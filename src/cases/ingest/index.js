@@ -897,6 +897,7 @@ class IngestService {
             caseId: meta.id,
             provider: sel.provider,
             model: sel.model,
+            role: sel.modelRole || null,
             system: propose.EXTRACT_SYSTEM,
             text: propose.extractUserText(chunk),
             maxTokens: 4096
@@ -976,6 +977,7 @@ class IngestService {
         caseId: meta.id,
         provider: sel.provider,
         model: sel.model,
+        role: sel.modelRole || null,
         system: review.VERIFY_SYSTEM,
         text: review.verifyUserText(p, review.verifyContext(pageText, p.anchor.quote, { pageAnchor: () => ctx.anchors(p.anchor.page, pageText) })),
         attachment,

@@ -14,6 +14,8 @@ const { WakeupStore } = require('../src/cases/wakeups');
 const { Budget } = require('../src/cases/budget');
 const { parseOrient } = require('../src/cases/turn-runner');
 const { withCaseProfile } = require('./helpers/profile-settings');
+const InferenceRouter = require('../src/providers/inference-router');
+const UsageTracker = require('../src/tracking/usage-tracker');
 
 initializeTools();
 
@@ -157,6 +159,32 @@ describe('runDueWakeups', () => {
     assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, ran: 1 });
     assert.deepStrictEqual([calls.orient, calls.judge], [1, 1]);
     assert.strictEqual(runtime.budget(c.id).status().usd.spent, 0.03);
+  });
+
+  it('records the orient call under utility, with its pricing usage (final review I3)', async () => {
+    const data = new Map();
+    const tracker = new UsageTracker({ get: (k, d) => (data.has(k) ? data.get(k) : d), set: (k, v) => data.set(k, v) });
+    // The real router stamps each call's model role on its metrics.
+    const router = new InferenceRouter({
+      getProviderToken: () => 'test-token',
+      createProvider: (p) => ({
+        sendMessageWithTools: async (_m, _t, opts) => ({
+          type: 'text',
+          content: '{"changed": false, "why": "nothing new"}',
+          llmMetrics: { provider: p, model: opts.model, inputTokens: 100, outputTokens: 20, totalTokens: 120, costUsd: 0.01, pricingUsage: { input: 100, output: 20 } }
+        })
+      })
+    });
+    const { runtime, clock } = harness({ host: { inferenceRouter: router, getUsageTracker: () => tracker } });
+    const c = await activeCase(runtime);
+    dueWakeup(runtime, c, clock);
+    assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, quiet: 1 });
+    const roles = tracker.sessionUsage.roles;
+    assert.deepStrictEqual(Object.keys(roles), ['utility']);
+    assert.strictEqual(roles.utility.turns, 1);
+    assert.strictEqual(roles.utility.totalCost, 0.01);
+    assert.deepStrictEqual([roles.utility.usage.input, roles.utility.usage.output], [100, 20]);
+    assert.strictEqual(tracker.recentRoleUsage({ days: 1 }).utility.calls, 1);
   });
 
   it('an orient reply with changed: true but an empty why still gives the judge a reason, not the "re-orientation trigger" default (minor fix)', async () => {

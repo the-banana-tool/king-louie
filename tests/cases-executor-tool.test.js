@@ -732,6 +732,22 @@ describe('Executor results, status and draft', () => {
     assert.strictEqual(ledger.assert({ stmt: 'x', subject: 'a', attr: 'b', provenance: 'external-agent', source: { kind: 'api', ref: 'sources/fake-agent/job-0001/r9.json' } }).provenance, 'external-agent');
   });
 
+  it('a draft reply with no usage still records estimated tokens, unpriced', async () => {
+    const tracked = [];
+    const s = await setup({ registryOptions: { usageTracker: { record: (ev) => { tracked.push(ev); return { ...ev, cost: null }; } } } });
+    const envelopeId = await approvedEnvelope(s);
+    s.rt.routedProvider = () => ({
+      getProviderName: () => 'stub', getDefaultModel: () => 'stub-1',
+      sendMessage: async () => 'Hello.'
+    });
+    const r = await draftPayload(s.reg, { caseId: s.meta.id }, { executor: 'fake-agent', envelopeId });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(tracked.length, 1);
+    assert.deepStrictEqual([tracked[0].provider, tracked[0].model, tracked[0].outputTokens], ['stub', 'stub-1', 2]);
+    assert.ok(tracked[0].inputTokens > 0);
+    assert.strictEqual('costUsd' in tracked[0], false);
+  });
+
   it('draft spend is charged', async () => {
     const tracked = [];
     const s = await setup({ registryOptions: { usageTracker: { record: (ev) => { tracked.push(ev); return { ...ev, cost: ev.costUsd, totalTokens: 120 }; } } } });
@@ -741,7 +757,7 @@ describe('Executor results, status and draft', () => {
       getProviderName: () => 'stub', getDefaultModel: () => 'stub-1',
       sendMessage: async (messages) => {
         prompts.push([spec, messages[0].content]);
-        return { content: `Hello about the {{${s.acres.id}}} lot. Offers are due by Friday November 14.`, llmMetrics: { inputTokens: 100, outputTokens: 20, costUsd: 0.02 } };
+        return { content: `Hello about the {{${s.acres.id}}} lot. Offers are due by Friday November 14.`, llmMetrics: { inputTokens: 100, outputTokens: 20, costUsd: 0.02, role: 'worker', pricingUsage: { input: 100, output: 20 } } };
       }
     });
     const r = await draftPayload(s.reg, { caseId: s.meta.id }, { executor: 'fake-agent', envelopeId, instructions: 'Keep it short.' });
@@ -750,6 +766,9 @@ describe('Executor results, status and draft', () => {
     assert.match(prompts[0][1], new RegExp(`\\{\\{${s.acres.id}\\}\\}: Lot size is 2\\.12 acres`));
     assert.match(prompts[0][1], /Say who you are calling for\./);
     assert.deepStrictEqual(tracked.map((e) => [e.provider, e.model, e.costUsd]), [['stub', 'stub-1', 0.02]]);
+    // The routed metrics' role and pricingUsage reach the tracker (final review I3).
+    assert.strictEqual(tracked[0].role, 'worker');
+    assert.deepStrictEqual(tracked[0].pricingUsage, { input: 100, cachedInput: 0, cacheWrite: 0, output: 20, reasoning: 0 });
     assert.strictEqual(s.rt.budget(s.meta.id).status().usd.spent, 0.02);
     assert.strictEqual(r.gate.ok, false);
     assert.ok(r.gate.blocked.some((b) => b.reason === 'unsourced-constraint'));

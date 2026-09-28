@@ -11,6 +11,7 @@ const { valueKey } = require('./normalize');
 const { valueText, cut } = require('./util');
 const jobs = require('./jobs');
 const { createLogger } = require('../../logging');
+const UsageTracker = require('../../tracking/usage-tracker');
 
 const log = createLogger('executors/results');
 
@@ -283,14 +284,18 @@ async function draftPayload(reg, { caseId } = {}, { executor, envelopeId = null,
   const result = await provider.sendMessage([{ role: 'user', content: prompt }], {});
   const payloadText = typeof result === 'string' ? result : String(result?.content ?? '');
   const metrics = result && typeof result === 'object' ? result.llmMetrics : null;
+  // The routed metrics carry the draft's model role and pricingUsage
+  // (final review I3); the token estimates stand in when a reply reports
+  // no usage.
+  const fromMetrics = UsageTracker.eventFromMetrics(metrics || {}, Date.now() - started);
   const event = {
-    provider: provider.getProviderName(),
-    model: provider.getDefaultModel(),
-    inputTokens: Number(metrics?.inputTokens) || Math.ceil(prompt.length / 4),
-    outputTokens: Number(metrics?.outputTokens) || Math.ceil(payloadText.length / 4),
-    ...(Number.isFinite(metrics?.costUsd) ? { costUsd: metrics.costUsd } : {}),
-    durationMs: Date.now() - started
+    ...fromMetrics,
+    provider: metrics?.provider || provider.getProviderName(),
+    model: metrics?.model || provider.getDefaultModel(),
+    inputTokens: fromMetrics.inputTokens || Math.ceil(prompt.length / 4),
+    outputTokens: fromMetrics.outputTokens || Math.ceil(payloadText.length / 4)
   };
+  if (event.costUsd === null || event.costUsd === undefined) delete event.costUsd;
   const tracker = reg.getUsageTracker();
   const recorded = tracker && typeof tracker.record === 'function'
     ? tracker.record(event)

@@ -10,6 +10,7 @@
 // and the caller caps and one-lines whatever it stores.
 const { createLogger } = require('../../logging');
 const { IngestError } = require('./errors');
+const UsageTracker = require('../../tracking/usage-tracker');
 
 const PURPOSES = Object.freeze(['ocr', 'extract', 'verify']);
 // Far above any reply at the default 4096 output tokens.
@@ -21,7 +22,10 @@ const costOf = (v) => (v !== null && v !== undefined && v !== '' && Number.isFin
 function createCallModel({ resolveInference, getUsageTracker = () => null, log = createLogger('cases/ingest/model') }) {
   if (typeof resolveInference !== 'function') throw new Error('createCallModel needs resolveInference.');
   // → { text, usage: { provider, model, inputTokens, outputTokens, totalTokens, cost } }
-  return async function callModel({ purpose, caseId, provider, model, system = '', text = '', attachment = null, maxTokens = 4096 }) {
+  // `role` is the model role the call ran on, for UsageTracker's by-role
+  // totals (final review I3): OCR is always vision; extract and verify pass
+  // their case role's model role (worker and main by default).
+  return async function callModel({ purpose, caseId, provider, model, role = null, system = '', text = '', attachment = null, maxTokens = 4096 }) {
     if (!PURPOSES.includes(purpose)) throw new Error(`Unknown ingest model purpose: ${purpose}`);
     const documents = Array.isArray(attachment?.documents) && attachment.documents.length ? attachment.documents : null;
     const images = Array.isArray(attachment?.images) && attachment.images.length ? attachment.images : null;
@@ -58,14 +62,15 @@ function createCallModel({ resolveInference, getUsageTracker = () => null, log =
     const tracker = getUsageTracker();
     if (tracker && typeof tracker.record === 'function') {
       try {
+        const usageRole = (typeof m.role === 'string' && m.role) || (purpose === 'ocr' ? 'vision' : role);
         const recorded = tracker.record({
+          ...UsageTracker.eventFromMetrics({ ...m, ...(usageRole ? { role: usageRole } : {}) }, Date.now() - started),
           provider: usageProvider,
           model: usageModel,
           inputTokens,
           outputTokens,
           totalTokens,
-          costUsd: cost,
-          durationMs: Date.now() - started
+          costUsd: cost
         });
         if (recorded && Object.prototype.hasOwnProperty.call(recorded, 'cost')) cost = costOf(recorded.cost);
       } catch (err) {

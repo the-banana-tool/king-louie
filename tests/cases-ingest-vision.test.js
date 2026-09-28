@@ -228,7 +228,24 @@ describe('createCallModel', () => {
     assert.deepStrictEqual(p.calls[0].tools, []);
     assert.strictEqual(p.calls[0].options.systemPrompt, 'S');
     assert.strictEqual(recorded[0].costUsd, 0.006);
+    // OCR is always the vision role (final review I3).
+    assert.strictEqual(recorded[0].role, 'vision');
     assert.deepStrictEqual(r, { text: 'page text', usage: { provider: 'anthropic', model: 'claude-sonnet-4-5', inputTokens: 1000, outputTokens: 200, totalTokens: 1200, cost: 0.007 } });
+  });
+
+  it('records extract and verify under the role the caller names, keeping pricingUsage (final review I3)', async () => {
+    const p = provider({ type: 'text', content: '{}', llmMetrics: { provider: 'openai', model: 'gpt-5.4', inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0.001, pricingUsage: { input: 10, output: 5 } } });
+    const recorded = [];
+    const callModel = createCallModel({
+      resolveInference: async () => ({ provider: p, providerType: 'openai', model: 'gpt-5.4' }),
+      getUsageTracker: () => ({ record: (ev) => { recorded.push(ev); return { cost: 0.001 }; } })
+    });
+    await callModel({ purpose: 'extract', caseId: 'c1', provider: 'openai', model: 'gpt-5.4', role: 'worker', text: 'x' });
+    await callModel({ purpose: 'verify', caseId: 'c1', provider: 'openai', model: 'gpt-5.4', role: 'main', text: 'x' });
+    await callModel({ purpose: 'verify', caseId: 'c1', provider: 'openai', model: 'gpt-5.4', text: 'x' });
+    assert.deepStrictEqual(recorded.map((e) => e.role), ['worker', 'main', undefined]);
+    assert.deepStrictEqual(recorded[0].pricingUsage, { input: 10, cachedInput: 0, cacheWrite: 0, output: 5, reasoning: 0 });
+    assert.deepStrictEqual([recorded[0].provider, recorded[0].model, recorded[0].totalTokens, recorded[0].costUsd], ['openai', 'gpt-5.4', 15, 0.001]);
   });
 
   it('reports cost null when nothing prices the model', async () => {
