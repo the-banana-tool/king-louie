@@ -123,6 +123,16 @@ const dom = {
   modelsCatalogRefreshHours: document.getElementById('models-catalog-refresh-hours'),
   modelsCatalogOverrides: document.getElementById('models-catalog-overrides'),
   modelsSaveCatalogBtn: document.getElementById('models-save-catalog-btn'),
+  modelsKlStatus: document.getElementById('models-kl-status'),
+  modelsKlPicks: document.getElementById('models-kl-picks'),
+  modelsKlProposal: document.getElementById('models-kl-proposal'),
+  modelsKlAutoAccept: document.getElementById('models-kl-auto-accept'),
+  modelsKlPreferLocal: document.getElementById('models-kl-prefer-local'),
+  modelsKlBand: document.getElementById('models-kl-band'),
+  modelsKlWorkerRatio: document.getElementById('models-kl-worker-ratio'),
+  modelsKlUtilityRatio: document.getElementById('models-kl-utility-ratio'),
+  modelsKlSaveBtn: document.getElementById('models-kl-save-btn'),
+  modelsKlDuplicateBtn: document.getElementById('models-kl-duplicate-btn'),
   modelsTestAllBtn: document.getElementById('models-test-all-btn'),
   settingsEncryptionAlert: document.getElementById('settings-encryption-alert'),
   agentModeBtn: document.getElementById('agent-mode-btn'),
@@ -3222,6 +3232,7 @@ function switchSettingsTab(tabName) {
   // Usability changes with every key test; re-read it whenever the tab opens.
   if (tabName === 'models' && typeof loadModelProfiles === 'function') {
     loadModelProfiles().catch((err) => settingsLog.warn(`loading model profiles failed: ${err.message}`));
+    loadKingLouie().catch((err) => settingsLog.warn(`loading the King Louie profile failed: ${err.message}`));
   }
 }
 
@@ -6454,7 +6465,8 @@ function renderModelProfileList() {
       b.dataset.profileId = profile.id;
       return b;
     };
-    actions.appendChild(button('Edit', 'edit', 'btn btn-primary'));
+    // The King Louie profile changes only by accepting a proposal (spec §7).
+    if (profile.kind !== 'king-louie') actions.appendChild(button('Edit', 'edit', 'btn btn-primary'));
     actions.appendChild(button('Duplicate', 'duplicate'));
     if (profile.id !== defaultProfileId) actions.appendChild(button('Make default', 'default'));
     if (profiles.length > 1) actions.appendChild(button('Delete', 'delete', 'btn btn-danger'));
@@ -6669,6 +6681,208 @@ function renderCatalogSettings() {
   if (dom.modelsCatalogFetch) dom.modelsCatalogFetch.checked = models.catalog?.fetch !== false;
   if (dom.modelsCatalogRefreshHours) dom.modelsCatalogRefreshHours.value = String(models.catalog?.refreshHours ?? 24);
   if (dom.modelsCatalogOverrides) dom.modelsCatalogOverrides.value = JSON.stringify(models.overrides || {}, null, 2);
+}
+
+/* --- Models tab: the King Louie profile (spec 2026-09-27 §7, §11) --- */
+
+function roleShortName(role) {
+  return (MODEL_ROLE_LABELS[role] || role).split(':')[0];
+}
+
+function targetsText(list) {
+  return (list || []).map((t) => `${t.name || t.model}${t.effort ? ` (${t.effort} effort)` : ''}`).join(', ') || '(none)';
+}
+
+function formatCostEffect(effect) {
+  if (!effect || typeof effect.usd !== 'number') return effect?.note || 'No estimate.';
+  const sign = effect.usd > 0 ? '+' : (effect.usd < 0 ? '−' : '');
+  return `${sign}$${Math.abs(effect.usd).toFixed(2)} a month (${effect.note})`;
+}
+
+function setKingLouieStatus(text, isError = false) {
+  if (!dom.modelsKlStatus) return;
+  dom.modelsKlStatus.textContent = text;
+  dom.modelsKlStatus.classList.toggle('error', Boolean(isError));
+}
+
+async function loadKingLouie() {
+  if (!dom.modelsKlStatus || !window.electron?.models?.kingLouie) return;
+  try {
+    const result = unwrapIpcResult(await window.electron.models.kingLouie(), 'Unable to read the King Louie profile.');
+    renderKingLouie(result.view);
+  } catch (err) {
+    setKingLouieStatus(err.message, true);
+  }
+}
+
+// A proposal shown in the tab can go stale between a click and its reply (a
+// provider status change, another proposal accepted elsewhere). The host
+// refuses with STALE_PROPOSAL rather than silently applying a different set
+// of models; that is not a failure, just news — show the newly current
+// proposal instead of an error (fix round 1 #2, #5; Task 11 note).
+function isStaleProposal(result) {
+  return Boolean(result) && result.ok === false && result.code === 'STALE_PROPOSAL';
+}
+
+function renderKingLouie(view) {
+  if (!view || !dom.modelsKlStatus) return;
+  appState.kingLouie = view;
+  const s = view.settings || {};
+  if (dom.modelsKlAutoAccept) dom.modelsKlAutoAccept.checked = Boolean(s.autoAccept);
+  if (dom.modelsKlPreferLocal) dom.modelsKlPreferLocal.checked = Boolean(s.preferLocalUtility);
+  if (dom.modelsKlBand) dom.modelsKlBand.value = String(s.bandPoints ?? 3);
+  if (dom.modelsKlWorkerRatio) dom.modelsKlWorkerRatio.value = String(s.workerAgenticRatio ?? 0.8);
+  if (dom.modelsKlUtilityRatio) dom.modelsKlUtilityRatio.value = String(s.utilityIntelligenceRatio ?? 0.5);
+
+  const p = view.proposal;
+  if (view.unavailable) setKingLouieStatus(view.unavailable, true);
+  else if (view.upToDate) setKingLouieStatus('The King Louie profile is up to date.');
+  else if (p && p.dismissed) setKingLouieStatus('You dismissed the current proposal. It comes back when the proposed models change.');
+  else if (p) setKingLouieStatus(view.profile ? 'King Louie proposes changes to its profile.' : 'King Louie has a first proposal. Accept it to create the King Louie profile; your default profile stays as it is.');
+
+  if (dom.modelsKlPicks) {
+    dom.modelsKlPicks.textContent = '';
+    for (const [role, list] of Object.entries(view.current || {})) {
+      if (!Array.isArray(list) || !list.length) continue;
+      const line = document.createElement('div');
+      line.className = 'provider-message';
+      line.textContent = `${roleShortName(role)}: ${targetsText(list)}`;
+      dom.modelsKlPicks.appendChild(line);
+    }
+  }
+
+  const box = dom.modelsKlProposal;
+  if (!box) return;
+  box.textContent = '';
+  if (!p || p.dismissed) return;
+  for (const change of p.changes || []) {
+    const card = document.createElement('div');
+    card.className = 'models-kl-change';
+    card.dataset.role = change.role;
+    const title = document.createElement('div');
+    title.className = 'chat-info-section-title';
+    title.textContent = roleShortName(change.role);
+    card.appendChild(title);
+    const from = document.createElement('div');
+    from.textContent = `Now: ${targetsText(change.from)}`;
+    card.appendChild(from);
+    const to = document.createElement('div');
+    to.textContent = `Proposed: ${targetsText(change.to)}`;
+    card.appendChild(to);
+    const reasons = document.createElement('ul');
+    for (const reason of change.reasons || []) {
+      const li = document.createElement('li');
+      li.textContent = reason;
+      reasons.appendChild(li);
+    }
+    card.appendChild(reasons);
+    const cost = document.createElement('div');
+    cost.className = 'provider-message';
+    cost.textContent = `Cost effect: ${formatCostEffect(change.costEffect)}`;
+    card.appendChild(cost);
+    box.appendChild(card);
+  }
+  const total = document.createElement('div');
+  total.className = 'provider-message';
+  total.textContent = `Estimated total: ${formatCostEffect(p.costEffect)}`;
+  box.appendChild(total);
+
+  const actions = document.createElement('div');
+  actions.className = 'provider-actions';
+  const accept = document.createElement('button');
+  accept.type = 'button';
+  accept.className = 'btn btn-primary';
+  accept.id = 'models-kl-accept-btn';
+  accept.textContent = 'Accept';
+  accept.addEventListener('click', async () => {
+    try {
+      // The id of the proposal actually shown on screen, so a reply that
+      // arrives after the picks changed underneath it is refused rather
+      // than silently applying a different set of models (Task 10 fix
+      // round 1 #2, applied here per the coordinator's note).
+      const result = await window.electron.models.acceptProposal(p.id);
+      if (isStaleProposal(result)) {
+        setKingLouieStatus('The proposal changed since it was shown. Here is the current one.');
+        await loadKingLouie();
+        return;
+      }
+      unwrapIpcResult(result, 'Unable to accept the proposal.');
+      setKingLouieStatus('Accepted. The King Louie profile uses these models now.');
+      await loadKingLouie();
+      await loadModelProfiles();
+    } catch (err) {
+      setKingLouieStatus(err.message, true);
+      await loadKingLouie();
+    }
+  });
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'btn';
+  dismiss.id = 'models-kl-dismiss-btn';
+  dismiss.textContent = 'Dismiss';
+  dismiss.addEventListener('click', async () => {
+    try {
+      const result = await window.electron.models.dismissProposal(p.id);
+      if (isStaleProposal(result)) {
+        setKingLouieStatus('The proposal changed since it was shown. Here is the current one.');
+        await loadKingLouie();
+        return;
+      }
+      unwrapIpcResult(result, 'Unable to dismiss the proposal.');
+      await loadKingLouie();
+    } catch (err) {
+      setKingLouieStatus(err.message, true);
+    }
+  });
+  actions.appendChild(accept);
+  actions.appendChild(dismiss);
+  box.appendChild(actions);
+}
+
+if (dom.modelsKlSaveBtn) {
+  dom.modelsKlSaveBtn.addEventListener('click', async () => {
+    try {
+      const result = unwrapIpcResult(await window.electron.models.saveKingLouieSettings({
+        autoAccept: Boolean(dom.modelsKlAutoAccept?.checked),
+        preferLocalUtility: Boolean(dom.modelsKlPreferLocal?.checked),
+        bandPoints: Number(dom.modelsKlBand?.value),
+        workerAgenticRatio: Number(dom.modelsKlWorkerRatio?.value),
+        utilityIntelligenceRatio: Number(dom.modelsKlUtilityRatio?.value)
+      }), 'Unable to save the King Louie settings.');
+      renderKingLouie(result.view);
+      await loadModelProfiles();
+    } catch (err) {
+      setKingLouieStatus(err.message, true);
+    }
+  });
+}
+
+if (dom.modelsKlDuplicateBtn) {
+  dom.modelsKlDuplicateBtn.addEventListener('click', async () => {
+    try {
+      // Pass the shown proposal's id too (Task 10 fix round 1 #2): before
+      // any Accept, "Duplicate" copies exactly what is on screen, or is
+      // refused as stale rather than silently copying whatever the picks
+      // have since become. Once a King Louie profile exists, the id is
+      // ignored (its own accepted roles are duplicated instead).
+      const proposalId = appState.kingLouie?.proposal?.id || undefined;
+      const result = await window.electron.models.duplicateKingLouie(proposalId ? { proposalId } : {});
+      if (isStaleProposal(result)) {
+        setKingLouieStatus('The proposal changed since it was shown. Here is the current one.');
+        await loadKingLouie();
+        return;
+      }
+      const data = unwrapIpcResult(result, 'Unable to duplicate the King Louie profile.');
+      setKingLouieStatus(`Created ${data.profile.name}. Edit it under Profiles.`);
+      await loadModelProfiles();
+    } catch (err) {
+      setKingLouieStatus(err.message, true);
+    }
+  });
+}
+
+if (window.electron?.models?.onProposalChanged) {
+  window.electron.models.onProposalChanged((view) => renderKingLouie(view));
 }
 
 if (dom.modelsNewProfileBtn) {

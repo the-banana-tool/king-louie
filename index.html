@@ -307,6 +307,34 @@
             <div class="models-profile-editor" id="models-profile-editor" hidden></div>
           </section>
 
+          <section class="template-variables-card" id="models-king-louie-card">
+            <h3>King Louie selected</h3>
+            <p>King Louie proposes models for each role from the models you can use, their prices and their scores. Nothing changes until you accept a proposal.</p>
+            <div class="provider-message" id="models-kl-status">Reading the proposal…</div>
+            <div class="models-kl-picks" id="models-kl-picks"></div>
+            <div class="models-kl-proposal" id="models-kl-proposal"></div>
+            <div class="template-variables-grid">
+              <label class="inline-toggle" for="models-kl-auto-accept">
+                <input id="models-kl-auto-accept" type="checkbox">
+                <span>Accept new proposals automatically</span>
+              </label>
+              <label class="inline-toggle" for="models-kl-prefer-local">
+                <input id="models-kl-prefer-local" type="checkbox">
+                <span>Prefer a local model for utility</span>
+              </label>
+              <label for="models-kl-band">Main: the cheaper model wins within this many agentic points of the best</label>
+              <input id="models-kl-band" class="provider-input" type="number" min="0" max="50" step="0.5">
+              <label for="models-kl-worker-ratio">Worker: at least this share of main's agentic score</label>
+              <input id="models-kl-worker-ratio" class="provider-input" type="number" min="0" max="1" step="0.05">
+              <label for="models-kl-utility-ratio">Utility and vision: at least this share of main's intelligence score</label>
+              <input id="models-kl-utility-ratio" class="provider-input" type="number" min="0" max="1" step="0.05">
+            </div>
+            <div class="provider-actions">
+              <button type="button" class="btn" id="models-kl-save-btn">Save these settings</button>
+              <button type="button" class="btn" id="models-kl-duplicate-btn">Duplicate as my profile</button>
+            </div>
+          </section>
+
           <section class="template-variables-card" id="models-catalog-card">
             <h3>Model catalog</h3>
             <p>Prices and capabilities for every model come from a catalog bundled with King Louie and refreshed daily from models.dev.</p>

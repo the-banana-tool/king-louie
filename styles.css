@@ -3083,3 +3083,20 @@ div.models-picker-item.is-unusable { cursor: default; }
 .chat-main-override-marker { color: var(--accent, #d9a441); }
 .message-retry { margin-top: 6px; display: flex; gap: 6px; align-items: center; }
 .message-error-action { margin-top: 6px; }
+
+/* Models M3: the King Louie profile's proposal (spec 2026-09-27 §7, §11). */
+.models-kl-change {
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 0.5em 0.75em;
+  margin: 0.5em 0;
+}
+
+.models-kl-change ul {
+  margin: 0.25em 0 0.25em 1.25em;
+  padding: 0;
+}
+
+.models-kl-picks .provider-message {
+  margin: 0.15em 0;
+}
