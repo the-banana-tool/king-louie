@@ -3090,13 +3090,13 @@ body {
 .case-proposal-edit[hidden] { display: none; }
 
 /* Models tab (spec 2026-09-27 §11) */
-.models-profile-editor { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.models-profile-editor { margin-top: 12px; padding: 12px; border: 1px solid var(--border-default); border-radius: 8px; }
 .models-role-block { margin: 12px 0; }
 .models-role-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 0; }
 .models-role-entry-label { flex: 1 1 240px; }
 .models-role-entry.is-unusable .models-role-entry-label,
 .models-picker-item.is-unusable { opacity: 0.55; }
-.models-picker { max-height: 260px; overflow-y: auto; margin-top: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 4px; }
+.models-picker { max-height: 260px; overflow-y: auto; margin-top: 6px; border: 1px solid var(--border-default); border-radius: 6px; padding: 4px; }
 .models-picker-item { display: block; width: 100%; text-align: left; padding: 4px 6px; background: none; border: none; color: inherit; cursor: pointer; }
 button.models-picker-item:hover { background: var(--hover, rgba(127, 127, 127, 0.15)); }
 div.models-picker-item.is-unusable { cursor: default; }
