@@ -82,13 +82,16 @@ describe('renderer: the chat header and Retry with…', () => {
     assert.doesNotMatch(block('function renderChatMessages()'), /Tier/);
   });
 
-  it('Retry with… truncates, then switches main, then re-sends', () => {
-    const resend = block('async function resendFromIndex(chatId, msgIndex, { beforeSend = null } = {})');
-    const truncate = resend.indexOf('window.electron.chat.truncateFrom(');
-    const before = resend.indexOf('beforeSend()');
-    const send = resend.indexOf('window.electron.chat.sendMessage(');
-    assert.ok(truncate > 0 && before > truncate && send > before, 'truncate → switch → send');
-    assert.match(block('async function retryWith(target)'), /switchMainModel\(target\)/);
+  it('Retry with… switches main first, then truncates and re-sends (final review m3)', () => {
+    const retry = block('async function retryWith(target)');
+    const sw = retry.indexOf('switchMainModel(target)');
+    const resend = retry.indexOf('resendFromIndex(');
+    assert.ok(sw > 0 && resend > sw, 'switch → truncate/send');
+    assert.ok(retry.includes('if (!(await switchMainModel(target))) return;'), 'a failed switch returns before any truncate');
+    const body = block('async function resendFromIndex(chatId, msgIndex, { carry = [] } = {})');
+    const truncate = body.indexOf('window.electron.chat.truncateFrom(');
+    const send = body.indexOf('window.electron.chat.sendMessage(');
+    assert.ok(truncate > 0 && send > truncate, 'truncate → send');
     assert.match(block('function renderRetryControl()'), /retry-with-btn/);
   });
 
