@@ -69,7 +69,7 @@ async function ingestHarness({ ingest = {}, budgets = {}, roles = {}, model = de
   const pinned = { ...ROLES, ...roles };
   runtime.roleModel = (_id, role) => ({ ...pinned[role], tier: 'standard' });
   // The profile's vision role (models spec 2026-09-27 §8), pinned per test.
-  runtime.visionTarget = () => (vision ? { ...vision } : null);
+  runtime.visionTarget = () => (vision ? { targets: [{ ...vision }], skipped: [] } : { targets: [], skipped: [] });
   const calls = [];
   const svc = new IngestService({
     runtime,

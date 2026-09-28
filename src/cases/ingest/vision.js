@@ -37,12 +37,40 @@ function isVisionEligible(getCapabilities, sel) {
   return IMAGE_FORWARDING_PROVIDERS.includes(provider) && capabilitiesOf(getCapabilities, { ...sel, provider }).vision === true;
 }
 
-// The profile's vision role when eligible, else the first eligible of the
-// draft and judge roles, else NO_VISION_MODEL.
-function pickOcrModel({ getCapabilities, configured, roleModel }) {
-  if (configured?.provider && configured?.model) {
-    const sel = { provider: configured.provider, model: configured.model };
+const targetLabel = (sel) => `${sel.provider}/${sel.model}`;
+
+// Why a resolved-but-not-yet-tried vision-role target is skipped here: the
+// router already checked it takes image input (models spec §6.4's
+// imageInput need); this is the narrower ingest-specific check — a
+// vision-capable model whose provider ImageHandler does not format
+// attachments for is still no use to OCR.
+function ineligibleReason(getCapabilities, sel) {
+  const caps = capabilitiesOf(getCapabilities, sel);
+  return caps.vision === true
+    ? `${sel.model}'s provider (${sel.provider}) does not forward images for ingest.`
+    : `${sel.model} is not vision-capable.`;
+}
+
+// fix round 1: every skipped candidate's label and reason, so the error
+// says why, not just that nothing was found.
+function describeSkipped(skipped) {
+  return skipped.map((s) => `${targetLabel(s.target)} (${(s.reasons || []).join(' ')})`).join('; ');
+}
+
+// The profile's vision role, tried in order (fix round 1: every target,
+// not just the first) and skipping any ImageHandler cannot forward to,
+// else the first eligible of the draft and judge roles, else NO_VISION_MODEL
+// naming every vision-role target this case skipped, with its reason.
+function pickOcrModel({ getCapabilities, configured, configuredSkipped = [], roleModel }) {
+  const candidates = Array.isArray(configured)
+    ? configured
+    : (configured?.provider && configured?.model ? [configured] : []);
+  const ineligible = [];
+  for (const raw of candidates) {
+    if (!raw?.provider || !raw?.model) continue;
+    const sel = { provider: raw.provider, model: raw.model };
     if (isVisionEligible(getCapabilities, sel)) return sel;
+    ineligible.push({ target: sel, reasons: [ineligibleReason(getCapabilities, sel)] });
   }
   for (const role of ['draft', 'judge']) {
     let sel = null;
@@ -53,7 +81,9 @@ function pickOcrModel({ getCapabilities, configured, roleModel }) {
     }
     if (sel && isVisionEligible(getCapabilities, sel)) return { provider: sel.provider, model: sel.model };
   }
-  throw new IngestError('NO_VISION_MODEL', NO_VISION_MESSAGE);
+  const skipped = [...configuredSkipped, ...ineligible];
+  const detail = skipped.length ? ` Skipped: ${describeSkipped(skipped)}.` : '';
+  throw new IngestError('NO_VISION_MODEL', `${NO_VISION_MESSAGE}${detail}`);
 }
 
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');

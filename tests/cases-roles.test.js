@@ -95,6 +95,18 @@ describe('case roles', () => {
     assert.ok(lines.some((l) => /same provider family as judge/.test(l)), lines.join('\n'));
   });
 
+  // fix round 1: judge can still answer through an explicit case.yaml
+  // target even when the plain main role has nothing usable; verify has
+  // no target of its own then, so it takes judge's instead of throwing.
+  it('verify falls back to judge\'s target when main itself has no usable model', () => {
+    const explain = (p, model) => (p === 'openai' && model === 'gpt-4o' ? usable() : { usable: false, reasons: ['No token saved.'], notes: [] });
+    const m = models({}, { explain });
+    const caseMeta = { roles: { judge: { provider: 'openai', model: 'gpt-4o' } } };
+    const { value, lines } = captureWarnings(() => resolveCaseRole('verify', { turnModels: m, caseMeta }));
+    assert.deepStrictEqual([value.caseRole, value.provider, value.model], ['verify', 'openai', 'gpt-4o']);
+    assert.ok(lines.some((l) => l.includes('verify falls back to judge\'s target')), lines.join('\n'));
+  });
+
   it('an unusable case main override fails the resolve with the reason', () => {
     const explain = (p) => (p === 'groq' ? { usable: false, reasons: ['No token saved for Groq.'], notes: [] } : usable());
     const m = models({ main: [t('openai', 'gpt-5.5')] }, { explain, mainOverride: t('groq', 'llama-3.3-70b') });
@@ -124,7 +136,23 @@ describe('CaseRuntime model roles', () => {
     assert.deepStrictEqual([judge.provider, judge.model], ['openai', 'gpt-5.4']);
     rt.store.updateMeta(info.id, { roles: { judge: { provider: 'gemini', model: 'gemini-2.5-pro' } } });
     assert.strictEqual(rt.roleModel(info.id, 'judge').model, 'gemini-2.5-pro');
-    assert.deepStrictEqual(rt.visionTarget(info.id), { provider: 'openai', model: 'gpt-5.5' });
+    assert.deepStrictEqual(rt.visionTarget(info.id).targets, [{ provider: 'openai', model: 'gpt-5.5', effort: null }]);
+    assert.deepStrictEqual(rt.visionTarget(info.id).skipped, []);
+  });
+
+  // fix round 1: visionTarget names why, not just that nothing was found.
+  it('visionTarget names every skipped target and its reason, for a profile with only text-only models', async () => {
+    const textOnly = createTurnModels({
+      profile: { id: 'p-1', name: 'Work', kind: 'user', roles: { main: [t('openai', 'gpt-5.4')], worker: [], utility: [] } },
+      explain: (_p, model, { needs } = {}) => (needs.imageInput ? { usable: false, reasons: [`${model} takes no image input.`], notes: [] } : usable())
+    });
+    const rt = new CaseRuntime({ root: root(), getSettings: () => settings(), host: { snapshotModels: () => textOnly } });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    const vt = rt.visionTarget(info.id);
+    assert.deepStrictEqual(vt.targets, []);
+    assert.strictEqual(vt.skipped.length, 1);
+    assert.deepStrictEqual(vt.skipped[0].target, t('openai', 'gpt-5.4'));
+    assert.match(vt.skipped[0].reasons[0], /takes no image input/);
   });
 
   it('follows case.yaml\'s profile and main override, and the host\'s snapshot when it has one', async () => {

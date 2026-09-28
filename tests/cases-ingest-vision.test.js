@@ -88,6 +88,26 @@ describe('vision eligibility', () => {
     };
     assert.deepStrictEqual(pickOcrModel({ getCapabilities: caps, configured: null, roleModel }), { provider: 'anthropic', model: 'claude-sonnet-4-5' });
   });
+
+  // Fix round 1, finding 2: every configured vision-role target is tried in
+  // order (not just the first), skipping ones ImageHandler cannot forward.
+  it('tries each configured vision target in order, skipping ones ineligible for OCR', () => {
+    const configured = [{ provider: 'groq', model: 'llama-vision-preview' }, { provider: 'openai', model: 'gpt-4o' }];
+    assert.deepStrictEqual(pickOcrModel({ getCapabilities: caps, configured, roleModel: () => null }), { provider: 'openai', model: 'gpt-4o' });
+  });
+
+  // Fix round 1, finding 1: the resolver's own skipped vision-role targets
+  // (e.g. text-only models rejected for the imageInput need) are named,
+  // with their reasons, in the NO_VISION_MODEL error.
+  it('names every skipped vision-role target, with its reason, in the NO_VISION_MODEL error', () => {
+    const configuredSkipped = [{ target: { provider: 'openai', model: 'gpt-3.5-turbo', effort: null }, reasons: ['gpt-3.5-turbo takes no image input.'] }];
+    assert.throws(
+      () => pickOcrModel({ getCapabilities: caps, configured: [], configuredSkipped, roleModel: () => null }),
+      (err) => err.code === 'NO_VISION_MODEL'
+        && err.message.startsWith(NO_VISION_MESSAGE)
+        && /openai\/gpt-3\.5-turbo \(gpt-3\.5-turbo takes no image input\.\)/.test(err.message)
+    );
+  });
 });
 
 // A JPEG header padded with comment segments past 5 MB: pdf-lib embeds it,

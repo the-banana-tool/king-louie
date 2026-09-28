@@ -7,6 +7,7 @@
 const { createLogger } = require('../logging');
 const { NO_RETRY } = require('../providers/failover-policy');
 const { roleForTier } = require('../models/roles');
+const { NoUsableModelError } = require('../models/resolver');
 
 const log = createLogger('cases/roles');
 
@@ -82,7 +83,18 @@ function resolveCaseRole(role, { settings = {}, caseMeta = null, turnModels, nee
     }
     return r;
   }
-  const resolved = turnModels.mustResolve(spec.modelRole, { needs: need });
+  // fix round 1: judge can answer through its own explicit case.yaml
+  // target even when main itself has nothing usable (e.g. every main
+  // model lacks a token); verify has no target of its own to fall back
+  // to in that case, so it takes judge's rather than failing the turn.
+  let resolved;
+  try {
+    resolved = turnModels.mustResolve(spec.modelRole, { needs: need });
+  } catch (err) {
+    if (!(err instanceof NoUsableModelError)) throw err;
+    log.warn(`verify falls back to judge's target: ${err.message}`);
+    return { ...judge, caseRole: 'verify' };
+  }
   const other = resolved.targets.filter((x) => providerFamily(x.provider, x.model) !== judgeFamily);
   if (other.length) return pick(role, spec.modelRole, { ...resolved, targets: other });
   log.warn(`verify falls back to the judge's provider family (${judgeFamily})`);

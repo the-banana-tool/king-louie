@@ -1702,14 +1702,17 @@ class CaseRuntime {
     return resolveCaseRole(role, { settings: { ...this._settingsSafe(), cases: this.settings() }, caseMeta: meta, turnModels, needs });
   }
 
-  // The profile's vision role for case ingest OCR (models spec §8), or null.
+  // The profile's vision role for case ingest OCR (models spec §8): every
+  // usable target in order, and every skipped one with its reason — so a
+  // profile with only text-only models can say why, not just that nothing
+  // was found (fix round 1).
   visionTarget(id) {
     try {
-      const [first] = this.modelsFor(id).resolve('vision').targets;
-      return first ? { provider: first.provider, model: first.model } : null;
+      const r = this.modelsFor(id).resolve('vision');
+      return { targets: r.targets.map((x) => ({ provider: x.provider, model: x.model, effort: x.effort || null })), skipped: r.skipped };
     } catch (err) {
       log.warn(`Resolving the vision role for case ${id} failed: ${err.message}`);
-      return null;
+      return { targets: [], skipped: [] };
     }
   }
 

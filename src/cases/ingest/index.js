@@ -652,9 +652,11 @@ class IngestService {
   }
 
   _ocrModel(caseId, cfg) {
+    const vt = this.runtime.visionTarget(caseId);
     return vision.pickOcrModel({
       getCapabilities: this.getCapabilities,
-      configured: this.runtime.visionTarget(caseId),
+      configured: vt.targets,
+      configuredSkipped: vt.skipped,
       roleModel: (role) => this.runtime.roleModel(caseId, role)
     });
   }
