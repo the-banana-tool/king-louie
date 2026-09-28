@@ -11,6 +11,7 @@ const roles = require('./roles');
 const { Profiles, ProfileError, normalizeProfile, snapshotFromSettings } = require('./profiles');
 const { createTurnModels, UnknownRoleError, NoUsableModelError, roleTimeoutMs } = require('./resolver');
 const { runTierMigration, needsMigration } = require('./migrate-tiers');
+const suggester = require('./suggester');
 
 let active = null;
 let bundled = null;
@@ -47,6 +48,7 @@ module.exports = {
   roleTimeoutMs,
   runTierMigration,
   needsMigration,
+  suggester,
   ...roles,
   ...providerIds
 };
