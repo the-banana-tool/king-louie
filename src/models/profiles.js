@@ -220,7 +220,14 @@ class Profiles {
     this._checkEfforts(profile);
     const list = this.list();
     list.push(profile);
-    this._write(list, this.defaultId() || profile.id);
+    // A genuinely empty store (no stored profiles at all) makes its first
+    // profile the default. A store whose stored profiles exist but all fail
+    // to parse must not hand default status to whatever gets created next —
+    // it keeps the stored default id as it was, broken reference or not
+    // (fix round 1 #3; reached from a King Louie Accept when every stored
+    // profile is broken).
+    const defaultProfileId = this.defaultId() || (this._stored().length === 0 ? profile.id : (this._models().defaultProfileId || null));
+    this._write(list, defaultProfileId);
     return profile;
   }
 

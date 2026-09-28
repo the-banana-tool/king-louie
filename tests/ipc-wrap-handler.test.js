@@ -33,6 +33,18 @@ run('wrapHandler catches thrown errors and returns ok:false', async () => {
   const result = await handler({});
   assert.strictEqual(result.ok, false);
   assert.strictEqual(result.error, 'boom');
+  assert.strictEqual('code' in result, false);
+});
+
+run('wrapHandler passes a thrown error\'s code through, so the renderer can tell one refusal from another', async () => {
+  const handler = wrapHandler('test:refused', async () => {
+    const err = new Error('The proposal changed since it was shown.');
+    err.code = 'STALE_PROPOSAL';
+    throw err;
+  });
+
+  const result = await handler({});
+  assert.deepStrictEqual(result, { ok: false, error: 'The proposal changed since it was shown.', code: 'STALE_PROPOSAL' });
 });
 
 setTimeout(() => {

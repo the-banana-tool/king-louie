@@ -246,8 +246,8 @@ function createModelChoices({
     return kl().view();
   }
 
-  function duplicateKingLouie({ name } = {}) {
-    return profileView(kl().duplicateAsProfile({ name }), { explain: explainTarget, catalog });
+  function duplicateKingLouie({ name, proposalId } = {}) {
+    return profileView(kl().duplicateAsProfile({ name, proposalId }), { explain: explainTarget, catalog });
   }
 
   return {

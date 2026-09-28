@@ -14,7 +14,16 @@ const log = createLogger('models/king-louie');
 const KING_LOUIE_NAME = 'King Louie selected';
 
 class KingLouieProfile extends EventEmitter {
-  constructor({ profiles, availability, catalog = null, getSettings, setSettings, getRecentUsage = () => ({}), debounceMs = 200 } = {}) {
+  constructor({
+    profiles, availability, catalog = null, getSettings, setSettings, getRecentUsage = () => ({}), debounceMs = 200,
+    // Gates auto-accept only (fix round 1 #6): the host can compute and show
+    // proposals from the first provider status change, but hold off taking
+    // one on its own until it says the initial round of startup checks has
+    // settled, so auto-accept never churns through intermediate picks made
+    // from a partial set of tested providers. Always ready by default: only
+    // a host that wires a startup sequence (the core) needs to gate this.
+    readyForAutoAccept = () => true
+  } = {}) {
     super();
     for (const [name, value] of Object.entries({ profiles, availability, getSettings, setSettings })) {
       if (!value) throw new Error(`KingLouieProfile needs ${name}.`);
@@ -26,6 +35,7 @@ class KingLouieProfile extends EventEmitter {
     this.setSettings = setSettings;
     this.getRecentUsage = getRecentUsage;
     this.debounceMs = debounceMs;
+    this.readyForAutoAccept = readyForAutoAccept;
     this._timer = null;
   }
 
@@ -127,8 +137,14 @@ class KingLouieProfile extends EventEmitter {
     if (patch.autoAccept !== undefined) next.autoAccept = patch.autoAccept === true;
     if (patch.preferLocalUtility !== undefined) next.preferLocalUtility = patch.preferLocalUtility === true;
     const ranged = (key, min, max, label) => {
-      if (patch[key] === undefined) return;
-      const n = Number(patch[key]);
+      const raw = patch[key];
+      if (raw === undefined) return;
+      // Number(...) turns null, "", " ", false and [] into 0, which would
+      // silently pass as a valid setting; accept only an actual finite
+      // number or a non-empty numeric string (fix round 1 #1).
+      const n = typeof raw === 'number'
+        ? raw
+        : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
       if (!Number.isFinite(n) || n < min || n > max) throw new ProfileError('BAD_SETTING', `${label} is a number from ${min} to ${max}.`);
       next[key] = n;
     };
@@ -141,12 +157,19 @@ class KingLouieProfile extends EventEmitter {
   }
 
   // "Duplicate as my profile" (spec §7.2): the accepted picks, or the
-  // pending proposal's before anything was accepted, as an ordinary profile.
-  duplicateAsProfile({ name } = {}) {
+  // pending proposal's before anything was accepted, as an ordinary
+  // profile. Before an Accept, an optional proposalId is checked the same
+  // way Accept checks it, so duplicating a stale view is refused rather
+  // than silently copying whatever the picks have since become (fix round
+  // 1 #2).
+  duplicateAsProfile({ name, proposalId } = {}) {
     let roles = this.profile()?.roles || null;
     if (!roles) {
       const p = this.propose();
       if (p.unavailable) throw new ProfileError('NO_PROPOSAL', p.unavailable);
+      if (proposalId !== undefined && p.id !== proposalId) {
+        throw new ProfileError('STALE_PROPOSAL', 'The proposal changed since it was shown. Review the new one, then duplicate it.');
+      }
       roles = p.roles;
     }
     const base = String(name || `${KING_LOUIE_NAME} copy`).trim();
@@ -154,17 +177,22 @@ class KingLouieProfile extends EventEmitter {
   }
 
   // Recompute now: accept a new proposal when autoAccept is on (never a
-  // dismissed one), then tell listeners.
+  // dismissed one), then tell listeners. accept() already emits, so a
+  // successful auto-accept does not emit again here (fix round 1 #4).
   refresh() {
+    let accepted = false;
     try {
-      if (this.settings().autoAccept) {
+      if (this.settings().autoAccept && this.readyForAutoAccept()) {
         const p = this.propose();
-        if (p.id && !p.dismissed) this.accept(p.id);
+        if (p.id && !p.dismissed) {
+          this.accept(p.id);
+          accepted = true;
+        }
       }
     } catch (err) {
       log.warn(`Refreshing the King Louie proposal failed: ${err.message}`);
     }
-    this._emit();
+    if (!accepted) this._emit();
   }
 
   // An input changed (a catalog refresh, a key test): recompute once the

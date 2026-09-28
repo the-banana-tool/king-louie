@@ -66,9 +66,11 @@ describe('profile channels', () => {
     ]);
   });
 
-  it('return a profile error as { ok: false, error }', async () => {
+  it('return a profile error as { ok: false, error, code }', async () => {
     const { call } = setup();
-    assert.deepStrictEqual(await call(IPC.MODELS_SAVE_PROFILE, { name: '' }), { ok: false, error: 'A profile needs a name.' });
+    // wrap-handler passes a thrown error's code through (fix round 1 #5), so
+    // the renderer can tell a refusal like this apart from another by code.
+    assert.deepStrictEqual(await call(IPC.MODELS_SAVE_PROFILE, { name: '' }), { ok: false, error: 'A profile needs a name.', code: 'BAD_NAME' });
   });
 
   it('save the catalog settings, refusing bad values', async () => {

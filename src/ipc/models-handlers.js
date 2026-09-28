@@ -159,7 +159,10 @@ function registerModelsHandlers(ipcMain, context = {}) {
     return { ok: true, view: choices().saveKingLouieSettings(patch) };
   });
 
-  handle(IPC.MODELS_DUPLICATE_KING_LOUIE, async ({ name }) => ({ ok: true, profile: choices().duplicateKingLouie({ name: text(name) || undefined }) }));
+  handle(IPC.MODELS_DUPLICATE_KING_LOUIE, async ({ name, proposalId }) => ({
+    ok: true,
+    profile: choices().duplicateKingLouie({ name: text(name) || undefined, proposalId: text(proposalId) || undefined })
+  }));
 }
 
 module.exports = { registerModelsHandlers };

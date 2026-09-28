@@ -1015,14 +1015,20 @@ function createCore(deps = {}) {
 
   // The King Louie profile (spec §7): proposals from the usable models,
   // their prices and scores; the owner accepts. Recomputed when the catalog
-  // or a provider's status changes, and pushed to the renderer.
+  // or a provider's status changes, and pushed to the renderer. Auto-accept
+  // stays off until the first round of startup background checks settles
+  // (below), so it never churns through picks made from a partial set of
+  // tested providers; proposals still compute and show before then
+  // (fix round 1 #6).
+  let modelsBackgroundChecksSettled = false;
   const kingLouie = new KingLouieProfile({
     profiles,
     availability,
     catalog,
     getSettings,
     setSettings,
-    getRecentUsage: () => (usageTracker && typeof usageTracker.recentRoleUsage === 'function' ? usageTracker.recentRoleUsage({ days: 30 }) : {})
+    getRecentUsage: () => (usageTracker && typeof usageTracker.recentRoleUsage === 'function' ? usageTracker.recentRoleUsage({ days: 30 }) : {}),
+    readyForAutoAccept: () => modelsBackgroundChecksSettled
   });
   catalog.on('updated', () => kingLouie.inputsChanged());
   availability.on('changed', () => kingLouie.inputsChanged());
@@ -1067,11 +1073,19 @@ function createCore(deps = {}) {
   // — never from inside this function; unit tests build cores all the time.
   // KL_TEST_MODE (every e2e launch and the service smoke test) keeps them off.
   const startModelsBackgroundChecks = async () => {
-    if (process.env.KL_TEST_MODE) return { skipped: true };
+    if (process.env.KL_TEST_MODE) {
+      // Nothing is being tested, so there is no partial-provider churn to
+      // guard against: the King Louie gate opens at once (fix round 1 #6).
+      modelsBackgroundChecksSettled = true;
+      kingLouie.inputsChanged();
+      return { skipped: true };
+    }
     await Promise.all([
       catalog.refresh().catch((err) => log.warn(`Model catalog refresh failed: ${err.message}`)),
       availability.retestStale().catch((err) => log.warn(`Provider retests failed: ${err.message}`))
     ]);
+    modelsBackgroundChecksSettled = true;
+    kingLouie.inputsChanged();
     return { skipped: false };
   };
 

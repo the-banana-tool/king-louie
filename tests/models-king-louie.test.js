@@ -129,6 +129,29 @@ describe('the King Louie profile', () => {
     assert.strictEqual(fresh.profile().kind, 'king-louie');
   });
 
+  it('never changes the default profile on Accept, even when every stored profile is broken (fix round 1 #3)', () => {
+    const mem = memorySettings({
+      models: {
+        // Neither entry parses: the first has no name, the second no id.
+        profiles: [{ id: 'p-broken-1', roles: {} }, { name: 'no id at all', roles: {} }],
+        defaultProfileId: 'p-broken-1'
+      }
+    });
+    const catalog = {
+      get: (p, m) => (ENTRIES[`${p}:${m}`] ? structuredClone(ENTRIES[`${p}:${m}`]) : null),
+      price: () => null
+    };
+    const availability = { usable: () => Object.keys(ENTRIES).map((key) => { const [provider, model] = key.split(':'); return { provider, model, name: model }; }) };
+    let n = 0;
+    const profiles = new Profiles({ getSettings: mem.getSettings, setSettings: mem.setSettings, createId: () => `id${++n}` });
+    assert.deepStrictEqual(profiles.list(), [], 'every stored entry is broken');
+    const kl = new KingLouieProfile({ profiles, availability, catalog, getSettings: mem.getSettings, setSettings: mem.setSettings });
+    const p = kl.propose();
+    const saved = kl.accept(p.id);
+    assert.strictEqual(saved.kind, 'king-louie');
+    assert.strictEqual(mem.getSettings().models.defaultProfileId, 'p-broken-1', 'the stored default id is untouched, however broken it is');
+  });
+
   it('recomputes once per burst of input changes and tells its listeners', async () => {
     const { kl } = setup();
     const views = [];
@@ -160,11 +183,69 @@ describe('the King Louie profile', () => {
     assert.deepStrictEqual(copy.roles.main.map((t) => t.model), ['sonnet', 'big', 'mini']);
   });
 
+  it('"Duplicate as my profile" before any Accept refuses a stale proposalId (fix round 1 #2)', () => {
+    const { kl, state } = setup();
+    const shown = kl.propose();
+    state.usable = ['openai:big', 'openai:mini']; // the picks change meanwhile
+    assert.throws(() => kl.duplicateAsProfile({ proposalId: shown.id }), (err) => err.code === 'STALE_PROPOSAL');
+    // No proposalId at all still duplicates whatever the picks are now.
+    assert.strictEqual(kl.duplicateAsProfile({}).kind, 'user');
+    // A proposalId that matches the current proposal is accepted.
+    const now = kl.propose();
+    assert.strictEqual(kl.duplicateAsProfile({ proposalId: now.id, name: 'My copy' }).name, 'My copy');
+  });
+
   it('checks its settings', () => {
     const { kl } = setup();
     assert.throws(() => kl.saveSettings({ bandPoints: -1 }), /The band is a number from 0 to 50/);
     assert.throws(() => kl.saveSettings({ workerAgenticRatio: 2 }), /The worker ratio is a number from 0 to 1/);
     assert.strictEqual(kl.saveSettings({ workerAgenticRatio: 0.95 }).workerAgenticRatio, 0.95);
+  });
+
+  it('refuses null, empty and blank-string settings instead of silently treating them as 0 (fix round 1 #1)', () => {
+    const { kl } = setup();
+    for (const bad of ['', ' ', null, false, []]) {
+      assert.throws(() => kl.saveSettings({ bandPoints: bad }), /The band is a number from 0 to 50/, JSON.stringify(bad));
+    }
+    // A non-empty numeric string is still fine.
+    assert.strictEqual(kl.saveSettings({ bandPoints: '7' }).bandPoints, 7);
+  });
+
+  it('auto-accept emits the proposal event once, not once from accept and again from refresh (fix round 1 #4)', () => {
+    const { kl } = setup({ models: { kingLouie: { autoAccept: true } } });
+    const views = [];
+    kl.on('proposal', (v) => views.push(v));
+    kl.refresh();
+    assert.strictEqual(views.length, 1);
+    assert.strictEqual(kl.profile().kind, 'king-louie');
+  });
+
+  it('does not auto-accept until an owner-supplied readiness gate opens, but still computes and shows the proposal (fix round 1 #6)', () => {
+    const mem = memorySettings({
+      models: {
+        profiles: [{ id: 'p-mine', name: 'Mine', kind: 'user', roles: { main: [{ provider: 'openai', model: 'big', effort: null }], worker: [], utility: [] } }],
+        defaultProfileId: 'p-mine',
+        kingLouie: { autoAccept: true }
+      }
+    });
+    const catalog = {
+      get: (p, m) => (ENTRIES[`${p}:${m}`] ? structuredClone(ENTRIES[`${p}:${m}`]) : null),
+      price: () => null
+    };
+    const availability = { usable: () => Object.keys(ENTRIES).map((key) => { const [provider, model] = key.split(':'); return { provider, model, name: model }; }) };
+    let ready = false;
+    let n = 0;
+    const profiles = new Profiles({ getSettings: mem.getSettings, setSettings: mem.setSettings, createId: () => `id${++n}` });
+    const kl = new KingLouieProfile({ profiles, availability, catalog, getSettings: mem.getSettings, setSettings: mem.setSettings, readyForAutoAccept: () => ready });
+    const views = [];
+    kl.on('proposal', (v) => views.push(v));
+    kl.refresh();
+    assert.strictEqual(kl.profile(), null, 'not ready: proposal is shown but not accepted');
+    assert.strictEqual(views.length, 1);
+    assert.ok(views[0].proposal, 'the proposal itself is still computed and shown');
+    ready = true;
+    kl.refresh();
+    assert.strictEqual(kl.profile().kind, 'king-louie', 'ready: the same proposal is now auto-accepted');
   });
 });
 
@@ -230,6 +311,50 @@ describe('the King Louie profile in the core', () => {
       core.models.availability.emit('changed', { provider: 'openai', status: null });
       await new Promise((resolve) => setTimeout(resolve, 350));
       assert.ok(sent.some((e) => e.channel === 'models:proposalChanged' && e.payload.unavailable), JSON.stringify(sent.map((e) => e.channel)));
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('does not auto-accept from a provider status change until the startup background checks settle (fix round 1 #6)', async () => {
+    const { createCore } = require('../src/core');
+    const { JsonFileStore } = require('../src/platform/json-file-store');
+    const { createAesGcmCipher } = require('../src/platform/cipher');
+    const { createHeadlessPrompter } = require('../src/platform/prompter');
+    delete process.env.KL_CASES_ROOT;
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-king-louie-ready-'));
+    tempDirs.push(dataDir);
+    const core = createCore({
+      paths: { dataDir },
+      store: new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: { chats: [], activeChatId: null, apiTokens: {}, apiStatus: {}, toolApprovals: { alwaysApproveTools: {} } } }),
+      vaultStore: new JsonFileStore({ dir: dataDir, name: 'config' }),
+      cipher: createAesGcmCipher(crypto.randomBytes(32)),
+      prompter: createHeadlessPrompter(),
+      builtinSkillsDir: path.join(__dirname, '..', 'skills'),
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
+      fetch: async (url) => { throw new Error(`no network in unit tests (${url})`); },
+      ui: { send: () => {} }
+    });
+    try {
+      await core.start();
+      // Fabricate one fully usable, priced and scored candidate, without
+      // touching the real catalog or network, and turn autoAccept on.
+      core.models.availability.usable = () => [{ provider: 'openai', model: 'big', name: 'Big' }];
+      core.models.catalog.get = (p, m) => (p === 'openai' && m === 'big'
+        ? { name: 'Big', cost: { input: 1, output: 2 }, scores: { intelligence: 60, agentic: 55 }, toolCall: true, input: ['text'], output: ['text'], limits: { context: 400000 }, local: false, reasoning: { efforts: [] } }
+        : null);
+      core.models.catalog.price = () => ({ usd: 0 });
+      const settings = core.context.getSettings();
+      core.context.setSettings({ ...settings, models: { ...settings.models, kingLouie: { ...settings.models.kingLouie, autoAccept: true } } });
+
+      core.models.availability.emit('changed', { provider: 'openai', status: { ok: true } });
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      assert.strictEqual(core.context.getKingLouie().profile(), null, 'no auto-accept before the startup checks settle');
+      assert.ok(core.context.getKingLouie().view().proposal, 'the proposal is still computed and shown');
+
+      await core.models.startBackgroundChecks();
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      assert.strictEqual(core.context.getKingLouie().profile()?.kind, 'king-louie', 'auto-accepts once the startup checks have settled');
     } finally {
       await core.shutdown();
     }
