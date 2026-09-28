@@ -747,16 +747,8 @@ function createCore(deps = {}) {
       { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
     );
 
-  const createUsageRecordFromMetrics = (metrics = {}, durationMs = 0) => ({
-    provider: metrics.provider,
-    model: metrics.model,
-    inputTokens: Number(metrics.inputTokens) || 0,
-    outputTokens: Number(metrics.outputTokens) || 0,
-    totalTokens: Number(metrics.totalTokens) || 0,
-    costUsd: typeof metrics.costUsd === 'number' && Number.isFinite(metrics.costUsd) ? metrics.costUsd : null,
-    ...(metrics.usagePartial ? { usagePartial: true } : {}),
-    durationMs: Number(durationMs) || 0
-  });
+  // One call's metrics as a usage record, its role included (spec §10).
+  const createUsageRecordFromMetrics = (metrics = {}, durationMs = 0) => UsageTracker.eventFromMetrics(metrics, durationMs);
 
   const buildRuntimeSystemPrompt = (runtimeEnvironment = {}) => {
     const platform = runtimeEnvironment.platform || process.platform;
@@ -2276,7 +2268,10 @@ function createCore(deps = {}) {
       model: first.model,
       effort: first.effort || null,
       provider: instance,
-      routed: inferenceRouter.routedProvider({ targets: resolved.targets }),
+      routed: inferenceRouter.routedProvider({
+        targets: resolved.targets,
+        meta: { role, profileId: models.profileId || null, borrowedFrom: resolved.borrowedFrom || null }
+      }),
       timeoutMs: roleTimeoutMs(getSettings(), role, profiles.customRoles())
     };
   };
@@ -3274,7 +3269,7 @@ function createCore(deps = {}) {
     explainTarget,
     snapshotModels,
     resolveRole,
-    routedProvider: ({ targets, signal = null } = {}) => inferenceRouter.routedProvider({ targets, signal }),
+    routedProvider: ({ targets, signal = null, meta = null } = {}) => inferenceRouter.routedProvider({ targets, signal, meta }),
     getModelChoices: () => modelChoices,
     getProviderOptions: providerOptionsFor,
     testProviderConnection,

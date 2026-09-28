@@ -30,6 +30,8 @@ describe('providers price calls through the catalog', () => {
     const m = p.buildLlmCallMetrics({ model: 'gpt-5.5', usage: { prompt_tokens: 43193, completion_tokens: 185, total_tokens: 43378, prompt_tokens_details: { cached_tokens: 39552 } } });
     assert.strictEqual(round4(m.costUsd), 0.0435);
     assert.strictEqual(m.cachedInputTokens, 39552);
+    // The priceable parts travel with the call, for repricing (spec §7.2).
+    assert.deepStrictEqual(m.pricingUsage, { input: 3641, cachedInput: 39552, cacheWrite: 0, output: 185, reasoning: 0 });
     assert.strictEqual(m.unpriced, undefined);
     assert.strictEqual(m.usagePartial, undefined);
   });

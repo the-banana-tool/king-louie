@@ -12,6 +12,7 @@ const { initializeTools, toolRegistry } = require('../../src/tools');
 const AgentLoop = require('../../src/execution/agent-loop');
 const InferenceRouter = require('../../src/providers/inference-router');
 const { createTurnModels } = require('../../src/models/resolver');
+const UsageTracker = require('../../src/tracking/usage-tracker');
 
 initializeTools();
 
@@ -49,22 +50,14 @@ function chatHarness({ provider, providerType = 'openai', model = 'test-model', 
           : { usable: true, reasons: [], notes: [] };
       }
     }),
-    routedProvider: ({ targets, signal }) => new InferenceRouter({
+    routedProvider: ({ targets, signal, meta }) => new InferenceRouter({
       getProviderToken: () => 'test-token-123456',
       createProvider: (p) => (providers && providers[p]) || provider,
       sleep: async () => {},
       onProviderError: (p, err) => ctx.reportProviderError(p, err)
-    }).routedProvider({ targets, signal }),
+    }).routedProvider({ targets, signal, meta }),
     getUsageTracker: () => ({ record: (event) => { usage.push(event); return { ...event, cost: event.costUsd ?? null }; } }),
-    createUsageRecordFromMetrics: (m) => ({
-      provider: m.provider,
-      model: m.model,
-      inputTokens: m.inputTokens,
-      outputTokens: m.outputTokens,
-      totalTokens: m.totalTokens,
-      costUsd: typeof m.costUsd === 'number' ? m.costUsd : null,
-      ...(m.usagePartial ? { usagePartial: true } : {})
-    }),
+    createUsageRecordFromMetrics: (m) => UsageTracker.eventFromMetrics(m),
     getConversationCompactor: () => null,
     getContextAssembler: () => null,
     getRuntimeEnvironment: async () => ({ platform: process.platform }),

@@ -224,3 +224,44 @@ describe('NO_RETRY and AgentExecutor', () => {
     assert.ok(Date.now() - started < 900, 'NO_RETRY: no backoff wait inside the loop');
   });
 });
+
+describe('cost tags on routed calls (spec 2026-09-27 §10)', () => {
+  it('stamps role, profile, borrow and failover on each call it answers', async () => {
+    const { router } = harness({ 'groq/llama': [unknownFailure()] });
+    const routed = router.routedProvider({ targets: [t('groq', 'llama'), t('openai', 'gpt-5.5')], meta: { role: 'utility', profileId: 'p-1', borrowedFrom: 'worker' } });
+    const res = await routed.sendMessageWithTools([{ role: 'user', content: 'hi' }], [{ name: 'Read' }], {});
+    assert.deepStrictEqual(
+      [res.llmMetrics.role, res.llmMetrics.profileId, res.llmMetrics.borrowedFrom, res.llmMetrics.failover, res.llmMetrics.model],
+      ['utility', 'p-1', 'worker', true, 'gpt-5.5']
+    );
+    assert.deepStrictEqual(routed.callTags(), { role: 'utility', profileId: 'p-1', borrowedFrom: 'worker', failover: true });
+  });
+
+  it('marks the first target\'s answer as no failover', async () => {
+    const { router } = harness();
+    const routed = router.routedProvider({ targets: [t('openai', 'gpt-5.5')], meta: { role: 'main', profileId: 'p-1' } });
+    const res = await routed.sendMessage([{ role: 'user', content: 'hi' }], {});
+    assert.strictEqual(res.llmMetrics.failover, false);
+    assert.strictEqual(res.llmMetrics.borrowedFrom, null);
+  });
+
+  it('stamps a stopped call\'s partial usage too', async () => {
+    const controller = new AbortController();
+    const stopped = () => {
+      controller.abort();
+      const err = new Error('aborted');
+      err.name = 'AbortError';
+      err.partialLlmMetrics = { provider: 'openai', model: 'gpt-5.5', inputTokens: 40, usagePartial: true };
+      throw err;
+    };
+    const { router } = harness({ 'openai/gpt-5.5': [stopped] });
+    const routed = router.routedProvider({ targets: [t('openai', 'gpt-5.5')], signal: controller.signal, meta: { role: 'main', profileId: 'p-1' } });
+    await assert.rejects(routed.sendMessage([{ role: 'user', content: 'hi' }], {}), (err) => err.partialLlmMetrics.role === 'main' && err.partialLlmMetrics.usagePartial === true);
+  });
+
+  it('leaves a route built without tags as it was', async () => {
+    const { router } = harness();
+    const res = await router.routeTargets([t('openai', 'gpt-5.5')], [{ role: 'user', content: 'hi' }]);
+    assert.deepStrictEqual(res.llmMetrics, { provider: 'openai', model: 'gpt-5.5' });
+  });
+});

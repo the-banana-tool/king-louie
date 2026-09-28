@@ -214,6 +214,9 @@ class BaseLLMProvider {
       provider,
       model: normalizedModel,
       ...normalizedUsage,
+      // The catalog's usage shape, so a call can be repriced on another
+      // model (the King Louie profile's cost effect, spec §7.2).
+      pricingUsage: this.usageForPricing(normalizedUsage),
       costUsd,
       ...(priced ? {} : { unpriced: true }),
       ...(partial ? { usagePartial: true } : {})

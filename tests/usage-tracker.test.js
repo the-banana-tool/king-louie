@@ -156,3 +156,58 @@ describe('Usage IPC handlers', () => {
     assert.strictEqual(dailyResult.data.turns, 1);
   });
 });
+
+describe('UsageTracker by role and model (spec 2026-09-27 §10)', () => {
+  const memoryStore = () => ({
+    data: {},
+    get(key, fallbackValue = null) { return Object.prototype.hasOwnProperty.call(this.data, key) ? this.data[key] : fallbackValue; },
+    set(key, value) { this.data[key] = value; }
+  });
+
+  it('totals by role and by model, counting unpriced calls instead of adding $0', () => {
+    const tracker = new UsageTracker(memoryStore());
+    tracker.record({ provider: 'openai', model: 'gpt-5.5', role: 'main', inputTokens: 100, outputTokens: 10, costUsd: 0.02 });
+    tracker.record({ provider: 'openai', model: 'gpt-5.4-mini', role: 'worker', inputTokens: 50, outputTokens: 5, costUsd: null });
+    tracker.record({ provider: 'openai', model: 'gpt-5.4-mini', inputTokens: 5, outputTokens: 1, costUsd: 0.001 });
+    const s = tracker.getSessionUsage();
+    assert.deepStrictEqual([s.roles.main.totalCost, s.roles.main.turns, s.roles.main.unpricedCalls], [0.02, 1, 0]);
+    assert.deepStrictEqual([s.roles.worker.totalCost, s.roles.worker.unpricedCalls], [0, 1]);
+    assert.strictEqual(s.roles.other.turns, 1);
+    assert.deepStrictEqual([s.models['openai:gpt-5.4-mini'].turns, s.models['openai:gpt-5.4-mini'].unpricedCalls], [2, 1]);
+    assert.strictEqual(s.unpricedCalls, 1);
+    const today = new Date().toISOString().slice(0, 10);
+    assert.strictEqual(tracker.getDailyUsage(today).roles.worker.unpricedCalls, 1);
+  });
+
+  it('builds the event from a call\'s metrics, role and priceable usage included', () => {
+    const e = UsageTracker.eventFromMetrics({
+      provider: 'openai', model: 'gpt-5.5', inputTokens: 100, outputTokens: 10, totalTokens: 110, cachedInputTokens: 60,
+      costUsd: 0.01, role: 'main', profileId: 'p-1',
+      pricingUsage: { input: 40, cachedInput: 60, cacheWrite: 0, output: 10, reasoning: 0 }
+    }, 25);
+    assert.deepStrictEqual(e, {
+      provider: 'openai', model: 'gpt-5.5', inputTokens: 100, outputTokens: 10, totalTokens: 110, cacheReadTokens: 60,
+      costUsd: 0.01, role: 'main', pricingUsage: { input: 40, cachedInput: 60, cacheWrite: 0, output: 10, reasoning: 0 }, durationMs: 25
+    });
+    assert.strictEqual(UsageTracker.eventFromMetrics({ costUsd: null }).costUsd, null);
+  });
+
+  it('sums the last 30 days by role, with the priceable parts', () => {
+    let now = new Date('2026-09-27T12:00:00Z');
+    const tracker = new UsageTracker(memoryStore(), { now: () => now });
+    const call = (role, costUsd, input) => tracker.record({
+      provider: 'openai', model: 'm', role, inputTokens: input, outputTokens: 1, costUsd,
+      pricingUsage: { input, cachedInput: 0, cacheWrite: 0, output: 1, reasoning: 0 }
+    });
+    call('utility', 0.01, 1000);
+    now = new Date('2026-09-10T12:00:00Z');
+    call('utility', 0.02, 2000);
+    now = new Date('2026-08-01T12:00:00Z'); // outside the window
+    call('utility', 5, 99999);
+    now = new Date('2026-09-27T12:00:00Z');
+    call('main', null, 10);
+    const recent = tracker.recentRoleUsage({ days: 30 });
+    assert.deepStrictEqual(recent.utility, { calls: 2, unpricedCalls: 0, cost: 0.03, usage: { input: 3000, cachedInput: 0, cacheWrite: 0, output: 2, reasoning: 0 } });
+    assert.deepStrictEqual([recent.main.calls, recent.main.unpricedCalls, recent.main.cost], [1, 1, 0]);
+  });
+});

@@ -9,6 +9,7 @@ const { roleTimeoutMs } = require('../models/resolver');
 const { KL_PROVIDERS } = require('../models/provider-ids');
 const { partialMetricsOf } = require('../providers/abort');
 const { sumLlmCalls } = require('../tracking/llm-totals');
+const UsageTracker = require('../tracking/usage-tracker');
 const { DELEGATION_GUIDANCE } = require('../context/system-sections');
 
 const log = createLogger('chat');
@@ -434,8 +435,12 @@ function registerChatHandlers(ipcMain, context = {}) {
       // provider on the first call, the same provider after it. A case
       // turn's calls go through the case runtime, which charges the case.
       const provider = caseTurn
-        ? caseRuntime.routedProvider(caseTurn, { targets: main.targets })
-        : createRoutedProvider({ targets: main.targets, signal: abortController.signal });
+        ? caseRuntime.routedProvider(caseTurn, { targets: main.targets, meta: { role: 'main', borrowedFrom: null } })
+        : createRoutedProvider({
+          targets: main.targets,
+          signal: abortController.signal,
+          meta: { role: 'main', profileId: turnModels.profileId || null, borrowedFrom: null }
+        });
 
       const chatRaw = getChats().find((item) => item.id === chatId);
       if (!chatRaw) {
@@ -723,7 +728,8 @@ function registerChatHandlers(ipcMain, context = {}) {
             if (!abortController.signal.aborted) throw err;
             // Stopped mid-call: keep the usage the provider reported so far.
             const at = typeof provider.current === 'function' ? provider.current() : mainTarget;
-            streamResult = { llmMetrics: partialMetricsOf(err, { provider: at.provider, model: at.model }) };
+            const tags = !err?.partialLlmMetrics && typeof provider.callTags === 'function' ? provider.callTags() : {};
+            streamResult = { llmMetrics: { ...partialMetricsOf(err, { provider: at.provider, model: at.model }), ...tags } };
           }
           if (abortController.signal.aborted) stopped = true;
 
@@ -740,14 +746,7 @@ function registerChatHandlers(ipcMain, context = {}) {
             const usageEvent = usageTracker.record(
               typeof createUsageRecordFromMetrics === 'function'
                 ? createUsageRecordFromMetrics(singleCall, 0)
-                : {
-                    provider: singleCall.provider,
-                    model: singleCall.model,
-                    inputTokens: singleCall.inputTokens,
-                    outputTokens: singleCall.outputTokens,
-                    totalTokens: singleCall.totalTokens,
-                    costUsd: singleCall.costUsd
-                  }
+                : UsageTracker.eventFromMetrics(singleCall)
             );
             if (caseTurn && usageEvent) caseRuntime.usageHook(caseTurn)(usageEvent);
           }

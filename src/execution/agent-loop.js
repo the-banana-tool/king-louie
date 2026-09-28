@@ -13,6 +13,7 @@ const { createLogger } = require('../logging');
 const { createHeadlessPrompter } = require('../platform/prompter');
 const { partialMetricsOf } = require('../providers/abort');
 const { sumLlmCalls } = require('../tracking/llm-totals');
+const UsageTracker = require('../tracking/usage-tracker');
 const log = createLogger('agent-loop');
 
 class AgentLoop {
@@ -258,10 +259,16 @@ class AgentLoop {
         } catch (err) {
           // Stopped mid-call: record what the provider reported so far, then stop.
           if (this.abortSignal?.aborted) {
-            this._recordCall(partialMetricsOf(err, {
-              provider: this.provider?.getProviderName?.() || null,
-              model: effectiveOptions.model || null
-            }), llmCalls);
+            // A routed provider already tagged a partial it attached; one
+            // cut off before any response gets the route's tags here.
+            const tags = !err?.partialLlmMetrics && typeof this.provider?.callTags === 'function' ? this.provider.callTags() : {};
+            this._recordCall({
+              ...partialMetricsOf(err, {
+                provider: this.provider?.getProviderName?.() || null,
+                model: effectiveOptions.model || null
+              }),
+              ...tags
+            }, llmCalls);
             return this._stoppedResult(iterations, executedTools, llmCalls);
           }
           lastErr = err;
@@ -633,15 +640,7 @@ class AgentLoop {
     }
 
     if (this.usageTracker && typeof this.usageTracker.record === 'function') {
-      const usageEvent = this.usageTracker.record({
-        provider: metrics.provider,
-        model: metrics.model,
-        inputTokens: metrics.inputTokens,
-        outputTokens: metrics.outputTokens,
-        totalTokens: metrics.totalTokens,
-        costUsd: metrics.costUsd,
-        ...(metrics.usagePartial ? { usagePartial: true } : {})
-      });
+      const usageEvent = this.usageTracker.record(UsageTracker.eventFromMetrics(metrics));
 
       if (this.onUsageRecorded) {
         try {

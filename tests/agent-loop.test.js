@@ -1137,4 +1137,18 @@ describe('AgentLoop', () => {
       assert.strictEqual(result.tools[0].result, undefined);
     });
   });
+
+  it('records each call with its role and priceable usage (models spec §10)', async () => {
+    const recorded = [];
+    const provider = {
+      sendMessageWithTools: async () => ({
+        type: 'text',
+        content: 'done',
+        llmMetrics: { provider: 'openai', model: 'm', inputTokens: 10, outputTokens: 2, totalTokens: 12, costUsd: 0.001, role: 'worker', pricingUsage: { input: 10, cachedInput: 0, cacheWrite: 0, output: 2, reasoning: 0 } }
+      })
+    };
+    const loop = new AgentLoop(provider, okExecutor(), { usageTracker: { record: (e) => { recorded.push(e); return e; } } });
+    await loop.run([{ role: 'user', content: 'hi' }], []);
+    assert.deepStrictEqual([recorded[0].role, recorded[0].pricingUsage.input, recorded[0].costUsd], ['worker', 10, 0.001]);
+  });
 });

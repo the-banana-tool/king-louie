@@ -244,7 +244,9 @@ describe('chat:sendMessage case turn, stage 2', () => {
     await send({ message: 'Where are we on the listing?' });
     assert.deepStrictEqual([calls.begin[0].source, calls.begin[0].ownerMessage], ['owner', 'Where are we on the listing?']);
     assert.deepStrictEqual(calls.ownerHooks, [calls.begin[0].turnId]);
-    assert.deepStrictEqual(calls.routed, [{ targets: [{ provider: 'openai', model: 'test-model', effort: null }] }]);
+    // Task 3 (models spec §10): a case owner turn's call is tagged main, for
+    // the usage roll-up by role.
+    assert.deepStrictEqual(calls.routed, [{ targets: [{ provider: 'openai', model: 'test-model', effort: null }], meta: { role: 'main', borrowedFrom: null } }]);
     assert.strictEqual(calls.loopProvider.routed, true);
     assert.strictEqual(calls.loopOptions.failoverPolicy.plan(new Error('x')).action, 'abort');
     calls.loopOptions.onUsageRecorded({ cost: 0.1 });

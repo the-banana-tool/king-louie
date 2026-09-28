@@ -1763,13 +1763,25 @@ class CaseRuntime {
     if (!router || typeof router.routeTargets !== 'function') {
       throw new Error('Routed providers need a host with an inference router.');
     }
+    // Cost records (models spec §10): a case role's calls carry its model
+    // role and case role; the owner turn's main list carries main.
     let targets;
-    if (Array.isArray(spec.targets) && spec.targets.length) targets = spec.targets;
-    else if (spec.target && spec.target.provider) targets = [spec.target];
-    else if (spec.role) targets = this.roleModel(turn.caseId, spec.role, { turn }).targets;
-    else throw new Error('A routed provider needs a role or targets.');
+    let tags = null;
+    if (Array.isArray(spec.targets) && spec.targets.length) {
+      targets = spec.targets;
+      tags = { role: 'main', borrowedFrom: null, ...(spec.meta && typeof spec.meta === 'object' ? spec.meta : {}) };
+    } else if (spec.target && spec.target.provider) {
+      targets = [spec.target];
+    } else if (spec.role) {
+      const pick = this.roleModel(turn.caseId, spec.role, { turn });
+      targets = pick.targets;
+      tags = { role: pick.modelRole, caseRole: spec.role, borrowedFrom: pick.borrowedFrom || null };
+    } else {
+      throw new Error('A routed provider needs a role or targets.');
+    }
+    if (tags) tags.profileId = turn.models?.profileId || null;
     const list = targets.map((x) => ({ provider: String(x.provider).toLowerCase(), model: String(x.model || ''), effort: x.effort || null }));
-    const state = typeof router.newRouteState === 'function' ? router.newRouteState() : undefined;
+    const state = typeof router.newRouteState === 'function' ? router.newRouteState(tags) : undefined;
     const call = (messages, opts = {}, tools = null, onChunk = null) => router.routeTargets(list, messages, {
       ...(opts || {}),
       ...(Array.isArray(tools) ? { tools } : {}),
@@ -1781,6 +1793,7 @@ class CaseRuntime {
       getProviderName: () => current().provider,
       getDefaultModel: () => current().model,
       current,
+      callTags: () => (typeof router.callTags === 'function' ? router.callTags(state) : {}),
       sendMessage: (messages, opts) => call(messages, opts),
       streamMessage: (messages, opts, onChunk) => call(messages, opts, null, onChunk),
       sendMessageWithTools: (messages, tools, opts) => call(messages, opts, tools),

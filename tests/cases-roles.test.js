@@ -223,4 +223,20 @@ describe('CaseRuntime model roles', () => {
     assert.deepStrictEqual([rt.getCase(info.id).profile, rt.getCase(info.id).mainOverride], ['p-test', null]);
     await assert.rejects(rt.setModelChoice(info.id, { status: 'done' }), /needs profile or mainOverride/);
   });
+
+  it('tags a case role call with its model role, case role and profile (models spec §10)', async () => {
+    const InferenceRouter = require('../src/providers/inference-router');
+    const router = new InferenceRouter({
+      getProviderToken: () => 'test-token',
+      createProvider: (p) => ({ sendMessageWithTools: async (_m, _t, opts) => ({ type: 'text', content: 'ok', llmMetrics: { provider: p, model: opts.model } }) })
+    });
+    const rt = new CaseRuntime({ root: root(), getSettings: () => settings(), host: { inferenceRouter: router } });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    const turn = { caseId: info.id, signal: null, models: rt.modelsFor(info.id) };
+    const reply = await rt.routedProvider(turn, { role: 'orient' }).sendMessageWithTools([{ role: 'user', content: 'hi' }], [{ name: 'Read' }], {});
+    assert.deepStrictEqual(
+      [reply.llmMetrics.role, reply.llmMetrics.caseRole, reply.llmMetrics.profileId, reply.llmMetrics.model, reply.llmMetrics.failover],
+      ['utility', 'orient', 'p-test', 'llama-3.3-70b', false]
+    );
+  });
 });
