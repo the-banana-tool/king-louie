@@ -79,6 +79,25 @@ function inAccount(list, id) {
   return list.includes(id) || list.some((m) => stripDateSuffix(m) === id || m === stripDateSuffix(id));
 }
 
+// A hyphen-separated segment that is only a version or date: "4", "4.1",
+// "5", "4o", "20250514" (and each piece of a hyphenated date, "2025", "04",
+// "14"). Everything else survives into the id's shape.
+const VERSION_SEGMENT = /^\d+(\.\d+)*$/;
+const VERSION_O_SEGMENT = /^\d+o$/;
+
+// An id with its version/date segments removed, so ids that differ only by
+// version (gpt-5-mini, gpt-4o-mini, gpt-4.1-mini) or by a release-date
+// suffix share the same shape. models.dev family names are not id
+// prefixes — "gpt-mini" covers gpt-5-mini, gpt-4o-mini and gpt-4.1-mini,
+// none of which starts with "gpt-mini-" — so family membership alone
+// cannot tell a stale mini id from a stale full-size one; shape can.
+function shapeOf(id) {
+  return String(id || '')
+    .split('-')
+    .filter((seg) => seg && !VERSION_SEGMENT.test(seg) && !VERSION_O_SEGMENT.test(seg))
+    .join('-');
+}
+
 function mapStaleTarget(target, { catalog = null, accountModels = {} } = {}) {
   const keep = { target, note: null };
   if (!catalog || target.provider === 'ollama') return keep;
@@ -87,14 +106,15 @@ function mapStaleTarget(target, { catalog = null, accountModels = {} } = {}) {
   if (inAccount(listed, target.model)) return keep;
   const label = R.targetLabel(target);
   const entries = catalog.list(target.provider);
-  const families = [...new Set(entries.map((e) => e.family).filter((f) => f && target.model.startsWith(`${f}-`)))];
-  const longest = Math.max(0, ...families.map((f) => f.length));
-  const best = families.filter((f) => f.length === longest);
-  if (best.length !== 1) return { target, note: `${label} is not in the model catalog; kept as is (no single model family matches it).` };
-  const family = best[0];
+  const shape = shapeOf(target.model);
+  // A family qualifies only when one of its own members shares the stale
+  // id's shape — never merely because the family name prefixes the id.
+  const families = [...new Set(entries.filter((e) => e.family && shapeOf(e.id) === shape).map((e) => e.family))];
+  if (families.length !== 1) return { target, note: `${label} is not in the model catalog; kept as is (no single model family matches it).` };
+  const family = families[0];
   // One entry per base id, preferring the undated alias over its dated twin.
   const byBase = new Map();
-  for (const e of entries.filter((x) => x.family === family)) {
+  for (const e of entries.filter((x) => x.family === family && shapeOf(x.id) === shape)) {
     const base = stripDateSuffix(e.id);
     if (!byBase.has(base) || e.id === base) byBase.set(base, e);
   }

@@ -140,10 +140,38 @@ describe('mapStaleTarget', () => {
     assert.deepStrictEqual(mapStaleTarget(t('openai', 'gpt-5.5'), { catalog }), { target: t('openai', 'gpt-5.5'), note: null });
     assert.deepStrictEqual(mapStaleTarget(t('ollama', 'llama3.2:latest'), { catalog }), { target: t('ollama', 'llama3.2:latest'), note: null });
     assert.deepStrictEqual(mapStaleTarget(t('anthropic', 'claude-haiku-3'), { catalog }).target, t('anthropic', 'claude-haiku-4-5'));
+    assert.deepStrictEqual(mapStaleTarget(t('anthropic', 'claude-sonnet-4-20250514'), { catalog }).target, t('anthropic', 'claude-sonnet-4-5'));
     const kept = mapStaleTarget(t('openai', 'davinci-002'), { catalog });
     assert.deepStrictEqual(kept.target, t('openai', 'davinci-002'));
     assert.match(kept.note, /kept as is/);
     assert.deepStrictEqual(mapStaleTarget(t('anthropic', 'claude-sonnet-4-20250514'), { catalog: null }).note, null);
+  });
+
+  // Fix round 1: models.dev family names are not id prefixes — gpt-5-mini,
+  // gpt-4o-mini and gpt-4.1-mini all share family "gpt" (never "gpt-mini-"
+  // as a literal prefix) in this fixture, just as they do in the real
+  // catalog. A stale mini or nano id must map within its own shape, never
+  // to a full-size model of the same family.
+  it('matches a retired id by shape, not by treating the family name as an id prefix', () => {
+    const catalog = fixtureCatalog();
+    const mini = mapStaleTarget(t('openai', 'gpt-4.1-mini-2024-01-01'), { catalog });
+    assert.deepStrictEqual(mini.target, t('openai', 'gpt-5.4-mini'));
+    assert.match(mini.note, /mapped to openai\/gpt-5\.4-mini/);
+    const nano = mapStaleTarget(t('openai', 'gpt-4.1-nano-2024-01-01'), { catalog });
+    assert.deepStrictEqual(nano.target, t('openai', 'gpt-5.4-nano'));
+    assert.match(nano.note, /mapped to openai\/gpt-5\.4-nano/);
+  });
+
+  it('keeps the id, with a reason, on a release-date tie or when the matching models have no release date', () => {
+    const catalog = fixtureCatalog();
+    // gpt-6-flex and gpt-7-flex share a shape and a release date: a tie.
+    const tie = mapStaleTarget(t('openai', 'gpt-8-flex'), { catalog });
+    assert.deepStrictEqual(tie.target, t('openai', 'gpt-8-flex'));
+    assert.match(tie.note, /kept as is/);
+    // gpt-6-lite and gpt-7-lite share a shape but neither has a release date.
+    const noDate = mapStaleTarget(t('openai', 'gpt-8-lite'), { catalog });
+    assert.deepStrictEqual(noDate.target, t('openai', 'gpt-8-lite'));
+    assert.match(noDate.note, /kept as is/);
   });
 });
 
