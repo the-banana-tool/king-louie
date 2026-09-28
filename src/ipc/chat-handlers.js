@@ -13,6 +13,8 @@ const UsageTracker = require('../tracking/usage-tracker');
 const { oneShot } = require('../providers/one-shot');
 const { targetLabel } = require('../models/roles');
 const { DELEGATION_GUIDANCE } = require('../context/system-sections');
+const { workerIsCheaper } = require('../models/delegation');
+const { getActiveCatalog } = require('../models');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -594,8 +596,13 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       // Main's delegation guidance (spec §8.1), first so it sits in the
       // stable, cached part of the prompt. Only where SpawnAgent can run:
-      // agent mode, and never a case turn (SpawnAgent is refused there).
-      if (agentMode && !caseTurn) {
+      // agent mode, and never a case turn (SpawnAgent is refused there). And
+      // only when its promise holds (final review I1): worker has models of
+      // its own and its first is cheaper than main's first. The check reads
+      // only the frozen TurnModels and the catalog, so it is the same for
+      // every turn of a profile and the cached prefix keeps.
+      const catalog = (typeof context.getCatalog === 'function' && context.getCatalog()) || getActiveCatalog();
+      if (agentMode && !caseTurn && workerIsCheaper(turnModels, catalog)) {
         options.systemPrompt = `${DELEGATION_GUIDANCE}\n\n${options.systemPrompt}`;
       }
 

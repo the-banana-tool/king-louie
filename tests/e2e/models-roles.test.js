@@ -93,6 +93,12 @@ describe('E2E: roles in use (models M3)', () => {
     assert.strictEqual(data.settings.models.defaultProfileId, 'p-local', 'accepting never changes the default');
     await waitFor(ctx, `document.getElementById('models-kl-status').textContent.includes('up to date')`, 15000);
     await waitFor(ctx, `[...document.querySelectorAll('#models-profile-list .models-profile-card')].some((c) => c.textContent.includes('King Louie selected'))`, 15000);
+    // Local's worker is empty and borrows main; King Louie's has a model
+    // (final review I1).
+    const notices = await evaluate(ctx, `Object.fromEntries([...document.querySelectorAll('#models-profile-list .models-profile-card')].map((c) => [c.dataset.profileId, c.querySelector('.models-worker-borrow-notice')?.textContent || null]))`);
+    assert.strictEqual(notices['p-local'], "Delegated reading runs on main's model until worker has one.");
+    assert.strictEqual(Object.entries(notices).filter(([id]) => id !== 'p-local').every(([, n]) => n === null), true);
+    assert.strictEqual(await evaluate(ctx, `!!document.querySelector('#models-kl-picks .models-worker-borrow-notice')`), false);
   });
 
   it('creates a custom role under Advanced and offers it in the profile editor', async () => {

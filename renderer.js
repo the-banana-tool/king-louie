@@ -6450,6 +6450,7 @@ function renderModelProfileList() {
     const unusable = Object.values(profile.roles || {}).flat().filter((e) => !e.usable).length;
     summary.textContent = `Main: ${mainNames.length ? mainNames.join(', ') : '(none)'}${unusable ? ` · ${unusable} model${unusable === 1 ? '' : 's'} not usable now` : ''}`;
     card.appendChild(summary);
+    if (workerBorrowsFromMain(profile.roles)) card.appendChild(workerBorrowNotice());
 
     // The migration's notes (spec §13): which old model ids were mapped or kept.
     const notes = profile.migration && Array.isArray(profile.migration.notes) ? profile.migration.notes : [];
@@ -6717,6 +6718,23 @@ function formatCostEffect(effect) {
   return `${sign}$${Math.abs(effect.usd).toFixed(2)} a month (${effect.note})`;
 }
 
+// An empty worker borrows main's models (spec §6.4), so the explorer and
+// every other delegated read costs main's price and saves nothing (final
+// review I1). The chat leaves out its delegation guidance then; this says why.
+function workerBorrowsFromMain(roles) {
+  if (!roles || typeof roles !== 'object') return false;
+  const worker = Array.isArray(roles.worker) ? roles.worker : [];
+  const main = Array.isArray(roles.main) ? roles.main : [];
+  return worker.length === 0 && main.length > 0;
+}
+
+function workerBorrowNotice() {
+  const notice = document.createElement('div');
+  notice.className = 'provider-message models-worker-borrow-notice';
+  notice.textContent = "Delegated reading runs on main's model until worker has one.";
+  return notice;
+}
+
 function setKingLouieStatus(text, isError = false) {
   if (!dom.modelsKlStatus) return;
   dom.modelsKlStatus.textContent = text;
@@ -6767,6 +6785,9 @@ function renderKingLouie(view) {
       line.textContent = `${roleShortName(role)}: ${targetsText(list)}`;
       dom.modelsKlPicks.appendChild(line);
     }
+    // The King Louie profile as it stands, or, before the first Accept, the
+    // picks it proposes.
+    if (workerBorrowsFromMain(view.current || p?.roles)) dom.modelsKlPicks.appendChild(workerBorrowNotice());
   }
 
   const box = dom.modelsKlProposal;

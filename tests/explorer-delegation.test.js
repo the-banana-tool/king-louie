@@ -14,6 +14,8 @@ const SpawnAgentTool = require('../src/tools/builtin/spawn-agent-tool');
 const { mergeSettings } = require('../src/core/settings');
 const { chatHarness } = require('./helpers/chat-harness');
 const { setLogLevel } = require('../src/logging');
+const { fixtureCatalog } = require('./helpers/models-fixture');
+const { workerIsCheaper, blendedRateOf } = require('../src/models/delegation');
 
 setLogLevel('fatal');
 
@@ -91,16 +93,21 @@ describe('SpawnAgent caps a summary', () => {
 });
 
 describe('main is told to delegate', () => {
-  const capture = () => {
+  const t = (model) => ({ provider: 'openai', model, effort: null });
+  // gpt-5.5 blends to $11.25 per million tokens in the fixture catalog;
+  // gpt-5.4-nano to $0.56; test-model has no catalog entry.
+  const CHEAPER = { main: [t('gpt-5.5')], worker: [t('gpt-5.4-nano')] };
+  const catalog = fixtureCatalog();
+  const capture = (roles = CHEAPER) => {
     const prompts = [];
     const provider = {
       sendMessageWithTools: async (_m, _t, opts) => { prompts.push(opts.systemPrompt); return { type: 'text', content: 'done' }; },
       streamMessage: async (_m, opts, onChunk) => { prompts.push(opts.systemPrompt); onChunk('done'); return {}; }
     };
-    return { prompts, h: chatHarness({ provider }) };
+    return { prompts, h: chatHarness({ provider, roles, overrides: { getCatalog: () => catalog } }) };
   };
 
-  it('puts the delegation guidance first in an agent-mode turn, before everything that changes', async () => {
+  it('puts the delegation guidance first in an agent-mode turn when worker is cheaper, before everything that changes', async () => {
     const { prompts, h } = capture();
     await h.send({ agentMode: true });
     assert.ok(prompts[0].startsWith(DELEGATION_GUIDANCE), prompts[0]);
@@ -113,6 +120,34 @@ describe('main is told to delegate', () => {
     const { prompts, h } = capture();
     await h.send({ agentMode: false });
     assert.strictEqual(prompts[0].includes(DELEGATION_GUIDANCE), false);
+  });
+
+  it('leaves it out when worker is empty and borrows from main', async () => {
+    const { prompts, h } = capture({ main: [t('gpt-5.5')], worker: [] });
+    await h.send({ agentMode: true });
+    assert.strictEqual(prompts[0].includes(DELEGATION_GUIDANCE), false);
+  });
+
+  it('leaves it out when worker is the same model as main', async () => {
+    const { prompts, h } = capture({ main: [t('gpt-5.5')], worker: [t('gpt-5.5')] });
+    await h.send({ agentMode: true });
+    assert.strictEqual(prompts[0].includes(DELEGATION_GUIDANCE), false);
+  });
+
+  it('leaves it out when worker is unpriced, since the saving cannot be shown', async () => {
+    const { prompts, h } = capture({ main: [t('gpt-5.5')], worker: [t('test-model')] });
+    await h.send({ agentMode: true });
+    assert.strictEqual(prompts[0].includes(DELEGATION_GUIDANCE), false);
+  });
+
+  it('decides from the catalog and the frozen models alone', () => {
+    const { createTurnModels } = require('../src/models/resolver');
+    const unusable = () => ({ usable: false, reasons: ['down'] });
+    const tm = (roles) => createTurnModels({ profile: { id: 'p', name: 'P', roles: { main: [], worker: [], utility: [], ...roles } }, explain: unusable });
+    assert.strictEqual(workerIsCheaper(tm(CHEAPER), catalog), true);
+    assert.strictEqual(workerIsCheaper(tm({ main: [t('gpt-5.4-nano')], worker: [t('gpt-5.5')] }), catalog), false);
+    assert.strictEqual(workerIsCheaper(tm({ main: [t('test-model')], worker: [t('gpt-5.4-nano')] }), catalog), false);
+    assert.strictEqual(blendedRateOf(catalog, t('gpt-5.5')), 11.25);
   });
 
   it('keeps SpawnAgent among the always-loaded tools', async () => {
