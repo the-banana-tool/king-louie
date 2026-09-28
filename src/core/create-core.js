@@ -2132,6 +2132,12 @@ function createCore(deps = {}) {
         vault,
         getSettings,
         getProviderToken: getDecryptedProviderToken,
+        // The turn's frozen models, for a tool limited to a role (the image
+        // tool's imageGeneration, spec §8); a run with no parent turn uses
+        // the default profile through snapshotModels.
+        turnModels: executorOptions.turnModels || null,
+        snapshotModels: (options) => snapshotModels(options),
+        ensureTargetsTested: (targets) => ensureTargetsTested(targets),
         userDataPath: userDataPath,
         canvasAction: async ({ action, content, title }) => {
           const cid = executorOptions.chatId;

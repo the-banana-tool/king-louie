@@ -699,6 +699,13 @@ class IngestService {
       return { method: 'pending-ocr', error: 'budget' };
     }
     if (typeof remaining === 'number' && remaining < ctx.cfg.ocrUsdPerPageEstimate) return { method: 'pending-ocr', error: 'budget' };
+    // The vision role's providers are tested once per document, before its
+    // first page (models spec §8; M2 final-fix ruling): a stale failed
+    // status must not refuse OCR until something else retests the provider.
+    if (!ctx.ocrModel && !ctx.visionTested && typeof this.runtime.ensureVisionTested === 'function') {
+      ctx.visionTested = true;
+      await this.runtime.ensureVisionTested(meta.id);
+    }
     let sel;
     try {
       sel = ctx.ocrModel || (ctx.ocrModel = this._ocrModel(meta.id, ctx.cfg));

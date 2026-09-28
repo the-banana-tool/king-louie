@@ -239,4 +239,15 @@ describe('CaseRuntime model roles', () => {
       ['utility', 'orient', 'p-test', 'llama-3.3-70b', false]
     );
   });
+
+  it('ensureVisionTested tests the vision role\'s providers and never throws (models M2 carry)', async () => {
+    const tested = [];
+    const rt = new CaseRuntime({ root: root(), getSettings: () => settings(), host: { ensureTargetsTested: async (targets) => { tested.push(...targets.map((x) => `${x.provider}/${x.model}`)); } } });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    await rt.ensureVisionTested(info.id);
+    assert.deepStrictEqual(tested, ['openai/gpt-5.5']);
+    const failing = new CaseRuntime({ root: root(), getSettings: () => settings(), host: { ensureTargetsTested: async () => { throw new Error('offline'); } } });
+    const other = await failing.createCase({ title: 'Lakeside lot' });
+    await failing.ensureVisionTested(other.id);
+  });
 });

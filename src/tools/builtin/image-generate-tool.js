@@ -41,6 +41,55 @@ async function resolveProvider(settings, providerOverride, context) {
   return new OpenAIImageProvider(apiKey);
 }
 
+// Image clients King Louie can generate through for a profile target
+// (models spec 2026-09-27 §8). context.createImageClient overrides (tests).
+const IMAGE_CLIENTS = Object.freeze({
+  openai: (apiKey) => {
+    const OpenAIImageProvider = require('../../media/image-generation/openai-provider');
+    return new OpenAIImageProvider(apiKey);
+  }
+});
+
+const targetName = (t) => `${t.provider}/${t.model}`;
+
+// The profile's imageGeneration role (spec §8): when it lists models, the
+// tool may use only those; empty, today's image settings apply. Returns
+// { useSettings: true }, { target } or { error }.
+async function roleTarget(params, context) {
+  const models = context.turnModels
+    || (typeof context.snapshotModels === 'function' ? context.snapshotModels({}) : null);
+  if (!models) return { useSettings: true };
+  if (typeof context.ensureTargetsTested === 'function') {
+    try {
+      await context.ensureTargetsTested(models.candidatesFor('imageGeneration'));
+    } catch (err) {
+      log.warn(`Testing the image generation providers failed: ${err.message}`);
+    }
+  }
+  const resolved = models.resolve('imageGeneration');
+  if (resolved.useSettings) return { useSettings: true };
+  const listed = [...resolved.targets, ...resolved.skipped.map((s) => s.target)].map(targetName).join(', ');
+  const skipped = [...resolved.skipped];
+  const usable = [];
+  for (const t of resolved.targets) {
+    if (IMAGE_CLIENTS[t.provider]) usable.push(t);
+    else skipped.push({ target: t, reasons: [`King Louie cannot generate images through ${t.provider} yet.`] });
+  }
+  const wantProvider = params.provider ? String(params.provider).trim().toLowerCase() : null;
+  const wantModel = params.model ? String(params.model).trim() : null;
+  if (wantProvider || wantModel) {
+    const match = usable.find((t) => (!wantProvider || t.provider === wantProvider) && (!wantModel || t.model === wantModel));
+    if (match) return { target: match };
+    const asked = [wantProvider, wantModel].filter(Boolean).join('/');
+    return { error: `${asked} is not a usable model in this profile's image generation role (${listed}). Use one of those, or leave provider and model out.` };
+  }
+  if (!usable.length) {
+    const why = skipped.map((s) => `${targetName(s.target)} (${s.reasons.join(' ')})`).join('; ');
+    return { error: `No usable image generation model in the profile "${models.profileName}": ${why}. Fix them in Settings → Models.` };
+  }
+  return { target: usable[0] };
+}
+
 const ImageGenerateTool = new Tool({
   name: 'ImageGenerate',
   description: 'Generate images from text prompts using DALL-E (OpenAI) or Fal (Flux). Returns file paths to the generated images. Use this when the user asks you to create, generate, draw, or design an image, diagram, illustration, or visual asset.',
@@ -58,7 +107,7 @@ const ImageGenerateTool = new Tool({
       },
       model: {
         type: 'string',
-        description: 'Model to use. OpenAI: gpt-image-1 (default). Fal: fal-ai/flux/dev (default).'
+        description: 'Model to use. When the profile\'s image generation role lists models, only those may be used; leave it out to use the first. Otherwise OpenAI: gpt-image-1 (default), Fal: fal-ai/flux/dev (default).'
       },
       size: {
         type: 'string',
@@ -87,14 +136,32 @@ const ImageGenerateTool = new Tool({
     const settings = typeof context?.getSettings === 'function' ? (context.getSettings() || {}) : {};
 
     let imageProvider;
+    let modelToUse = model;
     try {
-      imageProvider = await resolveProvider(settings, providerOverride, context);
+      const chosen = await roleTarget(params, context || {});
+      if (chosen.error) return { ok: false, error: chosen.error };
+      if (chosen.target) {
+        let apiKey = null;
+        try {
+          apiKey = context?.getProviderToken?.(chosen.target.provider) || null;
+        } catch (_) {
+          apiKey = null;
+        }
+        if (!apiKey) return { ok: false, error: `No ${chosen.target.provider} key is saved. Add it under API keys.` };
+        const create = typeof context?.createImageClient === 'function'
+          ? context.createImageClient
+          : (p, key) => IMAGE_CLIENTS[p](key);
+        imageProvider = create(chosen.target.provider, apiKey);
+        modelToUse = chosen.target.model;
+      } else {
+        imageProvider = await resolveProvider(settings, providerOverride, context);
+      }
     } catch (err) {
       return { ok: false, error: err.message };
     }
 
     try {
-      const results = await imageProvider.generate({ prompt, model, size, quality, count });
+      const results = await imageProvider.generate({ prompt, model: modelToUse, size, quality, count });
       ensureOutputDir();
 
       const savedFiles = [];
@@ -110,7 +177,7 @@ const ImageGenerateTool = new Tool({
       }
 
       const providerName = imageProvider.getName();
-      const modelName = model || imageProvider.getDefaultModel();
+      const modelName = modelToUse || imageProvider.getDefaultModel();
 
       log.info(`generated ${savedFiles.length} image(s) with ${providerName}/${modelName}`);
 

@@ -1726,6 +1726,21 @@ class CaseRuntime {
     }
   }
 
+  // Before case ingest reads a page on the vision role (models spec §8): the
+  // role's providers are tested now if they never were, or retested once
+  // after a stale non-auth failure, as ensureRoleTested does for the case
+  // roles (M2 final-fix ruling). Never throws: the pick reports what is
+  // still unusable.
+  async ensureVisionTested(id) {
+    const ensure = this.host?.ensureTargetsTested;
+    if (typeof ensure !== 'function') return;
+    try {
+      await ensure(this.modelsFor(id).candidatesFor('vision'));
+    } catch (err) {
+      log.warn(`Testing the vision providers for case ${id} failed: ${err.message}`);
+    }
+  }
+
   // The profile's vision role for case ingest OCR (models spec §8): every
   // usable target in order, and every skipped one with its reason — so a
   // profile with only text-only models can say why, not just that nothing

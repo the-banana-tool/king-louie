@@ -508,4 +508,14 @@ describe('vision pages in IngestService', { skip: require('./helpers/ingest-harn
     assert.deepStrictEqual(h.calls.filter((c) => c.purpose === 'ocr'), []);
     assert.strictEqual(files.readRecord(h.dir, out.docId).pages.filter((p) => p.method === 'pending-ocr').length, 2);
   });
+
+  it('tests the vision role\'s providers once per document, before its first page (models M2 carry)', async () => {
+    const h = await ingestHarness();
+    const seen = [];
+    h.runtime.ensureVisionTested = async (id) => { seen.push([id, h.calls.filter((c) => c.purpose === 'ocr').length]); };
+    await h.svc.store(h.caseId, { name: 'plat.pdf', bytes: await scan(2), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    assert.deepStrictEqual(seen, [[h.caseId, 0]]);
+    assert.strictEqual(h.calls.filter((c) => c.purpose === 'ocr').length, 2);
+  });
 });
