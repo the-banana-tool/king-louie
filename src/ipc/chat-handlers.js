@@ -414,7 +414,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       const availability = typeof context.getAvailability === 'function' ? context.getAvailability() : null;
       if (availability) {
         const providers = [...new Set(turnModels.candidatesFor('main').map((x) => x.provider))].filter((p) => KL_PROVIDERS.includes(p));
-        for (const p of providers) await refreshProvider(availability, p);
+        await Promise.all(providers.map((p) => refreshProvider(availability, p)));
       }
       // No usable main fails the turn before any call, listing every skipped
       // target with its reason; an unusable override fails with the reason
@@ -682,14 +682,18 @@ function registerChatHandlers(ipcMain, context = {}) {
               });
 
               if (reviewResult.review) {
+                // The routed provider may have failed over mid-review; label
+                // with whichever model actually answered, not just the one
+                // first asked (fix round 1).
+                const answeredModel = provider.current?.()?.model ?? mainTarget.model;
                 // Append advisor review as a system note
-                const reviewNote = `\n\n---\n**Advisor Review** (${advisorModel}):\n${reviewResult.review}`;
+                const reviewNote = `\n\n---\n**Advisor Review** (${answeredModel}):\n${reviewResult.review}`;
                 fullResponse += reviewNote;
                 safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk: reviewNote });
                 safeSend(event.sender, 'chat:advisorCompleted', {
                   chatId,
                   verdict: reviewResult.verdict,
-                  model: advisorModel
+                  model: answeredModel
                 });
               }
             } catch (err) {

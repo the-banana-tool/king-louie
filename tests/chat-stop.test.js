@@ -217,6 +217,51 @@ describe('Stop in chat', () => {
     assert.strictEqual(stoppedMessages.length, 1, 'exactly one stopped message');
     assert.strictEqual(h.chat.messages[h.chat.messages.length - 1].stopped, true);
   });
+
+  // Fix round 1: the pre-send connection tests over every main candidate ran
+  // one after another, so Stop pressed during a slow one waited for it, then
+  // for every other candidate after it too — the wait grew with the number
+  // of providers instead of just the slowest one. Run concurrently
+  // (Promise.all, matching create-core.js's ensureTargetsTested), so a slow
+  // groq test doesn't hold up openai's from even starting: this proves
+  // openai's test is already under way while groq's is still pending, then
+  // that Stop still reaches finishStopped once the slow one finally settles.
+  it('tests every main provider concurrently, so Stop needs the slowest one, not the sum of them all', async () => {
+    const order = [];
+    let releaseSlow;
+    const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+    let entered;
+    const inGate = new Promise((resolve) => { entered = resolve; });
+    let providerCalled = false;
+    const provider = { streamMessage: async () => { providerCalled = true; return {}; } };
+    const availability = {
+      ensureTested: async (p) => {
+        order.push(p);
+        if (p === 'groq') { entered(); await slowGate; }
+        return { ok: true };
+      },
+      explain: () => ({ usable: true, reasons: [], notes: [] })
+    };
+    const h = chatHarness({
+      provider,
+      roles: { main: [{ provider: 'groq', model: 'a', effort: null }, { provider: 'openai', model: 'b', effort: null }] },
+      overrides: { getAvailability: () => availability }
+    });
+    const sending = h.send({ agentMode: false });
+    await inGate;
+    // openai's test already started while groq's was still pending — run
+    // concurrently, not one after another (the old code would leave order
+    // as just ['groq'] at this point, since the sequential loop's own await
+    // never reached openai until groq's settled).
+    assert.deepStrictEqual(order, ['groq', 'openai']);
+    assert.deepStrictEqual(await h.stop(), { ok: true }, 'the run is registered before the slow test settles');
+    releaseSlow();
+    const result = await sending;
+    assert.notStrictEqual(result.ok, false, JSON.stringify(result));
+    assert.strictEqual(providerCalled, false, 'no model call is made once Stop lands during the gate');
+    const stoppedMessages = h.chat.messages.filter((m) => m.sender === 'assistant' && m.stopped);
+    assert.strictEqual(stoppedMessages.length, 1, 'exactly one stopped message');
+  });
 });
 
 describe('abort helpers and totals', () => {

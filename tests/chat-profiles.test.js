@@ -25,10 +25,19 @@ describe('chat turns on profiles', () => {
     const seen = [];
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
+    let calls = 0;
     const provider = {
       sendMessageWithTools: async (_messages, _tools, opts) => {
+        calls += 1;
         seen.push(opts.model);
-        if (seen.length === 1) await gate;
+        if (calls === 1) {
+          // Pause on the turn's first call, so the test can switch the main
+          // override while the turn is still running; the tool_use makes
+          // the loop call again inside the same turn, which is what proves
+          // the switch didn't reach the run already in flight.
+          await gate;
+          return { type: 'tool_use', toolName: 'Read', toolUseId: 't1', parameters: { file_path: 'notes.txt' } };
+        }
         return { type: 'text', content: `answered by ${opts.model}` };
       }
     };
@@ -38,8 +47,11 @@ describe('chat turns on profiles', () => {
     h.chat.mainOverride = t('openai', 'model-b');
     release();
     await first;
+    // The turn's own second call (after the tool ran) still used model-a:
+    // the switch made mid-run did not reach the run already in flight.
+    assert.deepStrictEqual(seen, ['model-a', 'model-a']);
     await h.send({ agentMode: true, message: 'second' });
-    assert.deepStrictEqual(seen, ['model-a', 'model-b']);
+    assert.deepStrictEqual(seen, ['model-a', 'model-a', 'model-b']);
     const replies = h.chat.messages.filter((m) => m.sender === 'assistant').map((m) => m.text);
     assert.deepStrictEqual(replies.slice(-2), ['answered by model-a', 'answered by model-b']);
   });
