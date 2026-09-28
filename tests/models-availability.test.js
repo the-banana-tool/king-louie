@@ -291,6 +291,24 @@ describe('during use and over time', () => {
     assert.deepStrictEqual(created, ['openai']);
   });
 
+  it('refreshForUse tests a never-tested provider, retests a stale non-auth failure once, and leaves an auth failure alone', async () => {
+    const fresh = setup({ lists: { openai: ['gpt-5.5'] } });
+    assert.strictEqual((await fresh.availability.refreshForUse('openai')).ok, true);
+    assert.deepStrictEqual(fresh.created, ['openai']);
+
+    const stale = setup({ lists: { openai: ['gpt-5.5'] }, statuses: { openai: { ok: false, error: 'timeout', checkedAt: hoursAgo(1), models: [] } } });
+    assert.strictEqual((await stale.availability.refreshForUse('openai')).ok, true);
+    assert.deepStrictEqual(stale.created, ['openai']);
+
+    const recent = setup({ statuses: { openai: { ok: false, error: 'timeout', checkedAt: NOW.toISOString(), models: [] } } });
+    assert.strictEqual((await recent.availability.refreshForUse('openai')).ok, false);
+    assert.deepStrictEqual(recent.created, []);
+
+    const auth = setup({ statuses: { openai: { ok: false, error: 'rejected', checkedAt: hoursAgo(1), models: [], authFailed: true } } });
+    assert.strictEqual((await auth.availability.refreshForUse('openai')).authFailed, true);
+    assert.deepStrictEqual(auth.created, []);
+  });
+
   it('forget drops the stored status', () => {
     const { availability, store, events } = setup({ statuses: { openai: { ok: true, checkedAt: hoursAgo(1), models: [] } } });
     availability.forget('openai');

@@ -67,6 +67,10 @@ const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
 const { localEntry } = require('../models/normalize');
+const { Profiles } = require('../models/profiles');
+const { roleTimeoutMs } = require('../models/resolver');
+const { runTierMigration } = require('../models/migrate-tiers');
+const { KL_PROVIDERS } = require('../models/provider-ids');
 const { classifyError, FailoverReason } = require('../providers/error-classifier');
 const {
   NotificationRouter,
@@ -1052,6 +1056,44 @@ function createCore(deps = {}) {
   });
   availability.on('changed', (change) => ui.send('models:statusChanged', change));
 
+  // Profiles and roles (spec 2026-09-27 §6). The tier settings move to a
+  // profile once, here, before anything resolves a model (§13). The raw
+  // stored settings are read, not the merged view: the migration must see
+  // what the owner actually saved.
+  // A caller that must write nothing (an import dry run) skips it.
+  const modelMigration = deps.skipModelMigration === true ? { migrated: false, skipped: true } : runTierMigration({
+    readRaw: () => store.get('settings', null),
+    writeRaw: (raw) => store.set('settings', raw),
+    // The old keys stay while code still reads them; they go with the tier code.
+    removeLegacy: false,
+    catalog,
+    // A fresh install's Default main: each provider's own default model, in
+    // the order the app lists providers; an empty default (Ollama) is skipped.
+    freshMain: Object.keys(PROVIDER_LABELS).map((provider) => {
+      try {
+        return { provider, model: ProviderFactory.create(provider, 'model-probe-token').getDefaultModel() || '' };
+      } catch {
+        return { provider, model: '' };
+      }
+    }).filter((x) => x.model),
+    accountModels: Object.fromEntries(Object.entries(getApiStatus() || {})
+      .map(([provider, status]) => [provider, Array.isArray(status?.models) ? status.models : []]))
+  });
+  const profiles = new Profiles({ getSettings, setSettings, catalog });
+
+  // A provider registered at runtime outside King Louie's fourteen (a host
+  // extension, or a test's fake) has no connection test: it is usable when
+  // it has a credential. Everything else is Availability's verdict (§5.1).
+  const explainTarget = (provider, model, options = {}) => {
+    const p = normalizeProvider(provider);
+    if (!KL_PROVIDERS.includes(p) && ProviderFactory.listRegistered().includes(p)) {
+      return hasProviderCredential(p)
+        ? { usable: true, reasons: [], notes: [`${p} is a registered provider with no connection test.`], entry: null }
+        : { usable: false, reasons: [`No token saved for ${providerLabels[p] || p}.`], notes: [], entry: null };
+    }
+    return availability.explain(p, model, options);
+  };
+
   // A 401 or 403 makes the provider unusable at once (spec §5.3). Rate
   // limits and timeouts do not change usability.
   const reportProviderError = (provider, error) => {
@@ -1600,6 +1642,7 @@ function createCore(deps = {}) {
           '- `/llm test <provider>` — test provider connection',
           '- `/llm use <provider>` — set active provider',
           '- `/llm model <provider> <model>` — set model for provider',
+          '- `/llm profile` — list model profiles; `/llm profile <name>` — make one the default',
           '- `/llm telegram add <token>` — save Telegram bot token and start bridge',
           '- `/llm telegram test` — test saved Telegram token',
           '- `/llm telegram remove` — clear Telegram token and stop bridge',
@@ -1961,6 +2004,29 @@ function createCore(deps = {}) {
       };
     }
 
+    if (action === 'profile' || action === 'profiles') {
+      const wanted = rest.join(' ').trim();
+      const list = profiles.list();
+      const defaultId = profiles.defaultId();
+      if (!wanted) {
+        if (!list.length) return { ok: true, output: 'No model profiles yet. Add one in Settings → Models.' };
+        return {
+          ok: true,
+          output: [
+            '### Model profiles',
+            '',
+            ...list.map((p) => `- **${p.name}**${p.id === defaultId ? ' (default)' : ''} | id: \`${p.id}\``),
+            '',
+            'Use `/llm profile <name>` to make one the default.'
+          ].join('\n')
+        };
+      }
+      const match = list.find((p) => p.id === wanted) || list.find((p) => p.name.toLowerCase() === wanted.toLowerCase());
+      if (!match) return { ok: false, error: `No profile named "${wanted}". Use \`/llm profile\` to list them.` };
+      profiles.setDefault(match.id);
+      return { ok: true, output: `Default profile set to ${match.name}.` };
+    }
+
     if (action === 'list') {
       const snapshot = getProviderSnapshot();
       const rows = Object.entries(snapshot.providers).map(([key, provider]) => {
@@ -2232,7 +2298,14 @@ function createCore(deps = {}) {
     getProviderModel,
     getProviderToken: getDecryptedProviderToken,
     createProvider: (providerType, token) => createProviderInstance(providerType, token),
-    onProviderError: reportProviderError
+    onProviderError: reportProviderError,
+    // Once per provider per turn: an Anthropic OAuth session needs a fresh
+    // access token before its first call (the routed path's ensureOAuthToken).
+    prepareProvider: async (instance, provider) => {
+      if (provider === 'anthropic' && instance?.authMode === 'oauth') {
+        instance.apiKey = await refreshAnthropicOAuthToken();
+      }
+    }
   });
 
   // Wrap resolveInference to handle async OAuth token refresh
@@ -2262,6 +2335,66 @@ function createCore(deps = {}) {
     }
 
     return ensureOAuthToken(result);
+  };
+
+  // ---- Profiles and roles (spec 2026-09-27 §6) ----
+
+  const readCaseModelChoice = (caseId) => {
+    if (!caseId) return null;
+    try {
+      const meta = caseRuntime.getCase(caseId);
+      return { profile: meta.profile || null, mainOverride: meta.mainOverride || null };
+    } catch (err) {
+      log.warn(`Reading the model choice of case ${caseId} failed: ${err.message}`);
+      return null;
+    }
+  };
+
+  // Precedence (§6.3): the case's profile and main override, else the
+  // chat's profile and main override, else the default profile. In a case
+  // chat the override lives in case.yaml, so unattended turns follow it.
+  const snapshotModels = ({ chatId = null, caseId = null, profileId = null } = {}) => {
+    const chat = chatId ? getChats().find((c) => c.id === chatId) || null : null;
+    const theCaseId = caseId || chat?.caseId || null;
+    const caseChoice = readCaseModelChoice(theCaseId);
+    const chosen = profileId || caseChoice?.profile || chat?.profileId || null;
+    const mainOverride = theCaseId ? (caseChoice?.mainOverride || null) : (chat?.mainOverride || null);
+    return profiles.snapshot({ profileId: chosen, mainOverride, explain: explainTarget });
+  };
+
+  // Every provider a role could use is tested before the resolve, if it
+  // never was (spec §5.2); a registered provider outside the fourteen has
+  // no test to run.
+  const ensureTargetsTested = async (targets) => {
+    const providers = [...new Set((targets || []).map((x) => String(x?.provider || '').toLowerCase()))]
+      .filter((p) => KL_PROVIDERS.includes(p) && hasProviderCredential(p));
+    await Promise.all(providers.map((p) => availability.refreshForUse(p)));
+  };
+
+  // One role for one call (spec §6.3, §6.4): the usable targets in order, a
+  // prepared instance of the first (for callers making one direct call) and
+  // a routed provider that fails over across them all (§6.7).
+  const resolveRole = async (role = 'main', { needs = {}, explicit = null, chatId = null, caseId = null, profileId = null, turnModels = null } = {}) => {
+    const models = turnModels || snapshotModels({ chatId, caseId, profileId });
+    await ensureTargetsTested(explicit ? [explicit] : models.candidatesFor(role));
+    const resolved = models.mustResolve(role, { needs, explicit });
+    const first = resolved.targets[0];
+    if (!first) throw new Error(`${role} has no model of its own; its own settings apply.`);
+    const instance = createProviderInstance(first.provider, getDecryptedProviderToken(first.provider));
+    await ensureOAuthToken({ providerType: first.provider, provider: instance });
+    return {
+      role,
+      turnModels: models,
+      targets: resolved.targets,
+      skipped: resolved.skipped,
+      borrowedFrom: resolved.borrowedFrom,
+      providerType: first.provider,
+      model: first.model,
+      effort: first.effort || null,
+      provider: instance,
+      routed: inferenceRouter.routedProvider({ targets: resolved.targets }),
+      timeoutMs: roleTimeoutMs(getSettings(), role, profiles.customRoles())
+    };
   };
 
   const createAgentRuntime = async (
@@ -3170,6 +3303,11 @@ function createCore(deps = {}) {
     // Models (spec 2026-09-27 §4, §5)
     getCatalog: () => catalog,
     getAvailability: () => availability,
+    getProfiles: () => profiles,
+    getModelMigration: () => modelMigration,
+    explainTarget,
+    snapshotModels,
+    resolveRole,
     getProviderOptions: providerOptionsFor,
     testProviderConnection,
     reportProviderError,
@@ -3268,7 +3406,7 @@ function createCore(deps = {}) {
     saveProviderToken,
     // The host starts these after start() (see main.js and
     // src/service/run.js): unit tests build cores all the time.
-    models: { catalog, availability, startBackgroundChecks: startModelsBackgroundChecks },
+    models: { catalog, availability, profiles, startBackgroundChecks: startModelsBackgroundChecks },
     getMeshContext: () => meshContext,
     // Service mode decides whether an enabled listener actually came up
     // through these (assertEnabledListenersBound in src/service/run.js). They

@@ -163,6 +163,21 @@ class Availability extends EventEmitter {
     return this.status(p) || this.test(p);
   }
 
+  // Before a model call (spec §5.2): a provider never tested is tested now,
+  // and a failed test that was not an auth failure and is older than
+  // staleFailureMs is retested once, so a transient blip does not stick
+  // until the next scheduled retest. An auth failure is only cleared by a
+  // fixed key and its own test.
+  async refreshForUse(provider, { staleFailureMs = 60 * 1000 } = {}) {
+    const p = normalizeProvider(provider);
+    const status = await this.ensureTested(p);
+    if (status && status.ok === false && !status.authFailed && status.checkedAt
+      && this.now().getTime() - Date.parse(status.checkedAt) > staleFailureMs) {
+      return this.test(p);
+    }
+    return status;
+  }
+
   _retestHours() {
     const hours = Number(this._settings().models?.availability?.retestHours);
     return Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_RETEST_HOURS;

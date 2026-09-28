@@ -67,7 +67,7 @@ function openCore(dataDir, onPathWritten, dryRun, masterKey = null) {
     const store = new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: CHAT_DATA_DEFAULTS });
     const vaultStore = new JsonFileStore({ dir: dataDir, name: 'config' });
     const cipher = createAesGcmCipher(crypto.randomBytes(32));
-    return { core: createCore({ paths: { dataDir }, store, vaultStore, cipher, prompter: createHeadlessPrompter(), adminExecutors: noAdminExecutors() }), cipher };
+    return { core: createCore({ paths: { dataDir }, store, vaultStore, cipher, prompter: createHeadlessPrompter(), adminExecutors: noAdminExecutors(), skipModelMigration: true }), cipher };
   }
   const { buildServicePorts } = require('../ports');
   if (!masterKey) throw Object.assign(new Error('a real import needs the master key from the admin process'), { code: 'BAD_REQUEST' });

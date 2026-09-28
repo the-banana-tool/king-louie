@@ -15,6 +15,7 @@ const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { getActiveCatalog, setActiveCatalog, CATALOG_DEFAULTS } = require('../src/models');
 const { setLogLevel } = require('../src/logging');
+const { profileSettings } = require('./helpers/profile-settings');
 
 // One case here deliberately fails a connection test (a bad key); silence
 // the resulting warning so TAP output stays clean.
@@ -203,7 +204,8 @@ describe('models in the core', () => {
   // createProvider), so the owner loops.
   it('a chat send to Anthropic stays in OAuth mode once the token is cached', async () => {
     const { core, store } = makeCore();
-    core.context.setSettings({ ...core.getSettings(), activeProvider: 'anthropic' });
+    core.context.setSettings(profileSettings(core.getSettings(), { main: [{ provider: 'anthropic', model: 'claude-sonnet-5', effort: null }] }));
+    store.set('apiStatus', { anthropic: { ok: true, checkedAt: new Date().toISOString(), models: ['claude-sonnet-5'] } });
     store.set('anthropicOAuth', {
       accessToken: core.context.encryptToken('oauth-access-token'),
       refreshToken: core.context.encryptToken('refresh-xyz'),
@@ -212,7 +214,7 @@ describe('models in the core', () => {
     });
     // No apiTokens.anthropic saved.
     const seen = stubProviderFetch({ 'https://api.anthropic.com/v1/models': () => json({ data: [{ id: 'claude-sonnet-5' }] }) });
-    const first = await core.context.resolveInference({});
+    const first = await core.context.resolveRole('main');
     assert.strictEqual(first.providerType, 'anthropic');
     assert.strictEqual(first.provider.authMode, 'oauth');
     // A single resolution does not prove the fix: on a fresh core the OAuth
@@ -220,7 +222,7 @@ describe('models in the core', () => {
     // returns the '__anthropic_oauth__' placeholder regardless of which
     // code is running. The bug only showed on a SECOND resolution, once the
     // token was cached and the placeholder check went false.
-    const second = await core.context.resolveInference({});
+    const second = await core.context.resolveRole('main');
     assert.strictEqual(second.providerType, 'anthropic');
     assert.strictEqual(second.provider.authMode, 'oauth', 'must stay in OAuth mode once the token is cached');
     await second.provider.listModels();
