@@ -6,6 +6,7 @@
 const crypto = require('crypto');
 const { createLogger } = require('../logging');
 const R = require('./roles');
+const { createTurnModels } = require('./resolver');
 
 const log = createLogger('models/profiles');
 
@@ -217,6 +218,25 @@ class Profiles {
     this._write(this.list(), id);
     return id;
   }
+
+  // The frozen view one turn uses (spec §6.6). An unknown id falls back to
+  // the default, logged: a chat or case can outlive the profile it named.
+  snapshot({ profileId = null, mainOverride = null, explain } = {}) {
+    let profile = profileId ? this.get(profileId) : null;
+    if (profileId && !profile) log.warn(`Profile ${profileId} no longer exists; using the default profile.`);
+    if (!profile) profile = this.getDefault();
+    return createTurnModels({ profile, mainOverride, customRoles: this.customRoles(), explain });
+  }
 }
 
-module.exports = { Profiles, ProfileError, PROFILE_KINDS, normalizeProfile, normalizeCustomRole };
+// A snapshot straight from a settings object, for a host with no Profiles
+// instance (a case runtime built without a core). Read-only.
+function snapshotFromSettings(settings, { profileId = null, mainOverride = null, explain } = {}) {
+  const view = new Profiles({
+    getSettings: () => settings || {},
+    setSettings: () => { throw new Error('snapshotFromSettings is read-only.'); }
+  });
+  return view.snapshot({ profileId, mainOverride, explain });
+}
+
+module.exports = { Profiles, ProfileError, PROFILE_KINDS, normalizeProfile, normalizeCustomRole, snapshotFromSettings };

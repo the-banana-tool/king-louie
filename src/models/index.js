@@ -8,7 +8,8 @@ const { Availability } = require('./availability');
 const { discoverOllama } = require('./ollama');
 const { capabilitiesOf } = require('./capabilities');
 const roles = require('./roles');
-const { Profiles, ProfileError, normalizeProfile } = require('./profiles');
+const { Profiles, ProfileError, normalizeProfile, snapshotFromSettings } = require('./profiles');
+const { createTurnModels, UnknownRoleError, NoUsableModelError, roleTimeoutMs } = require('./resolver');
 
 let active = null;
 let bundled = null;
@@ -38,6 +39,11 @@ module.exports = {
   Profiles,
   ProfileError,
   normalizeProfile,
+  snapshotFromSettings,
+  createTurnModels,
+  UnknownRoleError,
+  NoUsableModelError,
+  roleTimeoutMs,
   ...roles,
   ...providerIds
 };
