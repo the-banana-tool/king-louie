@@ -107,6 +107,16 @@ describe('TurnModels.resolve', () => {
     assert.deepStrictEqual(none.resolve('vision').targets, []);
   });
 
+  it('lists every core model it tried, with reasons, when none accepts images', () => {
+    const { explain } = explainer({}, { images: [] });
+    const m = createTurnModels({ profile: profile({ main: [t('openai', 'gpt-5.5')], worker: [t('openai', 'gpt-5.4')], utility: [t('openai', 'gpt-5.5-mini')] }), explain });
+    const r = m.resolve('vision');
+    assert.deepStrictEqual(r.targets, []);
+    assert.strictEqual(r.skipped.length, 3);
+    assert.throws(() => m.mustResolve('vision'), (err) => err.code === 'NO_USABLE_MODEL'
+      && /Skipped: openai\/gpt-5\.5-mini \(gpt-5\.5-mini takes no image input\.\); openai\/gpt-5\.4 \(gpt-5\.4 takes no image input\.\); openai\/gpt-5\.5 \(gpt-5\.5 takes no image input\.\)/.test(err.message));
+  });
+
   it('leaves an empty imageGeneration to its own settings', () => {
     const { explain } = explainer();
     const m = createTurnModels({ profile: profile({}), explain });
@@ -140,6 +150,45 @@ describe('TurnModels.resolve', () => {
     const refused = m.resolve('main', { explicit: t('groq', 'llama-3.3-70b') });
     assert.deepStrictEqual(refused.targets, []);
     assert.throws(() => m.resolve('main', { explicit: { provider: 'openai' } }), /needs both a provider and a model/);
+  });
+
+  it('validates an explicit target\'s role before checking it, unknown roles included', () => {
+    const { explain } = explainer();
+    const m = createTurnModels({ profile: profile({ main: [t('openai', 'gpt-5.5')] }), explain });
+    assert.throws(() => m.resolve('legal-drafting', { explicit: t('openai', 'gpt-5.5') }), (err) => err instanceof UnknownRoleError && err.role === 'legal-drafting');
+  });
+
+  it('applies the role\'s own needs to an explicit target too: vision requires image input', () => {
+    const { explain } = explainer({}, { images: ['openai/gpt-5.5'] });
+    const m = createTurnModels({ profile: profile({}), explain });
+    const ok = m.resolve('vision', { explicit: t('openai', 'gpt-5.5') });
+    assert.deepStrictEqual(ok.targets, [t('openai', 'gpt-5.5')]);
+    const refused = m.resolve('vision', { explicit: t('openai', 'gpt-5.4') });
+    assert.deepStrictEqual(refused.targets, []);
+    assert.match(refused.skipped[0].reasons[0], /takes no image input/);
+  });
+
+  it('applies a custom role\'s declared needs to an explicit target too', () => {
+    const { explain } = explainer({}, { tools: ['openai/gpt-5.5'] });
+    const customRoles = [{ id: 'legal-drafting', description: '', needs: { toolCall: true }, fallback: 'worker' }];
+    const m = createTurnModels({ profile: profile({}), customRoles, explain });
+    const ok = m.resolve('legal-drafting', { explicit: t('openai', 'gpt-5.5') });
+    assert.deepStrictEqual(ok.targets, [t('openai', 'gpt-5.5')]);
+    const refused = m.resolve('legal-drafting', { explicit: t('openai', 'gpt-3.5-turbo') });
+    assert.deepStrictEqual(refused.targets, []);
+  });
+
+  it('falls back to main\'s own list, never the main override, and keeps the true innermost source', () => {
+    const { explain } = explainer();
+    const toMain = [{ id: 'legal-drafting', description: '', needs: {}, fallback: 'main' }];
+    const overridden = createTurnModels({ profile: profile({ main: [t('openai', 'gpt-5.5')] }), mainOverride: t('anthropic', 'claude-sonnet-4-5'), customRoles: toMain, explain });
+    const r = overridden.resolve('legal-drafting');
+    assert.deepStrictEqual([r.targets, r.borrowedFrom], [[t('openai', 'gpt-5.5')], 'main']);
+
+    const toWorker = [{ id: 'legal-drafting', description: '', needs: {}, fallback: 'worker' }];
+    const onlyMain = createTurnModels({ profile: profile({ main: [t('openai', 'gpt-5.5')] }), customRoles: toWorker, explain });
+    const borrowed = onlyMain.resolve('legal-drafting');
+    assert.deepStrictEqual([borrowed.targets, borrowed.borrowedFrom], [[t('openai', 'gpt-5.5')], 'main']);
   });
 
   it('is frozen: later edits to the profile or override change nothing', () => {
@@ -187,11 +236,16 @@ describe('snapshots from profiles', () => {
   it('an unknown profile id falls back to the default', () => {
     const { explain } = explainer();
     const lines = [];
+    // addSink still fires at the default log level; only the console print
+    // (expected here, since the profile really is missing) is silenced.
+    const originalWarn = console.warn;
+    console.warn = () => {};
     const remove = addSink((r) => { if (r.level === 'warn') lines.push(r.line); });
     try {
       assert.strictEqual(store(models).snapshot({ profileId: 'p-gone', explain }).profileId, 'p-b');
     } finally {
       remove();
+      console.warn = originalWarn;
     }
     assert.ok(lines.some((l) => l.includes('p-gone')), lines.join('\n'));
   });

@@ -83,6 +83,17 @@ function createTurnModels({ profile = null, mainOverride = null, customRoles = [
 
   const borrowChain = (role) => (role === 'utility' ? ['worker', 'main'] : role === 'worker' ? ['main'] : []);
 
+  const isKnownRole = (role) => R.isBuiltinRole(role) || custom.has(role);
+
+  // A role's own needs (vision: image input; a custom role: its declared
+  // needs) merged with the call's — applied whether resolve() is checking
+  // the profile's list or a single explicit target (§6.3).
+  function needsFor(role, needs) {
+    if (role === 'vision') return mergeNeeds(R.ROLE_NEEDS.vision, needs);
+    const c = custom.get(role);
+    return c ? mergeNeeds(c.needs, needs) : needs;
+  }
+
   function candidatesFor(role) {
     if (role === 'main') return override ? [{ ...override }] : copy(own('main'));
     if (role === 'worker' || role === 'utility') {
@@ -96,51 +107,64 @@ function createTurnModels({ profile = null, mainOverride = null, customRoles = [
     }
     if (role === 'imageGeneration') return copy(own('imageGeneration'));
     const c = custom.get(role);
-    if (c) return own(role).length ? copy(own(role)) : candidatesFor(c.fallback);
+    if (c) {
+      if (own(role).length) return copy(own(role));
+      // A fallback of main previews main's own list, never the override —
+      // matching how worker/utility preview a borrow from main above.
+      return c.fallback === 'main' ? copy(own('main')) : candidatesFor(c.fallback);
+    }
     throw new UnknownRoleError(role);
   }
 
   function resolve(role, { needs = {}, explicit = null } = {}) {
+    if (!isKnownRole(role)) throw new UnknownRoleError(role);
+    const need = needsFor(role, needs);
     if (explicit) {
       const target = R.normalizeTarget(explicit);
       if (!target) throw new Error(`A named model needs both a provider and a model id (got ${JSON.stringify(explicit)}).`);
-      return result(role, check([target], needs), { explicit: true });
+      return result(role, check([target], need), { explicit: true });
     }
     if (role === 'main') {
-      if (override) return result('main', check([override], needs), { override: true });
-      return result('main', check(own('main'), needs));
+      if (override) return result('main', check([override], need), { override: true });
+      return result('main', check(own('main'), need));
     }
     if (role === 'worker' || role === 'utility') {
-      if (own(role).length) return result(role, check(own(role), needs));
+      if (own(role).length) return result(role, check(own(role), need));
       // An empty core role borrows from the next stronger one (§6.4); an
       // empty main never borrows from a weaker role.
       for (const from of borrowChain(role)) {
-        if (own(from).length) return result(role, check(own(from), needs), { borrowedFrom: from });
+        if (own(from).length) return result(role, check(own(from), need), { borrowedFrom: from });
       }
       return result(role, { targets: [], skipped: [] });
     }
     if (role === 'vision') {
-      const need = mergeNeeds(R.ROLE_NEEDS.vision, needs);
       if (own('vision').length) return result('vision', check(own('vision'), need));
-      // The first image-capable model in utility, then worker, then main.
+      // The first image-capable model in utility, then worker, then main;
+      // every skipped candidate along the way feeds the "no usable model"
+      // error when none qualifies.
+      const skipped = [];
       for (const from of ['utility', 'worker', 'main']) {
         const checked = check(own(from), need);
         if (checked.targets.length) return result('vision', { targets: [checked.targets[0]], skipped: [] }, { borrowedFrom: from });
+        skipped.push(...checked.skipped);
       }
-      return result('vision', { targets: [], skipped: [] });
+      return result('vision', { targets: [], skipped });
     }
     if (role === 'imageGeneration') {
-      if (own('imageGeneration').length) return result(role, check(own('imageGeneration'), needs));
+      if (own('imageGeneration').length) return result(role, check(own('imageGeneration'), need));
       // Empty: today's imageGeneration settings keep applying (§6.4).
       return result(role, { targets: [], skipped: [] }, { useSettings: true });
     }
+    // A custom role: its own list, else its fallback core role's. A
+    // fallback of main uses main's own list, never the main override
+    // (matching the borrow chain above); the innermost borrowedFrom is
+    // kept when the fallback itself had to borrow further.
     const c = custom.get(role);
-    if (c) {
-      const need = mergeNeeds(c.needs, needs);
-      if (own(role).length) return result(role, check(own(role), need));
-      return { ...resolve(c.fallback, { needs: need }), role, borrowedFrom: c.fallback };
-    }
-    throw new UnknownRoleError(role);
+    if (own(role).length) return result(role, check(own(role), need));
+    const inner = c.fallback === 'main'
+      ? result('main', check(own('main'), need))
+      : resolve(c.fallback, { needs: need });
+    return { ...inner, role, borrowedFrom: inner.borrowedFrom || c.fallback };
   }
 
   function mustResolve(role, options = {}) {

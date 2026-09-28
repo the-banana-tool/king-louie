@@ -181,12 +181,18 @@ describe('Profiles', () => {
 
   it('skips a malformed stored profile with a warning', () => {
     const lines = [];
+    // addSink still fires at the default log level; only the console print
+    // (expected here, since the stored profile really is malformed) is
+    // silenced.
+    const originalWarn = console.warn;
+    console.warn = () => {};
     const remove = addSink((r) => { if (r.level === 'warn') lines.push(r.line); });
     try {
       const { profiles } = makeProfiles({ models: { profiles: [{ id: 'p-bad', name: '' }, { id: 'p-ok', name: 'OK', roles: {} }] } });
       assert.deepStrictEqual(profiles.list().map((p) => p.id), ['p-ok']);
     } finally {
       remove();
+      console.warn = originalWarn;
     }
     assert.ok(lines.some((l) => l.includes('p-bad')), lines.join('\n'));
   });
