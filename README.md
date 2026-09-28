@@ -41,8 +41,7 @@ On first launch, the onboarding wizard walks you through selecting a provider an
 
 ### LLM & Providers
 - **Multi-Provider LLM Support** — OpenAI, Anthropic, Google Gemini, Groq, Mistral, Ollama (local), OpenRouter, x.AI, DeepSeek, Qwen, Together, Fireworks, and Cohere
-- **Smart LLM Routing** — Rule-based dynamic model selection routes messages to different providers based on keywords, regex patterns, or slash-command prefixes
-- **LLM-Powered Model Router** — AI-driven model selection that automatically picks the best provider/model per task based on message content, cost, speed, and quality preferences
+- **Profiles and Roles** — Named sets of models per role (main, worker, utility, and more); each chat or case picks a profile, and a failing model fails over to the next in its role
 - **Prompt Caching** — Anthropic `cache_control` blocks on system prompts reduce input token costs by 50–90% on multi-turn conversations, with cache-aware cost tracking
 - **Extended Thinking** — Claude 3.7+ models can use extended thinking with configurable budget tokens for deeper reasoning on complex tasks
 
@@ -426,68 +425,42 @@ never runs). Run it as the account that runs the runbooks.
 
 Configure providers and API keys in **Settings**.
 
-## Smart LLM Routing
+## Profiles and roles
 
-King Louie can automatically route messages to different LLM providers based on configurable rules. Instead of manually switching providers, define rules once and let the router pick the best model for each task.
+King Louie uses only the models you place in a role. A **profile** is a named
+set of those assignments; manage profiles in **Settings > Models**.
 
-### How It Works
+- **Roles.** `main` answers chats and runs the agent loop, `worker` handles
+  sub-agent work such as code exploration, and `utility` handles quick jobs
+  such as case orientation and classification. `vision` and
+  `imageGeneration` are optional specialist roles. An empty `worker` borrows from `main`, and an empty `utility` from
+  `worker`, then `main`.
+- **Ordered lists.** Each role holds a list of models in the order to try
+  them. A model is used only when its provider's connection test passes and
+  it can do what the call needs (tool calls in agent mode, image input when
+  you attach images).
+- **Default profile.** New chats use the default profile. The chat header's
+  profile picker gives one chat or case a different profile, and its main
+  switcher sets a different main model for that chat or case alone.
+- **Frozen per turn.** A turn keeps the models it started with, sub-agents
+  included; a switch or a profile edit applies from the next turn.
+- **Failover.** A failing model hands over to the next one in the role's
+  list. The turn's first model call may move to any provider; later calls
+  stay on the same provider, since the conversation is then in that
+  provider's format.
+- **Retry with…** On the last reply, pick another model to switch main and
+  send the last message again.
+- **Cases** map their roles onto these: orient and classify use `utility`,
+  draft uses `worker`, judge and verify use `main`.
+- **Headless runs** (the service, channels, cron and the gateway) use the
+  default profile.
 
-1. Go to **Settings > Smart Routing**
-2. Toggle **Enable smart routing** on
-3. Add rules — each rule has a **condition** (what to match) and a **target** (which provider/model to use)
-4. Rules are evaluated in priority order; the first match wins
-5. If no rule matches, the standard inference tier is used as a fallback
-
-### Condition Types
-
-| Type | Description | Example |
-|------|-------------|---------|
-| **Keyword** | Case-insensitive substring match (comma-separated, OR logic) | `documentation, write docs` |
-| **Regex** | Regular expression test against the message | `\b(refactor\|redesign)\b` |
-| **Prefix** | Slash-command at the start of the message (prefix is stripped before sending to the LLM) | `/code` |
-
-### Example Rules
-
-| Rule Name | Condition | Target |
-|-----------|-----------|--------|
-| Design with Claude | Keywords: `design, architect, plan feature` | Anthropic / claude-sonnet-4 |
-| Docs with GPT | Keywords: `documentation, write docs, readme` | OpenAI / gpt-4o-mini |
-| Code prefix | Prefix: `/code` | OpenAI / gpt-4o |
-| Agent-only coding | Keywords: `implement, build` (agent mode only) | Anthropic / claude-sonnet-4 |
-
-With these rules, typing "design a new auth system" automatically routes to Claude, while "write docs for the API" goes to GPT-4o-mini. Typing `/code implement a parser` routes to GPT-4o with the `/code` prefix stripped from the prompt.
-
-### Rule Options
-
-- **Priority** — Reorder rules with up/down arrows; lower position = higher priority
-- **Enabled** — Toggle individual rules on/off without deleting them
-- **Agent mode only** — Rule only applies when agent mode is active
-
-## LLM-Powered Model Router
-
-Beyond rule-based routing, King Louie can use AI to automatically select the best model for each task.
-
-### How It Works
-
-1. Go to **Settings > Workflows**
-2. Enable **LLM-Powered Routing**
-3. Configure your preferences:
-   - **Cost Sensitivity** — Low (prefer quality), Medium, or High (prefer cheap)
-   - **Speed Priority** — Low, Medium, or High (prefer fast)
-   - **Quality Priority** — Low, Medium, or High
-4. A fast, cheap classifier model analyzes each message and picks the best provider/model from your configured providers
-
-The router maintains a cache of recent classifications to avoid redundant API calls. It falls back to rule-based routing or tier defaults if classification fails.
-
-### When to Use Each
-
-| Approach | Best For |
-|----------|----------|
-| **Tier-based** | Simple setups — one model for everything |
-| **Rule-based** (Smart Routing) | Predictable patterns — always route `/code` to GPT-4o |
-| **LLM-powered** | Dynamic workloads — let AI decide based on task content |
-
-All three can coexist: LLM routing is tried first, then rule-based, then tier defaults.
+Earlier versions chose models by fast, standard and smart tiers, with
+optional keyword, regex and prefix routing rules and an LLM-powered router.
+The tiers move once, at the first start of this version, into a profile
+named "Migrated settings", and its card in the Models tab lists what the
+move changed. The routing rules and the LLM router are gone:
+messages go to `main` as written.
 
 ## Workflow Engine
 
