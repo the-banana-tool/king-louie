@@ -39,7 +39,9 @@ function summarizeTurnLlm({ calls = [], subagents = [] } = {}) {
     .filter((r) => r && Array.isArray(r.calls) && r.calls.length)
     .map((r) => {
       const runCalls = r.calls.filter(Boolean);
-      return { agentId: r.agentId || null, role: r.role || null, calls: runCalls, totals: sumLlmCalls(runCalls) };
+      // A run that failed mid-call (fix round 1) still reports what it
+      // billed before failing; the marker survives the roll-up.
+      return { agentId: r.agentId || null, role: r.role || null, calls: runCalls, totals: sumLlmCalls(runCalls), ...(r.failed ? { failed: true } : {}) };
     });
   const all = [...own, ...runs.flatMap((r) => r.calls)];
   const out = { calls: own, totals: sumLlmCalls(all) };

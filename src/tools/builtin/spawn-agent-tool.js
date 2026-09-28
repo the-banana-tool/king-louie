@@ -32,13 +32,17 @@ function capSummary(text, maxTokens) {
 
 // The child's calls roll up into the parent reply (models spec §10). A
 // grandchild reports to the same place, through the same requester; a run
-// that made no calls reports nothing. Reporting never fails the spawn.
-function reportSubagentLlm(options, { agentId, role, result }) {
+// that made no calls reports nothing. Reporting never fails the spawn. A
+// child that failed mid-run (NO_RETRY throws on any provider error, taking
+// its calls-so-far with it as error.llm — see the agent-loop throw path)
+// still reports what it billed before failing, marked failed: true, so a
+// parent's reply never drops calls UsageTracker already recorded.
+function reportSubagentLlm(options, { agentId, role, result, failed = false }) {
   const sink = options?.approvalRequester?.onSubagentLlm;
   const calls = Array.isArray(result?.llm?.calls) ? result.llm.calls.filter(Boolean) : [];
   if (typeof sink !== 'function' || !calls.length) return;
   try {
-    sink({ agentId, role, calls, totals: result.llm.totals || null });
+    sink({ agentId, role, calls, totals: result.llm.totals || null, ...(failed ? { failed: true } : {}) });
   } catch {
     // a broken sink only loses the roll-up; the usage is already recorded
   }
@@ -194,6 +198,12 @@ in its own conversation context. Results are returned inline to the calling agen
         llm: result.llm?.totals || null
       };
     } catch (error) {
+      // fix round 1: NO_RETRY (create-core.js's agentExecutorAdapter.execute)
+      // makes the child throw on its first provider error, on any iteration;
+      // the agent loop attaches what it already billed as error.llm, so a
+      // child that made three calls and failed on its fourth still reports
+      // those three instead of silently dropping them from the reply.
+      reportSubagentLlm(options, { agentId, role: role || agent.role || null, result: { llm: error.llm }, failed: true });
       return {
         success: false,
         agentId,

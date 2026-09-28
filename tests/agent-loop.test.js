@@ -1151,4 +1151,37 @@ describe('AgentLoop', () => {
     await loop.run([{ role: 'user', content: 'hi' }], []);
     assert.deepStrictEqual([recorded[0].role, recorded[0].pricingUsage.input, recorded[0].costUsd], ['worker', 10, 0.001]);
   });
+
+  it('a run that fails after billing calls attaches them to the error, never dropping them (fix round 1)', async () => {
+    const { NO_RETRY } = require('../src/providers/failover-policy');
+    let n = 0;
+    const provider = {
+      sendMessageWithTools: async () => {
+        n += 1;
+        if (n <= 2) {
+          return {
+            type: 'tool_use',
+            toolName: 'Read',
+            toolUseId: `t${n}`,
+            parameters: {},
+            llmMetrics: { provider: 'openai', model: 'm', inputTokens: 1, outputTokens: 1, totalTokens: 2, costUsd: 0.001 }
+          };
+        }
+        throw Object.assign(new Error('upstream exploded'), { status: 500 });
+      }
+    };
+    // NO_RETRY: the child (SpawnAgent) runs this way in create-core.js, so a
+    // provider error on any iteration throws at once, on the first attempt.
+    const loop = new AgentLoop(provider, okExecutor(), { failoverPolicy: NO_RETRY, maxIterations: 5 });
+    await assert.rejects(
+      loop.run([{ role: 'user', content: 'hi' }], [{ name: 'Read' }]),
+      (err) => {
+        assert.strictEqual(err.llm.calls.length, 2);
+        assert.strictEqual(err.llm.totals.costUsd, 0.002);
+        assert.match(err.message, /upstream exploded/);
+        return true;
+      }
+    );
+    assert.strictEqual(n, 3, 'two successes, then the failing third call');
+  });
 });

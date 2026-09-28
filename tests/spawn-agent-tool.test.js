@@ -283,5 +283,32 @@ describe('SpawnAgentTool', () => {
       }));
       assert.deepStrictEqual(reports, [{ agentId: 'main', role: 'worker', calls, totals: { costUsd: 0.002 } }]);
     });
+
+    it('reports a failed child\'s calls-so-far instead of dropping them (fix round 1)', async () => {
+      const reports = [];
+      const requester = Object.assign(async () => true, { onSubagentLlm: (run) => reports.push(run) });
+      const calls = [{ model: 'worker-model', role: 'worker', costUsd: 0.001 }, { model: 'worker-model', role: 'worker', costUsd: 0.002 }];
+      const failed = Object.assign(new Error('Provider call failed (iteration 3, model "worker-model"): upstream exploded'), {
+        llm: { calls, totals: { costUsd: 0.003 } }
+      });
+      const result = await SpawnAgentTool.execute({ task: 'look' }, makeOptions({
+        approvalRequester: requester,
+        adapter: { execute: async () => { throw failed; } }
+      }));
+      assert.strictEqual(result.success, false);
+      assert.deepStrictEqual(reports, [{ agentId: 'main', role: 'worker', calls, totals: { costUsd: 0.003 }, failed: true }]);
+    });
+
+    it('reports nothing for a failed child that never billed a call', async () => {
+      const reports = [];
+      const requester = Object.assign(async () => true, { onSubagentLlm: (run) => reports.push(run) });
+      const failed = new Error('connection refused');
+      const result = await SpawnAgentTool.execute({ task: 'look' }, makeOptions({
+        approvalRequester: requester,
+        adapter: { execute: async () => { throw failed; } }
+      }));
+      assert.strictEqual(result.success, false);
+      assert.deepStrictEqual(reports, []);
+    });
   });
 });

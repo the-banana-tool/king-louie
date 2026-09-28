@@ -27,7 +27,7 @@ describe('cost tags on a chat turn', () => {
 describe('sub-agent calls roll up into the reply (spec §10)', () => {
   // The parent calls one tool, then answers. The "tool" reports a sub-agent
   // run the way SpawnAgent does, through onSubagentLlm.
-  function rollupHarness({ stopAfterTool = false } = {}) {
+  function rollupHarness({ stopAfterTool = false, failChild = false } = {}) {
     let parentCalls = 0;
     let h = null;
     const provider = {
@@ -49,6 +49,19 @@ describe('sub-agent calls roll up into the reply (spec §10)', () => {
           const executor = new EventEmitter();
           executor.allowedDirectories = [];
           executor.execute = async () => {
+            if (failChild) {
+              // fix round 1: SpawnAgent's catch reports what the child
+              // billed before it failed, marked failed, then returns a
+              // plain failure — it never throws to the parent's loop.
+              opts.onSubagentLlm({
+                agentId: 'code-explorer',
+                role: 'worker',
+                calls: [{ ...metricsFor('worker-model', 0.003), role: 'worker' }],
+                totals: null,
+                failed: true
+              });
+              return { success: false, error: 'Sub-agent execution failed: upstream exploded' };
+            }
             opts.onSubagentLlm({
               agentId: 'code-explorer',
               role: 'worker',
@@ -85,5 +98,14 @@ describe('sub-agent calls roll up into the reply (spec §10)', () => {
     assert.strictEqual(reply.llm.subagents[0].calls.length, 2);
     assert.strictEqual(reply.llm.byRole.worker.costUsd, 0.003);
     assert.strictEqual(reply.llm.totals.costUsd, 0.013);
+  });
+
+  it('a child that fails after one call still has that call in the reply\'s totals (fix round 1)', async () => {
+    const h = rollupHarness({ failChild: true });
+    await h.send({ agentMode: true });
+    const reply = h.chat.messages[h.chat.messages.length - 1];
+    assert.deepStrictEqual(reply.llm.subagents.map((s) => [s.agentId, s.calls.length, s.failed]), [['code-explorer', 1, true]]);
+    assert.strictEqual(reply.llm.totals.costUsd, 0.033);
+    assert.strictEqual(reply.llm.byRole.worker.costUsd, 0.003);
   });
 });

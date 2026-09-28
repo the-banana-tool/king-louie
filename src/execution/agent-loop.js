@@ -290,6 +290,10 @@ class AgentLoop {
             );
             wrapped.cause = err;
             wrapped.failoverReason = plan.reason;
+            // fix round 1: a child that billed calls before this one failed
+            // must not lose them — same shape _stoppedResult uses, so a
+            // caller (SpawnAgent) can report them the same way.
+            wrapped.llm = { calls: llmCalls, totals: sumLlmCalls(llmCalls) };
             throw wrapped;
           }
 
