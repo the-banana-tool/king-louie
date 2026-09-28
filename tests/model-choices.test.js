@@ -107,12 +107,28 @@ describe('switching', () => {
 
   it('in a case chat, writes case.yaml through the case runtime', async () => {
     const { choices, chat, statuses, caseCalls } = setup({ chats: [{ id: 'c1', caseId: 'case-1' }], cases: { 'case-1': {} } });
+    // A bad effort is refused for a case chat the same as a plain one, and
+    // writes nothing to case.yaml.
+    await assert.rejects(choices.setMainOverride('c1', t('openai', 'gpt-5.5', 'extreme')), /does not offer the effort "extreme"/);
+    assert.deepStrictEqual(caseCalls, []);
     await choices.setMainOverride('c1', t('openai', 'gpt-4o'));
     await choices.setChatProfile('c1', 'p-b');
     assert.deepStrictEqual(caseCalls, [['case-1', { mainOverride: t('openai', 'gpt-4o') }], ['case-1', { profile: 'p-b' }]]);
     assert.strictEqual('mainOverride' in chat('c1'), false, 'the chat itself is untouched');
     assert.deepStrictEqual(statuses('c1'), ['Main model switched from GPT-5.5 to GPT-4o', 'This case now uses the profile Cheap.']);
     assert.strictEqual(choices.chatView('c1').chosenProfileId, 'p-b');
+  });
+
+  it('names the first usable main model in the status text, not just the first configured one', async () => {
+    const { choices, statuses } = setup({
+      chats: [{ id: 'c1', mainOverride: t('openai', 'gpt-4o') }],
+      unusable: { 'openai/gpt-5.5': 'OpenAI connection test failed.' }
+    });
+    // The profile's main is [gpt-5.5, claude-sonnet-4-5]; gpt-5.5 (first
+    // configured) is unusable here, so the model actually in use once the
+    // override is cleared is claude-sonnet-4-5 — the first *usable* one.
+    await choices.setMainOverride('c1', null);
+    assert.deepStrictEqual(statuses('c1'), ['Main model reset to the profile\'s main (Claude Sonnet 4.5)']);
   });
 
   it('picks and clears a chat profile', async () => {
@@ -123,6 +139,29 @@ describe('switching', () => {
     assert.strictEqual('profileId' in chat('c1'), false);
     assert.deepStrictEqual(statuses('c1'), ['This chat now uses the profile Cheap.', 'This chat now uses the default profile (Work).']);
     await assert.rejects(choices.setChatProfile('c1', 'p-gone'), /No profile with id p-gone/);
+  });
+});
+
+describe('main override efforts', () => {
+  it('refuses a bad effort and saves nothing', async () => {
+    const { choices, chat } = setup({ chats: [{ id: 'c1' }] });
+    await assert.rejects(
+      choices.setMainOverride('c1', t('openai', 'gpt-5.5', 'extreme')),
+      /gpt-5\.5 in role "main" does not offer the effort "extreme"; it offers none, low, medium, high, xhigh\./
+    );
+    assert.strictEqual('mainOverride' in chat('c1'), false);
+  });
+
+  it('saves a good effort', async () => {
+    const { choices, chat } = setup({ chats: [{ id: 'c1' }] });
+    await choices.setMainOverride('c1', t('openai', 'gpt-5.5', 'high'));
+    assert.deepStrictEqual(chat('c1').mainOverride, t('openai', 'gpt-5.5', 'high'));
+  });
+
+  it('is fine with no effort', async () => {
+    const { choices, chat } = setup({ chats: [{ id: 'c1' }] });
+    await choices.setMainOverride('c1', t('openai', 'gpt-4o'));
+    assert.deepStrictEqual(chat('c1').mainOverride, t('openai', 'gpt-4o'));
   });
 });
 

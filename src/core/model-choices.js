@@ -7,6 +7,7 @@
 const { createLogger } = require('../logging');
 const { normalizeTarget, targetLabel, targetKey } = require('../models/roles');
 const { profileView } = require('../models/profile-view');
+const { checkEffort } = require('../models/profiles');
 
 const log = createLogger('model-choices');
 const PICKER_UNUSABLE_CAP = 400;
@@ -69,13 +70,21 @@ function createModelChoices({
   // A case chat and an agent-mode chat call tools; so must their main.
   const needsFor = (chat) => (chat.caseId || chat.agentMode ? { toolCall: true } : {});
 
+  // The main model actually in use: the first usable target, else the first
+  // configured one so there is still something to name (spec §6.5). Shared
+  // by chatView (the header) and setMainOverride (its status message), so
+  // the two never name different models for the same turn.
+  const mainInUse = (models, needs) => {
+    const resolved = models.resolve('main', { needs });
+    const first = resolved.targets[0] || null;
+    return { first, resolved, current: first || models.candidatesFor('main')[0] || null };
+  };
+
   function chatView(chatId) {
     const chat = findChat(chatId);
     const needs = needsFor(chat);
     const models = snapshotModels({ chatId });
-    const resolved = models.resolve('main', { needs });
-    const first = resolved.targets[0] || null;
-    const current = first || models.candidatesFor('main')[0] || null;
+    const { first, resolved, current } = mainInUse(models, needs);
     const profileMain = models.configuredFor('main');
     const mainKeys = new Set(profileMain.map(targetKey));
     const fromMain = profileMain
@@ -116,18 +125,19 @@ function createModelChoices({
   // §6.5); a running turn keeps what it launched with.
   async function setMainOverride(chatId, target) {
     const chat = findChat(chatId);
+    const needs = needsFor(chat);
     const next = target ? normalizeTarget(target) : null;
     if (target && !next) throw new Error('Pick a model: a provider and a model id.');
     if (next) {
-      const verdict = explainTarget(next.provider, next.model, { needs: needsFor(chat) });
+      const verdict = explainTarget(next.provider, next.model, { needs });
       if (!verdict.usable) throw new Error(`${targetLabel(next)} cannot be used: ${verdict.reasons.join(' ')}`);
+      checkEffort(catalog, next, { role: 'main' });
     }
-    const before = snapshotModels({ chatId });
-    const from = before.mainOverride || before.configuredFor('main')[0] || null;
+    const from = mainInUse(snapshotModels({ chatId }), needs).current;
     const runtime = caseRuntimeFor(chat);
     if (runtime) await runtime.setModelChoice(chat.caseId, { mainOverride: next });
     else updateChat(chatId, { mainOverride: next });
-    const to = next || snapshotModels({ chatId }).configuredFor('main')[0] || null;
+    const to = mainInUse(snapshotModels({ chatId }), needs).current;
     status(chatId, next ? `Main model switched from ${nameOf(from)} to ${nameOf(to)}` : `Main model reset to the profile's main (${nameOf(to)})`);
     return findChat(chatId);
   }

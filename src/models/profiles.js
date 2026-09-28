@@ -88,6 +88,21 @@ function normalizeCustomRole(raw) {
   return { id: raw.id, description: String(raw.description || '').trim(), needs, fallback: raw.fallback };
 }
 
+// An effort must be one the catalog lists for that model (spec §6.1). A
+// model the catalog does not know keeps whatever effort it was given, and a
+// missing catalog checks nothing. Shared by Profiles#_checkEfforts (a whole
+// profile's roles) and model-choices.js's setMainOverride (one target),
+// rather than each keeping its own copy of the rule.
+function checkEffort(catalog, target, { role = 'main' } = {}) {
+  if (!catalog || !target?.effort) return;
+  const entry = catalog.get(target.provider, target.model);
+  if (!entry) return;
+  const efforts = Array.isArray(entry.reasoning?.efforts) ? entry.reasoning.efforts : [];
+  if (!efforts.includes(target.effort)) {
+    throw new ProfileError('BAD_EFFORT', `${target.model} in role "${role}" does not offer the effort "${target.effort}"${efforts.length ? `; it offers ${efforts.join(', ')}` : '; it has no effort setting'}.`);
+  }
+}
+
 class Profiles {
   constructor({ getSettings, setSettings, catalog = null, createId = () => crypto.randomBytes(4).toString('hex') } = {}) {
     if (typeof getSettings !== 'function' || typeof setSettings !== 'function') throw new Error('Profiles needs getSettings() and setSettings().');
@@ -153,15 +168,7 @@ class Profiles {
   _checkEfforts(profile) {
     if (!this.catalog) return;
     for (const [role, list] of Object.entries(profile.roles)) {
-      for (const t of list) {
-        if (!t.effort) continue;
-        const entry = this.catalog.get(t.provider, t.model);
-        if (!entry) continue;
-        const efforts = Array.isArray(entry.reasoning?.efforts) ? entry.reasoning.efforts : [];
-        if (!efforts.includes(t.effort)) {
-          throw new ProfileError('BAD_EFFORT', `${t.model} in role "${role}" does not offer the effort "${t.effort}"${efforts.length ? `; it offers ${efforts.join(', ')}` : '; it has no effort setting'}.`);
-        }
-      }
+      for (const t of list) checkEffort(this.catalog, t, { role });
     }
   }
 
@@ -239,4 +246,4 @@ function snapshotFromSettings(settings, { profileId = null, mainOverride = null,
   return view.snapshot({ profileId, mainOverride, explain });
 }
 
-module.exports = { Profiles, ProfileError, PROFILE_KINDS, normalizeProfile, normalizeCustomRole, snapshotFromSettings };
+module.exports = { Profiles, ProfileError, PROFILE_KINDS, normalizeProfile, normalizeCustomRole, snapshotFromSettings, checkEffort };
