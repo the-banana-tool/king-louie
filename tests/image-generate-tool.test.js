@@ -1,13 +1,21 @@
 // tests/image-generate-tool.test.js
 // The image tool uses only models in the profile's imageGeneration role
 // (models spec 2026-09-27 §8); with the role empty, the image settings apply.
-const { describe, it } = require('node:test');
+const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const ImageGenerateTool = require('../src/tools/builtin/image-generate-tool');
 const { createTurnModels } = require('../src/models/resolver');
 const { setLogLevel } = require('../src/logging');
 
 setLogLevel('fatal');
+
+// The settings fallback builds real image providers that call fetch; a
+// regression that reaches it must fail here, never call a real API.
+const realFetch = global.fetch;
+before(() => {
+  global.fetch = async (url) => { throw new Error(`test tried to reach the network: ${url}`); };
+});
+after(() => { global.fetch = realFetch; });
 
 const t = (provider, model) => ({ provider, model, effort: null });
 const usable = () => ({ usable: true, reasons: [], notes: [] });
