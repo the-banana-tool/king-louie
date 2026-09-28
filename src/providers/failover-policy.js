@@ -178,9 +178,14 @@ class FailoverPolicy {
   }
 }
 
+// For a loop whose provider already fails over (a routed provider): the
+// loop itself never retries, so a failure is never retried twice over.
+const NO_RETRY = Object.freeze({ plan: () => ({ action: 'abort', reason: 'routed', waitMs: 0 }) });
+
 module.exports = {
   FailoverPolicy,
   DEFAULT_BUDGETS,
   DEFAULT_MAX_TOTAL_ATTEMPTS,
-  computeWaitMs
+  computeWaitMs,
+  NO_RETRY
 };

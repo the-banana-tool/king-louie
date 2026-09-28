@@ -27,6 +27,9 @@ class AgentExecutor {
       ? options.onUsageRecorded
       : null;
     this.prompter = options.prompter || null;
+    // A routed provider fails over itself; its loop gets NO_RETRY so a
+    // failure is never retried twice over (spec 2026-09-27 §6.7).
+    this.failoverPolicy = options.failoverPolicy || null;
     this.templateEngine = new TemplateEngine({
       templatesDirectory: path.join(process.cwd(), 'templates')
     });
@@ -98,6 +101,7 @@ class AgentExecutor {
       usageTracker: this.usageTracker,
       onUsageRecorded: this.onUsageRecorded,
       prompter: this.prompter || undefined,
+      ...(this.failoverPolicy ? { failoverPolicy: this.failoverPolicy } : {}),
       // Fleet stage 4 §3.8: cancel_job aborts a delegate turn, tearing down
       // in-flight tools; the session keeps its own evidence ledger.
       abortSignal: options.abortSignal || null,

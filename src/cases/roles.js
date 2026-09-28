@@ -15,9 +15,9 @@ const DEFAULT_ROLES = Object.freeze({
   verify: Object.freeze({ tier: 'smart' })
 });
 
-// Case loops fail over through routeWithFallback, never by retrying the
-// same target inside the agent loop.
-const NO_RETRY = Object.freeze({ plan: () => ({ action: 'abort', reason: 'routed', waitMs: 0 }) });
+// Case loops fail over through the router, never by retrying the same
+// target inside the agent loop.
+const { NO_RETRY } = require('../providers/failover-policy');
 
 const lower = (s) => String(s || '').trim().toLowerCase();
 
