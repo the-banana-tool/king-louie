@@ -1,49 +1,29 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs');
-const path = require('path');
 
 const ProviderFactory = require('../src/providers/provider-factory');
+const { KL_PROVIDERS } = require('../src/models/provider-ids');
 
 /**
- * The provider picker UI is built from `PROVIDER_LABELS` / `providerDefaults`
- * in src/core/create-core.js. Every provider offered there must be creatable by
- * ProviderFactory — otherwise "Set Active" + sending a message blows up with
- * `Unknown provider: "x"` deep in the inference path, and the model dropdown
- * silently shows nothing. This guards that the menu and the factory agree.
+ * The API keys tab is built from PROVIDER_LABELS in src/core/create-core.js,
+ * and the models subsystem (catalog, availability, profiles) from KL_PROVIDERS
+ * in src/models/provider-ids.js. Every provider offered must be creatable by
+ * ProviderFactory — otherwise sending a message blows up with
+ * `Unknown provider: "x"` deep in the inference path. This guards that the two
+ * lists and the factory agree.
  */
-function extractObjectKeys(source, varName) {
-  const start = source.indexOf(`const ${varName} = {`);
-  assert.ok(start !== -1, `Could not find "const ${varName} = {" in src/core/create-core.js`);
-  const open = source.indexOf('{', start);
-  let depth = 0;
-  let end = -1;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === '{') depth++;
-    else if (source[i] === '}') {
-      depth--;
-      if (depth === 0) { end = i; break; }
-    }
-  }
-  assert.ok(end !== -1, `Unbalanced braces for ${varName}`);
-  const body = source.slice(open + 1, end);
-  return [...body.matchAll(/^\s*([A-Za-z0-9_]+)\s*:/gm)].map((m) => m[1]);
-}
-
 describe('Provider config consistency (core ↔ ProviderFactory)', () => {
-  const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'create-core.js'), 'utf8');
   // providerLabels is the module-level PROVIDER_LABELS (also what the service
   // CLI validates `token set <provider>` against).
   const labelKeys = Object.keys(require('../src/core/create-core').PROVIDER_LABELS);
-  const defaultKeys = extractObjectKeys(mainSrc, 'providerDefaults');
   const registered = new Set(ProviderFactory.listRegistered());
 
   it('finds a realistic provider list (sanity)', () => {
     assert.ok(labelKeys.length >= 8, `expected >=8 providers, got ${labelKeys.length}`);
   });
 
-  it('providerLabels and providerDefaults expose the same providers', () => {
-    assert.deepStrictEqual([...labelKeys].sort(), [...defaultKeys].sort());
+  it('providerLabels and KL_PROVIDERS expose the same providers', () => {
+    assert.deepStrictEqual([...labelKeys].sort(), [...KL_PROVIDERS].sort());
   });
 
   it('every provider offered in the UI is registered in ProviderFactory', () => {
