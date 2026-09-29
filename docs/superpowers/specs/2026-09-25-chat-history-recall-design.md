@@ -1,6 +1,8 @@
 # King Louie Chat History and Recall — Design Spec
 
-- **Status:** Draft — design agreed with the owner 2026-09-25, awaiting spec review
+- **Status:** Agreed with the owner 2026-09-25; amended 2026-09-29 after
+  a design review (§4.3 compaction summaries, §4.4 store schema, §11.2 stage
+  order). H1 is partly implemented (§4.4 notes). Terms follow `CONTEXT.md`.
 - **Date:** 2026-09-25
 - **Relates to:** `2026-09-22-king-louie-cases-design.md` (cases own curated
   facts and decisions; this spec owns verbatim history) and
@@ -240,8 +242,8 @@ Rules, applied at append time and identical for native and imported messages:
 | `toolUse` | `tool_use` | One chunk: `<toolName>: <one-line summary>` where the summary is the command for shell tools, the path for file tools, the query for search tools, and the first 200 characters of the parameters otherwise. Write and Edit contents are chunked additionally as prose. |
 | `toolResult` | `tool_result` | The result rendered as text (string results as-is, objects as pretty JSON), chunked as prose. `history.embedder.maxChunksPerToolResult` caps how many chunks of one result are embedded (default 0, unlimited); all chunks are always in the full-text index. |
 | document attachment | `attachment` | Extracted text chunked as prose. |
-| imported compaction summary | `summary` | Chunked as prose. |
-| `status`, images | none | Not indexed. |
+| `status` with `meta.compaction: true` (an imported compaction summary) | `summary` | Chunked as prose. The only `status` message that is indexed. |
+| other `status`, images | none | Not indexed. |
 
 ### 4.4 Facade over the store, and lazy chat loading
 
@@ -294,6 +296,21 @@ legacy bridge-origin startup migration tags matching chats through `updateChat`
 instead of rewriting the full chat array. This is deliberately not the SQLite
 migration; it is the adapter seam that lets later H1 steps move storage without
 changing IPC or renderer contracts again.
+
+Implementation note, 2026-09-29 SQLite: 998ebbb made a `SqliteChatHistoryStore`
+the live store, at `<dataDir>/chat-history.sqlite`, with one table
+`chats(id, position, data)` holding each chat as a JSON blob rewritten whole on
+every append. That is not §4.1's schema. **Decision (2026-09-29): the blob
+table is replaced by §4.1's schema in the rest of H1**, and the file becomes
+`history.sqlite`: messages as rows with dense `seq`, attachments as rows,
+`schema_version`, and `appendMessage` returning `{ message, seq }` (the
+facade's `appendMessageToChat` still returns the chat). H2's chunks and FTS
+rows hang off message rows, so the blob table cannot carry them. d644729 fixed
+the blob store's one-time copy from `chat-data.json` (a `meta` marker
+`migrated_from_json`, and a `chat-data.backup-<timestamp>.json` first); before
+it, deleting every chat and restarting brought them all back. `getChats` and
+`setChats` still exist as wrappers and are removed in the rest of H1 (§4.4
+above), with a test that keeps them out of `src/`.
 
 `chat-data.json` keeps `activeChatId`, `apiTokens`, `apiStatus`, `settings`,
 `toolApprovals`, `usage` and everything else it holds today. Only `chats`
@@ -518,7 +535,7 @@ unless the owner linked it.
 
 | Kind | Detects | Mapping |
 |---|---|---|
-| `claude-code-jsonl` | a `.jsonl` whose first records have `type` in `user`/`assistant` and `message.content` | `text` blocks → `user`/`assistant`; `tool_use` → `toolUse` (`toolName`, `parameters`); `tool_result` → `toolResult`; string user content with `isCompactSummary` → `status` with chunk kind `summary`; other record types skipped. Subagent files are skipped in this spec. |
+| `claude-code-jsonl` | a `.jsonl` whose first records have `type` in `user`/`assistant` and `message.content` | `text` blocks → `user`/`assistant`; `tool_use` → `toolUse` (`toolName`, `parameters`); `tool_result` → `toolResult`; string user content with `isCompactSummary` → `status` with `meta.compaction: true`, chunked as kind `summary` (§4.3); other record types skipped. Subagent files are skipped in this spec. |
 | `markdown-transcript` | headings that alternate roles (`## User` / `## Assistant`, `### User`, `## Turn N`, `## Message N`, `## <Name>` / `## Assistant`) | Heuristic role detection; `preview` returns the detected turn count and the first five role assignments; the UI shows them and the owner confirms or picks a different heading pattern before `parse`. |
 | `king-louie-json` | the app's own chat export | One-to-one. |
 
@@ -557,8 +574,14 @@ off, the builder sends the tail only, tools stay registered, indexing continues.
 Stages, each with its own implementation plan and each shippable on its own:
 H1 store, migration, facades, lazy
 chat loading; H2 chunking, full-text index, BM25 recall, context builder, the
-two tools, provenance and the recall line; H3 embedders, fusion, rerank, the
-evaluation script; H4 scope, links, importers, the case nudge.
+two tools, provenance and the recall line; H3 embedders, fusion, rerank; H4
+scope, links, importers, the case nudge.
+
+Order (decided 2026-09-29): H1 → H2 → LongHaul's evidence-recall slice (the
+benchmark spec, stage B0) → H3 → H4. The slice measures BM25 recall against a
+verified question set on the 2.2 million-token session before H3 picks an
+embedder, weights and whether to rerank, so H3's defaults are measured rather
+than assumed. The F3, F6 and F7 precondition above is met on `main`.
 
 ## 12. Relationship to existing code
 
@@ -615,8 +638,8 @@ each on a temp data directory:
 - e2e: send a message in a chat with 50 seeded messages on a temp data dir and
   assert the assistant message carries `context` and the recall line renders.
 
-**Evaluation.** Retrieval quality is measured by the session memory benchmark
-(`2026-09-25-session-memory-benchmark-design.md`), which imports a session,
+**Evaluation.** Retrieval quality is measured by LongHaul, the session memory
+benchmark (`2026-09-25-session-memory-benchmark-design.md`), which imports a session,
 asks verified questions at a point in the session, and reports evidence
 recall, answer correctness, tokens per turn and latency per configuration.
 This spec adds `upToSeq` to `ContextBuilder.build` and to the store's

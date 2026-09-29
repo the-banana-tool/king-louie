@@ -1,6 +1,8 @@
-# King Louie Session Memory Benchmark — Design Spec
+# LongHaul: a Session Memory Benchmark — Design Spec
 
-- **Status:** Draft — scope agreed with the owner 2026-09-25; open questions in §17 are for the next design thread
+- **Status:** Scope agreed with the owner 2026-09-25; the §17 questions were
+  answered 2026-09-29 (B-D5 to B-D10). Terms follow `CONTEXT.md`: a
+  **session** is the outside transcript, and importing it produces a **chat**.
 - **Date:** 2026-09-25
 - **Relates to:** `2026-09-25-chat-history-recall-design.md` (the recall spec). The
   benchmark is the primary artifact; the recall system is its reference
@@ -94,6 +96,18 @@ Settled with the owner on 2026-09-25:
 | B-D3 | The owner's sessions are inputs for private runs only | File drop outside the repo; results may be published, sessions never |
 | B-D4 | The public set comes from public agent trajectories plus synthetic sessions | Converters for the datasets in §10.2; licenses recorded per session |
 
+Settled with the owner on 2026-09-29 (the §17 questions):
+
+| # | Decision | Consequence |
+|---|---|---|
+| B-D5 | The benchmark is named **LongHaul** | Docs and reports use LongHaul, not King Louie; whether the CLI and `src/bench/` are renamed is open |
+| B-D6 | Harness code is ISC like the repo; questions and annotations are CC-BY-4.0; each converted session keeps its upstream license | The manifest's `license` is per session; a source dataset's license is checked before its converter is written |
+| B-D7 | Model spend is capped at **$50 per full run** | How a run fits the cap (answer model, sample sizes, the `full-history` adapter) is open |
+| B-D8 | Private sessions are never released, reviewed or not; only aggregate results from them are published | §10.1 holds; there is no release review process. The owner will export sessions A to D as raw JSONL into `KL_BENCH_PRIVATE_DIR` |
+| B-D9 | External systems (Mem0, Letta) are a follow-up, not the first release | The external adapter protocol stays in B4; Mem0 is the first external adapter after release |
+| B-D10 | Venue: an arXiv preprint and a workshop paper | Whether the public-set target (§6) shrinks for a workshop paper is open |
+| B-D11 | A thin evidence-recall slice (B0, §13) runs after recall stage H2 and before H3 | H3's choices are measured; answer and judge models are not needed for B0 |
+
 ## 3. Architecture
 
 ```
@@ -113,9 +127,11 @@ to drain, then replays questions in ascending `askAtSeq`.
 
 ## 4. Sessions
 
-A session is one chat in the recall spec's stored message shape (`id, sender,
-text, timestamp, seq` plus per-sender metadata) written as JSONL, one message
-per line, with a manifest:
+A session is a transcript from outside the app. LongHaul stores it in the
+recall spec's message shape (`id, sender, text, timestamp, seq` plus
+per-sender metadata) as JSONL, one message per line, with a manifest that
+records where the session came from; a run imports it into a temporary history
+store, where it becomes a chat:
 
 ```json
 {
@@ -348,6 +364,7 @@ gets its own implementation plan.
 
 | Stage | Delivers |
 |---|---|
+| B0 | After recall H2, before H3: the session and question formats, the validator, the Claude Code compaction events, a verified question set for session E, and the `kl-recall`, `sliding-window` and `oracle` adapters, scored by evidence recall only (no answer or judge model). Its pieces are the first parts of B1 and B3, not throwaway code |
 | B1 | Session format and manifest, question format and validator, Claude Code compaction events, synthetic generator and fixtures, CLI skeleton with `import` and `verify` |
 | B2 | Authoring pipeline, verification loop, public converters for two datasets, the `constructed` concatenation |
 | B3 | Adapters `kl-recall`, `full-history`, `sliding-window`, `summarize-compact`, `real-compaction`, `oracle`; `run`, judge, caching, `report` |
@@ -404,7 +421,7 @@ gets its own implementation plan.
 
 ## 17. Open questions for the owner
 
-For the next design thread:
+Answered 2026-09-29; see B-D5 to B-D10 in §2. The original questions:
 
 1. Name of the benchmark and the dataset, and the organisation it is released
    under.
