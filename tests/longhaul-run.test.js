@@ -12,6 +12,7 @@ const { writeSyntheticRoot, SYNTH_FIXTURES } = require('../src/longhaul/syntheti
 const { readQuestions, writeQuestions, questionsFile } = require('../src/longhaul/questions');
 const { ensureDirs, resolveHome } = require('../src/longhaul/home');
 const { UsageError } = require('../src/longhaul/errors');
+const { isInside } = require('../src/longhaul/files');
 const { main } = require('../src/longhaul/cli');
 const { tmpHome, sink, FIXTURE_ROOT } = require('./helpers/longhaul-helpers');
 
@@ -164,6 +165,33 @@ describe('runBenchmark', () => {
     assert.strictEqual(s.scored, 4);
     assert.strictEqual(s.evidenceRecall, 1);
     assert.strictEqual(out.records.find((r) => r.kind === 'decision').error, 'boom');
+  });
+});
+
+describe('runBenchmark temp stores', () => {
+  it('keeps the kl-recall temp store under LONGHAUL_HOME/tmp, never elsewhere', async () => {
+    const home = setup();
+    const made = [];
+    const real = fs.mkdtempSync;
+    fs.mkdtempSync = (prefix, ...rest) => { const d = real.call(fs, prefix, ...rest); made.push(d); return d; };
+    try {
+      await runBenchmark({ home, adapterNames: ['kl-recall'], now: fixedNow, commit: 'x' });
+    } finally {
+      fs.mkdtempSync = real;
+    }
+    assert.ok(made.length > 0, 'kl-recall made a temp store');
+    for (const d of made) assert.ok(isInside(d, home.tmp), `${d} is under ${home.tmp}`);
+    assert.deepStrictEqual(fs.readdirSync(home.tmp), [], 'release removed its store');
+  });
+
+  it('removes kl-* dirs an interrupted run left in LONGHAUL_HOME/tmp, and nothing else', async () => {
+    const home = setup();
+    fs.mkdirSync(path.join(home.tmp, 'kl-stale1'));
+    fs.writeFileSync(path.join(home.tmp, 'kl-stale1', 'history.sqlite'), 'x');
+    fs.mkdirSync(path.join(home.tmp, 'other'));
+    const out = await runBenchmark({ home, adapters: [firstEvidence], now: fixedNow, commit: 'x' });
+    assert.strictEqual(out.staleTmpRemoved, 1);
+    assert.deepStrictEqual(fs.readdirSync(home.tmp), ['other']);
   });
 });
 

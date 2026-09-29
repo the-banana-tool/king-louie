@@ -1,6 +1,6 @@
 'use strict';
 // LONGHAUL_HOME (benchmark spec B-D12, §10.1): private/, sessions/,
-// questions/, runs/ and reports/. It is refused inside a git working tree,
+// questions/, runs/, reports/ and tmp/. It is refused inside a git working tree,
 // checked on the path as given and on the path with links resolved, so a
 // junction or symlink into a repository is refused too.
 const fs = require('fs');
@@ -9,7 +9,9 @@ const path = require('path');
 const { UsageError } = require('./errors');
 const { isInside } = require('./files');
 
-const SUBDIRS = Object.freeze(['private', 'sessions', 'questions', 'runs', 'reports']);
+// tmp/ holds kl-recall's temporary history stores (a copy of a session's
+// text), so a private session never leaves LONGHAUL_HOME, even on a crash.
+const SUBDIRS = Object.freeze(['private', 'sessions', 'questions', 'runs', 'reports', 'tmp']);
 
 function findGitWorkTree(start) {
   let dir = path.resolve(start);

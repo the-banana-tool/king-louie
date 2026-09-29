@@ -12,6 +12,25 @@ const { createAdapter } = require('./adapters');
 const { evidenceRecall, chunkEvidenceRecall, summarize, renderSummaryMarkdown } = require('./scoring');
 const { writeFileAtomic, sha256File } = require('./files');
 const { UsageError } = require('./errors');
+const { createLogger } = require('../logging');
+
+const log = createLogger('longhaul/run');
+// kl-recall's temp store prefix (adapters/kl-recall.js TMP_PREFIX), kept
+// here so a run without kl-recall does not load node:sqlite.
+const KL_TMP_PREFIX = 'kl-';
+
+// Temp stores an interrupted run (Ctrl-C, crash) left behind.
+function removeStaleTmp(tmpDir) {
+  if (!tmpDir || !fs.existsSync(tmpDir)) return 0;
+  let removed = 0;
+  for (const e of fs.readdirSync(tmpDir, { withFileTypes: true })) {
+    if (!e.isDirectory() || !e.name.startsWith(KL_TMP_PREFIX)) continue;
+    fs.rmSync(path.join(tmpDir, e.name), { recursive: true, force: true });
+    removed += 1;
+  }
+  if (removed) log.info('removed temp stores left by an interrupted run', { removed });
+  return removed;
+}
 
 function gitCommit(cwd = path.join(__dirname, '..', '..')) {
   const git = (args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -86,7 +105,8 @@ async function runBenchmark({
   home, dataRoot = home.root, sessionIds = null, adapterNames = [], adapterConfig = {}, adapters: injected = null,
   budgetTokens = 6000, seed = 1, includeUnverified = false, now = () => new Date(), commit = gitCommit()
 }) {
-  const adapters = injected || adapterNames.map((name) => createAdapter(name, { budgetTokens, ...(adapterConfig[name] || {}) }));
+  const staleTmpRemoved = removeStaleTmp(home.tmp);
+  const adapters = injected || adapterNames.map((name) => createAdapter(name, { budgetTokens, tmpRoot: home.tmp, ...(adapterConfig[name] || {}) }));
   if (!adapters.length) throw new UsageError('Name at least one adapter with --adapters.');
   const { sets, skipped } = await loadRunSet({ dataRoot, sessionIds, includeUnverified });
 
@@ -138,7 +158,7 @@ async function runBenchmark({
   writeFileAtomic(path.join(dir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
   writeFileAtomic(path.join(dir, 'summary.md'), renderSummaryMarkdown(config, summary));
   const leaks = Object.values(summary).reduce((n, s) => n + s.leaks, 0);
-  return { runId, dir, config, summary, records, leaks };
+  return { runId, dir, config, summary, records, leaks, staleTmpRemoved };
 }
 
 module.exports = { runBenchmark, gitCommit };

@@ -104,7 +104,7 @@ Settled with the owner on 2026-09-29 (the §17 questions):
 | B-D6 | Harness code is ISC like the repo; questions and annotations are CC-BY-4.0; each converted session keeps its upstream license | The manifest's `license` is per session; a source dataset's license is checked before its converter is written |
 | B-D7 | Model spend is capped at **$50 per full run** | Two answer tiers (§8.1): a cheap open-weight model answers every question for every adapter; a frontier model answers a stratified sample of 150; `full-history` runs only on that sample, capped at a 128K window; a small model judges. Estimated $25 to $35 at about 500 questions |
 | B-D8 | Private sessions are never released, reviewed or not; only aggregate results from them are published | §10.1 holds; there is no release review process. The owner will export sessions A to D as raw JSONL into `$LONGHAUL_HOME/private/` |
-| B-D12 | LongHaul's data lives in `LONGHAUL_HOME` (default `~/.longhaul/`): `private/`, `sessions/`, `questions/`, `runs/`, `reports/` | Private transcripts are never inside the repository tree, gitignored or not; the repository holds only synthetic fixtures; LongHaul does not read King Louie's data directory |
+| B-D12 | LongHaul's data lives in `LONGHAUL_HOME` (default `~/.longhaul/`): `private/`, `sessions/`, `questions/`, `runs/`, `reports/`, `tmp/` | Private transcripts are never inside the repository tree, gitignored or not; the repository holds only synthetic fixtures; LongHaul does not read King Louie's data directory |
 | B-D9 | External systems (Mem0, Letta) are a follow-up, not the first release | The external adapter protocol stays in B4; Mem0 is the first external adapter after release |
 | B-D10 | Venue: an arXiv preprint and a workshop paper | The public set is about 12 sessions (decided 2026-09-29), about 40 verified questions each (§6) |
 | B-D11 | A thin evidence-recall slice (B0, §13) runs after recall stage H2 and before H3 | H3's choices are measured; answer and judge models are not needed for B0 |
@@ -120,6 +120,7 @@ questions/           question sets per session (§5), authored per §6
 systems/             adapters (§7): kl-recall, full-history, sliding-window, summarize-compact, oracle, external
 runs/                one directory per run: config, per-question records, summary (§8, §11)
 reports/             tables and figures generated from runs (§11)
+tmp/                 kl-recall's temporary history stores during a run; leftovers removed by the next run
 ```
 
 `bin/longhaul.js` exposes `import`, `author`, `verify`, `run`,

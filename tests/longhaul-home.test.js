@@ -13,12 +13,12 @@ const { REPO, tmpDir, sink } = require('./helpers/longhaul-helpers');
 const inGitTree = (err) => err.code === 'HOME_IN_GIT_TREE' && /git working tree/.test(err.message);
 
 describe('resolveHome', () => {
-  it('defaults to <homedir>/.longhaul with the five subdirectories', () => {
+  it('defaults to <homedir>/.longhaul with its six subdirectories', () => {
     const fakeHome = tmpDir();
     const home = resolveHome({}, { homedir: () => fakeHome });
     assert.strictEqual(home.root, path.join(fakeHome, '.longhaul'));
     for (const d of SUBDIRS) assert.strictEqual(home[d], path.join(fakeHome, '.longhaul', d));
-    assert.deepStrictEqual(SUBDIRS, ['private', 'sessions', 'questions', 'runs', 'reports']);
+    assert.deepStrictEqual(SUBDIRS, ['private', 'sessions', 'questions', 'runs', 'reports', 'tmp']);
   });
 
   it('uses LONGHAUL_HOME when it is set, and ensureDirs creates the subdirectories', () => {
@@ -106,6 +106,7 @@ describe('longhaul CLI skeleton', () => {
     assert.strictEqual(await main(['home'], { stdout, stderr: sink(), env: { LONGHAUL_HOME: root } }), 0);
     assert.ok(stdout.text.startsWith(root));
     assert.ok(fs.existsSync(path.join(root, 'private')));
+    assert.match(stdout.text, /tmp\//);
   });
 
   it('refuses with exit 2 when LONGHAUL_HOME is inside a git working tree', async () => {

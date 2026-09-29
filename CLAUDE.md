@@ -248,8 +248,11 @@ Electron-free, may use `src/history/` and `src/providers/`, and nothing else in
 Electron build.
 
 - Data lives in `LONGHAUL_HOME` (default `~/.longhaul/`: `private/`,
-  `sessions/`, `questions/`, `runs/`, `reports/`). The CLI refuses a
-  `LONGHAUL_HOME` inside a git working tree. Never put a real session under
+  `sessions/`, `questions/`, `runs/`, `reports/`, `tmp/`). The CLI refuses a
+  `LONGHAUL_HOME` inside a git working tree, and any of those subdirectories
+  that resolves into one or out of the home. `kl-recall`'s temporary history
+  store (the session's full text) lives in `tmp/`, never the system temp dir;
+  `run` removes `kl-*` dirs an interrupted run left there. Never put a real session under
   the repository. Only the synthetic fixtures in `tests/fixtures/longhaul/` are
   committed. Regenerate them with
   `node bin/longhaul.js synth --out tests/fixtures/longhaul`;

@@ -4,7 +4,6 @@
 // upToSeq = askAtSeq (exclusive), in place of the user message there, so
 // nothing at or after the question can be shown. BM25 only.
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { HistoryStore } = require('../../history');
 const { TokenEstimator } = require('../../history/token-estimator');
@@ -44,7 +43,13 @@ function shownFromBuild(out, chunkRows, chatId) {
   return { tailSeqs, recalledSeqs, shownBySeq, evidenceSeqsShown: uniqueSorted([...tailSeqs, ...recalledSeqs]) };
 }
 
-function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, tmpRoot = os.tmpdir() } = {}) {
+// Prefix of the temp store dirs under tmpRoot; `run` removes leftovers.
+const TMP_PREFIX = 'kl-';
+
+// tmpRoot is required (LONGHAUL_HOME/tmp from `run`): the store holds the
+// session's full text, so it never goes to the system temp dir.
+function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, tmpRoot } = {}) {
+  if (typeof tmpRoot !== 'string' || !tmpRoot) throw new Error('kl-recall needs a tmpRoot (LONGHAUL_HOME/tmp)');
   const settings = recallSettings(recall, budgetTokens);
   return {
     name: 'kl-recall',
@@ -53,7 +58,7 @@ function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, tmpRoot = os.
     },
 
     async prepare(session, { upToSeq = Infinity } = {}) {
-      const dir = fs.mkdtempSync(path.join(tmpRoot, 'longhaul-kl-'));
+      const dir = fs.mkdtempSync(path.join(tmpRoot, TMP_PREFIX));
       let store = null;
       try {
         store = HistoryStore.open(path.join(dir, 'history.sqlite'), { chunkOptions: settings.history.chunk });
@@ -115,4 +120,4 @@ function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, tmpRoot = os.
   };
 }
 
-module.exports = { createKlRecallAdapter, shownFromBuild, recallSettings };
+module.exports = { createKlRecallAdapter, shownFromBuild, recallSettings, TMP_PREFIX };

@@ -69,6 +69,7 @@ module.exports = {
       includeUnverified: values['include-unverified'],
       now: ctx.now
     });
+    if (result.staleTmpRemoved) ctx.stdout.write(`removed ${result.staleTmpRemoved} temp stores left in ${ctx.home.tmp} by an interrupted run\n`);
     ctx.stdout.write(`run ${result.runId} -> ${result.dir}\n`);
     if (result.config.includeUnverified) ctx.stdout.write('UNVERIFIED QUESTIONS INCLUDED: a smoke run, not a result.\n');
     for (const [name, s] of Object.entries(result.summary)) {

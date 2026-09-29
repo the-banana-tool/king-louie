@@ -13,7 +13,7 @@ const { readQuestions, questionsFile } = require('../src/longhaul/questions');
 const { UsageError } = require('../src/longhaul/errors');
 const { TokenEstimator } = require('../src/history/token-estimator');
 const { chunkMessage } = require('../src/history/chunker');
-const { FIXTURE_ROOT } = require('./helpers/longhaul-helpers');
+const { FIXTURE_ROOT, tmpDir } = require('./helpers/longhaul-helpers');
 
 async function fixture(id) {
   const session = await loadSession(path.join(FIXTURE_ROOT, 'sessions', id));
@@ -42,9 +42,13 @@ describe('kl-recall', () => {
     assert.deepStrictEqual(adapterNames(), ['kl-recall', 'oracle', 'sliding-window']);
   });
 
+  it('needs a tmpRoot: there is no default outside LONGHAUL_HOME', () => {
+    assert.throws(() => createKlRecallAdapter({}), /tmpRoot/);
+  });
+
   it('refuses a recall setting it does not know, and sets recalledTokens to the budget', () => {
-    assert.throws(() => createKlRecallAdapter({ recall: { notASetting: 1 } }), UsageError);
-    assert.strictEqual(createKlRecallAdapter({ budgetTokens: 4321 }).describe().recall.recalledTokens, 4321);
+    assert.throws(() => createKlRecallAdapter({ recall: { notASetting: 1 }, tmpRoot: tmpDir() }), UsageError);
+    assert.strictEqual(createKlRecallAdapter({ budgetTokens: 4321, tmpRoot: tmpDir() }).describe().recall.recalledTokens, 4321);
   });
 
   it('never shows a message at or after askAtSeq (the leakage test)', async () => {
@@ -61,7 +65,7 @@ describe('kl-recall', () => {
       id: 'leak-1', sessionId: base.manifest.sessionId, askAtSeq, kind: 'abstain', question: 'What is zephyr-quartz set to?',
       answer: 'not in the session', acceptableAnswers: [], evidenceSeqs: [], supersededBy: null, authoredBy: 'human', verifiedBy: 'human:T', notes: ''
     };
-    const adapter = createKlRecallAdapter({ budgetTokens: 6000 });
+    const adapter = createKlRecallAdapter({ budgetTokens: 6000, tmpRoot: tmpDir() });
     // Everything is in the store; only build's upToSeq keeps the later messages out.
     const handle = await adapter.prepare(session, { upToSeq: Infinity });
     try {
@@ -77,7 +81,7 @@ describe('kl-recall', () => {
   it('never leaks on any committed fixture question', async () => {
     for (const id of ['synth-small', 'synth-medium', 'synth-compacted']) {
       const { session, questions } = await fixture(id);
-      const adapter = createKlRecallAdapter({ budgetTokens: 6000 });
+      const adapter = createKlRecallAdapter({ budgetTokens: 6000, tmpRoot: tmpDir() });
       const handle = await adapter.prepare(session, { upToSeq: Infinity });
       try {
         for (const q of questions) {
@@ -94,7 +98,7 @@ describe('kl-recall', () => {
     const { session, questions } = await fixture('synth-medium');
     const q = questions.filter((x) => x.kind === 'user-said').sort((a, b) => b.distance.estTokens - a.distance.estTokens)[0];
     const [e] = q.evidenceSeqs;
-    const adapter = createKlRecallAdapter({ budgetTokens: 6000 });
+    const adapter = createKlRecallAdapter({ budgetTokens: 6000, tmpRoot: tmpDir() });
     const handle = await adapter.prepare(session, { upToSeq: q.askAtSeq });
     try {
       const r = await adapter.context(handle, { question: q, askAtSeq: q.askAtSeq, budgetTokens: 6000 });
@@ -111,7 +115,7 @@ describe('kl-recall', () => {
 
   it('imports only the messages before upToSeq and removes its store on release', async () => {
     const { manifest, messages, index } = generateSynthetic(SYNTH_FIXTURES[0]);
-    const adapter = createKlRecallAdapter({});
+    const adapter = createKlRecallAdapter({ tmpRoot: tmpDir() });
     const handle = await adapter.prepare({ manifest, messages, index }, { upToSeq: 50 });
     assert.deepStrictEqual(handle.store.getMessages(handle.chatId, { fromSeq: 50, toSeq: 60 }), []);
     assert.strictEqual(handle.store.getMessages(handle.chatId, { fromSeq: 49, toSeq: 49 }).length, 1);
@@ -122,7 +126,7 @@ describe('kl-recall', () => {
 
   it('estimates tokens exactly as TokenEstimator does before any calibration', async () => {
     const { manifest, messages, index } = generateSynthetic(SYNTH_FIXTURES[0]);
-    const adapter = createKlRecallAdapter({});
+    const adapter = createKlRecallAdapter({ tmpRoot: tmpDir() });
     const handle = await adapter.prepare({ manifest, messages, index }, { upToSeq: 5 });
     try {
       const estimator = new TokenEstimator({ store: handle.store });
