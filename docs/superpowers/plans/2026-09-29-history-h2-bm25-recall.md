@@ -401,7 +401,7 @@ describe('chunkMessage', () => {
 
   it('toolResult: rendered and chunked as prose; a 60K-character result stays bounded', () => {
     const big = Array.from({ length: 600 }, (_, i) => `row ${i}: sensor reading for the Lakeside lot drainage pipe, value ${i * 3}`).join('\n');
-    assert.ok(big.length > 45000);
+    assert.ok(big.length > 40000);
     const chunks = chunkMessage({ sender: 'toolResult', toolName: 'Bash', result: { ok: true, stdout: `${big}\n\n${big.slice(0, 15000)}` } });
     assert.ok(chunks.length >= 40, `got ${chunks.length}`);
     for (const c of chunks) {
