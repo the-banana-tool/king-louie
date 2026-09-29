@@ -494,7 +494,20 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+  /* Keep room for the title; the actions (model selects) shrink first. */
+  flex: 1 1 160px;
+  min-width: 160px;
+}
+
+.chat-header-text {
   min-width: 0;
+}
+
+.chat-header-title,
+.chat-header-meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-header-title {
@@ -513,6 +526,11 @@ body {
   align-items: center;
   gap: 8px;
   margin-left: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.chat-header-actions > * {
   flex-shrink: 0;
 }
 
@@ -3078,8 +3096,9 @@ div.models-picker-item.is-unusable { cursor: default; }
 }
 
 /* Chat header model switcher and Retry with… (spec 2026-09-27 §6.5, §9) */
-.chat-models-switcher { display: flex; align-items: center; gap: 6px; }
-.chat-models-switcher .chat-info-select { max-width: 220px; }
+.chat-models-switcher { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.chat-header-actions > .chat-models-switcher { flex-shrink: 1; }
+.chat-models-switcher .chat-info-select { max-width: 220px; min-width: 90px; flex: 0 1 auto; }
 .chat-main-override-marker { color: var(--accent, #d9a441); }
 .message-retry { margin-top: 6px; display: flex; gap: 6px; align-items: center; }
 .message-error-action { margin-top: 6px; }
