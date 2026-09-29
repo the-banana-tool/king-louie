@@ -350,6 +350,22 @@ async function launchAttached(opts = {}) {
   }
 }
 
+/**
+ * The profile's chats with their messages, read from its history.sqlite
+ * (history H1: chats no longer live in chat-data.json). Opens a read-only
+ * connection beside the app's and closes it before returning, so the profile
+ * folder can still be removed on Windows.
+ */
+function readHistoryChats(ctx) {
+  const { HistoryStore } = require('../../src/history');
+  const store = HistoryStore.open(path.join(ctx.userDataDir, 'history.sqlite'), { readonly: true });
+  try {
+    return store.listChats({ messages: true });
+  } finally {
+    store.close();
+  }
+}
+
 module.exports = {
   launchApp,
   relaunchApp,
@@ -367,5 +383,6 @@ module.exports = {
   childEnv,
   launchEnv,
   writeSeed,
+  readHistoryChats,
   APP_PATH
 };

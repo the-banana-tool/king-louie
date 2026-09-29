@@ -8,7 +8,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { launchApp, closeApp, evaluate, waitFor } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, readHistoryChats } = require('./helpers');
 const { startFakeLlmServer } = require('../helpers/fake-llm-server');
 
 const readData = (ctx) => JSON.parse(fs.readFileSync(path.join(ctx.userDataDir, 'chat-data.json'), 'utf8'));
@@ -68,7 +68,7 @@ describe('E2E: roles in use (models M3)', () => {
       document.getElementById('send-btn').click();
       return true;
     })()`);
-    await waitUntil(() => readData(ctx).chats[0].messages.some((m) => m.sender === 'assistant' && m.llm && m.llm.byRole && m.llm.byRole.main));
+    await waitUntil(() => readHistoryChats(ctx)[0].messages.some((m) => m.sender === 'assistant' && m.llm && m.llm.byRole && m.llm.byRole.main));
     const text = await waitFor(ctx, `(() => {
       const els = [...document.querySelectorAll('.message-metrics-call')];
       const t = els.length ? els[els.length - 1].textContent : '';

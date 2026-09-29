@@ -7,7 +7,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { launchApp, closeApp, evaluate, waitFor } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, readHistoryChats } = require('./helpers');
 const { startFakeLlmServer } = require('../helpers/fake-llm-server');
 
 describe('E2E: model catalog and Stop', () => {
@@ -62,7 +62,8 @@ describe('E2E: model catalog and Stop', () => {
     await waitFor(ctx, `!!document.querySelector('.message.assistant .message-stopped-marker')`, 15000);
 
     const data = JSON.parse(fs.readFileSync(path.join(ctx.userDataDir, 'chat-data.json'), 'utf8'));
-    const chat = data.chats.find((c) => c.id === data.activeChatId) || data.chats[0];
+    const chats = readHistoryChats(ctx);
+    const chat = chats.find((c) => c.id === data.activeChatId) || chats[0];
     const last = chat.messages[chat.messages.length - 1];
     assert.strictEqual(last.sender, 'assistant');
     assert.strictEqual(last.text, 'Hello');

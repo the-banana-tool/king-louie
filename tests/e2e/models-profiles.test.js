@@ -8,13 +8,10 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { launchApp, closeApp, evaluate, waitFor } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, readHistoryChats } = require('./helpers');
 const { startFakeLlmServer } = require('../helpers/fake-llm-server');
 
-const readChat = (ctx) => {
-  const data = JSON.parse(fs.readFileSync(path.join(ctx.userDataDir, 'chat-data.json'), 'utf8'));
-  return data.chats.find((c) => c.id === 'chat-1');
-};
+const readChat = (ctx) => readHistoryChats(ctx).find((c) => c.id === 'chat-1');
 
 // Polls the profile's chat file from the test process (a status message is
 // persisted by the main process; how the renderer draws it is not the point).
