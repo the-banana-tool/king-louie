@@ -4,7 +4,8 @@
   "description": "Cross-platform Electron desktop chat application",
   "main": "main.js",
   "bin": {
-    "king-louie-service": "bin/king-louie-service.js"
+    "king-louie-service": "bin/king-louie-service.js",
+    "longhaul": "bin/longhaul.js"
   },
   "engines": {
     "node": ">=22.16"
@@ -40,6 +41,8 @@
       "!tests/**",
       "!product-management/**",
       "!.github/**",
+      "!src/longhaul/**",
+      "!bin/longhaul.js",
       "!examples/**",
       "examples/playbooks/**"
     ],
