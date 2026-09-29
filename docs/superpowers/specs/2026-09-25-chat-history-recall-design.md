@@ -281,9 +281,12 @@ IPC and case attach/create chat lookups now use the same `getChat`/`updateChat`
 facade seam. Workflow plan recovery now reads through `getChat({ messages:
 true })`, and model-choice chat header/profile/main-override paths can use
 facade-backed `getChat`/`updateChat` while keeping legacy helpers for older test
-harnesses. This is deliberately not the SQLite migration; it is the adapter seam
-that lets later H1 steps move storage without changing IPC or renderer contracts
-again.
+harnesses. Core-internal lookups for the last assistant message and workflow
+parent chat messages now load the specific chat with messages through the same
+facade, and canvas tool persistence updates the active chat through
+`updateChat`. This is deliberately not the SQLite migration; it is the adapter
+seam that lets later H1 steps move storage without changing IPC or renderer
+contracts again.
 
 `chat-data.json` keeps `activeChatId`, `apiTokens`, `apiStatus`, `settings`,
 `toolApprovals`, `usage` and everything else it holds today. Only `chats`

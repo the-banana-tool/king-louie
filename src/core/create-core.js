@@ -1302,7 +1302,7 @@ function createCore(deps = {}) {
   };
 
   const getLastAssistantMessage = (chatId) => {
-    const chat = getChats().find((item) => item.id === chatId);
+    const chat = getChat(chatId, { messages: true });
     if (!chat) {
       return null;
     }
@@ -2174,9 +2174,8 @@ function createCore(deps = {}) {
           if (!cid) throw new Error('No chatId available for canvas action');
 
           if (action === 'render' || action === 'update') {
-            const chats = getChats();
             const canvasState = { title: title || 'Canvas', content, visible: true, lastUpdatedAt: new Date().toISOString() };
-            setChats(chats.map(c => c.id !== cid ? c : { ...c, canvasState, updatedAt: new Date().toISOString() }));
+            updateChat(cid, { canvasState, updatedAt: new Date().toISOString() });
             if (sender && !sender.isDestroyed()) {
               sender.send('canvas:render', { chatId: cid, title: canvasState.title, content });
             }
@@ -2184,8 +2183,7 @@ function createCore(deps = {}) {
           }
 
           if (action === 'close') {
-            const chats = getChats();
-            setChats(chats.map(c => c.id !== cid ? c : { ...c, canvasState: null, updatedAt: new Date().toISOString() }));
+            updateChat(cid, { canvasState: null, updatedAt: new Date().toISOString() });
             if (sender && !sender.isDestroyed()) {
               sender.send('canvas:close', { chatId: cid });
             }
@@ -2720,7 +2718,7 @@ function createCore(deps = {}) {
       // registry rebuilds from its job index, never the workflow file's own.
       resolveExecuteExtras: (wf) => executorRegistry?.workflowChildExtras(wf.id) ?? null,
       getParentChatMessages: (chatId) => {
-        const chat = getChats().find((c) => c.id === chatId);
+        const chat = getChat(chatId, { messages: true });
         if (!chat || !Array.isArray(chat.messages)) return [];
         return chat.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant');
       }
