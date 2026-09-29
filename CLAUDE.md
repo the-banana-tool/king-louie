@@ -67,6 +67,18 @@ Click through `page.evaluate(() => document.getElementById(id).click())` rather
 than `locator.click()`, and remember the onboarding wizard appears on a fresh
 profile (`#wizard-skip-btn` dismisses it).
 
+## Browser actions that change something
+
+`src/tools/browser-acting.js` lists the browser actions that type, click, run
+code or fill logins/payments. `ToolExecutor` asks the owner for these even when
+the browser tool is on the "always approve" list or an agent's
+`autoApproveTools`. Two explicit instructions lift the prompt: a permission rule
+for the action (browser rules match `params.action`, so `allow Browser(click)`),
+or an `ownerQuote` that appears on word boundaries in the owner's own message
+for this turn (`ownerTurnText`, set only by the local chat send path, and never
+honoured under `denyAutoApproval`). The quote proves the owner wrote the words,
+not that they were about this action.
+
 ## Service mode
 
 `node bin/king-louie-service.js run --data-dir <tmp> --profile agent` runs King Louie

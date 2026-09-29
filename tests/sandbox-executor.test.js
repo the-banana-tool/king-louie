@@ -97,4 +97,26 @@ describe('SandboxExecutor', () => {
     assert.strictEqual(typeof spawnResult.exitCode, 'number');
     assert.strictEqual(spawnResult.environment.sandbox, false);
   });
+
+  // On Windows, spawn(cmd.exe, ['/c', command]) escaped every " as \", so
+  // `python -c "..."` saw a broken string and `findstr "a b"` saw one file
+  // per word. Both paths must hand the shell the command verbatim.
+  it('passes double-quoted arguments through unchanged on both paths', async () => {
+    const executor = new SandboxExecutor();
+    const command = `"${process.execPath}" -e "console.log('a b', 1 + 1)"`;
+    for (const options of [{}, { onProgress: () => {} }]) {
+      const result = await executor._executeDirect(command, options);
+      assert.strictEqual(result.stderr, '', JSON.stringify(options));
+      assert.strictEqual(result.stdout, 'a b 2', JSON.stringify(options));
+    }
+  });
+
+  it('runs children with UTF-8 Python stdio', async () => {
+    const executor = new SandboxExecutor();
+    const command = `"${process.execPath}" -e "console.log(process.env.PYTHONUTF8)"`;
+    for (const options of [{}, { onProgress: () => {} }]) {
+      const result = await executor._executeDirect(command, options);
+      assert.strictEqual(result.stdout, '1', JSON.stringify(options));
+    }
+  });
 });

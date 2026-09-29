@@ -1,4 +1,5 @@
 const { Tool } = require('../tool-schema');
+const { OWNER_QUOTE_PARAM } = require('../browser-acting');
 const { validateUrl } = require('./web-fetch-utils');
 const PlaywrightBrowser = require('../../browser/playwright-browser');
 const fs = require('fs');
@@ -1234,6 +1235,7 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
   parameters: {
     type: 'object',
     properties: {
+      ownerQuote: OWNER_QUOTE_PARAM,
       action: {
         type: 'string',
         enum: actionNames,

@@ -199,3 +199,44 @@ describe('logging sinks', () => {
     assert.strictEqual(consoleCalls.length, 1);
   });
 });
+
+// A Windows console on its default code page (437) reads the UTF-8 bytes of
+// "—" as "ΓÇö". What goes to the console there is folded to ASCII; sinks
+// (the service log file) keep the text as it was.
+describe('logging: console text on Windows', () => {
+  const { asciiConsoleText } = require('../src/logging');
+
+  it('folds typographic characters to ASCII', () => {
+    assert.strictEqual(
+      asciiConsoleText('Repeating it will not help — change something; 8 → 6 … “ok” ‘x’ – •'),
+      'Repeating it will not help - change something; 8 -> 6 ... "ok" \'x\' - *'
+    );
+  });
+
+  it('drops accents and escapes what has no ASCII form', () => {
+    assert.strictEqual(asciiConsoleText('café 東'), 'cafe \\u6771');
+  });
+
+  it('leaves ASCII alone', () => {
+    const s = 'plain [text] {a=1}';
+    assert.strictEqual(asciiConsoleText(s), s);
+  });
+
+  it('the logger uses it for the console on win32 only, never for sinks', () => {
+    const captured = [];
+    const origLog = console.log;
+    console.log = (...args) => captured.push(args);
+    const records = [];
+    const remove = addSink((r) => records.push(r));
+    try {
+      createLogger('agent-loop').info('help — chan', { file: 'Lot 69 — Sheet.pdf' });
+    } finally {
+      console.log = origLog;
+      remove();
+    }
+    const win = process.platform === 'win32';
+    assert.deepStrictEqual(captured[0], ['[agent-loop]', win ? 'help - chan {file=Lot 69 - Sheet.pdf}' : 'help — chan {file=Lot 69 — Sheet.pdf}']);
+    assert.strictEqual(records[0].message, 'help — chan');
+    assert.strictEqual(records[0].line, '[agent-loop] help — chan {file=Lot 69 — Sheet.pdf}');
+  });
+});

@@ -117,6 +117,48 @@ describe('Provider multimodal formatting', () => {
     assert.strictEqual(docBlock.source.data, pdfBase64);
   });
 
+  // OpenAI used to get "[PDF file attached - content not extractable]" in
+  // place of the file, so a scanned PDF was invisible to the model.
+  it('OpenAIProvider sends a PDF as a native file part', () => {
+    const provider = new OpenAIProvider('test-key-minimum-length');
+    const pdfBase64 = Buffer.from('fake-pdf-content').toString('base64');
+
+    const messages = provider.formatMessages([
+      {
+        sender: 'user',
+        text: 'Read this PDF',
+        documents: [{ base64: pdfBase64, mimeType: 'application/pdf', name: 'report.pdf' }]
+      }
+    ]);
+
+    const filePart = messages[0].content.find((b) => b.type === 'file');
+    assert.deepStrictEqual(filePart, {
+      type: 'file',
+      file: { filename: 'report.pdf', file_data: `data:application/pdf;base64,${pdfBase64}` }
+    });
+  });
+
+  it('OpenAIProvider maps content parts to the Responses API types', () => {
+    const provider = new OpenAIProvider('test-key-minimum-length');
+    const pdfBase64 = Buffer.from('fake-pdf-content').toString('base64');
+    const imageBase64 = Buffer.from('tiny-image').toString('base64');
+
+    const input = provider._formatResponsesInput([
+      {
+        sender: 'user',
+        text: 'Read these',
+        images: [{ base64: imageBase64, mimeType: 'image/png', name: 'photo.png' }],
+        documents: [{ base64: pdfBase64, mimeType: 'application/pdf', name: 'report.pdf' }]
+      }
+    ]);
+
+    assert.deepStrictEqual(input[0].content, [
+      { type: 'input_text', text: 'Read these' },
+      { type: 'input_file', filename: 'report.pdf', file_data: `data:application/pdf;base64,${pdfBase64}` },
+      { type: 'input_image', image_url: `data:image/png;base64,${imageBase64}` }
+    ]);
+  });
+
   it('OpenAIProvider formats text document as text content block', () => {
     const provider = new OpenAIProvider('test-key-minimum-length');
     const docBase64 = Buffer.from('CSV data here').toString('base64');

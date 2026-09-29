@@ -2,6 +2,7 @@ const { EventEmitter } = require('events');
 const { toolRegistry } = require('../tools');
 const { getRuntimeEnvironment } = require('./runtime-environment');
 const { evaluateRules, describeRule } = require('../tools/permission-rules');
+const { isActingBrowserCall, ownerQuoteInTurn } = require('../tools/browser-acting');
 const path = require('path');
 const { isProtectedCasePath, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
 const { caseToolGuard, caseBrowserProfileGuard } = require('../cases/executors/case-guard');
@@ -97,6 +98,10 @@ class ToolExecutor extends EventEmitter {
     // `allow` permission rule — which is downgraded to `ask`. `deny` rules
     // are untouched, and tools that don't require approval still run.
     this.denyAutoApproval = options.denyAutoApproval === true;
+    // The owner's own message that started this turn (the local chat send
+    // path only). A browser action that changes something runs unasked when
+    // the model's ownerQuote is found in it (src/tools/browser-acting.js).
+    this.ownerTurnText = typeof options.ownerTurnText === 'string' ? options.ownerTurnText : null;
     // Cases stage 2: a wake-up turn may run only these tools, whatever the
     // model names. null means no restriction (every other caller).
     if (options.allowedToolNames instanceof Set) {
@@ -465,17 +470,29 @@ class ToolExecutor extends EventEmitter {
       // above evaluateRules has always claimed and the code did not do. Agent
       // mode's hard-coded list used to win here, leaving the whole `ask` tier
       // inert for Bash, Edit, Write and Git.
-      const autoApproved = this.denyAutoApproval || ruleSaysAsk || tierUnsafe
+      // A browser action that changes something is not covered by either
+      // auto-approve list: only an allow rule for the action (above) or the
+      // owner's own words this turn lift the prompt.
+      const actingBrowser = isActingBrowserCall(toolName, effectiveParameters);
+      const autoApproved = this.denyAutoApproval || ruleSaysAsk || tierUnsafe || actingBrowser
         ? false
         : await this.shouldAutoApprove(toolName, effectiveParameters);
       const agentAutoApproved = !this.denyAutoApproval
         && !ruleSaysAsk
         && !tierUnsafe
+        && !actingBrowser
         && Array.isArray(options.autoApproveTools)
         && options.autoApproveTools.includes(toolName);
+      const ownerQuoted = actingBrowser
+        && !this.denyAutoApproval
+        && !ruleSaysAsk
+        && !tierUnsafe
+        && ownerQuoteInTurn(effectiveParameters?.ownerQuote, this.ownerTurnText);
 
-      if (autoApproved || agentAutoApproved) {
-        approvalSource = { type: agentAutoApproved ? 'agent-config' : 'global-auto-approve' };
+      if (autoApproved || agentAutoApproved || ownerQuoted) {
+        approvalSource = ownerQuoted
+          ? { type: 'owner-quote', quote: effectiveParameters.ownerQuote }
+          : { type: agentAutoApproved ? 'agent-config' : 'global-auto-approve' };
         this.emit('approvalAutoGranted', {
           toolName,
           parameters: effectiveParameters,
@@ -483,7 +500,7 @@ class ToolExecutor extends EventEmitter {
         });
       }
 
-      if (!autoApproved && !agentAutoApproved) {
+      if (!autoApproved && !agentAutoApproved && !ownerQuoted) {
         if (this.denialTracker) {
           const check = this.denialTracker.check(toolName, effectiveParameters);
           if (check.tripped) {

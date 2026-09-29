@@ -1,4 +1,5 @@
 const { Tool } = require('../tool-schema');
+const { OWNER_QUOTE_PARAM } = require('../browser-acting');
 const browserTool = require('./browser-tool');
 
 /**
@@ -42,6 +43,7 @@ All element actions auto-wait for the element to be actionable. Avoid wait_for_l
     type: 'object',
     properties: {
       action: { type: 'string', enum: PAGE_ACTIONS, description: 'Page action.' },
+      ownerQuote: OWNER_QUOTE_PARAM,
 
       // Navigation
       url: { type: 'string', description: 'URL for navigate, wait_for_url.' },

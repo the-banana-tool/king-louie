@@ -1428,6 +1428,10 @@ function suggestAllowPattern(toolName, parameters = {}) {
   if (toolName === 'WebSearch' && typeof parameters.query === 'string') {
     return '*';
   }
+  // Browser rules match the action (src/tools/permission-rules.js).
+  if (/^Browser(Page|Extract|Session)?$/.test(toolName) && typeof parameters.action === 'string') {
+    return parameters.action;
+  }
   return null;
 }
 
@@ -8815,12 +8819,23 @@ if (dom.workingDirBtn) {
 }
 
 // --- Export chat as JSON ---
+// Attachment bytes stay out of the export; name, type, size and a document's
+// extracted text (what the model read) stay in.
+function omitAttachmentBytes(msg) {
+  if (!msg.documents && !msg.images) return msg;
+  const strip = ({ base64, previewUrl, ...rest }) => (base64 ? { ...rest, base64Omitted: true } : rest);
+  const out = { ...msg };
+  if (Array.isArray(msg.documents)) out.documents = msg.documents.map(strip);
+  if (Array.isArray(msg.images)) out.images = msg.images.map(strip);
+  return out;
+}
+
 dom.exportChatBtn.addEventListener('click', () => {
   const chat = appState.chats.find(c => c.id === appState.activeChatId);
   if (!chat) return;
 
   // Enrich messages: extract XML tool blocks from assistant text into structured toolCalls
-  const enrichedMessages = chat.messages.map((msg) => {
+  const enrichedMessages = chat.messages.map(omitAttachmentBytes).map((msg) => {
     if (msg.sender !== 'assistant' || !msg.text) return msg;
     const { cleanText, toolBlocks } = extractXmlToolBlocks(msg.text);
     if (toolBlocks.length === 0) return msg;

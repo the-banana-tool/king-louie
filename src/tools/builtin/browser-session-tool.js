@@ -1,4 +1,5 @@
 const { Tool } = require('../tool-schema');
+const { OWNER_QUOTE_PARAM } = require('../browser-acting');
 const browserTool = require('./browser-tool');
 
 /**
@@ -43,6 +44,7 @@ PREFER HIGH-LEVEL: login / signup / fill_payment auto-detect fields across sites
     type: 'object',
     properties: {
       action: { type: 'string', enum: SESSION_ACTIONS, description: 'Session action.' },
+      ownerQuote: OWNER_QUOTE_PARAM,
 
       // Lifecycle / profile
       profile: { type: 'string', description: 'Named persistent profile [A-Za-z0-9_-], max 64. Cookies/localStorage persist between runs.' },

@@ -406,7 +406,7 @@ class DiscordChannel extends ChannelPlugin {
       const requester = String(requesterUserId == null ? '' : requesterUserId).trim();
       const { target: approverChannelId, reason } = this.resolveApprover(origin);
       if (!approverChannelId) {
-        log.warn(`denied ${toolName} requested from discord:${origin} — ${reason}`);
+        log.warn(`denied ${toolName} requested from discord:${origin}: ${reason}`);
         return false;
       }
 
@@ -911,7 +911,7 @@ class DiscordChannel extends ChannelPlugin {
       actorAllowed: Boolean(this.allowlistManager?.isAllowedUser('discord', actorId))
     });
     if (!press.ok) {
-      log.warn(`rejected approval press for ${approvalId} in discord:${interaction.channelId} — ${press.reason}`);
+      log.warn(`rejected approval press for ${approvalId} in discord:${interaction.channelId}: ${press.reason}`);
       await interaction.reply({ content: 'You are not allowed to approve this action.', ephemeral: true });
       return;
     }

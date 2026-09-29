@@ -446,7 +446,7 @@ class AcmeManager extends EventEmitter {
     this._install(issued);
     this._succeeded();
     const event = { oldSpki, newSpki: this.leafSpki() };
-    log.warn(`rotated the mcp. key ${oldSpki} → ${event.newSpki}: every phone must re-pin`);
+    log.warn(`rotated the mcp. key ${oldSpki} -> ${event.newSpki}: every phone must re-pin`);
     await this._announce(event);
     return event;
   }

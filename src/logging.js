@@ -17,6 +17,32 @@ let globalLevel = LOG_LEVELS[
 
 let subsystemFilters = null;
 
+// A Windows console on its default code page (437) reads the UTF-8 bytes of
+// "—" as "ΓÇö", and log text carries model output, tool errors and file names
+// as well as our own messages. There the console gets an ASCII fold; sinks
+// keep the original text.
+const CONSOLE_ASCII = process.platform === 'win32';
+const TYPOGRAPHIC = {
+  '—': '-', '–': '-', '‐': '-', '‑': '-', '−': '-',
+  '→': '->', '←': '<-', '⇒': '=>', '↔': '<->',
+  '…': '...', '‘': "'", '’': "'", '“': '"', '”': '"',
+  '•': '*', '·': '*', '×': 'x', '≥': '>=', '≤': '<=', '≠': '!=',
+  '✓': 'v', '✔': 'v', '✗': 'x', '✖': 'x', ' ': ' '
+};
+
+function asciiConsoleText(text) {
+  if (!/[^\x00-\x7f]/.test(text)) return text;
+  return text
+    .replace(/[^\x00-\x7f]/g, (c) => TYPOGRAPHIC[c] ?? c)
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^\x00-\x7f]/gu, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, '0')}`);
+}
+
+function consoleText(text) {
+  return CONSOLE_ASCII && typeof text === 'string' ? asciiConsoleText(text) : text;
+}
+
 // Extra destinations for log records, alongside the console (e.g. the service
 // host's log file). Each sink receives
 // { time, level, subsystem, message, meta, line } for every record that
@@ -88,9 +114,9 @@ function createLogger(subsystem) {
       const tag = `[${subsystem}]`;
       const suffix = formatMeta(meta);
       if (suffix) {
-        console[consoleFn](tag, message + suffix);
+        console[consoleFn](tag, consoleText(message + suffix));
       } else {
-        console[consoleFn](tag, message);
+        console[consoleFn](tag, consoleText(message));
       }
       emitToSinks(level, subsystem, message, meta);
     };
@@ -123,7 +149,7 @@ function createBoundLogger(subsystem, boundMeta) {
       if (!isSubsystemEnabled(subsystem)) return;
       const merged = meta ? { ...boundMeta, ...meta } : boundMeta;
       const tag = `[${subsystem}]`;
-      console[consoleFn](tag, message + formatMeta(merged));
+      console[consoleFn](tag, consoleText(message + formatMeta(merged)));
       emitToSinks(level, subsystem, message, merged);
     };
   }
@@ -151,5 +177,6 @@ module.exports = {
   getLogLevel,
   setSubsystemFilter,
   addSink,
+  asciiConsoleText,
   LOG_LEVELS,
 };

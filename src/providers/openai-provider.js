@@ -34,6 +34,14 @@ function temperatureParam(model, options = {}) {
   return supportsTemperature(model) ? { temperature: options.temperature ?? 0.7 } : {};
 }
 
+// Chat Completions content parts, as the Responses API names them.
+function toResponsesPart(part) {
+  if (part?.type === 'text') return { type: 'input_text', text: part.text };
+  if (part?.type === 'image_url') return { type: 'input_image', image_url: part.image_url?.url };
+  if (part?.type === 'file') return { type: 'input_file', filename: part.file?.filename, file_data: part.file?.file_data };
+  return part;
+}
+
 // Track models that rejected temperature at runtime so we don't retry every call
 const _noTempModels = new Set();
 
@@ -384,9 +392,9 @@ class OpenAIProvider extends BaseLLMProvider {
         continue;
       }
 
-      // Regular message: system→developer, everything else passes through
+      // Regular message: system→developer, content parts in Responses types
       const role = msg.role === 'system' ? 'developer' : msg.role;
-      input.push({ role, content: msg.content });
+      input.push({ role, content: Array.isArray(msg.content) ? msg.content.map(toResponsesPart) : msg.content });
     }
 
     return input;

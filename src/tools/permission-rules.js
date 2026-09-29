@@ -46,7 +46,13 @@ const TOOL_KEY_FIELDS = {
   // Vault key namespace: lets users pre-allow per-prefix patterns like
   // `browser_cred:*` so common credential storage doesn't re-prompt for every
   // new profile name.
-  Vault: 'key'
+  Vault: 'key',
+  // The browser tools match on the action, so `allow Browser(click)` is an
+  // explicit grant for one kind of action (src/tools/browser-acting.js).
+  Browser: 'action',
+  BrowserPage: 'action',
+  BrowserExtract: 'action',
+  BrowserSession: 'action'
 };
 
 function compilePattern(pattern) {

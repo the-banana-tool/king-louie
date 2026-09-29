@@ -171,7 +171,7 @@ class ShadowGit {
       this._available = true;
     } catch {
       this._available = false;
-      log.warn(`git not available at "${this.gitPath}" — checkpoints are disabled`);
+      log.warn(`git not available at "${this.gitPath}"; checkpoints are disabled`);
     }
     return this._available;
   }

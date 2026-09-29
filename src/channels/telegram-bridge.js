@@ -822,7 +822,7 @@ class TelegramBridge extends ChannelPlugin {
       const requester = String(requesterUserId == null ? '' : requesterUserId).trim();
       const { target: approverChatId, reason } = this.resolveApprover(origin);
       if (!approverChatId) {
-        log.warn(`denied ${toolName} requested from telegram:${origin} — ${reason}`);
+        log.warn(`denied ${toolName} requested from telegram:${origin}: ${reason}`);
         return false;
       }
 
@@ -901,7 +901,7 @@ class TelegramBridge extends ChannelPlugin {
       actorAllowed: Boolean(this.allowlistManager?.isAllowedUser('telegram', actorId))
     });
     if (!press.ok) {
-      log.warn(`rejected approval press for ${approvalId} in telegram:${chatId} — ${press.reason}`);
+      log.warn(`rejected approval press for ${approvalId} in telegram:${chatId}: ${press.reason}`);
       await this.answerCallbackQuery(callbackId, 'You are not allowed to approve this action.');
       return;
     }

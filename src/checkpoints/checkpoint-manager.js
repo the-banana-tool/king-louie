@@ -77,7 +77,7 @@ class CheckpointManager {
 
     if (!this.git) {
       this.enabled = false;
-      log.warn('No rootDir supplied — checkpoints disabled');
+      log.warn('No rootDir supplied: checkpoints disabled');
     }
 
     /**

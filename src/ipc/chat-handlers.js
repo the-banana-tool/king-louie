@@ -310,6 +310,9 @@ function registerChatHandlers(ipcMain, context = {}) {
 
   ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], documents = [], agentMode = false, sandboxMode = true }) => {
     let safeMessage = String(message || '');
+    // The owner's words as sent, before any hook rewrites them: a browser
+    // action that changes something may quote them instead of prompting.
+    const ownerTurnText = safeMessage;
     const normalizedImages = ImageHandler.normalizeMessageImages(images);
     const normalizedDocuments = ImageHandler.normalizeMessageDocuments(documents);
 
@@ -493,7 +496,7 @@ function registerChatHandlers(ipcMain, context = {}) {
           });
           const origTokens = Math.ceil(allContentMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
           const compTokens = Math.ceil(chatMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
-          log.info(`Compacted ${allContentMessages.length} messages → ${chatMessages.length} messages (~${origTokens} → ~${compTokens} tokens, ${Math.round((1 - compTokens / origTokens) * 100)}% reduction)`);
+          log.info(`Compacted ${allContentMessages.length} messages -> ${chatMessages.length} messages (~${origTokens} -> ~${compTokens} tokens, ${Math.round((1 - compTokens / origTokens) * 100)}% reduction)`);
         } catch (err) {
           log.warn(`Conversation compaction failed, using full history: ${err.message}`);
         }
@@ -620,6 +623,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         turnModels,
         // SpawnAgent children report their calls here (spec §10).
         onSubagentLlm: (run) => { subagentRuns.push(run); },
+        ownerTurnText,
         caseContext: caseTurn ? caseRuntime.caseContext(caseTurn, { ownerMessages, ownerMessageTimes }) : null
       });
 

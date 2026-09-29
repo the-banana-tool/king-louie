@@ -174,16 +174,10 @@ class MCPClient extends EventEmitter {
   _onData(data) {
     this._buffer += data.toString();
 
-    // MCP uses Content-Length header framing (like LSP)
+    // MCP stdio is one JSON message per line. Content-Length header framing
+    // (like LSP) is still accepted from servers that send it.
     while (this._buffer.length > 0) {
-      const headerEnd = this._buffer.indexOf('\r\n\r\n');
-      if (headerEnd === -1) break;
-
-      const header = this._buffer.substring(0, headerEnd);
-      const contentLengthMatch = header.match(/Content-Length:\s*(\d+)/i);
-
-      if (!contentLengthMatch) {
-        // No Content-Length header — try parsing as raw JSON lines
+      if (!/^\s*Content-Length:/i.test(this._buffer)) {
         const lineEnd = this._buffer.indexOf('\n');
         if (lineEnd === -1) break;
 
@@ -193,6 +187,11 @@ class MCPClient extends EventEmitter {
         continue;
       }
 
+      const headerEnd = this._buffer.indexOf('\r\n\r\n');
+      if (headerEnd === -1) break;
+
+      const header = this._buffer.substring(0, headerEnd);
+      const contentLengthMatch = header.match(/Content-Length:\s*(\d+)/i);
       const contentLength = parseInt(contentLengthMatch[1], 10);
       const bodyStart = headerEnd + 4;
 
@@ -238,7 +237,7 @@ class MCPClient extends EventEmitter {
         params
       });
 
-      const frame = `Content-Length: ${Buffer.byteLength(message)}\r\n\r\n${message}`;
+      const frame = `${message}\n`;
 
       const timer = setTimeout(() => {
         this._pendingRequests.delete(id);
@@ -263,7 +262,7 @@ class MCPClient extends EventEmitter {
       method,
       params
     });
-    const frame = `Content-Length: ${Buffer.byteLength(message)}\r\n\r\n${message}`;
+    const frame = `${message}\n`;
     try {
       this._process.stdin.write(frame);
     } catch {

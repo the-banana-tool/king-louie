@@ -179,7 +179,7 @@ class RelayClient extends EventEmitter {
           // once an hour (§3.9, §9).
           if (this.now() - this.lastMismatchLogAt >= FRONT_DOOR_BACKOFF.mismatchLogEveryMs) {
             this.lastMismatchLogAt = this.now();
-            log.error(`${err.message} — the front door at ${this.frontDoorPin.mesh_url} is not the one this node paired with; run doctor`);
+            log.error(`${err.message}: the front door at ${this.frontDoorPin.mesh_url} is not the one this node paired with; run doctor`);
           }
           this._handleLinkDown('frontdoor_key_mismatch');
           return;

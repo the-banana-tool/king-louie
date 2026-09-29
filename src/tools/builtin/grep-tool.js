@@ -2,7 +2,7 @@ const { Tool } = require('../tool-schema');
 const fs = require('fs');
 const path = require('path');
 const fg = require('fast-glob');
-const { describePathDenial, isProtectedSecretPath } = require('../utils');
+const { describePathDenial, isProtectedSecretPath, toolDisplayPath } = require('../utils');
 const { boundedGlobOptions } = require('../bounded-walk');
 const { isPathUnderRoots } = require('../../platform/path-roots');
 
@@ -53,9 +53,9 @@ const grepTool = new Tool({
 
     const workingDirectory = context?.workingDirectory || process.cwd();
     const allowedDirectories = context?.allowedDirectories || [];
-    const baseDir = searchPath || workingDirectory;
+    const baseDir = path.resolve(workingDirectory, searchPath || '.');
 
-    const denial = describePathDenial(path.resolve(baseDir), workingDirectory, allowedDirectories);
+    const denial = describePathDenial(baseDir, workingDirectory, allowedDirectories);
     if (denial) {
       return { ok: false, error: denial };
     }
@@ -124,7 +124,7 @@ const grepTool = new Tool({
             }
 
             matches.push({
-              file: isDir ? path.relative(baseDir, file) : file,
+              file: toolDisplayPath(path.resolve(file), workingDirectory),
               line: lines[i],
               lineNumber: i + 1,
               ...(contextResult !== undefined && { context: contextResult })

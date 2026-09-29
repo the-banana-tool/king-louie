@@ -33,7 +33,7 @@ class OperatorTls {
     this.context = context;
     this.cert = { chain, notBefore: Date.parse(leaf.validFrom), notAfter: Date.parse(leaf.validTo), spki };
     if (oldSpki && oldSpki !== spki) {
-      log.error(`the mcp. certificate key changed (${oldSpki} → ${spki}): every phone must re-pin (relay qr, or rotate-tls-key under ACME)`);
+      log.error(`the mcp. certificate key changed (${oldSpki} -> ${spki}): every phone must re-pin (relay qr, or rotate-tls-key under ACME)`);
       if (this.alerts) {
         try {
           this.alerts.raise('tls_key_changed', { subject: this.host, detail: { old_spki: oldSpki, new_spki: spki } });

@@ -1,7 +1,7 @@
 const Tool = require('../tool-schema').Tool;
 const fg = require('fast-glob');
 const path = require('path');
-const { describePathDenial, isProtectedSecretPath } = require('../utils');
+const { describePathDenial, isProtectedSecretPath, toolDisplayPath } = require('../utils');
 const { boundedGlobOptions } = require('../bounded-walk');
 const { isPathUnderRoots } = require('../../platform/path-roots');
 
@@ -24,9 +24,7 @@ const globTool = new Tool({
     const { pattern, cwd, maxResults = 100, type: matchType = 'all' } = params;
     const workingDirectory = context?.workingDirectory || process.cwd();
     const allowedDirectories = context?.allowedDirectories || [];
-    const baseDir = cwd || workingDirectory;
-
-    const resolvedBase = path.resolve(baseDir);
+    const resolvedBase = path.resolve(workingDirectory, cwd || '.');
 
     const denial = describePathDenial(resolvedBase, workingDirectory, allowedDirectories);
     if (denial) {
@@ -72,7 +70,7 @@ const globTool = new Tool({
       files.sort((a, b) => (b.stats?.mtimeMs || 0) - (a.stats?.mtimeMs || 0));
 
       const results = files.slice(0, maxResults).map(f => ({
-        path: f.path || f,
+        path: toolDisplayPath(path.resolve(resolvedBase, f.path || f), workingDirectory),
         type: f.dirent?.isDirectory() ? 'directory' : 'file',
         modified: f.stats?.mtime?.toISOString() || null
       }));

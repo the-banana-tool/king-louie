@@ -1,4 +1,5 @@
 const { Tool } = require('../tool-schema');
+const { OWNER_QUOTE_PARAM } = require('../browser-acting');
 const browserTool = require('./browser-tool');
 
 /**
@@ -30,6 +31,7 @@ Console: returns recent browser console output.`,
     type: 'object',
     properties: {
       action: { type: 'string', enum: EXTRACT_ACTIONS, description: 'Extract action.' },
+      ownerQuote: OWNER_QUOTE_PARAM,
 
       // Element selectors
       selector: { type: 'string', description: 'Element selector for get_text/get_attribute/get_value/is_visible/count/bounding_box.' },

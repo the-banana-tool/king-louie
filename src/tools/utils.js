@@ -325,7 +325,17 @@ function evaluateDangerousCommand(command = '', patterns = DEFAULT_DANGEROUS_COM
   };
 }
 
+// A path a search tool returns, in the form Read resolves back to the same
+// file: relative to the working directory (with /) when under it, else
+// absolute.
+function toolDisplayPath(absPath, workingDirectory) {
+  const rel = path.relative(path.resolve(workingDirectory), absPath);
+  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.split(path.sep).join('/');
+  return absPath;
+}
+
 module.exports = {
+  toolDisplayPath,
   isPathWithin,
   isPathAllowed,
   isProtectedSecretPath,

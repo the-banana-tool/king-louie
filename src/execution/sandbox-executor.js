@@ -8,6 +8,21 @@ const log = createLogger('sandbox-executor');
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
+// Children print UTF-8 even when Python would default to the console code
+// page (cp1252 on Windows) and crash writing a character like "—".
+function hostChildEnv() {
+  return { ...process.env, PYTHONUTF8: '1' };
+}
+
+// The argv Node itself builds for `shell: true`. cmd.exe needs /s and the
+// command in one pair of quotes, passed verbatim: spawn's default quoting
+// escapes every " inside as \", which cmd hands on to the program as is.
+function hostShellArgs(command) {
+  return process.platform === 'win32'
+    ? { args: ['/d', '/s', '/c', `"${command}"`], windowsVerbatimArguments: true }
+    : { args: ['-c', command], windowsVerbatimArguments: false };
+}
+
 class SandboxExecutor {
   constructor(config = {}) {
     this.config = { ...SANDBOX_CONFIG, ...config };
@@ -234,6 +249,7 @@ class SandboxExecutor {
         timeout: Math.min(timeout, 600000),
         maxBuffer: 10 * 1024 * 1024,
         cwd: options.workingDirectory || process.cwd(),
+        env: hostChildEnv(),
         shell: true,
         signal: options.signal || undefined
       });
@@ -278,11 +294,13 @@ class SandboxExecutor {
     const hostShell = process.platform === 'win32'
       ? (process.env.ComSpec || 'cmd.exe')
       : (process.env.SHELL || '/bin/sh');
-    const shellArgs = process.platform === 'win32' ? ['/c', command] : ['-c', command];
+    const { args: shellArgs, windowsVerbatimArguments } = hostShellArgs(command);
 
     return new Promise((resolve) => {
       const child = spawn(hostShell, shellArgs, {
         cwd,
+        env: hostChildEnv(),
+        windowsVerbatimArguments,
         stdio: ['ignore', 'pipe', 'pipe'],
         signal: options.signal || undefined,
         timeout: Math.min(timeout, 600000)

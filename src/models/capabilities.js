@@ -3,8 +3,9 @@
 // InferenceRouter.getCapabilities and keeps its four keys, so its callers
 // (agent runtime, case ingest) did not have to change.
 
-// ImageHandler.formatDocumentForProvider sends a one-page PDF as a document
-// only to these; the others get the page image.
+// Case ingest sends a one-page PDF as a document only to these; the others
+// get the page image. (Chat attachments also go to OpenAI as a file part;
+// ingest keeps page images there.)
 const PDF_DOCUMENT_PROVIDERS = Object.freeze(['anthropic', 'gemini']);
 
 function capabilitiesOf(catalog, provider, model) {

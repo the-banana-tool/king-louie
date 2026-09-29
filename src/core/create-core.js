@@ -2117,6 +2117,9 @@ function createCore(deps = {}) {
       turnModels: executorOptions.turnModels || null,
       // A sub-agent's calls roll up into the turn's reply (spec §10).
       onSubagentLlm: executorOptions.onSubagentLlm || null,
+      // The owner's message for this turn (local chat send only): a browser
+      // action that changes something may quote it instead of prompting.
+      ownerTurnText: typeof executorOptions.ownerTurnText === 'string' ? executorOptions.ownerTurnText : null,
       runtimeEnvironment: resolvedRuntimeEnvironment,
       // approvalRequester, denyAutoApproval, localOrigin and origin, plus in
       // phone mode approvalTimeoutMs and classifyCall. denyAutoApproval closes
@@ -2596,7 +2599,7 @@ function createCore(deps = {}) {
     const vaultEnvResolver = createVaultEnvResolver({
       vaultStore,
       decryptToken,
-      onMissing: (key) => mcpLog.warn(`Vault key not found: "${key}" — env value left unresolved`)
+      onMissing: (key) => mcpLog.warn(`Vault key not found: "${key}"; env value left unresolved`)
     });
     mcpManager = new MCPManager({ toolRegistry, envResolver: vaultEnvResolver });
     const mcpServers = getSettings().mcpServers || {};

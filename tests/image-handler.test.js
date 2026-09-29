@@ -229,14 +229,15 @@ describe('ImageHandler', () => {
     assert.strictEqual(result.inlineData.data, base64);
   });
 
-  it('formats PDF as text fallback for OpenAI', () => {
+  it('formats PDF as a file part for OpenAI', () => {
     const base64 = Buffer.from('fake-pdf').toString('base64');
     const doc = { base64, mimeType: 'application/pdf', name: 'report.pdf' };
 
     const result = ImageHandler.formatDocumentForProvider('openai', doc);
-    assert.strictEqual(result.type, 'text');
-    assert.ok(result.text.includes('report.pdf'));
-    assert.ok(result.text.includes('not extractable'));
+    assert.deepStrictEqual(result, {
+      type: 'file',
+      file: { filename: 'report.pdf', file_data: `data:application/pdf;base64,${base64}` }
+    });
   });
 
   it('formats Excel documents as CSV text', () => {
@@ -263,6 +264,6 @@ describe('ImageHandler', () => {
     assert.ok(textResult.text.includes('--- document ---'));
 
     const pdfResult = ImageHandler.formatDocumentForProvider('openai', { base64, mimeType: 'application/pdf' });
-    assert.ok(pdfResult.text.includes('document.pdf'));
+    assert.strictEqual(pdfResult.file.filename, 'document.pdf');
   });
 });

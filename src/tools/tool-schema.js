@@ -1,3 +1,16 @@
+function matchesType(type, value) {
+  switch (type) {
+    case 'string': return typeof value === 'string';
+    case 'number': return typeof value === 'number';
+    case 'integer': return Number.isInteger(value);
+    case 'boolean': return typeof value === 'boolean';
+    case 'array': return Array.isArray(value);
+    case 'object': return typeof value === 'object' && !Array.isArray(value);
+    case 'null': return value === null;
+    default: return true; // a type this validator does not know is not refused
+  }
+}
+
 class Tool {
   constructor(config = {}) {
     if (!config.name) throw new Error('Tool name is required');
@@ -42,22 +55,17 @@ class Tool {
       const value = params[key];
       if (!descriptor.type) continue;
 
-      const typeOk =
-        (descriptor.type === 'string' && typeof value === 'string') ||
-        (descriptor.type === 'number' && typeof value === 'number') ||
-        (descriptor.type === 'boolean' && typeof value === 'boolean') ||
-        (descriptor.type === 'array' && Array.isArray(value)) ||
-        (descriptor.type === 'object' && typeof value === 'object' && !Array.isArray(value));
-
-      if (!typeOk) {
-        throw new Error(`Invalid type for parameter '${key}'. Expected ${descriptor.type}.`);
+      // JSON Schema allows a list of types (MCP servers send ["integer", "null"]).
+      const types = Array.isArray(descriptor.type) ? descriptor.type : [descriptor.type];
+      if (!types.some((type) => matchesType(type, value))) {
+        throw new Error(`Invalid type for parameter '${key}'. Expected ${types.join(' or ')}.`);
       }
 
       if (Array.isArray(descriptor.enum) && !descriptor.enum.includes(value)) {
         throw new Error(`Invalid value for parameter '${key}'. Expected one of: ${descriptor.enum.join(', ')}`);
       }
 
-      if (descriptor.type === 'number') {
+      if (typeof value === 'number') {
         if (typeof descriptor.minimum === 'number' && value < descriptor.minimum) {
           throw new Error(`Parameter '${key}' must be >= ${descriptor.minimum}`);
         }

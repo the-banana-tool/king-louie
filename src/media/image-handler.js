@@ -172,7 +172,12 @@ class ImageHandler {
           }
         };
       }
-      // OpenAI doesn't support PDF natively - include as a note
+      if (provider === 'openai') {
+        return {
+          type: 'file',
+          file: { filename: name || 'document.pdf', file_data: `data:application/pdf;base64,${base64}` }
+        };
+      }
       return { type: 'text', text: `--- ${name || 'document.pdf'} ---\n[PDF file attached - content not extractable in this provider]\n--- end ---` };
     }
 

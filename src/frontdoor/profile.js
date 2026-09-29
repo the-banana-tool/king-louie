@@ -166,7 +166,7 @@ function warnAboutF3Nodes(dataDir) {
   }
   if (Array.isArray(rows) && rows.length) {
     const names = rows.slice(0, 20).map((r) => (r && typeof r.node_name === 'string' && NODE_NAME_RE.test(r.node_name) ? r.node_name : '?')).join(', ');
-    log.warn(`relay nodes.json lists ${names}${rows.length > 20 ? ', …' : ''}: F3 relay records are not used by a front door; run "king-louie-service pair https://mcp.<domain>" on each`);
+    log.warn(`relay nodes.json lists ${names}${rows.length > 20 ? ', ...' : ''}: F3 relay records are not used by a front door; run "king-louie-service pair https://mcp.<domain>" on each`);
   }
 }
 
