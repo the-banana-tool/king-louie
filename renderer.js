@@ -1394,11 +1394,7 @@ function addStatusMessage(text) {
     timestamp: new Date().toISOString()
   };
   // Update local state so re-renders preserve it
-  const chat = appState.chats.find((c) => c.id === chatId);
-  if (chat) {
-    chat.messages = chat.messages || [];
-    chat.messages.push(msg);
-  }
+  pushLoadedMessage(appState.chats.find((c) => c.id === chatId), msg);
   window.electron.chat.addMessage({ chatId, sender: 'status', text }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 }
 
@@ -1662,6 +1658,45 @@ async function ensureChatMessagesLoaded(chatId = appState.activeChatId) {
   return mergeChatIntoState(chat);
 }
 
+// The renderer holds only the active chat's messages (recall spec §4.4);
+// every other chat keeps the metadata the sidebar needs. Runs on every
+// refresh, so a chat left behind by a switch, or a full chat an IPC reply
+// handed back, drops its messages; selecting it again loads them through
+// chat:get (ensureChatMessagesLoaded).
+function dropInactiveChatMessages(chats, activeChatId) {
+  for (const chat of chats) {
+    if (!chat || chat.id === activeChatId || !Array.isArray(chat.messages)) continue;
+    const messages = chat.messages;
+    const visible = messages.filter((m) => m && (m.sender === 'user' || m.sender === 'assistant'));
+    const last = visible[visible.length - 1] || messages[messages.length - 1] || null;
+    chat.messageCount = messages.length;
+    chat.userMessageCount = messages.filter((m) => m?.sender === 'user').length;
+    chat.assistantMessageCount = messages.filter((m) => m?.sender === 'assistant').length;
+    chat.preview = last?.text || '';
+    chat.lastMessageText = last?.text || '';
+    chat.lastMessageAt = last?.timestamp || null;
+    delete chat.messages;
+  }
+}
+
+// A message the renderer adds itself (a status line, a workflow goal) joins
+// a chat's local list only when that list is loaded: pushing into an
+// unloaded chat would make it look loaded with that one message. It is
+// persisted through IPC either way.
+function pushLoadedMessage(chat, message) {
+  if (chat && Array.isArray(chat.messages)) chat.messages.push(message);
+}
+
+function historyNoticeText(history) {
+  if (!history || typeof history !== 'object') return null;
+  if (history.available === false) {
+    return `Chats are unavailable: ${history.error || 'the history store did not open'}. See the log.`;
+  }
+  const failed = Number(history.migrationFailed) || 0;
+  if (failed > 0) return `${failed} ${failed === 1 ? 'chat' : 'chats'} could not be migrated; see log`;
+  return null;
+}
+
 function getChatPreview(chat) {
   const messages = chat.messages || [];
   const lastVisible = messages.findLast((m) => m.sender === 'user' || m.sender === 'assistant');
@@ -1730,6 +1765,12 @@ function formatTokenCount(value = 0) {
 
 function renderChatList() {
   dom.chatList.innerHTML = '';
+  if (appState.historyStatus?.available === false) {
+    const note = document.createElement('div');
+    note.className = 'chat-list-error';
+    note.textContent = historyNoticeText(appState.historyStatus);
+    dom.chatList.appendChild(note);
+  }
 
   appState.chats.forEach((chat) => {
     const chatItem = document.createElement('div');
@@ -3266,6 +3307,7 @@ function renderChatMessages() {
 }
 
 function refreshUI() {
+  dropInactiveChatMessages(appState.chats, appState.activeChatId);
   renderChatList();
   renderChatMessages();
   updateEmptyState();
@@ -5365,18 +5407,15 @@ async function persistProposedPlan(chatId, goal, taskGraph, kind = 'proposed') {
   }
 
   const chatObj = appState.chats.find((c) => c.id === chatId);
-  if (chatObj) {
-    chatObj.messages = chatObj.messages || [];
-    chatObj.messages.push({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      sender: 'assistant',
-      text,
-      workflowScaffolding: scaffolding,
-      timestamp: new Date().toISOString()
-    });
-    if (chatId === appState.activeChatId) {
-      addMessage('assistant', text);
-    }
+  pushLoadedMessage(chatObj, {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    sender: 'assistant',
+    text,
+    workflowScaffolding: scaffolding,
+    timestamp: new Date().toISOString()
+  });
+  if (chatObj && chatId === appState.activeChatId) {
+    addMessage('assistant', text);
   }
 }
 
@@ -5388,15 +5427,12 @@ async function persistProposedPlan(chatId, goal, taskGraph, kind = 'proposed') {
 function appendStatusToChat(chatId, text) {
   if (!chatId) return;
   const chat = appState.chats.find((c) => c.id === chatId);
-  if (chat) {
-    chat.messages = chat.messages || [];
-    chat.messages.push({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      sender: 'status',
-      text,
-      timestamp: new Date().toISOString()
-    });
-  }
+  pushLoadedMessage(chat, {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    sender: 'status',
+    text,
+    timestamp: new Date().toISOString()
+  });
   if (chatId === appState.activeChatId) {
     addToolEventCompact('Workflow', { message: text }, 'info', false);
   }
@@ -5718,8 +5754,7 @@ async function handleChatPlanAndExecute() {
     text: goal,
     timestamp: new Date().toISOString()
   };
-  chat.messages = chat.messages || [];
-  chat.messages.push(goalMsg);
+  pushLoadedMessage(chat, goalMsg);
   if (chatId === appState.activeChatId) {
     addMessage('user', goal);
   }
@@ -5811,17 +5846,14 @@ async function handleChatPlanAndExecute() {
           workflowScaffolding: true
         });
         const chatObj = appState.chats.find((c) => c.id === chatId);
-        if (chatObj) {
-          chatObj.messages = chatObj.messages || [];
-          chatObj.messages.push({
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-            sender: 'assistant',
-            text: diagnosticText,
-            workflowScaffolding: true,
-            timestamp: new Date().toISOString()
-          });
-          if (chatId === appState.activeChatId) renderChatMessages();
-        }
+        pushLoadedMessage(chatObj, {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+          sender: 'assistant',
+          text: diagnosticText,
+          workflowScaffolding: true,
+          timestamp: new Date().toISOString()
+        });
+        if (chatObj && chatId === appState.activeChatId) renderChatMessages();
         return;
       }
       throw new Error(result?.error || 'Planning failed');
@@ -8422,6 +8454,12 @@ if (dom.chatMainSelect) {
 async function loadChats() {
   const data = unwrapIpcResult(await window.electron.chat.load(), 'Unable to load chats.');
   appState.chats = data.chats || [];
+  appState.historyStatus = data.history || null;
+  const historyNotice = historyNoticeText(appState.historyStatus);
+  if (historyNotice && appState.historyStatus.available !== false && !appState.historyNoticeShown) {
+    appState.historyNoticeShown = true;
+    showNotice(historyNotice);
+  }
   appState.activeChatId = data.activeChatId || appState.chats[0]?.id || null;
   if (appState.activeChatId) {
     await ensureChatMessagesLoaded(appState.activeChatId);
@@ -8521,6 +8559,7 @@ async function handleDeleteChat(chatId) {
   const result = unwrapIpcResult(await window.electron.chat.remove(chatId), 'Unable to delete chat.');
   appState.chats = result.chats || [];
   appState.activeChatId = result.activeChatId || appState.chats[0]?.id || null;
+  await ensureChatMessagesLoaded(appState.activeChatId);
   refreshUI();
 }
 
