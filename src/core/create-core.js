@@ -2265,7 +2265,7 @@ function createCore(deps = {}) {
   // chat's profile and main override, else the default profile. In a case
   // chat the override lives in case.yaml, so unattended turns follow it.
   const snapshotModels = ({ chatId = null, caseId = null, profileId = null } = {}) => {
-    const chat = chatId ? getChats().find((c) => c.id === chatId) || null : null;
+    const chat = chatId ? getChat(chatId, { messages: false }) || null : null;
     const theCaseId = caseId || chat?.caseId || null;
     const caseChoice = readCaseModelChoice(theCaseId);
     const chosen = profileId || caseChoice?.profile || chat?.profileId || null;

@@ -95,4 +95,39 @@ describe('chat history retrieval IPC', () => {
       ['chat-1', ['agentMode', 'updatedAt']]
     ]);
   });
+
+  it('routes single-chat reads and truncation through the history facade when present', async () => {
+    const chat = {
+      id: 'chat-1',
+      title: 'Chat',
+      messages: [
+        { id: 'm1', sender: 'user', text: 'one' },
+        { id: 'm2', sender: 'assistant', text: 'two' },
+        { id: 'm3', sender: 'user', text: 'three' }
+      ]
+    };
+    const calls = [];
+    const handlers = setup([chat], chat.id, {
+      getChat: (chatId, options) => {
+        calls.push({ method: 'getChat', chatId, options });
+        return chatId === chat.id ? chat : null;
+      },
+      updateChat: (chatId, patch) => {
+        calls.push({ method: 'updateChat', chatId, patch });
+        Object.assign(chat, patch);
+        return { ...chat };
+      }
+    });
+
+    const result = await handlers.get(IPC.CHAT_TRUNCATE_FROM)({}, { chatId: chat.id, fromIndex: 2 });
+
+    assert.strictEqual(result.data.messages.length, 2);
+    assert.deepStrictEqual(chat.messages.map((m) => m.id), ['m1', 'm2']);
+    assert.deepStrictEqual(calls.map((call) => [call.method, call.chatId]), [
+      ['getChat', 'chat-1'],
+      ['updateChat', 'chat-1']
+    ]);
+    assert.deepStrictEqual(calls[0].options, { messages: true });
+    assert.deepStrictEqual(Object.keys(calls[1].patch).sort(), ['messages', 'updatedAt']);
+  });
 });

@@ -102,6 +102,16 @@ function registerChatHandlers(ipcMain, context = {}) {
 
   const setFullChats = (chats) => setChats(chats);
 
+  const findChat = (chatId, options = { messages: true }) => {
+    const id = String(chatId || '').trim();
+    if (!id) return null;
+    if (typeof context.getChat === 'function') {
+      const chat = context.getChat(id, options);
+      if (chat && typeof chat === 'object') return chat;
+    }
+    return fullChats().find((item) => item.id === id) || null;
+  };
+
   const patchChat = (chatId, patch = {}) => {
     const id = String(chatId || '').trim();
     if (!id) return null;
@@ -159,13 +169,8 @@ function registerChatHandlers(ipcMain, context = {}) {
       const cleaned = String(text || '').replace(/^["']|["'.!]$/g, '').trim();
       if (!cleaned) return;
 
-      const chats = getChats();
-      const updated = chats.map((chat) =>
-        chat.id === chatId
-          ? { ...chat, title: cleaned, updatedAt: new Date().toISOString() }
-          : chat
-      );
-      setChats(updated);
+      patchChat(chatId, { title: cleaned, updatedAt: new Date().toISOString() });
+      const updated = fullChats();
 
       // Notify the renderer so the sidebar updates
       if (sender && !sender.isDestroyed()) {
@@ -320,7 +325,7 @@ function registerChatHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CHAT_SPEAK_LAST, wrapHandler(IPC.CHAT_SPEAK_LAST, async (_event, { chatId, summary = false } = {}) => {
-    const chat = getChats().find((item) => item.id === chatId);
+    const chat = findChat(chatId, { messages: true });
     if (!chat) {
       return { ok: false, error: 'Chat not found.' };
     }
@@ -361,7 +366,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     }
 
     // Resolve working directory: per-chat > process.cwd()
-    const chatForDir = getChats().find((item) => item.id === chatId);
+    const chatForDir = findChat(chatId, { messages: true });
     const chatWorkingDirectory = chatForDir?.workingDirectory || process.cwd();
     const settings = typeof getSettings === 'function' ? getSettings() : {};
     const allowedDirectories = Array.isArray(settings.allowedDirectories) ? settings.allowedDirectories : [];
@@ -510,7 +515,7 @@ function registerChatHandlers(ipcMain, context = {}) {
           meta: { role: 'main', profileId: turnModels.profileId || null, borrowedFrom: null }
         });
 
-      const chatRaw = getChats().find((item) => item.id === chatId);
+      const chatRaw = findChat(chatId, { messages: true });
       if (!chatRaw) {
         throw new Error('Chat not found');
       }
@@ -897,19 +902,13 @@ function registerChatHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CHAT_TRUNCATE_FROM, wrapHandler(IPC.CHAT_TRUNCATE_FROM, async (_event, { chatId, fromIndex }) => {
-    const chats = getChats();
-    const chat = chats.find((c) => c.id === chatId);
+    const chat = findChat(chatId, { messages: true });
     if (!chat) throw new Error('Chat not found');
     if (typeof fromIndex !== 'number' || fromIndex < 0 || fromIndex >= chat.messages.length) {
       throw new Error('Invalid fromIndex');
     }
-    const updated = chats.map((c) => {
-      if (c.id !== chatId) return c;
-      const trimmed = c.messages.slice(0, fromIndex);
-      return { ...c, messages: trimmed, updatedAt: new Date().toISOString() };
-    });
-    setChats(updated);
-    return updated.find((c) => c.id === chatId);
+    const trimmed = chat.messages.slice(0, fromIndex);
+    return patchChat(chatId, { messages: trimmed, updatedAt: new Date().toISOString() });
   }));
 
   ipcMain.handle(IPC.CHAT_STOP_RESPONSE, wrapHandler(IPC.CHAT_STOP_RESPONSE, async (_event, { chatId }) => {
@@ -930,7 +929,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     // owner turn from a chat that isn't running it would abort the turn's
     // signal without ever aborting the run's own abortController, so that
     // other chat keeps streaming into a turn that no longer exists.
-    const chat = getChats().find((item) => item.id === chatId);
+    const chat = findChat(chatId, { messages: true });
     const caseRuntime = chat?.caseId && typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
     const runningTurn = caseRuntime && typeof caseRuntime.runningTurn === 'function' ? caseRuntime.runningTurn(chat.caseId) : null;
     if (caseRuntime && runningTurn?.source !== 'owner' && typeof caseRuntime.abortTurn === 'function' && caseRuntime.abortTurn(chat.caseId, 'stopped by owner')) {
