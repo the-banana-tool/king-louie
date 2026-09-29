@@ -6,9 +6,9 @@
 const fs = require('fs');
 const path = require('path');
 const { loadSession, sessionDir, validateSessionId } = require('../session-format');
-const { readQuestions, writeQuestions, questionsFile, authorLogFile } = require('../questions');
+const { writeQuestions, questionsFile, authorLogFile } = require('../questions');
 const { planAuthoring } = require('../sampling');
-const { authorCandidates, DEFAULT_PROMPT } = require('../author');
+const { authorCandidates, readAuthoringState, DEFAULT_PROMPT } = require('../author');
 const { createModelClient } = require('../model');
 const { positiveInt } = require('./run');
 const { UsageError } = require('../errors');
@@ -50,9 +50,9 @@ module.exports = {
     }
 
     const file = questionsFile(ctx.home.root, values.session);
-    const existing = await readQuestions(file);
-    const plan = planAuthoring(session.index, { count, seed, excludeSeqs: existing.flatMap((q) => q.evidenceSeqs || []) });
-    const out = await authorCandidates({ session, plan, client, sessionId: values.session, existing });
+    const { existing, rejected: rejectedBefore, excludeSeqs } = await readAuthoringState(ctx.home.root, values.session);
+    const plan = planAuthoring(session.index, { count, seed, excludeSeqs });
+    const out = await authorCandidates({ session, plan, client, sessionId: values.session, existing, reserved: rejectedBefore });
     writeQuestions(file, [...existing, ...out.candidates]);
 
     const rejected = {};

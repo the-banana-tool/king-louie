@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const { messageText, senderLabel } = require('./session-format');
-const { validateQuestion, normalizeQuestion } = require('./questions');
+const { validateQuestion, normalizeQuestion, readQuestions, questionsFile, rejectedFile } = require('./questions');
 const { sha256Text } = require('./files');
 
 const DEFAULT_PROMPT = path.join(__dirname, 'prompts', 'author-v1.md');
@@ -67,10 +67,22 @@ function nextSerial(existing, sessionId) {
   return max + 1;
 }
 
-async function authorCandidates({ session, plan, client, sessionId, existing = [], promptPath = DEFAULT_PROMPT, maxTokens = 800 }) {
+// What a new `author` run must not repeat: the live questions and the ones
+// rejected in `verify` (their ids are never reused, and their evidence
+// messages were bad anchors or already tried, so sampling leaves them out).
+async function readAuthoringState(dataRoot, sessionId) {
+  const existing = await readQuestions(questionsFile(dataRoot, sessionId));
+  const rejected = await readQuestions(rejectedFile(dataRoot, sessionId));
+  const excludeSeqs = [...new Set([...existing, ...rejected].flatMap((q) => q.evidenceSeqs || []))].sort((a, b) => a - b);
+  return { existing, rejected, excludeSeqs };
+}
+
+// `reserved` are questions whose ids are taken though they are not in the
+// live set (rejected ones).
+async function authorCandidates({ session, plan, client, sessionId, existing = [], reserved = [], promptPath = DEFAULT_PROMPT, maxTokens = 800 }) {
   const template = fs.readFileSync(promptPath, 'utf8');
   const promptSha256 = sha256Text(template);
-  let serial = nextSerial(existing, sessionId);
+  let serial = nextSerial([...existing, ...reserved], sessionId);
   const candidates = [];
   const rejected = [];
   for (const item of plan.items) {
@@ -109,4 +121,4 @@ async function authorCandidates({ session, plan, client, sessionId, existing = [
   return { candidates, rejected, promptSha256 };
 }
 
-module.exports = { DEFAULT_PROMPT, KIND_RULES, fillPrompt, parseReply, authorCandidates };
+module.exports = { DEFAULT_PROMPT, KIND_RULES, fillPrompt, parseReply, authorCandidates, readAuthoringState };

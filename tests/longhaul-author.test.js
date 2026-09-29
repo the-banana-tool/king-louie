@@ -5,10 +5,10 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { authorCandidates, parseReply, DEFAULT_PROMPT } = require('../src/longhaul/author');
+const { authorCandidates, parseReply, readAuthoringState, DEFAULT_PROMPT } = require('../src/longhaul/author');
 const { planAuthoring } = require('../src/longhaul/sampling');
 const { SYNTH_FIXTURES, generateSynthetic, writeSyntheticRoot } = require('../src/longhaul/synthetic');
-const { validateQuestionSet, readQuestions, questionsFile } = require('../src/longhaul/questions');
+const { validateQuestionSet, readQuestions, writeQuestions, questionsFile, rejectedFile } = require('../src/longhaul/questions');
 const { sha256Text } = require('../src/longhaul/files');
 const { main } = require('../src/longhaul/cli');
 const { startFakeLlmServer } = require('./helpers/fake-llm-server');
@@ -130,6 +130,31 @@ describe('parseReply', () => {
     assert.strictEqual(parseReply('[1,2]'), null);
     assert.strictEqual(parseReply('no json here'), null);
     assert.strictEqual(parseReply('{"a":'), null);
+  });
+});
+
+describe('authoring after a rejection', () => {
+  it('numbers new candidates past a rejected id and does not reuse rejected evidence', async () => {
+    const { root } = tmpHome();
+    writeSyntheticRoot(root, [SYNTH_FIXTURES[1]]);
+    const first = await authorCandidates({ session, plan, client: scripted(), sessionId: SID });
+    const [live1, live2, rejectedQ] = first.candidates;
+    writeQuestions(questionsFile(root, SID), [live1, live2]);
+    fs.writeFileSync(rejectedFile(root, SID), `${JSON.stringify({ ...rejectedQ, rejectedBy: 'human:TT', rejectReason: 'vague', rejectedAt: '2026-09-29T12:00:00.000Z' })}\n`);
+    assert.strictEqual(rejectedQ.id, `${SID}-g0003`);
+
+    const state = await readAuthoringState(root, SID);
+    assert.deepStrictEqual(state.existing.map((q) => q.id), [live1.id, live2.id]);
+    assert.deepStrictEqual(state.rejected.map((q) => q.id), [rejectedQ.id]);
+    for (const s of rejectedQ.evidenceSeqs) assert.ok(state.excludeSeqs.includes(s), `rejected evidence #${s} is excluded`);
+
+    const next = planAuthoring(session.index, { count: 6, seed: 9, excludeSeqs: state.excludeSeqs });
+    const out = await authorCandidates({ session, plan: next, client: scripted(), sessionId: SID, existing: state.existing, reserved: state.rejected });
+    assert.ok(out.candidates.length > 0);
+    assert.strictEqual(out.candidates[0].id, `${SID}-g0004`, 'the rejected id is not reused');
+    for (const q of out.candidates) {
+      assert.ok(!q.evidenceSeqs.some((s) => rejectedQ.evidenceSeqs.includes(s)), `${q.id} reuses rejected evidence`);
+    }
   });
 });
 
