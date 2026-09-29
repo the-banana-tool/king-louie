@@ -64,7 +64,7 @@ const { makeRootAssert } = require('../cases/executors/package-loader');
 const { buildChildContext, childRuntimeOptions } = require('../agents/child-context');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
-const { HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore } = require('../history');
+const { HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore, TokenEstimator, Retriever, ContextBuilder } = require('../history');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
@@ -269,6 +269,8 @@ function createCore(deps = {}) {
   // whose set is a no-op and with no backup, so the preview sees the
   // service's chats and nothing on disk is written.
   const historyLog = createLogger('history');
+  // Read on every insert, so a settings change reaches the next message.
+  const chunkOptions = () => mergeSettings(store.get('settings', DEFAULT_SETTINGS)).history.chunk;
   const historyStatus = { available: true, error: null, migrationFailed: 0 };
   let historyStore;
   if (deps.history?.open === false) {
@@ -279,9 +281,9 @@ function createCore(deps = {}) {
     const historyDbPath = deps.history.dbPath || path.join(paths.dataDir, 'history.sqlite');
     try {
       if (fs.existsSync(historyDbPath)) {
-        historyStore = HistoryStore.open(historyDbPath, { readonly: true });
+        historyStore = HistoryStore.open(historyDbPath, { readonly: true, chunkOptions });
       } else {
-        historyStore = HistoryStore.open(':memory:');
+        historyStore = HistoryStore.open(':memory:', { chunkOptions });
         const previewJson = { get: (key, fallback) => store.get(key, fallback), set: () => {} };
         const { failed } = migrateFromJson({ historyStore, jsonStore: previewJson, log: historyLog, backup: false });
         historyStatus.migrationFailed = failed.length;
@@ -296,7 +298,7 @@ function createCore(deps = {}) {
   } else {
     const historyDbPath = deps.history?.dbPath || path.join(paths.dataDir, 'history.sqlite');
     try {
-      historyStore = HistoryStore.open(historyDbPath);
+      historyStore = HistoryStore.open(historyDbPath, { chunkOptions });
     } catch (err) {
       historyLog.error(`Chat history could not be opened at ${historyDbPath}: ${err.message}. chat-data.json was left as it is.`);
       historyStore = createUnavailableHistoryStore(err);
@@ -314,6 +316,17 @@ function createCore(deps = {}) {
       }
     }
   }
+  // Recall stage H2 (spec 2026-09-25 §6): token estimates, BM25 retrieval
+  // and the per-turn context builder, all over the history store.
+  const tokenEstimator = new TokenEstimator({ store: historyStore });
+  const historyRetriever = new Retriever({ store: historyStore, estimator: tokenEstimator });
+  const contextBuilder = new ContextBuilder({
+    store: historyStore,
+    retriever: historyRetriever,
+    estimator: tokenEstimator,
+    // getSettings is declared further down; it is read only when a turn runs.
+    getSettings: () => getSettings()
+  });
   const getHistoryStore = () => historyStore;
   const getHistoryStatus = () => ({ ...historyStatus });
   const {
@@ -2135,6 +2148,13 @@ function createCore(deps = {}) {
         get caseContext() { return executorOptions.caseContext || null; },
         // Cases stage 3: a child run's { caseId }, checked by the case-turn guard.
         get guardContext() { return executorOptions.guardContext || null; },
+        // Recall stage H2: SearchHistory and ReadHistory read this run's chat.
+        get history() {
+          const cid = executorOptions.chatId;
+          return cid
+            ? { chatId: String(cid), store: historyStore, retriever: historyRetriever, estimator: tokenEstimator, getSettings }
+            : null;
+        },
         getAgent,
         listAgents,
         toolRegistry,
@@ -3217,6 +3237,9 @@ function createCore(deps = {}) {
     createId,
     historyStore,
     getHistoryStore,
+    getContextBuilder: () => contextBuilder,
+    getTokenEstimator: () => tokenEstimator,
+    getHistoryRetriever: () => historyRetriever,
     getHistoryStatus,
     getMessages,
     truncateChatFrom,

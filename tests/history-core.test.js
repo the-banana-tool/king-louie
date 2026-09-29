@@ -129,4 +129,25 @@ describe('createCore and the history store', () => {
     assert.deepStrictEqual(reopened.getMessages('c1').map((m) => m.text), ['hello']);
     reopened.close();
   });
+
+  it('exposes the context builder, token estimator and retriever over the store', () => {
+    const { deps } = makeDeps();
+    const core = createCore(deps);
+    const { getContextBuilder, getTokenEstimator, getHistoryRetriever } = core.context;
+    assert.strictEqual(typeof getContextBuilder().build, 'function');
+    assert.strictEqual(typeof getTokenEstimator().estimate, 'function');
+    assert.strictEqual(typeof getHistoryRetriever().retrieve, 'function');
+  });
+
+  it('chunks new messages with the chunk sizes in settings.history.chunk', () => {
+    const { deps } = makeDeps();
+    deps.store.set('settings', { history: { chunk: { targetChars: 200, minChars: 50 } } });
+    const core = createCore(deps);
+    core.context.createChat({ id: 'c1', title: 'One', messages: [] });
+    const paragraphs = Array.from({ length: 12 }, (_, i) => `Paragraph ${i} about the lakeside gate and fence. `.repeat(3)).join('\n\n');
+    core.context.appendMessageToChat('c1', 'user', paragraphs, {}, { returnChat: false });
+    const store = core.context.getHistoryStore();
+    const [message] = store.getMessages('c1');
+    assert.ok(store.chunksOfMessage(message.id).length > 3);
+  });
 });

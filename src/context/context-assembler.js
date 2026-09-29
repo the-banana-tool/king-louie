@@ -34,6 +34,11 @@ const CORE_TOOLS = new Set([
   // hand reading and searching to the explorer, so SpawnAgent is always
   // loaded rather than one ToolSearch round away.
   'SpawnAgent',
+  // Recall (history spec 2026-09-25 §8): always in the core tool set, so
+  // the recalled block's "use SearchHistory / ReadHistory" is never a
+  // ToolSearch round away.
+  'SearchHistory',
+  'ReadHistory',
 ]);
 
 // System prompt sections that are always included.
