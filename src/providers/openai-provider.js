@@ -25,6 +25,15 @@ function markAsResponsesModel(model) {
   _responsesModels.add(String(model || '').toLowerCase());
 }
 
+// Chat Completions refusals that mean "send this to /v1/responses instead".
+// Reasoning models such as gpt-5.6-sol accept function tools only there.
+function needsResponsesApi(message) {
+  const err = String(message || '');
+  return err.includes('not a chat model')
+    || err.includes('only supported in v1/responses')
+    || err.includes('use /v1/responses');
+}
+
 function supportsTemperature(model) {
   const lower = String(model || '').toLowerCase();
   return !NO_TEMPERATURE_MODELS.some((m) => lower.includes(m));
@@ -226,7 +235,7 @@ class OpenAIProvider extends BaseLLMProvider {
     if (!response.ok) {
       const providerError = await this.buildError(response);
       const err = providerError.message;
-      if (err.includes('not a chat model') || err.includes('only supported in v1/responses')) {
+      if (needsResponsesApi(err)) {
         markAsResponsesModel(model);
         return this._sendResponses(model, preparedMessages, options);
       }
@@ -297,7 +306,7 @@ class OpenAIProvider extends BaseLLMProvider {
     if (!response.ok) {
       const providerError = await this.buildError(response);
       const err = providerError.message;
-      if (err.includes('not a chat model') || err.includes('only supported in v1/responses')) {
+      if (needsResponsesApi(err)) {
         markAsResponsesModel(requestedModel);
         return this._sendResponsesWithTools(requestedModel, preparedMessages, tools, options);
       }
@@ -621,7 +630,7 @@ class OpenAIProvider extends BaseLLMProvider {
     if (!response.ok) {
       const providerError = await this.buildError(response);
       const err = providerError.message;
-      if (err.includes('not a chat model') || err.includes('only supported in v1/responses')) {
+      if (needsResponsesApi(err)) {
         markAsResponsesModel(requestedModel);
         return this._streamResponses(requestedModel, preparedMessages, options, onChunk);
       }
@@ -782,3 +791,4 @@ class OpenAIProvider extends BaseLLMProvider {
 }
 
 module.exports = OpenAIProvider;
+module.exports.needsResponsesApi = needsResponsesApi;
