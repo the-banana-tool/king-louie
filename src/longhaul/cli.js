@@ -7,7 +7,8 @@ const { resolveHome, ensureDirs } = require('./home');
 const { UsageError } = require('./errors');
 
 const COMMANDS = {
-  home: require('./commands/home')
+  home: require('./commands/home'),
+  import: require('./commands/import')
 };
 
 function usage() {
