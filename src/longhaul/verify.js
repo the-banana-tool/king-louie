@@ -83,9 +83,10 @@ async function verifyLoop({ session, questions, reviewer, input, output, onSave,
     return done ? null : value.trim();
   };
 
-  let current = questions.slice();
+  // A question with no verifiedBy key is unverified, like verifiedBy null.
+  let current = questions.map((q) => (q.verifiedBy === undefined ? { ...q, verifiedBy: null } : q));
   const replace = (q) => { current = current.map((x) => (x.id === q.id ? q : x)); };
-  const pending = current.filter((q) => q.verifiedBy === null).sort((a, b) => a.askAtSeq - b.askAtSeq || a.id.localeCompare(b.id));
+  const pending = current.filter((q) => q.verifiedBy == null).sort((a, b) => a.askAtSeq - b.askAtSeq || a.id.localeCompare(b.id));
   const counts = { accepted: 0, edited: 0, rejected: 0, skipped: 0, stopped: false };
 
   const edit = async (q) => {

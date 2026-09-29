@@ -94,6 +94,15 @@ describe('verifyLoop', () => {
     assert.strictEqual(rec.saves.length, 1);
   });
 
+  it('offers a question with no verifiedBy key for review', async () => {
+    const { session, questions } = setup();
+    const missing = questions.map(({ verifiedBy, ...q }) => q);
+    const rec = recorder();
+    const counts = await verifyLoop({ session, questions: missing, reviewer: 'TT', output: sink(), onSave: rec.onSave, now: NOW, input: input(['a', 'q']) });
+    assert.strictEqual(counts.accepted, 1);
+    assert.strictEqual(rec.saves.at(-1).current.filter((q) => q.verifiedBy === 'human:TT').length, 1);
+  });
+
   it('requires reviewer initials', async () => {
     const { session, questions } = setup();
     for (const reviewer of ['', 'a b', undefined]) {
@@ -117,6 +126,19 @@ describe('longhaul verify CLI', () => {
     const rejected = fs.readFileSync(path.join(root, 'questions', 'synth-small.rejected.jsonl'), 'utf8').trim().split('\n');
     assert.strictEqual(rejected.length, 1);
     assert.match(stdout.text, /verified for synth-small: 1 /);
+  });
+
+  it('treats a question with no verifiedBy key as unverified', async () => {
+    const { env, root } = tmpHome();
+    writeSyntheticRoot(root, [SYNTH_FIXTURES[0]]);
+    const file = questionsFile(root, 'synth-small');
+    writeQuestions(file, (await readQuestions(file)).map(({ verifiedBy, ...q }) => q));
+    const stdout = sink();
+    const code = await main(['verify', '--session', 'synth-small', '--reviewer', 'TT'], { stdin: input(['a', 'q']), stdout, stderr: sink(), env });
+    assert.strictEqual(code, 0);
+    assert.doesNotMatch(stdout.text, /Nothing to verify/);
+    const after = await readQuestions(file);
+    assert.strictEqual(after.filter((q) => q.verifiedBy === 'human:TT').length, 1);
   });
 
   it('refuses without --reviewer', async () => {

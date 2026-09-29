@@ -18,7 +18,7 @@ module.exports = {
     const file = questionsFile(ctx.home.root, values.session);
     const rejectedFile = rejectedPath(ctx.home.root, values.session);
     const questions = await readQuestions(file);
-    if (!questions.some((q) => q.verifiedBy === null)) {
+    if (!questions.some((q) => q.verifiedBy == null)) {
       ctx.stdout.write(`Nothing to verify for ${values.session}.\n`);
       return 0;
     }
