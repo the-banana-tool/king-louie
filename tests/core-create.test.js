@@ -51,14 +51,14 @@ describe('createCore', () => {
     assert.strictEqual(typeof core.context.listChats, 'function');
     assert.strictEqual(typeof core.context.upsertChat, 'function');
     assert.strictEqual(typeof core.context.updateChatsWhere, 'function');
-    assert.strictEqual(typeof core.context.getChats, 'function');
+    assert.strictEqual(core.context.getChats, undefined);
     assert.strictEqual(core.context.safeStorage, undefined);
   });
 
   it("appendMessageToChat generates id/timestamp itself; metadata cannot override them or the sender (minor fix, F5 review)", () => {
     const { deps } = makeDeps();
     const core = createCore(deps);
-    core.context.setChats([{ id: 'chat-1', title: 'Chat', messages: [] }]);
+    core.context.createChat({ id: 'chat-1', title: 'Chat', messages: [] });
     const updated = core.context.appendMessageToChat('chat-1', 'user', 'hi', {
       id: 'spoofed-id',
       sender: 'assistant',
@@ -89,7 +89,7 @@ describe('createCore', () => {
     ]);
     const core = createCore(deps);
     core.context.migrateLegacyBridgeChatOrigins();
-    const chats = core.context.getChats();
+    const chats = core.context.listChats({ messages: true });
     const tg = chats.find((c) => c.id === 'chat-tg');
     const dc = chats.find((c) => c.id === 'chat-dc');
     const plain = chats.find((c) => c.id === 'chat-plain');
@@ -100,9 +100,9 @@ describe('createCore', () => {
     assert.strictEqual(dc.messages[0].channel, 'discord');
     assert.strictEqual(plain.origin, undefined);
     assert.strictEqual(plain.messages[0].channel, undefined);
-    const before = JSON.stringify(core.context.getChats());
+    const before = JSON.stringify(core.context.listChats({ messages: true }));
     core.context.migrateLegacyBridgeChatOrigins();
-    assert.strictEqual(JSON.stringify(core.context.getChats()), before, 'a second run changes nothing further');
+    assert.strictEqual(JSON.stringify(core.context.listChats({ messages: true })), before, 'a second run changes nothing further');
   });
 
   it('starts headless with every optional feature off, then shuts down cleanly', async () => {

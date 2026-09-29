@@ -283,7 +283,7 @@ describe('sub-agents of a chat turn', () => {
     try {
       const result = await send();
       assert.notStrictEqual(result?.ok, false, JSON.stringify(result));
-      const reply = core.context.getChats().find((c) => c.id === 'chat-1').messages.filter((m) => m.sender === 'assistant').pop();
+      const reply = core.context.getChat('chat-1').messages.filter((m) => m.sender === 'assistant').pop();
       assert.deepStrictEqual(
         reply.llm.subagents.map((s) => [s.agentId, s.role, s.calls.map((c) => [c.model, c.role, c.profileId])]),
         [['code-explorer', 'worker', [['b-worker', 'worker', 'p-b']]]]

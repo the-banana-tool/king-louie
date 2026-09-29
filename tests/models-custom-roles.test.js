@@ -31,8 +31,9 @@ function setup({ models = {}, caseRoles = {}, cases = [] } = {}) {
     getSettings,
     explainTarget: usable,
     snapshotModels: () => null,
-    getChats: () => [],
-    setChats: () => {},
+    listChats: () => [],
+    getChat: () => null,
+    updateChat: () => null,
     appendMessageToChat: () => null,
     getCaseRuntime: () => ({ listCases: () => cases })
   });
@@ -86,8 +87,9 @@ describe('custom roles', () => {
       getSettings,
       explainTarget: usable,
       snapshotModels: () => null,
-      getChats: () => [],
-      setChats: () => {},
+      listChats: () => [],
+      getChat: () => null,
+      updateChat: () => null,
       appendMessageToChat: () => null,
       getCaseRuntime: () => ({ listCases: () => { throw new Error('the case store is locked'); } })
     });

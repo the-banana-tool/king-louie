@@ -256,8 +256,9 @@ describe('the King Louie profile in the model choices', () => {
     kingLouie: kl,
     explainTarget: () => ({ usable: true, reasons: [], notes: [] }),
     snapshotModels: () => null,
-    getChats: () => [],
-    setChats: () => {},
+    listChats: () => [],
+    getChat: () => null,
+    updateChat: () => null,
     appendMessageToChat: () => null
   });
 

@@ -476,7 +476,7 @@ class DesktopImporter {
       else add('allowedDirectory', dir, 'needs-attention', `the service cannot read ${dir}`);
     }
 
-    const chats = this.context.getChats();
+    const chats = this.context.listChats({ messages: true });
     // Remembers the live updatedAt an 'update' action was planned against,
     // so apply() can tell whether the service's copy is still the one the
     // plan looked at (fix round 1, I4) before overwriting it.
@@ -775,14 +775,14 @@ class DesktopImporter {
     if (!value || value.id !== item.key || !Array.isArray(value.messages)) throw new ImportError('BAD_VALUE', 'the chat does not match the plan');
     // Fail fast if the race has already happened, before doing any of the
     // work below (in particular the checkPath await).
-    const early = this.chatRaceCheck(plan, item, value, this.context.getChats());
+    const early = this.chatRaceCheck(plan, item, value, this.context.listChats({ messages: true }));
     if (early) return early;
 
     let note = null;
     let chat = { ...value };
     if (chat.workingDirectory) {
       // This await is exactly where fix round 2 found the gap: liveChats
-      // read before it can go stale by the time setChats below runs, so
+      // read before it can go stale by the time the upsert below runs, so
       // whatever changed the service's chats during this call — another
       // apply(), a live chat edit — would be silently overwritten by a
       // write built from a snapshot taken before the wait.
@@ -797,24 +797,15 @@ class DesktopImporter {
       : { ...chat, id: item.targetKey };
 
     // Read live state again immediately before writing, with no await
-    // between this read and setChats, and re-run the same check against
-    // it (fix round 2, I4): this is the read setChats below actually acts
-    // on, so it — and the presence/updatedAt decision — must be fresh.
-    const liveChats = this.context.getChats();
+    // between this read and the upsert, and re-run the same check against
+    // it (fix round 2, I4): this is the read the upsert below acts on, so
+    // it - and the presence/updatedAt decision - must be fresh.
+    const liveChats = this.context.listChats({ messages: true });
     const late = this.chatRaceCheck(plan, item, value, liveChats);
     if (late) return late;
-    if (typeof this.context.upsertChat === 'function') {
-      this.context.upsertChat(chat, { position: 'front' });
-    } else if (item.action === 'update' && typeof this.context.replaceChat === 'function') {
-      this.context.replaceChat(item.targetKey, chat);
-    } else if (item.action !== 'update' && typeof this.context.createChat === 'function') {
-      this.context.createChat(chat, { position: 'front' });
-    } else {
-      const updated = item.action === 'update'
-        ? liveChats.map((c) => (c.id === item.targetKey ? chat : c))
-        : [chat, ...liveChats.filter((c) => c.id !== chat.id)];
-      this.context.setChats(updated);
-    }
+    // A copy keeps the source's message ids; the history store gives any id
+    // it already holds a fresh one.
+    this.context.upsertChat(chat, { position: 'front' });
     return {
       note,
       attention: Boolean(note),

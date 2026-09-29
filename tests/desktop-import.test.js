@@ -214,8 +214,8 @@ describe('DesktopImporter', () => {
     const first = await runImport(importer, fx);
     assert.deepStrictEqual(first.report.failures, []);
     assert.strictEqual(core.context.getSettings().templateVariables.name, 'Example Owner');
-    assert.ok(core.context.getChats().some((c) => c.id === 'c1'));
-    const c2 = core.context.getChats().find((c) => c.id === 'c2');
+    assert.ok(Boolean(core.context.getChat('c1', { messages: false })));
+    const c2 = core.context.getChat('c2');
     assert.strictEqual(c2.workingDirectory, null, 'an unreadable working directory is dropped');
     assert.ok(first.report.attention.some((a) => a.category === 'chat' && a.key === 'c2'));
     assert.strictEqual(core.context.vault.get('github'), VAULT_SECRET);
@@ -247,16 +247,16 @@ describe('DesktopImporter', () => {
     const second = await runImport(importer, edited);
     assert.strictEqual(actionOf(second.plan, 'chat', 'c1'), 'update');
     assert.strictEqual(actionOf(second.plan, 'chat', 'c3'), 'new');
-    assert.strictEqual(core.context.getChats().find((c) => c.id === 'c1').title, 'Chat c1 edited');
+    assert.strictEqual(core.context.getChat('c1').title, 'Chat c1 edited');
     // Now both sides change c1.
-    core.context.setChats(core.context.getChats().map((c) => (c.id === 'c1' ? { ...c, updatedAt: '2026-09-22T09:00:00Z' } : c)));
+    core.context.updateChat('c1', { updatedAt: '2026-09-22T09:00:00Z' });
     const third = desktopFixture();
     third.values.chats.c1 = { ...edited.values.chats.c1, updatedAt: '2026-09-22T10:00:00Z' };
     third.inventory.chats = [{ id: 'c1', updatedAt: '2026-09-22T10:00:00Z', title: 'Chat c1 edited' }];
     const out = await runImport(importer, third);
     const copyItem = out.plan.items.find((i) => i.category === 'chat' && i.key === 'c1');
     assert.strictEqual(copyItem.action, 'copy');
-    const copy = core.context.getChats().find((c) => c.id === copyItem.targetKey);
+    const copy = core.context.getChat(copyItem.targetKey);
     assert.strictEqual(copy.title, 'Chat c1 edited (from desktop)');
     const fourth = await importer.plan({ installId: third.inventory.installId, inventory: third.inventory });
     assert.strictEqual(actionOf(fourth, 'chat', 'c1'), 'skip-present', 'the manifest now follows the copy');
@@ -306,7 +306,7 @@ describe('DesktopImporter', () => {
     assert.deepStrictEqual(failed, ['providerToken:anthropic', 'vault:github']);
     assert.ok(out.report.failures.every((f) => f.error === 'Encryption unavailable in the service.'));
     assert.deepStrictEqual(out.report.secretsMissing.map((s) => s.key).sort(), ['anthropic', 'github']);
-    assert.ok(core.context.getChats().some((c) => c.id === 'c1'));
+    assert.ok(Boolean(core.context.getChat('c1', { messages: false })));
   });
 
   it('expires a plan after 30 minutes and when its connection closes', async () => {
@@ -910,7 +910,7 @@ describe('DesktopImporter', () => {
     const fx = desktopFixture();
     const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
 
-    core.context.setChats([...core.context.getChats(), { id: 'c1', title: 'Collision', createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-01T00:00:00Z', messages: [] }]);
+    core.context.upsertChat({ id: 'c1', title: 'Collision', createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-01T00:00:00Z', messages: [] }, { position: 'back' });
     await core.context.getCronScheduler().addJob({ id: 'cron_1', name: 'race', schedule: { kind: 'cron', expr: '0 0 * * *' }, enabled: true, payload: {} });
     const tokens = { ...core.context.getApiTokens() };
     tokens.anthropic = core.context.encryptToken('sk-race');
@@ -928,7 +928,7 @@ describe('DesktopImporter', () => {
 
     const chatResult = results.find((r) => r.category === 'chat' && r.key === 'c1');
     assert.match(chatResult.note, /added to the service/);
-    assert.strictEqual(core.context.getChats().find((c) => c.id === 'c1').title, 'Collision', 'the racing chat is untouched');
+    assert.strictEqual(core.context.getChat('c1').title, 'Collision', 'the racing chat is untouched');
 
     const cronResult = results.find((r) => r.category === 'cron' && r.key === 'cron_1');
     assert.match(cronResult.note, /added to the service/);
@@ -957,12 +957,12 @@ describe('DesktopImporter', () => {
     const plan = await importer.plan({ installId: edited.inventory.installId, inventory: edited.inventory });
     assert.strictEqual(actionOf(plan, 'chat', 'c1'), 'update');
     // The service changes c1 again before the batch is applied.
-    core.context.setChats(core.context.getChats().map((c) => (c.id === 'c1' ? { ...c, updatedAt: '2026-09-22T00:00:00Z', title: 'Changed on service' } : c)));
+    core.context.updateChat('c1', { updatedAt: '2026-09-22T00:00:00Z', title: 'Changed on service' });
     const { results } = await importer.apply({ planId: plan.planId, batch: [{ category: 'chat', key: 'c1', value: edited.values.chats.c1 }] });
     const r = results.find((x) => x.category === 'chat' && x.key === 'c1');
     assert.strictEqual(r.ok, true);
     assert.match(r.note, /changed on the service/);
-    assert.strictEqual(core.context.getChats().find((c) => c.id === 'c1').title, 'Changed on service', 'not overwritten');
+    assert.strictEqual(core.context.getChat('c1').title, 'Changed on service', 'not overwritten');
     const report = await importer.finish({ planId: plan.planId });
     assert.ok(report.attention.some((a) => a.category === 'chat' && a.key === 'c1'));
   });
@@ -970,9 +970,9 @@ describe('DesktopImporter', () => {
   // Fix round 2, item 4: writeChat used to read liveChats once, before the
   // checkPath await, and build its write from that stale snapshot — a chat
   // added to the service during the await (another apply(), a live edit)
-  // would be silently discarded when setChats replaced the whole array.
-  // The fix re-reads getChats() and re-runs the presence check immediately
-  // before setChats, with no await in between.
+  // would be silently discarded when a write replaced the whole array.
+  // The fix re-reads listChats() and re-runs the presence check immediately
+  // before the upsert, with no await in between.
   it('re-checks live chats immediately before writing, catching a chat added to the service during the checkPath await', async () => {
     const dataDir = tmp();
     process.env.KL_CASES_ROOT = path.join(dataDir, 'cases');
@@ -997,7 +997,7 @@ describe('DesktopImporter', () => {
         // Simulate whatever happened during the await: a chat with the
         // same id the desktop chat is about to be written under appears
         // on the service.
-        core.context.setChats([{ id: 'c1', title: 'Raced in', createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-05T00:00:00Z', messages: [] }]);
+        core.context.upsertChat({ id: 'c1', title: 'Raced in', createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-05T00:00:00Z', messages: [] }, { position: 'front' });
       }
       return checkPath(target);
     };
@@ -1021,8 +1021,8 @@ describe('DesktopImporter', () => {
     const r = results.find((x) => x.category === 'chat' && x.key === 'c1');
     assert.strictEqual(r.ok, true);
     assert.match(r.note, /added to the service/);
-    assert.strictEqual(core.context.getChats().length, 1, 'the raced-in chat was not joined by a second, overwriting write');
-    assert.strictEqual(core.context.getChats().find((c) => c.id === 'c1').title, 'Raced in', 'the chat that raced in during checkPath is untouched');
+    assert.strictEqual(core.context.listChats({ messages: true }).length, 1, 'the raced-in chat was not joined by a second, overwriting write');
+    assert.strictEqual(core.context.getChat('c1').title, 'Raced in', 'the chat that raced in during checkPath is untouched');
   });
 
   // Fix round 1, M7: leading-dot case dirs, Windows reserved device names

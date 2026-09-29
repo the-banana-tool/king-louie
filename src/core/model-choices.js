@@ -18,56 +18,33 @@ function createModelChoices({
   availability = null,
   explainTarget,
   snapshotModels,
-  getChats,
   listChats,
-  setChats,
   getChat,
   updateChat: updateChatFacade,
-  updateChatsWhere,
   appendMessageToChat,
   getCaseRuntime = () => null,
   kingLouie = null,
   getSettings = () => ({})
 } = {}) {
-  for (const [name, value] of Object.entries({ profiles, explainTarget, snapshotModels, getChats, setChats, appendMessageToChat })) {
+  for (const [name, value] of Object.entries({ profiles, explainTarget, snapshotModels, listChats, getChat, updateChat: updateChatFacade, appendMessageToChat })) {
     if (!value) throw new Error(`createModelChoices needs ${name}.`);
   }
 
-  const findChat = (chatId) => {
-    const chat = typeof getChat === 'function'
-      ? getChat(chatId, { messages: true })
-      : fullChats().find((c) => c.id === chatId);
+  // Decisions read a chat without its messages; what goes back to the
+  // renderer carries them, since the renderer replaces its copy with it.
+  const findChat = (chatId, { messages = false } = {}) => {
+    const chat = getChat(chatId, { messages });
     if (!chat) throw new Error('Chat not found.');
     return chat;
   };
-  const chatMetas = () => (typeof listChats === 'function' ? listChats({ messages: false }) : getChats());
-  const fullChats = () => getChats();
+  const chatMetas = () => listChats({ messages: false });
   const nameOf = (target) => {
     if (!target) return '(none)';
     const entry = catalog ? catalog.get(target.provider, target.model) : null;
     return entry?.name || target.model;
   };
   const status = (chatId, text) => appendMessageToChat(chatId, 'status', text);
-  const updateChat = (chatId, patch) => {
-    const now = new Date().toISOString();
-    if (typeof updateChatFacade === 'function') {
-      return updateChatFacade(chatId, { ...patch, updatedAt: now });
-    }
-    if (typeof updateChatsWhere === 'function') {
-      return updateChatsWhere((c) => c.id === chatId, () => ({ ...patch, updatedAt: now }))[0] || null;
-    }
-    const next = fullChats().map((c) => {
-      if (c.id !== chatId) return c;
-      const out = { ...c, updatedAt: now };
-      for (const [key, value] of Object.entries(patch)) {
-        if (value === null || value === undefined) delete out[key];
-        else out[key] = value;
-      }
-      return out;
-    });
-    setChats(next);
-    return next.find((c) => c.id === chatId);
-  };
+  const updateChat = (chatId, patch) => updateChatFacade(chatId, { ...patch, updatedAt: new Date().toISOString() }, { messages: false });
   const caseRuntimeFor = (chat) => {
     if (!chat.caseId) return null;
     const runtime = getCaseRuntime();
@@ -136,7 +113,7 @@ function createModelChoices({
     const after = snapshotModels({ chatId }).profileName;
     const where = runtime ? 'This case' : 'This chat';
     status(chatId, id ? `${where} now uses the profile ${after}.` : `${where} now uses the default profile (${after}).`);
-    return findChat(chatId);
+    return findChat(chatId, { messages: true });
   }
 
   // Picking another usable model sets an override for main only (spec
@@ -157,7 +134,7 @@ function createModelChoices({
     else updateChat(chatId, { mainOverride: next });
     const to = mainInUse(snapshotModels({ chatId }), needs).current;
     status(chatId, next ? `Main model switched from ${nameOf(from)} to ${nameOf(to)}` : `Main model reset to the profile's main (${nameOf(to)})`);
-    return findChat(chatId);
+    return findChat(chatId, { messages: true });
   }
 
   // A profile in use is deleted (spec §15): its chats and cases move to the

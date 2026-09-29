@@ -12,7 +12,7 @@ const { fixtureCatalog } = require('./helpers/models-fixture');
 
 const t = (provider, model, effort = null) => ({ provider, model, effort });
 
-function setup({ chats = [], unusable = {}, cases = {}, facade = false } = {}) {
+function setup({ chats = [], unusable = {}, cases = {} } = {}) {
   let settings = mergeSettings({
     models: {
       profiles: [
@@ -54,23 +54,22 @@ function setup({ chats = [], unusable = {}, cases = {}, facade = false } = {}) {
     availability,
     explainTarget,
     snapshotModels,
-    getChats: () => store,
     listChats: (options = {}) => {
-      if (facade) facadeCalls.push({ method: 'listChats', options });
+      facadeCalls.push({ method: 'listChats', options });
       return options.messages === false ? store.map(({ messages: _messages, ...meta }) => meta) : store;
     },
-    setChats: (next) => { store = next; },
-    ...(facade ? {
-      getChat: (chatId, options) => {
-        facadeCalls.push({ method: 'getChat', chatId, options });
-        return store.find((c) => c.id === chatId) || null;
-      },
-      updateChat: (chatId, patch) => {
-        facadeCalls.push({ method: 'updateChat', chatId, patch });
-        store = store.map((c) => (c.id === chatId ? { ...c, ...patch } : c));
-        return store.find((c) => c.id === chatId) || null;
-      }
-    } : {}),
+    getChat: (chatId, options = {}) => {
+      facadeCalls.push({ method: 'getChat', chatId, options });
+      const chat = store.find((c) => c.id === chatId) || null;
+      if (!chat || options.messages !== false) return chat;
+      const { messages: _messages, ...meta } = chat;
+      return meta;
+    },
+    updateChat: (chatId, patch, options = {}) => {
+      facadeCalls.push({ method: 'updateChat', chatId, patch, options });
+      store = store.map((c) => (c.id === chatId ? { ...c, ...patch } : c));
+      return store.find((c) => c.id === chatId) || null;
+    },
     appendMessageToChat: (chatId, sender, text) => { store = store.map((c) => (c.id === chatId ? { ...c, messages: [...c.messages, { sender, text }] } : c)); return store.find((c) => c.id === chatId); },
     getCaseRuntime: () => caseRuntime
   });
@@ -110,12 +109,12 @@ describe('switching', () => {
     await choices.setMainOverride('c1', { provider: 'OpenAI', model: 'gpt-4o' });
     assert.deepStrictEqual(chat('c1').mainOverride, t('openai', 'gpt-4o'));
     await choices.setMainOverride('c1', null);
-    assert.strictEqual('mainOverride' in chat('c1'), false);
+    assert.strictEqual(chat('c1').mainOverride ?? null, null);
     assert.deepStrictEqual(statuses('c1'), ['Main model switched from GPT-5.5 to GPT-4o', 'Main model reset to the profile\'s main (GPT-5.5)']);
   });
 
   it('uses facade methods for chat model choice reads and writes when available', async () => {
-    const { choices, chat, facadeCalls } = setup({ chats: [{ id: 'c1' }], facade: true });
+    const { choices, chat, facadeCalls } = setup({ chats: [{ id: 'c1' }] });
 
     await choices.setChatProfile('c1', 'p-b');
 
@@ -166,7 +165,7 @@ describe('switching', () => {
     await choices.setChatProfile('c1', 'p-b');
     assert.strictEqual(chat('c1').profileId, 'p-b');
     await choices.setChatProfile('c1', null);
-    assert.strictEqual('profileId' in chat('c1'), false);
+    assert.strictEqual(chat('c1').profileId ?? null, null);
     assert.deepStrictEqual(statuses('c1'), ['This chat now uses the profile Cheap.', 'This chat now uses the default profile (Work).']);
     await assert.rejects(choices.setChatProfile('c1', 'p-gone'), /No profile with id p-gone/);
   });
@@ -179,7 +178,7 @@ describe('main override efforts', () => {
       choices.setMainOverride('c1', t('openai', 'gpt-5.5', 'extreme')),
       /gpt-5\.5 in role "main" does not offer the effort "extreme"; it offers none, low, medium, high, xhigh\./
     );
-    assert.strictEqual('mainOverride' in chat('c1'), false);
+    assert.strictEqual(chat('c1').mainOverride ?? null, null);
   });
 
   it('saves a good effort', async () => {
@@ -215,7 +214,7 @@ describe('profiles', () => {
     });
     const r = await choices.removeProfile('p-b');
     assert.deepStrictEqual(r, { removed: 'p-b', defaultProfileId: 'p-a', moved: { chats: ['c1'], cases: ['case-1'] } });
-    assert.strictEqual('profileId' in chat('c1'), false);
+    assert.strictEqual(chat('c1').profileId ?? null, null);
     assert.deepStrictEqual(caseCalls, [['case-1', { profile: null }]]);
     assert.deepStrictEqual(statuses('c1'), ['The profile Cheap was deleted; this chat now uses the default profile (Work).']);
     assert.deepStrictEqual(statuses('c2'), ['The profile Cheap was deleted; this case now uses the default profile (Work).']);
@@ -225,15 +224,13 @@ describe('profiles', () => {
   it('uses facade metadata listing while moving chats and case chats off a deleted profile', async () => {
     const { choices, facadeCalls } = setup({
       chats: [{ id: 'c1', profileId: 'p-b' }, { id: 'c2', caseId: 'case-1' }, { id: 'c3' }],
-      cases: { 'case-1': { profile: 'p-b' } },
-      facade: true
+      cases: { 'case-1': { profile: 'p-b' } }
     });
 
     const r = await choices.removeProfile('p-b');
 
     assert.deepStrictEqual(r.moved, { chats: ['c1'], cases: ['case-1'] });
     assert.ok(facadeCalls.some((call) => call.method === 'listChats' && call.options.messages === false));
-    assert.ok(!facadeCalls.some((call) => call.method === 'getChats'), 'removeProfile should not need full chat payloads when listChats exists');
   });
 
   it('views every profile entry with its usability, reasons and catalog facts', () => {

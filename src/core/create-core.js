@@ -297,17 +297,6 @@ function createCore(deps = {}) {
     listChats, getChat, updateChat, createChat, replaceChat, upsertChat, updateChatsWhere, deleteChat,
     getMessages, appendMessageToChat, truncateChatFrom
   } = createChatFacade({ historyStore, createId });
-  // Transitional (H1 Tasks 7 to 9): the last getChats/setChats call sites
-  // move to explicit store calls in Tasks 8 and 9, and Task 9 deletes these.
-  const getChats = () => listChats({ messages: true });
-  const setChats = (chats) => historyStore.transaction(() => {
-    const list = Array.isArray(chats) ? chats : [];
-    const keep = new Set(list.map((chat) => String(chat?.id ?? '').trim()).filter(Boolean));
-    for (const chat of historyStore.listChats()) if (!keep.has(chat.id)) historyStore.deleteChat(chat.id);
-    for (const chat of list) historyStore.upsertChat(chat, { position: 'back' });
-    return list;
-  });
-
   // F5 re-review: a chat a Telegram/Discord bridge created before the
   // origin/channel tagging existed carries neither, and the bridges keep
   // their chat-id maps in memory only, so such a chat is never re-tagged
@@ -325,18 +314,18 @@ function createCore(deps = {}) {
   ];
   const migrateLegacyBridgeChatOrigins = () => {
     if (!historyStatus.available) return;
-    const chats = getChats();
     let count = 0;
-    for (const chat of chats) {
-      if (chat.origin || typeof chat.title !== 'string') continue;
-      const match = LEGACY_BRIDGE_TITLE_PREFIXES.find(({ prefix }) => chat.title.startsWith(prefix));
+    for (const meta of listChats({ messages: false })) {
+      if (meta.origin || typeof meta.title !== 'string') continue;
+      const match = LEGACY_BRIDGE_TITLE_PREFIXES.find(({ prefix }) => meta.title.startsWith(prefix));
       if (!match) continue;
       count += 1;
-      const messages = Array.isArray(chat.messages) ? chat.messages : [];
-      updateChat(chat.id, {
+      const chat = getChat(meta.id, { messages: true });
+      const messages = Array.isArray(chat?.messages) ? chat.messages : [];
+      updateChat(meta.id, {
         origin: match.origin,
         messages: messages.map((m) => (m && m.sender === 'user' && !m.channel ? { ...m, channel: match.origin } : m))
-      });
+      }, { messages: false });
     }
     if (count) {
       log.info(`Tagged ${count} legacy bridge chat(s) by title prefix (F5 migration).`);
@@ -1363,9 +1352,7 @@ function createCore(deps = {}) {
           messages: []
         };
         createChat(newChat);
-        const chats = getChats();
-
-        ui.send('chat:updated', { chats });
+        ui.send('chat:updated', { chats: listChats({ messages: false }) });
 
         return newChat.id;
       },
@@ -1377,7 +1364,7 @@ function createCore(deps = {}) {
         });
         if (!chat) return;
 
-        ui.send('chat:updated', { chats: getChats() });
+        ui.send('chat:updated', { chats: listChats({ messages: false }) });
       }
     });
 
@@ -1433,10 +1420,9 @@ function createCore(deps = {}) {
           messages: []
         };
         createChat(newChat);
-        const chats = getChats();
 
         // Notify renderer if window exists
-        ui.send('chat:updated', { chats });
+        ui.send('chat:updated', { chats: listChats({ messages: false }) });
 
         return newChat.id;
       },
@@ -1449,7 +1435,7 @@ function createCore(deps = {}) {
         if (!chat) return;
 
         // Notify renderer if window exists
-        ui.send('chat:updated', { chats: getChats() });
+        ui.send('chat:updated', { chats: listChats({ messages: false }) });
       }
     });
 
@@ -2149,7 +2135,7 @@ function createCore(deps = {}) {
 
           if (action === 'render' || action === 'update') {
             const canvasState = { title: title || 'Canvas', content, visible: true, lastUpdatedAt: new Date().toISOString() };
-            updateChat(cid, { canvasState, updatedAt: new Date().toISOString() });
+            updateChat(cid, { canvasState, updatedAt: new Date().toISOString() }, { messages: false });
             if (sender && !sender.isDestroyed()) {
               sender.send('canvas:render', { chatId: cid, title: canvasState.title, content });
             }
@@ -2157,7 +2143,7 @@ function createCore(deps = {}) {
           }
 
           if (action === 'close') {
-            updateChat(cid, { canvasState: null, updatedAt: new Date().toISOString() });
+            updateChat(cid, { canvasState: null, updatedAt: new Date().toISOString() }, { messages: false });
             if (sender && !sender.isDestroyed()) {
               sender.send('canvas:close', { chatId: cid });
             }
@@ -3106,12 +3092,7 @@ function createCore(deps = {}) {
     availability,
     explainTarget,
     snapshotModels,
-    getChats,
     listChats,
-    setChats,
-    createChat,
-    replaceChat,
-    deleteChat,
     getChat,
     updateChat,
     appendMessageToChat,
@@ -3216,8 +3197,6 @@ function createCore(deps = {}) {
     getHistoryStatus,
     getMessages,
     truncateChatFrom,
-    getChats,
-    setChats,
     listChats,
     getChat,
     updateChat,

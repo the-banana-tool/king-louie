@@ -172,7 +172,7 @@ describe('bridge dispatcher', () => {
         'chat:stopResponse': async (_event, { chatId }) => { stopped.push(chatId); stops.get(chatId)({ ok: true, data: null }); return { ok: true }; }
       }
     });
-    core.context.setChats([{ id: 'c-run', title: 'Run', createdAt: '2026-09-23T10:00:00Z', updatedAt: '2026-09-23T10:00:00Z', messages: [] }]);
+    core.context.createChat({ id: 'c-run', title: 'Run', createdAt: '2026-09-23T10:00:00Z', updatedAt: '2026-09-23T10:00:00Z', messages: [] });
     const a = connection();
     use(a);
     const chat = dispatcher.handleFrame(a, { t: 'invoke', id: 4, channel: 'chat:sendMessage', args: [{ chatId: 'c-run', message: 'go' }] });
@@ -186,7 +186,7 @@ describe('bridge dispatcher', () => {
     // tool:execute's wrapHandler wraps the executor's refusal in { ok: true, data }.
     assert.strictEqual(resultFor(a, 5).value.data.deniedBy, 'user');
     assert.deepStrictEqual(await ask, { ok: false, error: 'The desktop disconnected.' });
-    const messages = core.context.getChats().find((c) => c.id === 'c-run').messages;
+    const messages = core.context.getChat('c-run').messages;
     assert.strictEqual(messages[messages.length - 1].text, 'The desktop disconnected; the run was stopped.');
   });
 
@@ -259,7 +259,7 @@ describe('bridge dispatcher', () => {
 
   it('sets a working directory only when the service can read it', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-dispatch-wd-'));
-    core.context.setChats([{ id: 'c-wd', title: 'WD', createdAt: '2026-09-23T10:00:00Z', updatedAt: '2026-09-23T10:00:00Z', messages: [] }]);
+    core.context.createChat({ id: 'c-wd', title: 'WD', createdAt: '2026-09-23T10:00:00Z', updatedAt: '2026-09-23T10:00:00Z', messages: [] });
     const { dispatcher, use } = makeDispatcher();
     const a = connection();
     use(a);

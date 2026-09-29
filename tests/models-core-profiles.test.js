@@ -162,7 +162,7 @@ describe('snapshotModels', () => {
     const { core } = makeCore({ settings: threeProfiles() });
     const rt = core.context.getCaseRuntime();
     const info = await rt.createCase({ title: 'Lakeside lot' });
-    core.context.setChats([{ id: 'c1', title: 'x', messages: [], caseId: info.id, profileId: 'p-b', mainOverride: t('openai', 'gpt-5.4') }]);
+    core.context.createChat({ id: 'c1', title: 'x', messages: [], caseId: info.id, profileId: 'p-b', mainOverride: t('openai', 'gpt-5.4') });
     const plain = core.context.snapshotModels({ chatId: 'c1' });
     assert.deepStrictEqual([plain.profileId, plain.mainOverride], ['p-b', null], 'the chat\'s own override does not apply in a case chat');
     rt.store.updateMeta(info.id, { profile: 'p-c', mainOverride: t('anthropic', 'claude-sonnet-5') });
