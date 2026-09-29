@@ -146,3 +146,55 @@ describe('desktop import and history.sqlite', () => {
     assert.deepStrictEqual(source.attention, []);
   });
 });
+
+describe('desktop import from an H1 (schema version 1) history.sqlite', () => {
+  // An H1 desktop's file: what H2's schema step 2 would add is not there.
+  function versionOneFile(root) {
+    const file = path.join(root, 'history.sqlite');
+    const store = HistoryStore.open(file);
+    store.createChat({ id: 'c1', title: 'From H1', updatedAt: '2026-09-20T10:00:00.000Z', messages: [msg] });
+    store.close();
+    const db = new sqlite.DatabaseSync(file);
+    db.exec(`DROP TRIGGER chunks_ai; DROP TRIGGER chunks_ad; DROP TRIGGER chunks_au;
+      DROP TABLE chunks_fts; DROP TABLE chunks; DROP TABLE calibration;
+      DELETE FROM meta WHERE key = 'chunks_backfill';
+      UPDATE schema_version SET version = 1;`);
+    db.close();
+    return file;
+  }
+
+  it('imports its chats without upgrading it', async () => {
+    const root = tempDir('kl-desktop-');
+    const file = versionOneFile(root);
+    const { found, chats, attention } = await readHistoryChats({ reader: createSafeReader({ root }), tmpRoot: tempDir('kl-copy-') });
+    assert.deepStrictEqual(attention, []);
+    assert.strictEqual(found, true);
+    assert.deepStrictEqual(chats.map((c) => [c.id, c.messages.length]), [['c1', 1]]);
+    const db = new sqlite.DatabaseSync(file, { readOnly: true });
+    assert.strictEqual(db.prepare('SELECT version FROM schema_version').get().version, 1);
+    db.close();
+  });
+
+  it('allowOlderSchema opens it read-only with no index; plain read-only and newer still refuse', () => {
+    const root = tempDir('kl-desktop-');
+    const file = versionOneFile(root);
+    assert.throws(() => HistoryStore.open(file, { readonly: true }), (err) => err.code === 'HISTORY_SCHEMA_OLDER');
+    const store = HistoryStore.open(file, { readonly: true, allowOlderSchema: true });
+    try {
+      assert.deepStrictEqual(store.listChats().map((c) => c.id), ['c1']);
+      assert.deepStrictEqual(store.searchText('Lakeside', {}), []);
+      assert.deepStrictEqual(store.chunks([1]), []);
+      assert.deepStrictEqual(store.chunksOfMessage('m1'), []);
+      assert.strictEqual(store.messageChunkCounts(['m1']).size, 0);
+      assert.strictEqual(store.historyChars('c1'), 0);
+      assert.strictEqual(store.calibration('any'), null);
+      assert.throws(() => store.setCalibration('any', 3, 1), /schema version 1/);
+    } finally {
+      store.close();
+    }
+    const db = new sqlite.DatabaseSync(file);
+    db.exec('UPDATE schema_version SET version = 99');
+    db.close();
+    assert.throws(() => HistoryStore.open(file, { readonly: true, allowOlderSchema: true }), (err) => err.code === 'HISTORY_SCHEMA_NEWER');
+  });
+});

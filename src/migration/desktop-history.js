@@ -44,11 +44,13 @@ async function readHistoryChats({ reader, tmpRoot = os.tmpdir(), backup = sqlite
   let snapshot = null;
   try {
     const file = path.join(dir, 'history.sqlite');
-    source = HistoryStore.open(checked.path, { readonly: true });
+    // An H1 desktop's file is schema 1: read as it is, never upgraded (only
+    // chats and messages are read).
+    source = HistoryStore.open(checked.path, { readonly: true, allowOlderSchema: true });
     await backup(source.db, file);
     source.close();
     source = null;
-    snapshot = HistoryStore.open(file, { readonly: true });
+    snapshot = HistoryStore.open(file, { readonly: true, allowOlderSchema: true });
     return { found: true, chats: snapshot.listChats({ messages: true }).map(forImport), attention };
   } catch (err) {
     attention.push({

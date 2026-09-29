@@ -137,7 +137,10 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   write-guarded in case turns (`case-guard.js`). A chat that never moves is
   backed up once, not on every start (`migration_backup` in the store's meta).
 - Schema changes are new entries in `SCHEMA_STEPS` (`src/history/schema.js`);
-  never edit a released step.
+  never edit a released step. A read-only open refuses an older schema unless
+  it passes `allowOlderSchema: true` (desktop import, which reads only chats
+  and messages, so it can import from an H1 desktop): the file is not
+  upgraded, and its index methods find nothing.
 - `main.js` and `bin/king-louie-service.js` drop Node's SQLite
   ExperimentalWarning (`src/history/sqlite-warning.js`); tests still print it.
 - Tests use `HistoryStore.open(':memory:')` or `tests/helpers/history-context.js`

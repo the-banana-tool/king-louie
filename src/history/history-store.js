@@ -15,6 +15,8 @@ const { createLogger } = require('../logging');
 
 const log = createLogger('history');
 const BUSY_TIMEOUT_MS = 5000;
+// The schema step that adds chunks, full-text search and calibration.
+const INDEX_SCHEMA_VERSION = 2;
 
 const PREVIEW_CHARS = 500;
 const normalizeId = (value) => String(value ?? '').trim();
@@ -44,11 +46,16 @@ const LIST_SQL = `
   ORDER BY c.position, c.rowid`;
 
 class HistoryStore {
-  static open(dbPath, { readonly = false, now, chunkOptions, backfillBatchSize } = {}) {
+  // allowOlderSchema (read-only only): open a file at any schema version from
+  // 1 to the latest without upgrading it, for callers that read only chats
+  // and messages (desktop import from an H1 profile). Its index methods then
+  // find nothing, and setCalibration throws.
+  static open(dbPath, { readonly = false, allowOlderSchema = false, now, chunkOptions, backfillBatchSize } = {}) {
     if (!dbPath || typeof dbPath !== 'string') throw new TypeError('HistoryStore.open needs a file path or ":memory:".');
     const memory = dbPath === ':memory:';
     if (!memory && !readonly) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     const db = new DatabaseSync(dbPath, readonly ? { readOnly: true } : {});
+    let version;
     try {
       db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
       db.exec('PRAGMA foreign_keys = ON');
@@ -56,16 +63,18 @@ class HistoryStore {
         const found = currentVersion(db);
         const latest = latestVersion();
         if (found > latest) throw new SchemaVersionError(found, latest);
-        if (found < latest) throw new SchemaVersionError(found, latest, 'HISTORY_SCHEMA_OLDER');
+        if (found < latest && !(allowOlderSchema && found >= 1)) throw new SchemaVersionError(found, latest, 'HISTORY_SCHEMA_OLDER');
+        version = found;
       } else {
         if (!memory) db.exec('PRAGMA journal_mode = WAL');
-        applySchema(db);
+        version = applySchema(db);
       }
     } catch (err) {
       db.close();
       throw err;
     }
     const store = new this(db, { dbPath, readonly, now });
+    store.schemaVersion = version;
     // Chunk sizes (settings.history.chunk), read on every insert so a
     // settings change applies to the next message.
     store._chunkOptions = typeof chunkOptions === 'function' ? chunkOptions : () => chunkOptions || {};
@@ -88,6 +97,12 @@ class HistoryStore {
     this._depth = 0;
     this._closed = false;
     this._statements = new Map();
+    this.schemaVersion = latestVersion();
+  }
+
+  // False only for a read-only store opened below schema 2 (no chunks).
+  get indexed() {
+    return this.schemaVersion >= INDEX_SCHEMA_VERSION;
   }
 
   get isOpen() {
@@ -398,14 +413,21 @@ class HistoryStore {
   }
 
   // Recall stage H2 (spec §3.2, §6.3, §6.6).
-  searchText(query, options = {}) { return chunkIndex.searchText(this.db, query, options); }
-  chunks(ids) { return chunkIndex.getChunks(this.db, ids); }
-  chunksOfMessage(messageId) { return chunkIndex.chunksOfMessage(this.db, messageId); }
-  messageChunkCounts(messageIds) { return chunkIndex.messageChunkCounts(this.db, messageIds); }
+  // A store opened below schema 2 (allowOlderSchema) has no index: reads
+  // find nothing and never touch the file.
+  searchText(query, options = {}) { return this.indexed ? chunkIndex.searchText(this.db, query, options) : []; }
+  chunks(ids) { return this.indexed ? chunkIndex.getChunks(this.db, ids) : []; }
+  chunksOfMessage(messageId) { return this.indexed ? chunkIndex.chunksOfMessage(this.db, messageId) : []; }
+  messageChunkCounts(messageIds) { return this.indexed ? chunkIndex.messageChunkCounts(this.db, messageIds) : new Map(); }
   lastSeq(chatId) { return chunkIndex.lastSeq(this.db, chatId); }
-  historyChars(chatId, options = {}) { return chunkIndex.historyChars(this.db, chatId, options); }
-  calibration(model) { return chunkIndex.getCalibration(this.db, model); }
-  setCalibration(model, charsPerToken, samples) { chunkIndex.setCalibration(this.db, model, charsPerToken, samples); }
+  historyChars(chatId, options = {}) { return this.indexed ? chunkIndex.historyChars(this.db, chatId, options) : 0; }
+  calibration(model) { return this.indexed ? chunkIndex.getCalibration(this.db, model) : null; }
+  setCalibration(model, charsPerToken, samples) {
+    if (!this.indexed) {
+      throw new Error(`history.sqlite has schema version ${this.schemaVersion} and was opened without upgrading it; it has no calibration table.`);
+    }
+    chunkIndex.setCalibration(this.db, model, charsPerToken, samples);
+  }
 
   _messagesFor(chatId, { fromSeq = 1, toSeq = Number.MAX_SAFE_INTEGER, limit = -1 } = {}) {
     const list = this._stmt('SELECT * FROM messages WHERE chat_id = ? AND seq >= ? AND seq <= ? ORDER BY seq LIMIT ?')
