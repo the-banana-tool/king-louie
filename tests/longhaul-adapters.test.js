@@ -58,6 +58,24 @@ describe('sliding-window', () => {
   });
 });
 
+describe('sliding-window with a window too small for the cut marker', () => {
+  it('leaves the message out entirely (--window-tokens 5)', async () => {
+    const at = (i) => new Date(Date.UTC(2026, 0, 5, 9, i)).toISOString();
+    const messages = [
+      { id: 'c1', seq: 1, sender: 'user', text: 'start', timestamp: at(1) },
+      { id: 'c2', seq: 2, sender: 'toolResult', toolName: 'Bash', result: 'y'.repeat(5000), timestamp: at(2) },
+      { id: 'c3', seq: 3, sender: 'user', text: 'what now?', timestamp: at(3) }
+    ];
+    const session = { manifest: { sessionId: 'C' }, messages, index: new SessionIndex(messages) };
+    const adapter = createAdapter('sliding-window', { windowTokens: 5 });
+    const r = await adapter.context(await adapter.prepare(session), { question: {}, askAtSeq: 3, budgetTokens: 5 });
+    assert.deepStrictEqual(r.evidenceSeqsShown, []);
+    assert.deepStrictEqual(r.evidenceSeqsPartial, []);
+    assert.ok(!r.text.includes('yyyy'), 'none of the message is shown');
+    assert.ok(r.estTokens <= 5, `${r.estTokens} tokens`);
+  });
+});
+
 describe('oracle', () => {
   for (const id of ['synth-small', 'synth-medium', 'synth-compacted']) {
     it(`${id}: shows every evidence message and every planted answer, nothing at or after askAtSeq`, async () => {

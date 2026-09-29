@@ -25,9 +25,10 @@ function createSlidingWindowAdapter({ budgetTokens = 6000, windowTokens = null }
           const t = estimateTokens(`${text}\n\n`);
           if (used + t > limit) {
             // The newest message alone is over the window: its end is shown,
-            // so it is partly shown, not shown.
-            if (parts.length === 0) {
-              const keep = Math.max(0, limit * 4 - CUT_MARKER_MAX);
+            // so it is partly shown, not shown. A window too small for the
+            // marker leaves it out entirely (slice(-0) would be all of it).
+            const keep = limit * 4 - CUT_MARKER_MAX;
+            if (parts.length === 0 && keep > 0) {
               parts.push(`[... earlier part of #${seq} cut]\n${text.slice(-keep)}`);
               partial.push(seq);
             }
