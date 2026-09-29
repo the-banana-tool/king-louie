@@ -198,7 +198,7 @@ chunks(
 );
 CREATE VIRTUAL TABLE chunks_fts USING fts5(
   text, content='chunks', content_rowid='id',
-  tokenize = "unicode61 tokenchars '_-.'"
+  tokenize = "unicode61 tokenchars '_-'"   -- '.' is a separator: 'is 4417.' must index 4417
 );
 -- triggers keep chunks_fts in step with chunks on insert and delete
 

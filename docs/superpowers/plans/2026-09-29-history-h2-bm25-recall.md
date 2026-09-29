@@ -17,7 +17,7 @@
 - Log through `createLogger` from `src/logging.js`; no bare `console.*` in `src/`.
 - Open source: invented fixture values only (`Lakeside lot`, `4417`, `example.com`); no personal names, paths or domains. Unit tests never touch the network.
 - Use the glossary: a **chunk** is the indexed unit; an **excerpt** is what the model is shown from one message (adjacent chunks merged under a `[#seq · sender · age]` header); the **tail** is the verbatim recent messages; the **recalled block** is `<recalled_history>…</recalled_history>`; **recall** is the whole feature, **retrieval** the ranking step; **provenance** is the `context` record on an assistant message.
-- FTS table: `CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='chunks', content_rowid='id', tokenize = "unicode61 tokenchars '_-.'")`, kept in step by triggers. No stemming. `/` is a separator (owner decision 2026-09-29): a path splits on `/`, so a file name matches alone and the full path matches as a phrase.
+- FTS table: `CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='chunks', content_rowid='id', tokenize = "unicode61 tokenchars '_-'")`, kept in step by triggers. No stemming. `/` is a separator (owner decision 2026-09-29): a path splits on `/`, so a file name matches alone and the full path matches as a phrase.
 - Chunk kinds: `user | assistant | tool_use | tool_result | attachment | summary`. `status` messages are indexed only with `meta.compaction === true` (kind `summary`, owner decision 2026-09-29).
 - Settings namespace is `history` (not `retrieval`). H2 keys and defaults, verbatim from §14:
   `history.recall = { enabled: true, tailMessages: 8, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true, recalledTokens: 6000, queryUserTurns: 2, bm25TopK: 50, rrfK: 60, kindWeights: { user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 }, recencyWeight: 0.3, recencyHalfLifeDays: 30, maxChunksPerMessage: 4 }`, `history.chunk = { targetChars: 1500, minChars: 40 }`, `history.readHistoryMaxTokens = 8000`.
@@ -799,7 +799,7 @@ CREATE INDEX idx_chunks_message ON chunks(message_id);
 CREATE INDEX idx_chunks_chat ON chunks(chat_id);
 CREATE VIRTUAL TABLE chunks_fts USING fts5(
   text, content='chunks', content_rowid='id',
-  tokenize = "unicode61 tokenchars '_-.'"
+  tokenize = "unicode61 tokenchars '_-'"
 );
 CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
   INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
@@ -4420,5 +4420,5 @@ git commit -m "test(history): recall end to end; CLAUDE.md history section"
 
 1. **Short messages are indexed.** `minChars` applies only to the fragments of a text that splits into more than one piece; a message whose text yields a single chunk always keeps it, however short ("the port is 8443" is indexed). Task 2 (`splitProse` and its tests) and Task 3 (the `chunkOptions` test).
 2. **Kind weights.** Ship the spec defaults unchanged. LongHaul B0 measures their effect; H3 retunes them.
-3. **Paths split on `/`.** The tokenizer is `unicode61 tokenchars '_-.'`: a file name ("app.js") matches a stored "src/app.js" alone, and the full path matches as a phrase. Global Constraints, Task 3 (schema and test), Task 5 (test); spec §4.1 updated to match.
+3. **Paths split on `/`.** The tokenizer is `unicode61 tokenchars '_-'`: '.' and '/' separate tokens (ruling 2026-09-29: with '.' as a token character a sentence-final number never matched), so a quoted file name ("app.js" → phrase app js) matches a stored "src/app.js", and the full path matches as a phrase. Global Constraints, Task 3 (schema and test), Task 5 (test); spec §4.1 updated to match.
 4. **`bodies-of-the-gods.md`** is deleted in Task 14, with the compactor test that was its only reader.
