@@ -146,6 +146,30 @@ describe('createCore and the history store', () => {
     assert.strictEqual(typeof getHistoryRetriever().retrieve, 'function');
   });
 
+  it('chunks what a version-1 store held after start(), not while the core is built', async () => {
+    const { dataDir, deps } = makeDeps();
+    const file = path.join(dataDir, 'history.sqlite');
+    const seed = HistoryStore.open(file);
+    seed.createChat({ id: 'c1', title: 'From H1', messages: [msg('m1', 'user', 'the blue folder is in the Lakeside shed'), msg('m2', 'assistant', 'noted')] });
+    seed.close();
+    const raw = new DatabaseSync(file);
+    raw.exec(`DROP TRIGGER chunks_ai; DROP TRIGGER chunks_ad; DROP TRIGGER chunks_au;
+      DROP TABLE chunks_fts; DROP TABLE chunks; DROP TABLE calibration;
+      UPDATE schema_version SET version = 1;`);
+    raw.close();
+    const core = createCore(deps);
+    const store = core.context.getHistoryStore();
+    assert.deepStrictEqual(store.searchText('Lakeside', {}), [], 'not indexed while the core is built');
+    try {
+      await core.start();
+      const result = await core.context.getHistoryBackfill().done;
+      assert.deepStrictEqual(result, { indexed: 2, finished: true });
+      assert.strictEqual(store.searchText('Lakeside', {}).length, 1);
+    } finally {
+      await core.shutdown();
+    }
+  });
+
   it('chunks new messages with the chunk sizes in settings.history.chunk', () => {
     const { deps } = makeDeps();
     deps.store.set('settings', { history: { chunk: { targetChars: 200, minChars: 50 } } });

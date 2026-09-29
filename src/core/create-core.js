@@ -64,6 +64,7 @@ const { makeRootAssert } = require('../cases/executors/package-loader');
 const { buildChildContext, childRuntimeOptions } = require('../agents/child-context');
 const ContextAssembler = require('../context/context-assembler');
 const { HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore, TokenEstimator, Retriever, ContextBuilder } = require('../history');
+const { startChunkBackfill } = require('../history/backfill');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
@@ -327,6 +328,10 @@ function createCore(deps = {}) {
   });
   const getHistoryStore = () => historyStore;
   const getHistoryStatus = () => ({ ...historyStatus });
+  // Chunking what an H1 store held runs after start(), a batch per tick
+  // (startChunkBackfill); shutdown stops it before the store closes.
+  let historyBackfill = null;
+  const getHistoryBackfill = () => historyBackfill;
   const {
     listChats, getChat, updateChat, createChat, replaceChat, upsertChat, updateChatsWhere, deleteChat,
     getMessages, appendMessageToChat, truncateChatFrom
@@ -3012,6 +3017,10 @@ function createCore(deps = {}) {
       meshContext.remoteControl.on('taskCompleted', (info) => ui.send('mesh:taskCompleted', info));
       meshContext.remoteControl.on('taskFailed', (info) => ui.send('mesh:taskFailed', info));
     }
+    // Recall stage H2: messages stored before the index existed are chunked
+    // in the background; search misses them until then. A read-only or
+    // in-memory store never backfills.
+    if (historyStatus.available && !historyBackfill) historyBackfill = startChunkBackfill(historyStore);
   };
 
   const shutdown = async () => {
@@ -3072,6 +3081,7 @@ function createCore(deps = {}) {
     }
     if (usageTracker) usageTracker.reset();
     // Last: nothing after this point appends to a chat.
+    if (historyBackfill) historyBackfill.stop();
     try {
       historyStore.close();
     } catch (err) {
@@ -3225,6 +3235,7 @@ function createCore(deps = {}) {
     getTokenEstimator: () => tokenEstimator,
     getHistoryRetriever: () => historyRetriever,
     getHistoryStatus,
+    getHistoryBackfill,
     getMessages,
     truncateChatFrom,
     listChats,

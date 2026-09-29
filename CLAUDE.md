@@ -151,7 +151,11 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   writes its FTS5 rows in the same transaction; never write `messages` or
   `chunks` another way. The tokenizer is `unicode61 tokenchars '_-'`: '.' and
   '/' separate tokens, so "app.js" matches a stored "src/app.js". A store
-  upgraded from schema 1 backfills chunks on open, resumably.
+  upgraded from schema 1 is chunked after `core.start()`, not on open:
+  `startChunkBackfill` (`src/history/backfill.js`) runs one
+  `backfillChunks` batch per `setImmediate` tick, resumably, and stops when
+  the store closes; search misses what is not indexed yet. Read-only and
+  in-memory stores never backfill.
 - Tools in `UNINDEXED_TOOLS` (`chunker.js`; `Vault`) make no chunks, so their
   secrets never reach search or recall; the tail's tool lines and ReadHistory
   show such a call's action and key only, and none of its result.

@@ -50,7 +50,7 @@ class HistoryStore {
   // 1 to the latest without upgrading it, for callers that read only chats
   // and messages (desktop import from an H1 profile). Its index methods then
   // find nothing, and setCalibration throws.
-  static open(dbPath, { readonly = false, allowOlderSchema = false, now, chunkOptions, backfillBatchSize } = {}) {
+  static open(dbPath, { readonly = false, allowOlderSchema = false, now, chunkOptions } = {}) {
     if (!dbPath || typeof dbPath !== 'string') throw new TypeError('HistoryStore.open needs a file path or ":memory:".');
     const memory = dbPath === ':memory:';
     if (!memory && !readonly) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -78,14 +78,8 @@ class HistoryStore {
     // Chunk sizes (settings.history.chunk), read on every insert so a
     // settings change applies to the next message.
     store._chunkOptions = typeof chunkOptions === 'function' ? chunkOptions : () => chunkOptions || {};
-    if (!readonly) {
-      try {
-        store.backfillChunks({ batchSize: backfillBatchSize });
-      } catch (err) {
-        try { store.close(); } catch { /* already closed */ }
-        throw err;
-      }
-    }
+    // Messages stored before schema step 2 are chunked later, a batch at a
+    // time (backfillChunks, driven by startChunkBackfill after startup).
     return store;
   }
 
@@ -379,37 +373,48 @@ class HistoryStore {
     insertChunks(db, chatId, message, this._chunkOptions ? this._chunkOptions() : {});
   }
 
-  // Chunk messages stored before schema step 2, a batch per transaction; the
-  // cursor moves inside the same transaction, so a crash resumes after the
-  // last committed batch and no message is chunked twice.
-  backfillChunks({ batchSize = 500 } = {}) {
+  // Messages stored before schema step 2 still to chunk (0 when none).
+  backfillRemaining() {
+    if (this.readonly || !this.indexed) return 0;
     const state = readBackfill(this.db);
-    if (!state) return { indexed: 0, total: 0 };
+    if (!state) return 0;
+    return Number(this._stmt('SELECT count(*) AS n FROM messages WHERE rowid > ? AND rowid <= ?').get(state.cursor, state.until).n);
+  }
+
+  // Chunk one batch of the messages stored before schema step 2: one read
+  // for the batch's rows and one for their attachments, then one
+  // transaction that indexes them and moves the cursor, so a crash resumes
+  // after the last committed batch and no message is chunked twice.
+  // Returns { indexed, done, remaining }.
+  backfillChunks({ batchSize = 500 } = {}) {
+    const state = this.readonly || !this.indexed ? null : readBackfill(this.db);
+    if (!state) return { indexed: 0, done: true, remaining: 0 };
     const size = Number.isInteger(batchSize) && batchSize > 0 ? batchSize : 500;
-    const total = Number(this._stmt('SELECT count(*) AS n FROM messages WHERE rowid > ? AND rowid <= ?').get(state.cursor, state.until).n);
-    let cursor = state.cursor;
-    let indexed = 0;
-    if (total > 0) log.info(`Indexing ${total} stored messages for recall`);
-    for (;;) {
-      const batch = this._stmt('SELECT rowid AS rowId, chat_id AS chatId, seq FROM messages WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?')
-        .all(cursor, state.until, size);
-      if (!batch.length) break;
-      const last = Number(batch[batch.length - 1].rowId);
-      this.transaction((db) => {
-        for (const row of batch) {
-          const [message] = this._messagesFor(row.chatId, { fromSeq: Number(row.seq), toSeq: Number(row.seq), limit: 1 });
-          if (!message) continue;
-          db.prepare('DELETE FROM chunks WHERE message_id = ?').run(message.id);
-          this._indexMessage(db, row.chatId, message);
-        }
-        writeBackfill(db, { cursor: last, until: state.until });
-      });
-      cursor = last;
-      indexed += batch.length;
-      log.info(`Indexed ${indexed} of ${total} stored messages for recall`);
+    const batch = this._stmt('SELECT rowid AS row_id, * FROM messages WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?')
+      .all(state.cursor, state.until, size);
+    if (!batch.length) {
+      clearBackfill(this.db);
+      return { indexed: 0, done: true, remaining: 0 };
     }
-    clearBackfill(this.db);
-    return { indexed, total };
+    const last = Number(batch[batch.length - 1].row_id);
+    const attachments = this._stmt(`SELECT a.* FROM attachments a JOIN messages m ON m.id = a.message_id
+      WHERE m.rowid > ? AND m.rowid <= ? ORDER BY a.message_id, a.kind, a.idx`).all(state.cursor, last);
+    const byMessage = new Map();
+    for (const a of attachments) {
+      if (!byMessage.has(a.message_id)) byMessage.set(a.message_id, []);
+      byMessage.get(a.message_id).push(a);
+    }
+    this.transaction((db) => {
+      for (const { row_id: _rowId, ...row } of batch) {
+        const message = rows.rowToMessage(row, byMessage.get(row.id) || []);
+        this._stmt('DELETE FROM chunks WHERE message_id = ?').run(message.id);
+        this._indexMessage(db, row.chat_id, message);
+      }
+      writeBackfill(db, { cursor: last, until: state.until });
+    });
+    const remaining = Number(this._stmt('SELECT count(*) AS n FROM messages WHERE rowid > ? AND rowid <= ?').get(last, state.until).n);
+    if (remaining === 0) clearBackfill(this.db);
+    return { indexed: batch.length, done: remaining === 0, remaining };
   }
 
   // Recall stage H2 (spec §3.2, §6.3, §6.6).
