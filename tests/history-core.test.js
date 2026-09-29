@@ -224,7 +224,7 @@ describe('history: a chat turn through the core', () => {
         return {
           ...step,
           llmMetrics: {
-            provider: FAKE, model: MODEL, inputTokens: 2000, outputTokens: 10, totalTokens: 2010, costUsd: 0.001,
+            provider: FAKE, model: step.metricsModel || MODEL, inputTokens: 2000, outputTokens: 10, totalTokens: 2010, costUsd: 0.001,
             pricingUsage: { input: 2000, cachedInput: 0, cacheWrite: 0, output: 10, reasoning: 0 }
           }
         };
@@ -238,11 +238,11 @@ describe('history: a chat turn through the core', () => {
     };
   }
 
-  async function start({ history = {}, script = [{ type: 'text', content: 'The code is 4417.' }] } = {}) {
+  async function start({ history = {}, script = [{ type: 'text', content: 'The code is 4417.' }], messages = seededMessages(40) } = {}) {
     const calls = [];
     ProviderFactory.registerProvider(FAKE, fakeProvider(calls, script));
     delete process.env.KL_CASES_ROOT;
-    const { deps } = makeDeps([{ id: 'chat-1', title: 'Seeded chat', createdAt: '2026-02-01T09:00:00.000Z', updatedAt: '2026-02-01T10:00:00.000Z', messages: seededMessages(40) }]);
+    const { deps } = makeDeps([{ id: 'chat-1', title: 'Seeded chat', createdAt: '2026-02-01T09:00:00.000Z', updatedAt: '2026-02-01T10:00:00.000Z', messages }]);
     deps.store.set('settings', {
       models: {
         profiles: [{ id: 'p-h', name: 'H', kind: 'user', roles: { main: [{ provider: FAKE, model: MODEL, effort: null }], worker: [], utility: [] } }],
@@ -295,6 +295,23 @@ describe('history: a chat turn through the core', () => {
     const seqs = core.context.getHistoryStore().chunks(ctx.recalledChunkIds).map((c) => c.seq);
     assert.ok(seqs.includes(3));
     assert.strictEqual(core.context.getHistoryStore().calibration(MODEL).samples, 1);
+  });
+
+  it('calibrates under the model the call actually used', async () => {
+    const { send } = await start({ script: [{ type: 'text', content: 'The code is 4417.', metricsModel: 'history-fallback' }] });
+    await send('What was the side gate code at the Lakeside lot?');
+    const store = core.context.getHistoryStore();
+    assert.strictEqual(store.calibration('history-fallback').samples, 1);
+    assert.strictEqual(store.calibration(MODEL), null);
+  });
+
+  it('does not calibrate a turn that sends an image or a document', async () => {
+    const messages = seededMessages(40);
+    messages[38] = { ...messages[38], images: [{ name: 'gate.png', mimeType: 'image/png', base64: 'aGVsbG8=' }] };
+    const { calls, send } = await start({ messages });
+    await send('What was the side gate code at the Lakeside lot?');
+    assert.ok(calls[0].messages.some((m) => Array.isArray(m.images) && m.images.length), 'the image was sent');
+    assert.strictEqual(core.context.getHistoryStore().calibration(MODEL), null);
   });
 
   it('history.recall.enabled false sends the tail only', async () => {

@@ -848,11 +848,15 @@ function registerChatHandlers(ipcMain, context = {}) {
       });
 
       // Correct the chars-per-token ratio from what the provider reported
-      // for the turn's first complete call on main (spec §6.6).
-      if (estimator && turnContext) {
+      // for the turn's first complete call (spec §6.6), under the model that
+      // call used (a failover may have answered). A turn that sends an image
+      // or a document is skipped: its prompt tokens are not text chars.
+      const sendsAttachments = chat.messages.some((m) => (Array.isArray(m.images) && m.images.length > 0)
+        || (Array.isArray(m.documents) && m.documents.length > 0));
+      if (estimator && turnContext && !sendsAttachments) {
         try {
           const first = ownCalls.find((c) => c && !c.usagePartial);
-          if (first && (!first.provider || first.provider === mainTarget.provider)) {
+          if (first) {
             const pu = first.pricingUsage;
             const promptTokens = pu
               ? (Number(pu.input) || 0) + (Number(pu.cachedInput) || 0) + (Number(pu.cacheWrite) || 0)
@@ -861,7 +865,7 @@ function registerChatHandlers(ipcMain, context = {}) {
               + String(options.systemPromptDynamic || '').length
               + (sentTools ? JSON.stringify(sentTools).length : 0)
               + chat.messages.reduce((n, m) => n + String(m.text ?? m.content ?? '').length, 0);
-            estimator.observe(mainTarget.model, charsSent, promptTokens);
+            estimator.observe(first.model || mainTarget.model, charsSent, promptTokens);
           }
         } catch (err) {
           log.debug(`Token calibration skipped: ${err.message}`);
