@@ -8,6 +8,11 @@ const { toolUseSummary } = require('./chunker');
 const { formatExcerpts, formatRecalledBlock } = require('./excerpts');
 
 const PAGE = 200;
+// What one image in a tail message is counted as. Providers bill an image by
+// its size (Anthropic: about 1,600 tokens for a 1.15-megapixel image); the
+// tail has no pixels to hand, so every image counts as this.
+const IMAGE_TOKEN_ESTIMATE = 1600;
+const documentText = (d) => (d && typeof d.textContent === 'string' ? d.textContent : '');
 const hasText = (m) => String((m && m.text) || '').trim().length > 0;
 // A stopped reply with no text stays out: some providers reject an empty turn.
 const isContent = (m) => (m.sender === 'user' || m.sender === 'assistant') && !(m.stopped && !hasText(m));
@@ -135,12 +140,13 @@ class ContextBuilder {
 
     const messages = entries.map((e, i) => {
       const lines = folded.get(i);
-      return { ...e.message, text: lines ? `${lines.join('\n')}\n\n${e.text}` : e.text };
+      const text = lines ? `${lines.join('\n')}\n\n${e.text}` : e.text;
+      return e.documents ? { ...e.message, text, documents: e.documents } : { ...e.message, text };
     });
     return {
       messages,
       messageIds: entries.map((e) => e.message.id),
-      estTokens: messages.reduce((n, m) => n + this.estimator.estimate(m.text, model), 0),
+      estTokens: messages.reduce((n, m) => n + this.estimator.estimate(m.text, model) + this._attachmentTokens(m, model), 0),
       stats: entries.length
         ? {
           fromSeq: entries[0].message.seq,
@@ -152,7 +158,48 @@ class ContextBuilder {
     };
   }
 
+  // Document text and images are sent with a tail message every turn, so
+  // they count toward its estimate.
+  _attachmentTokens(m, model) {
+    const images = Array.isArray(m.images) ? m.images.length : 0;
+    const docs = Array.isArray(m.documents) ? m.documents : [];
+    return images * IMAGE_TOKEN_ESTIMATE + docs.reduce((n, d) => n + this.estimator.estimate(documentText(d), model), 0);
+  }
+
+  // A tail message's text (shortened over the per-message cap, spec §6.1),
+  // then its documents: when they push it over the cap, each document's text
+  // is cut to an even share of what is left, head kept, with a note (they
+  // are indexed as attachment chunks). Images are never dropped.
   _entry(m, { recall, query, model }) {
+    const entry = this._textEntry(m, { recall, query, model });
+    const cap = recall.tailMaxMessageTokens;
+    const imageTokens = (Array.isArray(m.images) ? m.images.length : 0) * IMAGE_TOKEN_ESTIMATE;
+    const docs = Array.isArray(m.documents) ? m.documents : [];
+    const docTokens = docs.reduce((n, d) => n + this.estimator.estimate(documentText(d), model), 0);
+    if (!docTokens || entry.tokens + docTokens + imageTokens <= cap) {
+      return { ...entry, tokens: entry.tokens + docTokens + imageTokens };
+    }
+    const withText = docs.filter((d) => documentText(d)).length;
+    const share = Math.max(0, Math.floor((cap - entry.tokens - imageTokens) / withText));
+    let cut = 0;
+    const documents = docs.map((d) => {
+      const full = documentText(d);
+      if (!full || this.estimator.estimate(full, model) <= share) return d;
+      cut += 1;
+      const chars = Math.floor(share * this.estimator.charsPerToken(model));
+      const note = `[document "${(d && d.name) || 'document'}" in message #${m.seq} shortened: the start is shown; SearchHistory finds the rest]`;
+      return { ...d, textContent: chars > 0 ? `${full.slice(0, chars)}\n\n${note}` : note };
+    });
+    const shortTokens = documents.reduce((n, d) => n + this.estimator.estimate(documentText(d), model), 0);
+    return {
+      ...entry,
+      documents,
+      tokens: entry.tokens + shortTokens + imageTokens,
+      shortened: cut ? { ...(entry.shortened || { seq: m.seq }), documents: cut } : entry.shortened
+    };
+  }
+
+  _textEntry(m, { recall, query, model }) {
     const text = String(m.text || '');
     const tokens = this.estimator.estimate(text, model);
     if (tokens <= recall.tailMaxMessageTokens) return { message: m, text, tokens, shortened: null };
@@ -192,4 +239,4 @@ class ContextBuilder {
   }
 }
 
-module.exports = { ContextBuilder };
+module.exports = { ContextBuilder, IMAGE_TOKEN_ESTIMATE };

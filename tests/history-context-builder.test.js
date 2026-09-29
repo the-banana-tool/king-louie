@@ -251,3 +251,52 @@ describe('ContextBuilder: the tail scan reads only what the tail needs', () => {
     assert.strictEqual(out.tail[1].text, '[tool] Write: notes/survey.md\n\nThe survey notes are written.');
   });
 });
+
+describe('ContextBuilder: attachments count toward the tail budget', () => {
+  const { IMAGE_TOKEN_ESTIMATE } = require('../src/history/context-builder');
+  let t;
+  afterEach(() => t && t.cleanup());
+  const image = (i) => ({ name: `photo-${i}.png`, mimeType: 'image/png', base64: 'aGVsbG8=' });
+  const doc = (text) => ({ name: 'survey.txt', mimeType: 'text/plain', base64: 'aGVsbG8=', textContent: text });
+
+  it('counts each image at IMAGE_TOKEN_ESTIMATE; an older message over the budget is left out, the newest keeps its images', async () => {
+    assert.strictEqual(IMAGE_TOKEN_ESTIMATE, 1600);
+    const s = setup([
+      { sender: 'user', text: 'Here are three photos of the Lakeside fence.', images: [image(1), image(2), image(3)] },
+      { sender: 'assistant', text: 'The fence posts lean to the north.' },
+      { sender: 'user', text: 'And this is the gate.', images: [image(4)] },
+      { sender: 'assistant', text: 'The gate hinge is rusted.' }
+    ]);
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'what now?' });
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), [3, 4]);
+    assert.strictEqual(out.tail[0].images.length, 1);
+    assert.ok(out.stats.estTokens.tail >= IMAGE_TOKEN_ESTIMATE);
+
+    const one = setup([{ sender: 'user', text: 'Five photos of the lot.', images: [1, 2, 3, 4, 5].map(image) }]);
+    t.cleanup();
+    t = one.t;
+    const five = await one.builder.build({ chatId: 'chat-1', message: 'describe them' });
+    assert.deepStrictEqual(five.tail.map((m) => m.seq), [1]);
+    assert.strictEqual(five.tail[0].images.length, 5, 'images are never dropped from the newest message');
+  });
+
+  it('shortens a document that pushes its message over tailMaxMessageTokens, keeping its head, with a note', async () => {
+    const body = Array.from({ length: 400 }, (_, i) => `Line ${i} of the survey: the drainage ditch runs along the fence.`).join('\n');
+    const s = setup([
+      { sender: 'user', text: 'Here is the survey document.', documents: [doc(body)] },
+      { sender: 'assistant', text: 'I have read the survey.' }
+    ]);
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'what about drainage?' });
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), [1, 2]);
+    const sent = out.tail[0].documents[0].textContent;
+    assert.ok(sent.startsWith('Line 0 of the survey'));
+    assert.match(sent, /\[document "survey\.txt" in message #1 shortened: the start is shown; SearchHistory finds the rest\]$/);
+    assert.ok(s.estimator.estimate(out.tail[0].text) + s.estimator.estimate(sent) <= 1500 + 40);
+    assert.strictEqual(out.tail[0].documents[0].name, 'survey.txt');
+    assert.strictEqual(t.store.getMessages('chat-1', { fromSeq: 1, toSeq: 1 })[0].documents[0].textContent, body, 'the store keeps it whole');
+    assert.deepStrictEqual(out.stats.tail.shortened, [{ seq: 1, documents: 1 }]);
+    assert.ok(t.store.searchText('Line 399', { kinds: ['attachment'] }).length > 0, 'the rest is indexed');
+  });
+});
