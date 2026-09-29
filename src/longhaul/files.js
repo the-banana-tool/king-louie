@@ -37,4 +37,12 @@ function isInside(child, parent) {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-module.exports = { writeFileAtomic, sha256File, sha256Text, isInside };
+// path.join(base, name), refused unless the result is strictly inside base
+// (defence in depth behind session id validation).
+function childPath(base, name, onEscape) {
+  const out = path.join(base, name);
+  if (path.resolve(out) === path.resolve(base) || !isInside(out, base)) throw onEscape();
+  return out;
+}
+
+module.exports = { writeFileAtomic, sha256File, sha256Text, isInside, childPath };

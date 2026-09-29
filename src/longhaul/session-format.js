@@ -5,10 +5,12 @@
 const fs = require('fs');
 const path = require('path');
 const { readJsonlLines } = require('../history/importers/jsonl-lines');
-const { writeFileAtomic } = require('./files');
+const { writeFileAtomic, childPath } = require('./files');
+const { UsageError } = require('./errors');
 
 const SENDERS = Object.freeze(['user', 'assistant', 'toolUse', 'toolResult', 'status']);
-const SESSION_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
+// Starts with a letter or digit, so '.', '..' and hidden names are refused.
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const CHARS_PER_TOKEN = 4;
 const BYTE_KINDS = Object.freeze({ user: 'user', assistant: 'assistant', toolUse: 'tool_use', toolResult: 'tool_result', status: 'status' });
 
@@ -160,8 +162,17 @@ async function loadSession(dir) {
   return { manifest, messages, index: new SessionIndex(messages) };
 }
 
+// Every command validates a session id with this before building a path.
+function validateSessionId(id) {
+  if (typeof id !== 'string' || !SESSION_ID_RE.test(id)) {
+    throw new UsageError(`Session id ${JSON.stringify(id)} must match ${SESSION_ID_RE}.`, 'BAD_SESSION_ID');
+  }
+  return id;
+}
+
 function sessionDir(dataRoot, id) {
-  return path.join(dataRoot, 'sessions', id);
+  const base = path.join(dataRoot, 'sessions');
+  return childPath(base, String(id), () => new UsageError(`Session id ${JSON.stringify(id)} leaves ${base}.`, 'BAD_SESSION_ID'));
 }
 
 function listSessions(dataRoot) {
@@ -177,5 +188,5 @@ module.exports = {
   SENDERS, SESSION_ID_RE, CHARS_PER_TOKEN,
   estimateTokens, messageText, senderLabel, renderMessage, renderMessages,
   SessionIndex, validateMessages, validateManifest, buildManifest,
-  writeSession, loadSession, listSessions, sessionDir
+  writeSession, loadSession, listSessions, sessionDir, validateSessionId
 };

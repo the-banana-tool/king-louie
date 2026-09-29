@@ -5,7 +5,8 @@
 const fs = require('fs');
 const path = require('path');
 const { readJsonlLines } = require('../history/importers/jsonl-lines');
-const { writeFileAtomic } = require('./files');
+const { writeFileAtomic, childPath } = require('./files');
+const { UsageError } = require('./errors');
 
 const KINDS = Object.freeze(['user-said', 'tool-observed', 'decision', 'superseded', 'multi-hop', 'abstain']);
 const BUCKETS = Object.freeze([
@@ -127,8 +128,25 @@ function normalizeQuestion(q, index) {
   };
 }
 
+function questionsPath(dataRoot, sessionId, suffix) {
+  const base = path.join(dataRoot, 'questions');
+  const escape = () => new UsageError(`Session id ${JSON.stringify(sessionId)} leaves ${base}.`, 'BAD_SESSION_ID');
+  const out = childPath(base, `${sessionId}${suffix}`, escape);
+  if (path.dirname(path.resolve(out)) !== path.resolve(base)) throw escape();
+  return out;
+}
+
 function questionsFile(dataRoot, sessionId) {
-  return path.join(dataRoot, 'questions', `${sessionId}.jsonl`);
+  return questionsPath(dataRoot, sessionId, '.jsonl');
+}
+
+// Questions rejected in `verify`, and one line per `author` invocation.
+function rejectedFile(dataRoot, sessionId) {
+  return questionsPath(dataRoot, sessionId, '.rejected.jsonl');
+}
+
+function authorLogFile(dataRoot, sessionId) {
+  return questionsPath(dataRoot, sessionId, '.author-log.jsonl');
 }
 
 async function readQuestions(file) {
@@ -154,5 +172,5 @@ module.exports = {
   KINDS, BUCKETS, NO_BUCKET, VERIFIED_BY_RE,
   bucketFor, computeDistance, isVerified,
   validateQuestion, validateQuestionSet, normalizeQuestion,
-  questionsFile, readQuestions, writeQuestions
+  questionsFile, rejectedFile, authorLogFile, readQuestions, writeQuestions
 };

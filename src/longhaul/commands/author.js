@@ -5,8 +5,8 @@
 // before it builds a model client, so nothing leaves the machine.
 const fs = require('fs');
 const path = require('path');
-const { loadSession, sessionDir } = require('../session-format');
-const { readQuestions, writeQuestions, questionsFile } = require('../questions');
+const { loadSession, sessionDir, validateSessionId } = require('../session-format');
+const { readQuestions, writeQuestions, questionsFile, authorLogFile } = require('../questions');
 const { planAuthoring } = require('../sampling');
 const { authorCandidates, DEFAULT_PROMPT } = require('../author');
 const { createModelClient } = require('../model');
@@ -27,6 +27,7 @@ module.exports = {
   },
   async run(ctx, values) {
     if (!values.session || !values.provider || !values.model) throw new UsageError(USAGE);
+    validateSessionId(values.session);
     const count = values.count ? positiveInt(values.count, 'count') : 60;
     const seed = values.seed ? positiveInt(values.seed, 'seed') : 1;
     const dir = sessionDir(ctx.home.root, values.session);
@@ -61,7 +62,7 @@ module.exports = {
       provider: client.provider, model: client.model, seed, count,
       planned: plan.items.length, shortfall: plan.shortfall.length, written: out.candidates.length, rejected
     };
-    fs.appendFileSync(path.join(ctx.home.questions, `${values.session}.author-log.jsonl`), `${JSON.stringify(logLine)}\n`);
+    fs.appendFileSync(authorLogFile(ctx.home.root, values.session), `${JSON.stringify(logLine)}\n`);
 
     ctx.stdout.write(`authored ${out.candidates.length} candidates for ${values.session}: ${plan.items.length} planned, `
       + `${plan.shortfall.length} short of the target, ${out.rejected.length} rejected\n`);

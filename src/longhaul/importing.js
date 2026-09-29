@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const claudeCode = require('../history/importers/claude-code-jsonl');
-const { buildManifest, writeSession, SESSION_ID_RE } = require('./session-format');
+const { buildManifest, writeSession, validateSessionId, sessionDir } = require('./session-format');
 const { sha256File, isInside } = require('./files');
 const { UsageError } = require('./errors');
 
@@ -15,6 +15,7 @@ function realOrSelf(p) {
 }
 
 async function importSession(home, sourcePath, { id, license, publicSession = false, force = false } = {}) {
+  if (id !== undefined) validateSessionId(id);
   const resolved = path.resolve(sourcePath);
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) throw new UsageError(`No such file: ${sourcePath}`);
   const real = realOrSelf(resolved);
@@ -30,8 +31,8 @@ async function importSession(home, sourcePath, { id, license, publicSession = fa
 
   const sha = await sha256File(real);
   const sessionId = id || `cc-${sha.slice(0, 12)}`;
-  if (!SESSION_ID_RE.test(sessionId)) throw new UsageError(`Session id ${JSON.stringify(sessionId)} must match ${SESSION_ID_RE}.`);
-  const dir = path.join(home.sessions, sessionId);
+  validateSessionId(sessionId);
+  const dir = sessionDir(home.root, sessionId);
   const manifestPath = path.join(dir, 'manifest.json');
   if (fs.existsSync(manifestPath)) {
     const existing = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));

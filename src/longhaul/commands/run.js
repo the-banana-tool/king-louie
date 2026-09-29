@@ -3,6 +3,7 @@
 const path = require('path');
 const { runBenchmark } = require('../run');
 const { UsageError } = require('../errors');
+const { validateSessionId } = require('../session-format');
 
 const USAGE = 'Usage: longhaul run --adapters kl-recall,sliding-window,oracle [--sessions <data root>] [--session <id>]... '
   + '[--budget-tokens 6000] [--window-tokens N] [--recall key=value]... [--seed N] [--include-unverified]';
@@ -53,6 +54,7 @@ module.exports = {
   positiveInt,
   async run(ctx, values) {
     if (!values.adapters) throw new UsageError(USAGE);
+    for (const id of values.session || []) validateSessionId(id);
     const adapterNames = values.adapters.split(',').map((s) => s.trim()).filter(Boolean);
     const adapterConfig = {
       'kl-recall': { recall: parseRecallPairs(values.recall) },
