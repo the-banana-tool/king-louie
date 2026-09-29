@@ -72,24 +72,23 @@ class ContextBuilder {
     };
   }
 
-  // Newest first, every sender, a page at a time, until the tail and the
-  // query have what they need or the chat's start is reached.
+  // Newest first, a page at a time, until the tail and the query have what
+  // they need or the chat's start is reached. Only user and assistant rows,
+  // and tool calls when they are folded into the tail (tailScanPage).
   _scan(chatId, limit, recall) {
     const out = [];
     let content = 0;
     let users = 0;
-    let toSeq = limit - 1;
-    while (toSeq >= 1 && (content < recall.tailMessages || users < recall.queryUserTurns)) {
-      const fromSeq = Math.max(1, toSeq - PAGE + 1);
-      const page = this.store.getMessages(chatId, { fromSeq, toSeq })
-        .filter((m) => m.seq < limit)
-        .sort((a, b) => b.seq - a.seq);
+    let before = limit;
+    while (before > 1 && (content < recall.tailMessages || users < recall.queryUserTurns)) {
+      const page = this.store.tailScanPage(chatId, { beforeSeq: before, limit: PAGE, toolCalls: Boolean(recall.tailIncludeToolCalls) });
+      if (!page.length) break;
       for (const m of page) {
         out.push(m);
         if (isContent(m)) content += 1;
         if (m.sender === 'user' && hasText(m)) users += 1;
       }
-      toSeq = fromSeq - 1;
+      before = page[page.length - 1].seq;
     }
     return out;
   }

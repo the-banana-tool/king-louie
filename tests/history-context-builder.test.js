@@ -187,3 +187,42 @@ describe('ContextBuilder', () => {
     assert.strictEqual(out.stats.fullHistoryEstTokens, s.estimator.fromChars(t.store.historyChars('chat-1', { upToSeq: 20 })));
   });
 });
+
+describe('ContextBuilder: the tail scan reads only what the tail needs', () => {
+  let t;
+  afterEach(() => t && t.cleanup());
+  const BIG = 'x'.repeat(50000);
+  const chat = () => [
+    { sender: 'user', text: 'Write the survey notes for the Lakeside lot to a file.' },
+    { sender: 'toolUse', toolName: 'Write', parameters: { file_path: 'notes/survey.md', content: BIG } },
+    { sender: 'toolResult', toolName: 'Write', result: { ok: true, output: BIG } },
+    { sender: 'status', text: 'Working…' },
+    { sender: 'assistant', text: 'The survey notes are written.' }
+  ];
+
+  it('tailScanPage: seq descending, no tool results or status rows, tool calls only when asked', () => {
+    t = openTempStore();
+    seedChat(t.store, { messages: chat() });
+    const without = t.store.tailScanPage('chat-1', { beforeSeq: 6, limit: 10 });
+    assert.deepStrictEqual(without.map((m) => [m.seq, m.sender]), [[5, 'assistant'], [1, 'user']]);
+    const withCalls = t.store.tailScanPage('chat-1', { beforeSeq: 6, limit: 10, toolCalls: true });
+    assert.deepStrictEqual(withCalls.map((m) => [m.seq, m.sender]), [[5, 'assistant'], [2, 'toolUse'], [1, 'user']]);
+    assert.strictEqual(withCalls[1].toolName, 'Write');
+    assert.strictEqual(withCalls[1].parameters.file_path, 'notes/survey.md');
+    assert.strictEqual(withCalls[1].result, undefined);
+    assert.deepStrictEqual(t.store.tailScanPage('chat-1', { beforeSeq: 5, limit: 1 }).map((m) => m.seq), [1], 'a page is keyed by beforeSeq');
+  });
+
+  it('build() never loads the full rows of the range', async () => {
+    const s = setup(chat());
+    t = s.t;
+    const original = t.store._messagesFor.bind(t.store);
+    t.store._messagesFor = (chatId, range = {}) => {
+      if (range.fromSeq !== range.toSeq) throw new Error(`full range read ${range.fromSeq}-${range.toSeq}`);
+      return original(chatId, range);
+    };
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'thanks' });
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), [1, 5]);
+    assert.strictEqual(out.tail[1].text, '[tool] Write: notes/survey.md\n\nThe survey notes are written.');
+  });
+});

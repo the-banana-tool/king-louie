@@ -295,6 +295,41 @@ class HistoryStore {
     });
   }
 
+  // The context builder's tail scan (recall spec §6.1): one page of a chat's
+  // messages before beforeSeq, newest first, with only what the tail needs:
+  // user and assistant rows with their attachments and, when toolCalls is
+  // set, tool calls' name and parameters. Tool results, status rows and
+  // tool calls' other columns are never read.
+  tailScanPage(chatId, { beforeSeq = Number.MAX_SAFE_INTEGER, limit = 200, toolCalls = false } = {}) {
+    const id = normalizeId(chatId);
+    if (!id) return [];
+    const before = Number.isInteger(Number(beforeSeq)) ? Number(beforeSeq) : Number.MAX_SAFE_INTEGER;
+    const max = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 200;
+    const list = this._stmt(`SELECT id, seq, sender, timestamp,
+        CASE WHEN sender = 'toolUse' THEN NULL ELSE text END AS text,
+        tool_name,
+        CASE WHEN sender = 'toolUse' THEN params_json END AS params_json,
+        CASE WHEN sender = 'toolUse' THEN NULL ELSE run_id END AS run_id,
+        CASE WHEN sender = 'toolUse' THEN NULL ELSE llm_json END AS llm_json,
+        CASE WHEN sender = 'toolUse' THEN NULL ELSE context_json END AS context_json,
+        CASE WHEN sender = 'toolUse' THEN NULL ELSE meta_json END AS meta_json
+      FROM messages
+      WHERE chat_id = ? AND seq < ? AND (sender IN ('user', 'assistant') OR (? = 1 AND sender = 'toolUse'))
+      ORDER BY seq DESC LIMIT ?`).all(id, before, toolCalls ? 1 : 0, max);
+    const content = list.filter((row) => row.sender !== 'toolUse').map((row) => row.id);
+    const byMessage = new Map();
+    for (let i = 0; i < content.length; i += 500) {
+      const batch = content.slice(i, i + 500);
+      const attachments = this.db.prepare(`SELECT * FROM attachments WHERE message_id IN (${batch.map(() => '?').join(', ')})
+        ORDER BY message_id, kind, idx`).all(...batch);
+      for (const a of attachments) {
+        if (!byMessage.has(a.message_id)) byMessage.set(a.message_id, []);
+        byMessage.get(a.message_id).push(a);
+      }
+    }
+    return list.map((row) => rows.rowToMessage(row, byMessage.get(row.id) || []));
+  }
+
   messageCount(chatId) {
     return Number(this._stmt('SELECT COUNT(*) AS n FROM messages WHERE chat_id = ?').get(normalizeId(chatId)).n);
   }
