@@ -93,7 +93,9 @@ function registerChatHandlers(ipcMain, context = {}) {
     getUsageTracker,
     createUsageRecordFromMetrics,
     getContextAssembler,
-    getConversationCompactor,
+    getContextBuilder,
+    getHistoryStore,
+    getTokenEstimator,
     getToolResultsDir,
     prompter
   } = context;
@@ -389,6 +391,11 @@ function registerChatHandlers(ipcMain, context = {}) {
     // `return` or a `throw` below needs its own endCaseTurn call.
     let fullResponse = '';
     let answerText = '';
+    // Recall (history spec 2026-09-25 §6, §7): the provenance every reply of
+    // this turn records, and the tool list sent (for token calibration).
+    let turnContext = null;
+    let sentTools = null;
+    const withProvenance = (fields) => (turnContext ? { ...fields, context: turnContext } : fields);
     let turnModels = null;
     let main = null;
     // This turn's own model calls, and each sub-agent run's (spec §10): the
@@ -422,7 +429,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       if (stopFinished) return null;
       stopFinished = true;
       await endCaseTurn({ summary: `turn stopped by owner: ${safeMessage}`, journal: null });
-      const stoppedChat = appendMessageToChat(chatId, 'assistant', fullResponse, { llm: llmSummary, stopped: true });
+      const stoppedChat = appendMessageToChat(chatId, 'assistant', fullResponse, withProvenance({ llm: llmSummary, stopped: true }));
       safeSend(event.sender, 'chat:messageComplete', { chatId, responseId, message: fullResponse, llm: llmSummary, stopped: true });
       return stoppedChat;
     };
@@ -460,6 +467,11 @@ function registerChatHandlers(ipcMain, context = {}) {
       if (!userMessage) {
         throw new Error('Chat not found');
       }
+      // The new message's seq, read in the same synchronous tick as the
+      // append: the tail and recall consider only what came before it.
+      const historyStore = typeof getHistoryStore === 'function' ? getHistoryStore() : null;
+      const contextBuilder = historyStore && typeof getContextBuilder === 'function' ? getContextBuilder() : null;
+      const userSeq = contextBuilder ? historyStore.lastSeq(chatId) : 0;
 
       // The turn's models, frozen now (spec 2026-09-27 §6.6): the profile
       // and main override as they stand at launch serve every model call of
@@ -503,40 +515,28 @@ function registerChatHandlers(ipcMain, context = {}) {
           meta: { role: 'main', profileId: turnModels.profileId || null, borrowedFrom: null }
         });
 
-      const chatRaw = findChat(chatId, { messages: true });
+      // Only a case turn (owner messages) or a host without a builder needs
+      // every message of the chat in memory.
+      const chatRaw = findChat(chatId, { messages: !(contextBuilder && userSeq) || Boolean(caseTurn) });
       if (!chatRaw) {
         throw new Error('Chat not found');
       }
-      // Filter out persisted tool events — only user/assistant messages go to the LLM.
-      // A stopped reply with no text stays out: an empty assistant turn is
-      // rejected by some providers.
-      const allContentMessages = chatRaw.messages.filter((m) => (m.sender === 'user' || m.sender === 'assistant')
-        && !(m.stopped && !String(m.text || '').trim()));
-
-      // Semantic conversation compaction: for large conversations, chunk every
-      // message into paragraphs, embed them, then retrieve only the chunks
-      // relevant to the current query.  One cheap embedding call (~$0.002),
-      // then pure local cosine similarity — no LLM call for the retrieval.
-      const compactor = typeof getConversationCompactor === 'function' ? getConversationCompactor() : null;
-      let chatMessages = allContentMessages;
-      if (compactor && compactor.shouldCompact(allContentMessages)) {
-        try {
-          chatMessages = await compactor.retrieve(safeMessage, allContentMessages, {
-            maxChunks: 20,
-            alwaysKeepRecent: 4,
-            minSimilarity: 0.25,
-            maxTokens: 4000
-          });
-          const origTokens = Math.ceil(allContentMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
-          const compTokens = Math.ceil(chatMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
-          log.info(`Compacted ${allContentMessages.length} messages -> ${chatMessages.length} messages (~${origTokens} -> ~${compTokens} tokens, ${Math.round((1 - compTokens / origTokens) * 100)}% reduction)`);
-        } catch (err) {
-          log.warn(`Conversation compaction failed, using full history: ${err.message}`);
-        }
+      let built = null;
+      let chatMessages;
+      if (contextBuilder && userSeq) {
+        // The tail plus the new message; the recalled block goes in the
+        // dynamic system prompt below (spec §6.5). No tool blocks are sent.
+        built = await contextBuilder.build({ chatId, message: safeMessage, model: mainTarget.model, upToSeq: userSeq });
+        const stored = historyStore.getMessages(chatId, { fromSeq: userSeq, toSeq: userSeq });
+        chatMessages = [...built.tail, ...stored];
+      } else {
+        // Only user/assistant messages go to the LLM. A stopped reply with no
+        // text stays out: an empty assistant turn is rejected by some providers.
+        chatMessages = (chatRaw.messages || []).filter((m) => (m.sender === 'user' || m.sender === 'assistant')
+          && !(m.stopped && !String(m.text || '').trim()));
       }
 
-      // Compaction can also run long enough for a Stop to land while it was
-      // in flight (final review I2).
+      // The builder can run long enough for a Stop to land (final review I2).
       if (abortController.signal.aborted) return finishStopped();
 
       const chat = { ...chatRaw, messages: chatMessages };
@@ -641,12 +641,31 @@ function registerChatHandlers(ipcMain, context = {}) {
       }
 
       // The per-turn part (recall spec §6.5), after the stable, cached
-      // prompt: the case prompt and orientation, then the memory context.
+      // prompt: the case prompt and orientation, the recalled block, then
+      // the memory context.
       const dynamicParts = [
         caseTurn ? buildCaseSystemPrompt(caseTurn.orientation) : '',
+        built ? built.recalled.text : '',
         memoryContext
       ].filter((part) => typeof part === 'string' && part.trim());
       if (dynamicParts.length) options.systemPromptDynamic = dynamicParts.join('\n\n');
+
+      const estimator = typeof getTokenEstimator === 'function' ? getTokenEstimator() : null;
+      if (built) {
+        turnContext = {
+          tail: { fromSeq: built.stats.tail.fromSeq, toSeq: built.stats.tail.toSeq },
+          recalledChunkIds: built.stats.recalledChunkIds,
+          recalledExcerpts: built.stats.recalledExcerpts,
+          estTokens: {
+            system: estimator ? estimator.estimate(options.systemPrompt, mainTarget.model) : 0,
+            tail: built.stats.estTokens.tail,
+            recalled: built.stats.estTokens.recalled
+          },
+          fullHistoryEstTokens: built.stats.fullHistoryEstTokens,
+          embedder: built.stats.embedder,
+          scope: built.stats.scope
+        };
+      }
 
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment, null, {
         workingDirectory: chatWorkingDirectory,
@@ -721,6 +740,7 @@ function registerChatHandlers(ipcMain, context = {}) {
           // asking is now decided only by the user's permission rules and the
           // persisted "always approve" list — both of which they can see and
           // change.
+          sentTools = toolDefinitions;
           const result = await loop.run(chat.messages, toolDefinitions, {
             ...options,
             contextAssembler,
@@ -827,6 +847,27 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
       });
 
+      // Correct the chars-per-token ratio from what the provider reported
+      // for the turn's first complete call on main (spec §6.6).
+      if (estimator && turnContext) {
+        try {
+          const first = ownCalls.find((c) => c && !c.usagePartial);
+          if (first && (!first.provider || first.provider === mainTarget.provider)) {
+            const pu = first.pricingUsage;
+            const promptTokens = pu
+              ? (Number(pu.input) || 0) + (Number(pu.cachedInput) || 0) + (Number(pu.cacheWrite) || 0)
+              : Number(first.inputTokens) || 0;
+            const charsSent = String(options.systemPrompt || '').length
+              + String(options.systemPromptDynamic || '').length
+              + (sentTools ? JSON.stringify(sentTools).length : 0)
+              + chat.messages.reduce((n, m) => n + String(m.text ?? m.content ?? '').length, 0);
+            estimator.observe(mainTarget.model, charsSent, promptTokens);
+          }
+        } catch (err) {
+          log.debug(`Token calibration skipped: ${err.message}`);
+        }
+      }
+
       if (stopped || abortController.signal.aborted) {
         return finishStopped();
       }
@@ -834,9 +875,9 @@ function registerChatHandlers(ipcMain, context = {}) {
       const journal = answerText && answerText !== '(No response)' ? answerText : null;
       await endCaseTurn({ summary: safeMessage, journal });
 
-      const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)', {
+      const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)', withProvenance({
         llm: llmSummary
-      });
+      }));
       safeSend(event.sender, 'chat:messageComplete', {
         chatId,
         responseId,

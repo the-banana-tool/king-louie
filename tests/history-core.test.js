@@ -1,7 +1,10 @@
 // tests/history-core.test.js
 // createCore opens <dataDir>/history.sqlite, moves chat-data.json's chats
 // into it, reports a store that will not open, and closes it on shutdown
-// (recall spec §4.4, §11.1, §15).
+// (recall spec §4.4, §11.1, §15). A chat turn through the real core (§3,
+// §6.5, §7, §8): tail plus new message, the recalled block in the dynamic
+// prompt, provenance, calibration, the kill switch, and SearchHistory
+// reaching the store.
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
 const crypto = require('crypto');
@@ -15,6 +18,10 @@ const { HistoryStore } = require('../src/history');
 const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
+const ProviderFactory = require('../src/providers/provider-factory');
+const IPC = require('../src/ipc/constants');
+const { registerChatHandlers } = require('../src/ipc/chat-handlers');
+const { setLogLevel } = require('../src/logging');
 
 const tempDirs = [];
 afterEach(() => {
@@ -149,5 +156,143 @@ describe('createCore and the history store', () => {
     const store = core.context.getHistoryStore();
     const [message] = store.getMessages('c1');
     assert.ok(store.chunksOfMessage(message.id).length > 3);
+  });
+});
+
+setLogLevel('fatal');
+
+const FAKE = 'kl-test-history';
+const MODEL = 'history-main';
+const GATE = 'For the record, the side gate code at the Lakeside lot is 4417.';
+
+function seededMessages(count) {
+  const out = [];
+  for (let i = 1; i <= count; i += 1) {
+    out.push({
+      id: `seed-${i}`,
+      sender: i % 2 ? 'user' : 'assistant',
+      text: i === 3 ? GATE : `Seeded note ${i} about the weekly grocery list and the garden hose timer.`,
+      timestamp: new Date(Date.parse('2026-02-01T09:00:00.000Z') + i * 60000).toISOString()
+    });
+  }
+  return out;
+}
+
+describe('history: a chat turn through the core', () => {
+  const savedCasesRoot = process.env.KL_CASES_ROOT;
+  let core = null;
+  afterEach(async () => {
+    if (core) await core.shutdown();
+    core = null;
+    ProviderFactory._registry.delete(FAKE);
+    if (savedCasesRoot === undefined) delete process.env.KL_CASES_ROOT; else process.env.KL_CASES_ROOT = savedCasesRoot;
+  });
+
+  // script: what each parent call returns, in order; the last one repeats.
+  function fakeProvider(calls, script) {
+    return class {
+      getProviderName() { return FAKE; }
+      getDefaultModel() { return MODEL; }
+      async sendMessage() { return 'unused'; }
+      async sendMessageWithTools(messages, _tools, options) {
+        calls.push({ messages, options });
+        const step = script[Math.min(calls.length, script.length) - 1];
+        return {
+          ...step,
+          llmMetrics: {
+            provider: FAKE, model: MODEL, inputTokens: 2000, outputTokens: 10, totalTokens: 2010, costUsd: 0.001,
+            pricingUsage: { input: 2000, cachedInput: 0, cacheWrite: 0, output: 10, reasoning: 0 }
+          }
+        };
+      }
+      buildToolMessages(response, toolResult, toolCallId) {
+        return [
+          { role: 'assistant', content: '', tool_calls: [{ id: toolCallId, type: 'function', function: { name: response.toolName, arguments: JSON.stringify(response.parameters || {}) } }] },
+          { role: 'tool', tool_call_id: toolCallId, content: JSON.stringify(toolResult) }
+        ];
+      }
+    };
+  }
+
+  async function start({ history = {}, script = [{ type: 'text', content: 'The code is 4417.' }] } = {}) {
+    const calls = [];
+    ProviderFactory.registerProvider(FAKE, fakeProvider(calls, script));
+    delete process.env.KL_CASES_ROOT;
+    const { deps } = makeDeps([{ id: 'chat-1', title: 'Seeded chat', createdAt: '2026-02-01T09:00:00.000Z', updatedAt: '2026-02-01T10:00:00.000Z', messages: seededMessages(40) }]);
+    deps.store.set('settings', {
+      models: {
+        profiles: [{ id: 'p-h', name: 'H', kind: 'user', roles: { main: [{ provider: FAKE, model: MODEL, effort: null }], worker: [], utility: [] } }],
+        defaultProfileId: 'p-h'
+      },
+      history
+    });
+    core = createCore({ ...deps, fetch: async (url) => { throw new Error(`no network in unit tests (${url})`); } });
+    await core.start();
+    core.saveProviderToken(FAKE, 'fake-token-123456');
+    const handlers = new Map();
+    registerChatHandlers({ handle: (channel, fn) => handlers.set(channel, fn), on: () => {} }, core.context);
+    const event = { sender: { send: () => {}, isDestroyed: () => false } };
+    const send = (message) => handlers.get(IPC.CHAT_SEND_MESSAGE)(event, { chatId: 'chat-1', message, agentMode: true });
+    return { calls, send };
+  }
+
+  const lastMessage = () => {
+    const chat = core.context.getChat('chat-1', { messages: true });
+    return chat.messages[chat.messages.length - 1];
+  };
+
+  it('sends the tail and the new message, with the recalled block in the dynamic prompt', async () => {
+    const { calls, send } = await start();
+    const result = await send('What was the side gate code at the Lakeside lot?');
+    assert.notStrictEqual(result?.ok, false, JSON.stringify(result));
+    const first = calls[0];
+    assert.ok(first.messages.length <= 9, `sent ${first.messages.length} messages`);
+    const texts = first.messages.map((m) => String(m.text ?? m.content ?? ''));
+    assert.strictEqual(texts[texts.length - 1], 'What was the side gate code at the Lakeside lot?');
+    assert.ok(!texts.some((t) => t.includes('4417')), '#3 is not in the tail');
+    assert.ok(first.options.systemPromptDynamic.includes('<recalled_history>'));
+    assert.match(first.options.systemPromptDynamic, /\[#3 · user · [^\]]+\]\nFor the record, the side gate code/);
+    assert.ok(!String(first.options.systemPrompt).includes('<recalled_history>'));
+  });
+
+  it('stores provenance on the reply and calibrates the estimator', async () => {
+    const { send } = await start();
+    await send('What was the side gate code at the Lakeside lot?');
+    const reply = lastMessage();
+    assert.strictEqual(reply.sender, 'assistant');
+    const ctx = reply.context;
+    assert.deepStrictEqual(ctx.tail, { fromSeq: 33, toSeq: 40 });
+    assert.ok(ctx.recalledChunkIds.length > 0);
+    assert.ok(ctx.recalledExcerpts >= 1);
+    assert.ok(ctx.estTokens.system > 0 && ctx.estTokens.tail > 0 && ctx.estTokens.recalled > 0);
+    assert.ok(ctx.fullHistoryEstTokens > 0);
+    assert.strictEqual(ctx.embedder, 'none');
+    assert.strictEqual(ctx.scope, 'chat');
+    const seqs = core.context.getHistoryStore().chunks(ctx.recalledChunkIds).map((c) => c.seq);
+    assert.ok(seqs.includes(3));
+    assert.strictEqual(core.context.getHistoryStore().calibration(MODEL).samples, 1);
+  });
+
+  it('history.recall.enabled false sends the tail only', async () => {
+    const { calls, send } = await start({ history: { recall: { enabled: false } } });
+    await send('What was the side gate code at the Lakeside lot?');
+    assert.ok(!String(calls[0].options.systemPromptDynamic || '').includes('<recalled_history>'));
+    assert.ok(calls[0].messages.length <= 9);
+    assert.deepStrictEqual(lastMessage().context.recalledChunkIds, []);
+  });
+
+  it('SearchHistory in a turn reads this chat from the store', async () => {
+    const { send } = await start({
+      script: [
+        { type: 'tool_use', toolName: 'SearchHistory', toolUseId: 'sh-1', parameters: { query: 'gate code' } },
+        { type: 'text', content: 'Found it.' }
+      ]
+    });
+    await send('Search the history for the gate code.');
+    const chat = core.context.getChat('chat-1', { messages: true });
+    const toolResult = chat.messages.find((m) => m.sender === 'toolResult' && m.toolName === 'SearchHistory');
+    assert.ok(toolResult, 'the tool ran');
+    assert.strictEqual(toolResult.result.ok, true);
+    assert.ok(toolResult.result.excerpts.some((e) => e.text.includes('4417')));
   });
 });
