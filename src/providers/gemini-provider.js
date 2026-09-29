@@ -159,8 +159,8 @@ class GeminiProvider extends BaseLLMProvider {
   async sendMessage(messages, options = {}) {
     const model = options.model || this.getDefaultModel();
     const { contents, systemInstruction } = this.formatMessages(
-      options.systemPrompt
-        ? [{ role: 'system', content: options.systemPrompt }, ...messages]
+      this.systemText(options)
+        ? [{ role: 'system', content: this.systemText(options) }, ...messages]
         : messages
     );
 
@@ -192,8 +192,8 @@ class GeminiProvider extends BaseLLMProvider {
   async sendMessageWithTools(messages, tools = [], options = {}) {
     const requestedModel = options.model || this.getDefaultModel();
     const { contents, systemInstruction } = this.formatMessages(
-      options.systemPrompt
-        ? [{ role: 'system', content: options.systemPrompt }, ...messages]
+      this.systemText(options)
+        ? [{ role: 'system', content: this.systemText(options) }, ...messages]
         : messages
     );
 
@@ -317,8 +317,8 @@ class GeminiProvider extends BaseLLMProvider {
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
     const { contents, systemInstruction } = this.formatMessages(
-      options.systemPrompt
-        ? [{ role: 'system', content: options.systemPrompt }, ...messages]
+      this.systemText(options)
+        ? [{ role: 'system', content: this.systemText(options) }, ...messages]
         : messages
     );
 

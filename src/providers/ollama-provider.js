@@ -83,7 +83,7 @@ class OllamaProvider extends BaseLLMProvider {
   }
 
   async sendMessage(messages, options = {}) {
-    const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
+    const preparedMessages = this.prependSystemPrompt(messages, this.systemText(options));
     const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
@@ -105,7 +105,7 @@ class OllamaProvider extends BaseLLMProvider {
 
   async sendMessageWithTools(messages, tools = [], options = {}) {
     const requestedModel = options.model || this.getDefaultModel();
-    const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
+    const preparedMessages = this.prependSystemPrompt(messages, this.systemText(options));
     const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
@@ -222,7 +222,7 @@ class OllamaProvider extends BaseLLMProvider {
 
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
-    const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
+    const preparedMessages = this.prependSystemPrompt(messages, this.systemText(options));
     const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),

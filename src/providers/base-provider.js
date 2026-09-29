@@ -117,6 +117,18 @@ class BaseLLMProvider {
     return this.normalizeMessages(chatHistory);
   }
 
+  /**
+   * The system prompt as one string (recall spec §6.5): the stable part,
+   * then the per-turn dynamic part (case orientation, recalled block,
+   * memory context), a blank line apart. Anthropic sends them as two blocks
+   * instead so that only the stable one is cached.
+   */
+  systemText(options = {}) {
+    return [options.systemPrompt, options.systemPromptDynamic]
+      .filter((part) => typeof part === 'string' && part.trim())
+      .join('\n\n');
+  }
+
   getHeaders() {
     return {
       'Content-Type': 'application/json',

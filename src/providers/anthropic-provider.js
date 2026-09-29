@@ -90,20 +90,15 @@ class AnthropicProvider extends BaseLLMProvider {
     return formatted;
   }
 
-  buildCachedSystemPrompt(systemPrompt) {
-    if (!systemPrompt) return undefined;
-
-    // If it's already structured blocks, return as-is
-    if (Array.isArray(systemPrompt)) return systemPrompt;
-
-    // Single string → wrap in a cached text block
-    return [
-      {
-        type: 'text',
-        text: systemPrompt,
-        cache_control: { type: 'ephemeral' }
-      }
-    ];
+  // The stable system prompt is cached; the per-turn dynamic part (case
+  // orientation, recalled block, memory context) follows it uncached, so a
+  // turn's changes no longer break the cache (recall spec §6.5).
+  buildCachedSystemPrompt(systemPrompt, dynamic = '') {
+    const blocks = Array.isArray(systemPrompt)
+      ? [...systemPrompt]
+      : (systemPrompt ? [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }] : []);
+    if (typeof dynamic === 'string' && dynamic.trim()) blocks.push({ type: 'text', text: dynamic });
+    return blocks.length ? blocks : undefined;
   }
 
   formatMessages(chatHistory) {
@@ -209,7 +204,7 @@ class AnthropicProvider extends BaseLLMProvider {
 
   async sendMessage(messages, options = {}) {
     const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
-    const cachedSystem = this.buildCachedSystemPrompt(systemPrompt);
+    const cachedSystem = this.buildCachedSystemPrompt(systemPrompt, options.systemPromptDynamic);
     const response = await this.request(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: this.getHeaders(),
@@ -237,7 +232,7 @@ class AnthropicProvider extends BaseLLMProvider {
   async sendMessageWithTools(messages, tools = [], options = {}) {
     const requestedModel = options.model || this.getDefaultModel();
     const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
-    const cachedSystem = this.buildCachedSystemPrompt(systemPrompt);
+    const cachedSystem = this.buildCachedSystemPrompt(systemPrompt, options.systemPromptDynamic);
     const thinking = this.buildThinkingParam(requestedModel, options);
 
     const body = {
@@ -283,7 +278,7 @@ class AnthropicProvider extends BaseLLMProvider {
   async streamMessageWithTools(messages, tools = [], options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
     const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
-    const cachedSystem = this.buildCachedSystemPrompt(systemPrompt);
+    const cachedSystem = this.buildCachedSystemPrompt(systemPrompt, options.systemPromptDynamic);
     const thinking = this.buildThinkingParam(requestedModel, options);
 
     const body = {
@@ -520,7 +515,7 @@ class AnthropicProvider extends BaseLLMProvider {
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
     const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
-    const cachedSystem = this.buildCachedSystemPrompt(systemPrompt);
+    const cachedSystem = this.buildCachedSystemPrompt(systemPrompt, options.systemPromptDynamic);
     const response = await this.request(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: this.getHeaders(),

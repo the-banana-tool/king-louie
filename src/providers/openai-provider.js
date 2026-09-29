@@ -202,7 +202,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
   async sendMessage(messages, options = {}) {
     const model = options.model || this.getDefaultModel();
-    const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
+    const preparedMessages = this.prependSystemPrompt(messages, this.systemText(options));
 
     if (isCompletionsModel(model)) {
       return this._sendCompletions(model, messagesToPrompt(this.formatMessages(preparedMessages)), options);
@@ -260,7 +260,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
   async sendMessageWithTools(messages, tools = [], options = {}) {
     const requestedModel = options.model || this.getDefaultModel();
-    const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
+    const preparedMessages = this.prependSystemPrompt(messages, this.systemText(options));
 
     if (isCompletionsModel(requestedModel)) {
       return this._sendCompletionsWithTools(requestedModel, preparedMessages, tools, options);
@@ -584,7 +584,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
-    const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
+    const preparedMessages = this.prependSystemPrompt(messages, this.systemText(options));
 
     if (isResponsesModel(requestedModel)) {
       return this._streamResponses(requestedModel, preparedMessages, options, onChunk);
