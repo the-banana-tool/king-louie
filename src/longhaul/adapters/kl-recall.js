@@ -11,6 +11,7 @@ const { Retriever } = require('../../history/retriever');
 const { ContextBuilder } = require('../../history/context-builder');
 const { chunkMessage } = require('../../history/chunker');
 const { mergeSettings } = require('../../core/settings');
+const { HISTORY_DEFAULTS, mergeHistorySettings } = require('../../history/settings');
 const { estimateTokens, renderMessages } = require('../session-format');
 const { measured, uniqueSorted } = require('./common');
 const { UsageError } = require('../errors');
@@ -19,14 +20,32 @@ const { createLogger } = require('../../logging');
 const log = createLogger('longhaul/kl-recall');
 const ESTIMATOR_MODEL = 'longhaul-estimate';
 
+const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+// Whether the settings merge kept a --recall value as given (an object value,
+// kindWeights, keeps each given entry; the rest come from the defaults).
+function kept(given, merged) {
+  if (isObject(given)) return isObject(merged) && Object.entries(given).every(([k, v]) => k in merged && Object.is(merged[k], v));
+  return Object.is(given, merged);
+}
+
+// The effective settings: --recall values through mergeHistorySettings,
+// recalledTokens from the budget. A value the merge would replace with its
+// default (out of range, wrong type, not a whole number) is refused rather
+// than silently changed.
 function recallSettings(recall, budgetTokens) {
-  const base = mergeSettings({});
-  const history = base.history || {};
-  const defaults = history.recall || {};
+  const known = Object.keys(HISTORY_DEFAULTS.recall);
   for (const key of Object.keys(recall)) {
-    if (!(key in defaults)) throw new UsageError(`Unknown recall setting "${key}". Known: ${Object.keys(defaults).sort().join(', ')}`);
+    if (!known.includes(key)) throw new UsageError(`Unknown recall setting "${key}". Known: ${[...known].sort().join(', ')}`);
+    if (key === 'recalledTokens') throw new UsageError('--recall recalledTokens is not accepted: the recalled budget is set with --budget-tokens.');
   }
-  return { ...base, history: { ...history, recall: { ...defaults, ...recall, recalledTokens: budgetTokens } } };
+  const history = mergeHistorySettings({ recall: { ...recall, recalledTokens: budgetTokens } });
+  for (const [key, value] of Object.entries(recall)) {
+    if (!kept(value, history.recall[key])) {
+      throw new UsageError(`--recall ${key}=${JSON.stringify(value)} is not a valid value; recall would use ${JSON.stringify(history.recall[key])} instead.`);
+    }
+  }
+  return { ...mergeSettings({}), history };
 }
 
 // Which seqs a build put in front of the model, whole or in part (benchmark

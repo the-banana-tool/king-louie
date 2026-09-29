@@ -13,7 +13,9 @@ const { readQuestions, questionsFile } = require('../src/longhaul/questions');
 const { UsageError } = require('../src/longhaul/errors');
 const { TokenEstimator } = require('../src/history/token-estimator');
 const { chunkMessage } = require('../src/history/chunker');
-const { FIXTURE_ROOT, tmpDir } = require('./helpers/longhaul-helpers');
+const { FIXTURE_ROOT, tmpDir, tmpHome, sink } = require('./helpers/longhaul-helpers');
+const { mergeHistorySettings } = require('../src/history/settings');
+const { main } = require('../src/longhaul/cli');
 
 async function fixture(id) {
   const session = await loadSession(path.join(FIXTURE_ROOT, 'sessions', id));
@@ -52,6 +54,34 @@ describe('shownFromBuild', () => {
 describe('kl-recall', () => {
   it('is registered next to the other adapters', () => {
     assert.deepStrictEqual(adapterNames(), ['kl-recall', 'oracle', 'sliding-window']);
+  });
+
+  it('refuses --recall recalledTokens: the budget comes from --budget-tokens', () => {
+    assert.throws(() => createKlRecallAdapter({ recall: { recalledTokens: 100 }, tmpRoot: tmpDir() }), (err) => err instanceof UsageError && /--budget-tokens/.test(err.message));
+  });
+
+  it('refuses a recall value the settings merge would not keep', () => {
+    const bad = [
+      { tailMessages: -1 }, { tailMessages: 2.5 }, { tailMessages: 'many' }, { recencyWeight: 2 },
+      { tailIncludeToolCalls: 'yes' }, { kindWeights: { bogus: 1 } }, { kindWeights: { user: -1 } }, { kindWeights: 3 }
+    ];
+    for (const recall of bad) {
+      assert.throws(() => createKlRecallAdapter({ recall, tmpRoot: tmpDir() }), (err) => err instanceof UsageError && /--recall/.test(err.message), JSON.stringify(recall));
+    }
+  });
+
+  it('records the effective merged recall settings', () => {
+    const adapter = createKlRecallAdapter({ budgetTokens: 3000, recall: { tailMessages: 4, kindWeights: { user: 2 } }, tmpRoot: tmpDir() });
+    const expected = mergeHistorySettings({ recall: { tailMessages: 4, kindWeights: { user: 2 }, recalledTokens: 3000 } }).recall;
+    assert.deepStrictEqual(adapter.describe().recall, expected);
+    assert.strictEqual(adapter.describe().recall.kindWeights.assistant, 1.0);
+  });
+
+  it('the CLI refuses --recall recalledTokens with exit 2', async () => {
+    const stderr = sink();
+    const code = await main(['run', '--sessions', FIXTURE_ROOT, '--adapters', 'kl-recall', '--recall', 'recalledTokens=100'], { stdout: sink(), stderr, env: tmpHome().env });
+    assert.strictEqual(code, 2);
+    assert.match(stderr.text, /--budget-tokens/);
   });
 
   it('needs a tmpRoot: there is no default outside LONGHAUL_HOME', () => {
