@@ -258,7 +258,8 @@ function createCore(deps = {}) {
   const historyStore = deps.historyStore || new SqliteChatHistoryStore({
     dataDir: paths.dataDir,
     dbPath: deps.historyDbPath,
-    migrateChats: store.get('chats', [])
+    migrateChats: store.get('chats', []),
+    migrateBackupFrom: store.path
   });
   const getChats = () => historyStore.listChats({ messages: true });
   const setChats = (chats) => historyStore.setChats(chats);

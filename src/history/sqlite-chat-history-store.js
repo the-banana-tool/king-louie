@@ -30,9 +30,7 @@ class SqliteChatHistoryStore {
     this.dbPath = dbPath;
     this.db = options.db || null;
     this.initialize();
-    if (Array.isArray(options.migrateChats) && options.migrateChats.length && this.getAllChats().length === 0) {
-      this.setChats(options.migrateChats);
-    }
+    this.migrateFromJson(options.migrateChats, options.migrateBackupFrom);
   }
 
   initialize() {
@@ -44,7 +42,28 @@ class SqliteChatHistoryStore {
         data TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_chats_position ON chats(position);
+      CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `));
+  }
+
+  // The JSON chats array is copied once. After that the marker is set and the
+  // JSON copy is never read again, so deleting every chat cannot resurrect it.
+  // A database that already holds chats (made before the marker existed) is
+  // marked without copying.
+  migrateFromJson(chats, backupFrom) {
+    const marked = this.withDb((db) => db.prepare("SELECT value FROM meta WHERE key = 'migrated_from_json'").get());
+    if (marked) return;
+    const toCopy = Array.isArray(chats) && this.getAllChats().length === 0 ? chats : [];
+    if (toCopy.length && backupFrom && fs.existsSync(backupFrom)) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      fs.copyFileSync(backupFrom, path.join(path.dirname(backupFrom), `chat-data.backup-${stamp}.json`));
+    }
+    if (toCopy.length) this.setChats(toCopy);
+    this.withDb((db) => db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migrated_from_json', ?)")
+      .run(new Date().toISOString()));
   }
 
   close() {

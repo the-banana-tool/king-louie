@@ -115,4 +115,54 @@ describe('SqliteChatHistoryStore', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('copies the JSON chats once: deleting every chat does not bring them back on restart', () => {
+    const legacy = [{ id: 'c1', title: 'One', messages: [] }, { id: 'c2', title: 'Two', messages: [] }];
+    const { dir, history } = sqliteStore(legacy);
+    try {
+      history.deleteChat('c1');
+      history.deleteChat('c2');
+      const reopened = new SqliteChatHistoryStore({ dbPath: path.join(dir, 'history.sqlite'), migrateChats: legacy });
+      assert.deepStrictEqual(reopened.listChats(), []);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('marks a database that already holds chats as migrated without copying again', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-history-sqlite-'));
+    const dbPath = path.join(dir, 'history.sqlite');
+    try {
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(dbPath);
+      db.exec(`CREATE TABLE chats (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
+        INSERT INTO chats VALUES ('kept', 0, '{"id":"kept","title":"Kept","messages":[]}');`);
+      db.close();
+
+      const history = new SqliteChatHistoryStore({ dbPath, migrateChats: [{ id: 'old', title: 'Old', messages: [] }] });
+      assert.deepStrictEqual(history.listChats().map((c) => c.id), ['kept']);
+      history.deleteChat('kept');
+      const reopened = new SqliteChatHistoryStore({ dbPath, migrateChats: [{ id: 'old', title: 'Old', messages: [] }] });
+      assert.deepStrictEqual(reopened.listChats(), []);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('backs up the JSON file before copying its chats, and not when there is nothing to copy', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-history-sqlite-'));
+    try {
+      const source = path.join(dir, 'chat-data.json');
+      fs.writeFileSync(source, '{"chats":[{"id":"c1"}],"settings":{}}');
+      new SqliteChatHistoryStore({ dbPath: path.join(dir, 'history.sqlite'), migrateChats: [{ id: 'c1', messages: [] }], migrateBackupFrom: source });
+      const backups = fs.readdirSync(dir).filter((name) => /^chat-data\.backup-.+\.json$/.test(name));
+      assert.strictEqual(backups.length, 1);
+      assert.strictEqual(fs.readFileSync(path.join(dir, backups[0]), 'utf8'), '{"chats":[{"id":"c1"}],"settings":{}}');
+
+      new SqliteChatHistoryStore({ dbPath: path.join(dir, 'empty.sqlite'), migrateChats: [], migrateBackupFrom: source });
+      assert.strictEqual(fs.readdirSync(dir).filter((name) => name.startsWith('chat-data.backup-')).length, 1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
