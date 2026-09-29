@@ -406,6 +406,10 @@ contextBridge.exposeInMainWorld(
   {
     chat: {
       load: () => ipcRenderer.invoke('chat:load'),
+      get: (chatId) => {
+        validateString(chatId, 'chatId');
+        return ipcRenderer.invoke('chat:get', { chatId });
+      },
       create: (title) => ipcRenderer.invoke('chat:create', title),
       setActive: (chatId) => ipcRenderer.invoke('chat:setActive', chatId),
       setAgentMode: (chatId, agentMode) => {

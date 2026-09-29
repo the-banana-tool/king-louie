@@ -529,7 +529,7 @@ function appendLocalMessage(sender, text, metadata = {}) {
       ...chat,
       updatedAt: now,
       messages: [
-        ...chat.messages,
+        ...(Array.isArray(chat.messages) ? chat.messages : []),
         {
           id: `local-${Date.now()}-${Math.random().toString(16).slice(2)}`,
           sender,
@@ -1635,13 +1635,48 @@ function getActiveChat() {
   return appState.chats.find((chat) => chat.id === appState.activeChatId);
 }
 
+function mergeChatIntoState(chat) {
+  if (!chat?.id) return null;
+  const index = appState.chats.findIndex((item) => item.id === chat.id);
+  if (index >= 0) {
+    appState.chats[index] = { ...appState.chats[index], ...chat };
+  } else {
+    appState.chats = [chat, ...appState.chats];
+  }
+  return appState.chats.find((item) => item.id === chat.id) || null;
+}
+
+async function ensureChatMessagesLoaded(chatId = appState.activeChatId) {
+  const id = String(chatId || '').trim();
+  if (!id) return null;
+  const existing = appState.chats.find((chat) => chat.id === id);
+  if (existing && Array.isArray(existing.messages)) {
+    return existing;
+  }
+  if (!window.electron?.chat?.get) {
+    return existing || null;
+  }
+
+  const result = unwrapIpcResult(await window.electron.chat.get(id), 'Unable to load chat messages.');
+  const chat = result?.chat || result;
+  return mergeChatIntoState(chat);
+}
+
 function getChatPreview(chat) {
   const messages = chat.messages || [];
   const lastVisible = messages.findLast((m) => m.sender === 'user' || m.sender === 'assistant');
-  return lastVisible ? lastVisible.text : 'No messages yet...';
+  if (lastVisible) return lastVisible.text;
+  if (typeof chat.preview === 'string' && chat.preview.trim()) return chat.preview;
+  if (typeof chat.lastMessageText === 'string' && chat.lastMessageText.trim()) return chat.lastMessageText;
+  if (Number(chat.messageCount || 0) > 0) return `${Number(chat.messageCount).toLocaleString()} messages`;
+  return 'No messages yet...';
 }
 
 function sumChatLlmTotals(chat) {
+  if (!Array.isArray(chat?.messages)) {
+    return chat?.llmTotals || { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 };
+  }
+
   const totals = chat?.messages?.reduce(
     (acc, msg) => ({
       inputTokens: acc.inputTokens + (Number(msg?.llm?.totals?.inputTokens) || 0),
@@ -2973,9 +3008,10 @@ function renderChatInfoPopover() {
   }
 
   const totals = chat.llmTotals || sumChatLlmTotals(chat);
-  const messageCount = chat.messages?.length || 0;
-  const userMessages = chat.messages?.filter((m) => m.sender === 'user').length || 0;
-  const assistantMessages = chat.messages?.filter((m) => m.sender === 'assistant').length || 0;
+  const loadedMessages = Array.isArray(chat.messages) ? chat.messages : [];
+  const messageCount = chat.messageCount || loadedMessages.length || 0;
+  const userMessages = loadedMessages.filter((m) => m.sender === 'user').length || chat.userMessageCount || 0;
+  const assistantMessages = loadedMessages.filter((m) => m.sender === 'assistant').length || chat.assistantMessageCount || 0;
   const memoryCount = appState.memoryEntries?.length || 0;
 
   const rows = [
@@ -3135,6 +3171,16 @@ function renderChatMessages() {
     if (dom.chatModelsSwitcher) dom.chatModelsSwitcher.hidden = true;
     if (dom.workingDirLabel) dom.workingDirLabel.textContent = 'No working directory';
     if (dom.workingDirBtn) dom.workingDirBtn.classList.remove('is-set');
+    return;
+  }
+
+  if (!Array.isArray(activeChat.messages)) {
+    dom.chatHeaderTitle.textContent = activeChat.title || 'King Louie Chat';
+    dom.chatHeaderMeta.textContent = 'Loading chat history…';
+    const loading = document.createElement('div');
+    loading.className = 'status-message';
+    loading.textContent = 'Loading chat history…';
+    dom.chatMessages.appendChild(loading);
     return;
   }
 
@@ -8377,6 +8423,9 @@ async function loadChats() {
   const data = unwrapIpcResult(await window.electron.chat.load(), 'Unable to load chats.');
   appState.chats = data.chats || [];
   appState.activeChatId = data.activeChatId || appState.chats[0]?.id || null;
+  if (appState.activeChatId) {
+    await ensureChatMessagesLoaded(appState.activeChatId);
+  }
   const activeChat = appState.chats.find((c) => c.id === appState.activeChatId);
   appState.isAgentModeEnabled = !!(activeChat && activeChat.agentMode);
   appState.isSandboxModeEnabled = activeChat ? activeChat.sandboxMode !== false : true;
@@ -8417,10 +8466,11 @@ async function handleSelectChat(chatId) {
   streamTextOffsets.clear();
   appState.activeChatId = chatId;
   refreshStopButton();
-  const chat = appState.chats.find((c) => c.id === chatId);
+  let chat = appState.chats.find((c) => c.id === chatId);
   appState.isAgentModeEnabled = !!(chat && chat.agentMode);
   appState.isSandboxModeEnabled = chat ? chat.sandboxMode !== false : true;
   unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
+  chat = await ensureChatMessagesLoaded(chatId) || chat;
   refreshUI();
   refreshCaseQuestionsBar();
 

@@ -25,6 +25,7 @@ describe('IPC constants – sandbox mode entries', () => {
   it('all chat constants are present', () => {
     const chatConstants = [
       'CHAT_LOAD',
+      'CHAT_GET',
       'CHAT_CREATE',
       'CHAT_SET_ACTIVE',
       'CHAT_RENAME',

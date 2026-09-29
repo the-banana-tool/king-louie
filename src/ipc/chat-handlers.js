@@ -152,6 +152,20 @@ function registerChatHandlers(ipcMain, context = {}) {
     };
   }));
 
+  ipcMain.handle(IPC.CHAT_GET, wrapHandler(IPC.CHAT_GET, async (_event, { chatId } = {}) => {
+    const id = String(chatId || '').trim();
+    if (!id) {
+      return { ok: false, error: 'Chat ID is required.' };
+    }
+
+    const chat = getChats().find((item) => item.id === id) || null;
+    if (!chat) {
+      return { ok: false, error: 'Chat not found.' };
+    }
+
+    return { ok: true, chat };
+  }));
+
   ipcMain.handle(IPC.CHAT_CREATE, wrapHandler(IPC.CHAT_CREATE, async (_event, title = 'New Chat') => {
     const now = new Date().toISOString();
     const settings = typeof context.getSettings === 'function' ? context.getSettings() : {};

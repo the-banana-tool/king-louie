@@ -262,6 +262,14 @@ changes and keeps at most the active chat's messages in memory. This is the
 one renderer data-model change in this spec and it is what makes a 2 million
 token chat affordable to open.
 
+Implementation note, 2026-09-29: the compatibility slice of this data-model
+change has landed before the SQLite store migration. `chat:get` now exists in
+the JSON-backed IPC layer and the renderer loads/merges the active chat on
+startup and when switching chats while tolerating metadata-only inactive chats.
+Today `chat:load` still returns full JSON chats; the H1 store/facade work will
+change it to metadata plus active-chat messages without another renderer
+contract change.
+
 `chat-data.json` keeps `activeChatId`, `apiTokens`, `apiStatus`, `settings`,
 `toolApprovals`, `usage` and everything else it holds today. Only `chats`
 moves.
