@@ -109,7 +109,7 @@ Default is `info`. Override with `KING_LOUIE_LOG_LEVEL` or `LOG_LEVEL` env var.
 ## History
 
 `src/history/` is the history store (spec
-`docs/superpowers/specs/2026-09-25-chat-history-recall-design.md`, stage H1;
+`docs/superpowers/specs/2026-09-25-chat-history-recall-design.md`, stages H1-H2;
 ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
 
 - Chats, their messages (one row each, `seq` dense from 1 per chat) and
@@ -144,6 +144,21 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   (the facade over one). On Windows an open store keeps its folder from being
   deleted, so a test that builds a core calls `closeOpenHistoryStores()`
   (`tests/helpers/close-history-stores.js`) before removing the data dir.
+- H2 (BM25 recall): \`appendMessage\` chunks each message (\`chunker.js\`) and
+  writes its FTS5 rows in the same transaction; never write \`messages\` or
+  \`chunks\` another way. The tokenizer is \`unicode61 tokenchars '_-'\`: '.' and
+  '/' separate tokens, so "app.js" matches a stored "src/app.js". A store
+  upgraded from schema 1 backfills chunks on open, resumably.
+- Each turn, \`ContextBuilder.build\` gives the tail and the recalled block; the
+  send path puts the block, the case orientation and the memory context in
+  \`options.systemPromptDynamic\`, which Anthropic sends uncached after the
+  cached \`systemPrompt\`. \`history.recall.enabled: false\` sends the tail only.
+- Assistant replies carry \`context\` provenance; the recall line reads it and
+  \`history:excerpts\` returns the excerpts. \`SearchHistory\`/\`ReadHistory\` are
+  always loaded; their scope is the chat itself until stage H4.
+- Tests use \`tests/helpers/history-fixture.js\` (a temp store; chats seeded
+  through the real \`appendMessage\`); \`tests/e2e/history-recall.test.js\` is
+  the end-to-end check.
 
 ## Models
 
