@@ -1374,25 +1374,14 @@ function createCore(deps = {}) {
         return newChat.id;
       },
       addMessageToLocalChat: (chatId, sender, text, { channel } = {}) => {
-        const chats = getChats();
-        const chat = chats.find((c) => c.id === chatId);
-        if (!chat) return;
-
-        const now = new Date().toISOString();
-        chat.messages.push({
-          id: createId(),
-          sender,
-          text,
-          timestamp: now,
+        const chat = appendMessageToChat(chatId, sender, text, {
           // F5: excludes this message from the owner-message pool
           // (chat-handlers.js) even though sender is 'user'.
           ...(channel ? { channel } : {})
         });
-        chat.updatedAt = now;
+        if (!chat) return;
 
-        setChats(chats);
-
-        ui.send('chat:updated', { chats });
+        ui.send('chat:updated', { chats: getChats() });
       }
     });
 
@@ -1456,26 +1445,15 @@ function createCore(deps = {}) {
         return newChat.id;
       },
       addMessageToLocalChat: (chatId, sender, text, { channel } = {}) => {
-        const chats = getChats();
-        const chat = chats.find((c) => c.id === chatId);
-        if (!chat) return;
-
-        const now = new Date().toISOString();
-        chat.messages.push({
-          id: createId(),
-          sender,
-          text,
-          timestamp: now,
+        const chat = appendMessageToChat(chatId, sender, text, {
           // F5: excludes this message from the owner-message pool
           // (chat-handlers.js) even though sender is 'user'.
           ...(channel ? { channel } : {})
         });
-        chat.updatedAt = now;
-
-        setChats(chats);
+        if (!chat) return;
 
         // Notify renderer if window exists
-        ui.send('chat:updated', { chats });
+        ui.send('chat:updated', { chats: getChats() });
       }
     });
 

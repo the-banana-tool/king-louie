@@ -286,9 +286,10 @@ parent chat messages now load the specific chat with messages through the same
 facade, and canvas tool persistence updates the active chat through
 `updateChat`. `chat:sendMessage` setup/lookback paths, `chat:speakLast`,
 `chat:truncateFrom`, and core model snapshots now prefer single-chat facade
-reads/updates as well. This is deliberately not the SQLite migration; it is the
-adapter seam that lets later H1 steps move storage without changing IPC or
-renderer contracts again.
+reads/updates as well. Channel bridge local-chat message appends now share the
+core facade-backed append path. This is deliberately not the SQLite migration;
+it is the adapter seam that lets later H1 steps move storage without changing
+IPC or renderer contracts again.
 
 `chat-data.json` keeps `activeChatId`, `apiTokens`, `apiStatus`, `settings`,
 `toolApprovals`, `usage` and everything else it holds today. Only `chats`
