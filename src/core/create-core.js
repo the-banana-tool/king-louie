@@ -264,8 +264,10 @@ function createCore(deps = {}) {
   // service CLI's model and profile commands run as root and must neither
   // create root-owned history files nor move chats.
   // history.readonly === true is the import dry run's preview: an existing
-  // store is opened read-only, a missing one is an empty in-memory store,
-  // and no chats move out of chat-data.json, so nothing is written.
+  // store is opened read-only; a missing one (a pre-H1 data dir) is an
+  // in-memory store filled from chat-data.json's chats through a jsonStore
+  // whose set is a no-op and with no backup, so the preview sees the
+  // service's chats and nothing on disk is written.
   const historyLog = createLogger('history');
   const historyStatus = { available: true, error: null, migrationFailed: 0 };
   let historyStore;
@@ -276,10 +278,16 @@ function createCore(deps = {}) {
   } else if (deps.history?.readonly === true) {
     const historyDbPath = deps.history.dbPath || path.join(paths.dataDir, 'history.sqlite');
     try {
-      historyStore = fs.existsSync(historyDbPath)
-        ? HistoryStore.open(historyDbPath, { readonly: true })
-        : HistoryStore.open(':memory:');
+      if (fs.existsSync(historyDbPath)) {
+        historyStore = HistoryStore.open(historyDbPath, { readonly: true });
+      } else {
+        historyStore = HistoryStore.open(':memory:');
+        const previewJson = { get: (key, fallback) => store.get(key, fallback), set: () => {} };
+        const { failed } = migrateFromJson({ historyStore, jsonStore: previewJson, log: historyLog, backup: false });
+        historyStatus.migrationFailed = failed.length;
+      }
     } catch (err) {
+      try { historyStore?.close?.(); } catch { /* it failed while opening or filling */ }
       historyLog.error(`Chat history could not be opened read-only at ${historyDbPath}: ${err.message}.`);
       historyStore = createUnavailableHistoryStore(err);
       historyStatus.available = false;

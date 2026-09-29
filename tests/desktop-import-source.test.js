@@ -303,6 +303,21 @@ describe('king-louie-service import --from', () => {
     assert.deepStrictEqual(fs.readdirSync(dataDir).filter((n) => n.startsWith('chat-data.backup-')), []);
   });
 
+  it('dry run on a pre-H1 data dir plans against the chats still in chat-data.json and writes nothing', async () => {
+    const dataDir = tmp();
+    fs.writeFileSync(path.join(dataDir, 'chat-data.json'), JSON.stringify({ chats: [{ id: 'c1', title: 'Lakeside lot', createdAt: '2026-09-01T10:00:00Z', updatedAt: '2026-09-20T10:00:00Z', messages: [] }] }));
+    const jsonBefore = fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8');
+    const namesBefore = fs.readdirSync(dataDir).sort();
+    const o = io();
+    const code = await runImportCommand({ flags: { from: userData(), dryRun: true }, dataDir, io: o.io, deps: { isAdmin: () => true, runningServicePid: () => null } });
+    assert.strictEqual(code, 0, o.out.stderr);
+    assert.match(o.out.stdout, /skip-present\s+chat c1/);
+    assert.strictEqual(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8'), jsonBefore);
+    assert.ok(!fs.existsSync(path.join(dataDir, 'history.sqlite')), 'no history.sqlite is created');
+    assert.deepStrictEqual(fs.readdirSync(dataDir).filter((n) => n.startsWith('chat-data.backup-')), []);
+    assert.deepStrictEqual(fs.readdirSync(dataDir).sort(), namesBefore);
+  });
+
   it('imports everything but secrets, which it lists as needs-desktop', async () => {
     const dataDir = keyedDataDir();
     const savedRoot = process.env.KL_CASES_ROOT;
