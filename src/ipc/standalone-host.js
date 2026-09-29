@@ -7,6 +7,7 @@ const { registerHandlers } = require('./register');
 const { createCore } = require('../core');
 const { CHAT_DATA_DEFAULTS } = require('../core/settings');
 const { createSafeStorageCipher } = require('../platform/cipher');
+const { withReadCache } = require('../platform/cached-store');
 const { asarUnpackedPath } = require('../platform/paths');
 const { createElectronPrompter } = require('../platform/electron-prompter');
 const { markLocalDesktopEvent } = require('../core/origin');
@@ -26,7 +27,7 @@ function startStandaloneHost(deps) {
     app, ipcMain, safeStorage, shell, Notification, getWindow, state, appDir,
     standaloneOnce = false, StoreClass = null, createCoreFn = createCore
   } = deps;
-  const Store = StoreClass || require('electron-store').default;
+  const Store = StoreClass || withReadCache(require('electron-store').default);
   const pendingAskUserResolvers = new Map();
   const pendingDirectoryAccessResolvers = new Map();
   const prompter = createElectronPrompter({ getWindow, pendingAskUserResolvers, pendingDirectoryAccessResolvers });
