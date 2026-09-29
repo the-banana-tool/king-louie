@@ -1,0 +1,33 @@
+{
+  "title": "Synthetic session synth-medium",
+  "generator": {
+    "version": 1,
+    "seed": 22,
+    "turns": 220,
+    "resultLines": 24,
+    "compactEvery": 0
+  },
+  "unmapped": 0,
+  "constructed": false,
+  "sessionId": "synth-medium",
+  "source": "synthetic",
+  "sourceRef": "synthetic:v1:seed=22",
+  "license": "CC-BY-4.0",
+  "private": false,
+  "messages": 1100,
+  "humanMessages": 220,
+  "toolCalls": 220,
+  "estTokens": 106762,
+  "bytesByKind": {
+    "user": 29425,
+    "assistant": 120816,
+    "tool_use": 7213,
+    "tool_result": 267888,
+    "status": 0
+  },
+  "compactions": [],
+  "span": {
+    "from": "2026-01-05T09:00:37.000Z",
+    "to": "2026-01-05T20:18:20.000Z"
+  }
+}

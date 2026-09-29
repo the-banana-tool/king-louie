@@ -8,7 +8,8 @@ const { UsageError } = require('./errors');
 
 const COMMANDS = {
   home: require('./commands/home'),
-  import: require('./commands/import')
+  import: require('./commands/import'),
+  synth: require('./commands/synth')
 };
 
 function usage() {

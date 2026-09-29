@@ -1,0 +1,46 @@
+{
+  "title": "Synthetic session synth-compacted",
+  "generator": {
+    "version": 1,
+    "seed": 33,
+    "turns": 90,
+    "resultLines": 12,
+    "compactEvery": 30
+  },
+  "unmapped": 0,
+  "constructed": false,
+  "sessionId": "synth-compacted",
+  "source": "synthetic",
+  "sourceRef": "synthetic:v1:seed=33",
+  "license": "CC-BY-4.0",
+  "private": false,
+  "messages": 452,
+  "humanMessages": 90,
+  "toolCalls": 90,
+  "estTokens": 29547,
+  "bytesByKind": {
+    "user": 11448,
+    "assistant": 47950,
+    "tool_use": 2952,
+    "tool_result": 54467,
+    "status": 676
+  },
+  "compactions": [
+    {
+      "atSeq": 151,
+      "summarySeq": 151,
+      "windowFromSeq": 1,
+      "windowToSeq": 150
+    },
+    {
+      "atSeq": 302,
+      "summarySeq": 302,
+      "windowFromSeq": 152,
+      "windowToSeq": 301
+    }
+  ],
+  "span": {
+    "from": "2026-01-05T09:00:37.000Z",
+    "to": "2026-01-05T13:38:44.000Z"
+  }
+}
