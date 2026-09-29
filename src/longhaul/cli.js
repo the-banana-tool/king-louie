@@ -10,7 +10,8 @@ const COMMANDS = {
   home: require('./commands/home'),
   import: require('./commands/import'),
   synth: require('./commands/synth'),
-  run: require('./commands/run')
+  run: require('./commands/run'),
+  author: require('./commands/author')
 };
 
 function usage() {
