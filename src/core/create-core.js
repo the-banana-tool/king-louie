@@ -283,20 +283,18 @@ function createCore(deps = {}) {
   const migrateLegacyBridgeChatOrigins = () => {
     const chats = getChats();
     let count = 0;
-    const migrated = chats.map((chat) => {
-      if (chat.origin || typeof chat.title !== 'string') return chat;
+    for (const chat of chats) {
+      if (chat.origin || typeof chat.title !== 'string') continue;
       const match = LEGACY_BRIDGE_TITLE_PREFIXES.find(({ prefix }) => chat.title.startsWith(prefix));
-      if (!match) return chat;
+      if (!match) continue;
       count += 1;
       const messages = Array.isArray(chat.messages) ? chat.messages : [];
-      return {
-        ...chat,
+      updateChat(chat.id, {
         origin: match.origin,
         messages: messages.map((m) => (m && m.sender === 'user' && !m.channel ? { ...m, channel: match.origin } : m))
-      };
-    });
+      });
+    }
     if (count) {
-      setChats(migrated);
       log.info(`Tagged ${count} legacy bridge chat(s) by title prefix (F5 migration).`);
     }
   };

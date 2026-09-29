@@ -289,9 +289,11 @@ facade, and canvas tool persistence updates the active chat through
 `chat:truncateFrom`, and core model snapshots now prefer single-chat facade
 reads/updates as well. Channel bridge local-chat message appends now share the
 core facade-backed append path, and channel bridge local-chat creation plus
-desktop-import chat copy/update writes now use facade collection helpers. This is
-deliberately not the SQLite migration; it is the adapter seam that lets later H1
-steps move storage without changing IPC or renderer contracts again.
+desktop-import chat copy/update writes now use facade collection helpers. The
+legacy bridge-origin startup migration tags matching chats through `updateChat`
+instead of rewriting the full chat array. This is deliberately not the SQLite
+migration; it is the adapter seam that lets later H1 steps move storage without
+changing IPC or renderer contracts again.
 
 `chat-data.json` keeps `activeChatId`, `apiTokens`, `apiStatus`, `settings`,
 `toolApprovals`, `usage` and everything else it holds today. Only `chats`
