@@ -476,7 +476,7 @@ class DesktopImporter {
       else add('allowedDirectory', dir, 'needs-attention', `the service cannot read ${dir}`);
     }
 
-    const chats = this.context.listChats({ messages: true });
+    const chats = this.context.listChats({ messages: false });
     // Remembers the live updatedAt an 'update' action was planned against,
     // so apply() can tell whether the service's copy is still the one the
     // plan looked at (fix round 1, I4) before overwriting it.
@@ -775,7 +775,7 @@ class DesktopImporter {
     if (!value || value.id !== item.key || !Array.isArray(value.messages)) throw new ImportError('BAD_VALUE', 'the chat does not match the plan');
     // Fail fast if the race has already happened, before doing any of the
     // work below (in particular the checkPath await).
-    const early = this.chatRaceCheck(plan, item, value, this.context.listChats({ messages: true }));
+    const early = this.chatRaceCheck(plan, item, value, this.context.listChats({ messages: false }));
     if (early) return early;
 
     let note = null;
@@ -800,7 +800,7 @@ class DesktopImporter {
     // between this read and the upsert, and re-run the same check against
     // it (fix round 2, I4): this is the read the upsert below acts on, so
     // it - and the presence/updatedAt decision - must be fresh.
-    const liveChats = this.context.listChats({ messages: true });
+    const liveChats = this.context.listChats({ messages: false });
     const late = this.chatRaceCheck(plan, item, value, liveChats);
     if (late) return late;
     // A copy keeps the source's message ids; the history store gives any id
