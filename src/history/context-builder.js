@@ -112,6 +112,10 @@ class ContextBuilder {
       used += entry.tokens;
     }
     entries.reverse();
+    // Some providers (Mistral, Gemini) reject a conversation whose first
+    // message after the system prompt is not the user's: the tail starts at
+    // its first user message. What is dropped stays recallable.
+    while (entries.length && entries[0].message.sender !== 'user') entries.shift();
 
     // Tool calls in the tail's span, one line each at the top of the
     // assistant reply that follows them before the next user message.

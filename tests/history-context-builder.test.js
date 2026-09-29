@@ -63,8 +63,33 @@ describe('ContextBuilder', () => {
     t = s.t;
     const out = await s.builder.build({ chatId: 'chat-1', message: 'x' });
     assert.deepStrictEqual(out.tail.map((m) => m.seq), [5, 6]);
+    // The newest message (#6, an assistant reply) is kept by the budget, but
+    // a tail never starts with an assistant message, so it is empty.
     s.builder.getSettings = () => ({ history: { recall: { tailTokens: 1 } } });
-    assert.deepStrictEqual((await s.builder.build({ chatId: 'chat-1', message: 'x' })).tail.map((m) => m.seq), [6]);
+    assert.deepStrictEqual((await s.builder.build({ chatId: 'chat-1', message: 'x' })).tail.map((m) => m.seq), []);
+  });
+
+  it('never starts the tail with an assistant message (Mistral and Gemini reject it)', async () => {
+    // tailTokens: the budget ends on #2, an assistant reply; #1 is too big.
+    const s = setup([
+      { sender: 'user', text: 'Here is the whole survey for the Lakeside lot. '.repeat(40) },
+      { sender: 'assistant', text: 'Noted, the survey is long.' },
+      { sender: 'user', text: 'What is the fence length?' },
+      { sender: 'assistant', text: 'The north fence is forty meters.' }
+    ], { recall: { tailTokens: 60 } });
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'and the gate?' });
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), [3, 4]);
+    assert.strictEqual(out.stats.tail.fromSeq, 3);
+    assert.ok(!out.stats.tail.seqs.includes(2));
+
+    // tailMessages: the 8th message back is an assistant reply.
+    const n = setup(Array.from({ length: 9 }, (_, i) => filler(i + 1)));
+    t.cleanup();
+    t = n.t;
+    const nine = await n.builder.build({ chatId: 'chat-1', message: 'hello' });
+    assert.deepStrictEqual(nine.tail.map((m) => m.seq), [3, 4, 5, 6, 7, 8, 9]);
+    assert.strictEqual(nine.tail[0].sender, 'user');
   });
 
   it('folds tool calls into the reply that follows them; tool results stay out', async () => {
