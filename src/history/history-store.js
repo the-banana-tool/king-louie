@@ -229,7 +229,47 @@ class HistoryStore {
     return this.listChats();
   }
 
-  // ── internals shared with messages (Task 4) and later stages ────────────
+  // ── messages ───────────────────────────────────────────────────────────
+
+  appendMessage(chatId, message, { updatedAt, patch } = {}) {
+    const id = normalizeId(chatId);
+    if (!id) return null;
+    return this.transaction((db) => {
+      const row = this._chatRow(id);
+      if (!row) return null;
+      const inserted = this._insertMessage(db, id, message, { fallbackTimestamp: updatedAt });
+      const { messages: _ignored, ...fields } = patch || {};
+      this._updateChatRow(id, { ...rows.rowToChat(row), updatedAt: updatedAt || inserted.stored.timestamp, ...fields });
+      return { message: inserted.stored, seq: inserted.seq };
+    });
+  }
+
+  // Removing messages is only ever "from seq n onward", so seq stays dense
+  // from 1 (spec §4.1).
+  truncateFrom(chatId, seq) {
+    const id = normalizeId(chatId);
+    const from = Number(seq);
+    if (!Number.isInteger(from) || from < 1) throw new RangeError(`truncateFrom needs a seq of 1 or more, got ${seq}.`);
+    return this.transaction(() => Number(this._stmt('DELETE FROM messages WHERE chat_id = ? AND seq >= ?').run(id, from).changes));
+  }
+
+  // fromSeq and toSeq are both inclusive; limit counts from fromSeq.
+  getMessages(chatId, { fromSeq = 1, toSeq = Number.MAX_SAFE_INTEGER, limit = -1 } = {}) {
+    const id = normalizeId(chatId);
+    if (!id) return [];
+    const bound = (value, fallback) => (Number.isInteger(Number(value)) ? Number(value) : fallback);
+    return this._messagesFor(id, {
+      fromSeq: bound(fromSeq, 1),
+      toSeq: bound(toSeq, Number.MAX_SAFE_INTEGER),
+      limit: Number.isInteger(Number(limit)) && Number(limit) >= 0 ? Number(limit) : -1
+    });
+  }
+
+  messageCount(chatId) {
+    return Number(this._stmt('SELECT COUNT(*) AS n FROM messages WHERE chat_id = ?').get(normalizeId(chatId)).n);
+  }
+
+  // ── internals shared with messages and later stages ─────────────────────
 
   _chatRow(id) {
     return this._stmt('SELECT * FROM chats WHERE id = ?').get(id);
