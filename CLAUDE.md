@@ -144,20 +144,20 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   (the facade over one). On Windows an open store keeps its folder from being
   deleted, so a test that builds a core calls `closeOpenHistoryStores()`
   (`tests/helpers/close-history-stores.js`) before removing the data dir.
-- H2 (BM25 recall): \`appendMessage\` chunks each message (\`chunker.js\`) and
-  writes its FTS5 rows in the same transaction; never write \`messages\` or
-  \`chunks\` another way. The tokenizer is \`unicode61 tokenchars '_-'\`: '.' and
+- H2 (BM25 recall): `appendMessage` chunks each message (`chunker.js`) and
+  writes its FTS5 rows in the same transaction; never write `messages` or
+  `chunks` another way. The tokenizer is `unicode61 tokenchars '_-'`: '.' and
   '/' separate tokens, so "app.js" matches a stored "src/app.js". A store
   upgraded from schema 1 backfills chunks on open, resumably.
-- Each turn, \`ContextBuilder.build\` gives the tail and the recalled block; the
+- Each turn, `ContextBuilder.build` gives the tail and the recalled block; the
   send path puts the block, the case orientation and the memory context in
-  \`options.systemPromptDynamic\`, which Anthropic sends uncached after the
-  cached \`systemPrompt\`. \`history.recall.enabled: false\` sends the tail only.
-- Assistant replies carry \`context\` provenance; the recall line reads it and
-  \`history:excerpts\` returns the excerpts. \`SearchHistory\`/\`ReadHistory\` are
+  `options.systemPromptDynamic`, which Anthropic sends uncached after the
+  cached `systemPrompt`. `history.recall.enabled: false` sends the tail only.
+- Assistant replies carry `context` provenance; the recall line reads it and
+  `history:excerpts` returns the excerpts. `SearchHistory`/`ReadHistory` are
   always loaded; their scope is the chat itself until stage H4.
-- Tests use \`tests/helpers/history-fixture.js\` (a temp store; chats seeded
-  through the real \`appendMessage\`); \`tests/e2e/history-recall.test.js\` is
+- Tests use `tests/helpers/history-fixture.js` (a temp store; chats seeded
+  through the real `appendMessage`); `tests/e2e/history-recall.test.js` is
   the end-to-end check.
 
 ## Models
@@ -400,7 +400,7 @@ Fleet stage 3 (spec `docs/superpowers/specs/2026-09-23-fleet-stage3-approvals.md
 `docs/protocol/approval-v1.md`). On a service node, an unsafe remote tool call or `unsafe` runbook runs
 only after an enrolled phone signs an approval over the exact action; only `=== true` approves. The
 service only reads the approver set in `<configDir>/approvers/`; the admin CLI writes it. On Windows
-the files carry no owner check, so the service trusts `approvers\` only while (a) it cannot create a
+the files carry no owner check, so the service trusts `approvers` only while (a) it cannot create a
 file there (re-probed on every scan) and (b) the dir is owned by Administrators, SYSTEM or the config
 dir's owner, and the config dir is not owned by LOCAL SERVICE (re-read when either dir's ChangeTime
 moves). A dir's owner can always rewrite its ACL, so (b) is what stops a service-owned dir from
