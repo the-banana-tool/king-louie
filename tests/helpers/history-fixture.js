@@ -19,7 +19,8 @@ function openTempStore(options = {}) {
     dir,
     dbPath,
     cleanup() {
-      try { store.close(); } catch { /* already closed */ }
+      // Tests may replace t.store (reopen); close whichever is current.
+      try { this.store.close(); } catch { /* already closed */ }
       fs.rmSync(dir, { recursive: true, force: true });
     }
   };

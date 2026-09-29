@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
-const { insertChunks } = require('./chunk-index');
+const { insertChunks, readBackfill, writeBackfill, clearBackfill } = require('./chunk-index');
 const { applySchema, currentVersion, latestVersion, SchemaVersionError } = require('./schema');
 const rows = require('./rows');
 const { createLogger } = require('../logging');
@@ -43,7 +43,7 @@ const LIST_SQL = `
   ORDER BY c.position, c.rowid`;
 
 class HistoryStore {
-  static open(dbPath, { readonly = false, now, chunkOptions } = {}) {
+  static open(dbPath, { readonly = false, now, chunkOptions, backfillBatchSize } = {}) {
     if (!dbPath || typeof dbPath !== 'string') throw new TypeError('HistoryStore.open needs a file path or ":memory:".');
     const memory = dbPath === ':memory:';
     if (!memory && !readonly) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -68,6 +68,14 @@ class HistoryStore {
     // Chunk sizes (settings.history.chunk), read on every insert so a
     // settings change applies to the next message.
     store._chunkOptions = typeof chunkOptions === 'function' ? chunkOptions : () => chunkOptions || {};
+    if (!readonly) {
+      try {
+        store.backfillChunks({ batchSize: backfillBatchSize });
+      } catch (err) {
+        try { store.close(); } catch { /* already closed */ }
+        throw err;
+      }
+    }
     return store;
   }
 
@@ -353,6 +361,39 @@ class HistoryStore {
   // rolls the message back (spec §5.1).
   _indexMessage(db, chatId, message) {
     insertChunks(db, chatId, message, this._chunkOptions ? this._chunkOptions() : {});
+  }
+
+  // Chunk messages stored before schema step 2, a batch per transaction; the
+  // cursor moves inside the same transaction, so a crash resumes after the
+  // last committed batch and no message is chunked twice.
+  backfillChunks({ batchSize = 500 } = {}) {
+    const state = readBackfill(this.db);
+    if (!state) return { indexed: 0, total: 0 };
+    const size = Number.isInteger(batchSize) && batchSize > 0 ? batchSize : 500;
+    const total = Number(this._stmt('SELECT count(*) AS n FROM messages WHERE rowid > ? AND rowid <= ?').get(state.cursor, state.until).n);
+    let cursor = state.cursor;
+    let indexed = 0;
+    if (total > 0) log.info(`Indexing ${total} stored messages for recall`);
+    for (;;) {
+      const batch = this._stmt('SELECT rowid AS rowId, chat_id AS chatId, seq FROM messages WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?')
+        .all(cursor, state.until, size);
+      if (!batch.length) break;
+      const last = Number(batch[batch.length - 1].rowId);
+      this.transaction((db) => {
+        for (const row of batch) {
+          const [message] = this._messagesFor(row.chatId, { fromSeq: Number(row.seq), toSeq: Number(row.seq), limit: 1 });
+          if (!message) continue;
+          db.prepare('DELETE FROM chunks WHERE message_id = ?').run(message.id);
+          this._indexMessage(db, row.chatId, message);
+        }
+        writeBackfill(db, { cursor: last, until: state.until });
+      });
+      cursor = last;
+      indexed += batch.length;
+      log.info(`Indexed ${indexed} of ${total} stored messages for recall`);
+    }
+    clearBackfill(this.db);
+    return { indexed, total };
   }
 
   _messagesFor(chatId, { fromSeq = 1, toSeq = Number.MAX_SAFE_INTEGER, limit = -1 } = {}) {

@@ -65,4 +65,28 @@ function insertChunks(db, chatId, message, chunkOptions = {}) {
   return pieces.length;
 }
 
-module.exports = { SCHEMA_V2_SQL, prepared, insertChunks };
+// The resumable backfill (H2): messages stored before schema step 2 have no
+// chunks. The marker holds the messages.rowid cursor and the last rowid that
+// existed at the upgrade; later inserts index themselves.
+const BACKFILL_KEY = 'chunks_backfill';
+
+function readBackfill(db) {
+  const row = prepared(db, 'SELECT value FROM meta WHERE key = ?').get(BACKFILL_KEY);
+  if (!row) return null;
+  try {
+    const state = JSON.parse(row.value);
+    return Number.isInteger(state.cursor) && Number.isInteger(state.until) ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeBackfill(db, state) {
+  prepared(db, 'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(BACKFILL_KEY, JSON.stringify(state));
+}
+
+function clearBackfill(db) {
+  prepared(db, 'DELETE FROM meta WHERE key = ?').run(BACKFILL_KEY);
+}
+
+module.exports = { SCHEMA_V2_SQL, prepared, insertChunks, BACKFILL_KEY, readBackfill, writeBackfill, clearBackfill };
