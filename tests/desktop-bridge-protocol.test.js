@@ -11,6 +11,7 @@ const { DesktopBridgeServer } = require('../src/desktop-bridge/bridge-server');
 const { buildAuthS, buildAuthC, newNonce, PROTOCOL } = require('../src/desktop-bridge/protocol');
 const keys = require('../src/desktop-bridge/keys');
 const pairing = require('../src/desktop-bridge/pairing');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
 const dirs = [];
@@ -19,6 +20,7 @@ const identity = new NodeIdentity({ nodeName: 'gpu-box' });
 
 after(async () => {
   for (const s of servers) await s.stop().catch(() => {});
+  closeOpenHistoryStores();
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 });
 

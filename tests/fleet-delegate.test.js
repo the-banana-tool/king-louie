@@ -18,6 +18,7 @@ const { ToolError, STDIO_ORIGIN, FleetToolHandler } = require('../src/fleet/flee
 const { REFUSE_UNSAFE_MESSAGE } = require('../src/approvals/executor-options');
 const { holdEventLoop } = require('./helpers/hold-event-loop');
 const { profileSettings, everyRole } = require('./helpers/profile-settings');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const release = holdEventLoop();
 after(release);
@@ -79,6 +80,7 @@ const temps = [];
 const running = [];
 afterEach(async () => {
   while (running.length) await running.pop()();
+  closeOpenHistoryStores();
   while (temps.length) fs.rmSync(temps.pop(), { recursive: true, force: true });
   script = [];
   slowStarted = false;

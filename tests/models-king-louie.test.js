@@ -13,6 +13,7 @@ const { KingLouieProfile } = require('../src/models/king-louie');
 const { createModelChoices } = require('../src/core/model-choices');
 const { mergeSettings } = require('../src/core/settings');
 const { setLogLevel } = require('../src/logging');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 setLogLevel('fatal');
 
@@ -280,6 +281,7 @@ describe('the King Louie profile in the core', () => {
   const savedCasesRoot = process.env.KL_CASES_ROOT;
   afterEach(() => {
     if (savedCasesRoot === undefined) delete process.env.KL_CASES_ROOT; else process.env.KL_CASES_ROOT = savedCasesRoot;
+    closeOpenHistoryStores();
     while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
   });
 

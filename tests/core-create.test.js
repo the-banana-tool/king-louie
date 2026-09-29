@@ -10,9 +10,11 @@ const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { withTimeout, TIMED_OUT } = require('../src/core/with-timeout');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const tempDirs = [];
 afterEach(() => {
+  closeOpenHistoryStores();
   while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
 });
 

@@ -14,9 +14,10 @@ const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { profileSettings, everyRole } = require('./helpers/profile-settings');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const tempDirs = [];
-after(() => { while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true }); });
+after(() => { closeOpenHistoryStores(); while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true }); });
 
 describe('agent executor adapter', () => {
   it('runs on options.provider and options.model while the default profile names another provider', async () => {

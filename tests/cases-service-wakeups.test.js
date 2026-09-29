@@ -13,10 +13,12 @@ const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
 const ProviderFactory = require('../src/providers/provider-factory');
 const { profileSettings } = require('./helpers/profile-settings');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const tempDirs = [];
 const savedEnv = process.env.KL_CASES_ROOT;
 afterEach(() => {
+  closeOpenHistoryStores();
   while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
   if (savedEnv === undefined) delete process.env.KL_CASES_ROOT; else process.env.KL_CASES_ROOT = savedEnv;
 });

@@ -10,6 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 // Shutdown-order spies, installed before create-core loads (it keeps its
 // own references to these exports).
@@ -48,6 +49,7 @@ const dirs = [];
 const savedRoot = process.env.KL_CASES_ROOT;
 after(async () => {
   await shutdownPdfSandbox();
+  closeOpenHistoryStores();
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 });
   if (savedRoot === undefined) delete process.env.KL_CASES_ROOT; else process.env.KL_CASES_ROOT = savedRoot;
 });

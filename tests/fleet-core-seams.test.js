@@ -15,6 +15,7 @@ const { toolRegistry } = require('../src/tools');
 const AgentExecutor = require('../src/agents/agent-executor');
 const { REFUSE_UNSAFE_MESSAGE } = require('../src/approvals/executor-options');
 const { profileSettings, everyRole } = require('./helpers/profile-settings');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const FAKE = 'kl-test-seams-fake';
 const GATED = 'KlSeamsGated';
@@ -35,7 +36,7 @@ class FakeProvider {
 }
 
 const temps = [];
-afterEach(() => { while (temps.length) fs.rmSync(temps.pop(), { recursive: true, force: true }); });
+afterEach(() => { closeOpenHistoryStores(); while (temps.length) fs.rmSync(temps.pop(), { recursive: true, force: true }); });
 before(() => {
   ProviderFactory.registerProvider(FAKE, FakeProvider);
   if (!toolRegistry.get(GATED)) {

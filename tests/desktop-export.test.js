@@ -14,11 +14,13 @@ const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { DesktopImporter, buildImportTargets } = require('../src/migration/desktop-import');
 const { createDesktopScope } = require('../src/desktop-bridge/desktop-scope');
 const { checkPath } = require('../src/desktop-bridge/check-path');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const dirs = [];
 const cores = [];
 after(async () => {
   for (const c of cores) await c.shutdown().catch(() => {});
+  closeOpenHistoryStores();
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 });
 const tmp = (p = 'kl-export-') => { const d = fs.mkdtempSync(path.join(os.tmpdir(), p)); dirs.push(d); return d; };

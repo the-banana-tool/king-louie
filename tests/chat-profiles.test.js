@@ -17,6 +17,7 @@ const ProviderFactory = require('../src/providers/provider-factory');
 const IPC = require('../src/ipc/constants');
 const { registerChatHandlers } = require('../src/ipc/chat-handlers');
 const { setLogLevel } = require('../src/logging');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 setLogLevel('fatal');
 
@@ -160,6 +161,7 @@ describe('sub-agents of a chat turn', () => {
   afterEach(() => {
     ProviderFactory._registry.delete(FAKE);
     if (savedCasesRoot === undefined) delete process.env.KL_CASES_ROOT; else process.env.KL_CASES_ROOT = savedCasesRoot;
+    closeOpenHistoryStores();
     while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
   });
 

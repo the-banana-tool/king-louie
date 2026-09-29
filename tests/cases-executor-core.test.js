@@ -13,8 +13,9 @@ const IPC = require('../src/ipc/constants');
 const { ExecutorRegistry, JobStore } = require('../src/cases/executors');
 const envelopeOps = require('../src/cases/executors/envelope-ops');
 const { profileSettings, everyRole } = require('./helpers/profile-settings');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
-after(fx.cleanup);
+after(() => { closeOpenHistoryStores(); fx.cleanup(); });
 
 const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
 function adminDir(cfg) {

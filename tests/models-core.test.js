@@ -16,6 +16,7 @@ const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { getActiveCatalog, setActiveCatalog, CATALOG_DEFAULTS } = require('../src/models');
 const { setLogLevel } = require('../src/logging');
 const { profileSettings } = require('./helpers/profile-settings');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 // One case here deliberately fails a connection test (a bad key); silence
 // the resulting warning so TAP output stays clean.
@@ -29,6 +30,7 @@ afterEach(() => {
   if (originalTestMode === undefined) delete process.env.KL_TEST_MODE;
   else process.env.KL_TEST_MODE = originalTestMode;
   setActiveCatalog(null);
+  closeOpenHistoryStores();
   while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
 });
 

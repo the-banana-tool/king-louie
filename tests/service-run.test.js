@@ -1,6 +1,7 @@
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
 const { assertEnabledListenersBound } = require('../src/service/run');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 // createCore treats a failed listener bind as non-fatal on purpose (it only
 // log.warn's). In service mode that is a silent fail-open: an unprivileged
@@ -63,7 +64,7 @@ describe('acquireInstanceLock', () => {
   const { acquireInstanceLock, readPidfile } = require('../src/service/pidfile');
 
   const dirs = [];
-  after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
+  after(() => { closeOpenHistoryStores(); for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
   const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-lock-')); dirs.push(d); return d; };
 
   it('claims the data dir and names this process', () => {
@@ -134,7 +135,7 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
   const { ensureServicePaths, ensurePrivateDir } = require('../src/platform/paths');
 
   const dirs = [];
-  after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
+  after(() => { closeOpenHistoryStores(); for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
   function dataDir() {
     const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-listen-'));
     dirs.push(d);

@@ -12,11 +12,13 @@ const { startStandaloneHost, markingIpcMain } = require('../src/ipc/standalone-h
 const CronScheduler = require('../src/cron/cron-scheduler');
 const CronExecutor = require('../src/cron/cron-executor');
 const SkillLoader = require('../src/skills/skill-loader');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const dirs = [];
 const hosts = [];
 after(async () => {
   for (const h of hosts) await h.shutdown().catch(() => {});
+  closeOpenHistoryStores();
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 });
 const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-standalone-')); dirs.push(d); return d; };

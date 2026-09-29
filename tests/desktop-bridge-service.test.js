@@ -14,10 +14,11 @@ const { CHAT_DATA_DEFAULTS } = require('../src/core/settings');
 const { loadProfile } = require('../src/service/run');
 const keys = require('../src/desktop-bridge/keys');
 const pairing = require('../src/desktop-bridge/pairing');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
 const dirs = [];
-after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
+after(() => { closeOpenHistoryStores(); for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 
 function layout(adminCfg = null) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-bridge-svc-'));

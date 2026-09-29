@@ -19,6 +19,7 @@ const { Tool } = require('../src/tools/tool-schema');
 const { toolRegistry } = require('../src/tools');
 const { addSink } = require('../src/logging');
 const { profileSettings, everyRole } = require('./helpers/profile-settings');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const FAKE_PROVIDER = 'kl-test-approval-fake';
 const PROBE_TOOL = 'KlTestApprovalProbe';
@@ -50,6 +51,7 @@ class FakeProvider {
 
 const tempDirs = [];
 afterEach(() => {
+  closeOpenHistoryStores();
   while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
 });
 

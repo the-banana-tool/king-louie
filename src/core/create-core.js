@@ -64,7 +64,7 @@ const { makeRootAssert } = require('../cases/executors/package-loader');
 const { buildChildContext, childRuntimeOptions } = require('../agents/child-context');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
-const { SqliteChatHistoryStore } = require('../history');
+const { HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore } = require('../history');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
@@ -255,22 +255,58 @@ function createCore(deps = {}) {
 
   const createId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-  const historyStore = deps.historyStore || new SqliteChatHistoryStore({
-    dataDir: paths.dataDir,
-    dbPath: deps.historyDbPath,
-    migrateChats: store.get('chats', []),
-    migrateBackupFrom: store.path
+  // The history store (recall spec 2026-09-25 §4, stage H1):
+  // <dataDir>/history.sqlite, one connection for the life of this core,
+  // closed at the end of shutdown(). chat-data.json's chats move into it
+  // once (§11.1). A store that will not open is reported through
+  // getHistoryStatus() and chat:load and is never replaced by the JSON file
+  // (§15). history.open === false builds a core that opens nothing: the
+  // service CLI's model and profile commands run as root and must neither
+  // create root-owned history files nor move chats.
+  const historyLog = createLogger('history');
+  const historyStatus = { available: true, error: null, migrationFailed: 0 };
+  let historyStore;
+  if (deps.history?.open === false) {
+    historyStore = createUnavailableHistoryStore(new Error('this command does not open chat history'));
+    historyStatus.available = false;
+    historyStatus.error = 'this command does not open chat history';
+  } else {
+    const historyDbPath = deps.history?.dbPath || path.join(paths.dataDir, 'history.sqlite');
+    try {
+      historyStore = HistoryStore.open(historyDbPath);
+    } catch (err) {
+      historyLog.error(`Chat history could not be opened at ${historyDbPath}: ${err.message}. chat-data.json was left as it is.`);
+      historyStore = createUnavailableHistoryStore(err);
+      historyStatus.available = false;
+      historyStatus.error = err.message;
+    }
+    if (historyStatus.available) {
+      try {
+        const { failed } = migrateFromJson({ historyStore, jsonStore: store, jsonPath: store.path || null, log: historyLog });
+        historyStatus.migrationFailed = failed.length;
+      } catch (err) {
+        historyLog.error(`Moving chats out of chat-data.json failed: ${err.message}`);
+        const left = store.get('chats', []);
+        historyStatus.migrationFailed = Array.isArray(left) ? left.length : 1;
+      }
+    }
+  }
+  const getHistoryStore = () => historyStore;
+  const getHistoryStatus = () => ({ ...historyStatus });
+  const {
+    listChats, getChat, updateChat, createChat, replaceChat, upsertChat, updateChatsWhere, deleteChat,
+    getMessages, appendMessageToChat, truncateChatFrom
+  } = createChatFacade({ historyStore, createId });
+  // Transitional (H1 Tasks 7 to 9): the last getChats/setChats call sites
+  // move to explicit store calls in Tasks 8 and 9, and Task 9 deletes these.
+  const getChats = () => listChats({ messages: true });
+  const setChats = (chats) => historyStore.transaction(() => {
+    const list = Array.isArray(chats) ? chats : [];
+    const keep = new Set(list.map((chat) => String(chat?.id ?? '').trim()).filter(Boolean));
+    for (const chat of historyStore.listChats()) if (!keep.has(chat.id)) historyStore.deleteChat(chat.id);
+    for (const chat of list) historyStore.upsertChat(chat, { position: 'back' });
+    return list;
   });
-  const getChats = () => historyStore.listChats({ messages: true });
-  const setChats = (chats) => historyStore.setChats(chats);
-  const listChats = (options = {}) => historyStore.listChats(options);
-  const getChat = (chatId, options = {}) => historyStore.getChat(chatId, options);
-  const updateChat = (chatId, patch = {}) => historyStore.updateChat(chatId, patch);
-  const createChat = (chat, options = {}) => historyStore.createChat(chat, options);
-  const replaceChat = (chatId, chat) => historyStore.replaceChat(chatId, chat);
-  const upsertChat = (chat, options = {}) => historyStore.upsertChat(chat, options);
-  const updateChatsWhere = (predicate, patcher) => historyStore.updateChatsWhere(predicate, patcher);
-  const deleteChat = (chatId) => historyStore.deleteChat(chatId);
 
   // F5 re-review: a chat a Telegram/Discord bridge created before the
   // origin/channel tagging existed carries neither, and the bridges keep
@@ -288,6 +324,7 @@ function createCore(deps = {}) {
     { prefix: DiscordChannel.CHAT_TITLE_PREFIX, origin: 'discord' }
   ];
   const migrateLegacyBridgeChatOrigins = () => {
+    if (!historyStatus.available) return;
     const chats = getChats();
     let count = 0;
     for (const chat of chats) {
@@ -820,55 +857,6 @@ function createCore(deps = {}) {
     } catch (err) { systemPromptLog.debug(`skills unavailable: ${err.message}`); }
 
     return sections.join('\n');
-  };
-
-  const getChatLlmTotals = (chat) => {
-    const messages = chat?.messages || [];
-    const totals = messages.reduce(
-      (acc, message) => ({
-        inputTokens: acc.inputTokens + (Number(message?.llm?.totals?.inputTokens) || 0),
-        outputTokens: acc.outputTokens + (Number(message?.llm?.totals?.outputTokens) || 0),
-        totalTokens: acc.totalTokens + (Number(message?.llm?.totals?.totalTokens) || 0),
-        costUsd: Number((acc.costUsd + (Number(message?.llm?.totals?.costUsd) || 0)).toFixed(8))
-      }),
-      { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
-    );
-
-    return totals;
-  };
-
-  const appendMessageToChat = (chatId, sender, text, metadata = {}) => {
-    const now = new Date().toISOString();
-    // id, sender and timestamp are this function's to set; a caller-supplied
-    // metadata object (e.g. CHAT_ADD_MESSAGE's IPC payload) must not be able
-    // to override them by spreading last (minor fix, F5 review).
-    const { id: _id, sender: _sender, timestamp: _timestamp, ...safeMetadata } = metadata || {};
-    const chat = getChat(chatId, { messages: true });
-    if (!chat) return null;
-    const message = {
-      id: createId(),
-      sender,
-      text,
-      timestamp: now,
-      ...safeMetadata
-    };
-    const messages = Array.isArray(chat.messages) ? chat.messages : [];
-    const llmTotals = getChatLlmTotals({
-      ...chat,
-      messages: [
-        ...messages,
-        {
-          sender,
-          text,
-          ...safeMetadata
-        }
-      ]
-    });
-
-    return historyStore.appendMessage(chatId, message, {
-      updatedAt: now,
-      patch: { llmTotals }
-    });
   };
 
   let _cachedOAuthAccessToken = null;
@@ -3070,6 +3058,12 @@ function createCore(deps = {}) {
       log.warn(`Releasing case locks failed: ${err.message}`);
     }
     if (usageTracker) usageTracker.reset();
+    // Last: nothing after this point appends to a chat.
+    try {
+      historyStore.close();
+    } catch (err) {
+      log.warn(`Closing the history store failed: ${err.message}`);
+    }
   };
 
   // Constructing the runtime touches nothing on disk; the root directory is
@@ -3218,6 +3212,10 @@ function createCore(deps = {}) {
     // Chat
     createId,
     historyStore,
+    getHistoryStore,
+    getHistoryStatus,
+    getMessages,
+    truncateChatFrom,
     getChats,
     setChats,
     listChats,

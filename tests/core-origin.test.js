@@ -14,6 +14,7 @@ const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { Tool } = require('../src/tools/tool-schema');
 const { toolRegistry } = require('../src/tools');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 const {
   markLocalDesktopEvent, isLocalDesktopEvent, localDesktopDeviceId, markLocalRequester, isLocalRequester
 } = require('../src/core/origin');
@@ -35,6 +36,7 @@ before(() => {
 
 after(async () => {
   for (const core of cores) await core.shutdown().catch(() => {});
+  closeOpenHistoryStores();
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 });
 

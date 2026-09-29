@@ -16,6 +16,7 @@ const { checkPath } = require('../src/desktop-bridge/check-path');
 const { DesktopImporter, buildImportTargets, MAX_BATCH_BYTES, isSkippedCaseFile } = require('../src/migration/desktop-import');
 const { MemoryManager, MemoryStore } = require('../src/memory');
 const git = require('../src/cases/git');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const SECRET = 'sk-example-SECRET-0123456789';
 const VAULT_SECRET = 'ghp_exampleVAULTsecret42';
@@ -26,6 +27,7 @@ let savedCasesRoot;
 before(() => { savedCasesRoot = process.env.KL_CASES_ROOT; });
 after(async () => {
   for (const c of cores) await c.shutdown().catch(() => {});
+  closeOpenHistoryStores();
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
   if (savedCasesRoot === undefined) delete process.env.KL_CASES_ROOT; else process.env.KL_CASES_ROOT = savedCasesRoot;
 });

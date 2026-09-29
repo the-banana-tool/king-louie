@@ -17,6 +17,7 @@ const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { setActiveCatalog } = require('../src/models');
 const { profileSettings } = require('./helpers/profile-settings');
 const { setLogLevel } = require('../src/logging');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 setLogLevel('fatal');
 
@@ -28,6 +29,7 @@ afterEach(() => {
   ProviderFactory._registry.delete(FAKE);
   setActiveCatalog(null);
   if (savedCasesRoot === undefined) delete process.env.KL_CASES_ROOT; else process.env.KL_CASES_ROOT = savedCasesRoot;
+  closeOpenHistoryStores();
   while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
 });
 

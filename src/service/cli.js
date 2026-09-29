@@ -146,7 +146,9 @@ function withServiceCore(dataDir, io, fn) {
       chatDataDefaults: CHAT_DATA_DEFAULTS,
       onPathWritten: (p) => writtenPaths.push(p)
     });
-    const core = createCore({ ...ports, adminExecutors: NO_ADMIN_EXECUTORS });
+    // These commands run as root and never touch chats: opening the history
+    // store would create root-owned files and move chats out of chat-data.json.
+    const core = createCore({ ...ports, adminExecutors: NO_ADMIN_EXECUTORS, history: { open: false } });
     result = fn(core, ports);
   } catch (err) {
     restore();

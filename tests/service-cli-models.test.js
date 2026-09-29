@@ -73,6 +73,15 @@ describe('service CLI — models', () => {
     assert.strictEqual(await main(['models', 'nope', '--data-dir', dataDir()], t1), 2);
     assert.match(t1.err.join(''), /Usage: king-louie-service models status\|refresh/);
   });
+
+  it('never opens the history store or moves chats (it may run as root)', async () => {
+    const dir = dataDir();
+    const file = path.join(dir, 'chat-data.json');
+    fs.writeFileSync(file, JSON.stringify({ settings: SETTINGS, chats: [{ id: 'c1', title: 'Stays put', messages: [] }] }));
+    assert.strictEqual(await main(['profiles', 'list', '--data-dir', dir], io()), 0);
+    assert.ok(!fs.existsSync(path.join(dir, 'history.sqlite')));
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).chats.map((c) => c.id), ['c1']);
+  });
 });
 
 describe('service CLI — profiles', () => {

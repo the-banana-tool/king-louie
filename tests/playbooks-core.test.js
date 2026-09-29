@@ -15,10 +15,11 @@ const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { PlaybookManager, resolvePlaybookSettings } = require('../src/cases/playbooks');
 const { addSink } = require('../src/logging');
 const { loadServiceConfig } = require('../src/service/config');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const ROOT = path.join(__dirname, '..');
 const tempDirs = [];
-afterEach(() => { while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true }); });
+afterEach(() => { closeOpenHistoryStores(); while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true }); });
 
 function makeDeps(extra = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-pbcore-'));

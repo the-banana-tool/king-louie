@@ -20,6 +20,7 @@ const { createBridgeDispatcher, approvalsStatus } = require('../src/desktop-brid
 const { createConnection } = require('../src/desktop-bridge/connection');
 const { isLocalDesktopEvent, localDesktopDeviceId } = require('../src/core/origin');
 const { profileSettings, everyRole } = require('./helpers/profile-settings');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 const PROBE = 'KlTestBridgeProbe';
 let probeRuns = 0;
@@ -74,6 +75,7 @@ before(async () => {
 after(async () => {
   await core.shutdown().catch(() => {});
   if (realOpenAI) ProviderFactory.registerProvider('openai', realOpenAI);
+  closeOpenHistoryStores();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
