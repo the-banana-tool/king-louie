@@ -280,9 +280,9 @@ disabled MCP servers and working directory changes) prefer the facade and fall
 back to the legacy helpers in isolated tests. Canvas state
 IPC and case attach/create chat lookups now use the same `getChat`/`updateChat`
 facade seam. Workflow plan recovery now reads through `getChat({ messages:
-true })`, and model-choice chat header/profile/main-override paths can use
-facade-backed `getChat`/`updateChat` while keeping legacy helpers for older test
-harnesses. Core-internal lookups for the last assistant message and workflow
+true })`, and model-choice chat header/profile/main-override/deleted-profile
+paths can use facade-backed `getChat`/`listChats`/`updateChat` while keeping
+legacy helpers for older test harnesses. Core-internal lookups for the last assistant message and workflow
 parent chat messages now load the specific chat with messages through the same
 facade, and canvas tool persistence updates the active chat through
 `updateChat`. `chat:sendMessage` setup/lookback paths, `chat:speakLast`,

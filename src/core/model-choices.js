@@ -19,6 +19,7 @@ function createModelChoices({
   explainTarget,
   snapshotModels,
   getChats,
+  listChats,
   setChats,
   getChat,
   updateChat: updateChatFacade,
@@ -34,10 +35,12 @@ function createModelChoices({
   const findChat = (chatId) => {
     const chat = typeof getChat === 'function'
       ? getChat(chatId, { messages: true })
-      : getChats().find((c) => c.id === chatId);
+      : fullChats().find((c) => c.id === chatId);
     if (!chat) throw new Error('Chat not found.');
     return chat;
   };
+  const chatMetas = () => (typeof listChats === 'function' ? listChats({ messages: false }) : getChats());
+  const fullChats = () => getChats();
   const nameOf = (target) => {
     if (!target) return '(none)';
     const entry = catalog ? catalog.get(target.provider, target.model) : null;
@@ -49,7 +52,7 @@ function createModelChoices({
     if (typeof updateChatFacade === 'function') {
       return updateChatFacade(chatId, { ...patch, updatedAt: now });
     }
-    const next = getChats().map((c) => {
+    const next = fullChats().map((c) => {
       if (c.id !== chatId) return c;
       const out = { ...c, updatedAt: now };
       for (const [key, value] of Object.entries(patch)) {
@@ -161,7 +164,7 @@ function createModelChoices({
     const { defaultProfileId } = profiles.remove(id);
     const fallback = profiles.get(defaultProfileId)?.name || 'the default';
     const moved = { chats: [], cases: [] };
-    for (const chat of getChats()) {
+    for (const chat of chatMetas()) {
       if (chat.caseId || chat.profileId !== id) continue;
       updateChat(chat.id, { profileId: null });
       status(chat.id, `The profile ${victim.name} was deleted; this chat now uses the default profile (${fallback}).`);
@@ -180,7 +183,7 @@ function createModelChoices({
         continue;
       }
       moved.cases.push(meta.id);
-      for (const chat of getChats().filter((c) => c.caseId === meta.id)) {
+      for (const chat of chatMetas().filter((c) => c.caseId === meta.id)) {
         status(chat.id, `The profile ${victim.name} was deleted; this case now uses the default profile (${fallback}).`);
       }
     }

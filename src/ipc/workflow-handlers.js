@@ -14,7 +14,9 @@ function registerWorkflowHandlers(ipcMain, context) {
       if (chat && typeof chat === 'object') return chat;
     }
     const getChats = typeof context.getChats === 'function' ? context.getChats : null;
-    return getChats ? getChats().find((c) => c && c.id === chatId) || null : null;
+    if (!getChats) return null;
+    const chats = getChats();
+    return chats.find((c) => c && c.id === chatId) || null;
   };
 
   const mergePlanOptions = (payload) => {

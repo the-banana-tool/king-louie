@@ -3108,6 +3108,7 @@ function createCore(deps = {}) {
     explainTarget,
     snapshotModels,
     getChats,
+    listChats,
     setChats,
     createChat,
     replaceChat,

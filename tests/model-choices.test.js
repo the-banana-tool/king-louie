@@ -55,6 +55,10 @@ function setup({ chats = [], unusable = {}, cases = {}, facade = false } = {}) {
     explainTarget,
     snapshotModels,
     getChats: () => store,
+    listChats: (options = {}) => {
+      if (facade) facadeCalls.push({ method: 'listChats', options });
+      return options.messages === false ? store.map(({ messages: _messages, ...meta }) => meta) : store;
+    },
     setChats: (next) => { store = next; },
     ...(facade ? {
       getChat: (chatId, options) => {
@@ -216,6 +220,20 @@ describe('profiles', () => {
     assert.deepStrictEqual(statuses('c1'), ['The profile Cheap was deleted; this chat now uses the default profile (Work).']);
     assert.deepStrictEqual(statuses('c2'), ['The profile Cheap was deleted; this case now uses the default profile (Work).']);
     assert.deepStrictEqual(statuses('c3'), []);
+  });
+
+  it('uses facade metadata listing while moving chats and case chats off a deleted profile', async () => {
+    const { choices, facadeCalls } = setup({
+      chats: [{ id: 'c1', profileId: 'p-b' }, { id: 'c2', caseId: 'case-1' }, { id: 'c3' }],
+      cases: { 'case-1': { profile: 'p-b' } },
+      facade: true
+    });
+
+    const r = await choices.removeProfile('p-b');
+
+    assert.deepStrictEqual(r.moved, { chats: ['c1'], cases: ['case-1'] });
+    assert.ok(facadeCalls.some((call) => call.method === 'listChats' && call.options.messages === false));
+    assert.ok(!facadeCalls.some((call) => call.method === 'getChats'), 'removeProfile should not need full chat payloads when listChats exists');
   });
 
   it('views every profile entry with its usability, reasons and catalog facts', () => {

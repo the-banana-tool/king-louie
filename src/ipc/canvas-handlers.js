@@ -9,7 +9,8 @@ function registerCanvasHandlers(ipcMain, context = {}) {
       const chat = context.getChat(chatId, { messages: true });
       if (chat && typeof chat === 'object') return chat;
     }
-    return getChats().find(c => c.id === chatId) || null;
+    const chats = getChats();
+    return chats.find(c => c.id === chatId) || null;
   };
 
   const patchChat = (chatId, patch = {}) => {

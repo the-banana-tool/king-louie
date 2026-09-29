@@ -29,7 +29,8 @@ function registerCaseHandlers(ipcMain, context = {}) {
       const chat = context.getChat(chatId, { messages: true });
       if (chat && typeof chat === 'object') return chat;
     }
-    return context.getChats().find((c) => c.id === chatId) || null;
+    const chats = context.getChats();
+    return chats.find((c) => c.id === chatId) || null;
   };
 
   const patchChat = (chatId, patch = {}) => {
