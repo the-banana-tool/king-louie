@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { UsageError } = require('./errors');
+const { isInside } = require('./files');
 
 const SUBDIRS = Object.freeze(['private', 'sessions', 'questions', 'runs', 'reports']);
 
@@ -40,21 +41,40 @@ function resolveHome(env = process.env, { homedir } = {}) {
   const root = path.resolve(raw || path.join((homedir || os.homedir)(), '.longhaul'));
   for (const candidate of [root, nearestRealPath(root)]) {
     const tree = findGitWorkTree(candidate);
-    if (tree) {
-      throw new UsageError(
-        `LONGHAUL_HOME (${root}) is inside the git working tree at ${tree}. `
-        + 'Session data must never live in a repository; set LONGHAUL_HOME to a directory outside it.',
-        'HOME_IN_GIT_TREE'
-      );
-    }
+    if (tree) throw inGitTreeError('LONGHAUL_HOME', root, tree);
   }
   const home = { root };
   for (const d of SUBDIRS) home[d] = path.join(root, d);
   return home;
 }
 
+function inGitTreeError(what, where, tree) {
+  return new UsageError(
+    `${what} (${where}) is inside the git working tree at ${tree}. `
+    + 'Session data must never live in a repository; set LONGHAUL_HOME to a directory outside it.',
+    'HOME_IN_GIT_TREE'
+  );
+}
+
+// Every subdirectory is checked too, once it exists: one that is a junction or
+// symlink into a repository, or anywhere outside the home, is refused.
 function ensureDirs(home) {
   for (const d of SUBDIRS) fs.mkdirSync(home[d], { recursive: true });
+  const rootReal = nearestRealPath(home.root);
+  for (const d of SUBDIRS) {
+    const real = nearestRealPath(home[d]);
+    for (const candidate of [home[d], real]) {
+      const tree = findGitWorkTree(candidate);
+      if (tree) throw inGitTreeError(`LONGHAUL_HOME/${d}`, real, tree);
+    }
+    if (!isInside(real, rootReal)) {
+      throw new UsageError(
+        `LONGHAUL_HOME/${d} (${home[d]}) resolves to ${real}, outside LONGHAUL_HOME (${rootReal}). `
+        + 'Remove the link so the directory lives inside LONGHAUL_HOME.',
+        'HOME_IN_GIT_TREE'
+      );
+    }
+  }
   return home;
 }
 

@@ -52,6 +52,39 @@ describe('resolveHome', () => {
   });
 });
 
+describe('ensureDirs subdirectory checks', () => {
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+
+  it('refuses a subdirectory that is a junction or symlink into a git working tree', () => {
+    const repo = tmpDir();
+    fs.mkdirSync(path.join(repo, '.git'));
+    fs.mkdirSync(path.join(repo, 'inner'));
+    const root = path.join(tmpDir(), 'lh');
+    fs.mkdirSync(root);
+    fs.symlinkSync(path.join(repo, 'inner'), path.join(root, 'sessions'), linkType);
+    assert.throws(() => ensureDirs(resolveHome({ LONGHAUL_HOME: root })), inGitTree);
+  });
+
+  it('refuses a subdirectory whose real path is outside the home', () => {
+    const elsewhere = tmpDir();
+    const root = path.join(tmpDir(), 'lh');
+    fs.mkdirSync(root);
+    fs.symlinkSync(elsewhere, path.join(root, 'runs'), linkType);
+    assert.throws(() => ensureDirs(resolveHome({ LONGHAUL_HOME: root })), (err) => err.code === 'HOME_IN_GIT_TREE' && /outside/.test(err.message));
+  });
+
+  it('the CLI exits 2 for such a home', async () => {
+    const repo = tmpDir();
+    fs.mkdirSync(path.join(repo, '.git'));
+    const root = path.join(tmpDir(), 'lh');
+    fs.mkdirSync(root);
+    fs.symlinkSync(repo, path.join(root, 'questions'), linkType);
+    const stderr = sink();
+    assert.strictEqual(await main(['home'], { stdout: sink(), stderr, env: { LONGHAUL_HOME: root } }), 2);
+    assert.match(stderr.text, /git working tree/);
+  });
+});
+
 describe('longhaul CLI skeleton', () => {
   it('prints usage with no arguments and exits 0', async () => {
     const stdout = sink();
