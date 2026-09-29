@@ -58,6 +58,21 @@ describe('history search', () => {
     assert.deepStrictEqual(t.store.searchText('"lib/app.js"', {}), [], 'the phrase needs the whole path');
   });
 
+  it('keeps a leading or trailing dash: a flag like --user-data-dir is one token', () => {
+    const f = openTempStore();
+    try {
+      seedChat(f.store, { messages: [
+        { sender: 'user', text: 'Launch it with --user-data-dir set to a temp folder.' },
+        { sender: 'assistant', text: 'The user data folder is where the profile lives.' }
+      ] });
+      assert.strictEqual(ftsQuery('--user-data-dir?'), '"--user-data-dir?"');
+      const hits = f.store.searchText('what did we pass to --user-data-dir?', {});
+      assert.strictEqual(f.store.chunks(hits.map((h) => h.chunkId))[0].messageId, 'chat-1-m1');
+    } finally {
+      f.cleanup();
+    }
+  });
+
   it('never throws on FTS syntax, punctuation or unbalanced quotes', () => {
     for (const q of ['"', '*', 'NEAR(', 'col:x', 'what" is', '...', '   ', 'OR AND NOT', '^4417', '(gate']) {
       assert.doesNotThrow(() => t.store.searchText(q, {}), q);

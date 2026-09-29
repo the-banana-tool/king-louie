@@ -94,12 +94,14 @@ function clearBackfill(db) {
 
 // FTS5 query from user text (spec §6.3 step 1, §15): quoted phrases stay
 // phrases, every other term is quoted (so AND/OR/NEAR/*/^/: are literals),
-// terms are OR-ed. Leading/trailing . - / are trimmed from unquoted terms so
-// "config.yaml." at the end of a sentence is the phrase "config.yaml". The
+// terms are OR-ed. Leading/trailing . and / are trimmed from unquoted terms
+// so "config.yaml." at the end of a sentence is the phrase "config.yaml". The
 // tokenizer treats only _ and - as token characters: . and / separate tokens,
 // so a quoted "config.yaml" or "src/app.js" is a phrase of adjacent tokens
 // (config, yaml), and a bare app.js matches wherever those tokens are adjacent.
-const EDGE = /^[.\-/]+|[.\-/]+$/g;
+// A '-' is never trimmed: it is part of the token, so "--user-data-dir"
+// trimmed to "user-data-dir" would no longer match the stored flag.
+const EDGE = /^[./]+|[./]+$/g;
 function ftsQuery(text) {
   const parts = [];
   const re = /"([^"]*)"|(\S+)/g;
