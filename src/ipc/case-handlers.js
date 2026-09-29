@@ -24,6 +24,25 @@ const bridgeOriginFor = (chat) => {
 };
 
 function registerCaseHandlers(ipcMain, context = {}) {
+  const chatById = (chatId) => {
+    if (typeof context.getChat === 'function') {
+      const chat = context.getChat(chatId, { messages: true });
+      if (chat && typeof chat === 'object') return chat;
+    }
+    return context.getChats().find((c) => c.id === chatId) || null;
+  };
+
+  const patchChat = (chatId, patch = {}) => {
+    if (typeof context.updateChat === 'function') {
+      const updated = context.updateChat(chatId, patch);
+      if (updated && typeof updated === 'object') return updated;
+    }
+    const chats = context.getChats();
+    const updated = chats.map((c) => (c.id === chatId ? { ...c, ...(patch || {}) } : c));
+    context.setChats(updated);
+    return updated.find((c) => c.id === chatId) || null;
+  };
+
   const runtime = () => {
     const rt = typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
     if (!rt) throw new Error('Cases are not available in this host.');
@@ -31,12 +50,9 @@ function registerCaseHandlers(ipcMain, context = {}) {
   };
 
   const attach = (chatId, caseId) => {
-    const chats = context.getChats();
-    if (!chats.some((c) => c.id === chatId)) throw new Error('Chat not found.');
+    if (!chatById(chatId)) throw new Error('Chat not found.');
     const now = new Date().toISOString();
-    const updated = chats.map((c) => (c.id === chatId ? { ...c, caseId: caseId || null, updatedAt: now } : c));
-    context.setChats(updated);
-    return updated.find((c) => c.id === chatId);
+    return patchChat(chatId, { caseId: caseId || null, updatedAt: now });
   };
 
   ipcMain.handle(IPC.CASE_LIST, wrapHandler(IPC.CASE_LIST, async () => (
@@ -53,7 +69,7 @@ function registerCaseHandlers(ipcMain, context = {}) {
     if (type !== undefined && (typeof type !== 'string' || !type.trim())) return { ok: false, error: 'type must be a non-empty string.' };
     if (objective !== undefined && (typeof objective !== 'string' || !objective.trim())) return { ok: false, error: 'objective must be a non-empty string.' };
     if (force !== undefined && typeof force !== 'boolean') return { ok: false, error: 'force must be true or false.' };
-    if (chatId && !context.getChats().some((c) => c.id === chatId)) return { ok: false, error: 'Chat not found.' };
+    if (chatId && !chatById(chatId)) return { ok: false, error: 'Chat not found.' };
     // Cases stage 6: the owner's chosen playbooks are checked, fetched and
     // validated before the case exists; any failure refuses the create. The
     // type comes from the playbooks when the form gives none.
@@ -81,7 +97,7 @@ function registerCaseHandlers(ipcMain, context = {}) {
       // remote sender stamped sender: 'user'. Attaching a case would let
       // those messages satisfy the quote-verified owner-message check
       // (chat-handlers.js), so a case may never be attached to one.
-      const chat = context.getChats().find((c) => c.id === chatId);
+      const chat = chatById(chatId);
       const origin = bridgeOriginFor(chat);
       if (origin) throw new Error(`A ${origin} chat cannot be attached to a case; its messages are not verified as the owner's.`);
     }

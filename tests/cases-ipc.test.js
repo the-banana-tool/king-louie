@@ -10,7 +10,7 @@ const { CaseRuntime } = require('../src/cases');
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 
-function setup({ withRuntime = true, chats: initialChats = [{ id: 'chat-1', title: 'Chat', messages: [] }] } = {}) {
+function setup({ withRuntime = true, chats: initialChats = [{ id: 'chat-1', title: 'Chat', messages: [] }], facade = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cases-ipc-'));
   dirs.push(root);
   const runtime = new CaseRuntime({ root });
@@ -20,10 +20,19 @@ function setup({ withRuntime = true, chats: initialChats = [{ id: 'chat-1', titl
     getChats: () => chats,
     setChats: (next) => { chats = next; }
   };
+  if (facade) {
+    context.calls = [];
+    context.getChat = (chatId) => chats.find((c) => c.id === chatId) || null;
+    context.updateChat = (chatId, patch) => {
+      context.calls.push({ chatId, patch });
+      chats = chats.map((chat) => (chat.id === chatId ? { ...chat, ...patch } : chat));
+      return chats.find((chat) => chat.id === chatId) || null;
+    };
+  }
   const handlers = new Map();
   registerCaseHandlers({ handle: (ch, fn) => handlers.set(ch, fn), on: () => {} }, context);
   const call = (channel, payload) => handlers.get(channel)({}, payload);
-  return { runtime, call, chats: () => chats };
+  return { runtime, call, chats: () => chats, context };
 }
 
 describe('case IPC', () => {
@@ -49,6 +58,18 @@ describe('case IPC', () => {
     assert.match(badCase.error, /Case not found/);
     const badChat = await call(IPC.CASE_ATTACH, { chatId: 'nope', caseId: c.id });
     assert.strictEqual(badChat.ok, false);
+  });
+
+  it('attaches cases through the history facade when available', async () => {
+    const { call, context } = setup({ facade: true });
+    const { case: c } = await call(IPC.CASE_CREATE, { title: 'Facade case' });
+
+    const attached = await call(IPC.CASE_ATTACH, { chatId: 'chat-1', caseId: c.id });
+
+    assert.strictEqual(attached.chat.caseId, c.id);
+    assert.deepStrictEqual(context.calls.map((call) => [call.chatId, Object.keys(call.patch).sort()]), [
+      ['chat-1', ['caseId', 'updatedAt']]
+    ]);
   });
 
   it('refuses to attach a case to a bridge chat (F5)', async () => {
