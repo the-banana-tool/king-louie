@@ -12,6 +12,7 @@ const TogetherProvider = require('./together-provider');
 const FireworksProvider = require('./fireworks-provider');
 const CohereProvider = require('./cohere-provider');
 const CopilotProvider = require('./copilot-provider');
+const { PROVIDER_KEY_ENV, keyFromEnv } = require('./env-keys');
 
 class ProviderFactory {
   static _registry = new Map();
@@ -42,6 +43,26 @@ class ProviderFactory {
 
   static createProvider(providerType, apiKey, options = {}) {
     return ProviderFactory.create(providerType, apiKey, options);
+  }
+
+  // A provider for a host with no vault (the LongHaul CLI, scripts): the key
+  // comes from the environment (src/providers/env-keys.js). Ollama needs none.
+  static fromEnv(providerType, { env = process.env, options = {} } = {}) {
+    const key = (providerType || '').toLowerCase();
+    if (key === 'ollama') return ProviderFactory.create(key, '', options);
+    const names = PROVIDER_KEY_ENV[key];
+    if (!names) {
+      const err = new Error(`No environment variable is known for provider "${providerType}". Known: ${Object.keys(PROVIDER_KEY_ENV).join(', ')}, ollama`);
+      err.code = 'UNKNOWN_PROVIDER';
+      throw err;
+    }
+    const found = keyFromEnv(key, env);
+    if (!found) {
+      const err = new Error(`No API key for ${key} in the environment: set ${names.join(' or ')}.`);
+      err.code = 'NO_PROVIDER_KEY';
+      throw err;
+    }
+    return ProviderFactory.create(key, found.value, options);
   }
 }
 

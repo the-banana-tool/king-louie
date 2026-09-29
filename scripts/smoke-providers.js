@@ -10,21 +10,7 @@ const ProviderFactory = require('../src/providers/provider-factory');
 const { KL_PROVIDERS } = require('../src/models/provider-ids');
 const { runProviderChecks } = require('./lib/provider-checks');
 
-const KEY_ENV = Object.freeze({
-  openai: ['OPENAI_API_KEY'],
-  anthropic: ['ANTHROPIC_API_KEY'],
-  gemini: ['GEMINI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'],
-  groq: ['GROQ_API_KEY'],
-  mistral: ['MISTRAL_API_KEY'],
-  openrouter: ['OPENROUTER_API_KEY'],
-  xai: ['XAI_API_KEY'],
-  deepseek: ['DEEPSEEK_API_KEY'],
-  qwen: ['DASHSCOPE_API_KEY'],
-  together: ['TOGETHER_API_KEY'],
-  fireworks: ['FIREWORKS_API_KEY'],
-  cohere: ['COHERE_API_KEY', 'CO_API_KEY'],
-  copilot: ['GITHUB_TOKEN']
-});
+const { PROVIDER_KEY_ENV: KEY_ENV } = require('../src/providers/env-keys');
 
 // Which providers to check, from the environment. Pure, for the tests.
 function selectTargets(env = process.env) {
