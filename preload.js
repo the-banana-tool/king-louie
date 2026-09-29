@@ -923,6 +923,19 @@ contextBridge.exposeInMainWorld(
       getSession: () => ipcRenderer.invoke('usage:getSession'),
       getDaily: (payload) => ipcRenderer.invoke('usage:getDaily', payload)
     },
+    history: {
+      excerpts: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId', { minLength: 1 });
+        return ipcRenderer.invoke('history:excerpts', payload);
+      },
+      search: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId', { minLength: 1 });
+        validateString(payload.query, 'query', { minLength: 1 });
+        return ipcRenderer.invoke('history:search', payload);
+      }
+    },
     models: {
       status: () => ipcRenderer.invoke('models:status'),
       refreshCatalog: () => ipcRenderer.invoke('models:refreshCatalog'),

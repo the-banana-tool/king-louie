@@ -3295,7 +3295,10 @@ function renderChatMessages() {
       runningLlmTotals: callTotals ? { ...runningTotals } : null,
       format: message?.format,
       images: message?.images,
-      documents: message?.documents
+      documents: message?.documents,
+      context: message?.context,
+      seq: message?.seq,
+      chatId: activeChat.id
     });
   });
 
@@ -8174,6 +8177,70 @@ function renderAssistantMessageContent(messageContent, text, format = 'markdown'
   enhanceRenderedContent(messageContent);
 }
 
+/* --- History H2: the recall line under a reply, and its excerpt drawer --- */
+function formatCompactTokens(value = 0) {
+  const n = Number(value) || 0;
+  const short = (x, unit) => `${x >= 10 ? Math.round(x) : Math.round(x * 10) / 10}${unit}`;
+  if (n >= 1e6) return short(n / 1e6, 'M');
+  if (n >= 1e3) return short(n / 1e3, 'K');
+  return String(Math.round(n));
+}
+
+function recallLineText(context) {
+  const count = Number(context?.recalledExcerpts) || 0;
+  const recalled = Number(context?.estTokens?.recalled) || 0;
+  const full = Number(context?.fullHistoryEstTokens) || 0;
+  return `recalled ${count} ${count === 1 ? 'excerpt' : 'excerpts'} · about ${formatCompactTokens(recalled)} tokens · from ${formatCompactTokens(full)} tokens of history · BM25`;
+}
+
+function renderRecallLine(messageContent, context, { chatId, seq } = {}) {
+  const line = document.createElement('div');
+  line.className = 'message-recall-line';
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'message-recall-toggle';
+  toggle.textContent = recallLineText(context);
+  const drawer = document.createElement('div');
+  drawer.className = 'recall-drawer';
+  drawer.hidden = true;
+  const canOpen = (Number(context?.recalledExcerpts) || 0) > 0 && typeof chatId === 'string' && Number.isInteger(seq);
+  toggle.disabled = !canOpen;
+  let loaded = false;
+  toggle.addEventListener('click', async () => {
+    if (!canOpen) return;
+    drawer.hidden = !drawer.hidden;
+    if (drawer.hidden || loaded) return;
+    loaded = true;
+    drawer.textContent = 'Loading excerpts…';
+    try {
+      const result = await window.electron.history.excerpts({ chatId, seq });
+      drawer.textContent = '';
+      if (!result || result.ok === false) {
+        drawer.textContent = result?.error || 'Excerpts are not available.';
+        loaded = false;
+        return;
+      }
+      for (const excerpt of result.excerpts || []) {
+        const item = document.createElement('div');
+        item.className = 'recall-excerpt';
+        const header = document.createElement('div');
+        header.className = 'recall-excerpt-header';
+        header.textContent = excerpt.header;
+        const body = document.createElement('pre');
+        body.className = 'recall-excerpt-text';
+        body.textContent = excerpt.text;
+        item.append(header, body);
+        drawer.appendChild(item);
+      }
+    } catch (err) {
+      drawer.textContent = `Excerpts could not be loaded: ${err.message}`;
+      loaded = false;
+    }
+  });
+  line.append(toggle, drawer);
+  messageContent.appendChild(line);
+}
+
 function addMessage(sender, text, metadata = {}) {
   const messageDiv = document.createElement('div');
   messageDiv.className = `message ${sender}`;
@@ -8220,6 +8287,11 @@ function addMessage(sender, text, metadata = {}) {
     metricsDiv.appendChild(callSpan);
 
     messageContent.appendChild(metricsDiv);
+  }
+
+  // Recall provenance (history spec §7): what this reply was shown.
+  if (sender === 'assistant' && metadata?.context) {
+    renderRecallLine(messageContent, metadata.context, { chatId: metadata.chatId, seq: metadata.seq });
   }
 
   messageDiv.appendChild(messageContent);

@@ -89,6 +89,10 @@ module.exports = {
   USAGE_GET_DAILY: 'usage:getDaily',
 
   // Model catalog and availability (spec 2026-09-27, stage M1).
+  // Recall stage H2 (history spec 2026-09-25 §7, §12).
+  HISTORY_EXCERPTS: 'history:excerpts',
+  HISTORY_SEARCH: 'history:search',
+
   MODELS_STATUS: 'models:status',
   MODELS_REFRESH_CATALOG: 'models:refreshCatalog',
   MODELS_TEST_ALL: 'models:testAll',

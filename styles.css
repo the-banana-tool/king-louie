@@ -1062,6 +1062,48 @@ body {
   font-family: var(--font-mono);
 }
 
+/* --- History recall line ---------------------------------- */
+.message-recall-line {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.message-recall-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.message-recall-toggle:disabled {
+  cursor: default;
+}
+
+.recall-drawer {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.recall-excerpt-header {
+  font-family: var(--font-mono);
+  margin-top: 6px;
+}
+
+.recall-excerpt-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 2px 0 0;
+}
+
 /* --- Tool events – compact inline -------------------------- */
 
 /* Single compact tool row (collapsed state) */

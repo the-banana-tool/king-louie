@@ -23,7 +23,9 @@ const PROXIED_DOMAINS = Object.freeze([
   'contactPolicy',
   'presence',
   // Models stage M1: catalog status, usable models, provider tests.
-  'models'
+  'models',
+  // History stage H2: the recall line's excerpts and history search.
+  'history'
 ]);
 const PROXIED_CHANNELS = Object.freeze(['agent:userResponse']);
 
