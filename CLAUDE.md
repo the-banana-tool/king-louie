@@ -149,6 +149,9 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   `chunks` another way. The tokenizer is `unicode61 tokenchars '_-'`: '.' and
   '/' separate tokens, so "app.js" matches a stored "src/app.js". A store
   upgraded from schema 1 backfills chunks on open, resumably.
+- Tools in `UNINDEXED_TOOLS` (`chunker.js`; `Vault`) make no chunks, so their
+  secrets never reach search or recall; the tail's tool lines and ReadHistory
+  show such a call's action and key only, and none of its result.
 - Each turn, `ContextBuilder.build` gives the tail and the recalled block; the
   send path puts the block, the case orientation and the memory context in
   `options.systemPromptDynamic`, which Anthropic sends uncached after the

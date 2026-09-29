@@ -29,7 +29,8 @@ function senderLabel(chunk) {
   switch (chunk.sender) {
     case 'toolUse': return `${chunk.toolName || 'tool'} call`;
     case 'toolResult': return `${chunk.toolName || 'tool'} result`;
-    case 'status': return 'compaction summary';
+    // A chunk (kind 'summary') or a message (ReadHistory) can be labelled.
+    case 'status': return chunk.kind === 'summary' || (chunk.meta && chunk.meta.compaction === true) ? 'compaction summary' : 'status';
     default: return chunk.sender || chunk.kind || 'message';
   }
 }
@@ -93,4 +94,4 @@ function formatRecalledBlock(excerpts) {
   ].join('\n');
 }
 
-module.exports = { RECALLED_PREAMBLE, formatAge, formatExcerpts, formatRecalledBlock };
+module.exports = { RECALLED_PREAMBLE, formatAge, senderLabel, formatExcerpts, formatRecalledBlock };

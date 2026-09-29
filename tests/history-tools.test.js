@@ -96,6 +96,22 @@ describe('history tools', () => {
     assert.ok(out.text.includes('stdout:\ngate: 4417 for the side entrance\nfence: forty meters along the north edge'));
   });
 
+  it('ReadHistory reads back a text-only tool result as the chunker indexes it', async () => {
+    const f = openTempStore();
+    try {
+      seedChat(f.store, { messages: [
+        { sender: 'toolUse', toolName: 'WebFetch', parameters: { url: 'https://errands.example.com/lot' } },
+        { sender: 'toolResult', toolName: 'WebFetch', text: 'The lot page lists the north fence at forty meters.' }
+      ] });
+      const own = { ...history, chatId: 'chat-1', store: f.store };
+      const out = await read({ fromSeq: 1, toSeq: 2 }, { history: own });
+      assert.match(out.text, /\[#2 · WebFetch result · [^\]]+\]\nThe lot page lists the north fence at forty meters\./);
+      assert.ok(f.store.searchText('north fence', {}).length > 0, 'the chunker indexed the same text');
+    } finally {
+      f.cleanup();
+    }
+  });
+
   it('ReadHistory stops at readHistoryMaxTokens with a note saying where to continue', async () => {
     settings = { readHistoryMaxTokens: 40 };
     try {

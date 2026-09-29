@@ -6,7 +6,8 @@
 const { Tool } = require('../tool-schema');
 const { mergeHistorySettings } = require('../../history/settings');
 const { searchHistoryExcerpts } = require('../../history/search');
-const { renderToolResult } = require('../../history/chunker');
+const { visibleToolParams, toolResultText } = require('../../history/chunker');
+const { senderLabel } = require('../../history/excerpts');
 const { TokenEstimator } = require('../../history/token-estimator');
 
 const KINDS = ['user', 'assistant', 'tool_use', 'tool_result', 'attachment', 'summary'];
@@ -23,22 +24,18 @@ function settingsOf(h) {
   return mergeHistorySettings((all || {}).history);
 }
 
-function label(m) {
-  if (m.sender === 'toolUse') return `${m.toolName || 'tool'} call`;
-  if (m.sender === 'toolResult') return `${m.toolName || 'tool'} result`;
-  return m.sender;
-}
-
 function renderForRead(m) {
   let body;
-  if (m.sender === 'toolUse') body = JSON.stringify(m.parameters || {}, null, 2);
-  else if (m.sender === 'toolResult') body = renderToolResult(m.result);
+  // The text the chunker indexes; an unindexed tool (Vault) shows its
+  // action and key, and no result.
+  if (m.sender === 'toolUse') body = JSON.stringify(visibleToolParams(m), null, 2);
+  else if (m.sender === 'toolResult') body = toolResultText(m);
   else body = String(m.text || '');
   const extras = [
     ...(Array.isArray(m.images) ? m.images : []).map((i) => `[image${i && i.name ? `: ${i.name}` : ''}]`),
     ...(Array.isArray(m.documents) ? m.documents : []).map((d) => `[document${d && d.name ? `: ${d.name}` : ''}]`)
   ];
-  return [`[#${m.seq} · ${label(m)} · ${m.timestamp || 'unknown time'}]`, body, ...extras].filter((s) => s !== '').join('\n');
+  return [`[#${m.seq} · ${senderLabel(m)} · ${m.timestamp || 'unknown time'}]`, body, ...extras].filter((s) => s !== '').join('\n');
 }
 
 const searchHistoryTool = new Tool({

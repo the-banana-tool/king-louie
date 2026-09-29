@@ -9,6 +9,13 @@ const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
 // Parameter keys that make the one-line summary, in order of preference:
 // the command (shell tools), the path (file tools), the query (search tools).
 const SUMMARY_KEYS = ['command', 'file_path', 'path', 'notebook_path', 'query', 'pattern', 'url'];
+// Tools whose calls and results are never chunked (so never in the full-text
+// index, recall, SearchHistory or excerpts), and whose calls are rendered for
+// the model as their action and key only, their results as nothing: their
+// parameters and results hold secrets. The one place to add such a tool.
+const UNINDEXED_TOOLS = new Set(['Vault']);
+const VISIBLE_UNINDEXED_PARAMS = ['action', 'key'];
+const isUnindexedTool = (message) => Boolean(message && UNINDEXED_TOOLS.has(message.toolName));
 
 function sizes(options = {}) {
   const targetChars = Number.isFinite(options.targetChars) && options.targetChars > 0 ? options.targetChars : CHUNK_DEFAULTS.targetChars;
@@ -69,9 +76,23 @@ function safeJson(value, indent) {
   }
 }
 
+// The parameters of a tool call as the model may see them again: all of
+// them, or only the action and key of an unindexed tool.
+function visibleToolParams(message = {}) {
+  const params = message && message.parameters && typeof message.parameters === 'object' ? message.parameters : {};
+  if (!isUnindexedTool(message)) return params;
+  const out = {};
+  for (const key of VISIBLE_UNINDEXED_PARAMS) if (params[key] !== undefined) out[key] = params[key];
+  return out;
+}
+
 function toolUseSummary(message = {}) {
   const name = String((message && message.toolName) || 'tool');
-  const params = message && message.parameters && typeof message.parameters === 'object' ? message.parameters : {};
+  const params = visibleToolParams(message);
+  if (isUnindexedTool(message)) {
+    const shown = VISIBLE_UNINDEXED_PARAMS.map((k) => params[k]).filter((v) => typeof v === 'string' && v.trim());
+    return shown.length ? `${name}: ${oneLine(shown.join(' '))}` : name;
+  }
   for (const key of SUMMARY_KEYS) {
     if (typeof params[key] === 'string' && params[key].trim()) return `${name}: ${oneLine(params[key])}`;
   }
@@ -108,10 +129,19 @@ function renderToolResult(result) {
   return parts.join('\n\n');
 }
 
+// A toolResult message's text as the chunker indexes it and ReadHistory
+// shows it: its result, or its text when it has none; nothing for an
+// unindexed tool.
+function toolResultText(message = {}) {
+  if (isUnindexedTool(message)) return '';
+  return renderToolResult(message.result ?? message.text);
+}
+
 function chunkMessage(message, options = {}) {
   const m = message && typeof message === 'object' ? message : {};
   const opts = sizes(options);
   const out = [];
+  if ((m.sender === 'toolUse' || m.sender === 'toolResult') && isUnindexedTool(m)) return out;
   const add = (kind, texts) => {
     for (const text of texts) out.push({ idx: out.length, kind, text });
   };
@@ -128,7 +158,7 @@ function chunkMessage(message, options = {}) {
       }
       break;
     case 'toolResult':
-      add('tool_result', splitProse(renderToolResult(m.result !== undefined ? m.result : m.text), opts));
+      add('tool_result', splitProse(toolResultText(m), opts));
       break;
     case 'status':
       // Only an imported compaction summary (owner decision 2026-09-29).
@@ -147,4 +177,7 @@ function chunkMessage(message, options = {}) {
   return out;
 }
 
-module.exports = { CHUNK_DEFAULTS, splitProse, toolUseSummary, renderToolResult, chunkMessage };
+module.exports = {
+  CHUNK_DEFAULTS, UNINDEXED_TOOLS, isUnindexedTool, splitProse, visibleToolParams, toolUseSummary,
+  renderToolResult, toolResultText, chunkMessage
+};
