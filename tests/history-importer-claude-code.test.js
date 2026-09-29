@@ -44,6 +44,23 @@ describe('claude-code-jsonl parse', () => {
     assert.deepStrictEqual(messages[4].meta, { compactBoundary: { trigger: 'manual', preTokens: 1200, postTokens: 300 } });
   });
 
+  it('honours isCompactSummary whatever the content shape (string or text blocks)', async () => {
+    const records = cc.claudeCodeRecords().map((r) => (r && r.uuid === 'c-2'
+      ? { ...r, message: { role: 'user', content: [{ type: 'text', text: 'Summary: the build host' }, { type: 'text', text: 'is build-7.example.com.' }] } }
+      : r));
+    const { messages, compactions } = await importer.parse(cc.writeClaudeCodeFixture(tmpDir(), 'blocks.jsonl', { records }));
+    assert.deepStrictEqual(compactions, [
+      { atSeq: 5, summarySeq: 6, windowFromSeq: 1, windowToSeq: 4 },
+      { atSeq: 13, summarySeq: 14, windowFromSeq: 7, windowToSeq: 12 }
+    ]);
+    for (const seq of [6, 14]) {
+      assert.strictEqual(messages[seq - 1].sender, 'status', `#${seq}`);
+      assert.deepStrictEqual(messages[seq - 1].meta, { compaction: true });
+    }
+    assert.strictEqual(messages[13].text, 'Summary: the build host\nis build-7.example.com.');
+    assert.ok(!messages.some((m) => m.sender === 'user' && /Summary:/.test(m.text)), 'no summary imported as a user message');
+  });
+
   it('turns harness-injected isMeta text into a status message', async () => {
     const { messages } = await importer.parse(cc.writeClaudeCodeFixture(tmpDir()));
     assert.deepStrictEqual(messages[6].meta, { claudeCode: { isMeta: true } });

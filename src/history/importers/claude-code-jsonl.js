@@ -8,7 +8,7 @@ const path = require('path');
 const { readJsonlLines } = require('./jsonl-lines');
 
 const KIND = 'claude-code-jsonl';
-const VERSION = 1;
+const VERSION = 2; // 2: array-content compact summaries are compactions
 const RAW_MAX_CHARS = 4000;
 // Harness bookkeeping that carries no conversation.
 const SKIPPED_TYPES = new Set([
@@ -117,6 +117,17 @@ class ClaudeCodeParser {
       return;
     }
     if (!Array.isArray(content)) { this.unmapped(rec, 0, 'user', rec); return; }
+    // A compact summary is a compaction whatever its content shape: its text
+    // blocks joined, never a message from the user.
+    if (rec.isCompactSummary === true) {
+      const texts = [];
+      for (const block of content) {
+        if (block?.type === 'text') texts.push(String(block.text ?? ''));
+        else this.skip(`compact-summary:${block?.type ?? typeof block}`);
+      }
+      this.summary(rec, texts.join('\n'));
+      return;
+    }
     content.forEach((block, i) => {
       if (block?.type === 'text') this.userText(rec, i, String(block.text ?? ''));
       else if (block?.type === 'tool_result') {

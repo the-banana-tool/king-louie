@@ -18,6 +18,19 @@ async function run(argv, env) {
 }
 
 describe('longhaul import', () => {
+  it('counts an array-content compact summary as a compaction, not a message from the user', async () => {
+    const { env, root } = tmpHome();
+    const records = cc.claudeCodeRecords().map((r) => (r && (r.uuid === 'c-1' || r.uuid === 'c-2')
+      ? { ...r, message: { role: 'user', content: [{ type: 'text', text: r.message.content }] } }
+      : r));
+    const file = cc.writeClaudeCodeFixture(path.join(root, 'private'), 'blocks.jsonl', { records });
+    const r = await run(['import', file, '--id', 'B'], env);
+    assert.strictEqual(r.code, 0, r.stderr);
+    const s = await loadSession(path.join(root, 'sessions', 'B'));
+    assert.strictEqual(s.manifest.compactions.length, 2);
+    assert.strictEqual(s.manifest.humanMessages, 3);
+  });
+
   it('imports a file dropped in private/ as private, with its manifest', async () => {
     const { env, root } = tmpHome();
     const file = cc.writeClaudeCodeFixture(path.join(root, 'private'), 'session-x.jsonl');
