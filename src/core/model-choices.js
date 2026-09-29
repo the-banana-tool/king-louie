@@ -23,6 +23,7 @@ function createModelChoices({
   setChats,
   getChat,
   updateChat: updateChatFacade,
+  updateChatsWhere,
   appendMessageToChat,
   getCaseRuntime = () => null,
   kingLouie = null,
@@ -51,6 +52,9 @@ function createModelChoices({
     const now = new Date().toISOString();
     if (typeof updateChatFacade === 'function') {
       return updateChatFacade(chatId, { ...patch, updatedAt: now });
+    }
+    if (typeof updateChatsWhere === 'function') {
+      return updateChatsWhere((c) => c.id === chatId, () => ({ ...patch, updatedAt: now }))[0] || null;
     }
     const next = fullChats().map((c) => {
       if (c.id !== chatId) return c;

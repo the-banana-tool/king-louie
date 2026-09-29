@@ -53,4 +53,19 @@ describe('JsonChatHistoryStore', () => {
 
     assert.deepStrictEqual(history.deleteChat('c2').map((c) => c.id), ['c1']);
   });
+
+  it('upserts and bulk-updates chats through facade helpers', () => {
+    const store = memoryStore({ chats: [{ id: 'c1', title: 'One', profileId: 'p1', messages: [] }] });
+    const history = new JsonChatHistoryStore({ store });
+
+    assert.strictEqual(history.upsertChat({ id: 'c2', title: 'Two', messages: [] }).id, 'c2');
+    assert.deepStrictEqual(store.data.chats.map((c) => c.id), ['c2', 'c1']);
+    assert.strictEqual(history.upsertChat({ id: 'c1', title: 'One imported', messages: [{ id: 'm1' }] }).title, 'One imported');
+
+    const changed = history.updateChatsWhere((chat) => chat.id === 'c1', () => ({ profileId: null, updatedAt: 'now' }));
+
+    assert.deepStrictEqual(changed.map((c) => c.id), ['c1']);
+    assert.strictEqual(store.data.chats.find((c) => c.id === 'c1').profileId, null);
+    assert.strictEqual(store.data.chats.find((c) => c.id === 'c1').updatedAt, 'now');
+  });
 });

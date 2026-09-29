@@ -263,6 +263,8 @@ function createCore(deps = {}) {
   const updateChat = (chatId, patch = {}) => historyStore.updateChat(chatId, patch);
   const createChat = (chat, options = {}) => historyStore.createChat(chat, options);
   const replaceChat = (chatId, chat) => historyStore.replaceChat(chatId, chat);
+  const upsertChat = (chat, options = {}) => historyStore.upsertChat(chat, options);
+  const updateChatsWhere = (predicate, patcher) => historyStore.updateChatsWhere(predicate, patcher);
   const deleteChat = (chatId) => historyStore.deleteChat(chatId);
 
   // F5 re-review: a chat a Telegram/Discord bridge created before the
@@ -3218,6 +3220,8 @@ function createCore(deps = {}) {
     updateChat,
     createChat,
     replaceChat,
+    upsertChat,
+    updateChatsWhere,
     deleteChat,
     getActiveChatId,
     setActiveChatId,

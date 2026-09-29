@@ -273,15 +273,15 @@ renderer contract change.
 Implementation note, 2026-09-29 H1 seam: `src/history/` now contains a
 `JsonChatHistoryStore` facade over the existing `chat-data.json` `chats` array.
 `createCore` exposes `historyStore`, `listChats`, `getChat`, `createChat`,
-`replaceChat`, `deleteChat` and `updateChat` while preserving `getChats`,
-`setChats` and `appendMessageToChat` for current call sites. `chat:load`,
+`replaceChat`, `upsertChat`, `updateChatsWhere`, `deleteChat` and `updateChat`
+while preserving `getChats`, `setChats` and `appendMessageToChat` for current call sites. `chat:load`,
 `chat:get` and simple chat IPC mutations (create, delete, rename, mode toggles,
 disabled MCP servers and working directory changes) prefer the facade and fall
 back to the legacy helpers in isolated tests. Canvas state
 IPC and case attach/create chat lookups now use the same `getChat`/`updateChat`
 facade seam. Workflow plan recovery now reads through `getChat({ messages:
 true })`, and model-choice chat header/profile/main-override/deleted-profile
-paths can use facade-backed `getChat`/`listChats`/`updateChat` while keeping
+paths can use facade-backed `getChat`/`listChats`/`updateChat`/`updateChatsWhere` while keeping
 legacy helpers for older test harnesses. Core-internal lookups for the last assistant message and workflow
 parent chat messages now load the specific chat with messages through the same
 facade, and canvas tool persistence updates the active chat through
@@ -289,7 +289,7 @@ facade, and canvas tool persistence updates the active chat through
 `chat:truncateFrom`, and core model snapshots now prefer single-chat facade
 reads/updates as well. Channel bridge local-chat message appends now share the
 core facade-backed append path, and channel bridge local-chat creation plus
-desktop-import chat copy/update writes now use facade collection helpers. The
+desktop-import chat copy/update writes now use the facade `upsertChat` collection helper. The
 legacy bridge-origin startup migration tags matching chats through `updateChat`
 instead of rewriting the full chat array. This is deliberately not the SQLite
 migration; it is the adapter seam that lets later H1 steps move storage without

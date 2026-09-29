@@ -18,6 +18,9 @@ function registerCanvasHandlers(ipcMain, context = {}) {
       const updated = context.updateChat(chatId, patch);
       if (updated && typeof updated === 'object') return updated;
     }
+    if (typeof context.updateChatsWhere === 'function') {
+      return context.updateChatsWhere((chat) => chat.id === chatId, () => patch)[0] || null;
+    }
     const chats = getChats();
     const updated = chats.map(chat => {
       if (chat.id !== chatId) return chat;

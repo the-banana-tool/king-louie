@@ -803,7 +803,9 @@ class DesktopImporter {
     const liveChats = this.context.getChats();
     const late = this.chatRaceCheck(plan, item, value, liveChats);
     if (late) return late;
-    if (item.action === 'update' && typeof this.context.replaceChat === 'function') {
+    if (typeof this.context.upsertChat === 'function') {
+      this.context.upsertChat(chat, { position: 'front' });
+    } else if (item.action === 'update' && typeof this.context.replaceChat === 'function') {
       this.context.replaceChat(item.targetKey, chat);
     } else if (item.action !== 'update' && typeof this.context.createChat === 'function') {
       this.context.createChat(chat, { position: 'front' });

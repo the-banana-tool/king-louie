@@ -47,6 +47,8 @@ describe('createCore', () => {
     assert.strictEqual(typeof core.context.historyStore.listChats, 'function');
     assert.strictEqual(typeof core.context.getChat, 'function');
     assert.strictEqual(typeof core.context.listChats, 'function');
+    assert.strictEqual(typeof core.context.upsertChat, 'function');
+    assert.strictEqual(typeof core.context.updateChatsWhere, 'function');
     assert.strictEqual(typeof core.context.getChats, 'function');
     assert.strictEqual(core.context.safeStorage, undefined);
   });

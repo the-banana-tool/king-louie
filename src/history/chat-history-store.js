@@ -7,6 +7,10 @@ function withoutMessages(chat = {}) {
   return metadata;
 }
 
+function applyPatch(chat = {}, patch = {}) {
+  return { ...chat, ...(patch || {}) };
+}
+
 class JsonChatHistoryStore {
   constructor(options = {}) {
     if (!options.store || typeof options.store.get !== 'function' || typeof options.store.set !== 'function') {
@@ -66,6 +70,14 @@ class JsonChatHistoryStore {
     return normalized;
   }
 
+  upsertChat(chat = {}, options = {}) {
+    if (!chat || typeof chat !== 'object' || !String(chat.id || '').trim()) return null;
+    const id = String(chat.id).trim();
+    const existing = this.getChat(id, { messages: true });
+    if (existing) return this.replaceChat(id, chat);
+    return this.createChat({ ...chat, id }, options);
+  }
+
   deleteChat(chatId) {
     const id = String(chatId || '').trim();
     if (!id) return this.getAllChats();
@@ -80,12 +92,27 @@ class JsonChatHistoryStore {
     let updatedChat = null;
     const updated = this.getAllChats().map((chat) => {
       if (chat.id !== id) return chat;
-      updatedChat = { ...chat, ...(patch || {}) };
+      updatedChat = applyPatch(chat, patch);
       return updatedChat;
     });
     if (!updatedChat) return null;
     this.setChats(updated);
     return updatedChat;
+  }
+
+  updateChatsWhere(predicate, patcher) {
+    if (typeof predicate !== 'function' || typeof patcher !== 'function') return [];
+    const changed = [];
+    const updated = this.getAllChats().map((chat) => {
+      if (!predicate(chat)) return chat;
+      const patch = patcher(chat);
+      if (!patch || typeof patch !== 'object') return chat;
+      const next = applyPatch(chat, patch);
+      changed.push(next);
+      return next;
+    });
+    if (changed.length) this.setChats(updated);
+    return changed;
   }
 
   appendMessage(chatId, message = {}, options = {}) {
