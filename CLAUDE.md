@@ -259,8 +259,10 @@ Electron build.
   `tests/longhaul-synthetic.test.js` fails when they drift.
 - Smoke run (no models, no network):
   `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle`.
-  `oracle` must score evidence recall 1.000. Any shown message at or after
-  `askAtSeq` is a leak and exits 1. Add `kl-recall` to the adapters to
+  `oracle` must score evidence recall 1.000. Evidence recall counts only
+  evidence shown whole; evidence shown in part (a cut or shortened message,
+  some of its chunks, a folded tool call) is reported as `partial`. Any
+  message shown whole or in part at or after `askAtSeq` is a leak and exits 1. Add `kl-recall` to the adapters to
   measure recall itself.
 - Session files are read with `readJsonlLines`
   (`src/history/importers/jsonl-lines.js`), never `node:readline`: readline

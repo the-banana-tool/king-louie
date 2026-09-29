@@ -29,18 +29,44 @@ function recallSettings(recall, budgetTokens) {
   return { ...base, history: { ...history, recall: { ...defaults, ...recall, recalledTokens: budgetTokens } } };
 }
 
-// Which seqs a build put in front of the model: the tail messages it
-// returned (not the stats.tail range, which also spans the tool results the
-// tail leaves out) and the messages of its recalled chunks in this chat.
-function shownFromBuild(out, chunkRows, chatId) {
-  const tailSeqs = uniqueSorted((out.tail || []).map((m) => m.seq).filter(Number.isInteger));
+// Which seqs a build put in front of the model, whole or in part (benchmark
+// findings 5 and 6). Never the stats.tail fromSeq..toSeq range, which also
+// spans the tool results the tail leaves out.
+// - A tail message is shown whole unless ContextBuilder shortened it
+//   (stats.tail.shortened: text or documents cut), then it is partial.
+// - A tool call folded into the tail (in stats.tail.seqs but not a tail
+//   message) is shown as a one-line summary, so it is partial.
+// - A recalled message is whole when all its chunks were recalled
+//   (totalOf(seq), what chunkMessage cuts it into), else partial.
+function shownFromBuild(out, chunkRows, chatId, totalOf = () => Infinity) {
+  const tailMessageSeqs = uniqueSorted((out.tail || []).map((m) => m.seq).filter(Number.isInteger));
+  const statsTail = out.stats?.tail || {};
+  const tailSeqs = uniqueSorted([...tailMessageSeqs, ...(statsTail.seqs || []).filter(Number.isInteger)]);
+  const shortened = new Set((statsTail.shortened || []).map((x) => x && x.seq).filter(Number.isInteger));
+
   const shownBySeq = {};
   for (const c of chunkRows) {
     if (c.chatId !== chatId) continue;
     shownBySeq[c.seq] = (shownBySeq[c.seq] || 0) + 1;
   }
   const recalledSeqs = uniqueSorted(Object.keys(shownBySeq).map(Number));
-  return { tailSeqs, recalledSeqs, shownBySeq, evidenceSeqsShown: uniqueSorted([...tailSeqs, ...recalledSeqs]) };
+  const totalBySeq = {};
+  for (const seq of recalledSeqs) totalBySeq[seq] = totalOf(seq);
+
+  const whole = new Set();
+  for (const seq of tailMessageSeqs) if (!shortened.has(seq)) whole.add(seq);
+  for (const seq of recalledSeqs) if (shownBySeq[seq] >= totalBySeq[seq]) whole.add(seq);
+  const partial = [...tailSeqs, ...recalledSeqs].filter((seq) => !whole.has(seq));
+  return {
+    tailSeqs,
+    tailWholeSeqs: tailMessageSeqs.filter((seq) => !shortened.has(seq)),
+    shortened: statsTail.shortened || [],
+    recalledSeqs,
+    shownBySeq,
+    totalBySeq,
+    evidenceSeqsShown: uniqueSorted([...whole]),
+    evidenceSeqsPartial: uniqueSorted(partial)
+  };
 }
 
 // Prefix of the temp store dirs under tmpRoot; `run` removes leftovers.
@@ -93,19 +119,28 @@ function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, tmpRoot } = {
         const out = await handle.builder.build({ chatId: handle.chatId, message: question.question, model: ESTIMATOR_MODEL, upToSeq: askAtSeq });
         const chunkIds = out.recalled?.chunkIds || [];
         const rows = chunkIds.length ? handle.store.chunks(chunkIds) : [];
-        const shown = shownFromBuild(out, rows, handle.chatId);
-        const totalBySeq = {};
-        for (const seq of shown.recalledSeqs) {
+        const shown = shownFromBuild(out, rows, handle.chatId, (seq) => {
           const m = handle.session.index.get(seq);
-          totalBySeq[seq] = m ? chunkMessage(m, handle.settings.history.chunk).length : 0;
+          return m ? chunkMessage(m, handle.settings.history.chunk).length : 0;
+        });
+        // Chunk level: a whole tail message counts 1; a shortened one counts
+        // the paragraphs ContextBuilder showed of its own.
+        const shownBySeq = { ...shown.shownBySeq };
+        const totalBySeq = { ...shown.totalBySeq };
+        for (const x of shown.shortened) {
+          if (Number.isInteger(x?.seq) && Number.isInteger(x.shown) && Number.isInteger(x.total) && !(x.seq in totalBySeq)) {
+            shownBySeq[x.seq] = x.shown;
+            totalBySeq[x.seq] = x.total;
+          }
         }
         const text = [renderMessages(out.tail || []), out.recalled?.text || ''].filter(Boolean).join('\n\n');
         return {
           text,
           evidenceSeqsShown: shown.evidenceSeqsShown,
+          evidenceSeqsPartial: shown.evidenceSeqsPartial,
           estTokens: estimateTokens(text),
           cost: 0,
-          chunks: { tailSeqs: shown.tailSeqs, shownBySeq: shown.shownBySeq, totalBySeq }
+          chunks: { tailSeqs: shown.tailWholeSeqs, shownBySeq, totalBySeq }
         };
       });
     },

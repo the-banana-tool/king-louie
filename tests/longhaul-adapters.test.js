@@ -28,7 +28,8 @@ describe('sliding-window', () => {
     const handle = await adapter.prepare(session, { upToSeq: Infinity });
     for (const q of questions) {
       const r = await adapter.context(handle, { question: q, askAtSeq: q.askAtSeq, budgetTokens: 2000 });
-      const shown = r.evidenceSeqsShown;
+      const shown = [...r.evidenceSeqsShown, ...r.evidenceSeqsPartial].sort((a, b) => a - b);
+      assert.ok(r.evidenceSeqsPartial.length <= 1, 'at most the newest message is cut');
       assert.ok(shown.every((s) => s < q.askAtSeq));
       assert.strictEqual(shown.at(-1), q.askAtSeq - 1);
       assert.deepStrictEqual(shown, Array.from({ length: shown.length }, (_, i) => shown[0] + i));
@@ -50,7 +51,8 @@ describe('sliding-window', () => {
     const session = { manifest: { sessionId: 'B' }, messages, index: new SessionIndex(messages) };
     const adapter = createAdapter('sliding-window', { windowTokens: 100 });
     const r = await adapter.context(await adapter.prepare(session), { question: {}, askAtSeq: 3, budgetTokens: 100 });
-    assert.deepStrictEqual(r.evidenceSeqsShown, [2]);
+    assert.deepStrictEqual(r.evidenceSeqsShown, [], 'a cut message is not shown whole');
+    assert.deepStrictEqual(r.evidenceSeqsPartial, [2]);
     assert.ok(r.estTokens <= 100);
     assert.match(r.text, /earlier part of #2 cut/);
   });
@@ -66,6 +68,7 @@ describe('oracle', () => {
         const r = await adapter.context(handle, { question: q, askAtSeq: q.askAtSeq, budgetTokens: 6000 });
         assert.ok(q.evidenceSeqs.every((s) => r.evidenceSeqsShown.includes(s)), q.id);
         assert.ok(r.evidenceSeqsShown.every((s) => s < q.askAtSeq), q.id);
+        assert.deepStrictEqual(r.evidenceSeqsPartial, [], 'the oracle shows whole messages');
         if (q.kind !== 'abstain') assert.ok(q.acceptableAnswers.some((a) => r.text.includes(a)), `${q.id}: no acceptable answer in the oracle context`);
       }
       await adapter.release(handle);

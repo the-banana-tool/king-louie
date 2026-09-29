@@ -102,7 +102,7 @@ describe('runBenchmark', () => {
     assert.strictEqual(s.evidenceRecall, 0.8);
     assert.deepStrictEqual(s.byKind.superseded, { n: 1, evidenceRecall: 0.5 });
     assert.strictEqual(s.leaks, 0);
-    assert.match(fs.readFileSync(path.join(out.dir, 'summary.md'), 'utf8'), /\| first-evidence \| 6 \| 5 \| 0 \| 0\.800 \|/);
+    assert.match(fs.readFileSync(path.join(out.dir, 'summary.md'), 'utf8'), /\| first-evidence \| 6 \| 5 \| 0 \| 0\.800 \| 0 \|/);
 
     const questions = await readQuestions(questionsFile(home.root, 'synth-small'));
     const raw = fs.readFileSync(path.join(out.dir, 'records.jsonl'), 'utf8');
@@ -142,6 +142,37 @@ describe('runBenchmark', () => {
     const file = questionsFile(home.root, 'synth-small');
     writeQuestions(file, (await readQuestions(file)).map((q) => ({ ...q, verifiedBy: null })));
     await assert.rejects(runBenchmark({ home, adapters: [firstEvidence], now: fixedNow, commit: 'x' }), /--include-unverified/);
+  });
+
+  it('counts only wholly shown evidence in evidence recall and reports partial evidence apart', async () => {
+    const home = setup();
+    // The first evidence message whole, every other one only in part.
+    const halfShown = {
+      ...fakeAdapter('half', (q) => q.evidenceSeqs.slice(0, 1)),
+      context: async (handle, { question }) => ({
+        text: 'x', evidenceSeqsShown: question.evidenceSeqs.slice(0, 1), evidenceSeqsPartial: question.evidenceSeqs.slice(1),
+        estTokens: 1, latencyMs: 1, cpuMs: 1, cost: 0
+      })
+    };
+    const out = await runBenchmark({ home, adapters: [halfShown], now: fixedNow, commit: 'x' });
+    const s = out.summary.half;
+    // superseded and multi-hop have two evidence messages each: 0.5 each, the rest 1.
+    assert.strictEqual(s.evidenceRecall, 0.8);
+    assert.strictEqual(s.partial, 2);
+    const multi = out.records.find((r) => r.kind === 'multi-hop');
+    assert.strictEqual(multi.evidencePartial, 1);
+    assert.deepStrictEqual(multi.evidenceSeqsPartial, multi.evidenceSeqs.slice(1));
+    assert.match(fs.readFileSync(path.join(out.dir, 'summary.md'), 'utf8'), /\| half \| 6 \| 5 \| 0 \| 0\.800 \| 2 \|/);
+  });
+
+  it('counts a partly shown seq at or after askAtSeq as a leak too', async () => {
+    const home = setup();
+    const leaky = {
+      ...fakeAdapter('leaky-partial', () => []),
+      context: async (handle, { askAtSeq }) => ({ text: 'x', evidenceSeqsShown: [askAtSeq - 1], evidenceSeqsPartial: [askAtSeq], estTokens: 1, latencyMs: 1, cpuMs: 1, cost: 0 })
+    };
+    const out = await runBenchmark({ home, adapters: [leaky], now: fixedNow, commit: 'x' });
+    assert.strictEqual(out.leaks, 6);
   });
 
   it('counts every shown seq at or after askAtSeq as a leak, and the CLI exits 1', async () => {

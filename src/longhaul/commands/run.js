@@ -76,7 +76,7 @@ module.exports = {
     if (result.config.includeUnverified) ctx.stdout.write('UNVERIFIED QUESTIONS INCLUDED: a smoke run, not a result.\n');
     for (const [name, s] of Object.entries(result.summary)) {
       const er = s.evidenceRecall === null ? '-' : s.evidenceRecall.toFixed(3);
-      ctx.stdout.write(`${name.padEnd(16)} evidence recall ${er} (n=${s.scored})  median ${num(s.estTokens.median)} tokens  p90 ${num(s.estTokens.p90)}  errors ${s.errors}  leaks ${s.leaks}\n`);
+      ctx.stdout.write(`${name.padEnd(16)} evidence recall ${er} (n=${s.scored})  partial ${s.partial}  median ${num(s.estTokens.median)} tokens  p90 ${num(s.estTokens.p90)}  errors ${s.errors}  leaks ${s.leaks}\n`);
     }
     ctx.stdout.write(`summary: ${path.join(result.dir, 'summary.md')}\n`);
     return exitCodeFor(result, ctx.stderr);

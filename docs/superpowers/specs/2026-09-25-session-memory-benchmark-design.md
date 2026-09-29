@@ -223,7 +223,7 @@ An adapter:
 Adapter
   name, describe() → config
   prepare(session, { upToSeq }) → handle        // may index; billed as setup
-  context(handle, { question, askAtSeq, budgetTokens }) → { text, evidenceSeqsShown, estTokens, latencyMs, cpuMs, cost }
+  context(handle, { question, askAtSeq, budgetTokens }) → { text, evidenceSeqsShown, evidenceSeqsPartial, estTokens, latencyMs, cpuMs, cost }
   release(handle)
 ```
 
@@ -242,6 +242,10 @@ Built-in adapters:
 `evidenceSeqsShown` is how an adapter reports which message sequences its
 context contains; for `kl-recall` it comes from provenance, for others from
 construction. It is what makes evidence recall measurable without a judge.
+It lists only messages shown whole; `evidenceSeqsPartial` lists messages
+shown only in part (a cut or shortened message, some of a message's chunks,
+a tool call folded into the tail as one line). Both count toward the leak
+check.
 
 ## 8. Runs and metrics
 
@@ -249,8 +253,10 @@ For each question and adapter:
 
 1. `context` at `askAtSeq` under the run's `budgetTokens`.
 2. **Evidence recall**: fraction of `evidenceSeqs` present in
-   `evidenceSeqsShown` (message level), and the same at chunk level for
-   adapters that report chunks. No model call.
+   `evidenceSeqsShown` (message level, whole messages only), and the same at
+   chunk level for adapters that report chunks. Evidence in
+   `evidenceSeqsPartial` is not counted; it is reported apart as a partial
+   count. No model call.
 3. **Answer**: a fixed answer model receives the context and the question and
    must answer or say it does not know. Tokens and cost recorded from the
    provider's usage.

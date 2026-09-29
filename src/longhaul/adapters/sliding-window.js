@@ -18,15 +18,18 @@ function createSlidingWindowAdapter({ budgetTokens = 6000, windowTokens = null }
         const { index } = handle.session;
         const parts = [];
         const seqs = [];
+        const partial = [];
         let used = 0;
         for (let seq = Math.min(askAtSeq - 1, index.maxSeq); seq >= 1; seq--) {
           const text = renderMessage(index.get(seq));
           const t = estimateTokens(`${text}\n\n`);
           if (used + t > limit) {
+            // The newest message alone is over the window: its end is shown,
+            // so it is partly shown, not shown.
             if (parts.length === 0) {
               const keep = Math.max(0, limit * 4 - CUT_MARKER_MAX);
               parts.push(`[... earlier part of #${seq} cut]\n${text.slice(-keep)}`);
-              seqs.push(seq);
+              partial.push(seq);
             }
             break;
           }
@@ -35,7 +38,7 @@ function createSlidingWindowAdapter({ budgetTokens = 6000, windowTokens = null }
           used += t;
         }
         const text = parts.reverse().join('\n\n');
-        return { text, evidenceSeqsShown: uniqueSorted(seqs), estTokens: estimateTokens(text), cost: 0 };
+        return { text, evidenceSeqsShown: uniqueSorted(seqs), evidenceSeqsPartial: partial, estTokens: estimateTokens(text), cost: 0 };
       });
     },
     async release() {}

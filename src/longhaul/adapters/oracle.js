@@ -21,7 +21,7 @@ function createOracleAdapter({ tailMessages = TAIL_DEFAULTS.tailMessages, tailTo
         for (const m of [...evidence, ...tailBefore(index, askAtSeq, { tailMessages, tailTokens })]) bySeq.set(m.seq, m);
         const ordered = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
         const text = renderMessages(ordered);
-        return { text, evidenceSeqsShown: ordered.map((m) => m.seq), estTokens: estimateTokens(text), cost: 0 };
+        return { text, evidenceSeqsShown: ordered.map((m) => m.seq), evidenceSeqsPartial: [], estTokens: estimateTokens(text), cost: 0 };
       });
     },
     async release() {}

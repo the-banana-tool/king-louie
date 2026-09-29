@@ -83,19 +83,26 @@ async function scoreOne({ runId, adapter, handle, session, q, budgetTokens }) {
   };
   try {
     const r = await adapter.context(handle, { question: q, askAtSeq: q.askAtSeq, budgetTokens });
+    // Evidence recall counts only messages shown whole; partly shown
+    // evidence is reported apart. The leak check covers both.
     const shown = r.evidenceSeqsShown || [];
+    const whole = new Set(shown);
+    const partial = (r.evidenceSeqsPartial || []).filter((s) => !whole.has(s));
+    const partialSet = new Set(partial);
     return {
       ...base,
       evidenceSeqsShown: shown,
+      evidenceSeqsPartial: partial,
       evidenceRecall: evidenceRecall(q.evidenceSeqs, shown),
+      evidencePartial: q.evidenceSeqs.filter((s) => partialSet.has(s)).length,
       chunkEvidenceRecall: chunkEvidenceRecall(q.evidenceSeqs, r.chunks),
       estTokens: r.estTokens, latencyMs: r.latencyMs, cpuMs: r.cpuMs, cost: r.cost ?? 0,
-      leaked: shown.filter((s) => s >= q.askAtSeq).length,
+      leaked: [...shown, ...partial].filter((s) => s >= q.askAtSeq).length,
       error: null
     };
   } catch (err) {
     return {
-      ...base, evidenceSeqsShown: [], evidenceRecall: null, chunkEvidenceRecall: null,
+      ...base, evidenceSeqsShown: [], evidenceSeqsPartial: [], evidenceRecall: null, evidencePartial: 0, chunkEvidenceRecall: null,
       estTokens: null, latencyMs: null, cpuMs: null, cost: 0, leaked: 0, error: err.message
     };
   }

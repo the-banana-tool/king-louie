@@ -54,6 +54,8 @@ function summarize(records) {
       scored: scored.length,
       abstain: ok.length - scored.length,
       evidenceRecall: mean(scored.map((r) => r.evidenceRecall)),
+      // Evidence messages shown only in part (not counted in evidence recall).
+      partial: scored.reduce((n, r) => n + (r.evidencePartial || 0), 0),
       chunkEvidenceRecall: mean(scored.map((r) => r.chunkEvidenceRecall)),
       byKind: groupRecall(scored, 'kind'),
       byBucket: groupRecall(scored, 'bucket'),
@@ -75,10 +77,11 @@ function renderSummaryMarkdown(config, summary) {
   lines.push('Metric: evidence recall, at message level (and at chunk level for adapters that report chunks). No answer or judge model (stage B0).', '');
   lines.push(`Budget ${config.budgetTokens} recalled tokens; seed ${config.seed}; commit ${config.commit}.`, '');
   lines.push(`Sessions: ${config.sessions.map((s) => `${s.sessionId} (${s.private ? 'private' : s.license}, ${s.questions} questions)`).join(', ')}`, '');
-  lines.push('| Adapter | Questions | Scored | Errors | Evidence recall | Chunk evidence recall | Median tokens | p90 tokens | Median ms | p90 ms | Leaks |');
-  lines.push('|---|---|---|---|---|---|---|---|---|---|---|');
+  lines.push('Evidence recall counts an evidence message only when it was shown whole. Partial: evidence messages shown only in part (a cut or shortened message, some of its chunks, a folded tool call), not counted.', '');
+  lines.push('| Adapter | Questions | Scored | Errors | Evidence recall | Partial | Chunk evidence recall | Median tokens | p90 tokens | Median ms | p90 ms | Leaks |');
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const [name, s] of Object.entries(summary)) {
-    lines.push(`| ${name} | ${s.questions} | ${s.scored} | ${s.errors} | ${fmt(s.evidenceRecall)} | ${fmt(s.chunkEvidenceRecall)} | ${s.estTokens.median ?? '—'} | ${s.estTokens.p90 ?? '—'} | ${fmt(s.latencyMs.median, 1)} | ${fmt(s.latencyMs.p90, 1)} | ${s.leaks} |`);
+    lines.push(`| ${name} | ${s.questions} | ${s.scored} | ${s.errors} | ${fmt(s.evidenceRecall)} | ${s.partial} | ${fmt(s.chunkEvidenceRecall)} | ${s.estTokens.median ?? '—'} | ${s.estTokens.p90 ?? '—'} | ${fmt(s.latencyMs.median, 1)} | ${fmt(s.latencyMs.p90, 1)} | ${s.leaks} |`);
   }
   const kinds = KINDS.filter((k) => k !== 'abstain');
   lines.push('', '## Evidence recall by kind', '', `| Adapter | ${kinds.join(' | ')} |`, `|---|${kinds.map(() => '---').join('|')}|`);
