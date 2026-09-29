@@ -2,33 +2,9 @@ const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 
 function registerCanvasHandlers(ipcMain, context = {}) {
-  const { getChats, setChats } = context;
-
-  const findChat = (chatId) => {
-    if (typeof context.getChat === 'function') {
-      const chat = context.getChat(chatId, { messages: true });
-      if (chat && typeof chat === 'object') return chat;
-    }
-    const chats = getChats();
-    return chats.find(c => c.id === chatId) || null;
-  };
-
-  const patchChat = (chatId, patch = {}) => {
-    if (typeof context.updateChat === 'function') {
-      const updated = context.updateChat(chatId, patch);
-      if (updated && typeof updated === 'object') return updated;
-    }
-    if (typeof context.updateChatsWhere === 'function') {
-      return context.updateChatsWhere((chat) => chat.id === chatId, () => patch)[0] || null;
-    }
-    const chats = getChats();
-    const updated = chats.map(chat => {
-      if (chat.id !== chatId) return chat;
-      return { ...chat, ...(patch || {}) };
-    });
-    setChats(updated);
-    return updated.find((chat) => chat.id === chatId) || null;
-  };
+  // Canvas state is a chat field; none of these calls needs the messages.
+  const findChat = (chatId) => context.getChat(chatId, { messages: false });
+  const patchChat = (chatId, patch = {}) => context.updateChat(chatId, patch, { messages: false });
 
   ipcMain.handle(IPC.CANVAS_GET_STATE, wrapHandler(IPC.CANVAS_GET_STATE, async (_event, { chatId }) => {
     if (!chatId) return { ok: false, error: 'chatId required' };

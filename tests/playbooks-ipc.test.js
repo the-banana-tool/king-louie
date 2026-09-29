@@ -15,6 +15,7 @@ const { readState, writeState } = require('../src/cases/playbooks/changes');
 const { MAX_PATCH_BYTES } = require('../src/cases/playbooks/proposals');
 const { registerCaseHandlers } = require('../src/ipc/case-handlers');
 const { registerPlaybookHandlers } = require('../src/ipc/playbook-handlers');
+const { historyContext } = require('./helpers/history-context');
 const { createBridgeDispatcher } = require('../src/desktop-bridge/bridge-dispatcher');
 const { createConnection } = require('../src/desktop-bridge/connection');
 const { writePackage, makeGitPackage, PLAYBOOK_YAML, STEPS_MD, withYaml } = require('./helpers/playbook-fixture');
@@ -42,12 +43,11 @@ function makeContext({ examples = {}, settings = { playbooks: {} } } = {}) {
   writePackage(path.join(examplesDir, 'land-sale'), examples);
   const runtime = new CaseRuntime({ root: tmp(), getSettings: () => ({}) });
   installPlaybooks(runtime, { getSettings: () => settings, examplesDir, tmpRoot: tmp() });
-  let chats = [{ id: 'chat-1', title: 'Chat' }];
+  const history = historyContext([{ id: 'chat-1', title: 'Chat', messages: [] }]);
   const context = {
     getCaseRuntime: () => runtime,
     getPlaybookManager: () => runtime.playbooks,
-    getChats: () => chats,
-    setChats: (next) => { chats = next; }
+    ...history
   };
   return { runtime, context, examplesDir, settings };
 }

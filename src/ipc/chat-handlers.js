@@ -29,6 +29,11 @@ function visibleMessage(message = {}) {
 }
 
 function chatMetadata(chat = {}, { includeMessages = false } = {}) {
+  // A chat from listChats carries its counts and preview already.
+  if (!Array.isArray(chat.messages)) {
+    const { messages: _messages, ...metadata } = chat;
+    return metadata;
+  }
   const messages = Array.isArray(chat.messages) ? chat.messages : [];
   const visibleMessages = messages.filter(visibleMessage);
   const lastMessage = visibleMessages[visibleMessages.length - 1] || messages[messages.length - 1] || null;
@@ -62,12 +67,13 @@ async function refreshProvider(availability, provider) {
 function registerChatHandlers(ipcMain, context = {}) {
   const {
     createId,
-    getChats,
     listChats,
     getChat,
     createChat,
     deleteChat,
-    setChats,
+    updateChat,
+    truncateChatFrom,
+    getHistoryStatus,
     getActiveChatId,
     setActiveChatId,
     appendMessageToChat,
@@ -100,52 +106,39 @@ function registerChatHandlers(ipcMain, context = {}) {
   // controller in the set and clears the whole entry.
   const activeRuns = new Map();
 
-  const fullChats = () => getChats();
-
-  const setFullChats = (chats) => setChats(chats);
-
   const findChat = (chatId, options = { messages: true }) => {
     const id = String(chatId || '').trim();
-    if (!id) return null;
-    if (typeof context.getChat === 'function') {
-      const chat = context.getChat(id, options);
-      if (chat && typeof chat === 'object') return chat;
-    }
-    return fullChats().find((item) => item.id === id) || null;
+    return id ? getChat(id, options) : null;
   };
 
   const patchChat = (chatId, patch = {}) => {
     const id = String(chatId || '').trim();
-    if (!id) return null;
-    if (typeof context.updateChat === 'function') {
-      const updated = context.updateChat(id, patch);
-      if (updated && typeof updated === 'object') return updated;
-    }
-    const updatedChats = fullChats().map((chat) => (chat.id === id ? { ...chat, ...(patch || {}) } : chat));
-    setFullChats(updatedChats);
-    return updatedChats.find((chat) => chat.id === id) || null;
+    return id ? updateChat(id, patch) : null;
   };
 
-  const replaceChats = (chats) => {
-    setFullChats(chats);
-    return chats;
-  };
+  const DEFAULT_HISTORY_STATUS = Object.freeze({ available: true, error: null, migrationFailed: 0 });
+  const historyStatus = () => (typeof getHistoryStatus === 'function' && getHistoryStatus()) || DEFAULT_HISTORY_STATUS;
 
-  const prependChat = (chat) => {
-    if (typeof context.createChat === 'function') {
-      const created = context.createChat(chat, { position: 'front' });
-      if (created && typeof created === 'object') return created;
-    }
-    replaceChats([chat, ...fullChats()]);
-    return chat;
-  };
-
-  const removeChat = (chatId) => {
-    if (typeof context.deleteChat === 'function') {
-      const chats = context.deleteChat(chatId);
-      if (Array.isArray(chats)) return chats;
-    }
-    return replaceChats(fullChats().filter((chat) => chat.id !== chatId));
+  // What chat:load and chat:delete answer (recall spec §4.4): every chat's
+  // metadata, and the messages of the active chat only. A stored active id
+  // that names no chat (deleted, or left in chat-data.json by a failed
+  // migration) falls back to the first chat. A history store that did not
+  // open answers with no chats and says why; chats are never read from
+  // chat-data.json instead (§15).
+  const chatListPayload = () => {
+    const history = historyStatus();
+    if (!history.available) return { chats: [], activeChatId: null, history };
+    const metas = listChats({ messages: false });
+    const storedActiveId = getActiveChatId();
+    const activeChatId = metas.some((chat) => chat.id === storedActiveId) ? storedActiveId : (metas[0]?.id || null);
+    const activeChat = activeChatId ? getChat(activeChatId, { messages: true }) : null;
+    return {
+      chats: metas.map((chat) => (activeChat && chat.id === activeChat.id
+        ? chatMetadata(activeChat, { includeMessages: true })
+        : chatMetadata(chat))),
+      activeChatId,
+      history
+    };
   };
 
   /**
@@ -189,7 +182,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       if (!cleaned) return;
 
       patchChat(chatId, { title: cleaned, updatedAt: new Date().toISOString() });
-      const updated = fullChats();
+      const updated = listChats({ messages: false });
 
       // Notify the renderer so the sidebar updates
       if (sender && !sender.isDestroyed()) {
@@ -223,24 +216,7 @@ function registerChatHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CHAT_LOAD, wrapHandler(IPC.CHAT_LOAD, async () => {
-    const activeChatId = getActiveChatId();
-    const facadeChats = typeof listChats === 'function' ? listChats({ messages: false }) : null;
-    const loadedChats = Array.isArray(facadeChats)
-      ? facadeChats
-      : getChats();
-    const facadeActiveChat = activeChatId && typeof getChat === 'function' ? getChat(activeChatId, { messages: true }) : null;
-    const activeChat = facadeActiveChat && typeof facadeActiveChat === 'object'
-      ? facadeActiveChat
-      : findChat(activeChatId, { messages: true });
-
-    return {
-      chats: loadedChats.map((chat) => (
-        chat.id === activeChatId && activeChat
-          ? chatMetadata(activeChat, { includeMessages: true })
-          : chatMetadata(chat, { includeMessages: false })
-      )),
-      activeChatId
-    };
+    return chatListPayload();
   }));
 
   ipcMain.handle(IPC.CHAT_GET, wrapHandler(IPC.CHAT_GET, async (_event, { chatId } = {}) => {
@@ -248,15 +224,10 @@ function registerChatHandlers(ipcMain, context = {}) {
     if (!id) {
       return { ok: false, error: 'Chat ID is required.' };
     }
-
-    const facadeChat = typeof getChat === 'function' ? getChat(id, { messages: true }) : null;
-    const chat = facadeChat && typeof facadeChat === 'object'
-      ? facadeChat
-      : findChat(id, { messages: true });
+    const chat = getChat(id, { messages: true });
     if (!chat) {
       return { ok: false, error: 'Chat not found.' };
     }
-
     return { ok: true, chat };
   }));
 
@@ -280,7 +251,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
       ]
     };
-    prependChat(newChat);
+    createChat(newChat, { position: 'front' });
     setActiveChatId(newChat.id);
     return newChat;
   }));
@@ -295,13 +266,11 @@ function registerChatHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CHAT_DELETE, wrapHandler(IPC.CHAT_DELETE, async (_event, chatId) => {
-    const chats = removeChat(chatId);
-    const activeChatId = getActiveChatId();
-    if (activeChatId === chatId) {
-      const nextChatId = chats[0]?.id || null;
-      setActiveChatId(nextChatId);
+    deleteChat(chatId);
+    if (getActiveChatId() === chatId) {
+      setActiveChatId(listChats({ messages: false })[0]?.id || null);
     }
-    return { chats, activeChatId: getActiveChatId() };
+    return chatListPayload();
   }));
 
   ipcMain.handle(IPC.CHAT_SET_AGENT_MODE, wrapHandler(IPC.CHAT_SET_AGENT_MODE, async (_event, { chatId, agentMode }) => {
@@ -923,11 +892,11 @@ function registerChatHandlers(ipcMain, context = {}) {
   ipcMain.handle(IPC.CHAT_TRUNCATE_FROM, wrapHandler(IPC.CHAT_TRUNCATE_FROM, async (_event, { chatId, fromIndex }) => {
     const chat = findChat(chatId, { messages: true });
     if (!chat) throw new Error('Chat not found');
-    if (typeof fromIndex !== 'number' || fromIndex < 0 || fromIndex >= chat.messages.length) {
+    if (!Number.isInteger(fromIndex) || fromIndex < 0 || fromIndex >= chat.messages.length) {
       throw new Error('Invalid fromIndex');
     }
-    const trimmed = chat.messages.slice(0, fromIndex);
-    return patchChat(chatId, { messages: trimmed, updatedAt: new Date().toISOString() });
+    // seq is dense from 1: the message at index i has seq i + 1.
+    return truncateChatFrom(chat.id, fromIndex + 1);
   }));
 
   ipcMain.handle(IPC.CHAT_STOP_RESPONSE, wrapHandler(IPC.CHAT_STOP_RESPONSE, async (_event, { chatId }) => {

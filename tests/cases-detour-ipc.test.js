@@ -10,6 +10,7 @@ const { registerDetourHandlers } = require('../src/ipc/detour-handlers');
 const { registerCaseHandlers } = require('../src/ipc/case-handlers');
 const IPC = require('../src/ipc/constants');
 const { CaseRuntime } = require('../src/cases');
+const { historyContext } = require('./helpers/history-context');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -18,8 +19,8 @@ function setup() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-detour-ipc-'));
   dirs.push(root);
   const runtime = new CaseRuntime({ root, host: { interactive: () => true } });
-  let chats = [{ id: 'chat-1', title: 'Chat', messages: [] }];
-  const context = { getCaseRuntime: () => runtime, getChats: () => chats, setChats: (next) => { chats = next; } };
+  const history = historyContext([{ id: 'chat-1', title: 'Chat', messages: [] }]);
+  const context = { getCaseRuntime: () => runtime, ...history };
   const handlers = new Map();
   const ipcMain = { handle: (ch, fn) => handlers.set(ch, fn), on: () => {} };
   registerCaseHandlers(ipcMain, context);

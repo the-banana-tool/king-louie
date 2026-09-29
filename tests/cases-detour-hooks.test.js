@@ -57,8 +57,9 @@ function chatHarness(rt, caseId, { hookResult = null } = {}) {
     }
   }
   const overrides = {
-    getChats: () => [chat],
-    setChats: () => {},
+    getChat: (id) => (id === chat.id ? chat : null),
+    listChats: () => [chat],
+    updateChat: (id, patch) => (id === chat.id ? Object.assign(chat, patch) : null),
     appendMessageToChat: (_id, sender, text) => { chat.messages.push({ id: `m${chat.messages.length}`, sender, text, timestamp: new Date().toISOString() }); return chat; },
     runHookEvent: async () => hookResult || {},
     snapshotModels: () => createTurnModels({

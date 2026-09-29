@@ -24,28 +24,10 @@ const bridgeOriginFor = (chat) => {
 };
 
 function registerCaseHandlers(ipcMain, context = {}) {
-  const chatById = (chatId) => {
-    if (typeof context.getChat === 'function') {
-      const chat = context.getChat(chatId, { messages: true });
-      if (chat && typeof chat === 'object') return chat;
-    }
-    const chats = context.getChats();
-    return chats.find((c) => c.id === chatId) || null;
-  };
-
-  const patchChat = (chatId, patch = {}) => {
-    if (typeof context.updateChat === 'function') {
-      const updated = context.updateChat(chatId, patch);
-      if (updated && typeof updated === 'object') return updated;
-    }
-    if (typeof context.updateChatsWhere === 'function') {
-      return context.updateChatsWhere((chat) => chat.id === chatId, () => patch)[0] || null;
-    }
-    const chats = context.getChats();
-    const updated = chats.map((c) => (c.id === chatId ? { ...c, ...(patch || {}) } : c));
-    context.setChats(updated);
-    return updated.find((c) => c.id === chatId) || null;
-  };
+  const chatById = (chatId) => context.getChat(chatId, { messages: true });
+  // The renderer replaces its chat with what attach returns, so it keeps
+  // the messages.
+  const patchChat = (chatId, patch = {}) => context.updateChat(chatId, patch);
 
   const runtime = () => {
     const rt = typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;

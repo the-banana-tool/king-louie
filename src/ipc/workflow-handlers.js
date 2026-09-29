@@ -7,17 +7,7 @@ const { createLogger } = require('../logging');
 const log = createLogger('workflow-handlers');
 
 function registerWorkflowHandlers(ipcMain, context) {
-  const findChat = (chatId) => {
-    if (!chatId) return null;
-    if (typeof context.getChat === 'function') {
-      const chat = context.getChat(chatId, { messages: true });
-      if (chat && typeof chat === 'object') return chat;
-    }
-    const getChats = typeof context.getChats === 'function' ? context.getChats : null;
-    if (!getChats) return null;
-    const chats = getChats();
-    return chats.find((c) => c && c.id === chatId) || null;
-  };
+  const findChat = (chatId) => (chatId ? context.getChat(chatId, { messages: true }) : null);
 
   const mergePlanOptions = (payload) => {
     const options = { ...(payload.options || {}) };
@@ -192,7 +182,7 @@ function registerWorkflowHandlers(ipcMain, context) {
     wrapHandler('workflow:recoverPlan', async (event, payload = {}) => {
       const chatId = payload.chatId;
       if (!chatId) throw new Error('chatId is required');
-      if (typeof context.getChat !== 'function' && typeof context.getChats !== 'function') throw new Error('Chat storage not available');
+      if (typeof context.getChat !== 'function') throw new Error('Chat storage not available');
       const chat = findChat(chatId);
       if (!chat) return { ok: false, error: 'Chat not found' };
       const recovered = recoverPlanFromMessages(chat.messages || []);

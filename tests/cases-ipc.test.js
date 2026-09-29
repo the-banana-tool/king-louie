@@ -6,51 +6,42 @@ const path = require('path');
 const { registerCaseHandlers } = require('../src/ipc/case-handlers');
 const IPC = require('../src/ipc/constants');
 const { CaseRuntime } = require('../src/cases');
+const { historyContext } = require('./helpers/history-context');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 
-function setup({ withRuntime = true, chats: initialChats = [{ id: 'chat-1', title: 'Chat', messages: [] }], facade = false } = {}) {
+function setup({ withRuntime = true, chats: initialChats = [{ id: 'chat-1', title: 'Chat', messages: [] }] } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cases-ipc-'));
   dirs.push(root);
   const runtime = new CaseRuntime({ root });
-  let chats = initialChats;
+  const history = historyContext(initialChats);
   const context = {
     getCaseRuntime: () => (withRuntime ? runtime : null),
-    getChats: () => chats,
-    setChats: (next) => { chats = next; }
+    ...history
   };
-  if (facade) {
-    context.calls = [];
-    context.getChat = (chatId) => chats.find((c) => c.id === chatId) || null;
-    context.updateChat = (chatId, patch) => {
-      context.calls.push({ chatId, patch });
-      chats = chats.map((chat) => (chat.id === chatId ? { ...chat, ...patch } : chat));
-      return chats.find((chat) => chat.id === chatId) || null;
-    };
-  }
   const handlers = new Map();
   registerCaseHandlers({ handle: (ch, fn) => handlers.set(ch, fn), on: () => {} }, context);
   const call = (channel, payload) => handlers.get(channel)({}, payload);
-  return { runtime, call, chats: () => chats, context };
+  return { runtime, call, history, context };
 }
 
 describe('case IPC', () => {
   it('creates a case, attaches it to the chat, and lists it', async () => {
-    const { call, chats } = setup();
+    const { call, history } = setup();
     const created = await call(IPC.CASE_CREATE, { title: 'Lakeside lot', objective: 'Convert the lot to cash', chatId: 'chat-1' });
     assert.strictEqual(created.ok, true);
     assert.strictEqual(created.case.title, 'Lakeside lot');
     assert.strictEqual(created.case.status, 'draft');
-    assert.strictEqual(chats()[0].caseId, created.case.id);
+    assert.strictEqual(history.getChat('chat-1').caseId, created.case.id);
     const listed = await call(IPC.CASE_LIST);
     assert.deepStrictEqual(listed.cases.map((c) => c.id), [created.case.id]);
   });
 
   it('attaches, detaches and refuses unknown cases or chats', async () => {
-    const { call, chats } = setup();
+    const { call, history } = setup();
     const { case: c } = await call(IPC.CASE_CREATE, { title: 'A' });
-    assert.strictEqual(chats()[0].caseId, undefined);
+    assert.strictEqual(history.getChat('chat-1').caseId, undefined);
     assert.strictEqual((await call(IPC.CASE_ATTACH, { chatId: 'chat-1', caseId: c.id })).chat.caseId, c.id);
     assert.strictEqual((await call(IPC.CASE_ATTACH, { chatId: 'chat-1', caseId: null })).chat.caseId, null);
     const badCase = await call(IPC.CASE_ATTACH, { chatId: 'chat-1', caseId: 'nope' });
@@ -60,16 +51,14 @@ describe('case IPC', () => {
     assert.strictEqual(badChat.ok, false);
   });
 
-  it('attaches cases through the history facade when available', async () => {
-    const { call, context } = setup({ facade: true });
+  it('attaches cases through the history store', async () => {
+    const { call, history } = setup();
     const { case: c } = await call(IPC.CASE_CREATE, { title: 'Facade case' });
 
     const attached = await call(IPC.CASE_ATTACH, { chatId: 'chat-1', caseId: c.id });
 
     assert.strictEqual(attached.chat.caseId, c.id);
-    assert.deepStrictEqual(context.calls.map((call) => [call.chatId, Object.keys(call.patch).sort()]), [
-      ['chat-1', ['caseId', 'updatedAt']]
-    ]);
+    assert.strictEqual(history.getChat('chat-1', { messages: false }).caseId, c.id);
   });
 
   it('refuses to attach a case to a bridge chat (F5)', async () => {

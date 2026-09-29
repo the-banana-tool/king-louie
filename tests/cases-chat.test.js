@@ -57,8 +57,9 @@ function harness({
     }
   }
   const overrides = {
-    getChats: () => [chat],
-    setChats: () => {},
+    getChat: (id) => (id === chat.id ? chat : null),
+    listChats: () => [chat],
+    updateChat: (id, patch) => (id === chat.id ? Object.assign(chat, patch) : null),
     appendMessageToChat: (_id, sender, text) => { chat.messages.push({ id: `m${chat.messages.length}`, sender, text }); return chat; },
     runHookEvent: async () => hookResult || {},
     snapshotModels: () => {

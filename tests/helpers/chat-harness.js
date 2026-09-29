@@ -31,8 +31,9 @@ function chatHarness({ provider, providerType = 'openai', model = 'test-model', 
   let nextId = 0;
   let ctx = null;
   const context = {
-    getChats: () => [theChat],
-    setChats: () => {},
+    getChat: (id) => (id === theChat.id ? theChat : null),
+    listChats: () => [theChat],
+    updateChat: (id, patch) => (id === theChat.id ? Object.assign(theChat, patch) : null),
     appendMessageToChat: (_chatId, sender, text, metadata = {}) => {
       theChat.messages.push({ id: `m${theChat.messages.length}`, sender, text, ...metadata });
       return theChat;
