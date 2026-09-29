@@ -78,7 +78,6 @@ function harness({
       streamMessage: async () => streamMessageResult || {}
     }),
     getUsageTracker: () => usageTracker,
-    getConversationCompactor: () => null,
     getContextAssembler: () => contextAssembler,
     getRuntimeEnvironment: async () => ({ platform: process.platform }),
     buildMemoryContextSection: async () => '',

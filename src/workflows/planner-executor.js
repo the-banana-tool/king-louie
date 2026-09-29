@@ -14,11 +14,10 @@ class PlannerExecutor {
     this.agentExecutorAdapter = options.agentExecutorAdapter;
     this.workflowEngine = options.workflowEngine;
     this.getAgent = options.getAgent;
-    // Optional: semantic conversation compactor. When provided and the chat
-    // history exceeds its threshold, the planner receives a semantically
-    // retrieved subset instead of the full transcript.
-    this.getConversationCompactor = typeof options.getConversationCompactor === 'function'
-      ? options.getConversationCompactor
+    // Recall (history spec §12): with a chatId the planner sees that chat's
+    // tail and the excerpts recalled for the goal.
+    this.getContextBuilder = typeof options.getContextBuilder === 'function'
+      ? options.getContextBuilder
       : () => null;
   }
 
@@ -60,7 +59,7 @@ class PlannerExecutor {
    *     {role, content} and passed as `messages` so the planner sees the full
    *     conversation context (the goal alone is often not enough).
    *   - maxIterations: override default 15.
-   *   - chatId: carried through for event association (not used during planning).
+   *   - chatId: the chat to recall from (its tail, and excerpts for the goal); also carried for event association.
    */
   async plan(goal, options = {}) {
     const plannerAgent = this.getAgent('planner');
@@ -81,24 +80,21 @@ class PlannerExecutor {
       ].join('\n');
     }
 
-    let history = Array.isArray(options.chatMessages) ? options.chatMessages : [];
-    history = history.filter((m) => m && (m.sender === 'user' || m.sender === 'assistant'));
-
-    // Semantic compaction: if history is large, retrieve only the chunks
-    // relevant to the goal instead of replaying the whole transcript.
-    const compactor = this.getConversationCompactor();
-    if (compactor && history.length > 0 && typeof compactor.shouldCompact === 'function' && compactor.shouldCompact(history)) {
+    let history = [];
+    let recalledText = '';
+    const builder = options.chatId ? this.getContextBuilder() : null;
+    if (builder) {
       try {
-        history = await compactor.retrieve(goal, history, {
-          maxChunks: 20,
-          alwaysKeepRecent: 4,
-          minSimilarity: 0.25,
-          maxTokens: 4000
-        });
+        const built = await builder.build({ chatId: options.chatId, message: goal });
+        history = built.tail;
+        recalledText = (built.recalled && built.recalled.text) || '';
       } catch (err) {
-        log.warn(`Conversation compaction failed, using full history: ${err.message}`);
+        log.warn(`Recall for the planner failed; planning from the goal alone: ${err.message}`);
       }
+    } else if (Array.isArray(options.chatMessages)) {
+      history = options.chatMessages.filter((m) => m && (m.sender === 'user' || m.sender === 'assistant'));
     }
+    if (recalledText) execOptions.systemPromptDynamic = recalledText;
 
     const convertedHistory = history
       .map((m) => ({

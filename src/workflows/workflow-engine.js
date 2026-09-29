@@ -76,16 +76,12 @@ class WorkflowEngine extends EventEmitter {
     this.defaultTaskTimeoutMs = Number.isFinite(options.defaultTaskTimeoutMs)
       ? options.defaultTaskTimeoutMs
       : 10 * 60 * 1000;
-    // Optional: parent-chat context injection for each task. When both are
-    // provided, _executeTask pulls the parent chat's history, semantically
-    // compacts it using the task description as the query, and prepends it to
-    // the task's messages so the executor has the user's surrounding context.
-    this.getConversationCompactor = typeof options.getConversationCompactor === 'function'
-      ? options.getConversationCompactor
+    // Parent-chat context (recall spec §12): a task of a workflow launched
+    // from a chat gets that chat's tail and the excerpts recalled for the
+    // task's description, from the history store.
+    this.getContextBuilder = typeof options.getContextBuilder === 'function'
+      ? options.getContextBuilder
       : () => null;
-    this.getParentChatMessages = typeof options.getParentChatMessages === 'function'
-      ? options.getParentChatMessages
-      : () => [];
     this.eventLedger = options.eventLedger || null;
     this.workflows = new Map();
     this.activeExecutions = new Map(); // workflowId → AbortController
@@ -526,43 +522,20 @@ class WorkflowEngine extends EventEmitter {
       executeOptions.requireInProfile = true;
     }
 
-    // Parent-chat context: pull the chat that launched this workflow and
-    // semantically retrieve the slice relevant to this task. This gives each
-    // task agent visibility into the user's surrounding conversation (e.g. a
-    // pasted audit document) without replaying the whole transcript.
+    // Parent-chat context (recall spec §12): the chat's tail plus the block
+    // recalled for this task, so the executor sees the surrounding conversation.
     const parentChatId = workflow.metadata?.chatId;
-    if (parentChatId) {
+    const builder = parentChatId ? this.getContextBuilder() : null;
+    if (builder) {
       try {
-        let parentMessages = this.getParentChatMessages(parentChatId) || [];
-        parentMessages = parentMessages.filter((m) => m && (m.sender === 'user' || m.sender === 'assistant'));
-
-        const compactor = this.getConversationCompactor();
-        if (compactor && parentMessages.length > 0 && typeof compactor.shouldCompact === 'function' && compactor.shouldCompact(parentMessages)) {
-          try {
-            parentMessages = await compactor.retrieve(task.description || task.title || '', parentMessages, {
-              maxChunks: 12,
-              alwaysKeepRecent: 2,
-              minSimilarity: 0.25,
-              maxTokens: 2000
-            });
-          } catch (err) {
-            log.warn(`Parent context compaction failed for task ${task.id}: ${err.message}`);
-          }
-        }
-
-        const convertedParent = parentMessages
-          .map((m) => ({
-            role: m.sender === 'assistant' ? 'assistant' : 'user',
-            content: typeof m.text === 'string' ? m.text : String(m.text || '')
-          }))
+        const built = await builder.build({ chatId: parentChatId, message: task.description || task.title || '' });
+        const convertedParent = built.tail
+          .map((m) => ({ role: m.sender === 'assistant' ? 'assistant' : 'user', content: String(m.text || '') }))
           .filter((m) => m.content.trim().length > 0);
-
         if (convertedParent.length > 0) {
-          executeOptions.messages = [
-            ...convertedParent,
-            { role: 'user', content: fullMessage }
-          ];
+          executeOptions.messages = [...convertedParent, { role: 'user', content: fullMessage }];
         }
+        if (built.recalled && built.recalled.text) executeOptions.systemPromptDynamic = built.recalled.text;
       } catch (err) {
         log.warn(`Failed to load parent chat context for task ${task.id}: ${err.message}`);
       }

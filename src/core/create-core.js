@@ -63,7 +63,6 @@ const { configureCaseGuard } = require('../cases/executors/case-guard');
 const { makeRootAssert } = require('../cases/executors/package-loader');
 const { buildChildContext, childRuntimeOptions } = require('../agents/child-context');
 const ContextAssembler = require('../context/context-assembler');
-const ConversationCompactor = require('../context/conversation-compactor');
 const { HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore, TokenEstimator, Retriever, ContextBuilder } = require('../history');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
@@ -222,7 +221,6 @@ function createCore(deps = {}) {
   let memoryManager;
   let checkpointManager;
   let contextAssembler;
-  let conversationCompactor;
   let ttsEngine;
   let usageTracker;
   let cronStore;
@@ -2513,15 +2511,6 @@ function createCore(deps = {}) {
       openaiApiKey: openaiApiKey || ''
     });
 
-    // ConversationCompactor: semantic retrieval over conversation history.
-    // Reuses the same embedding provider as the context assembler. The cache
-    // file persists embeddings keyed by chunk-content hash, so the same text
-    // is never embedded twice — survives restarts and is shared across chats.
-    conversationCompactor = new ConversationCompactor({
-      embeddingProvider: contextAssembler.embeddingProvider,
-      cacheFilePath: path.join(userDataPath, 'memory', 'embedding-cache.jsonl')
-    });
-
     // Background task manager for async agent tasks
     backgroundTaskManager = new BackgroundTaskManager({
       outputDir: path.join(userDataPath, 'background-tasks')
@@ -2716,15 +2705,10 @@ function createCore(deps = {}) {
       agentExecutorAdapter,
       getAgent,
       maxConcurrentTasks: 3,
-      getConversationCompactor: () => conversationCompactor,
+      getContextBuilder: () => contextBuilder,
       // Cases stage 3: a case workflow's children run with the extras the
       // registry rebuilds from its job index, never the workflow file's own.
-      resolveExecuteExtras: (wf) => executorRegistry?.workflowChildExtras(wf.id) ?? null,
-      getParentChatMessages: (chatId) => {
-        const chat = getChat(chatId, { messages: true });
-        if (!chat || !Array.isArray(chat.messages)) return [];
-        return chat.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant');
-      }
+      resolveExecuteExtras: (wf) => executorRegistry?.workflowChildExtras(wf.id) ?? null
     });
     await workflowEngine.initialize();
 
@@ -2741,7 +2725,7 @@ function createCore(deps = {}) {
       agentExecutorAdapter,
       workflowEngine,
       getAgent,
-      getConversationCompactor: () => conversationCompactor
+      getContextBuilder: () => contextBuilder
     });
 
     remoteControl = new RemoteControl(
@@ -3266,7 +3250,6 @@ function createCore(deps = {}) {
     buildRuntimeSystemPrompt,
     buildMemoryContextSection,
     getContextAssembler: () => contextAssembler,
-    getConversationCompactor: () => conversationCompactor,
     getCheckpointManager: () => checkpointManager,
     getToolResultsDir: () => path.join(userDataPath, 'tool-results'),
     speakSummaryText,

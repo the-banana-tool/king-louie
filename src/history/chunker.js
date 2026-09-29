@@ -1,7 +1,7 @@
 // src/history/chunker.js
 // How one stored message becomes chunks (recall spec §4.3), the same for
-// native and imported messages. splitProse is the splitter that lived in
-// src/context/conversation-compactor.js, moved, with its sizes as options.
+// native and imported messages. splitProse is the prose splitter of the old
+// conversation compactor (since removed), with its sizes as options.
 const CHUNK_DEFAULTS = Object.freeze({ targetChars: 1500, minChars: 40 });
 const SUMMARY_MAX = 200;
 // Tools whose written text is indexed as prose besides the one-line summary.

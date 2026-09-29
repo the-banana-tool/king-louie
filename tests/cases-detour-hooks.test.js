@@ -67,7 +67,6 @@ function chatHarness(rt, caseId, { hookResult = null } = {}) {
       explain: () => ({ usable: true, reasons: [], notes: [] })
     }),
     routedProvider: () => ({ sendMessageWithTools: async () => ({}), streamMessage: async () => ({}) }),
-    getConversationCompactor: () => null,
     getContextAssembler: () => null,
     getRuntimeEnvironment: async () => ({ platform: process.platform }),
     buildMemoryContextSection: async () => '',
