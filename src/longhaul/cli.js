@@ -11,7 +11,8 @@ const COMMANDS = {
   import: require('./commands/import'),
   synth: require('./commands/synth'),
   run: require('./commands/run'),
-  author: require('./commands/author')
+  author: require('./commands/author'),
+  verify: require('./commands/verify')
 };
 
 function usage() {
