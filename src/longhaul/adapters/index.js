@@ -5,6 +5,8 @@ const { createSlidingWindowAdapter } = require('./sliding-window');
 const { createOracleAdapter } = require('./oracle');
 
 const FACTORIES = {
+  // Loaded on use: it opens node:sqlite, which the other adapters never need.
+  'kl-recall': (config) => require('./kl-recall').createKlRecallAdapter(config),
   'sliding-window': createSlidingWindowAdapter,
   oracle: createOracleAdapter
 };
