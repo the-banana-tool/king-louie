@@ -128,7 +128,14 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   never read.
 - A store that will not open is an error in the log and the chat list, never
   a fallback to the JSON file. Service CLI commands that build a core as root
-  pass `history: { open: false }`.
+  pass `history: { open: false }`. `import --dry-run` passes
+  `history: { readonly: true }`: an existing store opens read-only, and a
+  pre-H1 data dir gets an in-memory store filled from chat-data.json with
+  nothing written.
+- `history.sqlite*`, `chat-history.sqlite*` and `chat-data.backup-*` in the
+  data dir are secret files for every tool (`SECRET_FILE_PREFIXES`) and
+  write-guarded in case turns (`case-guard.js`). A chat that never moves is
+  backed up once, not on every start (`migration_backup` in the store's meta).
 - Schema changes are new entries in `SCHEMA_STEPS` (`src/history/schema.js`);
   never edit a released step.
 - `main.js` and `bin/king-louie-service.js` drop Node's SQLite
