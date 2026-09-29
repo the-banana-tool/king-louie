@@ -18,16 +18,27 @@ const PREVIEW_CHARS = 500;
 const normalizeId = (value) => String(value ?? '').trim();
 const textOrNull = (value) => (typeof value === 'string' && value ? value : null);
 
+// One pass over messages, grouped per chat, joined to each chat's preview
+// row: the last user/assistant message, or the last message of any kind.
 const LIST_SQL = `
+  WITH agg AS (
+    SELECT chat_id,
+      COUNT(*) AS message_count,
+      SUM(sender = 'user') AS user_count,
+      SUM(sender = 'assistant') AS assistant_count,
+      COALESCE(MAX(CASE WHEN sender IN ('user', 'assistant') THEN seq END), MAX(seq)) AS last_seq
+    FROM messages
+    GROUP BY chat_id
+  )
   SELECT c.*,
-    (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count,
-    (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id AND m.sender = 'user') AS user_count,
-    (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id AND m.sender = 'assistant') AS assistant_count,
-    COALESCE(
-      (SELECT MAX(seq) FROM messages m WHERE m.chat_id = c.id AND m.sender IN ('user', 'assistant')),
-      (SELECT MAX(seq) FROM messages m WHERE m.chat_id = c.id)
-    ) AS last_seq
+    COALESCE(a.message_count, 0) AS message_count,
+    COALESCE(a.user_count, 0) AS user_count,
+    COALESCE(a.assistant_count, 0) AS assistant_count,
+    substr(p.text, 1, ${PREVIEW_CHARS}) AS preview_text,
+    p.timestamp AS preview_at
   FROM chats c
+  LEFT JOIN agg a ON a.chat_id = c.id
+  LEFT JOIN messages p ON p.chat_id = c.id AND p.seq = a.last_seq
   ORDER BY c.position, c.rowid`;
 
 class HistoryStore {
@@ -132,18 +143,14 @@ class HistoryStore {
 
   listChats({ messages = false } = {}) {
     return this._stmt(LIST_SQL).all().map((row) => {
-      const last = row.last_seq
-        ? this._stmt('SELECT substr(text, 1, ?) AS text, timestamp FROM messages WHERE chat_id = ? AND seq = ?')
-          .get(PREVIEW_CHARS, row.id, row.last_seq)
-        : null;
       const chat = {
         ...rows.rowToChat(row),
         messageCount: Number(row.message_count),
         userMessageCount: Number(row.user_count),
         assistantMessageCount: Number(row.assistant_count),
-        preview: last?.text || '',
-        lastMessageText: last?.text || '',
-        lastMessageAt: last?.timestamp || null
+        preview: row.preview_text || '',
+        lastMessageText: row.preview_text || '',
+        lastMessageAt: row.preview_at || null
       };
       return messages ? { ...chat, messages: this._messagesFor(row.id) } : chat;
     });
@@ -225,8 +232,8 @@ class HistoryStore {
 
   deleteChat(id) {
     const key = normalizeId(id);
-    if (key) this._stmt('DELETE FROM chats WHERE id = ?').run(key);
-    return this.listChats();
+    if (!key) return false;
+    return Number(this._stmt('DELETE FROM chats WHERE id = ?').run(key).changes) > 0;
   }
 
   // ── messages ───────────────────────────────────────────────────────────

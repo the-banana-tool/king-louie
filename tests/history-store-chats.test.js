@@ -21,6 +21,7 @@ function memory() {
 }
 const msg = (id, sender, text, timestamp = '2026-09-29T10:00:00.000Z', extra = {}) => ({ id, sender, text, timestamp, ...extra });
 const withoutSeq = (messages) => messages.map(({ seq: _seq, ...m }) => m);
+const pick = (obj, keys) => Object.fromEntries(keys.filter((k) => k in obj).map((k) => [k, obj[k]]));
 const count = (store, table) => store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
 
 describe('HistoryStore chats', () => {
@@ -56,6 +57,55 @@ describe('HistoryStore chats', () => {
     const full = store.listChats({ messages: true });
     assert.deepStrictEqual(full[0].messages.map((m) => m.seq), [1, 2, 3, 4]);
     assert.deepStrictEqual(full[1].messages, []);
+  });
+
+  it('lists a multi-chat fixture exactly, with one statement however many chats there are', () => {
+    const store = memory();
+    store.createChat({
+      id: 'c1', title: 'Lakeside lot', pinned: true, llmTotals: { inputTokens: 3, outputTokens: 4, totalTokens: 7, costUsd: 0.001 },
+      createdAt: '2026-09-29T09:00:00.000Z', updatedAt: '2026-09-29T10:03:00.000Z',
+      messages: [
+        msg('m1', 'assistant', 'How can I help you?', '2026-09-29T10:00:00.000Z'),
+        msg('m2', 'user', 'remember the blue folder', '2026-09-29T10:01:00.000Z'),
+        msg('m3', 'toolUse', '', '2026-09-29T10:03:00.000Z', { toolName: 'Bash' })
+      ]
+    }, { position: 'back' });
+    store.createChat({ id: 'c2', title: 'Empty', createdAt: '2026-09-28T09:00:00.000Z' }, { position: 'back' });
+    store.createChat({
+      id: 'c3', title: 'Only tools', messages: [msg('t1', 'toolUse', 'ran it', '2026-09-27T10:00:00.000Z'), msg('t2', 'toolResult', 'done', '2026-09-27T10:00:01.000Z')]
+    }, { position: 'back' });
+    store.createChat({ id: 'c4', title: 'Front', messages: [msg('f1', 'user', 'y'.repeat(600), '2026-09-26T10:00:00.000Z')] }, { position: 'front' });
+
+    const statements = [];
+    const stmt = store._stmt.bind(store);
+    store._stmt = (sql) => { statements.push(sql); return stmt(sql); };
+    const listed = store.listChats();
+    store._stmt = stmt;
+
+    assert.strictEqual(statements.length, 1, 'no per-chat preview query');
+    assert.deepStrictEqual(listed, [
+      {
+        id: 'c4', title: 'Front', messageCount: 1, userMessageCount: 1, assistantMessageCount: 0,
+        preview: 'y'.repeat(500), lastMessageText: 'y'.repeat(500), lastMessageAt: '2026-09-26T10:00:00.000Z',
+        ...pick(listed[0], ['createdAt', 'updatedAt'])
+      },
+      {
+        id: 'c1', title: 'Lakeside lot', pinned: true, llmTotals: { inputTokens: 3, outputTokens: 4, totalTokens: 7, costUsd: 0.001 },
+        createdAt: '2026-09-29T09:00:00.000Z', updatedAt: '2026-09-29T10:03:00.000Z',
+        messageCount: 3, userMessageCount: 1, assistantMessageCount: 1,
+        preview: 'remember the blue folder', lastMessageText: 'remember the blue folder', lastMessageAt: '2026-09-29T10:01:00.000Z'
+      },
+      {
+        id: 'c2', title: 'Empty', createdAt: '2026-09-28T09:00:00.000Z', ...pick(listed[2], ['updatedAt']),
+        messageCount: 0, userMessageCount: 0, assistantMessageCount: 0, preview: '', lastMessageText: '', lastMessageAt: null
+      },
+      {
+        id: 'c3', title: 'Only tools', ...pick(listed[3], ['createdAt', 'updatedAt']),
+        messageCount: 2, userMessageCount: 0, assistantMessageCount: 0,
+        preview: 'done', lastMessageText: 'done', lastMessageAt: '2026-09-27T10:00:01.000Z'
+      }
+    ]);
+    assert.deepStrictEqual(store.listChats({ messages: true }).map((c) => [c.id, c.messages.length]), [['c4', 1], ['c1', 3], ['c2', 0], ['c3', 2]]);
   });
 
   it('cuts a long preview to 500 characters', () => {
@@ -162,14 +212,14 @@ describe('HistoryStore chats', () => {
     assert.deepStrictEqual(store.updateChatsWhere(() => true, () => null), []);
   });
 
-  it('deleteChat removes its messages and attachments and returns the remaining metadata', () => {
+  it('deleteChat removes its messages and attachments and says whether it deleted anything', () => {
     const store = memory();
     const image = { base64: Buffer.from('png').toString('base64'), mimeType: 'image/png' };
     store.createChat({ id: 'c1', title: 'One', messages: [msg('m1', 'user', 'x', 't', { images: [image] })] });
     store.createChat({ id: 'c2', title: 'Two' }, { position: 'back' });
-    const remaining = store.deleteChat('c1');
-    assert.deepStrictEqual(remaining.map((c) => c.id), ['c2']);
-    assert.strictEqual(remaining[0].messages, undefined);
+    assert.strictEqual(store.deleteChat('c1'), true);
+    assert.strictEqual(store.deleteChat('c1'), false);
+    assert.deepStrictEqual(store.listChats().map((c) => c.id), ['c2']);
     assert.strictEqual(count(store, 'messages'), 0);
     assert.strictEqual(count(store, 'attachments'), 0);
   });

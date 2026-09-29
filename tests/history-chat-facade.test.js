@@ -100,7 +100,7 @@ describe('createChatFacade', () => {
     f.createChat({ id: 'c1', title: 'One' });
     assert.strictEqual(f.updateChat('c1', { title: 'Renamed' }, { messages: false }).title, 'Renamed');
     assert.deepStrictEqual(f.listChats().map((c) => c.title), ['Renamed']);
-    assert.deepStrictEqual(f.deleteChat('c1'), []);
+    assert.strictEqual(f.deleteChat('c1'), true);
   });
 });
 

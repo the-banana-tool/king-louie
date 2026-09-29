@@ -182,11 +182,11 @@ function registerChatHandlers(ipcMain, context = {}) {
       if (!cleaned) return;
 
       patchChat(chatId, { title: cleaned, updatedAt: new Date().toISOString() });
-      const updated = listChats({ messages: false });
 
-      // Notify the renderer so the sidebar updates
+      // Notify the renderer so the sidebar updates. It reloads the list
+      // itself (renderer.js onChatUpdated ignores the payload).
       if (sender && !sender.isDestroyed()) {
-        sender.send('chat:updated', { chats: updated });
+        sender.send('chat:updated', { chatId });
       }
     } catch (err) {
       log.warn(`Failed to generate chat title: ${err.message}`);

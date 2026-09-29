@@ -1375,7 +1375,7 @@ function createCore(deps = {}) {
           messages: []
         };
         createChat(newChat);
-        ui.send('chat:updated', { chats: listChats({ messages: false }) });
+        ui.send('chat:updated', { chatId: newChat.id });
 
         return newChat.id;
       },
@@ -1387,7 +1387,7 @@ function createCore(deps = {}) {
         }, { returnChat: false });
         if (!appended) return;
 
-        ui.send('chat:updated', { chats: listChats({ messages: false }) });
+        ui.send('chat:updated', { chatId });
       }
     });
 
@@ -1445,7 +1445,7 @@ function createCore(deps = {}) {
         createChat(newChat);
 
         // Notify renderer if window exists
-        ui.send('chat:updated', { chats: listChats({ messages: false }) });
+        ui.send('chat:updated', { chatId: newChat.id });
 
         return newChat.id;
       },
@@ -1458,7 +1458,7 @@ function createCore(deps = {}) {
         if (!appended) return;
 
         // Notify renderer if window exists
-        ui.send('chat:updated', { chats: listChats({ messages: false }) });
+        ui.send('chat:updated', { chatId });
       }
     });
 
