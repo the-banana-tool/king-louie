@@ -52,11 +52,11 @@ New, under `src/history/` (Electron-free):
 | `sqlite-warning.js` | `suppressSqliteExperimentalWarning(proc?)` for the two hosts |
 | `index.js` | Re-exports |
 
-Also new: `src/migration/desktop-history.js` (desktop import reads a profile's `history.sqlite` through the safe reader), `tests/helpers/history-context.js`, `tests/helpers/close-history-stores.js`.
+Also new: `src/migration/desktop-history.js` (desktop import snapshots a profile's `history.sqlite` with `node:sqlite`'s online backup), `tests/helpers/history-context.js`, `tests/helpers/close-history-stores.js`.
 
 Deleted: `src/history/chat-history-store.js` (`JsonChatHistoryStore`), `src/history/sqlite-chat-history-store.js` (`SqliteChatHistoryStore`), `tests/history-store.test.js` (their tests).
 
-Modified: `src/core/create-core.js`, `src/core/model-choices.js`, `src/ipc/chat-handlers.js`, `src/ipc/canvas-handlers.js`, `src/ipc/case-handlers.js`, `src/ipc/workflow-handlers.js`, `src/migration/desktop-import.js`, `src/migration/desktop-source.js`, `src/service/cli.js`, `main.js`, `bin/king-louie-service.js`, `renderer.js`, `styles.css`, `CLAUDE.md`.
+Modified: `src/core/create-core.js`, `src/core/model-choices.js`, `src/ipc/chat-handlers.js`, `src/ipc/canvas-handlers.js`, `src/ipc/case-handlers.js`, `src/ipc/workflow-handlers.js`, `src/migration/desktop-import.js`, `src/migration/desktop-source.js`, `src/ipc/desktop-export.js`, `src/ipc/desktop-controller.js`, `src/service/commands/import.js`, `src/service/cli.js`, `main.js`, `bin/king-louie-service.js`, `renderer.js`, `styles.css`, `CLAUDE.md`.
 
 New tests: `tests/history-schema.test.js`, `tests/history-rows.test.js`, `tests/history-store-chats.test.js`, `tests/history-store-messages.test.js`, `tests/history-migrate-json.test.js`, `tests/history-chat-facade.test.js`, `tests/history-core.test.js`, `tests/history-no-legacy-chat-helpers.test.js`, `tests/renderer-history-lazy.test.js`, `tests/desktop-source-history.test.js`, `tests/history-sqlite-warning.test.js`, `tests/e2e/history.test.js`.
 
@@ -1822,7 +1822,7 @@ git commit -m "feat(history): move chat-data.json's chats into history.sqlite, o
   - `src/history/chat-facade.js`:
     - `createChatFacade({ historyStore, createId, now = () => new Date().toISOString() })` → `{ historyStore, listChats(options), getChat(id, options), createChat(chat, options), replaceChat(id, chat), upsertChat(chat, options), updateChat(id, patch, options), updateChatsWhere(predicate, patcher), deleteChat(id), getMessages(chatId, range), appendMessageToChat(chatId, sender, text, metadata = {}) → Chat|null, truncateChatFrom(chatId, seq) → Chat|null }`. The first nine delegate to the store with the same arguments.
     - `appendMessageToChat`: builds `{ id: createId(), sender, text, timestamp: now(), ...metadata }` where `metadata`'s `id`, `sender`, `timestamp` and `seq` are ignored; in one transaction reads the chat without messages (`null` if unknown), takes its stored `llmTotals` (or, for a chat without one, the totals of its stored messages), adds the new message's `llm.totals`, and calls `historyStore.appendMessage(chatId, message, { updatedAt: timestamp, patch: { llmTotals } })`; returns `getChat(chatId, { messages: true })`.
-    - `truncateChatFrom(chatId, seq)`: in one transaction `truncateFrom(chatId, seq)` and `updateChat(chatId, { updatedAt: now() }, { messages: false })`; returns the chat with messages, or `null` when unknown. `llmTotals` is not recomputed (as today's truncate).
+    - `truncateChatFrom(chatId, seq)`: in one transaction `truncateFrom(chatId, seq)` and `updateChat(chatId, { updatedAt: now() }, { messages: false })`; returns the chat with messages, or `null` when unknown. `llmTotals` is neither recomputed nor reduced: it is a record of spend, not a view of the remaining messages, so messages removed by a truncate stay counted (owner decision 2026-09-29), and later appends add to it.
     - `addLlmTotals(totals, message) → totals` and `chatLlmTotals(messages) → totals`, where `totals = { inputTokens, outputTokens, totalTokens, costUsd }` and `costUsd` is rounded with `toFixed(8)` at each step, exactly as today's `getChatLlmTotals` in `create-core.js`.
   - `src/history/unavailable-store.js`: `HistoryUnavailableError` (`code: 'HISTORY_UNAVAILABLE'`, `cause`), `createUnavailableHistoryStore(cause) → store` whose `listChats`, `getChat`, `createChat`, `replaceChat`, `upsertChat`, `updateChat`, `updateChatsWhere`, `deleteChat`, `appendMessage`, `truncateFrom`, `getMessages`, `messageCount`, `transaction`, `getMeta`, `setMeta` all throw it; `close()` does nothing; `isOpen` is `false`; `available` is `false`.
   - `src/history/index.js` exports `createChatFacade`, `addLlmTotals`, `chatLlmTotals`, `createUnavailableHistoryStore`, `HistoryUnavailableError`, `InvalidMessageError`, `DERIVED_CHAT_KEYS`, plus what it already exports.
@@ -1894,6 +1894,21 @@ describe('createChatFacade', () => {
     assert.deepStrictEqual(chat.messages.map((m) => m.text), ['a']);
     assert.notStrictEqual(chat.updatedAt, 'before');
     assert.strictEqual(f.truncateChatFrom('missing', 1), null);
+  });
+
+  it('truncateChatFrom keeps llmTotals: money already spent stays counted', () => {
+    const f = facade([{ id: 'c1', title: 'Chat', messages: [] }]);
+    f.appendMessageToChat('c1', 'user', 'q1');
+    f.appendMessageToChat('c1', 'assistant', 'a1', { llm: llm(100, 20, 0.5) });
+    f.appendMessageToChat('c1', 'user', 'q2');
+    const before = f.appendMessageToChat('c1', 'assistant', 'a2', { llm: llm(300, 40, 0.25) }).llmTotals;
+    const chat = f.truncateChatFrom('c1', 3);
+    assert.deepStrictEqual(chat.messages.map((m) => m.text), ['q1', 'a1']);
+    assert.deepStrictEqual(chat.llmTotals, before);
+    assert.deepStrictEqual(chat.llmTotals, { inputTokens: 400, outputTokens: 60, totalTokens: 460, costUsd: 0.75 });
+    assert.notDeepStrictEqual(chat.llmTotals, chatLlmTotals(chat.messages));
+    const next = f.appendMessageToChat('c1', 'assistant', 'a3', { llm: llm(1, 1, 0.25) });
+    assert.deepStrictEqual(next.llmTotals, { inputTokens: 401, outputTokens: 61, totalTokens: 462, costUsd: 1 });
   });
 
   it('delegates the chat calls to the store', () => {
@@ -2010,6 +2025,8 @@ function createChatFacade({ historyStore, createId, now = () => new Date().toISO
     return appended ? store.getChat(chatId, { messages: true }) : null;
   };
 
+  // llmTotals is a record of spend, not a view of the remaining messages:
+  // a truncate leaves it as it is, so money already spent stays counted.
   const truncateChatFrom = (chatId, seq) => {
     const done = store.transaction(() => {
       const chat = store.getChat(chatId, { messages: false });
@@ -3306,16 +3323,24 @@ git commit -m "feat(ui): keep only the active chat's messages in memory; say whe
 
 Without this, `king-louie-service import --from <desktop profile>` and the desktop's own Import would carry only chats still left in `chat-data.json`, which after H1 is none: every migrated chat would silently stay behind.
 
+The snapshot is taken with `node:sqlite`'s online backup API (`require('node:sqlite').backup(sourceDb, destPath)`, async, in Node 24.13) over a read-only connection to the profile's store, never a file copy: SQLite's backup reads a consistent snapshot even while the desktop app is writing, WAL included (owner decision 2026-09-29). Because `backup` is async, reading the history is a separate async step that the two callers (`import --from` and the desktop's Import) run before the synchronous `readDesktopSource`, which takes its result as `history`.
+
 **Files:**
 - Create: `src/migration/desktop-history.js`
-- Modify: `src/migration/desktop-source.js:180` (the `chats` line in `readDesktopSource`)
+- Modify: `src/migration/desktop-source.js` (`createSafeReader` gains `checkFile`; `readDesktopSource` takes `history` and uses it at the `chats` line, line 180)
+- Modify: `src/ipc/desktop-export.js:18-27` (`loadDesktopSource` becomes async and reads the history first)
+- Modify: `src/ipc/desktop-controller.js:396` (`await loadDesktopSource(...)`)
+- Modify: `src/service/commands/import.js:137-143` (reads the history before `readDesktopSource`)
+- Modify: `tests/desktop-export.test.js:104,124,135,214` (`await loadDesktopSource(...)`)
 - Test: `tests/desktop-source-history.test.js`
 
 **Interfaces:**
-- Consumes: `HistoryStore`, `DERIVED_CHAT_KEYS` (Tasks 1 to 6); the safe reader's `readFile(relPath) → { ok, data: Buffer } | { ok: false, missing?, reason }` (`createSafeReader` in `src/migration/desktop-source.js`).
+- Consumes: `HistoryStore` (its read-only `open` and `db`), `DERIVED_CHAT_KEYS` (Tasks 1 to 6); `backup` from `node:sqlite`; `createSafeReader` in `src/migration/desktop-source.js`.
 - Produces:
-  - `readHistoryChats({ reader, tmpRoot = os.tmpdir() }) → { found: boolean, chats: Chat[], attention: Array<{ category: 'source', key, note }> }`: reads `history.sqlite` (and `history.sqlite-wal` when present) through `reader`, writes them into a private `mkdtemp` folder under `tmpRoot`, opens the copy, returns every chat with its messages in position order (no derived listing fields, no `seq`), and removes the folder. A missing file is `found: false` with no attention; an unreadable or unopenable one is an attention entry and no chats.
-  - `readDesktopSource`'s chats: the history chats first, then `chat-data.json` chats whose ids the history does not have.
+  - The safe reader's `checkFile(relPath) → { ok: true, path } | { ok: false, missing?, reason }`: the same checks as `readFile` (every component below the root lstat'ed, no link or junction, owned by the root's owner off Windows, a regular file with one hard link) without reading the bytes, for a file that has to be opened by path.
+  - `readHistoryChats({ reader, tmpRoot = os.tmpdir(), backup = sqlite.backup }) → Promise<{ found: boolean, chats: Chat[], attention: Array<{ category: 'source', key, note }> }>`: checks `history.sqlite` with `reader.checkFile`, opens it with `HistoryStore.open(path, { readonly: true })`, snapshots it with `backup(source.db, <private mkdtemp folder under tmpRoot>/history.sqlite)`, closes the source, opens the snapshot read-only, returns every chat with its messages in position order (no derived listing fields, no `seq`), and removes the folder. A missing file is `found: false` with no attention; a refused file is `found: false` with an attention entry; an unopenable or unreadable one is `found: true`, an attention entry and no chats.
+  - `readDesktopSource({ ..., history = null })`: when `history` is given, the chats are `history.chats` first, then `chat-data.json` chats whose ids the history does not have, and `history.attention` joins the source's attention. Without it (the existing callers' tests), chats come from `chat-data.json` alone.
+  - `loadDesktopSource(...) → Promise<source>` (was synchronous).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3323,13 +3348,15 @@ Create `tests/desktop-source-history.test.js`:
 
 ```js
 // tests/desktop-source-history.test.js
-// Desktop import reads a profile's chats from history.sqlite, through the
-// safe reader and a private copy, plus any chats still in chat-data.json.
+// Desktop import reads a profile's chats from history.sqlite, through a
+// read-only connection and node:sqlite's online backup into a private
+// snapshot, plus any chats still in chat-data.json.
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const sqlite = require('node:sqlite');
 const { HistoryStore } = require('../src/history');
 const { createSafeReader, readDesktopSource } = require('../src/migration/desktop-source');
 const { readHistoryChats } = require('../src/migration/desktop-history');
@@ -3346,9 +3373,16 @@ function tempDir(prefix) {
   return dir;
 }
 const msg = { id: 'm1', sender: 'user', text: 'the Lakeside lot', timestamp: '2026-09-20T10:00:00.000Z' };
+const msgN = (i, prefix) => ({ id: `${prefix}-${i}`, sender: i % 2 ? 'assistant' : 'user', text: `note ${i} about the Lakeside lot`, timestamp: '2026-09-20T10:00:00.000Z' });
+
+async function readSource(root) {
+  const reader = createSafeReader({ root });
+  const history = await readHistoryChats({ reader, tmpRoot: tempDir('kl-copy-') });
+  return readDesktopSource({ userDataDir: root, reader, secrets: 'needs-desktop', history });
+}
 
 describe('desktop import and history.sqlite', () => {
-  it('reads chats from history.sqlite and the ones still in chat-data.json', () => {
+  it('reads chats from history.sqlite and the ones still in chat-data.json', async () => {
     const root = tempDir('kl-desktop-');
     const store = HistoryStore.open(path.join(root, 'history.sqlite'));
     store.createChat({ id: 'c1', title: 'Moved', updatedAt: '2026-09-20T10:00:00.000Z', messages: [msg] });
@@ -3357,7 +3391,7 @@ describe('desktop import and history.sqlite', () => {
       chats: [{ id: 'left', title: 'Left behind', messages: [] }, { id: 'c1', title: 'Stale copy', messages: [] }]
     }));
 
-    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    const source = await readSource(root);
 
     assert.deepStrictEqual(source.inventory.chats.map((c) => [c.id, c.title]), [['c1', 'Moved'], ['left', 'Left behind']]);
     const value = source.getValue('chat', 'c1');
@@ -3366,41 +3400,83 @@ describe('desktop import and history.sqlite', () => {
     assert.deepStrictEqual(source.attention, []);
   });
 
-  it('includes what is still in the WAL of a store that is open', () => {
+  it('a backup of a store with an open writer connection yields all chats', async () => {
     const root = tempDir('kl-desktop-');
     const live = HistoryStore.open(path.join(root, 'history.sqlite'));
     stores.push(live);
-    live.createChat({ id: 'fresh', title: 'Not checkpointed', messages: [msg] });
-    const { chats, attention } = readHistoryChats({ reader: createSafeReader({ root }), tmpRoot: tempDir('kl-copy-') });
-    assert.deepStrictEqual(chats.map((c) => c.id), ['fresh']);
+    live.createChat({ id: 'first', title: 'Checkpointed', messages: [msg] });
+    live.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    live.createChat({ id: 'fresh', title: 'Only in the WAL', messages: Array.from({ length: 50 }, (_, i) => msgN(i, 'fresh')) });
+    for (let i = 0; i < 20; i += 1) live.createChat({ id: `more-${i}`, title: `More ${i}`, messages: [msgN(i, `more-${i}`)] });
+
+    const { found, chats, attention } = await readHistoryChats({ reader: createSafeReader({ root }), tmpRoot: tempDir('kl-copy-') });
+
+    assert.strictEqual(found, true);
     assert.deepStrictEqual(attention, []);
+    assert.strictEqual(chats.length, 22);
+    assert.deepStrictEqual(chats.map((c) => c.id).sort(), live.listChats().map((c) => c.id).sort());
+    assert.strictEqual(chats.find((c) => c.id === 'fresh').messages.length, 50);
+    // The writer is untouched and keeps writing.
+    live.createChat({ id: 'after', title: 'After the import', messages: [] });
+    assert.ok(live.getChat('after'));
   });
 
-  it('removes its private copy', () => {
+  it('snapshots with node:sqlite backup over a read-only connection, never reading the file as bytes', async () => {
+    const root = tempDir('kl-desktop-');
+    const store = HistoryStore.open(path.join(root, 'history.sqlite'));
+    store.createChat({ id: 'c1', title: 'One', messages: [msg] });
+    store.close();
+    const calls = [];
+    const backup = async (db, dest) => {
+      calls.push(dest);
+      assert.throws(() => db.exec("INSERT INTO meta (key, value) VALUES ('probe', 'x')"), /readonly|read-only/i);
+      return sqlite.backup(db, dest);
+    };
+    const reader = { ...createSafeReader({ root }), readFile: () => assert.fail('history.sqlite is never read as bytes') };
+    const { chats } = await readHistoryChats({ reader, tmpRoot: tempDir('kl-copy-'), backup });
+    assert.strictEqual(calls.length, 1);
+    assert.deepStrictEqual(chats.map((c) => c.id), ['c1']);
+  });
+
+  it('removes its private snapshot', async () => {
     const root = tempDir('kl-desktop-');
     const store = HistoryStore.open(path.join(root, 'history.sqlite'));
     store.createChat({ id: 'c1', title: 'One', messages: [] });
     store.close();
     const tmpRoot = tempDir('kl-copy-');
-    readHistoryChats({ reader: createSafeReader({ root }), tmpRoot });
+    await readHistoryChats({ reader: createSafeReader({ root }), tmpRoot });
     assert.deepStrictEqual(fs.readdirSync(tmpRoot), []);
   });
 
-  it('reports an unreadable history.sqlite and still reads chat-data.json', () => {
+  it('reports an unreadable history.sqlite and still reads chat-data.json', async () => {
     const root = tempDir('kl-desktop-');
     fs.writeFileSync(path.join(root, 'history.sqlite'), 'invented text that is not a database '.repeat(40));
     fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ chats: [{ id: 'left', title: 'Left behind', messages: [] }] }));
-    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    const source = await readSource(root);
     assert.deepStrictEqual(source.inventory.chats.map((c) => c.id), ['left']);
     assert.strictEqual(source.attention.length, 1);
     assert.strictEqual(source.attention[0].key, 'history.sqlite');
     assert.match(source.attention[0].note, /could not be read/);
   });
 
-  it('reads chat-data.json alone for a profile that never had history.sqlite', () => {
+  it('refuses a history.sqlite with a second hard link and never opens it', async () => {
+    const root = tempDir('kl-desktop-');
+    const store = HistoryStore.open(path.join(root, 'history.sqlite'));
+    store.createChat({ id: 'c1', title: 'One', messages: [] });
+    store.close();
+    fs.linkSync(path.join(root, 'history.sqlite'), path.join(tempDir('kl-elsewhere-'), 'linked.sqlite'));
+    const { found, chats, attention } = await readHistoryChats({ reader: createSafeReader({ root }), tmpRoot: tempDir('kl-copy-') });
+    assert.strictEqual(found, false);
+    assert.deepStrictEqual(chats, []);
+    assert.strictEqual(attention.length, 1);
+    assert.strictEqual(attention[0].key, 'history.sqlite');
+    assert.match(attention[0].note, /hard links/);
+  });
+
+  it('reads chat-data.json alone for a profile that never had history.sqlite', async () => {
     const root = tempDir('kl-desktop-');
     fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ chats: [{ id: 'old', title: 'Old', messages: [] }] }));
-    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    const source = await readSource(root);
     assert.deepStrictEqual(source.inventory.chats.map((c) => c.id), ['old']);
     assert.deepStrictEqual(source.attention, []);
   });
@@ -3412,21 +3488,49 @@ describe('desktop import and history.sqlite', () => {
 Run: `node --test tests/desktop-source-history.test.js`
 Expected: FAIL with `Cannot find module '../src/migration/desktop-history'`.
 
-- [ ] **Step 3: Write `src/migration/desktop-history.js`**
+- [ ] **Step 3: Add `checkFile` to the safe reader**
+
+In `src/migration/desktop-source.js`, inside `createSafeReader`, after `readFile`:
+
+```js
+  // For a file that has to be opened by path (history.sqlite, which SQLite
+  // opens itself): readFile's checks without reading the bytes. The open
+  // that follows goes by path, so a link swapped in after this check is a
+  // residual this narrows but cannot close.
+  function checkFile(rel) {
+    const r = check(rel);
+    if (r.missing) return { ok: false, missing: true };
+    if (r.refused) return { ok: false, reason: r.refused };
+    if (!r.stat.isFile()) return { ok: false, reason: `${r.path} is not a regular file` };
+    if (r.stat.nlink > 1) return { ok: false, reason: `${r.path} has ${r.stat.nlink} hard links` };
+    return { ok: true, path: r.path };
+  }
+```
+
+and change the reader's return (line 151) to:
+
+```js
+  return { root: rootPath, readFile, checkFile, listDir, listFiles };
+```
+
+- [ ] **Step 4: Write `src/migration/desktop-history.js`**
 
 ```js
 // src/migration/desktop-history.js
 // Desktop import (fleet stage 7 §3.8) reads a profile's chats from its
-// history.sqlite (recall spec stage H1). The file is read through the same
-// safe reader as every other profile file, copied with its WAL into a
-// private temp folder, and opened there: the profile's own file is never
-// opened by path (the reader may run as root over a user-owned tree). A copy
-// taken while the desktop app is writing can be unreadable or a little
-// stale; unreadable is reported, and closing the app and importing again
-// reads it whole.
+// history.sqlite (recall spec stage H1). The file is checked with the safe
+// reader's checkFile, opened read-only, and snapshotted with node:sqlite's
+// online backup API into a private temp folder, which is then opened and
+// read. The backup reads a consistent snapshot even while the desktop app
+// is writing (WAL included), which a byte copy of the file and its WAL
+// cannot promise. A read-only open of a WAL database can leave its -wal and
+// -shm files beside it (SQLite needs its shared-memory index); run as root,
+// SQLite gives them the database file's owner, and the desktop's next open
+// uses them as usual.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const sqlite = require('node:sqlite');
 const { HistoryStore, DERIVED_CHAT_KEYS } = require('../history');
 
 function forImport(chat) {
@@ -3436,23 +3540,24 @@ function forImport(chat) {
   return out;
 }
 
-function readHistoryChats({ reader, tmpRoot = os.tmpdir() }) {
+async function readHistoryChats({ reader, tmpRoot = os.tmpdir(), backup = sqlite.backup }) {
   const attention = [];
-  const main = reader.readFile('history.sqlite');
-  if (!main.ok) {
-    if (!main.missing) attention.push({ category: 'source', key: 'history.sqlite', note: main.reason });
+  const checked = reader.checkFile('history.sqlite');
+  if (!checked.ok) {
+    if (!checked.missing) attention.push({ category: 'source', key: 'history.sqlite', note: checked.reason });
     return { found: false, chats: [], attention };
   }
   const dir = fs.mkdtempSync(path.join(tmpRoot, 'kl-import-history-'));
-  let store = null;
+  let source = null;
+  let snapshot = null;
   try {
     const file = path.join(dir, 'history.sqlite');
-    fs.writeFileSync(file, main.data, { mode: 0o600 });
-    const wal = reader.readFile('history.sqlite-wal');
-    if (wal.ok) fs.writeFileSync(`${file}-wal`, wal.data, { mode: 0o600 });
-    else if (!wal.missing) attention.push({ category: 'source', key: 'history.sqlite-wal', note: wal.reason });
-    store = HistoryStore.open(file);
-    return { found: true, chats: store.listChats({ messages: true }).map(forImport), attention };
+    source = HistoryStore.open(checked.path, { readonly: true });
+    await backup(source.db, file);
+    source.close();
+    source = null;
+    snapshot = HistoryStore.open(file, { readonly: true });
+    return { found: true, chats: snapshot.listChats({ messages: true }).map(forImport), attention };
   } catch (err) {
     attention.push({
       category: 'source',
@@ -3461,7 +3566,8 @@ function readHistoryChats({ reader, tmpRoot = os.tmpdir() }) {
     });
     return { found: true, chats: [], attention };
   } finally {
-    if (store) store.close();
+    if (source) source.close();
+    if (snapshot) snapshot.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -3469,12 +3575,18 @@ function readHistoryChats({ reader, tmpRoot = os.tmpdir() }) {
 module.exports = { readHistoryChats };
 ```
 
-- [ ] **Step 4: Use it in `src/migration/desktop-source.js`**
+- [ ] **Step 5: Use it in `src/migration/desktop-source.js`**
 
-Add to the requires:
+Change the signature (line 153):
 
 ```js
-const { readHistoryChats } = require('./desktop-history');
+function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop' }) {
+```
+
+to:
+
+```js
+function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null }) {
 ```
 
 Replace line 180:
@@ -3488,26 +3600,99 @@ with:
 ```js
   // Since history stage H1 a profile's chats live in history.sqlite; any
   // that could not be migrated are still in chat-data.json. The store wins
-  // for an id both hold.
-  const history = readHistoryChats({ reader });
-  attention.push(...history.attention);
-  const historyIds = new Set(history.chats.map((c) => c.id));
+  // for an id both hold. `history` is readHistoryChats' result, read by the
+  // caller first because node:sqlite's backup is async.
+  const historyChats = history ? history.chats : [];
+  if (history) attention.push(...history.attention);
+  const historyIds = new Set(historyChats.map((c) => c.id));
   const chats = [
-    ...history.chats,
+    ...historyChats,
     ...arr(chatData.chats).filter((c) => c && typeof c.id === 'string' && c.id && !historyIds.has(c.id))
   ];
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 6: The two callers read the history first**
 
-Run: `node --test tests/desktop-source-history.test.js tests/desktop-import-source.test.js tests/desktop-export.test.js tests/electron-boundary.test.js`
+In `src/ipc/desktop-export.js`, add to the requires:
+
+```js
+const { readHistoryChats } = require('../migration/desktop-history');
+```
+
+and replace `loadDesktopSource` (lines 18-27) with:
+
+```js
+async function loadDesktopSource({ userDataDir, safeStorage, platform = process.platform }) {
+  const usable = secureStorageUsable(safeStorage, platform);
+  const cipher = usable ? createSafeStorageCipher(safeStorage) : null;
+  const reader = createSafeReader({ root: userDataDir, platform });
+  const history = await readHistoryChats({ reader });
+  return readDesktopSource({
+    userDataDir,
+    reader,
+    decrypt: cipher ? (encrypted) => cipher.decryptString(encrypted) : null,
+    secrets: usable ? 'included' : 'unavailable',
+    history
+  });
+}
+```
+
+In `src/ipc/desktop-controller.js` line 396, replace:
+
+```js
+      const source = loadDesktopSource({ userDataDir, safeStorage, platform });
+```
+
+with:
+
+```js
+      const source = await loadDesktopSource({ userDataDir, safeStorage, platform });
+```
+
+In `tests/desktop-export.test.js`, each of the four `const source = loadDesktopSource(` lines (104, 124, 135, 214, all inside `async` tests) becomes `const source = await loadDesktopSource(`.
+
+In `src/service/commands/import.js`, add to the requires:
+
+```js
+const { readHistoryChats } = require('../../migration/desktop-history');
+```
+
+and replace lines 137-143:
+
+```js
+  let source;
+  try {
+    source = readDesktopSource({ userDataDir: from, reader: createSafeReader({ root: from, platform }), decrypt: null, secrets: 'needs-desktop' });
+  } catch (err) {
+    io.stderr.write(`Cannot read ${from}: ${err.message}\n`);
+    return 1;
+  }
+```
+
+with:
+
+```js
+  let source;
+  try {
+    const reader = createSafeReader({ root: from, platform });
+    const history = await readHistoryChats({ reader });
+    source = readDesktopSource({ userDataDir: from, reader, decrypt: null, secrets: 'needs-desktop', history });
+  } catch (err) {
+    io.stderr.write(`Cannot read ${from}: ${err.message}\n`);
+    return 1;
+  }
+```
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `node --test tests/desktop-source-history.test.js tests/desktop-import-source.test.js tests/desktop-export.test.js tests/desktop-cli.test.js tests/electron-boundary.test.js`
 Expected: PASS, `# fail 0`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/migration/desktop-history.js src/migration/desktop-source.js tests/desktop-source-history.test.js
-git commit -m "fix(import): desktop import reads chats from history.sqlite through a private copy"
+git add src/migration/desktop-history.js src/migration/desktop-source.js src/ipc/desktop-export.js src/ipc/desktop-controller.js src/service/commands/import.js tests/desktop-source-history.test.js tests/desktop-export.test.js
+git commit -m "fix(import): desktop import reads chats from history.sqlite through an online backup"
 ```
 
 ---
@@ -3824,7 +4009,7 @@ Not in H1 by design (later stages add them as schema steps and code): chunks, FT
 - `chat:load` falls back to the first chat when the stored `activeChatId` names none, without writing that choice back.
 - A read-only `open` refuses a file whose schema is older or newer than this build's.
 
-## Open questions
+## Decisions (2026-09-29)
 
-1. **Desktop import (Task 11).** The H1 scope did not name it, but without Task 11 every migrated chat silently drops out of `import --from` and the desktop's Import. The plan reads the profile's `history.sqlite` through the safe reader into a private copy. A copy taken while the desktop app is writing can come out unreadable (reported, "close King Louie and import again") or, rarely, miss the last few writes if a checkpoint lands mid-copy (not detected). Is that acceptable, or should Import require the desktop's own core to be stopped first?
-2. **Truncate and `llmTotals`.** Today a truncate keeps the chat's `llmTotals` (money already spent stays counted), and the plan keeps that. Should the chat info popover instead show only the cost of the messages still in the chat?
+1. **Desktop import (Task 11).** Task 11 stays. It snapshots the profile's `history.sqlite` with `node:sqlite`'s online backup API over a read-only connection, not a file copy, so a snapshot taken while the desktop app is writing is consistent. Test: a backup of a store with an open writer connection yields all chats.
+2. **Truncate and `llmTotals`.** `llmTotals` keeps counting messages removed by a truncate: it is a record of spend, not a view of the remaining messages. `truncateChatFrom` never recomputes it (Task 6 test).

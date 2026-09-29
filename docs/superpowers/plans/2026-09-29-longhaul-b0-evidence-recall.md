@@ -4211,10 +4211,10 @@ git commit -m "feat(longhaul): stratified, seeded sampling of authoring spans by
     - Rejection reasons are `model-error`, `unparsed`, `model-skipped`, `evidence-outside-span` and `invalid`.
     - Candidates are normalized with `authoredBy: 'generated'` and `verifiedBy: null`. For `abstain`, the evidence is forced to `[]` and the answer to `not in the session`.
     - Ids continue the session's `<sessionId>-gNNNN` series.
-  - CLI `longhaul author --session <id> --provider <p> --model <m> [--base-url <url>] [--count 60] [--seed 1]`:
+  - CLI `longhaul author --session <id> --provider <p> --model <m> [--base-url <url>] [--count 60] [--seed 1] [--send-private]`:
     - It appends candidates to `questions/<id>.jsonl`.
     - It appends one line to `questions/<id>.author-log.jsonl`: `{ at, prompt, promptSha256, provider, model, seed, count, planned, shortfall, written, rejected: { [reason]: n } }`.
-    - It prints a note on stderr when the session is private (its spans are sent to the provider).
+    - For a private session it refuses, before creating the model client and before any model call, unless `--send-private` is passed: `UsageError` (exit 2) naming the session, the provider and the flag; nothing is written. With `--send-private` it prints a note on stderr that the session's spans are sent to the provider (owner decision 2026-09-29).
     - Anchors already used as evidence by existing questions are excluded, so a second run with a new `--seed` adds different questions.
 
 - [ ] **Step 1: Write the prompt file**
@@ -4292,6 +4292,13 @@ function scripted(reply = fakeReply) {
       return { text: reply(prompt, prompts.length) };
     }
   };
+}
+
+// Marks a synthetic session private, as `longhaul import` would a real one.
+function makePrivate(root, sessionId) {
+  const file = path.join(root, 'sessions', sessionId, 'manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, `${JSON.stringify({ ...manifest, private: true, license: 'private' }, null, 2)}\n`);
 }
 
 const gen = generateSynthetic(SYNTH_FIXTURES[1]);
@@ -4410,6 +4417,42 @@ describe('longhaul author CLI', () => {
     assert.strictEqual(log[0].seed, 2);
     assert.deepStrictEqual(await readQuestions(questionsFile(root, 'synth-small')), before);
     assert.match(stdout.text, /longhaul verify --session synth-small/);
+  });
+
+  it('refuses a private session without --send-private: exit 2, no model call, nothing written', async () => {
+    const { env, root } = tmpHome();
+    writeSyntheticRoot(root, [SYNTH_FIXTURES[0]]);
+    makePrivate(root, 'synth-small');
+    const before = await readQuestions(questionsFile(root, 'synth-small'));
+    const stderr = sink();
+    const calls = server.requests.length;
+    const code = await main([
+      'author', '--session', 'synth-small', '--provider', 'openai', '--model', 'test-model',
+      '--base-url', `${server.url}/openai/v1`, '--count', '6'
+    ], { stdout: sink(), stderr, env: { ...env, OPENAI_API_KEY: 'test-key-123456' } });
+    assert.strictEqual(code, 2);
+    assert.match(stderr.text, /synth-small is private/);
+    assert.match(stderr.text, /--send-private/);
+    assert.strictEqual(server.requests.length, calls, 'no span reached a model');
+    assert.ok(!fs.existsSync(path.join(root, 'questions', 'synth-small.author-log.jsonl')));
+    assert.deepStrictEqual(await readQuestions(questionsFile(root, 'synth-small')), before);
+  });
+
+  it('with --send-private, authors a private session and says its spans go to the provider', async () => {
+    const { env, root } = tmpHome();
+    writeSyntheticRoot(root, [SYNTH_FIXTURES[0]]);
+    makePrivate(root, 'synth-small');
+    const stderr = sink();
+    const calls = server.requests.length;
+    const code = await main([
+      'author', '--session', 'synth-small', '--provider', 'openai', '--model', 'test-model',
+      '--base-url', `${server.url}/openai/v1`, '--count', '6', '--send-private'
+    ], { stdout: sink(), stderr, env: { ...env, OPENAI_API_KEY: 'test-key-123456' } });
+    assert.strictEqual(code, 0, stderr.text);
+    assert.ok(server.requests.length > calls, 'the spans went to the provider');
+    assert.match(stderr.text, /spans of private session synth-small are sent to openai \(test-model\)/);
+    const log = fs.readFileSync(path.join(root, 'questions', 'synth-small.author-log.jsonl'), 'utf8').trim().split('\n');
+    assert.strictEqual(log.length, 1);
   });
 });
 ```
@@ -4542,7 +4585,10 @@ module.exports = { DEFAULT_PROMPT, KIND_RULES, fillPrompt, parseReply, authorCan
 
 ```js
 'use strict';
-// `longhaul author --session <id> --provider <p> --model <m> [--base-url <url>] [--count 60] [--seed 1]`
+// `longhaul author --session <id> --provider <p> --model <m> [--base-url <url>] [--count 60] [--seed 1] [--send-private]`
+// A private session's spans go to the model provider only with
+// --send-private (owner decision 2026-09-29); without it the command refuses
+// before it builds a model client, so nothing leaves the machine.
 const fs = require('fs');
 const path = require('path');
 const { loadSession, sessionDir } = require('../session-format');
@@ -4553,7 +4599,7 @@ const { createModelClient } = require('../model');
 const { positiveInt } = require('./run');
 const { UsageError } = require('../errors');
 
-const USAGE = 'Usage: longhaul author --session <id> --provider <provider> --model <model> [--base-url <url>] [--count 60] [--seed 1]';
+const USAGE = 'Usage: longhaul author --session <id> --provider <provider> --model <model> [--base-url <url>] [--count 60] [--seed 1] [--send-private]';
 
 module.exports = {
   options: {
@@ -4562,7 +4608,8 @@ module.exports = {
     model: { type: 'string' },
     'base-url': { type: 'string' },
     count: { type: 'string' },
-    seed: { type: 'string' }
+    seed: { type: 'string' },
+    'send-private': { type: 'boolean' }
   },
   async run(ctx, values) {
     if (!values.session || !values.provider || !values.model) throw new UsageError(USAGE);
@@ -4570,18 +4617,26 @@ module.exports = {
     const seed = values.seed ? positiveInt(values.seed, 'seed') : 1;
     const dir = sessionDir(ctx.home.root, values.session);
     if (!fs.existsSync(path.join(dir, 'manifest.json'))) throw new UsageError(`No session "${values.session}"; import it first.`);
+
+    const session = await loadSession(dir);
+    if (session.manifest.private && values['send-private'] !== true) {
+      throw new UsageError(
+        `Session ${values.session} is private: authoring would send spans of it to ${values.provider} (${values.model}). `
+        + 'Pass --send-private to allow that.',
+        'PRIVATE_SESSION'
+      );
+    }
     const client = createModelClient({
       provider: values.provider, model: values.model, env: ctx.env,
       options: values['base-url'] ? { baseUrl: values['base-url'] } : {}
     });
+    if (session.manifest.private) {
+      ctx.stderr.write(`note: spans of private session ${values.session} are sent to ${values.provider} (${values.model}) to author questions (--send-private).\n`);
+    }
 
-    const session = await loadSession(dir);
     const file = questionsFile(ctx.home.root, values.session);
     const existing = await readQuestions(file);
     const plan = planAuthoring(session.index, { count, seed, excludeSeqs: existing.flatMap((q) => q.evidenceSeqs || []) });
-    if (session.manifest.private) {
-      ctx.stderr.write(`note: spans of private session ${values.session} are sent to ${values.provider} (${values.model}) to author questions.\n`);
-    }
     const out = await authorCandidates({ session, plan, client, sessionId: values.session, existing });
     writeQuestions(file, [...existing, ...out.candidates]);
 
@@ -5061,6 +5116,8 @@ Electron build.
 - `longhaul author` calls a real model with a key from the environment
   (`OPENAI_API_KEY`, …, through `ProviderFactory.fromEnv`). Unit tests inject a
   fake client or point `--base-url` at `tests/helpers/fake-llm-server.js`.
+  It refuses a private session (exit 2) unless `--send-private` is passed,
+  since that sends spans of the session to the provider.
 ```
 
 - [ ] **Step 2: Run the smoke in CI**
@@ -5128,10 +5185,10 @@ Expected: `imported E: …` with about 11,900 messages, about 700 from the user,
 Pick the authoring provider and model, set its key in the environment, and run:
 
 ```bash
-OPENAI_API_KEY=<key> node bin/longhaul.js author --session E --provider <provider> --model <model> --count 60 --seed 1
+OPENAI_API_KEY=<key> node bin/longhaul.js author --session E --provider <provider> --model <model> --count 60 --seed 1 --send-private
 ```
 
-The command prints a note that spans of the private session go to that provider (see Open question 1). Check the `short of the target` and `rejected` counts. To add more candidates later, run it again with `--seed 2`. It appends, and it skips anchors already used as evidence.
+Session E is private, so `author` refuses without `--send-private`; with it, the command prints a note that spans of the session go to that provider (Decision 1). Check the `short of the target` and `rejected` counts. To add more candidates later, run it again with `--seed 2`. It appends, and it skips anchors already used as evidence.
 
 - [ ] **Step 5: Verify to at least 40, with at least 5 abstain and 5 superseded**
 
@@ -5160,10 +5217,10 @@ This plan uses the H1/H2 contract exactly, with these readings, each pinned by a
 - **Module shape.** Named exports and `new` are assumed for `TokenEstimator`, `Retriever`, `ContextBuilder` and `chunkMessage`. `chunkMessage` gets `settings.history.chunk` as its options. If H2 differs, only the `require` lines and those two call sites in `adapters/kl-recall.js` change.
 - **Token estimate.** LongHaul's `estimateTokens` must equal `TokenEstimator`'s uncalibrated estimate (Task 8 test). When they disagree, LongHaul follows H2.
 
-## Open questions
+## Decisions (2026-09-29)
 
-1. **Private spans sent to a model provider.** `longhaul author` sends spans of a private session to the authoring provider. Spec §10.1 forbids private content in the repository, a release or a report, but does not mention model calls. B0 prints a note and proceeds. Should `author` instead require an explicit flag for private sessions, or allow only certain providers?
-2. **`sliding-window` window size.** B0 defaults it to the recalled budget plus the 6,000-token tail budget (12,000 at a 6K budget), which is the most `kl-recall` can show. The alternative is the recalled budget alone. `--window-tokens` overrides either way. Which is the baseline you want reported?
-3. **Harness-injected `isMeta` user records** (skill text, command caveats) are imported as `status`, so `askAtSeq` never lands on them and recall does not index them. Recall spec §10.2 does not mention them. Keep this, or import them as user text?
-4. **Recency's "now".** Resolved in cross-plan review (2026-09-29): H2's `build` measures ages from the timestamp of message `upToSeq` when it exists, which in LongHaul's temp store is the message at `askAtSeq`; `kl-recall` passes the question text as `message` (a string, as H2's `build` expects).
-5. **`verifiedBy: "synthetic"`.** The validator accepts it for generator questions, which are correct by construction, so the CI smoke run needs no `--include-unverified`. Spec §5 lists only `human:<initials>` and `null`. Keep the extension?
+1. **Private spans sent to a model provider.** `longhaul author` refuses to send any span of a private session to a model unless `--send-private` is passed: without it, it exits 2 with a message naming the session, the provider and the flag, before any model call, and writes nothing. With it, it prints a note and proceeds. Task 12 (command and both paths tested), Task 14 (CLAUDE.md), Task 15 (runbook).
+2. **`sliding-window` window size.** The default stays the recalled budget plus the tail budget (12,000 at a 6K budget), equal to what `kl-recall` can show. `--window-tokens` overrides it.
+3. **Harness-injected `isMeta` user records** stay imported as `status`: not indexed, and `askAtSeq` never lands on them.
+4. **Recency's "now".** Resolved in cross-plan review: H2's `build` measures ages from the timestamp of message `upToSeq` when it exists, which in LongHaul's temp store is the message at `askAtSeq`; `kl-recall` passes the question text as `message` (a string, as H2's `build` expects).
+5. **`verifiedBy: "synthetic"`** stays, for generator questions, which are correct by construction.

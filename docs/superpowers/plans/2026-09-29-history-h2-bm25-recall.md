@@ -17,7 +17,7 @@
 - Log through `createLogger` from `src/logging.js`; no bare `console.*` in `src/`.
 - Open source: invented fixture values only (`Lakeside lot`, `4417`, `example.com`); no personal names, paths or domains. Unit tests never touch the network.
 - Use the glossary: a **chunk** is the indexed unit; an **excerpt** is what the model is shown from one message (adjacent chunks merged under a `[#seq · sender · age]` header); the **tail** is the verbatim recent messages; the **recalled block** is `<recalled_history>…</recalled_history>`; **recall** is the whole feature, **retrieval** the ranking step; **provenance** is the `context` record on an assistant message.
-- FTS table: `CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='chunks', content_rowid='id', tokenize = "unicode61 tokenchars '_-./'")`, kept in step by triggers. No stemming.
+- FTS table: `CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='chunks', content_rowid='id', tokenize = "unicode61 tokenchars '_-.'")`, kept in step by triggers. No stemming. `/` is a separator (owner decision 2026-09-29): a path splits on `/`, so a file name matches alone and the full path matches as a phrase.
 - Chunk kinds: `user | assistant | tool_use | tool_result | attachment | summary`. `status` messages are indexed only with `meta.compaction === true` (kind `summary`, owner decision 2026-09-29).
 - Settings namespace is `history` (not `retrieval`). H2 keys and defaults, verbatim from §14:
   `history.recall = { enabled: true, tailMessages: 8, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true, recalledTokens: 6000, queryUserTurns: 2, bm25TopK: 50, rrfK: 60, kindWeights: { user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 }, recencyWeight: 0.3, recencyHalfLifeDays: 30, maxChunksPerMessage: 4 }`, `history.chunk = { targetChars: 1500, minChars: 40 }`, `history.readHistoryMaxTokens = 8000`.
@@ -73,7 +73,7 @@ Modified: `src/history/schema.js`, `src/history/history-store.js`, `src/history/
 
 New elsewhere: `src/tools/builtin/history-tools.js`, `src/ipc/history-handlers.js`, `tests/helpers/history-fixture.js`, `tests/helpers/fake-embedder.js`.
 
-Deleted: `src/context/conversation-compactor.js`, `tests/conversation-compactor.test.js`.
+Deleted: `src/context/conversation-compactor.js`, `tests/conversation-compactor.test.js`, `bodies-of-the-gods.md`.
 
 New tests: `tests/history-settings.test.js`, `tests/history-chunker.test.js`, `tests/history-index.test.js`, `tests/history-backfill.test.js`, `tests/history-search.test.js`, `tests/history-token-estimator.test.js`, `tests/history-excerpts.test.js`, `tests/history-retriever.test.js`, `tests/history-context-builder.test.js`, `tests/providers-system-dynamic.test.js`, `tests/history-tools.test.js`, `tests/history-core.test.js`, `tests/history-workflows.test.js`, `tests/history-ipc.test.js`, `tests/renderer-history-text.test.js`, `tests/fake-embedder.test.js`, `tests/e2e/history-recall.test.js`.
 
@@ -286,7 +286,7 @@ git commit -m "feat(history): history settings namespace for recall"
 - Consumes: nothing (pure).
 - Produces:
   - `CHUNK_DEFAULTS = { targetChars: 1500, minChars: 40 }`
-  - `splitProse(text, { targetChars, minChars }) → string[]` — the compactor's splitter, moved: blank lines, then lines, then a hard split; pieces shorter than `minChars` are dropped (spec: "drop chunks under minChars").
+  - `splitProse(text, { targetChars, minChars }) → string[]` — the compactor's splitter, moved: blank lines, then lines, then a hard split. `minChars` applies only to the fragments of a text that splits into more than one piece: those shorter than `minChars` are dropped. A text that yields a single piece always keeps it, however short, so a message like "the port is 8443" is indexed (owner decision 2026-09-29).
   - `toolUseSummary(message) → string` — `"<toolName>: <one line>"`, the command, else the path, else the query/pattern/url, else the first 200 characters of the parameters JSON; at most 200 characters after the name, whitespace collapsed.
   - `renderToolResult(result) → string` — a string as-is; an object as one paragraph per key, string values printed raw (see the decision in Step 3), other values pretty JSON; anything else pretty JSON.
   - `chunkMessage(message, { targetChars = 1500, minChars = 40 } = {}) → [{ idx, kind, text }]`, `idx` dense from 0 in order: the message's own chunks, then written-content chunks (Write/Edit/MultiEdit), then document-attachment chunks.
@@ -332,6 +332,12 @@ describe('splitProse', () => {
     assert.strictEqual(pieces.join(''), wall);
   });
 
+  it('keeps a text that yields a single piece, however short', () => {
+    assert.deepStrictEqual(splitProse('the port is 8443'), ['the port is 8443']);
+    assert.deepStrictEqual(splitProse('  ok  '), ['ok']);
+    assert.deepStrictEqual(splitProse(`${'a'.repeat(10)}\n\n${'b'.repeat(10)}`, { targetChars: 1500, minChars: 40 }), [], 'short fragments of a split are dropped');
+  });
+
   it('returns nothing for empty or whitespace text', () => {
     assert.deepStrictEqual(splitProse(''), []);
     assert.deepStrictEqual(splitProse('   \n\n  '), []);
@@ -352,11 +358,18 @@ describe('chunkMessage', () => {
     assert.strictEqual(chunkMessage({ sender: 'user', text: 'A user paragraph that is long enough to be kept as a chunk.' })[0].kind, 'user');
   });
 
+  it('a short message is one chunk, so it can be recalled and searched', () => {
+    assert.deepStrictEqual(chunkMessage({ sender: 'user', text: 'the port is 8443' }), [{ idx: 0, kind: 'user', text: 'the port is 8443' }]);
+    assert.deepStrictEqual(chunkMessage({ sender: 'assistant', text: 'Done.' }), [{ idx: 0, kind: 'assistant', text: 'Done.' }]);
+  });
+
   it('honours targetChars and minChars options', () => {
     const small = chunkMessage({ sender: 'user', text: article() }, { targetChars: 300, minChars: 10 });
     const big = chunkMessage({ sender: 'user', text: article() });
     assert.ok(small.length > big.length);
     assert.strictEqual(chunkMessage({ sender: 'user', text: 'short one' }, { minChars: 5 }).length, 1);
+    assert.strictEqual(chunkMessage({ sender: 'user', text: `tiny\n\n${'z'.repeat(20)}` }, { minChars: 5 }).length, 1);
+    assert.strictEqual(chunkMessage({ sender: 'user', text: `tiny\n\n${'z'.repeat(20)}` }).length, 0);
   });
 
   it('toolUse: one summary chunk; the command, the path or the query', () => {
@@ -487,6 +500,10 @@ function splitProse(text, options = {}) {
     }
     for (let i = 0; i < para.length; i += targetChars) pieces.push(para.substring(i, i + targetChars).trim());
   }
+  // minChars drops only the small fragments of a text that split into more
+  // than one piece; a text that is one piece is kept however short, so "the
+  // port is 8443" is indexed (owner decision 2026-09-29).
+  if (pieces.length === 1) return pieces;
   return pieces.filter((p) => p.length >= minChars);
 }
 
@@ -585,7 +602,7 @@ function chunkMessage(message, options = {}) {
 module.exports = { CHUNK_DEFAULTS, splitProse, toolUseSummary, renderToolResult, chunkMessage };
 ```
 
-Note for the reviewer: the old splitter kept pieces with `length > 40`; the spec says pieces "under minChars" are dropped, so a piece of exactly 40 characters is now kept (`>= minChars`). The test pins it.
+Note for the reviewer: the old splitter kept pieces with `length > 40`; the spec says pieces "under minChars" are dropped, so a piece of exactly 40 characters is now kept (`>= minChars`). The test pins it. Unlike the old splitter, a text that yields a single piece is kept whatever its length (owner decision 2026-09-29); `minChars` only drops fragments of a split.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -705,7 +722,8 @@ describe('history index: schema step 2', () => {
     assert.strictEqual(rows[0].chars, GATE.length);
     assert.strictEqual(rows[0].ts, '2026-01-01T09:00:00.000Z');
     assert.strictEqual(ftsCount(db, '4417'), 1);
-    assert.strictEqual(ftsCount(db, 'src/app.js'), 1, 'paths are one token');
+    assert.strictEqual(ftsCount(db, 'src/app.js'), 1, 'the full path matches as a phrase');
+    assert.strictEqual(ftsCount(db, 'app.js'), 1, 'a file name matches alone: / is a separator');
     db.close();
   });
 
@@ -740,9 +758,10 @@ describe('history index: schema step 2', () => {
 
   it('chunkOptions from open() are used for every insert', () => {
     t = openTempStore({ chunkOptions: () => ({ targetChars: 300, minChars: 5 }) });
-    seedChat(t.store, { messages: [{ sender: 'user', text: 'tiny' }, { sender: 'user', text: 'y'.repeat(900) }] });
+    seedChat(t.store, { messages: [{ sender: 'user', text: `tiny\n\n${'z'.repeat(20)}` }, { sender: 'user', text: 'y'.repeat(900) }] });
     const db = readDb(t.dbPath);
-    assert.strictEqual(db.prepare("SELECT count(*) AS n FROM chunks WHERE message_id = 'chat-1-m1'").get().n, 0, 'under minChars 5');
+    assert.deepStrictEqual(db.prepare("SELECT text FROM chunks WHERE message_id = 'chat-1-m1'").all().map((r) => r.text), ['z'.repeat(20)],
+      '"tiny" is under minChars 5; the 20-character fragment is not (the default 40 would drop it)');
     assert.strictEqual(db.prepare("SELECT count(*) AS n FROM chunks WHERE message_id = 'chat-1-m2'").get().n, 3);
     db.close();
   });
@@ -780,7 +799,7 @@ CREATE INDEX idx_chunks_message ON chunks(message_id);
 CREATE INDEX idx_chunks_chat ON chunks(chat_id);
 CREATE VIRTUAL TABLE chunks_fts USING fts5(
   text, content='chunks', content_rowid='id',
-  tokenize = "unicode61 tokenchars '_-./'"
+  tokenize = "unicode61 tokenchars '_-.'"
 );
 CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
   INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
@@ -1194,6 +1213,13 @@ describe('history search', () => {
     assert.deepStrictEqual(messageOf(t.store.searchText('src/app.js', { kinds: ['tool_result'] })), ['chat-1-m4']);
   });
 
+  it('a file name alone finds a stored path, and the full path matches as a phrase', () => {
+    assert.deepStrictEqual(messageOf(t.store.searchText('app.js', { kinds: ['tool_result'] })), ['chat-1-m4']);
+    assert.deepStrictEqual(messageOf(t.store.searchText('did we change app.js?', { kinds: ['assistant'] })), ['chat-1-m2']);
+    assert.deepStrictEqual(messageOf(t.store.searchText('"src/app.js"', { kinds: ['assistant'] })), ['chat-1-m2']);
+    assert.deepStrictEqual(t.store.searchText('"lib/app.js"', {}), [], 'the phrase needs the whole path');
+  });
+
   it('never throws on FTS syntax, punctuation or unbalanced quotes', () => {
     for (const q of ['"', '*', 'NEAR(', 'col:x', 'what" is', '...', '   ', 'OR AND NOT', '^4417', '(gate']) {
       assert.doesNotThrow(() => t.store.searchText(q, {}), q);
@@ -1266,8 +1292,9 @@ Append to `src/history/chunk-index.js` (add `const { createLogger } = require('.
 // FTS5 query from user text (spec §6.3 step 1, §15): quoted phrases stay
 // phrases, every other term is quoted (so AND/OR/NEAR/*/^/: are literals),
 // terms are OR-ed. Leading/trailing . - / are trimmed from unquoted terms:
-// they are token characters, so "config.yaml." at the end of a sentence
-// must still match the token "config.yaml".
+// . and - are token characters, so "config.yaml." at the end of a sentence
+// must still match the token "config.yaml"; / is a separator (a quoted
+// "src/app.js" is the phrase src, app.js), so trimming it changes nothing.
 const EDGE = /^[.\-/]+|[.\-/]+$/g;
 function ftsQuery(text) {
   const parts = [];
@@ -3589,7 +3616,7 @@ git commit -m "feat(chat): send the tail plus recalled excerpts, record provenan
 ## Task 14: Remove the conversation compactor; workflows recall from the store
 
 **Files:**
-- Delete: `src/context/conversation-compactor.js`, `tests/conversation-compactor.test.js`
+- Delete: `src/context/conversation-compactor.js`, `tests/conversation-compactor.test.js`, `bodies-of-the-gods.md` (repo root; only the compactor test read it)
 - Create: `tests/helpers/fake-embedder.js`, `tests/fake-embedder.test.js`
 - Modify: `src/context/index.js`, `src/core/create-core.js`, `src/workflows/workflow-engine.js`, `src/workflows/planner-executor.js`, `tests/cases-chat.test.js`, `tests/cases-detour-hooks.test.js`, `tests/helpers/chat-harness.js`
 - Test: `tests/history-workflows.test.js`
@@ -3760,10 +3787,10 @@ Expected: FAIL — the engine sends no `messages` (it asks `getParentChatMessage
 
 - [ ] **Step 3: Write the implementation**
 
-Delete the compactor and its test:
+Delete the compactor, its test and the fixture only that test read:
 
 ```bash
-git rm src/context/conversation-compactor.js tests/conversation-compactor.test.js
+git rm src/context/conversation-compactor.js tests/conversation-compactor.test.js bodies-of-the-gods.md
 ```
 
 `src/context/index.js`: remove the `ConversationCompactor` require and export.
@@ -3844,7 +3871,7 @@ Expected: PASS, `# fail 0`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A src/context src/core/create-core.js src/workflows tests/helpers/fake-embedder.js tests/fake-embedder.test.js tests/history-workflows.test.js tests/cases-chat.test.js tests/cases-detour-hooks.test.js tests/helpers/chat-harness.js tests/conversation-compactor.test.js
+git add -A src/context src/core/create-core.js src/workflows tests/helpers/fake-embedder.js tests/fake-embedder.test.js tests/history-workflows.test.js tests/cases-chat.test.js tests/cases-detour-hooks.test.js tests/helpers/chat-harness.js tests/conversation-compactor.test.js bodies-of-the-gods.md
 git commit -m "refactor(history): remove the conversation compactor; workflows and planner recall from the store"
 ```
 
@@ -4389,9 +4416,9 @@ git commit -m "test(history): recall end to end; CLAUDE.md history section"
 - **Left for later stages on purpose:** embedders, vectors, RRF over two lists, rerank, cosine dedupe, the embed worker and the "recall unavailable" wording (H3); history scope `linked`/`all`, links, importers and the case nudge (H4); the renderer's "History and recall" settings section (H3, when the embedder settings it has to show exist; the H2 keys already merge through `mergeSettings` and can be set in settings).
 - **Type consistency checked:** `searchText` options, the `chunks()` row shape, `Retriever.retrieve` params (`model`, `now`), `build()`'s result and `stats` fields, the `context.history` tool context, `turnContext` fields, the IPC payloads, and the renderer's `metadata.context/seq/chatId` match between the tasks that produce and consume them.
 
-## Open questions for the owner
+## Decisions (2026-09-29)
 
-1. **Short messages and short paragraphs are never indexed.** §4.3 keeps the compactor's splitter, which makes each paragraph its own chunk and drops any under `minChars` (40). A whole message like "the port is 8443" (16 characters), or a line "port 8443" between blank lines, produces no chunk, so neither recall nor `SearchHistory` can ever find it. This plan follows the spec literally. Proposed change (one function, `splitProse`): pack adjacent paragraphs up to `targetChars`, and apply `minChars` only when a message yields more than one chunk. Keep as specified, or change?
-2. **Kind weights outweigh BM25 rank when BM25 is the only signal.** With one signal, §6.3 step 3 scores `1 / (60 + rank)`, so rank 1 and rank 50 differ by under 2x while `user` (1.2) and `tool_result` (0.6) differ by 2x: a rank-50 user chunk outranks a rank-1 tool result. This plan implements the spec and LongHaul B0 will measure it. Ship H2 this way and let B0 decide, or score by the normalised BM25 value when there is one signal?
-3. **Paths are single tokens.** With `tokenchars '_-./'`, "app.js" does not match a stored "src/app.js" (§4.1 says identifiers match "as typed"). Accept for H2 and let B0 show whether it matters, or also index each path's last segment?
-4. **`bodies-of-the-gods.md` at the repo root** is used only by the compactor test this plan deletes. Delete the file too, or keep it?
+1. **Short messages are indexed.** `minChars` applies only to the fragments of a text that splits into more than one piece; a message whose text yields a single chunk always keeps it, however short ("the port is 8443" is indexed). Task 2 (`splitProse` and its tests) and Task 3 (the `chunkOptions` test).
+2. **Kind weights.** Ship the spec defaults unchanged. LongHaul B0 measures their effect; H3 retunes them.
+3. **Paths split on `/`.** The tokenizer is `unicode61 tokenchars '_-.'`: a file name ("app.js") matches a stored "src/app.js" alone, and the full path matches as a phrase. Global Constraints, Task 3 (schema and test), Task 5 (test); spec §4.1 updated to match.
+4. **`bodies-of-the-gods.md`** is deleted in Task 14, with the compactor test that was its only reader.

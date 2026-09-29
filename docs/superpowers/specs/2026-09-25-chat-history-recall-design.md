@@ -198,7 +198,7 @@ chunks(
 );
 CREATE VIRTUAL TABLE chunks_fts USING fts5(
   text, content='chunks', content_rowid='id',
-  tokenize = "unicode61 tokenchars '_-./'"
+  tokenize = "unicode61 tokenchars '_-.'"
 );
 -- triggers keep chunks_fts in step with chunks on insert and delete
 
@@ -218,9 +218,10 @@ calibration(model TEXT PRIMARY KEY, chars_per_token REAL NOT NULL, samples INTEG
 
 `seq` is per chat, dense, and is the number the model sees (`#412`). Deleting
 a message is not supported except through `truncateFrom`, which keeps `seq`
-dense from the start. The FTS tokenizer keeps `_`, `-`, `.` and `/` inside
-tokens so identifiers, file paths and hostnames match as typed; there is no
-stemming.
+dense from the start. The FTS tokenizer keeps `_`, `-` and `.` inside tokens
+so identifiers, file names and hostnames match as typed. Paths split on `/`,
+so a file name matches alone ("app.js" finds "src/app.js") and the full path
+matches as a phrase. There is no stemming.
 
 ### 4.2 Message shape
 
