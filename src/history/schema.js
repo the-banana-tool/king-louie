@@ -5,6 +5,8 @@
 // Stage H1 creates only the tables it uses; chunks, FTS, embeddings, links,
 // imports and calibration arrive as later steps.
 
+const { SCHEMA_V2_SQL } = require('./chunk-index');
+
 const SCHEMA_STEPS = [
   {
     version: 1,
@@ -63,6 +65,14 @@ const SCHEMA_STEPS = [
           value TEXT NOT NULL
         );
       `);
+    }
+  },
+  // Recall stage H2: chunks, the full-text index and token calibration
+  // (spec 2026-09-25 §4.1). Task 4 adds the backfill marker here.
+  {
+    version: 2,
+    up(db) {
+      db.exec(SCHEMA_V2_SQL);
     }
   }
 ];

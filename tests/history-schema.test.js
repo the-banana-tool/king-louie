@@ -7,7 +7,10 @@ const os = require('os');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { HistoryStore } = require('../src/history');
-const { SCHEMA_STEPS, applySchema, currentVersion, latestVersion } = require('../src/history/schema');
+const { SCHEMA_STEPS: ALL_STEPS, applySchema, currentVersion, latestVersion } = require('../src/history/schema');
+
+// These tests cover H1's step; later stages' steps have their own tests.
+const SCHEMA_STEPS = ALL_STEPS.slice(0, 1);
 
 const dirs = [];
 const stores = [];
@@ -30,18 +33,18 @@ const pragma = (db, name) => Object.values(db.prepare(`PRAGMA ${name}`).get())[0
 describe('history schema steps', () => {
   it('creates the H1 tables and records version 1 once', () => {
     const db = new DatabaseSync(':memory:');
-    assert.strictEqual(applySchema(db), 1);
+    assert.strictEqual(applySchema(db, SCHEMA_STEPS), 1);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((r) => r.name);
     assert.deepStrictEqual(tables, ['attachments', 'chats', 'messages', 'meta', 'schema_version']);
-    assert.strictEqual(applySchema(db), 1, 'a second run changes nothing');
+    assert.strictEqual(applySchema(db, SCHEMA_STEPS), 1, 'a second run changes nothing');
     assert.deepStrictEqual(db.prepare('SELECT version FROM schema_version').all().map((r) => r.version), [1]);
-    assert.strictEqual(latestVersion(), 1);
+    assert.strictEqual(latestVersion(), ALL_STEPS.length);
     db.close();
   });
 
   it('gives chats a position and messages a unique (chat_id, seq)', () => {
     const db = new DatabaseSync(':memory:');
-    applySchema(db);
+    applySchema(db, SCHEMA_STEPS);
     const chatCols = db.prepare('PRAGMA table_info(chats)').all().map((c) => c.name);
     assert.ok(chatCols.includes('position'));
     assert.ok(chatCols.includes('history_scope'));
@@ -53,7 +56,7 @@ describe('history schema steps', () => {
 
   it('runs only the pending steps, in order', () => {
     const db = new DatabaseSync(':memory:');
-    applySchema(db);
+    applySchema(db, SCHEMA_STEPS);
     const ran = [];
     const steps = [...SCHEMA_STEPS, { version: 2, up(d) { ran.push(2); d.exec('CREATE TABLE extra (x TEXT)'); } }];
     assert.strictEqual(applySchema(db, steps), 2);
@@ -65,7 +68,7 @@ describe('history schema steps', () => {
 
   it('rolls a failing step back and keeps the stored version', () => {
     const db = new DatabaseSync(':memory:');
-    applySchema(db);
+    applySchema(db, SCHEMA_STEPS);
     const steps = [...SCHEMA_STEPS, { version: 2, up(d) { d.exec('CREATE TABLE half (x TEXT)'); throw new Error('step failed'); } }];
     assert.throws(() => applySchema(db, steps), /step failed/);
     assert.strictEqual(currentVersion(db), 1);

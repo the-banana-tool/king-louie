@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
+const { insertChunks } = require('./chunk-index');
 const { applySchema, currentVersion, latestVersion, SchemaVersionError } = require('./schema');
 const rows = require('./rows');
 const { createLogger } = require('../logging');
@@ -42,7 +43,7 @@ const LIST_SQL = `
   ORDER BY c.position, c.rowid`;
 
 class HistoryStore {
-  static open(dbPath, { readonly = false, now } = {}) {
+  static open(dbPath, { readonly = false, now, chunkOptions } = {}) {
     if (!dbPath || typeof dbPath !== 'string') throw new TypeError('HistoryStore.open needs a file path or ":memory:".');
     const memory = dbPath === ':memory:';
     if (!memory && !readonly) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -63,7 +64,11 @@ class HistoryStore {
       db.close();
       throw err;
     }
-    return new this(db, { dbPath, readonly, now });
+    const store = new this(db, { dbPath, readonly, now });
+    // Chunk sizes (settings.history.chunk), read on every insert so a
+    // settings change applies to the next message.
+    store._chunkOptions = typeof chunkOptions === 'function' ? chunkOptions : () => chunkOptions || {};
+    return store;
   }
 
   constructor(db, { dbPath = null, readonly = false, now } = {}) {
@@ -340,7 +345,14 @@ class HistoryStore {
         .run(`${id}:${a.kind}:${a.idx}`, id, a.kind, a.idx, a.name, a.mime, a.bytes, a.text, a.meta_json);
     }
     const stored = rows.rowToMessage({ ...row, id, seq }, attachments);
+    this._indexMessage(db, chatId, stored);
     return { rowId: Number(info.lastInsertRowid), id, seq, stored };
+  }
+
+  // Every insert path indexes here, in the caller's transaction: a failure
+  // rolls the message back (spec §5.1).
+  _indexMessage(db, chatId, message) {
+    insertChunks(db, chatId, message, this._chunkOptions ? this._chunkOptions() : {});
   }
 
   _messagesFor(chatId, { fromSeq = 1, toSeq = Number.MAX_SAFE_INTEGER, limit = -1 } = {}) {
