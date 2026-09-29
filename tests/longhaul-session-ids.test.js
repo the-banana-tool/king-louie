@@ -14,7 +14,7 @@ const { UsageError } = require('../src/longhaul/errors');
 const { tmpHome, tmpDir, sink, FIXTURE_ROOT } = require('./helpers/longhaul-helpers');
 const cc = require('./helpers/claude-code-fixture');
 
-const BAD = ['..', '.', '../x', 'a/b', 'a\b', '.hidden', ''];
+const BAD = ['..', '.', '../x', 'a/b', 'a\\b','.hidden', ''];
 
 async function run(argv, env) {
   const stderr = sink();
