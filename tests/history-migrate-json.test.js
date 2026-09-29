@@ -107,6 +107,30 @@ describe('migrateFromJson', () => {
     assert.strictEqual(historyStore.getMeta(MIGRATION_MARKER), '2026-09-29T12:00:01.000Z');
   });
 
+  it('backs up once for a chat that can never move, however many starts retry it', () => {
+    const bad = { id: 'bad', title: 'Bad', messages: 'not a list' };
+    const { dir, jsonStore, historyStore, run } = setup([{ id: 'good', title: 'Good', messages: [] }, bad]);
+    assert.strictEqual(run().failed.length, 1);
+    assert.strictEqual(run().failed.length, 1);
+    assert.strictEqual(run().failed.length, 1);
+    assert.deepStrictEqual(backups(dir), [BACKUP], 'the first backup still holds every chat left');
+    assert.deepStrictEqual(jsonStore.get('chats'), [bad]);
+    assert.strictEqual(historyStore.getMeta(MIGRATION_MARKER), null);
+  });
+
+  it('backs up again when the chats left have changed since the recorded backup, or it is gone', () => {
+    const bad = { id: 'bad', title: 'Bad', messages: 'not a list' };
+    const { dir, jsonStore, run } = setup([bad]);
+    run();
+    assert.strictEqual(backups(dir).length, 1);
+    jsonStore.set('chats', [{ ...bad, title: 'Bad, edited' }]);
+    run();
+    assert.strictEqual(backups(dir).length, 2, 'an edited chat is not in the first backup');
+    for (const f of backups(dir)) fs.rmSync(path.join(dir, f));
+    run();
+    assert.strictEqual(backups(dir).length, 1, 'a recorded backup that is gone is made again');
+  });
+
   it('counts a chat committed before a crash as moved, without duplicating it (review focus 5)', () => {
     const chat = { id: 'c1', title: 'One', messages: [msg('m1', 'user', 'a'), msg('m2', 'assistant', 'b')] };
     const { jsonStore, historyStore, run } = setup([chat, { id: 'c2', title: 'Two', messages: [] }]);

@@ -5,10 +5,32 @@
 // the marker is set only when the array is empty, so a crash midway resumes
 // on the next start. Only chat-data.json is read: an old chat-history.sqlite
 // (the blob store) is never opened (owner decision 2026-09-29).
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
 const MIGRATION_MARKER = 'migrated_from_json';
+// The backup a run made, and a hash of each chat it held: a chat that can
+// never move would otherwise cost a fresh full copy of chat-data.json (with
+// its secrets) on every start. A later run skips the backup only while that
+// file is still there and every chat left is byte-for-byte one it holds.
+const BACKUP_META = 'migration_backup';
+
+const chatHash = (chat) => crypto.createHash('sha256').update(JSON.stringify(chat) ?? 'undefined').digest('hex');
+
+function recordedBackupCovers(historyStore, dir, chats) {
+  let recorded;
+  try {
+    recorded = JSON.parse(historyStore.getMeta(BACKUP_META) || 'null');
+  } catch {
+    return null;
+  }
+  if (!recorded || typeof recorded.file !== 'string' || !Array.isArray(recorded.chats)) return null;
+  const file = path.join(dir, path.basename(recorded.file));
+  if (!fs.existsSync(file)) return null;
+  const held = new Set(recorded.chats);
+  return chats.every((chat) => held.has(chatHash(chat))) ? file : null;
+}
 
 const backupName = (stamp) => `chat-data.backup-${String(stamp).replace(/[:.]/g, '-')}.json`;
 
@@ -38,7 +60,10 @@ function moveChat(historyStore, chat, seen) {
   });
 }
 
-function migrateFromJson({ historyStore, jsonStore, jsonPath = null, log, now = () => new Date().toISOString() }) {
+// backup: false is the import dry run's in-memory preview, which moves the
+// chats into a throwaway store and must write nothing (its jsonStore's set
+// is a no-op).
+function migrateFromJson({ historyStore, jsonStore, jsonPath = null, log, now = () => new Date().toISOString(), backup = true }) {
   if (historyStore.getMeta(MIGRATION_MARKER)) return { migrated: 0, failed: [] };
   const chats = jsonStore.get('chats', []);
   if (!Array.isArray(chats)) {
@@ -52,7 +77,12 @@ function migrateFromJson({ historyStore, jsonStore, jsonPath = null, log, now = 
     return { migrated: 0, failed: [] };
   }
 
-  if (jsonPath && fs.existsSync(jsonPath)) {
+  const covering = backup && jsonPath ? recordedBackupCovers(historyStore, path.dirname(jsonPath), chats) : null;
+  if (!backup) {
+    // The dry run's preview: nothing on disk changes.
+  } else if (covering) {
+    log.info(`${chats.length} chat(s) are still in chat-data.json; ${covering} already holds them, so no new backup.`);
+  } else if (jsonPath && fs.existsSync(jsonPath)) {
     const target = path.join(path.dirname(jsonPath), backupName(stamp));
     try {
       fs.copyFileSync(jsonPath, target, fs.constants.COPYFILE_EXCL);
@@ -62,6 +92,7 @@ function migrateFromJson({ historyStore, jsonStore, jsonPath = null, log, now = 
       log.error(`chat-data.json could not be backed up (${err.message}); no chats were moved.`);
       return { migrated: 0, failed: chats.map((chat, index) => ({ id: chatLabel(chat, index), error })) };
     }
+    historyStore.setMeta(BACKUP_META, JSON.stringify({ file: path.basename(target), chats: chats.map(chatHash) }));
   } else {
     log.warn('chat-data.json is not on disk, so there is no file to back up; moving its chats anyway.');
   }
