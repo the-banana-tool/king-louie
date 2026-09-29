@@ -231,7 +231,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     const facadeActiveChat = activeChatId && typeof getChat === 'function' ? getChat(activeChatId, { messages: true }) : null;
     const activeChat = facadeActiveChat && typeof facadeActiveChat === 'object'
       ? facadeActiveChat
-      : getChats().find((chat) => chat.id === activeChatId) || null;
+      : findChat(activeChatId, { messages: true });
 
     return {
       chats: loadedChats.map((chat) => (
@@ -252,7 +252,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     const facadeChat = typeof getChat === 'function' ? getChat(id, { messages: true }) : null;
     const chat = facadeChat && typeof facadeChat === 'object'
       ? facadeChat
-      : getChats().find((item) => item.id === id) || null;
+      : findChat(id, { messages: true });
     if (!chat) {
       return { ok: false, error: 'Chat not found.' };
     }
