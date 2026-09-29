@@ -43,7 +43,7 @@ function createModelChoices({
     const entry = catalog ? catalog.get(target.provider, target.model) : null;
     return entry?.name || target.model;
   };
-  const status = (chatId, text) => appendMessageToChat(chatId, 'status', text);
+  const status = (chatId, text) => appendMessageToChat(chatId, 'status', text, {}, { returnChat: false });
   const updateChat = (chatId, patch) => updateChatFacade(chatId, { ...patch, updatedAt: new Date().toISOString() }, { messages: false });
   const caseRuntimeFor = (chat) => {
     if (!chat.caseId) return null;

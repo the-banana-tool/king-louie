@@ -36,6 +36,26 @@ describe('createChatFacade', () => {
     assert.strictEqual(f.appendMessageToChat('missing', 'user', 'x'), null);
   });
 
+  it('appendMessageToChat with returnChat false returns { message, seq } and never reads the chat messages', () => {
+    // llmTotals already kept (every chat after its first append), so the
+    // one-time re-sum for a chat without it does not run either.
+    const f = facade([{ id: 'c1', title: 'Chat', llmTotals: chatLlmTotals([]), messages: [{ id: 'm0', sender: 'assistant', text: 'hello', timestamp: 't0' }] }]);
+    const store = f.historyStore;
+    const reads = [];
+    const getChat = store.getChat.bind(store);
+    const getMessages = store.getMessages.bind(store);
+    store.getChat = (id, options = {}) => { reads.push(['getChat', options.messages]); return getChat(id, options); };
+    store.getMessages = (...args) => { reads.push(['getMessages']); return getMessages(...args); };
+    const r = f.appendMessageToChat('c1', 'toolUse', '', { toolName: 'Read', runId: 'r1' }, { returnChat: false });
+    assert.strictEqual(r.seq, 2);
+    assert.strictEqual(r.message.id, 'gen-1');
+    assert.strictEqual(r.message.toolName, 'Read');
+    assert.deepStrictEqual(reads.filter(([what, messages]) => what === 'getMessages' || messages !== false), []);
+    assert.strictEqual(f.appendMessageToChat('missing', 'user', 'x', {}, { returnChat: false }), null);
+    store.getChat = getChat;
+    assert.deepStrictEqual(f.getChat('c1').messages.map((m) => [m.seq, m.sender]), [[1, 'assistant'], [2, 'toolUse']]);
+  });
+
   it('keeps llmTotals incrementally, equal to summing every message', () => {
     const f = facade([{ id: 'c1', title: 'Chat', messages: [] }]);
     f.appendMessageToChat('c1', 'user', 'q1');

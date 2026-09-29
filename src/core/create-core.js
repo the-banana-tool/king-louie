@@ -1380,12 +1380,12 @@ function createCore(deps = {}) {
         return newChat.id;
       },
       addMessageToLocalChat: (chatId, sender, text, { channel } = {}) => {
-        const chat = appendMessageToChat(chatId, sender, text, {
+        const appended = appendMessageToChat(chatId, sender, text, {
           // F5: excludes this message from the owner-message pool
           // (chat-handlers.js) even though sender is 'user'.
           ...(channel ? { channel } : {})
-        });
-        if (!chat) return;
+        }, { returnChat: false });
+        if (!appended) return;
 
         ui.send('chat:updated', { chats: listChats({ messages: false }) });
       }
@@ -1450,12 +1450,12 @@ function createCore(deps = {}) {
         return newChat.id;
       },
       addMessageToLocalChat: (chatId, sender, text, { channel } = {}) => {
-        const chat = appendMessageToChat(chatId, sender, text, {
+        const appended = appendMessageToChat(chatId, sender, text, {
           // F5: excludes this message from the owner-message pool
           // (chat-handlers.js) even though sender is 'user'.
           ...(channel ? { channel } : {})
-        });
-        if (!chat) return;
+        }, { returnChat: false });
+        if (!appended) return;
 
         // Notify renderer if window exists
         ui.send('chat:updated', { chats: listChats({ messages: false }) });

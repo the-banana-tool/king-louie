@@ -662,13 +662,13 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       executor.on('preExecute', ({ toolName, parameters }) => {
         if (abortController.signal.aborted) return;
-        appendMessageToChat(chatId, 'toolUse', '', { toolName, parameters, runId });
+        appendMessageToChat(chatId, 'toolUse', '', { toolName, parameters, runId }, { returnChat: false });
         safeSend(event.sender, 'chat:toolUse', { chatId, runId, toolName, parameters });
       });
 
       executor.on('postExecute', ({ toolName, result }) => {
         if (abortController.signal.aborted) return;
-        appendMessageToChat(chatId, 'toolResult', '', { toolName, result, runId });
+        appendMessageToChat(chatId, 'toolResult', '', { toolName, result, runId }, { returnChat: false });
         safeSend(event.sender, 'chat:toolResult', { chatId, runId, toolName, result });
       });
 

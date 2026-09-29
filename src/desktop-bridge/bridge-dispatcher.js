@@ -316,7 +316,7 @@ function createBridgeDispatcher({
     for (const chatId of [...conn.runs]) {
       try {
         if (stop) await stop(event, { chatId });
-        context.appendMessageToChat(chatId, 'assistant', MESSAGES.DESKTOP_DISCONNECTED_RUN);
+        context.appendMessageToChat(chatId, 'assistant', MESSAGES.DESKTOP_DISCONNECTED_RUN, {}, { returnChat: false });
         log.info(`stopped chat ${chatId}: its desktop disconnected`);
       } catch (err) {
         log.warn(`stopping chat ${chatId} failed: ${err.message}`);

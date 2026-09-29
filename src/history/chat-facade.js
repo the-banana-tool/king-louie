@@ -23,7 +23,10 @@ function createChatFacade({ historyStore, createId, now = () => new Date().toISO
   if (typeof createId !== 'function') throw new Error('createChatFacade needs createId.');
   const store = historyStore;
 
-  const appendMessageToChat = (chatId, sender, text, metadata = {}) => {
+  // Returns the whole chat, messages and all, as it always has. A caller that
+  // ignores the result passes { returnChat: false } and gets the appended
+  // { message, seq } (null for an unknown chat) without re-reading the chat.
+  const appendMessageToChat = (chatId, sender, text, metadata = {}, { returnChat = true } = {}) => {
     // id, sender, timestamp and seq are this function's (and the store's) to
     // set; an IPC payload spread into metadata must not override them.
     const { id: _id, sender: _sender, timestamp: _timestamp, seq: _seq, ...safeMetadata } = metadata || {};
@@ -37,7 +40,8 @@ function createChatFacade({ historyStore, createId, now = () => new Date().toISO
         : chatLlmTotals(store.getMessages(chat.id));
       return store.appendMessage(chat.id, message, { updatedAt: timestamp, patch: { llmTotals: addLlmTotals(base, message) } });
     });
-    return appended ? store.getChat(chatId, { messages: true }) : null;
+    if (!appended) return null;
+    return returnChat ? store.getChat(chatId, { messages: true }) : appended;
   };
 
   // llmTotals is a record of spend, not a view of the remaining messages:
