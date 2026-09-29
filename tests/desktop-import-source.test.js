@@ -25,6 +25,17 @@ function keyedDataDir(key = TEST_KEY) {
   return dir;
 }
 
+// Since history stage H1 the service keeps chats in <dataDir>/history.sqlite.
+function serviceChatIds(dataDir) {
+  const { HistoryStore } = require('../src/history');
+  const store = HistoryStore.open(path.join(dataDir, 'history.sqlite'), { readonly: true });
+  try {
+    return store.listChats().map((c) => c.id);
+  } finally {
+    store.close();
+  }
+}
+
 function userData() {
   const root = tmp('kl-userdata-');
   const write = (rel, content) => { const f = path.join(root, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, typeof content === 'string' ? content : JSON.stringify(content)); };
@@ -273,6 +284,25 @@ describe('king-louie-service import --from', () => {
     }
   });
 
+  it('dry run reads an existing history.sqlite read-only and plans against its chats', async () => {
+    const { HistoryStore } = require('../src/history');
+    const dataDir = tmp();
+    const file = path.join(dataDir, 'history.sqlite');
+    const store = HistoryStore.open(file);
+    store.createChat({ id: 'c1', title: 'Lakeside lot', createdAt: '2026-09-01T10:00:00Z', updatedAt: '2026-09-20T10:00:00Z', messages: [] });
+    store.close();
+    fs.writeFileSync(path.join(dataDir, 'chat-data.json'), JSON.stringify({ chats: [{ id: 'left', title: 'Blue folder', messages: [] }] }));
+    const before = fs.readFileSync(file);
+    const jsonBefore = fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8');
+    const o = io();
+    const code = await runImportCommand({ flags: { from: userData(), dryRun: true }, dataDir, io: o.io, deps: { isAdmin: () => true, runningServicePid: () => null } });
+    assert.strictEqual(code, 0, o.out.stderr);
+    assert.match(o.out.stdout, /skip-present\s+chat c1/);
+    assert.ok(fs.readFileSync(file).equals(before), 'history.sqlite is unchanged');
+    assert.strictEqual(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8'), jsonBefore, 'no chats move out of chat-data.json');
+    assert.deepStrictEqual(fs.readdirSync(dataDir).filter((n) => n.startsWith('chat-data.backup-')), []);
+  });
+
   it('imports everything but secrets, which it lists as needs-desktop', async () => {
     const dataDir = keyedDataDir();
     const savedRoot = process.env.KL_CASES_ROOT;
@@ -281,8 +311,7 @@ describe('king-louie-service import --from', () => {
       const o = io();
       const code = await runImportCommand({ flags: { from: userData() }, dataDir, io: o.io, deps: { isAdmin: () => true, runningServicePid: () => null, ...withKey } });
       assert.strictEqual(code, 0, o.out.stderr);
-      const store = JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8'));
-      assert.ok(store.chats.some((c) => c.id === 'c1'));
+      assert.ok(serviceChatIds(dataDir).includes('c1'));
       const jobs = JSON.parse(fs.readFileSync(path.join(dataDir, 'cron', 'jobs.json'), 'utf8'));
       assert.strictEqual(jobs.cron_1.enabled, false);
       assert.ok(fs.existsSync(path.join(dataDir, 'cases', 'lakeside-lot', 'notes', 'a.md')));
@@ -454,7 +483,7 @@ describe('import --from: reader and writer split (fix round 1)', () => {
     assert.strictEqual(spawned[0].env.HOME, undefined, 'a dropped child does not inherit the administrator HOME');
     assert.strictEqual(coresBuilt, 0);
     assert.deepStrictEqual(parentWrites, []);
-    assert.ok(JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8')).chats.some((c) => c.id === 'c1'));
+    assert.ok(serviceChatIds(dataDir).includes('c1'));
     assert.ok(fs.existsSync(path.join(dataDir, 'cases', 'lakeside-lot', 'notes', 'a.md')));
     assert.ok(fs.existsSync(path.join(dataDir, 'cron', 'jobs.json')));
     // N1: the key never lands in the data dir, key-check is untouched, and
@@ -569,7 +598,7 @@ describe('import --from: reader and writer split (fix round 1)', () => {
     const code = await withEnv({ KL_CASES_ROOT: undefined }, () => runImportCommand({ flags: { from }, dataDir, io: o.io, deps: base }));
     assert.strictEqual(code, 1);
     assert.match(o.out.stdout, /not read chat big: larger than the/);
-    assert.ok(JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8')).chats.some((c) => c.id === 'c1'));
+    assert.ok(serviceChatIds(dataDir).includes('c1'));
   });
 
   // N1: the parent resolves the key read-only and never creates one.

@@ -64,10 +64,12 @@ function openCore(dataDir, onPathWritten, dryRun, masterKey = null) {
     // parent refuses one that doesn't). The cipher never encrypts or
     // decrypts anything while planning (the CLI reports every secret
     // needs-desktop), so a throwaway in-memory key satisfies createCore.
+    // Chat history opens read-only (an empty in-memory store when the data
+    // dir has none yet) and no chats move out of chat-data.json.
     const store = new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: CHAT_DATA_DEFAULTS });
     const vaultStore = new JsonFileStore({ dir: dataDir, name: 'config' });
     const cipher = createAesGcmCipher(crypto.randomBytes(32));
-    return { core: createCore({ paths: { dataDir }, store, vaultStore, cipher, prompter: createHeadlessPrompter(), adminExecutors: noAdminExecutors(), skipModelMigration: true }), cipher };
+    return { core: createCore({ paths: { dataDir }, store, vaultStore, cipher, prompter: createHeadlessPrompter(), adminExecutors: noAdminExecutors(), skipModelMigration: true, history: { readonly: true } }), cipher };
   }
   const { buildServicePorts } = require('../ports');
   if (!masterKey) throw Object.assign(new Error('a real import needs the master key from the admin process'), { code: 'BAD_REQUEST' });

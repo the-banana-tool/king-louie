@@ -263,6 +263,9 @@ function createCore(deps = {}) {
   // (§15). history.open === false builds a core that opens nothing: the
   // service CLI's model and profile commands run as root and must neither
   // create root-owned history files nor move chats.
+  // history.readonly === true is the import dry run's preview: an existing
+  // store is opened read-only, a missing one is an empty in-memory store,
+  // and no chats move out of chat-data.json, so nothing is written.
   const historyLog = createLogger('history');
   const historyStatus = { available: true, error: null, migrationFailed: 0 };
   let historyStore;
@@ -270,6 +273,18 @@ function createCore(deps = {}) {
     historyStore = createUnavailableHistoryStore(new Error('this command does not open chat history'));
     historyStatus.available = false;
     historyStatus.error = 'this command does not open chat history';
+  } else if (deps.history?.readonly === true) {
+    const historyDbPath = deps.history.dbPath || path.join(paths.dataDir, 'history.sqlite');
+    try {
+      historyStore = fs.existsSync(historyDbPath)
+        ? HistoryStore.open(historyDbPath, { readonly: true })
+        : HistoryStore.open(':memory:');
+    } catch (err) {
+      historyLog.error(`Chat history could not be opened read-only at ${historyDbPath}: ${err.message}.`);
+      historyStore = createUnavailableHistoryStore(err);
+      historyStatus.available = false;
+      historyStatus.error = err.message;
+    }
   } else {
     const historyDbPath = deps.history?.dbPath || path.join(paths.dataDir, 'history.sqlite');
     try {
