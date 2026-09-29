@@ -64,6 +64,7 @@ const { makeRootAssert } = require('../cases/executors/package-loader');
 const { buildChildContext, childRuntimeOptions } = require('../agents/child-context');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
+const { JsonChatHistoryStore } = require('../history');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
@@ -254,8 +255,12 @@ function createCore(deps = {}) {
 
   const createId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-  const getChats = () => store.get('chats', []);
-  const setChats = (chats) => store.set('chats', chats);
+  const historyStore = deps.historyStore || new JsonChatHistoryStore({ store });
+  const getChats = () => historyStore.listChats({ messages: true });
+  const setChats = (chats) => historyStore.setChats(chats);
+  const listChats = (options = {}) => historyStore.listChats(options);
+  const getChat = (chatId, options = {}) => historyStore.getChat(chatId, options);
+  const updateChat = (chatId, patch = {}) => historyStore.updateChat(chatId, patch);
 
   // F5 re-review: a chat a Telegram/Discord bridge created before the
   // origin/channel tagging existed carries neither, and the bridges keep
@@ -830,41 +835,32 @@ function createCore(deps = {}) {
     // metadata object (e.g. CHAT_ADD_MESSAGE's IPC payload) must not be able
     // to override them by spreading last (minor fix, F5 review).
     const { id: _id, sender: _sender, timestamp: _timestamp, ...safeMetadata } = metadata || {};
-    const chats = getChats();
-    const updated = chats.map((chat) => {
-      if (chat.id !== chatId) {
-        return chat;
-      }
-
-      return {
-        ...chat,
-        updatedAt: now,
-        messages: [
-          ...chat.messages,
-          {
-            id: createId(),
-            sender,
-            text,
-            timestamp: now,
-            ...safeMetadata
-          }
-        ],
-        llmTotals: getChatLlmTotals({
-          ...chat,
-          messages: [
-            ...chat.messages,
-            {
-              sender,
-              text,
-              ...safeMetadata
-            }
-          ]
-        })
-      };
+    const chat = getChat(chatId, { messages: true });
+    if (!chat) return null;
+    const message = {
+      id: createId(),
+      sender,
+      text,
+      timestamp: now,
+      ...safeMetadata
+    };
+    const messages = Array.isArray(chat.messages) ? chat.messages : [];
+    const llmTotals = getChatLlmTotals({
+      ...chat,
+      messages: [
+        ...messages,
+        {
+          sender,
+          text,
+          ...safeMetadata
+        }
+      ]
     });
 
-    setChats(updated);
-    return updated.find((chat) => chat.id === chatId) || null;
+    return historyStore.appendMessage(chatId, message, {
+      updatedAt: now,
+      patch: { llmTotals }
+    });
   };
 
   let _cachedOAuthAccessToken = null;
@@ -3231,8 +3227,12 @@ function createCore(deps = {}) {
   const context = {
     // Chat
     createId,
+    historyStore,
     getChats,
     setChats,
+    listChats,
+    getChat,
+    updateChat,
     getActiveChatId,
     setActiveChatId,
     appendMessageToChat,

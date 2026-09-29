@@ -44,6 +44,9 @@ describe('createCore', () => {
     assert.ok(deps.store.get('apiTokens').openai.startsWith('klc1:'));
     core.vault.set('k', 'v');
     assert.strictEqual(core.vault.get('k'), 'v');
+    assert.strictEqual(typeof core.context.historyStore.listChats, 'function');
+    assert.strictEqual(typeof core.context.getChat, 'function');
+    assert.strictEqual(typeof core.context.listChats, 'function');
     assert.strictEqual(typeof core.context.getChats, 'function');
     assert.strictEqual(core.context.safeStorage, undefined);
   });

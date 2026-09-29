@@ -63,6 +63,8 @@ function registerChatHandlers(ipcMain, context = {}) {
   const {
     createId,
     getChats,
+    listChats,
+    getChat,
     setChats,
     getActiveChatId,
     setActiveChatId,
@@ -177,8 +179,21 @@ function registerChatHandlers(ipcMain, context = {}) {
 
   ipcMain.handle(IPC.CHAT_LOAD, wrapHandler(IPC.CHAT_LOAD, async () => {
     const activeChatId = getActiveChatId();
+    const facadeChats = typeof listChats === 'function' ? listChats({ messages: false }) : null;
+    const loadedChats = Array.isArray(facadeChats)
+      ? facadeChats
+      : getChats();
+    const facadeActiveChat = activeChatId && typeof getChat === 'function' ? getChat(activeChatId, { messages: true }) : null;
+    const activeChat = facadeActiveChat && typeof facadeActiveChat === 'object'
+      ? facadeActiveChat
+      : getChats().find((chat) => chat.id === activeChatId) || null;
+
     return {
-      chats: getChats().map((chat) => chatMetadata(chat, { includeMessages: chat.id === activeChatId })),
+      chats: loadedChats.map((chat) => (
+        chat.id === activeChatId && activeChat
+          ? chatMetadata(activeChat, { includeMessages: true })
+          : chatMetadata(chat, { includeMessages: false })
+      )),
       activeChatId
     };
   }));
@@ -189,7 +204,10 @@ function registerChatHandlers(ipcMain, context = {}) {
       return { ok: false, error: 'Chat ID is required.' };
     }
 
-    const chat = getChats().find((item) => item.id === id) || null;
+    const facadeChat = typeof getChat === 'function' ? getChat(id, { messages: true }) : null;
+    const chat = facadeChat && typeof facadeChat === 'object'
+      ? facadeChat
+      : getChats().find((item) => item.id === id) || null;
     if (!chat) {
       return { ok: false, error: 'Chat not found.' };
     }
