@@ -292,7 +292,8 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
         'Do what the case needs now, then stop.'
       ].join('\n');
       const result = await loop.run([{ sender: 'user', text: message }], toolDefs, {
-        systemPrompt: buildCaseSystemPrompt(turn.orientation, WAKEUP_PROMPT)
+        systemPrompt: WAKEUP_PROMPT,
+        systemPromptDynamic: buildCaseSystemPrompt(turn.orientation)
       });
       if (turn.signal.aborted) return await skipped(String(turn.signal.reason || 'aborted'));
       mark('acted');

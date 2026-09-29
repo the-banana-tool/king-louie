@@ -606,7 +606,8 @@ function registerChatHandlers(ipcMain, context = {}) {
           const assembled = await contextAssembler.assemble(safeMessage, {
             maxTools: 10,
             maxSections: 4,
-            memoryContext
+            // Memory context is per turn: it goes in systemPromptDynamic.
+            memoryContext: ''
           });
           options.systemPrompt = assembled.systemPrompt;
           assembledTools = filterMcpTools(assembled.tools);
@@ -624,10 +625,7 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       // Fallback: full system prompt + all tools
       if (!options.systemPrompt) {
-        options.systemPrompt = [
-          buildRuntimeSystemPrompt(runtimeEnvironment),
-          memoryContext
-        ].filter(Boolean).join('\n\n');
+        options.systemPrompt = buildRuntimeSystemPrompt(runtimeEnvironment);
       }
 
       // Main's delegation guidance (spec §8.1), first so it sits in the
@@ -642,9 +640,13 @@ function registerChatHandlers(ipcMain, context = {}) {
         options.systemPrompt = `${DELEGATION_GUIDANCE}\n\n${options.systemPrompt}`;
       }
 
-      if (caseTurn) {
-        options.systemPrompt = buildCaseSystemPrompt(caseTurn.orientation, options.systemPrompt);
-      }
+      // The per-turn part (recall spec §6.5), after the stable, cached
+      // prompt: the case prompt and orientation, then the memory context.
+      const dynamicParts = [
+        caseTurn ? buildCaseSystemPrompt(caseTurn.orientation) : '',
+        memoryContext
+      ].filter((part) => typeof part === 'string' && part.trim());
+      if (dynamicParts.length) options.systemPromptDynamic = dynamicParts.join('\n\n');
 
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment, null, {
         workingDirectory: chatWorkingDirectory,

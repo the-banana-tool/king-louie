@@ -186,10 +186,11 @@ describe('case-mode helpers', () => {
     assert.deepStrictEqual(shapeToolDefinitions(base, false, toolRegistry).map((d) => d.name), base.map((d) => d.name));
   });
 
-  it('puts the case prompt and orientation ahead of the base prompt', () => {
-    const p = buildCaseSystemPrompt('ORIENT', 'BASE');
-    assert.ok(p.startsWith(CASE_MODE_PROMPT));
-    assert.ok(p.indexOf('ORIENT') < p.indexOf('BASE'));
+  it('returns the case prompt and orientation for the dynamic part, nothing else', () => {
+    assert.strictEqual(buildCaseSystemPrompt('ORIENT'), `${CASE_MODE_PROMPT}
+
+ORIENT`);
+    assert.strictEqual(buildCaseSystemPrompt(''), CASE_MODE_PROMPT);
   });
 
   it('protects case.yaml and brief.md at the case root, in any letter case', () => {

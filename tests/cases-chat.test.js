@@ -114,8 +114,10 @@ describe('chat:sendMessage in case mode', () => {
     assert.strictEqual(calls.begin[0].id, 'case-1');
     assert.match(calls.begin[0].turnId, /^turn-/);
     const prompt = calls.run.options.systemPrompt;
-    assert.ok(prompt.startsWith('Case mode.'), 'case prompt first');
-    assert.ok(prompt.indexOf('ORIENTATION-BLOCK') < prompt.indexOf('BASE-PROMPT'));
+    const dynamic = calls.run.options.systemPromptDynamic;
+    assert.ok(dynamic.startsWith('Case mode.'), 'the case prompt leads the dynamic part');
+    assert.ok(dynamic.includes('ORIENTATION-BLOCK'));
+    assert.ok(prompt.includes('BASE-PROMPT') && !prompt.includes('Case mode.'), 'the stable part carries no case text');
     const toolNames = calls.run.tools.map((t) => t.name);
     for (const name of CASE_TOOL_NAMES) assert.ok(toolNames.includes(name), `${name} offered`);
     assert.strictEqual(calls.executorOptions.caseContext.caseId, 'case-1');
@@ -130,6 +132,7 @@ describe('chat:sendMessage in case mode', () => {
     await send({ agentMode: true });
     assert.strictEqual(calls.begin.length, 0);
     assert.ok(!calls.run.tools.some((t) => CASE_TOOL_NAMES.includes(t.name)));
+    assert.ok(!String(calls.run.options.systemPromptDynamic || '').includes('Case mode.'));
     assert.ok(!calls.run.options.systemPrompt.includes('Case mode.'));
     assert.strictEqual(calls.executorOptions.caseContext, null);
   });

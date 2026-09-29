@@ -52,7 +52,7 @@ function chatHarness(rt, caseId, { hookResult = null } = {}) {
   const chat = { id: 'chat-1', title: 'Case chat', caseId, messages: [] };
   class FakeLoop {
     async run(messages, tools, options) {
-      seen.prompts.push(options.systemPrompt);
+      seen.prompts.push(options.systemPromptDynamic || '');
       return { content: 'Noted.', llm: { calls: [], totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 } } };
     }
   }

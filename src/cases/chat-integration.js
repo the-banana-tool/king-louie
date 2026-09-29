@@ -72,8 +72,10 @@ function casePrompter(base) {
   };
 }
 
-function buildCaseSystemPrompt(orientation, base) {
-  return [CASE_MODE_PROMPT, orientation, base].filter(Boolean).join('\n\n');
+// The case part of a turn's prompt: it changes every turn, so it goes in
+// the dynamic part, after the stable, cached prompt (recall spec §6.5).
+function buildCaseSystemPrompt(orientation) {
+  return [CASE_MODE_PROMPT, orientation].filter(Boolean).join('\n\n');
 }
 
 // Files at the case root the model changes only through the case tools
