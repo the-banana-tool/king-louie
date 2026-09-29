@@ -261,6 +261,9 @@ function createCore(deps = {}) {
   const listChats = (options = {}) => historyStore.listChats(options);
   const getChat = (chatId, options = {}) => historyStore.getChat(chatId, options);
   const updateChat = (chatId, patch = {}) => historyStore.updateChat(chatId, patch);
+  const createChat = (chat, options = {}) => historyStore.createChat(chat, options);
+  const replaceChat = (chatId, chat) => historyStore.replaceChat(chatId, chat);
+  const deleteChat = (chatId) => historyStore.deleteChat(chatId);
 
   // F5 re-review: a chat a Telegram/Discord bridge created before the
   // origin/channel tagging existed carries neither, and the bridges keep
@@ -1366,8 +1369,8 @@ function createCore(deps = {}) {
           updatedAt: now,
           messages: []
         };
-        const chats = [newChat, ...getChats()];
-        setChats(chats);
+        createChat(newChat);
+        const chats = getChats();
 
         ui.send('chat:updated', { chats });
 
@@ -1436,8 +1439,8 @@ function createCore(deps = {}) {
           updatedAt: now,
           messages: []
         };
-        const chats = [newChat, ...getChats()];
-        setChats(chats);
+        createChat(newChat);
+        const chats = getChats();
 
         // Notify renderer if window exists
         ui.send('chat:updated', { chats });
@@ -3106,6 +3109,9 @@ function createCore(deps = {}) {
     snapshotModels,
     getChats,
     setChats,
+    createChat,
+    replaceChat,
+    deleteChat,
     getChat,
     updateChat,
     appendMessageToChat,
@@ -3211,6 +3217,9 @@ function createCore(deps = {}) {
     listChats,
     getChat,
     updateChat,
+    createChat,
+    replaceChat,
+    deleteChat,
     getActiveChatId,
     setActiveChatId,
     appendMessageToChat,

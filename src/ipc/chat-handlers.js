@@ -65,6 +65,8 @@ function registerChatHandlers(ipcMain, context = {}) {
     getChats,
     listChats,
     getChat,
+    createChat,
+    deleteChat,
     setChats,
     getActiveChatId,
     setActiveChatId,
@@ -127,6 +129,23 @@ function registerChatHandlers(ipcMain, context = {}) {
   const replaceChats = (chats) => {
     setFullChats(chats);
     return chats;
+  };
+
+  const prependChat = (chat) => {
+    if (typeof context.createChat === 'function') {
+      const created = context.createChat(chat, { position: 'front' });
+      if (created && typeof created === 'object') return created;
+    }
+    replaceChats([chat, ...fullChats()]);
+    return chat;
+  };
+
+  const removeChat = (chatId) => {
+    if (typeof context.deleteChat === 'function') {
+      const chats = context.deleteChat(chatId);
+      if (Array.isArray(chats)) return chats;
+    }
+    return replaceChats(fullChats().filter((chat) => chat.id !== chatId));
   };
 
   /**
@@ -261,7 +280,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
       ]
     };
-    replaceChats([newChat, ...fullChats()]);
+    prependChat(newChat);
     setActiveChatId(newChat.id);
     return newChat;
   }));
@@ -276,7 +295,7 @@ function registerChatHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CHAT_DELETE, wrapHandler(IPC.CHAT_DELETE, async (_event, chatId) => {
-    const chats = replaceChats(fullChats().filter((chat) => chat.id !== chatId));
+    const chats = removeChat(chatId);
     const activeChatId = getActiveChatId();
     if (activeChatId === chatId) {
       const nextChatId = chats[0]?.id || null;

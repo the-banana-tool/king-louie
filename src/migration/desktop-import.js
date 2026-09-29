@@ -803,10 +803,16 @@ class DesktopImporter {
     const liveChats = this.context.getChats();
     const late = this.chatRaceCheck(plan, item, value, liveChats);
     if (late) return late;
-    const updated = item.action === 'update'
-      ? liveChats.map((c) => (c.id === item.targetKey ? chat : c))
-      : [chat, ...liveChats.filter((c) => c.id !== chat.id)];
-    this.context.setChats(updated);
+    if (item.action === 'update' && typeof this.context.replaceChat === 'function') {
+      this.context.replaceChat(item.targetKey, chat);
+    } else if (item.action !== 'update' && typeof this.context.createChat === 'function') {
+      this.context.createChat(chat, { position: 'front' });
+    } else {
+      const updated = item.action === 'update'
+        ? liveChats.map((c) => (c.id === item.targetKey ? chat : c))
+        : [chat, ...liveChats.filter((c) => c.id !== chat.id)];
+      this.context.setChats(updated);
+    }
     return {
       note,
       attention: Boolean(note),

@@ -96,6 +96,33 @@ describe('chat history retrieval IPC', () => {
     ]);
   });
 
+  it('routes chat create and delete through facade collection helpers when present', async () => {
+    const chats = [{ id: 'old', title: 'Old', messages: [] }];
+    const calls = [];
+    const handlers = setup(chats, 'old', {
+      createId: () => `id-${calls.length}`,
+      createChat: (chat, options) => {
+        calls.push({ method: 'createChat', chat, options });
+        chats.unshift(chat);
+        return chat;
+      },
+      deleteChat: (chatId) => {
+        calls.push({ method: 'deleteChat', chatId });
+        const next = chats.filter((chat) => chat.id !== chatId);
+        chats.splice(0, chats.length, ...next);
+        return chats;
+      }
+    });
+
+    const created = await handlers.get(IPC.CHAT_CREATE)({}, 'Facade chat');
+    const deleted = await handlers.get(IPC.CHAT_DELETE)({}, created.data.id);
+
+    assert.strictEqual(created.data.title, 'Facade chat');
+    assert.deepStrictEqual(deleted.data.chats.map((chat) => chat.id), ['old']);
+    assert.deepStrictEqual(calls.map((call) => call.method), ['createChat', 'deleteChat']);
+    assert.deepStrictEqual(calls[0].options, { position: 'front' });
+  });
+
   it('routes single-chat reads and truncation through the history facade when present', async () => {
     const chat = {
       id: 'chat-1',

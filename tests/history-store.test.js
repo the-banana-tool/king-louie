@@ -39,4 +39,18 @@ describe('JsonChatHistoryStore', () => {
     assert.strictEqual(updated.updatedAt, '2026-09-29T12:00:00.000Z');
     assert.deepStrictEqual(store.data.chats[0].messages.map((m) => m.id), ['m1']);
   });
+
+  it('creates, replaces and deletes chats through the existing JSON chats array', () => {
+    const store = memoryStore({ chats: [{ id: 'c1', title: 'One', messages: [] }] });
+    const history = new JsonChatHistoryStore({ store });
+
+    assert.strictEqual(history.createChat({ id: 'c2', title: 'Two' }).id, 'c2');
+    assert.deepStrictEqual(store.data.chats.map((c) => c.id), ['c2', 'c1']);
+    assert.deepStrictEqual(store.data.chats[0].messages, []);
+
+    assert.strictEqual(history.replaceChat('c1', { id: 'ignored', title: 'Replaced', messages: [{ id: 'm1' }] }).id, 'c1');
+    assert.strictEqual(store.data.chats[1].title, 'Replaced');
+
+    assert.deepStrictEqual(history.deleteChat('c2').map((c) => c.id), ['c1']);
+  });
 });

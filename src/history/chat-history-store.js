@@ -40,6 +40,40 @@ class JsonChatHistoryStore {
     return includeMessages ? chat : withoutMessages(chat);
   }
 
+  createChat(chat = {}, options = {}) {
+    if (!chat || typeof chat !== 'object' || !String(chat.id || '').trim()) return null;
+    const id = String(chat.id).trim();
+    const normalized = { ...chat, id, messages: Array.isArray(chat.messages) ? chat.messages : [] };
+    const existing = this.getAllChats().filter((item) => item.id !== id);
+    const position = options.position || 'front';
+    const updated = position === 'back' ? [...existing, normalized] : [normalized, ...existing];
+    this.setChats(updated);
+    return normalized;
+  }
+
+  replaceChat(chatId, chat = {}) {
+    const id = String(chatId || chat?.id || '').trim();
+    if (!id || !chat || typeof chat !== 'object') return null;
+    const normalized = { ...chat, id, messages: Array.isArray(chat.messages) ? chat.messages : [] };
+    let replaced = false;
+    const updated = this.getAllChats().map((item) => {
+      if (item.id !== id) return item;
+      replaced = true;
+      return normalized;
+    });
+    if (!replaced) return null;
+    this.setChats(updated);
+    return normalized;
+  }
+
+  deleteChat(chatId) {
+    const id = String(chatId || '').trim();
+    if (!id) return this.getAllChats();
+    const updated = this.getAllChats().filter((chat) => chat.id !== id);
+    this.setChats(updated);
+    return updated;
+  }
+
   updateChat(chatId, patch = {}) {
     const id = String(chatId || '').trim();
     if (!id) return null;
