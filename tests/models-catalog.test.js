@@ -45,7 +45,7 @@ describe('Catalog lookup', () => {
       releaseDate: '2026-04-23', knowledge: '2025-12-01',
       limits: { context: 1050000, input: 922000, output: 128000 },
       input: ['text', 'image', 'pdf'], output: ['text'],
-      toolCall: true, structuredOutput: true,
+      toolCall: true, structuredOutput: true, temperature: null,
       reasoning: { supported: true, efforts: ['none', 'low', 'medium', 'high', 'xhigh'] },
       openWeights: false, local: false,
       cost: {

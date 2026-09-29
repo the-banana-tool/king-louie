@@ -1,13 +1,17 @@
 const BaseLLMProvider = require('./base-provider');
 const ImageHandler = require('../media/image-handler');
+const { acceptsTemperature } = require('../models/capabilities');
 const { createLogger } = require('../logging');
 const log = createLogger('openai');
 
 // Models that use the /v1/completions endpoint instead of /v1/chat/completions
 const COMPLETIONS_MODELS = ['davinci', 'babbage', 'curie', 'ada'];
 
-// Models that don't support temperature (only default of 1)
-const NO_TEMPERATURE_MODELS = ['codex', 'o1', 'o3', 'o4', 'gpt-5', 'chatgpt-'];
+// Name-based guess for models the catalog does not know: these take no
+// temperature (only the default of 1). GPT-5 and later are matched by number
+// below, so a new generation (gpt-6-sol) is covered before the catalog is.
+const NO_TEMPERATURE_MODELS = ['codex', 'o1', 'o3', 'o4', 'chatgpt-'];
+const REASONING_GPT = /(?:^|[^a-z0-9])gpt-(\d+)/;
 
 // Runtime cache: models that need /v1/responses instead of /v1/chat/completions
 const _responsesModels = new Set();
@@ -34,13 +38,19 @@ function needsResponsesApi(message) {
     || err.includes('use /v1/responses');
 }
 
-function supportsTemperature(model) {
+function guessSupportsTemperature(model) {
   const lower = String(model || '').toLowerCase();
+  const gpt = lower.match(REASONING_GPT);
+  if (gpt && Number(gpt[1]) >= 5) return false;
   return !NO_TEMPERATURE_MODELS.some((m) => lower.includes(m));
 }
 
-function temperatureParam(model, options = {}) {
-  return supportsTemperature(model) ? { temperature: options.temperature ?? 0.7 } : {};
+// OpenAI's 400 for a model that takes no temperature, e.g. "Unsupported
+// parameter: 'temperature' is not supported with this model." or
+// "Unsupported value: 'temperature' does not support 0.7 with this model."
+function rejectsTemperature(message) {
+  const err = String(message || '');
+  return /unsupported (parameter|value)/i.test(err) && err.includes("'temperature'");
 }
 
 // Chat Completions content parts, as the Responses API names them.
@@ -51,8 +61,18 @@ function toResponsesPart(part) {
   return part;
 }
 
-// Track models that rejected temperature at runtime so we don't retry every call
+// Models that rejected temperature at runtime, so later calls omit it
+// without a failed round trip first. This beats the catalog, which can lag.
 const _noTempModels = new Set();
+
+function jsonBody(init) {
+  if (typeof init?.body !== 'string') return null;
+  try {
+    return JSON.parse(init.body);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Convert chat messages array into a single prompt string for the completions endpoint.
@@ -101,6 +121,35 @@ class OpenAIProvider extends BaseLLMProvider {
 
   getProviderName() {
     return 'openai';
+  }
+
+  // Whether to send `temperature`: a runtime refusal first, then the
+  // catalog's flag, then the name-based guess for models it does not know.
+  supportsTemperature(model) {
+    const id = String(model || '').toLowerCase();
+    if (_noTempModels.has(id)) return false;
+    const known = acceptsTemperature(this.getCatalog(), this.getProviderName(), model);
+    return known ?? guessSupportsTemperature(model);
+  }
+
+  temperatureParam(model, options = {}) {
+    return this.supportsTemperature(model) ? { temperature: options.temperature ?? 0.7 } : {};
+  }
+
+  // A model that refuses `temperature` gets the same request again without
+  // it, once, and is remembered so later calls leave it out. Covers every
+  // endpoint (chat, completions, responses; streaming or not).
+  async request(url, init = {}, options = {}) {
+    const response = await super.request(url, init, options);
+    if (response.ok || response.status !== 400 || typeof response.clone !== 'function') return response;
+    const body = jsonBody(init);
+    if (!body || !('temperature' in body)) return response;
+    const text = await response.clone().text().catch(() => '');
+    if (!rejectsTemperature(text)) return response;
+    _noTempModels.add(String(body.model || '').toLowerCase());
+    log.info(`Model ${body.model} does not take temperature; retrying without it.`);
+    const { temperature: _dropped, ...rest } = body;
+    return super.request(url, { ...init, body: JSON.stringify(rest) }, options);
   }
 
   getModels() {
@@ -227,7 +276,7 @@ class OpenAIProvider extends BaseLLMProvider {
       body: JSON.stringify({
         model,
         messages: this.formatMessages(preparedMessages),
-        ...temperatureParam(model, options),
+        ...this.temperatureParam(model, options),
         stream: false
       })
     }, options);
@@ -254,7 +303,7 @@ class OpenAIProvider extends BaseLLMProvider {
         model,
         prompt,
         max_tokens: options.max_tokens || 4096,
-        ...temperatureParam(model, options),
+        ...this.temperatureParam(model, options),
         stream: false
       })
     }, options);
@@ -298,7 +347,7 @@ class OpenAIProvider extends BaseLLMProvider {
           })),
           tool_choice: 'auto'
         } : {}),
-        ...temperatureParam(requestedModel, options),
+        ...this.temperatureParam(requestedModel, options),
         stream: false
       })
     }, options);
@@ -331,7 +380,7 @@ class OpenAIProvider extends BaseLLMProvider {
         model,
         prompt,
         max_tokens: options.max_tokens || 4096,
-        ...temperatureParam(model, options),
+        ...this.temperatureParam(model, options),
         stream: false
       })
     }, options);
@@ -418,7 +467,7 @@ class OpenAIProvider extends BaseLLMProvider {
       body: JSON.stringify({
         model,
         input,
-        ...temperatureParam(model, options)
+        ...this.temperatureParam(model, options)
       })
     }, options);
 
@@ -453,7 +502,7 @@ class OpenAIProvider extends BaseLLMProvider {
         model,
         input,
         ...(responsesTools.length ? { tools: responsesTools } : {}),
-        ...temperatureParam(model, options)
+        ...this.temperatureParam(model, options)
       })
     }, options);
 
@@ -609,14 +658,14 @@ class OpenAIProvider extends BaseLLMProvider {
           model: requestedModel,
           prompt: messagesToPrompt(this.formatMessages(preparedMessages)),
           max_tokens: options.max_tokens || 4096,
-          ...temperatureParam(requestedModel, options),
+          ...this.temperatureParam(requestedModel, options),
           stream: true,
           stream_options: { include_usage: true }
         }
       : {
           model: requestedModel,
           messages: this.formatMessages(preparedMessages),
-          ...temperatureParam(requestedModel, options),
+          ...this.temperatureParam(requestedModel, options),
           stream: true,
           stream_options: { include_usage: true }
         };
@@ -696,7 +745,7 @@ class OpenAIProvider extends BaseLLMProvider {
       body: JSON.stringify({
         model: requestedModel,
         input,
-        ...temperatureParam(requestedModel, options),
+        ...this.temperatureParam(requestedModel, options),
         stream: true
       })
     }, options);
@@ -792,3 +841,5 @@ class OpenAIProvider extends BaseLLMProvider {
 
 module.exports = OpenAIProvider;
 module.exports.needsResponsesApi = needsResponsesApi;
+module.exports.rejectsTemperature = rejectsTemperature;
+module.exports.guessSupportsTemperature = guessSupportsTemperature;
