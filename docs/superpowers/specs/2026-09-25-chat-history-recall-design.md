@@ -274,10 +274,11 @@ Implementation note, 2026-09-29 H1 seam: `src/history/` now contains a
 `JsonChatHistoryStore` facade over the existing `chat-data.json` `chats` array.
 `createCore` exposes `historyStore`, `listChats`, `getChat` and `updateChat`
 while preserving `getChats`, `setChats` and `appendMessageToChat` for current
-call sites. `chat:load` and `chat:get` prefer the facade and fall back to the
-legacy helpers in isolated tests. This is deliberately not the SQLite migration;
-it is the adapter seam that lets later H1 steps move storage without changing
-IPC or renderer contracts again.
+call sites. `chat:load`, `chat:get` and simple chat IPC mutations (rename,
+delete, mode toggles, disabled MCP servers and working directory changes) prefer
+the facade and fall back to the legacy helpers in isolated tests. This is
+deliberately not the SQLite migration; it is the adapter seam that lets later H1
+steps move storage without changing IPC or renderer contracts again.
 
 `chat-data.json` keeps `activeChatId`, `apiTokens`, `apiStatus`, `settings`,
 `toolApprovals`, `usage` and everything else it holds today. Only `chats`

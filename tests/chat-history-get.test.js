@@ -3,11 +3,16 @@ const assert = require('node:assert');
 const { registerChatHandlers } = require('../src/ipc/chat-handlers');
 const IPC = require('../src/ipc/constants');
 
-function setup(chats = [], activeChatId = chats[0]?.id || null) {
+function setup(chats = [], activeChatId = chats[0]?.id || null, overrides = {}) {
   const handlers = new Map();
   const context = new Proxy({
     getChats: () => chats,
-    getActiveChatId: () => activeChatId
+    setChats: (next) => { chats.splice(0, chats.length, ...next); },
+    getActiveChatId: () => activeChatId,
+    setActiveChatId: (id) => { activeChatId = id; },
+    createId: () => `id-${Math.random().toString(16).slice(2)}`,
+    getSettings: () => ({}),
+    ...overrides
   }, { get: (target, key) => (key in target ? target[key] : () => null) });
   registerChatHandlers({ handle: (channel, fn) => handlers.set(channel, fn), on: () => {} }, context);
   return handlers;
@@ -67,5 +72,27 @@ describe('chat history retrieval IPC', () => {
     const result = await handlers.get(IPC.CHAT_GET)({}, { chatId: 'missing' });
 
     assert.deepStrictEqual(result, { ok: false, error: 'Chat not found.' });
+  });
+
+  it('routes simple chat mutations through the history facade when present', async () => {
+    const chat = { id: 'chat-1', title: 'Old name', messages: [] };
+    const calls = [];
+    const handlers = setup([chat], chat.id, {
+      updateChat: (chatId, patch) => {
+        calls.push({ chatId, patch });
+        Object.assign(chat, patch);
+        return { ...chat };
+      }
+    });
+
+    const renamed = await handlers.get(IPC.CHAT_RENAME)({}, { chatId: chat.id, name: 'New name' });
+    const agentMode = await handlers.get(IPC.CHAT_SET_AGENT_MODE)({}, { chatId: chat.id, agentMode: true });
+
+    assert.strictEqual(renamed.data.title, 'New name');
+    assert.strictEqual(agentMode.data.agentMode, true);
+    assert.deepStrictEqual(calls.map((call) => [call.chatId, Object.keys(call.patch).sort()]), [
+      ['chat-1', ['title', 'updatedAt']],
+      ['chat-1', ['agentMode', 'updatedAt']]
+    ]);
   });
 });

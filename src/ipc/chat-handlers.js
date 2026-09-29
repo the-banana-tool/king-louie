@@ -98,6 +98,27 @@ function registerChatHandlers(ipcMain, context = {}) {
   // controller in the set and clears the whole entry.
   const activeRuns = new Map();
 
+  const fullChats = () => getChats();
+
+  const setFullChats = (chats) => setChats(chats);
+
+  const patchChat = (chatId, patch = {}) => {
+    const id = String(chatId || '').trim();
+    if (!id) return null;
+    if (typeof context.updateChat === 'function') {
+      const updated = context.updateChat(id, patch);
+      if (updated && typeof updated === 'object') return updated;
+    }
+    const updatedChats = fullChats().map((chat) => (chat.id === id ? { ...chat, ...(patch || {}) } : chat));
+    setFullChats(updatedChats);
+    return updatedChats.find((chat) => chat.id === id) || null;
+  };
+
+  const replaceChats = (chats) => {
+    setFullChats(chats);
+    return chats;
+  };
+
   /**
    * Title a new chat on the turn's utility role (spec 2026-09-27 §8): a
    * small job on a cheap model, its usage recorded like any other call. An
@@ -235,8 +256,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
       ]
     };
-    const chats = [newChat, ...getChats()];
-    setChats(chats);
+    replaceChats([newChat, ...fullChats()]);
     setActiveChatId(newChat.id);
     return newChat;
   }));
@@ -247,19 +267,11 @@ function registerChatHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CHAT_RENAME, wrapHandler(IPC.CHAT_RENAME, async (_event, { chatId, name }) => {
-    const chats = getChats();
-    const updated = chats.map((chat) =>
-      chat.id === chatId
-        ? { ...chat, title: name, updatedAt: new Date().toISOString() }
-        : chat
-    );
-    setChats(updated);
-    return updated.find((chat) => chat.id === chatId);
+    return patchChat(chatId, { title: name, updatedAt: new Date().toISOString() });
   }));
 
   ipcMain.handle(IPC.CHAT_DELETE, wrapHandler(IPC.CHAT_DELETE, async (_event, chatId) => {
-    const chats = getChats().filter((chat) => chat.id !== chatId);
-    setChats(chats);
+    const chats = replaceChats(fullChats().filter((chat) => chat.id !== chatId));
     const activeChatId = getActiveChatId();
     if (activeChatId === chatId) {
       const nextChatId = chats[0]?.id || null;
@@ -269,50 +281,22 @@ function registerChatHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CHAT_SET_AGENT_MODE, wrapHandler(IPC.CHAT_SET_AGENT_MODE, async (_event, { chatId, agentMode }) => {
-    const chats = getChats();
-    const updated = chats.map((chat) =>
-      chat.id === chatId
-        ? { ...chat, agentMode: !!agentMode, updatedAt: new Date().toISOString() }
-        : chat
-    );
-    setChats(updated);
-    return updated.find((chat) => chat.id === chatId);
+    return patchChat(chatId, { agentMode: !!agentMode, updatedAt: new Date().toISOString() });
   }));
 
   ipcMain.handle(IPC.CHAT_SET_SANDBOX_MODE, wrapHandler(IPC.CHAT_SET_SANDBOX_MODE, async (_event, { chatId, sandboxMode }) => {
-    const chats = getChats();
-    const updated = chats.map((chat) =>
-      chat.id === chatId
-        ? { ...chat, sandboxMode: !!sandboxMode, updatedAt: new Date().toISOString() }
-        : chat
-    );
-    setChats(updated);
-    return updated.find((chat) => chat.id === chatId);
+    return patchChat(chatId, { sandboxMode: !!sandboxMode, updatedAt: new Date().toISOString() });
   }));
 
   ipcMain.handle(IPC.CHAT_SET_DISABLED_MCP, wrapHandler(IPC.CHAT_SET_DISABLED_MCP, async (_event, { chatId, disabledMcpServers } = {}) => {
     const list = Array.isArray(disabledMcpServers)
       ? disabledMcpServers.filter((s) => typeof s === 'string').map((s) => s.trim()).filter(Boolean)
       : [];
-    const chats = getChats();
-    const updated = chats.map((chat) =>
-      chat.id === chatId
-        ? { ...chat, disabledMcpServers: list, updatedAt: new Date().toISOString() }
-        : chat
-    );
-    setChats(updated);
-    return updated.find((chat) => chat.id === chatId);
+    return patchChat(chatId, { disabledMcpServers: list, updatedAt: new Date().toISOString() });
   }));
 
   ipcMain.handle(IPC.CHAT_SET_WORKING_DIR, wrapHandler(IPC.CHAT_SET_WORKING_DIR, async (_event, { chatId, workingDirectory }) => {
-    const chats = getChats();
-    const updated = chats.map((chat) =>
-      chat.id === chatId
-        ? { ...chat, workingDirectory: workingDirectory || null, updatedAt: new Date().toISOString() }
-        : chat
-    );
-    setChats(updated);
-    return updated.find((chat) => chat.id === chatId);
+    return patchChat(chatId, { workingDirectory: workingDirectory || null, updatedAt: new Date().toISOString() });
   }));
 
   ipcMain.handle(IPC.CHAT_PICK_WORKING_DIR, wrapHandler(IPC.CHAT_PICK_WORKING_DIR, async (_event, { chatId }) => {
@@ -327,14 +311,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       return { canceled: true };
     }
     const dir = result.filePaths[0];
-    const chats = getChats();
-    const updated = chats.map((chat) =>
-      chat.id === chatId
-        ? { ...chat, workingDirectory: dir, updatedAt: new Date().toISOString() }
-        : chat
-    );
-    setChats(updated);
-    return { canceled: false, chat: updated.find((chat) => chat.id === chatId) };
+    return { canceled: false, chat: patchChat(chatId, { workingDirectory: dir, updatedAt: new Date().toISOString() }) };
   }));
 
   ipcMain.handle(IPC.CHAT_ADD_MESSAGE, wrapHandler(IPC.CHAT_ADD_MESSAGE, async (_event, payload = {}) => {
