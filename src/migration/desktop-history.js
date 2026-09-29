@@ -29,6 +29,16 @@ async function readHistoryChats({ reader, tmpRoot = os.tmpdir(), backup = sqlite
     if (!checked.missing) attention.push({ category: 'source', key: 'history.sqlite', note: checked.reason });
     return { found: false, chats: [], attention };
   }
+  if (typeof backup !== 'function') {
+    // node:sqlite's backup() arrived in Node.js 22.16 and 23.8; closing the
+    // desktop app would not help.
+    attention.push({
+      category: 'source',
+      key: 'history.sqlite',
+      note: `could not be read: importing chats from history.sqlite needs Node.js 22.16 or later (23.8 or later on Node 23), and this is ${process.versions.node}; upgrade Node.js and import again`
+    });
+    return { found: true, chats: [], attention };
+  }
   const dir = fs.mkdtempSync(path.join(tmpRoot, 'kl-import-history-'));
   let source = null;
   let snapshot = null;

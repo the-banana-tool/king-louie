@@ -7,7 +7,7 @@
     "king-louie-service": "bin/king-louie-service.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.16"
   },
   "scripts": {
     "start": "electron .",

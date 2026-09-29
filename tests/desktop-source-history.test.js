@@ -110,6 +110,20 @@ describe('desktop import and history.sqlite', () => {
     assert.match(source.attention[0].note, /could not be read/);
   });
 
+  it('names the Node version it needs when node:sqlite has no backup(), not a desktop that is still open', async () => {
+    const root = tempDir('kl-desktop-');
+    const store = HistoryStore.open(path.join(root, 'history.sqlite'));
+    store.createChat({ id: 'c1', title: 'Lakeside lot', messages: [msg] });
+    store.close();
+    const reader = createSafeReader({ root });
+    const result = await readHistoryChats({ reader, tmpRoot: tempDir('kl-copy-'), backup: null });
+    assert.deepStrictEqual(result.chats, []);
+    assert.strictEqual(result.attention.length, 1);
+    assert.strictEqual(result.attention[0].key, 'history.sqlite');
+    assert.match(result.attention[0].note, /Node\.js 22\.16/);
+    assert.doesNotMatch(result.attention[0].note, /close King Louie/);
+  });
+
   it('refuses a history.sqlite with a second hard link and never opens it', async () => {
     const root = tempDir('kl-desktop-');
     const store = HistoryStore.open(path.join(root, 'history.sqlite'));
