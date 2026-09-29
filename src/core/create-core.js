@@ -64,7 +64,7 @@ const { makeRootAssert } = require('../cases/executors/package-loader');
 const { buildChildContext, childRuntimeOptions } = require('../agents/child-context');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
-const { JsonChatHistoryStore } = require('../history');
+const { SqliteChatHistoryStore } = require('../history');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
@@ -255,7 +255,11 @@ function createCore(deps = {}) {
 
   const createId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-  const historyStore = deps.historyStore || new JsonChatHistoryStore({ store });
+  const historyStore = deps.historyStore || new SqliteChatHistoryStore({
+    dataDir: paths.dataDir,
+    dbPath: deps.historyDbPath,
+    migrateChats: store.get('chats', [])
+  });
   const getChats = () => historyStore.listChats({ messages: true });
   const setChats = (chats) => historyStore.setChats(chats);
   const listChats = (options = {}) => historyStore.listChats(options);
