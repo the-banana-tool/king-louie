@@ -114,6 +114,19 @@ function createSafeReader({ root, platform = process.platform, fsImpl = fs, maxF
     }
   }
 
+  // For a file that has to be opened by path (history.sqlite, which SQLite
+  // opens itself): readFile's checks without reading the bytes. The open
+  // that follows goes by path, so a link swapped in after this check is a
+  // residual this narrows but cannot close.
+  function checkFile(rel) {
+    const r = check(rel);
+    if (r.missing) return { ok: false, missing: true };
+    if (r.refused) return { ok: false, reason: r.refused };
+    if (!r.stat.isFile()) return { ok: false, reason: `${r.path} is not a regular file` };
+    if (r.stat.nlink > 1) return { ok: false, reason: `${r.path} has ${r.stat.nlink} hard links` };
+    return { ok: true, path: r.path };
+  }
+
   function listDir(rel) {
     const r = check(rel);
     if (r.missing) return { dirs: [], refused: [] };
@@ -148,10 +161,10 @@ function createSafeReader({ root, platform = process.platform, fsImpl = fs, maxF
     return { files, refused };
   }
 
-  return { root: rootPath, readFile, listDir, listFiles };
+  return { root: rootPath, readFile, checkFile, listDir, listFiles };
 }
 
-function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop' }) {
+function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null }) {
   const attention = [];
   const readJson = (rel) => {
     const r = reader.readFile(rel);
@@ -177,7 +190,17 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     : crypto.createHash('sha256').update(fs.realpathSync.native(userDataDir)).digest('hex').slice(0, 16);
 
   const settings = chatData.settings && typeof chatData.settings === 'object' ? chatData.settings : {};
-  const chats = arr(chatData.chats).filter((c) => c && typeof c.id === 'string' && c.id);
+  // Since history stage H1 a profile's chats live in history.sqlite; any
+  // that could not be migrated are still in chat-data.json. The store wins
+  // for an id both hold. `history` is readHistoryChats' result, read by the
+  // caller first because node:sqlite's backup is async.
+  const historyChats = history ? history.chats : [];
+  if (history) attention.push(...history.attention);
+  const historyIds = new Set(historyChats.map((c) => c.id));
+  const chats = [
+    ...historyChats,
+    ...arr(chatData.chats).filter((c) => c && typeof c.id === 'string' && c.id && !historyIds.has(c.id))
+  ];
   const tokens = chatData.apiTokens && typeof chatData.apiTokens === 'object' ? chatData.apiTokens : {};
   const toolApprovals = chatData.toolApprovals && typeof chatData.toolApprovals === 'object' ? chatData.toolApprovals : {};
   const alwaysApprove = toolApprovals.alwaysApproveTools && typeof toolApprovals.alwaysApproveTools === 'object' ? toolApprovals.alwaysApproveTools : {};

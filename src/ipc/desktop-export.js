@@ -3,6 +3,7 @@
 // would write defaults), decrypt secrets in memory with safeStorage, and send
 // them only inside import.apply batches over the authenticated bridge.
 const { createSafeReader, readDesktopSource, planBatches } = require('../migration/desktop-source');
+const { readHistoryChats } = require('../migration/desktop-history');
 const { createSafeStorageCipher } = require('../platform/cipher');
 const { secureStorageUsable } = require('./desktop-state');
 
@@ -15,14 +16,17 @@ const failuresFor = (batch, error, code) => batch.map((e) => ({
   category: e.category, key: e.key, ok: false, error, ...(code ? { code } : {})
 }));
 
-function loadDesktopSource({ userDataDir, safeStorage, platform = process.platform }) {
+async function loadDesktopSource({ userDataDir, safeStorage, platform = process.platform }) {
   const usable = secureStorageUsable(safeStorage, platform);
   const cipher = usable ? createSafeStorageCipher(safeStorage) : null;
+  const reader = createSafeReader({ root: userDataDir, platform });
+  const history = await readHistoryChats({ reader });
   return readDesktopSource({
     userDataDir,
-    reader: createSafeReader({ root: userDataDir, platform }),
+    reader,
     decrypt: cipher ? (encrypted) => cipher.decryptString(encrypted) : null,
-    secrets: usable ? 'included' : 'unavailable'
+    secrets: usable ? 'included' : 'unavailable',
+    history
   });
 }
 

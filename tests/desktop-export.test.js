@@ -103,7 +103,7 @@ describe('desktop export over a bridge client', () => {
 
   it('plans with ids only, then sends decrypted secrets in apply batches', async () => {
     const root = desktopProfile();
-    const source = loadDesktopSource({ userDataDir: root, safeStorage: fakeSafeStorage(), platform: 'win32' });
+    const source = await loadDesktopSource({ userDataDir: root, safeStorage: fakeSafeStorage(), platform: 'win32' });
     assert.strictEqual(source.installId, '11111111-2222-4333-8444-555555555555');
     const { core, client, calls } = await serviceClient();
     const plan = await planImport({ client, source });
@@ -123,7 +123,7 @@ describe('desktop export over a bridge client', () => {
 
   it('marks secrets needs-attention when this desktop has no secure storage', async () => {
     const root = desktopProfile();
-    const source = loadDesktopSource({ userDataDir: root, safeStorage: fakeSafeStorage(false), platform: 'win32' });
+    const source = await loadDesktopSource({ userDataDir: root, safeStorage: fakeSafeStorage(false), platform: 'win32' });
     assert.strictEqual(source.inventory.secrets, 'unavailable');
     const { client } = await serviceClient();
     const plan = await planImport({ client, source });
@@ -134,7 +134,7 @@ describe('desktop export over a bridge client', () => {
 
   it('reports a batch the service refused as per-item failures', async () => {
     const root = desktopProfile();
-    const source = loadDesktopSource({ userDataDir: root, safeStorage: fakeSafeStorage(), platform: 'win32' });
+    const source = await loadDesktopSource({ userDataDir: root, safeStorage: fakeSafeStorage(), platform: 'win32' });
     const client = {
       call: async (method) => {
         if (method === 'import.plan') return { planId: 'p1', items: [{ category: 'chat', key: 'c1', action: 'new' }], counts: { new: 1 } };
@@ -213,7 +213,7 @@ describe('applyImport robustness', () => {
     const root = tmp('kl-export-profile-');
     fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ chats: [], settings: {} }));
     fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ __vault_github: sealed('ghp_example_token') }));
-    const source = loadDesktopSource({ userDataDir: root, safeStorage: fakeSafeStorage(false), platform: 'win32' });
+    const source = await loadDesktopSource({ userDataDir: root, safeStorage: fakeSafeStorage(false), platform: 'win32' });
     assert.strictEqual(source.inventory.secrets, 'unavailable');
     const sent = [];
     const client = recordingClient((params) => { sent.push(params); return { results: [] }; });

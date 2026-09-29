@@ -24,6 +24,7 @@
 const fs = require('fs');
 const path = require('path');
 const { readDesktopSource, createSafeReader, planBatches } = require('../../migration/desktop-source');
+const { readHistoryChats } = require('../../migration/desktop-history');
 const { spawnWriter, printable } = require('./import-channel');
 const { isAdmin: defaultIsAdmin } = require('./admin-check');
 const { resolveMasterKeyReadOnly } = require('../../platform/master-key');
@@ -136,7 +137,9 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
   const from = path.resolve(flags.from);
   let source;
   try {
-    source = readDesktopSource({ userDataDir: from, reader: createSafeReader({ root: from, platform }), decrypt: null, secrets: 'needs-desktop' });
+    const reader = createSafeReader({ root: from, platform });
+    const history = await readHistoryChats({ reader });
+    source = readDesktopSource({ userDataDir: from, reader, decrypt: null, secrets: 'needs-desktop', history });
   } catch (err) {
     io.stderr.write(`Cannot read ${from}: ${err.message}\n`);
     return 1;

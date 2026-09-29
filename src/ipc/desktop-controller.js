@@ -393,7 +393,7 @@ function createDesktopController({
     try {
       closeImportSession();
       const session = await importClient();
-      const source = loadDesktopSource({ userDataDir, safeStorage, platform });
+      const source = await loadDesktopSource({ userDataDir, safeStorage, platform });
       const plan = await planImport({ client: session.client, source });
       importSession = { ...session, plan, source };
       return { ok: true, plan, attention: source.attention };
