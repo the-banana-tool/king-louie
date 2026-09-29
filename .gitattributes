@@ -11,3 +11,8 @@ examples/**/*.py text eol=lf
 # tests/approvals-protocol.test.js) and read by the phone protocol cores; a
 # Windows checkout with core.autocrlf=true must not turn them into CRLF.
 tests/vectors/**/*.json text eol=lf
+# LongHaul hashes its prompt templates into every run record and its fixtures
+# are session files other tools read; keep them LF so a Windows checkout
+# records the same promptSha256 as everyone else.
+src/longhaul/prompts/** text eol=lf
+tests/fixtures/longhaul/** text eol=lf
