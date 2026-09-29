@@ -3,6 +3,9 @@
 // §6.3, §6.6) as plain functions over the store's DatabaseSync. HistoryStore
 // delegates here so history-store.js keeps H1's shape.
 const { chunkMessage } = require('./chunker');
+const { createLogger } = require('../logging');
+
+const log = createLogger('history-index');
 
 const SCHEMA_V2_SQL = `
 CREATE TABLE chunks (
@@ -89,4 +92,109 @@ function clearBackfill(db) {
   prepared(db, 'DELETE FROM meta WHERE key = ?').run(BACKFILL_KEY);
 }
 
-module.exports = { SCHEMA_V2_SQL, prepared, insertChunks, BACKFILL_KEY, readBackfill, writeBackfill, clearBackfill };
+// FTS5 query from user text (spec §6.3 step 1, §15): quoted phrases stay
+// phrases, every other term is quoted (so AND/OR/NEAR/*/^/: are literals),
+// terms are OR-ed. Leading/trailing . - / are trimmed from unquoted terms so
+// "config.yaml." at the end of a sentence is the phrase "config.yaml". The
+// tokenizer treats only _ and - as token characters: . and / separate tokens,
+// so a quoted "config.yaml" or "src/app.js" is a phrase of adjacent tokens
+// (config, yaml), and a bare app.js matches wherever those tokens are adjacent.
+const EDGE = /^[.\-/]+|[.\-/]+$/g;
+function ftsQuery(text) {
+  const parts = [];
+  const re = /"([^"]*)"|(\S+)/g;
+  let m;
+  while ((m = re.exec(String(text || '')))) {
+    const raw = m[1] !== undefined ? m[1] : m[2].replace(EDGE, '');
+    if (!/[\p{L}\p{N}]/u.test(raw)) continue;
+    parts.push(`"${raw.replace(/"/g, '""')}"`);
+  }
+  return parts.join(' OR ');
+}
+
+const placeholders = (n) => new Array(n).fill('?').join(', ');
+const asList = (v) => (Array.isArray(v) ? v.filter((x) => x !== undefined && x !== null).map(String) : []);
+
+function searchText(db, query, { chatIds, kinds, limit = 50, upToSeq, messageIds } = {}) {
+  const match = ftsQuery(query);
+  if (!match) return [];
+  const where = ['chunks_fts MATCH ?'];
+  const args = [match];
+  const chats = asList(chatIds);
+  const kindList = asList(kinds);
+  const messages = asList(messageIds);
+  if (chats.length) { where.push(`c.chat_id IN (${placeholders(chats.length)})`); args.push(...chats); }
+  if (kindList.length) { where.push(`c.kind IN (${placeholders(kindList.length)})`); args.push(...kindList); }
+  if (messages.length) { where.push(`c.message_id IN (${placeholders(messages.length)})`); args.push(...messages); }
+  if (Number.isInteger(upToSeq)) { where.push('m.seq < ?'); args.push(upToSeq); }
+  const max = Number.isInteger(limit) && limit > 0 ? limit : 50;
+  // bm25score, not "rank": rank is an FTS5 hidden column.
+  const sql = `SELECT c.id AS chunkId, bm25(chunks_fts) AS bm25score
+    FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid JOIN messages m ON m.id = c.message_id
+    WHERE ${where.join(' AND ')} ORDER BY bm25score LIMIT ?`;
+  try {
+    return db.prepare(sql).all(...args, max).map((r) => ({ chunkId: r.chunkId, score: -r.bm25score }));
+  } catch (err) {
+    log.warn(`Full-text search failed; recall uses the tail alone this turn: ${err.message}`);
+    return [];
+  }
+}
+
+const CHUNK_COLUMNS = `c.id AS id, c.message_id AS messageId, c.chat_id AS chatId, m.seq AS seq, c.idx AS idx,
+  c.kind AS kind, c.text AS text, c.chars AS chars, c.ts AS ts, m.sender AS sender, m.tool_name AS toolName`;
+const chunkRow = (row) => ({ ...row, toolName: row.toolName ?? null });
+
+function getChunks(db, ids) {
+  const list = (Array.isArray(ids) ? ids : []).filter(Number.isInteger);
+  const byId = new Map();
+  for (let i = 0; i < list.length; i += 500) {
+    const batch = list.slice(i, i + 500);
+    const rows = db.prepare(`SELECT ${CHUNK_COLUMNS} FROM chunks c JOIN messages m ON m.id = c.message_id WHERE c.id IN (${placeholders(batch.length)})`).all(...batch);
+    for (const row of rows) byId.set(row.id, chunkRow(row));
+  }
+  return list.map((id) => byId.get(id)).filter(Boolean);
+}
+
+function chunksOfMessage(db, messageId) {
+  return prepared(db, `SELECT ${CHUNK_COLUMNS} FROM chunks c JOIN messages m ON m.id = c.message_id WHERE c.message_id = ? ORDER BY c.idx`)
+    .all(String(messageId)).map(chunkRow);
+}
+
+function messageChunkCounts(db, messageIds) {
+  const list = asList(messageIds);
+  const out = new Map();
+  for (let i = 0; i < list.length; i += 500) {
+    const batch = list.slice(i, i + 500);
+    const sql = `SELECT message_id AS id, count(*) AS n FROM chunks WHERE message_id IN (${placeholders(batch.length)}) GROUP BY message_id`;
+    for (const row of db.prepare(sql).all(...batch)) out.set(row.id, row.n);
+  }
+  return out;
+}
+
+function lastSeq(db, chatId) {
+  return prepared(db, 'SELECT COALESCE(MAX(seq), 0) AS n FROM messages WHERE chat_id = ?').get(String(chatId)).n;
+}
+
+function historyChars(db, chatId, { upToSeq } = {}) {
+  if (Number.isInteger(upToSeq)) {
+    return prepared(db, 'SELECT COALESCE(SUM(c.chars), 0) AS n FROM chunks c JOIN messages m ON m.id = c.message_id WHERE c.chat_id = ? AND m.seq < ?')
+      .get(String(chatId), upToSeq).n;
+  }
+  return prepared(db, 'SELECT COALESCE(SUM(chars), 0) AS n FROM chunks WHERE chat_id = ?').get(String(chatId)).n;
+}
+
+function getCalibration(db, model) {
+  const row = prepared(db, 'SELECT model, chars_per_token AS charsPerToken, samples FROM calibration WHERE model = ?').get(String(model));
+  return row ? { model: row.model, charsPerToken: row.charsPerToken, samples: row.samples } : null;
+}
+
+function setCalibration(db, model, charsPerToken, samples) {
+  prepared(db, `INSERT INTO calibration (model, chars_per_token, samples) VALUES (?, ?, ?)
+    ON CONFLICT(model) DO UPDATE SET chars_per_token = excluded.chars_per_token, samples = excluded.samples`)
+    .run(String(model), Number(charsPerToken), Math.floor(Number(samples) || 0));
+}
+
+module.exports = {
+  SCHEMA_V2_SQL, prepared, insertChunks, BACKFILL_KEY, readBackfill, writeBackfill, clearBackfill,
+  ftsQuery, searchText, getChunks, chunksOfMessage, messageChunkCounts, lastSeq, historyChars, getCalibration, setCalibration
+};

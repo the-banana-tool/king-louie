@@ -7,7 +7,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
-const { insertChunks, readBackfill, writeBackfill, clearBackfill } = require('./chunk-index');
+const chunkIndex = require('./chunk-index');
+const { insertChunks, readBackfill, writeBackfill, clearBackfill } = chunkIndex;
 const { applySchema, currentVersion, latestVersion, SchemaVersionError } = require('./schema');
 const rows = require('./rows');
 const { createLogger } = require('../logging');
@@ -395,6 +396,16 @@ class HistoryStore {
     clearBackfill(this.db);
     return { indexed, total };
   }
+
+  // Recall stage H2 (spec §3.2, §6.3, §6.6).
+  searchText(query, options = {}) { return chunkIndex.searchText(this.db, query, options); }
+  chunks(ids) { return chunkIndex.getChunks(this.db, ids); }
+  chunksOfMessage(messageId) { return chunkIndex.chunksOfMessage(this.db, messageId); }
+  messageChunkCounts(messageIds) { return chunkIndex.messageChunkCounts(this.db, messageIds); }
+  lastSeq(chatId) { return chunkIndex.lastSeq(this.db, chatId); }
+  historyChars(chatId, options = {}) { return chunkIndex.historyChars(this.db, chatId, options); }
+  calibration(model) { return chunkIndex.getCalibration(this.db, model); }
+  setCalibration(model, charsPerToken, samples) { chunkIndex.setCalibration(this.db, model, charsPerToken, samples); }
 
   _messagesFor(chatId, { fromSeq = 1, toSeq = Number.MAX_SAFE_INTEGER, limit = -1 } = {}) {
     const list = this._stmt('SELECT * FROM messages WHERE chat_id = ? AND seq >= ? AND seq <= ? ORDER BY seq LIMIT ?')
