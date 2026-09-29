@@ -24,4 +24,13 @@ function capabilitiesOf(catalog, provider, model) {
   };
 }
 
-module.exports = { capabilitiesOf, PDF_DOCUMENT_PROVIDERS };
+// Whether a model takes a `temperature` parameter, as the catalog says:
+// true or false, or null when the catalog does not know the model or has no
+// word on it (the caller then falls back to its own guess).
+function acceptsTemperature(catalog, provider, model) {
+  const p = String(provider || '').toLowerCase();
+  const entry = catalog && model ? catalog.get(p, model) : null;
+  return typeof entry?.temperature === 'boolean' ? entry.temperature : null;
+}
+
+module.exports = { capabilitiesOf, acceptsTemperature, PDF_DOCUMENT_PROVIDERS };

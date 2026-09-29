@@ -6,7 +6,7 @@ const { priceWithCost } = require('./pricing');
 const providerIds = require('./provider-ids');
 const { Availability } = require('./availability');
 const { discoverOllama } = require('./ollama');
-const { capabilitiesOf } = require('./capabilities');
+const { capabilitiesOf, acceptsTemperature } = require('./capabilities');
 const roles = require('./roles');
 const { Profiles, ProfileError, normalizeProfile, snapshotFromSettings } = require('./profiles');
 const { createTurnModels, UnknownRoleError, NoUsableModelError, roleTimeoutMs } = require('./resolver');
@@ -39,6 +39,7 @@ module.exports = {
   Availability,
   discoverOllama,
   capabilitiesOf,
+  acceptsTemperature,
   Profiles,
   ProfileError,
   normalizeProfile,

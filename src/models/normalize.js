@@ -73,6 +73,9 @@ function normalizeModel(provider, raw) {
     output: strList(modalities.output, ['text']),
     toolCall: raw.tool_call === true,
     structuredOutput: raw.structured_output === true,
+    // Whether the model takes a `temperature` parameter; null when
+    // models.dev does not say.
+    temperature: typeof raw.temperature === 'boolean' ? raw.temperature : null,
     reasoning: { supported: raw.reasoning === true, efforts: effortsOf(raw.reasoning_options) },
     openWeights: raw.open_weights === true,
     local: false,
@@ -181,6 +184,7 @@ function localEntry(provider, { id, name = null, context = null, toolCall = null
     output: ['text'],
     toolCall: toolCall === true,
     structuredOutput: false,
+    temperature: null,
     reasoning: { supported: false, efforts: [] },
     openWeights: true,
     local: true,
