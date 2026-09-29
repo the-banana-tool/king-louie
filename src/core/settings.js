@@ -7,6 +7,7 @@ const { CATALOG_DEFAULTS } = require('../models/catalog');
 const { DEFAULT_OLLAMA_BASE_URL } = require('../models/provider-ids');
 const { DEFAULT_ROLE_TIMEOUTS_MS } = require('../models/roles');
 const { mergeKingLouieSettings } = require('../models/suggester');
+const { mergeHistorySettings } = require('../history/settings');
 
 const DEFAULT_SETTINGS = {
   defaults: {
@@ -28,6 +29,8 @@ const DEFAULT_SETTINGS = {
   // Cases stage 6: allowed playbook sources (URL prefixes and path:<folder>
   // roots; example: is always allowed) and same-major auto-update.
   playbooks: { sources: [], autoUpdate: false },
+  // Chat history and recall (spec 2026-09-25 §14, stage H2).
+  history: mergeHistorySettings({}),
   templateVariables: {
     name: '',
     role: '',
@@ -103,6 +106,8 @@ const mergeSettings = (settings = {}) => {
     cases: require('../cases/defaults').mergeCaseSettings(DEFAULT_SETTINGS.cases, source.cases),
     // Cases stage 3: settings.executors, merged key by key over its defaults.
     executors: require('../cases/executors/defaults').mergeExecutorSettings(null, source.executors),
+    // Recall stage H2: settings.history, type-checked key by key.
+    history: mergeHistorySettings(source.history),
     templateVariables: {
       ...(DEFAULT_SETTINGS.templateVariables || {}),
       ...(source.templateVariables || {})
