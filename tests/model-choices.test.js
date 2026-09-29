@@ -12,7 +12,7 @@ const { fixtureCatalog } = require('./helpers/models-fixture');
 
 const t = (provider, model, effort = null) => ({ provider, model, effort });
 
-function setup({ chats = [], unusable = {}, cases = {} } = {}) {
+function setup({ chats = [], unusable = {}, cases = {}, historyUnavailable = false } = {}) {
   let settings = mergeSettings({
     models: {
       profiles: [
@@ -56,6 +56,7 @@ function setup({ chats = [], unusable = {}, cases = {} } = {}) {
     snapshotModels,
     listChats: (options = {}) => {
       facadeCalls.push({ method: 'listChats', options });
+      if (historyUnavailable) throw Object.assign(new Error('Chat history is unavailable'), { code: 'HISTORY_UNAVAILABLE' });
       return options.messages === false ? store.map(({ messages: _messages, ...meta }) => meta) : store;
     },
     getChat: (chatId, options = {}) => {
@@ -231,6 +232,12 @@ describe('profiles', () => {
 
     assert.deepStrictEqual(r.moved, { chats: ['c1'], cases: ['case-1'] });
     assert.ok(facadeCalls.some((call) => call.method === 'listChats' && call.options.messages === false));
+  });
+
+  it('keeps the profile when chat history is unavailable, since its chats cannot be moved', async () => {
+    const { choices, profiles } = setup({ historyUnavailable: true, chats: [{ id: 'c1', profileId: 'p-b' }] });
+    await assert.rejects(() => choices.removeProfile('p-b'), (err) => err.code === 'HISTORY_UNAVAILABLE');
+    assert.ok(profiles.get('p-b'), 'the profile is still there');
   });
 
   it('views every profile entry with its usability, reasons and catalog facts', () => {

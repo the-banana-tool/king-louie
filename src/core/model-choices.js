@@ -142,10 +142,13 @@ function createModelChoices({
   async function removeProfile(id) {
     const victim = profiles.get(id);
     if (!victim) throw new Error(`No profile with id ${id}.`);
+    // Listed before the profile goes: with chat history unavailable this
+    // throws and the profile stays, rather than leaving its chats unmoved.
+    const metas = chatMetas();
     const { defaultProfileId } = profiles.remove(id);
     const fallback = profiles.get(defaultProfileId)?.name || 'the default';
     const moved = { chats: [], cases: [] };
-    for (const chat of chatMetas()) {
+    for (const chat of metas) {
       if (chat.caseId || chat.profileId !== id) continue;
       updateChat(chat.id, { profileId: null });
       status(chat.id, `The profile ${victim.name} was deleted; this chat now uses the default profile (${fallback}).`);
@@ -164,7 +167,7 @@ function createModelChoices({
         continue;
       }
       moved.cases.push(meta.id);
-      for (const chat of chatMetas().filter((c) => c.caseId === meta.id)) {
+      for (const chat of metas.filter((c) => c.caseId === meta.id)) {
         status(chat.id, `The profile ${victim.name} was deleted; this case now uses the default profile (${fallback}).`);
       }
     }
