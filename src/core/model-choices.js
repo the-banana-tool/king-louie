@@ -20,6 +20,8 @@ function createModelChoices({
   snapshotModels,
   getChats,
   setChats,
+  getChat,
+  updateChat: updateChatFacade,
   appendMessageToChat,
   getCaseRuntime = () => null,
   kingLouie = null,
@@ -30,7 +32,9 @@ function createModelChoices({
   }
 
   const findChat = (chatId) => {
-    const chat = getChats().find((c) => c.id === chatId);
+    const chat = typeof getChat === 'function'
+      ? getChat(chatId, { messages: true })
+      : getChats().find((c) => c.id === chatId);
     if (!chat) throw new Error('Chat not found.');
     return chat;
   };
@@ -42,6 +46,9 @@ function createModelChoices({
   const status = (chatId, text) => appendMessageToChat(chatId, 'status', text);
   const updateChat = (chatId, patch) => {
     const now = new Date().toISOString();
+    if (typeof updateChatFacade === 'function') {
+      return updateChatFacade(chatId, { ...patch, updatedAt: now });
+    }
     const next = getChats().map((c) => {
       if (c.id !== chatId) return c;
       const out = { ...c, updatedAt: now };

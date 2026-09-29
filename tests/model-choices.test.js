@@ -12,7 +12,7 @@ const { fixtureCatalog } = require('./helpers/models-fixture');
 
 const t = (provider, model, effort = null) => ({ provider, model, effort });
 
-function setup({ chats = [], unusable = {}, cases = {} } = {}) {
+function setup({ chats = [], unusable = {}, cases = {}, facade = false } = {}) {
   let settings = mergeSettings({
     models: {
       profiles: [
@@ -47,6 +47,7 @@ function setup({ chats = [], unusable = {}, cases = {} } = {}) {
       { provider: 'groq', model: 'llama-3.3-70b', name: 'Llama 3.3 70B' }
     ]
   };
+  const facadeCalls = [];
   const choices = createModelChoices({
     profiles,
     catalog: fixtureCatalog(),
@@ -55,12 +56,23 @@ function setup({ chats = [], unusable = {}, cases = {} } = {}) {
     snapshotModels,
     getChats: () => store,
     setChats: (next) => { store = next; },
+    ...(facade ? {
+      getChat: (chatId, options) => {
+        facadeCalls.push({ method: 'getChat', chatId, options });
+        return store.find((c) => c.id === chatId) || null;
+      },
+      updateChat: (chatId, patch) => {
+        facadeCalls.push({ method: 'updateChat', chatId, patch });
+        store = store.map((c) => (c.id === chatId ? { ...c, ...patch } : c));
+        return store.find((c) => c.id === chatId) || null;
+      }
+    } : {}),
     appendMessageToChat: (chatId, sender, text) => { store = store.map((c) => (c.id === chatId ? { ...c, messages: [...c.messages, { sender, text }] } : c)); return store.find((c) => c.id === chatId); },
     getCaseRuntime: () => caseRuntime
   });
   const chat = (id) => store.find((c) => c.id === id);
   const statuses = (id) => chat(id).messages.filter((m) => m.sender === 'status').map((m) => m.text);
-  return { choices, profiles, chat, statuses, caseCalls, caseMeta };
+  return { choices, profiles, chat, statuses, caseCalls, caseMeta, facadeCalls };
 }
 
 describe('the chat header view', () => {
@@ -96,6 +108,20 @@ describe('switching', () => {
     await choices.setMainOverride('c1', null);
     assert.strictEqual('mainOverride' in chat('c1'), false);
     assert.deepStrictEqual(statuses('c1'), ['Main model switched from GPT-5.5 to GPT-4o', 'Main model reset to the profile\'s main (GPT-5.5)']);
+  });
+
+  it('uses facade methods for chat model choice reads and writes when available', async () => {
+    const { choices, chat, facadeCalls } = setup({ chats: [{ id: 'c1' }], facade: true });
+
+    await choices.setChatProfile('c1', 'p-b');
+
+    assert.strictEqual(chat('c1').profileId, 'p-b');
+    assert.deepStrictEqual(facadeCalls.map((call) => [call.method, call.chatId]), [
+      ['getChat', 'c1'],
+      ['updateChat', 'c1'],
+      ['getChat', 'c1']
+    ]);
+    assert.deepStrictEqual(Object.keys(facadeCalls[1].patch).sort(), ['profileId', 'updatedAt']);
   });
 
   it('refuses to switch to a model that cannot be used', async () => {

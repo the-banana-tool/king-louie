@@ -7,6 +7,16 @@ const { createLogger } = require('../logging');
 const log = createLogger('workflow-handlers');
 
 function registerWorkflowHandlers(ipcMain, context) {
+  const findChat = (chatId) => {
+    if (!chatId) return null;
+    if (typeof context.getChat === 'function') {
+      const chat = context.getChat(chatId, { messages: true });
+      if (chat && typeof chat === 'object') return chat;
+    }
+    const getChats = typeof context.getChats === 'function' ? context.getChats : null;
+    return getChats ? getChats().find((c) => c && c.id === chatId) || null : null;
+  };
+
   const mergePlanOptions = (payload) => {
     const options = { ...(payload.options || {}) };
     if (payload.chatId) options.chatId = payload.chatId;
@@ -77,10 +87,9 @@ function registerWorkflowHandlers(ipcMain, context) {
       // The workflow runs against this snapshot, not against whatever the
       // user toggles to mid-flight.
       let modeSnapshot = null;
-      const getChats = typeof context.getChats === 'function' ? context.getChats : null;
       const store = typeof context.getStore === 'function' ? context.getStore() : null;
-      if (payload.chatId && getChats) {
-        const chat = getChats().find((c) => c && c.id === payload.chatId);
+      if (payload.chatId) {
+        const chat = findChat(payload.chatId);
         if (chat) {
           const settings = store ? store.get('settings', {}) : {};
           modeSnapshot = {
@@ -181,9 +190,8 @@ function registerWorkflowHandlers(ipcMain, context) {
     wrapHandler('workflow:recoverPlan', async (event, payload = {}) => {
       const chatId = payload.chatId;
       if (!chatId) throw new Error('chatId is required');
-      const getChats = typeof context.getChats === 'function' ? context.getChats : null;
-      if (!getChats) throw new Error('Chat storage not available');
-      const chat = getChats().find((c) => c && c.id === chatId);
+      if (typeof context.getChat !== 'function' && typeof context.getChats !== 'function') throw new Error('Chat storage not available');
+      const chat = findChat(chatId);
       if (!chat) return { ok: false, error: 'Chat not found' };
       const recovered = recoverPlanFromMessages(chat.messages || []);
       if (!recovered.taskGraph) {

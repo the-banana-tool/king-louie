@@ -3130,6 +3130,8 @@ function createCore(deps = {}) {
     snapshotModels,
     getChats,
     setChats,
+    getChat,
+    updateChat,
     appendMessageToChat,
     getCaseRuntime: () => caseRuntime,
     kingLouie,

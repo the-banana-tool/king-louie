@@ -70,4 +70,37 @@ describe('Workflow handler module', () => {
     assert.ok(registered.includes('workflow:recoverPlan'));
     assert.strictEqual(registered.length, 11);
   });
+
+  it('recovers a plan using getChat when the facade is available', async () => {
+    const { registerWorkflowHandlers } = require('../src/ipc/workflow-handlers');
+    const handlers = new Map();
+    const taskGraph = {
+      tasks: [
+        { id: 'task-1', title: 'Task 1', description: 'Do the thing', dependsOn: [] }
+      ]
+    };
+    const context = {
+      getPlannerExecutor: () => null,
+      getWorkflowEngine: () => null,
+      calls: [],
+      getChat: (chatId, options) => {
+        context.calls.push({ chatId, options });
+        return {
+          id: chatId,
+          messages: [
+            { id: 'm1', sender: 'assistant', workflowScaffolding: { kind: 'approved', taskGraph } }
+          ]
+        };
+      }
+    };
+
+    registerWorkflowHandlers({ handle: (channel, handler) => handlers.set(channel, handler) }, context);
+
+    const result = await handlers.get(constants.WORKFLOW_RECOVER_PLAN)({}, { chatId: 'chat-1' });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.kind, 'approved');
+    assert.deepStrictEqual(result.taskGraph, taskGraph);
+    assert.deepStrictEqual(context.calls, [{ chatId: 'chat-1', options: { messages: true } }]);
+  });
 });

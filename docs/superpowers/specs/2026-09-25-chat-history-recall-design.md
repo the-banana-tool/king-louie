@@ -278,9 +278,12 @@ call sites. `chat:load`, `chat:get` and simple chat IPC mutations (rename,
 delete, mode toggles, disabled MCP servers and working directory changes) prefer
 the facade and fall back to the legacy helpers in isolated tests. Canvas state
 IPC and case attach/create chat lookups now use the same `getChat`/`updateChat`
-facade seam. This is deliberately not the SQLite migration; it is the adapter
-seam that lets later H1 steps move storage without changing IPC or renderer
-contracts again.
+facade seam. Workflow plan recovery now reads through `getChat({ messages:
+true })`, and model-choice chat header/profile/main-override paths can use
+facade-backed `getChat`/`updateChat` while keeping legacy helpers for older test
+harnesses. This is deliberately not the SQLite migration; it is the adapter seam
+that lets later H1 steps move storage without changing IPC or renderer contracts
+again.
 
 `chat-data.json` keeps `activeChatId`, `apiTokens`, `apiStatus`, `settings`,
 `toolApprovals`, `usage` and everything else it holds today. Only `chats`
