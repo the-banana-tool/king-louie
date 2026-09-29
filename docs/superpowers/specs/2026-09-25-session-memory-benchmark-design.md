@@ -102,15 +102,19 @@ Settled with the owner on 2026-09-29 (the §17 questions):
 |---|---|---|
 | B-D5 | The benchmark is named **LongHaul** | Docs and reports use LongHaul, not King Louie. The code is `src/longhaul/`, the CLI `bin/longhaul.js`, tests `tests/longhaul-*.test.js`; `src/longhaul/` may use `src/history/` and `src/providers/`, and nothing depends on it, so it can move to its own repository |
 | B-D6 | Harness code is ISC like the repo; questions and annotations are CC-BY-4.0; each converted session keeps its upstream license | The manifest's `license` is per session; a source dataset's license is checked before its converter is written |
-| B-D7 | Model spend is capped at **$50 per full run** | How a run fits the cap (answer model, sample sizes, the `full-history` adapter) is open |
-| B-D8 | Private sessions are never released, reviewed or not; only aggregate results from them are published | §10.1 holds; there is no release review process. The owner will export sessions A to D as raw JSONL into `KL_BENCH_PRIVATE_DIR` |
+| B-D7 | Model spend is capped at **$50 per full run** | Two answer tiers (§8.1): a cheap open-weight model answers every question for every adapter; a frontier model answers a stratified sample of 150; `full-history` runs only on that sample, capped at a 128K window; a small model judges. Estimated $25 to $35 at about 500 questions |
+| B-D8 | Private sessions are never released, reviewed or not; only aggregate results from them are published | §10.1 holds; there is no release review process. The owner will export sessions A to D as raw JSONL into `$LONGHAUL_HOME/private/` |
+| B-D12 | LongHaul's data lives in `LONGHAUL_HOME` (default `~/.longhaul/`): `private/`, `sessions/`, `questions/`, `runs/`, `reports/` | Private transcripts are never inside the repository tree, gitignored or not; the repository holds only synthetic fixtures; LongHaul does not read King Louie's data directory |
 | B-D9 | External systems (Mem0, Letta) are a follow-up, not the first release | The external adapter protocol stays in B4; Mem0 is the first external adapter after release |
 | B-D10 | Venue: an arXiv preprint and a workshop paper | The public set is about 12 sessions (decided 2026-09-29), about 40 verified questions each (§6) |
 | B-D11 | A thin evidence-recall slice (B0, §13) runs after recall stage H2 and before H3 | H3's choices are measured; answer and judge models are not needed for B0 |
 
 ## 3. Architecture
 
+Under `LONGHAUL_HOME` (default `~/.longhaul/`, never inside the repository):
+
 ```
+private/             private session files dropped from any machine (§10.1)
 sessions/            canonical session files (§4), from importers and converters
 questions/           question sets per session (§5), authored per §6
 systems/             adapters (§7): kl-recall, full-history, sliding-window, summarize-compact, oracle, external
@@ -265,7 +269,24 @@ line per adapter, with `oracle` and `full-history` as reference lines. A
 second figure is correctness versus context tokens.
 
 Answer model and judge model are run settings; the judge is never the
-answer model. Prompts for authoring, answering and judging are versioned
+answer model.
+
+### 8.1 Cost tiers
+
+A full run is capped at $50 of model spend (B-D7). It has two answer tiers:
+
+- **Grid:** every question, every adapter except `full-history`, answered by
+  a cheap open-weight model (a DeepSeek V4 Flash class model, about $0.15 to
+  $0.30 per million input tokens).
+- **Headline sample:** a stratified sample of 150 questions (by kind and
+  distance bucket, seeded) answered by a frontier model for every adapter,
+  including `full-history`, whose context is capped at a 128K-token window;
+  the cap is reported as a limitation.
+
+A small model (Haiku class) judges both tiers; it sees the question, the
+reference answers and the reply, not the context. The run prices its plan
+from the model catalog before the first call and refuses to start when the
+estimate exceeds the cap; `--max-usd` overrides it. Prompts for authoring, answering and judging are versioned
 files in `src/longhaul/prompts/`, and their hashes are in every run's config.
 
 ## 9. The compaction-loss study
@@ -292,13 +313,12 @@ the session is public.
 
 ### 10.1 Private sessions
 
-`KL_BENCH_PRIVATE_DIR` (default `<dataDir>/bench-private/`) is a directory
-outside the repository. Session files dropped there from any machine are
-imported with `private: true` and `license: private`. Nothing under it is ever
-copied into the repository, into a release, or into a report that leaves the
-machine; `report --public` refuses sessions marked private. The repository's
-`.gitignore` excludes `bench-private/`, `runs/` and `sessions/` by default;
-only synthetic fixtures are committed.
+`$LONGHAUL_HOME/private/` (B-D12) is outside the repository. Session files
+dropped there from any machine are imported with `private: true` and
+`license: private`. Nothing under it is ever copied into the repository, into
+a release, or into a report that leaves the machine; `report --public` refuses
+sessions marked private. `bin/longhaul.js` refuses a `LONGHAUL_HOME` inside a
+git working tree. Only synthetic fixtures are committed.
 
 ### 10.2 Public sessions
 
@@ -352,8 +372,7 @@ is an open question (§17).
 | `src/history/history-store.js` | `vectors(model, chatIds, { upToSeq })` and `searchText(..., { upToSeq })` |
 | `src/history/importers/claude-code-jsonl.js` | records compaction events in the session manifest (§4) |
 | `src/providers/provider-factory.js` | usable from the CLI with keys from environment variables, without the vault |
-| `package.json` | `bin` entry; `!**/bench-private/**`, `!runs/**`, `!sessions/**` excluded from builds |
-| `.gitignore` | `bench-private/`, `runs/`, `sessions/` |
+| `package.json` | `bin` entry for `longhaul`; `src/longhaul/` excluded from the Electron build |
 | `CLAUDE.md` | one section: how to run a smoke benchmark on the synthetic fixtures |
 
 Nothing in `src/ipc/`, `main.js` or the renderer changes.
@@ -388,7 +407,9 @@ gets its own implementation plan.
   sample is written.
 - report: tables regenerate byte-identically from cached records.
 - privacy: `report --public` refuses a run containing a private session;
-  nothing under `bench-private/` is read by `import` unless asked.
+  nothing under `$LONGHAUL_HOME/private/` is read by `import` unless asked;
+  a `LONGHAUL_HOME` inside a git working tree is refused.
+- cost: a run whose priced plan exceeds the cap refuses to start.
 - CI smoke: `longhaul run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle --fake-models`.
 
 ## 15. Error handling
@@ -419,6 +440,11 @@ gets its own implementation plan.
   provider's window, so it is comparable across models.
 - Distance buckets are in estimated tokens, since that is what a budget is
   set in.
+- Added 2026-09-29 to enforce B-D7 and B-D12: a run prices its plan from the
+  catalog and refuses to start over the cap (`--max-usd` overrides);
+  `longhaul` refuses a `LONGHAUL_HOME` inside a git working tree; the
+  headline sample is 150 questions; `src/longhaul/` is left out of the
+  Electron build.
 
 ## 17. Open questions for the owner
 
