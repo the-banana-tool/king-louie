@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+require('../src/history/sqlite-warning').suppressSqliteExperimentalWarning();
 const { main } = require('../src/service/cli');
 
 main(process.argv.slice(2)).then(

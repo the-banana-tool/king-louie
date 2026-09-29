@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, safeStorage, shell, protocol, net, Notification, dialog } = require('electron');
+require('./src/history/sqlite-warning').suppressSqliteExperimentalWarning();
 const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');

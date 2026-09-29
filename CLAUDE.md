@@ -106,6 +106,38 @@ const bound = log.withContext({ sessionId: 's-1' }); // metadata on every call
 Levels (low → high): `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`.
 Default is `info`. Override with `KING_LOUIE_LOG_LEVEL` or `LOG_LEVEL` env var.
 
+## History
+
+`src/history/` is the history store (spec
+`docs/superpowers/specs/2026-09-25-chat-history-recall-design.md`, stage H1;
+ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
+
+- Chats, their messages (one row each, `seq` dense from 1 per chat) and
+  attachments live in `<dataDir>/history.sqlite` (`node:sqlite`, WAL, one
+  connection per core, closed at the end of `shutdown()`). `chat-data.json`
+  keeps everything else.
+- Code reaches chats through the core context: `listChats` (metadata with
+  `messageCount`, `preview`, `lastMessageAt`), `getChat(id, { messages })`,
+  `updateChat`, `appendMessageToChat`, `truncateChatFrom`, `getMessages`, or
+  `getHistoryStore()` for the store itself. `getChats`/`setChats` are gone;
+  `tests/history-no-legacy-chat-helpers.test.js` keeps them out of `src/`.
+- On the first start after H1, the chats in `chat-data.json` move into the
+  store, one transaction per chat, after a `chat-data.backup-<timestamp>.json`
+  copy. A chat that fails stays in the JSON file and the chat list says how
+  many; the move resumes on the next start. An old `chat-history.sqlite` is
+  never read.
+- A store that will not open is an error in the log and the chat list, never
+  a fallback to the JSON file. Service CLI commands that build a core as root
+  pass `history: { open: false }`.
+- Schema changes are new entries in `SCHEMA_STEPS` (`src/history/schema.js`);
+  never edit a released step.
+- `main.js` and `bin/king-louie-service.js` drop Node's SQLite
+  ExperimentalWarning (`src/history/sqlite-warning.js`); tests still print it.
+- Tests use `HistoryStore.open(':memory:')` or `tests/helpers/history-context.js`
+  (the facade over one). On Windows an open store keeps its folder from being
+  deleted, so a test that builds a core calls `closeOpenHistoryStores()`
+  (`tests/helpers/close-history-stores.js`) before removing the data dir.
+
 ## Models
 
 `src/models/` holds the model catalog and provider availability (spec:
