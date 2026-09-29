@@ -238,6 +238,36 @@ stages M1 to M3). It is Electron-free.
 - `king-louie-service models status|refresh` and `profiles list|show|set-default`
   work on the data dir; the writing ones refuse while the service runs.
 
+## LongHaul (session memory benchmark)
+
+`src/longhaul/` and `bin/longhaul.js` (spec
+`docs/superpowers/specs/2026-09-25-session-memory-benchmark-design.md`; stage
+B0 scores evidence recall only, with no answer or judge model). It is
+Electron-free, may use `src/history/` and `src/providers/`, and nothing else in
+`src/` may require it (`tests/longhaul-boundary.test.js`). It is left out of the
+Electron build.
+
+- Data lives in `LONGHAUL_HOME` (default `~/.longhaul/`: `private/`,
+  `sessions/`, `questions/`, `runs/`, `reports/`). The CLI refuses a
+  `LONGHAUL_HOME` inside a git working tree. Never put a real session under
+  the repository. Only the synthetic fixtures in `tests/fixtures/longhaul/` are
+  committed. Regenerate them with
+  `node bin/longhaul.js synth --out tests/fixtures/longhaul`;
+  `tests/longhaul-synthetic.test.js` fails when they drift.
+- Smoke run (no models, no network):
+  `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle`.
+  `oracle` must score evidence recall 1.000. Any shown message at or after
+  `askAtSeq` is a leak and exits 1. Add `kl-recall` to the adapters to
+  measure recall itself.
+- Session files are read with `readJsonlLines`
+  (`src/history/importers/jsonl-lines.js`), never `node:readline`: readline
+  also splits lines at U+2028/U+2029 inside JSON strings.
+- `longhaul author` calls a real model with a key from the environment
+  (`OPENAI_API_KEY`, ..., through `ProviderFactory.fromEnv`). Unit tests inject a
+  fake client or point `--base-url` at `tests/helpers/fake-llm-server.js`.
+  It refuses a private session (exit 2) unless `--send-private` is passed,
+  since that sends spans of the session to the provider.
+
 ## Cases
 
 `src/cases/` implements case repositories (spec:

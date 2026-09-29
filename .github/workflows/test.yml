@@ -22,3 +22,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle
+        env:
+          LONGHAUL_HOME: ${{ runner.temp }}/longhaul
