@@ -9,7 +9,8 @@ const { UsageError } = require('./errors');
 const COMMANDS = {
   home: require('./commands/home'),
   import: require('./commands/import'),
-  synth: require('./commands/synth')
+  synth: require('./commands/synth'),
+  run: require('./commands/run')
 };
 
 function usage() {
