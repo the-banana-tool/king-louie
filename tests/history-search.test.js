@@ -130,3 +130,43 @@ describe('history search', () => {
     }
   });
 });
+
+describe('excerptsForMessage', () => {
+  const { excerptsForMessage } = require('../src/history/search');
+  let f;
+  before(() => { f = openTempStore(); });
+  after(() => f.cleanup());
+
+  it('ignores a recalled chunk id that belongs to another chat', () => {
+    seedChat(f.store, { id: 'other', messages: [{ sender: 'user', text: 'The other lot has a gate code of 9001.' }] });
+    const [foreign] = f.store.chunksOfMessage('other-m1');
+    seedChat(f.store, { id: 'mine', messages: [
+      { sender: 'user', text: 'What was the gate code at the Lakeside lot?' },
+      { sender: 'assistant', text: 'I do not know yet.', context: { recalledChunkIds: [foreign.id] } }
+    ] });
+    assert.deepStrictEqual(excerptsForMessage({ store: f.store, chatId: 'mine', seq: 2 }), []);
+  });
+
+  it('ignores a stale id that now points at a message at or after the reply', () => {
+    seedChat(f.store, { id: 'rewrite', messages: [
+      { sender: 'user', text: 'Early note: the fence is forty meters along the north edge.' },
+      { sender: 'user', text: 'Second note about the drainage plan at the lot.' }
+    ] });
+    const staleIds = f.store.chunksOfMessage('rewrite-m1').map((c) => c.id);
+    // Rewritten: the reply is now first, and its old ids name chunks of later messages.
+    f.store.updateChat('rewrite', { messages: [
+      { id: 'r-reply', sender: 'assistant', text: 'Noted.', timestamp: '2026-01-01T10:00:00.000Z', context: { recalledChunkIds: staleIds } },
+      { id: 'r-1', sender: 'user', text: 'Early note: the fence is forty meters along the north edge.', timestamp: '2026-01-01T10:01:00.000Z' }
+    ] });
+    const pointed = f.store.chunks(staleIds);
+    assert.ok(pointed.some((c) => c.chatId === 'rewrite' && c.seq >= 1), 'precondition: an old id now names a chunk at or after the reply');
+    assert.deepStrictEqual(excerptsForMessage({ store: f.store, chatId: 'rewrite', seq: 1 }), []);
+  });
+
+  it('keeps ids of this chat before the reply', () => {
+    const [own] = f.store.chunksOfMessage('mine-m1');
+    f.store.appendMessage('mine', { id: 'mine-reply', sender: 'assistant', text: 'Checked.', timestamp: '2026-01-01T11:00:00.000Z', context: { recalledChunkIds: [own.id] } });
+    const out = excerptsForMessage({ store: f.store, chatId: 'mine', seq: 3 });
+    assert.deepStrictEqual(out.map((e) => e.seq), [1]);
+  });
+});

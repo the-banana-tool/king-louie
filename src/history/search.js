@@ -3,6 +3,9 @@
 // without the budget step (spec §8); the recall line's drawer shows the
 // excerpts one reply was given (§7).
 const { formatExcerpts } = require('./excerpts');
+const { createLogger } = require('../logging');
+
+const log = createLogger('history-search');
 
 async function searchHistoryExcerpts({ store, retriever, chatId, query, kinds = null, limit = 10, settings, asOf = Date.now() }) {
   const hits = await retriever.retrieve({ query, chatIds: [chatId], kinds, budgetTokens: null, settings, now: asOf });
@@ -15,7 +18,12 @@ function excerptsForMessage({ store, chatId, seq }) {
   const [message] = store.getMessages(chatId, { fromSeq: seq, toSeq: seq });
   const ids = message && message.context && Array.isArray(message.context.recalledChunkIds) ? message.context.recalledChunkIds : [];
   if (!ids.length) return [];
-  const chunks = store.chunks(ids);
+  // An imported reply, or one in a chat rewritten by replaceChat or
+  // updateChat({ messages }), can carry ids that now name another chat's
+  // chunks or a later message's: only this chat's chunks before the reply.
+  const all = store.chunks(ids);
+  const chunks = all.filter((c) => c.chatId === String(chatId) && c.seq < message.seq);
+  if (chunks.length < all.length) log.debug(`Reply #${message.seq} in chat ${chatId}: ignored ${all.length - chunks.length} recalled chunk ids that no longer point before it in this chat`);
   // Aged as the model saw them, at the reply's own time.
   const asOf = Date.parse(message.timestamp || '') || Date.now();
   const chunkCounts = store.messageChunkCounts([...new Set(chunks.map((c) => c.messageId))]);
