@@ -20,6 +20,36 @@ const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
 const voiceLog = createLogger('voice');
 
+function messageTimestamp(message = {}) {
+  return message.timestamp || message.createdAt || message.updatedAt || null;
+}
+
+function visibleMessage(message = {}) {
+  return message.sender === 'user' || message.sender === 'assistant';
+}
+
+function chatMetadata(chat = {}, { includeMessages = false } = {}) {
+  const messages = Array.isArray(chat.messages) ? chat.messages : [];
+  const visibleMessages = messages.filter(visibleMessage);
+  const lastMessage = visibleMessages[visibleMessages.length - 1] || messages[messages.length - 1] || null;
+  const lastMessageAt = lastMessage ? messageTimestamp(lastMessage) : null;
+  const metadata = {
+    ...chat,
+    messageCount: messages.length,
+    userMessageCount: messages.filter((message) => message.sender === 'user').length,
+    assistantMessageCount: messages.filter((message) => message.sender === 'assistant').length,
+    preview: lastMessage?.text || '',
+    lastMessageText: lastMessage?.text || '',
+    lastMessageAt
+  };
+
+  if (!includeMessages) {
+    delete metadata.messages;
+  }
+
+  return metadata;
+}
+
 // Before a send (spec 2026-09-27 §5.2): a never-tested provider is tested
 // now and a stale non-auth failure retested once (Availability#refreshForUse;
 // a host double with only ensureTested gets that).
@@ -146,9 +176,10 @@ function registerChatHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CHAT_LOAD, wrapHandler(IPC.CHAT_LOAD, async () => {
+    const activeChatId = getActiveChatId();
     return {
-      chats: getChats(),
-      activeChatId: getActiveChatId()
+      chats: getChats().map((chat) => chatMetadata(chat, { includeMessages: chat.id === activeChatId })),
+      activeChatId
     };
   }));
 
