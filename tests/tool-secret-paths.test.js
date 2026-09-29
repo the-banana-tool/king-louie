@@ -70,6 +70,20 @@ describe('secret-path deny-list (A1)', () => {
     }
   });
 
+  it('refuses the chat-data backups and the history store files (chats live there since H1)', () => {
+    const names = [
+      'chat-data.backup-2026-09-29T10-00-00-000Z.json',
+      'history.sqlite', 'history.sqlite-wal', 'history.sqlite-shm',
+      'chat-history.sqlite', 'chat-history.sqlite-wal', 'chat-history.sqlite-shm'
+    ];
+    for (const name of names) {
+      const target = path.join(dataDir, name);
+      fs.writeFileSync(target, 'chat data');
+      assert.strictEqual(isProtectedSecretPath(target), true, `${name} should be protected`);
+      assert.strictEqual(isPathAllowed(target, dataDir, []), false, `${name} must not be allowed`);
+    }
+  });
+
   it('refuses secret files listed in allowedDirectories too', () => {
     const target = path.join(dataDir, 'master.key');
     assert.strictEqual(isPathAllowed(target, path.join(os.tmpdir(), 'elsewhere'), [dataDir]), false);

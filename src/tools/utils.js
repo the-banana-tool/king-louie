@@ -97,6 +97,12 @@ const SECRET_FILE_PREFIXES = [
   '.gateway-token',  // its atomic-write temp
   'chat-data.json',  // the store: provider tokens, gateway.authToken, mesh key
   'config.json',     // the vault: every __vault_ entry
+  // Recall spec H1: chat-data.backup-<ts>.json is a full copy of chat-data.json
+  // made before the chats move, and the chats themselves now live in
+  // history.sqlite (plus its -wal/-shm) or, before H1, chat-history.sqlite.
+  'chat-data.backup-',
+  'history.sqlite',
+  'chat-history.sqlite',
   // The same master key under the name the OS integration uses: systemd's
   // LoadCredential= hands it to the service as $CREDENTIALS_DIRECTORY/kl-master-key,
   // and on macOS (and Linux without systemd) it lives under that name in the
@@ -107,7 +113,7 @@ const SECRET_FILE_PREFIXES = [
 
 const SECRET_PATH_DENIAL_MESSAGE =
   "Access denied: that file is one of King Louie's own secret stores "
-  + '(master key, key check, gateway token, or the encrypted chat/vault store). '
+  + '(master key, key check, gateway token, the encrypted chat/vault store or its backups, or the chat history). '
   + 'It is out of bounds for every tool regardless of the working directory.';
 
 // Data dirs to protect. createCore registers its own paths.dataDir, which

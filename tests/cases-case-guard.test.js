@@ -81,6 +81,20 @@ describe('web tools and data-dir writes', () => {
     }
   });
 
+  it('refuses writes to the chat-data backups and the history store files', async () => {
+    const { env, ctx } = await setup();
+    const names = [
+      'chat-data.backup-2026-09-29T10-00-00-000Z.json',
+      'history.sqlite', 'history.sqlite-wal', 'history.sqlite-shm',
+      'chat-history.sqlite', 'chat-history.sqlite-wal', 'chat-history.sqlite-shm'
+    ];
+    for (const name of names) {
+      const r = caseToolGuard('Write', { file_path: path.join(env.dataDir, name), content: 'x' }, ctx);
+      assert.strictEqual(r && r.success, false, name);
+    }
+    assert.strictEqual(caseToolGuard('Write', { file_path: path.join(env.dataDir, 'history-notes.md'), content: 'x' }, ctx), null);
+  });
+
   it('is off outside cases, and uses the configured runtime for a child\'s guardContext', async () => {
     const { meta } = await setup();
     assert.strictEqual(caseToolGuard('BrowserPage', { action: 'fill', selector: '#a', text: 'x' }, {}), null);

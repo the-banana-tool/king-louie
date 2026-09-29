@@ -36,7 +36,11 @@ const BROWSER_START_REFUSAL = `In a case, the browser starts only with profile "
 // settings and vault stores (chat-data.json holds executors.entries, the
 // pins, and the outbound category keywords; final review minor 8).
 const DATA_DIR_GUARDED = new Set(['ops-memory.jsonl', 'executors', 'workflows', 'chat-data.json', 'config.json']);
-const DATA_DIR_REFUSAL = 'ops-memory.jsonl, the executors folder, workflow files and the settings and vault stores are written only by King Louie, not by tools in a case.';
+// The chat-data backups the history move makes, and the history store
+// itself (history.sqlite and its WAL/SHM, the pre-H1 chat-history.sqlite).
+const DATA_DIR_GUARDED_PATTERN = /^(chat-data\.backup-|history\.sqlite|chat-history\.sqlite)/;
+const isDataDirGuarded = (name) => DATA_DIR_GUARDED.has(name) || DATA_DIR_GUARDED_PATTERN.test(name);
+const DATA_DIR_REFUSAL = 'ops-memory.jsonl, the executors folder, workflow files, the settings and vault stores, their backups and the chat history are written only by King Louie, not by tools in a case.';
 
 // Which profile the running browser uses: the browser tool's own state,
 // read only when a case run uses a browser tool.
@@ -128,7 +132,7 @@ function caseToolGuard(toolName, params = {}, ctx = {}) {
     const targets = [p.file_path, ...(Array.isArray(p.edits) ? p.edits.map((e) => e?.file_path) : [])].filter((t) => typeof t === 'string' && t);
     for (const t of targets) {
       const segments = segmentsWithin(host.dataDir, path.resolve(base, t));
-      if (segments && segments.length && DATA_DIR_GUARDED.has(segments[0])) return { success: false, error: DATA_DIR_REFUSAL };
+      if (segments && segments.length && isDataDirGuarded(segments[0])) return { success: false, error: DATA_DIR_REFUSAL };
     }
   }
   return null;
