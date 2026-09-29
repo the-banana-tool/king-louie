@@ -100,12 +100,12 @@ Settled with the owner on 2026-09-29 (the §17 questions):
 
 | # | Decision | Consequence |
 |---|---|---|
-| B-D5 | The benchmark is named **LongHaul** | Docs and reports use LongHaul, not King Louie; whether the CLI and `src/bench/` are renamed is open |
+| B-D5 | The benchmark is named **LongHaul** | Docs and reports use LongHaul, not King Louie. The code is `src/longhaul/`, the CLI `bin/longhaul.js`, tests `tests/longhaul-*.test.js`; `src/longhaul/` may use `src/history/` and `src/providers/`, and nothing depends on it, so it can move to its own repository |
 | B-D6 | Harness code is ISC like the repo; questions and annotations are CC-BY-4.0; each converted session keeps its upstream license | The manifest's `license` is per session; a source dataset's license is checked before its converter is written |
 | B-D7 | Model spend is capped at **$50 per full run** | How a run fits the cap (answer model, sample sizes, the `full-history` adapter) is open |
 | B-D8 | Private sessions are never released, reviewed or not; only aggregate results from them are published | §10.1 holds; there is no release review process. The owner will export sessions A to D as raw JSONL into `KL_BENCH_PRIVATE_DIR` |
 | B-D9 | External systems (Mem0, Letta) are a follow-up, not the first release | The external adapter protocol stays in B4; Mem0 is the first external adapter after release |
-| B-D10 | Venue: an arXiv preprint and a workshop paper | Whether the public-set target (§6) shrinks for a workshop paper is open |
+| B-D10 | Venue: an arXiv preprint and a workshop paper | The public set is about 12 sessions (decided 2026-09-29), about 40 verified questions each (§6) |
 | B-D11 | A thin evidence-recall slice (B0, §13) runs after recall stage H2 and before H3 | H3's choices are measured; answer and judge models are not needed for B0 |
 
 ## 3. Architecture
@@ -118,8 +118,8 @@ runs/                one directory per run: config, per-question records, summar
 reports/             tables and figures generated from runs (§11)
 ```
 
-`bin/king-louie-bench.js` exposes `import`, `author`, `verify`, `run`,
-`compaction-loss`, `report`. Everything under `src/bench/` is Electron-free and
+`bin/longhaul.js` exposes `import`, `author`, `verify`, `run`,
+`compaction-loss`, `report`. Everything under `src/longhaul/` is Electron-free and
 depends on `src/history/` for the session store, chunker and importers, and
 on `src/providers/` for the answer and judge models. A run creates a temporary
 history store per session, imports the session, waits for embedding backfill
@@ -206,7 +206,8 @@ its output as such.
 
 Targets: at least 40 verified questions per private session and per public
 session, spread across kinds and distance buckets, with at least 5 `abstain`
-and 5 `superseded` each. The public set aims for 30 sessions, 1,200 questions.
+and 5 `superseded` each. The public set aims for about 12 sessions and about
+500 questions (B-D10).
 These are targets for the release, not gates for the code.
 
 ## 7. Candidate systems
@@ -265,7 +266,7 @@ second figure is correctness versus context tokens.
 
 Answer model and judge model are run settings; the judge is never the
 answer model. Prompts for authoring, answering and judging are versioned
-files in `src/bench/prompts/`, and their hashes are in every run's config.
+files in `src/longhaul/prompts/`, and their hashes are in every run's config.
 
 ## 9. The compaction-loss study
 
@@ -301,7 +302,7 @@ only synthetic fixtures are committed.
 
 ### 10.2 Public sessions
 
-Converters under `src/bench/converters/` for, at least:
+Converters under `src/longhaul/converters/` for, at least:
 
 - `nebius/SWE-agent-trajectories` (80,036 SWE-agent runs) https://huggingface.co/datasets/nebius/SWE-agent-trajectories
 - `nebius/SWE-rebench-openhands-trajectories` (OpenHands runs with serialized tool calls) https://huggingface.co/datasets/nebius/SWE-rebench-openhands-trajectories
@@ -320,7 +321,7 @@ listed. Questions that cross a boundary are allowed and flagged.
 
 A generator produces small sessions with planted facts of every kind at
 controlled distances, for CI and for sanity-checking adapters. Three such
-sessions and their questions are committed under `tests/fixtures/bench/`.
+sessions and their questions are committed under `tests/fixtures/longhaul/`.
 
 ### 10.4 Release
 
@@ -345,8 +346,8 @@ is an open question (§17).
 
 | Path | Change |
 |---|---|
-| `src/bench/` (new) | `session-format.js`, `manifest.js`, `questions.js`, `author.js`, `verify.js`, `adapters/*.js`, `converters/*.js`, `synthetic.js`, `run.js`, `judge.js`, `compaction-loss.js`, `report.js`, `prompts/*.md`, `index.js` |
-| `bin/king-louie-bench.js` (new) | CLI |
+| `src/longhaul/` (new) | `session-format.js`, `manifest.js`, `questions.js`, `author.js`, `verify.js`, `adapters/*.js`, `converters/*.js`, `synthetic.js`, `run.js`, `judge.js`, `compaction-loss.js`, `report.js`, `prompts/*.md`, `index.js` |
+| `bin/longhaul.js` (new) | CLI |
 | `src/history/context-builder.js` | gains `upToSeq` (amendment to the recall spec §3.2): the tail and retrieval consider only messages with `seq < upToSeq` |
 | `src/history/history-store.js` | `vectors(model, chatIds, { upToSeq })` and `searchText(..., { upToSeq })` |
 | `src/history/importers/claude-code-jsonl.js` | records compaction events in the session manifest (§4) |
@@ -364,7 +365,7 @@ gets its own implementation plan.
 
 | Stage | Delivers |
 |---|---|
-| B0 | After recall H2, before H3: the session and question formats, the validator, the Claude Code compaction events, a verified question set for session E, and the `kl-recall`, `sliding-window` and `oracle` adapters, scored by evidence recall only (no answer or judge model). Its pieces are the first parts of B1 and B3, not throwaway code |
+| B0 | After recall H2, before H3: the session and question formats, the validator, the Claude Code compaction events, a minimal `author` (one prompt, stratified by kind and distance) and the `verify` loop, brought forward from B2, a verified question set for session E made with them, and the `kl-recall`, `sliding-window` and `oracle` adapters, scored by evidence recall only (no answer or judge model). Its pieces are the first parts of B1, B2 and B3, not throwaway code. The headline metric is always "evidence recall", never "recall" alone, which names King Louie's feature |
 | B1 | Session format and manifest, question format and validator, Claude Code compaction events, synthetic generator and fixtures, CLI skeleton with `import` and `verify` |
 | B2 | Authoring pipeline, verification loop, public converters for two datasets, the `constructed` concatenation |
 | B3 | Adapters `kl-recall`, `full-history`, `sliding-window`, `summarize-compact`, `real-compaction`, `oracle`; `run`, judge, caching, `report` |
@@ -372,7 +373,7 @@ gets its own implementation plan.
 
 ## 14. Testing
 
-`node --test` under `tests/bench-*.test.js`:
+`node --test` under `tests/longhaul-*.test.js`:
 
 - format and validator: every constraint in §5, including rejections.
 - Claude Code importer: compaction events and windows from a synthetic
@@ -388,7 +389,7 @@ gets its own implementation plan.
 - report: tables regenerate byte-identically from cached records.
 - privacy: `report --public` refuses a run containing a private session;
   nothing under `bench-private/` is read by `import` unless asked.
-- CI smoke: `king-louie-bench run --sessions tests/fixtures/bench --adapters sliding-window,oracle --fake-models`.
+- CI smoke: `longhaul run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle --fake-models`.
 
 ## 15. Error handling
 
@@ -403,7 +404,7 @@ gets its own implementation plan.
 
 ## 16. Assumptions made without asking
 
-- The benchmark lives in this repository under `src/bench/` with its own CLI,
+- The benchmark lives in this repository under `src/longhaul/` with its own CLI,
   rather than in a separate repository, because it shares the store,
   chunker and importers. It can be split out later.
 - Sequence number is the only clock; wall-clock timestamps are recorded but

@@ -46,7 +46,11 @@ _Avoid_: memory context, retrieved context
 
 **Recall**:
 Choosing, each turn, which excerpts from history the model sees.
-_Avoid_: memory
+_Avoid_: memory, retrieval (for the whole feature)
+
+**Retrieval**:
+The ranking step inside recall that scores chunks for a query.
+_Avoid_: search (except for the SearchHistory tool), recall (for this step)
 
 **Provenance**:
 The record, on an assistant message, of which tail and which chunks that turn
@@ -77,3 +81,8 @@ _Avoid_: the eval, the benchmark (in names or file paths)
 **Candidate system**:
 A memory system LongHaul measures through an adapter; recall is one of them.
 _Avoid_: model, baseline (except for the reference adapters)
+
+**Evidence recall**:
+The fraction of a question's evidence messages that a candidate system put in
+front of the model.
+_Avoid_: recall (alone, for this metric)

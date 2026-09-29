@@ -310,7 +310,11 @@ the blob store's one-time copy from `chat-data.json` (a `meta` marker
 `migrated_from_json`, and a `chat-data.backup-<timestamp>.json` first); before
 it, deleting every chat and restarting brought them all back. `getChats` and
 `setChats` still exist as wrappers and are removed in the rest of H1 (§4.4
-above), with a test that keeps them out of `src/`.
+above), with a test that keeps them out of `src/`. The §11.1 migration reads
+`chat-data.json` only, not the blob file (owner decision 2026-09-29): a
+profile that ran `main` between 998ebbb and H1 keeps its
+`chat-history.sqlite` on disk untouched, but chats created in that window
+are not carried into `history.sqlite`.
 
 `chat-data.json` keeps `activeChatId`, `apiTokens`, `apiStatus`, `settings`,
 `toolApprovals`, `usage` and everything else it holds today. Only `chats`
@@ -359,7 +363,7 @@ Local rerankers (§6.3) use the same runner.
 
 Retrieval loads the active model's vectors for the chats in scope into one
 `Float32Array` matrix per chat, cached with an LRU bounded by
-`history.retrieval.vectorCacheMb` (256). Appends extend the cached matrix.
+`history.recall.vectorCacheMb` (256). Appends extend the cached matrix.
 Search is a brute-force dot product over unit vectors: measured at 94 ms for
 100K × 384 on a 2021 laptop CPU, which covers roughly 40 million tokens of
 history in scope before a query exceeds 100 ms. An approximate index is not
@@ -369,7 +373,7 @@ part of this spec.
 
 ### 6.1 The tail
 
-The tail is the most recent `history.retrieval.tailMessages` (8) `user` and
+The tail is the most recent `history.recall.tailMessages` (8) `user` and
 `assistant` messages, capped at `tailTokens` (6,000). With
 `tailIncludeToolCalls` (true) each `toolUse` in that span appears as its
 one-line summary, and `toolResult`s are omitted; they are reachable by recall
@@ -568,7 +572,7 @@ migration is idempotent; a crash midway resumes on the next start.
 
 This work starts after F3, F6 and F7 have merged, because it edits the same
 `create-core.js`, `chat-handlers.js` and `anthropic-provider.js` seams. There
-is no dual-store mode. `history.retrieval.enabled` (true) is the kill switch:
+is no dual-store mode. `history.recall.enabled` (true) is the kill switch:
 off, the builder sends the tail only, tools stay registered, indexing continues.
 
 Stages, each with its own implementation plan and each shippable on its own:
@@ -581,7 +585,8 @@ Order (decided 2026-09-29): H1 → H2 → LongHaul's evidence-recall slice (the
 benchmark spec, stage B0) → H3 → H4. The slice measures BM25 recall against a
 verified question set on the 2.2 million-token session before H3 picks an
 embedder, weights and whether to rerank, so H3's defaults are measured rather
-than assumed. The F3, F6 and F7 precondition above is met on `main`.
+than assumed. Plans for H1, H2 and B0 are written first; H3's and H4's after
+B0 reports. The F3, F6 and F7 precondition above is met on `main`.
 
 ## 12. Relationship to existing code
 
@@ -605,7 +610,7 @@ than assumed. The F3, F6 and F7 precondition above is met on `main`.
 | `main.js` | injects a `utilityProcess` embed runner; filters the `node:sqlite` ExperimentalWarning |
 | `renderer.js`, `styles.css`, `index.html` | active-chat loading via `chat:get`, recall line and excerpt drawer, chat menu items (scope, links, import, convert to case), settings section "History and recall", indexing and embedder badges |
 | `package.json` | `@huggingface/transformers` dependency; `asarUnpack` for `onnxruntime-node`; `!**/models/**` excluded from the build |
-| `src/bench/`, `bin/king-louie-bench.js` | the session memory benchmark, specified separately (§13) |
+| `src/longhaul/`, `bin/longhaul.js` | the session memory benchmark, specified separately (§13) |
 | `CLAUDE.md` | one section: where history lives, how to run the benchmark smoke test, the ExperimentalWarning |
 
 `src/memory/` (the memory panel and `MemoryManager`) is untouched.
@@ -655,7 +660,7 @@ with the builder's output under 15K estimated tokens per turn.
 
 ```js
 history: {
-  retrieval: {
+  recall: {
     enabled: true,
     tailMessages: 8, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true,
     recalledTokens: 6000, queryUserTurns: 2,
