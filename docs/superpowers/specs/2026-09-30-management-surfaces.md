@@ -114,7 +114,8 @@ A grant is the owner. Every spoken tool takes a required `quote`: the owner's ow
   the host also requires the quote to name the chosen option (owner decision, 2026-09-30). An option is
   named by its label, on word boundaries after the same fold, or by its 1-based number only when the number
   stands alone (the whole quote, trailing punctuation ignored: "2", "2.") or is marked ("option 2",
-  "number 2", "no. 2", "#2"); "wait 1 week", "12", "1.5" and "2,1" name nothing. The option's id never
+  "number 2", "no. 2", "#2"), or follows "go with", "pick", "choose" or "select" and ends its clause
+  ("go with 2", "pick 2, thanks"; not "go with 2 weeks"); "wait 1 week", "12", "1.5" and "2,1" name nothing. The option's id never
   counts. A label found only inside another named option's label does not count on its own. A quote that
   names more than one option is refused (`option_ambiguous`), and one that names none or another option is
   refused (`option_not_in_quote`); both list the options as wrapped data so the model asks the owner which

@@ -285,6 +285,9 @@ describe('answer_question takes the owner\'s quote', () => {
     assert.strictEqual(await named('the weekly one', 'weekly'), true, 'label, any case');
     assert.strictEqual(await named('option 2', 'weekly'), true, 'option N');
     assert.strictEqual(await named('go with option 2', 'weekly'), true);
+    assert.strictEqual(await named('Go with 2', 'weekly'), true, 'a choosing verb marks the number');
+    assert.strictEqual(await named('pick 2, thanks', 'weekly'), true);
+    assert.strictEqual(await named('choose 2.', 'weekly'), true);
     assert.strictEqual(await named('#2', 'weekly'), true);
     assert.strictEqual(await named('number 2', 'weekly'), true);
     assert.strictEqual(await named('no. 2 please', 'weekly'), true);
@@ -299,7 +302,7 @@ describe('answer_question takes the owner\'s quote', () => {
       data: [{ number: 1, id: 'daily', label: 'Daily' }, { number: 2, id: 'weekly', label: 'Weekly' }]
     });
     assert.ok(!e.message.includes('Weekly') && !e.message.includes('Daily'));
-    for (const quote of ['wait 1 week then pick the other one', '12', '1.5', 'about 1.5 times a week', '2,1', '2,1 split', 'option 12', 'dailyish']) {
+    for (const quote of ['wait 1 week then pick the other one', '12', '1.5', 'about 1.5 times a week', '2,1', '2,1 split', 'option 12', 'dailyish', 'go with 2 weeks', 'pick 2.5', 'take 2']) {
       assert.strictEqual((await named(quote)).code, 'option_not_in_quote', quote);
     }
     // The id alone is not the owner naming the option.

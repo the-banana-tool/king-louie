@@ -68,13 +68,15 @@ function pendingProposals(dir) {
 
 // A 1-based option number counts only when it stands alone (the whole
 // quote, trailing punctuation ignored: "2", "2.") or is marked ("option 2",
-// "number 2", "no. 2", "#2"). "wait 1 week", "12", "1.5" and "2,1" name
-// nothing (owner decision, 2026-09-30).
+// "number 2", "no. 2", "#2"), or follows a choosing verb and ends its clause
+// ("go with 2", "pick 2, thanks"; not "go with 2 weeks"). "wait 1 week",
+// "12", "1.5" and "2,1" name nothing (owner decision, 2026-09-30).
 function markedNumber(n, quote) {
   const q = fold(quote);
   const bare = q.replace(/[\s.!?,;:]+$/, '');
   if (bare === String(n)) return true;
-  return new RegExp(`(?<!\\w)(?:(?:option|number|no\\.)\\s*#?\\s*|#\\s*)${n}(?!\\w|[.,]\\d)`).test(q);
+  if (new RegExp(`(?<!\\w)(?:(?:option|number|no\\.)\\s*#?\\s*|#\\s*)${n}(?!\\w|[.,]\\d)`).test(q)) return true;
+  return new RegExp(`(?<!\\w)(?:go with|pick|choose|select)\\s+${n}(?![.,]\\d)(?=\\s*(?:[.!?,;:]|$))`).test(q);
 }
 
 // The indexes of the options the quote names: by label on word boundaries
