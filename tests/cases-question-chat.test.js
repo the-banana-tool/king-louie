@@ -74,7 +74,7 @@ describe('CaseRuntime posts each new question to the case chat', () => {
     const host = { notify: (e, p) => events.push([e, p]), interactive: () => true };
     if (ctx) {
       let n = 0;
-      host.chats = { listChats: ctx.listChats, createChat: ctx.createChat, appendMessageToChat: ctx.appendMessageToChat, createId: () => `new-${++n}` };
+      host.chats = { listChats: ctx.listChats, createChat: ctx.createChat, appendMessageToChat: ctx.appendMessageToChat, getMessages: ctx.getMessages, createId: () => `new-${++n}` };
     }
     const rt = new CaseRuntime({ root, now: () => T0, getSettings: () => ({ cases: { timeZone: 'UTC' } }), host });
     return { rt, events, ctx };
@@ -109,6 +109,29 @@ describe('CaseRuntime posts each new question to the case chat', () => {
     assert.strictEqual(ctx.listChats().length, 3);
   });
 
+  it('posts an open duplicate again when a truncation removed its message, and only once', async () => {
+    const { rt, events, ctx } = runtime({ chats: [] });
+    const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+    ctx.createChat({ id: 'c', title: 'C', caseId: info.id, createdAt: T0.toISOString(), updatedAt: T0.toISOString(),
+      messages: [{ id: 'm1', sender: 'user', text: 'Sell it.', timestamp: T0.toISOString() }] });
+    const ask = { kind: 'question', text: 'Is the well shared?', urgency: 'normal' };
+    const q = rt.createQuestion(info.id, ask);
+    assert.strictEqual(questionMessages(ctx, 'c').length, 1);
+    // A resend truncates the chat from the user's message; the re-run asks
+    // the same question, which comes back as the open duplicate.
+    ctx.truncateChatFrom('c', 1);
+    assert.strictEqual(questionMessages(ctx, 'c').length, 0);
+    ctx.appendMessageToChat('c', 'user', 'Sell it.', {}, { returnChat: false });
+    events.length = 0;
+    assert.strictEqual(rt.createQuestion(info.id, ask).id, q.id);
+    assert.deepStrictEqual(questionMessages(ctx, 'c').map((m) => m.question.questionId), [q.id]);
+    const note = events.find(([e, p]) => e === 'case:changed' && p.questionId === q.id);
+    assert.strictEqual(note[1].chatId, 'c');
+    // Asked a third time, its card is there: nothing more.
+    rt.createQuestion(info.id, ask);
+    assert.strictEqual(questionMessages(ctx, 'c').length, 1);
+  });
+
   it('creates a chat with the case title and caseId when the case has none', async () => {
     const { rt, ctx } = runtime({ chats: [] });
     const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
@@ -138,6 +161,24 @@ describe('CaseRuntime posts each new question to the case chat', () => {
       remove();
     }
     assert.ok(records.some((r) => r.level === 'warn' && /no history store/.test(r.message)));
+  });
+
+  it('tells the window when a question is closed or settled by expiry, so its card is refreshed', async () => {
+    let clock = T0;
+    const { rt, events } = runtime({ chats: [] });
+    rt.now = () => clock;
+    const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+    const closed = rt.createQuestion(info.id, { kind: 'question', text: 'Is the well shared?', urgency: 'normal' });
+    const soon = new Date(T0.getTime() + 3600000).toISOString();
+    const brief = rt.createQuestion(info.id, { kind: 'briefing', text: 'The survey is booked.', urgency: 'low', expiresAt: soon });
+    const dflt = rt.createQuestion(info.id, { kind: 'question', text: 'Which cadence?', urgency: 'low', expiresAt: soon,
+      options: [{ id: 'w', label: 'Weekly' }, { id: 'm', label: 'Monthly' }], defaultOnSilence: 'w' });
+    events.length = 0;
+    rt.questions(info.id).close(closed.id, { reason: 'superseded', by: 'system' });
+    clock = new Date(T0.getTime() + 7200000);
+    rt.questions(info.id).expire(clock);
+    const notes = events.filter(([e, p]) => e === 'case:changed' && p.what === 'questions').map(([, p]) => [p.caseId, p.questionId]);
+    assert.deepStrictEqual(notes, [[info.id, closed.id], [info.id, brief.id], [info.id, dflt.id]]);
   });
 
   it('still creates the question when the store throws', async () => {

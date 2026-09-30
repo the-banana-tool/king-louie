@@ -112,4 +112,21 @@ describe('E2E: question cards in the case chat', { skip: gitAvailable ? false : 
     const stored = await evaluate(ctx, `window.electron.chat.get('case-chat').then((r) => (r.chat || r).messages.filter((m) => m.question).map((m) => m.question.questionId))`);
     assert.deepStrictEqual(stored, ['q-0001', 'q-0002', 'q-0003', 'q-0004']);
   });
+
+  it('a press refused because the question was settled meanwhile redraws the card as it is now', async () => {
+    // Closed behind the window's back (no notification): the card still
+    // offers Grant until a press is refused.
+    const file = path.join(caseDir, '.kl', 'questions', 'q-0004.json');
+    const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({ ...rec, closed: { at: new Date().toISOString(), reason: 'superseded', by: 'system' } }));
+    await evaluate(ctx, `(() => {
+      const c = document.querySelector('${card('q-0004')}');
+      c.querySelector('.chat-question-input').value = '20';
+      c.querySelector('.chat-question-send').click();
+      return true;
+    })()`);
+    await waitFor(ctx, `/^Closed .*\\(superseded\\)$/.test(document.querySelector('${card('q-0004')} .chat-question-outcome')?.textContent || '')`, 20000);
+    assert.strictEqual(await evaluate(ctx, `document.querySelectorAll('${card('q-0004')} button').length`), 0);
+    assert.ok(await evaluate(ctx, `(document.querySelector('${card('q-0004')} .case-question-error')?.textContent || '').length > 0`));
+  });
 });

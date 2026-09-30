@@ -2626,12 +2626,6 @@ function fillChatQuestionCard(card, q, error) {
   const actions = document.createElement('div');
   actions.className = 'case-question-actions';
   card.appendChild(actions);
-  const errorLine = line('case-question-error', '');
-  errorLine.hidden = true;
-  const showError = (message) => {
-    errorLine.textContent = message;
-    errorLine.hidden = false;
-  };
   const setDisabled = (disabled) => actions.querySelectorAll('button, input').forEach((el) => { el.disabled = disabled; });
   const press = async (call) => {
     setDisabled(true);
@@ -2643,8 +2637,14 @@ function fillChatQuestionCard(card, q, error) {
       }
       await refreshChatQuestionCard(card);
     } catch (err) {
-      setDisabled(false);
-      showError(err.message);
+      // A refused press (answered on another surface, closed or expired
+      // meanwhile) redraws the card from the store, so it shows the current
+      // state, and keeps the refusal under it.
+      await refreshChatQuestionCard(card);
+      const refusal = document.createElement('div');
+      refusal.className = 'case-question-error';
+      refusal.textContent = err.message;
+      card.appendChild(refusal);
     }
   };
   const answer = (fields) => press(() => window.electron.cases.answerQuestion({ caseId: q.caseId, questionId: q.id, ...fields }));
@@ -2691,7 +2691,7 @@ function refreshChatQuestionCards({ caseId, questionId } = {}) {
 // The chat list alone: a question may have created a chat or moved one up.
 // A full loadChats would redraw the active chat and drop a reply that is
 // still streaming.
-async function refreshChatListOnly() {
+async function refreshChatListOnly({ chatId = null } = {}) {
   const data = unwrapIpcResult(await window.electron.chat.load(), 'Unable to load chats.');
   const active = getActiveChat();
   appState.chats = (data.chats || []).map((c) => (active && c.id === active.id ? { ...c, messages: active.messages } : c));
@@ -2700,8 +2700,10 @@ async function refreshChatListOnly() {
     renderChatList();
     return;
   }
-  // No chat was open (a first question created the only one): open it.
-  appState.activeChatId = data.activeChatId || appState.chats[0]?.id || null;
+  // No chat was open: open the one the question was posted to (a first
+  // question may have created it), else the saved active chat.
+  const posted = chatId && appState.chats.some((c) => c.id === chatId) ? chatId : null;
+  appState.activeChatId = posted || data.activeChatId || appState.chats[0]?.id || null;
   if (appState.activeChatId) await ensureChatMessagesLoaded(appState.activeChatId);
   refreshUI();
 }
@@ -2724,7 +2726,7 @@ if (window.electron?.cases?.onChanged) {
     if (payload.chatId && payload.message?.question) {
       const chat = getActiveChat();
       if (chat && chat.id === payload.chatId) appendQuestionMessageLive(chat, payload.message);
-      refreshChatListOnly().catch((err) => chatLog.warn(`Chat list refresh failed: ${err.message}`));
+      refreshChatListOnly({ chatId: payload.chatId }).catch((err) => chatLog.warn(`Chat list refresh failed: ${err.message}`));
       return;
     }
     refreshChatQuestionCards({ caseId: payload.caseId, questionId: payload.questionId || null });

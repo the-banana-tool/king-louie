@@ -25,6 +25,10 @@ function pickCaseChat(chats, caseId) {
   return best;
 }
 
+function chatHasQuestion(chats, chatId, questionId) {
+  return chats.getMessages(chatId).some((m) => m?.question?.questionId === questionId);
+}
+
 function questionMessageText(meta, rec) {
   const label = rec.kind === 'briefing' ? 'Briefing' : (rec.kind === 'approval' ? 'Approval' : 'Question');
   const lines = [`${meta.title}: ${label} ${rec.id}`, '', rec.text];
@@ -41,8 +45,13 @@ function questionMessageText(meta, rec) {
 // chat (the case's title, its caseId) when the case has none. `chats` is
 // the core's chat facade plus createId. Throws on a store failure; the
 // caller logs it, since delivery must never fail question creation.
-function postQuestionToChat({ chats, meta, rec, now = () => new Date() }) {
+//
+// `onlyIfMissing` (a duplicate of an open question, asked again): posts
+// only when the chosen chat holds no message for the record, say because a
+// resend or an edit truncated the chat past it; returns null otherwise.
+function postQuestionToChat({ chats, meta, rec, now = () => new Date(), onlyIfMissing = false }) {
   let chat = pickCaseChat(chats.listChats({ messages: false }), meta.id);
+  if (onlyIfMissing && chat && chatHasQuestion(chats, chat.id, rec.id)) return null;
   let created = false;
   if (!chat) {
     const at = now().toISOString();
@@ -57,4 +66,4 @@ function postQuestionToChat({ chats, meta, rec, now = () => new Date() }) {
   return { chatId: chat.id, created, message: { ...appended.message, seq: appended.seq } };
 }
 
-module.exports = { pickCaseChat, questionMessageText, postQuestionToChat };
+module.exports = { pickCaseChat, chatHasQuestion, questionMessageText, postQuestionToChat };

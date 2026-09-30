@@ -117,6 +117,35 @@ describe('ContextBuilder', () => {
     assert.strictEqual((await s.builder.build({ chatId: 'chat-1', message: 'thanks' })).tail[1].text, 'All tests pass and src/app.js looks fine.');
   });
 
+  it('a case question posted mid-turn never takes the turn\'s tool lines: they fold into the real reply', async () => {
+    const question = { caseId: 'c-1', questionId: 'q-0001' };
+    const askLine = '[tool] Ask: {"text":"Is the well shared?"}';
+    const s = setup([
+      { sender: 'user', text: 'Find out whether the Lakeside well is shared.' },
+      { sender: 'toolUse', toolName: 'Ask', parameters: { text: 'Is the well shared?' } },
+      { sender: 'assistant', text: 'Lakeside lot: Question q-0001\n\nIs the well shared?\n\nReply below.', question },
+      { sender: 'toolResult', toolName: 'Ask', result: 'q-0001 asked' },
+      { sender: 'assistant', text: 'I asked you whether the well is shared.' }
+    ]);
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'yes' });
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), [1, 3, 5]);
+    assert.strictEqual(out.tail[1].text, 'Lakeside lot: Question q-0001\n\nIs the well shared?\n\nReply below.');
+    assert.strictEqual(out.tail[2].text, `${askLine}\n[tool result #4 Ask]\nq-0001 asked\n\nI asked you whether the well is shared.`);
+
+    // A turn stopped after the question, with no reply: the lines stay with
+    // the question rather than being lost.
+    const stopped = setup([
+      { sender: 'user', text: 'Find out whether the Lakeside well is shared.' },
+      { sender: 'toolUse', toolName: 'Ask', parameters: { text: 'Is the well shared?' } },
+      { sender: 'assistant', text: 'Is the well shared?', question }
+    ], { recall: { tailIncludeToolResults: false } });
+    t.cleanup();
+    t = stopped.t;
+    const cut = await stopped.builder.build({ chatId: 'chat-1', message: 'yes' });
+    assert.strictEqual(cut.tail[1].text, `${askLine}\n\nIs the well shared?`);
+  });
+
   it('a stopped empty reply is left out and its tool calls are not given to the next reply', async () => {
     const s = setup([
       { sender: 'user', text: 'Start the drainage report for the Lakeside lot.' },

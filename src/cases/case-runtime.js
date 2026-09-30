@@ -329,7 +329,13 @@ class CaseRuntime {
 
   questions(id) {
     const meta = this.getCase(id);
-    return new QuestionStore(meta.dir, { now: () => this.now(), caseId: meta.id });
+    return new QuestionStore(meta.dir, {
+      now: () => this.now(),
+      caseId: meta.id,
+      // A close or an expiry settles a question no answer path notified
+      // about; the window refreshes its card (management surfaces §3.4).
+      onSettled: (rec) => this._notify('case:changed', { caseId: meta.id, what: 'questions', questionId: rec.id })
+    });
   }
 
   orientation(id, { triggers = [], hookNotes = [] } = {}) {
@@ -1289,7 +1295,12 @@ class CaseRuntime {
     const meta = this.getCase(id);
     const store = this.questions(meta.id);
     const existing = store.findDuplicate(record);
-    if (existing) return existing;
+    if (existing) {
+      // Its message may be gone (a resend or an edit truncated the chat past
+      // it): post it again, so the question the turn re-asked has a card.
+      this._repostIfMissing(meta, existing);
+      return existing;
+    }
     const budget = charge ? this.budget(meta.id) : null;
     if (budget && budget.atLimit('questionsPerDay')) return { held: true };
     const rec = store.create(record);
@@ -1305,7 +1316,7 @@ class CaseRuntime {
   // §3.4): each new question is posted once, at creation, to the case's
   // newest chat, whatever the ladder does next. Never throws: a host with no
   // history store (tests, a bare host) or a store failure only logs.
-  _postToChat(meta, rec) {
+  _postToChat(meta, rec, { onlyIfMissing = false } = {}) {
     const chats = this.host?.chats;
     if (!chats || typeof chats.appendMessageToChat !== 'function') {
       // Once per runtime: every question after the first would say the same.
@@ -1314,11 +1325,20 @@ class CaseRuntime {
       return null;
     }
     try {
-      return postQuestionToChat({ chats, meta, rec, now: () => this.now() });
+      return postQuestionToChat({ chats, meta, rec, now: () => this.now(), onlyIfMissing });
     } catch (err) {
       log.warn(`Posting ${rec.id} of case ${meta.slug} to its chat failed: ${err.message}`);
       return null;
     }
+  }
+
+  _repostIfMissing(meta, rec) {
+    // Without getMessages there is no telling whether the card is there;
+    // posting blindly would repeat it on every duplicate.
+    if (typeof this.host?.chats?.getMessages !== 'function') return null;
+    const posted = this._postToChat(meta, rec, { onlyIfMissing: true });
+    if (posted) this._notify('case:changed', { caseId: meta.id, what: 'questions', questionId: rec.id, chatId: posted.chatId, message: posted.message });
+    return posted;
   }
 
   // For a question record created outside createQuestion (C4's conflict

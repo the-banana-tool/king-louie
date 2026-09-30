@@ -192,6 +192,9 @@ describe('case IPC, stage 2', () => {
     const got = await call(IPC.CASE_QUESTIONS, { caseId: c.id, questionIds: [q1.id, q2.id, 'q-9999'] });
     assert.deepStrictEqual(got.questions.map((q) => [q.id, q.answer ? q.answer.channel : null, q.caseTitle]), [[q1.id, 'in-app', 'Lakeside lot'], [q2.id, null, 'Lakeside lot']]);
     assert.strictEqual((await call(IPC.CASE_QUESTIONS, { caseId: c.id, questionIds: 'q-0001' })).ok, false);
+    assert.strictEqual((await call(IPC.CASE_QUESTIONS, { caseId: c.id, questionIds: Array.from({ length: 51 }, () => q1.id) })).ok, false);
+    assert.strictEqual((await call(IPC.CASE_QUESTIONS, { caseId: c.id, questionIds: [`q-${'0'.repeat(15)}`] })).ok, false);
+    assert.strictEqual((await call(IPC.CASE_QUESTIONS, { caseId: c.id, questionIds: Array.from({ length: 50 }, () => q1.id) })).ok, true);
   });
 
   it('acknowledges a briefing', async () => {

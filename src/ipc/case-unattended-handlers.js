@@ -41,8 +41,11 @@ function registerCaseUnattendedHandlers(ipcMain, context = {}) {
     // A chat's question cards (management surfaces §3.4) ask for their own
     // records by id, answered or not, in whatever state the case is.
     if (questionIds !== undefined) {
-      if (!Array.isArray(questionIds) || questionIds.some((id) => typeof id !== 'string')) {
-        return { ok: false, error: 'questionIds must be a list of question ids.' };
+      // Ids are q-NNNN (questions.js ID_PATTERN, no upper bound; 16 chars
+      // is q- and 14 digits); a chat never asks for more than 50 cards.
+      if (!Array.isArray(questionIds) || questionIds.length > 50
+        || questionIds.some((id) => typeof id !== 'string' || id.length > 16)) {
+        return { ok: false, error: 'questionIds must be a list of at most 50 question ids.' };
       }
       const meta = rt.getCase(required(caseId, 'caseId'));
       const store = rt.questions(meta.id);
