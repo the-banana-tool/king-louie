@@ -1,0 +1,34 @@
+{
+  "id": "chat-fixture-1",
+  "title": "Lakeside lot survey",
+  "createdAt": "2026-01-06T09:00:00.000Z",
+  "updatedAt": "2026-01-06T09:20:00.000Z",
+  "agentMode": true,
+  "sandboxMode": false,
+  "workingDirectory": "/srv/<project>",
+  "llmTotals": { "calls": 3, "inputTokens": 1200, "outputTokens": 340, "costUsd": 0.02 },
+  "messages": [
+    {
+      "id": "m-1", "sender": "user", "timestamp": "2026-01-06T09:01:00.000Z",
+      "text": "Ask example.com about lot 4417 and call +15550100.",
+      "documents": [
+        { "name": "survey.txt", "mimeType": "text/plain", "size": 52, "textContent": "Lakeside lot survey: parcel 4417, 2.5 acres.", "base64": "U3VydmV5IGJ5dGVz", "previewUrl": "blob:invented" }
+      ]
+    },
+    {
+      "id": "m-2", "sender": "assistant", "timestamp": "2026-01-06T09:02:00.000Z", "runId": "run-1",
+      "text": "Looking up lot 4417 now.",
+      "llm": { "provider": "provider-x", "model": "model-x", "usage": { "inputTokens": 10, "outputTokens": 5 } }
+    },
+    { "id": "m-3", "sender": "toolUse", "timestamp": "2026-01-06T09:03:00.000Z", "runId": "run-1", "toolName": "WebFetch", "parameters": { "url": "https://lots.example.com/4417" } },
+    { "id": "m-4", "sender": "toolResult", "timestamp": "2026-01-06T09:04:00.000Z", "runId": "run-1", "toolName": "WebFetch", "result": "Lot 4417: Lakeside lot, 2.5 acres." },
+    { "id": "m-5", "sender": "toolUse", "timestamp": "2026-01-06T09:05:00.000Z", "toolName": "Vault", "parameters": { "action": "get", "key": "lots.portal", "value": "pw-invented-1", "note": "invented note" } },
+    { "id": "m-6", "sender": "toolResult", "timestamp": "2026-01-06T09:06:00.000Z", "toolName": "Vault", "text": "pw-invented-1", "result": { "value": "pw-invented-1" } },
+    { "id": "m-7", "sender": "toolUse", "timestamp": "2026-01-06T09:07:00.000Z", "toolName": "Vault", "parameters": { "action": "store", "key": "lots.portal", "value": "pw-invented-2" } },
+    { "id": "m-8", "sender": "toolResult", "timestamp": "2026-01-06T09:08:00.000Z", "toolName": "Vault", "result": "stored pw-invented-2" },
+    { "id": "m-9", "sender": "status", "timestamp": "2026-01-06T09:09:00.000Z", "text": "Summary: lot 4417 is the Lakeside lot, 2.5 acres.", "meta": { "compaction": true } },
+    { "id": "m-10", "sender": "mystery", "timestamp": "2026-01-06T09:10:00.000Z", "text": "??" },
+    { "id": "m-10", "sender": "user", "timestamp": "not a time", "text": "Thanks, that is all." },
+    { "sender": "assistant", "timestamp": "2026-01-06T09:12:00.000Z", "text": "You are welcome.", "stopped": true }
+  ]
+}
