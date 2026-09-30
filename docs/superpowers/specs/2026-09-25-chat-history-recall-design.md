@@ -382,8 +382,15 @@ span appears as its one-line summary. With `tailIncludeToolResults` (true)
 each `toolResult` in the span is folded into the reply that follows it, newest
 first, with the tokens the user and assistant messages leave, so a tool dump
 never pushes out a user turn; one over `tailToolResultMaxTokens` (1,000) keeps
-its start and a note, and counts as shortened. Tool results in the tail are
-excluded from recall like the rest of the tail. The default was 8 messages with
+its start and a note, and counts as shortened, and one that does not fit what
+is left is skipped for an older one. The tail's token total counts everything
+folded in: each tool line and result is charged as the exact text it adds to
+its reply (joiner, label, body and note), so results never take the tail past
+`tailTokens` (tool-call lines are never dropped, so they alone can). Reading
+is bounded: results are read newest first, 20 rows at a time, and at most 64
+rows per turn (`TAIL_RESULT_PAGE`, `TAIL_RESULT_SCAN_MAX`), stopping once what
+is left cannot fit the smallest result. Tool results in the tail are excluded
+from recall like the rest of the tail. The default was 8 messages with
 results left out: agent sessions write one assistant row per tool round, so
 the last 8 rows were often all assistant and the tail came out empty (§6.7).
 A tail message over `tailMaxMessageTokens` (1,500) is
@@ -415,7 +422,10 @@ are excluded.
    Top `bm25TopK` (200) by `bm25()`; at 50 the evidence often ranked just
    below the cut (§6.7).
 2. **Semantic.** The query embedded with `kind: 'query'`; top `vectorTopK`
-   (50) by cosine. Skipped when no embedder is active.
+   (50) by cosine. The vectors come from the embedder, or from a
+   `vectorHits` list or `vectorSearch` callback the caller gives the
+   Retriever (LongHaul's `kl-recall-vec` probes use this, from a cache of
+   their own). Skipped when neither is there.
 3. **Fusion.** Reciprocal rank fusion, `score = Σ 1 / (rrfK + rank)`,
    `rrfK` 60. With one signal only, that signal's ranks are used alone.
 4. **Kind weight.** Multiply by `kindWeights`: `user` 1.2, `assistant` 1.0,
@@ -429,9 +439,16 @@ are excluded.
    of 16). `topM` must exceed what the budget selects (60–90 chunks at 6,000
    tokens) to change the selection at all: 20 is inert, 100 is the knee
    (about 2.2 s per question), so a per-turn rerank is too slow on a laptop
-   and fits `SearchHistory` better (§6.7).
+   and fits `SearchHistory` better (§6.7). `rerank.enabled` does nothing
+   unless a reranker callback is given to the Retriever; H3 supplies the
+   cross-encoder behind it (the Retriever never reads `rerank.model`).
+   `rerank.maxMs` (2,000) guards the latency: a slower reranker is skipped
+   for that turn and logged (§15).
 7. **Dedupe.** Drop a chunk whose cosine to an already selected chunk exceeds
-   `dedupeCosine` (0.92); without vectors, drop exact text duplicates.
+   `dedupeCosine` (0.92); without vectors, drop exact text duplicates. The
+   exact-text dedupe runs before the rerank (step 6), so the reranker never
+   spends a pair on a duplicate; a duplicate would get the same score, so
+   the selection is the same.
 8. **Budget.** Take chunks in score order until `recalledTokens` (6,000),
    with at most `maxChunksPerMessage` (4) from one message. Adjacent chunks
    of one message merge.
