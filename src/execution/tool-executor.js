@@ -598,7 +598,12 @@ class ToolExecutor extends EventEmitter {
         // Expose this executor's approval channel so meta-tools (BackgroundTask,
         // SpawnAgent, workflow runners) can route their child agents' approval
         // prompts back to the originating chat UI instead of silently auto-denying.
-        approvalRequester: this._rethreadedRequester()
+        approvalRequester: this._rethreadedRequester(),
+        // The owner's own message for this turn, from this executor's own
+        // field only (the local chat send path sets it): last, so no call
+        // option or extra tool option can supply it, and never under
+        // denyAutoApproval. answer_question checks its quote against it.
+        ownerTurnText: this.denyAutoApproval ? null : this.ownerTurnText
       });
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {

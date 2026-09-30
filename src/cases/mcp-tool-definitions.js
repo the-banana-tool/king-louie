@@ -52,16 +52,17 @@ const CASE_MCP_TOOLS = deepFreeze([
   },
   {
     name: 'answer_question',
-    description: 'Answer an open case question with text or one of its option ids (exactly one). Approvals, briefings and questions marked not answerable here are refused.',
+    description: "Answer an open case question in the owner's words. quote is required: the owner's own words, copied verbatim from their message. Give option_id (the quote must name that option by its label, id or number) or text (part of the quote; the quote itself when omitted), not both. A briefing is acknowledged. Questions that take a button (approvals, budgets, direction, a case's status and the like; list_questions marks them pressed) are refused: the owner answers them in the app or on the phone.",
     inputSchema: {
       type: 'object',
       properties: {
         case: CASE_ARG,
         question_id: { type: 'string', pattern: '^q-\\d{4,}$' },
+        quote: { type: 'string', minLength: 1, maxLength: 2000, description: "The owner's own words, verbatim, that answer the question. In King Louie's chat they must appear in the owner's latest message." },
         text: { type: 'string', minLength: 1, maxLength: 2000 },
         option_id: { type: 'string', pattern: '^[a-z0-9-]{1,16}$' }
       },
-      required: ['case', 'question_id'],
+      required: ['case', 'question_id', 'quote'],
       additionalProperties: false
     },
     tier: 'routine'

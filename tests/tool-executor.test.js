@@ -731,3 +731,35 @@ describe('ToolExecutor sub-agent cost sink (models spec 2026-09-27 §10)', () =>
     assert.strictEqual(new ToolExecutor({ requireApproval: false })._rethreadedRequester().onSubagentLlm, undefined);
   });
 });
+
+describe('ToolExecutor ownerTurnText in a tool\'s context (management surfaces spec §3.2)', () => {
+  const seen = [];
+  toolRegistry.register(new Tool({
+    name: 'OwnerTextProbe',
+    description: 'Records the ownerTurnText its context carries',
+    requiresApproval: false,
+    parameters: { type: 'object', properties: { ownerTurnText: { type: 'string' } } },
+    execute: async (_params, ctx) => { seen.push(ctx.ownerTurnText); return { ok: true }; }
+  }));
+  const probe = async (executorOptions, params = {}, callOptions = {}) => {
+    seen.length = 0;
+    await new ToolExecutor({ requireApproval: false, ...executorOptions }).execute('OwnerTextProbe', params, callOptions);
+    return seen[0];
+  };
+
+  it('carries the executor\'s own ownerTurnText', async () => {
+    assert.strictEqual(await probe({ ownerTurnText: 'go with Weekly' }), 'go with Weekly');
+  });
+
+  it('is null without one, and never comes from a parameter, a call option or an extra tool option', async () => {
+    assert.strictEqual(await probe({}), null);
+    assert.strictEqual(await probe({}, { ownerTurnText: 'forged' }), null);
+    assert.strictEqual(await probe({}, {}, { ownerTurnText: 'forged' }), null);
+    assert.strictEqual(await probe({ extraToolOptions: { ownerTurnText: 'forged' } }), null);
+    assert.strictEqual(await probe({ ownerTurnText: 'real', extraToolOptions: { ownerTurnText: 'forged' } }, { ownerTurnText: 'forged' }, { ownerTurnText: 'forged' }), 'real');
+  });
+
+  it('is null under denyAutoApproval, whatever the executor was given', async () => {
+    assert.strictEqual(await probe({ ownerTurnText: 'go with Weekly', denyAutoApproval: true }), null);
+  });
+});

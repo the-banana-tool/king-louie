@@ -15,9 +15,13 @@ const { createLogger } = require('../logging');
 const { ToolError } = require('../fleet/tool-definitions');
 const { listRecords } = require('../cases/ingest/files');
 const { CASE_MCP_TOOLS, STATUS_CHANGING, NEVER_OVER_MCP, untrusted, answerClass, CASE_TOOL_SCOPE } = require('../cases/mcp-tool-definitions');
+const { fold, wordsInText, ownerQuoteInTurn } = require('../tools/owner-quote');
 
 const CHANNELS = new Set(['mcp-stdio', 'mcp-frontdoor', 'in-app']);
 const RATE_WINDOW_MS = 60 * 1000;
+// Management surfaces spec §3.1-3.2 and part 1's Global Constraints.
+const PRESSED_MESSAGE = "Answer this with the buttons on the question in the case's chat, or on your phone.";
+const OWNER_ONLY_MESSAGE = "Only the owner's own message can answer a question.";
 
 // A ToolError, so FleetToolHandler, the courier and NodeFleetService pass its
 // code, message and retry_after to the client as they do for fleet tools.
@@ -56,18 +60,18 @@ function pendingProposals(dir) {
   return listRecords(dir).reduce((n, rec) => n + (Array.isArray(rec.proposals) ? rec.proposals.filter((p) => isObj(p) && !isObj(p.review)).length : 0), 0);
 }
 
-// Why this channel may not answer `q`, or null.
-function notAnswerable(q, channel) {
-  const payload = isObj(q.payload) ? q.payload : {};
-  if (q.kind === 'approval') return 'approvals are answered only on channels that prove the sender';
-  if (q.kind === 'briefing') return 'briefings are acknowledged in the app, not answered';
-  if (NEVER_OVER_MCP.has(payload.type)) return 'document reviews are answered in the panel';
-  if (payload.mcpAnswerable === false) return 'this question is marked not answerable over MCP';
-  if (channel === 'mcp-frontdoor') {
-    if (payload.failure) return 'failure reports are answered on the node, not through the front door';
-    if (STATUS_CHANGING.has(payload.type)) return 'questions that change the case status are answered on the node';
-  }
-  return null;
+// A 1-based option number on its own: "option 12" does not name option 1,
+// nor do "1.5" or "2,1".
+function numberInText(n, text) {
+  return new RegExp(`(?<!\\w|\\d[.,])${n}(?!\\w|[.,]\\d)`).test(fold(text));
+}
+
+// True when the quote names the option by its label, its id or its 1-based
+// position, on word boundaries after the owner-quote fold.
+function optionInQuote(quote, option, index) {
+  return wordsInText(String(option.label ?? ''), quote)
+    || wordsInText(String(option.id ?? ''), quote)
+    || numberInText(index + 1, quote);
 }
 
 // A payload type goes back bare only when it looks like one (records are
@@ -178,7 +182,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, channel, audit =
           options: q.options || [],
           urgency: q.urgency,
           expiresAt: q.expiresAt || null,
-          answerableHere: notAnswerable(q, channel) === null
+          answerableHere: answerClass(q) === 'spoken'
         })),
         lastJournal: rt.records(meta.id).lastJournal()
       })
@@ -252,49 +256,88 @@ function createCaseToolHandler({ getRuntime, getContact = null, channel, audit =
     };
   }
 
-  async function answerQuestion(rt, args) {
+  // The spoken class only (answerClass): a pressed question is refused on
+  // every channel, in-app included. `quote` is the owner's words: on the
+  // in-app channel it must be in the owner's own message this turn
+  // (ownerTurnText, from the executor only); over MCP it is recorded, not
+  // checked. An option must be named in the quote; free text is the quote,
+  // or words from it. A spoken briefing is acknowledged.
+  async function answerQuestion(rt, args, ownerTurnText) {
     const hasText = args.text !== undefined;
     const hasOption = args.option_id !== undefined;
-    if (hasText === hasOption) throw fail('invalid_params', 'give exactly one of text and option_id');
+    if (hasText && hasOption) throw fail('invalid_params', 'give text or option_id, not both');
+    const quote = args.quote;
+    if (!fold(quote)) throw fail('invalid_params', '"quote" must hold the owner\'s words');
+    if (channel === 'in-app') {
+      if (typeof ownerTurnText !== 'string' || !fold(ownerTurnText)) throw fail('not_owner', OWNER_ONLY_MESSAGE);
+      if (!ownerQuoteInTurn(quote, ownerTurnText)) throw fail('quote_not_found', 'the quote is not in the owner\'s message this turn; quote their words exactly');
+    }
     const meta = caseOf(rt, args.case);
     if (meta.status === 'done' || meta.status === 'abandoned') throw fail('case_closed', 'the case is done or abandoned');
     const q = rt.questions(meta.id).get(args.question_id);
     if (!q) throw fail('question_not_found', 'no such question in this case');
     if (q.answer || q.closed) throw fail('question_closed', 'the question is already answered or closed');
-    const why = notAnswerable(q, channel);
-    if (why) throw fail('not_answerable_here', why);
-    if (hasOption && !(Array.isArray(q.options) ? q.options : []).some((o) => isObj(o) && o.id === args.option_id)) {
-      throw fail('invalid_params', 'option_id is not one of the question\'s options');
+    if (answerClass(q) === 'pressed') throw fail('not_answerable_here', PRESSED_MESSAGE);
+    const briefing = q.kind === 'briefing';
+    let text = null;
+    if (!briefing) {
+      if (hasOption) {
+        const options = (Array.isArray(q.options) ? q.options : []).filter(isObj);
+        const index = options.findIndex((o) => o.id === args.option_id);
+        if (index === -1) throw fail('invalid_params', 'option_id is not one of the question\'s options');
+        if (!optionInQuote(quote, options[index], index)) {
+          // Labels can be model-authored: listed as data, never in the message.
+          throw fail('option_not_in_quote', 'the quote does not name that option by its label, id or number; ask the owner which option they mean', {
+            options: untrusted(options.map((o, i) => ({ number: i + 1, id: o.id, label: o.label ?? null })))
+          });
+        }
+      } else if (hasText) {
+        if (!wordsInText(args.text, quote)) throw fail('invalid_params', 'text must be words from the quote');
+        text = args.text;
+      } else {
+        text = quote;
+      }
     }
     const releaseSlot = takeRateSlot();
     let res;
     try {
-      res = await rt.answerQuestion(meta.id, q.id, { channel, text: hasText ? args.text : null, optionId: hasOption ? args.option_id : null });
+      res = briefing
+        ? { question: await rt.acknowledgeBriefing(meta.id, q.id, { channel, quote }), fact: null }
+        : await rt.answerQuestion(meta.id, q.id, { channel, text, optionId: hasOption ? args.option_id : null, quote });
     } catch (err) {
       const code = err && err.code;
       // A busy case or an answer that does not fit changed nothing: the
       // slot goes back (m4).
-      if (code === 'CASE_BUSY' || code === 'INVALID' || code === 'IS_BRIEFING') releaseSlot();
+      const unfit = code === 'INVALID' || code === 'IS_BRIEFING' || code === 'NOT_BRIEFING';
+      if (code === 'CASE_BUSY' || unfit) releaseSlot();
       if (code === 'CASE_BUSY') throw fail('case_busy', 'the case is busy with a turn', { retry_after: 5 });
       if (code === 'ALREADY_ANSWERED') throw fail('question_closed', 'the question was answered meanwhile');
       if (code === 'NOT_FOUND') throw fail('question_not_found', 'no such question in this case');
-      if (code === 'INVALID' || code === 'IS_BRIEFING') {
+      if (unfit) {
         log.info(`${channel} answer to ${q.id} refused: ${err.message}`);
         throw fail('invalid_params', 'the answer does not fit the question');
       }
       throw err;
     }
     const factId = res?.fact?.id ?? res?.question?.answer?.factId ?? null;
-    log.info(`${channel} answered ${q.id} in case ${meta.slug}`);
+    log.info(`${channel} ${briefing ? 'acknowledged' : 'answered'} ${q.id} in case ${meta.slug}`);
     if (audit && typeof audit.append === 'function') {
       Promise.resolve()
         .then(() => audit.append({ kind: 'cases.answer_question', data: { channel, caseId: meta.id, questionId: q.id, optionId: hasOption ? args.option_id : null, factId } }))
         .catch((err) => log.warn(`Audit entry for ${q.id} failed: ${err.message}`));
     }
-    return { question_id: q.id, answered_at: res?.question?.answer?.at ?? null, fact_id: factId };
+    return {
+      question_id: q.id,
+      answered_at: res?.question?.answer?.at ?? null,
+      fact_id: factId,
+      ...(briefing ? { acknowledged: true } : {})
+    };
   }
 
-  async function call(name, args = {}) {
+  // `ownerTurnText` is the executor's own field (the chat's in-app tools
+  // pass it from their execute context); the MCP surfaces pass none, and it
+  // is read only on the in-app channel.
+  async function call(name, args = {}, { ownerTurnText = null } = {}) {
     const tool = byName.get(name);
     if (!tool) throw fail('unknown_tool', 'no such case tool');
     validate(tool, args || {});
@@ -306,7 +349,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, channel, audit =
         case 'get_orientation': return untrusted({ text: rt.orientation(caseOf(rt, args.case).id) });
         case 'list_questions': return listQuestions(rt, args.case);
         case 'get_presence': return getPresence();
-        default: return await answerQuestion(rt, args);
+        default: return await answerQuestion(rt, args, ownerTurnText);
       }
     } catch (err) {
       if (err instanceof ToolError) throw err;
@@ -359,6 +402,7 @@ module.exports = {
   createCaseToolHandler,
   untrusted,
   answerClass,
-  notAnswerable,
+  PRESSED_MESSAGE,
+  OWNER_ONLY_MESSAGE,
   registerNodeCaseMethods
 };

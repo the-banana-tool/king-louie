@@ -122,16 +122,16 @@ Design:
   next turn start / `case:detours`); `resolve_detour` is not a tool.
 - Rate limit: the in-app handler shares the 30/min window design (its own instance).
 
-- [ ] Tool-executor test: a builtin tool's ctx carries `ownerTurnText` from the executor.
-- [ ] Handler tests: missing `quote` refused on each channel; in-app quote not in owner text refused;
+- [x] Tool-executor test: a builtin tool's ctx carries `ownerTurnText` from the executor.
+- [x] Handler tests: missing `quote` refused on each channel; in-app quote not in owner text refused;
       in-app quote on a word boundary accepted and the fact is `user` with `channel: 'in-app'` and the
       quote; `option_id` whose label/id/position is absent from the quote refused; stdio records the quote
       unchecked; every pressed kind refused on `in-app`, `mcp-stdio`, `mcp-frontdoor` with the card/phone
       message; an `Ask` briefing is acknowledged; a detour routing question answered is applied at the
       next turn start.
-- [ ] Chat test: in a non-case chat, the owner's message "the lakeside one, go with Weekly" lets the model
+- [x] Chat test: in a non-case chat, the owner's message "the lakeside one, go with Weekly" lets the model
       (scripted via `tests/helpers/fake-llm-server.js`) answer a question in another case.
-- [ ] Covering tests pass; commit `feat(cases): answer_question takes the owner's quote on every surface`.
+- [x] Covering tests pass; commit `feat(cases): answer_question takes the owner's quote on every surface`.
 
 ## Task 3: `cases:answer` on the front door, with a per-grant write-rate limit
 

@@ -8,6 +8,10 @@
 // Browser(click)`), or an `ownerQuote` found in the owner's own message for
 // this turn (ownerQuoteInTurn).
 
+// ownerQuoteInTurn lives in src/tools/owner-quote.js, shared with the
+// management tools' answer_question.
+const { ownerQuoteInTurn } = require('./owner-quote');
+
 const BROWSER_TOOLS = new Set(['Browser', 'BrowserPage', 'BrowserExtract', 'BrowserSession']);
 
 const ACTING_ACTIONS = new Set([
@@ -20,25 +24,6 @@ const ACTING_ACTIONS = new Set([
 
 function isActingBrowserCall(toolName, params) {
   return BROWSER_TOOLS.has(toolName) && ACTING_ACTIONS.has(params?.action);
-}
-
-function fold(text) {
-  return String(text).replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
-    .replace(/\s+/g, ' ').trim().toLowerCase();
-}
-
-function escapeRegExp(text) {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// The quote must appear in the owner's message on word boundaries, ignoring
-// case, spacing and curly quotes. It proves only that the owner wrote those
-// words this turn; that they are about this action is the model's claim.
-function ownerQuoteInTurn(quote, ownerTurnText) {
-  if (typeof quote !== 'string' || typeof ownerTurnText !== 'string') return false;
-  const q = fold(quote);
-  if (!q) return false;
-  return new RegExp(`(^|\\W)${escapeRegExp(q)}(?=\\W|$)`).test(fold(ownerTurnText));
 }
 
 // The schema property every browser tool declares.

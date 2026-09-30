@@ -6,8 +6,11 @@
 // allowedToolNames name only the case tools and WAKEUP_BASE_TOOLS.
 //
 // The handler comes from the executor's extraToolOptions (`caseManagement`,
-// built once per core). Only the read tools are here for now; the spoken
-// ones join with the owner's quote (part 1, Task 2).
+// built once per core). answer_question checks its quote against the
+// owner's own message for this turn, `ownerTurnText` in the execute context,
+// which ToolExecutor sets from its own field only (never from a parameter):
+// a turn with no owner message (a wake-up, a channel, a child run) cannot
+// answer.
 const { Tool } = require('../tool-schema');
 const { CASE_MCP_TOOLS } = require('../../cases/mcp-tool-definitions');
 
@@ -30,23 +33,27 @@ function managementTool(def) {
     description: def.description,
     parameters: chatSchema(def.inputSchema),
     requiresApproval: false,
-    concurrencySafe: true,
+    concurrencySafe: def.tier === 'read',
     execute: async (params, context) => {
       const handler = context && context.caseManagement;
       if (!handler || !handler.available()) return { ok: false, error: UNAVAILABLE };
       try {
-        return { ok: true, result: await handler.call(def.name, params || {}) };
+        const ownerTurnText = typeof context.ownerTurnText === 'string' ? context.ownerTurnText : null;
+        return { ok: true, result: await handler.call(def.name, params || {}, { ownerTurnText }) };
       } catch (err) {
         // The handler's refusals are fixed sentences; anything else it
         // already turned into `internal`.
-        if (err && err.isCaseToolError) return { ok: false, error: err.message, code: err.code };
+        if (err && err.isCaseToolError) {
+          const data = err.data && typeof err.data === 'object' && Object.keys(err.data).length ? { data: err.data } : {};
+          return { ok: false, error: err.message, code: err.code, ...data };
+        }
         throw err;
       }
     }
   });
 }
 
-const MANAGEMENT_TOOLS = Object.freeze(CASE_MCP_TOOLS.filter((t) => t.tier === 'read').map(managementTool));
+const MANAGEMENT_TOOLS = Object.freeze(CASE_MCP_TOOLS.map(managementTool));
 const MANAGEMENT_TOOL_NAMES = Object.freeze(MANAGEMENT_TOOLS.map((t) => t.name));
 
 function registerManagementTools(registry) {

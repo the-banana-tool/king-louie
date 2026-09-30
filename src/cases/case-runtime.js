@@ -1512,10 +1512,12 @@ class CaseRuntime {
   }
 
   // Every host path that answers a question comes through here (program §4.3).
-  async answerQuestion(caseId, questionId, { channel = 'in-app', text = null, optionId = null } = {}) {
+  // `quote`: the owner's verbatim words (management surfaces spec §3.2),
+  // kept on the answer and its fact's source.
+  async answerQuestion(caseId, questionId, { channel = 'in-app', text = null, optionId = null, quote = null } = {}) {
     return this.systemAction(caseId, `answer ${questionId}`, async (meta) => {
       const store = this.questions(meta.id);
-      const question = store.answer(questionId, { channel, text, optionId });
+      const question = store.answer(questionId, { channel, text, optionId, quote });
       const fact = question.answer?.factId ? new FactLedger(meta.dir).view().facts.get(question.answer.factId) || null : null;
       const handler = QuestionStore.answerHandler(question.payload?.type);
       let effect = null;
@@ -1533,9 +1535,9 @@ class CaseRuntime {
     });
   }
 
-  async acknowledgeBriefing(caseId, questionId, { channel = 'in-app' } = {}) {
+  async acknowledgeBriefing(caseId, questionId, { channel = 'in-app', quote = null } = {}) {
     return this.systemAction(caseId, `acknowledge ${questionId}`, async (meta) => {
-      const question = this.questions(meta.id).acknowledge(questionId, { channel });
+      const question = this.questions(meta.id).acknowledge(questionId, { channel, quote });
       this._notify('case:changed', { caseId: meta.id, what: 'questions', questionId });
       return question;
     });

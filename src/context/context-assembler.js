@@ -47,6 +47,7 @@ const CORE_TOOLS = new Set([
   'get_orientation',
   'list_questions',
   'get_presence',
+  'answer_question',
 ]);
 
 // System prompt sections that are always included.

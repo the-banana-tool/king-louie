@@ -40,6 +40,17 @@ function alreadyAnswered(rec) {
   return new QuestionError('ALREADY_ANSWERED', `${rec.id} was already answered via ${how}.`, rec);
 }
 
+const MAX_QUOTE = 2000;
+
+// null when absent; else the quote as given (verbatim), or INVALID.
+function cleanQuote(quote, rec) {
+  if (quote === null || quote === undefined) return null;
+  if (typeof quote !== 'string' || !quote.trim() || quote.length > MAX_QUOTE) {
+    throw new QuestionError('INVALID', `A quote is 1 to ${MAX_QUOTE} characters of the owner's words.`, rec);
+  }
+  return quote;
+}
+
 function defaultFactInput(rec, answer, option) {
   const about = rec.payload?.about && typeof rec.payload.about === 'object' ? rec.payload.about : {};
   const value = option ? option.label : answer.text;
@@ -230,8 +241,12 @@ class QuestionStore {
     fs.rmSync(path.join(this.qdir, `${id}.claim`), { force: true });
   }
 
-  answer(id, { channel = 'in-app', text = null, optionId = null } = {}) {
+  // `quote` (management surfaces spec §3.2): the owner's verbatim words an
+  // MCP or chat answer carries. It is kept on the answer and the fact's
+  // source; checking it against the owner's message is the caller's job.
+  answer(id, { channel = 'in-app', text = null, optionId = null, quote = null } = {}) {
     const rec = this._require(id);
+    const ownerQuote = cleanQuote(quote, rec);
     if (rec.kind === 'briefing') throw new QuestionError('IS_BRIEFING', `${id} is a briefing; acknowledge it instead of answering.`, rec);
     if (rec.answer || rec.closed) throw alreadyAnswered(rec);
     const wantsOption = optionId !== null && optionId !== undefined;
@@ -242,7 +257,7 @@ class QuestionStore {
     this._claim(rec);
     try {
       const at = this.now().toISOString();
-      const answer = { channel: String(channel), at, text: answerText, optionId: option ? option.id : null };
+      const answer = { channel: String(channel), at, text: answerText, optionId: option ? option.id : null, ...(ownerQuote ? { quote: ownerQuote } : {}) };
       const handler = HANDLERS.get(rec.payload?.type);
       const input = handler?.toFact ? handler.toFact(rec, answer) : defaultFactInput(rec, answer, option);
       const fact = new FactLedger(this.dir).assert({
@@ -250,7 +265,7 @@ class QuestionStore {
         ...(rec.payload?.disclosable === false ? { disclosable: false } : {}),
         ...(rec.payload?.gating?.category ? { category: rec.payload.gating.category } : {}),
         provenance: 'user',
-        source: { kind: 'question', ref: rec.id, channel: answer.channel, at },
+        source: { kind: 'question', ref: rec.id, channel: answer.channel, at, ...(ownerQuote ? { quote: ownerQuote } : {}) },
         addedBy: `question:${rec.id}`
       });
       rec.answer = { ...answer, factId: fact.id };
@@ -263,12 +278,13 @@ class QuestionStore {
     }
   }
 
-  acknowledge(id, { channel = 'in-app' } = {}) {
+  acknowledge(id, { channel = 'in-app', quote = null } = {}) {
     const rec = this._require(id);
     if (rec.kind !== 'briefing') throw new QuestionError('NOT_BRIEFING', `${id} is a ${rec.kind}; answer it instead.`, rec);
     if (rec.answer || rec.closed) throw alreadyAnswered(rec);
+    const ownerQuote = cleanQuote(quote, rec);
     this._claim(rec);
-    rec.answer = { channel: String(channel), at: this.now().toISOString(), text: null, optionId: null, factId: null };
+    rec.answer = { channel: String(channel), at: this.now().toISOString(), text: null, optionId: null, factId: null, ...(ownerQuote ? { quote: ownerQuote } : {}) };
     this._write(rec);
     return rec;
   }

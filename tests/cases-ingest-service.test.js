@@ -560,7 +560,8 @@ describe('review questions for documents King Louie added', { skip: NEEDS_GIT },
     }
     // The race: a plain question passes the MCP handler's check, then its
     // record is re-typed to a review before the locked re-read.
-    const plain = h.runtime.createQuestion(h.caseId, { kind: 'question', text: 'Use the county office?', urgency: 'low', options, payload: { type: 'plan' } }, { charge: false });
+    // (A plain Ask question: a plan question is pressed, refused before this race.)
+    const plain = h.runtime.createQuestion(h.caseId, { kind: 'question', text: 'Use the county office?', urgency: 'low', options, payload: { type: 'ask' } }, { charge: false });
     const real = h.runtime.answerQuestion.bind(h.runtime);
     const effects = [];
     h.runtime.answerQuestion = async (...args) => {
@@ -573,7 +574,7 @@ describe('review questions for documents King Louie added', { skip: NEEDS_GIT },
       return res;
     };
     const mcp = createCaseToolHandler({ getRuntime: () => h.runtime, channel: 'mcp-stdio' });
-    await mcp.call('answer_question', { case: h.caseId, question_id: plain.id, option_id: 'a' });
+    await mcp.call('answer_question', { case: h.caseId, question_id: plain.id, option_id: 'a', quote: 'Accept all' });
     assert.strictEqual(effects[0].applied, false);
     // Refused for the channel, not only because the re-typed question is
     // not the record's review question (final review m7).
