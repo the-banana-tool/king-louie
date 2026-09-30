@@ -663,6 +663,7 @@ function registerChatHandlers(ipcMain, context = {}) {
           },
           fullHistoryEstTokens: built.stats.fullHistoryEstTokens,
           embedder: built.stats.embedder,
+          vectorsSkipped: built.stats.vectorsSkipped ?? null,
           scope: built.stats.scope
         };
       }

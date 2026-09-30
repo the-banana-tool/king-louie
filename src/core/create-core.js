@@ -63,8 +63,13 @@ const { configureCaseGuard } = require('../cases/executors/case-guard');
 const { makeRootAssert } = require('../cases/executors/package-loader');
 const { buildChildContext, childRuntimeOptions } = require('../agents/child-context');
 const ContextAssembler = require('../context/context-assembler');
-const { HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore, TokenEstimator, Retriever, ContextBuilder } = require('../history');
+const {
+  HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore, TokenEstimator, Retriever, ContextBuilder,
+  EmbedderHost, EmbedRunner, VectorIndex, createVectorSearch
+} = require('../history');
 const { startChunkBackfill } = require('../history/backfill');
+const { startEmbedIndexer } = require('../history/embed-indexer');
+const { createHostReranker } = require('../history/reranker');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
@@ -317,8 +322,35 @@ function createCore(deps = {}) {
   }
   // Recall stage H2 (spec 2026-09-25 §6): token estimates, BM25 retrieval
   // and the per-turn context builder, all over the history store.
+  // Stage H3 (§5.2, §5.3, §6.3): embeddings. The EmbedderHost picks the
+  // embedder from settings.history.embedder; the local one runs in the embed
+  // worker (EmbedRunner, a child process). Nothing loads or downloads until
+  // startHistoryEmbedding(), which startModelsBackgroundChecks calls (main.js
+  // and runService; skipped under KL_TEST_MODE); until then recall is BM25
+  // only. Model files live in <dataDir>/models.
   const tokenEstimator = new TokenEstimator({ store: historyStore });
-  const historyRetriever = new Retriever({ store: historyStore, estimator: tokenEstimator });
+  const embedderHost = new EmbedderHost({
+    getSettings: () => getSettings(),
+    modelsDir: path.join(paths.dataDir, 'models'),
+    createRunner: typeof deps.history?.createEmbedRunner === 'function' ? deps.history.createEmbedRunner : () => new EmbedRunner(),
+    // Declared further down; called only once the host has started.
+    createProvider: (kind, cfg) => (kind === 'openai'
+      ? createProviderInstance('openai', getDecryptedProviderToken('openai'))
+      : ProviderFactory.createProvider('ollama', null, { catalog, serverUrl: cfg.ollama.baseUrl })),
+    notify: (toast) => {
+      if (!deps.uiToastChannel || typeof deps.uiToastChannel.send !== 'function') return;
+      Promise.resolve()
+        .then(() => deps.uiToastChannel.send(toast))
+        .catch((err) => historyLog.warn(`Recall warning toast failed: ${err.message}`));
+    }
+  });
+  const vectorIndex = new VectorIndex({
+    store: historyStore,
+    getCapMb: () => ((getSettings().history || {}).recall || {}).vectorCacheMb
+  });
+  const { vectorSearch, vectorOf } = createVectorSearch({ host: embedderHost, index: vectorIndex });
+  const historyReranker = createHostReranker(embedderHost);
+  const historyRetriever = new Retriever({ store: historyStore, estimator: tokenEstimator, vectorSearch, vectorOf, reranker: historyReranker });
   const contextBuilder = new ContextBuilder({
     store: historyStore,
     retriever: historyRetriever,
@@ -326,6 +358,10 @@ function createCore(deps = {}) {
     // getSettings is declared further down; it is read only when a turn runs.
     getSettings: () => getSettings()
   });
+  let embedIndexer = null;
+  const startHistoryEmbedding = () => {
+    if (historyStatus.available) embedderHost.start();
+  };
   const getHistoryStore = () => historyStore;
   const getHistoryStatus = () => ({ ...historyStatus });
   // Chunking what an H1 store held runs after start(), a batch per tick
@@ -377,7 +413,15 @@ function createCore(deps = {}) {
   const getApiStatus = () => store.get('apiStatus', {});
   const setApiStatus = (status) => store.set('apiStatus', status);
   const getSettings = () => mergeSettings(store.get('settings', DEFAULT_SETTINGS));
-  const setSettings = (settings) => store.set('settings', mergeSettings(settings));
+  const cacheMbOf = (s) => ((s && s.history) || {}).recall?.vectorCacheMb;
+  const setSettings = (settings) => {
+    const before = cacheMbOf(getSettings());
+    const next = mergeSettings(settings);
+    store.set('settings', next);
+    // Recall stage H3: a chat VectorIndex skipped as too large for the old
+    // cap stays skipped until clear(), so a new cap starts a fresh cache.
+    if (cacheMbOf(next) !== before) vectorIndex.clear();
+  };
 
   // Model catalog (spec 2026-09-27 §4): the bundled snapshot plus the copy
   // cached under <dataDir>/catalog/. Loading never touches the network; the
@@ -1100,6 +1144,9 @@ function createCore(deps = {}) {
       kingLouie.inputsChanged();
       return { skipped: true };
     }
+    // Recall stage H3: the embedder (and a first model download) starts with
+    // the other background checks, never under KL_TEST_MODE.
+    startHistoryEmbedding();
     await Promise.all([
       catalog.refresh().catch((err) => log.warn(`Model catalog refresh failed: ${err.message}`)),
       availability.retestStale().catch((err) => log.warn(`Provider retests failed: ${err.message}`))
@@ -2155,7 +2202,7 @@ function createCore(deps = {}) {
         get history() {
           const cid = executorOptions.chatId;
           return cid
-            ? { chatId: String(cid), store: historyStore, retriever: historyRetriever, estimator: tokenEstimator, getSettings }
+            ? { chatId: String(cid), store: historyStore, retriever: historyRetriever, estimator: tokenEstimator, reranker: historyReranker, getSettings }
             : null;
         },
         getAgent,
@@ -3021,6 +3068,10 @@ function createCore(deps = {}) {
     // in the background; search misses them until then. A read-only or
     // in-memory store never backfills.
     if (historyStatus.available && !historyBackfill) historyBackfill = startChunkBackfill(historyStore);
+    // Recall stage H3: chunks get vectors in the background once the
+    // embedder is ready (startHistoryEmbedding). Read-only and in-memory
+    // stores never embed.
+    if (historyStatus.available && !embedIndexer) embedIndexer = startEmbedIndexer({ store: historyStore, host: embedderHost, getSettings });
   };
 
   const shutdown = async () => {
@@ -3082,6 +3133,12 @@ function createCore(deps = {}) {
     if (usageTracker) usageTracker.reset();
     // Last: nothing after this point appends to a chat.
     if (historyBackfill) historyBackfill.stop();
+    if (embedIndexer) {
+      await withTimeout(embedIndexer.stop(), shutdownTimeoutMs, 'Embedding shutdown', warnTimeout)
+        .catch((err) => log.warn(`Embedding shutdown failed: ${err.message}`));
+    }
+    await withTimeout(embedderHost.stop(), shutdownTimeoutMs, 'Embed worker shutdown', warnTimeout)
+      .catch((err) => log.warn(`Embed worker shutdown failed: ${err.message}`));
     try {
       historyStore.close();
     } catch (err) {
@@ -3236,6 +3293,11 @@ function createCore(deps = {}) {
     getHistoryRetriever: () => historyRetriever,
     getHistoryStatus,
     getHistoryBackfill,
+    getEmbedderHost: () => embedderHost,
+    getVectorIndex: () => vectorIndex,
+    getEmbedIndexer: () => embedIndexer,
+    getHistoryReranker: () => historyReranker,
+    startHistoryEmbedding,
     getMessages,
     truncateChatFrom,
     listChats,
