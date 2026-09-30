@@ -8,12 +8,14 @@ const path = require('path');
 const { readJsonlLines } = require('./jsonl-lines');
 
 const KIND = 'claude-code-jsonl';
-const VERSION = 2; // 2: array-content compact summaries are compactions
+const VERSION = 3; // 3: frame-link and the artifact monitor/ledger records are skipped, not unmapped
+// (2: array-content compact summaries are compactions)
 const RAW_MAX_CHARS = 4000;
 // Harness bookkeeping that carries no conversation.
 const SKIPPED_TYPES = new Set([
   'attachment', 'bridge-session', 'queue-operation', 'file-history-snapshot', 'file-history-delta',
-  'atis-latch', 'last-prompt', 'ai-title', 'custom-title', 'summary', 'pr-link', 'mode', 'cost-state'
+  'atis-latch', 'last-prompt', 'ai-title', 'custom-title', 'summary', 'pr-link', 'mode', 'cost-state',
+  'frame-link', 'artifact-comment-monitor', 'artifact-autoreact-ledger'
 ]);
 
 function isSubagentPath(filePath) {

@@ -145,4 +145,13 @@ describe('claude-code-jsonl detect and preview', () => {
     assert.strictEqual(p.turns, 3);
     assert.deepStrictEqual(p.sample.map((s) => s.seq), [1, 2, 8, 15]);
   });
+
+  it('skips frame-link, artifact-comment-monitor and artifact-autoreact-ledger records', async () => {
+    const extra = ['frame-link', 'artifact-comment-monitor', 'artifact-autoreact-ledger'].map((type) => ({ type, sessionId: cc.SESSION, payload: { a: 1 } }));
+    const base = await importer.parse(cc.writeClaudeCodeFixture(tmpDir()));
+    const withExtra = await importer.parse(cc.writeClaudeCodeFixture(tmpDir(), 'extra.jsonl', { records: [...cc.claudeCodeRecords(), ...extra] }));
+    assert.strictEqual(withExtra.messages.length, base.messages.length);
+    assert.strictEqual(withExtra.stats.unmapped, base.stats.unmapped);
+    for (const type of ['frame-link', 'artifact-comment-monitor', 'artifact-autoreact-ledger']) assert.strictEqual(withExtra.stats.skipped[type], 1);
+  });
 });
