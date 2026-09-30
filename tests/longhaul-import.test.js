@@ -116,4 +116,35 @@ describe('longhaul import', () => {
     assert.strictEqual((await run(['import', good, '--id', 'a b'], env)).code, 2);
     assert.strictEqual((await run(['import'], env)).code, 2);
   });
+
+  it('imports a King Louie chat export: private by default, manifest names the importer, re-import is unchanged', async () => {
+    const { env, root } = tmpHome();
+    const file = path.join(tmpDir(), 'chat.json');
+    fs.copyFileSync(path.join(__dirname, 'fixtures', 'history', 'king-louie-chat.json'), file);
+    const r = await run(['import', file], env);
+    assert.strictEqual(r.code, 0, r.stderr);
+    const [id] = fs.readdirSync(path.join(root, 'sessions'));
+    assert.match(id, /^kl-[0-9a-f]{12}$/);
+    const { manifest } = await loadSession(path.join(root, 'sessions', id));
+    assert.strictEqual(manifest.private, true);
+    assert.strictEqual(manifest.license, 'private');
+    assert.strictEqual(manifest.source, 'king-louie-json');
+    assert.deepStrictEqual(manifest.importer, { kind: 'king-louie-json', version: 1 });
+    assert.deepStrictEqual(manifest.llmTotals, { calls: 3, inputTokens: 1200, outputTokens: 340, costUsd: 0.02 });
+    assert.strictEqual(manifest.compactions.length, 1);
+    assert.strictEqual(manifest.unmapped, 1);
+    const again = await run(['import', file], env);
+    assert.strictEqual(again.code, 0);
+    assert.match(again.stdout, /already imported/);
+  });
+
+  it('names the supported formats when a file is neither', async () => {
+    const { env } = tmpHome();
+    const file = path.join(tmpDir(), 'other.json');
+    fs.writeFileSync(file, '{"hello":"world"}');
+    const r = await run(['import', file], env);
+    assert.strictEqual(r.code, 2);
+    assert.match(r.stderr, /Claude Code session transcript/);
+    assert.match(r.stderr, /King Louie chat export/);
+  });
 });

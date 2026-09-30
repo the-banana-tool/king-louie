@@ -1,5 +1,5 @@
 'use strict';
-// `longhaul import <file.jsonl> [--id <id>] [--public --license <spdx>] [--force]`
+// `longhaul import <session.jsonl|chat.json> [--id <id>] [--public --license <spdx>] [--force]`
 const path = require('path');
 const { importSession } = require('../importing');
 const { UsageError } = require('../errors');
@@ -13,7 +13,7 @@ module.exports = {
   },
   async run(ctx, values, positionals) {
     if (positionals.length !== 1) {
-      throw new UsageError('Usage: longhaul import <session.jsonl> [--id <id>] [--public --license <spdx>] [--force]');
+      throw new UsageError('Usage: longhaul import <session.jsonl|chat.json> [--id <id>] [--public --license <spdx>] [--force]');
     }
     const out = await importSession(ctx.home, path.resolve(ctx.cwd, positionals[0]), {
       id: values.id, license: values.license, publicSession: values.public, force: values.force
