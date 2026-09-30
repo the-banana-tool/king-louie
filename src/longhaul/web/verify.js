@@ -105,20 +105,18 @@
     $('progress-bar').style.width = total ? `${Math.round((decided / total) * 100)}%` : '0%';
 
     const targets = clear($('targets'));
-    const row = (label, value, target, minor) => {
-      targets.appendChild(el('dt', minor ? 'minor' : null, label));
-      const dd = el('dd', minor ? 'minor' : null, target ? `${value} / ${target}` : String(value));
+    const row = (label, value, target) => {
+      targets.appendChild(el('dt', null, label));
+      const dd = el('dd', null, `${value} / ${target}`);
       if (target && value >= target) dd.classList.add('met');
       targets.appendChild(dd);
     };
     row('Verified in session', state.verified.total, state.targets.total);
     row('abstain', state.verified.byKind.abstain || 0, state.targets.abstain);
     row('superseded', state.verified.byKind.superseded || 0, state.targets.superseded);
-    targets.appendChild(el('div', 'target-sep'));
-    for (const k of KINDS) {
-      if (k !== 'abstain' && k !== 'superseded') row(k, state.verified.byKind[k] || 0, null, true);
-    }
-    row('still unverified', state.unverified, null, true);
+    const minor = KINDS.filter((k) => k !== 'abstain' && k !== 'superseded').map((k) => `${k} ${state.verified.byKind[k] || 0}`);
+    minor.push(`unverified ${state.unverified}`);
+    targets.appendChild(el('div', 'target-minor', minor.join(' · ')));
 
     const list = clear($('queue'));
     for (const q of state.queue) {
@@ -317,8 +315,11 @@
     $('context-details').open = true;
     fitAll(box);
     requestAnimationFrame(() => {
+      // Land the focused message just below the sticky header card.
+      const main = $('main');
       const focus = box.querySelector('.msg.focus') || section;
-      focus.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      const offset = focus.getBoundingClientRect().top - main.getBoundingClientRect().top;
+      main.scrollTo({ top: main.scrollTop + offset - $('head-card').offsetHeight - 16, behavior: 'smooth' });
     });
   }
 

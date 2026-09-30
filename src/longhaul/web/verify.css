@@ -107,8 +107,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .targets dt { color: var(--muted); }
 .targets dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
 .targets dd.met { color: var(--green); font-weight: 600; }
-.targets .target-sep { grid-column: 1 / -1; border-top: 1px dashed var(--border); margin: 0.25rem 0; }
-.targets .minor { color: var(--faint); }
+.targets .target-minor { grid-column: 1 / -1; border-top: 1px dashed var(--border); margin-top: 0.3rem; padding-top: 0.35rem; font-size: 0.78rem; color: var(--faint); line-height: 1.45; }
 
 .queue { list-style: none; margin: 0; padding: 0.4rem 0; overflow-y: auto; flex: 1; min-height: 0; }
 .queue li button {
