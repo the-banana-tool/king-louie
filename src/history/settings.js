@@ -23,6 +23,12 @@ const HISTORY_DEFAULTS = Object.freeze({
     prefixMinChars: 0,
     queryContextSeparate: false,
     pairToolMessages: false,
+    // Budget fill (recall budget 2026-09-30): diversifyFirst takes the best
+    // chunk of each distinct message first, then fills by score;
+    // dedupeJaccard > 0 drops a candidate whose word 5-gram Jaccard to a
+    // selected chunk exceeds it.
+    diversifyFirst: false,
+    dedupeJaccard: 0,
     // Top cosine hits fused with BM25 (spec §6.3 step 2). Inert until a
     // vector list is given to retrieve() (H3; LongHaul's kl-recall-vec).
     vectorTopK: 50,
@@ -74,6 +80,8 @@ function mergeHistorySettings(source) {
       prefixMinChars: atLeast(r.prefixMinChars, d.prefixMinChars, 0, true),
       queryContextSeparate: flag(r.queryContextSeparate, d.queryContextSeparate),
       pairToolMessages: flag(r.pairToolMessages, d.pairToolMessages),
+      diversifyFirst: flag(r.diversifyFirst, d.diversifyFirst),
+      dedupeJaccard: fraction(r.dedupeJaccard, d.dedupeJaccard),
       vectorTopK: atLeast(r.vectorTopK, d.vectorTopK, 1, true),
       rerank: {
         enabled: flag(rr.enabled, d.rerank.enabled),

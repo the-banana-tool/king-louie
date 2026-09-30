@@ -6,7 +6,7 @@ const { UsageError } = require('../errors');
 const { validateSessionId } = require('../session-format');
 
 const USAGE = 'Usage: longhaul run --adapters kl-recall,sliding-window,oracle [--sessions <data root>] [--session <id>]... '
-  + '[--budget-tokens 6000] [--window-tokens N] [--recall key=value]... [--seed N] [--include-unverified] '
+  + '[--budget-tokens 6000] [--window-tokens N] [--recall key=value]... [--chunk-target-chars N] [--seed N] [--include-unverified] '
   + '[--embed-model text-embedding-3-small] [--send-private]';
 
 function positiveInt(value, name) {
@@ -47,6 +47,7 @@ module.exports = {
     adapters: { type: 'string' },
     'budget-tokens': { type: 'string' },
     'window-tokens': { type: 'string' },
+    'chunk-target-chars': { type: 'string' },
     recall: { type: 'string', multiple: true },
     seed: { type: 'string' },
     'include-unverified': { type: 'boolean', default: false },
@@ -60,6 +61,8 @@ module.exports = {
     for (const id of values.session || []) validateSessionId(id);
     const adapterNames = values.adapters.split(',').map((s) => s.trim()).filter(Boolean);
     const recall = parseRecallPairs(values.recall);
+    // kl-recall's store chunk size (history.chunk.targetChars).
+    const chunk = values['chunk-target-chars'] ? { targetChars: positiveInt(values['chunk-target-chars'], 'chunk-target-chars') } : null;
     // kl-recall-vec(-only): vectors from `longhaul embed`'s cache; a question
     // with no cached vector is embedded now only with --send-private.
     const vec = {
@@ -67,7 +70,7 @@ module.exports = {
       ...(values['embed-model'] ? { model: values['embed-model'] } : {})
     };
     const adapterConfig = {
-      'kl-recall': { recall },
+      'kl-recall': { recall, ...(chunk ? { chunk } : {}) },
       'kl-recall-vec': vec,
       'kl-recall-vec-only': vec,
       // kl-recall-rerank: cross-encoder scores cached under LONGHAUL_HOME/private/rerank.
