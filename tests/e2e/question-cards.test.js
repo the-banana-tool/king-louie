@@ -30,7 +30,8 @@ describe('E2E: question cards in the case chat', { skip: gitAvailable ? false : 
     { ...base, id: 'q-0001', kind: 'approval', urgency: 'normal', text: 'Approve listing the lakeside lot with the county?',
       options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }], payload: { type: 'ask', mcpAnswerable: true } },
     { ...base, id: 'q-0002', kind: 'question', urgency: 'normal', text: 'How often should I check the listing?',
-      options: [{ id: 'weekly', label: 'Weekly' }, { id: 'monthly', label: 'Monthly' }], payload: { type: 'ask', mcpAnswerable: true } },
+      options: [{ id: 'weekly', label: 'Weekly' }, { id: 'monthly', label: 'Monthly' }], payload: { type: 'ask', mcpAnswerable: true },
+      notes: [{ at, text: 'The first report goes out on Monday.' }] },
     { ...base, id: 'q-0003', kind: 'question', urgency: 'normal', text: 'The case spent its usd budget and is paused. Reply with a new limit to continue.',
       options: [], payload: { type: 'budget-grant', budget: 'usd', spent: 5, limit: 5, mcpAnswerable: false, key: 'budget-grant:usd' } }
   ];
@@ -85,6 +86,8 @@ describe('E2E: question cards in the case chat', { skip: gitAvailable ? false : 
       ['1. Weekly', '2. Monthly']
     );
     assert.strictEqual(await evaluate(ctx, `document.querySelector('${card('q-0002')} .chat-question-hint').textContent`), 'Reply below.');
+    // A note the runtime put on the question (F2) is on the card, as it was on the panel's.
+    assert.strictEqual(await evaluate(ctx, `document.querySelector('${card('q-0002')} .case-question-note').textContent`), records[1].notes[0].text);
     assert.strictEqual(await evaluate(ctx, `document.querySelectorAll('${card('q-0002')} button').length`), 0);
 
     // Not through the card: the main process answers it, as any other

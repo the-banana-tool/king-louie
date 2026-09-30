@@ -119,6 +119,21 @@ const CASE_MCP_TOOLS = deepFreeze([
       additionalProperties: false
     },
     tier: 'routine'
+  },
+  {
+    name: 'set_away',
+    description: "Set the owner away, in their words: until a time, questions reach them by email only (email-only) or in the app only (in-app-only); off ends it. quote is required: the owner's own words, copied verbatim from their message. until is an RFC3339 date-time in the future, given with email-only or in-app-only and never with off.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: ['email-only', 'in-app-only', 'off'], description: 'email-only, in-app-only, or off to end being away.' },
+        until: { type: 'string', minLength: 1, maxLength: 64, pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2})$', description: 'When being away ends: an RFC3339 date-time with its offset, e.g. 2026-10-02T18:00:00-05:00.' },
+        quote: OWNER_WORDS
+      },
+      required: ['mode', 'quote'],
+      additionalProperties: false
+    },
+    tier: 'routine'
   }
 ]);
 
@@ -167,7 +182,7 @@ const CASE_SCOPES = Object.freeze({
     description: 'Read case lists, briefs, questions, envelopes, playbooks and orientation, including private facts.'
   }),
   'cases:answer': Object.freeze({
-    tools: Object.freeze(['answer_question']),
+    tools: Object.freeze(['answer_question', 'set_away']),
     description: "Answer open case questions in the owner's words. Approvals, money, direction and a case's status are never answered here.",
     requires: Object.freeze(['cases:read'])
   }),

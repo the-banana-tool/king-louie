@@ -91,6 +91,6 @@ Design:
 - Rewrite `tests/e2e/questions.test.js` against the chat card and Settings > Contact; drop the
   questions-bar cases from `tests/e2e/cases.test.js` or point them at the card.
 
-- [ ] `set_away` handler tests on `in-app` (quote checked), stdio, front door (`cases:answer`).
-- [ ] E2E: no `#questions-section` in the DOM; the contact-policy editor saves from Settings > Contact.
-- [ ] Covering tests pass; commit `feat(app): remove the questions sidebar; set_away; contact policy in Settings`.
+- [x] `set_away` handler tests on `in-app` (quote checked), stdio, front door (`cases:answer`).
+- [x] E2E: no `#questions-section` in the DOM; the contact-policy editor saves from Settings > Contact.
+- [x] Covering tests pass; commit `feat(app): remove the questions sidebar; set_away; contact policy in Settings`.

@@ -1901,23 +1901,24 @@ async function renderChatCaseSection(chat, container) {
     renderPlaybooksSection(chat, playbooksSection).catch((err) => chatLog.warn(`Playbooks panel failed: ${err.message}`));
   }
 
-  // Cases stage 2: status, budget and questions for the attached case.
+  // Cases stage 2: status and budget for the attached case. Its questions
+  // are cards in the case's chat (management surfaces §3.5).
   const unattended = document.createElement('div');
   unattended.id = 'case-unattended-section';
   unattended.className = 'case-unattended-section';
   container.appendChild(unattended);
   if (chat.caseId && !caseMissing) {
-    renderCaseUnattendedSection(chat, unattended, { compact: false }).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
+    renderCaseUnattendedSection(chat, unattended).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
   }
-  refreshCaseQuestionsBar();
 
-  // Cases stage 5: detour proposals and related cases.
-  const detours = document.createElement('div');
-  detours.id = 'case-detours-section';
-  detours.className = 'case-detours-section';
-  container.appendChild(detours);
+  // Cases stage 5: related cases. A detour's routing question is a card in
+  // the chat like any other question.
+  const related = document.createElement('div');
+  related.id = 'case-related-section';
+  related.className = 'case-related-section';
+  container.appendChild(related);
   if (chat.caseId && !caseMissing) {
-    renderCaseDetoursSection(chat, detours).catch((err) => chatLog.warn(`Detours panel failed: ${err.message}`));
+    renderCaseRelatedSection(chat, related).catch((err) => chatLog.warn(`Related cases failed: ${err.message}`));
   }
 
   const adopt = async (updatedChat) => {
@@ -2417,7 +2418,7 @@ function caseButton(text, className = 'secondary-button') {
 }
 
 // F2 re-review: our own explicit refresh (with pendingMessage) is not the
-// only render that can happen right after an answer/grant — the runtime's
+// only render that can happen right after a grant — the runtime's
 // own case:changed notification (the same action triggers it) fires the
 // onChanged listener below, which re-renders with no pendingMessage of its
 // own and would otherwise win the race and wipe the message a second time.
@@ -2434,86 +2435,6 @@ function peekCasePanelMessage(caseId) {
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) { casePanelMessages.delete(caseId); return null; }
   return entry.message;
-}
-
-function renderCaseQuestionCard(q, { onDone, showError }) {
-  const card = document.createElement('div');
-  card.className = `case-question case-question-${q.urgency}`;
-  card.dataset.questionId = q.id;
-  const head = document.createElement('div');
-  head.className = 'case-question-head';
-  head.textContent = `${q.caseTitle ? `${q.caseTitle} · ` : ''}${q.kind === 'briefing' ? 'Briefing' : 'Question'} ${q.id}`;
-  const text = document.createElement('div');
-  text.className = 'case-question-text';
-  text.textContent = q.text;
-  card.append(head, text);
-
-  // Notes the runtime attached to this question (e.g. why a reply had no
-  // effect) — textContent only, never innerHTML (F2 re-review).
-  if (Array.isArray(q.notes) && q.notes.length) {
-    const notes = document.createElement('div');
-    notes.className = 'case-question-notes';
-    q.notes.forEach((note) => {
-      const line = document.createElement('div');
-      line.className = 'case-question-note';
-      line.textContent = note?.text || '';
-      notes.appendChild(line);
-    });
-    card.appendChild(notes);
-  }
-
-  if (q.kind === 'briefing') {
-    const dismiss = caseButton('Dismiss', 'secondary-button case-question-dismiss');
-    dismiss.addEventListener('click', async () => {
-      const r = await window.electron.cases.acknowledgeBriefing({ caseId: q.caseId, questionId: q.id });
-      if (!r?.ok) { showError(r?.error || 'Could not dismiss the briefing.'); return; }
-      onDone();
-    });
-    card.appendChild(dismiss);
-    return card;
-  }
-
-  const submit = async (answer) => {
-    const r = await window.electron.cases.answerQuestion({ caseId: q.caseId, questionId: q.id, ...answer });
-    if (!r?.ok) { showError(r?.error || 'Could not send the answer.'); return; }
-    // The answer was recorded, but a rejected grant or direction has no
-    // further effect (r.effect.applied === false): tell the owner why
-    // instead of silently closing the card as if it worked (F2). onDone
-    // rebuilds the container (renderCaseUnattendedSection clears it), so
-    // the message must be set on the *new* container after that finishes,
-    // never on this card's own (about-to-be-discarded) showError — setting
-    // it first only for the rebuild to immediately wipe it (F2 re-review).
-    const pendingMessage = (r.effect && r.effect.applied === false)
-      ? (r.effect.note || r.effect.error || 'The answer had no effect.')
-      : null;
-    // Also stashed case-scoped (see setCasePanelMessage above): the
-    // runtime's own case:changed notification for this same answer can
-    // trigger another render with no pendingMessage of its own, shortly
-    // after this one, which would otherwise wipe the message again.
-    setCasePanelMessage(q.caseId, pendingMessage);
-    await onDone(pendingMessage);
-  };
-  const actions = document.createElement('div');
-  actions.className = 'case-question-actions';
-  (q.options || []).forEach((option) => {
-    const b = caseButton(option.label);
-    b.dataset.optionId = option.id;
-    b.addEventListener('click', () => submit({ optionId: option.id }));
-    actions.appendChild(b);
-  });
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'chat-info-input case-question-input';
-  input.placeholder = 'Answer…';
-  const send = caseButton('Answer', 'secondary-button case-question-answer');
-  send.addEventListener('click', () => {
-    const value = input.value.trim();
-    if (!value) { input.focus(); return; }
-    submit({ text: value });
-  });
-  actions.append(input, send);
-  card.appendChild(actions);
-  return card;
 }
 
 /* --- Questions in the chat (management surfaces spec §3.4). A case's
@@ -2773,9 +2694,8 @@ function renderCaseBudgetLine(caseId, budget, { showError, refresh }) {
     const value = category.value === 'deadline' ? raw : Number(raw);
     const r = await window.electron.cases.grantBudget({ caseId, category: category.value, limit: value });
     if (!r?.ok) { showError(r?.error || 'Could not change the budget.'); return; }
-    // Same ordering fix as the answer path above: set the message after
-    // refresh rebuilds the container, on the new one, not the old
-    // (about-to-be-discarded) showError (F2 re-review).
+    // Set the message after refresh rebuilds the container, on the new
+    // one, not the old (about-to-be-discarded) showError (F2 re-review).
     const pendingMessage = (r.effect && r.effect.applied === false)
       ? (r.effect.note || r.effect.error || 'The grant had no effect.')
       : null;
@@ -2786,45 +2706,26 @@ function renderCaseBudgetLine(caseId, budget, { showError, refresh }) {
   return row;
 }
 
-// Full mode fills the Chat Info case section; compact mode fills the bar
-// above the composer with what needs the owner's attention.
+// The case's status and budget in Chat Info.
 // pendingMessage (F2 re-review): a message from an action that just
-// completed (e.g. a rejected budget-grant reply) to show in *this*
-// render's error slot — set before the compact-mode hidden check and
-// before the full-mode append, so it survives the rebuild that would
-// otherwise wipe a message set on the previous (discarded) container.
-async function renderCaseUnattendedSection(chat, container, { compact = false, pendingMessage = null } = {}) {
+// completed (e.g. a grant with no effect) to show in *this* render's error
+// slot, so it survives the rebuild that would otherwise wipe a message set
+// on the previous (discarded) container.
+async function renderCaseUnattendedSection(chat, container, { pendingMessage = null } = {}) {
   if (!container) return;
-  if (!chat?.caseId || !window.electron?.cases?.questions) {
+  if (!chat?.caseId || !window.electron?.cases?.budget) {
     container.innerHTML = '';
-    if (compact) container.hidden = true;
     return;
   }
-  const listed = await window.electron.cases.questions({ caseId: chat.caseId });
-  const questions = listed?.ok ? listed.questions : [];
+  const budget = await window.electron.cases.budget({ caseId: chat.caseId });
   container.innerHTML = '';
   const error = document.createElement('div');
   error.className = 'chat-case-error case-unattended-error';
   const showError = (message) => { error.textContent = message || ''; };
-  if (!listed?.ok) showError(listed?.error || 'Could not load the case questions.');
-  else {
-    const carried = pendingMessage || peekCasePanelMessage(chat.caseId);
-    if (carried) showError(carried);
-  }
-
-  if (compact) {
-    const shown = questions.filter((q) => (q.kind !== 'briefing' && q.urgency !== 'low') || (q.kind === 'briefing' && q.urgency === 'high'));
-    shown.forEach((q) => container.appendChild(renderCaseQuestionCard(q, { onDone: (msg) => refreshCaseQuestionsBar(msg), showError })));
-    container.appendChild(error);
-    container.hidden = shown.length === 0 && !error.textContent;
-    return;
-  }
-
-  const refresh = (msg) => Promise.all([
-    renderCaseUnattendedSection(chat, container, { compact: false, pendingMessage: msg }).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`)),
-    refreshCaseQuestionsBar()
-  ]);
-  const budget = await window.electron.cases.budget({ caseId: chat.caseId });
+  const carried = pendingMessage || peekCasePanelMessage(chat.caseId);
+  if (carried) showError(carried);
+  const refresh = (msg) => renderCaseUnattendedSection(chat, container, { pendingMessage: msg })
+    .catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
   if (budget?.ok) {
     const info = budget.case;
     const statusRow = document.createElement('div');
@@ -2851,38 +2752,7 @@ async function renderCaseUnattendedSection(chat, container, { compact = false, p
   } else {
     showError(budget?.error || 'Could not load the case budget.');
   }
-
-  const list = document.createElement('div');
-  list.className = 'case-question-list';
-  list.id = 'case-question-list';
-  if (!questions.length) {
-    const none = document.createElement('div');
-    none.className = 'case-question-none';
-    none.textContent = 'No open questions.';
-    list.appendChild(none);
-  }
-  questions.forEach((q) => list.appendChild(renderCaseQuestionCard(q, { onDone: refresh, showError })));
-  container.append(list, error);
-}
-
-function ensureCaseQuestionsBar() {
-  let bar = document.getElementById('case-questions-bar');
-  if (bar) return bar;
-  const input = document.getElementById('input-container');
-  if (!input || !input.parentNode) return null;
-  bar = document.createElement('div');
-  bar.id = 'case-questions-bar';
-  bar.className = 'case-questions-bar';
-  bar.hidden = true;
-  input.parentNode.insertBefore(bar, input);
-  return bar;
-}
-
-function refreshCaseQuestionsBar(pendingMessage) {
-  const bar = ensureCaseQuestionsBar();
-  if (!bar) return Promise.resolve();
-  return renderCaseUnattendedSection(getActiveChat(), bar, { compact: true, pendingMessage })
-    .catch((err) => chatLog.warn(`Case questions bar failed: ${err.message}`));
+  container.appendChild(error);
 }
 
 if (window.electron?.cases?.onChanged) {
@@ -2895,56 +2765,14 @@ if (window.electron?.cases?.onChanged) {
     }
     const chat = getActiveChat();
     if (!chat?.caseId || (payload?.caseId && payload.caseId !== chat.caseId)) return;
-    refreshCaseQuestionsBar();
     const slot = document.getElementById('case-unattended-section');
-    if (slot) renderCaseUnattendedSection(chat, slot, { compact: false }).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
-    const detourSlot = document.getElementById('case-detours-section');
-    if (detourSlot) renderCaseDetoursSection(chat, detourSlot).catch((err) => chatLog.warn(`Detours panel failed: ${err.message}`));
+    if (slot) renderCaseUnattendedSection(chat, slot).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
+    const relatedSlot = document.getElementById('case-related-section');
+    if (relatedSlot) renderCaseRelatedSection(chat, relatedSlot).catch((err) => chatLog.warn(`Related cases failed: ${err.message}`));
   });
 }
 
-/* --- Cases stage 5: detours and related cases (docs/superpowers/specs/2026-09-23-cases-stage5-detours.md §7) --- */
-
-const CASE_DETOUR_OPEN = ['proposed', 'held', 'awaiting-mapping'];
-
-function renderCaseDetourCard(chat, d, { refresh, showError }) {
-  const card = document.createElement('div');
-  card.id = `case-detour-${d.id}`;
-  card.className = `case-detour${d.blocks ? ' case-detour-blocker' : ''}`;
-  card.dataset.detourId = d.id;
-  const text = document.createElement('div');
-  text.className = 'case-detour-text';
-  text.textContent = `${d.blocks ? 'Blocker: ' : ''}${d.summary}${d.reason ? ` — ${d.reason}` : ''}`;
-  card.appendChild(text);
-  if (d.status !== 'proposed') {
-    const state = document.createElement('div');
-    state.className = 'case-detour-state';
-    state.textContent = d.status === 'held'
-      ? "Waiting: today's question allowance is spent."
-      : 'You answered in words; the case maps it to an option on its next turn. You can also pick one here.';
-    card.appendChild(state);
-  }
-  const actions = document.createElement('div');
-  actions.className = 'case-detour-actions';
-  for (const o of d.options) {
-    const button = caseButton(o.label, o.optionId === 'decline' ? 'secondary-button case-detour-drop' : 'secondary-button');
-    button.id = `case-detour-${d.id}-${o.optionId}`;
-    button.addEventListener('click', async () => {
-      showError('');
-      const payload = { caseId: chat.caseId, detourId: d.id, optionId: o.optionId };
-      let result = await window.electron.cases.resolveDetour(payload);
-      if (!result?.ok && o.optionId === 'new' && result?.code === 'SIMILAR_CASES'
-        && await showConfirmDialog(`${result.error} Create the new case anyway?`)) {
-        result = await window.electron.cases.resolveDetour({ ...payload, force: true });
-      }
-      if (!result?.ok) showError(result?.error || 'Could not route the detour.');
-      await refresh();
-    });
-    actions.appendChild(button);
-  }
-  card.appendChild(actions);
-  return card;
-}
+/* --- Cases stage 5: related cases (docs/superpowers/specs/2026-09-23-cases-stage5-detours.md §7) --- */
 
 function relatedCaseLine(r) {
   const li = document.createElement('li');
@@ -2958,42 +2786,27 @@ function relatedCaseLine(r) {
   return li;
 }
 
-async function renderCaseDetoursSection(chat, container) {
-  const error = document.createElement('div');
-  error.className = 'chat-case-error';
-  const showError = (message) => { error.textContent = message || ''; };
-  const refresh = async () => {
-    await renderCaseDetoursSection(chat, container);
-    refreshCaseQuestionsBar();
-  };
+// case:detours also applies routing answers given since the last turn
+// (cases stage 5), as it did when this block showed the detours.
+async function renderCaseRelatedSection(chat, container) {
   const result = await window.electron.cases.detours({ caseId: chat.caseId });
   container.innerHTML = '';
   if (!result?.ok) {
-    showError(`Could not load detours: ${result?.error || 'unknown error'}`);
+    const error = document.createElement('div');
+    error.className = 'chat-case-error';
+    error.textContent = `Could not load related cases: ${result?.error || 'unknown error'}`;
     container.appendChild(error);
     return;
   }
-  const open = result.detours.filter((d) => CASE_DETOUR_OPEN.includes(d.status));
-  if (!open.length && !result.related.length) return;
+  if (!result.related.length) return;
   const heading = document.createElement('div');
-  heading.className = 'case-detours-heading';
-  heading.textContent = 'Detours and related cases';
-  container.appendChild(heading);
-  if (result.busy) {
-    const busy = document.createElement('div');
-    busy.className = 'case-detour-state';
-    busy.textContent = 'The case is busy with a turn; routing answers are applied when it finishes.';
-    container.appendChild(busy);
-  }
-  for (const d of open) container.appendChild(renderCaseDetourCard(chat, d, { refresh, showError }));
-  if (result.related.length) {
-    const list = document.createElement('ul');
-    list.id = 'case-related-list';
-    list.className = 'case-related-list';
-    for (const r of result.related) list.appendChild(relatedCaseLine(r));
-    container.appendChild(list);
-  }
-  container.appendChild(error);
+  heading.className = 'case-related-heading';
+  heading.textContent = 'Related cases';
+  const list = document.createElement('ul');
+  list.id = 'case-related-list';
+  list.className = 'case-related-list';
+  for (const r of result.related) list.appendChild(relatedCaseLine(r));
+  container.append(heading, list);
 }
 
 /* --- Cases stage 6: playbooks (docs/superpowers/specs/2026-09-23-cases-stage6-playbooks.md §3.12) --- */
@@ -3550,6 +3363,9 @@ function switchSettingsTab(tabName) {
   // every time the pane is opened rather than only at settings load.
   if (tabName === 'channels' && typeof loadChannelAccess === 'function') {
     loadChannelAccess().catch(() => {});
+  }
+  if (tabName === 'contact' && typeof renderContactSettings === 'function') {
+    renderContactSettings();
   }
   if (tabName === 'service' && typeof renderServiceSection === 'function') {
     renderServiceSection().catch((err) => serviceLog.warn('rendering the local service pane failed', { error: err && err.message }));
@@ -8773,7 +8589,6 @@ async function loadChats() {
   appState.isAgentModeEnabled = !!(activeChat && activeChat.agentMode);
   appState.isSandboxModeEnabled = activeChat ? activeChat.sandboxMode !== false : true;
   refreshUI();
-  refreshCaseQuestionsBar();
 }
 
 function persistAgentMode() {
@@ -8815,7 +8630,6 @@ async function handleSelectChat(chatId) {
   unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
   chat = await ensureChatMessagesLoaded(chatId) || chat;
   refreshUI();
-  refreshCaseQuestionsBar();
 
   if (chat?.caseId && window.electron?.cases?.runningTurn) {
     window.electron.cases.runningTurn({ caseId: chat.caseId })
@@ -11602,36 +11416,19 @@ function initMeshHandlers() {
 }
 
 initMeshHandlers();
-/* --- Cases stage 4: questions across cases, presence and the contact policy
-   (docs/superpowers/specs/2026-09-23-cases-stage4-channels.md §3.8) --- */
-const questionsLog = createLogger('questions');
-const QUESTION_URGENCY_RANK = { high: 0, normal: 1, low: 2 };
+/* --- Settings > Contact (cases stage 4 §3.8; management surfaces §3.5):
+   the contact policy — a ladder of channels per urgency, quiet hours, the
+   daily digest — and each channel's readiness. Away mode is set_away, in
+   words, from any chat. --- */
+const contactLog = createLogger('contact-settings');
 const CONTACT_LADDER_URGENCIES = ['low', 'normal', 'high'];
-let questionsRendering = null;
+let contactPaneRendering = null;
 
-function questionsEl(tag, className, text) {
+function contactEl(tag, className, text) {
   const el = document.createElement(tag);
   if (className) el.className = className;
   if (text !== undefined) el.textContent = text;
   return el;
-}
-
-function questionsButton(text, className = 'btn questions-btn') {
-  const b = questionsEl('button', className, text);
-  b.type = 'button';
-  return b;
-}
-
-function formatLadderState(state) {
-  if (!state) return '';
-  if (state.exhausted) return 'exhausted';
-  if (state.expired) return 'expired';
-  if (state.nextChannel && state.nextAt) {
-    const at = new Date(state.nextAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    return `next: ${state.nextChannel} at ${at}`;
-  }
-  const last = (state.attempts || [])[state.attempts.length - 1];
-  return last ? `${last.channel} ${last.outcome}` : '';
 }
 
 // "present, telegram@30, email@240, email@0+digest" ⇄ ladder steps.
@@ -11647,146 +11444,67 @@ function textToLadder(text) {
   });
 }
 
-function renderQuestionCard(q, ladderState, { refresh, showError }) {
-  const card = questionsEl('div', `questions-card questions-urgency-${q.urgency}`);
-  card.dataset.questionId = q.id;
-  card.dataset.caseId = q.caseId;
-  card.appendChild(questionsEl('div', 'questions-case', q.caseTitle || q.caseId));
-  card.appendChild(questionsEl('div', 'questions-text', q.text));
-  const answer = async (payload) => {
-    try {
-      const r = q.kind === 'briefing'
-        ? await window.electron.cases.acknowledgeBriefing({ caseId: q.caseId, questionId: q.id })
-        : await window.electron.cases.answerQuestion({ caseId: q.caseId, questionId: q.id, ...payload });
-      if (!r || r.ok === false) throw new Error(r?.error || 'The answer was not recorded.');
-      await refresh();
-    } catch (err) {
-      showError(err.message);
-    }
-  };
-  const actions = questionsEl('div', 'questions-actions');
-  if (q.kind === 'briefing') {
-    const ack = questionsButton('Got it');
-    ack.classList.add('questions-ack');
-    ack.addEventListener('click', () => answer({}));
-    actions.appendChild(ack);
-  } else {
-    for (const option of q.options || []) {
-      const b = questionsButton(option.label);
-      b.classList.add('questions-option');
-      b.dataset.optionId = option.id;
-      b.addEventListener('click', () => answer({ optionId: option.id }));
-      actions.appendChild(b);
-    }
-    const input = questionsEl('input', 'questions-input');
-    input.type = 'text';
-    input.placeholder = 'Answer…';
-    const send = questionsButton('Answer');
-    send.classList.add('questions-answer');
-    send.addEventListener('click', () => {
-      const text = input.value.trim();
-      if (text) answer({ text });
-    });
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send.click(); });
-    actions.append(input, send);
-  }
-  card.appendChild(actions);
-  const ladderText = formatLadderState(ladderState);
-  if (ladderText) card.appendChild(questionsEl('div', 'questions-ladder', ladderText));
-  return card;
-}
-
-function renderAwayControls(policy, { save, showError }) {
-  const row = questionsEl('div', 'questions-away');
-  const awayActive = policy.away && Date.parse(policy.away.until) > Date.now();
-  if (awayActive) {
-    row.appendChild(questionsEl('span', 'questions-away-note', `Away (${policy.away.mode}) until ${new Date(policy.away.until).toLocaleString()}`));
-    const back = questionsButton("I'm back");
-    back.id = 'questions-away-clear';
-    back.addEventListener('click', () => save({ ...policy, away: null }).catch((err) => showError(err.message)));
-    row.appendChild(back);
-    return row;
-  }
-  const mode = questionsEl('select', 'questions-away-mode');
-  for (const m of ['email-only', 'in-app-only']) {
-    const o = questionsEl('option', '', m);
-    o.value = m;
-    mode.appendChild(o);
-  }
-  const until = questionsEl('input', 'questions-away-until');
-  until.type = 'datetime-local';
-  const go = questionsButton('Away');
-  go.id = 'questions-away-set';
-  go.addEventListener('click', () => {
-    const t = Date.parse(until.value);
-    if (!Number.isFinite(t) || t <= Date.now()) {
-      showError('Pick a time in the future.');
-      return;
-    }
-    save({ ...policy, away: { mode: mode.value, until: new Date(t).toISOString() } }).catch((err) => showError(err.message));
-  });
-  row.append(mode, until, go);
-  return row;
-}
-
 function renderContactPolicyEditor(policy, channels, { save, showError }) {
-  const details = questionsEl('details', 'questions-policy');
-  details.id = 'contact-policy-editor';
-  details.appendChild(questionsEl('summary', '', 'Contact policy'));
+  const editor = contactEl('div', 'contact-policy');
+  editor.id = 'contact-policy-editor';
   const inputs = {};
+  editor.appendChild(contactEl('div', 'contact-policy-heading', 'Ladders (channel@minutes, comma-separated)'));
   for (const u of CONTACT_LADDER_URGENCIES) {
-    const label = questionsEl('label', 'questions-policy-row', `${u} `);
-    const input = questionsEl('input', 'questions-policy-ladder');
+    const label = contactEl('label', 'contact-policy-row', `${u} `);
+    const input = contactEl('input', 'contact-policy-ladder');
     input.type = 'text';
     input.id = `contact-ladder-${u}`;
     input.value = ladderToText(policy.ladders[u]);
     label.appendChild(input);
-    details.appendChild(label);
+    editor.appendChild(label);
     inputs[u] = input;
   }
-  const quiet = questionsEl('label', 'questions-policy-row', 'Quiet hours ');
-  const qStart = questionsEl('input', 'questions-policy-time');
+  const quiet = contactEl('label', 'contact-policy-row', 'Quiet hours ');
+  const qStart = contactEl('input', 'contact-policy-time');
   qStart.type = 'time';
   qStart.id = 'contact-quiet-start';
   qStart.value = policy.quietHours ? policy.quietHours.start : '';
-  const qEnd = questionsEl('input', 'questions-policy-time');
+  const qEnd = contactEl('input', 'contact-policy-time');
   qEnd.type = 'time';
   qEnd.id = 'contact-quiet-end';
   qEnd.value = policy.quietHours ? policy.quietHours.end : '';
   quiet.append(qStart, document.createTextNode(' – '), qEnd);
-  details.appendChild(quiet);
-  const breakthrough = questionsEl('div', 'questions-policy-row', 'Break through quiet hours: ');
+  editor.appendChild(quiet);
+  const breakthrough = contactEl('div', 'contact-policy-row', 'Break through quiet hours: ');
   const through = {};
   for (const u of CONTACT_LADDER_URGENCIES) {
-    const box = questionsEl('input');
+    const box = contactEl('input');
     box.type = 'checkbox';
     box.id = `contact-breakthrough-${u}`;
     box.checked = (policy.quietHours?.breakthrough || ['high']).includes(u);
-    const l = questionsEl('label', 'questions-policy-check', ` ${u} `);
+    const l = contactEl('label', 'contact-policy-check', ` ${u} `);
     l.prepend(box);
     breakthrough.appendChild(l);
     through[u] = box;
   }
-  details.appendChild(breakthrough);
-  const digest = questionsEl('label', 'questions-policy-row', 'Daily digest ');
-  const dChannel = questionsEl('input', 'questions-policy-digest');
+  editor.appendChild(breakthrough);
+  const digest = contactEl('label', 'contact-policy-row', 'Daily digest ');
+  const dChannel = contactEl('input', 'contact-policy-digest');
   dChannel.type = 'text';
   dChannel.id = 'contact-digest-channel';
   dChannel.placeholder = 'off';
   dChannel.value = policy.digest ? policy.digest.channel : '';
-  const dAt = questionsEl('input', 'questions-policy-time');
+  const dAt = contactEl('input', 'contact-policy-time');
   dAt.type = 'time';
   dAt.id = 'contact-digest-at';
   dAt.value = policy.digest ? policy.digest.at : '08:00';
   digest.append(dChannel, document.createTextNode(' at '), dAt);
-  details.appendChild(digest);
-  const status = questionsEl('ul', 'questions-policy-channels');
+  editor.appendChild(digest);
+  editor.appendChild(contactEl('div', 'contact-policy-heading', 'Channels'));
+  const status = contactEl('ul', 'contact-policy-channels');
+  status.id = 'contact-policy-channels';
   for (const [id, s] of Object.entries(channels || {})) {
     const text = s.configured ? `${id}: ready` : `${id}: ${s.enabled ? 'not configured' : 'off'}${s.reason ? ` (${s.reason})` : ''}`;
-    status.appendChild(questionsEl('li', s.configured ? 'is-ready' : 'is-off', text));
+    status.appendChild(contactEl('li', s.configured ? 'is-ready' : 'is-off', text));
   }
-  details.appendChild(status);
-  const saveBtn = questionsButton('Save contact policy');
+  editor.appendChild(status);
+  const saveBtn = contactEl('button', 'btn btn-primary', 'Save contact policy');
+  saveBtn.type = 'button';
   saveBtn.id = 'contact-policy-save';
   saveBtn.addEventListener('click', async () => {
     try {
@@ -11801,86 +11519,60 @@ function renderContactPolicyEditor(policy, channels, { save, showError }) {
       showError(err.message);
     }
   });
-  details.appendChild(saveBtn);
-  return details;
+  editor.appendChild(saveBtn);
+  return editor;
 }
 
-async function renderQuestionsSection() {
-  const section = document.getElementById('questions-section');
-  if (!section || !window.electron?.cases?.questions || !window.electron?.contact) return;
-  if (questionsRendering) return questionsRendering;
-  questionsRendering = (async () => {
-    const [q, ladder, presence, policy] = await Promise.all([
-      window.electron.cases.questions({}).catch((err) => ({ ok: false, error: err.message })),
-      window.electron.contact.ladderState().catch(() => ({ ok: false })),
+async function renderContactSettings() {
+  const body = document.getElementById('contact-pane-body');
+  if (!body || !window.electron?.contact) return;
+  if (contactPaneRendering) return contactPaneRendering;
+  contactPaneRendering = (async () => {
+    const [presence, policy] = await Promise.all([
       window.electron.contact.presenceStatus().catch(() => ({ ok: false })),
-      window.electron.contact.getPolicy().catch(() => ({ ok: false }))
+      window.electron.contact.getPolicy().catch((err) => ({ ok: false, error: err.message }))
     ]);
-    const openPolicy = document.getElementById('contact-policy-editor')?.open === true;
-    section.replaceChildren();
-    const error = questionsEl('div', 'questions-error');
-    error.hidden = true;
-    const showError = (message) => {
-      error.textContent = message;
-      error.hidden = false;
+    body.replaceChildren();
+    const message = contactEl('div', 'contact-pane-message');
+    message.id = 'contact-pane-message';
+    const showError = (text) => {
+      message.textContent = text;
+      message.classList.add('is-error');
     };
-    const refresh = () => renderQuestionsSection();
     const save = async (next) => {
-      const r = await window.electron.contact.setPolicy(next);
+      // The away setting may have changed (set_away) since the pane drew:
+      // keep the one saved now.
+      const fresh = await window.electron.contact.getPolicy().catch(() => null);
+      const r = await window.electron.contact.setPolicy(fresh?.ok ? { ...next, away: fresh.policy.away } : next);
       if (!r || r.ok === false) throw new Error(r?.error || 'The contact policy was not saved.');
-      await refresh();
+      await renderContactSettings();
+      const saved = document.getElementById('contact-pane-message');
+      if (saved) saved.textContent = 'Saved.';
     };
-
-    const header = questionsEl('div', 'questions-header');
-    const dot = questionsEl('span', 'questions-presence-dot');
-    dot.id = 'questions-presence-dot';
-    const here = presence.ok ? presence.presentChannel : null;
-    dot.classList.add(here === 'in-app' ? 'is-here' : (here ? 'is-elsewhere' : 'is-away'));
-    dot.title = here ? `Reaching you on ${here}` : 'Not present on any channel';
-    header.append(dot, questionsEl('span', 'questions-title', 'Questions'));
-    section.appendChild(header);
     // Final review M7: when another process holds the contact ladder lease,
     // this one sends nothing; say so where the owner looks.
     if (presence.ok && presence.ladder && presence.ladder.runsHere === false && presence.ladder.holder) {
-      const elsewhere = questionsEl('div', 'questions-ladder-elsewhere', presence.ladder.message);
-      elsewhere.id = 'questions-ladder-elsewhere';
-      section.appendChild(elsewhere);
+      const elsewhere = contactEl('div', 'contact-ladder-elsewhere', presence.ladder.message);
+      elsewhere.id = 'contact-ladder-elsewhere';
+      body.appendChild(elsewhere);
     }
-    if (policy.ok) section.appendChild(renderAwayControls(policy.policy, { save, showError }));
-
-    const list = questionsEl('div', 'questions-list');
-    list.id = 'questions-list';
-    const states = ladder.ok ? ladder.state : {};
-    const questions = (q.ok ? q.questions : [])
-      .slice()
-      .sort((a, b) => (QUESTION_URGENCY_RANK[a.urgency] ?? 1) - (QUESTION_URGENCY_RANK[b.urgency] ?? 1)
-        || String(b.createdAt).localeCompare(String(a.createdAt)));
-    for (const question of questions) {
-      list.appendChild(renderQuestionCard(question, states[`${question.caseId}/${question.id}`], { refresh, showError }));
-    }
-    if (!questions.length) list.appendChild(questionsEl('div', 'questions-empty', 'No open questions.'));
-    section.appendChild(list);
     if (policy.ok) {
-      const editor = renderContactPolicyEditor(policy.policy, policy.channels, { save, showError });
-      editor.open = openPolicy;
-      section.appendChild(editor);
+      const away = policy.policy.away && Date.parse(policy.policy.away.until) > Date.now() ? policy.policy.away : null;
+      const awayLine = contactEl('div', 'contact-away-note', away
+        ? `Away (${away.mode}) until ${new Date(away.until).toLocaleString()}. Tell King Louie you're back to end it.`
+        : 'Not away. To be away, tell King Louie in any chat, e.g. "email only until Friday".');
+      awayLine.id = 'contact-away-note';
+      body.appendChild(awayLine);
+      body.appendChild(renderContactPolicyEditor(policy.policy, policy.channels, { save, showError }));
+    } else {
+      showError(policy.error || 'The contact policy could not be read.');
     }
-    section.appendChild(error);
-    if (!q.ok && q.error) showError(q.error);
-  })().catch((err) => questionsLog.warn(`Questions section failed: ${err.message}`)).finally(() => {
-    questionsRendering = null;
+    body.appendChild(message);
+  })().catch((err) => contactLog.warn(`Contact settings failed: ${err.message}`)).finally(() => {
+    contactPaneRendering = null;
   });
-  return questionsRendering;
+  return contactPaneRendering;
 }
-
-function initQuestionsSection() {
-  if (!document.getElementById('questions-section')) return;
-  renderQuestionsSection();
-  if (window.electron?.cases?.onChanged) window.electron.cases.onChanged(() => renderQuestionsSection());
-  setInterval(() => renderQuestionsSection(), 60000);
-}
-
-initQuestionsSection();
 
 /* --- Presence (cases stage 4 §3.2; management surfaces §3.4): the window
    reports focus and input silently, whether or not any questions UI is on

@@ -31,9 +31,9 @@ const tmp = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix
 const NEW_TOOLS = ['list_questions', 'get_presence'];
 const READ = ['list_cases', 'open_case', 'get_orientation', ...NEW_TOOLS, 'list_envelopes', 'list_playbooks'];
 const MANAGE = ['create_case', 'revoke_envelope', 'cancel_case_job'];
-const SPOKEN = ['answer_question', ...MANAGE];
+const SPOKEN = ['answer_question', ...MANAGE, 'set_away'];
 // In CASE_MCP_TOOLS' order.
-const ALL = ['list_cases', 'open_case', 'get_orientation', ...NEW_TOOLS, 'answer_question', 'list_envelopes', 'list_playbooks', ...MANAGE];
+const ALL = ['list_cases', 'open_case', 'get_orientation', ...NEW_TOOLS, 'answer_question', 'list_envelopes', 'list_playbooks', ...MANAGE, 'set_away'];
 
 async function fixture() {
   const rt = new CaseRuntime({ root: tmp('kl-mgmt-') });
@@ -626,5 +626,108 @@ describe('list_envelopes and list_playbooks', () => {
     assert.deepStrictEqual(asked, [f.meta.id]);
     f.runtime.playbooks = null;
     assert.strictEqual((await refusal(f.handler('in-app').call('list_playbooks', { case: f.meta.id }))).code, 'playbooks_unavailable');
+  });
+});
+
+// ---- Part 2, Task 5: set_away ----
+
+const { createContactHost } = require('../src/cases/contact-host');
+const { mergeSettings } = require('../src/core/settings');
+
+// A real contact host over settings held here, as createCore builds it
+// (isService: true is the service's; its policy is data-dir settings too).
+function awayFixture({ isService = false } = {}) {
+  let stored = mergeSettings({ contactPolicy: { quietHours: { start: '22:00', end: '07:00' } } });
+  const rt = new CaseRuntime({ root: path.join(tmp('kl-mgmt-away-'), 'cases'), host: { interactive: () => true, notify: () => {} } });
+  const host = createContactHost({
+    getSettings: () => stored, setSettings: (s) => { stored = mergeSettings(s); }, isService, caseRuntime: rt, dataDir: tmp('kl-mgmt-away-data-'), features: { channels: false }
+  });
+  const handler = (channel, opts = {}) => createCaseToolHandler({ getRuntime: () => rt, getContact: () => host.context(), channel, ...opts });
+  return { rt, host, handler, policy: () => stored.contactPolicy };
+}
+const LATER = new Date(Date.now() + 3 * 86400000).toISOString();
+
+describe('set_away', () => {
+  it('is a spoken tool: mode and quote required, until optional, in cases:answer beside answer_question', () => {
+    const def = defs.CASE_MCP_TOOLS.find((t) => t.name === 'set_away');
+    assert.strictEqual(def.tier, 'routine');
+    assert.deepStrictEqual(def.inputSchema.required, ['mode', 'quote']);
+    assert.deepStrictEqual(Object.keys(def.inputSchema.properties), ['mode', 'until', 'quote']);
+    assert.deepStrictEqual([...def.inputSchema.properties.mode.enum], ['email-only', 'in-app-only', 'off']);
+    assert.strictEqual(def.inputSchema.additionalProperties, false);
+    assert.deepStrictEqual([...defs.CASE_SCOPES['cases:answer'].tools], ['answer_question', 'set_away']);
+    assert.deepStrictEqual([...toolRegistry.get('set_away').parameters.properties.mode.enum], ['email-only', 'in-app-only', 'off']);
+  });
+
+  it("in-app: refused without the owner's message, with a quote not in it, or with no quote; nothing changes", async () => {
+    const f = awayFixture();
+    const h = f.handler('in-app');
+    const args = { mode: 'email-only', until: LATER, quote: "I'm away until Friday, email only" };
+    assert.strictEqual((await refusal(h.call('set_away', args))).code, 'not_owner');
+    assert.strictEqual((await refusal(h.call('set_away', args, { ownerTurnText: "I'm away until Fridays, email only" }))).code, 'quote_not_found');
+    const { quote, ...noQuote } = args;
+    assert.strictEqual((await refusal(h.call('set_away', noQuote, { ownerTurnText: quote }))).code, 'invalid_params');
+    assert.strictEqual(f.policy().away, null);
+  });
+
+  it('in-app: a quote in the owner\'s message sets away through the policy validation, keeping the rest of the policy; off clears it', async () => {
+    const f = awayFixture();
+    const h = f.handler('in-app');
+    const owner = "Heads up: I'm away until Friday, email only.";
+    const r = await h.call('set_away', { mode: 'email-only', until: LATER, quote: "I'm away until Friday, email only" }, { ownerTurnText: owner });
+    assert.deepStrictEqual(r, { away: { mode: 'email-only', until: LATER } });
+    assert.deepStrictEqual(f.policy().away, { mode: 'email-only', until: LATER });
+    assert.deepStrictEqual(f.policy().quietHours, { start: '22:00', end: '07:00', breakthrough: ['high'] });
+    assert.strictEqual(f.host.context().presenceStatus().away, true);
+    const back = await h.call('set_away', { mode: 'off', quote: "I'm back" }, { ownerTurnText: "I'm back." });
+    assert.deepStrictEqual(back, { away: null });
+    assert.strictEqual(f.policy().away, null);
+    assert.deepStrictEqual(f.policy().quietHours, { start: '22:00', end: '07:00', breakthrough: ['high'] });
+  });
+
+  it('refuses an unknown mode, an away mode with no time or a past or malformed one, and a time with off', async () => {
+    const f = awayFixture();
+    const h = f.handler('mcp-stdio');
+    const quote = 'away for a bit';
+    for (const args of [
+      { mode: 'phone-only', until: LATER, quote },
+      { mode: 'in-app-only', quote },
+      { mode: 'in-app-only', until: new Date(Date.now() - 60000).toISOString(), quote },
+      { mode: 'in-app-only', until: 'next friday', quote },
+      { mode: 'off', until: LATER, quote }
+    ]) {
+      assert.strictEqual((await refusal(h.call('set_away', args))).code, 'invalid_params', JSON.stringify(args));
+    }
+    assert.strictEqual(f.policy().away, null);
+  });
+
+  it('mcp-stdio and mcp-frontdoor record the quote unchecked; in service mode the policy is data-dir settings, so it is set there too', async () => {
+    for (const isService of [false, true]) {
+      for (const channel of ['mcp-stdio', 'mcp-frontdoor']) {
+        const f = awayFixture({ isService });
+        const r = await f.handler(channel).call('set_away', { mode: 'in-app-only', until: LATER, quote: 'app only this week' }, { ownerTurnText: 'something else' });
+        assert.deepStrictEqual(r, { away: { mode: 'in-app-only', until: LATER } }, `${channel} service=${isService}`);
+        assert.deepStrictEqual(f.policy().away, { mode: 'in-app-only', until: LATER });
+      }
+    }
+  });
+
+  it('refuses where contact is off, and shares the write window', async () => {
+    const rt = new CaseRuntime({ root: tmp('kl-mgmt-away-none-') });
+    const none = createCaseToolHandler({ getRuntime: () => rt, channel: 'mcp-stdio' });
+    assert.strictEqual((await refusal(none.call('set_away', { mode: 'off', quote: 'back' }))).code, 'contact_unavailable');
+    const f = awayFixture();
+    const h = f.handler('mcp-stdio', { rateLimit: 1 });
+    await h.call('set_away', { mode: 'off', quote: 'back' });
+    const limited = await refusal(h.call('set_away', { mode: 'off', quote: 'back' }));
+    assert.strictEqual(limited.code, 'rate_limited');
+  });
+
+  it("runs from the chat through the executor, with the owner's message from the executor", async () => {
+    const f = awayFixture();
+    const ex = new ToolExecutor({ workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, extraToolOptions: { caseManagement: f.handler('in-app') }, ownerTurnText: 'Email only until the weekend, please.' });
+    const r = await ex.execute('set_away', { mode: 'email-only', until: LATER, quote: 'Email only until the weekend' });
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.deepStrictEqual(f.policy().away, { mode: 'email-only', until: LATER });
   });
 });

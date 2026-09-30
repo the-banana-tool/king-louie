@@ -80,7 +80,7 @@ async function setup() {
 }
 
 const stdioTools = (rt) => createCaseToolHandler({ getRuntime: () => rt, channel: 'mcp-stdio' });
-const CASE_NAMES = ['list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence', 'answer_question', 'list_envelopes', 'list_playbooks', 'create_case', 'revoke_envelope', 'cancel_case_job'];
+const CASE_NAMES = ['list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence', 'answer_question', 'list_envelopes', 'list_playbooks', 'create_case', 'revoke_envelope', 'cancel_case_job', 'set_away'];
 
 describe('MCP case tools on the stdio server', () => {
   it('lists the case tools with typed schemas after the fleet tools, only with a runtime', async () => {
@@ -95,7 +95,7 @@ describe('MCP case tools on the stdio server', () => {
       assert.strictEqual(t.inputSchema.additionalProperties, false);
       assert.strictEqual('tier' in t, false);
     }
-    assert.deepStrictEqual(CASE_MCP_TOOLS.map((t) => t.tier), ['read', 'read', 'read', 'read', 'read', 'routine', 'read', 'read', 'routine', 'routine', 'routine']);
+    assert.deepStrictEqual(CASE_MCP_TOOLS.map((t) => t.tier), ['read', 'read', 'read', 'read', 'read', 'routine', 'read', 'read', 'routine', 'routine', 'routine', 'routine']);
     const without = connect({});
     assert.ok(!(await without.request('tools/list')).result.tools.some((t) => t.name === 'list_cases'));
     const noRuntime = connect({ caseTools: createCaseToolHandler({ getRuntime: () => null, channel: 'mcp-stdio' }) });

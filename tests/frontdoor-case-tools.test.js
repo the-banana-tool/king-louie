@@ -32,7 +32,7 @@ const MANAGE_TOOLS = ['create_case', 'revoke_envelope', 'cancel_case_job'];
 // Every front-door case tool with its scope, in CASE_MCP_TOOLS' order.
 const TOOL_SCOPES = [
   ...READ_TOOLS.slice(0, 5).map((t) => [t, 'cases:read']), ['answer_question', 'cases:answer'],
-  ...READ_TOOLS.slice(5).map((t) => [t, 'cases:read']), ...MANAGE_TOOLS.map((t) => [t, 'cases:manage'])
+  ...READ_TOOLS.slice(5).map((t) => [t, 'cases:read']), ...MANAGE_TOOLS.map((t) => [t, 'cases:manage']), ['set_away', 'cases:answer']
 ];
 const GRANT_ID = `gr_${'a'.repeat(22)}`;
 const grant = (entries, machineIds = {}) => ({ grant_id: GRANT_ID, client_id: `dcr_${'b'.repeat(22)}`, client_name: 'Example Client', scopes: entries, machine_ids: machineIds });
@@ -98,7 +98,7 @@ describe('front-door case tools', () => {
       description: 'Read case lists, briefs, questions, envelopes, playbooks and orientation, including private facts.'
     });
     assert.deepStrictEqual({ ...scopeRegistry.get('cases:answer') }, {
-      name: 'cases:answer', tools: ['answer_question'], requires: ['cases:read'],
+      name: 'cases:answer', tools: ['answer_question', 'set_away'], requires: ['cases:read'],
       description: "Answer open case questions in the owner's words. Approvals, money, direction and a case's status are never answered here."
     });
     assert.deepStrictEqual({ ...scopeRegistry.get('cases:manage') }, {
@@ -108,6 +108,7 @@ describe('front-door case tools', () => {
     assert.strictEqual(scopeRegistry.has('cases:write'), false, 'retired without ever being registered (spec §3.3)');
     assert.deepStrictEqual(READ_TOOLS.map((t) => scopeRegistry.requiredScopeFor(t)), READ_TOOLS.map(() => 'cases:read'));
     assert.strictEqual(scopeRegistry.requiredScopeFor('answer_question'), 'cases:answer');
+    assert.strictEqual(scopeRegistry.requiredScopeFor('set_away'), 'cases:answer');
     assert.ok(!scopeRegistry.toolsFor(['cases:read', 'cases:write']).has('answer_question'));
     assert.ok(scopeRegistry.toolsFor(['cases:answer']).has('answer_question'));
     assert.deepStrictEqual(scopeRegistry.rules(['cases:read', 'cases:answer']).requires, { 'cases:answer': ['cases:read'] });
@@ -364,7 +365,7 @@ describe('front-door case tools', () => {
 
       const answerScopes = [{ scope: 'cases:answer', machines: null }, { scope: 'cases:read', machines: null }];
       const answerer = await client(answerScopes);
-      assert.deepStrictEqual(await answerer.list(), [...READ_TOOLS, 'answer_question'].sort());
+      assert.deepStrictEqual(await answerer.list(), [...READ_TOOLS, 'answer_question', 'set_away'].sort());
       const ok = await answerer.call('answer_question', args);
       assert.strictEqual(ok.question_id, q.plain.id);
       const answer = rt.questions(meta.id).get(q.plain.id).answer;
@@ -414,6 +415,33 @@ describe('front-door case tools', () => {
     const atNode = await t.gpu.service.dispatch('cases.create_case', { origin: fdOrigin(ANSWER_SCOPES), ...args, title: 'Garden shed', objective: 'build a shed', quote: 'build a shed' });
     assert.deepStrictEqual([atNode.error.code, atNode.error.required], ['insufficient_scope', 'cases:manage']);
     assert.strictEqual(rt.listCases().filter((c) => c.title === 'Boat sale').length, 1);
+  });
+
+  it("a cases:answer grant sets the owner away in their words on the mcp-frontdoor channel; a cases:read grant cannot", async () => {
+    const { createContactHost } = require('../src/cases/contact-host');
+    const { mergeSettings } = require('../src/core/settings');
+    const { rt } = await caseFixture();
+    let stored = mergeSettings({});
+    const host = createContactHost({ getSettings: () => stored, setSettings: (x) => { stored = mergeSettings(x); }, isService: true, caseRuntime: rt, dataDir: tmp('kl-fd-away-'), features: { channels: false } });
+    const gpu = createFakeNode({ name: 'gpu-box', profile: 'agent' });
+    const hub = createFakeHub([gpu]);
+    const scopeRegistry = createFleetScopeRegistry();
+    const router = new FleetRouter({ registry: createFakeRegistry([gpu]), nodeHub: hub, cache: new JobCache({ file: path.join(tmp('kl-fd-router-'), 'node-status.json') }), scopeRegistry });
+    router.attach();
+    registerFrontDoorCaseTools({ scopeRegistry, router });
+    registerNodeCaseMethods(gpu.service, { getRuntime: () => rt, getContact: () => host.context() });
+    assert.deepStrictEqual(await hub.fromNode(gpu.nodeId, 'fleet.hello', gpu.hello()), { ok: true });
+    await router.whenIdle();
+    const until = new Date(Date.now() + 86400000).toISOString();
+    const args = { machine: 'gpu-box', mode: 'email-only', until, quote: 'email me only until tomorrow' };
+    const reader = await router.callTool('set_away', args, { grant: READ, scopes: ['cases:read'], session: 's-1' });
+    assert.deepStrictEqual([reader.error.code, reader.error.required], ['insufficient_scope', 'cases:answer']);
+    assert.strictEqual(stored.contactPolicy.away, null);
+    const ok = await router.callTool('set_away', args, { grant: ANSWER, scopes: ANSWER_SCOPES, session: 's-1' });
+    assert.deepStrictEqual(ok, { away: { mode: 'email-only', until } });
+    assert.deepStrictEqual(stored.contactPolicy.away, { mode: 'email-only', until });
+    const noQuote = await router.callTool('set_away', { machine: 'gpu-box', mode: 'off' }, { grant: ANSWER, scopes: ANSWER_SCOPES, session: 's-1' });
+    assert.strictEqual(noQuote.error.code, 'invalid_params');
   });
 
   it('startFleetNode registers the read methods under cases:read, answer_question under cases:answer and the manage tools under cases:manage on an agent node with a front-door link', async () => {

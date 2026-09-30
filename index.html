@@ -24,7 +24,6 @@
         <h2>Chat History</h2>
         <button id="new-chat-btn" class="btn new-chat-btn"><i class="fas fa-plus"></i> New Chat</button>
       </div>
-      <div class="questions-section" id="questions-section" aria-label="Questions"></div>
       <div class="chat-list" id="chat-list">
         <!-- Chat items rendered by renderer.js -->
       </div>
@@ -170,6 +169,7 @@
           <option value="vault">Vault</option>
           <option value="mcp">MCP Servers</option>
           <option value="channels">Channels</option>
+          <option value="contact">Contact</option>
           <option value="profile">Profile</option>
           <option value="voice">Voice</option>
           <option value="notifications">Notifications</option>
@@ -1108,6 +1108,15 @@
           <section class="template-variables-card">
             <h3>Results</h3>
             <pre id="diagnostics-results" style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary);"></pre>
+          </section>
+        </div>
+
+        <!-- Tab: Contact (cases stage 4 contact policy; management surfaces §3.5) -->
+        <div class="settings-tab-content" data-tab="contact">
+          <section class="template-variables-card contact-pane" id="contact-pane">
+            <h3>Contact</h3>
+            <p>How a case's questions reach you when you are not in the app: a ladder of channels for each urgency, quiet hours and a daily digest.</p>
+            <div class="contact-pane-body" id="contact-pane-body"></div>
           </section>
         </div>
 

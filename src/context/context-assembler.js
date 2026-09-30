@@ -53,6 +53,7 @@ const CORE_TOOLS = new Set([
   'create_case',
   'revoke_envelope',
   'cancel_case_job',
+  'set_away',
 ]);
 
 // System prompt sections that are always included.

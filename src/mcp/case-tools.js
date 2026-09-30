@@ -1,8 +1,8 @@
 // src/mcp/case-tools.js
 // MCP case tools (cases stage 7 spec §3.7; program §4.14): list cases, open
 // one, read its orientation, list the open questions and the owner's
-// presence, answer a question. An agent node serves them to its own local
-// MCP clients through its FleetToolHandler (stdio, and `king-louie-service
+// presence, answer a question, set the owner away. An agent node serves
+// them to its own local MCP clients through its FleetToolHandler (stdio, and `king-louie-service
 // mcp` through the courier, R24) and, from Task 16, to front-door clients
 // through NodeFleetService's cases.<tool> methods. King Louie's own chat
 // serves the same tools on the in-app channel (management surfaces spec
@@ -57,6 +57,7 @@ function validate(tool, args) {
     if (rule.minLength && v.length < rule.minLength) throw fail('invalid_params', `"${key}" is too short`);
     if (rule.maxLength && v.length > rule.maxLength) throw fail('invalid_params', `"${key}" is longer than ${rule.maxLength} characters`);
     if (rule.pattern && !new RegExp(rule.pattern).test(v)) throw fail('invalid_params', `"${key}" does not match ${rule.pattern}`);
+    if (rule.enum && !rule.enum.includes(v)) throw fail('invalid_params', `"${key}" must be one of ${rule.enum.join(', ')}`);
   }
 }
 
@@ -402,6 +403,37 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     return { job: args.job, state: r.job && typeof r.job.state === 'string' ? r.job.state : 'cancelled' };
   }
 
+  // set_away: the away field the app's away controls wrote, through the
+  // same validation (contact's setPolicy, validatePolicy), the rest of the
+  // policy kept. The policy is data-dir settings on the desktop and in
+  // service mode alike (only the owner and addresses are admin-only).
+  async function setAway(args, ownerTurnText) {
+    checkQuote(args.quote, ownerTurnText);
+    const off = args.mode === 'off';
+    if (off && args.until !== undefined) throw fail('invalid_params', 'off takes no "until"');
+    if (!off) {
+      if (args.until === undefined) throw fail('invalid_params', `"until" is required with ${args.mode}`);
+      const t = Date.parse(args.until);
+      if (!Number.isFinite(t)) throw fail('invalid_params', '"until" is not a date-time');
+      if (t <= now()) throw fail('invalid_params', '"until" must be in the future');
+    }
+    const c = contact();
+    if (!c || typeof c.getPolicy !== 'function' || typeof c.setPolicy !== 'function') throw fail('contact_unavailable', 'contact is not available on this node');
+    const current = c.getPolicy();
+    const policy = isObj(current) && isObj(current.policy) ? current.policy : {};
+    const releaseSlot = takeRateSlot();
+    const r = c.setPolicy({ ...policy, away: off ? null : { mode: args.mode, until: args.until } });
+    if (!r || !r.ok) {
+      releaseSlot();
+      log.warn(`${channel} set_away refused by the contact policy: ${r && r.error}`);
+      throw fail('invalid_params', 'the contact policy refused that away setting');
+    }
+    const away = isObj(r.policy) && isObj(r.policy.away) ? { mode: r.policy.away.mode, until: r.policy.away.until } : null;
+    log.info(`${channel} set away ${away ? `${away.mode} until ${away.until}` : 'off'}`);
+    auditEntry('cases.set_away', { mode: args.mode, until: away ? away.until : null }, 'set_away');
+    return { away };
+  }
+
   // The spoken class only (answerClass): a pressed question is refused on
   // every channel, in-app included. `quote` is the owner's words: on the
   // in-app channel it must be in the owner's own message this turn
@@ -493,6 +525,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
         case 'revoke_envelope': return await revokeEnvelope(rt, args, ownerTurnText);
         case 'cancel_case_job': return await cancelCaseJob(rt, args, ownerTurnText);
         case 'answer_question': return await answerQuestion(rt, args, ownerTurnText);
+        case 'set_away': return await setAway(args, ownerTurnText);
         default: throw fail('unknown_tool', 'no such case tool');
       }
     } catch (err) {
@@ -519,8 +552,8 @@ const ROUTING_FIELDS = Object.freeze([...ROUTER_FIELDS, 'machine']);
 // On an agent node with a front-door link: the cases.<tool> methods, each
 // behind its own scope (NodeFleetService re-checks the front door's scopes
 // and machine pins before the method runs). Only the tools in
-// CASE_TOOL_SCOPE are registered (cases:read; answer_question under
-// cases:answer; create_case, revoke_envelope and cancel_case_job under
+// CASE_TOOL_SCOPE are registered (cases:read; answer_question and set_away
+// under cases:answer; create_case, revoke_envelope and cancel_case_job under
 // cases:manage: management surfaces spec §3.3). The handler is its own, on
 // the mcp-frontdoor channel (its own rate limit, shared by every front-door
 // client; the per-grant limit is the front door's; it repeats every

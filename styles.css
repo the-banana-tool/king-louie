@@ -2946,30 +2946,22 @@ body {
 .case-unattended-section { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .case-status-row, .case-budget-row { flex-wrap: wrap; gap: 6px; align-items: center; }
 .case-budget-warning { width: 100%; font-size: 12px; color: var(--text-secondary); }
-.case-question-list { display: flex; flex-direction: column; gap: 6px; }
 .case-question { border: 1px solid var(--border-default); border-radius: 6px; padding: 8px; background: var(--bg-overlay); }
 .case-question-high { border-color: var(--accent); }
 .case-question-head { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
 .case-question-text { white-space: pre-wrap; margin-bottom: 6px; }
 .case-question-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .case-question-input { flex: 1 1 160px; }
-.case-question-none { font-size: 12px; color: var(--text-secondary); }
 .chat-question-card { max-width: 560px; }
 .chat-question-option { font-size: 13px; }
 .chat-question-hint, .chat-question-outcome, .case-question-note { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
 .case-question-error { font-size: 12px; color: var(--error, #d9534f); margin-top: 4px; }
 .case-question-error[hidden] { display: none; }
-.case-questions-bar { display: flex; flex-direction: column; gap: 6px; padding: 6px 12px; max-height: 30vh; overflow-y: auto; border-top: 1px solid var(--border-default); }
-.case-questions-bar[hidden] { display: none; }
 
-/* Cases stage 5: detours and related cases */
-.case-detours-section { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-.case-detours-heading { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
-.case-detour { border: 1px solid var(--border-default); border-radius: 6px; padding: 8px; background: var(--bg-overlay); }
-.case-detour-blocker { border-color: var(--accent); }
-.case-detour-text { white-space: pre-wrap; margin-bottom: 6px; }
-.case-detour-state { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
-.case-detour-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+/* Cases stage 5: related cases */
+.case-related-section { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.case-related-section:empty { display: none; }
+.case-related-heading { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
 .case-related-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
 
 /* Settings > Local service (fleet stage 7) */
@@ -3039,14 +3031,11 @@ body {
   align-items: center;
 }
 
-/* Cases stage 4: questions across cases, presence and the contact policy */
-.questions-section { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); max-height: 45vh; overflow-y: auto; }
-.questions-section:empty { display: none; }
-.questions-header { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
-.questions-section select,
-.questions-section input[type="text"],
-.questions-section input[type="time"],
-.questions-section input[type="datetime-local"] {
+/* Settings > Contact: the contact policy (cases stage 4; management surfaces §3.5) */
+.contact-pane-body { display: flex; flex-direction: column; gap: 8px; }
+.contact-pane select,
+.contact-pane input[type="text"],
+.contact-pane input[type="time"] {
   font: inherit;
   font-size: 12px;
   padding: 3px 6px;
@@ -3058,32 +3047,23 @@ body {
   outline: none;
   min-width: 0;
 }
-.questions-section select { cursor: pointer; }
-.questions-section input::placeholder { color: var(--text-faint); }
-.questions-section select:focus,
-.questions-section input:focus { border-color: var(--accent); }
-.questions-section input[type="checkbox"] { accent-color: var(--accent); }
-.questions-away-until { flex: 1 1 150px; }
-.questions-section input[type="time"] { box-sizing: border-box; width: 86px; flex: 0 0 auto; }
-.questions-presence-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-faint); }
-.questions-presence-dot.is-here { background: var(--success); }
-.questions-presence-dot.is-elsewhere { background: var(--warning); }
-.questions-away, .questions-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-.questions-away-note, .questions-ladder, .questions-empty { font-size: 12px; color: var(--text-muted); }
-.questions-card { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-elevated); }
-.questions-card.questions-urgency-high { border-color: var(--error); }
-.questions-case { font-size: 0.8em; color: var(--text-secondary); }
-.questions-text { color: var(--text-primary); white-space: pre-wrap; }
-.questions-input { flex: 1; min-width: 80px; }
-.questions-btn { padding: 3px 8px; font-size: 12px; }
-.questions-error { color: var(--error); font-size: 0.85em; }
-.questions-ladder-elsewhere { color: var(--warning); font-size: 0.85em; }
-.questions-policy summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
-.questions-policy-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0; font-size: 12px; color: var(--text-secondary); }
-.questions-policy-check { display: inline-flex; align-items: center; gap: 3px; }
-.questions-policy-ladder { flex: 1; font-family: var(--font-mono); }
-.questions-policy-channels { margin: 4px 0; padding-left: 16px; font-size: 11px; color: var(--text-muted); }
-.questions-policy-channels .is-ready { color: var(--success); }
+.contact-pane input::placeholder { color: var(--text-faint); }
+.contact-pane input:focus { border-color: var(--accent); }
+.contact-pane input[type="checkbox"] { accent-color: var(--accent); }
+.contact-pane input[type="time"] { box-sizing: border-box; width: 86px; flex: 0 0 auto; }
+.contact-away-note { font-size: 12px; color: var(--text-muted); }
+.contact-ladder-elsewhere { color: var(--warning); font-size: 0.85em; }
+.contact-pane-message { font-size: 12px; color: var(--text-secondary); }
+.contact-pane-message.is-error { color: var(--error); }
+.contact-pane-message:empty { display: none; }
+.contact-policy { display: flex; flex-direction: column; gap: 2px; }
+.contact-policy-heading { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-top: 6px; }
+.contact-policy-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0; font-size: 12px; color: var(--text-secondary); }
+.contact-policy-check { display: inline-flex; align-items: center; gap: 3px; }
+.contact-policy-ladder { flex: 1; font-family: var(--font-mono); }
+.contact-policy-channels { margin: 4px 0; padding-left: 16px; font-size: 11px; color: var(--text-muted); }
+.contact-policy-channels .is-ready { color: var(--success); }
+.contact-policy .btn { align-self: flex-start; margin-top: 6px; }
 
 /* Cases stage 6: playbooks */
 .chat-case-new { flex-wrap: wrap; }
