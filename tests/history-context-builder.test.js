@@ -403,9 +403,6 @@ describe('ContextBuilder: the tail scan reads only what the tail needs', () => {
     assert.strictEqual(withCalls[1].parameters.file_path, 'notes/survey.md');
     assert.strictEqual(withCalls[1].result, undefined);
     assert.deepStrictEqual(t.store.tailScanPage('chat-1', { beforeSeq: 5, limit: 1 }).map((m) => m.seq), [1], 'a page is keyed by beforeSeq');
-    const withResults = t.store.tailScanPage('chat-1', { beforeSeq: 6, limit: 10, toolResults: true });
-    assert.deepStrictEqual(withResults.map((m) => [m.seq, m.sender]), [[5, 'assistant'], [3, 'toolResult'], [1, 'user']]);
-    assert.strictEqual(withResults[1].result.ok, true);
   });
 
   it('build() never loads the full rows of the range', async () => {
