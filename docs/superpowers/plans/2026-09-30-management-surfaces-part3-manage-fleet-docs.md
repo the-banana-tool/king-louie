@@ -80,12 +80,12 @@ Design:
 
 **Blocked by:** Tasks 5, 6, 7.
 
-- [ ] CLAUDE.md: replace the "withheld pending an owner decision" / `cases:write` lines (Cases stage 7
+- [x] CLAUDE.md: replace the "withheld pending an owner decision" / `cases:write` lines (Cases stage 7
       section) with `cases:answer` / `cases:manage`; describe the management tool surface (one definition,
       three registrations, never in wake-ups, the quote rule, pressed vs spoken); questions as chat cards;
       no Questions sidebar; `set_away`; Settings > Contact; fleet tools in service chats. Keep the file's
       terse style.
-- [ ] The stage 7 spec §3.8 "As built" note and the stage program §4.14/§4.19 point at the new spec.
-- [ ] Spec status: "Built" with the commit range.
-- [ ] `npm test` → `# fail 0`; `unset ELECTRON_RUN_AS_NODE && npm run test:e2e` → `# fail 0`.
-- [ ] Commit `docs: management surfaces as built`.
+- [x] The stage 7 spec §3.8 "As built" note and the stage program §4.14/§4.19 point at the new spec.
+- [x] Spec status: "Built" with the commit range.
+- [x] `npm test` → `# fail 0`; `unset ELECTRON_RUN_AS_NODE && npm run test:e2e` → `# fail 0`.
+- [x] Commit `docs: management surfaces as built`.

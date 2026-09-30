@@ -1,6 +1,6 @@
 # Management surfaces: MCP-first case and fleet management — Design Spec
 
-- **Status:** Draft (grilled 2026-09-30; owner confirmed the settled design)
+- **Status:** Built (`ddd9a05`..`ba23d88` on `feat/management-surfaces`, 2026-09-30; grilled 2026-09-30)
 - **Date:** 2026-09-30
 - **Parents:** `2026-09-22-king-louie-cases-design.md` (cases), `2026-09-21-king-louie-fleet-design.md`
   (fleet). Amends `2026-09-23-cases-stage2-unattended.md` (question records, M22),

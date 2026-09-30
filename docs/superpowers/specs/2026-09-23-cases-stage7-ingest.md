@@ -384,6 +384,9 @@ envelopes, signed authority and the refusals above.
 > `frontdoor.oauth.scopes_enabled` stops the front door at startup. Agent nodes serve the read tools as
 > `cases.<tool>` link methods, each with its own scope, on the `mcp-frontdoor` channel. A per-grant call-rate
 > limit in F4 is a precondition for bringing `answer_question` back.
+>
+> **Superseded (2026-09-30).** `docs/superpowers/specs/2026-09-30-management-surfaces.md` serves the spoken
+> tools under `cases:answer` / `cases:manage` with a per-grant write-rate limit; `cases:write` is retired.
 
 Wave 4 uses F4's route contract by name (R53; F4 spec §3.4 scopes, §3.6 `registerTool`, §3.7
 `NodeFleetService`, §5.2; program §4.19), with no routing of C7's own:

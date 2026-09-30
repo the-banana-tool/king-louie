@@ -408,6 +408,9 @@ status-changing questions from `mcp-frontdoor`, and calls `CaseRuntime.answerQue
 (`CaseBusyError` → `case_busy`). `get_orientation` returns non-disclosable facts to a
 granted client; the grant screen says so. Tool names are fixed here.
 
+> **Since:** `2026-09-30-management-surfaces.md` adds the management tools, the required `quote` and the
+> `cases:answer` / `cases:manage` scopes (`cases:write` retired).
+
 ### 4.15 Protocol test vectors — owner F3
 
 `docs/protocol/approval-v1.md` and `tests/vectors/approval-v1/*.json` (shape
@@ -456,6 +459,9 @@ route needs no router state), `NodeFleetService.registerMethod('cases.<tool>', h
 `frontdoor.oauth.scopes_enabled` lists the cases scopes. F4 spec §3.4 (scopes), §3.6
 (`registerTool`), §3.7 (`NodeFleetService`); C7 registers through
 `registerFrontDoorCaseTools` / `registerNodeCaseMethods`.
+
+> **Since:** `2026-09-30-management-surfaces.md` §3.3 registers `cases:answer` and `cases:manage` with a
+> per-grant write-rate limit; `cases:write` is never registered.
 
 ### 4.20 Turn hooks and the lock helper — owner C2
 

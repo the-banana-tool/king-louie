@@ -654,20 +654,20 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage5-detours.md`.
   chain's first id; once any detour of that chain is attached or created,
   the others get a `superseded` row, their open routing question is closed
   and their `pending:` blocker is removed.
-- A routing question can be answered from any channel: in the app, from the
-  case panel (`case:resolveDetour`) or by an agent session's
-  `Detour.resolve`, or over any C4 contact channel (Telegram, Discord, email,
-  SMS, voice, the phone app). A contact-channel answer is applied at the next
-  turn start, `case:detours` or `case:resolveDetour`. The first answer
-  stands: a later, different answer gets no C4 conflict follow-up, only an ack
-  saying the first answer stands (`contact.js` `_apply`, ruling
-  INT-detour), and changes are made in the app. C5 has no re-route API, so
-  changing a routing already applied is a manual step there. Local MCP
-  clients can answer through C7's `answer_question` on the `mcp-stdio`
-  channel (the running service's case tools, stage 7). The front door's case
-  tools are read-only for now, so no front-door client answers. `delegate`
-  remains a future source. Routing questions keep `mcpAnswerable` at its
-  default of `true`.
+- A routing question is a spoken question and can be answered from any
+  channel: in the app (its chat card, answered in words through
+  `answer_question`; IPC `case:resolveDetour` remains, though the case
+  panel no longer has a detours block) or by an agent session's
+  `Detour.resolve`, over any C4 contact channel (Telegram, Discord, email,
+  SMS, voice, the phone app), or through `answer_question` on `mcp-stdio`
+  or on the front door under `cases:answer`. A contact-channel answer is
+  applied at the next turn start, `case:detours` or `case:resolveDetour`.
+  The first answer stands: a later, different answer gets no C4 conflict
+  follow-up, only an ack saying the first answer stands (`contact.js`
+  `_apply`, ruling INT-detour), and changes are made in the app. C5 has no
+  re-route API, so changing a routing already applied is a manual step
+  there. `delegate` remains a future source. Routing questions keep
+  `mcpAnswerable` at its default of `true`.
 - Case types are code in `src/cases/case-types/` (`general`, `outreach`,
   `software-repo`); `case.yaml.type` is validated at creation. A
   `software-repo` case runs read-only `git` and `gh` at turn start (tests
@@ -705,14 +705,25 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   the first: the first answer stands, and a follow-up question asks which
   one stands, on the channel that gave the second answer
   (`contact.js` `_conflict`/`conflictFact`).
-- Owner decision (M22): a question C2 marks `mcpAnswerable:false` — a
+- Owner decision (M22, as amended by the management surfaces spec): a
+  pressed question (`answerClass`; every `mcpAnswerable:false` one — a
   budget-grant, a budget-daily, a direction question, a commit-failed
-  question, or a wakeups-failing briefing — is only
-  answered in the app or from the owner's paired phone. Every other channel
-  (Telegram, Discord, email, SMS, voice) gets "Answer this in the app"
-  instead of options or buttons; approvals follow the same rule and are
-  never persisted to the data-dir inbox, so a busy case refuses them outright
-  rather than queuing them.
+  question, a wakeups-failing briefing — plus approvals and the other
+  pressed kinds) is answered only by the buttons on its chat card or from
+  the owner's paired phone. Every other channel (Telegram, Discord, email,
+  SMS, voice) gets "Answer this in the app" instead of options or buttons;
+  approvals are never persisted to the data-dir inbox, so a busy case
+  refuses them outright rather than queuing them.
+- The `in-app` rung posts the question into the case's chat (see
+  Management surfaces); there is no Questions sidebar and no questions bar
+  in the case panel. `in-app` keeps its place in every ladder. Presence is
+  a heartbeat from window focus and input (`initPresenceHeartbeat`); away
+  is set with the `set_away` tool (it writes the policy's `away` through
+  `setPolicy`); the contact-policy editor (ladders, quiet hours,
+  breakthrough, digest, channel readiness) is Settings > Contact, and a
+  save there keeps an `away` set meanwhile. The contact policy is data-dir
+  settings in service mode too; only the owner and addresses are
+  admin-only.
 - Case code that sends to a channel uses `ContactRouter.sendExternal`, which
   runs C3's outbound gate for anyone but the owner and sends `rendered`.
   Until C3's `gateLeaves` exists (`src/cases/gates.js`), every non-owner
@@ -730,7 +741,7 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   host that is not currently holding the cases-root lease (a passive
   instance) refuses an inbound relay push with 503 and does not poll relay
   events or move the relay cursor, so the events wait for the active host
-  (which dedupes by event id); the Questions section names the lease holder.
+  (which dedupes by event id); Settings > Contact names the lease holder.
 - Replies can trigger acks, and a spoofed owner number or From address is
   enough for SMS and email, so acks are budgeted in the router: at most one
   refusal ack (unknown token, unparsed, refused) per channel and sender per
@@ -908,9 +919,9 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
   `svc.drain()` before asserting on a record.
 - `king-louie-service mcp` runs no core and no ingest worker. With the
   service running on the data dir, its calls go through the courier to the
-  service's `FleetToolHandler`, which on an agent node also serves
-  `list_cases`, `open_case`, `get_orientation` and `answer_question`
-  (`src/mcp/case-tools.js`, channel `mcp-stdio`). With no service running,
+  service's `FleetToolHandler`, which on an agent node also serves the
+  management tools (`src/mcp/case-tools.js`, channel `mcp-stdio`; see
+  Management surfaces). With no service running,
   `mcp` serves the fleet tools only. No MCP channel answers a document
   review (`ingest:review`), whatever its `mcpAnswerable` says.
   Anything running as the service account can write the courier outbox
@@ -918,14 +929,76 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
   replies to `mcp` (a forged tool list is read only as names; `mcp` shows
   its own definitions): the same class of limit as Bash writing
   `facts.jsonl`.
-- On the front door the case tools are read-only for now: `list_cases`,
-  `open_case` and `get_orientation` behind `cases:read`
-  (`src/cases/mcp-tool-definitions.js`, which has no requires because the
-  front door loads it; registered from `src/frontdoor/tool-extensions.js`).
-  An admin enables them by listing `cases:read` in
-  `frontdoor.oauth.scopes_enabled`. Agent nodes serve them as
-  `cases.<tool>` link methods, each with its own scope, on the
-  `mcp-frontdoor` channel. `answer_question` and `cases:write` are withheld
-  pending an owner decision, so listing `cases:write` in `scopes_enabled`
-  stops the front door at startup (nothing registers it); adding them back
-  is one `CASE_SCOPES` entry plus its tests.
+- On the front door the case tools sit behind three scopes
+  (`src/cases/mcp-tool-definitions.js`; registered from
+  `src/frontdoor/tool-extensions.js`): `cases:read` (`list_cases`,
+  `open_case`, `get_orientation`, `list_questions`, `list_envelopes`,
+  `list_playbooks`, `get_presence`), `cases:answer` (`answer_question`,
+  `set_away`) and `cases:manage` (`create_case`, `revoke_envelope`,
+  `cancel_case_job`); the last two require `cases:read`. An admin enables
+  them by listing them in `frontdoor.oauth.scopes_enabled`. Agent nodes
+  serve them as `cases.<tool>` link methods, each with its own scope, on
+  the `mcp-frontdoor` channel. Every tool in a write scope (all but
+  `cases:read`) is limited per grant id to 30 calls in a sliding 60 s
+  window (`FleetRouter`, `src/frontdoor/router/router.js`), refused with
+  the node's `rate_limited` / `retry_after` shape. `cases:write` is retired
+  and never registered, so listing it in `scopes_enabled` stops the front
+  door at startup. The pressed class is refused here as on every channel.
+
+## Management surfaces
+
+Spec `docs/superpowers/specs/2026-09-30-management-surfaces.md`; ADR
+`docs/adr/0002-management-surfaces-mcp-first.md`; words in `CONTEXT.md`.
+
+- One definition of the case management tools,
+  `src/cases/mcp-tool-definitions.js` (no requires, deep-frozen; the front
+  door loads it), served three ways by the one handler
+  (`src/mcp/case-tools.js`): the front door (`mcp-frontdoor`, scopes
+  above), `king-louie-service mcp` (`mcp-stdio`), and King Louie's chat
+  tools (`src/tools/builtin/management-tools.js`, channel `in-app`, always
+  loaded, in every chat, acting on any case). Never in a wake-up turn: its
+  `allowedToolNames` name only the case tools and `WAKEUP_BASE_TOOLS`.
+- Read: `list_cases`, `open_case`, `get_orientation`, `list_questions`,
+  `list_envelopes`, `list_playbooks`, `get_presence`. Spoken:
+  `answer_question`, `set_away`, `create_case`, `revoke_envelope`,
+  `cancel_case_job`. A question is spoken or pressed by `answerClass`
+  (same module); the renderer's `chatQuestionClass` is a copy (the
+  renderer cannot require it), so change both together. Pressed questions
+  (approvals, money, direction, status, failures, ingest reviews,
+  `detour-similar`, …) are refused by `answer_question` on every channel,
+  in-app included, and answered only by the card's buttons
+  (`case:answerQuestion`, no model between) or the phone.
+- Every spoken tool requires `quote`, the owner's verbatim words. In-app,
+  `ToolExecutor` puts its own `ownerTurnText` last in the execute context
+  (never under `denyAutoApproval`) and the quote must appear in it on word
+  boundaries after folding (`src/tools/owner-quote.js`, the browser
+  `ownerQuote` check); a miss refuses. Over MCP the quote is recorded, not
+  checked. The answer's fact is `provenance: 'user'` with the `channel`
+  and the quote on its source. `create_case` never takes `force` (a
+  `SIMILAR_CASES` refusal says to open the app); its objective must be
+  words from the quote.
+- Options: the quote must name the chosen option, by its label on word
+  boundaries or by its 1-based number when the number is the whole quote,
+  is marked ("option 2", "number 2", "no. 2", "#2"), or follows "go with",
+  "pick", "choose" or "select" and ends its clause ("go with 2", not "go
+  with 2 weeks"). The option id never counts. Naming two options is
+  `option_ambiguous`, none or another `option_not_in_quote`; both list the
+  options as wrapped data. Free text records the quote itself.
+- A question is posted when it is created: an assistant message in the
+  case's most recently active chat (one is created when the case has
+  none), with `question` metadata naming the record
+  (`src/cases/question-chat.js`). It is an ordinary history row (tail,
+  recall). The renderer draws a card from the question store, never from
+  the message, and redraws it on `case:changed` whichever surface
+  answered. A spoken reply is typed under the card and applied by the next
+  turn's `answer_question`; the host never parses replies.
+- Fleet tools in a service-run chat (`src/tools/builtin/fleet-chat-tools.js`):
+  while the core has a `FleetToolHandler` (`startFleetNode` on an agent
+  node calls `core.context.setFleetToolHandler`), the nine fleet tools are
+  always-loaded chat tools, removed again at stop; standalone never has
+  them. Calls carry a host-built origin of kind `service-chat`, which
+  `shouldRefuseUnsafe` treats like stdio (an unsafe runbook still waits
+  for the phone, after the usual tool approval). Wake-up and delegate
+  turns (`DELEGATE_EXCLUDED_TOOLS`) never get them; case turns block the
+  acting ones (`CASE_BLOCKED_TOOL_NAMES`) and keep the read ones. Attached, the turn runs in the service, so no new proxied
+  domain is needed.
