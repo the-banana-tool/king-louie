@@ -511,8 +511,16 @@ paraphrases of their evidence, so the oracle's containment is 0.631, not 1.0.
 | plus whole small messages and tool pairing (left off) | 0.494 | 0.563 |
 | plus fused `text-embedding-3-small` vectors (H3 probe) | 0.539 | — |
 | plus cross-encoder rerank, `topM` 100 (H3 probe) | 0.584 | 0.602 |
+| **Shipped H2 defaults** (query and `bm25TopK` above, 16-message tail with tool results) | **0.417** | **0.592** |
 | Sliding window, same total tokens | 0.238 | 0.427 |
 | Oracle | 1.000 | 0.631 |
+
+The shipped defaults use a median 12.5K and a p90 13.1K total tokens per
+turn (tail plus recalled block), under the 15K ceiling; their containment is
+94% of the oracle's. Evidence recall under 10K tokens back is 0.79, and
+0.26 to 0.37 beyond it, where the sliding window finds 0 to 0.05. The spec's
+0.8 recall target (§13) is not met with BM25 alone; H3 starts from these
+numbers.
 
 Findings the settings rest on:
 - **The query.** The previous user turns were noise; the question alone put
