@@ -79,11 +79,14 @@ class VectorIndex {
     this._check();
     const key = `${model}\u0000${chatId}`;
     if (this.tooLarge.has(key)) return null;
+    const cap = this._cap();
+    // The cap can be lowered while matrices are held: trim to it first (this
+    // chat included, when it alone is now over; it then reloads from scratch).
+    this._makeRoom(null, 0, cap);
     let e = this.entries.get(key);
     if (e) this.entries.delete(key);
     else e = { key, dim: 0, n: 0, capacity: 0, bytes: 0, matrix: null, ids: null, seqs: null, kinds: null, rowOf: new Map(), lastRowid: 0 };
     this.entries.set(key, e);
-    const cap = this._cap();
     try {
       this._extend(e, model, chatId, cap);
     } catch (err) {

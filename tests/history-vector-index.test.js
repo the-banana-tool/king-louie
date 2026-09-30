@@ -140,4 +140,21 @@ describe('VectorIndex', () => {
     assert.strictEqual(index.vectorOf(KEY, chunkOfB), null, 'b was the least recently used');
     assert.ok(index.vectorOf(KEY, t.store.chunksOfChat('a')[0]), 'a stayed');
   });
+
+  it('a lowered vectorCacheMb evicts on the next search, so memory stays under the new cap', async () => {
+    t = openTempStore();
+    for (const id of ['a', 'b']) seedChat(t.store, { id, messages: TEXTS.slice(0, 4) });
+    await embedAll(t.store);
+    let capMb = 0.02;
+    const index = new VectorIndex({ store: t.store, getCapMb: () => capMb, log: quietLog() });
+    const query = await q('linen');
+    index.search({ model: KEY, query, chatIds: ['a'] });
+    index.search({ model: KEY, query, chatIds: ['b'] });
+    assert.strictEqual(index.stats().chats, 2);
+    capMb = 0.01;
+    assert.ok(index.search({ model: KEY, query, chatIds: ['b'] }).length > 0);
+    assert.strictEqual(index.stats().chats, 1);
+    assert.ok(index.stats().bytes <= index.stats().capBytes);
+    assert.strictEqual(index.vectorOf(KEY, t.store.chunksOfChat('a')[0]), null, 'a was the least recently used');
+  });
 });
