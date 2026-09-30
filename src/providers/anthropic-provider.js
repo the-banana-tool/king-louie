@@ -1,5 +1,29 @@
 const BaseLLMProvider = require('./base-provider');
 const ImageHandler = require('../media/image-handler');
+const { acceptsTemperature } = require('../models/capabilities');
+const { createLogger } = require('../logging');
+const log = createLogger('anthropic');
+
+// Anthropic's 400 for a model that takes no temperature, e.g. "`temperature`
+// is deprecated for this model." (Claude 5) or "temperature: Extra inputs are
+// not permitted".
+function rejectsTemperature(message) {
+  const err = String(message || '');
+  return /temperature/i.test(err) && /deprecated|not supported|unsupported|not permitted/i.test(err);
+}
+
+// Models that rejected temperature at runtime, so later calls omit it
+// without a failed round trip first. This beats the catalog, which can lag.
+const _noTempModels = new Set();
+
+function jsonBody(init) {
+  if (typeof init?.body !== 'string') return null;
+  try {
+    return JSON.parse(init.body);
+  } catch {
+    return null;
+  }
+}
 
 // Models that support extended thinking (Claude 3.7+)
 const THINKING_CAPABLE_MODELS = [
@@ -16,6 +40,35 @@ class AnthropicProvider extends BaseLLMProvider {
   constructor(apiKey, options = {}) {
     super(apiKey, options);
     this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.anthropic.com/v1');
+  }
+
+  // Whether to send `temperature`: a runtime refusal first, then the
+  // catalog's flag; a model neither knows about gets it, as every Claude
+  // before the 5 family took it.
+  supportsTemperature(model) {
+    if (_noTempModels.has(String(model || '').toLowerCase())) return false;
+    return acceptsTemperature(this.getCatalog(), 'anthropic', model) ?? true;
+  }
+
+  // Extended thinking needs temperature 1 where temperature is taken at all.
+  temperatureParam(model, options = {}, thinking = null) {
+    if (!this.supportsTemperature(model)) return {};
+    return { temperature: thinking ? 1 : (options.temperature ?? 0.7) };
+  }
+
+  // A model that refuses `temperature` gets the same request again without
+  // it, once, and is remembered so later calls leave it out.
+  async request(url, init = {}, options = {}) {
+    const response = await super.request(url, init, options);
+    if (response.ok || response.status !== 400 || typeof response.clone !== 'function') return response;
+    const body = jsonBody(init);
+    if (!body || !('temperature' in body)) return response;
+    const text = await response.clone().text().catch(() => '');
+    if (!rejectsTemperature(text)) return response;
+    _noTempModels.add(String(body.model || '').toLowerCase());
+    log.info(`Model ${body.model} does not take temperature; retrying without it.`);
+    const { temperature: _dropped, ...rest } = body;
+    return super.request(url, { ...init, body: JSON.stringify(rest) }, options);
   }
 
   getProviderName() {
@@ -213,7 +266,7 @@ class AnthropicProvider extends BaseLLMProvider {
         messages: this.formatMessages(messages),
         ...(cachedSystem ? { system: cachedSystem } : {}),
         max_tokens: options.max_tokens || 4096,
-        temperature: options.temperature ?? 0.7,
+        ...this.temperatureParam(options.model || this.getDefaultModel(), options),
         stream: false
       })
     }, options);
@@ -244,13 +297,8 @@ class AnthropicProvider extends BaseLLMProvider {
       stream: false
     };
 
-    // Extended thinking requires temperature=1 and no explicit temperature
-    if (thinking) {
-      body.thinking = thinking;
-      body.temperature = 1;
-    } else {
-      body.temperature = options.temperature ?? 0.7;
-    }
+    if (thinking) body.thinking = thinking;
+    Object.assign(body, this.temperatureParam(requestedModel, options, thinking));
 
     const response = await this.request(`${this.baseUrl}/messages`, {
       method: 'POST',
@@ -290,12 +338,8 @@ class AnthropicProvider extends BaseLLMProvider {
       stream: true
     };
 
-    if (thinking) {
-      body.thinking = thinking;
-      body.temperature = 1;
-    } else {
-      body.temperature = options.temperature ?? 0.7;
-    }
+    if (thinking) body.thinking = thinking;
+    Object.assign(body, this.temperatureParam(requestedModel, options, thinking));
 
     const response = await this.request(`${this.baseUrl}/messages`, {
       method: 'POST',
@@ -524,7 +568,7 @@ class AnthropicProvider extends BaseLLMProvider {
         messages: this.formatMessages(messages),
         ...(cachedSystem ? { system: cachedSystem } : {}),
         max_tokens: options.max_tokens || 4096,
-        temperature: options.temperature ?? 0.7,
+        ...this.temperatureParam(requestedModel, options),
         stream: true
       })
     }, options);
@@ -646,3 +690,4 @@ class AnthropicProvider extends BaseLLMProvider {
 }
 
 module.exports = AnthropicProvider;
+module.exports.rejectsTemperature = rejectsTemperature;
