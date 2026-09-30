@@ -2,14 +2,14 @@
 // The verify loop (benchmark spec §6): a reviewer accepts, edits or rejects
 // each unverified candidate. Only a valid question can be accepted; an edit
 // is saved only when valid and is never accepted by itself; progress is
-// saved after every decision. The loop's own text is ASCII.
+// saved after every decision. The rules live in review.js, shared with the
+// web reviewer (verify-web.js). The loop's own text is ASCII.
 const readline = require('readline');
-const { KINDS, validateQuestion, normalizeQuestion, computeDistance, bucketFor } = require('./questions');
+const { KINDS, validateQuestion, computeDistance, bucketFor } = require('./questions');
 const { messageText, senderLabel } = require('./session-format');
-const { UsageError } = require('./errors');
+const { createReview } = require('./review');
 
 const SHOW_CHARS = 1500;
-const REVIEWER_RE = /^[A-Za-z0-9._-]{1,32}$/;
 const FIELDS = Object.freeze([
   ['question', 'text'], ['answer', 'text'], ['acceptableAnswers', 'list'], ['evidenceSeqs', 'seqs'],
   ['askAtSeq', 'int'], ['kind', 'kind'], ['supersededBy', 'optint']
@@ -72,7 +72,7 @@ function parseField(type, raw) {
 }
 
 async function verifyLoop({ session, questions, reviewer, input, output, onSave, now = () => new Date() }) {
-  if (!REVIEWER_RE.test(reviewer || '')) throw new UsageError('--reviewer <initials> is required (letters, digits, . _ -)');
+  const review = createReview({ session, questions, reviewer, onSave, now });
   const { index } = session;
   const sessionId = session.manifest.sessionId;
   const rl = readline.createInterface({ input, terminal: false });
@@ -82,12 +82,9 @@ async function verifyLoop({ session, questions, reviewer, input, output, onSave,
     const { value, done } = await lines.next();
     return done ? null : value.trim();
   };
-
-  // A question with no verifiedBy key is unverified, like verifiedBy null.
-  let current = questions.map((q) => (q.verifiedBy === undefined ? { ...q, verifiedBy: null } : q));
-  const replace = (q) => { current = current.map((x) => (x.id === q.id ? q : x)); };
-  const pending = current.filter((q) => q.verifiedBy == null).sort((a, b) => a.askAtSeq - b.askAtSeq || a.id.localeCompare(b.id));
-  const counts = { accepted: 0, edited: 0, rejected: 0, skipped: 0, stopped: false };
+  const pending = review.pending();
+  let stopped = false;
+  const result = () => ({ ...review.counts(), stopped });
 
   const edit = async (q) => {
     const next = { ...q };
@@ -107,50 +104,45 @@ async function verifyLoop({ session, questions, reviewer, input, output, onSave,
 
   try {
     for (let i = 0; i < pending.length; i++) {
-      let q = pending[i];
-      output.write(describeQuestion(q, index, i + 1, pending.length));
+      const { id } = pending[i];
+      // An edit that is not valid yet is kept here, unsaved, for the next
+      // edit; while it exists the question cannot be accepted.
+      let draft = null;
+      output.write(describeQuestion(review.get(id), index, i + 1, pending.length));
       let decided = false;
       while (!decided) {
         const cmd = await ask('[a]ccept  [e]dit  [r]eject  [s]kip  [q]uit > ');
-        if (cmd === null || cmd === 'q') { counts.stopped = true; return counts; }
+        if (cmd === null || cmd === 'q') { stopped = true; return result(); }
         if (cmd === 'a') {
-          const errors = validateQuestion(q, { index, sessionId });
-          if (errors.length) { output.write(`Cannot accept:\n  ${errors.join('\n  ')}\n`); continue; }
-          q = { ...normalizeQuestion(q, index), verifiedBy: `human:${reviewer}` };
-          replace(q);
-          onSave(current, null);
-          counts.accepted += 1;
+          const res = draft ? { ok: false, errors: validateQuestion(draft, { index, sessionId }) } : review.accept(id);
+          if (!res.ok) { output.write(`Cannot accept:\n  ${res.errors.join('\n  ')}\n`); continue; }
           decided = true;
         } else if (cmd === 'r') {
           const reason = await ask('Reason (optional): ');
-          current = current.filter((x) => x.id !== q.id);
-          onSave(current, { ...q, rejectedBy: `human:${reviewer}`, rejectReason: reason || '', rejectedAt: now().toISOString() });
-          counts.rejected += 1;
+          review.reject(id, reason || '');
           decided = true;
-          if (reason === null) { counts.stopped = true; return counts; }
+          if (reason === null) { stopped = true; return result(); }
         } else if (cmd === 's') {
-          counts.skipped += 1;
+          review.skip(id);
           decided = true;
         } else if (cmd === 'e') {
-          const edited = await edit(q);
-          if (edited === null) { counts.stopped = true; return counts; }
-          q = edited;
-          const errors = validateQuestion(q, { index, sessionId });
-          if (errors.length) {
-            output.write(`Not valid yet (not saved):\n  ${errors.join('\n  ')}\n`);
+          const edited = await edit(draft || review.get(id));
+          if (edited === null) { stopped = true; return result(); }
+          const fields = Object.fromEntries(FIELDS.map(([f]) => [f, edited[f]]));
+          const res = review.edit(id, fields);
+          if (res.ok) {
+            draft = null;
           } else {
-            q = normalizeQuestion(q, index);
-            replace(q);
-            onSave(current, null);
-            counts.edited += 1;
+            draft = edited;
+            output.write(`Not valid yet (not saved):\n  ${res.errors.join('\n  ')}\n`);
           }
-          output.write(describeQuestion(q, index, i + 1, pending.length));
+          output.write(describeQuestion(draft || review.get(id), index, i + 1, pending.length));
         } else {
           output.write('Type a, e, r, s or q.\n');
         }
       }
     }
-    return counts;
+    return result();
   } finally {
     rl.close();
   }
