@@ -113,6 +113,17 @@ class Retriever {
     return [...byId.values()].sort((a, b) => b.fused - a.fused || best(a) - best(b));
   }
 
+  // A chunk's age over the half-life (step 5). Position needs a chunk seq and
+  // an upToSeq, else the age falls back to days.
+  _age(chunk, { s, nowMs, upToSeq }) {
+    if (s.recencyByPosition && Number.isInteger(upToSeq) && upToSeq > 1 && Number.isInteger(chunk.seq)) {
+      return Math.max(0, (upToSeq - chunk.seq) / upToSeq) / s.recencyHalfLifeFraction;
+    }
+    const ts = Date.parse(chunk.ts);
+    const ageDays = Number.isFinite(ts) && Number.isFinite(nowMs) ? Math.max(0, (nowMs - ts) / DAY_MS) : 0;
+    return ageDays / s.recencyHalfLifeDays;
+  }
+
   async retrieve({
     query, contextQueries = [], chatIds, kinds = null, excludeMessageIds = [], budgetTokens = null, upToSeq = null,
     settings, model = null, now = Date.now(), vectorHits = null, lexical = true, reranker = null, stats = null
@@ -147,10 +158,11 @@ class Retriever {
       if (!chunk || excluded.has(chunk.messageId) || !inScope(chunk)) continue;
       // Step 4: kind weight.
       const kindWeight = Number.isFinite(s.kindWeights[chunk.kind]) ? s.kindWeights[chunk.kind] : 1;
-      // Step 5: recency, (1 - w) + w · exp(-age / halfLife).
-      const ts = Date.parse(chunk.ts);
-      const ageDays = Number.isFinite(ts) && Number.isFinite(nowMs) ? Math.max(0, (nowMs - ts) / DAY_MS) : 0;
-      const recency = (1 - s.recencyWeight) + s.recencyWeight * Math.exp(-ageDays / s.recencyHalfLifeDays);
+      // Step 5: recency, (1 - w) + w · exp(-age / halfLife). The age is in
+      // days, or with recencyByPosition the fraction of the chat behind this
+      // point, (upToSeq - seq) / upToSeq, against recencyHalfLifeFraction: a
+      // day-based age is flat inside one long session.
+      const recency = (1 - s.recencyWeight) + s.recencyWeight * Math.exp(-this._age(chunk, { s, nowMs, upToSeq }));
       scored.push({
         chunk,
         score: hit.fused * kindWeight * recency,

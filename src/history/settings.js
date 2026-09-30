@@ -35,7 +35,12 @@ const HISTORY_DEFAULTS = Object.freeze({
     // Step 6 (spec §6.3): rescore the top topM fused candidates with a
     // reranker callback given to the Retriever. Inert without one (H3;
     // LongHaul's kl-recall-rerank).
-    rerank: Object.freeze({ enabled: false, topM: 20 })
+    rerank: Object.freeze({ enabled: false, topM: 20 }),
+    // Experimental (recall tail/recency 2026-09-30); false = off.
+    tailIncludeToolResults: false,
+    tailToolResultMaxTokens: 300,
+    recencyByPosition: false,
+    recencyHalfLifeFraction: 0.25
   }),
   chunk: Object.freeze({ targetChars: 1500, minChars: 40 }),
   readHistoryMaxTokens: 8000
@@ -86,7 +91,11 @@ function mergeHistorySettings(source) {
       rerank: {
         enabled: flag(rr.enabled, d.rerank.enabled),
         topM: atLeast(rr.topM, d.rerank.topM, 1, true)
-      }
+      },
+      tailIncludeToolResults: flag(r.tailIncludeToolResults, d.tailIncludeToolResults),
+      tailToolResultMaxTokens: positive(r.tailToolResultMaxTokens, d.tailToolResultMaxTokens),
+      recencyByPosition: flag(r.recencyByPosition, d.recencyByPosition),
+      recencyHalfLifeFraction: positive(r.recencyHalfLifeFraction, d.recencyHalfLifeFraction)
     },
     chunk: {
       targetChars: atLeast(c.targetChars, HISTORY_DEFAULTS.chunk.targetChars, 200, true),

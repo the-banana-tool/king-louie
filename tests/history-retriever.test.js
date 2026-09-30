@@ -64,6 +64,29 @@ describe('Retriever', () => {
     for (const h of flat) assert.strictEqual(h.signals.recency, 1);
   });
 
+  it('recencyByPosition: age is the fraction of the chat behind upToSeq, not days', async () => {
+    // Same timestamp for both: day-based recency cannot tell them apart.
+    const at = new Date(BASE_TIME - DAY).toISOString();
+    const messages = [{ sender: 'user', text: 'the fence line was measured at forty meters', timestamp: at }];
+    for (let i = 0; i < 8; i += 1) messages.push({ sender: 'assistant', text: `filler note ${i} about the grocery list`, timestamp: at });
+    messages.push({ sender: 'user', text: 'the fence line was measured at forty meters again', timestamp: at });
+    const s = setup(messages);
+    t = s.t;
+    const byDays = await s.retriever.retrieve({ query: 'fence line measured', chatIds: ['chat-1'], upToSeq: 11, settings: recall(), now: BASE_TIME });
+    assert.strictEqual(byDays[0].signals.recency, byDays[1].signals.recency);
+
+    const settings = recall({ recencyByPosition: true, recencyWeight: 0.5, recencyHalfLifeFraction: 0.25 });
+    const hits = await s.retriever.retrieve({ query: 'fence line measured', chatIds: ['chat-1'], upToSeq: 11, settings, now: BASE_TIME });
+    assert.strictEqual(hits[0].chunk.messageId, 'chat-1-m10');
+    const expected = (seq) => 0.5 + 0.5 * Math.exp(-((11 - seq) / 11) / 0.25);
+    assert.ok(Math.abs(hits[0].signals.recency - expected(10)) < 1e-12);
+    assert.ok(Math.abs(hits[1].signals.recency - expected(1)) < 1e-12);
+
+    // Without an upToSeq the age falls back to days.
+    const fallback = await s.retriever.retrieve({ query: 'fence line measured', chatIds: ['chat-1'], settings, now: BASE_TIME });
+    assert.strictEqual(fallback[0].signals.recency, fallback[1].signals.recency);
+  });
+
   it('drops exact text duplicates', async () => {
     const same = 'The drainage pipe runs under the north fence of the Lakeside lot.';
     const s = setup([{ sender: 'user', text: same }, { sender: 'assistant', text: same }]);
