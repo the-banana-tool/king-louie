@@ -28,6 +28,11 @@ describe('renderer: the recall line', () => {
       'recalled 3 excerpts · about 1.9K tokens · from 412K tokens of history · BM25');
     assert.strictEqual(recallLineText({ recalledExcerpts: 1, estTokens: { recalled: 40 }, fullHistoryEstTokens: 900 }),
       'recalled 1 excerpt · about 40 tokens · from 900 tokens of history · BM25');
+    const { recallLineText: line } = new Function(`${fns}; return { recallLineText };`)();
+    const base = { recalledExcerpts: 2, estTokens: { recalled: 900 }, fullHistoryEstTokens: 5000 };
+    assert.match(line({ ...base, embedder: 'local:Xenova/bge-small-en-v1.5' }), / · BM25 \+ vectors$/);
+    assert.match(line({ ...base, embedder: 'none', vectorsSkipped: 'embedding model not loaded: fetch failed' }), / · BM25 only: embedding model not loaded: fetch failed$/);
+    assert.match(line({ ...base, embedder: 'none', vectorsSkipped: null }), / · BM25$/);
   });
 
   it('renders under assistant messages with provenance, excerpts as text', () => {

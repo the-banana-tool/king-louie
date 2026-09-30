@@ -934,7 +934,14 @@ contextBridge.exposeInMainWorld(
         validateString(payload.chatId, 'chatId', { minLength: 1 });
         validateString(payload.query, 'query', { minLength: 1 });
         return ipcRenderer.invoke('history:search', payload);
-      }
+      },
+      embedderStatus: () => ipcRenderer.invoke('history:embedder.status'),
+      saveEmbedder: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('history:embedder.save', payload);
+      },
+      rebuildEmbeddings: () => ipcRenderer.invoke('history:embedder.rebuild'),
+      retryEmbedder: () => ipcRenderer.invoke('history:embedder.retry')
     },
     models: {
       status: () => ipcRenderer.invoke('models:status'),
