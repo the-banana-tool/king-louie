@@ -41,6 +41,9 @@ function recallSettings(recall, budgetTokens, chunk = {}) {
   }
   const known = Object.keys(HISTORY_DEFAULTS.recall);
   for (const key of Object.keys(recall)) {
+    if (key === 'tailMessages') {
+      throw new UsageError('--recall tailMessages was replaced in H3: the tail counts user turns (tailUserTurns) with a row ceiling (tailMaxRows).');
+    }
     if (!known.includes(key)) throw new UsageError(`Unknown recall setting "${key}". Known: ${[...known].sort().join(', ')}`);
     if (key === 'recalledTokens') throw new UsageError('--recall recalledTokens is not accepted: the recalled budget is set with --budget-tokens.');
   }

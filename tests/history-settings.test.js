@@ -24,9 +24,9 @@ describe('history settings', () => {
     const s = mergeHistorySettings(undefined);
     assert.strictEqual(s.version, 3);
     assert.deepStrictEqual(s.recall, {
-      enabled: true, tailMessages: 16, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true,
+      enabled: true, tailUserTurns: 4, tailMaxRows: 64, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true,
       tailIncludeToolResults: true, tailToolResultMaxTokens: 1000,
-      recalledTokens: 6000, queryUserTurns: 0, bm25TopK: 200, rrfK: 60,
+      recalledTokens: 6000, queryUserTurns: 0, queryFallbackMinChars: 0, bm25TopK: 200, rrfK: 60,
       kindWeights: { user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 },
       recencyWeight: 0.3, recencyHalfLifeDays: 30, maxChunksPerMessage: 4,
       vectorTopK: 50, dedupeCosine: 0.92, vectorCacheMb: 256, rerank: RERANK,
@@ -154,5 +154,31 @@ describe('history settings', () => {
     const chosen = mergeSettings({ ...merged, history: { ...merged.history, recall: { ...merged.history.recall, rerank: { ...merged.history.recall.rerank, topM: 20 } } } });
     assert.strictEqual(chosen.history.recall.rerank.topM, 20, 'after the first merge, 20 is a choice');
     assert.strictEqual('retrieval' in merged.history, false);
+    assert.strictEqual(DEFAULT_SETTINGS.history.recall.tailUserTurns, 4);
+  });
+
+  it('tail keys: user turns, a row ceiling and the fallback threshold, type-checked', () => {
+    const r = (over) => saved({ recall: over }).recall;
+    assert.strictEqual(r({ tailUserTurns: 2 }).tailUserTurns, 2);
+    for (const bad of [0, -1, '4', NaN]) assert.strictEqual(r({ tailUserTurns: bad }).tailUserTurns, 4, String(bad));
+    assert.strictEqual(r({ tailUserTurns: 2.7 }).tailUserTurns, 2);
+    assert.strictEqual(r({ tailMaxRows: 0 }).tailMaxRows, 64);
+    assert.strictEqual(r({ tailMaxRows: 8 }).tailMaxRows, 8);
+    assert.strictEqual(r({ queryFallbackMinChars: -1 }).queryFallbackMinChars, 0);
+    assert.strictEqual(r({ queryFallbackMinChars: 20 }).queryFallbackMinChars, 20);
+    assert.strictEqual('tailMessages' in r({ tailMessages: 10 }), false);
+  });
+
+  it('a settings file saved before H3: tailMessages becomes user turns; the shipped 8 and 16 read as unset', () => {
+    const r = (over) => mergeHistorySettings({ recall: over }).recall;
+    assert.strictEqual(r({ tailMessages: 16 }).tailUserTurns, 4);
+    assert.strictEqual(r({ tailMessages: 8 }).tailUserTurns, 4);
+    assert.strictEqual(r({ tailMessages: 10 }).tailUserTurns, 5, 'a chat exchange is two rows');
+    assert.strictEqual(r({ tailMessages: 3 }).tailUserTurns, 2);
+    assert.strictEqual(r({ tailMessages: 10, tailUserTurns: 3 }).tailUserTurns, 3, 'the new key wins');
+    assert.strictEqual(saved({ recall: { tailMessages: 10 } }).recall.tailUserTurns, 4, 'a version-3 file has no tailMessages to map');
+    const once = mergeSettings({ history: { recall: { tailMessages: 12 } } });
+    assert.strictEqual(once.history.recall.tailUserTurns, 6);
+    assert.strictEqual(mergeSettings(once).history.recall.tailUserTurns, 6, 'merging again keeps it');
   });
 });

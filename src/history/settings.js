@@ -16,14 +16,22 @@ const LOCAL_MODEL_RE = /^[A-Za-z0-9._-]{1,100}(\/[A-Za-z0-9._-]{1,100})?$/;
 // A hosted model id may carry a tag (Ollama's "nomic-embed-text:latest").
 const REMOTE_MODEL_RE = /^[A-Za-z0-9._:-]{1,100}(\/[A-Za-z0-9._:-]{1,100})?$/;
 const LEGACY_RERANK_TOPM = 20;
+// tailMessages counted rows: 8 in the first H2, 16 after B0.
+const LEGACY_TAIL_MESSAGES = new Set([8, 16]);
 
 const HISTORY_DEFAULTS = Object.freeze({
   // Defaults measured on the LongHaul private set (2026-09-30, 103 verified
   // questions over four real sessions; recall spec §6.7).
   recall: Object.freeze({
     enabled: true,
-    // The tail (spec §6.1).
-    tailMessages: 16,
+    // The tail (spec §6.1), counted in user turns: the last tailUserTurns
+    // user messages and the user and assistant messages after the oldest of
+    // them. The newest user message is always in; the replies after it fill
+    // what is left of tailTokens, newest first; older turns come whole while
+    // they fit. tailMaxRows caps the rows. (H2 counted rows, and an agent
+    // session, one assistant row per tool round, got an empty tail.)
+    tailUserTurns: 4,
+    tailMaxRows: 64,
     tailTokens: 6000,
     tailMaxMessageTokens: 1500,
     tailIncludeToolCalls: true,
@@ -32,6 +40,10 @@ const HISTORY_DEFAULTS = Object.freeze({
     // Retrieval (spec §6.3).
     recalledTokens: 6000,
     queryUserTurns: 0,
+    // A new message with fewer letters and digits than this also searches
+    // with the previous user messages (at most 3) until it has them; 0 = off.
+    // Off: no measured question of that shape yet (a later LongHaul stage).
+    queryFallbackMinChars: 0,
     bm25TopK: 200,
     rrfK: 60,
     kindWeights: Object.freeze({ user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 }),
@@ -118,6 +130,15 @@ function mergeEmbedder(source) {
   };
 }
 
+// tailUserTurns, or from a pre-H3 file's tailMessages: a chat exchange is two
+// rows, and a shipped default reads as unset.
+function tailUserTurnsFrom(r, legacy, fallback) {
+  if (r.tailUserTurns !== undefined) return atLeast(r.tailUserTurns, fallback, 1, true);
+  const old = r.tailMessages;
+  if (!legacy || !finite(old) || old < 1 || LEGACY_TAIL_MESSAGES.has(old)) return fallback;
+  return Math.max(1, Math.ceil(old / 2));
+}
+
 function mergeHistorySettings(source) {
   const src = isObject(source) ? source : {};
   const legacy = src.version !== HISTORY_SETTINGS_VERSION;
@@ -133,7 +154,8 @@ function mergeHistorySettings(source) {
     version: HISTORY_SETTINGS_VERSION,
     recall: {
       enabled: flag(r.enabled, d.enabled),
-      tailMessages: atLeast(r.tailMessages, d.tailMessages, 0, true),
+      tailUserTurns: tailUserTurnsFrom(r, legacy, d.tailUserTurns),
+      tailMaxRows: atLeast(r.tailMaxRows, d.tailMaxRows, 1, true),
       tailTokens: positive(r.tailTokens, d.tailTokens),
       tailMaxMessageTokens: positive(r.tailMaxMessageTokens, d.tailMaxMessageTokens),
       tailIncludeToolCalls: flag(r.tailIncludeToolCalls, d.tailIncludeToolCalls),
@@ -141,6 +163,7 @@ function mergeHistorySettings(source) {
       tailToolResultMaxTokens: positive(r.tailToolResultMaxTokens, d.tailToolResultMaxTokens),
       recalledTokens: atLeast(r.recalledTokens, d.recalledTokens, 0),
       queryUserTurns: atLeast(r.queryUserTurns, d.queryUserTurns, 0, true),
+      queryFallbackMinChars: atLeast(r.queryFallbackMinChars, d.queryFallbackMinChars, 0, true),
       bm25TopK: atLeast(r.bm25TopK, d.bm25TopK, 1, true),
       rrfK: atLeast(r.rrfK, d.rrfK, 0),
       kindWeights,

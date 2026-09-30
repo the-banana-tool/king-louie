@@ -62,7 +62,7 @@ describe('kl-recall', () => {
 
   it('refuses a recall value the settings merge would not keep', () => {
     const bad = [
-      { tailMessages: -1 }, { tailMessages: 2.5 }, { tailMessages: 'many' }, { recencyWeight: 2 },
+      { tailUserTurns: -1 }, { tailUserTurns: 2.5 }, { tailUserTurns: 'many' }, { recencyWeight: 2 },
       { tailIncludeToolCalls: 'yes' }, { kindWeights: { bogus: 1 } }, { kindWeights: { user: -1 } }, { kindWeights: 3 }
     ];
     for (const recall of bad) {
@@ -71,10 +71,15 @@ describe('kl-recall', () => {
   });
 
   it('records the effective merged recall settings', () => {
-    const adapter = createKlRecallAdapter({ budgetTokens: 3000, recall: { tailMessages: 4, kindWeights: { user: 2 } }, tmpRoot: tmpDir() });
-    const expected = mergeHistorySettings({ recall: { tailMessages: 4, kindWeights: { user: 2 }, recalledTokens: 3000 } }).recall;
+    const adapter = createKlRecallAdapter({ budgetTokens: 3000, recall: { tailUserTurns: 2, kindWeights: { user: 2 } }, tmpRoot: tmpDir() });
+    const expected = mergeHistorySettings({ recall: { tailUserTurns: 2, kindWeights: { user: 2 }, recalledTokens: 3000 } }).recall;
     assert.deepStrictEqual(adapter.describe().recall, expected);
     assert.strictEqual(adapter.describe().recall.kindWeights.assistant, 1.0);
+  });
+
+  it('refuses --recall tailMessages and names the keys that replaced it', () => {
+    assert.throws(() => createKlRecallAdapter({ recall: { tailMessages: 16 }, tmpRoot: tmpDir() }),
+      (err) => err instanceof UsageError && /tailUserTurns/.test(err.message) && /tailMaxRows/.test(err.message));
   });
 
   it('the CLI refuses --recall recalledTokens with exit 2', async () => {
