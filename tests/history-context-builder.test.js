@@ -309,6 +309,34 @@ describe('ContextBuilder: tailIncludeToolResults (on by default)', () => {
     assert.deepStrictEqual(none.stats.tail.toolResultSeqs, []);
   });
 
+  it('a tail filled to the edge with results never exceeds tailTokens: joiners and notes are counted', async () => {
+    // Many small results, several per reply, each exactly a whole number of
+    // tokens as the tail shows it, so the '\n\n' and '\n' joiners are what
+    // tips the total; then one shortened result with its note.
+    const messages = [{ sender: 'user', text: 'Read the gauges at the Lakeside lot.' }];
+    const result = (seq, body) => {
+      const label = `[tool result #${seq} Bash]\n`;
+      return `${body}${'.'.repeat((4 - ((label.length + body.length) % 4)) % 4)}`;
+    };
+    for (let r = 1; r <= 12; r += 1) {
+      messages.push({ sender: 'toolResult', toolName: 'Bash', result: result(messages.length + 1, `gauge ${r}: ok`) });
+      if (r % 4 === 0) messages.push({ sender: 'assistant', text: `Gauges up to ${r} are read.` });
+    }
+    messages.push({ sender: 'toolResult', toolName: 'Bash', result: 'long log line at the north fence '.repeat(20) });
+    messages.push({ sender: 'assistant', text: 'All gauges read.' });
+    const s = setup(messages, { recall: { tailIncludeToolResults: false } });
+    t = s.t;
+    const base = (await s.builder.build({ chatId: 'chat-1', message: 'x' })).stats.estTokens.tail;
+    let folded = 0;
+    for (let tailTokens = base; tailTokens <= base + 200; tailTokens += 1) {
+      s.builder.getSettings = () => ({ history: { recall: { tailIncludeToolResults: true, tailToolResultMaxTokens: 30, tailTokens } } });
+      const out = await s.builder.build({ chatId: 'chat-1', message: 'x' });
+      assert.ok(out.stats.estTokens.tail <= tailTokens, `tailTokens ${tailTokens}: the tail is ${out.stats.estTokens.tail}`);
+      folded = Math.max(folded, out.stats.tail.toolResultSeqs.length);
+    }
+    assert.strictEqual(folded, 13, 'with room, every result is folded in');
+  });
+
   it('by default a result up to 1000 tokens is shown whole and a bigger one is shortened', async () => {
     const mid = Array.from({ length: 40 }, (_, i) => `fence post ${i} at the Lakeside lot leans two degrees north`).join('\n');
     const huge = Array.from({ length: 150 }, (_, i) => `drainage reading ${i} for the Lakeside lot ditch is steady`).join('\n');

@@ -157,6 +157,12 @@ class ContextBuilder {
       if (!folded.has(i)) folded.set(i, []);
       folded.get(i).push({ seq, line });
     };
+    // What a folded line adds to its reply's text, joiner included: the
+    // lines are joined by '\n' and the reply follows them after '\n\n', so
+    // the first line folded into a reply costs two more characters and each
+    // later one one more. The tail's total is at most the entries' own
+    // tokens plus these.
+    const foldCost = (i, line) => this.estimator.estimate(`${folded.has(i) ? '\n' : '\n\n'}${line}`, model);
     const foldedSeqs = [];
     let callTokens = 0;
     if (recall.tailIncludeToolCalls && entries.length) {
@@ -166,9 +172,9 @@ class ContextBuilder {
         const next = replyIndex(call.seq);
         if (next === -1) continue;
         const line = `[tool] ${toolUseSummary(call)}`;
+        callTokens += foldCost(next, line);
         fold(next, call.seq, line);
         foldedSeqs.push(call.seq);
-        callTokens += this.estimator.estimate(line, model);
       }
     }
     const results = recall.tailIncludeToolResults && entries.length
@@ -177,10 +183,11 @@ class ContextBuilder {
         afterSeq: entries[0].message.seq,
         beforeSeq: limit,
         left: recall.tailTokens - callTokens - entries.reduce((n, e) => n + e.tokens, 0),
-        replyIndex, recall, model
+        replyIndex, recall, model,
+        cost: foldCost,
+        take: fold
       })
       : [];
-    for (const r of results) fold(r.index, r.message.seq, r.text);
 
     const messages = entries.map((e, i) => {
       const lines = folded.get(i);
@@ -207,8 +214,9 @@ class ContextBuilder {
   }
 
   // tailIncludeToolResults: tool results in the tail's span, folded like
-  // tool calls into the reply that follows them. They get what the user and
-  // assistant messages and the tool lines left of tailTokens, newest first,
+  // tool calls into the reply that follows them (take). They get what the
+  // user and assistant messages and the tool lines left of tailTokens, each
+  // counted as cost gives it (joiner, label, body and note), newest first,
   // so a tool dump never pushes a user turn out. A result over
   // tailToolResultMaxTokens keeps its head, with a note, and is recorded in
   // stats.tail.shortened (shown: the leading chunks that fit whole); a
@@ -216,11 +224,11 @@ class ContextBuilder {
   // The span's results are read a page at a time (HistoryStore#
   // tailToolResults), newest first, until what is left cannot fit even the
   // smallest result or TAIL_RESULT_SCAN_MAX rows have been examined.
-  _toolResults({ chatId, afterSeq, beforeSeq, left, replyIndex, recall, model }) {
+  _toolResults({ chatId, afterSeq, beforeSeq, left, replyIndex, recall, model, cost, take }) {
     const out = [];
     let budget = left;
-    // No result costs less than a label and one character of body.
-    const smallest = this.estimator.estimate('[tool result #1]\nx', model);
+    // No result costs less than a joiner, a label and one character of body.
+    const smallest = this.estimator.estimate('\n[tool result #1]\nx', model);
     let examined = 0;
     let before = beforeSeq;
     while (budget >= smallest && examined < TAIL_RESULT_SCAN_MAX) {
@@ -233,8 +241,11 @@ class ContextBuilder {
       for (const m of page) {
         if (budget < smallest) break;
         const r = this._toolResult(m, { replyIndex, recall, model });
-        if (!r || r.tokens > budget) continue;
-        budget -= r.tokens;
+        if (!r) continue;
+        const tokens = cost(r.index, r.text);
+        if (tokens > budget) continue;
+        budget -= tokens;
+        take(r.index, m.seq, r.text);
         if (r.shortened) r.shortened = this._shortenedResult(m, r.shortened);
         out.push(r);
       }
@@ -257,7 +268,7 @@ class ContextBuilder {
       text = `${label}\n${full.slice(0, chars)}\n[tool result #${m.seq} shortened: the start is shown; ReadHistory ${m.seq} for the rest]`;
       shortened = { headChars: Math.min(chars, full.length) };
     }
-    return { message: m, index, text, tokens: this.estimator.estimate(text, model), shortened };
+    return { message: m, index, text, shortened };
   }
 
   // stats.tail.shortened for a shown, shortened result (shown: the leading
