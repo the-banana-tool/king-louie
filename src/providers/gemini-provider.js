@@ -136,11 +136,14 @@ class GeminiProvider extends BaseLLMProvider {
 
   formatTools(tools) {
     if (!tools || tools.length === 0) return undefined;
+    // Gemini refuses an object schema with no properties; a tool that takes
+    // no arguments (list_cases, get_presence) declares no parameters instead.
+    const takesArgs = (p) => Boolean(p) && !(p.type === 'object' && Object.keys(p.properties || {}).length === 0);
     return [{
       functionDeclarations: tools.map(tool => ({
         name: tool.name,
         description: tool.description,
-        parameters: tool.parameters
+        ...(takesArgs(tool.parameters) ? { parameters: tool.parameters } : {})
       }))
     }];
   }

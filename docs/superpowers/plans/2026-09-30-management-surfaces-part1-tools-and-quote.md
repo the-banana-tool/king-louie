@@ -80,15 +80,15 @@ Design:
 - Front door: `cases:read` gains `list_questions` and `get_presence`. `list_questions` fans out across
   machines the way `list_cases` does; `get_presence` takes `machine` like `open_case`.
 
-- [ ] Definitions-module test: the new tools exist, are deep-frozen, the module has no requires, and the
+- [x] Definitions-module test: the new tools exist, are deep-frozen, the module has no requires, and the
       classifier returns `pressed` for every kind in the Global Constraints list and `spoken` for a plain
       `Ask` question, a detour routing question and an `Ask` briefing.
-- [ ] Handler test (`tests/mcp-case-tools*.test.js` or its neighbour): `list_questions` on `in-app`,
+- [x] Handler test (`tests/mcp-case-tools*.test.js` or its neighbour): `list_questions` on `in-app`,
       `mcp-stdio`, `mcp-frontdoor` returns the same shape; `case` narrows it.
-- [ ] Chat test: a normal chat's tool list contains `list_questions`; a case chat's does too; a wake-up
+- [x] Chat test: a normal chat's tool list contains `list_questions`; a case chat's does too; a wake-up
       turn's `allowedToolNames` does not.
-- [ ] Front-door test (`tests/frontdoor-*.test.js` pattern): a `cases:read` grant sees and calls both.
-- [ ] Covering tests pass; commit `feat(cases): list_questions and get_presence on every management surface`.
+- [x] Front-door test (`tests/frontdoor-*.test.js` pattern): a `cases:read` grant sees and calls both.
+- [x] Covering tests pass; commit `feat(cases): list_questions and get_presence on every management surface`.
 
 ## Task 2: The quote rule, and `answer_question` from the chat
 

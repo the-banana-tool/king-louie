@@ -39,6 +39,14 @@ const CORE_TOOLS = new Set([
   // ToolSearch round away.
   'SearchHistory',
   'ReadHistory',
+  // Management surfaces (spec 2026-09-30 §3.1): the owner asks "what's
+  // waiting on me?" in any chat, so the management tools are always loaded
+  // (src/tools/builtin/management-tools.js; the same names MCP clients get).
+  'list_cases',
+  'open_case',
+  'get_orientation',
+  'list_questions',
+  'get_presence',
 ]);
 
 // System prompt sections that are always included.

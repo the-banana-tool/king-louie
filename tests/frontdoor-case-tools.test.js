@@ -27,12 +27,17 @@ const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 const tmp = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); dirs.push(d); return d; };
 
-const READ_TOOLS = ['list_cases', 'open_case', 'get_orientation'];
+const READ_TOOLS = ['list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence'];
 const GRANT_ID = `gr_${'a'.repeat(22)}`;
 const grant = (entries, machineIds = {}) => ({ grant_id: GRANT_ID, client_id: `dcr_${'b'.repeat(22)}`, client_name: 'Example Client', scopes: entries, machine_ids: machineIds });
 const READ = grant([{ scope: 'cases:read', machines: null }]);
 // What a client would hold if cases:write existed: it must still reach nothing.
 const BOTH = grant([{ scope: 'cases:read', machines: null }, { scope: 'cases:write', machines: null }]);
+// A stand-in for core.context.getContact() with no ladder entries.
+const PRESENCE = {
+  ladderState: () => ({}),
+  presenceStatus: () => ({ presentChannel: null, away: false, quiet: false, timeZoneSource: 'host', signals: { desktop: null, mobile: null, channels: {} }, ladder: { runsHere: true } })
+};
 const fdOrigin = (scopes) => ({ kind: 'frontdoor', grant_id: GRANT_ID, client_id: `dcr_${'b'.repeat(22)}`, client_name: 'Example Client', scopes, mcp_session: null });
 
 async function caseFixture() {
@@ -64,7 +69,7 @@ async function frontDoor(rt) {
   const router = new FleetRouter({ registry: createFakeRegistry(nodes), nodeHub: hub, cache: new JobCache({ file: path.join(tmp('kl-fd-router-'), 'node-status.json') }), scopeRegistry });
   router.attach();
   registerFrontDoorCaseTools({ scopeRegistry, router });
-  registerNodeCaseMethods(gpu.service, { getRuntime: () => rt });
+  registerNodeCaseMethods(gpu.service, { getRuntime: () => rt, getContact: () => PRESENCE });
   for (const n of nodes) assert.deepStrictEqual(await hub.fromNode(n.nodeId, 'fleet.hello', n.hello()), { ok: true });
   await router.whenIdle();
   hub.calls.length = 0;
@@ -73,7 +78,7 @@ async function frontDoor(rt) {
 }
 
 describe('front-door case tools', () => {
-  it('registers cases:read with its grant-screen text and three routed read tools; cases:write is not a front-door scope', () => {
+  it('registers cases:read with its grant-screen text and its routed read tools; cases:write is not a front-door scope', () => {
     const scopeRegistry = createFleetScopeRegistry();
     const tools = [];
     registerFrontDoorCaseTools({ scopeRegistry, router: { registerTool: (def, opts) => tools.push([def, opts]) } });
@@ -82,7 +87,7 @@ describe('front-door case tools', () => {
       description: 'Read case lists, briefs, questions and orientation, including private facts.'
     });
     assert.strictEqual(scopeRegistry.has('cases:write'), false, 'withheld pending the owner (T16-Q2)');
-    assert.deepStrictEqual(READ_TOOLS.map((t) => scopeRegistry.requiredScopeFor(t)), ['cases:read', 'cases:read', 'cases:read']);
+    assert.deepStrictEqual(READ_TOOLS.map((t) => scopeRegistry.requiredScopeFor(t)), READ_TOOLS.map(() => 'cases:read'));
     assert.strictEqual(scopeRegistry.requiredScopeFor('answer_question'), null, 'the MCP endpoint answers "Unknown tool"');
     assert.ok(!scopeRegistry.toolsFor(['cases:read', 'cases:write']).has('answer_question'));
     assert.deepStrictEqual(scopeRegistry.supported(['fleet:read']), ['fleet:read'], 'registered is not enabled: scopes_enabled decides');
@@ -90,12 +95,24 @@ describe('front-door case tools', () => {
     const [listDef, listOpts] = tools[0];
     assert.deepStrictEqual(listOpts.route({}), { fanout: true });
     assert.deepStrictEqual(listDef.inputSchema.required || [], []);
-    for (const [def, opts] of tools.slice(1)) {
+    const byName = Object.fromEntries(tools.map(([d, o]) => [d.name, [d, o]]));
+    for (const name of ['open_case', 'get_orientation']) {
+      const [def, opts] = byName[name];
       assert.deepStrictEqual(def.inputSchema.required, ['machine', 'case']);
       assert.strictEqual(def.inputSchema.additionalProperties, false);
       assert.deepStrictEqual(opts.route({ machine: 'web-01', case: 'lakeside-lot' }), { machine: 'web-01' });
     }
-    assert.deepStrictEqual({ ...CASE_TOOL_SCOPE }, { list_cases: 'cases:read', open_case: 'cases:read', get_orientation: 'cases:read' });
+    // get_presence names the machine; list_questions fans out unless it names one.
+    const [presenceDef, presenceOpts] = byName.get_presence;
+    assert.deepStrictEqual(presenceDef.inputSchema.required, ['machine']);
+    assert.deepStrictEqual(presenceOpts.route({ machine: 'gpu-box' }), { machine: 'gpu-box' });
+    const [questionsDef, questionsOpts] = byName.list_questions;
+    assert.deepStrictEqual(questionsDef.inputSchema.required, []);
+    assert.deepStrictEqual(Object.keys(questionsDef.inputSchema.properties), ['machine', 'case']);
+    assert.deepStrictEqual(questionsOpts.route({}), { fanout: true });
+    assert.deepStrictEqual(questionsOpts.route({ machine: 'gpu-box', case: 'lakeside-lot' }), { machine: 'gpu-box' });
+    assert.throws(() => questionsOpts.route({ case: 'lakeside-lot' }), /with a machine/);
+    assert.deepStrictEqual({ ...CASE_TOOL_SCOPE }, Object.fromEntries(READ_TOOLS.map((t) => [t, 'cases:read'])));
     assert.ok(Object.isFrozen(CASE_SCOPES) && Object.isFrozen(CASE_TOOL_SCOPE));
   });
 
@@ -129,6 +146,25 @@ describe('front-door case tools', () => {
     assert.deepStrictEqual(t.hub.calls.map((c) => c.method), ['cases.list_cases', 'cases.open_case', 'cases.get_orientation']);
   });
 
+  it('a cases:read grant lists the questions across machines or on one, and reads the presence of a machine', async () => {
+    const { rt, meta, q } = await caseFixture();
+    const t = await frontDoor(rt);
+    const all = await t.call('list_questions', {}, ['cases:read']);
+    assert.deepStrictEqual(all.unreachable, [], 'the runbook node is never asked');
+    assert.deepStrictEqual(all.rows.map((r) => [r.questionId, r.machine, r.answer]), [
+      [q.plain.id, 'gpu-box', 'spoken'], [q.failure.id, 'gpu-box', 'pressed'], [q.direction.id, 'gpu-box', 'pressed'], [q.review.id, 'gpu-box', 'pressed']
+    ]);
+    assert.strictEqual(all.rows[0].data.untrusted_output, true);
+    assert.strictEqual(all.rows[0].data.data.caseTitle, 'Lakeside lot');
+    const one = await t.call('list_questions', { machine: 'gpu-box', case: meta.id }, ['cases:read']);
+    assert.deepStrictEqual(one.map((r) => r.questionId), all.rows.map((r) => r.questionId));
+    const presence = await t.call('get_presence', { machine: 'gpu-box' }, ['cases:read']);
+    assert.deepStrictEqual(presence, { presentChannel: null, away: false, quiet: false, timeZoneSource: 'host', signals: { desktop: null, mobile: null, channels: {} }, ladderRunsHere: true });
+    assert.strictEqual((await t.call('list_questions', { case: meta.id }, ['cases:read'])).error.code, 'invalid_params');
+    assert.strictEqual((await t.call('get_presence', { machine: 'gpu-box' }, ['fleet:read'])).error.code, 'insufficient_scope');
+    assert.deepStrictEqual(t.hub.calls.map((c) => c.method), ['cases.list_questions', 'cases.list_questions', 'cases.get_presence']);
+  });
+
   it('answer_question is not on the front door: a client holding cases:write reaches nothing, and the node has no such method', async () => {
     const { rt, meta, q } = await caseFixture();
     const t = await frontDoor(rt);
@@ -151,8 +187,9 @@ describe('front-door case tools', () => {
     assert.strictEqual((await t.call('list_cases', {}, ['fleet:read'])).error.code, 'insufficient_scope');
     assert.deepStrictEqual(t.hub.calls, [], 'refused before anything reached the node');
     // What a buggy router would send: the node refuses on its own.
-    for (const method of ['cases.list_cases', 'cases.open_case', 'cases.get_orientation']) {
-      const atNode = await t.gpu.service.dispatch(method, { origin: fdOrigin(['cases:write', 'fleet:read']), ...(method === 'cases.list_cases' ? {} : { machine: 'gpu-box', case: meta.id }) });
+    for (const method of ['cases.list_cases', 'cases.open_case', 'cases.get_orientation', 'cases.list_questions', 'cases.get_presence']) {
+      const args = { 'cases.list_cases': {}, 'cases.list_questions': {}, 'cases.get_presence': { machine: 'gpu-box' } }[method] || { machine: 'gpu-box', case: meta.id };
+      const atNode = await t.gpu.service.dispatch(method, { origin: fdOrigin(['cases:write', 'fleet:read']), ...args });
       assert.deepStrictEqual([atNode.error.code, atNode.error.required], ['insufficient_scope', 'cases:read'], method);
     }
     const local = await t.gpu.service.dispatch('cases.open_case', { origin: { kind: 'stdio', scopes: ['cases:read'] }, machine: 'gpu-box', case: meta.id });
@@ -255,7 +292,7 @@ describe('front-door case tools', () => {
     assert.ok(!JSON.stringify(r).includes('xxxx'));
   });
 
-  it('startFleetNode registers the three read methods under cases:read on an agent node with a front-door link', async () => {
+  it('startFleetNode registers the read methods under cases:read on an agent node with a front-door link', async () => {
     const { startFleetNode } = require('../src/fleet/start');
     const { CourierPump } = require('../src/approvals/courier');
     const { rt } = await caseFixture();

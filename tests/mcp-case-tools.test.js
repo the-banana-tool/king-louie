@@ -80,21 +80,22 @@ async function setup() {
 }
 
 const stdioTools = (rt) => createCaseToolHandler({ getRuntime: () => rt, channel: 'mcp-stdio' });
+const CASE_NAMES = ['list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence', 'answer_question'];
 
 describe('MCP case tools on the stdio server', () => {
-  it('lists the four case tools with typed schemas after the fleet tools, only with a runtime', async () => {
+  it('lists the case tools with typed schemas after the fleet tools, only with a runtime', async () => {
     const { rt } = await setup();
     const withCases = connect({ caseTools: stdioTools(rt) });
     const { result } = await withCases.request('tools/list');
     const names = result.tools.map((t) => t.name);
-    assert.deepStrictEqual(names.slice(-4), ['list_cases', 'open_case', 'get_orientation', 'answer_question']);
+    assert.deepStrictEqual(names.slice(-CASE_NAMES.length), CASE_NAMES);
     assert.deepStrictEqual(names.slice(0, MCP_TOOLS.length), MCP_TOOLS.map((t) => t.name));
-    for (const t of result.tools.slice(-4)) {
+    for (const t of result.tools.slice(-CASE_NAMES.length)) {
       assert.strictEqual(t.inputSchema.type, 'object');
       assert.strictEqual(t.inputSchema.additionalProperties, false);
       assert.strictEqual('tier' in t, false);
     }
-    assert.deepStrictEqual(CASE_MCP_TOOLS.map((t) => t.tier), ['read', 'read', 'read', 'routine']);
+    assert.deepStrictEqual(CASE_MCP_TOOLS.map((t) => t.tier), ['read', 'read', 'read', 'read', 'read', 'routine']);
     const without = connect({});
     assert.ok(!(await without.request('tools/list')).result.tools.some((t) => t.name === 'list_cases'));
     const noRuntime = connect({ caseTools: createCaseToolHandler({ getRuntime: () => null, channel: 'mcp-stdio' }) });
@@ -266,7 +267,7 @@ describe('MCP case tools on the stdio server', () => {
   it("FleetToolHandler serves its case tools to this node's local clients only", async () => {
     const { rt, meta } = await setup();
     const handler = new FleetToolHandler({ nodeConfig: { name: 'web-01', profile: 'agent', capabilities: [], policy: {} }, caseTools: stdioTools(rt) });
-    assert.deepStrictEqual(handler.listTools().slice(-4).map((t) => t.name), ['list_cases', 'open_case', 'get_orientation', 'answer_question']);
+    assert.deepStrictEqual(handler.listTools().slice(-CASE_NAMES.length).map((t) => t.name), CASE_NAMES);
     assert.strictEqual((await handler.call('list_cases', {}, { origin: STDIO_ORIGIN }))[0].id, meta.id);
     const remote = { kind: 'frontdoor', grant_id: 'gr-1', client_id: 'dcr_x', scopes: ['cases:read', 'cases:write'] };
     await assert.rejects(handler.call('list_cases', {}, { origin: remote }), (e) => e instanceof ToolError && e.code === 'unknown_tool');
@@ -329,8 +330,13 @@ describe('MCP case tools through the running service (courier, R24)', () => {
     const c = connect({ handler: new CourierFleetClient({ courier, nodeConfig: { name: 'web-01' } }) });
     try {
       const names = (await c.request('tools/list')).result.tools.map((t) => t.name);
-      assert.deepStrictEqual(names.slice(-4), ['list_cases', 'open_case', 'get_orientation', 'answer_question']);
+      assert.deepStrictEqual(names.slice(-CASE_NAMES.length), CASE_NAMES);
       assert.strictEqual((await c.call('list_cases', {}))[0].id, meta.id);
+      const questions = await c.call('list_questions', { case: meta.id });
+      assert.strictEqual(questions.find((r) => r.questionId === q.free.id).answer, 'spoken');
+      assert.strictEqual(questions.find((r) => r.questionId === q.grant.id).answer, 'pressed');
+      // The stand-in core has no contact host.
+      assert.strictEqual((await c.call('get_presence', {})).error.error, 'contact_unavailable');
       const r = await c.call('answer_question', { case: meta.id, question_id: q.free.id, text: '250000' });
       assert.strictEqual(r.question_id, q.free.id);
       assert.strictEqual(rt.questions(meta.id).get(q.free.id).answer.channel, 'mcp-stdio');
@@ -397,7 +403,7 @@ describe('MCP case tools through the running service (courier, R24)', () => {
     assert.deepStrictEqual(open, []);
     assert.throws(() => {
       'use strict';
-      DEFS[3].inputSchema.properties.option_id.pattern = '.*';
+      DEFS.find((t) => t.name === 'answer_question').inputSchema.properties.option_id.pattern = '.*';
     }, TypeError);
   });
 

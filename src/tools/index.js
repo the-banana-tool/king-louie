@@ -68,6 +68,7 @@ function initializeTools() {
   require('./builtin/playbook-tool').registerPlaybookTools(toolRegistry);
   require('./builtin/ingest-tool').registerIngestTools(toolRegistry);
   require('./builtin/history-tools').registerHistoryTools(toolRegistry);
+  require('./builtin/management-tools').registerManagementTools(toolRegistry);
 
   initialized = true;
 }

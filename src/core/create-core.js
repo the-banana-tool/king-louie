@@ -91,6 +91,7 @@ const { initializeMesh } = require('../mesh');
 const { WorkflowEngine } = require('../workflows/workflow-engine');
 const PlannerExecutor = require('../workflows/planner-executor');
 const { MCPManager, createVaultEnvResolver } = require('../mcp');
+const { createCaseToolHandler } = require('../mcp/case-tools');
 const { BackgroundTaskManager } = require('../tasks/background-task-manager');
 const { createLogger } = require('../logging');
 const { DEFAULT_SETTINGS, mergeSettings } = require('./settings');
@@ -2151,6 +2152,9 @@ function createCore(deps = {}) {
         get caseContext() { return executorOptions.caseContext || null; },
         // Cases stage 3: a child run's { caseId }, checked by the case-turn guard.
         get guardContext() { return executorOptions.guardContext || null; },
+        // Management surfaces: the in-app case tool handler the chat's
+        // list_questions, get_presence and the other case tools call.
+        get caseManagement() { return inAppCaseToolHandler(); },
         // Recall stage H2: SearchHistory and ReadHistory read this run's chat.
         get history() {
           const cid = executorOptions.chatId;
@@ -2957,6 +2961,22 @@ function createCore(deps = {}) {
   // Cases stage 4: contact channels, presence and the ladder
   // (docs/superpowers/specs/2026-09-23-cases-stage4-channels.md §7).
   let contactHost = null;
+
+  // Management surfaces (spec 2026-09-30 §3.1): the case tools King Louie's
+  // chat serves, on the in-app channel. One handler per core, so its answer
+  // rate window spans turns; built on first use (caseRuntime is set up
+  // further down).
+  let inAppCaseTools = null;
+  function inAppCaseToolHandler() {
+    if (!inAppCaseTools) {
+      inAppCaseTools = createCaseToolHandler({
+        getRuntime: () => caseRuntime,
+        getContact: () => (contactHost ? contactHost.context() : null),
+        channel: 'in-app'
+      });
+    }
+    return inAppCaseTools;
+  }
 
   const start = async () => {
     migrateLegacyBridgeChatOrigins();

@@ -29,7 +29,8 @@
 const CLEARABLE_TOOLS = new Set([
   'Bash', 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch',
   'Git', 'Browser', 'ToolSearch', 'RequestTools',
-  'SearchHistory', 'ReadHistory'
+  'SearchHistory', 'ReadHistory',
+  'list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence'
 ]);
 
 // Default thresholds

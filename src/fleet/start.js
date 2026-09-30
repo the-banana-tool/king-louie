@@ -104,7 +104,10 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
       // clients (mcp reaches them through the courier, R24).
       // eslint-disable-next-line global-require -- agent profile only (the runbook profile never loads src/mcp/)
       caseTools = require('../mcp/case-tools').createCaseToolHandler({
-        getRuntime: () => core.context?.getCaseRuntime?.() || null, channel: 'mcp-stdio', audit: approvals.auditLedger || null
+        getRuntime: () => core.context?.getCaseRuntime?.() || null,
+        getContact: () => core.context?.getContact?.() || null,
+        channel: 'mcp-stdio',
+        audit: approvals.auditLedger || null
       });
     }
 
@@ -118,7 +121,11 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
       fleetService = new NodeFleetService({ handler, relayClient: approvals.relayClient, nodeConfig: { ...nodeConfig, nodeId: approvals.identity.nodeId }, bootId });
       // Cases stage 7 (spec §3.8): cases.<tool> for front-door clients, on the mcp-frontdoor channel.
       // eslint-disable-next-line global-require -- agent profile only (caseTools is set only there)
-      if (caseTools) require('../mcp/case-tools').registerNodeCaseMethods(fleetService, { getRuntime: () => core.context?.getCaseRuntime?.() || null, audit: approvals.auditLedger || null });
+      if (caseTools) require('../mcp/case-tools').registerNodeCaseMethods(fleetService, {
+        getRuntime: () => core.context?.getCaseRuntime?.() || null,
+        getContact: () => core.context?.getContact?.() || null,
+        audit: approvals.auditLedger || null
+      });
       fleetService.start();
     }
 

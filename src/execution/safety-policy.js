@@ -11,7 +11,10 @@ const {
 
 // Tools that only observe state. classifyToolCall gives any other tool that
 // passes its checks the `routine` tier.
-const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'status', 'get_state', 'list_machines', 'describe_machine', 'get_job', 'get_job_logs', 'SearchHistory', 'ReadHistory']);
+const READ_TOOLS = new Set([
+  'Read', 'Glob', 'Grep', 'status', 'get_state', 'list_machines', 'describe_machine', 'get_job', 'get_job_logs', 'SearchHistory', 'ReadHistory',
+  'list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence'
+]);
 
 // `$(...)`, backticks and process substitution (`<(...)`, `>(...)`) run a
 // command whose text only exists at run time, so no pattern list can say what

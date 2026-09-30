@@ -1,9 +1,12 @@
 // src/mcp/case-tools.js
 // MCP case tools (cases stage 7 spec §3.7; program §4.14): list cases, open
-// one, read its orientation, answer its open questions. An agent node serves
-// them to its own local MCP clients through its FleetToolHandler (stdio, and
-// `king-louie-service mcp` through the courier, R24) and, from Task 16, to
-// front-door clients through NodeFleetService's cases.<tool> methods.
+// one, read its orientation, list the open questions and the owner's
+// presence, answer a question. An agent node serves them to its own local
+// MCP clients through its FleetToolHandler (stdio, and `king-louie-service
+// mcp` through the courier, R24) and, from Task 16, to front-door clients
+// through NodeFleetService's cases.<tool> methods. King Louie's own chat
+// serves the same tools on the in-app channel (management surfaces spec
+// §3.1; src/tools/builtin/management-tools.js).
 //
 // Every refusal is a ToolError with a fixed sentence per code: no client
 // string, case text or runtime error message is echoed back (details go to
@@ -11,9 +14,9 @@
 const { createLogger } = require('../logging');
 const { ToolError } = require('../fleet/tool-definitions');
 const { listRecords } = require('../cases/ingest/files');
-const { CASE_MCP_TOOLS, STATUS_CHANGING, NEVER_OVER_MCP, untrusted, CASE_TOOL_SCOPE } = require('../cases/mcp-tool-definitions');
+const { CASE_MCP_TOOLS, STATUS_CHANGING, NEVER_OVER_MCP, untrusted, answerClass, CASE_TOOL_SCOPE } = require('../cases/mcp-tool-definitions');
 
-const CHANNELS = new Set(['mcp-stdio', 'mcp-frontdoor']);
+const CHANNELS = new Set(['mcp-stdio', 'mcp-frontdoor', 'in-app']);
 const RATE_WINDOW_MS = 60 * 1000;
 
 // A ToolError, so FleetToolHandler, the courier and NodeFleetService pass its
@@ -67,7 +70,28 @@ function notAnswerable(q, channel) {
   return null;
 }
 
-function createCaseToolHandler({ getRuntime, channel, audit = null, log = createLogger('mcp/case-tools'), now = () => Date.now(), rateLimit = 30 }) {
+// A payload type goes back bare only when it looks like one (records are
+// Bash-writable); anything else is null.
+const cleanType = (t) => (typeof t === 'string' && /^[a-z][a-z:-]{0,31}$/.test(t) ? t : null);
+
+// The ladder entry's public part (contact:ladderState's shape), or null.
+function ladderOf(state, caseId, questionId) {
+  const e = isObj(state) ? state[`${caseId}/${questionId}`] : null;
+  if (!isObj(e)) return null;
+  return {
+    step: e.step ?? null,
+    nextAt: e.nextAt ?? null,
+    nextChannel: e.nextChannel ?? null,
+    expired: e.expired === true,
+    exhausted: e.exhausted === true,
+    attempts: Array.isArray(e.attempts) ? e.attempts.map((a) => ({ channel: a?.channel ?? null, at: a?.at ?? null, outcome: a?.outcome ?? null })) : []
+  };
+}
+
+// `getContact` is core.context.getContact (the ladder and presence), or
+// null where contact is off: list_questions then gives no ladder state and
+// get_presence refuses.
+function createCaseToolHandler({ getRuntime, getContact = null, channel, audit = null, log = createLogger('mcp/case-tools'), now = () => Date.now(), rateLimit = 30 }) {
   if (!CHANNELS.has(channel)) throw new Error(`channel must be one of ${[...CHANNELS].join(', ')}`);
   const tools = CASE_MCP_TOOLS.map(({ tier, ...def }) => def);
   const byName = new Map(CASE_MCP_TOOLS.map((t) => [t.name, t]));
@@ -92,6 +116,13 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
     } catch (err) {
       if (err && err.code === 'CASE_NOT_FOUND') throw fail('case_not_found', 'no such case on this node');
       throw err;
+    }
+  };
+  const contact = () => {
+    try {
+      return typeof getContact === 'function' ? getContact() || null : null;
+    } catch {
+      return null;
     }
   };
   const openQuestions = (rt, id) => (typeof rt.questions === 'function' ? rt.questions(id).open() : []);
@@ -151,6 +182,58 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
         })),
         lastJournal: rt.records(meta.id).lastJournal()
       })
+    };
+  }
+
+  // Every open question in the open cases (or in one case), oldest first,
+  // with the shared spoken/pressed class. Text, options and titles can be
+  // model-authored: they go back inside the untrusted wrapper.
+  function listQuestions(rt, ref) {
+    const cases = ref === undefined ? rt.listCases() : [caseOf(rt, ref)];
+    let ladder = null;
+    const c = contact();
+    if (c && typeof c.ladderState === 'function') {
+      try {
+        ladder = c.ladderState();
+      } catch (err) {
+        log.warn(`Reading the contact ladder failed: ${err && err.message}`);
+      }
+    }
+    const rows = [];
+    for (const meta of cases) {
+      if (meta.status === 'done' || meta.status === 'abandoned') continue;
+      for (const q of openQuestions(rt, meta.id)) {
+        const payload = isObj(q.payload) ? q.payload : {};
+        rows.push({
+          caseId: meta.id,
+          questionId: q.id,
+          kind: q.kind,
+          type: cleanType(payload.type),
+          urgency: q.urgency,
+          createdAt: q.createdAt || null,
+          expiresAt: q.expiresAt || null,
+          answer: answerClass(q),
+          ladder: ladderOf(ladder, meta.id, q.id),
+          data: untrusted({ caseTitle: meta.title, text: q.text, options: Array.isArray(q.options) ? q.options : [] })
+        });
+      }
+    }
+    return rows.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  }
+
+  // The presence the ladder uses (contact's presenceStatus), without the
+  // ladder lease's host, pid and path.
+  function getPresence() {
+    const c = contact();
+    if (!c || typeof c.presenceStatus !== 'function') throw fail('contact_unavailable', 'contact is not available on this node');
+    const s = c.presenceStatus();
+    return {
+      presentChannel: s.presentChannel ?? null,
+      away: s.away === true,
+      quiet: s.quiet === true,
+      timeZoneSource: s.timeZoneSource ?? null,
+      signals: s.signals ?? null,
+      ladderRunsHere: s.ladder ? s.ladder.runsHere !== false : null
     };
   }
 
@@ -221,6 +304,8 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
         case 'list_cases': return listCases(rt);
         case 'open_case': return openCase(rt, args.case);
         case 'get_orientation': return untrusted({ text: rt.orientation(caseOf(rt, args.case).id) });
+        case 'list_questions': return listQuestions(rt, args.case);
+        case 'get_presence': return getPresence();
         default: return await answerQuestion(rt, args);
       }
     } catch (err) {
@@ -239,7 +324,8 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
 
 // What F4's router adds to a case tool's arguments (FleetRouter._callExtra):
 // its own origin and max_bytes, and, for a case-keyed tool, the client's
-// routing argument `machine` (list_cases fans out and takes no machine).
+// routing argument `machine` (list_cases fans out and takes no machine;
+// list_questions takes one only when it names it).
 const ROUTER_FIELDS = Object.freeze(['origin', 'max_bytes']);
 const ROUTING_FIELDS = Object.freeze([...ROUTER_FIELDS, 'machine']);
 
@@ -251,8 +337,8 @@ const ROUTING_FIELDS = Object.freeze([...ROUTER_FIELDS, 'machine']);
 // mcp-frontdoor channel (its own rate limit; it repeats every front-door
 // refusal). The router's fields are removed; anything else is checked
 // against the tool's schema.
-function registerNodeCaseMethods(nodeFleetService, { getRuntime, audit = null, log } = {}) {
-  const handler = createCaseToolHandler({ getRuntime, channel: 'mcp-frontdoor', audit, ...(log ? { log } : {}) });
+function registerNodeCaseMethods(nodeFleetService, { getRuntime, getContact = null, audit = null, log } = {}) {
+  const handler = createCaseToolHandler({ getRuntime, getContact, channel: 'mcp-frontdoor', audit, ...(log ? { log } : {}) });
   for (const name of handler.names) {
     if (!Object.hasOwn(CASE_TOOL_SCOPE, name)) continue;
     const strip = name === 'list_cases' ? ROUTER_FIELDS : ROUTING_FIELDS;
@@ -272,6 +358,7 @@ module.exports = {
   CaseToolError,
   createCaseToolHandler,
   untrusted,
+  answerClass,
   notAnswerable,
   registerNodeCaseMethods
 };

@@ -10,6 +10,7 @@ const ToolExecutor = require('../src/execution/tool-executor');
 const AgentLoop = require('../src/execution/agent-loop');
 const { CaseRuntime } = require('../src/cases');
 const { CASE_TOOL_NAMES } = require('../src/cases/chat-integration');
+const { MANAGEMENT_TOOL_NAMES } = require('../src/tools/builtin/management-tools');
 const { WakeupStore } = require('../src/cases/wakeups');
 const { Budget } = require('../src/cases/budget');
 const { parseOrient } = require('../src/cases/turn-runner');
@@ -144,6 +145,8 @@ describe('runDueWakeups', () => {
     const offered = calls.judgeTools[0];
     for (const name of ['Read', 'Glob', 'Grep', ...CASE_TOOL_NAMES]) assert.ok(offered.includes(name), name);
     for (const name of ['Bash', 'AskUser', 'Write']) assert.ok(!offered.includes(name), name);
+    // The owner's management tools never reach an unattended turn (management surfaces spec §3.1).
+    for (const name of MANAGEMENT_TOOL_NAMES) assert.ok(!offered.includes(name) && !opts.allowedToolNames.has(name), name);
     assert.deepStrictEqual(calls.results.map(([name, r]) => [name, r.ok]), [['Ledger', true]]);
   });
 

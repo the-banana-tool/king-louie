@@ -78,6 +78,12 @@ describe('GeminiProvider', () => {
     assert.strictEqual(formatted[0].functionDeclarations[0].name, 'Bash');
   });
 
+  it('declares no parameters for a tool that takes no arguments', () => {
+    const provider = new GeminiProvider('test-key-minimum-length');
+    const [{ functionDeclarations: [decl] }] = provider.formatTools([{ name: 'get_presence', description: 'Presence', parameters: { type: 'object', properties: {} } }]);
+    assert.deepStrictEqual(decl, { name: 'get_presence', description: 'Presence' });
+  });
+
   it('returns undefined for empty tools', () => {
     const provider = new GeminiProvider('test-key-minimum-length');
     assert.strictEqual(provider.formatTools([]), undefined);
