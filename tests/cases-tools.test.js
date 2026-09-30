@@ -179,7 +179,8 @@ describe('case-mode helpers', () => {
     assert.ok(CASE_BLOCKED_TOOL_NAMES.includes('SpawnAgent'));
     assert.ok(CASE_BLOCKED_TOOL_NAMES.includes('BackgroundTask'));
     // message and the sessions_* tools are registered by createCore, not initializeTools.
-    const coreOnly = new Set(['sessions_spawn', 'sessions_list', 'sessions_history', 'message']);
+    // The fleet tools are registered only while a service's fleet node runs.
+    const coreOnly = new Set(['sessions_spawn', 'sessions_list', 'sessions_history', 'message', 'run_runbook', 'delegate', 'send_to_job', 'cancel_job']);
     for (const name of CASE_BLOCKED_TOOL_NAMES) assert.ok(toolRegistry.get(name) || coreOnly.has(name), `${name} is not a registered tool`);
     const base = [{ name: 'Read' }, ...CASE_BLOCKED_TOOL_NAMES.map((name) => ({ name }))];
     assert.deepStrictEqual(shapeToolDefinitions(base, true, toolRegistry).map((d) => d.name), ['Read', ...CASE_TOOL_NAMES]);
@@ -442,7 +443,8 @@ describe('stage 2 confinement helpers', () => {
   it('blocks tools that reach other sessions or change the tool list in every case turn', () => {
     assert.deepStrictEqual([...CASE_BLOCKED_TOOL_NAMES], [
       'SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron',
-      'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas'
+      'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas',
+      'run_runbook', 'delegate', 'send_to_job', 'cancel_job'
     ]);
     assert.match(CASE_BLOCKED_TOOL_ERROR, /not available in case turns/);
   });

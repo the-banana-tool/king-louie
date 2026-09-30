@@ -68,11 +68,11 @@ Design:
 - Fleet tool approvals in the chat follow the usual tool-approval rules; the phone signature is additional,
   not a replacement.
 
-- [ ] Test: a standalone core's chat tool list has no fleet tools; a service core's does; wake-ups have
+- [x] Test: a standalone core's chat tool list has no fleet tools; a service core's does; wake-ups have
       none.
-- [ ] Test: an unsafe `run_runbook` from the chat origin goes to the approval requester (fake phone) and
+- [x] Test: an unsafe `run_runbook` from the chat origin goes to the approval requester (fake phone) and
       runs only on `=== true`; an unknown origin kind is still refused.
-- [ ] Covering tests pass; commit `feat(fleet): fleet tools in a service-run chat`.
+- [x] Covering tests pass; commit `feat(fleet): fleet tools in a service-run chat`.
 
 ## Task 8: Docs and the full suite
 

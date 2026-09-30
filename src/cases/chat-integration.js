@@ -10,10 +10,15 @@ const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend',
 // BackgroundTask, sessions_spawn, RemoteDispatch and Cron start a run with
 // no caseContext; message sends text into a gateway session that has none;
 // sessions_list and sessions_history read other sessions; RequestTools and
-// ToolSearch inject tools; Canvas drives the UI.
+// ToolSearch inject tools; Canvas drives the UI. The acting fleet tools of a
+// service-run chat (management surfaces §3.6) start or steer a run outside
+// the case: run_runbook and delegate start one (delegate an unguarded agent
+// session, like SpawnAgent), send_to_job and cancel_job reach one. A case
+// runs a runbook through the Executor tool instead.
 const CASE_BLOCKED_TOOL_NAMES = Object.freeze([
   'SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron',
-  'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas'
+  'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas',
+  'run_runbook', 'delegate', 'send_to_job', 'cancel_job'
 ]);
 const CASE_BLOCKED_TOOL_ERROR = 'This tool is not available in case turns: it starts another run, reaches another session, or changes the tool list. Do the work in this turn with the case tools and the other tools.';
 

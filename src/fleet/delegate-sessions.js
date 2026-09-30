@@ -11,6 +11,7 @@ const { isPathUnderRoots, realResolve } = require('../platform/path-roots');
 const { EvidenceLedger } = require('../verification/evidence-ledger');
 const { ToolError, approvalOrigin } = require('./fleet-tools');
 const { covers } = require('./scope-rules');
+const { MCP_TOOLS } = require('./tool-definitions');
 
 const log = createLogger('fleet/delegate');
 
@@ -30,7 +31,10 @@ const CLOSED_RETAIN_MS = 24 * 3600000;
 // chats (Telegram, Slack, â€¦). A delegate turn, and every sub-agent it
 // starts, runs without the tools that list, read, post to or spawn them (a
 // spawned owner session would run outside the delegate's own tool limits).
-const DELEGATE_EXCLUDED_TOOLS = Object.freeze(['sessions_list', 'sessions_history', 'message', 'sessions_spawn']);
+// The fleet tools a service-run chat gets (src/tools/builtin/fleet-chat-tools.js,
+// management surfaces spec §3.6) are left out too: a delegate's client
+// reaches the fleet only through its own grant, never as the node's chat.
+const DELEGATE_EXCLUDED_TOOLS = Object.freeze(['sessions_list', 'sessions_history', 'message', 'sessions_spawn', ...MCP_TOOLS.map((t) => t.name)]);
 
 // Every registered tool but the excluded ones, read at each turn so a tool
 // registered after start (MCP) is included.
@@ -47,9 +51,13 @@ function delegateToolNames(registry) {
 // its unsafe calls go to the phone, like stdio runbooks. Ruling T26-m19: it
 // fails closed, so every other origin (a front-door client, a malformed
 // origin, an unknown kind) is refused unless it covers fleet:unsafe here.
+// Management surfaces §3.6: the service's own chat (kind 'service-chat',
+// set by the host in fleet-chat-tools.js) is a session the node started
+// itself, so it is treated like stdio.
+const LOCAL_ORIGIN_KINDS = Object.freeze(['stdio', 'service-chat']);
 function shouldRefuseUnsafe(origin, nodeConfig) {
   if (origin === null || origin === undefined) return false;
-  if (typeof origin === 'object' && origin.kind === 'stdio') return false;
+  if (typeof origin === 'object' && LOCAL_ORIGIN_KINDS.includes(origin.kind)) return false;
   return !covers(origin && origin.scopes, 'fleet:unsafe', nodeConfig && nodeConfig.name);
 }
 

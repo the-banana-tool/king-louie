@@ -4,6 +4,7 @@ const AnthropicOAuth = require('../auth/anthropic-oauth');
 const ProviderFactory = require('../providers/provider-factory');
 const InferenceRouter = require('../providers/inference-router');
 const { initializeTools, toolRegistry } = require('../tools');
+const { registerFleetChatTools, unregisterFleetChatTools, FLEET_CHAT_TOOL_NAMES } = require('../tools/builtin/fleet-chat-tools');
 const { registerSecretDataDir } = require('../tools/utils');
 const { tokenizeCommand } = require('./llm-command');
 const { createModelChoices } = require('./model-choices');
@@ -2155,6 +2156,15 @@ function createCore(deps = {}) {
         // Management surfaces: the in-app case tool handler the chat's
         // list_questions, get_presence and the other case tools call.
         get caseManagement() { return inAppCaseToolHandler(); },
+        // Management surfaces ง3.6: the service's own FleetToolHandler and
+        // this run's chat, for the fleet tools (fleet-chat-tools.js builds
+        // the origin from these, never from a tool's parameters); null
+        // while the core has no fleet handler (standalone).
+        get fleetChat() {
+          return fleetToolHandler
+            ? { handler: fleetToolHandler, session: executorOptions.chatId ? String(executorOptions.chatId) : null }
+            : null;
+        },
         // Recall stage H2: SearchHistory and ReadHistory read this run's chat.
         get history() {
           const cid = executorOptions.chatId;
@@ -2979,6 +2989,21 @@ function createCore(deps = {}) {
     return inAppCaseTools;
   }
 
+  // Management surfaces ง3.6: the fleet tools in a service-run chat. Only
+  // startFleetNode (the agent profile) hands a handler in; while one is set
+  // the fleet chat tools are registered, and setting null removes them, so
+  // a standalone core never lists them.
+  let fleetToolHandler = null;
+  function setFleetToolHandler(handler) {
+    fleetToolHandler = handler || null;
+    if (fleetToolHandler) registerFleetChatTools(toolRegistry);
+    else unregisterFleetChatTools(toolRegistry);
+    if (contextAssembler) {
+      if (fleetToolHandler) contextAssembler.index(toolRegistry.getFunctionDefinitions()).catch(() => {});
+      else contextAssembler.removeTools(FLEET_CHAT_TOOL_NAMES);
+    }
+  }
+
   const start = async () => {
     migrateLegacyBridgeChatOrigins();
     initializeTools();
@@ -3296,6 +3321,8 @@ function createCore(deps = {}) {
     getExecutorRegistry: () => executorRegistry,
     getPlaybookManager: () => caseRuntime.playbooks || null,
     getContact: () => (contactHost ? contactHost.context() : null),
+    setFleetToolHandler,
+    getFleetToolHandler: () => fleetToolHandler,
     // The signed-approval requester (program ยง4.12), or null: always null in
     // 'allow' and 'deny' modes (the Electron host), and null while no device
     // is enrolled or no relay link can deliver.
