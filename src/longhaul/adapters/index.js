@@ -7,6 +7,9 @@ const { createOracleAdapter } = require('./oracle');
 const FACTORIES = {
   // Loaded on use: it opens node:sqlite, which the other adapters never need.
   'kl-recall': (config) => require('./kl-recall').createKlRecallAdapter(config),
+  // H3 probes (need `longhaul embed` first): fused, and cosine alone.
+  'kl-recall-vec': (config) => require('./kl-recall-vec').createKlRecallVecAdapter(config),
+  'kl-recall-vec-only': (config) => require('./kl-recall-vec').createKlRecallVecAdapter({ ...config, vectorOnly: true }),
   'sliding-window': createSlidingWindowAdapter,
   oracle: createOracleAdapter
 };

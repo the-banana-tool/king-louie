@@ -242,6 +242,17 @@ Built-in adapters:
 | `oracle` | The evidence messages plus the tail | Upper bound on answerability |
 | `external:<name>` | A subprocess speaking JSON lines over stdio | Mem0, Letta, others, later |
 
+**B0 addendum (2026-09-30): `kl-recall-vec` is an H3 probe, not a
+candidate system.** `kl-recall-vec` (and `kl-recall-vec-only`, cosine
+without BM25) is `kl-recall` plus a vector list fused by the retriever's
+reciprocal rank fusion (recall spec §6.3 steps 2 and 3), with vectors from a
+hosted embedder (OpenAI `text-embedding-3-small`) cached by `longhaul embed`
+under `LONGHAUL_HOME/private/embeddings/`. It measures how much a strong
+off-the-shelf semantic signal adds over BM25, so H3 can size its investment
+in a local embedder. It is never published as a result: it sends every chunk
+of a session to a provider, which King Louie's recall never does, and it is
+not what H3 ships.
+
 `evidenceSeqsShown` is how an adapter reports which message sequences its
 context contains; for `kl-recall` it comes from provenance, for others from
 construction. It is what makes evidence recall measurable without a judge.

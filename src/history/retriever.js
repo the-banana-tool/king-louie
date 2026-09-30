@@ -1,17 +1,22 @@
 // src/history/retriever.js
-// Retrieval: the ranking step inside recall (CONTEXT.md). Stage H2 runs
-// spec §6.3 steps 1 (BM25), 3 with one signal, 4 (kind weight), 5
-// (recency), 7 (exact-text dedupe) and 8 (per-message cap, token budget).
-// H3 adds a vector list to _fuse, the rerank and the cosine dedupe; the
-// signature of retrieve() stays the same.
+// Retrieval: the ranking step inside recall (CONTEXT.md). Spec §6.3 steps 1
+// (BM25), 2 (a vector list, when one is given), 3 (fusion), 4 (kind weight),
+// 5 (recency), 7 (exact-text dedupe) and 8 (per-message cap, token budget).
+// Step 2 takes the vector ranks from the caller (vectorHits) or from the
+// vectorSearch callback; H3 adds the embedder behind that callback, the
+// rerank and the cosine dedupe. The signature of retrieve() stays the same.
 const { HISTORY_DEFAULTS } = require('./settings');
 
 const DAY_MS = 86400000;
+const rankOf = (hit) => (Number.isFinite(hit.bm25Rank) ? hit.bm25Rank : hit.vectorRank);
 
 class Retriever {
-  constructor({ store, estimator }) {
+  // vectorSearch (optional): async ({ query, chatIds, kinds, upToSeq,
+  // settings }) => [{ chunkId, vectorRank }], ranks 1-based.
+  constructor({ store, estimator, vectorSearch = null }) {
     this.store = store;
     this.estimator = estimator;
+    this.vectorSearch = typeof vectorSearch === 'function' ? vectorSearch : null;
   }
 
   // Step 1: BM25 over the scope, ranks 1-based.
@@ -21,38 +26,65 @@ class Retriever {
       .map((hit, i) => ({ chunkId: hit.chunkId, bm25Rank: i + 1 }));
   }
 
-  // Step 3: reciprocal rank fusion over the lexical lists, one per query
-  // text: score = sum of 1 / (rrfK + rank). With one list, its ranks alone.
+  // Step 2: the vector list, at most vectorTopK, ranked 1-based in the order
+  // given when a hit carries no vectorRank of its own.
+  _vector(vectorHits, settings) {
+    if (!Array.isArray(vectorHits)) return [];
+    return vectorHits
+      .filter((h) => h && Number.isInteger(h.chunkId))
+      .slice(0, settings.vectorTopK)
+      .map((h, i) => ({ chunkId: h.chunkId, vectorRank: Number.isFinite(h.vectorRank) && h.vectorRank > 0 ? h.vectorRank : i + 1 }));
+  }
+
+  // Step 3: reciprocal rank fusion over every list (one BM25 list per query
+  // text, plus the vector list): score = sum of 1 / (rrfK + rank). With one
+  // list, its ranks alone. A chunk keeps its best rank on each signal.
   _fuse(lists, settings) {
     const byId = new Map();
     for (const list of lists) {
       for (const hit of list) {
-        const cur = byId.get(hit.chunkId) || { chunkId: hit.chunkId, bm25Rank: hit.bm25Rank, fused: 0 };
-        cur.fused += 1 / (settings.rrfK + hit.bm25Rank);
-        cur.bm25Rank = Math.min(cur.bm25Rank, hit.bm25Rank);
+        const cur = byId.get(hit.chunkId) || { chunkId: hit.chunkId, bm25Rank: null, vectorRank: null, fused: 0 };
+        cur.fused += 1 / (settings.rrfK + rankOf(hit));
+        for (const key of ['bm25Rank', 'vectorRank']) {
+          if (Number.isFinite(hit[key])) cur[key] = cur[key] === null ? hit[key] : Math.min(cur[key], hit[key]);
+        }
         byId.set(hit.chunkId, cur);
       }
     }
-    return [...byId.values()].sort((a, b) => b.fused - a.fused || a.bm25Rank - b.bm25Rank);
+    const best = (h) => Math.min(h.bm25Rank ?? Infinity, h.vectorRank ?? Infinity);
+    return [...byId.values()].sort((a, b) => b.fused - a.fused || best(a) - best(b));
   }
 
   async retrieve({
     query, contextQueries = [], chatIds, kinds = null, excludeMessageIds = [], budgetTokens = null, upToSeq = null,
-    settings, model = null, now = Date.now()
+    settings, model = null, now = Date.now(), vectorHits = null, lexical = true
   } = {}) {
-    const s = settings || HISTORY_DEFAULTS.recall;
+    const s = { ...HISTORY_DEFAULTS.recall, ...(settings || {}) };
     if (!String(query || '').trim()) return [];
     const texts = [query, ...(contextQueries || [])].filter((t) => String(t || '').trim());
-    const fused = this._fuse(texts.map((text) => this._lexical({ query: text, chatIds, kinds, upToSeq, settings: s })), s);
+    // lexical: false leaves BM25 out (a vector-only probe; LongHaul).
+    const lists = lexical === false ? [] : texts.map((text) => this._lexical({ query: text, chatIds, kinds, upToSeq, settings: s }));
+    let vectors = vectorHits;
+    if (!Array.isArray(vectors) && this.vectorSearch) vectors = await this.vectorSearch({ query, chatIds, kinds, upToSeq, settings: s });
+    const vectorList = this._vector(vectors, s);
+    if (vectorList.length) lists.push(vectorList);
+    const fused = this._fuse(lists, s);
     if (!fused.length) return [];
 
     const byId = new Map(this.store.chunks(fused.map((h) => h.chunkId)).map((c) => [c.id, c]));
     const excluded = new Set(excludeMessageIds || []);
+    // A vector list comes from outside the store's own filters: hold every
+    // hit to the scope, the kinds and upToSeq here (BM25 hits already are).
+    const chatScope = Array.isArray(chatIds) && chatIds.length ? new Set(chatIds.map(String)) : null;
+    const kindScope = Array.isArray(kinds) && kinds.length ? new Set(kinds.map(String)) : null;
+    const inScope = (chunk) => (!chatScope || chatScope.has(chunk.chatId))
+      && (!kindScope || kindScope.has(chunk.kind))
+      && (!Number.isInteger(upToSeq) || chunk.seq < upToSeq);
     const nowMs = typeof now === 'number' ? now : Date.parse(now);
     const scored = [];
     for (const hit of fused) {
       const chunk = byId.get(hit.chunkId);
-      if (!chunk || excluded.has(chunk.messageId)) continue;
+      if (!chunk || excluded.has(chunk.messageId) || !inScope(chunk)) continue;
       // Step 4: kind weight.
       const kindWeight = Number.isFinite(s.kindWeights[chunk.kind]) ? s.kindWeights[chunk.kind] : 1;
       // Step 5: recency, (1 - w) + w · exp(-age / halfLife).
@@ -62,7 +94,7 @@ class Retriever {
       scored.push({
         chunk,
         score: hit.fused * kindWeight * recency,
-        signals: { bm25Rank: hit.bm25Rank, vectorRank: null, rerank: null, recency, kindWeight }
+        signals: { bm25Rank: hit.bm25Rank, vectorRank: hit.vectorRank, rerank: null, recency, kindWeight }
       });
     }
     scored.sort((a, b) => b.score - a.score || a.chunk.id - b.chunk.id);

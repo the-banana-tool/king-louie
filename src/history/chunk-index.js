@@ -168,6 +168,13 @@ function chunksOfMessage(db, messageId) {
     .all(String(messageId)).map(chunkRow);
 }
 
+// Every chunk of a chat in reading order (seq, then idx). Used to embed a
+// chat's chunks (LongHaul's embed command; H3's indexer).
+function chunksOfChat(db, chatId) {
+  return prepared(db, `SELECT ${CHUNK_COLUMNS} FROM chunks c JOIN messages m ON m.id = c.message_id WHERE c.chat_id = ? ORDER BY m.seq, c.idx`)
+    .all(String(chatId)).map(chunkRow);
+}
+
 // The other half of a tool exchange: a tool call's result, or a result's
 // call. Matched by meta.toolUseId when both sides carry one (imported
 // sessions), else the nearest message of the other sender with the same
@@ -229,5 +236,5 @@ function setCalibration(db, model, charsPerToken, samples) {
 module.exports = {
   pairedToolMessageId,
   SCHEMA_V2_SQL, prepared, insertChunks, BACKFILL_KEY, readBackfill, writeBackfill, clearBackfill,
-  ftsQuery, searchText, getChunks, chunksOfMessage, messageChunkCounts, lastSeq, historyChars, getCalibration, setCalibration
+  ftsQuery, searchText, getChunks, chunksOfMessage, chunksOfChat, messageChunkCounts, lastSeq, historyChars, getCalibration, setCalibration
 };
