@@ -44,7 +44,7 @@ class ContextBuilder {
   // vectorHits / lexical pass through to Retriever#retrieve (a caller that
   // ranks by vector itself: LongHaul's kl-recall-vec).
   // reranker, when given, is used by spec §6.3 step 6 for this build only.
-  async build({ chatId, message = '', model = null, upToSeq = null, vectorHits = null, lexical = true, reranker = null } = {}) {
+  async build({ chatId, message = '', model = null, upToSeq = null, vectorHits = null, lexical = true, reranker = null, vectorOf = null } = {}) {
     const id = String(chatId || '');
     const { recall } = mergeHistorySettings((this.getSettings() || {}).history);
     const given = Number.isInteger(upToSeq) && upToSeq > 0;
@@ -63,6 +63,7 @@ class ContextBuilder {
     const contextQueries = separate ? previous : [];
     const tail = this._tail(scanned, { chatId: id, limit, recall, query, model });
 
+    const retrieval = {};
     let recalled = { text: '', chunkIds: [], estTokens: 0 };
     let recalledExcerpts = 0;
     if (recall.enabled && query.trim()) {
@@ -78,7 +79,9 @@ class ContextBuilder {
         now: asOf,
         vectorHits,
         lexical,
-        reranker
+        reranker,
+        vectorOf,
+        stats: retrieval
       });
       if (hits.length) {
         const chunks = hits.map((h) => h.chunk);
@@ -99,7 +102,10 @@ class ContextBuilder {
         recalledExcerpts,
         estTokens: { tail: tail.estTokens, recalled: recalled.estTokens },
         fullHistoryEstTokens: this.estimator.fromChars(this.store.historyChars(id, { upToSeq: limit }), model),
-        embedder: 'none',
+        // The embedder key this turn's vectors came from, and why there were
+        // none (spec §7; the recall line reads both).
+        embedder: retrieval.embedder || 'none',
+        vectorsSkipped: retrieval.vectorsSkipped ?? null,
         scope: 'chat',
         query,
         queryFallbackTurns: fallback.length
