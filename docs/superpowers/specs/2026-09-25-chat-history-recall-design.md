@@ -544,7 +544,9 @@ Findings the settings rest on:
   2.35 times as much evidence in the BM25 top 50.
 - **The tail.** 9 of 24 questions under 10K tokens back got an empty tail
   (above). With 16 messages and tool results capped at 1,000 tokens, recall
-  under 10K rose from 0.69 to 0.89, p90 under 13K total tokens. A larger
+  under 10K rose from 0.69 to 0.89 with whole-message completion on
+  (measured before it was left off), and is 0.79 with the shipped defaults;
+  p90 under 13K total tokens either way. A larger
   `tailTokens` did not help: the old tail used a median 1.3K of its 6K.
 - **Whole messages.** Taking a small message whole raised evidence recall but
   not containment: the chunk holding the answer was usually already shown.
