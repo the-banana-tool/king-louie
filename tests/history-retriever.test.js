@@ -340,6 +340,38 @@ describe('Retriever', () => {
       }
     });
 
+    it('a reranker slower than rerank.maxMs is skipped for the turn and logged, with the pair count and no text', async () => {
+      const { addSink } = require('../src/logging');
+      const s = setup(msgs);
+      t = s.t;
+      const fused = order(await s.retriever.retrieve(opts({ settings: recall() })));
+      let late;
+      const slow = (query, chunks) => new Promise((resolve) => {
+        late = setTimeout(() => resolve(chunks.map((c, i) => i)), 1000);
+      });
+      const records = [];
+      const remove = addSink((r) => records.push(r));
+      const started = Date.now();
+      let hits;
+      try {
+        hits = await s.retriever.retrieve(opts({ settings: recall({ rerank: { enabled: true, topM: 3, maxMs: 30 } }), reranker: slow }));
+      } finally {
+        remove();
+        clearTimeout(late);
+      }
+      assert.ok(Date.now() - started < 800, 'the turn does not wait for the reranker');
+      assert.deepStrictEqual(order(hits), fused, 'the fused order is kept');
+      assert.ok(hits.every((h) => h.signals.rerank === null));
+      const warn = records.find((r) => r.level === 'warn' && /maxMs/.test(r.message));
+      assert.ok(warn, 'a warning is logged');
+      assert.strictEqual(warn.meta.pairs, 3);
+      assert.ok(!/gate/i.test(warn.line), 'no query or chunk text in the log');
+
+      // Within maxMs the rerank applies.
+      const quick = await s.retriever.retrieve(opts({ settings: recall({ rerank: { enabled: true, topM: 3, maxMs: 2000 } }), reranker: preferring([fused[2]]) }));
+      assert.strictEqual(order(quick)[0], fused[2]);
+    });
+
     it('the budget and per-message cap apply to the reranked order', async () => {
       const s = setup(msgs);
       t = s.t;

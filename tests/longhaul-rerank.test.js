@@ -112,6 +112,7 @@ describe('kl-recall-rerank', () => {
     const first = createKlRecallRerankAdapter({ tmpRoot: home.tmp, privateRoot: home.private, recall: { ...REF, rerank: { topM: 5 } }, scorer });
     assert.strictEqual(first.describe().recall.rerank.enabled, true);
     assert.strictEqual(first.describe().recall.rerank.topM, 5);
+    assert.strictEqual(first.describe().recall.rerank.maxMs, 600000, 'a cold-cache rerank is not cut off by maxMs');
     const a = await runAll(first, session, questions);
     assert.ok(scorer.calls.length > 0 && scorer.calls.every((n) => n <= 5), 'at most topM pairs per question');
     assert.ok(first.stats.misses > 0);

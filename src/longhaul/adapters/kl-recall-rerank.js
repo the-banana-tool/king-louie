@@ -13,12 +13,16 @@ const {
   DEFAULT_RERANK_MODEL, rerankCacheDir, RerankCache, loadCrossEncoder, createCachedReranker, newRerankStats
 } = require('../rerank');
 
+const PROBE_RERANK_MAX_MS = 10 * 60 * 1000;
+
 function createKlRecallRerankAdapter({
   recall = {}, privateRoot, candidates = 'bm25', rerankModel = DEFAULT_RERANK_MODEL, scorer = null, ...rest
 } = {}) {
   if (typeof privateRoot !== 'string' || !privateRoot) throw new Error('kl-recall-rerank needs a privateRoot (LONGHAUL_HOME/private)');
   if (candidates !== 'bm25' && candidates !== 'fused') throw new Error(`kl-recall-rerank candidates must be bm25 or fused, got ${JSON.stringify(candidates)}`);
-  const withRerank = { ...recall, rerank: { enabled: true, topM: 20, ...(recall.rerank || {}) } };
+  // maxMs: the probe measures what the rerank selects, so a cold cache
+  // (a real cross-encoder call, about 2 s at topM 100) must not time out.
+  const withRerank = { ...recall, rerank: { enabled: true, topM: 20, maxMs: PROBE_RERANK_MAX_MS, ...(recall.rerank || {}) } };
   const cacheDirFor = (sessionId) => rerankCacheDir(privateRoot, sessionId, rerankModel);
   // The cross-encoder loads on the first cache miss, once per adapter.
   let loading = null;

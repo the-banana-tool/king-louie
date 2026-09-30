@@ -37,8 +37,11 @@ const HISTORY_DEFAULTS = Object.freeze({
     // Step 6: rescore the top topM candidates with a reranker callback given
     // to the Retriever. Inert without one (H3; LongHaul's kl-recall-rerank).
     // topM must exceed what the budget selects (60-90 chunks at 6000 tokens)
-    // to change anything.
-    rerank: Object.freeze({ enabled: false, topM: 20 }),
+    // to change anything. maxMs: a reranker slower than this is skipped for
+    // the turn (spec §15). model is the cross-encoder H3 loads; the Retriever
+    // never reads it (the callback owns its model), it is here so the
+    // settings match spec §14.
+    rerank: Object.freeze({ enabled: false, model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 20, maxMs: 2000 }),
     // Measured and left off (spec §6.7); 0 / false = off.
     // completeMessageTokens: take a small message whole on its first hit;
     // pairToolMessages (only with it): a tool call brings its result.
@@ -71,6 +74,7 @@ const atLeast = (value, fallback, min, integer = false) => {
 const positive = (value, fallback) => (finite(value) && value > 0 ? value : fallback);
 const fraction = (value, fallback) => (finite(value) && value >= 0 && value <= 1 ? value : fallback);
 const flag = (value, fallback) => (typeof value === 'boolean' ? value : fallback);
+const text = (value, fallback) => (typeof value === 'string' && value.trim() ? value : fallback);
 
 function mergeHistorySettings(source) {
   const src = isObject(source) ? source : {};
@@ -105,7 +109,9 @@ function mergeHistorySettings(source) {
       vectorTopK: atLeast(r.vectorTopK, d.vectorTopK, 1, true),
       rerank: {
         enabled: flag(rr.enabled, d.rerank.enabled),
-        topM: atLeast(rr.topM, d.rerank.topM, 1, true)
+        model: text(rr.model, d.rerank.model),
+        topM: atLeast(rr.topM, d.rerank.topM, 1, true),
+        maxMs: positive(rr.maxMs, d.rerank.maxMs)
       },
       tailIncludeToolResults: flag(r.tailIncludeToolResults, d.tailIncludeToolResults),
       tailToolResultMaxTokens: positive(r.tailToolResultMaxTokens, d.tailToolResultMaxTokens),

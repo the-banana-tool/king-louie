@@ -15,7 +15,7 @@ describe('history settings', () => {
       recencyWeight: 0.3, recencyHalfLifeDays: 30, maxChunksPerMessage: 4,
       completeMessageTokens: 0, prefixMinChars: 0, queryContextSeparate: false, pairToolMessages: false,
       diversifyFirst: false, dedupeJaccard: 0,
-      vectorTopK: 50, rerank: { enabled: false, topM: 20 },
+      vectorTopK: 50, rerank: { enabled: false, model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 20, maxMs: 2000 },
       tailIncludeToolResults: true, tailToolResultMaxTokens: 1000, recencyByPosition: false, recencyHalfLifeFraction: 0.25
     });
     assert.deepStrictEqual(s.chunk, { targetChars: 1500, minChars: 40 });
@@ -62,10 +62,19 @@ describe('history settings', () => {
   });
 
   it('rerank: type-checked one key at a time', () => {
-    assert.deepStrictEqual(mergeHistorySettings({ recall: { rerank: { enabled: true } } }).recall.rerank, { enabled: true, topM: 20 });
-    assert.deepStrictEqual(mergeHistorySettings({ recall: { rerank: { topM: 50.9 } } }).recall.rerank, { enabled: false, topM: 50 });
-    assert.deepStrictEqual(mergeHistorySettings({ recall: { rerank: { enabled: 'yes', topM: 0 } } }).recall.rerank, { enabled: false, topM: 20 });
-    assert.deepStrictEqual(mergeHistorySettings({ recall: { rerank: true } }).recall.rerank, { enabled: false, topM: 20 });
+    const d = { enabled: false, model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 20, maxMs: 2000 };
+    assert.deepStrictEqual(mergeHistorySettings({ recall: { rerank: { enabled: true } } }).recall.rerank, { ...d, enabled: true });
+    assert.deepStrictEqual(mergeHistorySettings({ recall: { rerank: { topM: 50.9 } } }).recall.rerank, { ...d, topM: 50 });
+    assert.deepStrictEqual(mergeHistorySettings({ recall: { rerank: { enabled: 'yes', topM: 0 } } }).recall.rerank, d);
+    assert.deepStrictEqual(mergeHistorySettings({ recall: { rerank: true } }).recall.rerank, d);
+    assert.deepStrictEqual(mergeHistorySettings({ recall: { rerank: { maxMs: 500, model: 'Xenova/other-reranker' } } }).recall.rerank,
+      { ...d, maxMs: 500, model: 'Xenova/other-reranker' });
+    for (const maxMs of [0, -5, NaN, Infinity, '2000', null]) {
+      assert.strictEqual(mergeHistorySettings({ recall: { rerank: { maxMs } } }).recall.rerank.maxMs, 2000, String(maxMs));
+    }
+    for (const model of ['', '   ', 42, null, ['x']]) {
+      assert.strictEqual(mergeHistorySettings({ recall: { rerank: { model } } }).recall.rerank.model, d.model, JSON.stringify(model));
+    }
     assert.ok(Object.isFrozen(HISTORY_DEFAULTS.recall.rerank));
   });
 

@@ -14,6 +14,7 @@ const { createLogger } = require('../logging');
 const log = createLogger('history/retriever');
 
 const DAY_MS = 86400000;
+const TIMED_OUT = Symbol('rerank timed out');
 const rankOf = (hit) => (Number.isFinite(hit.bm25Rank) ? hit.bm25Rank : hit.vectorRank);
 const SHINGLE_WORDS = 5;
 
@@ -53,17 +54,29 @@ class Retriever {
   // Step 6: the reranker rescores the first topM candidates (already held to
   // the scope, the kinds and upToSeq) and its score replaces theirs; they
   // sort by it, and every other candidate keeps its score and order below
-  // them. A reranker that throws or returns anything but one finite number
-  // per chunk leaves the order as it was.
+  // them. A reranker that throws, returns anything but one finite number
+  // per chunk, or takes longer than rerank.maxMs (spec §15) leaves the order
+  // as it was for this turn.
   async _rerank(query, items, rerank, reranker) {
     const m = Math.min(items.length, rerank.topM);
     if (m < 1) return items;
     const head = items.slice(0, m);
+    const maxMs = Number.isFinite(rerank.maxMs) && rerank.maxMs > 0 ? rerank.maxMs : HISTORY_DEFAULTS.recall.rerank.maxMs;
+    let timer = null;
     let scores;
     try {
-      scores = await reranker(query, head.map((item) => item.chunk));
+      scores = await Promise.race([
+        Promise.resolve().then(() => reranker(query, head.map((item) => item.chunk))),
+        new Promise((resolve) => { timer = setTimeout(resolve, maxMs, TIMED_OUT); })
+      ]);
     } catch (err) {
       log.warn('reranker failed; keeping the fused order', { error: err.message, pairs: m });
+      return items;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (scores === TIMED_OUT) {
+      log.warn('reranker slower than rerank.maxMs; keeping the fused order', { pairs: m, maxMs });
       return items;
     }
     const list = scores && typeof scores.length === 'number' ? Array.from(scores) : null;
