@@ -267,11 +267,22 @@ describe('history: a chat turn through the core', () => {
 
   it('sends the tail and the new message, with the recalled block in the dynamic prompt', async () => {
     const { calls, send } = await start();
+    const builder = core.context.getContextBuilder();
+    const build = builder.build.bind(builder);
+    const queries = [];
+    builder.build = async (args) => {
+      const built = await build(args);
+      queries.push(built.stats.query);
+      return built;
+    };
     const result = await send('What was the side gate code at the Lakeside lot?');
     assert.notStrictEqual(result?.ok, false, JSON.stringify(result));
+    assert.deepStrictEqual(queries, ['What was the side gate code at the Lakeside lot?'], 'by default the query is the new message alone');
     const first = calls[0];
-    assert.ok(first.messages.length <= 9, `sent ${first.messages.length} messages`);
+    // The default tail, #25-#40 (16 messages), then the new message.
+    assert.strictEqual(first.messages.length, 17, `sent ${first.messages.length} messages`);
     const texts = first.messages.map((m) => String(m.text ?? m.content ?? ''));
+    assert.strictEqual(texts[0], 'Seeded note 25 about the weekly grocery list and the garden hose timer.');
     assert.strictEqual(texts[texts.length - 1], 'What was the side gate code at the Lakeside lot?');
     assert.ok(!texts.some((t) => t.includes('4417')), '#3 is not in the tail');
     assert.ok(first.options.systemPromptDynamic.includes('<recalled_history>'));
@@ -285,7 +296,7 @@ describe('history: a chat turn through the core', () => {
     const reply = lastMessage();
     assert.strictEqual(reply.sender, 'assistant');
     const ctx = reply.context;
-    assert.deepStrictEqual(ctx.tail, { fromSeq: 33, toSeq: 40 });
+    assert.deepStrictEqual(ctx.tail, { fromSeq: 25, toSeq: 40 });
     assert.ok(ctx.recalledChunkIds.length > 0);
     assert.ok(ctx.recalledExcerpts >= 1);
     assert.ok(ctx.estTokens.system > 0 && ctx.estTokens.tail > 0 && ctx.estTokens.recalled > 0);
@@ -318,7 +329,7 @@ describe('history: a chat turn through the core', () => {
     const { calls, send } = await start({ history: { recall: { enabled: false } } });
     await send('What was the side gate code at the Lakeside lot?');
     assert.ok(!String(calls[0].options.systemPromptDynamic || '').includes('<recalled_history>'));
-    assert.ok(calls[0].messages.length <= 9);
+    assert.strictEqual(calls[0].messages.length, 17, 'the default tail of 16 and the new message');
     assert.deepStrictEqual(lastMessage().context.recalledChunkIds, []);
   });
 

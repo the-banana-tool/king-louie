@@ -4,41 +4,56 @@
 // Every value is type-checked: a hand-edited settings file must never turn a
 // budget into NaN, a negative number or a division by zero.
 const HISTORY_DEFAULTS = Object.freeze({
+  // Defaults measured on the LongHaul private set (2026-09-30, 103 verified
+  // questions over four real sessions; recall spec §6.7): evidence recall
+  // 0.19 with the first H2 defaults. The previous user turns in the query
+  // were noise (queryUserTurns 0) and the answer often ranked below 50
+  // (bm25TopK 200). The tail counted assistant rows, so agent sessions, which
+  // write one assistant row per tool round, got an empty tail (tailMessages
+  // 16), and it never showed tool results (tailIncludeToolResults).
   recall: Object.freeze({
     enabled: true,
-    tailMessages: 8,
+    // The tail (spec §6.1).
+    tailMessages: 16,
     tailTokens: 6000,
     tailMaxMessageTokens: 1500,
     tailIncludeToolCalls: true,
+    // Tool results inside the tail span, newest first, with the tokens the
+    // user and assistant messages leave; one over the cap is shortened.
+    tailIncludeToolResults: true,
+    tailToolResultMaxTokens: 1000,
+    // Retrieval (spec §6.3).
     recalledTokens: 6000,
-    queryUserTurns: 2,
-    bm25TopK: 50,
+    queryUserTurns: 0,
+    bm25TopK: 200,
     rrfK: 60,
     kindWeights: Object.freeze({ user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 }),
     recencyWeight: 0.3,
     recencyHalfLifeDays: 30,
     maxChunksPerMessage: 4,
-    // Experimental (recall tuning 2026-09-30); 0 / false = off.
+    // Top cosine hits fused with BM25 (step 2). Inert until a vector list is
+    // given to retrieve() (H3; LongHaul's kl-recall-vec).
+    vectorTopK: 50,
+    // Step 6: rescore the top topM candidates with a reranker callback given
+    // to the Retriever. Inert without one (H3; LongHaul's kl-recall-rerank).
+    // topM must exceed what the budget selects (60-90 chunks at 6000 tokens)
+    // to change anything.
+    rerank: Object.freeze({ enabled: false, topM: 20 }),
+    // Measured and left off (spec §6.7); 0 / false = off.
+    // completeMessageTokens: take a small message whole on its first hit;
+    // pairToolMessages (only with it): a tool call brings its result.
     completeMessageTokens: 0,
-    prefixMinChars: 0,
-    queryContextSeparate: false,
     pairToolMessages: false,
-    // Budget fill (recall budget 2026-09-30): diversifyFirst takes the best
-    // chunk of each distinct message first, then fills by score;
-    // dedupeJaccard > 0 drops a candidate whose word 5-gram Jaccard to a
-    // selected chunk exceeds it.
+    // prefixMinChars: prefix-match unquoted words at least this long.
+    prefixMinChars: 0,
+    // queryContextSeparate: previous user turns as their own fused list.
+    queryContextSeparate: false,
+    // diversifyFirst: the best chunk of each message first, then by score;
+    // dedupeJaccard > 0: drop a word 5-gram near-duplicate of a selected chunk.
     diversifyFirst: false,
     dedupeJaccard: 0,
-    // Top cosine hits fused with BM25 (spec §6.3 step 2). Inert until a
-    // vector list is given to retrieve() (H3; LongHaul's kl-recall-vec).
-    vectorTopK: 50,
-    // Step 6 (spec §6.3): rescore the top topM fused candidates with a
-    // reranker callback given to the Retriever. Inert without one (H3;
-    // LongHaul's kl-recall-rerank).
-    rerank: Object.freeze({ enabled: false, topM: 20 }),
-    // Experimental (recall tail/recency 2026-09-30); false = off.
-    tailIncludeToolResults: false,
-    tailToolResultMaxTokens: 300,
+    // recencyByPosition: age as the fraction of the chat behind this point,
+    // against recencyHalfLifeFraction, instead of days.
     recencyByPosition: false,
     recencyHalfLifeFraction: 0.25
   }),

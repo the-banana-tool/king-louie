@@ -47,8 +47,8 @@ describe('ContextBuilder', () => {
   let t;
   afterEach(() => t && t.cleanup());
 
-  it('the tail is the last 8 user and assistant messages, verbatim and in order', async () => {
-    const s = setup(Array.from({ length: 20 }, (_, i) => filler(i + 1)));
+  it('the tail is the last tailMessages user and assistant messages, verbatim and in order', async () => {
+    const s = setup(Array.from({ length: 20 }, (_, i) => filler(i + 1)), { recall: { tailMessages: 8 } });
     t = s.t;
     const out = await s.builder.build({ chatId: 'chat-1', message: 'hello' });
     assert.deepStrictEqual(out.tail.map((m) => m.seq), [13, 14, 15, 16, 17, 18, 19, 20]);
@@ -56,6 +56,14 @@ describe('ContextBuilder', () => {
     assert.deepStrictEqual({ fromSeq: out.stats.tail.fromSeq, toSeq: out.stats.tail.toSeq }, { fromSeq: 13, toSeq: 20 });
     assert.deepStrictEqual(out.stats.tail.seqs, [13, 14, 15, 16, 17, 18, 19, 20]);
     assert.strictEqual(out.stats.estTokens.tail, out.tail.reduce((n, m) => n + s.estimator.estimate(m.text), 0));
+  });
+
+  it('by default the tail is the last 16 user and assistant messages, and no more', async () => {
+    const s = setup(Array.from({ length: 40 }, (_, i) => filler(i + 1)));
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'hello' });
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), Array.from({ length: 16 }, (_, i) => 25 + i));
+    assert.strictEqual(out.tail[0].sender, 'user');
   });
 
   it('stops at tailTokens but always keeps the newest message', async () => {
@@ -84,7 +92,7 @@ describe('ContextBuilder', () => {
     assert.ok(!out.stats.tail.seqs.includes(2));
 
     // tailMessages: the 8th message back is an assistant reply.
-    const n = setup(Array.from({ length: 9 }, (_, i) => filler(i + 1)));
+    const n = setup(Array.from({ length: 9 }, (_, i) => filler(i + 1)), { recall: { tailMessages: 8 } });
     t.cleanup();
     t = n.t;
     const nine = await n.builder.build({ chatId: 'chat-1', message: 'hello' });
@@ -92,20 +100,20 @@ describe('ContextBuilder', () => {
     assert.strictEqual(nine.tail[0].sender, 'user');
   });
 
-  it('folds tool calls into the reply that follows them; tool results stay out', async () => {
+  it('folds tool calls into the reply that follows them; with tailIncludeToolResults off, tool results stay out', async () => {
     const s = setup([
       { sender: 'user', text: 'Please run the tests for the Lakeside project now.' },
       { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'npm test' } },
       { sender: 'toolResult', toolName: 'Bash', result: { stdout: 'all 12 tests passed' } },
       { sender: 'toolUse', toolName: 'Read', parameters: { file_path: 'src/app.js' } },
       { sender: 'assistant', text: 'All tests pass and src/app.js looks fine.' }
-    ]);
+    ], { recall: { tailIncludeToolResults: false } });
     t = s.t;
     const out = await s.builder.build({ chatId: 'chat-1', message: 'thanks' });
     assert.deepStrictEqual(out.tail.map((m) => m.sender), ['user', 'assistant']);
     assert.strictEqual(out.tail[1].text, '[tool] Bash: npm test\n[tool] Read: src/app.js\n\nAll tests pass and src/app.js looks fine.');
     assert.deepStrictEqual(out.stats.tail.seqs, [1, 2, 4, 5]);
-    s.builder.getSettings = () => ({ history: { recall: { tailIncludeToolCalls: false } } });
+    s.builder.getSettings = () => ({ history: { recall: { tailIncludeToolCalls: false, tailIncludeToolResults: false } } });
     assert.strictEqual((await s.builder.build({ chatId: 'chat-1', message: 'thanks' })).tail[1].text, 'All tests pass and src/app.js looks fine.');
   });
 
@@ -142,14 +150,23 @@ describe('ContextBuilder', () => {
     assert.deepStrictEqual(out.stats.tail.shortened, [{ seq: 2, shown: Number(marker[1]), total: Number(marker[2]) }]);
   });
 
-  it('the query is the new message and the previous two user messages, newest first', async () => {
-    const s = setup([
-      { sender: 'user', text: 'first user message' },
-      { sender: 'assistant', text: 'a reply' },
-      { sender: 'user', text: 'second user message' },
-      { sender: 'assistant', text: 'another reply' },
-      { sender: 'user', text: 'third user message' }
-    ]);
+  const queryChat = () => [
+    { sender: 'user', text: 'first user message' },
+    { sender: 'assistant', text: 'a reply' },
+    { sender: 'user', text: 'second user message' },
+    { sender: 'assistant', text: 'another reply' },
+    { sender: 'user', text: 'third user message' }
+  ];
+
+  it('by default the query is the new message alone', async () => {
+    const s = setup(queryChat());
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'the new one' });
+    assert.strictEqual(out.stats.query, 'the new one');
+  });
+
+  it('with queryUserTurns 2, the query is the new message and the previous two user messages, newest first', async () => {
+    const s = setup(queryChat(), { recall: { queryUserTurns: 2 } });
     t = s.t;
     const out = await s.builder.build({ chatId: 'chat-1', message: 'the new one' });
     assert.strictEqual(out.stats.query, 'the new one\nthird user message\nsecond user message');
@@ -183,7 +200,7 @@ describe('ContextBuilder', () => {
     t = s.t;
     const out = await s.builder.build({ chatId: 'chat-1', message: 'gate code?' });
     assert.deepStrictEqual(out.recalled, { text: '', chunkIds: [], estTokens: 0 });
-    assert.strictEqual(out.tail.length, 8);
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), Array.from({ length: 16 }, (_, i) => 5 + i));
   });
 
   it('an empty chat, or nothing that matches, gives an empty block', async () => {
@@ -213,7 +230,7 @@ describe('ContextBuilder', () => {
   });
 });
 
-describe('ContextBuilder: tailIncludeToolResults (experimental, off by default)', () => {
+describe('ContextBuilder: tailIncludeToolResults (on by default)', () => {
   let t;
   afterEach(() => t && t.cleanup());
   const LOG = Array.from({ length: 40 }, (_, i) => `drainage log line ${i} for the Lakeside lot north fence sensor`).join('\n');
@@ -250,9 +267,9 @@ describe('ContextBuilder: tailIncludeToolResults (experimental, off by default)'
     const recalledIds = t.store.chunks(out.recalled.chunkIds).map((c) => c.messageId);
     assert.ok(!recalledIds.includes('chat-1-m3') && !recalledIds.includes('chat-1-m5'), 'tail results are not recalled');
 
-    s.builder.getSettings = () => ({ history: {} });
+    s.builder.getSettings = () => ({ history: { recall: { tailIncludeToolResults: false } } });
     const off = await s.builder.build({ chatId: 'chat-1', message: 'gate code' });
-    assert.ok(!off.tail[1].text.includes('4417'), 'off by default: results stay out');
+    assert.ok(!off.tail[1].text.includes('4417'), 'off: results stay out');
     assert.strictEqual(off.stats.tail.toolResultSeqs, undefined);
   });
 
@@ -268,8 +285,9 @@ describe('ContextBuilder: tailIncludeToolResults (experimental, off by default)'
       { sender: 'toolResult', toolName: 'Bash', result: 'reading c: 12' },
       { sender: 'assistant', text: 'All three sensors read steady.' }
     ];
-    const s = setup(messages);
+    const s = setup(messages, { recall: { tailIncludeToolResults: false } });
     t = s.t;
+    // The user and assistant messages and the tool lines alone.
     const base = await s.builder.build({ chatId: 'chat-1', message: 'x' });
     const lines = base.stats.estTokens.tail;
     const one = s.estimator.estimate(`[tool result #5 Bash]\n${big('b')}`);
@@ -289,6 +307,76 @@ describe('ContextBuilder: tailIncludeToolResults (experimental, off by default)'
     const none = await s.builder.build({ chatId: 'chat-1', message: 'x' });
     assert.deepStrictEqual(none.tail.map((m) => m.seq), [1, 8]);
     assert.deepStrictEqual(none.stats.tail.toolResultSeqs, []);
+  });
+
+  it('by default a result up to 1000 tokens is shown whole and a bigger one is shortened', async () => {
+    const mid = Array.from({ length: 40 }, (_, i) => `fence post ${i} at the Lakeside lot leans two degrees north`).join('\n');
+    const huge = Array.from({ length: 150 }, (_, i) => `drainage reading ${i} for the Lakeside lot ditch is steady`).join('\n');
+    const s = setup([
+      { sender: 'user', text: 'Survey the fence and read the drainage log for the Lakeside lot.' },
+      { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'cat fence.txt' } },
+      { sender: 'toolResult', toolName: 'Bash', result: mid },
+      { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'cat drainage.log' } },
+      { sender: 'toolResult', toolName: 'Bash', result: huge },
+      { sender: 'assistant', text: 'The fence leans a little and the drainage is steady.' }
+    ]);
+    t = s.t;
+    const midTokens = s.estimator.estimate(mid);
+    const hugeTokens = s.estimator.estimate(huge);
+    assert.ok(midTokens > 300 && midTokens <= 1000, `mid is ${midTokens} tokens`);
+    assert.ok(hugeTokens > 1000, `huge is ${hugeTokens} tokens`);
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'how is the fence?' });
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), [1, 6]);
+    const reply = out.tail[1].text;
+    assert.ok(reply.includes(`[tool result #3 Bash]\n${mid}\n`), 'the mid-size result is whole');
+    assert.ok(reply.includes('[tool result #5 shortened: the start is shown; ReadHistory 5 for the rest]'));
+    assert.ok(reply.includes('drainage reading 0 '), 'the head of the big result is kept');
+    assert.ok(!reply.includes('drainage reading 149 '), 'the rest of the big result is cut');
+    assert.deepStrictEqual(out.stats.tail.toolResultSeqs, [3, 5]);
+    assert.deepStrictEqual(out.stats.tail.shortened.map((x) => x.seq), [5]);
+  });
+});
+
+describe('ContextBuilder: agent chats, one assistant row per tool round', () => {
+  let t;
+  afterEach(() => t && t.cleanup());
+  // A user message, then `rounds` tool rounds, each a call, its result and an
+  // assistant row.
+  const agentChat = (rounds) => {
+    const messages = [{ sender: 'user', text: 'Tidy up the drainage notes for the Lakeside lot, file by file.' }];
+    for (let r = 1; r <= rounds; r += 1) {
+      messages.push({ sender: 'toolUse', toolName: 'Read', parameters: { file_path: `notes/part-${r}.md` } });
+      messages.push({ sender: 'toolResult', toolName: 'Read', result: `part ${r}: the ditch runs along the north fence` });
+      messages.push({ sender: 'assistant', text: `Part ${r} is tidied.` });
+    }
+    return messages;
+  };
+
+  it('by default the tail reaches the user message behind ten assistant rows', async () => {
+    const s = setup(agentChat(10));
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'what is left?' });
+    assert.strictEqual(out.tail.length, 11);
+    assert.strictEqual(out.tail[0].seq, 1);
+    assert.strictEqual(out.tail[0].sender, 'user');
+    assert.ok(out.tail[1].text.startsWith('[tool] Read: notes/part-1.md\n[tool result #3 Read]\npart 1: the ditch runs along the north fence'), out.tail[1].text);
+
+    // With the old tailMessages 8 the eight rows are all assistant rows, and
+    // a tail never starts with one: it was empty.
+    s.builder.getSettings = () => ({ history: { recall: { tailMessages: 8 } } });
+    const eight = await s.builder.build({ chatId: 'chat-1', message: 'what is left?' });
+    assert.deepStrictEqual(eight.tail, []);
+  });
+
+  it('the tail is still bounded by tailMessages: a user message 17 or more rows back is not reached', async () => {
+    const s = setup(agentChat(16));
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'what is left?' });
+    assert.deepStrictEqual(out.tail, [], 'the last 16 are all assistant rows');
+    s.builder.getSettings = () => ({ history: { recall: { tailMessages: 17 } } });
+    const seventeen = await s.builder.build({ chatId: 'chat-1', message: 'what is left?' });
+    assert.strictEqual(seventeen.tail.length, 17);
+    assert.strictEqual(seventeen.tail[0].seq, 1);
   });
 });
 
@@ -321,7 +409,7 @@ describe('ContextBuilder: the tail scan reads only what the tail needs', () => {
   });
 
   it('build() never loads the full rows of the range', async () => {
-    const s = setup(chat());
+    const s = setup(chat(), { recall: { tailIncludeToolResults: false } });
     t = s.t;
     const original = t.store._messagesFor.bind(t.store);
     t.store._messagesFor = (chatId, range = {}) => {
@@ -331,6 +419,42 @@ describe('ContextBuilder: the tail scan reads only what the tail needs', () => {
     const out = await s.builder.build({ chatId: 'chat-1', message: 'thanks' });
     assert.deepStrictEqual(out.tail.map((m) => m.seq), [1, 5]);
     assert.strictEqual(out.tail[1].text, '[tool] Write: notes/survey.md\n\nThe survey notes are written.');
+  });
+
+  it('with tailIncludeToolResults on, only the tail span\'s tool results are read', async () => {
+    const rows = require('../src/history/rows');
+    // Twenty older rounds, each with a big result, then the tail's round.
+    const messages = [];
+    for (let r = 1; r <= 20; r += 1) {
+      messages.push({ sender: 'user', text: `Read survey part ${r} of the Lakeside lot.` });
+      messages.push({ sender: 'toolUse', toolName: 'Read', parameters: { file_path: `survey/part-${r}.md` } });
+      messages.push({ sender: 'toolResult', toolName: 'Read', result: `part ${r} ${BIG}` });
+      messages.push({ sender: 'assistant', text: `Part ${r} is read.` });
+    }
+    const s = setup(messages, { recall: { tailMessages: 4, tailIncludeToolResults: true } });
+    t = s.t;
+    const original = t.store._messagesFor.bind(t.store);
+    t.store._messagesFor = (chatId, range = {}) => {
+      if (range.fromSeq !== range.toSeq) throw new Error(`full range read ${range.fromSeq}-${range.toSeq}`);
+      return original(chatId, range);
+    };
+    const read = [];
+    const toMessage = rows.rowToMessage;
+    rows.rowToMessage = (row, attachments) => {
+      const m = toMessage(row, attachments);
+      if (m.sender === 'toolResult' && m.result !== undefined) read.push(m.seq);
+      return m;
+    };
+    let out;
+    try {
+      out = await s.builder.build({ chatId: 'chat-1', message: 'thanks' });
+    } finally {
+      rows.rowToMessage = toMessage;
+    }
+    // The tail is rounds 19 and 20 (seqs 73-80); its results are #75 and #79.
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), [73, 76, 77, 80]);
+    assert.deepStrictEqual(out.stats.tail.toolResultSeqs, [75, 79]);
+    assert.deepStrictEqual([...read].sort((a, b) => a - b), [75, 79], 'no result older than the tail is loaded');
   });
 });
 

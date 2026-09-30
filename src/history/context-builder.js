@@ -43,7 +43,7 @@ class ContextBuilder {
       ? String(message || '')
       : [String(message || ''), ...previous].filter((text) => text.trim()).join('\n');
     const contextQueries = separate ? previous : [];
-    const tail = this._tail(scanned, { recall, query, model });
+    const tail = this._tail(scanned, { chatId: id, limit, recall, query, model });
 
     let recalled = { text: '', chunkIds: [], estTokens: 0 };
     let recalledExcerpts = 0;
@@ -90,8 +90,9 @@ class ContextBuilder {
 
   // Newest first, a page at a time, until the tail and the query have what
   // they need or the chat's start is reached. Only user and assistant rows,
-  // and tool calls and results when they are folded into the tail
-  // (tailScanPage).
+  // and tool calls when they are folded into the tail (tailScanPage). Tool
+  // results are read later, for the tail's span only (_tail): a page runs
+  // past the span, and a result body can be large.
   _scan(chatId, limit, recall) {
     const out = [];
     let content = 0;
@@ -99,7 +100,7 @@ class ContextBuilder {
     let before = limit;
     while (before > 1 && (content < recall.tailMessages || users < recall.queryUserTurns)) {
       const page = this.store.tailScanPage(chatId, {
-        beforeSeq: before, limit: PAGE, toolCalls: Boolean(recall.tailIncludeToolCalls), toolResults: Boolean(recall.tailIncludeToolResults)
+        beforeSeq: before, limit: PAGE, toolCalls: Boolean(recall.tailIncludeToolCalls)
       });
       if (!page.length) break;
       for (const m of page) {
@@ -119,7 +120,7 @@ class ContextBuilder {
     return Number.isFinite(ts) ? ts : this.now();
   }
 
-  _tail(scanned, { recall, query, model }) {
+  _tail(scanned, { chatId, limit, recall, query, model }) {
     const entries = [];
     let used = 0;
     for (const m of scanned) {
@@ -163,8 +164,7 @@ class ContextBuilder {
       }
     }
     const results = recall.tailIncludeToolResults && entries.length
-      ? this._toolResults(scanned, {
-        from: entries[0].message.seq,
+      ? this._toolResults(this.store.tailToolResults(chatId, { afterSeq: entries[0].message.seq, beforeSeq: limit }), {
         left: recall.tailTokens - callTokens - entries.reduce((n, e) => n + e.tokens, 0),
         replyIndex, recall, model
       })
@@ -202,10 +202,10 @@ class ContextBuilder {
   // tailToolResultMaxTokens keeps its head, with a note, and is recorded in
   // stats.tail.shortened (shown: the leading chunks that fit whole); a
   // result that does not fit what is left is skipped and an older one tried.
-  _toolResults(scanned, { from, left, replyIndex, recall, model }) {
+  // candidates: the span's tool results (HistoryStore#tailToolResults).
+  _toolResults(candidates, { left, replyIndex, recall, model }) {
     const out = [];
     let budget = left;
-    const candidates = scanned.filter((m) => m.sender === 'toolResult' && m.seq > from).sort((a, b) => b.seq - a.seq);
     for (const m of candidates) {
       if (budget <= 0) break;
       const index = replyIndex(m.seq);

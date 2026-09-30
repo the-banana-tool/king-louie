@@ -9,14 +9,14 @@ describe('history settings', () => {
   it('defaults match the spec', () => {
     const s = mergeHistorySettings(undefined);
     assert.deepStrictEqual(s.recall, {
-      enabled: true, tailMessages: 8, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true,
-      recalledTokens: 6000, queryUserTurns: 2, bm25TopK: 50, rrfK: 60,
+      enabled: true, tailMessages: 16, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true,
+      recalledTokens: 6000, queryUserTurns: 0, bm25TopK: 200, rrfK: 60,
       kindWeights: { user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 },
       recencyWeight: 0.3, recencyHalfLifeDays: 30, maxChunksPerMessage: 4,
       completeMessageTokens: 0, prefixMinChars: 0, queryContextSeparate: false, pairToolMessages: false,
       diversifyFirst: false, dedupeJaccard: 0,
       vectorTopK: 50, rerank: { enabled: false, topM: 20 },
-      tailIncludeToolResults: false, tailToolResultMaxTokens: 300, recencyByPosition: false, recencyHalfLifeFraction: 0.25
+      tailIncludeToolResults: true, tailToolResultMaxTokens: 1000, recencyByPosition: false, recencyHalfLifeFraction: 0.25
     });
     assert.deepStrictEqual(s.chunk, { targetChars: 1500, minChars: 40 });
     assert.strictEqual(s.readHistoryMaxTokens, 8000);
@@ -27,7 +27,7 @@ describe('history settings', () => {
   it('merges one key at a time and keeps the rest', () => {
     const s = mergeHistorySettings({ recall: { enabled: false, kindWeights: { tool_result: 0.2 } }, chunk: { minChars: 10 } });
     assert.strictEqual(s.recall.enabled, false);
-    assert.strictEqual(s.recall.tailMessages, 8);
+    assert.strictEqual(s.recall.tailMessages, 16);
     assert.strictEqual(s.recall.kindWeights.tool_result, 0.2);
     assert.strictEqual(s.recall.kindWeights.user, 1.2);
     assert.deepStrictEqual(s.chunk, { targetChars: 1500, minChars: 10 });
@@ -36,26 +36,27 @@ describe('history settings', () => {
   it('falls back to the default for a value of the wrong type or out of range', () => {
     const s = mergeHistorySettings({
       recall: {
-        enabled: 'no', tailMessages: '8', tailTokens: -5, recalledTokens: NaN, recencyHalfLifeDays: 0,
+        enabled: 'no', tailMessages: '8', queryUserTurns: -1, tailTokens: -5, recalledTokens: NaN, recencyHalfLifeDays: 0,
         recencyWeight: 3, bm25TopK: 0, maxChunksPerMessage: 2.7, kindWeights: null,
-        tailIncludeToolResults: 'yes', tailToolResultMaxTokens: 0, recencyByPosition: 1, recencyHalfLifeFraction: -0.5
+        tailIncludeToolResults: 0, tailToolResultMaxTokens: 0, recencyByPosition: 1, recencyHalfLifeFraction: -0.5
       },
       chunk: { targetChars: 10 },
       readHistoryMaxTokens: 'lots'
     });
     assert.strictEqual(s.recall.enabled, true);
-    assert.strictEqual(s.recall.tailMessages, 8);
+    assert.strictEqual(s.recall.tailMessages, 16);
+    assert.strictEqual(s.recall.queryUserTurns, 0);
     assert.strictEqual(s.recall.tailTokens, 6000);
     assert.strictEqual(s.recall.recalledTokens, 6000);
     assert.strictEqual(s.recall.recencyHalfLifeDays, 30);
     assert.strictEqual(s.recall.recencyWeight, 0.3);
-    assert.strictEqual(s.recall.bm25TopK, 50);
+    assert.strictEqual(s.recall.bm25TopK, 200);
     assert.strictEqual(s.recall.maxChunksPerMessage, 2);
     assert.strictEqual(s.recall.kindWeights.user, 1.2);
     assert.strictEqual(s.chunk.targetChars, 1500);
     assert.strictEqual(s.readHistoryMaxTokens, 8000);
-    assert.strictEqual(s.recall.tailIncludeToolResults, false);
-    assert.strictEqual(s.recall.tailToolResultMaxTokens, 300);
+    assert.strictEqual(s.recall.tailIncludeToolResults, true, 'a falsy non-boolean falls back to the default, not to false');
+    assert.strictEqual(s.recall.tailToolResultMaxTokens, 1000);
     assert.strictEqual(s.recall.recencyByPosition, false);
     assert.strictEqual(s.recall.recencyHalfLifeFraction, 0.25);
   });
@@ -80,7 +81,7 @@ describe('history settings', () => {
   });
 
   it('is part of mergeSettings and DEFAULT_SETTINGS', () => {
-    assert.strictEqual(DEFAULT_SETTINGS.history.recall.tailMessages, 8);
+    assert.strictEqual(DEFAULT_SETTINGS.history.recall.tailMessages, 16);
     assert.strictEqual(mergeSettings({}).history.recall.enabled, true);
     const merged = mergeSettings({ history: { recall: { recalledTokens: 2000 } } });
     assert.strictEqual(merged.history.recall.recalledTokens, 2000);
