@@ -12,7 +12,8 @@ describe('history settings', () => {
       enabled: true, tailMessages: 8, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true,
       recalledTokens: 6000, queryUserTurns: 2, bm25TopK: 50, rrfK: 60,
       kindWeights: { user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 },
-      recencyWeight: 0.3, recencyHalfLifeDays: 30, maxChunksPerMessage: 4
+      recencyWeight: 0.3, recencyHalfLifeDays: 30, maxChunksPerMessage: 4,
+      completeMessageTokens: 0, prefixMinChars: 0, queryContextSeparate: false, pairToolMessages: false
     });
     assert.deepStrictEqual(s.chunk, { targetChars: 1500, minChars: 40 });
     assert.strictEqual(s.readHistoryMaxTokens, 8000);

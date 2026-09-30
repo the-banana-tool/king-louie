@@ -35,7 +35,11 @@ class ContextBuilder {
     const asOf = this._asOf(id, limit, given, scanned);
 
     const previous = scanned.filter((m) => m.sender === 'user' && hasText(m)).slice(0, recall.queryUserTurns).map((m) => String(m.text));
-    const query = [String(message || ''), ...previous].filter((text) => text.trim()).join('\n');
+    const separate = Boolean(recall.queryContextSeparate);
+    const query = separate
+      ? String(message || '')
+      : [String(message || ''), ...previous].filter((text) => text.trim()).join('\n');
+    const contextQueries = separate ? previous : [];
     const tail = this._tail(scanned, { recall, query, model });
 
     let recalled = { text: '', chunkIds: [], estTokens: 0 };
@@ -43,6 +47,7 @@ class ContextBuilder {
     if (recall.enabled && query.trim()) {
       const hits = await this.retriever.retrieve({
         query,
+        contextQueries,
         chatIds: [id],
         excludeMessageIds: tail.messageIds,
         budgetTokens: recall.recalledTokens,

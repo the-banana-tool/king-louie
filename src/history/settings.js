@@ -17,7 +17,12 @@ const HISTORY_DEFAULTS = Object.freeze({
     kindWeights: Object.freeze({ user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 }),
     recencyWeight: 0.3,
     recencyHalfLifeDays: 30,
-    maxChunksPerMessage: 4
+    maxChunksPerMessage: 4,
+    // Experimental (recall tuning 2026-09-30); 0 / false = off.
+    completeMessageTokens: 0,
+    prefixMinChars: 0,
+    queryContextSeparate: false,
+    pairToolMessages: false
   }),
   chunk: Object.freeze({ targetChars: 1500, minChars: 40 }),
   readHistoryMaxTokens: 8000
@@ -56,7 +61,11 @@ function mergeHistorySettings(source) {
       kindWeights,
       recencyWeight: fraction(r.recencyWeight, d.recencyWeight),
       recencyHalfLifeDays: positive(r.recencyHalfLifeDays, d.recencyHalfLifeDays),
-      maxChunksPerMessage: atLeast(r.maxChunksPerMessage, d.maxChunksPerMessage, 1, true)
+      maxChunksPerMessage: atLeast(r.maxChunksPerMessage, d.maxChunksPerMessage, 1, true),
+      completeMessageTokens: atLeast(r.completeMessageTokens, d.completeMessageTokens, 0),
+      prefixMinChars: atLeast(r.prefixMinChars, d.prefixMinChars, 0, true),
+      queryContextSeparate: flag(r.queryContextSeparate, d.queryContextSeparate),
+      pairToolMessages: flag(r.pairToolMessages, d.pairToolMessages)
     },
     chunk: {
       targetChars: atLeast(c.targetChars, HISTORY_DEFAULTS.chunk.targetChars, 200, true),

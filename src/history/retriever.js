@@ -17,22 +17,33 @@ class Retriever {
   // Step 1: BM25 over the scope, ranks 1-based.
   _lexical({ query, chatIds, kinds, upToSeq, settings }) {
     return this.store
-      .searchText(query, { chatIds, kinds, limit: settings.bm25TopK, upToSeq })
+      .searchText(query, { chatIds, kinds, limit: settings.bm25TopK, upToSeq, prefixMinChars: settings.prefixMinChars })
       .map((hit, i) => ({ chunkId: hit.chunkId, bm25Rank: i + 1 }));
   }
 
-  // Step 3 with one signal: that signal's ranks alone, 1 / (rrfK + rank).
-  _fuse(lexical, settings) {
-    return lexical.map((hit) => ({ ...hit, fused: 1 / (settings.rrfK + hit.bm25Rank) }));
+  // Step 3: reciprocal rank fusion over the lexical lists, one per query
+  // text: score = sum of 1 / (rrfK + rank). With one list, its ranks alone.
+  _fuse(lists, settings) {
+    const byId = new Map();
+    for (const list of lists) {
+      for (const hit of list) {
+        const cur = byId.get(hit.chunkId) || { chunkId: hit.chunkId, bm25Rank: hit.bm25Rank, fused: 0 };
+        cur.fused += 1 / (settings.rrfK + hit.bm25Rank);
+        cur.bm25Rank = Math.min(cur.bm25Rank, hit.bm25Rank);
+        byId.set(hit.chunkId, cur);
+      }
+    }
+    return [...byId.values()].sort((a, b) => b.fused - a.fused || a.bm25Rank - b.bm25Rank);
   }
 
   async retrieve({
-    query, chatIds, kinds = null, excludeMessageIds = [], budgetTokens = null, upToSeq = null,
+    query, contextQueries = [], chatIds, kinds = null, excludeMessageIds = [], budgetTokens = null, upToSeq = null,
     settings, model = null, now = Date.now()
   } = {}) {
     const s = settings || HISTORY_DEFAULTS.recall;
     if (!String(query || '').trim()) return [];
-    const fused = this._fuse(this._lexical({ query, chatIds, kinds, upToSeq, settings: s }), s);
+    const texts = [query, ...(contextQueries || [])].filter((t) => String(t || '').trim());
+    const fused = this._fuse(texts.map((text) => this._lexical({ query: text, chatIds, kinds, upToSeq, settings: s })), s);
     if (!fused.length) return [];
 
     const byId = new Map(this.store.chunks(fused.map((h) => h.chunkId)).map((c) => [c.id, c]));
@@ -66,18 +77,59 @@ class Retriever {
     });
 
     // Step 8: per-message cap, then the token budget when one is given.
+    // completeMessageTokens > 0: the first hit on a message whose whole text
+    // is at most that many tokens brings the message's other chunks with it
+    // (a fact rarely sits in the one chunk the query's words landed in), when
+    // they fit the budget; a longer message keeps chunk-by-chunk selection.
+    const hasBudget = budgetTokens !== null && budgetTokens !== undefined;
     const perMessage = new Map();
+    const considered = new Set();
+    const taken = new Set();
     const out = [];
     let used = 0;
+    // pairToolMessages: a tool call and its result are one exchange; the
+    // call names what was done, the result holds what came back, and a
+    // question about it usually matches only the call. Taking a small
+    // message whole also takes its small partner.
+    const tokensOf = (chunks) => chunks.reduce((sum, c) => sum + this.estimator.estimate(c.text, model), 0);
+    const takeWhole = (chunks, item, why) => {
+      for (const c of chunks) {
+        taken.add(c.id);
+        out.push({ chunk: c, score: item.score, signals: { ...item.signals, [why]: true } });
+      }
+      perMessage.set(chunks[0].messageId, chunks.length);
+    };
     for (const item of deduped) {
-      const count = perMessage.get(item.chunk.messageId) || 0;
+      const messageId = item.chunk.messageId;
+      if (taken.has(item.chunk.id)) continue;
+      if (s.completeMessageTokens > 0 && !considered.has(messageId)) {
+        considered.add(messageId);
+        const all = this.store.chunksOfMessage(messageId);
+        const total = tokensOf(all);
+        const partnerId = s.pairToolMessages && !excluded.has(messageId) ? this.store.pairedToolMessageId(messageId) : null;
+        const partner = partnerId && !considered.has(partnerId) && !excluded.has(partnerId) ? this.store.chunksOfMessage(partnerId) : [];
+        const partnerTotal = tokensOf(partner);
+        const wholeFits = total <= s.completeMessageTokens && (!hasBudget || used + total <= budgetTokens);
+        if (wholeFits && (all.length > 1 || partner.length)) {
+          takeWhole(all, item, 'completed');
+          used += total;
+          if (partner.length && partnerTotal <= s.completeMessageTokens && (!hasBudget || used + partnerTotal <= budgetTokens)) {
+            considered.add(partnerId);
+            takeWhole(partner, item, 'paired');
+            used += partnerTotal;
+          }
+          continue;
+        }
+      }
+      const count = perMessage.get(messageId) || 0;
       if (count >= s.maxChunksPerMessage) continue;
-      if (budgetTokens !== null && budgetTokens !== undefined) {
+      if (hasBudget) {
         const tokens = this.estimator.estimate(item.chunk.text, model);
         if (used + tokens > budgetTokens) continue;
         used += tokens;
       }
-      perMessage.set(item.chunk.messageId, count + 1);
+      perMessage.set(messageId, count + 1);
+      taken.add(item.chunk.id);
       out.push(item);
     }
     return out;
