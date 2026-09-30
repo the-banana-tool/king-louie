@@ -176,6 +176,17 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
 - Tests use `tests/helpers/history-fixture.js` (a temp store; chats seeded
   through the real `appendMessage`); `tests/e2e/history-recall.test.js` is
   the end-to-end check.
+- The local embedder and the cross-encoder run in the embed worker, a child
+  process of `process.execPath` with `ELECTRON_RUN_AS_NODE=1` (like the PDF
+  worker), so they need Electron's RunAsNode fuse left on and
+  `onnxruntime-node` unpacked from the asar (`build.asarUnpack`).
+  `node scripts/check-embed-worker.js [--app <binary> --resources <dir>]`
+  checks a checkout or a packaged build (it downloads the models once). Only
+  the Windows x64 package has been checked; macOS and Linux are a residual.
+  The other platforms' onnxruntime binaries are dropped by one top-level
+  `build.files` pattern (`${platform}` macro); never give `build.win`/`mac`/
+  `linux` a `files` list: electron-builder 26 then drops the top-level list,
+  and `.git`, `tests` and `src/longhaul` go into the asar.
 
 ## Models
 
