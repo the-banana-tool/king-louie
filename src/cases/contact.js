@@ -494,6 +494,14 @@ class ContactRouter {
     return { ok: true, outcome: 'queued', ack: 'Received — recording it after the current step' };
   }
 
+  // A conflict already open for this record comes back from create as it
+  // is; `fresh` says whether this call made it.
+  _createConflict(caseId, record) {
+    const store = this.runtime.questions(caseId);
+    const fresh = !store.findDuplicate(record);
+    return { created: store.create(record), fresh };
+  }
+
   // §3.5 step 6: never overwrite; ask which answer stands, on this channel only.
   async _conflict(channelId, caseMeta, record, answer) {
     const first = cut(answerLabel(record, record.answer), 80);
@@ -502,7 +510,7 @@ class ContactRouter {
     const text = record.answer.channel === 'default'
       ? `${record.id} was settled by its default "${first}" at ${when}; you now answered "${second}". Which stands?`
       : `You answered ${record.id} "${first}" on ${record.answer.channel} at ${when}, and now "${second}". Which stands?`;
-    const created = await this.runtime.systemAction(caseMeta.id, `contact: conflict ${record.id}`, () => this.runtime.questions(caseMeta.id).create({
+    const { created, fresh } = await this.runtime.systemAction(caseMeta.id, `contact: conflict ${record.id}`, () => this._createConflict(caseMeta.id, {
       kind: record.kind,
       urgency: record.urgency,
       text,
@@ -525,6 +533,9 @@ class ContactRouter {
       }
     }));
     this.state.pin(`${caseMeta.id}/${created.id}`, channelId);
+    // Like every new question, it also lands in the case's chat (management
+    // surfaces spec §3.4); the ladder still asks it on this channel only.
+    if (fresh && typeof this.runtime.postQuestion === 'function') this.runtime.postQuestion(caseMeta.id, created);
     return created;
   }
 

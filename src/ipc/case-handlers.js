@@ -72,8 +72,13 @@ function registerCaseHandlers(ipcMain, context = {}) {
       if (err && err.code === 'UNKNOWN_CASE_TYPE') return { ok: false, error: err.message, code: err.code };
       throw err;
     }
+    // The chat is attached before the playbooks: their gating questions are
+    // posted to the case's chat (management surfaces §3.4), and with no chat
+    // carrying the caseId yet each would create a stray one.
+    const chat = chatId ? attach(chatId, info.id) : null;
     const attached = await playbookIpc.attachPlaybooksAfterCreate(context, info.id, withPlaybooks, { acceptBudgetRaises: acceptBudgetRaises === true });
-    return { ok: true, case: summarize(info), chat: chatId ? attach(chatId, info.id) : null, ...attached };
+    // The reply carries the chat as it is now, with the questions posted to it.
+    return { ok: true, case: summarize(info), chat: chat && attached.playbooks ? chatById(chatId) : chat, ...attached };
   }));
 
   ipcMain.handle(IPC.CASE_ATTACH, wrapHandler(IPC.CASE_ATTACH, async (_event, { chatId, caseId } = {}) => {

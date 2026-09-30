@@ -378,6 +378,24 @@ describe('case:create with playbooks', () => {
     assert.strictEqual(runtime.getCase(accepted.case.id).budget.usd, 40);
   });
 
+  it('attaches the chat before the playbooks, so their gating questions land in it (no stray chat)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { runtime, context } = makeContext();
+    let n = 0;
+    runtime.host = { chats: { listChats: context.listChats, createChat: context.createChat, appendMessageToChat: context.appendMessageToChat, createId: () => `stray-${++n}` } };
+    const handlers = new Map();
+    const ipcMain = { handle: (channel, fn) => handlers.set(channel, fn), on: () => {} };
+    registerCaseHandlers(ipcMain, context);
+    registerPlaybookHandlers(ipcMain, context);
+    const r = await handlers.get(IPC.CASE_CREATE)({}, { title: 'Lakeside lot', chatId: 'chat-1', playbooks: [{ source: 'example:land-sale' }] });
+    assert.strictEqual(r.ok, true);
+    const ids = r.playbooks[0].questionIds;
+    assert.strictEqual(ids.length, 2);
+    assert.deepStrictEqual(context.listChats().map((c) => c.id), ['chat-1']);
+    const posted = context.getMessages('chat-1').filter((m) => m.question).map((m) => m.question.questionId);
+    assert.deepStrictEqual(posted.sort(), [...ids].sort());
+  });
+
   it('infers the type from the playbooks, and refuses when they disagree', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const { runtime, call, examplesDir } = await world({ examples: { 'playbook.yaml': withYaml(/caseType: general/, 'caseType: outreach') } });

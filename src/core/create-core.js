@@ -3134,6 +3134,8 @@ function createCore(deps = {}) {
         }
       },
       notify: (event, payload) => ui.send(event, payload),
+      // Management surfaces §3.4: a new question is posted to the case's chat.
+      chats: { listChats, createChat, appendMessageToChat, getMessages, createId },
       uiToast: deps.uiToastChannel || null,
       // Fleet stage 7 (R50): a service host with the desktop bridge injects a
       // bridge-connected check; otherwise "a UI is attached" (the Electron host).

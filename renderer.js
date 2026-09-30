@@ -2516,6 +2516,223 @@ function renderCaseQuestionCard(q, { onDone, showError }) {
   return card;
 }
 
+/* --- Questions in the chat (management surfaces spec §3.4). A case's
+   question is an assistant message whose `question` metadata names the
+   record; the card is drawn from the question store and redrawn whenever
+   the case says its questions changed, whichever surface answered. Every
+   question string goes through textContent. --- */
+
+// Mirrors answerClass in src/cases/mcp-tool-definitions.js (the renderer
+// cannot require it): pressed kinds take buttons in the card, spoken ones
+// a reply in the chat.
+const CHAT_QUESTION_PRESSED_TYPES = new Set([
+  'envelope', 'envelope-delta', 'plan', 'budget-grant', 'budget-daily', 'direction', 'commit-failed',
+  'wakeups-failing', 'gating-pending', 'owner-task', 'conflict', 'ingest:review'
+]);
+function chatQuestionClass(q) {
+  const payload = q?.payload && typeof q.payload === 'object' ? q.payload : {};
+  const type = payload.type ?? 'ask';
+  if (q?.kind === 'approval') return 'pressed';
+  if (payload.mcpAnswerable === false || payload.failure) return 'pressed';
+  if (CHAT_QUESTION_PRESSED_TYPES.has(type)) return 'pressed';
+  if (q?.kind === 'briefing' && type !== 'ask') return 'pressed';
+  return 'spoken';
+}
+
+// A "no effect" note from an answer (a rejected grant, say) outlives the
+// redraw the runtime's own case:changed triggers for the same answer.
+const chatQuestionNotes = new Map();
+
+function chatQuestionOutcome(q) {
+  if (q.answer) {
+    const when = formatTimestamp(q.answer.at);
+    if (q.kind === 'briefing') {
+      return q.answer.channel === 'expired' ? `Expired ${when}` : `Acknowledged ${when} via ${q.answer.channel}`;
+    }
+    const option = (q.options || []).find((o) => o.id === q.answer.optionId);
+    const value = option ? option.label : (q.answer.text || '');
+    return `Answered ${when} via ${q.answer.channel}${value ? `: ${value}` : ''}`;
+  }
+  if (q.closed) return `Closed ${formatTimestamp(q.closed.at)}${q.closed.reason ? ` (${q.closed.reason})` : ''}`;
+  return null;
+}
+
+function createChatQuestionCard(ref) {
+  const card = document.createElement('div');
+  card.className = 'case-question chat-question-card';
+  card.dataset.caseId = ref.caseId;
+  card.dataset.questionId = ref.questionId;
+  const loading = document.createElement('div');
+  loading.className = 'case-question-head';
+  loading.textContent = `Question ${ref.questionId}`;
+  card.appendChild(loading);
+  refreshChatQuestionCard(card);
+  return card;
+}
+
+async function refreshChatQuestionCard(card) {
+  const { caseId, questionId } = card.dataset;
+  let q = null;
+  let error = null;
+  try {
+    const r = await window.electron.cases.questions({ caseId, questionIds: [questionId] });
+    if (!r?.ok) error = r?.error || 'The question could not be read.';
+    else q = (r.questions || [])[0] || null;
+  } catch (err) {
+    error = err.message;
+  }
+  if (!q && !error) error = `Question ${questionId} is no longer in its case.`;
+  fillChatQuestionCard(card, q, error);
+}
+
+function fillChatQuestionCard(card, q, error) {
+  card.replaceChildren();
+  const line = (className, text) => {
+    const el = document.createElement('div');
+    el.className = className;
+    el.textContent = text;
+    card.appendChild(el);
+    return el;
+  };
+  if (!q) {
+    line('case-question-head', `Question ${card.dataset.questionId}`);
+    line('case-question-error', error);
+    return;
+  }
+  const pressed = chatQuestionClass(q) === 'pressed';
+  card.className = `case-question case-question-${q.urgency} chat-question-card ${pressed ? 'is-pressed' : 'is-spoken'}`;
+  const label = q.kind === 'briefing' ? 'Briefing' : (q.kind === 'approval' ? 'Approval' : 'Question');
+  line('case-question-head', `${q.caseTitle ? `${q.caseTitle} · ` : ''}${label} ${q.id}`);
+  line('case-question-text', q.text);
+  (Array.isArray(q.notes) ? q.notes : []).forEach((note) => line('case-question-note', note?.text || ''));
+
+  const outcome = chatQuestionOutcome(q);
+  if (outcome) {
+    card.classList.add('is-answered');
+    line('chat-question-outcome', outcome);
+    const note = chatQuestionNotes.get(`${q.caseId}/${q.id}`);
+    if (note) line('case-question-note', note);
+    return;
+  }
+
+  if (!pressed) {
+    // Spoken: the owner answers in words, under the card, and the next turn
+    // relays it. The options are shown, not pressed.
+    (q.options || []).forEach((o, i) => line('chat-question-option', `${i + 1}. ${o.label}`));
+    line('chat-question-hint', 'Reply below.');
+    return;
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'case-question-actions';
+  card.appendChild(actions);
+  const setDisabled = (disabled) => actions.querySelectorAll('button, input').forEach((el) => { el.disabled = disabled; });
+  const press = async (call) => {
+    setDisabled(true);
+    try {
+      const r = await call();
+      if (!r?.ok) throw new Error(r?.error || 'The answer was not recorded.');
+      if (r.effect && r.effect.applied === false) {
+        chatQuestionNotes.set(`${q.caseId}/${q.id}`, r.effect.note || r.effect.error || 'The answer had no effect.');
+      }
+      await refreshChatQuestionCard(card);
+    } catch (err) {
+      // A refused press (answered on another surface, closed or expired
+      // meanwhile) redraws the card from the store, so it shows the current
+      // state, and keeps the refusal under it.
+      await refreshChatQuestionCard(card);
+      const refusal = document.createElement('div');
+      refusal.className = 'case-question-error';
+      refusal.textContent = err.message;
+      card.appendChild(refusal);
+    }
+  };
+  const answer = (fields) => press(() => window.electron.cases.answerQuestion({ caseId: q.caseId, questionId: q.id, ...fields }));
+
+  if (q.kind === 'briefing') {
+    const ack = caseButton('Got it', 'secondary-button chat-question-ack');
+    ack.addEventListener('click', () => press(() => window.electron.cases.acknowledgeBriefing({ caseId: q.caseId, questionId: q.id })));
+    actions.appendChild(ack);
+  } else if ((q.options || []).length) {
+    q.options.forEach((option) => {
+      const b = caseButton(option.label, 'secondary-button chat-question-option-btn');
+      b.dataset.optionId = option.id;
+      b.addEventListener('click', () => answer({ optionId: option.id }));
+      actions.appendChild(b);
+    });
+  } else {
+    // A pressed question with no options (a grant amount, a direction, an
+    // owner task's result) is typed here, in the card: no model between.
+    const grant = q.payload?.type === 'budget-grant';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'chat-info-input case-question-input chat-question-input';
+    input.placeholder = grant ? 'New limit' : 'Answer…';
+    const send = caseButton(grant ? 'Grant' : 'Answer', 'secondary-button chat-question-send');
+    send.addEventListener('click', () => {
+      const value = input.value.trim();
+      if (!value) { input.focus(); return; }
+      answer({ text: value });
+    });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send.click(); });
+    actions.append(input, send);
+  }
+}
+
+function refreshChatQuestionCards({ caseId, questionId } = {}) {
+  if (!dom.chatMessages) return;
+  dom.chatMessages.querySelectorAll('.chat-question-card').forEach((card) => {
+    if (caseId && card.dataset.caseId !== caseId) return;
+    if (questionId && card.dataset.questionId !== questionId) return;
+    refreshChatQuestionCard(card);
+  });
+}
+
+// The chat list alone: a question may have created a chat or moved one up.
+// A full loadChats would redraw the active chat and drop a reply that is
+// still streaming.
+async function refreshChatListOnly({ chatId = null } = {}) {
+  const data = unwrapIpcResult(await window.electron.chat.load(), 'Unable to load chats.');
+  const active = getActiveChat();
+  appState.chats = (data.chats || []).map((c) => (active && c.id === active.id ? { ...c, messages: active.messages } : c));
+  if (active) {
+    dropInactiveChatMessages(appState.chats, appState.activeChatId);
+    renderChatList();
+    return;
+  }
+  // No chat was open: open the one the question was posted to (a first
+  // question may have created it), else the saved active chat.
+  const posted = chatId && appState.chats.some((c) => c.id === chatId) ? chatId : null;
+  appState.activeChatId = posted || data.activeChatId || appState.chats[0]?.id || null;
+  if (appState.activeChatId) await ensureChatMessagesLoaded(appState.activeChatId);
+  refreshUI();
+}
+
+// A question just posted to the chat on screen is drawn in place, above a
+// reply that is still streaming (the store has it before that reply too).
+function appendQuestionMessageLive(chat, message) {
+  if (!Array.isArray(chat.messages) || chat.messages.some((m) => m.id === message.id)) return;
+  chat.messages.push(message);
+  addMessage('assistant', message.text, { question: message.question, seq: message.seq, chatId: chat.id, messageId: message.id });
+  const added = dom.chatMessages.lastElementChild;
+  const streaming = dom.chatMessages.querySelector('.message.streaming');
+  if (streaming && added && added !== streaming) dom.chatMessages.insertBefore(added, streaming);
+  updateEmptyState();
+}
+
+if (window.electron?.cases?.onChanged) {
+  window.electron.cases.onChanged((payload) => {
+    if (!payload?.caseId || payload.what !== 'questions') return;
+    if (payload.chatId && payload.message?.question) {
+      const chat = getActiveChat();
+      if (chat && chat.id === payload.chatId) appendQuestionMessageLive(chat, payload.message);
+      refreshChatListOnly({ chatId: payload.chatId }).catch((err) => chatLog.warn(`Chat list refresh failed: ${err.message}`));
+      return;
+    }
+    refreshChatQuestionCards({ caseId: payload.caseId, questionId: payload.questionId || null });
+  });
+}
+
 function renderCaseBudgetLine(caseId, budget, { showError, refresh }) {
   const row = document.createElement('div');
   row.className = 'chat-info-row case-budget-row';
@@ -3298,7 +3515,9 @@ function renderChatMessages() {
       documents: message?.documents,
       context: message?.context,
       seq: message?.seq,
-      chatId: activeChat.id
+      chatId: activeChat.id,
+      question: message?.question,
+      messageId: message?.id
     });
   });
 
@@ -8244,6 +8463,20 @@ function renderRecallLine(messageContent, context, { chatId, seq } = {}) {
 function addMessage(sender, text, metadata = {}) {
   const messageDiv = document.createElement('div');
   messageDiv.className = `message ${sender}`;
+  if (metadata?.messageId) messageDiv.dataset.messageId = metadata.messageId;
+
+  // A case's question (management surfaces §3.4): drawn as a card from the
+  // question store, never from the message text.
+  if (sender === 'assistant' && metadata?.question?.caseId && metadata?.question?.questionId) {
+    messageDiv.classList.add('question-message');
+    const messageContent = document.createElement('div');
+    messageContent.className = 'message-content';
+    messageContent.appendChild(createChatQuestionCard(metadata.question));
+    messageDiv.appendChild(messageContent);
+    dom.chatMessages.appendChild(messageDiv);
+    dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+    return;
+  }
   
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
@@ -11374,8 +11607,6 @@ initMeshHandlers();
 const questionsLog = createLogger('questions');
 const QUESTION_URGENCY_RANK = { high: 0, normal: 1, low: 2 };
 const CONTACT_LADDER_URGENCIES = ['low', 'normal', 'high'];
-let questionsLastInputAt = Date.now();
-let questionsLastHeartbeatAt = 0;
 let questionsRendering = null;
 
 function questionsEl(tag, className, text) {
@@ -11642,25 +11873,37 @@ async function renderQuestionsSection() {
   return questionsRendering;
 }
 
-function sendPresenceHeartbeat(force = false) {
-  if (!window.electron?.contact?.heartbeat) return;
-  const now = Date.now();
-  if (!force && now - questionsLastHeartbeatAt < 30000) return;
-  questionsLastHeartbeatAt = now;
-  window.electron.contact.heartbeat({ focused: document.hasFocus(), lastInputAt: new Date(questionsLastInputAt).toISOString() })
-    .catch((err) => questionsLog.debug(`heartbeat failed: ${err.message}`));
-}
-
 function initQuestionsSection() {
   if (!document.getElementById('questions-section')) return;
   renderQuestionsSection();
   if (window.electron?.cases?.onChanged) window.electron.cases.onChanged(() => renderQuestionsSection());
   setInterval(() => renderQuestionsSection(), 60000);
+}
+
+initQuestionsSection();
+
+/* --- Presence (cases stage 4 §3.2; management surfaces §3.4): the window
+   reports focus and input silently, whether or not any questions UI is on
+   screen. --- */
+const presenceLog = createLogger('presence');
+let presenceLastInputAt = Date.now();
+let presenceLastHeartbeatAt = 0;
+
+function sendPresenceHeartbeat(force = false) {
+  if (!window.electron?.contact?.heartbeat) return;
+  const now = Date.now();
+  if (!force && now - presenceLastHeartbeatAt < 30000) return;
+  presenceLastHeartbeatAt = now;
+  window.electron.contact.heartbeat({ focused: document.hasFocus(), lastInputAt: new Date(presenceLastInputAt).toISOString() })
+    .catch((err) => presenceLog.debug(`heartbeat failed: ${err.message}`));
+}
+
+function initPresenceHeartbeat() {
   window.addEventListener('focus', () => sendPresenceHeartbeat(true));
   window.addEventListener('blur', () => sendPresenceHeartbeat(true));
   for (const name of ['keydown', 'pointerdown']) {
     window.addEventListener(name, () => {
-      questionsLastInputAt = Date.now();
+      presenceLastInputAt = Date.now();
       sendPresenceHeartbeat(false);
     }, { capture: true, passive: true });
   }
@@ -11668,7 +11911,7 @@ function initQuestionsSection() {
   sendPresenceHeartbeat(true);
 }
 
-initQuestionsSection();
+initPresenceHeartbeat();
 
 /* --- Onboarding Wizard ------------------------------------- */
 const wizardState = { currentStep: 0, steps: [], data: {} };

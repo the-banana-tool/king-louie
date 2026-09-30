@@ -143,10 +143,13 @@ const PRESSED_TYPES = new Set([
 function answerClass(question) {
   const q = question && typeof question === 'object' ? question : {};
   const payload = q.payload && typeof q.payload === 'object' && !Array.isArray(q.payload) ? q.payload : {};
+  const type = payload.type ?? 'ask';
   if (q.kind === 'approval') return 'pressed';
-  if (PRESSED_TYPES.has(payload.type)) return 'pressed';
-  if (payload.failure) return 'pressed';
-  if (payload.mcpAnswerable === false) return 'pressed';
+  if (payload.mcpAnswerable === false || payload.failure) return 'pressed';
+  if (PRESSED_TYPES.has(type)) return 'pressed';
+  // Only a briefing the model asked (Ask) is spoken: a briefing of any
+  // other type fails closed.
+  if (q.kind === 'briefing' && type !== 'ask') return 'pressed';
   return 'spoken';
 }
 

@@ -64,11 +64,19 @@ function defaultFactInput(rec, answer, option) {
 }
 
 class QuestionStore {
-  constructor(dir, { now = () => new Date(), caseId = null } = {}) {
+  // `onSettled(rec)` runs after close() or expire() settles a record, so
+  // the host can tell the window (a chat card showing it goes stale
+  // otherwise). Answers and acknowledgements notify from the runtime.
+  constructor(dir, { now = () => new Date(), caseId = null, onSettled = null } = {}) {
     this.dir = dir;
     this.qdir = path.join(dir, '.kl', 'questions');
     this.now = now;
     this._caseId = caseId;
+    this._onSettled = typeof onSettled === 'function' ? onSettled : null;
+  }
+
+  _settled(rec) {
+    if (this._onSettled) this._onSettled(rec);
   }
 
   static registerAnswerHandler(type, { toFact = null, onAnswered = null } = {}) {
@@ -327,6 +335,7 @@ class QuestionStore {
           rec.answer = { channel: 'expired', at: now.toISOString(), text: null, optionId: null, factId: null };
           this._write(rec);
           expired.push(rec.id);
+          this._settled(rec);
         }
         continue;
       }
@@ -339,6 +348,7 @@ class QuestionStore {
         this._write(rec);
         new CaseRecords(this.dir).writeJournal('question', `${rec.id} expired: default ${rec.defaultOnSilence} applied`, now);
         expired.push(rec.id);
+        this._settled(rec);
       }
     }
     return { expired, overdue };
@@ -352,6 +362,7 @@ class QuestionStore {
     rec.closed = { at: this.now().toISOString(), reason: String(reason), by };
     this._write(rec);
     new CaseRecords(this.dir).writeJournal('question', `${rec.id} closed by ${by}: ${reason || 'no reason given'}`, this.now());
+    this._settled(rec);
     return rec;
   }
 }

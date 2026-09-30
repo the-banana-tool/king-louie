@@ -853,6 +853,15 @@ contextBridge.exposeInMainWorld(
       questions: (payload = {}) => {
         validateObject(payload, 'payload');
         if (payload.caseId !== undefined) validateString(payload.caseId, 'caseId', { minLength: 1 });
+        if (payload.questionIds !== undefined) {
+          // Question ids are q-NNNN (src/cases/questions.js ID_PATTERN); a
+          // chat asks for its own cards, never more than 50 at a time.
+          if (!Array.isArray(payload.questionIds) || payload.questionIds.length > 50) throw new Error('Invalid questionIds: expected an array of at most 50 ids');
+          payload.questionIds.forEach((id) => {
+            validateString(id, 'questionIds[]', { minLength: 1 });
+            if (id.length > 16) throw new Error('Invalid questionIds[]: at most 16 characters');
+          });
+        }
         return ipcRenderer.invoke('case:questions', payload);
       },
       answerQuestion: (payload) => {

@@ -147,10 +147,20 @@ class ContextBuilder {
 
     // Tool calls in the tail's span, one line each at the top of the
     // assistant reply that follows them before the next user message; with
-    // tailIncludeToolResults, their results too (_toolResults).
+    // tailIncludeToolResults, their results too (_toolResults). A case
+    // question posted mid-turn (a row with `question`, stored between the
+    // Ask call and its result) is not the turn's reply: the lines go to the
+    // first assistant row after it that is not a question, and to the
+    // question only when the turn left no other (stopped after asking).
     const replyIndex = (seq) => {
-      const next = entries.findIndex((e) => e.message.seq > seq);
-      return next === -1 || entries[next].message.sender !== 'assistant' ? -1 : next;
+      let question = -1;
+      for (let i = entries.findIndex((e) => e.message.seq > seq); i !== -1 && i < entries.length; i += 1) {
+        const m = entries[i].message;
+        if (m.sender !== 'assistant') break;
+        if (!m.question) return i;
+        if (question === -1) question = i;
+      }
+      return question;
     };
     const folded = new Map();
     const fold = (i, seq, line) => {
