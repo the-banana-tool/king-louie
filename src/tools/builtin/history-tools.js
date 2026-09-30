@@ -67,7 +67,8 @@ const searchHistoryTool = new Tool({
       query,
       kinds: kinds.length ? kinds : null,
       limit,
-      settings: settingsOf(h).recall
+      settings: settingsOf(h).recall,
+      reranker: typeof h.reranker === 'function' ? h.reranker : null
     });
     return {
       ok: true,

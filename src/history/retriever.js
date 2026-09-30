@@ -76,6 +76,16 @@ class Retriever {
         new Promise((resolve) => { timer = setTimeout(resolve, maxMs, TIMED_OUT); })
       ]);
     } catch (err) {
+      // No reranker yet (the EmbedderHost starts with the background checks:
+      // never under KL_TEST_MODE, not before startup finishes): the fused
+      // order, silently, with one debug line per Retriever.
+      if (err && err.code === 'RERANK_UNAVAILABLE') {
+        if (!this._rerankUnavailableLogged) {
+          this._rerankUnavailableLogged = true;
+          log.debug('no reranker yet; keeping the fused order', { pairs: m });
+        }
+        return items;
+      }
       log.warn('reranker failed; keeping the fused order', { error: err.message, pairs: m });
       return items;
     } finally {
