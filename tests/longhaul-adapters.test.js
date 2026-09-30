@@ -10,6 +10,11 @@ const { SessionIndex, loadSession, estimateTokens } = require('../src/longhaul/s
 const { readQuestions, questionsFile } = require('../src/longhaul/questions');
 const { UsageError } = require('../src/longhaul/errors');
 const { FIXTURE_ROOT } = require('./helpers/longhaul-helpers');
+const { shownFromBuild } = require('../src/longhaul/adapters/kl-recall');
+const { ContextBuilder } = require('../src/history/context-builder');
+const { Retriever } = require('../src/history/retriever');
+const { TokenEstimator } = require('../src/history/token-estimator');
+const { openTempStore, seedChat } = require('./helpers/history-fixture');
 
 function generated(config) {
   const { manifest, messages, questions, index } = generateSynthetic(config);
@@ -19,6 +24,40 @@ async function fixture(id) {
   const session = await loadSession(path.join(FIXTURE_ROOT, 'sessions', id));
   return { session, questions: await readQuestions(questionsFile(FIXTURE_ROOT, id)) };
 }
+
+describe('shownFromBuild with tailIncludeToolResults', () => {
+  it('a whole tool result in the tail is shown whole, a shortened one partial', async () => {
+    const t = openTempStore();
+    try {
+      seedChat(t.store, {
+        messages: [
+          { sender: 'user', text: 'Check the gate and the drainage log at the Lakeside lot.' },
+          { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'cat gate.txt' } },
+          { sender: 'toolResult', toolName: 'Bash', result: 'side gate code 4417' },
+          { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'cat drainage.log' } },
+          { sender: 'toolResult', toolName: 'Bash', result: Array.from({ length: 40 }, (_, i) => `drainage line ${i} north fence`).join('\n') },
+          { sender: 'assistant', text: 'The gate code is 4417 and the log is normal.' }
+        ]
+      });
+      const estimator = new TokenEstimator();
+      const builder = new ContextBuilder({
+        store: t.store,
+        retriever: new Retriever({ store: t.store, estimator }),
+        estimator,
+        getSettings: () => ({ history: { recall: { tailIncludeToolResults: true, tailToolResultMaxTokens: 50 } } })
+      });
+      const out = await builder.build({ chatId: 'chat-1', message: 'gate code', upToSeq: 7 });
+      const rows = out.recalled.chunkIds.length ? t.store.chunks(out.recalled.chunkIds) : [];
+      const shown = shownFromBuild(out, rows, 'chat-1', () => Infinity);
+      assert.deepStrictEqual(shown.evidenceSeqsShown, [1, 3, 6], 'user, assistant and the small result are whole');
+      assert.deepStrictEqual(shown.evidenceSeqsPartial, [2, 4, 5], 'the tool lines and the shortened result are partial');
+      assert.deepStrictEqual(shown.tailWholeSeqs, [1, 3, 6]);
+      assert.deepStrictEqual(shown.shortened.map((x) => x.seq), [5]);
+    } finally {
+      t.cleanup();
+    }
+  });
+});
 
 describe('sliding-window', () => {
   it('shows a contiguous run ending just before askAtSeq, inside the window', async () => {

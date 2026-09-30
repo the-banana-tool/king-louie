@@ -22,7 +22,12 @@ const HISTORY_DEFAULTS = Object.freeze({
     completeMessageTokens: 0,
     prefixMinChars: 0,
     queryContextSeparate: false,
-    pairToolMessages: false
+    pairToolMessages: false,
+    // Experimental (recall tail/recency 2026-09-30); false = off.
+    tailIncludeToolResults: false,
+    tailToolResultMaxTokens: 300,
+    recencyByPosition: false,
+    recencyHalfLifeFraction: 0.25
   }),
   chunk: Object.freeze({ targetChars: 1500, minChars: 40 }),
   readHistoryMaxTokens: 8000
@@ -65,7 +70,11 @@ function mergeHistorySettings(source) {
       completeMessageTokens: atLeast(r.completeMessageTokens, d.completeMessageTokens, 0),
       prefixMinChars: atLeast(r.prefixMinChars, d.prefixMinChars, 0, true),
       queryContextSeparate: flag(r.queryContextSeparate, d.queryContextSeparate),
-      pairToolMessages: flag(r.pairToolMessages, d.pairToolMessages)
+      pairToolMessages: flag(r.pairToolMessages, d.pairToolMessages),
+      tailIncludeToolResults: flag(r.tailIncludeToolResults, d.tailIncludeToolResults),
+      tailToolResultMaxTokens: positive(r.tailToolResultMaxTokens, d.tailToolResultMaxTokens),
+      recencyByPosition: flag(r.recencyByPosition, d.recencyByPosition),
+      recencyHalfLifeFraction: positive(r.recencyHalfLifeFraction, d.recencyHalfLifeFraction)
     },
     chunk: {
       targetChars: atLeast(c.targetChars, HISTORY_DEFAULTS.chunk.targetChars, 200, true),

@@ -13,7 +13,8 @@ describe('history settings', () => {
       recalledTokens: 6000, queryUserTurns: 2, bm25TopK: 50, rrfK: 60,
       kindWeights: { user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 },
       recencyWeight: 0.3, recencyHalfLifeDays: 30, maxChunksPerMessage: 4,
-      completeMessageTokens: 0, prefixMinChars: 0, queryContextSeparate: false, pairToolMessages: false
+      completeMessageTokens: 0, prefixMinChars: 0, queryContextSeparate: false, pairToolMessages: false,
+      tailIncludeToolResults: false, tailToolResultMaxTokens: 300, recencyByPosition: false, recencyHalfLifeFraction: 0.25
     });
     assert.deepStrictEqual(s.chunk, { targetChars: 1500, minChars: 40 });
     assert.strictEqual(s.readHistoryMaxTokens, 8000);
@@ -34,7 +35,8 @@ describe('history settings', () => {
     const s = mergeHistorySettings({
       recall: {
         enabled: 'no', tailMessages: '8', tailTokens: -5, recalledTokens: NaN, recencyHalfLifeDays: 0,
-        recencyWeight: 3, bm25TopK: 0, maxChunksPerMessage: 2.7, kindWeights: null
+        recencyWeight: 3, bm25TopK: 0, maxChunksPerMessage: 2.7, kindWeights: null,
+        tailIncludeToolResults: 'yes', tailToolResultMaxTokens: 0, recencyByPosition: 1, recencyHalfLifeFraction: -0.5
       },
       chunk: { targetChars: 10 },
       readHistoryMaxTokens: 'lots'
@@ -50,6 +52,10 @@ describe('history settings', () => {
     assert.strictEqual(s.recall.kindWeights.user, 1.2);
     assert.strictEqual(s.chunk.targetChars, 1500);
     assert.strictEqual(s.readHistoryMaxTokens, 8000);
+    assert.strictEqual(s.recall.tailIncludeToolResults, false);
+    assert.strictEqual(s.recall.tailToolResultMaxTokens, 300);
+    assert.strictEqual(s.recall.recencyByPosition, false);
+    assert.strictEqual(s.recall.recencyHalfLifeFraction, 0.25);
   });
 
   it('is part of mergeSettings and DEFAULT_SETTINGS', () => {

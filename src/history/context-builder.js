@@ -4,7 +4,7 @@
 // asks at a point in the chat: nothing with seq >= upToSeq is read for the
 // tail, the query or retrieval (LongHaul relies on this).
 const { mergeHistorySettings } = require('./settings');
-const { toolUseSummary } = require('./chunker');
+const { toolUseSummary, toolResultText } = require('./chunker');
 const { formatExcerpts, formatRecalledBlock } = require('./excerpts');
 
 const PAGE = 200;
@@ -84,14 +84,17 @@ class ContextBuilder {
 
   // Newest first, a page at a time, until the tail and the query have what
   // they need or the chat's start is reached. Only user and assistant rows,
-  // and tool calls when they are folded into the tail (tailScanPage).
+  // and tool calls and results when they are folded into the tail
+  // (tailScanPage).
   _scan(chatId, limit, recall) {
     const out = [];
     let content = 0;
     let users = 0;
     let before = limit;
     while (before > 1 && (content < recall.tailMessages || users < recall.queryUserTurns)) {
-      const page = this.store.tailScanPage(chatId, { beforeSeq: before, limit: PAGE, toolCalls: Boolean(recall.tailIncludeToolCalls) });
+      const page = this.store.tailScanPage(chatId, {
+        beforeSeq: before, limit: PAGE, toolCalls: Boolean(recall.tailIncludeToolCalls), toolResults: Boolean(recall.tailIncludeToolResults)
+      });
       if (!page.length) break;
       for (const m of page) {
         out.push(m);
@@ -128,39 +131,104 @@ class ContextBuilder {
     while (entries.length && entries[0].message.sender !== 'user') entries.shift();
 
     // Tool calls in the tail's span, one line each at the top of the
-    // assistant reply that follows them before the next user message.
+    // assistant reply that follows them before the next user message; with
+    // tailIncludeToolResults, their results too (_toolResults).
+    const replyIndex = (seq) => {
+      const next = entries.findIndex((e) => e.message.seq > seq);
+      return next === -1 || entries[next].message.sender !== 'assistant' ? -1 : next;
+    };
     const folded = new Map();
+    const fold = (i, seq, line) => {
+      if (!folded.has(i)) folded.set(i, []);
+      folded.get(i).push({ seq, line });
+    };
     const foldedSeqs = [];
+    let callTokens = 0;
     if (recall.tailIncludeToolCalls && entries.length) {
       const from = entries[0].message.seq;
       const toolUses = scanned.filter((m) => m.sender === 'toolUse' && m.seq > from).sort((a, b) => a.seq - b.seq);
       for (const call of toolUses) {
-        const next = entries.findIndex((e) => e.message.seq > call.seq);
-        if (next === -1 || entries[next].message.sender !== 'assistant') continue;
-        if (!folded.has(next)) folded.set(next, []);
-        folded.get(next).push(`[tool] ${toolUseSummary(call)}`);
+        const next = replyIndex(call.seq);
+        if (next === -1) continue;
+        const line = `[tool] ${toolUseSummary(call)}`;
+        fold(next, call.seq, line);
         foldedSeqs.push(call.seq);
+        callTokens += this.estimator.estimate(line, model);
       }
     }
+    const results = recall.tailIncludeToolResults && entries.length
+      ? this._toolResults(scanned, {
+        from: entries[0].message.seq,
+        left: recall.tailTokens - callTokens - entries.reduce((n, e) => n + e.tokens, 0),
+        replyIndex, recall, model
+      })
+      : [];
+    for (const r of results) fold(r.index, r.message.seq, r.text);
 
     const messages = entries.map((e, i) => {
       const lines = folded.get(i);
-      const text = lines ? `${lines.join('\n')}\n\n${e.text}` : e.text;
+      const head = lines ? lines.sort((a, b) => a.seq - b.seq).map((x) => x.line).join('\n') : '';
+      const text = lines ? `${head}\n\n${e.text}` : e.text;
       return e.documents ? { ...e.message, text, documents: e.documents } : { ...e.message, text };
     });
+    const resultSeqs = results.map((r) => r.message.seq).sort((a, b) => a - b);
     return {
       messages,
-      messageIds: entries.map((e) => e.message.id),
+      messageIds: [...entries.map((e) => e.message.id), ...results.map((r) => r.message.id)],
       estTokens: messages.reduce((n, m) => n + this.estimator.estimate(m.text, model) + this._attachmentTokens(m, model), 0),
       stats: entries.length
         ? {
           fromSeq: entries[0].message.seq,
           toSeq: entries[entries.length - 1].message.seq,
-          seqs: [...entries.map((e) => e.message.seq), ...foldedSeqs].sort((a, b) => a - b),
-          shortened: entries.filter((e) => e.shortened).map((e) => e.shortened)
+          seqs: [...entries.map((e) => e.message.seq), ...foldedSeqs, ...resultSeqs].sort((a, b) => a - b),
+          shortened: [...entries.filter((e) => e.shortened).map((e) => e.shortened), ...results.filter((r) => r.shortened).map((r) => r.shortened)]
+            .sort((a, b) => a.seq - b.seq),
+          ...(recall.tailIncludeToolResults ? { toolResultSeqs: resultSeqs } : {})
         }
         : { fromSeq: null, toSeq: null, seqs: [], shortened: [] }
     };
+  }
+
+  // tailIncludeToolResults: tool results in the tail's span, folded like
+  // tool calls into the reply that follows them. They get what the user and
+  // assistant messages and the tool lines left of tailTokens, newest first,
+  // so a tool dump never pushes a user turn out. A result over
+  // tailToolResultMaxTokens keeps its head, with a note, and is recorded in
+  // stats.tail.shortened (shown: the leading chunks that fit whole); a
+  // result that does not fit what is left is skipped and an older one tried.
+  _toolResults(scanned, { from, left, replyIndex, recall, model }) {
+    const out = [];
+    let budget = left;
+    const candidates = scanned.filter((m) => m.sender === 'toolResult' && m.seq > from).sort((a, b) => b.seq - a.seq);
+    for (const m of candidates) {
+      if (budget <= 0) break;
+      const index = replyIndex(m.seq);
+      if (index === -1) continue;
+      const full = toolResultText(m);
+      if (!full.trim()) continue;
+      const label = `[tool result #${m.seq}${m.toolName ? ` ${m.toolName}` : ''}]`;
+      let text = `${label}\n${full}`;
+      let shortened = null;
+      if (this.estimator.estimate(full, model) > recall.tailToolResultMaxTokens) {
+        const chars = Math.max(1, Math.floor(recall.tailToolResultMaxTokens * this.estimator.charsPerToken(model)));
+        const head = full.slice(0, chars);
+        text = `${label}\n${head}\n[tool result #${m.seq} shortened: the start is shown; ReadHistory ${m.seq} for the rest]`;
+        const own = this.store.chunksOfMessage(m.id).filter((c) => c.kind === 'tool_result');
+        let shown = 0;
+        let covered = 0;
+        for (const c of own) {
+          covered += c.text.length + (shown ? 2 : 0);
+          if (covered > head.length) break;
+          shown += 1;
+        }
+        shortened = { seq: m.seq, shown, total: Math.max(own.length, 1), toolResult: true };
+      }
+      const tokens = this.estimator.estimate(text, model);
+      if (tokens > budget) continue;
+      budget -= tokens;
+      out.push({ message: m, index, text, tokens, shortened });
+    }
+    return out;
   }
 
   // Document text and images are sent with a tail message every turn, so

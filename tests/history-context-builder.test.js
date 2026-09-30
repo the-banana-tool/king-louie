@@ -213,6 +213,85 @@ describe('ContextBuilder', () => {
   });
 });
 
+describe('ContextBuilder: tailIncludeToolResults (experimental, off by default)', () => {
+  let t;
+  afterEach(() => t && t.cleanup());
+  const LOG = Array.from({ length: 40 }, (_, i) => `drainage log line ${i} for the Lakeside lot north fence sensor`).join('\n');
+  const chat = () => [
+    { sender: 'user', text: 'Check the drainage sensor at the Lakeside lot and the gate status.' },
+    { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'cat gate.txt' } },
+    { sender: 'toolResult', toolName: 'Bash', result: 'side gate code 4417, gate closed' },
+    { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'cat drainage.log' } },
+    { sender: 'toolResult', toolName: 'Bash', result: LOG },
+    { sender: 'toolUse', toolName: 'Vault', parameters: { action: 'get', key: 'gate' } },
+    { sender: 'toolResult', toolName: 'Vault', result: 'secret-value-never-shown' },
+    { sender: 'assistant', text: 'The gate is closed and the drainage log looks normal.' }
+  ];
+
+  it('keeps a small result whole, shortens a big one with a note, excludes both from recall', async () => {
+    const s = setup(chat(), { recall: { tailIncludeToolResults: true, tailToolResultMaxTokens: 100 } });
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'what was the gate code and the drainage log' });
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), [1, 8]);
+    const reply = out.tail[1].text;
+    assert.ok(reply.startsWith('[tool] Bash: cat gate.txt\n[tool result #3 Bash]\nside gate code 4417, gate closed\n[tool] Bash: cat drainage.log\n[tool result #5 Bash]\n'), reply);
+    assert.ok(reply.includes('[tool result #5 shortened: the start is shown; ReadHistory 5 for the rest]'));
+    assert.ok(!reply.includes('drainage log line 39'), 'the tail of the big result is cut');
+    assert.ok(!reply.includes('secret-value-never-shown'), 'an unindexed tool result is never shown');
+    assert.ok(reply.endsWith('\n\nThe gate is closed and the drainage log looks normal.'));
+    assert.deepStrictEqual(out.stats.tail.seqs, [1, 2, 3, 4, 5, 6, 8]);
+    assert.deepStrictEqual(out.stats.tail.toolResultSeqs, [3, 5]);
+    assert.strictEqual(out.stats.tail.shortened.length, 1);
+    const cut = out.stats.tail.shortened[0];
+    assert.strictEqual(cut.seq, 5);
+    assert.strictEqual(cut.toolResult, true);
+    assert.ok(cut.shown < cut.total, `${cut.shown} of ${cut.total}`);
+    assert.strictEqual(out.stats.estTokens.tail, out.tail.reduce((n, m) => n + s.estimator.estimate(m.text), 0));
+    const recalledIds = t.store.chunks(out.recalled.chunkIds).map((c) => c.messageId);
+    assert.ok(!recalledIds.includes('chat-1-m3') && !recalledIds.includes('chat-1-m5'), 'tail results are not recalled');
+
+    s.builder.getSettings = () => ({ history: {} });
+    const off = await s.builder.build({ chatId: 'chat-1', message: 'gate code' });
+    assert.ok(!off.tail[1].text.includes('4417'), 'off by default: results stay out');
+    assert.strictEqual(off.stats.tail.toolResultSeqs, undefined);
+  });
+
+  it('results get what user and assistant messages left of tailTokens, newest first; a user turn is never dropped for one', async () => {
+    const big = (n) => `reading ${n}: ${'sensor value steady at the north fence '.repeat(12)}`;
+    const messages = [
+      { sender: 'user', text: 'Read the three sensors at the Lakeside lot.' },
+      { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'read a' } },
+      { sender: 'toolResult', toolName: 'Bash', result: big('a') },
+      { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'read b' } },
+      { sender: 'toolResult', toolName: 'Bash', result: big('b') },
+      { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'read c' } },
+      { sender: 'toolResult', toolName: 'Bash', result: 'reading c: 12' },
+      { sender: 'assistant', text: 'All three sensors read steady.' }
+    ];
+    const s = setup(messages);
+    t = s.t;
+    const base = await s.builder.build({ chatId: 'chat-1', message: 'x' });
+    const lines = base.stats.estTokens.tail;
+    const one = s.estimator.estimate(`[tool result #5 Bash]\n${big('b')}`);
+    const small = s.estimator.estimate('[tool result #7 Bash]\nreading c: 12');
+    // Room for the tail, #7 and #5, but not #3 as well.
+    const tailTokens = lines + small + one + Math.floor(one / 2);
+    s.builder.getSettings = () => ({ history: { recall: { tailIncludeToolResults: true, tailToolResultMaxTokens: 1000, tailTokens } } });
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'x' });
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), [1, 8], 'both user and assistant messages stay');
+    assert.deepStrictEqual(out.stats.tail.toolResultSeqs, [5, 7]);
+    assert.deepStrictEqual(out.stats.tail.shortened, []);
+    assert.ok(out.stats.estTokens.tail <= tailTokens, `${out.stats.estTokens.tail} > ${tailTokens}`);
+
+    // A budget the user and assistant messages already fill leaves no result.
+    const own = s.estimator.estimate(messages[0].text) + s.estimator.estimate(messages[7].text);
+    s.builder.getSettings = () => ({ history: { recall: { tailIncludeToolResults: true, tailTokens: own } } });
+    const none = await s.builder.build({ chatId: 'chat-1', message: 'x' });
+    assert.deepStrictEqual(none.tail.map((m) => m.seq), [1, 8]);
+    assert.deepStrictEqual(none.stats.tail.toolResultSeqs, []);
+  });
+});
+
 describe('ContextBuilder: the tail scan reads only what the tail needs', () => {
   let t;
   afterEach(() => t && t.cleanup());
@@ -236,6 +315,9 @@ describe('ContextBuilder: the tail scan reads only what the tail needs', () => {
     assert.strictEqual(withCalls[1].parameters.file_path, 'notes/survey.md');
     assert.strictEqual(withCalls[1].result, undefined);
     assert.deepStrictEqual(t.store.tailScanPage('chat-1', { beforeSeq: 5, limit: 1 }).map((m) => m.seq), [1], 'a page is keyed by beforeSeq');
+    const withResults = t.store.tailScanPage('chat-1', { beforeSeq: 6, limit: 10, toolResults: true });
+    assert.deepStrictEqual(withResults.map((m) => [m.seq, m.sender]), [[5, 'assistant'], [3, 'toolResult'], [1, 'user']]);
+    assert.strictEqual(withResults[1].result.ok, true);
   });
 
   it('build() never loads the full rows of the range', async () => {

@@ -55,6 +55,8 @@ function recallSettings(recall, budgetTokens) {
 //   (stats.tail.shortened: text or documents cut), then it is partial.
 // - A tool call folded into the tail (in stats.tail.seqs but not a tail
 //   message) is shown as a one-line summary, so it is partial.
+// - A tool result folded into the tail (stats.tail.toolResultSeqs, with
+//   tailIncludeToolResults) is whole unless shortened, then partial.
 // - A recalled message is whole when all its chunks were recalled
 //   (totalOf(seq), what chunkMessage cuts it into), else partial.
 function shownFromBuild(out, chunkRows, chatId, totalOf = () => Infinity) {
@@ -62,6 +64,8 @@ function shownFromBuild(out, chunkRows, chatId, totalOf = () => Infinity) {
   const statsTail = out.stats?.tail || {};
   const tailSeqs = uniqueSorted([...tailMessageSeqs, ...(statsTail.seqs || []).filter(Number.isInteger)]);
   const shortened = new Set((statsTail.shortened || []).map((x) => x && x.seq).filter(Number.isInteger));
+  const tailWholeSeqs = uniqueSorted([...tailMessageSeqs, ...(statsTail.toolResultSeqs || []).filter(Number.isInteger)])
+    .filter((seq) => !shortened.has(seq));
 
   const shownBySeq = {};
   for (const c of chunkRows) {
@@ -73,12 +77,12 @@ function shownFromBuild(out, chunkRows, chatId, totalOf = () => Infinity) {
   for (const seq of recalledSeqs) totalBySeq[seq] = totalOf(seq);
 
   const whole = new Set();
-  for (const seq of tailMessageSeqs) if (!shortened.has(seq)) whole.add(seq);
+  for (const seq of tailWholeSeqs) whole.add(seq);
   for (const seq of recalledSeqs) if (shownBySeq[seq] >= totalBySeq[seq]) whole.add(seq);
   const partial = [...tailSeqs, ...recalledSeqs].filter((seq) => !whole.has(seq));
   return {
     tailSeqs,
-    tailWholeSeqs: tailMessageSeqs.filter((seq) => !shortened.has(seq)),
+    tailWholeSeqs,
     shortened: statsTail.shortened || [],
     recalledSeqs,
     shownBySeq,
