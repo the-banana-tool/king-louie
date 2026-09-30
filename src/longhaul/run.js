@@ -157,7 +157,7 @@ async function runBenchmark({
     if (!questions.length) continue;
     const upToSeq = Math.max(...questions.map((q) => q.askAtSeq));
     for (const adapter of adapters) {
-      const handle = await adapter.prepare(session, { upToSeq });
+      const handle = await adapter.prepare(session, { upToSeq, questionCount: questions.length });
       try {
         for (const q of questions) {
           const record = await scoreOne({ runId, adapter, handle, session, q, budgetTokens });
@@ -173,8 +173,12 @@ async function runBenchmark({
   const summary = summarize(records);
   writeFileAtomic(path.join(dir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
   writeFileAtomic(path.join(dir, 'summary.md'), renderSummaryMarkdown(config, summary));
+  // Adapters that count something of their own (numbers only; the Jev probe).
+  const adapterStats = {};
+  for (const a of adapters) if (typeof a.runStats === 'function') adapterStats[a.name] = a.runStats();
+  if (Object.keys(adapterStats).length) writeFileAtomic(path.join(dir, 'adapter-stats.json'), `${JSON.stringify(adapterStats, null, 2)}\n`);
   const leaks = Object.values(summary).reduce((n, s) => n + s.leaks, 0);
-  return { runId, dir, config, summary, records, leaks, staleTmpRemoved };
+  return { runId, dir, config, summary, records, leaks, staleTmpRemoved, adapterStats };
 }
 
 module.exports = { runBenchmark, gitCommit, removeStaleTmp, KL_TMP_PREFIX };

@@ -7,7 +7,7 @@ const { validateSessionId } = require('../session-format');
 
 const USAGE = 'Usage: longhaul run --adapters kl-recall,sliding-window,oracle [--sessions <data root>] [--session <id>]... '
   + '[--budget-tokens 6000] [--window-tokens N] [--recall key=value]... [--chunk-target-chars N] [--seed N] [--include-unverified] '
-  + '[--embed-model text-embedding-3-small] [--send-private]';
+  + '[--embed-model text-embedding-3-small] [--jev-mode pointwise|batched] [--jev-max-usd 5] [--jev-base-url <url>] [--send-private]';
 
 function positiveInt(value, name) {
   const n = Number(value);
@@ -52,6 +52,9 @@ module.exports = {
     seed: { type: 'string' },
     'include-unverified': { type: 'boolean', default: false },
     'embed-model': { type: 'string' },
+    'jev-mode': { type: 'string' },
+    'jev-max-usd': { type: 'string' },
+    'jev-base-url': { type: 'string' },
     'send-private': { type: 'boolean', default: false }
   },
   exitCodeFor,
@@ -69,6 +72,15 @@ module.exports = {
       recall, privateRoot: ctx.home.private, env: ctx.env, sendPrivate: values['send-private'],
       ...(values['embed-model'] ? { model: values['embed-model'] } : {})
     };
+    // kl-recall(-vec)-jev-rerank (experiment): typesafe.ai's Jev as the
+    // reranker; TYPESAFE_AI_KEY from the environment, a private session only
+    // with --send-private.
+    const jev = {
+      sendPrivate: values['send-private'], env: ctx.env,
+      ...(values['jev-mode'] ? { jevMode: values['jev-mode'] } : {}),
+      ...(values['jev-max-usd'] !== undefined ? { maxUsd: Number(values['jev-max-usd']) } : {}),
+      ...(values['jev-base-url'] ? { jevBaseUrl: values['jev-base-url'] } : {})
+    };
     const adapterConfig = {
       'kl-recall': { recall, ...(chunk ? { chunk } : {}) },
       'kl-recall-vec': vec,
@@ -76,6 +88,8 @@ module.exports = {
       // kl-recall-rerank: cross-encoder scores cached under LONGHAUL_HOME/private/rerank.
       'kl-recall-rerank': { recall, privateRoot: ctx.home.private },
       'kl-recall-vec-rerank': vec,
+      'kl-recall-jev-rerank': { recall, privateRoot: ctx.home.private, ...jev },
+      'kl-recall-vec-jev-rerank': { ...vec, ...jev },
       'sliding-window': values['window-tokens'] ? { windowTokens: positiveInt(values['window-tokens'], 'window-tokens') } : {}
     };
     const result = await runBenchmark({
@@ -96,6 +110,13 @@ module.exports = {
       const er = s.evidenceRecall === null ? '-' : s.evidenceRecall.toFixed(3);
       const ac = (x) => (x === null || x === undefined ? '-' : x.toFixed(3));
       ctx.stdout.write(`${name.padEnd(16)} evidence recall ${er} (n=${s.scored})  answer contained ${ac(s.answerContainment)} (tokens ${ac(s.answerTokenContainment)})  partial ${s.partial}  median ${num(s.estTokens.median)} tokens  p90 ${num(s.estTokens.p90)}  errors ${s.errors}  leaks ${s.leaks}\n`);
+    }
+    for (const [name, st] of Object.entries(result.adapterStats || {})) {
+      const j = st.jev;
+      const s = st.uncachedMsMedian === null || st.uncachedMsMedian === undefined ? '-' : (st.uncachedMsMedian / 1000).toFixed(2);
+      ctx.stdout.write(`${name.padEnd(16)} ${st.mode || ''} topM ${st.topM ?? '-'}  pairs ${st.rerank?.pairs ?? 0} (cached ${st.rerank?.hits ?? 0})  `
+        + `uncached s/question median ${s}  score errors ${st.scoreErrors ?? 0}`
+        + (j ? `  requests ${j.requests} retries ${j.retries} input tokens ${j.inputTokens} $${j.usd.toFixed(4)} status ${JSON.stringify(j.status)}` : '') + '\n');
     }
     ctx.stdout.write(`summary: ${path.join(result.dir, 'summary.md')}\n`);
     return exitCodeFor(result, ctx.stderr);

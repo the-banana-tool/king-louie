@@ -14,6 +14,10 @@ const FACTORIES = {
   // candidates, and over BM25 fused with cosine.
   'kl-recall-rerank': (config) => require('./kl-recall-rerank').createKlRecallRerankAdapter(config),
   'kl-recall-vec-rerank': (config) => require('./kl-recall-rerank').createKlRecallRerankAdapter({ ...config, candidates: 'fused' }),
+  // Experiment (exp/jev-rerank): step 6 rerank by typesafe.ai's Jev,
+  // pointwise or batched (config jevMode), over BM25 or fused candidates.
+  'kl-recall-jev-rerank': (config) => require('./kl-recall-jev-rerank').createKlRecallJevRerankAdapter(config),
+  'kl-recall-vec-jev-rerank': (config) => require('./kl-recall-jev-rerank').createKlRecallJevRerankAdapter({ ...config, candidates: 'fused' }),
   'sliding-window': createSlidingWindowAdapter,
   oracle: createOracleAdapter
 };
