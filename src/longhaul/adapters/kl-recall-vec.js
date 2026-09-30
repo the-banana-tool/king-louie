@@ -18,7 +18,7 @@ const DEFAULT_MODEL = 'text-embedding-3-small';
 
 function createKlRecallVecAdapter({
   budgetTokens = 6000, recall = {}, tmpRoot, privateRoot, provider = 'openai', model = DEFAULT_MODEL,
-  vectorOnly = false, sendPrivate = false, env = process.env, baseUrl = null, providerInstance = null
+  vectorOnly = false, sendPrivate = false, env = process.env, baseUrl = null, providerInstance = null, rerankerFor = null
 } = {}) {
   if (typeof privateRoot !== 'string' || !privateRoot) throw new Error('kl-recall-vec needs a privateRoot (LONGHAUL_HOME/private)');
   const base = createKlRecallAdapter({ budgetTokens, recall, tmpRoot });
@@ -70,9 +70,10 @@ function createKlRecallVecAdapter({
       return measured(async () => {
         const k = handle.settings.history.recall.vectorTopK;
         const vectorHits = topByCosine(handle.vec.index, q, { upToSeq: askAtSeq, k });
+        const reranker = rerankerFor ? rerankerFor(handle, question) : null;
         const out = await handle.builder.build({
           chatId: handle.chatId, message: question.question, model: ESTIMATOR_MODEL, upToSeq: askAtSeq,
-          vectorHits, lexical: !vectorOnly
+          vectorHits, lexical: !vectorOnly, reranker
         });
         return resultFromBuild(handle, out);
       });

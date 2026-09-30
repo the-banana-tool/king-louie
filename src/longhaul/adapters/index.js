@@ -10,6 +10,10 @@ const FACTORIES = {
   // H3 probes (need `longhaul embed` first): fused, and cosine alone.
   'kl-recall-vec': (config) => require('./kl-recall-vec').createKlRecallVecAdapter(config),
   'kl-recall-vec-only': (config) => require('./kl-recall-vec').createKlRecallVecAdapter({ ...config, vectorOnly: true }),
+  // H3 probe: step 6 rerank (local cross-encoder, cached scores) over BM25
+  // candidates, and over BM25 fused with cosine.
+  'kl-recall-rerank': (config) => require('./kl-recall-rerank').createKlRecallRerankAdapter(config),
+  'kl-recall-vec-rerank': (config) => require('./kl-recall-rerank').createKlRecallRerankAdapter({ ...config, candidates: 'fused' }),
   'sliding-window': createSlidingWindowAdapter,
   oracle: createOracleAdapter
 };

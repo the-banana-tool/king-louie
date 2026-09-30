@@ -293,6 +293,12 @@ Electron build.
   `vectorTopK` with BM25, or use cosine alone, and refuse a session whose
   cache is missing or incomplete. Tests use
   `tests/helpers/fake-embedding-server.js`.
+- `kl-recall-rerank` / `kl-recall-vec-rerank` (H3 probe) turn on
+  `history.recall.rerank` (spec §6.3 step 6, a `reranker` callback into
+  `Retriever#retrieve`, default off) with a local cross-encoder whose scores
+  are cached under `LONGHAUL_HOME/private/rerank/`; it needs
+  `npm i --no-save @huggingface/transformers onnxruntime-node`, never an app
+  dependency. Tests inject a fake `scorer`.
 
 ## Cases
 

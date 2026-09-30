@@ -25,7 +25,11 @@ const HISTORY_DEFAULTS = Object.freeze({
     pairToolMessages: false,
     // Top cosine hits fused with BM25 (spec §6.3 step 2). Inert until a
     // vector list is given to retrieve() (H3; LongHaul's kl-recall-vec).
-    vectorTopK: 50
+    vectorTopK: 50,
+    // Step 6 (spec §6.3): rescore the top topM fused candidates with a
+    // reranker callback given to the Retriever. Inert without one (H3;
+    // LongHaul's kl-recall-rerank).
+    rerank: Object.freeze({ enabled: false, topM: 20 })
   }),
   chunk: Object.freeze({ targetChars: 1500, minChars: 40 }),
   readHistoryMaxTokens: 8000
@@ -48,6 +52,7 @@ function mergeHistorySettings(source) {
   const c = isObject(src.chunk) ? src.chunk : {};
   const d = HISTORY_DEFAULTS.recall;
   const weightsIn = isObject(r.kindWeights) ? r.kindWeights : {};
+  const rr = isObject(r.rerank) ? r.rerank : {};
   const kindWeights = {};
   for (const [kind, weight] of Object.entries(d.kindWeights)) kindWeights[kind] = atLeast(weightsIn[kind], weight, 0);
   return {
@@ -69,7 +74,11 @@ function mergeHistorySettings(source) {
       prefixMinChars: atLeast(r.prefixMinChars, d.prefixMinChars, 0, true),
       queryContextSeparate: flag(r.queryContextSeparate, d.queryContextSeparate),
       pairToolMessages: flag(r.pairToolMessages, d.pairToolMessages),
-      vectorTopK: atLeast(r.vectorTopK, d.vectorTopK, 1, true)
+      vectorTopK: atLeast(r.vectorTopK, d.vectorTopK, 1, true),
+      rerank: {
+        enabled: flag(rr.enabled, d.rerank.enabled),
+        topM: atLeast(rr.topM, d.rerank.topM, 1, true)
+      }
     },
     chunk: {
       targetChars: atLeast(c.targetChars, HISTORY_DEFAULTS.chunk.targetChars, 200, true),

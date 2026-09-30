@@ -1,11 +1,15 @@
 // src/history/retriever.js
 // Retrieval: the ranking step inside recall (CONTEXT.md). Spec §6.3 steps 1
 // (BM25), 2 (a vector list, when one is given), 3 (fusion), 4 (kind weight),
-// 5 (recency), 7 (exact-text dedupe) and 8 (per-message cap, token budget).
-// Step 2 takes the vector ranks from the caller (vectorHits) or from the
-// vectorSearch callback; H3 adds the embedder behind that callback, the
-// rerank and the cosine dedupe. The signature of retrieve() stays the same.
+// 5 (recency), 6 (rerank, when a reranker is given), 7 (exact-text dedupe)
+// and 8 (per-message cap, token budget). Step 2 takes the vector ranks from
+// the caller (vectorHits) or from the vectorSearch callback; step 6 takes a
+// reranker callback. H3 adds the embedder and the cross-encoder behind those
+// callbacks, and the cosine dedupe. The signature of retrieve() stays the same.
 const { HISTORY_DEFAULTS } = require('./settings');
+const { createLogger } = require('../logging');
+
+const log = createLogger('history/retriever');
 
 const DAY_MS = 86400000;
 const rankOf = (hit) => (Number.isFinite(hit.bm25Rank) ? hit.bm25Rank : hit.vectorRank);
@@ -13,10 +17,40 @@ const rankOf = (hit) => (Number.isFinite(hit.bm25Rank) ? hit.bm25Rank : hit.vect
 class Retriever {
   // vectorSearch (optional): async ({ query, chatIds, kinds, upToSeq,
   // settings }) => [{ chunkId, vectorRank }], ranks 1-based.
-  constructor({ store, estimator, vectorSearch = null }) {
+  // reranker (optional): async (query, chunks) => scores, one finite number
+  // per chunk, higher is more relevant. Used only when rerank.enabled.
+  constructor({ store, estimator, vectorSearch = null, reranker = null }) {
     this.store = store;
     this.estimator = estimator;
     this.vectorSearch = typeof vectorSearch === 'function' ? vectorSearch : null;
+    this.reranker = typeof reranker === 'function' ? reranker : null;
+  }
+
+  // Step 6: the reranker rescores the first topM candidates (already held to
+  // the scope, the kinds and upToSeq) and its score replaces theirs; they
+  // sort by it, and every other candidate keeps its score and order below
+  // them. A reranker that throws or returns anything but one finite number
+  // per chunk leaves the order as it was.
+  async _rerank(query, items, rerank, reranker) {
+    const m = Math.min(items.length, rerank.topM);
+    if (m < 1) return items;
+    const head = items.slice(0, m);
+    let scores;
+    try {
+      scores = await reranker(query, head.map((item) => item.chunk));
+    } catch (err) {
+      log.warn('reranker failed; keeping the fused order', { error: err.message, pairs: m });
+      return items;
+    }
+    const list = scores && typeof scores.length === 'number' ? Array.from(scores) : null;
+    if (!list || list.length !== m || !list.every(Number.isFinite)) {
+      log.warn('reranker returned no usable scores; keeping the fused order', { pairs: m, got: list ? list.length : null });
+      return items;
+    }
+    const reranked = head
+      .map((item, i) => ({ ...item, score: list[i], signals: { ...item.signals, rerank: list[i], fused: item.score } }))
+      .sort((a, b) => b.score - a.score || a.chunk.id - b.chunk.id);
+    return [...reranked, ...items.slice(m)];
   }
 
   // Step 1: BM25 over the scope, ranks 1-based.
@@ -57,9 +91,11 @@ class Retriever {
 
   async retrieve({
     query, contextQueries = [], chatIds, kinds = null, excludeMessageIds = [], budgetTokens = null, upToSeq = null,
-    settings, model = null, now = Date.now(), vectorHits = null, lexical = true
+    settings, model = null, now = Date.now(), vectorHits = null, lexical = true, reranker = null
   } = {}) {
     const s = { ...HISTORY_DEFAULTS.recall, ...(settings || {}) };
+    const rerank = { ...HISTORY_DEFAULTS.recall.rerank, ...(s.rerank || {}) };
+    const rerankWith = typeof reranker === 'function' ? reranker : this.reranker;
     if (!String(query || '').trim()) return [];
     const texts = [query, ...(contextQueries || [])].filter((t) => String(t || '').trim());
     // lexical: false leaves BM25 out (a vector-only probe; LongHaul).
@@ -99,14 +135,19 @@ class Retriever {
     }
     scored.sort((a, b) => b.score - a.score || a.chunk.id - b.chunk.id);
 
-    // Step 7: without vectors, drop exact text duplicates.
+    // Step 7: without vectors, drop exact text duplicates. It runs before
+    // step 6 here so the reranker never spends a pair on a duplicate; a
+    // duplicate would get the same score, so the selection is the same.
     const seen = new Set();
-    const deduped = scored.filter((item) => {
+    const unique = scored.filter((item) => {
       const key = item.chunk.text.trim();
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
+
+    // Step 6: rerank the first topM.
+    const deduped = rerank.enabled && rerankWith ? await this._rerank(query, unique, rerank, rerankWith) : unique;
 
     // Step 8: per-message cap, then the token budget when one is given.
     // completeMessageTokens > 0: the first hit on a message whose whole text

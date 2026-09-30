@@ -171,4 +171,97 @@ describe('Retriever', () => {
       assert.strictEqual(seen[0].settings.vectorTopK, 50);
     });
   });
+
+  describe('rerank (spec §6.3 step 6)', () => {
+    const msgs = [
+      { sender: 'user', text: 'Gate note one: the side gate at the Lakeside lot sticks.' },
+      { sender: 'user', text: 'Gate note two: the gate code is 4417 for the side gate.' },
+      { sender: 'user', text: 'Gate note three: a gate repair visit is booked for Tuesday.' },
+      { sender: 'user', text: 'Gate note four: the gate remote needs a new battery.' },
+      { sender: 'user', text: 'Gate note five: the gate hinge was oiled last week.' }
+    ];
+    const opts = (over = {}) => ({ query: 'gate', chatIds: ['chat-1'], now: BASE_TIME, ...over });
+    const order = (hits) => hits.map((h) => h.chunk.messageId);
+    // A fake reranker: scores each chunk by where its message sits in `prefer`.
+    const preferring = (prefer, calls = []) => async (query, chunks) => {
+      calls.push({ query, ids: chunks.map((c) => c.messageId), seqs: chunks.map((c) => c.seq) });
+      return chunks.map((c) => (prefer.includes(c.messageId) ? 100 - prefer.indexOf(c.messageId) : 0));
+    };
+
+    it('reorders only the top M; the rest keep their fused order below', async () => {
+      const s = setup(msgs);
+      t = s.t;
+      const fused = order(await s.retriever.retrieve(opts({ settings: recall() })));
+      assert.strictEqual(fused.length, 5);
+      const calls = [];
+      // Prefer the third fused hit, then the second; the fifth is outside topM 3.
+      const reranker = preferring([fused[2], fused[1], fused[4]], calls);
+      const hits = await s.retriever.retrieve(opts({ settings: recall({ rerank: { enabled: true, topM: 3 } }), reranker }));
+      assert.deepStrictEqual(order(hits), [fused[2], fused[1], fused[0], fused[3], fused[4]]);
+      assert.strictEqual(calls.length, 1);
+      assert.deepStrictEqual(calls[0].ids, fused.slice(0, 3), 'the reranker sees the top M only');
+      assert.strictEqual(calls[0].query, 'gate');
+      assert.strictEqual(hits[0].score, 100);
+      assert.strictEqual(hits[0].signals.rerank, 100);
+      assert.ok(Number.isFinite(hits[0].signals.fused));
+      assert.strictEqual(hits[3].signals.rerank, null, 'below topM: no rerank score');
+    });
+
+    it('never passes or surfaces a chunk at or after upToSeq', async () => {
+      const s = setup(msgs);
+      t = s.t;
+      const later = t.store.chunksOfMessage('chat-1-m5')[0].id;
+      const calls = [];
+      const reranker = preferring(['chat-1-m5', 'chat-1-m4'], calls);
+      const hits = await s.retriever.retrieve(opts({
+        upToSeq: 5, settings: recall({ rerank: { enabled: true, topM: 50 } }), reranker,
+        vectorHits: [{ chunkId: later, vectorRank: 1 }]
+      }));
+      assert.ok(calls[0].seqs.every((seq) => seq < 5));
+      assert.ok(hits.every((h) => h.chunk.seq < 5));
+      assert.strictEqual(hits[0].chunk.messageId, 'chat-1-m4');
+    });
+
+    it('off by default, and without a reranker; a constructor reranker is used when enabled', async () => {
+      const t0 = openTempStore();
+      seedChat(t0.store, { messages: msgs });
+      t = t0;
+      const calls = [];
+      const retriever = new Retriever({ store: t0.store, estimator: new TokenEstimator(), reranker: preferring(['chat-1-m4'], calls) });
+      const plain = order(await retriever.retrieve(opts({ settings: recall() })));
+      assert.strictEqual(calls.length, 0, 'rerank.enabled defaults to false');
+      const noReranker = new Retriever({ store: t0.store, estimator: new TokenEstimator() });
+      assert.deepStrictEqual(order(await noReranker.retrieve(opts({ settings: recall({ rerank: { enabled: true } }) }))), plain);
+      const hits = await retriever.retrieve(opts({ settings: recall({ rerank: { enabled: true } }) }));
+      assert.strictEqual(calls.length, 1);
+      assert.strictEqual(hits[0].chunk.messageId, 'chat-1-m4');
+    });
+
+    it('keeps the fused order when the reranker throws or returns unusable scores', async () => {
+      const s = setup(msgs);
+      t = s.t;
+      const settings = recall({ rerank: { enabled: true, topM: 3 } });
+      const fused = order(await s.retriever.retrieve(opts({ settings: recall() })));
+      for (const reranker of [
+        async () => { throw new Error('model missing'); },
+        async () => [1, 2],
+        async () => [1, NaN, 3],
+        async () => null
+      ]) {
+        assert.deepStrictEqual(order(await s.retriever.retrieve(opts({ settings, reranker }))), fused);
+      }
+    });
+
+    it('the budget and per-message cap apply to the reranked order', async () => {
+      const s = setup(msgs);
+      t = s.t;
+      const fused = order(await s.retriever.retrieve(opts({ settings: recall() })));
+      const one = t.store.chunksOfMessage(fused[4])[0].text;
+      const budget = new TokenEstimator().estimate(one) + 1;
+      const hits = await s.retriever.retrieve(opts({
+        settings: recall({ rerank: { enabled: true, topM: 5 } }), budgetTokens: budget, reranker: preferring([fused[4]])
+      }));
+      assert.deepStrictEqual(order(hits), [fused[4]]);
+    });
+  });
 });

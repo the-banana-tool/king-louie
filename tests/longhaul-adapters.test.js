@@ -113,7 +113,7 @@ describe('oracle', () => {
 
 describe('adapter registry', () => {
   it('lists the built-in adapters and refuses an unknown one', () => {
-    assert.deepStrictEqual(adapterNames(), ['kl-recall', 'kl-recall-vec', 'kl-recall-vec-only', 'oracle', 'sliding-window']);
+    assert.deepStrictEqual(adapterNames(), ['kl-recall', 'kl-recall-rerank', 'kl-recall-vec', 'kl-recall-vec-only', 'kl-recall-vec-rerank', 'oracle', 'sliding-window']);
     assert.throws(() => createAdapter('full-history'), UsageError);
   });
 });

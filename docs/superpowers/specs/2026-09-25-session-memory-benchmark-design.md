@@ -253,6 +253,21 @@ in a local embedder. It is never published as a result: it sends every chunk
 of a session to a provider, which King Louie's recall never does, and it is
 not what H3 ships.
 
+**B0 addendum (2026-09-30): `kl-recall-rerank` is an H3 probe, not a
+candidate system.** `kl-recall-rerank` (BM25 candidates) and
+`kl-recall-vec-rerank` (BM25 fused with `kl-recall-vec`'s cached cosine
+list) turn on recall spec §6.3 step 6: a local cross-encoder
+(`Xenova/ms-marco-MiniLM-L-6-v2` through `@huggingface/transformers` on the
+native `onnxruntime-node`, CPU) rescores the top `rerank.topM` fused
+candidates and its score replaces theirs. Neither package is an app
+dependency; install them in a checkout with `npm i --no-save`. Scores are
+cached per question and chunk (with a hash of the exact query and chunk
+text) under `LONGHAUL_HOME/private/rerank/<session>/<model>/`, so a sweep
+pays the model once. Its latency includes the reranker call, which is real
+CPU time on a miss and near zero on a hit; a report states which it measured.
+It sizes what a reranker buys H3; the fused variant inherits
+`kl-recall-vec`'s hosted embedder and is never published as a result.
+
 `evidenceSeqsShown` is how an adapter reports which message sequences its
 context contains; for `kl-recall` it comes from provenance, for others from
 construction. It is what makes evidence recall measurable without a judge.

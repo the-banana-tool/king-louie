@@ -123,7 +123,9 @@ const TMP_PREFIX = 'kl-';
 
 // tmpRoot is required (LONGHAUL_HOME/tmp from `run`): the store holds the
 // session's full text, so it never goes to the system temp dir.
-function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, tmpRoot } = {}) {
+// rerankerFor (optional; kl-recall-rerank): (handle, question) => the
+// reranker callback for that question's build (recall spec §6.3 step 6).
+function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, tmpRoot, rerankerFor = null } = {}) {
   if (typeof tmpRoot !== 'string' || !tmpRoot) throw new Error('kl-recall needs a tmpRoot (LONGHAUL_HOME/tmp)');
   const settings = recallSettings(recall, budgetTokens);
   return {
@@ -165,7 +167,8 @@ function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, tmpRoot } = {
     async context(handle, { question, askAtSeq }) {
       return measured(async () => {
         // build() takes the new user message as a string; upToSeq is exclusive.
-        const out = await handle.builder.build({ chatId: handle.chatId, message: question.question, model: ESTIMATOR_MODEL, upToSeq: askAtSeq });
+        const reranker = rerankerFor ? rerankerFor(handle, question) : null;
+        const out = await handle.builder.build({ chatId: handle.chatId, message: question.question, model: ESTIMATOR_MODEL, upToSeq: askAtSeq, reranker });
         return resultFromBuild(handle, out);
       });
     },

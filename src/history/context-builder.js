@@ -28,7 +28,8 @@ class ContextBuilder {
 
   // vectorHits / lexical pass through to Retriever#retrieve (a caller that
   // ranks by vector itself: LongHaul's kl-recall-vec).
-  async build({ chatId, message = '', model = null, upToSeq = null, vectorHits = null, lexical = true } = {}) {
+  // reranker, when given, is used by spec §6.3 step 6 for this build only.
+  async build({ chatId, message = '', model = null, upToSeq = null, vectorHits = null, lexical = true, reranker = null } = {}) {
     const id = String(chatId || '');
     const { recall } = mergeHistorySettings((this.getSettings() || {}).history);
     const given = Number.isInteger(upToSeq) && upToSeq > 0;
@@ -58,7 +59,8 @@ class ContextBuilder {
         model,
         now: asOf,
         vectorHits,
-        lexical
+        lexical,
+        reranker
       });
       if (hits.length) {
         const chunks = hits.map((h) => h.chunk);

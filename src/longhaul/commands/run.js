@@ -70,6 +70,9 @@ module.exports = {
       'kl-recall': { recall },
       'kl-recall-vec': vec,
       'kl-recall-vec-only': vec,
+      // kl-recall-rerank: cross-encoder scores cached under LONGHAUL_HOME/private/rerank.
+      'kl-recall-rerank': { recall, privateRoot: ctx.home.private },
+      'kl-recall-vec-rerank': vec,
       'sliding-window': values['window-tokens'] ? { windowTokens: positiveInt(values['window-tokens'], 'window-tokens') } : {}
     };
     const result = await runBenchmark({
