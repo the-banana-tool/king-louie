@@ -240,8 +240,14 @@ class Retriever {
         considered.add(messageId);
         const all = this.store.chunksOfMessage(messageId);
         const total = tokensOf(all);
-        const partnerId = s.pairToolMessages && !excluded.has(messageId) ? this.store.pairedToolMessageId(messageId) : null;
-        const partner = partnerId && !considered.has(partnerId) && !excluded.has(partnerId) ? this.store.chunksOfMessage(partnerId) : [];
+        const partnerId = s.pairToolMessages && !excluded.has(messageId)
+          ? this.store.pairedToolMessageId(messageId, { upToSeq: Number.isInteger(upToSeq) ? upToSeq : null })
+          : null;
+        // The partner is held to the same scope as any candidate: the
+        // chats, the kinds and upToSeq, and never an excluded message.
+        const partner = partnerId && !considered.has(partnerId) && !excluded.has(partnerId)
+          ? this.store.chunksOfMessage(partnerId).filter(inScope)
+          : [];
         const partnerTotal = tokensOf(partner);
         const wholeFits = total <= s.completeMessageTokens && (!hasBudget || used + total <= budgetTokens);
         if (wholeFits && (all.length > 1 || partner.length)) {

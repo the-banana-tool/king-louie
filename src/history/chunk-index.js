@@ -179,16 +179,19 @@ function chunksOfChat(db, chatId) {
 // call. Matched by meta.toolUseId when both sides carry one (imported
 // sessions), else the nearest message of the other sender with the same
 // tool name within PAIR_WINDOW messages (native chats append call, result).
+// upToSeq (optional) bounds the forward lookup: a result at or after it is
+// never a partner (recall asked at a point in the chat).
 const PAIR_WINDOW = 12;
-function pairedToolMessageId(db, messageId) {
+function pairedToolMessageId(db, messageId, { upToSeq = null } = {}) {
   const m = prepared(db, 'SELECT id, chat_id, seq, sender, tool_name, meta_json FROM messages WHERE id = ?').get(String(messageId));
   if (!m || (m.sender !== 'toolUse' && m.sender !== 'toolResult')) return null;
   const forward = m.sender === 'toolUse';
   const want = forward ? 'toolResult' : 'toolUse';
+  const last = Number.isInteger(upToSeq) ? Math.min(m.seq + PAIR_WINDOW, upToSeq - 1) : m.seq + PAIR_WINDOW;
   const rows = prepared(db, forward
     ? 'SELECT id, tool_name, meta_json FROM messages WHERE chat_id = ? AND seq > ? AND seq <= ? AND sender = ? ORDER BY seq'
     : 'SELECT id, tool_name, meta_json FROM messages WHERE chat_id = ? AND seq < ? AND seq >= ? AND sender = ? ORDER BY seq DESC')
-    .all(m.chat_id, m.seq, forward ? m.seq + PAIR_WINDOW : m.seq - PAIR_WINDOW, want);
+    .all(m.chat_id, m.seq, forward ? last : m.seq - PAIR_WINDOW, want);
   const metaOf = (row) => { try { return row.meta_json ? JSON.parse(row.meta_json) : null; } catch { return null; } };
   const myId = metaOf(m)?.toolUseId ?? null;
   if (myId !== null) {

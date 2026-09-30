@@ -176,6 +176,24 @@ describe('Retriever', () => {
     assert.deepStrictEqual(await ids({ chatIds: ['chat-1'], query: '' }), []);
   });
 
+  it('pairToolMessages: a partner at or after upToSeq, outside kinds, or excluded is never shown', async () => {
+    const s = setup([
+      { sender: 'user', text: 'Survey the Lakeside lot fence.' },
+      { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'cat survey/fence.txt' } },
+      { sender: 'toolResult', toolName: 'Bash', result: 'north post leans two degrees' }
+    ]);
+    t = s.t;
+    const settings = recall({ completeMessageTokens: 800, pairToolMessages: true });
+    const ids = async (opts) => (await s.retriever.retrieve({ query: 'fence survey', chatIds: ['chat-1'], settings, now: BASE_TIME, ...opts }))
+      .map((h) => h.chunk.messageId);
+    assert.ok((await ids({ upToSeq: 4 })).includes('chat-1-m3'), 'control: the result is paired with its call');
+    const cut = await ids({ upToSeq: 3 });
+    assert.ok(cut.includes('chat-1-m2'), 'the call is recalled');
+    assert.ok(!cut.includes('chat-1-m3'), 'the result at upToSeq is never shown');
+    assert.ok(!(await ids({ upToSeq: 4, kinds: ['user', 'tool_use'] })).includes('chat-1-m3'), 'a partner outside kinds is not shown');
+    assert.ok(!(await ids({ upToSeq: 4, excludeMessageIds: ['chat-1-m3'] })).includes('chat-1-m3'), 'an excluded partner is not shown');
+  });
+
   describe('vector list (spec §6.3 steps 2-3)', () => {
     const msgs = [
       { sender: 'user', text: 'The side gate code at the Lakeside lot is 4417.' },
