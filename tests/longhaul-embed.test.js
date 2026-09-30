@@ -183,6 +183,37 @@ describe('longhaul embed', () => {
     assert.strictEqual(server.requests.length, calls);
   });
 
+  it('keeps its temp store in a kl-embed-* dir that run cleans up, removes it on failure, and removes stale ones at start', async () => {
+    const { removeStaleTmp } = require('../src/longhaul/run');
+    const { env, home } = setupHome();
+    // A stale temp store an interrupted embed left behind.
+    fs.mkdirSync(path.join(home.tmp, 'kl-embed-99999', 'kl-abc'), { recursive: true });
+    fs.writeFileSync(path.join(home.tmp, 'kl-embed-99999', 'kl-abc', 'history.sqlite'), 'x');
+    fs.writeFileSync(path.join(home.tmp, 'keep.txt'), 'not a temp store');
+    const made = [];
+    const mkdir = fs.mkdirSync;
+    fs.mkdirSync = (dir, ...rest) => {
+      if (path.dirname(path.resolve(String(dir))) === path.resolve(home.tmp)) made.push(path.basename(String(dir)));
+      return mkdir.call(fs, dir, ...rest);
+    };
+    let code;
+    try {
+      // Fails over --max-usd, inside the command, after the temp store is built.
+      code = await main(['embed', '--session', 'synth-small', '--provider', 'openai', '--model', 'text-embedding-3-small',
+        '--base-url', `${server.url}/v1`, '--max-usd', '0.0000000001'], { stdout: sink(), stderr: sink(), env: { ...env, OPENAI_API_KEY: KEY } });
+    } finally {
+      fs.mkdirSync = mkdir;
+    }
+    assert.strictEqual(code, 2);
+    assert.ok(made.length === 1 && made[0].startsWith('kl-embed-'), `made ${JSON.stringify(made)}`);
+    assert.deepStrictEqual(fs.readdirSync(home.tmp), ['keep.txt'], 'the stale dir and its own dir are gone');
+
+    // run's startup cleanup covers the embed prefix too.
+    fs.mkdirSync(path.join(home.tmp, 'kl-embed-12345'));
+    assert.strictEqual(removeStaleTmp(home.tmp), 1);
+    assert.deepStrictEqual(fs.readdirSync(home.tmp), ['keep.txt']);
+  });
+
   it('retries a 429 through the provider and finishes', async () => {
     const flaky = await startFakeEmbeddingServer({ failFirst: 2 });
     try {

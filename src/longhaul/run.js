@@ -16,15 +16,17 @@ const { createLogger } = require('../logging');
 
 const log = createLogger('longhaul/run');
 // kl-recall's temp store prefix (adapters/kl-recall.js TMP_PREFIX), kept
-// here so a run without kl-recall does not load node:sqlite.
+// here so a run without kl-recall does not load node:sqlite. `embed`'s temp
+// dir (commands/embed.js, kl-embed-<pid>) shares it, so this covers both.
 const KL_TMP_PREFIX = 'kl-';
 
-// Temp stores an interrupted run (Ctrl-C, crash) left behind.
-function removeStaleTmp(tmpDir) {
+// Temp stores an interrupted run or embed (Ctrl-C, crash) left behind.
+// prefix narrows it (embed removes only kl-embed-* dirs).
+function removeStaleTmp(tmpDir, prefix = KL_TMP_PREFIX) {
   if (!tmpDir || !fs.existsSync(tmpDir)) return 0;
   let removed = 0;
   for (const e of fs.readdirSync(tmpDir, { withFileTypes: true })) {
-    if (!e.isDirectory() || !e.name.startsWith(KL_TMP_PREFIX)) continue;
+    if (!e.isDirectory() || !e.name.startsWith(prefix)) continue;
     fs.rmSync(path.join(tmpDir, e.name), { recursive: true, force: true });
     removed += 1;
   }
@@ -175,4 +177,4 @@ async function runBenchmark({
   return { runId, dir, config, summary, records, leaks, staleTmpRemoved };
 }
 
-module.exports = { runBenchmark, gitCommit };
+module.exports = { runBenchmark, gitCommit, removeStaleTmp, KL_TMP_PREFIX };

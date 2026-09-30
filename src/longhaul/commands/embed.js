@@ -16,12 +16,18 @@ const {
   EmbeddingCache, cacheDir, validateModelName, embedText, createEmbedClient, embedChunks, embedderFromEnv, priceTokens
 } = require('../embeddings');
 const { positiveInt } = require('./run');
+const { removeStaleTmp } = require('../run');
 const { UsageError } = require('../errors');
 
 const USAGE = 'Usage: longhaul embed --session <id> --provider openai --model <model> [--batch 100] [--base-url <url>] [--max-usd 1] [--send-private]';
 // Rough tokens for the estimate before any call: 3 characters a token errs
 // high for prose and about right for code and JSON.
 const EST_CHARS_PER_TOKEN = 3;
+
+// The temp store's dir under LONGHAUL_HOME/tmp. It starts with kl-, so
+// `run`'s startup cleanup removes one an interrupted embed left; embed itself
+// removes stale kl-embed-* dirs at start (not a run's kl-* stores).
+const TMP_PREFIX = 'kl-embed-';
 
 const usd = (x) => `$${x.toFixed(4)}`;
 
@@ -60,11 +66,13 @@ module.exports = {
 
     // The session's chunks as kl-recall's store makes them, in a temp store
     // under LONGHAUL_HOME/tmp (the session's text never leaves the home).
-    const tmpRoot = path.join(ctx.home.tmp, `embed-${process.pid}`);
-    fs.mkdirSync(tmpRoot, { recursive: true });
-    const base = createKlRecallAdapter({ tmpRoot });
+    removeStaleTmp(ctx.home.tmp, TMP_PREFIX);
+    const tmpRoot = path.join(ctx.home.tmp, `${TMP_PREFIX}${process.pid}`);
+    let base = null;
     let handle = null;
     try {
+      fs.mkdirSync(tmpRoot, { recursive: true });
+      base = createKlRecallAdapter({ tmpRoot });
       handle = await base.prepare(session);
       const chunks = handle.store.chunksOfChat(handle.chatId);
       const chunkSettings = handle.settings.history.chunk;
