@@ -182,6 +182,18 @@ describe('case IPC, stage 2', () => {
     assert.strictEqual((await call(IPC.CASE_ANSWER_QUESTION, { caseId: a.id, questionId: qa.id, text: 7 })).ok, false);
   });
 
+  it('returns a chat card its own questions by id, answered or not, even in a done case', async () => {
+    const { runtime, call } = setup2();
+    const c = await activeCase(runtime);
+    const q1 = runtime.createQuestion(c.id, { kind: 'question', text: 'Is the well shared?', urgency: 'normal' });
+    const q2 = runtime.createQuestion(c.id, { kind: 'question', text: 'Who mows the verge?', urgency: 'low' });
+    await call(IPC.CASE_ANSWER_QUESTION, { caseId: c.id, questionId: q1.id, text: 'Yes' });
+    runtime.setStatus(c.id, 'done', { kind: 'owner', by: 'owner' });
+    const got = await call(IPC.CASE_QUESTIONS, { caseId: c.id, questionIds: [q1.id, q2.id, 'q-9999'] });
+    assert.deepStrictEqual(got.questions.map((q) => [q.id, q.answer ? q.answer.channel : null, q.caseTitle]), [[q1.id, 'in-app', 'Lakeside lot'], [q2.id, null, 'Lakeside lot']]);
+    assert.strictEqual((await call(IPC.CASE_QUESTIONS, { caseId: c.id, questionIds: 'q-0001' })).ok, false);
+  });
+
   it('acknowledges a briefing', async () => {
     const { runtime, call } = setup2();
     const c = await activeCase(runtime);

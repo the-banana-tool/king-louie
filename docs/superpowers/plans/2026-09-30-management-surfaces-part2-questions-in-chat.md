@@ -60,14 +60,14 @@ Design:
 - Presence: `presence:heartbeat` is sent on window focus/blur and the existing interval from a module that
   does not depend on the sidebar (it currently lives in `initQuestionsSection`).
 
-- [ ] Runtime test: creating a question appends exactly one message with `question.questionId` to the
+- [x] Runtime test: creating a question appends exactly one message with `question.questionId` to the
       newest case chat; a second delivery (resurface) appends nothing; a case with no chat gets one
       created; no history store → question still created, warning logged.
-- [ ] Unit test for chat selection (newest by `lastMessageAt`, fallback `updatedAt`).
-- [ ] E2E (`tests/e2e/`): a seeded case asks a pressed question → the card shows Approve/Reject → click →
+- [x] Unit test for chat selection (newest by `lastMessageAt`, fallback `updatedAt`).
+- [x] E2E (`tests/e2e/`): a seeded case asks a pressed question → the card shows Approve/Reject → click →
       answered state; a spoken question answered through `case:answerQuestion` from outside redraws the
       card as answered.
-- [ ] Covering tests pass; commit `feat(cases): questions arrive as cards in the case's chat`.
+- [x] Covering tests pass; commit `feat(cases): questions arrive as cards in the case's chat`.
 
 ## Task 5: The sidebar goes; `set_away`; contact policy moves to Settings
 

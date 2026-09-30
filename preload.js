@@ -853,6 +853,10 @@ contextBridge.exposeInMainWorld(
       questions: (payload = {}) => {
         validateObject(payload, 'payload');
         if (payload.caseId !== undefined) validateString(payload.caseId, 'caseId', { minLength: 1 });
+        if (payload.questionIds !== undefined) {
+          if (!Array.isArray(payload.questionIds)) throw new Error('Invalid questionIds: expected an array');
+          payload.questionIds.forEach((id) => validateString(id, 'questionIds[]', { minLength: 1 }));
+        }
         return ipcRenderer.invoke('case:questions', payload);
       },
       answerQuestion: (payload) => {

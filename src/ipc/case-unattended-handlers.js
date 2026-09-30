@@ -36,8 +36,20 @@ function registerCaseUnattendedHandlers(ipcMain, context = {}) {
     }
   }));
 
-  handle(IPC.CASE_QUESTIONS, async ({ caseId }) => {
+  handle(IPC.CASE_QUESTIONS, async ({ caseId, questionIds }) => {
     const rt = runtime();
+    // A chat's question cards (management surfaces §3.4) ask for their own
+    // records by id, answered or not, in whatever state the case is.
+    if (questionIds !== undefined) {
+      if (!Array.isArray(questionIds) || questionIds.some((id) => typeof id !== 'string')) {
+        return { ok: false, error: 'questionIds must be a list of question ids.' };
+      }
+      const meta = rt.getCase(required(caseId, 'caseId'));
+      const store = rt.questions(meta.id);
+      const questions = questionIds.map((id) => store.get(id)).filter(Boolean)
+        .map((q) => ({ ...q, caseId: meta.id, caseTitle: meta.title, caseStatus: meta.status }));
+      return { ok: true, questions };
+    }
     const cases = caseId ? [rt.getCase(caseId)] : rt.listCases();
     const questions = cases
       .filter((c) => c.status !== 'done' && c.status !== 'abandoned')

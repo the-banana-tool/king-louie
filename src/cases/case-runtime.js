@@ -28,6 +28,7 @@ const { findSimilarCases } = require('./gates');
 const { assertKnownType, resolveCaseType, briefFieldsFor, gatingQuestionsFor } = require('./case-types');
 const { DetourClassifier } = require('./detours/classifier');
 const { DetourRouter } = require('./detours/router');
+const { postQuestionToChat } = require('./question-chat');
 const { registerDetourHooks } = require('./detours/hooks');
 // Registers the direction and budget-grant answer handlers.
 require('./answer-handlers');
@@ -1300,9 +1301,42 @@ class CaseRuntime {
     return store.get(rec.id) || rec;
   }
 
+  // The chat is the first rung for everyone (management surfaces spec
+  // §3.4): each new question is posted once, at creation, to the case's
+  // newest chat, whatever the ladder does next. Never throws: a host with no
+  // history store (tests, a bare host) or a store failure only logs.
+  _postToChat(meta, rec) {
+    const chats = this.host?.chats;
+    if (!chats || typeof chats.appendMessageToChat !== 'function') {
+      // Once per runtime: every question after the first would say the same.
+      if (!this._warnedNoChats) log.warn(`Case ${meta.slug} asks ${rec.id}: this host has no history store, so questions are not posted to a chat.`);
+      this._warnedNoChats = true;
+      return null;
+    }
+    try {
+      return postQuestionToChat({ chats, meta, rec, now: () => this.now() });
+    } catch (err) {
+      log.warn(`Posting ${rec.id} of case ${meta.slug} to its chat failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  // For a question record created outside createQuestion (C4's conflict
+  // follow-up): posts it and tells the window, as createQuestion does.
+  postQuestion(id, rec) {
+    const meta = this.getCase(id);
+    const posted = this._postToChat(meta, rec);
+    if (posted) this._notify('case:changed', { caseId: meta.id, what: 'questions', questionId: rec.id, chatId: posted.chatId, message: posted.message });
+    return posted;
+  }
+
   _deliver(meta, store, rec) {
     const attention = rec.urgency === 'low' ? 'panel' : 'banner';
-    this._notify('case:changed', { caseId: meta.id, what: 'questions', questionId: rec.id, attention });
+    const posted = this._postToChat(meta, rec);
+    this._notify('case:changed', {
+      caseId: meta.id, what: 'questions', questionId: rec.id, attention,
+      ...(posted ? { chatId: posted.chatId, message: posted.message } : {})
+    });
     if (rec.urgency === 'high' && typeof this.host?.uiToast?.send === 'function') {
       Promise.resolve()
         .then(() => this.host.uiToast.send({ title: meta.title, body: rec.text }))
