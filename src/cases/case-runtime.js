@@ -1657,6 +1657,24 @@ class CaseRuntime {
     });
   }
 
+  // create_case (management surfaces spec §3.1-3.2): the objective the owner
+  // gave in their own words, recorded as theirs (provenance user, an
+  // owner-action source with the channel and the quote). brief.md holds the
+  // objective the way the app's create writes it; this fact is what says
+  // the owner said it. Private at birth (the owner can make it disclosable).
+  async recordOwnerObjective(id, { objective, quote, channel }) {
+    return this.systemAction(id, 'owner objective', async (meta) => new FactLedger(meta.dir).assert({
+      stmt: `The owner's objective for this case: ${objective}`,
+      subject: 'brief',
+      attr: 'objective',
+      value: objective,
+      disclosable: false,
+      provenance: 'user',
+      source: { kind: 'owner-action', ref: 'create-case', channel, at: this.now().toISOString(), quote },
+      addedBy: 'owner-action'
+    }));
+  }
+
   // ---- Model roles (spec §3.8; models spec 2026-09-27 §6, §8) ----
 
   _settingsSafe() {

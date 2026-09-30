@@ -106,6 +106,7 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
       caseTools = require('../mcp/case-tools').createCaseToolHandler({
         getRuntime: () => core.context?.getCaseRuntime?.() || null,
         getContact: () => core.context?.getContact?.() || null,
+        getExecutorRegistry: () => core.context?.getExecutorRegistry?.() || null,
         channel: 'mcp-stdio',
         audit: approvals.auditLedger || null
       });
@@ -124,6 +125,7 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
       if (caseTools) require('../mcp/case-tools').registerNodeCaseMethods(fleetService, {
         getRuntime: () => core.context?.getCaseRuntime?.() || null,
         getContact: () => core.context?.getContact?.() || null,
+        getExecutorRegistry: () => core.context?.getExecutorRegistry?.() || null,
         audit: approvals.auditLedger || null
       });
       fleetService.start();

@@ -43,11 +43,11 @@ Design:
 - Covered by the part 1 per-grant write-rate limit on the front door.
 - Every tool on all three surfaces, absent from wake-up turns.
 
-- [ ] Handler tests per tool on `in-app` / stdio / front door; `create_case` similar-case refusal carries
+- [x] Handler tests per tool on `in-app` / stdio / front door; `create_case` similar-case refusal carries
       no way to force; a quote missing the objective is refused in-app.
-- [ ] Front-door test: `cases:manage` registers, requires `cases:read`; a `cases:answer`-only grant cannot
+- [x] Front-door test: `cases:manage` registers, requires `cases:read`; a `cases:answer`-only grant cannot
       call `create_case`.
-- [ ] Covering tests pass; commit `feat(cases): cases:manage — create cases, revoke envelopes, cancel case jobs`.
+- [x] Covering tests pass; commit `feat(cases): cases:manage — create cases, revoke envelopes, cancel case jobs`.
 
 ## Task 7: Fleet tools in the chat
 

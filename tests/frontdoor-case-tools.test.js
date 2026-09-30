@@ -27,7 +27,13 @@ const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 const tmp = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); dirs.push(d); return d; };
 
-const READ_TOOLS = ['list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence'];
+const READ_TOOLS = ['list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence', 'list_envelopes', 'list_playbooks'];
+const MANAGE_TOOLS = ['create_case', 'revoke_envelope', 'cancel_case_job'];
+// Every front-door case tool with its scope, in CASE_MCP_TOOLS' order.
+const TOOL_SCOPES = [
+  ...READ_TOOLS.slice(0, 5).map((t) => [t, 'cases:read']), ['answer_question', 'cases:answer'],
+  ...READ_TOOLS.slice(5).map((t) => [t, 'cases:read']), ...MANAGE_TOOLS.map((t) => [t, 'cases:manage'])
+];
 const GRANT_ID = `gr_${'a'.repeat(22)}`;
 const grant = (entries, machineIds = {}) => ({ grant_id: GRANT_ID, client_id: `dcr_${'b'.repeat(22)}`, client_name: 'Example Client', scopes: entries, machine_ids: machineIds });
 const READ = grant([{ scope: 'cases:read', machines: null }]);
@@ -36,6 +42,8 @@ const BOTH = grant([{ scope: 'cases:read', machines: null }, { scope: 'cases:wri
 const ANSWER = grant([{ scope: 'cases:read', machines: null }, { scope: 'cases:answer', machines: null }]);
 const ANSWER_2 = { ...ANSWER, grant_id: `gr_${'c'.repeat(22)}` };
 const ANSWER_SCOPES = ['cases:read', 'cases:answer'];
+const MANAGE = grant([{ scope: 'cases:read', machines: null }, { scope: 'cases:manage', machines: null }]);
+const MANAGE_SCOPES = ['cases:read', 'cases:manage'];
 // A stand-in for core.context.getContact() with no ladder entries.
 const PRESENCE = {
   ladderState: () => ({}),
@@ -87,11 +95,15 @@ describe('front-door case tools', () => {
     registerFrontDoorCaseTools({ scopeRegistry, router: { registerTool: (def, opts) => tools.push([def, opts]) } });
     assert.deepStrictEqual({ ...scopeRegistry.get('cases:read') }, {
       name: 'cases:read', tools: READ_TOOLS, requires: null,
-      description: 'Read case lists, briefs, questions and orientation, including private facts.'
+      description: 'Read case lists, briefs, questions, envelopes, playbooks and orientation, including private facts.'
     });
     assert.deepStrictEqual({ ...scopeRegistry.get('cases:answer') }, {
       name: 'cases:answer', tools: ['answer_question'], requires: ['cases:read'],
       description: "Answer open case questions in the owner's words. Approvals, money, direction and a case's status are never answered here."
+    });
+    assert.deepStrictEqual({ ...scopeRegistry.get('cases:manage') }, {
+      name: 'cases:manage', tools: MANAGE_TOOLS, requires: ['cases:read'],
+      description: "Create cases, revoke a case's envelopes and cancel its jobs, in the owner's words."
     });
     assert.strictEqual(scopeRegistry.has('cases:write'), false, 'retired without ever being registered (spec §3.3)');
     assert.deepStrictEqual(READ_TOOLS.map((t) => scopeRegistry.requiredScopeFor(t)), READ_TOOLS.map(() => 'cases:read'));
@@ -101,9 +113,11 @@ describe('front-door case tools', () => {
     assert.deepStrictEqual(scopeRegistry.rules(['cases:read', 'cases:answer']).requires, { 'cases:answer': ['cases:read'] });
     assert.deepStrictEqual(scopeRegistry.supported(['fleet:read']), ['fleet:read'], 'registered is not enabled: scopes_enabled decides');
     // Every tool of a write scope (every case scope but cases:read) is limited per grant on the front door.
-    assert.deepStrictEqual([...CASE_WRITE_SCOPES], ['cases:answer']);
+    assert.deepStrictEqual([...CASE_WRITE_SCOPES], ['cases:answer', 'cases:manage']);
     assert.deepStrictEqual(tools.map(([d, o]) => [d.name, o.scope, o.perGrantLimit === true]),
-      [...READ_TOOLS.map((t) => [t, 'cases:read', false]), ['answer_question', 'cases:answer', true]]);
+      TOOL_SCOPES.map(([t, s]) => [t, s, s !== 'cases:read']));
+    for (const name of MANAGE_TOOLS) assert.strictEqual(scopeRegistry.requiredScopeFor(name), 'cases:manage');
+    assert.deepStrictEqual(scopeRegistry.rules(['cases:read', 'cases:manage']).requires, { 'cases:manage': ['cases:read'] });
     const [listDef, listOpts] = tools[0];
     assert.deepStrictEqual(listOpts.route({}), { fanout: true });
     assert.deepStrictEqual(listDef.inputSchema.required || [], []);
@@ -127,7 +141,10 @@ describe('front-door case tools', () => {
     const [answerDef, answerOpts] = byName.answer_question;
     assert.deepStrictEqual(answerDef.inputSchema.required, ['machine', 'case', 'question_id', 'quote']);
     assert.deepStrictEqual(answerOpts.route({ machine: 'gpu-box', case: 'lakeside-lot' }), { machine: 'gpu-box' });
-    assert.deepStrictEqual({ ...CASE_TOOL_SCOPE }, { ...Object.fromEntries(READ_TOOLS.map((t) => [t, 'cases:read'])), answer_question: 'cases:answer' });
+    assert.deepStrictEqual({ ...CASE_TOOL_SCOPE }, Object.fromEntries(TOOL_SCOPES));
+    const [createDef] = byName.create_case;
+    assert.deepStrictEqual(createDef.inputSchema.required, ['machine', 'title', 'objective', 'quote']);
+    assert.ok(!('force' in createDef.inputSchema.properties));
     assert.ok(Object.isFrozen(CASE_SCOPES) && Object.isFrozen(CASE_TOOL_SCOPE) && Object.isFrozen(CASE_WRITE_SCOPES));
   });
 
@@ -378,7 +395,28 @@ describe('front-door case tools', () => {
     assert.ok(!JSON.stringify(r).includes('xxxx'));
   });
 
-  it('startFleetNode registers the read methods under cases:read and answer_question under cases:answer on an agent node with a front-door link', async () => {
+  it("a cases:manage grant creates a case in the owner's words on the mcp-frontdoor channel; a cases:answer grant cannot, and a similar case is not forced", async () => {
+    const { rt } = await caseFixture();
+    const t = await frontDoor(rt);
+    const args = { machine: 'gpu-box', title: 'Boat sale', objective: 'sell the boat', quote: 'start a case to sell the boat' };
+    const answerOnly = await t.call('create_case', args, ANSWER_SCOPES, ANSWER);
+    assert.deepStrictEqual([answerOnly.error.code, answerOnly.error.required], ['insufficient_scope', 'cases:manage']);
+    assert.deepStrictEqual(t.hub.calls, [], 'refused before anything reached the node');
+    const ok = await t.call('create_case', args, MANAGE_SCOPES, MANAGE);
+    const fact = rt.ledger(ok.case_id).view().facts.get(ok.fact_id);
+    assert.deepStrictEqual([fact.provenance, fact.source.channel, fact.source.quote], ['user', 'mcp-frontdoor', 'start a case to sell the boat']);
+    const again = await t.call('create_case', { ...args, force: true }, MANAGE_SCOPES, MANAGE);
+    assert.strictEqual(again.error.code, 'invalid_params');
+    const similar = await t.call('create_case', args, MANAGE_SCOPES, MANAGE);
+    assert.strictEqual(similar.error.code, 'similar_cases');
+    assert.match(similar.error.message, /Open the app to create it anyway\.$/);
+    // What a buggy router would send: the node re-checks cases:manage.
+    const atNode = await t.gpu.service.dispatch('cases.create_case', { origin: fdOrigin(ANSWER_SCOPES), ...args, title: 'Garden shed', objective: 'build a shed', quote: 'build a shed' });
+    assert.deepStrictEqual([atNode.error.code, atNode.error.required], ['insufficient_scope', 'cases:manage']);
+    assert.strictEqual(rt.listCases().filter((c) => c.title === 'Boat sale').length, 1);
+  });
+
+  it('startFleetNode registers the read methods under cases:read, answer_question under cases:answer and the manage tools under cases:manage on an agent node with a front-door link', async () => {
     const { startFleetNode } = require('../src/fleet/start');
     const { CourierPump } = require('../src/approvals/courier');
     const { rt } = await caseFixture();
@@ -407,7 +445,7 @@ describe('front-door case tools', () => {
     });
     try {
       assert.deepStrictEqual([...fleet.fleetService.extra].map(([name, v]) => [name, v.scope]),
-        [...READ_TOOLS.map((t) => [`cases.${t}`, 'cases:read']), ['cases.answer_question', 'cases:answer']]);
+        TOOL_SCOPES.map(([t, s]) => [`cases.${t}`, s]));
       assert.ok(registered.includes('cases.get_orientation'), 'the link methods are on the relay client');
       assert.ok(registered.includes('cases.answer_question'));
     } finally {

@@ -48,6 +48,11 @@ const CORE_TOOLS = new Set([
   'list_questions',
   'get_presence',
   'answer_question',
+  'list_envelopes',
+  'list_playbooks',
+  'create_case',
+  'revoke_envelope',
+  'cancel_case_job',
 ]);
 
 // System prompt sections that are always included.

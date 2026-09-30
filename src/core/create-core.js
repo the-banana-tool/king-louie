@@ -2972,6 +2972,7 @@ function createCore(deps = {}) {
       inAppCaseTools = createCaseToolHandler({
         getRuntime: () => caseRuntime,
         getContact: () => (contactHost ? contactHost.context() : null),
+        getExecutorRegistry: () => executorRegistry,
         channel: 'in-app'
       });
     }

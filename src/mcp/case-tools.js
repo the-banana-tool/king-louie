@@ -14,6 +14,8 @@
 const { createLogger } = require('../logging');
 const { ToolError } = require('../fleet/tool-definitions');
 const { listRecords } = require('../cases/ingest/files');
+const { EnvelopeStore, ENVELOPE_STATUSES } = require('../cases/executors/envelope');
+const { JobStore, isOpen: jobIsOpen } = require('../cases/executors/job-store');
 const { CASE_MCP_TOOLS, STATUS_CHANGING, NEVER_OVER_MCP, untrusted, answerClass, CASE_TOOL_SCOPE } = require('../cases/mcp-tool-definitions');
 const { fold, wordsInText, ownerQuoteInTurn } = require('../tools/owner-quote');
 
@@ -22,6 +24,9 @@ const RATE_WINDOW_MS = 60 * 1000;
 // Management surfaces spec §3.1-3.2 and part 1's Global Constraints.
 const PRESSED_MESSAGE = "Answer this with the buttons on the question in the case's chat, or on your phone.";
 const OWNER_ONLY_MESSAGE = "Only the owner's own message can answer a question.";
+const SIMILAR_MESSAGE = 'a similar case is already open, so nothing was created. Open the app to create it anyway.';
+// The registry's refusal when a wake-up holds the case (jobs.js BUSY).
+const REGISTRY_BUSY = /busy/i;
 
 // A ToolError, so FleetToolHandler, the courier and NodeFleetService pass its
 // code, message and retry_after to the client as they do for fleet tools.
@@ -94,13 +99,15 @@ function ladderOf(state, caseId, questionId) {
 
 // `getContact` is core.context.getContact (the ladder and presence), or
 // null where contact is off: list_questions then gives no ladder state and
-// get_presence refuses.
-function createCaseToolHandler({ getRuntime, getContact = null, channel, audit = null, log = createLogger('mcp/case-tools'), now = () => Date.now(), rateLimit = 30 }) {
+// get_presence refuses. `getExecutorRegistry` is core.context's
+// (revoke_envelope and cancel_case_job go through it, as the
+// case:revokeEnvelope and case:cancelJob IPC do), or null: those two refuse.
+function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegistry = null, channel, audit = null, log = createLogger('mcp/case-tools'), now = () => Date.now(), rateLimit = 30 }) {
   if (!CHANNELS.has(channel)) throw new Error(`channel must be one of ${[...CHANNELS].join(', ')}`);
   const tools = CASE_MCP_TOOLS.map(({ tier, ...def }) => def);
   const byName = new Map(CASE_MCP_TOOLS.map((t) => [t.name, t]));
   const names = new Set(byName.keys());
-  const answers = [];
+  const writes = [];
 
   const currentRuntime = () => {
     try {
@@ -241,19 +248,158 @@ function createCaseToolHandler({ getRuntime, getContact = null, channel, audit =
     };
   }
 
-  // Takes a slot and returns a release for it.
+  // Takes a slot in the write window (every spoken tool shares it) and
+  // returns a release for it.
   function takeRateSlot() {
     const t = now();
-    while (answers.length && answers[0] <= t - RATE_WINDOW_MS) answers.shift();
-    if (answers.length >= rateLimit) {
-      const retryAfter = Math.max(1, Math.ceil((answers[0] + RATE_WINDOW_MS - t) / 1000));
-      throw fail('rate_limited', `at most ${rateLimit} answers per minute; retry after ${retryAfter}s`, { retry_after: retryAfter });
+    while (writes.length && writes[0] <= t - RATE_WINDOW_MS) writes.shift();
+    if (writes.length >= rateLimit) {
+      const retryAfter = Math.max(1, Math.ceil((writes[0] + RATE_WINDOW_MS - t) / 1000));
+      throw fail('rate_limited', `at most ${rateLimit} case writes per minute; retry after ${retryAfter}s`, { retry_after: retryAfter });
     }
-    answers.push(t);
+    writes.push(t);
     return () => {
-      const i = answers.indexOf(t);
-      if (i !== -1) answers.splice(i, 1);
+      const i = writes.indexOf(t);
+      if (i !== -1) writes.splice(i, 1);
     };
+  }
+
+  // Every spoken tool's quote rule (spec §3.2): required and non-blank on
+  // every channel; on the in-app channel it must be in the owner's own
+  // message this turn (ownerTurnText, from the executor only); over MCP it
+  // is recorded, not checked.
+  function checkQuote(quote, ownerTurnText) {
+    if (!fold(quote)) throw fail('invalid_params', '"quote" must hold the owner\'s words');
+    if (channel === 'in-app') {
+      if (typeof ownerTurnText !== 'string' || !fold(ownerTurnText)) throw fail('not_owner', OWNER_ONLY_MESSAGE);
+      if (!ownerQuoteInTurn(quote, ownerTurnText)) throw fail('quote_not_found', 'the quote is not in the owner\'s message this turn; quote their words exactly');
+    }
+  }
+
+  const auditEntry = (kind, data, what) => {
+    if (!audit || typeof audit.append !== 'function') return;
+    Promise.resolve()
+      .then(() => audit.append({ kind, data: { channel, ...data } }))
+      .catch((err) => log.warn(`Audit entry for ${what} failed: ${err.message}`));
+  };
+
+  const registry = () => {
+    let r = null;
+    try {
+      r = typeof getExecutorRegistry === 'function' ? getExecutorRegistry() || null : null;
+    } catch {
+      r = null;
+    }
+    if (!r) throw fail('executors_unavailable', 'executors are not available on this node');
+    return r;
+  };
+
+  // The case's envelopes (case:envelopes' list). Envelope files are
+  // Bash-writable: id and status go back bare only when they look like
+  // one; the whole envelope is case content, wrapped.
+  function listEnvelopes(rt, ref) {
+    const meta = caseOf(rt, ref);
+    return new EnvelopeStore(meta.dir).list().filter(isObj).map((env) => ({
+      id: typeof env.id === 'string' && /^env-\d{2,}$/.test(env.id) ? env.id : null,
+      status: ENVELOPE_STATUSES.includes(env.status) ? env.status : null,
+      data: untrusted(env)
+    }));
+  }
+
+  // The case's playbooks (case:playbooks' summary). Playbook text is data.
+  function listPlaybooks(rt, ref) {
+    const meta = caseOf(rt, ref);
+    if (!rt.playbooks || typeof rt.playbooks.summary !== 'function') throw fail('playbooks_unavailable', 'playbooks are not available on this node');
+    return untrusted(rt.playbooks.summary(meta.id));
+  }
+
+  // create_case: the case the app's case:create makes (no playbooks, no
+  // chat), never with force. The objective must be words from the quote on
+  // every channel; the quote itself is checked in-app only. The objective is
+  // recorded as the owner's (CaseRuntime.recordOwnerObjective).
+  async function createCase(rt, args, ownerTurnText) {
+    checkQuote(args.quote, ownerTurnText);
+    if (!fold(args.title)) throw fail('invalid_params', '"title" must not be blank');
+    if (!wordsInText(args.objective, args.quote)) throw fail('objective_not_in_quote', 'the objective must be the owner\'s words from the quote');
+    const releaseSlot = takeRateSlot();
+    let info;
+    try {
+      info = await rt.createCase({ title: args.title.trim(), type: args.type || 'general', objective: args.objective });
+    } catch (err) {
+      releaseSlot();
+      if (err && err.code === 'SIMILAR_CASES') {
+        const similar = (Array.isArray(err.similar) ? err.similar : []).map((c) => ({ caseId: c.caseId, title: c.title, status: c.status, match: c.match }));
+        throw fail('similar_cases', SIMILAR_MESSAGE, { similar: untrusted(similar) });
+      }
+      if (err && err.code === 'UNKNOWN_CASE_TYPE') throw fail('invalid_params', 'no such case type');
+      throw err;
+    }
+    let factId = null;
+    try {
+      factId = (await rt.recordOwnerObjective(info.id, { objective: args.objective, quote: args.quote, channel })).id;
+    } catch (err) {
+      // The case exists: it is reported, with a note that the objective
+      // was not recorded as the owner's.
+      log.warn(`${channel} create_case: recording the owner's objective in ${info.slug} failed: ${err && err.message}`);
+    }
+    log.info(`${channel} created case ${info.slug}`);
+    auditEntry('cases.create_case', { caseId: info.id, factId }, info.slug);
+    return {
+      case_id: info.id,
+      status: info.status,
+      type: info.type,
+      fact_id: factId,
+      ...(factId ? {} : { note: 'the case was created, but the owner\'s objective could not be recorded as a fact' }),
+      data: untrusted({ title: info.title, slug: info.slug })
+    };
+  }
+
+  const busyOrInternal = (what, meta, why) => {
+    if (REGISTRY_BUSY.test(String(why))) return fail('case_busy', 'the case is busy with a turn', { retry_after: 5 });
+    log.warn(`${channel} ${what} in ${meta.slug} failed: ${why}`);
+    return fail('internal', 'the case tool failed on this node');
+  };
+
+  // revoke_envelope: IPC case:revokeEnvelope's path (the registry's
+  // revokeEnvelope, in systemAction), with the quote in the reason.
+  async function revokeEnvelope(rt, args, ownerTurnText) {
+    checkQuote(args.quote, ownerTurnText);
+    const meta = caseOf(rt, args.case);
+    const reg = registry();
+    if (!isObj(new EnvelopeStore(meta.dir).get(args.envelope))) throw fail('envelope_not_found', 'no such envelope in this case');
+    const releaseSlot = takeRateSlot();
+    const r = await reg.revokeEnvelope(meta.id, args.envelope, `revoked by the owner (${channel}): ${JSON.stringify(args.quote)}`);
+    if (!r || !r.ok) {
+      releaseSlot();
+      throw busyOrInternal(`revoke_envelope ${args.envelope}`, meta, r && r.error);
+    }
+    log.info(`${channel} revoked ${args.envelope} in case ${meta.slug}`);
+    auditEntry('cases.revoke_envelope', { caseId: meta.id, envelopeId: args.envelope }, args.envelope);
+    return { envelope: args.envelope, status: 'revoked', cancelled_jobs: Array.isArray(r.cancelled) ? r.cancelled : [] };
+  }
+
+  // cancel_case_job: IPC case:cancelJob's path (the registry's cancelJob,
+  // in systemAction), with the quote in the reason.
+  async function cancelCaseJob(rt, args, ownerTurnText) {
+    checkQuote(args.quote, ownerTurnText);
+    const meta = caseOf(rt, args.case);
+    const reg = registry();
+    const job = new JobStore(meta.dir).get(args.job);
+    if (!isObj(job)) throw fail('job_not_found', 'no such job in this case');
+    if (!jobIsOpen(job.state)) throw fail('job_closed', 'the job is already finished or cancelled');
+    const releaseSlot = takeRateSlot();
+    const r = await reg.cancelJob(meta.id, args.job, `cancelled by the owner (${channel}): ${JSON.stringify(args.quote)}`);
+    if (!r || !r.ok) {
+      releaseSlot();
+      const why = String(r && r.error);
+      if (REGISTRY_BUSY.test(why)) throw busyOrInternal(`cancel_case_job ${args.job}`, meta, why);
+      // Settled by a poll meanwhile.
+      log.info(`${channel} cancel_case_job ${args.job} in ${meta.slug} refused: ${why}`);
+      throw fail('job_closed', 'the job is already finished or cancelled');
+    }
+    log.info(`${channel} cancelled ${args.job} in case ${meta.slug}`);
+    auditEntry('cases.cancel_case_job', { caseId: meta.id, jobId: args.job }, args.job);
+    return { job: args.job, state: r.job && typeof r.job.state === 'string' ? r.job.state : 'cancelled' };
   }
 
   // The spoken class only (answerClass): a pressed question is refused on
@@ -267,11 +413,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, channel, audit =
     const hasOption = args.option_id !== undefined;
     if (hasText && hasOption) throw fail('invalid_params', 'give text or option_id, not both');
     const quote = args.quote;
-    if (!fold(quote)) throw fail('invalid_params', '"quote" must hold the owner\'s words');
-    if (channel === 'in-app') {
-      if (typeof ownerTurnText !== 'string' || !fold(ownerTurnText)) throw fail('not_owner', OWNER_ONLY_MESSAGE);
-      if (!ownerQuoteInTurn(quote, ownerTurnText)) throw fail('quote_not_found', 'the quote is not in the owner\'s message this turn; quote their words exactly');
-    }
+    checkQuote(quote, ownerTurnText);
     const meta = caseOf(rt, args.case);
     if (meta.status === 'done' || meta.status === 'abandoned') throw fail('case_closed', 'the case is done or abandoned');
     const q = rt.questions(meta.id).get(args.question_id);
@@ -321,11 +463,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, channel, audit =
     }
     const factId = res?.fact?.id ?? res?.question?.answer?.factId ?? null;
     log.info(`${channel} ${briefing ? 'acknowledged' : 'answered'} ${q.id} in case ${meta.slug}`);
-    if (audit && typeof audit.append === 'function') {
-      Promise.resolve()
-        .then(() => audit.append({ kind: 'cases.answer_question', data: { channel, caseId: meta.id, questionId: q.id, optionId: hasOption ? args.option_id : null, factId } }))
-        .catch((err) => log.warn(`Audit entry for ${q.id} failed: ${err.message}`));
-    }
+    auditEntry('cases.answer_question', { caseId: meta.id, questionId: q.id, optionId: hasOption ? args.option_id : null, factId }, q.id);
     return {
       question_id: q.id,
       answered_at: res?.question?.answer?.at ?? null,
@@ -349,7 +487,13 @@ function createCaseToolHandler({ getRuntime, getContact = null, channel, audit =
         case 'get_orientation': return untrusted({ text: rt.orientation(caseOf(rt, args.case).id) });
         case 'list_questions': return listQuestions(rt, args.case);
         case 'get_presence': return getPresence();
-        default: return await answerQuestion(rt, args, ownerTurnText);
+        case 'list_envelopes': return listEnvelopes(rt, args.case);
+        case 'list_playbooks': return listPlaybooks(rt, args.case);
+        case 'create_case': return await createCase(rt, args, ownerTurnText);
+        case 'revoke_envelope': return await revokeEnvelope(rt, args, ownerTurnText);
+        case 'cancel_case_job': return await cancelCaseJob(rt, args, ownerTurnText);
+        case 'answer_question': return await answerQuestion(rt, args, ownerTurnText);
+        default: throw fail('unknown_tool', 'no such case tool');
       }
     } catch (err) {
       if (err instanceof ToolError) throw err;
@@ -375,14 +519,15 @@ const ROUTING_FIELDS = Object.freeze([...ROUTER_FIELDS, 'machine']);
 // On an agent node with a front-door link: the cases.<tool> methods, each
 // behind its own scope (NodeFleetService re-checks the front door's scopes
 // and machine pins before the method runs). Only the tools in
-// CASE_TOOL_SCOPE are registered (cases:read, and answer_question under
-// cases:answer: management surfaces spec §3.3). The handler is its own, on
+// CASE_TOOL_SCOPE are registered (cases:read; answer_question under
+// cases:answer; create_case, revoke_envelope and cancel_case_job under
+// cases:manage: management surfaces spec §3.3). The handler is its own, on
 // the mcp-frontdoor channel (its own rate limit, shared by every front-door
 // client; the per-grant limit is the front door's; it repeats every
 // front-door refusal). The router's fields are removed; anything else is checked
 // against the tool's schema.
-function registerNodeCaseMethods(nodeFleetService, { getRuntime, getContact = null, audit = null, log } = {}) {
-  const handler = createCaseToolHandler({ getRuntime, getContact, channel: 'mcp-frontdoor', audit, ...(log ? { log } : {}) });
+function registerNodeCaseMethods(nodeFleetService, { getRuntime, getContact = null, getExecutorRegistry = null, audit = null, log } = {}) {
+  const handler = createCaseToolHandler({ getRuntime, getContact, getExecutorRegistry, channel: 'mcp-frontdoor', audit, ...(log ? { log } : {}) });
   for (const name of handler.names) {
     if (!Object.hasOwn(CASE_TOOL_SCOPE, name)) continue;
     const strip = name === 'list_cases' ? ROUTER_FIELDS : ROUTING_FIELDS;
