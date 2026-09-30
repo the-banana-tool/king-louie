@@ -272,6 +272,21 @@ For each question and adapter:
 5. Recorded per question: the four scores, `estTokens`, `latencyMs`, `cpuMs`,
    adapter cost, answer cost, judge cost, distance bucket, kind.
 
+**Answer containment** (secondary, stage B0 onward, no model call): whether
+the adapter's context text holds the answer. Both sides are normalized (NFKC,
+typographic quotes and dashes to ASCII, case-folded, whitespace collapsed,
+surrounding punctuation stripped from the answer). Strict: `answer` or one of
+`acceptableAnswers` is a substring of the context. Tokens: strict, or every
+word of the shortest answer appears inside one message of the context.
+`abstain` questions are left out, as from evidence recall. Records carry
+`answerContained` and `answerTokensContained` (booleans, never the text);
+the summary reports both next to evidence recall, which stays the headline.
+Known blind spots: a paraphrased answer (the reviewer's wording, not the
+session's) is never found, so `oracle` scores below 1.0 and its containment
+is the ceiling for the question set; and a short answer (a number, a word)
+can be found in an unrelated message, so a hit does not prove the evidence
+was shown.
+
 Per adapter the report gives evidence recall and correctness overall, per
 kind, and per distance bucket; median and p90 context tokens; median and p90
 latency; total cost. The headline figure is correctness versus distance, one

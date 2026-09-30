@@ -9,7 +9,7 @@ const { execFileSync } = require('child_process');
 const { loadSession, listSessions, sessionDir } = require('./session-format');
 const { readQuestions, questionsFile, validateQuestionSet, isVerified, bucketFor, computeDistance } = require('./questions');
 const { createAdapter } = require('./adapters');
-const { evidenceRecall, chunkEvidenceRecall, summarize, renderSummaryMarkdown } = require('./scoring');
+const { evidenceRecall, chunkEvidenceRecall, answerContainment, summarize, renderSummaryMarkdown } = require('./scoring');
 const { writeFileAtomic, sha256File } = require('./files');
 const { UsageError } = require('./errors');
 const { createLogger } = require('../logging');
@@ -89,12 +89,17 @@ async function scoreOne({ runId, adapter, handle, session, q, budgetTokens }) {
     const whole = new Set(shown);
     const partial = (r.evidenceSeqsPartial || []).filter((s) => !whole.has(s));
     const partialSet = new Set(partial);
+    // Secondary metric: the answer text in the context. Booleans only; the
+    // record never carries the text. null for abstain.
+    const contained = answerContainment(r.text, q);
     return {
       ...base,
       evidenceSeqsShown: shown,
       evidenceSeqsPartial: partial,
       evidenceRecall: evidenceRecall(q.evidenceSeqs, shown),
       evidencePartial: q.evidenceSeqs.filter((s) => partialSet.has(s)).length,
+      answerContained: contained ? contained.strict : null,
+      answerTokensContained: contained ? contained.tokens : null,
       chunkEvidenceRecall: chunkEvidenceRecall(q.evidenceSeqs, r.chunks),
       estTokens: r.estTokens, latencyMs: r.latencyMs, cpuMs: r.cpuMs, cost: r.cost ?? 0,
       leaked: [...shown, ...partial].filter((s) => s >= q.askAtSeq).length,
@@ -103,6 +108,7 @@ async function scoreOne({ runId, adapter, handle, session, q, budgetTokens }) {
   } catch (err) {
     return {
       ...base, evidenceSeqsShown: [], evidenceSeqsPartial: [], evidenceRecall: null, evidencePartial: 0, chunkEvidenceRecall: null,
+      answerContained: null, answerTokensContained: null,
       estTokens: null, latencyMs: null, cpuMs: null, cost: 0, leaked: 0, error: err.message
     };
   }
@@ -126,6 +132,7 @@ async function runBenchmark({
     benchmark: 'LongHaul',
     stage: 'B0',
     metric: 'evidence recall',
+    secondaryMetrics: ['answer containment'],
     commit,
     node: process.version,
     budgetTokens,

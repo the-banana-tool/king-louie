@@ -263,7 +263,10 @@ Electron build.
   evidence shown whole; evidence shown in part (a cut or shortened message,
   some of its chunks, a folded tool call) is reported as `partial`. Any
   message shown whole or in part at or after `askAtSeq` is a leak and exits 1. Add `kl-recall` to the adapters to
-  measure recall itself.
+  measure recall itself. Answer containment (`answerContained`, strict
+  normalized substring; `answerTokensContained`, looser) is a secondary,
+  judge-free column; `oracle` scores below 1.0 on it wherever an answer is a
+  paraphrase, so compare adapters against oracle's containment, not 1.0.
 - `longhaul import` reads Claude Code JSONL transcripts and King Louie chat
   exports (`.json`), picking the importer with `detectImporter`
   (`src/history/importers/index.js`); ids default to `cc-<hash>` / `kl-<hash>`.

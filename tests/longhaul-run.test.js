@@ -70,8 +70,9 @@ describe('scoring', () => {
     assert.strictEqual(s.scored, 3);
     assert.strictEqual(s.abstain, 1);
     assert.strictEqual(s.evidenceRecall, 0.5);
-    assert.deepStrictEqual(s.byKind, { 'user-said': { n: 2, evidenceRecall: 0.5 }, superseded: { n: 1, evidenceRecall: 0.5 } });
-    assert.deepStrictEqual(s.byBucket, { '<10K': { n: 2, evidenceRecall: 0.75 }, '10K-50K': { n: 1, evidenceRecall: 0 } });
+    const g = (n, evidenceRecall) => ({ n, evidenceRecall, answerContainment: null, answerTokenContainment: null });
+    assert.deepStrictEqual(s.byKind, { 'user-said': g(2, 0.5), superseded: g(1, 0.5) });
+    assert.deepStrictEqual(s.byBucket, { '<10K': g(2, 0.75), '10K-50K': g(1, 0) });
     assert.deepStrictEqual(s.estTokens, { median: 100, p90: 100, max: 100 });
     assert.strictEqual(s.chunkEvidenceRecall, null);
   });
@@ -100,9 +101,9 @@ describe('runBenchmark', () => {
     assert.strictEqual(s.scored, 5);
     assert.strictEqual(s.abstain, 1);
     assert.strictEqual(s.evidenceRecall, 0.8);
-    assert.deepStrictEqual(s.byKind.superseded, { n: 1, evidenceRecall: 0.5 });
+    assert.deepStrictEqual(s.byKind.superseded, { n: 1, evidenceRecall: 0.5, answerContainment: 0, answerTokenContainment: 0 });
     assert.strictEqual(s.leaks, 0);
-    assert.match(fs.readFileSync(path.join(out.dir, 'summary.md'), 'utf8'), /\| first-evidence \| 6 \| 5 \| 0 \| 0\.800 \| 0 \|/);
+    assert.match(fs.readFileSync(path.join(out.dir, 'summary.md'), 'utf8'), /\| first-evidence \| 6 \| 5 \| 0 \| 0\.800 \| 0\.000 \| 0\.000 \| 0 \|/);
 
     const questions = await readQuestions(questionsFile(home.root, 'synth-small'));
     const raw = fs.readFileSync(path.join(out.dir, 'records.jsonl'), 'utf8');
@@ -162,7 +163,7 @@ describe('runBenchmark', () => {
     const multi = out.records.find((r) => r.kind === 'multi-hop');
     assert.strictEqual(multi.evidencePartial, 1);
     assert.deepStrictEqual(multi.evidenceSeqsPartial, multi.evidenceSeqs.slice(1));
-    assert.match(fs.readFileSync(path.join(out.dir, 'summary.md'), 'utf8'), /\| half \| 6 \| 5 \| 0 \| 0\.800 \| 2 \|/);
+    assert.match(fs.readFileSync(path.join(out.dir, 'summary.md'), 'utf8'), /\| half \| 6 \| 5 \| 0 \| 0\.800 \| 0\.000 \| 0\.000 \| 2 \|/);
   });
 
   it('counts a partly shown seq at or after askAtSeq as a leak too', async () => {
