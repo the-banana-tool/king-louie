@@ -25,8 +25,9 @@ const log = createLogger('longhaul/jev-rerank');
 
 const MODES = ['pointwise', 'batched'];
 // Tokens a call adds besides the chunk: the query, the instructions and
-// criteria, the JSON (pointwise, per pair).
-const PAIR_OVERHEAD_TOKENS = 250;
+// criteria, the JSON (pointwise, per pair): the first real run averaged
+// about 550 input tokens a pair at 141 estimated chunk tokens.
+const PAIR_OVERHEAD_TOKENS = 450;
 
 function median(xs, p = 0.5) {
   if (!xs.length) return null;
