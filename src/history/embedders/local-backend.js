@@ -52,8 +52,13 @@ function createLocalBackend({ load = () => require('@huggingface/transformers'),
         throw unavailable(`the local model runtime did not load (${why}); @huggingface/transformers and onnxruntime-node must be installed with a native binary for this platform`);
       }
     }
+    // A complete model loads with remote access off. transformers.js refuses
+    // outright when local and remote are both off, before it reads its cache,
+    // so local is on then, pointed at the same folder (its cache and local
+    // layouts are both <dir>/<org>/<name>/), never the library's own models/.
     T.env.cacheDir = modelsDir;
-    T.env.allowLocalModels = false;
+    T.env.localModelPath = modelsDir;
+    T.env.allowLocalModels = complete;
     T.env.allowRemoteModels = !complete;
     return { dir, marker, complete };
   }

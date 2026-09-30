@@ -17,11 +17,17 @@ const tempModels = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-m
 function fakeTransformers({ failWith = null } = {}) {
   const calls = [];
   const env = {};
+  // transformers.js refuses before it reads its cache when local and remote
+  // models are both off (hub.js getModelFile), so an offline load needs local on.
+  const guard = () => {
+    if (!env.allowLocalModels && !env.allowRemoteModels) throw new Error('Invalid configuration detected: both local and remote models are disabled.');
+  };
   return {
     env,
     calls,
     async pipeline(task, model, opts) {
       calls.push({ task, model, dtype: opts.dtype, threads: opts.session_options.intraOpNumThreads, remote: env.allowRemoteModels, cacheDir: env.cacheDir });
+      guard();
       if (failWith) throw failWith;
       opts.progress_callback({ status: 'progress', file: 'onnx/model_quantized.onnx', loaded: 1, total: 2 });
       opts.progress_callback({ status: 'done', file: 'onnx/model_quantized.onnx' });
@@ -35,6 +41,7 @@ function fakeTransformers({ failWith = null } = {}) {
     AutoModelForSequenceClassification: {
       from_pretrained: async (model, opts) => {
         calls.push({ rerank: model, dtype: opts.dtype, remote: env.allowRemoteModels });
+        guard();
         return async (inputs) => ({ logits: { data: Float32Array.from({ length: inputs.n }, (_, i) => i * 0.5) } });
       }
     }
@@ -58,6 +65,8 @@ describe('local backend', () => {
     assert.deepStrictEqual(T.calls[1], { run: 2, pooling: 'cls', normalize: true });
     await backend.loadEmbedder({ model: MODEL, modelsDir: models, allowDownload: true });
     assert.strictEqual(T.calls[2].remote, false, 'a complete model loads with remote access off');
+    assert.strictEqual(T.env.allowLocalModels, true, 'and from the models folder');
+    assert.strictEqual(T.env.localModelPath, models);
   });
 
   it('a model folder without the marker is a stopped download: it is deleted before the next try', async () => {
