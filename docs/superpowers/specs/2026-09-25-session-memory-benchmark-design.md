@@ -132,7 +132,10 @@ to drain, then replays questions in ascending `askAtSeq`.
 
 ## 4. Sessions
 
-A session is a transcript from outside the app. LongHaul stores it in the
+A session is a transcript from outside the app: a Claude Code JSONL transcript or
+a King Louie chat export (`.json`); `import` picks the importer that recognises
+the file (`src/history/importers/index.js`) and names the supported formats
+when none does. LongHaul stores it in the
 recall spec's message shape (`id, sender, text, timestamp, seq` plus
 per-sender metadata) as JSONL, one message per line, with a manifest that
 records where the session came from; a run imports it into a temporary history
@@ -378,6 +381,7 @@ is an open question (§17).
 | `src/history/context-builder.js` | gains `upToSeq` (amendment to the recall spec §3.2): the tail and retrieval consider only messages with `seq < upToSeq` |
 | `src/history/history-store.js` | `vectors(model, chatIds, { upToSeq })` and `searchText(..., { upToSeq })` |
 | `src/history/importers/claude-code-jsonl.js` | records compaction events in the session manifest (§4) |
+| `src/history/importers/king-louie-json.js`, `index.js` | the King Louie chat export importer and the detection order (§4) |
 | `src/providers/provider-factory.js` | usable from the CLI with keys from environment variables, without the vault |
 | `package.json` | `bin` entry for `longhaul`; `src/longhaul/` excluded from the Electron build |
 | `CLAUDE.md` | one section: how to run a smoke benchmark on the synthetic fixtures |

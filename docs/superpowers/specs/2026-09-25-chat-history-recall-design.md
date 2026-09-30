@@ -542,7 +542,7 @@ unless the owner linked it.
 |---|---|---|
 | `claude-code-jsonl` | a `.jsonl` whose first records have `type` in `user`/`assistant` and `message.content` | `text` blocks → `user`/`assistant`; `tool_use` → `toolUse` (`toolName`, `parameters`); `tool_result` → `toolResult`; string user content with `isCompactSummary` → `status` with `meta.compaction: true`, chunked as kind `summary` (§4.3); other record types skipped. Subagent files are skipped in this spec. |
 | `markdown-transcript` | headings that alternate roles (`## User` / `## Assistant`, `### User`, `## Turn N`, `## Message N`, `## <Name>` / `## Assistant`) | Heuristic role detection; `preview` returns the detected turn count and the first five role assignments; the UI shows them and the owner confirms or picks a different heading pattern before `parse`. |
-| `king-louie-json` | the app's own chat export | One-to-one. |
+| `king-louie-json` | the app's own chat export (`Export as JSON`: one chat, `{ ...chat, messages }`, a `.json` file with a `messages` array whose entries have a `sender`) | One-to-one, except that it drops `llm` (usage bookkeeping), `context` (turn provenance) and attachment bytes (name, type, size and a document's `textContent` stay), and keeps a Vault call to its `action` and `key` and a Vault result, and its text, to nothing (`UNINDEXED_TOOLS`). The chat's `llmTotals` go to the manifest. A duplicate or missing message id gets a fresh `line-N` id; an unknown sender becomes an unmapped status message; a `status` with `meta.compaction` is a compaction. |
 
 Imports are idempotent by `source_hash` (SHA-256 of the file); re-importing
 the same file returns the existing chat. Imported chats are ordinary chats:

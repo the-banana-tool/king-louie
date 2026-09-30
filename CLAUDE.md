@@ -264,6 +264,9 @@ Electron build.
   some of its chunks, a folded tool call) is reported as `partial`. Any
   message shown whole or in part at or after `askAtSeq` is a leak and exits 1. Add `kl-recall` to the adapters to
   measure recall itself.
+- `longhaul import` reads Claude Code JSONL transcripts and King Louie chat
+  exports (`.json`), picking the importer with `detectImporter`
+  (`src/history/importers/index.js`); ids default to `cc-<hash>` / `kl-<hash>`.
 - Session files are read with `readJsonlLines`
   (`src/history/importers/jsonl-lines.js`), never `node:readline`: readline
   also splits lines at U+2028/U+2029 inside JSON strings.
