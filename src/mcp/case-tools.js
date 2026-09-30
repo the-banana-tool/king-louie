@@ -66,18 +66,30 @@ function pendingProposals(dir) {
   return listRecords(dir).reduce((n, rec) => n + (Array.isArray(rec.proposals) ? rec.proposals.filter((p) => isObj(p) && !isObj(p.review)).length : 0), 0);
 }
 
-// A 1-based option number on its own: "option 12" does not name option 1,
-// nor do "1.5" or "2,1".
-function numberInText(n, text) {
-  return new RegExp(`(?<!\\w|\\d[.,])${n}(?!\\w|[.,]\\d)`).test(fold(text));
+// A 1-based option number counts only when it stands alone (the whole
+// quote, trailing punctuation ignored: "2", "2.") or is marked ("option 2",
+// "number 2", "no. 2", "#2"). "wait 1 week", "12", "1.5" and "2,1" name
+// nothing (owner decision, 2026-09-30).
+function markedNumber(n, quote) {
+  const q = fold(quote);
+  const bare = q.replace(/[\s.!?,;:]+$/, '');
+  if (bare === String(n)) return true;
+  return new RegExp(`(?<!\\w)(?:(?:option|number|no\\.)\\s*#?\\s*|#\\s*)${n}(?!\\w|[.,]\\d)`).test(q);
 }
 
-// True when the quote names the option by its label, its id or its 1-based
-// position, on word boundaries after the owner-quote fold.
-function optionInQuote(quote, option, index) {
-  return wordsInText(String(option.label ?? ''), quote)
-    || wordsInText(String(option.id ?? ''), quote)
-    || numberInText(index + 1, quote);
+// The indexes of the options the quote names: by label on word boundaries
+// after the owner-quote fold, or by a marked number. An option's id never
+// counts. A label found only inside another named option's label ("Yes" in
+// "Yes, later") does not count on its own.
+function optionsInQuote(quote, options) {
+  const labels = options.map((o) => String(o.label ?? ''));
+  const byLabel = labels.map((l) => wordsInText(l, quote));
+  const named = [];
+  options.forEach((_o, i) => {
+    const inLonger = byLabel[i] && labels.some((other, j) => j !== i && byLabel[j] && fold(other) !== fold(labels[i]) && wordsInText(labels[i], other));
+    if ((byLabel[i] && !inLonger) || markedNumber(i + 1, quote)) named.push(i);
+  });
+  return named;
 }
 
 // A payload type goes back bare only when it looks like one (records are
@@ -459,11 +471,14 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
         const options = (Array.isArray(q.options) ? q.options : []).filter(isObj);
         const index = options.findIndex((o) => o.id === args.option_id);
         if (index === -1) throw fail('invalid_params', 'option_id is not one of the question\'s options');
-        if (!optionInQuote(quote, options[index], index)) {
-          // Labels can be model-authored: listed as data, never in the message.
-          throw fail('option_not_in_quote', 'the quote does not name that option by its label, id or number; ask the owner which option they mean', {
-            options: untrusted(options.map((o, i) => ({ number: i + 1, id: o.id, label: o.label ?? null })))
-          });
+        const named = optionsInQuote(quote, options);
+        // Labels can be model-authored: listed as data, never in the message.
+        const listed = () => ({ options: untrusted(options.map((o, i) => ({ number: i + 1, id: o.id, label: o.label ?? null }))) });
+        if (named.length > 1) {
+          throw fail('option_ambiguous', 'the quote names more than one option; ask the owner which one they mean', listed());
+        }
+        if (named[0] !== index) {
+          throw fail('option_not_in_quote', 'the quote does not name that option by its label or number; ask the owner which option they mean', listed());
         }
       } else if (hasText) {
         if (!wordsInText(args.text, quote)) throw fail('invalid_params', 'text must be words from the quote');

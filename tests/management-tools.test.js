@@ -271,19 +271,27 @@ describe('answer_question takes the owner\'s quote', () => {
     assert.deepStrictEqual(fact.source, { kind: 'question', ref: q.cadence.id, channel: 'in-app', at: answer.at, quote: 'go with “Weekly”' });
   });
 
-  it('an option must be named in the quote by its label, id or number on word boundaries', async () => {
-    const named = async (quote, optionId = 'daily') => {
-      const { rt, lot, q } = await answerFixture();
-      return handlerFor(rt, 'mcp-stdio').call('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: optionId, quote }).then(() => true, (e) => {
-        assert.strictEqual(e.code, 'option_not_in_quote', quote);
+  it('an option counts by its label on word boundaries or by a marked number; its id never does', async () => {
+    const named = async (quote, optionId = 'daily', q = null) => {
+      const { rt, lot, q: qs } = await answerFixture();
+      const question = q ? q(rt, lot) : qs.cadence;
+      return handlerFor(rt, 'mcp-stdio').call('answer_question', { case: lot.id, question_id: question.id, option_id: optionId, quote }).then(() => true, (e) => {
+        assert.ok(['option_not_in_quote', 'option_ambiguous'].includes(e.code), `${quote}: ${e.code}`);
         return e;
       });
     };
     assert.strictEqual(await named('daily is fine'), true, 'label');
+    assert.strictEqual(await named('Weekly', 'weekly'), true, 'label alone');
     assert.strictEqual(await named('the weekly one', 'weekly'), true, 'label, any case');
-    assert.strictEqual(await named('option 1'), true, 'number');
-    assert.strictEqual(await named('2.', 'weekly'), true, 'number at the end of a sentence');
+    assert.strictEqual(await named('option 2', 'weekly'), true, 'option N');
+    assert.strictEqual(await named('go with option 2', 'weekly'), true);
+    assert.strictEqual(await named('#2', 'weekly'), true);
+    assert.strictEqual(await named('number 2', 'weekly'), true);
+    assert.strictEqual(await named('no. 2 please', 'weekly'), true);
+    assert.strictEqual(await named('2', 'weekly'), true, 'the whole quote');
+    assert.strictEqual(await named(' 2. ', 'weekly'), true, 'the whole quote, trailing punctuation ignored');
     const e = await named('go with Weekly');
+    assert.strictEqual(e.code, 'option_not_in_quote');
     // The options come back as wrapped data; the message is a fixed sentence.
     assert.deepStrictEqual(e.data.options, {
       untrusted_output: true,
@@ -291,10 +299,47 @@ describe('answer_question takes the owner\'s quote', () => {
       data: [{ number: 1, id: 'daily', label: 'Daily' }, { number: 2, id: 'weekly', label: 'Weekly' }]
     });
     assert.ok(!e.message.includes('Weekly') && !e.message.includes('Daily'));
-    assert.notStrictEqual(await named('option 12'), true, '"option 12" does not name option 1');
-    assert.notStrictEqual(await named('about 1.5 times a week'), true, '"1.5" does not name option 1');
-    assert.notStrictEqual(await named('dailyish'), true, 'a label inside a longer word');
-    assert.notStrictEqual(await named('2,1 split'), true);
+    for (const quote of ['wait 1 week then pick the other one', '12', '1.5', 'about 1.5 times a week', '2,1', '2,1 split', 'option 12', 'dailyish']) {
+      assert.strictEqual((await named(quote)).code, 'option_not_in_quote', quote);
+    }
+    // The id alone is not the owner naming the option.
+    const byId = (rt, lot) => rt.createQuestion(lot.id, { kind: 'question', urgency: 'normal', payload: { type: 'ask' }, text: 'Which vendor?', options: [{ id: 'a', label: 'Acme' }, { id: 'b', label: 'Bolt' }] }, { charge: false });
+    assert.strictEqual((await named('a', 'a', byId)).code, 'option_not_in_quote', 'an id is not a label');
+    assert.strictEqual((await named("Bolt, it's a better deal", 'a', byId)).code, 'option_not_in_quote', 'the quote names another option');
+    assert.strictEqual(await named('Acme, please', 'a', byId), true);
+    // A label with regex characters is matched as text.
+    const special = (rt, lot) => rt.createQuestion(lot.id, { kind: 'question', urgency: 'normal', payload: { type: 'ask' }, text: 'Which plan?', options: [{ id: 'p', label: 'Plan (a+b)?' }, { id: 'q', label: 'Plan c.*' }] }, { charge: false });
+    assert.strictEqual(await named('go with plan (a+b)? I think', 'p', special), true);
+    assert.strictEqual((await named('plan cxx', 'q', special)).code, 'option_not_in_quote');
+    assert.strictEqual(await named('Plan c.*', 'q', special), true);
+  });
+
+  it('a quote that names more than one option is refused as ambiguous, listing the options', async () => {
+    const tried = async (quote, optionId) => {
+      const { rt, lot, q } = await answerFixture();
+      const e = await refusal(handlerFor(rt, 'mcp-stdio').call('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: optionId, quote }));
+      assert.strictEqual(rt.questions(lot.id).get(q.cadence.id).answer, null);
+      return e;
+    };
+    for (const [quote, optionId] of [['option 1 or option 2', 'daily'], ['daily, no wait, weekly', 'weekly'], ['option 2, daily', 'weekly'], ['#1 #2', 'daily']]) {
+      const e = await tried(quote, optionId);
+      assert.strictEqual(e.code, 'option_ambiguous', quote);
+      assert.deepStrictEqual(e.data.options.data, [{ number: 1, id: 'daily', label: 'Daily' }, { number: 2, id: 'weekly', label: 'Weekly' }]);
+      assert.ok(!e.message.includes('Weekly') && !e.message.includes('Daily'));
+    }
+    // Only unmarked numbers: not named at all.
+    assert.strictEqual((await tried('not 1, 2', 'weekly')).code, 'option_not_in_quote');
+    // Naming one option twice is not ambiguous.
+    const { rt, lot, q } = await answerFixture();
+    await handlerFor(rt, 'mcp-stdio').call('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: 'weekly', quote: 'option 2, weekly' });
+    assert.strictEqual(rt.questions(lot.id).get(q.cadence.id).answer.optionId, 'weekly');
+  });
+
+  it('a label that contains another option\'s label names only the longer one', async () => {
+    const { rt, lot } = await answerFixture();
+    const qq = rt.createQuestion(lot.id, { kind: 'question', urgency: 'normal', payload: { type: 'ask' }, text: 'Go ahead?', options: [{ id: 'y', label: 'Yes' }, { id: 'yl', label: 'Yes, later' }] }, { charge: false });
+    await handlerFor(rt, 'mcp-stdio').call('answer_question', { case: lot.id, question_id: qq.id, option_id: 'yl', quote: 'yes, later' });
+    assert.strictEqual(rt.questions(lot.id).get(qq.id).answer.optionId, 'yl');
   });
 
   it('text is the quote when omitted, and must be words from the quote when given', async () => {
