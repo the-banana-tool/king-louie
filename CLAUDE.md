@@ -270,6 +270,15 @@ Electron build.
 - Session files are read with `readJsonlLines`
   (`src/history/importers/jsonl-lines.js`), never `node:readline`: readline
   also splits lines at U+2028/U+2029 inside JSON strings.
+- `longhaul verify --session <id> --reviewer <initials>` reviews candidate
+  questions in the terminal; add `--web` (`--port <n>`, `--no-open`) for a
+  browser page (`src/longhaul/verify-web.js`, static files in
+  `src/longhaul/web/`). It binds 127.0.0.1 only, every API call needs the
+  per-run token from the printed URL's `#fragment`, other `Host` headers are
+  refused, and nothing leaves the machine (no external assets, strict CSP, no
+  session text in logs). Both flows share the rules in `src/longhaul/review.js`.
+  The page sets session text with `textContent` only;
+  `tests/longhaul-verify-web.test.js` fails on `innerHTML` in `verify.js`.
 - `longhaul author` calls a real model with a key from the environment
   (`OPENAI_API_KEY`, ..., through `ProviderFactory.fromEnv`). Unit tests inject a
   fake client or point `--base-url` at `tests/helpers/fake-llm-server.js`.
