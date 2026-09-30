@@ -71,6 +71,44 @@ The text a harness put in place of the history it condensed; kept verbatim
 when a session is imported. Recall never writes one.
 _Avoid_: summary (alone), compacted history
 
+### Fleet and cases
+
+**Fleet**:
+The machines King Louie runs on and what an owner does to them: nodes, the
+relay, runbooks, jobs, enrolled phones.
+_Avoid_: fleet (for case management), mesh (the older peer network)
+
+**Case**:
+A long-running task with its own repository, worked in turns, that asks the
+owner questions when it needs them.
+_Avoid_: task, project, job (a job is one executor run inside a case)
+
+**Owner**:
+The one person whose words are host-verified: typed into the app, signed by
+a paired phone, or quoted verbatim by a client acting for them.
+_Avoid_: user (for the person), admin (the account that configures a service)
+
+**Question**:
+A case's request for an owner decision, delivered up the contact ladder and
+answered exactly once.
+_Avoid_: prompt, request, ask (for the record)
+
+**Spoken answer**:
+An answer the owner gives in words, which a model relays with the owner's
+quote; the host checks the quote where it can see the owner's message.
+_Avoid_: prose answer, free-text answer (that is one shape of it)
+
+**Pressed answer**:
+An answer no model relays: a button the owner presses in the app, or a
+signature from the paired phone. Approvals, budget grants, direction, a
+case's status and a commit failure take only this kind.
+_Avoid_: button answer, manual answer
+
+**Management surface**:
+Any place the owner sees and answers questions or acts on the fleet: the
+chat, a paired phone, an MCP client, a contact channel.
+_Avoid_: panel, UI (for the set)
+
 ### LongHaul (the session memory benchmark)
 
 **LongHaul**:
