@@ -14,12 +14,12 @@ describe('history index: schema step 2', () => {
   let t;
   afterEach(() => t && t.cleanup());
 
-  it('creates chunks, chunks_fts and calibration at version 2', () => {
+  it('creates chunks, chunks_fts and calibration (schema 2) and is at version 3', () => {
     t = openTempStore();
     const db = readDb(t.dbPath);
     const names = db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'trigger')").all().map((r) => r.name);
     for (const name of ['chunks', 'chunks_fts', 'calibration', 'chunks_ai', 'chunks_ad', 'chunks_au']) assert.ok(names.includes(name), name);
-    assert.strictEqual(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 2);
+    assert.strictEqual(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 3);
     db.close();
   });
 

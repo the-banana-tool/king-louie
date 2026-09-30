@@ -3,9 +3,11 @@
 // Each step runs once, in its own transaction, and bumps schema_version.
 // Later stages append { version: N, up(db) }; never edit a released step.
 // Stage H1 creates only the tables it uses; chunks, FTS, embeddings, links,
-// imports and calibration arrive as later steps.
+// imports and calibration arrive as later steps (H2: chunks, FTS and
+// calibration; H3: embeddings).
 
 const { SCHEMA_V2_SQL, writeBackfill } = require('./chunk-index');
+const { SCHEMA_V3_SQL } = require('./embedding-index');
 
 const SCHEMA_STEPS = [
   {
@@ -75,6 +77,14 @@ const SCHEMA_STEPS = [
       db.exec(SCHEMA_V2_SQL);
       const { until } = db.prepare('SELECT COALESCE(MAX(rowid), 0) AS until FROM messages').get();
       if (until > 0) writeBackfill(db, { cursor: 0, until });
+    }
+  },
+  // Recall stage H3: one vector per chunk per embedder key (spec §4.1). An
+  // upgraded store has every chunk pending; the EmbedIndexer fills it.
+  {
+    version: 3,
+    up(db) {
+      db.exec(SCHEMA_V3_SQL);
     }
   }
 ];

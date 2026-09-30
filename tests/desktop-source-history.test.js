@@ -9,6 +9,7 @@ const os = require('os');
 const path = require('path');
 const sqlite = require('node:sqlite');
 const { HistoryStore } = require('../src/history');
+const { downgradeToVersion1 } = require('./helpers/history-fixture');
 const { createSafeReader, readDesktopSource } = require('../src/migration/desktop-source');
 const { readHistoryChats } = require('../src/migration/desktop-history');
 
@@ -155,10 +156,8 @@ describe('desktop import from an H1 (schema version 1) history.sqlite', () => {
     store.createChat({ id: 'c1', title: 'From H1', updatedAt: '2026-09-20T10:00:00.000Z', messages: [msg] });
     store.close();
     const db = new sqlite.DatabaseSync(file);
-    db.exec(`DROP TRIGGER chunks_ai; DROP TRIGGER chunks_ad; DROP TRIGGER chunks_au;
-      DROP TABLE chunks_fts; DROP TABLE chunks; DROP TABLE calibration;
-      DELETE FROM meta WHERE key = 'chunks_backfill';
-      UPDATE schema_version SET version = 1;`);
+    downgradeToVersion1(db);
+    db.exec("DELETE FROM meta WHERE key = 'chunks_backfill'");
     db.close();
     return file;
   }

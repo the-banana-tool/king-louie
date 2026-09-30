@@ -13,6 +13,7 @@ const os = require('os');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
+const { downgradeToVersion1 } = require('./helpers/history-fixture');
 const { createCore } = require('../src/core');
 const { HistoryStore } = require('../src/history');
 const { JsonFileStore } = require('../src/platform/json-file-store');
@@ -153,9 +154,7 @@ describe('createCore and the history store', () => {
     seed.createChat({ id: 'c1', title: 'From H1', messages: [msg('m1', 'user', 'the blue folder is in the Lakeside shed'), msg('m2', 'assistant', 'noted')] });
     seed.close();
     const raw = new DatabaseSync(file);
-    raw.exec(`DROP TRIGGER chunks_ai; DROP TRIGGER chunks_ad; DROP TRIGGER chunks_au;
-      DROP TABLE chunks_fts; DROP TABLE chunks; DROP TABLE calibration;
-      UPDATE schema_version SET version = 1;`);
+    downgradeToVersion1(raw);
     raw.close();
     const core = createCore(deps);
     const store = core.context.getHistoryStore();
