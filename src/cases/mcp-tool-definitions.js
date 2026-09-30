@@ -152,7 +152,7 @@ const NEVER_OVER_MCP = new Set(['ingest:review']);
 // record the same way.
 const PRESSED_TYPES = new Set([
   'envelope', 'envelope-delta', 'plan', 'budget-grant', 'budget-daily', 'direction', 'commit-failed',
-  'wakeups-failing', 'gating-pending', 'owner-task', 'conflict', 'ingest:review'
+  'wakeups-failing', 'gating-pending', 'owner-task', 'conflict', 'ingest:review', 'detour-similar'
 ]);
 
 function answerClass(question) {

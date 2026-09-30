@@ -13,6 +13,14 @@ const { createLogger } = require('../../logging');
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DUPLICATE_SIMILARITY = 0.8;
 const CLOSED = Object.freeze(['done', 'abandoned']);
+// The similar-case follow-up (owner decision, 2026-09-30): a pressed
+// question whose "Create anyway" is the only way a detour's new case skips
+// the similar-case refusal. Answered only by a button in the app or on the
+// paired phone (APP_ANSWER_CHANNELS in contact.js).
+const SIMILAR_TYPE = 'detour-similar';
+const CREATE_ANYWAY = 'create-anyway';
+const SIMILAR_MAX = 3;
+const PRESS_CHANNELS = Object.freeze(['in-app', 'mobile']);
 
 const oneLine = (s, max) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 const label = (s) => oneLine(s, 150);
@@ -175,7 +183,7 @@ class DetourRouter {
     return { ranked, seeAlso };
   }
 
-  async _propose(caseId, { summary, source, serves, blocks, reason, turn, extraAttach, retryOf = null }) {
+  async _propose(caseId, { summary, source, serves, blocks, reason, turn, extraAttach, retryOf = null, similarTo = null }) {
     const rt = this.runtime;
     const meta = rt.getCase(caseId);
     const log = new DetourLog(meta.dir);
@@ -183,6 +191,7 @@ class DetourRouter {
     const dup = this._duplicate(log, rows, summary);
     if (dup.refusal) return dup.refusal;
     if (dup.existing) return { ok: true, detour: this._view(meta, dup.existing), questionId: dup.existing.questionId, existing: true };
+    if (similarTo) return this._proposeSimilar(meta, log, rows, { summary, source, serves, blocks, reason, turn, retryOf, ...similarTo });
 
     const cfg = this.getSettings();
     const { ranked, seeAlso } = this._candidates(meta, summary, reason);
@@ -258,9 +267,91 @@ class DetourRouter {
     return { ok: true, detour: { ...view, seeAlso: seeAlso.map((s) => ({ title: s.title, status: s.status })) }, questionId, ...(held ? { held: true } : {}) };
   }
 
+  // The retry after a new case met the similar-case refusal: the similar
+  // open cases to attach to (at most SIMILAR_MAX) and the new case as it was
+  // tried, behind a pressed question. Never charged: it follows the owner's
+  // own answer.
+  _proposeSimilar(meta, log, rows, { summary, source, serves, blocks, reason, turn, retryOf, caseIds, newCase }) {
+    const rt = this.runtime;
+    const candidates = [];
+    for (const caseId of caseIds) {
+      const m = rt.store.get(caseId);
+      if (!m || m.id === meta.id || !OPEN_CASE_STATUSES.includes(m.status) || candidates.some((c) => c.caseId === m.id)) continue;
+      if (candidates.length >= SIMILAR_MAX) break;
+      candidates.push({ caseId: m.id, score: 0, optionId: `attach-${candidates.length + 1}` });
+    }
+    const detourId = log.nextId(rows);
+    const record = this._question(meta, detourId, { blocks, candidates, newCase, similar: true });
+    const questionId = rt.createQuestion(meta.id, record, { charge: false }).id;
+    const proposal = log.append({
+      type: 'proposal',
+      id: detourId,
+      at: this.now().toISOString(),
+      turnId: turn?.turnId || rt.turns?.get(meta.id)?.turnId || null,
+      summary,
+      source,
+      serves,
+      blocks,
+      reason,
+      questionId,
+      held: false,
+      candidates,
+      newCase,
+      similar: true,
+      ...(retryOf ? { retryOf } : {})
+    });
+    rt.records(meta.id).writeJournal('detour', [
+      `# Detour ${detourId}`,
+      '',
+      `Summary: ${summary}`,
+      `The new case "${newCase.title}" met the similar-case refusal; the owner is asked whether to create it anyway.`,
+      `Options: ${record.options.map((o) => o.id).join(', ')}`,
+      `Question: ${questionId}`
+    ].join('\n'), this.now());
+    if (blocks) rt.addRelation(meta.id, { id: `pending:${detourId}`, relation: 'blocked-by', note: summary, detour: detourId });
+    rt._notify('case:changed', { caseId: meta.id, what: 'detours' });
+    return { ok: true, detour: this._view(meta, { id: detourId, proposal, questionId, status: 'proposed', last: null }), questionId };
+  }
+
+  // "Create anyway" first, then one "Attach to" per similar case; the text
+  // names the similar cases and the new one.
+  _similarQuestion(meta, detourId, { blocks, candidates = [], newCase }) {
+    const rt = this.runtime;
+    const options = [{ id: CREATE_ANYWAY, label: 'Create anyway' }];
+    const targets = { [CREATE_ANYWAY]: null };
+    const titles = [];
+    for (const c of candidates) {
+      const m = rt.store.get(c.caseId);
+      const title = label(m ? m.title : c.caseId);
+      titles.push(`"${title}"`);
+      options.push({ id: c.optionId, label: `Attach to "${title}"` });
+      targets[c.optionId] = c.caseId;
+    }
+    const open = titles.length === 1 ? `A similar case is open: ${titles[0]}` : `Similar cases are open: ${titles.join(', ')}`;
+    return {
+      kind: 'question',
+      urgency: blocks ? 'high' : 'normal',
+      defaultOnSilence: 'hold',
+      expiresAt: null,
+      options,
+      text: `${open}. Create a new case "${label(newCase.title)}" anyway?`,
+      payload: {
+        type: SIMILAR_TYPE,
+        detourId,
+        blocks: Boolean(blocks),
+        targets,
+        about: { subject: 'detour', attr: detourId },
+        disclosable: false,
+        mcpAnswerable: false,
+        key: `detour:${detourId}`
+      }
+    };
+  }
+
   // The routing question, built from the stored candidates and the current
   // titles and statuses of the cases they name.
-  _question(meta, detourId, { summary, reason, blocks, candidates = [], newCase = null }) {
+  _question(meta, detourId, { summary, reason, blocks, candidates = [], newCase = null, similar = false }) {
+    if (similar === true && newCase) return this._similarQuestion(meta, detourId, { blocks, candidates, newCase });
     const rt = this.runtime;
     const options = [];
     const targets = {};
@@ -326,13 +417,12 @@ class DetourRouter {
 
   // ---- Resolve ----
 
-  // `force` skips the similar-case refusal when creating a new case. Only the
-  // IPC `case:resolveDetour` path passes it, after the owner explicitly chose
-  // to create a case despite a similar one. The router never sets it on its
-  // own (spec §3.4), and the Detour tool's schema must not expose it.
+  // There is no `force`: a detour's new case skips the similar-case refusal
+  // only through "Create anyway" on the pressed similar-case question, as
+  // the owner pressed it (_apply reads the recorded answer).
   // `expectStatus` refuses unless the detour is in that status when its turn
   // in the per-case queue comes (the Detour tool passes 'awaiting-mapping').
-  async resolve(caseId, detourId, { optionId, by = 'in-app', title = null, objective = null, force = false, expectStatus = null } = {}) {
+  async resolve(caseId, detourId, { optionId, by = 'in-app', title = null, objective = null, expectStatus = null } = {}) {
     const rt = this.runtime;
     let meta = null;
     try {
@@ -340,7 +430,7 @@ class DetourRouter {
       const refused = rt.assertWritable(meta.id, 'Detour.resolve');
       if (refused) return refused;
       return await this._serial(meta.id, () => rt.systemAction(meta.id, `detour ${detourId}: ${optionId}`,
-        () => this._resolve(meta.id, detourId, { optionId, by, title, objective, force, expectStatus })));
+        () => this._resolve(meta.id, detourId, { optionId, by, title, objective, expectStatus })));
     } catch (err) {
       return this._failure('resolve', err, meta);
     }
@@ -369,7 +459,7 @@ class DetourRouter {
     return { ok: false, error: `The owner has not answered routing question ${d.questionId} for ${d.id} yet. Wait for the answer; do not pick an option for the owner.` };
   }
 
-  async _resolve(caseId, detourId, { optionId, by, title, objective, force, expectStatus = null }) {
+  async _resolve(caseId, detourId, { optionId, by, title, objective, expectStatus = null }) {
     const rt = this.runtime;
     const meta = rt.getCase(caseId);
     const log = new DetourLog(meta.dir);
@@ -403,11 +493,13 @@ class DetourRouter {
     };
     // A retry proposal names the chain's first detour in `retryOf`, so a
     // later attach or create of any of them settles the rest.
-    const retry = async (error, extraAttach = [], code = null) => {
+    // `similarTo` ({ caseIds, newCase }: the SIMILAR_CASES matches and the
+    // new case as tried) makes the retry the pressed similar-case question.
+    const retry = async (error, extraAttach = [], code = null, similarTo = null) => {
       resolution('failed', { error });
       const again = await this._propose(meta.id, {
         summary: p.summary, source: p.source, serves: p.serves, blocks: p.blocks, reason: p.reason, turn: null, extraAttach,
-        retryOf: p.retryOf || detourId
+        retryOf: p.retryOf || detourId, similarTo
       });
       return { ok: false, error, ...(code ? { code } : {}), retry: again };
     };
@@ -415,7 +507,7 @@ class DetourRouter {
     // A case created before a later step failed; recorded on the failed row.
     let createdId = null;
     try {
-      return await this._apply(meta, d, { optionId, title, objective, force, routedFrom, at, finish, retry, onCreated: (id) => { createdId = id; } });
+      return await this._apply(meta, d, { optionId, title, objective, routedFrom, at, finish, retry, onCreated: (id) => { createdId = id; } });
     } catch (err) {
       if (err && err.code === 'CASE_BUSY') throw err;
       const error = `Resolving ${detourId} failed: ${err && err.message ? err.message : String(err)}`;
@@ -427,7 +519,7 @@ class DetourRouter {
   }
 
   // The option's writes. Throws on failure; _resolve records the failed row.
-  async _apply(meta, d, { optionId, title, objective, force, routedFrom, at, finish, retry, onCreated }) {
+  async _apply(meta, d, { optionId, title, objective, routedFrom, at, finish, retry, onCreated }) {
     const rt = this.runtime;
     const detourId = d.id;
     const p = d.proposal;
@@ -462,20 +554,34 @@ class DetourRouter {
       return finish('attached', target.id);
     }
 
-    if (optionId === 'new') {
+    // "Create anyway" counts only as the owner pressed it: the recorded
+    // answer to this detour's own pressed question, given in the app or on
+    // the phone. A model mapping words to it, or any caller naming it, is
+    // refused. It creates the case as it was tried, with no new title.
+    let force = false;
+    if (optionId === CREATE_ANYWAY) {
+      const q = p.similar === true && d.questionId ? rt.questions(meta.id).get(d.questionId) : null;
+      const pressed = Boolean(q) && q.payload?.type === SIMILAR_TYPE && q.answer?.optionId === CREATE_ANYWAY && PRESS_CHANNELS.includes(q.answer.channel);
+      if (!pressed || !p.newCase) {
+        return { ok: false, error: `Only the owner's own press of "Create anyway" on ${d.questionId || detourId} creates a case over a similar one.` };
+      }
+      force = true;
+    }
+
+    if ((optionId === 'new' && p.similar !== true) || force) {
       if (!p.newCase) return { ok: false, error: `Option "new" is not one of ${detourId}'s options.` };
+      const newTitle = !force && title && String(title).trim() ? String(title).trim() : p.newCase.title;
+      const newObjective = !force && objective && String(objective).trim() ? String(objective).trim() : p.newCase.objective;
       // An earlier attempt created the case and then failed: finish that one.
       let created = d.status === 'failed' && d.last?.targetCaseId ? rt.store.get(d.last.targetCaseId) : null;
       if (!created) {
         try {
-          created = await rt.createCase({
-            title: title && String(title).trim() ? String(title).trim() : p.newCase.title,
-            type: p.newCase.type,
-            objective: objective && String(objective).trim() ? String(objective).trim() : p.newCase.objective,
-            force: force === true
-          });
+          created = await rt.createCase({ title: newTitle, type: p.newCase.type, objective: newObjective, force });
         } catch (err) {
-          if (err && err.code === 'SIMILAR_CASES') return retry(err.message, err.similar.map((s) => s.caseId), 'SIMILAR_CASES');
+          if (err && err.code === 'SIMILAR_CASES') {
+            const similarTo = { caseIds: err.similar.map((s) => s.caseId), newCase: { ...p.newCase, title: newTitle, objective: newObjective } };
+            return retry(err.message, [], 'SIMILAR_CASES', similarTo);
+          }
           throw err;
         }
       }

@@ -33,7 +33,12 @@ describe('E2E: question cards in the case chat', { skip: gitAvailable ? false : 
       options: [{ id: 'weekly', label: 'Weekly' }, { id: 'monthly', label: 'Monthly' }], payload: { type: 'ask', mcpAnswerable: true },
       notes: [{ at, text: 'The first report goes out on Monday.' }] },
     { ...base, id: 'q-0003', kind: 'question', urgency: 'normal', text: 'The case spent its usd budget and is paused. Reply with a new limit to continue.',
-      options: [], payload: { type: 'budget-grant', budget: 'usd', spent: 5, limit: 5, mcpAnswerable: false, key: 'budget-grant:usd' } }
+      options: [], payload: { type: 'budget-grant', budget: 'usd', spent: 5, limit: 5, mcpAnswerable: false, key: 'budget-grant:usd' } },
+    // A detour's similar-case follow-up (router.js). q-0000 keeps the next
+    // id the runtime gives at q-0004.
+    { ...base, id: 'q-0000', kind: 'question', urgency: 'normal', text: 'A similar case is open: "Garden shed". Create a new case "Build a garden shed" anyway?',
+      options: [{ id: 'create-anyway', label: 'Create anyway' }, { id: 'attach-1', label: 'Attach to "Garden shed"' }],
+      payload: { type: 'detour-similar', detourId: 'd-0002', blocks: false, targets: { 'create-anyway': null, 'attach-1': 'garden-shed' }, mcpAnswerable: false, key: 'detour:d-0002' } }
   ];
 
   before(async () => {
@@ -113,7 +118,16 @@ describe('E2E: question cards in the case chat', { skip: gitAvailable ? false : 
     assert.strictEqual(await evaluate(ctx, `document.querySelectorAll('${card('q-0004')}').length`), 1);
 
     const stored = await evaluate(ctx, `window.electron.chat.get('case-chat').then((r) => (r.chat || r).messages.filter((m) => m.question).map((m) => m.question.questionId))`);
-    assert.deepStrictEqual(stored, ['q-0001', 'q-0002', 'q-0003', 'q-0004']);
+    assert.deepStrictEqual(stored, ['q-0001', 'q-0002', 'q-0003', 'q-0000', 'q-0004']);
+  });
+
+  it('draws a detour\'s similar-case question as pressed, with "Create anyway" and "Attach to" buttons', async () => {
+    await waitFor(ctx, `document.querySelectorAll('${card('q-0000')} .chat-question-option-btn').length === 2`, 20000);
+    assert.ok(await evaluate(ctx, `document.querySelector('${card('q-0000')}').classList.contains('is-pressed')`));
+    const buttons = await evaluate(ctx, `[...document.querySelectorAll('${card('q-0000')} .chat-question-option-btn')].map((b) => [b.dataset.optionId, b.textContent])`);
+    assert.deepStrictEqual(buttons, [['create-anyway', 'Create anyway'], ['attach-1', 'Attach to "Garden shed"']]);
+    assert.strictEqual(await evaluate(ctx, `document.querySelector('${card('q-0000')} .case-question-text').textContent`), records[3].text);
+    assert.strictEqual(await evaluate(ctx, `document.querySelectorAll('${card('q-0000')} .chat-question-hint').length`), 0);
   });
 
   it('a press refused because the question was settled meanwhile redraws the card as it is now', async () => {

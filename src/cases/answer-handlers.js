@@ -98,3 +98,20 @@ QuestionStore.registerAnswerHandler('budget-grant', {
     return runtime.applyOwnerFact(caseId, fact);
   }
 });
+
+// The similar-case follow-up to a detour (owner decision, 2026-09-30): a
+// press of "Create anyway" or "Attach to ..." is applied at once, through
+// the router's own reconcile (the same resolve a routing answer gets at the
+// next turn start). A detour it could not settle says so on the card.
+QuestionStore.registerAnswerHandler('detour-similar', {
+  onAnswered: async (record, _fact, { runtime, caseId }) => {
+    const detourId = record.payload?.detourId;
+    const r = await runtime.detours.reconcile(caseId);
+    const d = runtime.detours.list(caseId).detours.find((x) => x.id === detourId);
+    if (d && (d.status === 'created' || d.status === 'attached')) return { applied: 'detour', status: d.status };
+    if (d && d.status === 'awaiting-mapping') return { applied: false, note: 'The answer was in words; the next turn maps it to an option.' };
+    const why = r.error || (r.busy ? 'the case is busy' : `detour ${detourId || '?'} is ${d ? d.status : 'missing'}`);
+    log.warn(`${record.id}: the detour was not settled: ${why}`);
+    return { applied: false, note: `The detour was not settled (${why}).` };
+  }
+});

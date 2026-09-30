@@ -2448,7 +2448,7 @@ function peekCasePanelMessage(caseId) {
 // a reply in the chat.
 const CHAT_QUESTION_PRESSED_TYPES = new Set([
   'envelope', 'envelope-delta', 'plan', 'budget-grant', 'budget-daily', 'direction', 'commit-failed',
-  'wakeups-failing', 'gating-pending', 'owner-task', 'conflict', 'ingest:review'
+  'wakeups-failing', 'gating-pending', 'owner-task', 'conflict', 'ingest:review', 'detour-similar'
 ]);
 function chatQuestionClass(q) {
   const payload = q?.payload && typeof q.payload === 'object' ? q.payload : {};

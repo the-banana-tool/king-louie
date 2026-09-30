@@ -62,8 +62,9 @@ const DetourTool = new Tool({
         };
       }
       // Only an owner's answer given in words (awaiting-mapping), and only on
-      // the detour whose routing question it is. Never `force`: only IPC
-      // may retry a failed detour or skip the similar-case refusal.
+      // the detour whose routing question it is. Never `force`: only the
+      // owner's press of "Create anyway" on a similar-case question skips
+      // the similar-case refusal (the router refuses a mapped one).
       case 'resolve': {
         if (!text(params.questionId) || !text(params.optionId)) return { ok: false, error: 'resolve needs "questionId" and "optionId".' };
         const detour = router.list(ctx.caseId).detours.find((d) => d.questionId === text(params.questionId));

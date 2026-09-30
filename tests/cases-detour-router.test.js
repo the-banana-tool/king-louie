@@ -9,6 +9,7 @@ const path = require('path');
 const { CaseRuntime } = require('../src/cases');
 const { DetourRouter } = require('../src/cases/detours/router');
 const { DetourLog } = require('../src/cases/detours/log');
+const { answerClass } = require('../src/cases/mcp-tool-definitions');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -205,49 +206,93 @@ describe('DetourRouter.resolve', () => {
     assert.strictEqual(await git.isDirty(created.dir), false, 'the new case is committed');
   });
 
-  it('new: SIMILAR_CASES fails the resolution and re-proposes with that case to attach', async () => {
-    const { rt, router, door } = await doorAndPhone();
-    const p = await router.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand' });
-    const tuner = await rt.createCase({ title: 'Book a piano tuner' });
-    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
-    const r = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
-    assert.strictEqual(r.ok, false);
+  // A detour routed to "new" over a similar open case (owner decision,
+  // 2026-09-30): the host asks a pressed follow-up in the case.
+  async function similarRefusal({ blocks = false } = {}) {
+    const w = await doorAndPhone();
+    const p = await w.router.propose(w.door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand', blocks });
+    const tuner = await w.rt.createCase({ title: 'Book a piano tuner' });
+    await w.rt.answerQuestion(w.door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
+    const r = await w.router.resolve(w.door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
+    return { ...w, p, tuner, r };
+  }
+  const statuses = (door) => [...new DetourLog(door.dir).detours().values()].map((d) => [d.id, d.status]);
+
+  it('new: SIMILAR_CASES fails the resolution and asks a pressed "Create anyway" question naming the similar case', async () => {
+    const { rt, door, tuner, r } = await similarRefusal();
+    assert.deepStrictEqual([r.ok, r.code], [false, 'SIMILAR_CASES']);
     assert.match(r.error, /A similar case exists: "Book a piano tuner" \(draft\)/);
     assert.strictEqual(r.retry.ok, true);
-    const retryQ = rt.questions(door.id).get(r.retry.questionId);
-    assert.strictEqual(retryQ.payload.targets['attach-1'], tuner.id);
-    assert.ok(!retryQ.options.some((o) => o.id === 'new'));
-    const statuses = [...new DetourLog(door.dir).detours().values()].map((d) => [d.id, d.status]);
-    assert.deepStrictEqual(statuses, [['d-0001', 'failed'], ['d-0002', 'proposed']]);
-    assert.strictEqual(new DetourLog(door.dir).detours().get('d-0002').proposal.retryOf, 'd-0001');
-    const forced = await router.resolve(door.id, 'd-0001', { optionId: 'new', by: 'in-app', force: true });
-    assert.strictEqual(forced.ok, true);
-    assert.strictEqual(rt.getCase(forced.linkedCaseId).title, 'Book a piano tuner for the living room');
-    const after = [...new DetourLog(door.dir).detours().values()].map((d) => [d.id, d.status]);
-    assert.deepStrictEqual(after, [['d-0001', 'created'], ['d-0002', 'superseded']]);
-    const closed = rt.questions(door.id).get(r.retry.questionId);
-    assert.deepStrictEqual([closed.closed.by, closed.closed.reason], ['system', 'superseded: d-0001 was created']);
-    assert.deepStrictEqual(rt.questions(door.id).open().filter((q) => q.payload?.type === 'detour'), []);
-    const again = await router.resolve(door.id, 'd-0002', { optionId: 'attach-1', by: 'in-app' });
-    assert.deepStrictEqual([again.ok, again.existing, again.detour.status], [true, true, 'superseded']);
-    assert.deepStrictEqual(rt.getCase(tuner.id).related || [], [], 'the retry never routes the work a second time');
+    const q = rt.questions(door.id).get(r.retry.questionId);
+    assert.strictEqual(q.payload.type, 'detour-similar');
+    assert.strictEqual(q.payload.mcpAnswerable, false);
+    assert.strictEqual(answerClass(q), 'pressed');
+    assert.strictEqual(q.text, 'A similar case is open: "Book a piano tuner". Create a new case "Book a piano tuner for the living room" anyway?');
+    assert.deepStrictEqual(q.options, [{ id: 'create-anyway', label: 'Create anyway' }, { id: 'attach-1', label: 'Attach to "Book a piano tuner"' }]);
+    assert.deepStrictEqual(q.payload.targets, { 'create-anyway': null, 'attach-1': tuner.id });
+    assert.deepStrictEqual(statuses(door), [['d-0001', 'failed'], ['d-0002', 'proposed']]);
+    const retry = new DetourLog(door.dir).detours().get('d-0002').proposal;
+    assert.deepStrictEqual([retry.retryOf, retry.similar, retry.newCase.title], ['d-0001', true, 'Book a piano tuner for the living room']);
   });
 
-  it('a blocking retry that is attached supersedes the failed original and drops both pending blockers', async () => {
+  it('caps the attach options of the similar-case question at three', async () => {
     const { rt, router, door } = await doorAndPhone();
-    const p = await router.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand', blocks: true });
-    const tuner = await rt.createCase({ title: 'Book a piano tuner' });
+    const p = await router.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand' });
+    for (let i = 0; i < 4; i += 1) await rt.createCase({ title: 'Book a piano tuner for the living room', force: true });
     await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
     const r = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
-    assert.strictEqual(r.code, 'SIMILAR_CASES');
-    await rt.answerQuestion(door.id, r.retry.questionId, { channel: 'in-app', optionId: 'attach-1' });
-    const attached = await router.resolve(door.id, 'd-0002', { optionId: 'attach-1', by: 'in-app' });
-    assert.deepStrictEqual([attached.ok, attached.linkedCaseId], [true, tuner.id]);
-    const after = [...new DetourLog(door.dir).detours().values()].map((d) => [d.id, d.status]);
-    assert.deepStrictEqual(after, [['d-0001', 'superseded'], ['d-0002', 'attached']]);
+    const q = rt.questions(door.id).get(r.retry.questionId);
+    assert.deepStrictEqual(q.options.map((o) => o.id), ['create-anyway', 'attach-1', 'attach-2', 'attach-3']);
+    assert.match(q.text, /^Similar cases are open: "[^"]+", "[^"]+", "[^"]+"\. Create a new case/);
+  });
+
+  it('pressing "Create anyway" creates the case at once and supersedes the chain', async () => {
+    const { rt, door, tuner, r } = await similarRefusal({ blocks: true });
+    const out = await rt.answerQuestion(door.id, r.retry.questionId, { channel: 'in-app', optionId: 'create-anyway' });
+    assert.deepStrictEqual([out.effect.applied, out.effect.status], ['detour', 'created']);
+    assert.deepStrictEqual(statuses(door), [['d-0001', 'superseded'], ['d-0002', 'created']]);
+    const d = new DetourLog(door.dir).detours().get('d-0002');
+    const created = rt.getCase(d.last.targetCaseId);
+    assert.notStrictEqual(created.id, tuner.id);
+    assert.strictEqual(created.title, 'Book a piano tuner for the living room');
+    assert.deepStrictEqual(rt.getCase(door.id).related.map((x) => [x.id, x.relation]), [[created.id, 'spawned'], [created.id, 'blocked-by']]);
+    assert.deepStrictEqual(rt.questions(door.id).open().filter((q) => String(q.payload?.type).startsWith('detour')), []);
+    assert.deepStrictEqual(rt.getCase(tuner.id).related || [], []);
+    const again = await rt.detours.resolve(door.id, 'd-0001', { optionId: 'new', by: 'in-app' });
+    assert.deepStrictEqual([again.ok, again.existing], [true, true], 'the superseded original cannot create a second case');
+  });
+
+  it('pressing "Attach to" on the phone attaches to the similar case and drops both pending blockers', async () => {
+    const { rt, door, tuner, r } = await similarRefusal({ blocks: true });
+    const out = await rt.answerQuestion(door.id, r.retry.questionId, { channel: 'mobile', optionId: 'attach-1' });
+    assert.deepStrictEqual([out.effect.applied, out.effect.status], ['detour', 'attached']);
+    assert.deepStrictEqual(statuses(door), [['d-0001', 'superseded'], ['d-0002', 'attached']]);
     assert.deepStrictEqual(rt.getCase(door.id).related.map((x) => [x.id, x.relation]), [[tuner.id, 'blocked-by']]);
+    assert.strictEqual(rt.listCases().filter((c) => /piano/.test(c.title)).length, 1);
+  });
+
+  it('force is not reachable: resolve takes none, and a model mapping words to "Create anyway" is refused', async () => {
+    const { rt, router, door, r } = await similarRefusal();
+    const count = () => rt.listCases().length;
+    const before = count();
+    // resolve() has no force: "new" on the failed original meets the same refusal.
     const forced = await router.resolve(door.id, 'd-0001', { optionId: 'new', by: 'in-app', force: true });
-    assert.deepStrictEqual([forced.ok, forced.existing], [true, true], 'the superseded original cannot create a second case');
+    assert.deepStrictEqual([forced.ok, forced.code], [false, 'SIMILAR_CASES']);
+    assert.strictEqual(forced.retry.questionId, r.retry.questionId, 'the open similar-case question is reused');
+    // Without the owner's press: refused, whatever the caller.
+    for (const by of ['in-app', 'model-mapped']) {
+      const early = await router.resolve(door.id, 'd-0002', { optionId: 'create-anyway', by });
+      assert.strictEqual(early.ok, false, by);
+    }
+    // An answer in words on the phone: the model may map it to an attach, never to "Create anyway".
+    await rt.answerQuestion(door.id, r.retry.questionId, { channel: 'mobile', text: 'create it anyway' });
+    assert.deepStrictEqual(statuses(door).at(-1), ['d-0002', 'awaiting-mapping']);
+    const mapped = await router.resolve(door.id, 'd-0002', { optionId: 'create-anyway', by: 'model-mapped', expectStatus: 'awaiting-mapping' });
+    assert.strictEqual(mapped.ok, false);
+    assert.match(mapped.error, /Create anyway/);
+    assert.strictEqual(count(), before);
+    const attached = await router.resolve(door.id, 'd-0002', { optionId: 'attach-1', by: 'model-mapped', expectStatus: 'awaiting-mapping' });
+    assert.strictEqual(attached.ok, true);
   });
 
   it('decline drops a pending blocker and blocks the same proposal for 30 days', async () => {

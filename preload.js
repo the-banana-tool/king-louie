@@ -909,7 +909,6 @@ contextBridge.exposeInMainWorld(
         validateString(payload.optionId, 'optionId', { minLength: 1 });
         if (payload.title !== undefined) validateString(payload.title, 'title');
         if (payload.objective !== undefined) validateString(payload.objective, 'objective');
-        if (payload.force !== undefined && typeof payload.force !== 'boolean') throw new Error('Invalid force: expected boolean');
         return ipcRenderer.invoke('case:resolveDetour', payload);
       },
       reindex: () => ipcRenderer.invoke('case:reindex', {}),

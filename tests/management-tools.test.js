@@ -92,7 +92,7 @@ describe('management tool definitions', () => {
       { kind: 'approval', payload: { type: 'plan', mcpAnswerable: true } },
       // Pressed by type alone, whatever kind or flag a record carries.
       ...['envelope', 'envelope-delta', 'plan', 'budget-grant', 'budget-daily', 'direction', 'commit-failed',
-        'wakeups-failing', 'gating-pending', 'owner-task', 'conflict', 'ingest:review'].map((type) => ({ kind: 'question', payload: { type } })),
+        'wakeups-failing', 'gating-pending', 'owner-task', 'conflict', 'ingest:review', 'detour-similar'].map((type) => ({ kind: 'question', payload: { type } })),
       { kind: 'briefing', payload: { type: 'budget-daily' } },
       { kind: 'question', payload: { type: 'ask', failure: 'journal/x-failure.md' } },
       { kind: 'question', payload: { type: 'ask', mcpAnswerable: false } }
@@ -416,6 +416,39 @@ describe('answer_question takes the owner\'s quote', () => {
     assert.deepStrictEqual([d.status, d.last.by], ['attached', 'in-app']);
     assert.ok(rt.getCase(phone.id).related.some((x) => x.id === door.id));
   });
+
+  it('a detour\'s similar-case question ("Create anyway") is pressed: refused on every channel, and no tool takes force', async () => {
+    const rt = new CaseRuntime({ root: tmp('kl-mgmt-similar-') });
+    const info = await rt.createCase({ title: 'Rear door quotes', objective: 'Three written quotes for the rear door', force: true });
+    rt.brief(info.id).update('why', 'The owner asked for it', { provenance: 'user' });
+    rt.brief(info.id).append('successCriteria', 'Three quotes', { provenance: 'model' });
+    rt.completeGating(info.id);
+    const door = rt.getCase(info.id);
+    const p = await rt.detours.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand', source: 'detour-tool' });
+    await rt.createCase({ title: 'Book a piano tuner' });
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
+    const r = await rt.detours.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
+    assert.strictEqual(r.code, 'SIMILAR_CASES');
+    const similar = rt.questions(door.id).get(r.retry.questionId);
+    assert.strictEqual(defs.answerClass(similar), 'pressed');
+    const before = rt.listCases().length;
+    for (const channel of ['in-app', 'mcp-stdio', 'mcp-frontdoor']) {
+      const e = await refusal(handlerFor(rt, channel).call('answer_question', { case: door.id, question_id: similar.id, option_id: 'create-anyway', quote: 'Create anyway' }, { ownerTurnText: 'Create anyway' }));
+      assert.deepStrictEqual([e.code, e.message], ['not_answerable_here', `not_answerable_here: ${PRESSED_MESSAGE}`], channel);
+      // Not a field any case tool takes.
+      const extra = await refusal(handlerFor(rt, channel).call('create_case', { title: 'Book a piano tuner for the living room', quote: 'Book a piano tuner', force: true }, { ownerTurnText: 'Book a piano tuner' }));
+      assert.strictEqual(extra.code, 'invalid_params', channel);
+    }
+    assert.strictEqual(rt.questions(door.id).get(similar.id).answer, null);
+    assert.strictEqual(rt.listCases().length, before);
+    // No tool the model or an MCP client sees has a force parameter.
+    const hasForce = (schema) => JSON.stringify(schema || {}).includes('"force"');
+    assert.deepStrictEqual(defs.CASE_MCP_TOOLS.filter((t) => hasForce(t.inputSchema)).map((t) => t.name), []);
+    assert.deepStrictEqual(toolRegistry.list().filter((t) => hasForce(t.parameters)).map((t) => t.name), []);
+    assert.ok(toolRegistry.get('Detour'), 'the Detour tool is in the registry checked');
+    assert.deepStrictEqual(require('../src/fleet/tool-definitions').MCP_TOOLS.filter((t) => hasForce(t.inputSchema)).map((t) => t.name), []);
+  });
+
 
   it('keeps its own 30-a-minute window on the in-app channel', async () => {
     const { rt, lot, q } = await answerFixture();

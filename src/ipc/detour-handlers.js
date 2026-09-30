@@ -43,14 +43,16 @@ function registerDetourHandlers(ipcMain, context = {}) {
     return { ok: true, ...rt.detours.list(id), ...(reconciled.busy ? { busy: true } : {}) };
   });
 
-  // The owner's pick in the panel: answers the routing question in-app if
-  // it is still open, then resolves, then reconciles.
+  // The owner's pick in the app: answers the routing question in-app if
+  // it is still open, then resolves, then reconciles. It takes no `force`:
+  // a new case over a similar one is created only from the pressed
+  // similar-case question's "Create anyway" (its retryQuestionId).
   handle(IPC.CASE_RESOLVE_DETOUR, async ({ caseId, detourId, optionId, title, objective, force }) => {
     const rt = runtime();
     const id = rt.getCase(required(caseId, 'caseId')).id;
     required(detourId, 'detourId');
     required(optionId, 'optionId');
-    if (force !== undefined && typeof force !== 'boolean') return { ok: false, error: 'force must be true or false.' };
+    if (force !== undefined) return { ok: false, error: 'force is not taken here: answer the similar-case question with "Create anyway".' };
     const newTitle = optionalText(title, 'title');
     const newObjective = optionalText(objective, 'objective');
     const view = rt.detours.list(id).detours.find((d) => d.id === detourId);
@@ -59,7 +61,7 @@ function registerDetourHandlers(ipcMain, context = {}) {
       const q = rt.questions(id).get(view.questionId);
       if (q && !q.answer && !q.closed) await rt.answerQuestion(id, view.questionId, { channel: 'in-app', optionId });
     }
-    const r = await rt.detours.resolve(id, detourId, { optionId, by: 'in-app', title: newTitle, objective: newObjective, force: force === true });
+    const r = await rt.detours.resolve(id, detourId, { optionId, by: 'in-app', title: newTitle, objective: newObjective });
     await rt.detours.reconcile(id);
     if (!r.ok) {
       return { ok: false, error: r.error, ...(r.code ? { code: r.code } : {}), ...(r.retry?.questionId ? { retryQuestionId: r.retry.questionId } : {}) };

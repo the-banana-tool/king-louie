@@ -67,7 +67,7 @@ describe('detour IPC', () => {
     const door = await activeCase(runtime, 'Rear door quotes', 'Three written quotes for the rear door');
     const phone = await activeCase(runtime, 'Phone agent maintenance', 'Keep the phone agent answering and reporting call status');
     await runtime.detours.propose(door.id, { summary: 'Fix the phone agent status polling', reason: 'A different project' });
-    assert.deepStrictEqual(await call(IPC.CASE_RESOLVE_DETOUR, { caseId: door.id, detourId: 'd-0001', optionId: 'new', force: 'yes' }), { ok: false, error: 'force must be true or false.' });
+    assert.deepStrictEqual(await call(IPC.CASE_RESOLVE_DETOUR, { caseId: door.id, detourId: 'd-0001', optionId: 'new', force: true }), { ok: false, error: 'force is not taken here: answer the similar-case question with "Create anyway".' });
     assert.deepStrictEqual(await call(IPC.CASE_RESOLVE_DETOUR, { caseId: door.id, detourId: 'd-0404', optionId: 'decline' }), { ok: false, error: 'There is no detour d-0404 in this case.' });
     runtime.setStatus(phone.id, 'done', { kind: 'owner', by: 'owner' });
     const r = await call(IPC.CASE_RESOLVE_DETOUR, { caseId: door.id, detourId: 'd-0001', optionId: 'attach-1' });
@@ -76,8 +76,10 @@ describe('detour IPC', () => {
     assert.match(r.retryQuestionId, /^q-\d{4}$/);
   });
 
-  it('case:resolveDetour: a forced retry after SIMILAR_CASES leaves one routed detour, no open routing question and no pending blocker', async () => {
-    const { runtime, call } = setup();
+  it('case:resolveDetour: SIMILAR_CASES asks the pressed similar-case question, and its "Create anyway" button creates the case', async () => {
+    const { runtime, handlers, call } = setup();
+    const { registerCaseUnattendedHandlers } = require('../src/ipc/case-unattended-handlers');
+    registerCaseUnattendedHandlers({ handle: (ch, fn) => handlers.set(ch, fn), on: () => {} }, { getCaseRuntime: () => runtime });
     const door = await activeCase(runtime, 'Rear door quotes', 'Three written quotes for the rear door');
     await runtime.detours.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand', blocks: true });
     const tuner = await runtime.createCase({ title: 'Book a piano tuner' });
@@ -85,16 +87,22 @@ describe('detour IPC', () => {
     assert.deepStrictEqual([refused.ok, refused.code], [false, 'SIMILAR_CASES']);
     assert.match(refused.error, /A similar case exists: "Book a piano tuner"/);
     assert.match(refused.retryQuestionId, /^q-\d{4}$/);
-    const forced = await call(IPC.CASE_RESOLVE_DETOUR, { caseId: door.id, detourId: 'd-0001', optionId: 'new', force: true });
-    assert.strictEqual(forced.ok, true);
-    assert.notStrictEqual(forced.linkedCaseId, tuner.id);
+    const q = runtime.questions(door.id).get(refused.retryQuestionId);
+    assert.deepStrictEqual([q.payload.type, q.options.map((o) => o.label)], ['detour-similar', ['Create anyway', 'Attach to "Book a piano tuner"']]);
+    // The card's button: case:answerQuestion, channel in-app.
+    const pressed = await call(IPC.CASE_ANSWER_QUESTION, { caseId: door.id, questionId: refused.retryQuestionId, optionId: 'create-anyway' });
+    assert.deepStrictEqual([pressed.ok, pressed.effect.applied, pressed.effect.status], [true, 'detour', 'created']);
     const listed = await call(IPC.CASE_DETOURS, { caseId: door.id });
-    assert.deepStrictEqual(listed.detours.map((d) => [d.id, d.status]), [['d-0001', 'created'], ['d-0002', 'superseded']]);
-    assert.deepStrictEqual(runtime.questions(door.id).open().filter((q) => q.payload?.type === 'detour'), []);
+    assert.deepStrictEqual(listed.detours.map((d) => [d.id, d.status]), [['d-0001', 'superseded'], ['d-0002', 'created']]);
+    assert.deepStrictEqual(runtime.questions(door.id).open().filter((x) => String(x.payload?.type).startsWith('detour')), []);
     const related = runtime.getCase(door.id).related;
     assert.ok(!related.some((x) => x.id.startsWith('pending:')), JSON.stringify(related));
-    assert.deepStrictEqual(related.map((x) => [x.id, x.relation]), [[forced.linkedCaseId, 'spawned'], [forced.linkedCaseId, 'blocked-by']]);
+    const createdId = related[0].id;
+    assert.notStrictEqual(createdId, tuner.id);
+    assert.deepStrictEqual(related.map((x) => [x.id, x.relation]), [[createdId, 'spawned'], [createdId, 'blocked-by']]);
+    assert.strictEqual(runtime.getCase(createdId).title, 'Book a piano tuner for the living room');
   });
+
 
   it('case:detours returns busy without reconciling while another process holds the case', async () => {
     const { runtime, call } = setup();

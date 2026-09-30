@@ -629,10 +629,19 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage5-detours.md`.
 - `CaseRuntime.createCase` refuses an open case with the same or a close
   title/objective (`SimilarCaseError`, `code: 'SIMILAR_CASES'`) unless
   `force: true`. The model can never pass `force` itself — no case tool
-  accepts it — it flows only from the owner's own choices in the app: IPC
-  `case:create`, and IPC `case:resolveDetour` when the case panel's
-  confirmation follows a similar-case refusal (`code: 'SIMILAR_CASES'`) of
-  the owner's pick of "new". Answering "new" alone never forces. Tests that create
+  accepts it — it flows only from the owner's own choices: IPC `case:create`,
+  and a detour's similar-case question. When a detour routed to "new" (from
+  any channel) meets the similar-case refusal, the router re-proposes it as
+  a pressed `detour-similar` question in the case (`mcpAnswerable: false`,
+  never charged; posted as a card and sent up the ladder like any question)
+  with "Create anyway" and one "Attach to <title>" per similar case (at most
+  three). A press in the app (`case:answerQuestion`) or on the phone is
+  applied at once (`answer-handlers.js` runs the router's reconcile);
+  "Create anyway" creates the case with `force` only when the recorded
+  answer to that question is that option from `in-app` or `mobile`, so
+  `answer_question` (it is pressed) and a model mapping words to it are
+  refused. `DetourRouter.resolve` and `case:resolveDetour` take no `force`.
+  Answering "new" alone never forces. Tests that create
   several cases sharing a title or an objective pass `force: true`.
 - Detours live in `src/cases/detours/` and `.kl/detours.jsonl`. The owner's
   message is classified (`classify` role) after `UserPromptSubmit` passes; a
