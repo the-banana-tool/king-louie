@@ -8,6 +8,14 @@ const { toolUseSummary, toolResultText } = require('./chunker');
 const { formatExcerpts, formatRecalledBlock } = require('./excerpts');
 
 const PAGE = 200;
+// Tool results in the tail's span are read newest first, TAIL_RESULT_PAGE
+// rows at a time, and never more than TAIL_RESULT_SCAN_MAX rows per turn: an
+// agent turn can span hundreds of results, and at the default budget
+// (tailTokens 6,000 less the messages, results up to 1,000 tokens each) only
+// the newest few are ever shown. A result past the cap is left out of the
+// tail like one that does not fit.
+const TAIL_RESULT_PAGE = 20;
+const TAIL_RESULT_SCAN_MAX = 64;
 // What one image in a tail message is counted as. Providers bill an image by
 // its size (Anthropic: about 1,600 tokens for a 1.15-megapixel image); the
 // tail has no pixels to hand, so every image counts as this.
@@ -164,7 +172,10 @@ class ContextBuilder {
       }
     }
     const results = recall.tailIncludeToolResults && entries.length
-      ? this._toolResults(this.store.tailToolResults(chatId, { afterSeq: entries[0].message.seq, beforeSeq: limit }), {
+      ? this._toolResults({
+        chatId,
+        afterSeq: entries[0].message.seq,
+        beforeSeq: limit,
         left: recall.tailTokens - callTokens - entries.reduce((n, e) => n + e.tokens, 0),
         replyIndex, recall, model
       })
@@ -202,39 +213,65 @@ class ContextBuilder {
   // tailToolResultMaxTokens keeps its head, with a note, and is recorded in
   // stats.tail.shortened (shown: the leading chunks that fit whole); a
   // result that does not fit what is left is skipped and an older one tried.
-  // candidates: the span's tool results (HistoryStore#tailToolResults).
-  _toolResults(candidates, { left, replyIndex, recall, model }) {
+  // The span's results are read a page at a time (HistoryStore#
+  // tailToolResults), newest first, until what is left cannot fit even the
+  // smallest result or TAIL_RESULT_SCAN_MAX rows have been examined.
+  _toolResults({ chatId, afterSeq, beforeSeq, left, replyIndex, recall, model }) {
     const out = [];
     let budget = left;
-    for (const m of candidates) {
-      if (budget <= 0) break;
-      const index = replyIndex(m.seq);
-      if (index === -1) continue;
-      const full = toolResultText(m);
-      if (!full.trim()) continue;
-      const label = `[tool result #${m.seq}${m.toolName ? ` ${m.toolName}` : ''}]`;
-      let text = `${label}\n${full}`;
-      let shortened = null;
-      if (this.estimator.estimate(full, model) > recall.tailToolResultMaxTokens) {
-        const chars = Math.max(1, Math.floor(recall.tailToolResultMaxTokens * this.estimator.charsPerToken(model)));
-        const head = full.slice(0, chars);
-        text = `${label}\n${head}\n[tool result #${m.seq} shortened: the start is shown; ReadHistory ${m.seq} for the rest]`;
-        const own = this.store.chunksOfMessage(m.id).filter((c) => c.kind === 'tool_result');
-        let shown = 0;
-        let covered = 0;
-        for (const c of own) {
-          covered += c.text.length + (shown ? 2 : 0);
-          if (covered > head.length) break;
-          shown += 1;
-        }
-        shortened = { seq: m.seq, shown, total: Math.max(own.length, 1), toolResult: true };
+    // No result costs less than a label and one character of body.
+    const smallest = this.estimator.estimate('[tool result #1]\nx', model);
+    let examined = 0;
+    let before = beforeSeq;
+    while (budget >= smallest && examined < TAIL_RESULT_SCAN_MAX) {
+      const page = this.store.tailToolResults(chatId, {
+        afterSeq, beforeSeq: before, limit: Math.min(TAIL_RESULT_PAGE, TAIL_RESULT_SCAN_MAX - examined)
+      });
+      if (!page.length) break;
+      examined += page.length;
+      before = page[page.length - 1].seq;
+      for (const m of page) {
+        if (budget < smallest) break;
+        const r = this._toolResult(m, { replyIndex, recall, model });
+        if (!r || r.tokens > budget) continue;
+        budget -= r.tokens;
+        if (r.shortened) r.shortened = this._shortenedResult(m, r.shortened);
+        out.push(r);
       }
-      const tokens = this.estimator.estimate(text, model);
-      if (tokens > budget) continue;
-      budget -= tokens;
-      out.push({ message: m, index, text, tokens, shortened });
     }
     return out;
+  }
+
+  // One tool result as the tail shows it (null when it is not shown); a
+  // shortened one carries how many characters of its body it keeps.
+  _toolResult(m, { replyIndex, recall, model }) {
+    const index = replyIndex(m.seq);
+    if (index === -1) return null;
+    const full = toolResultText(m);
+    if (!full.trim()) return null;
+    const label = `[tool result #${m.seq}${m.toolName ? ` ${m.toolName}` : ''}]`;
+    let text = `${label}\n${full}`;
+    let shortened = null;
+    if (this.estimator.estimate(full, model) > recall.tailToolResultMaxTokens) {
+      const chars = Math.max(1, Math.floor(recall.tailToolResultMaxTokens * this.estimator.charsPerToken(model)));
+      text = `${label}\n${full.slice(0, chars)}\n[tool result #${m.seq} shortened: the start is shown; ReadHistory ${m.seq} for the rest]`;
+      shortened = { headChars: Math.min(chars, full.length) };
+    }
+    return { message: m, index, text, tokens: this.estimator.estimate(text, model), shortened };
+  }
+
+  // stats.tail.shortened for a shown, shortened result (shown: the leading
+  // chunks that fit whole in its head).
+  _shortenedResult(m, { headChars }) {
+    const own = this.store.chunksOfMessage(m.id).filter((c) => c.kind === 'tool_result');
+    let shown = 0;
+    let covered = 0;
+    for (const c of own) {
+      covered += c.text.length + (shown ? 2 : 0);
+      if (covered > headChars) break;
+      shown += 1;
+    }
+    return { seq: m.seq, shown, total: Math.max(own.length, 1), toolResult: true };
   }
 
   // Document text and images are sent with a tail message every turn, so
@@ -318,4 +355,4 @@ class ContextBuilder {
   }
 }
 
-module.exports = { ContextBuilder, IMAGE_TOKEN_ESTIMATE };
+module.exports = { ContextBuilder, IMAGE_TOKEN_ESTIMATE, TAIL_RESULT_PAGE, TAIL_RESULT_SCAN_MAX };

@@ -453,6 +453,34 @@ describe('ContextBuilder: the tail scan reads only what the tail needs', () => {
     assert.deepStrictEqual(out.stats.tail.toolResultSeqs, [75, 79]);
     assert.deepStrictEqual([...read].sort((a, b) => a - b), [75, 79], 'no result older than the tail is loaded');
   });
+
+  it('a tail span with many large results reads them in small pages, newest first, and at most TAIL_RESULT_SCAN_MAX rows', async () => {
+    const { TAIL_RESULT_SCAN_MAX, TAIL_RESULT_PAGE } = require('../src/history/context-builder');
+    // One agent turn: 150 reads of large files, then the reply.
+    const messages = [{ sender: 'user', text: 'Read every survey part of the Lakeside lot.' }];
+    for (let r = 1; r <= 150; r += 1) {
+      messages.push({ sender: 'toolUse', toolName: 'Read', parameters: { file_path: `survey/part-${r}.md` } });
+      messages.push({ sender: 'toolResult', toolName: 'Read', result: `part ${r} ${'fence line survey notes '.repeat(400)}` });
+    }
+    messages.push({ sender: 'assistant', text: 'Every part is read.' });
+    const s = setup(messages, { recall: { tailIncludeToolResults: true } });
+    t = s.t;
+    const pages = [];
+    const original = t.store.tailToolResults.bind(t.store);
+    t.store.tailToolResults = (chatId, options) => {
+      const page = original(chatId, options);
+      pages.push(page.map((m) => m.seq));
+      return page;
+    };
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'thanks' });
+    const read = pages.flat();
+    assert.ok(read.length <= TAIL_RESULT_SCAN_MAX, `${read.length} rows read`);
+    assert.ok(pages.every((p) => p.length <= TAIL_RESULT_PAGE), 'each page is bounded');
+    assert.deepStrictEqual(read, [...read].sort((a, b) => b - a), 'newest first');
+    assert.strictEqual(read[0], 301, 'the newest result is read first');
+    assert.ok(out.stats.tail.toolResultSeqs.length > 0);
+    assert.ok(out.stats.tail.toolResultSeqs.every((seq) => read.includes(seq)));
+  });
 });
 
 describe('ContextBuilder: attachments count toward the tail budget', () => {

@@ -330,19 +330,22 @@ class HistoryStore {
     return list.map((row) => rows.rowToMessage(row, byMessage.get(row.id) || []));
   }
 
-  // The tool results the tail folds in (tailIncludeToolResults): those after
-  // afterSeq (the tail's first message) and before beforeSeq, newest first,
-  // without attachments. Read once the tail's span is known, so a tool
-  // result older than the tail is never loaded.
-  tailToolResults(chatId, { afterSeq = 0, beforeSeq = Number.MAX_SAFE_INTEGER } = {}) {
+  // The tool results the tail folds in (tailIncludeToolResults): one page of
+  // those after afterSeq (the tail's first message) and before beforeSeq,
+  // newest first, at most limit rows, without attachments. Read once the
+  // tail's span is known, so a tool result older than the tail is never
+  // loaded; the caller pages with beforeSeq and stops when its budget is
+  // spent.
+  tailToolResults(chatId, { afterSeq = 0, beforeSeq = Number.MAX_SAFE_INTEGER, limit = 20 } = {}) {
     const id = normalizeId(chatId);
     if (!id) return [];
     const after = Number.isInteger(Number(afterSeq)) ? Number(afterSeq) : 0;
     const before = Number.isInteger(Number(beforeSeq)) ? Number(beforeSeq) : Number.MAX_SAFE_INTEGER;
+    const max = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
     const list = this._stmt(`SELECT id, seq, sender, timestamp, text, tool_name, result_json, run_id, llm_json, context_json, meta_json
       FROM messages
       WHERE chat_id = ? AND sender = 'toolResult' AND seq > ? AND seq < ?
-      ORDER BY seq DESC`).all(id, after, before);
+      ORDER BY seq DESC LIMIT ?`).all(id, after, before, max);
     return list.map((row) => rows.rowToMessage(row, []));
   }
 
