@@ -95,7 +95,7 @@ const waitFor = async (cond, what) => {
   assert.ok(cond(), `timed out waiting for ${what}`);
 };
 
-async function setup({ maxSessions = 4, maxJobs = 2, idleCloseMs = 7200000, withNodePolicy = true, remoteApprovals = 'phone' } = {}) {
+async function setup({ maxSessions = 4, maxJobs = 2, idleCloseMs = 7200000, withNodePolicy = true, remoteApprovals = 'phone', phoneAnswer = true } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-delegate-'));
   temps.push(dataDir);
   const root = path.join(dataDir, 'work');
@@ -111,7 +111,7 @@ async function setup({ maxSessions = 4, maxJobs = 2, idleCloseMs = 7200000, with
     builtinSkillsDir: path.join(__dirname, '..', 'skills'),
     features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
     remoteApprovals,
-    phoneApprover: { ttlMs: 300000, isAvailable: () => true, requestApproval: async (tool, params, meta) => { calls.push({ tool, origin: meta.origin }); return true; } },
+    phoneApprover: { ttlMs: 300000, isAvailable: () => true, requestApproval: async (tool, params, meta) => { calls.push({ tool, origin: meta.origin }); return phoneAnswer; } },
     auditLedger: { append: async (e) => { audit.push(e); return e; } },
     ...(withNodePolicy ? { nodePolicy: { allowed_roots: [root], remote_sessions: { always_confirm: [GATED], deny: [] } } } : {})
   });
@@ -295,6 +295,32 @@ describe('DelegateSessions', () => {
     assert.deepEqual(t.calls.map((c) => c.tool), [GATED], 'the phone is asked, as for a stdio runbook');
     const line = t.jobs.getJob(jobId).logs.find((l) => l.startsWith(`tool ${GATED}`));
     assert.ok(!line.includes(REFUSE_UNSAFE_MESSAGE), line);
+  });
+
+  it("a session the service's own chat started sends its unsafe calls to the phone, and runs one only on === true (spec §3.6)", async () => {
+    const { serviceChatOrigin } = require('../src/tools/builtin/fleet-chat-tools');
+    for (const [answer, runs] of [['yes', false], [1, false], [{ approved: true }, false], [true, true]]) {
+      const t = await setup({ phoneAnswer: answer });
+      script = [use(GATED)];
+      const { job_id: jobId } = await t.sessions.start({ task: 'push', origin: serviceChatOrigin('chat-1') });
+      await t.sessions.turns.get(jobId);
+      assert.deepEqual(t.calls.map((c) => c.tool), [GATED], `the phone is asked (${JSON.stringify(answer)})`);
+      assert.equal(t.calls[0].origin.client, 'king-louie');
+      const line = t.jobs.getJob(jobId).logs.find((l) => l.startsWith(`tool ${GATED}`));
+      assert.ok(!line.includes(REFUSE_UNSAFE_MESSAGE), line);
+      assert.equal(seen.some((s) => s.tool === GATED && s.result && s.result.ok === true), runs, `ran on ${JSON.stringify(answer)}: ${line}`);
+      seen = [];
+    }
+  });
+
+  it('shouldRefuseUnsafe: the service chat is local like stdio; every other or unknown kind fails closed (spec §3.6)', () => {
+    const node = { name: 'gpu-box' };
+    assert.equal(shouldRefuseUnsafe({ kind: 'service-chat', client: 'king-louie', session: 'chat-1' }, node), false);
+    for (const kind of ['desktop', 'chat', 'Service-Chat', 'service-chat ', '', null, undefined, 42]) {
+      assert.equal(shouldRefuseUnsafe({ kind, client: 'king-louie', session: 'chat-1' }, node), true, `kind ${JSON.stringify(kind)}`);
+    }
+    assert.equal(shouldRefuseUnsafe('service-chat', node), true, 'a bare string is not an origin');
+    assert.equal(shouldRefuseUnsafe({ kind: 'bogus', scopes: ['fleet:unsafe'] }, node), false, 'an unknown kind passes only with fleet:unsafe, as before');
   });
 
   it('shouldRefuseUnsafe: only a front-door origin without fleet:unsafe for this node refuses (M19)', () => {

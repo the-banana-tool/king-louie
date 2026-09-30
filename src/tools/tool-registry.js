@@ -13,6 +13,10 @@ class ToolRegistry {
     return tool;
   }
 
+  unregister(name) {
+    return this.tools.delete(name);
+  }
+
   get(name) {
     return this.tools.get(name);
   }

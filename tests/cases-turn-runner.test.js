@@ -11,6 +11,7 @@ const AgentLoop = require('../src/execution/agent-loop');
 const { CaseRuntime } = require('../src/cases');
 const { CASE_TOOL_NAMES } = require('../src/cases/chat-integration');
 const { MANAGEMENT_TOOL_NAMES } = require('../src/tools/builtin/management-tools');
+const { FLEET_CHAT_TOOL_NAMES } = require('../src/tools/builtin/fleet-chat-tools');
 const { WakeupStore } = require('../src/cases/wakeups');
 const { Budget } = require('../src/cases/budget');
 const { parseOrient } = require('../src/cases/turn-runner');
@@ -147,6 +148,8 @@ describe('runDueWakeups', () => {
     for (const name of ['Bash', 'AskUser', 'Write']) assert.ok(!offered.includes(name), name);
     // The owner's management tools never reach an unattended turn (management surfaces spec §3.1).
     for (const name of MANAGEMENT_TOOL_NAMES) assert.ok(!offered.includes(name) && !opts.allowedToolNames.has(name), name);
+    // Nor do the fleet tools of a service-run chat (spec §3.6).
+    for (const name of FLEET_CHAT_TOOL_NAMES) assert.ok(!offered.includes(name) && !opts.allowedToolNames.has(name), name);
     assert.deepStrictEqual(calls.results.map(([name, r]) => [name, r.ok]), [['Ledger', true]]);
   });
 

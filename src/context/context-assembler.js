@@ -54,6 +54,18 @@ const CORE_TOOLS = new Set([
   'revoke_envelope',
   'cancel_case_job',
   'set_away',
+  // Fleet tools (spec 2026-09-30 §3.6): registered only while a service's
+  // fleet node runs (src/tools/builtin/fleet-chat-tools.js), so a
+  // standalone chat never has them; when present, always loaded.
+  'list_machines',
+  'describe_machine',
+  'get_state',
+  'run_runbook',
+  'delegate',
+  'send_to_job',
+  'get_job',
+  'get_job_logs',
+  'cancel_job',
 ]);
 
 // System prompt sections that are always included.
@@ -166,6 +178,15 @@ class ContextAssembler {
     }
 
     this._indexed = true;
+  }
+
+  /**
+   * Forget tools that are no longer registered (the fleet chat tools when a
+   * service's fleet node stops). Their vectors are pruned at the next index().
+   * @param {string[]} names
+   */
+  removeTools(names = []) {
+    for (const name of names) this._tools.delete(name);
   }
 
   // ──────────────────────────────────────────────

@@ -81,9 +81,19 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
   let courierPump = approvals.courierPump || null;
   let ownPump = false;
   let rpcInstalled = false;
+  // Management surfaces §3.6: the core's chat reaches this handler (the
+  // fleet chat tools) from when it exists until stop.
+  const setChatFleet = core && core.context && typeof core.context.setFleetToolHandler === 'function'
+    ? (h) => core.context.setFleetToolHandler(h)
+    : null;
+  let chatFleetSet = false;
   // Undoes whatever has been started so far; used by stop() and by a
   // startup that fails partway (nothing may be left running either way).
   const teardown = () => {
+    if (chatFleetSet) {
+      chatFleetSet = false;
+      setChatFleet(null);
+    }
     if (fleetService) fleetService.stop();
     if (delegateSessions) delegateSessions.stop();
     if (courierPump && ownPump) courierPump.stop();
@@ -117,6 +127,11 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
     handler = new FleetToolHandler({
       nodeConfig, runbookEngine, jobManager, approver: approvals.phoneApprover, auditLedger: approvals.auditLedger, delegateSessions, gui, caseTools
     });
+
+    if (nodeConfig.profile === 'agent' && setChatFleet) {
+      setChatFleet(handler);
+      chatFleetSet = true;
+    }
 
     if (approvals.relayClient) {
       fleetService = new NodeFleetService({ handler, relayClient: approvals.relayClient, nodeConfig: { ...nodeConfig, nodeId: approvals.identity.nodeId }, bootId });
