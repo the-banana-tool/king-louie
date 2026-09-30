@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const { sha256Text } = require('./files');
 const { UsageError } = require('./errors');
+const { retryable } = require('./retry');
 const { createLogger } = require('../logging');
 
 const log = createLogger('longhaul/embeddings');
@@ -195,14 +196,6 @@ class EmbeddingCache {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function retryable(err) {
-  if (!err) return false;
-  if (err.status === 429 || (Number.isInteger(err.status) && err.status >= 500)) return true;
-  if (Number.isInteger(err.status)) return false;
-  // A transport failure (fetch rejects with a TypeError): reset, DNS, timeout.
-  return err.name === 'TypeError' || /fetch failed|ECONNRESET|ETIMEDOUT|socket/i.test(String(err.message || ''));
-}
 
 // embedder: an object with embed(inputs, { model }) (OpenAIProvider#embed).
 // Retries 429, 5xx and transport failures with backoff; anything else throws.
