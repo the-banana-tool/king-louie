@@ -163,6 +163,13 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   send path puts the block, the case orientation and the memory context in
   `options.systemPromptDynamic`, which Anthropic sends uncached after the
   cached `systemPrompt`. `history.recall.enabled: false` sends the tail only.
+- Recall defaults come from LongHaul measurements (spec §6.7): the query is
+  the new message alone (`queryUserTurns: 0`), `bm25TopK` 200, and the tail is
+  16 messages with the tool results in its span (capped at 1,000 tokens each).
+  The other `history.recall` knobs (`completeMessageTokens`,
+  `pairToolMessages`, `rerank`, `vectorTopK`, `dedupeJaccard`, …) were measured
+  and are off or inert by default. Change a default only with a LongHaul run
+  that shows it; tests that check a mechanism pin their settings explicitly.
 - Assistant replies carry `context` provenance; the recall line reads it and
   `history:excerpts` returns the excerpts. `SearchHistory`/`ReadHistory` are
   always loaded; their scope is the chat itself until stage H4.

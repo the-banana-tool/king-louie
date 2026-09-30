@@ -2,7 +2,8 @@
 
 - **Status:** Agreed with the owner 2026-09-25; amended 2026-09-29 after
   a design review (§4.3 compaction summaries, §4.4 store schema, §11.2 stage
-  order). H1 is partly implemented (§4.4 notes). Terms follow `CONTEXT.md`.
+  order), and 2026-09-30 with the H2 defaults measured on LongHaul (§6.1–§6.3,
+  §6.7, §14). H1 and H2 are implemented. Terms follow `CONTEXT.md`.
 - **Date:** 2026-09-25
 - **Relates to:** `2026-09-22-king-louie-cases-design.md` (cases own curated
   facts and decisions; this spec owns verbatim history) and
@@ -374,11 +375,18 @@ part of this spec.
 
 ### 6.1 The tail
 
-The tail is the most recent `history.recall.tailMessages` (8) `user` and
-`assistant` messages, capped at `tailTokens` (6,000). With
-`tailIncludeToolCalls` (true) each `toolUse` in that span appears as its
-one-line summary, and `toolResult`s are omitted; they are reachable by recall
-and `ReadHistory`. A tail message over `tailMaxMessageTokens` (1,500) is
+The tail is the most recent `history.recall.tailMessages` (16) `user` and
+`assistant` messages, capped at `tailTokens` (6,000), and it starts at a
+`user` message. With `tailIncludeToolCalls` (true) each `toolUse` in that
+span appears as its one-line summary. With `tailIncludeToolResults` (true)
+each `toolResult` in the span is folded into the reply that follows it, newest
+first, with the tokens the user and assistant messages leave, so a tool dump
+never pushes out a user turn; one over `tailToolResultMaxTokens` (1,000) keeps
+its start and a note, and counts as shortened. Tool results in the tail are
+excluded from recall like the rest of the tail. The default was 8 messages with
+results left out: agent sessions write one assistant row per tool round, so
+the last 8 rows were often all assistant and the tail came out empty (§6.7).
+A tail message over `tailMaxMessageTokens` (1,500) is
 replaced by its chunks that scored best for this turn's query, followed by a
 marker: `[message #412 shortened: 3 of 11 paragraphs shown; ReadHistory 412
 for the rest]`. This preserves today's behaviour for a large pasted article.
@@ -386,10 +394,15 @@ for the rest]`. This preserves today's behaviour for a large pasted article.
 ### 6.2 The query
 
 The query text is the new user message plus the previous
-`queryUserTurns` (2) user messages, newest first, joined with newlines. This
-covers follow-ups that refer back with pronouns without a model call. An
-optional model rewrite is not in this spec; the evaluation script (§13) will
-show whether it is needed.
+`queryUserTurns` (0) user messages, newest first, joined with newlines. The
+default was 2, meant for follow-ups that refer back with pronouns, but the
+previous turns (a median of 570 characters) drowned out the question: with
+them 40 of 175 evidence messages ranked in the BM25 top 50, without them 94
+(§6.7). A follow-up too short to search on is a known gap; a fallback that adds
+the previous turns only for a very short message, or a model rewrite, would
+need questions of that shape to measure. `queryContextSeparate` (false) fuses
+the previous turns as a list of their own instead; it measured 0.27–0.31
+against 0.35 for the question alone.
 
 ### 6.3 Retrieval
 
@@ -399,7 +412,8 @@ are excluded.
 
 1. **Lexical.** FTS5 `MATCH` over the scope with the query's terms OR-ed and
    any quoted phrases kept as phrases; FTS syntax in the query is escaped.
-   Top `bm25TopK` (50) by `bm25()`.
+   Top `bm25TopK` (200) by `bm25()`; at 50 the evidence often ranked just
+   below the cut (§6.7).
 2. **Semantic.** The query embedded with `kind: 'query'`; top `vectorTopK`
    (50) by cosine. Skipped when no embedder is active.
 3. **Fusion.** Reciprocal rank fusion, `score = Σ 1 / (rrfK + rank)`,
@@ -411,13 +425,22 @@ are excluded.
 6. **Rerank (optional).** When `rerank.enabled` (false), a local cross-encoder
    (`rerank.model`, default `Xenova/ms-marco-MiniLM-L-6-v2`) rescores the top
    `rerank.topM` (20) query/chunk pairs and its score replaces the fused score
-   for those. Measured at about 60 ms per pair on CPU, so `topM` is the latency
-   knob.
+   for those. Measured at 18–28 ms per pair on the owner's CPU (fp32, batches
+   of 16). `topM` must exceed what the budget selects (60–90 chunks at 6,000
+   tokens) to change the selection at all: 20 is inert, 100 is the knee
+   (about 2.2 s per question), so a per-turn rerank is too slow on a laptop
+   and fits `SearchHistory` better (§6.7).
 7. **Dedupe.** Drop a chunk whose cosine to an already selected chunk exceeds
    `dedupeCosine` (0.92); without vectors, drop exact text duplicates.
 8. **Budget.** Take chunks in score order until `recalledTokens` (6,000),
    with at most `maxChunksPerMessage` (4) from one message. Adjacent chunks
    of one message merge.
+
+Measured and left off by default (§6.7, §14): `completeMessageTokens` with
+`pairToolMessages` (take a small message whole on its first hit, and a tool
+call's result with it), `prefixMinChars`, `diversifyFirst`,
+`dedupeJaccard` (word 5-gram near-duplicates), and `recencyByPosition`
+(age as the fraction of the chat behind this point instead of days).
 
 ### 6.4 The recalled block
 
@@ -469,6 +492,49 @@ default 4 chars per token, corrected after every response from the ratio of
 the provider's reported `inputTokens` to the characters sent (exponential
 moving average, stored in `calibration`). Budgets in this spec are in those
 estimated tokens.
+
+### 6.7 Measured on LongHaul (2026-09-30)
+
+The H2 defaults above come from LongHaul stage B0 on the owner's private set:
+four real sessions (0.17M to 2.5M estimated tokens) with 138 verified
+questions, 103 of them scored (the 35 `abstain` questions have no evidence),
+175 evidence messages, recalled budget 6,000. One question is about 0.01, so
+differences under 0.02 are noise. Two metrics: evidence recall (an evidence
+message counts only when shown whole) and strict answer containment (the
+answer text appears in what was shown). 40% of the verified answers are
+paraphrases of their evidence, so the oracle's containment is 0.631, not 1.0.
+
+| Configuration | Evidence recall | Containment |
+|---|---|---|
+| First H2 defaults | 0.194 | 0.456 |
+| `queryUserTurns` 0, `bm25TopK` 200 | 0.352 | 0.573 |
+| plus whole small messages and tool pairing (left off) | 0.494 | 0.563 |
+| plus fused `text-embedding-3-small` vectors (H3 probe) | 0.539 | — |
+| plus cross-encoder rerank, `topM` 100 (H3 probe) | 0.584 | 0.602 |
+| Sliding window, same total tokens | 0.238 | 0.427 |
+| Oracle | 1.000 | 0.631 |
+
+Findings the settings rest on:
+- **The query.** The previous user turns were noise; the question alone put
+  2.35 times as much evidence in the BM25 top 50.
+- **The tail.** 9 of 24 questions under 10K tokens back got an empty tail
+  (above). With 16 messages and tool results capped at 1,000 tokens, recall
+  under 10K rose from 0.69 to 0.89, p90 under 13K total tokens. A larger
+  `tailTokens` did not help: the old tail used a median 1.3K of its 6K.
+- **Whole messages.** Taking a small message whole raised evidence recall but
+  not containment: the chunk holding the answer was usually already shown.
+  Left off until an answer-accuracy stage can tell whether the model reads a
+  whole message better.
+- **Selection, not candidates.** BM25 top 200 and cosine top 200 together
+  hold 81% of the evidence; about half of it survives the budget. Vectors add
+  about 0.05, a reranker about 0.04–0.06 more (H3). Chunk size (600–1,500),
+  the per-message cap, fill order and near-duplicate removal each moved 0–2
+  questions.
+- **Budget.** Recall rises about 0.035 per 1,000 recalled tokens up to 6,000,
+  then about 0.015; 10,000 puts p90 over the 15K ceiling. At equal total tokens
+  recall shows 2.4 to 2.6 times the sliding window's evidence.
+- **Recency by position** gained 0.03 overall and 0.07 on superseded questions
+  at one narrow setting and lost 0.04 beyond 1M tokens: left off.
 
 ## 7. Provenance
 
@@ -663,14 +729,19 @@ with the builder's output under 15K estimated tokens per turn.
 history: {
   recall: {
     enabled: true,
-    tailMessages: 8, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true,
-    recalledTokens: 6000, queryUserTurns: 2,
-    bm25TopK: 50, vectorTopK: 50, rrfK: 60,
+    tailMessages: 16, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true,
+    tailIncludeToolResults: true, tailToolResultMaxTokens: 1000,
+    recalledTokens: 6000, queryUserTurns: 0,
+    bm25TopK: 200, vectorTopK: 50, rrfK: 60,
     kindWeights: { user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 },
     recencyWeight: 0.3, recencyHalfLifeDays: 30,
     maxChunksPerMessage: 4, dedupeCosine: 0.92,
     rerank: { enabled: false, model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 20, maxMs: 2000 },
-    vectorCacheMb: 256
+    vectorCacheMb: 256,
+    // measured and off (§6.3, §6.7): 0 / false
+    completeMessageTokens: 0, pairToolMessages: false, prefixMinChars: 0,
+    queryContextSeparate: false, diversifyFirst: false, dedupeJaccard: 0,
+    recencyByPosition: false, recencyHalfLifeFraction: 0.25
   },
   embedder: {
     kind: 'local',                                   // local | ollama | openai | none
