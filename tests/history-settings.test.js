@@ -14,6 +14,7 @@ describe('history settings', () => {
       kindWeights: { user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 },
       recencyWeight: 0.3, recencyHalfLifeDays: 30, maxChunksPerMessage: 4,
       completeMessageTokens: 0, prefixMinChars: 0, queryContextSeparate: false, pairToolMessages: false,
+      diversifyFirst: false, dedupeJaccard: 0,
       vectorTopK: 50
     });
     assert.deepStrictEqual(s.chunk, { targetChars: 1500, minChars: 40 });
@@ -51,6 +52,17 @@ describe('history settings', () => {
     assert.strictEqual(s.recall.kindWeights.user, 1.2);
     assert.strictEqual(s.chunk.targetChars, 1500);
     assert.strictEqual(s.readHistoryMaxTokens, 8000);
+  });
+
+  it('budget-fill knobs: a flag and a fraction, else the default', () => {
+    const on = mergeHistorySettings({ recall: { diversifyFirst: true, dedupeJaccard: 0.8 } }).recall;
+    assert.strictEqual(on.diversifyFirst, true);
+    assert.strictEqual(on.dedupeJaccard, 0.8);
+    for (const bad of [{ diversifyFirst: 'yes', dedupeJaccard: 1.5 }, { diversifyFirst: 1, dedupeJaccard: -0.1 }, { dedupeJaccard: '0.8' }]) {
+      const s = mergeHistorySettings({ recall: bad }).recall;
+      assert.strictEqual(s.diversifyFirst, false, JSON.stringify(bad));
+      assert.strictEqual(s.dedupeJaccard, 0, JSON.stringify(bad));
+    }
   });
 
   it('is part of mergeSettings and DEFAULT_SETTINGS', () => {

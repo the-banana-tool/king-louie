@@ -84,6 +84,43 @@ describe('kl-recall', () => {
     assert.match(stderr.text, /--budget-tokens/);
   });
 
+  it('chunk overrides history.chunk for the store and for the whole/partial count', async () => {
+    assert.throws(() => createKlRecallAdapter({ chunk: { notAKey: 1 }, tmpRoot: tmpDir() }), UsageError);
+    assert.throws(() => createKlRecallAdapter({ chunk: { targetChars: 100 }, tmpRoot: tmpDir() }), (err) => err instanceof UsageError && /targetChars/.test(err.message));
+    assert.deepStrictEqual(createKlRecallAdapter({ tmpRoot: tmpDir() }).describe().chunk, { targetChars: 1500, minChars: 40 });
+    const small = createKlRecallAdapter({ chunk: { targetChars: 600 }, tmpRoot: tmpDir() });
+    assert.deepStrictEqual(small.describe().chunk, { targetChars: 600, minChars: 40 });
+
+    const para = (i) => `Paragraph ${i} about the Lakeside lot drainage survey, with enough words to stand on its own as a piece of text here.`;
+    // One paragraph of lines: targetChars splits a paragraph over it; it
+    // never merges paragraphs.
+    const text = Array.from({ length: 12 }, (_, i) => para(i)).join('\n');
+    const messages = [
+      { id: 'm1', seq: 1, sender: 'user', text: 'Please write up the drainage survey.', timestamp: '2026-01-01T00:00:00.000Z' },
+      { id: 'm2', seq: 2, sender: 'assistant', text, timestamp: '2026-01-01T00:01:00.000Z' }
+    ];
+    const session = { manifest: { sessionId: 'chunk-override' }, messages, index: new SessionIndex(messages) };
+    const counts = {};
+    for (const [name, adapter] of [['default', createKlRecallAdapter({ tmpRoot: tmpDir() })], ['small', small]]) {
+      const handle = await adapter.prepare(session);
+      try {
+        const rows = handle.store.chunksOfChat(handle.chatId).filter((c) => c.seq === 2);
+        counts[name] = rows.length;
+        assert.strictEqual(rows.length, chunkMessage(messages[1], adapter.describe().chunk).length, name);
+      } finally {
+        await adapter.release(handle);
+      }
+    }
+    assert.ok(counts.small > counts.default, JSON.stringify(counts));
+  });
+
+  it('the CLI passes --chunk-target-chars to kl-recall', async () => {
+    const stderr = sink();
+    const code = await main(['run', '--sessions', FIXTURE_ROOT, '--adapters', 'kl-recall', '--chunk-target-chars', 'x'], { stdout: sink(), stderr, env: tmpHome().env });
+    assert.strictEqual(code, 2);
+    assert.match(stderr.text, /--chunk-target-chars/);
+  });
+
   it('needs a tmpRoot: there is no default outside LONGHAUL_HOME', () => {
     assert.throws(() => createKlRecallAdapter({}), /tmpRoot/);
   });

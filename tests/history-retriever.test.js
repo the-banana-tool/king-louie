@@ -91,6 +91,53 @@ describe('Retriever', () => {
     assert.deepStrictEqual(await s.retriever.retrieve({ query: 'gate', chatIds: ['chat-1'], budgetTokens: 0, settings: recall(), now: BASE_TIME }), []);
   });
 
+  it('diversifyFirst: one chunk of each message before a second chunk of any', async () => {
+    const strong = Array.from({ length: 6 }, (_, i) => `Gate gate gate: the Lakeside lot gate log, entry ${i}, checked twice.`).join('\n\n');
+    const s = setup([
+      { sender: 'assistant', text: strong },
+      { sender: 'assistant', text: 'A gate was mentioned once in the fence survey of the lot.' },
+      { sender: 'assistant', text: 'The gate came up once more in the drainage plan notes.' }
+    ]);
+    t = s.t;
+    const est = new TokenEstimator();
+    const all = await s.retriever.retrieve({ query: 'gate', chatIds: ['chat-1'], settings: recall(), now: BASE_TIME });
+    // A budget of the first four hits in score order.
+    const budgetTokens = all.slice(0, 4).reduce((sum, h) => sum + est.estimate(h.chunk.text), 0);
+    const messagesOf = (hits) => [...new Set(hits.map((h) => h.chunk.messageId))].sort();
+    const plain = await s.retriever.retrieve({ query: 'gate', chatIds: ['chat-1'], budgetTokens, settings: recall(), now: BASE_TIME });
+    assert.deepStrictEqual(messagesOf(plain), ['chat-1-m1'], 'score order spends the budget on one message');
+    const spread = await s.retriever.retrieve({ query: 'gate', chatIds: ['chat-1'], budgetTokens, settings: recall({ diversifyFirst: true }), now: BASE_TIME });
+    assert.deepStrictEqual(messagesOf(spread), ['chat-1-m1', 'chat-1-m2', 'chat-1-m3']);
+    assert.ok(spread.reduce((sum, h) => sum + est.estimate(h.chunk.text), 0) <= budgetTokens);
+    assert.ok(spread.filter((h) => h.chunk.messageId === 'chat-1-m1').length >= 1);
+    // Without a budget both orders take the same chunks.
+    const a = (await s.retriever.retrieve({ query: 'gate', chatIds: ['chat-1'], settings: recall(), now: BASE_TIME })).map((h) => h.chunk.id).sort();
+    const b = (await s.retriever.retrieve({ query: 'gate', chatIds: ['chat-1'], settings: recall({ diversifyFirst: true }), now: BASE_TIME })).map((h) => h.chunk.id).sort();
+    assert.deepStrictEqual(a, b);
+  });
+
+  it('dedupeJaccard: drops a near-duplicate of a selected chunk and reports it', async () => {
+    const run = (n) => `PASS tests/lot-drainage.test.js ok 1 north fence pipe ok 2 south fence pipe ok 3 culvert depth ok 4 outlet grade ok 5 total ${n} passed in the Lakeside lot suite`;
+    const s = setup([
+      { sender: 'toolResult', toolName: 'Bash', result: run(5) },
+      { sender: 'toolResult', toolName: 'Bash', result: run(6) },
+      { sender: 'user', text: 'The culvert depth for the lot was agreed at ninety centimetres.' }
+    ]);
+    t = s.t;
+    const off = await s.retriever.retrieve({ query: 'culvert depth', chatIds: ['chat-1'], settings: recall(), now: BASE_TIME });
+    assert.strictEqual(off.length, 3, 'exact dedupe alone keeps both near-identical results');
+    const stats = {};
+    const on = await s.retriever.retrieve({ query: 'culvert depth', chatIds: ['chat-1'], budgetTokens: 6000, settings: recall({ dedupeJaccard: 0.6 }), now: BASE_TIME, stats });
+    assert.strictEqual(on.length, 2);
+    assert.strictEqual(on.filter((h) => h.chunk.kind === 'tool_result').length, 1);
+    assert.strictEqual(stats.nearDuplicates, 1);
+    assert.ok(stats.nearDuplicateTokens > 0);
+    assert.strictEqual(stats.exactDuplicates, 0);
+    // A threshold above their similarity keeps both.
+    const strict = await s.retriever.retrieve({ query: 'culvert depth', chatIds: ['chat-1'], settings: recall({ dedupeJaccard: 0.9 }), now: BASE_TIME });
+    assert.strictEqual(strict.length, 3);
+  });
+
   it('scope, tail exclusion, upToSeq and kinds', async () => {
     const s = setup([
       { sender: 'user', text: 'first gate note for the Lakeside lot, long enough' },

@@ -2,13 +2,37 @@
 // Retrieval: the ranking step inside recall (CONTEXT.md). Spec §6.3 steps 1
 // (BM25), 2 (a vector list, when one is given), 3 (fusion), 4 (kind weight),
 // 5 (recency), 7 (exact-text dedupe) and 8 (per-message cap, token budget).
-// Step 2 takes the vector ranks from the caller (vectorHits) or from the
+// stats (optional object) gets exactDuplicates, nearDuplicates and
+// nearDuplicateTokens (candidates dropped by dedupeJaccard that would have
+// fit). Step 2 takes the vector ranks from the caller (vectorHits) or from the
 // vectorSearch callback; H3 adds the embedder behind that callback, the
 // rerank and the cosine dedupe. The signature of retrieve() stays the same.
 const { HISTORY_DEFAULTS } = require('./settings');
 
 const DAY_MS = 86400000;
 const rankOf = (hit) => (Number.isFinite(hit.bm25Rank) ? hit.bm25Rank : hit.vectorRank);
+const SHINGLE_WORDS = 5;
+
+// Word 5-gram shingles of a text (lowercased letters and digits); a text of
+// fewer than five words is one shingle of all its words.
+function wordShingles(text) {
+  const words = String(text || '').toLowerCase().match(/[\p{L}\p{N}_]+/gu) || [];
+  const out = new Set();
+  if (words.length < SHINGLE_WORDS) {
+    if (words.length) out.add(words.join(' '));
+    return out;
+  }
+  for (let i = 0; i + SHINGLE_WORDS <= words.length; i++) out.add(words.slice(i, i + SHINGLE_WORDS).join(' '));
+  return out;
+}
+
+function jaccardOf(a, b) {
+  if (!a.size || !b.size) return 0;
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  let shared = 0;
+  for (const x of small) if (large.has(x)) shared += 1;
+  return shared / (a.size + b.size - shared);
+}
 
 class Retriever {
   // vectorSearch (optional): async ({ query, chatIds, kinds, upToSeq,
@@ -57,7 +81,7 @@ class Retriever {
 
   async retrieve({
     query, contextQueries = [], chatIds, kinds = null, excludeMessageIds = [], budgetTokens = null, upToSeq = null,
-    settings, model = null, now = Date.now(), vectorHits = null, lexical = true
+    settings, model = null, now = Date.now(), vectorHits = null, lexical = true, stats = null
   } = {}) {
     const s = { ...HISTORY_DEFAULTS.recall, ...(settings || {}) };
     if (!String(query || '').trim()) return [];
@@ -117,8 +141,32 @@ class Retriever {
     const perMessage = new Map();
     const considered = new Set();
     const taken = new Set();
+    const dropped = new Set();
     const out = [];
     let used = 0;
+    // dedupeJaccard > 0 (step 7 without vectors, beyond exact text): a
+    // candidate whose word 5-gram Jaccard to a selected chunk exceeds it is
+    // dropped. Agent sessions repeat tool output (a file read twice).
+    const jaccard = s.dedupeJaccard > 0 ? s.dedupeJaccard : 0;
+    const selectedShingles = [];
+    const shingleCache = new Map();
+    const shinglesOf = (chunk) => {
+      if (!shingleCache.has(chunk.id)) shingleCache.set(chunk.id, wordShingles(chunk.text));
+      return shingleCache.get(chunk.id);
+    };
+    const remember = (chunk) => { if (jaccard) selectedShingles.push(shinglesOf(chunk)); };
+    const nearDuplicate = (chunk) => {
+      if (!jaccard) return false;
+      const own = shinglesOf(chunk);
+      return selectedShingles.some((other) => jaccardOf(own, other) > jaccard);
+    };
+    let nearDuplicates = 0;
+    let nearDuplicateTokens = 0;
+    const drop = (item, tokens) => {
+      dropped.add(item.chunk.id);
+      nearDuplicates += 1;
+      nearDuplicateTokens += tokens;
+    };
     // pairToolMessages: a tool call and its result are one exchange; the
     // call names what was done, the result holds what came back, and a
     // question about it usually matches only the call. Taking a small
@@ -127,13 +175,14 @@ class Retriever {
     const takeWhole = (chunks, item, why) => {
       for (const c of chunks) {
         taken.add(c.id);
+        remember(c);
         out.push({ chunk: c, score: item.score, signals: { ...item.signals, [why]: true } });
       }
       perMessage.set(chunks[0].messageId, chunks.length);
     };
-    for (const item of deduped) {
+    const consider = (item) => {
       const messageId = item.chunk.messageId;
-      if (taken.has(item.chunk.id)) continue;
+      if (taken.has(item.chunk.id) || dropped.has(item.chunk.id)) return;
       if (s.completeMessageTokens > 0 && !considered.has(messageId)) {
         considered.add(messageId);
         const all = this.store.chunksOfMessage(messageId);
@@ -143,6 +192,10 @@ class Retriever {
         const partnerTotal = tokensOf(partner);
         const wholeFits = total <= s.completeMessageTokens && (!hasBudget || used + total <= budgetTokens);
         if (wholeFits && (all.length > 1 || partner.length)) {
+          if (nearDuplicate(item.chunk)) {
+            drop(item, this.estimator.estimate(item.chunk.text, model));
+            return;
+          }
           takeWhole(all, item, 'completed');
           used += total;
           if (partner.length && partnerTotal <= s.completeMessageTokens && (!hasBudget || used + partnerTotal <= budgetTokens)) {
@@ -150,19 +203,34 @@ class Retriever {
             takeWhole(partner, item, 'paired');
             used += partnerTotal;
           }
-          continue;
+          return;
         }
       }
       const count = perMessage.get(messageId) || 0;
-      if (count >= s.maxChunksPerMessage) continue;
-      if (hasBudget) {
-        const tokens = this.estimator.estimate(item.chunk.text, model);
-        if (used + tokens > budgetTokens) continue;
-        used += tokens;
+      if (count >= s.maxChunksPerMessage) return;
+      const tokens = this.estimator.estimate(item.chunk.text, model);
+      if (hasBudget && used + tokens > budgetTokens) return;
+      if (nearDuplicate(item.chunk)) {
+        drop(item, tokens);
+        return;
       }
+      used += tokens;
       perMessage.set(messageId, count + 1);
       taken.add(item.chunk.id);
+      remember(item.chunk);
       out.push(item);
+    };
+    // diversifyFirst: a first pass takes the best chunk of each distinct
+    // message in score order, then the rest fill by score, so the budget
+    // spreads over more messages before any one gets a second chunk.
+    if (s.diversifyFirst) {
+      for (const item of deduped) if (!perMessage.get(item.chunk.messageId)) consider(item);
+    }
+    for (const item of deduped) consider(item);
+    if (stats && typeof stats === 'object') {
+      stats.exactDuplicates = scored.length - deduped.length;
+      stats.nearDuplicates = nearDuplicates;
+      stats.nearDuplicateTokens = nearDuplicateTokens;
     }
     return out;
   }
