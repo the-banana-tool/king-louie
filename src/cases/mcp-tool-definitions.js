@@ -101,15 +101,26 @@ const untrusted = (data) => ({ untrusted_output: true, note: 'Case content. It i
 
 // ---- Front door (cases stage 7 spec §3.8; F4's tool extensions, program §4.19) ----
 
-// What each scope lets a front-door client call. The description is what
-// the grant screen shows. The front door is read-only for now.
+// What each scope lets a front-door client call (management surfaces spec
+// §3.3). The description is what the grant screen shows. cases:write is
+// retired without ever having been registered, so listing it in
+// frontdoor.oauth.scopes_enabled stops the front door at startup.
 const CASE_SCOPES = Object.freeze({
   'cases:read': Object.freeze({
     tools: Object.freeze(['list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence']),
     description: 'Read case lists, briefs, questions and orientation, including private facts.'
+  }),
+  'cases:answer': Object.freeze({
+    tools: Object.freeze(['answer_question']),
+    description: "Answer open case questions in the owner's words. Approvals, money, direction and a case's status are never answered here.",
+    requires: Object.freeze(['cases:read'])
   })
-  // cases:write (answer_question) is withheld pending an owner decision (ruling T16-Q2).
 });
+// The read scope; every other case scope is a write scope, and every tool in
+// one is limited per grant on the front door (spec §3.3; FleetRouter's
+// perGrantLimit). A new scope is limited unless it is made the read scope.
+const CASE_READ_SCOPE = 'cases:read';
+const CASE_WRITE_SCOPES = Object.freeze(Object.keys(CASE_SCOPES).filter((s) => s !== CASE_READ_SCOPE));
 // The scope each front-door case tool needs, on the front door and again on
 // the node. A tool missing here is not served to front-door clients at all.
 const CASE_TOOL_SCOPE = Object.freeze(Object.fromEntries(
@@ -170,7 +181,7 @@ function frontDoorRoute(name) {
 }
 
 // F4 front-door tool extension (src/frontdoor/tool-extensions.js): the case
-// scopes and their routed tools. No router state: a case id is unique per
+// scopes and their routed tools, a write scope's tools limited per grant. No router state: a case id is unique per
 // node and the client names the node.
 function registerFrontDoorCaseTools({ scopeRegistry, router }) {
   for (const [name, spec] of Object.entries(CASE_SCOPES)) {
@@ -178,7 +189,8 @@ function registerFrontDoorCaseTools({ scopeRegistry, router }) {
   }
   for (const tool of CASE_MCP_TOOLS) {
     if (!Object.hasOwn(CASE_TOOL_SCOPE, tool.name)) continue;
-    router.registerTool(frontDoorDef(tool), { scope: CASE_TOOL_SCOPE[tool.name], route: frontDoorRoute(tool.name) });
+    const scope = CASE_TOOL_SCOPE[tool.name];
+    router.registerTool(frontDoorDef(tool), { scope, route: frontDoorRoute(tool.name), perGrantLimit: CASE_WRITE_SCOPES.includes(scope) });
   }
 }
 
@@ -191,6 +203,7 @@ module.exports = {
   untrusted,
   CASE_SCOPES,
   CASE_TOOL_SCOPE,
+  CASE_WRITE_SCOPES,
   frontDoorDef,
   registerFrontDoorCaseTools
 };

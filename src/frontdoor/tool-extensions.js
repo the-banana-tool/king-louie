@@ -5,5 +5,6 @@
 // scopes.
 module.exports = [];
 
-// Cases stage 7 (spec §3.8): cases:read and the read-only case tools.
+// Cases stage 7 (spec §3.8) and management surfaces (spec §3.3): cases:read,
+// cases:answer and their case tools.
 module.exports.push(require('../cases/mcp-tool-definitions').registerFrontDoorCaseTools);

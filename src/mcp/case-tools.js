@@ -375,10 +375,11 @@ const ROUTING_FIELDS = Object.freeze([...ROUTER_FIELDS, 'machine']);
 // On an agent node with a front-door link: the cases.<tool> methods, each
 // behind its own scope (NodeFleetService re-checks the front door's scopes
 // and machine pins before the method runs). Only the tools in
-// CASE_TOOL_SCOPE are registered: answer_question is withheld pending an
-// owner decision (ruling T16-Q2). The handler is its own, on the
-// mcp-frontdoor channel (its own rate limit; it repeats every front-door
-// refusal). The router's fields are removed; anything else is checked
+// CASE_TOOL_SCOPE are registered (cases:read, and answer_question under
+// cases:answer: management surfaces spec §3.3). The handler is its own, on
+// the mcp-frontdoor channel (its own rate limit, shared by every front-door
+// client; the per-grant limit is the front door's; it repeats every
+// front-door refusal). The router's fields are removed; anything else is checked
 // against the tool's schema.
 function registerNodeCaseMethods(nodeFleetService, { getRuntime, getContact = null, audit = null, log } = {}) {
   const handler = createCaseToolHandler({ getRuntime, getContact, channel: 'mcp-frontdoor', audit, ...(log ? { log } : {}) });

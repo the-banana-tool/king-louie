@@ -41,6 +41,13 @@ const CACHED_WHEN_OFFLINE = new Set(['describe_machine', 'get_state', 'get_job']
 // node id and job id, and applied only when that reply records the job.
 const EARLY_UPDATE_MS = 60000;
 const EARLY_UPDATE_MAX = 256;
+// A write tool (registerTool's perGrantLimit: every tool in a case write
+// scope, management surfaces spec §3.3) takes a slot in its grant's sliding
+// window before it is forwarded; the 31st in a minute is refused with the
+// node handler's own rate_limited / retry_after shape. The window is per
+// grant id, from the grant the endpoint authenticated, never the arguments.
+const GRANT_WRITE_LIMIT = 30;
+const GRANT_WRITE_WINDOW_MS = 60000;
 const OFFLINE_CODES = new Set(['offline', 'peer_disconnected', 'unknown_node', 'closed', 'not_linked']);
 // The router's own calls (the catalog refresh after fleet.hello): read-only.
 // The node refuses any origin without a grant_id (Task 12), so the router
@@ -98,7 +105,7 @@ function requireFns(obj, fns, what) {
 
 class FleetRouter extends EventEmitter {
   constructor({ registry, nodeHub, cache, scopeRegistry, timeoutMs = 30000, perNodeLimit = 64, totalLimit = 256, maxBytes = MAX_BYTES,
-    saveEveryMs = 60000, now = Date.now, uuid = () => crypto.randomUUID() } = {}) {
+    saveEveryMs = 60000, now = Date.now, uuid = () => crypto.randomUUID(), grantWriteLimit = GRANT_WRITE_LIMIT } = {}) {
     super();
     // Fail closed: without these nothing can be checked or reached.
     requireFns(registry, ['byId', 'byName', 'list', 'presence', 'markOnline', 'markOffline'], 'registry');
@@ -118,6 +125,8 @@ class FleetRouter extends EventEmitter {
     this.inflight = new Map();
     this.total = 0;
     this.extraTools = new Map();
+    this.grantWriteLimit = grantWriteLimit;
+    this.grantWrites = new Map(); // grant id → call times inside the window, oldest first
     this.watchers = new Map(); // public id → Set<{ grantId, fn }>
     this.refreshing = new Map();
     this.refreshAgain = new Map();
@@ -173,11 +182,35 @@ class FleetRouter extends EventEmitter {
   }
 
   // C7 (program §4.19): route(args, ctx) → { machine } | { fanout: true }.
-  registerTool(def, { scope, route } = {}) {
+  // perGrantLimit: the tool's calls count against its grant's write window.
+  registerTool(def, { scope, route, perGrantLimit = false } = {}) {
     if (!def || typeof def.name !== 'string') throw new TypeError('registerTool needs a tool definition with a name');
     if (Object.hasOwn(METHODS, def.name) || def.name === 'list_machines' || this.extraTools.has(def.name)) throw new Error(`tool ${def.name} is already registered`);
     if (typeof scope !== 'string' || typeof route !== 'function') throw new TypeError(`tool ${def.name}: registerTool needs { scope, route }`);
-    this.extraTools.set(def.name, { def, scope, route });
+    this.extraTools.set(def.name, { def, scope, route, perGrantLimit: perGrantLimit === true });
+  }
+
+  // Takes a slot in `grantId`'s write window: → a release for it, or a
+  // rate_limited refusal. Empty windows are dropped as they are met.
+  _takeGrantSlot(grantId) {
+    const t = this.now();
+    for (const [id, times] of this.grantWrites) {
+      while (times.length && times[0] <= t - GRANT_WRITE_WINDOW_MS) times.shift();
+      if (times.length === 0) this.grantWrites.delete(id);
+    }
+    const times = this.grantWrites.get(grantId) || [];
+    if (times.length >= this.grantWriteLimit) {
+      const retryAfter = Math.max(1, Math.ceil((times[0] + GRANT_WRITE_WINDOW_MS - t) / 1000));
+      return { refused: refusal('rate_limited', `rate_limited: at most ${this.grantWriteLimit} case write calls per minute for this client; retry after ${retryAfter}s`, { retry_after: retryAfter }) };
+    }
+    times.push(t);
+    this.grantWrites.set(grantId, times);
+    return {
+      release: () => {
+        const i = times.indexOf(t);
+        if (i !== -1) times.splice(i, 1);
+      }
+    };
   }
 
   // Whether this grant, with these token scopes, may reach `node` for
@@ -543,6 +576,9 @@ class FleetRouter extends EventEmitter {
     // max_bytes never replaces them.
     const params = { ...args, origin, max_bytes: this.maxBytes };
     if (target.fanout) {
+      // A fanned-out write is one call against the grant's window.
+      const fanSlot = tool.perGrantLimit ? this._takeGrantSlot(grant.grant_id) : null;
+      if (fanSlot && fanSlot.refused) return fanSlot.refused;
       const rows = [];
       const unreachable = [];
       const nodes = this.registry.list().filter((r) => r.profile === 'agent' && this._reaches(grant, origin.scopes, name, tool.scope, r, { required: tool.scope }));
@@ -566,9 +602,13 @@ class FleetRouter extends EventEmitter {
     const node = typeof machine === 'string' ? this.registry.byName(machine) : null;
     if (!this._reaches(grant, origin.scopes, name, tool.scope, node, { required: tool.scope })) return unknownMachine(machine);
     if (!this._online(node.node_id)) return offline(machine);
+    const slot = tool.perGrantLimit ? this._takeGrantSlot(grant.grant_id) : null;
+    if (slot && slot.refused) return slot.refused;
     try {
       return await this._forward(node.node_id, `cases.${name}`, params);
     } catch (err) {
+      // Refused by the router's own in-flight bound: nothing reached the node.
+      if (slot && err && err.code === 'frontdoor_busy') slot.release();
       return this._forwardError(err, machine, null);
     }
   }

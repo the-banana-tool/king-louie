@@ -176,6 +176,13 @@ describe('startFrontDoor refusals', () => {
     assert.deepEqual(stopped, ['router', 'device states', 'courier', 'registry transport watch', 'relay', 'tls', 'audit prune']);
   });
 
+  it('with the real tool extensions, cases:read and cases:answer register but cases:write still refuses start (management surfaces §3.3)', async () => {
+    const l = await layout();
+    l.nodeConfig.frontdoor.oauth.scopesEnabled = ['fleet:read', 'cases:read', 'cases:answer', 'cases:write'];
+    await assert.rejects(start(l, { deps: { ...l.deps } }),
+      /frontdoor\.oauth\.scopes_enabled lists "cases:write", which nothing registers/);
+  });
+
   it('carry 11: without the test-only switch the self-probe refuses a name that resolves to loopback; relay.push in service.json reaches the relay', async () => {
     const l = await layout();
     // fix 8: service.json relay.push → the relay's pusher (no test senders here).

@@ -153,10 +153,10 @@ Design:
 - Remove the "withheld pending an owner decision (ruling T16-Q2)" comments; replace with a pointer to the
   spec §3.3.
 
-- [ ] Scope test: `cases:answer` registers, requires `cases:read`, owns `answer_question`; `cases:write`
+- [x] Scope test: `cases:answer` registers, requires `cases:read`, owns `answer_question`; `cases:write`
       still stops startup.
-- [ ] Front-door harness test (`tests/helpers/frontdoor-harness.js`): a grant with `cases:read` +
+- [x] Front-door harness test (`tests/helpers/frontdoor-harness.js`): a grant with `cases:read` +
       `cases:answer` answers a spoken question with a quote; the node records `channel: 'mcp-frontdoor'`;
       a pressed kind is refused; the 31st call inside a minute from one grant is refused, a second grant is
       not.
-- [ ] Covering tests pass; commit `feat(frontdoor): cases:answer scope and a per-grant write-rate limit`.
+- [x] Covering tests pass; commit `feat(frontdoor): cases:answer scope and a per-grant write-rate limit`.
