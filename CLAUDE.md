@@ -278,6 +278,21 @@ Electron build.
   fake client or point `--base-url` at `tests/helpers/fake-llm-server.js`.
   It refuses a private session (exit 2) unless `--send-private` is passed,
   since that sends spans of the session to the provider.
+- `longhaul embed --session <id> --provider openai --model text-embedding-3-small
+  --send-private [--batch 100] [--max-usd 1]` embeds every chunk of a session
+  (chunked as kl-recall's store chunks it, keyed by message id and chunk idx)
+  and its questions, through `OpenAIProvider#embed`, into
+  `LONGHAUL_HOME/private/embeddings/<session>/<model>/` (`meta.json`,
+  `index.jsonl`, little-endian float32 `vectors.f32`, `questions.jsonl`;
+  `src/longhaul/embeddings.js`). That cache holds private data and never
+  leaves `LONGHAUL_HOME/private`. Re-running skips what is cached; it refuses
+  a private session without `--send-private`, and an estimate over
+  `--max-usd`, before any request, and prints counts, tokens and the catalog
+  price only, never text. The `kl-recall-vec` and `kl-recall-vec-only`
+  adapters (an H3 probe, not a candidate system) fuse cosine top
+  `vectorTopK` with BM25, or use cosine alone, and refuse a session whose
+  cache is missing or incomplete. Tests use
+  `tests/helpers/fake-embedding-server.js`.
 
 ## Cases
 

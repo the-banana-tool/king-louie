@@ -88,6 +88,36 @@ function shownFromBuild(out, chunkRows, chatId, totalOf = () => Infinity) {
   };
 }
 
+// What the scorer gets from one ContextBuilder.build: the text shown and
+// which seqs it showed, whole or in part, and at chunk level.
+function resultFromBuild(handle, out) {
+  const chunkIds = out.recalled?.chunkIds || [];
+  const rows = chunkIds.length ? handle.store.chunks(chunkIds) : [];
+  const shown = shownFromBuild(out, rows, handle.chatId, (seq) => {
+    const m = handle.session.index.get(seq);
+    return m ? chunkMessage(m, handle.settings.history.chunk).length : 0;
+  });
+  // Chunk level: a whole tail message counts 1; a shortened one counts
+  // the paragraphs ContextBuilder showed of its own.
+  const shownBySeq = { ...shown.shownBySeq };
+  const totalBySeq = { ...shown.totalBySeq };
+  for (const x of shown.shortened) {
+    if (Number.isInteger(x?.seq) && Number.isInteger(x.shown) && Number.isInteger(x.total) && !(x.seq in totalBySeq)) {
+      shownBySeq[x.seq] = x.shown;
+      totalBySeq[x.seq] = x.total;
+    }
+  }
+  const text = [renderMessages(out.tail || []), out.recalled?.text || ''].filter(Boolean).join('\n\n');
+  return {
+    text,
+    evidenceSeqsShown: shown.evidenceSeqsShown,
+    evidenceSeqsPartial: shown.evidenceSeqsPartial,
+    estTokens: estimateTokens(text),
+    cost: 0,
+    chunks: { tailSeqs: shown.tailWholeSeqs, shownBySeq, totalBySeq }
+  };
+}
+
 // Prefix of the temp store dirs under tmpRoot; `run` removes leftovers.
 const TMP_PREFIX = 'kl-';
 
@@ -136,31 +166,7 @@ function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, tmpRoot } = {
       return measured(async () => {
         // build() takes the new user message as a string; upToSeq is exclusive.
         const out = await handle.builder.build({ chatId: handle.chatId, message: question.question, model: ESTIMATOR_MODEL, upToSeq: askAtSeq });
-        const chunkIds = out.recalled?.chunkIds || [];
-        const rows = chunkIds.length ? handle.store.chunks(chunkIds) : [];
-        const shown = shownFromBuild(out, rows, handle.chatId, (seq) => {
-          const m = handle.session.index.get(seq);
-          return m ? chunkMessage(m, handle.settings.history.chunk).length : 0;
-        });
-        // Chunk level: a whole tail message counts 1; a shortened one counts
-        // the paragraphs ContextBuilder showed of its own.
-        const shownBySeq = { ...shown.shownBySeq };
-        const totalBySeq = { ...shown.totalBySeq };
-        for (const x of shown.shortened) {
-          if (Number.isInteger(x?.seq) && Number.isInteger(x.shown) && Number.isInteger(x.total) && !(x.seq in totalBySeq)) {
-            shownBySeq[x.seq] = x.shown;
-            totalBySeq[x.seq] = x.total;
-          }
-        }
-        const text = [renderMessages(out.tail || []), out.recalled?.text || ''].filter(Boolean).join('\n\n');
-        return {
-          text,
-          evidenceSeqsShown: shown.evidenceSeqsShown,
-          evidenceSeqsPartial: shown.evidenceSeqsPartial,
-          estTokens: estimateTokens(text),
-          cost: 0,
-          chunks: { tailSeqs: shown.tailWholeSeqs, shownBySeq, totalBySeq }
-        };
+        return resultFromBuild(handle, out);
       });
     },
 
@@ -174,4 +180,4 @@ function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, tmpRoot } = {
   };
 }
 
-module.exports = { createKlRecallAdapter, shownFromBuild, recallSettings, TMP_PREFIX };
+module.exports = { createKlRecallAdapter, shownFromBuild, resultFromBuild, recallSettings, TMP_PREFIX, ESTIMATOR_MODEL };

@@ -53,7 +53,7 @@ describe('shownFromBuild', () => {
 
 describe('kl-recall', () => {
   it('is registered next to the other adapters', () => {
-    assert.deepStrictEqual(adapterNames(), ['kl-recall', 'oracle', 'sliding-window']);
+    assert.deepStrictEqual(adapterNames(), ['kl-recall', 'kl-recall-vec', 'kl-recall-vec-only', 'oracle', 'sliding-window']);
   });
 
   it('refuses --recall recalledTokens: the budget comes from --budget-tokens', () => {

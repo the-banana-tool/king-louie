@@ -105,4 +105,70 @@ describe('Retriever', () => {
     assert.deepStrictEqual(await ids({ chatIds: ['chat-1'], kinds: ['assistant'] }), ['chat-1-m2']);
     assert.deepStrictEqual(await ids({ chatIds: ['chat-1'], query: '' }), []);
   });
+
+  describe('vector list (spec §6.3 steps 2-3)', () => {
+    const msgs = [
+      { sender: 'user', text: 'The side gate code at the Lakeside lot is 4417.' },
+      { sender: 'user', text: 'The gate by the dock sticks in the rain.' },
+      { sender: 'user', text: 'Parking permits renew every March for the Lakeside lot.' },
+      { sender: 'user', text: 'Later: the gate code changed after the storm.' }
+    ];
+    const chunkIdOf = (store, messageId) => store.chunksOfMessage(messageId)[0].id;
+
+    it('a chunk on both lists ranks above a chunk on one, with both ranks as signals', async () => {
+      const s = setup(msgs);
+      t = s.t;
+      const lexOnly = await s.retriever.retrieve({ query: 'gate', chatIds: ['chat-1'], settings: recall({ recencyWeight: 0 }), now: BASE_TIME });
+      const lexIds = lexOnly.map((h) => h.chunk.messageId);
+      // The vector list puts m2 (lower on BM25) first, then m3 (not on BM25).
+      const second = lexIds[1];
+      const vectorHits = [{ chunkId: chunkIdOf(t.store, second), vectorRank: 1 }, { chunkId: chunkIdOf(t.store, 'chat-1-m3'), vectorRank: 2 }];
+      const hits = await s.retriever.retrieve({ query: 'gate', chatIds: ['chat-1'], settings: recall({ recencyWeight: 0, kindWeights: { user: 1 } }), now: BASE_TIME, vectorHits });
+      const top = hits[0];
+      assert.strictEqual(top.chunk.messageId, second, 'on both lists beats first on one');
+      assert.strictEqual(top.signals.vectorRank, 1);
+      assert.strictEqual(top.signals.bm25Rank, 2);
+      assert.ok(Math.abs(top.score - (1 / 62 + 1 / 61)) < 1e-12);
+      const m3 = hits.find((h) => h.chunk.messageId === 'chat-1-m3');
+      assert.ok(m3, 'a vector-only hit is recalled');
+      assert.strictEqual(m3.signals.bm25Rank, null);
+      assert.strictEqual(m3.signals.vectorRank, 2);
+    });
+
+    it('lexical: false uses the vector list alone, capped at vectorTopK', async () => {
+      const s = setup(msgs);
+      t = s.t;
+      const vectorHits = ['chat-1-m3', 'chat-1-m1', 'chat-1-m2'].map((id, i) => ({ chunkId: chunkIdOf(t.store, id), vectorRank: i + 1 }));
+      const hits = await s.retriever.retrieve({ query: 'gate', chatIds: ['chat-1'], settings: recall({ recencyWeight: 0, vectorTopK: 2 }), now: BASE_TIME, vectorHits, lexical: false });
+      assert.deepStrictEqual(hits.map((h) => h.chunk.messageId), ['chat-1-m3', 'chat-1-m1']);
+      assert.ok(hits.every((h) => h.signals.bm25Rank === null));
+    });
+
+    it('drops vector hits at or after upToSeq and outside the chat scope', async () => {
+      const s = setup(msgs, [{ id: 'other', messages: [{ sender: 'user', text: 'The other chat gate.' }] }]);
+      t = s.t;
+      const vectorHits = [
+        { chunkId: chunkIdOf(t.store, 'chat-1-m4'), vectorRank: 1 },
+        { chunkId: chunkIdOf(t.store, 'other-m1'), vectorRank: 2 },
+        { chunkId: chunkIdOf(t.store, 'chat-1-m3'), vectorRank: 3 }
+      ];
+      const hits = await s.retriever.retrieve({ query: 'permits', chatIds: ['chat-1'], upToSeq: 4, settings: recall(), now: BASE_TIME, vectorHits, lexical: false });
+      assert.deepStrictEqual(hits.map((h) => h.chunk.messageId), ['chat-1-m3']);
+    });
+
+    it('asks the vectorSearch callback when no list is given', async () => {
+      const t0 = openTempStore();
+      seedChat(t0.store, { messages: msgs });
+      t = t0;
+      const seen = [];
+      const retriever = new Retriever({
+        store: t0.store, estimator: new TokenEstimator(),
+        vectorSearch: async (args) => { seen.push(args); return [{ chunkId: chunkIdOf(t0.store, 'chat-1-m3'), vectorRank: 1 }]; }
+      });
+      const hits = await retriever.retrieve({ query: 'nothing lexical here', chatIds: ['chat-1'], upToSeq: 4, settings: recall(), now: BASE_TIME });
+      assert.deepStrictEqual(hits.map((h) => h.chunk.messageId), ['chat-1-m3']);
+      assert.strictEqual(seen[0].upToSeq, 4);
+      assert.strictEqual(seen[0].settings.vectorTopK, 50);
+    });
+  });
 });

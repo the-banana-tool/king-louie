@@ -12,6 +12,7 @@ const COMMANDS = {
   synth: require('./commands/synth'),
   run: require('./commands/run'),
   author: require('./commands/author'),
+  embed: require('./commands/embed'),
   verify: require('./commands/verify')
 };
 

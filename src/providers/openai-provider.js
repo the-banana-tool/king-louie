@@ -815,6 +815,32 @@ class OpenAIProvider extends BaseLLMProvider {
     });
   }
 
+  /**
+   * Embeddings (POST /embeddings): one vector per input, in input order.
+   * Returns { vectors: number[][], usage: { input }, model }. A non-2xx
+   * reply throws the provider error (its status tells a caller whether to
+   * retry). The caller batches and truncates; this sends what it is given.
+   */
+  async embed(inputs, { model, dimensions, abortSignal } = {}) {
+    if (!Array.isArray(inputs) || !inputs.length) throw new Error('embed needs at least one input');
+    if (!model) throw new Error('embed needs a model');
+    const body = { model, input: inputs.map(String), encoding_format: 'float' };
+    if (Number.isInteger(dimensions) && dimensions > 0) body.dimensions = dimensions;
+    const response = await this.request(`${this.baseUrl}/embeddings`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify(body)
+    }, { abortSignal, model });
+    if (!response.ok) throw await this.buildError(response, { model });
+    const data = await response.json();
+    const rows = Array.isArray(data?.data) ? [...data.data].sort((a, b) => a.index - b.index) : [];
+    if (rows.length !== inputs.length || rows.some((r) => !Array.isArray(r.embedding))) {
+      throw new Error(`embeddings reply has ${rows.length} vectors for ${inputs.length} inputs`);
+    }
+    const input = Number(data?.usage?.prompt_tokens ?? data?.usage?.total_tokens);
+    return { vectors: rows.map((r) => r.embedding), usage: { input: Number.isFinite(input) ? input : null }, model: data?.model || model };
+  }
+
   async listModels(options = {}) {
     const response = await this.request(`${this.baseUrl}/models`, {
       method: 'GET',

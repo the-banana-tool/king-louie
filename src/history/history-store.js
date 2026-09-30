@@ -458,6 +458,7 @@ class HistoryStore {
   searchText(query, options = {}) { return this.indexed ? chunkIndex.searchText(this.db, query, options) : []; }
   chunks(ids) { return this.indexed ? chunkIndex.getChunks(this.db, ids) : []; }
   chunksOfMessage(messageId) { return this.indexed ? chunkIndex.chunksOfMessage(this.db, messageId) : []; }
+  chunksOfChat(chatId) { return this.indexed ? chunkIndex.chunksOfChat(this.db, chatId) : []; }
   pairedToolMessageId(messageId) { return this.indexed ? chunkIndex.pairedToolMessageId(this.db, messageId) : null; }
   messageChunkCounts(messageIds) { return this.indexed ? chunkIndex.messageChunkCounts(this.db, messageIds) : new Map(); }
   lastSeq(chatId) { return chunkIndex.lastSeq(this.db, chatId); }

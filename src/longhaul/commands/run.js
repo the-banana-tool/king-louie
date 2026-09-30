@@ -6,7 +6,8 @@ const { UsageError } = require('../errors');
 const { validateSessionId } = require('../session-format');
 
 const USAGE = 'Usage: longhaul run --adapters kl-recall,sliding-window,oracle [--sessions <data root>] [--session <id>]... '
-  + '[--budget-tokens 6000] [--window-tokens N] [--recall key=value]... [--seed N] [--include-unverified]';
+  + '[--budget-tokens 6000] [--window-tokens N] [--recall key=value]... [--seed N] [--include-unverified] '
+  + '[--embed-model text-embedding-3-small] [--send-private]';
 
 function positiveInt(value, name) {
   const n = Number(value);
@@ -48,7 +49,9 @@ module.exports = {
     'window-tokens': { type: 'string' },
     recall: { type: 'string', multiple: true },
     seed: { type: 'string' },
-    'include-unverified': { type: 'boolean', default: false }
+    'include-unverified': { type: 'boolean', default: false },
+    'embed-model': { type: 'string' },
+    'send-private': { type: 'boolean', default: false }
   },
   exitCodeFor,
   positiveInt,
@@ -56,8 +59,17 @@ module.exports = {
     if (!values.adapters) throw new UsageError(USAGE);
     for (const id of values.session || []) validateSessionId(id);
     const adapterNames = values.adapters.split(',').map((s) => s.trim()).filter(Boolean);
+    const recall = parseRecallPairs(values.recall);
+    // kl-recall-vec(-only): vectors from `longhaul embed`'s cache; a question
+    // with no cached vector is embedded now only with --send-private.
+    const vec = {
+      recall, privateRoot: ctx.home.private, env: ctx.env, sendPrivate: values['send-private'],
+      ...(values['embed-model'] ? { model: values['embed-model'] } : {})
+    };
     const adapterConfig = {
-      'kl-recall': { recall: parseRecallPairs(values.recall) },
+      'kl-recall': { recall },
+      'kl-recall-vec': vec,
+      'kl-recall-vec-only': vec,
       'sliding-window': values['window-tokens'] ? { windowTokens: positiveInt(values['window-tokens'], 'window-tokens') } : {}
     };
     const result = await runBenchmark({
