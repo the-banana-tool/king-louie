@@ -32,7 +32,7 @@ const flush = () => new Promise((r) => setImmediate(r));
 const RETRY = 600000;
 
 function setup(embedder = {}, extra = {}) {
-  let settings = { history: { embedder } };
+  let settings = { history: { embedder, ...(extra.recall ? { recall: extra.recall } : {}) } };
   let now = 0;
   const runner = new StubRunner();
   const notices = [];
@@ -67,7 +67,7 @@ describe('EmbedderHost', () => {
     const none = setup({ kind: 'none' });
     none.host.start();
     assert.strictEqual(none.host.status().state, 'off');
-    assert.strictEqual(none.runner.loads.length, 0);
+    assert.strictEqual(none.runner.loads.filter((l) => l.role === 'embedder').length, 0, 'no embedder load (the reranker preload is its own test)');
   });
 
   it('local: starting, downloading with progress, then ready with the model under its key', async () => {
@@ -147,10 +147,11 @@ describe('EmbedderHost', () => {
     assert.strictEqual(s.host.current(), null);
     s.advance(RETRY * 10);
     s.host.current();
-    assert.strictEqual(s.runner.loads.length, 1, 'disabled is not retried on a timer');
+    const embedderLoads = () => s.runner.loads.filter((l) => l.role === 'embedder').length;
+    assert.strictEqual(embedderLoads(), 1, 'disabled is not retried on a timer');
     s.host.retry();
     assert.ok(s.runner.resets >= 1);
-    assert.strictEqual(s.runner.loads.length, 2);
+    assert.strictEqual(embedderLoads(), 2);
   });
 
   it('openai: built through createProvider, ready at once; a failed call reported with fail() makes it unavailable once', async () => {
@@ -179,7 +180,7 @@ describe('EmbedderHost', () => {
     assert.strictEqual(s.host.status().state, 'starting', 'the stale failure does not mark the local key unavailable');
     assert.strictEqual(s.notices.length, 0, 'and shows nothing');
     assert.strictEqual(s.warnings.length, 0);
-    s.runner.loads[0].resolve({ dim: 384 });
+    s.runner.loads.find((l) => l.role === 'embedder').resolve({ dim: 384 });
     await flush();
     assert.strictEqual(s.host.status().state, 'ready', 'the local load still lands');
     assert.strictEqual(s.host.current().name, 'local:Xenova/bge-small-en-v1.5');
@@ -203,6 +204,45 @@ describe('EmbedderHost', () => {
     s.host.start();
     assert.strictEqual(s.host.status().state, 'unavailable');
     assert.match(s.host.status().error, /No OpenAI key/);
+  });
+
+  it('preloads the cross-encoder at document priority once the embedder is ready, when a rerank setting is on', async () => {
+    const s = setup();
+    s.host.start();
+    assert.deepStrictEqual(s.runner.loads.map((l) => l.role), ['embedder'], 'nothing before the embedder is ready');
+    s.runner.loads[0].resolve({ dim: 384 });
+    await flush();
+    assert.deepStrictEqual(s.runner.loads.map((l) => [l.role, l.model, l.opts.priority]), [
+      ['embedder', 'Xenova/bge-small-en-v1.5', undefined],
+      ['reranker', 'Xenova/ms-marco-MiniLM-L-6-v2', 'document']
+    ]);
+    s.runner.loads[1].resolve({ dim: null });
+    await s.host.rerank('gate', ['a']);
+    assert.strictEqual(s.runner.loads.length, 2, 'SearchHistory uses the preloaded model');
+
+    const none = setup({ kind: 'none' });
+    none.host.start();
+    assert.deepStrictEqual(none.runner.loads.map((l) => [l.role, l.opts.priority]), [['reranker', 'document']], 'kind none preloads at start');
+
+    const off = setup({}, { recall: { rerank: { search: false, enabled: false } } });
+    off.host.start();
+    off.runner.loads[0].resolve({ dim: 384 });
+    await flush();
+    assert.deepStrictEqual(off.runner.loads.map((l) => l.role), ['embedder'], 'no preload with both rerank settings off');
+  });
+
+  it('a failed reranker preload is a debug line; SearchHistory then gets RERANK_UNAVAILABLE until retryMs', async () => {
+    const s = setup({ kind: 'none' });
+    s.host.start();
+    s.runner.loads[0].reject(new EmbedError('MODEL_UNAVAILABLE', 'fetch failed (offline)'));
+    await flush();
+    assert.strictEqual(s.warnings.length, 0);
+    assert.strictEqual(s.notices.length, 0);
+    await assert.rejects(s.host.rerank('gate', ['a']), (err) => err.code === 'RERANK_UNAVAILABLE' && /offline/.test(err.message));
+    assert.strictEqual(s.runner.loads.length, 1, 'no new download on the SearchHistory call');
+    s.advance(RETRY);
+    s.host.current();
+    assert.strictEqual(s.runner.loads.length, 2, 'retried after retryMs');
   });
 
   it('rerank loads the cross-encoder once and passes a deadline', async () => {

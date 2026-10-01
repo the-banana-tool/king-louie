@@ -132,6 +132,19 @@ describe('EmbedRunner', () => {
     await assert.rejects(waiting, (err) => err.code === 'MODEL_UNAVAILABLE');
   });
 
+  it('a load at document priority waits behind the slices already queued and lets a query go first', async () => {
+    const r = make();
+    await load(r);
+    const order = [];
+    const doc = (n) => r.embed('fake/one', Array.from({ length: 8 }, () => `__slow__ gate ${n}`)).then(() => order.push(`doc${n}`));
+    const jobs = [doc(1), doc(2)];
+    await new Promise((resolve) => setImmediate(resolve));
+    jobs.push(r.load('reranker', 'fake/rr', { modelsDir: MODELS, priority: 'document' }).then(() => order.push('preload')));
+    jobs.push(r.embed('fake/one', ['gate code'], { priority: 'query' }).then(() => order.push('query')));
+    await Promise.all(jobs);
+    assert.deepStrictEqual(order, ['doc1', 'query', 'doc2', 'preload']);
+  });
+
   it('reranks in length-sorted slices, scores back in the given order; a passed deadline rejects RERANK_TIMEOUT', async () => {
     const r = make();
     await r.load('reranker', 'fake/rr', { modelsDir: MODELS });

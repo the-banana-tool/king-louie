@@ -98,10 +98,14 @@ class EmbedRunner extends EventEmitter {
     return this.child ? 'running' : 'idle';
   }
 
-  load(role, model, { modelsDir, allowDownload = true } = {}) {
+  // priority 'document' queues a background preload behind the slices
+  // already waiting and behind every query; the default runs it first.
+  load(role, model, { modelsDir, allowDownload = true, priority = 'load' } = {}) {
     const r = role === 'reranker' ? 'reranker' : 'embedder';
     this.desired[r] = { model, modelsDir, allowDownload };
-    return this._enqueue(this._loadJob(r, this.desired[r]));
+    const job = this._loadJob(r, this.desired[r]);
+    if (priority === 'document') job.priority = PRIORITY.document;
+    return this._enqueue(job);
   }
 
   embed(model, texts, { priority = 'document' } = {}) {
