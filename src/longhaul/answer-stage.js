@@ -1,12 +1,15 @@
 'use strict';
-// The answer stage for one (adapter, question) item (benchmark spec §8
-// steps 3 and 4, §15): the answer call on the adapter's context, then the
-// judge call on the reply, both through the model cache. Returns the
-// record's fields (verdicts, booleans, numbers, error codes) and, apart, the
-// reply and the verdict's reason for the spot-check sample; a record never
-// carries text. A call that fails after its retries is recorded as an error
-// code and left out of the rates. A refused key (401/403) stops the run,
-// since every later call would fail the same way.
+// The answer stage's parts (benchmark spec §8 steps 3 and 4, §8.1, §15):
+// which questions each adapter answers (selectQuestions), the calls a run
+// would make (planCalls, for the estimate), the spot-check sample, and, for
+// one (adapter, question) item, the answer call on the adapter's context and
+// then the judge call on the reply, both through the model cache
+// (answerAndJudge). That returns the record's fields (verdicts, booleans,
+// numbers, error codes) and, apart, the reply and the verdict's reason for
+// the spot-check sample; a record never carries text. A call that fails
+// after its retries is recorded as an error code and left out of the rates.
+// A refused key (401/403) stops the run, since every later call would fail
+// the same way.
 const path = require('path');
 const { cacheKey, cachedCall, stableStringify } = require('./model-cache');
 const { buildAnswerPrompt, NOTHING_SHOWN } = require('./answer');
@@ -160,9 +163,9 @@ const TIERS = Object.freeze(['grid', 'frontier']);
 // question, every adapter except the frontier-only full-history. frontier:
 // a stratified sample (sampling.js sampleQuestions, seeded) of sampleSize.
 // In either tier the long-context adapters (full-history, real-compaction)
-// get only the first longContextSample of the stratified order, since at
-// 90-128K tokens a question they are the cost of a run (measured facts;
-// decision D3).
+// get only the first longContextSample of the stratified order: at 90-128K
+// tokens a question, their answer calls are most of a run's cost (measured
+// facts; decision D3).
 function selectQuestions(sets, adapters, { tier = 'grid', sampleSize = 150, longContextSample = null, seed = 1 } = {}) {
   if (!TIERS.includes(tier)) throw new UsageError(`--tier must be grid or frontier, got ${JSON.stringify(tier)}`);
   if (tier === 'grid') {
@@ -196,20 +199,20 @@ function selectQuestions(sets, adapters, { tier = 'grid', sampleSize = 150, long
 // need a model for their context (deferred) add their summaries, and an
 // answer and a judgment per question with the context at the adapter's
 // estimate.
-function planCalls({ items, deferred, answer: a }) {
+function planCalls({ items, deferred, answer }) {
   const calls = [];
   const counts = { answers: 0, answersCached: 0, judgments: 0, judgmentsCached: 0, summaries: 0, summariesCached: 0 };
   const model = (c) => ({ provider: c.provider, model: c.model, local: Boolean(c.local) });
-  const answerChars = (contextChars, q) => a.prompts.answer.text.length + contextChars + q.question.length;
-  const judgeChars = (q) => buildJudgePrompt(a.prompts.judge.text, { question: q, reply: '' }).length;
+  const answerChars = (contextChars, q) => answer.prompts.answer.text.length + contextChars + q.question.length;
+  const judgeChars = (q) => buildJudgePrompt(answer.prompts.judge.text, { question: q, reply: '' }).length;
   const pushAnswer = (adapter, q, contextChars) => {
-    calls.push({ role: 'answer', adapter, ...model(a.answerClient), inputChars: answerChars(contextChars, q), maxTokens: a.answerMaxTokens });
+    calls.push({ role: 'answer', adapter, ...model(answer.answerClient), inputChars: answerChars(contextChars, q), maxTokens: answer.answerMaxTokens });
     counts.answers += 1;
   };
   const pushJudge = (adapter, q, reply) => {
     calls.push({
-      role: 'judge', adapter, ...model(a.judgeClient),
-      inputChars: judgeChars(q) + (reply === null ? 0 : reply.length), extraInputTokens: reply === null ? a.answerMaxTokens : 0, maxTokens: a.judgeMaxTokens
+      role: 'judge', adapter, ...model(answer.judgeClient),
+      inputChars: judgeChars(q) + (reply === null ? 0 : reply.length), extraInputTokens: reply === null ? answer.answerMaxTokens : 0, maxTokens: answer.judgeMaxTokens
     });
     counts.judgments += 1;
   };
@@ -217,13 +220,13 @@ function planCalls({ items, deferred, answer: a }) {
     if (it.record.error) continue;
     const aKey = answerKey({
       adapterConfigSha256: it.adapterConfigSha256, question: it.q, contextSha256: it.contextSha256,
-      client: a.answerClient, promptSha256: a.prompts.answer.sha256, maxTokens: a.answerMaxTokens
+      client: answer.answerClient, promptSha256: answer.prompts.answer.sha256, maxTokens: answer.answerMaxTokens
     });
-    const hit = a.cache.get('answer', aKey);
+    const hit = answer.cache.get('answer', aKey);
     if (hit) counts.answersCached += 1;
     else pushAnswer(it.adapter.name, it.q, it.contextChars);
-    const judged = hit && a.cache.get('judge', judgeKey({
-      answerCacheKey: aKey, prompt: buildJudgePrompt(a.prompts.judge.text, { question: it.q, reply: hit.text }), client: a.judgeClient, maxTokens: a.judgeMaxTokens
+    const judged = hit && answer.cache.get('judge', judgeKey({
+      answerCacheKey: aKey, prompt: buildJudgePrompt(answer.prompts.judge.text, { question: it.q, reply: hit.text }), client: answer.judgeClient, maxTokens: answer.judgeMaxTokens
     }));
     if (judged) counts.judgmentsCached += 1;
     else pushJudge(it.adapter.name, it.q, hit ? hit.text : null);
