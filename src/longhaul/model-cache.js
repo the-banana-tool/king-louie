@@ -87,8 +87,8 @@ const resultOf = (entry, cached) => ({
 // One model call through the cache. A hit spends nothing and returns what
 // the reply cost when it was made (a report's cost is what the result cost
 // to produce; spend.json has what this run paid). A miss asks the hooks
-// (the spend guard) first, retries 429/5xx/transport failures, then stores
-// the reply before returning it.
+// (the spend guard) first, retries 429/5xx/transport failures, settles the
+// spend, then stores the reply before returning it.
 async function cachedCall({ cache, stage, key, client, prompt, maxTokens, hooks = NO_HOOKS, retry = {}, meta = {}, clock = () => Date.now() }) {
   const hit = cache.get(stage, key);
   if (hit) return resultOf(hit, true);
@@ -110,8 +110,10 @@ async function cachedCall({ cache, stage, key, client, prompt, maxTokens, hooks 
     maxTokens,
     meta
   };
-  cache.put(stage, key, entry);
+  // Settle the spend first: the call is paid for whether or not the cache
+  // write below succeeds, so a failed write never leaves it reserved.
   hooks.afterCall(ticket, entry);
+  cache.put(stage, key, entry);
   return resultOf(entry, false);
 }
 

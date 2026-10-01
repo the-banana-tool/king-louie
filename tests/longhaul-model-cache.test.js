@@ -75,6 +75,19 @@ describe('cachedCall', () => {
     assert.deepStrictEqual(log, [['before', 2, 50], ['after', 7, 0.01], ['before', 2, 50], ['cancel', 7]]);
   });
 
+  it('settles the spend before storing, so a failing cache write never leaves a paid call reserved', async () => {
+    const cache = newCache();
+    cache.put = () => { throw new Error('disk full'); };
+    const log = [];
+    const hooks = {
+      beforeCall: () => 7,
+      afterCall: (ticket, usage) => log.push(['after', ticket, usage.costUsd, usage.inputTokens]),
+      cancel: (ticket) => log.push(['cancel', ticket])
+    };
+    await assert.rejects(call(cache, fakeClient(), 'p1', { hooks }), /disk full/);
+    assert.deepStrictEqual(log, [['after', 7, 0.01, 2]]);
+  });
+
   it('retries a 429 inside one call and stores one entry', async () => {
     const cache = newCache();
     const client = fakeClient({ failAt: 1, error: Object.assign(new Error('slow down'), { status: 429 }) });
