@@ -10,7 +10,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { runBenchmark } = require('../src/longhaul/run');
+const { runBenchmark, sigintHandler } = require('../src/longhaul/run');
 const { createAdapter } = require('../src/longhaul/adapters');
 const { writeSyntheticRoot, SYNTH_FIXTURES } = require('../src/longhaul/synthetic');
 const { readQuestions, questionsFile } = require('../src/longhaul/questions');
@@ -184,8 +184,37 @@ describe('answer stage', () => {
     assert.strictEqual(seen[0].code, 130);
     assert.strictEqual(seen[0].spend.stoppedBy, 'SIGINT');
     assert.strictEqual(seen[0].spend.calls, 6, 'three answers and three judgments had settled');
+    assert.ok(seen[0].spend.reservedUsd > 0, 'the answer in flight is recorded as an open reservation (an upper bound)');
     assert.deepStrictEqual(seen[0].tmp, [], 'the context texts are removed');
     assert.strictEqual(signals.listenerCount('SIGINT'), 0, 'the handler is removed when the run ends');
+  });
+
+  it('the SIGINT handler writes spend.json mid-run, never over a finished run, and always removes the texts and exits 130 (review round 2)', () => {
+    const run = (state) => {
+      const ctxDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'lh-sigint-'));
+      const codes = [];
+      sigintHandler(state, { ctxDir, exit: (code) => codes.push(code) })();
+      return { codes, removed: !fs.existsSync(ctxDir) };
+    };
+    const writes = [];
+    assert.deepStrictEqual(run({ writeSpend: () => writes.push('SIGINT'), finished: false }), { codes: [130], removed: true });
+    assert.deepStrictEqual(writes, ['SIGINT']);
+    assert.deepStrictEqual(run({ writeSpend: () => writes.push('again'), finished: true }), { codes: [130], removed: true });
+    assert.deepStrictEqual(writes, ['SIGINT'], 'a finished run keeps its spend.json');
+    assert.deepStrictEqual(run({ writeSpend: null, finished: false }), { codes: [130], removed: true }, 'before spend.json exists');
+    assert.deepStrictEqual(run({ writeSpend: () => { throw Object.assign(new Error('disk'), { code: 'EIO' }); }, finished: false }), { codes: [130], removed: true });
+  });
+
+  it('leaves no SIGINT handler and no context dir behind when the stage throws before its first item (review round 2)', async () => {
+    const home = setup();
+    const questions = await allQuestions(home);
+    const { EventEmitter } = require('events');
+    const signals = new EventEmitter();
+    const broken = { ...blind, describe: () => { throw new Error('describe failed'); } };
+    const opts = answerOptions(home, questions, { signals, exit: () => assert.fail('no exit') });
+    await assert.rejects(runBenchmark({ home, adapters: [broken], answer: opts, now: fixedNow, commit: 'x' }), /describe failed/);
+    assert.strictEqual(signals.listenerCount('SIGINT'), 0);
+    assert.deepStrictEqual(fs.readdirSync(home.tmp), []);
   });
 
   it('refuses a private session without --send-private before any call, and writes no run', async () => {

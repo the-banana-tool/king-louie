@@ -25,6 +25,7 @@ const { estimateCalls, checkBudget, SpendGuard, DEFAULT_MAX_USD, EST_CHARS_PER_T
 const { JUDGE_RULES_SHA256 } = require('./judge');
 const { isAuthFailure, retryable } = require('./retry');
 const { UsageError } = require('./errors');
+const { round8 } = require('./format');
 const { createLogger } = require('../logging');
 
 const log = createLogger('longhaul/run');
@@ -338,6 +339,22 @@ function recordOrder(adapters) {
     || x.askAtSeq - y.askAtSeq || byCodePoint(x.questionId, y.questionId);
 }
 
+// Ctrl-C during the answer stage: spend.json (once it exists, and unless the
+// run already wrote its final one) says the run stopped on SIGINT, with the
+// settled totals and the open reservations; the context texts are removed
+// and the process exits 130. Synchronous, best effort.
+function sigintHandler(state, { ctxDir, exit }) {
+  return () => {
+    try {
+      if (state.writeSpend && !state.finished) state.writeSpend();
+    } catch (err) {
+      log.warn('could not write spend.json on SIGINT', { code: err.code || 'error' });
+    }
+    fs.rmSync(ctxDir, { recursive: true, force: true });
+    exit(130);
+  };
+}
+
 async function runAnswerStage(run, options) {
   const { home, now, seed } = run;
   const answer = {
@@ -368,32 +385,26 @@ async function runAnswerStage(run, options) {
   const runId = newRunId(now());
   const ctxDir = path.join(home.tmp, `${KL_TMP_PREFIX}ctx-${runId}`);
   fs.mkdirSync(ctxDir, { recursive: true });
-  // Ctrl-C: spend.json (once it exists) says the run stopped on SIGINT, with
-  // the totals so far (calls still in flight are not in them), the context
-  // texts are removed, and the process exits. Synchronous, best effort.
-  let writeSpend = null;
-  const onSigint = () => {
-    try { if (writeSpend) writeSpend('SIGINT'); } catch (err) { log.warn('could not write spend.json on SIGINT', { code: err.code || 'error' }); }
-    fs.rmSync(ctxDir, { recursive: true, force: true });
-    answer.exit(130);
-  };
-  answer.signals.once('SIGINT', onSigint);
-  const describeSha = new Map(adapters.map((x) => [x, sha256Text(stableStringify(x.describe()))]));
-  const items = [];
-  const contextItem = async (adapter, handle, session, q) => {
-    const { record, text } = await scoreOne({ runId, adapter, handle, session, q, budgetTokens: run.budgetTokens });
-    record.tier = answer.tier;
-    const item = { adapter, q, record, adapterConfigSha256: describeSha.get(adapter) };
-    if (text !== null) {
-      item.contextFile = path.join(ctxDir, `${items.length}.txt`);
-      fs.writeFileSync(item.contextFile, text);
-      item.contextChars = text.length;
-      item.contextSha256 = sha256Text(text);
-    }
-    items.push(item);
-  };
+  const sigint = { writeSpend: null, finished: false };
+  const onSigint = sigintHandler(sigint, { ctxDir, exit: answer.exit });
 
   try {
+    answer.signals.once('SIGINT', onSigint);
+    const describeSha = new Map(adapters.map((x) => [x, sha256Text(stableStringify(x.describe()))]));
+    const items = [];
+    const contextItem = async (adapter, handle, session, q) => {
+      const { record, text } = await scoreOne({ runId, adapter, handle, session, q, budgetTokens: run.budgetTokens });
+      record.tier = answer.tier;
+      const item = { adapter, q, record, adapterConfigSha256: describeSha.get(adapter) };
+      if (text !== null) {
+        item.contextFile = path.join(ctxDir, `${items.length}.txt`);
+        fs.writeFileSync(item.contextFile, text);
+        item.contextChars = text.length;
+        item.contextSha256 = sha256Text(text);
+      }
+      items.push(item);
+    };
+
     // Pass 1: every context that needs no model, built here, nothing sent.
     const deferred = [];
     for (const { set, questions, longQuestions } of selection.perSet) {
@@ -439,11 +450,14 @@ async function runAnswerStage(run, options) {
     // spend.json is on disk from here on and rewritten after every item, so
     // a run that stops (a refused key, a crash, Ctrl-C) still says what it
     // paid; stoppedBy names the code that stopped it.
-    writeSpend = (stoppedBy = null) => {
-      spend = { estimateUsd: estimate.totalUsd, estimateKnownUsd: estimate.knownUsd, ...guard.totals(), setupCosts, stoppedBy };
+    const writeSpend = (stoppedBy = null, extra = {}) => {
+      spend = { estimateUsd: estimate.totalUsd, estimateKnownUsd: estimate.knownUsd, ...guard.totals(), setupCosts, stoppedBy, ...extra };
       writeFileAtomic(path.join(dir, 'spend.json'), `${JSON.stringify(spend, null, 2)}\n`);
     };
     writeSpend();
+    // On Ctrl-C the calls in flight are not settled: their reservations are
+    // recorded as reservedUsd, an upper bound on what they cost.
+    sigint.writeSpend = () => writeSpend('SIGINT', { reservedUsd: round8(guard.reservedUsd) });
     // One adapter's questions in one session, recorded as context errors.
     const recordFailed = (d, code) => {
       for (const q of d.qs) {
@@ -507,12 +521,14 @@ async function runAnswerStage(run, options) {
       });
     } catch (err) {
       writeSpend(err.code || 'error');
+      sigint.finished = true;
       throw err;
     }
 
     const records = items.map((it) => it.record).sort(recordOrder(adapters));
     writeFileAtomic(recordsPath, (write) => { for (const r of records) write(`${JSON.stringify(r)}\n`); });
     writeSpend();
+    sigint.finished = true;
     const file = spotCheckFile(home, runId);
     const n = writeSpotCheckSample(file, texts, { seed });
     const result = finish({ run, runId, dir, config, records, spend, setupCosts });
@@ -523,4 +539,4 @@ async function runAnswerStage(run, options) {
   }
 }
 
-module.exports = { runBenchmark, gitCommit, removeStaleTmp, contextCapTokens, KL_TMP_PREFIX, RUN_ID_RE, ANSWER_PROMPT_OVERHEAD_TOKENS };
+module.exports = { runBenchmark, sigintHandler, gitCommit, removeStaleTmp, contextCapTokens, KL_TMP_PREFIX, RUN_ID_RE, ANSWER_PROMPT_OVERHEAD_TOKENS };
