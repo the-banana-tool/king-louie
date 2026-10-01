@@ -157,4 +157,22 @@ describe('VectorIndex', () => {
     assert.ok(index.stats().bytes <= index.stats().capBytes);
     assert.strictEqual(index.vectorOf(KEY, t.store.chunksOfChat('a')[0]), null, 'a was the least recently used');
   });
+
+  it('a store error while loading drops the half-loaded matrix; the next search loads it whole', async () => {
+    t = openTempStore();
+    seedChat(t.store, { messages: TEXTS });
+    await embedAll(t.store);
+    const index = new VectorIndex({ store: t.store, log: quietLog() });
+    const query = await q('linen bandage');
+    const real = t.store.vectorRows.bind(t.store);
+    t.store.vectorRows = function* (...args) {
+      const [first] = real(...args);
+      yield first;
+      throw new Error('database disk image is malformed');
+    };
+    assert.throws(() => index.search({ model: KEY, query, chatIds: ['chat-1'], k: 6 }), /malformed/);
+    assert.deepStrictEqual([index.stats().chats, index.stats().bytes], [0, 0], 'no half-loaded entry is kept');
+    t.store.vectorRows = real;
+    assert.strictEqual(index.search({ model: KEY, query, chatIds: ['chat-1'], k: 6 }).length, 6, 'reloaded from scratch');
+  });
 });

@@ -33,7 +33,7 @@ function embedder({ hang = false, fail = null } = {}) {
 }
 function hostWith(e) {
   const failures = [];
-  return { failures, current: () => e, reason: () => 'the embedding model is loading', fail: (err) => failures.push(err) };
+  return { failures, current: () => e, reason: () => 'the embedding model is loading', fail: (err, key) => failures.push([err, key]) };
 }
 async function embedAll(store) {
   const rows = store.pendingEmbeddings(KEY, { limit: 1000 });
@@ -90,10 +90,31 @@ describe('vector search', () => {
     const a = createVectorSearch({ host: failing, index: new VectorIndex({ store: t.store, log: quiet }) });
     assert.deepStrictEqual(await a.vectorSearch({ query: 'x', chatIds: ['chat-1'], settings: recall(), stats: {} }), []);
     assert.strictEqual(failing.failures.length, 1);
+    assert.deepStrictEqual(failing.failures[0][1], KEY, 'reported under the key that failed');
     const crashing = hostWith(embedder({ fail: Object.assign(new Error('exited'), { code: 'EMBED_WORKER_CRASHED' }) }));
     const b = createVectorSearch({ host: crashing, index: new VectorIndex({ store: t.store, log: quiet }) });
     await b.vectorSearch({ query: 'x', chatIds: ['chat-1'], settings: recall(), stats: {} });
     assert.strictEqual(crashing.failures.length, 0);
+    const stopping = hostWith(embedder({ fail: Object.assign(new Error('the embed runner was stopped'), { code: 'EMBED_STOPPED' }) }));
+    const c = createVectorSearch({ host: stopping, index: new VectorIndex({ store: t.store, log: quiet }) });
+    const stats = {};
+    assert.deepStrictEqual(await c.vectorSearch({ query: 'x', chatIds: ['chat-1'], settings: recall(), stats }), []);
+    assert.strictEqual(stopping.failures.length, 0, 'a shutdown is not a failure');
+    assert.strictEqual(stats.embedder, 'none');
+  });
+
+  it('never throws: a store error while loading vectors is BM25 alone with a note', async () => {
+    t = openTempStore();
+    seedChat(t.store, { messages: MSGS });
+    await embedAll(t.store);
+    t.store.vectorRows = () => { throw new Error('database disk image is malformed'); };
+    const host = hostWith(embedder());
+    const { vectorSearch } = createVectorSearch({ host, index: new VectorIndex({ store: t.store, log: quiet }), log: quiet });
+    const stats = {};
+    assert.deepStrictEqual(await vectorSearch({ query: 'linen', chatIds: ['chat-1'], settings: recall(), stats }), []);
+    assert.strictEqual(stats.embedder, 'none');
+    assert.match(stats.vectorsSkipped, /could not be read.*malformed/);
+    assert.strictEqual(host.failures.length, 0, 'a store error is not an embedder failure');
   });
 
   it('a chat over vectorCacheMb on its own: BM25 alone, and the provenance note names the cap', async () => {
@@ -105,7 +126,8 @@ describe('vector search', () => {
     const { vectorSearch } = createVectorSearch({ host: hostWith(embedder()), index });
     const stats = {};
     assert.deepStrictEqual(await vectorSearch({ query: 'linen', chatIds: ['chat-1'], settings: recall(), stats }), []);
-    assert.deepStrictEqual(stats, { embedder: KEY, vectorsSkipped: 'this chat has more vectors than history.recall.vectorCacheMb holds' });
+    assert.deepStrictEqual(stats, { embedder: 'none', vectorsSkipped: 'this chat has more vectors than history.recall.vectorCacheMb holds' },
+      'the key was not used for this turn');
 
     const estimator = new TokenEstimator();
     const builder = new ContextBuilder({

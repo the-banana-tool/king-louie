@@ -90,8 +90,9 @@ class VectorIndex {
     try {
       this._extend(e, model, chatId, cap);
     } catch (err) {
-      if (err !== TOO_LARGE) throw err;
+      // Never keep a half-loaded matrix: it reloads from scratch next time.
       this.entries.delete(key);
+      if (err !== TOO_LARGE) throw err;
       this.tooLarge.add(key);
       if (!this.warned.has(key)) {
         this.warned.add(key);

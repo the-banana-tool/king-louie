@@ -33,6 +33,9 @@ describe('renderer: the recall line', () => {
     assert.match(line({ ...base, embedder: 'local:Xenova/bge-small-en-v1.5' }), / · BM25 \+ vectors$/);
     assert.match(line({ ...base, embedder: 'none', vectorsSkipped: 'embedding model not loaded: fetch failed' }), / · BM25 only: embedding model not loaded: fetch failed$/);
     assert.match(line({ ...base, embedder: 'none', vectorsSkipped: null }), / · BM25$/);
+    // A chat over vectorCacheMb: vector-search records embedder 'none' (the key was not used).
+    assert.match(line({ ...base, embedder: 'none', vectorsSkipped: 'this chat has more vectors than history.recall.vectorCacheMb holds' }),
+      / · BM25 only: this chat has more vectors than history\.recall\.vectorCacheMb holds$/);
   });
 
   it('renders under assistant messages with provenance, excerpts as text', () => {
