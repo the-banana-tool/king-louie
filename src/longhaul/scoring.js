@@ -128,6 +128,9 @@ function summarize(records, { setupCosts = [] } = {}) {
       answerTokenContainment: rate(scored, 'answerTokensContained'),
       // Evidence messages shown only in part (not counted in evidence recall).
       partial: scored.reduce((n, r) => n + (r.evidencePartial || 0), 0),
+      // Questions whose context showed no tail message whole (tailEmpty is
+      // null, not counted, for an adapter that reports no tail).
+      emptyTail: ok.filter((r) => r.tailEmpty === true).length,
       chunkEvidenceRecall: mean(scored.map((r) => r.chunkEvidenceRecall)),
       byKind: groupRecall(scored, 'kind'),
       byBucket: groupRecall(scored, 'bucket'),
@@ -306,6 +309,7 @@ function renderSummaryMarkdown(config, summary, { spend = null, comparisons = []
   for (const [name, s] of Object.entries(summary)) {
     lines.push(`| ${name} | ${s.questions} | ${s.scored} | ${s.errors} | ${fmt(s.evidenceRecall)} | ${fmt(s.answerContainment)} | ${fmt(s.answerTokenContainment)} | ${s.partial} | ${fmt(s.chunkEvidenceRecall)} | ${s.estTokens.median ?? '—'} | ${s.estTokens.p90 ?? '—'} | ${fmt(s.latencyMs.median, 1)} | ${fmt(s.latencyMs.p90, 1)} | ${s.leaks} |`);
   }
+  lines.push('', `Empty tail (no tail message shown whole; H2's row-counted tail left agent sessions without one): ${Object.entries(summary).map(([name, s]) => `${name} ${s.emptyTail ?? 0}`).join(', ')}`);
   const kinds = KINDS.filter((k) => k !== 'abstain');
   lines.push('', '## Evidence recall / answer contained by kind', '', `| Adapter | ${kinds.join(' | ')} |`, `|---|${kinds.map(() => '---').join('|')}|`);
   for (const [name, s] of Object.entries(summary)) lines.push(`| ${name} | ${kinds.map((k) => cell(s.byKind[k])).join(' | ')} |`);

@@ -27,17 +27,22 @@ const MAX_EMBED_CHARS = 6000;
 // Per request: at most --batch inputs and at most this many characters, well
 // under the provider's per-request token cap.
 const MAX_BATCH_CHARS = 400000;
-const MODEL_RE = /^[A-Za-z0-9._:-]{1,100}$/;
+// A model id, optionally org/name (the app's local models); a ':' tag is
+// allowed for hosted ids. No dot-only segment: it becomes a folder.
+const MODEL_RE = /^[A-Za-z0-9._:-]{1,100}(\/[A-Za-z0-9._-]{1,100})?$/;
 
 const keyOf = (messageId, idx) => `${messageId}\u0000${idx}`;
 
 function validateModelName(model) {
-  if (!MODEL_RE.test(String(model || ''))) throw new UsageError(`--model must be a plain model id (letters, digits, . _ : -), got ${JSON.stringify(model)}`);
-  return String(model);
+  const s = String(model || '');
+  if (!MODEL_RE.test(s) || s.split('/').some((seg) => /^\.+$/.test(seg))) {
+    throw new UsageError(`--model must be a plain model id (org/name; letters, digits, . _ : -), got ${JSON.stringify(model)}`);
+  }
+  return s;
 }
 
 function cacheDir(privateRoot, sessionId, model) {
-  return path.join(privateRoot, 'embeddings', sessionId, validateModelName(model).replace(/:/g, '_'));
+  return path.join(privateRoot, 'embeddings', sessionId, validateModelName(model).replace(/:/g, '_').replace(/\//g, '__'));
 }
 
 const embedText = (text) => {
@@ -185,7 +190,8 @@ class EmbeddingCache {
   }
 }
 
-// embedder: an object with embed(inputs, { model }) (OpenAIProvider#embed).
+// embedder: an object with embed(inputs, { model, kind }) (OpenAIProvider#embed,
+// which ignores kind; the local embedder prefixes queries and documents).
 // Retries 429, 5xx and transport failures with backoff (retry.js); anything
 // else throws.
 function createEmbedClient({ embedder, model, maxAttempts = 6, baseDelayMs = 1000, wait }) {
@@ -193,7 +199,7 @@ function createEmbedClient({ embedder, model, maxAttempts = 6, baseDelayMs = 100
   const onRetry = ({ err, attempt, delayMs }) => log.warn('embeddings request failed; retrying', { status: err.status ?? null, attempt, delayMs });
   return {
     model,
-    embed: (inputs) => withRetries(() => embedder.embed(inputs, { model }), { retries: maxAttempts - 1, baseDelayMs, wait, onRetry })
+    embed: (inputs, { kind = 'document' } = {}) => withRetries(() => embedder.embed(inputs, { model, kind }), { retries: maxAttempts - 1, baseDelayMs, wait, onRetry })
   };
 }
 
@@ -227,7 +233,7 @@ async function embedChunks({ cache, client, chunks, batch = 100, progress = () =
   let tokens = 0;
   let done = 0;
   for (const group of batches(todo, batch)) {
-    const res = await client.embed(group.map((g) => g.text));
+    const res = await client.embed(group.map((g) => g.text), { kind: 'document' });
     const used = Number.isFinite(res.usage?.input) ? res.usage.input : 0;
     tokens += used;
     cache.append(group.map(({ messageId, idx, chars, truncated }) => ({ messageId, idx, chars, truncated })), res.vectors, { tokens: used });
@@ -288,10 +294,40 @@ module.exports = {
   createEmbedClient, batches, embedChunks, vectorIndexFor, topByCosine, keyOf
 };
 
+// The app's local embedder (recall stage H3) for `embed` and kl-recall-vec:
+// the embed worker through an EmbedRunner, models under modelsDir, the same
+// prefixes the app uses. Nothing leaves this machine.
+function localEmbedderFor({ runner, modelsDir }) {
+  const { prefixTexts } = require('../history/embedders/profiles');
+  const loading = new Map();
+  return {
+    local: true,
+    async embed(inputs, { model, kind = 'document' } = {}) {
+      if (!loading.has(model)) {
+        loading.set(model, runner.load('embedder', model, { modelsDir }).catch((err) => {
+          loading.delete(model);
+          throw err;
+        }));
+      }
+      await loading.get(model);
+      const vectors = await runner.embed(model, prefixTexts(model, inputs, kind), { priority: kind === 'query' ? 'query' : 'document' });
+      return { vectors, usage: { input: null }, model };
+    }
+  };
+}
+
+// Where LongHaul keeps downloaded local models (inside LONGHAUL_HOME).
+const localModelsDir = (privateRoot) => path.join(privateRoot, 'models');
+
 // The provider behind `embed` and kl-recall-vec: the key from the
-// environment like model.js, or an injected instance (tests).
-function embedderFromEnv({ provider, env = process.env, baseUrl = null, providerInstance = null }) {
+// environment like model.js, an injected instance (tests), or 'local' (the
+// app's embedder through an embed runner).
+function embedderFromEnv({ provider, env = process.env, baseUrl = null, providerInstance = null, runner = null, modelsDir = null }) {
   if (providerInstance) return providerInstance;
+  if (provider === 'local') {
+    if (!runner || !modelsDir) throw new UsageError('local embedding needs an embed runner and a models folder');
+    return localEmbedderFor({ runner, modelsDir });
+  }
   if (!provider) throw new UsageError('--provider is required.');
   const ProviderFactory = require('../providers/provider-factory');
   let instance;
@@ -313,4 +349,6 @@ function priceTokens(provider, model, tokens, catalog = null) {
 }
 
 module.exports.embedderFromEnv = embedderFromEnv;
+module.exports.localEmbedderFor = localEmbedderFor;
+module.exports.localModelsDir = localModelsDir;
 module.exports.priceTokens = priceTokens;

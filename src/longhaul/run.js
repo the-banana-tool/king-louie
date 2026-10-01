@@ -124,7 +124,7 @@ function recordBase({ runId, adapter, session, q }) {
 // A question with no context: error names why (a message or a code).
 function errorRecord(base, error) {
   return {
-    ...base, evidenceSeqsShown: [], evidenceSeqsPartial: [], evidenceRecall: null, evidencePartial: 0, chunkEvidenceRecall: null,
+    ...base, evidenceSeqsShown: [], evidenceSeqsPartial: [], evidenceRecall: null, evidencePartial: 0, chunkEvidenceRecall: null, tailEmpty: null,
     answerContained: null, answerTokensContained: null,
     estTokens: null, latencyMs: null, cpuMs: null, cost: 0, contextTruncated: null, leaked: 0, error
   };
@@ -154,6 +154,8 @@ async function scoreOne({ runId, adapter, handle, session, q, budgetTokens }) {
       answerContained: contained ? contained.strict : null,
       answerTokensContained: contained ? contained.tokens : null,
       chunkEvidenceRecall: chunkEvidenceRecall(q.evidenceSeqs, r.chunks),
+      // null for an adapter that reports no tail.
+      tailEmpty: Array.isArray(r.chunks?.tailSeqs) ? r.chunks.tailSeqs.length === 0 : null,
       estTokens: r.estTokens, latencyMs: r.latencyMs, cpuMs: r.cpuMs, cost: r.cost ?? 0,
       // null for an adapter that never reports cutting (kl-recall, oracle):
       // "not known", not "not cut".
@@ -203,6 +205,20 @@ function finish({ run, runId, dir, config, records, spend = null, setupCosts = [
   return { runId, dir, config, summary, records, comparisons, leaks, spend, staleTmpRemoved: run.staleTmpRemoved };
 }
 
+// Adapters that hold a process (kl-recall-vec and kl-recall-rerank with the
+// local embedder start an embed worker) release it here. A close that fails
+// is logged; it never hides the run's own result or error.
+async function closeAdapters(adapters) {
+  for (const a of adapters) {
+    if (typeof a.close !== 'function') continue;
+    try {
+      await a.close();
+    } catch (err) {
+      log.warn('an adapter did not close cleanly', { adapter: a.name, error: err.message });
+    }
+  }
+}
+
 async function runBenchmark({
   home, dataRoot = home.root, sessionIds = null, adapterNames = [], adapterConfig = {}, adapters: injected = null,
   budgetTokens = 6000, seed = 1, includeUnverified = false, now = () => new Date(), commit = gitCommit(), answer = null
@@ -210,18 +226,25 @@ async function runBenchmark({
   const staleTmpRemoved = removeStaleTmp(home.tmp);
   const adapters = injected || adapterNames.map((name) => createAdapter(name, { budgetTokens, tmpRoot: home.tmp, ...(adapterConfig[name] || {}) }));
   if (!adapters.length) throw new UsageError('Name at least one adapter with --adapters.');
-  if (!answer) {
-    const needModel = adapters.filter((a) => a.usesModel).map((a) => a.name);
-    if (needModel.length) {
-      throw new UsageError(`${needModel.join(', ')} calls a summarizer model, so it runs only in the answer stage (--answer-model and --judge-model, or --fake-models).`);
+  // Both stages (and the answer stage's deferred adapters, which are in this
+  // list too) close every adapter, whether the run finishes, refuses, stops
+  // at --dry-run or throws.
+  try {
+    if (!answer) {
+      const needModel = adapters.filter((a) => a.usesModel).map((a) => a.name);
+      if (needModel.length) {
+        throw new UsageError(`${needModel.join(', ')} calls a summarizer model, so it runs only in the answer stage (--answer-model and --judge-model, or --fake-models).`);
+      }
     }
+    const { sets, skipped } = await loadRunSet({ dataRoot, sessionIds, includeUnverified });
+    const run = {
+      home, dataRoot, adapters, sets, skipped, skippedAdapters: adapterSkips(adapters, sets),
+      budgetTokens, seed, includeUnverified, now, commit, staleTmpRemoved
+    };
+    return answer ? await runAnswerStage(run, answer) : await runEvidenceOnly(run);
+  } finally {
+    await closeAdapters(adapters);
   }
-  const { sets, skipped } = await loadRunSet({ dataRoot, sessionIds, includeUnverified });
-  const run = {
-    home, dataRoot, adapters, sets, skipped, skippedAdapters: adapterSkips(adapters, sets),
-    budgetTokens, seed, includeUnverified, now, commit, staleTmpRemoved
-  };
-  return answer ? runAnswerStage(run, answer) : runEvidenceOnly(run);
 }
 
 async function runEvidenceOnly(run) {
