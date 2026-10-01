@@ -81,7 +81,7 @@ function createKlRecallVecAdapter({
         if (cache.exists && JSON.stringify(cache.meta.chunk) !== JSON.stringify(handle.settings.history.chunk)) {
           throw new UsageError(`kl-recall-vec: the embedding cache for ${sessionId} was chunked with other settings; run longhaul embed again into a fresh cache.`);
         }
-        const index = vectorIndexFor(cache, handle.store.chunksOfChat(handle.chatId), { sessionId, model });
+        const index = vectorIndexFor(cache, handle.store.chunksOfChat(handle.chatId), { sessionId, model, provider });
         const rowOf = new Map(Array.from(index.chunkIds, (id, i) => [id, i]));
         handle.vec = { cache, index, rowOf, sessionId, isPrivate: Boolean(session.manifest.private) };
         return handle;

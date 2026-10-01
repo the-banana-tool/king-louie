@@ -243,10 +243,19 @@ async function embedChunks({ cache, client, chunks, batch = 100, progress = () =
   return { embedded: todo.length, truncated: todo.filter((t) => t.truncated).length, tokens };
 }
 
+// The `longhaul embed` command that fills a session's cache for this
+// provider: local needs no --send-private (nothing leaves the machine).
+function embedHint(sessionId, model, provider = 'openai') {
+  return provider === 'local'
+    ? `run: longhaul embed --session ${sessionId} --provider local --model ${model}`
+    : `run: longhaul embed --session ${sessionId} --provider ${provider} --model ${model} --send-private`;
+}
+
 // Normalised rows of a store's chunks, in the store's chunk order, from the
-// cache. Throws naming `longhaul embed` when any chunk has no vector.
-function vectorIndexFor(cache, chunks, { sessionId, model }) {
-  const hint = `run: longhaul embed --session ${sessionId} --provider openai --model ${model} --send-private`;
+// cache. Throws naming `longhaul embed` (for the provider in use) when any
+// chunk has no vector.
+function vectorIndexFor(cache, chunks, { sessionId, model, provider = 'openai' }) {
+  const hint = embedHint(sessionId, model, provider);
   if (!cache.exists || !cache.dim) throw new UsageError(`kl-recall-vec: no embedding cache for session ${sessionId} (${model}); ${hint}`);
   const dim = cache.dim;
   const n = chunks.length;
@@ -291,7 +300,7 @@ function topByCosine(index, q, { upToSeq = Infinity, k = 50 } = {}) {
 
 module.exports = {
   MAX_EMBED_CHARS, MAX_BATCH_CHARS, EmbeddingCache, cacheDir, validateModelName, embedText, toBytes, fromBytes,
-  createEmbedClient, batches, embedChunks, vectorIndexFor, topByCosine, keyOf
+  createEmbedClient, batches, embedChunks, embedHint, vectorIndexFor, topByCosine, keyOf
 };
 
 // The app's local embedder (recall stage H3) for `embed` and kl-recall-vec:

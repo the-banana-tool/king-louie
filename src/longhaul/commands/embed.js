@@ -59,6 +59,8 @@ module.exports = {
 
     const session = await loadSession(dir);
     const isLocal = values.provider === 'local';
+    // The local embedder has no address; a --base-url would be ignored, so refuse it.
+    if (isLocal && values['base-url']) throw new UsageError('--base-url is for a hosted provider; --provider local runs the app\'s embedder here.');
     if (session.manifest.private && !isLocal && values['send-private'] !== true) {
       throw new UsageError(
         `Session ${values.session} is private: embedding would send every chunk of it and its questions to ${values.provider} (${model}). `

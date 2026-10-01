@@ -17,7 +17,8 @@ const { SYNTH_FIXTURES, writeSyntheticRoot } = require('../src/longhaul/syntheti
 const { loadSession, sessionDir } = require('../src/longhaul/session-format');
 const { readQuestions, questionsFile } = require('../src/longhaul/questions');
 const { createAdapter } = require('../src/longhaul/adapters');
-const { EmbeddingCache, cacheDir, validateModelName } = require('../src/longhaul/embeddings');
+const { EmbeddingCache, cacheDir, validateModelName, embedHint } = require('../src/longhaul/embeddings');
+const { UsageError } = require('../src/longhaul/errors');
 const { createRunnerScorer } = require('../src/longhaul/rerank');
 const { runBenchmark } = require('../src/longhaul/run');
 const { createFakeModels } = require('../src/longhaul/fake-models');
@@ -63,6 +64,26 @@ describe('LongHaul with the local embedder', () => {
     assert.match(ctx.stdout.text, /local, no cost/);
     const questions = await readQuestions(questionsFile(home.root, SESSION));
     assert.ok(questions.length > 0 && questions.every((q) => cache.question(q.id, q.question)));
+  });
+
+  it('embed --provider local refuses --base-url (a usage error), before any work', async () => {
+    const { env, home } = setupHome();
+    const ctx = ctxFor(home, env);
+    await assert.rejects(
+      embedCommand.run(ctx, { session: SESSION, provider: 'local', model: MODEL, 'base-url': 'http://127.0.0.1:1/v1' }, [], { runner: runner() }),
+      (err) => err instanceof UsageError && /--base-url/.test(err.message)
+    );
+    assert.strictEqual(EmbeddingCache.open(cacheDir(home.private, SESSION, MODEL)).exists, false);
+  });
+
+  it('a missing cache names the embed command for the provider in use', async () => {
+    const { home } = setupHome();
+    const session = await loadSession(sessionDir(home.root, SESSION));
+    const local = createAdapter('kl-recall-vec', { tmpRoot: home.tmp, privateRoot: home.private, provider: 'local', model: MODEL, runner: runner() });
+    await assert.rejects(local.prepare(session), (err) => err instanceof UsageError
+      && err.message.includes(`longhaul embed --session ${SESSION} --provider local --model ${MODEL}`) && !/--send-private/.test(err.message));
+    await local.close();
+    assert.match(embedHint(SESSION, 'text-embedding-3-small'), /--provider openai --model text-embedding-3-small --send-private$/);
   });
 
   it('kl-recall-vec --embed-provider local: runs from the cache and closes its runner', async () => {
