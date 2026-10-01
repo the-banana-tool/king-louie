@@ -6,14 +6,16 @@
 // reply, the judge's verdict and reason) and records the reviewer's own
 // verdict, saving after each. The report shows the agreement rate, numbers
 // only.
-const fs = require('fs');
 const readline = require('readline');
 const { VERDICTS } = require('./judge');
 const { UsageError } = require('./errors');
+const { readJsonl } = require('./files');
 
 const REVIEWER_RE = /^[A-Za-z0-9._-]{1,32}$/;
 const KEYS = Object.freeze({ c: 'correct', p: 'partial', i: 'incorrect', a: 'abstained' });
 
+// The reviewed text (question, references, reply, reason) is shown as it is,
+// whatever its characters; the ASCII rule covers the CLI's own text.
 function describeRow(r, position, total) {
   const lines = ['', `[${position}/${total}] ${r.adapter} - ${r.kind} - ${r.questionId}`, `Q: ${r.question}`, `Reference: ${r.reference}`];
   if (r.acceptableAnswers?.length) lines.push(`Also accept: ${r.acceptableAnswers.join(' | ')}`);
@@ -68,8 +70,6 @@ function agreement(rows) {
   return { sampled: rows.length, reviewed: reviewed.length, agreed, rate: reviewed.length ? agreed / reviewed.length : null };
 }
 
-function readSpotChecks(file) {
-  return fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
-}
+const readSpotChecks = (file) => readJsonl(file);
 
 module.exports = { reviewSpotChecks, agreement, readSpotChecks };

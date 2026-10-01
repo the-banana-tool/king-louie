@@ -18,6 +18,7 @@ const {
 const { positiveInt } = require('./run');
 const { removeStaleTmp } = require('../run');
 const { UsageError } = require('../errors');
+const { usd } = require('../format');
 
 const USAGE = 'Usage: longhaul embed --session <id> --provider openai --model <model> [--batch 100] [--base-url <url>] [--max-usd 1] [--send-private]';
 // Rough tokens for the estimate before any call: 3 characters a token errs
@@ -28,8 +29,6 @@ const EST_CHARS_PER_TOKEN = 3;
 // `run`'s startup cleanup removes one an interrupted embed left; embed itself
 // removes stale kl-embed-* dirs at start (not a run's kl-* stores).
 const TMP_PREFIX = 'kl-embed-';
-
-const usd = (x) => `$${x.toFixed(4)}`;
 
 module.exports = {
   options: {

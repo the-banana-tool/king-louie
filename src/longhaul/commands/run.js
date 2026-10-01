@@ -12,6 +12,7 @@ const { loadPrompt } = require('../prompts');
 const { formatEstimate, DEFAULT_MAX_USD } = require('../cost');
 const { FULL_HISTORY_TOKENS } = require('../adapters/full-history');
 const { spendEstimatedNote } = require('../scoring');
+const { fixed, usd } = require('../format');
 
 const USAGE = [
   'Usage: longhaul run --adapters kl-recall,sliding-window,oracle [--sessions <data root>] [--session <id>]...',
@@ -75,7 +76,7 @@ function clientFor(ctx, values, role, deps) {
 }
 
 const num = (x) => (x === null || x === undefined ? '-' : String(Math.round(x)));
-const ac = (x) => (x === null || x === undefined ? '-' : x.toFixed(3));
+const ac = (x) => fixed(x, 3, '-');
 
 function exitCodeFor(result, stderr) {
   if (result.leaks > 0) {
@@ -240,8 +241,8 @@ module.exports = {
         + `a difference under ${(2 / c.result.judged).toFixed(3)} is noise\n`);
     }
     if (result.spend) {
-      const est = result.spend.estimateUsd === null ? 'unknown' : `$${result.spend.estimateUsd.toFixed(4)}`;
-      ctx.stdout.write(`spent $${result.spend.spentUsd.toFixed(4)} on ${result.spend.calls} calls (${result.spend.unpricedCalls} unpriced${spendEstimatedNote(result.spend)}); estimate ${est}\n`);
+      const est = usd(result.spend.estimateUsd, 'unknown');
+      ctx.stdout.write(`spent ${usd(result.spend.spentUsd)} on ${result.spend.calls} calls (${result.spend.unpricedCalls} unpriced${spendEstimatedNote(result.spend)}); estimate ${est}\n`);
     }
     if (result.spotChecks?.n) {
       ctx.stdout.write(`spot-check sample: ${result.spotChecks.n} judgments; review them with longhaul spot-check --run ${result.runId} --reviewer <initials>\n`);

@@ -16,7 +16,7 @@ const { byCodePoint } = require('./files');
 const EST_CHARS_PER_TOKEN = 3;
 const DEFAULT_MAX_USD = 50;
 const ROLE_ORDER = Object.freeze(['summary', 'answer', 'judge']);
-const round8 = (n) => Number(n.toFixed(8));
+const { round8, usd: usdText } = require('./format');
 
 function estInputTokens(chars, extraTokens = 0) {
   return Math.ceil(Math.max(0, chars) / EST_CHARS_PER_TOKEN) + Math.max(0, extraTokens || 0);
@@ -126,7 +126,6 @@ class SpendGuard {
   }
 }
 
-const usd = (x) => (x === null ? 'price unknown' : `$${x.toFixed(4)}`);
 
 function formatEstimate(estimate, { maxUsd = DEFAULT_MAX_USD, counts = null } = {}) {
   const out = [];
@@ -136,9 +135,9 @@ function formatEstimate(estimate, { maxUsd = DEFAULT_MAX_USD, counts = null } = 
   }
   for (const l of estimate.lines) {
     out.push(`  ${l.role.padEnd(8)}${l.adapter.padEnd(22)}${`${l.provider}/${l.model}`.padEnd(34)}${String(l.calls).padStart(6)} calls  `
-      + `~${l.inputTokens} in  <=${l.outputTokens} out  ${usd(l.usd)}`);
+      + `~${l.inputTokens} in  <=${l.outputTokens} out  ${usdText(l.usd)}`);
   }
-  const total = estimate.totalUsd === null ? `${usd(estimate.knownUsd)} priced + unknown for ${estimate.unpriced.join(', ')}` : usd(estimate.totalUsd);
+  const total = estimate.totalUsd === null ? `${usdText(estimate.knownUsd)} priced + unknown for ${estimate.unpriced.join(', ')}` : usdText(estimate.totalUsd);
   // An unpriced call reserves nothing against the cap (--allow-unpriced).
   const unpricedCalls = estimate.lines.filter((l) => l.usd === null).reduce((n, l) => n + l.calls, 0);
   const uncovered = unpricedCalls ? `; the cap does not cover ${unpricedCalls} unpriced calls` : '';

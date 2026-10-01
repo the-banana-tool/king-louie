@@ -11,6 +11,7 @@
 // of the context. Blind spot: a paraphrased answer is never found.
 const { KINDS, BUCKETS } = require('./questions');
 const { isRight } = require('./judge');
+const { round8, fixed } = require('./format');
 
 // Typographic quotes and dashes NFKC leaves alone.
 const TYPOGRAPHIC = [
@@ -142,8 +143,6 @@ function summarize(records, { setupCosts = [] } = {}) {
   return out;
 }
 
-const round8 = (n) => Number(n.toFixed(8));
-
 // The named comparisons a run and a report print when both adapters ran.
 // whole-messages is the experiment B0 left open (measured facts; recall spec
 // §6.7): whole small messages and tool pairing raised evidence recall but not
@@ -264,7 +263,7 @@ function compareAdapters(records, a, b) {
   };
 }
 
-const fmt = (x, digits = 3) => (x === null || x === undefined ? '—' : x.toFixed(digits));
+const fmt = (x, digits = 3) => fixed(x, digits, '—');
 const cell = (g) => (g ? `${fmt(g.evidenceRecall)} / ${fmt(g.answerContainment)} (n=${g.n})` : '—');
 
 const usdCell = ({ usd, unknown }) => (unknown ? `${usd.toFixed(4)} + ${unknown} unpriced` : usd.toFixed(4));

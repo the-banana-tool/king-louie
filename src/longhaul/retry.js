@@ -19,13 +19,15 @@ function isAuthFailure(err) {
   return Boolean(err) && (err.status === 401 || err.status === 403);
 }
 
-async function withRetries(fn, { retries = 3, baseDelayMs = 1000, wait = sleep } = {}) {
+// onRetry({ err, attempt, delayMs }) runs before each wait (a caller's log line).
+async function withRetries(fn, { retries = 3, baseDelayMs = 1000, wait = sleep, onRetry = null } = {}) {
   for (let attempt = 1; ; attempt++) {
     try {
       return await fn(attempt);
     } catch (err) {
       if (attempt > retries || !retryable(err)) throw err;
       const delay = Number.isFinite(err.retryAfterMs) && err.retryAfterMs > 0 ? err.retryAfterMs : baseDelayMs * 2 ** (attempt - 1);
+      if (onRetry) onRetry({ err, attempt, delayMs: delay });
       await wait(delay);
     }
   }

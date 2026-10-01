@@ -22,12 +22,13 @@ const { KINDS, BUCKETS } = require('./questions');
 const { RUN_ID_RE } = require('./run');
 const { spotCheckFile } = require('./answer-stage');
 const { readSpotChecks, agreement } = require('./spot-check');
-const { writeFileAtomic, sha256Text, childPath, byCodePoint } = require('./files');
+const { writeFileAtomic, sha256Text, childPath, readJsonl, byCodePoint } = require('./files');
+const { fixed } = require('./format');
 const { UsageError } = require('./errors');
 
 const REPORT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const fmt = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(x) ? '' : x.toFixed(d));
-const md = (x, d = 3) => fmt(x, d) || '-';
+const fmt = (x, d = 3) => fixed(x, d, ''); // CSV: a missing value is an empty cell
+const md = (x, d = 3) => fixed(x, d, '-');
 const texEscape = (s) => String(s).replace(/[\\&%$#_{}]/g, (c) => (c === '\\' ? '\\textbackslash{}' : `\\${c}`));
 
 function csv(rows) {
@@ -38,10 +39,6 @@ function csv(rows) {
   return `${rows.map((r) => r.map(cell).join(',')).join('\n')}\n`;
 }
 
-function readJsonl(file) {
-  return fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
-}
-
 function loadRun(home, runId) {
   if (!RUN_ID_RE.test(runId)) throw new UsageError(`${JSON.stringify(runId)} is not a run id (like 20260930T101500Z-1a2b).`);
   const dir = path.join(home.runs, runId);
@@ -49,7 +46,7 @@ function loadRun(home, runId) {
   if (!fs.existsSync(configFile)) throw new UsageError(`No run ${runId} under ${home.runs}.`);
   const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
   const recordsFile = path.join(dir, 'records.jsonl');
-  const records = fs.existsSync(recordsFile) ? readJsonl(recordsFile) : [];
+  const records = readJsonl(recordsFile);
   const spendFile = path.join(dir, 'spend.json');
   const spend = fs.existsSync(spendFile) ? JSON.parse(fs.readFileSync(spendFile, 'utf8')) : null;
   const sample = spotCheckFile(home, runId);

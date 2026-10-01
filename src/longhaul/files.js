@@ -1,6 +1,7 @@
 'use strict';
 // Small file helpers for LongHaul: atomic writes (temp file, fsync, rename),
-// streaming SHA-256, path containment, and a code-point string order.
+// streaming SHA-256, path containment, JSON lines, and a code-point string
+// order.
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -45,6 +46,24 @@ function childPath(base, name, onEscape) {
   return out;
 }
 
+// The rows of a JSON-lines file; a missing file has none. tornTail: a line
+// that does not parse ends the file (a write cut off mid-line, as an
+// interrupted append leaves); otherwise it throws.
+function readJsonl(file, { tornTail = false } = {}) {
+  if (!fs.existsSync(file)) return [];
+  const out = [];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch (err) {
+      if (tornTail) break;
+      throw err;
+    }
+  }
+  return out;
+}
+
 // A sort order that is the same on every machine: UTF-16 code units, never
 // the locale's collation (localeCompare), so the same runs give the same
 // files and samples everywhere.
@@ -54,4 +73,4 @@ function byCodePoint(a, b) {
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-module.exports = { writeFileAtomic, sha256File, sha256Text, isInside, childPath, byCodePoint };
+module.exports = { writeFileAtomic, sha256File, sha256Text, isInside, childPath, readJsonl, byCodePoint };
