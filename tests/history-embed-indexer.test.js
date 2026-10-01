@@ -5,6 +5,7 @@
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
 const { startEmbedIndexer } = require('../src/history/embed-indexer');
+const { HistoryStore } = require('../src/history');
 const { unit } = require('../src/history/embedders/vectors');
 const { createBagOfWordsEmbedder } = require('./helpers/fake-embedder');
 const { openTempStore, seedChat, readDb } = require('./helpers/history-fixture');
@@ -127,7 +128,36 @@ describe('EmbedIndexer', () => {
     assert.strictEqual(t.store.countEmbedded('local:model-a'), 4, 'the old key keeps its rows');
   });
 
-  it('does nothing without a ready embedder, on a read-only store, or after stop()', async () => {
+  it('a batch in flight across a truncate is not written: a reused chunk id never gets the old vector', async () => {
+    let open;
+    const gate = new Promise((r) => { open = r; });
+    const s = setup({ embedder: fakeEmbedder('fake:bow', { gate }), history: { embedder: { batchSize: 16 } } });
+    t = s.t;
+    const seqs = seedChat(t.store, { messages: notes(3) });
+    const db0 = readDb(t.dbPath);
+    const lastId = db0.prepare('SELECT MAX(id) AS id FROM chunks').get().id;
+    db0.close();
+    ix = s.indexer();
+    const inFlight = ix.tick();
+    await new Promise((r) => setImmediate(r));
+    t.store.truncateFrom('chat-1', seqs[2]);
+    t.store.appendMessage('chat-1', { id: 'chat-1-new', sender: 'user', text: 'The mummy mask is in the tomb.', timestamp: '2026-01-02T09:00:00.000Z' });
+    const db1 = readDb(t.dbPath);
+    const reused = db1.prepare('SELECT id, text FROM chunks WHERE message_id = ?').get('chat-1-new');
+    db1.close();
+    assert.strictEqual(reused.id, lastId, 'the new chunk reuses the truncated chunk id');
+    open();
+    await inFlight;
+    const db = readDb(t.dbPath);
+    const row = db.prepare("SELECT dim FROM embeddings WHERE model = 'fake:bow' AND chunk_id = ?").get(reused.id);
+    db.close();
+    assert.strictEqual(row, undefined, 'no vector under the reused id from the stale batch');
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 0, 'the stale batch wrote nothing');
+    await ix.tick();
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 3, 'the rows are pending again and fill on the next tick');
+  });
+
+  it('does nothing without a ready embedder, or after stop()', async () => {
     const s = setup({ embedder: null });
     t = s.t;
     seedChat(t.store, { messages: notes(2) });
@@ -137,5 +167,24 @@ describe('EmbedIndexer', () => {
     await ix.stop();
     assert.deepStrictEqual(await ix.tick(), { embedded: 0, skipped: 0 });
     assert.strictEqual(t.store.countEmbedded('fake:bow'), 0);
+  });
+
+  it('does nothing on a read-only store', async () => {
+    const s = setup();
+    t = s.t;
+    seedChat(t.store, { messages: notes(2) });
+    t.store.close();
+    t.store = HistoryStore.open(t.dbPath, { readonly: true });
+    assert.strictEqual(t.store.readonly, true);
+    const embedder = fakeEmbedder();
+    const host = { current: () => embedder, fail: () => assert.fail('no failure expected') };
+    ix = startEmbedIndexer({
+      store: t.store, host, getSettings: () => ({}),
+      setTimer: () => 1, clearTimer: () => {}, log: { warn() {}, info() {}, debug() {} }
+    });
+    assert.deepStrictEqual(await ix.tick(), { embedded: 0, skipped: 0 });
+    assert.strictEqual(embedder.calls.length, 0, 'nothing sent to the embedder');
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 0);
+    assert.ok(t.store.countPending('fake:bow') > 0, 'the chunks are still pending');
   });
 });

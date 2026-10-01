@@ -40,8 +40,13 @@ function startEmbedIndexer({
   const eligible = () => Boolean(store && store.isOpen && store.embeddable && !store.readonly && store.dbPath !== ':memory:');
   const progress = () => ({ key: counts ? counts.key : null, embedded: counts ? counts.embedded : 0, pending: counts ? counts.pending : 0 });
 
+  // A truncate or rewrite while the batch is with the embedder (vectorEpoch
+  // moved) can hand a chunk id to new text; the batch is then not written,
+  // and its rows are pending again for the next tick.
   async function embedRows(embedder, key, rows) {
+    const before = store.vectorEpoch;
     const vecs = await embedder.embed(rows.map((r) => embedInput(r.text)), { kind: 'document' });
+    if (store.vectorEpoch !== before) return 0;
     return store.putEmbeddings(key, rows.map((r, i) => ({ chunkId: r.id, vec: vecs[i] })));
   }
 
@@ -60,6 +65,7 @@ function startEmbedIndexer({
     let skipped = 0;
     for (const row of rows) {
       if (stopped) return { embedded, skipped, handled: false };
+      const before = store.vectorEpoch;
       try {
         embedded += await embedRows(embedder, key, [row]);
       } catch (err) {
@@ -67,6 +73,7 @@ function startEmbedIndexer({
           host.fail(err);
           return { embedded, skipped, handled: false };
         }
+        if (store.vectorEpoch !== before) continue;
         store.putEmbeddings(key, [{ chunkId: row.id, vec: null }]);
         skipped += 1;
         log.warn('A chunk crashed the embed worker; it is skipped for this model', { chunkId: row.id, key });
