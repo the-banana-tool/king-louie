@@ -261,6 +261,30 @@ function assertMaySend(run, a) {
   a.onSendPrivate({ sessions: privateIds, to });
 }
 
+// kl-recall-vec* embeds a question it has no cached vector for, a paid call
+// the plan does not price. In the answer stage (and its dry run) that call
+// would sit outside the estimate and the spend guard, so an uncached
+// question vector refuses the run before any client is used; `longhaul
+// embed` caches every question of the session. Evidence-only runs still
+// embed on the fly.
+function assertQuestionVectors(run, selection) {
+  for (const { set, questions, longQuestions } of selection.perSet) {
+    const { session } = set;
+    for (const adapter of run.adapters) {
+      if (typeof adapter.missingQuestionVectors !== 'function' || isSkipped(run.skippedAdapters, adapter, session)) continue;
+      const missing = adapter.missingQuestionVectors(session, adapter.longContext ? longQuestions : questions);
+      if (!missing.length) continue;
+      const sessionId = session.manifest.sessionId;
+      const embedder = String(adapter.describe().embedder || '');
+      const slash = embedder.indexOf('/');
+      const how = slash > 0 ? ` --provider ${embedder.slice(0, slash)} --model ${embedder.slice(slash + 1)}` : '';
+      throw new UsageError(`${adapter.name}: ${missing.length} question${missing.length === 1 ? '' : 's'} of session ${sessionId} `
+        + `${missing.length === 1 ? 'has' : 'have'} no cached vector, and the answer stage makes no embedding call outside its estimate; nothing was sent. `
+        + `Run longhaul embed --session ${sessionId}${how} first (add --send-private for a private session).`, 'EMBEDDINGS_MISSING');
+    }
+  }
+}
+
 // The most estimated context tokens (characters / 4) the answer model's
 // window holds (benchmark spec §7: full-history is what "fits the model's
 // window"): the catalog's context, less the reply (answerMaxTokens) and the
@@ -329,6 +353,7 @@ async function runAnswerStage(run, answer) {
   run.adapters = run.adapters.map((x) => (cap !== null && typeof x.capWindow === 'function' ? x.capWindow(cap) : x));
   const { adapters } = run;
   const selection = selectQuestions(run.sets, adapters, { tier: a.tier, sampleSize: a.sampleSize, longContextSample: a.longContextSample, seed });
+  assertQuestionVectors(run, selection);
 
   const runId = newRunId(now());
   const ctxDir = path.join(home.tmp, `${KL_TMP_PREFIX}ctx-${runId}`);
