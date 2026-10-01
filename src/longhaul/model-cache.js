@@ -69,10 +69,16 @@ class ModelCache {
 
 // One call's usage: tokens as the provider reported them and the catalog
 // cost from llmMetrics, null where unknown (an unpriced model is never $0).
-function usageFromMetrics(m) {
+// A reply from a real provider that reports no tokens (zero or absent, as
+// from a server that omits stream usage) was priced at $0 for nothing it
+// counted, so its cost is unknown too; the spend guard charges its estimate.
+// The built-in fakes (local) cost nothing whatever they report.
+function usageFromMetrics(m, { local = false } = {}) {
   const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   if (!m) return { inputTokens: null, outputTokens: null, costUsd: null };
-  return { inputTokens: num(m.inputTokens), outputTokens: num(m.outputTokens), costUsd: num(m.costUsd) };
+  const usage = { inputTokens: num(m.inputTokens), outputTokens: num(m.outputTokens), costUsd: num(m.costUsd) };
+  if (!local && !((usage.inputTokens || 0) + (usage.outputTokens || 0) > 0)) usage.costUsd = null;
+  return usage;
 }
 
 const resultOf = (entry, cached) => ({
@@ -103,7 +109,7 @@ async function cachedCall({ cache, stage, key, client, prompt, maxTokens, hooks 
   }
   const entry = {
     text: String(reply?.text ?? ''),
-    ...usageFromMetrics(reply?.llmMetrics),
+    ...usageFromMetrics(reply?.llmMetrics, { local: Boolean(client.local) }),
     latencyMs: clock() - t0,
     provider: client.provider,
     model: client.model,

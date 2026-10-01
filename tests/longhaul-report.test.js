@@ -167,6 +167,19 @@ describe('longhaul report', () => {
     assert.strictEqual(built.series.length, 3);
   });
 
+  it('shows a reply with no usage as unknown cost, and notes the calls settled at their estimate (review round 2)', () => {
+    const { home } = setup();
+    const records = [rec(RUN_B, 'kl-recall', 1, 'user-said', 'correct'), { ...rec(RUN_B, 'kl-recall', 2, 'user-said', 'correct'), answerCostUsd: null }];
+    writeRun(home, RUN_B, config(RUN_B, true), records);
+    writeFileAtomic(path.join(home.runs, RUN_B, 'spend.json'), `${JSON.stringify({ spentUsd: 0.03, calls: 4, unpricedCalls: 0, estimatedCalls: 1, overBudget: false, setupCosts: [] })}
+`);
+    const md = readAll(writeReport(home, [RUN_B]).dir)['report.md'];
+    assert.ok(md.includes(' | 0.0140 + 1 unknown | - |'), 'the unknown cost is never $0, and no cost per point is given');
+    assert.ok(md.includes(`at its reservation): ${RUN_B} 1.`), 'the estimated-calls note');
+    const plain = readAll(writeReport(home, [RUN_A]).dir)['report.md'];
+    assert.ok(!plain.includes('at its estimate') && !plain.includes('at their estimate'));
+  });
+
   it('runs from the CLI, and refuses an unknown run or a bad id', async () => {
     const { env } = setup();
     const io = () => ({ stdout: sink(), stderr: sink(), env });

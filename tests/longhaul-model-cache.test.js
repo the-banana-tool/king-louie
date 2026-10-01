@@ -124,4 +124,19 @@ describe('usageFromMetrics', () => {
     assert.deepStrictEqual(usageFromMetrics({ inputTokens: 10, outputTokens: 2, costUsd: null, unpriced: true }), { inputTokens: 10, outputTokens: 2, costUsd: null });
     assert.deepStrictEqual(usageFromMetrics(null), { inputTokens: null, outputTokens: null, costUsd: null });
   });
+
+  it('records a reply with zero or absent usage as cost unknown, never $0, unless the client is local (review round 2)', () => {
+    assert.deepStrictEqual(usageFromMetrics({ inputTokens: 0, outputTokens: 0, costUsd: 0 }), { inputTokens: 0, outputTokens: 0, costUsd: null });
+    assert.deepStrictEqual(usageFromMetrics({ costUsd: 0 }), { inputTokens: null, outputTokens: null, costUsd: null });
+    assert.deepStrictEqual(usageFromMetrics({ inputTokens: 0, outputTokens: 0, costUsd: 0 }, { local: true }), { inputTokens: 0, outputTokens: 0, costUsd: 0 });
+  });
+
+  it('stores cost unknown for a non-local reply that reports no usage, through cachedCall', async () => {
+    const cache = newCache();
+    const client = { provider: 'fake', model: 'fake-1', async complete() { return { text: 'x', llmMetrics: { inputTokens: 0, outputTokens: 0, costUsd: 0 } }; } };
+    const out = await call(cache, client, 'p');
+    assert.strictEqual(out.costUsd, null);
+    const local = { ...client, local: true };
+    assert.strictEqual((await call(newCache(), local, 'p')).costUsd, 0);
+  });
 });

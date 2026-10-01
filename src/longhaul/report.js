@@ -243,7 +243,7 @@ function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
     const cost = adapterCost(s);
     L.push(`| ${name} | ${s.questions} | ${md(s.evidenceRecall)} | ${md(s.answerContainment)} | ${a ? `${md(a.accuracy)} (${a.n})` : '-'} | ${md(a?.partialRate)} | `
       + `${md(a?.declinedRate)} | ${a ? `${md(a.abstain.accuracy)} (${a.abstain.n})` : '-'} | ${md(a?.abstain.falseAnswerRate)} | ${cut[name]} | `
-      + `${s.estTokens.median ?? '-'} | ${s.estTokens.p90 ?? '-'} | ${a ? `${cost.usd.toFixed(4)}${cost.unknown ? ` + ${cost.unknown} unpriced` : ''}` : '-'} | ${md(costPerPoint(s), 5)} |`);
+      + `${s.estTokens.median ?? '-'} | ${s.estTokens.p90 ?? '-'} | ${a ? `${cost.usd.toFixed(4)}${cost.unknown ? ` + ${cost.unknown} unknown` : ''}` : '-'} | ${md(costPerPoint(s), 5)} |`);
   }
   const table = (title, groups, pick) => {
     L.push('', `## ${title}`, '', `| Series | ${groups.join(' | ')} |`, `|---|${groups.map(() => '---').join('|')}|`);
@@ -269,7 +269,13 @@ function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
     '- full-history and real-compaction are cut at their window; "Contexts cut" counts the questions where that happened (spec §8.1).',
     `- ${noiseNote(Math.max(0, ...series.map((n) => summary[n].answer?.n ?? 0))) || 'No answerable question was judged.'} `
       + 'Its n is the largest series\' answerable questions.',
-    '- Cost is what the calls behind these records cost to make, from catalog prices at the time; cached calls are counted at their original cost.');
+    '- Cost is what the calls behind these records cost to make, from catalog prices at the time; cached calls are counted at their original cost. '
+      + '"+ N unknown" counts calls with no known cost (an unpriced model, or a reply that reported no usage), never $0.');
+  const estimated = [...runs].sort((x, y) => byCodePoint(x.runId, y.runId)).filter((r) => r.spend?.estimatedCalls > 0);
+  if (estimated.length) {
+    L.push('- Calls settled at their estimate (a priced reply that reported no usage: its record\'s cost is unknown, and spend.json charged it '
+      + `at its reservation): ${estimated.map((r) => `${r.runId} ${r.spend.estimatedCalls}`).join(', ')}.`);
+  }
   return `${L.join('\n')}\n`;
 }
 

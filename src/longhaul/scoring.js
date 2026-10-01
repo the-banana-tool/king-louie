@@ -266,7 +266,9 @@ function compareAdapters(records, a, b) {
 const fmt = (x, digits = 3) => fixed(x, digits, '—');
 const cell = (g) => (g ? `${fmt(g.evidenceRecall)} / ${fmt(g.answerContainment)} (n=${g.n})` : '—');
 
-const usdCell = ({ usd, unknown }) => (unknown ? `${usd.toFixed(4)} + ${unknown} unpriced` : usd.toFixed(4));
+// unknown: calls with no known cost (an unpriced model, or a reply that
+// reported no usage), never counted as $0.
+const usdCell = ({ usd, unknown }) => (unknown ? `${usd.toFixed(4)} + ${unknown} unknown` : usd.toFixed(4));
 const answerCell = (g) => (g ? `${fmt(g.accuracy)} (n=${g.n})` : '—');
 const kindCell = (kind, g) => (!g ? '—' : kind === 'abstain' ? `${fmt(g.abstainAccuracy)} (n=${g.abstainN})` : answerCell(g));
 

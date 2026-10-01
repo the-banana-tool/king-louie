@@ -129,6 +129,12 @@ describe('renderSummaryMarkdown with answers', () => {
     assert.match(est, /42 calls \(0 unpriced, 3 at their estimate: no usage reported\)/);
   });
 
+  it('shows a reply whose cost is unknown as unknown, never $0 (review round 2)', () => {
+    const summary = summarize([rec('a', 'q1', 'user-said', 'correct'), rec('a', 'q2', 'user-said', 'correct', { answerCostUsd: null })]);
+    const md = renderSummaryMarkdown(config, summary, {});
+    assert.match(md, /\| 0\.0020 \+ 1 unknown \|/);
+  });
+
   it('keeps the B0 summary as it was when the run had no answer stage', () => {
     const { answer, ...b0config } = config;
     const md = renderSummaryMarkdown(b0config, summarize([rec('a', 'q1', 'user-said', undefined)]));
