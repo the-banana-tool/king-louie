@@ -161,6 +161,33 @@ describe('answer stage', () => {
     assert.strictEqual(out.spend.calls, 12);
   });
 
+  it('on SIGINT writes spend.json with stoppedBy SIGINT, removes the context texts and exits (review Minor 4)', async () => {
+    const home = setup();
+    const questions = await allQuestions(home);
+    const { EventEmitter } = require('events');
+    const signals = new EventEmitter();
+    const seen = [];
+    const answerClient = answerFake(questions);
+    const complete = answerClient.complete.bind(answerClient);
+    answerClient.complete = async (prompt, opts) => {
+      if (answerClient.prompts.length === 3) signals.emit('SIGINT');
+      return complete(prompt, opts);
+    };
+    const exit = (code) => {
+      const [run] = fs.readdirSync(home.runs);
+      seen.push({ code, spend: JSON.parse(fs.readFileSync(path.join(home.runs, run, 'spend.json'), 'utf8')), tmp: fs.readdirSync(home.tmp) });
+      throw Object.assign(new Error('exited'), { code: 'TEST_EXIT' });
+    };
+    const opts = answerOptions(home, questions, { answerClient, signals, exit });
+    await runBenchmark({ home, adapters: [createAdapter('oracle'), blind], answer: opts, now: fixedNow, commit: 'x' }).catch(() => {});
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].code, 130);
+    assert.strictEqual(seen[0].spend.stoppedBy, 'SIGINT');
+    assert.strictEqual(seen[0].spend.calls, 6, 'three answers and three judgments had settled');
+    assert.deepStrictEqual(seen[0].tmp, [], 'the context texts are removed');
+    assert.strictEqual(signals.listenerCount('SIGINT'), 0, 'the handler is removed when the run ends');
+  });
+
   it('refuses a private session without --send-private before any call, and writes no run', async () => {
     const home = setup();
     makePrivate(home.root, 'synth-small');

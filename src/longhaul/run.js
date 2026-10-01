@@ -334,6 +334,7 @@ async function runAnswerStage(run, answer) {
   const a = {
     answerMaxTokens: 400, judgeMaxTokens: 200, tier: 'grid', sampleSize: 150, longContextSample: null, maxUsd: DEFAULT_MAX_USD,
     allowUnpriced: false, sendPrivate: false, dryRun: false, concurrency: 4, retry: {}, onPlan: () => {}, onSendPrivate: () => {},
+    signals: process, exit: (code) => process.exit(code),
     ...answer
   };
   a.cache = a.cache || ModelCache.forHome(home);
@@ -358,6 +359,16 @@ async function runAnswerStage(run, answer) {
   const runId = newRunId(now());
   const ctxDir = path.join(home.tmp, `${KL_TMP_PREFIX}ctx-${runId}`);
   fs.mkdirSync(ctxDir, { recursive: true });
+  // Ctrl-C: spend.json (once it exists) says the run stopped on SIGINT, with
+  // the totals so far (calls still in flight are not in them), the context
+  // texts are removed, and the process exits. Synchronous, best effort.
+  let writeSpend = null;
+  const onSigint = () => {
+    try { if (writeSpend) writeSpend('SIGINT'); } catch (err) { log.warn('could not write spend.json on SIGINT', { code: err.code || 'error' }); }
+    fs.rmSync(ctxDir, { recursive: true, force: true });
+    a.exit(130);
+  };
+  a.signals.once('SIGINT', onSigint);
   const describeSha = new Map(adapters.map((x) => [x, sha256Text(stableStringify(x.describe()))]));
   const items = [];
   const contextItem = async (adapter, handle, session, q) => {
@@ -419,7 +430,7 @@ async function runAnswerStage(run, answer) {
     // spend.json is on disk from here on and rewritten after every item, so
     // a run that stops (a refused key, a crash, Ctrl-C) still says what it
     // paid; stoppedBy names the code that stopped it.
-    const writeSpend = (stoppedBy = null) => {
+    writeSpend = (stoppedBy = null) => {
       spend = { estimateUsd: estimate.totalUsd, estimateKnownUsd: estimate.knownUsd, ...guard.totals(), setupCosts, stoppedBy };
       writeFileAtomic(path.join(dir, 'spend.json'), `${JSON.stringify(spend, null, 2)}\n`);
     };
@@ -500,6 +511,7 @@ async function runAnswerStage(run, answer) {
     const result = finish({ run, runId, dir, config, records, spend, setupCosts });
     return { ...result, spotChecks: { file, n } };
   } finally {
+    a.signals.removeListener('SIGINT', onSigint);
     fs.rmSync(ctxDir, { recursive: true, force: true });
   }
 }
