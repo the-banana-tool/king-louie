@@ -109,7 +109,7 @@ Default is `info`. Override with `KING_LOUIE_LOG_LEVEL` or `LOG_LEVEL` env var.
 ## History
 
 `src/history/` is the history store (spec
-`docs/superpowers/specs/2026-09-25-chat-history-recall-design.md`, stages H1-H2;
+`docs/superpowers/specs/2026-09-25-chat-history-recall-design.md`, stages H1-H3;
 ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
 
 - Chats, their messages (one row each, `seq` dense from 1 per chat) and
@@ -165,8 +165,11 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   cached `systemPrompt`. `history.recall.enabled: false` sends the tail only.
 - Recall defaults come from LongHaul measurements (spec §6.7): the query is
   the new message alone (`queryUserTurns: 0`), `bm25TopK` 200, and the tail is
-  16 messages with the tool results in its span (capped at 1,000 tokens each).
-  The other `history.recall` knobs (`completeMessageTokens`,
+  the last `tailUserTurns` (4) user turns with the replies and tool results in
+  their span (tool results capped at 1,000 tokens each, the tail at
+  `tailMaxRows` rows). `tailUserTurns` 4 was measured on LongHaul 2026-09-30
+  (evidence recall 0.426 at p90 13.5K tokens, against 0.389 at 2, and 0.433 at
+  8 with a p90 of 16K, over the ceiling). The other `history.recall` knobs (`completeMessageTokens`,
   `pairToolMessages`, `rerank`, `vectorTopK`, `dedupeJaccard`, …) were measured
   and are off or inert by default. Change a default only with a LongHaul run
   that shows it; tests that check a mechanism pin their settings explicitly.
@@ -176,6 +179,13 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
 - Tests use `tests/helpers/history-fixture.js` (a temp store; chats seeded
   through the real `appendMessage`); `tests/e2e/history-recall.test.js` is
   the end-to-end check.
+- H3 embeddings: the `embeddings` table (schema step 3) holds one unit vector
+  per chunk per embedder key (`settings.history.embedder.kind` `local`,
+  `ollama`, `openai` or `none`); `EmbedIndexer` fills it in the background,
+  each turn fuses cosine hits with BM25, and `dedupeCosine` drops near
+  duplicates. Both are provisional until the H3 LongHaul measurement (plan
+  Task 16). `KL_TEST_MODE` never starts the embedder (it starts from
+  `startModelsBackgroundChecks`).
 - The local embedder and the cross-encoder run in the embed worker, a child
   process of `process.execPath` with `ELECTRON_RUN_AS_NODE=1` (like the PDF
   worker), so they need Electron's RunAsNode fuse left on and
@@ -315,9 +325,9 @@ Electron build.
 - `kl-recall-rerank` / `kl-recall-vec-rerank` (H3 probe) turn on
   `history.recall.rerank` (spec §6.3 step 6, a `reranker` callback into
   `Retriever#retrieve`, default off) with a local cross-encoder whose scores
-  are cached under `LONGHAUL_HOME/private/rerank/`; it needs
-  `npm i --no-save @huggingface/transformers onnxruntime-node`, never an app
-  dependency. Tests inject a fake `scorer`.
+  are cached under `LONGHAUL_HOME/private/rerank/`; it uses the app's own
+  `@huggingface/transformers` and `onnxruntime-node` dependencies (unpacked
+  from the asar for the embed worker). Tests inject a fake `scorer`.
 
 ## Cases
 
