@@ -83,6 +83,9 @@ describe('longhaul report', () => {
     assert.strictEqual(files['comparisons.csv'].trim().split('\n')[1], `whole-messages,${KL},${WHOLE},4,4,0.750,0.750,0.000,1,1,1.000,1.000,1.000,1.000`);
     assert.ok(files['by-kind.csv'].includes(`${KL},abstain,0,,,1,1.000`));
     assert.match(files['report.md'], /## Per adapter/);
+    // 3 answerable questions per series: one is 0.333 of a rate.
+    assert.ok(files['report.md'].includes('- One question is 0.333 of a rate at n=3 (1/n); a difference under two questions (0.667) is noise'));
+    assert.ok(!files['report.md'].includes('about 0.01'));
     assert.match(files['adapters.tex'], /\\begin\{tabular\}/);
   });
 

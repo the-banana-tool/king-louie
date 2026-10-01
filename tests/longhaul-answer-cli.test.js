@@ -51,6 +51,22 @@ describe('longhaul run: the answer stage', () => {
     assert.deepStrictEqual(config.skippedAdapters.map((s) => s.sessionId).sort(), ['synth-medium', 'synth-small']);
   });
 
+  it('states what one question is worth from n, not a fixed 0.01 (review deferred T14)', async () => {
+    const { env, root } = tmpHome();
+    const out = io(env);
+    assert.strictEqual(await main(['run', '--sessions', FIXTURE_ROOT, '--adapters', 'kl-recall,kl-recall-whole', '--fake-models'], out), 0, out.stderr.text);
+    const m = out.stdout.text.match(/whole-messages: .* over (\d+) questions .*; one question is (\d\.\d{3}), a difference under (\d\.\d{3}) is noise\n/);
+    assert.ok(m, out.stdout.text);
+    const n = Number(m[1]);
+    assert.deepStrictEqual([m[2], m[3]], [(1 / n).toFixed(3), (2 / n).toFixed(3)]);
+    const [runId] = fs.readdirSync(path.join(root, 'runs'));
+    const summary = JSON.parse(fs.readFileSync(path.join(root, 'runs', runId, 'summary.json'), 'utf8'));
+    const answerable = summary['kl-recall'].answer.n;
+    assert.ok(fs.readFileSync(path.join(root, 'runs', runId, 'summary.md'), 'utf8')
+      .includes(`One question is ${(1 / answerable).toFixed(3)} of a rate at n=${answerable} (1/n); a difference under two questions (${(2 / answerable).toFixed(3)}) is noise`));
+    assert.ok(!out.stdout.text.includes('under 0.02'));
+  });
+
   it('refuses a private session without --send-private: exit 2, and no request reaches the provider', async () => {
     const { env, root } = tmpHome();
     writeSyntheticRoot(root, [SYNTH_FIXTURES[0]]);

@@ -16,7 +16,7 @@
 // latest counts, unless it failed where an earlier one succeeded.
 const fs = require('fs');
 const path = require('path');
-const { summarize, compareAdapters, COMPARISONS, adapterCost } = require('./scoring');
+const { summarize, compareAdapters, COMPARISONS, adapterCost, noiseNote } = require('./scoring');
 const { stableStringify } = require('./model-cache');
 const { KINDS, BUCKETS } = require('./questions');
 const { RUN_ID_RE } = require('./run');
@@ -270,7 +270,8 @@ function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
     '- Accuracy counts answerable questions judged correct; partial is not correct. Abstain accuracy counts abstain questions the model declined.',
     '- The judge sees the question, the reference answers and the reply, never the context. See the runs table for its spot-check agreement.',
     '- full-history and real-compaction are cut at their window; "Contexts cut" counts the questions where that happened (spec §8.1).',
-    '- One question is about 0.01 of a rate at this set\'s size; differences under 0.02 are noise.',
+    `- ${noiseNote(Math.max(0, ...series.map((n) => summary[n].answer?.n ?? 0))) || 'No answerable question was judged.'} `
+      + 'Its n is the largest series\' answerable questions.',
     '- Cost is what the calls behind these records cost to make, from catalog prices at the time; cached calls are counted at their original cost.');
   return `${L.join('\n')}\n`;
 }

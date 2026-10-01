@@ -271,6 +271,15 @@ const usdCell = ({ usd, unknown }) => (unknown ? `${usd.toFixed(4)} + ${unknown}
 const answerCell = (g) => (g ? `${fmt(g.accuracy)} (n=${g.n})` : '—');
 const kindCell = (kind, g) => (!g ? '—' : kind === 'abstain' ? `${fmt(g.abstainAccuracy)} (n=${g.abstainN})` : answerCell(g));
 
+// What one question is worth in a rate over n questions, from n (the plan's
+// "about 0.01" holds only near n=100): 1/n, and two questions (2/n) as the
+// noise floor. Rounded to 3 places, like the rates.
+function noiseNote(n) {
+  if (!Number.isInteger(n) || n <= 0) return '';
+  return `One question is ${(1 / n).toFixed(3)} of a rate at n=${n} (1/n); a difference under two questions (${(2 / n).toFixed(3)}) is noise, `
+    + 'and a cell with fewer questions moves more.';
+}
+
 // A priced call whose reply reported no usage is counted at its estimate.
 const spendEstimatedNote = (spend) => (spend.estimatedCalls ? `, ${spend.estimatedCalls} at their estimate: no usage reported` : '');
 
@@ -308,7 +317,7 @@ function renderSummaryMarkdown(config, summary, { spend = null, comparisons = []
     lines.push('Accuracy: answerable questions judged correct (partial is not correct). Declined: answerable questions the model said it could not answer. '
       + 'Abstain accuracy: abstain questions the model declined; false answers: abstain questions it answered anyway. '
       + 'Errors (a failed call, an unparsable verdict, the cap) are left out of the rates. Answer tokens come from provider usage; context tokens are estimated. '
-      + 'One question is about 0.01; differences under 0.02 are noise.', '');
+      + noiseNote(Math.max(...answered.map(([, s]) => s.answer.n))), '');
     lines.push('| Adapter | Judged | Accuracy | Partial | Declined | Abstain accuracy | False answers | Errors | Median answer tokens | p90 answer tokens | Cost USD |');
     lines.push('|---|---|---|---|---|---|---|---|---|---|---|');
     for (const [name, s] of answered) {
@@ -343,5 +352,5 @@ function renderSummaryMarkdown(config, summary, { spend = null, comparisons = []
 
 module.exports = {
   evidenceRecall, chunkEvidenceRecall, answerContainment, normalizeText, normalizeAnswer, splitMessages,
-  percentile, mean, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS, adapterCost, spendEstimatedNote
+  percentile, mean, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS, adapterCost, spendEstimatedNote, noiseNote
 };

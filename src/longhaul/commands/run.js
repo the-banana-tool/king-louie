@@ -234,7 +234,8 @@ module.exports = {
     for (const c of result.comparisons || []) {
       if (!c.result.judged) continue;
       ctx.stdout.write(`${c.id}: ${c.a} ${ac(c.result.accuracy.a)} vs ${c.b} ${ac(c.result.accuracy.b)} over ${c.result.judged} questions `
-        + `(right in one only: ${c.result.onlyA} vs ${c.result.onlyB}); a difference under 0.02 is noise\n`);
+        + `(right in one only: ${c.result.onlyA} vs ${c.result.onlyB}); one question is ${(1 / c.result.judged).toFixed(3)}, `
+        + `a difference under ${(2 / c.result.judged).toFixed(3)} is noise\n`);
     }
     if (result.spend) {
       const est = result.spend.estimateUsd === null ? 'unknown' : `$${result.spend.estimateUsd.toFixed(4)}`;
