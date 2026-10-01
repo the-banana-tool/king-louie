@@ -5,6 +5,8 @@
 // summarizer returns a fixed line. They are local (client.local), so they
 // cost $0 and need no --send-private: a smoke run exercises the whole answer
 // stage and scores it at accuracy 0 and abstain accuracy 1.
+const { estimateTokens } = require('./session-format');
+
 function fake(model, reply) {
   return {
     provider: 'fake',
@@ -12,7 +14,7 @@ function fake(model, reply) {
     local: true,
     async complete(prompt) {
       const text = reply(String(prompt));
-      return { text, llmMetrics: { inputTokens: Math.ceil(prompt.length / 4), outputTokens: Math.ceil(text.length / 4), costUsd: 0 } };
+      return { text, llmMetrics: { inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(text), costUsd: 0 } };
     }
   };
 }

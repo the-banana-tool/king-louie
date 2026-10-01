@@ -69,4 +69,10 @@ function newestFirst(index, { fromSeq = 1, beforeSeq, limit }) {
   return { text: parts.reverse().join('\n\n'), seqs: uniqueSorted(seqs), partial, truncated };
 }
 
-module.exports = { TAIL_DEFAULTS, measured, tailBefore, uniqueSorted, newestFirst };
+// A long-context adapter's capWindow (run.js contextCapTokens): the same
+// adapter, made by create, at the smaller of its own window and tokens.
+function capWindowWith(create, windowTokens) {
+  return (tokens) => create({ windowTokens: Math.min(windowTokens, tokens) });
+}
+
+module.exports = { TAIL_DEFAULTS, measured, tailBefore, uniqueSorted, newestFirst, capWindowWith };

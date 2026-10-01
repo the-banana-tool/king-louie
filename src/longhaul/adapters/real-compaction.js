@@ -12,7 +12,7 @@
 // says whether the summary kept the fact anyway (the compaction-loss study,
 // spec §9, stage B4, builds on these records).
 const { estimateTokens, renderMessage } = require('../session-format');
-const { measured, newestFirst } = require('./common');
+const { measured, newestFirst, capWindowWith } = require('./common');
 const { FULL_HISTORY_TOKENS } = require('./full-history');
 
 function createRealCompactionAdapter({ windowTokens = FULL_HISTORY_TOKENS } = {}) {
@@ -22,7 +22,7 @@ function createRealCompactionAdapter({ windowTokens = FULL_HISTORY_TOKENS } = {}
     skipReason: 'no recorded compactions',
     describe() { return { name: 'real-compaction', windowTokens }; },
     // The answer stage lowers the window to what the answer model holds (run.js contextCapTokens).
-    capWindow: (tokens) => createRealCompactionAdapter({ windowTokens: Math.min(windowTokens, tokens) }),
+    capWindow: capWindowWith(createRealCompactionAdapter, windowTokens),
     appliesTo(session) {
       return Array.isArray(session.manifest.compactions) && session.manifest.compactions.length > 0;
     },

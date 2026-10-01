@@ -9,6 +9,7 @@
 // lowers the window to what the answer model holds (capWindow, run.js
 // contextCapTokens), so an overflow never becomes a 400 recorded as an error.
 const { createSlidingWindowAdapter } = require('./sliding-window');
+const { capWindowWith } = require('./common');
 
 const FULL_HISTORY_TOKENS = 128000;
 
@@ -16,7 +17,7 @@ function createFullHistoryAdapter({ windowTokens = FULL_HISTORY_TOKENS } = {}) {
   const base = createSlidingWindowAdapter({ windowTokens, name: 'full-history' });
   return {
     ...base, frontierOnly: true, longContext: true,
-    capWindow: (tokens) => createFullHistoryAdapter({ windowTokens: Math.min(windowTokens, tokens) })
+    capWindow: capWindowWith(createFullHistoryAdapter, windowTokens)
   };
 }
 
