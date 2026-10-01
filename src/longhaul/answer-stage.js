@@ -15,6 +15,8 @@ const { isAuthFailure } = require('./retry');
 const { sha256Text, writeFileAtomic } = require('./files');
 const { createRng } = require('./rng');
 const { UsageError } = require('./errors');
+const { sampleQuestions } = require('./sampling');
+const { bucketFor, computeDistance } = require('./questions');
 const { createLogger } = require('../logging');
 
 const log = createLogger('longhaul/answer-stage');
@@ -152,7 +154,93 @@ function writeSpotCheckSample(file, rows, { seed = 1, fraction = SPOT_CHECK_FRAC
   return n;
 }
 
+const TIERS = Object.freeze(['grid', 'frontier']);
+
+// Which questions each adapter answers (benchmark spec §8.1). grid: every
+// question, every adapter except the frontier-only full-history. frontier:
+// a stratified sample (sampling.js sampleQuestions, seeded) of sampleSize.
+// In either tier the long-context adapters (full-history, real-compaction)
+// get only the first longContextSample of the stratified order, since at
+// 90-128K tokens a question they are the cost of a run (measured facts;
+// decision D3).
+function selectQuestions(sets, adapters, { tier = 'grid', sampleSize = 150, longContextSample = null, seed = 1 } = {}) {
+  if (!TIERS.includes(tier)) throw new UsageError(`--tier must be grid or frontier, got ${JSON.stringify(tier)}`);
+  if (tier === 'grid') {
+    const frontierOnly = adapters.filter((a) => a.frontierOnly).map((a) => a.name);
+    if (frontierOnly.length) throw new UsageError(`${frontierOnly.join(', ')} runs only in the frontier tier (benchmark spec section 8.1); pass --tier frontier.`);
+  }
+  if (longContextSample !== null && !(Number.isInteger(longContextSample) && longContextSample > 0)) {
+    throw new UsageError('--long-context-sample must be a positive whole number');
+  }
+  const items = sets.flatMap((set) => set.questions.map((q) => ({ question: q, bucket: bucketFor(computeDistance(set.session.index, q)) })));
+  const ordered = sampleQuestions(items, { size: Math.max(1, tier === 'frontier' ? sampleSize : items.length), seed });
+  const keyOf = (q) => `${q.sessionId}\u0000${q.id}`;
+  const chosen = new Set(ordered.map((it) => keyOf(it.question)));
+  const long = new Set(ordered.slice(0, longContextSample ?? ordered.length).map((it) => keyOf(it.question)));
+  return {
+    perSet: sets.map((set) => ({
+      set,
+      questions: set.questions.filter((q) => chosen.has(keyOf(q))),
+      longQuestions: set.questions.filter((q) => long.has(keyOf(q)))
+    })),
+    sample: {
+      tier, requested: tier === 'frontier' ? sampleSize : null, questions: chosen.size, longContextQuestions: long.size, seed,
+      idsSha256: sha256Text([...chosen].sort().join('\n'))
+    }
+  };
+}
+
+// The calls a run would make now, for the estimate: an answer per item whose
+// reply is not cached, and a judgment per item whose verdict is not cached,
+// its reply counted at answerMaxTokens when not written yet. Adapters that
+// need a model for their context (deferred) add their summaries, and an
+// answer and a judgment per question with the context at the adapter's
+// estimate.
+function planCalls({ items, deferred, answer: a }) {
+  const calls = [];
+  const counts = { answers: 0, answersCached: 0, judgments: 0, judgmentsCached: 0, summaries: 0, summariesCached: 0 };
+  const model = (c) => ({ provider: c.provider, model: c.model, local: Boolean(c.local) });
+  const answerChars = (contextChars, q) => a.prompts.answer.text.length + contextChars + q.question.length;
+  const judgeChars = (q) => buildJudgePrompt(a.prompts.judge.text, { question: q, reply: '' }).length;
+  const pushAnswer = (adapter, q, contextChars) => {
+    calls.push({ role: 'answer', adapter, ...model(a.answerClient), inputChars: answerChars(contextChars, q), maxTokens: a.answerMaxTokens });
+    counts.answers += 1;
+  };
+  const pushJudge = (adapter, q, reply) => {
+    calls.push({
+      role: 'judge', adapter, ...model(a.judgeClient),
+      inputChars: judgeChars(q) + (reply === null ? 0 : reply.length), extraInputTokens: reply === null ? a.answerMaxTokens : 0, maxTokens: a.judgeMaxTokens
+    });
+    counts.judgments += 1;
+  };
+  for (const it of items) {
+    if (it.record.error) continue;
+    const aKey = answerKey({
+      adapterConfigSha256: it.adapterConfigSha256, question: it.q, contextSha256: it.contextSha256,
+      client: a.answerClient, promptSha256: a.prompts.answer.sha256, maxTokens: a.answerMaxTokens
+    });
+    const hit = a.cache.get('answer', aKey);
+    if (hit) counts.answersCached += 1;
+    else pushAnswer(it.adapter.name, it.q, it.contextChars);
+    const judged = hit && a.cache.get('judge', judgeKey({
+      answerCacheKey: aKey, prompt: buildJudgePrompt(a.prompts.judge.text, { question: it.q, reply: hit.text }), client: a.judgeClient, maxTokens: a.judgeMaxTokens
+    }));
+    if (judged) counts.judgmentsCached += 1;
+    else pushJudge(it.adapter.name, it.q, hit ? hit.text : null);
+  }
+  for (const d of deferred) {
+    for (const c of d.estimate.calls) calls.push({ role: 'summary', adapter: d.adapter.name, ...c });
+    counts.summaries += d.estimate.calls.length;
+    counts.summariesCached += d.estimate.cached;
+    for (const q of d.qs) {
+      pushAnswer(d.adapter.name, q, d.estimate.contextChars);
+      pushJudge(d.adapter.name, q, null);
+    }
+  }
+  return { calls, counts };
+}
+
 module.exports = {
   SPOT_CHECK_FRACTION, EMPTY_ANSWER_FIELDS, questionSha256, answerKey, judgeKey,
-  answerAndJudge, mapPool, spotCheckFile, writeSpotCheckSample
+  answerAndJudge, mapPool, spotCheckFile, writeSpotCheckSample, TIERS, selectQuestions, planCalls
 };

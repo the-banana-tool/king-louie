@@ -22,4 +22,12 @@ function tmpHome() {
   return { env: { LONGHAUL_HOME: root }, root };
 }
 
-module.exports = { REPO, FIXTURE_ROOT, tmpDir, sink, tmpHome };
+// Marks a session private, as `longhaul import` does a real one.
+function makePrivate(root, sessionId) {
+  const file = path.join(root, 'sessions', sessionId, 'manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, `${JSON.stringify({ ...manifest, private: true, license: 'private' }, null, 2)}
+`);
+}
+
+module.exports = { REPO, FIXTURE_ROOT, tmpDir, sink, tmpHome, makePrivate };
