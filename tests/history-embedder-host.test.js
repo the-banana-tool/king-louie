@@ -159,12 +159,41 @@ describe('EmbedderHost', () => {
     assert.strictEqual(s.host.status().state, 'ready');
     assert.deepStrictEqual(s.providers.map((p) => [p.kind, p.cfg.openai.model]), [['openai', 'text-embedding-3-small']]);
     assert.strictEqual(s.host.current().name, 'openai:text-embedding-3-small');
-    s.host.fail(Object.assign(new Error('401 invalid key'), { status: 401 }));
-    s.host.fail(Object.assign(new Error('401 invalid key'), { status: 401 }));
+    const key = 'openai:text-embedding-3-small';
+    s.host.fail(Object.assign(new Error('401 invalid key'), { status: 401 }), key);
+    s.host.fail(Object.assign(new Error('401 invalid key'), { status: 401 }), key);
     assert.strictEqual(s.host.status().state, 'unavailable');
     assert.strictEqual(s.notices.length, 1);
-    s.host.fail(new EmbedError('MODEL_CHANGED', 'switched'));
+    s.host.fail(new EmbedError('MODEL_CHANGED', 'switched'), key);
     assert.strictEqual(s.notices.length, 1, 'a switch race is not a failure');
+  });
+
+  it('a hosted failure that arrives after a switch leaves the new key alone', async () => {
+    const s = setup({ kind: 'ollama' });
+    s.host.start();
+    const old = s.host.current();
+    assert.strictEqual(old.name, 'ollama:nomic-embed-text');
+    s.set({ kind: 'local' });
+    assert.strictEqual(s.host.status().state, 'starting');
+    s.host.fail(Object.assign(new Error('connect ETIMEDOUT 192.0.2.10:11434'), { code: 'ETIMEDOUT' }), old.name);
+    assert.strictEqual(s.host.status().state, 'starting', 'the stale failure does not mark the local key unavailable');
+    assert.strictEqual(s.notices.length, 0, 'and shows nothing');
+    assert.strictEqual(s.warnings.length, 0);
+    s.runner.loads[0].resolve({ dim: 384 });
+    await flush();
+    assert.strictEqual(s.host.status().state, 'ready', 'the local load still lands');
+    assert.strictEqual(s.host.current().name, 'local:Xenova/bge-small-en-v1.5');
+  });
+
+  it('EMBED_STOPPED (shutdown) is not a failure: no state change, no warning', async () => {
+    const s = setup();
+    s.host.start();
+    s.runner.loads[0].resolve({ dim: 384 });
+    await flush();
+    s.host.fail(new EmbedError('EMBED_STOPPED', 'the embed runner was stopped'), 'local:Xenova/bge-small-en-v1.5');
+    assert.strictEqual(s.host.status().state, 'ready');
+    assert.strictEqual(s.notices.length, 0);
+    assert.strictEqual(s.warnings.length, 0);
   });
 
   it('a provider that cannot be built is unavailable with its message', () => {

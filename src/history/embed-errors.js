@@ -25,4 +25,8 @@ class EmbedError extends Error {
 // the worker, and the indexer isolates the chunk that caused it.
 const WORKER_FAILURES = new Set(['EMBED_WORKER_CRASHED', 'EMBED_WORKER_TIMEOUT']);
 
-module.exports = { EmbedError, WORKER_FAILURES };
+// Not failures at all: a switch racing a call, or the runner stopped at
+// shutdown. No state change, no warning, no toast.
+const NOT_FAILURES = new Set(['MODEL_CHANGED', 'EMBED_STOPPED']);
+
+module.exports = { EmbedError, WORKER_FAILURES, NOT_FAILURES };

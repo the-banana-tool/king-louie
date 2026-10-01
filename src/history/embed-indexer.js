@@ -57,7 +57,7 @@ function startEmbedIndexer({
       return { embedded: await embedRows(embedder, key, rows), skipped: 0, handled: true };
     } catch (err) {
       if (!WORKER_FAILURES.has(err.code)) {
-        host.fail(err);
+        host.fail(err, key);
         return { embedded: 0, skipped: 0, handled: false };
       }
     }
@@ -70,7 +70,7 @@ function startEmbedIndexer({
         embedded += await embedRows(embedder, key, [row]);
       } catch (err) {
         if (!WORKER_FAILURES.has(err.code)) {
-          host.fail(err);
+          host.fail(err, key);
           return { embedded, skipped, handled: false };
         }
         if (store.vectorEpoch !== before) continue;

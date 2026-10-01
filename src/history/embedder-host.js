@@ -20,7 +20,7 @@ const { EventEmitter } = require('node:events');
 const { mergeHistorySettings, embedderKey } = require('./settings');
 const { createLocalEmbedder } = require('./embedders/local');
 const { createRemoteEmbedder } = require('./embedders/remote');
-const { EmbedError } = require('./embed-errors');
+const { EmbedError, NOT_FAILURES } = require('./embed-errors');
 const { createLogger } = require('../logging');
 
 const RETRY_MS = 10 * 60000;
@@ -91,10 +91,13 @@ class EmbedderHost extends EventEmitter {
     this._switch(this.started ? embedderKey(this._settings().embedder) : null, this._settings().embedder);
   }
 
-  // A caller's embed failed. A switch racing a call is not a failure.
-  fail(err) {
+  // A caller's embed with the embedder under `key` failed. A failure for a
+  // key that is no longer active (a hosted call that finished after a switch)
+  // changes nothing; neither does a switch racing a call or a shutdown
+  // (NOT_FAILURES).
+  fail(err, key) {
     const code = err && err.code;
-    if (code === 'MODEL_CHANGED') return;
+    if (NOT_FAILURES.has(code) || key !== this.key) return;
     this.embedder = null;
     this.loading = null;
     this.error = String((err && err.message) || err).slice(0, MESSAGE_MAX);
@@ -163,7 +166,7 @@ class EmbedderHost extends EventEmitter {
         this._set('downloading');
       });
       this.runner.on('disabled', () => {
-        if (this.kind === 'local') this.fail(new EmbedError('EMBED_DISABLED', 'the embedding worker crashed three times in ten minutes; local embedding is off for this session'));
+        if (this.kind === 'local') this.fail(new EmbedError('EMBED_DISABLED', 'the embedding worker crashed three times in ten minutes; local embedding is off for this session'), this.key);
       });
     }
     return this.runner;
@@ -204,7 +207,7 @@ class EmbedderHost extends EventEmitter {
         this._set('ready');
       }, (err) => {
         if (this.loading !== token) return;
-        this.fail(err);
+        this.fail(err, key);
       });
       return;
     }
@@ -213,7 +216,7 @@ class EmbedderHost extends EventEmitter {
       this.embedder = createRemoteEmbedder({ kind: cfg.kind, model, provider: this.createProvider(cfg.kind, cfg) });
       this._set('ready');
     } catch (err) {
-      this.fail(err);
+      this.fail(err, key);
     }
   }
 }
