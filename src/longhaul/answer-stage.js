@@ -14,8 +14,8 @@ const path = require('path');
 const { cacheKey, cachedCall, stableStringify } = require('./model-cache');
 const { buildAnswerPrompt, NOTHING_SHOWN } = require('./answer');
 const { buildJudgePrompt, parseVerdict, scoreVerdict } = require('./judge');
-const { isAuthFailure } = require('./retry');
-const { sha256Text, writeFileAtomic, byCodePoint } = require('./files');
+const { isAuthFailure, callErrorCode, authStopError } = require('./retry');
+const { sha256Text, writeFileAtomic, byCodeUnit } = require('./files');
 const { createRng } = require('./rng');
 const { UsageError } = require('./errors');
 const { sampleQuestions } = require('./sampling');
@@ -57,21 +57,13 @@ function judgeKey({ answerCacheKey, prompt, client, maxTokens }) {
   });
 }
 
-function errorCode(stage, err) {
-  if (err && err.code === 'OVER_BUDGET') return 'over-budget';
-  return `${stage}-failed${Number.isInteger(err?.status) ? `:${err.status}` : ''}`;
-}
-
 async function answerAndJudge(item, deps) {
   const { question } = item;
   const fields = { ...EMPTY_ANSWER_FIELDS };
   const meta = { sessionId: question.sessionId, questionId: question.id, adapter: item.adapter };
   const failed = (stage, err, reply = null) => {
-    if (isAuthFailure(err)) {
-      const provider = stage === 'answer' ? deps.answerClient.provider : deps.judgeClient.provider;
-      throw new UsageError(`${provider} refused the API key (${err.status}); the run stopped. Finished calls are cached, so running again costs only what is left.`, 'AUTH');
-    }
-    fields.answerError = errorCode(stage, err);
+    if (isAuthFailure(err)) throw authStopError(stage === 'answer' ? deps.answerClient.provider : deps.judgeClient.provider, err.status);
+    fields.answerError = callErrorCode(stage, err);
     log.warn('model call failed', { stage, questionId: question.id, adapter: item.adapter, code: fields.answerError });
     return { fields, reply, reason: null };
   };
@@ -148,9 +140,9 @@ function spotCheckFile(home, runId) {
 
 function writeSpotCheckSample(file, rows, { seed = 1, fraction = SPOT_CHECK_FRACTION } = {}) {
   const key = (r) => `${r.sessionId}\u0000${r.questionId}\u0000${r.adapter}`;
-  const judged = rows.filter((r) => r.verdict).sort((a, b) => byCodePoint(key(a), key(b)));
+  const judged = rows.filter((r) => r.verdict).sort((a, b) => byCodeUnit(key(a), key(b)));
   const n = judged.length ? Math.max(1, Math.ceil(judged.length * fraction)) : 0;
-  const picked = createRng(seed).shuffle(judged).slice(0, n).sort((a, b) => byCodePoint(key(a), key(b)));
+  const picked = createRng(seed).shuffle(judged).slice(0, n).sort((a, b) => byCodeUnit(key(a), key(b)));
   writeFileAtomic(file, (write) => {
     for (const r of picked) write(`${JSON.stringify({ ...r, humanVerdict: null, reviewer: null })}\n`);
   });

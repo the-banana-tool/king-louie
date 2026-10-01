@@ -14,7 +14,7 @@ const { buildAnswerPrompt } = require('../src/longhaul/answer');
 const { buildJudgePrompt, VERDICTS } = require('../src/longhaul/judge');
 const { UsageError } = require('../src/longhaul/errors');
 const { tmpDir } = require('./helpers/longhaul-helpers');
-const { byCodePoint } = require('../src/longhaul/files');
+const { byCodeUnit } = require('../src/longhaul/files');
 
 const prompts = { answer: loadPrompt('answer'), judge: loadPrompt('judge') };
 const status = (s) => Object.assign(new Error(`status ${s}`), { status: s });
@@ -190,8 +190,8 @@ describe('spot-check sample', () => {
     assert.strictEqual(fs.readFileSync(again, 'utf8'), fs.readFileSync(file, 'utf8'), 'the same seed picks the same items in any order');
   });
 
-  it('orders by code point, not by the locale: ids that differ only in case (review Minor 5)', () => {
-    assert.deepStrictEqual(['b', 'a', 'B', 'A'].sort(byCodePoint), ['A', 'B', 'a', 'b']);
+  it('orders by UTF-16 code unit, not by the locale: ids that differ only in case (review Minor 5)', () => {
+    assert.deepStrictEqual(['b', 'a', 'B', 'A'].sort(byCodeUnit), ['A', 'B', 'a', 'b']);
     assert.notDeepStrictEqual(['b', 'a', 'B', 'A'].sort((x, y) => x.localeCompare(y)), ['A', 'B', 'a', 'b'], 'the locale order differs');
     const home = { private: path.join(tmpDir(), 'private') };
     const row = (questionId) => ({ runId: 'R', sessionId: 'S', questionId, adapter: 'oracle', kind: 'user-said', reply: 'A', verdict: 'correct' });

@@ -22,7 +22,7 @@ const { KINDS, BUCKETS } = require('./questions');
 const { RUN_ID_RE } = require('./run');
 const { spotCheckFile } = require('./answer-stage');
 const { readSpotChecks, agreement } = require('./spot-check');
-const { writeFileAtomic, sha256Text, childPath, readJsonl, byCodePoint } = require('./files');
+const { writeFileAtomic, sha256Text, childPath, readJsonl, byCodeUnit } = require('./files');
 const { fixed } = require('./format');
 const { UsageError } = require('./errors');
 
@@ -108,7 +108,7 @@ function seriesOf(config, adapter) {
 const succeeded = (r) => !r.error && !r.answerError;
 
 function buildReport(runs) {
-  const ordered = [...runs].sort((x, y) => byCodePoint(x.runId, y.runId));
+  const ordered = [...runs].sort((x, y) => byCodeUnit(x.runId, y.runId));
   const byKey = new Map();
   const setup = new Map();
   const meta = new Map();
@@ -126,9 +126,9 @@ function buildReport(runs) {
       setup.set(`${adapter}\u0000${c.sessionId}`, { ...c, adapter });
     }
   }
-  const records = [...byKey.values()].sort((x, y) => byCodePoint(x.adapter, y.adapter)
-    || byCodePoint(x.sessionId, y.sessionId) || byCodePoint(x.questionId, y.questionId));
-  const summary = summarize(records, { setupCosts: [...setup.values()].sort((x, y) => byCodePoint(x.adapter, y.adapter) || byCodePoint(x.sessionId, y.sessionId)) });
+  const records = [...byKey.values()].sort((x, y) => byCodeUnit(x.adapter, y.adapter)
+    || byCodeUnit(x.sessionId, y.sessionId) || byCodeUnit(x.questionId, y.questionId));
+  const summary = summarize(records, { setupCosts: [...setup.values()].sort((x, y) => byCodeUnit(x.adapter, y.adapter) || byCodeUnit(x.sessionId, y.sessionId)) });
   const series = Object.keys(summary).sort();
   const cut = Object.fromEntries(series.map((s) => [s, records.filter((r) => r.adapter === s && r.contextTruncated === true).length]));
   const comparisons = [];
@@ -225,7 +225,7 @@ function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
     + 'when several runs answer the same question for one series, the latest run counts, but a failed record never replaces a successful one.', '');
   L.push('## Runs', '', '| Run | Stage | Tier | Answer model | Judge model | Prompts (answer / judge) | Questions | Private sessions | Commit | Judge spot-check |',
     '|---|---|---|---|---|---|---|---|---|---|');
-  for (const run of [...runs].sort((x, y) => byCodePoint(x.runId, y.runId))) {
+  for (const run of [...runs].sort((x, y) => byCodeUnit(x.runId, y.runId))) {
     const c = run.config;
     const a = c.answer;
     const questions = (c.sessions || []).reduce((n, s) => n + (s.questions || 0), 0);
@@ -271,9 +271,9 @@ function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
       + 'Its n is the largest series\' answerable questions.',
     '- Cost is what the calls behind these records cost to make, from catalog prices at the time; cached calls are counted at their original cost. '
       + '"+ N unknown" counts calls with no known cost (an unpriced model, or a reply that reported no usage), never $0.');
-  const estimated = [...runs].sort((x, y) => byCodePoint(x.runId, y.runId)).filter((r) => r.spend?.estimatedCalls > 0);
+  const estimated = [...runs].sort((x, y) => byCodeUnit(x.runId, y.runId)).filter((r) => r.spend?.estimatedCalls > 0);
   if (estimated.length) {
-    L.push('- Calls settled at their estimate (a priced reply that reported no usage: its record\'s cost is unknown, and spend.json charged it '
+    L.push('- Calls settled at their estimate (a reply from a priced model that came back unpriced, with no usage or no cost: its record\'s cost is unknown, and spend.json charged it '
       + `at its reservation): ${estimated.map((r) => `${r.runId} ${r.spend.estimatedCalls}`).join(', ')}.`);
   }
   return `${L.join('\n')}\n`;

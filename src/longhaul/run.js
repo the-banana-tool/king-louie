@@ -18,12 +18,12 @@ const { createAdapter } = require('./adapters');
 const {
   evidenceRecall, chunkEvidenceRecall, answerContainment, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS
 } = require('./scoring');
-const { writeFileAtomic, sha256File, sha256Text, byCodePoint } = require('./files');
+const { writeFileAtomic, sha256File, sha256Text, byCodeUnit } = require('./files');
 const { ModelCache, stableStringify } = require('./model-cache');
 const { selectQuestions, planCalls, answerAndJudge, mapPool, spotCheckFile, writeSpotCheckSample } = require('./answer-stage');
 const { estimateCalls, checkBudget, SpendGuard, DEFAULT_MAX_USD, EST_CHARS_PER_TOKEN } = require('./cost');
 const { JUDGE_RULES_SHA256 } = require('./judge');
-const { isAuthFailure, retryable } = require('./retry');
+const { isAuthFailure, retryable, callErrorCode, authStopError } = require('./retry');
 const { UsageError } = require('./errors');
 const { round8 } = require('./format');
 const { createLogger } = require('../logging');
@@ -88,7 +88,7 @@ async function loadRunSet({ dataRoot, sessionIds, includeUnverified }) {
     }
     const questions = all
       .filter((q) => includeUnverified || isVerified(q))
-      .sort((a, b) => a.askAtSeq - b.askAtSeq || byCodePoint(a.id, b.id));
+      .sort((a, b) => a.askAtSeq - b.askAtSeq || byCodeUnit(a.id, b.id));
     sets.push({ session, questions, verified: all.filter(isVerified).length, questionsSha256: await sha256File(qFile) });
   }
   if (sets.reduce((n, s) => n + s.questions.length, 0) === 0) {
@@ -335,8 +335,8 @@ function answerConfig(answer, adapters, selection, estimate, cap) {
 
 function recordOrder(adapters) {
   const rank = new Map(adapters.map((a, i) => [a.name, i]));
-  return (x, y) => byCodePoint(x.sessionId, y.sessionId) || rank.get(x.adapter) - rank.get(y.adapter)
-    || x.askAtSeq - y.askAtSeq || byCodePoint(x.questionId, y.questionId);
+  return (x, y) => byCodeUnit(x.sessionId, y.sessionId) || rank.get(x.adapter) - rank.get(y.adapter)
+    || x.askAtSeq - y.askAtSeq || byCodeUnit(x.questionId, y.questionId);
 }
 
 // Ctrl-C during the answer stage: spend.json (once it exists, and unless the
@@ -478,13 +478,9 @@ async function runAnswerStage(run, options) {
           // call that failed after its retries (spec §15: three), is recorded
           // as a context error on this adapter's questions and the run goes
           // on. Anything else is a defect and is thrown.
-          if (isAuthFailure(err)) {
-            const c = d.adapter.modelClient;
-            throw new UsageError(`${c ? c.provider : 'The provider'} refused the API key (${err.status}) for the summarizer; the run stopped. `
-              + 'Finished calls are cached, so running again costs only what is left.', 'AUTH');
-          }
+          if (isAuthFailure(err)) throw authStopError(d.adapter.modelClient?.provider ?? 'The provider', err.status, 'the summarizer');
           if (err.code !== 'OVER_BUDGET' && !Number.isInteger(err.status) && !retryable(err)) throw err;
-          const code = err.code === 'OVER_BUDGET' ? 'over-budget' : `summary-failed${Number.isInteger(err.status) ? `:${err.status}` : ''}`;
+          const code = callErrorCode('summary', err);
           log.warn('summarizer failed; its questions are recorded as errors', { adapter: d.adapter.name, sessionId: d.session.manifest.sessionId, code });
           recordFailed(d, code);
           writeSpend();

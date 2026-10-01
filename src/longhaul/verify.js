@@ -7,7 +7,7 @@ const readline = require('readline');
 const { KINDS, validateQuestion, normalizeQuestion, computeDistance, bucketFor } = require('./questions');
 const { messageText, senderLabel } = require('./session-format');
 const { UsageError } = require('./errors');
-const { byCodePoint } = require('./files');
+const { byCodeUnit } = require('./files');
 
 const SHOW_CHARS = 1500;
 const REVIEWER_RE = /^[A-Za-z0-9._-]{1,32}$/;
@@ -87,7 +87,7 @@ async function verifyLoop({ session, questions, reviewer, input, output, onSave,
   // A question with no verifiedBy key is unverified, like verifiedBy null.
   let current = questions.map((q) => (q.verifiedBy === undefined ? { ...q, verifiedBy: null } : q));
   const replace = (q) => { current = current.map((x) => (x.id === q.id ? q : x)); };
-  const pending = current.filter((q) => q.verifiedBy == null).sort((a, b) => a.askAtSeq - b.askAtSeq || byCodePoint(a.id, b.id));
+  const pending = current.filter((q) => q.verifiedBy == null).sort((a, b) => a.askAtSeq - b.askAtSeq || byCodeUnit(a.id, b.id));
   const counts = { accepted: 0, edited: 0, rejected: 0, skipped: 0, stopped: false };
 
   const edit = async (q) => {

@@ -4,6 +4,8 @@
 // 5xx or a transport failure is retried with exponential backoff, or after
 // the provider's retry-after; anything else (a 400, a refused key) is thrown
 // at once.
+const { UsageError } = require('./errors');
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function retryable(err) {
@@ -17,6 +19,20 @@ function retryable(err) {
 // A refused key: every later call would fail the same way, so a run stops.
 function isAuthFailure(err) {
   return Boolean(err) && (err.status === 401 || err.status === 403);
+}
+
+// The record code for a model call that failed (answer, judge or summary):
+// over-budget for the cap, else <stage>-failed with the HTTP status if any.
+function callErrorCode(stage, err) {
+  if (err && err.code === 'OVER_BUDGET') return 'over-budget';
+  return `${stage}-failed${Number.isInteger(err?.status) ? `:${err.status}` : ''}`;
+}
+
+// The error that stops a run on a refused key; forWhat names the caller
+// when it is not the answer or judge model ("the summarizer").
+function authStopError(provider, status, forWhat = null) {
+  return new UsageError(`${provider} refused the API key (${status})${forWhat ? ` for ${forWhat}` : ''}; the run stopped. `
+    + 'Finished calls are cached, so running again costs only what is left.', 'AUTH');
 }
 
 // onRetry({ err, attempt, delayMs }) runs before each wait (a caller's log line).
@@ -33,4 +49,4 @@ async function withRetries(fn, { retries = 3, baseDelayMs = 1000, wait = sleep, 
   }
 }
 
-module.exports = { retryable, isAuthFailure, withRetries };
+module.exports = { retryable, isAuthFailure, callErrorCode, authStopError, withRetries };

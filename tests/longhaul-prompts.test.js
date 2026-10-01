@@ -5,7 +5,8 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const { PROMPTS, loadPrompt, placeholders, fillTemplate } = require('../src/longhaul/prompts');
-const { retryable, isAuthFailure, withRetries } = require('../src/longhaul/retry');
+const { retryable, isAuthFailure, withRetries, callErrorCode, authStopError } = require('../src/longhaul/retry');
+const { UsageError } = require('../src/longhaul/errors');
 const { sha256Text } = require('../src/longhaul/files');
 
 describe('prompts', () => {
@@ -75,5 +76,21 @@ describe('withRetries', () => {
     assert.strictEqual(retryable(new Error('socket hang up')), true);
     assert.strictEqual(isAuthFailure(status(401)), true);
     assert.strictEqual(isAuthFailure(status(500)), false);
+  });
+});
+
+describe('call failure helpers', () => {
+  it('names a failed call by stage and status, and the cap as over-budget (one shape for answers, judgments and summaries)', () => {
+    assert.strictEqual(callErrorCode('answer', Object.assign(new Error('x'), { status: 500 })), 'answer-failed:500');
+    assert.strictEqual(callErrorCode('summary', new TypeError('fetch failed')), 'summary-failed');
+    assert.strictEqual(callErrorCode('judge', Object.assign(new Error('cap'), { code: 'OVER_BUDGET' })), 'over-budget');
+  });
+
+  it('builds the one refused-key error that stops a run', () => {
+    const err = authStopError('openai', 401);
+    assert.ok(err instanceof UsageError);
+    assert.strictEqual(err.code, 'AUTH');
+    assert.strictEqual(err.message, 'openai refused the API key (401); the run stopped. Finished calls are cached, so running again costs only what is left.');
+    assert.match(authStopError('anthropic', 403, 'the summarizer').message, /^anthropic refused the API key \(403\) for the summarizer; the run stopped\./);
   });
 });

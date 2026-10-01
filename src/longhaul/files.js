@@ -64,13 +64,14 @@ function readJsonl(file, { tornTail = false } = {}) {
   return out;
 }
 
-// A sort order that is the same on every machine: UTF-16 code units, never
-// the locale's collation (localeCompare), so the same runs give the same
-// files and samples everywhere.
-function byCodePoint(a, b) {
+// A sort order that is the same on every machine: JavaScript's < on strings,
+// which compares UTF-16 code units (not code points: a character outside the
+// BMP sorts by its surrogates), never the locale's collation (localeCompare),
+// so the same runs give the same files and samples everywhere.
+function byCodeUnit(a, b) {
   const x = String(a);
   const y = String(b);
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-module.exports = { writeFileAtomic, sha256File, sha256Text, isInside, childPath, readJsonl, byCodePoint };
+module.exports = { writeFileAtomic, sha256File, sha256Text, isInside, childPath, readJsonl, byCodeUnit };

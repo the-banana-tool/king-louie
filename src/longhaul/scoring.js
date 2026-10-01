@@ -281,8 +281,9 @@ function noiseNote(n) {
     + 'and a cell with fewer questions moves more.';
 }
 
-// A priced call whose reply reported no usage is counted at its estimate.
-const spendEstimatedNote = (spend) => (spend.estimatedCalls ? `, ${spend.estimatedCalls} at their estimate: no usage reported` : '');
+// A priced model's reply that came back unpriced (no usage, zero tokens or
+// no cost) is counted at its estimate.
+const spendEstimatedNote = ({ estimatedCalls: n }) => (n ? `, ${n} unpriced ${n === 1 ? 'reply, settled at its' : 'replies, settled at their'} estimate` : '');
 
 function renderSummaryMarkdown(config, summary, { spend = null, comparisons = [] } = {}) {
   const lines = [`# LongHaul run ${config.runId}`, ''];

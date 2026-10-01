@@ -11,7 +11,7 @@
 // and the run refuses unless --allow-unpriced. The built-in fake models
 // (client.local, --fake-models) cost nothing.
 const { UsageError } = require('./errors');
-const { byCodePoint } = require('./files');
+const { byCodeUnit } = require('./files');
 
 const EST_CHARS_PER_TOKEN = 3;
 const DEFAULT_MAX_USD = 50;
@@ -43,7 +43,7 @@ function estimateCalls(calls, catalog) {
     line.usd = line.usd === null || usd === null ? null : line.usd + usd;
   }
   const sorted = [...lines.values()].sort((a, b) => ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role)
-    || byCodePoint(a.adapter, b.adapter) || byCodePoint(a.provider, b.provider) || byCodePoint(a.model, b.model));
+    || byCodeUnit(a.adapter, b.adapter) || byCodeUnit(a.provider, b.provider) || byCodeUnit(a.model, b.model));
   for (const l of sorted) if (l.usd !== null) l.usd = round8(l.usd);
   const knownUsd = round8(sorted.reduce((n, l) => n + (l.usd ?? 0), 0));
   const unpriced = [...new Set(sorted.filter((l) => l.usd === null).map((l) => `${l.provider}/${l.model}`))].sort();

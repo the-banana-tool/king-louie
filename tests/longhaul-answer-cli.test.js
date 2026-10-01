@@ -140,6 +140,6 @@ describe('longhaul run: the answer stage', () => {
     await assert.rejects(COMMANDS.run.run(ctx, values, [], deps), (err) => err.code === 'UNPRICED');
     assert.strictEqual(await COMMANDS.run.run(ctx, { ...values, 'allow-unpriced': true }, [], deps), 0, ctx.stderr.text);
     // The fake server reports no usage, so the priced judge settles at its estimate.
-    assert.match(ctx.stdout.text, /\(21 unpriced, 21 at their estimate: no usage reported\)/);
+    assert.match(ctx.stdout.text, /\(21 unpriced, 21 unpriced replies, settled at their estimate\)/);
   });
 });
