@@ -152,7 +152,58 @@ describe('oracle', () => {
 
 describe('adapter registry', () => {
   it('lists the built-in adapters and refuses an unknown one', () => {
-    assert.deepStrictEqual(adapterNames(), ['kl-recall', 'kl-recall-rerank', 'kl-recall-vec', 'kl-recall-vec-only', 'kl-recall-vec-rerank', 'oracle', 'sliding-window']);
-    assert.throws(() => createAdapter('full-history'), UsageError);
+    assert.deepStrictEqual(adapterNames(), [
+      'full-history', 'kl-recall', 'kl-recall-rerank', 'kl-recall-vec', 'kl-recall-vec-only', 'kl-recall-vec-rerank',
+      'kl-recall-whole', 'oracle', 'sliding-window'
+    ]);
+    assert.throws(() => createAdapter('no-such-adapter'), UsageError);
+  });
+});
+
+describe('full-history', () => {
+  it('shows every message before askAtSeq when the session fits the window', async () => {
+    for (const id of ['synth-small', 'synth-medium', 'synth-compacted']) {
+      const { session, questions } = await fixture(id);
+      const adapter = createAdapter('full-history');
+      assert.strictEqual(adapter.frontierOnly, true);
+      assert.strictEqual(adapter.longContext, true);
+      const handle = await adapter.prepare(session);
+      for (const q of questions) {
+        const r = await adapter.context(handle, { question: q, askAtSeq: q.askAtSeq });
+        assert.deepStrictEqual(r.evidenceSeqsShown, Array.from({ length: q.askAtSeq - 1 }, (_, i) => i + 1), `${q.id}`);
+        assert.strictEqual(r.truncated, false);
+      }
+    }
+  });
+
+  it('cuts the oldest messages at the window and says so', async () => {
+    const { session, questions } = await fixture('synth-medium');
+    const adapter = createAdapter('full-history', { windowTokens: 5000 });
+    assert.deepStrictEqual(adapter.describe(), { name: 'full-history', windowTokens: 5000 });
+    const q = questions.at(-1);
+    const r = await adapter.context(await adapter.prepare(session), { question: q, askAtSeq: q.askAtSeq });
+    assert.strictEqual(r.truncated, true);
+    assert.ok(r.estTokens <= 5000, `${r.estTokens} tokens`);
+    assert.strictEqual(Math.max(...r.evidenceSeqsShown), q.askAtSeq - 1);
+    assert.ok(Math.min(...r.evidenceSeqsShown) > 1);
+  });
+
+  it('lowers its window to a cap, never raises it', () => {
+    const capped = createAdapter('full-history').capWindow(5000);
+    assert.strictEqual(capped.name, 'full-history');
+    assert.strictEqual(capped.frontierOnly, true);
+    assert.deepStrictEqual(capped.describe(), { name: 'full-history', windowTokens: 5000 });
+    assert.strictEqual(createAdapter('full-history', { windowTokens: 3000 }).capWindow(5000).describe().windowTokens, 3000);
+  });
+});
+
+describe('sliding-window truncated flag', () => {
+  it('is true when older messages were left out, false when the whole prefix fits', async () => {
+    const { session, questions } = await fixture('synth-small');
+    const q = questions.at(-1);
+    const small = createAdapter('sliding-window', { windowTokens: 500 });
+    assert.strictEqual((await small.context(await small.prepare(session), { question: q, askAtSeq: q.askAtSeq })).truncated, true);
+    const big = createAdapter('sliding-window', { windowTokens: 1000000 });
+    assert.strictEqual((await big.context(await big.prepare(session), { question: q, askAtSeq: q.askAtSeq })).truncated, false);
   });
 });

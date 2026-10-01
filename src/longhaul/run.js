@@ -104,6 +104,7 @@ async function scoreOne({ runId, adapter, handle, session, q, budgetTokens }) {
       answerTokensContained: contained ? contained.tokens : null,
       chunkEvidenceRecall: chunkEvidenceRecall(q.evidenceSeqs, r.chunks),
       estTokens: r.estTokens, latencyMs: r.latencyMs, cpuMs: r.cpuMs, cost: r.cost ?? 0,
+      contextTruncated: typeof r.truncated === 'boolean' ? r.truncated : null,
       leaked: [...shown, ...partial].filter((s) => s >= q.askAtSeq).length,
       error: null
     };
@@ -111,7 +112,7 @@ async function scoreOne({ runId, adapter, handle, session, q, budgetTokens }) {
     return {
       ...base, evidenceSeqsShown: [], evidenceSeqsPartial: [], evidenceRecall: null, evidencePartial: 0, chunkEvidenceRecall: null,
       answerContained: null, answerTokensContained: null,
-      estTokens: null, latencyMs: null, cpuMs: null, cost: 0, leaked: 0, error: err.message
+      estTokens: null, latencyMs: null, cpuMs: null, cost: 0, contextTruncated: null, leaked: 0, error: err.message
     };
   }
 }

@@ -198,6 +198,14 @@ describe('runBenchmark', () => {
     assert.strictEqual(s.evidenceRecall, 1);
     assert.strictEqual(out.records.find((r) => r.kind === 'decision').error, 'boom');
   });
+
+  it('records whether an adapter cut the context', async () => {
+    const home = setup();
+    const out = await runBenchmark({ home, adapterNames: ['sliding-window'], adapterConfig: { 'sliding-window': { windowTokens: 300 } }, now: fixedNow, commit: 'x' });
+    assert.ok(out.records.every((r) => r.contextTruncated === true));
+    const oracle = await runBenchmark({ home, adapterNames: ['oracle'], now: fixedNow, commit: 'x' });
+    assert.ok(oracle.records.every((r) => r.contextTruncated === null), 'an adapter that never cuts says "not known", not false');
+  });
 });
 
 describe('runBenchmark temp stores', () => {
@@ -232,7 +240,7 @@ describe('longhaul run CLI', () => {
     const { env } = tmpHome();
     const io = () => ({ stdout: sink(), stderr: sink(), env });
     assert.strictEqual(await main(['run', '--sessions', FIXTURE_ROOT], io()), 2);
-    assert.strictEqual(await main(['run', '--sessions', FIXTURE_ROOT, '--adapters', 'full-history'], io()), 2);
+    assert.strictEqual(await main(['run', '--sessions', FIXTURE_ROOT, '--adapters', 'no-such-adapter'], io()), 2);
     assert.strictEqual(await main(['run', '--sessions', FIXTURE_ROOT, '--adapters', 'oracle', '--budget-tokens', '0'], io()), 2);
     assert.strictEqual(await main(['run', '--sessions', FIXTURE_ROOT, '--adapters', 'oracle', '--session', 'nope'], io()), 2);
     assert.strictEqual(await main(['run', '--sessions', FIXTURE_ROOT, '--adapters', 'kl-recall', '--recall', 'noEquals'], io()), 2);

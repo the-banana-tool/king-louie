@@ -2,44 +2,23 @@
 // sliding-window (benchmark spec §7): the last N estimated tokens before
 // askAtSeq, any sender. The naive baseline. By default N is the most
 // kl-recall can show at the same budget: recalled budget plus tail budget.
-const { estimateTokens, renderMessage } = require('../session-format');
-const { TAIL_DEFAULTS, measured, uniqueSorted } = require('./common');
+// full-history is this adapter with a 128K window (full-history.js).
+const { estimateTokens } = require('../session-format');
+const { TAIL_DEFAULTS, measured, newestFirst } = require('./common');
 
-const CUT_MARKER_MAX = 40;
-
-function createSlidingWindowAdapter({ budgetTokens = 6000, windowTokens = null } = {}) {
+function createSlidingWindowAdapter({ budgetTokens = 6000, windowTokens = null, name = 'sliding-window' } = {}) {
   const limit = windowTokens ?? budgetTokens + TAIL_DEFAULTS.tailTokens;
   return {
-    name: 'sliding-window',
-    describe() { return { name: 'sliding-window', windowTokens: limit }; },
+    name,
+    describe() { return { name, windowTokens: limit }; },
     async prepare(session) { return { session }; },
     async context(handle, { askAtSeq }) {
       return measured(async () => {
-        const { index } = handle.session;
-        const parts = [];
-        const seqs = [];
-        const partial = [];
-        let used = 0;
-        for (let seq = Math.min(askAtSeq - 1, index.maxSeq); seq >= 1; seq--) {
-          const text = renderMessage(index.get(seq));
-          const t = estimateTokens(`${text}\n\n`);
-          if (used + t > limit) {
-            // The newest message alone is over the window: its end is shown,
-            // so it is partly shown, not shown. A window too small for the
-            // marker leaves it out entirely (slice(-0) would be all of it).
-            const keep = limit * 4 - CUT_MARKER_MAX;
-            if (parts.length === 0 && keep > 0) {
-              parts.push(`[... earlier part of #${seq} cut]\n${text.slice(-keep)}`);
-              partial.push(seq);
-            }
-            break;
-          }
-          parts.push(text);
-          seqs.push(seq);
-          used += t;
-        }
-        const text = parts.reverse().join('\n\n');
-        return { text, evidenceSeqsShown: uniqueSorted(seqs), evidenceSeqsPartial: partial, estTokens: estimateTokens(text), cost: 0 };
+        const w = newestFirst(handle.session.index, { beforeSeq: askAtSeq, limit });
+        return {
+          text: w.text, evidenceSeqsShown: w.seqs, evidenceSeqsPartial: w.partial,
+          estTokens: estimateTokens(w.text), cost: 0, truncated: w.truncated
+        };
       });
     },
     async release() {}

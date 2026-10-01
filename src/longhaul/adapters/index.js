@@ -3,6 +3,14 @@
 const { UsageError } = require('../errors');
 const { createSlidingWindowAdapter } = require('./sliding-window');
 const { createOracleAdapter } = require('./oracle');
+const { createFullHistoryAdapter } = require('./full-history');
+
+// The whole-message experiment B0 left open (measured facts; recall spec
+// §6.7): taking a small message whole and pairing a tool call with its result
+// raised evidence recall 0.352 -> 0.494 but left containment flat. B3's
+// answer accuracy decides it; the run's summary prints the comparison
+// (scoring.js COMPARISONS). These two settings win over --recall.
+const WHOLE_MESSAGES = Object.freeze({ completeMessageTokens: 800, pairToolMessages: true });
 
 const FACTORIES = {
   // Loaded on use: it opens node:sqlite, which the other adapters never need.
@@ -14,6 +22,11 @@ const FACTORIES = {
   // candidates, and over BM25 fused with cosine.
   'kl-recall-rerank': (config) => require('./kl-recall-rerank').createKlRecallRerankAdapter(config),
   'kl-recall-vec-rerank': (config) => require('./kl-recall-rerank').createKlRecallRerankAdapter({ ...config, candidates: 'fused' }),
+  'kl-recall-whole': (config) => require('./kl-recall').createKlRecallAdapter({
+    ...config, name: 'kl-recall-whole', recall: { ...(config.recall || {}), ...WHOLE_MESSAGES }
+  }),
+  // Long-context baseline, frontier tier only (spec §8.1).
+  'full-history': (config) => createFullHistoryAdapter(config),
   'sliding-window': createSlidingWindowAdapter,
   oracle: createOracleAdapter
 };
@@ -28,4 +41,4 @@ function createAdapter(name, config = {}) {
   return factory(config);
 }
 
-module.exports = { createAdapter, adapterNames };
+module.exports = { createAdapter, adapterNames, WHOLE_MESSAGES };
