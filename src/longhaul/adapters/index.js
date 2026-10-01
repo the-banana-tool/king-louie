@@ -4,6 +4,7 @@ const { UsageError } = require('../errors');
 const { createSlidingWindowAdapter } = require('./sliding-window');
 const { createOracleAdapter } = require('./oracle');
 const { createFullHistoryAdapter } = require('./full-history');
+const { createRealCompactionAdapter } = require('./real-compaction');
 
 // The whole-message experiment B0 left open (measured facts; recall spec
 // §6.7): taking a small message whole and pairing a tool call with its result
@@ -27,6 +28,8 @@ const FACTORIES = {
   }),
   // Long-context baseline, frontier tier only (spec §8.1).
   'full-history': (config) => createFullHistoryAdapter(config),
+  // What Claude Code had: its own compaction summaries (sessions with compactions only).
+  'real-compaction': (config) => createRealCompactionAdapter(config),
   'sliding-window': createSlidingWindowAdapter,
   oracle: createOracleAdapter
 };

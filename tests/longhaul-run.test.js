@@ -206,6 +206,16 @@ describe('runBenchmark', () => {
     const oracle = await runBenchmark({ home, adapterNames: ['oracle'], now: fixedNow, commit: 'x' });
     assert.ok(oracle.records.every((r) => r.contextTruncated === null), 'an adapter that never cuts says "not known", not false');
   });
+
+  it('skips an adapter that does not apply to a session and lists it in config.json', async () => {
+    const home = setup();
+    writeSyntheticRoot(home.root, [SYNTH_FIXTURES[2]]);
+    const out = await runBenchmark({ home, adapterNames: ['real-compaction', 'oracle'], now: fixedNow, commit: 'x' });
+    assert.deepStrictEqual(out.config.skippedAdapters, [{ adapter: 'real-compaction', sessionId: 'synth-small', reason: 'no recorded compactions' }]);
+    assert.ok(out.records.filter((r) => r.adapter === 'real-compaction').every((r) => r.sessionId === 'synth-compacted'));
+    assert.strictEqual(out.records.filter((r) => r.adapter === 'oracle').length, 12);
+    assert.strictEqual(out.leaks, 0);
+  });
 });
 
 describe('runBenchmark temp stores', () => {

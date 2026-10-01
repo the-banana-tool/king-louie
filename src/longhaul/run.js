@@ -49,6 +49,22 @@ function newRunId(date) {
   return `${stamp}-${crypto.randomBytes(2).toString('hex')}`;
 }
 
+// Adapters that do not apply to a session (real-compaction on a session with
+// no recorded compactions) are skipped there and listed in config.json.
+function adapterSkips(adapters, sets) {
+  const out = [];
+  for (const { session } of sets) {
+    for (const a of adapters) {
+      if (typeof a.appliesTo === 'function' && !a.appliesTo(session)) {
+        out.push({ adapter: a.name, sessionId: session.manifest.sessionId, reason: a.skipReason || 'does not apply' });
+      }
+    }
+  }
+  return out;
+}
+
+const isSkipped = (skips, adapter, session) => skips.some((s) => s.adapter === adapter.name && s.sessionId === session.manifest.sessionId);
+
 async function loadRunSet({ dataRoot, sessionIds, includeUnverified }) {
   const ids = sessionIds && sessionIds.length ? sessionIds : listSessions(dataRoot);
   if (!ids.length) throw new UsageError(`No sessions under ${path.join(dataRoot, 'sessions')}.`);
@@ -125,6 +141,7 @@ async function runBenchmark({
   const adapters = injected || adapterNames.map((name) => createAdapter(name, { budgetTokens, tmpRoot: home.tmp, ...(adapterConfig[name] || {}) }));
   if (!adapters.length) throw new UsageError('Name at least one adapter with --adapters.');
   const { sets, skipped } = await loadRunSet({ dataRoot, sessionIds, includeUnverified });
+  const skippedAdapters = adapterSkips(adapters, sets);
 
   const runId = newRunId(now());
   const dir = path.join(home.runs, runId);
@@ -147,7 +164,8 @@ async function runBenchmark({
       sessionId: session.manifest.sessionId, source: session.manifest.source, private: session.manifest.private,
       license: session.manifest.license, questions: questions.length, verifiedQuestions: verified, questionsSha256
     })),
-    skippedSessions: skipped
+    skippedSessions: skipped,
+    skippedAdapters
   };
   writeFileAtomic(path.join(dir, 'config.json'), `${JSON.stringify(config, null, 2)}\n`);
 
@@ -158,6 +176,7 @@ async function runBenchmark({
     if (!questions.length) continue;
     const upToSeq = Math.max(...questions.map((q) => q.askAtSeq));
     for (const adapter of adapters) {
+      if (isSkipped(skippedAdapters, adapter, session)) continue;
       const handle = await adapter.prepare(session, { upToSeq });
       try {
         for (const q of questions) {
