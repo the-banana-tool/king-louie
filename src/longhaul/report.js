@@ -9,8 +9,9 @@
 // with a private session (spec §10.1) before any file is written. The same
 // runs give byte-identical files: nothing reads the clock, every list is
 // sorted. A series is one adapter with one configuration (its describe(),
-// hashed), at one tier, answer model and judge model, from one commit, so
-// runs that differ in any of these never share a row. When several runs
+// hashed), at one tier, answer model and judge model, from one commit and
+// with one setup (max tokens and prompt hashes), so runs that differ in any
+// of these never share a row. When several runs
 // answer the same question for one series (a crashed run and its rerun), the
 // latest counts, unless it failed where an earlier one succeeded.
 const fs = require('fs');
@@ -56,7 +57,12 @@ function loadRun(home, runId) {
   return { runId, config, records, spend, spot };
 }
 
-const short = (commit) => String(commit ?? 'unknown').slice(0, 12);
+// The commit as shown: 12 hex, keeping a "-dirty" mark (an uncommitted
+// prompt edit is another setup).
+function shortCommit(commit) {
+  const full = String(commit ?? 'unknown');
+  return `${full.slice(0, 12)}${full.endsWith('-dirty') && full.length > 18 ? '-dirty' : ''}`;
+}
 
 // The adapter's configuration as the run recorded it (config.adapters holds
 // each adapter's describe(), with the recall settings, windows and models),
@@ -67,12 +73,34 @@ function configHash(config, adapter) {
   return d ? sha256Text(stableStringify(d)).slice(0, 8) : 'unknown';
 }
 
+// What else changes an answer, hashed into setup: (8 hex): the full commit
+// (two commits that share 12 hex, or a "-dirty" tree, stay apart), the
+// answer and judge max tokens, and the prompts' hashes (answer, judge and its
+// rules, summarize when the run had one).
+function setupHash(config) {
+  const a = config.answer;
+  const prompt = (p) => (p ? p.sha256 ?? null : null);
+  const parts = { commit: String(config.commit ?? 'unknown') };
+  if (a) {
+    Object.assign(parts, {
+      answerMaxTokens: a.answerModel?.maxTokens ?? null,
+      judgeMaxTokens: a.judgeModel?.maxTokens ?? null,
+      prompts: {
+        answer: prompt(a.prompts?.answer), judge: prompt(a.prompts?.judge),
+        judgeRules: a.prompts?.judge?.rulesSha256 ?? null, summarize: prompt(a.prompts?.summarize)
+      }
+    });
+  }
+  return sha256Text(stableStringify(parts)).slice(0, 8);
+}
+
 // Everything a series holds equal except the adapter and its configuration;
 // a named comparison pairs two adapters within one cohort.
 function cohortOf(config) {
-  if (!config.answer) return `evidence-only commit:${short(config.commit)}`;
+  const tail = `commit:${shortCommit(config.commit)} setup:${setupHash(config)}`;
+  if (!config.answer) return `evidence-only ${tail}`;
   const { tier, answerModel: m, judgeModel: j } = config.answer;
-  return `${tier} ${m.provider}/${m.model} judge:${j.provider}/${j.model} commit:${short(config.commit)}`;
+  return `${tier} ${m.provider}/${m.model} judge:${j.provider}/${j.model} ${tail}`;
 }
 
 function seriesOf(config, adapter) {
@@ -195,7 +223,8 @@ function renderTex({ summary, series }) {
 function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
   const L = [`# LongHaul report ${reportId}`, ''];
   L.push('Aggregate numbers only: no question, answer or session text (B-D8). A series is one adapter with one configuration '
-    + '(cfg: the first 8 hex of its recorded describe() hash) at one tier, answer model and judge model, from one commit; '
+    + '(cfg: the first 8 hex of its recorded describe() hash) at one tier, answer model and judge model, from one commit, with one setup '
+    + '(setup: 8 hex over the full commit, the answer and judge max tokens and the prompt hashes); '
     + 'when several runs answer the same question for one series, the latest run counts, but a failed record never replaces a successful one.', '');
   L.push('## Runs', '', '| Run | Stage | Tier | Answer model | Judge model | Prompts (answer / judge) | Questions | Private sessions | Commit | Judge spot-check |',
     '|---|---|---|---|---|---|---|---|---|---|');
@@ -207,7 +236,7 @@ function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
     const spot = !run.spot ? '-' : run.spot.reviewed ? `${run.spot.agreed}/${run.spot.reviewed} agreed (${run.spot.sampled} sampled)` : `not reviewed (${run.spot.sampled} sampled)`;
     L.push(`| ${run.runId} | ${c.stage} | ${a ? a.tier : '-'} | ${a ? `${a.answerModel.provider}/${a.answerModel.model}` : '-'} | `
       + `${a ? `${a.judgeModel.provider}/${a.judgeModel.model}` : '-'} | ${a ? `${a.prompts.answer.sha256.slice(0, 12)} / ${a.prompts.judge.sha256.slice(0, 12)}` : '-'} | `
-      + `${questions} | ${priv} | ${String(c.commit).slice(0, 12)} | ${spot} |`);
+      + `${questions} | ${priv} | ${shortCommit(c.commit)} | ${spot} |`);
   }
   L.push('', '## Per adapter', '', '| Series | Questions | Evidence recall | Contained | Accuracy (n) | Partial | Declined | Abstain accuracy (n) | False answers | Contexts cut | Median tokens | p90 tokens | Cost USD | USD per accuracy point |',
     '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');

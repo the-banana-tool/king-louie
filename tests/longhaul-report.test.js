@@ -60,7 +60,11 @@ function setup() {
   return { env, home };
 }
 const cfg = (d) => sha256Text(stableStringify(d)).slice(0, 8);
-const COHORT = 'grid openai/gpt-6-lite judge:anthropic/claude-haiku-4-5 commit:abcdef123456';
+const SETUP = sha256Text(stableStringify({
+  commit: 'abcdef1234567890', answerMaxTokens: 400, judgeMaxTokens: 200,
+  prompts: { answer: 'a'.repeat(64), judge: 'b'.repeat(64), judgeRules: null, summarize: null }
+})).slice(0, 8);
+const COHORT = `grid openai/gpt-6-lite judge:anthropic/claude-haiku-4-5 commit:abcdef123456 setup:${SETUP}`;
 const KL = `kl-recall cfg:${cfg(ADAPTERS[0])} @ ${COHORT}`;
 const WHOLE = `kl-recall-whole cfg:${cfg(ADAPTERS[1])} @ ${COHORT}`;
 const readAll = (dir) => Object.fromEntries(fs.readdirSync(dir).sort().map((f) => [f, fs.readFileSync(path.join(dir, f), 'utf8')]));
@@ -131,7 +135,33 @@ describe('longhaul report', () => {
     assert.notStrictEqual(other({ adapters: [{ ...ADAPTERS[0], recall: { bm25TopK: 100 } }] }), KL);
     assert.notStrictEqual(other({ answer: { ...base.answer, tier: 'frontier' } }), KL);
     const b0 = { stage: 'B0', commit: 'c0ffee', adapters: [{ name: 'oracle' }] };
-    assert.strictEqual(seriesOf(b0, 'oracle'), `oracle cfg:${cfg({ name: 'oracle' })} @ evidence-only commit:c0ffee`);
+    assert.strictEqual(seriesOf(b0, 'oracle'), `oracle cfg:${cfg({ name: 'oracle' })} @ evidence-only commit:c0ffee setup:${sha256Text(stableStringify({ commit: 'c0ffee' })).slice(0, 8)}`);
+  });
+
+  it('keeps apart runs whose max tokens, prompts or full commit differ (review Important 3)', () => {
+    const base = config(RUN_A, false);
+    const other = (patch) => seriesOf({ ...base, ...patch }, 'kl-recall');
+    const answer = (patch) => other({ answer: { ...base.answer, ...patch } });
+    assert.notStrictEqual(answer({ answerModel: { ...base.answer.answerModel, maxTokens: 100 } }), KL);
+    assert.notStrictEqual(answer({ judgeModel: { ...base.answer.judgeModel, maxTokens: 100 } }), KL);
+    assert.notStrictEqual(answer({ prompts: { ...base.answer.prompts, answer: { sha256: 'c'.repeat(64) } } }), KL);
+    assert.notStrictEqual(answer({ prompts: { ...base.answer.prompts, judge: { sha256: 'b'.repeat(64), rulesSha256: 'd'.repeat(64) } } }), KL);
+    assert.notStrictEqual(answer({ prompts: { ...base.answer.prompts, summarize: { sha256: 'e'.repeat(64) } } }), KL);
+    // Same first 12 hex, another commit; and the same commit with a dirty tree.
+    assert.notStrictEqual(other({ commit: 'abcdef1234567891' }), KL);
+    const dirty = other({ commit: 'abcdef1234567890-dirty' });
+    assert.notStrictEqual(dirty, KL);
+    assert.match(dirty, /commit:abcdef123456-dirty setup:[0-9a-f]{8}$/);
+  });
+
+  it('never merges two runs that differ only in answer max tokens', () => {
+    const { home } = setup();
+    const cfgB = config(RUN_B, true);
+    cfgB.answer.answerModel.maxTokens = 100;
+    writeRun(home, RUN_B, cfgB, [rec(RUN_B, 'kl-recall', 2, 'user-said', 'correct')]);
+    const built = buildReport([RUN_A, RUN_B].map((r) => loadRun(home, r)));
+    assert.strictEqual(built.summary[KL].answer.accuracy, 2 / 3, 'RUN_A keeps its own series');
+    assert.strictEqual(built.series.length, 3);
   });
 
   it('runs from the CLI, and refuses an unknown run or a bad id', async () => {
