@@ -3373,21 +3373,26 @@ function sortSettingsNavOptions() {
 // Everything shown comes from the host and is set with textContent.
 let historyStatusTimer = null;
 
+// The local embedder is unpriced and says so; a hosted one shows the tokens
+// it has embedded this session (a count only: prices come from the catalog).
 function historyEmbedderStatusText(status, progress) {
   const s = status || {};
   const pct = (a, b) => (b > 0 ? Math.min(100, Math.floor((a / b) * 100)) : 0);
+  const cost = s.kind === 'local'
+    ? ' Runs on this computer, no API cost.'
+    : (s.kind === 'openai' || s.kind === 'ollama' ? ` ${Number(s.tokens) || 0} tokens embedded this session.` : '');
   switch (s.state) {
     case 'off': return 'Off: recall uses keyword search only.';
-    case 'starting': return 'Loading the embedding model…';
-    case 'downloading': return s.download && s.download.total > 0
+    case 'starting': return `Loading the embedding model…${cost}`;
+    case 'downloading': return (s.download && s.download.total > 0
       ? `Downloading the embedding model: ${pct(s.download.loaded, s.download.total)}%`
-      : 'Downloading the embedding model…';
+      : 'Downloading the embedding model…') + cost;
     case 'ready': {
       const embedded = Number(progress?.embedded) || 0;
       const pending = Number(progress?.pending) || 0;
-      return pending > 0
+      return (pending > 0
         ? `Ready. Embedding the history: ${pct(embedded, embedded + pending)}% (${pending} chunks to go)`
-        : 'Ready. All history is embedded.';
+        : 'Ready. All history is embedded.') + cost;
     }
     case 'unavailable': return `Not available, keyword search only: ${s.error || 'unknown error'}`;
     case 'disabled': return `Stopped for this session, keyword search only: ${s.error || 'the embedding worker kept crashing'}`;

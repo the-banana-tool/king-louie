@@ -29,6 +29,12 @@ describe('renderer: History and recall pane', () => {
     assert.strictEqual(f({ state: 'ready' }, { embedded: 40, pending: 0 }), 'Ready. All history is embedded.');
     assert.strictEqual(f({ state: 'unavailable', error: 'fetch failed' }), 'Not available, keyword search only: fetch failed');
     assert.strictEqual(f({ state: 'disabled', error: 'the embedding worker kept crashing' }), 'Stopped for this session, keyword search only: the embedding worker kept crashing');
+    // The local embedder is unpriced and says so; a hosted one shows its token count, no price.
+    assert.strictEqual(f({ state: 'ready', kind: 'local' }, { embedded: 40, pending: 0 }), 'Ready. All history is embedded. Runs on this computer, no API cost.');
+    assert.strictEqual(f({ state: 'starting', kind: 'local' }), 'Loading the embedding model… Runs on this computer, no API cost.');
+    assert.strictEqual(f({ state: 'ready', kind: 'openai', tokens: 1234 }, { embedded: 30, pending: 10 }), 'Ready. Embedding the history: 75% (10 chunks to go) 1234 tokens embedded this session.');
+    assert.strictEqual(f({ state: 'ready', kind: 'ollama', tokens: 0 }, { embedded: 1, pending: 0 }), 'Ready. All history is embedded. 0 tokens embedded this session.');
+    assert.doesNotMatch(f({ state: 'ready', kind: 'openai', tokens: 1234 }, {}), /\$/, 'no price');
   });
 
   it('sets text with textContent only, and opens with the tab', () => {
