@@ -18,7 +18,7 @@ const { createAdapter } = require('./adapters');
 const {
   evidenceRecall, chunkEvidenceRecall, answerContainment, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS
 } = require('./scoring');
-const { writeFileAtomic, sha256File, sha256Text } = require('./files');
+const { writeFileAtomic, sha256File, sha256Text, byCodePoint } = require('./files');
 const { ModelCache, stableStringify } = require('./model-cache');
 const { selectQuestions, planCalls, answerAndJudge, mapPool, spotCheckFile, writeSpotCheckSample } = require('./answer-stage');
 const { estimateCalls, checkBudget, SpendGuard, DEFAULT_MAX_USD, EST_CHARS_PER_TOKEN } = require('./cost');
@@ -87,7 +87,7 @@ async function loadRunSet({ dataRoot, sessionIds, includeUnverified }) {
     }
     const questions = all
       .filter((q) => includeUnverified || isVerified(q))
-      .sort((a, b) => a.askAtSeq - b.askAtSeq || a.id.localeCompare(b.id));
+      .sort((a, b) => a.askAtSeq - b.askAtSeq || byCodePoint(a.id, b.id));
     sets.push({ session, questions, verified: all.filter(isVerified).length, questionsSha256: await sha256File(qFile) });
   }
   if (sets.reduce((n, s) => n + s.questions.length, 0) === 0) {
@@ -325,8 +325,8 @@ function answerConfig(a, adapters, selection, estimate, cap) {
 
 function recordOrder(adapters) {
   const rank = new Map(adapters.map((a, i) => [a.name, i]));
-  return (x, y) => x.sessionId.localeCompare(y.sessionId) || rank.get(x.adapter) - rank.get(y.adapter)
-    || x.askAtSeq - y.askAtSeq || x.questionId.localeCompare(y.questionId);
+  return (x, y) => byCodePoint(x.sessionId, y.sessionId) || rank.get(x.adapter) - rank.get(y.adapter)
+    || x.askAtSeq - y.askAtSeq || byCodePoint(x.questionId, y.questionId);
 }
 
 async function runAnswerStage(run, answer) {

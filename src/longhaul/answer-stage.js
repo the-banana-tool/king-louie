@@ -12,7 +12,7 @@ const { cacheKey, cachedCall, stableStringify } = require('./model-cache');
 const { buildAnswerPrompt, NOTHING_SHOWN } = require('./answer');
 const { buildJudgePrompt, parseVerdict, scoreVerdict } = require('./judge');
 const { isAuthFailure } = require('./retry');
-const { sha256Text, writeFileAtomic } = require('./files');
+const { sha256Text, writeFileAtomic, byCodePoint } = require('./files');
 const { createRng } = require('./rng');
 const { UsageError } = require('./errors');
 const { sampleQuestions } = require('./sampling');
@@ -145,9 +145,9 @@ function spotCheckFile(home, runId) {
 
 function writeSpotCheckSample(file, rows, { seed = 1, fraction = SPOT_CHECK_FRACTION } = {}) {
   const key = (r) => `${r.sessionId}\u0000${r.questionId}\u0000${r.adapter}`;
-  const judged = rows.filter((r) => r.verdict).sort((a, b) => key(a).localeCompare(key(b)));
+  const judged = rows.filter((r) => r.verdict).sort((a, b) => byCodePoint(key(a), key(b)));
   const n = judged.length ? Math.max(1, Math.ceil(judged.length * fraction)) : 0;
-  const picked = createRng(seed).shuffle(judged).slice(0, n).sort((a, b) => key(a).localeCompare(key(b)));
+  const picked = createRng(seed).shuffle(judged).slice(0, n).sort((a, b) => byCodePoint(key(a), key(b)));
   writeFileAtomic(file, (write) => {
     for (const r of picked) write(`${JSON.stringify({ ...r, humanVerdict: null, reviewer: null })}\n`);
   });

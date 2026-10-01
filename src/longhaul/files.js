@@ -1,6 +1,6 @@
 'use strict';
 // Small file helpers for LongHaul: atomic writes (temp file, fsync, rename),
-// streaming SHA-256, and path containment.
+// streaming SHA-256, path containment, and a code-point string order.
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -45,4 +45,13 @@ function childPath(base, name, onEscape) {
   return out;
 }
 
-module.exports = { writeFileAtomic, sha256File, sha256Text, isInside, childPath };
+// A sort order that is the same on every machine: UTF-16 code units, never
+// the locale's collation (localeCompare), so the same runs give the same
+// files and samples everywhere.
+function byCodePoint(a, b) {
+  const x = String(a);
+  const y = String(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+module.exports = { writeFileAtomic, sha256File, sha256Text, isInside, childPath, byCodePoint };

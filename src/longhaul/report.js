@@ -22,7 +22,7 @@ const { KINDS, BUCKETS } = require('./questions');
 const { RUN_ID_RE } = require('./run');
 const { spotCheckFile } = require('./answer-stage');
 const { readSpotChecks, agreement } = require('./spot-check');
-const { writeFileAtomic, sha256Text, childPath } = require('./files');
+const { writeFileAtomic, sha256Text, childPath, byCodePoint } = require('./files');
 const { UsageError } = require('./errors');
 
 const REPORT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -111,7 +111,7 @@ function seriesOf(config, adapter) {
 const succeeded = (r) => !r.error && !r.answerError;
 
 function buildReport(runs) {
-  const ordered = [...runs].sort((x, y) => x.runId.localeCompare(y.runId));
+  const ordered = [...runs].sort((x, y) => byCodePoint(x.runId, y.runId));
   const byKey = new Map();
   const setup = new Map();
   const meta = new Map();
@@ -129,9 +129,9 @@ function buildReport(runs) {
       setup.set(`${adapter}\u0000${c.sessionId}`, { ...c, adapter });
     }
   }
-  const records = [...byKey.values()].sort((x, y) => x.adapter.localeCompare(y.adapter)
-    || x.sessionId.localeCompare(y.sessionId) || x.questionId.localeCompare(y.questionId));
-  const summary = summarize(records, { setupCosts: [...setup.values()].sort((x, y) => x.adapter.localeCompare(y.adapter) || x.sessionId.localeCompare(y.sessionId)) });
+  const records = [...byKey.values()].sort((x, y) => byCodePoint(x.adapter, y.adapter)
+    || byCodePoint(x.sessionId, y.sessionId) || byCodePoint(x.questionId, y.questionId));
+  const summary = summarize(records, { setupCosts: [...setup.values()].sort((x, y) => byCodePoint(x.adapter, y.adapter) || byCodePoint(x.sessionId, y.sessionId)) });
   const series = Object.keys(summary).sort();
   const cut = Object.fromEntries(series.map((s) => [s, records.filter((r) => r.adapter === s && r.contextTruncated === true).length]));
   const comparisons = [];
@@ -228,7 +228,7 @@ function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
     + 'when several runs answer the same question for one series, the latest run counts, but a failed record never replaces a successful one.', '');
   L.push('## Runs', '', '| Run | Stage | Tier | Answer model | Judge model | Prompts (answer / judge) | Questions | Private sessions | Commit | Judge spot-check |',
     '|---|---|---|---|---|---|---|---|---|---|');
-  for (const run of [...runs].sort((x, y) => x.runId.localeCompare(y.runId))) {
+  for (const run of [...runs].sort((x, y) => byCodePoint(x.runId, y.runId))) {
     const c = run.config;
     const a = c.answer;
     const questions = (c.sessions || []).reduce((n, s) => n + (s.questions || 0), 0);

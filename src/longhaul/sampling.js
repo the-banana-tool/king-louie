@@ -7,6 +7,7 @@ const { createRng } = require('./rng');
 const { KINDS, BUCKETS, NO_BUCKET } = require('./questions');
 const { messageText } = require('./session-format');
 const { UsageError } = require('./errors');
+const { byCodePoint } = require('./files');
 
 const ANCHOR_SENDERS = Object.freeze({
   'user-said': ['user'],
@@ -108,7 +109,7 @@ function sampleQuestions(items, { size = items.length, seed = 1 } = {}) {
   const rng = createRng(seed);
   const keyOf = (it) => `${it.question.sessionId}\u0000${it.question.id}`;
   const strata = new Map();
-  for (const it of [...items].sort((a, b) => keyOf(a).localeCompare(keyOf(b)))) {
+  for (const it of [...items].sort((a, b) => byCodePoint(keyOf(a), keyOf(b)))) {
     const s = `${it.question.kind}|${it.bucket}`;
     if (!strata.has(s)) strata.set(s, []);
     strata.get(s).push(it);
