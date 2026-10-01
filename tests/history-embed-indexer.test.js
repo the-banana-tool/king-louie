@@ -1,10 +1,13 @@
 // tests/history-embed-indexer.test.js
 // Background embedding (recall spec §5.2): batches, the newest chat first,
 // maxChunksPerToolResult, a poison chunk, a model switch mid-backfill,
-// failures reported to the host. In-process embedders; manual ticks.
+// failures reported to the host, onIdle and the reranker preload behind it.
+// In-process embedders; manual ticks.
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
+const { EventEmitter } = require('node:events');
 const { startEmbedIndexer } = require('../src/history/embed-indexer');
+const { EmbedderHost } = require('../src/history/embedder-host');
 const { HistoryStore } = require('../src/history');
 const { unit } = require('../src/history/embedders/vectors');
 const { createBagOfWordsEmbedder } = require('./helpers/fake-embedder');
@@ -186,5 +189,90 @@ describe('EmbedIndexer', () => {
     assert.strictEqual(embedder.calls.length, 0, 'nothing sent to the embedder');
     assert.strictEqual(t.store.countEmbedded('fake:bow'), 0);
     assert.ok(t.store.countPending('fake:bow') > 0, 'the chunks are still pending');
+  });
+
+  it('onIdle fires when a full pass finds nothing pending, once per transition', async () => {
+    const s = setup({ history: { embedder: { batchSize: 8 } } });
+    t = s.t;
+    seedChat(t.store, { messages: notes(10) });
+    const idles = [];
+    ix = startEmbedIndexer({
+      store: t.store, host: s.host, getSettings: () => ({ history: { embedder: { batchSize: 8 } } }), onIdle: (key) => idles.push(key),
+      setTimer: () => 1, clearTimer: () => {}, log: { warn() {}, info() {}, debug() {} }
+    });
+    while (ix.progress().pending > 0 || !ix.idle()) {
+      assert.deepStrictEqual(idles, [], 'not idle while chunks are pending');
+      await ix.tick();
+    }
+    assert.deepStrictEqual(idles, ['fake:bow']);
+    await ix.tick();
+    assert.deepStrictEqual(idles, ['fake:bow'], 'once per transition');
+    seedChat(t.store, { id: 'c2', messages: notes(2, 'later') });
+    assert.strictEqual(ix.idle(), false, 'an append ends the idle');
+    while (!ix.idle()) await ix.tick();
+    assert.deepStrictEqual(idles, ['fake:bow', 'fake:bow']);
+  });
+});
+
+// The core wires the indexer's onIdle to host.preloadReranker (recall spec
+// §5.2): the cross-encoder download never shares the worker with the first
+// backfill. A real EmbedderHost on a stub runner, a real indexer and store.
+class StubRunner extends EventEmitter {
+  constructor() { super(); this.loads = []; }
+  load(role, model, opts) {
+    this.loads.push({ role, model, opts });
+    return Promise.resolve({ dim: role === 'embedder' ? 28 : null });
+  }
+  async embed(model, texts) { return (await bow.embed(texts)).map((v) => unit(v)); }
+  async rerank(model, query, texts) { return texts.map(() => 0); }
+  reset() {}
+  async stop() {}
+}
+
+describe('EmbedIndexer with the EmbedderHost: the reranker preload waits for an idle indexer', () => {
+  let t;
+  let ix;
+  afterEach(async () => { if (ix) await ix.stop(); ix = null; if (t) t.cleanup(); t = null; });
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  function wire(embedder) {
+    t = openTempStore();
+    seedChat(t.store, { messages: notes(20) });
+    const settings = { history: { embedder: { batchSize: 8, ...embedder } } };
+    const runner = new StubRunner();
+    const host = new EmbedderHost({
+      getSettings: () => settings, modelsDir: '/data/models', createRunner: () => runner, createProvider: () => assert.fail('no provider'),
+      log: { warn() {}, info() {}, debug() {} }
+    });
+    host.start();
+    ix = startEmbedIndexer({
+      store: t.store, host, getSettings: () => settings, onIdle: () => host.preloadReranker(),
+      setTimer: () => 1, clearTimer: () => {}, log: { warn() {}, info() {}, debug() {} }
+    });
+    return { host, runner, rerankLoads: () => runner.loads.filter((l) => l.role === 'reranker') };
+  }
+
+  it('no reranker load while chunks are pending; one after the indexer goes idle', async () => {
+    const w = wire({});
+    await flush();
+    assert.strictEqual(w.host.status().state, 'ready');
+    await ix.tick();
+    assert.ok(ix.progress().pending > 0);
+    assert.deepStrictEqual(w.rerankLoads(), [], 'pending chunks: no reranker load');
+    while (ix.progress().pending > 0) {
+      await ix.tick();
+      if (ix.progress().pending > 0) assert.deepStrictEqual(w.rerankLoads(), []);
+    }
+    while (!ix.idle()) await ix.tick();
+    assert.deepStrictEqual(w.rerankLoads().map((l) => [l.model, l.opts.priority]), [['Xenova/ms-marco-MiniLM-L-6-v2', 'document']]);
+    await ix.tick();
+    assert.strictEqual(w.rerankLoads().length, 1, 'requested once');
+  });
+
+  it('kind none: no reranker load in the background at all', async () => {
+    const w = wire({ kind: 'none' });
+    await flush();
+    for (let i = 0; i < 5; i += 1) await ix.tick();
+    assert.deepStrictEqual(w.runner.loads, []);
   });
 });

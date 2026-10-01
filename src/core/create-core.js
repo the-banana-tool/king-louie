@@ -3069,8 +3069,12 @@ function createCore(deps = {}) {
     if (historyStatus.available && !historyBackfill) historyBackfill = startChunkBackfill(historyStore);
     // Recall stage H3: chunks get vectors in the background once the
     // embedder is ready (startHistoryEmbedding). Read-only and in-memory
-    // stores never embed.
-    if (historyStatus.available && !embedIndexer) embedIndexer = startEmbedIndexer({ store: historyStore, host: embedderHost, getSettings });
+    // stores never embed. The reranker preloads only once the indexer is
+    // idle, so its download never holds the worker the backfill and the
+    // turns' query embeddings need.
+    if (historyStatus.available && !embedIndexer) {
+      embedIndexer = startEmbedIndexer({ store: historyStore, host: embedderHost, getSettings, onIdle: () => embedderHost.preloadReranker() });
+    }
   };
 
   const shutdown = async () => {

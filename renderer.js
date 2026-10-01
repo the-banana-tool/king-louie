@@ -3381,6 +3381,17 @@ function historyEmbedderStatusText(status, progress) {
   const cost = s.kind === 'local'
     ? ' Runs on this computer, no API cost.'
     : (s.kind === 'openai' || s.kind === 'ollama' ? ` ${Number(s.tokens) || 0} tokens embedded this session.` : '');
+  const text = historyEmbedderStateText(s, progress, pct, cost);
+  const d = s.download;
+  if (!d || d.role !== 'reranker') return text;
+  // The reranker downloads in the background once the history is embedded;
+  // the embedder's state is unchanged meanwhile.
+  const mb = (n) => Math.round((Number(n) || 0) / 1048576);
+  const size = Number(d.total) > 0 ? `${mb(d.loaded)} of ${mb(d.total)} MB` : `${mb(d.loaded)} MB`;
+  return `${text ? `${text} ` : ''}Downloading reranker: ${size}`;
+}
+
+function historyEmbedderStateText(s, progress, pct, cost) {
   switch (s.state) {
     case 'off': return 'Off: recall uses keyword search only.';
     case 'starting': return `Loading the embedding model…${cost}`;

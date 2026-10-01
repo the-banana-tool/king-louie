@@ -67,7 +67,7 @@ describe('EmbedderHost', () => {
     const none = setup({ kind: 'none' });
     none.host.start();
     assert.strictEqual(none.host.status().state, 'off');
-    assert.strictEqual(none.runner.loads.filter((l) => l.role === 'embedder').length, 0, 'no embedder load (the reranker preload is its own test)');
+    assert.strictEqual(none.runner.loads.length, 0, 'nothing loads with kind none');
   });
 
   it('local: starting, downloading with progress, then ready with the model under its key', async () => {
@@ -77,7 +77,7 @@ describe('EmbedderHost', () => {
     assert.deepStrictEqual(s.runner.loads.map((l) => [l.role, l.model, l.opts.modelsDir]), [['embedder', 'Xenova/bge-small-en-v1.5', '/data/models']]);
     s.runner.emit('progress', { role: 'embedder', model: 'Xenova/bge-small-en-v1.5', file: 'onnx/model_quantized.onnx', loaded: 10, total: 40 });
     s.runner.emit('progress', { role: 'embedder', model: 'Xenova/bge-small-en-v1.5', file: 'tokenizer.json', loaded: 5, total: 10 });
-    assert.deepStrictEqual(s.host.status().download, { loaded: 15, total: 50 });
+    assert.deepStrictEqual(s.host.status().download, { role: 'embedder', loaded: 15, total: 50 });
     assert.strictEqual(s.host.status().state, 'downloading');
     s.runner.loads[0].resolve({ dim: 384 });
     await flush();
@@ -206,12 +206,16 @@ describe('EmbedderHost', () => {
     assert.match(s.host.status().error, /No OpenAI key/);
   });
 
-  it('preloads the cross-encoder at document priority once the embedder is ready, when a rerank setting is on', async () => {
+  it('preloadReranker: at document priority once the embedder is ready, when a rerank setting is on; never with kind none', async () => {
     const s = setup();
     s.host.start();
+    s.host.preloadReranker();
     assert.deepStrictEqual(s.runner.loads.map((l) => l.role), ['embedder'], 'nothing before the embedder is ready');
     s.runner.loads[0].resolve({ dim: 384 });
     await flush();
+    assert.deepStrictEqual(s.runner.loads.map((l) => l.role), ['embedder'], 'ready alone does not preload: the indexer goes first');
+    s.host.preloadReranker();
+    s.host.preloadReranker();
     assert.deepStrictEqual(s.runner.loads.map((l) => [l.role, l.model, l.opts.priority]), [
       ['embedder', 'Xenova/bge-small-en-v1.5', undefined],
       ['reranker', 'Xenova/ms-marco-MiniLM-L-6-v2', 'document']
@@ -222,27 +226,74 @@ describe('EmbedderHost', () => {
 
     const none = setup({ kind: 'none' });
     none.host.start();
-    assert.deepStrictEqual(none.runner.loads.map((l) => [l.role, l.opts.priority]), [['reranker', 'document']], 'kind none preloads at start');
+    none.host.preloadReranker();
+    assert.strictEqual(none.runner.loads.length, 0, 'kind none: no background model; the reranker loads on the first SearchHistory');
+    const lazy = none.host.rerank('gate', ['a']);
+    assert.deepStrictEqual(none.runner.loads.map((l) => [l.role, l.opts.priority]), [['reranker', undefined]]);
+    none.runner.loads[0].resolve({ dim: null });
+    await lazy;
 
     const off = setup({}, { recall: { rerank: { search: false, enabled: false } } });
     off.host.start();
     off.runner.loads[0].resolve({ dim: 384 });
     await flush();
+    off.host.preloadReranker();
     assert.deepStrictEqual(off.runner.loads.map((l) => l.role), ['embedder'], 'no preload with both rerank settings off');
   });
 
-  it('a failed reranker preload is a debug line; SearchHistory then gets RERANK_UNAVAILABLE until retryMs', async () => {
+  it('the reranker download shows in status() with its role; the embedder download says embedder', async () => {
+    const s = setup();
+    s.host.start();
+    s.runner.emit('progress', { role: 'embedder', model: 'Xenova/bge-small-en-v1.5', file: 'onnx/model_quantized.onnx', loaded: 10, total: 40 });
+    assert.deepStrictEqual(s.host.status().download, { role: 'embedder', loaded: 10, total: 40 });
+    s.runner.loads[0].resolve({ dim: 384 });
+    await flush();
+    assert.strictEqual(s.host.status().download, null);
+    s.runner.emit('progress', { role: 'reranker', model: 'Xenova/ms-marco-MiniLM-L-6-v2', file: 'onnx/model.onnx', loaded: 5e6, total: 9e7 });
+    assert.strictEqual(s.host.status().download, null, 'progress for a reranker nobody asked for is ignored');
+    s.host.preloadReranker();
+    s.runner.emit('progress', { role: 'reranker', model: 'Xenova/ms-marco-MiniLM-L-6-v2', file: 'onnx/model.onnx', loaded: 3e7, total: 9e7 });
+    s.runner.emit('progress', { role: 'reranker', model: 'Xenova/ms-marco-MiniLM-L-6-v2', file: 'tokenizer.json', loaded: 1e6, total: 1e6 });
+    const st = s.host.status();
+    assert.strictEqual(st.state, 'ready', 'the embedder stays ready while the reranker downloads');
+    assert.deepStrictEqual(st.download, { role: 'reranker', loaded: 3.1e7, total: 9.1e7 });
+    s.runner.loads[1].resolve({ dim: null });
+    await flush();
+    assert.strictEqual(s.host.status().download, null, 'gone once loaded');
+  });
+
+  it('a reranker that did not load (MODEL_UNAVAILABLE) is RERANK_UNAVAILABLE until retryMs, silently', async () => {
     const s = setup({ kind: 'none' });
     s.host.start();
-    s.runner.loads[0].reject(new EmbedError('MODEL_UNAVAILABLE', 'fetch failed (offline)'));
-    await flush();
+    await assert.rejects(Promise.all([s.host.rerank('gate', ['a']), Promise.resolve().then(() => s.runner.loads[0].reject(new EmbedError('MODEL_UNAVAILABLE', 'fetch failed (offline)')))]),
+      (err) => err.code === 'MODEL_UNAVAILABLE');
     assert.strictEqual(s.warnings.length, 0);
     assert.strictEqual(s.notices.length, 0);
     await assert.rejects(s.host.rerank('gate', ['a']), (err) => err.code === 'RERANK_UNAVAILABLE' && /offline/.test(err.message));
-    assert.strictEqual(s.runner.loads.length, 1, 'no new download on the SearchHistory call');
+    assert.strictEqual(s.runner.loads.length, 1, 'no new download on the next SearchHistory call');
     s.advance(RETRY);
-    s.host.current();
+    const again = s.host.rerank('gate', ['a']);
     assert.strictEqual(s.runner.loads.length, 2, 'retried after retryMs');
+    s.runner.loads[1].resolve({ dim: null });
+    await again;
+  });
+
+  it('a worker crash, timeout or stop during the reranker load does not hold it off: the next call retries', async () => {
+    for (const code of ['EMBED_WORKER_CRASHED', 'EMBED_WORKER_TIMEOUT', 'EMBED_STOPPED']) {
+      const s = setup();
+      s.host.start();
+      s.runner.loads[0].resolve({ dim: 384 });
+      await flush();
+      s.host.preloadReranker();
+      s.runner.loads[1].reject(new EmbedError(code, 'the embed worker exited'));
+      await flush();
+      const next = s.host.rerank('gate', ['a']);
+      assert.strictEqual(s.runner.loads.length, 3, `${code}: the next SearchHistory loads again`);
+      s.runner.loads[2].resolve({ dim: null });
+      assert.deepStrictEqual(await next, [0]);
+      s.host.preloadReranker();
+      assert.strictEqual(s.runner.loads.length, 3, 'loaded once more, not again');
+    }
   });
 
   it('rerank loads the cross-encoder once and passes a deadline', async () => {

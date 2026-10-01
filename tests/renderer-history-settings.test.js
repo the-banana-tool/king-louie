@@ -35,6 +35,12 @@ describe('renderer: History and recall pane', () => {
     assert.strictEqual(f({ state: 'ready', kind: 'openai', tokens: 1234 }, { embedded: 30, pending: 10 }), 'Ready. Embedding the history: 75% (10 chunks to go) 1234 tokens embedded this session.');
     assert.strictEqual(f({ state: 'ready', kind: 'ollama', tokens: 0 }, { embedded: 1, pending: 0 }), 'Ready. All history is embedded. 0 tokens embedded this session.');
     assert.doesNotMatch(f({ state: 'ready', kind: 'openai', tokens: 1234 }, {}), /\$/, 'no price');
+    // The reranker's background download (the embedder stays ready meanwhile).
+    assert.strictEqual(f({ state: 'ready', download: { role: 'reranker', loaded: 31457280, total: 94371840 } }, { embedded: 40, pending: 0 }),
+      'Ready. All history is embedded. Downloading reranker: 30 of 90 MB');
+    assert.strictEqual(f({ state: 'ready', kind: 'local', download: { role: 'reranker', loaded: 1048576, total: 0 } }, { embedded: 40, pending: 0 }),
+      'Ready. All history is embedded. Runs on this computer, no API cost. Downloading reranker: 1 MB');
+    assert.strictEqual(f({ state: 'downloading', download: { role: 'embedder', loaded: 25, total: 100 } }), 'Downloading the embedding model: 25%');
   });
 
   it('sets text with textContent only, and opens with the tab', () => {

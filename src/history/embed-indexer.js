@@ -12,6 +12,12 @@
 // time; a chunk that crashes it alone is written as a tombstone and never
 // tried again for that key. Any other failure is reported to the host
 // (host.fail), which turns vectors off until its retry.
+//
+// onIdle(key) is called each time a full pass finds nothing pending for the
+// active key (once per transition; an append, a destructive change or a key
+// change ends the idle). The core preloads the reranker from it, so that
+// download never holds the worker while the backfill or query embeddings
+// need it.
 const { mergeHistorySettings } = require('./settings');
 const { embedInput } = require('./embedders/vectors');
 const { WORKER_FAILURES } = require('./embed-errors');
@@ -22,7 +28,7 @@ const { createLogger } = require('../logging');
 const RECOUNT_EVERY = 50;
 
 function startEmbedIndexer({
-  store, host, getSettings, onProgress = () => {}, setTimer = setTimeout, clearTimer = clearTimeout,
+  store, host, getSettings, onProgress = () => {}, onIdle = () => {}, setTimer = setTimeout, clearTimer = clearTimeout,
   log = createLogger('history/embed-indexer')
 }) {
   let stopped = false;
@@ -110,8 +116,16 @@ function startEmbedIndexer({
       if (!rows.length) {
         // A full pass from the start that finds nothing: idle until an
         // append, a destructive change or a key change.
-        if (cursor.get(key)) cursor.set(key, 0);
-        else idle.add(key);
+        if (cursor.get(key)) {
+          cursor.set(key, 0);
+        } else {
+          idle.add(key);
+          try {
+            onIdle(key);
+          } catch (err) {
+            log.debug(`embedding idle listener failed: ${err.message}`);
+          }
+        }
         return none;
       }
     }
@@ -158,6 +172,8 @@ function startEmbedIndexer({
     },
     tick,
     progress,
+    // Whether the last full pass found nothing pending for the active key.
+    idle: () => Boolean(counts && idle.has(counts.key)),
     async stop() {
       stopped = true;
       if (timer !== null) clearTimer(timer);

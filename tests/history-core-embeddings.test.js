@@ -69,8 +69,14 @@ describe('createCore with embeddings', () => {
     ctx.startHistoryEmbedding();
     await waitFor(() => ctx.getEmbedderHost().status().state === 'ready');
     const store = ctx.getHistoryStore();
-    for (let i = 0; i < 5 && store.countPending(KEY) > 0; i += 1) await ctx.getEmbedIndexer().tick();
+    const rerankLoads = () => runner.calls.filter((c) => c.op === 'load' && c.role === 'reranker').length;
+    for (let i = 0; i < 5 && store.countPending(KEY) > 0; i += 1) {
+      assert.strictEqual(rerankLoads(), 0, 'no reranker load while chunks are pending');
+      await ctx.getEmbedIndexer().tick();
+    }
     assert.strictEqual(store.countPending(KEY), 0);
+    for (let i = 0; i < 5 && !ctx.getEmbedIndexer().idle(); i += 1) await ctx.getEmbedIndexer().tick();
+    await waitFor(() => rerankLoads() === 1);
     assert.ok(store.countEmbedded(KEY) >= 3);
 
     const after = await ctx.getContextBuilder().build({ chatId: 'c1', message: 'linen', upToSeq: 3 });

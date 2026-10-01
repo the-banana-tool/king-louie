@@ -6,7 +6,8 @@
 // startModelsBackgroundChecks (skipped under KL_TEST_MODE).
 //   off          kind none, or not started
 //   starting     the local model is loading
-//   downloading  the local model's files are downloading (download: { loaded, total })
+//   downloading  the local model's files are downloading
+//                (download: { role: 'embedder', loaded, total })
 //   ready        embedding works
 //   unavailable  the model did not load or a call failed; recall is BM25
 //                only until retryMs passes, the settings change or retry()
@@ -16,11 +17,16 @@
 // session (notify). Changing the embedder never deletes vectors: the new key
 // fills in, and the old key's rows stay for a switch back. The reranker is
 // always the local cross-encoder, whatever the embedder kind. When
-// recall.rerank.search or rerank.enabled is on, it is preloaded at document
-// priority once the embedder is ready (or at start with kind none), so its
-// one-time download happens in the background, not on the first
-// SearchHistory call. A reranker that did not load is RERANK_UNAVAILABLE
-// (silent in the Retriever) until retryMs passes or retry().
+// recall.rerank.search or rerank.enabled is on, preloadReranker() loads it at
+// document priority; the core calls it when the embed indexer goes idle, so
+// its one-time download (about 90 MB, the worker's only request while in
+// flight) never starves the backfill or a turn's query embedding. With kind
+// none nothing loads in the background: the reranker loads on the first
+// SearchHistory. While it downloads, status().download is
+// { role: 'reranker', loaded, total } and the state stays as it is. A
+// reranker whose model did not load (MODEL_UNAVAILABLE) is RERANK_UNAVAILABLE
+// (silent in the Retriever) until retryMs passes or retry(); a worker crash,
+// timeout or stop during the load holds nothing off.
 const { EventEmitter } = require('node:events');
 const { mergeHistorySettings, embedderKey } = require('./settings');
 const { createLocalEmbedder } = require('./embedders/local');
@@ -30,6 +36,16 @@ const { createLogger } = require('../logging');
 
 const RETRY_MS = 10 * 60000;
 const MESSAGE_MAX = 300;
+
+function sumFiles(files) {
+  let loaded = 0;
+  let total = 0;
+  for (const f of files.values()) {
+    loaded += f.loaded;
+    total += f.total;
+  }
+  return { loaded, total };
+}
 
 class EmbedderHost extends EventEmitter {
   constructor({ getSettings, modelsDir, createRunner, createProvider, notify = () => {}, now = Date.now, retryMs = RETRY_MS, log = createLogger('history/embedder') }) {
@@ -56,6 +72,7 @@ class EmbedderHost extends EventEmitter {
     this.rerankModel = null;
     this.rerankLoad = null;
     this.rerankFailed = null;
+    this.rerankFiles = new Map();
   }
 
   _settings() {
@@ -74,7 +91,9 @@ class EmbedderHost extends EventEmitter {
 
   status() {
     this._sync();
-    const download = this.state === 'downloading' ? this._download() : null;
+    let download = null;
+    if (this.state === 'downloading') download = { role: 'embedder', ...sumFiles(this.files) };
+    else if (this.rerankLoad && this.rerankFiles.size) download = { role: 'reranker', ...sumFiles(this.rerankFiles) };
     return { kind: this.kind, key: this.key, state: this.state, download, error: this.error, tokens: this.embedder ? this.embedder.tokens : 0 };
   }
 
@@ -135,6 +154,19 @@ class EmbedderHost extends EventEmitter {
     return this._runner().rerank(model, query, texts, { deadlineMs: Number.isFinite(maxMs) ? this.now() + maxMs : Infinity });
   }
 
+  // Loads the reranker in the background (see the header): only with a local
+  // or hosted embedder ready, a rerank setting on, and no load in flight or
+  // held off. The core calls it when the embed indexer goes idle.
+  preloadReranker() {
+    if (!this.started || this.kind === 'none' || this.state !== 'ready') return;
+    const rerank = this._settings().recall.rerank;
+    if (!rerank.search && !rerank.enabled) return;
+    if ((this.rerankLoad && this.rerankModel === rerank.model) || this._rerankFailedFor(rerank.model)) return;
+    this._loadReranker(rerank.model, { priority: 'document' }).catch((err) => {
+      this.log.debug(`The reranker did not preload; SearchHistory keeps the fused order: ${err.message}`);
+    });
+  }
+
   async stop() {
     this.started = false;
     if (this.runner) await this.runner.stop();
@@ -152,15 +184,27 @@ class EmbedderHost extends EventEmitter {
     return f;
   }
 
-  // The reranker's load, shared by a preload and SearchHistory; a failure
-  // holds it off for retryMs.
+  // The reranker's load, shared by a preload and SearchHistory. Only a model
+  // that did not load (MODEL_UNAVAILABLE) holds it off for retryMs; a worker
+  // crash, timeout or stop leaves the next call free to load it again.
   _loadReranker(model, { priority } = {}) {
     if (this.rerankModel !== model || !this.rerankLoad) {
       this.rerankModel = model;
-      const load = this._runner().load('reranker', model, { modelsDir: this.modelsDir, ...(priority ? { priority } : {}) }).catch((err) => {
-        if (this.rerankLoad === load) {
+      this.rerankFiles = new Map();
+      const settle = () => {
+        if (this.rerankLoad !== load) return false;
+        this.rerankFiles = new Map();
+        return true;
+      };
+      const load = this._runner().load('reranker', model, { modelsDir: this.modelsDir, ...(priority ? { priority } : {}) }).then((out) => {
+        settle();
+        return out;
+      }, (err) => {
+        if (settle()) {
           this.rerankLoad = null;
-          this.rerankFailed = { model, until: this.now() + this.retryMs, message: String((err && err.message) || err).slice(0, MESSAGE_MAX) };
+          if (err && err.code === 'MODEL_UNAVAILABLE') {
+            this.rerankFailed = { model, until: this.now() + this.retryMs, message: String(err.message || err).slice(0, MESSAGE_MAX) };
+          }
         }
         throw err;
       });
@@ -169,36 +213,20 @@ class EmbedderHost extends EventEmitter {
     return this.rerankLoad;
   }
 
-  _maybePreloadReranker() {
-    if (!this.started || (this.state !== 'ready' && this.state !== 'off')) return;
-    const rerank = this._settings().recall.rerank;
-    if (!rerank.search && !rerank.enabled) return;
-    if ((this.rerankLoad && this.rerankModel === rerank.model) || this._rerankFailedFor(rerank.model)) return;
-    this._loadReranker(rerank.model, { priority: 'document' }).catch((err) => {
-      this.log.debug(`The reranker did not preload; SearchHistory keeps the fused order: ${err.message}`);
-    });
-  }
-
   _set(state) {
     if (this.state === state) return;
     this.state = state;
     this.emit('status', { state, key: this.key, error: this.error });
   }
 
-  _download() {
-    let loaded = 0;
-    let total = 0;
-    for (const f of this.files.values()) {
-      loaded += f.loaded;
-      total += f.total;
-    }
-    return { loaded, total };
-  }
-
   _runner() {
     if (!this.runner) {
       this.runner = this.createRunner();
       this.runner.on('progress', (p) => {
+        if (p.role === 'reranker') {
+          if (this.rerankLoad && p.model === this.rerankModel) this.rerankFiles.set(p.file, { loaded: Number(p.loaded) || 0, total: Number(p.total) || 0 });
+          return;
+        }
         if (p.role !== 'embedder' || !this.loading || p.model !== this.loading.model) return;
         this.files.set(p.file, { loaded: Number(p.loaded) || 0, total: Number(p.total) || 0 });
         this._set('downloading');
@@ -214,7 +242,6 @@ class EmbedderHost extends EventEmitter {
     const cfg = this._settings().embedder;
     const key = this.started ? embedderKey(cfg) : null;
     if (key !== this.key || (this.state === 'unavailable' && this.now() >= this.until)) this._switch(key, cfg);
-    this._maybePreloadReranker();
   }
 
   _switch(key, cfg) {
@@ -240,7 +267,6 @@ class EmbedderHost extends EventEmitter {
         this.loading = null;
         this.embedder = embedder;
         this._set('ready');
-        this._maybePreloadReranker();
       }, (err) => {
         if (this.loading !== token) return;
         this.fail(err, key);
