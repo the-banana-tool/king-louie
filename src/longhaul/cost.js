@@ -139,7 +139,11 @@ function formatEstimate(estimate, { maxUsd = DEFAULT_MAX_USD, counts = null } = 
       + `~${l.inputTokens} in  <=${l.outputTokens} out  ${usd(l.usd)}`);
   }
   const total = estimate.totalUsd === null ? `${usd(estimate.knownUsd)} priced + unknown for ${estimate.unpriced.join(', ')}` : usd(estimate.totalUsd);
-  out.push(`estimate: ${total} (a close bound: input at ${EST_CHARS_PER_TOKEN} characters a token, output at the max tokens; the spend guard stops at the cap); cap $${maxUsd} (--max-usd)`);
+  // An unpriced call reserves nothing against the cap (--allow-unpriced).
+  const unpricedCalls = estimate.lines.filter((l) => l.usd === null).reduce((n, l) => n + l.calls, 0);
+  const uncovered = unpricedCalls ? `; the cap does not cover ${unpricedCalls} unpriced calls` : '';
+  out.push(`estimate: ${total} (a close bound: input at ${EST_CHARS_PER_TOKEN} characters a token, output at the max tokens; the spend guard stops at the cap); `
+    + `cap $${maxUsd} (--max-usd)${uncovered}`);
   return `${out.join('\n')}\n`;
 }
 

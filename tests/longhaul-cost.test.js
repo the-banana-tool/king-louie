@@ -123,6 +123,8 @@ describe('formatEstimate', () => {
     assert.match(text, /plan: 1 answers \(2 cached\), 1 judgments \(0 cached\), 0 summaries \(0 cached\)/);
     assert.match(text, /price unknown/);
     assert.match(text, /\$0\.0034 priced \+ unknown for openai\/no-such-model/);
-    assert.match(text, /cap \$50 \(--max-usd\)/);
+    assert.match(text, /cap \$50 \(--max-usd\); the cap does not cover 1 unpriced calls\n$/);
+    const priced = formatEstimate(estimateCalls([{ role: 'answer', adapter: 'kl-recall', ...answerModel, inputChars: 30, maxTokens: 4 }], catalog), { maxUsd: 50 });
+    assert.ok(!priced.includes('does not cover'), 'nothing to say when every call is priced');
   });
 });
