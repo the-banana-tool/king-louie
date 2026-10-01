@@ -223,11 +223,13 @@ module.exports = {
     }
     ctx.stdout.write(`run ${result.runId} -> ${result.dir}\n`);
     if (result.config.includeUnverified) ctx.stdout.write('UNVERIFIED QUESTIONS INCLUDED: a smoke run, not a result.\n');
+    // The name column fits the longest adapter name (summarize-compact, kl-recall-vec-rerank).
+    const nameWidth = Math.max(16, ...Object.keys(result.summary).map((n) => n.length));
     for (const [name, s] of Object.entries(result.summary)) {
       const er = s.evidenceRecall === null ? '-' : s.evidenceRecall.toFixed(3);
-      ctx.stdout.write(`${name.padEnd(16)} evidence recall ${er} (n=${s.scored})  answer contained ${ac(s.answerContainment)} (tokens ${ac(s.answerTokenContainment)})  partial ${s.partial}  median ${num(s.estTokens.median)} tokens  p90 ${num(s.estTokens.p90)}  errors ${s.errors}  leaks ${s.leaks}\n`);
+      ctx.stdout.write(`${name.padEnd(nameWidth)} evidence recall ${er} (n=${s.scored})  answer contained ${ac(s.answerContainment)} (tokens ${ac(s.answerTokenContainment)})  partial ${s.partial}  median ${num(s.estTokens.median)} tokens  p90 ${num(s.estTokens.p90)}  errors ${s.errors}  leaks ${s.leaks}\n`);
       if (s.answer) {
-        ctx.stdout.write(`${''.padEnd(16)} answer accuracy ${ac(s.answer.accuracy)} (n=${s.answer.n})  partial ${ac(s.answer.partialRate)}  declined ${ac(s.answer.declinedRate)}  `
+        ctx.stdout.write(`${''.padEnd(nameWidth)} answer accuracy ${ac(s.answer.accuracy)} (n=${s.answer.n})  partial ${ac(s.answer.partialRate)}  declined ${ac(s.answer.declinedRate)}  `
           + `abstain accuracy ${ac(s.answer.abstain.accuracy)} (n=${s.answer.abstain.n})  answer errors ${s.answer.errors}\n`);
       }
     }

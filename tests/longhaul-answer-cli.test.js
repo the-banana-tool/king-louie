@@ -41,6 +41,10 @@ describe('longhaul run: the answer stage', () => {
     assert.strictEqual(code, 0, out.stderr.text);
     assert.match(out.stdout.text, /estimate: \$0\.0000/);
     assert.match(out.stdout.text, /answer accuracy 0\.000 \(n=\d+\)/);
+    // The name column fits summarize-compact (17 chars): every row's metrics start in one column.
+    const rows = out.stdout.text.split('\n').filter((l) => / evidence recall | answer accuracy /.test(l));
+    assert.ok(rows.some((l) => l.startsWith('summarize-compact ')));
+    assert.deepStrictEqual([...new Set(rows.map((l) => l.search(/ (evidence recall|answer accuracy) /)))], ['summarize-compact'.length]);
     const [runId] = fs.readdirSync(path.join(root, 'runs'));
     const summary = JSON.parse(fs.readFileSync(path.join(root, 'runs', runId, 'summary.json'), 'utf8'));
     assert.strictEqual(summary.oracle.answer.abstain.accuracy, 1);
