@@ -11,6 +11,7 @@ const { ModelCache } = require('../model-cache');
 const { loadPrompt } = require('../prompts');
 const { formatEstimate, DEFAULT_MAX_USD } = require('../cost');
 const { FULL_HISTORY_TOKENS } = require('../adapters/full-history');
+const { spendEstimatedNote } = require('../scoring');
 
 const USAGE = [
   'Usage: longhaul run --adapters kl-recall,sliding-window,oracle [--sessions <data root>] [--session <id>]...',
@@ -237,7 +238,7 @@ module.exports = {
     }
     if (result.spend) {
       const est = result.spend.estimateUsd === null ? 'unknown' : `$${result.spend.estimateUsd.toFixed(4)}`;
-      ctx.stdout.write(`spent $${result.spend.spentUsd.toFixed(4)} on ${result.spend.calls} calls (${result.spend.unpricedCalls} unpriced); estimate ${est}\n`);
+      ctx.stdout.write(`spent $${result.spend.spentUsd.toFixed(4)} on ${result.spend.calls} calls (${result.spend.unpricedCalls} unpriced${spendEstimatedNote(result.spend)}); estimate ${est}\n`);
     }
     if (result.spotChecks?.n) {
       ctx.stdout.write(`spot-check sample: ${result.spotChecks.n} judgments; review them with longhaul spot-check --run ${result.runId} --reviewer <initials>\n`);

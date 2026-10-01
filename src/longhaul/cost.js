@@ -70,9 +70,12 @@ class OverBudgetError extends Error {
 
 // Spend during a run. Each call reserves its own estimate (prompt characters
 // / 3, output at maxTokens) before it goes out and settles at its real cost
-// after, so concurrent calls cannot pass the cap together. Once tripped it
-// never resets: every later call in this run is refused (recorded as
-// over-budget), and a rerun, which starts a new guard, finishes the rest.
+// after, so concurrent calls cannot pass the cap together. A priced model
+// whose reply reports no usage (no tokens, zero tokens or no cost, as from a
+// server that omits stream usage) settles at its reservation and counts in
+// estimatedCalls, never at $0. Once tripped it never resets: every later
+// call in this run is refused (recorded as over-budget), and a rerun, which
+// starts a new guard, finishes the rest.
 class SpendGuard {
   constructor({ maxUsd = DEFAULT_MAX_USD, catalog }) {
     this.maxUsd = maxUsd;
@@ -81,32 +84,44 @@ class SpendGuard {
     this.reservedUsd = 0;
     this.calls = 0;
     this.unpricedCalls = 0;
+    this.estimatedCalls = 0;
     this.tripped = false;
   }
 
   hooks() {
     return {
       beforeCall: ({ client, promptChars, maxTokens }) => {
-        const est = priceCall(this.catalog, client, { input: estInputTokens(promptChars), output: maxTokens }) ?? 0;
-        if (this.tripped || this.spentUsd + this.reservedUsd + est > this.maxUsd) {
+        const price = priceCall(this.catalog, client, { input: estInputTokens(promptChars), output: maxTokens });
+        const usd = price ?? 0;
+        if (this.tripped || this.spentUsd + this.reservedUsd + usd > this.maxUsd) {
           this.tripped = true;
           throw new OverBudgetError(this.maxUsd, this.spentUsd);
         }
-        this.reservedUsd += est;
-        return est;
+        this.reservedUsd += usd;
+        return { usd, priced: price !== null, local: Boolean(client.local) };
       },
-      afterCall: (ticket, { costUsd }) => {
-        this.reservedUsd -= ticket;
+      afterCall: (ticket, { inputTokens = null, outputTokens = null, costUsd }) => {
+        this.reservedUsd -= ticket.usd;
         this.calls += 1;
-        if (typeof costUsd === 'number') this.spentUsd += costUsd;
-        else this.unpricedCalls += 1;
+        const noUsage = !((inputTokens || 0) + (outputTokens || 0) > 0) || typeof costUsd !== 'number';
+        if (ticket.local) return; // the built-in fakes cost nothing, whatever they report
+        if (ticket.priced && noUsage) {
+          this.spentUsd += ticket.usd;
+          this.estimatedCalls += 1;
+        } else if (typeof costUsd === 'number') {
+          this.spentUsd += costUsd;
+        } else {
+          this.unpricedCalls += 1;
+        }
       },
-      cancel: (ticket) => { this.reservedUsd -= ticket; }
+      cancel: (ticket) => { this.reservedUsd -= ticket.usd; }
     };
   }
 
   totals() {
-    return { spentUsd: round8(this.spentUsd), calls: this.calls, unpricedCalls: this.unpricedCalls, overBudget: this.tripped };
+    return {
+      spentUsd: round8(this.spentUsd), calls: this.calls, unpricedCalls: this.unpricedCalls, estimatedCalls: this.estimatedCalls, overBudget: this.tripped
+    };
   }
 }
 

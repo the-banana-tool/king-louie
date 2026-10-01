@@ -125,6 +125,8 @@ describe('renderSummaryMarkdown with answers', () => {
     assert.match(md, /## Named comparisons/);
     assert.match(md, /whole-messages: kl-recall 0\.500 vs kl-recall-whole 0\.500 answer accuracy over 6 paired questions/);
     assert.match(md, /Spent \$0\.0315 on 42 calls/);
+    const est = renderSummaryMarkdown(config, summary, { spend: { spentUsd: 0.0315, calls: 42, unpricedCalls: 0, estimatedCalls: 3, overBudget: false, estimateUsd: 0.05 }, comparisons });
+    assert.match(est, /42 calls \(0 unpriced, 3 at their estimate: no usage reported\)/);
   });
 
   it('keeps the B0 summary as it was when the run had no answer stage', () => {

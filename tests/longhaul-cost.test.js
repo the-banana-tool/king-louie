@@ -9,6 +9,9 @@ const {
 } = require('../src/longhaul/cost');
 const { UsageError } = require('../src/longhaul/errors');
 const { fixtureCatalog } = require('./helpers/models-fixture');
+const path = require('path');
+const { ModelCache, cacheKey, cachedCall } = require('../src/longhaul/model-cache');
+const { tmpDir } = require('./helpers/longhaul-helpers');
 
 const catalog = fixtureCatalog();
 const answerModel = { provider: 'openai', model: 'gpt-6-lite' };
@@ -67,17 +70,45 @@ describe('SpendGuard', () => {
     const t1 = h.beforeCall({ client, promptChars: 30000, maxTokens: 400 }); // reserves $0.0034
     const t2 = h.beforeCall({ client, promptChars: 30000, maxTokens: 400 }); // $0.0068 reserved
     assert.throws(() => h.beforeCall({ client, promptChars: 30000, maxTokens: 400 }), (e) => e.code === 'OVER_BUDGET'); // would be $0.0102
-    h.afterCall(t1, { costUsd: 0.001 });
+    h.afterCall(t1, { inputTokens: 900, outputTokens: 100, costUsd: 0.001 });
     h.cancel(t2);
     assert.throws(() => h.beforeCall({ client, promptChars: 3, maxTokens: 1 }), OverBudgetError, 'a tripped guard stays tripped');
-    assert.deepStrictEqual(guard.totals(), { spentUsd: 0.001, calls: 1, unpricedCalls: 0, overBudget: true });
+    assert.deepStrictEqual(guard.totals(), { spentUsd: 0.001, calls: 1, unpricedCalls: 0, estimatedCalls: 0, overBudget: true });
   });
 
   it('counts calls with no known cost apart, never as $0 spent', () => {
     const guard = new SpendGuard({ maxUsd: 1, catalog });
     const h = guard.hooks();
     h.afterCall(h.beforeCall({ client: { provider: 'openai', model: 'no-such-model' }, promptChars: 3, maxTokens: 1 }), { costUsd: null });
-    assert.deepStrictEqual(guard.totals(), { spentUsd: 0, calls: 1, unpricedCalls: 1, overBudget: false });
+    assert.deepStrictEqual(guard.totals(), { spentUsd: 0, calls: 1, unpricedCalls: 1, estimatedCalls: 0, overBudget: false });
+  });
+
+  it('settles a priced reply that reports no usage at its reservation, never at $0 (review Important 1)', () => {
+    const guard = new SpendGuard({ maxUsd: 1, catalog });
+    const h = guard.hooks();
+    const client = { ...answerModel };
+    // 30,000 chars / 3 = 10,000 input x $0.3/M + 400 output x $1/M = $0.0034 reserved.
+    h.afterCall(h.beforeCall({ client, promptChars: 30000, maxTokens: 400 }), { inputTokens: null, outputTokens: null, costUsd: null });
+    h.afterCall(h.beforeCall({ client, promptChars: 30000, maxTokens: 400 }), { inputTokens: 0, outputTokens: 0, costUsd: 0 });
+    assert.deepStrictEqual(guard.totals(), { spentUsd: 0.0068, calls: 2, unpricedCalls: 0, estimatedCalls: 2, overBudget: false });
+    // A local fake reporting nothing still costs nothing.
+    h.afterCall(h.beforeCall({ client: { provider: 'fake', model: 'f', local: true }, promptChars: 3, maxTokens: 1 }), { costUsd: null });
+    assert.deepStrictEqual(guard.totals(), { spentUsd: 0.0068, calls: 3, unpricedCalls: 0, estimatedCalls: 2, overBudget: false });
+  });
+
+  it('trips the cap on replies with no usage, through cachedCall', async () => {
+    const guard = new SpendGuard({ maxUsd: 0.007, catalog });
+    const cache = new ModelCache(path.join(tmpDir(), 'model-cache'));
+    let calls = 0;
+    const client = { ...answerModel, async complete() { calls += 1; return { text: 'ok' }; } };
+    const prompt = 'x'.repeat(30000);
+    const one = (i) => cachedCall({ cache, stage: 'answer', key: cacheKey({ i }), client, prompt, maxTokens: 400, hooks: guard.hooks(), retry: { wait: async () => {} } });
+    await one(1);
+    await one(2);
+    assert.strictEqual(guard.totals().spentUsd, 0.0068);
+    await assert.rejects(one(3), (e) => e.code === 'OVER_BUDGET');
+    assert.strictEqual(calls, 2);
+    assert.strictEqual(guard.totals().estimatedCalls, 2);
   });
 });
 

@@ -271,6 +271,9 @@ const usdCell = ({ usd, unknown }) => (unknown ? `${usd.toFixed(4)} + ${unknown}
 const answerCell = (g) => (g ? `${fmt(g.accuracy)} (n=${g.n})` : '—');
 const kindCell = (kind, g) => (!g ? '—' : kind === 'abstain' ? `${fmt(g.abstainAccuracy)} (n=${g.abstainN})` : answerCell(g));
 
+// A priced call whose reply reported no usage is counted at its estimate.
+const spendEstimatedNote = (spend) => (spend.estimatedCalls ? `, ${spend.estimatedCalls} at their estimate: no usage reported` : '');
+
 function renderSummaryMarkdown(config, summary, { spend = null, comparisons = [] } = {}) {
   const lines = [`# LongHaul run ${config.runId}`, ''];
   if (config.includeUnverified) lines.push('**UNVERIFIED QUESTIONS INCLUDED. This is a smoke run, not a result.**', '');
@@ -331,7 +334,7 @@ function renderSummaryMarkdown(config, summary, { spend = null, comparisons = []
     }
   }
   if (spend) {
-    lines.push('', '## Spend', '', `Spent $${spend.spentUsd.toFixed(4)} on ${spend.calls} calls (${spend.unpricedCalls} unpriced); `
+    lines.push('', '## Spend', '', `Spent $${spend.spentUsd.toFixed(4)} on ${spend.calls} calls (${spend.unpricedCalls} unpriced${spendEstimatedNote(spend)}); `
       + `estimate ${spend.estimateUsd === null || spend.estimateUsd === undefined ? 'unknown' : `$${spend.estimateUsd.toFixed(4)}`}.`
       + `${spend.overBudget ? ' STOPPED AT THE CAP: the remaining questions are over-budget errors; run again to finish (cached calls are free).' : ''}`);
   }
@@ -340,5 +343,5 @@ function renderSummaryMarkdown(config, summary, { spend = null, comparisons = []
 
 module.exports = {
   evidenceRecall, chunkEvidenceRecall, answerContainment, normalizeText, normalizeAnswer, splitMessages,
-  percentile, mean, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS, adapterCost
+  percentile, mean, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS, adapterCost, spendEstimatedNote
 };
