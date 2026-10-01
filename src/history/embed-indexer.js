@@ -170,4 +170,4 @@ function startEmbedIndexer({
   return api;
 }
 
-module.exports = { startEmbedIndexer, RECOUNT_EVERY };
+module.exports = { startEmbedIndexer };

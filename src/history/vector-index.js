@@ -12,19 +12,22 @@
 // is not cached and is not searched by vector (BM25 still covers it); the log
 // says so once per chat. Other chats are evicted, least recently used first,
 // before a matrix grows past the cap, so memory held here never exceeds it.
-const { blobToVec } = require('./embedders/vectors');
+const { blobToVec, dot } = require('./embedders/vectors');
+const { HISTORY_DEFAULTS } = require('./settings');
 const { createLogger } = require('../logging');
 
 const MB = 1024 * 1024;
 const MIN_ROWS = 64;
 const KIND_CODES = Object.freeze({ user: 1, assistant: 2, tool_use: 3, tool_result: 4, attachment: 5, summary: 6 });
 const TOO_LARGE = Symbol('too large');
+const DEFAULT_CAP_MB = HISTORY_DEFAULTS.recall.vectorCacheMb;
+const keyOf = (model, chatId) => `${model}\u0000${chatId}`;
 
 // A row: the vector, its chunk id and seq (int32 each), its kind (a byte).
 const rowBytes = (dim) => dim * 4 + 4 + 4 + 1;
 
 class VectorIndex {
-  constructor({ store, getCapMb = () => 256, log = createLogger('history/vectors') }) {
+  constructor({ store, getCapMb = () => DEFAULT_CAP_MB, log = createLogger('history/vectors') }) {
     this.store = store;
     this.getCapMb = getCapMb;
     this.log = log;
@@ -42,7 +45,7 @@ class VectorIndex {
 
   _cap() {
     const mb = Number(this.getCapMb());
-    return (Number.isFinite(mb) && mb > 0 ? mb : 256) * MB;
+    return (Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_CAP_MB) * MB;
   }
 
   _check() {
@@ -62,7 +65,7 @@ class VectorIndex {
   }
 
   skipped(model, chatId) {
-    return this.tooLarge.has(`${model}\u0000${chatId}`);
+    return this.tooLarge.has(keyOf(model, chatId));
   }
 
   // Evicts least recently used matrices (never `keep`) until `extra` more
@@ -77,7 +80,7 @@ class VectorIndex {
   // The loaded (or newly loaded) matrix of one chat, or null.
   _entry(model, chatId) {
     this._check();
-    const key = `${model}\u0000${chatId}`;
+    const key = keyOf(model, chatId);
     if (this.tooLarge.has(key)) return null;
     const cap = this._cap();
     // The cap can be lowered while matrices are held: trim to it first (this
@@ -160,17 +163,15 @@ class VectorIndex {
       for (let i = 0; i < e.n; i++) {
         if (Number.isInteger(upToSeq) && !(e.seqs[i] < upToSeq)) continue;
         if (kindSet && !kindSet.has(e.kinds[i])) continue;
-        let dot = 0;
-        const off = i * e.dim;
-        for (let d = 0; d < e.dim; d++) dot += e.matrix[off + d] * query[d];
+        const cos = dot(e.matrix, query, i * e.dim);
         const id = e.ids[i];
         if (top.length === limit) {
           const last = top[top.length - 1];
-          if (dot < last.cosine || (dot === last.cosine && id > last.chunkId)) continue;
+          if (cos < last.cosine || (cos === last.cosine && id > last.chunkId)) continue;
         }
         let at = top.length;
-        while (at > 0 && (top[at - 1].cosine < dot || (top[at - 1].cosine === dot && top[at - 1].chunkId > id))) at -= 1;
-        top.splice(at, 0, { chunkId: id, cosine: dot });
+        while (at > 0 && (top[at - 1].cosine < cos || (top[at - 1].cosine === cos && top[at - 1].chunkId > id))) at -= 1;
+        top.splice(at, 0, { chunkId: id, cosine: cos });
         if (top.length > limit) top.pop();
       }
     }
@@ -181,11 +182,11 @@ class VectorIndex {
   vectorOf(model, chunk) {
     if (!chunk || !model) return null;
     this._check();
-    const e = this.entries.get(`${model}\u0000${chunk.chatId}`);
+    const e = this.entries.get(keyOf(model, chunk.chatId));
     if (!e) return null;
     const i = e.rowOf.get(chunk.id);
     return i === undefined ? null : e.matrix.subarray(i * e.dim, (i + 1) * e.dim);
   }
 }
 
-module.exports = { VectorIndex, KIND_CODES };
+module.exports = { VectorIndex };

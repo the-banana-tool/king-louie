@@ -65,10 +65,9 @@ const { buildChildContext, childRuntimeOptions } = require('../agents/child-cont
 const ContextAssembler = require('../context/context-assembler');
 const {
   HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore, TokenEstimator, Retriever, ContextBuilder,
-  EmbedderHost, EmbedRunner, VectorIndex, createVectorSearch
+  EmbedderHost, EmbedRunner, VectorIndex, createVectorSearch, startEmbedIndexer, mergeHistorySettings
 } = require('../history');
 const { startChunkBackfill } = require('../history/backfill');
-const { startEmbedIndexer } = require('../history/embed-indexer');
 const { createHostReranker } = require('../history/reranker');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
@@ -346,7 +345,7 @@ function createCore(deps = {}) {
   });
   const vectorIndex = new VectorIndex({
     store: historyStore,
-    getCapMb: () => ((getSettings().history || {}).recall || {}).vectorCacheMb
+    getCapMb: () => cacheMbOf(getSettings())
   });
   const { vectorSearch, vectorOf } = createVectorSearch({ host: embedderHost, index: vectorIndex });
   const historyReranker = createHostReranker(embedderHost);
@@ -413,7 +412,7 @@ function createCore(deps = {}) {
   const getApiStatus = () => store.get('apiStatus', {});
   const setApiStatus = (status) => store.set('apiStatus', status);
   const getSettings = () => mergeSettings(store.get('settings', DEFAULT_SETTINGS));
-  const cacheMbOf = (s) => ((s && s.history) || {}).recall?.vectorCacheMb;
+  const cacheMbOf = (s) => mergeHistorySettings((s || {}).history).recall.vectorCacheMb;
   const setSettings = (settings) => {
     const before = cacheMbOf(getSettings());
     const next = mergeSettings(settings);

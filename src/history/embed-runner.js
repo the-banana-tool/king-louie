@@ -286,6 +286,11 @@ class EmbedRunner extends EventEmitter {
     job.reject(err);
     const want = this.desired[job.role];
     if (want && want.model === job.model) this.desired[job.role] = null;
+    this._rejectWaiting(job, err);
+  }
+
+  // Fails every queued job for the same role and model as `job`.
+  _rejectWaiting(job, err) {
     this.queue = this.queue.filter((j) => {
       if (j.role === job.role && j.model === job.model) {
         j.reject(err);
@@ -382,13 +387,7 @@ class EmbedRunner extends EventEmitter {
         : new EmbedError('EMBED_WORKER_CRASHED', `the embed worker exited (code ${code}, signal ${signal})${quick ? `; ${QUICK_EXIT_HINT}` : ''}`);
       if (job.internal) {
         // A reload for a fresh worker died: fail what waited on it.
-        this.queue = this.queue.filter((j) => {
-          if (j.role === job.role && j.model === job.model) {
-            j.reject(err);
-            return false;
-          }
-          return true;
-        });
+        this._rejectWaiting(job, err);
       } else {
         job.reject(err);
       }

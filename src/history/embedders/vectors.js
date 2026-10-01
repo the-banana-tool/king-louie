@@ -28,6 +28,14 @@ function unit(values) {
   return v;
 }
 
+// The dot product of b with b.length values of a from aOffset (a matrix row,
+// without a subarray per row); for unit vectors, their cosine.
+function dot(a, b, aOffset = 0) {
+  let sum = 0;
+  for (let i = 0; i < b.length; i++) sum += a[aOffset + i] * b[i];
+  return sum;
+}
+
 // Little-endian float32, as the embeddings table stores it (spec §4.1).
 function vecToBlob(vec) {
   const out = Buffer.alloc(vec.length * 4);
@@ -46,4 +54,4 @@ function blobToVec(bytes) {
   return out;
 }
 
-module.exports = { MAX_EMBED_CHARS, embedInput, unit, vecToBlob, blobToVec };
+module.exports = { MAX_EMBED_CHARS, embedInput, unit, dot, vecToBlob, blobToVec };

@@ -11,6 +11,7 @@
 // the cosine dedupe and the cross-encoder reranker (reranker.js); the
 // signature of retrieve() stays the same.
 const { HISTORY_DEFAULTS } = require('./settings');
+const { dot } = require('./embedders/vectors');
 const { createLogger } = require('../logging');
 
 const log = createLogger('history/retriever');
@@ -266,14 +267,16 @@ class Retriever {
       if (!cosineAt) return false;
       const v = vectorFor(chunk);
       if (!v) return false;
-      return selectedVecs.some((o) => {
-        if (o.length !== v.length) return false;
-        let dot = 0;
-        for (let i = 0; i < v.length; i++) dot += o[i] * v[i];
-        return dot > cosineAt;
-      });
+      return selectedVecs.some((o) => o.length === v.length && dot(o, v) > cosineAt);
     };
     let cosineDuplicates = 0;
+    // True when the item is dropped as a cosine near-duplicate.
+    const dropCosine = (item) => {
+      if (!cosineDuplicate(item.chunk)) return false;
+      dropped.add(item.chunk.id);
+      cosineDuplicates += 1;
+      return true;
+    };
     const remember = (chunk) => {
       if (jaccard) selectedShingles.push(shinglesOf(chunk));
       if (cosineAt) {
@@ -323,11 +326,7 @@ class Retriever {
             drop(item, this.estimator.estimate(item.chunk.text, model));
             return;
           }
-          if (cosineDuplicate(item.chunk)) {
-            dropped.add(item.chunk.id);
-            cosineDuplicates += 1;
-            return;
-          }
+          if (dropCosine(item)) return;
           takeWhole(all, item, 'completed');
           used += total;
           if (partner.length && partnerTotal <= s.completeMessageTokens && (!hasBudget || used + partnerTotal <= budgetTokens)) {
@@ -346,11 +345,7 @@ class Retriever {
         drop(item, tokens);
         return;
       }
-      if (cosineDuplicate(item.chunk)) {
-        dropped.add(item.chunk.id);
-        cosineDuplicates += 1;
-        return;
-      }
+      if (dropCosine(item)) return;
       used += tokens;
       perMessage.set(messageId, count + 1);
       taken.add(item.chunk.id);
