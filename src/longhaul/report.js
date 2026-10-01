@@ -10,8 +10,8 @@
 // runs give byte-identical files: nothing reads the clock, every list is
 // sorted. A series is one adapter with one configuration (its describe(),
 // hashed), at one tier, answer model and judge model, from one commit and
-// with one setup (max tokens and prompt hashes), so runs that differ in any
-// of these never share a row. When several runs
+// with one setup (max tokens and the answer and judge prompt hashes), so
+// runs that differ in any of these never share a row. When several runs
 // answer the same question for one series (a crashed run and its rerun), the
 // latest counts, unless it failed where an earlier one succeeded.
 const fs = require('fs');
@@ -72,8 +72,11 @@ function configHash(config, adapter) {
 
 // What else changes an answer, hashed into setup: (8 hex): the full commit
 // (two commits that share 12 hex, or a "-dirty" tree, stay apart), the
-// answer and judge max tokens, and the prompts' hashes (answer, judge and its
-// rules, summarize when the run had one).
+// answer and judge max tokens, and the answer and judge prompts' hashes (the
+// judge's with its rules). The summarize prompt is not here: only
+// summarize-compact uses it, and its describe() carries the hash (so cfg:
+// splits that series alone), so a run with a summarizer and one without
+// still share a cohort for the other adapters.
 function setupHash(config) {
   const a = config.answer;
   const prompt = (p) => (p ? p.sha256 ?? null : null);
@@ -82,10 +85,7 @@ function setupHash(config) {
     Object.assign(parts, {
       answerMaxTokens: a.answerModel?.maxTokens ?? null,
       judgeMaxTokens: a.judgeModel?.maxTokens ?? null,
-      prompts: {
-        answer: prompt(a.prompts?.answer), judge: prompt(a.prompts?.judge),
-        judgeRules: a.prompts?.judge?.rulesSha256 ?? null, summarize: prompt(a.prompts?.summarize)
-      }
+      prompts: { answer: prompt(a.prompts?.answer), judge: prompt(a.prompts?.judge), judgeRules: a.prompts?.judge?.rulesSha256 ?? null }
     });
   }
   return sha256Text(stableStringify(parts)).slice(0, 8);
@@ -221,7 +221,7 @@ function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
   const L = [`# LongHaul report ${reportId}`, ''];
   L.push('Aggregate numbers only: no question, answer or session text (B-D8). A series is one adapter with one configuration '
     + '(cfg: the first 8 hex of its recorded describe() hash) at one tier, answer model and judge model, from one commit, with one setup '
-    + '(setup: 8 hex over the full commit, the answer and judge max tokens and the prompt hashes); '
+    + '(setup: 8 hex over the full commit, the answer and judge max tokens and the answer and judge prompt hashes; the summarize prompt hash is in the cfg: of summarize-compact alone); '
     + 'when several runs answer the same question for one series, the latest run counts, but a failed record never replaces a successful one.', '');
   L.push('## Runs', '', '| Run | Stage | Tier | Answer model | Judge model | Prompts (answer / judge) | Questions | Private sessions | Commit | Judge spot-check |',
     '|---|---|---|---|---|---|---|---|---|---|');

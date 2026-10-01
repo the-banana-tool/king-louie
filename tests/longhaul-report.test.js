@@ -62,7 +62,7 @@ function setup() {
 const cfg = (d) => sha256Text(stableStringify(d)).slice(0, 8);
 const SETUP = sha256Text(stableStringify({
   commit: 'abcdef1234567890', answerMaxTokens: 400, judgeMaxTokens: 200,
-  prompts: { answer: 'a'.repeat(64), judge: 'b'.repeat(64), judgeRules: null, summarize: null }
+  prompts: { answer: 'a'.repeat(64), judge: 'b'.repeat(64), judgeRules: null }
 })).slice(0, 8);
 const COHORT = `grid openai/gpt-6-lite judge:anthropic/claude-haiku-4-5 commit:abcdef123456 setup:${SETUP}`;
 const KL = `kl-recall cfg:${cfg(ADAPTERS[0])} @ ${COHORT}`;
@@ -149,12 +149,30 @@ describe('longhaul report', () => {
     assert.notStrictEqual(answer({ judgeModel: { ...base.answer.judgeModel, maxTokens: 100 } }), KL);
     assert.notStrictEqual(answer({ prompts: { ...base.answer.prompts, answer: { sha256: 'c'.repeat(64) } } }), KL);
     assert.notStrictEqual(answer({ prompts: { ...base.answer.prompts, judge: { sha256: 'b'.repeat(64), rulesSha256: 'd'.repeat(64) } } }), KL);
-    assert.notStrictEqual(answer({ prompts: { ...base.answer.prompts, summarize: { sha256: 'e'.repeat(64) } } }), KL);
+    // The summarize prompt splits only summarize-compact's series (its describe() carries the hash).
+    assert.strictEqual(answer({ prompts: { ...base.answer.prompts, summarize: { sha256: 'e'.repeat(64) } } }), KL);
+    const sc = (sha) => seriesOf({ ...base, adapters: [{ name: 'summarize-compact', summarizePromptSha256: sha }] }, 'summarize-compact');
+    assert.notStrictEqual(sc('e'.repeat(64)), sc('f'.repeat(64)));
     // Same first 12 hex, another commit; and the same commit with a dirty tree.
     assert.notStrictEqual(other({ commit: 'abcdef1234567891' }), KL);
     const dirty = other({ commit: 'abcdef1234567890-dirty' });
     assert.notStrictEqual(dirty, KL);
     assert.match(dirty, /commit:abcdef123456-dirty setup:[0-9a-f]{8}$/);
+  });
+
+  it('pairs kl-recall and kl-recall-whole from two runs when only one also ran summarize-compact (review round 2)', () => {
+    const { env } = tmpHome();
+    const home = ensureDirs(resolveHome(env));
+    const withSummary = config(RUN_A, true);
+    withSummary.adapters = [ADAPTERS[0], { name: 'summarize-compact', summarizePromptSha256: 'e'.repeat(64) }];
+    withSummary.answer.prompts.summarize = { file: 'summarize-v1.md', sha256: 'e'.repeat(64) };
+    writeRun(home, RUN_A, withSummary, [1, 2, 3].map((n) => rec(RUN_A, 'kl-recall', n, 'user-said', 'correct'))
+      .concat([1, 2, 3].map((n) => rec(RUN_A, 'summarize-compact', n, 'user-said', 'correct'))));
+    const whole = config(RUN_B, true);
+    whole.adapters = [ADAPTERS[1]];
+    writeRun(home, RUN_B, whole, [1, 2, 3].map((n) => rec(RUN_B, 'kl-recall-whole', n, 'user-said', 'correct')));
+    const built = buildReport([RUN_A, RUN_B].map((r) => loadRun(home, r)));
+    assert.deepStrictEqual(built.comparisons.map((c) => [c.id, c.a, c.b, c.result.n]), [['whole-messages', KL, WHOLE, 3]]);
   });
 
   it('never merges two runs that differ only in answer max tokens', () => {
