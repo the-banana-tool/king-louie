@@ -10,7 +10,7 @@ const { mergeSettings, DEFAULT_SETTINGS } = require('../src/core/settings');
 const RERANK = { enabled: false, model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 100, maxMs: 2000, search: true, searchMaxMs: 6000 };
 const EMBEDDER = {
   kind: 'local',
-  model: 'Xenova/bge-small-en-v1.5',
+  model: 'Xenova/all-MiniLM-L6-v2',
   ollama: { baseUrl: 'http://127.0.0.1:11434', model: 'nomic-embed-text' },
   openai: { model: 'text-embedding-3-small' },
   batchSize: 16,
@@ -127,7 +127,7 @@ describe('history settings', () => {
 
   it('embedderKey names the model the vectors belong to', () => {
     const e = (over) => mergeHistorySettings({ embedder: over }).embedder;
-    assert.strictEqual(embedderKey(e({})), 'local:Xenova/bge-small-en-v1.5');
+    assert.strictEqual(embedderKey(e({})), 'local:Xenova/all-MiniLM-L6-v2');
     assert.strictEqual(embedderKey(e({ kind: 'ollama' })), 'ollama:nomic-embed-text');
     assert.strictEqual(embedderKey(e({ kind: 'openai' })), 'openai:text-embedding-3-small');
     assert.strictEqual(embedderKey(e({ kind: 'none' })), null);

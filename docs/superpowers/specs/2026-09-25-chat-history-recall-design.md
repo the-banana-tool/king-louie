@@ -356,7 +356,7 @@ Embedder implementations:
 
 | Kind | Backend | Notes |
 |---|---|---|
-| `local` (default) | `@huggingface/transformers` on `onnxruntime-node`, int8 weights | Default model `Xenova/bge-small-en-v1.5` (384 dims, MIT). Model files download on first enable into `<dataDir>/models/` with progress in the UI; nothing is bundled in the installer. Offline first run means BM25 only until the download succeeds. |
+| `local` (default) | `@huggingface/transformers` on `onnxruntime-node`, int8 weights | Default model `Xenova/all-MiniLM-L6-v2` (384 dims, Apache-2.0), measured against `Xenova/bge-small-en-v1.5` (§6.7, §16). Model files download on first enable into `<dataDir>/models/` with progress in the UI; nothing is bundled in the installer. Offline first run means BM25 only until the download succeeds. |
 | `ollama` | `POST /api/embed` on the configured Ollama base URL, through `OllamaProvider#embed` | Default model `nomic-embed-text`; the user must run Ollama. |
 | `openai` | `OpenAIProvider#embed` (through `BaseProvider.request`) | Sends chunk text to OpenAI; the settings UI says so. |
 | `none` | | BM25 only. |
@@ -382,9 +382,18 @@ part of this spec.
 
 ### 6.1 The tail
 
-The tail is the most recent `history.recall.tailMessages` (16) `user` and
-`assistant` messages, capped at `tailTokens` (6,000), and it starts at a
-`user` message. With `tailIncludeToolCalls` (true) each `toolUse` in that
+The tail is counted in user turns: the last `history.recall.tailUserTurns`
+(4) user messages and the user and assistant messages after the oldest of
+them, capped at `tailTokens` (6,000) and `tailMaxRows` (64) rows. The newest
+user message is always in it; the replies after it fill what is left, newest
+first, and older turns come whole while they fit, so the tail starts at a
+`user` message and is never empty while the chat has one within
+`TAIL_SCAN_MAX_ROWS` (2,000) rows. A tool call or result is folded into the
+reply that followed it only when that reply is shown. H2 counted
+`tailMessages` rows instead; agent sessions write one assistant row per tool
+round, so 16 rows after the owner's last message left an empty tail (§6.7).
+A settings file saved before H3 maps its `tailMessages` to user turns (two
+rows a turn; the shipped 8 and 16 read as unset). With `tailIncludeToolCalls` (true) each `toolUse` in that
 span appears as its one-line summary. With `tailIncludeToolResults` (true)
 each `toolResult` in the span is folded into the reply that follows it, newest
 first, with the tokens the user and assistant messages leave, so a tool dump
@@ -397,9 +406,7 @@ its reply (joiner, label, body and note), so results never take the tail past
 is bounded: results are read newest first, 20 rows at a time, and at most 64
 rows per turn (`TAIL_RESULT_PAGE`, `TAIL_RESULT_SCAN_MAX`), stopping once what
 is left cannot fit the smallest result. Tool results in the tail are excluded
-from recall like the rest of the tail. The default was 8 messages with
-results left out: agent sessions write one assistant row per tool round, so
-the last 8 rows were often all assistant and the tail came out empty (§6.7).
+from recall like the rest of the tail.
 A tail message over `tailMaxMessageTokens` (1,500) is
 replaced by its chunks that scored best for this turn's query, followed by a
 marker: `[message #412 shortened: 3 of 11 paragraphs shown; ReadHistory 412
@@ -539,16 +546,23 @@ paraphrases of their evidence, so the oracle's containment is 0.631, not 1.0.
 | plus whole small messages and tool pairing (left off) | 0.494 | 0.563 |
 | plus fused `text-embedding-3-small` vectors (H3 probe) | 0.539 | — |
 | plus cross-encoder rerank, `topM` 100 (H3 probe) | 0.584 | 0.602 |
+| plus Jev hosted rerank, batched, topM 100 (probe; opt-in, not shipped) | 0.662 | 0.621 |
 | **Shipped H2 defaults** (query and `bm25TopK` above, 16-message tail with tool results) | **0.417** | **0.592** |
+| H3: tail in user turns (`tailUserTurns` 4), BM25 only | 0.426 | 0.592 |
+| **H3 shipped defaults** (the tail above, local `Xenova/all-MiniLM-L6-v2` vectors fused, `dedupeCosine` 0.92) | **0.456** | **0.612** |
+| H3, `Xenova/bge-small-en-v1.5` (the other one; one question under on containment) | 0.443 | 0.583 |
+| H3, `Xenova/bge-small-en-v1.5` with `dedupeCosine` 0 (off) | 0.456 | 0.592 |
+| H3, hosted `text-embedding-3-small` vectors instead (probe) | 0.459 | 0.602 |
+| H3, plus cross-encoder rerank, `topM` 100 (SearchHistory, or `rerank.enabled`) | 0.462 | 0.592 |
 | Sliding window, same total tokens | 0.238 | 0.427 |
 | Oracle | 1.000 | 0.631 |
 
 The shipped defaults use a median 12.5K and a p90 13.1K total tokens per
 turn (tail plus recalled block), under the 15K ceiling; their containment is
 94% of the oracle's. Evidence recall under 10K tokens back is 0.79, and
-0.26 to 0.37 beyond it, where the sliding window finds 0 to 0.05. The spec's
-0.8 recall target (§13) is not met with BM25 alone; H3 starts from these
-numbers.
+0.26 to 0.37 beyond it, where the sliding window finds 0 to 0.05. The
+shipped H3 defaults reach 0.456 overall and 0.76 under 10K tokens back,
+still short of the 0.8 target (§13), at a p90 of 13.6K total tokens.
 
 Findings the settings rest on:
 - **The query.** The previous user turns were noise; the question alone put
@@ -559,6 +573,29 @@ Findings the settings rest on:
   (measured before it was left off), and is 0.79 with the shipped defaults;
   p90 under 13K total tokens either way. A larger
   `tailTokens` did not help: the old tail used a median 1.3K of its 6K.
+- **The user-turn tail.** No question gets an empty tail now (the 8-row tail
+  left 9 of 24 under 10K with none). Swept at 2, 3, 4, 6 and 8 user turns:
+  recall 0.389, 0.407, 0.426, 0.431, 0.433; containment 0.583, then 0.592;
+  recall under 10K 0.69, 0.75, 0.79, 0.81, 0.82 against the 0.79 baseline;
+  p90 12.8K, 12.9K, 13.5K, 15.6K, 16.0K. 4 is the smallest value within 0.02
+  of the best on both metrics, at the baseline under 10K and under the 15K
+  ceiling, which 6 and 8 exceed.
+- **Local vectors.** Fused local MiniLM vectors add 0.030 recall and 0.020
+  containment over the BM25 path on the same tail, the same as the hosted
+  `text-embedding-3-small` there (0.459 / 0.602), and less than the OpenAI
+  probe's +0.05, which was measured with whole messages on. bge-small scored
+  below MiniLM (0.443 / 0.583); dropping the cosine dedupe on it moved 0.013
+  and 0.009, inside noise, so `dedupeCosine` stays 0.92.
+- **Rerank.** The cross-encoder at `topM` 100 on the shipped defaults adds
+  0.006 recall and loses 0.020 containment (0.462 / 0.592), at a cold median
+  of 3.7 s per question (p90 5.0 s). It is not worth a turn's latency; it
+  stays on for `SearchHistory` and opt-in per turn.
+- **Hosted rerank.** Jev's hosted reranker is the first one inside the
+  per-turn budget (0.24 s a turn), but it sends about 100 chunks a turn to a
+  third party, so it stays an opt-in follow-up.
+- **Embedding wall time.** The four sessions' 45,064 chunks took 57.0 minutes
+  with bge-small and 28.4 minutes with MiniLM (76 and 38 ms a chunk, two ONNX
+  threads, download included).
 - **Whole messages.** Taking a small message whole raised evidence recall but
   not containment: the chunk holding the answer was usually already shown.
   Left off until an answer-accuracy stage can tell whether the model reads a
@@ -584,7 +621,7 @@ Every assistant message the send path appends carries:
   "recalledChunkIds": [8812, 8813, 9107],
   "estTokens": { "system": 3100, "tail": 2900, "recalled": 1850 },
   "fullHistoryEstTokens": 412000,
-  "embedder": "local:Xenova/bge-small-en-v1.5",
+  "embedder": "local:Xenova/all-MiniLM-L6-v2",
   "scope": "chat"
 }
 ```
@@ -765,16 +802,20 @@ with the builder's output under 15K estimated tokens per turn.
 
 ```js
 history: {
+  // setSettings stores the whole merged object, so a file saved before H3
+  // holds the old shipped defaults as if chosen; without version 3, a
+  // tailMessages of 8 or 16 and a rerank.topM of 20 read as unset.
+  version: 3,
   recall: {
     enabled: true,
-    tailMessages: 16, tailTokens: 6000, tailMaxMessageTokens: 1500, tailIncludeToolCalls: true,
-    tailIncludeToolResults: true, tailToolResultMaxTokens: 1000,
-    recalledTokens: 6000, queryUserTurns: 0,
+    tailUserTurns: 4, tailMaxRows: 64, tailTokens: 6000, tailMaxMessageTokens: 1500,
+    tailIncludeToolCalls: true, tailIncludeToolResults: true, tailToolResultMaxTokens: 1000,
+    recalledTokens: 6000, queryUserTurns: 0, queryFallbackMinChars: 0,
     bm25TopK: 200, vectorTopK: 50, rrfK: 60,
     kindWeights: { user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 },
     recencyWeight: 0.3, recencyHalfLifeDays: 30,
     maxChunksPerMessage: 4, dedupeCosine: 0.92,
-    rerank: { enabled: false, model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 20, maxMs: 2000 },
+    rerank: { enabled: false, model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 100, maxMs: 2000, search: true, searchMaxMs: 6000 },
     vectorCacheMb: 256,
     // measured and off (§6.3, §6.7): 0 / false
     completeMessageTokens: 0, pairToolMessages: false, prefixMinChars: 0,
@@ -783,7 +824,7 @@ history: {
   },
   embedder: {
     kind: 'local',                                   // local | ollama | openai | none
-    model: 'Xenova/bge-small-en-v1.5',
+    model: 'Xenova/all-MiniLM-L6-v2',
     ollama: { baseUrl: 'http://127.0.0.1:11434', model: 'nomic-embed-text' },
     openai: { model: 'text-embedding-3-small' },
     batchSize: 16, intervalMs: 2000, maxChunksPerToolResult: 0
@@ -821,8 +862,9 @@ Labelled decisions the owner can overturn:
   Node the service runs on and the Node bundled in Electron 41, proven here
   with FTS5, and needs no packaging work. It still prints an ExperimentalWarning
   on Node 24; the hosts filter that one warning.
-- bge-small-en-v1.5 as the default local model: better retrieval quality than
-  MiniLM for about 2.5x the CPU, still about 100 ms per chunk in the background.
+- `Xenova/all-MiniLM-L6-v2` as the default local model, measured (§6.7):
+  fused, it scored 0.456 recall and 0.612 containment against bge-small-en-v1.5's
+  0.443 and 0.583, at 42 ms a chunk against 102 (A.3).
 - Models download on first enable rather than shipping in the installer.
 - The tail excludes tool results by default and includes one-line tool call
   summaries.

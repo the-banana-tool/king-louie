@@ -167,11 +167,14 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   the new message alone (`queryUserTurns: 0`), `bm25TopK` 200, and the tail is
   the last `tailUserTurns` (4) user turns with the replies and tool results in
   their span (tool results capped at 1,000 tokens each, the tail at
-  `tailMaxRows` rows). `tailUserTurns` 4 was measured on LongHaul 2026-09-30
-  (evidence recall 0.426 at p90 13.5K tokens, against 0.389 at 2, and 0.433 at
-  8 with a p90 of 16K, over the ceiling). The other `history.recall` knobs (`completeMessageTokens`,
-  `pairToolMessages`, `rerank`, `vectorTopK`, `dedupeJaccard`, …) were measured
-  and are off or inert by default. Change a default only with a LongHaul run
+  `tailMaxRows` rows), and local `Xenova/all-MiniLM-L6-v2` vectors are fused
+  with BM25 (`dedupeCosine` 0.92). Settled on LongHaul in H3 (spec §6.7):
+  the tail by a sweep of 2 to 8 user turns (4 is the smallest within noise of
+  the best, under the 15K p90 ceiling), MiniLM over bge-small (0.456 / 0.612
+  against 0.443 / 0.583 evidence recall / containment, at half the CPU). The
+  other `history.recall` knobs (`completeMessageTokens`, `pairToolMessages`,
+  per-turn `rerank`, `dedupeJaccard`, …) were measured and are off or inert by
+  default. Change a default only with a LongHaul run
   that shows it; tests that check a mechanism pin their settings explicitly.
 - Assistant replies carry `context` provenance; the recall line reads it and
   `history:excerpts` returns the excerpts. `SearchHistory`/`ReadHistory` are
@@ -179,13 +182,19 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
 - Tests use `tests/helpers/history-fixture.js` (a temp store; chats seeded
   through the real `appendMessage`); `tests/e2e/history-recall.test.js` is
   the end-to-end check.
-- H3 embeddings: the `embeddings` table (schema step 3) holds one unit vector
-  per chunk per embedder key (`settings.history.embedder.kind` `local`,
-  `ollama`, `openai` or `none`); `EmbedIndexer` fills it in the background,
-  each turn fuses cosine hits with BM25, and `dedupeCosine` drops near
-  duplicates. Both are provisional until the H3 LongHaul measurement (plan
-  Task 16). `KL_TEST_MODE` never starts the embedder (it starts from
-  `startModelsBackgroundChecks`).
+- H3 (vectors): `embeddings` (schema step 3) holds one unit float32 vector per
+  chunk per embedder key (`local:<model>`, `ollama:<model>`,
+  `openai:<model>`). `EmbedderHost` (`src/history/embedder-host.js`) picks the
+  embedder from `settings.history.embedder` and starts only from
+  `startModelsBackgroundChecks` (never under `KL_TEST_MODE`, never in
+  `createCore().start()`); `startEmbedIndexer` fills the table in the
+  background; `VectorIndex` keeps per-chat matrices under `vectorCacheMb`.
+  Local models run in the embed worker (`embed-runner.js`, `embed-worker.js`)
+  and download once into `<dataDir>/models/`. `SearchHistory` reranks with the
+  local cross-encoder; per turn only with `rerank.enabled`.
+- Tests never load a model: the worker with `tests/helpers/fake-embed-backend.js`
+  (`new EmbedRunner({ testBackend })`), a core with `deps.history.createEmbedRunner`
+  returning `FakeEmbedRunner` (`tests/helpers/fake-embed-runner.js`).
 - The local embedder and the cross-encoder run in the embed worker, a child
   process of `process.execPath` with `ELECTRON_RUN_AS_NODE=1` (like the PDF
   worker), so they need Electron's RunAsNode fuse left on and
@@ -322,12 +331,12 @@ Electron build.
   `vectorTopK` with BM25, or use cosine alone, and refuse a session whose
   cache is missing or incomplete. Tests use
   `tests/helpers/fake-embedding-server.js`.
-- `kl-recall-rerank` / `kl-recall-vec-rerank` (H3 probe) turn on
-  `history.recall.rerank` (spec §6.3 step 6, a `reranker` callback into
-  `Retriever#retrieve`, default off) with a local cross-encoder whose scores
-  are cached under `LONGHAUL_HOME/private/rerank/`; it uses the app's own
-  `@huggingface/transformers` and `onnxruntime-node` dependencies (unpacked
-  from the asar for the embed worker). Tests inject a fake `scorer`.
+- `kl-recall-rerank` / `kl-recall-vec-rerank` use the app's cross-encoder in
+  the embed worker (models under `LONGHAUL_HOME/private/models`), scores
+  cached under `LONGHAUL_HOME/private/rerank/`. `longhaul embed --provider
+  local --model <org/name>` and `run --embed-provider local` use the app's
+  local embedder; nothing leaves the machine, so no `--send-private`.
+  Summaries count questions with an empty tail. Tests inject a fake `scorer`.
 - The answer stage (B3): `longhaul run ... --answer-provider <p> --answer-model <m>
   --judge-provider <p> --judge-model <m>` adds answer accuracy (answerable questions
   judged `correct`), abstain accuracy (abstain questions the model declined) and the

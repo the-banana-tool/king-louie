@@ -78,7 +78,7 @@ const HISTORY_DEFAULTS = Object.freeze({
   // embed worker; ollama and openai go through their providers.
   embedder: Object.freeze({
     kind: 'local',
-    model: 'Xenova/bge-small-en-v1.5',
+    model: 'Xenova/all-MiniLM-L6-v2',
     ollama: Object.freeze({ baseUrl: 'http://127.0.0.1:11434', model: 'nomic-embed-text' }),
     openai: Object.freeze({ model: 'text-embedding-3-small' }),
     batchSize: 16,

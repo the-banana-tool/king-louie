@@ -74,9 +74,9 @@ describe('EmbedderHost', () => {
     const s = setup();
     s.host.start();
     assert.strictEqual(s.host.status().state, 'starting');
-    assert.deepStrictEqual(s.runner.loads.map((l) => [l.role, l.model, l.opts.modelsDir]), [['embedder', 'Xenova/bge-small-en-v1.5', '/data/models']]);
-    s.runner.emit('progress', { role: 'embedder', model: 'Xenova/bge-small-en-v1.5', file: 'onnx/model_quantized.onnx', loaded: 10, total: 40 });
-    s.runner.emit('progress', { role: 'embedder', model: 'Xenova/bge-small-en-v1.5', file: 'tokenizer.json', loaded: 5, total: 10 });
+    assert.deepStrictEqual(s.runner.loads.map((l) => [l.role, l.model, l.opts.modelsDir]), [['embedder', 'Xenova/all-MiniLM-L6-v2', '/data/models']]);
+    s.runner.emit('progress', { role: 'embedder', model: 'Xenova/all-MiniLM-L6-v2', file: 'onnx/model_quantized.onnx', loaded: 10, total: 40 });
+    s.runner.emit('progress', { role: 'embedder', model: 'Xenova/all-MiniLM-L6-v2', file: 'tokenizer.json', loaded: 5, total: 10 });
     assert.deepStrictEqual(s.host.status().download, { role: 'embedder', loaded: 15, total: 50 });
     assert.strictEqual(s.host.status().state, 'downloading');
     s.runner.loads[0].resolve({ dim: 384 });
@@ -85,12 +85,12 @@ describe('EmbedderHost', () => {
     assert.strictEqual(s.host.status().state, 'ready');
     assert.strictEqual(e.dim, null, 'dim comes from the first vector, not the load reply');
     assert.strictEqual(e.tokens, 0, 'the local embedder is unpriced');
-    assert.strictEqual(e.name, 'local:Xenova/bge-small-en-v1.5');
-    assert.strictEqual(s.host.status().key, 'local:Xenova/bge-small-en-v1.5');
+    assert.strictEqual(e.name, 'local:Xenova/all-MiniLM-L6-v2');
+    assert.strictEqual(s.host.status().key, 'local:Xenova/all-MiniLM-L6-v2');
     const [q] = await e.embed(['gate code'], { kind: 'query' });
     assert.ok(Math.abs(q[0] - 0.6) < 1e-6, 'unit length');
     assert.strictEqual(e.dim, 2);
-    assert.deepStrictEqual(s.runner.lastEmbed.texts, ['Represent this sentence for searching relevant passages: gate code']);
+    assert.deepStrictEqual(s.runner.lastEmbed.texts, ['gate code'], 'MiniLM has no query prefix');
     assert.strictEqual(s.runner.lastEmbed.opts.priority, 'query');
     assert.strictEqual(s.host.reason(), null);
   });
@@ -98,7 +98,7 @@ describe('EmbedderHost', () => {
   it('a download that fails: unavailable, one warning to the log and the owner, a retry after retryMs', async () => {
     const s = setup();
     s.host.start();
-    s.runner.loads[0].reject(new EmbedError('MODEL_UNAVAILABLE', 'Xenova/bge-small-en-v1.5 could not be loaded: fetch failed (offline)'));
+    s.runner.loads[0].reject(new EmbedError('MODEL_UNAVAILABLE', 'Xenova/all-MiniLM-L6-v2 could not be loaded: fetch failed (offline)'));
     await flush();
     assert.strictEqual(s.host.status().state, 'unavailable');
     assert.match(s.host.status().error, /offline/);
@@ -123,15 +123,15 @@ describe('EmbedderHost', () => {
   it('a model switch while loading: the old load is ignored, the new one wins', async () => {
     const s = setup();
     s.host.start();
-    s.set({ model: 'Xenova/all-MiniLM-L6-v2' });
-    assert.strictEqual(s.host.status().key, 'local:Xenova/all-MiniLM-L6-v2');
+    s.set({ model: 'Xenova/bge-small-en-v1.5' });
+    assert.strictEqual(s.host.status().key, 'local:Xenova/bge-small-en-v1.5');
     assert.strictEqual(s.runner.loads.length, 2);
     s.runner.loads[0].resolve({ dim: 384 });
     await flush();
     assert.strictEqual(s.host.current(), null, 'the old model finishing does not make it live');
     s.runner.loads[1].resolve({ dim: 384 });
     await flush();
-    assert.strictEqual(s.host.current().name, 'local:Xenova/all-MiniLM-L6-v2');
+    assert.strictEqual(s.host.current().name, 'local:Xenova/bge-small-en-v1.5');
     s.runner.loads[0].reject(new EmbedError('MODEL_UNAVAILABLE', 'late'));
     await flush();
     assert.strictEqual(s.host.status().state, 'ready', 'a late failure of the old load changes nothing');
@@ -183,7 +183,7 @@ describe('EmbedderHost', () => {
     s.runner.loads.find((l) => l.role === 'embedder').resolve({ dim: 384 });
     await flush();
     assert.strictEqual(s.host.status().state, 'ready', 'the local load still lands');
-    assert.strictEqual(s.host.current().name, 'local:Xenova/bge-small-en-v1.5');
+    assert.strictEqual(s.host.current().name, 'local:Xenova/all-MiniLM-L6-v2');
   });
 
   it('EMBED_STOPPED (shutdown) is not a failure: no state change, no warning', async () => {
@@ -191,7 +191,7 @@ describe('EmbedderHost', () => {
     s.host.start();
     s.runner.loads[0].resolve({ dim: 384 });
     await flush();
-    s.host.fail(new EmbedError('EMBED_STOPPED', 'the embed runner was stopped'), 'local:Xenova/bge-small-en-v1.5');
+    s.host.fail(new EmbedError('EMBED_STOPPED', 'the embed runner was stopped'), 'local:Xenova/all-MiniLM-L6-v2');
     assert.strictEqual(s.host.status().state, 'ready');
     assert.strictEqual(s.notices.length, 0);
     assert.strictEqual(s.warnings.length, 0);
@@ -217,7 +217,7 @@ describe('EmbedderHost', () => {
     s.host.preloadReranker();
     s.host.preloadReranker();
     assert.deepStrictEqual(s.runner.loads.map((l) => [l.role, l.model, l.opts.priority]), [
-      ['embedder', 'Xenova/bge-small-en-v1.5', undefined],
+      ['embedder', 'Xenova/all-MiniLM-L6-v2', undefined],
       ['reranker', 'Xenova/ms-marco-MiniLM-L-6-v2', 'document']
     ]);
     s.runner.loads[1].resolve({ dim: null });
@@ -244,7 +244,7 @@ describe('EmbedderHost', () => {
   it('the reranker download shows in status() with its role; the embedder download says embedder', async () => {
     const s = setup();
     s.host.start();
-    s.runner.emit('progress', { role: 'embedder', model: 'Xenova/bge-small-en-v1.5', file: 'onnx/model_quantized.onnx', loaded: 10, total: 40 });
+    s.runner.emit('progress', { role: 'embedder', model: 'Xenova/all-MiniLM-L6-v2', file: 'onnx/model_quantized.onnx', loaded: 10, total: 40 });
     assert.deepStrictEqual(s.host.status().download, { role: 'embedder', loaded: 10, total: 40 });
     s.runner.loads[0].resolve({ dim: 384 });
     await flush();
@@ -317,7 +317,7 @@ describe('FakeEmbedRunner', () => {
     const { FakeEmbedRunner } = require('./helpers/fake-embed-runner');
     const runner = new FakeEmbedRunner();
     const host = new EmbedderHost({
-      getSettings: () => ({ history: { embedder: { kind: 'local', model: 'Xenova/all-MiniLM-L6-v2' } } }),
+      getSettings: () => ({ history: { embedder: { kind: 'local', model: 'Xenova/bge-small-en-v1.5' } } }),
       modelsDir: '/data/models',
       createRunner: () => runner,
       createProvider: () => { throw new Error('not used'); },

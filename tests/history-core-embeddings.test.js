@@ -16,7 +16,7 @@ const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
 
-const KEY = 'local:Xenova/bge-small-en-v1.5';
+const KEY = 'local:Xenova/all-MiniLM-L6-v2';
 const tempDirs = [];
 afterEach(() => {
   closeOpenHistoryStores();
