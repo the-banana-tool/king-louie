@@ -14,7 +14,7 @@ class HistoryUnavailableError extends Error {
 
 const METHODS = [
   'listChats', 'getChat', 'createChat', 'replaceChat', 'upsertChat', 'updateChat', 'updateChatsWhere', 'deleteChat',
-  'appendMessage', 'truncateFrom', 'getMessages', 'messageCount', 'transaction', 'getMeta', 'setMeta'
+  'appendMessage', 'truncateFrom', 'getMessages', 'findQuestionMessage', 'messageCount', 'transaction', 'getMeta', 'setMeta'
 ];
 
 function createUnavailableHistoryStore(cause) {

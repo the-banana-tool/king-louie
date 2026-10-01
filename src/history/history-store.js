@@ -295,6 +295,19 @@ class HistoryStore {
     });
   }
 
+  // The seq of the chat's assistant message carrying a case question's
+  // `question` metadata (management surfaces spec §3.4), or null. One
+  // indexed scan of the chat's rows in SQLite: no message is read into JS.
+  findQuestionMessage(chatId, questionId) {
+    const id = normalizeId(chatId);
+    if (!id || typeof questionId !== 'string' || !questionId) return null;
+    const row = this._stmt(`SELECT seq FROM messages
+      WHERE chat_id = ? AND sender = 'assistant' AND meta_json IS NOT NULL AND json_valid(meta_json)
+        AND json_extract(meta_json, '$.question.questionId') = ?
+      ORDER BY seq DESC LIMIT 1`).get(id, questionId);
+    return row ? Number(row.seq) : null;
+  }
+
   // The context builder's tail scan (recall spec §6.1): one page of a chat's
   // messages before beforeSeq, newest first, with only what the tail needs:
   // user and assistant rows with their attachments and, when toolCalls is

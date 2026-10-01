@@ -92,7 +92,7 @@ const { initializeMesh } = require('../mesh');
 const { WorkflowEngine } = require('../workflows/workflow-engine');
 const PlannerExecutor = require('../workflows/planner-executor');
 const { MCPManager, createVaultEnvResolver } = require('../mcp');
-const { createCaseToolHandler } = require('../mcp/case-tools');
+const { createCaseToolHandler, CHAT_CHANNEL } = require('../mcp/case-tools');
 const { BackgroundTaskManager } = require('../tasks/background-task-manager');
 const { createLogger } = require('../logging');
 const { DEFAULT_SETTINGS, mergeSettings } = require('./settings');
@@ -336,7 +336,7 @@ function createCore(deps = {}) {
   const getHistoryBackfill = () => historyBackfill;
   const {
     listChats, getChat, updateChat, createChat, replaceChat, upsertChat, updateChatsWhere, deleteChat,
-    getMessages, appendMessageToChat, truncateChatFrom
+    getMessages, findQuestionMessage, appendMessageToChat, truncateChatFrom
   } = createChatFacade({ historyStore, createId });
   // F5 re-review: a chat a Telegram/Discord bridge created before the
   // origin/channel tagging existed carries neither, and the bridges keep
@@ -2156,7 +2156,7 @@ function createCore(deps = {}) {
         // Management surfaces: the in-app case tool handler the chat's
         // list_questions, get_presence and the other case tools call.
         get caseManagement() { return inAppCaseToolHandler(); },
-        // Management surfaces �3.6: the service's own FleetToolHandler and
+        // Management surfaces §3.6: the service's own FleetToolHandler and
         // this run's chat, for the fleet tools (fleet-chat-tools.js builds
         // the origin from these, never from a tool's parameters); null
         // while the core has no fleet handler (standalone).
@@ -2973,7 +2973,8 @@ function createCore(deps = {}) {
   let contactHost = null;
 
   // Management surfaces (spec 2026-09-30 §3.1): the case tools King Louie's
-  // chat serves, on the in-app channel. One handler per core, so its answer
+  // chat serves, on the in-app-chat channel (never 'in-app', the card's
+  // press). One handler per core, so its answer
   // rate window spans turns; built on first use (caseRuntime is set up
   // further down).
   let inAppCaseTools = null;
@@ -2983,13 +2984,13 @@ function createCore(deps = {}) {
         getRuntime: () => caseRuntime,
         getContact: () => (contactHost ? contactHost.context() : null),
         getExecutorRegistry: () => executorRegistry,
-        channel: 'in-app'
+        channel: CHAT_CHANNEL
       });
     }
     return inAppCaseTools;
   }
 
-  // Management surfaces �3.6: the fleet tools in a service-run chat. Only
+  // Management surfaces §3.6: the fleet tools in a service-run chat. Only
   // startFleetNode (the agent profile) hands a handler in; while one is set
   // the fleet chat tools are registered, and setting null removes them, so
   // a standalone core never lists them.
@@ -3160,7 +3161,7 @@ function createCore(deps = {}) {
       },
       notify: (event, payload) => ui.send(event, payload),
       // Management surfaces §3.4: a new question is posted to the case's chat.
-      chats: { listChats, createChat, appendMessageToChat, getMessages, createId },
+      chats: { listChats, createChat, appendMessageToChat, findQuestionMessage, createId },
       uiToast: deps.uiToastChannel || null,
       // Fleet stage 7 (R50): a service host with the desktop bridge injects a
       // bridge-connected check; otherwise "a UI is attached" (the Electron host).

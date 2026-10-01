@@ -635,12 +635,13 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage5-detours.md`.
   a pressed `detour-similar` question in the case (`mcpAnswerable: false`,
   never charged; posted as a card and sent up the ladder like any question)
   with "Create anyway" and one "Attach to <title>" per similar case (at most
-  three). A press in the app (`case:answerQuestion`) or on the phone is
+  three; when the similar case is the detour's own, it is named as "this
+  case" and "Attach to this case" keeps the work there). A press in the app (`case:answerQuestion`) or on the phone is
   applied at once (`answer-handlers.js` runs the router's reconcile);
   "Create anyway" creates the case with `force` only when the recorded
   answer to that question is that option from `in-app` or `mobile`, so
-  `answer_question` (it is pressed) and a model mapping words to it are
-  refused. `DetourRouter.resolve` and `case:resolveDetour` take no `force`.
+  `answer_question` (it is pressed), an answer recorded on `in-app-chat`
+  and a model mapping words to it are refused. `DetourRouter.resolve` and `case:resolveDetour` take no `force`.
   Answering "new" alone never forces. Tests that create
   several cases sharing a title or an objective pass `force: true`.
 - Detours live in `src/cases/detours/` and `.kl/detours.jsonl`. The owner's
@@ -718,10 +719,11 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   Management surfaces); there is no Questions sidebar and no questions bar
   in the case panel. `in-app` keeps its place in every ladder. Presence is
   a heartbeat from window focus and input (`initPresenceHeartbeat`); away
-  is set with the `set_away` tool (it writes the policy's `away` through
-  `setPolicy`); the contact-policy editor (ladders, quiet hours,
+  is set with the `set_away` tool (the contact host's `setAway` writes the
+  stored policy's `away` field alone, validated as `setPolicy` validates
+  it); the contact-policy editor (ladders, quiet hours,
   breakthrough, digest, channel readiness) is Settings > Contact, and a
-  save there keeps an `away` set meanwhile. The contact policy is data-dir
+  save there re-reads `away` first, so it keeps one set meanwhile. The contact policy is data-dir
   settings in service mode too; only the owner and addresses are
   admin-only.
 - Case code that sends to a channel uses `ContactRouter.sendExternal`, which
@@ -941,7 +943,10 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
   the `mcp-frontdoor` channel. Every tool in a write scope (all but
   `cases:read`) is limited per grant id to 30 calls in a sliding 60 s
   window (`FleetRouter`, `src/frontdoor/router/router.js`), refused with
-  the node's `rate_limited` / `retry_after` shape. `cases:write` is retired
+  the node's `rate_limited` / `retry_after` shape. Only `list_cases` and
+  `list_questions` fan out to every node (registered `fanout: true`);
+  `registerTool` refuses a write tool declared fan-out, and a route that
+  fans out for a tool not declared so is refused. `cases:write` is retired
   and never registered, so listing it in `scopes_enabled` stops the front
   door at startup. The pressed class is refused here as on every channel.
 
@@ -955,18 +960,29 @@ Spec `docs/superpowers/specs/2026-09-30-management-surfaces.md`; ADR
   door loads it), served three ways by the one handler
   (`src/mcp/case-tools.js`): the front door (`mcp-frontdoor`, scopes
   above), `king-louie-service mcp` (`mcp-stdio`), and King Louie's chat
-  tools (`src/tools/builtin/management-tools.js`, channel `in-app`, always
-  loaded, in every chat, acting on any case). Never in a wake-up turn: its
-  `allowedToolNames` name only the case tools and `WAKEUP_BASE_TOOLS`.
+  tools (`src/tools/builtin/management-tools.js`, channel `in-app-chat`,
+  always loaded, in every chat, acting on any case). Never in a wake-up
+  turn: its `allowedToolNames` name only the case tools and
+  `WAKEUP_BASE_TOOLS`. Never in a delegate turn either
+  (`DELEGATE_EXCLUDED_TOOLS`; a front-door delegate reaches cases only
+  through its own case scopes), and a run whose origin names a delegate
+  job is refused by the tools themselves.
+- `in-app-chat` (the model relaying the owner's chat words) is not
+  `in-app` (the card's buttons and the IPC: a press, no model between). No
+  list that takes a recorded channel as proof of a press names it
+  (`APP_ANSWER_CHANNELS` in `contact.js`, `PRESS_CHANNELS` in the detour
+  router), and an ingest review refuses it like `mcp-*`.
 - Read: `list_cases`, `open_case`, `get_orientation`, `list_questions`,
   `list_envelopes`, `list_playbooks`, `get_presence`. Spoken:
   `answer_question`, `set_away`, `create_case`, `revoke_envelope`,
   `cancel_case_job`. A question is spoken or pressed by `answerClass`
-  (same module); the renderer's `chatQuestionClass` is a copy (the
-  renderer cannot require it), so change both together. Pressed questions
+  (same module); the `case:questions` IPC puts it on every record it
+  returns (`answerClass: 'spoken' | 'pressed'`, beside the recorded
+  `answer`), and the renderer draws the card by it, with no copy of the
+  rule. Pressed questions
   (approvals, money, direction, status, failures, ingest reviews,
   `detour-similar`, …) are refused by `answer_question` on every channel,
-  in-app included, and answered only by the card's buttons
+  in the chat (`in-app-chat`) included, and answered only by the card's buttons
   (`case:answerQuestion`, no model between) or the phone.
 - Every spoken tool requires `quote`, the owner's verbatim words. In-app,
   `ToolExecutor` puts its own `ownerTurnText` last in the execute context

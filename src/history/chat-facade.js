@@ -68,6 +68,7 @@ function createChatFacade({ historyStore, createId, now = () => new Date().toISO
     updateChatsWhere: (predicate, patcher) => store.updateChatsWhere(predicate, patcher),
     deleteChat: (id) => store.deleteChat(id),
     getMessages: (chatId, range) => store.getMessages(chatId, range),
+    findQuestionMessage: (chatId, questionId) => store.findQuestionMessage(chatId, questionId),
     appendMessageToChat,
     truncateChatFrom
   };

@@ -235,6 +235,34 @@ describe('DetourRouter.resolve', () => {
     assert.deepStrictEqual([retry.retryOf, retry.similar, retry.newCase.title], ['d-0001', true, 'Book a piano tuner for the living room']);
   });
 
+  it('names this case when the only similar case is the detour’s own, and "Attach to this case" keeps the work here', async () => {
+    const { rt, router, door } = await doorAndPhone();
+    const p = await router.propose(door.id, { summary: 'Three written quotes for the rear door', reason: 'Owner asked for it', source: 'detour-tool', blocks: true });
+    const newOpt = rt.questions(door.id).get(p.questionId).options.find((o) => o.id === 'new');
+    assert.ok(newOpt, 'the routing question offers a new case');
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
+    const r = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
+    assert.deepStrictEqual([r.ok, r.code], [false, 'SIMILAR_CASES']);
+    const q = rt.questions(door.id).get(r.retry.questionId);
+    assert.strictEqual(q.text, 'A similar case is open: this case ("Rear door quotes"). Create a new case "Three written quotes for the rear door" anyway?');
+    assert.deepStrictEqual(q.options, [{ id: 'create-anyway', label: 'Create anyway' }, { id: 'attach-1', label: 'Attach to this case' }]);
+    assert.deepStrictEqual(q.payload.targets, { 'create-anyway': null, 'attach-1': door.id });
+    const before = rt.listCases().length;
+    const out = await rt.answerQuestion(door.id, r.retry.questionId, { channel: 'in-app', optionId: 'attach-1' });
+    assert.deepStrictEqual([out.effect.applied, out.effect.status], ['detour', 'attached']);
+    assert.deepStrictEqual(statuses(door), [['d-0001', 'superseded'], ['d-0002', 'attached']]);
+    assert.deepStrictEqual(rt.getCase(door.id).related || [], [], 'no relation to itself, and the pending blocker is gone');
+    assert.strictEqual(rt.listCases().length, before);
+  });
+
+  it('never words the similar-case question with an empty list when no match is left to name', () => {
+    const w = { rt: { store: { get: () => null } } };
+    const { DetourRouter } = require('../src/cases/detours/router');
+    const record = DetourRouter.prototype._similarQuestion.call({ runtime: w.rt }, { id: 'c-1' }, 'd-0002', { blocks: false, candidates: [], newCase: { title: 'Piano tuner' } });
+    assert.strictEqual(record.text, 'A similar case is open. Create a new case "Piano tuner" anyway?');
+    assert.deepStrictEqual(record.options, [{ id: 'create-anyway', label: 'Create anyway' }]);
+  });
+
   it('caps the attach options of the similar-case question at three', async () => {
     const { rt, router, door } = await doorAndPhone();
     const p = await router.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand' });
@@ -260,6 +288,18 @@ describe('DetourRouter.resolve', () => {
     assert.deepStrictEqual(rt.getCase(tuner.id).related || [], []);
     const again = await rt.detours.resolve(door.id, 'd-0001', { optionId: 'new', by: 'in-app' });
     assert.deepStrictEqual([again.ok, again.existing], [true, true], 'the superseded original cannot create a second case');
+  });
+
+  it('a recorded "Create anyway" answer on in-app-chat (the model relaying the chat) is not a press', async () => {
+    const { rt, router, door, r } = await similarRefusal();
+    const before = rt.listCases().length;
+    const out = await rt.answerQuestion(door.id, r.retry.questionId, { channel: 'in-app-chat', optionId: 'create-anyway', quote: 'create it anyway' });
+    assert.strictEqual(out.question.answer.channel, 'in-app-chat');
+    assert.notStrictEqual(out.effect && out.effect.status, 'created');
+    const again = await router.resolve(door.id, 'd-0002', { optionId: 'create-anyway', by: 'in-app-chat' });
+    assert.strictEqual(again.ok, false);
+    assert.match(again.error, /Create anyway/);
+    assert.strictEqual(rt.listCases().length, before);
   });
 
   it('pressing "Attach to" on the phone attaches to the similar case and drops both pending blockers', async () => {

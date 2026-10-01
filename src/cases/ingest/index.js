@@ -1580,11 +1580,12 @@ class IngestService {
   async onReviewAnswered(caseId, question) {
     const refuse = (reason) => ({ applied: false, reason });
     if (!isObj(question) || !isObj(question.payload) || question.payload.type !== 'ingest:review') return refuse('Not a document review question.');
-    // No MCP channel ever reviews or accepts. The MCP handler refuses review
-    // questions up front, but the record it checked can be re-typed before
-    // the locked re-read, so the effect itself refuses too.
+    // No MCP channel, and no model relaying the chat (in-app-chat), ever
+    // reviews or accepts. The case tool handler refuses review questions up
+    // front, but the record it checked can be re-typed before the locked
+    // re-read, so the effect itself refuses too.
     const channel = isObj(question.answer) ? question.answer.channel : null;
-    if (typeof channel !== 'string' || channel.startsWith('mcp-')) return refuse('Document reviews are not answered over MCP; review the proposals in the panel.');
+    if (typeof channel !== 'string' || channel.startsWith('mcp-') || channel === 'in-app-chat') return refuse('Document reviews are not answered over MCP; review the proposals in the panel.');
     if (typeof question.id !== 'string' || question.id.length > ID_CAP || !QUESTION_ID.test(question.id)) return refuse('The question has no valid id.');
     const docId = question.payload.docId;
     if (typeof docId !== 'string' || !store.DOC_ID.test(docId)) return refuse('The question names no valid document.');

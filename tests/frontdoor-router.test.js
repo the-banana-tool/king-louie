@@ -192,7 +192,7 @@ describe('FleetRouter', () => {
     const t = await setup();
     t.gpu.service.registerMethod('cases.list_cases', async () => [{ id: 'lakeside-lot' }], { scope: 'cases:read' });
     t.gpu.service.registerMethod('cases.read_case', async (params) => ({ id: params.case }), { scope: 'cases:read' });
-    t.router.registerTool({ name: 'list_cases', description: 'List cases', inputSchema: { type: 'object', properties: {} } }, { scope: 'cases:read', route: () => ({ fanout: true }) });
+    t.router.registerTool({ name: 'list_cases', description: 'List cases', inputSchema: { type: 'object', properties: {} } }, { scope: 'cases:read', route: () => ({ fanout: true }), fanout: true });
     t.router.registerTool({ name: 'read_case', description: 'Read a case', inputSchema: { type: 'object', properties: { machine: { type: 'string' }, case: { type: 'string' } }, required: ['machine', 'case'] } },
       { scope: 'cases:read', route: (args) => ({ machine: args.machine }) });
     assert.ok(t.router.toolDefinitions().some((d) => d.name === 'list_cases'));
@@ -203,6 +203,18 @@ describe('FleetRouter', () => {
     assert.equal((await t.call('read_case', { machine: 'gpu-box', case: 'x' }, ['cases:read;machines=web-01'])).error.code, 'unknown_machine');
     assert.deepEqual(t.hub.calls.map((c) => c.method), ['cases.list_cases', 'cases.read_case']);
     assert.equal(t.hub.calls[1].params.case, 'lakeside-lot');
+  });
+
+  it('registerTool refuses a write tool declared fan-out; a route that fans out for a tool not declared so is refused at call', async () => {
+    const t = await setup();
+    const def = (name) => ({ name, description: name, inputSchema: { type: 'object', properties: {} } });
+    assert.throws(() => t.router.registerTool(def('set_everything'), { scope: 'cases:answer', route: () => ({ fanout: true }), perGrantLimit: true, fanout: true }), /write tool .* cannot fan out/);
+    assert.ok(!t.router.toolDefinitions().some((d) => d.name === 'set_everything'));
+    t.gpu.service.registerMethod('cases.sneaky', async () => [{ id: 'x' }], { scope: 'cases:answer' });
+    t.router.registerTool(def('sneaky'), { scope: 'cases:answer', route: () => ({ fanout: true }), perGrantLimit: true });
+    const r = await t.call('sneaky', {}, ['cases:answer']);
+    assert.equal(r.error.code, 'invalid_params');
+    assert.deepEqual(t.hub.calls.filter((c) => c.method === 'cases.sneaky'), []);
   });
 
   it("a grant pinned to one machine never lists, calls, reads or watches another (machineMatches)", async () => {
@@ -216,7 +228,7 @@ describe('FleetRouter', () => {
     await t.call('run_runbook', { machine: 'gpu-box', runbook: 'site.status' });
     t.hub.calls.length = 0;
     t.gpu.service.registerMethod('cases.list_cases', async () => [{ id: 'lakeside-lot' }], { scope: 'cases:read' });
-    t.router.registerTool({ name: 'list_cases', description: 'List cases', inputSchema: { type: 'object', properties: {} } }, { scope: 'cases:read', route: () => ({ fanout: true }) });
+    t.router.registerTool({ name: 'list_cases', description: 'List cases', inputSchema: { type: 'object', properties: {} } }, { scope: 'cases:read', route: () => ({ fanout: true }), fanout: true });
     assert.deepEqual((await as('list_machines', {})).map((m) => m.name), ['web-01']);
     for (const [name, args] of [
       ['describe_machine', { machine: 'gpu-box' }], ['get_state', { machine: 'gpu-box' }],

@@ -25,8 +25,10 @@ function pickCaseChat(chats, caseId) {
   return best;
 }
 
+// One metadata lookup in the history store (findQuestionMessage), never a
+// read of the chat's messages.
 function chatHasQuestion(chats, chatId, questionId) {
-  return chats.getMessages(chatId).some((m) => m?.question?.questionId === questionId);
+  return chats.findQuestionMessage(chatId, questionId) !== null;
 }
 
 function questionMessageText(meta, rec) {

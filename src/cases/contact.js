@@ -14,7 +14,9 @@ const { createLogger } = require('../logging');
 // Ruling T5-m22 (owner: "only the app or my paired phone"): the only
 // channels that may answer an approval or an app-only question. An
 // allowlist, so a channel added later is refused until it is named here.
-// `mobile` is F3's device-signed phone channel.
+// `mobile` is F3's device-signed phone channel. `in-app-chat` (the model
+// relaying the owner's chat words, src/mcp/case-tools.js) is not a press and
+// is never named here.
 const APP_ANSWER_CHANNELS = Object.freeze(['in-app', 'mobile']);
 // Channels whose adapter binds a reply to one question (meta.bound): only the
 // phone app, whose answers are device-signed over token, case and question.

@@ -2443,23 +2443,6 @@ function peekCasePanelMessage(caseId) {
    the case says its questions changed, whichever surface answered. Every
    question string goes through textContent. --- */
 
-// Mirrors answerClass in src/cases/mcp-tool-definitions.js (the renderer
-// cannot require it): pressed kinds take buttons in the card, spoken ones
-// a reply in the chat.
-const CHAT_QUESTION_PRESSED_TYPES = new Set([
-  'envelope', 'envelope-delta', 'plan', 'budget-grant', 'budget-daily', 'direction', 'commit-failed',
-  'wakeups-failing', 'gating-pending', 'owner-task', 'conflict', 'ingest:review', 'detour-similar'
-]);
-function chatQuestionClass(q) {
-  const payload = q?.payload && typeof q.payload === 'object' ? q.payload : {};
-  const type = payload.type ?? 'ask';
-  if (q?.kind === 'approval') return 'pressed';
-  if (payload.mcpAnswerable === false || payload.failure) return 'pressed';
-  if (CHAT_QUESTION_PRESSED_TYPES.has(type)) return 'pressed';
-  if (q?.kind === 'briefing' && type !== 'ask') return 'pressed';
-  return 'spoken';
-}
-
 // A "no effect" note from an answer (a rejected grant, say) outlives the
 // redraw the runtime's own case:changed triggers for the same answer.
 const chatQuestionNotes = new Map();
@@ -2478,6 +2461,9 @@ function chatQuestionOutcome(q) {
   return null;
 }
 
+// Cards created while a chat renders are loaded together, after the
+// render: one case:questions call per case, not one per card.
+const pendingChatQuestionCards = new Set();
 function createChatQuestionCard(ref) {
   const card = document.createElement('div');
   card.className = 'case-question chat-question-card';
@@ -2487,23 +2473,51 @@ function createChatQuestionCard(ref) {
   loading.className = 'case-question-head';
   loading.textContent = `Question ${ref.questionId}`;
   card.appendChild(loading);
-  refreshChatQuestionCard(card);
+  if (!pendingChatQuestionCards.size) {
+    queueMicrotask(() => {
+      const cards = [...pendingChatQuestionCards];
+      pendingChatQuestionCards.clear();
+      loadChatQuestionCards(cards);
+    });
+  }
+  pendingChatQuestionCards.add(card);
   return card;
 }
 
-async function refreshChatQuestionCard(card) {
-  const { caseId, questionId } = card.dataset;
-  let q = null;
-  let error = null;
-  try {
-    const r = await window.electron.cases.questions({ caseId, questionIds: [questionId] });
-    if (!r?.ok) error = r?.error || 'The question could not be read.';
-    else q = (r.questions || [])[0] || null;
-  } catch (err) {
-    error = err.message;
+// The case:questions handler takes at most 50 ids per call.
+const CHAT_QUESTION_BATCH = 50;
+
+// Fills each card from the question store: one call per case (chunked at
+// 50 ids), each record carrying its answerClass.
+async function loadChatQuestionCards(cards) {
+  const byCase = new Map();
+  for (const card of cards) {
+    const { caseId } = card.dataset;
+    if (!byCase.has(caseId)) byCase.set(caseId, []);
+    byCase.get(caseId).push(card);
   }
-  if (!q && !error) error = `Question ${questionId} is no longer in its case.`;
-  fillChatQuestionCard(card, q, error);
+  await Promise.all([...byCase].map(async ([caseId, list]) => {
+    const ids = [...new Set(list.map((card) => card.dataset.questionId))];
+    const found = new Map();
+    let error = null;
+    for (let i = 0; i < ids.length && !error; i += CHAT_QUESTION_BATCH) {
+      try {
+        const r = await window.electron.cases.questions({ caseId, questionIds: ids.slice(i, i + CHAT_QUESTION_BATCH) });
+        if (!r?.ok) error = r?.error || 'The question could not be read.';
+        else (r.questions || []).forEach((q) => found.set(q.id, q));
+      } catch (err) {
+        error = err.message;
+      }
+    }
+    for (const card of list) {
+      const q = found.get(card.dataset.questionId) || null;
+      fillChatQuestionCard(card, q, q ? null : (error || `Question ${card.dataset.questionId} is no longer in its case.`));
+    }
+  }));
+}
+
+function refreshChatQuestionCard(card) {
+  return loadChatQuestionCards([card]);
 }
 
 function fillChatQuestionCard(card, q, error) {
@@ -2520,7 +2534,7 @@ function fillChatQuestionCard(card, q, error) {
     line('case-question-error', error);
     return;
   }
-  const pressed = chatQuestionClass(q) === 'pressed';
+  const pressed = q.answerClass === 'pressed';
   card.className = `case-question case-question-${q.urgency} chat-question-card ${pressed ? 'is-pressed' : 'is-spoken'}`;
   const label = q.kind === 'briefing' ? 'Briefing' : (q.kind === 'approval' ? 'Approval' : 'Question');
   line('case-question-head', `${q.caseTitle ? `${q.caseTitle} · ` : ''}${label} ${q.id}`);
@@ -2602,11 +2616,12 @@ function fillChatQuestionCard(card, q, error) {
 
 function refreshChatQuestionCards({ caseId, questionId } = {}) {
   if (!dom.chatMessages) return;
-  dom.chatMessages.querySelectorAll('.chat-question-card').forEach((card) => {
-    if (caseId && card.dataset.caseId !== caseId) return;
-    if (questionId && card.dataset.questionId !== questionId) return;
-    refreshChatQuestionCard(card);
+  const cards = [...dom.chatMessages.querySelectorAll('.chat-question-card')].filter((card) => {
+    if (caseId && card.dataset.caseId !== caseId) return false;
+    if (questionId && card.dataset.questionId !== questionId) return false;
+    return true;
   });
+  if (cards.length) loadChatQuestionCards(cards);
 }
 
 // The chat list alone: a question may have created a chat or moved one up.

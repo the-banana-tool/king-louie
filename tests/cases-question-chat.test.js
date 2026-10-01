@@ -8,7 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { CaseRuntime } = require('../src/cases');
-const { pickCaseChat, questionMessageText } = require('../src/cases/question-chat');
+const { pickCaseChat, questionMessageText, chatHasQuestion } = require('../src/cases/question-chat');
 const { answerClass } = require('../src/cases/mcp-tool-definitions');
 const { DesktopChannelPlugin } = require('../src/channels/channel-plugin');
 const { historyContext } = require('./helpers/history-context');
@@ -74,7 +74,7 @@ describe('CaseRuntime posts each new question to the case chat', () => {
     const host = { notify: (e, p) => events.push([e, p]), interactive: () => true };
     if (ctx) {
       let n = 0;
-      host.chats = { listChats: ctx.listChats, createChat: ctx.createChat, appendMessageToChat: ctx.appendMessageToChat, getMessages: ctx.getMessages, createId: () => `new-${++n}` };
+      host.chats = { listChats: ctx.listChats, createChat: ctx.createChat, appendMessageToChat: ctx.appendMessageToChat, findQuestionMessage: ctx.findQuestionMessage, createId: () => `new-${++n}` };
     }
     const rt = new CaseRuntime({ root, now: () => T0, getSettings: () => ({ cases: { timeZone: 'UTC' } }), host });
     return { rt, events, ctx };
@@ -130,6 +130,25 @@ describe('CaseRuntime posts each new question to the case chat', () => {
     // Asked a third time, its card is there: nothing more.
     rt.createQuestion(info.id, ask);
     assert.strictEqual(questionMessages(ctx, 'c').length, 1);
+  });
+
+  it('checks for the card with one metadata lookup, never reading the chat’s messages', () => {
+    const ctx = historyContext([]);
+    ctx.createChat({ id: 'c', title: 'C', createdAt: T0.toISOString(), updatedAt: T0.toISOString(), messages: [] });
+    ctx.appendMessageToChat('c', 'user', 'hi', {}, { returnChat: false });
+    ctx.appendMessageToChat('c', 'assistant', 'q-0001 text', { question: { caseId: 'k', questionId: 'q-0001' } }, { returnChat: false });
+    ctx.appendMessageToChat('c', 'assistant', 'plain', { note: 'x' }, { returnChat: false });
+    assert.strictEqual(ctx.findQuestionMessage('c', 'q-0001'), 2);
+    assert.strictEqual(ctx.findQuestionMessage('c', 'q-0002'), null);
+    assert.strictEqual(ctx.findQuestionMessage('other', 'q-0001'), null);
+    const store = ctx.getHistoryStore();
+    const read = store.getMessages;
+    store.getMessages = () => assert.fail('the lookup must not read messages');
+    try {
+      assert.strictEqual(chatHasQuestion(ctx, 'c', 'q-0001'), true);
+    } finally {
+      store.getMessages = read;
+    }
   });
 
   it('creates a chat with the case title and caseId when the case has none', async () => {

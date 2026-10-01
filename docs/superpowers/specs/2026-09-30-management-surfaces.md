@@ -65,7 +65,8 @@ without the agent core). Three registrations read the same definitions:
    `mcp-stdio`, as the four case tools are today.
 3. **King Louie's chat** (`src/tools/builtin/`): the same names and schemas, always loaded like
    `SearchHistory`, in every chat, acting on any case (an owner act is not confined to the chat's own
-   case), channel `in-app`. **Never loaded in an unattended turn**: a wake-up's judge loop stays confined to
+   case), channel `in-app-chat`. **Never loaded in an unattended turn** (nor in a fleet delegate turn,
+   whose client reaches cases only through its own scopes): a wake-up's judge loop stays confined to
    the case tools plus Read, Glob and Grep, so a case can never answer its own question, and with no owner
    message there is no quote to verify anyway.
 
@@ -106,9 +107,10 @@ A grant is the owner. Every spoken tool takes a required `quote`: the owner's ow
 - **Over the front door and `mcp-stdio`** there is no owner text; the quote is a recorded claim. It is
   still required: a client that cannot produce the owner's words is not relaying an owner.
 - **The fact** an answer writes is `provenance: 'user'` on every channel, and counts wherever a `user`
-  fact counts — including the outbound gate's rule 3 — with `channel` recorded (`in-app`,
+  fact counts — including the outbound gate's rule 3 — with `channel` recorded (`in-app-chat`,
   `mcp-frontdoor`, `mcp-stdio`, or a contact channel) so an audit can tell a host-checked quote from a
-  claimed one. This is the same standing a Telegram DM from the owner's id already has; an OAuth grant is
+  claimed one. `in-app-chat` is the model relaying the owner's chat words; it is not `in-app`, the card's
+  buttons and the IPC (§3.4), and no list that takes a recorded channel as proof of a press names it. This is the same standing a Telegram DM from the owner's id already has; an OAuth grant is
   stronger.
 - **Options.** For a question with options, the quote proves the words and the model picks the option, so
   the host also requires the quote to name the chosen option (owner decision, 2026-09-30). An option is
@@ -198,7 +200,7 @@ still needs the phone.
   tests extend).
 - Each spoken tool: refused without `quote`; in-app refused when the quote is not in `ownerTurnText`;
   option answers refused when the option is not in the quote; the written fact is `user` with the channel.
-- Pressed kinds refused on `in-app`, `mcp-stdio` and `mcp-frontdoor` with the "use the card / the phone"
+- Pressed kinds refused on `in-app-chat`, `mcp-stdio` and `mcp-frontdoor` with the "use the card / the phone"
   message; the card's button path still answers them.
 - Unattended turns: the management tools are not in the tool list.
 - Front door: `cases:answer` and `cases:manage` register; listing `cases:write` stops startup as before;

@@ -5,8 +5,14 @@
 // them to its own local MCP clients through its FleetToolHandler (stdio, and `king-louie-service
 // mcp` through the courier, R24) and, from Task 16, to front-door clients
 // through NodeFleetService's cases.<tool> methods. King Louie's own chat
-// serves the same tools on the in-app channel (management surfaces spec
+// serves the same tools on the in-app-chat channel (management surfaces spec
 // §3.1; src/tools/builtin/management-tools.js).
+//
+// `in-app-chat` is the model relaying the owner's words from the chat. It is
+// not `in-app`, the id of the card's buttons and the IPC (a press, with no
+// model between): no list that treats a recorded channel as proof of a
+// press (APP_ANSWER_CHANNELS in contact.js, PRESS_CHANNELS in the detour
+// router) names it.
 //
 // Every refusal is a ToolError with a fixed sentence per code: no client
 // string, case text or runtime error message is echoed back (details go to
@@ -19,7 +25,8 @@ const { JobStore, isOpen: jobIsOpen } = require('../cases/executors/job-store');
 const { CASE_MCP_TOOLS, STATUS_CHANGING, NEVER_OVER_MCP, untrusted, answerClass, CASE_TOOL_SCOPE } = require('../cases/mcp-tool-definitions');
 const { fold, wordsInText, ownerQuoteInTurn } = require('../tools/owner-quote');
 
-const CHANNELS = new Set(['mcp-stdio', 'mcp-frontdoor', 'in-app']);
+const CHAT_CHANNEL = 'in-app-chat';
+const CHANNELS = new Set(['mcp-stdio', 'mcp-frontdoor', CHAT_CHANNEL]);
 const RATE_WINDOW_MS = 60 * 1000;
 // Management surfaces spec §3.1-3.2 and part 1's Global Constraints.
 const PRESSED_MESSAGE = "Answer this with the buttons on the question in the case's chat, or on your phone.";
@@ -280,12 +287,12 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
   }
 
   // Every spoken tool's quote rule (spec §3.2): required and non-blank on
-  // every channel; on the in-app channel it must be in the owner's own
+  // every channel; on the in-app-chat channel it must be in the owner's own
   // message this turn (ownerTurnText, from the executor only); over MCP it
   // is recorded, not checked.
   function checkQuote(quote, ownerTurnText) {
     if (!fold(quote)) throw fail('invalid_params', '"quote" must hold the owner\'s words');
-    if (channel === 'in-app') {
+    if (channel === CHAT_CHANNEL) {
       if (typeof ownerTurnText !== 'string' || !fold(ownerTurnText)) throw fail('not_owner', OWNER_ONLY_MESSAGE);
       if (!ownerQuoteInTurn(quote, ownerTurnText)) throw fail('quote_not_found', 'the quote is not in the owner\'s message this turn; quote their words exactly');
     }
@@ -417,10 +424,12 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     return { job: args.job, state: r.job && typeof r.job.state === 'string' ? r.job.state : 'cancelled' };
   }
 
-  // set_away: the away field the app's away controls wrote, through the
-  // same validation (contact's setPolicy, validatePolicy), the rest of the
-  // policy kept. The policy is data-dir settings on the desktop and in
-  // service mode alike (only the owner and addresses are admin-only).
+  // set_away: the away field alone (contact's setAway), through the same
+  // validation as setPolicy (validatePolicy). The rest of the stored policy
+  // is never read back and rewritten, so no default is frozen into the
+  // settings and a Settings > Contact save meanwhile is not undone. The
+  // policy is data-dir settings on the desktop and in service mode alike
+  // (only the owner and addresses are admin-only).
   async function setAway(args, ownerTurnText) {
     checkQuote(args.quote, ownerTurnText);
     const off = args.mode === 'off';
@@ -432,25 +441,23 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
       if (t <= now()) throw fail('invalid_params', '"until" must be in the future');
     }
     const c = contact();
-    if (!c || typeof c.getPolicy !== 'function' || typeof c.setPolicy !== 'function') throw fail('contact_unavailable', 'contact is not available on this node');
-    const current = c.getPolicy();
-    const policy = isObj(current) && isObj(current.policy) ? current.policy : {};
+    if (!c || typeof c.setAway !== 'function') throw fail('contact_unavailable', 'contact is not available on this node');
     const releaseSlot = takeRateSlot();
-    const r = c.setPolicy({ ...policy, away: off ? null : { mode: args.mode, until: args.until } });
+    const r = c.setAway(off ? null : { mode: args.mode, until: args.until });
     if (!r || !r.ok) {
       releaseSlot();
       log.warn(`${channel} set_away refused by the contact policy: ${r && r.error}`);
       throw fail('invalid_params', 'the contact policy refused that away setting');
     }
-    const away = isObj(r.policy) && isObj(r.policy.away) ? { mode: r.policy.away.mode, until: r.policy.away.until } : null;
+    const away = isObj(r.away) ? { mode: r.away.mode, until: r.away.until } : null;
     log.info(`${channel} set away ${away ? `${away.mode} until ${away.until}` : 'off'}`);
     auditEntry('cases.set_away', { mode: args.mode, until: away ? away.until : null }, 'set_away');
     return { away };
   }
 
   // The spoken class only (answerClass): a pressed question is refused on
-  // every channel, in-app included. `quote` is the owner's words: on the
-  // in-app channel it must be in the owner's own message this turn
+  // every channel, in-app-chat included. `quote` is the owner's words: on the
+  // in-app-chat channel it must be in the owner's own message this turn
   // (ownerTurnText, from the executor only); over MCP it is recorded, not
   // checked. An option must be named in the quote; free text is the quote,
   // or words from it. A spoken briefing is acknowledged.
@@ -523,7 +530,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
 
   // `ownerTurnText` is the executor's own field (the chat's in-app tools
   // pass it from their execute context); the MCP surfaces pass none, and it
-  // is read only on the in-app channel.
+  // is read only on the in-app-chat channel.
   async function call(name, args = {}, { ownerTurnText = null } = {}) {
     const tool = byName.get(name);
     if (!tool) throw fail('unknown_tool', 'no such case tool');
@@ -595,6 +602,7 @@ module.exports = {
   STATUS_CHANGING,
   NEVER_OVER_MCP,
   CaseToolError,
+  CHAT_CHANNEL,
   createCaseToolHandler,
   untrusted,
   answerClass,

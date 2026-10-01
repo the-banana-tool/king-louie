@@ -197,6 +197,20 @@ describe('case IPC, stage 2', () => {
     assert.strictEqual((await call(IPC.CASE_QUESTIONS, { caseId: c.id, questionIds: Array.from({ length: 50 }, () => q1.id) })).ok, true);
   });
 
+  it('gives each record its answerClass, by id and in the open list, beside the recorded answer', async () => {
+    const { runtime, call } = setup2();
+    const c = await activeCase(runtime);
+    const spoken = runtime.createQuestion(c.id, { kind: 'question', text: 'Is the well shared?', urgency: 'normal' });
+    const pressed = runtime.createQuestion(c.id, { kind: 'question', text: 'Raise the usd budget?', urgency: 'normal', payload: { type: 'budget-grant', mcpAnswerable: false } }, { charge: false });
+    const byId = await call(IPC.CASE_QUESTIONS, { caseId: c.id, questionIds: [spoken.id, pressed.id] });
+    assert.deepStrictEqual(byId.questions.map((q) => [q.id, q.answerClass]), [[spoken.id, 'spoken'], [pressed.id, 'pressed']]);
+    const open = await call(IPC.CASE_QUESTIONS, { caseId: c.id });
+    assert.deepStrictEqual(open.questions.map((q) => [q.id, q.answerClass]), [[spoken.id, 'spoken'], [pressed.id, 'pressed']]);
+    await call(IPC.CASE_ANSWER_QUESTION, { caseId: c.id, questionId: spoken.id, text: 'Yes' });
+    const answered = (await call(IPC.CASE_QUESTIONS, { caseId: c.id, questionIds: [spoken.id] })).questions[0];
+    assert.deepStrictEqual([answered.answerClass, answered.answer.channel], ['spoken', 'in-app']);
+  });
+
   it('acknowledges a briefing', async () => {
     const { runtime, call } = setup2();
     const c = await activeCase(runtime);

@@ -16,7 +16,8 @@ const CLOSED = Object.freeze(['done', 'abandoned']);
 // The similar-case follow-up (owner decision, 2026-09-30): a pressed
 // question whose "Create anyway" is the only way a detour's new case skips
 // the similar-case refusal. Answered only by a button in the app or on the
-// paired phone (APP_ANSWER_CHANNELS in contact.js).
+// paired phone (APP_ANSWER_CHANNELS in contact.js). A recorded
+// `in-app-chat` answer (the model relaying the chat) is not a press.
 const SIMILAR_TYPE = 'detour-similar';
 const CREATE_ANYWAY = 'create-anyway';
 const SIMILAR_MAX = 3;
@@ -270,13 +271,15 @@ class DetourRouter {
   // The retry after a new case met the similar-case refusal: the similar
   // open cases to attach to (at most SIMILAR_MAX) and the new case as it was
   // tried, behind a pressed question. Never charged: it follows the owner's
-  // own answer.
+  // own answer. The detour's own case can be the similar one (the new case
+  // repeats this case's title or objective): it is offered as "Attach to
+  // this case", which keeps the work here.
   _proposeSimilar(meta, log, rows, { summary, source, serves, blocks, reason, turn, retryOf, caseIds, newCase }) {
     const rt = this.runtime;
     const candidates = [];
     for (const caseId of caseIds) {
       const m = rt.store.get(caseId);
-      if (!m || m.id === meta.id || !OPEN_CASE_STATUSES.includes(m.status) || candidates.some((c) => c.caseId === m.id)) continue;
+      if (!m || !OPEN_CASE_STATUSES.includes(m.status) || candidates.some((c) => c.caseId === m.id)) continue;
       if (candidates.length >= SIMILAR_MAX) break;
       candidates.push({ caseId: m.id, score: 0, optionId: `attach-${candidates.length + 1}` });
     }
@@ -323,11 +326,16 @@ class DetourRouter {
     for (const c of candidates) {
       const m = rt.store.get(c.caseId);
       const title = label(m ? m.title : c.caseId);
-      titles.push(`"${title}"`);
-      options.push({ id: c.optionId, label: `Attach to "${title}"` });
+      const self = c.caseId === meta.id;
+      titles.push(self ? `this case ("${title}")` : `"${title}"`);
+      options.push({ id: c.optionId, label: self ? 'Attach to this case' : `Attach to "${title}"` });
       targets[c.optionId] = c.caseId;
     }
-    const open = titles.length === 1 ? `A similar case is open: ${titles[0]}` : `Similar cases are open: ${titles.join(', ')}`;
+    // No open case left to name (every match closed or gone since): the
+    // text still says why the owner is asked.
+    const open = titles.length === 0
+      ? 'A similar case is open'
+      : (titles.length === 1 ? `A similar case is open: ${titles[0]}` : `Similar cases are open: ${titles.join(', ')}`);
     return {
       kind: 'question',
       urgency: blocks ? 'high' : 'normal',
@@ -532,6 +540,9 @@ class DetourRouter {
       if (!target || !OPEN_CASE_STATUSES.includes(target.status)) {
         return retry(`Case "${target ? target.title : cand.caseId}" is ${target ? target.status : 'gone'}; pick another option.`);
       }
+      // "Attach to this case" (the similar-case question named the detour's
+      // own case): the work stays here; no relation to itself.
+      if (target.id === meta.id) return finish('attached', meta.id);
       try {
         await rt.systemAction(target.id, `detour ${detourId} from ${meta.slug}`, async () => {
           rt.addRelation(target.id, { id: meta.id, relation: p.blocks ? 'blocks' : 'related', note: p.summary, detour: detourId });

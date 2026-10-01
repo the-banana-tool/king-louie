@@ -1,7 +1,8 @@
 // src/tools/builtin/management-tools.js
 // The management tools in King Louie's own chat (management surfaces spec
 // §3.1): the case tools MCP clients get, under the same names, served by the
-// same handler (src/mcp/case-tools.js) on the in-app channel. Always loaded,
+// same handler (src/mcp/case-tools.js) on the in-app-chat channel (not
+// 'in-app', which is the card's button press). Always loaded,
 // in every chat, case chat or not; never in a wake-up turn, whose
 // allowedToolNames name only the case tools and WAKEUP_BASE_TOOLS.
 //
@@ -15,6 +16,7 @@ const { Tool } = require('../tool-schema');
 const { CASE_MCP_TOOLS } = require('../../cases/mcp-tool-definitions');
 
 const UNAVAILABLE = 'Cases are not available here.';
+const DELEGATE_REFUSED = 'A delegate session reaches the cases through its own client, not through these tools.';
 
 // The chat's copy of an MCP input schema: the keywords every provider
 // accepts (Gemini refuses additionalProperties and the string limits). The
@@ -37,6 +39,11 @@ function managementTool(def) {
     execute: async (params, context) => {
       const handler = context && context.caseManagement;
       if (!handler || !handler.available()) return { ok: false, error: UNAVAILABLE };
+      // A delegate turn's run origin names its job; it (and its children)
+      // never act on the cases as the owner's chat. Delegate turns do not
+      // get these tools at all (DELEGATE_EXCLUDED_TOOLS); this is the
+      // second line should one ever reach them.
+      if (context.origin && context.origin.job_id) return { ok: false, error: DELEGATE_REFUSED };
       try {
         const ownerTurnText = typeof context.ownerTurnText === 'string' ? context.ownerTurnText : null;
         return { ok: true, result: await handler.call(def.name, params || {}, { ownerTurnText }) };
@@ -60,4 +67,4 @@ function registerManagementTools(registry) {
   for (const tool of MANAGEMENT_TOOLS) registry.register(tool);
 }
 
-module.exports = { registerManagementTools, MANAGEMENT_TOOLS, MANAGEMENT_TOOL_NAMES, chatSchema, UNAVAILABLE };
+module.exports = { registerManagementTools, MANAGEMENT_TOOLS, MANAGEMENT_TOOL_NAMES, chatSchema, UNAVAILABLE, DELEGATE_REFUSED };

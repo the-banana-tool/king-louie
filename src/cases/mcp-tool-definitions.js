@@ -237,6 +237,9 @@ function frontDoorDef(tool) {
 // than fanned out to nodes that would each refuse it and be listed as
 // unreachable. The router bounds each node's reply at max_bytes but not the
 // combined fan-out; accepted under ruling T16-Q1 (rows are short summaries).
+// The read tools whose route may fan out (frontDoorRoute); the router
+// refuses a write tool registered as fan-out.
+const FANOUT_TOOLS = Object.freeze(['list_cases', 'list_questions']);
 function frontDoorRoute(name) {
   if (name === 'list_cases') {
     return (args) => {
@@ -266,7 +269,9 @@ function registerFrontDoorCaseTools({ scopeRegistry, router }) {
   for (const tool of CASE_MCP_TOOLS) {
     if (!Object.hasOwn(CASE_TOOL_SCOPE, tool.name)) continue;
     const scope = CASE_TOOL_SCOPE[tool.name];
-    router.registerTool(frontDoorDef(tool), { scope, route: frontDoorRoute(tool.name), perGrantLimit: CASE_WRITE_SCOPES.includes(scope) });
+    router.registerTool(frontDoorDef(tool), {
+      scope, route: frontDoorRoute(tool.name), perGrantLimit: CASE_WRITE_SCOPES.includes(scope), fanout: FANOUT_TOOLS.includes(tool.name)
+    });
   }
 }
 

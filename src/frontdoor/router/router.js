@@ -183,11 +183,15 @@ class FleetRouter extends EventEmitter {
 
   // C7 (program §4.19): route(args, ctx) → { machine } | { fanout: true }.
   // perGrantLimit: the tool's calls count against its grant's write window.
-  registerTool(def, { scope, route, perGrantLimit = false } = {}) {
+  // fanout: the tool may route to every reachable node; only a read tool
+  // may, so a write tool (perGrantLimit) declared fan-out is refused here,
+  // and a route that fans out for a tool not declared so is refused at call.
+  registerTool(def, { scope, route, perGrantLimit = false, fanout = false } = {}) {
     if (!def || typeof def.name !== 'string') throw new TypeError('registerTool needs a tool definition with a name');
     if (Object.hasOwn(METHODS, def.name) || def.name === 'list_machines' || this.extraTools.has(def.name)) throw new Error(`tool ${def.name} is already registered`);
     if (typeof scope !== 'string' || typeof route !== 'function') throw new TypeError(`tool ${def.name}: registerTool needs { scope, route }`);
-    this.extraTools.set(def.name, { def, scope, route, perGrantLimit: perGrantLimit === true });
+    if (perGrantLimit === true && fanout === true) throw new Error(`tool ${def.name}: a write tool (perGrantLimit) cannot fan out`);
+    this.extraTools.set(def.name, { def, scope, route, perGrantLimit: perGrantLimit === true, fanout: fanout === true });
   }
 
   // Takes a slot in `grantId`'s write window: → a release for it, or a
@@ -576,9 +580,11 @@ class FleetRouter extends EventEmitter {
     // max_bytes never replaces them.
     const params = { ...args, origin, max_bytes: this.maxBytes };
     if (target.fanout) {
-      // A fanned-out write is one call against the grant's window.
-      const fanSlot = tool.perGrantLimit ? this._takeGrantSlot(grant.grant_id) : null;
-      if (fanSlot && fanSlot.refused) return fanSlot.refused;
+      // Only a tool registered as fan-out (never a write tool) fans out.
+      if (!tool.fanout) {
+        log.warn(`route for ${name} fanned out, but the tool is not registered as fan-out`);
+        return refusal('invalid_params', `invalid_params: ${name} names one machine`);
+      }
       const rows = [];
       const unreachable = [];
       const nodes = this.registry.list().filter((r) => r.profile === 'agent' && this._reaches(grant, origin.scopes, name, tool.scope, r, { required: tool.scope }));

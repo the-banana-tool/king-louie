@@ -284,6 +284,21 @@ function createContactHost({
       return { ok: true, policy: r.policy };
     },
 
+    // set_away (management surfaces §3.1): the away field alone, validated
+    // as setPolicy validates it, written over the stored policy as it is.
+    // The effective policy's defaults are never frozen into the settings,
+    // and nothing else in the policy is read back and rewritten.
+    setAway(away) {
+      const r = validatePolicy({ away: away === undefined ? null : away }, { now: clock() });
+      if (!r.ok) return r;
+      if (typeof setSettings !== 'function') return { ok: false, error: 'this host cannot save settings' };
+      const current = settings();
+      const stored = current.contactPolicy && typeof current.contactPolicy === 'object' && !Array.isArray(current.contactPolicy) ? current.contactPolicy : {};
+      const contactPolicy = { ...stored, away: r.policy.away };
+      setSettings({ ...current, contactPolicy });
+      return { ok: true, away: r.policy.away, policy: effectivePolicy(contactPolicy) };
+    },
+
     presenceStatus() {
       const status = presence.status();
       const s = ladder.status();
@@ -329,6 +344,7 @@ function createContactHost({
         ladderState: () => ladder.list(),
         getPolicy: () => api.getPolicy(),
         setPolicy: (p) => api.setPolicy(p),
+        setAway: (a) => api.setAway(a),
         heartbeat: (p) => presence.heartbeat(p || {}),
         presenceStatus: () => api.presenceStatus()
       };

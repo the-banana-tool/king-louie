@@ -1333,9 +1333,9 @@ class CaseRuntime {
   }
 
   _repostIfMissing(meta, rec) {
-    // Without getMessages there is no telling whether the card is there;
-    // posting blindly would repeat it on every duplicate.
-    if (typeof this.host?.chats?.getMessages !== 'function') return null;
+    // Without findQuestionMessage there is no telling whether the card is
+    // there; posting blindly would repeat it on every duplicate.
+    if (typeof this.host?.chats?.findQuestionMessage !== 'function') return null;
     const posted = this._postToChat(meta, rec, { onlyIfMissing: true });
     if (posted) this._notify('case:changed', { caseId: meta.id, what: 'questions', questionId: rec.id, chatId: posted.chatId, message: posted.message });
     return posted;

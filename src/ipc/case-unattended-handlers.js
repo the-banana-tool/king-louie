@@ -6,9 +6,16 @@ const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const { CATEGORIES } = require('../cases/budget');
 const { STATUSES } = require('../cases/status');
+const { answerClass } = require('../cases/mcp-tool-definitions');
 
 const BUSY = 'Case is busy with a wake-up; try again in a minute.';
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+// Each record carries its class (management surfaces §3.1): 'pressed' (the
+// card's buttons) or 'spoken' (a reply in the chat). The renderer draws the
+// card by it and keeps no copy of the rule. Not `answer`: that is the
+// recorded answer.
+const withCase = (q, c) => ({ ...q, caseId: c.id, caseTitle: c.title, caseStatus: c.status, answerClass: answerClass(q) });
 
 const caseSummary = (c) => ({ id: c.id, title: c.title, status: c.status, statusReason: c.statusReason || null, budget: c.budget || null });
 
@@ -49,14 +56,13 @@ function registerCaseUnattendedHandlers(ipcMain, context = {}) {
       }
       const meta = rt.getCase(required(caseId, 'caseId'));
       const store = rt.questions(meta.id);
-      const questions = questionIds.map((id) => store.get(id)).filter(Boolean)
-        .map((q) => ({ ...q, caseId: meta.id, caseTitle: meta.title, caseStatus: meta.status }));
+      const questions = questionIds.map((id) => store.get(id)).filter(Boolean).map((q) => withCase(q, meta));
       return { ok: true, questions };
     }
     const cases = caseId ? [rt.getCase(caseId)] : rt.listCases();
     const questions = cases
       .filter((c) => c.status !== 'done' && c.status !== 'abandoned')
-      .flatMap((c) => rt.questions(c.id).open().map((q) => ({ ...q, caseId: c.id, caseTitle: c.title, caseStatus: c.status })));
+      .flatMap((c) => rt.questions(c.id).open().map((q) => withCase(q, c)));
     return { ok: true, questions };
   });
 
