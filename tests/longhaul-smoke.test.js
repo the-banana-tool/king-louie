@@ -27,3 +27,25 @@ describe('longhaul smoke run', () => {
     assert.ok(config.sessions.every((s) => s.private === false));
   });
 });
+
+describe('longhaul answer-stage smoke run', () => {
+  it('answers and judges the fixtures with --fake-models: every adapter, both tiers, $0, no network', () => {
+    const { root } = tmpHome();
+    const run = (tier, adapters) => spawnSync(process.execPath, [
+      path.join('bin', 'longhaul.js'), 'run', '--sessions', path.join('tests', 'fixtures', 'longhaul'),
+      '--adapters', adapters, '--tier', tier, '--fake-models'
+    ], { cwd: REPO, encoding: 'utf8', env: { ...process.env, LONGHAUL_HOME: root } });
+    const grid = run('grid', 'kl-recall,kl-recall-whole,sliding-window,oracle,summarize-compact,real-compaction');
+    assert.strictEqual(grid.status, 0, grid.stderr);
+    assert.match(grid.stdout, /whole-messages: kl-recall/);
+    const frontier = run('frontier', 'oracle,full-history');
+    assert.strictEqual(frontier.status, 0, frontier.stderr);
+    for (const runId of fs.readdirSync(path.join(root, 'runs'))) {
+      const summary = JSON.parse(fs.readFileSync(path.join(root, 'runs', runId, 'summary.json'), 'utf8'));
+      for (const s of Object.values(summary)) {
+        assert.strictEqual(s.leaks, 0);
+        assert.strictEqual(s.answer.abstain.accuracy, 1);
+      }
+    }
+  });
+});

@@ -270,7 +270,7 @@ stages M1 to M3). It is Electron-free.
 
 `src/longhaul/` and `bin/longhaul.js` (spec
 `docs/superpowers/specs/2026-09-25-session-memory-benchmark-design.md`; stage
-B0 scores evidence recall only, with no answer or judge model). It is
+B0 scores evidence recall; stage B3 adds the answer stage and reports). It is
 Electron-free, may use `src/history/` and `src/providers/`, and nothing else in
 `src/` may require it (`tests/longhaul-boundary.test.js`). It is left out of the
 Electron build.
@@ -328,6 +328,40 @@ Electron build.
   are cached under `LONGHAUL_HOME/private/rerank/`; it uses the app's own
   `@huggingface/transformers` and `onnxruntime-node` dependencies (unpacked
   from the asar for the embed worker). Tests inject a fake `scorer`.
+- The answer stage (B3): `longhaul run ... --answer-provider <p> --answer-model <m>
+  --judge-provider <p> --judge-model <m>` adds answer accuracy (answerable questions
+  judged `correct`), abstain accuracy (abstain questions the model declined) and the
+  false-answer rate. The judge never sees the context and is never the answer model.
+  Prompts are `src/longhaul/prompts/*-v1.md`; a change is a new versioned file, and
+  every run's `config.json` records their hashes. Adapters added: `full-history`
+  (the frontier tier only in the answer stage, and evidence-only runs; capped at the
+  answer model's window, 128K when unknown), `real-compaction` (sessions with recorded
+  compactions only), `summarize-compact` (a summarizer model every 10K tokens, answer
+  stage only) and `kl-recall-whole` (the whole-message comparison the summary prints).
+- Before any call, a run prices its plan from `Catalog#price` (input at 3 characters a
+  token, output at max tokens: a close bound, not a guarantee; a spend guard stops the
+  run at the cap and never resets within it) and refuses over `--max-usd` (default
+  $50) or with an unpriced model unless `--allow-unpriced`; `--dry-run` prints the plan
+  and calls nothing. `--tier frontier --sample 150 --long-context-sample N` is the
+  headline sample. `full-history` and `real-compaction` are capped at what the answer
+  model's catalog window holds (128K when unknown). A private session needs
+  `--send-private` for the answer stage too. `runs/<id>/spend.json` is rewritten as
+  the run goes, with `stoppedBy` when a run stops (`SIGINT` on Ctrl-C); a priced reply
+  that reports no usage is charged at its estimate (`estimatedCalls`), never $0. In the
+  answer stage and `--dry-run`, a `kl-recall-vec*` question with no cached vector
+  refuses the run (`EMBEDDINGS_MISSING`): run `longhaul embed` first. Run no other `longhaul` command on the
+  same `LONGHAUL_HOME` while a run is going: `run` starts by removing `tmp/kl-*` dirs,
+  which would delete another run's contexts or an `embed`'s temp store.
+- Model calls are cached under `LONGHAUL_HOME/private/model-cache/` (answers, verdicts,
+  summaries: private text), so a rerun or a resumed run pays only for missing calls.
+  Records hold verdicts and numbers only; the 10% judge sample is
+  `private/spot-checks/<runId>.jsonl`, reviewed with `longhaul spot-check --run <id>
+  --reviewer <initials>`. `longhaul report --runs <id>,<id>` writes publishable
+  aggregate tables to `reports/<id>/` (`--public` refuses private runs); a series
+  there is one adapter configuration at one tier, answer model, judge model and
+  full commit, with one setup (`setup:` hashes the max tokens and prompt hashes).
+- Smoke run of the answer stage (no models, no network, $0):
+  `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models`.
 
 ## Cases
 

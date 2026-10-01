@@ -144,13 +144,13 @@ const TMP_PREFIX = 'kl-';
 // adapter builds; resultFromBuild counts a message's chunks with the same.
 // rerankerFor (optional; kl-recall-rerank): (handle, question) => the
 // reranker callback for that question's build (recall spec §6.3 step 6).
-function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, chunk = {}, tmpRoot, rerankerFor = null } = {}) {
+function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, chunk = {}, tmpRoot, rerankerFor = null, name = 'kl-recall' } = {}) {
   if (typeof tmpRoot !== 'string' || !tmpRoot) throw new Error('kl-recall needs a tmpRoot (LONGHAUL_HOME/tmp)');
   const settings = recallSettings(recall, budgetTokens, chunk);
   return {
-    name: 'kl-recall',
+    name,
     describe() {
-      return { name: 'kl-recall', recall: settings.history.recall, chunk: settings.history.chunk ?? null, embedder: 'none (BM25 only)' };
+      return { name, recall: settings.history.recall, chunk: settings.history.chunk ?? null, embedder: 'none (BM25 only)' };
     },
 
     async prepare(session, { upToSeq = Infinity } = {}) {

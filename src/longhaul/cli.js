@@ -13,7 +13,9 @@ const COMMANDS = {
   run: require('./commands/run'),
   author: require('./commands/author'),
   embed: require('./commands/embed'),
-  verify: require('./commands/verify')
+  verify: require('./commands/verify'),
+  'spot-check': require('./commands/spot-check'),
+  report: require('./commands/report')
 };
 
 function usage() {

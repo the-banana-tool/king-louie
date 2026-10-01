@@ -20,6 +20,9 @@ const {
 } = require('../src/longhaul/embeddings');
 const { fakeEmbedder, fakeVector, startFakeEmbeddingServer, DIM } = require('./helpers/fake-embedding-server');
 const { tmpDir, tmpHome, sink } = require('./helpers/longhaul-helpers');
+const { runBenchmark } = require('../src/longhaul/run');
+const { createFakeModels } = require('../src/longhaul/fake-models');
+const { loadPrompt } = require('../src/longhaul/prompts');
 
 const KEY = 'test-key-123456';
 
@@ -307,6 +310,33 @@ describe('kl-recall-vec', () => {
     assert.strictEqual(embedder.calls.length, calls + 1, 'embedded once, then cached');
     const cache = EmbeddingCache.open(cacheDir(home.private, sessionId, 'fake-embed-1'));
     assert.deepStrictEqual([...cache.question(fresh.id, fresh.question)].map((x) => Math.round(x * 1e6)), fakeVector(fresh.question).map((x) => Math.round(x * 1e6)));
+  });
+
+  it('refuses uncached question vectors in the answer stage and a dry run, before any call (review Important 2)', async () => {
+    const { home, sessionId } = await embeddedHome();
+    fs.rmSync(path.join(cacheDir(home.private, sessionId, 'fake-embed-1'), 'questions.jsonl'));
+    const server = await startFakeEmbeddingServer();
+    try {
+      const fakes = createFakeModels();
+      for (const name of ['kl-recall-vec', 'kl-recall-vec-only', 'kl-recall-vec-rerank']) {
+        const adapter = createAdapter(name, {
+          tmpRoot: home.tmp, privateRoot: home.private, model: 'fake-embed-1', baseUrl: `${server.url}/v1`,
+          env: { OPENAI_API_KEY: KEY }, sendPrivate: true, scorer: async (q, texts) => texts.map(() => 0)
+        });
+        assert.strictEqual(adapter.missingQuestionVectors((await loadSession(sessionDir(home.root, sessionId))), [{ id: 'x', question: 'y?' }]).length, 1);
+        for (const dryRun of [false, true]) {
+          await assert.rejects(runBenchmark({
+            home, adapters: [adapter], includeUnverified: true,
+            answer: { answerClient: fakes.answer, judgeClient: fakes.judge, prompts: { answer: loadPrompt('answer'), judge: loadPrompt('judge') }, dryRun }
+          }), (err) => err instanceof UsageError && err.code === 'EMBEDDINGS_MISSING'
+            && err.message.includes(`longhaul embed --session ${sessionId} --provider openai --model fake-embed-1`));
+        }
+      }
+      assert.strictEqual(server.requests.length, 0, 'no embedding request');
+      assert.deepStrictEqual(fs.readdirSync(home.runs), [], 'no run dir');
+    } finally {
+      await server.close();
+    }
   });
 
   it('is created by name, fused and vector-only', () => {

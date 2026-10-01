@@ -13,8 +13,9 @@
 // line are cut off.
 const fs = require('fs');
 const path = require('path');
-const { sha256Text } = require('./files');
+const { sha256Text, readJsonl } = require('./files');
 const { UsageError } = require('./errors');
+const { withRetries } = require('./retry');
 const { createLogger } = require('../logging');
 
 const log = createLogger('longhaul/embeddings');
@@ -56,16 +57,6 @@ function fromBytes(buf, offset = 0, dim = (buf.length - offset) / 4) {
   return out;
 }
 
-function readJsonl(file) {
-  if (!fs.existsSync(file)) return [];
-  const out = [];
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-    if (!line.trim()) continue;
-    try { out.push(JSON.parse(line)); } catch { break; } // a torn last line ends the file
-  }
-  return out;
-}
-
 // The chunk cache of one session and model. open() reads what is there;
 // append() adds rows; nothing here prints or logs chunk text.
 class EmbeddingCache {
@@ -96,7 +87,7 @@ class EmbeddingCache {
   _load() {
     if (!fs.existsSync(this.files.meta)) return;
     this.meta = JSON.parse(fs.readFileSync(this.files.meta, 'utf8'));
-    const rows = readJsonl(this.files.index);
+    const rows = readJsonl(this.files.index, { tornTail: true }); // a torn last line ends the file
     const dim = this.meta.dim;
     const bytes = fs.existsSync(this.files.vectors) ? fs.readFileSync(this.files.vectors) : Buffer.alloc(0);
     const whole = Number.isInteger(dim) && dim > 0 ? Math.floor(bytes.length / (dim * 4)) : 0;
@@ -108,7 +99,7 @@ class EmbeddingCache {
     this.vectors = new Float32Array(n * (dim || 0));
     for (let r = 0; r < n; r++) this.vectors.set(fromBytes(bytes, r * dim * 4, dim), r * dim);
     this.byKey = new Map(this.rows.map((row, i) => [keyOf(row.messageId, row.idx), i]));
-    for (const q of readJsonl(this.files.questions)) {
+    for (const q of readJsonl(this.files.questions, { tornTail: true })) {
       if (q && typeof q.id === 'string' && typeof q.vec === 'string') this.questions.set(q.id, q);
     }
   }
@@ -194,34 +185,15 @@ class EmbeddingCache {
   }
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function retryable(err) {
-  if (!err) return false;
-  if (err.status === 429 || (Number.isInteger(err.status) && err.status >= 500)) return true;
-  if (Number.isInteger(err.status)) return false;
-  // A transport failure (fetch rejects with a TypeError): reset, DNS, timeout.
-  return err.name === 'TypeError' || /fetch failed|ECONNRESET|ETIMEDOUT|socket/i.test(String(err.message || ''));
-}
-
 // embedder: an object with embed(inputs, { model }) (OpenAIProvider#embed).
-// Retries 429, 5xx and transport failures with backoff; anything else throws.
-function createEmbedClient({ embedder, model, maxAttempts = 6, baseDelayMs = 1000, wait = sleep }) {
+// Retries 429, 5xx and transport failures with backoff (retry.js); anything
+// else throws.
+function createEmbedClient({ embedder, model, maxAttempts = 6, baseDelayMs = 1000, wait }) {
   if (!embedder || typeof embedder.embed !== 'function') throw new UsageError('This provider has no embeddings call; use --provider openai.');
+  const onRetry = ({ err, attempt, delayMs }) => log.warn('embeddings request failed; retrying', { status: err.status ?? null, attempt, delayMs });
   return {
     model,
-    async embed(inputs) {
-      for (let attempt = 1; ; attempt++) {
-        try {
-          return await embedder.embed(inputs, { model });
-        } catch (err) {
-          if (attempt >= maxAttempts || !retryable(err)) throw err;
-          const delay = Number.isFinite(err.retryAfterMs) && err.retryAfterMs > 0 ? err.retryAfterMs : baseDelayMs * 2 ** (attempt - 1);
-          log.warn('embeddings request failed; retrying', { status: err.status ?? null, attempt, delayMs: delay });
-          await wait(delay);
-        }
-      }
-    }
+    embed: (inputs) => withRetries(() => embedder.embed(inputs, { model }), { retries: maxAttempts - 1, baseDelayMs, wait, onRetry })
   };
 }
 

@@ -48,6 +48,14 @@ function createKlRecallVecAdapter({
       return { ...base.describe(), name, embedder: `${provider}/${model}`, vectorOnly: Boolean(vectorOnly) };
     },
 
+    // The ids of questions whose vector is not cached yet. The answer stage
+    // and a dry run refuse when there are any (EMBEDDINGS_MISSING), so that
+    // no embedding call happens outside the estimate.
+    missingQuestionVectors(session, questions) {
+      const cache = EmbeddingCache.open(cacheDir(privateRoot, session.manifest.sessionId, model));
+      return questions.filter((q) => !cache.question(q.id, q.question)).map((q) => q.id);
+    },
+
     async prepare(session, options = {}) {
       const handle = await base.prepare(session, options);
       try {

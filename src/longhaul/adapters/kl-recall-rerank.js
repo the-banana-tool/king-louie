@@ -48,6 +48,7 @@ function createKlRecallRerankAdapter({
     describe() {
       return { ...base.describe(), name, reranker: rerankModel, candidates, latency: 'includes the reranker; cached scores cost no model time' };
     },
+    ...(base.missingQuestionVectors ? { missingQuestionVectors: (session, questions) => base.missingQuestionVectors(session, questions) } : {}),
     prepare: (session, options) => base.prepare(session, options),
     context: (handle, args) => base.context(handle, args),
     release: (handle) => base.release(handle)
