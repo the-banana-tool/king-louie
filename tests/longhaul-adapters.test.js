@@ -154,7 +154,7 @@ describe('adapter registry', () => {
   it('lists the built-in adapters and refuses an unknown one', () => {
     assert.deepStrictEqual(adapterNames(), [
       'full-history', 'kl-recall', 'kl-recall-rerank', 'kl-recall-vec', 'kl-recall-vec-only', 'kl-recall-vec-rerank',
-      'kl-recall-whole', 'oracle', 'real-compaction', 'sliding-window'
+      'kl-recall-whole', 'oracle', 'real-compaction', 'sliding-window', 'summarize-compact'
     ]);
     assert.throws(() => createAdapter('no-such-adapter'), UsageError);
   });
