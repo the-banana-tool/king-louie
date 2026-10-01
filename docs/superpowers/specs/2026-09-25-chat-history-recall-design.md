@@ -124,8 +124,10 @@ user message
 - **Show your work.** Each assistant message records exactly which excerpts
   and which tail it was given, and exports include it.
 - **Host-agnostic.** `src/history/` requires nothing from Electron.
-  `tests/electron-boundary.test.js` applies. The Electron host may inject a
-  utility-process embed runner; the service uses `worker_threads`.
+  `tests/electron-boundary.test.js` applies. The embed worker is a child
+  process spawned from `process.execPath` with `ELECTRON_RUN_AS_NODE=1` (the
+  app binary in a packaged build, `node` in the service), in both hosts, like
+  the PDF worker: a native crash in onnxruntime ends the child, not the app.
 
 ### 3.2 Interfaces
 
@@ -333,11 +335,11 @@ worker reading while the main thread writes.
 
 ### 5.2 Embeddings
 
-An `EmbedRunner` hosts one `Embedder` off the main thread. The default runner
-uses `worker_threads` (`src/history/embed-worker.js`) and works in both hosts.
-The Electron host may inject `deps.history.embedRunner` backed by
-`utilityProcess` for crash isolation; `main.js` does so, `src/service/run.js`
-does not.
+An `EmbedRunner` hosts one `Embedder` off the main thread
+(`src/history/embed-worker.js`). The embed worker is a child process spawned
+from `process.execPath` with `ELECTRON_RUN_AS_NODE=1` (the app binary in a
+packaged build, `node` in the service), in both hosts, like the PDF worker: a
+native crash in onnxruntime ends the child, not the app.
 
 The catch-up loop: every `history.embedder.intervalMs` (2,000) or on demand
 after an append, take up to `batchSize` (16) pending chunks for the active
@@ -355,9 +357,14 @@ Embedder implementations:
 | Kind | Backend | Notes |
 |---|---|---|
 | `local` (default) | `@huggingface/transformers` on `onnxruntime-node`, int8 weights | Default model `Xenova/bge-small-en-v1.5` (384 dims, MIT). Model files download on first enable into `<dataDir>/models/` with progress in the UI; nothing is bundled in the installer. Offline first run means BM25 only until the download succeeds. |
-| `ollama` | `POST /api/embed` on the configured Ollama base URL | Default model `nomic-embed-text`; the user must run Ollama. |
-| `openai` | existing `OpenAIEmbeddingProvider` | Sends chunk text to OpenAI; the settings UI says so. |
+| `ollama` | `POST /api/embed` on the configured Ollama base URL, through `OllamaProvider#embed` | Default model `nomic-embed-text`; the user must run Ollama. |
+| `openai` | `OpenAIProvider#embed` (through `BaseProvider.request`) | Sends chunk text to OpenAI; the settings UI says so. |
 | `none` | | BM25 only. |
+
+Model files download into `<dataDir>/models/<org>/<name>/`; a completed load
+writes `.kl-complete.json`, and a folder without it is deleted before the
+next try. The embedder starts with the host's background checks (never under
+`KL_TEST_MODE`).
 
 Local rerankers (§6.3) use the same runner.
 
@@ -405,9 +412,11 @@ The query text is the new user message plus the previous
 default was 2, meant for follow-ups that refer back with pronouns, but the
 previous turns (a median of 570 characters) drowned out the question: with
 them 40 of 175 evidence messages ranked in the BM25 top 50, without them 94
-(§6.7). A follow-up too short to search on is a known gap; a fallback that adds
-the previous turns only for a very short message, or a model rewrite, would
-need questions of that shape to measure. `queryContextSeparate` (false) fuses
+(§6.7). `queryFallbackMinChars` (0, off) adds the previous user messages, at
+most three, to a message with fewer letters and digits than that. It is off
+until LongHaul has follow-up questions to measure it with: authoring them (a
+question kind asked right after the message it refers back to) belongs to a
+later LongHaul stage, after B3. `queryContextSeparate` (false) fuses
 the previous turns as a list of their own instead; it measured 0.27–0.31
 against 0.35 for the question alone.
 
@@ -434,19 +443,21 @@ are excluded.
    `recencyWeight` 0.3, `recencyHalfLifeDays` 30.
 6. **Rerank (optional).** When `rerank.enabled` (false), a local cross-encoder
    (`rerank.model`, default `Xenova/ms-marco-MiniLM-L-6-v2`) rescores the top
-   `rerank.topM` (20) query/chunk pairs and its score replaces the fused score
+   `rerank.topM` (100) query/chunk pairs and its score replaces the fused score
    for those. Measured at 18–28 ms per pair on the owner's CPU (fp32, batches
    of 16). `topM` must exceed what the budget selects (60–90 chunks at 6,000
    tokens) to change the selection at all: 20 is inert, 100 is the knee
    (about 2.2 s per question), so a per-turn rerank is too slow on a laptop
-   and fits `SearchHistory` better (§6.7). `rerank.enabled` does nothing
-   unless a reranker callback is given to the Retriever; H3 supplies the
-   cross-encoder behind it (the Retriever never reads `rerank.model`).
+   and fits `SearchHistory` better (§6.7). `SearchHistory` reranks by
+   default (`rerank.search`, under `rerank.searchMaxMs`, 6,000), since the
+   model is waiting on the tool anyway; per turn it is opt-in
+   (`rerank.enabled`). The cross-encoder runs fp32 in the embed worker
+   (§5.2).
    `rerank.maxMs` (2,000) guards the latency: a slower reranker is skipped
    for that turn and logged (§15).
-7. **Dedupe.** Drop a chunk whose cosine to an already selected chunk exceeds
-   `dedupeCosine` (0.92); without vectors, drop exact text duplicates. The
-   exact-text dedupe runs before the rerank (step 6), so the reranker never
+7. **Dedupe.** Drop exact text duplicates before step 6, then, in the budget
+   step, a chunk whose cosine to an already selected chunk exceeds
+   `dedupeCosine` (0.92) when both have vectors. The exact-text dedupe runs before the rerank (step 6), so the reranker never
    spends a pair on a duplicate; a duplicate would get the same score, so
    the selection is the same.
 8. **Budget.** Take chunks in score order until `recalledTokens` (6,000),
@@ -701,9 +712,9 @@ B0 reports. The F3, F6 and F7 precondition above is met on `main`.
 | `src/context/context-assembler.js` | unchanged in this spec; its tool-matching embeddings still use the OpenAI provider (follow-up: switch to the `Embedder` interface) |
 | `src/core/settings.js` | new `history` namespace (§14) |
 | `src/service/run.js`, `src/service/cli.js`, `src/service/commands/history.js` (new) | `history import`, `history reindex`, `history status` subcommands |
-| `main.js` | injects a `utilityProcess` embed runner; filters the `node:sqlite` ExperimentalWarning |
+| `main.js` | filters the `node:sqlite` ExperimentalWarning |
 | `renderer.js`, `styles.css`, `index.html` | active-chat loading via `chat:get`, recall line and excerpt drawer, chat menu items (scope, links, import, convert to case), settings section "History and recall", indexing and embedder badges |
-| `package.json` | `@huggingface/transformers` dependency; `asarUnpack` for `onnxruntime-node`; `!**/models/**` excluded from the build |
+| `package.json` | `@huggingface/transformers` 4.3.0 and `onnxruntime-node` 1.30.0; `asarUnpack` for `onnxruntime-node`; each platform build drops the other platforms' onnxruntime binaries. (No `!**/models/**` pattern: it would drop `src/models/`, and model files live in the data dir.) |
 | `src/longhaul/`, `bin/longhaul.js` | the session memory benchmark, specified separately (§13) |
 | `CLAUDE.md` | one section: where history lives, how to run the benchmark smoke test, the ExperimentalWarning |
 
@@ -794,8 +805,8 @@ section "History and recall"; the weights and top-k values sit behind an
 |---|---|
 | Store will not open (corrupt file, locked, disk full) | Core start reports the error to the UI and the log; the JSON file is untouched; the app shows chats as unavailable rather than reading the JSON file. |
 | `appendMessage` transaction fails | The turn fails with the error; nothing is sent to the provider. |
-| Embedder unavailable (model download failed, Ollama down, key missing) | Retrieval runs BM25 only; one warning in the log per session; the recall line and a settings badge say so; retry on the next catch-up tick. |
-| Embed worker crashes | Restart with backoff (1 s, 5 s, 30 s); after three crashes in ten minutes the local embedder is disabled for the session with a badge. |
+| Embedder unavailable (model download failed, Ollama down, key missing) | Retrieval runs BM25 only; one warning in the log per session; the recall line and a settings badge say so; retry after 10 minutes, on a settings change or on Retry. |
+| Embed worker crashes | Restart with backoff (1 s, 5 s, 30 s); after three crashes in ten minutes the local embedder is disabled for the session with a badge; the chunk that crashed it alone is skipped for that model. |
 | Model download interrupted | Partial files are discarded; the next enable retries. |
 | Migration of one chat fails | That chat stays in the JSON array and is reported; the rest migrate; the backup exists before any change. |
 | Reranker slower than `rerank.maxMs` (2,000) | The rerank step is skipped for that turn and logged. |

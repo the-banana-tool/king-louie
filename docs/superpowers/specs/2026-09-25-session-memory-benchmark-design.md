@@ -242,31 +242,40 @@ Built-in adapters:
 | `oracle` | The evidence messages plus the tail | Upper bound on answerability |
 | `external:<name>` | A subprocess speaking JSON lines over stdio | Mem0, Letta, others, later |
 
-**B0 addendum (2026-09-30): `kl-recall-vec` is an H3 probe, not a
-candidate system.** `kl-recall-vec` (and `kl-recall-vec-only`, cosine
+**B0 addendum (2026-09-30, amended by H3): `kl-recall-vec` is an H3 probe
+with a hosted embedder; with `--embed-provider local` it measures what H3
+ships.** `kl-recall-vec` (and `kl-recall-vec-only`, cosine
 without BM25) is `kl-recall` plus a vector list fused by the retriever's
 reciprocal rank fusion (recall spec §6.3 steps 2 and 3), with vectors from a
 hosted embedder (OpenAI `text-embedding-3-small`) cached by `longhaul embed`
 under `LONGHAUL_HOME/private/embeddings/`. It measures how much a strong
 off-the-shelf semantic signal adds over BM25, so H3 can size its investment
-in a local embedder. It is never published as a result: it sends every chunk
-of a session to a provider, which King Louie's recall never does, and it is
-not what H3 ships.
+in a local embedder. With its hosted embedder (the default,
+`--embed-provider openai`) it is never published as a result: it sends every
+chunk of a session to a provider, which King Louie's recall never does. With
+`--embed-provider local` (H3) it embeds with the app's own local model in the
+embed worker, cached under
+`LONGHAUL_HOME/private/embeddings/<session>/<org>__<name>/`; nothing leaves
+the machine, it is what H3 ships (`kl-recall` is the BM25 path the app falls
+back to), and it is published like `kl-recall`.
 
-**B0 addendum (2026-09-30): `kl-recall-rerank` is an H3 probe, not a
-candidate system.** `kl-recall-rerank` (BM25 candidates) and
+**B0 addendum (2026-09-30, amended by H3): `kl-recall-rerank` is an H3 probe
+with a hosted embedder; with `--embed-provider local` it measures what H3
+ships.** `kl-recall-rerank` (BM25 candidates) and
 `kl-recall-vec-rerank` (BM25 fused with `kl-recall-vec`'s cached cosine
 list) turn on recall spec §6.3 step 6: a local cross-encoder
 (`Xenova/ms-marco-MiniLM-L-6-v2` through `@huggingface/transformers` on the
 native `onnxruntime-node`, CPU) rescores the top `rerank.topM` fused
-candidates and its score replaces theirs. Neither package is an app
-dependency; install them in a checkout with `npm i --no-save`. Scores are
+candidates and its score replaces theirs. Since H3 both are app dependencies
+(`package.json`) and the cross-encoder runs in the app's embed worker; its
+model downloads once into `LONGHAUL_HOME/private/models/`. Scores are
 cached per question and chunk (with a hash of the exact query and chunk
 text) under `LONGHAUL_HOME/private/rerank/<session>/<model>/`, so a sweep
 pays the model once. Its latency includes the reranker call, which is real
 CPU time on a miss and near zero on a hit; a report states which it measured.
-It sizes what a reranker buys H3; the fused variant inherits
-`kl-recall-vec`'s hosted embedder and is never published as a result.
+It sizes what a reranker buys H3; the fused variant with the hosted embedder
+is never published as a result; with `--embed-provider local` it is
+published like `kl-recall`.
 
 **B3 addendum (2026-09-30): `kl-recall-whole` is a new adapter.** It is
 `kl-recall` with whole small messages and tool pairing on
