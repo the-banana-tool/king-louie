@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>LongHaul verify</title>
+<link rel="stylesheet" href="/verify.css">
+<script src="/verify.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="rail" aria-label="Questions">
+    <div class="rail-head">
+      <div class="brand">LongHaul verify</div>
+      <div class="session" id="session-title"></div>
+      <div class="progress">
+        <div class="progress-line"><span id="progress-text"></span></div>
+        <div class="bar" aria-hidden="true"><div class="bar-fill" id="progress-bar"></div></div>
+      </div>
+      <dl class="targets" id="targets"></dl>
+    </div>
+    <ol class="queue" id="queue"></ol>
+    <div class="legend" aria-hidden="true">
+      <span><i class="dot pending"></i>pending</span>
+      <span><i class="dot accepted"></i>accepted</span>
+      <span><i class="dot edited"></i>edited</span>
+      <span><i class="dot rejected"></i>rejected</span>
+      <span><i class="dot skipped"></i>skipped</span>
+    </div>
+  </aside>
+
+  <main class="main" id="main" tabindex="-1">
+    <div class="column">
+      <div class="notice" id="notice" hidden></div>
+
+      <section class="head-card" id="head-card" hidden>
+        <div class="meta-row">
+          <span class="badge" id="q-kind"></span>
+          <span class="meta" id="q-at"></span>
+          <span class="meta" id="q-distance"></span>
+          <span class="spacer"></span>
+          <span class="meta status-text" id="q-status"></span>
+          <span class="meta qid" id="q-id"></span>
+        </div>
+        <div class="banner warn" id="abstain-banner" hidden></div>
+        <div class="qa">
+          <div class="label">Question</div>
+          <div class="question" id="q-question"></div>
+          <div class="label">Answer</div>
+          <div class="answer" id="q-answer"></div>
+        </div>
+        <dl class="extras" id="q-extras"></dl>
+        <div class="banner error" id="q-errors" hidden></div>
+      </section>
+
+      <section class="card edit-card" id="edit-card" hidden>
+        <h2>Edit question</h2>
+        <p class="hint">Saving keeps the question unverified; press Accept afterwards.</p>
+        <form id="edit-form" autocomplete="off">
+          <label>Question<textarea id="f-question" rows="2"></textarea></label>
+          <label>Answer<textarea id="f-answer" rows="2"></textarea></label>
+          <label>Acceptable answers <span class="hint">one per line</span><textarea id="f-acceptable" rows="3"></textarea></label>
+          <div class="field-row">
+            <label>Evidence seqs <span class="hint">comma separated</span><input id="f-evidence" type="text"></label>
+            <label>Ask at seq<input id="f-askat" type="text" inputmode="numeric"></label>
+          </div>
+          <div class="field-row">
+            <label>Kind<select id="f-kind"></select></label>
+            <label>Superseded by <span class="hint">seq, or empty</span><input id="f-superseded" type="text" inputmode="numeric"></label>
+          </div>
+          <div class="banner error" id="edit-errors" hidden></div>
+          <div class="form-actions">
+            <button type="submit" class="btn primary" id="edit-save">Save edit</button>
+            <button type="button" class="btn" id="edit-cancel">Cancel</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="section" id="evidence-section" hidden>
+        <h2 class="section-title">Evidence</h2>
+        <div id="evidence"></div>
+      </section>
+
+      <section class="section" id="askat-section" hidden>
+        <h2 class="section-title">Asked in place of</h2>
+        <div id="askat"></div>
+      </section>
+
+      <section class="section" id="context-section" hidden>
+        <details class="context-wrap" id="context-details" open>
+          <summary class="section-title" id="context-title">Surrounding messages</summary>
+          <div id="context"></div>
+        </details>
+      </section>
+
+      <div class="actions-spacer"></div>
+    </div>
+  </main>
+
+  <footer class="actions" aria-label="Actions">
+    <div class="actions-inner">
+      <button class="btn" id="btn-prev" title="Previous (k)"><kbd>k</kbd> Prev</button>
+      <button class="btn" id="btn-next" title="Next (j)">Next <kbd>j</kbd></button>
+      <span class="divider"></span>
+      <button class="btn accept" id="btn-accept" title="Accept (a)"><kbd>a</kbd> Accept</button>
+      <button class="btn" id="btn-edit" title="Edit (e)"><kbd>e</kbd> Edit</button>
+      <button class="btn reject" id="btn-reject" title="Reject (r)"><kbd>r</kbd> Reject</button>
+      <button class="btn" id="btn-skip" title="Skip (s)"><kbd>s</kbd> Skip</button>
+      <button class="btn" id="btn-context" title="Show surrounding messages (c)"><kbd>c</kbd> Context</button>
+      <form class="reject-form" id="reject-form" hidden autocomplete="off">
+        <input id="reject-reason" type="text" placeholder="Reason (optional)" maxlength="2000">
+        <button type="submit" class="btn reject">Confirm reject</button>
+        <button type="button" class="btn" id="reject-cancel">Cancel</button>
+      </form>
+      <span class="spacer"></span>
+      <span class="flash" id="flash" role="status" aria-live="polite"></span>
+      <button class="btn quiet" id="btn-quit" title="End the review">Quit</button>
+    </div>
+  </footer>
+</div>
+</body>
+</html>

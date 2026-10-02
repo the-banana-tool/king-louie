@@ -208,7 +208,11 @@ distance bucket and by kind so the set is not dominated by recent prose.
 
 `verify` walks unverified candidates in a terminal loop: shows the question,
 answer, evidence messages and the message at `askAtSeq`; the reviewer accepts,
-edits or rejects. Accepted questions get `verifiedBy`. Only verified questions
+edits or rejects. `verify --web` shows the same review as a local browser
+page: the server binds 127.0.0.1 only, every API call carries a random per-run
+token from the printed URL's fragment, other `Host` headers are refused, and
+the page loads nothing from the network, so the session never leaves the
+machine. Accepted questions get `verifiedBy`. Only verified questions
 count in a run; `run --include-unverified` exists for smoke tests and marks
 its output as such.
 
