@@ -88,9 +88,9 @@ The tools and their classes:
 | `list_questions` | read | every open question across the caller's cases, with kind, options, urgency, ladder state and whether it is spoken or pressed |
 | `list_envelopes`, `list_playbooks`, `get_presence` | read | the first two mirror IPC the renderer never called |
 | `answer_question` | spoken | exists; gains `quote` (§3.2). A detour's routing question is a question: `resolve_detour` is not a separate tool. A briefing a model asked (`Ask`) is acknowledged through it too |
-| `create_case` | spoken | the quote is the owner's objective. Honours the similar-case refusal; `force` never comes from a client, so a `SIMILAR_CASES` refusal from ChatGPT means "open the app" |
-| `revoke_envelope`, `cancel_case_job` | spoken | both only reduce what the case may do. Not `cancel_job`: that name is the fleet tool's, and a tool belongs to one scope |
-| `set_away` | spoken | `email-only` / `in-app-only` until a time, as the sidebar's away controls did |
+| `create_case` | spoken | the quote is the owner's objective. Honours the similar-case refusal; `force` never comes from a client, so a `SIMILAR_CASES` refusal from ChatGPT means "open the app". In the chat it asks first (§3.2, Q28) |
+| `revoke_envelope`, `cancel_case_job` | spoken | both only reduce what the case may do. Not `cancel_job`: that name is the fleet tool's, and a tool belongs to one scope. In the chat both ask first (§3.2, Q28) |
+| `set_away` | spoken | `email-only` / `in-app-only` until a time, as the sidebar's away controls did. In the chat it asks first (§3.2, Q28) |
 | — | pressed | envelope and plan approvals (and deltas), budget grants, `budget-daily`, `direction`, `commit-failed`, `wakeups-failing`, `gating-pending`, owner tasks, conflict follow-ups, ingest reviews, and **a case's status** (pause, resume, close). No tool; refused over every `mcp-*` channel; answered by a button in the chat card or a phone signature |
 
 Fleet tools (`list_machines`, `describe_machine`, `get_state`, `run_runbook`, `delegate`, `send_to_job`,
@@ -107,6 +107,17 @@ front door now serves the spoken class at all.
 ### 3.2 The owner and the quote
 
 A grant is the owner. Every spoken tool takes a required `quote`: the owner's own words, verbatim.
+
+- **Three words** (owner decision Q28, 2026-10-01). On every channel (`in-app-chat`, `mcp-stdio`,
+  `mcp-frontdoor`) the quote must be at least three words, counted as runs of letters or digits after the
+  owner-quote fold ("go with 2" is three); a shorter one is refused (`quote_too_short`), so a bare "yes"
+  or "option 2" lifted from a longer message never stands for the owner's request. A bare number is
+  therefore never a whole quote that names an option.
+- **Asking first in the chat** (owner decision Q28, 2026-10-01). In King Louie's chat, `revoke_envelope`,
+  `cancel_case_job`, `set_away` and `create_case` go through the normal tool-approval prompt
+  (`requiresApproval: true`; the always-approve list and permission rules can lift it as for any tool).
+  `answer_question` stays prompt-free, as do the read tools. The MCP surfaces are unaffected: they have
+  scopes.
 
 - **In the app** the host verifies the quote against the owner's turn text (`ownerTurnText`, set only by
   the local chat send path, case chat or not). The check is the browser `ownerQuote` gate's: the quote must

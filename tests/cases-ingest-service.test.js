@@ -574,7 +574,7 @@ describe('review questions for documents King Louie added', { skip: NEEDS_GIT },
       return res;
     };
     const mcp = createCaseToolHandler({ getRuntime: () => h.runtime, channel: 'mcp-stdio' });
-    await mcp.call('answer_question', { case: h.caseId, question_id: plain.id, option_id: 'a', quote: 'Accept all' });
+    await mcp.call('answer_question', { case: h.caseId, question_id: plain.id, option_id: 'a', quote: 'Accept all, please' });
     assert.strictEqual(effects[0].applied, false);
     // Refused for the channel, not only because the re-typed question is
     // not the record's review question (final review m7).

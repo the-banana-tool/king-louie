@@ -31,12 +31,18 @@ function chatSchema(schema) {
   return { type: 'object', properties, ...(schema.required && schema.required.length ? { required: [...schema.required] } : {}) };
 }
 
+// Owner decision Q28 (2026-10-01): in the chat these four go through the
+// normal tool-approval prompt (the always-approve list and permission rules
+// lift it as for any tool). answer_question and the read tools never
+// prompt. The MCP surfaces call the handler directly, behind their scopes.
+const ASKS_FIRST_TOOLS = Object.freeze(['create_case', 'revoke_envelope', 'cancel_case_job', 'set_away']);
+
 function managementTool(def) {
   return new Tool({
     name: def.name,
     description: def.description,
     parameters: chatSchema(def.inputSchema),
-    requiresApproval: false,
+    requiresApproval: ASKS_FIRST_TOOLS.includes(def.name),
     concurrencySafe: def.tier === 'read',
     execute: async (params, context) => {
       const handler = context && context.caseManagement;
@@ -76,4 +82,4 @@ function registerManagementTools(registry) {
   for (const tool of MANAGEMENT_TOOLS) registry.register(tool);
 }
 
-module.exports = { registerManagementTools, MANAGEMENT_TOOLS, MANAGEMENT_TOOL_NAMES, chatSchema, UNAVAILABLE, DELEGATE_REFUSED };
+module.exports = { registerManagementTools, MANAGEMENT_TOOLS, MANAGEMENT_TOOL_NAMES, ASKS_FIRST_TOOLS, chatSchema, UNAVAILABLE, DELEGATE_REFUSED };

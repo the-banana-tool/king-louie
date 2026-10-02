@@ -218,7 +218,7 @@ describe('front-door case tools', () => {
     const answer = rt.questions(meta.id).get(q.plain.id).answer;
     assert.deepStrictEqual([answer.channel, answer.quote, answer.text], ['mcp-frontdoor', quote, quote]);
     for (const pressed of [q.direction, q.failure, q.review]) {
-      const r = await t.call('answer_question', { ...args, question_id: pressed.id, quote: 'yes' }, ANSWER_SCOPES, ANSWER);
+      const r = await t.call('answer_question', { ...args, question_id: pressed.id, quote: 'yes, go ahead' }, ANSWER_SCOPES, ANSWER);
       assert.strictEqual(r.error.code, 'not_answerable_here', pressed.id);
       assert.strictEqual(rt.questions(meta.id).get(pressed.id).answer, null);
     }
@@ -233,7 +233,7 @@ describe('front-door case tools', () => {
     const t = await frontDoor(rt, { now: () => t0 });
     // Question ids that do not exist: the node refuses each without taking a
     // slot of its own, so only the front door's limit is counted here.
-    const args = (n) => ({ machine: 'gpu-box', case: meta.id, question_id: `q-${String(9000 + n)}`, quote: 'yes' });
+    const args = (n) => ({ machine: 'gpu-box', case: meta.id, question_id: `q-${String(9000 + n)}`, quote: 'yes, go ahead' });
     for (let i = 0; i < 30; i += 1) {
       const r = await t.call('answer_question', args(i), ANSWER_SCOPES, ANSWER);
       assert.strictEqual(r.error.code, 'question_not_found', `call ${i + 1}`);
@@ -370,7 +370,7 @@ describe('front-door case tools', () => {
       assert.strictEqual(ok.question_id, q.plain.id);
       const answer = rt.questions(meta.id).get(q.plain.id).answer;
       assert.deepStrictEqual([answer.channel, answer.quote], ['mcp-frontdoor', 'Lead with the lake view']);
-      assert.strictEqual((await answerer.call('answer_question', { ...args, question_id: q.direction.id, quote: 'yes' })).error, 'not_answerable_here');
+      assert.strictEqual((await answerer.call('answer_question', { ...args, question_id: q.direction.id, quote: 'yes, go ahead' })).error, 'not_answerable_here');
       // 2 write calls so far; 28 more fill the window (ids that do not exist,
       // so the node's own limit takes no slot), and the 31st is refused.
       for (let i = 0; i < 28; i += 1) {

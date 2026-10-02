@@ -41,6 +41,13 @@ const CASE_SCOPED_TOOLS = new Set([
   'list_cases', 'open_case', 'get_orientation', 'list_questions', 'list_envelopes', 'list_playbooks',
   'answer_question', 'revoke_envelope', 'cancel_case_job'
 ]);
+// Owner decision Q28 (2026-10-01): every spoken tool's quote is at least
+// three words on every channel, so a bare "yes" or "option 2" lifted from a
+// longer message never stands for the owner's request. Words are runs of
+// letters or digits after the owner-quote fold ("go with 2" is three).
+const MIN_QUOTE_WORDS = 3;
+const QUOTE_TOO_SHORT_MESSAGE = "the quote must be at least three of the owner's words; quote more of their message, or ask them to say it in a few words";
+const quoteWordCount = (quote) => (fold(quote).match(/[\p{L}\p{N}]+/gu) || []).length;
 // The registry's refusal when a wake-up holds the case (jobs.js BUSY).
 const REGISTRY_BUSY = /busy/i;
 
@@ -295,12 +302,13 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     };
   }
 
-  // Every spoken tool's quote rule (spec §3.2): required and non-blank on
-  // every channel; on the in-app-chat channel it must be in the owner's own
+  // Every spoken tool's quote rule (spec §3.2): required, non-blank and at
+  // least three words (Q28) on every channel; on the in-app-chat channel it must be in the owner's own
   // message this turn (ownerTurnText, from the executor only); over MCP it
   // is recorded, not checked.
   function checkQuote(quote, ownerTurnText) {
     if (!fold(quote)) throw fail('invalid_params', '"quote" must hold the owner\'s words');
+    if (quoteWordCount(quote) < MIN_QUOTE_WORDS) throw fail('quote_too_short', QUOTE_TOO_SHORT_MESSAGE);
     if (channel === CHAT_CHANNEL) {
       if (typeof ownerTurnText !== 'string' || !fold(ownerTurnText)) throw fail('not_owner', OWNER_ONLY_MESSAGE);
       if (!ownerQuoteInTurn(quote, ownerTurnText)) throw fail('quote_not_found', 'the quote is not in the owner\'s message this turn; quote their words exactly');
@@ -639,5 +647,7 @@ module.exports = {
   OWNER_ONLY_MESSAGE,
   OTHER_CASE_MESSAGE,
   CASE_SCOPED_TOOLS,
+  QUOTE_TOO_SHORT_MESSAGE,
+  quoteWordCount,
   registerNodeCaseMethods
 };

@@ -996,7 +996,10 @@ Spec `docs/superpowers/specs/2026-09-30-management-surfaces.md`; ADR
   `detour-similar`, …) are refused by `answer_question` on every channel,
   in the chat (`in-app-chat`) included, and answered only by the card's buttons
   (`case:answerQuestion`, no model between) or the phone.
-- Every spoken tool requires `quote`, the owner's verbatim words. In-app,
+- Every spoken tool requires `quote`, the owner's verbatim words, at least
+  three words on every channel (owner decision Q28, 2026-10-01; words are
+  runs of letters or digits after the owner-quote fold, so "go with 2"
+  passes; shorter is refused `quote_too_short`). In-app,
   `ToolExecutor` puts its own `ownerTurnText` last in the execute context
   (never under `denyAutoApproval`) and the quote must appear in it on word
   boundaries after folding (`src/tools/owner-quote.js`, the browser
@@ -1005,6 +1008,13 @@ Spec `docs/superpowers/specs/2026-09-30-management-surfaces.md`; ADR
   and the quote on its source. `create_case` never takes `force` (a
   `SIMILAR_CASES` refusal says to open the app); its objective must be
   words from the quote.
+- In King Louie's chat, `revoke_envelope`, `cancel_case_job`, `set_away`
+  and `create_case` (`ASKS_FIRST_TOOLS` in `management-tools.js`) go
+  through the normal tool-approval prompt (`requiresApproval: true`; the
+  always-approve list and permission rules lift it as for any tool), after
+  which the quote is still checked. `answer_question` and the read tools
+  never prompt. The MCP surfaces call the handler directly and have their
+  scopes instead (owner decision Q28, 2026-10-01).
 - Options: the quote must name the chosen option, by its label on word
   boundaries or by its 1-based number when the number is the whole quote,
   is marked ("option 2", "number 2", "no. 2", "#2"), or follows "go with",

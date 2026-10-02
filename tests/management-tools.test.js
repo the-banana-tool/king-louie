@@ -169,8 +169,10 @@ describe('management tools in King Louie\'s chat', () => {
     for (const name of ALL) {
       const tool = toolRegistry.get(name);
       assert.ok(tool, name);
-      assert.strictEqual(tool.requiresApproval, false);
-      assert.strictEqual(classifyToolCall(name, {}, {}).tier, SPOKEN.includes(name) ? 'routine' : 'read');
+      assert.strictEqual(tool.requiresApproval, MANAGE.includes(name) || name === 'set_away', name);
+      // A tool that asks first is unsafe to a node policy, like every such tool (Q28).
+      const asks = MANAGE.includes(name) || name === 'set_away';
+      assert.strictEqual(classifyToolCall(name, {}, {}).tier, asks ? 'unsafe' : SPOKEN.includes(name) ? 'routine' : 'read', name);
       const def = defs.CASE_MCP_TOOLS.find((t) => t.name === name);
       assert.deepStrictEqual(Object.keys(tool.parameters.properties), Object.keys(def.inputSchema.properties));
       assert.ok(!JSON.stringify(tool.parameters).includes('additionalProperties'));
@@ -301,18 +303,22 @@ describe('answer_question takes the owner\'s quote', () => {
       });
     };
     assert.strictEqual(await named('daily is fine'), true, 'label');
-    assert.strictEqual(await named('Weekly', 'weekly'), true, 'label alone');
+    assert.strictEqual(await named('Weekly, thank you', 'weekly'), true, 'label');
     assert.strictEqual(await named('the weekly one', 'weekly'), true, 'label, any case');
-    assert.strictEqual(await named('option 2', 'weekly'), true, 'option N');
+    assert.strictEqual(await named('option 2 please', 'weekly'), true, 'option N');
     assert.strictEqual(await named('go with option 2', 'weekly'), true);
     assert.strictEqual(await named('Go with 2', 'weekly'), true, 'a choosing verb marks the number');
     assert.strictEqual(await named('pick 2, thanks', 'weekly'), true);
-    assert.strictEqual(await named('choose 2.', 'weekly'), true);
-    assert.strictEqual(await named('#2', 'weekly'), true);
-    assert.strictEqual(await named('number 2', 'weekly'), true);
+    assert.strictEqual(await named('I choose 2.', 'weekly'), true);
+    assert.strictEqual(await named('#2 for me', 'weekly'), true);
+    assert.strictEqual(await named('number 2 please', 'weekly'), true);
     assert.strictEqual(await named('no. 2 please', 'weekly'), true);
-    assert.strictEqual(await named('2', 'weekly'), true, 'the whole quote');
-    assert.strictEqual(await named(' 2. ', 'weekly'), true, 'the whole quote, trailing punctuation ignored');
+    // A bare number is under the three-word floor (Q28).
+    for (const quote of ['2', ' 2. ', 'Weekly', 'option 2', '#2']) {
+      const { rt, lot, q: qs } = await answerFixture();
+      const e = await refusal(handlerFor(rt, 'mcp-stdio').call('answer_question', { case: lot.id, question_id: qs.cadence.id, option_id: 'weekly', quote }));
+      assert.strictEqual(e.code, 'quote_too_short', quote);
+    }
     const e = await named('go with Weekly');
     assert.strictEqual(e.code, 'option_not_in_quote');
     // The options come back as wrapped data; the message is a fixed sentence.
@@ -322,19 +328,19 @@ describe('answer_question takes the owner\'s quote', () => {
       data: [{ number: 1, id: 'daily', label: 'Daily' }, { number: 2, id: 'weekly', label: 'Weekly' }]
     });
     assert.ok(!e.message.includes('Weekly') && !e.message.includes('Daily'));
-    for (const quote of ['wait 1 week then pick the other one', '12', '1.5', 'about 1.5 times a week', '2,1', '2,1 split', 'option 12', 'dailyish', 'go with 2 weeks', 'pick 2.5', 'take 2']) {
+    for (const quote of ['wait 1 week then pick the other one', 'make it 12', 'say 1.5 then', 'about 1.5 times a week', 'split it 2,1', '2,1 split please', 'option 12 please', 'dailyish is fine', 'go with 2 weeks', 'pick 2.5 please', 'take 2 please']) {
       assert.strictEqual((await named(quote)).code, 'option_not_in_quote', quote);
     }
     // The id alone is not the owner naming the option.
     const byId = (rt, lot) => rt.createQuestion(lot.id, { kind: 'question', urgency: 'normal', payload: { type: 'ask' }, text: 'Which vendor?', options: [{ id: 'a', label: 'Acme' }, { id: 'b', label: 'Bolt' }] }, { charge: false });
-    assert.strictEqual((await named('a', 'a', byId)).code, 'option_not_in_quote', 'an id is not a label');
+    assert.strictEqual((await named('a is fine', 'a', byId)).code, 'option_not_in_quote', 'an id is not a label');
     assert.strictEqual((await named("Bolt, it's a better deal", 'a', byId)).code, 'option_not_in_quote', 'the quote names another option');
-    assert.strictEqual(await named('Acme, please', 'a', byId), true);
+    assert.strictEqual(await named('Acme, please, thanks', 'a', byId), true);
     // A label with regex characters is matched as text.
     const special = (rt, lot) => rt.createQuestion(lot.id, { kind: 'question', urgency: 'normal', payload: { type: 'ask' }, text: 'Which plan?', options: [{ id: 'p', label: 'Plan (a+b)?' }, { id: 'q', label: 'Plan c.*' }] }, { charge: false });
     assert.strictEqual(await named('go with plan (a+b)? I think', 'p', special), true);
-    assert.strictEqual((await named('plan cxx', 'q', special)).code, 'option_not_in_quote');
-    assert.strictEqual(await named('Plan c.*', 'q', special), true);
+    assert.strictEqual((await named('plan cxx please', 'q', special)).code, 'option_not_in_quote');
+    assert.strictEqual(await named('Plan c.* please', 'q', special), true);
   });
 
   it('a quote that names more than one option is refused as ambiguous, listing the options', async () => {
@@ -344,7 +350,7 @@ describe('answer_question takes the owner\'s quote', () => {
       assert.strictEqual(rt.questions(lot.id).get(q.cadence.id).answer, null);
       return e;
     };
-    for (const [quote, optionId] of [['option 1 or option 2', 'daily'], ['daily, no wait, weekly', 'weekly'], ['option 2, daily', 'weekly'], ['#1 #2', 'daily']]) {
+    for (const [quote, optionId] of [['option 1 or option 2', 'daily'], ['daily, no wait, weekly', 'weekly'], ['option 2, daily', 'weekly'], ['#1 #2 maybe', 'daily']]) {
       const e = await tried(quote, optionId);
       assert.strictEqual(e.code, 'option_ambiguous', quote);
       assert.deepStrictEqual(e.data.options.data, [{ number: 1, id: 'daily', label: 'Daily' }, { number: 2, id: 'weekly', label: 'Weekly' }]);
@@ -361,7 +367,7 @@ describe('answer_question takes the owner\'s quote', () => {
   it('a label that contains another option\'s label names only the longer one', async () => {
     const { rt, lot } = await answerFixture();
     const qq = rt.createQuestion(lot.id, { kind: 'question', urgency: 'normal', payload: { type: 'ask' }, text: 'Go ahead?', options: [{ id: 'y', label: 'Yes' }, { id: 'yl', label: 'Yes, later' }] }, { charge: false });
-    await handlerFor(rt, 'mcp-stdio').call('answer_question', { case: lot.id, question_id: qq.id, option_id: 'yl', quote: 'yes, later' });
+    await handlerFor(rt, 'mcp-stdio').call('answer_question', { case: lot.id, question_id: qq.id, option_id: 'yl', quote: 'yes, later please' });
     assert.strictEqual(rt.questions(lot.id).get(qq.id).answer.optionId, 'yl');
   });
 
@@ -380,9 +386,9 @@ describe('answer_question takes the owner\'s quote', () => {
   it('mcp-stdio and mcp-frontdoor record the quote without checking it, and ignore any owner text', async () => {
     for (const channel of ['mcp-stdio', 'mcp-frontdoor']) {
       const { rt, lot, q } = await answerFixture();
-      const r = await handlerFor(rt, channel).call('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: 'weekly', quote: 'weekly works' }, { ownerTurnText: 'something else entirely' });
+      const r = await handlerFor(rt, channel).call('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: 'weekly', quote: 'weekly works for me' }, { ownerTurnText: 'something else entirely' });
       const fact = factOf(rt, lot, r.fact_id);
-      assert.deepStrictEqual([fact.provenance, fact.source.channel, fact.source.quote], ['user', channel, 'weekly works']);
+      assert.deepStrictEqual([fact.provenance, fact.source.channel, fact.source.quote], ['user', channel, 'weekly works for me']);
     }
   });
 
@@ -400,8 +406,8 @@ describe('answer_question takes the owner\'s quote', () => {
     for (const channel of ['in-app-chat', 'mcp-stdio', 'mcp-frontdoor']) {
       const h = handlerFor(rt, channel);
       for (const qq of pressed) {
-        const args = { case: lot.id, question_id: qq.id, quote: 'yes', ...(qq.kind === 'briefing' ? {} : { option_id: 'yes' }) };
-        const e = await refusal(h.call('answer_question', args, { ownerTurnText: 'yes' }));
+        const args = { case: lot.id, question_id: qq.id, quote: 'yes, go ahead', ...(qq.kind === 'briefing' ? {} : { option_id: 'yes' }) };
+        const e = await refusal(h.call('answer_question', args, { ownerTurnText: 'yes, go ahead' }));
         assert.deepStrictEqual([e.code, e.message], ['not_answerable_here', `not_answerable_here: ${PRESSED_MESSAGE}`], `${channel} ${qq.payload.type}`);
       }
     }
@@ -410,10 +416,10 @@ describe('answer_question takes the owner\'s quote', () => {
 
   it('acknowledges an Ask briefing, with the quote and the channel', async () => {
     const { rt, lot, q } = await answerFixture();
-    const r = await handlerFor(rt, 'in-app-chat').call('answer_question', { case: lot.id, question_id: q.digest.id, quote: 'thanks, noted' }, { ownerTurnText: 'Thanks, noted.' });
+    const r = await handlerFor(rt, 'in-app-chat').call('answer_question', { case: lot.id, question_id: q.digest.id, quote: 'thanks, all noted' }, { ownerTurnText: 'Thanks, all noted.' });
     assert.deepStrictEqual([r.question_id, r.fact_id, r.acknowledged], [q.digest.id, null, true]);
     const answer = rt.questions(lot.id).get(q.digest.id).answer;
-    assert.deepStrictEqual([answer.channel, answer.quote, answer.factId], ['in-app-chat', 'thanks, noted', null]);
+    assert.deepStrictEqual([answer.channel, answer.quote, answer.factId], ['in-app-chat', 'thanks, all noted', null]);
   });
 
   it('a detour routing question answered here is applied at the next turn start', async () => {
@@ -456,7 +462,7 @@ describe('answer_question takes the owner\'s quote', () => {
     assert.strictEqual(defs.answerClass(similar), 'pressed');
     const before = rt.listCases().length;
     for (const channel of ['in-app-chat', 'mcp-stdio', 'mcp-frontdoor']) {
-      const e = await refusal(handlerFor(rt, channel).call('answer_question', { case: door.id, question_id: similar.id, option_id: 'create-anyway', quote: 'Create anyway' }, { ownerTurnText: 'Create anyway' }));
+      const e = await refusal(handlerFor(rt, channel).call('answer_question', { case: door.id, question_id: similar.id, option_id: 'create-anyway', quote: 'Create it anyway' }, { ownerTurnText: 'Create it anyway' }));
       assert.deepStrictEqual([e.code, e.message], ['not_answerable_here', `not_answerable_here: ${PRESSED_MESSAGE}`], channel);
       // Not a field any case tool takes.
       const extra = await refusal(handlerFor(rt, channel).call('create_case', { title: 'Book a piano tuner for the living room', quote: 'Book a piano tuner', force: true }, { ownerTurnText: 'Book a piano tuner' }));
@@ -477,11 +483,11 @@ describe('answer_question takes the owner\'s quote', () => {
     const { rt, lot, q } = await answerFixture();
     let t = 1000000;
     const h = createCaseToolHandler({ getRuntime: () => rt, channel: 'in-app-chat', now: () => t, rateLimit: 1 });
-    await h.call('answer_question', { case: lot.id, question_id: q.price.id, quote: '250000' }, { ownerTurnText: '250000' });
-    const e = await refusal(h.call('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: 'daily', quote: 'daily' }, { ownerTurnText: 'daily' }));
+    await h.call('answer_question', { case: lot.id, question_id: q.price.id, quote: 'ask 250000 for it' }, { ownerTurnText: 'ask 250000 for it' });
+    const e = await refusal(h.call('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: 'daily', quote: 'daily is fine' }, { ownerTurnText: 'daily is fine' }));
     assert.strictEqual(e.code, 'rate_limited');
     t += 61000;
-    await h.call('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: 'daily', quote: 'daily' }, { ownerTurnText: 'daily' });
+    await h.call('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: 'daily', quote: 'daily is fine' }, { ownerTurnText: 'daily is fine' });
   });
 });
 
@@ -645,7 +651,7 @@ describe('create_case', () => {
   it("runs from the chat through the executor, with the owner's message from the executor", async () => {
     const rt = new CaseRuntime({ root: tmp('kl-mgmt-create-') });
     const inApp = createCaseToolHandler({ getRuntime: () => rt, channel: 'in-app-chat' });
-    const ex = new ToolExecutor({ workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, extraToolOptions: { caseManagement: inApp }, ownerTurnText: 'Open a case to sell the boat, please.' });
+    const ex = new ToolExecutor({ workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, extraToolOptions: { caseManagement: inApp }, ownerTurnText: 'Open a case to sell the boat, please.', approvalRequester: async () => true });
     const r = await ex.execute('create_case', { title: 'Boat sale', objective: 'sell the boat', quote: 'Open a case to sell the boat' });
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.strictEqual(rt.listCases().length, 1);
@@ -662,7 +668,7 @@ describe('revoke_envelope and cancel_case_job', () => {
       assert.strictEqual(env.status, 'revoked');
       assert.strictEqual(env.revoked.reason, `revoked by the owner (${channel}): "revoke that envelope"`);
       assert.strictEqual(f.jobs.get(f.job.own.id).state, 'running');
-      assert.strictEqual((await refusal(f.handler(channel).call('revoke_envelope', { case: f.meta.id, envelope: 'env-09', quote: 'revoke it' }, { ownerTurnText: 'revoke it' }))).code, 'envelope_not_found');
+      assert.strictEqual((await refusal(f.handler(channel).call('revoke_envelope', { case: f.meta.id, envelope: 'env-09', quote: 'revoke it now' }, { ownerTurnText: 'revoke it now' }))).code, 'envelope_not_found');
     }
   });
 
@@ -685,8 +691,8 @@ describe('revoke_envelope and cancel_case_job', () => {
     const h = f.handler('in-app-chat');
     for (const opts of [{}, { ownerTurnText: 'keep everything as it is' }]) {
       const want = opts.ownerTurnText ? 'quote_not_found' : 'not_owner';
-      assert.strictEqual((await refusal(h.call('revoke_envelope', { case: f.meta.id, envelope: 'env-01', quote: 'revoke it' }, opts))).code, want);
-      assert.strictEqual((await refusal(h.call('cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote: 'cancel it' }, opts))).code, want);
+      assert.strictEqual((await refusal(h.call('revoke_envelope', { case: f.meta.id, envelope: 'env-01', quote: 'revoke it now' }, opts))).code, want);
+      assert.strictEqual((await refusal(h.call('cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote: 'cancel it now' }, opts))).code, want);
     }
     for (const channel of CHANNELS) {
       assert.strictEqual((await refusal(f.handler(channel).call('revoke_envelope', { case: f.meta.id, envelope: 'env-01' }, { ownerTurnText: 'x' }))).code, 'invalid_params');
@@ -701,11 +707,11 @@ describe('revoke_envelope and cancel_case_job', () => {
     const busy = { revokeEnvelope: busyReply, cancelJob: busyReply };
     const h = createCaseToolHandler({ getRuntime: () => f.runtime, getExecutorRegistry: () => busy, channel: 'mcp-stdio', rateLimit: 1 });
     for (let i = 0; i < 2; i += 1) {
-      assert.strictEqual((await refusal(h.call('revoke_envelope', { case: f.meta.id, envelope: 'env-01', quote: 'revoke it' }))).code, 'case_busy');
-      assert.strictEqual((await refusal(h.call('cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote: 'cancel it' }))).code, 'case_busy');
+      assert.strictEqual((await refusal(h.call('revoke_envelope', { case: f.meta.id, envelope: 'env-01', quote: 'revoke it now' }))).code, 'case_busy');
+      assert.strictEqual((await refusal(h.call('cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote: 'cancel it now' }))).code, 'case_busy');
     }
     const none = createCaseToolHandler({ getRuntime: () => f.runtime, channel: 'mcp-stdio' });
-    assert.strictEqual((await refusal(none.call('revoke_envelope', { case: f.meta.id, envelope: 'env-01', quote: 'revoke it' }))).code, 'executors_unavailable');
+    assert.strictEqual((await refusal(none.call('revoke_envelope', { case: f.meta.id, envelope: 'env-01', quote: 'revoke it now' }))).code, 'executors_unavailable');
   });
 });
 
@@ -793,14 +799,14 @@ describe('set_away', () => {
     const f = awayFixture({ raw: true });
     const before = { ...f.policy() };
     assert.deepStrictEqual(Object.keys(before).sort(), ['quietHours']);
-    await f.handler('mcp-stdio').call('set_away', { mode: 'email-only', until: LATER, quote: 'email only' });
+    await f.handler('mcp-stdio').call('set_away', { mode: 'email-only', until: LATER, quote: 'email only please' });
     assert.deepStrictEqual(f.policy(), { ...before, away: { mode: 'email-only', until: LATER } });
     // Settings > Contact saves a ladder (keeping away, as its save does);
     // the next set_away keeps the ladder and adds nothing else.
     const saved = f.host.context().setPolicy({ ...f.host.context().getPolicy().policy, batchDelaySec: 30 });
     assert.strictEqual(saved.ok, true, saved.error);
     const afterSave = { ...f.policy() };
-    await f.handler('mcp-stdio').call('set_away', { mode: 'off', quote: 'back' });
+    await f.handler('mcp-stdio').call('set_away', { mode: 'off', quote: 'I am back' });
     assert.deepStrictEqual(f.policy(), { ...afterSave, away: null });
     assert.strictEqual(f.policy().batchDelaySec, 30);
   });
@@ -835,17 +841,17 @@ describe('set_away', () => {
   it('refuses where contact is off, and shares the write window', async () => {
     const rt = new CaseRuntime({ root: tmp('kl-mgmt-away-none-') });
     const none = createCaseToolHandler({ getRuntime: () => rt, channel: 'mcp-stdio' });
-    assert.strictEqual((await refusal(none.call('set_away', { mode: 'off', quote: 'back' }))).code, 'contact_unavailable');
+    assert.strictEqual((await refusal(none.call('set_away', { mode: 'off', quote: 'I am back' }))).code, 'contact_unavailable');
     const f = awayFixture();
     const h = f.handler('mcp-stdio', { rateLimit: 1 });
-    await h.call('set_away', { mode: 'off', quote: 'back' });
-    const limited = await refusal(h.call('set_away', { mode: 'off', quote: 'back' }));
+    await h.call('set_away', { mode: 'off', quote: 'I am back' });
+    const limited = await refusal(h.call('set_away', { mode: 'off', quote: 'I am back' }));
     assert.strictEqual(limited.code, 'rate_limited');
   });
 
   it("runs from the chat through the executor, with the owner's message from the executor", async () => {
     const f = awayFixture();
-    const ex = new ToolExecutor({ workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, extraToolOptions: { caseManagement: f.handler('in-app-chat') }, ownerTurnText: 'Email only until the weekend, please.' });
+    const ex = new ToolExecutor({ workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, extraToolOptions: { caseManagement: f.handler('in-app-chat') }, ownerTurnText: 'Email only until the weekend, please.', approvalRequester: async () => true });
     const r = await ex.execute('set_away', { mode: 'email-only', until: LATER, quote: 'Email only until the weekend' });
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.deepStrictEqual(f.policy().away, { mode: 'email-only', until: LATER });
@@ -925,5 +931,128 @@ describe('in a case chat, the management tools act only on that case', () => {
     const plain = executor({});
     assert.deepStrictEqual((await plain.execute('list_cases', {})).result.map((r) => r.id).sort(), [lot.id, shed.id].sort());
     assert.strictEqual((await plain.execute('open_case', { case: shed.id })).result.id, shed.id);
+  });
+});
+
+// ---- Owner decision Q28 (2026-10-01): three words, and four tools ask first ----
+
+const { QUOTE_TOO_SHORT_MESSAGE, quoteWordCount } = require('../src/mcp/case-tools');
+const { ASKS_FIRST_TOOLS } = require('../src/tools/builtin/management-tools');
+
+describe('a spoken quote needs at least three words', () => {
+  it('counts words as runs of letters or digits after the owner-quote fold', () => {
+    assert.strictEqual(quoteWordCount('go with 2'), 3);
+    assert.strictEqual(quoteWordCount('  Go,  with—“2” '), 3);
+    assert.strictEqual(quoteWordCount('yes'), 1);
+    assert.strictEqual(quoteWordCount('option 2'), 2);
+    assert.strictEqual(quoteWordCount('... !!'), 0);
+    assert.strictEqual(quoteWordCount('café au lait'), 3);
+  });
+
+  it('every spoken tool refuses a one- or two-word quote on every channel; nothing changes', async () => {
+    for (const channel of CHANNELS) {
+      const f = await executorFixture();
+      const ask = f.runtime.createQuestion(f.meta.id, { kind: 'question', urgency: 'normal', payload: { type: 'ask' }, text: 'How often?', options: [{ id: 'daily', label: 'Daily' }, { id: 'weekly', label: 'Weekly' }] }, { charge: false });
+      const h = f.handler(channel);
+      for (const quote of ['weekly', 'option 2', 'go with']) {
+        const opts = { ownerTurnText: `ok, ${quote}` };
+        const calls = [
+          ['answer_question', { case: f.meta.id, question_id: ask.id, option_id: 'weekly', quote }],
+          ['revoke_envelope', { case: f.meta.id, envelope: 'env-01', quote }],
+          ['cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote }],
+          ['create_case', { title: 'Boat', objective: quote, quote }],
+          ['set_away', { mode: 'off', quote }]
+        ];
+        for (const [name, args] of calls) {
+          const e = await refusal(h.call(name, args, opts));
+          assert.deepStrictEqual([e.code, e.message], ['quote_too_short', `quote_too_short: ${QUOTE_TOO_SHORT_MESSAGE}`], `${channel} ${name} "${quote}"`);
+        }
+      }
+      assert.strictEqual(f.runtime.questions(f.meta.id).get(ask.id).answer, null);
+      assert.strictEqual(new EnvelopeStore(f.meta.dir).get('env-01').status, 'active');
+      assert.strictEqual(f.jobs.get(f.job.own.id).state, 'running');
+      assert.strictEqual(f.runtime.listCases().length, 1);
+      // "go with 2" is three words, and names option 2.
+      await h.call('answer_question', { case: f.meta.id, question_id: ask.id, option_id: 'weekly', quote: 'go with 2' }, { ownerTurnText: 'go with 2' });
+      assert.strictEqual(f.runtime.questions(f.meta.id).get(ask.id).answer.optionId, 'weekly', channel);
+    }
+  });
+
+  it("every spoken tool's quote description says so", () => {
+    for (const name of SPOKEN) {
+      const def = defs.CASE_MCP_TOOLS.find((t) => t.name === name);
+      assert.match(def.inputSchema.properties.quote.description, /at least three words/i, name);
+      assert.match(toolRegistry.get(name).parameters.properties.quote.description, /at least three words/i, name);
+    }
+  });
+});
+
+describe("in King Louie's chat, revoke, cancel, away and create ask first", () => {
+  it('those four require approval; answer_question and the read tools do not', () => {
+    assert.deepStrictEqual([...ASKS_FIRST_TOOLS].sort(), ['cancel_case_job', 'create_case', 'revoke_envelope', 'set_away']);
+    for (const name of ALL) assert.strictEqual(toolRegistry.get(name).requiresApproval, ASKS_FIRST_TOOLS.includes(name), name);
+  });
+
+  it('raise an approval request through the executor and do not run when it is denied', async () => {
+    const f = await executorFixture();
+    const away = awayFixture();
+    const owner = 'Please revoke that envelope, cancel the running job, start a case to sell the boat; email only until the weekend.';
+    const calls = [
+      ['revoke_envelope', { case: f.meta.id, envelope: 'env-01', quote: 'revoke that envelope' }, f.handler('in-app-chat')],
+      ['cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote: 'cancel the running job' }, f.handler('in-app-chat')],
+      ['create_case', { title: 'Boat sale', objective: 'sell the boat', quote: 'start a case to sell the boat' }, f.handler('in-app-chat')],
+      ['set_away', { mode: 'email-only', until: LATER, quote: 'email only until the weekend' }, away.handler('in-app-chat')]
+    ];
+    for (const [name, args, handler] of calls) {
+      const asked = [];
+      const ex = new ToolExecutor({
+        workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, ownerTurnText: owner,
+        extraToolOptions: { caseManagement: handler }, approvalRequester: async (toolName) => { asked.push(toolName); return false; }
+      });
+      const r = await ex.execute(name, args);
+      assert.deepStrictEqual(asked, [name]);
+      assert.strictEqual(r.success, false, name);
+    }
+    assert.strictEqual(new EnvelopeStore(f.meta.dir).get('env-01').status, 'active');
+    assert.strictEqual(f.jobs.get(f.job.own.id).state, 'running');
+    assert.strictEqual(f.runtime.listCases().length, 1);
+    assert.strictEqual(away.policy().away, null);
+    // Approved, they run.
+    for (const [name, args, handler] of calls) {
+      const ex = new ToolExecutor({
+        workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, ownerTurnText: owner,
+        extraToolOptions: { caseManagement: handler }, approvalRequester: async () => true
+      });
+      const r = await ex.execute(name, args);
+      assert.strictEqual(r.ok, true, `${name}: ${JSON.stringify(r)}`);
+    }
+    assert.strictEqual(new EnvelopeStore(f.meta.dir).get('env-01').status, 'revoked');
+    assert.deepStrictEqual(away.policy().away, { mode: 'email-only', until: LATER });
+  });
+
+  it('the always-approve list lifts the prompt like any other tool', async () => {
+    const f = await executorFixture();
+    const asked = [];
+    const ex = new ToolExecutor({
+      workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, ownerTurnText: 'cancel the running job',
+      extraToolOptions: { caseManagement: f.handler('in-app-chat') },
+      shouldAutoApprove: async (toolName) => toolName === 'cancel_case_job',
+      approvalRequester: async (toolName) => { asked.push(toolName); return false; }
+    });
+    const r = await ex.execute('cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote: 'cancel the running job' });
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.deepStrictEqual(asked, []);
+  });
+
+  it('answer_question does not prompt', async () => {
+    const { rt, lot, q } = await answerFixture();
+    const asked = [];
+    const ex = new ToolExecutor({
+      workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, ownerTurnText: 'the lakeside one, go with Weekly',
+      extraToolOptions: { caseManagement: handlerFor(rt, 'in-app-chat') }, approvalRequester: async (toolName) => { asked.push(toolName); return false; }
+    });
+    const r = await ex.execute('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: 'weekly', quote: 'go with Weekly' });
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.deepStrictEqual(asked, []);
   });
 });

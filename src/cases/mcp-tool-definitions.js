@@ -19,8 +19,11 @@ function deepFreeze(value) {
 const CASE_ARG = Object.freeze({ type: 'string', minLength: 1, maxLength: 128, description: 'Case id or slug.' });
 const CASE_ONLY = Object.freeze({ type: 'object', properties: { case: CASE_ARG }, required: ['case'], additionalProperties: false });
 const QUOTE_ARG = Object.freeze({ type: 'string', minLength: 1, maxLength: 2000 });
-// The spoken management tools' quote (management surfaces spec §3.2).
-const OWNER_WORDS = Object.freeze({ ...QUOTE_ARG, description: "The owner's own words, verbatim, asking for this. In King Louie's chat they must appear in the owner's latest message." });
+// The spoken management tools' quote (management surfaces spec §3.2): at
+// least three words on every channel (owner decision Q28, 2026-10-01; the
+// handler counts them).
+const THREE_WORDS = 'At least three words; a shorter quote is refused.';
+const OWNER_WORDS = Object.freeze({ ...QUOTE_ARG, description: `The owner's own words, verbatim, asking for this. ${THREE_WORDS} In King Louie's chat they must appear in the owner's latest message.` });
 
 const CASE_MCP_TOOLS = deepFreeze([
   {
@@ -55,13 +58,13 @@ const CASE_MCP_TOOLS = deepFreeze([
   },
   {
     name: 'answer_question',
-    description: "Answer an open case question in the owner's words. quote is required: the owner's own words, copied verbatim from their message. Give option_id (the quote must name that option, and only that one, by its label or a marked number such as 'option 2' or '#2', or be just the number) or text (part of the quote; the quote itself when omitted), not both. A briefing is acknowledged. Questions that take a button (approvals, budgets, direction, a case's status and the like; list_questions marks them pressed) are refused: the owner answers them in the app or on the phone.",
+    description: "Answer an open case question in the owner's words. quote is required: at least three of the owner's own words, copied verbatim from their message. Give option_id (the quote must name that option, and only that one, by its label or a marked number such as 'option 2' or '#2', or be just the number) or text (part of the quote; the quote itself when omitted), not both. A briefing is acknowledged. Questions that take a button (approvals, budgets, direction, a case's status and the like; list_questions marks them pressed) are refused: the owner answers them in the app or on the phone.",
     inputSchema: {
       type: 'object',
       properties: {
         case: CASE_ARG,
         question_id: { type: 'string', pattern: '^q-\\d{4,}$' },
-        quote: { ...QUOTE_ARG, description: "The owner's own words, verbatim, that answer the question. In King Louie's chat they must appear in the owner's latest message." },
+        quote: { ...QUOTE_ARG, description: `The owner's own words, verbatim, that answer the question. ${THREE_WORDS} In King Louie's chat they must appear in the owner's latest message.` },
         text: { type: 'string', minLength: 1, maxLength: 2000 },
         option_id: { type: 'string', pattern: '^[a-z0-9-]{1,16}$' }
       },
@@ -84,7 +87,7 @@ const CASE_MCP_TOOLS = deepFreeze([
   },
   {
     name: 'create_case',
-    description: "Start a case in the owner's words. quote is required: the owner's own words, copied verbatim from their message; the objective must be words from the quote. When a similar case is already open, nothing is created and the similar cases are listed: the owner opens the app to create it anyway.",
+    description: "Start a case in the owner's words. quote is required: at least three of the owner's own words, copied verbatim from their message; the objective must be words from the quote. When a similar case is already open, nothing is created and the similar cases are listed: the owner opens the app to create it anyway.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -100,7 +103,7 @@ const CASE_MCP_TOOLS = deepFreeze([
   },
   {
     name: 'revoke_envelope',
-    description: "Revoke one of a case's envelopes, in the owner's words, and cancel its open jobs. quote is required: the owner's own words, copied verbatim from their message.",
+    description: "Revoke one of a case's envelopes, in the owner's words, and cancel its open jobs. quote is required: at least three of the owner's own words, copied verbatim from their message.",
     inputSchema: {
       type: 'object',
       properties: { case: CASE_ARG, envelope: { type: 'string', pattern: '^env-\\d{2,}$', description: 'The envelope id, from list_envelopes.' }, quote: OWNER_WORDS },
@@ -111,7 +114,7 @@ const CASE_MCP_TOOLS = deepFreeze([
   },
   {
     name: 'cancel_case_job',
-    description: "Cancel one of a case's open executor jobs, in the owner's words. quote is required: the owner's own words, copied verbatim from their message.",
+    description: "Cancel one of a case's open executor jobs, in the owner's words. quote is required: at least three of the owner's own words, copied verbatim from their message.",
     inputSchema: {
       type: 'object',
       properties: { case: CASE_ARG, job: { type: 'string', pattern: '^job-\\d{4,}$', description: 'The job id.' }, quote: OWNER_WORDS },
@@ -122,7 +125,7 @@ const CASE_MCP_TOOLS = deepFreeze([
   },
   {
     name: 'set_away',
-    description: "Set the owner away, in their words: until a time, questions reach them by email only (email-only) or in the app only (in-app-only); off ends it. quote is required: the owner's own words, copied verbatim from their message. until is an RFC3339 date-time in the future, given with email-only or in-app-only and never with off.",
+    description: "Set the owner away, in their words: until a time, questions reach them by email only (email-only) or in the app only (in-app-only); off ends it. quote is required: at least three of the owner's own words, copied verbatim from their message. until is an RFC3339 date-time in the future, given with email-only or in-app-only and never with off.",
     inputSchema: {
       type: 'object',
       properties: {

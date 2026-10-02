@@ -152,19 +152,19 @@ describe('MCP case tools on the stdio server', () => {
   it('refuses approvals, not-answerable questions and bad arguments', async () => {
     const { rt, meta, q } = await setup();
     const c = connect({ caseTools: stdioTools(rt) });
-    const code = async (args) => (await c.call('answer_question', { case: meta.id, quote: 'x', ...args })).error?.error;
-    assert.strictEqual(await code({ question_id: q.approval.id, text: 'yes', quote: 'yes' }), 'not_answerable_here');
-    assert.strictEqual(await code({ question_id: q.grant.id, text: '50', quote: '50' }), 'not_answerable_here');
+    const code = async (args) => (await c.call('answer_question', { case: meta.id, quote: 'go ahead now', ...args })).error?.error;
+    assert.strictEqual(await code({ question_id: q.approval.id, text: 'yes', quote: 'yes, go ahead' }), 'not_answerable_here');
+    assert.strictEqual(await code({ question_id: q.grant.id, text: '50', quote: 'raise it 50' }), 'not_answerable_here');
     assert.strictEqual(await code({ question_id: q.color.id, quote: undefined }), 'invalid_params');
     assert.strictEqual(await code({ question_id: q.color.id, quote: '   ' }), 'invalid_params');
     assert.strictEqual(await code({ question_id: q.color.id, text: 'x', option_id: 'a' }), 'invalid_params');
-    assert.strictEqual(await code({ question_id: q.color.id, option_id: 'z', quote: 'z' }), 'invalid_params');
+    assert.strictEqual(await code({ question_id: q.color.id, option_id: 'z', quote: 'z is fine' }), 'invalid_params');
     assert.strictEqual(await code({ question_id: 'q-12', text: 'x' }), 'invalid_params');
     assert.strictEqual(await code({ question_id: q.free.id, text: 'x', extra: 1 }), 'invalid_params');
     assert.strictEqual(await code({ question_id: 'q-9999', text: 'x' }), 'question_not_found');
     assert.strictEqual((await c.call('open_case', { case: 'no-such-case' })).error.error, 'case_not_found');
     rt.store.updateMeta(meta.id, { status: 'done' });
-    assert.strictEqual(await code({ question_id: q.free.id, text: '250000', quote: '250000' }), 'case_closed');
+    assert.strictEqual(await code({ question_id: q.free.id, text: '250000', quote: 'ask 250000 for it' }), 'case_closed');
     const none = connect({ caseTools: createCaseToolHandler({ getRuntime: () => null, channel: 'mcp-stdio' }) });
     assert.strictEqual((await none.call('list_cases', {})).error.error, 'cases_unavailable');
     c.close();
@@ -196,7 +196,7 @@ describe('MCP case tools on the stdio server', () => {
   it('from the front door also refuses failure, status-changing and plan questions', async () => {
     const { rt, meta, q } = await setup();
     const fd = createCaseToolHandler({ getRuntime: () => rt, channel: 'mcp-frontdoor' });
-    const code = (args) => fd.call('answer_question', { case: meta.id, quote: 'go ahead', ...args }).then(() => null, (e) => e.code);
+    const code = (args) => fd.call('answer_question', { case: meta.id, quote: 'go ahead please', ...args }).then(() => null, (e) => e.code);
     assert.strictEqual(await code({ question_id: q.failure.id, text: 'go ahead' }), 'not_answerable_here');
     assert.strictEqual(await code({ question_id: q.plan.id, text: 'go ahead' }), 'not_answerable_here');
     for (const type of ['direction', 'budget-grant', 'commit-failed']) {
@@ -222,15 +222,15 @@ describe('MCP case tools on the stdio server', () => {
     let t = 1000000;
     const audit = [];
     const h = createCaseToolHandler({ getRuntime: () => stub, channel: 'mcp-stdio', now: () => t, audit: { append: (e) => audit.push(e) } });
-    await assert.rejects(h.call('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'x' }), (e) => e.code === 'case_busy' && e.data.retry_after === 5);
+    await assert.rejects(h.call('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'go with x' }), (e) => e.code === 'case_busy' && e.data.retry_after === 5);
     busy = false;
     invalid = true;
-    await assert.rejects(h.call('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'x' }), (e) => e.code === 'invalid_params');
+    await assert.rejects(h.call('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'go with x' }), (e) => e.code === 'invalid_params');
     invalid = false;
-    for (let i = 0; i < 30; i += 1) await h.call('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'x' });
-    await assert.rejects(h.call('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'x' }), (e) => e.code === 'rate_limited' && e.data.retry_after === 60);
+    for (let i = 0; i < 30; i += 1) await h.call('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'go with x' });
+    await assert.rejects(h.call('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'go with x' }), (e) => e.code === 'rate_limited' && e.data.retry_after === 60);
     t += 61000;
-    assert.deepStrictEqual(await h.call('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'x' }), { question_id: 'q-0001', answered_at: '2026-09-23T15:00:00.000Z', fact_id: 'f-0001' });
+    assert.deepStrictEqual(await h.call('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'go with x' }), { question_id: 'q-0001', answered_at: '2026-09-23T15:00:00.000Z', fact_id: 'f-0001' });
     await new Promise((r) => setImmediate(r));
     assert.strictEqual(audit[0].kind, 'cases.answer_question');
   });
@@ -253,16 +253,16 @@ describe('MCP case tools on the stdio server', () => {
     assert.ok(hostile instanceof ToolError && hostile instanceof CaseToolError);
     assert.strictEqual(hostile.code, 'invalid_params');
     assert.ok(!hostile.message.includes('Ignore'));
-    const closed = await refusal('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'x' });
+    const closed = await refusal('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'go with x' });
     assert.deepStrictEqual([closed.code, closed.message], ['case_closed', 'case_closed: the case is done or abandoned']);
     stub.getCase = (ref) => {
       if (ref === 'boom') throw new Error(secret);
       return { id: 'c1', slug: 'lakeside-lot', title: 'Lakeside lot', status: 'active', dir: os.tmpdir() };
     };
-    const invalid = await refusal('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'x' });
+    const invalid = await refusal('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'go with x' });
     assert.deepStrictEqual([invalid.code, invalid.message], ['invalid_params', 'invalid_params: the answer does not fit the question']);
     mode = 'io';
-    const io = await refusal('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'x' });
+    const io = await refusal('answer_question', { case: 'c1', question_id: 'q-0001', text: 'x', quote: 'go with x' });
     assert.deepStrictEqual([io.code, io.message], ['internal', 'internal: the case tool failed on this node']);
     const thrown = await refusal('open_case', { case: 'boom' });
     assert.deepStrictEqual([thrown.code, thrown.message], ['internal', 'internal: the case tool failed on this node']);
@@ -348,7 +348,7 @@ describe('MCP case tools through the running service (courier, R24)', () => {
       assert.strictEqual(r.question_id, q.free.id);
       assert.strictEqual(rt.questions(meta.id).get(q.free.id).answer.channel, 'mcp-stdio');
       assert.strictEqual(rt.questions(meta.id).get(q.free.id).answer.quote, 'Ask 250000 for it');
-      assert.strictEqual((await c.call('answer_question', { case: meta.id, question_id: q.approval.id, text: 'yes', quote: 'yes' })).error.error, 'not_answerable_here');
+      assert.strictEqual((await c.call('answer_question', { case: meta.id, question_id: q.approval.id, text: 'yes', quote: 'yes, go ahead' })).error.error, 'not_answerable_here');
       for (let i = 0; i < 100 && !audit.some((e) => e.kind === 'cases.answer_question'); i += 1) await new Promise((r) => setTimeout(r, 10));
       const entry = audit.find((e) => e.kind === 'cases.answer_question');
       assert.deepStrictEqual(entry && entry.data, { channel: 'mcp-stdio', caseId: meta.id, questionId: q.free.id, optionId: null, factId: r.fact_id });
