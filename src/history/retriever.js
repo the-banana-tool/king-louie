@@ -4,11 +4,14 @@
 // 5 (recency), 6 (rerank, when a reranker is given), 7 (exact-text dedupe)
 // and 8 (per-message cap, token budget). stats (optional object) gets
 // exactDuplicates, nearDuplicates and nearDuplicateTokens (candidates dropped
-// by dedupeJaccard that would have fit). Step 2 takes the vector ranks from
+// by dedupeJaccard that would have fit), cosineDuplicates (dropped by
+// dedupeCosine) and whatever vectorSearch records. Step 2 takes the vector ranks from
 // the caller (vectorHits) or from the vectorSearch callback; step 6 takes a
-// reranker callback. H3 adds the embedder and the cross-encoder behind those
-// callbacks, and the cosine dedupe. The signature of retrieve() stays the same.
+// reranker callback. H3 supplies vectorSearch (vector-search.js), vectorOf for
+// the cosine dedupe and the cross-encoder reranker (reranker.js); the
+// signature of retrieve() stays the same.
 const { HISTORY_DEFAULTS } = require('./settings');
+const { dot } = require('./embedders/vectors');
 const { createLogger } = require('../logging');
 
 const log = createLogger('history/retriever');
@@ -41,13 +44,17 @@ function jaccardOf(a, b) {
 
 class Retriever {
   // vectorSearch (optional): async ({ query, chatIds, kinds, upToSeq,
-  // settings }) => [{ chunkId, vectorRank }], ranks 1-based.
-  // reranker (optional): async (query, chunks) => scores, one finite number
-  // per chunk, higher is more relevant. Used only when rerank.enabled.
-  constructor({ store, estimator, vectorSearch = null, reranker = null }) {
+  // settings, stats }) => [{ chunkId, vectorRank }], ranks 1-based.
+  // vectorOf (optional): (chunk) => its unit vector or null, for the cosine
+  // dedupe (step 7 with vectors).
+  // reranker (optional): async (query, chunks, { maxMs }) => scores, one
+  // finite number per chunk, higher is more relevant. Used only when
+  // rerank.enabled.
+  constructor({ store, estimator, vectorSearch = null, vectorOf = null, reranker = null }) {
     this.store = store;
     this.estimator = estimator;
     this.vectorSearch = typeof vectorSearch === 'function' ? vectorSearch : null;
+    this.vectorOf = typeof vectorOf === 'function' ? vectorOf : null;
     this.reranker = typeof reranker === 'function' ? reranker : null;
   }
 
@@ -66,10 +73,20 @@ class Retriever {
     let scores;
     try {
       scores = await Promise.race([
-        Promise.resolve().then(() => reranker(query, head.map((item) => item.chunk))),
+        Promise.resolve().then(() => reranker(query, head.map((item) => item.chunk), { maxMs })),
         new Promise((resolve) => { timer = setTimeout(resolve, maxMs, TIMED_OUT); })
       ]);
     } catch (err) {
+      // No reranker yet (the EmbedderHost starts with the background checks:
+      // never under KL_TEST_MODE, not before startup finishes): the fused
+      // order, silently, with one debug line per Retriever.
+      if (err && err.code === 'RERANK_UNAVAILABLE') {
+        if (!this._rerankUnavailableLogged) {
+          this._rerankUnavailableLogged = true;
+          log.debug('no reranker yet; keeping the fused order', { pairs: m });
+        }
+        return items;
+      }
       log.warn('reranker failed; keeping the fused order', { error: err.message, pairs: m });
       return items;
     } finally {
@@ -139,7 +156,7 @@ class Retriever {
 
   async retrieve({
     query, contextQueries = [], chatIds, kinds = null, excludeMessageIds = [], budgetTokens = null, upToSeq = null,
-    settings, model = null, now = Date.now(), vectorHits = null, lexical = true, reranker = null, stats = null
+    settings, model = null, now = Date.now(), vectorHits = null, lexical = true, reranker = null, vectorOf = null, stats = null
   } = {}) {
     const s = { ...HISTORY_DEFAULTS.recall, ...(settings || {}) };
     const rerank = { ...HISTORY_DEFAULTS.recall.rerank, ...(s.rerank || {}) };
@@ -149,7 +166,7 @@ class Retriever {
     // lexical: false leaves BM25 out (a vector-only probe; LongHaul).
     const lists = lexical === false ? [] : texts.map((text) => this._lexical({ query: text, chatIds, kinds, upToSeq, settings: s }));
     let vectors = vectorHits;
-    if (!Array.isArray(vectors) && this.vectorSearch) vectors = await this.vectorSearch({ query, chatIds, kinds, upToSeq, settings: s });
+    if (!Array.isArray(vectors) && this.vectorSearch) vectors = await this.vectorSearch({ query, chatIds, kinds, upToSeq, settings: s, stats });
     const vectorList = this._vector(vectors, s);
     if (vectorList.length) lists.push(vectorList);
     const fused = this._fuse(lists, s);
@@ -184,9 +201,11 @@ class Retriever {
     }
     scored.sort((a, b) => b.score - a.score || a.chunk.id - b.chunk.id);
 
-    // Step 7: without vectors, drop exact text duplicates. It runs before
-    // step 6 here so the reranker never spends a pair on a duplicate; a
-    // duplicate would get the same score, so the selection is the same.
+    // Step 7, first half: drop exact text duplicates. It runs before step 6
+    // so the reranker never spends a pair on a duplicate (a duplicate would
+    // get the same score, so the selection is the same). With vectors, the
+    // cosine half (dedupeCosine) runs in the budget loop below; identical
+    // text has cosine 1, so this half is part of that rule too.
     const seen = new Set();
     const unique = scored.filter((item) => {
       const key = item.chunk.text.trim();
@@ -220,11 +239,50 @@ class Retriever {
       if (!shingleCache.has(chunk.id)) shingleCache.set(chunk.id, wordShingles(chunk.text));
       return shingleCache.get(chunk.id);
     };
-    const remember = (chunk) => { if (jaccard) selectedShingles.push(shinglesOf(chunk)); };
     const nearDuplicate = (chunk) => {
       if (!jaccard) return false;
       const own = shinglesOf(chunk);
       return selectedShingles.some((other) => jaccardOf(own, other) > jaccard);
+    };
+    // Step 7 with vectors (dedupeCosine > 0): a candidate whose cosine to a
+    // selected chunk exceeds it is dropped. Only chunks with a vector take
+    // part; one without is kept (exact-text dedupe covered it above).
+    const vecOf = typeof vectorOf === 'function' ? vectorOf : this.vectorOf;
+    const cosineAt = s.dedupeCosine > 0 && vecOf ? s.dedupeCosine : 0;
+    const selectedVecs = [];
+    const vecCache = new Map();
+    const vectorFor = (chunk) => {
+      if (!vecCache.has(chunk.id)) {
+        let v = null;
+        try {
+          v = vecOf(chunk);
+        } catch {
+          v = null;
+        }
+        vecCache.set(chunk.id, v && v.length ? v : null);
+      }
+      return vecCache.get(chunk.id);
+    };
+    const cosineDuplicate = (chunk) => {
+      if (!cosineAt) return false;
+      const v = vectorFor(chunk);
+      if (!v) return false;
+      return selectedVecs.some((o) => o.length === v.length && dot(o, v) > cosineAt);
+    };
+    let cosineDuplicates = 0;
+    // True when the item is dropped as a cosine near-duplicate.
+    const dropCosine = (item) => {
+      if (!cosineDuplicate(item.chunk)) return false;
+      dropped.add(item.chunk.id);
+      cosineDuplicates += 1;
+      return true;
+    };
+    const remember = (chunk) => {
+      if (jaccard) selectedShingles.push(shinglesOf(chunk));
+      if (cosineAt) {
+        const v = vectorFor(chunk);
+        if (v) selectedVecs.push(v);
+      }
     };
     let nearDuplicates = 0;
     let nearDuplicateTokens = 0;
@@ -268,6 +326,7 @@ class Retriever {
             drop(item, this.estimator.estimate(item.chunk.text, model));
             return;
           }
+          if (dropCosine(item)) return;
           takeWhole(all, item, 'completed');
           used += total;
           if (partner.length && partnerTotal <= s.completeMessageTokens && (!hasBudget || used + partnerTotal <= budgetTokens)) {
@@ -286,6 +345,7 @@ class Retriever {
         drop(item, tokens);
         return;
       }
+      if (dropCosine(item)) return;
       used += tokens;
       perMessage.set(messageId, count + 1);
       taken.add(item.chunk.id);
@@ -303,6 +363,7 @@ class Retriever {
       stats.exactDuplicates = scored.length - deduped.length;
       stats.nearDuplicates = nearDuplicates;
       stats.nearDuplicateTokens = nearDuplicateTokens;
+      stats.cosineDuplicates = cosineDuplicates;
     }
     return out;
   }

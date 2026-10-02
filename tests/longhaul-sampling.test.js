@@ -3,7 +3,7 @@
 // bucket, seeded, so the set is not dominated by recent prose.
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
-const { planAuthoring, ANCHOR_SENDERS } = require('../src/longhaul/sampling');
+const { planAuthoring, ANCHOR_SENDERS, sampleQuestions } = require('../src/longhaul/sampling');
 const { SYNTH_FIXTURES, generateSynthetic } = require('../src/longhaul/synthetic');
 const { bucketFor, KINDS } = require('../src/longhaul/questions');
 const { UsageError } = require('../src/longhaul/errors');
@@ -57,5 +57,45 @@ describe('planAuthoring', () => {
 
   it('refuses a count that is not a positive whole number', () => {
     assert.throws(() => planAuthoring(index, { count: 0, seed: 1 }), UsageError);
+  });
+});
+
+describe('sampleQuestions', () => {
+  const items = [];
+  for (const kind of ['user-said', 'decision', 'abstain']) {
+    for (let i = 0; i < 10; i++) {
+      items.push({ question: { sessionId: 'S', id: `${kind}-${i}`, kind }, bucket: kind === 'abstain' ? 'none' : (i % 2 ? '<10K' : '>1M') });
+    }
+  }
+  const strata = (list) => {
+    const c = {};
+    for (const it of list) c[`${it.question.kind}|${it.bucket}`] = (c[`${it.question.kind}|${it.bucket}`] || 0) + 1;
+    return Object.values(c).sort((a, b) => a - b);
+  };
+  const ids = (list) => list.map((it) => it.question.id);
+
+  it('is deterministic for a seed and independent of input order', () => {
+    assert.deepStrictEqual(ids(sampleQuestions(items, { size: 7, seed: 3 })), ids(sampleQuestions([...items].reverse(), { size: 7, seed: 3 })));
+    assert.notDeepStrictEqual(ids(sampleQuestions(items, { size: 30, seed: 3 })), ids(sampleQuestions(items, { size: 30, seed: 4 })));
+  });
+
+  it('keeps every prefix even across kind x bucket strata', () => {
+    // Five strata: user-said and decision in <10K and >1M (5 each), abstain in none (10).
+    const all = sampleQuestions(items, { size: 30, seed: 1 });
+    assert.deepStrictEqual(strata(all.slice(0, 5)), [1, 1, 1, 1, 1]);
+    assert.deepStrictEqual(strata(all.slice(0, 10)), [2, 2, 2, 2, 2]);
+    assert.deepStrictEqual(strata(all.slice(0, 25)), [5, 5, 5, 5, 5]);
+    assert.deepStrictEqual(strata(all), [5, 5, 5, 5, 10]);
+  });
+
+  it('takes the whole set when asked for more, never repeating a question', () => {
+    const all = sampleQuestions(items, { size: 150, seed: 1 });
+    assert.strictEqual(all.length, 30);
+    assert.strictEqual(new Set(ids(all)).size, 30);
+  });
+
+  it('refuses a size that is not a positive whole number', () => {
+    assert.throws(() => sampleQuestions(items, { size: 0, seed: 1 }), UsageError);
+    assert.throws(() => sampleQuestions(items, { size: 1.5, seed: 1 }), UsageError);
   });
 });

@@ -7,7 +7,7 @@ const assert = require('node:assert');
 const { DatabaseSync } = require('node:sqlite');
 const { HistoryStore } = require('../src/history');
 const { startChunkBackfill } = require('../src/history/backfill');
-const { openTempStore, seedChat, readDb } = require('./helpers/history-fixture');
+const { openTempStore, seedChat, readDb, downgradeToVersion1 } = require('./helpers/history-fixture');
 const { setLogLevel } = require('../src/logging');
 
 setLogLevel('fatal');
@@ -21,11 +21,7 @@ function versionOneStore(count) {
   seedChat(t.store, { messages: Array.from({ length: count }, (_, i) => ({ sender: i % 2 ? 'assistant' : 'user', text: text(i + 1) })) });
   t.store.close();
   const db = new DatabaseSync(t.dbPath);
-  db.exec(`
-    DROP TRIGGER chunks_ai; DROP TRIGGER chunks_ad; DROP TRIGGER chunks_au;
-    DROP TABLE chunks_fts; DROP TABLE chunks; DROP TABLE calibration;
-    UPDATE schema_version SET version = 1 WHERE version = 2;
-  `);
+  downgradeToVersion1(db);
   db.prepare("DELETE FROM meta WHERE key = 'chunks_backfill'").run();
   db.close();
   return t;

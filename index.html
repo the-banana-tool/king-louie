@@ -176,6 +176,7 @@
           <option value="hooks">Hooks</option>
           <option value="permissions">Permissions</option>
           <option value="memory">Memory</option>
+          <option value="history">History and recall</option>
           <option value="scheduler">Scheduler</option>
           <option value="workflows">Workflows</option>
           <option value="webhooks">Webhooks</option>
@@ -841,6 +842,51 @@
               <span id="memory-status" class="provider-message">Memory not loaded yet.</span>
             </div>
             <div class="provider-list" id="memory-list"></div>
+          </section>
+        </div>
+
+        <!-- Tab: History and recall -->
+        <div class="settings-tab-content" data-tab="history">
+          <section class="template-variables-card">
+            <h3>History and recall</h3>
+            <p>Each reply sees the recent messages plus excerpts found in the whole chat. Embeddings let recall find excerpts by meaning as well as by the words used.</p>
+            <div class="template-variables-grid">
+              <label for="history-embedder-kind">Embeddings</label>
+              <select id="history-embedder-kind" class="provider-input">
+                <option value="local">On this computer (downloads a small model once)</option>
+                <option value="ollama">Ollama</option>
+                <option value="openai">OpenAI (sends chat text to OpenAI)</option>
+                <option value="none">Off (keyword search only)</option>
+              </select>
+
+              <label for="history-rerank-search">Rerank SearchHistory results</label>
+              <input id="history-rerank-search" type="checkbox">
+            </div>
+            <details class="history-advanced">
+              <summary>Advanced</summary>
+              <div class="template-variables-grid">
+                <label for="history-embedder-model">Local model</label>
+                <input id="history-embedder-model" class="provider-input" type="text" spellcheck="false">
+
+                <label for="history-ollama-url">Ollama address</label>
+                <input id="history-ollama-url" class="provider-input" type="text" spellcheck="false">
+
+                <label for="history-ollama-model">Ollama model</label>
+                <input id="history-ollama-model" class="provider-input" type="text" spellcheck="false">
+
+                <label for="history-openai-model">OpenAI model</label>
+                <input id="history-openai-model" class="provider-input" type="text" spellcheck="false">
+
+                <label for="history-rerank-turn">Rerank every turn (about 2 s a turn on a laptop CPU)</label>
+                <input id="history-rerank-turn" type="checkbox">
+              </div>
+            </details>
+            <div class="template-variables-actions">
+              <button id="history-embedder-save-btn" type="button" class="btn btn-primary">Save</button>
+              <button id="history-embedder-retry-btn" type="button" class="btn">Retry</button>
+              <button id="history-embedder-rebuild-btn" type="button" class="btn btn-danger">Rebuild embeddings</button>
+              <span id="history-embedder-status" class="provider-message">Loading…</span>
+            </div>
           </section>
         </div>
 

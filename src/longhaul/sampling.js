@@ -7,6 +7,7 @@ const { createRng } = require('./rng');
 const { KINDS, BUCKETS, NO_BUCKET } = require('./questions');
 const { messageText } = require('./session-format');
 const { UsageError } = require('./errors');
+const { byCodeUnit } = require('./files');
 
 const ANCHOR_SENDERS = Object.freeze({
   'user-said': ['user'],
@@ -96,4 +97,37 @@ function planAuthoring(index, { count, seed, kinds = KINDS, excludeSeqs = [] }) 
   return { items, shortfall };
 }
 
-module.exports = { ANCHOR_SENDERS, SPAN_RADIUS, planAuthoring };
+// The frontier tier's stratified sample (benchmark spec §8.1): questions
+// grouped by stratum (kind x distance bucket), each stratum shuffled by a
+// seeded RNG, then taken one per stratum in turn, the strata in a seeded
+// order. Every prefix of the result is as even across strata as the set
+// allows. The first `size` are the sample, and --long-context-sample N gives
+// the long-context adapters the first N of the same order. items:
+// [{ question, bucket }]; the result is in sample order.
+function sampleQuestions(items, { size = items.length, seed = 1 } = {}) {
+  if (!Number.isInteger(size) || size <= 0) throw new UsageError('--sample must be a positive whole number');
+  const rng = createRng(seed);
+  const keyOf = (it) => `${it.question.sessionId}\u0000${it.question.id}`;
+  const strata = new Map();
+  for (const it of [...items].sort((a, b) => byCodeUnit(keyOf(a), keyOf(b)))) {
+    const s = `${it.question.kind}|${it.bucket}`;
+    if (!strata.has(s)) strata.set(s, []);
+    strata.get(s).push(it);
+  }
+  const queues = rng.shuffle([...strata.keys()].sort()).map((s) => rng.shuffle(strata.get(s)));
+  const out = [];
+  for (let round = 0; out.length < size; round++) {
+    let took = false;
+    for (const queue of queues) {
+      if (out.length >= size) break;
+      if (round < queue.length) {
+        out.push(queue[round]);
+        took = true;
+      }
+    }
+    if (!took) break;
+  }
+  return out;
+}
+
+module.exports = { ANCHOR_SENDERS, SPAN_RADIUS, planAuthoring, sampleQuestions };

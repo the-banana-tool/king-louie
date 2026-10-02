@@ -385,3 +385,55 @@ describe('Retriever', () => {
     });
   });
 });
+
+describe('Retriever: cosine dedupe (spec §6.3 step 7)', () => {
+  const { unit } = require('../src/history/embedders/vectors');
+  const { createBagOfWordsEmbedder } = require('./helpers/fake-embedder');
+  const bowEmbedder = createBagOfWordsEmbedder();
+  let t;
+  afterEach(() => t && t.cleanup());
+  const msgs = [
+    { sender: 'user', text: 'The side gate code at the Lakeside lot is 4417.' },
+    { sender: 'user', text: 'Again: the gate code for the Lakeside lot is 4417.' },
+    { sender: 'user', text: 'The fence along the lot is forty meters.' }
+  ];
+  async function vectorsOf(store) {
+    const map = new Map();
+    for (const c of store.chunksOfChat('chat-1')) map.set(c.id, unit((await bowEmbedder.embed([c.text]))[0]));
+    return (chunk) => map.get(chunk.id) || null;
+  }
+  const has = (hits, id) => hits.some((h) => h.chunk.messageId === id);
+
+  it('drops a near-duplicate by cosine when both have vectors', async () => {
+    const s = setup(msgs);
+    t = s.t;
+    const vectorOf = await vectorsOf(t.store);
+    const stats = {};
+    const hits = await s.retriever.retrieve({ query: 'gate code lot', chatIds: ['chat-1'], settings: recall({ recencyWeight: 0 }), now: BASE_TIME, vectorOf, stats });
+    assert.notStrictEqual(has(hits, 'chat-1-m1'), has(hits, 'chat-1-m2'), 'one of the two gate-code notes is kept');
+    assert.ok(has(hits, 'chat-1-m3'), 'the fence note is not a duplicate');
+    assert.strictEqual(stats.cosineDuplicates, 1);
+  });
+
+  it('keeps both at dedupeCosine 0, without vectors, or when a chunk has no vector', async () => {
+    const s = setup(msgs);
+    t = s.t;
+    const vectorOf = await vectorsOf(t.store);
+    const run = (over) => s.retriever.retrieve({ query: 'gate code lot', chatIds: ['chat-1'], now: BASE_TIME, settings: recall({ recencyWeight: 0 }), ...over });
+    for (const hits of [
+      await run({ vectorOf, settings: recall({ recencyWeight: 0, dedupeCosine: 0 }) }),
+      await run({}),
+      await run({ vectorOf: () => null })
+    ]) {
+      assert.ok(has(hits, 'chat-1-m1') && has(hits, 'chat-1-m2'));
+    }
+  });
+
+  it('uses the constructor\'s vectorOf when the call gives none', async () => {
+    const s = setup(msgs);
+    t = s.t;
+    const retriever = new Retriever({ store: t.store, estimator: new TokenEstimator(), vectorOf: await vectorsOf(t.store) });
+    const hits = await retriever.retrieve({ query: 'gate code lot', chatIds: ['chat-1'], settings: recall({ recencyWeight: 0 }), now: BASE_TIME });
+    assert.notStrictEqual(has(hits, 'chat-1-m1'), has(hits, 'chat-1-m2'));
+  });
+});

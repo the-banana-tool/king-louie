@@ -25,3 +25,6 @@ jobs:
       - run: node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle
         env:
           LONGHAUL_HOME: ${{ runner.temp }}/longhaul
+      - run: node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models
+        env:
+          LONGHAUL_HOME: ${{ runner.temp }}/longhaul

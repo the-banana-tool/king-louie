@@ -15,7 +15,7 @@ const { createAdapter } = require('../src/longhaul/adapters');
 const { createKlRecallRerankAdapter } = require('../src/longhaul/adapters/kl-recall-rerank');
 const { UsageError } = require('../src/longhaul/errors');
 const {
-  DEFAULT_RERANK_MODEL, rerankCacheDir, pairHash, RerankCache, loadCrossEncoder, createCachedReranker, newRerankStats
+  DEFAULT_RERANK_MODEL, rerankCacheDir, pairHash, RerankCache, createRunnerScorer, createCachedReranker, newRerankStats
 } = require('../src/longhaul/rerank');
 const { fakeEmbedder } = require('./helpers/fake-embedding-server');
 const { tmpDir, tmpHome, sink } = require('./helpers/longhaul-helpers');
@@ -81,9 +81,16 @@ describe('rerank cache', () => {
     assert.deepStrictEqual(scorer.calls, [2, 1], 'a new chunk alone is scored');
   });
 
-  it('names the no-save install when transformers.js is missing', async () => {
-    const load = () => { const e = new Error('Cannot find module'); e.code = 'MODULE_NOT_FOUND'; throw e; };
-    await assert.rejects(loadCrossEncoder({ load }), (err) => err instanceof UsageError && /npm i --no-save @huggingface\/transformers onnxruntime-node/.test(err.message));
+  it('createRunnerScorer passes the model and the models folder to the runner', async () => {
+    const calls = [];
+    const fake = {
+      load: async (role, model, opts) => { calls.push(['load', role, model, opts.modelsDir]); return { dim: null }; },
+      rerank: async (model, query, texts) => { calls.push(['rerank', model, texts.length]); return texts.map(() => 0); }
+    };
+    const scorer = createRunnerScorer({ runner: fake, model: 'fake/rr', modelsDir: '/lh/private/models' });
+    await scorer.score('q', ['a', 'b']);
+    await scorer.score('q', ['c']);
+    assert.deepStrictEqual(calls, [['load', 'reranker', 'fake/rr', '/lh/private/models'], ['rerank', 'fake/rr', 2], ['rerank', 'fake/rr', 1]]);
   });
 });
 
@@ -139,7 +146,7 @@ describe('kl-recall-rerank', () => {
     assert.strictEqual(adapter.name, 'kl-recall-vec-rerank');
     assert.strictEqual(adapter.describe().candidates, 'fused');
     await runAll(adapter, session, questions);
-    assert.ok(scorer.calls.length > 0 && scorer.calls.every((n) => n <= 20), 'topM defaults to 20');
+    assert.ok(scorer.calls.length > 0 && scorer.calls.every((n) => n <= 100), 'topM defaults to the app\'s 100');
     assert.strictEqual(embedder.calls.length, calls);
   });
 

@@ -70,16 +70,17 @@ describe('E2E: recall', () => {
     assert.strictEqual(last.sender, 'assistant');
     const context = last.context;
     assert.ok(context, 'the reply carries context');
-    // The default tail is 16 messages (recall spec §6.1), so it starts at #35.
-    assert.deepStrictEqual(context.tail, { fromSeq: 35, toSeq: 50 });
+    // The default tail is the last 4 user turns (recall spec §6.1): users are
+    // at the odd seqs, so #49, #47, #45 and #43, and it runs #43-#50.
+    assert.deepStrictEqual(context.tail, { fromSeq: 43, toSeq: 50 });
     assert.ok(context.recalledChunkIds.length > 0);
     assert.strictEqual(context.embedder, 'none');
     assert.strictEqual(context.scope, 'chat');
 
     const sent = server.requests.filter((r) => r.provider === 'ollama' && r.body && Array.isArray(r.body.messages)).pop();
     assert.ok(sent, 'the provider was called');
-    // The 16-message tail plus the new message and the system prompt.
-    assert.ok(sent.body.messages.length <= 18, `sent ${sent.body.messages.length} messages`);
+    // The 8-message tail plus the new message and the system prompt.
+    assert.ok(sent.body.messages.length <= 10, `sent ${sent.body.messages.length} messages`);
     const system = sent.body.messages.find((m) => m.role === 'system');
     assert.ok(system && system.content.includes('<recalled_history>') && system.content.includes('4417'));
 

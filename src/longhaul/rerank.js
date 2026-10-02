@@ -1,6 +1,7 @@
 'use strict';
-// Reranker for the H3 probe (kl-recall-rerank; recall spec §6.3 step 6). A
-// local cross-encoder scores (query, chunk text) pairs on the CPU; scores are
+// Reranker for the H3 probe (kl-recall-rerank; recall spec §6.3 step 6). The
+// app's own cross-encoder, in the embed worker (src/history/embed-runner.js),
+// scores (query, chunk text) pairs on the CPU; scores are
 // cached under LONGHAUL_HOME/private/rerank/<sessionId>/<model>/, never
 // anywhere else, so a sweep over topM or settings is free after its first
 // pass:
@@ -8,18 +9,13 @@
 //                 messageId and idx, a hash of the exact query and chunk
 //                 text scored, and the score
 // The hash means a changed question, query (queryUserTurns) or chunk text is
-// a miss, never a stale score. The cross-encoder needs
-// @huggingface/transformers with the native onnxruntime-node, which are not
-// dependencies of the app: install them in a checkout with
-//   npm i --no-save @huggingface/transformers onnxruntime-node
+// a miss, never a stale score. The model is downloaded once into
+// LONGHAUL_HOME/private/models (embeddings.js localModelsDir).
 const fs = require('fs');
 const path = require('path');
 const { performance } = require('node:perf_hooks');
 const { sha256Text } = require('./files');
 const { UsageError } = require('./errors');
-const { createLogger } = require('../logging');
-
-const log = createLogger('longhaul/rerank');
 
 const DEFAULT_RERANK_MODEL = 'Xenova/ms-marco-MiniLM-L-6-v2';
 const MODEL_RE = /^[A-Za-z0-9._-]{1,100}(\/[A-Za-z0-9._-]{1,100})?$/;
@@ -67,37 +63,21 @@ class RerankCache {
   }
 }
 
-// The cross-encoder: { model, score(query, texts) => number[] } (raw logits,
-// higher is more relevant). Texts are scored in batches sorted by length so
-// a batch pads to similar lengths; results come back in the given order.
-async function loadCrossEncoder({ model = DEFAULT_RERANK_MODEL, batchSize = 16, maxLength = 512, load = null } = {}) {
-  let T;
-  try {
-    T = load ? load() : require('@huggingface/transformers');
-  } catch (err) {
-    throw new UsageError('kl-recall-rerank needs @huggingface/transformers and onnxruntime-node, which the app does not ship: '
-      + `npm i --no-save @huggingface/transformers onnxruntime-node (${err.code || err.message})`);
-  }
-  const t0 = performance.now();
-  const tokenizer = await T.AutoTokenizer.from_pretrained(model);
-  const net = await T.AutoModelForSequenceClassification.from_pretrained(model, { dtype: 'fp32', device: 'cpu' });
-  log.info('cross-encoder loaded', { model, ms: Math.round(performance.now() - t0) });
+// The cross-encoder the app ships (recall stage H3), in the embed worker
+// through an EmbedRunner: loaded once, then each score() call reranks.
+function createRunnerScorer({ runner, model = DEFAULT_RERANK_MODEL, modelsDir }) {
+  let loading = null;
   return {
     model,
     async score(query, texts) {
-      const order = texts.map((t, i) => i).sort((a, b) => texts[a].length - texts[b].length);
-      const out = new Array(texts.length);
-      for (let b = 0; b < order.length; b += batchSize) {
-        const idx = order.slice(b, b + batchSize);
-        const inputs = tokenizer(new Array(idx.length).fill(query), {
-          text_pair: idx.map((i) => texts[i]), padding: true, truncation: true, max_length: maxLength
+      if (!loading) {
+        loading = runner.load('reranker', model, { modelsDir }).catch((err) => {
+          loading = null;
+          throw err;
         });
-        const { logits } = await net(inputs);
-        const data = logits.data;
-        const width = data.length / idx.length;
-        idx.forEach((i, k) => { out[i] = Number(data[k * width]); });
       }
-      return out;
+      await loading;
+      return runner.rerank(model, query, texts);
     }
   };
 }
@@ -128,5 +108,5 @@ function createCachedReranker({ cache, questionId, scorer, stats = null }) {
 const newRerankStats = () => ({ pairs: 0, hits: 0, misses: 0, missMs: 0, calls: 0 });
 
 module.exports = {
-  DEFAULT_RERANK_MODEL, rerankCacheDir, pairHash, RerankCache, loadCrossEncoder, createCachedReranker, newRerankStats
+  DEFAULT_RERANK_MODEL, rerankCacheDir, pairHash, RerankCache, createRunnerScorer, createCachedReranker, newRerankStats
 };

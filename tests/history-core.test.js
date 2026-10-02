@@ -13,6 +13,7 @@ const os = require('os');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
+const { downgradeToVersion1 } = require('./helpers/history-fixture');
 const { createCore } = require('../src/core');
 const { HistoryStore } = require('../src/history');
 const { JsonFileStore } = require('../src/platform/json-file-store');
@@ -153,9 +154,7 @@ describe('createCore and the history store', () => {
     seed.createChat({ id: 'c1', title: 'From H1', messages: [msg('m1', 'user', 'the blue folder is in the Lakeside shed'), msg('m2', 'assistant', 'noted')] });
     seed.close();
     const raw = new DatabaseSync(file);
-    raw.exec(`DROP TRIGGER chunks_ai; DROP TRIGGER chunks_ad; DROP TRIGGER chunks_au;
-      DROP TABLE chunks_fts; DROP TABLE chunks; DROP TABLE calibration;
-      UPDATE schema_version SET version = 1;`);
+    downgradeToVersion1(raw);
     raw.close();
     const core = createCore(deps);
     const store = core.context.getHistoryStore();
@@ -279,10 +278,10 @@ describe('history: a chat turn through the core', () => {
     assert.notStrictEqual(result?.ok, false, JSON.stringify(result));
     assert.deepStrictEqual(queries, ['What was the side gate code at the Lakeside lot?'], 'by default the query is the new message alone');
     const first = calls[0];
-    // The default tail, #25-#40 (16 messages), then the new message.
-    assert.strictEqual(first.messages.length, 17, `sent ${first.messages.length} messages`);
+    // The default tail, the last 4 user turns (#33-#40, 8 messages), then the new message.
+    assert.strictEqual(first.messages.length, 9, `sent ${first.messages.length} messages`);
     const texts = first.messages.map((m) => String(m.text ?? m.content ?? ''));
-    assert.strictEqual(texts[0], 'Seeded note 25 about the weekly grocery list and the garden hose timer.');
+    assert.strictEqual(texts[0], 'Seeded note 33 about the weekly grocery list and the garden hose timer.');
     assert.strictEqual(texts[texts.length - 1], 'What was the side gate code at the Lakeside lot?');
     assert.ok(!texts.some((t) => t.includes('4417')), '#3 is not in the tail');
     assert.ok(first.options.systemPromptDynamic.includes('<recalled_history>'));
@@ -296,7 +295,7 @@ describe('history: a chat turn through the core', () => {
     const reply = lastMessage();
     assert.strictEqual(reply.sender, 'assistant');
     const ctx = reply.context;
-    assert.deepStrictEqual(ctx.tail, { fromSeq: 25, toSeq: 40 });
+    assert.deepStrictEqual(ctx.tail, { fromSeq: 33, toSeq: 40 });
     assert.ok(ctx.recalledChunkIds.length > 0);
     assert.ok(ctx.recalledExcerpts >= 1);
     assert.ok(ctx.estTokens.system > 0 && ctx.estTokens.tail > 0 && ctx.estTokens.recalled > 0);
@@ -329,7 +328,7 @@ describe('history: a chat turn through the core', () => {
     const { calls, send } = await start({ history: { recall: { enabled: false } } });
     await send('What was the side gate code at the Lakeside lot?');
     assert.ok(!String(calls[0].options.systemPromptDynamic || '').includes('<recalled_history>'));
-    assert.strictEqual(calls[0].messages.length, 17, 'the default tail of 16 and the new message');
+    assert.strictEqual(calls[0].messages.length, 9, 'the default tail of 4 user turns (8 messages) and the new message');
     assert.deepStrictEqual(lastMessage().context.recalledChunkIds, []);
   });
 

@@ -3366,6 +3366,8 @@ function refreshUI() {
 function setSettingsDrawer(open) {
   dom.settingsDrawer.hidden = !open;
   document.body.style.overflow = open ? 'hidden' : '';
+  // The History and recall status poll runs only while its pane is visible.
+  if (!open && typeof stopHistoryStatusPoll === 'function') stopHistoryStatusPoll();
 }
 
 function switchSettingsTab(tabName) {
@@ -3390,6 +3392,12 @@ function switchSettingsTab(tabName) {
     loadModelProfiles().catch((err) => settingsLog.warn(`loading model profiles failed: ${err.message}`));
     loadKingLouie().catch((err) => settingsLog.warn(`loading the King Louie profile failed: ${err.message}`));
   }
+  // History and recall: its status is read while the pane is open.
+  if (tabName === 'history' && typeof loadHistorySettings === 'function') {
+    loadHistorySettings().catch((err) => settingsLog.warn(`loading history settings failed: ${err.message}`));
+  } else if (typeof stopHistoryStatusPoll === 'function') {
+    stopHistoryStatusPoll();
+  }
 }
 
 function sortSettingsNavOptions() {
@@ -3411,9 +3419,131 @@ function sortSettingsNavOptions() {
   }
 }
 
+// History and recall (recall spec §14): the embedder choice and its status.
+// Everything shown comes from the host and is set with textContent.
+let historyStatusTimer = null;
+
+// The local embedder is unpriced and says so; a hosted one shows the tokens
+// it has embedded this session (a count only: prices come from the catalog).
+function historyEmbedderStatusText(status, progress) {
+  const s = status || {};
+  const pct = (a, b) => (b > 0 ? Math.min(100, Math.floor((a / b) * 100)) : 0);
+  const cost = s.kind === 'local'
+    ? ' Runs on this computer, no API cost.'
+    : (s.kind === 'openai' || s.kind === 'ollama' ? ` ${Number(s.tokens) || 0} tokens embedded this session.` : '');
+  const text = historyEmbedderStateText(s, progress, pct, cost);
+  const d = s.download;
+  if (!d || d.role !== 'reranker') return text;
+  // The reranker downloads in the background once the history is embedded;
+  // the embedder's state is unchanged meanwhile.
+  const mb = (n) => Math.round((Number(n) || 0) / 1048576);
+  const size = Number(d.total) > 0 ? `${mb(d.loaded)} of ${mb(d.total)} MB` : `${mb(d.loaded)} MB`;
+  return `${text ? `${text} ` : ''}Downloading reranker: ${size}`;
+}
+
+function historyEmbedderStateText(s, progress, pct, cost) {
+  switch (s.state) {
+    case 'off': return 'Off: recall uses keyword search only.';
+    case 'starting': return `Loading the embedding model…${cost}`;
+    case 'downloading': return (s.download && s.download.total > 0
+      ? `Downloading the embedding model: ${pct(s.download.loaded, s.download.total)}%`
+      : 'Downloading the embedding model…') + cost;
+    case 'ready': {
+      const embedded = Number(progress?.embedded) || 0;
+      const pending = Number(progress?.pending) || 0;
+      return (pending > 0
+        ? `Ready. Embedding the history: ${pct(embedded, embedded + pending)}% (${pending} chunks to go)`
+        : 'Ready. All history is embedded.') + cost;
+    }
+    case 'unavailable': return `Not available, keyword search only: ${s.error || 'unknown error'}`;
+    case 'disabled': return `Stopped for this session, keyword search only: ${s.error || 'the embedding worker kept crashing'}`;
+    default: return '';
+  }
+}
+
+function stopHistoryStatusPoll() {
+  if (historyStatusTimer) clearInterval(historyStatusTimer);
+  historyStatusTimer = null;
+}
+
+async function refreshHistoryEmbedderStatus() {
+  const el = document.getElementById('history-embedder-status');
+  if (!el || !window.electron?.history?.embedderStatus) return null;
+  const out = await window.electron.history.embedderStatus();
+  el.textContent = out && out.ok
+    ? historyEmbedderStatusText(out.status, out.progress)
+    : `Could not read the embedding status: ${(out && out.error) || 'unknown error'}`;
+  return out;
+}
+
+async function loadHistorySettings() {
+  const out = await refreshHistoryEmbedderStatus();
+  if (out && out.ok && out.settings) {
+    const e = out.settings.embedder;
+    document.getElementById('history-embedder-kind').value = e.kind;
+    document.getElementById('history-embedder-model').value = e.model;
+    document.getElementById('history-ollama-url').value = e.ollama.baseUrl;
+    document.getElementById('history-ollama-model').value = e.ollama.model;
+    document.getElementById('history-openai-model').value = e.openai.model;
+    document.getElementById('history-rerank-search').checked = Boolean(out.settings.rerank.search);
+    document.getElementById('history-rerank-turn').checked = Boolean(out.settings.rerank.enabled);
+  }
+  stopHistoryStatusPoll();
+  historyStatusTimer = setInterval(() => { refreshHistoryEmbedderStatus().catch(() => {}); }, 2000);
+}
+
+async function saveHistorySettings() {
+  const el = document.getElementById('history-embedder-status');
+  const val = (id) => document.getElementById(id).value.trim();
+  const out = await window.electron.history.saveEmbedder({
+    embedder: {
+      kind: document.getElementById('history-embedder-kind').value,
+      model: val('history-embedder-model'),
+      ollama: { baseUrl: val('history-ollama-url'), model: val('history-ollama-model') },
+      openai: { model: val('history-openai-model') }
+    },
+    rerank: {
+      search: document.getElementById('history-rerank-search').checked,
+      enabled: document.getElementById('history-rerank-turn').checked
+    }
+  });
+  el.textContent = out && out.ok
+    ? historyEmbedderStatusText(out.status, out.progress)
+    : `Not saved: ${(out && out.error) || 'unknown error'}`;
+}
+
+// Retry and Rebuild show the host's refusal (e.g. "Embeddings are off.")
+// instead of silently re-reading the status.
+async function runHistoryEmbedderAction(call) {
+  const out = await call();
+  if (out && !out.ok) {
+    document.getElementById('history-embedder-status').textContent = out.error || 'unknown error';
+    return;
+  }
+  await refreshHistoryEmbedderStatus();
+}
+
+function wireHistorySettings() {
+  const on = (id, fn) => document.getElementById(id)?.addEventListener('click', () => {
+    fn().catch((err) => settingsLog.warn(`history settings: ${err.message}`));
+  });
+  on('history-embedder-save-btn', saveHistorySettings);
+  on('history-embedder-retry-btn', () => runHistoryEmbedderAction(() => window.electron.history.retryEmbedder()));
+  on('history-embedder-rebuild-btn', async () => {
+    if (!window.confirm('Delete this model\'s embeddings and embed the whole history again? Recall uses keyword search until it catches up.')) return;
+    await runHistoryEmbedderAction(() => window.electron.history.rebuildEmbeddings());
+  });
+}
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wireHistorySettings);
+else wireHistorySettings();
+
 function openSettingsDrawer() {
   setSettingsDrawer(true);
   loadSettings();
+  if (dom.settingsNavSelect?.value === 'history') {
+    loadHistorySettings().catch((err) => settingsLog.warn(`loading history settings failed: ${err.message}`));
+  }
 }
 
 function renderProviderCard(providerKey, provider) {
@@ -8236,11 +8366,17 @@ function formatCompactTokens(value = 0) {
   return String(Math.round(n));
 }
 
+// Which retrieval a reply's recall ran (provenance embedder, vectorsSkipped).
+function recallVia(context) {
+  if (context?.embedder && context.embedder !== 'none') return 'BM25 + vectors';
+  return context?.vectorsSkipped ? `BM25 only: ${context.vectorsSkipped}` : 'BM25';
+}
+
 function recallLineText(context) {
   const count = Number(context?.recalledExcerpts) || 0;
   const recalled = Number(context?.estTokens?.recalled) || 0;
   const full = Number(context?.fullHistoryEstTokens) || 0;
-  return `recalled ${count} ${count === 1 ? 'excerpt' : 'excerpts'} · about ${formatCompactTokens(recalled)} tokens · from ${formatCompactTokens(full)} tokens of history · BM25`;
+  return `recalled ${count} ${count === 1 ? 'excerpt' : 'excerpts'} · about ${formatCompactTokens(recalled)} tokens · from ${formatCompactTokens(full)} tokens of history · ${recallVia(context)}`;
 }
 
 function renderRecallLine(messageContent, context, { chatId, seq } = {}) {
