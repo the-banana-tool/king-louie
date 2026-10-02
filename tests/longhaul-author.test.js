@@ -227,4 +227,21 @@ describe('longhaul author CLI', () => {
     const log = fs.readFileSync(path.join(root, 'questions', 'synth-small.author-log.jsonl'), 'utf8').trim().split('\n');
     assert.strictEqual(log.length, 1);
   });
+
+  it('--kinds plans only the kinds named, logs them, and refuses an unknown kind before any call', async () => {
+    const { env, root } = tmpHome();
+    writeSyntheticRoot(root, [SYNTH_FIXTURES[0]]);
+    const e = { ...env, OPENAI_API_KEY: 'test-key-123456' };
+    const args = ['author', '--session', 'synth-small', '--provider', 'openai', '--model', 'test-model', '--base-url', `${server.url}/openai/v1`, '--count', '4'];
+    const calls = server.requests.length;
+    const bad = sink();
+    assert.strictEqual(await main([...args, '--kinds', 'decision,nope'], { stdout: sink(), stderr: bad, env: e }), 2);
+    assert.match(bad.text, /--kinds/);
+    assert.strictEqual(server.requests.length, calls);
+    assert.strictEqual(await main([...args, '--kinds', 'decision'], { stdout: sink(), stderr: sink(), env: e }), 0);
+    const log = fs.readFileSync(path.join(root, 'questions', 'synth-small.author-log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepStrictEqual(log.at(-1).kinds, ['decision']);
+    assert.ok(log.at(-1).planned >= 1 && log.at(-1).planned <= 4);
+    assert.strictEqual(server.requests.length - calls, log.at(-1).planned, 'one call per planned decision item');
+  });
 });

@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const chunkIndex = require('./chunk-index');
+const embeddingIndex = require('./embedding-index');
 const { insertChunks, readBackfill, writeBackfill, clearBackfill } = chunkIndex;
 const { applySchema, currentVersion, latestVersion, SchemaVersionError } = require('./schema');
 const rows = require('./rows');
@@ -17,6 +18,8 @@ const log = createLogger('history');
 const BUSY_TIMEOUT_MS = 5000;
 // The schema step that adds chunks, full-text search and calibration.
 const INDEX_SCHEMA_VERSION = 2;
+// The schema step that adds the embeddings table.
+const EMBEDDINGS_SCHEMA_VERSION = 3;
 
 const PREVIEW_CHARS = 500;
 const normalizeId = (value) => String(value ?? '').trim();
@@ -91,12 +94,44 @@ class HistoryStore {
     this._depth = 0;
     this._closed = false;
     this._statements = new Map();
+    // Bumped by every change that can drop a vector or let a later chunk
+    // reuse a chunk id (truncate, rewrite, delete, rebuild): the VectorIndex
+    // drops its cached matrices when it moves.
+    this.vectorEpoch = 0;
+    this._appendListeners = new Set();
     this.schemaVersion = latestVersion();
   }
 
   // False only for a read-only store opened below schema 2 (no chunks).
   get indexed() {
     return this.schemaVersion >= INDEX_SCHEMA_VERSION;
+  }
+
+  // False for a read-only store opened below schema 3.
+  get embeddable() {
+    return this.schemaVersion >= EMBEDDINGS_SCHEMA_VERSION;
+  }
+
+  // fn(chatId, seq) after each appendMessage has committed its message and
+  // chunks (the EmbedIndexer embeds the newest chat first). A listener that
+  // throws is logged; the append stands.
+  onAppend(fn) {
+    this._appendListeners.add(fn);
+    return () => this._appendListeners.delete(fn);
+  }
+
+  _emitAppend(chatId, seq) {
+    for (const fn of this._appendListeners) {
+      try {
+        fn(chatId, seq);
+      } catch (err) {
+        log.warn(`A history append listener failed: ${err.message}`);
+      }
+    }
+  }
+
+  _bumpVectorEpoch() {
+    this.vectorEpoch += 1;
   }
 
   get isOpen() {
@@ -192,7 +227,8 @@ class HistoryStore {
     const id = normalizeId(chat?.id);
     if (!id || typeof chat !== 'object') return null;
     return this.transaction(() => {
-      this._stmt('DELETE FROM chats WHERE id = ?').run(id);
+      // Only a chat that replaced an existing one can drop vectors.
+      if (Number(this._stmt('DELETE FROM chats WHERE id = ?').run(id).changes) > 0) this._bumpVectorEpoch();
       this._insertChatRow(id, chat, this._nextPosition(position));
       this._insertMessages(id, chat.messages, textOrNull(chat.updatedAt) || textOrNull(chat.createdAt));
       return this.getChat(id);
@@ -206,6 +242,7 @@ class HistoryStore {
       if (!this._chatRow(key)) return null;
       this._updateChatRow(key, chat);
       this._stmt('DELETE FROM messages WHERE chat_id = ?').run(key);
+      this._bumpVectorEpoch();
       this._insertMessages(key, chat.messages, textOrNull(chat.updatedAt) || textOrNull(chat.createdAt));
       return this.getChat(key);
     });
@@ -230,6 +267,7 @@ class HistoryStore {
       this._updateChatRow(key, merged);
       if (Array.isArray(nextMessages)) {
         this._stmt('DELETE FROM messages WHERE chat_id = ?').run(key);
+        this._bumpVectorEpoch();
         this._insertMessages(key, nextMessages, textOrNull(merged.updatedAt) || textOrNull(merged.createdAt));
       }
       return this.getChat(key, { messages });
@@ -256,7 +294,9 @@ class HistoryStore {
   deleteChat(id) {
     const key = normalizeId(id);
     if (!key) return false;
-    return Number(this._stmt('DELETE FROM chats WHERE id = ?').run(key).changes) > 0;
+    const removed = Number(this._stmt('DELETE FROM chats WHERE id = ?').run(key).changes) > 0;
+    if (removed) this._bumpVectorEpoch();
+    return removed;
   }
 
   // ── messages ───────────────────────────────────────────────────────────
@@ -264,7 +304,7 @@ class HistoryStore {
   appendMessage(chatId, message, { updatedAt, patch } = {}) {
     const id = normalizeId(chatId);
     if (!id) return null;
-    return this.transaction((db) => {
+    const out = this.transaction((db) => {
       const row = this._chatRow(id);
       if (!row) return null;
       const inserted = this._insertMessage(db, id, message, { fallbackTimestamp: updatedAt });
@@ -272,6 +312,8 @@ class HistoryStore {
       this._updateChatRow(id, { ...rows.rowToChat(row), updatedAt: updatedAt || inserted.stored.timestamp, ...fields });
       return { message: inserted.stored, seq: inserted.seq };
     });
+    if (out) this._emitAppend(id, out.seq);
+    return out;
   }
 
   // Removing messages is only ever "from seq n onward", so seq stays dense
@@ -280,7 +322,9 @@ class HistoryStore {
     const id = normalizeId(chatId);
     const from = Number(seq);
     if (!Number.isInteger(from) || from < 1) throw new RangeError(`truncateFrom needs a seq of 1 or more, got ${seq}.`);
-    return this.transaction(() => Number(this._stmt('DELETE FROM messages WHERE chat_id = ? AND seq >= ?').run(id, from).changes));
+    const removed = this.transaction(() => Number(this._stmt('DELETE FROM messages WHERE chat_id = ? AND seq >= ?').run(id, from).changes));
+    if (removed) this._bumpVectorEpoch();
+    return removed;
   }
 
   // fromSeq and toSeq are both inclusive; limit counts from fromSeq.
@@ -501,6 +545,24 @@ class HistoryStore {
       throw new Error(`history.sqlite has schema version ${this.schemaVersion} and was opened without upgrading it; it has no calibration table.`);
     }
     chunkIndex.setCalibration(this.db, model, charsPerToken, samples);
+  }
+
+  // Recall stage H3 (spec §4.1, §5.2, §5.3). A store below schema 3 has no
+  // embeddings table: reads find nothing and writes do nothing; a read-only
+  // store never writes.
+  putEmbeddings(model, rows) {
+    if (!this.embeddable || this.readonly || !Array.isArray(rows) || !rows.length) return 0;
+    return this.transaction((db) => embeddingIndex.putEmbeddings(db, model, rows));
+  }
+  pendingEmbeddings(model, options = {}) { return this.embeddable ? embeddingIndex.pendingEmbeddings(this.db, model, options) : []; }
+  countPending(model, options = {}) { return this.embeddable ? embeddingIndex.countPending(this.db, model, options) : 0; }
+  countEmbedded(model) { return this.embeddable ? embeddingIndex.countEmbedded(this.db, model) : 0; }
+  vectorRows(model, chatId, options = {}) { return this.embeddable ? embeddingIndex.vectorRows(this.db, model, chatId, options) : []; }
+  deleteEmbeddings(model) {
+    if (!this.embeddable || this.readonly) return 0;
+    const removed = embeddingIndex.deleteEmbeddings(this.db, model);
+    this._bumpVectorEpoch();
+    return removed;
   }
 
   _messagesFor(chatId, { fromSeq = 1, toSeq = Number.MAX_SAFE_INTEGER, limit = -1 } = {}) {

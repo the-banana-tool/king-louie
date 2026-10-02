@@ -13,8 +13,9 @@
 // line are cut off.
 const fs = require('fs');
 const path = require('path');
-const { sha256Text } = require('./files');
+const { sha256Text, readJsonl } = require('./files');
 const { UsageError } = require('./errors');
+const { withRetries } = require('./retry');
 const { createLogger } = require('../logging');
 
 const log = createLogger('longhaul/embeddings');
@@ -26,17 +27,22 @@ const MAX_EMBED_CHARS = 6000;
 // Per request: at most --batch inputs and at most this many characters, well
 // under the provider's per-request token cap.
 const MAX_BATCH_CHARS = 400000;
-const MODEL_RE = /^[A-Za-z0-9._:-]{1,100}$/;
+// A model id, optionally org/name (the app's local models); a ':' tag is
+// allowed for hosted ids. No dot-only segment: it becomes a folder.
+const MODEL_RE = /^[A-Za-z0-9._:-]{1,100}(\/[A-Za-z0-9._-]{1,100})?$/;
 
 const keyOf = (messageId, idx) => `${messageId}\u0000${idx}`;
 
 function validateModelName(model) {
-  if (!MODEL_RE.test(String(model || ''))) throw new UsageError(`--model must be a plain model id (letters, digits, . _ : -), got ${JSON.stringify(model)}`);
-  return String(model);
+  const s = String(model || '');
+  if (!MODEL_RE.test(s) || s.split('/').some((seg) => /^\.+$/.test(seg))) {
+    throw new UsageError(`--model must be a plain model id (org/name; letters, digits, . _ : -), got ${JSON.stringify(model)}`);
+  }
+  return s;
 }
 
 function cacheDir(privateRoot, sessionId, model) {
-  return path.join(privateRoot, 'embeddings', sessionId, validateModelName(model).replace(/:/g, '_'));
+  return path.join(privateRoot, 'embeddings', sessionId, validateModelName(model).replace(/:/g, '_').replace(/\//g, '__'));
 }
 
 const embedText = (text) => {
@@ -53,16 +59,6 @@ function toBytes(vec) {
 function fromBytes(buf, offset = 0, dim = (buf.length - offset) / 4) {
   const out = new Float32Array(dim);
   for (let i = 0; i < dim; i++) out[i] = buf.readFloatLE(offset + i * 4);
-  return out;
-}
-
-function readJsonl(file) {
-  if (!fs.existsSync(file)) return [];
-  const out = [];
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-    if (!line.trim()) continue;
-    try { out.push(JSON.parse(line)); } catch { break; } // a torn last line ends the file
-  }
   return out;
 }
 
@@ -96,7 +92,7 @@ class EmbeddingCache {
   _load() {
     if (!fs.existsSync(this.files.meta)) return;
     this.meta = JSON.parse(fs.readFileSync(this.files.meta, 'utf8'));
-    const rows = readJsonl(this.files.index);
+    const rows = readJsonl(this.files.index, { tornTail: true }); // a torn last line ends the file
     const dim = this.meta.dim;
     const bytes = fs.existsSync(this.files.vectors) ? fs.readFileSync(this.files.vectors) : Buffer.alloc(0);
     const whole = Number.isInteger(dim) && dim > 0 ? Math.floor(bytes.length / (dim * 4)) : 0;
@@ -108,7 +104,7 @@ class EmbeddingCache {
     this.vectors = new Float32Array(n * (dim || 0));
     for (let r = 0; r < n; r++) this.vectors.set(fromBytes(bytes, r * dim * 4, dim), r * dim);
     this.byKey = new Map(this.rows.map((row, i) => [keyOf(row.messageId, row.idx), i]));
-    for (const q of readJsonl(this.files.questions)) {
+    for (const q of readJsonl(this.files.questions, { tornTail: true })) {
       if (q && typeof q.id === 'string' && typeof q.vec === 'string') this.questions.set(q.id, q);
     }
   }
@@ -194,34 +190,16 @@ class EmbeddingCache {
   }
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function retryable(err) {
-  if (!err) return false;
-  if (err.status === 429 || (Number.isInteger(err.status) && err.status >= 500)) return true;
-  if (Number.isInteger(err.status)) return false;
-  // A transport failure (fetch rejects with a TypeError): reset, DNS, timeout.
-  return err.name === 'TypeError' || /fetch failed|ECONNRESET|ETIMEDOUT|socket/i.test(String(err.message || ''));
-}
-
-// embedder: an object with embed(inputs, { model }) (OpenAIProvider#embed).
-// Retries 429, 5xx and transport failures with backoff; anything else throws.
-function createEmbedClient({ embedder, model, maxAttempts = 6, baseDelayMs = 1000, wait = sleep }) {
+// embedder: an object with embed(inputs, { model, kind }) (OpenAIProvider#embed,
+// which ignores kind; the local embedder prefixes queries and documents).
+// Retries 429, 5xx and transport failures with backoff (retry.js); anything
+// else throws.
+function createEmbedClient({ embedder, model, maxAttempts = 6, baseDelayMs = 1000, wait }) {
   if (!embedder || typeof embedder.embed !== 'function') throw new UsageError('This provider has no embeddings call; use --provider openai.');
+  const onRetry = ({ err, attempt, delayMs }) => log.warn('embeddings request failed; retrying', { status: err.status ?? null, attempt, delayMs });
   return {
     model,
-    async embed(inputs) {
-      for (let attempt = 1; ; attempt++) {
-        try {
-          return await embedder.embed(inputs, { model });
-        } catch (err) {
-          if (attempt >= maxAttempts || !retryable(err)) throw err;
-          const delay = Number.isFinite(err.retryAfterMs) && err.retryAfterMs > 0 ? err.retryAfterMs : baseDelayMs * 2 ** (attempt - 1);
-          log.warn('embeddings request failed; retrying', { status: err.status ?? null, attempt, delayMs: delay });
-          await wait(delay);
-        }
-      }
-    }
+    embed: (inputs, { kind = 'document' } = {}) => withRetries(() => embedder.embed(inputs, { model, kind }), { retries: maxAttempts - 1, baseDelayMs, wait, onRetry })
   };
 }
 
@@ -255,7 +233,7 @@ async function embedChunks({ cache, client, chunks, batch = 100, progress = () =
   let tokens = 0;
   let done = 0;
   for (const group of batches(todo, batch)) {
-    const res = await client.embed(group.map((g) => g.text));
+    const res = await client.embed(group.map((g) => g.text), { kind: 'document' });
     const used = Number.isFinite(res.usage?.input) ? res.usage.input : 0;
     tokens += used;
     cache.append(group.map(({ messageId, idx, chars, truncated }) => ({ messageId, idx, chars, truncated })), res.vectors, { tokens: used });
@@ -265,10 +243,19 @@ async function embedChunks({ cache, client, chunks, batch = 100, progress = () =
   return { embedded: todo.length, truncated: todo.filter((t) => t.truncated).length, tokens };
 }
 
+// The `longhaul embed` command that fills a session's cache for this
+// provider: local needs no --send-private (nothing leaves the machine).
+function embedHint(sessionId, model, provider = 'openai') {
+  return provider === 'local'
+    ? `run: longhaul embed --session ${sessionId} --provider local --model ${model}`
+    : `run: longhaul embed --session ${sessionId} --provider ${provider} --model ${model} --send-private`;
+}
+
 // Normalised rows of a store's chunks, in the store's chunk order, from the
-// cache. Throws naming `longhaul embed` when any chunk has no vector.
-function vectorIndexFor(cache, chunks, { sessionId, model }) {
-  const hint = `run: longhaul embed --session ${sessionId} --provider openai --model ${model} --send-private`;
+// cache. Throws naming `longhaul embed` (for the provider in use) when any
+// chunk has no vector.
+function vectorIndexFor(cache, chunks, { sessionId, model, provider = 'openai' }) {
+  const hint = embedHint(sessionId, model, provider);
   if (!cache.exists || !cache.dim) throw new UsageError(`kl-recall-vec: no embedding cache for session ${sessionId} (${model}); ${hint}`);
   const dim = cache.dim;
   const n = chunks.length;
@@ -313,13 +300,43 @@ function topByCosine(index, q, { upToSeq = Infinity, k = 50 } = {}) {
 
 module.exports = {
   MAX_EMBED_CHARS, MAX_BATCH_CHARS, EmbeddingCache, cacheDir, validateModelName, embedText, toBytes, fromBytes,
-  createEmbedClient, batches, embedChunks, vectorIndexFor, topByCosine, keyOf
+  createEmbedClient, batches, embedChunks, embedHint, vectorIndexFor, topByCosine, keyOf
 };
 
+// The app's local embedder (recall stage H3) for `embed` and kl-recall-vec:
+// the embed worker through an EmbedRunner, models under modelsDir, the same
+// prefixes the app uses. Nothing leaves this machine.
+function localEmbedderFor({ runner, modelsDir }) {
+  const { prefixTexts } = require('../history/embedders/profiles');
+  const loading = new Map();
+  return {
+    local: true,
+    async embed(inputs, { model, kind = 'document' } = {}) {
+      if (!loading.has(model)) {
+        loading.set(model, runner.load('embedder', model, { modelsDir }).catch((err) => {
+          loading.delete(model);
+          throw err;
+        }));
+      }
+      await loading.get(model);
+      const vectors = await runner.embed(model, prefixTexts(model, inputs, kind), { priority: kind === 'query' ? 'query' : 'document' });
+      return { vectors, usage: { input: null }, model };
+    }
+  };
+}
+
+// Where LongHaul keeps downloaded local models (inside LONGHAUL_HOME).
+const localModelsDir = (privateRoot) => path.join(privateRoot, 'models');
+
 // The provider behind `embed` and kl-recall-vec: the key from the
-// environment like model.js, or an injected instance (tests).
-function embedderFromEnv({ provider, env = process.env, baseUrl = null, providerInstance = null }) {
+// environment like model.js, an injected instance (tests), or 'local' (the
+// app's embedder through an embed runner).
+function embedderFromEnv({ provider, env = process.env, baseUrl = null, providerInstance = null, runner = null, modelsDir = null }) {
   if (providerInstance) return providerInstance;
+  if (provider === 'local') {
+    if (!runner || !modelsDir) throw new UsageError('local embedding needs an embed runner and a models folder');
+    return localEmbedderFor({ runner, modelsDir });
+  }
   if (!provider) throw new UsageError('--provider is required.');
   const ProviderFactory = require('../providers/provider-factory');
   let instance;
@@ -341,4 +358,6 @@ function priceTokens(provider, model, tokens, catalog = null) {
 }
 
 module.exports.embedderFromEnv = embedderFromEnv;
+module.exports.localEmbedderFor = localEmbedderFor;
+module.exports.localModelsDir = localModelsDir;
 module.exports.priceTokens = priceTokens;

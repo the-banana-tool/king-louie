@@ -242,31 +242,58 @@ Built-in adapters:
 | `oracle` | The evidence messages plus the tail | Upper bound on answerability |
 | `external:<name>` | A subprocess speaking JSON lines over stdio | Mem0, Letta, others, later |
 
-**B0 addendum (2026-09-30): `kl-recall-vec` is an H3 probe, not a
-candidate system.** `kl-recall-vec` (and `kl-recall-vec-only`, cosine
+**B0 addendum (2026-09-30, amended by H3): `kl-recall-vec` is an H3 probe
+with a hosted embedder; with `--embed-provider local` it measures what H3
+ships.** `kl-recall-vec` (and `kl-recall-vec-only`, cosine
 without BM25) is `kl-recall` plus a vector list fused by the retriever's
 reciprocal rank fusion (recall spec §6.3 steps 2 and 3), with vectors from a
 hosted embedder (OpenAI `text-embedding-3-small`) cached by `longhaul embed`
 under `LONGHAUL_HOME/private/embeddings/`. It measures how much a strong
 off-the-shelf semantic signal adds over BM25, so H3 can size its investment
-in a local embedder. It is never published as a result: it sends every chunk
-of a session to a provider, which King Louie's recall never does, and it is
-not what H3 ships.
+in a local embedder. With its hosted embedder (the default,
+`--embed-provider openai`) it is never published as a result: it sends every
+chunk of a session to a provider, which King Louie's recall never does. With
+`--embed-provider local` (H3) it embeds with the app's own local model in the
+embed worker, cached under
+`LONGHAUL_HOME/private/embeddings/<session>/<org>__<name>/`; nothing leaves
+the machine, it is what H3 ships (`kl-recall` is the BM25 path the app falls
+back to), and it is published like `kl-recall`.
 
-**B0 addendum (2026-09-30): `kl-recall-rerank` is an H3 probe, not a
-candidate system.** `kl-recall-rerank` (BM25 candidates) and
+**B0 addendum (2026-09-30, amended by H3): `kl-recall-rerank` is an H3 probe
+with a hosted embedder; with `--embed-provider local` it measures what H3
+ships.** `kl-recall-rerank` (BM25 candidates) and
 `kl-recall-vec-rerank` (BM25 fused with `kl-recall-vec`'s cached cosine
 list) turn on recall spec §6.3 step 6: a local cross-encoder
 (`Xenova/ms-marco-MiniLM-L-6-v2` through `@huggingface/transformers` on the
 native `onnxruntime-node`, CPU) rescores the top `rerank.topM` fused
-candidates and its score replaces theirs. Neither package is an app
-dependency; install them in a checkout with `npm i --no-save`. Scores are
+candidates and its score replaces theirs. Since H3 both are app dependencies
+(`package.json`) and the cross-encoder runs in the app's embed worker; its
+model downloads once into `LONGHAUL_HOME/private/models/`. Scores are
 cached per question and chunk (with a hash of the exact query and chunk
 text) under `LONGHAUL_HOME/private/rerank/<session>/<model>/`, so a sweep
 pays the model once. Its latency includes the reranker call, which is real
 CPU time on a miss and near zero on a hit; a report states which it measured.
-It sizes what a reranker buys H3; the fused variant inherits
-`kl-recall-vec`'s hosted embedder and is never published as a result.
+It sizes what a reranker buys H3; the fused variant with the hosted embedder
+is never published as a result; with `--embed-provider local` it is
+published like `kl-recall`.
+
+**B3 addendum (2026-09-30): `kl-recall-whole` is a new adapter.** It is
+`kl-recall` with whole small messages and tool pairing on
+(`completeMessageTokens` 800, `pairToolMessages` true, winning over
+`--recall`). B0 measured that these raise evidence recall (0.352 to 0.494)
+but leave answer containment flat, so only answer accuracy can decide them;
+each answer-stage run prints the paired `whole-messages` comparison. It is
+a candidate configuration of the system under test, published like
+`kl-recall`. Three rulings on the table above: `full-history` is capped at
+what the answer model's catalog window holds (128K estimated tokens when the
+catalog does not know it), as "fits the model's window" says, and may run in
+an evidence-only run (no model, 128K); `real-compaction` shows the latest
+real summary before `askAtSeq`, not every summary, since after a compaction
+Claude Code's own context held only that latest summary (it was written
+from a context that held the one before); and an adapter's setup cost (the
+summaries of `summarize-compact`) is recorded once per (adapter, session),
+in `spend.json` and the summary's `setup`, not per question as §8 step 5
+lists.
 
 `evidenceSeqsShown` is how an adapter reports which message sequences its
 context contains; for `kl-recall` it comes from provenance, for others from
@@ -339,6 +366,31 @@ reference answers and the reply, not the context. The run prices its plan
 from the model catalog before the first call and refuses to start when the
 estimate exceeds the cap; `--max-usd` overrides it. Prompts for authoring, answering and judging are versioned
 files in `src/longhaul/prompts/`, and their hashes are in every run's config.
+
+**B3 addendum (2026-09-30).** Measured context sizes change B-D7's estimate:
+the budget-sized adapters show about 12K estimated tokens a question
+(`kl-recall` p90 13.1K), but `full-history` at its 128K cap and
+`real-compaction` (up to one compaction window: session E compacted about
+every 275K tokens, so after the 128K cap an estimated 60K to 128K a
+question, not yet measured) are 5 to 10 times that. At 150 questions,
+`full-history` alone is about 18M input tokens: $36 at $2 per million and
+$72 at $4. `run --long-context-sample N` therefore gives the long-context
+adapters the first N questions of the stratified sample (every prefix of it
+is stratified), and the dry run prices the choice before anything is sent.
+The cache that makes reruns free lives under `LONGHAUL_HOME/private/model-cache/`,
+shared by every run, not under `runs/<id>/cache/` (§11): its entries are model
+text about private sessions, and a crashed run's replacement has a new id.
+`real-compaction` skips a session without recorded compactions (listed in
+`config.json`). `summarize-compact` compacts every 10K estimated tokens by
+default, which keeps its context at the other adapters' budget. The
+estimate is a close bound, not a guarantee (dense text runs under 3
+characters a token); a spend guard stops the run at the cap and does not
+reset within it, and `spend.json` is rewritten as the run goes. The judge's
+cache key is the hash of the prompt as sent, and `config.json` records a
+hash of the kind rules beside `judge-v1.md`'s. A report series is one
+adapter configuration (its `describe()` hash) at one tier, answer model,
+judge model and commit. Follow-up questions (one asked after an earlier
+answer in the same run) are not a kind in B3; they belong to a later stage.
 
 ## 9. The compaction-loss study
 

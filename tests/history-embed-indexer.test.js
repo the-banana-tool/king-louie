@@ -1,0 +1,278 @@
+// tests/history-embed-indexer.test.js
+// Background embedding (recall spec §5.2): batches, the newest chat first,
+// maxChunksPerToolResult, a poison chunk, a model switch mid-backfill,
+// failures reported to the host, onIdle and the reranker preload behind it.
+// In-process embedders; manual ticks.
+const { describe, it, afterEach } = require('node:test');
+const assert = require('node:assert');
+const { EventEmitter } = require('node:events');
+const { startEmbedIndexer } = require('../src/history/embed-indexer');
+const { EmbedderHost } = require('../src/history/embedder-host');
+const { HistoryStore } = require('../src/history');
+const { unit } = require('../src/history/embedders/vectors');
+const { createBagOfWordsEmbedder } = require('./helpers/fake-embedder');
+const { openTempStore, seedChat, readDb } = require('./helpers/history-fixture');
+
+const bow = createBagOfWordsEmbedder();
+function fakeEmbedder(name = 'fake:bow', { failWhen = null, gate = null } = {}) {
+  const calls = [];
+  return {
+    name, kind: 'fake', model: name, dim: 28, tokens: 0, calls,
+    async embed(texts) {
+      calls.push(texts.slice());
+      if (gate) await gate;
+      const err = failWhen && failWhen(texts);
+      if (err) throw err;
+      return (await bow.embed(texts)).map((v) => unit(v));
+    }
+  };
+}
+const crash = () => Object.assign(new Error('the embed worker exited (code 70)'), { code: 'EMBED_WORKER_CRASHED' });
+const notes = (n, prefix = 'note') => Array.from({ length: n }, (_, i) => ({ sender: i % 2 ? 'assistant' : 'user', text: `${prefix} ${i} about the linen bandage and the gate code` }));
+
+function setup({ embedder = fakeEmbedder(), history = {} } = {}) {
+  const t = openTempStore();
+  const failures = [];
+  const timers = [];
+  const host = { active: embedder, current() { return this.active; }, fail: (e) => failures.push(e) };
+  const indexer = () => startEmbedIndexer({
+    store: t.store, host, getSettings: () => ({ history }),
+    setTimer: (fn, ms) => { timers.push(ms); return timers.length; }, clearTimer: () => {},
+    log: { warn() {}, info() {}, debug() {} }
+  });
+  return { t, host, failures, timers, indexer };
+}
+
+describe('EmbedIndexer', () => {
+  let t;
+  let ix;
+  afterEach(async () => { if (ix) await ix.stop(); ix = null; if (t) t.cleanup(); t = null; });
+
+  it('embeds every chunk in batches of batchSize and reports progress', async () => {
+    const s = setup({ history: { embedder: { batchSize: 8 } } });
+    t = s.t;
+    seedChat(t.store, { messages: notes(20) });
+    ix = s.indexer();
+    for (let i = 0; i < 3; i += 1) await ix.tick();
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 20);
+    assert.deepStrictEqual(ix.progress(), { key: 'fake:bow', embedded: 20, pending: 0 });
+    assert.deepStrictEqual(s.host.active.calls.map((c) => c.length), [8, 8, 4]);
+    assert.deepStrictEqual(await ix.tick(), { embedded: 0, skipped: 0 });
+  });
+
+  it('an append nudges it: the chat with the newest append goes first', async () => {
+    const s = setup({ history: { embedder: { batchSize: 1 } } });
+    t = s.t;
+    seedChat(t.store, { messages: notes(10) });
+    seedChat(t.store, { id: 'chat-2', messages: [] });
+    ix = s.indexer();
+    s.timers.length = 0;
+    t.store.appendMessage('chat-2', { id: 'n1', sender: 'user', text: 'The mummy mask is in the tomb.', timestamp: '2026-01-02T09:00:00.000Z' });
+    assert.deepStrictEqual(s.timers, [0], 'scheduled at once');
+    await ix.tick();
+    assert.deepStrictEqual(s.host.active.calls[0], ['The mummy mask is in the tomb.']);
+  });
+
+  it('maxChunksPerToolResult: only the first n chunks of a tool result are embedded', async () => {
+    const s = setup({ history: { embedder: { maxChunksPerToolResult: 2 } } });
+    t = s.t;
+    const long = Array.from({ length: 5 }, (_, i) => `Section ${i + 1} of the survey output. ${'drainage reading '.repeat(100)}`).join('\n\n');
+    seedChat(t.store, { messages: [{ sender: 'toolResult', toolName: 'Bash', result: long }] });
+    ix = s.indexer();
+    await ix.tick();
+    await ix.tick();
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 2);
+    assert.strictEqual(ix.progress().pending, 0);
+  });
+
+  it('a chunk that crashes the worker is isolated and tombstoned; the rest are embedded; the host is not failed', async () => {
+    const s = setup({ embedder: fakeEmbedder('fake:bow', { failWhen: (texts) => (texts.some((x) => x.includes('poison')) ? crash() : null) }) });
+    t = s.t;
+    seedChat(t.store, { messages: [...notes(3), { sender: 'user', text: 'poison text that crashes the model' }, ...notes(3, 'later')] });
+    ix = s.indexer();
+    const out = await ix.tick();
+    assert.deepStrictEqual(out, { embedded: 6, skipped: 1 });
+    assert.strictEqual(s.failures.length, 0);
+    const db = readDb(t.dbPath);
+    const dims = db.prepare("SELECT e.dim AS dim, c.text AS text FROM embeddings e JOIN chunks c ON c.id = e.chunk_id WHERE e.model = 'fake:bow'").all();
+    db.close();
+    assert.strictEqual(dims.find((r) => r.text.includes('poison')).dim, 0, 'a tombstone');
+    assert.strictEqual(t.store.countPending('fake:bow'), 0, 'never retried for this key');
+  });
+
+  it('any other failure is reported to the host once and nothing is written', async () => {
+    const s = setup({ embedder: fakeEmbedder('fake:bow', { failWhen: () => Object.assign(new Error('401 invalid key'), { status: 401 }) }) });
+    t = s.t;
+    seedChat(t.store, { messages: notes(4) });
+    ix = s.indexer();
+    await ix.tick();
+    assert.strictEqual(s.failures.length, 1);
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 0);
+  });
+
+  it('a model switch mid-backfill: the batch in flight lands under its own key; the next tick fills the new key', async () => {
+    let open;
+    const gate = new Promise((r) => { open = r; });
+    const a = fakeEmbedder('local:model-a', { gate });
+    const s = setup({ embedder: a, history: { embedder: { batchSize: 4 } } });
+    t = s.t;
+    seedChat(t.store, { messages: notes(8) });
+    ix = s.indexer();
+    const inFlight = ix.tick();
+    await new Promise((r) => setImmediate(r));
+    s.host.active = fakeEmbedder('local:model-b');
+    open();
+    await inFlight;
+    assert.strictEqual(t.store.countEmbedded('local:model-a'), 4);
+    assert.strictEqual(t.store.countEmbedded('local:model-b'), 0);
+    await ix.tick();
+    await ix.tick();
+    assert.strictEqual(t.store.countEmbedded('local:model-b'), 8);
+    assert.strictEqual(t.store.countEmbedded('local:model-a'), 4, 'the old key keeps its rows');
+  });
+
+  it('a batch in flight across a truncate is not written: a reused chunk id never gets the old vector', async () => {
+    let open;
+    const gate = new Promise((r) => { open = r; });
+    const s = setup({ embedder: fakeEmbedder('fake:bow', { gate }), history: { embedder: { batchSize: 16 } } });
+    t = s.t;
+    const seqs = seedChat(t.store, { messages: notes(3) });
+    const db0 = readDb(t.dbPath);
+    const lastId = db0.prepare('SELECT MAX(id) AS id FROM chunks').get().id;
+    db0.close();
+    ix = s.indexer();
+    const inFlight = ix.tick();
+    await new Promise((r) => setImmediate(r));
+    t.store.truncateFrom('chat-1', seqs[2]);
+    t.store.appendMessage('chat-1', { id: 'chat-1-new', sender: 'user', text: 'The mummy mask is in the tomb.', timestamp: '2026-01-02T09:00:00.000Z' });
+    const db1 = readDb(t.dbPath);
+    const reused = db1.prepare('SELECT id, text FROM chunks WHERE message_id = ?').get('chat-1-new');
+    db1.close();
+    assert.strictEqual(reused.id, lastId, 'the new chunk reuses the truncated chunk id');
+    open();
+    await inFlight;
+    const db = readDb(t.dbPath);
+    const row = db.prepare("SELECT dim FROM embeddings WHERE model = 'fake:bow' AND chunk_id = ?").get(reused.id);
+    db.close();
+    assert.strictEqual(row, undefined, 'no vector under the reused id from the stale batch');
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 0, 'the stale batch wrote nothing');
+    await ix.tick();
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 3, 'the rows are pending again and fill on the next tick');
+  });
+
+  it('does nothing without a ready embedder, or after stop()', async () => {
+    const s = setup({ embedder: null });
+    t = s.t;
+    seedChat(t.store, { messages: notes(2) });
+    ix = s.indexer();
+    assert.deepStrictEqual(await ix.tick(), { embedded: 0, skipped: 0 });
+    s.host.active = fakeEmbedder();
+    await ix.stop();
+    assert.deepStrictEqual(await ix.tick(), { embedded: 0, skipped: 0 });
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 0);
+  });
+
+  it('does nothing on a read-only store', async () => {
+    const s = setup();
+    t = s.t;
+    seedChat(t.store, { messages: notes(2) });
+    t.store.close();
+    t.store = HistoryStore.open(t.dbPath, { readonly: true });
+    assert.strictEqual(t.store.readonly, true);
+    const embedder = fakeEmbedder();
+    const host = { current: () => embedder, fail: () => assert.fail('no failure expected') };
+    ix = startEmbedIndexer({
+      store: t.store, host, getSettings: () => ({}),
+      setTimer: () => 1, clearTimer: () => {}, log: { warn() {}, info() {}, debug() {} }
+    });
+    assert.deepStrictEqual(await ix.tick(), { embedded: 0, skipped: 0 });
+    assert.strictEqual(embedder.calls.length, 0, 'nothing sent to the embedder');
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 0);
+    assert.ok(t.store.countPending('fake:bow') > 0, 'the chunks are still pending');
+  });
+
+  it('onIdle fires when a full pass finds nothing pending, once per transition', async () => {
+    const s = setup({ history: { embedder: { batchSize: 8 } } });
+    t = s.t;
+    seedChat(t.store, { messages: notes(10) });
+    const idles = [];
+    ix = startEmbedIndexer({
+      store: t.store, host: s.host, getSettings: () => ({ history: { embedder: { batchSize: 8 } } }), onIdle: (key) => idles.push(key),
+      setTimer: () => 1, clearTimer: () => {}, log: { warn() {}, info() {}, debug() {} }
+    });
+    while (ix.progress().pending > 0 || !ix.idle()) {
+      assert.deepStrictEqual(idles, [], 'not idle while chunks are pending');
+      await ix.tick();
+    }
+    assert.deepStrictEqual(idles, ['fake:bow']);
+    await ix.tick();
+    assert.deepStrictEqual(idles, ['fake:bow'], 'once per transition');
+    seedChat(t.store, { id: 'c2', messages: notes(2, 'later') });
+    assert.strictEqual(ix.idle(), false, 'an append ends the idle');
+    while (!ix.idle()) await ix.tick();
+    assert.deepStrictEqual(idles, ['fake:bow', 'fake:bow']);
+  });
+});
+
+// The core wires the indexer's onIdle to host.preloadReranker (recall spec
+// §5.2): the cross-encoder download never shares the worker with the first
+// backfill. A real EmbedderHost on a stub runner, a real indexer and store.
+class StubRunner extends EventEmitter {
+  constructor() { super(); this.loads = []; }
+  load(role, model, opts) {
+    this.loads.push({ role, model, opts });
+    return Promise.resolve({ dim: role === 'embedder' ? 28 : null });
+  }
+  async embed(model, texts) { return (await bow.embed(texts)).map((v) => unit(v)); }
+  async rerank(model, query, texts) { return texts.map(() => 0); }
+  reset() {}
+  async stop() {}
+}
+
+describe('EmbedIndexer with the EmbedderHost: the reranker preload waits for an idle indexer', () => {
+  let t;
+  let ix;
+  afterEach(async () => { if (ix) await ix.stop(); ix = null; if (t) t.cleanup(); t = null; });
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  function wire(embedder) {
+    t = openTempStore();
+    seedChat(t.store, { messages: notes(20) });
+    const settings = { history: { embedder: { batchSize: 8, ...embedder } } };
+    const runner = new StubRunner();
+    const host = new EmbedderHost({
+      getSettings: () => settings, modelsDir: '/data/models', createRunner: () => runner, createProvider: () => assert.fail('no provider'),
+      log: { warn() {}, info() {}, debug() {} }
+    });
+    host.start();
+    ix = startEmbedIndexer({
+      store: t.store, host, getSettings: () => settings, onIdle: () => host.preloadReranker(),
+      setTimer: () => 1, clearTimer: () => {}, log: { warn() {}, info() {}, debug() {} }
+    });
+    return { host, runner, rerankLoads: () => runner.loads.filter((l) => l.role === 'reranker') };
+  }
+
+  it('no reranker load while chunks are pending; one after the indexer goes idle', async () => {
+    const w = wire({});
+    await flush();
+    assert.strictEqual(w.host.status().state, 'ready');
+    await ix.tick();
+    assert.ok(ix.progress().pending > 0);
+    assert.deepStrictEqual(w.rerankLoads(), [], 'pending chunks: no reranker load');
+    while (ix.progress().pending > 0) {
+      await ix.tick();
+      if (ix.progress().pending > 0) assert.deepStrictEqual(w.rerankLoads(), []);
+    }
+    while (!ix.idle()) await ix.tick();
+    assert.deepStrictEqual(w.rerankLoads().map((l) => [l.model, l.opts.priority]), [['Xenova/ms-marco-MiniLM-L-6-v2', 'document']]);
+    await ix.tick();
+    assert.strictEqual(w.rerankLoads().length, 1, 'requested once');
+  });
+
+  it('kind none: no reranker load in the background at all', async () => {
+    const w = wire({ kind: 'none' });
+    await flush();
+    for (let i = 0; i < 5; i += 1) await ix.tick();
+    assert.deepStrictEqual(w.runner.loads, []);
+  });
+});

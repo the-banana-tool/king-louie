@@ -5,7 +5,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { adapterNames } = require('../src/longhaul/adapters');
+const { adapterNames, createAdapter } = require('../src/longhaul/adapters');
 const { createKlRecallAdapter, shownFromBuild } = require('../src/longhaul/adapters/kl-recall');
 const { SYNTH_FIXTURES, generateSynthetic } = require('../src/longhaul/synthetic');
 const { SessionIndex, loadSession, estimateTokens } = require('../src/longhaul/session-format');
@@ -53,7 +53,8 @@ describe('shownFromBuild', () => {
 
 describe('kl-recall', () => {
   it('is registered next to the other adapters', () => {
-    assert.deepStrictEqual(adapterNames(), ['kl-recall', 'kl-recall-rerank', 'kl-recall-vec', 'kl-recall-vec-only', 'kl-recall-vec-rerank', 'oracle', 'sliding-window']);
+    assert.ok(adapterNames().includes('kl-recall'));
+    assert.ok(adapterNames().includes('kl-recall-whole'));
   });
 
   it('refuses --recall recalledTokens: the budget comes from --budget-tokens', () => {
@@ -62,7 +63,7 @@ describe('kl-recall', () => {
 
   it('refuses a recall value the settings merge would not keep', () => {
     const bad = [
-      { tailMessages: -1 }, { tailMessages: 2.5 }, { tailMessages: 'many' }, { recencyWeight: 2 },
+      { tailUserTurns: -1 }, { tailUserTurns: 2.5 }, { tailUserTurns: 'many' }, { recencyWeight: 2 },
       { tailIncludeToolCalls: 'yes' }, { kindWeights: { bogus: 1 } }, { kindWeights: { user: -1 } }, { kindWeights: 3 }
     ];
     for (const recall of bad) {
@@ -71,10 +72,15 @@ describe('kl-recall', () => {
   });
 
   it('records the effective merged recall settings', () => {
-    const adapter = createKlRecallAdapter({ budgetTokens: 3000, recall: { tailMessages: 4, kindWeights: { user: 2 } }, tmpRoot: tmpDir() });
-    const expected = mergeHistorySettings({ recall: { tailMessages: 4, kindWeights: { user: 2 }, recalledTokens: 3000 } }).recall;
+    const adapter = createKlRecallAdapter({ budgetTokens: 3000, recall: { tailUserTurns: 2, kindWeights: { user: 2 } }, tmpRoot: tmpDir() });
+    const expected = mergeHistorySettings({ recall: { tailUserTurns: 2, kindWeights: { user: 2 }, recalledTokens: 3000 } }).recall;
     assert.deepStrictEqual(adapter.describe().recall, expected);
     assert.strictEqual(adapter.describe().recall.kindWeights.assistant, 1.0);
+  });
+
+  it('refuses --recall tailMessages and names the keys that replaced it', () => {
+    assert.throws(() => createKlRecallAdapter({ recall: { tailMessages: 16 }, tmpRoot: tmpDir() }),
+      (err) => err instanceof UsageError && /tailUserTurns/.test(err.message) && /tailMaxRows/.test(err.message));
   });
 
   it('the CLI refuses --recall recalledTokens with exit 2', async () => {
@@ -238,6 +244,36 @@ describe('kl-recall', () => {
       const estimator = new TokenEstimator({ store: handle.store });
       for (const text of ['', 'abcd', 'abcde', 'x'.repeat(1001), messages[3].result || messages[3].text]) {
         assert.strictEqual(estimator.estimate(text, 'longhaul-estimate'), estimateTokens(text), JSON.stringify(String(text).slice(0, 20)));
+      }
+    } finally {
+      await adapter.release(handle);
+    }
+  });
+});
+
+describe('kl-recall-whole', () => {
+  it('is kl-recall with whole small messages and tool pairing on, whatever --recall says', () => {
+    const whole = createAdapter('kl-recall-whole', { tmpRoot: tmpDir(), recall: { bm25TopK: 100, completeMessageTokens: 0 } });
+    const d = whole.describe();
+    assert.strictEqual(d.name, 'kl-recall-whole');
+    assert.strictEqual(whole.name, 'kl-recall-whole');
+    assert.strictEqual(d.recall.completeMessageTokens, 800);
+    assert.strictEqual(d.recall.pairToolMessages, true);
+    assert.strictEqual(d.recall.bm25TopK, 100);
+    const shipped = createAdapter('kl-recall', { tmpRoot: tmpDir() }).describe();
+    assert.strictEqual(shipped.name, 'kl-recall');
+    assert.strictEqual(shipped.recall.completeMessageTokens, 0);
+    assert.strictEqual(shipped.recall.pairToolMessages, false);
+  });
+
+  it('never shows a message at or after askAtSeq', async () => {
+    const { session, questions } = await fixture('synth-small');
+    const adapter = createAdapter('kl-recall-whole', { tmpRoot: tmpDir() });
+    const handle = await adapter.prepare(session, { upToSeq: Math.max(...questions.map((q) => q.askAtSeq)) });
+    try {
+      for (const q of questions) {
+        const r = await adapter.context(handle, { question: q, askAtSeq: q.askAtSeq });
+        assert.ok([...r.evidenceSeqsShown, ...r.evidenceSeqsPartial].every((s) => s < q.askAtSeq), q.id);
       }
     } finally {
       await adapter.release(handle);

@@ -109,7 +109,7 @@ Default is `info`. Override with `KING_LOUIE_LOG_LEVEL` or `LOG_LEVEL` env var.
 ## History
 
 `src/history/` is the history store (spec
-`docs/superpowers/specs/2026-09-25-chat-history-recall-design.md`, stages H1-H2;
+`docs/superpowers/specs/2026-09-25-chat-history-recall-design.md`, stages H1-H3;
 ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
 
 - Chats, their messages (one row each, `seq` dense from 1 per chat) and
@@ -165,10 +165,16 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   cached `systemPrompt`. `history.recall.enabled: false` sends the tail only.
 - Recall defaults come from LongHaul measurements (spec §6.7): the query is
   the new message alone (`queryUserTurns: 0`), `bm25TopK` 200, and the tail is
-  16 messages with the tool results in its span (capped at 1,000 tokens each).
-  The other `history.recall` knobs (`completeMessageTokens`,
-  `pairToolMessages`, `rerank`, `vectorTopK`, `dedupeJaccard`, …) were measured
-  and are off or inert by default. Change a default only with a LongHaul run
+  the last `tailUserTurns` (4) user turns with the replies and tool results in
+  their span (tool results capped at 1,000 tokens each, the tail at
+  `tailMaxRows` rows), and local `Xenova/all-MiniLM-L6-v2` vectors are fused
+  with BM25 (`dedupeCosine` 0.92). Settled on LongHaul in H3 (spec §6.7):
+  the tail by a sweep of 2 to 8 user turns (4 is the smallest within noise of
+  the best, under the 15K p90 ceiling), MiniLM over bge-small (0.456 / 0.612
+  against 0.443 / 0.583 evidence recall / containment, at half the CPU). The
+  other `history.recall` knobs (`completeMessageTokens`, `pairToolMessages`,
+  per-turn `rerank`, `dedupeJaccard`, …) were measured and are off or inert by
+  default. Change a default only with a LongHaul run
   that shows it; tests that check a mechanism pin their settings explicitly.
 - Assistant replies carry `context` provenance; the recall line reads it and
   `history:excerpts` returns the excerpts. `SearchHistory`/`ReadHistory` are
@@ -176,6 +182,30 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
 - Tests use `tests/helpers/history-fixture.js` (a temp store; chats seeded
   through the real `appendMessage`); `tests/e2e/history-recall.test.js` is
   the end-to-end check.
+- H3 (vectors): `embeddings` (schema step 3) holds one unit float32 vector per
+  chunk per embedder key (`local:<model>`, `ollama:<model>`,
+  `openai:<model>`). `EmbedderHost` (`src/history/embedder-host.js`) picks the
+  embedder from `settings.history.embedder` and starts only from
+  `startModelsBackgroundChecks` (never under `KL_TEST_MODE`, never in
+  `createCore().start()`); `startEmbedIndexer` fills the table in the
+  background; `VectorIndex` keeps per-chat matrices under `vectorCacheMb`.
+  Local models run in the embed worker (`embed-runner.js`, `embed-worker.js`)
+  and download once into `<dataDir>/models/`. `SearchHistory` reranks with the
+  local cross-encoder; per turn only with `rerank.enabled`.
+- Tests never load a model: the worker with `tests/helpers/fake-embed-backend.js`
+  (`new EmbedRunner({ testBackend })`), a core with `deps.history.createEmbedRunner`
+  returning `FakeEmbedRunner` (`tests/helpers/fake-embed-runner.js`).
+- The local embedder and the cross-encoder run in the embed worker, a child
+  process of `process.execPath` with `ELECTRON_RUN_AS_NODE=1` (like the PDF
+  worker), so they need Electron's RunAsNode fuse left on and
+  `onnxruntime-node` unpacked from the asar (`build.asarUnpack`).
+  `node scripts/check-embed-worker.js [--app <binary> --resources <dir>]`
+  checks a checkout or a packaged build (it downloads the models once). Only
+  the Windows x64 package has been checked; macOS and Linux are a residual.
+  The other platforms' onnxruntime binaries are dropped by one top-level
+  `build.files` pattern (`${platform}` macro); never give `build.win`/`mac`/
+  `linux` a `files` list: electron-builder 26 then drops the top-level list,
+  and `.git`, `tests` and `src/longhaul` go into the asar.
 
 ## Models
 
@@ -249,7 +279,7 @@ stages M1 to M3). It is Electron-free.
 
 `src/longhaul/` and `bin/longhaul.js` (spec
 `docs/superpowers/specs/2026-09-25-session-memory-benchmark-design.md`; stage
-B0 scores evidence recall only, with no answer or judge model). It is
+B0 scores evidence recall; stage B3 adds the answer stage and reports). It is
 Electron-free, may use `src/history/` and `src/providers/`, and nothing else in
 `src/` may require it (`tests/longhaul-boundary.test.js`). It is left out of the
 Electron build.
@@ -301,12 +331,46 @@ Electron build.
   `vectorTopK` with BM25, or use cosine alone, and refuse a session whose
   cache is missing or incomplete. Tests use
   `tests/helpers/fake-embedding-server.js`.
-- `kl-recall-rerank` / `kl-recall-vec-rerank` (H3 probe) turn on
-  `history.recall.rerank` (spec §6.3 step 6, a `reranker` callback into
-  `Retriever#retrieve`, default off) with a local cross-encoder whose scores
-  are cached under `LONGHAUL_HOME/private/rerank/`; it needs
-  `npm i --no-save @huggingface/transformers onnxruntime-node`, never an app
-  dependency. Tests inject a fake `scorer`.
+- `kl-recall-rerank` / `kl-recall-vec-rerank` use the app's cross-encoder in
+  the embed worker (models under `LONGHAUL_HOME/private/models`), scores
+  cached under `LONGHAUL_HOME/private/rerank/`. `longhaul embed --provider
+  local --model <org/name>` and `run --embed-provider local` use the app's
+  local embedder; nothing leaves the machine, so no `--send-private`.
+  Summaries count questions with an empty tail. Tests inject a fake `scorer`.
+- The answer stage (B3): `longhaul run ... --answer-provider <p> --answer-model <m>
+  --judge-provider <p> --judge-model <m>` adds answer accuracy (answerable questions
+  judged `correct`), abstain accuracy (abstain questions the model declined) and the
+  false-answer rate. The judge never sees the context and is never the answer model.
+  Prompts are `src/longhaul/prompts/*-v1.md`; a change is a new versioned file, and
+  every run's `config.json` records their hashes. Adapters added: `full-history`
+  (the frontier tier only in the answer stage, and evidence-only runs; capped at the
+  answer model's window, 128K when unknown), `real-compaction` (sessions with recorded
+  compactions only), `summarize-compact` (a summarizer model every 10K tokens, answer
+  stage only) and `kl-recall-whole` (the whole-message comparison the summary prints).
+- Before any call, a run prices its plan from `Catalog#price` (input at 3 characters a
+  token, output at max tokens: a close bound, not a guarantee; a spend guard stops the
+  run at the cap and never resets within it) and refuses over `--max-usd` (default
+  $50) or with an unpriced model unless `--allow-unpriced`; `--dry-run` prints the plan
+  and calls nothing. `--tier frontier --sample 150 --long-context-sample N` is the
+  headline sample. `full-history` and `real-compaction` are capped at what the answer
+  model's catalog window holds (128K when unknown). A private session needs
+  `--send-private` for the answer stage too. `runs/<id>/spend.json` is rewritten as
+  the run goes, with `stoppedBy` when a run stops (`SIGINT` on Ctrl-C); a priced reply
+  that reports no usage is charged at its estimate (`estimatedCalls`), never $0. In the
+  answer stage and `--dry-run`, a `kl-recall-vec*` question with no cached vector
+  refuses the run (`EMBEDDINGS_MISSING`): run `longhaul embed` first. Run no other `longhaul` command on the
+  same `LONGHAUL_HOME` while a run is going: `run` starts by removing `tmp/kl-*` dirs,
+  which would delete another run's contexts or an `embed`'s temp store.
+- Model calls are cached under `LONGHAUL_HOME/private/model-cache/` (answers, verdicts,
+  summaries: private text), so a rerun or a resumed run pays only for missing calls.
+  Records hold verdicts and numbers only; the 10% judge sample is
+  `private/spot-checks/<runId>.jsonl`, reviewed with `longhaul spot-check --run <id>
+  --reviewer <initials>`. `longhaul report --runs <id>,<id>` writes publishable
+  aggregate tables to `reports/<id>/` (`--public` refuses private runs); a series
+  there is one adapter configuration at one tier, answer model, judge model and
+  full commit, with one setup (`setup:` hashes the max tokens and prompt hashes).
+- Smoke run of the answer stage (no models, no network, $0):
+  `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models`.
 
 ## Cases
 

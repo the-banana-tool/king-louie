@@ -12,7 +12,7 @@ const { ContextBuilder } = require('../src/history/context-builder');
 const { Retriever } = require('../src/history/retriever');
 const { TokenEstimator } = require('../src/history/token-estimator');
 const { initializeTools, toolRegistry } = require('../src/tools');
-const { openTempStore, seedChat, readDb } = require('./helpers/history-fixture');
+const { openTempStore, seedChat, readDb, downgradeToVersion1 } = require('./helpers/history-fixture');
 const { setLogLevel } = require('../src/logging');
 
 setLogLevel('fatal');
@@ -68,9 +68,7 @@ describe('history: Vault is never indexed or shown', () => {
     seedChat(t.store, { messages: messages() });
     t.store.close();
     const raw = new DatabaseSync(t.dbPath);
-    raw.exec(`DROP TRIGGER chunks_ai; DROP TRIGGER chunks_ad; DROP TRIGGER chunks_au;
-      DROP TABLE chunks_fts; DROP TABLE chunks; DROP TABLE calibration;
-      UPDATE schema_version SET version = 1;`);
+    downgradeToVersion1(raw);
     raw.close();
     t.store = HistoryStore.open(t.dbPath);
     t.store.backfillChunks();

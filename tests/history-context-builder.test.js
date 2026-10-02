@@ -3,7 +3,7 @@
 // false, and no leakage past upToSeq (recall spec §6.1–§6.4, §7, §13).
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
-const { ContextBuilder } = require('../src/history/context-builder');
+const { ContextBuilder, FALLBACK_MAX_TURNS } = require('../src/history/context-builder');
 const { Retriever } = require('../src/history/retriever');
 const { TokenEstimator } = require('../src/history/token-estimator');
 const { openTempStore, seedChat, BASE_TIME } = require('./helpers/history-fixture');
@@ -47,8 +47,8 @@ describe('ContextBuilder', () => {
   let t;
   afterEach(() => t && t.cleanup());
 
-  it('the tail is the last tailMessages user and assistant messages, verbatim and in order', async () => {
-    const s = setup(Array.from({ length: 20 }, (_, i) => filler(i + 1)), { recall: { tailMessages: 8 } });
+  it('the tail is the last tailUserTurns user turns, verbatim and in order', async () => {
+    const s = setup(Array.from({ length: 20 }, (_, i) => filler(i + 1)), { recall: { tailUserTurns: 4 } });
     t = s.t;
     const out = await s.builder.build({ chatId: 'chat-1', message: 'hello' });
     assert.deepStrictEqual(out.tail.map((m) => m.seq), [13, 14, 15, 16, 17, 18, 19, 20]);
@@ -58,23 +58,23 @@ describe('ContextBuilder', () => {
     assert.strictEqual(out.stats.estTokens.tail, out.tail.reduce((n, m) => n + s.estimator.estimate(m.text), 0));
   });
 
-  it('by default the tail is the last 16 user and assistant messages, and no more', async () => {
+  it('by default the tail is the last 4 user turns, and no more', async () => {
     const s = setup(Array.from({ length: 40 }, (_, i) => filler(i + 1)));
     t = s.t;
     const out = await s.builder.build({ chatId: 'chat-1', message: 'hello' });
-    assert.deepStrictEqual(out.tail.map((m) => m.seq), Array.from({ length: 16 }, (_, i) => 25 + i));
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), Array.from({ length: 8 }, (_, i) => 33 + i));
     assert.strictEqual(out.tail[0].sender, 'user');
+    assert.strictEqual(out.stats.tail.userTurns, 4);
   });
 
-  it('stops at tailTokens but always keeps the newest message', async () => {
+  it('stops at tailTokens but always keeps the newest user message', async () => {
     const s = setup(Array.from({ length: 6 }, (_, i) => filler(i + 1)), { recall: { tailTokens: 40 } });
     t = s.t;
     const out = await s.builder.build({ chatId: 'chat-1', message: 'x' });
     assert.deepStrictEqual(out.tail.map((m) => m.seq), [5, 6]);
-    // The newest message (#6, an assistant reply) is kept by the budget, but
-    // a tail never starts with an assistant message, so it is empty.
+    // Nothing fits after the user message: it is still the tail (H2 sent an empty one).
     s.builder.getSettings = () => ({ history: { recall: { tailTokens: 1 } } });
-    assert.deepStrictEqual((await s.builder.build({ chatId: 'chat-1', message: 'x' })).tail.map((m) => m.seq), []);
+    assert.deepStrictEqual((await s.builder.build({ chatId: 'chat-1', message: 'x' })).tail.map((m) => m.seq), [5]);
   });
 
   it('never starts the tail with an assistant message (Mistral and Gemini reject it)', async () => {
@@ -91,8 +91,8 @@ describe('ContextBuilder', () => {
     assert.strictEqual(out.stats.tail.fromSeq, 3);
     assert.ok(!out.stats.tail.seqs.includes(2));
 
-    // tailMessages: the 8th message back is an assistant reply.
-    const n = setup(Array.from({ length: 9 }, (_, i) => filler(i + 1)), { recall: { tailMessages: 8 } });
+    // tailUserTurns: the 4th user turn back starts at #3.
+    const n = setup(Array.from({ length: 9 }, (_, i) => filler(i + 1)), { recall: { tailUserTurns: 4 } });
     t.cleanup();
     t = n.t;
     const nine = await n.builder.build({ chatId: 'chat-1', message: 'hello' });
@@ -229,7 +229,7 @@ describe('ContextBuilder', () => {
     t = s.t;
     const out = await s.builder.build({ chatId: 'chat-1', message: 'gate code?' });
     assert.deepStrictEqual(out.recalled, { text: '', chunkIds: [], estTokens: 0 });
-    assert.deepStrictEqual(out.tail.map((m) => m.seq), Array.from({ length: 16 }, (_, i) => 5 + i));
+    assert.deepStrictEqual(out.tail.map((m) => m.seq), Array.from({ length: 8 }, (_, i) => 13 + i));
   });
 
   it('an empty chat, or nothing that matches, gives an empty block', async () => {
@@ -238,7 +238,7 @@ describe('ContextBuilder', () => {
     const out = await s.builder.build({ chatId: 'chat-1', message: 'anything' });
     assert.deepStrictEqual(out.tail, []);
     assert.strictEqual(out.recalled.text, '');
-    assert.deepStrictEqual(out.stats.tail, { fromSeq: null, toSeq: null, seqs: [], shortened: [] });
+    assert.deepStrictEqual(out.stats.tail, { fromSeq: null, toSeq: null, seqs: [], shortened: [], userTurns: 0 });
   });
 
   it('nothing at or after upToSeq reaches the tail, the block or the counts', async () => {
@@ -418,22 +418,32 @@ describe('ContextBuilder: agent chats, one assistant row per tool round', () => 
     assert.strictEqual(out.tail[0].sender, 'user');
     assert.ok(out.tail[1].text.startsWith('[tool] Read: notes/part-1.md\n[tool result #3 Read]\npart 1: the ditch runs along the north fence'), out.tail[1].text);
 
-    // With the old tailMessages 8 the eight rows are all assistant rows, and
-    // a tail never starts with one: it was empty.
-    s.builder.getSettings = () => ({ history: { recall: { tailMessages: 8 } } });
-    const eight = await s.builder.build({ chatId: 'chat-1', message: 'what is left?' });
-    assert.deepStrictEqual(eight.tail, []);
+    // tailMaxRows 8: the user message and the newest seven replies; a tool
+    // call is folded only into the reply that followed it.
+    s.builder.getSettings = () => ({ history: { recall: { tailMaxRows: 8 } } });
+    const capped = await s.builder.build({ chatId: 'chat-1', message: 'what is left?' });
+    assert.deepStrictEqual(capped.tail.map((m) => m.seq), [1, 13, 16, 19, 22, 25, 28, 31]);
+    assert.ok(capped.tail[1].text.startsWith('[tool] Read: notes/part-4.md'), capped.tail[1].text);
+    assert.ok(!capped.stats.tail.seqs.includes(8), 'round 3\'s call belongs to a reply that is not shown');
   });
 
-  it('the tail is still bounded by tailMessages: a user message 17 or more rows back is not reached', async () => {
+  it('reaches the user message behind any number of tool rounds, keeping the newest replies that fit', async () => {
     const s = setup(agentChat(16));
     t = s.t;
     const out = await s.builder.build({ chatId: 'chat-1', message: 'what is left?' });
-    assert.deepStrictEqual(out.tail, [], 'the last 16 are all assistant rows');
-    s.builder.getSettings = () => ({ history: { recall: { tailMessages: 17 } } });
-    const seventeen = await s.builder.build({ chatId: 'chat-1', message: 'what is left?' });
-    assert.strictEqual(seventeen.tail.length, 17);
-    assert.strictEqual(seventeen.tail[0].seq, 1);
+    assert.strictEqual(out.tail.length, 17, 'H2 sent an empty tail here');
+    assert.strictEqual(out.tail[0].seq, 1);
+
+    const s40 = setup(agentChat(40), { recall: { tailTokens: 200 } });
+    t.cleanup();
+    t = s40.t;
+    const tight = await s40.builder.build({ chatId: 'chat-1', message: 'what is left?' });
+    const seqs = tight.tail.map((m) => m.seq);
+    assert.strictEqual(seqs[0], 1, 'the user message is always in');
+    assert.ok(seqs.length > 1 && seqs.length < 41, `${seqs.length} rows`);
+    assert.strictEqual(seqs.at(-1), 121, 'the newest reply');
+    for (let i = 2; i < seqs.length; i += 1) assert.strictEqual(seqs[i] - seqs[i - 1], 3, 'the newest replies, contiguous');
+    assert.strictEqual(tight.stats.tail.userTurns, 1);
   });
 });
 
@@ -485,7 +495,7 @@ describe('ContextBuilder: the tail scan reads only what the tail needs', () => {
       messages.push({ sender: 'toolResult', toolName: 'Read', result: `part ${r} ${BIG}` });
       messages.push({ sender: 'assistant', text: `Part ${r} is read.` });
     }
-    const s = setup(messages, { recall: { tailMessages: 4, tailIncludeToolResults: true } });
+    const s = setup(messages, { recall: { tailUserTurns: 2, tailIncludeToolResults: true } });
     t = s.t;
     const original = t.store._messagesFor.bind(t.store);
     t.store._messagesFor = (chatId, range = {}) => {
@@ -586,5 +596,45 @@ describe('ContextBuilder: attachments count toward the tail budget', () => {
     assert.strictEqual(t.store.getMessages('chat-1', { fromSeq: 1, toSeq: 1 })[0].documents[0].textContent, body, 'the store keeps it whole');
     assert.deepStrictEqual(out.stats.tail.shortened, [{ seq: 1, documents: 1 }]);
     assert.ok(t.store.searchText('Line 399', { kinds: ['attachment'] }).length > 0, 'the rest is indexed');
+  });
+});
+
+describe('ContextBuilder: the short follow-up fallback (spec §6.2)', () => {
+  let t;
+  afterEach(() => t && t.cleanup());
+  const chat = [
+    { sender: 'user', text: 'What is the side gate code at the Lakeside lot?' },
+    { sender: 'assistant', text: 'It is 4417.' },
+    { sender: 'user', text: 'And the fence?' },
+    { sender: 'assistant', text: 'Forty meters.' }
+  ];
+
+  it('is off by default: a short follow-up is the query alone', async () => {
+    const s = setup(chat);
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'and the other one?' });
+    assert.strictEqual(out.stats.query, 'and the other one?');
+    assert.strictEqual(out.stats.queryFallbackTurns, 0);
+  });
+
+  it('with queryFallbackMinChars, previous user messages are added until the query has that many letters and digits', async () => {
+    const s = setup(chat, { recall: { queryFallbackMinChars: 20 } });
+    t = s.t;
+    // 14 letters, then "And the fence?" adds 11: 25 >= 20, stop.
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'and the other one?' });
+    assert.strictEqual(out.stats.query, 'and the other one?\nAnd the fence?');
+    assert.strictEqual(out.stats.queryFallbackTurns, 1);
+    const long = await s.builder.build({ chatId: 'chat-1', message: 'what was the drainage pipe diameter?' });
+    assert.strictEqual(long.stats.query, 'what was the drainage pipe diameter?');
+    assert.strictEqual(long.stats.queryFallbackTurns, 0);
+  });
+
+  it('adds at most FALLBACK_MAX_TURNS previous messages', async () => {
+    const many = Array.from({ length: 6 }, (_, i) => ({ sender: 'user', text: `ok ${i}` }));
+    const s = setup(many, { recall: { queryFallbackMinChars: 1000 } });
+    t = s.t;
+    const out = await s.builder.build({ chatId: 'chat-1', message: 'and?' });
+    assert.strictEqual(out.stats.queryFallbackTurns, FALLBACK_MAX_TURNS);
+    assert.strictEqual(out.stats.query, 'and?\nok 5\nok 4\nok 3');
   });
 });

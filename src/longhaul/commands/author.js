@@ -1,19 +1,28 @@
 'use strict';
-// `longhaul author --session <id> --provider <p> --model <m> [--base-url <url>] [--count 60] [--seed 1] [--send-private]`
+// `longhaul author --session <id> --provider <p> --model <m> [--base-url <url>] [--count 60] [--seed 1] [--kinds decision,superseded] [--send-private]`
 // A private session's spans go to the model provider only with
 // --send-private (owner decision 2026-09-29); without it the command refuses
 // before it builds a model client, so nothing leaves the machine.
 const fs = require('fs');
 const path = require('path');
 const { loadSession, sessionDir, validateSessionId } = require('../session-format');
-const { writeQuestions, questionsFile, authorLogFile } = require('../questions');
+const { KINDS, writeQuestions, questionsFile, authorLogFile } = require('../questions');
 const { planAuthoring } = require('../sampling');
 const { authorCandidates, readAuthoringState, DEFAULT_PROMPT } = require('../author');
 const { createModelClient } = require('../model');
 const { positiveInt } = require('./run');
 const { UsageError } = require('../errors');
 
-const USAGE = 'Usage: longhaul author --session <id> --provider <provider> --model <model> [--base-url <url>] [--count 60] [--seed 1] [--send-private]';
+const USAGE = 'Usage: longhaul author --session <id> --provider <provider> --model <model> [--base-url <url>] [--count 60] [--seed 1] [--kinds decision,superseded] [--send-private]';
+
+// --kinds decision,superseded: plan only these kinds (for topping up a kind
+// the set is short of, such as decision questions).
+function parseKinds(raw) {
+  const list = [...new Set(String(raw).split(',').map((s) => s.trim()).filter(Boolean))];
+  const bad = list.filter((k) => !KINDS.includes(k));
+  if (!list.length || bad.length) throw new UsageError(`--kinds takes kinds from ${KINDS.join(', ')}, got ${JSON.stringify(raw)}`);
+  return list;
+}
 
 module.exports = {
   options: {
@@ -23,6 +32,7 @@ module.exports = {
     'base-url': { type: 'string' },
     count: { type: 'string' },
     seed: { type: 'string' },
+    kinds: { type: 'string' },
     'send-private': { type: 'boolean' }
   },
   async run(ctx, values) {
@@ -30,6 +40,7 @@ module.exports = {
     validateSessionId(values.session);
     const count = values.count ? positiveInt(values.count, 'count') : 60;
     const seed = values.seed ? positiveInt(values.seed, 'seed') : 1;
+    const kinds = values.kinds !== undefined ? parseKinds(values.kinds) : [...KINDS];
     const dir = sessionDir(ctx.home.root, values.session);
     if (!fs.existsSync(path.join(dir, 'manifest.json'))) throw new UsageError(`No session "${values.session}"; import it first.`);
 
@@ -51,7 +62,7 @@ module.exports = {
 
     const file = questionsFile(ctx.home.root, values.session);
     const { existing, rejected: rejectedBefore, excludeSeqs } = await readAuthoringState(ctx.home.root, values.session);
-    const plan = planAuthoring(session.index, { count, seed, excludeSeqs });
+    const plan = planAuthoring(session.index, { count, seed, kinds, excludeSeqs });
     const out = await authorCandidates({ session, plan, client, sessionId: values.session, existing, reserved: rejectedBefore });
     writeQuestions(file, [...existing, ...out.candidates]);
 
@@ -59,7 +70,7 @@ module.exports = {
     for (const r of out.rejected) rejected[r.reason] = (rejected[r.reason] || 0) + 1;
     const logLine = {
       at: ctx.now().toISOString(), prompt: path.basename(DEFAULT_PROMPT), promptSha256: out.promptSha256,
-      provider: client.provider, model: client.model, seed, count,
+      provider: client.provider, model: client.model, seed, count, kinds,
       planned: plan.items.length, shortfall: plan.shortfall.length, written: out.candidates.length, rejected
     };
     fs.appendFileSync(authorLogFile(ctx.home.root, values.session), `${JSON.stringify(logLine)}\n`);

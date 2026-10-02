@@ -16,6 +16,13 @@ const PAGE = 200;
 // tail like one that does not fit.
 const TAIL_RESULT_PAGE = 20;
 const TAIL_RESULT_SCAN_MAX = 64;
+// The tail scan reads at most this many rows looking for its user messages;
+// a user message further back than that is not reached (the tail is then
+// empty, and everything in reach stays recallable).
+const TAIL_SCAN_MAX_ROWS = 2000;
+// The short follow-up fallback adds at most this many previous user messages.
+const FALLBACK_MAX_TURNS = 3;
+const indexableChars = (text) => (String(text || '').match(/[\p{L}\p{N}]/gu) || []).length;
 // What one image in a tail message is counted as. Providers bill an image by
 // its size (Anthropic: about 1,600 tokens for a 1.15-megapixel image); the
 // tail has no pixels to hand, so every image counts as this.
@@ -37,7 +44,7 @@ class ContextBuilder {
   // vectorHits / lexical pass through to Retriever#retrieve (a caller that
   // ranks by vector itself: LongHaul's kl-recall-vec).
   // reranker, when given, is used by spec §6.3 step 6 for this build only.
-  async build({ chatId, message = '', model = null, upToSeq = null, vectorHits = null, lexical = true, reranker = null } = {}) {
+  async build({ chatId, message = '', model = null, upToSeq = null, vectorHits = null, lexical = true, reranker = null, vectorOf = null } = {}) {
     const id = String(chatId || '');
     const { recall } = mergeHistorySettings((this.getSettings() || {}).history);
     const given = Number.isInteger(upToSeq) && upToSeq > 0;
@@ -45,14 +52,18 @@ class ContextBuilder {
     const scanned = this._scan(id, limit, recall);
     const asOf = this._asOf(id, limit, given, scanned);
 
-    const previous = scanned.filter((m) => m.sender === 'user' && hasText(m)).slice(0, recall.queryUserTurns).map((m) => String(m.text));
+    const users = scanned.filter((m) => m.sender === 'user' && hasText(m));
+    const previous = users.slice(0, recall.queryUserTurns).map((m) => String(m.text));
+    const fallback = this._fallbackTurns(String(message || ''), users.slice(recall.queryUserTurns), recall);
+    const asked = [String(message || ''), ...fallback].filter((text) => text.trim()).join('\n');
     const separate = Boolean(recall.queryContextSeparate);
     const query = separate
-      ? String(message || '')
-      : [String(message || ''), ...previous].filter((text) => text.trim()).join('\n');
+      ? asked
+      : [asked, ...previous].filter((text) => text.trim()).join('\n');
     const contextQueries = separate ? previous : [];
     const tail = this._tail(scanned, { chatId: id, limit, recall, query, model });
 
+    const retrieval = {};
     let recalled = { text: '', chunkIds: [], estTokens: 0 };
     let recalledExcerpts = 0;
     if (recall.enabled && query.trim()) {
@@ -68,7 +79,9 @@ class ContextBuilder {
         now: asOf,
         vectorHits,
         lexical,
-        reranker
+        reranker,
+        vectorOf,
+        stats: retrieval
       });
       if (hits.length) {
         const chunks = hits.map((h) => h.chunk);
@@ -89,34 +102,52 @@ class ContextBuilder {
         recalledExcerpts,
         estTokens: { tail: tail.estTokens, recalled: recalled.estTokens },
         fullHistoryEstTokens: this.estimator.fromChars(this.store.historyChars(id, { upToSeq: limit }), model),
-        embedder: 'none',
+        // The embedder key this turn's vectors came from, and why there were
+        // none (spec §7; the recall line reads both).
+        embedder: retrieval.embedder || 'none',
+        vectorsSkipped: retrieval.vectorsSkipped ?? null,
         scope: 'chat',
-        query
+        query,
+        queryFallbackTurns: fallback.length
       }
     };
   }
 
-  // Newest first, a page at a time, until the tail and the query have what
-  // they need or the chat's start is reached. Only user and assistant rows,
-  // and tool calls when they are folded into the tail (tailScanPage). Tool
-  // results are read later, for the tail's span only (_tail): a page runs
-  // past the span, and a result body can be large.
+  // Newest first, a page at a time, until the tail and the query have the
+  // user messages they need, the chat's start, or TAIL_SCAN_MAX_ROWS rows.
+  // Only user and assistant rows, and tool calls when they are folded into
+  // the tail. Tool results are read later, for the tail's span only (_tail).
   _scan(chatId, limit, recall) {
     const out = [];
-    let content = 0;
     let users = 0;
     let before = limit;
-    while (before > 1 && (content < recall.tailMessages || users < recall.queryUserTurns)) {
+    const need = Math.max(recall.tailUserTurns, recall.queryUserTurns + (recall.queryFallbackMinChars > 0 ? FALLBACK_MAX_TURNS : 0));
+    while (before > 1 && users < need && out.length < TAIL_SCAN_MAX_ROWS) {
       const page = this.store.tailScanPage(chatId, {
         beforeSeq: before, limit: PAGE, toolCalls: Boolean(recall.tailIncludeToolCalls)
       });
       if (!page.length) break;
       for (const m of page) {
         out.push(m);
-        if (isContent(m)) content += 1;
         if (m.sender === 'user' && hasText(m)) users += 1;
       }
       before = page[page.length - 1].seq;
+    }
+    return out;
+  }
+
+  // Spec §6.2: a new message too short to search on also searches with the
+  // previous user messages, newest first, until the query has
+  // queryFallbackMinChars letters and digits or FALLBACK_MAX_TURNS are added.
+  _fallbackTurns(message, candidates, recall) {
+    const min = recall.queryFallbackMinChars;
+    let chars = indexableChars(message);
+    if (!(min > 0) || chars >= min) return [];
+    const out = [];
+    for (const m of candidates) {
+      if (out.length >= FALLBACK_MAX_TURNS || chars >= min) break;
+      out.push(String(m.text));
+      chars += indexableChars(m.text);
     }
     return out;
   }
@@ -129,36 +160,76 @@ class ContextBuilder {
   }
 
   _tail(scanned, { chatId, limit, recall, query, model }) {
+    const content = scanned.filter(isContent);
+    // Turns, newest first: a user message and the content rows after it.
+    const turns = [];
+    let rows = [];
+    for (const m of content) {
+      rows.push(m);
+      if (m.sender !== 'user') continue;
+      turns.push(rows.reverse());
+      rows = [];
+      if (turns.length >= recall.tailUserTurns) break;
+    }
+    // The newest turn: its user message always, then its replies newest
+    // first while they fit tailTokens and tailMaxRows. Older turns come
+    // whole while they fit. The tail starts at a user message (Mistral and
+    // Gemini reject anything else); what is left out stays recallable.
     const entries = [];
     let used = 0;
-    for (const m of scanned) {
-      if (entries.length >= recall.tailMessages) break;
-      if (!isContent(m)) continue;
-      const entry = this._entry(m, { recall, query, model });
-      if (entries.length > 0 && used + entry.tokens > recall.tailTokens) break;
-      entries.push(entry);
-      used += entry.tokens;
+    let userTurns = 0;
+    if (turns.length) {
+      const [newest, ...older] = turns;
+      const user = this._entry(newest[0], { recall, query, model });
+      used = user.tokens;
+      const replies = [];
+      for (const m of newest.slice(1).reverse()) {
+        if (1 + replies.length >= recall.tailMaxRows) break;
+        const e = this._entry(m, { recall, query, model });
+        if (used + e.tokens > recall.tailTokens) break;
+        replies.unshift(e);
+        used += e.tokens;
+      }
+      entries.push(user, ...replies);
+      userTurns = 1;
+      for (const turn of older) {
+        if (entries.length + turn.length > recall.tailMaxRows) break;
+        const es = turn.map((m) => this._entry(m, { recall, query, model }));
+        const tokens = es.reduce((n, e) => n + e.tokens, 0);
+        if (used + tokens > recall.tailTokens) break;
+        entries.unshift(...es);
+        used += tokens;
+        userTurns += 1;
+      }
     }
-    entries.reverse();
-    // Some providers (Mistral, Gemini) reject a conversation whose first
-    // message after the system prompt is not the user's: the tail starts at
-    // its first user message. What is dropped stays recallable.
-    while (entries.length && entries[0].message.sender !== 'user') entries.shift();
 
-    // Tool calls in the tail's span, one line each at the top of the
-    // assistant reply that follows them before the next user message; with
-    // tailIncludeToolResults, their results too (_toolResults). A case
-    // question posted mid-turn (a row with `question`, stored between the
-    // Ask call and its result) is not the turn's reply: the lines go to the
-    // first assistant row after it that is not a question, and to the
-    // question only when the turn left no other (stopped after asking).
+    // Tool calls and results fold into the reply that followed them: the
+    // content row right after them in the chat must be a shown assistant
+    // reply. A call whose reply was left out (the newest turn keeps only its
+    // newest replies) is not given to a later one. A case question posted
+    // mid-turn (a row with `question`, stored between the Ask call and its
+    // result) is not the turn's reply: the lines go to the first assistant
+    // row after it that is not a question, and to the question only when the
+    // turn left no other (stopped after asking).
+    const chronological = [...content].reverse();
+    const shownAt = new Map(entries.map((e, i) => [e.message.seq, i]));
+    const indexAfter = (seq) => {
+      let lo = 0;
+      let hi = chronological.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (chronological[mid].seq > seq) hi = mid;
+        else lo = mid + 1;
+      }
+      return lo;
+    };
     const replyIndex = (seq) => {
       let question = -1;
-      for (let i = entries.findIndex((e) => e.message.seq > seq); i !== -1 && i < entries.length; i += 1) {
-        const m = entries[i].message;
+      for (let i = indexAfter(seq); i < chronological.length; i += 1) {
+        const m = chronological[i];
         if (m.sender !== 'assistant') break;
-        if (!m.question) return i;
-        if (question === -1) question = i;
+        if (!m.question) return shownAt.has(m.seq) ? shownAt.get(m.seq) : question;
+        if (question === -1 && shownAt.has(m.seq)) question = shownAt.get(m.seq);
       }
       return question;
     };
@@ -214,12 +285,13 @@ class ContextBuilder {
         ? {
           fromSeq: entries[0].message.seq,
           toSeq: entries[entries.length - 1].message.seq,
+          userTurns,
           seqs: [...entries.map((e) => e.message.seq), ...foldedSeqs, ...resultSeqs].sort((a, b) => a - b),
           shortened: [...entries.filter((e) => e.shortened).map((e) => e.shortened), ...results.filter((r) => r.shortened).map((r) => r.shortened)]
             .sort((a, b) => a.seq - b.seq),
           ...(recall.tailIncludeToolResults ? { toolResultSeqs: resultSeqs } : {})
         }
-        : { fromSeq: null, toSeq: null, seqs: [], shortened: [] }
+        : { fromSeq: null, toSeq: null, seqs: [], shortened: [], userTurns: 0 }
     };
   }
 
@@ -376,4 +448,4 @@ class ContextBuilder {
   }
 }
 
-module.exports = { ContextBuilder, IMAGE_TOKEN_ESTIMATE, TAIL_RESULT_PAGE, TAIL_RESULT_SCAN_MAX };
+module.exports = { ContextBuilder, IMAGE_TOKEN_ESTIMATE, TAIL_RESULT_PAGE, TAIL_RESULT_SCAN_MAX, TAIL_SCAN_MAX_ROWS, FALLBACK_MAX_TURNS };

@@ -1,6 +1,7 @@
 'use strict';
 // Small file helpers for LongHaul: atomic writes (temp file, fsync, rename),
-// streaming SHA-256, and path containment.
+// streaming SHA-256, path containment, JSON lines, and a code-point string
+// order.
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -45,4 +46,32 @@ function childPath(base, name, onEscape) {
   return out;
 }
 
-module.exports = { writeFileAtomic, sha256File, sha256Text, isInside, childPath };
+// The rows of a JSON-lines file; a missing file has none. tornTail: a line
+// that does not parse ends the file (a write cut off mid-line, as an
+// interrupted append leaves); otherwise it throws.
+function readJsonl(file, { tornTail = false } = {}) {
+  if (!fs.existsSync(file)) return [];
+  const out = [];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch (err) {
+      if (tornTail) break;
+      throw err;
+    }
+  }
+  return out;
+}
+
+// A sort order that is the same on every machine: JavaScript's < on strings,
+// which compares UTF-16 code units (not code points: a character outside the
+// BMP sorts by its surrogates), never the locale's collation (localeCompare),
+// so the same runs give the same files and samples everywhere.
+function byCodeUnit(a, b) {
+  const x = String(a);
+  const y = String(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+module.exports = { writeFileAtomic, sha256File, sha256Text, isInside, childPath, readJsonl, byCodeUnit };

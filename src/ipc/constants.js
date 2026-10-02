@@ -92,6 +92,11 @@ module.exports = {
   // Recall stage H2 (history spec 2026-09-25 §7, §12).
   HISTORY_EXCERPTS: 'history:excerpts',
   HISTORY_SEARCH: 'history:search',
+  // Recall stage H3: the embedder's state, choice, rebuild and retry.
+  HISTORY_EMBEDDER_STATUS: 'history:embedder.status',
+  HISTORY_EMBEDDER_SAVE: 'history:embedder.save',
+  HISTORY_EMBEDDER_REBUILD: 'history:embedder.rebuild',
+  HISTORY_EMBEDDER_RETRY: 'history:embedder.retry',
 
   MODELS_STATUS: 'models:status',
   MODELS_REFRESH_CATALOG: 'models:refreshCatalog',

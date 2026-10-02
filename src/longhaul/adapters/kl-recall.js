@@ -11,7 +11,7 @@ const { Retriever } = require('../../history/retriever');
 const { ContextBuilder } = require('../../history/context-builder');
 const { chunkMessage } = require('../../history/chunker');
 const { mergeSettings } = require('../../core/settings');
-const { HISTORY_DEFAULTS, mergeHistorySettings } = require('../../history/settings');
+const { HISTORY_DEFAULTS, HISTORY_SETTINGS_VERSION, mergeHistorySettings } = require('../../history/settings');
 const { estimateTokens, renderMessages } = require('../session-format');
 const { measured, uniqueSorted } = require('./common');
 const { UsageError } = require('../errors');
@@ -41,10 +41,13 @@ function recallSettings(recall, budgetTokens, chunk = {}) {
   }
   const known = Object.keys(HISTORY_DEFAULTS.recall);
   for (const key of Object.keys(recall)) {
+    if (key === 'tailMessages') {
+      throw new UsageError('--recall tailMessages was replaced in H3: the tail counts user turns (tailUserTurns) with a row ceiling (tailMaxRows).');
+    }
     if (!known.includes(key)) throw new UsageError(`Unknown recall setting "${key}". Known: ${[...known].sort().join(', ')}`);
     if (key === 'recalledTokens') throw new UsageError('--recall recalledTokens is not accepted: the recalled budget is set with --budget-tokens.');
   }
-  const history = mergeHistorySettings({ recall: { ...recall, recalledTokens: budgetTokens }, chunk: { ...(chunk || {}) } });
+  const history = mergeHistorySettings({ version: HISTORY_SETTINGS_VERSION, recall: { ...recall, recalledTokens: budgetTokens }, chunk: { ...(chunk || {}) } });
   for (const [key, value] of Object.entries(recall)) {
     if (!kept(value, history.recall[key])) {
       throw new UsageError(`--recall ${key}=${JSON.stringify(value)} is not a valid value; recall would use ${JSON.stringify(history.recall[key])} instead.`);
@@ -141,13 +144,13 @@ const TMP_PREFIX = 'kl-';
 // adapter builds; resultFromBuild counts a message's chunks with the same.
 // rerankerFor (optional; kl-recall-rerank): (handle, question) => the
 // reranker callback for that question's build (recall spec §6.3 step 6).
-function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, chunk = {}, tmpRoot, rerankerFor = null } = {}) {
+function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, chunk = {}, tmpRoot, rerankerFor = null, name = 'kl-recall' } = {}) {
   if (typeof tmpRoot !== 'string' || !tmpRoot) throw new Error('kl-recall needs a tmpRoot (LONGHAUL_HOME/tmp)');
   const settings = recallSettings(recall, budgetTokens, chunk);
   return {
-    name: 'kl-recall',
+    name,
     describe() {
-      return { name: 'kl-recall', recall: settings.history.recall, chunk: settings.history.chunk ?? null, embedder: 'none (BM25 only)' };
+      return { name, recall: settings.history.recall, chunk: settings.history.chunk ?? null, embedder: 'none (BM25 only)' };
     },
 
     async prepare(session, { upToSeq = Infinity } = {}) {

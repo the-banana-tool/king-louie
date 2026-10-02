@@ -1,11 +1,14 @@
 'use strict';
-// `longhaul embed --session <id> --provider openai --model <m> [--batch 100]
+// `longhaul embed --session <id> --provider openai|local --model <m> [--batch 100]
 //   [--base-url <url>] [--max-usd 1] [--send-private]`
 // Embeds every chunk of a session (chunked exactly as kl-recall's store
 // chunks it) and every question of its question set into the cache under
 // LONGHAUL_HOME/private/embeddings/ (embeddings.js). Resumable: cached chunks
 // and questions are skipped. A private session goes to the provider only with
 // --send-private; without it the command refuses before any network call.
+// --provider local is the app's own embedder (recall stage H3) in the embed
+// worker, models under LONGHAUL_HOME/private/models: nothing leaves this
+// machine, so it needs no --send-private and has no cost to cap.
 // Prints counts, tokens and cost only, never chunk or question text.
 const fs = require('fs');
 const path = require('path');
@@ -13,13 +16,15 @@ const { loadSession, sessionDir, validateSessionId } = require('../session-forma
 const { readQuestions, questionsFile } = require('../questions');
 const { createKlRecallAdapter } = require('../adapters/kl-recall');
 const {
-  EmbeddingCache, cacheDir, validateModelName, embedText, createEmbedClient, embedChunks, embedderFromEnv, priceTokens
+  EmbeddingCache, cacheDir, validateModelName, embedText, createEmbedClient, embedChunks, embedderFromEnv, priceTokens, localModelsDir
 } = require('../embeddings');
+const { EmbedRunner } = require('../../history/embed-runner');
 const { positiveInt } = require('./run');
 const { removeStaleTmp } = require('../run');
 const { UsageError } = require('../errors');
+const { usd } = require('../format');
 
-const USAGE = 'Usage: longhaul embed --session <id> --provider openai --model <model> [--batch 100] [--base-url <url>] [--max-usd 1] [--send-private]';
+const USAGE = 'Usage: longhaul embed --session <id> --provider openai|local --model <model> [--batch 100] [--base-url <url>] [--max-usd 1] [--send-private]';
 // Rough tokens for the estimate before any call: 3 characters a token errs
 // high for prose and about right for code and JSON.
 const EST_CHARS_PER_TOKEN = 3;
@@ -28,8 +33,6 @@ const EST_CHARS_PER_TOKEN = 3;
 // `run`'s startup cleanup removes one an interrupted embed left; embed itself
 // removes stale kl-embed-* dirs at start (not a run's kl-* stores).
 const TMP_PREFIX = 'kl-embed-';
-
-const usd = (x) => `$${x.toFixed(4)}`;
 
 module.exports = {
   options: {
@@ -41,7 +44,8 @@ module.exports = {
     'max-usd': { type: 'string' },
     'send-private': { type: 'boolean' }
   },
-  // deps (tests): providerInstance, catalog, wait.
+  // deps (tests): providerInstance, catalog, wait, runner (an EmbedRunner
+  // the caller owns and stops).
   async run(ctx, values, _positionals, deps = {}) {
     if (!values.session || !values.provider || !values.model) throw new UsageError(USAGE);
     validateSessionId(values.session);
@@ -54,14 +58,22 @@ module.exports = {
     if (!fs.existsSync(path.join(dir, 'manifest.json'))) throw new UsageError(`No session "${values.session}"; import it first.`);
 
     const session = await loadSession(dir);
-    if (session.manifest.private && values['send-private'] !== true) {
+    const isLocal = values.provider === 'local';
+    // The local embedder has no address; a --base-url would be ignored, so refuse it.
+    if (isLocal && values['base-url']) throw new UsageError('--base-url is for a hosted provider; --provider local runs the app\'s embedder here.');
+    if (session.manifest.private && !isLocal && values['send-private'] !== true) {
       throw new UsageError(
         `Session ${values.session} is private: embedding would send every chunk of it and its questions to ${values.provider} (${model}). `
         + 'Pass --send-private to allow that.',
         'PRIVATE_SESSION'
       );
     }
-    const embedder = embedderFromEnv({ provider: values.provider, env: ctx.env, baseUrl: values['base-url'] || null, providerInstance: deps.providerInstance });
+    // local: the app's embedder in the embed worker; nothing leaves this machine.
+    const runner = isLocal ? (deps.runner || new EmbedRunner({ idleUnref: true })) : null;
+    const embedder = embedderFromEnv({
+      provider: values.provider, env: ctx.env, baseUrl: values['base-url'] || null, providerInstance: deps.providerInstance,
+      runner, modelsDir: localModelsDir(ctx.home.private)
+    });
     const client = createEmbedClient({ embedder, model, wait: deps.wait });
 
     // The session's chunks as kl-recall's store makes them, in a temp store
@@ -87,14 +99,14 @@ module.exports = {
       const qTodo = questions.filter((q) => !cache.question(q.id, q.question));
       const estChars = todo.reduce((n, c) => n + embedText(c.text).text.length, 0) + qTodo.reduce((n, q) => n + String(q.question).length, 0);
       const estTokens = Math.ceil(estChars / EST_CHARS_PER_TOKEN);
-      const estUsd = priceTokens(values.provider, model, estTokens, deps.catalog);
+      const estUsd = isLocal ? 0 : priceTokens(values.provider, model, estTokens, deps.catalog);
       ctx.stdout.write(`${values.session}: ${chunks.length} chunks (${chunks.length - todo.length} cached, ${todo.length} to embed), `
         + `${questions.length} questions (${qTodo.length} to embed); estimate ~${estTokens} tokens, `
-        + `${estUsd === null ? 'price unknown' : `~${usd(estUsd)}`}\n`);
-      if (estUsd !== null && estUsd > maxUsd) {
+        + `${isLocal ? 'local, no cost' : (estUsd === null ? 'price unknown' : `~${usd(estUsd)}`)}\n`);
+      if (!isLocal && estUsd !== null && estUsd > maxUsd) {
         throw new UsageError(`The estimate ${usd(estUsd)} is over --max-usd ${maxUsd}; nothing was sent.`, 'OVER_BUDGET');
       }
-      if (session.manifest.private && (todo.length || qTodo.length)) {
+      if (!isLocal && session.manifest.private && (todo.length || qTodo.length)) {
         ctx.stderr.write(`note: chunks and questions of private session ${values.session} are sent to ${values.provider} (${model}) to embed them (--send-private).\n`);
       }
 
@@ -112,19 +124,20 @@ module.exports = {
       let qTokens = 0;
       for (let i = 0; i < qTodo.length; i += batch) {
         const group = qTodo.slice(i, i + batch);
-        const res = await client.embed(group.map((q) => embedText(q.question).text));
+        const res = await client.embed(group.map((q) => embedText(q.question).text), { kind: 'query' });
         const used = Number.isFinite(res.usage?.input) ? res.usage.input : 0;
         qTokens += used;
         group.forEach((q, j) => cache.addQuestion(q.id, q.question, res.vectors[j], { tokens: j === 0 ? used : 0 }));
       }
 
       const tokens = out.tokens + qTokens;
-      const cost = priceTokens(values.provider, model, tokens, deps.catalog);
+      const cost = isLocal ? null : priceTokens(values.provider, model, tokens, deps.catalog);
       ctx.stdout.write(`done: ${out.embedded} chunks (${out.truncated} truncated to ${cache.meta.maxChars} characters) and ${qTodo.length} questions embedded; `
         + `${cache.rows.length}/${chunks.length} chunks cached, dim ${cache.dim ?? '-'}\n`);
-      ctx.stdout.write(`tokens ${tokens}; cost ${cost === null ? `unknown (the catalog has no price for ${values.provider}/${model})` : usd(cost)}\n`);
+      ctx.stdout.write(`tokens ${tokens}; cost ${isLocal ? 'none (local)' : cost === null ? `unknown (the catalog has no price for ${values.provider}/${model})` : usd(cost)}\n`);
       return 0;
     } finally {
+      if (runner && !deps.runner) await runner.stop();
       try { if (handle) await base.release(handle); } finally { fs.rmSync(tmpRoot, { recursive: true, force: true }); }
     }
   }

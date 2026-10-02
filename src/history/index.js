@@ -6,6 +6,11 @@ const { chunkMessage } = require('./chunker');
 const { TokenEstimator } = require('./token-estimator');
 const { Retriever } = require('./retriever');
 const { ContextBuilder } = require('./context-builder');
+const { createVectorSearch } = require('./vector-search');
+const { VectorIndex } = require('./vector-index');
+const { EmbedderHost } = require('./embedder-host');
+const { EmbedRunner } = require('./embed-runner');
+const { startEmbedIndexer } = require('./embed-indexer');
 const { HISTORY_DEFAULTS, mergeHistorySettings } = require('./settings');
 const { formatExcerpts, formatRecalledBlock } = require('./excerpts');
 const { InvalidMessageError, DERIVED_CHAT_KEYS } = require('./rows');
@@ -18,6 +23,11 @@ module.exports = {
   TokenEstimator,
   Retriever,
   ContextBuilder,
+  createVectorSearch,
+  VectorIndex,
+  EmbedderHost,
+  EmbedRunner,
+  startEmbedIndexer,
   HISTORY_DEFAULTS,
   mergeHistorySettings,
   formatExcerpts,

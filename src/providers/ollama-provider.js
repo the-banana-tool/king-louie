@@ -301,6 +301,31 @@ class OllamaProvider extends BaseLLMProvider {
     return (data.data || []).map((model) => model.id).sort();
   }
 
+  /**
+   * Embeddings (recall spec §5.2): POST /api/embed on the Ollama server, one
+   * vector per input, in input order. Returns { vectors, usage: { input },
+   * model } like OpenAIProvider#embed. A non-2xx reply throws the provider
+   * error.
+   */
+  async embed(inputs, { model, abortSignal } = {}) {
+    if (!Array.isArray(inputs) || !inputs.length) throw new Error('embed needs at least one input');
+    if (!model) throw new Error('embed needs a model');
+    const server = this.baseUrl.replace(/\/v1$/, '');
+    const response = await this.request(`${server}/api/embed`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ model, input: inputs.map(String) })
+    }, { abortSignal, model });
+    if (!response.ok) throw await this.buildError(response, { model });
+    const data = await response.json();
+    const vectors = Array.isArray(data?.embeddings) ? data.embeddings : [];
+    if (vectors.length !== inputs.length || vectors.some((v) => !Array.isArray(v))) {
+      throw new Error(`embeddings reply has ${vectors.length} vectors for ${inputs.length} inputs`);
+    }
+    const input = Number(data?.prompt_eval_count);
+    return { vectors, usage: { input: Number.isFinite(input) ? input : null }, model: data?.model || model };
+  }
+
   async discoverModels(options = {}) {
     try {
       const baseUrl = this.baseUrl.replace(/\/v1$/, '');
