@@ -498,9 +498,9 @@ describe('answer_question in King Louie\'s chat', () => {
     const executor = (opts) => new ToolExecutor({ workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, extraToolOptions: { caseManagement: inApp }, ...opts });
     const args = { case: lot.id, question_id: q.cadence.id, option_id: 'weekly', quote: 'go with Weekly' };
     const unattended = await executor({ ownerTurnText: 'the lakeside one, go with Weekly', denyAutoApproval: true }).execute('answer_question', args);
-    assert.deepStrictEqual([unattended.ok, unattended.code], [false, 'not_owner']);
+    assert.deepStrictEqual([unattended.success, unattended.code], [false, 'not_owner']);
     const smuggled = await executor({ extraToolOptions: { caseManagement: inApp, ownerTurnText: 'go with Weekly' } }).execute('answer_question', args, { ownerTurnText: 'go with Weekly' });
-    assert.deepStrictEqual([smuggled.ok, smuggled.code], [false, 'not_owner']);
+    assert.deepStrictEqual([smuggled.success, smuggled.code], [false, 'not_owner']);
     const ok = await executor({ ownerTurnText: 'the lakeside one, go with Weekly' }).execute('answer_question', args);
     assert.strictEqual(ok.ok, true, JSON.stringify(ok));
     assert.strictEqual(rt.questions(lot.id).get(q.cadence.id).answer.optionId, 'weekly');
@@ -789,7 +789,7 @@ describe('set_away', () => {
     assert.deepStrictEqual(f.policy().away, { mode: 'email-only', until: LATER });
     assert.deepStrictEqual(f.policy().quietHours, { start: '22:00', end: '07:00' });
     assert.strictEqual(f.host.context().presenceStatus().away, true);
-    const back = await h.call('set_away', { mode: 'off', quote: "I'm back" }, { ownerTurnText: "I'm back." });
+    const back = await h.call('set_away', { mode: 'off', quote: "I'm back home" }, { ownerTurnText: "I'm back home." });
     assert.deepStrictEqual(back, { away: null });
     assert.strictEqual(f.policy().away, null);
     assert.deepStrictEqual(f.policy().quietHours, { start: '22:00', end: '07:00' });
@@ -898,6 +898,23 @@ describe('in a case chat, the management tools act only on that case', () => {
     assert.strictEqual((await h.call('open_case', { case: shed.id })).id, shed.id);
   });
 
+  it("create_case's similar-case refusal in a case chat names no other case; outside one it lists them", async () => {
+    const rt = new CaseRuntime({ root: tmp('kl-mgmt-create-') });
+    const here = await rt.createCase({ title: 'Lakeside lot', objective: 'sell the lot' });
+    const boat = await rt.createCase({ title: 'Boat sale', objective: 'sell the boat' });
+    const h = handlerFor(rt, 'in-app-chat');
+    const args = { title: 'Boat sale', objective: 'sell the boat', quote: 'start a case to sell the boat' };
+    const opts = { ownerTurnText: 'start a case to sell the boat' };
+    const scoped = await refusal(h.call('create_case', args, { ...opts, caseScope: here.id }));
+    assert.strictEqual(scoped.code, 'similar_cases');
+    assert.match(scoped.message, /Open the app to create it anyway\.$/);
+    assert.ok(!scoped.data || !Object.hasOwn(scoped.data, 'similar'), JSON.stringify(scoped.data));
+    assert.ok(!JSON.stringify(scoped).includes(boat.id));
+    const unscoped = await refusal(h.call('create_case', args, opts));
+    assert.deepStrictEqual(unscoped.data.similar.data.map((c) => c.caseId), [boat.id]);
+    assert.strictEqual(rt.listCases().length, 2);
+  });
+
   it('revoke_envelope and cancel_case_job naming another case are refused; nothing changes', async () => {
     const f = await executorFixture();
     const other = await f.runtime.createCase({ title: 'Garden shed', objective: 'Build a shed' });
@@ -947,6 +964,33 @@ describe('a spoken quote needs at least three words', () => {
     assert.strictEqual(quoteWordCount('option 2'), 2);
     assert.strictEqual(quoteWordCount('... !!'), 0);
     assert.strictEqual(quoteWordCount('café au lait'), 3);
+  });
+
+  it('counts words in languages written without spaces, by the word segmenter', () => {
+    assert.ok(quoteWordCount('取消这个工作吧') >= 3, String(quoteWordCount('取消这个工作吧')));
+    assert.ok(quoteWordCount('この仕事をキャンセルして') >= 3);
+    assert.ok(quoteWordCount('ยกเลิกงานนี้เลย') >= 3);
+  });
+
+  it('a number run is one token, and a quote with no word holding a letter counts nothing', () => {
+    for (const quote of ['$1,000.00', '2026-10-05', '12:30:45', '1 2 3', '10/05/2026 12:30']) {
+      assert.ok(quoteWordCount(quote) < 3, quote);
+    }
+    assert.strictEqual(quoteWordCount('go with 2'), 3);
+    assert.strictEqual(quoteWordCount('pay $1,000.00 now'), 3);
+    assert.strictEqual(quoteWordCount('on 2026-10-05'), 2);
+  });
+
+  it('refuses an amount, a date or a time alone, and accepts a short Chinese request', async () => {
+    const f = await executorFixture();
+    const ask = f.runtime.createQuestion(f.meta.id, { kind: 'question', urgency: 'normal', payload: { type: 'ask' }, text: 'What price?' }, { charge: false });
+    const h = f.handler('mcp-stdio');
+    for (const quote of ['$1,000.00', '2026-10-05', '12:30:45']) {
+      const e = await refusal(h.call('answer_question', { case: f.meta.id, question_id: ask.id, quote }));
+      assert.strictEqual(e.code, 'quote_too_short', quote);
+    }
+    await h.call('answer_question', { case: f.meta.id, question_id: ask.id, quote: '取消这个工作吧' });
+    assert.strictEqual(f.runtime.questions(f.meta.id).get(ask.id).answer.quote, '取消这个工作吧');
   });
 
   it('every spoken tool refuses a one- or two-word quote on every channel; nothing changes', async () => {
@@ -1042,6 +1086,45 @@ describe("in King Louie's chat, revoke, cancel, away and create ask first", () =
     const r = await ex.execute('cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote: 'cancel the running job' });
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.deepStrictEqual(asked, []);
+  });
+
+  it('a run with no owner text (gateway, cron, denyAutoApproval) refuses every spoken tool before the prompt', async () => {
+    const f = await executorFixture();
+    const away = awayFixture();
+    const ask = f.runtime.createQuestion(f.meta.id, { kind: 'question', urgency: 'normal', payload: { type: 'ask' }, text: 'How often?', options: [{ id: 'daily', label: 'Daily' }, { id: 'weekly', label: 'Weekly' }] }, { charge: false });
+    const calls = [
+      ['answer_question', { case: f.meta.id, question_id: ask.id, option_id: 'weekly', quote: 'go with Weekly' }, f.handler('in-app-chat')],
+      ['revoke_envelope', { case: f.meta.id, envelope: 'env-01', quote: 'revoke that envelope' }, f.handler('in-app-chat')],
+      ['cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote: 'cancel the running job' }, f.handler('in-app-chat')],
+      ['create_case', { title: 'Boat sale', objective: 'sell the boat', quote: 'start a case to sell the boat' }, f.handler('in-app-chat')],
+      ['set_away', { mode: 'email-only', until: LATER, quote: 'email only until the weekend' }, away.handler('in-app-chat')]
+    ];
+    const runs = [{}, { ownerTurnText: '   ' }, { ownerTurnText: 'go with Weekly, revoke that envelope', denyAutoApproval: true }];
+    for (const run of runs) {
+      for (const [name, args, handler] of calls) {
+        const asked = [];
+        const ex = new ToolExecutor({
+          workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, ...run,
+          extraToolOptions: { caseManagement: handler },
+          // An always-approve entry and an allow rule do not change it.
+          shouldAutoApprove: async () => true,
+          permissionRules: [{ tool: name, action: 'allow' }],
+          approvalRequester: async (toolName) => { asked.push(toolName); return true; }
+        });
+        const r = await ex.execute(name, args);
+        assert.deepStrictEqual([r.success, r.code, r.deniedBy], [false, 'not_owner', 'policy'], `${name} ${JSON.stringify(run)}`);
+        assert.deepStrictEqual(asked, [], name);
+      }
+    }
+    assert.strictEqual(f.runtime.questions(f.meta.id).get(ask.id).answer, null);
+    assert.strictEqual(new EnvelopeStore(f.meta.dir).get('env-01').status, 'active');
+    assert.strictEqual(f.jobs.get(f.job.own.id).state, 'running');
+    assert.strictEqual(f.runtime.listCases().length, 1);
+    assert.strictEqual(away.policy().away, null);
+    // The read tools need no owner text.
+    const reader = new ToolExecutor({ workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, extraToolOptions: { caseManagement: f.handler('in-app-chat') } });
+    assert.strictEqual((await reader.execute('list_cases', {})).ok, true);
+    for (const name of ALL) assert.strictEqual(toolRegistry.get(name).requiresOwnerTurn, SPOKEN.includes(name), name);
   });
 
   it('answer_question does not prompt', async () => {

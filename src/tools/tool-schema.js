@@ -21,6 +21,12 @@ class Tool {
     this.parameters = config.parameters || { type: 'object', properties: {} };
     this.execute = config.execute;
     this.requiresApproval = Boolean(config.requiresApproval);
+    // A tool that acts only on the owner's own words this turn (the spoken
+    // case management tools). ToolExecutor refuses it before any hook,
+    // rule or approval gate on a run that carries no owner text (gateway
+    // sessions, cron, denyAutoApproval), so nobody is asked to approve a
+    // call that could only fail.
+    this.requiresOwnerTurn = config.requiresOwnerTurn === true;
     this.dangerousPatterns = Array.isArray(config.dangerousPatterns) ? config.dangerousPatterns : [];
     // Concurrency-safe tools (read-only, idempotent, no shared mutable
     // state) can run in parallel within a single LLM turn. Unsafe tools

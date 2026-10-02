@@ -43,6 +43,10 @@ function managementTool(def) {
     description: def.description,
     parameters: chatSchema(def.inputSchema),
     requiresApproval: ASKS_FIRST_TOOLS.includes(def.name),
+    // A spoken tool needs the owner's own message this turn: on a run with
+    // none (gateway, cron, denyAutoApproval) ToolExecutor refuses it before
+    // the approval prompt rather than ask for a call that fails not_owner.
+    requiresOwnerTurn: def.tier !== 'read',
     concurrencySafe: def.tier === 'read',
     execute: async (params, context) => {
       const handler = context && context.caseManagement;

@@ -43,11 +43,26 @@ const CASE_SCOPED_TOOLS = new Set([
 ]);
 // Owner decision Q28 (2026-10-01): every spoken tool's quote is at least
 // three words on every channel, so a bare "yes" or "option 2" lifted from a
-// longer message never stands for the owner's request. Words are runs of
-// letters or digits after the owner-quote fold ("go with 2" is three).
+// longer message never stands for the owner's request. Words are the
+// word-like segments of Intl.Segmenter after the owner-quote fold, so a
+// language written without spaces counts too ("取消这个工作吧" is more than
+// three). A run of digits with its separators ("1,000.00", "2026-10-05",
+// "12:30:45") is one token, and a quote needs at least one word with a
+// letter in it: an amount, a date or a time alone is never three words,
+// while "go with 2" is.
 const MIN_QUOTE_WORDS = 3;
 const QUOTE_TOO_SHORT_MESSAGE = "the quote must be at least three of the owner's words; quote more of their message, or ask them to say it in a few words";
-const quoteWordCount = (quote) => (fold(quote).match(/[\p{L}\p{N}]+/gu) || []).length;
+const WORD_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'word' });
+const NUMBER_RUN = /[\p{N}][\p{N}.,:/-]*/gu;
+function quoteWordCount(quote) {
+  const folded = fold(quote);
+  const words = [];
+  for (const piece of folded.split(NUMBER_RUN)) {
+    for (const seg of WORD_SEGMENTER.segment(piece)) if (seg.isWordLike) words.push(seg.segment);
+  }
+  if (!words.some((w) => /\p{L}/u.test(w))) return 0;
+  return words.length + (folded.match(NUMBER_RUN) || []).length;
+}
 // The registry's refusal when a wake-up holds the case (jobs.js BUSY).
 const REGISTRY_BUSY = /busy/i;
 
@@ -356,7 +371,10 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
   // chat), never with force. The objective must be words from the quote on
   // every channel; the quote itself is checked in-app only. The objective is
   // recorded as the owner's (CaseRuntime.recordOwnerObjective).
-  async function createCase(rt, args, ownerTurnText) {
+  // In a case chat (caseScope set) a similar-case refusal names no other
+  // case: the list of other cases' ids, titles and statuses would reach the
+  // case turn's context (Q27), so only the message goes back.
+  async function createCase(rt, args, ownerTurnText, caseScope = null) {
     checkQuote(args.quote, ownerTurnText);
     if (!fold(args.title)) throw fail('invalid_params', '"title" must not be blank');
     if (!wordsInText(args.objective, args.quote)) throw fail('objective_not_in_quote', 'the objective must be the owner\'s words from the quote');
@@ -368,6 +386,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
       releaseSlot();
       if (err && err.code === 'SIMILAR_CASES') {
         const similar = (Array.isArray(err.similar) ? err.similar : []).map((c) => ({ caseId: c.caseId, title: c.title, status: c.status, match: c.match }));
+        if (caseScope !== null) throw fail('similar_cases', SIMILAR_MESSAGE);
         throw fail('similar_cases', SIMILAR_MESSAGE, { similar: untrusted(similar) });
       }
       if (err && err.code === 'UNKNOWN_CASE_TYPE') throw fail('invalid_params', 'no such case type');
@@ -582,7 +601,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
         case 'get_presence': return getPresence();
         case 'list_envelopes': return listEnvelopes(rt, args.case);
         case 'list_playbooks': return listPlaybooks(rt, args.case);
-        case 'create_case': return await createCase(rt, args, ownerTurnText);
+        case 'create_case': return await createCase(rt, args, ownerTurnText, caseScope);
         case 'revoke_envelope': return await revokeEnvelope(rt, args, ownerTurnText);
         case 'cancel_case_job': return await cancelCaseJob(rt, args, ownerTurnText);
         case 'answer_question': return await answerQuestion(rt, args, ownerTurnText);

@@ -109,14 +109,19 @@ front door now serves the spoken class at all.
 A grant is the owner. Every spoken tool takes a required `quote`: the owner's own words, verbatim.
 
 - **Three words** (owner decision Q28, 2026-10-01). On every channel (`in-app-chat`, `mcp-stdio`,
-  `mcp-frontdoor`) the quote must be at least three words, counted as runs of letters or digits after the
-  owner-quote fold ("go with 2" is three); a shorter one is refused (`quote_too_short`), so a bare "yes"
+  `mcp-frontdoor`) the quote must be at least three words, counted as `Intl.Segmenter` word-like segments
+  after the owner-quote fold (so Chinese, Japanese or Thai counts), with a number run ("1,000.00",
+  "2026-10-05", "12:30:45") as one token and at least one word holding a letter ("go with 2" is three; an
+  amount, date or time alone is not); a shorter one is refused (`quote_too_short`), so a bare "yes"
   or "option 2" lifted from a longer message never stands for the owner's request. A bare number is
   therefore never a whole quote that names an option.
 - **Asking first in the chat** (owner decision Q28, 2026-10-01). In King Louie's chat, `revoke_envelope`,
   `cancel_case_job`, `set_away` and `create_case` go through the normal tool-approval prompt
-  (`requiresApproval: true`; the always-approve list and permission rules can lift it as for any tool).
-  `answer_question` stays prompt-free, as do the read tools. The MCP surfaces are unaffected: they have
+  (`requiresApproval: true`; on a standalone desktop the always-approve list and permission rules can
+  lift it as for any tool; on a service node with phone approvals they classify as `unsafe`, which cancels
+  both). `answer_question` stays prompt-free, as do the read tools. A run with no owner text (gateway,
+  cron, `denyAutoApproval`) has every spoken tool refused `not_owner` before any prompt
+  (`requiresOwnerTurn`). The MCP surfaces are unaffected: they have
   scopes.
 
 - **In the app** the host verifies the quote against the owner's turn text (`ownerTurnText`, set only by

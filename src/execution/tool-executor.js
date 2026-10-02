@@ -17,6 +17,8 @@ const log = createLogger('tool-executor');
 // case.yaml, .gitmodules, .gitattributes, playbooks/, .kl/, .git/) are
 // written only through the case tools (.git/ never). Bash is not covered.
 const FILE_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
+// A requiresOwnerTurn tool on a run with no owner message (see execute).
+const OWNER_TURN_REQUIRED_MESSAGE = "not_owner: this tool acts only on the owner's own message in King Louie's chat, and this run has none. Nothing ran.";
 
 // Extract a stable, telemetry-safe error code from an Error. Raw
 // error.message leaks local file paths and may contain
@@ -230,6 +232,17 @@ class ToolExecutor extends EventEmitter {
     const tool = toolRegistry.get(toolName);
     if (!tool) {
       throw new Error(`Tool not found: ${toolName}`);
+    }
+
+    // A tool that needs the owner's own words this turn is refused before
+    // any hook, rule or approval prompt when the run has none (the same
+    // condition under which tool.execute gets ownerTurnText: null), so a
+    // gateway, cron or remote run never asks anyone (a phone on a service
+    // node) to approve a call that would then fail not_owner.
+    if (tool.requiresOwnerTurn && (this.denyAutoApproval || typeof this.ownerTurnText !== 'string' || !this.ownerTurnText.trim())) {
+      const refused = { success: false, error: OWNER_TURN_REQUIRED_MESSAGE, code: 'not_owner', deniedBy: 'policy' };
+      this.emit('postExecute', { toolName, parameters, result: refused });
+      return refused;
     }
 
     // There is exactly one parameter set, and it is both judged and executed.
@@ -699,3 +712,4 @@ class ToolExecutor extends EventEmitter {
 
 module.exports = ToolExecutor;
 module.exports.mapApprovalResult = mapApprovalResult;
+module.exports.OWNER_TURN_REQUIRED_MESSAGE = OWNER_TURN_REQUIRED_MESSAGE;
