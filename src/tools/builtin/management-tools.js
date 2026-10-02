@@ -4,7 +4,9 @@
 // same handler (src/mcp/case-tools.js) on the in-app-chat channel (not
 // 'in-app', which is the card's button press). Always loaded,
 // in every chat, case chat or not; never in a wake-up turn, whose
-// allowedToolNames name only the case tools and WAKEUP_BASE_TOOLS.
+// allowedToolNames name only the case tools and WAKEUP_BASE_TOOLS. In a case
+// chat the tools that act on a case act on that chat's case alone (owner
+// decision Q27, 2026-10-01; the handler's CASE_SCOPED_TOOLS).
 //
 // The handler comes from the executor's extraToolOptions (`caseManagement`,
 // built once per core). answer_question checks its quote against the
@@ -44,9 +46,16 @@ function managementTool(def) {
       // get these tools at all (DELEGATE_EXCLUDED_TOOLS); this is the
       // second line should one ever reach them.
       if (context.origin && context.origin.job_id) return { ok: false, error: DELEGATE_REFUSED };
+      // In a case chat (or a child run guarded for a case) the case-scoped
+      // tools act on that case alone (owner decision Q27): the scope is the
+      // host's case context, never a parameter. One without a case id fails
+      // closed.
+      const scoped = context.caseContext || context.guardContext || null;
+      const caseScope = scoped ? (typeof scoped.caseId === 'string' && scoped.caseId ? scoped.caseId : false) : null;
+      if (caseScope === false) return { ok: false, error: UNAVAILABLE };
       try {
         const ownerTurnText = typeof context.ownerTurnText === 'string' ? context.ownerTurnText : null;
-        return { ok: true, result: await handler.call(def.name, params || {}, { ownerTurnText }) };
+        return { ok: true, result: await handler.call(def.name, params || {}, { ownerTurnText, caseScope }) };
       } catch (err) {
         // The handler's refusals are fixed sentences; anything else it
         // already turned into `internal`.

@@ -961,12 +961,24 @@ Spec `docs/superpowers/specs/2026-09-30-management-surfaces.md`; ADR
   (`src/mcp/case-tools.js`): the front door (`mcp-frontdoor`, scopes
   above), `king-louie-service mcp` (`mcp-stdio`), and King Louie's chat
   tools (`src/tools/builtin/management-tools.js`, channel `in-app-chat`,
-  always loaded, in every chat, acting on any case). Never in a wake-up
+  always loaded, in every chat). Never in a wake-up
   turn: its `allowedToolNames` name only the case tools and
   `WAKEUP_BASE_TOOLS`. Never in a delegate turn either
   (`DELEGATE_EXCLUDED_TOOLS`; a front-door delegate reaches cases only
   through its own case scopes), and a run whose origin names a delegate
   job is refused by the tools themselves.
+- In a case chat they act only on that case (owner decision Q27,
+  2026-10-01): a case turn's context feeds that case's ledger and executor
+  payloads, and the outbound gate knows only that case's private facts.
+  The tools that act on a case (`CASE_SCOPED_TOOLS` in
+  `src/mcp/case-tools.js`: the six read tools besides `get_presence`, and
+  `answer_question`, `revoke_envelope`, `cancel_case_job`) take the
+  handler's `caseScope`, which the chat tools set from the host's
+  `caseContext` (or a child's `guardContext`), never from a parameter: the
+  lists give that case alone, and a call naming another (or an unknown)
+  case is refused `other_case`. `create_case`, `set_away` and
+  `get_presence` are unaffected; a chat with no case keeps every case, and
+  the MCP surfaces pass no scope.
 - `in-app-chat` (the model relaying the owner's chat words) is not
   `in-app` (the card's buttons and the IPC: a press, no model between). No
   list that takes a recorded channel as proof of a press names it

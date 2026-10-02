@@ -851,3 +851,79 @@ describe('set_away', () => {
     assert.deepStrictEqual(f.policy().away, { mode: 'email-only', until: LATER });
   });
 });
+
+// ---- Owner decision Q27 (2026-10-01): in a case chat, only that case ----
+
+const { OTHER_CASE_MESSAGE } = require('../src/mcp/case-tools');
+
+describe('in a case chat, the management tools act only on that case', () => {
+  const MESSAGE = 'In a case chat these tools act only on this case. Use a chat that is not attached to a case, or your phone, to manage other cases.';
+
+  it('the handler: list tools give only the scoped case, and a call naming another case is refused', async () => {
+    assert.strictEqual(OTHER_CASE_MESSAGE, MESSAGE);
+    const { rt, lot, shed, q } = await fixture();
+    rt.playbooks = { summary: () => [] };
+    const h = createCaseToolHandler({ getRuntime: () => rt, getContact: () => fakeContact(lot, q), channel: 'in-app-chat' });
+    const scope = { caseScope: lot.id };
+    assert.deepStrictEqual((await h.call('list_cases', {}, scope)).map((r) => r.id), [lot.id]);
+    assert.deepStrictEqual((await h.call('list_questions', {}, scope)).map((r) => r.questionId), [q.photo.id, q.grant.id]);
+    for (const ref of [lot.id, 'lakeside-lot']) {
+      assert.strictEqual((await h.call('open_case', { case: ref }, scope)).id, lot.id);
+      assert.strictEqual((await h.call('get_orientation', { case: ref }, scope)).untrusted_output, true);
+      assert.ok(Array.isArray(await h.call('list_envelopes', { case: ref }, scope)));
+      assert.strictEqual((await h.call('list_playbooks', { case: ref }, scope)).untrusted_output, true);
+      assert.strictEqual((await h.call('list_questions', { case: ref }, scope)).length, 2);
+    }
+    for (const ref of [shed.id, 'garden-shed', 'no-such-case']) {
+      for (const name of ['open_case', 'get_orientation', 'list_envelopes', 'list_playbooks', 'list_questions']) {
+        const e = await refusal(h.call(name, { case: ref }, scope));
+        assert.deepStrictEqual([e.code, e.message], ['other_case', `other_case: ${MESSAGE}`], `${name} ${ref}`);
+      }
+    }
+    const e = await refusal(h.call('answer_question', { case: shed.id, question_id: q.roof.id, quote: 'metal roof, please' }, { ...scope, ownerTurnText: 'metal roof, please' }));
+    assert.strictEqual(e.code, 'other_case');
+    assert.strictEqual(rt.questions(shed.id).get(q.roof.id).answer, null);
+    // Not case-scoped: get_presence and create_case.
+    assert.strictEqual((await h.call('get_presence', {}, scope)).presentChannel, 'in-app');
+    const made = await h.call('create_case', { title: 'Boat sale', objective: 'sell the boat', quote: 'start a case to sell the boat' }, { ...scope, ownerTurnText: 'start a case to sell the boat' });
+    assert.ok(rt.getCase(made.case_id));
+    // With no scope, the whole surface.
+    assert.strictEqual((await h.call('list_cases', {})).length, 3);
+    assert.strictEqual((await h.call('open_case', { case: shed.id })).id, shed.id);
+  });
+
+  it('revoke_envelope and cancel_case_job naming another case are refused; nothing changes', async () => {
+    const f = await executorFixture();
+    const other = await f.runtime.createCase({ title: 'Garden shed', objective: 'Build a shed' });
+    const h = f.handler('in-app-chat');
+    const opts = { caseScope: other.id, ownerTurnText: 'revoke that envelope and cancel the running job' };
+    assert.strictEqual((await refusal(h.call('revoke_envelope', { case: f.meta.id, envelope: 'env-01', quote: 'revoke that envelope' }, opts))).code, 'other_case');
+    assert.strictEqual((await refusal(h.call('cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote: 'cancel the running job' }, opts))).code, 'other_case');
+    assert.strictEqual(new EnvelopeStore(f.meta.dir).get('env-01').status, 'active');
+    assert.strictEqual(f.jobs.get(f.job.own.id).state, 'running');
+    const own = await h.call('cancel_case_job', { case: f.meta.id, job: f.job.own.id, quote: 'cancel the running job' }, { ...opts, caseScope: f.meta.id });
+    assert.strictEqual(own.state, 'cancelled');
+  });
+
+  it('through the executor, the scope is the turn\'s caseContext, never a parameter; a non-case chat keeps every case', async () => {
+    const { rt, lot, shed, q } = await fixture();
+    const inApp = createCaseToolHandler({ getRuntime: () => rt, getContact: () => fakeContact(lot, q), channel: 'in-app-chat' });
+    const executor = (extra) => new ToolExecutor({ workingDirectory: tmp('kl-mgmt-cwd-'), requireApproval: true, useSandbox: false, extraToolOptions: { caseManagement: inApp, ...extra } });
+    const caseChat = executor({ caseContext: { caseId: lot.id, dir: lot.dir } });
+    const listed = await caseChat.execute('list_cases', {});
+    assert.deepStrictEqual(listed.result.map((r) => r.id), [lot.id]);
+    const questions = await caseChat.execute('list_questions', {});
+    assert.deepStrictEqual(questions.result.map((r) => r.caseId), [lot.id, lot.id]);
+    const refused = await caseChat.execute('open_case', { case: shed.id });
+    assert.deepStrictEqual(refused, { ok: false, error: `other_case: ${MESSAGE}`, code: 'other_case' });
+    // A parameter cannot widen it.
+    const widened = await caseChat.execute('list_cases', { caseScope: null });
+    assert.strictEqual(widened.ok, false);
+    // A case-turn child's guardContext scopes it the same way.
+    const child = await executor({ guardContext: { caseId: lot.id } }).execute('open_case', { case: shed.id });
+    assert.strictEqual(child.code, 'other_case');
+    const plain = executor({});
+    assert.deepStrictEqual((await plain.execute('list_cases', {})).result.map((r) => r.id).sort(), [lot.id, shed.id].sort());
+    assert.strictEqual((await plain.execute('open_case', { case: shed.id })).result.id, shed.id);
+  });
+});

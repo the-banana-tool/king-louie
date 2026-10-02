@@ -32,6 +32,15 @@ const RATE_WINDOW_MS = 60 * 1000;
 const PRESSED_MESSAGE = "Answer this with the buttons on the question in the case's chat, or on your phone.";
 const OWNER_ONLY_MESSAGE = "Only the owner's own message can answer a question.";
 const SIMILAR_MESSAGE = 'a similar case is already open, so nothing was created. Open the app to create it anyway.';
+// Owner decision Q27 (2026-10-01): a case turn's context feeds that case's
+// ledger and executor payloads, and the outbound gate knows only that case's
+// private facts, so in a case chat the tools that act on a case see that
+// case alone. create_case, set_away and get_presence act on no case.
+const OTHER_CASE_MESSAGE = 'In a case chat these tools act only on this case. Use a chat that is not attached to a case, or your phone, to manage other cases.';
+const CASE_SCOPED_TOOLS = new Set([
+  'list_cases', 'open_case', 'get_orientation', 'list_questions', 'list_envelopes', 'list_playbooks',
+  'answer_question', 'revoke_envelope', 'cancel_case_job'
+]);
 // The registry's refusal when a wake-up holds the case (jobs.js BUSY).
 const REGISTRY_BUSY = /busy/i;
 
@@ -165,10 +174,10 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     return { usd: { spent: usd.spent ?? 0, limit: usd.limit ?? null } };
   };
 
-  function listCases(rt) {
+  function listCases(rt, scope = null) {
     // Titles and slugs can be model-authored (ruling T12-titles): they go
     // back inside the untrusted wrapper; id and status stay bare.
-    return rt.listCases().map((meta) => ({
+    return rt.listCases().filter((meta) => scope === null || meta.id === scope).map((meta) => ({
       id: meta.id,
       type: meta.type,
       status: meta.status,
@@ -528,20 +537,40 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     };
   }
 
+  // In a case chat (Q27) a case the call names must be the chat's own. An
+  // unknown one is refused the same way, so the refusal tells nothing about
+  // the other cases.
+  function checkScope(rt, ref, scope) {
+    let meta = null;
+    try {
+      meta = rt.getCase(ref);
+    } catch (err) {
+      if (!(err && err.code === 'CASE_NOT_FOUND')) throw err;
+    }
+    if (!meta || meta.id !== scope) throw fail('other_case', OTHER_CASE_MESSAGE);
+  }
+
   // `ownerTurnText` is the executor's own field (the chat's in-app tools
   // pass it from their execute context); the MCP surfaces pass none, and it
-  // is read only on the in-app-chat channel.
-  async function call(name, args = {}, { ownerTurnText = null } = {}) {
+  // is read only on the in-app-chat channel. `caseScope` is a case chat's
+  // case id, from the host's case context (the chat's tools pass it from
+  // their execute context; never a tool argument): the case-scoped tools
+  // then act on that case alone (Q27). The MCP surfaces pass none.
+  async function call(name, args = {}, { ownerTurnText = null, caseScope = null } = {}) {
     const tool = byName.get(name);
     if (!tool) throw fail('unknown_tool', 'no such case tool');
     validate(tool, args || {});
+    // A scope that is not a case id fails closed.
+    if (caseScope !== null && (typeof caseScope !== 'string' || !caseScope)) throw fail('other_case', OTHER_CASE_MESSAGE);
+    const scope = CASE_SCOPED_TOOLS.has(name) ? caseScope : null;
     const rt = runtime();
     try {
+      if (scope !== null && args.case !== undefined) checkScope(rt, args.case, scope);
       switch (name) {
-        case 'list_cases': return listCases(rt);
+        case 'list_cases': return listCases(rt, scope);
         case 'open_case': return openCase(rt, args.case);
         case 'get_orientation': return untrusted({ text: rt.orientation(caseOf(rt, args.case).id) });
-        case 'list_questions': return listQuestions(rt, args.case);
+        case 'list_questions': return listQuestions(rt, args.case ?? scope ?? undefined);
         case 'get_presence': return getPresence();
         case 'list_envelopes': return listEnvelopes(rt, args.case);
         case 'list_playbooks': return listPlaybooks(rt, args.case);
@@ -608,5 +637,7 @@ module.exports = {
   answerClass,
   PRESSED_MESSAGE,
   OWNER_ONLY_MESSAGE,
+  OTHER_CASE_MESSAGE,
+  CASE_SCOPED_TOOLS,
   registerNodeCaseMethods
 };

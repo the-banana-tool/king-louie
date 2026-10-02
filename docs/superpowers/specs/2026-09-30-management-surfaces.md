@@ -64,8 +64,18 @@ without the agent core). Three registrations read the same definitions:
 2. **`king-louie-service mcp`** (`src/mcp/stdio-server.js` through `FleetToolHandler`): channel
    `mcp-stdio`, as the four case tools are today.
 3. **King Louie's chat** (`src/tools/builtin/`): the same names and schemas, always loaded like
-   `SearchHistory`, in every chat, acting on any case (an owner act is not confined to the chat's own
-   case), channel `in-app-chat`. **Never loaded in an unattended turn** (nor in a fleet delegate turn,
+   `SearchHistory`, in every chat, channel `in-app-chat`. In a chat that is not attached to a case they
+   act on any case. **In a case chat they act only on that case** (owner decision Q27, 2026-10-01): a
+   case turn's context feeds that case's ledger and executor payloads, and the outbound gate knows only
+   that case's private facts, so another case's private facts must never enter it. Every tool that acts
+   on a case (`list_cases`, `open_case`, `get_orientation`, `list_questions`, `list_envelopes`,
+   `list_playbooks`, `answer_question`, `revoke_envelope`, `cancel_case_job`) is limited to the turn's
+   own case: the list tools return only that case, and a call naming another case (or an unknown one) is
+   refused with "In a case chat these tools act only on this case. Use a chat that is not attached to a
+   case, or your phone, to manage other cases." The scope comes from the host's case context (the
+   turn's `caseContext`, or a child run's `guardContext`), never from tool parameters. `create_case`,
+   `set_away` and `get_presence` act on no case and are unaffected. The MCP surfaces have no case chat
+   and keep the whole surface. **Never loaded in an unattended turn** (nor in a fleet delegate turn,
    whose client reaches cases only through its own scopes): a wake-up's judge loop stays confined to
    the case tools plus Read, Glob and Grep, so a case can never answer its own question, and with no owner
    message there is no quote to verify anyway.
