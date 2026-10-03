@@ -571,3 +571,78 @@ Answered 2026-09-29; see B-D5 to B-D10 in §2. The original questions:
    follow-up.
 6. Whether any private session could be released after review, or none.
 7. The target venue, which sets the deadline and the size of the public set.
+
+## 18. First results (stage B3, 2026-10-02)
+
+The owner's private set: four real sessions (0.17M to 2.5M estimated tokens),
+138 verified questions (103 answerable, 35 `abstain`). Numbers only; nothing
+from the sessions is in this section. One question is about 0.01 of a rate,
+so differences under 0.02 are noise. The judge is `anthropic/claude-haiku-4-5`
+in both tiers; its 10% samples have not been spot-checked by a human yet, so
+every accuracy below is provisional on that agreement figure. Report
+`b3-2026-10` in `LONGHAUL_HOME/reports/` holds the full tables.
+
+Grid tier, `openai/gpt-6-luna` answers (not open-weight: no key for the
+`deepseek-v4-flash` endpoint of §8.1 was available; a second grid series on it
+costs about $6), 138 questions per adapter:
+
+| Adapter | Answer accuracy | Abstain accuracy | Evidence recall | Median context tokens |
+|---|---|---|---|---|
+| `kl-recall` (BM25, shipped tail) | 0.738 | 0.657 | 0.426 | 12.5K |
+| `kl-recall-vec` (the shipped H3 path, local MiniLM vectors) | 0.738 | 0.657 | 0.456 | 12.6K |
+| `kl-recall-whole` | 0.748 | 0.657 | 0.553 | 12.3K |
+| `sliding-window` | 0.311 | 0.886 | 0.238 | 11.7K |
+| `summarize-compact` (every 10K tokens) | 0.272 | 0.800 | 0.157 | 6.5K |
+| `real-compaction` (124 questions) | 0.564 | 0.700 | 0.415 | 108K |
+| `oracle` | 0.825 | 1.000 | 1.000 | 2.0K |
+
+Frontier tier, `openai/gpt-6-sol` answers; the two long-context adapters on
+the first 40 questions of the stratified sample:
+
+| Adapter | Answer accuracy (n) | Abstain accuracy | Median context tokens |
+|---|---|---|---|
+| `kl-recall` | 0.718 (103) | 0.714 | 12.5K |
+| `sliding-window` | 0.340 (103) | 0.857 | 11.7K |
+| `summarize-compact` | 0.262 (103) | 0.829 | 6.5K |
+| `full-history` (capped at 128K) | 0.538 (39) | n/a (1) | 127K |
+| `real-compaction` | 0.543 (35) | n/a (1) | 112K |
+| `oracle` | 0.942 (103) | 0.971 | 2.0K |
+
+Answer accuracy by distance from the evidence to the question (frontier tier):
+
+| Adapter | <10K | 10K-50K | 50K-200K | 200K-1M | >1M |
+|---|---|---|---|---|---|
+| `kl-recall` | 0.917 | 0.714 | 0.591 | 0.714 | 0.600 |
+| `sliding-window` | 0.958 | 0.333 | 0.045 | 0.190 | 0.000 |
+| `summarize-compact` | 0.750 | 0.381 | 0.045 | 0.000 | 0.000 |
+| `full-history` | 1.000 | 1.000 | 0.500 | 0.200 | 0.000 |
+| `real-compaction` | 1.000 | 1.000 | 0.667 | 0.200 | 0.000 |
+| `oracle` | 0.958 | 0.905 | 0.909 | 0.952 | 1.000 |
+
+What these say:
+- Recall at about 12.5K tokens answers more than twice what a sliding window
+  of the same size does, and about 0.18 more than a 128K context of the newest
+  history or of the session's own compaction summaries. Beyond 200K tokens
+  back, everything but recall and the oracle is at or near zero.
+- The oracle rises from 0.825 to 0.942 with the stronger answer model while
+  `kl-recall` does not (0.738, 0.718): the gap is evidence that was not found,
+  not reading ability. Retrieval is the place to spend effort.
+- Local vectors raise evidence recall (0.426 to 0.456) and containment but
+  not answer accuracy on this set (0.738 both).
+- Whole messages (`kl-recall-whole`): 0.748 against 0.738, and over all 138
+  questions 0.725 against 0.717 with 7 and 6 questions right in one only.
+  Noise: `completeMessageTokens` and `pairToolMessages` stay off (recall spec
+  §6.7).
+- Abstain accuracy is the weak spot of recall: with a recalled block in view,
+  the model answers about a third of the questions it should decline (0.657
+  grid, 0.714 frontier), where a sliding window declines more (0.86 to 0.89)
+  because it sees less.
+- 37 of the 40 `full-history` contexts and 13 of the 36 `real-compaction`
+  contexts were cut at the 128K cap, a stated limit of those two rows.
+
+Spend against the estimate (the dry-run bound), to calibrate the next plan:
+grid $3.73 of $5.84 (64%); frontier $27.72 of $40.80 (68%) over two
+invocations, the second filling 109 answers that failed when the provider
+account ran out of credit. A quota refusal arrives as HTTP 429 and was retried
+and recorded per item like a rate limit; it should stop the run as a refused
+key does (follow-up).
