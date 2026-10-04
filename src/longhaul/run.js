@@ -23,7 +23,7 @@ const { ModelCache, stableStringify } = require('./model-cache');
 const { selectQuestions, planCalls, answerAndJudge, mapPool, spotCheckFile, writeSpotCheckSample } = require('./answer-stage');
 const { estimateCalls, checkBudget, SpendGuard, DEFAULT_MAX_USD, EST_CHARS_PER_TOKEN } = require('./cost');
 const { JUDGE_RULES_SHA256 } = require('./judge');
-const { isAuthFailure, retryable, callErrorCode, authStopError } = require('./retry');
+const { retryable, callErrorCode, stopErrorFor } = require('./retry');
 const { UsageError } = require('./errors');
 const { round8 } = require('./format');
 const { createLogger } = require('../logging');
@@ -497,11 +497,13 @@ async function runAnswerStage(run, options) {
         try {
           handle = await d.adapter.prepare(d.session, { upToSeq: d.upToSeq, hooks });
         } catch (err) {
-          // A refused key stops the run, as an answer's does. The cap, or a
-          // call that failed after its retries (spec §15: three), is recorded
-          // as a context error on this adapter's questions and the run goes
-          // on. Anything else is a defect and is thrown.
-          if (isAuthFailure(err)) throw authStopError(d.adapter.modelClient?.provider ?? 'The provider', err.status, 'the summarizer');
+          // A refused key or an exhausted account stops the run (AUTH,
+          // QUOTA), as an answer's does. The cap, or a call that failed
+          // after its retries (spec §15: three), is recorded as a context
+          // error on this adapter's questions and the run goes on. Anything
+          // else is a defect and is thrown.
+          const stop = stopErrorFor(err, d.adapter.modelClient?.provider ?? 'The provider', 'the summarizer');
+          if (stop) throw stop;
           if (err.code !== 'OVER_BUDGET' && !Number.isInteger(err.status) && !retryable(err)) throw err;
           const code = callErrorCode('summary', err);
           log.warn('summarizer failed; its questions are recorded as errors', { adapter: d.adapter.name, sessionId: d.session.manifest.sessionId, code });

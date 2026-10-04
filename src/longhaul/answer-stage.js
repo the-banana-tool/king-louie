@@ -14,7 +14,7 @@ const path = require('path');
 const { cacheKey, cachedCall, stableStringify } = require('./model-cache');
 const { buildAnswerPrompt, NOTHING_SHOWN } = require('./answer');
 const { buildJudgePrompt, parseVerdict, scoreVerdict } = require('./judge');
-const { isAuthFailure, callErrorCode, authStopError } = require('./retry');
+const { callErrorCode, stopErrorFor } = require('./retry');
 const { sha256Text, writeFileAtomic, byCodeUnit } = require('./files');
 const { createRng } = require('./rng');
 const { UsageError } = require('./errors');
@@ -62,7 +62,9 @@ async function answerAndJudge(item, deps) {
   const fields = { ...EMPTY_ANSWER_FIELDS };
   const meta = { sessionId: question.sessionId, questionId: question.id, adapter: item.adapter };
   const failed = (stage, err, reply = null) => {
-    if (isAuthFailure(err)) throw authStopError(stage === 'answer' ? deps.answerClient.provider : deps.judgeClient.provider, err.status);
+    // A refused key or an exhausted account stops the run (AUTH, QUOTA).
+    const stop = stopErrorFor(err, stage === 'answer' ? deps.answerClient.provider : deps.judgeClient.provider);
+    if (stop) throw stop;
     fields.answerError = callErrorCode(stage, err);
     log.warn('model call failed', { stage, questionId: question.id, adapter: item.adapter, code: fields.answerError });
     return { fields, reply, reason: null };
