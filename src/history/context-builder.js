@@ -106,6 +106,10 @@ class ContextBuilder {
         // none (spec §7; the recall line reads both).
         embedder: retrieval.embedder || 'none',
         vectorsSkipped: retrieval.vectorsSkipped ?? null,
+        // Which reranker ran this turn (spec §6.3 step 6, §7), or why one
+        // that was on did not; both null when rerank is off.
+        reranker: retrieval.reranker ?? null,
+        rerankSkipped: retrieval.rerankSkipped ?? null,
         scope: 'chat',
         query,
         queryFallbackTurns: fallback.length

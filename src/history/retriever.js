@@ -5,7 +5,9 @@
 // and 8 (per-message cap, token budget). stats (optional object) gets
 // exactDuplicates, nearDuplicates and nearDuplicateTokens (candidates dropped
 // by dedupeJaccard that would have fit), cosineDuplicates (dropped by
-// dedupeCosine) and whatever vectorSearch records. Step 2 takes the vector ranks from
+// dedupeCosine), reranker / rerankSkipped (step 6: the reranker that ran, or
+// why one that was on did not) and whatever vectorSearch records. Step 2
+// takes the vector ranks from
 // the caller (vectorHits) or from the vectorSearch callback; step 6 takes a
 // reranker callback. H3 supplies vectorSearch (vector-search.js), vectorOf for
 // the cosine dedupe and the cross-encoder reranker (reranker.js); the
@@ -20,6 +22,8 @@ const DAY_MS = 86400000;
 const TIMED_OUT = Symbol('rerank timed out');
 const rankOf = (hit) => (Number.isFinite(hit.bm25Rank) ? hit.bm25Rank : hit.vectorRank);
 const SHINGLE_WORDS = 5;
+// A rerankSkipped reason is at most this long (provenance, the recall line).
+const REASON_MAX = 200;
 
 // Word 5-gram shingles of a text (lowercased letters and digits); a text of
 // fewer than five words is one shingle of all its words.
@@ -63,44 +67,59 @@ class Retriever {
   // sort by it, and every other candidate keeps its score and order below
   // them. A reranker that throws, returns anything but one finite number
   // per chunk, or takes longer than rerank.maxMs (spec §15) leaves the order
-  // as it was for this turn.
-  async _rerank(query, items, rerank, reranker) {
+  // as it was for this turn. stats gets reranker (info.name, set by the
+  // reranker: 'local:<model>', 'jev:<model>') or rerankSkipped (why not).
+  async _rerank(query, items, rerank, reranker, stats = null) {
+    const note = (name, skipped) => {
+      if (stats && typeof stats === 'object') {
+        stats.reranker = name;
+        stats.rerankSkipped = skipped === null ? null : String(skipped).slice(0, REASON_MAX);
+      }
+    };
     const m = Math.min(items.length, rerank.topM);
     if (m < 1) return items;
     const head = items.slice(0, m);
     const maxMs = Number.isFinite(rerank.maxMs) && rerank.maxMs > 0 ? rerank.maxMs : HISTORY_DEFAULTS.recall.rerank.maxMs;
+    const info = {};
     let timer = null;
     let scores;
     try {
       scores = await Promise.race([
-        Promise.resolve().then(() => reranker(query, head.map((item) => item.chunk), { maxMs })),
+        Promise.resolve().then(() => reranker(query, head.map((item) => item.chunk), { maxMs, info })),
         new Promise((resolve) => { timer = setTimeout(resolve, maxMs, TIMED_OUT); })
       ]);
     } catch (err) {
+      const reason = String((err && err.message) || err);
       // No reranker yet (the EmbedderHost starts with the background checks:
-      // never under KL_TEST_MODE, not before startup finishes): the fused
-      // order, silently, with one debug line per Retriever.
+      // never under KL_TEST_MODE, not before startup finishes), or a hosted
+      // one with no key or paused: the fused order, silently, with one debug
+      // line per Retriever. The reranker itself warns the owner.
       if (err && err.code === 'RERANK_UNAVAILABLE') {
         if (!this._rerankUnavailableLogged) {
           this._rerankUnavailableLogged = true;
           log.debug('no reranker yet; keeping the fused order', { pairs: m });
         }
+        note(null, reason);
         return items;
       }
-      log.warn('reranker failed; keeping the fused order', { error: err.message, pairs: m });
+      log.warn('reranker failed; keeping the fused order', { error: reason, pairs: m });
+      note(null, `the reranker failed: ${reason}`);
       return items;
     } finally {
       clearTimeout(timer);
     }
     if (scores === TIMED_OUT) {
       log.warn('reranker slower than rerank.maxMs; keeping the fused order', { pairs: m, maxMs });
+      note(null, `the reranker took longer than rerank.maxMs (${maxMs} ms)`);
       return items;
     }
     const list = scores && typeof scores.length === 'number' ? Array.from(scores) : null;
     if (!list || list.length !== m || !list.every(Number.isFinite)) {
       log.warn('reranker returned no usable scores; keeping the fused order', { pairs: m, got: list ? list.length : null });
+      note(null, 'the reranker returned no usable scores');
       return items;
     }
+    note(typeof info.name === 'string' && info.name ? info.name : 'unnamed', null);
     const reranked = head
       .map((item, i) => ({ ...item, score: list[i], signals: { ...item.signals, rerank: list[i], fused: item.score } }))
       .sort((a, b) => b.score - a.score || a.chunk.id - b.chunk.id);
@@ -215,7 +234,7 @@ class Retriever {
     });
 
     // Step 6: rerank the first topM.
-    const deduped = rerank.enabled && rerankWith ? await this._rerank(query, unique, rerank, rerankWith) : unique;
+    const deduped = rerank.enabled && rerankWith ? await this._rerank(query, unique, rerank, rerankWith, stats) : unique;
 
     // Step 8: per-message cap, then the token budget when one is given.
     // completeMessageTokens > 0: the first hit on a message whose whole text

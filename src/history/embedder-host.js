@@ -145,6 +145,11 @@ class EmbedderHost extends EventEmitter {
     }
   }
 
+  // The cross-encoder rerank() would use now (provenance names it).
+  rerankModelName() {
+    return this._settings().recall.rerank.model;
+  }
+
   async rerank(query, texts, { maxMs = Infinity } = {}) {
     if (!this.started) throw new EmbedError('RERANK_UNAVAILABLE', 'the reranker is not started');
     const model = this._settings().recall.rerank.model;
