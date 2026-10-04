@@ -462,6 +462,24 @@ are excluded.
    (§5.2).
    `rerank.maxMs` (2,000) guards the latency: a slower reranker is skipped
    for that turn and logged (§15).
+   `rerank.kind` picks the reranker: `local` (the default, the cross-encoder
+   above) or `jev`, typesafe.ai's hosted Jev, opt-in. Jev gets the query and
+   the top `rerank.topM` chunks: one `POST /v1/systemone` per group of
+   candidates with one `noul` question per candidate ("does it establish
+   what the query asks about?", its `criteria` an object naming what counts
+   as true and as false), groups held under 28K estimated tokens of state
+   (Jev's cap is 32K; a longer query or chunk is cut to fit), four requests
+   at a time; the answer, a probability, replaces the fused score. At 0.24 s
+   a turn (§6.7) it serves `SearchHistory` (`rerank.search`) and each turn
+   when `rerank.enabled`, in every chat, case chats included. Choosing it in
+   the settings pane takes an explicit confirmation, and nothing is sent
+   under `KL_TEST_MODE` (the hosted reranker starts with the background
+   checks, like the embedder). A Jev failure, timeout or missing key keeps
+   the fused order (§15); it never falls back to the cross-encoder. The
+   client is `TypesafeProvider` (`src/providers/typesafe-provider.js`), a
+   decide-only provider outside the catalog (unpriced); the scorer,
+   `src/history/jev-rerank.js`, is shared with LongHaul's
+   `kl-recall(-vec)-jev-rerank`.
 7. **Dedupe.** Drop exact text duplicates before step 6, then, in the budget
    step, a chunk whose cosine to an already selected chunk exceeds
    `dedupeCosine` (0.92) when both have vectors. The exact-text dedupe runs before the rerank (step 6), so the reranker never
@@ -622,6 +640,8 @@ Every assistant message the send path appends carries:
   "estTokens": { "system": 3100, "tail": 2900, "recalled": 1850 },
   "fullHistoryEstTokens": 412000,
   "embedder": "local:Xenova/all-MiniLM-L6-v2",
+  "reranker": "jev:jev-1.13.0",
+  "rerankSkipped": null,
   "scope": "chat"
 }
 ```
@@ -630,6 +650,12 @@ Chat exports include it. The renderer shows one line under the message,
 "recalled 3 excerpts · about 1.9K tokens · from 412K tokens of history", that
 expands to the excerpts (fetched by `history:excerpts`). The same line reads
 "recall unavailable: BM25 only, embedding model not loaded" when degraded.
+
+`reranker` names the reranker that ran this turn (`local:<model>`, or
+`jev:<model>` with the model the response named), null when none did;
+`rerankSkipped` says why one that was on did not run (no key, a refused key,
+slower than `rerank.maxMs`, a failure), null otherwise. The recall line ends
+in "· reranked" when one ran.
 
 ## 8. Tools
 
@@ -815,7 +841,11 @@ history: {
     kindWeights: { user: 1.2, assistant: 1.0, summary: 0.9, attachment: 0.9, tool_use: 0.7, tool_result: 0.6 },
     recencyWeight: 0.3, recencyHalfLifeDays: 30,
     maxChunksPerMessage: 4, dedupeCosine: 0.92,
-    rerank: { enabled: false, model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 100, maxMs: 2000, search: true, searchMaxMs: 6000 },
+    rerank: {
+      enabled: false, kind: 'local',                 // local | jev (hosted, opt-in)
+      model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 100, maxMs: 2000, search: true, searchMaxMs: 6000,
+      jev: { model: 'jev-latest' }                   // asked for; provenance names what answered
+    },
     vectorCacheMb: 256,
     // measured and off (§6.3, §6.7): 0 / false
     completeMessageTokens: 0, pairToolMessages: false, prefixMinChars: 0,
@@ -840,6 +870,16 @@ Per chat: `history_scope` and `chat_links` (§10.1). Every key merges through
 section "History and recall"; the weights and top-k values sit behind an
 "advanced" disclosure.
 
+The typesafe.ai key is not a setting. It is stored like a provider token:
+encrypted by the core's cipher (Electron `safeStorage` on the desktop, the
+AES-GCM master key in service mode) under `apiTokens.__typesafe_api_key` in
+the store (`chat-data.json`, a secret file for every tool). It is entered in
+the History and recall pane (`history:jev.saveKey`) and never returned to
+the renderer; the `Vault` tool reads only the vault, so it cannot read it.
+Saving or removing it lifts a pause Jev holds for the old key.
+`king-louie-service import --from` does not carry it; enter it again on the
+service.
+
 ## 15. Error handling
 
 | Failure | Behaviour |
@@ -851,6 +891,7 @@ section "History and recall"; the weights and top-k values sit behind an
 | Model download interrupted | Partial files are discarded; the next enable retries. |
 | Migration of one chat fails | That chat stays in the JSON array and is reported; the rest migrate; the backup exists before any change. |
 | Reranker slower than `rerank.maxMs` (2,000) | The rerank step is skipped for that turn and logged. |
+| Hosted reranker (Jev) fails, times out, or has no key | The fused order for that turn or search, never the cross-encoder instead; provenance `rerankSkipped` says why; one owner-visible warning per failure episode (the next success ends it). The call is aborted at `rerank.maxMs` (`searchMaxMs` for SearchHistory). A refused key (401/403) or an account out of credit (402) pauses Jev, sending nothing, until a new key is saved or Retry; a 429/529 holds it off for the server's retry-after (30 s without one). |
 | FTS query syntax error from user text | The query is escaped before use; a residual error falls back to the vector signal alone, then to the tail alone. |
 | `ReadHistory` range outside scope | The tool returns an error naming the allowed scope; nothing is read. |
 

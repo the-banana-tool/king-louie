@@ -206,6 +206,19 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   `build.files` pattern (`${platform}` macro); never give `build.win`/`mac`/
   `linux` a `files` list: electron-builder 26 then drops the top-level list,
   and `.git`, `tests` and `src/longhaul` go into the asar.
+- Rerank (`history.recall.rerank.kind`): `local` (the cross-encoder) or `jev`,
+  typesafe.ai's hosted Jev, opt-in (the pane's "Allow sending to typesafe.ai"
+  box; `history:embedder.save` refuses the switch without `confirmJev`). It
+  sends the query and about 100 chunks per rerank, in every chat, case chats
+  included. One client, `TypesafeProvider` (decide-only: not registered, not
+  in the catalog, unpriced), and one scorer, `src/history/jev-rerank.js`,
+  shared with LongHaul. `JevReranker` starts only from
+  `startHistoryEmbedding` and refuses under `KL_TEST_MODE`; a failure keeps
+  the fused order with one warning per episode. Its key is
+  `apiTokens.__typesafe_api_key`, encrypted like a provider token; the
+  `Vault` tool cannot read it, and `import --from` does not carry it (enter
+  it again on the service). Provenance has `reranker` and `rerankSkipped`.
+  Tests use `tests/helpers/fake-jev-server.js`, never the network.
 
 ## Models
 
@@ -378,6 +391,18 @@ Electron build.
   aggregate tables to `reports/<id>/` (`--public` refuses private runs); a series
   there is one adapter configuration at one tier, answer model, judge model and
   full commit, with one setup (`setup:` hashes the max tokens and prompt hashes).
+- `kl-recall-jev-rerank` / `kl-recall-vec-jev-rerank` rerank with Jev
+  (`--jev-mode batched|pointwise`, `--jev-model jev-1.13.0`,
+  `--jev-max-tokens` (20M), `--jev-base-url`, key `TYPESAFE_AI_KEY`); scores
+  are cached under `LONGHAUL_HOME/private/rerank/<session>/<model>-<mode>/`,
+  a private session needs `--send-private`, and the cost is input tokens with
+  the price unknown. In the answer stage and its dry run they are cache-only
+  (`JEV_SCORES_MISSING`): run the evidence-only run with the same settings
+  first.
+- A quota refusal (402, OpenAI `insufficient_quota`, Anthropic's
+  credit-balance 400 or `billing_error`) is never retried and stops a run
+  like a refused key: `QUOTA`, exit 2, `spend.json` `stoppedBy: 'QUOTA'`. A
+  plain 429 is still retried.
 - Smoke run of the answer stage (no models, no network, $0):
   `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models`.
 

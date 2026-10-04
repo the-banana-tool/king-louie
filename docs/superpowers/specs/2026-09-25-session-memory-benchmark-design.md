@@ -299,6 +299,21 @@ summaries of `summarize-compact`) is recorded once per (adapter, session),
 in `spend.json` and the summary's `setup`, not per question as §8 step 5
 lists.
 
+**Addendum (2026-10-04): `kl-recall-jev-rerank` and
+`kl-recall-vec-jev-rerank` rerank with typesafe.ai's Jev,** the opt-in
+hosted reranker the app ships as `rerank.kind: 'jev'` (recall spec §6.3
+step 6), on the app's own client (`TypesafeProvider`) and scorer: batched
+by default (`--jev-mode pointwise` for one request per pair), the model
+pinned to `jev-1.13.0` (`--jev-model`; a response naming another model stops
+the run, so cached scores never mix versions). The key comes from
+`TYPESAFE_AI_KEY`. Scores are cached under
+`LONGHAUL_HOME/private/rerank/<session>/<model>-<mode>/`. A private session
+needs `--send-private`; a run whose estimate is over `--jev-max-tokens`
+(20M) is refused before any request. Jev is not in the model catalog, so
+its cost is reported as input tokens with the price unknown. In the answer
+stage and its dry run they are cache-only (`JEV_SCORES_MISSING` on a miss):
+the evidence-only run with the same settings comes first.
+
 `evidenceSeqsShown` is how an adapter reports which message sequences its
 context contains; for `kl-recall` it comes from provenance, for others from
 construction. It is what makes evidence recall measurable without a judge.
@@ -527,6 +542,7 @@ gets its own implementation plan.
 | A converter meets a record it cannot map | The step is kept as a `status` message with the raw record in `meta`, counted in the manifest as `unmapped`; the session is still usable. |
 | Embedding backfill does not drain within `prepareTimeoutMs` | The run records the fraction embedded and continues; the report flags it. |
 | Answer or judge call fails | Retried three times; then the question is recorded as `error` and excluded from rates, with the count shown. |
+| A model call is refused for credit or quota (HTTP 402; OpenAI 429 `insufficient_quota`; Anthropic 400 "credit balance is too low" or 402 `billing_error`) | Not retried: the run stops like a refused key (`QUOTA`, exit 2; in the answer stage `spend.json` has `stoppedBy: 'QUOTA'`), for answer, judge, summarizer and Jev calls; nothing is cached for the failed call, so a rerun finishes from the cache. A plain rate limit (429) is still retried. |
 | Judge returns an unparseable verdict | Recorded as `error`, same as above. |
 | A question fails validation | `run` refuses the whole set and names the question; `verify` fixes it. |
 | Private data in a public report | Refused before any file is written. |
@@ -644,5 +660,5 @@ Spend against the estimate (the dry-run bound), to calibrate the next plan:
 grid $3.73 of $5.84 (64%); frontier $27.72 of $40.80 (68%) over two
 invocations, the second filling 109 answers that failed when the provider
 account ran out of credit. A quota refusal arrives as HTTP 429 and was retried
-and recorded per item like a rate limit; it should stop the run as a refused
-key does (follow-up).
+and recorded per item like a rate limit; it now stops the run as a refused
+key does (`QUOTA`, §15).
