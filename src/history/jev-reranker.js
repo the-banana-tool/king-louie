@@ -14,7 +14,8 @@
 // owner gets one warning per failure episode (one toast and one log line);
 // an episode ends at the next success or reset(). A failure that lands after
 // reset() or after a switch away from 'jev' changes nothing. Messages carry
-// statuses and codes only, never chat text.
+// statuses and codes only, never chat text. A change of rerank.kind or of
+// the Jev model resets it too, so nothing carries over from the last choice.
 const { mergeHistorySettings } = require('./settings');
 const { EmbedError } = require('./embed-errors');
 const { jevScores } = require('./jev-rerank');
@@ -48,6 +49,7 @@ class JevReranker {
     this.tokens = 0;
     this.requests = 0;
     this.servedModel = null;
+    this.choice = null;
     this.inFlight = new Set();
   }
 
@@ -75,7 +77,7 @@ class JevReranker {
   }
 
   status() {
-    const rerank = this._rerankSettings();
+    const rerank = this._syncedSettings();
     const hasKey = Boolean(this._key());
     let state;
     if (rerank.kind !== 'jev') state = 'off';
@@ -90,6 +92,7 @@ class JevReranker {
   async rerank(query, texts, { maxMs = Infinity, info = null } = {}) {
     if (this.env.KL_TEST_MODE) throw new EmbedError('RERANK_UNAVAILABLE', 'hosted reranking is off under KL_TEST_MODE');
     if (!this.started) throw new EmbedError('RERANK_UNAVAILABLE', 'the hosted reranker is not started');
+    this._syncedSettings();
     const key = this._key();
     if (!key) {
       const message = 'no typesafe.ai key is saved (Settings > History and recall)';
@@ -143,6 +146,18 @@ class JevReranker {
 
   _rerankSettings() {
     return mergeHistorySettings((this.getSettings() || {}).history).recall.rerank;
+  }
+
+  // The rerank settings, after a reset() when the kind or the Jev model
+  // changed since the last look: a pause or a warned episode from one Jev
+  // choice never carries into the next (jev -> local -> jev, a new model).
+  // The settings save also resets; this covers any other path.
+  _syncedSettings() {
+    const rerank = this._rerankSettings();
+    const choice = `${rerank.kind}|${rerank.jev.model}`;
+    if (this.choice !== null && this.choice !== choice) this.reset();
+    this.choice = choice;
+    return rerank;
   }
 
   _key() {

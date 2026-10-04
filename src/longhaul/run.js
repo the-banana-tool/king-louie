@@ -24,7 +24,7 @@ const { selectQuestions, planCalls, answerAndJudge, mapPool, spotCheckFile, writ
 const { estimateCalls, checkBudget, SpendGuard, DEFAULT_MAX_USD, EST_CHARS_PER_TOKEN } = require('./cost');
 const { JUDGE_RULES_SHA256 } = require('./judge');
 const { retryable, callErrorCode, stopErrorFor, STOP_CODES } = require('./retry');
-const { UsageError } = require('./errors');
+const { UsageError, JEV_STOP_CODES } = require('./errors');
 const { round8 } = require('./format');
 const { createLogger } = require('../logging');
 
@@ -40,10 +40,10 @@ const RUN_ID_RE = /^\d{8}T\d{6}Z-[0-9a-f]{4}$/;
 const ANSWER_PROMPT_OVERHEAD_TOKENS = 1000;
 // UsageErrors that stop a run when an adapter's context throws them: a
 // refused key, an exhausted account (retry.js STOP_CODES), and the Jev
-// adapters' cache-only miss, token cap and model mismatch (jev.js
-// JEV_STOP_CODES, named here so run.js does not load the Jev client). Every
-// other context error is recorded on its question.
-const RUN_STOP_CODES = new Set([...STOP_CODES, 'JEV_SCORES_MISSING', 'JEV_OVER_TOKENS', 'JEV_MODEL_MISMATCH']);
+// adapters' cache-only miss, token cap, model mismatch and missing key
+// (errors.js JEV_STOP_CODES, kept there so run.js does not load the Jev
+// client). Every other context error is recorded on its question.
+const RUN_STOP_CODES = new Set([...STOP_CODES, ...JEV_STOP_CODES]);
 
 // Temp dirs an interrupted run or embed (Ctrl-C, crash) left behind.
 // prefix narrows it (embed removes only kl-embed-* dirs).

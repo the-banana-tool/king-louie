@@ -8,8 +8,9 @@
 //              candidate (the app's mode: 0.24 s a turn at topM 100)
 //   pointwise  one request per candidate (LongHaul only)
 // Jev takes at most STATE_TOKEN_LIMIT tokens of state per request. Groups
-// are planned on an estimate of 3 characters a token over the JSON-escaped
-// text and kept under maxStateTokens (28K), so dense text still fits; a
+// are planned on an estimate over the JSON-escaped text (3 ASCII characters
+// a token, every non-ASCII character one) and kept under maxStateTokens
+// (28K), so dense text still fits; a
 // query longer than QUERY_MAX_TOKENS and a candidate too long for a group of
 // its own are cut to fit. `ask` is the caller's transport
 // (TypesafeProvider#ask, or LongHaul's retrying client); this module sends
@@ -32,7 +33,18 @@ const CRITERIA = Object.freeze({
   false: 'The candidate is merely on a similar topic, mentions the same words, or does not contain what the query asks about.'
 });
 
-const estTokens = (text) => Math.ceil(JSON.stringify(String(text ?? '')).length / EST_CHARS_PER_TOKEN);
+// ASCII at EST_CHARS_PER_TOKEN characters a token; every other character
+// (CJK and other non-Latin text, which JSON leaves unescaped) as one token
+// at least, so dense non-Latin text never pushes a group over the cap.
+function estTokens(text) {
+  let ascii = 0;
+  let other = 0;
+  for (const ch of JSON.stringify(String(text ?? ''))) {
+    if (ch.codePointAt(0) > 127) other += 1;
+    else ascii += 1;
+  }
+  return Math.ceil(ascii / EST_CHARS_PER_TOKEN) + other;
+}
 
 // The text cut so its estimate is at most maxTokens.
 function clip(text, maxTokens) {

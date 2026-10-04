@@ -85,6 +85,24 @@ describe('Jev scoring', () => {
     assert.ok(estTokens('"\n'.repeat(1000)) > estTokens('a'.repeat(2000)) / 2, 'escaping counts');
   });
 
+  it('non-ASCII text counts one token a character, so a group of CJK chunks stays under the 32K state cap', () => {
+    assert.strictEqual(estTokens('门禁密码'), Math.ceil(2 / 3) + 4, 'the quotes at 3 a token, each CJK character one');
+    assert.strictEqual(estTokens('abcdef'), Math.ceil(8 / 3), 'ASCII stays at 3 characters a token');
+    // Invented text: about 600 CJK characters a chunk, 100 chunks (topM 100).
+    const chunk = (i) => `第${i}段：侧门的密码是四四一七，码头边的门下雨时会卡住。`.repeat(24);
+    const texts = Array.from({ length: 100 }, (_, i) => chunk(i));
+    const plan = planBatches('侧门的密码是多少？', texts);
+    // At least one token per non-ASCII character: a floor on what Jev counts.
+    const floor = (s) => [...String(s)].filter((c) => c.charCodeAt(0) > 127).length;
+    for (const g of plan.groups) {
+      const tokens = floor(plan.query) + g.reduce((n, i) => n + floor(plan.texts[i]), 0);
+      assert.ok(tokens < STATE_TOKEN_LIMIT, `group of ${g.length}: ${tokens} CJK characters`);
+      assert.ok(groupStateTokens(plan, g) <= MAX_STATE_TOKENS);
+    }
+    const cut = clip('门'.repeat(5000), 100);
+    assert.ok(estTokens(cut) <= 100 && cut.length > 0);
+  });
+
   it('a failed group stops the groups not yet started, and the error carries the usage so far', async () => {
     const texts = Array.from({ length: 6 }, (_, i) => `gate ${i} ${'x'.repeat(3000)}`);
     const plan = planBatches('gate', texts, { maxStateTokens: 2500 });

@@ -181,6 +181,25 @@ describe('JevReranker', () => {
     assert.strictEqual(server.requests.at(-1).auth, 'Bearer test-key-not-real-0002', 'the new key is used');
   });
 
+  it('a refusal does not survive jev -> local -> jev, nor a change of Jev model; the next failure warns again', async () => {
+    const { jev, notes } = make();
+    jev.start();
+    server.setFailure({ count: 1, status: 401 });
+    await assert.rejects(jev.rerank('gate code', TEXTS), (err) => err.code === 'RERANK_REFUSED');
+    assert.strictEqual(jev.status().state, 'refused');
+    assert.strictEqual(notes.length, 1);
+    settings = jevSettings('local');
+    assert.strictEqual(jev.status().state, 'off');
+    settings = jevSettings('jev');
+    assert.strictEqual(jev.status().state, 'ready', 'switching back starts clean');
+    server.setFailure({ count: 1, status: 401 });
+    await assert.rejects(jev.rerank('gate code', TEXTS), (err) => err.code === 'RERANK_REFUSED');
+    assert.strictEqual(notes.length, 2, 'a new episode, a new warning');
+    settings = jevSettings('jev', { jev: { model: 'jev-1.14.0' } });
+    assert.strictEqual(jev.status().state, 'ready', 'a new model starts clean');
+    assert.deepStrictEqual(await jev.rerank('gate code', TEXTS), [1, 0]);
+  });
+
   it('stop() aborts a call in flight without a warning', async () => {
     const { jev, notes } = make();
     jev.start();
@@ -235,6 +254,33 @@ describe('JevReranker', () => {
     assert.ok(hits.length >= 2);
     assert.strictEqual(stats.reranker, null);
     assert.match(stats.rerankSkipped, /longer than rerank\.maxMs \(50 ms\)/);
+  });
+
+  it('a Jev 401 keeps the fused order and never falls back to the local cross-encoder', async () => {
+    t = openTempStore();
+    seedChat(t.store, { messages: [
+      { sender: 'user', text: 'The side gate code is 4417.' },
+      { sender: 'user', text: 'The gate by the dock sticks in the rain.' },
+      { sender: 'user', text: 'Lunch is at noon.' }
+    ] });
+    settings = jevSettings('jev');
+    const { jev } = make();
+    jev.start();
+    let localCalls = 0;
+    const host = { rerank: async (q, texts) => { localCalls += 1; return texts.map(() => 0.5); }, rerankModelName: () => 'local-model' };
+    const reranker = createRecallReranker({ host, jev, getSettings: () => settings });
+    const query = { query: 'gate', chatIds: ['chat-1'], settings: settings.history.recall, now: BASE_TIME };
+    const fused = await new Retriever({ store: t.store, estimator: new TokenEstimator() })
+      .retrieve({ ...query, settings: { ...settings.history.recall, rerank: { ...settings.history.recall.rerank, enabled: false } } });
+    server.setFailure({ count: 1, status: 401 });
+    const stats = {};
+    const hits = await new Retriever({ store: t.store, estimator: new TokenEstimator(), reranker }).retrieve({ ...query, stats });
+    const ids = (list) => list.map((h) => h.chunk.id);
+    assert.ok(fused.length >= 2 && ids(fused).every(Number.isInteger));
+    assert.deepStrictEqual(ids(hits), ids(fused));
+    assert.strictEqual(stats.reranker, null);
+    assert.match(stats.rerankSkipped, /refused the key \(401\)/);
+    assert.strictEqual(localCalls, 0, 'host.rerank is never called');
   });
 
   it('Vault results make no chunks, so their text never reaches typesafe.ai', async () => {

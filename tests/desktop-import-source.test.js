@@ -42,7 +42,7 @@ function userData() {
   write('chat-data.json', {
     chats: [{ id: 'c1', title: 'Lakeside lot', createdAt: '2026-09-01T10:00:00Z', updatedAt: '2026-09-20T10:00:00Z', messages: [] }],
     settings: { inference: { activeTier: 'smart' }, allowedDirectories: [root], webSearch: { brave: { apiKey: 'ENC-brave' } }, hooks: { enabled: true } },
-    apiTokens: { anthropic: 'ENC-anthropic', __telegram_bot_token: 'ENC-bot', __elevenlabs_api_key: 'ENC-eleven' },
+    apiTokens: { anthropic: 'ENC-anthropic', __telegram_bot_token: 'ENC-bot', __elevenlabs_api_key: 'ENC-eleven', __typesafe_api_key: 'ENC-typesafe' },
     toolApprovals: { alwaysApproveTools: { Read: true, Bash: false }, permissionRules: [{ tool: 'Bash', pattern: 'git *', action: 'allow', source: 'user' }] },
     userProfile: { name: 'Example Owner' },
     mesh: { identity: { publicKey: 'aa' } }
@@ -72,6 +72,7 @@ describe('readDesktopSource', () => {
     assert.deepStrictEqual(inv.chats, [{ id: 'c1', updatedAt: '2026-09-20T10:00:00Z', title: 'Lakeside lot' }]);
     assert.deepStrictEqual(inv.settingsKeys.sort(), ['hooks', 'inference']);
     assert.deepStrictEqual(inv.providerTokens.sort(), ['__elevenlabs_api_key', 'anthropic']);
+    assert.ok(!inv.providerTokens.includes('__typesafe_api_key'), 'import --from leaves the typesafe.ai (Jev) key out');
     assert.deepStrictEqual(inv.searchKeys, ['brave']);
     assert.deepStrictEqual(inv.vault, ['github']);
     assert.deepStrictEqual(inv.alwaysApprove, ['Read']);

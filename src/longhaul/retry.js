@@ -18,15 +18,36 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // rate limit (OpenAI rate_limit_exceeded, Anthropic rate_limit_error) is none
 // of these, even when its message links the billing page, so the word
 // "billing" alone is never read (unlike error-classifier.js's BILLING).
+// Quota rests on those typed signals. The words "exceeded your current
+// quota" count only from a provider that is not Google's: Gemini says them
+// on its ordinary per-minute 429 too (status RESOURCE_EXHAUSTED, a numeric
+// error.code equal to the HTTP status, "Please retry in 41.5s"), which is a
+// rate limit to wait out.
 const QUOTA_IDS = new Set(['insufficient_quota', 'credit_balance_exhausted', 'billing_error', 'billing_hard_limit_reached']);
-const QUOTA_MESSAGE = /credit balance is too low|exceeded your current quota|insufficient[ _](quota|balance|credits?|funds)/i;
+const CREDIT_MESSAGE = /credit balance is too low/i;
+const QUOTA_MESSAGE = /exceeded your current quota|insufficient[ _](quota|balance|credits?|funds)/i;
 const QUOTA_MESSAGE_STATUSES = new Set([400, 403, 429]);
+
+// A Google/Gemini-shaped error, or any that names a retry delay: buildError
+// keeps Google's numeric error.code (the HTTP status) and the delay its
+// message gives; RESOURCE_EXHAUSTED survives when a caller kept it.
+function googleShapedOrRetryable(err) {
+  if (/gemini|google|vertex/i.test(String(err.provider || ''))) return true;
+  if ([err.code, err.type, err.statusText].some((v) => String(v || '').toUpperCase() === 'RESOURCE_EXHAUSTED')) return true;
+  if (/RESOURCE_EXHAUSTED/.test(String(err.message || ''))) return true;
+  if (typeof err.code === 'number' && err.code === err.status) return true;
+  return Number.isFinite(err.retryAfterMs) && err.retryAfterMs > 0;
+}
 
 function isQuotaFailure(err) {
   if (!err || typeof err !== 'object') return false;
   if (err.status === 402) return true;
   if ([err.code, err.type].some((v) => QUOTA_IDS.has(String(v || '').toLowerCase()))) return true;
-  return QUOTA_MESSAGE_STATUSES.has(err.status) && QUOTA_MESSAGE.test(String(err.message || ''));
+  if (!QUOTA_MESSAGE_STATUSES.has(err.status)) return false;
+  const message = String(err.message || '');
+  // Anthropic's 400 (and a 403 that says the same) is never Google's.
+  if (CREDIT_MESSAGE.test(message)) return true;
+  return QUOTA_MESSAGE.test(message) && !googleShapedOrRetryable(err);
 }
 
 function retryable(err) {

@@ -43,7 +43,7 @@ describe('history IPC: the hosted reranker', () => {
     assert.strictEqual(out.jev.tokens, 12);
   });
 
-  it('choosing jev needs confirmJev; local and staying on jev do not (Review Focus 5)', async () => {
+  it('every save with kind jev needs confirmJev (an unticked box is refused); local does not', async () => {
     const refused = await call(IPC.HISTORY_EMBEDDER_SAVE, { rerank: { kind: 'jev' } });
     assert.strictEqual(refused.ok, false);
     assert.match(refused.error, /Allow sending to typesafe\.ai/);
@@ -52,14 +52,32 @@ describe('history IPC: the hosted reranker', () => {
     assert.strictEqual(ok.ok, true);
     assert.strictEqual(settings.history.recall.rerank.kind, 'jev');
     assert.strictEqual(ok.settings.rerank.kind, 'jev');
-    const stay = await call(IPC.HISTORY_EMBEDDER_SAVE, { rerank: { kind: 'jev', enabled: false } });
-    assert.strictEqual(stay.ok, true, 'already chosen: no second confirmation');
+    // Already on jev: the owner unticks the box and saves; refused, nothing changes.
+    const unticked = await call(IPC.HISTORY_EMBEDDER_SAVE, { rerank: { kind: 'jev', enabled: false }, confirmJev: false });
+    assert.strictEqual(unticked.ok, false);
+    assert.match(unticked.error, /Allow sending to typesafe\.ai/);
+    assert.strictEqual(settings.history.recall.rerank.enabled, true, 'nothing saved');
+    // Saving another history setting while on jev passes the ticked box.
+    const other = await call(IPC.HISTORY_EMBEDDER_SAVE, { embedder: { kind: 'none' }, rerank: { kind: 'jev', enabled: false }, confirmJev: true });
+    assert.strictEqual(other.ok, true);
+    assert.strictEqual(settings.history.embedder.kind, 'none');
     const back = await call(IPC.HISTORY_EMBEDDER_SAVE, { rerank: { kind: 'local' } });
     assert.strictEqual(back.ok, true);
     assert.strictEqual(settings.history.recall.rerank.kind, 'local');
     const bad = await call(IPC.HISTORY_EMBEDDER_SAVE, { rerank: { kind: 'remote' }, confirmJev: true });
     assert.strictEqual(bad.ok, false);
     assert.match(bad.error, /Not a valid reranker/);
+  });
+
+  it('a save that changes the reranker kind resets Jev (jev -> local -> jev starts clean); one that keeps it does not', async () => {
+    await call(IPC.HISTORY_EMBEDDER_SAVE, { rerank: { kind: 'jev' }, confirmJev: true });
+    assert.strictEqual(resets, 1);
+    await call(IPC.HISTORY_EMBEDDER_SAVE, { rerank: { kind: 'jev', search: false }, confirmJev: true });
+    assert.strictEqual(resets, 1, 'same kind and model: no reset');
+    await call(IPC.HISTORY_EMBEDDER_SAVE, { rerank: { kind: 'local' } });
+    assert.strictEqual(resets, 2);
+    await call(IPC.HISTORY_EMBEDDER_SAVE, { rerank: { kind: 'jev' }, confirmJev: true });
+    assert.strictEqual(resets, 3);
   });
 
   it('saveKey: checks the shape, saves it trimmed, never answers with it; clearKey removes it', async () => {

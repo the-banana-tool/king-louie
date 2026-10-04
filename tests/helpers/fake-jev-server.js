@@ -9,7 +9,8 @@
 // retryAfter is set); every answer waits delayMs; a state over
 // stateTokenLimit tokens (JSON characters / 3, Jev's 32K cap) gets 422;
 // a question whose criteria is a string gets 422, as the real API refuses it
-// (criteria is an object such as { yes, no }); every answer names `model`.
+// (criteria is an object, keyed by the answer: the scorer sends
+// { true, false }); every answer names `model`.
 // aborted() counts clients that dropped the connection before the answer.
 // 127.0.0.1 only; never the network.
 const http = require('http');

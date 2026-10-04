@@ -15,7 +15,7 @@
 const { jevScores, limiter, MODES } = require('../history/jev-rerank');
 const TypesafeProvider = require('../providers/typesafe-provider');
 const { withRetries, retryable } = require('./retry');
-const { UsageError } = require('./errors');
+const { UsageError, JEV_STOP_CODES } = require('./errors');
 const { createLogger } = require('../logging');
 
 const log = createLogger('longhaul/jev');
@@ -31,8 +31,6 @@ const DEFAULT_MAX_TOKENS = 20000000;
 // probe measured about 550 a pair pointwise at 141 estimated chunk tokens,
 // and about 26K a question batched at topM 100.
 const OVERHEAD_TOKENS = Object.freeze({ pointwise: 450, batched: 120 });
-// The UsageError codes from here that stop a run (run.js RUN_STOP_CODES).
-const JEV_STOP_CODES = Object.freeze(['JEV_SCORES_MISSING', 'JEV_OVER_TOKENS', 'JEV_MODEL_MISMATCH']);
 
 const jevRetryable = (err) => retryable(err) || Boolean(err && err.code === 'JEV_TIMEOUT');
 
@@ -45,7 +43,7 @@ function createJevClient({
   apiKey, baseUrl = null, model = JEV_DEFAULT_MODEL, provider = null, concurrency = 24, timeoutMs = 60000,
   retries = 6, baseDelayMs = 500, wait = null, maxTokens = null, now = () => Date.now()
 } = {}) {
-  if (!provider && !apiKey) throw new UsageError('Jev needs an API key: set TYPESAFE_AI_KEY in the environment.');
+  if (!provider && !apiKey) throw new UsageError('Jev needs an API key: set TYPESAFE_AI_KEY in the environment.', 'JEV_NO_KEY');
   const p = provider || new TypesafeProvider(apiKey, baseUrl ? { baseUrl } : {});
   const usage = newJevUsage();
   const limit = limiter(concurrency);

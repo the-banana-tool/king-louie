@@ -107,12 +107,22 @@ function registerHistoryHandlers(ipcMain, context = {}) {
     ];
     const refused = checks.find(([, given, kept]) => given !== kept);
     if (refused) return { ok: false, error: `Not a valid ${refused[0]}: ${JSON.stringify(refused[1])}` };
-    // Opt-in (spec §14): Jev sends chat excerpts to typesafe.ai, so the
-    // switch to it needs the pane's explicit confirmation.
-    if (next.recall.rerank.kind === 'jev' && current.recall.rerank.kind !== 'jev' && confirmJev !== true) {
-      return { ok: false, error: 'Jev sends excerpts of your chats to typesafe.ai: tick "Allow sending to typesafe.ai" to choose it.' };
+    // Opt-in (spec §14): Jev sends chat excerpts to typesafe.ai, so every
+    // save that keeps or chooses it carries the pane's ticked box; an owner
+    // who unticks it and saves is refused, not left on Jev.
+    if (next.recall.rerank.kind === 'jev' && confirmJev !== true) {
+      return {
+        ok: false,
+        error: 'Jev sends excerpts of your chats to typesafe.ai: tick "Allow sending to typesafe.ai" to keep it, or choose "On this computer".'
+      };
     }
     context.setSettings({ ...all, history: next });
+    // A pause or warning from one Jev choice never carries into the next
+    // (jev -> local -> jev, or another Jev model).
+    const was = current.recall.rerank;
+    const now = next.recall.rerank;
+    const jev = jevOf();
+    if (jev && (was.kind !== now.kind || was.jev.model !== now.jev.model)) jev.reset();
     return embedderView();
   });
 

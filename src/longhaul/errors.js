@@ -9,4 +9,10 @@ class UsageError extends Error {
   }
 }
 
-module.exports = { UsageError };
+// The UsageError codes from the Jev client and adapters (jev.js,
+// adapters/kl-recall-jev-rerank.js) that stop a run (run.js RUN_STOP_CODES):
+// a cache-only miss, the token cap, a served-model mismatch, no key. Here,
+// not in jev.js, so run.js does not load the Jev client.
+const JEV_STOP_CODES = Object.freeze(['JEV_SCORES_MISSING', 'JEV_OVER_TOKENS', 'JEV_MODEL_MISMATCH', 'JEV_NO_KEY']);
+
+module.exports = { UsageError, JEV_STOP_CODES };

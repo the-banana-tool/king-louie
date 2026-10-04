@@ -3528,8 +3528,9 @@ async function saveHistorySettings() {
       enabled: document.getElementById('history-rerank-turn').checked,
       kind: document.getElementById('history-rerank-kind').value
     },
-    // Choosing Jev sends excerpts to typesafe.ai: the host refuses the
-    // switch unless this box is ticked.
+    // Jev sends excerpts to typesafe.ai: the host refuses any save with
+    // Jev chosen unless this box is ticked (it is ticked on load when Jev is
+    // the saved choice, so unticking it and saving is refused).
     confirmJev: document.getElementById('history-rerank-jev-confirm').checked
   });
   el.textContent = out && out.ok

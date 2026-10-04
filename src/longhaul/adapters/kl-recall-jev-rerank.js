@@ -16,6 +16,9 @@
 // every later question would share (a refused key: AUTH; an exhausted
 // account: QUOTA; the token cap; a model mismatch; no key) is remembered and
 // thrown from context(), and run.js lets it stop the run.
+// A batched score depends a little on the other candidates in its request.
+// The cache is shared by both Jev adapters and reuses scores from partly
+// cached groups, so a warm run can differ slightly from a cold one.
 const { createKlRecallRerankAdapter } = require('./kl-recall-rerank');
 const {
   JEV_DEFAULT_MODEL, DEFAULT_MODE, DEFAULT_MAX_TOKENS, createJevClient, createJevScorer, newCalibration, calibrationSummary,

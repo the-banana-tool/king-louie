@@ -18,6 +18,7 @@ const { runBenchmark, RUN_STOP_CODES } = require('../src/longhaul/run');
 const { JEV_STOP_CODES } = require('../src/longhaul/jev');
 const { UsageError } = require('../src/longhaul/errors');
 const runCommand = require('../src/longhaul/commands/run');
+const { main } = require('../src/longhaul/cli');
 const { startFakeJevServer } = require('./helpers/fake-jev-server');
 const { tmpHome, sink } = require('./helpers/longhaul-helpers');
 
@@ -123,6 +124,19 @@ describe('kl-recall-jev-rerank', () => {
         await refusing.close();
       }
     }
+  });
+
+  it('no TYPESAFE_AI_KEY: the first uncached question stops the run (exit 2, JEV_NO_KEY), not an error per question', async () => {
+    assert.ok(JEV_STOP_CODES.includes('JEV_NO_KEY'));
+    assert.ok(RUN_STOP_CODES.has('JEV_NO_KEY'));
+    const { env, home } = setupHome();
+    await assert.rejects(runBenchmark({ home, adapters: [make(home, { env: {} })], now, commit: 'x' }),
+      (err) => err instanceof UsageError && err.code === 'JEV_NO_KEY' && /TYPESAFE_AI_KEY/.test(err.message));
+    const stdout = sink();
+    const stderr = sink();
+    const code = await main(['run', '--adapters', 'kl-recall-jev-rerank', '--jev-base-url', server.url], { env, stdout, stderr, now });
+    assert.strictEqual(code, 2);
+    assert.match(stderr.text, /TYPESAFE_AI_KEY/);
   });
 
   it('cache-only (the answer stage): a miss stops the run with JEV_SCORES_MISSING and sends nothing; a warm cache serves it', async () => {

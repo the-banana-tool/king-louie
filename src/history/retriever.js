@@ -51,9 +51,9 @@ class Retriever {
   // settings, stats }) => [{ chunkId, vectorRank }], ranks 1-based.
   // vectorOf (optional): (chunk) => its unit vector or null, for the cosine
   // dedupe (step 7 with vectors).
-  // reranker (optional): async (query, chunks, { maxMs }) => scores, one
-  // finite number per chunk, higher is more relevant. Used only when
-  // rerank.enabled.
+  // reranker (optional): async (query, chunks, { maxMs, info }) => scores,
+  // one finite number per chunk, higher is more relevant; it may name
+  // itself in info.name. Used only when rerank.enabled.
   constructor({ store, estimator, vectorSearch = null, vectorOf = null, reranker = null }) {
     this.store = store;
     this.estimator = estimator;

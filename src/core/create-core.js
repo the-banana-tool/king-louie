@@ -333,6 +333,13 @@ function createCore(deps = {}) {
   // and runService; skipped under KL_TEST_MODE); until then recall is BM25
   // only. Model files live in <dataDir>/models.
   const tokenEstimator = new TokenEstimator({ store: historyStore });
+  // The embedder's and the hosted reranker's one-per-episode warnings.
+  const notifyRecallWarning = (toast) => {
+    if (!deps.uiToastChannel || typeof deps.uiToastChannel.send !== 'function') return;
+    Promise.resolve()
+      .then(() => deps.uiToastChannel.send(toast))
+      .catch((err) => historyLog.warn(`Recall warning toast failed: ${err.message}`));
+  };
   const embedderHost = new EmbedderHost({
     getSettings: () => getSettings(),
     modelsDir: path.join(paths.dataDir, 'models'),
@@ -341,12 +348,7 @@ function createCore(deps = {}) {
     createProvider: (kind, cfg) => (kind === 'openai'
       ? createProviderInstance('openai', getDecryptedProviderToken('openai'))
       : ProviderFactory.createProvider('ollama', null, { catalog, serverUrl: cfg.ollama.baseUrl })),
-    notify: (toast) => {
-      if (!deps.uiToastChannel || typeof deps.uiToastChannel.send !== 'function') return;
-      Promise.resolve()
-        .then(() => deps.uiToastChannel.send(toast))
-        .catch((err) => historyLog.warn(`Recall warning toast failed: ${err.message}`));
-    }
+    notify: notifyRecallWarning
   });
   const vectorIndex = new VectorIndex({
     store: historyStore,
@@ -363,12 +365,7 @@ function createCore(deps = {}) {
     createProvider: typeof deps.history?.createJevProvider === 'function'
       ? deps.history.createJevProvider
       : (key) => new TypesafeProvider(key, { catalog }),
-    notify: (toast) => {
-      if (!deps.uiToastChannel || typeof deps.uiToastChannel.send !== 'function') return;
-      Promise.resolve()
-        .then(() => deps.uiToastChannel.send(toast))
-        .catch((err) => historyLog.warn(`Recall warning toast failed: ${err.message}`));
-    }
+    notify: notifyRecallWarning
   });
   const historyReranker = createRecallReranker({ host: embedderHost, jev: jevReranker, getSettings: () => getSettings() });
   const historyRetriever = new Retriever({ store: historyStore, estimator: tokenEstimator, vectorSearch, vectorOf, reranker: historyReranker });

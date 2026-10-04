@@ -141,6 +141,28 @@ describe('createCore with the hosted reranker', () => {
     assert.strictEqual(ctx.getJevReranker().status().state, 'not-started');
   });
 
+  it('a case chat goes through the Jev dispatch like any other chat (case chats included)', async () => {
+    const core = createCore(makeDeps());
+    await core.start();
+    const ctx = core.context;
+    try {
+      ctx.saveTypesafeKey(KEY);
+      ctx.setSettings({ ...ctx.getSettings(), history: jevHistory() });
+      ctx.createChat({ id: 'c1', title: 'Lakeside lot', caseId: 'case-lakeside-lot', messages: [] });
+      for (const text of ['The linen bandage goes in the canopic jar.', 'The side gate code is 4417.', 'Lunch is at noon on Fridays.', 'The canopic jar sits on the top shelf.']) {
+        ctx.appendMessageToChat('c1', 'user', text);
+      }
+      assert.strictEqual(ctx.getChat('c1', { messages: false }).caseId, 'case-lakeside-lot');
+      ctx.startHistoryEmbedding();
+      const n0 = server.requests.length;
+      const built = await ask(ctx);
+      assert.strictEqual(built.stats.reranker, 'jev:jev-1.13.0');
+      assert.ok(server.requests.length > n0, 'the case chat\'s excerpts went to typesafe.ai');
+    } finally {
+      await core.shutdown();
+    }
+  });
+
   it('a refused key pauses Jev; saving a key lifts it (Review Focus 3)', async () => {
     const core = createCore(makeDeps());
     await core.start();

@@ -53,7 +53,7 @@ describe('renderer: the reranker', () => {
     }
     assert.match(html, /<option value="local">On this computer \(cross-encoder\)<\/option>/);
     assert.match(html, /<option value="jev">typesafe\.ai Jev \(hosted, opt-in\)<\/option>/);
-    assert.match(html, /Jev sends your new message and about 100 excerpts of this chat to typesafe\.ai each time it reranks\./);
+    assert.match(html, /For every chat, case chats included, Jev sends your new message and about 100 excerpts of this chat to typesafe\.ai each time it reranks\./);
     assert.match(html, /<input id="history-jev-key"[^>]*type="password"/);
   });
 

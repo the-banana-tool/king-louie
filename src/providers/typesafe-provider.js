@@ -9,7 +9,8 @@
 // POST <baseUrl>/v1/systemone, Bearer key, { model, state, questions } ->
 // { model, answers: { <id>: { type, noul } }, usage: { input_tokens,
 // output_tokens } }. A noul question is { type: 'noul', instructions,
-// criteria: { yes, no } } (an object; a string criteria is refused with
+// criteria: { true, false } } (an object, keyed by the answer; the scorer,
+// jev-rerank.js, sends { true, false }; a string criteria is refused with
 // 422). Errors 401, 422, 429, 529. The request goes through
 // BaseProvider.request with options.abortSignal. An error never carries the
 // response body's text (a 422 can echo the state, which is chat text): the

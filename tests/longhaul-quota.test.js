@@ -11,6 +11,7 @@ const http = require('http');
 const path = require('path');
 const OpenAIProvider = require('../src/providers/openai-provider');
 const AnthropicProvider = require('../src/providers/anthropic-provider');
+const GeminiProvider = require('../src/providers/gemini-provider');
 const {
   isQuotaFailure, retryable, withRetries, stopErrorFor, quotaStopError, STOP_CODES
 } = require('../src/longhaul/retry');
@@ -31,6 +32,8 @@ const OPENAI_RATE = { error: { message: 'Rate limit reached for test-model in or
 const ANTHROPIC_CREDIT = { type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.' } };
 const ANTHROPIC_BILLING = { type: 'error', error: { type: 'billing_error', message: 'There is an issue with your billing.' } };
 const ANTHROPIC_RATE = { type: 'error', error: { type: 'rate_limit_error', message: 'Number of request tokens has exceeded your per-minute rate limit.' } };
+const GEMINI_RATE_MESSAGE = 'You exceeded your current quota, please check your plan and billing details. For more information on this error, '
+  + 'head to: https://ai.google.dev/gemini-api/docs/rate-limits. Please retry in 41.5s.';
 const noWait = async () => {};
 
 describe('the thrown error tells a quota refusal from a rate limit', () => {
@@ -64,6 +67,28 @@ describe('the thrown error tells a quota refusal from a rate limit', () => {
     const rate = await anthropic.buildError(jsonResponse(429, ANTHROPIC_RATE));
     assert.strictEqual(isQuotaFailure(rate), false);
     assert.strictEqual(retryable(rate), true);
+  });
+
+  it('a Gemini per-minute 429 (RESOURCE_EXHAUSTED, "exceeded your current quota", a retry delay) is retried, not a quota stop', async () => {
+    const gemini = new GeminiProvider('test-gemini-key-not-real');
+    const body = { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: GEMINI_RATE_MESSAGE } };
+    const err = await gemini.buildError(jsonResponse(429, body));
+    assert.strictEqual(err.status, 429);
+    assert.match(err.message, /exceeded your current quota/);
+    assert.ok(err.retryAfterMs > 0);
+    assert.strictEqual(isQuotaFailure(err), false);
+    assert.strictEqual(retryable(err), true);
+    assert.strictEqual(stopErrorFor(err, 'gemini'), null);
+    // Without the retry hint, the RESOURCE_EXHAUSTED status alone marks it Google's.
+    const bare = await gemini.buildError(jsonResponse(429, { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'You exceeded your current quota.' } }));
+    assert.strictEqual(isQuotaFailure(bare), false);
+    // A Google-shaped body through another provider class (an OpenAI-compatible endpoint) too.
+    const viaOpenAI = await openai.buildError(jsonResponse(429, body));
+    assert.strictEqual(isQuotaFailure(viaOpenAI), false);
+    // OpenAI's typed insufficient_quota still stops, with the same words in its message.
+    const quota = await openai.buildError(jsonResponse(429, OPENAI_QUOTA));
+    assert.strictEqual(isQuotaFailure(quota), true);
+    assert.strictEqual(stopErrorFor(quota, 'openai').code, 'QUOTA');
   });
 
   it('any 402 is quota (DeepSeek "Insufficient Balance"); a message with no status is not', async () => {
