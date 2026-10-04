@@ -10,6 +10,9 @@
 // below). The output always carries version 3, so the mapping runs once.
 const HISTORY_SETTINGS_VERSION = 3;
 const EMBEDDER_KINDS = Object.freeze(['local', 'ollama', 'openai', 'none']);
+// Step 6's reranker (spec §6.3): the local cross-encoder, or typesafe.ai's
+// hosted Jev (opt-in: it sends the query and the top topM chunks).
+const RERANK_KINDS = Object.freeze(['local', 'jev']);
 // A local model id is org/name (or name): letters, digits, . _ -; it becomes
 // a folder under <dataDir>/models, so no ':' and no '.'/'..' segment.
 const LOCAL_MODEL_RE = /^[A-Za-z0-9._-]{1,100}(\/[A-Za-z0-9._-]{1,100})?$/;
@@ -63,7 +66,19 @@ const HISTORY_DEFAULTS = Object.freeze({
     // turn (off: too slow per turn); search: SearchHistory, where the model
     // is waiting anyway, under searchMaxMs. maxMs: a per-turn rerank slower
     // than this is skipped for that turn (spec §15).
-    rerank: Object.freeze({ enabled: false, model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 100, maxMs: 2000, search: true, searchMaxMs: 6000 }),
+    // kind: 'local' (this cross-encoder) or 'jev' (typesafe.ai, hosted,
+    // opt-in; jev.model is what is asked for, the provenance names what
+    // answered).
+    rerank: Object.freeze({
+      enabled: false,
+      kind: 'local',
+      model: 'Xenova/ms-marco-MiniLM-L-6-v2',
+      topM: 100,
+      maxMs: 2000,
+      search: true,
+      searchMaxMs: 6000,
+      jev: Object.freeze({ model: 'jev-latest' })
+    }),
     // Measured and left off (spec §6.7); 0 / false = off.
     completeMessageTokens: 0,
     pairToolMessages: false,
@@ -147,6 +162,7 @@ function mergeHistorySettings(source) {
   const d = HISTORY_DEFAULTS.recall;
   const weightsIn = isObject(r.kindWeights) ? r.kindWeights : {};
   const rr = isObject(r.rerank) ? r.rerank : {};
+  const rj = isObject(rr.jev) ? rr.jev : {};
   const kindWeights = {};
   for (const [kind, weight] of Object.entries(d.kindWeights)) kindWeights[kind] = atLeast(weightsIn[kind], weight, 0);
   const topM = legacy && rr.topM === LEGACY_RERANK_TOPM ? d.rerank.topM : atLeast(rr.topM, d.rerank.topM, 1, true);
@@ -175,11 +191,13 @@ function mergeHistorySettings(source) {
       vectorCacheMb: positive(r.vectorCacheMb, d.vectorCacheMb),
       rerank: {
         enabled: flag(rr.enabled, d.rerank.enabled),
+        kind: RERANK_KINDS.includes(rr.kind) ? rr.kind : d.rerank.kind,
         model: localModel(rr.model, d.rerank.model),
         topM,
         maxMs: positive(rr.maxMs, d.rerank.maxMs),
         search: flag(rr.search, d.rerank.search),
-        searchMaxMs: positive(rr.searchMaxMs, d.rerank.searchMaxMs)
+        searchMaxMs: positive(rr.searchMaxMs, d.rerank.searchMaxMs),
+        jev: { model: remoteModel(rj.model, d.rerank.jev.model) }
       },
       completeMessageTokens: atLeast(r.completeMessageTokens, d.completeMessageTokens, 0),
       prefixMinChars: atLeast(r.prefixMinChars, d.prefixMinChars, 0, true),
@@ -210,5 +228,5 @@ function embedderKey(embedder) {
 }
 
 module.exports = {
-  HISTORY_DEFAULTS, HISTORY_SETTINGS_VERSION, EMBEDDER_KINDS, LOCAL_MODEL_RE, REMOTE_MODEL_RE, mergeHistorySettings, embedderKey
+  HISTORY_DEFAULTS, HISTORY_SETTINGS_VERSION, EMBEDDER_KINDS, RERANK_KINDS, LOCAL_MODEL_RE, REMOTE_MODEL_RE, mergeHistorySettings, embedderKey
 };

@@ -3,11 +3,14 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const {
-  HISTORY_DEFAULTS, HISTORY_SETTINGS_VERSION, EMBEDDER_KINDS, mergeHistorySettings, embedderKey
+  HISTORY_DEFAULTS, HISTORY_SETTINGS_VERSION, EMBEDDER_KINDS, RERANK_KINDS, mergeHistorySettings, embedderKey
 } = require('../src/history/settings');
 const { mergeSettings, DEFAULT_SETTINGS } = require('../src/core/settings');
 
-const RERANK = { enabled: false, model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 100, maxMs: 2000, search: true, searchMaxMs: 6000 };
+const RERANK = {
+  enabled: false, kind: 'local', model: 'Xenova/ms-marco-MiniLM-L-6-v2', topM: 100, maxMs: 2000, search: true, searchMaxMs: 6000,
+  jev: { model: 'jev-latest' }
+};
 const EMBEDDER = {
   kind: 'local',
   model: 'Xenova/all-MiniLM-L6-v2',
@@ -100,6 +103,21 @@ describe('history settings', () => {
     }
     assert.strictEqual(saved({ recall: { rerank: { search: 'yes' } } }).recall.rerank.search, true);
     assert.ok(Object.isFrozen(HISTORY_DEFAULTS.recall.rerank));
+  });
+
+  it('rerank.kind: local (the default) or jev; rerank.jev.model a hosted model id', () => {
+    assert.deepStrictEqual(RERANK_KINDS, ['local', 'jev']);
+    assert.strictEqual(mergeHistorySettings(undefined).recall.rerank.kind, 'local', 'opt-in only');
+    assert.strictEqual(saved({ recall: { rerank: { kind: 'jev' } } }).recall.rerank.kind, 'jev');
+    for (const kind of ['JEV', 'remote', '', null, 1, ['jev']]) {
+      assert.strictEqual(saved({ recall: { rerank: { kind } } }).recall.rerank.kind, 'local', JSON.stringify(kind));
+    }
+    assert.strictEqual(saved({ recall: { rerank: { jev: { model: 'jev-1.13.0' } } } }).recall.rerank.jev.model, 'jev-1.13.0');
+    for (const model of ['', '../x', 'a b', 42, null]) {
+      assert.strictEqual(saved({ recall: { rerank: { jev: { model } } } }).recall.rerank.jev.model, 'jev-latest', JSON.stringify(model));
+    }
+    assert.deepStrictEqual(saved({ recall: { rerank: { jev: 'jev-1.13.0' } } }).recall.rerank.jev, { model: 'jev-latest' });
+    assert.ok(Object.isFrozen(HISTORY_DEFAULTS.recall.rerank.jev));
   });
 
   it('a settings file saved before H3 (no version): rerank.topM 20 was the shipped default and reads as unset', () => {
