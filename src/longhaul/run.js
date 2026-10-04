@@ -23,7 +23,7 @@ const { ModelCache, stableStringify } = require('./model-cache');
 const { selectQuestions, planCalls, answerAndJudge, mapPool, spotCheckFile, writeSpotCheckSample } = require('./answer-stage');
 const { estimateCalls, checkBudget, SpendGuard, DEFAULT_MAX_USD, EST_CHARS_PER_TOKEN } = require('./cost');
 const { JUDGE_RULES_SHA256 } = require('./judge');
-const { retryable, callErrorCode, stopErrorFor } = require('./retry');
+const { retryable, callErrorCode, stopErrorFor, STOP_CODES } = require('./retry');
 const { UsageError } = require('./errors');
 const { round8 } = require('./format');
 const { createLogger } = require('../logging');
@@ -38,6 +38,12 @@ const RUN_ID_RE = /^\d{8}T\d{6}Z-[0-9a-f]{4}$/;
 // The answer prompt's own text and the question, in tokens, on top of the
 // context (answer-v1.md is about 150 words; a question is one line).
 const ANSWER_PROMPT_OVERHEAD_TOKENS = 1000;
+// UsageErrors that stop a run when an adapter's context throws them: a
+// refused key, an exhausted account (retry.js STOP_CODES), and the Jev
+// adapters' cache-only miss, token cap and model mismatch (jev.js
+// JEV_STOP_CODES, named here so run.js does not load the Jev client). Every
+// other context error is recorded on its question.
+const RUN_STOP_CODES = new Set([...STOP_CODES, 'JEV_SCORES_MISSING', 'JEV_OVER_TOKENS', 'JEV_MODEL_MISMATCH']);
 
 // Temp dirs an interrupted run or embed (Ctrl-C, crash) left behind.
 // prefix narrows it (embed removes only kl-embed-* dirs).
@@ -165,6 +171,7 @@ async function scoreOne({ runId, adapter, handle, session, q, budgetTokens }) {
     };
     return { record, text: String(r.text ?? '') };
   } catch (err) {
+    if (err instanceof UsageError && RUN_STOP_CODES.has(err.code)) throw err;
     return { record: errorRecord(base, err.message), text: null };
   }
 }
@@ -201,8 +208,13 @@ function finish({ run, runId, dir, config, records, spend = null, setupCosts = [
   writeFileAtomic(path.join(dir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
   if (spend) writeFileAtomic(path.join(dir, 'spend.json'), `${JSON.stringify(spend, null, 2)}\n`);
   writeFileAtomic(path.join(dir, 'summary.md'), renderSummaryMarkdown(config, summary, { spend, comparisons }));
+  // Adapters that count something of their own (the Jev adapters: requests,
+  // tokens, latency; numbers only) write adapter-stats.json.
+  const adapterStats = {};
+  for (const a of run.adapters) if (typeof a.runStats === 'function') adapterStats[a.name] = a.runStats();
+  if (Object.keys(adapterStats).length) writeFileAtomic(path.join(dir, 'adapter-stats.json'), `${JSON.stringify(adapterStats, null, 2)}\n`);
   const leaks = Object.values(summary).reduce((n, s) => n + s.leaks, 0);
-  return { runId, dir, config, summary, records, comparisons, leaks, spend, staleTmpRemoved: run.staleTmpRemoved };
+  return { runId, dir, config, summary, records, comparisons, leaks, spend, adapterStats, staleTmpRemoved: run.staleTmpRemoved };
 }
 
 // Adapters that hold a process (kl-recall-vec and kl-recall-rerank with the
@@ -262,7 +274,7 @@ async function runEvidenceOnly(run) {
     const upToSeq = Math.max(...questions.map((q) => q.askAtSeq));
     for (const adapter of adapters) {
       if (isSkipped(run.skippedAdapters, adapter, session)) continue;
-      const handle = await adapter.prepare(session, { upToSeq });
+      const handle = await adapter.prepare(session, { upToSeq, questionCount: questions.length });
       try {
         for (const q of questions) {
           const { record } = await scoreOne({ runId, adapter, handle, session, q, budgetTokens });
@@ -441,7 +453,7 @@ async function runAnswerStage(run, options) {
           deferred.push({ adapter, session, qs, upToSeq, estimate: adapter.estimate(session, { upToSeq }) });
           continue;
         }
-        const handle = await adapter.prepare(session, { upToSeq });
+        const handle = await adapter.prepare(session, { upToSeq, questionCount: qs.length });
         try {
           for (const q of qs) await contextItem(adapter, handle, session, q);
         } finally {
@@ -560,4 +572,4 @@ async function runAnswerStage(run, options) {
   }
 }
 
-module.exports = { runBenchmark, sigintHandler, gitCommit, removeStaleTmp, contextCapTokens, KL_TMP_PREFIX, RUN_ID_RE, ANSWER_PROMPT_OVERHEAD_TOKENS };
+module.exports = { runBenchmark, sigintHandler, gitCommit, removeStaleTmp, contextCapTokens, KL_TMP_PREFIX, RUN_ID_RE, ANSWER_PROMPT_OVERHEAD_TOKENS, RUN_STOP_CODES };

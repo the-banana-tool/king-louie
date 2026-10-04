@@ -19,6 +19,8 @@ const USAGE = [
   '  [--budget-tokens 6000] [--window-tokens N] [--recall key=value]... [--chunk-target-chars N] [--seed N] [--include-unverified]',
   '  [--embed-model text-embedding-3-small] [--embed-provider openai|local] [--send-private]',
   '  --embed-provider: the embedder for kl-recall-vec: openai (default) or local (H3)',
+  '  [--jev-mode batched|pointwise] [--jev-model jev-1.13.0] [--jev-max-tokens 20000000] [--jev-base-url <url>]',
+  '  --jev-*: kl-recall-jev-rerank and kl-recall-vec-jev-rerank (key TYPESAFE_AI_KEY; unpriced, input tokens reported)',
   'Answer stage: --answer-provider <p> --answer-model <m> [--answer-base-url <url>] --judge-provider <p> --judge-model <m> [--judge-base-url <url>]',
   '  [--summarizer-provider <p> --summarizer-model <m> [--summarizer-base-url <url>]] [--tier grid|frontier] [--sample 150]',
   '  [--long-context-sample N] [--max-usd 50] [--allow-unpriced] [--dry-run] [--concurrency 4] [--answer-max-tokens 400]',
@@ -105,6 +107,10 @@ module.exports = {
     'embed-model': { type: 'string' },
     'embed-provider': { type: 'string' },
     'send-private': { type: 'boolean', default: false },
+    'jev-mode': { type: 'string' },
+    'jev-model': { type: 'string' },
+    'jev-max-tokens': { type: 'string' },
+    'jev-base-url': { type: 'string' },
     'answer-provider': { type: 'string' },
     'answer-model': { type: 'string' },
     'answer-base-url': { type: 'string' },
@@ -166,6 +172,18 @@ module.exports = {
       provider: values['embed-provider'] || 'openai',
       ...(values['embed-model'] ? { model: values['embed-model'] } : {})
     };
+    // kl-recall(-vec)-jev-rerank: typesafe.ai's Jev as the reranker, the key
+    // TYPESAFE_AI_KEY from the environment, a private session only with
+    // --send-private. In the answer stage (and its dry run) it is
+    // cache-only: a score not cached refuses the run (JEV_SCORES_MISSING)
+    // instead of calling Jev outside the priced plan.
+    const jev = {
+      sendPrivate: values['send-private'] === true, env: ctx.env, cachedOnly: answering,
+      ...(values['jev-mode'] ? { jevMode: values['jev-mode'] } : {}),
+      ...(values['jev-model'] ? { jevModel: values['jev-model'] } : {}),
+      ...(values['jev-max-tokens'] ? { maxTokens: positiveInt(values['jev-max-tokens'], 'jev-max-tokens') } : {}),
+      ...(values['jev-base-url'] ? { jevBaseUrl: values['jev-base-url'] } : {})
+    };
     const adapterConfig = {
       'kl-recall': { recall, ...(chunk ? { chunk } : {}) },
       'kl-recall-whole': { recall, ...(chunk ? { chunk } : {}) },
@@ -174,6 +192,8 @@ module.exports = {
       // kl-recall-rerank: cross-encoder scores cached under LONGHAUL_HOME/private/rerank.
       'kl-recall-rerank': { recall, privateRoot: ctx.home.private },
       'kl-recall-vec-rerank': vec,
+      'kl-recall-jev-rerank': { recall, privateRoot: ctx.home.private, ...jev },
+      'kl-recall-vec-jev-rerank': { ...vec, ...jev },
       'sliding-window': values['window-tokens'] ? { windowTokens: positiveInt(values['window-tokens'], 'window-tokens') } : {},
       'full-history': { windowTokens },
       'real-compaction': { windowTokens },
@@ -233,6 +253,15 @@ module.exports = {
         ctx.stdout.write(`${''.padEnd(nameWidth)} answer accuracy ${ac(s.answer.accuracy)} (n=${s.answer.n})  partial ${ac(s.answer.partialRate)}  declined ${ac(s.answer.declinedRate)}  `
           + `abstain accuracy ${ac(s.answer.abstain.accuracy)} (n=${s.answer.abstain.n})  answer errors ${s.answer.errors}\n`);
       }
+    }
+    // The Jev adapters' own counts (adapter-stats.json): tokens, unpriced.
+    for (const [name, st] of Object.entries(result.adapterStats || {})) {
+      const j = st.jev;
+      const s = Number.isFinite(st.uncachedMsMedian) ? (st.uncachedMsMedian / 1000).toFixed(2) : '-';
+      ctx.stdout.write(`${name.padEnd(nameWidth)} ${st.mode} topM ${st.topM}  pairs ${st.rerank?.pairs ?? 0} (cached ${st.rerank?.hits ?? 0})  `
+        + `uncached s/question median ${s}  score errors ${st.scoreErrors}`
+        + (j ? `  requests ${j.requests} retries ${j.retries} input tokens ${j.inputTokens} (price unknown) status ${JSON.stringify(j.status)}` : '  no request sent')
+        + '\n');
     }
     for (const c of result.comparisons || []) {
       if (!c.result.judged) continue;

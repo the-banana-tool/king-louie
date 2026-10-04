@@ -24,6 +24,10 @@ const FACTORIES = {
   // candidates, and over BM25 fused with cosine.
   'kl-recall-rerank': (config) => require('./kl-recall-rerank').createKlRecallRerankAdapter(config),
   'kl-recall-vec-rerank': (config) => require('./kl-recall-rerank').createKlRecallRerankAdapter({ ...config, candidates: 'fused' }),
+  // Step 6 by typesafe.ai's Jev (batched by default, or pointwise) over BM25
+  // or fused candidates; scores cached under private/rerank (unpriced).
+  'kl-recall-jev-rerank': (config) => require('./kl-recall-jev-rerank').createKlRecallJevRerankAdapter(config),
+  'kl-recall-vec-jev-rerank': (config) => require('./kl-recall-jev-rerank').createKlRecallJevRerankAdapter({ ...config, candidates: 'fused' }),
   'kl-recall-whole': (config) => require('./kl-recall').createKlRecallAdapter({
     ...config, name: 'kl-recall-whole', recall: { ...(config.recall || {}), ...WHOLE_MESSAGES }
   }),
