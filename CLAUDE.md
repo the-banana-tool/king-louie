@@ -208,7 +208,8 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   and `.git`, `tests` and `src/longhaul` go into the asar.
 - Rerank (`history.recall.rerank.kind`): `local` (the cross-encoder) or `jev`,
   typesafe.ai's hosted Jev, opt-in (the pane's "Allow sending to typesafe.ai"
-  box; `history:embedder.save` refuses the switch without `confirmJev`). It
+  box; `history:embedder.save` refuses any save with `jev` chosen without
+  `confirmJev`, and a change of kind or Jev model resets `JevReranker`). It
   sends the query and about 100 chunks per rerank, in every chat, case chats
   included. One client, `TypesafeProvider` (decide-only: not registered, not
   in the catalog, unpriced), and one scorer, `src/history/jev-rerank.js`,
@@ -219,6 +220,9 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   `Vault` tool cannot read it, and `import --from` does not carry it (enter
   it again on the service). Provenance has `reranker` and `rerankSkipped`.
   Tests use `tests/helpers/fake-jev-server.js`, never the network.
+  Measured on LongHaul (spec §6.7): Jev, with or without whole messages,
+  gave no better answer accuracy than the shipped defaults and lowered
+  abstain accuracy, so it stays opt-in and no default changed.
 
 ## Models
 
@@ -402,7 +406,9 @@ Electron build.
 - A quota refusal (402, OpenAI `insufficient_quota`, Anthropic's
   credit-balance 400 or `billing_error`) is never retried and stops a run
   like a refused key: `QUOTA`, exit 2, `spend.json` `stoppedBy: 'QUOTA'`. A
-  plain 429 is still retried.
+  plain 429 is still retried, Gemini's "exceeded your current quota" per-minute
+  429 (`RESOURCE_EXHAUSTED`, a retry delay) included. A Jev adapter with no
+  `TYPESAFE_AI_KEY` stops at its first uncached question (`JEV_NO_KEY`).
 - Smoke run of the answer stage (no models, no network, $0):
   `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models`.
 

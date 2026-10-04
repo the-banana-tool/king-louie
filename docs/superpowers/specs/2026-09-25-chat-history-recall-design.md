@@ -572,6 +572,9 @@ paraphrases of their evidence, so the oracle's containment is 0.631, not 1.0.
 | H3, `Xenova/bge-small-en-v1.5` with `dedupeCosine` 0 (off) | 0.456 | 0.592 |
 | H3, hosted `text-embedding-3-small` vectors instead (probe) | 0.459 | 0.602 |
 | H3, plus cross-encoder rerank, `topM` 100 (SearchHistory, or `rerank.enabled`) | 0.462 | 0.592 |
+| H3 shipped defaults, plus Jev hosted rerank, batched, topM 100 (opt-in, `rerank.kind: 'jev'`) | 0.462 | 0.612 |
+| H3 shipped defaults with whole messages (`completeMessageTokens` 800, `pairToolMessages`) | 0.551 | 0.602 |
+| the same, plus Jev | 0.650 | 0.612 |
 | Sliding window, same total tokens | 0.238 | 0.427 |
 | Oracle | 1.000 | 0.631 |
 
@@ -581,6 +584,19 @@ turn (tail plus recalled block), under the 15K ceiling; their containment is
 0.26 to 0.37 beyond it, where the sliding window finds 0 to 0.05. The
 shipped H3 defaults reach 0.456 overall and 0.76 under 10K tokens back,
 still short of the 0.8 target (§13), at a p90 of 13.6K total tokens.
+
+The H3 shipped defaults (A), plus Jev (J), with whole messages (W) and with
+whole messages plus Jev (JW) were also run through the answer stage
+(2026-10-04; `openai/gpt-6-luna` answers, `anthropic/claude-haiku-4-5`
+judge, grid tier; 103 answerable and 35 abstain questions). Answer accuracy
+0.738, 0.757, 0.748 and 0.728; abstain accuracy 0.686, 0.600, 0.743 and
+0.629; median context 12,639, 12,560, 12,329 and 12,326 tokens. Jev took a
+median 0.17 s a question uncached, in 136 requests with no retries; the
+uncached part of one pass (2,526 of 13,624 pairs) was 621,685 input tokens,
+and a full pass is estimated at about 3.4M. The answer stage spent $0.54 and
+$0.53 against estimates of $1.02 and $1.01. Runs 20261004T165433Z-1e5f and
+20261004T165720Z-0b70 (evidence only), 20261004T170258Z-96f0 and
+20261004T170745Z-7444 (answer stage).
 
 Findings the settings rest on:
 - **The query.** The previous user turns were noise; the question alone put
@@ -610,7 +626,16 @@ Findings the settings rest on:
   stays on for `SearchHistory` and opt-in per turn.
 - **Hosted rerank.** Jev's hosted reranker is the first one inside the
   per-turn budget (0.24 s a turn), but it sends about 100 chunks a turn to a
-  third party, so it stays an opt-in follow-up.
+  third party, so it stays opt-in. Measured with answers (above): with whole
+  messages it raises evidence recall by 0.10 to 0.19 (0.650 against 0.551
+  with whole messages alone and 0.462 with Jev alone), but that did not
+  become more correct answers with this answer model: answer accuracy 0.728
+  against 0.757 for Jev alone and 0.738 for the shipped defaults, all within
+  about two questions of each other, which is noise. Jev lowered abstain
+  accuracy on both settings (0.686 to 0.600, 0.743 to 0.629). The rule set
+  before the run, whole messages with Jev only if their answer accuracy beats
+  both Jev alone and the shipped defaults by 0.02, is not met, so the pair is
+  not recommended and no default changes.
 - **Embedding wall time.** The four sessions' 45,064 chunks took 57.0 minutes
   with bge-small and 28.4 minutes with MiniLM (76 and 38 ms a chunk, two ONNX
   threads, download included).
