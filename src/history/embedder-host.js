@@ -166,6 +166,9 @@ class EmbedderHost extends EventEmitter {
     if (!this.started || this.kind === 'none' || this.state !== 'ready') return;
     const rerank = this._settings().recall.rerank;
     if (!rerank.search && !rerank.enabled) return;
+    // Jev reranks instead (rerank.kind 'jev'): the cross-encoder's download
+    // would buy nothing.
+    if (rerank.kind === 'jev') return;
     if ((this.rerankLoad && this.rerankModel === rerank.model) || this._rerankFailedFor(rerank.model)) return;
     this._loadReranker(rerank.model, { priority: 'document' }).catch((err) => {
       this.log.debug(`The reranker did not preload; SearchHistory keeps the fused order: ${err.message}`);
