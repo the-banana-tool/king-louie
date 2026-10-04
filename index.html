@@ -861,7 +861,27 @@
 
               <label for="history-rerank-search">Rerank SearchHistory results</label>
               <input id="history-rerank-search" type="checkbox">
+
+              <label for="history-rerank-kind">Reranker</label>
+              <select id="history-rerank-kind" class="provider-input">
+                <option value="local">On this computer (cross-encoder)</option>
+                <option value="jev">typesafe.ai Jev (hosted, opt-in)</option>
+              </select>
+
+              <label for="history-rerank-jev-confirm">Allow sending to typesafe.ai</label>
+              <span>
+                <input id="history-rerank-jev-confirm" type="checkbox">
+                <span id="history-rerank-jev-note" class="provider-message">For every chat, case chats included, Jev sends your new message and about 100 excerpts of this chat to typesafe.ai each time it reranks.</span>
+              </span>
+
+              <label for="history-jev-key">typesafe.ai key</label>
+              <span>
+                <input id="history-jev-key" class="provider-input" type="password" autocomplete="off" spellcheck="false" placeholder="A saved key is never shown">
+                <button id="history-jev-key-save-btn" type="button" class="btn">Save key</button>
+                <button id="history-jev-key-clear-btn" type="button" class="btn">Remove key</button>
+              </span>
             </div>
+            <p id="history-rerank-status" class="provider-message"></p>
             <details class="history-advanced">
               <summary>Advanced</summary>
               <div class="template-variables-grid">

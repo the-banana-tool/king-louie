@@ -664,6 +664,10 @@ function registerChatHandlers(ipcMain, context = {}) {
           fullHistoryEstTokens: built.stats.fullHistoryEstTokens,
           embedder: built.stats.embedder,
           vectorsSkipped: built.stats.vectorsSkipped ?? null,
+          // Which reranker ran (spec §6.3 step 6, §7), or why one that was
+          // on did not.
+          reranker: built.stats.reranker ?? null,
+          rerankSkipped: built.stats.rerankSkipped ?? null,
           scope: built.stats.scope
         };
       }

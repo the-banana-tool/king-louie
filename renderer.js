@@ -3461,6 +3461,22 @@ function historyEmbedderStateText(s, progress, pct, cost) {
   }
 }
 
+// The reranker (recall spec §6.3 step 6, §14). Jev is hosted and unpriced:
+// the pane shows the tokens sent, never a price.
+function historyRerankStatusText(jev) {
+  const j = jev || {};
+  if (j.kind !== 'jev') return 'Reranking runs on this computer.';
+  const sent = ` ${Number(j.tokens) || 0} tokens sent this session (price unknown).`;
+  switch (j.state) {
+    case 'not-started': return 'Jev starts with the app’s background checks.';
+    case 'no-key': return 'Jev is chosen, but no typesafe.ai key is saved: results keep their order.';
+    case 'refused': return `Jev is paused, results keep their order: ${j.error || 'typesafe.ai refused the key'}`;
+    case 'failing': return `Jev failed last time, results kept their order: ${j.error || 'unknown error'}.${sent}`;
+    case 'ready': return `Jev is ready${j.model ? ` (${j.model})` : ''}.${sent}`;
+    default: return '';
+  }
+}
+
 function stopHistoryStatusPoll() {
   if (historyStatusTimer) clearInterval(historyStatusTimer);
   historyStatusTimer = null;
@@ -3473,6 +3489,8 @@ async function refreshHistoryEmbedderStatus() {
   el.textContent = out && out.ok
     ? historyEmbedderStatusText(out.status, out.progress)
     : `Could not read the embedding status: ${(out && out.error) || 'unknown error'}`;
+  const rerankEl = document.getElementById('history-rerank-status');
+  if (rerankEl && out && out.ok) rerankEl.textContent = historyRerankStatusText(out.jev);
   return out;
 }
 
@@ -3487,6 +3505,9 @@ async function loadHistorySettings() {
     document.getElementById('history-openai-model').value = e.openai.model;
     document.getElementById('history-rerank-search').checked = Boolean(out.settings.rerank.search);
     document.getElementById('history-rerank-turn').checked = Boolean(out.settings.rerank.enabled);
+    const kind = out.settings.rerank.kind === 'jev' ? 'jev' : 'local';
+    document.getElementById('history-rerank-kind').value = kind;
+    document.getElementById('history-rerank-jev-confirm').checked = kind === 'jev';
   }
   stopHistoryStatusPoll();
   historyStatusTimer = setInterval(() => { refreshHistoryEmbedderStatus().catch(() => {}); }, 2000);
@@ -3504,12 +3525,41 @@ async function saveHistorySettings() {
     },
     rerank: {
       search: document.getElementById('history-rerank-search').checked,
-      enabled: document.getElementById('history-rerank-turn').checked
-    }
+      enabled: document.getElementById('history-rerank-turn').checked,
+      kind: document.getElementById('history-rerank-kind').value
+    },
+    // Choosing Jev sends excerpts to typesafe.ai: the host refuses the
+    // switch unless this box is ticked.
+    confirmJev: document.getElementById('history-rerank-jev-confirm').checked
   });
   el.textContent = out && out.ok
     ? historyEmbedderStatusText(out.status, out.progress)
     : `Not saved: ${(out && out.error) || 'unknown error'}`;
+  const rerankEl = document.getElementById('history-rerank-status');
+  if (rerankEl && out && out.ok) rerankEl.textContent = historyRerankStatusText(out.jev);
+}
+
+// The typesafe.ai key: sent once, the field cleared at once, never read
+// back from the host.
+async function saveHistoryJevKey() {
+  const input = document.getElementById('history-jev-key');
+  const key = input.value.trim();
+  input.value = '';
+  const status = document.getElementById('history-rerank-status');
+  if (key.length < 8 || /\s/.test(key)) {
+    status.textContent = 'That does not look like a typesafe.ai key.';
+    return;
+  }
+  const out = await window.electron.history.saveJevKey({ key });
+  status.textContent = out && out.ok ? historyRerankStatusText(out.jev) : `Key not saved: ${(out && out.error) || 'unknown error'}`;
+}
+
+async function clearHistoryJevKey() {
+  if (!window.confirm('Remove the saved typesafe.ai key? Jev stops reranking until a key is saved again.')) return;
+  const out = await window.electron.history.clearJevKey();
+  document.getElementById('history-rerank-status').textContent = out && out.ok
+    ? historyRerankStatusText(out.jev)
+    : `Key not removed: ${(out && out.error) || 'unknown error'}`;
 }
 
 // Retry and Rebuild show the host's refusal (e.g. "Embeddings are off.")
@@ -3528,6 +3578,8 @@ function wireHistorySettings() {
     fn().catch((err) => settingsLog.warn(`history settings: ${err.message}`));
   });
   on('history-embedder-save-btn', saveHistorySettings);
+  on('history-jev-key-save-btn', saveHistoryJevKey);
+  on('history-jev-key-clear-btn', clearHistoryJevKey);
   on('history-embedder-retry-btn', () => runHistoryEmbedderAction(() => window.electron.history.retryEmbedder()));
   on('history-embedder-rebuild-btn', async () => {
     if (!window.confirm('Delete this model\'s embeddings and embed the whole history again? Recall uses keyword search until it catches up.')) return;
@@ -8366,10 +8418,13 @@ function formatCompactTokens(value = 0) {
   return String(Math.round(n));
 }
 
-// Which retrieval a reply's recall ran (provenance embedder, vectorsSkipped).
+// Which retrieval a reply's recall ran (provenance embedder, vectorsSkipped)
+// and whether a reranker ran (provenance reranker).
 function recallVia(context) {
-  if (context?.embedder && context.embedder !== 'none') return 'BM25 + vectors';
-  return context?.vectorsSkipped ? `BM25 only: ${context.vectorsSkipped}` : 'BM25';
+  let via = 'BM25';
+  if (context?.embedder && context.embedder !== 'none') via = 'BM25 + vectors';
+  else if (context?.vectorsSkipped) via = `BM25 only: ${context.vectorsSkipped}`;
+  return context?.reranker ? `${via} · reranked` : via;
 }
 
 function recallLineText(context) {
