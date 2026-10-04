@@ -87,7 +87,7 @@ describe('history IPC: the embedder', () => {
     assert.strictEqual(out.status.state, 'ready');
     assert.deepStrictEqual(out.progress, { key: 'local:Xenova/all-MiniLM-L6-v2', embedded: 1, pending: 0 });
     assert.strictEqual(out.settings.embedder.kind, 'local');
-    assert.deepStrictEqual(out.settings.rerank, { enabled: false, search: true });
+    assert.deepStrictEqual(out.settings.rerank, { enabled: false, search: true, kind: 'local' });
   });
 
   it('save: merges the embedder and rerank choices; refuses a value the merge would replace', async () => {

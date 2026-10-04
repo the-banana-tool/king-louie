@@ -69,7 +69,9 @@ const {
   EmbedderHost, EmbedRunner, VectorIndex, createVectorSearch, startEmbedIndexer, mergeHistorySettings
 } = require('../history');
 const { startChunkBackfill } = require('../history/backfill');
-const { createHostReranker } = require('../history/reranker');
+const { createRecallReranker } = require('../history/reranker');
+const { JevReranker } = require('../history/jev-reranker');
+const TypesafeProvider = require('../providers/typesafe-provider');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
@@ -257,6 +259,7 @@ function createCore(deps = {}) {
   const SLACK_APP_TOKEN_STORE_KEY = '__slack_app_token';
   const SLACK_BOT_TOKEN_STORE_KEY = '__slack_bot_token';
   const ELEVENLABS_TOKEN_STORE_KEY = '__elevenlabs_api_key';
+  const TYPESAFE_TOKEN_STORE_KEY = '__typesafe_api_key';
 
   const createId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
@@ -350,7 +353,24 @@ function createCore(deps = {}) {
     getCapMb: () => cacheMbOf(getSettings())
   });
   const { vectorSearch, vectorOf } = createVectorSearch({ host: embedderHost, index: vectorIndex });
-  const historyReranker = createHostReranker(embedderHost);
+  // Step 6's hosted reranker (rerank.kind 'jev', opt-in): typesafe.ai's Jev.
+  // It starts with startHistoryEmbedding, never under KL_TEST_MODE; its key
+  // is read only when a rerank runs (getDecryptedTypesafeKey is declared
+  // further down). The dispatcher picks it or the cross-encoder per call.
+  const jevReranker = new JevReranker({
+    getSettings: () => getSettings(),
+    getKey: () => getDecryptedTypesafeKey(),
+    createProvider: typeof deps.history?.createJevProvider === 'function'
+      ? deps.history.createJevProvider
+      : (key) => new TypesafeProvider(key, { catalog }),
+    notify: (toast) => {
+      if (!deps.uiToastChannel || typeof deps.uiToastChannel.send !== 'function') return;
+      Promise.resolve()
+        .then(() => deps.uiToastChannel.send(toast))
+        .catch((err) => historyLog.warn(`Recall warning toast failed: ${err.message}`));
+    }
+  });
+  const historyReranker = createRecallReranker({ host: embedderHost, jev: jevReranker, getSettings: () => getSettings() });
   const historyRetriever = new Retriever({ store: historyStore, estimator: tokenEstimator, vectorSearch, vectorOf, reranker: historyReranker });
   const contextBuilder = new ContextBuilder({
     store: historyStore,
@@ -361,7 +381,10 @@ function createCore(deps = {}) {
   });
   let embedIndexer = null;
   const startHistoryEmbedding = () => {
-    if (historyStatus.available) embedderHost.start();
+    if (historyStatus.available) {
+      embedderHost.start();
+      jevReranker.start();
+    }
   };
   const getHistoryStore = () => historyStore;
   const getHistoryStatus = () => ({ ...historyStatus });
@@ -1321,6 +1344,31 @@ function createCore(deps = {}) {
     const encryptedToken = tokens[ELEVENLABS_TOKEN_STORE_KEY];
     if (!encryptedToken) return null;
     return decryptToken(encryptedToken);
+  };
+
+  // typesafe.ai's key for the hosted reranker (recall spec §14): stored like
+  // a provider token, encrypted, in the store (a secret file for every
+  // tool); the Vault tool reads only the vault, so it cannot read it.
+  // Saving or removing it lifts a refusal Jev holds for the old key.
+  const hasTypesafeKey = () => Boolean(getApiTokens()[TYPESAFE_TOKEN_STORE_KEY]);
+
+  const saveTypesafeKey = (token) => {
+    const tokens = getApiTokens();
+    tokens[TYPESAFE_TOKEN_STORE_KEY] = encryptToken(String(token).trim());
+    setApiTokens(tokens);
+    jevReranker.reset();
+  };
+
+  const clearTypesafeKey = () => {
+    const tokens = getApiTokens();
+    delete tokens[TYPESAFE_TOKEN_STORE_KEY];
+    setApiTokens(tokens);
+    jevReranker.reset();
+  };
+
+  const getDecryptedTypesafeKey = () => {
+    const encrypted = getApiTokens()[TYPESAFE_TOKEN_STORE_KEY];
+    return encrypted ? decryptToken(encrypted) : null;
   };
 
   const buildAgentVoiceOptions = (agent = null) => {
@@ -3189,6 +3237,7 @@ function createCore(deps = {}) {
     }
     await withTimeout(embedderHost.stop(), shutdownTimeoutMs, 'Embed worker shutdown', warnTimeout)
       .catch((err) => log.warn(`Embed worker shutdown failed: ${err.message}`));
+    await jevReranker.stop();
     try {
       historyStore.close();
     } catch (err) {
@@ -3349,6 +3398,10 @@ function createCore(deps = {}) {
     getVectorIndex: () => vectorIndex,
     getEmbedIndexer: () => embedIndexer,
     getHistoryReranker: () => historyReranker,
+    getJevReranker: () => jevReranker,
+    hasTypesafeKey,
+    saveTypesafeKey,
+    clearTypesafeKey,
     startHistoryEmbedding,
     getMessages,
     truncateChatFrom,

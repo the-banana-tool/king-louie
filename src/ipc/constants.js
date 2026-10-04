@@ -97,6 +97,8 @@ module.exports = {
   HISTORY_EMBEDDER_SAVE: 'history:embedder.save',
   HISTORY_EMBEDDER_REBUILD: 'history:embedder.rebuild',
   HISTORY_EMBEDDER_RETRY: 'history:embedder.retry',
+  HISTORY_JEV_SAVE_KEY: 'history:jev.saveKey',
+  HISTORY_JEV_CLEAR_KEY: 'history:jev.clearKey',
 
   MODELS_STATUS: 'models:status',
   MODELS_REFRESH_CATALOG: 'models:refreshCatalog',

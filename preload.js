@@ -949,7 +949,14 @@ contextBridge.exposeInMainWorld(
         return ipcRenderer.invoke('history:embedder.save', payload);
       },
       rebuildEmbeddings: () => ipcRenderer.invoke('history:embedder.rebuild'),
-      retryEmbedder: () => ipcRenderer.invoke('history:embedder.retry')
+      retryEmbedder: () => ipcRenderer.invoke('history:embedder.retry'),
+      // The typesafe.ai key goes in once and is never read back.
+      saveJevKey: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.key, 'key', { minLength: 8 });
+        return ipcRenderer.invoke('history:jev.saveKey', payload);
+      },
+      clearJevKey: () => ipcRenderer.invoke('history:jev.clearKey')
     },
     models: {
       status: () => ipcRenderer.invoke('models:status'),

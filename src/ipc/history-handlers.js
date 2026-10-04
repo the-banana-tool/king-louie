@@ -45,10 +45,13 @@ function registerHistoryHandlers(ipcMain, context = {}) {
     return { ok: true, untrustedText: true, excerpts: excerpts.map(view) };
   });
 
-  // The embedder (recall spec §5.2, §14). Host strings (an error, a model
-  // id) are shown with textContent.
+  // The embedder (recall spec §5.2, §14) and the reranker (§6.3 step 6).
+  // Host strings (an error, a model id) are shown with textContent. The
+  // typesafe.ai key goes in through history:jev.saveKey and never comes back.
   const OFF = Object.freeze({ kind: 'none', key: null, state: 'off', download: null, error: null, tokens: 0 });
+  const JEV_OFF = Object.freeze({ kind: 'local', model: null, state: 'off', error: null, hasKey: false, tokens: 0, requests: 0 });
   const hostOf = () => (typeof context.getEmbedderHost === 'function' ? context.getEmbedderHost() : null);
+  const jevOf = () => (typeof context.getJevReranker === 'function' ? context.getJevReranker() : null);
   const settingsNow = () => ((typeof context.getSettings === 'function' && context.getSettings()) || {});
   const pick = (o, keys) => {
     const out = {};
@@ -57,20 +60,23 @@ function registerHistoryHandlers(ipcMain, context = {}) {
   };
   const embedderView = () => {
     const host = hostOf();
+    const jev = jevOf();
     const indexer = typeof context.getEmbedIndexer === 'function' ? context.getEmbedIndexer() : null;
     const history = mergeHistorySettings(settingsNow().history);
+    const rerank = history.recall.rerank;
     return {
       ok: true,
       untrustedText: true,
       status: host ? host.status() : { ...OFF },
       progress: indexer ? indexer.progress() : null,
-      settings: { embedder: history.embedder, rerank: { enabled: history.recall.rerank.enabled, search: history.recall.rerank.search } }
+      jev: jev ? jev.status() : { ...JEV_OFF, kind: rerank.kind },
+      settings: { embedder: history.embedder, rerank: { enabled: rerank.enabled, search: rerank.search, kind: rerank.kind } }
     };
   };
 
   handle(IPC.HISTORY_EMBEDDER_STATUS, async () => embedderView());
 
-  handle(IPC.HISTORY_EMBEDDER_SAVE, async ({ embedder, rerank }) => {
+  handle(IPC.HISTORY_EMBEDDER_SAVE, async ({ embedder, rerank, confirmJev }) => {
     if (typeof context.setSettings !== 'function') throw new Error('Settings are not available in this host.');
     const all = settingsNow();
     const current = mergeHistorySettings(all.history);
@@ -83,7 +89,7 @@ function registerHistoryHandlers(ipcMain, context = {}) {
         ollama: { ...current.embedder.ollama, ...pick(e.ollama, ['baseUrl', 'model']) },
         openai: { ...current.embedder.openai, ...pick(e.openai, ['model']) }
       },
-      recall: { ...current.recall, rerank: { ...current.recall.rerank, ...pick(rerank, ['enabled', 'search']) } }
+      recall: { ...current.recall, rerank: { ...current.recall.rerank, ...pick(rerank, ['enabled', 'search', 'kind']) } }
     };
     const next = mergeHistorySettings(wanted);
     // A value the merge would replace with its default is refused, never
@@ -96,10 +102,16 @@ function registerHistoryHandlers(ipcMain, context = {}) {
       ['Ollama model', wanted.embedder.ollama.model, next.embedder.ollama.model],
       ['OpenAI model', wanted.embedder.openai.model, next.embedder.openai.model],
       ['per-turn rerank', wanted.recall.rerank.enabled, next.recall.rerank.enabled],
-      ['SearchHistory rerank', wanted.recall.rerank.search, next.recall.rerank.search]
+      ['SearchHistory rerank', wanted.recall.rerank.search, next.recall.rerank.search],
+      ['reranker', wanted.recall.rerank.kind, next.recall.rerank.kind]
     ];
     const refused = checks.find(([, given, kept]) => given !== kept);
     if (refused) return { ok: false, error: `Not a valid ${refused[0]}: ${JSON.stringify(refused[1])}` };
+    // Opt-in (spec §14): Jev sends chat excerpts to typesafe.ai, so the
+    // switch to it needs the pane's explicit confirmation.
+    if (next.recall.rerank.kind === 'jev' && current.recall.rerank.kind !== 'jev' && confirmJev !== true) {
+      return { ok: false, error: 'Jev sends excerpts of your chats to typesafe.ai: tick "Allow sending to typesafe.ai" to choose it.' };
+    }
     context.setSettings({ ...all, history: next });
     return embedderView();
   });
@@ -114,8 +126,24 @@ function registerHistoryHandlers(ipcMain, context = {}) {
 
   handle(IPC.HISTORY_EMBEDDER_RETRY, async () => {
     const host = hostOf();
-    if (!host) return { ok: false, error: 'Embeddings are not available in this host.' };
-    host.retry();
+    const jev = jevOf();
+    if (!host && !jev) return { ok: false, error: 'Embeddings are not available in this host.' };
+    if (host) host.retry();
+    if (jev) jev.reset();
+    return embedderView();
+  });
+
+  handle(IPC.HISTORY_JEV_SAVE_KEY, async ({ key }) => {
+    if (typeof context.saveTypesafeKey !== 'function') throw new Error('The typesafe.ai key cannot be saved in this host.');
+    const k = typeof key === 'string' ? key.trim() : '';
+    if (k.length < 8 || k.length > 512 || /\s/.test(k)) return { ok: false, error: 'That does not look like a typesafe.ai key.' };
+    context.saveTypesafeKey(k);
+    return embedderView();
+  });
+
+  handle(IPC.HISTORY_JEV_CLEAR_KEY, async () => {
+    if (typeof context.clearTypesafeKey !== 'function') throw new Error('The typesafe.ai key cannot be removed in this host.');
+    context.clearTypesafeKey();
     return embedderView();
   });
 }
