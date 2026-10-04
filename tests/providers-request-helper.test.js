@@ -91,7 +91,10 @@ describe('every provider goes through the helper', () => {
   });
 
   it('every streaming method reads through guardStream', () => {
-    for (const file of providerFiles()) {
+    // typesafe-provider.js answers questions about a state and never streams
+    // a chat; the fetch and listModels guards still cover it.
+    const DECIDE_ONLY = new Set(['typesafe-provider.js']);
+    for (const file of providerFiles().filter((f) => !DECIDE_ONLY.has(f))) {
       const src = fs.readFileSync(path.join(PROVIDERS_DIR, file), 'utf8');
       const streams = (src.match(/async (streamMessage|streamMessageWithTools|_streamResponses)\(/g) || []).length;
       const guarded = (src.match(/this\.guardStream\(/g) || []).length;
