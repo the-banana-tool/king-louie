@@ -33,7 +33,19 @@ describe('reviewSpotChecks', () => {
     assert.match(out.text, /Reference: 18001/);
     assert.match(out.text, /Also accept: port 18001/);
     assert.match(out.text, /Judge: correct - same value/);
-    assert.match(out.text, /Type c, p, i, a, s or q\./);
+    assert.match(out.text, /Type y, c, p, i, a, s or q\./);
+  });
+
+  it('y agrees with the judge: the judge\'s verdict is recorded as the reviewer\'s own', async () => {
+    const saves = [];
+    const out = sink();
+    const counts = await reviewSpotChecks({
+      rows: [row(1, 'abstained'), row(2, 'incorrect')], reviewer: 'TT',
+      input: input(['y', 'y']), output: out, onSave: (rows) => saves.push(rows)
+    });
+    assert.deepStrictEqual(counts, { reviewed: 2, skipped: 0, stopped: false });
+    assert.deepStrictEqual(saves.at(-1).map((r) => [r.humanVerdict, r.reviewer]), [['abstained', 'human:TT'], ['incorrect', 'human:TT']]);
+    assert.match(out.text, /The judge said abstained\. \[y\] agree, or your own verdict:/);
   });
 
   it('skips rows already reviewed, and stops on q or at the end of input', async () => {

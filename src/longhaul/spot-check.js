@@ -40,7 +40,7 @@ async function reviewSpotChecks({ rows, reviewer, input, output, onSave }) {
       const i = pending[n];
       output.write(describeRow(current[i], n + 1, pending.length));
       for (;;) {
-        const cmd = await ask('Your verdict: [c]orrect [p]artial [i]ncorrect [a]bstained  [s]kip  [q]uit > ');
+        const cmd = await ask(`The judge said ${current[i].verdict}. [y] agree, or your own verdict: [c]orrect [p]artial [i]ncorrect [a]bstained  [s]kip  [q]uit > `);
         if (cmd === null || cmd === 'q') {
           counts.stopped = true;
           return counts;
@@ -49,13 +49,15 @@ async function reviewSpotChecks({ rows, reviewer, input, output, onSave }) {
           counts.skipped += 1;
           break;
         }
-        if (KEYS[cmd]) {
-          current[i] = { ...current[i], humanVerdict: KEYS[cmd], reviewer: `human:${reviewer}` };
+        // y records the judge's verdict as the reviewer's own.
+        const verdict = cmd === 'y' ? current[i].verdict : KEYS[cmd];
+        if (verdict) {
+          current[i] = { ...current[i], humanVerdict: verdict, reviewer: `human:${reviewer}` };
           onSave(current);
           counts.reviewed += 1;
           break;
         }
-        output.write('Type c, p, i, a, s or q.\n');
+        output.write('Type y, c, p, i, a, s or q.\n');
       }
     }
     return counts;
