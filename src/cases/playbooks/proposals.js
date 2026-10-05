@@ -339,15 +339,34 @@ async function buildProposal({ name, isNew, base = null, files, knownCaseTypes =
     checkPatch(patch, { newOnly: Boolean(isNew) });
     return { patch, changedFiles, playbook: v.playbook };
   } finally {
-    removeDir(tmpDir);
+    await removeDir(tmpDir);
   }
 }
 
-function removeDir(dir) {
-  try {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  } catch (err) {
-    log.warn('could not remove a temp dir', { dir, error: err.message });
+// A git killed at its timeout (a probe clone) can still hold a file or its
+// cwd in `dir` for a moment on Windows: the run settles when git itself
+// exits, and the real git behind a launcher, or a child of it, goes a little
+// later. rmSync's maxRetries does not cover that: it waits and retries only
+// the final rmdir of a directory, while a locked file inside fails its unlink
+// with EPERM at once. So the whole removal is retried, without blocking the
+// event loop, for up to REMOVE_RETRY_MS. Measured on Windows under parallel
+// load, such a lock cleared within 80 ms.
+const REMOVE_RETRY_MS = 5000;
+const REMOVE_RETRY_DELAY_MS = 25;
+
+async function removeDir(dir) {
+  const deadline = Date.now() + REMOVE_RETRY_MS;
+  for (;;) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      break;
+    } catch (err) {
+      if (Date.now() >= deadline) {
+        log.warn('could not remove a temp dir', { dir, error: err.message });
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, REMOVE_RETRY_DELAY_MS));
+    }
   }
   forgetConfigs(dir);
 }
@@ -712,7 +731,7 @@ async function applyProposalTo({ caseDir, casesRoot, record, repoPath, tmpRoot =
     await applyToOwner(top, ['apply', ...mode, ...dirArgs, '--', patchFile], { killTree: true, timeoutMs }, repoPath, names, rel, doesNotApply);
     return { appliedOver, rel };
   } finally {
-    removeDir(work);
+    await removeDir(work);
   }
 }
 
