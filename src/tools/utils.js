@@ -53,14 +53,28 @@ function normalizeForComparison(value) {
   return path.resolve(value).replace(/\\/g, '/').toLowerCase();
 }
 
+// .native, because on Windows the JS realpathSync resolves links but keeps an
+// 8.3 short name: C:\Users\LONGUS~1\work and C:\Users\longusername\work were
+// two spellings of one folder, so isPathWithin refused a file inside a working
+// directory that had been canonicalized elsewhere with .native (a delegate
+// session's cwd is). A drive the native call cannot resolve (some RAM disks)
+// keeps the JS form, as before; a missing path still throws.
+function realpathOf(p) {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    return fs.realpathSync(p);
+  }
+}
+
 function resolveRealPath(filePath) {
   try {
-    return fs.realpathSync(filePath);
+    return realpathOf(filePath);
   } catch {
     // If the file doesn't exist yet, resolve the parent directory and append the basename
     const dir = path.dirname(filePath);
     try {
-      return path.join(fs.realpathSync(dir), path.basename(filePath));
+      return path.join(realpathOf(dir), path.basename(filePath));
     } catch {
       return path.resolve(filePath);
     }
