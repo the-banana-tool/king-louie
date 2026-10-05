@@ -179,6 +179,12 @@ class AuditLedger {
   // aside file; if it changed, someone re-acquired a fresh lock in the gap
   // between our inspection and our rename, and we restore it (when the path
   // is free) instead of taking over, then back off and let the caller retry.
+  //
+  // On Windows a lock whose holder is unlinking it stays on disk, delete
+  // pending, and opening or renaming it fails with EPERM (or EBUSY/EACCES)
+  // rather than ENOENT: the same race _lock waits out on create. Such a lock
+  // is being released, not abandoned, so it is treated as gone and the
+  // caller retries inside its deadline.
   _breakStaleLock() {
     let st;
     let content;
@@ -186,7 +192,7 @@ class AuditLedger {
       st = fs.statSync(this.lockFile);
       content = fs.readFileSync(this.lockFile, 'utf8');
     } catch (err) {
-      if (err.code === 'ENOENT') return;
+      if (this._lockGone(err)) return;
       log.warn(`failed to inspect ${this.lockFile}`, { error: err.message });
       throw err;
     }
@@ -199,7 +205,7 @@ class AuditLedger {
     try {
       fs.renameSync(this.lockFile, aside);
     } catch (err) {
-      if (err.code === 'ENOENT') return;
+      if (this._lockGone(err)) return;
       log.warn(`failed to rename ${this.lockFile} aside`, { error: err.message });
       throw err;
     }
@@ -223,6 +229,10 @@ class AuditLedger {
     } catch {
       // Already gone.
     }
+  }
+
+  _lockGone(err) {
+    return err.code === 'ENOENT' || (this.platform === 'win32' && WIN32_BUSY_CODES.has(err.code));
   }
 
   // Unlinks the lock only if it still holds the token we wrote when we

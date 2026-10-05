@@ -149,6 +149,51 @@ describe('AuditLedger lock', () => {
     }
   });
 
+  // The same race one step later: the lock existed (EEXIST), and while it is
+  // checked for staleness its holder's unlink is pending. Seen on a Windows
+  // runner as a raw "EPERM: operation not permitted, open '...ledger.lock'"
+  // failing an append when three processes shared the lock.
+  it('on win32 a lock that goes mid-delete while it is checked for staleness is waited out, not thrown', async () => {
+    const realStat = fs.statSync;
+    const realRename = fs.renameSync;
+    try {
+      for (const code of ['EPERM', 'EBUSY', 'EACCES']) {
+        const busy = (p) => Object.assign(new Error(`${code}: operation not permitted, open '${p}'`), { code });
+
+        // Inspecting it: the holder is unlinking it.
+        let dir = tempDir();
+        let lockFile = path.join(dir, 'ledger.lock');
+        let held = true;
+        const lockOpen = (file) => {
+          if (held) throw Object.assign(new Error('EEXIST: file already exists'), { code: 'EEXIST' });
+          return fs.openSync(file, 'wx', 0o600);
+        };
+        fs.statSync = (p, ...rest) => {
+          if (p === lockFile && held) { held = false; throw busy(p); }
+          return realStat(p, ...rest);
+        };
+        assert.equal((await ledger(dir, { platform: 'win32', lockOpen }).append({ kind: 'x', data: { code } })).seq, 1, `${code} on inspect`);
+        fs.statSync = realStat;
+
+        // Renaming a stale lock aside: another process is already removing it.
+        dir = tempDir();
+        lockFile = path.join(dir, 'ledger.lock');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(lockFile, '999999999');
+        let first = true;
+        fs.renameSync = (from, to) => {
+          if (from === lockFile && first) { first = false; fs.unlinkSync(lockFile); throw busy(from); }
+          return realRename(from, to);
+        };
+        assert.equal((await ledger(dir, { platform: 'win32' }).append({ kind: 'x', data: { code } })).seq, 1, `${code} on rename`);
+        fs.renameSync = realRename;
+      }
+    } finally {
+      fs.statSync = realStat;
+      fs.renameSync = realRename;
+    }
+  });
+
   it('elsewhere an EPERM on the lock is not retried, and on win32 it still gives up at the deadline', async () => {
     const eperm = () => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }); };
     await assert.rejects(ledger(tempDir(), { platform: 'linux', lockOpen: eperm }).append({ kind: 'x', data: {} }), (err) => err.code === 'EPERM');
