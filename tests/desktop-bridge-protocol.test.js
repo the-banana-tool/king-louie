@@ -764,8 +764,14 @@ describe('DesktopBridgeClient', () => {
     client.on('state', (s) => states.push(s.status));
     first.dispatcher.handleFrame = async () => {};
     const pending = client.invoke('chat:load', []);
+    // The handler goes on before the server stops. Stopping it closes the
+    // socket, and _onDisconnected rejects every pending call; when that close
+    // lands inside stop()'s own await (a loaded machine does this) the
+    // rejection would otherwise reach a promise nobody is watching yet, and
+    // node:test fails the test on the unhandledRejection.
+    const rejected = assert.rejects(pending, (err) => err.code === 'SERVICE_UNREACHABLE');
     await first.server.stop();
-    await assert.rejects(pending, (err) => err.code === 'SERVICE_UNREACHABLE');
+    await rejected;
     const second = await startServer({ devices: [device] });
     currentPort = second.port;
     await new Promise((resolve) => { const check = () => (client.connected ? resolve() : setTimeout(check, 10)); check(); });
