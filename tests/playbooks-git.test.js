@@ -643,10 +643,12 @@ describe('checked-out submodules', () => {
     await git.git(parent, ['status', '--porcelain']);
     await git.git(parent, ['status', '--porcelain']); // cached with no gitlinks
     // The gitlink is recorded as "subz" (flags length 4), then its NUL padding
-    // is filled with "zzzzz". Git copies the byte after the 4 name bytes as the
-    // terminator and so uses the path "subzz", where the planted repository
-    // is; a NUL search reads "subzzzzzz", a path that does not exist, and
-    // would key the index as having no checked-out submodule.
+    // is filled with "zzzzz". git copies the byte after the 4 name bytes as the
+    // terminator and reads on into whatever memory follows: often "subzz",
+    // where the planted repository is, but not always (a Windows runner read
+    // "subzzry\perl\site\bi3"), so a check that asks git which submodules
+    // exist can get a different answer from the command it guards. The index
+    // is refused outright, whatever git would read.
     const sha = await nestedRepo(parent, 'subzz');
     const marker = path.join(parent, 'padded-filter-ran');
     plantSubFilter(path.join(parent, 'subzz'), marker);
@@ -660,11 +662,16 @@ describe('checked-out submodules', () => {
     require('crypto').createHash('sha1').update(buf.subarray(0, buf.length - 20)).digest().copy(buf, buf.length - 20);
     fs.writeFileSync(indexFile, buf);
     const listed = spawnGit(parent, ['ls-files', '--stage']);
-    assert.strictEqual(listed.status, 0, listed.stderr);
-    assert.match(listed.stdout, /^160000 [0-9a-f]+ 0\tsubzz$/m, 'git reads the gitlink as subzz');
-    await assert.rejects(git.git(parent, ['status', '--porcelain']), refusedFor('subzz'));
-    await assert.rejects(git.git(parent, ['status', '--porcelain']), refusedFor('subzz')); // not cached either
-    assert.throws(() => git.runGitSync(parent, ['status', '--porcelain']), refusedFor('subzz'));
+    assert.strictEqual(listed.status, 0, `git accepts the index: ${listed.stderr}`);
+    const ambiguous = (err) => {
+      assert.strictEqual(err.code, 'GIT_UNSAFE_CONFIG');
+      assert.strictEqual(err.submodule, null);
+      assert.match(err.message, /its index has an entry \("subz"\) whose name does not end where its length says/);
+      return true;
+    };
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), ambiguous);
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), ambiguous); // not cached either
+    assert.throws(() => git.runGitSync(parent, ['status', '--porcelain']), ambiguous);
     assert.strictEqual(fs.existsSync(marker), false, 'the filter behind the padded name never ran');
   });
 

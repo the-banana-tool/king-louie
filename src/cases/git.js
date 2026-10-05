@@ -296,10 +296,11 @@ function isPlainDir(p) {
   }
 }
 
-// The paths of gitlink (mode 160000) entries in a git index file, [] when
-// there is no index, or null when the file can't be read with certainty
-// (unknown version, split or sparse index, truncated, or any entry that git
-// could read differently from this parser).
+// A git index file read for its gitlink (mode 160000) entries:
+// { links } (none when there is no index), { ambiguous: name } for an entry
+// git could read as a different path than its length gives, or null when the
+// file can't be read with certainty for any other reason (unknown version,
+// split or sparse index, truncated).
 //
 // Names are read the way git reads them (read-cache.c, create_from_disk):
 // the length comes from the entry's flags (flags & 0xfff), and only a name of
@@ -307,17 +308,29 @@ function isPlainDir(p) {
 // covers the whole name, of which the entry stores only the suffix after the
 // prefix it shares with the previous name. The entry size comes from that
 // length, never from where a NUL happens to be, so a name must end in a NUL
-// exactly where its length says: an index whose padding hides a longer
-// "name" (git reads "subz", a NUL search would read "subzzzzzz") is refused.
+// exactly where its length says.
+//
+// git does not check that. It copies the name with the byte at its length as
+// the terminator, so for a name that does not end there (padding that hides
+// a longer "name", subz then zzzzz) it reads on into whatever memory follows,
+// and two git processes can read the one entry as different paths: on a
+// Windows runner one read "subzz" and the next "subzzry\perl\site\bi3". No
+// check that asks git can be trusted for such an index, so it is
+// `ambiguous`, and repoChecks refuses the repository.
 const INDEX_NAME_MASK = 0xfff;
 const INDEX_MAX_NAME_BYTES = 64 * 1024 * 1024;
 
 function indexGitlinks(indexFile, hashLen) {
+  const read = readIndex(indexFile, hashLen);
+  return read && read.links ? read.links : null;
+}
+
+function readIndex(indexFile, hashLen) {
   let buf;
   try {
     buf = fs.readFileSync(indexFile);
   } catch (err) {
-    return err.code === 'ENOENT' ? [] : null;
+    return err.code === 'ENOENT' ? { links: [] } : null;
   }
   if (buf.length < 12 + hashLen || buf.toString('latin1', 0, 4) !== 'DIRC') return null;
   const version = buf.readUInt32BE(4);
@@ -360,11 +373,13 @@ function indexGitlinks(indexFile, hashLen) {
     }
     let nameLen = flags & INDEX_NAME_MASK;
     const nul = buf.indexOf(0, p);
-    if (nul < 0 || nul >= entriesEnd) return null;
+    // The name as its length gives it, for the refusal.
+    const asFlagsSay = () => Buffer.concat([prev.subarray(0, copyLen), buf.subarray(p, Math.min(entriesEnd, p + Math.max(0, nameLen - copyLen)))]).toString('utf8');
+    if (nul < 0 || nul >= entriesEnd) return { ambiguous: asFlagsSay() };
     if (nameLen === INDEX_NAME_MASK) {
       nameLen = (nul - p) + copyLen;
     } else if (nameLen < copyLen || nul !== p + (nameLen - copyLen)) {
-      return null;
+      return { ambiguous: asFlagsSay() };
     }
     const suffixLen = nameLen - copyLen;
     const name = version === 4
@@ -387,7 +402,20 @@ function indexGitlinks(indexFile, hashLen) {
     if (sig === 'link' || sig === 'sdir') return null;
     off += 8 + buf.readUInt32BE(off + 4);
   }
-  return [...links].sort();
+  return { links: [...links].sort() };
+}
+
+// The name of an entry in the index at dirs.gitDir that git could read as a
+// different path (readIndex), or null.
+function ambiguousIndexName(dirs) {
+  let hashLen = 20;
+  try {
+    if (/objectformat\s*=\s*sha256/i.test(fs.readFileSync(path.join(dirs.commonDir, 'config'), 'utf8'))) hashLen = 32;
+  } catch {
+    // git found this repository a moment ago; read the index as SHA-1.
+  }
+  const read = readIndex(path.join(dirs.gitDir, 'index'), hashLen);
+  return read && typeof read.ambiguous === 'string' ? read.ambiguous : null;
 }
 
 // The git dir a submodule's .git leads to: the directory itself, or the
@@ -518,6 +546,14 @@ function* repoChecks(root, cwd, depth, label) {
   // git is concerned: git found the enclosing repository, already checked.
   if (depth > 0 && !(dirs && samePath(dirs.top, cwd))) return { repo: false };
   if (!dirs) return { repo: true, dirs: null, subs: [] };
+  // Before git is asked which submodules there are: for an ambiguous entry
+  // its answer can differ from what the command after this check reads.
+  const ambiguous = ambiguousIndexName(dirs);
+  if (ambiguous !== null) {
+    const whose = label ? `its submodule ${label} has an index entry` : 'its index has an entry';
+    const message = `Refusing to run git in ${root}: ${whose} (${JSON.stringify(ambiguous.slice(0, 200))}) whose name does not end where its length says, so git can read it as a different path from one run to the next.`;
+    throw codedError(message, 'GIT_UNSAFE_CONFIG', { keys: [], submodule: label || null, firstLine: message });
+  }
   const subs = [];
   for (const rel of parseGitlinks(root, yield { cwd: dirs.top, args: GITLINKS_QUERY })) {
     const subTree = path.join(dirs.top, ...rel.split('/'));

@@ -980,7 +980,9 @@ plain copy into `<case>/playbooks/<name>/`, recorded in `case.yaml.playbooks[]` 
   package. Case types come only through `case-types-bridge.js` (C5's registry or its stand-in).
 - Git for playbooks runs through `runGit` / `runGitSync` in `src/cases/git.js` (hardened `-c` flags
   including `core.fsmonitor=false`, the checked empty hooks dir outside every case, no prompts, 60 s
-  timeout; a repo whose own config defines drivers or commands is refused with `GIT_UNSAFE_CONFIG`).
+  timeout; a repo whose own config defines drivers or commands is refused with `GIT_UNSAFE_CONFIG`, and
+  so is an index entry whose name does not end where its length says: git reads past such a name, so
+  two git runs can see different paths and asking git which submodules exist cannot be trusted).
   Versions compare with `compareVersions`; there is no `semver`.
 - Mutations (attach, adopt, update, remove, proposals) do network and temp-dir work first, then one
   `runtime.systemAction` (applying a proposal runs its git work inside it, so a race applies once).
