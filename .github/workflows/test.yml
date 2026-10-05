@@ -11,6 +11,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # 22 is the floor package.json engines promises (king-louie-service
+        # runs on the system Node); 24 is what Electron 41 bundles, so it is
+        # the runtime the desktop app actually ships on.
+        node: [22, 24]
+    name: unit (${{ matrix.os }}, node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
@@ -18,10 +23,43 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm test
+      # Diagnostic only (never fails the job): tests/mesh-hardening.test.js
+      # dies with SIGABRT on macOS, deterministically, inside 'an attacker
+      # holding 8 sockets on the same address cannot keep a valid peer out',
+      # and passes on Linux and Windows. `node --test` discards a child's
+      # stderr when the child dies on a signal, so the abort message reaches
+      # no log — this runs the file directly instead, which keeps stderr, and
+      # asks for a diagnostic report on the fatal error. Delete this step
+      # once the crash is understood.
+      - name: Diagnose the mesh-hardening abort (macOS)
+        if: always() && runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/mesh-diag"
+          { echo "node: $(node -v)"; echo "arch: $(uname -m)"; echo "open files (ulimit -n): $(ulimit -n)";
+            echo "--- lo0 aliases (127.0.0.2-9 are not configured on macOS by default):";
+            ifconfig lo0 || true; } > "$RUNNER_TEMP/mesh-diag/env.txt" 2>&1
+          set +e
+          node --report-on-fatalerror --report-uncaught-exception \
+               --report-directory="$RUNNER_TEMP/mesh-diag" \
+               tests/mesh-hardening.test.js > "$RUNNER_TEMP/mesh-diag/run.log" 2>&1
+          echo "exit=$? (0 means it did not reproduce this run)" | tee -a "$RUNNER_TEMP/mesh-diag/run.log"
+          set -e
+          # Whatever the kernel wrote for the abort, if anything.
+          cp ~/Library/Logs/DiagnosticReports/node*.ips "$RUNNER_TEMP/mesh-diag/" 2>/dev/null || true
+          tail -40 "$RUNNER_TEMP/mesh-diag/run.log"
+      - name: Upload the mesh-hardening diagnostics
+        if: always() && runner.os == 'macOS'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-diag-node${{ matrix.node }}
+          path: ${{ runner.temp }}/mesh-diag
+          if-no-files-found: warn
       - run: node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle
         env:
           LONGHAUL_HOME: ${{ runner.temp }}/longhaul

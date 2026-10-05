@@ -22,7 +22,10 @@ const { writePackage, makeGitPackage, PLAYBOOK_YAML, STEPS_MD, withYaml } = requ
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
-const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-pbipc-')); dirs.push(d); return d; };
+// Resolved like playbooks-manager's: on macOS os.tmpdir() is under /var, a
+// symlink to /private/var, and a recorded `path:` source that goes through a
+// link is refused (SOURCE_NEEDS_CONFIRM) however the owner answers.
+const tmp = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-pbipc-'))); dirs.push(d); return d; };
 const U = (o) => ({ ...o, untrustedText: true });
 
 const CHANNELS = {

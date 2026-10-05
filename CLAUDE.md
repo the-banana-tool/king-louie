@@ -19,6 +19,18 @@ When iterating on a specific module, run just its test file directly with
 `node --test`. Output uses TAP format; look for `# fail 0` / `# pass N` in the
 summary block.
 
+`--test-timeout` is 600000 because on Node 22 it bounds the **whole file**, not
+just each test: node wraps each file in a test of its own, so a file whose
+tests are all fast still fails `testTimeoutFailure` at `<file>:1:1` once its
+total runtime passes the limit. Several case and ingest suites run 85-110 s
+here and about 2.5x that on Windows CI, so a 120 s limit failed them. Node 24
+(what Electron 41 bundles) does not bound the file wrapper, so this only ever
+shows up on the Node 22 CI leg — the matrix runs both. A file-level timeout is
+a slow file or a leaked handle, never a slow single test; `node --test` keeps
+running until the loop drains, so an unclosed core, child process or server
+hangs the file long after the last test passes. Cores built in a test get
+`await core.shutdown()`.
+
 `npm run test:e2e` launches the real Electron binary through Playwright's
 `_electron` (`tests/e2e/helpers.js`). Every launch gets its own temporary
 `--user-data-dir` (the helper throws `userData isolation failed` otherwise), so

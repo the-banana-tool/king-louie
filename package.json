@@ -12,7 +12,7 @@
   },
   "scripts": {
     "start": "electron .",
-    "test": "node --test --test-timeout=120000 tests/*.test.js",
+    "test": "node --test --test-timeout=600000 tests/*.test.js",
     "test:e2e": "node --test --test-concurrency=1 --test-timeout=120000 tests/e2e/*.test.js",
     "test:watch": "node --test --watch",
     "models:snapshot": "node scripts/models-snapshot.js",

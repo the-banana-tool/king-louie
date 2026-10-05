@@ -138,6 +138,9 @@ describe('openPdf (isolated)', () => {
       if (process.platform === 'win32') {
         for (const k of ['HOMEDRIVE', 'HOMEPATH', 'LOGONSERVER', 'PATH', 'SYSTEMDRIVE', 'TEMP', 'USERDOMAIN', 'USERNAME', 'USERPROFILE', 'WINDIR']) allowed.add(k);
       }
+      // CoreFoundation adds this to every process it starts on macOS; it is
+      // the user's text encoding ("0x1F5:0x0:0x0"), not a credential.
+      if (process.platform === 'darwin') allowed.add('__CF_USER_TEXT_ENCODING');
       assert.deepStrictEqual(Object.keys(opts.env).sort(), ['ELECTRON_RUN_AS_NODE', 'KL_PDF_WORKER_TEST_HOOKS', ...(process.env.SYSTEMROOT ? ['SYSTEMROOT'] : [])]);
       assert.ok(!keys.includes('KL_SANDBOX_TEST_SECRET'));
       assert.deepStrictEqual(keys.filter((k) => !allowed.has(k.toUpperCase())), []);

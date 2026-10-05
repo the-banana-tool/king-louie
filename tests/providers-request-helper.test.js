@@ -43,8 +43,16 @@ describe('BaseLLMProvider.request', () => {
   });
 
   it('surfaces an AbortSignal.timeout() as a timeout, not a bare "aborted" message', async () => {
+    // AbortSignal.timeout()'s own timer is unref'd, so it cannot hold the
+    // event loop open: with nothing else pending the loop drains and this
+    // await never settles ("Promise resolution is still pending but the event
+    // loop has already resolved", which cancels the rest of the file). A
+    // ref'd timer alongside it keeps the loop alive, and the 1 ms timer still
+    // fires first.
     const signal = AbortSignal.timeout(1);
+    const hold = setTimeout(() => {}, 30_000);
     await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+    clearTimeout(hold);
     globalThis.fetch = async (_url, init) => { throw init.signal.reason; };
     const p = new GroqProvider('test-key-123456', { catalog: fixtureCatalog() });
     await assert.rejects(p.request('http://127.0.0.1:9/x', {}, { abortSignal: signal, model: 'llama-3.3-70b' }), (err) => {

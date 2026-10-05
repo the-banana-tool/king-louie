@@ -17,18 +17,25 @@ const { getActiveCatalog, setActiveCatalog, CATALOG_DEFAULTS } = require('../src
 const { setLogLevel } = require('../src/logging');
 const { profileSettings } = require('./helpers/profile-settings');
 const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
+const { FakeEmbedRunner } = require('./helpers/fake-embed-runner');
 
 // One case here deliberately fails a connection test (a bad key); silence
 // the resulting warning so TAP output stays clean.
 setLogLevel('fatal');
 
 const tempDirs = [];
+const cores = [];
 const originalFetch = globalThis.fetch;
 const originalTestMode = process.env.KL_TEST_MODE;
-afterEach(() => {
+// Every core this file builds is shut down here: 'background checks refresh
+// the catalog' runs with KL_TEST_MODE off, so startBackgroundChecks reaches
+// startHistoryEmbedding and starts the embedder host. Left running, its embed
+// worker keeps the process alive and the whole file times out.
+afterEach(async () => {
   globalThis.fetch = originalFetch;
   if (originalTestMode === undefined) delete process.env.KL_TEST_MODE;
   else process.env.KL_TEST_MODE = originalTestMode;
+  while (cores.length) await cores.pop().shutdown();
   setActiveCatalog(null);
   closeOpenHistoryStores();
   while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
@@ -49,8 +56,12 @@ function makeCore(extra = {}) {
     builtinSkillsDir: path.join(__dirname, '..', 'skills'),
     features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
     fetch: async (url) => { throw new Error(`no network in unit tests (${url})`); },
+    // No test here loads a model: the embedder host gets the in-process fake
+    // runner, never a child process that would download one.
+    history: { createEmbedRunner: () => new FakeEmbedRunner() },
     ...extra
   });
+  cores.push(core);
   return { core, store, sent, dataDir };
 }
 
