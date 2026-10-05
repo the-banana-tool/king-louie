@@ -704,7 +704,8 @@ function ProtectFile($p, $rules) {
   foreach ($r in $rules) { $a.AddAccessRule($r) }
   [IO.File]::SetAccessControl($p, $a)
 }
-function Invoke-Try($block) { try { & $block; $null } catch { $_.Exception.Message } }
+# $null on success, whatever the block returns (Resolve-KlBase returns its path).
+function Invoke-Try($block) { try { $null = & $block; $null } catch { $_.Exception.Message } }
 `;
     function runWalk(root, body) {
       const file = path.join(root, 'harness.ps1');
