@@ -16,6 +16,7 @@ const { RunbookEngine } = require('../src/runbooks/runbook-engine');
 const { isPathUnderRoots } = require('../src/platform/path-roots');
 const { windowsPowerShellExe } = require('../src/platform/windows-paths');
 const { ALLOWED_HOSTS, scanForPersonalValues } = require('./helpers/example-denylist');
+const { windowsPowerShellEnv } = require('./helpers/windows-powershell-env');
 
 const ROOT = path.join(__dirname, '..');
 const EXAMPLES = path.join(ROOT, 'examples');
@@ -27,7 +28,9 @@ const POSIX = process.platform !== 'win32';
 const temps = [];
 after(() => { for (const d of temps) fs.rmSync(d, { recursive: true, force: true }); });
 function tmp() {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-examples-'));
+  // .native expands an 8.3 short TEMP (a Windows runner's C:\Users\RUNNER~1),
+  // as the ACL example script does when it resolves a path it names.
+  const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-examples-')));
   temps.push(d);
   return d;
 }
@@ -708,7 +711,8 @@ function Invoke-Try($block) { try { & $block; $null } catch { $_.Exception.Messa
       fs.writeFileSync(file, `${PRELUDE}\n${body}\n`);
       const r = spawnSync(windowsPowerShellExe(), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], {
         encoding: 'utf8',
-        env: { ...process.env, KL_ACL_SCRIPT: SCRIPT, KL_ACL_ROOT: root },
+        // The prelude and the bodies call Get-Acl: see windows-powershell-env.js.
+        env: windowsPowerShellEnv({ KL_ACL_SCRIPT: SCRIPT, KL_ACL_ROOT: root }),
       });
       assert.equal(r.status, 0, `powershell failed:\n${r.stdout}\n${r.stderr}`);
       return JSON.parse(r.stdout.trim().split(/\r?\n/).pop());

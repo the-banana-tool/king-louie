@@ -31,6 +31,26 @@ running until the loop drains, so an unclosed core, child process or server
 hangs the file long after the last test passes. Cores built in a test get
 `await core.shutdown()`.
 
+The same drain runs the other way: a test that awaits an **unref'd** timer
+(`withTimeout`, `AbortSignal.timeout()`) against a promise nothing else
+settles has nothing holding the loop open, so node exits the file mid-await
+("Promise resolution is still pending but the event loop has already
+resolved") and cancels every test after it. Keep a ref'd `setTimeout` alive
+across that await.
+
+A Windows CI runner differs from a dev box in two ways tests must survive:
+- Steps run under pwsh 7, whose `PSModulePath` reaches any node-spawned
+  `powershell.exe` (5.1) and breaks its `Microsoft.PowerShell.Security`
+  cmdlets (`Get-Acl` "could not be loaded", exit code still 0). `src/`
+  avoids those cmdlets; a test that needs one spawns with
+  `tests/helpers/windows-powershell-env.js`.
+- `TEMP` is an 8.3 short path (`C:\Users\RUNNER~1\...`). Compare paths
+  through `fs.realpathSync.native`, which expands it; the JS `realpathSync`
+  resolves links but keeps the short name.
+
+To reproduce both, run the suite from pwsh with `TEMP`/`TMP` pointed at the
+short name of a long-named folder (`cmd /c for %I in ("<dir>") do @echo %~sI`).
+
 `npm run test:e2e` launches the real Electron binary through Playwright's
 `_electron` (`tests/e2e/helpers.js`). Every launch gets its own temporary
 `--user-data-dir` (the helper throws `userData isolation failed` otherwise), so

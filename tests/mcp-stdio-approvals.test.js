@@ -19,7 +19,10 @@ const cleanups = [];
 after(() => { for (const c of cleanups.reverse()) c(); });
 
 function sandbox() {
-  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-mcp-approvals-')));
+  // .native: on Windows the JS realpathSync resolves links but keeps an 8.3
+  // short name (a runner's TEMP is C:\Users\RUNNER~1\...), while the runbook
+  // canonicalizes its target to the long name the approver signs.
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-mcp-approvals-')));
   cleanups.push(() => fs.rmSync(base, { recursive: true, force: true }));
   const root = path.join(base, 'root');
   for (const d of ['a', 'b']) fs.mkdirSync(path.join(root, d), { recursive: true });

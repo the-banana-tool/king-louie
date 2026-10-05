@@ -13,6 +13,7 @@ const { assertAdminOwned } = require('../src/service/config');
 const { PassThrough, Readable } = require('stream');
 const { runDesktopCommand, grantDirectoryReadControl, applyWindowsAcls, defaultConfirm, PAIR_WARNING } = require('../src/service/commands/desktop');
 const { main, parseArgs } = require('../src/service/cli');
+const { windowsPowerShellEnv } = require('./helpers/windows-powershell-env');
 
 const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
 const dirs = [];
@@ -460,7 +461,7 @@ describe('Windows ACE for the bridge-file directory (R56)', { skip: process.plat
     dirs.push(dir);
     grantDirectoryReadControl(dir);
     const script = "(Get-Acl -LiteralPath $env:KL_ACE_DIR).Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-11' -and -not $_.IsInherited } | ForEach-Object { \"$($_.FileSystemRights)|$($_.InheritanceFlags)\" }";
-    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, KL_ACE_DIR: dir }, encoding: 'utf8' }).trim();
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: windowsPowerShellEnv({ KL_ACE_DIR: dir }), encoding: 'utf8' }).trim();
     assert.match(out, /ReadAttributes/);
     assert.match(out, /ReadPermissions/);
     assert.match(out, /\|None$/m, 'no inheritance flags');

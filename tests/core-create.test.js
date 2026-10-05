@@ -232,7 +232,14 @@ describe('withTimeout', () => {
 
   it('resolves with TIMED_OUT and reports the label after the deadline', async () => {
     const seen = [];
+    // withTimeout unrefs its timer on purpose, and this promise never
+    // settles, so nothing here holds the event loop open: without a ref'd
+    // timer alongside, the loop drains before the 20 ms deadline fires and
+    // node:test cancels the rest of the file ("the event loop has already
+    // resolved"). The 20 ms timer still fires first.
+    const hold = setTimeout(() => {}, 30_000);
     const result = await withTimeout(new Promise(() => {}), 20, 'slow step', (label, ms) => seen.push([label, ms]));
+    clearTimeout(hold);
     assert.strictEqual(result, TIMED_OUT);
     assert.deepStrictEqual(seen, [['slow step', 20]]);
   });
