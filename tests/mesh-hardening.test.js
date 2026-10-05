@@ -3,6 +3,7 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const { once, EventEmitter } = require('events');
+const net = require('net');
 const WebSocket = require('ws');
 const { MeshIdentity } = require('../src/mesh/mesh-identity');
 const { MeshTransport, CLOSE_CODES, PRE_AUTH_MAX_BYTES, MAX_PAYLOAD_BYTES } = require('../src/mesh/mesh-transport');
@@ -13,6 +14,18 @@ const { setLogLevel } = require('../src/logging');
 setLogLevel('fatal');
 const cleanups = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()().catch(() => {}); });
+
+// Linux and Windows treat every 127.0.0.0/8 address as local; macOS puts only
+// 127.0.0.1 on lo0, so binding a client to 127.0.0.2 there fails with
+// EADDRNOTAVAIL. A test that needs several loopback source addresses asks
+// first and skips rather than dialling an address that can never connect.
+function loopbackAliasAvailable(address = '127.0.0.2') {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', () => resolve(false));
+    probe.listen(0, address, () => probe.close(() => resolve(true)));
+  });
+}
 
 async function waitFor(fn, what, ms = 5000) {
   const until = Date.now() + ms;
@@ -149,7 +162,9 @@ describe('frame limits and auth before parse', () => {
     for (const ws of held) ws.terminate();
   });
 
-  it('churn at the global cap from other addresses cannot keep a valid peer out', async () => {
+  it('churn at the global cap from other addresses cannot keep a valid peer out', async (t) => {
+    // Needs 127.0.0.2-9 as client source addresses; macOS has only 127.0.0.1.
+    if (!(await loopbackAliasAvailable())) return t.skip('127.0.0.2-9 are not configured on this host');
     const a = await listener();
     let stop = false;
     let opened = 0;
@@ -161,9 +176,14 @@ describe('frame limits and auth before parse', () => {
       if (stop) return;
       const ws = new WebSocket(`ws://127.0.0.1:${a.port}`, { localAddress });
       live.add(ws);
+      let established = false;
       ws.on('error', () => {});
-      ws.on('open', () => { opened += 1; });
-      ws.on('close', () => { live.delete(ws); hold(localAddress); });
+      ws.on('open', () => { established = true; opened += 1; });
+      // Only a socket that was actually open is replaced. A socket that never
+      // connected (a source address that cannot be bound) would otherwise be
+      // re-dialled the instant it failed, and that tight loop exhausts the
+      // heap and aborts the process instead of failing the test.
+      ws.on('close', () => { live.delete(ws); if (established) hold(localAddress); });
     };
     for (let ip = 2; ip <= 9; ip += 1) for (let i = 0; i < 8; i += 1) hold(`127.0.0.${ip}`);
     await waitFor(() => a.unauth.size === 64, 'the global cap to fill');
