@@ -127,8 +127,12 @@ describe('the phone claims by the typed code, then decides', () => {
     assert.deepEqual(deny.body, { state: 'denied' });
     assert.equal(p.status, 'denied');
     assert.equal(t.grants.get(p.grant_id), null);
+    // Each lookup gets its own query string: two signed GETs of the same path
+    // in the same millisecond share a signed string, and the second is a
+    // replay (401 before the device bucket is charged), which would leave the
+    // bucket one short and make the last call a 404 instead of the 429.
     let last;
-    for (let i = 0; i < 9; i += 1) last = await t.call(A, 'GET', '/v1/grants/pending?user_code=ZZZZZZ');
+    for (let i = 0; i < 9; i += 1) last = await t.call(A, 'GET', `/v1/grants/pending?user_code=ZZZZZ${i}`);
     assert.equal(last.status, 429, 'the 11th lookup in a minute from one device is refused');
   });
 

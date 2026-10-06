@@ -129,7 +129,9 @@ describe('CaseRuntime', () => {
   });
 
   it('an owner turn preempts an in-process wake-up: it aborts it, waits, and proceeds (F6)', async () => {
-    const rt = new CaseRuntime({ root: tmp(), wakeupPreemptTimeoutMs: 2000 });
+    // The wait ends as soon as the aborted wake-up's endTurn (a git commit)
+    // releases the lock; the bound only has to outlast a slow CI runner.
+    const rt = new CaseRuntime({ root: tmp(), wakeupPreemptTimeoutMs: 30000 });
     const info = await rt.createCase({ title: 'Lot' });
     const wake = await rt.beginTurn(info.id, { turnId: 'wakeup-1', source: 'wakeup' });
     // Stands in for turn-runner.js noticing the abort and ending the turn,
