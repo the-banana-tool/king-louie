@@ -594,8 +594,11 @@ The owner's private set: four real sessions (0.17M to 2.5M estimated tokens),
 138 verified questions (103 answerable, 35 `abstain`). Numbers only; nothing
 from the sessions is in this section. One question is about 0.01 of a rate,
 so differences under 0.02 are noise. The judge is `anthropic/claude-haiku-4-5`
-in both tiers; its 10% samples have not been spot-checked by a human yet, so
-every accuracy below is provisional on that agreement figure. Report
+in both tiers; the owner reviewed its samples on 2026-10-06 (96 of 96 grid
+judgments and 63 of 63 frontier judgments) and agreed with every verdict,
+so the accuracies below stand. Two of the judge's `incorrect` verdicts were
+strict on form (a thousands separator in a byte count, a folder path before a
+file name) and were kept as the owner's own verdicts too. Report
 `b3-2026-10` in `LONGHAUL_HOME/reports/` holds the full tables.
 
 Grid tier, `openai/gpt-6-luna` answers (not open-weight: no key for the
