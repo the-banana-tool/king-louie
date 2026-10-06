@@ -18,6 +18,7 @@ const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { mergeHistorySettings } = require('../src/history/settings');
+const { searchHistoryExcerpts } = require('../src/history/search');
 const TypesafeProvider = require('../src/providers/typesafe-provider');
 const vaultTool = require('../src/tools/builtin/vault-tool');
 
@@ -141,7 +142,7 @@ describe('createCore with the hosted reranker', () => {
     assert.strictEqual(ctx.getJevReranker().status().state, 'not-started');
   });
 
-  it('a case chat goes through the Jev dispatch like any other chat (case chats included)', async () => {
+  it('a case chat is never reranked by Jev: rerankSkipped case-chat, nothing sent (per turn and SearchHistory)', async () => {
     const core = createCore(makeDeps());
     await core.start();
     const ctx = core.context;
@@ -156,8 +157,15 @@ describe('createCore with the hosted reranker', () => {
       ctx.startHistoryEmbedding();
       const n0 = server.requests.length;
       const built = await ask(ctx);
-      assert.strictEqual(built.stats.reranker, 'jev:jev-1.13.0');
-      assert.ok(server.requests.length > n0, 'the case chat\'s excerpts went to typesafe.ai');
+      assert.strictEqual(built.stats.reranker, null);
+      assert.strictEqual(built.stats.rerankSkipped, 'case-chat');
+      const out = await searchHistoryExcerpts({
+        store: ctx.getHistoryStore(), retriever: ctx.getHistoryRetriever(), chatId: 'c1', query: 'canopic jar', limit: 10,
+        settings: jevHistory().recall, reranker: ctx.getHistoryReranker()
+      });
+      assert.ok(out.length >= 1);
+      assert.strictEqual(server.requests.length, n0, 'nothing from the case chat reached typesafe.ai');
+      assert.strictEqual(ctx.getJevReranker().status().state, 'ready', 'a skip is not a failure');
     } finally {
       await core.shutdown();
     }

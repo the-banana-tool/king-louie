@@ -3,6 +3,7 @@
 // without the budget step (spec §8); the recall line's drawer shows the
 // excerpts one reply was given (§7).
 const { formatExcerpts } = require('./excerpts');
+const { caseIdOf } = require('./reranker');
 const { createLogger } = require('../logging');
 
 const log = createLogger('history-search');
@@ -16,7 +17,8 @@ async function searchHistoryExcerpts({ store, retriever, chatId, query, kinds = 
   const useRerank = Boolean(reranker && rr && rr.search);
   const s = useRerank ? { ...settings, rerank: { ...rr, enabled: true, maxMs: rr.searchMaxMs } } : settings;
   const hits = await retriever.retrieve({
-    query, chatIds: [chatId], kinds, budgetTokens: null, settings: s, now: asOf, reranker: useRerank ? reranker : null
+    query, chatIds: [chatId], kinds, budgetTokens: null, settings: s, now: asOf, reranker: useRerank ? reranker : null,
+    caseId: useRerank ? caseIdOf(store, chatId) : null
   });
   const chunks = hits.map((h) => h.chunk);
   const chunkCounts = store.messageChunkCounts([...new Set(chunks.map((c) => c.messageId))]);

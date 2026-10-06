@@ -27,8 +27,8 @@ function openTempStore(options = {}) {
 }
 
 // messages: [{ sender, text, ...metadata }]; ids `${id}-m1`…, one minute apart.
-function seedChat(store, { id = 'chat-1', title = 'Test chat', messages = [], startMinute = 0, stepMinutes = 1 } = {}) {
-  store.createChat({ id, title, createdAt: isoAt(startMinute), updatedAt: isoAt(startMinute), messages: [] });
+function seedChat(store, { id = 'chat-1', title = 'Test chat', caseId = null, messages = [], startMinute = 0, stepMinutes = 1 } = {}) {
+  store.createChat({ id, title, ...(caseId ? { caseId } : {}), createdAt: isoAt(startMinute), updatedAt: isoAt(startMinute), messages: [] });
   return messages.map((m, i) => {
     const message = { ...m, id: m.id || `${id}-m${i + 1}`, timestamp: m.timestamp || isoAt(startMinute + i * stepMinutes) };
     return store.appendMessage(id, message, { updatedAt: message.timestamp }).seq;

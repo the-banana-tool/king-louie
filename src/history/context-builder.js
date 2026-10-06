@@ -6,6 +6,7 @@
 const { mergeHistorySettings } = require('./settings');
 const { toolUseSummary, toolResultText } = require('./chunker');
 const { formatExcerpts, formatRecalledBlock } = require('./excerpts');
+const { caseIdOf } = require('./reranker');
 
 const PAGE = 200;
 // Tool results in the tail's span are read newest first, TAIL_RESULT_PAGE
@@ -44,6 +45,7 @@ class ContextBuilder {
   // vectorHits / lexical pass through to Retriever#retrieve (a caller that
   // ranks by vector itself: LongHaul's kl-recall-vec).
   // reranker, when given, is used by spec §6.3 step 6 for this build only.
+  // The chat's caseId goes to the reranker (Jev never reranks a case chat).
   async build({ chatId, message = '', model = null, upToSeq = null, vectorHits = null, lexical = true, reranker = null, vectorOf = null } = {}) {
     const id = String(chatId || '');
     const { recall } = mergeHistorySettings((this.getSettings() || {}).history);
@@ -81,6 +83,7 @@ class ContextBuilder {
         lexical,
         reranker,
         vectorOf,
+        caseId: caseIdOf(this.store, id),
         stats: retrieval
       });
       if (hits.length) {

@@ -242,8 +242,10 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   typesafe.ai's hosted Jev, opt-in (the pane's "Allow sending to typesafe.ai"
   box; `history:embedder.save` refuses any save with `jev` chosen without
   `confirmJev`, and a change of kind or Jev model resets `JevReranker`). It
-  sends the query and about 100 chunks per rerank, in every chat, case chats
-  included. One client, `TypesafeProvider` (decide-only: not registered, not
+  sends the query and about 100 chunks per rerank, in every chat but a case
+  chat: a chat with a `caseId` is never sent and not reranked at all (owner
+  decision 2026-10-06, per turn and `SearchHistory`; the fused order,
+  `reranker: null`, `rerankSkipped: 'case-chat'`, no warning). One client, `TypesafeProvider` (decide-only: not registered, not
   in the catalog, unpriced), and one scorer, `src/history/jev-rerank.js`,
   shared with LongHaul. `JevReranker` starts only from
   `startHistoryEmbedding` and refuses under `KL_TEST_MODE`; a failure keeps

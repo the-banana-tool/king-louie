@@ -11,6 +11,9 @@
 //   RERANK_UNAVAILABLE    no reranker yet: the EmbedderHost has not started
 //                         (KL_TEST_MODE, e2e, before the background checks);
 //                         the Retriever keeps the fused order without a warning
+//   RERANK_SKIPPED        the reranker declined on purpose, the reason as the
+//                         message ('case-chat': Jev never reranks a case
+//                         chat); the fused order, no warning, no log line
 //   EMBEDDER_UNAVAILABLE  a hosted embedder cannot be built (no embed call)
 //   EMBED_FAILED          anything else (a malformed reply, a bad vector)
 class EmbedError extends Error {

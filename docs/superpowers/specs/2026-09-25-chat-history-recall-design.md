@@ -471,7 +471,11 @@ are excluded.
    (Jev's cap is 32K; a longer query or chunk is cut to fit), four requests
    at a time; the answer, a probability, replaces the fused score. At 0.24 s
    a turn (§6.7) it serves `SearchHistory` (`rerank.search`) and each turn
-   when `rerank.enabled`, in every chat, case chats included. Choosing it in
+   when `rerank.enabled`, in every chat but a case chat. A chat with a
+   `caseId` is never sent to Jev (owner decision 2026-10-06: its private
+   facts stay off third parties, as the cases outbound gate keeps them) and
+   is not reranked at all, the cross-encoder included: the fused order, with
+   `rerankSkipped: 'case-chat'` and no warning. Choosing it in
    the settings pane takes an explicit confirmation, and nothing is sent
    under `KL_TEST_MODE` (the hosted reranker starts with the background
    checks, like the embedder). A Jev failure, timeout or missing key keeps
@@ -679,7 +683,8 @@ expands to the excerpts (fetched by `history:excerpts`). The same line reads
 `reranker` names the reranker that ran this turn (`local:<model>`, or
 `jev:<model>` with the model the response named), null when none did;
 `rerankSkipped` says why one that was on did not run (no key, a refused key,
-slower than `rerank.maxMs`, a failure), null otherwise. The recall line ends
+slower than `rerank.maxMs`, a failure, or `case-chat` when Jev is chosen in a
+chat with a `caseId`), null otherwise. The recall line ends
 in "· reranked" when one ran.
 
 ## 8. Tools

@@ -14,6 +14,7 @@ const { EmbedderHost } = require('../src/history/embedder-host');
 const { Retriever } = require('../src/history/retriever');
 const { TokenEstimator } = require('../src/history/token-estimator');
 const { searchHistoryExcerpts } = require('../src/history/search');
+const { ContextBuilder } = require('../src/history/context-builder');
 const { mergeHistorySettings } = require('../src/history/settings');
 const TypesafeProvider = require('../src/providers/typesafe-provider');
 const { setLogLevel } = require('../src/logging');
@@ -281,6 +282,71 @@ describe('JevReranker', () => {
     assert.strictEqual(stats.reranker, null);
     assert.match(stats.rerankSkipped, /refused the key \(401\)/);
     assert.strictEqual(localCalls, 0, 'host.rerank is never called');
+  });
+
+  it('dispatch: kind jev with a caseId is skipped (RERANK_SKIPPED, case-chat), sends nothing and never runs the cross-encoder', async () => {
+    let localCalls = 0;
+    const host = { rerank: async (q, texts) => { localCalls += 1; return texts.map(() => 0.5); }, rerankModelName: () => 'local-model' };
+    const { jev, notes } = make();
+    jev.start();
+    const reranker = createRecallReranker({ host, jev, getSettings: () => settings });
+    settings = jevSettings('jev');
+    const n = server.requests.length;
+    const info = {};
+    await assert.rejects(
+      reranker('gate code', TEXTS.map((text) => ({ text })), { maxMs: 2000, info, caseId: 'case-lakeside-lot' }),
+      (err) => err.code === 'RERANK_SKIPPED' && err.message === 'case-chat'
+    );
+    assert.strictEqual(server.requests.length, n, 'nothing reached typesafe.ai');
+    assert.strictEqual(localCalls, 0, 'no fallback to the cross-encoder');
+    assert.strictEqual(info.name, undefined);
+    assert.strictEqual(notes.length, 0);
+    settings = jevSettings('local');
+    assert.deepStrictEqual(await reranker('gate code', [{ text: 'a' }], { maxMs: 2000, caseId: 'case-lakeside-lot' }), [0.5]);
+    assert.strictEqual(localCalls, 1, 'kind local reranks a case chat as before');
+  });
+
+  it('a case chat with kind jev: per turn and SearchHistory keep the fused order, rerankSkipped case-chat, nothing sent', async () => {
+    t = openTempStore();
+    const messages = [
+      { sender: 'user', text: 'The side gate code is 4417.' },
+      { sender: 'user', text: 'The gate by the dock sticks in the rain.' },
+      { sender: 'user', text: 'Lunch is at noon.' },
+      { sender: 'user', text: 'Where is the gate?' }
+    ];
+    seedChat(t.store, { id: 'chat-1', caseId: 'case-lakeside-lot', messages });
+    seedChat(t.store, { id: 'chat-2', messages });
+    settings = jevSettings('jev', { search: true });
+    const { jev, notes } = make();
+    jev.start();
+    let localCalls = 0;
+    const host = { rerank: async (q, texts) => { localCalls += 1; return texts.map(() => 0.5); }, rerankModelName: () => 'local-model' };
+    const reranker = createRecallReranker({ host, jev, getSettings: () => settings });
+    const retriever = new Retriever({ store: t.store, estimator: new TokenEstimator(), reranker });
+    const builder = new ContextBuilder({ store: t.store, retriever, estimator: new TokenEstimator(), getSettings: () => settings, now: () => BASE_TIME });
+    const n = server.requests.length;
+
+    const built = await builder.build({ chatId: 'chat-1', message: 'gate', upToSeq: 4 });
+    assert.ok(built.stats.recalledChunkIds.length >= 1);
+    assert.strictEqual(built.stats.reranker, null);
+    assert.strictEqual(built.stats.rerankSkipped, 'case-chat');
+
+    const out = await searchHistoryExcerpts({
+      store: t.store, retriever, chatId: 'chat-1', query: 'gate', limit: 10, settings: settings.history.recall, reranker, asOf: BASE_TIME
+    });
+    const fused = await searchHistoryExcerpts({
+      store: t.store, retriever: new Retriever({ store: t.store, estimator: new TokenEstimator() }), chatId: 'chat-1', query: 'gate', limit: 10,
+      settings: settings.history.recall, reranker: null, asOf: BASE_TIME
+    });
+    assert.ok(out.length >= 2);
+    assert.deepStrictEqual(out.map((e) => e.seq), fused.map((e) => e.seq), 'the fused order');
+    assert.strictEqual(server.requests.length, n, 'nothing from the case chat reached typesafe.ai');
+    assert.strictEqual(localCalls, 0, 'no fallback to the cross-encoder');
+    assert.strictEqual(notes.length, 0, 'not a failure: no warning');
+
+    const other = await builder.build({ chatId: 'chat-2', message: 'gate', upToSeq: 4 });
+    assert.strictEqual(other.stats.reranker, 'jev:jev-1.13.0', 'a chat with no case still goes to Jev');
+    assert.ok(server.requests.length > n);
   });
 
   it('Vault results make no chunks, so their text never reaches typesafe.ai', async () => {

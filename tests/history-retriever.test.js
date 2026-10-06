@@ -372,6 +372,32 @@ describe('Retriever', () => {
       assert.strictEqual(order(quick)[0], fused[2]);
     });
 
+    it('a reranker that skips (RERANK_SKIPPED) keeps the fused order, records the reason and logs no warning', async () => {
+      const { addSink } = require('../src/logging');
+      const s = setup(msgs);
+      t = s.t;
+      const fused = order(await s.retriever.retrieve(opts({ settings: recall() })));
+      const seen = [];
+      const skipping = async (query, chunks, options) => {
+        seen.push(options.caseId);
+        throw Object.assign(new Error('case-chat'), { code: 'RERANK_SKIPPED' });
+      };
+      const records = [];
+      const remove = addSink((r) => records.push(r));
+      const stats = {};
+      let hits;
+      try {
+        hits = await s.retriever.retrieve(opts({ settings: recall({ rerank: { enabled: true, topM: 3 } }), reranker: skipping, caseId: 'case-lakeside-lot', stats }));
+      } finally {
+        remove();
+      }
+      assert.deepStrictEqual(seen, ['case-lakeside-lot'], 'the caseId reaches the reranker');
+      assert.deepStrictEqual(order(hits), fused);
+      assert.strictEqual(stats.reranker, null);
+      assert.strictEqual(stats.rerankSkipped, 'case-chat');
+      assert.ok(!records.some((r) => r.level === 'warn'), 'not a failure: no warning');
+    });
+
     it('the budget and per-message cap apply to the reranked order', async () => {
       const s = setup(msgs);
       t = s.t;
