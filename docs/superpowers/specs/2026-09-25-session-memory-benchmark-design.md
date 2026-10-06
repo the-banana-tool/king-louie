@@ -588,10 +588,10 @@ Answered 2026-09-29; see B-D5 to B-D10 in §2. The original questions:
 6. Whether any private session could be released after review, or none.
 7. The target venue, which sets the deadline and the size of the public set.
 
-## 18. First results (stage B3, 2026-10-02)
+## 18. First results (stage B3, 2026-10-02, corrected 2026-10-06)
 
 The owner's private set: four real sessions (0.17M to 2.5M estimated tokens),
-138 verified questions (103 answerable, 35 `abstain`). Numbers only; nothing
+138 verified questions (111 answerable, 27 `abstain`). Numbers only; nothing
 from the sessions is in this section. One question is about 0.01 of a rate,
 so differences under 0.02 are noise. The judge is `anthropic/claude-haiku-4-5`
 in both tiers; the owner reviewed its samples on 2026-10-06 (96 of 96 grid
@@ -601,67 +601,86 @@ strict on form (a thousands separator in a byte count, a folder path before a
 file name) and were kept as the owner's own verdicts too. Report
 `b3-2026-10` in `LONGHAUL_HOME/reports/` holds the full tables.
 
+The first runs (2026-10-02 and -03) had 103 answerable and 35 `abstain`
+questions. Reviewing the recall adapters' wrong abstains showed that 8 of the
+35 were mislabelled: the value asked for was in a tool result before
+`askAtSeq`, and the authoring model (and the owner's review, which reads the
+prose) had judged "not in the session" from the prose alone. They were
+relabelled `tool-observed` on 2026-10-06 (`verifiedBy: human:sb`, the old
+files kept beside them) and both tiers were rerun from the answer cache
+(runs `20261006T072303Z-9951` and `20261006T073342Z-3495`); only the
+relabelled questions were re-judged, plus the recall adapters' answers, whose
+cache key changed with the rerank settings. The 8 spot-check rows that touch
+relabelled questions are not reviewed yet. Lesson for §7: an abstain question
+needs a search of the tool results, not only the prose, before it is accepted.
+
 Grid tier, `openai/gpt-6-luna` answers (not open-weight: no key for the
 `deepseek-v4-flash` endpoint of §8.1 was available; a second grid series on it
 costs about $6), 138 questions per adapter:
 
 | Adapter | Answer accuracy | Abstain accuracy | Evidence recall | Median context tokens |
 |---|---|---|---|---|
-| `kl-recall` (BM25, shipped tail) | 0.738 | 0.657 | 0.426 | 12.5K |
-| `kl-recall-vec` (the shipped H3 path, local MiniLM vectors) | 0.738 | 0.657 | 0.456 | 12.6K |
-| `kl-recall-whole` | 0.748 | 0.657 | 0.553 | 12.3K |
-| `sliding-window` | 0.311 | 0.886 | 0.238 | 11.7K |
-| `summarize-compact` (every 10K tokens) | 0.272 | 0.800 | 0.157 | 6.5K |
-| `real-compaction` (124 questions) | 0.564 | 0.700 | 0.415 | 108K |
-| `oracle` | 0.825 | 1.000 | 1.000 | 2.0K |
+| `kl-recall` (BM25, shipped tail) | 0.748 | 0.815 | 0.405 | 12.5K |
+| `kl-recall-vec` (the shipped H3 path, local MiniLM vectors) | 0.739 | 0.852 | 0.459 | 12.6K |
+| `kl-recall-whole` | 0.739 | 0.741 | 0.532 | 12.3K |
+| `sliding-window` | 0.306 | 0.926 | 0.239 | 11.7K |
+| `summarize-compact` (every 10K tokens) | 0.297 | 0.889 | 0.164 | 6.5K |
+| `real-compaction` (124 questions) | 0.569 | 0.864 | 0.441 | 108K |
+| `oracle` | 0.820 | 1.000 | 1.000 | 2.0K |
 
 Frontier tier, `openai/gpt-6-sol` answers; the two long-context adapters on
 the first 40 questions of the stratified sample:
 
 | Adapter | Answer accuracy (n) | Abstain accuracy | Median context tokens |
 |---|---|---|---|
-| `kl-recall` | 0.718 (103) | 0.714 | 12.5K |
-| `sliding-window` | 0.340 (103) | 0.857 | 11.7K |
-| `summarize-compact` | 0.262 (103) | 0.829 | 6.5K |
-| `full-history` (capped at 128K) | 0.538 (39) | n/a (1) | 127K |
-| `real-compaction` | 0.543 (35) | n/a (1) | 112K |
-| `oracle` | 0.942 (103) | 0.971 | 2.0K |
+| `kl-recall` | 0.703 (111) | 0.852 | 12.5K |
+| `sliding-window` | 0.342 (111) | 0.926 | 11.7K |
+| `summarize-compact` | 0.279 (111) | 0.963 | 6.5K |
+| `full-history` (capped at 128K) | 0.590 (39) | n/a (1) | 127K |
+| `real-compaction` | 0.583 (36) | n/a (1) | 112K |
+| `oracle` | 0.928 (111) | 0.963 | 2.0K |
 
 Answer accuracy by distance from the evidence to the question (frontier tier):
 
 | Adapter | <10K | 10K-50K | 50K-200K | 200K-1M | >1M |
 |---|---|---|---|---|---|
-| `kl-recall` | 0.917 | 0.714 | 0.591 | 0.714 | 0.600 |
-| `sliding-window` | 0.958 | 0.333 | 0.045 | 0.190 | 0.000 |
-| `summarize-compact` | 0.750 | 0.381 | 0.045 | 0.000 | 0.000 |
-| `full-history` | 1.000 | 1.000 | 0.500 | 0.200 | 0.000 |
-| `real-compaction` | 1.000 | 1.000 | 0.667 | 0.200 | 0.000 |
-| `oracle` | 0.958 | 0.905 | 0.909 | 0.952 | 1.000 |
+| `kl-recall` | 0.923 | 0.739 | 0.542 | 0.652 | 0.600 |
+| `sliding-window` | 0.962 | 0.348 | 0.042 | 0.174 | 0.000 |
+| `summarize-compact` | 0.731 | 0.435 | 0.083 | 0.000 | 0.000 |
+| `full-history` | 1.000 | 0.857 | 0.750 | 0.400 | 0.000 |
+| `real-compaction` | 1.000 | 0.833 | 0.857 | 0.400 | 0.000 |
+| `oracle` | 0.962 | 0.913 | 0.875 | 0.913 | 1.000 |
 
 What these say:
 - Recall at about 12.5K tokens answers more than twice what a sliding window
-  of the same size does, and about 0.18 more than a 128K context of the newest
-  history or of the session's own compaction summaries. Beyond 200K tokens
-  back, everything but recall and the oracle is at or near zero.
-- The oracle rises from 0.825 to 0.942 with the stronger answer model while
-  `kl-recall` does not (0.738, 0.718): the gap is evidence that was not found,
+  of the same size does, and 0.11 to 0.18 more than a 128K context of the
+  newest history or of the session's own compaction summaries. Beyond 200K
+  tokens back, everything but recall and the oracle is at or near zero.
+- The oracle rises from 0.820 to 0.928 with the stronger answer model while
+  `kl-recall` does not (0.748, 0.703): the gap is evidence that was not found,
   not reading ability. Retrieval is the place to spend effort.
-- Local vectors raise evidence recall (0.426 to 0.456) and containment but
-  not answer accuracy on this set (0.738 both).
-- Whole messages (`kl-recall-whole`): 0.748 against 0.738, and over all 138
-  questions 0.725 against 0.717 with 7 and 6 questions right in one only.
-  Noise: `completeMessageTokens` and `pairToolMessages` stay off (recall spec
-  §6.7).
-- Abstain accuracy is the weak spot of recall: with a recalled block in view,
-  the model answers about a third of the questions it should decline (0.657
-  grid, 0.714 frontier), where a sliding window declines more (0.86 to 0.89)
-  because it sees less.
+- Local vectors raise evidence recall (0.405 to 0.459) and containment but
+  not answer accuracy on this set (0.748 against 0.739, noise).
+- Whole messages (`kl-recall-whole`): 0.739 against 0.748 on the corrected
+  set (0.748 against 0.738 before the relabel). Noise either way:
+  `completeMessageTokens` and `pairToolMessages` stay off (recall spec §6.7).
+- Abstain accuracy was reported as the weak spot of recall (0.657 grid, 0.714
+  frontier on the first runs). Most of that was the 8 mislabelled questions:
+  on the corrected set recall declines 0.82 to 0.85 of the questions it
+  should, against 0.93 for a sliding window that sees less, and the oracle's
+  0.96 to 1.00. What remains is real but small: with a recalled block in
+  view the model answers about one in six of the questions it should decline.
 - 37 of the 40 `full-history` contexts and 13 of the 36 `real-compaction`
   contexts were cut at the 128K cap, a stated limit of those two rows.
 
 Spend against the estimate (the dry-run bound), to calibrate the next plan:
-grid $3.73 of $5.84 (64%); frontier $27.72 of $40.80 (68%) over two
-invocations, the second filling 109 answers that failed when the provider
+first runs, grid $3.73 of $5.84 (64%); frontier $27.72 of $40.80 (68%) over
+two invocations, the second filling 109 answers that failed when the provider
 account ran out of credit. A quota refusal arrives as HTTP 429 and was retried
 and recorded per item like a rate limit; it now stops the run as a refused
-key does (`QUOTA`, §15).
+key does (`QUOTA`, §15). The corrected reruns, from the cache: grid $0.67 of
+$1.75; frontier $13.75 of $23.70, most of it re-answering `kl-recall` on
+`gpt-6-sol` because its adapter configuration (and so its cache key) had
+gained the rerank settings. The frontier rerun needs the summarizer named
+(`--summarizer-provider openai --summarizer-model gpt-6-luna`), or the plan
+prices 500 new summaries on the answer model ($49).
