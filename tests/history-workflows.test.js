@@ -27,7 +27,7 @@ const graphReply = { type: 'complete', content: JSON.stringify({ tasks: [{ id: '
 
 describe('workflows recall from the store', () => {
   const dirs = [];
-  afterEach(() => { while (dirs.length) fs.rmSync(dirs.pop(), { recursive: true, force: true }); });
+  afterEach(() => { while (dirs.length) fs.rmSync(dirs.pop(), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); });
 
   it('a task of a chat-launched workflow gets the tail and the recalled block', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-wf-history-'));
@@ -47,6 +47,9 @@ describe('workflows recall from the store', () => {
       tasks: [{ id: 't1', title: 'Task 1', description: 'Check the fence line', agentId: 'main', dependsOn: [], priority: 1 }]
     }, { chatId: 'chat-1' });
     await engine.run(wf.id);
+    // run() ends with a fire-and-forget _save; queue behind it so the
+    // teardown's rmdir never races the write (ENOTEMPTY on macOS).
+    await engine._saveMutex.run(wf.id, async () => {});
     assert.deepStrictEqual(builds[0], { chatId: 'chat-1', message: 'Check the fence line' });
     assert.deepStrictEqual(seen[0].messages.slice(0, 2), [{ role: 'user', content: 'earlier question' }, { role: 'assistant', content: 'earlier answer' }]);
     assert.strictEqual(seen[0].messages[2].role, 'user');
