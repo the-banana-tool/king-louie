@@ -2,7 +2,7 @@
 // Glue between the chat send path and a case: prompt text, tool list
 // shaping, the protected-path check the tool executor uses, and the
 // owner-quote check the case tools use for provenance "user".
-const { segmentsWithin } = require('./safe-path');
+const { locateWithin } = require('./safe-path');
 
 const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour', 'Plan', 'Executor', 'Playbook', 'Ingest']);
 
@@ -96,17 +96,30 @@ const PROTECTED_FILE_NAMES = new Set(['.gitattributes']);
 // Folders at the case root the model never writes directly.
 const PROTECTED_ROOT_DIRS = new Set(['.kl', 'playbooks', '.git']);
 
-function isProtectedCasePath(caseDir, absolutePath) {
-  // Links, junctions, 8.3 names, long-path prefixes, stream suffixes,
-  // trailing dots/spaces and letter case are undone by segmentsWithin.
-  const segments = segmentsWithin(caseDir, absolutePath);
-  if (!segments || !segments.length) return false;
+// Why a direct write to this path is refused in a case turn: 'protected'
+// (a file the case tools own), 'unverifiable' (a Windows network or device
+// path that may be the case directory under another name: nothing shows it
+// is outside), or null when the write may go ahead.
+function caseWriteRefusal(caseDir, absolutePath) {
+  // Links, junctions, 8.3 names, long-path prefixes, other names for the
+  // same directory, stream suffixes, trailing dots/spaces and letter case
+  // are undone by locateWithin.
+  const { segments, unverifiable } = locateWithin(caseDir, absolutePath);
+  if (unverifiable) return 'unverifiable';
+  if (!segments || !segments.length) return null;
   // playbooks/ is data the owner vendors; the model proposes changes with
   // Playbook.propose instead (cases stage 6 spec §3.10).
   // .git/ (ruling T12-dotgit): a written .git/config or info/attributes could
   // define filters or hooks that the runtime's own commits would run.
-  return PROTECTED_ROOT_DIRS.has(segments[0]) || PROTECTED_ROOT_FILES.has(segments.join('/'))
+  const guarded = PROTECTED_ROOT_DIRS.has(segments[0]) || PROTECTED_ROOT_FILES.has(segments.join('/'))
     || segments.some((seg) => PROTECTED_FILE_NAMES.has(seg));
+  return guarded ? 'protected' : null;
+}
+
+// True for both kinds of refusal: a path that cannot be placed is treated
+// as protected.
+function isProtectedCasePath(caseDir, absolutePath) {
+  return caseWriteRefusal(caseDir, absolutePath) !== null;
 }
 
 const MIN_QUOTE_LENGTH = 3;
@@ -170,6 +183,7 @@ module.exports = {
   shapeToolDefinitions,
   buildCaseSystemPrompt,
   isProtectedCasePath,
+  caseWriteRefusal,
   requireOwnerQuote,
   // Cases stage 7: ingest checks quotes with it.
   normalizeForQuote

@@ -4,7 +4,8 @@ const { getRuntimeEnvironment } = require('./runtime-environment');
 const { evaluateRules, describeRule } = require('../tools/permission-rules');
 const { isActingBrowserCall, ownerQuoteInTurn } = require('../tools/browser-acting');
 const path = require('path');
-const { isProtectedCasePath, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
+const { caseWriteRefusal, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
+const { UNVERIFIABLE_PATH_ERROR } = require('../cases/safe-path');
 const { caseToolGuard, caseBrowserProfileGuard } = require('../cases/executors/case-guard');
 const { markLocalRequester } = require('../core/origin');
 const { refuseUnsafeGate, REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
@@ -345,10 +346,12 @@ class ToolExecutor extends EventEmitter {
         effectiveParameters.file_path,
         ...(Array.isArray(effectiveParameters.edits) ? effectiveParameters.edits.map((e) => e?.file_path) : [])
       ].filter((p) => typeof p === 'string' && p);
-      if (targets.some((p) => isProtectedCasePath(caseContext.dir, path.resolve(base, p)))) {
+      const reasons = targets.map((p) => caseWriteRefusal(caseContext.dir, path.resolve(base, p)));
+      if (reasons.some(Boolean)) {
         const refused = {
           success: false,
-          error: 'facts.jsonl, brief.md, case.yaml, .gitmodules, .gitattributes, playbooks/ and .kl/ are written only through the case tools, and .git/ is never written directly. Use the Ledger tool for facts and the Brief tool for the brief (or Decide, Recommend), and Playbook propose for a playbook change, instead.'
+          // A path that cannot be placed is refused too, in its own words.
+          error: !reasons.includes('protected') ? UNVERIFIABLE_PATH_ERROR : 'facts.jsonl, brief.md, case.yaml, .gitmodules, .gitattributes, playbooks/ and .kl/ are written only through the case tools, and .git/ is never written directly. Use the Ledger tool for facts and the Brief tool for the brief (or Decide, Recommend), and Playbook propose for a playbook change, instead.'
         };
         this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
         return refused;

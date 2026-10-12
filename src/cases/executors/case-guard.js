@@ -6,7 +6,7 @@
 // not guarded (§8).
 const path = require('path');
 const { outboundGate } = require('../gates');
-const { segmentsWithin } = require('../safe-path');
+const { locateWithin, UNVERIFIABLE_PATH_ERROR } = require('../safe-path');
 const { CASES_BROWSER_PROFILE } = require('./util');
 
 const SESSION = ['start', 'stop', 'status', 'profile_list', 'profile_current', 'tabs', 'close_tab', 'switch_tab', 'open_tab'];
@@ -131,7 +131,9 @@ function caseToolGuard(toolName, params = {}, ctx = {}) {
     const base = ctx.workingDirectory || process.cwd();
     const targets = [p.file_path, ...(Array.isArray(p.edits) ? p.edits.map((e) => e?.file_path) : [])].filter((t) => typeof t === 'string' && t);
     for (const t of targets) {
-      const segments = segmentsWithin(host.dataDir, path.resolve(base, t));
+      const { segments, unverifiable } = locateWithin(host.dataDir, path.resolve(base, t));
+      // A network or device path that may be the data dir under another name.
+      if (unverifiable) return { success: false, error: UNVERIFIABLE_PATH_ERROR };
       if (segments && segments.length && isDataDirGuarded(segments[0])) return { success: false, error: DATA_DIR_REFUSAL };
     }
   }
