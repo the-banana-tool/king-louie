@@ -72,7 +72,7 @@ const { startChunkBackfill } = require('../history/backfill');
 const { createRecallReranker } = require('../history/reranker');
 const { JevReranker } = require('../history/jev-reranker');
 const TypesafeProvider = require('../providers/typesafe-provider');
-const { buildSystemSections } = require('../context/system-sections');
+const { buildSystemSections, readGitContext } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
 const { localEntry } = require('../models/normalize');
@@ -2671,12 +2671,18 @@ function createCore(deps = {}) {
 
     // Index tools and system prompt sections in the ContextAssembler (background, non-blocking)
     if (contextAssembler) {
-      (async () => {
+      // Tracked, so a turn sent before the index exists waits for it in
+      // assemble() instead of going out with no tools.
+      contextAssembler.trackFirstIndex((async () => {
         try {
           const toolDefs = toolRegistry.getFunctionDefinitions();
           const runtimeEnv = await getRuntimeEnvironment({ workingDirectory: hostWorkingDirectory });
           const skills = typeof skillRegistry?.listSkills === 'function' ? skillRegistry.listSkills() : [];
+          // Awaited child processes: a synchronous git here would stop the
+          // whole process at some moment after start() has returned.
+          const gitContext = await readGitContext(runtimeEnv.workingDirectory || process.cwd());
           const sections = buildSystemSections(runtimeEnv, {
+            gitContext,
             discoveredApps,
             buildAppContextSection,
             skills
@@ -2686,7 +2692,7 @@ function createCore(deps = {}) {
         } catch (err) {
           contextAssemblerLog.warn(`Indexing failed (will use full context fallback): ${err.message}`);
         }
-      })();
+      })());
     }
 
     // Initialize MCP servers from settings (background, non-blocking).

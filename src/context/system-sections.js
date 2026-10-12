@@ -1,4 +1,6 @@
-const { execSync } = require('child_process');
+const { execFile } = require('child_process');
+
+const GIT_TIMEOUT_MS = 3000;
 
 /**
  * Breaks the monolithic system prompt into discrete, named sections
@@ -10,31 +12,39 @@ const { execSync } = require('child_process');
  */
 
 /**
- * Gather git context for the working directory.
- * Runs synchronously with short timeouts — never blocks startup.
+ * Gather git context for the working directory without blocking the event
+ * loop: each git is a child process that is awaited (3 s each at most).
+ *
+ * This used to be five execSync calls inside buildSystemSections. They ran in
+ * the indexing task that start() fires and forgets, so at some moment after
+ * start() had returned the whole process stood still for five git runs:
+ * sockets, timers and every deadline (a rerank's maxMs, shutdownTimeoutMs).
+ * Every core in a process waits on the one cached runtime-environment
+ * promise, so several cores took that pause back to back.
+ *
+ * Resolves null when the directory is not in a git repository or git cannot
+ * run. options.exec replaces execFile (tests).
  */
-function getGitContext(workingDirectory) {
-  const run = (cmd) => {
+async function readGitContext(workingDirectory, options = {}) {
+  const exec = typeof options.exec === 'function' ? options.exec : execFile;
+  const run = (args) => new Promise((resolve) => {
     try {
-      return execSync(cmd, {
-        cwd: workingDirectory,
-        timeout: 3000,
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe']
-      }).trim();
+      exec('git', args, { cwd: workingDirectory, timeout: GIT_TIMEOUT_MS, encoding: 'utf8', windowsHide: true }, (err, stdout) => {
+        resolve(err ? null : String(stdout || '').trim());
+      });
     } catch {
-      return null;
+      resolve(null);
     }
-  };
+  });
 
   // Check if this is a git repo
-  const isGitRepo = run('git rev-parse --is-inside-work-tree');
+  const isGitRepo = await run(['rev-parse', '--is-inside-work-tree']);
   if (isGitRepo !== 'true') return null;
 
-  const branch = run('git branch --show-current') || run('git rev-parse --short HEAD') || 'unknown';
-  const status = run('git status --short --untracked-files=normal');
-  const recentCommits = run('git log --oneline -5 --no-decorate');
-  const userName = run('git config user.name');
+  const branch = await run(['branch', '--show-current']) || await run(['rev-parse', '--short', 'HEAD']) || 'unknown';
+  const status = await run(['status', '--short', '--untracked-files=normal']);
+  const recentCommits = await run(['log', '--oneline', '-5', '--no-decorate']);
+  const userName = await run(['config', 'user.name']);
 
   return { branch, status, recentCommits, userName };
 }
@@ -60,7 +70,9 @@ function buildSystemSections(runtimeEnvironment = {}, options = {}) {
   });
 
   // ── 2. Git repository context (auto-detected) ─────────────
-  const gitContext = options.gitContext || getGitContext(workingDirectory);
+  // Read by the caller with readGitContext: nothing in here runs git, so
+  // building the sections never blocks.
+  const gitContext = options.gitContext || null;
   if (gitContext) {
     const lines = [
       'Git repository context (auto-detected):',
@@ -167,4 +179,4 @@ const DELEGATION_GUIDANCE = [
   '- Read a file yourself only when you need its exact text, such as a passage to quote or the lines you are about to edit.'
 ].join('\n');
 
-module.exports = { buildSystemSections, DELEGATION_GUIDANCE };
+module.exports = { buildSystemSections, readGitContext, DELEGATION_GUIDANCE };

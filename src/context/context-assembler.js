@@ -103,11 +103,31 @@ class ContextAssembler {
     this._sections = new Map();
 
     this._indexed = false;
+    this._firstIndex = null;
   }
 
   // ──────────────────────────────────────────────
   // Indexing (called once at startup / when tools change)
   // ──────────────────────────────────────────────
+
+  /**
+   * The host builds the first index in the background (the runtime
+   * environment and the git context are read with child processes first).
+   * It hands that work in here, and assemble() waits for it: a turn sent
+   * before the index exists would otherwise get no tools and no sections.
+   * Nothing but the order of two promise callbacks used to prevent that.
+   * A failed first index is the host's to log; turns go on without it.
+   *
+   * @param {Promise} work - settles when the first index() has finished
+   * @returns {Promise<void>} never rejects
+   */
+  trackFirstIndex(work) {
+    const tracked = Promise.resolve(work).then(() => {}, () => {}).then(() => {
+      if (this._firstIndex === tracked) this._firstIndex = null;
+    });
+    this._firstIndex = tracked;
+    return tracked;
+  }
 
   /**
    * Register all tool definitions and system prompt sections, then embed
@@ -211,6 +231,7 @@ class ContextAssembler {
    * @returns {{ systemPrompt: string, tools: Array, allToolNames: string[] }}
    */
   async assemble(userMessage, options = {}) {
+    if (this._firstIndex) await this._firstIndex;
     if (this.mode === 'deferred') {
       return this._assembleDeferred(options);
     }
