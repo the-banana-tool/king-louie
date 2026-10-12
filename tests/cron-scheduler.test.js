@@ -102,3 +102,71 @@ describe('CronScheduler', () => {
     assert.ok(executed);
   });
 });
+
+// start() also schedules one tick 100 ms later. stop() cleared only the
+// interval, so a core shut down inside those 100 ms ran its due jobs after
+// shutdown() had returned: on a fresh data dir cases:wakeups is always due,
+// and its jobs.json write re-created a data dir the caller had just removed.
+describe('CronScheduler: stop() stops the start-up tick too', () => {
+  function dueStore() {
+    const store = new MockStore();
+    store.add({ id: 'due', enabled: true, schedule: { kind: 'every', everyMs: 60000 }, state: { lastRunAtMs: 0, consecutiveErrors: 0 } });
+    return store;
+  }
+
+  function trackTimeouts() {
+    const realSet = global.setTimeout;
+    const realClear = global.clearTimeout;
+    const created = [];
+    const cleared = new Set();
+    global.setTimeout = (...args) => { const t = realSet(...args); created.push({ timer: t, fn: args[0], ms: args[1] }); return t; };
+    global.clearTimeout = (t) => { cleared.add(t); return realClear(t); };
+    return { created, cleared, restore: () => { global.setTimeout = realSet; global.clearTimeout = realClear; } };
+  }
+
+  it('clears the start-up timer, and that timer runs nothing if it fires anyway', async () => {
+    let runs = 0;
+    const scheduler = new CronScheduler(dueStore(), { execute: async () => { runs += 1; return { ok: true }; } });
+    const timers = trackTimeouts();
+    try {
+      scheduler.start();
+      scheduler.stop();
+    } finally {
+      timers.restore();
+    }
+    assert.strictEqual(timers.created.length, 1, 'start() schedules one start-up tick');
+    assert.strictEqual(timers.created[0].ms, 100);
+    assert.ok(timers.cleared.has(timers.created[0].timer), 'stop() did not clear the start-up tick');
+    assert.strictEqual(scheduler.timer, null);
+
+    // The callback itself, as if it had already been queued when stop() ran.
+    await timers.created[0].fn();
+    assert.strictEqual(runs, 0, 'a due job ran after stop()');
+  });
+
+  it('a stopped scheduler ignores tick() until it is started again', async () => {
+    let runs = 0;
+    const scheduler = new CronScheduler(dueStore(), { execute: async () => { runs += 1; return { ok: true }; } });
+    scheduler.start();
+    scheduler.stop();
+    await scheduler.tick();
+    assert.strictEqual(runs, 0);
+
+    scheduler.start();
+    try {
+      await scheduler.tick();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.strictEqual(runs, 1);
+    } finally {
+      scheduler.stop();
+    }
+  });
+
+  it('a scheduler that was never started still runs a tick called directly', async () => {
+    let runs = 0;
+    const scheduler = new CronScheduler(dueStore(), { execute: async () => { runs += 1; return { ok: true }; } });
+    await scheduler.tick();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(runs, 1);
+  });
+});

@@ -17,8 +17,12 @@ class CronScheduler {
   start() {
     // A paused scheduler stays paused: nothing restarts it for this process.
     if (this.timer || this.paused) return;
+    this.stopped = false;
     this.timer = setInterval(() => this.tick(), this.tickIntervalMs);
-    setTimeout(() => this.tick(), 100);
+    this.firstTick = setTimeout(() => {
+      this.firstTick = null;
+      this.tick();
+    }, 100);
   }
 
   // Fleet stage 7 --kl-standalone-once: the service is the instance that
@@ -28,10 +32,20 @@ class CronScheduler {
     this.stop();
   }
 
+  // Stops both timers. The start-up tick used to survive stop(): a core shut
+  // down within 100 ms of start() still ran its due jobs afterwards (a fresh
+  // data dir's cases:wakeups is always due) and wrote jobs.json into a data
+  // dir that shutdown() had already left, re-creating it when it was gone.
+  // A stopped scheduler runs no tick until start() is called again.
   stop() {
+    this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.firstTick) {
+      clearTimeout(this.firstTick);
+      this.firstTick = null;
     }
   }
 
@@ -79,7 +93,7 @@ class CronScheduler {
   }
 
   async tick() {
-    if (this.paused) return;
+    if (this.paused || this.stopped) return;
     const jobs = this.store.list();
     const dueJobs = jobs.filter(job => this.isDue(job) && !this.runningJobs.has(job.id));
 
