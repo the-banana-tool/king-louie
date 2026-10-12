@@ -3,6 +3,7 @@
 const { UsageError } = require('../errors');
 const { createSlidingWindowAdapter } = require('./sliding-window');
 const { createOracleAdapter } = require('./oracle');
+const { createNoContextAdapter } = require('./no-context');
 const { createFullHistoryAdapter } = require('./full-history');
 const { createRealCompactionAdapter } = require('./real-compaction');
 const { createSummarizeCompactAdapter } = require('./summarize-compact');
@@ -38,6 +39,8 @@ const FACTORIES = {
   // Compaction baseline: a summarizer model every compactEveryTokens (answer stage only).
   'summarize-compact': (config) => createSummarizeCompactAdapter(config),
   'sliding-window': createSlidingWindowAdapter,
+  // The floor: the question alone, nothing from the session.
+  'no-context': () => createNoContextAdapter(),
   oracle: createOracleAdapter
 };
 

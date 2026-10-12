@@ -244,6 +244,7 @@ Built-in adapters:
 | `summarize-compact` | Replays the session; every `compactEveryTokens` calls a summarizer model to replace history with a summary, then continues; context is summary plus tail | The compaction baseline, mimicking what harnesses do |
 | `real-compaction` | For sessions with real compaction events only: the real summaries plus the messages since the last one before `askAtSeq` | What the owner actually had |
 | `oracle` | The evidence messages plus the tail | Upper bound on answerability |
+| `no-context` | Nothing from the session: no tail, no recall, the question alone | The floor; finds questions that do not measure memory (addendum 2026-10-12) |
 | `external:<name>` | A subprocess speaking JSON lines over stdio | Mem0, Letta, others, later |
 
 **B0 addendum (2026-09-30, amended by H3): `kl-recall-vec` is an H3 probe
@@ -314,6 +315,17 @@ its cost is reported as input tokens with the price unknown. In the answer
 stage and its dry run they are cache-only (`JEV_SCORES_MISSING` on a miss):
 the evidence-only run with the same settings comes first.
 
+**Addendum (2026-10-12): `no-context` is the floor.** It shows the answer
+model nothing from the session, so its evidence recall is 0 by construction
+and it can never leak. It needs no model for its context: it runs in
+evidence-only runs, in both tiers of the answer stage and with
+`--fake-models`, and its answer and judge calls are in the priced plan like
+any adapter's. It is a quality check on the question set, not a candidate
+system. It uses the same `answer-v1.md` as every adapter, with the prompt's
+"(the memory system showed nothing)" in place of a context; that prompt tells
+the model to decline when the context lacks the answer, so what it gets
+right is a lower bound on what is answerable without evidence (§8).
+
 `evidenceSeqsShown` is how an adapter reports which message sequences its
 context contains; for `kl-recall` it comes from provenance, for others from
 construction. It is what makes evidence recall measurable without a judge.
@@ -367,6 +379,34 @@ second figure is correctness versus context tokens.
 
 Answer model and judge model are run settings; the judge is never the
 answer model.
+
+**Addendum (2026-10-12): the floor check, difficulty bands, and which
+columns are scored.**
+
+- **Floor flag.** In an answer-stage run that includes `no-context`, an
+  answerable question the judge marks `correct` for `no-context` is flagged:
+  every record of that question, whichever adapter it is from, carries
+  `answerableWithoutEvidence: true` (`false` when `no-context` did not get it
+  right and for every abstain question, which is never flagged; `null` when
+  `no-context` has no verdict for it). Flagged questions stay in the records
+  and in every existing figure. The run summary and the report add a floor
+  check section: how many questions were flagged, and each adapter's answer
+  accuracy over all its answerable questions (the headline, unchanged) and
+  with the flagged ones left out (`summary.json` `answer.floor`:
+  `flagged`, `n`, `accuracy`, `unchecked`; the report's `floor-check.csv`).
+  A run without `no-context` has neither the field nor the section. In a
+  report a series is checked against the `no-context` series of its own
+  cohort (same tier, answer model, judge model, commit and setup), from the
+  same run or another; a series whose cohort has none (an older run) is left
+  out of the floor table, not shown as zero.
+- **Difficulty bands** (report only, `difficulty-bands.csv`): per cohort,
+  each answerable question by how many of the series that judged it got it
+  right: `none`, `some`, `all`. `oracle`, `no-context` and `full-history` are
+  not counted. Counts only, so a `--public` report stays publishable.
+- **Scored and reported.** Evidence recall, answer accuracy and abstain
+  accuracy are scored. Answer containment and the context-size columns
+  (median and p90 tokens, contexts cut) are reported, not scored; the report
+  says so in its notes.
 
 ### 8.1 Cost tiers
 
@@ -534,6 +574,10 @@ gets its own implementation plan.
   a `LONGHAUL_HOME` inside a git working tree is refused.
 - cost: a run whose priced plan exceeds the cap refuses to start.
 - CI smoke: `longhaul run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle --fake-models`.
+- floor check (`tests/longhaul-floor.test.js`): `no-context` shows nothing
+  and never leaks; the flag is set only for answerable and correct under
+  `no-context`; both accuracies and the bands on a hand-built case; a run
+  without `no-context` still reports.
 
 ## 15. Error handling
 

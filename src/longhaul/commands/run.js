@@ -11,11 +11,13 @@ const { ModelCache } = require('../model-cache');
 const { loadPrompt } = require('../prompts');
 const { formatEstimate, DEFAULT_MAX_USD } = require('../cost');
 const { FULL_HISTORY_TOKENS } = require('../adapters/full-history');
+const { NO_CONTEXT } = require('../adapters/no-context');
 const { spendEstimatedNote } = require('../scoring');
 const { fixed, usd } = require('../format');
 
 const USAGE = [
   'Usage: longhaul run --adapters kl-recall,sliding-window,oracle [--sessions <data root>] [--session <id>]...',
+  '  add no-context to --adapters for the floor check: questions answered right with nothing from the session shown',
   '  [--budget-tokens 6000] [--window-tokens N] [--recall key=value]... [--chunk-target-chars N] [--seed N] [--include-unverified]',
   '  [--embed-model text-embedding-3-small] [--embed-provider openai|local] [--send-private]',
   '  --embed-provider: the embedder for kl-recall-vec: openai (default) or local (H3)',
@@ -253,6 +255,14 @@ module.exports = {
         ctx.stdout.write(`${''.padEnd(nameWidth)} answer accuracy ${ac(s.answer.accuracy)} (n=${s.answer.n})  partial ${ac(s.answer.partialRate)}  declined ${ac(s.answer.declinedRate)}  `
           + `abstain accuracy ${ac(s.answer.abstain.accuracy)} (n=${s.answer.abstain.n})  answer errors ${s.answer.errors}\n`);
       }
+    }
+    // The floor check, only when no-context ran in the answer stage.
+    const floor = result.summary[NO_CONTEXT]?.answer?.floor;
+    if (floor) {
+      const others = Object.entries(result.summary).filter(([name, s]) => name !== NO_CONTEXT && s.answer?.floor)
+        .map(([name, s]) => `${name} ${ac(s.answer.floor.accuracy)} (n=${s.answer.floor.n})`);
+      ctx.stdout.write(`floor check (no-context): ${floor.flagged} of ${result.summary[NO_CONTEXT].answer.n} answerable questions flagged answerableWithoutEvidence`
+        + `${others.length ? `; answer accuracy with them left out: ${others.join(', ')}` : ''}\n`);
     }
     // The Jev adapters' own counts (adapter-stats.json): tokens, unpriced.
     for (const [name, st] of Object.entries(result.adapterStats || {})) {

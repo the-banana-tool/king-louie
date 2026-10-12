@@ -12,6 +12,9 @@
 const { KINDS, BUCKETS } = require('./questions');
 const { isRight } = require('./judge');
 const { round8, fixed } = require('./format');
+const { NO_CONTEXT } = require('./adapters/no-context');
+
+const ORACLE = 'oracle';
 
 // Typographic quotes and dashes NFKC leaves alone.
 const TYPOGRAPHIC = [
@@ -110,9 +113,70 @@ function groupRecall(records, key) {
   }]));
 }
 
-function summarize(records, { setupCosts = [] } = {}) {
+const questionKey = (r) => `${r.sessionId}\u0000${r.questionId}`;
+
+// The floor check (benchmark spec §8, addendum 2026-10-12), from the
+// no-context adapter's records: checked, the questions it has a verdict for,
+// and flagged, the answerable ones among them judged correct with nothing
+// from the session shown. Those do not measure memory. An abstain question
+// is never flagged. null when no-context judged nothing (it did not run, or
+// the run had no answer stage).
+function floorFrom(noContextRecords) {
+  const judged = noContextRecords.filter((r) => !r.error && typeof r.verdict === 'string');
+  if (!judged.length) return null;
+  return {
+    checked: new Set(judged.map(questionKey)),
+    flagged: new Set(judged.filter((r) => r.kind !== 'abstain' && r.verdict === 'correct').map(questionKey))
+  };
+}
+
+// Sets answerableWithoutEvidence on every record of an answer-stage run that
+// included no-context, whichever adapter the record is from: true for a
+// flagged question, false for one no-context did not get right and for every
+// abstain question, null when no-context has no verdict for it (not known).
+// A run without no-context is left as it is: the field is absent.
+function stampFloor(records) {
+  const mine = records.filter((r) => r.adapter === NO_CONTEXT);
+  if (!mine.length) return records;
+  const floor = floorFrom(mine) || { checked: new Set(), flagged: new Set() };
+  for (const r of records) {
+    const key = questionKey(r);
+    r.answerableWithoutEvidence = r.kind === 'abstain' ? false : floor.flagged.has(key) ? true : floor.checked.has(key) ? false : null;
+  }
+  return records;
+}
+
+// The adapters a difficulty band never counts: the two bounds and the
+// long-context baseline, which runs on a sample of its own.
+const BAND_EXCLUDED = Object.freeze([ORACLE, NO_CONTEXT, 'full-history']);
+
+// Difficulty bands (report only): each answerable question by how many of
+// the adapters that judged it got it right: none, some, all. adapterOf gives
+// a record's adapter name when r.adapter is a report series. Counts only.
+// null when no counted adapter judged an answerable question.
+function difficultyBands(records, adapterOf = (r) => r.adapter) {
+  const eligible = records.filter((r) => !r.error && typeof r.verdict === 'string' && r.kind !== 'abstain' && !BAND_EXCLUDED.includes(adapterOf(r)));
+  if (!eligible.length) return null;
+  const byQuestion = new Map();
+  for (const r of eligible) {
+    const q = byQuestion.get(questionKey(r)) || { right: 0, total: 0 };
+    q.total += 1;
+    if (r.verdict === 'correct') q.right += 1;
+    byQuestion.set(questionKey(r), q);
+  }
+  const out = { adapters: new Set(eligible.map((r) => r.adapter)).size, questions: byQuestion.size, none: 0, some: 0, all: 0 };
+  for (const q of byQuestion.values()) out[q.right === 0 ? 'none' : q.right === q.total ? 'all' : 'some'] += 1;
+  return out;
+}
+
+// floorOf(adapter) gives the floor that adapter's records are checked
+// against (report.js: the no-context series of the same cohort); by default
+// it is this record set's own no-context adapter, for every adapter.
+function summarize(records, { setupCosts = [], floorOf = null } = {}) {
   const byAdapter = {};
   for (const r of records) (byAdapter[r.adapter] ||= []).push(r);
+  const own = floorOf ? null : floorFrom(byAdapter[NO_CONTEXT] || []);
+  const floorFor = floorOf || (() => own);
   const out = {};
   for (const [adapter, rs] of Object.entries(byAdapter)) {
     const ok = rs.filter((r) => !r.error);
@@ -135,7 +199,7 @@ function summarize(records, { setupCosts = [] } = {}) {
       byKind: groupRecall(scored, 'kind'),
       byBucket: groupRecall(scored, 'bucket'),
       bySession: groupRecall(scored, 'sessionId'),
-      answer: answerStats(rs),
+      answer: answerStats(rs, floorFor(adapter)),
       setup: setupOf(setupCosts, adapter),
       estTokens: { median: percentile(ok.map((r) => r.estTokens), 0.5), p90: percentile(ok.map((r) => r.estTokens), 0.9), max: percentile(ok.map((r) => r.estTokens), 1) },
       latencyMs: { median: percentile(ok.map((r) => r.latencyMs), 0.5), p90: percentile(ok.map((r) => r.latencyMs), 0.9) },
@@ -194,7 +258,12 @@ function costOf(staged, costField, cachedField) {
   return { usd: round8(usd), spentUsd: round8(spentUsd), unknown };
 }
 
-function answerStats(rs) {
+// floor (floorFrom) adds `floor`: flagged, how many of this adapter's judged
+// answerable questions are answerable without evidence; n and accuracy, the
+// same accuracy with those left out; unchecked, how many of the rest
+// no-context has no verdict for (they count as not flagged). Without a floor
+// the key is absent, and nothing above it changes either way.
+function answerStats(rs, floor = null) {
   const staged = rs.filter((r) => !r.error && r.verdict !== undefined);
   if (!staged.length) return null;
   const judged = staged.filter((r) => typeof r.verdict === 'string');
@@ -206,7 +275,7 @@ function answerStats(rs) {
   for (const r of staged) if (r.answerError) errorsByCode[r.answerError] = (errorsByCode[r.answerError] || 0) + 1;
   const tokens = staged.map((r) => r.answerInputTokens);
   const latency = staged.map((r) => r.answerLatencyMs);
-  return {
+  const stats = {
     n: answerable.length,
     accuracy: share(answerable, 'correct'),
     partialRate: share(answerable, 'partial'),
@@ -222,6 +291,14 @@ function answerStats(rs) {
     byBucket: groupAnswers(judged, 'bucket'),
     bySession: groupAnswers(judged, 'sessionId')
   };
+  if (floor) {
+    const rest = answerable.filter((r) => !floor.flagged.has(questionKey(r)));
+    stats.floor = {
+      flagged: answerable.length - rest.length, n: rest.length, accuracy: share(rest, 'correct'),
+      unchecked: rest.filter((r) => !floor.checked.has(questionKey(r))).length
+    };
+  }
+  return stats;
 }
 
 function setupOf(setupCosts, adapter) {
@@ -284,6 +361,13 @@ function noiseNote(n) {
     + 'and a cell with fewer questions moves more.';
 }
 
+// What the floor check's table says, in a run's summary and in a report.
+const FLOOR_NOTE = 'no-context shows the answer model the question alone, nothing from the session, under the same answer prompt. '
+  + 'An answerable question judged correct there does not measure memory: it is flagged answerableWithoutEvidence in the records and stays in every figure above. '
+  + 'The table gives each adapter\'s answer accuracy over all its answerable questions (the headline, unchanged) and with the flagged ones left out. '
+  + 'Not checked: questions no-context has no verdict for, counted as not flagged. '
+  + 'The answer prompt tells the model to decline when the context lacks the answer, so the flagged count is a lower bound.';
+
 // A priced model's reply that came back unpriced (no usage, zero tokens or
 // no cost) is counted at its estimate.
 const spendEstimatedNote = ({ estimatedCalls: n }) => (n ? `, ${n} unpriced ${n === 1 ? 'reply, settled at its' : 'replies, settled at their'} estimate` : '');
@@ -338,6 +422,19 @@ function renderSummaryMarkdown(config, summary, { spend = null, comparisons = []
     const sessions = [...new Set(answered.flatMap(([, s]) => Object.keys(s.answer.bySession)))].sort();
     lines.push('', '## Answer accuracy by session', '', `| Adapter | ${sessions.join(' | ')} |`, `|---|${sessions.map(() => '---').join('|')}|`);
     for (const [name, s] of answered) lines.push(`| ${name} | ${sessions.map((id) => answerCell(s.answer.bySession[id])).join(' | ')} |`);
+    // Only when no-context ran: a section of its own, so every table above
+    // is the same with and without it.
+    const floored = answered.filter(([, s]) => s.answer.floor);
+    if (floored.length) {
+      const nc = summary[NO_CONTEXT]?.answer;
+      lines.push('', '## Floor check (no-context)', '');
+      lines.push(`${FLOOR_NOTE}${nc ? ` Flagged here: ${nc.floor.flagged} of ${nc.n} answerable questions no-context was judged on.` : ''}`, '');
+      lines.push('| Adapter | Flagged | Accuracy, all answerable (n) | Accuracy, flagged left out (n) | Not checked |', '|---|---|---|---|---|');
+      for (const [name, s] of floored) {
+        const f = s.answer.floor;
+        lines.push(`| ${name} | ${f.flagged} | ${answerCell(s.answer)} | ${answerCell(f)} | ${f.unchecked} |`);
+      }
+    }
   }
   const shown = comparisons.filter((c) => c.result);
   if (shown.length) {
@@ -358,5 +455,6 @@ function renderSummaryMarkdown(config, summary, { spend = null, comparisons = []
 
 module.exports = {
   evidenceRecall, chunkEvidenceRecall, answerContainment, normalizeText, normalizeAnswer, splitMessages,
-  percentile, mean, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS, adapterCost, spendEstimatedNote, noiseNote
+  percentile, mean, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS, adapterCost, spendEstimatedNote, noiseNote,
+  floorFrom, stampFloor, difficultyBands, BAND_EXCLUDED, FLOOR_NOTE
 };

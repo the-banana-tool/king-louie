@@ -16,7 +16,7 @@ const { loadSession, listSessions, sessionDir, CHARS_PER_TOKEN } = require('./se
 const { readQuestions, questionsFile, validateQuestionSet, isVerified, bucketFor, computeDistance } = require('./questions');
 const { createAdapter } = require('./adapters');
 const {
-  evidenceRecall, chunkEvidenceRecall, answerContainment, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS
+  evidenceRecall, chunkEvidenceRecall, answerContainment, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS, stampFloor
 } = require('./scoring');
 const { writeFileAtomic, sha256File, sha256Text, byCodeUnit } = require('./files');
 const { ModelCache, stableStringify } = require('./model-cache');
@@ -558,7 +558,9 @@ async function runAnswerStage(run, options) {
       throw err;
     }
 
-    const records = items.map((it) => it.record).sort(recordOrder(adapters));
+    // With no-context in the run, every record says whether its question was
+    // answerable without evidence (the floor check); otherwise nothing is added.
+    const records = stampFloor(items.map((it) => it.record).sort(recordOrder(adapters)));
     writeFileAtomic(recordsPath, (write) => { for (const r of records) write(`${JSON.stringify(r)}\n`); });
     writeSpend();
     sigint.finished = true;

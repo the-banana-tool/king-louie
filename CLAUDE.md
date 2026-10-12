@@ -443,6 +443,17 @@ Electron build.
   plain 429 is still retried, Gemini's "exceeded your current quota" per-minute
   429 (`RESOURCE_EXHAUSTED`, a retry delay) included. A Jev adapter with no
   `TYPESAFE_AI_KEY` stops at its first uncached question (`JEV_NO_KEY`).
+- Floor check: add `no-context` to `--adapters` (the question alone, nothing
+  from the session; evidence recall 0). In an answer-stage run an answerable
+  question it gets `correct` is stamped `answerableWithoutEvidence` on every
+  record of that question; the summary and `report` (`floor-check.csv`) give
+  each adapter's accuracy over all answerable questions and with the flagged
+  ones left out, added beside the headline numbers, never in place of them.
+  A run or report cohort without `no-context` shows none of it (absent, not
+  zero). `report` also bands answerable questions `none`/`some`/`all` by the
+  adapters other than `oracle`, `no-context` and `full-history`
+  (`difficulty-bands.csv`, counts only). `--fake-models` always declines, so
+  it flags nothing.
 - Smoke run of the answer stage (no models, no network, $0):
   `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models`.
 

@@ -74,7 +74,7 @@ describe('longhaul report', () => {
     const { home } = setup();
     const out = writeReport(home, [RUN_A]);
     assert.match(out.id, /^r-[0-9a-f]{12}$/);
-    assert.deepStrictEqual(out.files, ['accuracy-vs-tokens.csv', 'adapters.csv', 'adapters.tex', 'by-distance.csv', 'by-kind.csv', 'by-session.csv', 'comparisons.csv', 'report.md']);
+    assert.deepStrictEqual(out.files, ['accuracy-vs-tokens.csv', 'adapters.csv', 'adapters.tex', 'by-distance.csv', 'by-kind.csv', 'by-session.csv', 'comparisons.csv', 'difficulty-bands.csv', 'floor-check.csv', 'report.md']);
     const files = readAll(out.dir);
     const rows = files['adapters.csv'].trim().split('\n');
     assert.strictEqual(rows[0], 'series,questions,evidence_recall,answer_contained,answer_n,answer_accuracy,partial_rate,declined_rate,abstain_n,abstain_accuracy,false_answer_rate,answer_errors,contexts_cut,median_context_tokens,p90_context_tokens,median_answer_input_tokens,cost_usd,cost_unknown_calls,cost_per_accuracy_point_usd,median_context_ms,p90_context_ms,median_answer_ms,p90_answer_ms');

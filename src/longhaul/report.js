@@ -16,7 +16,10 @@
 // latest counts, unless it failed where an earlier one succeeded.
 const fs = require('fs');
 const path = require('path');
-const { summarize, compareAdapters, COMPARISONS, adapterCost, noiseNote } = require('./scoring');
+const {
+  summarize, compareAdapters, COMPARISONS, adapterCost, noiseNote, floorFrom, difficultyBands, BAND_EXCLUDED, FLOOR_NOTE
+} = require('./scoring');
+const { NO_CONTEXT } = require('./adapters/no-context');
 const { stableStringify } = require('./model-cache');
 const { KINDS, BUCKETS } = require('./questions');
 const { RUN_ID_RE } = require('./run');
@@ -128,7 +131,19 @@ function buildReport(runs) {
   }
   const records = [...byKey.values()].sort((x, y) => byCodeUnit(x.adapter, y.adapter)
     || byCodeUnit(x.sessionId, y.sessionId) || byCodeUnit(x.questionId, y.questionId));
-  const summary = summarize(records, { setupCosts: [...setup.values()].sort((x, y) => byCodeUnit(x.adapter, y.adapter) || byCodeUnit(x.sessionId, y.sessionId)) });
+  // The floor check and the difficulty bands are per cohort: a series is
+  // checked against the no-context series that shares everything but the
+  // adapter with it, from the same run or another. A cohort without one (an
+  // older run) has no floor, and its series carry no floor figures at all.
+  const base = (r) => meta.get(r.adapter).adapter;
+  const cohorts = [...new Set([...meta.values()].map((m) => m.cohort))].sort(byCodeUnit);
+  const inCohort = new Map(cohorts.map((c) => [c, records.filter((r) => meta.get(r.adapter).cohort === c)]));
+  const floors = new Map(cohorts.map((c) => [c, floorFrom(inCohort.get(c).filter((r) => base(r) === NO_CONTEXT))]));
+  const summary = summarize(records, {
+    setupCosts: [...setup.values()].sort((x, y) => byCodeUnit(x.adapter, y.adapter) || byCodeUnit(x.sessionId, y.sessionId)),
+    floorOf: (name) => floors.get(meta.get(name).cohort)
+  });
+  const bands = cohorts.map((cohort) => ({ cohort, bands: difficultyBands(inCohort.get(cohort), base) })).filter((b) => b.bands);
   const series = Object.keys(summary).sort();
   const cut = Object.fromEntries(series.map((s) => [s, records.filter((r) => r.adapter === s && r.contextTruncated === true).length]));
   const comparisons = [];
@@ -142,8 +157,11 @@ function buildReport(runs) {
       }
     }
   }
-  return { summary, series, comparisons, cut };
+  return { summary, series, comparisons, cut, bands };
 }
+
+// The series that have floor figures (a no-context series in their cohort).
+const floored = ({ summary, series }) => series.filter((name) => summary[name].answer?.floor);
 
 function costPerPoint(s) {
   const cost = adapterCost(s);
@@ -151,7 +169,7 @@ function costPerPoint(s) {
   return s.answer && cost.unknown === 0 && acc ? cost.usd / (acc * 100) : null;
 }
 
-function renderCsvs({ summary, series, comparisons, cut }) {
+function renderCsvs({ summary, series, comparisons, cut, bands }) {
   const files = {};
   const adapters = [['series', 'questions', 'evidence_recall', 'answer_contained', 'answer_n', 'answer_accuracy', 'partial_rate', 'declined_rate',
     'abstain_n', 'abstain_accuracy', 'false_answer_rate', 'answer_errors', 'contexts_cut', 'median_context_tokens', 'p90_context_tokens',
@@ -201,6 +219,18 @@ function renderCsvs({ summary, series, comparisons, cut }) {
       fmt(r.evidenceRecall.a), fmt(r.evidenceRecall.b), fmt(r.answerContainment.a), fmt(r.answerContainment.b)]);
   }
   files['comparisons.csv'] = csv(comp);
+
+  // The floor check: only series with a no-context series in their cohort
+  // have a row (absent, not zero, for an older run).
+  const floor = [['series', 'answerable_without_evidence', 'answer_n', 'answer_accuracy', 'answer_n_flagged_left_out', 'answer_accuracy_flagged_left_out', 'not_checked']];
+  for (const name of floored({ summary, series })) {
+    const a = summary[name].answer;
+    floor.push([name, a.floor.flagged, a.n, fmt(a.accuracy), a.floor.n, fmt(a.floor.accuracy), a.floor.unchecked]);
+  }
+  files['floor-check.csv'] = csv(floor);
+  const bandRows = [['cohort', 'series_counted', 'questions', 'none', 'some', 'all']];
+  for (const { cohort, bands: b } of bands) bandRows.push([cohort, b.adapters, b.questions, b.none, b.some, b.all]);
+  files['difficulty-bands.csv'] = csv(bandRows);
   return files;
 }
 
@@ -217,7 +247,7 @@ function renderTex({ summary, series }) {
   return `${lines.join('\n')}\n`;
 }
 
-function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
+function renderMarkdown(reportId, runs, { summary, series, comparisons, cut, bands }) {
   const L = [`# LongHaul report ${reportId}`, ''];
   L.push('Aggregate numbers only: no question, answer or session text (B-D8). A series is one adapter with one configuration '
     + '(cfg: the first 8 hex of its recorded describe() hash) at one tier, answer model and judge model, from one commit, with one setup '
@@ -255,6 +285,22 @@ function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
   table('Evidence recall by distance', BUCKETS.map((b) => b.id), (s, b) => (s.byBucket[b] ? `${md(s.byBucket[b].evidenceRecall)} (${s.byBucket[b].n})` : '-'));
   const sessions = [...new Set(series.flatMap((n) => Object.keys(summary[n].answer?.bySession || {})))].sort();
   if (sessions.length) table('Answer accuracy by session', sessions, (s, id) => answerCell(s.answer?.bySession[id]));
+  const withFloor = floored({ summary, series });
+  if (withFloor.length) {
+    const answering = series.filter((name) => summary[name].answer);
+    L.push('', '## Floor check (no-context)', '', `${FLOOR_NOTE} A series is checked against the no-context series of its own cohort`
+      + `${withFloor.length < answering.length ? `; the ${answering.length - withFloor.length} series whose cohort has none (a run without no-context) are not listed` : ''}.`, '',
+    '| Series | Flagged | Accuracy, all answerable (n) | Accuracy, flagged left out (n) | Not checked |', '|---|---|---|---|---|');
+    for (const name of withFloor) {
+      const a = summary[name].answer;
+      L.push(`| ${name} | ${a.floor.flagged} | ${md(a.accuracy)} (${a.n}) | ${md(a.floor.accuracy)} (${a.floor.n}) | ${a.floor.unchecked} |`);
+    }
+  }
+  if (bands.length) {
+    L.push('', '## Difficulty bands', '', `Answerable questions by how many of the series that judged them got them right, per cohort (${BAND_EXCLUDED.join(', ')} are not counted). `
+      + 'Counts only.', '', '| Cohort | Series counted | Questions | none | some | all |', '|---|---|---|---|---|---|');
+    for (const { cohort, bands: b } of bands) L.push(`| ${cohort} | ${b.adapters} | ${b.questions} | ${b.none} | ${b.some} | ${b.all} |`);
+  }
   if (comparisons.length) {
     L.push('', '## Named comparisons', '');
     for (const { id, title, a, b, result: r } of comparisons) {
@@ -263,6 +309,8 @@ function renderMarkdown(reportId, runs, { summary, series, comparisons, cut }) {
     }
   }
   L.push('', '## Notes', '',
+    '- Scored: evidence recall, answer accuracy and abstain accuracy (false answers are its complement). Reported, not scored: answer containment ("Contained") '
+      + 'and the context-size columns (median and p90 tokens, contexts cut).',
     '- Context tokens are estimated (characters / 4, recall spec §6.6); answer and judge tokens come from provider usage (spec §11).',
     '- Accuracy counts answerable questions judged correct; partial is not correct. Abstain accuracy counts abstain questions the model declined.',
     '- The judge sees the question, the reference answers and the reply, never the context. See the runs table for its spot-check agreement.',
