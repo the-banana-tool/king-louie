@@ -13,6 +13,8 @@ const { sha256Text } = require('./files');
 const PROMPTS_DIR = path.join(__dirname, 'prompts');
 const PROMPTS = Object.freeze({
   answer: 'answer-v1.md',
+  // no-context alone (adapters/no-context.js): the question, no context.
+  answerNoContext: 'answer-no-context-v1.md',
   judge: 'judge-v1.md',
   summarize: 'summarize-v1.md',
   author: 'author-v1.md'

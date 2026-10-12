@@ -40,7 +40,7 @@ const FACTORIES = {
   'summarize-compact': (config) => createSummarizeCompactAdapter(config),
   'sliding-window': createSlidingWindowAdapter,
   // The floor: the question alone, nothing from the session.
-  'no-context': () => createNoContextAdapter(),
+  'no-context': (config) => createNoContextAdapter(config.answerPrompt ? { answerPrompt: config.answerPrompt } : {}),
   oracle: createOracleAdapter
 };
 

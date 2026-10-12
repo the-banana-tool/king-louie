@@ -362,11 +362,14 @@ function noiseNote(n) {
 }
 
 // What the floor check's table says, in a run's summary and in a report.
-const FLOOR_NOTE = 'no-context shows the answer model the question alone, nothing from the session, under the same answer prompt. '
+const FLOOR_NOTE = 'no-context shows the answer model the question alone, nothing from the session, under a prompt of its own (answer-no-context-v1.md) '
+  + 'that asks for its best answer from general knowledge and reasoning; every other adapter answers under answer-v1.md. '
   + 'An answerable question judged correct there does not measure memory: it is flagged answerableWithoutEvidence in the records and stays in every figure above. '
   + 'The table gives each adapter\'s answer accuracy over all its answerable questions (the headline, unchanged) and with the flagged ones left out. '
   + 'Not checked: questions no-context has no verdict for, counted as not flagged. '
-  + 'The answer prompt tells the model to decline when the context lacks the answer, so the flagged count is a lower bound.';
+  + 'What a flag measures: this answer model got the question right from general knowledge, the question\'s own wording or a guess, in one try. '
+  + 'What it does not: a question another model could guess, or a mislabelled abstain question (an abstain question is never flagged; '
+  + 'no-context is asked to answer, so its own abstain accuracy and false answers say nothing about the question set).';
 
 // A priced model's reply that came back unpriced (no usage, zero tokens or
 // no cost) is counted at its estimate.
@@ -428,7 +431,8 @@ function renderSummaryMarkdown(config, summary, { spend = null, comparisons = []
     if (floored.length) {
       const nc = summary[NO_CONTEXT]?.answer;
       lines.push('', '## Floor check (no-context)', '');
-      lines.push(`${FLOOR_NOTE}${nc ? ` Flagged here: ${nc.floor.flagged} of ${nc.n} answerable questions no-context was judged on.` : ''}`, '');
+      const own = config.answer?.prompts?.answerNoContext?.sha256;
+      lines.push(`${FLOOR_NOTE}${own ? ` Its prompt: ${own.slice(0, 12)}.` : ''}${nc ? ` Flagged here: ${nc.floor.flagged} of ${nc.n} answerable questions no-context was judged on.` : ''}`, '');
       lines.push('| Adapter | Flagged | Accuracy, all answerable (n) | Accuracy, flagged left out (n) | Not checked |', '|---|---|---|---|---|');
       for (const [name, s] of floored) {
         const f = s.answer.floor;

@@ -14,8 +14,13 @@ const { runBenchmark } = require('../src/longhaul/run');
 const { createAdapter, adapterNames } = require('../src/longhaul/adapters');
 const { NO_CONTEXT } = require('../src/longhaul/adapters/no-context');
 const { summarize, renderSummaryMarkdown, floorFrom, stampFloor, difficultyBands } = require('../src/longhaul/scoring');
-const { writeReport, buildReport, loadRun } = require('../src/longhaul/report');
-const { NOTHING_SHOWN } = require('../src/longhaul/answer');
+const { writeReport, buildReport, loadRun, seriesOf, cohortOf } = require('../src/longhaul/report');
+const { NOTHING_SHOWN, DONT_KNOW } = require('../src/longhaul/answer');
+const { planCalls, answerKey, answerPromptFor } = require('../src/longhaul/answer-stage');
+const { estimateCalls } = require('../src/longhaul/cost');
+const { createFakeModels } = require('../src/longhaul/fake-models');
+const { placeholders, fillTemplate } = require('../src/longhaul/prompts');
+const { sha256Text } = require('../src/longhaul/files');
 const { scoreVerdict } = require('../src/longhaul/judge');
 const { writeSyntheticRoot, SYNTH_FIXTURES } = require('../src/longhaul/synthetic');
 const { loadSession } = require('../src/longhaul/session-format');
@@ -65,7 +70,8 @@ describe('no-context adapter', () => {
     assert.ok(adapterNames().includes('no-context'));
     assert.strictEqual(NO_CONTEXT, 'no-context');
     const adapter = createAdapter('no-context', { budgetTokens: 6000, tmpRoot: 'unused' });
-    assert.deepStrictEqual(adapter.describe(), { name: 'no-context' });
+    const own = loadPrompt('answerNoContext');
+    assert.deepStrictEqual(adapter.describe(), { name: 'no-context', answerPrompt: own.file, answerPromptSha256: own.sha256 });
     assert.ok(!adapter.usesModel && !adapter.frontierOnly && !adapter.longContext);
     for (const { sessionId: id } of SYNTH_FIXTURES) {
       const session = await loadSession(path.join(FIXTURE_ROOT, 'sessions', id));
@@ -326,9 +332,24 @@ describe('floor check in a run', () => {
     assert.ok(out.spend.spentUsd <= plan.estimate.totalUsd);
     assert.strictEqual(out.spend.calls, questions.length * 4);
 
-    // What no-context sent: the prompt with nothing in its context.
-    const empty = seen.filter((p) => p.includes(`<context>\n${NOTHING_SHOWN}\n</context>`));
-    assert.strictEqual(empty.length, questions.length);
+    // What no-context sent: its own prompt and the question, no context block
+    // at all. Every other adapter keeps answer-v1.md.
+    const own = loadPrompt('answerNoContext');
+    const head = own.text.slice(0, own.text.indexOf('{{question}}'));
+    const mine = seen.filter((p) => p.startsWith(head));
+    assert.strictEqual(mine.length, questions.length);
+    for (const p of mine) {
+      assert.ok(!p.includes('<context>') && !p.includes(NOTHING_SHOWN));
+      assert.strictEqual(p, fillTemplate(own.text, { question: find(questions, p).question }));
+    }
+    const v1Head = prompts.answer.text.slice(0, prompts.answer.text.indexOf('{{context}}'));
+    assert.strictEqual(seen.filter((p) => p.startsWith(v1Head)).length, questions.length, 'oracle answers under answer-v1.md');
+    assert.strictEqual(seen.length, questions.length * 2);
+    // Both hashes are in config.json; the adapter's describe() carries its own.
+    assert.deepStrictEqual(out.config.answer.prompts.answer, { file: 'answer-v1.md', sha256: prompts.answer.sha256 });
+    assert.deepStrictEqual(out.config.answer.prompts.answerNoContext, { file: 'answer-no-context-v1.md', sha256: own.sha256 });
+    assert.deepStrictEqual(out.config.adapters.find((a) => a.name === 'no-context'),
+      { name: 'no-context', answerPrompt: 'answer-no-context-v1.md', answerPromptSha256: own.sha256 });
 
     const nc = out.summary['no-context'];
     assert.strictEqual(nc.evidenceRecall, 0);
@@ -345,6 +366,119 @@ describe('floor check in a run', () => {
     for (const r of onDisk) assert.strictEqual(r.answerableWithoutEvidence, r.questionId === guessable.id, `${r.adapter} ${r.questionId}`);
     assert.match(fs.readFileSync(path.join(out.dir, 'summary.md'), 'utf8'), /## Floor check \(no-context\)/);
     assert.ok(JSON.parse(fs.readFileSync(path.join(out.dir, 'config.json'), 'utf8')).adapters.some((a) => a.name === 'no-context'));
+  });
+});
+
+describe('no-context answer prompt', () => {
+  const catalog = fixtureCatalog();
+  const prompts = { answer: loadPrompt('answer'), judge: loadPrompt('judge'), summarize: loadPrompt('summarize') };
+  const own = loadPrompt('answerNoContext');
+  const q = { id: 'q1', sessionId: 'S1', kind: 'user-said', question: 'Which port does the worker use?', answer: '8080', acceptableAnswers: ['8080'] };
+  const client = (provider, model) => ({ provider, model });
+
+  it('is a versioned file of its own: the question alone, the decline string, and answer-v1.md untouched', () => {
+    assert.strictEqual(own.file, 'answer-no-context-v1.md');
+    assert.deepStrictEqual(placeholders(own.text), ['question']);
+    assert.ok(own.text.includes(`reply exactly: ${DONT_KNOW}.`));
+    assert.match(own.text, /general knowledge/);
+    assert.notStrictEqual(own.sha256, prompts.answer.sha256);
+    // answer-v1.md as it was on f56149a (git blob bytes with LF line ends).
+    assert.strictEqual(sha256Text(prompts.answer.text.replace(/\r\n/g, '\n')), '6af0b918eea9cab12e526f8173c0bec94f844ed305f936f2d77d3fc0d3f7f332');
+    const adapter = createAdapter('no-context');
+    assert.deepStrictEqual(adapter.answerPrompt, own);
+    assert.strictEqual(createAdapter('oracle').answerPrompt, undefined);
+    assert.strictEqual(answerPromptFor(adapter, prompts), adapter.answerPrompt);
+    assert.strictEqual(answerPromptFor(createAdapter('oracle'), prompts), prompts.answer);
+  });
+
+  it('prices no-context at its own prompt\'s length and keys its cache by its own prompt', () => {
+    const adapter = createAdapter('no-context');
+    const oracle = createAdapter('oracle');
+    const item = (a, contextChars) => ({ adapter: a, q, record: { error: null }, adapterConfigSha256: 'cfg', contextSha256: sha256Text(''), contextChars });
+    const answer = {
+      prompts, answerClient: client('openai', 'gpt-6-lite'), judgeClient: client('anthropic', 'claude-haiku-4-5'),
+      answerMaxTokens: 400, judgeMaxTokens: 200, cache: { get: () => null }
+    };
+    const { calls } = planCalls({ items: [item(adapter, 0), item(oracle, 500)], deferred: [], answer });
+    const answers = calls.filter((c) => c.role === 'answer');
+    assert.strictEqual(answers.find((c) => c.adapter === 'no-context').inputChars, own.text.length + q.question.length);
+    assert.strictEqual(answers.find((c) => c.adapter === 'oracle').inputChars, prompts.answer.text.length + 500 + q.question.length);
+    assert.ok(estimateCalls(calls, catalog).totalUsd > 0);
+
+    // The same adapter config, question and context under the two prompts: two cache entries.
+    const key = (promptSha256) => answerKey({ adapterConfigSha256: 'cfg', question: q, contextSha256: sha256Text(''), client: answer.answerClient, promptSha256, maxTokens: 400 });
+    assert.notStrictEqual(key(own.sha256), key(prompts.answer.sha256));
+  });
+
+  it('never reuses a no-context answer cached under another prompt, while the other adapters stay cached', async () => {
+    const { env } = tmpHome();
+    const home = ensureDirs(resolveHome(env));
+    writeSyntheticRoot(home.root, [SYNTH_FIXTURES[0]]);
+    const questions = await readQuestions(questionsFile(home.root, SYNTH_FIXTURES[0].sessionId));
+    const seen = [];
+    const answerClient = {
+      provider: 'openai', model: 'gpt-6-lite',
+      async complete(prompt) { seen.push(prompt); return { text: "I don't know", llmMetrics: { inputTokens: 10, outputTokens: 5, costUsd: 0.0001 } }; }
+    };
+    const judgeClient = {
+      provider: 'anthropic', model: 'claude-haiku-4-5',
+      async complete() { return { text: JSON.stringify({ verdict: 'abstained', reason: 'fake' }), llmMetrics: { inputTokens: 10, outputTokens: 5, costUsd: 0.0001 } }; }
+    };
+    const cache = ModelCache.forHome(home);
+    const run = (noContext, stamp) => runBenchmark({
+      home, adapters: [noContext, createAdapter('oracle')], commit: 'abc', now: () => new Date(stamp),
+      answer: { answerClient, judgeClient, prompts, catalog, cache, concurrency: 1, retry: { wait: async () => {} } }
+    });
+    // The floor as f56149a ran it: no-context under answer-v1.md.
+    const old = { ...createAdapter('no-context'), answerPrompt: undefined, describe: () => ({ name: 'no-context' }) };
+    await run(old, '2026-10-12T10:00:00.000Z');
+    assert.strictEqual(seen.length, questions.length * 2);
+    const first = await run(createAdapter('no-context'), '2026-10-12T11:00:00.000Z');
+    assert.strictEqual(seen.length, questions.length * 3, 'only no-context is answered again');
+    assert.ok(seen.slice(questions.length * 2).every((p) => !p.includes('<context>')));
+    assert.ok(first.records.filter((r) => r.adapter === 'no-context').every((r) => r.answerCached === false));
+    assert.ok(first.records.filter((r) => r.adapter === 'oracle').every((r) => r.answerCached === true));
+    // The same prompt again: all cached. An edited prompt (a new file in practice): answered again.
+    await run(createAdapter('no-context'), '2026-10-12T12:00:00.000Z');
+    assert.strictEqual(seen.length, questions.length * 3);
+    const text = `${own.text}\n`;
+    await run(createAdapter('no-context', { answerPrompt: { ...own, file: 'answer-no-context-v2.md', text, sha256: sha256Text(text) } }), '2026-10-12T13:00:00.000Z');
+    assert.strictEqual(seen.length, questions.length * 4);
+  });
+
+  it('records its hash in config.json only for a run with no-context, and leaves every other series\' identity alone', async () => {
+    const { env } = tmpHome();
+    const home = ensureDirs(resolveHome(env));
+    const fake = createFakeModels();
+    const run = (adapterNames) => runBenchmark({
+      home, dataRoot: FIXTURE_ROOT, adapterNames, includeUnverified: true, commit: 'abc',
+      answer: { answerClient: fake.answer, judgeClient: fake.judge, prompts, catalog, cache: ModelCache.forHome(home), retry: { wait: async () => {} } }
+    });
+    const without = await run(['oracle']);
+    assert.strictEqual(without.config.answer.prompts.answerNoContext, null);
+    const withIt = await run(['oracle', 'no-context']);
+    assert.deepStrictEqual(withIt.config.answer.prompts.answerNoContext, { file: own.file, sha256: own.sha256 });
+    // One cohort, and the same oracle series, with and without no-context in the run.
+    assert.strictEqual(cohortOf(withIt.config), cohortOf(without.config));
+    assert.strictEqual(seriesOf(withIt.config, 'oracle'), seriesOf(without.config, 'oracle'));
+
+    // The setup hash of a run without no-context, pinned at its value on commit f56149a.
+    const config = {
+      commit: 'abcdef1234567890', adapters: [{ name: 'kl-recall' }],
+      answer: {
+        tier: 'grid', answerModel: { provider: 'openai', model: 'gpt-6-lite', maxTokens: 400 }, judgeModel: { provider: 'anthropic', model: 'claude-haiku-4-5', maxTokens: 200 },
+        prompts: { answer: { file: 'answer-v1.md', sha256: 'a'.repeat(64) }, judge: { file: 'judge-v1.md', sha256: 'b'.repeat(64), rulesSha256: 'c'.repeat(64) }, summarize: null }
+      }
+    };
+    const PINNED = 'kl-recall cfg:0ba3e474 @ grid openai/gpt-6-lite judge:anthropic/claude-haiku-4-5 commit:abcdef123456 setup:97286082';
+    assert.strictEqual(seriesOf(config, 'kl-recall'), PINNED);
+    const now = (answerNoContext) => ({ ...config, answer: { ...config.answer, prompts: { ...config.answer.prompts, answerNoContext } } });
+    assert.strictEqual(seriesOf(now(null), 'kl-recall'), PINNED, 'a run without no-context, as written from now on');
+    assert.strictEqual(seriesOf(now({ file: own.file, sha256: own.sha256 }), 'kl-recall'), PINNED, 'and beside no-context in one run');
+    // The prompt splits no-context's own series, through its describe() (cfg:).
+    const nc = (sha) => seriesOf({ ...config, adapters: [{ name: 'no-context', answerPrompt: own.file, answerPromptSha256: sha }] }, 'no-context');
+    assert.notStrictEqual(nc('d'.repeat(64)), nc('e'.repeat(64)));
+    assert.notStrictEqual(nc(own.sha256), seriesOf({ ...config, adapters: [{ name: 'no-context' }] }, 'no-context'), 'not the series f56149a wrote');
   });
 });
 

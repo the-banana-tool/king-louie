@@ -57,8 +57,17 @@ function judgeKey({ answerCacheKey, prompt, client, maxTokens }) {
   });
 }
 
+// The answer prompt an adapter's questions are asked under: answer-v1.md,
+// unless the adapter brings its own (no-context alone). The prompt's hash is
+// in the answer cache key and its length in the plan, so both follow it.
+function answerPromptFor(adapter, prompts) {
+  return adapter?.answerPrompt || prompts.answer;
+}
+
+// item.answerPrompt is the item's adapter's prompt (answerPromptFor).
 async function answerAndJudge(item, deps) {
   const { question } = item;
+  const answerPrompt = item.answerPrompt || deps.prompts.answer;
   const fields = { ...EMPTY_ANSWER_FIELDS };
   const meta = { sessionId: question.sessionId, questionId: question.id, adapter: item.adapter };
   const failed = (stage, err, reply = null) => {
@@ -72,13 +81,13 @@ async function answerAndJudge(item, deps) {
 
   const aKey = answerKey({
     adapterConfigSha256: item.adapterConfigSha256, question, contextSha256: item.contextSha256,
-    client: deps.answerClient, promptSha256: deps.prompts.answer.sha256, maxTokens: deps.answerMaxTokens
+    client: deps.answerClient, promptSha256: answerPrompt.sha256, maxTokens: deps.answerMaxTokens
   });
   let answer;
   try {
     answer = await cachedCall({
       cache: deps.cache, stage: 'answer', key: aKey, client: deps.answerClient,
-      prompt: buildAnswerPrompt(deps.prompts.answer.text, { context: item.context, question }),
+      prompt: buildAnswerPrompt(answerPrompt.text, { context: item.context, question }),
       maxTokens: deps.answerMaxTokens, hooks: deps.hooks, retry: deps.retry, meta
     });
   } catch (err) {
@@ -197,10 +206,10 @@ function planCalls({ items, deferred, answer }) {
   const calls = [];
   const counts = { answers: 0, answersCached: 0, judgments: 0, judgmentsCached: 0, summaries: 0, summariesCached: 0 };
   const model = (c) => ({ provider: c.provider, model: c.model, local: Boolean(c.local) });
-  const answerChars = (contextChars, q) => answer.prompts.answer.text.length + contextChars + q.question.length;
+  const answerChars = (adapter, contextChars, q) => answerPromptFor(adapter, answer.prompts).text.length + contextChars + q.question.length;
   const judgeChars = (q) => buildJudgePrompt(answer.prompts.judge.text, { question: q, reply: '' }).length;
   const pushAnswer = (adapter, q, contextChars) => {
-    calls.push({ role: 'answer', adapter, ...model(answer.answerClient), inputChars: answerChars(contextChars, q), maxTokens: answer.answerMaxTokens });
+    calls.push({ role: 'answer', adapter: adapter.name, ...model(answer.answerClient), inputChars: answerChars(adapter, contextChars, q), maxTokens: answer.answerMaxTokens });
     counts.answers += 1;
   };
   const pushJudge = (adapter, q, reply) => {
@@ -214,11 +223,11 @@ function planCalls({ items, deferred, answer }) {
     if (it.record.error) continue;
     const aKey = answerKey({
       adapterConfigSha256: it.adapterConfigSha256, question: it.q, contextSha256: it.contextSha256,
-      client: answer.answerClient, promptSha256: answer.prompts.answer.sha256, maxTokens: answer.answerMaxTokens
+      client: answer.answerClient, promptSha256: answerPromptFor(it.adapter, answer.prompts).sha256, maxTokens: answer.answerMaxTokens
     });
     const hit = answer.cache.get('answer', aKey);
     if (hit) counts.answersCached += 1;
-    else pushAnswer(it.adapter.name, it.q, it.contextChars);
+    else pushAnswer(it.adapter, it.q, it.contextChars);
     const judged = hit && answer.cache.get('judge', judgeKey({
       answerCacheKey: aKey, prompt: buildJudgePrompt(answer.prompts.judge.text, { question: it.q, reply: hit.text }), client: answer.judgeClient, maxTokens: answer.judgeMaxTokens
     }));
@@ -230,7 +239,7 @@ function planCalls({ items, deferred, answer }) {
     counts.summaries += d.estimate.calls.length;
     counts.summariesCached += d.estimate.cached;
     for (const q of d.qs) {
-      pushAnswer(d.adapter.name, q, d.estimate.contextChars);
+      pushAnswer(d.adapter, q, d.estimate.contextChars);
       pushJudge(d.adapter.name, q, null);
     }
   }
@@ -239,5 +248,5 @@ function planCalls({ items, deferred, answer }) {
 
 module.exports = {
   SPOT_CHECK_FRACTION, EMPTY_ANSWER_FIELDS, questionSha256, answerKey, judgeKey,
-  answerAndJudge, mapPool, spotCheckFile, writeSpotCheckSample, TIERS, selectQuestions, planCalls
+  answerPromptFor, answerAndJudge, mapPool, spotCheckFile, writeSpotCheckSample, TIERS, selectQuestions, planCalls
 };

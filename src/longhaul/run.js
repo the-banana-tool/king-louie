@@ -20,7 +20,7 @@ const {
 } = require('./scoring');
 const { writeFileAtomic, sha256File, sha256Text, byCodeUnit } = require('./files');
 const { ModelCache, stableStringify } = require('./model-cache');
-const { selectQuestions, planCalls, answerAndJudge, mapPool, spotCheckFile, writeSpotCheckSample } = require('./answer-stage');
+const { selectQuestions, planCalls, answerAndJudge, answerPromptFor, mapPool, spotCheckFile, writeSpotCheckSample } = require('./answer-stage');
 const { estimateCalls, checkBudget, SpendGuard, DEFAULT_MAX_USD, EST_CHARS_PER_TOKEN } = require('./cost');
 const { JUDGE_RULES_SHA256 } = require('./judge');
 const { retryable, callErrorCode, stopErrorFor, STOP_CODES } = require('./retry');
@@ -355,7 +355,11 @@ function answerConfig(answer, adapters, selection, estimate, cap) {
       // judge.js splices its kind rules and fixed texts into judge-v1.md;
       // rulesSha256 names them (the judge's cache key covers the rendered prompt).
       judge: { ...prompt(answer.prompts.judge), rulesSha256: JUDGE_RULES_SHA256 },
-      summarize: adapters.some((x) => x.usesModel) ? prompt(answer.prompts.summarize) : null
+      summarize: adapters.some((x) => x.usesModel) ? prompt(answer.prompts.summarize) : null,
+      // no-context's own answer prompt, only when it ran. Like summarize, it
+      // is not in the report's setup hash: the adapter's describe() carries
+      // it, so it splits that series alone (report.js setupHash).
+      answerNoContext: prompt(adapters.map((x) => x.answerPrompt).find(Boolean))
     },
     contextCapTokens: cap,
     maxUsd: answer.maxUsd,
@@ -540,7 +544,8 @@ async function runAnswerStage(run, options) {
       await mapPool(items.filter((it) => !it.record.error), answer.concurrency, async (it) => {
         const out = await answerAndJudge({
           question: it.q, adapter: it.adapter.name, adapterConfigSha256: it.adapterConfigSha256,
-          context: fs.readFileSync(it.contextFile, 'utf8'), contextSha256: it.contextSha256
+          context: fs.readFileSync(it.contextFile, 'utf8'), contextSha256: it.contextSha256,
+          answerPrompt: answerPromptFor(it.adapter, answer.prompts)
         }, deps);
         Object.assign(it.record, out.fields);
         fs.appendFileSync(recordsPath, `${JSON.stringify(it.record)}\n`);

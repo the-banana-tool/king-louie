@@ -454,6 +454,14 @@ Electron build.
   adapters other than `oracle`, `no-context` and `full-history`
   (`difficulty-bands.csv`, counts only). `--fake-models` always declines, so
   it flags nothing.
+- `no-context` alone answers under `prompts/answer-no-context-v1.md` (best
+  answer from general knowledge; `answer-v1.md` would make it decline), an
+  adapter's `answerPrompt`. Its hash is in `config.json`
+  (`answer.prompts.answerNoContext`), the adapter's `describe()` (so `cfg:`,
+  never `setup:`: other series keep their identity) and its answer cache
+  keys. A flag says this answer model got it right with nothing shown; it
+  does not find a mislabelled abstain question (never flagged; `no-context`'s
+  own abstain accuracy means nothing).
 - Smoke run of the answer stage (no models, no network, $0):
   `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models`.
 

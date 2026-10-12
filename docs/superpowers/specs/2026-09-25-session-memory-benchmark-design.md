@@ -321,10 +321,20 @@ and it can never leak. It needs no model for its context: it runs in
 evidence-only runs, in both tiers of the answer stage and with
 `--fake-models`, and its answer and judge calls are in the priced plan like
 any adapter's. It is a quality check on the question set, not a candidate
-system. It uses the same `answer-v1.md` as every adapter, with the prompt's
-"(the memory system showed nothing)" in place of a context; that prompt tells
-the model to decline when the context lacks the answer, so what it gets
-right is a lower bound on what is answerable without evidence (§8).
+system. It is the one adapter with an answer prompt of its own,
+`answer-no-context-v1.md` (owner decision 2026-10-12): `answer-v1.md` tells
+the model to decline when the context lacks the answer, so under it the
+floor would only catch a model that disobeys. The new prompt says there is
+no context and asks for the model's best answer from general knowledge and
+reasoning, with the same exact "I don't know" only when it truly cannot
+answer. Every other adapter keeps `answer-v1.md`. The prompt's hash is in
+`config.json` (`answer.prompts.answerNoContext`, null in a run without
+`no-context`), in the adapter's `describe()` and in its answer cache keys,
+and the plan prices its calls at its length. Like the summarize prompt it is
+not in the report's `setup:` hash but in the adapter's `cfg:`, so it splits
+the `no-context` series alone: a run without `no-context` keeps the setup
+hash and series it had, and `no-context` shares a cohort with the adapters
+it checks (§8).
 
 `evidenceSeqsShown` is how an adapter reports which message sequences its
 context contains; for `kl-recall` it comes from provenance, for others from
@@ -399,6 +409,14 @@ columns are scored.**
   cohort (same tier, answer model, judge model, commit and setup), from the
   same run or another; a series whose cohort has none (an older run) is left
   out of the floor table, not shown as zero.
+  What a flag measures: this answer model, asked for its best answer with
+  nothing shown, got the question right in one try, from general knowledge,
+  the question's own wording or a guess. What it does not: a question
+  another answer model could guess; and a mislabelled abstain question (an
+  abstain question is never flagged, and because `no-context` is asked to
+  answer, its own abstain accuracy and false-answer rate say nothing about
+  the question set). Its accuracy is under another prompt than the other
+  adapters', so it is a check, not a row to compare with them.
 - **Difficulty bands** (report only, `difficulty-bands.csv`): per cohort,
   each answerable question by how many of the series that judged it got it
   right: `none`, `some`, `all`. `oracle`, `no-context` and `full-history` are
