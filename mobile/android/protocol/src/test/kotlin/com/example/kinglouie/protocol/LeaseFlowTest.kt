@@ -52,6 +52,33 @@ class LeaseFlowTest {
         assertTrue(!Leases.isPausedForContact("ended", "no_contact"))
     }
 
+    /** Fourth security review, finding 3: a pending lease this phone signed a grant for may still start; when its row stays. */
+    @Test
+    fun mayStillStart() {
+        assertTrue(Leases.mayStillStart("pending", true))
+        assertTrue(!Leases.mayStillStart("pending", false))
+        for (state in listOf("active", "suspended", "ended", "")) assertTrue(!Leases.mayStillStart(state, true))
+        // Named by an accepted listing: kept only while still pending.
+        assertTrue(Leases.keepsMayStart("pending", false))
+        assertTrue(Leases.keepsMayStart("pending", true))
+        for (state in listOf("active", "suspended", "ended")) assertTrue(!Leases.keepsMayStart(state, false))
+        // Not named: kept until the request has expired.
+        assertTrue(Leases.keepsMayStart(null, false))
+        assertTrue(!Leases.keepsMayStart(null, true))
+        assertEquals("May still start on gpu-box", Leases.mayStillStartTitle("gpu-box"))
+        assertTrue(!Leases.mayStillStartTitle("gpu\u202Ebox").contains('\u202E'))
+    }
+
+    /** Fourth security review, finding 2: the words for a node not asked yet and for one whose listing was accepted. */
+    @Test
+    fun checkedWords() {
+        assertEquals("Not checked yet: gpu-box", Leases.notCheckedYet("gpu-box"))
+        assertEquals("Checked gpu-box at 14:02: no computer-use session", Leases.checked("gpu-box", "14:02", 0, 0))
+        assertEquals("Checked gpu-box at 14:02: 1 computer-use session running", Leases.checked("gpu-box", "14:02", 1, 0))
+        assertEquals("Checked gpu-box at 14:02: 2 computer-use sessions running; 1 request waiting for an answer", Leases.checked("gpu-box", "14:02", 2, 1))
+        assertEquals("Checked gpu-box at 14:02: no computer-use session; 2 requests waiting for an answer", Leases.checked("gpu-box", "14:02", 0, 2))
+    }
+
     /** R-F5-18: which leases get a banner, and what a phone says of one it did not grant. */
     @Test
     fun liveAndGrantedBy() {

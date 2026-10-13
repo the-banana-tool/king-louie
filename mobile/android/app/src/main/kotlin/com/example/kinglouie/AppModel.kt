@@ -456,6 +456,15 @@ class AppModel(context: Context) {
     /** Request ids whose decision is being signed or sent. */
     val decidingLease = mutableStateListOf<String>()
     private val decidedLeaseRequests = HashSet<String>()
+
+    /**
+     * Leases this phone has signed a grant for, by lease id, with when the
+     * request that grant answers expires (epoch ms; fourth security review,
+     * finding 3). Kept from the signature on, whatever the relay then
+     * answered: a relay can say 503 and deliver the grant later. In memory
+     * only: a phone that was restarted in between no longer knows.
+     */
+    private val signedLeaseGrants = HashMap<String, Long>()
     private var demoLeaseJob: Job? = null
 
     /** A `lease` push (R-F5-6): say where to look. Nothing is fetched until the owner taps. */
@@ -498,6 +507,7 @@ class AppModel(context: Context) {
                     val check = Leases.checkListing(listed, pin, nonce, deviceId ?: "")
                     leaseChecks[pin.id] = if (check.accepted) {
                         val named = Leases.listedStatuses(check, pin)
+                        dropMayStartRows(pin, named.map { it.leaseId }.toSet(), api)
                         LeaseNodeCheck.Confirmed(checkedAt, named.count { Leases.isLive(it.state) }, named.count { it.state == "pending" })
                     } else {
                         LeaseNodeCheck.Unconfirmed
@@ -561,8 +571,41 @@ class AppModel(context: Context) {
         val known = runningLeases.indexOfFirst { it.leaseId == status.leaseId }
         if (!Leases.acceptsStatus(status, if (known >= 0) runningLeases[known].appliedSeq else 0)) return
         if (known >= 0) runningLeases.removeAt(known)
-        if (!Leases.isLive(status.state)) return
+        // Finding 3: a lease still waiting for an answer gets a row too when this phone
+        // signed a grant for it ("May still start").
+        if (!Leases.isLive(status.state) && !Leases.mayStillStart(status.state, status.leaseId in signedLeaseGrants)) {
+            if (status.state == "ended") signedLeaseGrants.remove(status.leaseId)
+            return
+        }
         runningLeases.add(RunningLease(pin.id, pin.name, status.leaseId, status.state, status.reason, status.seq, status.grantedByDevice, status.grantedByName, signed))
+    }
+
+    /**
+     * After a listing [pin] signed was accepted: the "May still start" rows
+     * of that node the listing does not name (finding 3). Such a row goes
+     * only once the request its grant answered has expired, on this phone's
+     * clock and on the relay-corrected one (so a relay that pushes the clock
+     * forward gains nothing). A row the listing names is handled by its
+     * signed status (noteListedLease). Nothing is signed or sent here
+     * (R-F5-5): Stop is the owner's tap.
+     */
+    private fun dropMayStartRows(pin: NodePin, named: Set<String>, api: RelayApi) {
+        val relayNowMs = api.now().toEpochMilli()
+        fun gone(leaseId: String): Boolean {
+            if (leaseId in named) return false
+            val expires = signedLeaseGrants[leaseId]
+            val expired = expires == null || (expires < System.currentTimeMillis() && expires < relayNowMs)
+            return !Leases.keepsMayStart(null, expired)
+        }
+        val dropped = runningLeases.filter { it.nodeId == pin.id && it.state == "pending" && gone(it.leaseId) }.map { it.leaseId }.toMutableSet()
+        // The same lease when it is the one on the live screen (the owner is on Pending when this runs).
+        val live = liveLease
+        if (live != null && live.nodeId == pin.id && live.state == "pending" && !live.busy && gone(live.leaseId)) {
+            dropped.add(live.leaseId)
+            closeLiveLease()
+        }
+        runningLeases.removeAll { it.leaseId in dropped }
+        signedLeaseGrants.keys.removeAll(dropped)
     }
 
     /** One send, never repeated (R-F5-5): the node's answer, or why there is none. */
@@ -602,6 +645,8 @@ class AppModel(context: Context) {
                 } else {
                     signEnvelope(k, Leases.deny(item.request, k.deviceId, signedAt), "Deny computer use", promptText(item.nodeName, 30))
                 }
+                // Signed: from here on the lease may start, whatever the relay answers.
+                if (grant) signedLeaseGrants[item.request.leaseId] = Timestamps.epochMillis(item.request.expiresAt) ?: Long.MAX_VALUE
                 val sent = sendLease(api, "grant", item.request.leaseId, envelope)
                 when (val outcome = sent.outcome) {
                     is SendOutcome.Unconfirmed ->
@@ -1009,6 +1054,7 @@ class AppModel(context: Context) {
         closeLiveLease()
         runningLeases.clear()
         leaseChecks.clear()
+        signedLeaseGrants.clear()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
         decidingLease.clear()
@@ -2078,6 +2124,7 @@ class AppModel(context: Context) {
         closeLiveLease()
         runningLeases.clear()
         leaseChecks.clear()
+        signedLeaseGrants.clear()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
         decidingLease.clear()

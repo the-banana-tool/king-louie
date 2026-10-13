@@ -331,6 +331,12 @@ final class AppModel: ObservableObject {
     private var leaseOpenTask: Task<Void, Never>?
     @Published private(set) var decidingLease: Set<String> = []
     private var decidedLeaseRequests = Set<String>()
+    /// Leases this phone has signed a grant for, by lease id, with when the
+    /// request that grant answers expires (fourth security review, finding
+    /// 3). Kept from the signature on, whatever the relay then answered: a
+    /// relay can say 503 and deliver the grant later. In memory only: a
+    /// phone that was restarted in between no longer knows.
+    private var signedLeaseGrants: [String: Date] = [:]
     private var liveTask: Task<Void, Never>?
     private var demoLeaseTimer: Task<Void, Never>?
 
@@ -385,6 +391,7 @@ final class AppModel: ObservableObject {
                 let check = Leases.checkListing(entries, pin: pin, nonce: nonce, deviceId: key.deviceId)
                 guard check.accepted else { checks[pin.id] = .unconfirmed; continue }
                 let listed = Leases.listedStatuses(check, pin: pin)
+                dropMayStartRows(of: pin, named: Set(listed.map { $0.leaseId }), relayNow: client.now())
                 checks[pin.id] = .confirmed(at: checkedAt, running: listed.filter { Leases.isLive(state: $0.state) }.count,
                                             waiting: listed.filter { $0.state == "pending" }.count)
             }
@@ -415,6 +422,8 @@ final class AppModel: ObservableObject {
                 let message = try Leases.grant(to: item.request, apps: Array(apps), minutes: minutes, deviceId: key.deviceId, signedAt: signedAt)
                 let names = item.request.apps.filter { apps.contains($0.id) }.map { Self.promptText($0.name, 30) }.joined(separator: ", ")
                 envelope = try await key.signEnvelope(message, reason: "Allow computer use of \(names) on \(Self.promptText(item.nodeName, 30)) for \(minutes) min")
+                // Signed: from here on the lease may start, whatever the relay answers.
+                signedLeaseGrants[item.request.leaseId] = Timestamps.date(item.request.expiresAt) ?? Date.distantFuture
             } else {
                 envelope = try await key.signEnvelope(Leases.deny(item.request, deviceId: key.deviceId, signedAt: signedAt), reason: "Deny computer use on \(Self.promptText(item.nodeName, 30))")
             }
@@ -633,10 +642,40 @@ final class AppModel: ObservableObject {
         let known = runningLeases.firstIndex(where: { $0.leaseId == status.leaseId })
         guard Leases.acceptsStatus(status, appliedSeq: known.map { runningLeases[$0].appliedSeq } ?? 0) else { return }
         if let known { runningLeases.remove(at: known) }
-        guard Leases.isLive(state: status.state) else { return }
+        // Finding 3: a lease still waiting for an answer gets a row too when
+        // this phone signed a grant for it ("May still start").
+        let mayStart = Leases.mayStillStart(state: status.state, signedGrant: signedLeaseGrants[status.leaseId] != nil)
+        guard Leases.isLive(state: status.state) || mayStart else {
+            if status.state == "ended" { signedLeaseGrants[status.leaseId] = nil }
+            return
+        }
         runningLeases.append(RunningLease(nodeId: pin.id, nodeName: pin.name, leaseId: status.leaseId, state: status.state, reason: status.reason,
                                           appliedSeq: status.seq, grantedByDevice: status.grantedByDevice, grantedByName: status.grantedByName,
                                           status: signed))
+    }
+
+    /// After a listing `pin` signed was accepted: the "May still start" rows
+    /// of that node the listing does not name (finding 3). Such a row goes
+    /// only once the request its grant answered has expired, on this phone's
+    /// clock and on the relay-corrected one (so a relay that pushes the
+    /// clock forward gains nothing). A row the listing names is handled by
+    /// its signed status (`noteListedLease`). Nothing is sent here.
+    private func dropMayStartRows(of pin: NodePin, named: Set<String>, relayNow: Date) {
+        func gone(_ leaseId: String) -> Bool {
+            let expired = signedLeaseGrants[leaseId].map { $0 < Date() && $0 < relayNow } ?? true
+            return !Leases.keepsMayStart(listedState: nil, requestExpired: expired)
+        }
+        var dropped: [String] = []
+        for row in runningLeases where row.nodeId == pin.id && row.state == "pending" && !named.contains(row.leaseId) {
+            if gone(row.leaseId) { dropped.append(row.leaseId) }
+        }
+        // The same lease when it is the one being followed, unless its view is open.
+        if let live = liveLease, live.nodeId == pin.id, live.state == "pending", !named.contains(live.leaseId), !showLiveLease, gone(live.leaseId) {
+            dropped.append(live.leaseId)
+            closeLiveLease()
+        }
+        runningLeases.removeAll { dropped.contains($0.leaseId) }
+        for leaseId in dropped { signedLeaseGrants[leaseId] = nil }
     }
 
     private func runningRow(_ live: LiveLease) -> RunningLease {
@@ -658,6 +697,8 @@ final class AppModel: ObservableObject {
     /// again, and this phone watches only with the live view open (R-F5-19):
     /// so for its own lease the banner says what to do.
     func bannerTitle(_ lease: RunningLease) -> String {
+        // Finding 3: not running, and not over: a grant this phone signed may still reach it.
+        if lease.state == "pending" { return Leases.mayStillStartTitle(nodeName: lease.nodeName) }
         let node = Display.escape(lease.nodeName)
         if Leases.isPausedForContact(state: lease.state, reason: lease.reason) {
             return grantedByOtherText(device: lease.grantedByDevice, name: lease.grantedByName) == nil
@@ -934,6 +975,7 @@ final class AppModel: ObservableObject {
         closeLiveLease()
         runningLeases = []
         leaseChecks = [:]
+        signedLeaseGrants = [:]
         showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []
@@ -1914,6 +1956,7 @@ final class AppModel: ObservableObject {
         closeLiveLease()
         runningLeases = []
         leaseChecks = [:]
+        signedLeaseGrants = [:]
         showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []

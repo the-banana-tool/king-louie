@@ -176,6 +176,30 @@ public enum Leases {
     /// click and type. Such a lease has a banner and a Stop (R-F5-18).
     public static func isLive(state: String) -> Bool { state == "active" || state == "suspended" }
 
+    /// A lease that may still start (fourth security review, finding 3).
+    /// Its node signed that it is waiting for a phone's answer, and this
+    /// phone signed a grant for it that the node never confirmed. A relay
+    /// can hold such a grant back (answering 503) and deliver it later, so
+    /// the lease is not running and is not over either. It gets a row with
+    /// a Stop, like a running one.
+    public static func mayStillStart(state: String, signedGrant: Bool) -> Bool { state == "pending" && signedGrant }
+
+    public static func mayStillStartTitle(nodeName: String) -> String { "May still start on \(Display.escape(nodeName))" }
+
+    /// Under that row.
+    public static let mayStillStartDetail = "This phone signed an Allow for it that the computer did not confirm. The relay could still deliver it. Stop cancels it."
+
+    /// Whether such a row stays after a listing its node signed was
+    /// accepted. `listedState`: the state the listing gives the lease, nil
+    /// when it does not name it. Named: it stays while still pending (a
+    /// live lease has its ordinary row, an ended one none). Not named: it
+    /// stays until the request the grant answered has expired, and goes
+    /// only then. Without an accepted listing nothing is dropped.
+    public static func keepsMayStart(listedState: String?, requestExpired: Bool) -> Bool {
+        guard let listedState else { return !requestExpired }
+        return listedState == "pending"
+    }
+
     /// What to say beside Stop for a lease another phone granted (R-F5-18):
     /// nil when this phone granted it or the node has not said who did.
     /// The text is escaped for display.

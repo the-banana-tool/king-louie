@@ -195,6 +195,8 @@ struct LeaseBanner: View {
                         if let by = model.grantedByOtherText(device: lease.grantedByDevice, name: lease.grantedByName) {
                             Text(by).font(.caption).foregroundStyle(.secondary)
                         }
+                        // Finding 3: a lease that is not running yet and may still start.
+                        if lease.state == "pending" { Text(Leases.mayStillStartDetail).font(.caption).foregroundStyle(.secondary) }
                     }
                     Spacer()
                     Button("Stop", role: .destructive) { Task { await model.stopLease(lease) } }

@@ -1071,6 +1071,32 @@ describe('lock, expiry and revoke', () => {
       assert.deepEqual(leases.listFor('not-a-device'), []);
     });
 
+    // Fourth security review, finding 3: a relay can answer a phone's grant
+    // with 503 and deliver it later. Until then the lease is pending, and a
+    // listing names it as such, so the phone that signed the grant can show
+    // "may still start" with a Stop. That Stop is an ordinary revoke.
+    it('a pending lease is listed as pending; a revoke from any enrolled phone ends it, and the grant that was held back is then refused', async () => {
+      const waiting = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      waiting.catch(() => {});
+      const request = relay.last('kl.lease.request').envelope;
+      const held = phone.leaseGrant(request, { minutes: 10 });
+      const leaseId = open(request).message.lease_id;
+      const answer = leases.listingFor(phone.deviceId, 'n'.repeat(43));
+      assert.deepEqual(answer.statuses.map((e) => [open(e).message.lease_id, open(e).message.state]), [[leaseId, 'pending']]);
+      const checked = L.verifyLeaseListing(answer.listing, { nodeId: identity.nodeId, nodePublicKeyHex: identity.publicKey.toString('hex'), nonce: 'n'.repeat(43), deviceId: phone.deviceId, statuses: answer.statuses });
+      assert.equal(checked.accepted, true, checked.reason);
+      // Stop, from the other phone (R-F5-18): the pending lease ends.
+      const stopped = leases.onRevoke(other.leaseRevoke(identity.nodeId, leaseId));
+      assert.equal(stopped.state, 'ended');
+      assert.equal(open(stopped.status).message.state, 'ended');
+      await assert.rejects(waiting, (e) => e.code === 'lease_revoked');
+      // The grant the relay kept back arrives now: there is nothing left to grant.
+      const late = leases.onGrant(held);
+      assert.deepEqual([late.state, late.reason], ['rejected', 'unknown_request']);
+      assert.equal(leases.current(), null);
+      assert.deepEqual(leases.listingFor(phone.deviceId, 'n'.repeat(43)).statuses.map((e) => open(e).message.state), ['ended']);
+    });
+
     it('listFor lists at most the live lease and the four that ended last', async () => {
       for (let i = 0; i < 6; i += 1) {
         openJobs.add(`job-x${i}`);

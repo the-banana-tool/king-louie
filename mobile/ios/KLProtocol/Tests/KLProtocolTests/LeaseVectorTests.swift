@@ -206,6 +206,34 @@ final class LeaseVectorTests: XCTestCase {
     }
 
     /// R-F5-18: which leases get a banner, and what a phone says of one it did not grant.
+    /// Fourth security review, finding 3: a pending lease this phone signed
+    /// a grant for may still start; when its row stays.
+    func testMayStillStart() {
+        XCTAssertTrue(Leases.mayStillStart(state: "pending", signedGrant: true))
+        XCTAssertFalse(Leases.mayStillStart(state: "pending", signedGrant: false))
+        for state in ["active", "suspended", "ended", ""] { XCTAssertFalse(Leases.mayStillStart(state: state, signedGrant: true), state) }
+        // Named by an accepted listing: kept only while still pending.
+        XCTAssertTrue(Leases.keepsMayStart(listedState: "pending", requestExpired: false))
+        XCTAssertTrue(Leases.keepsMayStart(listedState: "pending", requestExpired: true))
+        for state in ["active", "suspended", "ended"] { XCTAssertFalse(Leases.keepsMayStart(listedState: state, requestExpired: false), state) }
+        // Not named: kept until the request has expired.
+        XCTAssertTrue(Leases.keepsMayStart(listedState: nil, requestExpired: false))
+        XCTAssertFalse(Leases.keepsMayStart(listedState: nil, requestExpired: true))
+        XCTAssertEqual(Leases.mayStillStartTitle(nodeName: "gpu-box"), "May still start on gpu-box")
+        XCTAssertFalse(Leases.mayStillStartTitle(nodeName: "gpu\u{202E}box").unicodeScalars.contains("\u{202E}"))
+    }
+
+    /// Fourth security review, finding 2: the words for a node not asked
+    /// yet and for one whose listing was accepted.
+    func testCheckedWords() {
+        XCTAssertEqual(Leases.notCheckedYet(nodeName: "gpu-box"), "Not checked yet: gpu-box")
+        XCTAssertEqual(Leases.checked(nodeName: "gpu-box", at: "14:02", running: 0, waiting: 0), "Checked gpu-box at 14:02: no computer-use session")
+        XCTAssertEqual(Leases.checked(nodeName: "gpu-box", at: "14:02", running: 1, waiting: 0), "Checked gpu-box at 14:02: 1 computer-use session running")
+        XCTAssertEqual(Leases.checked(nodeName: "gpu-box", at: "14:02", running: 2, waiting: 1), "Checked gpu-box at 14:02: 2 computer-use sessions running; 1 request waiting for an answer")
+        XCTAssertEqual(Leases.checked(nodeName: "gpu-box", at: "14:02", running: 0, waiting: 2), "Checked gpu-box at 14:02: no computer-use session; 2 requests waiting for an answer")
+        XCTAssertEqual(Leases.listedStatuses(ListingCheck(accepted: false, reason: "no_listing", statuses: []), pin: NodePin(id: "kl-x", name: "x", key: "")), [])
+    }
+
     func testLiveAndGrantedBy() {
         XCTAssertTrue(Leases.isLive(state: "active"))
         XCTAssertTrue(Leases.isLive(state: "suspended"))

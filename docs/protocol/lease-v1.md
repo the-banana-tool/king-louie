@@ -186,11 +186,30 @@ a `kl.lease.listing`:
   <node>"). On iOS a session that has locked asks nothing and leaves what
   is shown, with its time. Android asks only on the owner's tap.
 
+A lease that may still start (2026-10-13, fourth security review). A relay
+can answer a phone's grant with `503` and deliver it later, any time before
+the request expires. Until then the lease is `pending`, which is not
+running, and a listing signed meanwhile names it as `pending`. So a phone
+remembers each lease it has signed a grant for, from the signature on and
+whatever the relay answered, and shows such a lease, when a status its node
+signed says `pending`, as "May still start on <node>", with the same Stop
+as a running lease: a `kl.lease.revoke` the phone signs (any enrolled phone
+may stop a lease, R-F5-18; a revoke ends a pending lease and its request,
+so a grant delivered afterwards is `unknown_request`). The row stays until
+a status the node signed says the lease ended, or a listing that passed no
+longer names it after the request's `expires_at` has passed on the phone's
+own clock and on the relay-corrected one. The phone revokes nothing by
+itself and sends no grant again by itself; Android sends each on the
+owner's tap only (R-F5-5). The memory is the app's own and is lost when the
+app is restarted: a phone restarted between its grant and the listing shows
+the lease only once it runs.
+
 The node does not remember listing nonces and judges nothing by them: it is
 the phone that needs the answer to be fresh. `at` is informational, like
-`signed_at`. What a listing does not say: anything about a request still
-waiting for an answer (a relay can withhold a pending request; nothing runs
-until it is granted), and anything after it was signed. An answer is as old
+`signed_at`. What a listing does not say: whether a pending lease will be
+granted (it names the lease as `pending`; a relay can withhold the request
+itself, and nothing runs until a grant reaches the node), and anything
+after it was signed. An answer is as old
 as its request took: a relay can hold a reply back for as long as the phone
 waits for it (the phones' request timeout, 40 s), not longer.
 

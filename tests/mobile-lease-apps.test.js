@@ -266,7 +266,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(listed, /guard let nodeId = entry\["node_id"\]\?\.stringValue, let pin = state\.nodes\.first\(where: \{ \$0\.id == nodeId \}\),\n\s+let json = entry\["status"\], let signed = try\? Envelope\(json: json\),\n\s+let message = Leases\.verifiedMessage\(signed, pin: pin\), let status = LeaseStatus\(message: message\) else \{ return \}/);
     assert.match(listed, /apply\(signed, pin: pin, deviceId: deviceId, to: &live\)/);
     assert.match(listed, /guard Leases\.acceptsStatus\(status, appliedSeq: known\.map \{ runningLeases\[\$0\]\.appliedSeq \} \?\? 0\) else \{ return \}/);
-    assert.match(listed, /guard Leases\.isLive\(state: status\.state\) else \{ return \}/);
+    assert.match(listed, /guard Leases\.isLive\(state: status\.state\) \|\| mayStart else \{\n\s+if status\.state == "ended" \{ signedLeaseGrants\[status\.leaseId\] = nil \}\n\s+return\n\s+\}/);
     assert.ok(listed.indexOf('Leases.verifiedMessage(') < listed.indexOf('runningLeases.append('));
     // It comes with the one list request, and only from entries that carry no request.
     const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
@@ -307,7 +307,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(note, /val status = Leases\.verifiedMessage\(signed, pin\)\?\.let \{ LeaseStatus\.from\(it\) \} \?: return/);
     assert.match(note, /liveLease = applyLease\(signed, pin, live, deviceId \?: ""\)/);
     assert.match(note, /if \(!Leases\.acceptsStatus\(status, if \(known >= 0\) runningLeases\[known\]\.appliedSeq else 0\)\) return/);
-    assert.match(note, /if \(!Leases\.isLive\(status\.state\)\) return/);
+    assert.match(note, /if \(!Leases\.isLive\(status\.state\) && !Leases\.mayStillStart\(status\.state, status\.leaseId in signedLeaseGrants\)\) \{\n\s+if \(status\.state == "ended"\) signedLeaseGrants\.remove\(status\.leaseId\)\n\s+return\n\s+\}/);
     assert.ok(note.indexOf('Leases.verifiedMessage(') < note.indexOf('runningLeases.add('));
     const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
     assert.match(refreshAndroid, /val listed = api\.leases\(nonce\)\n/, 'R-F5-20: the list request carries this request\'s nonce');
@@ -489,6 +489,84 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(pending, /is AppModel\.LeaseNodeCheck\.Confirmed ->\n\s+Text\(Leases\.checked\(pin\.name, DateFormat\.getDateTimeInstance\(DateFormat\.SHORT, DateFormat\.SHORT\)\.format\(Date\(check\.atMs\)\), check\.running, check\.waiting\)\)/);
     assert.match(pending, /if \(model\.nodes\.any \{ model\.leaseChecks\[it\.id\] == null \}\) Text\(Leases\.NOT_CHECKED_YET_DETAIL \+ /);
     assert.equal(count(screens, 'Leases.checked('), 1);
+  });
+
+  // Fourth security review, finding 3. A relay can answer a grant with 503
+  // and deliver it just after a verified listing; the lease was "pending"
+  // then, which is not "live", so the phone showed nothing running. A lease
+  // this phone signed a grant for that its node lists as pending is now a
+  // row that says "May still start", with the same Stop as any other row
+  // (a revoke the phone signs; any enrolled phone may stop, R-F5-18). The
+  // row goes when the node signs that the lease ended, or when a listing
+  // that was accepted no longer names it after the request has expired.
+  it('finding 3: a pending lease this phone signed a grant for is shown as "May still start", with a working Stop, until a signed word says it cannot', () => {
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    assert.match(swift, /public static func mayStillStart\(state: String, signedGrant: Bool\) -> Bool \{ state == "pending" && signedGrant \}/);
+    assert.match(kotlin, /fun mayStillStart\(state: String, signedGrant: Boolean\): Boolean = state == "pending" && signedGrant/);
+    assert.match(swift, /public static func mayStillStartTitle\(nodeName: String\) -> String \{ "May still start on \\\(Display\.escape\(nodeName\)\)" \}/);
+    assert.match(kotlin, /fun mayStillStartTitle\(nodeName: String\): String = "May still start on \$\{Display\.escape\(nodeName\)\}"/);
+    // Absent from an accepted listing: gone only once the request has expired. Named: kept only while still pending.
+    assert.match(swift, /public static func keepsMayStart\(listedState: String\?, requestExpired: Bool\) -> Bool \{\n\s+guard let listedState else \{ return !requestExpired \}\n\s+return listedState == "pending"\n\s+\}/);
+    assert.match(kotlin, /fun keepsMayStart\(listedState: String\?, requestExpired: Boolean\): Boolean = if \(listedState == null\) !requestExpired else listedState == "pending"/);
+
+    // iOS.
+    const ios = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    // The grant is remembered once it is signed, before it is sent: whatever the relay then answers.
+    const decideIos = section(iosLeases, 'func decideLease', '\n    }\n');
+    assert.ok(decideIos.indexOf('envelope = try await key.signEnvelope(message, reason: "Allow computer use') < decideIos.indexOf('signedLeaseGrants[item.request.leaseId] = '));
+    assert.ok(decideIos.indexOf('signedLeaseGrants[item.request.leaseId] = ') < decideIos.indexOf('client.leaseDecision("grant"'));
+    assert.equal(count(decideIos, 'signedLeaseGrants['), 1, 'for a grant only, never a deny');
+    // A status its node signed: live, or pending with a grant this phone signed, gets a row; "ended" forgets the grant.
+    const noteIos = section(iosLeases, 'private func noteListedLease', '\n    }\n');
+    assert.match(noteIos, /let mayStart = Leases\.mayStillStart\(state: status\.state, signedGrant: signedLeaseGrants\[status\.leaseId\] != nil\)\n\s+guard Leases\.isLive\(state: status\.state\) \|\| mayStart else \{\n\s+if status\.state == "ended" \{ signedLeaseGrants\[status\.leaseId\] = nil \}\n\s+return\n\s+\}/);
+    assert.ok(noteIos.indexOf('Leases.verifiedMessage(signed, pin: pin)') < noteIos.indexOf('Leases.mayStillStart('), 'only on the pinned node\'s signed word');
+    // Dropped for an absence only after a listing that was accepted, and only once the request has expired on both clocks.
+    const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
+    assert.ok(refreshIos.indexOf('guard check.accepted else { checks[pin.id] = .unconfirmed; continue }') < refreshIos.indexOf('dropMayStartRows(of: pin, named: Set(listed.map { $0.leaseId }), relayNow: client.now())'));
+    assert.equal(count(iosLeases, 'dropMayStartRows('), 2, 'declared, and called from that one place');
+    const dropIos = section(iosLeases, 'private func dropMayStartRows', '\n    }\n');
+    assert.match(dropIos, /signedLeaseGrants\[leaseId\]\.map \{ \$0 < Date\(\) && \$0 < relayNow \} \?\? true/);
+    assert.match(dropIos, /Leases\.keepsMayStart\(listedState: nil, requestExpired: expired\)/);
+    assert.match(dropIos, /where row\.nodeId == pin\.id && row\.state == "pending" && !named\.contains\(row\.leaseId\)/);
+    // The row: its own words, and the Stop every row has.
+    assert.match(section(iosLeases, 'func bannerTitle', '\n    }\n'), /if lease\.state == "pending" \{ return Leases\.mayStillStartTitle\(nodeName: lease\.nodeName\) \}/);
+    const views = read('mobile', 'ios', 'App', 'LeaseViews.swift');
+    const banner = views.slice(views.indexOf('struct LeaseBanner'));
+    assert.match(banner, /if lease\.state == "pending" \{ Text\(Leases\.mayStillStartDetail\)/);
+    assert.match(banner, /Button\("Stop", role: \.destructive\) \{ Task \{ await model\.stopLease\(lease\) \} \}/);
+    // Stop is the owner's tap and nothing else: no revoke is built anywhere but in killSwitch (no automatic revoke after an unconfirmed grant).
+    assert.equal(count(ios, 'Leases.revoke('), 1);
+    assert.equal(count(ios, 'signedLeaseGrants = [:]'), 2, 'emptied when the phone is unpaired or reset');
+
+    // Android: the same, and nothing by itself (R-F5-5).
+    const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+    const android = read(...kt, 'AppModel.kt');
+    const live = section(android, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+    const decide = section(live, 'fun decideLease', '\n    }\n');
+    assert.match(decide, /if \(grant\) signedLeaseGrants\[item\.request\.leaseId\] = Timestamps\.epochMillis\(item\.request\.expiresAt\) \?: Long\.MAX_VALUE\n\s+val sent = sendLease\(api, "grant", /);
+    assert.equal(count(decide, 'sendLease('), 1, 'R-F5-5: the grant is still sent once');
+    const note = section(live, 'private fun noteListedLease', '\n    }\n');
+    assert.match(note, /if \(!Leases\.isLive\(status\.state\) && !Leases\.mayStillStart\(status\.state, status\.leaseId in signedLeaseGrants\)\) \{\n\s+if \(status\.state == "ended"\) signedLeaseGrants\.remove\(status\.leaseId\)\n\s+return\n\s+\}/);
+    const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
+    assert.match(refreshAndroid, /leaseChecks\[pin\.id\] = if \(check\.accepted\) \{\n\s+val named = Leases\.listedStatuses\(check, pin\)\n\s+dropMayStartRows\(pin, named\.map \{ it\.leaseId \}\.toSet\(\), api\)/);
+    assert.equal(count(live, 'dropMayStartRows('), 2, 'declared, and called from that one place');
+    const drop = section(live, 'private fun dropMayStartRows', '\n    }\n');
+    assert.match(drop, /val relayNowMs = api\.now\(\)\.toEpochMilli\(\)/);
+    assert.equal(count(drop, 'api.'), 1, 'the relay-corrected clock, and no request');
+    assert.match(drop, /val expired = expires == null \|\| \(expires < System\.currentTimeMillis\(\) && expires < relayNowMs\)\n\s+return !Leases\.keepsMayStart\(null, expired\)/);
+    assert.match(drop, /it\.nodeId == pin\.id && it\.state == "pending" && gone\(it\.leaseId\)/);
+    // The drop sends nothing and signs nothing; neither does anything else outside a tap.
+    none(drop, ['api.lease', 'sendLease(', 'signEnvelope(', 'killSwitch(', 'scope.launch'], 'dropMayStartRows');
+    assert.equal(count(android, 'Leases.revoke('), 1, 'a revoke is built only by "Stop now", on the owner\'s tap: no automatic revoke');
+    assert.equal(count(live, 'scope.launch'), 4, 'still one coroutine per tap');
+    const screens = read(...kt, 'LeaseScreens.kt');
+    const bannerKt = screens.slice(screens.indexOf('fun LeaseBanner('));
+    assert.equal(count(bannerKt, 'Leases.mayStillStartTitle('), 2, 'the row of the lease on the live screen, and the rows of the others');
+    assert.equal(count(bannerKt, 'Leases.MAY_STILL_START_DETAIL'), 2);
+    assert.match(bannerKt, /Button\(\{ model\.stopRunningLease\(lease\) \}/);
+    assert.equal(count(android, 'signedLeaseGrants.clear()'), 2);
   });
 
   // R-F5-19 (owner ruling, 2026-10-13): iOS watches only while the live
