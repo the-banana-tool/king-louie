@@ -378,6 +378,45 @@ describe('lock, expiry and revoke', () => {
     assert.equal(leases.verifyWatch(watch).reason, 'replay');
   });
 
+  // Security review finding 5: a watch or a revoke has no validity window of
+  // its own, so its nonce is remembered for as long as its lease is.
+  it('finding 5: a watch replayed after the old 10-minute cache has lapsed is still a replay', async () => {
+    const lease = await granted({ minutes: 15 });
+    const watch = other.leaseWatch(identity.nodeId, lease.leaseId);
+    assert.equal(leases.verifyWatch(watch).accepted, true);
+    timers.jump(11 * 60000);
+    assert.equal(lease.state, 'active', 'the lease is still live');
+    assert.deepEqual(leases.verifyWatch(watch), { accepted: false, reason: 'replay' });
+    // A fresh watch is still accepted, and the same nonce under other bytes is not.
+    assert.equal(leases.verifyWatch(other.leaseWatch(identity.nodeId, lease.leaseId)).accepted, true);
+    const nonce = require('crypto').randomBytes(32).toString('base64url');
+    assert.equal(leases.verifyWatch(phone.leaseWatch(identity.nodeId, lease.leaseId, { nonce })).accepted, true);
+    timers.jump(11 * 60000);
+    assert.equal(leases.verifyWatch(phone.leaseWatch(identity.nodeId, lease.leaseId, { nonce, signedAt: new Date(clock.now()).toISOString() })).reason, 'already_decided');
+  });
+
+  it('finding 5: a revoke replayed after the old cache lapsed, on an ended lease, is a replay that changes nothing', async () => {
+    const lease = await granted();
+    const watch = other.leaseWatch(identity.nodeId, lease.leaseId);
+    leases.verifyWatch(watch);
+    const revoke = phone.leaseRevoke(identity.nodeId, lease.leaseId);
+    assert.deepEqual(leases.onRevoke(revoke), { state: 'ended' });
+    timers.jump(11 * 60000);
+    const rejected = audits.filter((a) => a.kind === 'lease.rejected').length;
+    assert.equal(leases.onRevoke(revoke).state, 'ended');
+    assert.equal(audits.filter((a) => a.kind === 'lease.rejected').length, rejected, 'a replay is not audited as a rejection');
+    // The ended lease's watch nonces are kept with it too.
+    assert.equal(leases.verifyWatch(watch).reason, 'replay');
+  });
+
+  it('finding 5: a lease remembers a bounded number of watch nonces and then refuses more; a revoke is never refused for that', async () => {
+    const lease = await granted({ minutes: 15 });
+    lease.controlNonces.max = 3;
+    for (let i = 0; i < 3; i += 1) assert.equal(leases.verifyWatch(other.leaseWatch(identity.nodeId, lease.leaseId)).accepted, true);
+    assert.deepEqual(leases.verifyWatch(other.leaseWatch(identity.nodeId, lease.leaseId)), { accepted: false, reason: 'too_many_watches' });
+    assert.deepEqual(leases.onRevoke(phone.leaseRevoke(identity.nodeId, lease.leaseId)), { state: 'ended' });
+  });
+
   it('statusSummary for status.json', async () => {
     assert.equal(leases.statusSummary(), null);
     const lease = await granted();

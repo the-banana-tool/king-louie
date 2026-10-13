@@ -15,6 +15,31 @@ const L = require('./lease-protocol');
 
 const NONCE_TTL_MS = 10 * 60 * 1000;
 const HISTORY_MAX = 32;
+// A lease lasts at most an hour and iOS renews its watch every 20 s, so a
+// real lease sees a few hundred control messages.
+const CONTROL_NONCES_MAX = 4096;
+
+// The nonces of the watches and revokes one lease has accepted (security
+// review finding 5). Those messages carry no validity window of their own,
+// so a nonce is remembered for as long as the lease record is, not for ten
+// minutes: a relay that kept a watch can never play it again for that lease.
+// Same answers as NonceCache#get, so verifyDeviceEnvelope's check 8 applies.
+class LeaseNonces {
+  constructor(max = CONTROL_NONCES_MAX) {
+    this.max = max;
+    this.seen = new Map(); // nonce → sha256 of the bytes it came with
+  }
+
+  get(nonce) {
+    const sha256 = this.seen.get(nonce);
+    return sha256 === undefined ? null : { sha256 };
+  }
+
+  get full() { return this.seen.size >= this.max; }
+
+  add(nonce, sha256) { this.seen.set(nonce, sha256); }
+}
+const NO_NONCES = Object.freeze({ get: () => null });
 const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', expired: 'lease_expired', job_closed: 'job_closed' };
 
 class LeaseManager extends EventEmitter {
@@ -26,13 +51,23 @@ class LeaseManager extends EventEmitter {
     this.nodeName = nodeName || (approvals.identity && approvals.identity.nodeName) || 'unnamed-node';
     this.leases = [];
     this.pending = new Map(); // request_id → { request_id, lease_id, nonce, lease_hash, expires_at, lease, resume, ref, envelope, delivered, timer }
+    // A grant answers one request, which lives five minutes: ten is enough.
     this.grantNonces = new NonceCache({ ttlMs: NONCE_TTL_MS, now: clock });
-    this.controlNonces = new NonceCache({ ttlMs: NONCE_TTL_MS, now: clock });
     this._onDown = () => this._relayDown();
     this._onUp = () => this._relayUp();
   }
 
   setBroker(broker) { this.broker = broker; }
+
+  // The nonce store for a control message: the one of the lease it names
+  // (read before anything is verified; an unknown lease is refused by the
+  // verifier whatever store it gets).
+  _controlNonces(envelope) {
+    let claimed = null;
+    try { claimed = open(envelope).message; } catch { claimed = null; }
+    const lease = claimed && typeof claimed.lease_id === 'string' ? this.find(claimed.lease_id) : null;
+    return lease ? lease.controlNonces : NO_NONCES;
+  }
 
   setJobOpen(fn) { this.jobOpen = fn; }
 
@@ -134,7 +169,7 @@ class LeaseManager extends EventEmitter {
       lease = {
         leaseId: crypto.randomUUID(), jobId, origin, reason: String(reason), requestedApps: [...appIds], maxMinutes: minutes,
         apps: [], state: 'pending', locked: false, endReason: null, suspendReason: null, expiresAt: null, deviceId: null,
-        seq: 0, typed: new TypedBuffer(), inputTimes: [], waiters: [], expiryTimer: null
+        seq: 0, typed: new TypedBuffer(), inputTimes: [], waiters: [], expiryTimer: null, controlNonces: new LeaseNonces()
       };
       this.leases.push(lease);
       this._sendRequest(lease, { resume: false });
@@ -274,7 +309,7 @@ class LeaseManager extends EventEmitter {
     let claimed = null;
     try { claimed = open(envelope).message; } catch { claimed = null; }
     const r = L.verifyLeaseRevoke(envelope, {
-      approverStore: this.approvals.approverStore, nodeId: this.approvals.identity.nodeId, nonces: this.controlNonces,
+      approverStore: this.approvals.approverStore, nodeId: this.approvals.identity.nodeId, nonces: this._controlNonces(envelope),
       knownLease: (id) => Boolean(this.find(id))
     });
     if (!r.accepted) {
@@ -286,8 +321,10 @@ class LeaseManager extends EventEmitter {
       this._audit('lease.rejected', lease, { check: r.check, reason: r.reason });
       return { state: 'rejected', reason: r.reason };
     }
-    this.controlNonces.add(r.message.nonce, bytesSha256(r.bytes));
     const lease = this.find(r.message.lease_id);
+    // A revoke is never refused for a full store: playing one again only
+    // ends a lease that has ended.
+    if (!lease.controlNonces.full) lease.controlNonces.add(r.message.nonce, bytesSha256(r.bytes));
     if (lease.state === 'ended') {
       this._status(lease);
       return { state: 'ended' };
@@ -299,12 +336,14 @@ class LeaseManager extends EventEmitter {
 
   verifyWatch(envelope) {
     const r = L.verifyLeaseWatch(envelope, {
-      approverStore: this.approvals.approverStore, nodeId: this.approvals.identity.nodeId, nonces: this.controlNonces,
+      approverStore: this.approvals.approverStore, nodeId: this.approvals.identity.nodeId, nonces: this._controlNonces(envelope),
       knownLease: (id) => Boolean(this.find(id))
     });
     if (!r.accepted) return { accepted: false, reason: r.reason };
-    this.controlNonces.add(r.message.nonce, bytesSha256(r.bytes));
     const lease = this.find(r.message.lease_id);
+    // A watch that cannot be remembered could be played again: refused.
+    if (lease.controlNonces.full) return { accepted: false, reason: 'too_many_watches' };
+    lease.controlNonces.add(r.message.nonce, bytesSha256(r.bytes));
     this._audit('lease.watch', lease, { device_id: r.deviceId });
     return { accepted: true, reason: null, lease, deviceId: r.deviceId };
   }

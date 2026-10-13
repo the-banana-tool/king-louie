@@ -64,9 +64,15 @@ that is not open (`job_closed`), or for a front-door client whose grant does
 not cover `fleet:unsafe` on this node (refused in the node's own words for a
 missing scope).
 
-Revoke and watch: checks 1–8 with their own type and a 10-minute nonce cache,
-then the `lease_id` must be known (`unknown_lease`). Any enrolled device may
-revoke any lease; a replayed revoke changes nothing and re-sends the status.
+Revoke and watch: checks 1–8 with their own type, then the `lease_id` must be
+known (`unknown_lease`). Neither message has a validity window of its own, so
+the node remembers their nonces per lease for as long as it remembers the
+lease (not for ten minutes; revised 2026-10-12): the same bytes again are a
+`replay` however late they come, and the same nonce under other bytes is
+`already_decided`. A lease remembers at most 4096 of them; a watch beyond
+that is refused (`too_many_watches`), a revoke never is. This is node
+behaviour only: no message changed. Any enrolled device may revoke any lease;
+a replayed revoke changes nothing and re-sends the status.
 
 ## 3. What the phone checks and shows
 
