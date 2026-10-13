@@ -19,6 +19,7 @@ const HELP = `Usage:
   king-louie-service models status|refresh [--data-dir DIR]
   king-louie-service profiles list|show <id-or-name>|set-default <id-or-name> [--data-dir DIR]
   king-louie-service import --from <desktop user-data dir> [--data-dir DIR] [--dry-run]
+  king-louie-service history import <file> [--pattern ID] [--data-dir DIR]
   king-louie-service install [--profile P] [--user NAME] [--data-dir DIR] [--dry-run]
   king-louie-service uninstall [--dry-run]
   king-louie-service enroll-device [--data-dir DIR]              (admin: pair a phone approver)
@@ -33,6 +34,15 @@ const HELP = `Usage:
 A chat channel with an empty allowlist refuses every sender, and a channel
 approval is denied unless "channel approval" names an owner chat that is not
 the chat the request came from.
+
+"history import" adds one conversation file (a Claude Code session, a Markdown
+transcript or a King Louie chat export) to the data dir's chat history as a new
+chat. Run it with the service stopped, as the account that owns the data dir,
+never as root or Administrator.
+On Windows the data dir's owner is not checked: only an elevated prompt is
+refused, and an account that cannot write the data dir fails to open the
+history. A service installed under LOCAL SERVICE has no CLI import; import
+from the attached desktop app instead.
 `;
 
 const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-dir DIR]
@@ -41,7 +51,7 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
        king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
 `;
 
-const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file']);
+const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern']);
 // Flags that must never carry a value, whichever form produced it.
 const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm']);
 
@@ -288,6 +298,10 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
     io.stderr.write('Flag "--confirm" is only valid for "frontdoor code".\n');
     return 2;
   }
+  if (flags.pattern !== undefined && !(command === 'history' && sub === 'import')) {
+    io.stderr.write('Flag "--pattern" is only valid for "history import".\n');
+    return 2;
+  }
   if (flags.sessionFile !== undefined && command !== 'session') {
     io.stderr.write('Flag "--session-file" is only valid for "session".\n');
     return 2;
@@ -417,6 +431,11 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       case 'import': {
         const { runImportCommand } = require('./commands/import');
         return await runImportCommand({ flags, dataDir, io, deps: { runningServicePid } });
+      }
+
+      case 'history': {
+        const { runHistoryCommand } = require('./commands/history');
+        return await runHistoryCommand({ sub, arg, extra: arg2, flags, dataDir, io, deps: { runningServicePid } });
       }
 
       case 'install':

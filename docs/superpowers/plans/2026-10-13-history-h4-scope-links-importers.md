@@ -156,6 +156,19 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **Tests changed.** `tests/desktop-bridge-allowlist.test.js`: the three rows that said `'deny'` (Task 11's interim state) say `'local'`, as this task's text requires; the inventory case that says a service never serves the three still holds unchanged. `tests/attached-host.test.js` and `tests/standalone-host.test.js` needed no change.
 - **Not run:** `tests/e2e/history-import-attached.test.js` is written and committed but was not run in this task (e2e runs were ruled out for it); Task 17 runs it.
 
+**Task 13**
+
+- **The helpers the task names are elsewhere**: `isAdmin` is `src/service/commands/admin-check.js`, and there is no `import-channel.js`. `printable` (`src/service/commands/io.js`) removes a control character; step 1 wants it printed as `?`, so `history.js` has its own `plain()`: every C0, C1, bidi-control and line-separator character becomes `?`. It is applied to every string from the file (title, pattern labels, importer sentences, the file path in "No such file").
+- **The owner check compares the effective uid** (`process.geteuid()`), not the real one: new files belong to the effective uid. The dep is still called `getuid`. An owner that cannot be read (no integer `uid`) refuses.
+- **The data dir is read with `lstat` and must be a real directory**: a link or a file there is refused ("links are refused"), as `import --from` does. The dep `statDataDir` defaults to `fs.lstatSync`.
+- **The order of the refusals**: usage (exit 2), then root/Administrator, then the data dir exists and is a directory, then its owner (POSIX), then the running service, then the file. The data dir is checked before the owner because the owner is read from it. As root on POSIX the sentence ends "`<dataDir>` belongs to uid `<n>`." when the dir can be read.
+- **The file is read once before the store is opened** (`previewImport`): a file no importer takes, an unknown `--pattern` or one that does not fit exits 1 with no `history.sqlite` created. The preview also gives the heading pattern for the output, which `importChat` does not return.
+- **"Other patterns that fit" says how to use one**: the file's hash is already imported, so the line says to delete the chat in the app and import again with `--pattern <id>`. With `--pattern` given the others are not listed.
+- **A third positional argument is a usage error** (a path with a space that was not quoted). `--pattern` on any other command is a usage error (exit 2), as the other scoped flags are.
+- **`runHistoryCommand` throws without `deps.runningServicePid`** (no fail-open default, as `runImportCommand`). `cli.js` passes only that; the other deps are for tests.
+- **Help text**: one usage line and a paragraph with the Windows residual. `docs/install-guide.md`: a subsection at the end of section 4 (`tests/examples.test.js` fixes the guide's numbered headings, so no section 13).
+- **Tests.** `tests/service-cli-history.test.js` only; `tests/service-cli.test.js` pins no help text and needed no change. One case runs the real CLI and is skipped when the test process is elevated (the command then refuses, as it should).
+
 **Task 14**
 
 - **"Link chats…" is disabled for a pinned chat too**, not only the two wider "Recall from" items: links saved on a case, bridge or imported-case chat do nothing while the pin holds, and the menu offers nothing that cannot take effect. "Recall from: this chat" stays enabled there (Task 7 stores `chat` for a pinned chat). `openLinkChatsDialog` also checks `pinned` itself and shows the pin's sentence instead of the dialog.

@@ -243,6 +243,45 @@ sudo /usr/local/bin/node /opt/king-louie/app/bin/king-louie-service.js install -
 The service runs as `LOCAL SERVICE` from a boot-time Scheduled Task. Its data
 dir is `%ProgramData%\KingLouie\data`.
 
+### Importing a conversation into the chat history
+
+`history import` adds one conversation file to a data dir's chat history as a
+new chat: a Claude Code session (`.jsonl`), a Markdown transcript (`.md`) or a
+King Louie chat export (`.json`). The transcript is stored as it is and can be
+searched and recalled like any chat, so read it first if it may hold a key or
+a password. An imported chat stays on this machine: it is never sent to a
+hosted embedding service or to a hosted reranker.
+
+Stop the service, run the command as the account that owns the data dir, then
+start the service again:
+
+```bash
+sudo -u king-louie /usr/bin/node /opt/king-louie/app/bin/king-louie-service.js history import /opt/king-louie/mcp/work/lakeside-lot.md --data-dir /opt/king-louie/mcp/data
+```
+
+It prints the kind of file, the title, the number of messages and the new
+chat's id. The same file a second time changes nothing and prints
+`Already imported as <chat id>.` A file that has grown since (a session still
+being written) is imported as a second, separate chat; an import never writes
+into a chat that exists. For a Markdown transcript the command names the
+heading pattern it read the file with, and any others that fit; `--pattern
+<id>` picks one.
+
+The command refuses, and writes nothing:
+
+- as root or Administrator: what an administrator writes into the data dir
+  is theirs, and the service could not use it;
+- on Linux and macOS, as any account but the data dir's owner;
+- while the service is running on that data dir;
+- when the data dir does not exist (start the service once first).
+
+On Windows the data dir's owner is not checked. The command refuses an
+elevated prompt and otherwise relies on Windows: an account that cannot write
+the data dir fails to open the history, with that error. A service installed
+under `LOCAL SERVICE` therefore has no command-line import. Import from the
+desktop app attached to that service instead (the app reads the file on the
+desktop and sends the conversation to the service).
+
 ## 5. Write the config directories
 
 Each machine has two config dirs. Both are owned by root or Administrators,
