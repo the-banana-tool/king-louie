@@ -535,6 +535,25 @@ function registerChatHandlers(ipcMain, context = {}) {
         // crossChat: this is the chat's own turn, so it recalls across the
         // chat's history scope (stage H4); no other caller passes it.
         built = await contextBuilder.build({ chatId, message: safeMessage, model: mainTarget.model, upToSeq: userSeq, crossChat: true });
+        // Text from another chat is about to reach the model (R-H4-1): the
+        // chat is marked now, before any call. A reply's provenance comes
+        // too late for a turn that fails or is cut off, and the attach rule
+        // would then see nothing. A mark that cannot be written ends the
+        // turn here.
+        const named = built.stats ? built.stats.recalledChats : undefined;
+        if (Array.isArray(named) ? named.length > 0 : named !== undefined && named !== null) {
+          let marked = false;
+          try {
+            marked = typeof historyStore.markRecalledOtherChats === 'function' && historyStore.markRecalledOtherChats(chatId) === true;
+          } catch (err) {
+            log.error(`The recall mark could not be written: ${err.message}`);
+          }
+          if (!marked) {
+            const err = new Error('That this chat read other chats could not be recorded, so the message was not sent to the model. Try again.');
+            err.code = 'RECALL_MARK_FAILED';
+            throw err;
+          }
+        }
         const stored = historyStore.getMessages(chatId, { fromSeq: userSeq, toSeq: userSeq });
         chatMessages = [...built.tail, ...stored];
       } else {

@@ -8,7 +8,7 @@
 // The offer is made only when the chat could be attached (the checks
 // case:attach and case:create make, CHAT_BUSY apart). The chat is marked
 // (`caseNudgedAt`) whether or not it is offered, so the check runs once.
-const { attachBlock: defaultAttachBlock, recalledOtherChats: defaultRecalledOtherChats } = require('./chat-attach');
+const { attachBlock: defaultAttachBlock, recalledOtherChats: defaultRecalledOtherChats, recallMarked } = require('./chat-attach');
 
 const NUDGE_TEXT = 'This chat is getting long. If it is about a task with decisions worth keeping, you can turn it into a case.';
 const NUDGE_ACTION = 'convertToCase';
@@ -33,7 +33,7 @@ function canOfferCase({
     if (chat.caseId) return false;
     if (bridgeOriginFor(chat)) return false;
     if (chat.source || chat.importedFromCase === true) return false;
-    if (recalledOtherChats(messages, chat.id)) return false;
+    if (recallMarked(chat) || recalledOtherChats(messages, chat.id)) return false;
     if (attachBlock(messages, null)) return false;
     return true;
   } catch {

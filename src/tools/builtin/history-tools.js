@@ -41,6 +41,20 @@ function scopeOf(h, requested = null) {
   };
 }
 
+// Before a result holding another chat's text is returned, the chat is
+// marked as having read other chats (R-H4-1: it can then never be given a
+// case). The result row may never be stored (the turn is stopped or fails),
+// so the mark is written here, where the text is handed over. False when it
+// could not be written: the caller then returns none of the text.
+const MARK_FAILED = 'That this chat read another chat could not be recorded, so nothing from other chats is returned.';
+function markReadOtherChats(h) {
+  try {
+    return typeof h.store.markRecalledOtherChats === 'function' && h.store.markRecalledOtherChats(h.chatId) === true;
+  } catch {
+    return false;
+  }
+}
+
 const NO_MATCH = {
   chat: 'No matches in this chat. Try other words, or ReadHistory for a range.',
   linked: 'No matches in this chat or the chats linked to it. Try other words, or ReadHistory for a range.',
@@ -98,6 +112,7 @@ const searchHistoryTool = new Tool({
       settings: settingsOf(h).recall,
       reranker: typeof h.reranker === 'function' ? h.reranker : null
     });
+    if (excerpts.some((e) => e.chatId !== h.chatId) && !markReadOtherChats(h)) return { ok: false, error: MARK_FAILED };
     // Asked for more than the chat has (only where a scope is resolved):
     // say so, since the argument changed nothing.
     const notes = [];
@@ -151,6 +166,7 @@ const readHistoryTool = new Tool({
         return { ok: false, error: `ReadHistory can read only chats in this chat's history scope ("${scope.effective}").` };
       }
       chatTitle = chatHeaderTitle(scope.titles.get(chatId), chatId);
+      if (!markReadOtherChats(h)) return { ok: false, error: MARK_FAILED };
     }
     const chatLabel = other ? `chat "${chatTitle}" · ` : '';
     const fromSeq = Number(params.fromSeq);

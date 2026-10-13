@@ -23,6 +23,8 @@ const INDEX_SCHEMA_VERSION = 2;
 const EMBEDDINGS_SCHEMA_VERSION = 3;
 // The schema step that adds chat links and import records.
 const LINKS_SCHEMA_VERSION = 4;
+// The chat meta key of the recall mark (markRecalledOtherChats).
+const RECALL_MARK_KEY = 'recalledOtherChatsAt';
 
 const PREVIEW_CHARS = 500;
 const normalizeId = (value) => String(value ?? '').trim();
@@ -237,9 +239,11 @@ class HistoryStore {
     const id = normalizeId(chat?.id);
     if (!id || typeof chat !== 'object') return null;
     return this.transaction(() => {
+      // A chat created over an id keeps that id's recall mark.
+      const mark = this._recallMark(id);
       // Only a chat that replaced an existing one can drop vectors.
       if (Number(this._stmt('DELETE FROM chats WHERE id = ?').run(id).changes) > 0) this._bumpVectorEpoch();
-      this._insertChatRow(id, chat, this._nextPosition(position));
+      this._insertChatRow(id, mark === undefined ? chat : { ...chat, [RECALL_MARK_KEY]: mark }, this._nextPosition(position));
       this._insertMessages(id, chat.messages, textOrNull(chat.updatedAt) || textOrNull(chat.createdAt));
       return this.getChat(id);
     });
@@ -462,8 +466,20 @@ class HistoryStore {
         r.case_id, r.working_directory, r.source, r.meta_json);
   }
 
+  // The recall mark the chat `id` holds now, or undefined. Read from the row
+  // itself, never from a chat object.
+  _recallMark(id) {
+    const row = this._stmt('SELECT meta_json FROM chats WHERE id = ?').get(id);
+    if (!row || typeof row.meta_json !== 'string' || !row.meta_json.includes(RECALL_MARK_KEY)) return undefined;
+    const value = JSON.parse(row.meta_json)[RECALL_MARK_KEY];
+    return value === null ? undefined : value;
+  }
+
+  // Every write of a chat's fields goes through here, so a mark the row
+  // holds outlives whatever the chat object says.
   _updateChatRow(id, chat) {
-    const r = rows.chatToRow(chat);
+    const mark = this._recallMark(id);
+    const r = rows.chatToRow(mark === undefined ? chat : { ...chat, [RECALL_MARK_KEY]: mark });
     this._stmt(`UPDATE chats SET title = ?, created_at = ?, updated_at = ?, agent_mode = ?, sandbox_mode = ?,
         case_id = ?, working_directory = ?, source = ?, meta_json = ?
       WHERE id = ?`)
@@ -601,6 +617,31 @@ class HistoryStore {
     const removed = embeddingIndex.deleteEmbeddings(this.db, model);
     this._bumpVectorEpoch();
     return removed;
+  }
+
+  // The recall mark (stage H4 review; owner ruling R-H4-1): this chat was
+  // given text from another chat, by a turn's recalled block or by
+  // SearchHistory / ReadHistory. It is set before that text reaches a model,
+  // so a turn that dies with no reply stored is still on record, and it is
+  // never cleared: _updateChatRow and createChat carry the row's mark over
+  // any chat object (a patch, a replace, an upsert), and truncation, the
+  // scope and the links do not touch it. A chat object may bring a mark with
+  // it (a copy from a desktop); none can take one away. It lives in
+  // meta_json, so it needs no schema step and reads back on the chat as
+  // `recalledOtherChatsAt`. True when the chat is marked now; false for an
+  // unknown chat or a store that cannot write, which the caller must treat
+  // as a refusal.
+  markRecalledOtherChats(chatId) {
+    const id = normalizeId(chatId);
+    if (!id || this.readonly) return false;
+    return this.transaction(() => {
+      const row = this._chatRow(id);
+      if (!row) return false;
+      if (this._recallMark(id) !== undefined) return true;
+      const meta = row.meta_json ? JSON.parse(row.meta_json) : {};
+      meta[RECALL_MARK_KEY] = this._now();
+      return Number(this._stmt('UPDATE chats SET meta_json = ? WHERE id = ?').run(JSON.stringify(meta), id).changes) > 0;
+    });
   }
 
   // Recall stage H4 (spec §3.2, §4.1). A chat's history scope and its links

@@ -41,8 +41,11 @@
 //   through the tail and recall. It reads what the send path stores: a
 //   reply's recall provenance (`context.recalledChats`) and the results of
 //   SearchHistory and ReadHistory. A result that is not the tool's own shape
-//   blocks. It cannot see text the owner pasted in, or rows a truncation
-//   removed.
+//   blocks. A turn that failed stores no reply, and a truncation removes
+//   rows, so the chat also carries a mark (`recalledOtherChatsAt`,
+//   HistoryStore#markRecalledOtherChats) set before another chat's text
+//   reaches a model and never cleared; the mark alone refuses
+//   (`recallMarked`). What neither sees is text the owner pasted in.
 const { CASE_MCP_TOOLS } = require('./mcp-tool-definitions');
 
 const SAW_OTHER_CASES_MESSAGE = 'This chat has looked at other cases, so it cannot be attached to a case. Start a new chat for the case.';
@@ -128,6 +131,13 @@ const HISTORY_RESULT_FROM_OTHER_CHAT = Object.freeze({
   ReadHistory: (r, chatId) => !(isObj(r) && r.ok === true && isId(r.chatId) && r.chatId === chatId)
 });
 
+// Whether the chat carries the recall mark. Any value but a missing one
+// counts: the store writes a time, and anything else there is not a reason
+// to attach.
+function recallMarked(chat) {
+  return isObj(chat) && chat.recalledOtherChatsAt !== undefined && chat.recalledOtherChatsAt !== null;
+}
+
 // The first row that shows the chat `chatId` has read another chat
 // ({ seq, toolName }), or null: a reply whose recall provenance names other
 // chats, or a SearchHistory / ReadHistory result from one. A bare failure
@@ -208,6 +218,7 @@ function attachBlock(messages, caseId = null) {
 // lifts any of them.
 function assertChatAttachable(chat, caseId = null) {
   if (chat && (chat.source || chat.importedFromCase === true)) throw new ImportedChatError();
+  if (recallMarked(chat)) throw new ChatRecalledOtherChatsError({ seq: null, toolName: null });
   // No message list to read is Q29's refusal, below.
   const read = chat && Array.isArray(chat.messages) ? recalledOtherChats(chat.messages, chat.id) : null;
   if (read) throw new ChatRecalledOtherChatsError(read);
@@ -217,7 +228,7 @@ function assertChatAttachable(chat, caseId = null) {
 
 module.exports = {
   attachBlock, assertChatAttachable, ChatAttachRefusedError, ChatBusyError,
-  recalledOtherChats, ChatRecalledOtherChatsError, ImportedChatError,
+  recalledOtherChats, recallMarked, ChatRecalledOtherChatsError, ImportedChatError,
   CASE_DATA_TOOLS, NO_CASE_DATA, SAW_OTHER_CASES_MESSAGE, UNVERIFIABLE_MESSAGE, CHAT_BUSY_MESSAGE,
   RECALLED_OTHER_CHATS_MESSAGE, IMPORTED_CHAT_MESSAGE
 };
