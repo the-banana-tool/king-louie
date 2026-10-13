@@ -298,6 +298,22 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         try await request("POST", "/v1/questions/\(Self.segment(token))/answer", body: envelope.json).1
     }
 
+    // Fleet stage 5 (§4.7): lease requests with their latest status, the
+    // phone's decisions, and the live view.
+    func leases(wait: Int = 0, signWith: Signer? = nil) async throws -> [JSONValue] {
+        try await request("GET", "/v1/leases?wait=\(wait)", signWith: signWith).1?.arrayValue ?? []
+    }
+
+    /// `202 { state, reason? }` from the node, passed through by the relay
+    /// (a watch reply also has `after_seq`, which this app does not use).
+    func leaseDecision(_ action: String, leaseId: String, envelope: Envelope) async throws -> JSONValue? {
+        try await request("POST", "/v1/leases/\(Self.segment(leaseId))/\(action)", body: envelope.json).1
+    }
+
+    func leaseViews(_ leaseId: String, afterSeq: Int, wait: Int, signWith: Signer? = nil) async throws -> [JSONValue] {
+        try await request("GET", "/v1/leases/\(Self.segment(leaseId))/views?after_seq=\(afterSeq)&wait=\(wait)", signWith: signWith).1?.arrayValue ?? []
+    }
+
     /// Unsigned foreground ping `{ foreground, at }` (ruling T17-presence),
     /// `at` in ms since the epoch on the relay-corrected clock. The request
     /// itself is device-authenticated with `signer`.

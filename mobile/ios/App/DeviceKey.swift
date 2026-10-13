@@ -111,6 +111,20 @@ final class DeviceKey {
         return Envelope(alg: "ES256", kid: deviceId, payload: Base64URL.encode(bytes), sig: Base64URL.encode(signature))
     }
 
+    /// A kl.lease.watch signed with the session's unlock (owner ruling
+    /// R-F5-8): a watch grants nothing (it asks for frames of a lease the
+    /// owner already granted), so it does not need a fresh Face ID every
+    /// 20 s. Anything else is refused: a lease grant, deny or revoke is
+    /// signed with signEnvelope, after a fresh prompt.
+    func signWatchEnvelope(_ message: JSONValue) async throws -> Envelope {
+        guard message["type"]?.stringValue == "kl.lease.watch" else {
+            throw ProtocolError.malformed("Only a lease watch is signed with the session.")
+        }
+        let bytes = JCS.data(message)
+        let signature = try await signForSession(bytes)
+        return Envelope(alg: "ES256", kid: deviceId, payload: Base64URL.encode(bytes), sig: Base64URL.encode(signature))
+    }
+
     /// Signs API requests with a context unlocked once per session. If the
     /// cached context no longer works, unlock once more before judging the key.
     func signForSession(_ data: Data) async throws -> Data {

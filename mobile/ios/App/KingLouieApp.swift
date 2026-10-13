@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     var onToken: ((String) -> Void)? {
         didSet { if let token, let onToken { onToken(token) } }
     }
-    /// (kind, id): an approval's request id, or the id a pairing, alert or question push names.
+    /// (kind, id): an approval's request id, or the id a pairing, alert, question or lease push names.
     var onOpen: ((String, String) -> Void)?
     /// A token that arrived before the app's scene hooked up onToken.
     private var token: String?
@@ -33,13 +33,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     /// The push is { aps, kl: { rid, k } }; a missing k means approval.
-    /// Approval, pairing, alert and question pushes are handled; the app fetches and
-    /// verifies what they name itself.
+    /// Approval, pairing, alert, question and lease pushes are handled; the app
+    /// fetches and verifies what they name itself.
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let kl = response.notification.request.content.userInfo["kl"] as? [String: Any]
         guard let id = kl?["rid"] as? String else { return }
         let kind = (kl?["k"] as? String) ?? "approval"
-        guard ["approval", "pairing", "alert", "question"].contains(kind) else { return }
+        guard ["approval", "pairing", "alert", "question", "lease"].contains(kind) else { return }
         await MainActor.run { onOpen?(kind, id) }
     }
 }

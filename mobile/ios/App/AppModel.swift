@@ -213,6 +213,284 @@ final class AppModel: ObservableObject {
         try? await client.presence(foreground: true, signer: Self.sessionOnlySigner(key))
     }
 
+    // MARK: Leases (fleet stage 5)
+    // Owner ruling R-F5-8 (2026-10-12): the live view signs kl.lease.watch
+    // with the API session the app already unlocked; a grant, a deny and the
+    // kill switch each take a fresh Face ID. A request is shown only when a
+    // pinned node signed it. tests/mobile-lease-apps.test.js reads this
+    // section, so keep the two markers and the lease code between them.
+
+    struct LeaseRequestItem: Identifiable, Equatable {
+        var id: String { request.requestId }
+        let request: LeaseRequest
+        let nodeName: String
+        var status: LeaseStatus?
+    }
+
+    struct LiveLease: Equatable {
+        let nodeId: String
+        let nodeName: String
+        let leaseId: String
+        var state: String = "pending"
+        var locked = false
+        var reason: String?
+        var expiresAt: Date?
+        var frame: Data?
+        var frameAt: Date?
+        var frameDropped = false
+        var actions: [LeaseAction] = []
+        var lastSeq = 0
+        var revoking = false
+    }
+
+    @Published var leaseRequests: [LeaseRequestItem] = []
+    @Published var liveLease: LiveLease?
+    @Published private(set) var decidingLease: Set<String> = []
+    private var decidedLeaseRequests = Set<String>()
+    private var liveTask: Task<Void, Never>?
+    private var demoLeaseTimer: Task<Void, Never>?
+
+    /// Pending lease requests: node-signed by a pinned node, the lease hash
+    /// intact, not expired, and not already ended by a status.
+    /// `onlyIfUnlocked`: skip rather than ask for Face ID (the screen
+    /// appearing is not the owner asking).
+    func refreshLeases(onlyIfUnlocked: Bool = false) async {
+        guard mode == .live, !pairing, let client, let key else { return }
+        if onlyIfUnlocked, !key.isSessionUnlocked { return }
+        do {
+            var items: [LeaseRequestItem] = []
+            for entry in try await client.leases(signWith: onlyIfUnlocked ? Self.sessionOnlySigner(key) : nil) {
+                guard let json = entry["envelope"], let envelope = try? Envelope(json: json),
+                      let pin = state.nodes.first(where: { $0.id == envelope.kid }),
+                      let message = Leases.verifiedMessage(envelope, pin: pin), let request = LeaseRequest(message: message),
+                      !decidedLeaseRequests.contains(request.requestId),
+                      let expires = Timestamps.date(request.expiresAt), expires > client.now() else { continue }
+                // Listed under the node that signed it.
+                if let listed = entry["node_id"]?.stringValue, listed != pin.id { continue }
+                // A status counts only when the same node signed it, about this lease.
+                var status: LeaseStatus?
+                if let statusJSON = entry["status"], let statusEnvelope = try? Envelope(json: statusJSON),
+                   let statusMessage = Leases.verifiedMessage(statusEnvelope, pin: pin),
+                   let parsed = LeaseStatus(message: statusMessage), parsed.leaseId == request.leaseId {
+                    status = parsed
+                }
+                if status?.state == "ended" { continue }
+                if !items.contains(where: { $0.id == request.requestId }) { items.append(LeaseRequestItem(request: request, nodeName: pin.name, status: status)) }
+            }
+            leaseRequests = items
+        } catch is SessionLocked {
+            // The session lapsed: quiet; the owner can pull to refresh.
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// Grant (a fresh Face ID over exactly these apps and minutes) or deny
+    /// (a fresh Face ID too). `signed_at` is the relay-corrected clock.
+    func decideLease(_ item: LeaseRequestItem, apps: Set<String>, minutes: Int, grant: Bool) async {
+        if mode == .demo { demoDecide(item, grant: grant); return }
+        guard mode == .live, let key, let client, !decidingLease.contains(item.id) else { return }
+        decidingLease.insert(item.id)
+        defer { decidingLease.remove(item.id) }
+        do {
+            let signedAt = Timestamps.string(client.now())
+            let envelope: Envelope
+            if grant {
+                let message = try Leases.grant(to: item.request, apps: Array(apps), minutes: minutes, deviceId: key.deviceId, signedAt: signedAt)
+                let names = item.request.apps.filter { apps.contains($0.id) }.map { Self.promptText($0.name, 30) }.joined(separator: ", ")
+                envelope = try await key.signEnvelope(message, reason: "Allow computer use of \(names) on \(Self.promptText(item.nodeName, 30)) for \(minutes) min")
+            } else {
+                envelope = try await key.signEnvelope(Leases.deny(item.request, deviceId: key.deviceId, signedAt: signedAt), reason: "Deny computer use on \(Self.promptText(item.nodeName, 30))")
+            }
+            let result = try await client.leaseDecision("grant", leaseId: item.request.leaseId, envelope: envelope)
+            let state = result?["state"]?.stringValue
+            if state == "rejected" {
+                banner = "Node rejected: \(friendlyReason(result?["reason"]?.stringValue))"
+                return
+            }
+            // Only an answer that names a state is the node's; anything else leaves the request listed.
+            guard state != nil else {
+                banner = "The node did not confirm this. Pull to refresh to see whether the request is still open."
+                return
+            }
+            decidedLeaseRequests.insert(item.id)
+            leaseRequests.removeAll { $0.id == item.id }
+            if grant, state == "active" { openLiveLease(nodeId: item.request.nodeId, leaseId: item.request.leaseId) }
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// The live view: a watch every 20 s (signed with the session, never a
+    /// fresh prompt) and a long poll for views and statuses, until the lease
+    /// ends or is closed. It never asks for Face ID by itself: while the API
+    /// session is locked it waits for the owner to unlock the app.
+    func openLiveLease(nodeId: String, leaseId: String) {
+        guard let pin = state.nodes.first(where: { $0.id == nodeId }) ?? demo?.pins.first(where: { $0.id == nodeId }) else { return }
+        liveTask?.cancel()
+        demoLeaseTimer?.cancel()
+        liveLease = LiveLease(nodeId: nodeId, nodeName: pin.name, leaseId: leaseId)
+        if mode == .demo { startDemoFrames(); return }
+        guard let client, let key else { return }
+        liveTask = Task { [weak self] in
+            var lastWatch = Date.distantPast
+            while !Task.isCancelled {
+                guard let self, let live = self.liveLease, live.leaseId == leaseId else { return }
+                guard key.isSessionUnlocked else {
+                    try? await Task.sleep(for: .seconds(3))
+                    continue
+                }
+                do {
+                    if Date().timeIntervalSince(lastWatch) >= 20, live.state != "ended" {
+                        lastWatch = Date()
+                        let watch = Leases.watch(nodeId: nodeId, leaseId: leaseId, deviceId: key.deviceId, nonce: Messages.randomNonce(),
+                                                 signedAt: Timestamps.string(client.now()))
+                        let envelope = try await key.signWatchEnvelope(watch)
+                        do {
+                            _ = try await client.leaseDecision("watch", leaseId: leaseId, envelope: envelope)
+                        } catch is RelayError {
+                            // The node is offline or busy: the poll below still shows the lease's state, and the next watch is 20 s away.
+                        }
+                    }
+                    let entries = try await client.leaseViews(leaseId, afterSeq: live.lastSeq, wait: 20)
+                    // Read again: the kill switch may have changed the lease while this waited.
+                    guard var current = self.liveLease, current.leaseId == leaseId else { return }
+                    for entry in entries {
+                        current.lastSeq = max(current.lastSeq, entry["seq"]?.intValue ?? current.lastSeq)
+                        guard let json = entry["envelope"], let envelope = try? Envelope(json: json) else { continue }
+                        self.apply(envelope, pin: pin, to: &current)
+                    }
+                    self.liveLease = current
+                    if current.state == "ended" { return }
+                } catch {
+                    if Task.isCancelled { return }
+                    // A failed unlock ends the session (DeviceKey), so the next turn waits above; anything else is tried again.
+                    try? await Task.sleep(for: .seconds(3))
+                }
+            }
+        }
+    }
+
+    /// One received envelope onto the live lease. Only a status or a view the
+    /// pinned node signed, about this lease, changes anything.
+    private func apply(_ envelope: Envelope, pin: NodePin, to live: inout LiveLease) {
+        if let message = Leases.verifiedMessage(envelope, pin: pin), let status = LeaseStatus(message: message) {
+            guard status.leaseId == live.leaseId else { return }
+            live.state = status.state
+            live.locked = status.locked
+            live.reason = status.reason
+            live.expiresAt = status.expiresAt.flatMap { Timestamps.date($0) }
+            if status.state == "ended" { live.revoking = false }
+            return
+        }
+        let check = Leases.verifyView(envelope, pin: pin)
+        guard check.accepted, let view = check.view, view.leaseId == live.leaseId else { return }
+        live.state = view.state
+        live.locked = view.locked
+        live.expiresAt = Date().addingTimeInterval(TimeInterval(view.remainingS))
+        live.frameDropped = view.frameDropped
+        if let frame = view.frame { live.frame = frame; live.frameAt = Date() }
+        live.actions = Leases.mergedActions(live.actions, adding: view.actions)
+        if view.state == "ended" { live.revoking = false }
+    }
+
+    func closeLiveLease() {
+        liveTask?.cancel()
+        demoLeaseTimer?.cancel()
+        liveLease = nil
+    }
+
+    /// A signature that was not made because the unlock was cancelled or
+    /// failed, or because the key is unusable or gone.
+    private static func isUnlockFailure(_ error: Error) -> Bool {
+        error is LAError || error is DeviceKeyUnusable || (error as? ProtocolError) == .keyInvalidated
+    }
+
+    /// One fresh Face ID, then the signed revoke, sent again every 3 s until
+    /// a node-signed status says the lease ended. The re-sends are relay
+    /// requests, signed with the API session; if that session cannot be
+    /// unlocked they stop (the app never asks for Face ID in a loop) and
+    /// "Stop now" is enabled again.
+    func killSwitch() async {
+        guard var live = liveLease, !live.revoking, live.state != "ended" else { return }
+        if mode == .demo { live.state = "ended"; live.reason = "revoked"; liveLease = live; demoLeaseTimer?.cancel(); return }
+        guard let key, let client else { return }
+        let leaseId = live.leaseId
+        do {
+            let message = Leases.revoke(nodeId: live.nodeId, leaseId: leaseId, deviceId: key.deviceId, nonce: Messages.randomNonce(), signedAt: Timestamps.string(client.now()))
+            let envelope = try await key.signEnvelope(message, reason: "Stop computer use on \(Self.promptText(live.nodeName, 30)) now")
+            // Read again: the prompt took time.
+            guard var current = liveLease, current.leaseId == leaseId, current.state != "ended", !current.revoking else { return }
+            current.revoking = true
+            liveLease = current
+            Task { [weak self] in
+                while let self, let now = self.liveLease, now.leaseId == leaseId, now.state != "ended", now.revoking {
+                    do {
+                        _ = try await client.leaseDecision("revoke", leaseId: leaseId, envelope: envelope)
+                    } catch {
+                        if AppModel.isUnlockFailure(error) {
+                            self.revokeNotSent(leaseId, error)
+                            return
+                        }
+                        // The node is offline or the relay is busy: the same signed revoke goes again.
+                    }
+                    try? await Task.sleep(for: .seconds(3))
+                }
+            }
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// The revoke was signed but its request could not be: say so and let the owner tap again.
+    private func revokeNotSent(_ leaseId: String, _ error: Error) {
+        if var current = liveLease, current.leaseId == leaseId {
+            current.revoking = false
+            liveLease = current
+        }
+        if (error as? ProtocolError) == .keyInvalidated { fail(error); return }
+        banner = "The stop was not sent: \(describe(error)) The lease may still be active. Unlock the app and tap Stop again."
+    }
+
+    // Demo: a fake lease with canned frames (store review). No relay, no key.
+    private func demoDecide(_ item: LeaseRequestItem, grant: Bool) {
+        leaseRequests.removeAll { $0.id == item.id }
+        if grant { openLiveLease(nodeId: item.request.nodeId, leaseId: item.request.leaseId) }
+    }
+
+    private func startDemoFrames() {
+        demoLeaseTimer?.cancel()
+        demoLeaseTimer = Task { [weak self] in
+            var seq = 1
+            while !Task.isCancelled {
+                guard let self, let demo = self.demo, var live = self.liveLease, live.state != "ended" else { return }
+                let frame = AppModel.demoFrame(seq)
+                let action = LeaseAction(seq: seq, at: Timestamps.string(Date()), tool: seq % 2 == 0 ? "Type" : "Click",
+                                         summary: seq % 2 == 0 ? "Type \"12+30=\" (6 chars)" : "Click left at (120, 88) on ss-\(seq)", result: "ok")
+                if let index = demo.pins.firstIndex(where: { $0.id == live.nodeId }),
+                   let envelope = try? demo.leaseView(on: index, leaseId: live.leaseId, seq: seq, toDevice: demo.deviceId, frame: frame,
+                                                      remaining: max(0, 900 - seq * 3), actions: [action]) {
+                    self.apply(envelope, pin: demo.pins[index], to: &live)
+                    self.liveLease = live
+                }
+                seq += 1
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    private static func demoFrame(_ seq: Int) -> Data {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 480, height: 320))
+        let image = renderer.image { ctx in
+            UIColor.systemGray6.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 480, height: 320))
+            ("Demo frame \(seq)" as NSString).draw(at: CGPoint(x: 24, y: 140), withAttributes: [.font: UIFont.systemFont(ofSize: 28)])
+        }
+        return image.jpegData(compressionQuality: 0.6) ?? Data()
+    }
+
+    // MARK: Leases end
+
     init() {
         key = DeviceKey.load()
         if state.mode == .demo { startDemo() }
@@ -312,6 +590,12 @@ final class AppModel: ObservableObject {
                 receive(.object(["envelope": env.json, "expires_in_ms": .number("300000"), "status": .null]), pins: fleet.pins)
             }
         }
+        closeLiveLease()
+        leaseRequests = []
+        if let env = try? fleet.leaseRequest(on: 0, apps: ["calculator", "textedit"], minutes: 15),
+           let message = Leases.verifiedMessage(env, pin: fleet.pins[0]), let request = LeaseRequest(message: message) {
+            leaseRequests = [LeaseRequestItem(request: request, nodeName: fleet.pins[0].name, status: nil)]
+        }
     }
 
     /// Leaving demo drops the demo fleet and its software key; the hardware
@@ -319,6 +603,9 @@ final class AppModel: ObservableObject {
     func leaveDemo() {
         demo = nil
         pending = []
+        closeLiveLease()
+        leaseRequests = []
+        decidedLeaseRequests = []
         state = StoredState()
         state.save()
     }
@@ -1245,6 +1532,8 @@ final class AppModel: ObservableObject {
         case "alert": await refreshAlerts()
         // Cases stage 4 sends kind "question"; the app fetches and verifies the list itself.
         case "question": await refreshQuestions()
+        // Fleet stage 5 sends kind "lease"; the app fetches the requests and shows those a pinned node signed.
+        case "lease": await refreshLeases()
         default: await openPushed(requestId: id)
         }
     }
@@ -1289,6 +1578,9 @@ final class AppModel: ObservableObject {
         pending = []
         questions = []
         answeredTokens = []
+        closeLiveLease()
+        leaseRequests = []
+        decidedLeaseRequests = []
         history = nil
         devices = []
         onlineNodes = [:]

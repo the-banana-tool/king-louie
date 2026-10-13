@@ -75,6 +75,7 @@ struct MainView: View {
                 Text("Demo — nothing here reaches a real machine").font(.footnote.bold())
                     .frame(maxWidth: .infinity).padding(6).background(Color.yellow)
             }
+            LeaseBanner()
             if let fingerprint = model.fingerprintToCompare {
                 Text("This phone: \(fingerprint)\nCheck the other screen shows the same.")
                     .font(.footnote.monospaced()).padding(6)
@@ -105,13 +106,17 @@ struct PendingListView: View {
         NavigationStack {
             TimelineView(.periodic(from: .now, by: 1)) { _ in
                 List {
+                    LeaseRequestsSection()
                     if model.mode == .live {
                         Section {
                             if let problem = model.pollProblem {
                                 Text(problem).font(.caption).foregroundStyle(.secondary)
                             }
                             if !model.isPolling {
-                                Button("Check for requests") { model.checkNow() }
+                                Button("Check for requests") {
+                                    model.checkNow()
+                                    Task { await model.refreshLeases() }
+                                }
                             }
                         }
                     }
@@ -130,8 +135,12 @@ struct PendingListView: View {
                         }
                     }
                 }
-                .overlay { if model.pending.isEmpty { Text("Nothing is waiting for you.").foregroundStyle(.secondary) } }
+                .overlay { if model.pending.isEmpty && model.leaseRequests.isEmpty { Text("Nothing is waiting for you.").foregroundStyle(.secondary) } }
+                // Computer-use requests: pull to load them (this may ask for Face ID, as any check does).
+                .refreshable { await model.refreshLeases() }
             }
+            // The screen appearing is not the owner asking: load them only with a session already unlocked.
+            .task { await model.refreshLeases(onlyIfUnlocked: true) }
             .navigationTitle("Pending approvals")
             .navigationDestination(for: String.self) { id in
                 ApprovalDetailView(itemId: id)
@@ -248,7 +257,8 @@ struct HistoryView: View {
                     Section("As of \(Display.escape(page.asOf))") {
                         ForEach(Array(page.entries.enumerated()), id: \.offset) { _, entry in
                             VStack(alignment: .leading) {
-                                Text(Display.escape(entry["kind"]?.stringValue ?? "")).font(.headline)
+                                let kind = entry["kind"]?.stringValue ?? ""
+                                Text(kind.hasPrefix("lease.") || kind.hasPrefix("gui.") ? "Computer use · \(Display.escape(kind))" : Display.escape(kind)).font(.headline)
                                 Text("#\(entry["seq"]?.intValue ?? 0) · \(Display.escape(entry["at"]?.stringValue ?? "")) · \(Display.escape(entry["writer"]?.stringValue ?? ""))").font(.caption)
                             }
                         }
