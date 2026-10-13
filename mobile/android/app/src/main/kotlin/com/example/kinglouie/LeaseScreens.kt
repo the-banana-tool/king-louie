@@ -188,9 +188,10 @@ fun LeaseBanner(model: AppModel, open: () -> Unit) {
         if (live != null) {
             Row(Modifier.fillMaxWidth().background(Color(0x22FF0000)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(Modifier.weight(1f)) {
-                    // Finding 3 (fourth security review): a lease that is not running yet and may still start says so.
-                    OutlinedButton(open) { Text(if (live.state == "pending") Leases.mayStillStartTitle(live.nodeName) else "Lease ${if (live.state == "suspended") "paused" else "active"} on ${Display.escape(live.nodeName)}") }
-                    if (live.state == "pending") Text(Leases.MAY_STILL_START_DETAIL)
+                    // A lease that is not running yet and may still start says so, in the words for what this phone
+                    // knows of it: a grant it remembers signing, or only that its node says a request is waiting.
+                    OutlinedButton(open) { Text(if (live.state == "pending") model.pendingLeaseTitle(live.leaseId, live.nodeName) else "Lease ${if (live.state == "suspended") "paused" else "active"} on ${Display.escape(live.nodeName)}") }
+                    if (live.state == "pending") Text(model.pendingLeaseDetail(live.leaseId))
                     Leases.grantedByOther(live.grantedByDevice, live.grantedByName, model.deviceId)?.let { Text(it) }
                 }
                 Button({ model.killSwitch() }, enabled = !live.busy, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("Stop") }
@@ -201,8 +202,8 @@ fun LeaseBanner(model: AppModel, open: () -> Unit) {
             if (lease.leaseId != live?.leaseId) {
                 Row(Modifier.fillMaxWidth().background(Color(0x22FF0000)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                     Column(Modifier.weight(1f)) {
-                        OutlinedButton({ model.openRunningLease(lease); open() }) { Text(if (lease.state == "pending") Leases.mayStillStartTitle(lease.nodeName) else "Lease ${if (lease.state == "suspended") "paused" else "active"} on ${Display.escape(lease.nodeName)}") }
-                        if (lease.state == "pending") Text(Leases.MAY_STILL_START_DETAIL)
+                        OutlinedButton({ model.openRunningLease(lease); open() }) { Text(if (lease.state == "pending") model.pendingLeaseTitle(lease.leaseId, lease.nodeName) else "Lease ${if (lease.state == "suspended") "paused" else "active"} on ${Display.escape(lease.nodeName)}") }
+                        if (lease.state == "pending") Text(model.pendingLeaseDetail(lease.leaseId))
                         Leases.grantedByOther(lease.grantedByDevice, lease.grantedByName, model.deviceId)?.let { Text(it) }
                     }
                     Button({ model.stopRunningLease(lease) }, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("Stop") }

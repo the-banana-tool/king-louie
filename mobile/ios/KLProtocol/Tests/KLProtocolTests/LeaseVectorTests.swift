@@ -277,6 +277,28 @@ final class LeaseVectorTests: XCTestCase {
         XCTAssertFalse(Leases.mayStillStartTitle(nodeName: "gpu\u{202E}box").unicodeScalars.contains("\u{202E}"))
     }
 
+    /// Fifth security review, finding 1: a pending lease an accepted
+    /// listing names gets a row whatever this phone remembers; what it
+    /// remembers only chooses the words.
+    func testListedPendingGetsRow() {
+        // No memory of a grant (a restarted app, or another phone), no request on screen: a row.
+        XCTAssertTrue(Leases.listedPendingGetsRow(state: "pending", shownAsRequest: false, signedGrant: false))
+        XCTAssertTrue(Leases.listedPendingGetsRow(state: "pending", shownAsRequest: false, signedGrant: true))
+        XCTAssertTrue(Leases.listedPendingGetsRow(state: "pending", shownAsRequest: true, signedGrant: true))
+        // The request is on screen, unanswered by this phone: that card is its row.
+        XCTAssertFalse(Leases.listedPendingGetsRow(state: "pending", shownAsRequest: true, signedGrant: false))
+        for state in ["active", "suspended", "ended", ""] {
+            XCTAssertFalse(Leases.listedPendingGetsRow(state: state, shownAsRequest: false, signedGrant: true), state)
+        }
+        XCTAssertEqual(Leases.pendingTitle(nodeName: "gpu-box", signedGrant: true), "May still start on gpu-box")
+        XCTAssertEqual(Leases.pendingTitle(nodeName: "gpu-box", signedGrant: false), "A request is waiting on gpu-box")
+        XCTAssertFalse(Leases.requestWaitingTitle(nodeName: "gpu\u{202E}box").unicodeScalars.contains("\u{202E}"))
+        XCTAssertEqual(Leases.pendingDetail(signedGrant: true), Leases.mayStillStartDetail)
+        XCTAssertEqual(Leases.pendingDetail(signedGrant: false), Leases.requestWaitingDetail)
+        XCTAssertTrue(Leases.requestWaitingDetail.contains("does not remember allowing it"))
+        XCTAssertFalse(Leases.requestWaitingDetail.contains("This phone signed"))
+    }
+
     /// Fourth security review, finding 2: the words for a node not asked
     /// yet and for one whose listing was accepted.
     func testCheckedWords() {

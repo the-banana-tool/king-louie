@@ -189,6 +189,34 @@ public enum Leases {
     /// Under that row.
     public static let mayStillStartDetail = "This phone signed an Allow for it that the computer did not confirm. The relay could still deliver it. Stop cancels it."
 
+    /// A lease its node says is waiting for a phone's answer, named in a
+    /// listing this phone accepted, for which this phone remembers signing
+    /// no grant (fifth security review, finding 1). The memory of what was
+    /// signed is the app's own: it is gone after a restart, and another
+    /// phone never had it. So such a phone cannot say the lease "may still
+    /// start"; it says what it knows, and gives the same Stop (any enrolled
+    /// phone's revoke ends a pending lease).
+    public static func requestWaitingTitle(nodeName: String) -> String { "A request is waiting on \(Display.escape(nodeName))" }
+
+    /// Under that row.
+    public static let requestWaitingDetail = "Its computer says a request for computer use is waiting for a phone's answer. This phone does not remember allowing it. An Allow signed before this app was restarted, or on another phone, could still reach it. Stop cancels the request."
+
+    /// What the row of a pending lease is called, and what is said under it.
+    public static func pendingTitle(nodeName: String, signedGrant: Bool) -> String {
+        signedGrant ? mayStillStartTitle(nodeName: nodeName) : requestWaitingTitle(nodeName: nodeName)
+    }
+
+    public static func pendingDetail(signedGrant: Bool) -> String { signedGrant ? mayStillStartDetail : requestWaitingDetail }
+
+    /// Whether a lease that an accepted listing names gets a banner row
+    /// for being pending. Nothing this phone remembers decides it: a
+    /// pending lease gets one, unless the request itself is on screen with
+    /// its Allow and Deny (`shownAsRequest`) and this phone signed no grant
+    /// for it, which is a request nobody has answered yet.
+    public static func listedPendingGetsRow(state: String, shownAsRequest: Bool, signedGrant: Bool) -> Bool {
+        state == "pending" && (signedGrant || !shownAsRequest)
+    }
+
     /// Whether such a row stays after a listing its node signed was
     /// accepted. `listedState`: the state the listing gives the lease, nil
     /// when it does not name it. Named: it stays while still pending (a

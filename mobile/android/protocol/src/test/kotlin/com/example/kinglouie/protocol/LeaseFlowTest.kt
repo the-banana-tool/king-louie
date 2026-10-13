@@ -69,6 +69,26 @@ class LeaseFlowTest {
         assertTrue(!Leases.mayStillStartTitle("gpu\u202Ebox").contains('\u202E'))
     }
 
+    /** Fifth security review, finding 1: a pending lease an accepted listing names gets a row whatever this phone remembers; what it remembers only chooses the words. */
+    @Test
+    fun listedPendingGetsRow() {
+        // No memory of a grant (a restarted app, or another phone), no request on screen: a row.
+        assertTrue(Leases.listedPendingGetsRow("pending", shownAsRequest = false, signedGrant = false))
+        assertTrue(Leases.listedPendingGetsRow("pending", shownAsRequest = false, signedGrant = true))
+        assertTrue(Leases.listedPendingGetsRow("pending", shownAsRequest = true, signedGrant = true))
+        // The request is on screen, unanswered by this phone: that card is its row.
+        assertTrue(!Leases.listedPendingGetsRow("pending", shownAsRequest = true, signedGrant = false))
+        for (state in listOf("active", "suspended", "ended", "")) assertTrue(!Leases.listedPendingGetsRow(state, shownAsRequest = false, signedGrant = true))
+        assertEquals("May still start on gpu-box", Leases.pendingTitle("gpu-box", true))
+        assertEquals("A request is waiting on gpu-box", Leases.pendingTitle("gpu-box", false))
+        val rlo = Char(0x202E)
+        assertTrue(!Leases.requestWaitingTitle("gpu${rlo}box").contains(rlo))
+        assertEquals(Leases.MAY_STILL_START_DETAIL, Leases.pendingDetail(true))
+        assertEquals(Leases.REQUEST_WAITING_DETAIL, Leases.pendingDetail(false))
+        assertTrue(Leases.REQUEST_WAITING_DETAIL.contains("does not remember allowing it"))
+        assertTrue(!Leases.REQUEST_WAITING_DETAIL.contains("This phone signed"))
+    }
+
     /** Fourth security review, finding 2: the words for a node not asked yet and for one whose listing was accepted. */
     @Test
     fun checkedWords() {

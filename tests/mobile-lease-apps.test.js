@@ -272,7 +272,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
     assert.match(refreshIos, /if entry\["envelope"\]\?\.isNull \?\? true \{\n\s+noteListedLease\(entry, deviceId: key\.deviceId\)\n\s+continue\n\s+\}/);
     assert.equal(count(iosLeases, 'client.leases('), 1, 'one request lists both');
-    assert.equal(count(iosLeases, 'runningLeases.append('), 2, 'a listed lease, and the lease that was on the live screen when another is followed');
+    assert.equal(count(iosLeases, 'runningLeases.append('), 3, 'a listed lease, a pending lease an accepted listing names, and the lease that was on the live screen when another is followed');
     // On opening the app: only with a session already unlocked, never a prompt of its own.
     const open = section(iosLeases, 'func loadLeasesWhenUnlocked', '\n    }\n');
     assert.match(open, /if key\.isSessionUnlocked \{\n\s+await self\.refreshLeases\(onlyIfUnlocked: true\)\n\s+return\n\s+\}/);
@@ -572,11 +572,13 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(dropIos, /signedLeaseGrants\[leaseId\]\.map \{ \$0 < Date\(\) && \$0 < relayNow \} \?\? true/);
     assert.match(dropIos, /Leases\.keepsMayStart\(listedState: nil, requestExpired: expired\)/);
     assert.match(dropIos, /where row\.nodeId == pin\.id && row\.state == "pending" && !named\.contains\(row\.leaseId\)/);
-    // The row: its own words, and the Stop every row has.
-    assert.match(section(iosLeases, 'func bannerTitle', '\n    }\n'), /if lease\.state == "pending" \{ return Leases\.mayStillStartTitle\(nodeName: lease\.nodeName\) \}/);
+    // The row: its own words, and the Stop every row has. "May still start" only for a grant this phone
+    // remembers signing (fifth security review, finding 1: a pending row no longer needs one).
+    assert.match(section(iosLeases, 'func bannerTitle', '\n    }\n'), /if lease\.state == "pending" \{ return Leases\.pendingTitle\(nodeName: lease\.nodeName, signedGrant: signedLeaseGrants\[lease\.leaseId\] != nil\) \}/);
+    assert.match(swift, /public static func pendingTitle\(nodeName: String, signedGrant: Bool\) -> String \{\n\s+signedGrant \? mayStillStartTitle\(nodeName: nodeName\) : requestWaitingTitle\(nodeName: nodeName\)\n\s+\}/);
     const views = read('mobile', 'ios', 'App', 'LeaseViews.swift');
     const banner = views.slice(views.indexOf('struct LeaseBanner'));
-    assert.match(banner, /if lease\.state == "pending" \{ Text\(Leases\.mayStillStartDetail\)/);
+    assert.match(banner, /if lease\.state == "pending" \{ Text\(model\.pendingDetail\(lease\)\)/);
     assert.match(banner, /Button\("Stop", role: \.destructive\) \{ Task \{ await model\.stopLease\(lease\) \} \}/);
     // Stop is the owner's tap and nothing else: no revoke is built anywhere but in killSwitch (no automatic revoke after an unconfirmed grant).
     assert.equal(count(ios, 'Leases.revoke('), 1);
@@ -605,10 +607,91 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.equal(count(live, 'scope.launch'), 4, 'still one coroutine per tap');
     const screens = read(...kt, 'LeaseScreens.kt');
     const bannerKt = screens.slice(screens.indexOf('fun LeaseBanner('));
-    assert.equal(count(bannerKt, 'Leases.mayStillStartTitle('), 2, 'the row of the lease on the live screen, and the rows of the others');
-    assert.equal(count(bannerKt, 'Leases.MAY_STILL_START_DETAIL'), 2);
+    // "May still start" only for a grant this phone remembers signing (fifth security review, finding 1).
+    assert.equal(count(bannerKt, 'model.pendingLeaseTitle('), 2, 'the row of the lease on the live screen, and the rows of the others');
+    assert.equal(count(bannerKt, 'model.pendingLeaseDetail('), 2);
+    assert.match(live, /fun pendingLeaseTitle\(leaseId: String, nodeName: String\): String = Leases\.pendingTitle\(nodeName, leaseId in signedLeaseGrants\)/);
+    assert.match(kotlin, /fun pendingTitle\(nodeName: String, signedGrant: Boolean\): String = if \(signedGrant\) mayStillStartTitle\(nodeName\) else requestWaitingTitle\(nodeName\)/);
     assert.match(bannerKt, /Button\(\{ model\.stopRunningLease\(lease\) \}/);
     assert.equal(count(android, 'signedLeaseGrants.clear()'), 2);
+  });
+
+  // Fifth security review, finding 1. The memory of signed grants is the
+  // app's own, so after a restart, and on any other enrolled phone, a
+  // listing that passed named a lease as pending and the phone showed "1
+  // request waiting" with no row and no Stop, while the relay could still
+  // deliver the grant it held. Every pending lease a listing that passed
+  // names now gets a row with the Stop every row has, whatever this phone
+  // remembers; what it remembers only chooses the words.
+  it('fifth review, finding 1: a pending lease an accepted listing names gets a row and a Stop on both phones, with no memory of a grant', () => {
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    // The rule, the same in both cores: pending gets a row; only an unanswered request that is on screen as a card does not get a second one.
+    assert.match(swift, /public static func listedPendingGetsRow\(state: String, shownAsRequest: Bool, signedGrant: Bool\) -> Bool \{\n\s+state == "pending" && \(signedGrant \|\| !shownAsRequest\)\n\s+\}/);
+    assert.match(kotlin, /fun listedPendingGetsRow\(state: String, shownAsRequest: Boolean, signedGrant: Boolean\): Boolean = state == "pending" && \(signedGrant \|\| !shownAsRequest\)/);
+    // Honest words: a phone that remembers no grant does not say "may still start".
+    assert.match(swift, /public static func requestWaitingTitle\(nodeName: String\) -> String \{ "A request is waiting on \\\(Display\.escape\(nodeName\)\)" \}/);
+    assert.match(kotlin, /fun requestWaitingTitle\(nodeName: String\): String = "A request is waiting on \$\{Display\.escape\(nodeName\)\}"/);
+    const DETAIL = 'Its computer says a request for computer use is waiting for a phone\'s answer. This phone does not remember allowing it. An Allow signed before this app was restarted, or on another phone, could still reach it. Stop cancels the request.';
+    assert.ok(swift.includes(`public static let requestWaitingDetail = "${DETAIL}"`));
+    assert.ok(kotlin.includes(`const val REQUEST_WAITING_DETAIL = "${DETAIL}"`));
+    assert.match(swift, /public static func pendingDetail\(signedGrant: Bool\) -> String \{ signedGrant \? mayStillStartDetail : requestWaitingDetail \}/);
+    assert.match(kotlin, /fun pendingDetail\(signedGrant: Boolean\): String = if \(signedGrant\) MAY_STILL_START_DETAIL else REQUEST_WAITING_DETAIL/);
+
+    // iOS.
+    const ios = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
+    // Only after that node's listing passed, and after the rows it no longer names were dropped.
+    const accepted = refreshIos.indexOf('guard check.accepted else { checks[pin.id] = .unconfirmed; continue }');
+    const noted = refreshIos.indexOf('notePendingListed(check, pin: pin, shownAsRequest: Set(items.map { $0.request.leaseId }))');
+    assert.ok(accepted > 0 && accepted < refreshIos.indexOf('dropMayStartRows(') && refreshIos.indexOf('dropMayStartRows(') < noted);
+    assert.equal(count(iosLeases, 'notePendingListed('), 2, 'declared, and called from that one place');
+    const pendingIos = section(iosLeases, 'private func notePendingListed', '\n    }\n');
+    assert.match(pendingIos, /guard check\.accepted else \{ return \}\n\s+for signed in check\.statuses \{\n\s+guard let message = Leases\.verifiedMessage\(signed, pin: pin\), let status = LeaseStatus\(message: message\) else \{ continue \}/);
+    assert.match(pendingIos, /guard Leases\.listedPendingGetsRow\(state: status\.state, shownAsRequest: shownAsRequest\.contains\(status\.leaseId\), signedGrant: remembered\) else \{ continue \}/);
+    assert.match(pendingIos, /guard Leases\.acceptsStatus\(status, appliedSeq: 0\) else \{ continue \}\n\s+runningLeases\.append\(RunningLease\(/);
+    assert.match(pendingIos, /status: signed\)\)/, 'the row carries the signed status, so Stop starts from it');
+    // Memory chooses the words and nothing else: no branch here returns for want of a remembered grant.
+    assert.equal(count(pendingIos, 'signedLeaseGrants['), 1);
+    none(pendingIos, ['client.', 'signEnvelope(', 'killSwitch(', 'Task {', 'Leases.revoke('], 'notePendingListed (iOS)');
+    // A row that is there stays while its node still signs "pending", listing or no listing.
+    const noteIos = section(iosLeases, 'private func noteListedLease', '\n    }\n');
+    assert.match(noteIos, /if let known, status\.state == "pending" \{\n\s+runningLeases\[known\] = RunningLease\(/);
+    assert.ok(noteIos.indexOf('guard Leases.acceptsStatus(') < noteIos.indexOf('if let known, status.state == "pending" {'), 'never from an older status');
+    // An unremembered row has no expiry to wait for: it goes with the first accepted listing that does not name it.
+    assert.match(section(iosLeases, 'private func dropMayStartRows', '\n    }\n'), /signedLeaseGrants\[leaseId\]\.map \{ \$0 < Date\(\) && \$0 < relayNow \} \?\? true/);
+    // Stop from that row is the Stop of every row: followed, then the kill switch, which asks nothing about who granted.
+    const kill = section(iosLeases, 'func killSwitch', '// Demo:');
+    none(kill, ['signedLeaseGrants', 'grantedBy'], 'killSwitch (iOS)');
+    assert.match(kill, /guard var live = liveLease, !live\.revoking, live\.state != "ended" else \{ return \}/);
+    assert.match(section(iosLeases, 'private func follow', '\n    }\n'), /if let old = liveLease, Leases\.isLive\(state: old\.state\) \|\| \(old\.state == "pending" && old\.lastStatus != nil\) \{/);
+    assert.equal(count(ios, 'Leases.revoke('), 1, 'still no revoke but the owner\'s Stop');
+
+    // Android: the same, inside the owner's "Check" tap and nowhere else (R-F5-1), sending nothing (R-F5-5).
+    const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+    const android = read(...kt, 'AppModel.kt');
+    const live = section(android, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+    const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
+    assert.match(refreshAndroid, /leaseChecks\[pin\.id\] = if \(check\.accepted\) \{\n\s+val named = Leases\.listedStatuses\(check, pin\)\n\s+dropMayStartRows\(pin, named\.map \{ it\.leaseId \}\.toSet\(\), api\)\n\s+notePendingListed\(check, pin, items\.map \{ it\.request\.leaseId \}\.toSet\(\)\)/);
+    assert.equal(count(live, 'notePendingListed('), 2, 'declared, and called from that one place: the tap');
+    assert.equal(count(refreshAndroid, 'api.'), 1, 'still one request, one prompt');
+    const pendingKt = section(live, 'private fun notePendingListed', '\n    }\n');
+    assert.match(pendingKt, /if \(!check\.accepted\) return\n\s+for \(signed in check\.statuses\) \{\n\s+val status = Leases\.verifiedMessage\(signed, pin\)\?\.let \{ LeaseStatus\.from\(it\) \} \?: continue/);
+    assert.match(pendingKt, /if \(!Leases\.listedPendingGetsRow\(status\.state, status\.leaseId in shownAsRequest, status\.leaseId in signedLeaseGrants\)\) continue/);
+    assert.match(pendingKt, /if \(!Leases\.acceptsStatus\(status, 0\)\) continue\n\s+runningLeases\.add\(RunningLease\(pin\.id, pin\.name, status\.leaseId, status\.state, status\.reason, status\.seq, status\.grantedByDevice, status\.grantedByName, signed\)\)/);
+    none(pendingKt, ['api.', 'sendLease(', 'signEnvelope(', 'killSwitch(', 'scope.launch', 'delay(', 'while'], 'notePendingListed (Android)');
+    const note = section(live, 'private fun noteListedLease', '\n    }\n');
+    assert.match(note, /if \(known >= 0 && status\.state == "pending"\) \{\n\s+runningLeases\[known\] = RunningLease\(/);
+    assert.ok(note.indexOf('if (!Leases.acceptsStatus(') < note.indexOf('if (known >= 0 && status.state == "pending") {'), 'never from an older status');
+    assert.match(section(live, 'private fun dropMayStartRows', '\n    }\n'), /val expired = expires == null \|\| /);
+    const killKt = section(live, 'fun killSwitch', '\n    }\n');
+    none(killKt, ['signedLeaseGrants', 'grantedBy'], 'killSwitch (Android)');
+    assert.equal(count(killKt, 'sendLease('), 1, 'R-F5-5: one revoke, sent once');
+    assert.match(section(live, 'private fun followRunningLease', '\n    }\n'), /if \(old != null && \(Leases\.isLive\(old\.state\) \|\| \(old\.state == "pending" && old\.lastStatus != null\)\)\) \{/);
+    assert.equal(count(live, 'scope.launch'), 4, 'still one coroutine per tap: nothing new runs by itself');
+    assert.equal(count(android, 'Leases.revoke('), 1);
+    assert.match(android, /import com\.example\.kinglouie\.protocol\.ListingCheck\n/);
   });
 
   // R-F5-19 (owner ruling, 2026-10-13): iOS watches only while the live
@@ -701,8 +784,10 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
       'forEach', 'generateSequence', 'tailrec', 'ticker', 'Handler(', 'schedule', 'LaunchedEffect', '.collect', 'flow {'], 'the live lease section');
     // Each `for` walks the entries one fetch returned (the views, the list, the fresh statuses before a
     // watch) or, after the one list request, the pinned nodes (what each one's listing came to; fourth
-    // security review, finding 2). None of them sends anything.
-    assert.equal(count(live, 'for ('), 5);
+    // security review, finding 2) and the statuses of a listing that passed (fifth, finding 1). None of
+    // them sends anything.
+    assert.equal(count(live, 'for ('), 6);
+    assert.match(live, /for \(signed in check\.statuses\)/);
     assert.match(live, /for \(entry in entries\)/);
     assert.match(live, /for \(entry in listed\)/);
     assert.match(live, /for \(entry in fresh\)/);

@@ -219,9 +219,25 @@ a status the node signed says the lease ended, or a listing that passed no
 longer names it after the request's `expires_at` has passed on the phone's
 own clock and on the relay-corrected one. The phone revokes nothing by
 itself and sends no grant again by itself; Android sends each on the
-owner's tap only (R-F5-5). The memory is the app's own and is lost when the
-app is restarted: a phone restarted between its grant and the listing shows
-the lease only once it runs.
+owner's tap only (R-F5-5).
+
+That memory is the app's own: it is lost when the app is restarted, and no
+other phone has it. So it does not decide whether a pending lease is shown
+(2026-10-13, fifth security review, finding 1). Every lease that a listing
+which passed names as `pending` gets a banner row with the same Stop, on
+any enrolled phone, whatever that phone remembers. What it remembers
+chooses the words only: "May still start on <node>" for a grant it
+remembers signing; otherwise "A request is waiting on <node>", with a line
+saying that this phone does not remember allowing it and that an Allow
+signed before a restart, or on another phone, could still reach it. One
+case gets no second row: the request itself is on the phone's screen with
+its Allow and Deny, and the phone remembers no grant for it (a request
+nobody has answered; Deny ends it). A row for which no grant is remembered
+goes when the node signs that the lease ended or started, or with the first
+listing that passes and no longer names the lease; while its node still
+signs `pending` it stays, also when a newer status arrives without a
+listing. Android adds these rows only inside the owner's "Check" tap, like
+everything else it learns (R-F5-1), and sends nothing for them (R-F5-5).
 
 The node does not remember listing nonces and judges nothing by them: it is
 the phone that needs the answer to be fresh. `at` is informational, like
