@@ -10,6 +10,14 @@ const crypto = require('crypto');
 const { validTimeZone, isRealCalendarDate, toMs } = require('./clock');
 
 const CONTACT_CHANNELS = Object.freeze(['in-app', 'telegram', 'discord', 'email', 'sms', 'voice', 'ntfy', 'mobile']);
+// The contact channels an envelope may name for a channel send to someone
+// other than the owner (executors/envelope.js `channels`). Narrower than
+// CONTACT_CHANNELS on purpose: only a channel that addresses a third party.
+// `in-app` and `mobile` are the owner's own window and paired phone, so a
+// "send" there reaches the owner, not the recipient; `ntfy` publishes to
+// whatever topic is named, under the owner's own notification identity, and
+// is left out until the owner asks for it. `call` is stored as `voice`.
+const SEND_CHANNELS = Object.freeze(['telegram', 'discord', 'email', 'sms', 'voice']);
 const STEP_CHANNELS = Object.freeze(['present', 'journal', ...CONTACT_CHANNELS]);
 const URGENCIES = Object.freeze(['low', 'normal', 'high']);
 const SLACK_ERROR = 'slack is not a contact channel: it has no sender allowlist';
@@ -513,6 +521,7 @@ function stripQuoted(text) {
 
 module.exports = {
   CONTACT_CHANNELS,
+  SEND_CHANNELS,
   STEP_CHANNELS,
   URGENCIES,
   SLACK_ERROR,

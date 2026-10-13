@@ -394,10 +394,12 @@ for showing an envelope stored before the rule.
 **Channels (owner decision 2026-10-12).** `channels` lists the contact channels a channel send
 (`ContactRouter.sendExternal`, §3.7) to the envelope's recipients may use, in stored form (`call` is
 `voice`). A request names them explicitly; the owner sees them in the approval question (`Channel sends
-allowed: sms, voice`) and, for a `signed` envelope, in the phone summary before the intent. Only the known contact channels
-are accepted (`CONTACT_CHANNELS` in `contact-format.js`: `in-app`, `telegram`, `discord`, `email`, `sms`,
-`voice`, `ntfy`, `mobile`), each at most once, in a request and when a stored envelope is read
-(security review 2026-10-12). For an envelope with channels the phone summary is host-first:
+allowed: sms, voice`) and, for a `signed` envelope, in the phone summary before the intent. Only channels that address a third party
+are accepted (`SEND_CHANNELS` in `contact-format.js`: `telegram`, `discord`, `email`, `sms`, `voice`), each
+at most once, in a request, when a stored envelope is read and at send (security reviews 2026-10-12 and
+2026-10-13). `in-app` and `mobile` are the owner's own window and phone, and `ntfy` publishes to a named
+topic under the owner's notification identity, so none of them is an envelope channel; `ntfy` can be added
+if the owner asks for it. For an envelope with channels the phone summary is host-first:
 `<id> · <executor> · channel sends: … · N recipients · $cap · start to end: <intent on one line>`, so F3's
 300-character cut can only shorten the intent, and `renderSignedSummary` throws (the request is refused)
 if the host-written part alone would not fit. An envelope without channels keeps its old summary, intent

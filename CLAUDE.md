@@ -711,8 +711,10 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
       when present, so an envelope without it hashes as before and allows
       no channel send (executor jobs only). Adding a channel is a `channel`
       delta the owner approves; never edit `envelopeCore` so that an
-      envelope without a field hashes differently. Only `CONTACT_CHANNELS`
-      ids are accepted, each once. With channels the phone summary is
+      envelope without a field hashes differently. Only `SEND_CHANNELS`
+      ids (`telegram`, `discord`, `email`, `sms`, `voice`: the channels
+      that address a third party; never `in-app`, `mobile` or `ntfy`) are
+      accepted, each once. With channels the phone summary is
       host-first (channels, recipients, cap, window, then the intent) and
       refuses to be built if those would not fit F3's 300-character cut;
       without channels it keeps its old intent-first layout (it is hashed).

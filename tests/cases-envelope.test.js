@@ -577,7 +577,7 @@ describe('the approval question cannot be spoofed by model-written text', () => 
 // 300 characters, so the channel list must be bounded and can never be cut.
 describe('envelope channels: known ids only, and a phone summary that keeps them', () => {
   const ctx = { entry: PHONE_AGENT, facts: facts(ACRES, GUESS, FLOOR), casesTimeZone: 'UTC' };
-  const { CONTACT_CHANNELS } = require('../src/cases/contact-format');
+  const { SEND_CHANNELS } = require('../src/cases/contact-format');
   const helpers = approvalHelpers();
   const shown = (env) => signedAction(env, 'case-1', helpers).summary;
 
@@ -589,10 +589,10 @@ describe('envelope channels: known ids only, and a phone summary that keeps them
       assert.throws(() => envelopeCore({ ...activeEnvelope(), channels: bad }), /channels/, JSON.stringify(bad));
       assert.strictEqual(envelopeIntact(activeEnvelope({ channels: ['sms'] }) && { ...activeEnvelope(), channels: bad }), false);
     }
-    const all = validateEnvelopeRequest(request({ channels: [...CONTACT_CHANNELS, 'call', 'SMS'] }), ctx);
+    const all = validateEnvelopeRequest(request({ channels: [...SEND_CHANNELS, 'call', 'SMS'] }), ctx);
     assert.strictEqual(all.ok, true, all.error);
-    assert.deepStrictEqual(all.core.channels, [...CONTACT_CHANNELS]);
-    assert.throws(() => envelopeCore({ ...activeEnvelope(), channels: [...CONTACT_CHANNELS, 'sms'] }), /channels/, 'more entries than there are channels');
+    assert.deepStrictEqual(all.core.channels, [...SEND_CHANNELS]);
+    assert.throws(() => envelopeCore({ ...activeEnvelope(), channels: [...SEND_CHANNELS, 'sms'] }), /channels/, 'more entries than there are channels');
     assert.strictEqual(envelopeFit(activeEnvelope({ channels: ['sms'] }), {}, {
       facts: facts(ACRES), recipients: ['+15550100'], now: MONDAY_NOON, estimateUsd: 0, executorId: 'phone-agent', channel: 'loop-sms'
     }).refusals[0], 'the channel named for the send is not a channel id');
@@ -601,13 +601,13 @@ describe('envelope channels: known ids only, and a phone summary that keeps them
   it('with every channel, many recipients and the longest intent, the cut summary still shows all the host-written parts', () => {
     const recipients = Array.from({ length: 150 }, (_, i) => `+1555010${String(i).padStart(3, '0')}`);
     const env = activeEnvelope({
-      authority: 'signed', channels: [...CONTACT_CHANNELS], intent: 'Ask about the lot. '.repeat(26).trim(), recipients: { allow: recipients },
+      authority: 'signed', channels: [...SEND_CHANNELS], intent: 'Ask about the lot. '.repeat(26).trim(), recipients: { allow: recipients },
       caps: { usd: 123456.78, contacts: 150, attemptsPerContact: 9 }
     });
     const summary = shown(env);
     assert.ok(Array.from(summary).length <= 300);
     assert.ok(summary.endsWith('…'), 'the intent is what gets cut');
-    assert.ok(summary.startsWith(`env-01 · phone-agent · channel sends: ${CONTACT_CHANNELS.join(', ')} · 150 recipients · $123456.78 · 2026-10-26 to 2026-10-30: Ask about the lot.`), summary);
+    assert.ok(summary.startsWith(`env-01 · phone-agent · channel sends: ${SEND_CHANNELS.join(', ')} · 150 recipients · $123456.78 · 2026-10-26 to 2026-10-30: Ask about the lot.`), summary);
   });
 
   it('a stored multi-line intent cannot break the summary of an envelope with channels', () => {
@@ -626,5 +626,35 @@ describe('envelope channels: known ids only, and a phone summary that keeps them
       renderSignedSummary(envelopeCore(activeEnvelope()), 'env-01'),
       'env-01 · phone-agent: Ask three brokers for a listing quote on the lot (2 recipients, $20.00, 2026-10-26 to 2026-10-30)'
     );
+  });
+});
+
+// Second review 2026-10-13, finding 4: an envelope channel is one that
+// addresses a third party. in-app and mobile are the owner's own surfaces
+// and ntfy publishes to a topic under the owner's notification identity.
+describe('envelope channels are limited to those that address a third party', () => {
+  const ctx = { entry: PHONE_AGENT, facts: facts(ACRES, GUESS, FLOOR), casesTimeZone: 'UTC' };
+  const { CONTACT_CHANNELS, SEND_CHANNELS } = require('../src/cases/contact-format');
+
+  it('the list is telegram, discord, email, sms and voice, all of them contact channels', () => {
+    assert.deepStrictEqual([...SEND_CHANNELS], ['telegram', 'discord', 'email', 'sms', 'voice']);
+    assert.ok(SEND_CHANNELS.every((id) => CONTACT_CHANNELS.includes(id)));
+    assert.ok(Object.isFrozen(SEND_CHANNELS));
+  });
+
+  it('in-app, mobile and ntfy are refused in a request, in a stored envelope and at send', () => {
+    for (const id of ['in-app', 'mobile', 'ntfy']) {
+      const r = validateEnvelopeRequest(request({ channels: ['sms', id] }), ctx);
+      assert.strictEqual(r.ok, false, id);
+      assert.match(r.error, /"channels" must be a list of telegram, discord, email, sms, voice/);
+      assert.throws(() => envelopeCore({ ...activeEnvelope(), channels: [id] }), /channels/, id);
+      assert.strictEqual(envelopeIntact({ ...activeEnvelope(), channels: [id] }), false, id);
+      const fit = envelopeFit(activeEnvelope({ channels: ['sms'] }), {}, {
+        facts: facts(ACRES), recipients: ['+15550100'], now: MONDAY_NOON, estimateUsd: 0, executorId: 'phone-agent', channel: id
+      });
+      assert.deepStrictEqual([fit.fits, fit.refusals], [false, ['the channel named for the send is not a channel id']], id);
+    }
+    const all = validateEnvelopeRequest(request({ channels: [...SEND_CHANNELS, 'call'] }), ctx);
+    assert.deepStrictEqual(all.core.channels, [...SEND_CHANNELS]);
   });
 });

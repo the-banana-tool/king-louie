@@ -11,7 +11,7 @@ const {
 const { normalizeRecipient, recipientChannel } = require('./normalize');
 const { gateLeaves } = require('../gates');
 const { HIDDEN_CLASS } = require('../hidden-chars');
-const { CONTACT_CHANNELS } = require('../contact-format');
+const { SEND_CHANNELS } = require('../contact-format');
 
 // The owner approves an envelope from a card of lines. Model-written text
 // (intent, rules, fact statements) must never be able to start a line of
@@ -112,13 +112,14 @@ function authorityOf(env) {
 // An envelope with no `channels` key allows no channel send, and its core
 // (so its hash, and the action a phone signs) has no such key: it is what it
 // was before the field existed. A key that is present must be a clean list
-// of known contact channel ids (contact-format.js CONTACT_CHANNELS, the ids
-// the contact adapters and ladders use; 'call' is stored as 'voice'), each
-// at most once, so never more of them than there are channels; anything
-// else is malformed (read as tampered), never "no list". The bound is what
-// lets the phone summary always show the whole list (renderSignedSummary).
-const MAX_CHANNELS = CONTACT_CHANNELS.length;
-const isChannelId = (v) => typeof v === 'string' && CONTACT_CHANNELS.includes(v);
+// of channels that address a third party (contact-format.js SEND_CHANNELS;
+// 'call' is stored as 'voice'), each at most once, so never more of them
+// than there are such channels; anything else, the owner's own surfaces
+// (in-app, mobile) and ntfy included, is malformed (read as tampered),
+// never "no list". The bound is what lets the phone summary always show
+// the whole list (renderSignedSummary).
+const MAX_CHANNELS = SEND_CHANNELS.length;
+const isChannelId = (v) => typeof v === 'string' && SEND_CHANNELS.includes(v);
 
 // → the stored form of a channel id ('call' → 'voice'), or null.
 function normalizeChannelId(value) {
@@ -131,7 +132,7 @@ function normalizeChannelId(value) {
 function channelsOf(env) {
   const list = env.channels;
   if (!Array.isArray(list) || list.length > MAX_CHANNELS || !list.every(isChannelId) || new Set(list).size !== list.length) {
-    throw new EnvelopeCoreError(`channels must be a list of distinct contact channels (${CONTACT_CHANNELS.join(', ')})`);
+    throw new EnvelopeCoreError(`channels must be a list of distinct channels out of ${SEND_CHANNELS.join(', ')}`);
   }
   return [...list];
 }
@@ -207,7 +208,7 @@ function validateEnvelopeRequest(body, {
   if (b.channels !== undefined) {
     const ids = Array.isArray(b.channels) ? b.channels.map(normalizeChannelId) : null;
     if (!ids || !ids.length || ids.includes(null)) {
-      errors.push(`"channels" must list at least one of ${CONTACT_CHANNELS.join(', ')} (leave it out when no channel send is needed)`);
+      errors.push(`"channels" must be a list of ${SEND_CHANNELS.join(', ')} (leave it out when no channel send is needed)`);
     } else {
       channels = [...new Set(ids)];
     }
