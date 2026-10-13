@@ -10,6 +10,7 @@ const { caseToolGuard, caseBrowserProfileGuard } = require('../cases/executors/c
 const { markLocalRequester } = require('../core/origin');
 const { refuseUnsafeGate, REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
 const { createLogger } = require('../logging');
+const { detachImages } = require('./tool-images');
 
 const log = createLogger('tool-executor');
 
@@ -602,7 +603,10 @@ class ToolExecutor extends EventEmitter {
       // instead, so it means "the tool is about to run", not "was asked for".
       this.emit('executeStart', { toolName, parameters: effectiveParameters });
 
-      const result = await tool.execute(effectiveParameters, {
+      // Fleet stage 5: `_images` never reach postExecute listeners (chat
+      // storage, audit, the renderer); only an emitsImages tool keeps them,
+      // off-JSON, for the agent loop to lift.
+      const result = detachImages(tool, await tool.execute(effectiveParameters, {
         ...this.extraToolOptions,
         ...options,
         workingDirectory: options.workingDirectory || this.workingDirectory,
@@ -620,7 +624,7 @@ class ToolExecutor extends EventEmitter {
         // option or extra tool option can supply it, and never under
         // denyAutoApproval. answer_question checks its quote against it.
         ownerTurnText: this.denyAutoApproval ? null : this.ownerTurnText
-      });
+      }));
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
         const postHookResult = await this.hookExecutor.run('PostToolUse', {
@@ -633,12 +637,14 @@ class ToolExecutor extends EventEmitter {
         });
 
         if (postHookResult?.context?.result) {
+          // A hook can pass the tool's result on, but it cannot add images.
+          const replaced = detachImages(null, postHookResult.context.result);
           this.emit('postExecute', {
             toolName,
             parameters: effectiveParameters,
-            result: postHookResult.context.result
+            result: replaced
           });
-          return postHookResult.context.result;
+          return replaced;
         }
       }
 

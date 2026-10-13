@@ -14,6 +14,7 @@ const { createHeadlessPrompter } = require('../platform/prompter');
 const { partialMetricsOf } = require('../providers/abort');
 const { sumLlmCalls } = require('../tracking/llm-totals');
 const UsageTracker = require('../tracking/usage-tracker');
+const { takeImages, ImageTracker } = require('./tool-images');
 const log = createLogger('agent-loop');
 
 class AgentLoop {
@@ -191,6 +192,10 @@ class AgentLoop {
     const llmCalls = [];
     // Mutable copy so RequestTools can inject additional tools mid-run
     let activeTools = [...tools];
+    // Fleet stage 5 §3.9: screenshots in the conversation (per run). Which
+    // provider they are placed for is set per iteration, below.
+    const imageTracker = new ImageTracker();
+    let imageRetryUsed = false;
 
     while (iterations < this.maxIterations) {
       if (this.abortSignal?.aborted) {
@@ -285,6 +290,16 @@ class AgentLoop {
           attemptsByReason[plan.reason] = (attemptsByReason[plan.reason] || 0) + 1;
 
           const canRetry = plan.action === 'retry' && attempt < maxAttempts;
+          // A provider that refuses images (a non-vision model) gets the same
+          // request once more without them, and no more images this run.
+          if (!canRetry && !imageRetryUsed && imageTracker.count() > 0) {
+            imageRetryUsed = true;
+            imageTracker.stripAll();
+            imageTracker.disable();
+            log.warn(`Provider refused a request with images; retrying once without them: ${err.message}`);
+            attempt -= 1;
+            continue;
+          }
           if (!canRetry) {
             const usedModel = effectiveOptions.model || options.model || '(default)';
             const wrapped = new Error(
@@ -421,6 +436,9 @@ class AgentLoop {
               toolResult, call.toolName, call.parameters, callOptions
             );
           }
+          // Lifted before anything below spreads the result (the images ride
+          // on a non-enumerable symbol a spread does not carry).
+          const images = takeImages(toolResult);
 
           this._observeForVerification(turnState, call, toolResult);
 
@@ -437,7 +455,7 @@ class AgentLoop {
             }
           }
 
-          return { ...call, toolCallId, result: toolResult };
+          return { ...call, toolCallId, result: toolResult, images };
         };
 
         // Concurrency-safety partitioning. Read-only / idempotent tools
@@ -497,6 +515,11 @@ class AgentLoop {
           return null;
         }).filter(Boolean);
 
+        // The provider that answered this call: a routed provider's current
+        // target, which can differ from the one the run started on.
+        imageTracker.use(this._currentProviderName());
+        imageTracker.cap(results);
+
         // Persist oversized results to disk and replace inline payloads
         // with a [persisted: <path>] preview. The model still sees the
         // shape and a head excerpt and can Read the file if needed —
@@ -532,17 +555,21 @@ class AgentLoop {
         if (results.length > 1 && typeof this.provider.buildMultiToolMessages === 'function') {
           const providerMessages = this.provider.buildMultiToolMessages(response, results);
           conversationHistory.push(...providerMessages);
+          if (imageTracker.placement === 'tool_result') imageTracker.recordToolResults(results, providerMessages);
         } else if (results.length === 1 && typeof this.provider.buildToolMessages === 'function') {
           const entry = results[0];
           const providerMessages = this.provider.buildToolMessages(
             { toolName: entry.toolName, parameters: entry.parameters, messageContent: response.messageContent },
             entry.result,
-            entry.toolCallId
+            entry.toolCallId,
+            imageTracker.placement === 'tool_result' ? { images: entry.images || [] } : undefined
           );
           conversationHistory.push(...providerMessages);
+          if (imageTracker.placement === 'tool_result') imageTracker.recordToolResults([entry], providerMessages);
         } else if (typeof this.provider.buildMultiToolMessages === 'function') {
           const providerMessages = this.provider.buildMultiToolMessages(response, results);
           conversationHistory.push(...providerMessages);
+          if (imageTracker.placement === 'tool_result') imageTracker.recordToolResults(results, providerMessages);
         } else {
           // Generic fallback for providers without buildToolMessages
           for (const entry of results) {
@@ -565,6 +592,12 @@ class AgentLoop {
             });
           }
         }
+
+        if (imageTracker.placement === 'user_message') {
+          const imageMessage = imageTracker.userMessage(results);
+          if (imageMessage) conversationHistory.push(imageMessage);
+        }
+        imageTracker.retain();
 
         // Track tool results for semantic compaction
         for (const entry of results) {

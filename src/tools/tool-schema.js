@@ -34,6 +34,10 @@ class Tool {
     // parallel Edit calls on the same file can't corrupt it. Default false
     // — opt in explicitly. AgentLoop partitions accordingly.
     this.concurrencySafe = config.concurrencySafe === true;
+    // Fleet stage 5 §3.9: only a tool with this flag may put images into the
+    // conversation (`_images` in its result); ToolExecutor drops them for
+    // every other tool.
+    this.emitsImages = config.emitsImages === true;
   }
 
   toFunctionDefinition() {

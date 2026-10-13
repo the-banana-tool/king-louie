@@ -496,7 +496,18 @@ class AnthropicProvider extends BaseLLMProvider {
     };
   }
 
-  buildToolMessages(response, toolResult, toolCallId) {
+  // Fleet stage 5 §3.9: a tool's images go inside its own tool_result.
+  static toolResultContent(toolResult, images = []) {
+    const text = JSON.stringify(toolResult);
+    if (!Array.isArray(images) || images.length === 0) return text;
+    return [
+      { type: 'text', text },
+      ...ImageHandler.normalizeMessageImages(images.map((i) => ({ base64: i.base64, mimeType: i.mimeType })))
+        .map((image) => ImageHandler.formatForProvider('anthropic', image))
+    ];
+  }
+
+  buildToolMessages(response, toolResult, toolCallId, { images = [] } = {}) {
     const assistantContent = [];
 
     if (response.messageContent) {
@@ -521,7 +532,7 @@ class AnthropicProvider extends BaseLLMProvider {
           {
             type: 'tool_result',
             tool_use_id: toolCallId,
-            content: JSON.stringify(toolResult)
+            content: AnthropicProvider.toolResultContent(toolResult, images)
           }
         ]
       }
@@ -547,7 +558,7 @@ class AnthropicProvider extends BaseLLMProvider {
     const toolResults = toolCallEntries.map((entry) => ({
       type: 'tool_result',
       tool_use_id: entry.toolCallId,
-      content: JSON.stringify(entry.result)
+      content: AnthropicProvider.toolResultContent(entry.result, entry.images || [])
     }));
 
     return [
