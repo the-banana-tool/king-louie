@@ -5,20 +5,32 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { runSessionCommand, readNodeId } = require('../src/service/commands/session');
+const { runSessionCommand, readNodeIdentity } = require('../src/service/commands/session');
 const { main, parseArgs } = require('../src/service/cli');
 const S = require('../src/gui/session-secret');
 const { writeGuiStatus } = require('../src/gui/status');
 const { createAesGcmCipher } = require('../src/platform/cipher');
-const { testNodeIdentity } = require('./helpers/fake-phone');
+const { deriveNodeId } = require('../src/mesh/node-identity');
 
 const POSIX = process.platform !== 'win32';
 const UID = POSIX ? process.getuid() : 0;
 const GID = POSIX ? process.getgid() : 0;
 const cleanups = [];
 after(() => { for (const c of cleanups) c(); });
-const identity = testNodeIdentity({ key: 'gpu-box' });
 const KEY = crypto.randomBytes(32);
+// A node identity as the service stores it (src/mesh/mesh-identity.js): the
+// public key in the clear, the private key under the master key, at the
+// store's dot path mesh.identity.
+function nodeKeys() {
+  const pair = crypto.generateKeyPairSync('ed25519', { publicKeyEncoding: { type: 'spki', format: 'der' }, privateKeyEncoding: { type: 'pkcs8', format: 'der' } });
+  return { publicKey: pair.publicKey, privateHex: pair.privateKey.toString('hex'), nodeId: deriveNodeId(pair.publicKey) };
+}
+const identity = nodeKeys();
+function storedIdentity(keys = identity, { key = KEY, plaintext = false } = {}) {
+  if (plaintext) return { publicKey: keys.publicKey.toString('hex'), privateKey: keys.privateHex };
+  return { publicKey: keys.publicKey.toString('hex'), privateKey: null, keyEncryption: 'cipher-v1', encryptedPrivateKey: createAesGcmCipher(key).encryptString(keys.privateHex) };
+}
+const writeIdentity = (dataDir, record) => fs.writeFileSync(path.join(dataDir, 'chat-data.json'), JSON.stringify({ mesh: { identity: record } }));
 
 function setup({ withIdentity = true } = {}) {
   // Native realpath: session-secret.js requires the config dir to be its own
@@ -31,7 +43,7 @@ function setup({ withIdentity = true } = {}) {
   fs.mkdirSync(dataDir, { mode: 0o700 });
   fs.mkdirSync(configDir, { mode: 0o755 });
   if (POSIX) { fs.chmodSync(base, 0o755); fs.chmodSync(configDir, 0o755); }
-  if (withIdentity) fs.writeFileSync(path.join(dataDir, 'chat-data.json'), JSON.stringify({ 'mesh.identity': { publicKey: identity.publicKey.toString('hex') } }));
+  if (withIdentity) writeIdentity(dataDir, storedIdentity());
   return { base, dataDir, configDir, ipcDir };
 }
 
@@ -60,6 +72,7 @@ function deps(s, extra = {}) {
     resolveSessionUser: (name) => account(name),
     resolveKey: () => ({ key: KEY, source: 'test' }),
     verifyKey: () => {},
+    dataDirOwnerUid: UID,
     configDir: s.configDir,
     ipcDir: s.ipcDir,
     runIcacls: () => {},
@@ -450,9 +463,98 @@ describe('the CLI', () => {
     assert.equal(seen.sessionFile, '/x.json');
   });
 
-  it('readNodeId derives the node id from the stored identity without the master key', () => {
+  it('readNodeIdentity reads the identity where the store keeps it (mesh.identity as a dot path), or null', () => {
     const s = setup();
-    assert.equal(readNodeId(s.dataDir), identity.nodeId);
-    assert.equal(readNodeId(setup({ withIdentity: false }).dataDir), null);
+    const cipher = createAesGcmCipher(KEY);
+    assert.equal(readNodeIdentity(s.dataDir, cipher).nodeId, identity.nodeId);
+    assert.equal(readNodeIdentity(setup({ withIdentity: false }).dataDir, cipher), null);
+    // A real store's file, written by the service's own code.
+    const { JsonFileStore } = require('../src/platform/json-file-store');
+    const s2 = setup({ withIdentity: false });
+    new JsonFileStore({ dir: s2.dataDir, name: 'chat-data' }).set('mesh.identity', storedIdentity());
+    assert.equal(readNodeIdentity(s2.dataDir, cipher).nodeId, identity.nodeId);
+    // A flat "mesh.identity" key is not where the store writes it.
+    const s3 = setup({ withIdentity: false });
+    fs.writeFileSync(path.join(s3.dataDir, 'chat-data.json'), JSON.stringify({ 'mesh.identity': storedIdentity() }));
+    assert.equal(readNodeIdentity(s3.dataDir, cipher), null);
+  });
+});
+
+// R-F5-12 (owner ruling, 2026-10-12): the master key file's owner is checked,
+// and the node id is the verified identity's before it is sealed into anything.
+describe('R-F5-12: session install checks the key file\'s owner and verifies the node id', () => {
+  const refusedInstall = async (s, extra = {}) => {
+    const before = tree(s.base);
+    const t = io();
+    const d = deps(s, extra);
+    const code = await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d });
+    assert.equal(code, 1);
+    assert.deepEqual(tree(s.base), before, 'nothing was written');
+    assert.equal(d.executed.length, 0);
+    return t.err.join('');
+  };
+
+  it('asks for the master key as the data dir\'s owner (so a key file owned by anyone else is refused)', async () => {
+    const s = setup();
+    const seen = [];
+    const d = deps(s, { dataDirOwnerUid: undefined, resolveKey: (ownerUid) => { seen.push(ownerUid); return { key: KEY, source: 'test' }; } });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    assert.deepEqual(seen, [POSIX ? fs.statSync(s.dataDir).uid : null]);
+  });
+
+  it('the real resolver refuses a master key file that the data dir\'s owner does not own', { skip: !POSIX }, async () => {
+    const s = setup();
+    fs.writeFileSync(path.join(s.dataDir, 'master.key'), `${KEY.toString('hex')}\n`, { mode: 0o600 });
+    // The data dir's owner is somebody else; this process's uid owns the key file.
+    const err = await refusedInstall(s, { resolveKey: undefined, dataDirOwnerUid: UID + 1 });
+    assert.match(err, new RegExp(`master\\.key is owned by uid ${UID}, not ${UID + 1}`));
+  });
+
+  it('refuses a data dir that is missing or is not a directory', async () => {
+    const s = setup();
+    const file = path.join(s.base, 'not-a-dir');
+    fs.writeFileSync(file, 'x');
+    const t = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: file, io: t.io, deps: deps(s) }), 1);
+    assert.match(t.err.join(''), /is not a directory/);
+    const t2 = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: path.join(s.base, 'absent'), io: t2.io, deps: deps(s) }), 1);
+    assert.match(t2.err.join(''), /does not exist/);
+    assert.equal(fs.existsSync(path.join(s.configDir, 'session')), false);
+  });
+
+  it('seals the node id of an identity whose private key matches its public key', async () => {
+    const s = setup();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) }), 0);
+    assert.equal(canonical(s.configDir).node_id, identity.nodeId);
+    // An identity an older build stored in the clear is the same identity.
+    const s2 = setup({ withIdentity: false });
+    writeIdentity(s2.dataDir, storedIdentity(identity, { plaintext: true }));
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s2.dataDir, io: io().io, deps: deps(s2) }), 0);
+    assert.equal(canonical(s2.configDir).node_id, identity.nodeId);
+  });
+
+  it('refuses a stored public key that is not the node\'s own (another node\'s id would be sealed)', async () => {
+    const other = nodeKeys();
+    const s = setup({ withIdentity: false });
+    writeIdentity(s.dataDir, { ...storedIdentity(), publicKey: other.publicKey.toString('hex') });
+    const err = await refusedInstall(s);
+    assert.match(err, /the node identity in .* names a public key that is not its private key's/);
+    assert.ok(!err.includes(other.nodeId) && !err.includes(identity.privateHex));
+  });
+
+  it('refuses an identity with no private key, one that does not decrypt under this master key, and one that is not a key', async () => {
+    const s = setup({ withIdentity: false });
+    writeIdentity(s.dataDir, { publicKey: identity.publicKey.toString('hex') });
+    assert.match(await refusedInstall(s), /the node identity in .* has no private key/);
+    const s2 = setup({ withIdentity: false });
+    writeIdentity(s2.dataDir, storedIdentity(identity, { key: crypto.randomBytes(32) }));
+    assert.match(await refusedInstall(s2), /the node identity in .* does not decrypt under this data dir's master key/);
+    const s3 = setup({ withIdentity: false });
+    writeIdentity(s3.dataDir, { publicKey: 'abcd', privateKey: 'abcd' });
+    assert.match(await refusedInstall(s3), /the node identity in .* holds no Ed25519 public key/);
+    const s4 = setup({ withIdentity: false });
+    writeIdentity(s4.dataDir, { publicKey: identity.publicKey.toString('hex'), privateKey: 'abcd' });
+    assert.match(await refusedInstall(s4), /the node identity in .* holds an unreadable private key/);
   });
 });

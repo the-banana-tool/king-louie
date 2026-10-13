@@ -10,6 +10,7 @@
 // (owner ruling R-F5-9), like "desktop pair": off a terminal they need --yes
 // (exit 2), and nothing is resolved, minted, created or written before the
 // answer. --dry-run asks nothing because it changes nothing.
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { GuiError, isGuiError } = require('../../gui/errors');
@@ -21,15 +22,54 @@ const SESSION_USAGE = `Usage: king-louie-service session [--session-file PATH]
        king-louie-service session probe [--data-dir DIR]
 `;
 
-function readNodeId(dataDir) {
+// The node's identity, read where the service's store keeps it (the dot path
+// mesh.identity of <dataDir>/chat-data.json) and verified before its id is
+// sealed into anything (owner ruling R-F5-12): the stored public key must be
+// the public half of the stored private key, which is held under the master
+// key (or in the clear, by an older build). Read-only: unlike loadIdentity it
+// never upgrades or writes the record. Null when there is no identity yet;
+// throws when there is one that does not hold together. This proves the id
+// belongs to the key this data dir signs with. It cannot prove more: the
+// identity lives only in the data dir, and no admin-owned file names it.
+function readNodeIdentity(dataDir, cipher) {
+  let record;
   try {
     const store = JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8'));
-    const record = store && store['mesh.identity'];
-    if (!record || typeof record.publicKey !== 'string') return null;
-    return require('../../mesh/node-identity').deriveNodeId(Buffer.from(record.publicKey, 'hex'));
+    record = store && store.mesh && store.mesh.identity;
   } catch {
     return null;
   }
+  if (!record || typeof record !== 'object' || typeof record.publicKey !== 'string' || !record.publicKey) return null;
+  const { deriveNodeId } = require('../../mesh/node-identity');
+  const { KEY_ENCRYPTION_MARKER } = require('../../mesh/mesh-identity');
+  // The reasons never quote the record.
+  const refuse = (why) => new Error(`the node identity in ${dataDir} ${why}; nothing was installed`);
+  let publicKey;
+  let nodeId;
+  try {
+    publicKey = Buffer.from(record.publicKey, 'hex');
+    nodeId = deriveNodeId(publicKey);
+  } catch {
+    throw refuse('holds no Ed25519 public key');
+  }
+  let privateHex = record.privateKey;
+  if (record.keyEncryption === KEY_ENCRYPTION_MARKER) {
+    try {
+      privateHex = cipher.decryptString(record.encryptedPrivateKey);
+    } catch {
+      throw refuse('does not decrypt under this data dir\'s master key');
+    }
+  }
+  if (typeof privateHex !== 'string' || !privateHex) throw refuse('has no private key');
+  let derived;
+  try {
+    const privateKey = crypto.createPrivateKey({ key: Buffer.from(privateHex, 'hex'), format: 'der', type: 'pkcs8' });
+    derived = crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'der' });
+  } catch {
+    throw refuse('holds an unreadable private key');
+  }
+  if (!derived.equals(publicKey)) throw refuse('names a public key that is not its private key\'s');
+  return { nodeId };
 }
 
 async function readStdin(stdin) {
@@ -98,13 +138,25 @@ async function install({ flags, dataDir, io, deps }) {
   // Everything from here to the question only reads.
   const account = c.resolveUser(flags.user);
   const sessionUser = bareName(flags.user, c.platform);
-  const nodeId = readNodeId(dataDir);
-  if (!nodeId) throw new Error(`no node identity in ${dataDir}: start the service once first`);
-  const resolveKey = deps.resolveKey || (() => require('../../platform/master-key').resolveMasterKeyReadOnly({ dataDir }));
-  const resolved = resolveKey();
+  let dirStat;
+  try {
+    dirStat = fs.lstatSync(dataDir);
+  } catch (err) {
+    throw new Error(err.code === 'ENOENT' ? `${dataDir} does not exist: start the service once first` : `cannot check ${dataDir}: ${err.message}`);
+  }
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) throw new Error(`${dataDir} is not a directory (links are refused)`);
+  // R-F5-12: the service account controls every name in the data dir, so a
+  // key file there counts only when the data dir's owner owns it (as
+  // "import --from" reads it). Windows has no uid; its key is DPAPI-wrapped.
+  const ownerUid = deps.dataDirOwnerUid !== undefined ? deps.dataDirOwnerUid : (c.platform === 'win32' ? null : dirStat.uid);
+  const resolveKey = deps.resolveKey || ((uid) => require('../../platform/master-key').resolveMasterKeyReadOnly({ platform: c.platform, dataDir, dataDirOwnerUid: uid }));
+  const resolved = resolveKey(ownerUid);
   if (!resolved) throw new Error(`no master key for ${dataDir}: start the service once first`);
   (deps.verifyKey || ((r) => require('../../platform/master-key').verifyKeyCheck({ dataDir, key: r.key, source: r.source, create: false })))(resolved);
   const cipher = require('../../platform/cipher').createAesGcmCipher(resolved.key);
+  const nodeIdentity = readNodeIdentity(dataDir, cipher);
+  if (!nodeIdentity) throw new Error(`no node identity in ${dataDir}: start the service once first`);
+  const { nodeId } = nodeIdentity;
   // R-F5-10: who is installed is the recorded SID (uid off Windows), never
   // the name, and a file that cannot say so refuses the install. Checked with
   // the cipher, so "installed" means what the service itself would accept.
@@ -307,4 +359,4 @@ async function runSessionCommand({ sub, arg, flags = {}, dataDir, io, deps = {} 
   }
 }
 
-module.exports = { runSessionCommand, readNodeId, SESSION_USAGE };
+module.exports = { runSessionCommand, readNodeIdentity, SESSION_USAGE };
