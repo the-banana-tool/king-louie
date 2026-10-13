@@ -557,6 +557,18 @@ function takeReservation(job) {
   return n;
 }
 
+// Gives a job's daily-cap reservation back, only into the usage day it was
+// made on (job.reservedDay, from reserveContacts). A job stored before the
+// day was recorded has none: it cannot be shown to be today's, so nothing
+// is released and the count stays (too high for a day, never too low).
+async function releaseReserved(reg, caseId, job, n) {
+  if (typeof job.reservedDay !== 'string' || !job.reservedDay) {
+    log.warn(`Case ${caseId}: ${job.id} has no reservation day on record; its ${n} reserved contact(s) stay counted`);
+    return { ok: true, released: 0 };
+  }
+  return reg.releaseContacts(job.executor, n, { caseId, day: job.reservedDay });
+}
+
 // What a job that reached its recipients counts against: the envelope's
 // payloads record and usage (contacts, attempts), then the case's
 // contactsPerDay. The envelope side is idempotent per job id; the caller
@@ -628,7 +640,7 @@ async function failSubmit(reg, caseId, job, submitted = {}, reason = 'failed', {
   job.lastChange = reg.now().toISOString();
   finishJob(reg, caseId, caseDir, job, after);
   saveJob(store, job);
-  if (release) await reg.releaseContacts(job.executor, release, { caseId });
+  if (release) await releaseReserved(reg, caseId, job, release);
   after.journal.push(`Job ${job.id} on ${job.executor} failed at submit: ${job.reason}${note ? ` (${note})` : ''}.`);
   flushAfter(reg, caseId, after);
   await indexQuietly(reg, caseId, job);
@@ -755,7 +767,7 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
   job.lastChange = reg.now().toISOString();
   finishJob(reg, caseId, caseDir, job, after);
   saveJob(store, job);
-  if (release) await reg.releaseContacts(job.executor, release, { caseId });
+  if (release) await releaseReserved(reg, caseId, job, release);
   after.journal.push(`Job ${job.id} on ${job.executor} cancelled: ${reason}${note ? ` (${note})` : ''}.`);
   flushAfter(reg, caseId, after);
   await indexQuietly(reg, caseId, job);
@@ -1007,7 +1019,7 @@ async function reconcileApply(reg, caseId, listed, outcome) {
   const after = newAfter();
   finishJob(reg, caseId, caseDir, job, after);
   saveJob(store, job);
-  if (release) await reg.releaseContacts(job.executor, release, { caseId });
+  if (release) await releaseReserved(reg, caseId, job, release);
   flushAfter(reg, caseId, after);
   await indexQuietly(reg, caseId, job);
   return { jobId: job.id, state: 'failed' };

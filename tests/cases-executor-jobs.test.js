@@ -32,7 +32,7 @@ async function submitted({ reg, meta, dir }, over = {}) {
   const job = new JobStore(dir).create({
     caseId: meta.id, executor: 'fake-agent', kind: 'external', envelopeId: 'env-01', planStepId: 's1', n: 1,
     signature: 'sig-1', payloadHash: 'hash-1', intent: 'Ask for a listing quote', recipients: ['+15550100'],
-    payload, originalPayload: payload, estimateUsd: 2, newContacts: 1, reservedContacts: 1, createdAt: reg.now().toISOString(), ...over
+    payload, originalPayload: payload, estimateUsd: 2, newContacts: 1, reservedContacts: 1, reservedDay: '2026-10-26', createdAt: reg.now().toISOString(), ...over
   });
   const adapter = await reg.adapter('fake-agent');
   const res = await adapter.submit({ ...job, externalRef: `${meta.id}/${job.id}` }, null);
@@ -158,7 +158,7 @@ describe('cancel', () => {
   it('releases the reservation of a job cancelled while submitting', async () => {
     const s = await setup();
     await s.reg.reserveContacts('fake-agent', 2, { caseId: s.meta.id });
-    const job = new JobStore(s.dir).create({ caseId: s.meta.id, executor: 'fake-agent', kind: 'external', state: 'submitting', reservedContacts: 2 });
+    const job = new JobStore(s.dir).create({ caseId: s.meta.id, executor: 'fake-agent', kind: 'external', state: 'submitting', reservedContacts: 2, reservedDay: '2026-10-26' });
     assert.strictEqual(s.reg.globalRemaining('fake-agent'), 3);
     await jobs.cancelJob(s.reg, s.meta.id, job.id, 'case paused');
     assert.strictEqual(s.reg.globalRemaining('fake-agent'), 5);
@@ -253,7 +253,7 @@ function newJob({ reg, meta, dir }, over = {}) {
   return new JobStore(dir).create({
     caseId: meta.id, executor: 'fake-agent', kind: 'external', envelopeId: 'env-01', planStepId: 's1', n: 1,
     signature: 'sig-1', payloadHash: 'hash-1', intent: 'Ask for a listing quote', recipients: ['+15550100'],
-    payload, originalPayload: payload, estimateUsd: 2, newContacts: 1, reservedContacts: 1, createdAt: reg.now().toISOString(), ...over
+    payload, originalPayload: payload, estimateUsd: 2, newContacts: 1, reservedContacts: 1, reservedDay: '2026-10-26', createdAt: reg.now().toISOString(), ...over
   });
 }
 
@@ -553,5 +553,74 @@ describe('fix round 1', () => {
     assert.deepStrictEqual([store.get(late.id).state, store.get(late.id).copied], ['cancelled', true]);
     assert.deepStrictEqual([store.get(odd.id).state, store.get(odd.id).copied], ['running', false]);
     assert.deepStrictEqual(await jobs.copyBackgroundOutput(s.reg, s.meta.id), [], 'never copied twice');
+  });
+});
+
+// Second review 2026-10-13, finding 5: a job's reservation is released only
+// into the usage day it was made on.
+describe('a job reservation released across midnight', () => {
+  const held = async (s, over = {}) => {
+    const res = await s.reg.reserveContacts('fake-agent', 1, { caseId: s.meta.id });
+    return new JobStore(s.dir).create({
+      caseId: s.meta.id, executor: 'fake-agent', kind: 'external', state: 'submitting', reservedContacts: 1, newContacts: 1, reservedDay: res.day, ...over
+    });
+  };
+
+  it('a cancel, a failed submit and an interrupted job take nothing off the new day', async () => {
+    for (const end of [
+      (s, job) => jobs.cancelJob(s.reg, s.meta.id, job.id, 'case paused'),
+      (s, job) => jobs.failSubmit(s.reg, s.meta.id, job, {}, 'refused'),
+      (s, job) => jobs.reconcileSubmitting(s.reg, s.meta.id, { jobIds: [job.id] })
+    ]) {
+      const s = await setup();
+      s.env.clock.now = new Date('2026-10-26T23:59:30Z');
+      const job = await held(s);
+      assert.strictEqual(job.reservedDay, '2026-10-26');
+      s.env.clock.now = new Date('2026-10-27T00:00:30Z');
+      assert.strictEqual((await s.reg.reserveContacts('fake-agent', 1, { caseId: s.meta.id })).day, '2026-10-27');
+      assert.strictEqual(s.reg.globalRemaining('fake-agent'), 4);
+      await end(s, job);
+      assert.notStrictEqual(new JobStore(s.dir).get(job.id).state, 'submitting');
+      assert.strictEqual(s.reg.globalRemaining('fake-agent'), 4, 'the new day keeps its one contact');
+    }
+  });
+
+  it('on the same day the reservation is given back', async () => {
+    const s = await setup();
+    const job = await held(s);
+    assert.strictEqual(s.reg.globalRemaining('fake-agent'), 4);
+    await jobs.cancelJob(s.reg, s.meta.id, job.id, 'case paused');
+    assert.strictEqual(s.reg.globalRemaining('fake-agent'), 5);
+  });
+
+  it('a job stored without a day releases nothing: it cannot be shown to be today\'s', async () => {
+    const s = await setup();
+    const job = await held(s, { reservedDay: undefined });
+    assert.ok(!new JobStore(s.dir).get(job.id).reservedDay);
+    await jobs.cancelJob(s.reg, s.meta.id, job.id, 'case paused');
+    assert.strictEqual(new JobStore(s.dir).get(job.id).state, 'cancelled');
+    assert.strictEqual(s.reg.globalRemaining('fake-agent'), 4, 'the count stays');
+  });
+
+  it('Executor.submit records the day its contacts were reserved on', async () => {
+    const { submitJob } = require('../src/cases/executors/submit');
+    const envelopeOps = require('../src/cases/executors/envelope-ops');
+    const s = await setup();
+    const req = await envelopeOps.requestEnvelope(s.reg, { caseId: s.meta.id }, {
+      executor: 'fake-agent', intent: 'Ask for a listing quote', recipients: { allow: ['+15550100'] },
+      caps: { usd: 20, contacts: 3, attemptsPerContact: 2 }, window: { start: '2026-10-26', end: '2026-10-30' }
+    });
+    assert.strictEqual(req.ok, true, req.error);
+    await s.env.runtime.answerQuestion(s.meta.id, req.questionId, { channel: 'in-app', optionId: 'approve' });
+    envelopeOps.syncEnvelopes(s.reg, s.meta.id);
+    s.ctl.submitError = Object.assign(new Error('bad request'), { status: 400 });
+    const r = await submitJob(s.reg, { caseId: s.meta.id, turnId: 'turn-1' }, {
+      executor: 'fake-agent', envelopeId: req.envelopeId, payload: JSON.stringify({ recipients: [{ address: '+15550100', name: 'Harbor Realty' }], text: 'Hello about the lot', attemptsPerContact: 1 })
+    });
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, /refused job-0001/);
+    const job = new JobStore(s.dir).get('job-0001');
+    assert.deepStrictEqual([job.state, job.reservedDay, job.reservedContacts], ['failed', '2026-10-26', 0]);
+    assert.strictEqual(s.reg.globalRemaining('fake-agent'), 5, 'a clear refusal on the same day gives the contact back');
   });
 });

@@ -322,10 +322,13 @@ async function submitChecked(reg, ctx, params) {
     const remContacts = budget.remaining('contactsPerDay');
     if (newContacts && remContacts !== null && remContacts < newContacts) return fail(`the case has ${remContacts} contacts left today; this job needs ${newContacts}`);
     let reserved = 0;
+    let reservedDay = null;
     if (newContacts) {
       const res = await reg.reserveContacts(entry.id, newContacts, { caseId });
       if (!res.ok) return fail(res.error);
       reserved = newContacts;
+      // The usage day the reservation is in: a release goes into that day only.
+      reservedDay = typeof res.day === 'string' && res.day ? res.day : null;
     }
 
     // 11. The job, in `submitting`, then the executor.
@@ -345,7 +348,7 @@ async function submitChecked(reg, ctx, params) {
       job = store.create({
         caseId, executor: entry.id, kind, envelopeId: envelope ? envelope.id : null, planStepId: step ? step.id : null, retryOf: params.retryOf || null,
         n, signature, payloadHash: sha256hex(canonicalize(rendered)), intent, state: 'submitting', recipients,
-        payload: rendered, originalPayload: payload, createdAt: now.toISOString(), estimateUsd, reservedContacts: reserved, newContacts,
+        payload: rendered, originalPayload: payload, createdAt: now.toISOString(), estimateUsd, reservedContacts: reserved, reservedDay, newContacts,
         facts: (Array.isArray(payload.facts) ? payload.facts : []).map((id, i) => {
           const f = facts.get(id);
           const stmt = Array.isArray(sentStatements) ? sentStatements[i] : f?.stmt;
@@ -359,7 +362,7 @@ async function submitChecked(reg, ctx, params) {
       await reg.indexJob(caseId, job);
     } catch (err) {
       // No job holds the reservation yet (or its file cannot be trusted to).
-      if (reserved && !job) await reg.releaseContacts(entry.id, reserved, { caseId });
+      if (reserved && !job && reservedDay) await reg.releaseContacts(entry.id, reserved, { caseId, day: reservedDay });
       if (job) await kinds.failJob(reg, caseId, job, `could not be written: ${err.message}`);
       throw err;
     }

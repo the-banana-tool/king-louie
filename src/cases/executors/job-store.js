@@ -31,7 +31,7 @@ const JOB_DEFAULTS = Object.freeze({
   n: null, signature: null, payloadHash: null, idempotencyKey: null, intent: '', state: 'submitting', recipients: [],
   payload: null, originalPayload: null, facts: [], createdAt: null, submittedAt: null, lastPolledAt: null, nextPollAt: null,
   lastChange: null, pollErrors: 0, stale: false, error: null, resultsCursor: null, recordsSaved: [], estimateUsd: 0,
-  chargedUsd: 0, costReported: false, wakeupId: null, contacts: [], reason: null, reservedContacts: 0, newContacts: 0,
+  chargedUsd: 0, costReported: false, wakeupId: null, contacts: [], reason: null, reservedContacts: 0, reservedDay: null, newContacts: 0,
   questionId: null, copied: false, window: null, maxCostUsd: null
 });
 
