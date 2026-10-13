@@ -411,3 +411,31 @@ describe('an approval question that would be cut is refused', () => {
     assert.strictEqual(envelopeOf(s).pendingDelta, null);
   });
 });
+
+// Security review 2026-10-12, finding 5: recording the phone approval as an
+// answer awaits; what was written to the envelope meanwhile must survive.
+describe('activating a signed envelope keeps what was written during its await', () => {
+  it('a reservation counted while the answer was being recorded is not erased', async () => {
+    const approver = { requestAction: () => new Promise(() => {}) };
+    const s = await setup({ authority: 'signed', approver });
+    await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    const h = approvalHelpers();
+    const outcome = { decision: 'approve', request_id: 'r-9', action_hash: h.actionHash(signedAction(envelopeOf(s), s.meta.id, h)), device_id: 'd-1' };
+    const real = s.rt.answerQuestion.bind(s.rt);
+    const counted = { usd: 0, contacts: ['+15550100'], attempts: { '+15550100': 1 } };
+    s.rt.answerQuestion = async (...args) => {
+      const answered = await real(...args);
+      // Another writer counts a send against the now-active envelope.
+      const store = new EnvelopeStore(s.meta.dir);
+      const e = store.get('env-01');
+      assert.strictEqual(e.status, 'active');
+      store.write({ ...e, usage: counted, payloads: [{ n: 1, sendId: 'd-1', state: 'reserved' }], nextN: 1 });
+      return answered;
+    };
+    assert.deepStrictEqual(await ops.applySignedOutcome(s.reg, s.meta.id, 'env-01', outcome), { applied: true });
+    const e = envelopeOf(s);
+    assert.deepStrictEqual([e.status, e.usage, e.payloads.length, e.nextN], ['active', counted, 1, 1]);
+    assert.match(e.grantedBy.factId, /^f-\d{4}$/);
+    assert.deepStrictEqual(e.grantedBy.evidence, { request_id: 'r-9', action_hash: outcome.action_hash });
+  });
+});

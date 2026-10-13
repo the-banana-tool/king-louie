@@ -253,8 +253,15 @@ async function activateSigned(reg, caseId, envelopeId, outcome) {
   if (env.questionId) {
     try {
       const answered = await reg.caseRuntime.answerQuestion(caseId, env.questionId, { channel: 'phone', optionId: 'approve', text: 'approved on phone' });
-      env.grantedBy.factId = answered?.fact?.id || null;
-      store.write(env);
+      // The await is over: `env` is what the file held before it. Read the
+      // envelope again and set the one field, so nothing written meanwhile
+      // (a send counted against it, a revoke) is undone. No await between
+      // this read and the write.
+      const now = store.get(envelopeId);
+      if (now && now.grantedBy && now.grantedBy.evidence?.request_id === outcome.request_id) {
+        now.grantedBy.factId = answered?.fact?.id || null;
+        store.write(now);
+      }
     } catch (err) {
       log.warn(`Recording the phone approval of ${envelopeId} as an answer failed: ${err.message}`);
     }

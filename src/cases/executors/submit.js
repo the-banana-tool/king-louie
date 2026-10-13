@@ -327,9 +327,11 @@ async function submitChecked(reg, ctx, params) {
     try {
       let n = null;
       if (envelope) {
-        n = (Number(envelope.nextN) || (envelope.payloads || []).length) + 1;
+        // Numbered from the envelope as it is on disk now, never from a
+        // copy read before an await.
         const envelopes = new EnvelopeStore(dir);
         const fresh = envelopes.get(envelope.id);
+        n = (Number(fresh.nextN) || (fresh.payloads || []).length) + 1;
         fresh.nextN = n;
         envelopes.write(fresh);
       }
