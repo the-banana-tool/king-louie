@@ -176,3 +176,37 @@ describe('VectorIndex', () => {
     assert.strictEqual(index.search({ model: KEY, query, chatIds: ['chat-1'], k: 6 }).length, 6, 'reloaded from scratch');
   });
 });
+
+// Recall across chats (stage H4): upToSeq cuts the asking chat only.
+describe('VectorIndex: upToSeq for one chat of several', () => {
+  let t;
+  afterEach(() => { if (t) t.cleanup(); t = null; });
+  const filler = (n) => Array.from({ length: n }, (_, i) => ({ sender: 'assistant', text: `Salt and natron, note ${i}.` }));
+  async function seedTwo() {
+    t = openTempStore();
+    // "linen bandage" at seq 2 of a and at seq 9 of b.
+    seedChat(t.store, { id: 'a', messages: [...filler(1), { sender: 'user', text: 'The linen bandage goes in the jar.' }, ...filler(2)] });
+    seedChat(t.store, { id: 'b', messages: [...filler(8), { sender: 'user', text: 'A linen bandage for the priest.' }] });
+    await embedAll(t.store);
+    const index = new VectorIndex({ store: t.store, log: quietLog() });
+    const query = await q('linen bandage');
+    const place = new Map([...t.store.chunksOfChat('a'), ...t.store.chunksOfChat('b')].map((c) => [c.id, `${c.chatId}#${c.seq}`]));
+    // Only the chunks that match the query at all.
+    return (options) => index.search({ model: KEY, query, chatIds: ['a', 'b'], k: 20, ...options })
+      .filter((h) => h.cosine > 0.5).map((h) => place.get(h.chunkId)).sort();
+  }
+
+  it('without upToSeqChatId the cut applies to every chat, as before', async () => {
+    const find = await seedTwo();
+    assert.deepStrictEqual(find({}), ['a#2', 'b#9']);
+    assert.deepStrictEqual(find({ upToSeq: 5 }), ['a#2']);
+  });
+
+  it('with upToSeqChatId the cut applies to that chat alone', async () => {
+    const find = await seedTwo();
+    assert.deepStrictEqual(find({ upToSeq: 5, upToSeqChatId: 'a' }), ['a#2', 'b#9']);
+    assert.deepStrictEqual(find({ upToSeq: 2, upToSeqChatId: 'a' }), ['b#9']);
+    assert.deepStrictEqual(find({ upToSeq: 5, upToSeqChatId: 'b' }), ['a#2']);
+    assert.deepStrictEqual(find({ upToSeqChatId: 'a' }), ['a#2', 'b#9']);
+  });
+});

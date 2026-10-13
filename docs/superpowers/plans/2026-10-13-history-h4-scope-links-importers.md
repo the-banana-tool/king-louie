@@ -38,6 +38,11 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **`recordImport` validates more than the text says**: `id`, `sourceKind`, `sourceHash` and `chatId` must be non-empty strings (`TypeError`), `state` one of `running`, `done` (`RangeError`); a chat that does not exist fails the foreign key.
 - **`rowToChat` also drops a `historyScope` found in `meta_json`**, so a value written there by hand or by an older build is never read back as if it were the chat's scope.
 
+**Task 2**
+
+- **Tool pairing follows the cut too.** `Retriever#retrieve` passed `upToSeq` to `store.pairedToolMessageId`, which the task's text does not name. It now passes the cut only for a message of the cut's chat, so a tool call recalled from another chat is paired with its result past the asking chat's `upToSeq`, and a partner in the cut's own chat is still never shown at or after it. Without `upToSeqChatId` the call is what it was.
+- **`upToSeqChatId` is always passed on** (as `null` when unset) to `searchText`, `index.search` and the `vectorSearch` callback, so LongHaul's own `vectorSearch` callbacks receive one more key and ignore it. A named chat with no integer `upToSeq` cuts nothing.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named).

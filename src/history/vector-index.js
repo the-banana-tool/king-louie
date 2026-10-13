@@ -151,17 +151,21 @@ class VectorIndex {
     }
   }
 
-  search({ model, query, chatIds, kinds = null, upToSeq = null, k = 50 }) {
+  // upToSeq cuts every chat given, or only upToSeqChatId's when one is named
+  // (recall across chats: the cut belongs to the asking chat).
+  search({ model, query, chatIds, kinds = null, upToSeq = null, upToSeqChatId = null, k = 50 }) {
     if (!model || !query || !query.length || !Array.isArray(chatIds)) return [];
     const kindSet = Array.isArray(kinds) && kinds.length ? new Set(kinds.map((x) => KIND_CODES[x]).filter(Boolean)) : null;
     const limit = Number.isInteger(k) && k > 0 ? k : 50;
+    const cutChat = upToSeqChatId === null || upToSeqChatId === undefined ? '' : String(upToSeqChatId);
     // The best `limit` so far, highest cosine first, ties by chunk id.
     const top = [];
     for (const chatId of chatIds) {
       const e = this._entry(model, String(chatId));
       if (!e || e.dim !== query.length) continue;
+      const cut = Number.isInteger(upToSeq) && (!cutChat || cutChat === String(chatId));
       for (let i = 0; i < e.n; i++) {
-        if (Number.isInteger(upToSeq) && !(e.seqs[i] < upToSeq)) continue;
+        if (cut && !(e.seqs[i] < upToSeq)) continue;
         if (kindSet && !kindSet.has(e.kinds[i])) continue;
         const cos = dot(e.matrix, query, i * e.dim);
         const id = e.ids[i];

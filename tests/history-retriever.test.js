@@ -463,3 +463,94 @@ describe('Retriever: cosine dedupe (spec §6.3 step 7)', () => {
     assert.notStrictEqual(has(hits, 'chat-1-m1'), has(hits, 'chat-1-m2'));
   });
 });
+
+// Recall across chats (stage H4): "before message #N of this chat" cuts the
+// asking chat only, in BM25, in the vector list's guard, in the recency age
+// and in tool pairing.
+describe('Retriever: upToSeq for one chat of several', () => {
+  let t;
+  afterEach(() => { if (t) t.cleanup(); t = null; });
+  const chunkIdOf = (store, messageId) => store.chunksOfMessage(messageId)[0].id;
+  const filler = (n, from = 0) => Array.from({ length: n }, (_, i) => ({ sender: 'assistant', text: `filler note ${from + i} about the grocery list` }));
+  // "gate code" at seq 2 of a and at seq 9 of b.
+  function seedTwo(extraB = []) {
+    t = openTempStore();
+    seedChat(t.store, { id: 'a', messages: [...filler(1), { sender: 'user', text: 'The side gate code at the Lakeside lot is 4417.' }, ...filler(2, 1)] });
+    seedChat(t.store, { id: 'b', messages: [...filler(8, 10), { sender: 'user', text: 'Later: the gate code changed after the storm.' }, ...extraB] });
+    return new Retriever({ store: t.store, estimator: new TokenEstimator() });
+  }
+  const places = (hits) => hits.map((h) => `${h.chunk.chatId}#${h.chunk.seq}`).sort();
+
+  it('BM25: the cut applies to the named chat alone; without a name, to every chat', async () => {
+    const retriever = seedTwo();
+    const find = async (opts) => places(await retriever.retrieve({ query: 'gate code', chatIds: ['a', 'b'], settings: recall(), now: BASE_TIME, ...opts }));
+    assert.deepStrictEqual(await find({ upToSeq: 5 }), ['a#2']);
+    assert.deepStrictEqual(await find({ upToSeq: 5, upToSeqChatId: 'a' }), ['a#2', 'b#9']);
+    assert.deepStrictEqual(await find({ upToSeq: 2, upToSeqChatId: 'a' }), ['b#9']);
+  });
+
+  it('a caller\'s vector hit in another chat survives the cut only when the cut names the asking chat', async () => {
+    const retriever = seedTwo();
+    const vectorHits = [
+      { chunkId: chunkIdOf(t.store, 'b-m9'), vectorRank: 1 },
+      { chunkId: chunkIdOf(t.store, 'a-m2'), vectorRank: 2 },
+      { chunkId: chunkIdOf(t.store, 'a-m4'), vectorRank: 3 }
+    ];
+    const find = async (opts) => places(await retriever.retrieve({
+      query: 'permits', chatIds: ['a', 'b'], settings: recall(), now: BASE_TIME, vectorHits, lexical: false, ...opts
+    }));
+    assert.deepStrictEqual(await find({ upToSeq: 4 }), ['a#2']);
+    assert.deepStrictEqual(await find({ upToSeq: 4, upToSeqChatId: 'a' }), ['a#2', 'b#9']);
+    assert.deepStrictEqual(await find({ upToSeq: 4, upToSeqChatId: 'b' }), ['a#2', 'a#4']);
+  });
+
+  it('passes upToSeqChatId to the vectorSearch callback', async () => {
+    seedTwo();
+    const seen = [];
+    const retriever = new Retriever({
+      store: t.store, estimator: new TokenEstimator(),
+      vectorSearch: async (args) => { seen.push(args); return [{ chunkId: chunkIdOf(t.store, 'b-m9'), vectorRank: 1 }]; }
+    });
+    const hits = await retriever.retrieve({ query: 'nothing lexical here', chatIds: ['a', 'b'], upToSeq: 3, upToSeqChatId: 'a', settings: recall(), now: BASE_TIME });
+    assert.deepStrictEqual(places(hits), ['b#9']);
+    assert.strictEqual(seen[0].upToSeq, 3);
+    assert.strictEqual(seen[0].upToSeqChatId, 'a');
+    await retriever.retrieve({ query: 'nothing lexical here', chatIds: ['a', 'b'], upToSeq: 3, settings: recall(), now: BASE_TIME });
+    assert.strictEqual(seen[1].upToSeqChatId, null);
+  });
+
+  it('recencyByPosition: a chunk of another chat ages in days, the asking chat\'s by position', async () => {
+    const retriever = seedTwo();
+    const settings = recall({ recencyByPosition: true, recencyWeight: 0.5, recencyHalfLifeFraction: 0.25, recencyHalfLifeDays: 30 });
+    // seedChat stamps messages one minute apart from BASE_TIME: b-m9 is at
+    // minute 8, read ten days later.
+    const now = BASE_TIME + 10 * DAY;
+    const hits = await retriever.retrieve({ query: 'gate code', chatIds: ['a', 'b'], upToSeq: 5, upToSeqChatId: 'a', settings, now });
+    const recencyOf = (place) => hits.find((h) => `${h.chunk.chatId}#${h.chunk.seq}` === place).signals.recency;
+    const byPosition = 0.5 + 0.5 * Math.exp(-((5 - 2) / 5) / 0.25);
+    const byDays = 0.5 + 0.5 * Math.exp(-((10 * DAY - 8 * 60000) / DAY) / 30);
+    assert.ok(Math.abs(recencyOf('a#2') - byPosition) < 1e-12);
+    assert.ok(Math.abs(recencyOf('b#9') - byDays) < 1e-12);
+
+    // Unnamed, the cut and the position apply to every chat, as before.
+    const all = await retriever.retrieve({ query: 'gate code', chatIds: ['a', 'b'], upToSeq: 12, settings, now });
+    const b9 = all.find((h) => h.chunk.chatId === 'b');
+    assert.ok(Math.abs(b9.signals.recency - (0.5 + 0.5 * Math.exp(-((12 - 9) / 12) / 0.25))) < 1e-12);
+  });
+
+  it('pairToolMessages: a tool result in another chat is paired past the asking chat\'s cut', async () => {
+    const retriever = seedTwo([
+      { sender: 'toolUse', toolName: 'Bash', parameters: { command: 'cat survey/fence.txt' } },
+      { sender: 'toolResult', toolName: 'Bash', result: 'north post leans two degrees' }
+    ]);
+    const settings = recall({ completeMessageTokens: 800, pairToolMessages: true });
+    const ids = async (opts) => (await retriever.retrieve({ query: 'survey fence', chatIds: ['a', 'b'], settings, now: BASE_TIME, ...opts }))
+      .map((h) => h.chunk.messageId);
+    const named = await ids({ upToSeq: 3, upToSeqChatId: 'a' });
+    assert.ok(named.includes('b-m10') && named.includes('b-m11'), 'the call and its result, both after seq 3 of another chat');
+    assert.deepStrictEqual(await ids({ upToSeq: 3 }), [], 'unnamed, the cut hides both');
+    const cutB = await ids({ upToSeq: 11, upToSeqChatId: 'b' });
+    assert.ok(cutB.includes('b-m10'), 'the call is before the cut');
+    assert.ok(!cutB.includes('b-m11'), 'the result at the cut of its own chat is never shown');
+  });
+});

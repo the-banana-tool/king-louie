@@ -123,7 +123,10 @@ function ftsQuery(text, { prefixMinChars = 0 } = {}) {
 const placeholders = (n) => new Array(n).fill('?').join(', ');
 const asList = (v) => (Array.isArray(v) ? v.filter((x) => x !== undefined && x !== null).map(String) : []);
 
-function searchText(db, query, { chatIds, kinds, limit = 50, upToSeq, messageIds, prefixMinChars = 0 } = {}) {
+// upToSeq alone cuts every chat at that seq. With upToSeqChatId (recall
+// across chats, stage H4) it cuts that chat only: "before message #N of the
+// asking chat" says nothing about a linked chat, which is searched whole.
+function searchText(db, query, { chatIds, kinds, limit = 50, upToSeq, upToSeqChatId = null, messageIds, prefixMinChars = 0 } = {}) {
   const match = ftsQuery(query, { prefixMinChars });
   if (!match) return [];
   const where = ['chunks_fts MATCH ?'];
@@ -134,7 +137,11 @@ function searchText(db, query, { chatIds, kinds, limit = 50, upToSeq, messageIds
   if (chats.length) { where.push(`c.chat_id IN (${placeholders(chats.length)})`); args.push(...chats); }
   if (kindList.length) { where.push(`c.kind IN (${placeholders(kindList.length)})`); args.push(...kindList); }
   if (messages.length) { where.push(`c.message_id IN (${placeholders(messages.length)})`); args.push(...messages); }
-  if (Number.isInteger(upToSeq)) { where.push('m.seq < ?'); args.push(upToSeq); }
+  if (Number.isInteger(upToSeq)) {
+    const cutChat = upToSeqChatId === null || upToSeqChatId === undefined ? '' : String(upToSeqChatId);
+    if (cutChat) { where.push('(c.chat_id <> ? OR m.seq < ?)'); args.push(cutChat, upToSeq); }
+    else { where.push('m.seq < ?'); args.push(upToSeq); }
+  }
   const max = Number.isInteger(limit) && limit > 0 ? limit : 50;
   // bm25score, not "rank": rank is an FTS5 hidden column.
   const sql = `SELECT c.id AS chunkId, bm25(chunks_fts) AS bm25score

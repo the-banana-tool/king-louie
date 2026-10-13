@@ -48,7 +48,8 @@ function jaccardOf(a, b) {
 
 class Retriever {
   // vectorSearch (optional): async ({ query, chatIds, kinds, upToSeq,
-  // settings, stats }) => [{ chunkId, vectorRank }], ranks 1-based.
+  // upToSeqChatId, settings, stats }) => [{ chunkId, vectorRank }], ranks
+  // 1-based.
   // vectorOf (optional): (chunk) => its unit vector or null, for the cosine
   // dedupe (step 7 with vectors).
   // reranker (optional): async (query, chunks, { maxMs, info, caseId }) =>
@@ -135,9 +136,9 @@ class Retriever {
   }
 
   // Step 1: BM25 over the scope, ranks 1-based.
-  _lexical({ query, chatIds, kinds, upToSeq, settings }) {
+  _lexical({ query, chatIds, kinds, upToSeq, upToSeqChatId = null, settings }) {
     return this.store
-      .searchText(query, { chatIds, kinds, limit: settings.bm25TopK, upToSeq, prefixMinChars: settings.prefixMinChars })
+      .searchText(query, { chatIds, kinds, limit: settings.bm25TopK, upToSeq, upToSeqChatId, prefixMinChars: settings.prefixMinChars })
       .map((hit, i) => ({ chunkId: hit.chunkId, bm25Rank: i + 1 }));
   }
 
@@ -171,7 +172,9 @@ class Retriever {
   }
 
   // A chunk's age over the half-life (step 5). Position needs a chunk seq and
-  // an upToSeq, else the age falls back to days.
+  // an upToSeq, else the age falls back to days. The caller passes no upToSeq
+  // for a chunk of a chat the cut does not belong to: its seq is a position
+  // in another chat, so it ages in days.
   _age(chunk, { s, nowMs, upToSeq }) {
     if (s.recencyByPosition && Number.isInteger(upToSeq) && upToSeq > 1 && Number.isInteger(chunk.seq)) {
       return Math.max(0, (upToSeq - chunk.seq) / upToSeq) / s.recencyHalfLifeFraction;
@@ -183,7 +186,7 @@ class Retriever {
 
   async retrieve({
     query, contextQueries = [], chatIds, kinds = null, excludeMessageIds = [], budgetTokens = null, upToSeq = null,
-    settings, model = null, now = Date.now(), vectorHits = null, lexical = true, reranker = null, vectorOf = null, stats = null,
+    upToSeqChatId = null, settings, model = null, now = Date.now(), vectorHits = null, lexical = true, reranker = null, vectorOf = null, stats = null,
     caseId = null
   } = {}) {
     const s = { ...HISTORY_DEFAULTS.recall, ...(settings || {}) };
@@ -191,10 +194,15 @@ class Retriever {
     const rerankWith = typeof reranker === 'function' ? reranker : this.reranker;
     if (!String(query || '').trim()) return [];
     const texts = [query, ...(contextQueries || [])].filter((t) => String(t || '').trim());
+    // upToSeq means "before message #N". Alone, it cuts every chat in scope
+    // (one chat, or LongHaul's). With upToSeqChatId (recall across chats,
+    // stage H4) it cuts that chat only: the other chats are read whole.
+    const cutChat = upToSeqChatId === null || upToSeqChatId === undefined || String(upToSeqChatId) === '' ? null : String(upToSeqChatId);
+    const cutFor = (chatId) => (Number.isInteger(upToSeq) && (cutChat === null || cutChat === chatId) ? upToSeq : null);
     // lexical: false leaves BM25 out (a vector-only probe; LongHaul).
-    const lists = lexical === false ? [] : texts.map((text) => this._lexical({ query: text, chatIds, kinds, upToSeq, settings: s }));
+    const lists = lexical === false ? [] : texts.map((text) => this._lexical({ query: text, chatIds, kinds, upToSeq, upToSeqChatId: cutChat, settings: s }));
     let vectors = vectorHits;
-    if (!Array.isArray(vectors) && this.vectorSearch) vectors = await this.vectorSearch({ query, chatIds, kinds, upToSeq, settings: s, stats });
+    if (!Array.isArray(vectors) && this.vectorSearch) vectors = await this.vectorSearch({ query, chatIds, kinds, upToSeq, upToSeqChatId: cutChat, settings: s, stats });
     const vectorList = this._vector(vectors, s);
     if (vectorList.length) lists.push(vectorList);
     const fused = this._fuse(lists, s);
@@ -208,7 +216,7 @@ class Retriever {
     const kindScope = Array.isArray(kinds) && kinds.length ? new Set(kinds.map(String)) : null;
     const inScope = (chunk) => (!chatScope || chatScope.has(chunk.chatId))
       && (!kindScope || kindScope.has(chunk.kind))
-      && (!Number.isInteger(upToSeq) || chunk.seq < upToSeq);
+      && (cutFor(chunk.chatId) === null || chunk.seq < upToSeq);
     const nowMs = typeof now === 'number' ? now : Date.parse(now);
     const scored = [];
     for (const hit of fused) {
@@ -220,7 +228,7 @@ class Retriever {
       // days, or with recencyByPosition the fraction of the chat behind this
       // point, (upToSeq - seq) / upToSeq, against recencyHalfLifeFraction: a
       // day-based age is flat inside one long session.
-      const recency = (1 - s.recencyWeight) + s.recencyWeight * Math.exp(-this._age(chunk, { s, nowMs, upToSeq }));
+      const recency = (1 - s.recencyWeight) + s.recencyWeight * Math.exp(-this._age(chunk, { s, nowMs, upToSeq: cutFor(chunk.chatId) }));
       scored.push({
         chunk,
         score: hit.fused * kindWeight * recency,
@@ -340,7 +348,7 @@ class Retriever {
         const all = this.store.chunksOfMessage(messageId);
         const total = tokensOf(all);
         const partnerId = s.pairToolMessages && !excluded.has(messageId)
-          ? this.store.pairedToolMessageId(messageId, { upToSeq: Number.isInteger(upToSeq) ? upToSeq : null })
+          ? this.store.pairedToolMessageId(messageId, { upToSeq: cutFor(item.chunk.chatId) })
           : null;
         // The partner is held to the same scope as any candidate: the
         // chats, the kinds and upToSeq, and never an excluded message.

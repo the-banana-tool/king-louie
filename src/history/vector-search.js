@@ -19,7 +19,7 @@ const TIMED_OUT = Symbol('query embedding timed out');
 const OVER_CAP = 'this chat has more vectors than history.recall.vectorCacheMb holds';
 
 function createVectorSearch({ host, index, queryTimeoutMs = QUERY_TIMEOUT_MS, setTimer = setTimeout, clearTimer = clearTimeout, log = createLogger('history/vector-search') }) {
-  async function vectorSearch({ query, chatIds, kinds = null, upToSeq = null, settings, stats = null }) {
+  async function vectorSearch({ query, chatIds, kinds = null, upToSeq = null, upToSeqChatId = null, settings, stats = null }) {
     const note = (reason) => {
       if (stats) {
         stats.embedder = 'none';
@@ -46,7 +46,7 @@ function createVectorSearch({ host, index, queryTimeoutMs = QUERY_TIMEOUT_MS, se
     let hits;
     let over;
     try {
-      hits = index.search({ model: embedder.name, query: vecs[0], chatIds, kinds, upToSeq, k: settings.vectorTopK });
+      hits = index.search({ model: embedder.name, query: vecs[0], chatIds, kinds, upToSeq, upToSeqChatId, k: settings.vectorTopK });
       over = (chatIds || []).filter((id) => index.skipped(embedder.name, id));
     } catch (err) {
       log.warn(`Vector search failed this turn; keyword search only: ${err.message}`);

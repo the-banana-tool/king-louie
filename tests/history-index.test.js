@@ -76,3 +76,40 @@ describe('history index: schema step 2', () => {
     db.close();
   });
 });
+
+// Recall across chats (stage H4): "before message #N of this chat" cuts the
+// asking chat only; a linked chat with more messages is searched whole.
+describe('history index: upToSeq for one chat of several', () => {
+  let t;
+  afterEach(() => t && t.cleanup());
+  const filler = (n, from = 0) => Array.from({ length: n }, (_, i) => ({ sender: 'assistant', text: `filler note ${from + i} about the grocery list` }));
+  function seedTwo() {
+    t = openTempStore();
+    // "lakeside" at seq 2 of a and at seq 9 of b.
+    seedChat(t.store, { id: 'a', messages: [...filler(1), { sender: 'user', text: 'The lakeside survey is booked.' }, ...filler(2, 1)] });
+    seedChat(t.store, { id: 'b', messages: [...filler(8, 10), { sender: 'user', text: 'The lakeside gate code is 4417.' }] });
+    const where = (hits) => t.store.chunks(hits.map((h) => h.chunkId)).map((c) => `${c.chatId}#${c.seq}`).sort();
+    return (options) => where(t.store.searchText('lakeside', { chatIds: ['a', 'b'], ...options }));
+  }
+
+  it('without upToSeqChatId the cut applies to every chat, as before', () => {
+    const find = seedTwo();
+    assert.deepStrictEqual(find({}), ['a#2', 'b#9']);
+    assert.deepStrictEqual(find({ upToSeq: 5 }), ['a#2']);
+    assert.deepStrictEqual(find({ upToSeq: 2 }), []);
+  });
+
+  it('with upToSeqChatId the cut applies to that chat alone', () => {
+    const find = seedTwo();
+    assert.deepStrictEqual(find({ upToSeq: 5, upToSeqChatId: 'a' }), ['a#2', 'b#9']);
+    assert.deepStrictEqual(find({ upToSeq: 2, upToSeqChatId: 'a' }), ['b#9']);
+    assert.deepStrictEqual(find({ upToSeq: 5, upToSeqChatId: 'b' }), ['a#2']);
+    // No cut without an upToSeq, whatever chat is named.
+    assert.deepStrictEqual(find({ upToSeqChatId: 'a' }), ['a#2', 'b#9']);
+    // The scope still holds: the other chat must be in chatIds.
+    assert.deepStrictEqual(
+      t.store.chunks(t.store.searchText('lakeside', { chatIds: ['a'], upToSeq: 2, upToSeqChatId: 'a' }).map((h) => h.chunkId)),
+      []
+    );
+  });
+});

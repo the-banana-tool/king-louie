@@ -163,3 +163,30 @@ describe('vector search', () => {
     assert.strictEqual((await plain.build({ chatId: 'chat-1', message: 'linen' })).stats.embedder, 'none');
   });
 });
+
+// Recall across chats (stage H4): the chat the cut belongs to reaches the index.
+describe('vector search: upToSeq for one chat of several', () => {
+  function recordingIndex() {
+    const seen = [];
+    return { seen, search: (args) => { seen.push(args); return [{ chunkId: 7, vectorRank: 1, cosine: 0.9 }]; }, skipped: () => false, vectorOf: () => null };
+  }
+
+  it('passes upToSeqChatId on to index.search', async () => {
+    const index = recordingIndex();
+    const { vectorSearch } = createVectorSearch({ host: hostWith(embedder()), index });
+    const hits = await vectorSearch({ query: 'linen bandage', chatIds: ['a', 'b'], upToSeq: 5, upToSeqChatId: 'a', settings: recall() });
+    assert.deepStrictEqual(hits.map((h) => h.chunkId), [7]);
+    assert.strictEqual(index.seen.length, 1);
+    assert.deepStrictEqual(index.seen[0].chatIds, ['a', 'b']);
+    assert.strictEqual(index.seen[0].upToSeq, 5);
+    assert.strictEqual(index.seen[0].upToSeqChatId, 'a');
+  });
+
+  it('passes none when the caller gave none', async () => {
+    const index = recordingIndex();
+    const { vectorSearch } = createVectorSearch({ host: hostWith(embedder()), index });
+    await vectorSearch({ query: 'linen bandage', chatIds: ['a', 'b'], upToSeq: 5, settings: recall() });
+    assert.strictEqual(index.seen[0].upToSeq, 5);
+    assert.strictEqual(index.seen[0].upToSeqChatId, null);
+  });
+});
