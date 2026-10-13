@@ -242,6 +242,24 @@ describe('createCore and the history store', () => {
     }
   });
 
+  it('stage H4: shutdown removes an import that was still open', async () => {
+    const { dataDir, deps } = makeDeps();
+    const core = createCore(deps);
+    await core.start();
+    const gate = core.context.getHistoryImportGate();
+    const begun = gate.begin({ kind: 'markdown-transcript', sourceHash: 'c'.repeat(64), chat: { id: 'md-open', title: 'Open at quit' }, total: 3 });
+    gate.append({ importId: begun.importId, messages: [msg('o1', 'user', 'one of three')] });
+    assert.strictEqual(gate.busy(), true);
+    await core.shutdown();
+    const reopened = HistoryStore.open(path.join(dataDir, 'history.sqlite'));
+    try {
+      assert.strictEqual(reopened.getChat('md-open'), null);
+      assert.deepStrictEqual(reopened.unfinishedImports(), []);
+    } finally {
+      reopened.close();
+    }
+  });
+
   it('chunks new messages with the chunk sizes in settings.history.chunk', () => {
     const { deps } = makeDeps();
     deps.store.set('settings', { history: { chunk: { targetChars: 200, minChars: 50 } } });

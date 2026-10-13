@@ -72,7 +72,7 @@ const {
 const { createScopePolicy } = require('../history/scope-policy');
 const { bridgeOriginFor } = require('../history/bridge-origin');
 const { startChunkBackfill } = require('../history/backfill');
-const { sweepUnfinishedImports } = require('../history/import-chats');
+const { sweepUnfinishedImports, createImportGate } = require('../history/import-chats');
 const { createRecallReranker } = require('../history/reranker');
 const { JevReranker } = require('../history/jev-reranker');
 const TypesafeProvider = require('../providers/typesafe-provider');
@@ -400,6 +400,9 @@ function createCore(deps = {}) {
     }
   };
   const getHistoryStore = () => historyStore;
+  // Stage H4: one import at a time on this core, whichever channel starts it
+  // (the import dialog, or a parsed chat arriving over the desktop bridge).
+  const historyImportGate = createImportGate({ getStore: () => historyStore });
   const getHistoryStatus = () => ({ ...historyStatus });
   // Chunking what an H1 store held runs after start(), a batch per tick
   // (startChunkBackfill); shutdown stops it before the store closes.
@@ -3267,6 +3270,9 @@ function createCore(deps = {}) {
       log.warn(`Releasing case locks failed: ${err.message}`);
     }
     if (usageTracker) usageTracker.reset();
+    // An import still open (its sender is gone with this process) goes; one
+    // cut off in the middle of a file is removed by the next start's sweep.
+    historyImportGate.abortOpen('shutdown');
     // Last: nothing after this point appends to a chat.
     if (historyBackfill) historyBackfill.stop();
     if (embedIndexer) {
@@ -3432,6 +3438,7 @@ function createCore(deps = {}) {
     // What a stored scope may not do; the history IPC asks it which chats
     // may be linked.
     getHistoryScopePolicy: () => historyScopePolicy,
+    getHistoryImportGate: () => historyImportGate,
     getTokenEstimator: () => tokenEstimator,
     getHistoryRetriever: () => historyRetriever,
     getHistoryStatus,

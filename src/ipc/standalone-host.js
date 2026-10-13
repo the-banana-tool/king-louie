@@ -24,7 +24,7 @@ function markingIpcMain(ipcMain) {
 
 function startStandaloneHost(deps) {
   const {
-    app, ipcMain, safeStorage, shell, Notification, getWindow, state, appDir,
+    app, ipcMain, safeStorage, shell, Notification, getWindow, state, appDir, dialog = null,
     standaloneOnce = false, StoreClass = null, createCoreFn = createCore
   } = deps;
   const Store = StoreClass || withReadCache(require('electron-store').default);
@@ -89,6 +89,19 @@ function startStandaloneHost(deps) {
     ...core.context,
     safeStorage,
     getMainWindow: getWindow,
+    // History stage H4: the file an import reads is chosen here, in the main
+    // process; the renderer gets a token for it (import-picks.js).
+    pickImportFile: async () => {
+      if (!dialog) return null;
+      const options = {
+        title: 'Import a conversation',
+        properties: ['openFile'],
+        filters: [{ name: 'Conversations', extensions: ['jsonl', 'json', 'md', 'markdown'] }]
+      };
+      const win = liveWindow();
+      const result = await (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options));
+      return result.canceled || !result.filePaths || result.filePaths.length === 0 ? null : result.filePaths[0];
+    },
     getShell: () => shell,
     pendingAskUserResolvers,
     pendingDirectoryAccessResolvers,

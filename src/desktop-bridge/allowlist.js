@@ -4,7 +4,15 @@
 const LOCAL_PREFIXES = Object.freeze(['desktop:', 'wizard:']);
 const LOCAL_CHANNELS = Object.freeze(['app:quitWindow']);
 const PRESTEP_CHANNELS = Object.freeze(['chat:pickWorkingDirectory', 'settings:addAllowedDirectory']);
-const DENY_CHANNELS = Object.freeze(['chat:speakLast', 'settings:testVoice']);
+// History stage H4: the import dialog's three channels open a file the owner
+// picked on the desktop, so the service never serves them (owner ruling
+// R-H4-3). Until the attached host parses the file itself they are refused
+// while attached; the batch channels (history:import.lookup, .begin, .append,
+// .finish) carry a parsed chat and ride the proxied history domain.
+const DENY_CHANNELS = Object.freeze([
+  'chat:speakLast', 'settings:testVoice',
+  'history:import.pick', 'history:import.preview', 'history:import.commit'
+]);
 const DENY_PREFIXES = Object.freeze(['settings:mcp', 'settings:anthropicOAuth']);
 const PROXIED_DOMAINS = Object.freeze([
   'chat',

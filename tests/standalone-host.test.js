@@ -29,7 +29,7 @@ function fakeIpcMain() {
   return { handlers, listeners, handle: (ch, fn) => { assert.ok(!handlers.has(ch), `duplicate ${ch}`); handlers.set(ch, fn); }, on: (ch, fn) => listeners.set(ch, fn), removeHandler: (ch) => handlers.delete(ch) };
 }
 
-function startHost({ standaloneOnce }) {
+function startHost({ standaloneOnce, dialog = undefined }) {
   const userData = tmp();
   const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(`sealed:${s}`), decryptString: (b) => Buffer.from(b).toString().replace(/^sealed:/, '') };
   class StoreClass extends JsonFileStore {
@@ -47,6 +47,7 @@ function startHost({ standaloneOnce }) {
     state: openDesktopState(userData, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) }),
     appDir: path.join(__dirname, '..'),
     standaloneOnce,
+    ...(dialog ? { dialog } : {}),
     StoreClass,
     // Webhooks and app discovery off only to keep the test quick and port-free.
     createCoreFn: (deps) => { captured = deps; return createCore({ ...deps, features: { ...(deps.features || {}), webhooks: false, appDiscovery: false, ...(standaloneOnce ? {} : { gateway: false, mesh: false, channels: false }) } }); }
@@ -134,6 +135,32 @@ describe('startStandaloneHost', () => {
     assert.ok(ipc.listeners.has('canvas:executeJsResult'));
     await host.start();
     assert.notStrictEqual(host.core.context.getCronScheduler().paused, true);
+  });
+
+  it('history stage H4: the import file is picked in a main-process dialog and named by a token', async () => {
+    const asked = [];
+    const answers = [
+      { canceled: false, filePaths: [path.join(os.tmpdir(), 'notes', 'lot.md')] },
+      { canceled: true, filePaths: [] },
+      { canceled: false, filePaths: [] }
+    ];
+    const dialog = { showOpenDialog: async (...args) => { asked.push(args); return answers.shift(); } };
+    const { ipc } = startHost({ standaloneOnce: false, dialog });
+    const pick = () => ipc.handlers.get('history:import.pick')({ sender: {} }, { path: '/srv/<project>/other.md' });
+    const first = await pick();
+    assert.strictEqual(first.ok, true);
+    assert.strictEqual(first.name, 'lot.md');
+    assert.match(first.token, /^[0-9a-f]{32}$/);
+    assert.ok(!JSON.stringify(first).includes('notes'), 'the path stays in the main process');
+    assert.strictEqual(asked.length, 1);
+    const options = asked[0].at(-1);
+    assert.deepStrictEqual(options.properties, ['openFile']);
+    assert.deepStrictEqual(options.filters, [{ name: 'Conversations', extensions: ['jsonl', 'json', 'md', 'markdown'] }]);
+    assert.deepStrictEqual(await pick(), { ok: false, canceled: true });
+    assert.deepStrictEqual(await pick(), { ok: false, canceled: true });
+    // A host given no dialog picks nothing.
+    const bare = startHost({ standaloneOnce: false });
+    assert.deepStrictEqual(await bare.ipc.handlers.get('history:import.pick')({ sender: {} }), { ok: false, canceled: true });
   });
 
   it('--kl-standalone-once starts with channels, gateway and mesh off and cron paused', async () => {

@@ -36,6 +36,16 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
     'history:scope.set': 'proxy',
     'history:links.get': 'proxy',
     'history:links.set': 'proxy',
+    // Stage H4 (R-H4-3): the dialog's channels are refused while attached
+    // until the attached host parses the file itself; the batch channels
+    // carry a parsed chat to the service.
+    'history:import.pick': 'deny',
+    'history:import.preview': 'deny',
+    'history:import.commit': 'deny',
+    'history:import.lookup': 'proxy',
+    'history:import.begin': 'proxy',
+    'history:import.append': 'proxy',
+    'history:import.finish': 'proxy',
     'agent:userResponse': 'proxy',
     'agent:executeWithDeps': 'deny',
     'hooks:list': 'deny',
@@ -113,6 +123,18 @@ describe('listIpcChannels', () => {
     assert.ok(inv.on.includes('tool:approvalResponse'));
     assert.ok(inv.on.includes('agent:userResponse'));
     assert.strictEqual(listIpcChannels(), inv, 'memoized');
+  });
+
+  it('R-H4-3: a service serves the batch import channels and never the three that open a picked file', () => {
+    const inv = listIpcChannels();
+    const served = servedChannels(inv).handle;
+    for (const ch of ['history:import.pick', 'history:import.preview', 'history:import.commit']) {
+      assert.ok(inv.handle.includes(ch), `${ch} is registered`);
+      assert.ok(!served.includes(ch), `${ch} is not served over the bridge`);
+    }
+    for (const ch of ['history:import.lookup', 'history:import.begin', 'history:import.append', 'history:import.finish', 'history:links.get']) {
+      assert.ok(served.includes(ch), `${ch} is served over the bridge`);
+    }
   });
 
   it('classifies every channel into exactly one route', () => {

@@ -2,13 +2,16 @@
 // The recall line's excerpt drawer and an owner-side search (history spec
 // 2026-09-25 §7, §12), and the embedder's state, choice, rebuild and retry
 // (§5.2, §14). Excerpt text is untrusted: the renderer sets it with
-// textContent only.
+// textContent only. Stage H4 adds the scope and link channels and the import
+// channels (a file's name, title and sample are untrusted text too).
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const { mergeHistorySettings } = require('../history/settings');
 const { searchHistoryExcerpts, excerptsForMessage } = require('../history/search');
 const { SCOPES, CLOSED_POLICY, resolveScope } = require('../history/scope');
 const { chatHeaderTitle } = require('../history/excerpts');
+const { previewImport, importChat, createImportGate, HASH_PATTERN } = require('../history/import-chats');
+const { createImportPicks, importRequest, sourceBaseName, NO_FILE } = require('./import-picks');
 
 const view = (e) => ({ seq: e.seq, header: e.header, text: e.text });
 
@@ -128,6 +131,76 @@ function registerHistoryHandlers(ipcMain, context = {}) {
     s.setLinks(reader.id, linkedChatIds);
     chatUpdated(event, reader.id);
     return linksView(reader);
+  });
+
+  // Stage H4: importing a conversation (spec §10.2, §12; owner ruling
+  // R-H4-3). The file is chosen in a dialog the main process opens and is
+  // named to the renderer by a token: pick, preview and commit read `token`
+  // and `pattern` from the payload and nothing else, so no channel opens a
+  // path the renderer sent. lookup, begin, append and finish take a chat that
+  // is already parsed (the attached desktop parses the file and the service
+  // stores it): no path at all, fixed key lists and caps (import-chats.js).
+  // One import at a time per core.
+  const picks = createImportPicks({
+    pickFile: async () => (typeof context.pickImportFile === 'function' ? context.pickImportFile() : null)
+  });
+  let ownGate = null;
+  const importGate = () => {
+    const given = typeof context.getHistoryImportGate === 'function' ? context.getHistoryImportGate() : null;
+    if (given) return given;
+    if (!ownGate) ownGate = createImportGate({ getStore: store });
+    return ownGate;
+  };
+  const invalid = (message) => Object.assign(new Error(message), { code: 'IMPORT_INVALID' });
+  // A file imported before, when its chat is still there.
+  const importedAs = (sourceHash) => {
+    const row = store().findImport(sourceHash);
+    return row && row.state === 'done' && store().chatRef(row.chatId) ? row.chatId : null;
+  };
+
+  handle(IPC.HISTORY_IMPORT_PICK, async () => picks.pick());
+
+  handle(IPC.HISTORY_IMPORT_PREVIEW, async (payload) => {
+    const { token, pattern } = importRequest(payload);
+    const filePath = picks.pathFor(token);
+    if (!filePath) return { ...NO_FILE };
+    const { sourceHash, importerVersion: _version, ...preview } = await previewImport(filePath, { pattern });
+    return { ok: true, untrustedText: true, ...preview, existingChatId: importedAs(sourceHash) };
+  });
+
+  handle(IPC.HISTORY_IMPORT_COMMIT, async (payload, event) => {
+    const { token, pattern } = importRequest(payload);
+    const filePath = picks.pathFor(token);
+    if (!filePath) return { ...NO_FILE };
+    const out = await importGate().run(() => importChat({ store: store(), filePath, pattern }));
+    picks.spend(token);
+    chatUpdated(event, out.chatId);
+    return { ok: true, chatId: out.chatId, imported: out.imported, messages: out.messages, kind: out.kind };
+  });
+
+  handle(IPC.HISTORY_IMPORT_LOOKUP, async ({ sourceHash }) => {
+    if (typeof sourceHash !== 'string' || !HASH_PATTERN.test(sourceHash)) throw invalid('An import is looked up by the SHA-256 of its file.');
+    return { ok: true, existingChatId: importedAs(sourceHash) };
+  });
+
+  handle(IPC.HISTORY_IMPORT_BEGIN, async ({ kind, importerVersion, sourceHash, sourceName, chat, total }) => {
+    const begun = importGate().begin({
+      kind, importerVersion, sourceHash, sourcePath: sourceBaseName(sourceName), chat, total
+    });
+    return begun.existingChatId
+      ? { ok: true, existingChatId: begun.existingChatId }
+      : { ok: true, importId: begun.importId, chatId: begun.chatId };
+  });
+
+  handle(IPC.HISTORY_IMPORT_APPEND, async ({ importId, messages }) => {
+    const { done } = importGate().append({ importId, messages });
+    return { ok: true, done };
+  });
+
+  handle(IPC.HISTORY_IMPORT_FINISH, async ({ importId }, event) => {
+    const out = importGate().finish({ importId });
+    chatUpdated(event, out.chatId);
+    return { ok: true, chatId: out.chatId, messages: out.messages };
   });
 
   handle(IPC.HISTORY_EXCERPTS, async ({ chatId, seq }) => {

@@ -96,6 +96,16 @@ module.exports = {
   HISTORY_SCOPE_SET: 'history:scope.set',
   HISTORY_LINKS_GET: 'history:links.get',
   HISTORY_LINKS_SET: 'history:links.set',
+  // Stage H4: importing a conversation. pick, preview and commit are the
+  // renderer's (a token, never a path); lookup, begin, append and finish take
+  // a parsed chat in batches and are not exposed to the renderer.
+  HISTORY_IMPORT_PICK: 'history:import.pick',
+  HISTORY_IMPORT_PREVIEW: 'history:import.preview',
+  HISTORY_IMPORT_COMMIT: 'history:import.commit',
+  HISTORY_IMPORT_LOOKUP: 'history:import.lookup',
+  HISTORY_IMPORT_BEGIN: 'history:import.begin',
+  HISTORY_IMPORT_APPEND: 'history:import.append',
+  HISTORY_IMPORT_FINISH: 'history:import.finish',
   // Recall stage H3: the embedder's state, choice, rebuild and retry.
   HISTORY_EMBEDDER_STATUS: 'history:embedder.status',
   HISTORY_EMBEDDER_SAVE: 'history:embedder.save',

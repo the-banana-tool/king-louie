@@ -317,8 +317,125 @@ function sweepUnfinishedImports(store) {
   return removed;
 }
 
+// One import at a time per core (stage H4, the import IPC), and the state of
+// an import that arrives parsed in batches over history:import.begin, .append
+// and .finish. What arrives is held to caps: `total` is declared at begin and
+// never passed, a batch is at most 500 messages and 8 MB of JSON, and an
+// import with no call for idleMs is removed. Any refused batch, and a finish
+// before every message arrived, removes the import and its chat: a transcript
+// is stored whole or not at all.
+const MAX_IMPORT_MESSAGES = 2000000;
+const MAX_BATCH_MESSAGES = 500;
+const MAX_BATCH_CHARS = 8 * 1024 * 1024;
+const IMPORT_IDLE_MS = 30 * 60 * 1000;
+const BUSY_MESSAGE = 'Another import is running.';
+
+function createImportGate({ getStore, idleMs = IMPORT_IDLE_MS, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  let running = false; // a whole file is being imported (run)
+  let open = null; // { importId, sourceHash, total, done, timer }
+
+  const store = () => getStore();
+  const stopTimer = (entry) => {
+    if (entry && entry.timer !== null) clearTimer(entry.timer);
+    if (entry) entry.timer = null;
+  };
+  const arm = (entry) => {
+    stopTimer(entry);
+    entry.timer = setTimer(() => abortOpen('no call for 30 minutes'), idleMs);
+    // Never the reason the process stays up.
+    if (entry.timer && typeof entry.timer.unref === 'function') entry.timer.unref();
+  };
+  function abortOpen(reason = 'aborted') {
+    if (!open) return false;
+    const entry = open;
+    open = null;
+    stopTimer(entry);
+    try {
+      abortChatImport({ store: store(), importId: entry.importId });
+    } catch (err) {
+      // The next start's sweep removes it.
+      log.warn(`An open import could not be removed now: ${err.message}`);
+    }
+    log.info(`An open import was removed (${reason}).`);
+    return true;
+  }
+  const current = (importId) => {
+    if (!open || typeof importId !== 'string' || importId !== open.importId) throw fail('IMPORT_NOT_OPEN', 'This import is not open.');
+    return open;
+  };
+
+  return {
+    busy: () => running || open !== null,
+    // A whole-file import (importChat): refused while another import runs.
+    async run(fn) {
+      if (running || open) throw fail('IMPORT_BUSY', BUSY_MESSAGE);
+      running = true;
+      try {
+        return await fn();
+      } finally {
+        running = false;
+      }
+    },
+    begin({ kind, importerVersion = null, sourceHash, sourcePath = null, chat, total, now } = {}) {
+      if (!Number.isInteger(total) || total < 1 || total > MAX_IMPORT_MESSAGES) {
+        throw fail('IMPORT_INVALID', `An import needs its message count, from 1 to ${MAX_IMPORT_MESSAGES}.`);
+      }
+      if (running) throw fail('IMPORT_BUSY', BUSY_MESSAGE);
+      if (open) {
+        // The same file begun again (the sender lost its connection and
+        // starts over) replaces the open import; any other waits.
+        if (open.sourceHash !== sourceHash) throw fail('IMPORT_BUSY', BUSY_MESSAGE);
+        abortOpen('the same file was begun again');
+      }
+      const begun = beginChatImport({ store: store(), kind, importerVersion, sourceHash, sourcePath, chat, now });
+      if (begun.existingChatId) return begun;
+      open = { importId: begun.importId, sourceHash, total, done: 0, timer: null };
+      arm(open);
+      return begun;
+    },
+    append({ importId, messages } = {}) {
+      const entry = current(importId);
+      try {
+        if (!Array.isArray(messages)) throw fail('IMPORT_INVALID', 'An import batch must be a list of messages.');
+        let chars;
+        try {
+          chars = messages.length > MAX_BATCH_MESSAGES ? Infinity : JSON.stringify(messages).length;
+        } catch {
+          throw fail('IMPORT_INVALID', 'An import batch must be plain data.');
+        }
+        if (chars > MAX_BATCH_CHARS) throw fail('IMPORT_BATCH_TOO_LARGE', `An import batch is at most ${MAX_BATCH_MESSAGES} messages and 8 MB.`);
+        if (entry.done + messages.length > entry.total) throw fail('IMPORT_OVER_TOTAL', 'More messages arrived than this import said it has.');
+        appendChatImport({ store: store(), importId, messages });
+        entry.done += messages.length;
+      } catch (err) {
+        abortOpen('a batch was refused');
+        throw err;
+      }
+      arm(entry);
+      return { done: entry.done };
+    },
+    finish({ importId } = {}) {
+      const entry = current(importId);
+      let out;
+      try {
+        if (entry.done !== entry.total) throw fail('IMPORT_INCOMPLETE', 'This import ended before all of its messages arrived.');
+        out = finishChatImport({ store: store(), importId });
+      } catch (err) {
+        abortOpen('it could not be finished');
+        throw err;
+      }
+      open = null;
+      stopTimer(entry);
+      return out;
+    },
+    abortOpen
+  };
+}
+
 module.exports = {
-  IMPORT_KINDS: KINDS, IMPORT_SENDERS: SENDERS,
+  IMPORT_KINDS: KINDS, IMPORT_SENDERS: SENDERS, HASH_PATTERN,
+  MAX_IMPORT_MESSAGES, MAX_BATCH_MESSAGES, MAX_BATCH_CHARS, IMPORT_IDLE_MS,
+  createImportGate,
   hashFile, parseImport, previewImport, beginChatImport, appendChatImport, finishChatImport, abortChatImport,
   importChat, sweepUnfinishedImports
 };

@@ -961,6 +961,22 @@ contextBridge.exposeInMainWorld(
         if (!Array.isArray(payload.linkedChatIds)) throw new TypeError('linkedChatIds must be an array');
         return ipcRenderer.invoke('history:links.set', payload);
       },
+      // Stage H4: importing a conversation. The file is chosen in a dialog
+      // the main process opens; this side holds a token for it and sends
+      // nothing else but a Markdown heading pattern.
+      pickImport: () => ipcRenderer.invoke('history:import.pick'),
+      previewImport: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.token, 'token', { minLength: 1 });
+        if (payload.pattern !== undefined) validateString(payload.pattern, 'pattern');
+        return ipcRenderer.invoke('history:import.preview', { token: payload.token, pattern: payload.pattern });
+      },
+      commitImport: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.token, 'token', { minLength: 1 });
+        if (payload.pattern !== undefined) validateString(payload.pattern, 'pattern');
+        return ipcRenderer.invoke('history:import.commit', { token: payload.token, pattern: payload.pattern });
+      },
       embedderStatus: () => ipcRenderer.invoke('history:embedder.status'),
       saveEmbedder: (payload) => {
         validateObject(payload, 'payload');
