@@ -43,6 +43,8 @@ function refusesUnsafe(options) {
 }
 
 const NO_JOB = 'this run has no job or chat to bind a lease to';
+// Input failures after which the keys may already be on the screen.
+const MAY_HAVE_SENT = Object.freeze(['op_timeout', 'backend_failed', 'helper_disconnected']);
 
 // Strict JSON-schema subset: what these schemas use, nothing more.
 function checkValue(schema, value, where) {
@@ -144,10 +146,12 @@ function buildGuiTools(gui) {
     broker.require('gui.input');
     const jobId = jobIdOf(options);
     let lease = null;
+    let typedFn = null;
     try {
       if (!jobId) throw new GuiError('job_required', NO_JOB);
       lease = leases.assertUsable(jobId);
       const { action, typed } = build(lease, jobId);
+      typedFn = typed || null;
       leases.chargeInput(lease);
       const out = await broker.input(action, { jobId, leaseId: lease.leaseId, appIds: lease.apps, yieldMs: guiConfig.lease.yieldMs });
       if (typed) typed(lease.typed);
@@ -160,6 +164,10 @@ function buildGuiTools(gui) {
       return { ok: true, foreground: out.afterAppId, action_seq: entry ? entry.seq : null, ...(suspended ? { lease_suspended: true } : {}) };
     } catch (err) {
       const code = isGuiError(err) ? err.code : 'backend_failed';
+      // The typed buffer holds what was sent, not what was confirmed: after
+      // a failure that can follow the send (no answer in time, the backend
+      // or the helper gone mid-op) the text counts as typed.
+      if (lease && typedFn && MAY_HAVE_SENT.includes(code)) typedFn(lease.typed);
       if (lease) {
         leases.noteInputOutcome(lease, { code });
         if (liveView) liveView.recordAction(lease, { tool: toolName, summary, result: `refused:${code}` });

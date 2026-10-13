@@ -13,7 +13,7 @@ const HAS_X = process.platform === 'linux' && Boolean(process.env.DISPLAY) && !p
 function fakeX(script) {
   const calls = [];
   const execFileImpl = async (file, args, opts = {}) => {
-    calls.push({ file, args, input: opts.input });
+    calls.push({ file, args, input: opts.input, timeout: opts.timeout });
     const key = [file.split('/').pop(), ...args].join(' ');
     for (const [pattern, out] of script) if (pattern.test(key)) return { stdout: typeof out === 'function' ? out(args) : out };
     return { stdout: '' };
@@ -62,7 +62,7 @@ describe('X11 backend (scripted xdotool)', () => {
     const expect = { match: ['/usr/bin/gnome-calculator'], pids: [4242] };
     await b.input({ expect, action: { kind: 'type', text: 'rm -rf / 12+30=' }, yieldMs: 2000 });
     const typeCall = calls.find((c) => c.args[0] === 'type');
-    assert.deepEqual(typeCall.args, ['type', '--clearmodifiers', '--file', '-']);
+    assert.deepEqual(typeCall.args, ['type', '--clearmodifiers', '--delay', '12', '--file', '-']);
     assert.equal(typeCall.input, 'rm -rf / 12+30=');
     await b.input({ expect, action: { kind: 'click', handle: '42', rel: [10, 20], button: 'left', count: 2, mods: ['ctrl'] }, yieldMs: 0 });
     assert.ok(calls.some((c) => c.args.join(' ') === 'mousemove --sync 110 70'));
@@ -122,6 +122,38 @@ describe('X11 backend (scripted xdotool)', () => {
       const b2 = createX11Backend({ env: { DISPLAY: ':0', XDG_SESSION_ID: '3' }, execFileImpl: ok.execFileImpl, readlink, exists: () => true });
       await b2.input({ expect, action: { kind: 'key', mods: [], key, repeat: 1 }, yieldMs: 0 });
       assert.equal(ok.calls.filter((c) => c.args[0] === 'key').length, 1, key);
+    }
+  });
+
+  it('a drag always releases the button, also when the move fails', async () => {
+    const expect = { match: ['/usr/bin/gnome-calculator'], pids: [4242] };
+    let downs = 0;
+    const { calls, execFileImpl } = fakeX([
+      [/^xdotool mousedown/, () => { downs += 1; return ''; }],
+      // Every pointer move after the button went down fails.
+      [/^xdotool mousemove --sync/, () => { if (downs > 0) throw new Error('X error'); return ''; }],
+      ...baseScript
+    ]);
+    const b = createX11Backend({ env: { DISPLAY: ':0', XDG_SESSION_ID: '3' }, execFileImpl, readlink, exists: () => true });
+    await assert.rejects(b.input({ expect, action: { kind: 'drag', handle: '42', from: [10, 10], to: [50, 50], button: 'left' }, yieldMs: 0 }));
+    const names = calls.map((c) => c.args[0]);
+    assert.ok(names.includes('mousedown'));
+    assert.ok(names.lastIndexOf('mouseup') > names.lastIndexOf('mousedown'), 'the button was released after it went down');
+  });
+
+  it('typing gets a time limit sized to the text, below the service\'s own for the same text', async () => {
+    const { inputTimeoutMs } = require('../src/gui/broker');
+    const expect = { match: ['/usr/bin/gnome-calculator'], pids: [4242] };
+    for (const n of [1, 400, 2000]) {
+      const { calls, execFileImpl } = fakeX(baseScript);
+      const b = createX11Backend({ env: { DISPLAY: ':0', XDG_SESSION_ID: '3' }, execFileImpl, readlink, exists: () => true });
+      await b.input({ expect, action: { kind: 'type', text: 'x'.repeat(n) }, yieldMs: 0 });
+      const typeCall = calls.find((c) => c.args[0] === 'type');
+      assert.deepEqual(typeCall.args, ['type', '--clearmodifiers', '--delay', '12', '--file', '-']);
+      // xdotool waits --delay after each key event, two events a character.
+      assert.ok(typeCall.timeout >= 5000 + n * 24, `${n} characters fit in ${typeCall.timeout} ms`);
+      // The helper gives up (and stops xdotool) before the service stops waiting for it.
+      assert.ok(typeCall.timeout + 5000 <= inputTimeoutMs({ kind: 'type', text: 'x'.repeat(n) }), `${n}: helper ${typeCall.timeout} ms, service ${inputTimeoutMs({ kind: 'type', text: 'x'.repeat(n) })} ms`);
     }
   });
 

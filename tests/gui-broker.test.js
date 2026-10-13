@@ -81,6 +81,25 @@ function broker(opts = {}) {
 const code = async (p) => { try { await p; return null; } catch (e) { return e.code; } };
 const ctx = { jobId: 'job-1', leaseId: null };
 
+describe('how long an input may take (review finding 10)', () => {
+  const { inputTimeoutMs } = require('../src/gui/broker');
+
+  it('a click or a key keeps the channel default; typed text gets time for its length', async () => {
+    const { b, channel } = broker();
+    channel.connect();
+    await b.input({ kind: 'key', mods: [], key: 'a', repeat: 1 }, { jobId: 'job-1', leaseId: 'l', appIds: ['calculator'], yieldMs: 0 });
+    assert.equal(channel.requests.find((r) => r.op === 'input').opts.timeoutMs, undefined);
+    channel.requests.length = 0;
+    const text = 'x'.repeat(2000);
+    await b.input({ kind: 'type', text }, { jobId: 'job-1', leaseId: 'l', appIds: ['calculator'], yieldMs: 0 });
+    const sent = channel.requests.find((r) => r.op === 'input');
+    assert.equal(sent.opts.timeoutMs, inputTimeoutMs({ kind: 'type', text }));
+    assert.ok(sent.opts.timeoutMs > 60000, 'two thousand characters at xdotool\'s pace do not fit in ten seconds');
+    assert.equal(inputTimeoutMs({ kind: 'type', text: 'é'.repeat(10) }), inputTimeoutMs({ kind: 'type', text: 'x'.repeat(10) }), 'counted in code points');
+    assert.equal(inputTimeoutMs({ kind: 'click' }), undefined);
+  });
+});
+
 describe('capability lifecycle', () => {
   it('available only between ready and closed, advertising only probed sub-capabilities', () => {
     const { b, channel } = broker();

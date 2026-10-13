@@ -16,6 +16,13 @@ const execFileP = promisify(execFile);
 const XDOTOOL = '/usr/bin/xdotool';
 const IMPORT = '/usr/bin/import';
 const LOGINCTL = '/usr/bin/loginctl';
+// xdotool waits this long after each key event (two a character); given
+// explicitly so the time limit below is computed from it, not from a default.
+const TYPE_DELAY_MS = 12;
+// The limit for typing a text: its keys at twice the pace above, plus slack.
+// Shorter than the service's wait for the same text (inputTimeoutMs in
+// src/gui/broker.js), so xdotool is stopped and the op answers first.
+const typeTimeoutMs = (text) => 5000 + 50 * Array.from(String(text)).length;
 
 function parseShell(text) {
   const out = {};
@@ -28,7 +35,7 @@ function parseShell(text) {
 
 function createX11Backend({ env = process.env, log = createLogger('session-helper/x11'), spawnImpl, readlink = fs.readlinkSync, readdir = fs.readdirSync, exists = fs.existsSync,
   execFileImpl = (file, args, opts = {}) => new Promise((resolve, reject) => {
-    const child = execFile(file, args, { env, encoding: opts.encoding || 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 20000 }, (err, stdout) => (err ? reject(err) : resolve({ stdout })));
+    const child = execFile(file, args, { env, encoding: opts.encoding || 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: opts.timeout || 20000 }, (err, stdout) => (err ? reject(err) : resolve({ stdout })));
     if (opts.input !== undefined) child.stdin.end(opts.input);
   }) } = {}) {
   const x = async (args, opts) => (await execFileImpl(XDOTOOL, args, opts)).stdout;
@@ -106,7 +113,7 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
     };
     switch (action.kind) {
       case 'type':
-        await x(['type', '--clearmodifiers', '--file', '-'], { input: String(action.text) });
+        await x(['type', '--clearmodifiers', '--delay', String(TYPE_DELAY_MS), '--file', '-'], { input: String(action.text), timeout: typeTimeoutMs(action.text) });
         break;
       case 'key':
         await x(['key', '--clearmodifiers', '--repeat', String(action.repeat || 1), [...m, sym].join('+')]);
@@ -125,8 +132,12 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
         const [[fx, fy], [tx, ty]] = points;
         await x(['mousemove', '--sync', String(fx), String(fy)]);
         await x(['mousedown', button(action.button)]);
-        await x(['mousemove', '--sync', String(tx), String(ty)]);
-        await x(['mouseup', button(action.button)]);
+        // Always released: a move that fails must not leave the button held.
+        try {
+          await x(['mousemove', '--sync', String(tx), String(ty)]);
+        } finally {
+          await x(['mouseup', button(action.button)]);
+        }
         break;
       }
       default:

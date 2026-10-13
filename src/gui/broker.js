@@ -17,6 +17,20 @@ const TITLE_MAX = 120;
 const SUSPENDING_CODES = Object.freeze(['foreground_mismatch', 'app_not_running', 'helper_disconnected']);
 const suspendsLease = (code) => SUSPENDING_CODES.includes(code);
 
+// How long the service waits for one input op. A click or a key keeps the
+// channel's default. Typed text takes as long as it is: a backend that
+// presses keys one by one (xdotool waits 12 ms after each key event) needs
+// far more than the default for 2000 characters, and a wait that ended
+// first would report a refusal while the typing went on. The helper's own
+// limit for the same text (x11.js) is shorter, so it stops typing and
+// answers before this runs out.
+const TYPE_BASE_MS = 15000;
+const TYPE_PER_CHAR_MS = 60;
+function inputTimeoutMs(action) {
+  if (!action || action.kind !== 'type') return undefined;
+  return TYPE_BASE_MS + TYPE_PER_CHAR_MS * Array.from(String(action.text || '')).length;
+}
+
 class GuiBroker extends EventEmitter {
   constructor({ channel, guiConfig, getPolicy = () => ({}), audit = null, dataDir = null, platform = process.platform, clock = Date.now,
     log = createLogger('gui/broker'), heartbeatMs = 10000, realpath = realResolve } = {}) {
@@ -271,7 +285,8 @@ class GuiBroker extends EventEmitter {
   async input(action, { jobId, leaseId, appIds, yieldMs }) {
     this.require('gui.input');
     const expect = await this.expectFor(appIds);
-    const res = await this.channel.request('input', { expect, yield_ms: yieldMs, action }, { jobId, leaseId });
+    const timeoutMs = inputTimeoutMs(action);
+    const res = await this.channel.request('input', { expect, yield_ms: yieldMs, action }, { jobId, leaseId, ...(timeoutMs ? { timeoutMs } : {}) });
     const after = res && res.foregroundAfter;
     const afterAppId = after ? (appIds.find((id) => imageMatches(after.image, this._match([id]), this.platform)) || null) : null;
     return {
@@ -304,4 +319,4 @@ class GuiBroker extends EventEmitter {
   }
 }
 
-module.exports = { GuiBroker, SUSPENDING_CODES, suspendsLease, SCREENSHOTS_PER_JOB, SCREENSHOT_TTL_MS };
+module.exports = { GuiBroker, SUSPENDING_CODES, suspendsLease, SCREENSHOTS_PER_JOB, SCREENSHOT_TTL_MS, inputTimeoutMs };

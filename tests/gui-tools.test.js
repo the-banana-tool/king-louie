@@ -349,6 +349,22 @@ describe('input tools', () => {
     assert.ok(audits.some((a) => a.kind === 'gui.input' && a.data.result === 'refused:text_looks_secret'));
   });
 
+  it('review finding 10: text whose typing may have happened is in the typed buffer, text that was refused before the send is not', async () => {
+    await withLease();
+    const lease = leases.current();
+    // The helper did not answer in time: the text may be on the screen.
+    channel.inputError = new GuiError('op_timeout', 'input');
+    assert.match((await tools.Type.execute({ text: 'half of ' }, opts())).error, /^op_timeout/);
+    assert.equal(lease.typed.value, 'half of ', 'counted as typed');
+    channel.inputError = new GuiError('backend_failed', 'xdotool');
+    assert.match((await tools.Type.execute({ text: 'it' }, opts())).error, /^backend_failed/);
+    assert.equal(lease.typed.value, 'half of it');
+    // Refused by the helper's own checks before anything was injected.
+    channel.inputError = new GuiError('user_active');
+    assert.match((await tools.Type.execute({ text: ' never' }, opts())).error, /^user_active/);
+    assert.equal(lease.typed.value, 'half of it', 'not typed');
+  });
+
   it('Type refuses a vault value', async () => {
     await withLease();
     const vault = { list: () => ['pw'], get: () => 'hunter2hunter2' };
