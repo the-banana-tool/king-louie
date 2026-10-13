@@ -734,6 +734,50 @@ describe('input tools', () => {
       });
     }
 
+    // Second security review, finding 7: a pause used to wipe the typed
+    // buffer, so a value could be typed half before it and half after. What
+    // is in the field does not go away because the lease paused: the text
+    // typed so far stays, as a piece of unknown place.
+    it('finding 7: a pause for want of contact does not wipe it: half, the pause, the resume, the other half', async () => {
+      await withLease();
+      const lease = leases.current();
+      assert.equal((await tools.Type.execute({ text: 'correct-ho' }, v())).ok, true);
+      leases.suspend(lease.leaseId, 'no_contact');
+      assert.equal(lease.state, 'suspended');
+      assert.deepEqual([lease.typed.value, lease.typed.segments], ['', ['correct-ho']]);
+      const token = [...relay.sent].reverse().find((s) => typeof s.message.contact_token === 'string').message.contact_token;
+      assert.equal(leases.verifyWatch(phone.leaseWatch(testNodeIdentity({ key: 'gpu-box' }).nodeId, lease.leaseId, { contactToken: token })).contact, true);
+      assert.equal(lease.state, 'active');
+      assert.deepEqual(lease.typed.segments, ['correct-ho'], 'still there after the resume');
+      assert.match((await tools.Type.execute({ text: 'rse-battery' }, v())).error, /^text_looks_secret/);
+      // The other order too, and ordinary text still goes through.
+      assert.equal((await tools.Type.execute({ text: 'rse-battery is not it' }, v())).error.startsWith('text_looks_secret'), true);
+      assert.equal((await tools.Type.execute({ text: ' and more' }, v())).ok, true);
+    });
+
+    it('finding 7: nor does any other suspension and its resume grant: half, the app loses the foreground, the phone resumes, the other half', async () => {
+      await withLease();
+      const lease = leases.current();
+      assert.equal((await tools.Type.execute({ text: 'rse-battery' }, v())).ok, true);
+      leases.suspend(lease.leaseId, 'foreground_changed');
+      const resume = relay.sent.filter((s) => s.message.type === 'kl.lease.request').pop();
+      assert.equal(resume.message.lease.resumes, lease.leaseId);
+      assert.equal(leases.onGrant(phone.leaseGrant(resume.envelope, { minutes: 5 })).state, 'active');
+      assert.deepEqual([lease.typed.value, lease.typed.segments], ['', ['rse-battery']]);
+      assert.match((await tools.Type.execute({ text: 'correct-ho' }, v())).error, /^text_looks_secret/);
+    });
+
+    it('finding 7: a new lease starts with nothing typed', async () => {
+      await withLease();
+      const first = leases.current();
+      assert.equal((await tools.Type.execute({ text: 'correct-ho' }, v())).ok, true);
+      leases.onRevoke(phone.leaseRevoke(testNodeIdentity({ key: 'gpu-box' }).nodeId, first.leaseId));
+      await withLease();
+      const second = leases.current();
+      assert.notEqual(second, first);
+      assert.deepEqual([second.typed.value, second.typed.segments], ['', []]);
+    });
+
     it('a click moves the caret too: the second half, a click, the first half', async () => {
       await withLease();
       const shot = await tools.Screenshot.execute({ app: 'calculator' }, opts());

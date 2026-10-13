@@ -152,7 +152,8 @@ class LeaseManager extends EventEmitter {
     }
     lease.state = 'active';
     lease.suspendReason = null;
-    lease.typed.reset();
+    // What was typed stays (suspend() set it aside as a piece): the field
+    // still holds it.
     this._audit('lease.resumed', lease, { reason: 'contact', device_id: deviceId });
     this._status(lease);
   }
@@ -386,7 +387,10 @@ class LeaseManager extends EventEmitter {
     lease.expiresAt = L.effectiveExpiry({ verifiedAt: now, minutes: m.grant.minutes, resumeOf: entry.resume ? lease.expiresAt : null });
     lease.state = 'active';
     lease.suspendReason = null;
-    lease.typed.reset();
+    // A resume keeps what was typed, as a piece of unknown place (second
+    // security review, finding 7); only a new lease starts with nothing.
+    if (entry.resume) lease.typed.navigate();
+    else lease.typed.reset();
     this._audit(entry.resume ? 'lease.resumed' : 'lease.granted', lease, {
       request_id: m.request_id, apps: lease.apps, minutes: m.grant.minutes, device_id: r.deviceId
     });
@@ -536,7 +540,11 @@ class LeaseManager extends EventEmitter {
     if (!lease || lease.state !== 'active') return;
     lease.state = 'suspended';
     lease.suspendReason = reason;
-    lease.typed.reset();
+    // A pause does not empty the field (second security review, finding 7):
+    // a value typed half before it and half after must still be seen. What
+    // was typed is kept as a piece whose place is unknown, as after any key
+    // that moves the caret; this used to be wiped, for every reason.
+    lease.typed.navigate();
     if (this.broker) this.broker.releaseAll().catch(() => {});
     this._audit('lease.suspended', lease, { reason });
     this._status(lease);

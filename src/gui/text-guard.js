@@ -23,8 +23,9 @@
 // (autocomplete, find and replace, macros, an input method, drag and drop of
 // a selection); text that was in the field before the lease; patterns and
 // always_confirm commands split into three or more pieces, or completed by a
-// piece dropped into the middle of another. The pieces are forgotten when
-// the foreground changes or the lease is suspended, as before.
+// piece dropped into the middle of another. The pieces are kept through a
+// suspension and its resume (second security review, finding 7: a pause
+// does not empty the field); a new lease starts with none.
 const { patternMatch, SHELL_SEPARATORS } = require('../execution/tool-patterns');
 
 const MAX_TEXT = 2000;
