@@ -153,3 +153,40 @@ describe('JCS', () => {
     assert.strictEqual(sha256b64url(''), '47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU');
   });
 });
+
+// Security review 2026-10-12, finding 6: a category named after a member of
+// Object.prototype made the merge throw, and core mergeSettings with it.
+describe('category keywords named after Object.prototype members', () => {
+  const NAMES = ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf', '__defineGetter__'];
+  const builtIn = EXECUTOR_SETTINGS_DEFAULTS.outbound.categoryKeywords;
+
+  it('never throw, never become a category, and leave every other list as it was', () => {
+    for (const name of NAMES) {
+      const raw = JSON.parse(`{"${name}":["escrow"],"legal":["easement"]}`);
+      assert.ok(Object.prototype.hasOwnProperty.call(raw, name), name);
+      const kw = mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, { outbound: { categoryKeywords: raw } }).outbound.categoryKeywords;
+      assert.strictEqual(Object.getPrototypeOf(kw), Object.prototype, name);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(kw, name), false, name);
+      assert.deepStrictEqual(Object.keys(kw).sort(), ['financial', 'health', 'legal', 'personal'], name);
+      assert.deepStrictEqual(kw.legal, [...builtIn.legal, 'easement'], name);
+      assert.deepStrictEqual([kw.personal, kw.financial, kw.health], [builtIn.personal, builtIn.financial, builtIn.health], name);
+      assert.deepStrictEqual(categoryKeywordProblems({ outbound: { categoryKeywords: raw } }), [`outbound.categoryKeywords.${name} is not a usable category name`]);
+    }
+    assert.strictEqual({}.escrow, undefined, 'nothing leaked onto Object.prototype');
+  });
+
+  it('core mergeSettings does not throw on such a setting', () => {
+    const { mergeSettings } = require('../src/core/settings');
+    for (const name of NAMES) {
+      const merged = mergeSettings(JSON.parse(`{"executors":{"outbound":{"categoryKeywords":{"${name}":["escrow"],"health":["clinic"]}}}}`));
+      assert.deepStrictEqual(merged.executors.outbound.categoryKeywords.health, [...builtIn.health, 'clinic'], name);
+    }
+  });
+
+  it('a base that carries such a key is not read through the prototype either', () => {
+    const base = { ...EXECUTOR_SETTINGS_DEFAULTS, outbound: { categoryKeywords: JSON.parse('{"__proto__":["x"],"constructor":["y"],"health":["clinic"]}') } };
+    const kw = mergeExecutorSettings(base, { outbound: { categoryKeywords: { health: ['ward'] } } }).outbound.categoryKeywords;
+    assert.deepStrictEqual(Object.keys(kw), ['health']);
+    assert.deepStrictEqual(kw.health, ['clinic', 'ward']);
+  });
+});

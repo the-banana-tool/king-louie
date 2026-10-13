@@ -34,6 +34,12 @@ const EXECUTOR_SETTINGS_DEFAULTS = Object.freeze({
 
 const isObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 const isKeywordList = (v) => Array.isArray(v) && v.every((k) => typeof k === 'string');
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+// A category named after a member of Object.prototype ('constructor',
+// '__proto__', 'toString', …) is never a category: read as a plain key it
+// would return the inherited member, and '__proto__' assigned to a plain
+// object replaces its prototype. Such a key is ignored, with a warning.
+const isCategoryName = (k) => typeof k === 'string' && !(k in Object.prototype);
 const warned = new Set();
 
 // What is wrong with a settings.executors value's outbound.categoryKeywords,
@@ -46,8 +52,10 @@ function categoryKeywordProblems(source) {
   if (kw === undefined) return [];
   if (!isObject(kw)) return ['outbound.categoryKeywords is not an object of keyword lists'];
   return Object.entries(kw)
-    .filter(([, v]) => !isKeywordList(v))
-    .map(([k]) => `outbound.categoryKeywords.${k} is not a list of strings`);
+    .filter(([k, v]) => !isCategoryName(k) || !isKeywordList(v))
+    .map(([k]) => (isCategoryName(k)
+      ? `outbound.categoryKeywords.${k} is not a list of strings`
+      : `outbound.categoryKeywords.${k} is not a usable category name`));
 }
 
 // Category keywords from `source` only add to the base lists, on the desktop
@@ -59,7 +67,9 @@ function mergeExecutorSettings(base, source) {
   const b = isObject(base) ? base : EXECUTOR_SETTINGS_DEFAULTS;
   const s = isObject(source) ? source : {};
   const keywords = {};
-  for (const [k, v] of Object.entries(b.outbound?.categoryKeywords || {})) keywords[k] = [...v];
+  for (const [k, v] of Object.entries(b.outbound?.categoryKeywords || {})) {
+    if (isCategoryName(k) && isKeywordList(v)) keywords[k] = [...v];
+  }
   for (const problem of categoryKeywordProblems(s)) {
     if (warned.has(problem)) continue;
     warned.add(problem);
@@ -69,8 +79,8 @@ function mergeExecutorSettings(base, source) {
   if (isObject(sourceKeywords)) {
     for (const [k, v] of Object.entries(sourceKeywords)) {
       // Fail closed: a list with a non-string in it is ignored whole.
-      if (!isKeywordList(v)) continue;
-      keywords[k] = [...new Set([...(keywords[k] || []), ...v])];
+      if (!isCategoryName(k) || !isKeywordList(v)) continue;
+      keywords[k] = [...new Set([...(own(keywords, k) ? keywords[k] : []), ...v])];
     }
   }
   return {

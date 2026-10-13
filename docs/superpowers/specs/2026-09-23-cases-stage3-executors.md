@@ -739,7 +739,8 @@ Note (owner decision 2026-10-12): `outbound.categoryKeywords` is add-only everyw
 never weaken the outbound gate. A list given for a category is unioned with the built-in list; a category
 the built-ins do not have is added to the resolved settings (rule 2 itself still reads only `personal`,
 `financial`, `legal` and `health`); `[]`, or a list that is not an array of strings, leaves the built-in
-list as it is. This replaces the earlier rule, under which a desktop list replaced its built-in one and
+list as it is. A category named after a member of `Object.prototype` (`constructor`, `__proto__`,
+`toString`, …) is ignored with a warning, never a category and never a throw. This replaces the earlier rule, under which a desktop list replaced its built-in one and
 only service mode was add-only.
 
 Time zone: `settings.cases.timeZone`. Admin `service.json` gains `executors: { entries: {}, packageRoots: []
