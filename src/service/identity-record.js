@@ -36,8 +36,10 @@ const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const PUBLIC_KEY_RE = /^[0-9a-f]{88}$/;
 const SID_RE = /^S-1-(?:\d+-)*\d+$/;
 const WINDOWS_ADMINISTRATORS = 'S-1-5-32-544';
-const WINDOWS_TRUSTED_OWNERS = new Set([WINDOWS_ADMINISTRATORS, 'S-1-5-18']);
-const WINDOWS_SERVICE_ACCOUNTS = new Set(['S-1-5-19']);
+const WINDOWS_SYSTEM = 'S-1-5-18';
+const WINDOWS_LOCAL_SERVICE = 'S-1-5-19';
+const WINDOWS_TRUSTED_OWNERS = new Set([WINDOWS_ADMINISTRATORS, WINDOWS_SYSTEM]);
+const WINDOWS_SERVICE_ACCOUNTS = new Set([WINDOWS_LOCAL_SERVICE]);
 const defaultGeteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1);
 
 const recordDir = (configDir) => path.join(configDir, RECORD_DIR);
@@ -296,6 +298,15 @@ function readIdentityRecord({ configDir, platform = process.platform, adminUid =
   const dir = recordDir(configDir);
   const file = recordPath(configDir);
   const invalid = (reason) => ({ state: 'invalid', file, reason });
+  // Windows: "access denied" on the record is its own answer (fifth security
+  // review, finding 2). The record's access list names three readers, so an
+  // account that is none of them is not helped by writing the record again.
+  // Still invalid: a record nobody could read vouches for nothing.
+  const refused = (err) => platform === 'win32' && Boolean(err) && (err.code === 'EACCES' || err.code === 'EPERM');
+  const unreadable = (err) => ({
+    ...invalid(`could not be read by the account ${serviceProbe ? 'the service runs as' : 'this ran as'} (${err.code})`),
+    unreadable: serviceProbe ? 'service' : 'admin'
+  });
   let st;
   try {
     st = fsImpl.lstatSync(file);
@@ -307,6 +318,7 @@ function readIdentityRecord({ configDir, platform = process.platform, adminUid =
       } catch { /* no directory either */ }
       return { state: 'none', file };
     }
+    if (refused(err)) return unreadable(err);
     return invalid(`could not be checked (${err.code || 'error'})`);
   }
   if (st.isSymbolicLink() || !st.isFile()) return invalid('is not a regular file');
@@ -320,6 +332,7 @@ function readIdentityRecord({ configDir, platform = process.platform, adminUid =
     raw = JSON.parse(fsImpl.readFileSync(file, 'utf8'));
   } catch (err) {
     // Never the parser's own message: it quotes the text it could not parse.
+    if (refused(err)) return unreadable(err);
     return invalid(err instanceof SyntaxError ? 'is not valid JSON' : `could not be read (${err.code || 'error'})`);
   }
   const record = parseRecord(raw);
@@ -344,6 +357,21 @@ function checkNodeIdentityRecord({ configDir, dataDir = null, identity, ...readO
     return {
       state: 'none', file: seen.file, recorded: null,
       problem: `no administrator record of this node's identity (${seen.file} is missing): ${ADMIN} run "king-louie-service identity record${where}" and compare the id it shows with the one your phones show for this node`
+    };
+  }
+  if (seen.state === 'invalid' && seen.unreadable) {
+    // Who "identity record" lets read the record on Windows
+    // (windowsRecordDirAclArgs, windowsRecordFileAclArgs). Writing it again
+    // gives the same three, so that is not the remedy.
+    const readers = `On Windows the record can be read only by SYSTEM (${WINDOWS_SYSTEM}), Administrators (${WINDOWS_ADMINISTRATORS}) and LOCAL SERVICE (${WINDOWS_LOCAL_SERVICE})`;
+    const remedy = seen.unreadable === 'service'
+      ? `${readers}, the account "king-louie-service install" sets the service up under: run the service as LOCAL SERVICE. `
+        + '"king-louie-service identity record --replace" writes the same access list again and changes nothing. '
+        + 'If the service does run as LOCAL SERVICE, the access list is no longer the one that command writes: an Administrator should find out who changed it before writing the record anew'
+      : `${readers}: run this from an elevated (Administrator) prompt`;
+    return {
+      state: 'invalid', file: seen.file, recorded: null,
+      problem: `${seen.file} ${seen.reason}, so it does not say which identity an administrator recorded. ${remedy}`
     };
   }
   if (seen.state === 'invalid') {
@@ -410,8 +438,6 @@ function assertRealConfigDir(configDir) {
 // Administrators in full; LOCAL SERVICE, the account the installed service
 // runs as, reads. A service run by hand as any other account cannot read a
 // record written this way, and refuses to start for it.
-const WINDOWS_SYSTEM = 'S-1-5-18';
-const WINDOWS_LOCAL_SERVICE = 'S-1-5-19';
 function icaclsExe(env) {
   return require('../platform/windows-paths').windowsIcaclsExe(env);
 }

@@ -39,6 +39,13 @@ const ADMINS = 'S-1-5-32-544';
 const owners = (config = ADMINS, dir = ADMINS, file = ADMINS, link = [false, false, false]) => () => ({
   me: 'S-1-5-21-1-2-3-1001', entries: [{ owner: config, link: link[0] }, { owner: dir, link: link[1] }, { owner: file, link: link[2] }]
 });
+// What the Windows access-list inspector reports for a record as "identity
+// record" leaves it, for however many paths it is asked about.
+const cleanAce = (sid, mask, flags) => ({ type: 0, sid, mask, flags });
+const cleanAcl = (paths) => paths.map((p, i) => ({
+  dacl: true, owner: ADMINS,
+  aces: [cleanAce('S-1-5-18', 0x1f01ff, i < paths.length - 1 ? 3 : 0), cleanAce(ADMINS, 0x1f01ff, i < paths.length - 1 ? 3 : 0), cleanAce('S-1-5-19', 0x1200a9, i < paths.length - 1 ? 3 : 0)]
+}));
 // The reader's options in a test: this uid as the administrator; on Windows
 // no probe and Administrators as every owner, unless a test says otherwise.
 const opts = (extra = {}) => ({ adminUid: UID, serviceProbe: false, inspectOwners: owners(), runIcacls: () => {}, ...extra });
@@ -262,6 +269,63 @@ describe('the administrator\'s record of the node identity (R-F5-17)', () => {
       assert.match(probe({ fsImpl: answering({ create: null }) }), /identity is writable by the account running the service/);
       assert.match(probe({ fsImpl: answering({ write: 'EIO' }) }), /could not be verified/);
       assert.equal(R.probeIdentityRecord({ configDir: s.configDir, platform: 'linux', fsImpl: answering({ write: null }) }), null);
+    });
+
+    // Fifth security review, finding 2: a service run by hand as an account
+    // the record's access list does not name was told to run "identity
+    // record --replace", which writes the same access list again.
+    describe('a record this account is not allowed to read', () => {
+      const denying = (what, code) => ({
+        ...fs,
+        lstatSync: (p, ...rest) => {
+          if (what === 'lstat' && path.basename(String(p)) === 'node.json') throw Object.assign(new Error(code), { code });
+          return fs.lstatSync(p, ...rest);
+        },
+        readFileSync: (p, ...rest) => {
+          if (what === 'read' && path.basename(String(p)) === 'node.json') throw Object.assign(new Error(code), { code });
+          return fs.readFileSync(p, ...rest);
+        }
+      });
+      const check = (s, extra) => R.checkNodeIdentityRecord({ configDir: s.configDir, dataDir: s.dataDir, identity: keys(), platform: 'win32', ...opts(extra) });
+
+      it('the service is told who can read the record and to run as LOCAL SERVICE; it still refuses to start', () => {
+        const s = recorded();
+        for (const what of ['lstat', 'read']) {
+          for (const code of ['EPERM', 'EACCES']) {
+            const fsImpl = { ...denying(what, code), openSync: answering().openSync };
+            const seen = check(s, { serviceProbe: true, fsImpl, inspectAcl: cleanAcl });
+            assert.equal(seen.state, 'invalid', `${what} ${code}: never "none", never a match`);
+            assert.ok(seen.problem.includes(`(${code})`));
+            assert.match(seen.problem, /can be read only by SYSTEM \(S-1-5-18\), Administrators \(S-1-5-32-544\) and LOCAL SERVICE \(S-1-5-19\)/);
+            assert.match(seen.problem, /run the service as LOCAL SERVICE/);
+            assert.match(seen.problem, /"king-louie-service identity record --replace" writes the same access list again and changes nothing/);
+            assert.doesNotMatch(seen.problem, /find out who could have changed it, then run/);
+            assert.throws(() => R.assertRecordedIdentity({ configDir: s.configDir, dataDir: s.dataDir, identity: keys(), platform: 'win32', log: { warn() {}, error() {}, info() {} }, ...opts({ serviceProbe: true, fsImpl, inspectAcl: cleanAcl }) }),
+              (err) => err.code === 'NODE_IDENTITY_RECORD_INVALID' && /^Refusing to start: /.test(err.message) && /run the service as LOCAL SERVICE/.test(err.message));
+          }
+        }
+      });
+
+      it('an administrator\'s command is told to run elevated, not to change the service\'s account', () => {
+        const s = recorded();
+        const seen = check(s, { serviceProbe: false, fsImpl: denying('lstat', 'EPERM') });
+        assert.equal(seen.state, 'invalid');
+        assert.match(seen.problem, /run this from an elevated \(Administrator\) prompt/);
+        assert.doesNotMatch(seen.problem, /run the service as LOCAL SERVICE/);
+        assert.doesNotMatch(seen.problem, /find out who could have changed it, then run/);
+      });
+
+      it('any other failure, and any failure off Windows, keeps the plain wording', () => {
+        const s = recorded();
+        const other = check(s, { serviceProbe: true, fsImpl: { ...denying('lstat', 'EIO'), openSync: answering().openSync } });
+        assert.equal(other.state, 'invalid');
+        assert.match(other.problem, /could not be checked \(EIO\)/);
+        assert.match(other.problem, /identity record --replace/);
+        const posix = R.checkNodeIdentityRecord({ configDir: s.configDir, dataDir: s.dataDir, identity: keys(), platform: 'linux', ...opts({ fsImpl: denying('lstat', 'EACCES') }) });
+        assert.equal(posix.state, 'invalid');
+        assert.match(posix.problem, /could not be checked \(EACCES\)/);
+        assert.doesNotMatch(posix.problem, /LOCAL SERVICE/);
+      });
     });
 
     const winWrite = (s, k, runIcacls) => R.writeIdentityRecord({
