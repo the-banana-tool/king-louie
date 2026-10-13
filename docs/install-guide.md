@@ -540,10 +540,35 @@ What each FAIL means:
 | `sudo rules (run doctor as the service account …)` | you ran `doctor` as root, which says nothing about `king-louie`'s rules | run it with `sudo -u king-louie` as shown |
 | `data dir is private (mode …)` | the MCP data dir is readable by others | `chmod 700` it |
 | `DPAPI-wrapped master key present (created on first run)` | the MCP instance has not started yet | start it once (section 8), then run `doctor` again |
+| `node identity record (the identity in … is not the one an administrator recorded in …)` | the data dir holds another node identity than the one recorded with `identity record` | if you replaced or reset the data dir on purpose, run `identity record --replace` (below) and pair phones, relays and desktops again; if you did not, restore the data dir from a backup |
+| `node identity record (… so it does not say which identity an administrator recorded …)` | the record cannot be trusted or read: wrong owner or permissions, a link, or a damaged file | find out who could have changed it, then run `identity record --replace` (below) |
 
 A `not checked: uses parameters without defaults` row is not a failure. That
 `sudo` step has a parameter with no default value, so `doctor` cannot know
 the exact command to ask sudo about.
+
+A `WARN  node identity record` row is not a failure either. It means no
+administrator has recorded this node's identity yet. Runbooks and stdio MCP
+work without a record. Desktop apps (stage 5) do not: the service keeps them
+off, and `session install` refuses, until the identity is recorded. Recording
+it also makes the service refuse to start if the identity in its data dir is
+ever replaced. Start the service (or the MCP instance) once so that it has an
+identity, then, from an elevated PowerShell or as root:
+
+```powershell
+& 'C:\Program Files\nodejs\node.exe' C:\KingLouie\app\bin\king-louie-service.js identity record --data-dir C:\KingLouie\mcp\data
+```
+
+```bash
+sudo /usr/bin/node /opt/king-louie/app/bin/king-louie-service.js identity record --data-dir /opt/king-louie/mcp/data
+```
+
+The command prints the node's name, its id and a fingerprint, and asks before
+it writes anything. If a phone is enrolled for this node, compare the id with
+the one the phone shows. It writes `identity/node.json` in the config dir
+beside that data dir, which only an administrator can change. Run it once for
+each data dir (the service's own data dir takes no `--data-dir`), and restart
+the service afterwards. `identity show` prints what is recorded.
 
 ## 8. Your first runbook over stdio MCP
 
@@ -718,6 +743,7 @@ The examples follow rules that keep a runbook safe to hand to a model:
 | `site.status` fails after its health check passed | `systemctl is-active` exited 3: `site.service` is not active | the job's output says `inactive`; the check's evidence is still recorded |
 | a folder with a space in `allowed_roots` or a step argument | nothing: it is passed as one argument | — |
 | the service and the MCP instance behave differently | the two `node.yaml` copies have drifted apart | compare them (section 5) and run `doctor` on both |
+| the service will not start, with `Refusing to start: the identity in … is not the one an administrator recorded in …` | the node identity in the data dir was replaced after `identity record` | see the `node identity record` rows in section 7; the message names both ids and the command |
 | a long job stops when you close Claude, or its program keeps running with no job to report to | the MCP process exits with the session and its jobs go with it; on Windows especially, a step's program can outlive it, orphaned | keep the session open; after closing one mid-job, end any leftover program by hand (Task Manager, or `ps`). Fleet stage 4 moves jobs into the service |
 | `git` refuses `/srv/site` with "detected dubious ownership" | the repository is owned by another account | `chown` it to `king-louie` (section 6). Never set `safe.directory=*` |
 | `runbook-acls.ps1`'s verification step fails, naming a file inside `mcp\data` or `D:\train\runs` that you never put there yourself | that data folder had contents, and old permissions, from before the first time you ran the script | clear the named file or folder by hand (as an administrator) and run the script again |

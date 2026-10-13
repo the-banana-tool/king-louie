@@ -1333,8 +1333,8 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   (default no). Off a TTY they need `--yes` or refuse (exit 2) before
   anything is resolved or read. Nothing is minted, created or written before
   the answer. `--dry-run` asks nothing. `--yes` is valid for `desktop pair`,
-  `device apply`, `session install` and `session uninstall` only
-  (`YES_COMMANDS` in `src/service/cli.js`).
+  `device apply`, `identity record`, `session install` and `session
+  uninstall` only (`YES_COMMANDS` in `src/service/cli.js`).
 - **Who is installed (R-F5-2, R-F5-10).** One session user per node, decided
   by the SID the canonical file records (the uid off Windows:
   `session_sid`, `session_uid`), never the bare name. Another identity is
@@ -1382,15 +1382,16 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   owner does not own is refused. The node id is read where the store keeps
   it (the dot path `mesh.identity` of `chat-data.json`) and verified: the
   public key must be the public half of the private key held under the
-  master key (`readNodeIdentity`, read-only). A record with its private key
+  master key (`readNodeIdentity`, read-only; `resolveNodeIdentity` is that
+  with the key resolution, shared with `identity record`). A record with its private key
   in the clear is refused (start the service once: it moves the key under
   the master key), and the store is read only as a regular file of at most
-  64 MiB, no link followed and no pipe waited on. The identity lives only in
-  the data dir; no admin-owned file names the node id, so an account that
-  can write the data dir and read the master key (the service account) can
-  still replace it. Closing that (an admin-owned record of the node id and
-  public key) is owner ruling R-F5-17: approved, deferred until after F5
-  merges, not built. On Windows install
+  64 MiB, no link followed and no pipe waited on. That alone proves only
+  that whoever holds this data dir's master key stored the identity, which
+  the service account does, so install also needs it to be the identity an
+  administrator recorded (R-F5-17, below): no record, another identity or a
+  record that cannot be trusted refuses before the question (`--dry-run`
+  too), with nothing written. On Windows install
   also runs the installers' config-dir check (`WINDOWS_CONFIG_DIRS_SCRIPT`)
   after consent, gives the session user's SID read-control, read-attributes
   and synchronize on `session\users` itself (no inheritance; without it the
@@ -1405,6 +1406,51 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   in `tests/gui-session-secret.test.js` that runs the real check against a
   temp dir locked with `icacls` and an OWNER RIGHTS entry, and lifts the
   lock with one blind DACL write before cleanup).
+- **The administrator's record of the node identity (R-F5-17).**
+  `<configDir>/identity/node.json` (`{ v, node_id, public_key, recorded_at }`;
+  `src/service/identity-record.js`) is what an administrator vouched for.
+  Only `king-louie-service identity record` writes it
+  (`src/service/commands/identity.js`; root or Administrator): it reads the
+  identity as install does, prints the node's name, id and fingerprint,
+  asks `[y/N]`, needs `--yes` off a terminal (exit 2 before anything is
+  read), and writes nothing before the answer. `--replace` (valid for this
+  command only) is needed to record another identity or to write over a
+  record that cannot be used; the same identity again writes nothing;
+  `identity show` prints it. Nothing else ever writes it, the service
+  least of all: a start without a record records nothing.
+  - Readers (`readIdentityRecord`, `checkNodeIdentityRecord`) trust it as
+    the approver set is trusted. POSIX: the file, `identity/` and the
+    config dir are owned by `adminUid` and not writable by anyone else, and
+    none is a link. Windows: their owners, read by the handle-based
+    inspector in a PowerShell child (`inspectWindowsOwners`; no `Get-Acl`),
+    are Administrators, SYSTEM or the config dir's own owner, the config
+    dir is not LOCAL SERVICE's, none is a link, and with `serviceProbe`
+    (the service; never the admin CLI or doctor) this process cannot
+    create a file in `identity/`. An owner nobody could read, a file that
+    is not JSON, extra keys, an id that is not its key's: all `invalid`,
+    never `none`. The key is what is compared, not the id.
+  - No record: `session install` refuses; the service starts with one
+    warning; computer use is off (`node_identity_unrecorded`, with the
+    command in the log, `session status` and doctor). A record of another
+    identity, or one that is `invalid`: `session install` refuses and the
+    service refuses to start (`NODE_IDENTITY_MISMATCH`,
+    `NODE_IDENTITY_RECORD_INVALID`; `checkRecordedIdentity` in `run.js`,
+    before `startApprovals`, agent and runbook profiles), with the remedy
+    in the message. The GUI gets the result (`identityRecord`) and reads
+    the record itself when its host passed none; only `match` turns it on.
+  - Not checked: a front door, a relay host, and the other commands that
+    load the identity (`pair`, `enroll-device`, `device apply`,
+    `desktop pair`, `mcp`). The check is the service's own code: it
+    catches an identity replaced in the data dir, not code inside the
+    service process. doctor's `node identity record` row compares public
+    keys only.
+  - Tests write the record with `recordIdentity` and read it with
+    `IDENTITY_RECORD_TEST_OPTIONS` (`tests/helpers/identity-record.js`: the
+    Windows owner read answered in place, no write probe), passed as
+    `deps.identityRecord` to `runSessionCommand`, `runIdentityCommand`,
+    `loadProfile(...).start`, `createGuiSubsystem` and `runDoctor`. A test
+    that wants a GUI that is on, or an install that goes through, records
+    the identity first.
 - **Helper- and file-supplied text** (what the helper says of itself in
   `status.json`, a name in the helper file) goes to an administrator's
   terminal only through `shown` (`src/service/commands/io.js`), which is
