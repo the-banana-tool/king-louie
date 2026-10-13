@@ -40,6 +40,7 @@ class FakeChannel extends EventEmitter {
   connect() { this.connected = true; this.info = { user: 'alice', platform: plat, pid: 1, capabilities: ['gui.launch', 'gui.screenshot', 'gui.input'], probes: [], displays: [], limits: [], locked: false, since: 'x' }; this.emit('ready', this.info); }
   async request(op, params) {
     this.requests.push({ op, params });
+    if (this.during && this.during[op]) await this.during[op]();
     switch (op) {
       case 'processes': return [CALC];
       case 'windows': return [{ handle: 'w1', pid: 100, image: CALC.image, title: 'Calculator', bounds: { x: 0, y: 0, w: 800, h: 600 }, scale: 1, minimized: false }];
@@ -363,6 +364,39 @@ describe('input tools', () => {
     channel.inputError = new GuiError('user_active');
     assert.match((await tools.Type.execute({ text: ' never' }, opts())).error, /^user_active/);
     assert.equal(lease.typed.value, 'half of it', 'not typed');
+  });
+
+  // Security review finding 4: the lease is checked again after the round
+  // trip that looks up the app's processes, immediately before the send.
+  for (const [name, end, code] of [
+    ['a revoke (Stop)', (lease) => leases.onRevoke(phone.leaseRevoke(testNodeIdentity({ key: 'gpu-box' }).nodeId, lease.leaseId)), 'lease_revoked'],
+    ['the job closing', (lease) => leases.endForJob(lease.jobId, 'job_closed'), 'job_closed'],
+    ['a suspension', (lease) => leases.suspend(lease.leaseId, 'foreground_changed'), 'lease_suspended']
+  ]) {
+    it(`finding 4: ${name} between the first lease check and the send means no input op is sent`, async () => {
+      await withLease();
+      const lease = leases.current();
+      channel.requests.length = 0;
+      let ended = false;
+      channel.during = { processes: async () => { if (!ended) { ended = true; end(lease); } } };
+      const out = await tools.Key.execute({ keys: 'a' }, opts());
+      assert.equal(out.ok, false);
+      assert.match(out.error, new RegExp(`^${code}`));
+      assert.ok(channel.requests.some((r) => r.op === 'processes'), 'the lookup ran');
+      assert.deepEqual(channel.requests.filter((r) => r.op === 'input'), [], 'nothing was injected');
+      assert.equal(lease.typed.value, '', 'and nothing counts as typed');
+    });
+  }
+
+  it('finding 4: an input for a lease that is no longer the job\'s lease is not sent', async () => {
+    await withLease();
+    const lease = leases.current();
+    channel.requests.length = 0;
+    await assert.rejects(
+      broker.input({ kind: 'key', mods: [], key: 'a', repeat: 1 }, { jobId: 'job-1', leaseId: 'another-lease', appIds: lease.apps, yieldMs: 0 }),
+      (e) => e.code === 'lease_required'
+    );
+    assert.deepEqual(channel.requests.filter((r) => r.op === 'input'), []);
   });
 
   it('Type refuses a vault value', async () => {

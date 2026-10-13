@@ -73,6 +73,11 @@ function broker(opts = {}) {
     channel, guiConfig, getPolicy: () => ({ allowed_roots: [] }), audit: { append: async (e) => { audits.push(e); } },
     dataDir: opts.dataDir || null, platform: 'win32', clock: () => t, heartbeatMs: 60000, realpath: (p) => p
   });
+  // The broker sends no input without a lease manager (finding 4); these
+  // tests are about the broker, so theirs always holds lease l1 for the job.
+  if (opts.leases !== null) {
+    b.setLeases(opts.leases || { assertUsable: () => ({ leaseId: 'l1' }), statusSummary: () => null, active: () => null, onHelperDisconnected() {}, setLocked() {} });
+  }
   b.start();
   cleanups.push(() => b.stop());
   return { b, channel, audits, advance: (ms) => { t += ms; }, now: () => t };
@@ -87,16 +92,25 @@ describe('how long an input may take (review finding 10)', () => {
   it('a click or a key keeps the channel default; typed text gets time for its length', async () => {
     const { b, channel } = broker();
     channel.connect();
-    await b.input({ kind: 'key', mods: [], key: 'a', repeat: 1 }, { jobId: 'job-1', leaseId: 'l', appIds: ['calculator'], yieldMs: 0 });
+    await b.input({ kind: 'key', mods: [], key: 'a', repeat: 1 }, { jobId: 'job-1', leaseId: 'l1', appIds: ['calculator'], yieldMs: 0 });
     assert.equal(channel.requests.find((r) => r.op === 'input').opts.timeoutMs, undefined);
     channel.requests.length = 0;
     const text = 'x'.repeat(2000);
-    await b.input({ kind: 'type', text }, { jobId: 'job-1', leaseId: 'l', appIds: ['calculator'], yieldMs: 0 });
+    await b.input({ kind: 'type', text }, { jobId: 'job-1', leaseId: 'l1', appIds: ['calculator'], yieldMs: 0 });
     const sent = channel.requests.find((r) => r.op === 'input');
     assert.equal(sent.opts.timeoutMs, inputTimeoutMs({ kind: 'type', text }));
     assert.ok(sent.opts.timeoutMs > 60000, 'two thousand characters at xdotool\'s pace do not fit in ten seconds');
     assert.equal(inputTimeoutMs({ kind: 'type', text: 'é'.repeat(10) }), inputTimeoutMs({ kind: 'type', text: 'x'.repeat(10) }), 'counted in code points');
     assert.equal(inputTimeoutMs({ kind: 'click' }), undefined);
+  });
+});
+
+describe('no lease manager, no input (review finding 4)', () => {
+  it('a broker with no lease manager refuses every input before the helper hears of it', async () => {
+    const { b, channel } = broker({ leases: null });
+    channel.connect();
+    assert.equal(await code(b.input({ kind: 'key', mods: [], key: 'a', repeat: 1 }, { jobId: 'job-1', leaseId: 'l1', appIds: ['calculator'], yieldMs: 0 })), 'lease_required');
+    assert.deepEqual(channel.requests.filter((r) => r.op === 'input'), []);
   });
 });
 

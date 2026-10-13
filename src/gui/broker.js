@@ -297,6 +297,13 @@ class GuiBroker extends EventEmitter {
   async input(action, { jobId, leaseId, appIds, yieldMs }) {
     this.require('gui.input');
     const expect = await this.expectFor(appIds);
+    // The lease again, now (security review finding 4): the lookup above is
+    // a round trip to the helper, and a Stop, an expiry, a suspension or the
+    // job closing during it must not be followed by one more input. Nothing
+    // awaits between this check and the send. No lease manager, no input.
+    if (!this.leases) throw new GuiError('lease_required', 'this node has no lease manager');
+    const lease = this.leases.assertUsable(jobId);
+    if (lease.leaseId !== leaseId) throw new GuiError('lease_required', 'that lease is no longer this job\'s lease');
     const timeoutMs = inputTimeoutMs(action);
     const res = await this.channel.request('input', { expect, yield_ms: yieldMs, action }, { jobId, leaseId, ...(timeoutMs ? { timeoutMs } : {}) });
     const after = res && res.foregroundAfter;
