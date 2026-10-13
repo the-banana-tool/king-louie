@@ -1,0 +1,15 @@
+{
+  "name": "handshake",
+  "given": {
+    "secret_hex": "666ff8eacb9745f0dd897a310ab50e6ff4090541d377c276467466a0daf54294",
+    "node_id": "kl-hnef32472qzibi5r",
+    "nonce_h": "dXUR9ajktJCxctq0KYFqXcoxg-MQVgrqy0RVxSfvjjk",
+    "nonce_s": "plgzWSiGWGhNX_bYBCz8IbqisYLDX0EVliQL2EKbckw"
+  },
+  "expect": {
+    "proof_s": "2UI-THEbhgLxwXj5a30LYC5w8I-czKQFqM8oswnpl1Q",
+    "proof_h": "6ezt_vuP5492bmxVN4TdaPD_NW77-LnoDarxp6ouuOQ",
+    "k_sh_hex": "4d76eacb708c821e70ec201e6e06194cea72efd20a1234d27ac0473afbcb044f",
+    "k_hs_hex": "ed1fa6f17fd37e0652a5df897810cd5ff779ff38f0593cacf845e04cb65c5bdb"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "reject-seq-skip",
+  "given": {
+    "key_hex": "4d76eacb708c821e70ec201e6e06194cea72efd20a1234d27ac0473afbcb044f",
+    "dir": 1,
+    "frames": [
+      "00000024000000000000000262c81e6b876e45b2a56cf87034cd40a54094d26919efa53d94f3b8fd"
+    ]
+  },
+  "expect": {
+    "rejected_at": 0,
+    "reason": "sequence"
+  }
+}

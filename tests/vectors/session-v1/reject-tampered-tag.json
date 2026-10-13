@@ -1,0 +1,14 @@
+{
+  "name": "reject-tampered-tag",
+  "given": {
+    "key_hex": "4d76eacb708c821e70ec201e6e06194cea72efd20a1234d27ac0473afbcb044f",
+    "dir": 1,
+    "frames": [
+      "0000006900000000000000010fc420386535dc40321d4c2b625c82cb9bfba78438172f23ab92e88ee13717144d0714a1cc94947242d0f84866aa9a52a8f5e43a4a137a5a6007abe4fe29dcb6b8d08cc0cff9b028ff805f3892048aa4afa0e05374b4cbf2c2aad0edcf00b7095b"
+    ]
+  },
+  "expect": {
+    "rejected_at": 0,
+    "reason": "authentication"
+  }
+}

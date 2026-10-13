@@ -1,0 +1,29 @@
+{
+  "name": "sealed-frames",
+  "given": {
+    "k_sh_hex": "4d76eacb708c821e70ec201e6e06194cea72efd20a1234d27ac0473afbcb044f",
+    "k_hs_hex": "ed1fa6f17fd37e0652a5df897810cd5ff779ff38f0593cacf845e04cb65c5bdb"
+  },
+  "expect": {
+    "service_to_helper": [
+      {
+        "plaintext_json": "{\"t\":\"req\",\"id\":1,\"op\":\"foreground\",\"job_id\":\"job-1\",\"lease_id\":null,\"params\":{}}",
+        "frame_hex": "0000006900000000000000010fc420386535dc40321d4c2b625c82cb9bfba78438172f23ab92e88ee13717144d0714a1cc94947242d0f84866aa9a52a8f5e43a4a137a5a6007abe4fe29dcb6b8d08cc0cff9b028ff805f3892048aa4afa0e05374b4cbf2c2aad0edcf00b7095a"
+      },
+      {
+        "plaintext_json": "{\"t\":\"ping\"}",
+        "frame_hex": "00000024000000000000000262c81e6b876e45b2a56cf87034cd40a54094d26919efa53d94f3b8fd"
+      }
+    ],
+    "helper_to_service": [
+      {
+        "plaintext_json": "{\"t\":\"probe_report\",\"capabilities\":[\"gui.launch\"],\"probes\":[],\"displays\":[],\"limits\":[],\"locked\":false}",
+        "frame_hex": "0000007f00000000000000011362ab6b8e410b57be353401c3584d2d4d1cddffe94701221f01bb506bdae67e6fb8411dbe1138745077e8b68e7140d01132a3df41162a369af2728293be0d419fa17749134d65a7cd3836244f4c390c13453b9e1e20cb47b254ce1bd0bc650dbde7a56b120d7220a82f4da316b2043d62d6c9357bb38f"
+      },
+      {
+        "plaintext_json": "{\"t\":\"res\",\"id\":1,\"ok\":true,\"result\":null}",
+        "frame_hex": "00000042000000000000000232b0fec11ed8a93ae19800073ec21ca46df710786b6a7fa3f343799ee2bd2eb4eac7c71f5306d87c13ef7432916f8e64e9fd0c1fd059b520d356"
+      }
+    ]
+  }
+}
