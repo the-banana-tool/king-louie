@@ -14,13 +14,17 @@ const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend',
 // service-run chat (management surfaces §3.6) start or steer a run outside
 // the case: run_runbook and delegate start one (delegate an unguarded agent
 // session, like SpawnAgent), send_to_job and cancel_job reach one. A case
-// runs a runbook through the Executor tool instead.
+// runs a runbook through the Executor tool instead. The acting desktop tools
+// of fleet stage 5 (owner ruling R-F5-4, 2026-10-12) are out as well: in a
+// case turn the desktop is read-only (ListApps and Screenshot stay), because
+// nothing a case turn types or clicks passes the case's outbound gate.
 const CASE_BLOCKED_TOOL_NAMES = Object.freeze([
   'SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron',
   'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas',
-  'run_runbook', 'delegate', 'send_to_job', 'cancel_job'
+  'run_runbook', 'delegate', 'send_to_job', 'cancel_job',
+  'LaunchApp', 'CloseApp', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag'
 ]);
-const CASE_BLOCKED_TOOL_ERROR = 'This tool is not available in case turns: it starts another run, reaches another session, or changes the tool list. Do the work in this turn with the case tools and the other tools.';
+const CASE_BLOCKED_TOOL_ERROR = 'This tool is not available in case turns: it starts another run, reaches another session, changes the tool list, or acts on the desktop. Do the work in this turn with the case tools and the other tools.';
 
 // Everything a wake-up may use besides the case tools. WebFetch and
 // WebSearch are gated in query mode by the case-turn guard (C3): a GET URL

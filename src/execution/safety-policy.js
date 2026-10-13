@@ -13,7 +13,9 @@ const {
 // passes its checks the `routine` tier.
 const READ_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'status', 'get_state', 'list_machines', 'describe_machine', 'get_job', 'get_job_logs', 'SearchHistory', 'ReadHistory',
-  'list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence', 'list_envelopes', 'list_playbooks'
+  'list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence', 'list_envelopes', 'list_playbooks',
+  // Fleet stage 5: the GUI read tools.
+  'Screenshot', 'ListApps'
 ]);
 
 // `$(...)`, backticks and process substitution (`<(...)`, `>(...)`) run a
