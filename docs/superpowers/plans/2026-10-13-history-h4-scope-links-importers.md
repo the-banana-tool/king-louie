@@ -202,6 +202,57 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **Tests.** The send-path cases run the real `chat:sendMessage` handler through `tests/helpers/chat-harness.js` over `historyContext`'s in-memory store, the real `ContextBuilder` and `tests/helpers/fake-llm-server.js`, not a whole `createCore`: there is no core to shut down, and each store is closed. Recall is pinned off (`recall.enabled: false`) so two chats' requests can be compared byte for byte whatever their timestamps. `tests/history-settings.test.js`: two assertions added to the defaults case and one new case; none changed.
 - **Not covered by a test:** looked at once by hand on a throwaway profile (`launchApp`, standalone, threshold 3 in the seeded settings, the fake model): the row appears under the reply after the third user message with "Make this a case", no request to the model mentions it, the button opens the chat info at "New case…" with the New case dialog, and a further turn adds no second row. Not rendered: the button disabled during a reply, the button gone after a case is created, a refusal in the attach flow, a chat that was not attachable, and anything attached.
 
+**Task 17**
+
+- **The end-to-end check is four files, not one test.** Step 1's test is in `tests/e2e/history-recall.test.js` as a second suite (its own launch, two seeded chats, scope and link set through the IPC). The menu and the dialogs are driven as the owner drives them in three new files: `tests/e2e/history-scope-links.test.js` (7 tests), `tests/e2e/history-import.test.js` (6) and `tests/e2e/case-nudge.test.js` (3). `tests/e2e/history-import-attached.test.js` (Task 12's, never run before) passed as written and gained three tests: the import dialog attached, scope and links attached, and the service unreachable. Each file was run singly on Windows with `ELECTRON_RUN_AS_NODE` unset; all pass.
+- **One product fix, found by the import e2e** (its own commit). A picked file that was moved or deleted before the preview or the commit answered the renderer with Node's own error, which names the full path ("ENOENT: no such file or directory, open '…'"), against Decision 10. Both hosts now answer `IMPORT_UNREADABLE`, "The file could not be read. Choose it again.", and log the system code only (`readingPickedFile` in `src/ipc/import-picks.js`; `history-handlers.js` and `createAttachedImport` use it). Pinned in `tests/history-ipc-import.test.js` and `tests/attached-host-import.test.js` (one new case each; no existing assertion changed). A failed commit still keeps its token.
+- **How the e2e reaches what a click cannot.** The file "picked" is `KL_TEST_IMPORT_FILE`, read at each pick, so a test sets it in the app's main process before each click. A refused `history:links.set` cannot be produced through the dialog (it never sends a disabled box), so the test enables the case chat's box by hand in the page and says so; the refusal and the dialog staying open are then the product's. A failed `history:links.get` is the menu opened on a chat id that no longer exists.
+- **Step 3.** The H4 text in `CLAUDE.md` is a group of bullets at the end of "History", one sentence added to Q29's bullet under "Management surfaces", one bullet under "Attached mode" and one under "Cases". Each sentence was checked against the source; "never read `history_scope` elsewhere" is said as what holds (outside the store only the two IPC channels write a scope or a link).
+- **Step 2.** The spec keeps its old text and marks each H4 change "As built (H4, 2026-10-13)" or "Corrected 2026-10-13"; §9's sentence to the model is described as not built rather than deleted; the rulings, residuals and open questions are a new §17.
+- **Step 4 was not run here** (the controller runs the full suite once). Run instead: the e2e files above, and the unit files the fix and the docs touch (see the report).
+
+## What is left
+
+Collected at the close of the stage (Task 17) from the rulings, the Deviations above and the end-to-end check. Nothing here blocks the merge; each item is either the owner's to decide, a known limit, or something nobody has seen yet.
+
+### Open owner questions
+
+Each is built the cautious way and is one small change either way.
+
+- **(a) Under scope `all`, a bridge chat the owner linked explicitly is not read** (it is read only under `linked`): keep or change. `resolveScope` asks every chat under `all` with `explicit: false` (Tasks 4 and 8).
+- **(b) In an imported chat the owner's new message is still sent to a hosted embedder as the turn's query**: keep, or keep it local. Keeping it local means skipping the vector search for that chat's turns under a hosted key (Task 10); not built.
+- **(c) N1, N2 and N3**, all built the cautious way; the owner may overrule: **N1** Ollama counts as a hosted embedder, so an imported chat gets vectors only from the local model; **N2** a chat's sub-agents and workflow tasks read only their own chat, not its wider scope; **N3** an imported case-chat export is pinned as a reader (it reads itself only), not only kept out of other chats' scopes.
+
+### Residuals
+
+Limits the code has and the docs state (spec §17, `CLAUDE.md`).
+
+- Everything under "What the rulings cost, and what they do not cover" below: what "ever recalled" can see; a chat detached from its case is an ordinary chat again; two chats of one case cannot recall from each other; a chat that used `linked`/`all`, and any imported chat, cannot become a case chat; imported chunks still reach the chat model when recalled; with Jev chosen a scope holding an imported chat is not reranked at all; nothing scans an import; a case-chat export is recognised only by the `caseId` in the file; the nudge's attachable check runs once; `linked` and `all` are unmeasured.
+- **Windows CLI** (R-H4-4): the data dir's owner is not checked, only an elevated prompt is refused; a service installed under LOCAL SERVICE has no CLI import.
+- **A file written to while it is imported** (Task 9): it is hashed, then parsed, so it is stored under the earlier hash.
+- **A whole-file commit cut off by shutdown is not cancelled** (Task 11); the next start's sweep removes the half chat.
+- **A bridge chat the owner renamed, with no origin tag**, is not recognised as one (`src/history/bridge-origin.js`), so the policy treats it as an ordinary chat.
+- **A link to a chat the policy later refuses stays stored** (Task 7) and is not read; the next save of the picker removes it.
+- **The excerpt drawer shows what a reply was given**, also from a chat unlinked since (Task 5).
+- **Desktop-to-service copies carry no scope or links** (Decision 14).
+- **LongHaul's refusal for an unsupported file names only the two older formats** (Task 3).
+
+### Not verified
+
+- **The full `npm test`** (Task 17 step 4) was not run by Task 17's implementer; the controller runs it once.
+- **Only Windows.** No H4 e2e file has run on macOS or Linux, and no packaged build has been checked for H4.
+- **UI states no test or person has rendered**, after the end-to-end check:
+  - a candidate that is `linked: true, allowed: false` (a link stored before its chat got a case); the `allowed: false` row itself is rendered;
+  - a refused `history:scope.set` and the notice "The links were saved, but this chat still recalls only from itself";
+  - a reply's recall line reading "all chats" (the menu's "all chats" state is rendered; the line is rendered for "linked chats");
+  - the pin line of a chat imported from a case ("A chat imported from a case recalls only from itself.") and an import of a case-chat export in the dialog;
+  - a Markdown file that more than one heading pattern fits, and a pattern change that is refused;
+  - the commit that answers `imported: false` because the file was imported between the preview and the click;
+  - the import dialog's refusals `IMPORT_BUSY`, `IMPORT_MESSAGE_TOO_LARGE` and `SERVICE_TOO_OLD`, and a commit cut off by a lost bridge;
+  - attached: a reply that recalls from a linked chat with its recall line and drawer (scope and links attached are checked through the menu, the picker and `history:search`), and the case nudge;
+  - the nudge's notice for a click during a reply (the button is disabled then, so the click does nothing; the disabled state is rendered), the "case section could not be opened" notice, and a refusal in the attach flow reached from the nudge's own button (the two attach refusals are rendered from the chat info's "New case…").
+- **The real CLI as the data dir's owner**: one unit case runs it and is skipped when the test process is elevated (Task 13).
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named).
@@ -373,7 +424,7 @@ Beyond spec §4.1 (Decisions 1 and 2): the foreign keys with `ON DELETE CASCADE`
 
 Note for the implementer: `createChat` deletes an existing chat with the same id before inserting. With the cascade, `createChat` over an existing id drops that chat's links and import row. That is existing behaviour for messages; the test below records it for links.
 
-- [ ] **Step 1: Write the failing tests.** `tests/history-links-store.test.js`, on `openTempStore()` with chats seeded by `seedChat`:
+- [x] **Step 1: Write the failing tests.** `tests/history-links-store.test.js`, on `openTempStore()` with chats seeded by `seedChat`:
   - a new store is at schema version 4 and has both tables; a store created at version 3 (apply `applySchema(db, SCHEMA_STEPS.slice(0, 3))` on a raw `DatabaseSync`, insert a chat, close) opens at 4 with its chat intact and `getHistoryScope` `'chat'`;
   - `getHistoryScope` defaults to `'chat'`; `setHistoryScope` stores each of the three; an invalid value throws `RangeError` and changes nothing; an unknown chat returns false; a value written straight into the column that is not one of the three reads as `'chat'`;
   - `setLinks('a', ['b', 'c', 'b', 'a', 'missing'])` stores `['b', 'c']`; `getLinks('b')` is `[]` (one-directional); `setLinks('a', [])` clears;
@@ -385,10 +436,10 @@ Note for the implementer: `createChat` deletes an existing chat with the same id
 
   In `tests/history-schema.test.js` raise the expected latest version to 4 wherever it is asserted; in `tests/history-rows.test.js` add: `chatToRow({ title: 't', historyScope: 'all' })` has `meta_json` null.
 
-- [ ] **Step 2: Run them and see them fail.** `node --test tests/history-links-store.test.js tests/history-schema.test.js tests/history-rows.test.js` — expected: failures on the missing step and methods.
-- [ ] **Step 3: Implement.** `link-index.js` exports `SCHEMA_V4_SQL` and plain functions over `db`; the store methods delegate to them and return the neutral value when `!this.linkable`. `setLinks` and `setHistoryScope` do not bump `vectorEpoch`.
-- [ ] **Step 4: Run the tests again; also** `node --test tests/history-store-chats.test.js tests/history-store-messages.test.js tests/history-migrate-json.test.js tests/desktop-source-history.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run them and see them fail.** `node --test tests/history-links-store.test.js tests/history-schema.test.js tests/history-rows.test.js` — expected: failures on the missing step and methods.
+- [x] **Step 3: Implement.** `link-index.js` exports `SCHEMA_V4_SQL` and plain functions over `db`; the store methods delegate to them and return the neutral value when `!this.linkable`. `setLinks` and `setHistoryScope` do not bump `vectorEpoch`.
+- [x] **Step 4: Run the tests again; also** `node --test tests/history-store-chats.test.js tests/history-store-messages.test.js tests/history-migrate-json.test.js tests/desktop-source-history.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/history/link-index.js src/history/schema.js src/history/history-store.js src/history/rows.js tests/history-links-store.test.js tests/history-schema.test.js tests/history-rows.test.js
@@ -416,15 +467,15 @@ Parallel with Tasks 1 and 3.
   - `Retriever#retrieve({ …, upToSeq, upToSeqChatId })`: passes it to `_lexical` and `vectorSearch`; `inScope` applies `chunk.seq < upToSeq` only when `upToSeqChatId` is unset or equals `chunk.chatId`; `_age` uses `recencyByPosition` only for a chunk of the cut's chat (another chat's chunk ages in days).
 - With `upToSeqChatId` unset everything behaves exactly as before (LongHaul and every existing test pass `upToSeq` alone).
 
-- [ ] **Step 1: Write the failing tests** (added to the four files):
+- [x] **Step 1: Write the failing tests** (added to the four files):
   - index: two chats with the word `lakeside` at seq 2 of `a` and seq 9 of `b`; `searchText('lakeside', { chatIds: ['a', 'b'], upToSeq: 5 })` finds only `a`'s (unchanged); with `upToSeqChatId: 'a'` it finds both; with `upToSeq: 2, upToSeqChatId: 'a'` it finds only `b`'s;
   - vector index: the same shape with vectors from `createBagOfWordsEmbedder`;
   - vector search: `upToSeqChatId` reaches `index.search` (a recording fake index);
   - retriever: a caller-supplied `vectorHits` list holding a chunk of `b` at seq 9 survives `upToSeq: 5, upToSeqChatId: 'a'` and is dropped without `upToSeqChatId`; with `recencyByPosition: true` a chunk of `b` gets a day-based recency (pin `now`).
-- [ ] **Step 2: Run** `node --test tests/history-index.test.js tests/history-vector-index.test.js tests/history-vector-search.test.js tests/history-retriever.test.js` — expected: the new cases fail.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run the four files again, and** `node --test tests/longhaul-adapter-kl-recall.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/history-index.test.js tests/history-vector-index.test.js tests/history-vector-search.test.js tests/history-retriever.test.js` — expected: the new cases fail.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run the four files again, and** `node --test tests/longhaul-adapter-kl-recall.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/history/chunk-index.js src/history/vector-index.js src/history/vector-search.js src/history/retriever.js tests/history-index.test.js tests/history-vector-index.test.js tests/history-vector-search.test.js tests/history-retriever.test.js
@@ -456,11 +507,11 @@ Parallel with Tasks 1 and 2.
 
 LongHaul: `detectImporter` is shared, so `longhaul import` now accepts such a file (its id prefix falls back to `im-`). `tests/longhaul-import.test.js` gains one case asserting it; no other LongHaul file changes.
 
-- [ ] **Step 1: Write the failing test**: each pattern on a small in-test string written to a temp file; the fixture's turn count and first five roles; a heading inside a code fence ignored; `preview` with a chosen pattern; a `.md` that is not a transcript (`detect` false, `parse` throws `NOT_A_TRANSCRIPT`); the size cap (inject the limit); stable ids and timestamps across two parses; the King Louie and Claude Code fixtures are still claimed by their own importers; a `.json`/`.jsonl` is never claimed by this one.
-- [ ] **Step 2: Run** `node --test tests/history-importer-markdown.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/history-importer-markdown.test.js tests/history-importer-claude-code.test.js tests/history-import-king-louie.test.js tests/longhaul-import.test.js tests/electron-boundary.test.js tests/longhaul-boundary.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing test**: each pattern on a small in-test string written to a temp file; the fixture's turn count and first five roles; a heading inside a code fence ignored; `preview` with a chosen pattern; a `.md` that is not a transcript (`detect` false, `parse` throws `NOT_A_TRANSCRIPT`); the size cap (inject the limit); stable ids and timestamps across two parses; the King Louie and Claude Code fixtures are still claimed by their own importers; a `.json`/`.jsonl` is never claimed by this one.
+- [x] **Step 2: Run** `node --test tests/history-importer-markdown.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/history-importer-markdown.test.js tests/history-importer-claude-code.test.js tests/history-import-king-louie.test.js tests/longhaul-import.test.js tests/electron-boundary.test.js tests/longhaul-boundary.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/history/importers/markdown-transcript.js src/history/importers/index.js tests/fixtures/history/markdown-transcript.md tests/history-importer-markdown.test.js tests/longhaul-import.test.js
@@ -493,7 +544,7 @@ After Task 1.
     - An unknown `chatId`, or a store that is not `linkable`: `{ stored: 'chat', effective: 'chat', chatIds: [chatId], titles: empty, refs: [], pinned: null, excluded: [] }`.
   - A policy's `canRead` returns `true`, or a reason string (refused).
 
-- [ ] **Step 1: Write the failing test.** With `openTempStore`, chats `a`, `b`, `c`, `d` (one with `caseId`, one with `origin: 'telegram'`, one with `source: 'claude-code-jsonl'`):
+- [x] **Step 1: Write the failing test.** With `openTempStore`, chats `a`, `b`, `c`, `d` (one with `caseId`, one with `origin: 'telegram'`, one with `source: 'claude-code-jsonl'`):
   - default → `effective: 'chat'`, `chatIds: ['a']`;
   - `linked` with links `[b, c]` → `['a', 'b', 'c']`; after `deleteChat('b')` → `['a', 'c']`;
   - `all` → every chat, `a` first;
@@ -502,10 +553,10 @@ After Task 1.
   - a policy whose `canRead` refuses sources with a `caseId`: left out of `all` silently, and out of `linked` with an `excluded` entry carrying the reason; `explicit` is true for a link and false for `all` (assert with a recording policy);
   - `titles` and `refs` cover every id in `chatIds`;
   - an unknown chat id resolves to itself alone.
-- [ ] **Step 2: Run** `node --test tests/history-scope.test.js` — expected: fails (module missing).
-- [ ] **Step 3: Implement** `scope.js` as a pure function over the store's three methods. No caching.
-- [ ] **Step 4: Run it again** — expected: `# fail 0`. Also `node --test tests/electron-boundary.test.js`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/history-scope.test.js` — expected: fails (module missing).
+- [x] **Step 3: Implement** `scope.js` as a pure function over the store's three methods. No caching.
+- [x] **Step 4: Run it again** — expected: `# fail 0`. Also `node --test tests/electron-boundary.test.js`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/history/scope.js src/history/index.js tests/history-scope.test.js
@@ -544,7 +595,7 @@ After Tasks 2 and 4.
 
 Until Task 8 lands the policy is open, but nothing can set a scope other than `chat` before Task 7, and Task 7 is not merged to `main` without Task 8.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   `tests/history-cross-chat-recall.test.js` (store from `openTempStore`, real `Retriever` and `ContextBuilder`, settings from `mergeHistorySettings({})` with `recall.rerank.enabled` pinned false, `resolveScope` built over `OPEN_POLICY`):
   - **`R-H4-6: scope "chat" is byte-identical to H3`**: a chat seeded with twelve messages, scope `chat`, built once with no `resolveScope` and once with it and `crossChat: true` → `recalled.text`, `tail` and every pre-existing `stats` key are deeply equal; `stats.scope === 'chat'`, `stats.recalledChats` is `[]`;
   - scope `linked` to chat `b` that holds "the gate code for the Lakeside lot is 4417": asking chat `a` "what is the gate code for the Lakeside lot" with `crossChat: true` → the block contains `[chat "Lot notes" · #2 · user · ` and `4417`, begins with the cross preamble, `stats.scope === 'linked'`, `stats.recalledChats` equals `['b']`, `stats.scopeChats === 2`;
@@ -558,10 +609,10 @@ Until Task 8 lands the policy is open, but nothing can set a scope other than `c
   `tests/history-search.test.js`: `excerptsForMessage` returns the other chat's excerpt when `context.recalledChats` names it, drops it when it does not, and drops it when the chunk's `ts` is after the reply.
   `tests/history-excerpts.test.js`: the title rule and both preambles.
   `tests/history-workflows.test.js`: a workflow task whose parent chat is scoped `linked` gets nothing from the linked chat.
-- [ ] **Step 2: Run** `node --test tests/history-cross-chat-recall.test.js tests/history-search.test.js tests/history-excerpts.test.js tests/history-workflows.test.js` — expected: the new cases fail.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/history-cross-chat-recall.test.js tests/history-context-builder.test.js tests/history-excerpts.test.js tests/history-search.test.js tests/history-rerank-provenance.test.js tests/history-core.test.js tests/history-workflows.test.js tests/history-jev-reranker.test.js tests/longhaul-adapter-kl-recall.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/history-cross-chat-recall.test.js tests/history-search.test.js tests/history-excerpts.test.js tests/history-workflows.test.js` — expected: the new cases fail.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/history-cross-chat-recall.test.js tests/history-context-builder.test.js tests/history-excerpts.test.js tests/history-search.test.js tests/history-rerank-provenance.test.js tests/history-core.test.js tests/history-workflows.test.js tests/history-jev-reranker.test.js tests/longhaul-adapter-kl-recall.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/history/context-builder.js src/history/excerpts.js src/history/search.js src/history/reranker.js src/core/create-core.js src/ipc/chat-handlers.js tests/history-cross-chat-recall.test.js tests/history-context-builder.test.js tests/history-excerpts.test.js tests/history-search.test.js tests/history-rerank-provenance.test.js tests/history-workflows.test.js
@@ -591,17 +642,17 @@ After Task 5.
 
 A result from another chat is stored in this chat as a tool result, as spec §8 says. Task 8's attach rule reads exactly these two shapes: a `SearchHistory` result with an excerpt carrying `chatId`, and a `ReadHistory` result whose `chatId` differs from the chat it is stored in.
 
-- [ ] **Step 1: Write the failing tests** (`tests/history-tools-scope.test.js`; the tools called with a hand-built `context.history` over `openTempStore` and `resolveScope` with `OPEN_POLICY`):
+- [x] **Step 1: Write the failing tests** (`tests/history-tools-scope.test.js`; the tools called with a hand-built `context.history` over `openTempStore` and `resolveScope` with `OPEN_POLICY`):
   - chat scoped `chat`: `SearchHistory({ query, scope: 'all' })` finds nothing from `b`, `scope: 'chat'`, and carries the widening note; `ReadHistory({ chatId: 'b', fromSeq: 1, toSeq: 2 })` → `ok: false`, the error names `"chat"`, and a spy on `store.getMessages` saw no call for `b`;
   - chat scoped `linked` to `b`: `SearchHistory` returns `b`'s excerpt with `chatId: 'b'` and `chatTitle`; `scope: 'chat'` narrows it away; `ReadHistory({ chatId: 'b', … })` returns `b`'s messages with the chat in each header; `ReadHistory({ chatId: 'c', … })` (not linked) is refused;
   - chat scoped `all`: `scope: 'linked'` searches the links only;
   - a Vault call in `b` read through `ReadHistory` shows action and key only;
   - no `resolveScope` on the context → today's behaviour.
   In `tests/history-core.test.js`: a core's executor built with `historyCrossChat: true` has `context.history.resolveScope`; one built without it does not; a `SpawnAgent` child of the first does not (use the file's existing way of building executors; if a child cannot be built there without a model, assert on the options object the child executor is created with).
-- [ ] **Step 2: Run** `node --test tests/history-tools-scope.test.js tests/history-core.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/history-tools-scope.test.js tests/history-tools.test.js tests/history-search.test.js tests/history-search-rerank.test.js tests/history-vault.test.js tests/history-core.test.js` — expected: `# fail 0`. Then search the tests for the old description strings (`which is this chat`, `only this chat can be read`) and update any that pinned them.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/history-tools-scope.test.js tests/history-core.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/history-tools-scope.test.js tests/history-tools.test.js tests/history-search.test.js tests/history-search-rerank.test.js tests/history-vault.test.js tests/history-core.test.js` — expected: `# fail 0`. Then search the tests for the old description strings (`which is this chat`, `only this chat can be read`) and update any that pinned them.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/tools/builtin/history-tools.js src/history/search.js src/core/create-core.js src/ipc/chat-handlers.js tests/history-tools-scope.test.js tests/history-tools.test.js tests/history-search-rerank.test.js tests/history-core.test.js
@@ -628,11 +679,11 @@ After Task 6. Not merged to `main` without Task 8.
 - `history:search` (existing, the owner-side search) uses `resolveHistoryScope(chatId)` and returns `chatId`/`chatTitle` on excerpts from other chats.
 - All three new channels are in the proxied `history` domain: attached, they act on the service's store (R-H4-3). No allowlist line is added; the allowlist test gains the three channels as `'proxy'`.
 
-- [ ] **Step 1: Write the failing tests** (`tests/history-ipc-scope.test.js`, with the fake `ipcMain` pattern of `tests/history-ipc.test.js` and a context holding a temp store and a `resolveHistoryScope` over a small recording policy): each reply shape above; an invalid scope; a pinned chat (`SCOPE_PINNED`, column unchanged, each of the four sentences); a refused link (nothing stored); `links.set` with a non-array, a 201-entry array and a non-string entry refused; a deleted chat disappears from `links`; every reply with titles has `untrustedText: true`. In `tests/desktop-bridge-allowlist.test.js` add the three channels as `'proxy'`.
-- [ ] **Step 2: Run** `node --test tests/history-ipc-scope.test.js tests/desktop-bridge-allowlist.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/history-ipc-scope.test.js tests/history-ipc.test.js tests/history-ipc-jev.test.js tests/desktop-bridge-allowlist.test.js tests/renderer-history-settings.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing tests** (`tests/history-ipc-scope.test.js`, with the fake `ipcMain` pattern of `tests/history-ipc.test.js` and a context holding a temp store and a `resolveHistoryScope` over a small recording policy): each reply shape above; an invalid scope; a pinned chat (`SCOPE_PINNED`, column unchanged, each of the four sentences); a refused link (nothing stored); `links.set` with a non-array, a 201-entry array and a non-string entry refused; a deleted chat disappears from `links`; every reply with titles has `untrustedText: true`. In `tests/desktop-bridge-allowlist.test.js` add the three channels as `'proxy'`.
+- [x] **Step 2: Run** `node --test tests/history-ipc-scope.test.js tests/desktop-bridge-allowlist.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/history-ipc-scope.test.js tests/history-ipc.test.js tests/history-ipc-jev.test.js tests/desktop-bridge-allowlist.test.js tests/renderer-history-settings.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/ipc/constants.js src/ipc/history-handlers.js preload.js src/core/create-core.js tests/history-ipc-scope.test.js tests/history-ipc.test.js tests/desktop-bridge-allowlist.test.js
@@ -674,7 +725,7 @@ After Task 7.
 
 What this does not do is listed under "What the rulings cost" above (pasted text, truncation, a detached chat).
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   `tests/history-scope-policy.test.js` (through `resolveScope` with the shipped policy on `openTempStore`, and through the Task 7 handlers):
   - `R-H4-1: a case chat stored as "all" reads only itself` (`pinned.reason === 'case-chat'`; `history:scope.set` to `linked` → `SCOPE_PINNED`);
   - `R-H4-1: a case chat is in no other chat's scope, by link or by "all"` (`history:links.set` → `LINK_REFUSED`; `links.get` shows it `allowed: false`, `reason: 'case-chat'`; a link stored before the chat got its case is dropped from `chatIds` with an `excluded` entry);
@@ -689,10 +740,10 @@ What this does not do is listed under "What the rulings cost" above (pasted text
   - `R-H4-1: force does not lift CHAT_RECALLED_OTHER_CHATS`; no case is created by a refused `case:create`;
   - `R-H4-7: an imported chat is refused IMPORTED_CHAT by case:attach and case:create`;
   - every existing case in the file unchanged.
-- [ ] **Step 2: Run** `node --test tests/history-scope-policy.test.js tests/case-chat-attach.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/history-scope-policy.test.js tests/case-chat-attach.test.js tests/history-cross-chat-recall.test.js tests/history-ipc-scope.test.js tests/history-tools-scope.test.js tests/history-core.test.js tests/electron-boundary.test.js`, and every other test file that names `CASE_ATTACH`, `case:attach` or `bridgeOriginFor` (search `tests/`) — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/history-scope-policy.test.js tests/case-chat-attach.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/history-scope-policy.test.js tests/case-chat-attach.test.js tests/history-cross-chat-recall.test.js tests/history-ipc-scope.test.js tests/history-tools-scope.test.js tests/history-core.test.js tests/electron-boundary.test.js`, and every other test file that names `CASE_ATTACH`, `case:attach` or `bridgeOriginFor` (search `tests/`) — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/history/bridge-origin.js src/history/scope-policy.js src/core/create-core.js src/cases/chat-attach.js src/ipc/case-handlers.js tests/history-scope-policy.test.js tests/case-chat-attach.test.js tests/history-cross-chat-recall.test.js tests/history-ipc-scope.test.js
@@ -729,7 +780,7 @@ After Task 8 (stream i). Needs Tasks 1 and 3.
 - `importChat({ store, filePath, pattern, batchSize = 500, schedule = setImmediate, now, onProgress }) → Promise<{ chatId, imported: boolean, messages, kind, stats }>`: `parseImport`, `beginChatImport` (`sourcePath: filePath`), `appendChatImport` in batches of `batchSize` yielding through `schedule` and calling `onProgress({ done, total })`, `finishChatImport`. Any failure after `begin` calls `abortChatImport` and rethrows.
 - `sweepUnfinishedImports(store) → number`: deletes the chat of every `running` import (a crash mid-import); logged once with the count, no titles.
 
-- [ ] **Step 1: Write the failing test** (`openTempStore`; the three fixtures; `schedule: (fn) => fn()`):
+- [x] **Step 1: Write the failing test** (`openTempStore`; the three fixtures; `schedule: (fn) => fn()`):
   - each kind imports: the chat exists with `source`, message count, dense `seq`, and `searchText` finds a word from it;
   - the same file twice → the second returns `imported: false` and the same `chatId`; one chat, one import row;
   - the chat deleted, then the same file again → imported afresh;
@@ -745,10 +796,10 @@ After Task 8 (stream i). Needs Tasks 1 and 3.
   - 1,200 synthetic messages with `batchSize: 500` → `onProgress` called with 500, 1,000, 1,200 and one `onAppend` emission per batch;
   - an unknown format → `IMPORT_UNKNOWN_FORMAT`, nothing written.
   In `tests/history-store-messages.test.js`: `appendMessages` gives dense seqs after existing messages, chunks each message, and emits once.
-- [ ] **Step 2: Run** `node --test tests/history-import-chats.test.js tests/history-store-messages.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/history-import-chats.test.js tests/history-store-messages.test.js tests/history-embed-indexer.test.js tests/history-core.test.js tests/history-vault.test.js tests/electron-boundary.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/history-import-chats.test.js tests/history-store-messages.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/history-import-chats.test.js tests/history-store-messages.test.js tests/history-embed-indexer.test.js tests/history-core.test.js tests/history-vault.test.js tests/electron-boundary.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/history/import-chats.js src/history/history-store.js src/history/index.js src/core/create-core.js tests/fixtures/history/claude-code-session.jsonl tests/history-import-chats.test.js tests/history-store-messages.test.js
@@ -781,16 +832,16 @@ After Task 9.
 
 What this does not do is under "What the rulings cost": the chat model still sees recalled imported text, and the query is still embedded by the active embedder.
 
-- [ ] **Step 1: Write the failing tests** (`tests/history-imports-local.test.js`; a temp store with one native chat and one chat imported through `importChat` from the Markdown fixture):
+- [x] **Step 1: Write the failing tests** (`tests/history-imports-local.test.js`; a temp store with one native chat and one chat imported through `importChat` from the Markdown fixture):
   - **`R-H4-2: a hosted embedder is never given a chunk of an imported chat`**: `startEmbedIndexer` with a recording embedder whose key is `openai:text-embedding-3-small` (the pattern of `tests/history-embed-indexer.test.js`) embeds every chunk of the native chat and none of the imported one, and its progress reports nothing pending afterwards; with key `ollama:nomic-embed-text` the same (N1); with key `local:Xenova/all-MiniLM-L6-v2` both chats are embedded;
   - a message appended later to the imported chat is not given to the hosted embedder either;
   - **`R-H4-2: Jev is not called when an imported chat is in scope`**: `createRecallReranker` with a recording fake `jev` and settings `rerank.kind: 'jev'`, `rerank.enabled: true`; a build in the imported chat, and a build in a native chat scoped `linked` to it, leave `jev.rerank` uncalled and give `stats.rerankSkipped === 'imported-chat'` with no warning logged (`addSink` from `src/logging`); a native chat with no imported chat in scope is reranked; with `rerank.kind: 'local'` the cross-encoder fake is called in all three;
   - `searchHistoryExcerpts` in the imported chat with `rerank.search` true and kind `jev` → not called.
   In `tests/history-embeddings-store.test.js`: `pendingEmbeddings` and `countPending` with and without `localOnly`.
-- [ ] **Step 2: Run** `node --test tests/history-imports-local.test.js tests/history-embeddings-store.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/history-imports-local.test.js tests/history-embeddings-store.test.js tests/history-embed-indexer.test.js tests/history-jev-reranker.test.js tests/history-core-jev.test.js tests/history-core-embeddings.test.js tests/history-rerank-provenance.test.js tests/history-retriever.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/history-imports-local.test.js tests/history-embeddings-store.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/history-imports-local.test.js tests/history-embeddings-store.test.js tests/history-embed-indexer.test.js tests/history-jev-reranker.test.js tests/history-core-jev.test.js tests/history-core-embeddings.test.js tests/history-rerank-provenance.test.js tests/history-retriever.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/history/embedding-index.js src/history/history-store.js src/history/embed-indexer.js src/history/reranker.js src/history/retriever.js src/history/context-builder.js src/history/search.js tests/history-imports-local.test.js tests/history-embeddings-store.test.js tests/history-embed-indexer.test.js tests/history-jev-reranker.test.js
@@ -828,7 +879,7 @@ After Task 10.
 - `preload.js`: `window.electron.history.{ pickImport, previewImport, commitImport }` only; `token` validated as a non-empty string; `pattern` as an optional string. The batch channels are not exposed to the renderer.
 - Attached, in this task: pick, preview and commit are denied; lookup, begin, append and finish are proxied by the domain rule. Task 12 makes the first three local.
 
-- [ ] **Step 1: Write the failing test** (`tests/history-ipc-import.test.js`, fake `ipcMain`, a temp store, the three fixtures):
+- [x] **Step 1: Write the failing test** (`tests/history-ipc-import.test.js`, fake `ipcMain`, a temp store, the three fixtures):
   - `pick` with a fake `pickFile` (a path, then `null`); the ninth pick drops the oldest token; a token is gone after 15 minutes (inject `now`);
   - `preview` and `commit` with a good token; a made-up token refused;
   - **`R-H4-3: no import channel takes a path`**: `preview` and `commit` given `path`, `filePath` and `sourcePath` in the payload, pointing at a different fixture, preview the picked file (assert the title) and never open the other (a spy on `fs`'s open functions for that path); `begin` given `chat.sourcePath` or a `sourceName` of `../../etc/x.jsonl` stores only `x.jsonl`;
@@ -838,10 +889,10 @@ After Task 10.
   - an import left open is aborted after 30 minutes (inject the timer);
   - `untrustedText: true` on the preview.
   Allowlist: pick, preview and commit are `'deny'`; lookup, begin, append, finish and `history:links.get` are `'proxy'`.
-- [ ] **Step 2: Run** `node --test tests/history-ipc-import.test.js tests/desktop-bridge-allowlist.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/history-ipc-import.test.js tests/history-ipc.test.js tests/history-ipc-scope.test.js tests/desktop-bridge-allowlist.test.js tests/electron-boundary.test.js` — expected: `# fail 0`. If a test lists every IPC channel or every bridge-served channel (search `tests/` for `history:embedder.status`), add the seven there.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/history-ipc-import.test.js tests/desktop-bridge-allowlist.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/history-ipc-import.test.js tests/history-ipc.test.js tests/history-ipc-scope.test.js tests/desktop-bridge-allowlist.test.js tests/electron-boundary.test.js` — expected: `# fail 0`. If a test lists every IPC channel or every bridge-served channel (search `tests/` for `history:embedder.status`), add the seven there.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/ipc/constants.js src/ipc/import-picks.js src/ipc/history-handlers.js src/desktop-bridge/allowlist.js preload.js main.js tests/history-ipc-import.test.js tests/desktop-bridge-allowlist.test.js
@@ -869,7 +920,7 @@ After Task 11.
 - The desktop never sends its path: `sourceName` is the base name.
 - Nothing is written on the desktop; the chat exists only in the service's store, and the service's `chat:updated` event reaches the renderer as today.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   `tests/attached-host-import.test.js` (the way the existing attached-host tests build the host with a fake client, fake `ipcMain` and fake `dialog`; search `tests/` for `attached-host` and copy that setup):
   - **`R-H4-3: a commit while attached sends the parsed chat in batches`**: a 450-message Markdown transcript written to a temp dir → one `begin`, three `append`s (200, 200, 50), one `finish`, in that order; no call's arguments contain the temp dir's path; `begin.sourceName` is the base name;
   - `begin` answering `existingChatId` → no `append`, `imported: false`;
@@ -880,10 +931,10 @@ After Task 11.
   - a made-up token → `IMPORT_NO_FILE`; two commits at once → `IMPORT_BUSY`.
   Allowlist: **`R-H4-3: pick, preview and commit are local; begin, append, finish and lookup are proxied`**.
   `tests/e2e/history-import-attached.test.js`: `launchAttached()` (`tests/e2e/helpers.js`); the test cannot drive a native dialog, so the app reads `KL_TEST_IMPORT_FILE` as the picked path **only when `KL_TEST_MODE` is set** (one line in the `pickFile` of both hosts, with a comment; the unit tests above pin that the variable is ignored without `KL_TEST_MODE`). The test points it at `tests/fixtures/history/markdown-transcript.md`, calls `window.electron.history.pickImport`, `previewImport`, `commitImport` through `page.evaluate`, and asserts the new chat is in the chat list with the fixture's title and that `history:search` on it finds a word of the fixture.
-- [ ] **Step 2: Run** `node --test tests/attached-host-import.test.js tests/desktop-bridge-allowlist.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/attached-host-import.test.js tests/desktop-bridge-allowlist.test.js tests/history-ipc-import.test.js tests/electron-boundary.test.js`, every other test file that names `attached-host` (search `tests/`), and `unset ELECTRON_RUN_AS_NODE && node --test tests/e2e/history-import-attached.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/attached-host-import.test.js tests/desktop-bridge-allowlist.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/attached-host-import.test.js tests/desktop-bridge-allowlist.test.js tests/history-ipc-import.test.js tests/electron-boundary.test.js`, every other test file that names `attached-host` (search `tests/`), and `unset ELECTRON_RUN_AS_NODE && node --test tests/e2e/history-import-attached.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/desktop-bridge/allowlist.js src/ipc/attached-host.js src/ipc/import-picks.js main.js tests/attached-host-import.test.js tests/desktop-bridge-allowlist.test.js tests/e2e/history-import-attached.test.js
@@ -915,11 +966,11 @@ Stream ii: may run in parallel with Tasks 10 to 12 and 14, once Task 9 is in its
 - A data dir that has never been started has no `history.sqlite`: the command creates it at the current schema, which is what the service would do; chats still in `chat-data.json` move on the service's next start as before.
 - Windows residual (stated under "What the rulings cost"): no owner check; refusal 1 only.
 
-- [ ] **Step 1: Write the failing test**: **`R-H4-4: refused as root`** (`isAdmin: () => true`, POSIX), **`R-H4-4: refused as Administrator`** (`platform: 'win32'`), **`R-H4-4: refused when the data dir belongs to another account`**, **`R-H4-4: refused while the service runs`**; in each the temp data dir has no `history.sqlite` afterwards; a successful import of each fixture into a temp data dir (open the store afterwards and find the chat; `closeOpenHistoryStores()` before cleanup); the same file twice → "Already imported"; `--pattern` used and reported; a control character in a transcript title is printed as `?`; usage errors exit 2; a missing file exits 1.
-- [ ] **Step 2: Run** `node --test tests/service-cli-history.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/service-cli-history.test.js tests/service-cli.test.js tests/service-cli-models.test.js tests/examples.test.js tests/electron-boundary.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing test**: **`R-H4-4: refused as root`** (`isAdmin: () => true`, POSIX), **`R-H4-4: refused as Administrator`** (`platform: 'win32'`), **`R-H4-4: refused when the data dir belongs to another account`**, **`R-H4-4: refused while the service runs`**; in each the temp data dir has no `history.sqlite` afterwards; a successful import of each fixture into a temp data dir (open the store afterwards and find the chat; `closeOpenHistoryStores()` before cleanup); the same file twice → "Already imported"; `--pattern` used and reported; a control character in a transcript title is printed as `?`; usage errors exit 2; a missing file exits 1.
+- [x] **Step 2: Run** `node --test tests/service-cli-history.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/service-cli-history.test.js tests/service-cli.test.js tests/service-cli-models.test.js tests/examples.test.js tests/electron-boundary.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/service/commands/history.js src/service/cli.js docs/install-guide.md tests/service-cli-history.test.js
@@ -945,11 +996,11 @@ Stream iii: after Task 8; may run in parallel with Tasks 9 to 13.
 - `recallScopeWord(context)` returns `''` (scope `chat` or missing), `'linked chats'` or `'all chats'`; `recallLineText(context)` is unchanged when the word is empty, otherwise the word is added after the history size (`… from 412K tokens of history · linked chats · <via>`).
 - The excerpt drawer already prints each excerpt's `header` and `text` with `textContent`; an excerpt whose header starts with `[chat "` gets the class `recall-excerpt-other-chat`.
 
-- [ ] **Step 1: Write the failing test**: `recallScopeWord` and `recallLineText` for the three scopes and for a context with no `scope` (byte-identical to today's string for `chat`); the two text tables; the menu markup has the four items; the dialog has both fixed lines; `preload.js` exposes `setScope`, `getLinks`, `setLinks`; the source of `openLinkChatsDialog` and of the menu handler contains no `innerHTML`, `insertAdjacentHTML` or `outerHTML`.
-- [ ] **Step 2: Run** `node --test tests/renderer-history-scope.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/renderer-history-scope.test.js tests/renderer-history-text.test.js tests/renderer-history-settings.test.js tests/renderer-history-rerank.test.js tests/renderer-history-lazy.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing test**: `recallScopeWord` and `recallLineText` for the three scopes and for a context with no `scope` (byte-identical to today's string for `chat`); the two text tables; the menu markup has the four items; the dialog has both fixed lines; `preload.js` exposes `setScope`, `getLinks`, `setLinks`; the source of `openLinkChatsDialog` and of the menu handler contains no `innerHTML`, `insertAdjacentHTML` or `outerHTML`.
+- [x] **Step 2: Run** `node --test tests/renderer-history-scope.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/renderer-history-scope.test.js tests/renderer-history-text.test.js tests/renderer-history-settings.test.js tests/renderer-history-rerank.test.js tests/renderer-history-lazy.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add index.html renderer.js styles.css tests/renderer-history-scope.test.js
@@ -974,11 +1025,11 @@ After Tasks 12 and 14.
 - When `existingChatId` is set: "This file was already imported." and a button that selects that chat; no Import button. When `serviceUnreachable` is set: "The service is not reachable; the preview is shown, but the chat cannot be imported now." and the Import button disabled.
 - "Import" calls `commitImport`, shows a busy state (no progress bar: the commit is one call), then selects the new chat. A refusal shows its `error` as text. The item works standalone and attached alike (Task 12); nothing in the renderer differs between them.
 
-- [ ] **Step 1: Write the failing test**: `importKindText`; **`R-H4-2: the dialog's warning`** (`IMPORT_WARNING_TEXT` equals the sentence above, and the dialog's render function sets it); the R-H4-7 line; the markup has the dialog and the button; `preload.js` exposes `pickImport`, `previewImport`, `commitImport` and none of `begin`, `append`, `finish`, `lookup`; the dialog's render function contains no `innerHTML`, `insertAdjacentHTML` or `outerHTML`.
-- [ ] **Step 2: Run** `node --test tests/renderer-history-import.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/renderer-history-import.test.js tests/renderer-history-scope.test.js tests/renderer-history-settings.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing test**: `importKindText`; **`R-H4-2: the dialog's warning`** (`IMPORT_WARNING_TEXT` equals the sentence above, and the dialog's render function sets it); the R-H4-7 line; the markup has the dialog and the button; `preload.js` exposes `pickImport`, `previewImport`, `commitImport` and none of `begin`, `append`, `finish`, `lookup`; the dialog's render function contains no `innerHTML`, `insertAdjacentHTML` or `outerHTML`.
+- [x] **Step 2: Run** `node --test tests/renderer-history-import.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/renderer-history-import.test.js tests/renderer-history-scope.test.js tests/renderer-history-settings.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add index.html renderer.js styles.css tests/renderer-history-import.test.js
@@ -1015,7 +1066,7 @@ After Task 15.
 - Renderer: a `status` message with `meta.action === 'convertToCase'` is drawn by `renderCaseNudge(message, chat)`: its text by `textContent`, and a button "Make this a case" shown only while the chat has no `caseId` and no `source`. The button scrolls the chat's case section into view and opens its "New case" flow (the existing `select` in `renderChatCaseSection` set to `__new__` and its `change` handler run), where every refusal (`CHAT_BUSY`, `SIMILAR_CASES`, `CHAT_SAW_OTHER_CASES`, `CHAT_RECALLED_OTHER_CHATS`) already has its message. Any other `status` message is drawn as today.
 - Task 9 strips `meta.action` from imported messages, so an imported or re-imported chat never shows a button from a file.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   `tests/history-case-nudge.test.js`:
   - `nudgeDue` and `canOfferCase` as pure functions (each false case);
   - through the send path, with a core from `tests/helpers/history-context.js`, `tests/helpers/fake-llm-server.js` and `tests/helpers/profile-settings.js`, the threshold pinned to 3 in settings: **`R-H4-5: one status row at the threshold, never a second`** (two turns: none; the third: exactly one `status` row with `meta.action === 'convertToCase'` and `caseNudgedAt` set; a fourth and fifth: still one);
@@ -1024,10 +1075,10 @@ After Task 15.
   - a chat with a `caseId` is never marked; a stopped turn and a failed turn do not nudge; threshold 0 does nothing.
   `tests/history-settings.test.js`: the default 40; 0 accepted; a negative number, a fraction and a string keep 40.
   Renderer (static): `renderCaseNudge` uses no `innerHTML`; the button's label; it is absent for a chat with a `caseId` or a `source`.
-- [ ] **Step 2: Run** `node --test tests/history-case-nudge.test.js tests/history-settings.test.js` — expected: fails.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/history-case-nudge.test.js tests/history-settings.test.js tests/history-core.test.js tests/case-chat-attach.test.js tests/renderer-history-scope.test.js tests/renderer-history-text.test.js` and the renderer test this task added — expected: `# fail 0`. `closeOpenHistoryStores()` and `await core.shutdown()` in the new file's cleanup.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/history-case-nudge.test.js tests/history-settings.test.js` — expected: fails.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/history-case-nudge.test.js tests/history-settings.test.js tests/history-core.test.js tests/case-chat-attach.test.js tests/renderer-history-scope.test.js tests/renderer-history-text.test.js` and the renderer test this task added — expected: `# fail 0`. `closeOpenHistoryStores()` and `await core.shutdown()` in the new file's cleanup.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/history/settings.js src/history/history-store.js src/cases/case-nudge.js src/ipc/chat-handlers.js renderer.js styles.css tests/history-case-nudge.test.js tests/history-settings.test.js
@@ -1047,11 +1098,11 @@ After Task 16.
 - Modify: `docs/superpowers/specs/2026-09-25-chat-history-recall-design.md`
 - Modify: `CLAUDE.md` (History; Management surfaces; Attached mode)
 
-- [ ] **Step 1: The e2e test.** In `tests/e2e/history-recall.test.js`, with `launchApp({ seed })` seeding two chats (the second holding "the gate code for the Lakeside lot is 4417"): through `page.evaluate`, call `window.electron.history.setLinks` and `setScope({ chatId, scope: 'linked' })` on the first chat, send "what is the gate code for the Lakeside lot", and assert the reply's `context.scope === 'linked'`, `context.recalledChats` names the second chat, and the recall line's text contains "linked chats". Run only this file: `unset ELECTRON_RUN_AS_NODE && node --test tests/e2e/history-recall.test.js` — expected: `# fail 0`.
-- [ ] **Step 2: The spec.** Status line: H4 implemented, with the date. §2: D3 and D4 as built. §3.2: the store's methods as named in Task 1; `Importer.parse(path, { pattern })`. §4.1: `chat_links` and `imports` as built. §5.2: imported chats and hosted embedders (R-H4-2, N1). §6.3: the per-chat `upToSeq`; the scope policy (R-H4-1, R-H4-2, R-H4-7); Jev skipped for a case chat or an imported chat in scope. §6.4: the cross-chat preamble and the title rule. §6.7: "Recall across chats (`linked`, `all`) is not measured: LongHaul asks inside one session. No default changed for it (owner ruling 2026-10-13)." §7: `scopeChats`, `recalledChats`, `scopePinned`, `rerankSkipped: 'imported-chat'`. §8: both tools as built, and that only the chat's own turn gets the wider scope (N2). §9: the nudge as built (R-H4-5), replacing the paragraph's sentence to the model. §10.1: the menu, the picker, the pins. §10.2: the three importers; import through pick, preview and commit; the batch channels; attached mode (R-H4-3); the CLI (R-H4-4); a second import is a second chat (R-H4-8); the warning's text. **§12 (R-H4-9):** the `src/ipc/history-handlers.js` row lists the channels that exist (`history:search`, `history:excerpts`, `history:embedder.status/save/rebuild/retry`, `history:jev.saveKey/clearKey`, `history:scope.set`, `history:links.get/set`, `history:import.pick/preview/commit/lookup/begin/append/finish`), without `history:index.status` and `history:reindex`; the service row lists `history import` only, without `history reindex` and `history status`, and names `src/service/commands/history.js`. §13: the test files as built. §14: `caseNudgeAfterUserTurns` (0 is off). §15: `ReadHistory` outside scope; the import refusals. §16: this plan's Decisions. Add a short "H4 rulings (2026-10-13)" list with R-H4-1 to R-H4-9, the residuals from "What the rulings cost", and the three new questions as open.
-- [ ] **Step 3: CLAUDE.md.** Under "History", one bullet group for H4: where scope is decided (`resolveScope` and `scope-policy.js`; never read `history_scope` elsewhere); only the owner's IPC widens a scope, and only the chat's own turn uses it (`crossChat`, `historyCrossChat`); the per-chat `upToSeq`; an import goes through `import-chats.js`, never reuses a chat id and never takes chat fields from the file; no import channel takes a path; an imported chat's chunks go to the local embedder only and never to Jev; each ruling with its date and code (`CHAT_RECALLED_OTHER_CHATS`, `IMPORTED_CHAT`, `SCOPE_PINNED`, `LINK_REFUSED`); the residuals in one sentence each. Under "Management surfaces", beside Q29: the two attach refusals Task 8 added. Under "Attached mode": pick, preview and commit are local, the batch channels proxied. Under "Cases": the nudge in one bullet.
-- [ ] **Step 4: The full suite, once.** `npm test` — expected: `# fail 0`. A failure in a file this plan did not touch is reported with the file's name and its first failing assertion, not fixed here.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: The e2e test.** In `tests/e2e/history-recall.test.js`, with `launchApp({ seed })` seeding two chats (the second holding "the gate code for the Lakeside lot is 4417"): through `page.evaluate`, call `window.electron.history.setLinks` and `setScope({ chatId, scope: 'linked' })` on the first chat, send "what is the gate code for the Lakeside lot", and assert the reply's `context.scope === 'linked'`, `context.recalledChats` names the second chat, and the recall line's text contains "linked chats". Run only this file: `unset ELECTRON_RUN_AS_NODE && node --test tests/e2e/history-recall.test.js` — expected: `# fail 0`.
+- [x] **Step 2: The spec.** Status line: H4 implemented, with the date. §2: D3 and D4 as built. §3.2: the store's methods as named in Task 1; `Importer.parse(path, { pattern })`. §4.1: `chat_links` and `imports` as built. §5.2: imported chats and hosted embedders (R-H4-2, N1). §6.3: the per-chat `upToSeq`; the scope policy (R-H4-1, R-H4-2, R-H4-7); Jev skipped for a case chat or an imported chat in scope. §6.4: the cross-chat preamble and the title rule. §6.7: "Recall across chats (`linked`, `all`) is not measured: LongHaul asks inside one session. No default changed for it (owner ruling 2026-10-13)." §7: `scopeChats`, `recalledChats`, `scopePinned`, `rerankSkipped: 'imported-chat'`. §8: both tools as built, and that only the chat's own turn gets the wider scope (N2). §9: the nudge as built (R-H4-5), replacing the paragraph's sentence to the model. §10.1: the menu, the picker, the pins. §10.2: the three importers; import through pick, preview and commit; the batch channels; attached mode (R-H4-3); the CLI (R-H4-4); a second import is a second chat (R-H4-8); the warning's text. **§12 (R-H4-9):** the `src/ipc/history-handlers.js` row lists the channels that exist (`history:search`, `history:excerpts`, `history:embedder.status/save/rebuild/retry`, `history:jev.saveKey/clearKey`, `history:scope.set`, `history:links.get/set`, `history:import.pick/preview/commit/lookup/begin/append/finish`), without `history:index.status` and `history:reindex`; the service row lists `history import` only, without `history reindex` and `history status`, and names `src/service/commands/history.js`. §13: the test files as built. §14: `caseNudgeAfterUserTurns` (0 is off). §15: `ReadHistory` outside scope; the import refusals. §16: this plan's Decisions. Add a short "H4 rulings (2026-10-13)" list with R-H4-1 to R-H4-9, the residuals from "What the rulings cost", and the three new questions as open.
+- [x] **Step 3: CLAUDE.md.** Under "History", one bullet group for H4: where scope is decided (`resolveScope` and `scope-policy.js`; never read `history_scope` elsewhere); only the owner's IPC widens a scope, and only the chat's own turn uses it (`crossChat`, `historyCrossChat`); the per-chat `upToSeq`; an import goes through `import-chats.js`, never reuses a chat id and never takes chat fields from the file; no import channel takes a path; an imported chat's chunks go to the local embedder only and never to Jev; each ruling with its date and code (`CHAT_RECALLED_OTHER_CHATS`, `IMPORTED_CHAT`, `SCOPE_PINNED`, `LINK_REFUSED`); the residuals in one sentence each. Under "Management surfaces", beside Q29: the two attach refusals Task 8 added. Under "Attached mode": pick, preview and commit are local, the batch channels proxied. Under "Cases": the nudge in one bullet.
+- [ ] **Step 4: The full suite, once.** (Not run by Task 17's implementer: the controller runs it; see "What is left".) `npm test` — expected: `# fail 0`. A failure in a file this plan did not touch is reported with the file's name and its first failing assertion, not fixed here.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add tests/e2e/history-recall.test.js docs/superpowers/specs/2026-09-25-chat-history-recall-design.md CLAUDE.md

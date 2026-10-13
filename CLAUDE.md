@@ -257,6 +257,117 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   Measured on LongHaul (spec §6.7): Jev, with or without whole messages,
   gave no better answer accuracy than the shipped defaults and lowered
   abstain accuracy, so it stays opt-in and no default changed.
+- H4 (scope, links, importers; plan
+  `docs/superpowers/plans/2026-10-13-history-h4-scope-links-importers.md`,
+  owner rulings R-H4-1 to R-H4-9 of 2026-10-13). Schema step 4 adds
+  `chat_links` and `imports`. A chat's scope is `chats.history_scope`
+  (`chat`, `linked`, `all`; default `chat`) and is never a field of the chat
+  object (`rows.js` drops `historyScope`), so no import, export or
+  `updateChat` patch can widen it. Outside the store, only
+  `history:scope.set` and `history:links.set` (the chat menu's "Recall
+  from" items and "Link chats…") write a scope or a link. Links go one way.
+- Which chats a turn may read is decided in one place, on every turn and
+  every tool call, from what is stored then: `resolveScope`
+  (`src/history/scope.js`) with the app's policy, `createScopePolicy`
+  (`src/history/scope-policy.js`; `core.context.resolveHistoryScope`,
+  `getHistoryScopePolicy`). The policy pins these chats to `chat` whatever is
+  stored, and `history:scope.set` refuses a wider scope for them
+  (`SCOPE_PINNED`): a chat with a `caseId` (`case-chat`, R-H4-1), a King
+  Louie export of a case chat (`importedFromCase`, reason
+  `imported-case-chat`, R-H4-2) and a Telegram or Discord bridge chat
+  (`bridge-chat`, R-H4-7; `src/history/bridge-origin.js`, which is not
+  exported from the history index because it loads the channel bridges). The
+  first two are in no other chat's scope, by link or by `all`
+  (`history:links.set` answers `LINK_REFUSED`); a bridge chat is left out of
+  `all` and is read only through an explicit link, under `linked`. A host
+  with no policy gets `CLOSED_POLICY` (every chat reads itself);
+  `OPEN_POLICY` is for unit tests and LongHaul.
+- Only the chat's own turn reads the wider scope: the desktop send path
+  passes `crossChat: true` to `ContextBuilder.build` and
+  `historyCrossChat: true` in its executor options, which is what gives
+  `SearchHistory` and `ReadHistory` a `resolveScope`. A sub-agent, a workflow
+  task, a bridge chat's turn and a gateway session read their chat alone. A
+  tool's `scope` argument only narrows; `ReadHistory` refuses a chat outside
+  the scope before reading it. `upToSeq` cuts only the asking chat
+  (`upToSeqChatId`), so "before this turn" hides nothing of a linked chat.
+  Scope `chat` is what H3 sent (R-H4-6): no `history.recall` default
+  changed, and `linked`/`all` are unmeasured (LongHaul asks inside one
+  session). Provenance adds `scopeChats`, `recalledChats` and `scopePinned`;
+  the recall line says "linked chats" or "all chats", an excerpt of another
+  chat is headed `chat "<title>"` (`chatHeaderTitle`: one plain line, 60
+  characters), and the block's preamble changes only when one is in it.
+- Attach (R-H4-1, R-H4-7; `assertChatAttachable` in
+  `src/cases/chat-attach.js`, before Q29's check): `case:attach` and
+  `case:create` refuse `IMPORTED_CHAT` for a chat with `source` set (or the
+  `importedFromCase` mark) and `CHAT_RECALLED_OTHER_CHATS` for a chat whose
+  stored rows show it read another chat (a reply's `context.recalledChats`,
+  a `SearchHistory` or `ReadHistory` result from another chat). `case:create`
+  checks before any case is created, and no `force` lifts either. It cannot
+  see text the owner pasted from another chat, or rows truncated away.
+- Imports go through `src/history/import-chats.js` only (`importChat` for a
+  file; `createImportGate`'s `begin`/`append`/`finish` for a chat that
+  arrives parsed), over the importers in `src/history/importers/`
+  (`claude-code-jsonl`, `king-louie-json`, `markdown-transcript`). An import
+  never overwrites (R-H4-8): the chat gets an id no chat has
+  (`freeChatId`), the chat and each message are built from fixed key lists,
+  the same file again (by SHA-256) returns the first chat, and a grown copy
+  of a session is a second chat. One import runs at a time per core; a
+  half-written one is removed by the gate (a refused batch, 30 minutes
+  without a call, the desktop that began it disconnecting, shutdown) or by
+  `sweepUnfinishedImports` at the next start.
+- An imported chat stays local (R-H4-2): its chunks are embedded only under
+  a `local:` key (`isLocalKey`; `pendingEmbeddings`/`countPending` take
+  `localOnly`), so Ollama counts as hosted, and with Jev chosen a turn or
+  search whose scope holds an imported chat is not reranked
+  (`rerankSkipped: 'imported-chat'`). Nothing scans an import: the dialog's
+  warning (`IMPORT_WARNING_TEXT`, also in `index.html`; a test holds the two
+  equal) is the only protection against a key in a transcript.
+- Import IPC (R-H4-3): `history:import.pick` opens the file dialog in the
+  main process (`src/ipc/import-picks.js`) and gives the renderer a token
+  and the file's base name; `preview` and `commit` take the token and a
+  Markdown heading pattern and nothing else, so no channel opens a path a
+  renderer or a desktop sent. A file that can no longer be read answers
+  `IMPORT_UNREADABLE` with a fixed sentence, never Node's error (it names
+  the path). Attached, those three are local to the desktop
+  (`LOCAL_CHANNELS`): it parses the file and sends the chat through the
+  proxied `history:import.lookup`/`begin`/`append`/`finish`, which the
+  service holds to the same key lists and caps (500 messages and 8 MB of
+  JSON a batch). Scope and links are proxied with the rest of `history`, so
+  they act on the service's store.
+- `king-louie-service history import <file> [--pattern ID]`
+  (`src/service/commands/history.js`, R-H4-4) runs with the service
+  stopped, only as the account that owns the data dir, never as root or
+  Administrator; it opens the store directly and builds no core. Windows
+  residual: the owner is not checked there (only an elevated prompt is
+  refused), so a service installed under LOCAL SERVICE has no CLI import;
+  its owner imports from the attached desktop. `history:index.status`,
+  `history:reindex` and a `history reindex`/`status` command do not exist
+  (R-H4-9).
+- The case nudge (R-H4-5; `offerCaseNudge` in `src/cases/case-nudge.js`,
+  called by the send path after a finished reply): at
+  `history.caseNudgeAfterUserTurns` user messages (40; 0 is off; not in the
+  settings pane) a chat with no case is marked `caseNudgedAt`, once, and
+  gets one `status` row with `meta.action: 'convertToCase'` only when the
+  attach checks above and the bridge rule would let it have a case. The
+  renderer draws the row with a "Make this a case" button that opens the
+  chat info's "New case…" flow. No prompt text is added.
+- H4 tests: stores and chats as in H2 (`tests/helpers/history-fixture.js`);
+  import files are the synthetic ones in `tests/fixtures/history/` or
+  `tests/helpers/claude-code-fixture.js`; the nudge's send path runs through
+  `tests/helpers/chat-harness.js`. The e2e files are
+  `tests/e2e/history-scope-links.test.js`, `history-import.test.js`,
+  `history-import-attached.test.js`, `case-nudge.test.js` and the second
+  suite in `history-recall.test.js`. A test cannot drive the native file
+  dialog: under `KL_TEST_MODE`, and only then, `KL_TEST_IMPORT_FILE` is the
+  file "picked", read at each pick.
+- H4 residuals and open questions are the plan's "What is left" section.
+  The ones that change what a reader may assume: a chat detached from its
+  case is an ordinary chat again (its stored scope applies and other chats
+  may read it); two chats of one case cannot recall from each other; under
+  `all` a bridge chat the owner linked is still not read; in an imported
+  chat the owner's new message is still embedded as the turn's query by
+  whatever embedder is active; a case-chat export is recognised only by the
+  `caseId` in the file; desktop-to-service copies carry no scope or links.
 
 ## Models
 
@@ -487,6 +598,10 @@ git repo under `<dataDir>/cases/` (override with `settings.cases.root` or
   sourced fact is only as good as the source the model names. The write guard
   covers Write, Edit and MultiEdit, not Bash: in stage 1 a shell command can
   still rewrite `facts.jsonl`.
+- A long chat with no case is offered one, once (history stage H4, owner
+  ruling R-H4-5; see History): a `status` row with a "Make this a case"
+  button that opens the chat info's "New case…" flow. The model is told
+  nothing, and the attach flow makes every check itself.
 
 ## Cases: unattended (stage 2)
 
@@ -622,6 +737,14 @@ work while attached appends it to `PROXIED_DOMAINS`).
 - **Lockout:** a handshake with a valid device signature is never refused by
   lockout; only further *failing* attempts for an already-locked-out device id
   are refused, closed `4429` at once (no delay is added).
+- **Importing a conversation** (history stage H4, R-H4-3): the file dialog,
+  the preview and the parse run on the desktop (`history:import.pick`,
+  `.preview`, `.commit` are `LOCAL_CHANNELS`), and the parsed chat goes to
+  the service in batches over the proxied `history:import.lookup`, `.begin`,
+  `.append`, `.finish`; the service never opens a path the desktop named,
+  and removes a half-sent chat when that desktop disconnects. With the
+  service unreachable the preview still shows (`serviceUnreachable`) and
+  Import is off. A chat's scope and links are the service's.
 - **E2E:** `launchAttached()` in `tests/e2e/helpers.js` starts a temporary
   service (`tests/e2e/_attach-service.js`, stub provider), pairs, attaches and
   relaunches; `ctx.service` has `kill()`, `restart()`, `stop()`. Every launch
@@ -1225,7 +1348,13 @@ Spec `docs/superpowers/specs/2026-09-30-management-surfaces.md`; ADR
   stored `toolUse`/`toolResult` rows; what it cannot tell (a call by slug,
   a sub-agent that used the tools, another run's text) it refuses. A new
   case tool blocks until it is in `NO_CASE_DATA`. Chats attached before
-  the rule, imported or migrated, are not re-checked.
+  the rule, imported or migrated, are not re-checked. The same check
+  (`assertChatAttachable`) refuses two more chats first (history stage H4,
+  owner rulings R-H4-1 and R-H4-7 of 2026-10-13; see History):
+  `IMPORTED_CHAT` for a chat imported from a file, and
+  `CHAT_RECALLED_OTHER_CHATS` for a chat whose stored replies or
+  `SearchHistory`/`ReadHistory` results show it read another chat. No
+  `force` lifts either.
 - `in-app-chat` (the model relaying the owner's chat words) is not
   `in-app` (the card's buttons and the IPC: a press, no model between). No
   list that takes a recorded channel as proof of a press names it
