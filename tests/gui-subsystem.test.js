@@ -414,6 +414,10 @@ describe('host wiring', () => {
     assert.deepEqual(await refusing.execute('RequestLease', { apps: ['calculator'], reason: 'x' }), { ok: false, error: REFUSE_UNSAFE_MESSAGE });
     const exe = process.execPath;
     assert.deepEqual(await refusing.execute('LaunchApp', { app: exe }), { ok: false, error: REFUSE_UNSAFE_MESSAGE }, 'not allowlisted, so unsafe');
+    // R-F5-13: the reading tools and an allowlisted launch are refused the same way.
+    for (const [name, params] of [['ListApps', {}], ['Screenshot', {}], ['LaunchApp', { app: 'calculator' }], ['CloseApp', { app: 'calculator' }], ['Key', { keys: 'a' }]]) {
+      assert.deepEqual(await refusing.execute(name, params), { ok: false, error: REFUSE_UNSAFE_MESSAGE }, name);
+    }
     assert.deepEqual(reached, []);
     assert.deepEqual(launched, []);
     assert.deepEqual(asked, [], 'the phone was never asked');

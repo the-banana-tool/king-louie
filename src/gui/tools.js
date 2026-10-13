@@ -7,12 +7,11 @@ const crypto = require('crypto');
 const { Tool } = require('../tools/tool-schema');
 const { REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
 const { isLocalRequester } = require('../core/origin');
-const { GuiError, isGuiError, toToolResult } = require('./errors');
+const { GuiError, isGuiError, toToolResult, GUI_TOOL_NAMES } = require('./errors');
 const { resolveLaunch } = require('./apps');
 const { parseKeys, printableChar, isEnter, checkButton, checkClickModifiers, MODIFIERS } = require('./keys');
 const { checkTypeText } = require('./text-guard');
 
-const GUI_TOOL_NAMES = Object.freeze(['ListApps', 'LaunchApp', 'CloseApp', 'Screenshot', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag']);
 // R-F5-4: what a case turn keeps, and what src/cases/chat-integration.js blocks.
 const GUI_READ_TOOL_NAMES = Object.freeze(['ListApps', 'Screenshot']);
 const GUI_ACTING_TOOL_NAMES = Object.freeze(GUI_TOOL_NAMES.filter((name) => !GUI_READ_TOOL_NAMES.includes(name)));
@@ -131,6 +130,20 @@ function buildGuiTools(gui) {
     execute: async (params = {}, options = {}) => {
       // R-F5-11: desktop apps are off on this node for a reason the host
       // gives (no broker, no leases, no channel); every tool says so first.
+      // R-F5-13 (owner ruling, 2026-10-13; it widens R-F5-3 and review
+      // finding 13f): a run that refuses unsafe calls (a front-door client
+      // without fleet:unsafe for this node, and its sub-agents, background
+      // tasks and workflow children, which inherit the mark) gets no GUI
+      // tool at all: not the screen, not the app list, not a launch or a
+      // close, no lease and no input. Refused for scope, in the node's own
+      // words and never as "the phone denied", before parameters are read
+      // and before the broker, the lease manager or the helper is touched.
+      // Such a turn is not offered these tools in the first place
+      // (delegateToolNames); this is the backstop on every other path.
+      if (refusesUnsafe(options)) {
+        auditAppend('gui.refused', { job_id: jobIdOf(options), tool: config.name, reason: 'scope' });
+        return { ok: false, error: REFUSE_UNSAFE_MESSAGE };
+      }
       if (unavailable) return toToolResult(new GuiError('capability_unavailable', `gui (${unavailable.message})`));
       try {
         checkParams(config.parameters, params);
@@ -145,14 +158,6 @@ function buildGuiTools(gui) {
   async function runInput(toolName, params, options, summary, auditParams, build) {
     broker.require('gui.input');
     const jobId = jobIdOf(options);
-    // R-F5-3 for input too (security review finding 13f): a run that refuses
-    // unsafe calls may not drive the desktop, whoever asked for the job's
-    // lease. Refused for scope, in the node's own words, before the lease is
-    // looked at; audited like every other refused input.
-    if (refusesUnsafe(options)) {
-      auditAppend('gui.input', { job_id: jobId, lease_id: null, tool: toolName, params: auditParams, foreground_before: null, foreground_after: null, result: 'refused:scope' });
-      return { ok: false, error: REFUSE_UNSAFE_MESSAGE };
-    }
     let lease = null;
     let typedFn = null;
     try {
@@ -216,9 +221,6 @@ function buildGuiTools(gui) {
       const resolution = resolveLaunch(guiConfig, policy(), { app: params.app, args: params.args || [], files: params.files || [] }, { platform });
       let approvedBy = 'allowlist';
       if (resolution.tier === 'unsafe') {
-        // R-F5-3 (M19): this client may not request unsafe actions, so nobody
-        // is asked, and the refusal says that, not that a phone said no.
-        if (refusesUnsafe(options)) return { ok: false, error: REFUSE_UNSAFE_MESSAGE };
         const requester = options.approvalRequester;
         if (typeof requester !== 'function') return { ok: false, error: 'denied: phone approval required (no approval channel)' };
         // A paired desktop's turn is answered on its own screen; every other
@@ -267,9 +269,6 @@ function buildGuiTools(gui) {
       }, ['apps', 'reason'])
     }, async (params, options, ctx) => {
       broker.require('gui.input');
-      // R-F5-3 (M19): a front-door client without fleet:unsafe puts nothing
-      // on the owner's phone. Checked before the lease manager is touched.
-      if (refusesUnsafe(options)) return { ok: false, error: REFUSE_UNSAFE_MESSAGE };
       // R-F5-7: a lease is bound to a job; this run has none.
       if (!ctx.jobId) throw new GuiError('job_required', NO_JOB);
       if (!leases.available()) throw new GuiError('approval_unavailable');

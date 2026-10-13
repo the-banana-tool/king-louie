@@ -13,6 +13,7 @@ const { ToolError, approvalOrigin } = require('./fleet-tools');
 const { covers } = require('./scope-rules');
 const { MCP_TOOLS } = require('./tool-definitions');
 const { CASE_MCP_TOOLS } = require('../cases/mcp-tool-definitions');
+const { GUI_TOOL_NAMES } = require('../gui/errors');
 
 const log = createLogger('fleet/delegate');
 
@@ -47,8 +48,12 @@ const DELEGATE_EXCLUDED_TOOLS = Object.freeze([
 
 // Every registered tool but the excluded ones, read at each turn so a tool
 // registered after start (MCP) is included.
-function delegateToolNames(registry) {
-  const excluded = new Set(DELEGATE_EXCLUDED_TOOLS);
+// R-F5-13 (owner ruling, 2026-10-13): a turn that refuses unsafe calls (a
+// front-door client without fleet:unsafe for this node) is not offered the
+// GUI tools at all. The tools refuse such a run themselves too; this only
+// keeps them out of what the model is shown.
+function delegateToolNames(registry, { refuseUnsafe = false } = {}) {
+  const excluded = new Set([...DELEGATE_EXCLUDED_TOOLS, ...(refuseUnsafe === true ? GUI_TOOL_NAMES : [])]);
   return new Set(registry.list().map((tool) => tool.name).filter((name) => !excluded.has(name)));
 }
 
@@ -353,6 +358,7 @@ class DelegateSessions {
       messages.push({ role: 'user', content: message });
       const manager = this._backgroundTasks();
       if (manager && !session.backgroundView) session.backgroundView = scopedBackgroundTasks(manager, session.backgroundTaskIds);
+      const refuseUnsafe = shouldRefuseUnsafe(origin, this.nodeConfig);
       const result = await this.core.context.getAgentExecutorAdapter().execute(this.agent, message, {
         ...(this.config.provider ? { provider: this.config.provider } : {}),
         ...(this.config.model ? { model: this.config.model } : {}),
@@ -361,11 +367,11 @@ class DelegateSessions {
         abortSignal: session.turnAbort.signal,
         evidenceLedger: session.evidence,
         // T11-sessions; the re-threaded requester carries it to sub-agents.
-        allowedToolNames: delegateToolNames(this.toolRegistry),
+        allowedToolNames: delegateToolNames(this.toolRegistry, { refuseUnsafe }),
         executorOptions: {
           origin: approvalOrigin(origin, jobId),
           chatId: `delegate:${jobId}`,
-          refuseUnsafe: shouldRefuseUnsafe(origin, this.nodeConfig),
+          refuseUnsafe,
           // T11-roots: with no node policy, the refuseUnsafe classifier
           // allows paths under the session's cwd and nowhere else.
           allowedRoots: [session.cwd],

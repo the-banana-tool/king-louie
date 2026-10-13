@@ -15,6 +15,10 @@ const GUI_ERROR_CODES = Object.freeze([
   'home_missing', 'cancelled'
 ]);
 
+// The ten GUI tools. Here (dependency-free) so code that shapes a run's tool
+// list can name them without loading the tools themselves.
+const GUI_TOOL_NAMES = Object.freeze(['ListApps', 'LaunchApp', 'CloseApp', 'Screenshot', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag']);
+
 class GuiError extends Error {
   constructor(code, detail = null, extra = {}) {
     super(detail ? `${code}: ${detail}` : code);
@@ -48,4 +52,4 @@ function fromWire(error) {
   return new GuiError(code, null, { info: isPlainObject(error) && isPlainObject(error.detail) ? error.detail : {} });
 }
 
-module.exports = { GuiError, GUI_ERROR_CODES, isGuiError, toToolResult, fromWire };
+module.exports = { GuiError, GUI_ERROR_CODES, GUI_TOOL_NAMES, isGuiError, toToolResult, fromWire };

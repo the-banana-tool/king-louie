@@ -148,8 +148,9 @@ describe('capability first', () => {
     assert.deepEqual(unsafe, { ok: false, error: 'capability_unavailable: gui' });
     assert.equal(requesterCalls.length, 0, 'the fake approver was never asked');
     assert.deepEqual(await tools.RequestLease.execute({ apps: ['calculator'], reason: 'x' }, opts()), { ok: false, error: 'capability_unavailable: gui' });
-    // The capability comes before the scope check too (R-F5-3).
-    assert.deepEqual(await tools.RequestLease.execute({ apps: ['calculator'], reason: 'x' }, opts({ approvalRequester: refusing() })), { ok: false, error: 'capability_unavailable: gui' });
+    // Scope comes before the capability (R-F5-13, which changed R-F5-3's order): a run that
+    // refuses unsafe calls is not told whether a helper is connected; the broker is not asked.
+    assert.deepEqual(await tools.RequestLease.execute({ apps: ['calculator'], reason: 'x' }, opts({ approvalRequester: refusing() })), { ok: false, error: REFUSE_UNSAFE_MESSAGE });
     assert.equal(relay.sent.length, 0);
     for (const name of ['ListApps', 'Screenshot', 'CloseApp', 'Click', 'Type', 'Key', 'Scroll', 'Drag']) {
       const params = { ListApps: {}, Screenshot: {}, CloseApp: { app: 'calculator' }, Click: { screenshot_id: 'ss-1', x: 1, y: 1 }, Type: { text: 'a' }, Key: { keys: 'a' }, Scroll: { screenshot_id: 'ss-1', x: 1, y: 1, dy: 1 }, Drag: { screenshot_id: 'ss-1', from: { x: 1, y: 1 }, to: { x: 2, y: 2 } } }[name];
@@ -216,17 +217,58 @@ describe('R-F5-3: a front-door client needs fleet:unsafe', () => {
     assert.equal(requesterCalls.length, 0);
   });
 
-  it('R-F5-3: an unsafe LaunchApp is refused for scope and the requester is never called; an allowlisted launch still runs', async () => {
-    const out = await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: refusing() }));
-    assert.deepEqual(out, { ok: false, error: REFUSE_UNSAFE_MESSAGE });
-    assert.equal(requesterCalls.length, 0);
-    assert.ok(!channel.requests.some((r) => r.op === 'launch'));
-    const routine = await tools.LaunchApp.execute({ app: 'calculator' }, opts({ approvalRequester: refusing() }));
-    assert.equal(routine.ok, true);
-    assert.equal(requesterCalls.length, 0);
+  // R-F5-13 (owner ruling, 2026-10-13): a front-door run without
+  // fleet:unsafe gets no GUI tool at all. This is the in-tool backstop, on
+  // every path a tool can be reached by.
+  it('R-F5-13: all ten GUI tools refuse a run that refuses unsafe calls, for scope, before the broker or the helper is touched', async () => {
+    channel.connect();
+    await withLease();
+    const shot = await tools.Screenshot.execute({ app: 'calculator' }, opts());
+    channel.requests.length = 0;
+    relay.sent.length = 0;
+    const audited = audits.length;
+    // The broker itself must not be asked anything.
+    const touched = [];
+    for (const name of ['require', 'listApps', 'launch', 'close', 'screenshot', 'input', 'capability', 'mapPoint']) {
+      const real = broker[name].bind(broker);
+      broker[name] = (...args) => { touched.push(name); return real(...args); };
+    }
+    const calls = {
+      ListApps: {}, Screenshot: { app: 'calculator' }, LaunchApp: { app: 'calculator' }, CloseApp: { app: 'calculator' },
+      RequestLease: { apps: ['calculator'], minutes: 5, reason: 'x' },
+      Click: { screenshot_id: shot.screenshot_id, x: 5, y: 5 }, Type: { text: 'a' }, Key: { keys: 'a' },
+      Scroll: { screenshot_id: shot.screenshot_id, x: 5, y: 5, dy: 1 }, Drag: { screenshot_id: shot.screenshot_id, from: { x: 1, y: 1 }, to: { x: 2, y: 2 } }
+    };
+    assert.deepEqual(Object.keys(calls).sort(), [...GUI_TOOL_NAMES].sort());
+    for (const [name, params] of Object.entries(calls)) {
+      const out = await tools[name].execute(params, opts({ approvalRequester: refusing() }));
+      assert.deepEqual(out, { ok: false, error: REFUSE_UNSAFE_MESSAGE }, name);
+    }
+    // A path outside the allowlist is the same refusal: scope first, never "phone denied".
+    assert.deepEqual(await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: refusing() })), { ok: false, error: REFUSE_UNSAFE_MESSAGE });
+    // And parameters are not even looked at.
+    assert.deepEqual(await tools.Click.execute({ bogus: 1 }, opts({ approvalRequester: refusing() })), { ok: false, error: REFUSE_UNSAFE_MESSAGE });
+    assert.deepEqual(touched, [], 'the broker was not touched');
+    assert.deepEqual(channel.requests, [], 'the helper heard nothing');
+    assert.deepEqual(relay.sent.filter((s) => s.message.type === 'kl.lease.request'), [], 'nothing went to the phone');
+    assert.equal(requesterCalls.length, 0, 'and nobody was asked');
+    await new Promise((r) => setImmediate(r));
+    const refused = audits.slice(audited).filter((a) => a.kind === 'gui.refused');
+    assert.equal(refused.length, 12, 'each refusal is audited');
+    assert.ok(refused.every((a) => a.data.reason === 'scope' && a.data.job_id === 'job-1' && GUI_TOOL_NAMES.includes(a.data.tool)));
   });
 
-  it('finding 13f: every input tool refuses a run that refuses unsafe calls, for scope, before the lease check and before the helper', async () => {
+  it('R-F5-13: a run the node started itself, and a client with fleet:unsafe (no mark), keep every tool', async () => {
+    channel.connect();
+    for (const o of [opts(), opts({ approvalRequester: requester(true) })]) {
+      assert.equal((await tools.ListApps.execute({}, o)).ok, true);
+      assert.equal((await tools.Screenshot.execute({ app: 'calculator' }, o)).ok, true);
+      assert.equal((await tools.LaunchApp.execute({ app: 'calculator' }, o)).ok, true);
+      assert.equal((await tools.CloseApp.execute({ app: 'calculator' }, o)).ok, true);
+    }
+  });
+
+  it('R-F5-13: the lease check never runs for a run that refuses unsafe calls', async () => {
     channel.connect();
     // The job holds an active lease (granted to a run that may ask for one).
     await withLease();
@@ -247,8 +289,8 @@ describe('R-F5-3: a front-door client needs fleet:unsafe', () => {
     leases.stopAll();
     assert.deepEqual(await tools.Key.execute({ keys: 'a' }, opts({ approvalRequester: refusing() })), { ok: false, error: REFUSE_UNSAFE_MESSAGE });
     await new Promise((r) => setImmediate(r));
-    assert.equal(audits.slice(audited).filter((a) => a.kind === 'gui.input').length, 6, 'each refusal is audited');
-    assert.ok(audits.slice(audited).filter((a) => a.kind === 'gui.input').every((a) => a.data.result === 'refused:scope'));
+    assert.equal(audits.slice(audited).filter((a) => a.kind === 'gui.refused').length, 6, 'each refusal is audited');
+    assert.equal(audits.slice(audited).filter((a) => a.kind === 'gui.input').length, 0);
   });
 
   it('R-F5-3: a node-local run still asks the phone', async () => {
@@ -289,9 +331,15 @@ describe('R-F5-4: which turns get GUI tools', () => {
     // Wake-up turns (Deviation 36): none, not even the two read tools.
     const wakeupAllowed = new Set([...CASE_TOOL_NAMES, ...WAKEUP_BASE_TOOLS]);
     for (const name of GUI_TOOL_NAMES) assert.ok(!wakeupAllowed.has(name), `wake-up: ${name}`);
-    // Delegate turns: all ten; R-F5-3 gates what would reach the phone.
+    // Delegate turns: all ten for a run that may ask for unsafe actions (a
+    // session the node started, a client with fleet:unsafe)...
     const delegate = delegateToolNames(shared);
     for (const name of GUI_TOOL_NAMES) assert.ok(delegate.has(name) && !DELEGATE_EXCLUDED_TOOLS.includes(name), `delegate: ${name}`);
+    assert.deepEqual([...delegateToolNames(shared, { refuseUnsafe: false })].sort(), [...delegate].sort());
+    // ...and none at all for one that refuses them (R-F5-13): the tools are not offered.
+    const refusingTurn = delegateToolNames(shared, { refuseUnsafe: true });
+    for (const name of GUI_TOOL_NAMES) assert.ok(!refusingTurn.has(name), `not offered: ${name}`);
+    assert.deepEqual([...delegate].filter((n) => !refusingTurn.has(n)).sort(), [...GUI_TOOL_NAMES].sort(), 'only the GUI tools are withheld');
   });
 
   it('R-F5-4: ToolExecutor refuses an acting GUI tool in a case turn', async () => {
