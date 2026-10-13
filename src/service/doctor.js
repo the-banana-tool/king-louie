@@ -99,14 +99,14 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
     const { adminConfigDir } = require('../platform/paths');
     const dir = configDir || adminConfigDir({ dataDir });
     const { inspectCanonical } = require('../gui/session-secret');
-    const { readGuiStatusRecord, SESSION_FILE_REMEDY } = require('../gui/status');
+    const { readGuiStatusRecord, SESSION_FILE_REMEDY, remedyFor } = require('../gui/status');
     const seen = inspectCanonical({ configDir: dir, platform, adminUid, checkOwner: true, requireIdentity: false });
     const record = readGuiStatusRecord({ dataDir });
     const serviceSays = record && record.available !== true && typeof record.reason === 'string' && record.reason ? record : null;
     if (seen.state === 'invalid') {
       results.push({ check: 'session helper file', ok: false, detail: `session_file_invalid: ${seen.file} ${seen.reason}; desktop apps are off. To fix it, ${SESSION_FILE_REMEDY}` });
     } else if (serviceSays) {
-      results.push({ check: 'desktop apps (running service)', ok: false, detail: `off, ${serviceSays.reason}${serviceSays.detail ? `: ${serviceSays.detail}` : ''}. To fix it, ${SESSION_FILE_REMEDY}` });
+      results.push({ check: 'desktop apps (running service)', ok: false, detail: `off, ${serviceSays.reason}${serviceSays.detail ? `: ${serviceSays.detail}` : ''}. To fix it, ${remedyFor(serviceSays.reason)}` });
     } else if (seen.state === 'installed') {
       results.push({ check: 'session helper file', ok: true, detail: `installed for ${seen.user}; the service checks that it decrypts when it starts` });
     }

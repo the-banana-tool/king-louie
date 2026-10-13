@@ -12,7 +12,14 @@ const statusPath = (dataDir) => path.join(dataDir, 'session', 'status.json');
 const UNAVAILABLE = Object.freeze({ available: false, capabilities: [], apps: [], limits: [], lease: null });
 // R-F5-11: what an administrator does about a session helper file the
 // service refused. Said by the log, the GUI tools, "session status" and doctor.
+// The same for a GUI that could not be built or started for another reason.
+const GUI_START_REMEDY = 'see the service log for the cause, fix it and restart the service';
 const SESSION_FILE_REMEDY = 'as root or an Administrator run "king-louie-service session uninstall --user NAME", then "king-louie-service session install --user NAME", and restart the service';
+
+// What to do about a reason the service gave for turning desktop apps off.
+function remedyFor(reason) {
+  return reason === 'session_file_invalid' ? SESSION_FILE_REMEDY : GUI_START_REMEDY;
+}
 
 function writeGuiStatus(dataDir, record) {
   const dir = path.dirname(statusPath(dataDir));
@@ -59,4 +66,4 @@ function readGuiStatus(options = {}) {
   };
 }
 
-module.exports = { statusPath, writeGuiStatus, readGuiStatus, readGuiStatusRecord, STALE_MS, SESSION_FILE_REMEDY };
+module.exports = { statusPath, writeGuiStatus, readGuiStatus, readGuiStatusRecord, STALE_MS, SESSION_FILE_REMEDY, GUI_START_REMEDY, remedyFor };

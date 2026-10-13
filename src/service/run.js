@@ -87,7 +87,9 @@ function loadProfile(profile) {
         let fleet = null;
         // Fleet stage 5: desktop apps through the session helper (null when
         // gui is off or no helper is installed). configDir falls back to the
-        // same per-platform admin dir service-wiring uses.
+        // same per-platform admin dir service-wiring uses. Neither
+        // createGuiSubsystem nor gui.start() throws: a GUI that cannot be
+        // built or started is off with a reason, and the service goes on.
         let gui = null;
         try {
           const { createGuiSubsystem, isJobOpen } = require('../gui');

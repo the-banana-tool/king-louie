@@ -293,9 +293,9 @@ async function status({ dataDir, io, deps }) {
   if (!record.available && typeof record.reason === 'string' && record.reason) {
     // R-F5-11: the running service turned desktop apps off, and why.
     const { printable } = require('./io');
-    const { SESSION_FILE_REMEDY } = require('../../gui/status');
+    const { remedyFor } = require('../../gui/status');
     io.stdout.write(`helper: off (${printable(record.reason)})${record.detail ? `: ${printable(record.detail)}` : ''}\n`);
-    io.stdout.write(`  to fix it, ${SESSION_FILE_REMEDY}\n`);
+    io.stdout.write(`  to fix it, ${remedyFor(record.reason)}\n`);
     return 0;
   }
   io.stdout.write(`helper: ${record.available ? `connected (${record.user}, ${record.platform})` : 'not connected'}\n`);

@@ -45,6 +45,15 @@ class GuiBroker extends EventEmitter {
     this.displaysGen = 0;
     this.lockedFlag = false;
     this.listeners = [];
+    this.off = null;
+  }
+
+  // The host could not start the GUI (index.js): from here on the capability
+  // is unavailable for that reason, whatever the channel says, and every op
+  // refuses with it. There is no way back but a restart.
+  setUnavailable({ reason, detail, message }) {
+    this.off = { reason, detail, message };
+    this._changed();
   }
 
   setLeases(leases) {
@@ -84,11 +93,12 @@ class GuiBroker extends EventEmitter {
   }
 
   capability() {
-    const info = this.channel.connected ? this.channel.info : null;
+    const info = !this.off && this.channel.connected ? this.channel.info : null;
     const available = Boolean(this.guiConfig.enabled && info);
     const lease = this.leases ? this.leases.statusSummary() : null;
     return {
       available,
+      ...(this.off ? { reason: this.off.reason } : {}),
       capabilities: available ? [...info.capabilities] : [],
       user: info ? info.user : null,
       platform: info ? info.platform : null,
@@ -101,6 +111,7 @@ class GuiBroker extends EventEmitter {
   }
 
   require(sub) {
+    if (this.off) throw new GuiError('capability_unavailable', `gui (${this.off.message})`);
     const cap = this.capability();
     if (!cap.available) throw new GuiError('capability_unavailable', 'gui');
     if (!cap.capabilities.includes(sub)) throw new GuiError('capability_unavailable', sub);
@@ -118,10 +129,11 @@ class GuiBroker extends EventEmitter {
   _writeStatus({ stopping = false } = {}) {
     if (!this.dataDir) return;
     const cap = this.capability();
-    const info = this.channel.connected ? this.channel.info : null;
+    const info = !this.off && this.channel.connected ? this.channel.info : null;
     try {
       writeGuiStatus(this.dataDir, {
-        v: 1, pid: process.pid, available: stopping ? false : cap.available, user: cap.user, platform: cap.platform,
+        v: 1, pid: process.pid, available: stopping ? false : cap.available,
+        ...(this.off ? { reason: this.off.reason, detail: this.off.detail } : {}), user: cap.user, platform: cap.platform,
         capabilities: cap.capabilities, probes: info ? info.probes : [], limits: cap.limits, apps: cap.apps, since: cap.since,
         updated_at: new Date(this.clock()).toISOString(),
         lease: cap.lease ? { active: cap.lease.active, app_ids: cap.lease.appIds, expires_at: cap.lease.expiresAt } : null

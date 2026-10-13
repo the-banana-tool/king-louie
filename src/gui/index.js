@@ -11,9 +11,13 @@ const { LeaseManager } = require('./leases');
 const { LiveView } = require('./live-view');
 const { registerGuiTools } = require('./tools');
 const { readCanonical, canonicalMtime, endpointPath, canonicalPath, inspectCanonical } = require('./session-secret');
-const { writeGuiStatus, SESSION_FILE_REMEDY } = require('./status');
+const { writeGuiStatus, SESSION_FILE_REMEDY, remedyFor } = require('./status');
 
 const SESSION_FILE_INVALID = 'session_file_invalid';
+// Anything else that stopped the GUI from being built or started (security
+// review finding 2): the helper endpoint taken by another process, say.
+const GUI_START_FAILED = 'gui_start_failed';
+const failureDetail = (err) => String((err && err.message) || err || 'unknown error').slice(0, 300);
 
 // R-F5-11: desktop apps are off, for a reason. No helper channel, no broker,
 // no lease manager and no link method exist; the GUI tools are registered
@@ -21,8 +25,8 @@ const SESSION_FILE_INVALID = 'session_file_invalid';
 // status" and doctor. The bad file is never read for anything else, and
 // nothing falls back to a weaker mode.
 function unavailableSubsystem({ reason, detail, guiConfig, dataDir, platform, log, clock = Date.now, heartbeatMs = 10000 }) {
-  const message = `${reason}: ${detail}; ${SESSION_FILE_REMEDY}`;
-  const apps = () => Object.values(guiConfig.apps).map((a) => ({ id: a.id, name: a.name }));
+  const message = `${reason}: ${detail}; ${remedyFor(reason)}`;
+  const apps = () => Object.values((guiConfig && guiConfig.apps) || {}).map((a) => ({ id: a.id, name: a.name }));
   const capability = () => ({
     available: false, reason, capabilities: [], user: null, platform: null, since: null, apps: apps(), limits: [], locked: false, lease: null
   });
@@ -76,8 +80,22 @@ function isJobOpen({ jobManager = null, chatExists = null } = {}, jobId) {
   }
 }
 
+// Never throws (security review finding 2): whatever goes wrong while the GUI
+// is built, the service that hosts it still starts. The result is then a
+// subsystem that is off, with the reason gui_start_failed.
+function createGuiSubsystem(options = {}) {
+  try {
+    return buildGuiSubsystem(options);
+  } catch (err) {
+    const { nodeConfig = null, dataDir = null, platform = process.platform, log = createLogger('gui') } = options;
+    const detail = failureDetail(err);
+    log.error(`desktop apps are off: the GUI could not be set up (${detail}). To fix it, ${remedyFor(GUI_START_FAILED)}.`, { reason: GUI_START_FAILED });
+    return unavailableSubsystem({ reason: GUI_START_FAILED, detail, guiConfig: nodeConfig && nodeConfig.gui, dataDir, platform, log });
+  }
+}
+
 // jobOpen fails closed: a host that passes none can hold no lease.
-function createGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => false,
+function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => false,
   adminUid = 0, geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1), log = createLogger('gui'), deps = {} } = {}) {
   const gui = nodeConfig.gui;
   if (nodeConfig.profile !== 'agent' || !gui || !gui.enabled) {
@@ -123,26 +141,50 @@ function createGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals,
     relay.registerMethod('lease.watch', async ({ envelope } = {}) => liveView.onWatch(envelope));
   }
 
-  return {
+  let brokerStarted = false;
+  const quietly = async (fn) => { try { await fn(); } catch (err) { log.debug(`gui teardown: ${err.message}`); } };
+  const subsystem = {
     broker, leases, liveView, channel,
+    // Set when start() failed: { reason, detail }.
+    unavailable: null,
     capability: () => broker.capability(),
     registerTools(toolRegistry) {
       registerGuiTools(toolRegistry, { broker, leases, liveView, guiConfig: gui, getPolicy, audit, platform });
     },
+    // Never throws (security review finding 2). A start that fails (the
+    // pipe or socket name is taken by another local process, say) closes
+    // what it opened, ends every lease and leaves the capability unavailable
+    // with a reason. The tools the core already registered refuse with it,
+    // status.json carries it, and the service goes on without desktop apps.
     async start() {
-      await channel.start();
-      broker.start();
-      leases.start();
-      if (relay) liveView.start();
-      log.info('waiting for the session helper', { endpoint: channel.endpoint });
+      try {
+        await channel.start();
+        broker.start();
+        brokerStarted = true;
+        leases.start();
+        if (relay) liveView.start();
+        log.info('waiting for the session helper', { endpoint: channel.endpoint });
+      } catch (err) {
+        const detail = failureDetail(err);
+        log.error(`desktop apps are off: the GUI could not start (${detail}). To fix it, ${remedyFor(GUI_START_FAILED)}.`, { reason: GUI_START_FAILED });
+        await quietly(() => liveView.stop());
+        await quietly(() => leases.stop());
+        await quietly(() => channel.stop());
+        subsystem.unavailable = { reason: GUI_START_FAILED, detail };
+        // The broker stays up only to say why and to keep status.json fresh.
+        if (!brokerStarted) await quietly(() => { broker.start(); brokerStarted = true; });
+        await quietly(() => broker.setUnavailable({ reason: GUI_START_FAILED, detail, message: `${GUI_START_FAILED}: ${detail}; ${remedyFor(GUI_START_FAILED)}` }));
+      }
     },
     async stop() {
       liveView.stop();
       leases.stop();
-      broker.stop();
+      if (brokerStarted) broker.stop();
+      brokerStarted = false;
       await channel.stop();
     }
   };
+  return subsystem;
 }
 
 module.exports = { createGuiSubsystem, isJobOpen };

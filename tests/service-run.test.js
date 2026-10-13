@@ -476,6 +476,42 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
       }
     });
 
+    it('(d) security review finding 2: a GUI that cannot start (its endpoint is taken) is off with a reason and the service is up', async () => {
+      const { dataDir: dir, workspace } = liveDataDir();
+      const configDir = adminDir();
+      const { buildServicePorts } = require('../src/service/ports');
+      const { CHAT_DATA_DEFAULTS } = require('../src/core/settings');
+      const { getOrGenerateNodeIdentity } = require('../src/mesh/node-identity');
+      const ports = buildServicePorts({ dataDir: dir, chatDataDefaults: CHAT_DATA_DEFAULTS });
+      const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, 'unnamed-node');
+      const { secret, endpointId } = S.mintSessionSecret();
+      S.writeCanonical({ configDir, cipher: ports.cipher, secret, endpointId, nodeId: identity.nodeId, sessionUser: 'alice' });
+      fs.writeFileSync(path.join(dir, 'service.pid'), String(process.pid));
+      // Something else holds the endpoint: a pipe on Windows, elsewhere a
+      // directory the channel cannot replace.
+      const ep = endpoint(configDir);
+      let squatter = null;
+      if (POSIX) {
+        fs.mkdirSync(ep);
+        fs.writeFileSync(path.join(ep, 'x'), '');
+      } else {
+        squatter = require('net').createServer(() => {});
+        await new Promise((resolve, reject) => { squatter.once('error', reject); squatter.listen(ep, resolve); });
+      }
+      let running;
+      try {
+        running = await loadProfile('agent').start({ dataDir: dir, features: allOff, ports: {}, workspace, configDir, adminUid: UID, deps: { gui: { endpoint: ep } } });
+        assert.ok(running.gui);
+        assert.strictEqual(running.gui.unavailable.reason, 'gui_start_failed');
+        assert.strictEqual(running.gui.capability().available, false);
+        assert.strictEqual(readGuiStatusRecord({ dataDir: dir }).reason, 'gui_start_failed');
+        assert.ok(running.fleet && running.fleet.jobManager, 'the rest of the service started');
+      } finally {
+        if (running) await running.stop();
+        if (squatter) await new Promise((resolve) => squatter.close(() => resolve()));
+      }
+    });
+
     it('(c) a valid helper file: started after the fleet node, stopped first, with jobOpen bound to the real JobManager', async () => {
       const { dataDir: dir, workspace } = liveDataDir();
       const configDir = adminDir();

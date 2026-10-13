@@ -178,6 +178,79 @@ describe('createGuiSubsystem', () => {
     });
   }
 
+  // Security review finding 2: not only a bad file. Nothing in building or
+  // starting the GUI may stop the service: it is off, with a reason.
+  // Something else already holds the helper endpoint: another process's pipe
+  // on Windows; elsewhere a directory, which the channel cannot replace.
+  async function takeEndpoint(base) {
+    const net = require('net');
+    const ep = endpoint(base);
+    if (POSIX) {
+      fs.mkdirSync(ep);
+      fs.writeFileSync(path.join(ep, 'x'), '');
+      return ep;
+    }
+    const squatter = net.createServer(() => {});
+    await new Promise((resolve, reject) => { squatter.once('error', reject); squatter.listen(ep, resolve); });
+    cleanups.push(() => new Promise((resolve) => squatter.close(() => resolve())));
+    return ep;
+  }
+
+  it('finding 2: a start that fails (the endpoint is already taken) leaves the GUI off with gui_start_failed; start() does not throw', async () => {
+    const { base, configDir, dataDir } = dirs();
+    install(configDir);
+    const ep = await takeEndpoint(base);
+    const log = spyLog();
+    const a = approvals();
+    const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log, deps: { endpoint: ep } });
+    assert.ok(gui && !gui.unavailable, 'built normally');
+    const registry = new ToolRegistry();
+    gui.registerTools(registry);
+    await gui.start();
+    cleanups.push(() => gui.stop());
+    assert.equal(gui.unavailable.reason, 'gui_start_failed');
+    assert.equal(log.errors.length, 1, log.errors.join('\n'));
+    assert.match(log.errors[0], /desktop apps are off/);
+    const cap = gui.capability();
+    assert.equal(cap.available, false);
+    assert.equal(cap.reason, 'gui_start_failed');
+    assert.equal(gui.channel.server, null, 'nothing is listening');
+    // The tools the core registered before the start refuse with the reason.
+    for (const tool of registry.list()) {
+      const out = await registry.get(tool.name).execute(tool.name === 'RequestLease' ? { apps: ['calculator'], reason: 'x' } : {}, { origin: { client: 'x', session: 'c1', job_id: null } });
+      assert.equal(out.ok, false, tool.name);
+      if (['ListApps', 'RequestLease'].includes(tool.name)) assert.match(out.error, /^capability_unavailable: gui \(gui_start_failed: /, tool.name);
+    }
+    assert.equal(readGuiStatusRecord({ dataDir }).reason, 'gui_start_failed');
+    assert.equal(readGuiStatus({ dataDir }).available, false);
+    // A helper cannot change that: nothing of this subsystem listens.
+    await gui.stop();
+    await gui.stop();
+  });
+
+  it('finding 2: a build that throws gives a subsystem that is off with gui_start_failed, not an exception', async () => {
+    const { base, configDir, dataDir } = dirs();
+    install(configDir);
+    const log = spyLog();
+    const a = approvals();
+    a.relayClient.registerMethod = () => { throw new Error('the relay client is not what it should be'); };
+    const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log, deps: { endpoint: endpoint(base) } });
+    assert.ok(gui);
+    assert.equal(gui.unavailable.reason, 'gui_start_failed');
+    assert.equal(gui.channel, null);
+    assert.equal(gui.leases, null);
+    assert.equal(log.errors.length, 1);
+    const registry = new ToolRegistry();
+    gui.registerTools(registry);
+    const out = await registry.get('ListApps').execute({}, {});
+    assert.match(out.error, /^capability_unavailable: gui \(gui_start_failed: /);
+    await gui.start();
+    await gui.stop();
+    // Even a node config that cannot be read at all does not throw.
+    const broken = createGuiSubsystem({ nodeConfig: null, dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, log: spyLog() });
+    assert.equal(broken.unavailable.reason, 'gui_start_failed');
+  });
+
   it('R-F5-11: doctor is quiet about a helper that is not installed and passes one that is', async () => {
     const { configDir, dataDir } = dirs();
     let rows = await runDoctor({ dataDir, adminUid: UID, configDir });
