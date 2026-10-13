@@ -36,12 +36,12 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
     'history:scope.set': 'proxy',
     'history:links.get': 'proxy',
     'history:links.set': 'proxy',
-    // Stage H4 (R-H4-3): the dialog's channels are refused while attached
-    // until the attached host parses the file itself; the batch channels
-    // carry a parsed chat to the service.
-    'history:import.pick': 'deny',
-    'history:import.preview': 'deny',
-    'history:import.commit': 'deny',
+    // Stage H4 (R-H4-3): the dialog's channels are answered on the desktop,
+    // which opens and parses the file; the batch channels carry the parsed
+    // chat to the service.
+    'history:import.pick': 'local',
+    'history:import.preview': 'local',
+    'history:import.commit': 'local',
     'history:import.lookup': 'proxy',
     'history:import.begin': 'proxy',
     'history:import.append': 'proxy',
@@ -63,6 +63,18 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
   for (const [channel, route] of Object.entries(cases)) {
     it(`${channel} → ${route}`, () => assert.strictEqual(classifyChannel(channel), route));
   }
+
+  it('R-H4-3: pick, preview and commit are local; begin, append, finish and lookup are proxied', () => {
+    for (const ch of [IPC.HISTORY_IMPORT_PICK, IPC.HISTORY_IMPORT_PREVIEW, IPC.HISTORY_IMPORT_COMMIT]) {
+      assert.strictEqual(classifyChannel(ch), 'local', ch);
+    }
+    for (const ch of [IPC.HISTORY_IMPORT_BEGIN, IPC.HISTORY_IMPORT_APPEND, IPC.HISTORY_IMPORT_FINISH, IPC.HISTORY_IMPORT_LOOKUP]) {
+      assert.strictEqual(classifyChannel(ch), 'proxy', ch);
+    }
+    // Nothing else in the history domain is answered on the desktop.
+    const local = Object.values(IPC).filter((ch) => typeof ch === 'string' && ch.startsWith('history:') && classifyChannel(ch) === 'local');
+    assert.deepStrictEqual(local.sort(), ['history:import.commit', 'history:import.pick', 'history:import.preview']);
+  });
 
   it('proxies every case channel C2 registers', () => {
     const caseChannels = Object.values(IPC).filter((ch) => typeof ch === 'string' && ch.startsWith('case:'));

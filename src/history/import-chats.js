@@ -428,7 +428,13 @@ function createImportGate({ getStore, idleMs = IMPORT_IDLE_MS, setTimer = setTim
       stopTimer(entry);
       return out;
     },
-    abortOpen
+    abortOpen,
+    // Removes the open import only when it is this one: the sender of a
+    // batch import went away (the desktop bridge's disconnect).
+    abort({ importId, reason = 'its sender went away' } = {}) {
+      if (!open || typeof importId !== 'string' || importId !== open.importId) return false;
+      return abortOpen(reason);
+    }
   };
 }
 

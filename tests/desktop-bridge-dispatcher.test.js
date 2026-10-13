@@ -311,6 +311,55 @@ describe('bridge dispatcher', () => {
     assert.strictEqual(core.pendingCanvasJsResolvers.has('req-2'), false, 'removed, not left pending');
   });
 
+  // History stage H4 (owner ruling R-H4-3): a parsed chat arrives in batches.
+  // A desktop that goes away in the middle leaves no half chat behind.
+  it('R-H4-3: an import left open by a desktop that disconnects is removed', async () => {
+    const { dispatcher, use } = makeDispatcher();
+    const store = core.context.getHistoryStore();
+    const gate = core.context.getHistoryImportGate();
+    const a = connection();
+    use(a);
+    const begin = (id, hash, total) => dispatcher.handleFrame(a, {
+      t: 'invoke', id, channel: 'history:import.begin',
+      args: [{ kind: 'markdown-transcript', importerVersion: 1, sourceHash: hash, sourceName: 'Lakeside lot notes.md', chat: { title: 'Lakeside lot planning' }, total }]
+    });
+    const messages = [{ sender: 'user', text: 'Where is the Lakeside lot culvert?' }, { sender: 'assistant', text: 'Under the north fence.' }];
+    const half = 'ab'.repeat(32);
+    await begin(1, half, 4);
+    const begun = resultFor(a, 1).value;
+    assert.strictEqual(begun.ok, true);
+    await dispatcher.handleFrame(a, { t: 'invoke', id: 2, channel: 'history:import.append', args: [{ importId: begun.importId, messages }] });
+    assert.deepStrictEqual(resultFor(a, 2).value, { ok: true, done: 2 });
+    assert.ok(store.chatRef(begun.chatId));
+    // Another desktop going away is not this import's.
+    const other = connection('desk b');
+    await dispatcher.onDisconnect(other);
+    assert.ok(store.chatRef(begun.chatId));
+    assert.strictEqual(gate.busy(), true);
+    await dispatcher.onDisconnect(a);
+    assert.strictEqual(store.chatRef(begun.chatId), null);
+    assert.strictEqual(store.findImport(half), null);
+    assert.strictEqual(gate.busy(), false);
+
+    // A finished import stays when its desktop disconnects.
+    const b = connection();
+    use(b);
+    const whole = 'cd'.repeat(32);
+    await dispatcher.handleFrame(b, {
+      t: 'invoke', id: 1, channel: 'history:import.begin',
+      args: [{ kind: 'markdown-transcript', importerVersion: 1, sourceHash: whole, sourceName: 'Lakeside lot notes.md', chat: { title: 'Lakeside lot planning' }, total: 2 }]
+    });
+    const second = resultFor(b, 1).value;
+    await dispatcher.handleFrame(b, { t: 'invoke', id: 2, channel: 'history:import.append', args: [{ importId: second.importId, messages }] });
+    await dispatcher.handleFrame(b, { t: 'invoke', id: 3, channel: 'history:import.finish', args: [{ importId: second.importId }] });
+    assert.strictEqual(resultFor(b, 3).value.ok, true);
+    await dispatcher.onDisconnect(b);
+    assert.ok(store.chatRef(second.chatId));
+    assert.strictEqual(store.messageCount(second.chatId), 2);
+    assert.strictEqual(store.findImport(whole).state, 'done');
+    store.deleteChat(second.chatId);
+  });
+
   it('reports approvals status, unavailable before fleet stage 3', async () => {
     assert.deepStrictEqual(approvalsStatus({ approvals: null, dataDir }), { available: false });
     fs.mkdirSync(path.join(dataDir, 'approvals'), { recursive: true });

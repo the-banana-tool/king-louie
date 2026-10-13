@@ -6,10 +6,34 @@
 // handlers and the attached host each build one.
 const crypto = require('crypto');
 const path = require('path');
+const { parseImport, previewImport, MAX_BATCH_MESSAGES, MAX_BATCH_CHARS } = require('../history/import-chats');
 
 const MAX_PICKS = 8;
 const PICK_TTL_MS = 15 * 60 * 1000;
 const NO_FILE = Object.freeze({ ok: false, error: 'Choose the file again.', code: 'IMPORT_NO_FILE' });
+
+// The dialog both hosts open. Returns a function that answers the chosen
+// path, or null when the dialog was cancelled or the host has no dialog.
+function createPickImportFile({ dialog = null, getWindow = () => null, env = process.env } = {}) {
+  return async () => {
+    // The e2e suite cannot drive a native dialog: under KL_TEST_MODE, and
+    // only then, KL_TEST_IMPORT_FILE is the file "picked". Without
+    // KL_TEST_MODE the variable is ignored.
+    if (env && env.KL_TEST_MODE && typeof env.KL_TEST_IMPORT_FILE === 'string' && env.KL_TEST_IMPORT_FILE) {
+      return env.KL_TEST_IMPORT_FILE;
+    }
+    if (!dialog || typeof dialog.showOpenDialog !== 'function') return null;
+    const options = {
+      title: 'Import a conversation',
+      properties: ['openFile'],
+      filters: [{ name: 'Conversations', extensions: ['jsonl', 'json', 'md', 'markdown'] }]
+    };
+    const win = typeof getWindow === 'function' ? getWindow() : null;
+    const live = win && !(typeof win.isDestroyed === 'function' && win.isDestroyed()) ? win : null;
+    const result = await (live ? dialog.showOpenDialog(live, options) : dialog.showOpenDialog(options));
+    return !result || result.canceled || !result.filePaths || result.filePaths.length === 0 ? null : result.filePaths[0];
+  };
+}
 
 // pickFile() → the chosen path, or null when the dialog was cancelled.
 function createImportPicks({ pickFile, now = Date.now } = {}) {
@@ -60,4 +84,123 @@ function sourceBaseName(name) {
   return base && base !== '.' && base !== '..' ? base : null;
 }
 
-module.exports = { createImportPicks, importRequest, sourceBaseName, NO_FILE, MAX_PICKS, PICK_TTL_MS };
+// Attached mode (owner ruling R-H4-3): the desktop opens and parses the
+// picked file here, in its own main process, and the service stores what it
+// is sent. A batch is at most 200 messages and half the service's size cap
+// (import-chats.js), so a sender that keeps to them is never refused for size.
+const SEND_BATCH_MESSAGES = 200;
+const SEND_BATCH_CHARS = MAX_BATCH_CHARS / 2;
+const BUSY = Object.freeze({ ok: false, error: 'Another import is running.', code: 'IMPORT_BUSY' });
+const MESSAGE_TOO_LARGE = Object.freeze({
+  ok: false, code: 'IMPORT_MESSAGE_TOO_LARGE', error: 'One message of this conversation is too large to send to the service.'
+});
+
+// The messages as the batches to send, or null when one message alone is
+// more than the service takes in a call. A message over the batch size goes
+// in a batch of its own.
+function planImportBatches(messages, { maxMessages = SEND_BATCH_MESSAGES, maxChars = SEND_BATCH_CHARS, hardChars = MAX_BATCH_CHARS } = {}) {
+  const batches = [];
+  let batch = [];
+  let chars = 2; // the list's brackets
+  for (const message of messages) {
+    const size = JSON.stringify(message).length;
+    if (size + 2 > hardChars) return null;
+    if (batch.length && (batch.length >= maxMessages || chars + size + 1 > maxChars)) {
+      batches.push(batch);
+      batch = [];
+      chars = 2;
+    }
+    batch.push(message);
+    chars += size + 1;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
+// A reply of the service that is not the one a step needs, as this commit's
+// own reply: the service's code and sentence when it gave them.
+function refusedReply(reply) {
+  const r = reply && typeof reply === 'object' ? reply : {};
+  return {
+    ok: false,
+    code: typeof r.code === 'string' && r.code ? r.code : 'IMPORT_FAILED',
+    error: typeof r.error === 'string' && r.error ? r.error : 'The local service did not store this conversation.'
+  };
+}
+
+// invoke(channel, args) → the service's reply (the attached host's
+// proxyInvoke: an unreachable or too-old service is a reply, not a throw).
+// Nothing is written on the desktop, and the path stays here: the service is
+// told the file's base name, its hash and the parsed chat.
+function createAttachedImport({ picks, invoke, parse = parseImport, preview = previewImport } = {}) {
+  let running = false;
+
+  return {
+    async preview(payload) {
+      const { token, pattern } = importRequest(payload);
+      const filePath = picks.pathFor(token);
+      if (!filePath) return { ...NO_FILE };
+      const { sourceHash, importerVersion: _version, ...shown } = await preview(filePath, { pattern });
+      const looked = await invoke('history:import.lookup', [{ sourceHash }]);
+      if (!looked || looked.ok !== true) {
+        // Not reachable (or too old to say): the owner still sees the file.
+        return { ok: true, untrustedText: true, ...shown, existingChatId: null, serviceUnreachable: true };
+      }
+      const existing = typeof looked.existingChatId === 'string' && looked.existingChatId ? looked.existingChatId : null;
+      return { ok: true, untrustedText: true, ...shown, existingChatId: existing };
+    },
+
+    async commit(payload) {
+      const { token, pattern } = importRequest(payload);
+      const filePath = picks.pathFor(token);
+      if (!filePath) return { ...NO_FILE };
+      if (running) return { ...BUSY };
+      running = true;
+      try {
+        const parsed = await parse(filePath, { pattern });
+        const { kind, messages } = parsed;
+        if (!Array.isArray(messages) || !messages.length) {
+          return { ok: false, code: 'IMPORT_INVALID', error: 'This file has no messages to import.' };
+        }
+        const batches = planImportBatches(messages);
+        if (!batches) return { ...MESSAGE_TOO_LARGE };
+
+        const begun = await invoke('history:import.begin', [{
+          kind,
+          importerVersion: parsed.importerVersion,
+          sourceHash: parsed.sourceHash,
+          sourceName: sourceBaseName(path.basename(filePath)),
+          chat: parsed.chat,
+          total: messages.length
+        }]);
+        if (!begun || begun.ok !== true) return refusedReply(begun);
+        if (typeof begun.existingChatId === 'string' && begun.existingChatId) {
+          picks.spend(token);
+          return { ok: true, chatId: begun.existingChatId, imported: false, kind };
+        }
+        const { importId } = begun;
+        if (typeof importId !== 'string' || !importId) return refusedReply(null);
+
+        // A call that fails ends the commit. The service removes the half
+        // chat itself: at once for a refused batch; for a connection that
+        // went away, when it sees it go, at the next begin of this file, or
+        // after 30 minutes without a call.
+        for (const batch of batches) {
+          const appended = await invoke('history:import.append', [{ importId, messages: batch }]);
+          if (!appended || appended.ok !== true) return refusedReply(appended);
+        }
+        const finished = await invoke('history:import.finish', [{ importId }]);
+        if (!finished || finished.ok !== true || typeof finished.chatId !== 'string') return refusedReply(finished);
+        picks.spend(token);
+        return { ok: true, chatId: finished.chatId, imported: true, messages: finished.messages, kind };
+      } finally {
+        running = false;
+      }
+    }
+  };
+}
+
+module.exports = {
+  createImportPicks, createPickImportFile, createAttachedImport, planImportBatches,
+  importRequest, sourceBaseName, NO_FILE, MAX_PICKS, PICK_TTL_MS, SEND_BATCH_MESSAGES, SEND_BATCH_CHARS
+};

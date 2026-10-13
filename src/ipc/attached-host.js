@@ -6,6 +6,8 @@ const { listIpcChannels } = require('./channel-inventory');
 const { createDesktopHandler } = require('./desktop-handlers');
 const { createDesktopController } = require('./desktop-controller');
 const { classifyChannel, isRendererEvent } = require('../desktop-bridge/allowlist');
+const { wrapHandler } = require('./wrap-handler');
+const { createImportPicks, createPickImportFile, createAttachedImport } = require('./import-picks');
 const { MESSAGES, DEFAULT_DESKTOP_BRIDGE_PORT } = require('../desktop-bridge/protocol');
 
 const log = createLogger('attached-host');
@@ -58,7 +60,17 @@ function startAttachedHost(deps) {
     }
   }
 
+  // History stage H4 (owner ruling R-H4-3): the file an import reads is
+  // picked, opened and parsed here, on the desktop; the service is sent the
+  // parsed chat in batches and never a path. Nothing is stored on the desktop.
+  const importPicks = createImportPicks({ pickFile: createPickImportFile({ dialog, getWindow, env }) });
+  const attachedImport = createAttachedImport({ picks: importPicks, invoke: proxyInvoke });
+  const localImport = (channel, fn) => wrapHandler(channel, async (_event, payload) => fn(payload));
+
   const LOCAL = {
+    'history:import.pick': localImport('history:import.pick', () => importPicks.pick()),
+    'history:import.preview': localImport('history:import.preview', (payload) => attachedImport.preview(payload)),
+    'history:import.commit': localImport('history:import.commit', (payload) => attachedImport.commit(payload)),
     'wizard:getStatus': async () => ({ ok: true, isFirstRun: false }),
     'wizard:complete': async () => ({ ok: true }),
     'wizard:getSteps': async () => {

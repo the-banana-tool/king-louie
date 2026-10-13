@@ -13,6 +13,7 @@ const { createElectronPrompter } = require('../platform/electron-prompter');
 const { markLocalDesktopEvent } = require('../core/origin');
 const UiToastChannel = require('../notifications/channels/ui-toast');
 const { createDesktopController } = require('./desktop-controller');
+const { createPickImportFile } = require('./import-picks');
 
 function markingIpcMain(ipcMain) {
   return {
@@ -25,7 +26,7 @@ function markingIpcMain(ipcMain) {
 function startStandaloneHost(deps) {
   const {
     app, ipcMain, safeStorage, shell, Notification, getWindow, state, appDir, dialog = null,
-    standaloneOnce = false, StoreClass = null, createCoreFn = createCore
+    standaloneOnce = false, StoreClass = null, createCoreFn = createCore, env = process.env
   } = deps;
   const Store = StoreClass || withReadCache(require('electron-store').default);
   const pendingAskUserResolvers = new Map();
@@ -91,17 +92,7 @@ function startStandaloneHost(deps) {
     getMainWindow: getWindow,
     // History stage H4: the file an import reads is chosen here, in the main
     // process; the renderer gets a token for it (import-picks.js).
-    pickImportFile: async () => {
-      if (!dialog) return null;
-      const options = {
-        title: 'Import a conversation',
-        properties: ['openFile'],
-        filters: [{ name: 'Conversations', extensions: ['jsonl', 'json', 'md', 'markdown'] }]
-      };
-      const win = liveWindow();
-      const result = await (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options));
-      return result.canceled || !result.filePaths || result.filePaths.length === 0 ? null : result.filePaths[0];
-    },
+    pickImportFile: createPickImportFile({ dialog, getWindow: liveWindow, env }),
     getShell: () => shell,
     pendingAskUserResolvers,
     pendingDirectoryAccessResolvers,

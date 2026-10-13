@@ -2,17 +2,18 @@
 // Rules are evaluated in order; the first match wins. A stage that adds a
 // domain that must work while attached appends it to PROXIED_DOMAINS (one line).
 const LOCAL_PREFIXES = Object.freeze(['desktop:', 'wizard:']);
-const LOCAL_CHANNELS = Object.freeze(['app:quitWindow']);
-const PRESTEP_CHANNELS = Object.freeze(['chat:pickWorkingDirectory', 'settings:addAllowedDirectory']);
-// History stage H4: the import dialog's three channels open a file the owner
-// picked on the desktop, so the service never serves them (owner ruling
-// R-H4-3). Until the attached host parses the file itself they are refused
-// while attached; the batch channels (history:import.lookup, .begin, .append,
-// .finish) carry a parsed chat and ride the proxied history domain.
-const DENY_CHANNELS = Object.freeze([
-  'chat:speakLast', 'settings:testVoice',
+// History stage H4 (owner ruling R-H4-3): the import dialog's three channels
+// are answered on the desktop. Its main process opens and parses the file the
+// owner picked there; the service never serves them and never opens a path a
+// desktop named. The parsed chat goes to the service over the batch channels
+// (history:import.lookup, .begin, .append, .finish), which ride the proxied
+// history domain.
+const LOCAL_CHANNELS = Object.freeze([
+  'app:quitWindow',
   'history:import.pick', 'history:import.preview', 'history:import.commit'
 ]);
+const PRESTEP_CHANNELS = Object.freeze(['chat:pickWorkingDirectory', 'settings:addAllowedDirectory']);
+const DENY_CHANNELS = Object.freeze(['chat:speakLast', 'settings:testVoice']);
 const DENY_PREFIXES = Object.freeze(['settings:mcp', 'settings:anthropicOAuth']);
 const PROXIED_DOMAINS = Object.freeze([
   'chat',

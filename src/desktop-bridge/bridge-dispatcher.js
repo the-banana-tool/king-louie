@@ -144,6 +144,30 @@ function createBridgeDispatcher({
   const servedHandle = new Set(served.handle);
   const servedOn = new Set(served.on);
 
+  // History stage H4 (owner ruling R-H4-3): a chat a desktop parsed arrives
+  // in batches. The import each connection has open is remembered, so one
+  // left unfinished is removed when that connection goes, not 30 minutes
+  // later (the gate's idle timer) or at the next start (the sweep).
+  const openImports = new WeakMap(); // conn -> importId
+  const noteImport = (conn, channel, value) => {
+    if (channel === 'history:import.begin' && value && value.ok === true && typeof value.importId === 'string') {
+      openImports.set(conn, value.importId);
+    } else if (channel === 'history:import.finish' && value && value.ok === true) {
+      openImports.delete(conn);
+    }
+  };
+  const dropImport = (conn) => {
+    const importId = openImports.get(conn);
+    if (!importId) return;
+    openImports.delete(conn);
+    try {
+      const gate = typeof context.getHistoryImportGate === 'function' ? context.getHistoryImportGate() : null;
+      if (gate && typeof gate.abort === 'function') gate.abort({ importId, reason: 'its desktop disconnected' });
+    } catch (err) {
+      log.warn(`removing an unfinished import failed: ${err.message}`);
+    }
+  };
+
   const makeEvent = (conn) => markLocalDesktopEvent(
     { sender: { send: (channel, payload) => pushEvent(conn, channel, payload), isDestroyed: () => !conn.live } },
     { deviceId: conn.deviceId }
@@ -165,6 +189,9 @@ function createBridgeDispatcher({
     if (chatId) conn.runs.add(chatId);
     try {
       const value = await handlers.get(channel)(makeEvent(conn), ...args);
+      noteImport(conn, channel, value);
+      // Begun for a desktop that left while the handler ran.
+      if (!conn.live) dropImport(conn);
       conn.send({ t: 'result', id, value: value === undefined ? null : value });
     } catch (err) {
       conn.send({ t: 'result', id, error: (err && err.message) || String(err), code: (err && err.code) || 'HANDLER_ERROR' });
@@ -287,6 +314,7 @@ function createBridgeDispatcher({
     conn.cleaned = true;
     conn.markGone();
     if (importer) importer.expireConnection(conn.id);
+    dropImport(conn);
     const event = makeEvent(conn);
     const approvalResponse = listeners.get('tool:approvalResponse');
     for (const approvalId of [...conn.prompts.approvals]) {
