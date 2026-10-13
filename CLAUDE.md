@@ -1428,10 +1428,26 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
     dir is not LOCAL SERVICE's, none is a link, and with `serviceProbe`
     (the service; never the admin CLI or doctor) this process can neither
     create a file in `identity/` nor open `node.json` for writing (only
-    `EACCES`/`EPERM` is trusted; fourth security review). An owner nobody
+    `EACCES`/`EPERM` is trusted; fourth security review), and the access
+    lists of `identity\` and `node.json` let nobody but SYSTEM and
+    Administrators change either (`windowsAclProblem` →
+    `recordAclProblem`, after the probes; fifth security review, finding
+    3: an entry giving the service WRITE_DAC alone passed the owner read
+    and both probes). A list that cannot be read or judged is refused.
+    That read is one more synchronous PowerShell child, so it runs where
+    the owner read does (the start, and the GUI's own read when its host
+    passed none), never in `probeIdentityRecord`. An owner nobody
     could read, a file that is not JSON, extra keys, an id that is not its
     key's: all `invalid`, never `none`. The key is what is compared, not
     the id.
+  - Windows, a record this account may not read (`EPERM`/`EACCES` on
+    `node.json`): still `invalid` (the service refuses to start), but the
+    message names the three readers the record's access list has (SYSTEM,
+    Administrators, LOCAL SERVICE) and says to run the service as LOCAL
+    SERVICE, or an administrator's command from an elevated prompt; it
+    never offers `identity record --replace` as the remedy, since that
+    writes the same list again (`unreadable` on the read result; fifth
+    security review, finding 2).
   - Windows, writing: `writeIdentityRecord` never keeps a directory that
     was there (an inherit-only entry left in it would reach the new file).
     It builds `.identity.new-*` beside it, gives the directory and then the
@@ -1440,13 +1456,28 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
     and Administrators as owner, writes the record, swaps the directories
     with two renames and removes the old one; a failure puts it back. A
     service run by hand as any account but LOCAL SERVICE cannot read such a
-    record and refuses to start.
+    record and refuses to start. The old directory is never deleted
+    recursively (`removeRecordDir`; fifth security review, finding 6): the
+    old `node.json`, when it is a regular file, then `rmdir`. A directory
+    that holds anything else, or a link, is left as `.identity.old-*` with
+    nothing in it touched; the record is still written and the command
+    says on stderr where it is and how many entries it holds (names from
+    it are never repeated). Never use `fs.rmSync(…, { recursive })` there.
   - Windows, while the service runs: `probeIdentityRecord` is the write
     probe alone, and the lease manager asks it before every new lease
     request (`identityProbe`; off where the host ran no probe). A record
     the service can now write refuses the request
     (`capability_unavailable: gui (node_identity_invalid: …)`), logged
-    when the answer changes; a running lease is not ended by it.
+    when the answer changes; a running lease is not ended by it. The
+    probe runs in `_sendRequest`, where every request is built, so the
+    resume requests the node sends by itself are covered (after a
+    suspension, on `_relayUp`; fifth security review, finding 4;
+    `request()` passes `probed: true`). A resume it refuses sends nothing
+    and ends the lease (`node_identity_invalid`, a free status `reason`;
+    input then says `capability_unavailable`): nothing but an
+    administrator and a restart brings the record back, so a suspended
+    lease would wait for nothing. Not asked: a `no_contact` pause, which
+    resumes on a watch, and a grant that answers a request sent earlier.
   - No record: `session install` refuses; the service starts with one
     warning; computer use is off (`node_identity_unrecorded`, with the
     command in the log, `session status` and doctor). A record of another
@@ -1462,16 +1493,25 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
     catches an identity replaced in the data dir, not code inside the
     service process. doctor's `node identity record` row compares public
     keys only and says so, with what else it did not check
-    (`identityMatchRow`). On Windows it also reads the access lists of
-    `identity\` and `node.json` (`recordAclProblem`: the handle-based
-    inspector, no `Get-Acl`) and fails the row when they let anyone but
-    SYSTEM and Administrators change either, an inherit-only entry
-    included; lists it cannot read are "not checked", never clean. It
+    (`identityMatchRow`). On Windows it also reads the access lists and
+    the owners of the config dir, `identity\` and `node.json`
+    (`recordAclProblem` with `whole: true`: the handle-based inspector,
+    whose `path` line carries the owner; no `Get-Acl`) and fails the row
+    when a list lets anyone but SYSTEM and Administrators change one of
+    them: delete-child or add-subdirectory on the config dir (its own
+    remedy), an inherit-only entry on `identity\`. It says "clean" only
+    when all three are also owned by Administrators or SYSTEM; another
+    owner is a `WARN` that says what was read and that an owner can
+    rewrite a list (fifth security review, finding 5); lists it cannot
+    read are "not checked", never clean. The service's own read asks about
+    `identity\` and `node.json` only, since its owner rule accepts a
+    hand-made config dir another account owns. It
     never runs the write probe (an administrator can always write).
   - Tests write the record with `recordIdentity` and read it with
     `IDENTITY_RECORD_TEST_OPTIONS` (`tests/helpers/identity-record.js`: the
-    Windows owner read and access lists answered in place, no write
-    probe), passed as
+    Windows owner read and access lists answered in place, for however
+    many paths are asked about, no write probe, so no service-side
+    access-list read either), passed as
     `deps.identityRecord` to `runSessionCommand`, `runIdentityCommand`,
     `loadProfile(...).start`, `createGuiSubsystem` and `runDoctor`. A test
     that wants a GUI that is on, or an install that goes through, records
@@ -1627,6 +1667,20 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
     accepted listing no longer names it after the request expired on both
     clocks (`dropMayStartRows`, `Leases.keepsMayStart`). Nothing is
     revoked or sent again by itself.
+  - That memory never decides whether a pending lease has a row (fifth
+    security review, finding 1: a restart loses it and no other phone has
+    it). Every lease an accepted listing names as `pending` gets a row
+    with the same Stop (`notePendingListed` in both apps, after the
+    listing check and `dropMayStartRows`; `Leases.listedPendingGetsRow`),
+    except a request that is on screen with Allow and Deny and that this
+    phone remembers no grant for. Memory chooses the words:
+    `Leases.pendingTitle` / `pendingDetail` say "May still start on
+    <node>" only for a remembered grant, otherwise "A request is waiting
+    on <node>" and that this phone does not remember allowing it. A row
+    without a remembered grant goes with the first accepted listing that
+    no longer names the lease; a row that is there stays while its node
+    still signs `pending`, listing or not (`noteListedLease`). Android
+    does this only inside the "Check" tap and sends nothing for it.
   - `Leases.isListing` in both cores is the node's
     `VALIDATORS['kl.lease.listing']` (exact keys, a real `at`, at most
     eight leases, each once), checked after the signature.
