@@ -272,6 +272,41 @@ function buildVectors() {
   });
   out.push({ name: 'view-node-sig-valid', consumers: PHONES, check: null, given: viewGiven, input: viewEnvelope(), expect: { ...accepted, contact_token: tokenOf('view') } });
   out.push({ name: 'view-tampered-frame', consumers: PHONES, check: null, given: viewGiven, input: viewEnvelope({ tamperHash: true }), expect: reject('frame_hash_mismatch') });
+
+  // R-F5-20: the node's whole answer to one phone's "what is running". A
+  // phone takes it only with the nonce it chose for that request, made for
+  // itself, and with a signed status for every lease it names (by id and
+  // seq). given.nonce and given.device_id are the phone's own; given.statuses
+  // are the status envelopes that came beside the listing. expect.leases is
+  // what the phone then knows of that node, in the listing's order.
+  const listingVector = (name, { states = [], nonce = nonceOf(`listing ${name}`), signedNonce = nonce, toDevice = 'A', beside = null, tamper = null, expect }) => {
+    const statuses = states.map(([state, seq, reason], i) => statusEnvelope(`${name} ${i}`, { seq, state, reason: reason || null, expiresAt: state === 'ended' ? null : NOW_MS + 10 * 60000 }));
+    let input = L.buildLeaseListing({ identity: GPU, toDevice: DEVICES[toDevice].id, nonce: signedNonce, statuses, now: NOW_MS });
+    if (tamper) input = tamper(input);
+    const leases = states.map(([state, seq], i) => ({ lease_id: uuidOf(`lease ${name} ${i}`), seq, state }));
+    return {
+      name, consumers: PHONES, check: null,
+      given: { ...viewGiven, nonce, device_id: DEVICES.A.id, statuses: beside ? beside(statuses) : statuses },
+      input, expect: expect.accepted ? { ...expect, leases } : expect
+    };
+  };
+  // Nothing is running, and the node says so over this request's nonce.
+  out.push(listingVector('listing-none', { expect: accepted }));
+  out.push(listingVector('listing-live', { states: [['active', 7], ['ended', 12, 'revoked']], expect: accepted }));
+  // An answer the node signed for an earlier request, replayed.
+  out.push(listingVector('listing-nonce-mismatch', { signedNonce: nonceOf('an earlier listing request'), expect: reject('nonce_mismatch') }));
+  // The relay left the live lease's status out.
+  out.push(listingVector('listing-status-withheld', { states: [['active', 7], ['ended', 12, 'revoked']], beside: (s) => [s[1]], expect: reject('status_missing') }));
+  // The relay put an older signed status of the same lease in its place.
+  out.push(listingVector('listing-status-stale', {
+    states: [['suspended', 9, 'no_contact']], expect: reject('status_missing'),
+    beside: () => [statusEnvelope('listing-status-stale 0', { seq: 4, state: 'active' })]
+  }));
+  out.push(listingVector('listing-other-device', { toDevice: 'B', expect: reject('wrong_device') }));
+  out.push(listingVector('listing-bad-signature', {
+    expect: reject('bad_signature'),
+    tamper: (e) => ({ ...e, sig: Buffer.concat([sha('bad listing sig a'), sha('bad listing sig b')]).toString('base64url') })
+  }));
   return out;
 }
 

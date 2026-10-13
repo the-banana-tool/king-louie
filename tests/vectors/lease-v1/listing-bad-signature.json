@@ -1,0 +1,30 @@
+{
+  "name": "listing-bad-signature",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": null,
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "node": {
+      "id": "kl-hnef32472qzibi5r",
+      "name": "gpu-box",
+      "key": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950"
+    },
+    "nonce": "Fb9uqf_IAltLENRC9b-uu3M4rWvhnKuYnHWJ5k4d3aE",
+    "device_id": "d-3vmwrihhdbnit4oi",
+    "statuses": []
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-hnef32472qzibi5r",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImxlYXNlcyI6W10sIm5vZGVfaWQiOiJrbC1obmVmMzI0NzJxemliaTVyIiwibm9uY2UiOiJGYjl1cWZfSUFsdExFTlJDOWItdXUzTTRyV3Zobkt1WW5IV0o1azRkM2FFIiwidG9fZGV2aWNlIjoiZC0zdm13cmloaGRibml0NG9pIiwidHlwZSI6ImtsLmxlYXNlLmxpc3RpbmciLCJ2IjoxfQ",
+    "sig": "64Sf218-IwQxx2CWfYlFJ2JkB2nlzJXtrnVG9bB6eoHgF1doz-IfaDE99CdkJd1cB6fE7TurRrSR1jJfr2MgDg"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "bad_signature"
+  }
+}

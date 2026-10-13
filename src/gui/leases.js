@@ -782,6 +782,17 @@ class LeaseManager extends EventEmitter {
     relay.send(this._signStatus(lease)).catch((err) => this.log.debug(`lease status not sent: ${err.message}`));
   }
 
+  // An enrolled, real, unrevoked device of this node; false when that cannot be read.
+  _enrolled(deviceId) {
+    try {
+      const store = this.approvals.approverStore;
+      const record = typeof deviceId === 'string' && store ? store.get(deviceId) : null;
+      return Boolean(record) && record.platform !== 'demo' && store.isActive(deviceId) === true;
+    } catch {
+      return false;
+    }
+  }
+
   // R-F5-18: what a phone asks for when it opens (one signed request to the
   // relay, which names the device it authenticated): a status signed now
   // for the live lease, if there is one, and for the few that ended last,
@@ -793,18 +804,26 @@ class LeaseManager extends EventEmitter {
   // answered: the statuses say nothing the phones of this node are not sent
   // anyway, and what a phone does with one (watch, stop) it signs itself.
   listFor(deviceId) {
-    let enrolled = false;
-    try {
-      const store = this.approvals.approverStore;
-      const record = typeof deviceId === 'string' && store ? store.get(deviceId) : null;
-      enrolled = Boolean(record) && record.platform !== 'demo' && store.isActive(deviceId) === true;
-    } catch {
-      enrolled = false;
-    }
-    if (!enrolled) return [];
+    if (!this._enrolled(deviceId)) return [];
     const live = this.current();
     const ended = this.leases.filter((l) => l.state === 'ended').slice(-LISTED_ENDED).reverse();
     return [...(live ? [live] : []), ...ended].map((lease) => this._signStatus(lease));
+  }
+
+  // R-F5-20 (owner ruling, 2026-10-13): a relay cannot hide a live lease
+  // from a phone. The phone puts a nonce it chose for this request in the
+  // request it signs; the node answers with the statuses above and a listing
+  // it signs over that nonce, that phone and exactly those statuses (each
+  // lease by its id and the seq just signed), also when there are none. A
+  // relay can then neither drop an entry nor replay an earlier "nothing":
+  // the phone accepts the answer whole or not at all. The nonce is not
+  // remembered here: it is the phone that needs it to be fresh. No nonce (an
+  // older relay or phone) gives the statuses alone, and a device that is
+  // not enrolled here gets nothing, as before.
+  listingFor(deviceId, nonce) {
+    const statuses = this.listFor(deviceId);
+    if (!this._enrolled(deviceId) || typeof nonce !== 'string' || !L.LIST_NONCE_RE.test(nonce)) return { statuses, listing: null };
+    return { statuses, listing: L.buildLeaseListing({ identity: this.approvals.identity, toDevice: deviceId, nonce, statuses, now: this.clock() }) };
   }
 }
 

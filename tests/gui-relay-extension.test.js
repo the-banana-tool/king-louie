@@ -140,6 +140,92 @@ describe('lease routes', () => {
       const many = relayWith(() => ({ statuses: Array.from({ length: 20 }, (_, i) => status(node, 'ended', i + 1)) }));
       assert.equal((await call(many, 'GET /v1/leases', phone)).body.length, 8);
     });
+
+    // R-F5-20 (owner ruling, 2026-10-13): a relay cannot hide a live lease
+    // from a phone. The phone's request carries a nonce it chose (in the
+    // query, so under its request signature); each node signs a listing
+    // over it, and the relay only carries that.
+    describe('R-F5-20: with the phone\'s nonce, each node\'s signed listing comes with its statuses', () => {
+      const NONCE = 'n'.repeat(43);
+      const other = testNodeIdentity({ key: 'web-01' });
+      const two = [{ node_id: NODE, state: 'active' }, { node_id: other.nodeId, state: 'active' }];
+      const answer = (identity, deviceId, nonce, states) => {
+        const statuses = states.map((state, i) => L.buildLeaseStatus({ identity, leaseId: request().message.lease_id, seq: 5 + i, state }));
+        return { statuses, listing: L.buildLeaseListing({ identity, toDevice: deviceId, nonce, statuses }) };
+      };
+      const asPhone = (body, identity, phone, nonce = NONCE) => {
+        const mine = body.filter((e) => e.node_id === identity.nodeId && e.envelope === null);
+        const listing = mine.find((e) => e.listing);
+        if (!listing) return { accepted: false, reason: 'no_listing' };
+        return L.verifyLeaseListing(listing.listing, {
+          nodeId: identity.nodeId, nodePublicKeyHex: identity.publicKey.toString('hex'), nonce, deviceId: phone.deviceId, statuses: mine.map((e) => e.status).filter(Boolean)
+        });
+      };
+
+      it('hands each node the nonce and passes its listing on, also one that lists nothing', async () => {
+        const phone = createFakePhone();
+        const r = relayWith((nodeId, method, params) => (nodeId === NODE
+          ? answer(node, params.device_id, params.nonce, ['active'])
+          : answer(other, params.device_id, params.nonce, [])), two);
+        const listed = (await call(r, 'GET /v1/leases', phone, { query: { nonce: NONCE } })).body;
+        assert.deepEqual(r.rpcs.map((c) => [c.nodeId, c.method, c.params]), [
+          [NODE, 'lease.list', { device_id: phone.deviceId, nonce: NONCE }], [other.nodeId, 'lease.list', { device_id: phone.deviceId, nonce: NONCE }]
+        ]);
+        assert.deepEqual(listed.map((e) => [e.node_id, e.envelope, Boolean(e.status), Boolean(e.listing)]), [
+          [NODE, null, false, true], [NODE, null, true, false], [other.nodeId, null, false, true]
+        ]);
+        const live = asPhone(listed, node, phone);
+        assert.equal(live.accepted, true, live.reason);
+        assert.deepEqual(live.statuses.map((m) => m.state), ['active']);
+        const none = asPhone(listed, other, phone);
+        assert.equal(none.accepted, true, none.reason);
+        assert.deepEqual(none.statuses, [], 'nothing live, on the node\'s own signature');
+      });
+
+      it('a node that is offline, slow or older gives no listing, which a phone cannot take for "nothing"', async () => {
+        const phone = createFakePhone();
+        for (const rpc of [
+          () => { throw Object.assign(new Error('timeout'), { code: 'timeout' }); },
+          // An older node: statuses, no listing.
+          () => ({ statuses: [L.buildLeaseStatus({ identity: node, leaseId: request().message.lease_id, seq: 5, state: 'active' })] }),
+          () => ({ statuses: [], listing: { not: 'an envelope' } }),
+          // A listing by another node, and something that is not a listing.
+          (nodeId, method, params) => ({ statuses: [], listing: answer(other, params.device_id, params.nonce, []).listing }),
+          () => ({ statuses: [], listing: L.buildLeaseStatus({ identity: node, leaseId: request().message.lease_id, seq: 5, state: 'ended' }) })
+        ]) {
+          const listed = (await call(relayWith(rpc), 'GET /v1/leases', phone, { query: { nonce: NONCE } })).body;
+          assert.ok(listed.every((e) => !e.listing));
+          assert.equal(asPhone(listed, node, phone).accepted, false);
+        }
+      });
+
+      it('what a relay could do to the answer is caught by the phone\'s check', async () => {
+        const phone = createFakePhone();
+        const fresh = async (nonce) => (await call(relayWith((nodeId, method, params) => answer(node, params.device_id, params.nonce, ['active', 'ended'])), 'GET /v1/leases', phone, { query: { nonce } })).body;
+        const now = await fresh(NONCE);
+        assert.equal(asPhone(now, node, phone).accepted, true);
+        // Entries stripped: the live one, or all of them.
+        assert.equal(asPhone(now.filter((e) => !e.status || open(e.status).message.state !== 'active'), node, phone).reason, 'status_missing');
+        assert.equal(asPhone(now.filter((e) => e.listing), node, phone).reason, 'status_missing');
+        // An answer to an earlier request, replayed whole.
+        assert.equal(asPhone(await fresh('o'.repeat(43)), node, phone).reason, 'nonce_mismatch');
+        // An answer made for another phone.
+        assert.equal(asPhone(now, node, createFakePhone()).reason, 'wrong_device');
+      });
+
+      it('no nonce: as before, and no listing; a nonce that is not one is refused before any node is asked', async () => {
+        const phone = createFakePhone();
+        const r = relayWith((nodeId, method, params) => answer(node, params.device_id, 'x'.repeat(43), ['active']));
+        const listed = (await call(r, 'GET /v1/leases', phone)).body;
+        assert.deepEqual(listed.map((e) => Object.keys(e)), [['node_id', 'envelope', 'status']], 'a node\'s listing is not passed on unasked');
+        assert.deepEqual(r.rpcs[0].params, { device_id: phone.deviceId });
+        const strict = relayWith(() => ({ statuses: [] }));
+        for (const nonce of ['short', 'n'.repeat(44), '', 'n'.repeat(42) + '!']) {
+          await assert.rejects(call(strict, 'GET /v1/leases', phone, { query: { nonce } }), (e) => e.status === 400 && e.code === 'bad_nonce');
+        }
+        assert.deepEqual(strict.rpcs, []);
+      });
+    });
   });
 
   it('long-polls with wait', async () => {

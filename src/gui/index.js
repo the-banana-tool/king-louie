@@ -140,8 +140,14 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
     relay.registerMethod('lease.grant', async ({ envelope } = {}) => leases.onGrant(envelope));
     relay.registerMethod('lease.revoke', async ({ envelope } = {}) => leases.onRevoke(envelope));
     relay.registerMethod('lease.watch', async ({ envelope } = {}) => liveView.onWatch(envelope));
-    // R-F5-18: statuses signed now, for a phone that opens and asks what is running.
-    relay.registerMethod('lease.list', async ({ device_id: deviceId } = {}) => ({ statuses: leases.listFor(deviceId) }));
+    // R-F5-18: statuses signed now, for a phone that opens and asks what is
+    // running. R-F5-20: with the phone's nonce, a listing signed over it and
+    // over exactly those statuses, so the phone can tell the node's "nothing"
+    // from a relay that left something out.
+    relay.registerMethod('lease.list', async ({ device_id: deviceId, nonce } = {}) => {
+      const { statuses, listing } = leases.listingFor(deviceId, nonce);
+      return listing ? { statuses, listing } : { statuses };
+    });
   }
 
   let brokerStarted = false;

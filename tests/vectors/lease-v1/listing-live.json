@@ -1,0 +1,55 @@
+{
+  "name": "listing-live",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": null,
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "node": {
+      "id": "kl-hnef32472qzibi5r",
+      "name": "gpu-box",
+      "key": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950"
+    },
+    "nonce": "IRej8FIqX7dPaZkPSCAPtG2EN2bVR7iydpsMkaS_DrI",
+    "device_id": "d-3vmwrihhdbnit4oi",
+    "statuses": [
+      {
+        "alg": "Ed25519",
+        "kid": "kl-hnef32472qzibi5r",
+        "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJEQzdfSXQwYWdOWi1aQmZORWFiVUlRIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MTQ6MTEuMjAxWiIsImdyYW50ZWRfYnkiOnsiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwibmFtZSI6Ik93bmVyIHBob25lIn0sImxlYXNlX2lkIjoiZGY4NzUxMDktMzJkOS00YmQyLTk1NzItMzBkY2ZhY2FhN2QyIiwibG9ja2VkIjpmYWxzZSwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJyZWFzb24iOm51bGwsInNlcSI6Nywic3RhdGUiOiJhY3RpdmUiLCJ0eXBlIjoia2wubGVhc2Uuc3RhdHVzIiwidiI6MX0",
+        "sig": "5bSdlMugIpEL57fEhLR_R39193zxI8HsKo91wrI3cc3RRfloD4bkuhuLYYSs3F9oiI7O-mDqMpsZb1Nsl60FCw"
+      },
+      {
+        "alg": "Ed25519",
+        "kid": "kl-hnef32472qzibi5r",
+        "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJ2Q1cyNHFWb1E4TzNMaC1YVVppQmdBIiwiZXhwaXJlc19hdCI6bnVsbCwiZ3JhbnRlZF9ieSI6eyJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJuYW1lIjoiT3duZXIgcGhvbmUifSwibGVhc2VfaWQiOiI0ODFlMWFmMC0zMmFkLTRhZDAtOWY5MC02NzY1NDdiNGM1NWMiLCJsb2NrZWQiOmZhbHNlLCJub2RlX2lkIjoia2wtaG5lZjMyNDcycXppYmk1ciIsInJlYXNvbiI6InJldm9rZWQiLCJzZXEiOjEyLCJzdGF0ZSI6ImVuZGVkIiwidHlwZSI6ImtsLmxlYXNlLnN0YXR1cyIsInYiOjF9",
+        "sig": "ukeDvEnZ5lbWvOyAUFQm8Te2chVSTJEoBxLnTPAPODi3Jb1eH3ZlXYkKpGfhluzsqbiXwe_-JbveaKRTXw7CDg"
+      }
+    ]
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-hnef32472qzibi5r",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImxlYXNlcyI6W3sibGVhc2VfaWQiOiJkZjg3NTEwOS0zMmQ5LTRiZDItOTU3Mi0zMGRjZmFjYWE3ZDIiLCJzZXEiOjd9LHsibGVhc2VfaWQiOiI0ODFlMWFmMC0zMmFkLTRhZDAtOWY5MC02NzY1NDdiNGM1NWMiLCJzZXEiOjEyfV0sIm5vZGVfaWQiOiJrbC1obmVmMzI0NzJxemliaTVyIiwibm9uY2UiOiJJUmVqOEZJcVg3ZFBhWmtQU0NBUHRHMkVOMmJWUjdpeWRwc01rYVNfRHJJIiwidG9fZGV2aWNlIjoiZC0zdm13cmloaGRibml0NG9pIiwidHlwZSI6ImtsLmxlYXNlLmxpc3RpbmciLCJ2IjoxfQ",
+    "sig": "MMFVcL02XZ9oUdAVa23BnaoEDqdD1cjPGL2T077zQWnZ5Sp45SS6uFO-NXTsj1YNlhmoZRhPvx8QN7e0pArQBw"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "leases": [
+      {
+        "lease_id": "df875109-32d9-4bd2-9572-30dcfacaa7d2",
+        "seq": 7,
+        "state": "active"
+      },
+      {
+        "lease_id": "481e1af0-32ad-4ad0-9f90-676547b4c55c",
+        "seq": 12,
+        "state": "ended"
+      }
+    ]
+  }
+}

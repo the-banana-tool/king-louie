@@ -340,6 +340,9 @@ describe('createGuiSubsystem', () => {
     const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, deps: { endpoint: endpoint(base) } });
     assert.ok(gui);
     assert.deepEqual([...a.relayClient.methods.keys()], ['lease.grant', 'lease.revoke', 'lease.watch', 'lease.list']);
+    // R-F5-20: lease.list takes the phone's nonce; a device this node does not know gets no listing, with or without one.
+    assert.deepEqual(await a.relayClient.methods.get('lease.list')({ device_id: 'd-aaaaaaaaaaaaaaaa', nonce: 'n'.repeat(43) }), { statuses: [] });
+    assert.deepEqual(await a.relayClient.methods.get('lease.list')(), { statuses: [] });
     const registry = new ToolRegistry();
     gui.registerTools(registry);
     assert.equal(registry.list().length, 10);

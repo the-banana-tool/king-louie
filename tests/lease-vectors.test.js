@@ -19,10 +19,12 @@ const EXPECTED = [
   'unknown-device', 'demo-device', 'test-key', 'wrong-node', 'replay', 'unknown-request', 'lease-hash-mismatch',
   'lease-changed-app-path', 'apps-not-requested', 'minutes-over-requested', 'minutes-over-60', 'expired', 'revoke-valid',
   'revoke-phone-clock-off', 'revoke-unknown-lease', 'revoke-replayed', 'watch-valid', 'watch-no-token', 'watch-bad-token',
-  'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame'
+  'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame',
+  'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature'
 ];
 const PHONE = ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'watch-no-token',
-  'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame'];
+  'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame',
+  'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature'];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')));
 const byName = new Map(vectors.map((v) => [v.name, v]));
@@ -34,6 +36,8 @@ async function run(v) {
   const now = Date.parse(g.now);
   if (v.name.startsWith('view-')) return L.verifyLeaseView(v.input, { nodeId: g.node.id, nodePublicKeyHex: g.node.key });
   if (v.name.startsWith('status-')) return verifyStatus(v.input, g.node);
+  // R-F5-20: what a phone checks on a listing, with its own nonce and device id.
+  if (v.name.startsWith('listing-')) return L.verifyLeaseListing(v.input, { nodeId: g.node.id, nodePublicKeyHex: g.node.key, nonce: g.nonce, deviceId: g.device_id, statuses: g.statuses });
   const store = await approverStoreWith(g.approvers, { allowTestKeys: g.allow_test_keys, now: () => now });
   stores.push(store);
   const nonces = new NonceCache({ now: () => now });
@@ -62,7 +66,7 @@ function verifyStatus(envelope, node) {
 
 describe('lease-v1 vectors', () => {
   it('has exactly the expected set, and phones consume exactly theirs', () => {
-    assert.equal(EXPECTED.length, 32);
+    assert.equal(EXPECTED.length, 39);
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
     for (const phone of ['ios', 'android']) {
       assert.deepEqual(vectors.filter((v) => v.consumers.includes(phone)).map((v) => v.name).sort(), [...PHONE].sort());
@@ -85,10 +89,13 @@ describe('lease-v1 vectors', () => {
       const r = await run(v);
       assert.equal(r.accepted, v.expect.accepted, `${name}: ${r.reason}`);
       assert.equal(r.reason, v.expect.reason);
-      if (v.check !== null && !name.startsWith('view-')) assert.equal(r.check, v.check);
+      if (v.check !== null && !name.startsWith('view-') && !name.startsWith('listing-')) assert.equal(r.check, v.check);
       // The fields a phone reads from a status or a view, the contact token among them.
       if (v.expect.status) for (const [key, value] of Object.entries(v.expect.status)) assert.deepEqual(r.message[key], value, `${name}: ${key}`);
       if (v.expect.contact_token) assert.equal(r.message.contact_token, v.expect.contact_token);
+      // What a phone knows of a node after a listing it accepted: every lease the node listed, in its order.
+      if (v.expect.leases) assert.deepEqual(r.statuses.map((s) => ({ lease_id: s.lease_id, seq: s.seq, state: s.state })), v.expect.leases);
+      if (name.startsWith('listing-') && !v.expect.accepted) assert.equal(r.statuses, undefined, 'a refused listing gives nothing to show');
     });
   }
 

@@ -8,7 +8,7 @@ const { parseGuiConfig } = require('../src/gui/config');
 const { setLogLevel } = require('../src/logging');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
-require('../src/gui/lease-protocol');
+const L = require('../src/gui/lease-protocol');
 
 setLogLevel('fatal');
 const stores = [];
@@ -1036,6 +1036,75 @@ describe('lock, expiry and revoke', () => {
       await granted({ jobId: 'job-1' });
       const listed = leases.listFor(phone.deviceId).map((envelope) => open(envelope).message.state);
       assert.deepEqual(listed, ['active', 'ended', 'ended', 'ended', 'ended']);
+    });
+
+    // R-F5-20 (owner ruling, 2026-10-13): a relay cannot hide a live lease
+    // from a phone. Asked with the nonce the phone chose for this request,
+    // the node also signs a listing: that nonce, the phone, and every lease
+    // it lists by id and by the seq of the status it signed beside it. It is
+    // signed when nothing is live too, so "nothing" can be told from silence.
+    describe('R-F5-20: listingFor signs an answer a phone can check, also when nothing is live', () => {
+      const NONCE = 'n'.repeat(43);
+      const check = (answer, over = {}) => L.verifyLeaseListing(answer.listing, {
+        nodeId: identity.nodeId, nodePublicKeyHex: identity.publicKey.toString('hex'), nonce: NONCE, deviceId: phone.deviceId, statuses: answer.statuses, ...over
+      });
+
+      it('nothing live: a signed listing of no leases, bound to the nonce and the phone', () => {
+        const answer = leases.listingFor(phone.deviceId, NONCE);
+        assert.deepEqual(answer.statuses, []);
+        const m = open(answer.listing).message;
+        assert.deepEqual(m, { v: 1, type: 'kl.lease.listing', node_id: identity.nodeId, to_device: phone.deviceId, nonce: NONCE, at: new Date(clock.now()).toISOString(), leases: [] });
+        const r = check(answer);
+        assert.equal(r.accepted, true, r.reason);
+        assert.deepEqual(r.statuses, []);
+      });
+
+      it('names every lease it lists by id and by the seq of the status signed beside it', async () => {
+        const first = await granted();
+        leases.onRevoke(phone.leaseRevoke(identity.nodeId, first.leaseId));
+        const live = await granted({ jobId: 'job-2' });
+        const answer = leases.listingFor(phone.deviceId, NONCE);
+        const statuses = answer.statuses.map((e) => open(e).message);
+        assert.deepEqual(statuses.map((m) => [m.lease_id, m.state]), [[live.leaseId, 'active'], [first.leaseId, 'ended']]);
+        assert.deepEqual(open(answer.listing).message.leases, statuses.map((m) => ({ lease_id: m.lease_id, seq: m.seq })));
+        const r = check(answer);
+        assert.equal(r.accepted, true, r.reason);
+        assert.deepEqual(r.statuses.map((m) => m.state), ['active', 'ended']);
+      });
+
+      it('a relay that strips a status, swaps in an older one, or replays an old answer is caught', async () => {
+        const live = await granted();
+        const old = leases.listingFor(phone.deviceId, 'o'.repeat(43));
+        const answer = leases.listingFor(phone.deviceId, NONCE);
+        // An entry withheld; the listing itself withheld is simply no answer.
+        assert.equal(check({ listing: answer.listing, statuses: [] }).reason, 'status_missing');
+        // The same lease, but the status signed for an earlier listing.
+        assert.equal(check({ listing: answer.listing, statuses: old.statuses }).reason, 'status_missing');
+        // An answer signed for an earlier request (its own statuses with it).
+        assert.equal(check(old).reason, 'nonce_mismatch');
+        // An answer made for another phone, another node's key, a changed payload.
+        assert.equal(check(leases.listingFor(other.deviceId, NONCE)).reason, 'wrong_device');
+        assert.equal(check(answer, { nodePublicKeyHex: testNodeIdentity({ key: 'web-01' }).publicKey.toString('hex') }).reason, 'bad_signature');
+        assert.equal(check({ listing: { ...answer.listing, sig: old.listing.sig }, statuses: answer.statuses }).reason, 'bad_signature');
+        assert.equal(check({ listing: answer.statuses[0], statuses: answer.statuses }).reason, 'malformed', 'a status is not a listing');
+        assert.equal(check({ listing: null, statuses: [] }).reason, 'malformed');
+        // Statuses beside the ones it names (an older one of the same lease, junk) are not taken.
+        const padded = check({ listing: answer.listing, statuses: [...old.statuses, { not: 'an envelope' }, null, ...answer.statuses] });
+        assert.equal(padded.accepted, true, padded.reason);
+        assert.deepEqual(padded.statuses.map((m) => [m.lease_id, m.seq]), [[live.leaseId, open(answer.statuses[0]).message.seq]]);
+      });
+
+      it('no nonce, or one that is not 32 bytes of base64url: statuses as before and no listing; nobody but an enrolled phone gets one', async () => {
+        await granted();
+        for (const nonce of [undefined, null, '', 'short', 'n'.repeat(44), 7, {}]) {
+          const answer = leases.listingFor(phone.deviceId, nonce);
+          assert.equal(answer.listing, null);
+          assert.equal(answer.statuses.length, 1);
+        }
+        for (const device of [createFakePhone().deviceId, null, 'not-a-device']) {
+          assert.deepEqual(leases.listingFor(device, NONCE), { statuses: [], listing: null });
+        }
+      });
     });
   });
 
