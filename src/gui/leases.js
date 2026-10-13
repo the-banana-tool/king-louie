@@ -74,7 +74,13 @@ class LeaseNonces {
   add(nonce, sha256) { this.seen.set(nonce, sha256); }
 }
 const NO_NONCES = Object.freeze({ get: () => null });
-const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', device_revoked: 'lease_revoked', expired: 'lease_expired', job_closed: 'job_closed' };
+const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', device_revoked: 'lease_revoked', expired: 'lease_expired', job_closed: 'job_closed', node_identity_invalid: 'capability_unavailable' };
+// Why a suspended lease ends instead of asking to resume: the
+// administrator's record of this node's identity can no longer be trusted
+// (fifth security review, finding 4). Another value of a status's free
+// `reason`, like device_revoked.
+const IDENTITY_REASON = 'node_identity_invalid';
+const IDENTITY_MESSAGE = 'gui (node_identity_invalid: the record of this node identity can no longer be trusted; see the service log)';
 // Why a lease ends when the device that granted it is no longer an
 // enrolled, unrevoked approver, and how often the node looks (an
 // administrator's "device revoke" or "device apply" only writes a file).
@@ -124,7 +130,7 @@ class LeaseManager extends EventEmitter {
     }
     problem = problem || null;
     if (problem !== (this._recordProblem || null)) {
-      if (problem) this.log.error(`no new computer-use lease is requested: ${problem}. As root or an Administrator find out who could have changed it, run "king-louie-service identity record --replace" and restart the service.`, { reason: 'node_identity_invalid' });
+      if (problem) this.log.error(`no new computer-use lease is requested, and a suspended one ends instead of asking to resume: ${problem}. As root or an Administrator find out who could have changed it, run "king-louie-service identity record --replace" and restart the service.`, { reason: 'node_identity_invalid' });
       else this.log.info('the record of this node identity is out of reach of this process again; leases can be requested');
     }
     this._recordProblem = problem;
@@ -375,9 +381,15 @@ class LeaseManager extends EventEmitter {
     // asks again, before every new request, whether it can write the
     // administrator's record of this node's identity. If it now can (or
     // that cannot be told), the record vouches for nothing: no request goes
-    // out. A lease that is already running is not ended by this.
+    // out. A lease that is already running is not ended by this; a suspended
+    // one of this job, which this call would have asked to resume, is (as in
+    // _sendRequest).
     const recordProblem = this._identityRecordProblem();
-    if (recordProblem) throw new GuiError('capability_unavailable', 'gui (node_identity_invalid: the record of this node identity can no longer be trusted; see the service log)');
+    if (recordProblem) {
+      const held = this.current();
+      if (held && held.jobId === jobId && held.state === 'suspended') this._end(held, IDENTITY_REASON);
+      throw new GuiError('capability_unavailable', IDENTITY_MESSAGE);
+    }
     const cfg = this.guiConfig;
     if (!Array.isArray(appIds) || appIds.length < 1 || appIds.length > 8 || new Set(appIds).size !== appIds.length
       || appIds.some((id) => !Object.hasOwn(cfg.apps, id))) {
@@ -412,10 +424,10 @@ class LeaseManager extends EventEmitter {
         tokens: new Map(), tokenIssued: 0, tokenUsedUpTo: 0, lastStatus: null
       };
       this.leases.push(lease);
-      this._sendRequest(lease, { resume: false });
+      this._sendRequest(lease, { resume: false, probed: true });
     } else {
       // A suspended lease whose resume request lapsed: ask again.
-      this._sendRequest(lease, { resume: true });
+      this._sendRequest(lease, { resume: true, probed: true });
     }
     return this._wait(lease, signal);
   }
@@ -441,7 +453,19 @@ class LeaseManager extends EventEmitter {
     for (const w of waiters) (err ? w.reject(err) : w.resolve(lease));
   }
 
-  _sendRequest(lease, { resume }) {
+  // Every request is built here, the ones the node sends by itself included
+  // (a resume after a suspension, and when the relay link returns), so this
+  // is where the record of the node identity is asked about (fifth security
+  // review, finding 4; `probed`: request() asked a moment ago). A request it
+  // refuses ends the lease. Ended, not left suspended: a record this process
+  // can write vouches for nothing until an administrator has written it anew
+  // and restarted the service, so a suspended lease would wait for nothing,
+  // and would ask again at every reconnect.
+  _sendRequest(lease, { resume, probed = false }) {
+    if (!probed && this._identityRecordProblem()) {
+      this._end(lease, IDENTITY_REASON);
+      return;
+    }
     const now = this.clock();
     const cfg = this.guiConfig;
     const ids = resume ? lease.apps : lease.requestedApps;
@@ -656,6 +680,7 @@ class LeaseManager extends EventEmitter {
       if (last && last.endReason === GRANTOR_REVOKED_REASON) throw new GuiError('lease_revoked', 'the phone that granted this lease is no longer enrolled; call RequestLease for a new lease');
       if (last && last.endReason === 'expired') throw new GuiError('lease_expired', 'call RequestLease for a new lease');
       if (last && last.endReason === 'job_closed') throw new GuiError('job_closed', 'the job this lease belonged to is not open');
+      if (last && last.endReason === IDENTITY_REASON) throw new GuiError('capability_unavailable', IDENTITY_MESSAGE);
       throw new GuiError('lease_required', 'call RequestLease first');
     }
     if (lease.state === 'pending') throw new GuiError('lease_pending', 'waiting for the phone');
@@ -767,7 +792,7 @@ class LeaseManager extends EventEmitter {
     }
     if (this.broker) this.broker.releaseAll().catch(() => {});
     if (!['revoked', 'expired', 'denied'].includes(reason)) this._audit('lease.ended', lease, { reason });
-    this._settle(lease, new GuiError(END_ERROR[reason] || 'lease_required', END_ERROR[reason] ? null : reason));
+    this._settle(lease, new GuiError(END_ERROR[reason] || 'lease_required', END_ERROR[reason] ? (reason === IDENTITY_REASON ? IDENTITY_MESSAGE : null) : reason));
     this._status(lease);
     const ended = this.leases.filter((l) => l.state === 'ended');
     if (ended.length > HISTORY_MAX) this.leases = this.leases.filter((l) => l !== ended[0]);

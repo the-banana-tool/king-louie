@@ -217,6 +217,112 @@ describe('the identity record is probed again before every new lease request', (
   });
 });
 
+// Fifth security review, finding 4: only request() asked. The resume
+// requests the node sends by itself (after a suspension, and when the relay
+// link returns) went out without the probe. It is asked in the one place
+// every request is built, and a resume it refuses ends the lease: a record
+// the service's account can write vouches for nothing, and nothing but an
+// administrator and a restart brings that back, so there is nothing for a
+// suspended lease to wait for.
+describe('the identity record is probed before a resume request too', () => {
+  const WRITABLE = '<configDir>/identity/node.json cannot be trusted: it is writable by the account running the service';
+  const build = () => {
+    const state = { problem: null, asked: 0 };
+    const m = new LeaseManager({
+      approvals: leases.approvals, guiConfig, broker, audit: { append: async (e) => { audits.push(e); } }, nodeName: 'gpu-box', clock: () => clock.now(), timers,
+      jobOpen: (jobId) => openJobs.has(jobId), identityProbe: () => { state.asked += 1; return state.problem; },
+      log: { error() {}, info() {}, warn() {}, debug() {} }
+    });
+    return { m, state };
+  };
+  const grantedOn = async (m) => {
+    const p = m.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+    assert.equal(m.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 10 })).state, 'active');
+    return p;
+  };
+  const ended = (m, lease, sentBefore) => {
+    assert.deepEqual([lease.state, lease.endReason], ['ended', 'node_identity_invalid']);
+    assert.equal(relay.all('kl.lease.request').length, sentBefore, 'no resume request went out');
+    assert.equal(m.current(), null);
+    assert.deepEqual([relay.last('kl.lease.status').message.state, relay.last('kl.lease.status').message.reason], ['ended', 'node_identity_invalid']);
+    assert.ok(audits.some((a) => a.kind === 'lease.ended' && a.data.reason === 'node_identity_invalid'));
+    assert.throws(() => m.assertUsable('job-1'), (e) => e.code === 'capability_unavailable' && /node_identity_invalid/.test(e.message) && !/configDir/.test(e.message));
+  };
+
+  it('a suspension that would ask to resume: the probe is asked, and a record now writable ends the lease', async () => {
+    for (const suspend of [(m) => m.onHelperDisconnected(), (m, lease) => m.noteInputOutcome(lease, { code: 'app_not_running' })]) {
+      const { m, state } = build();
+      const lease = await grantedOn(m);
+      const sent = relay.all('kl.lease.request').length;
+      const asked = state.asked;
+      state.problem = WRITABLE;
+      suspend(m, lease);
+      assert.equal(state.asked, asked + 1, 'asked before the resume request');
+      ended(m, lease, sent);
+      assert.ok(audits.some((a) => a.kind === 'lease.suspended'), 'the suspension itself is still recorded');
+      m.stop();
+    }
+  });
+
+  it('the link returning: no resume request for a record that can no longer be trusted', async () => {
+    const { m, state } = build();
+    m.start();
+    const lease = await grantedOn(m);
+    const sent = relay.all('kl.lease.request').length;
+    relay.down();
+    assert.deepEqual([lease.state, lease.suspendReason], ['suspended', 'relay_unreachable']);
+    state.problem = WRITABLE;
+    relay.up();
+    ended(m, lease, sent);
+    m.stop();
+  });
+
+  it('a probe that throws proves nothing: the resume is refused the same way', async () => {
+    const { m, state } = build();
+    const lease = await grantedOn(m);
+    const sent = relay.all('kl.lease.request').length;
+    Object.defineProperty(state, 'problem', { get() { throw Object.assign(new Error('boom'), { code: 'EIO' }); } });
+    m.onHelperDisconnected();
+    ended(m, lease, sent);
+    m.stop();
+  });
+
+  it('RequestLease on a suspended lease whose resume lapsed: refused, and the lease ends', async () => {
+    const { m, state } = build();
+    const lease = await grantedOn(m);
+    m.onHelperDisconnected();
+    timers.advance(5 * 60000 + 1); // the resume request lapses
+    assert.equal(lease.state, 'suspended');
+    const sent = relay.all('kl.lease.request').length;
+    state.problem = WRITABLE;
+    await assert.rejects(m.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' }), (e) => e.code === 'capability_unavailable' && /node_identity_invalid/.test(e.message));
+    ended(m, lease, sent);
+    m.stop();
+  });
+
+  it('a record still out of reach: the resume goes out as before, asked once', async () => {
+    const { m, state } = build();
+    const lease = await grantedOn(m);
+    const sent = relay.all('kl.lease.request').length;
+    const asked = state.asked;
+    m.onHelperDisconnected();
+    assert.equal(state.asked, asked + 1);
+    assert.equal(relay.all('kl.lease.request').length, sent + 1);
+    assert.equal(relay.last('kl.lease.request').message.lease.resumes, lease.leaseId);
+    m.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 1 }));
+    assert.equal(m.assertUsable('job-1'), lease);
+    m.stop();
+  });
+
+  it('a new request is asked once, not twice', async () => {
+    const { m, state } = build();
+    const p = m.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+    assert.equal(state.asked, 1);
+    p.catch(() => {});
+    m.stop();
+  });
+});
+
 describe('R-F5-7: a lease needs a known, open job', () => {
   it('R-F5-7: no job id is job_required, a job that is not open is job_closed, and nothing goes out', async () => {
     for (const jobId of [null, undefined, '', 42]) {

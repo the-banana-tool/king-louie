@@ -105,6 +105,18 @@ A lease does not outlive the enrollment of the device that granted it
 seconds), the node ends the lease: status `ended`, reason
 `device_revoked`, another value of the free `reason`. No message changed.
 
+A suspended lease is never resumed on a node whose identity record can no
+longer be trusted (2026-10-13, fifth security review, finding 4). Every
+`kl.lease.request` the node builds, the resume requests it sends by itself
+included (after a suspension, and when the relay link returns), is preceded
+on Windows by the service's write probe of the administrator's record of
+its identity. When the probe fails, or cannot be run, no resume request
+goes out and the node ends the lease: status `ended`, reason
+`node_identity_invalid`, another value of the free `reason`. No message
+changed. A lease that is active is not ended by the probe, and a lease
+paused for `no_contact`, which resumes on a watch and not on a request, is
+not asked about.
+
 What counts as contact (revised 2026-10-13, second security review, finding
 3; this changed `kl.lease.watch`, `kl.lease.status` and `kl.lease.view`).
 A watch says nothing the node can believe about when it was signed: the
