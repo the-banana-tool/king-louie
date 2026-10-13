@@ -52,10 +52,24 @@ const XDOTOOL_KEYS = Object.freeze({
 });
 const XDOTOOL_MODS = Object.freeze({ ctrl: 'ctrl', alt: 'alt', shift: 'shift', meta: 'super' });
 
+// Only the key grammar's own names (src/gui/keys.js) have a keysym. Anything
+// else is key_invalid, as the Windows and macOS workers answer: xdotool
+// would take any X keysym name (XF86PowerOff, say) or a whole chord.
 function keysym(key) {
-  if (XDOTOOL_KEYS[key]) return XDOTOOL_KEYS[key];
-  if (/^f\d+$/.test(key)) return key.toUpperCase();
-  return key;
+  if (typeof key === 'string') {
+    if (Object.hasOwn(XDOTOOL_KEYS, key)) return XDOTOOL_KEYS[key];
+    if (/^f([1-9]|1[0-9]|2[0-4])$/.test(key)) return key.toUpperCase();
+    if (/^[a-z0-9]$/.test(key)) return key;
+  }
+  throw new GuiError('key_invalid', typeof key === 'string' ? key : 'not a key name');
 }
 
-module.exports = { listProcesses, launchDetached, jpegSize, XDOTOOL_KEYS, XDOTOOL_MODS, keysym };
+// The same for modifiers: an unknown one is refused, never dropped.
+function modifierKeys(list) {
+  return (Array.isArray(list) ? list : []).map((m) => {
+    if (typeof m !== 'string' || !Object.hasOwn(XDOTOOL_MODS, m)) throw new GuiError('key_invalid', typeof m === 'string' ? m : 'not a modifier');
+    return XDOTOOL_MODS[m];
+  });
+}
+
+module.exports = { listProcesses, launchDetached, jpegSize, XDOTOOL_KEYS, XDOTOOL_MODS, keysym, modifierKeys };

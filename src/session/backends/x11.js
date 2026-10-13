@@ -10,7 +10,7 @@ const { promisify } = require('util');
 const { createLogger } = require('../../logging');
 const { GuiError } = require('../../gui/errors');
 const { imageMatches } = require('../../gui/apps');
-const { listProcesses, launchDetached, jpegSize, XDOTOOL_MODS, keysym } = require('./linux-common');
+const { listProcesses, launchDetached, jpegSize, keysym, modifierKeys } = require('./linux-common');
 
 const execFileP = promisify(execFile);
 const XDOTOOL = '/usr/bin/xdotool';
@@ -69,12 +69,15 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
     return { handle: String(loc.WINDOW), pid, image: imageOf(pid) };
   }
 
-  const mods = (list) => (list || []).map((m) => XDOTOOL_MODS[m]).filter(Boolean);
   const button = (b) => (b === 'right' ? '3' : b === 'middle' ? '2' : '1');
 
   async function input({ expect = {}, action = {} }) {
     const match = expect.match || [];
     const pids = expect.pids || [];
+    // Names first: an unknown key or modifier is refused before anything is
+    // looked at, moved or pressed.
+    const m = modifierKeys(action.mods);
+    const sym = action.kind === 'key' ? keysym(action.key) : null;
     if ((await lockedHint()) === true) throw new GuiError('screen_locked', 'the screen is locked');
     const fg = await foreground();
     if (!fg || !pids.includes(fg.pid) || !imageMatches(fg.image, match, 'linux')) {
@@ -97,7 +100,6 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
         if (!under || !pids.includes(under.pid)) throw new GuiError('point_obscured', 'another window covers that point');
       }
     }
-    const m = mods(action.mods);
     const withMods = async (fn) => {
       for (const k of m) await x(['keydown', k]);
       try { await fn(); } finally { for (const k of [...m].reverse()) await x(['keyup', k]); }
@@ -107,7 +109,7 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
         await x(['type', '--clearmodifiers', '--file', '-'], { input: String(action.text) });
         break;
       case 'key':
-        await x(['key', '--clearmodifiers', '--repeat', String(action.repeat || 1), [...m, keysym(action.key)].join('+')]);
+        await x(['key', '--clearmodifiers', '--repeat', String(action.repeat || 1), [...m, sym].join('+')]);
         break;
       case 'click':
         await withMods(() => x(['click', '--repeat', String(action.count || 1), button(action.button)]));

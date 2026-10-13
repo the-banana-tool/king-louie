@@ -98,6 +98,33 @@ describe('X11 backend (scripted xdotool)', () => {
     assert.deepEqual(shot.transform, { sx: 800 / 640, sy: 600 / 480, unit: 'px' });
   });
 
+  it('an unknown key or modifier is key_invalid and never reaches xdotool (as the Windows and macOS workers answer)', async () => {
+    const expect = { match: ['/usr/bin/gnome-calculator'], pids: [4242] };
+    const bad = [
+      { mods: [], key: 'XF86PowerOff' }, { mods: [], key: 'super+l' }, { mods: [], key: 'Return' }, { mods: [], key: 'ab' }, { mods: [], key: 'f25' },
+      { mods: [], key: 'f0' }, { mods: [], key: '' }, { mods: [], key: undefined }, { mods: [], key: 7 }, { mods: [], key: 'toString' },
+      { mods: ['hyper'], key: 'a' }, { mods: ['ctrl', 'constructor'], key: 'a' }
+    ];
+    for (const combo of bad) {
+      const { calls, execFileImpl } = fakeX(baseScript);
+      const b = createX11Backend({ env: { DISPLAY: ':0', XDG_SESSION_ID: '3' }, execFileImpl, readlink, exists: () => true });
+      await assert.rejects(b.input({ expect, action: { kind: 'key', ...combo, repeat: 1 }, yieldMs: 0 }), (e) => e.code === 'key_invalid', JSON.stringify(combo));
+      assert.equal(calls.filter((c) => ['key', 'keydown', 'keyup'].includes(c.args[0])).length, 0, `nothing was pressed for ${JSON.stringify(combo)}`);
+    }
+    // A click's modifiers are checked the same way, before the pointer moves.
+    const { calls, execFileImpl } = fakeX(baseScript);
+    const b = createX11Backend({ env: { DISPLAY: ':0', XDG_SESSION_ID: '3' }, execFileImpl, readlink, exists: () => true });
+    await assert.rejects(b.input({ expect, action: { kind: 'click', handle: '42', rel: [10, 20], button: 'left', count: 1, mods: ['hyper'] }, yieldMs: 0 }), (e) => e.code === 'key_invalid');
+    assert.equal(calls.filter((c) => ['click', 'mousemove', 'keydown'].includes(c.args[0])).length, 0);
+    // Every key the grammar knows still maps.
+    for (const key of ['a', 'z', '0', '9', 'f1', 'f24', 'enter', 'pageup', '/', '\\']) {
+      const ok = fakeX(baseScript);
+      const b2 = createX11Backend({ env: { DISPLAY: ':0', XDG_SESSION_ID: '3' }, execFileImpl: ok.execFileImpl, readlink, exists: () => true });
+      await b2.input({ expect, action: { kind: 'key', mods: [], key, repeat: 1 }, yieldMs: 0 });
+      assert.equal(ok.calls.filter((c) => c.args[0] === 'key').length, 1, key);
+    }
+  });
+
   it('maps the key grammar to X keysyms', () => {
     assert.equal(XDOTOOL_KEYS.enter, 'Return');
     assert.equal(XDOTOOL_KEYS.pageup, 'Prior');
