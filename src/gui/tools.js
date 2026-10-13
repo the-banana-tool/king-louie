@@ -10,6 +10,7 @@ const { GuiError, isGuiError, toToolResult, GUI_TOOL_NAMES } = require('./errors
 const { resolveLaunch } = require('./apps');
 const { parseKeys, printableChar, isEnter, checkButton, checkClickModifiers, MODIFIERS } = require('./keys');
 const { checkTypeText } = require('./text-guard');
+const { plainLineProblem } = require('../cases/hidden-chars');
 
 // R-F5-4: what a case turn keeps, and what src/cases/chat-integration.js blocks.
 const GUI_READ_TOOL_NAMES = Object.freeze(['ListApps', 'Screenshot']);
@@ -304,6 +305,13 @@ function buildGuiTools(gui) {
       }, ['apps', 'reason'])
     }, async (params, options, ctx) => {
       broker.require('gui.input');
+      // The reason is the model's own words, and the owner reads it on the
+      // phone before signing. It must be one plain line by the shared
+      // definition (no line break, no hidden, control or bidi character, no
+      // odd space): text that could pass for a line the node wrote is
+      // refused here, before anything is sent.
+      const reasonProblem = plainLineProblem(params.reason);
+      if (reasonProblem) throw new GuiError('invalid_params', `"reason" must be one plain line: ${reasonProblem}`);
       // R-F5-7: a lease is bound to a job; this run has none.
       if (!ctx.jobId) throw new GuiError('job_required', NO_JOB);
       if (!leases.available()) throw new GuiError('approval_unavailable');

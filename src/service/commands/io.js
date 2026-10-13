@@ -48,6 +48,24 @@ function printable(value) {
   return String(value == null ? '' : value).replace(UNPRINTABLE_RE, '');
 }
 
+// One line for the administrator's terminal out of text this program did not
+// write: what a session helper (the session user's own process) reported
+// about itself, what a status file or a helper file holds. Text that is one
+// plain line (plainLineProblem, the one shared definition: no control,
+// hidden or bidi character, no odd space, no run of spaces) is shown as it
+// is, cut to `max` code points; anything else is shown without those
+// characters and marked, so a name cannot redraw the line it is on or add a
+// line that reads as the program's own.
+function shown(value, max = 200) {
+  // Required here: this file is loaded by every profile's CLI.
+  const { plainLineProblem } = require('../../cases/hidden-chars');
+  const text = Array.from(String(value === null || value === undefined ? '' : value)).slice(0, max).join('');
+  if (plainLineProblem(text) === null) return text;
+  let kept = Array.from(text).map((ch) => (plainLineProblem(ch) === null ? ch : (/\s|\p{Zs}/u.test(ch) ? ' ' : ''))).join('').replace(/ {2,}/g, ' ').trim();
+  if (plainLineProblem(kept) !== null) kept = kept.replace(/\p{M}/gu, '');
+  return `${kept} [hidden or control characters removed]`;
+}
+
 function runningServicePid(dataDir) {
   const pid = readPidfile(dataDir);
   return pid && isRunning(pid) ? pid : null;
@@ -59,4 +77,4 @@ async function renderQr(text) {
   return QRCode.toString(text, { type: 'terminal', small: true });
 }
 
-module.exports = { readLine, printable, runningServicePid, renderQr };
+module.exports = { readLine, printable, shown, runningServicePid, renderQr };

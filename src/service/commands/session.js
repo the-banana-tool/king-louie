@@ -191,21 +191,12 @@ function verifyWindowsConfigDir(configDir) {
   }
 }
 
-// One line for the administrator's terminal out of text this command did not
-// write: what a session helper (the session user's own process) reported
-// about itself, and what a file says. Text that is one plain line
-// (plainLineProblem: no control, hidden or bidi character, no odd space) is
-// shown as it is, cut to `max` code points; anything else is shown without
-// those characters and marked, so a name cannot redraw the line it is on.
-function shown(value, max = 200) {
-  const { plainLineProblem } = require('../../cases/hidden-chars');
-  const cut = (text) => Array.from(text).slice(0, max).join('');
-  const text = cut(String(value === null || value === undefined ? '' : value));
-  if (plainLineProblem(text) === null) return text;
-  let kept = Array.from(text).map((ch) => (plainLineProblem(ch) === null ? ch : (/\s|\p{Zs}/u.test(ch) ? ' ' : ''))).join('').replace(/ {2,}/g, ' ').trim();
-  if (plainLineProblem(kept) !== null) kept = kept.replace(/\p{M}/gu, '');
-  return `${kept} [hidden or control characters removed]`;
-}
+// Text this command did not write (what the helper reported about itself,
+// what a status file or the helper file holds) goes to the terminal only
+// through this: one clean line, or marked as altered (second security
+// review, finding 13). See commands/io.js.
+const shown = (value, max) => require('./io').shown(value, max);
+const shownList = (list) => (Array.isArray(list) ? list : []).map((v) => shown(v, 64)).join(', ');
 
 // Windows account names are compared case-insensitively and stored bare.
 const bareName = (name, platform) => (platform === 'win32' ? String(name).split('\\').pop() : String(name));
@@ -274,7 +265,7 @@ async function install({ flags, dataDir, io, deps }) {
     throw new GuiError('session_file_invalid', `${installed.file} ${installed.reason}, so this cannot tell who the helper is installed for; run "session uninstall --user NAME" to clear it, or fix the file, then install again`);
   }
   if (installed.state === 'installed' && !S.sameSessionIdentity(installed, account, c.platform)) {
-    throw new GuiError('session_user_mismatch', `installed for "${installed.user}" (${identityText(installed, c.platform)}), not ${sessionUser} (${identityText(account, c.platform)}); run "session uninstall --user ${installed.user}" first`);
+    throw new GuiError('session_user_mismatch', `installed for "${shown(installed.user)}" (${identityText(installed, c.platform)}), not ${sessionUser} (${identityText(account, c.platform)}); run "session uninstall --user ${shown(installed.user)}" first`);
   }
   const rotates = installed.state === 'installed';
 
@@ -302,7 +293,7 @@ async function install({ flags, dataDir, io, deps }) {
   // checks who owns its file and the directory it is in before it trusts
   // either, and the directory's ACL would not let it look.
   if (c.platform === 'win32') io.stdout.write(`  lets ${sessionUser} read who owns ${path.dirname(sessionFile)} (its owner and attributes; nothing in it, and no other directory)\n`);
-  if (rotates) io.stdout.write(`  replaces the secret installed for ${installed.user}; the endpoint stays, so a running service and helper pick the new secret up without a restart\n`);
+  if (rotates) io.stdout.write(`  replaces the secret installed for ${shown(installed.user)}; the endpoint stays, so a running service and helper pick the new secret up without a restart\n`);
   if (!(await consented({ flags, c, question: `Install the session helper for ${sessionUser}? [y/N] ` }))) {
     io.stderr.write('Not installing without confirmation. Nothing was written.\n');
     return 1;
@@ -504,7 +495,10 @@ async function uninstall({ flags, dataDir, io, deps }) {
 }
 
 function printProbes(io, probes) {
-  for (const p of probes || []) io.stdout.write(`  ${p.check}: ${p.ok ? 'ok' : `missing — ${p.hint || 'no hint'}`}\n`);
+  for (const p of Array.isArray(probes) ? probes : []) {
+    if (p === null || typeof p !== 'object') continue;
+    io.stdout.write(`  ${shown(p.check, 64)}: ${p.ok === true ? 'ok' : `missing — ${p.hint ? shown(p.hint) : 'no hint'}`}\n`);
+  }
 }
 
 async function status({ dataDir, io, deps }) {
@@ -512,7 +506,7 @@ async function status({ dataDir, io, deps }) {
   const record = (deps.readStatus || ((d) => require('../../gui/status').readGuiStatusRecord({ dataDir: d })))(dataDir);
   const installed = require('../../gui/session-secret').inspectCanonical({ configDir: c.configDir, platform: c.platform });
   if (installed.state === 'installed') {
-    io.stdout.write(`installed for: ${installed.user} (${identityText(installed, c.platform)})\n`);
+    io.stdout.write(`installed for: ${shown(installed.user)} (${identityText(installed, c.platform)})\n`);
     if (c.guiEnabled() === false) io.stdout.write(`${NOT_ENABLED(c.configDir)}\n`);
   }
   else if (installed.state === 'invalid') io.stdout.write(`installed, but ${installed.file} ${installed.reason}: run "session uninstall --user NAME", then "session install --user NAME"\n`);
@@ -523,25 +517,25 @@ async function status({ dataDir, io, deps }) {
   }
   if (!record.available && typeof record.reason === 'string' && record.reason) {
     // R-F5-11: the running service turned desktop apps off, and why.
-    const { printable } = require('./io');
     const { remedyFor } = require('../../gui/status');
-    io.stdout.write(`helper: off (${printable(record.reason)})${record.detail ? `: ${printable(record.detail)}` : ''}\n`);
+    io.stdout.write(`helper: off (${shown(record.reason)})${record.detail ? `: ${shown(record.detail)}` : ''}\n`);
     io.stdout.write(`  to fix it, ${remedyFor(record.reason)}\n`);
     return 0;
   }
-  io.stdout.write(`helper: ${record.available ? `connected (${record.user}, ${record.platform})` : 'not connected'}\n`);
-  if (record.available) io.stdout.write(`capabilities: ${(record.capabilities || []).join(', ') || 'none'}\n`);
-  if ((record.limits || []).length) io.stdout.write(`limits: ${record.limits.join(', ')}\n`);
+  // From here on every value is the helper's word or the file's: shown, never printed raw.
+  io.stdout.write(`helper: ${record.available ? `connected (${shown(record.user, 64)}, ${shown(record.platform, 64)})` : 'not connected'}\n`);
+  if (record.available) io.stdout.write(`capabilities: ${shownList(record.capabilities) || 'none'}\n`);
+  if (Array.isArray(record.limits) && record.limits.length) io.stdout.write(`limits: ${shownList(record.limits)}\n`);
   printProbes(io, record.probes);
-  if (record.lease) io.stdout.write(`lease: ${record.lease.active ? 'active' : 'not active'} (${(record.lease.app_ids || []).join(', ')})\n`);
+  if (record.lease) io.stdout.write(`lease: ${record.lease.active === true ? 'active' : 'not active'} (${shownList(record.lease.app_ids)})\n`);
   return 0;
 }
 
 async function probe({ dataDir, io, deps }) {
   const record = (deps.readStatus || ((d) => require('../../gui/status').readGuiStatusRecord({ dataDir: d })))(dataDir);
   if (record && record.available) {
-    io.stdout.write(`probe report from the running helper (${record.user}, ${record.platform}):\n`);
-    io.stdout.write(`capabilities: ${(record.capabilities || []).join(', ') || 'none'}\n`);
+    io.stdout.write(`probe report from the running helper (${shown(record.user, 64)}, ${shown(record.platform, 64)}):\n`);
+    io.stdout.write(`capabilities: ${shownList(record.capabilities) || 'none'}\n`);
     printProbes(io, record.probes);
     return 0;
   }
@@ -554,7 +548,7 @@ async function probe({ dataDir, io, deps }) {
   });
   const r = await localProbe();
   io.stdout.write('local probe from this shell, not the running helper:\n');
-  io.stdout.write(`capabilities: ${(r.capabilities || []).join(', ') || 'none'}\n`);
+  io.stdout.write(`capabilities: ${shownList(r.capabilities) || 'none'}\n`);
   printProbes(io, r.probes);
   return 0;
 }

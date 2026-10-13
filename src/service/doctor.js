@@ -100,13 +100,15 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
     const dir = configDir || adminConfigDir({ dataDir });
     const { inspectCanonical } = require('../gui/session-secret');
     const { readGuiStatusRecord, SESSION_FILE_REMEDY, remedyFor } = require('../gui/status');
+    // What a status file or the helper file says is not doctor's own text.
+    const { shown } = require('./commands/io');
     const seen = inspectCanonical({ configDir: dir, platform, adminUid, checkOwner: true, requireIdentity: false });
     const record = readGuiStatusRecord({ dataDir });
     const serviceSays = record && record.available !== true && typeof record.reason === 'string' && record.reason ? record : null;
     if (seen.state === 'invalid') {
       results.push({ check: 'session helper file', ok: false, detail: `session_file_invalid: ${seen.file} ${seen.reason}; desktop apps are off. To fix it, ${SESSION_FILE_REMEDY}` });
     } else if (serviceSays) {
-      results.push({ check: 'desktop apps (running service)', ok: false, detail: `off, ${serviceSays.reason}${serviceSays.detail ? `: ${serviceSays.detail}` : ''}. To fix it, ${remedyFor(serviceSays.reason)}` });
+      results.push({ check: 'desktop apps (running service)', ok: false, detail: `off, ${shown(serviceSays.reason)}${serviceSays.detail ? `: ${shown(serviceSays.detail)}` : ''}. To fix it, ${remedyFor(serviceSays.reason)}` });
     } else if (seen.state === 'installed') {
       // R-F5-14: installing the helper enables nothing; node.yaml does.
       let enabled = null;
@@ -119,7 +121,7 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
       if (enabled === false) {
         results.push({ check: 'session helper file', ok: true, warn: true, detail: `installed but not enabled in node.yaml: desktop apps stay off until ${path.join(dir, 'node.yaml')} has "gui:" with "enabled: true" under it, and the service is restarted` });
       } else {
-        results.push({ check: 'session helper file', ok: true, detail: `installed for ${seen.user}; the service checks that it decrypts when it starts` });
+        results.push({ check: 'session helper file', ok: true, detail: `installed for ${shown(seen.user)}; the service checks that it decrypts when it starts` });
       }
     }
   }

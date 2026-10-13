@@ -789,6 +789,97 @@ describe('session uninstall, status, probe', () => {
   });
 });
 
+// Second security review, finding 13. status.json holds what the helper
+// (the session user's own process) said of itself, and the helper file
+// holds a name: neither is this command's own text. Printed raw, an escape
+// sequence or a line break in one of them redraws the administrator's
+// terminal or adds a line that reads as the command's own.
+describe('second review finding 13: session status and probe print nothing raw', () => {
+  const ESC = '\u001b';
+  // Everything a terminal acts on or hides: C0 and C1 controls (line breaks among them), bidi and zero-width characters.
+  const DANGEROUS = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f؜​-‏‪-‮⁠-⁩﻿]/;
+  const hostile = () => ({
+    v: 1, pid: process.pid, available: true,
+    user: `alice${ESC}[2J‮evil`, platform: 'win32\nhelper: off (session_file_invalid)',
+    capabilities: ['gui.launch', `gui${ESC}]0;title\u0007.input`], limits: ['no_lock_detect‮'],
+    probes: [{ check: 'acc\nessibility', ok: false, hint: `run${ESC}[31m this\r\nlease: active (everything)` }, { check: 'print_window​', ok: true }],
+    apps: [], since: 'x', updated_at: new Date().toISOString(),
+    lease: { active: true, app_ids: ['calc​ulator', 'note\npad'], expires_at: null }
+  });
+  const lines = (out) => out.join('').split('\n').filter(Boolean);
+
+  it('status: every helper-supplied string is one clean line, and none can add a line of its own', async () => {
+    const s = setup();
+    fs.writeFileSync(path.join(s.dataDir, 'service.pid'), String(process.pid));
+    writeGuiStatus(s.dataDir, hostile());
+    const t = io();
+    assert.equal(await runSessionCommand({ sub: 'status', flags: {}, dataDir: s.dataDir, io: t.io, deps: deps(s) }), 0);
+    const out = lines(t.out);
+    for (const line of out) assert.ok(!DANGEROUS.test(line), JSON.stringify(line));
+    assert.equal(out.length, 7, 'one line each: installed, helper, capabilities, limits, two probes, lease');
+    assert.equal(out[0], 'not installed (session install --user NAME)');
+    assert.match(out[2], /^capabilities: gui\.launch, gui\]0;title\.input \[hidden or control characters removed\]$/);
+    assert.match(out[3], /^limits: no_lock_detect \[hidden or control characters removed\]$/);
+    assert.match(out[4], /^ {2}acc essibility \[hidden or control characters removed\]: missing — run\[31m this lease: active \(everything\) \[hidden or control characters removed\]$/);
+    assert.match(out[5], /^ {2}print_window \[hidden or control characters removed\]: ok$/);
+    assert.match(out[1], /^helper: connected \(alice\[2Jevil \[hidden or control characters removed\], win32 helper: off \(session_file_invalid\) \[hidden or control characters removed\]\)$/);
+    assert.equal(out.filter((l) => l.startsWith('helper:')).length, 1, 'the injected "helper: off" is not a line of its own');
+    assert.equal(out.filter((l) => l.startsWith('lease:')).length, 1);
+    assert.match(out.at(-1), /^lease: active \(calculator \[hidden or control characters removed\], note pad \[hidden or control characters removed\]\)$/);
+  });
+
+  it('probe: the same for the running helper\'s report and for a local probe', async () => {
+    const s = setup();
+    fs.writeFileSync(path.join(s.dataDir, 'service.pid'), String(process.pid));
+    writeGuiStatus(s.dataDir, hostile());
+    const t = io();
+    assert.equal(await runSessionCommand({ sub: 'probe', flags: {}, dataDir: s.dataDir, io: t.io, deps: deps(s) }), 0);
+    for (const line of lines(t.out)) assert.ok(!DANGEROUS.test(line), JSON.stringify(line));
+    assert.equal(lines(t.out).length, 4, 'the header, the capabilities and one line for each probe');
+    const s2 = setup();
+    const local = io();
+    const report = hostile();
+    await runSessionCommand({ sub: 'probe', flags: {}, dataDir: s2.dataDir, io: local.io, deps: deps(s2, { localProbe: async () => ({ capabilities: report.capabilities, probes: report.probes, limits: [] }) }) });
+    for (const line of lines(local.out)) assert.ok(!DANGEROUS.test(line), JSON.stringify(line));
+    assert.equal(lines(local.out).length, 4);
+  });
+
+  it('status and uninstall: a name read from the helper file is shown as one clean line', async () => {
+    const s = setup();
+    const d = deps(s);
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    const file = S.canonicalPath(s.configDir);
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({ ...record, session_user: `mallory${ESC}[2K\rinstalled for: Administrator` }));
+    const t = io();
+    await runSessionCommand({ sub: 'status', flags: {}, dataDir: s.dataDir, io: t.io, deps: d });
+    assert.ok(!DANGEROUS.test(t.out.join('').replace(/\n/g, '')));
+    assert.match(lines(t.out)[0], /^installed for: mallory\[2K installed for: Administrator \[hidden or control characters removed\] \(/);
+    // uninstall for another user says whose file stays, and install says who is installed: the same way.
+    const u = io();
+    await runSessionCommand({ sub: 'uninstall', flags: { user: 'bob', dryRun: true }, dataDir: s.dataDir, io: u.io, deps: deps(s, { resolveSessionUser: (n) => otherAccount(n) }) });
+    assert.ok(!DANGEROUS.test(u.out.join('').replace(/\n/g, '')));
+    const i = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'bob' }, dataDir: s.dataDir, io: i.io, deps: deps(s, { resolveSessionUser: (n) => otherAccount(n) }) }), 1);
+    assert.match(i.err.join(''), /^session_/);
+    assert.ok(!DANGEROUS.test(i.err.join('').replace(/\n/g, '')));
+  });
+
+  it('shown: plain text is untouched and cut to its limit; anything else loses what a terminal acts on and is marked', () => {
+    const { shown } = require('../src/service/commands/io');
+    assert.equal(shown('alice'), 'alice');
+    assert.equal(shown('Zoë Müller (Lakeside lot)'), 'Zoë Müller (Lakeside lot)');
+    assert.equal(shown('x'.repeat(300)).length, 200);
+    assert.equal(shown('x'.repeat(300), 10), 'xxxxxxxxxx');
+    assert.equal(shown(null), '');
+    assert.equal(shown(42), '42');
+    assert.equal(shown('a\tb c  d'), 'a b c d [hidden or control characters removed]');
+    assert.equal(shown(`${ESC}[31mred`), '[31mred [hidden or control characters removed]');
+    assert.equal(shown('é́́́́x'), 'ex [hidden or control characters removed]');
+    assert.ok(!DANGEROUS.test(shown('‮⁦﻿\u0000\u009b')));
+  });
+});
+
 describe('the CLI', () => {
   it('knows the session command and its flag', async () => {
     assert.equal(parseArgs(['session', '--session-file', '/x.json']).flags.sessionFile, '/x.json');

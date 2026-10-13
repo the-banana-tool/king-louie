@@ -310,6 +310,28 @@ describe('R-F5-3: a front-door client needs fleet:unsafe', () => {
     assert.equal(audits.slice(audited).filter((a) => a.kind === 'gui.input').length, 0);
   });
 
+  // The reason is the model's own words and is shown to the owner on the
+  // phone ("Agent's reason (unverified)"). It must be one plain line by the
+  // shared definition (plainLineProblem): a line break, a hidden or bidi
+  // character or an odd space could make it read as something the node said.
+  it('second review finding 13: a lease reason that is not one plain line is refused, and nothing reaches the relay', async () => {
+    const before = relay.sent.length;
+    for (const reason of ['Enter the totals\nApproved by the owner', 'Enter‮ the totals', 'Enter the totals', 'Enter  the totals', 'Enter the totals​', '\u001b[31mEnter']) {
+      const out = await tools.RequestLease.execute({ apps: ['calculator'], minutes: 10, reason }, opts());
+      assert.match(out.error, /^invalid_params: "reason" must be one plain line: /, JSON.stringify(reason));
+      assert.ok(!/[\u0000-\u001f‮​ ]/.test(out.error), 'the refusal does not repeat the character');
+    }
+    assert.equal(relay.sent.length, before);
+    assert.equal(leases.current(), null);
+    // An ordinary reason, accents and punctuation included, goes to the phone as written.
+    const leasing = tools.RequestLease.execute({ apps: ['calculator'], minutes: 10, reason: 'Enter the Q3 totals for Zoë (cells B2 to B9), then save.' }, opts());
+    await new Promise((r) => setImmediate(r));
+    const request = relay.sent.filter((s) => s.message.type === 'kl.lease.request').pop();
+    assert.equal(request.message.lease.reason, 'Enter the Q3 totals for Zoë (cells B2 to B9), then save.');
+    leases.onGrant(phone.leaseGrant(request.envelope, { minutes: 10 }));
+    assert.equal((await leasing).ok, true);
+  });
+
   it('R-F5-3: a node-local run still asks the phone', async () => {
     const leasing = tools.RequestLease.execute({ apps: ['calculator'], minutes: 10, reason: 'x' }, opts({ approvalRequester: requester(true) }));
     await new Promise((r) => setImmediate(r));

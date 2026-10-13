@@ -132,6 +132,36 @@ describe('createGuiSubsystem', () => {
     assert.doesNotMatch(rows[0].detail, /not enabled/);
   });
 
+  // Second security review, finding 13: doctor prints what the running
+  // service wrote to status.json and a name from the helper file; neither
+  // goes to the administrator's terminal raw.
+  it('finding 13: doctor shows the service\'s reason and detail, and the installed user\'s name, as clean single lines', async () => {
+    const { writeGuiStatus } = require('../src/gui/status');
+    const DANGEROUS = /[\u0000-\u001f\u007f-\u009f؜​-‏‪-‮⁠-⁩﻿]/;
+    const { configDir, dataDir } = dirs();
+    install(configDir);
+    fs.writeFileSync(path.join(configDir, 'node.yaml'), 'name: gpu-box\ngui:\n  enabled: true\n', { mode: 0o644 });
+    fs.writeFileSync(path.join(dataDir, 'service.pid'), String(process.pid));
+    writeGuiStatus(dataDir, {
+      v: 1, pid: process.pid, available: false, reason: 'gui_start_failed\u001b[2J', detail: 'EADDRINUSE\n[ok] node config‮',
+      user: null, platform: null, capabilities: [], probes: [], limits: [], apps: [], since: null, updated_at: new Date().toISOString(), lease: null
+    });
+    const rows = (await runDoctor({ dataDir, adminUid: UID, configDir })).filter((r) => /desktop apps|session helper/.test(r.check));
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].ok, false);
+    assert.ok(!DANGEROUS.test(rows[0].detail), JSON.stringify(rows[0].detail));
+    assert.match(rows[0].detail, /^off, gui_start_failed\[2J \[hidden or control characters removed\]: EADDRINUSE \[ok\] node config \[hidden or control characters removed\]\. To fix it, /);
+    // The installed user's name comes from the helper file.
+    fs.rmSync(path.join(dataDir, 'session'), { recursive: true, force: true });
+    const file = require('../src/gui/session-secret').canonicalPath(configDir);
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({ ...record, session_user: 'alice\u001b[2K\rroot' }), { mode: 0o640 });
+    const named = (await runDoctor({ dataDir, adminUid: UID, configDir })).filter((r) => /session helper/.test(r.check));
+    assert.equal(named.length, 1);
+    assert.ok(!DANGEROUS.test(named[0].detail), JSON.stringify(named[0].detail));
+    assert.match(named[0].detail, /^installed for alice\[2K root \[hidden or control characters removed\]; /);
+  });
+
   // R-F5-11 (owner ruling, 2026-10-12): a helper file that is there but
   // cannot be used turns desktop apps off, with a reason; it never throws
   // (the service still starts) and is never accepted.
