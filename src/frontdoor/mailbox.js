@@ -6,6 +6,9 @@ const { open } = require('../approvals/envelope');
 const { NODE_ID_RE, DEVICE_ID_RE } = require('../approvals/messages');
 const { err } = require('./errors');
 
+// How many items one node may hold under one registered prefix. Per prefix,
+// not per node in all: a node's live lease views (one a second while a phone
+// watches) must never push out a question that waits a week for its answer.
 const PER_NODE = 1000;
 const MAX_WAIT_MS = 25000;
 // The approval protocol's own types travel only over their dedicated link
@@ -20,9 +23,10 @@ function overlapsReserved(prefix) {
 }
 
 class Mailbox extends EventEmitter {
-  constructor({ now = Date.now } = {}) {
+  constructor({ now = Date.now, perNode = PER_NODE } = {}) {
     super();
     this.now = now;
+    this.perNode = perNode;
     this.types = new Map();
     this.items = [];
     this.seq = 0;
@@ -40,7 +44,7 @@ class Mailbox extends EventEmitter {
   }
 
   _typeConfig(type) {
-    for (const [prefix, config] of this.types) if (String(type).startsWith(prefix)) return config;
+    for (const [prefix, config] of this.types) if (String(type).startsWith(prefix)) return { prefix, ...config };
     return null;
   }
 
@@ -52,10 +56,12 @@ class Mailbox extends EventEmitter {
     if (!config) throw err('type_not_routed', `no consumer routes ${message.type}`);
     if (bytes.length > config.maxBytes) throw err('too_large', `${message.type} is over ${config.maxBytes} bytes`);
     this.seq += 1;
-    this.items.push({ seq: this.seq, node_id: nodeId, type: message.type, envelope, to_device: toDevice, expires_at: this.now() + config.ttlMs });
-    const mine = this.items.filter((i) => i.node_id === nodeId);
-    if (mine.length > PER_NODE) {
-      const drop = new Set(mine.slice(0, mine.length - PER_NODE).map((i) => i.seq));
+    this.items.push({ seq: this.seq, node_id: nodeId, type: message.type, prefix: config.prefix, envelope, to_device: toDevice, expires_at: this.now() + config.ttlMs });
+    // Over the cap, this node's oldest items of the same prefix go; nothing
+    // of another prefix or another node is touched.
+    const mine = this.items.filter((i) => i.node_id === nodeId && i.prefix === config.prefix);
+    if (mine.length > this.perNode) {
+      const drop = new Set(mine.slice(0, mine.length - this.perNode).map((i) => i.seq));
       this.items = this.items.filter((i) => !drop.has(i.seq));
     }
     this.emit('change', this.seq);

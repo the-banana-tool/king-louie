@@ -290,6 +290,34 @@ describe('Mailbox', () => {
     assert.equal(box.list({ nodeIds: ['kl-other'] }).length, 0);
   });
 
+  // Security review finding 12: the cap is per node and per registered
+  // prefix, so a stream of live lease views cannot push out a question that
+  // waits a week for its answer.
+  it('a flood of one type evicts only its own oldest items, never another type\'s', () => {
+    const box = new Mailbox({ perNode: 5 });
+    box.registerType('kl.lease.', { ttlMs: 60000 });
+    box.registerType('kl.question.', { ttlMs: 7 * 86400000 });
+    const question = box.put(node.nodeId, msg('kl.question.ask'));
+    const firstLease = box.put(node.nodeId, msg('kl.lease.request'));
+    for (let i = 0; i < 20; i += 1) box.put(node.nodeId, msg('kl.lease.view'));
+    const all = box.list({ nodeIds: [node.nodeId] });
+    assert.ok(all.some((i) => i.seq === question.seq), 'the question is still there');
+    assert.equal(box.list({ nodeIds: [node.nodeId], typePrefix: 'kl.question.' }).length, 1);
+    const leases = box.list({ nodeIds: [node.nodeId], typePrefix: 'kl.lease.' });
+    assert.equal(leases.length, 5, 'the lease prefix keeps its own newest five');
+    assert.ok(!leases.some((i) => i.seq === firstLease.seq), 'its own oldest went');
+    // The cap is per node too: another node's items are untouched.
+    const other = testNodeIdentity();
+    const otherMsg = seal({ v: 1, type: 'kl.lease.view', node_id: other.nodeId, nonce: m.randomNonce() }, other.signer);
+    box.put(other.nodeId, otherMsg);
+    assert.equal(box.list({ nodeIds: [node.nodeId], typePrefix: 'kl.lease.' }).length, 5);
+    assert.equal(box.list({ nodeIds: [other.nodeId] }).length, 1);
+    // And questions have their own cap, which only questions can fill.
+    for (let i = 0; i < 7; i += 1) box.put(node.nodeId, msg('kl.question.ask'));
+    assert.equal(box.list({ nodeIds: [node.nodeId], typePrefix: 'kl.question.' }).length, 5);
+    assert.equal(box.list({ nodeIds: [node.nodeId], typePrefix: 'kl.lease.' }).length, 5);
+  });
+
   it('wait resolves on a new message and caps the wait at 25 s', async () => {
     const box = new Mailbox();
     box.registerType('kl.lease.', { ttlMs: 60000 });
