@@ -14,6 +14,7 @@ const { startEmbedIndexer } = require('./embed-indexer');
 const { HISTORY_DEFAULTS, mergeHistorySettings } = require('./settings');
 const { formatExcerpts, formatRecalledBlock } = require('./excerpts');
 const { InvalidMessageError, DERIVED_CHAT_KEYS } = require('./rows');
+const { SCOPES, narrowest, resolveScope, OPEN_POLICY, CLOSED_POLICY } = require('./scope');
 
 module.exports = {
   HistoryStore,
@@ -38,5 +39,10 @@ module.exports = {
   createUnavailableHistoryStore,
   HistoryUnavailableError,
   InvalidMessageError,
-  DERIVED_CHAT_KEYS
+  DERIVED_CHAT_KEYS,
+  SCOPES,
+  narrowest,
+  resolveScope,
+  OPEN_POLICY,
+  CLOSED_POLICY
 };

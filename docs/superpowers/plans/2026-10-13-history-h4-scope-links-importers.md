@@ -55,6 +55,13 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **The fixture is ten user turns** (twenty messages), with a title, one line before the first turn, a fenced block holding a heading, and level-3 headings inside a reply.
 - **LongHaul's refusal for an unsupported file still names only the two older formats** (`src/longhaul/importing.js`), since the task changes no other LongHaul file. The new test also checks that a Markdown file that is not a transcript is refused.
 
+**Task 4**
+
+- **`CLOSED_POLICY` is added beside `OPEN_POLICY`** (`pinnedTo` pins every chat to `chat`, reason `no-policy`; `canRead` refuses with the same reason). It is what the core runs on until Task 8's policy replaces it (see Task 5), and what `resolveScope` uses when it is handed a `policy` that is not an object with both functions.
+- **Only an exact `true` from `canRead` allows.** Any other answer refuses; one that is not a non-empty string is recorded with the reason `refused`. A pin whose `scope` is not one of the three pins to `chat`.
+- **Under `all`, a linked chat is asked with `explicit: false`** like every other chat, as the interface says. So a chat that a policy allows only when linked (Task 8's bridge chat) is read under `linked` and not under `all`, even when it is among the chat's links.
+- **`requested` narrows only when it is one of the three strings**; an object, an array, a number or `''` is ignored like an unknown word.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named).
