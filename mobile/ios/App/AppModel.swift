@@ -275,6 +275,10 @@ final class AppModel: ObservableObject {
     @Published var runningLeases: [RunningLease] = []
     /// Whether the live lease sheet is presented (the banner owns the sheet).
     @Published var showLiveLease = false
+    /// Whether the live lease view is on screen with the app in front
+    /// (owner ruling R-F5-19). Set only by that view, through
+    /// `setLiveViewVisible`; the watch goes out only while it is true.
+    @Published private(set) var liveViewVisible = false
     private var leaseOpenTask: Task<Void, Never>?
     @Published private(set) var decidingLease: Set<String> = []
     private var decidedLeaseRequests = Set<String>()
@@ -357,6 +361,10 @@ final class AppModel: ObservableObject {
                 // The node's answer carries the status it signed for it, and with
                 // that the first contact token: the first watch can echo it.
                 applyReplyStatus(result, leaseId: item.request.leaseId)
+                // R-F5-19: the watch goes out only while the live view is on
+                // screen, so a lease just allowed is shown at once. Closing the
+                // view pauses the lease after the contact window; the banner says so.
+                showLiveLease = true
             }
         } catch {
             fail(error)
@@ -376,22 +384,46 @@ final class AppModel: ObservableObject {
         liveLease = current
     }
 
-    /// The live view: a watch every 20 s (signed with the session, never a
-    /// fresh prompt) and a long poll for views and statuses, until the lease
-    /// ends or is closed. It does not unlock the app by itself: while the API
-    /// session is locked it waits, and its two relay requests are signed only
-    /// with a session that is already unlocked. One case is left, the same
-    /// as for every API request of this app: if the session's unlock has gone
-    /// stale without the app noticing, signing the watch asks to unlock once
-    /// (DeviceKey's session signature does); a refusal there locks the
-    /// session, and the loop then waits.
+    /// Follows a lease: the banner, the kill switch and, while the live view
+    /// is on screen, the watch.
     func openLiveLease(nodeId: String, leaseId: String) {
         guard let pin = state.nodes.first(where: { $0.id == nodeId }) ?? demo?.pins.first(where: { $0.id == nodeId }) else { return }
         liveTask?.cancel()
         demoLeaseTimer?.cancel()
         liveLease = LiveLease(nodeId: nodeId, nodeName: pin.name, leaseId: leaseId)
         if mode == .demo { startDemoFrames(); return }
-        guard let client, let key else { return }
+        startLiveLoop()
+    }
+
+    /// R-F5-19 (owner ruling, 2026-10-13): this phone watches only while
+    /// the live lease view is visible. The view says when it appears and
+    /// disappears and when the app leaves the foreground; nothing else sets
+    /// this. Coming into view starts the loop afresh, so the watch goes out
+    /// now and not after a poll that may be parked for 20 s.
+    func setLiveViewVisible(_ visible: Bool) {
+        guard visible != liveViewVisible else { return }
+        liveViewVisible = visible
+        if visible, mode == .live, let live = liveLease, live.state != "ended" { startLiveLoop() }
+    }
+
+    /// The loop behind a followed lease. Always: a long poll for statuses
+    /// and views, so the banner tells the truth (ended, paused). Only while
+    /// the live view is on screen (R-F5-19): a watch every 20 s, signed with
+    /// the session, never a fresh prompt. With the view closed or the app in
+    /// the background no watch is sent, the node pauses the lease after its
+    /// contact window, and opening the view again lets it continue. It does
+    /// not unlock the app by itself: while the API session is locked it
+    /// waits, and its two relay requests are signed only with a session that
+    /// is already unlocked. One case is left, the same as for every API
+    /// request of this app: if the session's unlock has gone stale without
+    /// the app noticing, signing the watch asks to unlock once (DeviceKey's
+    /// session signature does); a refusal there locks the session, and the
+    /// loop then waits.
+    private func startLiveLoop() {
+        guard let followed = liveLease, let pin = state.nodes.first(where: { $0.id == followed.nodeId }), let client, let key else { return }
+        let nodeId = followed.nodeId
+        let leaseId = followed.leaseId
+        liveTask?.cancel()
         liveTask = Task { [weak self] in
             var lastWatch = Date.distantPast
             // The token the last watch echoed, and whether the one early watch of this 20 s has been used.
@@ -411,19 +443,23 @@ final class AppModel: ObservableObject {
                     // not grant the lease is never contact, and must not watch in a tight loop).
                     let early = Leases.isPausedForContact(state: live.state, reason: live.reason) && !earlyUsed
                         && live.contactToken != nil && live.contactToken != lastWatchToken
-                    if sinceWatch >= 20 || early, live.state != "ended" {
+                    // R-F5-19: no watch is built, signed or sent unless the live view is on screen.
+                    if self.liveViewVisible, sinceWatch >= 20 || early, live.state != "ended" {
                         earlyUsed = sinceWatch < 20
                         lastWatch = Date()
                         lastWatchToken = live.contactToken
                         let watch = Leases.watch(nodeId: nodeId, leaseId: leaseId, deviceId: key.deviceId, contactToken: live.contactToken,
                                                  nonce: Messages.randomNonce(), signedAt: Timestamps.string(client.now()))
                         let envelope = try await key.signWatchEnvelope(watch)
-                        do {
-                            let reply = try await client.leaseDecision("watch", leaseId: leaseId, envelope: envelope, signWith: AppModel.sessionOnlySigner(key))
-                            // The status the node signed for this watch: the token the next one echoes.
-                            self.applyReplyStatus(reply, leaseId: leaseId)
-                        } catch is RelayError {
-                            // The node is offline or busy: the poll below still shows the lease's state, and the next watch is 20 s away.
+                        // Signing can take a moment (an unlock): the view may have gone meanwhile.
+                        if self.liveViewVisible {
+                            do {
+                                let reply = try await client.leaseDecision("watch", leaseId: leaseId, envelope: envelope, signWith: AppModel.sessionOnlySigner(key))
+                                // The status the node signed for this watch: the token the next one echoes.
+                                self.applyReplyStatus(reply, leaseId: leaseId)
+                            } catch is RelayError {
+                                // The node is offline or busy: the poll below still shows the lease's state, and the next watch is 20 s away.
+                            }
                         }
                     }
                     // (`live` is the lease as this turn began; its mailbox position is what the poll needs.)
@@ -542,9 +578,18 @@ final class AppModel: ObservableObject {
         return rows
     }
 
-    /// What the banner calls a lease.
+    /// What the banner calls a lease. A lease the node paused for want of
+    /// contact (R-F5-15) continues when the phone that granted it watches
+    /// again, and this phone watches only with the live view open (R-F5-19):
+    /// so for its own lease the banner says what to do.
     func bannerTitle(_ lease: RunningLease) -> String {
-        "Lease \(lease.state == "suspended" ? "paused" : "active") on \(Display.escape(lease.nodeName))"
+        let node = Display.escape(lease.nodeName)
+        if Leases.isPausedForContact(state: lease.state, reason: lease.reason) {
+            return grantedByOtherText(device: lease.grantedByDevice, name: lease.grantedByName) == nil
+                ? "Paused: open to let it continue (\(node))"
+                : "Paused on \(node): the phone that granted it is not watching"
+        }
+        return "Lease \(lease.state == "suspended" ? "paused" : "active") on \(node)"
     }
 
     /// Beside Stop, for a lease another phone granted (R-F5-18); nil for this phone's own.

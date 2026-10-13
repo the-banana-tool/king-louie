@@ -86,6 +86,7 @@ struct LeaseRequestView: View {
 
 struct LiveLeaseView: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -109,6 +110,14 @@ struct LiveLeaseView: View {
                             Text("No frame for more than 10 s").font(.caption).foregroundStyle(.orange)
                         }
                         if let reason = live.reason, live.state != "active" { Text("Reason: \(Display.escape(reason))").font(.caption) }
+                        // R-F5-15, R-F5-19: paused for want of contact. With this view open this phone is
+                        // watching again, so its own lease continues in a moment; another phone's does not.
+                        if Leases.isPausedForContact(state: live.state, reason: live.reason) {
+                            Text(model.grantedByOtherText(device: live.grantedByDevice, name: live.grantedByName) == nil
+                                 ? "Paused while this view was closed. It continues now that it is open."
+                                 : "Paused: the phone that granted it is not watching. You can still stop it here.")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
                         // R-F5-18: a lease this phone did not grant says who did.
                         if let by = model.grantedByOtherText(device: live.grantedByDevice, name: live.grantedByName) { Text(by).font(.caption) }
                         Button(role: .destructive) { Task { await model.killSwitch() } } label: {
@@ -129,9 +138,21 @@ struct LiveLeaseView: View {
                 .navigationTitle(Display.escape(live.nodeName))
             }
         }
-        // Leaving the screen forgets only a lease that is over. One that is
-        // still running keeps its banner, and so its kill switch, on every tab.
-        .onDisappear { if model.liveLease?.state == "ended" { model.closeLiveLease() } }
+        // R-F5-19 (owner ruling, 2026-10-13): this phone watches a lease only
+        // while this view is on screen with the app in front. The model is
+        // told here and nowhere else. Going to the background stops the
+        // watch; a Face ID prompt only makes the scene inactive and does not.
+        .onAppear { model.setLiveViewVisible(scenePhase != .background) }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { model.setLiveViewVisible(false) } else if phase == .active { model.setLiveViewVisible(true) }
+        }
+        // Leaving the screen stops the watch, and forgets only a lease that
+        // is over. One that is still running keeps its banner, and so its
+        // kill switch, on every tab.
+        .onDisappear {
+            model.setLiveViewVisible(false)
+            if model.liveLease?.state == "ended" { model.closeLiveLease() }
+        }
     }
 
     private func chipColor(_ live: AppModel.LiveLease) -> Color {

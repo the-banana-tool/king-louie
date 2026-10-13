@@ -70,9 +70,12 @@ can see:
   every three seconds by default) and none while no phone is watching, the
   lease is paused or the screen is locked. The relay holds each for five
   minutes.
-  The iPhone app watches from the moment you allow a lease until it ends,
-  while the app is open and unlocked. The Android app watches only when you
-  tap Refresh; the node then keeps sending pictures for up to a minute,
+  The iPhone app watches only while its live view of the lease is on screen
+  and the app is in front and unlocked; when you close that view or leave
+  the app the node keeps sending pictures for up to a minute more, and then
+  none (and the lease pauses about two minutes after the last watch, until
+  you open the view again). The Android app watches only when you tap
+  Refresh; the node then keeps sending pictures for up to a minute,
   although the app loads only the first to arrive and waits at most five
   seconds for it;
 - each node's audit history (the slices you open, and the copy a relay keeps

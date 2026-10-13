@@ -214,7 +214,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     // One early watch at most per 20 s, so a phone that is never contact does not loop.
     const iosLive = section(iosLeases, 'func openLiveLease', 'private func apply(');
     assert.match(iosLive, /let early = Leases\.isPausedForContact\(state: live\.state, reason: live\.reason\) && !earlyUsed\n\s+&& live\.contactToken != nil && live\.contactToken != lastWatchToken/);
-    assert.match(iosLive, /if sinceWatch >= 20 \|\| early, live\.state != "ended" \{\n\s+earlyUsed = sinceWatch < 20\n/);
+    assert.match(iosLive, /if self\.liveViewVisible, sinceWatch >= 20 \|\| early, live\.state != "ended" \{\n\s+earlyUsed = sinceWatch < 20\n/);
 
     // Android: the same, with no loop: the token rides on the one watch a Refresh sends.
     const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
@@ -330,6 +330,64 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.equal(count(bannerKt, 'Leases.grantedByOther('), 2, 'the lease on the live screen, and each listed one');
     assert.match(screens, /val grantedByOther = Leases\.grantedByOther\(live\.grantedByDevice, live\.grantedByName, model\.deviceId\)/);
     none(screens, ['LaunchedEffect', 'DisposableEffect', 'SideEffect', 'produceState', 'rememberCoroutineScope', 'delay(', 'while (', 'ticker('], 'LeaseScreens.kt');
+  });
+
+  // R-F5-19 (owner ruling, 2026-10-13): iOS watches only while the live
+  // view is visible, as the spec says. Closing the live lease sheet or
+  // backgrounding the app stops the watch; the banner and Stop stay. The
+  // lease then pauses after the contact window (R-F5-15) and continues
+  // when the view is opened again, and the banner says so. This fails if a
+  // watch can be sent while the live view is not visible.
+  it('R-F5-19: iOS sends a watch only while the live view is visible; the banner says "Paused: open to let it continue"', () => {
+    const model = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const leases = section(model, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    const views = read('mobile', 'ios', 'App', 'LeaseViews.swift');
+
+    // One place builds, signs and sends a watch: the loop, and only under liveViewVisible.
+    assert.equal(count(model, 'Leases.watch('), 1);
+    assert.equal(count(model, 'signWatchEnvelope('), 1);
+    assert.equal(count(model, 'leaseDecision("watch"'), 1);
+    const loop = section(leases, 'private func startLiveLoop', 'private func apply(');
+    const gate = loop.indexOf('if self.liveViewVisible, sinceWatch >= 20 || early, live.state != "ended" {');
+    const build = loop.indexOf('Leases.watch(');
+    const sign = loop.indexOf('signWatchEnvelope(');
+    const regate = loop.indexOf('if self.liveViewVisible {');
+    const send = loop.indexOf('leaseDecision("watch"');
+    const poll = loop.indexOf('client.leaseViews(');
+    assert.ok(gate > 0 && gate < build && build < sign && sign < regate && regate < send && send < poll,
+      'visible is checked before the watch is built, and again after it is signed, before it is sent');
+    assert.equal(count(loop, 'self.liveViewVisible'), 2);
+    // Nothing between the gate and its closing brace is outside it: the watch block ends before the poll.
+    assert.match(loop, /if self\.liveViewVisible \{\n\s+do \{\n\s+let reply = try await client\.leaseDecision\("watch", leaseId: leaseId, envelope: envelope, signWith: AppModel\.sessionOnlySigner\(key\)\)/);
+    // The poll for statuses goes on with the view closed, so the banner tells the truth; it signs nothing of the lease.
+    none(loop.slice(poll), ['Leases.watch(', 'signWatchEnvelope(', 'leaseDecision('], 'after the poll');
+
+    // The flag has one writer, and that writer is told only by the live view.
+    assert.match(leases, /@Published private\(set\) var liveViewVisible = false/);
+    assert.equal(count(model, 'liveViewVisible = '), 2, 'its declaration and setLiveViewVisible');
+    const setter = section(leases, 'func setLiveViewVisible', '\n    }\n');
+    assert.match(setter, /guard visible != liveViewVisible else \{ return \}\n\s+liveViewVisible = visible\n/);
+    assert.equal(count(model, 'setLiveViewVisible('), 1, 'declared in the model and called from nowhere in it');
+    const live = views.slice(views.indexOf('struct LiveLeaseView'), views.indexOf('struct LeaseBanner'));
+    assert.equal(count(views, 'setLiveViewVisible('), 4);
+    assert.equal(count(live, 'setLiveViewVisible('), 4, 'only the live view calls it');
+    assert.match(live, /\.onAppear \{ model\.setLiveViewVisible\(scenePhase != \.background\) \}/);
+    assert.match(live, /\.onChange\(of: scenePhase\) \{ _, phase in\n\s+if phase == \.background \{ model\.setLiveViewVisible\(false\) \} else if phase == \.active \{ model\.setLiveViewVisible\(true\) \}\n\s+\}/);
+    assert.match(live, /\.onDisappear \{\n\s+model\.setLiveViewVisible\(false\)\n/);
+    assert.equal(count(views, 'setLiveViewVisible(true)'), 1, 'true only when the scene is active with the view on screen');
+    // The earlier departure is gone: opening a lease starts no watch by itself.
+    const open = section(leases, 'func openLiveLease', 'func setLiveViewVisible');
+    none(open, ['Leases.watch(', 'signWatchEnvelope(', 'liveViewVisible = true'], 'openLiveLease');
+    none(model, ['until the lease\n    /// ends or is closed'], 'the old comment');
+
+    // The banner and Stop stay with the view closed; a lease paused for want of contact says what to do.
+    assert.match(leases, /if Leases\.isPausedForContact\(state: lease\.state, reason: lease\.reason\) \{\n\s+return grantedByOtherText\(device: lease\.grantedByDevice, name: lease\.grantedByName\) == nil\n\s+\? "Paused: open to let it continue \(\\\(node\)\)"/);
+    const banner = views.slice(views.indexOf('struct LeaseBanner'));
+    assert.match(banner, /Button\(model\.bannerTitle\(lease\)\) \{ model\.showLease\(lease\) \}/);
+    assert.match(banner, /Button\("Stop", role: \.destructive\)/);
+    none(banner, ['liveViewVisible', 'setLiveViewVisible'], 'the banner (it neither needs the view nor counts as it)');
+    // Allow shows the live view at once (the watch needs it on screen).
+    assert.match(section(leases, 'func decideLease', 'private func applyReplyStatus'), /applyReplyStatus\(result, leaseId: item\.request\.leaseId\)\n[\s\S]*?showLiveLease = true\n/);
   });
 
   it('neither app\'s demo shows typed text in its action log', () => {
