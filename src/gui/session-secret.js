@@ -171,7 +171,10 @@ const defaultGeteuid = () => (typeof process.geteuid === 'function' ? process.ge
 // cipher the file is also verified as the service reads it: admin-owned, it
 // decrypts, and it holds a valid secret. Without one (uninstall, which must
 // work with no master key) only the recorded identity is read.
-function inspectCanonical({ configDir, platform = process.platform, cipher = null, geteuid = defaultGeteuid, adminUid = 0 }) {
+// requireIdentity: false is the service's own reading (R-F5-11): it runs a
+// file it can verify whether or not the file records the SID or uid.
+function inspectCanonical({ configDir, platform = process.platform, cipher = null, geteuid = defaultGeteuid, adminUid = 0,
+  checkOwner = cipher !== null, requireIdentity = true }) {
   const file = canonicalPath(configDir);
   const invalid = (reason) => ({ state: 'invalid', file, reason });
   let st;
@@ -193,15 +196,17 @@ function inspectCanonical({ configDir, platform = process.platform, cipher = nul
   }
   const sid = typeof raw.session_sid === 'string' && SID_RE.test(raw.session_sid) ? raw.session_sid : null;
   const uid = Number.isInteger(raw.session_uid) && raw.session_uid >= 0 ? raw.session_uid : null;
-  if ((platform === 'win32' ? sid : uid) === null) {
+  if (requireIdentity && (platform === 'win32' ? sid : uid) === null) {
     return invalid(`does not record the ${platform === 'win32' ? 'SID' : 'uid'} it was installed for`);
   }
-  if (cipher) {
+  if (checkOwner) {
     try {
       require('../service/node-config').assertAdminOwned(file, geteuid, adminUid, { decides: 'who the session helper is', selfGrant: 'pose as the session helper' });
     } catch {
       return invalid('is not owned by the administrator');
     }
+  }
+  if (cipher) {
     try {
       readCanonical({ configDir, cipher, geteuid, adminUid });
     } catch (err) {

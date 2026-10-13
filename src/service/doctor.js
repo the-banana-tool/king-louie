@@ -90,6 +90,28 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
     }
   }
 
+  // Fleet stage 5 (R-F5-11): the session helper file. A file that is there
+  // but that the service would refuse turns desktop apps off; say so, with
+  // the remedy. doctor has no master key, so it checks what it can (a regular
+  // file, JSON, its shape, its owner); what the running service itself found
+  // (a file that does not decrypt, say) is read from its status record.
+  {
+    const { adminConfigDir } = require('../platform/paths');
+    const dir = configDir || adminConfigDir({ dataDir });
+    const { inspectCanonical } = require('../gui/session-secret');
+    const { readGuiStatusRecord, SESSION_FILE_REMEDY } = require('../gui/status');
+    const seen = inspectCanonical({ configDir: dir, platform, adminUid, checkOwner: true, requireIdentity: false });
+    const record = readGuiStatusRecord({ dataDir });
+    const serviceSays = record && record.available !== true && typeof record.reason === 'string' && record.reason ? record : null;
+    if (seen.state === 'invalid') {
+      results.push({ check: 'session helper file', ok: false, detail: `session_file_invalid: ${seen.file} ${seen.reason}; desktop apps are off. To fix it, ${SESSION_FILE_REMEDY}` });
+    } else if (serviceSays) {
+      results.push({ check: 'desktop apps (running service)', ok: false, detail: `off, ${serviceSays.reason}${serviceSays.detail ? `: ${serviceSays.detail}` : ''}. To fix it, ${SESSION_FILE_REMEDY}` });
+    } else if (seen.state === 'installed') {
+      results.push({ check: 'session helper file', ok: true, detail: `installed for ${seen.user}; the service checks that it decrypts when it starts` });
+    }
+  }
+
   // Fleet stage 4 §3.14: doctor on a front door.
   {
     const { adminConfigDir } = require('../platform/paths');

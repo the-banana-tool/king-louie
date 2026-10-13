@@ -13,7 +13,9 @@ const S = require('../src/gui/session-secret');
 const { connectToService, createOpHandler } = require('../src/session/connection');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { ToolRegistry } = require('../src/tools/tool-registry');
-const { readGuiStatus } = require('../src/gui/status');
+const { readGuiStatus, readGuiStatusRecord } = require('../src/gui/status');
+const { runSessionCommand } = require('../src/service/commands/session');
+const { runDoctor } = require('../src/service/doctor');
 const { FleetToolHandler } = require('../src/fleet/fleet-tools');
 const { setLogLevel } = require('../src/logging');
 const { testNodeIdentity } = require('./helpers/fake-phone');
@@ -66,17 +68,125 @@ function install(configDir, { nodeId = identity.nodeId } = {}) {
   return secret;
 }
 
+// A logger that keeps what it was told, by level.
+function spyLog() {
+  const lines = { info: [], warn: [], error: [] };
+  const text = (message, meta) => `${message}${meta ? ` ${JSON.stringify(meta)}` : ''}`;
+  return {
+    info: (m, meta) => lines.info.push(text(m, meta)), warn: (m, meta) => lines.warn.push(text(m, meta)), error: (m, meta) => lines.error.push(text(m, meta)),
+    debug: () => {}, errors: lines.error, all: () => [...lines.info, ...lines.warn, ...lines.error].join('\n')
+  };
+}
+
 const approvals = () => ({ identity, approverStore: { get: () => null }, relayClient: new FakeRelay(), phoneApprover: { isAvailable: () => true }, auditLedger: { append: async () => {} } });
 
 describe('createGuiSubsystem', () => {
-  it('is null when gui is off, on a runbook node, when not installed, or installed for another node', () => {
+  it('is null when gui is off, on a runbook node or when not installed (and that is not an error)', () => {
     const { configDir, dataDir } = dirs();
-    const common = { dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID };
+    const log = spyLog();
+    const common = { dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, log };
     assert.equal(createGuiSubsystem({ ...common, nodeConfig: nodeConfig({ enabled: false }) }), null);
     assert.equal(createGuiSubsystem({ ...common, nodeConfig: nodeConfig({}, 'runbook') }), null);
     assert.equal(createGuiSubsystem({ ...common, nodeConfig: nodeConfig() }), null, 'no helper-secret.json yet');
-    install(configDir, { nodeId: 'kl-c2ubd6jjqumalzt5' });
-    assert.equal(createGuiSubsystem({ ...common, nodeConfig: nodeConfig() }), null, 'installed for another node');
+    assert.deepEqual(log.errors, []);
+  });
+
+  // R-F5-11 (owner ruling, 2026-10-12): a helper file that is there but
+  // cannot be used turns desktop apps off, with a reason; it never throws
+  // (the service still starts) and is never accepted.
+  const SECRET_HEX = 'ab'.repeat(32);
+  const badFiles = {
+    'is not JSON': (file) => fs.writeFileSync(file, '{ "secret": "klc1:not json'),
+    'does not decrypt': (file) => {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      fs.writeFileSync(file, JSON.stringify({ ...raw, secret: createAesGcmCipher(crypto.randomBytes(32)).encryptString(SECRET_HEX) }));
+    },
+    'is malformed (no endpoint id)': (file) => {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      delete raw.endpoint_id;
+      fs.writeFileSync(file, JSON.stringify(raw));
+    },
+    'holds no valid secret': (file) => {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      fs.writeFileSync(file, JSON.stringify({ ...raw, secret: cipher.encryptString('nope') }));
+    },
+    'was written for another node': (file) => {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      fs.writeFileSync(file, JSON.stringify({ ...raw, node_id: 'kl-c2ubd6jjqumalzt5' }));
+    },
+    'is a directory': (file) => { fs.unlinkSync(file); fs.mkdirSync(file); }
+  };
+  // The owner check is a uid comparison, which Windows does not have.
+  if (POSIX) badFiles['is not owned by the administrator'] = () => 'wrong-admin';
+
+  for (const [name, damage] of Object.entries(badFiles)) {
+    it(`R-F5-11: a helper file that ${name} turns the GUI off with session_file_invalid; nothing throws, no channel opens, every tool refuses`, async () => {
+      const { configDir, dataDir } = dirs();
+      install(configDir);
+      const file = S.canonicalPath(configDir);
+      const wrongAdmin = damage(file) === 'wrong-admin';
+      if (POSIX && !wrongAdmin && fs.statSync(file).isFile()) fs.chmodSync(file, 0o640);
+      const log = spyLog();
+      const a = approvals();
+      const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: wrongAdmin ? UID + 1 : UID, geteuid: () => UID, log });
+      assert.ok(gui, 'the subsystem exists so that its tools can say why they refuse');
+      assert.equal(gui.unavailable.reason, 'session_file_invalid');
+      assert.equal(gui.channel, null, 'no helper channel');
+      assert.equal(gui.broker, null);
+      assert.equal(gui.leases, null, 'and no lease manager');
+      assert.equal(a.relayClient.methods.size, 0, 'no lease link method is registered');
+      const cap = gui.capability();
+      assert.equal(cap.available, false);
+      assert.equal(cap.reason, 'session_file_invalid');
+      assert.deepEqual(cap.capabilities, []);
+      // Logged once, at error level, with the remedy and nothing of the file's contents.
+      assert.equal(log.errors.length, 1, log.errors.join('\n'));
+      assert.match(log.errors[0], /desktop apps are off/);
+      assert.match(log.errors[0], /session uninstall --user NAME/);
+      assert.ok(!log.all().includes('klc1:') && !log.all().includes(SECRET_HEX), 'no secret material in any log line');
+
+      const registry = new ToolRegistry();
+      gui.registerTools(registry);
+      assert.equal(registry.list().length, 10);
+      for (const tool of registry.list()) {
+        const out = await registry.get(tool.name).execute({}, { origin: { client: 'x', session: 'c1', job_id: null } });
+        assert.equal(out.ok, false, tool.name);
+        assert.match(out.error, /^capability_unavailable: gui \(session_file_invalid: /, tool.name);
+        assert.match(out.error, /session install --user NAME/, tool.name);
+      }
+
+      await gui.start();
+      cleanups.push(() => gui.stop());
+      assert.equal(readGuiStatus({ dataDir }).available, false);
+      const record = readGuiStatusRecord({ dataDir });
+      assert.equal(record.available, false);
+      assert.equal(record.reason, 'session_file_invalid');
+      assert.ok(!JSON.stringify(record).includes('klc1:'));
+
+      // "session status" and "doctor" say so, with the remedy.
+      const out = [];
+      const io = { stdout: { write: (t) => out.push(String(t)) }, stderr: { write: () => {} }, stdin: null };
+      assert.equal(await runSessionCommand({ sub: 'status', flags: {}, dataDir, io, deps: { configDir, platform: process.platform } }), 0);
+      assert.match(out.join(''), /helper: off \(session_file_invalid\)/);
+      assert.match(out.join(''), /session uninstall --user NAME/);
+      const rows = await runDoctor({ dataDir, adminUid: wrongAdmin ? UID + 1 : UID, configDir });
+      const bad = rows.filter((r) => /session helper|desktop apps/.test(r.check) && r.ok === false);
+      assert.equal(bad.length, 1, JSON.stringify(rows.filter((r) => /session helper|desktop apps/.test(r.check))));
+      assert.match(bad[0].detail, /session_file_invalid/);
+      assert.match(bad[0].detail, /session uninstall --user NAME/);
+      await gui.stop();
+    });
+  }
+
+  it('R-F5-11: doctor is quiet about a helper that is not installed and passes one that is', async () => {
+    const { configDir, dataDir } = dirs();
+    let rows = await runDoctor({ dataDir, adminUid: UID, configDir });
+    assert.deepEqual(rows.filter((r) => /session helper|desktop apps/.test(r.check)), []);
+    install(configDir);
+    rows = await runDoctor({ dataDir, adminUid: UID, configDir });
+    const row = rows.filter((r) => /session helper/.test(r.check));
+    assert.equal(row.length, 1);
+    assert.equal(row[0].ok, true);
   });
 
   it('builds the channel, broker, leases and live view; registers the tools and the lease link methods', async () => {

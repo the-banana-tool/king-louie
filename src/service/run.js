@@ -57,7 +57,9 @@ function adminDirApprovalOptions({ adminUid, configDir }) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, adminUid, configDir, executors }) {
+      // deps: tests only (deps.gui reaches createGuiSubsystem's deps, for a
+      // helper endpoint under a temp dir); runService passes none.
+      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, adminUid, configDir, executors, deps = {} }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -99,7 +101,8 @@ function loadProfile(profile) {
               jobManager: fleet ? fleet.jobManager : null,
               chatExists: (chatId) => Boolean(core && core.context.getChat(chatId, { messages: false }))
             }, jobId),
-            ...(adminUid === undefined ? {} : { adminUid })
+            ...(adminUid === undefined ? {} : { adminUid }),
+            ...(deps.gui ? { deps: deps.gui } : {})
           });
         } catch (err) {
           await desktopBridge.stop().catch(() => {});

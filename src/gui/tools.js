@@ -116,7 +116,7 @@ function vaultValues(options) {
 }
 
 function buildGuiTools(gui) {
-  const { broker, leases, liveView = null, guiConfig, getPolicy = () => ({}), audit = null, platform = process.platform } = gui;
+  const { broker, leases, liveView = null, guiConfig, getPolicy = () => ({}), audit = null, platform = process.platform, unavailable = null } = gui;
   const policy = () => getPolicy() || {};
   const auditAppend = (kind, data) => {
     if (!audit) return;
@@ -127,6 +127,9 @@ function buildGuiTools(gui) {
     requiresApproval: false,
     ...config,
     execute: async (params = {}, options = {}) => {
+      // R-F5-11: desktop apps are off on this node for a reason the host
+      // gives (no broker, no leases, no channel); every tool says so first.
+      if (unavailable) return toToolResult(new GuiError('capability_unavailable', `gui (${unavailable.message})`));
       try {
         checkParams(config.parameters, params);
         return await run(params, options, { jobId: jobIdOf(options), leaseId: null });

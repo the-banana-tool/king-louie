@@ -408,6 +408,116 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
     assert.ok(!path.resolve(seen.approvals.approverStore.dir).startsWith(path.resolve(dir)), 'not a data-dir approver set');
   });
 
+  // Fleet stage 5 (owner ruling R-F5-11), with a live core: the session
+  // helper file decides whether desktop apps are on, never whether the
+  // service starts.
+  describe('the GUI subsystem under a live core (R-F5-11)', () => {
+    const crypto = require('crypto');
+    const S = require('../src/gui/session-secret');
+    const { readGuiStatusRecord } = require('../src/gui/status');
+    const POSIX = process.platform !== 'win32';
+    const UID = POSIX ? process.getuid() : 0;
+
+    // These tests' own dirs, removed here and with retries: a live core
+    // probes its workspace with a git child (system-sections.js) that can
+    // outlive shutdown() by a moment, and on Windows a directory that is a
+    // running process's cwd cannot be removed until that process exits.
+    const mine = [];
+    after(async () => {
+      closeOpenHistoryStores();
+      for (const d of mine) await fs.promises.rm(d, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+    });
+    function liveDataDir() {
+      const made = dataDir();
+      dirs.splice(dirs.indexOf(made.dataDir), 1);
+      mine.push(made.dataDir);
+      return made;
+    }
+    function adminDir() {
+      // Native realpath: session-secret.js wants the config dir to be its own.
+      const configDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-run-gui-cfg-')));
+      mine.push(configDir);
+      if (POSIX) fs.chmodSync(configDir, 0o755);
+      return configDir;
+    }
+    const endpoint = (configDir) => (POSIX ? path.join(configDir, 'h.sock') : `\\\\.\\pipe\\kl-run-gui-${crypto.randomBytes(6).toString('hex')}`);
+    const start = (dir, workspace, configDir) => loadProfile('agent').start({
+      dataDir: dir, features: allOff, ports: {}, workspace, configDir, adminUid: UID, deps: { gui: { endpoint: endpoint(configDir) } }
+    });
+
+    it('(a) no helper installed: the GUI is off and the service is up', async () => {
+      const { dataDir: dir, workspace } = liveDataDir();
+      const running = await start(dir, workspace, adminDir());
+      try {
+        assert.strictEqual(running.gui, null);
+        assert.ok(running.fleet && running.fleet.jobManager, 'the rest of the service started');
+      } finally {
+        await running.stop();
+      }
+    });
+
+    it('(b) an invalid helper file: the GUI is off with session_file_invalid and the service is up', async () => {
+      const { dataDir: dir, workspace } = liveDataDir();
+      const configDir = adminDir();
+      fs.mkdirSync(path.join(configDir, 'session'), { mode: 0o755 });
+      fs.writeFileSync(S.canonicalPath(configDir), '{ not json', { mode: 0o640 });
+      fs.writeFileSync(path.join(dir, 'service.pid'), String(process.pid));
+      const running = await start(dir, workspace, configDir);
+      try {
+        assert.ok(running.gui, 'a subsystem that is off, not a missing one');
+        assert.strictEqual(running.gui.unavailable.reason, 'session_file_invalid');
+        assert.strictEqual(running.gui.channel, null, 'no helper channel was opened');
+        assert.strictEqual(running.gui.capability().available, false);
+        assert.strictEqual(running.gui.capability().reason, 'session_file_invalid');
+        assert.strictEqual(readGuiStatusRecord({ dataDir: dir }).reason, 'session_file_invalid');
+        assert.ok(running.fleet && running.fleet.jobManager, 'the rest of the service started');
+      } finally {
+        await running.stop();
+      }
+    });
+
+    it('(c) a valid helper file: started after the fleet node, stopped first, with jobOpen bound to the real JobManager', async () => {
+      const { dataDir: dir, workspace } = liveDataDir();
+      const configDir = adminDir();
+      // The service's own master key and node identity, made the way it makes them.
+      const { buildServicePorts } = require('../src/service/ports');
+      const { CHAT_DATA_DEFAULTS } = require('../src/core/settings');
+      const { getOrGenerateNodeIdentity } = require('../src/mesh/node-identity');
+      const ports = buildServicePorts({ dataDir: dir, chatDataDefaults: CHAT_DATA_DEFAULTS });
+      const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, 'unnamed-node');
+      const { secret, endpointId } = S.mintSessionSecret();
+      S.writeCanonical({ configDir, cipher: ports.cipher, secret, endpointId, nodeId: identity.nodeId, sessionUser: 'alice' });
+      fs.writeFileSync(path.join(dir, 'service.pid'), String(process.pid));
+
+      const running = await start(dir, workspace, configDir);
+      const order = [];
+      try {
+        assert.ok(running.gui && !running.gui.unavailable, 'the real subsystem');
+        assert.ok(running.gui.channel.server, 'the helper channel is listening');
+        assert.strictEqual(running.gui.capability().available, false, 'no helper has connected');
+        const record = readGuiStatusRecord({ dataDir: dir });
+        assert.ok(record && record.available === false && !record.reason, 'the broker started and wrote its status');
+        // jobOpen is the real one: a job the fleet JobManager has is open
+        // until it ends, and nothing else is.
+        const { jobOpen } = running.gui.leases;
+        const job = running.fleet.jobManager.createDelegateJob({ machine: 'unnamed-node', task: 'x', cwd: null });
+        assert.strictEqual(jobOpen(job.job_id), true);
+        assert.strictEqual(jobOpen('job-0-nobody'), false);
+        assert.strictEqual(jobOpen('chat:no-such-chat'), false);
+        running.fleet.jobManager.cancelJob(job.job_id);
+        assert.strictEqual(jobOpen(job.job_id), false, 'a job that ended is closed');
+        for (const [name, part] of [['gui', running.gui], ['fleet', running.fleet], ['approvals', running.approvals]]) {
+          const stop = part.stop.bind(part);
+          part.stop = async () => { order.push(name); return stop(); };
+        }
+      } finally {
+        await running.stop();
+      }
+      assert.deepStrictEqual(order, ['gui', 'fleet', 'approvals'], 'the GUI stops first, approvals last');
+      assert.strictEqual(running.gui.channel.server, null, 'the helper channel is closed');
+    });
+  });
+
   // Fix round 2 (opus re-review, minor, explicitly requested test): the
   // returned stop() already runs core.shutdown() in a try with
   // approvals.stop() in the finally (round 1); this pins that a rejecting

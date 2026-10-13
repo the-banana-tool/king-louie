@@ -290,6 +290,14 @@ async function status({ dataDir, io, deps }) {
     io.stdout.write('helper: no running service reports a session helper\n');
     return 0;
   }
+  if (!record.available && typeof record.reason === 'string' && record.reason) {
+    // R-F5-11: the running service turned desktop apps off, and why.
+    const { printable } = require('./io');
+    const { SESSION_FILE_REMEDY } = require('../../gui/status');
+    io.stdout.write(`helper: off (${printable(record.reason)})${record.detail ? `: ${printable(record.detail)}` : ''}\n`);
+    io.stdout.write(`  to fix it, ${SESSION_FILE_REMEDY}\n`);
+    return 0;
+  }
   io.stdout.write(`helper: ${record.available ? `connected (${record.user}, ${record.platform})` : 'not connected'}\n`);
   if (record.available) io.stdout.write(`capabilities: ${(record.capabilities || []).join(', ') || 'none'}\n`);
   if ((record.limits || []).length) io.stdout.write(`limits: ${record.limits.join(', ')}\n`);

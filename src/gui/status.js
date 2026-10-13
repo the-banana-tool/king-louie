@@ -10,6 +10,9 @@ const path = require('path');
 const STALE_MS = 30000;
 const statusPath = (dataDir) => path.join(dataDir, 'session', 'status.json');
 const UNAVAILABLE = Object.freeze({ available: false, capabilities: [], apps: [], limits: [], lease: null });
+// R-F5-11: what an administrator does about a session helper file the
+// service refused. Said by the log, the GUI tools, "session status" and doctor.
+const SESSION_FILE_REMEDY = 'as root or an Administrator run "king-louie-service session uninstall --user NAME", then "king-louie-service session install --user NAME", and restart the service';
 
 function writeGuiStatus(dataDir, record) {
   const dir = path.dirname(statusPath(dataDir));
@@ -56,4 +59,4 @@ function readGuiStatus(options = {}) {
   };
 }
 
-module.exports = { statusPath, writeGuiStatus, readGuiStatus, readGuiStatusRecord, STALE_MS };
+module.exports = { statusPath, writeGuiStatus, readGuiStatus, readGuiStatusRecord, STALE_MS, SESSION_FILE_REMEDY };
