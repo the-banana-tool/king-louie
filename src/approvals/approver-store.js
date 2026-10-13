@@ -215,6 +215,28 @@ class ApproverStore {
     this.readOwners = readOwners;
     this._ownerKey = null;
     this._ownerProblem = null;
+    // Told when a revoke relayed from a phone is staged (onDeviceRevoked).
+    this._revokeListeners = new Set();
+  }
+
+  // fn(deviceId) runs when a verified revoke from a phone is staged and its
+  // device goes onto the overlay: what rests on that device's signature can
+  // end at once, not at its next look at the set. A revoke an administrator
+  // writes into the directory is not announced: readers find it by reading.
+  // Returns the function that takes the listener off again.
+  onDeviceRevoked(fn) {
+    this._revokeListeners.add(fn);
+    return () => { this._revokeListeners.delete(fn); };
+  }
+
+  _announceRevoked(deviceId) {
+    for (const fn of [...this._revokeListeners]) {
+      try {
+        fn(deviceId);
+      } catch (err) {
+        log.warn(`a revoke listener failed: ${err.message}`);
+      }
+    }
   }
 
   // Startup probe. POSIX: the dir must be admin-owned and not writable by
@@ -500,6 +522,9 @@ class ApproverStore {
     // then fails (a full disk, a permission flip) — the alternative order
     // would let a write failure silently drop the revoke's only effect.
     this.overlay.add(message.device_id);
+    // Before the write as well: what the device granted ends even if the
+    // revoke cannot be kept.
+    this._announceRevoked(message.device_id);
     if (!this._writeStagedSafe(message.nonce, envelope)) return rejected('staging_write_failed');
     return { state: 'revoked-pending-apply' };
   }

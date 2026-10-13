@@ -805,6 +805,86 @@ describe('lock, expiry and revoke', () => {
     });
   });
 
+  // Third security review, hardening (b): when the phone that granted a
+  // lease is revoked, the lease ends at once. It used to pause only when
+  // the contact window ran out, and stay resumable by nobody.
+  describe('the leases a revoked device granted end', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const store = () => leases.approvals.approverStore;
+    const adminRevokes = (device) => {
+      const record = device.approverRecord({ revokedAt: new Date(clock.now()).toISOString(), revokedBy: 'console' });
+      fs.writeFileSync(path.join(store().dir, `${device.deviceId}.json`), JSON.stringify(record));
+    };
+
+    it('a revoke relayed from another phone (staged): the lease ends as it is staged, with release_all, a status and an audit entry', async () => {
+      const lease = await granted();
+      broker.calls.length = 0;
+      assert.equal(store().stage(other.revoke(phone.deviceId, { now: clock.now() })).state, 'revoked-pending-apply');
+      assert.equal(lease.state, 'ended');
+      assert.equal(lease.endReason, 'device_revoked');
+      assert.ok(broker.calls.includes('releaseAll'));
+      const status = relay.last('kl.lease.status').message;
+      assert.deepEqual([status.lease_id, status.state, status.reason], [lease.leaseId, 'ended', 'device_revoked']);
+      assert.ok(audits.some((a) => a.kind === 'lease.ended' && a.data.reason === 'device_revoked' && a.data.lease_id === lease.leaseId));
+      assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'lease_revoked' && /phone that granted/.test(e.message));
+      assert.equal(leases.current(), null);
+    });
+
+    it('a revoke written by the administrator (device revoke, device apply): found at the next check, five seconds at most', async () => {
+      const { GRANTOR_CHECK_MS } = require('../src/gui/leases');
+      assert.equal(GRANTOR_CHECK_MS, 5000);
+      const lease = await granted();
+      timers.advance(GRANTOR_CHECK_MS);
+      assert.equal(lease.state, 'active', 'an enrolled device: nothing happens');
+      adminRevokes(phone);
+      timers.advance(GRANTOR_CHECK_MS - 1);
+      assert.equal(lease.state, 'active', 'the node has not looked yet');
+      timers.advance(1);
+      assert.equal(lease.state, 'ended');
+      assert.equal(lease.endReason, 'device_revoked');
+      assert.equal(relay.last('kl.lease.status').message.reason, 'device_revoked');
+    });
+
+    it('the next input finds it without the timer', async () => {
+      const lease = await granted();
+      adminRevokes(phone);
+      store().refresh(); // the store looks at its files once a second at most
+      assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'lease_revoked');
+      assert.equal(lease.endReason, 'device_revoked');
+    });
+
+    it('the revocation of another device ends nothing; a paused lease of the revoked device ends too', async () => {
+      const lease = await granted();
+      assert.equal(store().stage(phone.revoke(other.deviceId, { now: clock.now() })).state, 'revoked-pending-apply');
+      timers.advance(5000);
+      assert.equal(lease.state, 'active');
+      leases.suspend(lease.leaseId, 'foreground_changed');
+      assert.equal(lease.state, 'suspended');
+      adminRevokes(phone);
+      timers.advance(5000);
+      assert.equal(lease.state, 'ended');
+      assert.equal(lease.endReason, 'device_revoked');
+      assert.equal(relay.all('kl.lease.request').filter((s) => s.message.lease.resumes === lease.leaseId).length, 1, 'its resume request is not sent again');
+    });
+
+    it('a lease still waiting for its first grant is not ended: nobody granted it yet', async () => {
+      const p = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'Enter the totals' });
+      p.catch(() => {});
+      adminRevokes(phone);
+      timers.advance(5000);
+      assert.equal(leases.current().state, 'pending');
+      leases.stopAll();
+    });
+
+    it('stop() takes the manager off the store', async () => {
+      await granted();
+      assert.equal(store()._revokeListeners.size, 1);
+      leases.stop();
+      assert.equal(store()._revokeListeners.size, 0);
+    });
+  });
+
   // R-F5-18 (owner ruling, 2026-10-13): any enrolled phone can stop a
   // lease, and can see what it is stopping. Granting, resuming and contact
   // stay with the phone that granted it. A phone learns of live leases

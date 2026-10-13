@@ -70,7 +70,12 @@ class LeaseNonces {
   add(nonce, sha256) { this.seen.set(nonce, sha256); }
 }
 const NO_NONCES = Object.freeze({ get: () => null });
-const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', expired: 'lease_expired', job_closed: 'job_closed' };
+const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', device_revoked: 'lease_revoked', expired: 'lease_expired', job_closed: 'job_closed' };
+// Why a lease ends when the device that granted it is no longer an
+// enrolled, unrevoked approver, and how often the node looks (an
+// administrator's "device revoke" or "device apply" only writes a file).
+const GRANTOR_REVOKED_REASON = 'device_revoked';
+const GRANTOR_CHECK_MS = 5000;
 
 class LeaseManager extends EventEmitter {
   // jobOpen fails closed (R-F5-7): with none given, no job is open.
@@ -236,6 +241,48 @@ class LeaseManager extends EventEmitter {
       relay.on('disconnected', this._onDown);
       relay.on('connected', this._onUp);
     }
+    // A revoke a phone sent through the relay takes effect as it is staged.
+    const store = this.approvals.approverStore;
+    if (store && typeof store.onDeviceRevoked === 'function') this._offRevoked = store.onDeviceRevoked(() => this.checkGrantingDevices());
+  }
+
+  // Is the device that granted this lease still an enrolled approver that
+  // nobody has revoked (a revoke staged from a phone counts)? Anything else
+  // is a no, a store that cannot be read or trusted included: the lease
+  // rests on that device's signature.
+  _grantorActive(lease) {
+    try {
+      return this.approvals.approverStore.isActive(lease.grantedBy) === true;
+    } catch (err) {
+      this.log.warn(`approver check failed, treating the granting device as revoked: ${err.message}`);
+      return false;
+    }
+  }
+
+  // Third security review, hardening (b): a lease does not outlive the
+  // enrollment of the device that granted it. Every live lease whose
+  // granting device is no longer active ends now (release_all, a status,
+  // an audit entry), whatever state it is in; a lease still waiting for
+  // its first grant has no granting device. Called when a revoke is staged,
+  // before every input, and every GRANTOR_CHECK_MS while a lease is live.
+  checkGrantingDevices({ refresh = false } = {}) {
+    const store = this.approvals.approverStore;
+    if (refresh && store && typeof store.refresh === 'function') store.refresh();
+    for (const lease of this.leases) {
+      if (lease.state === 'ended' || lease.grantedBy === null) continue;
+      if (!this._grantorActive(lease)) this._end(lease, GRANTOR_REVOKED_REASON);
+    }
+  }
+
+  // While the lease lives: look again every GRANTOR_CHECK_MS.
+  _armGrantorCheck(lease) {
+    if (lease.grantorTimer) this.timers.clearTimeout(lease.grantorTimer);
+    lease.grantorTimer = this._timer(() => {
+      lease.grantorTimer = null;
+      if (lease.state === 'ended') return;
+      this.checkGrantingDevices({ refresh: true });
+      if (lease.state !== 'ended') this._armGrantorCheck(lease);
+    }, GRANTOR_CHECK_MS);
   }
 
   stop() {
@@ -244,6 +291,7 @@ class LeaseManager extends EventEmitter {
       relay.off('disconnected', this._onDown);
       relay.off('connected', this._onUp);
     }
+    if (this._offRevoked) { this._offRevoked(); this._offRevoked = null; }
     this.stopAll('service_stopped');
   }
 
@@ -326,7 +374,7 @@ class LeaseManager extends EventEmitter {
         apps: [], state: 'pending', locked: false, endReason: null, suspendReason: null, expiresAt: null, expiresMono: null,
         grantedBy: null, grantedByName: null,
         seq: 0, typed: new TypedBuffer(), inputTimes: [], waiters: [], expiryTimer: null, controlNonces: new LeaseNonces(),
-        lastContact: null, contactTimer: null,
+        lastContact: null, contactTimer: null, grantorTimer: null,
         // Contact tokens: token → { n, at }; how many were issued; and the
         // newest one that has made contact.
         tokens: new Map(), tokenIssued: 0, tokenUsedUpTo: 0, lastStatus: null
@@ -450,6 +498,7 @@ class LeaseManager extends EventEmitter {
     if (!entry.resume) {
       lease.grantedBy = r.deviceId;
       lease.grantedByName = this._deviceName(r.deviceId);
+      this._armGrantorCheck(lease);
     }
     // The same rule on each clock: a resume never outlives the original lease on either.
     lease.expiresAt = L.effectiveExpiry({ verifiedAt: now, minutes: m.grant.minutes, resumeOf: entry.resume ? lease.expiresAt : null });
@@ -566,10 +615,13 @@ class LeaseManager extends EventEmitter {
     // R-F5-7: a lease does not outlive its job.
     const held = this.current();
     if (held && !this._jobIsOpen(held.jobId)) this._end(held, 'job_closed');
+    // Nor the enrollment of the device that granted it.
+    this.checkGrantingDevices();
     const lease = this.current();
     if (!lease || lease.jobId !== jobId) {
       const last = [...this.leases].reverse().find((l) => l.jobId === jobId && l.state === 'ended');
       if (last && last.endReason === 'revoked') throw new GuiError('lease_revoked', 'call RequestLease for a new lease');
+      if (last && last.endReason === GRANTOR_REVOKED_REASON) throw new GuiError('lease_revoked', 'the phone that granted this lease is no longer enrolled; call RequestLease for a new lease');
       if (last && last.endReason === 'expired') throw new GuiError('lease_expired', 'call RequestLease for a new lease');
       if (last && last.endReason === 'job_closed') throw new GuiError('job_closed', 'the job this lease belonged to is not open');
       throw new GuiError('lease_required', 'call RequestLease first');
@@ -673,6 +725,7 @@ class LeaseManager extends EventEmitter {
     lease.endReason = reason;
     if (lease.expiryTimer) this.timers.clearTimeout(lease.expiryTimer);
     if (lease.contactTimer) this.timers.clearTimeout(lease.contactTimer);
+    if (lease.grantorTimer) this.timers.clearTimeout(lease.grantorTimer);
     lease.tokens.clear();
     for (const [id, entry] of this.pending) {
       if (entry.ref === lease) {
@@ -755,4 +808,4 @@ class LeaseManager extends EventEmitter {
   }
 }
 
-module.exports = { LeaseManager, CONTACT_REASON, CONTACT_MAX_S };
+module.exports = { LeaseManager, CONTACT_REASON, CONTACT_MAX_S, GRANTOR_REVOKED_REASON, GRANTOR_CHECK_MS };
