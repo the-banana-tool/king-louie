@@ -268,6 +268,117 @@ describe('screenshots and coordinates', () => {
   });
 });
 
+// Second security review, finding 4. A window with an owner (a Save As or a
+// message box, a Find or Print dialog, a pop-up menu, a combo box's list)
+// was left out of the window list, so the model was shown the window behind
+// it and every click there was refused as obscured. The helper now lists
+// them (`owned: true`); these run the broker over a fake helper. What must
+// not change: a click lands only on the window the screenshot was of.
+describe('second review finding 4: dialogs, menus and lists of a leased app can be seen and clicked', () => {
+  const MAIN = { handle: 'w1', pid: 100, image: CALC.image, title: 'Untitled - Notes', bounds: { x: 0, y: 0, w: 1200, h: 800 }, scale: 1, minimized: false, owned: false };
+  const DIALOG = { handle: 'w2', pid: 100, image: CALC.image, title: 'Save As', bounds: { x: 300, y: 200, w: 600, h: 400 }, scale: 1, minimized: false, owned: true };
+  const MENU = { handle: 'w3', pid: 100, image: CALC.image, title: '', bounds: { x: 10, y: 30, w: 180, h: 260 }, scale: 1, minimized: false, owned: true };
+  const fgOf = (w) => async () => ({ handle: w.handle, pid: w.pid, image: w.image, bounds: w.bounds, scale: 1 });
+  const captured = (channel) => channel.requests.filter((r) => r.op === 'screenshot').map((r) => r.params.handle);
+  const click = (b, target) => b.input({ kind: 'click', handle: target.handle, rel: target.rel, button: 'left', count: 1, mods: [] }, { jobId: 'job-1', leaseId: 'l1', appIds: ['calculator'], yieldMs: 0 });
+
+  it('Save As is in front: the screenshot is of the dialog, and a click goes to the dialog\'s own handle', async () => {
+    const { b, channel } = broker({ handlers: { windows: async () => [DIALOG, MAIN], foreground: fgOf(DIALOG), screenshot: async () => ({ mime: 'image/jpeg', width: 600, height: 400, data: 'AA==', transform: { sx: 1, sy: 1, unit: 'px' } }) } });
+    channel.connect();
+    const shot = await b.screenshot({ app: 'calculator' }, ctx);
+    assert.deepEqual(captured(channel), ['w2']);
+    const target = b.mapPoint('job-1', shot.screenshotId, 500, 350, ['calculator']);
+    assert.deepEqual(target, { handle: 'w2', rel: [500, 350], appId: 'calculator' });
+    await click(b, target);
+    assert.equal(channel.requests.find((r) => r.op === 'input').params.action.handle, 'w2', 'the hit test is against the window that was shown');
+    // The window behind it is offered by id, with its title as untrusted text.
+    assert.deepEqual(shot.otherWindows, [{ window: 'win-1', title: 'Untitled - Notes', owned: false, width: 1200, height: 800 }]);
+  });
+
+  it('a foreground window of the app that the list does not hold is used itself', async () => {
+    const { b, channel } = broker({ handlers: { windows: async () => [MAIN], foreground: fgOf(DIALOG) } });
+    channel.connect();
+    const shot = await b.screenshot({ app: 'calculator' }, ctx);
+    assert.deepEqual(captured(channel), ['w2']);
+    assert.equal(b.mapPoint('job-1', shot.screenshotId, 1, 1, ['calculator']).handle, 'w2');
+    // Not when the foreground is another process's window: then it is the app's largest main window.
+    const other = broker({ handlers: { windows: async () => [MENU, MAIN], foreground: async () => ({ handle: 'x9', pid: 4, image: 'C:\\Windows\\explorer.exe', bounds: { x: 0, y: 0, w: 5, h: 5 }, scale: 1 }) } });
+    other.channel.connect();
+    await other.b.screenshot({ app: 'calculator' }, ctx);
+    assert.deepEqual(captured(other.channel), ['w1'], 'never a small owned window by default, and never a window of another process');
+  });
+
+  it('a menu is open over the main window: the default screenshot is still the main window, and names the menu so the model can ask for it', async () => {
+    const { b, channel } = broker({ handlers: { windows: async () => [MENU, MAIN], foreground: fgOf(MAIN) } });
+    channel.connect();
+    const main = await b.screenshot({ app: 'calculator' }, ctx);
+    assert.deepEqual(captured(channel), ['w1']);
+    assert.deepEqual(main.otherWindows, [{ window: 'win-1', title: '', owned: true, width: 180, height: 260 }]);
+    // Asked for by id: the menu itself, and a click on it carries the menu's handle.
+    const menu = await b.screenshot({ app: 'calculator', window: 'win-1' }, ctx);
+    assert.deepEqual(captured(channel), ['w1', 'w3']);
+    const target = b.mapPoint('job-1', menu.screenshotId, 20, 40, ['calculator']);
+    assert.equal(target.handle, 'w3');
+    await click(b, target);
+    assert.equal(channel.requests.filter((r) => r.op === 'input').pop().params.action.handle, 'w3');
+    // The same window keeps its id from one screenshot to the next.
+    assert.deepEqual(menu.otherWindows.map((w) => w.window), ['win-2']);
+    assert.deepEqual((await b.screenshot({ app: 'calculator' }, ctx)).otherWindows.map((w) => w.window), ['win-1']);
+  });
+
+  it('a window id is good only for a window the helper still lists for that app, in the job it was given to', async () => {
+    let list = [MENU, MAIN];
+    const { b, channel } = broker({ handlers: { windows: async () => list, foreground: fgOf(MAIN) } });
+    channel.connect();
+    await b.screenshot({ app: 'calculator' }, ctx);
+    assert.equal(await code(b.screenshot({ app: 'calculator', window: 'win-1' }, { jobId: 'job-2', leaseId: null })), 'stale_screenshot', 'another job\'s id');
+    assert.equal(await code(b.screenshot({ app: 'calculator', window: 'win-77' }, ctx)), 'stale_screenshot', 'an id nobody was given');
+    list = [MAIN];
+    assert.equal(await code(b.screenshot({ app: 'calculator', window: 'win-1' }, ctx)), 'stale_screenshot', 'the menu closed');
+    list = [{ ...MENU, minimized: true }, MAIN];
+    assert.equal(await code(b.screenshot({ app: 'calculator', window: 'win-1' }, ctx)), 'stale_screenshot');
+    assert.deepEqual(captured(channel), ['w1'], 'nothing was captured for a refused id');
+  });
+
+  it('a window the helper lists for a process that is not the app\'s is never offered or captured', async () => {
+    const foreign = { ...DIALOG, handle: 'x7', pid: 4444 };
+    const { b, channel } = broker({ handlers: { windows: async () => [foreign, MAIN], foreground: fgOf(MAIN) } });
+    channel.connect();
+    const shot = await b.screenshot({ app: 'calculator' }, ctx);
+    assert.deepEqual(shot.otherWindows, []);
+    assert.deepEqual(captured(channel), ['w1']);
+  });
+
+  it('point_obscured tells the model to take a new screenshot, and names the app\'s own window that covers the point', async () => {
+    const obscured = (detail) => async () => { throw new GuiError('point_obscured', null, { info: detail }); };
+    const { b, channel } = broker({ handlers: { windows: async () => [MENU, MAIN], foreground: fgOf(MAIN), input: obscured({ image: CALC.image, pid: 100, covering: { handle: 'w3', pid: 100 } }) } });
+    channel.connect();
+    const shot = await b.screenshot({ app: 'calculator' }, ctx);
+    const target = b.mapPoint('job-1', shot.screenshotId, 20, 40, ['calculator']);
+    await assert.rejects(click(b, target), (e) => e.code === 'point_obscured'
+      && /take a new screenshot/.test(e.message) && /Screenshot with window "win-1"/.test(e.message) && e.info.pid === 100);
+    // A window of another process over the point: a new screenshot, and no id.
+    const foreign = broker({ handlers: { input: obscured({ covering: { handle: 'x9', pid: 4 } }) } });
+    foreign.channel.connect();
+    const s2 = await foreign.b.screenshot({ app: 'calculator' }, ctx);
+    await assert.rejects(click(foreign.b, foreign.b.mapPoint('job-1', s2.screenshotId, 5, 5, ['calculator'])), (e) => e.code === 'point_obscured'
+      && /take a new screenshot/.test(e.message) && !/win-/.test(e.message));
+    // A helper that says nothing about what covers it (macOS, an older helper): the same advice.
+    const silent = broker({ handlers: { input: obscured({}) } });
+    silent.channel.connect();
+    const s3 = await silent.b.screenshot({ app: 'calculator' }, ctx);
+    await assert.rejects(click(silent.b, silent.b.mapPoint('job-1', s3.screenshotId, 5, 5, ['calculator'])), (e) => e.code === 'point_obscured' && /take a new screenshot/.test(e.message));
+    assert.equal(suspendsLease('point_obscured'), false);
+  });
+
+  it('a resume focuses the app\'s main window, not a list or a menu that happens to be first', async () => {
+    const { b, channel } = broker({ handlers: { windows: async () => [MENU, MAIN] } });
+    channel.connect();
+    await b.focusApp(['calculator']);
+    assert.equal(channel.requests.find((r) => r.op === 'focus').params.handle, 'w1');
+  });
+});
+
 describe('launch, close and list', () => {
   it('records launched pids per job; force-kills only those', async () => {
     const { b, channel, audits } = broker({ handlers: { processes: async () => [{ pid: 555, image: CALC.image }, { pid: 100, image: CALC.image }] } });
@@ -283,7 +394,9 @@ describe('launch, close and list', () => {
   });
 
   it('R-F5-7: a run with no job id keeps no launched pids and no screenshots', async () => {
-    const { b, channel } = broker({ handlers: { processes: async () => [{ pid: 555, image: CALC.image }] } });
+    // (The window is that process's own: the broker drops a listed window of any other pid.)
+    const mine = { handle: 'w1', pid: 555, image: CALC.image, title: 'Calculator', bounds: { x: 0, y: 0, w: 800, h: 600 }, scale: 1, minimized: false };
+    const { b, channel } = broker({ handlers: { processes: async () => [{ pid: 555, image: CALC.image }], windows: async () => [mine], foreground: async () => mine } });
     channel.connect();
     const none = { jobId: null, leaseId: null };
     await b.launch({ tier: 'routine', reason: 'allowlisted', appId: 'calculator', exe: 'C:\\Windows\\System32\\calc.exe', argv: [], files: [], match: [] }, none, { approvedBy: 'allowlist' });
@@ -291,6 +404,8 @@ describe('launch, close and list', () => {
     assert.deepEqual(channel.requests.filter((r) => r.op === 'close').map((r) => r.params), [{ pids: [555], force: false }], 'never a kill');
     const shot = await b.screenshot({ app: 'calculator' }, none);
     assert.match(shot.screenshotId, /^ss-\d+$/);
+    assert.deepEqual(shot.otherWindows, [], 'and no window ids');
+    assert.equal(b.windowIds.size, 0);
     for (const jobId of [null, undefined]) {
       assert.throws(() => b.mapPoint(jobId, shot.screenshotId, 1, 1, ['calculator']), (e) => e.code === 'stale_screenshot');
     }

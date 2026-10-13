@@ -168,9 +168,18 @@ namespace KingLouie {
       }
       return false;
     }
+    // Visible top-level windows that have no owner: an app's main windows.
     static List<IntPtr> TopWindows() {
       var l = new List<IntPtr>();
       Native.EnumWindows((h, x) => { if (Native.IsWindowVisible(h) && Native.GetWindow(h, 4) == IntPtr.Zero) l.Add(h); return true; }, IntPtr.Zero);
+      return l;
+    }
+    // Every visible top-level window, front to back, owned ones too: a Save As
+    // or a message box, a Find or Print dialog, a pop-up menu and a combo
+    // box's list are windows of their own with an owner.
+    static List<IntPtr> VisibleWindows() {
+      var l = new List<IntPtr>();
+      Native.EnumWindows((h, x) => { if (Native.IsWindowVisible(h)) l.Add(h); return true; }, IntPtr.Zero);
       return l;
     }
     static object Processes(List<string> match) {
@@ -187,14 +196,16 @@ namespace KingLouie {
     }
     static object Windows(List<int> pids) {
       var list = new List<object>();
-      foreach (var h in TopWindows()) {
+      foreach (var h in VisibleWindows()) {
         uint pid = AppPidOf(h);
         if (!pids.Contains((int)pid)) continue;
         Dictionary<string, object> b;
         try { b = Bounds(h); } catch { continue; }
+        // A window with no area shows nothing and cannot be clicked.
+        if ((int)b["w"] <= 0 || (int)b["h"] <= 0) continue;
         var sb = new StringBuilder(512);
         Native.GetWindowText(h, sb, 512);
-        list.Add(new Dictionary<string, object> { { "handle", h.ToInt64().ToString() }, { "pid", (int)pid }, { "image", ImageOf(pid) }, { "title", sb.ToString() }, { "bounds", b }, { "scale", Scale(h) }, { "minimized", Native.IsIconic(h) } });
+        list.Add(new Dictionary<string, object> { { "handle", h.ToInt64().ToString() }, { "pid", (int)pid }, { "image", ImageOf(pid) }, { "title", sb.ToString() }, { "bounds", b }, { "scale", Scale(h) }, { "minimized", Native.IsIconic(h) }, { "owned", Native.GetWindow(h, 4) != IntPtr.Zero } });
       }
       return list;
     }
@@ -280,6 +291,13 @@ namespace KingLouie {
     static Dictionary<string, object> Detail(Dictionary<string, object> fg) {
       return fg == null ? new Dictionary<string, object>() : new Dictionary<string, object> { { "image", fg["image"] }, { "pid", fg["pid"] } };
     }
+    // What covers a point that was refused: the service tells the model which
+    // window to look at next. Never used to let a click through.
+    static Dictionary<string, object> Covering(Dictionary<string, object> fg, IntPtr under) {
+      var d = Detail(fg);
+      if (under != IntPtr.Zero) d["covering"] = new Dictionary<string, object> { { "handle", under.ToInt64().ToString() }, { "pid", (int)AppPidOf(under) } };
+      return d;
+    }
 
     static object Input(Dictionary<string, object> p) {
       var expect = p.ContainsKey("expect") && p["expect"] is Dictionary<string, object> ? (Dictionary<string, object>)p["expect"] : new Dictionary<string, object>();
@@ -312,7 +330,7 @@ namespace KingLouie {
           // app (review finding 8): a dialog, a menu or a second window of
           // the same process over that point is something the model never saw.
           IntPtr under = Native.GetAncestor(Native.WindowFromPoint(pt), 2);
-          if (under == IntPtr.Zero || under != target) throw new OpError("point_obscured", "another window covers that point");
+          if (under == IntPtr.Zero || under != target) throw new OpError("point_obscured", "another window covers that point", Covering(fg, under));
         }
       }
       var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO)) };

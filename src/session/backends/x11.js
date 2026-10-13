@@ -107,7 +107,11 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
         // app: a dialog, a menu or a second window of the same process over
         // that point is something the model never saw (review finding 8).
         const under = await hitTest({ x: px, y: py });
-        if (!under || !pids.includes(under.pid) || under.handle !== String(action.handle)) throw new GuiError('point_obscured', 'another window covers that point');
+        if (!under || !pids.includes(under.pid) || under.handle !== String(action.handle)) {
+          // What covers it goes back with the refusal, so the service can tell
+          // the model which window to look at next (never to let a click through).
+          throw new GuiError('point_obscured', 'another window covers that point', { info: under ? { covering: { handle: under.handle, pid: under.pid } } : {} });
+        }
       }
     }
     const withMods = async (fn) => {

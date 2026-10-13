@@ -6,13 +6,17 @@
 const { EventEmitter } = require('events');
 const crypto = require('crypto');
 const { createLogger } = require('../logging');
-const { GuiError } = require('./errors');
+const { GuiError, isGuiError } = require('./errors');
 const { imageMatches, matchSetFor } = require('./apps');
 const { realResolve } = require('../platform/path-roots');
 const { writeGuiStatus } = require('./status');
 
 const SCREENSHOTS_PER_JOB = 16;
 const SCREENSHOT_TTL_MS = 10 * 60 * 1000;
+// How many of an app's other windows a screenshot names, and how many window
+// ids a job keeps (the oldest are forgotten first).
+const OTHER_WINDOWS_MAX = 16;
+const WINDOW_IDS_PER_JOB = 256;
 const TITLE_MAX = 120;
 const SUSPENDING_CODES = Object.freeze(['foreground_mismatch', 'app_not_running', 'helper_disconnected']);
 const suspendsLease = (code) => SUSPENDING_CODES.includes(code);
@@ -47,6 +51,9 @@ class GuiBroker extends EventEmitter {
     // with no job id gets no entry, so such runs never share a bucket.
     this.shots = new Map(); // jobId → [{ screenshotId, appId, handle, transform, width, height, at, gen }]
     this.launched = new Map(); // jobId → Map(appId → Set(pid))
+    // The ids a job may name a window by (Screenshot's `window`): never a
+    // handle from the model. jobId → Map(id → handle), with a counter.
+    this.windowIds = new Map();
     this.nextShot = 1;
     this.displaysGen = 0;
     this.lockedFlag = false;
@@ -211,22 +218,63 @@ class GuiBroker extends EventEmitter {
     return { closed };
   }
 
-  // The window to capture: the foreground one if it is the app's, else its
-  // largest window that is not minimized.
-  async _window(appId, ctx) {
+  // The id a job names one window by. A handle keeps its id for the job.
+  _windowId(jobId, handle) {
+    if (!jobId) return null;
+    if (!this.windowIds.has(jobId)) this.windowIds.set(jobId, { next: 1, ids: new Map() });
+    const book = this.windowIds.get(jobId);
+    for (const [id, h] of book.ids) if (h === String(handle)) return id;
+    const id = `win-${book.next}`;
+    book.next += 1;
+    book.ids.set(id, String(handle));
+    while (book.ids.size > WINDOW_IDS_PER_JOB) book.ids.delete(book.ids.keys().next().value);
+    return id;
+  }
+
+  _windowHandle(jobId, id) {
+    const book = jobId ? this.windowIds.get(jobId) : null;
+    return book && book.ids.has(id) ? book.ids.get(id) : null;
+  }
+
+  // The window to capture, and the app's other open windows.
+  //   - `windowId` (the model named one of the ids an earlier screenshot gave
+  //     this job): that window, if the helper still lists it for this app.
+  //   - else the foreground window when it is the app's: a dialog that is in
+  //     front is what the user would see and click. The helper lists owned
+  //     windows too (second security review, finding 4); a foreground window
+  //     of the app that its list does not hold is used itself.
+  //   - else the app's largest main window that is not minimized.
+  // A menu or a dropdown list is never the foreground window and is never
+  // picked by itself: the screenshot names it and the model asks for it.
+  // Whatever is picked, a click is sent with that window's own handle and
+  // the helper refuses a point any other window covers.
+  async _window(appId, ctx, windowId = null) {
     const procs = await this._pids([appId], ctx);
     if (procs.length === 0) throw new GuiError('app_not_running', appId);
     const pids = procs.map((p) => p.pid);
     const fg = await this.channel.request('foreground', {}, { jobId: ctx.jobId });
-    const windows = (await this.channel.request('windows', { pids }, { jobId: ctx.jobId })) || [];
-    if (fg && pids.includes(fg.pid)) {
-      const w = windows.find((x) => x.handle === fg.handle);
-      if (w && !w.minimized) return w;
-    }
+    // Only windows of this app's processes, whatever the helper sent.
+    const windows = ((await this.channel.request('windows', { pids }, { jobId: ctx.jobId })) || []).filter((w) => w && pids.includes(w.pid));
     const open = windows.filter((w) => !w.minimized);
-    if (open.length === 0) throw new GuiError(windows.length ? 'window_minimized' : 'app_not_running', appId);
-    const area = (w) => (w.bounds ? (w.bounds.w || 0) * (w.bounds.h || 0) : 0);
-    return open.sort((a, b) => area(b) - area(a))[0];
+    const same = (w, handle) => String(w.handle) === String(handle);
+    let win = null;
+    if (windowId !== null) {
+      const handle = this._windowHandle(ctx.jobId, windowId);
+      win = handle === null ? null : open.find((w) => same(w, handle)) || null;
+      if (!win) throw new GuiError('stale_screenshot', 'that window is gone, or was never one of this app\'s: take a new screenshot without "window"');
+    } else if (fg && pids.includes(fg.pid)) {
+      win = open.find((w) => same(w, fg.handle)) || null;
+      if (!win && !windows.some((w) => same(w, fg.handle))) {
+        win = { handle: fg.handle, pid: fg.pid, image: fg.image, title: '', bounds: fg.bounds || null, minimized: false, owned: true };
+      }
+    }
+    if (!win) {
+      if (open.length === 0) throw new GuiError(windows.length ? 'window_minimized' : 'app_not_running', appId);
+      const area = (w) => (w.bounds ? (w.bounds.w || 0) * (w.bounds.h || 0) : 0);
+      const main = open.filter((w) => w.owned !== true);
+      win = [...(main.length ? main : open)].sort((a, b) => area(b) - area(a))[0];
+    }
+    return { win, others: open.filter((w) => !same(w, win.handle)) };
   }
 
   async foregroundApp(appIds) {
@@ -236,7 +284,7 @@ class GuiBroker extends EventEmitter {
     return { appId: null, image: fg.image, handle: fg.handle };
   }
 
-  async screenshot({ app = null, maxWidth = null } = {}, ctx) {
+  async screenshot({ app = null, maxWidth = null, window = null } = {}, ctx) {
     this.require('gui.screenshot');
     if (this.lockedFlag) throw new GuiError('screen_locked');
     let appId = app;
@@ -247,7 +295,7 @@ class GuiBroker extends EventEmitter {
       if (!appId) throw new GuiError('app_required', 'name an allowlisted app');
     }
     this._app(appId);
-    const win = await this._window(appId, ctx);
+    const { win, others } = await this._window(appId, ctx, window);
     const shot = await this.channel.request('screenshot', {
       handle: win.handle, max_width: maxWidth || this.guiConfig.screenshot.maxWidth, quality: this.guiConfig.screenshot.quality
     }, { jobId: ctx.jobId, timeoutMs: 20000 });
@@ -266,10 +314,30 @@ class GuiBroker extends EventEmitter {
     }
     const sha256 = crypto.createHash('sha256').update(bytes).digest('base64url');
     this._audit('gui.screenshot', { job_id: ctx.jobId, app_id: appId, screenshot_id: entry.screenshotId, sha256, bytes: bytes.length });
+    // The app's other open windows, by id (a run without a job holds no
+    // lease and gets none). Titles are the app's own text: one short line.
+    const otherWindows = ctx.jobId ? others.slice(0, OTHER_WINDOWS_MAX).map((w) => ({
+      window: this._windowId(ctx.jobId, w.handle), title: titleLine(w.title), owned: w.owned === true,
+      width: w.bounds && Number.isFinite(w.bounds.w) ? w.bounds.w : null, height: w.bounds && Number.isFinite(w.bounds.h) ? w.bounds.h : null
+    })) : [];
     return {
       screenshotId: entry.screenshotId, appId, width: shot.width, height: shot.height, mime: 'image/jpeg', data: shot.data,
-      transform: shot.transform, capturedAt: new Date(entry.at).toISOString(), sha256, bytes: bytes.length
+      transform: shot.transform, capturedAt: new Date(entry.at).toISOString(), sha256, bytes: bytes.length, otherWindows
     };
+  }
+
+  // A click, scroll or drag was refused because another window covers the
+  // point (the helper's own check, which this never relaxes). The refusal
+  // says what to do: take a new screenshot; and when what covers the point
+  // is a window of the leased apps (a dialog, a menu, a list), which one.
+  _obscured(err, { jobId, pids }) {
+    const covering = err.info && err.info.covering;
+    const ofApp = covering && Number.isInteger(covering.pid) && pids.includes(covering.pid) && (typeof covering.handle === 'string' || Number.isInteger(covering.handle));
+    const id = ofApp ? this._windowId(jobId, covering.handle) : null;
+    const hint = id
+      ? `a window of the app covers that point (a dialog, a menu or a list): take a new screenshot; Screenshot with window "${id}" shows the window that covers it`
+      : 'another window covers that point: take a new screenshot';
+    return new GuiError('point_obscured', hint, { info: err.info || {} });
   }
 
   // Live-view frames (§3.7): the foreground leased app's window, never stored.
@@ -311,7 +379,13 @@ class GuiBroker extends EventEmitter {
     const lease = this.leases.assertUsable(jobId);
     if (lease.leaseId !== leaseId) throw new GuiError('lease_required', 'that lease is no longer this job\'s lease');
     const timeoutMs = inputTimeoutMs(action);
-    const res = await this.channel.request('input', { expect, yield_ms: yieldMs, action }, { jobId, leaseId, ...(timeoutMs ? { timeoutMs } : {}) });
+    let res;
+    try {
+      res = await this.channel.request('input', { expect, yield_ms: yieldMs, action }, { jobId, leaseId, ...(timeoutMs ? { timeoutMs } : {}) });
+    } catch (err) {
+      if (isGuiError(err) && err.code === 'point_obscured') throw this._obscured(err, { jobId, pids: expect.pids });
+      throw err;
+    }
     const after = res && res.foregroundAfter;
     const afterAppId = after ? (appIds.find((id) => imageMatches(after.image, this._match([id]), this.platform)) || null) : null;
     return {
@@ -336,7 +410,8 @@ class GuiBroker extends EventEmitter {
       const procs = await this._pids(appIds);
       if (!procs.length) return;
       const windows = (await this.channel.request('windows', { pids: procs.map((p) => p.pid) }, {})) || [];
-      const top = windows.find((w) => !w.minimized);
+      // A main window first: the list holds menus and dropdown lists too.
+      const top = windows.find((w) => !w.minimized && w.owned !== true) || windows.find((w) => !w.minimized);
       if (top) await this.channel.request('focus', { handle: top.handle }, {});
     } catch (err) {
       this.log.debug(`focus after resume failed: ${err.message}`);

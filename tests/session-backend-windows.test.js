@@ -187,6 +187,26 @@ describe('finding 8, by reading the worker sources: the window under the point i
     assert.doesNotMatch(src, /under == IntPtr\.Zero \|\| !pids\.Contains\(\(int\)AppPidOf\(under\)\)/, 'no longer "any window of a leased pid"');
   });
 
+  // Second review finding 4, by reading: the window list holds owned windows
+  // too (dialogs, menus, dropdown lists), the hit test is unchanged, and a
+  // refusal says which window covers the point.
+  it('Windows: the window list includes owned windows and marks them; an obscured point names what covers it', () => {
+    const src = read('windows-worker.ps1');
+    const list = /static object Windows\(List<int> pids\) \{[\s\S]*?\n    \}/.exec(src);
+    assert.ok(list, 'Windows() is there');
+    assert.match(list[0], /foreach \(var h in VisibleWindows\(\)\)/);
+    assert.doesNotMatch(list[0], /TopWindows\(\)/, 'not the unowned-only list');
+    assert.match(list[0], /\{ "owned", Native\.GetWindow\(h, 4\) != IntPtr\.Zero \}/);
+    const visible = /static List<IntPtr> VisibleWindows\(\) \{[\s\S]*?\n    \}/.exec(src);
+    assert.ok(visible);
+    assert.match(visible[0], /if \(Native\.IsWindowVisible\(h\)\) l\.Add\(h\);/);
+    assert.doesNotMatch(visible[0], /GetWindow\(h, 4\)/, 'no owner filter');
+    // Close still asks only the app's main windows to close.
+    assert.match(src, /foreach \(var h in TopWindows\(\)\) if \(AppPidOf\(h\) == \(uint\)pid\) \{ Native\.PostMessage\(h, 0x0010/);
+    assert.match(src, /throw new OpError\("point_obscured", "another window covers that point", Covering\(fg, under\)\);/);
+    assert.match(src, /d\["covering"\] = new Dictionary<string, object> \{ \{ "handle", under\.ToInt64\(\)\.ToString\(\) \}, \{ "pid", \(int\)AppPidOf\(under\) \} \};/);
+  });
+
   // Security review finding 7 (macOS, by reading only): the hit test looks
   // at every on-screen layer, not only the normal window layer.
   it('macOS: the hit test reads all on-screen layers, front to back, skipping only fully transparent windows', () => {
@@ -234,6 +254,25 @@ describe('Windows worker', { skip: !WIN }, () => {
     assert.equal(typeof fg.image, 'string');
     const hit = await backend.hitTest({ x: fg.bounds.x + Math.floor(fg.bounds.w / 2), y: fg.bounds.y + Math.floor(fg.bounds.h / 2) });
     assert.ok(hit === null || Number.isInteger(hit.pid));
+  });
+
+  // Second review finding 4: the list is every visible top-level window of
+  // the given processes, owned ones included, each marked. Read-only: this
+  // looks at the window in front and injects nothing.
+  it('lists the windows of the foreground window\'s process, each marked owned or not, the foreground one among them', async () => {
+    assert.deepEqual(await backend.windows({ pids: [] }), []);
+    const fg = await backend.foreground();
+    if (!fg || !fg.bounds || !Number.isInteger(fg.pid)) return;
+    const list = await backend.windows({ pids: [fg.pid] });
+    assert.ok(list.length >= 1);
+    for (const w of list) {
+      assert.equal(typeof w.owned, 'boolean');
+      assert.equal(w.pid, fg.pid);
+      assert.ok(w.bounds.w > 0 && w.bounds.h > 0, 'no empty window');
+    }
+    // (Only when the same window is still in front: someone may be using this desktop.)
+    const still = await backend.foreground();
+    if (still && still.handle === fg.handle) assert.ok(list.some((w) => w.handle === fg.handle), 'the foreground window is listed, owned or not');
   });
 
   it('refuses before injecting when the foreground is not leased', async () => {
