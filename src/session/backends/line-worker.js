@@ -32,14 +32,22 @@ function onLines(stream, onLine) {
 class LineWorker {
   constructor({ file, args = [], spawnImpl = spawn, env = process.env, log = createLogger('session-helper/worker'), name = 'worker' } = {}) {
     Object.assign(this, { file, args, spawnImpl, env, log, name });
-    this.child = null;
-    this.pending = new Map();
+    // The worker in use: { child, pending }. Each child has its own pending
+    // calls, and its handlers close over its own record, so an old child's
+    // late exit, error or reply touches nothing of the child that replaced it.
+    this.current = null;
     this.nextId = 1;
+  }
+
+  // The child process in use, or null.
+  get child() {
+    return this.current ? this.current.child : null;
   }
 
   _start() {
     const child = this.spawnImpl(this.file, this.args, { stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true, env: this.env });
-    this.child = child;
+    const worker = { child, pending: new Map() };
+    this.current = worker;
     onLines(child.stdout, (line) => {
       let msg;
       try {
@@ -48,50 +56,55 @@ class LineWorker {
         this.log.debug(`${this.name}: unparseable line`);
         return;
       }
-      const p = this.pending.get(msg.id);
+      const p = worker.pending.get(msg.id);
       if (!p) return;
-      this.pending.delete(msg.id);
+      worker.pending.delete(msg.id);
       clearTimeout(p.timer);
       if (msg.ok === true) p.resolve(msg.result === undefined ? null : msg.result);
       else p.reject(fromWire(msg.error));
     });
     if (child.stderr) onLines(child.stderr, (line) => this.log.debug(`${this.name}: ${line}`));
-    child.on('error', (err) => this._fail(`${this.name} could not start: ${err.message}`));
-    child.on('exit', (code) => this._fail(`${this.name} exited (${code})`));
+    child.on('error', (err) => this._fail(worker, `${this.name} could not start: ${err.message}`));
+    child.on('exit', (code) => this._fail(worker, `${this.name} exited (${code})`));
     if (child.stdin) child.stdin.on('error', () => {});
+    return worker;
   }
 
-  _fail(why) {
-    this.child = null;
-    for (const p of this.pending.values()) {
+  // Fails what this worker had in flight; it stops being the worker in use
+  // only if it still is.
+  _fail(worker, why) {
+    if (this.current === worker) this.current = null;
+    for (const p of worker.pending.values()) {
       clearTimeout(p.timer);
       p.reject(new GuiError('backend_failed', why));
     }
-    this.pending.clear();
+    worker.pending.clear();
+  }
+
+  // Lets go of a worker: nothing more is expected of it.
+  _retire(worker, why) {
+    this._fail(worker, why);
+    try { worker.child.stdin.end(); } catch { /* gone */ }
+    try { worker.child.kill(); } catch { /* gone */ }
   }
 
   call(op, params = {}, { timeoutMs = 25000 } = {}) {
-    if (!this.child) this._start();
+    const worker = this.current || this._start();
     const id = this.nextId;
     this.nextId += 1;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id);
+        worker.pending.delete(id);
         reject(new GuiError('op_timeout', `${this.name} ${op}`));
       }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
-      this.pending.set(id, { resolve, reject, timer });
-      this.child.stdin.write(`${JSON.stringify({ id, op, params })}\n`);
+      worker.pending.set(id, { resolve, reject, timer });
+      worker.child.stdin.write(`${JSON.stringify({ id, op, params })}\n`);
     });
   }
 
   async stop() {
-    const child = this.child;
-    this.child = null;
-    if (child) {
-      try { child.stdin.end(); } catch { /* gone */ }
-      try { child.kill(); } catch { /* gone */ }
-    }
+    if (this.current) this._retire(this.current, `${this.name} stopped`);
   }
 }
 

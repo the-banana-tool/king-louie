@@ -73,6 +73,72 @@ describe('LineWorker (any OS, with a fake child)', () => {
     const again = w.call('foreground', {}, { timeoutMs: 50 });
     await assert.rejects(again, (e) => e.code === 'op_timeout');
   });
+
+  // A child that can be told to reply, exit or fail by hand.
+  function manualSpawn() {
+    const children = [];
+    const spawnImpl = () => {
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.killed = 0;
+      child.kill = () => { child.killed += 1; };
+      child.requests = [];
+      child.stdin.on('data', (chunk) => {
+        for (const line of chunk.toString().split('\n').filter(Boolean)) child.requests.push(JSON.parse(line));
+      });
+      child.reply = (result) => child.stdout.write(`${JSON.stringify({ id: child.requests.at(-1).id, ok: true, result })}\n`);
+      children.push(child);
+      return child;
+    };
+    return { children, spawnImpl };
+  }
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+  for (const event of ['exit', 'error']) {
+    it(`a late "${event}" of an old worker does not fail the calls of its replacement`, async () => {
+      const { children, spawnImpl } = manualSpawn();
+      const w = new LineWorker({ file: 'x', args: [], spawnImpl });
+      const first = w.call('foreground');
+      await tick();
+      await w.stop(); // the old worker is told to go; its exit comes later
+      await assert.rejects(first, (e) => e.code === 'backend_failed', 'a stopped worker fails what it had in flight');
+      let settled = null;
+      const second = w.call('foreground').then((v) => { settled = { ok: v }; return v; }, (e) => { settled = { error: e }; throw e; });
+      await tick();
+      assert.equal(children.length, 2, 'the next call started a new worker');
+      children[0].emit(event, event === 'exit' ? 0 : new Error('late'));
+      await tick();
+      assert.equal(settled, null, 'the replacement\'s call is still in flight');
+      // And the replacement is still the worker: no third child is spawned.
+      children[1].reply({ from: 'second' });
+      assert.deepEqual(await second, { from: 'second' });
+      const third = w.call('foreground');
+      await tick();
+      assert.equal(children.length, 2);
+      children[1].reply({ from: 'second again' });
+      assert.deepEqual(await third, { from: 'second again' });
+      await w.stop();
+    });
+  }
+
+  it('a late reply of an old worker settles nothing of its replacement', async () => {
+    const { children, spawnImpl } = manualSpawn();
+    const w = new LineWorker({ file: 'x', args: [], spawnImpl });
+    const first = w.call('foreground');
+    first.catch(() => {});
+    await tick();
+    await w.stop();
+    const second = w.call('foreground');
+    await tick();
+    // The old worker answers with the id the new call happens to have.
+    children[0].stdout.write(`${JSON.stringify({ id: children[1].requests[0].id, ok: true, result: { from: 'old' } })}\n`);
+    await tick();
+    children[1].reply({ from: 'new' });
+    assert.deepEqual(await second, { from: 'new' });
+    await w.stop();
+  });
 });
 
 describe('the Windows worker script (any OS)', () => {
