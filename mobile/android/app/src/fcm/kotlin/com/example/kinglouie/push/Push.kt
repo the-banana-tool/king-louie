@@ -38,7 +38,7 @@ class KlMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         val rid = message.data["rid"] ?: return
         val kind = message.data["k"] ?: "approval"
-        if (kind !in setOf("approval", "pairing", "alert", "question")) return
+        if (kind !in setOf("approval", "pairing", "alert", "question", "lease")) return
         // The relay sanitizes the node name; the text stays generic anyway.
         val node = message.data["n"].orEmpty().filter { it.isLetterOrDigit() || it in "._-" }.take(64)
         val manager = getSystemService(NotificationManager::class.java)
@@ -56,6 +56,7 @@ class KlMessagingService : FirebaseMessagingService() {
                     "pairing" -> "A node is waiting for you"
                     "alert" -> "Front door alert"
                     "question" -> "A question is waiting for you"
+                    "lease" -> "Computer use requested"
                     else -> if (node.isEmpty()) "Approval needed" else "Approval needed on $node"
                 }
             )

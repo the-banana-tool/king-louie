@@ -26,6 +26,10 @@ import com.example.kinglouie.protocol.Hex
 import com.example.kinglouie.protocol.Identifiers
 import com.example.kinglouie.protocol.Jcs
 import com.example.kinglouie.protocol.JsonText
+import com.example.kinglouie.protocol.LeaseAction
+import com.example.kinglouie.protocol.LeaseRequest
+import com.example.kinglouie.protocol.LeaseStatus
+import com.example.kinglouie.protocol.Leases
 import com.example.kinglouie.protocol.Messages
 import com.example.kinglouie.protocol.NodePin
 import com.example.kinglouie.protocol.PairingRequest
@@ -36,6 +40,7 @@ import com.example.kinglouie.protocol.RelayClientFactory
 import com.example.kinglouie.protocol.RepinTarget
 import com.example.kinglouie.protocol.ResponseOutcome
 import com.example.kinglouie.protocol.ScopeChoice
+import com.example.kinglouie.protocol.SendOutcome
 import com.example.kinglouie.protocol.Timestamps
 import com.example.kinglouie.protocol.arr
 import com.example.kinglouie.protocol.bool
@@ -195,6 +200,14 @@ class AppModel(context: Context) {
     val frontDoorNodes = mutableStateListOf<JsonElement>()
     val alerts = mutableStateListOf<JsonElement>()
     val pending = mutableStateListOf<PendingItem>()
+
+    /**
+     * Computer-use requests (fleet stage 5; the rest is in the Leases section
+     * below). Declared here, above `init`: `init` runs startDemo, which fills
+     * this list, and a property declared after `init` is not there yet.
+     */
+    val leaseRequests = mutableStateListOf<LeaseRequestItem>()
+
     val devices = mutableStateListOf<JsonElement>()
     val online = mutableStateMapOf<String, Boolean>()
     val nodes: List<NodePin> get() = storage.nodes
@@ -352,6 +365,331 @@ class AppModel(context: Context) {
         return Display.escape(cut)
     }
 
+    // ---- Leases (fleet stage 5) ----
+    // Owner rulings R-F5-1, R-F5-5, R-F5-6 (2026-10-12). Every signature on
+    // this phone is a biometric prompt, relay requests included. So each
+    // function below runs on the owner's tap, signs and sends one time, and
+    // shows a send that got no answer as not confirmed. Nothing here polls
+    // and nothing is sent again by itself. tests/mobile-lease-apps.test.js
+    // reads this section up to the demo marker, so keep both markers.
+    // (`leaseRequests` itself is declared above `init`, which fills it in demo.)
+
+    data class LeaseRequestItem(val request: LeaseRequest, val nodeName: String, val status: LeaseStatus?, val unconfirmed: String? = null)
+
+    data class LiveLease(
+        val nodeId: String, val nodeName: String, val leaseId: String, val state: String = "pending", val locked: Boolean = false,
+        val reason: String? = null, val expiresAtMs: Long? = null, val frame: ByteArray? = null, val frameAtMs: Long? = null,
+        val frameDropped: Boolean = false, val actions: List<LeaseAction> = emptyList(), val lastSeq: Int = 0,
+        /** A Stop or a Refresh is being signed or sent. */
+        val busy: Boolean = false,
+        /** The last Stop or Refresh got no answer; shown until the next tap. */
+        val unconfirmed: String? = null,
+        /** The last Refresh was answered but brought no frame within the wait. */
+        val noFrame: Boolean = false
+    )
+
+    /** What one send came to: the node's answer, or why there is none. */
+    private class LeaseReply(val outcome: SendOutcome, val json: JsonElement?, val problem: String?)
+
+    var liveLease by mutableStateOf<LiveLease?>(null)
+        private set
+    var isLoadingLeases by mutableStateOf(false)
+        private set
+
+    /** A `lease` push arrived and the list has not been fetched since. */
+    var leaseNotice by mutableStateOf(false)
+        private set
+
+    /** Counts lease pushes, so the screen can show the Pending tab once for each. */
+    var leasePushes by mutableStateOf(0)
+        private set
+
+    /** Request ids whose decision is being signed or sent. */
+    val decidingLease = mutableStateListOf<String>()
+    private val decidedLeaseRequests = HashSet<String>()
+    private var demoLeaseJob: Job? = null
+
+    /** A `lease` push (R-F5-6): say where to look. Nothing is fetched until the owner taps. */
+    private fun noteLeasePush() {
+        leaseNotice = true
+        leasePushes += 1
+    }
+
+    /** "Check for computer-use requests": one list request, one prompt. */
+    fun refreshLeases() {
+        if (pairing || mode != AppMode.LIVE || isLoadingLeases) return
+        val api = client ?: run {
+            banner = "This phone is not paired with a relay."
+            return
+        }
+        isLoadingLeases = true
+        scope.launch {
+            try {
+                val pins = storage.nodes
+                val items = api.leases().mapNotNull { entry -> verifiedLeaseRequest(entry, pins, api) }.distinctBy { it.request.requestId }
+                leaseRequests.clear()
+                leaseRequests.addAll(items)
+                leaseNotice = false
+            } catch (e: Exception) {
+                fail(e)
+            } finally {
+                isLoadingLeases = false
+            }
+        }
+    }
+
+    /**
+     * A request is listed only when a pinned node signed it (kid, node_id and
+     * signature all that node's), its lease hash is intact, it has not
+     * expired on the relay-corrected clock, and no status that node signed
+     * about this lease says it ended.
+     */
+    private fun verifiedLeaseRequest(entry: JsonElement, pins: List<NodePin>, api: RelayApi): LeaseRequestItem? {
+        val envelope = try {
+            Envelope.fromJson(entry["envelope"] ?: return null)
+        } catch (e: ProtocolException) {
+            return null
+        }
+        val pin = pins.firstOrNull { it.id == envelope.kid } ?: return null
+        val request = Leases.verifiedMessage(envelope, pin)?.let { LeaseRequest.from(it) } ?: return null
+        if (request.requestId in decidedLeaseRequests) return null
+        if ((Timestamps.epochMillis(request.expiresAt) ?: 0L) <= api.now().toEpochMilli()) return null
+        // Listed under the node that signed it.
+        entry["node_id"].str()?.let { if (it != pin.id) return null }
+        val status = entry["status"]?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() }
+            ?.let { Leases.verifiedMessage(it, pin) }?.let { LeaseStatus.from(it) }?.takeIf { it.leaseId == request.leaseId }
+        if (status?.state == "ended") return null
+        return LeaseRequestItem(request, pin.name, status)
+    }
+
+    /** One send, never repeated (R-F5-5): the node's answer, or why there is none. */
+    private suspend fun sendLease(api: RelayApi, action: String, leaseId: String, envelope: Envelope): LeaseReply = try {
+        val json = api.leaseDecision(action, leaseId, envelope)
+        val outcome = Leases.sendOutcome(json)
+        LeaseReply(outcome, json, if (outcome is SendOutcome.Unconfirmed) "the answer could not be read" else null)
+    } catch (e: RelayException) {
+        LeaseReply(SendOutcome.Unconfirmed, null, describe(e).trimEnd('.'))
+    }
+
+    private fun markLeaseUnconfirmed(requestId: String, text: String?) {
+        val i = leaseRequests.indexOfFirst { it.request.requestId == requestId }
+        if (i >= 0) leaseRequests[i] = leaseRequests[i].copy(unconfirmed = text)
+    }
+
+    /** Allow or Deny: one signature over the decision, one request that carries it (two prompts). */
+    fun decideLease(item: LeaseRequestItem, apps: Set<String>, minutes: Int, grant: Boolean) {
+        val id = item.request.requestId
+        if (mode == AppMode.DEMO) {
+            leaseRequests.removeAll { it.request.requestId == id }
+            if (grant) openLiveLease(item.request.nodeId, item.request.leaseId, "active")
+            return
+        }
+        val k = key ?: return
+        val api = client ?: return
+        if (id in decidingLease) return
+        decidingLease.add(id)
+        markLeaseUnconfirmed(id, null)
+        scope.launch {
+            try {
+                val signedAt = Timestamps.string(api.now())
+                val envelope = if (grant) {
+                    val names = item.request.apps.filter { it.id in apps }.joinToString(", ") { promptText(it.name, 30) }
+                    signEnvelope(k, Leases.grant(item.request, apps.toList(), minutes, k.deviceId, signedAt), "Allow computer use",
+                        "$names on ${promptText(item.nodeName, 30)} for $minutes min")
+                } else {
+                    signEnvelope(k, Leases.deny(item.request, k.deviceId, signedAt), "Deny computer use", promptText(item.nodeName, 30))
+                }
+                val sent = sendLease(api, "grant", item.request.leaseId, envelope)
+                when (val outcome = sent.outcome) {
+                    is SendOutcome.Unconfirmed ->
+                        markLeaseUnconfirmed(id, "Not confirmed: ${sent.problem}. Tap again, or check for requests to see what the node did.")
+                    is SendOutcome.Rejected -> banner = "Node rejected: ${friendlyReason(outcome.reason)}"
+                    is SendOutcome.Confirmed -> {
+                        decidedLeaseRequests.add(id)
+                        leaseRequests.removeAll { it.request.requestId == id }
+                        if (grant && outcome.state == "active") openLiveLease(item.request.nodeId, item.request.leaseId, outcome.state)
+                    }
+                }
+            } catch (e: Exception) {
+                // A prompt was cancelled or the key failed: the decision was not sent.
+                fail(e)
+            } finally {
+                decidingLease.remove(id)
+            }
+        }
+    }
+
+    /** Opens the live screen with what is already known. It fetches nothing (R-F5-1): Refresh does. */
+    fun openLiveLease(nodeId: String, leaseId: String, state: String = "pending") {
+        val pin = storage.nodes.firstOrNull { it.id == nodeId } ?: demo?.pins?.firstOrNull { it.id == nodeId } ?: return
+        demoLeaseJob?.cancel()
+        liveLease = LiveLease(nodeId, pin.name, leaseId, state = state)
+        if (mode == AppMode.DEMO) startDemoFrames(pin)
+    }
+
+    /**
+     * Refresh (R-F5-1, R-F5-6): one watch, then one fetch of what is new,
+     * held open up to Leases.REFRESH_WAIT_S for the frame that watch causes.
+     * Three prompts on this phone (the watch, its request, the fetch), all
+     * from this one tap.
+     */
+    fun refreshLiveLease() {
+        val live = liveLease ?: return
+        if (live.busy || mode != AppMode.LIVE) return
+        val k = key ?: return
+        val api = client ?: return
+        val pin = storage.nodes.firstOrNull { it.id == live.nodeId } ?: return
+        liveLease = live.copy(busy = true, unconfirmed = null, noFrame = false)
+        scope.launch {
+            var next = live.copy(unconfirmed = null, noFrame = false)
+            try {
+                var cursor = next.lastSeq
+                if (next.state != "ended") {
+                    val watch = Leases.watch(next.nodeId, next.leaseId, k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
+                    val sent = sendLease(api, "watch", next.leaseId, signEnvelope(k, watch, "Watch computer use", promptText(next.nodeName, 30)))
+                    when (val outcome = sent.outcome) {
+                        is SendOutcome.Unconfirmed -> {
+                            // No watch reached the node, so no frame is coming: the fetch (one more prompt) is not made.
+                            next = next.copy(unconfirmed = "Refresh not confirmed: ${sent.problem}. Tap Refresh again.")
+                            return@launch
+                        }
+                        is SendOutcome.Rejected -> {
+                            next = next.copy(unconfirmed = "The node refused the watch: ${friendlyReason(outcome.reason)}.")
+                            return@launch
+                        }
+                        is SendOutcome.Confirmed -> {
+                            next = next.copy(state = outcome.state)
+                            // Views from where the relay's mailbox stood before the node heard this watch.
+                            cursor = Leases.cursorAfterWatch(next.lastSeq, sent.json)
+                        }
+                    }
+                }
+                val frameBefore = next.frameAtMs
+                val entries = try {
+                    api.leaseViews(next.leaseId, cursor, if (next.state == "active") Leases.REFRESH_WAIT_S else 0)
+                } catch (e: RelayException) {
+                    next = next.copy(unconfirmed = "Refresh not confirmed: ${describe(e).trimEnd('.')}. Tap Refresh again.")
+                    return@launch
+                }
+                next = next.copy(lastSeq = maxOf(next.lastSeq, cursor))
+                for (entry in entries) {
+                    next = next.copy(lastSeq = maxOf(next.lastSeq, entry["seq"].int() ?: next.lastSeq))
+                    val raw = entry["envelope"] ?: continue
+                    val envelope = try {
+                        Envelope.fromJson(raw)
+                    } catch (e: ProtocolException) {
+                        continue
+                    }
+                    next = applyLease(envelope, pin, next)
+                }
+                next = next.copy(noFrame = next.state == "active" && !next.locked && next.frameAtMs == frameBefore)
+            } catch (e: Exception) {
+                // A prompt was cancelled or the key failed.
+                fail(e)
+            } finally {
+                // Still the same lease on screen: show what this tap learned.
+                if (liveLease?.leaseId == next.leaseId) liveLease = next.copy(busy = false)
+            }
+        }
+    }
+
+    /** One received envelope onto the live lease. Only a status or a view the pinned node signed, about this lease, changes anything. */
+    private fun applyLease(envelope: Envelope, pin: NodePin, live: LiveLease): LiveLease {
+        val status = Leases.verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it) }
+        if (status != null) {
+            if (status.leaseId != live.leaseId) return live
+            return live.copy(state = status.state, locked = status.locked, reason = status.reason, expiresAtMs = status.expiresAt?.let { Timestamps.epochMillis(it) })
+        }
+        val check = Leases.verifyView(envelope, pin)
+        val view = check.view?.takeIf { check.accepted && it.leaseId == live.leaseId } ?: return live
+        val now = System.currentTimeMillis()
+        return live.copy(
+            state = view.state, locked = view.locked, expiresAtMs = now + view.remainingS * 1000L,
+            frameDropped = view.frameDropped, frame = view.frame ?: live.frame, frameAtMs = if (view.frame != null) now else live.frameAtMs,
+            actions = Leases.mergedActions(live.actions, view.actions)
+        )
+    }
+
+    /** Forgets the lease on this screen (the node's lease is not touched). */
+    fun closeLiveLease() {
+        demoLeaseJob?.cancel()
+        liveLease = null
+    }
+
+    /**
+     * "Stop now" (R-F5-5): one signed revoke, sent one time. Two prompts on
+     * this phone: the revoke, then the request that carries it. If no answer
+     * comes, the screen says the stop is not confirmed and the owner taps
+     * again; a second revoke for a lease that already ended is acknowledged
+     * by the node.
+     */
+    fun killSwitch() {
+        val live = liveLease ?: return
+        if (live.busy || live.state == "ended") return
+        if (mode == AppMode.DEMO) {
+            demoLeaseJob?.cancel()
+            liveLease = live.copy(state = "ended", reason = "revoked")
+            return
+        }
+        val k = key ?: return
+        val api = client ?: return
+        liveLease = live.copy(busy = true, unconfirmed = null)
+        scope.launch {
+            var next = live.copy(unconfirmed = null)
+            try {
+                val message = Leases.revoke(live.nodeId, live.leaseId, "kill_switch", k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
+                val sent = sendLease(api, "revoke", live.leaseId, signEnvelope(k, message, "Stop computer use now", promptText(live.nodeName, 30)))
+                next = when (val outcome = sent.outcome) {
+                    is SendOutcome.Confirmed ->
+                        if (outcome.state == "ended") next.copy(state = "ended", reason = "revoked")
+                        else next.copy(state = outcome.state, unconfirmed = "The node answered \"${Display.escape(outcome.state)}\", not ended. Tap Stop now again.")
+                    is SendOutcome.Rejected ->
+                        next.copy(unconfirmed = "The node refused the stop: ${friendlyReason(outcome.reason)}. The lease may still be active.")
+                    is SendOutcome.Unconfirmed ->
+                        next.copy(unconfirmed = "Stop not confirmed: ${sent.problem}. The lease may still be active. Tap Stop now again.")
+                }
+            } catch (e: Exception) {
+                // A prompt was cancelled or the key failed: the stop was not sent.
+                next = next.copy(unconfirmed = "The stop was not sent. Tap Stop now again.")
+                fail(e)
+            } finally {
+                if (liveLease?.leaseId == next.leaseId) liveLease = next.copy(busy = false)
+            }
+        }
+    }
+
+    // ---- Leases: demo ----
+    // Canned frames for store review; no network, no key. This part may loop.
+
+    private fun startDemoFrames(pin: NodePin) {
+        val fleet = demo ?: return
+        demoLeaseJob?.cancel()
+        demoLeaseJob = scope.launch {
+            var seq = 1
+            while (true) {
+                val live = liveLease ?: break
+                if (live.state == "ended") break
+                val index = fleet.pins.indexOfFirst { it.id == pin.id }.takeIf { it >= 0 } ?: break
+                val action = LeaseAction(
+                    seq, Timestamps.string(java.time.Instant.now()), if (seq % 2 == 0) "Type" else "Click",
+                    if (seq % 2 == 0) "Type \"12+30=\" (6 chars)" else "Click left at (120, 88) on ss-$seq", "ok"
+                )
+                val envelope = fleet.leaseView(index, live.leaseId, seq, fleet.deviceId, demoFrame(seq), maxOf(0, 900 - seq * 3), listOf(action))
+                liveLease = applyLease(envelope, pin, live)
+                seq += 1
+                delay(3000)
+            }
+        }
+    }
+
+    private fun demoFrame(seq: Int): ByteArray {
+        val bitmap = android.graphics.Bitmap.createBitmap(480, 320, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bitmap)
+        canvas.drawColor(android.graphics.Color.LTGRAY)
+        canvas.drawText("Demo frame $seq", 24f, 160f, android.graphics.Paint().apply { textSize = 32f })
+        return java.io.ByteArrayOutputStream().also { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 60, it) }.toByteArray()
+    }
+
     // Errors
 
     private fun friendlyReason(reason: String?): String = when (reason) {
@@ -450,12 +788,18 @@ class AppModel(context: Context) {
     fun startDemo() {
         client = null
         pending.clear()
+        // Only the list declared above `init`: this also runs from `init`, before the Leases section's own properties exist.
+        leaseRequests.clear()
         try {
             val fleet = DemoFleet()
             val requests = listOf("nvidia-smi --gpu-reset", "rm -rf ~/Downloads/old", "systemctl restart site").mapIndexed { i, command -> fleet.request(i, command) }
             demo = fleet
             changeMode(AppMode.DEMO)
             requests.forEach { receive(JsonObject(mapOf("envelope" to it.json, "expires_in_ms" to jsonNumber("300000"), "status" to JsonNull)), fleet.pins) }
+            // A demo lease request, node-signed and verified like a real one.
+            runCatching { fleet.leaseRequest(0, listOf("calculator", "notepad"), 15) }.getOrNull()?.let { env ->
+                Leases.verifiedMessage(env, fleet.pins[0])?.let { LeaseRequest.from(it) }?.let { leaseRequests.add(LeaseRequestItem(it, fleet.pins[0].name, null)) }
+            }
         } catch (e: Exception) {
             if (e !is GeneralSecurityException && e !is ProviderException && e !is ProtocolException) throw e
             demo = null
@@ -469,6 +813,11 @@ class AppModel(context: Context) {
     fun leaveDemo() {
         demo = null
         pending.clear()
+        closeLiveLease()
+        leaseRequests.clear()
+        decidedLeaseRequests.clear()
+        decidingLease.clear()
+        leaseNotice = false
         val token = storage.pushToken
         storage.clear()
         storage.pushToken = token
@@ -1471,6 +1820,8 @@ class AppModel(context: Context) {
             "alert" -> refreshAlerts()
             // Cases stage 4 sends kind "question"; the app fetches and verifies the list itself.
             "question" -> refreshQuestions()
+            // Fleet stage 5 sends kind "lease". It fetches nothing: a fetch is a prompt the owner did not ask for (R-F5-6).
+            "lease" -> noteLeasePush()
             "approval" -> openPushed(id)
         }
     }
@@ -1529,6 +1880,11 @@ class AppModel(context: Context) {
         online.clear()
         questions.clear()
         answeredTokens.clear()
+        closeLiveLease()
+        leaseRequests.clear()
+        decidedLeaseRequests.clear()
+        decidingLease.clear()
+        leaseNotice = false
         history = null
         inviteQr = null
         inviteClaim = null

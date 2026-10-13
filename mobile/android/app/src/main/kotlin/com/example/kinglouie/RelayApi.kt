@@ -214,6 +214,19 @@ class RelayApi(
     /** The node's `{ ok, outcome, ack }` or `{ ok: false, error }`, passed through by the relay. */
     suspend fun answerQuestion(token: String, envelope: Envelope): JsonElement? =
         request("POST", "/v1/questions/${segment(token)}/answer", envelope.json).second
+
+    // Fleet stage 5 (§4.7): lease requests, decisions and views. No call here
+    // repeats itself; the model calls each once per tap (R-F5-1, R-F5-5).
+    suspend fun leases(): List<JsonElement> = request("GET", "/v1/leases?wait=0").second.arr() ?: emptyList()
+
+    /** `202 { state, reason? }` from the node, passed through by the relay; a watch reply also has `after_seq`. */
+    suspend fun leaseDecision(action: String, leaseId: String, envelope: Envelope): JsonElement? =
+        request("POST", "/v1/leases/${segment(leaseId)}/$action", envelope.json).second
+
+    /** Views and statuses after `afterSeq`; `waitS` > 0 holds the request open until something arrives (the relay caps it at 25). */
+    suspend fun leaseViews(leaseId: String, afterSeq: Int, waitS: Int): List<JsonElement> =
+        request("GET", "/v1/leases/${segment(leaseId)}/views?after_seq=$afterSeq&wait=$waitS").second.arr() ?: emptyList()
+
     suspend fun nodes(): List<JsonElement> = request("GET", "/v1/nodes").second.arr() ?: emptyList()
     suspend fun history(nodeId: String, limit: Int, beforeSeq: Int?): JsonElement? =
         request("GET", "/v1/nodes/${segment(nodeId)}/history?limit=$limit" + (beforeSeq?.let { "&before_seq=$it" } ?: "")).second

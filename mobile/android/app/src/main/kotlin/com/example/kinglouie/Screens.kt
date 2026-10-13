@@ -91,25 +91,45 @@ fun Welcome(model: AppModel) {
 @Composable
 fun Main(model: AppModel) {
     var tab by remember { mutableStateOf(0) }
+    // Fleet stage 5: the lease request being reviewed, and whether the live lease is on screen.
+    var leaseItem by remember { mutableStateOf<AppModel.LeaseRequestItem?>(null) }
+    var showLive by remember { mutableStateOf(false) }
+    // A lease push: show where the request will be listed. The model fetched nothing.
+    LaunchedEffect(model.leasePushes) {
+        if (model.leasePushes > 0) {
+            tab = 0
+            leaseItem = null
+            showLive = false
+        }
+    }
     val tabs = listOf("Pending", "Questions", "History", "Nodes", "Front door", "Devices", "Settings")
     Scaffold(bottomBar = {
         NavigationBar {
-            tabs.forEachIndexed { i, label -> NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = {}, label = { Text(label) }) }
+            tabs.forEachIndexed { i, label ->
+                // A tab also leaves a lease screen; a lease that is still running keeps its banner.
+                NavigationBarItem(selected = tab == i, onClick = { tab = i; leaseItem = null; showLive = false }, icon = {}, label = { Text(label) })
+            }
         }
     }) { padding ->
         Column(Modifier.padding(padding)) {
             if (model.mode == AppMode.DEMO) {
                 Text("Demo — nothing here reaches a real machine", Modifier.fillMaxWidth().background(Color.Yellow).padding(6.dp), fontWeight = FontWeight.Bold)
             }
+            LeaseBanner(model) { leaseItem = null; showLive = true }
             model.fingerprintToCompare?.let { Text("This phone: $it — check the other screen shows the same.", Modifier.padding(6.dp), fontFamily = FontFamily.Monospace) }
-            when (tab) {
-                0 -> Pending(model)
-                1 -> Questions(model)
-                2 -> History(model)
-                3 -> Nodes(model)
-                4 -> FrontDoor(model)
-                5 -> Devices(model)
-                else -> Settings(model)
+            val item = leaseItem
+            when {
+                item != null -> LeaseRequestScreen(model, item, back = { leaseItem = null }, done = { leaseItem = null; showLive = model.liveLease != null })
+                showLive && model.liveLease != null -> LiveLeaseScreen(model) { showLive = false }
+                else -> when (tab) {
+                    0 -> Pending(model) { leaseItem = it }
+                    1 -> Questions(model)
+                    2 -> History(model)
+                    3 -> Nodes(model)
+                    4 -> FrontDoor(model)
+                    5 -> Devices(model)
+                    else -> Settings(model)
+                }
             }
         }
     }
@@ -125,7 +145,7 @@ fun ticker(): Long {
 }
 
 @Composable
-fun Pending(model: AppModel) {
+fun Pending(model: AppModel, openLease: (AppModel.LeaseRequestItem) -> Unit = {}) {
     var open by remember { mutableStateOf<String?>(null) }
     ticker()
     val item = model.pending.firstOrNull { it.id == open }
@@ -134,6 +154,8 @@ fun Pending(model: AppModel) {
         return
     }
     Column(Modifier.padding(12.dp)) {
+        // Fleet stage 5: computer-use requests, loaded only by their own button.
+        LeaseRequests(model, openLease)
         if (model.mode == AppMode.LIVE) {
             Button({ model.checkNow() }, enabled = !model.isPolling) { Text(if (model.isPolling) "Checking…" else "Check for requests") }
         }
@@ -209,7 +231,10 @@ fun History(model: AppModel) {
             Text("As of ${Display.escape(asOf)}", fontWeight = FontWeight.Bold)
             LazyColumn {
                 items(entries) { e ->
-                    Text("#${e["seq"].int()} ${relayText(e["kind"])} · ${relayText(e["at"])} · ${relayText(e["writer"])}", Modifier.padding(vertical = 4.dp))
+                    // Lease and GUI entries (fleet stage 5) are labelled; the kind itself is still shown.
+                    val kind = e["kind"].str() ?: ""
+                    val label = if (kind.startsWith("lease.") || kind.startsWith("gui.")) "Computer use · " else ""
+                    Text("#${e["seq"].int()} $label${relayText(e["kind"])} · ${relayText(e["at"])} · ${relayText(e["writer"])}", Modifier.padding(vertical = 4.dp))
                 }
             }
         }

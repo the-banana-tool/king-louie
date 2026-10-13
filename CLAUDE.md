@@ -1376,3 +1376,13 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   been run for real on any OS.
 - Vectors: `node tests/vectors/lease-v1/generate.js --check` (26) and
   `node tests/vectors/session-v1/generate.js --check` (6).
+- The phones: iOS streams the live lease, signing only `kl.lease.watch` with
+  its API session (owner ruling R-F5-8); Android fetches on tap, sends each
+  Stop, Allow and Refresh once and shows an unanswered send as not confirmed
+  (R-F5-1, R-F5-5), and a lease push there fetches nothing (R-F5-6). The app
+  modules have no test target, so `tests/mobile-lease-apps.test.js` pins
+  these rules by reading the Swift and Kotlin sources (it shows the rules are
+  written into the code, not that the apps build). On Android a property that
+  `AppModel`'s `init` reaches (through `startDemo`) is declared above `init`:
+  `leaseRequests` is, for that reason. `mobile/PRIVACY.md` says what a relay
+  operator sees of a lease.
