@@ -136,6 +136,14 @@ async function requestEnvelopeUnsafe(reg, { caseId, turnId = null, signal = null
   const text = approver ? `${card}\n\n${SIGNED_NOTE}` : card;
   const long = tooLong(text);
   if (long) return { ok: false, error: `Envelope refused: ${long}.` };
+  if (approver) {
+    // The phone must be able to show what it signs (renderSignedSummary).
+    try {
+      signedAction(env, caseId, approvalHelpers());
+    } catch (err) {
+      return { ok: false, error: `Envelope refused: ${err.message}.` };
+    }
+  }
   const q = rt.createQuestion(caseId, {
     kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text, options: APPROVE_REJECT,
     payload: { type: 'envelope', envelopeId: env.id, hash: env.hash, envelope: v.core, mcpAnswerable: true }

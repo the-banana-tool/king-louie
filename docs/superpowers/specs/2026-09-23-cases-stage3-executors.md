@@ -394,7 +394,16 @@ for showing an envelope stored before the rule.
 **Channels (owner decision 2026-10-12).** `channels` lists the contact channels a channel send
 (`ContactRouter.sendExternal`, §3.7) to the envelope's recipients may use, in stored form (`call` is
 `voice`). A request names them explicitly; the owner sees them in the approval question (`Channel sends
-allowed: sms, voice`) and, for a `signed` envelope, in the phone summary before the intent. The list is in the
+allowed: sms, voice`) and, for a `signed` envelope, in the phone summary before the intent. Only the known contact channels
+are accepted (`CONTACT_CHANNELS` in `contact-format.js`: `in-app`, `telegram`, `discord`, `email`, `sms`,
+`voice`, `ntfy`, `mobile`), each at most once, in a request and when a stored envelope is read
+(security review 2026-10-12). For an envelope with channels the phone summary is host-first:
+`<id> · <executor> · channel sends: … · N recipients · $cap · start to end: <intent on one line>`, so F3's
+300-character cut can only shorten the intent, and `renderSignedSummary` throws (the request is refused)
+if the host-written part alone would not fit. An envelope without channels keeps its old summary, intent
+first, because the summary is hashed; there a long intent can still push the recipient count, cap and
+window past the cut (a limit that predates channels and cannot be changed without unsigning approved
+envelopes). The list is in the
 core, so in the hash, only when the envelope has one: an envelope without the key allows no channel send
 and its core, hash and signed action are byte for byte what they were before the field existed (no approval
 vector changes). A `channels` key that is not a list of distinct channel ids is malformed (`tampered`),

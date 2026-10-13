@@ -11,6 +11,7 @@ const {
 const { normalizeRecipient, recipientChannel } = require('./normalize');
 const { gateLeaves } = require('../gates');
 const { HIDDEN_CLASS } = require('../hidden-chars');
+const { CONTACT_CHANNELS } = require('../contact-format');
 
 // The owner approves an envelope from a card of lines. Model-written text
 // (intent, rules, fact statements) must never be able to start a line of
@@ -111,10 +112,13 @@ function authorityOf(env) {
 // An envelope with no `channels` key allows no channel send, and its core
 // (so its hash, and the action a phone signs) has no such key: it is what it
 // was before the field existed. A key that is present must be a clean list
-// of channel ids ('call' is stored as 'voice'); anything else is malformed
-// (read as tampered), never "no list".
-const CHANNEL_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
-const isChannelId = (v) => typeof v === 'string' && CHANNEL_ID_RE.test(v) && v !== 'call';
+// of known contact channel ids (contact-format.js CONTACT_CHANNELS, the ids
+// the contact adapters and ladders use; 'call' is stored as 'voice'), each
+// at most once, so never more of them than there are channels; anything
+// else is malformed (read as tampered), never "no list". The bound is what
+// lets the phone summary always show the whole list (renderSignedSummary).
+const MAX_CHANNELS = CONTACT_CHANNELS.length;
+const isChannelId = (v) => typeof v === 'string' && CONTACT_CHANNELS.includes(v);
 
 // → the stored form of a channel id ('call' → 'voice'), or null.
 function normalizeChannelId(value) {
@@ -126,8 +130,8 @@ function normalizeChannelId(value) {
 
 function channelsOf(env) {
   const list = env.channels;
-  if (!Array.isArray(list) || !list.every(isChannelId) || new Set(list).size !== list.length) {
-    throw new EnvelopeCoreError('channels must be a list of distinct channel ids');
+  if (!Array.isArray(list) || list.length > MAX_CHANNELS || !list.every(isChannelId) || new Set(list).size !== list.length) {
+    throw new EnvelopeCoreError(`channels must be a list of distinct contact channels (${CONTACT_CHANNELS.join(', ')})`);
   }
   return [...list];
 }
@@ -203,7 +207,7 @@ function validateEnvelopeRequest(body, {
   if (b.channels !== undefined) {
     const ids = Array.isArray(b.channels) ? b.channels.map(normalizeChannelId) : null;
     if (!ids || !ids.length || ids.includes(null)) {
-      errors.push('"channels" must list at least one channel id such as "sms" or "email" (leave it out when no channel send is needed)');
+      errors.push(`"channels" must list at least one of ${CONTACT_CHANNELS.join(', ')} (leave it out when no channel send is needed)`);
     } else {
       channels = [...new Set(ids)];
     }
@@ -302,14 +306,39 @@ function renderEnvelopeQuestion(env, options = {}) {
   return cut(envelopeQuestionText(env, options), QUESTION_MAX_CHARS);
 }
 
-// The phone shows this; F3 cuts it to 300 characters. The summary is part of
-// the hashed action, so the envelope id in front binds an approval to one
-// envelope: two envelopes with the same core are different actions.
-// The channels come before the intent so the cut never drops them; a core
-// with no channels renders exactly as it always did (the summary is hashed).
+// The phone shows this; F3 cuts it to SUMMARY_MAX characters
+// (src/approvals/messages.js). The summary is part of the hashed action, so
+// the envelope id in front binds an approval to one envelope: two envelopes
+// with the same core are different actions.
+//
+// Two layouts, chosen by the core alone:
+// - A core with `channels`: every host-written part (id, executor, the
+//   whole channel list, recipient count, usd cap, window) comes first and
+//   the intent, on one line, last, so the cut can only shorten the intent.
+//   If the host-written part alone would not fit, this throws: no signed
+//   request is built whose summary could lose a channel.
+// - A core without `channels` keeps the layout it has always had, intent
+//   first, because the summary is hashed: changing it would unsign every
+//   envelope the phone already approved. There a long intent can push the
+//   recipient count, cap and window past the cut (a known limit that
+//   predates channels); the in-app card shows them whole.
+const SUMMARY_MAX = 300;
 function renderSignedSummary(core, envelopeId) {
-  const channels = Array.isArray(core.channels) ? ` [channel sends: ${core.channels.join(', ') || 'none'}]` : '';
-  return `${envelopeId} · ${core.executor}${channels}: ${core.intent} (${core.recipients.allow.length} recipients, ${money(core.caps.usd)}, ${core.window.start} to ${core.window.end})`;
+  if (!Array.isArray(core.channels)) {
+    return `${envelopeId} · ${core.executor}: ${core.intent} (${core.recipients.allow.length} recipients, ${money(core.caps.usd)}, ${core.window.start} to ${core.window.end})`;
+  }
+  const head = [
+    `${oneLine(envelopeId)} · ${oneLine(core.executor)}`,
+    `channel sends: ${core.channels.map(oneLine).join(', ') || 'none'}`,
+    `${core.recipients.allow.length} recipients`,
+    money(core.caps.usd),
+    `${oneLine(core.window.start)} to ${oneLine(core.window.end)}`
+  ].join(' · ');
+  // Room for ': ' and at least the cut mark after the host-written part.
+  if (Array.from(head).length > SUMMARY_MAX - 3) {
+    throw new EnvelopeCoreError('the phone summary cannot show the channels, recipients, cap and window whole');
+  }
+  return `${head}: ${oneLine(core.intent)}`;
 }
 
 // The owner-facing line for one delta, built from its kind and value against

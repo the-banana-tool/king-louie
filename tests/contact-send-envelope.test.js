@@ -36,7 +36,7 @@ async function setup({ authority = 'envelope', approve = true, wire = true } = {
   const req = await envelopeOps.requestEnvelope(reg, { caseId: meta.id, turnId: 'turn-1' }, {
     executor: 'fake-agent', intent: 'Ask a broker for a listing quote', recipients: { allow: [BROKER] }, facts: [acres.id],
     caps: { usd: 10, contacts: 1, attemptsPerContact: 2 }, window: { start: '2026-10-26', end: '2026-10-30' },
-    channels: ['sms', 'loop-sms']
+    channels: ['sms']
   });
   assert.strictEqual(req.ok, true, req.error);
   if (approve) {
@@ -140,16 +140,16 @@ describe('ContactRouter.sendExternal: a non-owner send needs an owner-approved e
 
   it('createContactHost wires the check from the executor registry', async () => {
     const s = await setup();
-    const sms = new LoopbackChannel({ id: 'loop-sms', owner: 'owner-1' });
+    const sms = new LoopbackChannel({ id: 'sms', owner: 'owner-1' });
     const build = (extras) => createContactHost({
       getSettings: () => s.env.settings, caseRuntime: s.rt, dataDir: fx.tempDir('kl-host-env-'), features: { channels: true },
-      extraAdapters: { 'loop-sms': sms }, tickMs: 60000, fetchImpl: async () => { throw new Error('offline in tests'); }, ...extras
+      extraAdapters: { 'sms': sms }, tickMs: 60000, fetchImpl: async () => { throw new Error('offline in tests'); }, ...extras
     });
     const none = build({});
     const wired = build({ getExecutorRegistry: () => s.reg });
     try {
       await none.start();
-      const args = { caseId: s.meta.id, channelId: 'loop-sms', target: BROKER, text: 'Is the lot still listed?', envelopeId: s.envelopeId, executorId: 'fake-agent' };
+      const args = { caseId: s.meta.id, channelId: 'sms', target: BROKER, text: 'Is the lot still listed?', envelopeId: s.envelopeId, executorId: 'fake-agent' };
       const r0 = await none.context().router.sendExternal(args);
       assert.strictEqual(r0.ok, false);
       assert.match(r0.error, /no envelope check is available/);

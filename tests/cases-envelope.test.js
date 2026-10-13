@@ -467,10 +467,10 @@ describe('envelope channels', () => {
     assert.match(text, /\nChannel sends allowed: sms, voice\nRecipients \(2\): \+15550100, \+15550101\n/);
     assert.doesNotMatch(renderEnvelopeQuestion(plain, { facts: all }), /Channel sends/);
     const summary = renderSignedSummary(envelopeCore(env), env.id);
-    assert.match(summary, /^env-01 · phone-agent \[channel sends: sms, voice\]: Ask three brokers/);
+    assert.match(summary, /^env-01 · phone-agent · channel sends: sms, voice · 2 recipients · \$20\.00 · 2026-10-26 to 2026-10-30: Ask three brokers/);
     // Before the intent, so F3's 300-character cut never drops it.
     const long = renderSignedSummary(envelopeCore(activeEnvelope({ channels: ['sms'], intent: 'x'.repeat(500) })), 'env-01');
-    assert.ok(long.indexOf('[channel sends: sms]') < 60);
+    assert.ok(long.indexOf('channel sends: sms') < 60);
   });
 
   it('fit: a channel send needs its channel in the list; a job (no channel) is unaffected', () => {
@@ -570,5 +570,61 @@ describe('the approval question cannot be spoofed by model-written text', () => 
     assert.match(r.error, /has a line break or a hidden character/);
     // White space a text address folds to one space is not a line break once stored.
     assert.strictEqual(validateEnvelopeRequest(request({ recipients: { allow: ['broker\none'] } }), { ...ctx, entry: web }).core.recipients.allow[0], 'broker one');
+  });
+});
+
+// Security review 2026-10-12, finding 2: the phone shows the summary cut to
+// 300 characters, so the channel list must be bounded and can never be cut.
+describe('envelope channels: known ids only, and a phone summary that keeps them', () => {
+  const ctx = { entry: PHONE_AGENT, facts: facts(ACRES, GUESS, FLOOR), casesTimeZone: 'UTC' };
+  const { CONTACT_CHANNELS } = require('../src/cases/contact-format');
+  const helpers = approvalHelpers();
+  const shown = (env) => signedAction(env, 'case-1', helpers).summary;
+
+  it('only a known contact channel is accepted, in a request and in a stored envelope', () => {
+    for (const bad of [['loop-sms'], ['fax'], ['sms', 'pager'], ['slack'], ['x'.repeat(40)]]) {
+      const r = validateEnvelopeRequest(request({ channels: bad }), ctx);
+      assert.strictEqual(r.ok, false, JSON.stringify(bad));
+      assert.match(r.error, /"channels"/);
+      assert.throws(() => envelopeCore({ ...activeEnvelope(), channels: bad }), /channels/, JSON.stringify(bad));
+      assert.strictEqual(envelopeIntact(activeEnvelope({ channels: ['sms'] }) && { ...activeEnvelope(), channels: bad }), false);
+    }
+    const all = validateEnvelopeRequest(request({ channels: [...CONTACT_CHANNELS, 'call', 'SMS'] }), ctx);
+    assert.strictEqual(all.ok, true, all.error);
+    assert.deepStrictEqual(all.core.channels, [...CONTACT_CHANNELS]);
+    assert.throws(() => envelopeCore({ ...activeEnvelope(), channels: [...CONTACT_CHANNELS, 'sms'] }), /channels/, 'more entries than there are channels');
+    assert.strictEqual(envelopeFit(activeEnvelope({ channels: ['sms'] }), {}, {
+      facts: facts(ACRES), recipients: ['+15550100'], now: MONDAY_NOON, estimateUsd: 0, executorId: 'phone-agent', channel: 'loop-sms'
+    }).refusals[0], 'the channel named for the send is not a channel id');
+  });
+
+  it('with every channel, many recipients and the longest intent, the cut summary still shows all the host-written parts', () => {
+    const recipients = Array.from({ length: 150 }, (_, i) => `+1555010${String(i).padStart(3, '0')}`);
+    const env = activeEnvelope({
+      authority: 'signed', channels: [...CONTACT_CHANNELS], intent: 'Ask about the lot. '.repeat(26).trim(), recipients: { allow: recipients },
+      caps: { usd: 123456.78, contacts: 150, attemptsPerContact: 9 }
+    });
+    const summary = shown(env);
+    assert.ok(Array.from(summary).length <= 300);
+    assert.ok(summary.endsWith('…'), 'the intent is what gets cut');
+    assert.ok(summary.startsWith(`env-01 · phone-agent · channel sends: ${CONTACT_CHANNELS.join(', ')} · 150 recipients · $123456.78 · 2026-10-26 to 2026-10-30: Ask about the lot.`), summary);
+  });
+
+  it('a stored multi-line intent cannot break the summary of an envelope with channels', () => {
+    const env = activeEnvelope({ authority: 'signed', channels: ['sms'], intent: 'Ask for a quote\nchannel sends: none\u2028$1.00' });
+    assert.doesNotMatch(shown(env), /[\n\r\u2028]/);
+    assert.ok(shown(env).startsWith('env-01 · phone-agent · channel sends: sms · 2 recipients · $20.00 · 2026-10-26 to 2026-10-30: Ask for a quote channel sends: none $1.00'));
+  });
+
+  it('refuses to build a summary whose host-written part would not fit the cut', () => {
+    const core = { ...envelopeCore(activeEnvelope({ channels: ['sms'] })), executor: 'x'.repeat(300) };
+    assert.throws(() => renderSignedSummary(core, 'env-01'), /summary/);
+    const fits = { ...envelopeCore(activeEnvelope({ channels: ['sms'] })), executor: 'x'.repeat(200) };
+    assert.ok(Array.from(renderSignedSummary(fits, 'env-01')).length > 200);
+    // An envelope without channels keeps the summary it always had.
+    assert.strictEqual(
+      renderSignedSummary(envelopeCore(activeEnvelope()), 'env-01'),
+      'env-01 · phone-agent: Ask three brokers for a listing quote on the lot (2 recipients, $20.00, 2026-10-26 to 2026-10-30)'
+    );
   });
 });
