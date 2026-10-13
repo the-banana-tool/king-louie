@@ -128,14 +128,33 @@ class LeaseManager extends EventEmitter {
   // The granting device was heard from now: the window runs from here.
   _noteContact(lease) {
     lease.lastContact = this._stamp();
+    this._armContact(lease, this._contactWindowMs());
+  }
+
+  // One contact timer a lease, due in `ms`.
+  _armContact(lease, ms) {
     if (lease.contactTimer) this.timers.clearTimeout(lease.contactTimer);
-    lease.contactTimer = this._timer(() => this._checkContact(lease), this._contactWindowMs());
+    lease.contactTimer = this._timer(() => this._checkContact(lease), ms);
+  }
+
+  // What is left of the contact window, on the clock that has less left.
+  _contactLeftMs(lease) {
+    const window = this._contactWindowMs();
+    if (lease.lastContact === null) return 0;
+    return window - Math.max(this.monotonic() - lease.lastContact.mono, this.clock() - lease.lastContact.wall);
   }
 
   // The window ran out with the lease active: suspended for want of contact,
-  // unless the lease's own time is up as well, which ends it as expired.
+  // unless the lease's own time is up as well, which ends it as expired. A
+  // timer that fires before the window has lapsed on either clock (a coarse
+  // or early timer; third security review, finding 3) is armed again for
+  // what is left, so the suspension never waits for the next input.
   _checkContact(lease) {
-    if (lease.state !== 'active' || !this._contactLapsed(lease)) return;
+    if (lease.state !== 'active') return;
+    if (!this._contactLapsed(lease)) {
+      this._armContact(lease, Math.max(1, Math.ceil(this._contactLeftMs(lease))));
+      return;
+    }
     if (this._expired(lease)) {
       this._audit('lease.expired', lease, { reason: 'expired' });
       this._end(lease, 'expired');

@@ -479,6 +479,44 @@ describe('lock, expiry and revoke', () => {
       assert.equal(leases.current(), lease, 'it still holds the node\'s lease');
     });
 
+    // Third security review, finding 3: a timer may fire a little early (a
+    // coarse timer, two clocks that drift apart). It used to find the window
+    // not yet lapsed, do nothing and never run again, so the suspension (the
+    // status, release_all, the live view's stop) waited for the next input.
+    it('a contact timer that fires early is armed again for the rest of the window', async () => {
+      const lease = await granted();
+      const early = lease.contactTimer;
+      timers.clearTimeout(early); // it will not fire on time: it fires now, 30 ms early
+      timers.advance(WINDOW - 30);
+      broker.calls.length = 0;
+      early.fn();
+      assert.equal(lease.state, 'active', 'the window has not lapsed');
+      timers.advance(29);
+      assert.equal(lease.state, 'active');
+      timers.advance(1);
+      assert.equal(lease.state, 'suspended', 'suspended when the window lapses, with no input to find it');
+      assert.equal(lease.suspendReason, 'no_contact');
+      assert.ok(broker.calls.includes('releaseAll'));
+      assert.deepEqual([relay.last('kl.lease.status').message.state, relay.last('kl.lease.status').message.reason], ['suspended', 'no_contact']);
+    });
+
+    it('an early contact timer after a later contact waits for that contact window, once', async () => {
+      const lease = await granted();
+      timers.advance(60000);
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, true);
+      const timer = lease.contactTimer;
+      timers.clearTimeout(timer);
+      timers.advance(WINDOW - 5000);
+      timer.fn();
+      timer.fn(); // and a second early firing leaves one timer, not two
+      assert.equal(lease.state, 'active');
+      timers.advance(4999);
+      assert.equal(lease.state, 'active');
+      timers.advance(1);
+      assert.equal(lease.state, 'suspended');
+      assert.equal(relay.all('kl.lease.status').filter((s) => s.message.state === 'suspended').length, 1);
+    });
+
     it('a laptop that slept through the window: the next input finds the lapse without the timer', async () => {
       const lease = await granted();
       timers.jump(WINDOW + 1);
