@@ -9,6 +9,7 @@ const { EnvelopeStore, envelopeFit } = require('./envelope');
 const { PlanStore } = require('./plan');
 const { normalizeRecipient, recipientChannel } = require('./normalize');
 const { gateLeaves } = require('../gates');
+const { plainLineProblem } = require('../hidden-chars');
 const { DIRECT_TOOLS } = require('./builtins');
 const { parseJsonObject, sha256hex, windowInstants, roundUsd } = require('./util');
 const { jobSignature, findDuplicateJob } = require('./duplicates');
@@ -168,6 +169,11 @@ async function submitChecked(reg, ctx, params) {
     for (const address of addresses) {
       const n = normalizeRecipient(address, { channel, defaultCountryCode: settings.defaultCountryCode });
       if (!n.ok) return fail(n.error);
+      // The same rule as an envelope request (envelope.js): a recipient
+      // reaches the owner's card when it is added by a delta, so one that
+      // is not one plain line is refused here, never flattened there.
+      const problem = plainLineProblem(n.value);
+      if (problem) return fail(`recipient ${recipients.length + 1} is not one plain line: ${problem}`);
       // Refused, not merged: adapters map contacts to recipients by position.
       if (recipients.includes(n.value)) return fail(`recipient ${n.value} is listed more than once`);
       recipients.push(n.value);

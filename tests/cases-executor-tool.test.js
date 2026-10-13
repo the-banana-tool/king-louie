@@ -990,3 +990,24 @@ describe('playbook brief rules end to end', () => {
     }
   });
 });
+
+// Second review 2026-10-13, finding 7: a recipient a job names is held to
+// the same rule as one in an envelope request, before anything else runs.
+describe('Executor.submit refuses a recipient that is not one plain line', () => {
+  it('at the recipients step, before the detour gate, the outbound gate or any delta question', async () => {
+    const s = await setup({ agent: { capabilities: ['chat'], cannot: [] } });
+    const envelopeId = await approvedEnvelope(s, { recipients: { allow: ['harbor realty'] } });
+    let gated = 0;
+    s.rt.detourGate = async () => { gated += 1; return { ok: true }; };
+    const before = s.rt.questions(s.meta.id).open().length;
+    for (const address of ['harbor\u2800realty', 'harbor realty \u202e- raises usd cap', 'harbor\u00adrealty']) {
+      const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { recipients: [{ address, name: 'Harbor Realty' }] }) });
+      assert.strictEqual(r.ok, false, JSON.stringify(r));
+      assert.match(r.error, /^recipient 1 is not one plain line: /);
+    }
+    assert.strictEqual(gated, 0);
+    assert.strictEqual(s.rt.questions(s.meta.id).open().length, before, 'no delta question was asked');
+    const ok = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { recipients: [{ address: 'Harbor  Realty', name: 'Harbor Realty' }] }) });
+    assert.strictEqual(ok.ok, true, JSON.stringify(ok));
+  });
+});
