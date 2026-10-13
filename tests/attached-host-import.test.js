@@ -253,6 +253,20 @@ describe('attached host: importing a conversation', () => {
     assert.strictEqual(preview.serviceUnreachable, true);
   });
 
+  it('a picked file that can no longer be read is refused without its path, and the service is not called', async () => {
+    const { client, call, pick } = setup();
+    client.goLive();
+    const file = transcript(tmp(), 2);
+    const picked = await pick(file);
+    fs.rmSync(file);
+    for (const channel of ['history:import.preview', 'history:import.commit']) {
+      const reply = await call(channel, { token: picked.token });
+      assert.deepStrictEqual(reply, { ok: false, error: 'The file could not be read. Choose it again.', code: 'IMPORT_UNREADABLE' });
+      assert.ok(!JSON.stringify(reply).includes('kl-attached-import-'), 'the renderer is never told the path');
+    }
+    assert.deepStrictEqual(client.invoked, []);
+  });
+
   it('a made-up token is refused, and so is a second commit while one runs', async () => {
     const { client, call, pick } = setup();
     client.goLive();

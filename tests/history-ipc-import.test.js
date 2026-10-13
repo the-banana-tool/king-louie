@@ -155,6 +155,26 @@ describe('history IPC: import', () => {
     assert.deepStrictEqual(chatIds(), []);
   });
 
+  it('a picked file that can no longer be read is refused without its path', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-import-gone-'));
+    try {
+      const file = path.join(dir, 'visit-notes.md');
+      fs.copyFileSync(MARKDOWN, file);
+      const token = await pick(file);
+      fs.rmSync(file);
+      for (const channel of [IPC.HISTORY_IMPORT_PREVIEW, IPC.HISTORY_IMPORT_COMMIT]) {
+        const reply = await call(channel, { token });
+        assert.deepStrictEqual(reply, { ok: false, error: 'The file could not be read. Choose it again.', code: 'IMPORT_UNREADABLE' });
+        assert.ok(!JSON.stringify(reply).includes('kl-import-gone-'), 'the renderer is never told the path');
+      }
+      assert.deepStrictEqual(chatIds(), []);
+      // Nothing is held open by the refusal: another file imports.
+      assert.strictEqual((await call(IPC.HISTORY_IMPORT_COMMIT, { token: await pick(MARKDOWN) })).ok, true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('commit: the chat is stored, the token is spent and the chat list is told', async () => {
     const token = await pick(MARKDOWN);
     const out = await call(IPC.HISTORY_IMPORT_COMMIT, { token });

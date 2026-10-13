@@ -11,7 +11,7 @@ const { searchHistoryExcerpts, excerptsForMessage } = require('../history/search
 const { SCOPES, CLOSED_POLICY, resolveScope } = require('../history/scope');
 const { chatHeaderTitle } = require('../history/excerpts');
 const { previewImport, importChat, createImportGate, HASH_PATTERN } = require('../history/import-chats');
-const { createImportPicks, importRequest, sourceBaseName, NO_FILE } = require('./import-picks');
+const { createImportPicks, importRequest, sourceBaseName, readingPickedFile, NO_FILE } = require('./import-picks');
 
 const view = (e) => ({ seq: e.seq, header: e.header, text: e.text });
 
@@ -164,7 +164,9 @@ function registerHistoryHandlers(ipcMain, context = {}) {
     const { token, pattern } = importRequest(payload);
     const filePath = picks.pathFor(token);
     if (!filePath) return { ...NO_FILE };
-    const { sourceHash, importerVersion: _version, ...preview } = await previewImport(filePath, { pattern });
+    const read = await readingPickedFile(() => previewImport(filePath, { pattern }));
+    if (read.ok === false) return read;
+    const { sourceHash, importerVersion: _version, ...preview } = read;
     return { ok: true, untrustedText: true, ...preview, existingChatId: importedAs(sourceHash) };
   });
 
@@ -172,7 +174,8 @@ function registerHistoryHandlers(ipcMain, context = {}) {
     const { token, pattern } = importRequest(payload);
     const filePath = picks.pathFor(token);
     if (!filePath) return { ...NO_FILE };
-    const out = await importGate().run(() => importChat({ store: store(), filePath, pattern }));
+    const out = await readingPickedFile(() => importGate().run(() => importChat({ store: store(), filePath, pattern })));
+    if (out.ok === false) return out;
     picks.spend(token);
     chatUpdated(event, out.chatId);
     return { ok: true, chatId: out.chatId, imported: out.imported, messages: out.messages, kind: out.kind };

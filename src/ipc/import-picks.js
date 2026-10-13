@@ -7,10 +7,29 @@
 const crypto = require('crypto');
 const path = require('path');
 const { parseImport, previewImport, MAX_BATCH_MESSAGES, MAX_BATCH_CHARS } = require('../history/import-chats');
+const { createLogger } = require('../logging');
+
+const log = createLogger('history-import');
 
 const MAX_PICKS = 8;
 const PICK_TTL_MS = 15 * 60 * 1000;
 const NO_FILE = Object.freeze({ ok: false, error: 'Choose the file again.', code: 'IMPORT_NO_FILE' });
+const UNREADABLE = Object.freeze({ ok: false, error: 'The file could not be read. Choose it again.', code: 'IMPORT_UNREADABLE' });
+
+// Runs a step that opens the picked file. A file-system error (the file was
+// moved, deleted or locked since it was picked) carries the path in its
+// message, and the renderer is never told the path: the reply is a fixed
+// sentence, and the log gets the system's code only. Every other error is
+// the importer's or the store's own and is thrown on.
+async function readingPickedFile(step) {
+  try {
+    return await step();
+  } catch (err) {
+    if (!err || !err.syscall) throw err;
+    log.warn(`A picked import file could not be read (${typeof err.code === 'string' ? err.code : 'no code'}).`);
+    return { ...UNREADABLE };
+  }
+}
 
 // The dialog both hosts open. Returns a function that answers the chosen
 // path, or null when the dialog was cancelled or the host has no dialog.
@@ -140,7 +159,9 @@ function createAttachedImport({ picks, invoke, parse = parseImport, preview = pr
       const { token, pattern } = importRequest(payload);
       const filePath = picks.pathFor(token);
       if (!filePath) return { ...NO_FILE };
-      const { sourceHash, importerVersion: _version, ...shown } = await preview(filePath, { pattern });
+      const read = await readingPickedFile(() => preview(filePath, { pattern }));
+      if (read.ok === false) return read;
+      const { sourceHash, importerVersion: _version, ...shown } = read;
       const looked = await invoke('history:import.lookup', [{ sourceHash }]);
       if (!looked || looked.ok !== true) {
         // Not reachable (or too old to say): the owner still sees the file.
@@ -157,7 +178,8 @@ function createAttachedImport({ picks, invoke, parse = parseImport, preview = pr
       if (running) return { ...BUSY };
       running = true;
       try {
-        const parsed = await parse(filePath, { pattern });
+        const parsed = await readingPickedFile(() => parse(filePath, { pattern }));
+        if (parsed.ok === false) return parsed;
         const { kind, messages } = parsed;
         if (!Array.isArray(messages) || !messages.length) {
           return { ok: false, code: 'IMPORT_INVALID', error: 'This file has no messages to import.' };
@@ -202,5 +224,5 @@ function createAttachedImport({ picks, invoke, parse = parseImport, preview = pr
 
 module.exports = {
   createImportPicks, createPickImportFile, createAttachedImport, planImportBatches,
-  importRequest, sourceBaseName, NO_FILE, MAX_PICKS, PICK_TTL_MS, SEND_BATCH_MESSAGES, SEND_BATCH_CHARS
+  importRequest, sourceBaseName, readingPickedFile, NO_FILE, UNREADABLE, MAX_PICKS, PICK_TTL_MS, SEND_BATCH_MESSAGES, SEND_BATCH_CHARS
 };
