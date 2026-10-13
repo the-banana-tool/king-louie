@@ -529,7 +529,9 @@ function registerChatHandlers(ipcMain, context = {}) {
       if (contextBuilder && userSeq) {
         // The tail plus the new message; the recalled block goes in the
         // dynamic system prompt below (spec §6.5). No tool blocks are sent.
-        built = await contextBuilder.build({ chatId, message: safeMessage, model: mainTarget.model, upToSeq: userSeq });
+        // crossChat: this is the chat's own turn, so it recalls across the
+        // chat's history scope (stage H4); no other caller passes it.
+        built = await contextBuilder.build({ chatId, message: safeMessage, model: mainTarget.model, upToSeq: userSeq, crossChat: true });
         const stored = historyStore.getMessages(chatId, { fromSeq: userSeq, toSeq: userSeq });
         chatMessages = [...built.tail, ...stored];
       } else {
@@ -671,7 +673,12 @@ function registerChatHandlers(ipcMain, context = {}) {
           // on did not.
           reranker: built.stats.reranker ?? null,
           rerankSkipped: built.stats.rerankSkipped ?? null,
-          scope: built.stats.scope
+          scope: built.stats.scope,
+          // Stage H4: how many chats the scope held, the other chats an
+          // excerpt came from, and why the scope was capped (or null).
+          scopeChats: built.stats.scopeChats ?? 1,
+          recalledChats: Array.isArray(built.stats.recalledChats) ? built.stats.recalledChats : [],
+          scopePinned: built.stats.scopePinned ?? null
         };
       }
 

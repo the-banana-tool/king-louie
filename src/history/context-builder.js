@@ -7,6 +7,7 @@ const { mergeHistorySettings } = require('./settings');
 const { toolUseSummary, toolResultText } = require('./chunker');
 const { formatExcerpts, formatRecalledBlock } = require('./excerpts');
 const { caseIdOf } = require('./reranker');
+const { SCOPES } = require('./scope');
 
 const PAGE = 200;
 // Tool results in the tail's span are read newest first, TAIL_RESULT_PAGE
@@ -34,7 +35,11 @@ const hasText = (m) => String((m && m.text) || '').trim().length > 0;
 const isContent = (m) => (m.sender === 'user' || m.sender === 'assistant') && !(m.stopped && !hasText(m));
 
 class ContextBuilder {
-  constructor({ store, retriever, estimator, getSettings = () => ({}), now = () => Date.now() } = {}) {
+  // resolveScope(chatId) → { effective, chatIds, titles, pinned } says which
+  // chats a turn of that chat may read (scope.js, stage H4). Without one a
+  // build reads the chat alone.
+  constructor({ store, retriever, estimator, getSettings = () => ({}), now = () => Date.now(), resolveScope = null } = {}) {
+    this.resolveScope = typeof resolveScope === 'function' ? resolveScope : null;
     this.store = store;
     this.retriever = retriever;
     this.estimator = estimator;
@@ -45,9 +50,16 @@ class ContextBuilder {
   // vectorHits / lexical pass through to Retriever#retrieve (a caller that
   // ranks by vector itself: LongHaul's kl-recall-vec).
   // reranker, when given, is used by spec §6.3 step 6 for this build only.
-  // The chat's caseId goes to the reranker (Jev never reranks a case chat).
-  async build({ chatId, message = '', model = null, upToSeq = null, vectorHits = null, lexical = true, reranker = null, vectorOf = null } = {}) {
+  // The caseId of the first case chat in scope goes to the reranker (Jev
+  // never reranks a case chat).
+  // crossChat: recall from the chat's whole history scope. Only the chat's
+  // own turn passes it (the send path); a workflow task or the planner reads
+  // the parent chat alone, whatever its scope. The tail, the query and the
+  // full-history estimate are this chat's either way, and upToSeq cuts this
+  // chat only.
+  async build({ chatId, message = '', model = null, upToSeq = null, vectorHits = null, lexical = true, reranker = null, vectorOf = null, crossChat = false } = {}) {
     const id = String(chatId || '');
+    const scope = this._scope(id, crossChat === true);
     const { recall } = mergeHistorySettings((this.getSettings() || {}).history);
     const given = Number.isInteger(upToSeq) && upToSeq > 0;
     const limit = given ? upToSeq : this.store.lastSeq(id) + 1;
@@ -68,14 +80,16 @@ class ContextBuilder {
     const retrieval = {};
     let recalled = { text: '', chunkIds: [], estTokens: 0 };
     let recalledExcerpts = 0;
+    let recalledChats = [];
     if (recall.enabled && query.trim()) {
       const hits = await this.retriever.retrieve({
         query,
         contextQueries,
-        chatIds: [id],
+        chatIds: scope.chatIds,
         excludeMessageIds: tail.messageIds,
         budgetTokens: recall.recalledTokens,
         upToSeq: limit,
+        upToSeqChatId: id,
         settings: recall,
         model,
         now: asOf,
@@ -83,14 +97,15 @@ class ContextBuilder {
         lexical,
         reranker,
         vectorOf,
-        caseId: caseIdOf(this.store, id),
+        caseId: caseIdOf(this.store, scope.chatIds),
         stats: retrieval
       });
       if (hits.length) {
         const chunks = hits.map((h) => h.chunk);
         const chunkCounts = this.store.messageChunkCounts([...new Set(chunks.map((c) => c.messageId))]);
-        const excerpts = formatExcerpts(chunks, { chatId: id, asOf, chunkCounts });
-        const text = formatRecalledBlock(excerpts);
+        const excerpts = formatExcerpts(chunks, { chatId: id, asOf, chunkCounts, chatTitles: scope.titles });
+        recalledChats = [...new Set(excerpts.map((e) => e.chatId).filter((other) => other !== id))];
+        const text = formatRecalledBlock(excerpts, { otherChats: recalledChats.length > 0 });
         recalled = { text, chunkIds: excerpts.flatMap((e) => e.chunkIds), estTokens: this.estimator.estimate(text, model) };
         recalledExcerpts = excerpts.length;
       }
@@ -113,10 +128,33 @@ class ContextBuilder {
         // that was on did not; both null when rerank is off.
         reranker: retrieval.reranker ?? null,
         rerankSkipped: retrieval.rerankSkipped ?? null,
-        scope: 'chat',
+        // The effective history scope (spec §6.3, §7), how many chats it
+        // held, the other chats an excerpt in the block came from (block
+        // order) and why the scope was capped, if it was.
+        scope: scope.effective,
+        scopeChats: scope.chatIds.length,
+        recalledChats,
+        scopePinned: scope.pinned,
         query,
         queryFallbackTurns: fallback.length
       }
+    };
+  }
+
+  // The chats this build may read: the chat alone unless the caller asked
+  // for the chat's scope and the builder can resolve one. An answer that is
+  // not a list starting with this chat is read as the chat alone.
+  _scope(id, crossChat) {
+    const alone = { effective: 'chat', chatIds: [id], titles: new Map(), pinned: null };
+    if (!crossChat || !this.resolveScope || !id) return alone;
+    const r = this.resolveScope(id);
+    if (!r || !Array.isArray(r.chatIds) || r.chatIds[0] !== id || !SCOPES.includes(r.effective)) return alone;
+    const chatIds = [...new Set(r.chatIds.filter((other) => typeof other === 'string' && other))];
+    return {
+      effective: r.effective,
+      chatIds,
+      titles: r.titles instanceof Map ? r.titles : new Map(),
+      pinned: r.pinned && typeof r.pinned.reason === 'string' ? r.pinned.reason : null
     };
   }
 

@@ -66,7 +66,8 @@ const { buildChildContext, childRuntimeOptions } = require('../agents/child-cont
 const ContextAssembler = require('../context/context-assembler');
 const {
   HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore, TokenEstimator, Retriever, ContextBuilder,
-  EmbedderHost, EmbedRunner, VectorIndex, createVectorSearch, startEmbedIndexer, mergeHistorySettings
+  EmbedderHost, EmbedRunner, VectorIndex, createVectorSearch, startEmbedIndexer, mergeHistorySettings,
+  resolveScope, CLOSED_POLICY
 } = require('../history');
 const { startChunkBackfill } = require('../history/backfill');
 const { createRecallReranker } = require('../history/reranker');
@@ -369,12 +370,23 @@ function createCore(deps = {}) {
   });
   const historyReranker = createRecallReranker({ host: embedderHost, jev: jevReranker, getSettings: () => getSettings() });
   const historyRetriever = new Retriever({ store: historyStore, estimator: tokenEstimator, vectorSearch, vectorOf, reranker: historyReranker });
+  // Stage H4 (spec §6.3): which chats a turn of a chat may read, resolved on
+  // every call from what the store holds now and never kept. requested is a
+  // tool's scope argument and can only narrow. The policy says what a stored
+  // scope may not do; until the shipped policy (scope-policy.js) is wired it
+  // is the closed one, under which every chat reads itself only.
+  const historyScopePolicy = CLOSED_POLICY;
+  const resolveHistoryScope = (chatId, requested = null) => resolveScope({
+    store: historyStore, chatId, requested, policy: historyScopePolicy
+  });
   const contextBuilder = new ContextBuilder({
     store: historyStore,
     retriever: historyRetriever,
     estimator: tokenEstimator,
     // getSettings is declared further down; it is read only when a turn runs.
-    getSettings: () => getSettings()
+    getSettings: () => getSettings(),
+    // Used only by a build that asks for it (crossChat: the chat's own turn).
+    resolveScope: (chatId) => resolveHistoryScope(chatId)
   });
   let embedIndexer = null;
   const startHistoryEmbedding = () => {
@@ -3397,6 +3409,7 @@ function createCore(deps = {}) {
     historyStore,
     getHistoryStore,
     getContextBuilder: () => contextBuilder,
+    resolveHistoryScope,
     getTokenEstimator: () => tokenEstimator,
     getHistoryRetriever: () => historyRetriever,
     getHistoryStatus,

@@ -62,6 +62,16 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **Under `all`, a linked chat is asked with `explicit: false`** like every other chat, as the interface says. So a chat that a policy allows only when linked (Task 8's bridge chat) is read under `linked` and not under `all`, even when it is among the chat's links.
 - **`requested` narrows only when it is one of the three strings**; an object, an array, a number or `''` is ignored like an unknown word.
 
+**Task 5**
+
+- **The core's policy is `CLOSED_POLICY`, not `OPEN_POLICY`, until Task 8.** The task's text wires the open policy and relies on no path being able to set a scope. With the closed one every chat reads itself only whatever its stored scope and links say, so the interim state fails closed by itself. Task 8 replaces the one line (`const historyScopePolicy = CLOSED_POLICY` in `create-core.js`). Until then a reply's provenance carries `scopePinned: 'no-policy'`.
+- **`crossChat` must be exactly `true`**, and the builder reads a `resolveScope` answer as the chat alone unless it is an object whose `chatIds` is a list starting with this chat and whose `effective` is one of the three scopes. `stats.scopePinned` is the pin's reason whenever the resolver reports a pin, including one that narrowed nothing (a case chat stored as `chat`).
+- **The title rule also turns Unicode format characters (bidi controls, zero-width) and line and paragraph separators into a space**, and neutralises a `recalled_history` tag before the brackets go, so the title `<recalled_history>` reads `recalled_history tag`. The cut is 59 characters and `…` (60 in all), counted in code points. When the title and the id both clean to nothing the header says `chat "another chat"`. The rule is exported as `chatHeaderTitle(title, chatId)` for Task 6.
+- **`RECALLED_PREAMBLE_CROSS` is wrapped in lines like `RECALLED_PREAMBLE`** (five lines joined by `\n`); the words are the task's.
+- **`excerptsForMessage` drops another chat's chunk when either timestamp does not parse**, not only when the chunk is later than the reply. It does not ask the scope as it is now: the drawer shows the owner what that reply was given, and a chat linked then and unlinked since still shows.
+- **No file under `src/workflows/` changed**, as expected; the new case in `tests/history-workflows.test.js` runs the real engine and planner over a real builder whose parent chat is `linked`.
+- **`tests/history-context-builder.test.js` and `tests/history-rerank-provenance.test.js` needed no change** and are not in the commit.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named).

@@ -38,10 +38,16 @@ function createRecallReranker({ host, jev, getSettings }) {
 // The case a chat belongs to, or null: what the dispatcher needs to keep a
 // case chat away from Jev. Read from the store's chat row; a store without
 // chats (or a chat it does not hold) is no case.
-function caseIdOf(store, chatId) {
-  if (!store || typeof store.getChat !== 'function' || !chatId) return null;
-  const chat = store.getChat(String(chatId), { messages: false });
-  return chat && chat.caseId ? String(chat.caseId) : null;
+// Given several chats (a turn's history scope, stage H4) it is the first
+// case among them: one case chat in scope keeps the whole rerank off Jev.
+function caseIdOf(store, chatIdOrIds) {
+  if (!store || typeof store.getChat !== 'function') return null;
+  for (const chatId of Array.isArray(chatIdOrIds) ? chatIdOrIds : [chatIdOrIds]) {
+    if (!chatId) continue;
+    const chat = store.getChat(String(chatId), { messages: false });
+    if (chat && chat.caseId) return String(chat.caseId);
+  }
+  return null;
 }
 
 module.exports = { createHostReranker, createRecallReranker, caseIdOf };

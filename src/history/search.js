@@ -31,14 +31,30 @@ function excerptsForMessage({ store, chatId, seq }) {
   if (!ids.length) return [];
   // An imported reply, or one in a chat rewritten by replaceChat or
   // updateChat({ messages }), can carry ids that now name another chat's
-  // chunks or a later message's: only this chat's chunks before the reply.
+  // chunks or a later message's: only this chat's chunks before the reply,
+  // and (stage H4) chunks of a chat the reply's own provenance says it
+  // recalled from, written no later than the reply.
+  const own = String(chatId);
+  const named = Array.isArray(message.context.recalledChats) ? message.context.recalledChats : [];
+  const recalledChats = new Set(named.filter((id) => typeof id === 'string' && id && id !== own));
+  const repliedAt = Date.parse(message.timestamp || '');
+  const before = (c) => {
+    const at = Date.parse(c.ts || '');
+    return Number.isFinite(repliedAt) && Number.isFinite(at) && at <= repliedAt;
+  };
   const all = store.chunks(ids);
-  const chunks = all.filter((c) => c.chatId === String(chatId) && c.seq < message.seq);
-  if (chunks.length < all.length) log.debug(`Reply #${message.seq} in chat ${chatId}: ignored ${all.length - chunks.length} recalled chunk ids that no longer point before it in this chat`);
+  const chunks = all.filter((c) => (c.chatId === own ? c.seq < message.seq : recalledChats.has(c.chatId) && before(c)));
+  if (chunks.length < all.length) log.debug(`Reply #${message.seq} in chat ${chatId}: ignored ${all.length - chunks.length} recalled chunk ids that no longer point before it in this chat or in a chat it recalled from`);
   // Aged as the model saw them, at the reply's own time.
-  const asOf = Date.parse(message.timestamp || '') || Date.now();
+  const asOf = repliedAt || Date.now();
   const chunkCounts = store.messageChunkCounts([...new Set(chunks.map((c) => c.messageId))]);
-  return formatExcerpts(chunks, { chatId, asOf, chunkCounts, order: 'seq' });
+  const chatTitles = new Map();
+  for (const c of chunks) {
+    if (c.chatId === own || chatTitles.has(c.chatId) || typeof store.chatRef !== 'function') continue;
+    const ref = store.chatRef(c.chatId);
+    if (ref) chatTitles.set(c.chatId, ref.title);
+  }
+  return formatExcerpts(chunks, { chatId: own, asOf, chunkCounts, chatTitles, order: 'seq' });
 }
 
 module.exports = { searchHistoryExcerpts, excerptsForMessage };

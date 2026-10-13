@@ -169,4 +169,39 @@ describe('excerptsForMessage', () => {
     const out = excerptsForMessage({ store: f.store, chatId: 'mine', seq: 3 });
     assert.deepStrictEqual(out.map((e) => e.seq), [1]);
   });
+
+  it('stage H4: shows an excerpt of another chat only when the reply says it recalled from that chat', () => {
+    seedChat(f.store, { id: 'lot', title: 'Lot "notes"', messages: [{ sender: 'user', text: 'The gate code for the Lakeside lot is 4417.' }] });
+    const [foreign] = f.store.chunksOfMessage('lot-m1');
+    const [mine] = f.store.chunksOfMessage('mine-m1');
+    let n = 0;
+    const reply = (context) => {
+      n += 1;
+      return f.store.appendMessage('mine', { id: `mine-x${n}`, sender: 'assistant', text: 'It is 4417.', timestamp: '2026-01-02T09:00:00.000Z', context }).seq;
+    };
+
+    const named = reply({ recalledChunkIds: [foreign.id, mine.id], recalledChats: ['lot'] });
+    const out = excerptsForMessage({ store: f.store, chatId: 'mine', seq: named });
+    assert.deepStrictEqual(out.map((e) => [e.chatId, e.seq]), [['mine', 1], ['lot', 1]]);
+    assert.match(out[1].header, /^\[chat "Lot notes" · #1 · user · /);
+
+    const unnamed = reply({ recalledChunkIds: [foreign.id, mine.id] });
+    assert.deepStrictEqual(excerptsForMessage({ store: f.store, chatId: 'mine', seq: unnamed }).map((e) => e.chatId), ['mine']);
+    for (const recalledChats of ['lot', { lot: true }, ['other'], [['lot']], []]) {
+      const seq = reply({ recalledChunkIds: [foreign.id], recalledChats });
+      assert.deepStrictEqual(excerptsForMessage({ store: f.store, chatId: 'mine', seq }), [], JSON.stringify(recalledChats));
+    }
+  });
+
+  it('stage H4: drops a chunk of another chat written after the reply, or when either time is unknown', () => {
+    seedChat(f.store, { id: 'late', messages: [{ sender: 'user', text: 'A later note about the dock.', timestamp: '2026-03-01T09:00:00.000Z' }] });
+    const [late] = f.store.chunksOfMessage('late-m1');
+    const context = { recalledChunkIds: [late.id], recalledChats: ['late'] };
+    const early = f.store.appendMessage('mine', { id: 'mine-early', sender: 'assistant', text: 'Noted.', timestamp: '2026-02-01T09:00:00.000Z', context }).seq;
+    assert.deepStrictEqual(excerptsForMessage({ store: f.store, chatId: 'mine', seq: early }), []);
+    const after = f.store.appendMessage('mine', { id: 'mine-after', sender: 'assistant', text: 'Noted.', timestamp: '2026-03-02T09:00:00.000Z', context }).seq;
+    assert.deepStrictEqual(excerptsForMessage({ store: f.store, chatId: 'mine', seq: after }).map((e) => e.chatId), ['late']);
+    const undated = f.store.appendMessage('mine', { id: 'mine-undated', sender: 'assistant', text: 'Noted.', timestamp: 'not a date', context }).seq;
+    assert.deepStrictEqual(excerptsForMessage({ store: f.store, chatId: 'mine', seq: undated }), []);
+  });
 });
