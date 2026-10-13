@@ -71,20 +71,17 @@ function resolveLaunch(guiConfig, policy, request = {}, { platform = process.pla
     };
   }
 
+  // Not an app id in gui.apps. Owner ruling R-F5-14 (2026-10-13): only an
+  // allowlisted app can be launched. A path outside the allowlist used to
+  // resolve as an unsafe launch for the phone to approve; it is now refused
+  // outright and nobody is asked. (An allowlisted app with an argument
+  // outside its globs, or a file outside allowed_roots, is still unsafe and
+  // still goes to the phone, above.) A relative path or one with ".." keeps
+  // its own error: it was never a launchable name.
   if (!isAbsoluteFor(app, platform) || hasDotDot(app)) {
-    throw new GuiError('invalid_params', '"app" must be an allowlisted app id or an absolute path without ".."');
+    throw new GuiError('invalid_params', '"app" must be an allowlisted app id (an absolute path is no longer accepted)');
   }
-  if (platform === 'win32' && !/\.exe$/i.test(app)) throw new GuiError('app_type_not_supported', 'only .exe files can be launched on Windows');
-  let st;
-  try {
-    st = statSync(app);
-  } catch {
-    throw new GuiError('file_not_found', app);
-  }
-  const launchable = platform === 'darwin' ? (st.isFile() || (st.isDirectory() && /\.app$/i.test(app))) : st.isFile();
-  if (!launchable) throw new GuiError('app_type_not_supported', `${app} is not a file this node can launch`);
-  const exe = realpath(app);
-  return { tier: 'unsafe', reason: 'app_not_allowlisted', appId: null, exe, argv: [...args], match: [exe], files: resolvedFiles };
+  throw new GuiError('app_not_allowlisted', 'only an app listed under gui.apps in node.yaml can be launched; call ListApps for the ids');
 }
 
 // `*` and `?` only; everything else literal. Anchored.

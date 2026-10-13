@@ -59,12 +59,12 @@ class FakeRelay extends EventEmitter {
 
 const nodeConfig = (gui = {}, profile = 'agent') => ({
   name: 'gpu-box', profile, capabilities: [], policy: { allowed_roots: [], remote_sessions: { always_confirm: [], deny: [] }, max_concurrent_jobs: 2 },
-  gui: parseGuiConfig({ apps: { calculator: { path: POSIX ? '/usr/bin/gnome-calculator' : 'C:\\Windows\\System32\\calc.exe' } }, ...gui }, { profile })
+  gui: parseGuiConfig({ enabled: true, apps: { calculator: { path: POSIX ? '/usr/bin/gnome-calculator' : 'C:\\Windows\\System32\\calc.exe' } }, ...gui }, { profile })
 });
 
 function install(configDir, { nodeId = identity.nodeId } = {}) {
   const { secret, endpointId } = S.mintSessionSecret();
-  S.writeCanonical({ configDir, cipher, secret, endpointId, nodeId, sessionUser: 'alice' });
+  S.writeCanonical({ configDir, cipher, secret, endpointId, nodeId, sessionUser: 'alice', sessionSid: POSIX ? null : 'S-1-5-21-1-2-3-1001', sessionUid: POSIX ? UID : null });
   return secret;
 }
 
@@ -89,6 +89,47 @@ describe('createGuiSubsystem', () => {
     assert.equal(createGuiSubsystem({ ...common, nodeConfig: nodeConfig({}, 'runbook') }), null);
     assert.equal(createGuiSubsystem({ ...common, nodeConfig: nodeConfig() }), null, 'no helper-secret.json yet');
     assert.deepEqual(log.errors, []);
+  });
+
+  // R-F5-14 (owner ruling, 2026-10-13): installing the helper enables
+  // nothing. Only "gui: enabled: true" in node.yaml does.
+  it('R-F5-14: an installed helper with no "enabled: true" in node.yaml starts nothing; status and doctor say what to add', async () => {
+    const { configDir, dataDir } = dirs();
+    install(configDir);
+    const apps = { calculator: { path: POSIX ? '/usr/bin/gnome-calculator' : 'C:\\Windows\\System32\\calc.exe' } };
+    for (const raw of [undefined, {}, { apps }, { enabled: false, apps }]) {
+      const log = spyLog();
+      const a = approvals();
+      const config = { ...nodeConfig(), gui: parseGuiConfig(raw, { profile: 'agent' }) };
+      assert.equal(createGuiSubsystem({ nodeConfig: config, dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log }), null, JSON.stringify(raw));
+      assert.equal(a.relayClient.methods.size, 0);
+      assert.deepEqual(log.errors, []);
+      assert.match(log.all(), /enabled: true/);
+    }
+    const io = () => { const out = []; return { out, io: { stdout: { write: (t) => out.push(String(t)) }, stderr: { write: () => {} }, stdin: null } }; };
+    const status = async () => { const t = io(); assert.equal(await runSessionCommand({ sub: 'status', flags: {}, dataDir, io: t.io, deps: { configDir, platform: process.platform, adminUid: UID } }), 0); return t.out.join(''); };
+    const helperRows = async () => (await runDoctor({ dataDir, adminUid: UID, configDir })).filter((r) => /session helper/.test(r.check));
+
+    // No node.yaml, then one that lists apps but does not enable them.
+    for (const yaml of [null, 'name: gpu-box\n', `name: gpu-box\ngui:\n  apps:\n    calculator: '${apps.calculator.path}'\n`]) {
+      if (yaml !== null) fs.writeFileSync(path.join(configDir, 'node.yaml'), yaml, { mode: 0o644 });
+      const said = await status();
+      assert.match(said, /installed but not enabled in node\.yaml/);
+      assert.match(said, /gui:\n\s+enabled: true/);
+      const rows = await helperRows();
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].ok, true);
+      assert.equal(rows[0].warn, true);
+      assert.match(rows[0].detail, /installed but not enabled in node\.yaml/);
+      assert.match(rows[0].detail, /enabled: true/);
+    }
+    // Enabled: neither says it.
+    fs.writeFileSync(path.join(configDir, 'node.yaml'), 'name: gpu-box\ngui:\n  enabled: true\n', { mode: 0o644 });
+    assert.doesNotMatch(await status(), /not enabled/);
+    const rows = await helperRows();
+    assert.equal(rows.length, 1);
+    assert.ok(!rows[0].warn);
+    assert.doesNotMatch(rows[0].detail, /not enabled/);
   });
 
   // R-F5-11 (owner ruling, 2026-10-12): a helper file that is there but

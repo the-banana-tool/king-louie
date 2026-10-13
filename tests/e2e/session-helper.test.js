@@ -84,7 +84,7 @@ describe('session helper end to end', { skip: !RUN && 'set KL_E2E_GUI=1 on Windo
     phone = createFakePhone();
     const store = await approverStoreWith([phone.approverRecord()]);
     relay = new FakeRelay();
-    const nodeConfig = { name: 'gpu-box', profile: 'agent', capabilities: [], policy: { allowed_roots: [base], remote_sessions: { always_confirm: [], deny: [] } }, gui: parseGuiConfig({ apps: APPS }, { platform: process.platform }) };
+    const nodeConfig = { name: 'gpu-box', profile: 'agent', capabilities: [], policy: { allowed_roots: [base], remote_sessions: { always_confirm: [], deny: [] } }, gui: parseGuiConfig({ enabled: true, apps: APPS }, { platform: process.platform }) };
     gui = createGuiSubsystem({
       nodeConfig, dataDir, configDir, cipher, adminUid: UID, geteuid: () => UID,
       approvals: { identity, approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true }, auditLedger: { append: async () => {} } },

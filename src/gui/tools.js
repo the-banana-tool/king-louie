@@ -210,7 +210,7 @@ function buildGuiTools(gui) {
 
     tool({
       name: 'LaunchApp',
-      description: 'Launch a desktop app in the logged-in user\'s session: an allowlisted app id (routine), or an absolute path, which needs the owner\'s phone approval. Optional args and files.',
+      description: 'Launch a desktop app in the logged-in user\'s session by its allowlisted app id (see ListApps); anything else is refused. Optional args and files; an argument or file outside what the allowlist permits needs the owner\'s phone approval.',
       parameters: schema({
         app: { type: 'string', minLength: 1, maxLength: 1024 },
         args: { type: 'array', maxItems: 32, items: { type: 'string', maxLength: 4096 } },

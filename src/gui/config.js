@@ -62,14 +62,18 @@ function parseGuiConfig(raw, { profile = 'agent', platform = process.platform, f
 
   // Neither profile runs a session helper (§3.4, Deviation 9).
   if (profile !== 'agent') return disabled();
-  const out = { ...disabled(), enabled: true };
+  // Off until enabled (owner ruling R-F5-14, 2026-10-13): computer use
+  // starts only when node.yaml says "gui: enabled: true". No block, an empty
+  // block and a block that only lists apps all mean off; installing the
+  // session helper enables nothing.
+  const out = disabled();
   if (raw === undefined || raw === null) return out;
   if (!isPlainObject(raw)) throw invalid('gui must be a mapping');
   checkKeys(raw, GUI_KEYS.top, 'gui.');
 
   if (raw.enabled !== undefined) {
     if (typeof raw.enabled !== 'boolean') throw invalid('gui.enabled must be true or false');
-    out.enabled = raw.enabled;
+    out.enabled = raw.enabled === true;
   }
 
   for (const section of ['screenshot', 'live_view', 'lease']) {
@@ -140,4 +144,7 @@ function parseApp(id, value, { platform, invalid, checkKeys, warnings }) {
   return { id, name, path: appPath, processes, args };
 }
 
-module.exports = { parseGuiConfig, GUI_KEYS, GUI_DEFAULTS, APP_ID_RE };
+// What an administrator adds to node.yaml to turn desktop apps on.
+const GUI_ENABLE_LINES = 'gui:\n  enabled: true';
+
+module.exports = { parseGuiConfig, GUI_KEYS, GUI_DEFAULTS, APP_ID_RE, GUI_ENABLE_LINES };

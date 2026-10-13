@@ -108,7 +108,19 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
     } else if (serviceSays) {
       results.push({ check: 'desktop apps (running service)', ok: false, detail: `off, ${serviceSays.reason}${serviceSays.detail ? `: ${serviceSays.detail}` : ''}. To fix it, ${remedyFor(serviceSays.reason)}` });
     } else if (seen.state === 'installed') {
-      results.push({ check: 'session helper file', ok: true, detail: `installed for ${seen.user}; the service checks that it decrypts when it starts` });
+      // R-F5-14: installing the helper enables nothing; node.yaml does.
+      let enabled = null;
+      try {
+        const gui = require('./node-config').loadNodeConfig({ dataDir, adminConfigDir: dir, adminUid }).gui;
+        enabled = Boolean(gui && gui.enabled === true);
+      } catch {
+        enabled = null; // a node.yaml problem is the "node config" row above
+      }
+      if (enabled === false) {
+        results.push({ check: 'session helper file', ok: true, warn: true, detail: `installed but not enabled in node.yaml: desktop apps stay off until ${path.join(dir, 'node.yaml')} has "gui:" with "enabled: true" under it, and the service is restarted` });
+      } else {
+        results.push({ check: 'session helper file', ok: true, detail: `installed for ${seen.user}; the service checks that it decrypts when it starts` });
+      }
     }
   }
 

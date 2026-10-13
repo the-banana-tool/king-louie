@@ -15,6 +15,7 @@ const stores = [];
 after(() => { for (const s of stores) s.cleanup(); });
 
 const guiConfig = parseGuiConfig({
+  enabled: true,
   apps: {
     calculator: { name: 'Calculator', path: 'C:\\Windows\\System32\\calc.exe', processes: ['CalculatorApp.exe'] },
     notepad: { name: 'Notepad', path: 'C:\\Windows\\System32\\notepad.exe' }

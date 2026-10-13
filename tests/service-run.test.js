@@ -433,13 +433,41 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
       mine.push(made.dataDir);
       return made;
     }
-    function adminDir() {
+    function adminDir({ enabled = true } = {}) {
       // Native realpath: session-secret.js wants the config dir to be its own.
       const configDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-run-gui-cfg-')));
       mine.push(configDir);
       if (POSIX) fs.chmodSync(configDir, 0o755);
+      // R-F5-14: desktop apps are off until node.yaml enables them.
+      if (enabled) fs.writeFileSync(path.join(configDir, 'node.yaml'), 'name: unnamed-node\ngui:\n  enabled: true\n', { mode: 0o644 });
       return configDir;
     }
+    function installHelper(dir, configDir) {
+      const { buildServicePorts } = require('../src/service/ports');
+      const { CHAT_DATA_DEFAULTS } = require('../src/core/settings');
+      const { getOrGenerateNodeIdentity } = require('../src/mesh/node-identity');
+      const ports = buildServicePorts({ dataDir: dir, chatDataDefaults: CHAT_DATA_DEFAULTS });
+      const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, 'unnamed-node');
+      const { secret, endpointId } = S.mintSessionSecret();
+      S.writeCanonical({ configDir, cipher: ports.cipher, secret, endpointId, nodeId: identity.nodeId, sessionUser: 'alice' });
+      fs.writeFileSync(path.join(dir, 'service.pid'), String(process.pid));
+    }
+
+    it('(e) R-F5-14: a valid helper file with no "gui: enabled: true" in node.yaml starts no GUI; the service is up', async () => {
+      for (const yaml of [null, 'name: unnamed-node\n', 'name: unnamed-node\ngui:\n  enabled: false\n']) {
+        const { dataDir: dir, workspace } = liveDataDir();
+        const configDir = adminDir({ enabled: false });
+        if (yaml !== null) fs.writeFileSync(path.join(configDir, 'node.yaml'), yaml, { mode: 0o644 });
+        installHelper(dir, configDir);
+        const running = await start(dir, workspace, configDir);
+        try {
+          assert.strictEqual(running.gui, null, String(yaml));
+          assert.ok(running.fleet && running.fleet.jobManager);
+        } finally {
+          await running.stop();
+        }
+      }
+    });
     const endpoint = (configDir) => (POSIX ? path.join(configDir, 'h.sock') : `\\\\.\\pipe\\kl-run-gui-${crypto.randomBytes(6).toString('hex')}`);
     const start = (dir, workspace, configDir) => loadProfile('agent').start({
       dataDir: dir, features: allOff, ports: {}, workspace, configDir, adminUid: UID, deps: { gui: { endpoint: endpoint(configDir) } }

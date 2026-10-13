@@ -32,7 +32,7 @@ const calcPath = path.join(base, plat === 'win32' ? 'calc.exe' : 'calc');
 const otherPath = path.join(base, plat === 'win32' ? 'other.exe' : 'other');
 fs.writeFileSync(calcPath, '');
 fs.writeFileSync(otherPath, '');
-const guiConfig = parseGuiConfig({ apps: { calculator: { name: 'Calculator', path: calcPath, processes: ['calc-app*'] } }, lease: { max_inputs_per_minute: 10 } }, { platform: plat });
+const guiConfig = parseGuiConfig({ enabled: true, apps: { calculator: { name: 'Calculator', path: calcPath, processes: ['calc-app*'] } }, lease: { max_inputs_per_minute: 10 } }, { platform: plat });
 const CALC = { pid: 100, image: path.join(base, 'calc-app') };
 
 class FakeChannel extends EventEmitter {
@@ -144,7 +144,7 @@ describe('schemas', () => {
 
 describe('capability first', () => {
   it('capability_unavailable: gui before any approval or lease request', async () => {
-    const unsafe = await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: requester(true) }));
+    const unsafe = await tools.LaunchApp.execute({ app: 'calculator', args: ['--x'] }, opts({ approvalRequester: requester(true) }));
     assert.deepEqual(unsafe, { ok: false, error: 'capability_unavailable: gui' });
     assert.equal(requesterCalls.length, 0, 'the fake approver was never asked');
     assert.deepEqual(await tools.RequestLease.execute({ apps: ['calculator'], reason: 'x' }, opts()), { ok: false, error: 'capability_unavailable: gui' });
@@ -170,15 +170,32 @@ describe('LaunchApp', () => {
     assert.equal(requesterCalls.length, 0);
   });
 
-  it('an unsafe launch goes to the requester with the exact resolved path and argv; only true launches', async () => {
+  // R-F5-14 (owner ruling, 2026-10-13).
+  it('R-F5-14: an app outside the allowlist is refused outright; nobody is asked and nothing is launched', async () => {
+    for (const requesterOpt of [{}, { approvalRequester: requester(true) }, { approvalRequester: markLocalRequester(requester(true)) }]) {
+      requesterCalls.length = 0;
+      channel.requests.length = 0;
+      for (const params of [{ app: otherPath }, { app: otherPath, args: ['--x'] }, { app: calcPath }]) {
+        const out = await tools.LaunchApp.execute(params, opts(requesterOpt));
+        assert.equal(out.ok, false);
+        assert.match(out.error, /^app_not_allowlisted/);
+      }
+      assert.equal(requesterCalls.length, 0, 'no phone and no desktop was asked');
+      assert.ok(!channel.requests.some((r) => r.op === 'launch'));
+    }
+    assert.equal(relay.sent.length, 0);
+  });
+
+  it('R-F5-14: an allowlisted app with an argument outside its globs is still an unsafe launch for the phone, with the exact resolved path and argv; only true launches', async () => {
     const cases = [[true, null], [false, 'denied: phone approval denied'], ['timeout', 'denied: phone approval timed out'],
       ['unavailable', 'signed approval unavailable'], ['yes', 'denied: phone approval denied'], ['approved', 'denied: phone approval denied']];
     for (const [answer, error] of cases) {
       requesterCalls.length = 0;
       channel.requests.length = 0;
-      const out = await tools.LaunchApp.execute({ app: otherPath, args: ['--x'] }, opts({ approvalRequester: requester(answer) }));
+      const out = await tools.LaunchApp.execute({ app: 'calculator', args: ['--x'] }, opts({ approvalRequester: requester(answer) }));
       assert.equal(requesterCalls.length, 1);
-      assert.deepEqual(requesterCalls[0].slice(0, 2), ['LaunchApp', { app: otherPath, args: ['--x'], files: [] }]);
+      assert.deepEqual(requesterCalls[0].slice(0, 2), ['LaunchApp', { app: calcPath, args: ['--x'], files: [] }]);
+      assert.equal(requesterCalls[0][2].reason, 'args_not_allowlisted');
       assert.equal(requesterCalls[0][2].tier, 'unsafe');
       if (error) {
         assert.deepEqual(out, { ok: false, error }, String(answer));
@@ -191,14 +208,14 @@ describe('LaunchApp', () => {
   });
 
   it('no requester at all is denied', async () => {
-    assert.deepEqual(await tools.LaunchApp.execute({ app: otherPath }, opts()), { ok: false, error: 'denied: phone approval required (no approval channel)' });
+    assert.deepEqual(await tools.LaunchApp.execute({ app: 'calculator', args: ['--x'] }, opts()), { ok: false, error: 'denied: phone approval required (no approval channel)' });
   });
 
   it('a paired desktop\'s turn is answered on its screen, and the result says so', async () => {
     const atDesktop = (answer) => markLocalRequester(requester(answer));
-    assert.deepEqual(await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: atDesktop(false) })), { ok: false, error: 'denied: approval denied at the desktop' });
-    assert.deepEqual(await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: atDesktop('timeout') })), { ok: false, error: 'denied: approval timed out at the desktop' });
-    const ok = await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: atDesktop(true) }));
+    assert.deepEqual(await tools.LaunchApp.execute({ app: 'calculator', args: ['--x'] }, opts({ approvalRequester: atDesktop(false) })), { ok: false, error: 'denied: approval denied at the desktop' });
+    assert.deepEqual(await tools.LaunchApp.execute({ app: 'calculator', args: ['--x'] }, opts({ approvalRequester: atDesktop('timeout') })), { ok: false, error: 'denied: approval timed out at the desktop' });
+    const ok = await tools.LaunchApp.execute({ app: 'calculator', args: ['--x'] }, opts({ approvalRequester: atDesktop(true) }));
     assert.equal(ok.ok, true);
     assert.ok(audits.some((a) => a.kind === 'gui.launch' && a.data.approved_by === 'desktop'));
   });
@@ -300,7 +317,7 @@ describe('R-F5-3: a front-door client needs fleet:unsafe', () => {
     assert.equal(requests.length, 1);
     leases.onGrant(phone.leaseGrant(requests[0].envelope, { minutes: 10 }));
     assert.equal((await leasing).ok, true);
-    const launched = await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: requester(true) }));
+    const launched = await tools.LaunchApp.execute({ app: 'calculator', args: ['--x'] }, opts({ approvalRequester: requester(true) }));
     assert.equal(launched.ok, true);
     assert.equal(requesterCalls.length, 1);
   });

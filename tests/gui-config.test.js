@@ -49,9 +49,27 @@ describe('GuiError', () => {
 });
 
 describe('parseGuiConfig', () => {
+  // R-F5-14 (owner ruling, 2026-10-13): computer use is off until node.yaml
+  // says "gui: enabled: true". Nothing else turns it on.
+  it('R-F5-14: off unless enabled is written as true', () => {
+    const on = (raw, profile = 'agent') => parseGuiConfig(raw, { profile, platform: 'linux' }).enabled;
+    assert.equal(on(undefined), false, 'no gui block');
+    assert.equal(on(null), false);
+    assert.equal(on({}), false, 'an empty block');
+    assert.equal(on({ apps: { calc: '/usr/bin/gnome-calculator' } }), false, 'an allowlist alone enables nothing');
+    assert.equal(on({ lease: { max_minutes: 30 } }), false);
+    assert.equal(on({ enabled: false, apps: { calc: '/usr/bin/gnome-calculator' } }), false);
+    assert.equal(on({ enabled: true }), true);
+    assert.equal(on({ enabled: true, apps: { calc: '/usr/bin/gnome-calculator' } }), true);
+    for (const profile of ['runbook', 'frontdoor']) assert.equal(on({ enabled: true }, profile), false, profile);
+    // A block that is off is still read strictly and keeps what it lists.
+    assert.deepEqual(Object.keys(parseGuiConfig({ apps: { calc: '/usr/bin/gnome-calculator' } }, { platform: 'linux' }).apps), ['calc']);
+    assert.throws(() => parseGuiConfig({ bogus: 1 }, { platform: 'linux' }), /unknown key "gui\.bogus"/);
+  });
+
   it('fills every default on an agent node', () => {
     const g = parseGuiConfig(undefined, { profile: 'agent', platform: 'linux' });
-    assert.equal(g.enabled, true);
+    assert.equal(g.enabled, false);
     assert.deepEqual(g.apps, {});
     assert.deepEqual(g.screenshot, { maxWidth: 1280, quality: 70 });
     assert.deepEqual(g.liveView, { intervalS: 3, maxWidth: 960, quality: 60, maxFrameBytes: 184320 });
@@ -119,7 +137,7 @@ describe('node.yaml gui:', () => {
     assert.ok(NODE_YAML_KEYS.top.includes('gui'));
     assert.deepEqual(NODE_YAML_KEYS.gui, GUI_KEYS.top);
     const appPath = process.platform === 'win32' ? 'C:\\Windows\\System32\\notepad.exe' : '/usr/bin/gedit';
-    const config = configDirWith(`name: mac\nprofile: agent\ngui:\n  apps:\n    notes: '${appPath}'\n`);
+    const config = configDirWith(`name: mac\nprofile: agent\ngui:\n  enabled: true\n  apps:\n    notes: '${appPath}'\n`);
     const node = loadNodeConfig({ adminConfigDir: config, adminUid: UID, geteuid: () => -1 });
     assert.equal(node.gui.enabled, true);
     assert.equal(node.gui.apps.notes.path, appPath);
@@ -136,11 +154,21 @@ describe('node.yaml gui:', () => {
     assert.throws(() => loadNodeConfig({ adminConfigDir: config, adminUid: UID, geteuid: () => -1 }), /unknown key "gui\.bogus"/);
   });
 
+  it('R-F5-14: a node.yaml gui block without "enabled: true" loads with gui off', () => {
+    const appPath = process.platform === 'win32' ? 'C:\\Windows\\System32\\notepad.exe' : '/usr/bin/gedit';
+    const config = configDirWith(`name: mac\nprofile: agent\ngui:\n  apps:\n    notes: '${appPath}'\n`);
+    const node = loadNodeConfig({ adminConfigDir: config, adminUid: UID, geteuid: () => -1 });
+    assert.equal(node.gui.enabled, false);
+    assert.equal(node.gui.apps.notes.path, appPath);
+    const bare = configDirWith('name: mac\nprofile: agent\n');
+    assert.equal(loadNodeConfig({ adminConfigDir: bare, adminUid: UID, geteuid: () => -1 }).gui.enabled, false);
+  });
+
   it('no node.yaml at all still gives the gui defaults', () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-none-'));
     cleanups.push(() => fs.rmSync(base, { recursive: true, force: true }));
     const node = loadNodeConfig({ adminConfigDir: base, adminUid: UID, geteuid: () => -1 });
-    assert.equal(node.gui.enabled, true);
+    assert.equal(node.gui.enabled, false, 'and with them, gui off (R-F5-14)');
     assert.deepEqual(node.gui.apps, {});
   });
 });

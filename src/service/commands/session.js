@@ -85,6 +85,19 @@ function common(dataDir, deps, io) {
   return {
     platform,
     configDir,
+    // R-F5-14: whether node.yaml enables desktop apps (null when it cannot be read).
+    guiEnabled: deps.guiEnabled || (() => {
+      try {
+        const gui = require('../node-config').loadNodeConfig({
+          dataDir, adminConfigDir: configDir,
+          ...(deps.adminUid === undefined ? {} : { adminUid: deps.adminUid }),
+          ...(deps.geteuid ? { geteuid: deps.geteuid } : {})
+        }).gui;
+        return Boolean(gui && gui.enabled === true);
+      } catch {
+        return null;
+      }
+    }),
     isTTY: deps.isTTY || (() => Boolean(io && io.stdin && io.stdin.isTTY)),
     confirm: deps.confirm || ((question) => require('./desktop').defaultConfirm(io, question)),
     // node.yaml is the admin's; a file that fails its owner check throws.
@@ -100,6 +113,9 @@ function common(dataDir, deps, io) {
     resolveUser: deps.resolveSessionUser || ((name) => require('../../gui/session-secret').resolveSessionUser(name, { platform }))
   };
 }
+
+// R-F5-14: installing the helper enables nothing; node.yaml does.
+const NOT_ENABLED = (configDir) => `installed but not enabled in node.yaml: desktop apps stay off until ${path.join(configDir, 'node.yaml')} has\n  ${require('../../gui/config').GUI_ENABLE_LINES.replace(/\n/g, '\n  ')}\nand the service is restarted`;
 
 // The installers' check of the Windows config dir (WINDOWS_CONFIG_DIRS_SCRIPT:
 // framework types only, the path in an environment variable). Throws with
@@ -260,6 +276,7 @@ async function install({ flags, dataDir, io, deps }) {
   io.stdout.write(rotates
     ? 'The secret was rotated and the endpoint kept. A running service drops the helper\'s connection at its next check (about 10 seconds) and takes only the new secret; the helper reads its new file when it reconnects (its retries are 1 to 30 seconds apart). no restart is needed. A service that was not running, or that started with desktop apps off, needs a start as usual.\n'
     : 'Restart the King Louie service so it starts waiting for the helper.\n');
+  if (c.guiEnabled() !== true) io.stdout.write(`${NOT_ENABLED(c.configDir)}\n`);
   if (c.platform === 'darwin') {
     io.stdout.write(`At the next login macOS asks for Screen Recording and Accessibility for ${c.nodePath}. Those permissions cover every script ${sessionUser} runs with that node binary.\n`);
   }
@@ -342,7 +359,10 @@ async function status({ dataDir, io, deps }) {
   const c = common(dataDir, deps, io);
   const record = (deps.readStatus || ((d) => require('../../gui/status').readGuiStatusRecord({ dataDir: d })))(dataDir);
   const installed = require('../../gui/session-secret').inspectCanonical({ configDir: c.configDir, platform: c.platform });
-  if (installed.state === 'installed') io.stdout.write(`installed for: ${installed.user} (${identityText(installed, c.platform)})\n`);
+  if (installed.state === 'installed') {
+    io.stdout.write(`installed for: ${installed.user} (${identityText(installed, c.platform)})\n`);
+    if (c.guiEnabled() === false) io.stdout.write(`${NOT_ENABLED(c.configDir)}\n`);
+  }
   else if (installed.state === 'invalid') io.stdout.write(`installed, but ${installed.file} ${installed.reason}: run "session uninstall --user NAME", then "session install --user NAME"\n`);
   else io.stdout.write('not installed (session install --user NAME)\n');
   if (!record) {

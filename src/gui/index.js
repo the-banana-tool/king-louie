@@ -99,7 +99,8 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
   adminUid = 0, geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1), log = createLogger('gui'), deps = {} } = {}) {
   const gui = nodeConfig.gui;
   if (nodeConfig.profile !== 'agent' || !gui || !gui.enabled) {
-    log.info('desktop apps are off on this node (gui.enabled is false or the profile is not agent)');
+    // R-F5-14: off until node.yaml enables it; an installed helper changes nothing.
+    log.info('desktop apps are off on this node: node.yaml does not say "gui: enabled: true" (or the profile is not agent)');
     return null;
   }
   const read = () => readCanonical({ configDir, cipher, adminUid, geteuid });

@@ -16,7 +16,7 @@ setLogLevel('fatal');
 const stores = [];
 after(() => { for (const s of stores) s.cleanup(); });
 
-const guiConfig = parseGuiConfig({ apps: { calculator: { path: 'C:\\Windows\\System32\\calc.exe', processes: ['CalculatorApp.exe'] } } }, { platform: 'win32' });
+const guiConfig = parseGuiConfig({ enabled: true, apps: { calculator: { path: 'C:\\Windows\\System32\\calc.exe', processes: ['CalculatorApp.exe'] } } }, { platform: 'win32' });
 
 class FakeRelay extends EventEmitter {
   constructor() { super(); this.sent = []; }

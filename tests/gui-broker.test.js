@@ -27,7 +27,7 @@ const APPS = {
   calculator: { name: 'Calculator', path: 'C:\\Windows\\System32\\calc.exe', processes: ['CalculatorApp.exe'] },
   notepad: { name: 'Notepad', path: 'C:\\Windows\\System32\\notepad.exe' }
 };
-const guiConfig = parseGuiConfig({ apps: APPS }, { platform: 'win32' });
+const guiConfig = parseGuiConfig({ enabled: true, apps: APPS }, { platform: 'win32' });
 const INFO = { user: 'alice', platform: 'win32', pid: 7, capabilities: ['gui.launch', 'gui.screenshot', 'gui.input'], probes: [], displays: [], limits: [], locked: false, since: '2026-09-23T18:00:00.000Z' };
 
 class FakeChannel extends EventEmitter {

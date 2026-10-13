@@ -22,7 +22,7 @@ fs.mkdirSync(outside);
 fs.writeFileSync(path.join(work, 'in.txt'), 'x');
 fs.writeFileSync(path.join(outside, 'out.txt'), 'x');
 
-const gui = parseGuiConfig({ apps: { tool: { path: exe, processes: ['helper-*.bin'], args: ['--open=*', '--quiet'] } } }, { platform: plat });
+const gui = parseGuiConfig({ enabled: true, apps: { tool: { path: exe, processes: ['helper-*.bin'], args: ['--open=*', '--quiet'] } } }, { platform: plat });
 const policy = { allowed_roots: [work] };
 const opts = { platform: plat };
 
@@ -42,9 +42,16 @@ describe('resolveLaunch', () => {
     assert.deepEqual([f.tier, f.reason], ['unsafe', 'file_outside_allowed_roots']);
   });
 
-  it('an absolute path that is not allowlisted is unsafe with no app id', () => {
-    const r = resolveLaunch(gui, policy, { app: other }, opts);
-    assert.deepEqual([r.tier, r.reason, r.appId, r.exe], ['unsafe', 'app_not_allowlisted', null, other]);
+  // R-F5-14 (owner ruling, 2026-10-13): only an app in gui.apps can be
+  // launched. A path outside it is refused outright; it is not an unsafe
+  // launch for the phone to approve.
+  it('R-F5-14: a path that is not in the allowlist is refused as app_not_allowlisted, whatever it is', () => {
+    assert.throws(() => resolveLaunch(gui, policy, { app: other }, opts), (e) => e.code === 'app_not_allowlisted');
+    assert.throws(() => resolveLaunch(gui, policy, { app: other, args: ['--quiet'] }, opts), (e) => e.code === 'app_not_allowlisted');
+    // Also one that does not exist, and the allowlisted app's own path given as a path.
+    assert.throws(() => resolveLaunch(gui, policy, { app: path.join(base, plat === 'win32' ? 'missing.exe' : 'missing') }, opts), (e) => e.code === 'app_not_allowlisted');
+    assert.throws(() => resolveLaunch(gui, policy, { app: exe }, opts), (e) => e.code === 'app_not_allowlisted');
+    assert.throws(() => resolveLaunch(parseGuiConfig({ enabled: true }, { platform: plat }), policy, { app: exe }, opts), (e) => e.code === 'app_not_allowlisted');
   });
 
   it('refuses relative paths, "..", null bytes and slash lookalikes as invalid_params', () => {
@@ -56,21 +63,23 @@ describe('resolveLaunch', () => {
   });
 
   it('a missing file is file_not_found', () => {
-    assert.throws(() => resolveLaunch(gui, policy, { app: path.join(base, plat === 'win32' ? 'missing.exe' : 'missing') }, opts), (e) => e.code === 'file_not_found');
     assert.throws(() => resolveLaunch(gui, policy, { app: 'tool', files: [path.join(work, 'nope.txt')] }, opts), (e) => e.code === 'file_not_found');
   });
 
-  it('only .exe on Windows', () => {
+  it('only .exe on Windows: the allowlist itself refuses anything else', () => {
+    assert.throws(() => parseGuiConfig({ enabled: true, apps: { run: 'C:\\Tools\\run.bat' } }, { platform: 'win32' }), /\.exe/);
     const fake = { statSync: () => ({ isFile: () => true, isDirectory: () => false }), realpath: (p) => p };
-    const winGui = parseGuiConfig({}, { platform: 'win32' });
-    assert.throws(() => resolveLaunch(winGui, policy, { app: 'C:\\Tools\\run.bat' }, { platform: 'win32', ...fake }), (e) => e.code === 'app_type_not_supported');
-    assert.equal(resolveLaunch(winGui, policy, { app: 'C:\\Tools\\run.exe' }, { platform: 'win32', ...fake }).tier, 'unsafe');
+    const winGui = parseGuiConfig({ enabled: true, apps: { run: 'C:\\Tools\\run.exe' } }, { platform: 'win32' });
+    assert.equal(resolveLaunch(winGui, policy, { app: 'run' }, { platform: 'win32', ...fake }).tier, 'routine');
+    assert.throws(() => resolveLaunch(winGui, policy, { app: 'C:\\Tools\\other.exe' }, { platform: 'win32', ...fake }), (e) => e.code === 'app_not_allowlisted');
   });
 
-  it('a .app bundle directory is launchable on macOS', () => {
+  it('an allowlisted .app bundle directory is launchable on macOS', () => {
     const fake = { statSync: () => ({ isFile: () => false, isDirectory: () => true }), realpath: (p) => p };
-    const r = resolveLaunch(parseGuiConfig({}, { platform: 'darwin' }), policy, { app: '/Applications/Notes.app' }, { platform: 'darwin', ...fake });
+    const macGui = parseGuiConfig({ enabled: true, apps: { notes: '/Applications/Notes.app' } }, { platform: 'darwin' });
+    const r = resolveLaunch(macGui, policy, { app: 'notes' }, { platform: 'darwin', ...fake });
     assert.equal(r.exe, '/Applications/Notes.app');
+    assert.throws(() => resolveLaunch(macGui, policy, { app: '/Applications/Other.app' }, { platform: 'darwin', ...fake }), (e) => e.code === 'app_not_allowlisted');
   });
 });
 
