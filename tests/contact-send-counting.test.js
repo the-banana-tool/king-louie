@@ -289,7 +289,8 @@ describe('sendExternal: settling a counted send', () => {
   it('a reservation that is never settled (a crash mid-send) stays counted', async () => {
     const s = await setup({ caps: { usd: 10, contacts: 2, attemptsPerContact: 1 } });
     const held = await s.reg.reserveChannelSend({
-      caseId: s.meta.id, envelopeId: s.envelopeId, executorId: 'fake-agent', channelId: 'sms', recipients: [BROKER], sendId: 'd-crash', rendered: TEXT
+      caseId: s.meta.id, envelopeId: s.envelopeId, executorId: 'fake-agent', channelId: 'sms', recipients: [BROKER], sendId: 'd-crash', rendered: TEXT,
+      expectedHash: s.store.get(s.envelopeId).hash
     });
     assert.strictEqual(held.ok, true, held.error);
     assert.deepStrictEqual(s.counts(), { contacts: [BROKER], attempts: { [BROKER]: 1 }, states: ['reserved'], caseToday: 1, globalLeft: 4 });
@@ -325,10 +326,19 @@ describe('sendExternal: counting fails closed', () => {
 
   it('the reservation checks the envelope again: revoked, changed or another version since the gate ran', async () => {
     const s = await setup();
-    const args = { caseId: s.meta.id, envelopeId: s.envelopeId, executorId: 'fake-agent', channelId: 'sms', recipients: [BROKER], sendId: 'd-1', rendered: TEXT };
+    const args = {
+      caseId: s.meta.id, envelopeId: s.envelopeId, executorId: 'fake-agent', channelId: 'sms', recipients: [BROKER], sendId: 'd-1', rendered: TEXT,
+      expectedHash: s.store.get(s.envelopeId).hash
+    };
     const stale = await s.reg.reserveChannelSend({ ...args, expectedHash: 'sha256:another-version' });
     assert.strictEqual(stale.ok, false);
     assert.match(stale.error, /changed while the send was being checked/);
+    for (const expectedHash of [undefined, null, '', 42]) {
+      const none = await s.reg.reserveChannelSend({ ...args, expectedHash });
+      assert.strictEqual(none.ok, false, String(expectedHash));
+      assert.match(none.error, /does not say which version of the envelope/);
+    }
+    assert.deepStrictEqual(s.counts(), NOTHING());
     for (const bad of [{ sendId: '' }, { recipients: [] }, { rendered: undefined }, { channelId: undefined }, { channelId: 'email' }, { executorId: 'no-such-agent' }]) {
       const r = await s.reg.reserveChannelSend({ ...args, ...bad });
       assert.strictEqual(r.ok, false, JSON.stringify(bad));
@@ -338,6 +348,51 @@ describe('sendExternal: counting fails closed', () => {
     assert.strictEqual(revoked.ok, false);
     assert.match(revoked.error, /envelope env-01 is revoked/);
     assert.deepStrictEqual(s.counts(), NOTHING());
+  });
+
+  it('through the router: an envelope that changes between the gate and the count sends nothing', async () => {
+    // The owner approves a wider version while the gate is running: the send
+    // was checked against the old one, so it is not counted or sent.
+    let widen = null;
+    const s = await setup({
+      wire: {
+        getGate: () => ({
+          gateLeaves: async (payload, opts) => {
+            await widen();
+            return gates.gateLeaves(payload, opts);
+          }
+        })
+      }
+    });
+    widen = async () => {
+      const questionId = await s.rt.systemAction(s.meta.id, 'ask for a channel', () => (
+        envelopeOps.requestDelta(s.reg, s.meta.id, s.store.get(s.envelopeId), [{ kind: 'channel', value: 'voice' }])
+      ));
+      await s.rt.answerQuestion(s.meta.id, questionId, { channel: 'in-app', optionId: 'approve' });
+      envelopeOps.syncEnvelopes(s.reg, s.meta.id);
+    };
+    const before = s.store.get(s.envelopeId).hash;
+    const r = await s.send();
+    assert.notStrictEqual(s.store.get(s.envelopeId).hash, before, 'the envelope did change');
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, /envelope env-01 changed while the send was being checked; nothing was sent/);
+    assert.deepStrictEqual(s.sms.plain, []);
+    assert.deepStrictEqual(s.counts(), NOTHING());
+    widen = async () => {};
+    assert.strictEqual((await s.send()).ok, true, 'checked again against the new version, it goes out');
+  });
+
+  it('through the router: an envelope check that returns no hash sends nothing', async () => {
+    const s = await setup();
+    s.router.checkEnvelope = (args) => {
+      const checked = s.reg.sendEnvelope(args);
+      const { hash, ...rest } = checked.envelope;
+      return { ok: true, envelope: rest };
+    };
+    const r = await s.send();
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /does not say which version of the envelope/);
+    assert.deepStrictEqual(s.sms.plain, []);
   });
 
   it('a paused case sends nothing', async () => {

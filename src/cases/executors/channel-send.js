@@ -119,7 +119,12 @@ function reserveInCase(reg, { caseId, envelopeId, executorId, channelId, recipie
   const checked = envelopeOps.sendEnvelope(reg, { caseId, envelopeId, executorId, recipients, channelId });
   if (!checked || checked.ok !== true || !checked.envelope) return refuse(checked?.error || 'the envelope check refused the send');
   const env = checked.envelope;
-  if (expectedHash !== null && env.hash !== expectedHash) {
+  // The gate ran against one version of the envelope; only that version is
+  // counted and sent under. No hash to compare is a refusal, not a pass.
+  if (typeof expectedHash !== 'string' || !expectedHash) {
+    return refuse('the send does not say which version of the envelope it was checked against; nothing was sent');
+  }
+  if (env.hash !== expectedHash) {
     return refuse(`envelope ${env.id} changed while the send was being checked; nothing was sent`);
   }
   const payloads = Array.isArray(env.payloads) ? env.payloads : [];
@@ -172,7 +177,7 @@ function reserveInCase(reg, { caseId, envelopeId, executorId, channelId, recipie
 // → { ok: true, envelope, reservation } | { ok: false, error }. Never throws.
 // `rendered` is the text the outbound gate rendered (what is sent), `text`
 // the text before it; `expectedHash` the hash of the envelope the gate ran
-// against. `sendId` names the send in the envelope's payloads.
+// against (required). `sendId` names the send in the envelope's payloads.
 async function reserveChannelSend(reg, args = {}) {
   const a = isObject(args) ? args : {};
   const { caseId, envelopeId, executorId, sendId, rendered } = a;
