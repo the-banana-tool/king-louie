@@ -417,6 +417,9 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
     const { readGuiStatusRecord } = require('../src/gui/status');
     const POSIX = process.platform !== 'win32';
     const UID = POSIX ? process.getuid() : 0;
+    // R-F5-17: the administrator's record of the node identity, which a
+    // helper install needs, written and read the way a temp dir allows.
+    const { recordIdentity, IDENTITY_RECORD_TEST_OPTIONS } = require('./helpers/identity-record');
 
     // These tests' own dirs, removed here and with retries: a live core
     // probes its workspace with a git child (system-sections.js) that can
@@ -442,15 +445,17 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
       if (enabled) fs.writeFileSync(path.join(configDir, 'node.yaml'), 'name: unnamed-node\ngui:\n  enabled: true\n', { mode: 0o644 });
       return configDir;
     }
-    function installHelper(dir, configDir) {
+    function installHelper(dir, configDir, { record = true } = {}) {
       const { buildServicePorts } = require('../src/service/ports');
       const { CHAT_DATA_DEFAULTS } = require('../src/core/settings');
       const { getOrGenerateNodeIdentity } = require('../src/mesh/node-identity');
       const ports = buildServicePorts({ dataDir: dir, chatDataDefaults: CHAT_DATA_DEFAULTS });
       const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, 'unnamed-node');
+      if (record) recordIdentity(configDir, identity);
       const { secret, endpointId } = S.mintSessionSecret();
       S.writeCanonical({ configDir, cipher: ports.cipher, secret, endpointId, nodeId: identity.nodeId, sessionUser: 'alice' });
       fs.writeFileSync(path.join(dir, 'service.pid'), String(process.pid));
+      return identity;
     }
 
     it('(e) R-F5-14: a valid helper file with no "gui: enabled: true" in node.yaml starts no GUI; the service is up', async () => {
@@ -470,7 +475,7 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
     });
     const endpoint = (configDir) => (POSIX ? path.join(configDir, 'h.sock') : `\\\\.\\pipe\\kl-run-gui-${crypto.randomBytes(6).toString('hex')}`);
     const start = (dir, workspace, configDir) => loadProfile('agent').start({
-      dataDir: dir, features: allOff, ports: {}, workspace, configDir, adminUid: UID, deps: { gui: { endpoint: endpoint(configDir) } }
+      dataDir: dir, features: allOff, ports: {}, workspace, configDir, adminUid: UID, deps: { gui: { endpoint: endpoint(configDir) }, identityRecord: IDENTITY_RECORD_TEST_OPTIONS }
     });
 
     it('(a) no helper installed: the GUI is off and the service is up', async () => {
@@ -512,6 +517,8 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
       const { getOrGenerateNodeIdentity } = require('../src/mesh/node-identity');
       const ports = buildServicePorts({ dataDir: dir, chatDataDefaults: CHAT_DATA_DEFAULTS });
       const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, 'unnamed-node');
+      // R-F5-17: an administrator recorded that identity.
+      recordIdentity(configDir, identity);
       const { secret, endpointId } = S.mintSessionSecret();
       S.writeCanonical({ configDir, cipher: ports.cipher, secret, endpointId, nodeId: identity.nodeId, sessionUser: 'alice' });
       fs.writeFileSync(path.join(dir, 'service.pid'), String(process.pid));
@@ -528,7 +535,7 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
       }
       let running;
       try {
-        running = await loadProfile('agent').start({ dataDir: dir, features: allOff, ports: {}, workspace, configDir, adminUid: UID, deps: { gui: { endpoint: ep } } });
+        running = await loadProfile('agent').start({ dataDir: dir, features: allOff, ports: {}, workspace, configDir, adminUid: UID, deps: { gui: { endpoint: ep }, identityRecord: IDENTITY_RECORD_TEST_OPTIONS } });
         assert.ok(running.gui);
         assert.strictEqual(running.gui.unavailable.reason, 'gui_start_failed');
         assert.strictEqual(running.gui.capability().available, false);
@@ -549,6 +556,8 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
       const { getOrGenerateNodeIdentity } = require('../src/mesh/node-identity');
       const ports = buildServicePorts({ dataDir: dir, chatDataDefaults: CHAT_DATA_DEFAULTS });
       const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, 'unnamed-node');
+      // R-F5-17: an administrator recorded that identity.
+      recordIdentity(configDir, identity);
       const { secret, endpointId } = S.mintSessionSecret();
       S.writeCanonical({ configDir, cipher: ports.cipher, secret, endpointId, nodeId: identity.nodeId, sessionUser: 'alice' });
       fs.writeFileSync(path.join(dir, 'service.pid'), String(process.pid));
@@ -579,6 +588,78 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
       }
       assert.deepStrictEqual(order, ['gui', 'fleet', 'approvals'], 'the GUI stops first, approvals last');
       assert.strictEqual(running.gui.channel.server, null, 'the helper channel is closed');
+    });
+
+    // R-F5-17 (owner ruling, built 2026-10-13): the service holds the
+    // identity in its data dir against the administrator's record of it.
+    describe('R-F5-17: the administrator\'s record of the node identity', () => {
+      const R = require('../src/service/identity-record');
+      const { NodeIdentity } = require('../src/mesh/node-identity');
+
+      it('(f) no record (an install from before the ruling): the service is up and signs as before; computer use is off and says what to run', async () => {
+        const { dataDir: dir, workspace } = liveDataDir();
+        const configDir = adminDir();
+        const identity = installHelper(dir, configDir, { record: false });
+        const running = await start(dir, workspace, configDir);
+        try {
+          assert.ok(running.fleet && running.fleet.jobManager, 'the service is up');
+          assert.strictEqual(running.approvals.identity.nodeId, identity.nodeId);
+          assert.ok(running.gui && running.gui.unavailable, 'a subsystem that is off');
+          assert.strictEqual(running.gui.unavailable.reason, 'node_identity_unrecorded');
+          assert.strictEqual(running.gui.channel, null);
+          const record = readGuiStatusRecord({ dataDir: dir });
+          assert.strictEqual(record.reason, 'node_identity_unrecorded');
+        } finally {
+          await running.stop();
+        }
+        assert.strictEqual(R.readIdentityRecord({ configDir, adminUid: UID, ...IDENTITY_RECORD_TEST_OPTIONS }).state, 'none', 'the service never writes the record itself');
+      });
+
+      it('(g) the data dir holds another identity than the one recorded: the service refuses to start, with the remedy, on both node profiles', async () => {
+        for (const profile of ['agent', 'runbook']) {
+          const { dataDir: dir, workspace } = liveDataDir();
+          const configDir = adminDir();
+          const identity = installHelper(dir, configDir, { record: false });
+          const vouched = new NodeIdentity({ nodeName: 'unnamed-node' });
+          recordIdentity(configDir, vouched);
+          await assert.rejects(
+            loadProfile(profile).start({ dataDir: dir, features: allOff, ports: {}, workspace, configDir, adminUid: UID, deps: { gui: { endpoint: endpoint(configDir) }, identityRecord: IDENTITY_RECORD_TEST_OPTIONS } }),
+            (err) => {
+              assert.strictEqual(err.code, 'NODE_IDENTITY_MISMATCH', profile);
+              assert.match(err.message, /^Refusing to start: /);
+              assert.ok(err.message.includes(identity.nodeId) && err.message.includes(vouched.nodeId), 'names both identities');
+              assert.ok(err.message.includes(`king-louie-service identity record --replace --data-dir ${dir}`), 'the administrator\'s remedy');
+              return true;
+            }
+          );
+          assert.strictEqual(fs.existsSync(path.join(dir, 'audit')), false, `${profile}: nothing was signed or opened with that identity`);
+        }
+      });
+
+      it('(h) a record that cannot be trusted or read: the service refuses to start (fail closed), never as if there were none', async () => {
+        const cases = [
+          ['is not valid JSON', (configDir) => fs.writeFileSync(R.recordPath(configDir), '{ broken'), IDENTITY_RECORD_TEST_OPTIONS],
+          // Windows: a directory this process can write (the real probe), and owners nobody could read.
+          ['is writable by the account running the service', () => {}, { ...IDENTITY_RECORD_TEST_OPTIONS, platform: 'win32', serviceProbe: true }],
+          ['could not be read', () => {}, { platform: 'win32', serviceProbe: false, inspectOwners: () => { throw new Error('powershell failed'); } }]
+        ];
+        if (POSIX) cases.push(['is not owned by the administrator', () => {}, { adminUid: UID + 1 }]);
+        for (const [why, damage, identityRecord] of cases) {
+          const { dataDir: dir, workspace } = liveDataDir();
+          const configDir = adminDir();
+          installHelper(dir, configDir);
+          damage(configDir);
+          await assert.rejects(
+            loadProfile('agent').start({ dataDir: dir, features: allOff, ports: {}, workspace, configDir, adminUid: UID, deps: { gui: { endpoint: endpoint(configDir) }, identityRecord } }),
+            (err) => {
+              assert.strictEqual(err.code, 'NODE_IDENTITY_RECORD_INVALID', why);
+              assert.ok(err.message.includes(why), err.message);
+              assert.ok(!err.message.includes('broken'), 'the file is never quoted');
+              return true;
+            }
+          );
+        }
+      });
     });
   });
 

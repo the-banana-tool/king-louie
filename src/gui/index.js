@@ -17,6 +17,11 @@ const SESSION_FILE_INVALID = 'session_file_invalid';
 // Anything else that stopped the GUI from being built or started (security
 // review finding 2): the helper endpoint taken by another process, say.
 const GUI_START_FAILED = 'gui_start_failed';
+// R-F5-17: computer use runs only for an identity an administrator recorded
+// (src/service/identity-record.js). No record at all is the first; a record
+// of another identity, or one that cannot be trusted or read, the second.
+const NODE_IDENTITY_UNRECORDED = 'node_identity_unrecorded';
+const NODE_IDENTITY_INVALID = 'node_identity_invalid';
 const failureDetail = (err) => String((err && err.message) || err || 'unknown error').slice(0, 300);
 
 // R-F5-11: desktop apps are off, for a reason. No helper channel, no broker,
@@ -95,7 +100,9 @@ function createGuiSubsystem(options = {}) {
 }
 
 // jobOpen fails closed: a host that passes none can hold no lease.
-function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => false,
+// identityRecord: what the host's own check of the administrator's record
+// came to (assertRecordedIdentity, run.js); without one it is read here.
+function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => false, identityRecord = null,
   adminUid = 0, geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1), log = createLogger('gui'), deps = {} } = {}) {
   const gui = nodeConfig.gui;
   if (nodeConfig.profile !== 'agent' || !gui || !gui.enabled) {
@@ -123,6 +130,22 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
   }
   if (canonical.nodeId !== approvals.identity.nodeId) {
     return invalid(`${canonicalPath(configDir)} was written for node ${canonical.nodeId}, not this node (${approvals.identity.nodeId})`);
+  }
+
+  // R-F5-17 (owner ruling): the helper file names this node, but the
+  // identity itself lives in the data dir, which the service account can
+  // write. Desktop apps run only when it is the one an administrator
+  // recorded. Without a record (an install from before the ruling), with a
+  // record of another identity, or with one that cannot be trusted, they
+  // are off and say why; never a weaker mode.
+  const recorded = identityRecord || require('../service/identity-record').checkNodeIdentityRecord({
+    configDir, dataDir, identity: approvals.identity, platform, adminUid, serviceProbe: true, ...(deps.identityRecord || {})
+  });
+  if (!recorded || recorded.state !== 'match') {
+    const reason = recorded && recorded.state === 'none' ? NODE_IDENTITY_UNRECORDED : NODE_IDENTITY_INVALID;
+    const detail = String((recorded && recorded.problem) || 'the administrator\'s record of this node\'s identity could not be checked').slice(0, 600);
+    log.error(`desktop apps are off: ${detail}. Then restart the service.`, { reason });
+    return unavailableSubsystem({ reason, detail: reason === NODE_IDENTITY_UNRECORDED ? 'no administrator has recorded this node\'s identity' : 'the administrator\'s record of this node\'s identity does not vouch for the identity in the data dir', guiConfig: gui, dataDir, platform, log });
   }
 
   const audit = approvals.auditLedger || null;

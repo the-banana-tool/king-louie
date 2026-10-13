@@ -16,9 +16,17 @@ const UNAVAILABLE = Object.freeze({ available: false, capabilities: [], apps: []
 const GUI_START_REMEDY = 'see the service log for the cause, fix it and restart the service';
 const SESSION_FILE_REMEDY = 'as root or an Administrator run "king-louie-service session uninstall --user NAME", then "king-louie-service session install --user NAME", and restart the service';
 
+// R-F5-17: desktop apps are off because no administrator has recorded this
+// node's identity, or because the record cannot be used.
+const NODE_IDENTITY_REMEDY = 'as root or an Administrator run "king-louie-service identity record", compare the id it shows with the one your phones show for this node, and restart the service';
+const NODE_IDENTITY_INVALID_REMEDY = 'as root or an Administrator run "king-louie-service identity show" to see why, then "king-louie-service identity record --replace" once you know who changed it, and restart the service';
+
 // What to do about a reason the service gave for turning desktop apps off.
 function remedyFor(reason) {
-  return reason === 'session_file_invalid' ? SESSION_FILE_REMEDY : GUI_START_REMEDY;
+  if (reason === 'session_file_invalid') return SESSION_FILE_REMEDY;
+  if (reason === 'node_identity_unrecorded') return NODE_IDENTITY_REMEDY;
+  if (reason === 'node_identity_invalid') return NODE_IDENTITY_INVALID_REMEDY;
+  return GUI_START_REMEDY;
 }
 
 function writeGuiStatus(dataDir, record) {
@@ -66,4 +74,4 @@ function readGuiStatus(options = {}) {
   };
 }
 
-module.exports = { statusPath, writeGuiStatus, readGuiStatus, readGuiStatusRecord, STALE_MS, SESSION_FILE_REMEDY, GUI_START_REMEDY, remedyFor };
+module.exports = { statusPath, writeGuiStatus, readGuiStatus, readGuiStatusRecord, STALE_MS, SESSION_FILE_REMEDY, GUI_START_REMEDY, NODE_IDENTITY_REMEDY, NODE_IDENTITY_INVALID_REMEDY, remedyFor };

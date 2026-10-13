@@ -10,7 +10,8 @@ function posixPrivate(file) {
 // (default root). The CLI never passes it; tests pass their own euid so the
 // wiring runs unprivileged too.
 // Async: the approval checks wait for the approver store to load.
-async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, configDir = null }) {
+// deps.identityRecord: tests only (how a temp dir's identity record is read).
+async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, configDir = null, deps = {} }) {
   const results = [];
   const major = Number(process.versions.node.split('.')[0]);
   results.push({ check: 'node >= 22', ok: major >= 22, detail: process.versions.node });
@@ -122,6 +123,43 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
         results.push({ check: 'session helper file', ok: true, warn: true, detail: `installed but not enabled in node.yaml: desktop apps stay off until ${path.join(dir, 'node.yaml')} has "gui:" with "enabled: true" under it, and the service is restarted` });
       } else {
         results.push({ check: 'session helper file', ok: true, detail: `installed for ${shown(seen.user)}; the service checks that it decrypts when it starts` });
+      }
+    }
+  }
+
+  // R-F5-17: the administrator's record of this node's identity, against the
+  // public key the data dir holds. Doctor does not resolve the master key,
+  // so this compares public keys only; the service and "session install"
+  // also check that the private key is the public key's. Front doors and
+  // relay hosts are not held to a record.
+  {
+    const { adminConfigDir } = require('../platform/paths');
+    const dir = configDir || adminConfigDir({ dataDir });
+    let profile = null;
+    try {
+      profile = require('./node-config').loadNodeConfig({ dataDir, adminConfigDir: dir, adminUid }).profile;
+    } catch {
+      profile = null; // a node.yaml problem is the "node config" row above
+    }
+    let held = null;
+    try {
+      const store = JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8'));
+      const key = store && store.mesh && store.mesh.identity && store.mesh.identity.publicKey;
+      if (typeof key === 'string' && key) held = { publicKey: key };
+    } catch {
+      held = null; // no store yet, or one doctor cannot read: nothing to compare
+    }
+    if (held && profile !== 'frontdoor') {
+      const { checkNodeIdentityRecord } = require('./identity-record');
+      // serviceProbe: false: doctor is run by an administrator, who can
+      // write the directory; the service's own probe is the one that counts.
+      const seen = checkNodeIdentityRecord({ configDir: dir, dataDir, identity: held, platform, adminUid, serviceProbe: false, ...(deps.identityRecord || {}) });
+      if (seen.state === 'match') {
+        results.push({ check: 'node identity record', ok: true, detail: `${seen.recorded.nodeId}, recorded by an administrator in ${seen.file}` });
+      } else if (seen.state === 'none') {
+        results.push({ check: 'node identity record', ok: true, warn: true, detail: `${seen.problem}. Until then the service runs, computer use stays off and "session install" refuses` });
+      } else {
+        results.push({ check: 'node identity record', ok: false, detail: `${seen.problem}. The service refuses to start until this is fixed` });
       }
     }
   }

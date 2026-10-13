@@ -286,3 +286,40 @@ describe('the CLI knows identity', () => {
     assert.match(help.text(), /identity show \[--data-dir DIR\]/);
   });
 });
+
+describe('doctor: the node identity record', () => {
+  const { runDoctor } = require('../src/service/doctor');
+  const row = async (s) => (await runDoctor({ dataDir: s.dataDir, configDir: s.configDir, adminUid: UID, deps: { identityRecord: IDENTITY_RECORD_TEST_OPTIONS } })).filter((r) => r.check === 'node identity record');
+
+  it('warns when there is none, passes a match, fails another identity and a record it cannot trust; says nothing before there is an identity', async () => {
+    const empty = setup({ withIdentity: false });
+    assert.deepEqual(await row(empty), []);
+
+    const s = setup();
+    let [r] = await row(s);
+    assert.equal(r.ok, true);
+    assert.equal(r.warn, true);
+    assert.match(r.detail, /no administrator record of this node's identity/);
+    assert.match(r.detail, /computer use stays off and "session install" refuses/);
+
+    recordIdentity(s.configDir, s.keys);
+    [r] = await row(s);
+    assert.equal(r.ok, true);
+    assert.equal(r.warn, undefined);
+    assert.ok(r.detail.includes(s.keys.nodeId));
+
+    // Something replaced the identity in the data dir.
+    const planted = nodeKeys();
+    writeIdentity(s.dataDir, stored(planted));
+    [r] = await row(s);
+    assert.equal(r.ok, false);
+    assert.ok(r.detail.includes(planted.nodeId) && r.detail.includes(s.keys.nodeId));
+    assert.match(r.detail, /identity record --replace/);
+    assert.match(r.detail, /The service refuses to start until this is fixed/);
+
+    fs.writeFileSync(R.recordPath(s.configDir), '{ broken');
+    [r] = await row(s);
+    assert.equal(r.ok, false);
+    assert.match(r.detail, /is not valid JSON/);
+  });
+});

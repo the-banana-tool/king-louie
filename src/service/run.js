@@ -53,6 +53,23 @@ function adminDirApprovalOptions({ adminUid, configDir }) {
   };
 }
 
+// R-F5-17: this node's identity, loaded (or made, on a first start) from the
+// data dir and held against the administrator's record of it in the config
+// dir. Throws when the record names another identity or cannot be trusted;
+// with no record it warns and goes on. → { identity, record }.
+// deps.identityRecord: tests only (how a temp dir's record is read).
+function checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, deps = {} }) {
+  const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');
+  const { assertRecordedIdentity } = require('./identity-record');
+  const { adminConfigDir } = require('../platform/paths');
+  const identity = getOrGenerateNodeIdentity(servicePorts.store, servicePorts.cipher, nodeConfig.name);
+  const record = assertRecordedIdentity({
+    configDir: configDir || adminConfigDir({ dataDir }), dataDir, identity,
+    ...(adminUid === undefined ? {} : { adminUid }), ...(deps.identityRecord || {})
+  });
+  return { identity, record };
+}
+
 // Each profile is required lazily so the runbook profile never loads the agent stack.
 function loadProfile(profile) {
   if (profile === 'agent') {
@@ -76,12 +93,23 @@ function loadProfile(profile) {
         const { createDesktopBridgeHost } = require('../desktop-bridge/service-wiring');
         const desktopBridge = createDesktopBridgeHost({ dataDir, features, ports, adminUid, configDir });
         const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir }));
+        // R-F5-17: the identity in the data dir must be the one an
+        // administrator recorded, before anything is signed with it or any
+        // link is opened. A mismatch, or a record that cannot be trusted,
+        // stops the start; no record is a warning (and no computer use).
+        let recordedIdentity;
+        try {
+          recordedIdentity = checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, deps });
+        } catch (err) {
+          await desktopBridge.stop().catch(() => {});
+          throw err;
+        }
         // Fleet stage 3: an unsafe tool from anything remote (chat channels,
         // gateway clients, cron, webhooks) runs only with a signed phone
         // approval; with no enrolled phone or no relay it is refused.
         const approvals = await startApprovals({
           dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
-          nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }
+          nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }, identity: recordedIdentity.identity
         });
         let core;
         let fleet = null;
@@ -104,6 +132,8 @@ function loadProfile(profile) {
               chatExists: (chatId) => Boolean(core && core.context.getChat(chatId, { messages: false }))
             }, jobId),
             ...(adminUid === undefined ? {} : { adminUid }),
+            // R-F5-17: the check made above; only a match turns desktop apps on.
+            identityRecord: recordedIdentity.record,
             ...(deps.gui ? { deps: deps.gui } : {})
           });
         } catch (err) {
@@ -232,7 +262,7 @@ function loadProfile(profile) {
   }
   if (profile === 'runbook') {
     return {
-      async start({ dataDir, audit, adminUid, configDir }) {
+      async start({ dataDir, audit, adminUid, configDir, deps = {} }) {
         const { buildServicePorts } = require('./ports');
         const { loadNodeConfig } = require('./node-config');
         const { startApprovals } = require('../approvals/service-wiring');
@@ -240,9 +270,11 @@ function loadProfile(profile) {
         // The runbook profile runs the relay link and the courier that the
         // `mcp` process sends its approval requests through; still no agent stack.
         const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir }));
+        // R-F5-17: as on an agent node, before anything is signed or linked.
+        const recordedIdentity = checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, deps });
         const approvals = await startApprovals({
           dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
-          nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }
+          nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }, identity: recordedIdentity.identity
         });
         let fleet;
         try {
