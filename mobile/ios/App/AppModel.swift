@@ -323,8 +323,13 @@ final class AppModel: ObservableObject {
 
     /// The live view: a watch every 20 s (signed with the session, never a
     /// fresh prompt) and a long poll for views and statuses, until the lease
-    /// ends or is closed. It never asks for Face ID by itself: while the API
-    /// session is locked it waits for the owner to unlock the app.
+    /// ends or is closed. It does not unlock the app by itself: while the API
+    /// session is locked it waits, and its two relay requests are signed only
+    /// with a session that is already unlocked. One case is left, the same
+    /// as for every API request of this app: if the session's unlock has gone
+    /// stale without the app noticing, signing the watch asks to unlock once
+    /// (DeviceKey's session signature does); a refusal there locks the
+    /// session, and the loop then waits.
     func openLiveLease(nodeId: String, leaseId: String) {
         guard let pin = state.nodes.first(where: { $0.id == nodeId }) ?? demo?.pins.first(where: { $0.id == nodeId }) else { return }
         liveTask?.cancel()
@@ -347,12 +352,12 @@ final class AppModel: ObservableObject {
                                                  signedAt: Timestamps.string(client.now()))
                         let envelope = try await key.signWatchEnvelope(watch)
                         do {
-                            _ = try await client.leaseDecision("watch", leaseId: leaseId, envelope: envelope)
+                            _ = try await client.leaseDecision("watch", leaseId: leaseId, envelope: envelope, signWith: AppModel.sessionOnlySigner(key))
                         } catch is RelayError {
                             // The node is offline or busy: the poll below still shows the lease's state, and the next watch is 20 s away.
                         }
                     }
-                    let entries = try await client.leaseViews(leaseId, afterSeq: live.lastSeq, wait: 20)
+                    let entries = try await client.leaseViews(leaseId, afterSeq: live.lastSeq, wait: 20, signWith: AppModel.sessionOnlySigner(key))
                     // Read again: the kill switch may have changed the lease while this waited.
                     guard var current = self.liveLease, current.leaseId == leaseId else { return }
                     for entry in entries {
@@ -364,7 +369,7 @@ final class AppModel: ObservableObject {
                     if current.state == "ended" { return }
                 } catch {
                     if Task.isCancelled { return }
-                    // A failed unlock ends the session (DeviceKey), so the next turn waits above; anything else is tried again.
+                    // A locked session (or a failed unlock, which locks it) waits above on the next turn; anything else is tried again.
                     try? await Task.sleep(for: .seconds(3))
                 }
             }
@@ -424,7 +429,9 @@ final class AppModel: ObservableObject {
             current.revoking = true
             liveLease = current
             Task { [weak self] in
-                while let self, let now = self.liveLease, now.leaseId == leaseId, now.state != "ended", now.revoking {
+                while !Task.isCancelled {
+                    // Until a node-signed status says ended, the lease is closed, or the send below gives up.
+                    guard let self, let now = self.liveLease, now.leaseId == leaseId, now.state != "ended", now.revoking else { return }
                     do {
                         _ = try await client.leaseDecision("revoke", leaseId: leaseId, envelope: envelope)
                     } catch {

@@ -45,7 +45,7 @@ struct LeaseRequestView: View {
             Section("Agent's reason (unverified)") { Text(Display.escape(item.request.reason)) }
             Section("Apps it may control") {
                 ForEach(item.request.apps) { app in
-                    Toggle(isOn: Binding(get: { chosen.contains(app.id) }, set: { on in if on { chosen.insert(app.id) } else { chosen.remove(app.id) } })) {
+                    Toggle(isOn: Binding(get: { chosen.contains(app.id) }, set: { on in if on { _ = chosen.insert(app.id) } else { _ = chosen.remove(app.id) } })) {
                         VStack(alignment: .leading) {
                             Text(Display.escape(app.name))
                             Text(Display.escape(app.path)).font(.caption.monospaced())

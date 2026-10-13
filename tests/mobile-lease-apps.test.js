@@ -72,12 +72,16 @@ describe('iOS lease screens (owner ruling R-F5-8)', () => {
     none(liveView, ['Leases.grant(', 'Leases.deny(', 'Leases.revoke(', 'key.signEnvelope('], 'the live view');
   });
 
-  it('iOS: the live view never asks for Face ID by itself', () => {
+  it('iOS: the live view does not unlock the app by itself', () => {
     const { leases, screens } = ios();
     // It waits while the API session is locked instead of unlocking it.
     const liveView = section(leases, 'func openLiveLease', 'private func apply');
     assert.match(liveView, /guard key\.isSessionUnlocked else \{/);
     assert.ok(liveView.indexOf('guard key.isSessionUnlocked else {') < liveView.indexOf('signWatchEnvelope('), 'checked before the watch is signed');
+    // Its two relay requests (the watch and the poll) are signed only with a session already unlocked.
+    assert.match(liveView, /client\.leaseDecision\("watch", leaseId: leaseId, envelope: envelope, signWith: AppModel\.sessionOnlySigner\(key\)\)/);
+    assert.match(liveView, /client\.leaseViews\(leaseId, afterSeq: live\.lastSeq, wait: 20, signWith: AppModel\.sessionOnlySigner\(key\)\)/);
+    assert.equal(count(liveView, 'client.'), 3, 'the two requests, and the relay clock for signed_at');
     // The list is loaded without a prompt when the screen merely appears.
     assert.match(section(leases, 'func refreshLeases', 'func decideLease'), /signWith: onlyIfUnlocked \? Self\.sessionOnlySigner\(key\) : nil/);
     assert.match(screens, /\.task \{ await model\.refreshLeases\(onlyIfUnlocked: true\) \}/);

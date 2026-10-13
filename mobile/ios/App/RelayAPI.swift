@@ -306,8 +306,10 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
     /// `202 { state, reason? }` from the node, passed through by the relay
     /// (a watch reply also has `after_seq`, which this app does not use).
-    func leaseDecision(_ action: String, leaseId: String, envelope: Envelope) async throws -> JSONValue? {
-        try await request("POST", "/v1/leases/\(Self.segment(leaseId))/\(action)", body: envelope.json).1
+    /// `signWith`: sign the request with this instead of the client's signer
+    /// (the no-prompt session signer, for the live view's own requests).
+    func leaseDecision(_ action: String, leaseId: String, envelope: Envelope, signWith: Signer? = nil) async throws -> JSONValue? {
+        try await request("POST", "/v1/leases/\(Self.segment(leaseId))/\(action)", body: envelope.json, signWith: signWith).1
     }
 
     func leaseViews(_ leaseId: String, afterSeq: Int, wait: Int, signWith: Signer? = nil) async throws -> [JSONValue] {
