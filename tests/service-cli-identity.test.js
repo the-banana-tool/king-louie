@@ -332,6 +332,27 @@ describe('doctor: the node identity record', () => {
   // write). It now reads the access lists, fails when they let anyone but
   // SYSTEM and Administrators change the record, and says in every "ok"
   // what it did not check.
+  // Fifth security review, finding 6: the directory a record replaces is
+  // never deleted recursively. What is left goes to the administrator's own
+  // terminal, not only to a log.
+  it('Windows: --replace over a directory that holds something else leaves it aside and says where, on stderr', { skip: process.platform !== 'win32' }, async () => {
+    const s = setup();
+    assert.equal(await run(s, io(), { flags: { yes: true } }), 0);
+    fs.writeFileSync(path.join(s.configDir, 'identity', 'left-behind.txt'), 'x');
+    const next = nodeKeys();
+    writeIdentity(s.dataDir, stored(next));
+    const t = io();
+    assert.equal(await run(s, t, { flags: { yes: true, replace: true } }), 0);
+    assert.match(t.text(), /Recorded\. /);
+    assert.equal(seen(s).nodeId, next.nodeId);
+    const aside = fs.readdirSync(s.configDir).filter((n) => n.startsWith('.identity.old-'));
+    assert.equal(aside.length, 1);
+    assert.deepEqual(fs.readdirSync(path.join(s.configDir, aside[0])).sort(), ['left-behind.txt', 'node.json']);
+    assert.ok(t.errors().includes(path.join(s.configDir, aside[0])));
+    assert.match(t.errors(), /^Note: the identity record was written\. The directory it replaced was moved to .* holds 1 entry besides node\.json, and was not removed/);
+    assert.doesNotMatch(t.errors(), /left-behind/);
+  });
+
   describe('what the row says it did not check, and the access lists on Windows', () => {
     const { identityMatchRow } = require('../src/service/doctor');
     const seen = { state: 'match', file: 'C:/cfg/identity/node.json', recorded: { nodeId: 'kl-aaaaaaaaaaaaaaaa' } };

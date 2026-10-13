@@ -103,7 +103,10 @@ async function record({ flags, dataDir, io, deps }) {
       return 1;
     }
   }
-  R.writeIdentityRecord({ configDir: c.configDir, nodeId, publicKey, platform: c.platform, ...(deps.runIcacls ? { runIcacls: deps.runIcacls } : {}) });
+  // What the write leaves for the administrator to look at (a replaced
+  // directory it would not remove) is said here, in this terminal.
+  const note = { warn: (message) => io.stderr.write(`Note: ${message}.\n`) };
+  R.writeIdentityRecord({ configDir: c.configDir, nodeId, publicKey, platform: c.platform, log: note, ...(deps.runIcacls ? { runIcacls: deps.runIcacls } : {}) });
   // Read back the way the readers will: a record that would be refused is
   // said now, not at the next start.
   const written = R.readIdentityRecord(c.recordOptions);

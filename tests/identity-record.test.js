@@ -423,10 +423,9 @@ describe('the administrator\'s record of the node identity (R-F5-17)', () => {
       assert.deepEqual(fs.readdirSync(s.configDir), ['identity']);
     });
 
-    it('a directory that was there before is replaced, never kept, with whatever was in it', () => {
+    it('a directory that was there before is replaced, never kept', () => {
       const s = recorded();
       const dir = path.join(s.configDir, 'identity');
-      fs.writeFileSync(path.join(dir, 'left-behind.txt'), 'x');
       const k = keys();
       const emptyWhenSet = [];
       winWrite(s, k, (argv) => { if (argv.includes('/setowner') && path.basename(argv[1]) === 'node.json') emptyWhenSet.push(fs.statSync(argv[1]).size); });
@@ -434,6 +433,92 @@ describe('the administrator\'s record of the node identity (R-F5-17)', () => {
       assert.deepEqual(fs.readdirSync(dir), ['node.json']);
       assert.deepEqual(fs.readdirSync(s.configDir), ['identity'], 'neither the new directory nor the old one is left beside it');
       assert.equal(win(s).nodeId, k.nodeId);
+    });
+
+    // Fifth security review, finding 6: the old directory was removed with a
+    // recursive delete, as an administrator, though the account the service
+    // runs as may once have controlled it. Only the record this command
+    // expects is removed, then the empty directory; anything else is left
+    // where it is and the administrator is told.
+    describe('removing the directory that was replaced', () => {
+      const replace = (s, k) => {
+        const warned = [];
+        const file = R.writeIdentityRecord({
+          configDir: s.configDir, nodeId: k.nodeId, publicKey: k.publicKey, platform: 'win32', ...opts(), env: { SystemRoot: 'C:\\Windows' },
+          log: { warn: (m) => warned.push(m) }
+        });
+        return { file, warned };
+      };
+      const asideOf = (s) => fs.readdirSync(s.configDir).filter((n) => /^\.identity\.old-[0-9a-f]{8}$/.test(n)).map((n) => path.join(s.configDir, n));
+
+      it('never deletes recursively', () => {
+        const s = recorded();
+        const realRm = fs.rmSync;
+        const calls = [];
+        fs.rmSync = (target, options) => { calls.push(options || {}); return realRm(target, options); };
+        try {
+          assert.deepEqual(replace(s, keys()).warned, []);
+        } finally {
+          fs.rmSync = realRm;
+        }
+        assert.ok(calls.every((o) => !o.recursive), 'no recursive removal');
+        assert.deepEqual(fs.readdirSync(s.configDir), ['identity']);
+      });
+
+      it('anything but the record in it: nothing is removed, the record is still replaced, and the administrator is told what is left and where', () => {
+        const s = recorded();
+        const dir = path.join(s.configDir, 'identity');
+        const before = fs.readFileSync(path.join(dir, 'node.json'), 'utf8');
+        fs.writeFileSync(path.join(dir, 'left-behind.txt'), 'x');
+        fs.mkdirSync(path.join(dir, 'sub'));
+        fs.writeFileSync(path.join(dir, 'sub', 'deep.txt'), 'y');
+        const k = keys();
+        const { warned } = replace(s, k);
+        assert.deepEqual(fs.readdirSync(dir), ['node.json'], 'the new directory holds the record alone');
+        assert.equal(win(s).nodeId, k.nodeId);
+        const [aside] = asideOf(s);
+        assert.ok(aside, 'the old directory is left beside it');
+        assert.deepEqual(fs.readdirSync(aside).sort(), ['left-behind.txt', 'node.json', 'sub']);
+        assert.equal(fs.readFileSync(path.join(aside, 'node.json'), 'utf8'), before, 'not even the old record is removed');
+        assert.equal(fs.readFileSync(path.join(aside, 'sub', 'deep.txt'), 'utf8'), 'y');
+        assert.equal(warned.length, 1);
+        assert.ok(warned[0].includes(aside), 'where');
+        assert.match(warned[0], /holds 2 entries besides node\.json/);
+        assert.match(warned[0], /was not removed/);
+        assert.doesNotMatch(warned[0], /left-behind|sub/, 'names from that directory are not repeated');
+      });
+
+      it('a link where the old record was is not followed and not removed', (t) => {
+        const s = setup();
+        const dir = path.join(s.configDir, 'identity');
+        const elsewhere = path.join(s.base, 'elsewhere');
+        fs.mkdirSync(dir);
+        fs.mkdirSync(elsewhere);
+        fs.writeFileSync(path.join(elsewhere, 'keep.txt'), 'keep');
+        // What was at node.json when the swap happens: a link to a directory elsewhere.
+        const realRename = fs.renameSync;
+        let linked = true;
+        fs.renameSync = (from, to) => {
+          const r = realRename(from, to);
+          if (/\.identity\.old-/.test(path.basename(to))) {
+            try { fs.symlinkSync(elsewhere, path.join(to, 'node.json'), 'junction'); } catch { linked = false; }
+          }
+          return r;
+        };
+        let out;
+        try {
+          out = replace(s, keys());
+        } finally {
+          fs.renameSync = realRename;
+        }
+        if (!linked) { t.skip('this account cannot create a link'); return; }
+        const [aside] = asideOf(s);
+        assert.ok(aside);
+        assert.equal(fs.readFileSync(path.join(elsewhere, 'keep.txt'), 'utf8'), 'keep', 'what the link pointed at is untouched');
+        assert.ok(fs.lstatSync(path.join(aside, 'node.json')).isSymbolicLink(), 'the link itself is left for the administrator');
+        assert.equal(out.warned.length, 1);
+        assert.match(out.warned[0], /node\.json in it is not a regular file/);
+      });
     });
 
     it('if an ACL cannot be set nothing is recorded and what was there stays', () => {

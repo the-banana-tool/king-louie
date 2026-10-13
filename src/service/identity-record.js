@@ -514,8 +514,58 @@ function windowsRecordOwnerArgs(target, env = process.env) {
 // anything is in it; the file is created empty, gets its own, and is written
 // only then; and the new directory takes the old one's name (two renames:
 // for that instant there is no record, which every reader takes as "none").
-// The old directory is removed. If anything fails the old one is put back
-// and nothing was recorded.
+// The old directory is removed (removeRecordDir: the record and the empty
+// directory, nothing else). If anything fails the old one is put back and
+// nothing was recorded.
+
+// Removes a record directory this command is done with: the one record file
+// it expects, then the directory itself, neither of them recursively (fifth
+// security review, finding 6). The account the service runs as may once have
+// controlled the directory that is being replaced, and this runs as an
+// administrator: a recursive delete would remove whatever that account left
+// in it, and whatever a link in it led to on a file system that follows
+// them. null when it is gone; otherwise what is left, and nothing was
+// removed unless the answer says so. Names found in the directory are
+// counted, never repeated: they go to an administrator's terminal.
+function removeRecordDir(dir) {
+  let st;
+  try {
+    st = fs.lstatSync(dir);
+  } catch (err) {
+    return err.code === 'ENOENT' ? null : `could not be looked at (${err.code || 'error'})`;
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) return 'is a link or not a directory, and was not removed';
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch (err) {
+    return `could not be listed (${err.code || 'error'}), and was not removed`;
+  }
+  const others = names.filter((name) => name !== RECORD_FILE).length;
+  if (others > 0) return `holds ${others} ${others === 1 ? 'entry' : 'entries'} besides ${RECORD_FILE}, and was not removed: nothing in it was touched`;
+  const file = path.join(dir, RECORD_FILE);
+  if (names.length === 1) {
+    let fst;
+    try {
+      fst = fs.lstatSync(file);
+    } catch (err) {
+      return `${RECORD_FILE} in it could not be looked at (${err.code || 'error'}), and it was not removed`;
+    }
+    if (fst.isSymbolicLink() || !fst.isFile()) return `${RECORD_FILE} in it is not a regular file, and it was not removed: nothing in it was touched`;
+    try {
+      fs.unlinkSync(file);
+    } catch (err) {
+      return `${RECORD_FILE} in it could not be removed (${err.code || 'error'})`;
+    }
+  }
+  try {
+    fs.rmdirSync(dir);
+  } catch (err) {
+    return `is empty of its record now but could not be removed itself (${err.code || 'error'})`;
+  }
+  return null;
+}
+
 function writeWindowsRecord({ root, text, runIcacls, env, log }) {
   const dir = recordDir(root);
   const tag = crypto.randomBytes(4).toString('hex');
@@ -550,14 +600,19 @@ function writeWindowsRecord({ root, text, runIcacls, env, log }) {
     swapped = true;
   } catch (err) {
     if (movedAside && !swapped) { try { fs.renameSync(aside, dir); } catch { /* the caller's read-back says what is there now */ } }
-    try { fs.rmSync(fresh, { recursive: true, force: true }); } catch { /* never made, or already renamed */ }
+    // Never made, already renamed, or this command's own minutes-old
+    // directory: at most the record file is in it.
+    if (!swapped) {
+      const left = removeRecordDir(fresh);
+      if (left) log.warn(`nothing was recorded, and the directory this command had made for the new record, ${fresh}, ${left}. Look at what it holds and remove it by hand`);
+    }
     throw err;
   }
   if (movedAside) {
-    try {
-      fs.rmSync(aside, { recursive: true, force: true });
-    } catch (err) {
-      log.warn(`the identity record was written, but the directory it replaced could not be removed (${err.code || 'error'}): remove ${aside} by hand`);
+    const left = removeRecordDir(aside);
+    if (left) {
+      log.warn(`the identity record was written. The directory it replaced was moved to ${aside}, which ${left}. `
+        + 'This command removes only the old record and the empty directory. Look at what that directory holds, and who put it there, and remove it by hand');
     }
   }
   return recordPath(root);
