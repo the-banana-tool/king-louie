@@ -492,3 +492,45 @@ describe('sendExternal and Executor.submit under one envelope', () => {
     assert.deepStrictEqual(s.counts(), { contacts: [BROKER], attempts: { [BROKER]: 1 }, states: [undefined], caseToday: 1, globalLeft: 4 });
   });
 });
+
+// Security review 2026-10-12, finding 4: a release gives back only into the
+// day the reservation was counted on.
+describe('sendExternal: a release across midnight', () => {
+  const reserve = (s) => s.reg.reserveChannelSend({
+    caseId: s.meta.id, envelopeId: s.envelopeId, executorId: 'fake-agent', channelId: 'sms', recipients: [BROKER], sendId: 'd-late', rendered: TEXT,
+    expectedHash: s.store.get(s.envelopeId).hash
+  });
+
+  it('takes nothing off the new day, in the global cap or the case contacts', async () => {
+    const s = await setup();
+    s.env.clock.now = new Date('2026-10-26T23:59:30Z');
+    const held = await reserve(s);
+    assert.strictEqual(held.ok, true, held.error);
+    assert.deepStrictEqual([s.counts().caseToday, s.counts().globalLeft], [1, 4]);
+    // The next day: this case counts one contact of its own, then yesterday's send is released.
+    s.env.clock.now = new Date('2026-10-27T00:00:30Z');
+    assert.strictEqual((await s.reg.reserveContacts('fake-agent', 1, { caseId: s.meta.id })).ok, true);
+    s.rt.budget(s.meta.id).charge('contactsPerDay', 1);
+    assert.deepStrictEqual([s.counts().caseToday, s.counts().globalLeft], [1, 4]);
+    assert.deepStrictEqual(await s.reg.settleChannelSend(held.reservation, { sent: false }), { ok: true, state: 'released' });
+    assert.deepStrictEqual(s.counts(), { contacts: [], attempts: {}, states: [], caseToday: 1, globalLeft: 4 });
+  });
+
+  it('on the same day the release gives the contact back in both', async () => {
+    const s = await setup();
+    s.env.clock.now = new Date('2026-10-26T23:00:00Z');
+    const held = await reserve(s);
+    s.env.clock.now = new Date('2026-10-26T23:59:00Z');
+    await s.reg.settleChannelSend(held.reservation, { sent: false });
+    assert.deepStrictEqual(s.counts(), NOTHING());
+  });
+
+  it('releaseContacts with a day releases only into that day', async () => {
+    const s = await setup();
+    const first = await s.reg.reserveContacts('fake-agent', 2, { caseId: s.meta.id });
+    assert.strictEqual(first.day, '2026-10-26');
+    assert.deepStrictEqual(await s.reg.releaseContacts('fake-agent', 1, { caseId: s.meta.id, day: '2026-10-25' }), { ok: true, released: 0 });
+    assert.deepStrictEqual(await s.reg.releaseContacts('fake-agent', 1, { caseId: s.meta.id, day: '2026-10-26' }), { ok: true, released: 1 });
+    assert.strictEqual(s.reg.globalRemaining('fake-agent'), 4);
+  });
+});

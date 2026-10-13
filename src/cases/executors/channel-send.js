@@ -192,7 +192,10 @@ async function reserveChannelSend(reg, args = {}) {
       if (!held.ok) return held;
       const reservation = {
         caseId, envelopeId: held.envelope.id, executorId: held.executorId, sendId, channel: channelId, recipients,
-        newContacts: held.newContacts, crossedNow: held.crossedNow, n: held.n, rendered, settled: null
+        newContacts: held.newContacts, crossedNow: held.crossedNow, n: held.n, rendered, settled: null,
+        // The global cap's usage day this send was counted on; a release
+        // goes into that day only. null: nothing was reserved there.
+        globalDay: null
       };
       if (held.newContacts.length) {
         let res;
@@ -206,6 +209,7 @@ async function reserveChannelSend(reg, args = {}) {
           reservation.settled = 'released';
           return refuse(res?.error || 'the daily cap refused the send');
         }
+        reservation.globalDay = typeof res.day === 'string' && res.day ? res.day : null;
       }
       return { ok: true, envelope: held.envelope, reservation };
     }));
@@ -255,8 +259,10 @@ async function settleChannelSend(reg, reservation, { sent = true, unconfirmed = 
       sent === false ? undoInCase(reg, reservation) : markInCase(reg, reservation, { unconfirmed: unconfirmed === true, reason })
     ));
     reservation.settled = out.state;
-    if (sent === false && Array.isArray(out.removed) && out.removed.length) {
-      await reg.releaseContacts(reservation.executorId, out.removed.length, { caseId });
+    // Only into the day it was reserved on; with no day on record nothing
+    // is released (the count stays, too high rather than too low).
+    if (sent === false && Array.isArray(out.removed) && out.removed.length && reservation.globalDay) {
+      await reg.releaseContacts(reservation.executorId, out.removed.length, { caseId, day: reservation.globalDay });
     }
     return { ok: true, state: out.state };
   } catch (err) {

@@ -473,13 +473,17 @@ class ExecutorRegistry {
     });
   }
 
-  async releaseContacts(id, n, { caseId = null } = {}) {
+  // `day`: the usage day the contacts were reserved on (reserveContacts
+  // returns it). With one, nothing is released into any other day: a
+  // reservation made before midnight never lowers the new day's count.
+  async releaseContacts(id, n, { caseId = null, day = null } = {}) {
     const count = Number(n);
     const sub = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
     return this.mutex.run('usage', async () => {
       const data = this._readObject(this.usagePath);
       const rec = this._currentUsage(data[id]);
       if (!rec || !sub) return { ok: true, released: 0 };
+      if (day !== null && rec.day !== day) return { ok: true, released: 0 };
       const key = caseId || 'none';
       const take = Math.min(sub, rec.byCase[key] || 0, rec.used);
       rec.used -= take;
