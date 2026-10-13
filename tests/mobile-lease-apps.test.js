@@ -192,15 +192,44 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
     // A send with no answer stays on screen as not confirmed, and is never shown as done.
     assert.ok(count(live, 'unconfirmed =') >= 3);
     assert.match(section(live, 'fun decideLease', 'fun openLiveLease'), /is SendOutcome\.Unconfirmed ->\n\s+markLeaseUnconfirmed\(id, "Not confirmed: /);
-    assert.match(kill, /is SendOutcome\.Unconfirmed ->\n\s+next\.copy\(unconfirmed = "Stop not confirmed: /);
-    assert.match(kill, /is SendOutcome\.Confirmed ->\n\s+if \(outcome\.state == "ended"\) next\.copy\(state = "ended", reason = "revoked"\)\n/);
-    assert.equal(count(kill, 'state = "ended"'), 2, 'the demo, and the node saying ended');
+    assert.match(kill, /next = next\.copy\(unconfirmed = Leases\.stopNotice\(sent\.outcome, sent\.problem\)\)/);
     assert.match(leaseScreens, /live\.unconfirmed\?\.let \{ Text\(it, /);
     assert.match(leaseScreens, /item\.unconfirmed\?\.let \{ Text\(it, /);
     // The owner can tap again: the buttons depend on what is in flight, not on the last answer.
     assert.match(leaseScreens, /Button\(\{ model\.killSwitch\(\) \}, Modifier\.fillMaxWidth\(\), enabled = !live\.busy && live\.state != "ended",/);
     assert.match(leaseScreens, /OutlinedButton\(\{ model\.refreshLiveLease\(\) \}, enabled = !live\.busy\)/);
     assert.match(leaseScreens, /enabled = chosen\.isNotEmpty\(\) && !deciding\)/);
+  });
+
+  // Security review finding 1: a relay's reply to Stop (or to a watch) is not
+  // signed by the node. It must never be what makes the screen say "ended".
+  it('Android: a lease is shown as ended only by a status or view the pinned node signed', () => {
+    const { live, core } = android();
+    const kill = live.slice(live.indexOf('fun killSwitch'));
+    const refresh = section(live, 'fun refreshLiveLease', 'private fun applyLease');
+    const apply = section(live, 'private fun applyLease', '\n    }\n');
+    // Stop: whatever comes back, the screen keeps its state and says what the reply was worth.
+    assert.equal(count(kill, 'state = "ended"'), 1, 'only the demo, which has no node');
+    assert.match(kill, /if \(mode == AppMode\.DEMO\) \{\n\s+demoLeaseJob\?\.cancel\(\)\n\s+liveLease = live\.copy\(state = "ended", reason = "revoked"\)\n\s+return\n\s+\}/);
+    none(kill, ['state = outcome.state', 'outcome.state'], 'killSwitch (the relay\'s word used as the lease state)');
+    // Refresh: the watch reply's state only decides how long to wait for the signed view.
+    none(refresh, ['state = outcome.state', 'next.copy(state'], 'refreshLiveLease');
+    assert.match(refresh, /waitForFrame = outcome\.state == "active"/);
+    assert.equal(count(refresh, 'outcome.state'), 1);
+    // The one place a live lease's state is written from the network: applyLease, from verified messages.
+    assert.equal(count(apply, 'state = status.state'), 1);
+    assert.equal(count(apply, 'state = view.state'), 1);
+    assert.match(apply, /val status = Leases\.verifiedMessage\(envelope, pin\)\?\.let \{ LeaseStatus\.from\(it\) \}/);
+    const outside = live.replace(apply, '');
+    none(outside, ['state = status.state', 'state = view.state', 'state = sent.', 'state = json', 'state = reply'], 'the lease section outside applyLease');
+    assert.equal(count(outside, 'state = "ended"'), 1, 'the demo Stop');
+    // The core says what a Stop's reply lets the screen say, and "ended" is not in any of it.
+    const notice = section(core, 'fun stopNotice', '\n    }\n');
+    assert.match(notice, /is SendOutcome\.Confirmed -> "Stop sent, not yet confirmed by the computer\./);
+    assert.doesNotMatch(notice, /ended|stopped\b/i);
+    // Stop stays enabled until a signed message ends the lease.
+    const { leaseScreens } = android();
+    assert.match(leaseScreens, /Button\(\{ model\.killSwitch\(\) \}, Modifier\.fillMaxWidth\(\), enabled = !live\.busy && live\.state != "ended",/);
   });
 
   it('Android: a lease push fetches nothing; Refresh waits with Leases.REFRESH_WAIT_S', () => {
@@ -219,7 +248,7 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
     // Refresh: views from the position the watch reply gives, waiting for the frame.
     const refresh = section(live, 'fun refreshLiveLease', 'private fun applyLease');
     assert.match(refresh, /cursor = Leases\.cursorAfterWatch\(next\.lastSeq, sent\.json\)/);
-    assert.match(refresh, /api\.leaseViews\(next\.leaseId, cursor, if \(next\.state == "active"\) Leases\.REFRESH_WAIT_S else 0\)/);
+    assert.match(refresh, /api\.leaseViews\(next\.leaseId, cursor, if \(waitForFrame\) Leases\.REFRESH_WAIT_S else 0\)/);
     assert.equal(count(live, 'api.leaseViews('), 1);
     assert.equal(count(live, 'api.leases('), 1);
     assert.match(api, /views\?after_seq=\$afterSeq&wait=\$waitS/);

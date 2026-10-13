@@ -76,7 +76,12 @@ data class ViewCheck(val accepted: Boolean, val reason: String?, val view: Lease
 
 /** What one lease send (grant, deny, revoke, watch) came to. Android shows the third as "not confirmed" and sends nothing again by itself (owner ruling R-F5-5). */
 sealed class SendOutcome {
-    /** The node answered with the lease's state. */
+    /**
+     * A reply that names a state came back. It arrives through the relay and
+     * is not signed by the node, so it says the send was delivered and
+     * nothing more: the state a screen shows comes only from a status or a
+     * view the pinned node signed.
+     */
     data class Confirmed(val state: String) : SendOutcome()
 
     /** The node answered and refused; `reason` is its word, when it gave one. */
@@ -107,6 +112,20 @@ object Leases {
     fun sendOutcome(reply: JsonElement?): SendOutcome {
         val state = reply["state"].str() ?: return SendOutcome.Unconfirmed
         return if (state == "rejected") SendOutcome.Rejected(reply["reason"].str()) else SendOutcome.Confirmed(state)
+    }
+
+    /**
+     * What the live screen says after a Stop was sent (security review,
+     * 2026-10-12). No reply ends the lease on screen: a reply is the relay's
+     * word, and a relay that wanted the owner to stop watching could say
+     * "ended" while the lease went on. The lease is shown as over only when a
+     * status or view signed by the pinned node says so. The reply's own
+     * state is deliberately not repeated here.
+     */
+    fun stopNotice(outcome: SendOutcome, problem: String?): String = when (outcome) {
+        is SendOutcome.Confirmed -> "Stop sent, not yet confirmed by the computer. Tap Refresh to see its signed answer, or tap Stop now again."
+        is SendOutcome.Rejected -> "The stop was refused (${Display.escape(outcome.reason ?: "no reason given")}). The lease may still be active. Tap Stop now again."
+        is SendOutcome.Unconfirmed -> "Stop not confirmed: ${problem ?: "no answer"}. The lease may still be active. Tap Stop now again."
     }
 
     /**

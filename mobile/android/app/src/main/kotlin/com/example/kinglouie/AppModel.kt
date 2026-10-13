@@ -544,6 +544,8 @@ class AppModel(context: Context) {
             var next = live.copy(unconfirmed = null, noFrame = false)
             try {
                 var cursor = next.lastSeq
+                // What the screen knows from signed messages; a watch's reply may only lengthen the wait below.
+                var waitForFrame = next.state == "active"
                 if (next.state != "ended") {
                     val watch = Leases.watch(next.nodeId, next.leaseId, k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
                     val sent = sendLease(api, "watch", next.leaseId, signEnvelope(k, watch, "Watch computer use", promptText(next.nodeName, 30)))
@@ -558,7 +560,10 @@ class AppModel(context: Context) {
                             return@launch
                         }
                         is SendOutcome.Confirmed -> {
-                            next = next.copy(state = outcome.state)
+                            // The reply is the relay's word, not signed by the node: it is never the
+                            // lease's state on this screen. It only decides whether to wait for the
+                            // signed view, which applyLease reads.
+                            waitForFrame = outcome.state == "active"
                             // Views from where the relay's mailbox stood before the node heard this watch.
                             cursor = Leases.cursorAfterWatch(next.lastSeq, sent.json)
                         }
@@ -566,7 +571,7 @@ class AppModel(context: Context) {
                 }
                 val frameBefore = next.frameAtMs
                 val entries = try {
-                    api.leaseViews(next.leaseId, cursor, if (next.state == "active") Leases.REFRESH_WAIT_S else 0)
+                    api.leaseViews(next.leaseId, cursor, if (waitForFrame) Leases.REFRESH_WAIT_S else 0)
                 } catch (e: RelayException) {
                     next = next.copy(unconfirmed = "Refresh not confirmed: ${describe(e).trimEnd('.')}. Tap Refresh again.")
                     return@launch
@@ -618,10 +623,14 @@ class AppModel(context: Context) {
 
     /**
      * "Stop now" (R-F5-5): one signed revoke, sent one time. Two prompts on
-     * this phone: the revoke, then the request that carries it. If no answer
-     * comes, the screen says the stop is not confirmed and the owner taps
-     * again; a second revoke for a lease that already ended is acknowledged
-     * by the node.
+     * this phone: the revoke, then the request that carries it. Whatever
+     * comes back is the relay's word, which the node did not sign: it never
+     * ends the lease on this screen. The screen says the stop was sent and
+     * is not yet confirmed by the computer (or that no answer came), Stop
+     * stays enabled, and only a status or view the pinned node signed, read
+     * by applyLease on the next Refresh, shows the lease as ended. Nothing
+     * is sent again by itself; a second revoke for a lease that already
+     * ended is acknowledged by the node.
      */
     fun killSwitch() {
         val live = liveLease ?: return
@@ -639,15 +648,7 @@ class AppModel(context: Context) {
             try {
                 val message = Leases.revoke(live.nodeId, live.leaseId, "kill_switch", k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
                 val sent = sendLease(api, "revoke", live.leaseId, signEnvelope(k, message, "Stop computer use now", promptText(live.nodeName, 30)))
-                next = when (val outcome = sent.outcome) {
-                    is SendOutcome.Confirmed ->
-                        if (outcome.state == "ended") next.copy(state = "ended", reason = "revoked")
-                        else next.copy(state = outcome.state, unconfirmed = "The node answered \"${Display.escape(outcome.state)}\", not ended. Tap Stop now again.")
-                    is SendOutcome.Rejected ->
-                        next.copy(unconfirmed = "The node refused the stop: ${friendlyReason(outcome.reason)}. The lease may still be active.")
-                    is SendOutcome.Unconfirmed ->
-                        next.copy(unconfirmed = "Stop not confirmed: ${sent.problem}. The lease may still be active. Tap Stop now again.")
-                }
+                next = next.copy(unconfirmed = Leases.stopNotice(sent.outcome, sent.problem))
             } catch (e: Exception) {
                 // A prompt was cancelled or the key failed: the stop was not sent.
                 next = next.copy(unconfirmed = "The stop was not sent. Tap Stop now again.")

@@ -21,6 +21,26 @@ class LeaseFlowTest {
         assertTrue(Leases.sendOutcome(json("""[]""")) is SendOutcome.Unconfirmed)
     }
 
+    /** A Stop's reply is the relay's word: no outcome lets the screen say the lease is over. */
+    @Test
+    fun stopNotice() {
+        val sent = Leases.stopNotice(SendOutcome.Confirmed("ended"), null)
+        assertTrue(sent.startsWith("Stop sent, not yet confirmed by the computer."))
+        // The same words whatever state the reply named: it is not repeated, and never believed.
+        assertEquals(sent, Leases.stopNotice(SendOutcome.Confirmed("active"), null))
+        assertEquals(sent, Leases.stopNotice(SendOutcome.Confirmed("<b>ended</b>"), null))
+        val refused = Leases.stopNotice(SendOutcome.Rejected("unknown_lease"), null)
+        assertTrue(refused.contains("refused (unknown_lease)") && refused.contains("may still be active"))
+        assertTrue(Leases.stopNotice(SendOutcome.Rejected(null), null).contains("no reason given"))
+        val lost = Leases.stopNotice(SendOutcome.Unconfirmed, "no network")
+        assertTrue(lost.startsWith("Stop not confirmed: no network.") && lost.contains("may still be active"))
+        assertTrue(Leases.stopNotice(SendOutcome.Unconfirmed, null).startsWith("Stop not confirmed: no answer."))
+        for (text in listOf(sent, refused, lost)) {
+            assertTrue(text.contains("Stop now again"))
+            assertTrue(!text.contains("ended") && !text.contains("stopped"))
+        }
+    }
+
     @Test
     fun cursorAfterWatch() {
         assertEquals(5, Leases.REFRESH_WAIT_S)
