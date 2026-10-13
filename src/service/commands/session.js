@@ -212,6 +212,7 @@ async function install({ flags, dataDir, io, deps }) {
   if (flags.dryRun) {
     io.stdout.write(`[dry-run] write ${S.canonicalPath(c.configDir)} (node ${nodeId}, user ${sessionUser})\n`);
     io.stdout.write(`[dry-run] write ${sessionFile}\n`);
+    if (c.platform === 'win32') io.stdout.write(`[dry-run] give ${account.sid} read-control, read-attributes and synchronize on ${path.dirname(sessionFile)} (that directory only)\n`);
     if (c.platform !== 'win32') io.stdout.write(`[dry-run] create ${ipcDir} (0711, owned by the service account)\n`);
     await c.execute(steps, { dryRun: true, io, entryPath: c.entryPath, nodePath: c.nodePath });
     return 0;
@@ -224,6 +225,10 @@ async function install({ flags, dataDir, io, deps }) {
   io.stdout.write(`  grants: a helper that runs as ${sessionUser} in ${sessionUser}'s desktop session. Through it this node's service can launch the apps in gui.apps, capture their windows and, under a lease signed on the owner's phone, click and type in them.\n`);
   io.stdout.write(`  starts at every login of ${sessionUser}: ${loginStartText({ platform: c.platform, account, sessionUser })}\n`);
   io.stdout.write(`  writes: ${S.canonicalPath(c.configDir)} (the service's secret) and ${sessionFile} (${sessionUser}'s copy)${c.platform === 'win32' ? '' : `; creates ${ipcDir}`}\n`);
+  // Windows (second review, finding 1): the helper, running as this user,
+  // checks who owns its file and the directory it is in before it trusts
+  // either, and the directory's ACL would not let it look.
+  if (c.platform === 'win32') io.stdout.write(`  lets ${sessionUser} read who owns ${path.dirname(sessionFile)} (its owner and attributes; nothing in it, and no other directory)\n`);
   if (rotates) io.stdout.write(`  replaces the secret installed for ${installed.user}; the endpoint stays, so a running service and helper pick the new secret up without a restart\n`);
   if (!(await consented({ flags, c, question: `Install the session helper for ${sessionUser}? [y/N] ` }))) {
     io.stderr.write('Not installing without confirmation. Nothing was written.\n');
@@ -316,6 +321,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
   const copyFile = S.userCopyPath({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid });
   if (flags.dryRun) {
     io.stdout.write(`[dry-run] remove ${copyFile}\n`);
+    if (c.platform === 'win32') io.stdout.write(`[dry-run] remove the entry for ${account.sid} from the ACL of ${path.dirname(copyFile)}\n`);
     await c.execute(steps, { dryRun: true, io, entryPath: c.entryPath, nodePath: c.nodePath });
     return 0;
   }
@@ -333,6 +339,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
   if (unreachableLoginStart) io.stdout.write(`  the login start in ${sessionUser}'s home directory could not be removed (there is no such user to remove it as); it does nothing without the files below\n`);
   else io.stdout.write(`  the login start: ${loginStartText({ platform: c.platform, account, sessionUser })}\n`);
   io.stdout.write(`  ${sessionUser}'s copy of the secret: ${copyFile}\n`);
+  if (c.platform === 'win32') io.stdout.write(`  ${sessionUser}'s right to read who owns ${path.dirname(copyFile)}\n`);
   if (mine) io.stdout.write(`  the service's secret: ${installed.file} (desktop apps stay off on this node until "session install" runs again)\n`);
   if (damaged) io.stdout.write(`  the service's helper file: ${installed.file} ${installed.reason}, so this cannot tell who it was installed for; it is removed too. If it was installed for another user, run "session uninstall" for that user as well.\n`);
   if (installed.state === 'installed' && !mine) io.stdout.write(`  ${installed.file} stays: it is installed for "${installed.user}" (${identityText(installed, c.platform)}), not for this user\n`);
@@ -341,11 +348,24 @@ async function uninstall({ flags, dataDir, io, deps }) {
     return 1;
   }
   if (steps.length) await c.execute(steps, { dryRun: false, io, entryPath: c.entryPath, nodePath: c.nodePath });
-  S.removeUserCopy({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid });
+  // Windows: the copy, then the entry install gave this SID on the users
+  // directory. If only that entry stays behind, the rest is still removed
+  // and the command says what is left and how to remove it.
+  let aclLeft = null;
+  try {
+    S.removeUserCopy({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid, ...(deps.runIcacls ? { runIcacls: deps.runIcacls } : {}) });
+  } catch (err) {
+    if (!err || err.aclNotRemoved !== true) throw err;
+    aclLeft = err.message;
+  }
   if (mine || damaged) {
     S.assertSafeComponents(installed.file, { root: c.configDir });
     // Never follows a link: a link is removed itself, a directory with what is in it.
     fs.rmSync(installed.file, { recursive: damaged, force: true });
+  }
+  if (aclLeft) {
+    io.stderr.write(`Session helper removed for ${sessionUser}, except one directory permission: ${aclLeft}\n`);
+    return 1;
   }
   io.stdout.write(`Session helper removed for ${sessionUser}.\n`);
   return 0;

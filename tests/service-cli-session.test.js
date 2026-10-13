@@ -527,6 +527,54 @@ describe('finding 3: session install verifies the Windows config dir', () => {
   });
 });
 
+describe('second review finding 1: the session user can read who owns the users directory (Windows)', () => {
+  const SID = 'S-1-5-21-1-2-3-1001';
+
+  it('install gives the user that one right on the directory before the copy exists, and says so before asking', { skip: POSIX }, async () => {
+    const s = setup();
+    const calls = [];
+    const t = io();
+    const d = deps(s, { runIcacls: (argv) => calls.push({ argv, copyThere: fs.existsSync(S.userCopyPath({ platform: 'win32', configDir: s.configDir, sid: SID })) }) });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
+    const dir = path.join(s.configDir, 'session', 'users');
+    assert.deepEqual(calls[0].argv, S.windowsUsersDirAclArgs(dir, SID));
+    assert.equal(calls[0].copyThere, false);
+    assert.match(t.out.join(''), /read who owns .*session.users/);
+  });
+
+  it('uninstall takes it off again, lists it first, and a dry run lists it without running anything', { skip: POSIX }, async () => {
+    const s = setup();
+    const calls = [];
+    const d = deps(s, { runIcacls: (argv) => calls.push(argv) });
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    const dir = path.join(s.configDir, 'session', 'users');
+    calls.length = 0;
+    const dry = io();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: dry.io, deps: d }), 0);
+    assert.deepEqual(calls, []);
+    assert.match(dry.out.join(''), /\[dry-run\] remove the entry for S-1-5-21-1-2-3-1001 from the ACL of .*session.users/);
+    const t = io();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
+    assert.deepEqual(calls, [S.windowsUsersDirRevokeArgs(dir, SID)]);
+    assert.match(t.out.join(''), /alice's right to read who owns .*session.users/);
+  });
+
+  it('when only that entry cannot be removed, everything else is, and the command says what is left (exit 1)', { skip: POSIX }, async () => {
+    const s = setup();
+    const d = deps(s);
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    const t = io();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: { ...d, runIcacls: () => { throw new Error('icacls failed'); } } }), 1);
+    assert.match(t.err.join(''), /except one directory permission/);
+    assert.match(t.err.join(''), /icacls .* \/remove:g \*S-1-5-21-1-2-3-1001/);
+    assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), false);
+    assert.equal(fs.existsSync(S.userCopyPath({ platform: 'win32', configDir: s.configDir, sid: SID })), false);
+    // The next run finishes it.
+    const again = io();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: again.io, deps: d }), 0);
+  });
+});
+
 describe('session uninstall, status, probe', () => {
   it('uninstall removes the copy, the canonical secret and the login start', async () => {
     const s = setup();

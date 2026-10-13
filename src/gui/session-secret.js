@@ -236,6 +236,32 @@ function windowsUserOwnerArgs(file, env = process.env) {
   return [windowsIcaclsExe(env), file, '/setowner', '*S-1-5-32-544'];
 }
 
+// The users directory inherits the config dir's protected ACL (SYSTEM,
+// Administrators, LOCAL SERVICE), so the session user, who is none of them,
+// could not read who owns it, and checkUserCopyTrust runs as that user: on a
+// real install the helper exited session_file_insecure before it connected
+// (second security review, finding 1). The user gets read-control,
+// read-attributes and synchronize on the directory itself: the first two are
+// what the owner read opens it with, and every CreateFile asks for the third
+// as well (without it the open is still refused; the test that runs the real
+// check found that). Nothing more: no (OI) or (CI), so no child inherits the
+// entry, and none of the three lists, reads or writes anything in it. /grant:r
+// replaces an older entry for the same SID. No traverse right is given on
+// the parents: every Windows account holds "bypass traverse checking"
+// unless an administrator took it away, and then nothing under the config
+// dir is reachable by path for that user anyway.
+function windowsUsersDirAclArgs(dir, sid, env = process.env) {
+  if (!SID_RE.test(String(sid))) throw new GuiError('invalid_params', 'a Windows session user is named by its SID');
+  return [windowsIcaclsExe(env), dir, '/grant:r', `*${sid}:(RC,S,RA)`];
+}
+
+// Uninstall takes that entry off again (by SID, so an account that is gone
+// is removed as well).
+function windowsUsersDirRevokeArgs(dir, sid, env = process.env) {
+  if (!SID_RE.test(String(sid))) throw new GuiError('invalid_params', 'a Windows session user is named by its SID');
+  return [windowsIcaclsExe(env), dir, '/remove:g', `*${sid}`];
+}
+
 function defaultRunIcacls(argv) {
   execFileSync(argv[0], argv.slice(1), { stdio: 'ignore', windowsHide: true });
 }
@@ -259,7 +285,12 @@ function writeUserCopy({ platform = process.platform, configDir, user, uid, gid,
     // inherits, so it is created empty, narrowed to this user (read),
     // SYSTEM and Administrators and given to Administrators, and only then
     // written. If any of that fails the file is removed: the secret is never
-    // in a file whose ACL nobody set.
+    // in a file whose ACL nobody set. The directory first (second review,
+    // finding 1): the user's right to read its owner, and its owner, which
+    // the helper checks. A failure there leaves no copy at all.
+    const dir = path.dirname(file);
+    runIcacls(windowsUsersDirAclArgs(dir, sid, env));
+    runIcacls(windowsUserOwnerArgs(dir, env));
     fs.closeSync(fs.openSync(file, flags, 0o600));
     try {
       runIcacls(windowsUserAclArgs(file, sid, env));
@@ -289,16 +320,34 @@ function writeUserCopy({ platform = process.platform, configDir, user, uid, gid,
   return file;
 }
 
-function removeUserCopy({ platform = process.platform, configDir, user, sid }) {
+function removeUserCopy({ platform = process.platform, configDir, user, sid, runIcacls = defaultRunIcacls, env = process.env }) {
   const file = userCopyPath({ platform, configDir, user, sid });
   assertSafeComponents(file, { root: configDir });
+  let removed = true;
   try {
     fs.unlinkSync(file);
-    return true;
   } catch (err) {
-    if (err.code === 'ENOENT') return false;
-    throw err;
+    if (err.code !== 'ENOENT') throw err;
+    removed = false;
   }
+  // Windows: the entry install gave this SID on the users directory goes
+  // too, after the copy (the secret is what matters most) and whether or
+  // not a copy was there, so a run that stopped half way is finished by the
+  // next one. A directory that is not there has no entry to remove.
+  if (platform === 'win32') {
+    const dir = path.dirname(file);
+    let st = null;
+    try { st = fs.lstatSync(dir); } catch { st = null; }
+    if (st && st.isDirectory() && !st.isSymbolicLink()) {
+      const argv = windowsUsersDirRevokeArgs(dir, sid, env);
+      try {
+        runIcacls(argv);
+      } catch {
+        throw Object.assign(new Error(`the copy is removed, but the entry for ${sid} could not be taken off ${dir}; as an administrator run: icacls "${dir}" /remove:g *${sid}`), { aclNotRemoved: true });
+      }
+    }
+  }
+  return removed;
 }
 
 function readUserCopy({ path: file, platform = process.platform, getuid = () => (typeof process.getuid === 'function' ? process.getuid() : -1), rootUid = 0 }) {
@@ -345,7 +394,8 @@ async function checkUserCopyTrust({ path: file, platform = process.platform, env
   try {
     report = await inspectOwners(paths, { env });
   } catch {
-    throw new GuiError('session_file_insecure', `the owners of ${file} and its directory could not be read`);
+    // An install older than the directory entry for this user ends here.
+    throw new GuiError('session_file_insecure', `the owners of ${file} and its directory could not be read (ask the administrator to run "session install" again: it gives this user the right to read them)`);
   }
   // No evidence is not trust.
   if (!report || !Array.isArray(report.entries) || report.entries.length !== paths.length) {
@@ -396,5 +446,6 @@ function resolveSessionUser(name, { platform = process.platform, execFile = (f, 
 module.exports = {
   mintSessionSecret, canonicalPath, writeCanonical, readCanonical, canonicalMtime, inspectCanonical, sameSessionIdentity,
   userCopyPath, writeUserCopy, readUserCopy, removeUserCopy, checkUserCopyTrust, windowsUserOwnerArgs,
+  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs,
   endpointPath, sessionIpcDir, assertSafeComponents, windowsUserAclArgs, resolveSessionUser
 };

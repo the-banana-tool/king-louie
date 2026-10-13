@@ -153,28 +153,75 @@ describe('per-user copies', () => {
     const { config } = tempConfig();
     const file = S.writeUserCopy({
       platform: 'win32', configDir: config, sid: 'S-1-5-21-1-2-3-1001', content, env,
-      runIcacls: (argv) => calls.push({ argv, bytes: fs.readFileSync(argv[1]).length })
+      runIcacls: (argv) => calls.push({ argv, bytes: fs.existsSync(argv[1]) && fs.statSync(argv[1]).isFile() ? fs.readFileSync(argv[1]).length : null })
     });
-    assert.equal(calls.length, 2);
-    assert.deepEqual(calls[0].argv, S.windowsUserAclArgs(file, 'S-1-5-21-1-2-3-1001', env));
-    assert.deepEqual(calls[1].argv, ['C:\\Windows\\System32\\icacls.exe', file, '/setowner', '*S-1-5-32-544']);
-    assert.deepEqual(calls.map((c) => c.bytes), [0, 0], 'the file held nothing while its ACL was being set');
+    // Second-review finding 1: the directory first (the user's right to
+    // read its owner and attributes, and its owner), then the file.
+    assert.equal(calls.length, 4);
+    const dir = path.dirname(file);
+    assert.deepEqual(calls[0].argv, S.windowsUsersDirAclArgs(dir, 'S-1-5-21-1-2-3-1001', env));
+    assert.deepEqual(calls[1].argv, ['C:\\Windows\\System32\\icacls.exe', dir, '/setowner', '*S-1-5-32-544']);
+    assert.deepEqual(calls[2].argv, S.windowsUserAclArgs(file, 'S-1-5-21-1-2-3-1001', env));
+    assert.deepEqual(calls[3].argv, ['C:\\Windows\\System32\\icacls.exe', file, '/setowner', '*S-1-5-32-544']);
+    assert.deepEqual(calls.map((c) => c.bytes), [null, null, 0, 0], 'the file was not there, then held nothing, while the ACLs were being set');
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), content);
+  });
+
+  // Second-review finding 1: the helper runs as the session user, and the
+  // users directory inherits the config dir's protected ACL (SYSTEM,
+  // Administrators, LOCAL SERVICE), so that user could not read who owns it.
+  it('Windows: the users directory gives the session user read-control, read-attributes and synchronize on itself, and nothing else', () => {
+    const env = { SystemRoot: 'C:\\Windows' };
+    const sid = 'S-1-5-21-1-2-3-1001';
+    // No (OI) or (CI): the entry is for the directory alone and no child
+    // inherits it. RC, RA and S (which every open asks for) only: the user
+    // can neither list nor write it.
+    assert.deepEqual(S.windowsUsersDirAclArgs('C:\\cfg\\session\\users', sid, env),
+      ['C:\\Windows\\System32\\icacls.exe', 'C:\\cfg\\session\\users', '/grant:r', `*${sid}:(RC,S,RA)`]);
+    assert.deepEqual(S.windowsUsersDirRevokeArgs('C:\\cfg\\session\\users', sid, env),
+      ['C:\\Windows\\System32\\icacls.exe', 'C:\\cfg\\session\\users', '/remove:g', `*${sid}`]);
+    assert.throws(() => S.windowsUsersDirAclArgs('C:\\cfg\\session\\users', 'Everyone', env), (e) => e.code === 'invalid_params');
+    assert.throws(() => S.windowsUsersDirRevokeArgs('C:\\cfg\\session\\users', '*S-1-1-0', env), (e) => e.code === 'invalid_params');
+  });
+
+  it('Windows: removing the copy takes the user\'s entry off the users directory; a missing directory asks for nothing', { skip: POSIX }, () => {
+    const { config } = tempConfig();
+    const sid = 'S-1-5-21-1-2-3-1001';
+    const file = S.writeUserCopy({ platform: 'win32', configDir: config, sid, content, runIcacls: () => {} });
+    const calls = [];
+    assert.equal(S.removeUserCopy({ platform: 'win32', configDir: config, sid, runIcacls: (argv) => calls.push(argv) }), true);
+    assert.equal(fs.existsSync(file), false);
+    assert.deepEqual(calls, [S.windowsUsersDirRevokeArgs(path.dirname(file), sid)]);
+    // Again: no file, the entry is still asked off (a run that failed half way is finished by the next).
+    assert.equal(S.removeUserCopy({ platform: 'win32', configDir: config, sid, runIcacls: (argv) => calls.push(argv) }), false);
+    assert.equal(calls.length, 2);
+    const { config: empty } = tempConfig();
+    assert.equal(S.removeUserCopy({ platform: 'win32', configDir: empty, sid, runIcacls: () => { throw new Error('must not run'); } }), false);
+  });
+
+  it('Windows: the copy is gone even when the entry cannot be taken off, and the failure is reported', { skip: POSIX }, () => {
+    const { config } = tempConfig();
+    const sid = 'S-1-5-21-1-2-3-1001';
+    const file = S.writeUserCopy({ platform: 'win32', configDir: config, sid, content, runIcacls: () => {} });
+    assert.throws(() => S.removeUserCopy({ platform: 'win32', configDir: config, sid, runIcacls: () => { throw new Error('icacls failed'); } }),
+      (e) => e.aclNotRemoved === true && e.message.includes('/remove:g'));
+    assert.equal(fs.existsSync(file), false);
   });
 
   it('Windows: if icacls fails the copy is removed and nothing of the secret was written', { skip: POSIX }, () => {
     const { config } = tempConfig();
     const sid = 'S-1-5-21-1-2-3-1001';
     const file = S.userCopyPath({ platform: 'win32', configDir: config, sid });
-    for (const failAt of [1, 2]) {
+    // Calls 1 and 2 are the directory's (before the file exists), 3 and 4 the file's.
+    for (const failAt of [1, 2, 3, 4]) {
       let n = 0;
       let seen = null;
       assert.throws(() => S.writeUserCopy({
         platform: 'win32', configDir: config, sid, content,
-        runIcacls: (argv) => { n += 1; if (n === failAt) { seen = fs.readFileSync(argv[1]).length; throw new Error('icacls failed'); } }
+        runIcacls: () => { n += 1; if (n === failAt) { seen = fs.existsSync(file) ? fs.readFileSync(file).length : null; throw new Error('icacls failed'); } }
       }), /icacls failed/);
-      assert.equal(seen, 0);
-      assert.equal(fs.existsSync(file), false, `removed after icacls call ${failAt} failed`);
+      assert.equal(seen, failAt <= 2 ? null : 0);
+      assert.equal(fs.existsSync(file), false, `no copy after icacls call ${failAt} failed`);
     }
     // An older copy is gone too: it is never left in place under a failed rotation.
     S.writeUserCopy({ platform: 'win32', configDir: config, sid, content, runIcacls: () => {} });
@@ -225,6 +272,100 @@ describe('per-user copies', () => {
       let called = 0;
       await S.checkUserCopyTrust({ path: '/etc/kl/session/users/alice.json', platform: 'linux', inspectOwners: async () => { called += 1; return null; } });
       assert.equal(called, 0);
+    });
+  });
+
+  // Second-review finding 1, with nothing injected: the real inspector (a
+  // Windows PowerShell child) against a temp directory whose ACL is the one
+  // a real install leaves, as far as an unelevated test can build it. The
+  // users directory admits SYSTEM and Administrators only, as it does when
+  // it inherits the config dir's protected ACL. This process owns the temp
+  // directory, and an owner may always read an object's security
+  // descriptor, so an OWNER RIGHTS entry takes that away: write-DAC only,
+  // which is also what lets the test undo it. icacls cannot read such a
+  // directory either, so the lock is lifted with one blind DACL write.
+  describe('checkUserCopyTrust for real (Windows: icacls on a temp dir, nothing injected)', { skip: POSIX }, () => {
+    const { execFileSync } = require('child_process');
+    const { windowsPowerShellExe } = require('../src/platform/windows-paths');
+    const { windowsPowerShellEnv } = require('./helpers/windows-powershell-env');
+    const icacls = (argv) => execFileSync(argv[0], argv.slice(1), { stdio: 'ignore', windowsHide: true });
+    const LIFT = [
+      "$ErrorActionPreference = 'Stop'",
+      "Add-Type -TypeDefinition @'",
+      'using System;',
+      'using System.Runtime.InteropServices;',
+      'public static class KlTestAcl {',
+      '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+      '  public static extern bool SetFileSecurityW(string name, uint info, byte[] sd);',
+      '}',
+      "'@",
+      '$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+      '$sd = New-Object System.Security.AccessControl.RawSecurityDescriptor("D:P(A;;FA;;;OW)")',
+      '$bytes = New-Object byte[] $sd.BinaryLength',
+      '$sd.GetBinaryForm($bytes, 0)',
+      // DACL_SECURITY_INFORMATION; needs write-DAC only.
+      'if (-not [KlTestAcl]::SetFileSecurityW($env:KL_TEST_ACL_DIR, 4, $bytes)) { throw "SetFileSecurityW failed" }',
+      '[Console]::Out.WriteLine($me)'
+    ].join('\n');
+    // Gives the owner (this user) full control again, through OWNER RIGHTS so
+    // that no entry names this user's own SID; answers with that SID.
+    const lift = (dir) => execFileSync(windowsPowerShellExe(), ['-NoProfile', '-NonInteractive', '-Command', LIFT], {
+      env: windowsPowerShellEnv({ KL_TEST_ACL_DIR: dir }), encoding: 'utf8', windowsHide: true
+    }).trim();
+    // What the users directory looks like to a session user on a real
+    // install: no inherited entry, SYSTEM and Administrators only. /grant:r
+    // replaces only the entries of the SIDs it names, so an entry the
+    // product gave this user stays.
+    const lock = (dir) => icacls([windowsIcaclsExe(), dir, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)', '*S-1-3-4:(WDAC)']);
+    const codeOf = async (p) => { try { await p; return null; } catch (e) { return e.code; } };
+
+    function build() {
+      const { config } = tempConfig();
+      const dir = path.join(config, 'session', 'users');
+      fs.mkdirSync(dir, { recursive: true });
+      const me = lift(dir);
+      assert.match(me, /^S-1-5-/);
+      // Registered before anything locks it, and runs before tempConfig's own removal.
+      cleanups.unshift(() => { try { lift(dir); } catch { /* removed already */ } });
+      const file = path.join(dir, `${me}.json`);
+      fs.writeFileSync(file, `${JSON.stringify(content)}\n`);
+      // The file's own ACL, as install sets it: this user reads it.
+      icacls(S.windowsUserAclArgs(file, me));
+      return { dir, file, me };
+    }
+
+    it('proves the finding: without the entry the session user cannot read who owns the directory, and the helper would exit', async () => {
+      const { dir, file } = build();
+      lock(dir);
+      try {
+        assert.equal(await codeOf(S.checkUserCopyTrust({ path: file, alsoTrustCurrentUser: true })), 'session_file_insecure');
+      } finally {
+        lift(dir);
+      }
+    });
+
+    it('with the entry install adds, the same check passes, and the user can still neither list nor write the directory', async () => {
+      const { dir, file, me } = build();
+      icacls(S.windowsUsersDirAclArgs(dir, me));
+      lock(dir);
+      try {
+        // This user owns the temp directory (an unelevated test cannot give
+        // it to Administrators), so the owner rule is relaxed; the read
+        // itself, which is what failed, is the real one.
+        assert.equal(await codeOf(S.checkUserCopyTrust({ path: file, alsoTrustCurrentUser: true })), null);
+        assert.equal(await codeOf(S.checkUserCopyTrust({ path: file })), 'session_file_insecure', 'still refused when the owner is not SYSTEM or Administrators');
+        assert.equal(S.readUserCopy({ path: file, platform: 'win32' }).nodeId, content.node_id);
+        assert.throws(() => fs.readdirSync(dir), /EPERM|EACCES/);
+        assert.throws(() => fs.writeFileSync(path.join(dir, 'planted.json'), '{}'), /EPERM|EACCES/);
+        // Uninstall's command takes the entry off again: the read is refused as before.
+        lift(dir);
+        icacls(S.windowsUsersDirAclArgs(dir, me));
+        icacls(S.windowsUsersDirRevokeArgs(dir, me));
+        lock(dir);
+        assert.equal(await codeOf(S.checkUserCopyTrust({ path: file, alsoTrustCurrentUser: true })), 'session_file_insecure');
+      } finally {
+        lift(dir);
+      }
     });
   });
 });
