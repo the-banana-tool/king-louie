@@ -522,14 +522,19 @@ executor jobs only. (b) The send is counted, the way a job's contacts are (`reco
   usage only when it commits, so both fits read the envelope through `withPendingJobs` (open jobs that
   have not recorded yet count their contacts and attempts), a send's check of the case's `contactsPerDay`
   subtracts `pendingJobContacts`, and a released send never takes out or refunds a contact that an open
-  job under the envelope names (`openJobRecipients`). Left as it was: two jobs checked back to back can
-  both pass the case's `contactsPerDay` (a job checks it and charges at commit, it does not reserve); and
-  a fresh contact a pending job and a send both count is charged twice for the day (too high).
+  job under the envelope names (`openJobRecipients`). A job's own check of `contactsPerDay` subtracts
+  `pendingJobContacts` too, so two jobs checked back to back cannot both pass it, and a send's settle
+  (mark or release) runs under the same lock (second review 2026-10-13). A reservation of the global daily
+  cap, a job's (`job.reservedDay`) or a send's, is released only into the usage day it was made on; a job
+  stored without a day releases nothing. Left as it is: a fresh contact a pending job and a send both
+  count is charged twice for the day (too high); and the usd cap is fitted against cost already recorded,
+  so several pending jobs can each fit it before any reports its cost.
 - Residuals: a channel send's money cost is unknown and is not charged (`estimateUsd: 0`; the usd cap is
   not consumed). A released send gives back a contact only when it alone counted it, so two overlapping
   sends to one new contact that both fail leave that contact counted for the day (too high, never too
   low). `sendEnvelope` compares the channel adapter's normalized target with `recipients.allow`, which was
-  normalized for the executor's own channel; a form that differs is refused. Revoking an envelope does not
+  normalized for the executor's own channel; a form that differs is refused (an approved email recipient
+  with an upper-case local part can never be sent to, because the channel send lower-cases the address). Revoking an envelope does not
   recall a send already past its reservation. The Bash write-guard gap applies to `usage` and `payloads`
   as to the rest of the envelope file.
 

@@ -24,9 +24,10 @@
 // another process holding it refuses the send. systemAction runs inline for
 // any holder in this process, so the lock does not serialize two sends
 // here. Two things do: the check and its writes run with no await between
-// them, and a whole reservation (the global cap included) runs under one
-// per-case mutex, so a second send never reads a count the first is about
-// to undo.
+// them, and a whole reservation (the global cap included) and every settle
+// run under the case's counting lock (ExecutorRegistry#countingLock), the
+// one a job's fit-to-job-file section runs under (submit.js), so a second
+// send, a release or a job never reads a count another is about to change.
 const { createLogger } = require('../../logging');
 const { canonicalize } = require('../../platform/jcs');
 const { EnvelopeStore } = require('./envelope');
@@ -260,9 +261,12 @@ async function settleChannelSend(reg, reservation, { sent = true, unconfirmed = 
   if (reservation.settled) return { ok: true, state: reservation.settled };
   const { caseId, sendId } = reservation;
   try {
-    const out = await reg.caseRuntime.systemAction(caseId, `channel send ${sendId} ${sent === false ? 'released' : 'sent'}`, () => (
+    // Under the counting lock, like the reservation: a release looks at the
+    // open jobs to decide what it may give back, so it must not run while a
+    // job is between its fit and its job file.
+    const out = await reg.countingLock(caseId, () => reg.caseRuntime.systemAction(caseId, `channel send ${sendId} ${sent === false ? 'released' : 'sent'}`, () => (
       sent === false ? undoInCase(reg, reservation) : markInCase(reg, reservation, { unconfirmed: unconfirmed === true, reason })
-    ));
+    )));
     reservation.settled = out.state;
     // Only into the day it was reserved on; with no day on record nothing
     // is released (the count stays, too high rather than too low).

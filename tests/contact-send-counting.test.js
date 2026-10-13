@@ -647,4 +647,41 @@ describe('jobs, sends and the counting lock', () => {
     assert.deepStrictEqual(s.sms.plain, []);
     assert.deepStrictEqual(s.counts().attempts, { [BROKER]: 1 });
   });
+
+  it('a release waits for a job that is between its fit and its job file, and then leaves its contact', async () => {
+    const s = await setup();
+    const held = await s.reg.reserveChannelSend({
+      caseId: s.meta.id, envelopeId: s.envelopeId, executorId: 'fake-agent', channelId: 'sms', recipients: [BROKER], sendId: 'd-held', rendered: TEXT,
+      expectedHash: s.store.get(s.envelopeId).hash
+    });
+    assert.strictEqual(held.ok, true, held.error);
+    // The job treats BROKER as already counted, then waits (on the detour
+    // gate's follow-up work here; on any await in its checked section).
+    const order = [];
+    let release = null;
+    const realIndex = s.reg.indexJob.bind(s.reg);
+    let hooked = false;
+    const realFit = require('../src/cases/executors/envelope-ops').withPendingJobs;
+    const ops = require('../src/cases/executors/envelope-ops');
+    ops.withPendingJobs = (...args) => {
+      if (!hooked) {
+        hooked = true;
+        // Inside the job's checked section, before its job file exists.
+        release = s.reg.settleChannelSend(held.reservation, { sent: false }).then((out) => { order.push('released'); return out; });
+      }
+      return realFit(...args);
+    };
+    s.reg.indexJob = async (...args) => { order.push('job file written'); return realIndex(...args); };
+    try {
+      const done = await job(s, BROKER);
+      assert.strictEqual(done.ok, true, JSON.stringify(done));
+      assert.deepStrictEqual(await release, { ok: true, state: 'released' });
+    } finally {
+      ops.withPendingJobs = realFit;
+    }
+    assert.deepStrictEqual(order.slice(0, 1), ['job file written'], 'the release ran after the job left its checked section');
+    assert.ok(order.includes('released'));
+    const c = s.counts();
+    assert.deepStrictEqual([c.contacts, c.caseToday, c.globalLeft], [[BROKER], 1, 4], 'the contact the job relies on stays counted');
+  });
 });
