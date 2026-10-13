@@ -1,5 +1,6 @@
 package com.example.kinglouie.protocol
 
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -47,7 +48,10 @@ class LeaseVectorTest {
 
     private val listingVectors = setOf(
         "listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
-        "listing-other-device", "listing-bad-signature"
+        "listing-other-device", "listing-bad-signature",
+        // Fourth security review: another pinned node's listing, an extra status beside one, and the shape.
+        "listing-other-node", "listing-wrong-node", "listing-extra-status", "listing-duplicate-lease",
+        "listing-too-many", "listing-extra-key", "listing-bad-at"
     )
 
     /** R-F5-20: a node's listing is taken whole or not at all. */
@@ -69,6 +73,52 @@ class LeaseVectorTest {
         }
         assertEquals(0, vector("listing-none")["expect"]["leases"].arr()!!.size)
         assertEquals(2, vector("listing-live")["expect"]["leases"].arr()!!.size)
+        // An extra signed status beside the listing is not part of it.
+        assertEquals(2, vector("listing-extra-status")["given"]["statuses"].arr()!!.size)
+        assertEquals(1, vector("listing-extra-status")["expect"]["leases"].arr()!!.size)
+    }
+
+    /**
+     * Fourth security review: the shape of a listing, as the node's validator
+     * has it. The four vectors are signed by the node, so it is the shape
+     * alone that refuses them; and each rule is tried by hand.
+     */
+    @Test
+    fun listingShape() {
+        for (name in listOf("listing-duplicate-lease", "listing-too-many", "listing-extra-key", "listing-bad-at")) {
+            val v = vector(name)
+            val envelope = Envelope.fromJson(v["input"]!!)
+            assertTrue(name, envelope.verifyEd25519(pin(v).key))
+            assertTrue(name, !Leases.isListing(envelope.message()))
+        }
+        val good = Envelope.fromJson(vector("listing-live")["input"]!!).message()
+        assertTrue(Leases.isListing(good))
+        assertTrue(Leases.isListing(Envelope.fromJson(vector("listing-none")["input"]!!).message()))
+        assertEquals(8, Leases.LISTING_MAX)
+        fun changed(key: String, value: JsonElement?): JsonElement =
+            JsonObject(if (value == null) good.obj()!!.filterKeys { it != key } else good.obj()!! + (key to value))
+        val entry = good["leases"].arr()!![0]
+        fun leases(entries: List<JsonElement>): JsonElement = changed("leases", JsonArray(entries))
+        fun entryWith(key: String, value: JsonElement?): JsonElement =
+            JsonObject(if (value == null) entry.obj()!!.filterKeys { it != key } else entry.obj()!! + (key to value))
+        val bad = listOf(
+            "a key missing" to changed("at", null), "a key too many" to changed("note", JsonPrimitive("x")),
+            "v 2" to changed("v", JsonPrimitive(2)), "another type" to changed("type", JsonPrimitive("kl.lease.status")),
+            "node id" to changed("node_id", JsonPrimitive("gpu-box")), "device id" to changed("to_device", JsonPrimitive("phone")),
+            "nonce" to changed("nonce", JsonPrimitive("short")), "at: not a time" to changed("at", JsonPrimitive("now")),
+            "at: no such day" to changed("at", JsonPrimitive("2026-02-30T18:04:11.201Z")), "at: a number" to changed("at", JsonPrimitive(1)),
+            "leases: not a list" to changed("leases", JsonObject(emptyMap())),
+            "the same lease twice" to leases(listOf(entry, entry)),
+            "nine leases" to leases(List(9) { entry }),
+            "an entry that is not an object" to leases(listOf(JsonPrimitive("x"))),
+            "an entry with a key too many" to leases(listOf(entryWith("state", JsonPrimitive("active")))),
+            "an entry with no seq" to leases(listOf(entryWith("seq", null))),
+            "seq 0" to leases(listOf(entryWith("seq", JsonPrimitive(0)))), "seq 1.5" to leases(listOf(entryWith("seq", JsonPrimitive(1.5)))),
+            "seq as text" to leases(listOf(entryWith("seq", JsonPrimitive("7")))),
+            "lease id" to leases(listOf(entryWith("lease_id", JsonPrimitive("lease-1")))),
+            "not an object" to JsonArray(emptyList())
+        )
+        for ((why, message) in bad) assertTrue(why, !Leases.isListing(message))
     }
 
     /** R-F5-20: the relay's reply, node by node. No listing for a node is no answer from it. */

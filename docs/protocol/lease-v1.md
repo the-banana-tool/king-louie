@@ -242,8 +242,15 @@ re-sends the status.
   `frame_hash_mismatch`).
 - `listing` (R-F5-20; `verifyLeaseListing` in `src/gui/lease-protocol.js` is
   the reference, `Leases.verifyListing` / `checkListing` in both phone
-  cores): the node signature against the pin (`bad_signature`); type and
-  node (`malformed`, `wrong_node`); `nonce` equals the one this phone chose
+  cores): the envelope is Ed25519 with the pinned node's `kid`
+  (`malformed`: a listing another node signed, however validly, is not
+  this node's); the node signature against the pin (`bad_signature`); the
+  whole shape, as in §1 (`malformed`: exactly the seven keys, `v` 1, a node
+  id, a device id, a 32-byte nonce, `at` a real time, at most eight
+  `leases`, each exactly `{ lease_id, seq }` with a UUID v4 and an integer
+  of at least 1, and no lease twice; `isListing` in both phone cores is the
+  node's `VALIDATORS['kl.lease.listing']`); the node it names
+  (`wrong_node`); `nonce` equals the one this phone chose
   for this request (`nonce_mismatch`); `to_device` is this device
   (`wrong_device`); for each entry of `leases`, among the statuses listed
   beside it, one the same node signed with that `lease_id` and `seq`
@@ -275,7 +282,7 @@ message the phone must build). Phones consume `grant-valid`, `grant-narrowed`,
 `status-pending` (`granted_by: null`), `status-granted-unnamed` (a granting
 device with `name: null`) (`expect.status` holds the fields a phone reads,
 the contact token and `granted_by` among them), `view-node-sig-valid`
-(`expect.contact_token`), `view-tampered-frame`, and the seven listing vectors
+(`expect.contact_token`), `view-tampered-frame`, and the fourteen listing vectors
 (R-F5-20): `given.nonce` and `given.device_id` are the phone's own,
 `given.statuses` the status envelopes that came beside the listing, and
 `expect.leases` (`[{ lease_id, seq, state }]`) what the phone then knows of the
@@ -283,4 +290,12 @@ node: `listing-none` (nothing running, signed), `listing-live`,
 `listing-nonce-mismatch` (an answer to an earlier request),
 `listing-status-withheld` (an entry left out), `listing-status-stale` (an
 older status of the same lease in its place), `listing-other-device`,
-`listing-bad-signature`. Thirty-nine vectors in all.
+`listing-bad-signature`; and (fourth security review) `listing-other-node`
+(another pinned node's own listing, validly signed by that node:
+`malformed`, its `kid` is not this node's), `listing-wrong-node` (this
+node's key over a listing that names another node), `listing-extra-status`
+(a signed status beside the listing that it does not name: accepted, and
+that status is not part of what the phone then knows), and four for the
+shape, each signed by the node: `listing-duplicate-lease`,
+`listing-too-many` (nine entries), `listing-extra-key`, `listing-bad-at`
+(a day that does not exist). Forty-six vectors in all.

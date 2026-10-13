@@ -287,6 +287,36 @@ object Leases {
         )
     }
 
+    /** The most leases a listing names (the node lists the live one and the four that ended last; LISTING_MAX in src/gui/lease-protocol.js). */
+    const val LISTING_MAX = 8
+
+    /**
+     * The shape of a kl.lease.listing, exactly as the node's own validator
+     * has it (VALIDATORS['kl.lease.listing'] in src/gui/lease-protocol.js;
+     * fourth security review): these seven keys and no other; v 1; a node
+     * id, a device id, a nonce of 32 bytes, a real time in `at`; at most
+     * LISTING_MAX leases, each `{ lease_id, seq }` and nothing else, a
+     * lowercase UUID v4 and an integer of at least 1, and no lease twice.
+     */
+    internal fun isListing(message: JsonElement): Boolean {
+        val m = message.obj() ?: return false
+        if (!Rules.hasExactKeys(m, listOf("v", "type", "node_id", "to_device", "nonce", "at", "leases"))) return false
+        if (m["v"].int() != 1 || m["type"].str() != "kl.lease.listing") return false
+        if (!Rules.isNodeId(m["node_id"]) || !Rules.isDeviceId(m["to_device"]) || !Rules.isNonce(m["nonce"]) || !Rules.isTimestamp(m["at"])) return false
+        val leases = m["leases"].arr() ?: return false
+        if (leases.size > LISTING_MAX) return false
+        val seen = HashSet<String>()
+        for (entry in leases) {
+            val e = entry.obj() ?: return false
+            if (!Rules.hasExactKeys(e, listOf("lease_id", "seq")) || !Rules.isUuidV4(e["lease_id"])) return false
+            val leaseId = e["lease_id"].str() ?: return false
+            val seq = e["seq"] ?: return false
+            if (!Rules.isInteger(seq) || (seq.int() ?: 0) < 1) return false
+            if (!seen.add(leaseId)) return false
+        }
+        return true
+    }
+
     /**
      * One node's listing (R-F5-20), checked the way `verifyLeaseListing` in
      * src/gui/lease-protocol.js does: the pinned node's signature over the
@@ -306,7 +336,8 @@ object Leases {
         } catch (e: ProtocolException) {
             return refused("malformed")
         }
-        if (m["type"].str() != "kl.lease.listing" || m["v"].int() != 1) return refused("malformed")
+        // The shape in full, after the signature and before anything is read from it.
+        if (!isListing(m)) return refused("malformed")
         val named = m["leases"].arr() ?: return refused("malformed")
         val signedNonce = m["nonce"].str() ?: return refused("malformed")
         val toDevice = m["to_device"].str() ?: return refused("malformed")

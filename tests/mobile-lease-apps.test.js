@@ -349,7 +349,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
         at = next;
       }
     };
-    inOrder(verifySwift, ['envelope.kid == pin.id', 'envelope.verifyEd25519(spkiHex: pin.key)', '"kl.lease.listing"', 'm["node_id"]?.stringValue == pin.id',
+    inOrder(verifySwift, ['envelope.kid == pin.id', 'envelope.verifyEd25519(spkiHex: pin.key)', 'isListing(m)', 'm["node_id"]?.stringValue == pin.id',
       'signedNonce == nonce', 'toDevice == deviceId', 'verifiedMessage(candidate, pin: pin)', '$0.status.leaseId == leaseId && $0.status.seq == seq', 'accepted: true'], 'verifyListing (Swift)');
     assert.match(verifySwift, /guard !nonce\.isEmpty, signedNonce == nonce else \{ return refused\("nonce_mismatch"\) \}/);
     assert.match(verifySwift, /else \{ return refused\("status_missing"\) \}/);
@@ -361,7 +361,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
 
     const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
     const verifyKotlin = section(kotlin, 'fun verifyListing', '\n    }\n');
-    inOrder(verifyKotlin, ['envelope.kid != pin.id', '!envelope.verifyEd25519(pin.key)', '"kl.lease.listing"', 'm["node_id"].str() != pin.id',
+    inOrder(verifyKotlin, ['envelope.kid != pin.id', '!envelope.verifyEd25519(pin.key)', '!isListing(m)', 'm["node_id"].str() != pin.id',
       'signedNonce != nonce', 'toDevice != deviceId', 'verifiedMessage(candidate, pin)', 'it.first.leaseId == leaseId && it.first.seq == seq', 'ListingCheck(true, null, listed)'], 'verifyListing (Kotlin)');
     assert.match(verifyKotlin, /if \(nonce\.isEmpty\(\) \|\| signedNonce != nonce\) return refused\("nonce_mismatch"\)/);
     assert.match(verifyKotlin, /\?: return refused\("status_missing"\)/);
@@ -414,6 +414,48 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(pending, /is AppModel\.LeaseNodeCheck\.Unconfirmed -> Text\(Leases\.couldNotConfirm\(pin\.name\), /);
     assert.match(pending, /if \(model\.nodes\.any \{ model\.leaseChecks\[it\.id\] is AppModel\.LeaseNodeCheck\.Unconfirmed \}\) Text\(Leases\.COULD_NOT_CONFIRM_DETAIL \+ /);
     none(screens, ['No computer-use', 'Nothing is running', 'No leases'], 'LeaseScreens.kt');
+  });
+
+  // Fourth security review, finding 4: both phone cores check a listing's
+  // shape as the node's validator does (VALIDATORS['kl.lease.listing'] in
+  // src/gui/lease-protocol.js), after the signature and before they read
+  // anything from it; the listing vectors for it are run by both.
+  it('finding 4: both cores check a listing\'s whole shape (exact keys, a real `at`, at most eight leases, each once) and run every listing vector', () => {
+    const L = require('../src/gui/lease-protocol');
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    assert.equal(L.LISTING_MAX, 8);
+    assert.match(swift, /public static let listingMax = 8\n/);
+    assert.match(kotlin, /const val LISTING_MAX = 8\n/);
+    const shapeSwift = section(swift, 'static func isListing(_ message: JSONValue) -> Bool', '\n    }\n');
+    for (const needle of ['Rules.hasExactKeys(m, ["v", "type", "node_id", "to_device", "nonce", "at", "leases"])', 'm["v"]?.intValue == 1', 'm["type"]?.stringValue == "kl.lease.listing"',
+      'Rules.isNodeId(m["node_id"])', 'Rules.isDeviceId(m["to_device"])', 'Rules.isNonce(m["nonce"])', 'Rules.isTimestamp(m["at"])', 'leases.count <= listingMax',
+      'Rules.hasExactKeys(e, ["lease_id", "seq"])', 'Rules.isUuidV4(e["lease_id"])', 'Rules.isInteger(seq)', 'n >= 1', 'seen.insert(leaseId).inserted']) {
+      assert.ok(shapeSwift.includes(needle), `${needle} in isListing (Swift)`);
+    }
+    const shapeKotlin = section(kotlin, 'internal fun isListing(message: JsonElement): Boolean', '\n    }\n');
+    for (const needle of ['Rules.hasExactKeys(m, listOf("v", "type", "node_id", "to_device", "nonce", "at", "leases"))', 'm["v"].int() != 1', 'm["type"].str() != "kl.lease.listing"',
+      '!Rules.isNodeId(m["node_id"])', '!Rules.isDeviceId(m["to_device"])', '!Rules.isNonce(m["nonce"])', '!Rules.isTimestamp(m["at"])', 'leases.size > LISTING_MAX',
+      '!Rules.hasExactKeys(e, listOf("lease_id", "seq"))', '!Rules.isUuidV4(e["lease_id"])', '!Rules.isInteger(seq)', '(seq.int() ?: 0) < 1', '!seen.add(leaseId)']) {
+      assert.ok(shapeKotlin.includes(needle), `${needle} in isListing (Kotlin)`);
+    }
+    // It refuses as "malformed", as the node's check does.
+    assert.match(section(swift, 'public static func verifyListing', '\n    }\n'), /guard let m = try\? envelope\.message\(\), isListing\(m\),\n[^\n]+\n[^\n]+else \{ return refused\("malformed"\) \}/);
+    assert.match(section(kotlin, 'fun verifyListing', '\n    }\n'), /if \(!isListing\(m\)\) return refused\("malformed"\)/);
+    // Both cores' vector tests name every listing vector the generator marks for phones, and no other.
+    const dir = path.join(ROOT, 'tests', 'vectors', 'lease-v1');
+    const listing = fs.readdirSync(dir).filter((f) => f.startsWith('listing-')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+    assert.equal(listing.length, 14);
+    for (const v of listing) assert.deepEqual(v.consumers.slice().sort(), ['android', 'ios', 'node'], v.name);
+    const names = listing.map((v) => v.name).sort();
+    const swiftTests = read('mobile', 'ios', 'KLProtocol', 'Tests', 'KLProtocolTests', 'LeaseVectorTests.swift');
+    const kotlinTests = read('mobile', 'android', 'protocol', 'src', 'test', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'LeaseVectorTest.kt');
+    const namedIn = (text) => [...new Set(text.match(/"listing-[a-z-]+"/g).map((s) => s.slice(1, -1)))].sort();
+    assert.deepEqual(namedIn(section(swiftTests, 'static let listingVectors = [', ']')), names);
+    assert.deepEqual(namedIn(section(kotlinTests, 'private val listingVectors = setOf(', ')')), names);
+    assert.deepEqual(namedIn(section(swiftTests, 'func testEveryIosVectorIsCovered', '\n    }\n')), names);
+    assert.match(swiftTests, /func testListingShape\(\) throws \{/);
+    assert.match(kotlinTests, /fun listingShape\(\) \{/);
   });
 
   // Fourth security review, finding 2. "Never asked" used to look the same

@@ -277,6 +277,30 @@ public enum Leases {
         ])
     }
 
+    /// The most leases a listing names (the node lists the live one and the
+    /// four that ended last; LISTING_MAX in src/gui/lease-protocol.js).
+    public static let listingMax = 8
+
+    /// The shape of a kl.lease.listing, exactly as the node's own validator
+    /// has it (VALIDATORS['kl.lease.listing'] in src/gui/lease-protocol.js;
+    /// fourth security review): these seven keys and no other; v 1; a node
+    /// id, a device id, a nonce of 32 bytes, a real time in `at`; at most
+    /// `listingMax` leases, each `{ lease_id, seq }` and nothing else, a
+    /// lowercase UUID v4 and an integer of at least 1, and no lease twice.
+    static func isListing(_ message: JSONValue) -> Bool {
+        guard let m = message.objectValue, Rules.hasExactKeys(m, ["v", "type", "node_id", "to_device", "nonce", "at", "leases"]),
+              m["v"]?.intValue == 1, m["type"]?.stringValue == "kl.lease.listing",
+              Rules.isNodeId(m["node_id"]), Rules.isDeviceId(m["to_device"]), Rules.isNonce(m["nonce"]), Rules.isTimestamp(m["at"]),
+              let leases = m["leases"]?.arrayValue, leases.count <= listingMax else { return false }
+        var seen = Set<String>()
+        for entry in leases {
+            guard let e = entry.objectValue, Rules.hasExactKeys(e, ["lease_id", "seq"]), Rules.isUuidV4(e["lease_id"]),
+                  let leaseId = e["lease_id"]?.stringValue, let seq = e["seq"], Rules.isInteger(seq), let n = seq.intValue, n >= 1,
+                  seen.insert(leaseId).inserted else { return false }
+        }
+        return true
+    }
+
     /// One node's listing (R-F5-20), checked the way
     /// `verifyLeaseListing` in src/gui/lease-protocol.js does: the pinned
     /// node's signature over the received bytes; a kl.lease.listing of that
@@ -285,12 +309,13 @@ public enum Leases {
     /// and, for every lease it names, a status of that lease with that seq
     /// which the same node signed, among `statuses` (so no entry can be
     /// left out or swapped for an older one). Statuses it does not name are
-    /// not returned.
+    /// not returned. The message's shape is checked in full first
+    /// (`isListing`), after the signature and before anything is read from it.
     public static func verifyListing(_ envelope: Envelope, pin: NodePin, nonce: String, deviceId: String, statuses: [Envelope]) -> ListingCheck {
         func refused(_ reason: String) -> ListingCheck { ListingCheck(accepted: false, reason: reason, statuses: []) }
         guard envelope.alg == "Ed25519", envelope.kid == pin.id else { return refused("malformed") }
         guard envelope.verifyEd25519(spkiHex: pin.key) else { return refused("bad_signature") }
-        guard let m = try? envelope.message(), m["type"]?.stringValue == "kl.lease.listing", m["v"]?.intValue == 1,
+        guard let m = try? envelope.message(), isListing(m),
               let named = m["leases"]?.arrayValue, let signedNonce = m["nonce"]?.stringValue,
               let toDevice = m["to_device"]?.stringValue else { return refused("malformed") }
         guard m["node_id"]?.stringValue == pin.id else { return refused("wrong_node") }

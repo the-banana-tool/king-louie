@@ -20,11 +20,14 @@ const EXPECTED = [
   'lease-changed-app-path', 'apps-not-requested', 'minutes-over-requested', 'minutes-over-60', 'expired', 'revoke-valid',
   'revoke-phone-clock-off', 'revoke-unknown-lease', 'revoke-replayed', 'watch-valid', 'watch-no-token', 'watch-bad-token',
   'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame',
-  'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature'
+  'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature',
+  // Fourth security review: another pinned node's listing, an extra status beside one, and the shape (each lease once, at most eight, exact keys, a real time).
+  'listing-other-node', 'listing-wrong-node', 'listing-extra-status', 'listing-duplicate-lease', 'listing-too-many', 'listing-extra-key', 'listing-bad-at'
 ];
 const PHONE = ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'watch-no-token',
   'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame',
-  'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature'];
+  'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature',
+  'listing-other-node', 'listing-wrong-node', 'listing-extra-status', 'listing-duplicate-lease', 'listing-too-many', 'listing-extra-key', 'listing-bad-at'];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')));
 const byName = new Map(vectors.map((v) => [v.name, v]));
@@ -65,8 +68,49 @@ function verifyStatus(envelope, node) {
 }
 
 describe('lease-v1 vectors', () => {
+  // Fourth security review: the listing vectors that are refused for their
+  // shape or their signer are what they say they are (so a phone core that
+  // refuses them refuses them for that, and not for a broken signature).
+  it('the new listing vectors: validly signed, and wrong in exactly the way their names say', () => {
+    const { open } = require('../src/approvals/envelope');
+    const { verifyEd25519 } = require('../src/approvals/envelope');
+    const read = (name) => { const v = byName.get(name); return { v, m: open(v.input).message }; };
+    // Another pinned node's own listing: its signature is good under its own key, and it is not this node's.
+    const other = read('listing-other-node');
+    assert.notEqual(other.v.input.kid, other.v.given.node.id);
+    assert.equal(other.m.node_id, other.v.input.kid);
+    assert.equal(verifyEd25519(other.v.input, other.v.given.node.key), false);
+    // This node's key over a listing that names another node.
+    const wrong = read('listing-wrong-node');
+    assert.equal(wrong.v.input.kid, wrong.v.given.node.id);
+    assert.equal(verifyEd25519(wrong.v.input, wrong.v.given.node.key), true);
+    assert.notEqual(wrong.m.node_id, wrong.v.given.node.id);
+    // Signed by this node, for this phone and this nonce; only the shape is off.
+    for (const name of ['listing-duplicate-lease', 'listing-too-many', 'listing-extra-key', 'listing-bad-at']) {
+      const { v, m } = read(name);
+      assert.equal(verifyEd25519(v.input, v.given.node.key), true, name);
+      assert.deepEqual([m.node_id, m.nonce, m.to_device], [v.given.node.id, v.given.nonce, v.given.device_id], name);
+      assert.deepEqual([v.expect.accepted, v.expect.reason], [false, 'malformed'], name);
+    }
+    const dup = read('listing-duplicate-lease').m.leases;
+    assert.equal(dup.length, 2);
+    assert.equal(dup[0].lease_id, dup[1].lease_id);
+    assert.notEqual(dup[0].seq, dup[1].seq);
+    // Both statuses it names are beside it: only the repeat is wrong.
+    assert.equal(byName.get('listing-duplicate-lease').given.statuses.length, 2);
+    const many = read('listing-too-many').m.leases;
+    assert.equal(many.length, L.LISTING_MAX + 1);
+    assert.equal(new Set(many.map((l) => l.lease_id)).size, many.length);
+    assert.ok(Object.hasOwn(read('listing-extra-key').m, 'note'));
+    assert.equal(read('listing-bad-at').m.at, '2026-02-30T18:04:11.201Z', 'the right form, and no such day');
+    // An extra status beside the listing is not taken: the phone knows of exactly what the listing names.
+    const extra = byName.get('listing-extra-status');
+    assert.equal(extra.given.statuses.length, 2);
+    assert.equal(extra.expect.leases.length, 1);
+  });
+
   it('has exactly the expected set, and phones consume exactly theirs', () => {
-    assert.equal(EXPECTED.length, 39);
+    assert.equal(EXPECTED.length, 46);
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
     for (const phone of ['ios', 'android']) {
       assert.deepEqual(vectors.filter((v) => v.consumers.includes(phone)).map((v) => v.name).sort(), [...PHONE].sort());

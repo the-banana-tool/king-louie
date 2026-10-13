@@ -1,0 +1,50 @@
+{
+  "name": "listing-extra-status",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": null,
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "node": {
+      "id": "kl-hnef32472qzibi5r",
+      "name": "gpu-box",
+      "key": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950"
+    },
+    "nonce": "4Xo3gJ5w_PGNYILymTbCi7ls_xY1u1mXN6jsChtJMKU",
+    "device_id": "d-3vmwrihhdbnit4oi",
+    "statuses": [
+      {
+        "alg": "Ed25519",
+        "kid": "kl-hnef32472qzibi5r",
+        "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJJYlpVaHdma3VSWk8tLUVBWmhmSWNnIiwiZXhwaXJlc19hdCI6bnVsbCwiZ3JhbnRlZF9ieSI6eyJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJuYW1lIjoiT3duZXIgcGhvbmUifSwibGVhc2VfaWQiOiJmMWRiN2ZlNC1mYzIyLTQzZWEtYmYyNy1lYjY2OGZhZmJlMTgiLCJsb2NrZWQiOmZhbHNlLCJub2RlX2lkIjoia2wtaG5lZjMyNDcycXppYmk1ciIsInJlYXNvbiI6InJldm9rZWQiLCJzZXEiOjMsInN0YXRlIjoiZW5kZWQiLCJ0eXBlIjoia2wubGVhc2Uuc3RhdHVzIiwidiI6MX0",
+        "sig": "Iwyf0-DqgwiIHUOXyVWu2CtPH4hfMdLZSoFDYLy_nuO60MvFSmVoMUPQzTtRCctgrJE-ujTelUZKu33RfCUODA"
+      },
+      {
+        "alg": "Ed25519",
+        "kid": "kl-hnef32472qzibi5r",
+        "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJvZnIwYUFCNS1hX0JOYkRNaTRWVmh3IiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MTQ6MTEuMjAxWiIsImdyYW50ZWRfYnkiOnsiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwibmFtZSI6Ik93bmVyIHBob25lIn0sImxlYXNlX2lkIjoiYTkwZDJlMmMtZmI2NC00ZWQ2LTg5NDgtMTE0MzNjYTEyMGIzIiwibG9ja2VkIjpmYWxzZSwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJyZWFzb24iOm51bGwsInNlcSI6Nywic3RhdGUiOiJhY3RpdmUiLCJ0eXBlIjoia2wubGVhc2Uuc3RhdHVzIiwidiI6MX0",
+        "sig": "176bOQNX-1wTBF_SD81z31lBSDQ0HxKotBqOQM5jQjiw0vznwarzX3oNzQG3QZzT2m_6QOi3FwiGUEQbkfL_AA"
+      }
+    ]
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-hnef32472qzibi5r",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImxlYXNlcyI6W3sibGVhc2VfaWQiOiJhOTBkMmUyYy1mYjY0LTRlZDYtODk0OC0xMTQzM2NhMTIwYjMiLCJzZXEiOjd9XSwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJub25jZSI6IjRYbzNnSjV3X1BHTllJTHltVGJDaTdsc194WTF1MW1YTjZqc0NodEpNS1UiLCJ0b19kZXZpY2UiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJ0eXBlIjoia2wubGVhc2UubGlzdGluZyIsInYiOjF9",
+    "sig": "g4uQ7Im32mF99PNDfPoVZHWEuazf9SCQ_hWO5tr2s4bDw_GNNDCQFYVbt9eMg2aVKLpCcNuTgZGlqG3aVR2xCA"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "leases": [
+      {
+        "lease_id": "a90d2e2c-fb64-4ed6-8948-11433ca120b3",
+        "seq": 7,
+        "state": "active"
+      }
+    ]
+  }
+}

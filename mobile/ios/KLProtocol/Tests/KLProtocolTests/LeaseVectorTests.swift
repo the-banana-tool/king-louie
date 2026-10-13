@@ -45,11 +45,16 @@ final class LeaseVectorTests: XCTestCase {
                                "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed",
                                "view-node-sig-valid", "view-tampered-frame",
                                "listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
-                               "listing-other-device", "listing-bad-signature"])
+                               "listing-other-device", "listing-bad-signature",
+                               "listing-other-node", "listing-wrong-node", "listing-extra-status", "listing-duplicate-lease",
+                               "listing-too-many", "listing-extra-key", "listing-bad-at"])
     }
 
     static let listingVectors = ["listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
-                                 "listing-other-device", "listing-bad-signature"]
+                                 "listing-other-device", "listing-bad-signature",
+                                 // Fourth security review: another pinned node's listing, an extra status beside one, and the shape.
+                                 "listing-other-node", "listing-wrong-node", "listing-extra-status", "listing-duplicate-lease",
+                                 "listing-too-many", "listing-extra-key", "listing-bad-at"]
 
     /// R-F5-20: a node's listing is taken whole or not at all.
     func testListings() throws {
@@ -70,6 +75,55 @@ final class LeaseVectorTests: XCTestCase {
         }
         XCTAssertEqual(try vector("listing-none")["expect"]!["leases"]!.arrayValue!.count, 0)
         XCTAssertEqual(try vector("listing-live")["expect"]!["leases"]!.arrayValue!.count, 2)
+        // An extra signed status beside the listing is not part of it.
+        XCTAssertEqual(try vector("listing-extra-status")["given"]!["statuses"]!.arrayValue!.count, 2)
+        XCTAssertEqual(try vector("listing-extra-status")["expect"]!["leases"]!.arrayValue!.count, 1)
+    }
+
+    /// Fourth security review: the shape of a listing, as the node's
+    /// validator has it. The four vectors are signed by the node, so it is
+    /// the shape alone that refuses them; and each rule is tried by hand.
+    func testListingShape() throws {
+        for name in ["listing-duplicate-lease", "listing-too-many", "listing-extra-key", "listing-bad-at"] {
+            let v = try vector(name)
+            let envelope = try Envelope(json: v["input"]!)
+            XCTAssertTrue(envelope.verifyEd25519(spkiHex: pin(v).key), name)
+            XCTAssertFalse(Leases.isListing(try envelope.message()), name)
+        }
+        let good = try Envelope(json: try vector("listing-live")["input"]!).message()
+        XCTAssertTrue(Leases.isListing(good))
+        XCTAssertTrue(Leases.isListing(try Envelope(json: try vector("listing-none")["input"]!).message()))
+        XCTAssertEqual(Leases.listingMax, 8)
+        func with(_ key: String, _ value: JSONValue?) -> JSONValue {
+            var o = good.objectValue!
+            o[key] = value
+            return .object(o)
+        }
+        let entry = good["leases"]![0]!
+        func leases(_ entries: [JSONValue]) -> JSONValue { with("leases", .array(entries)) }
+        func entryWith(_ key: String, _ value: JSONValue?) -> JSONValue {
+            var o = entry.objectValue!
+            o[key] = value
+            return .object(o)
+        }
+        let bad: [(String, JSONValue)] = [
+            ("a key missing", with("at", nil)), ("a key too many", with("note", .string("x"))),
+            ("v 2", with("v", .number("2"))), ("another type", with("type", .string("kl.lease.status"))),
+            ("node id", with("node_id", .string("gpu-box"))), ("device id", with("to_device", .string("phone"))),
+            ("nonce", with("nonce", .string("short"))), ("at: not a time", with("at", .string("now"))),
+            ("at: no such day", with("at", .string("2026-02-30T18:04:11.201Z"))), ("at: a number", with("at", .number("1"))),
+            ("leases: not a list", with("leases", .object([:]))),
+            ("the same lease twice", leases([entry, entry])),
+            ("nine leases", leases((0..<9).map { _ in entry })),
+            ("an entry that is not an object", leases([.string("x")])),
+            ("an entry with a key too many", leases([entryWith("state", .string("active"))])),
+            ("an entry with no seq", leases([entryWith("seq", nil)])),
+            ("seq 0", leases([entryWith("seq", .number("0"))])), ("seq 1.5", leases([entryWith("seq", .number("1.5"))])),
+            ("seq as text", leases([entryWith("seq", .string("7"))])),
+            ("lease id", leases([entryWith("lease_id", .string("lease-1"))])),
+            ("not an object", .array([]))
+        ]
+        for (why, message) in bad { XCTAssertFalse(Leases.isListing(message), why) }
     }
 
     /// R-F5-20: the relay's reply, node by node. No listing for a node is no answer from it.
