@@ -202,8 +202,15 @@ function buildGuiTools(gui) {
       const code = isGuiError(err) ? err.code : 'backend_failed';
       // The typed buffer holds what was sent, not what was confirmed: after
       // a failure that can follow the send (no answer in time, the backend
-      // or the helper gone mid-op) the text counts as typed.
-      if (lease && typedFn && MAY_HAVE_SENT.includes(code)) typedFn(lease.typed, { certain: false });
+      // or the helper gone mid-op) the text counts as typed. Typed text goes
+      // out in pieces (second review finding 5), and a failure says which
+      // went out (err.typed): the pieces the helper answered for count, the
+      // one in flight counts when it may have been typed, and the pieces
+      // never sent do not.
+      if (lease && typedFn && err && err.typed) {
+        const text = `${err.typed.sent}${MAY_HAVE_SENT.includes(code) ? err.typed.inFlight : ''}`;
+        if (text) typedFn(lease.typed, { certain: false, text });
+      } else if (lease && typedFn && MAY_HAVE_SENT.includes(code)) typedFn(lease.typed, { certain: false });
       if (lease) {
         leases.noteInputOutcome(lease, { code });
         if (liveView) liveView.recordAction(lease, { tool: toolName, summary, result: `refused:${code}` });
@@ -345,7 +352,8 @@ function buildGuiTools(gui) {
         const guard = checkTypeText(text, { alwaysConfirm: remote.always_confirm || [], vaultValues: vaultValues(options), buffer: lease.typed.value, segments: lease.typed.segments });
         if (!guard.ok) throw new GuiError(guard.code);
         // A line break is text like any other: it does not wipe the buffer.
-        return { action: { kind: 'type', text }, typed: (buffer) => buffer.append(text) };
+        // `sent`: the part that went out, when a failure cut the text short.
+        return { action: { kind: 'type', text }, typed: (buffer, { text: sent = text } = {}) => buffer.append(sent) };
       });
     }),
 

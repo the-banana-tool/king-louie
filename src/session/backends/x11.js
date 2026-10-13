@@ -33,11 +33,23 @@ function parseShell(text) {
   return out;
 }
 
-function createX11Backend({ env = process.env, log = createLogger('session-helper/x11'), spawnImpl, readlink = fs.readlinkSync, readdir = fs.readdirSync, exists = fs.existsSync,
-  execFileImpl = (file, args, opts = {}) => new Promise((resolve, reject) => {
+// Runs one program and gives its output. opts.onChild gets the child at
+// once, so a caller can stop it while it runs (the typing xdotool).
+function runFile(env) {
+  return (file, args, opts = {}) => new Promise((resolve, reject) => {
     const child = execFile(file, args, { env, encoding: opts.encoding || 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: opts.timeout || 20000 }, (err, stdout) => (err ? reject(err) : resolve({ stdout })));
+    if (typeof opts.onChild === 'function') opts.onChild(child);
     if (opts.input !== undefined) child.stdin.end(opts.input);
-  }) } = {}) {
+  });
+}
+
+function createX11Backend({ env = process.env, log = createLogger('session-helper/x11'), spawnImpl, readlink = fs.readlinkSync, readdir = fs.readdirSync, exists = fs.existsSync,
+  execFileImpl = runFile(env) } = {}) {
+  // The xdotool that is typing right now, if any (second security review,
+  // finding 5). It presses a key every 24 ms and knows nothing of the lease,
+  // so release_all, which the service sends on Stop, expiry and suspension,
+  // kills it.
+  let typing = null;
   const x = async (args, opts) => (await execFileImpl(XDOTOOL, args, opts)).stdout;
   const pidOf = async (win) => Number(String(await x(['getwindowpid', String(win)])).trim());
   const geometry = async (win) => {
@@ -119,9 +131,17 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
       try { await fn(); } finally { for (const k of [...m].reverse()) await x(['keyup', k]); }
     };
     switch (action.kind) {
-      case 'type':
-        await x(['type', '--clearmodifiers', '--delay', String(TYPE_DELAY_MS), '--file', '-'], { input: String(action.text), timeout: typeTimeoutMs(action.text) });
+      case 'type': {
+        let mine = null;
+        try {
+          await x(['type', '--clearmodifiers', '--delay', String(TYPE_DELAY_MS), '--file', '-'], {
+            input: String(action.text), timeout: typeTimeoutMs(action.text), onChild: (child) => { mine = child; typing = child; }
+          });
+        } finally {
+          if (typing === mine) typing = null;
+        }
         break;
+      }
       case 'key':
         await x(['key', '--clearmodifiers', '--repeat', String(action.repeat || 1), [...m, sym].join('+')]);
         break;
@@ -218,6 +238,12 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
     },
     input,
     async releaseAll() {
+      // First the typing itself: a key that is still to come is not "held".
+      if (typing) {
+        const child = typing;
+        typing = null;
+        try { child.kill('SIGKILL'); } catch { /* gone already */ }
+      }
       try { await x(['keyup', 'ctrl', 'alt', 'shift', 'super']); } catch { /* nothing held */ }
       for (const b of ['1', '2', '3']) {
         try { await x(['mouseup', b]); } catch { /* nothing held */ }
@@ -230,4 +256,4 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
   };
 }
 
-module.exports = { createX11Backend };
+module.exports = { createX11Backend, runFile };

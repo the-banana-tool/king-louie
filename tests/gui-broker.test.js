@@ -96,12 +96,92 @@ describe('how long an input may take (review finding 10)', () => {
     assert.equal(channel.requests.find((r) => r.op === 'input').opts.timeoutMs, undefined);
     channel.requests.length = 0;
     const text = 'x'.repeat(2000);
+    assert.ok(inputTimeoutMs({ kind: 'type', text }) > 60000, 'two thousand characters at xdotool\'s pace do not fit in ten seconds');
     await b.input({ kind: 'type', text }, { jobId: 'job-1', leaseId: 'l1', appIds: ['calculator'], yieldMs: 0 });
-    const sent = channel.requests.find((r) => r.op === 'input');
-    assert.equal(sent.opts.timeoutMs, inputTimeoutMs({ kind: 'type', text }));
-    assert.ok(sent.opts.timeoutMs > 60000, 'two thousand characters at xdotool\'s pace do not fit in ten seconds');
+    // Long text goes out a piece at a time (below); each piece gets the time its own length needs.
+    const sent = channel.requests.filter((r) => r.op === 'input');
+    for (const s of sent) assert.equal(s.opts.timeoutMs, inputTimeoutMs({ kind: 'type', text: s.params.action.text }));
     assert.equal(inputTimeoutMs({ kind: 'type', text: 'é'.repeat(10) }), inputTimeoutMs({ kind: 'type', text: 'x'.repeat(10) }), 'counted in code points');
     assert.equal(inputTimeoutMs({ kind: 'click' }), undefined);
+  });
+});
+
+// Second security review, finding 5: one long Type was one op, so a Stop,
+// an expiry or a suspension that came while it ran did not stop the keys
+// (on X11 xdotool goes on for up to a minute). The service now sends typed
+// text in short pieces and checks the lease before each one.
+describe('second review finding 5: typed text goes out in short pieces, the lease checked before each', () => {
+  const { TYPE_CHUNK, typeChunks } = require('../src/gui/broker');
+  const typed = (channel) => channel.requests.filter((r) => r.op === 'input').map((r) => r.params.action.text);
+  const where = { jobId: 'job-1', leaseId: 'l1', appIds: ['calculator'], yieldMs: 0 };
+
+  it('pieces of at most TYPE_CHUNK code points, in order, that join back into the text; never half a character', () => {
+    assert.ok(TYPE_CHUNK >= 20 && TYPE_CHUNK <= 64, 'short enough that a Stop lands within about a second on the slowest backend');
+    const text = `${'a'.repeat(TYPE_CHUNK - 1)}😀${'b'.repeat(TYPE_CHUNK)}é\nlast`;
+    const chunks = typeChunks(text);
+    assert.equal(chunks.join(''), text);
+    assert.ok(chunks.every((c) => Array.from(c).length <= TYPE_CHUNK && c.length > 0));
+    assert.equal(chunks[0], `${'a'.repeat(TYPE_CHUNK - 1)}😀`, 'the pair stays whole');
+    assert.deepEqual(typeChunks('short'), ['short']);
+    assert.deepEqual(typeChunks('x'.repeat(TYPE_CHUNK)), ['x'.repeat(TYPE_CHUNK)]);
+    assert.equal(typeChunks('x'.repeat(2000)).length, Math.ceil(2000 / TYPE_CHUNK));
+  });
+
+  it('every piece is its own input op with the same expected set, and the lease is checked before each', async () => {
+    let checks = 0;
+    const leases = { assertUsable: () => { checks += 1; return { leaseId: 'l1' }; }, statusSummary: () => null, active: () => null, onHelperDisconnected() {}, setLocked() {} };
+    const { b, channel } = broker({ leases });
+    channel.connect();
+    const text = 'k'.repeat(TYPE_CHUNK * 3 + 7);
+    const out = await b.input({ kind: 'type', text }, where);
+    assert.deepEqual(typed(channel), typeChunks(text));
+    assert.equal(typed(channel).length, 4);
+    assert.equal(checks, 4, 'one lease check immediately before each piece');
+    const ops = channel.requests.filter((r) => r.op === 'input');
+    for (const op of ops) assert.deepEqual(op.params.expect, ops[0].params.expect);
+    assert.equal(out.afterMatches, true);
+    // A key or a click is still one op and one check.
+    checks = 0;
+    channel.requests.length = 0;
+    await b.input({ kind: 'key', mods: [], key: 'a', repeat: 1 }, where);
+    assert.deepEqual([checks, channel.requests.filter((r) => r.op === 'input').length], [1, 1]);
+  });
+
+  it('Stop while a long text is being typed: the piece in flight ends, and no further piece is sent', async () => {
+    let stopped = false;
+    const leases = {
+      assertUsable: () => { if (stopped) throw new GuiError('lease_revoked', 'call RequestLease for a new lease'); return { leaseId: 'l1' }; },
+      statusSummary: () => null, active: () => null, onHelperDisconnected() {}, setLocked() {}
+    };
+    let n = 0;
+    const { b, channel } = broker({ leases, handlers: { input: async () => { n += 1; if (n === 2) stopped = true; return { foregroundBefore: CALC, foregroundAfter: CALC }; } } });
+    channel.connect();
+    const text = 'k'.repeat(TYPE_CHUNK * 5);
+    const err = await b.input({ kind: 'type', text }, where).then(() => null, (e) => e);
+    assert.equal(err.code, 'lease_revoked');
+    assert.equal(typed(channel).length, 2, 'the two pieces that were sent before the Stop, and none after');
+    // What was sent, exactly: the typed buffer is built from this.
+    assert.deepEqual(err.typed, { sent: text.slice(0, TYPE_CHUNK * 2), inFlight: '' });
+  });
+
+  it('a piece that fails says what went before it and what was in flight; a refusal before any piece says nothing was sent', async () => {
+    let n = 0;
+    const failing = broker({ handlers: { input: async () => { n += 1; if (n === 3) throw new GuiError('op_timeout', 'input'); return { foregroundBefore: CALC, foregroundAfter: CALC }; } } });
+    failing.channel.connect();
+    const text = `${'a'.repeat(TYPE_CHUNK)}${'b'.repeat(TYPE_CHUNK)}${'c'.repeat(TYPE_CHUNK)}${'d'.repeat(9)}`;
+    const err = await failing.b.input({ kind: 'type', text }, where).then(() => null, (e) => e);
+    assert.equal(err.code, 'op_timeout');
+    assert.deepEqual(err.typed, { sent: 'a'.repeat(TYPE_CHUNK) + 'b'.repeat(TYPE_CHUNK), inFlight: 'c'.repeat(TYPE_CHUNK) });
+    assert.equal(typed(failing.channel).length, 3);
+    // The process lookup failed: nothing was sent, whatever the code.
+    const early = broker({ handlers: { processes: async () => { throw new GuiError('helper_disconnected'); } } });
+    early.channel.connect();
+    const none = await early.b.input({ kind: 'type', text: 'abc' }, where).then(() => null, (e) => e);
+    assert.equal(none.code, 'helper_disconnected');
+    assert.deepEqual(none.typed, { sent: '', inFlight: '' });
+    // Only typed text carries this.
+    const click = await early.b.input({ kind: 'key', mods: [], key: 'a', repeat: 1 }, where).then(() => null, (e) => e);
+    assert.equal(click.typed, undefined);
   });
 });
 

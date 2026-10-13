@@ -41,6 +41,20 @@ function inputTimeoutMs(action) {
   return TYPE_BASE_MS + TYPE_PER_CHAR_MS * Array.from(String(action.text || '')).length;
 }
 
+// Typed text goes to the helper in pieces of at most this many code points,
+// on every platform, and the lease is checked before each piece (second
+// security review, finding 5): a Stop, an expiry or a suspension takes
+// effect within one piece instead of after the whole text. At xdotool's
+// pace (two key events a character, 12 ms after each) a piece is about a
+// second; the Windows worker sends one in a single call.
+const TYPE_CHUNK = 40;
+function typeChunks(text) {
+  const points = Array.from(String(text));
+  const out = [];
+  for (let i = 0; i < points.length; i += TYPE_CHUNK) out.push(points.slice(i, i + TYPE_CHUNK).join(''));
+  return out;
+}
+
 class GuiBroker extends EventEmitter {
   constructor({ channel, guiConfig, getPolicy = () => ({}), audit = null, dataDir = null, platform = process.platform, clock = Date.now,
     log = createLogger('gui/broker'), heartbeatMs = 10000, realpath = realResolve } = {}) {
@@ -369,31 +383,61 @@ class GuiBroker extends EventEmitter {
   }
 
   async input(action, { jobId, leaseId, appIds, yieldMs }) {
-    this.require('gui.input');
-    const expect = await this.expectFor(appIds);
-    // The lease again, now (security review finding 4): the lookup above is
-    // a round trip to the helper, and a Stop, an expiry, a suspension or the
-    // job closing during it must not be followed by one more input. Nothing
-    // awaits between this check and the send. No lease manager, no input.
-    if (!this.leases) throw new GuiError('lease_required', 'this node has no lease manager');
-    const lease = this.leases.assertUsable(jobId);
-    if (lease.leaseId !== leaseId) throw new GuiError('lease_required', 'that lease is no longer this job\'s lease');
-    const timeoutMs = inputTimeoutMs(action);
-    let res;
+    const typing = Boolean(action && action.kind === 'type');
+    // For typed text: what the helper has acknowledged, and the piece it was
+    // sent last and has not answered for. A failure carries both (err.typed),
+    // so the typed buffer holds exactly what was sent.
+    const progress = { sent: '', inFlight: '' };
     try {
-      res = await this.channel.request('input', { expect, yield_ms: yieldMs, action }, { jobId, leaseId, ...(timeoutMs ? { timeoutMs } : {}) });
+      this.require('gui.input');
+      const expect = await this.expectFor(appIds);
+      // The lease again, now (security review finding 4): the lookup above is
+      // a round trip to the helper, and a Stop, an expiry, a suspension or the
+      // job closing during it must not be followed by one more input. Nothing
+      // awaits between this check and the send. No lease manager, no input.
+      if (!this.leases) throw new GuiError('lease_required', 'this node has no lease manager');
+      const checkLease = () => {
+        const lease = this.leases.assertUsable(jobId);
+        if (lease.leaseId !== leaseId) throw new GuiError('lease_required', 'that lease is no longer this job\'s lease');
+      };
+      const send = async (piece) => {
+        const timeoutMs = inputTimeoutMs(piece);
+        try {
+          return await this.channel.request('input', { expect, yield_ms: yieldMs, action: piece }, { jobId, leaseId, ...(timeoutMs ? { timeoutMs } : {}) });
+        } catch (err) {
+          if (isGuiError(err) && err.code === 'point_obscured') throw this._obscured(err, { jobId, pids: expect.pids });
+          throw err;
+        }
+      };
+      let first = null;
+      let res = null;
+      if (typing) {
+        // A piece at a time, the lease checked before each (finding 5).
+        for (const chunk of typeChunks(action.text)) {
+          checkLease();
+          progress.inFlight = chunk;
+          res = await send({ ...action, text: chunk });
+          progress.sent += chunk;
+          progress.inFlight = '';
+          if (first === null) first = res;
+        }
+      } else {
+        checkLease();
+        res = await send(action);
+        first = res;
+      }
+      const after = res && res.foregroundAfter;
+      const afterAppId = after ? (appIds.find((id) => imageMatches(after.image, this._match([id]), this.platform)) || null) : null;
+      return {
+        foregroundBefore: first && first.foregroundBefore ? first.foregroundBefore : null,
+        foregroundAfter: after || null,
+        afterMatches: Boolean(after && expect.pids.includes(after.pid) && imageMatches(after.image, expect.match, this.platform)),
+        afterAppId
+      };
     } catch (err) {
-      if (isGuiError(err) && err.code === 'point_obscured') throw this._obscured(err, { jobId, pids: expect.pids });
+      if (typing && err !== null && typeof err === 'object') err.typed = { sent: progress.sent, inFlight: progress.inFlight };
       throw err;
     }
-    const after = res && res.foregroundAfter;
-    const afterAppId = after ? (appIds.find((id) => imageMatches(after.image, this._match([id]), this.platform)) || null) : null;
-    return {
-      foregroundBefore: res && res.foregroundBefore ? res.foregroundBefore : null,
-      foregroundAfter: after || null,
-      afterMatches: Boolean(after && expect.pids.includes(after.pid) && imageMatches(after.image, expect.match, this.platform)),
-      afterAppId
-    };
   }
 
   async releaseAll() {
@@ -419,4 +463,4 @@ class GuiBroker extends EventEmitter {
   }
 }
 
-module.exports = { GuiBroker, SUSPENDING_CODES, suspendsLease, SCREENSHOTS_PER_JOB, SCREENSHOT_TTL_MS, inputTimeoutMs };
+module.exports = { GuiBroker, SUSPENDING_CODES, suspendsLease, SCREENSHOTS_PER_JOB, SCREENSHOT_TTL_MS, inputTimeoutMs, TYPE_CHUNK, typeChunks };

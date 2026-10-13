@@ -179,6 +179,62 @@ describe('X11 backend (scripted xdotool)', () => {
     }
   });
 
+  // Second review finding 5: xdotool types a character every 24 ms and knows
+  // nothing of the lease. release_all (sent on Stop, expiry and suspension)
+  // kills the xdotool that is typing before it releases keys and buttons.
+  it('release_all kills the xdotool that is typing, then releases keys and buttons', async () => {
+    const order = [];
+    const children = [];
+    const execFileImpl = (file, args, opts = {}) => {
+      const key = [file.split('/').pop(), ...args].join(' ');
+      if (args[0] === 'type') {
+        return new Promise((resolve, reject) => {
+          const child = { killed: null, kill(signal) { this.killed = signal; order.push(`kill ${signal}`); reject(Object.assign(new Error('Command failed: xdotool type'), { killed: true, signal })); return true; } };
+          children.push(child);
+          opts.onChild(child);
+        });
+      }
+      if (args[0] === 'keyup' || args[0] === 'mouseup') order.push(args.join(' '));
+      for (const [pattern, out] of baseScript) if (pattern.test(key)) return Promise.resolve({ stdout: out });
+      return Promise.resolve({ stdout: '' });
+    };
+    const b = createX11Backend({ env: { DISPLAY: ':0', XDG_SESSION_ID: '3' }, execFileImpl, readlink, exists: () => true });
+    const expect = { match: ['/usr/bin/gnome-calculator'], pids: [4242] };
+    const typing = b.input({ expect, action: { kind: 'type', text: 'x'.repeat(50) }, yieldMs: 0 }).then(() => 'typed', (e) => e);
+    for (let i = 0; i < 20 && children.length === 0; i += 1) await new Promise((r) => setImmediate(r));
+    assert.equal(children.length, 1, 'xdotool is typing');
+    await b.releaseAll();
+    assert.equal(children[0].killed, 'SIGKILL');
+    assert.deepEqual(order.slice(0, 2), ['kill SIGKILL', 'keyup ctrl alt shift super'], 'killed first, then the modifiers go up');
+    assert.ok(order.includes('mouseup 1'));
+    const outcome = await typing;
+    assert.ok(outcome instanceof Error, 'the type op fails; the service counts its text as possibly typed');
+    // Nothing is typing now: a second release kills nothing.
+    await b.releaseAll();
+    assert.equal(order.filter((o) => o.startsWith('kill')).length, 1);
+    // A text that finishes by itself leaves nothing to kill.
+    const quick = createX11Backend({ env: { DISPLAY: ':0', XDG_SESSION_ID: '3' }, execFileImpl: (file, args, opts = {}) => {
+      if (args[0] === 'type') { opts.onChild({ kill() { order.push('late kill'); } }); return Promise.resolve({ stdout: '' }); }
+      return execFileImpl(file, args, opts);
+    }, readlink, exists: () => true });
+    await quick.input({ expect, action: { kind: 'type', text: 'ok' }, yieldMs: 0 });
+    await quick.releaseAll();
+    assert.ok(!order.includes('late kill'));
+  });
+
+  it('the backend\'s own runner hands back the child it started, and a killed child fails its call', async () => {
+    const { runFile } = require('../src/session/backends/x11');
+    let child = null;
+    const running = runFile(process.env)(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { timeout: 20000, onChild: (c) => { child = c; } }).then(() => 'exited', (e) => e);
+    assert.ok(child && Number.isInteger(child.pid), 'the child is handed over before the call settles');
+    child.kill('SIGKILL');
+    const outcome = await running;
+    assert.ok(outcome instanceof Error);
+    assert.equal(child.exitCode === null ? child.signalCode !== null : true, true, 'the child is gone');
+    // Without onChild it runs as before.
+    assert.equal(String((await runFile(process.env)(process.execPath, ['-e', 'process.stdout.write("ok")'])).stdout), 'ok');
+  });
+
   it('maps the key grammar to X keysyms', () => {
     assert.equal(XDOTOOL_KEYS.enter, 'Return');
     assert.equal(XDOTOOL_KEYS.pageup, 'Prior');

@@ -612,6 +612,50 @@ describe('input tools', () => {
     assert.equal(lease.typed.value, 'half of it', 'not typed');
   });
 
+  // Second review finding 5: a long text goes out in pieces, and the typed
+  // buffer holds exactly what was sent when a Stop or a failure cuts it short.
+  it('finding 5: after a Stop in the middle of a long Type the typed buffer holds the pieces that were sent, no more', async () => {
+    const { TYPE_CHUNK } = require('../src/gui/broker');
+    await withLease();
+    const lease = leases.current();
+    const text = `${'a'.repeat(TYPE_CHUNK)}${'b'.repeat(TYPE_CHUNK)}${'c'.repeat(TYPE_CHUNK)}`;
+    let n = 0;
+    channel.during = { input: async () => { n += 1; if (n === 2) leases.onRevoke(phone.leaseRevoke(testNodeIdentity({ key: 'gpu-box' }).nodeId, lease.leaseId)); } };
+    assert.match((await tools.Type.execute({ text }, opts())).error, /^lease_revoked/);
+    assert.equal(channel.requests.filter((r) => r.op === 'input').length, 2, 'the third piece was never sent');
+    assert.equal(lease.typed.value, text.slice(0, TYPE_CHUNK * 2));
+    assert.equal(actions.at(-1).summary, `Typed ${TYPE_CHUNK * 3} characters`);
+    assert.equal(actions.at(-1).result, 'refused:lease_revoked');
+  });
+
+  it('finding 5: a piece that may have been typed counts, the pieces after it do not; a whole text that went out is in the buffer once', async () => {
+    const { TYPE_CHUNK } = require('../src/gui/broker');
+    await withLease();
+    const lease = leases.current();
+    const text = `${'a'.repeat(TYPE_CHUNK)}${'b'.repeat(TYPE_CHUNK)}${'c'.repeat(TYPE_CHUNK)}`;
+    let n = 0;
+    const real = channel.request.bind(channel);
+    channel.request = async (op, params) => {
+      if (op === 'input') { n += 1; if (n === 2) { channel.requests.push({ op, params }); throw new GuiError('op_timeout', 'input'); } }
+      return real(op, params);
+    };
+    assert.match((await tools.Type.execute({ text }, opts())).error, /^op_timeout/);
+    assert.equal(lease.typed.value, text.slice(0, TYPE_CHUNK * 2), 'the piece that timed out may be on the screen; the third was never sent');
+    // user_active on the second piece: the helper refused it before injecting.
+    lease.typed.reset();
+    n = 0;
+    channel.request = async (op, params) => {
+      if (op === 'input') { n += 1; if (n === 2) throw new GuiError('user_active'); }
+      return real(op, params);
+    };
+    assert.match((await tools.Type.execute({ text }, opts())).error, /^user_active/);
+    assert.equal(lease.typed.value, 'a'.repeat(TYPE_CHUNK));
+    lease.typed.reset();
+    channel.request = real;
+    assert.equal((await tools.Type.execute({ text }, opts())).ok, true);
+    assert.equal(lease.typed.value, text);
+  });
+
   // Security review finding 4: the lease is checked again after the round
   // trip that looks up the app's processes, immediately before the send.
   for (const [name, end, code] of [
