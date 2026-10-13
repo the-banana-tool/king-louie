@@ -1,13 +1,16 @@
 package com.example.kinglouie.protocol
 
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.time.Instant
+import java.util.Base64
 import java.util.UUID
 
 enum class AppMode { WELCOME, DEMO, LIVE }
@@ -73,6 +76,87 @@ class DemoFleet(names: List<String> = listOf("gpu-box", "laptop", "web-01")) {
                 "created_at" to jsonString(Timestamps.string(now)),
                 "expires_at" to jsonString(Timestamps.string(now.plusSeconds(300))),
                 "nonce" to jsonString(Messages.randomNonce())
+            )
+        )
+        return Envelope.seal(message, node.pin.id, "Ed25519") { bytes ->
+            Signature.getInstance("Ed25519").run { initSign(node.keys.private); update(bytes); sign() }
+        }
+    }
+
+    /** A node-signed lease request, as a real node would send it (demo mode, §3.10). */
+    fun leaseRequest(index: Int, apps: List<String>, minutes: Int, now: Instant = Instant.now()): Envelope {
+        val node = nodes[index]
+        val lease = JsonObject(
+            mapOf(
+                "kind" to jsonString("computer_use"),
+                "job_id" to jsonString("job-demo"),
+                "apps" to JsonArray(apps.map { id ->
+                    val name = id.replaceFirstChar { it.uppercase() }
+                    JsonObject(
+                        mapOf(
+                            "id" to jsonString(id), "name" to jsonString(name),
+                            "path" to jsonString("C:\\Program Files\\" + name + "\\" + id + ".exe"), "processes" to JsonArray(emptyList())
+                        )
+                    )
+                }),
+                "max_minutes" to jsonNumber(minutes.toString()),
+                "reason" to jsonString("Enter the monthly totals"),
+                "resumes" to JsonNull,
+                "limits" to JsonArray(emptyList())
+            )
+        )
+        val message = JsonObject(
+            mapOf(
+                "v" to jsonNumber("1"),
+                "type" to jsonString("kl.lease.request"),
+                "request_id" to jsonString(UUID.randomUUID().toString()),
+                "lease_id" to jsonString(UUID.randomUUID().toString()),
+                "node_id" to jsonString(node.pin.id),
+                "node_name" to jsonString(node.pin.name),
+                "lease" to lease,
+                "lease_hash" to jsonString(Digest.sha256B64url(Jcs.bytes(lease))),
+                "origin" to JsonObject(mapOf("client" to jsonString("demo"), "session" to JsonNull, "job_id" to jsonString("job-demo"))),
+                "created_at" to jsonString(Timestamps.string(now)),
+                "expires_at" to jsonString(Timestamps.string(now.plusSeconds(300))),
+                "nonce" to jsonString(Messages.randomNonce())
+            )
+        )
+        return Envelope.seal(message, node.pin.id, "Ed25519") { bytes ->
+            Signature.getInstance("Ed25519").run { initSign(node.keys.private); update(bytes); sign() }
+        }
+    }
+
+    /** A node-signed view carrying a canned frame (the app draws it). */
+    fun leaseView(index: Int, leaseId: String, seq: Int, toDevice: String, frame: ByteArray, remaining: Int, actions: List<LeaseAction>, now: Instant = Instant.now()): Envelope {
+        val node = nodes[index]
+        val message = JsonObject(
+            mapOf(
+                "v" to jsonNumber("1"),
+                "type" to jsonString("kl.lease.view"),
+                "node_id" to jsonString(node.pin.id),
+                "lease_id" to jsonString(leaseId),
+                "seq" to jsonNumber(seq.toString()),
+                "at" to jsonString(Timestamps.string(now)),
+                "to_device" to jsonString(toDevice),
+                "state" to jsonString("active"),
+                "locked" to JsonPrimitive(false),
+                "remaining_s" to jsonNumber(remaining.toString()),
+                "foreground" to JsonObject(mapOf("app_id" to jsonString("calculator"), "matches" to JsonPrimitive(true))),
+                "frame" to JsonObject(
+                    mapOf(
+                        "mime" to jsonString("image/jpeg"), "width" to jsonNumber("960"), "height" to jsonNumber("640"),
+                        "sha256" to jsonString(Digest.sha256B64url(frame)), "data" to jsonString(Base64.getEncoder().encodeToString(frame))
+                    )
+                ),
+                "frame_dropped" to JsonPrimitive(false),
+                "actions" to JsonArray(actions.map { a ->
+                    JsonObject(
+                        mapOf(
+                            "seq" to jsonNumber(a.seq.toString()), "at" to jsonString(a.at), "tool" to jsonString(a.tool),
+                            "summary" to jsonString(a.summary), "result" to jsonString(a.result)
+                        )
+                    )
+                })
             )
         )
         return Envelope.seal(message, node.pin.id, "Ed25519") { bytes ->
