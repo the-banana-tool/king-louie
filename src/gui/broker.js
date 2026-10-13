@@ -17,6 +17,12 @@ const TITLE_MAX = 120;
 const SUSPENDING_CODES = Object.freeze(['foreground_mismatch', 'app_not_running', 'helper_disconnected']);
 const suspendsLease = (code) => SUSPENDING_CODES.includes(code);
 
+// A window title is whatever the app (or a web page in it) put there. It goes
+// to the model as one short line: no line breaks, controls or bidi controls
+// that could make it read as anything but a title.
+const TITLE_UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g;
+const titleLine = (title) => String(title || '').replace(TITLE_UNSAFE, ' ').replace(/ {2,}/g, ' ').trim().slice(0, TITLE_MAX);
+
 // How long the service waits for one input op. A click or a key keeps the
 // channel's default. Typed text takes as long as it is: a backend that
 // presses keys one by one (xdotool waits 12 ms after each key event) needs
@@ -171,7 +177,7 @@ class GuiBroker extends EventEmitter {
       const windows = procs.length ? await this.channel.request('windows', { pids: procs.map((p) => p.pid) }, { jobId: ctx.jobId }) : [];
       out.push({
         id: app.id, name: app.name, running: procs.length > 0,
-        windows: (windows || []).map((w) => ({ title: String(w.title || '').slice(0, TITLE_MAX), minimized: w.minimized === true }))
+        windows: (windows || []).map((w) => ({ title: titleLine(w.title), minimized: w.minimized === true }))
       });
     }
     return out;
