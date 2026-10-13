@@ -47,6 +47,10 @@ async function world({ getGate = () => null, host = null, ...routerOptions } = {
 }
 
 const facts = (runtime, caseId) => [...runtime.ledger(caseId).view().facts.values()];
+// Stands in for the registry's envelope check (envelope-ops.js sendEnvelope,
+// covered in contact-send-envelope.test.js): the send has its envelope.
+const APPROVED_ENVELOPE = Object.freeze({ id: 'env-01', status: 'active' });
+const approved = () => ({ ok: true, envelope: APPROVED_ENVELOPE });
 
 describe('ContactRouter.deliver', () => {
   it('sends one message per channel for items from several cases, and records the delivery', async () => {
@@ -333,7 +337,7 @@ describe('ContactRouter.sendExternal', () => {
     assert.match(refused.error, /only the owner can be messaged/);
 
     const calls = [];
-    const w = await world({ getGate: gateStub(calls) });
+    const w = await world({ checkEnvelope: approved, getGate: gateStub(calls) });
     const r = await w.router.sendExternal({ caseId: w.lot.id, channelId: 'telegram', target: '-100222', text: 'About {{f-0001}}' });
     assert.strictEqual(r.ok, true);
     assert.deepStrictEqual(w.adapters.get('telegram').plain, [{ target: '-100222', text: 'About the lakeside lot' }], 'the adapter receives rendered text');
@@ -345,7 +349,7 @@ describe('ContactRouter.sendExternal', () => {
 
   it('a block returns blocked and sends nothing; ntfy is never exempt', async () => {
     const calls = [];
-    const w = await world({ getGate: gateStub(calls) });
+    const w = await world({ checkEnvelope: approved, getGate: gateStub(calls) });
     const r = await w.router.sendExternal({ caseId: w.lot.id, channelId: 'telegram', target: '-100222', text: 'The lot next to 12 Birch' });
     assert.deepStrictEqual(r, { ok: false, error: 'outbound gate blocked the message', blocked: [{ path: 'text', reason: 'not-disclosable' }] });
     assert.deepStrictEqual(w.adapters.get('telegram').plain, []);
@@ -354,14 +358,36 @@ describe('ContactRouter.sendExternal', () => {
     assert.strictEqual(calls.length, 2, 'ntfy went through the gate');
   });
 
+  it('a non-owner send asks the envelope check first and gates against the envelope it returns', async () => {
+    const calls = [];
+    const checks = [];
+    const w = await world({ getGate: gateStub(calls), checkEnvelope: (args) => { checks.push(args); return approved(); } });
+    const forged = { id: 'env-09', status: 'active', intent: 'anything goes' };
+    const r = await w.router.sendExternal({ caseId: w.lot.id, channelId: 'telegram', target: '-100222', text: 'hello', envelopeId: 'env-01', executorId: 'fake-agent', envelope: forged });
+    assert.strictEqual(r.ok, true);
+    assert.deepStrictEqual(checks, [{ caseId: w.lot.id, envelopeId: 'env-01', executorId: 'fake-agent', recipients: ['-100222'] }]);
+    assert.strictEqual(calls[0].opts.envelope, APPROVED_ENVELOPE, 'never the caller\'s object');
+
+    for (const checkEnvelope of [undefined, () => ({ ok: false, error: 'envelope env-01 is revoked' }), () => ({ ok: true }), () => null, async () => { throw new Error('check exploded'); }]) {
+      const gated = [];
+      const no = await world({ getGate: gateStub(gated), checkEnvelope });
+      const refused = await no.router.sendExternal({ caseId: no.lot.id, channelId: 'telegram', target: '-100222', text: 'hello', envelopeId: 'env-01', executorId: 'fake-agent' });
+      assert.strictEqual(refused.ok, false);
+      assert.strictEqual(typeof refused.error, 'string');
+      assert.deepStrictEqual([gated.length, no.adapters.get('telegram').plain], [0, []], 'refused before the gate, nothing sent');
+      const owner = await no.router.sendExternal({ caseId: no.lot.id, channelId: 'telegram', target: '111', text: 'hello' });
+      assert.strictEqual(owner.ok, true, 'the owner path needs no envelope');
+    }
+  });
+
   it('gates with the configured category keywords; when they cannot be read nothing is sent', async () => {
     const calls = [];
     const keywords = { financial: ['escrow'] };
-    const w = await world({ getGate: gateStub(calls), getCategoryKeywords: () => keywords });
+    const w = await world({ checkEnvelope: approved, getGate: gateStub(calls), getCategoryKeywords: () => keywords });
     assert.strictEqual((await w.router.sendExternal({ caseId: w.lot.id, channelId: 'telegram', target: '-100222', text: 'hello' })).ok, true);
     assert.strictEqual(calls[0].opts.categoryKeywords, keywords);
 
-    const broken = await world({ getGate: gateStub(calls), getCategoryKeywords: () => { throw new Error('settings unreadable'); } });
+    const broken = await world({ checkEnvelope: approved, getGate: gateStub(calls), getCategoryKeywords: () => { throw new Error('settings unreadable'); } });
     const r = await broken.router.sendExternal({ caseId: broken.lot.id, channelId: 'telegram', target: '-100222', text: 'hello' });
     assert.strictEqual(r.ok, false);
     assert.match(r.error, /settings unreadable/);
@@ -895,18 +921,18 @@ describe('ContactRouter inbox: the race and ruling T5-inbox', () => {
 
 describe('ContactRouter.sendExternal never throws', () => {
   it('a throwing gate, an async gate, a malformed gate result and an unknown case', async () => {
-    const throwing = await world({ getGate: () => ({ gateLeaves: () => { throw new Error('gate exploded'); } }) });
+    const throwing = await world({ checkEnvelope: approved, getGate: () => ({ gateLeaves: () => { throw new Error('gate exploded'); } }) });
     const r1 = await throwing.router.sendExternal({ caseId: throwing.lot.id, channelId: 'telegram', target: '-100222', text: 'hi' });
     assert.strictEqual(r1.ok, false);
     assert.match(r1.error, /gate exploded/);
     assert.deepStrictEqual(throwing.adapters.get('telegram').plain, []);
 
-    const asyncGate = await world({ getGate: () => ({ gateLeaves: async (p) => ({ ok: true, blocked: [], rendered: { text: p.text.toUpperCase() } }) }) });
+    const asyncGate = await world({ checkEnvelope: approved, getGate: () => ({ gateLeaves: async (p) => ({ ok: true, blocked: [], rendered: { text: p.text.toUpperCase() } }) }) });
     const r2 = await asyncGate.router.sendExternal({ caseId: asyncGate.lot.id, channelId: 'telegram', target: '-100222', text: 'hi' });
     assert.strictEqual(r2.ok, true);
     assert.deepStrictEqual(asyncGate.adapters.get('telegram').plain, [{ target: '-100222', text: 'HI' }]);
 
-    const junk = await world({ getGate: () => ({ gateLeaves: () => ({ ok: true }) }) });
+    const junk = await world({ checkEnvelope: approved, getGate: () => ({ gateLeaves: () => ({ ok: true }) }) });
     const r3 = await junk.router.sendExternal({ caseId: junk.lot.id, channelId: 'telegram', target: '-100222', text: 'hi' });
     assert.strictEqual(r3.ok, false);
     assert.deepStrictEqual(junk.adapters.get('telegram').plain, [], 'no rendered text, nothing sent');

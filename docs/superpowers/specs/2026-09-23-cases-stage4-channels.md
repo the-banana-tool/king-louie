@@ -225,7 +225,7 @@ class ContactRouter({ dir, runtime, adapters, presence, getGate, clock, log })
 async deliver(channelId, entries) → { deliveryId, externalRef }         // throws ContactDeliveryError
 async handleReply(channelId, correlationId, answer, meta) → { ok, outcome, ackText | null }
 async ingestRelayEvents(relayName, events) → { applied, skipped }       // poll and webhook push
-async sendExternal({ caseId, channelId, target, text, envelope }) → { ok, deliveryId } | { ok: false, error, blocked? }
+async sendExternal({ caseId, channelId, target, text, envelopeId, executorId }) → { ok, deliveryId } | { ok: false, error, blocked? }
 async drainInbox()                                                      // answers queued behind a busy case
 isOwnerTarget(channelId, target) → boolean
 ```
@@ -292,7 +292,7 @@ hint to the configured owner number. Voice and ntfy send no acks; email acks as 
 channel-targeted send by case code; it has no stage-3 consumer. The target is normalized (E.164, lowercase
 email) first. **Owner exemption:** only when `isOwnerTarget(channelId, target)` — the adapter's
 `ownerTarget()` exists, is a private chat/DM or owner address per §3.1, and equals the normalized target;
-ntfy never qualifies. Otherwise it runs `gateLeaves({ text }, { recipients: [target], envelope, facts, mode:
+ntfy never qualifies. Otherwise it first needs an owner-approved envelope (`envelopeId`, `executorId`; C3 spec §3.7, `sendEnvelope`: the stored envelope, never a caller's object) and refuses without one, then runs `gateLeaves({ text }, { recipients: [target], envelope, facts, mode:
 'message', caseId, entityIndex: runtime.entityIndex?.() })` (C3) and sends **`rendered.text`**, never
 `text`; a block returns `{ ok: false, error: 'outbound gate blocked the message', blocked }`. The new
 adapters' plain `send(target, …)` refuses a non-owner target unless `options[GATE_PASSED]` is set, a
@@ -532,7 +532,7 @@ each other's name. Relay requests never follow redirects and read at most 1 MB o
 |---|---|---|
 | `ChannelPlugin` contact methods | `contactCapabilities()`, `sendContact(message, meta)`, `onContactReply(handler)`, `presence()`, `ownerTarget()` (§3.1) | channels |
 | `core.context.getContact()` | `→ { ladder, presence, router } \| null` | IPC, F7 |
-| `ContactRouter.sendExternal({ caseId, channelId, target, text, envelope })` | `→ { ok, deliveryId } \| { ok: false, error, blocked? }`; no stage-3 consumer (R39) | future channel senders |
+| `ContactRouter.sendExternal({ caseId, channelId, target, text, envelopeId, executorId })` | `→ { ok, deliveryId } \| { ok: false, error, blocked? }`; no stage-3 consumer (R39) | future channel senders |
 | `QuestionStore.recordDelivery(id, { channel, at, deliveryId })` | appends to `deliveries` atomically, idempotent on `deliveryId`, no claim file (C4-owned, §4.3) | C2 in-app delivery, C4 |
 | `Presence.mobileForeground({ deviceId, foreground })` | via the `presence.foreground` link method | F3 relay route (C4-mounted) |
 | Phone routes (R44) | `GET /v1/questions`, `POST /v1/questions/{token}/answer`, `POST /v1/presence` | mobile apps |

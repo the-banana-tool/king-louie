@@ -596,6 +596,11 @@ class ExecutorRegistry {
     return envelopeOps.revokeEnvelope(this, caseId, envelopeId, reason);
   }
 
+  // ContactRouter.sendExternal's envelope check for a non-owner send.
+  sendEnvelope(args) {
+    return envelopeOps.sendEnvelope(this, args);
+  }
+
   // Registered as caseRuntime.addTurnStartHook('executors', …) by createCore.
   turnStartHook(ctx) {
     return turnHook.turnStartHook(this, ctx);

@@ -121,8 +121,17 @@ function createContactHost({
     }
     return null;
   };
+  // A non-owner sendExternal needs an owner-approved envelope, checked
+  // through the registry; with no registry every such send is refused.
+  const checkEnvelope = (args) => {
+    const registry = getExecutorRegistry();
+    if (!registry || typeof registry.sendEnvelope !== 'function') {
+      return { ok: false, error: 'no envelope check is available (no executor registry), so only the owner can be messaged' };
+    }
+    return registry.sendEnvelope(args);
+  };
   const router = new ContactRouter({
-    state, runtime: caseRuntime, adapters, presence, getGate, getCategoryKeywords, clock, getTimeZone: () => presence.timeZone()
+    state, runtime: caseRuntime, adapters, presence, getGate, getCategoryKeywords, checkEnvelope, clock, getTimeZone: () => presence.timeZone()
   });
   const ladder = new LadderEngine({
     state, casesRoot: caseRuntime.root, runtime: caseRuntime, router, presence, getPolicy: () => settings().contactPolicy, clock, tickMs, dataDir

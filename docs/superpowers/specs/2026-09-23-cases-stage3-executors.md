@@ -427,6 +427,17 @@ never the input (R38).
 It runs on `Executor.submit` (`outbound ≠ none`), envelope requests, `draft` previews, the case-turn guard
 and the `case-researcher` child (`query` mode), and C4's `sendExternal`.
 
+**`sendExternal` and envelopes.** A `sendExternal` to anyone but the owner always needs an envelope (the R42
+floor: an outbound message has authority ≥ `envelope`). The caller passes `envelopeId` and `executorId`;
+`sendEnvelope(reg, { caseId, envelopeId, executorId, recipients })` (`envelope-ops.js`,
+`ExecutorRegistry#sendEnvelope`) reads the envelope from `.kl/envelopes/` (an envelope object from the caller
+is never used) and returns it only when the executor is known and available, `envelopeFit` has no refusal
+and no delta (intact hash, that executor's, every recipient in `recipients.allow`, today inside the
+window, caps not passed), its status is `active`, and a `signed` one passes `verifyEnvelopeGrant`. The gate
+then runs against that stored envelope. No registry → every non-owner send is refused. It only checks:
+recording the send against the envelope's caps, and tying the named executor to the channel, are left to
+the first caller (there is none, R39).
+
 ### 3.8 Normalization — `src/cases/executors/normalize.js`
 
 `normalizeRecipient(address, { channel, defaultCountryCode }) → { ok, value, error }`. `call`/ `sms`: strip

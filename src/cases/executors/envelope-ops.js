@@ -8,7 +8,7 @@
 const { createLogger } = require('../../logging');
 const {
   EnvelopeStore, envelopeHash, envelopeIntact, validateEnvelopeRequest, renderEnvelopeQuestion, applyDeltas, renderDeltaQuestion, deltasEqual,
-  deltaText
+  deltaText, envelopeFit
 } = require('./envelope');
 const { AUTHORITIES } = require('./builtins');
 const { approvalHelpers, signedAction, verifySignedGrant } = require('./signed');
@@ -440,7 +440,44 @@ async function revokeEnvelope(reg, caseId, envelopeId, reason = 'revoked by the 
   }
 }
 
+// For ContactRouter.sendExternal: the envelope a channel send to anyone but
+// the owner goes out under. → { ok: true, envelope } only for the envelope
+// as stored in the case (never a caller's object), intact, `active`, for the
+// named executor, with every recipient in it and today in its window
+// (envelopeFit; a delta is a refusal here, there is no delta question), and
+// with its phone grant when it is `signed`. Never throws. It reads only:
+// the send is not counted against the envelope's caps (see CLAUDE.md).
+function sendEnvelope(reg, { caseId, envelopeId, executorId, recipients } = {}) {
+  const refuse = (error) => ({ ok: false, error });
+  const NEEDS = 'a send to anyone but the owner needs an owner-approved envelope';
+  try {
+    if (typeof envelopeId !== 'string' || !envelopeId) return refuse(`${NEEDS}; none was named`);
+    if (typeof executorId !== 'string' || !executorId) return refuse(`${NEEDS} for the executor that sends; no executor was named`);
+    const entry = reg.get(executorId, { caseId });
+    if (!entry) return refuse(`unknown executor "${executorId}"`);
+    if (!entry.available) return refuse(`${entry.id} is unavailable: ${entry.reason}`);
+    const env = new EnvelopeStore(reg.caseDir(caseId)).get(envelopeId);
+    if (!env) return refuse(`${envelopeId} was not found in this case`);
+    const fit = envelopeFit(env, {}, {
+      facts: reg.caseRuntime.ledger(caseId).view().facts, recipients, now: reg.now(), estimateUsd: 0, executorId: entry.id
+    });
+    const problems = [...fit.refusals, ...fit.deltas.map((d) => d.text)];
+    // envelopeFit also fits `expired` and `exhausted` (they take a delta); a send needs `active`.
+    if (env.status !== 'active' && !problems.some((p) => p.includes(` is ${env.status}`))) problems.unshift(`envelope ${env.id} is ${env.status}`);
+    if (problems.length) return refuse(`outside envelope ${env.id}: ${problems.join('; ')}`);
+    if (effectiveAuthority(reg, caseId, env) === 'signed') {
+      const v = verifyEnvelopeGrant(reg, caseId, env);
+      if (!v || v.ok !== true) return refuse(v?.error || `envelope ${env.id} has no verified phone grant`);
+    }
+    return { ok: true, envelope: env };
+  } catch (err) {
+    log.warn(`Envelope check for a send in ${caseId} failed: ${err.message}`);
+    return refuse(`the envelope could not be checked: ${err.message}`);
+  }
+}
+
 module.exports = {
+  sendEnvelope,
   requestEnvelope,
   syncEnvelopes,
   requestDelta,

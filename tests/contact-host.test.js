@@ -453,6 +453,7 @@ describe('createContactHost: presence status names the lease holder (final revie
 // gateLeaves (src/cases/gates.js) and sends its rendered text.
 describe('createContactHost: sendExternal uses the real outbound gate (C3 merge, M9)', () => {
   const gates = require('../src/cases/gates');
+  const { resolveExecutorSettings } = require('../src/cases/executors/defaults');
   const { defaultGetGate } = require('../src/cases/contact-host');
 
   it('defaultGetGate() returns the gates module that exports gateLeaves', () => {
@@ -463,7 +464,14 @@ describe('createContactHost: sendExternal uses the real outbound gate (C3 merge,
 
   it('a non-owner send goes through gateLeaves: a reference renders, a private value is blocked', async () => {
     const extra = new LoopbackChannel({ id: 'loop-extra', owner: 'owner-1' });
-    const t = makeHost({ settings: {}, extraAdapters: { 'loop-extra': extra } });
+    // The envelope check itself is covered in contact-send-envelope.test.js;
+    // here the send has its envelope, so the gate is what decides.
+    const envelope = { id: 'env-01', status: 'active', facts: [] };
+    const t = makeHost({
+      settings: {},
+      extraAdapters: { 'loop-extra': extra },
+      hostExtras: { getExecutorRegistry: () => ({ settings: () => resolveExecutorSettings(), sendEnvelope: () => ({ ok: true, envelope }) }) }
+    });
     const real = gates.gateLeaves;
     const calls = [];
     gates.gateLeaves = (payload, opts) => {
@@ -477,6 +485,7 @@ describe('createContactHost: sendExternal uses the real outbound gate (C3 merge,
       const size = ledger.assert({ stmt: 'The lot is 2.12 acres', subject: 'lot', attr: 'size', value: '2.12', unit: 'acres', provenance: 'sourced', source: { kind: 'document', ref: 'survey' } });
       const floor = ledger.assert({ stmt: 'The lowest price the owner takes', subject: 'lot', attr: 'floor price', value: 187500, provenance: 'sourced', category: 'financial', source: { kind: 'document', ref: 'notes' } });
       assert.strictEqual(floor.disclosable, false);
+      envelope.facts.push(size.id);
       const { router } = t.host.context();
 
       const ok = await router.sendExternal({ caseId: lot.id, channelId: 'loop-extra', target: 'broker-1', text: `The lot is {{${size.id}}}.` });
@@ -517,6 +526,7 @@ describe('createContactHost: sendExternal uses the real outbound gate (C3 merge,
       hostExtras: { getExecutorRegistry: () => executors }
     });
     executors = new ExecutorRegistry({ dataDir: tmp('kl-host-exec-'), getSettings: t.settings, caseRuntime: t.runtime });
+    executors.sendEnvelope = () => ({ ok: true, envelope: { id: 'env-01', status: 'active', facts: [] } });
     try {
       await t.host.start();
       const lot = await t.runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });

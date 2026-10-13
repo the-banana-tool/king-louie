@@ -698,6 +698,15 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
     admin entry says `authority: none` and that has no outbound capability
     sends without one, in `query` mode, with only disclosable declared facts.
   - Workflow research tasks and runbook `params`: `query` mode, no envelope.
+  - A channel send to anyone but the owner (`ContactRouter.sendExternal`, no
+    caller yet): `message` mode, and always an envelope. The caller names
+    `envelopeId` and `executorId`; `sendEnvelope` (`envelope-ops.js`) reads
+    the envelope from the case (a caller's envelope object is never used)
+    and refuses unless it is intact, `active`, that executor's, lists the
+    recipient, is inside its window and, when `signed`, has its phone grant.
+    A delta is a refusal there. It only checks: the send is not counted
+    against the envelope's caps, and nothing ties the named executor to the
+    channel; the first caller has to settle both.
   - In text, facts are quoted as `{{f-0042}}` references.
 - Only a clear 4xx refusal fails an external submit. A timeout
   (`submitTimeoutMs`, or `host.fetch`'s `requestTimeoutMs`), a network error
@@ -896,8 +905,9 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   settings in service mode too; only the owner and addresses are
   admin-only.
 - Case code that sends to a channel uses `ContactRouter.sendExternal`, which
-  runs C3's outbound gate for anyone but the owner and sends `rendered`.
-  Until C3's `gateLeaves` exists (`src/cases/gates.js`), every non-owner
+  for anyone but the owner needs an owner-approved envelope (`envelopeId`,
+  `executorId`; see Cases: executors), runs C3's outbound gate and sends
+  `rendered`. Without the gate or the executor registry every non-owner
   send is refused.
 - Service mode: the owner identity and channel addresses come only from the
   admin `service.json` `contact` block (`contact` joins `ADMIN_ONLY_KEYS`);

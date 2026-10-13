@@ -129,7 +129,7 @@ QuestionStore.registerAnswerHandler('conflict', { toFact: conflictFact, onAnswer
 class ContactRouter {
   constructor({
     dir = null, state, runtime, adapters, presence = null, getGate = () => null, clock = () => new Date(),
-    getTimeZone = () => '', getCategoryKeywords = null, log = createLogger('contact/router')
+    getTimeZone = () => '', getCategoryKeywords = null, checkEnvelope = null, log = createLogger('contact/router')
   } = {}) {
     if (!state) throw new Error('ContactRouter needs a ContactState');
     this.dir = dir || state.dir;
@@ -142,6 +142,10 @@ class ContactRouter {
     // host, for the outbound gate's rule 2. Without one the gate uses its
     // built-in lists; a throw refuses the send.
     this.getCategoryKeywords = typeof getCategoryKeywords === 'function' ? getCategoryKeywords : () => null;
+    // ({ caseId, envelopeId, executorId, recipients }) → { ok: true, envelope }
+    // | { ok: false, error }: the owner-approved envelope a non-owner send
+    // needs (envelope-ops.js sendEnvelope). Without one every such send is refused.
+    this.checkEnvelope = typeof checkEnvelope === 'function' ? checkEnvelope : null;
     this.clock = clock;
     this.getTimeZone = getTimeZone;
     this.log = log;
@@ -757,7 +761,11 @@ class ContactRouter {
     }
   }
 
-  async _sendExternal({ caseId, channelId, target, text, envelope = null }) {
+  // `envelopeId` and `executorId` name the owner-approved envelope a send to
+  // anyone but the owner goes out under and the executor that sends. The
+  // envelope is read from the case by checkEnvelope; an envelope object from
+  // the caller is never used.
+  async _sendExternal({ caseId, channelId, target, text, envelopeId = null, executorId = null }) {
     const adapter = this.adapter(channelId);
     if (!adapter) return { ok: false, error: `${channelId} is not configured` };
     const to = normalizeAddress(channelId, target);
@@ -769,6 +777,14 @@ class ContactRouter {
       if (!gate || typeof gate.gateLeaves !== 'function') {
         return { ok: false, error: 'the outbound gate is not available (cases stage 3), so only the owner can be messaged' };
       }
+      if (!this.checkEnvelope) {
+        return { ok: false, error: 'no envelope check is available (no executor registry), so only the owner can be messaged' };
+      }
+      const checked = await this.checkEnvelope({ caseId, envelopeId, executorId, recipients: [to] });
+      if (!checked || checked.ok !== true || !checked.envelope) {
+        return { ok: false, error: typeof checked?.error === 'string' && checked.error ? checked.error : 'the envelope check refused the send' };
+      }
+      const envelope = checked.envelope;
       const facts = this.runtime.ledger(caseId).view().facts;
       const entityIndex = typeof this.runtime.entityIndex === 'function' ? this.runtime.entityIndex() : null;
       const categoryKeywords = this.getCategoryKeywords() || null;
