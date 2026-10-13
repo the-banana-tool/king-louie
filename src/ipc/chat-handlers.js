@@ -107,6 +107,9 @@ function registerChatHandlers(ipcMain, context = {}) {
   // (targeted fix, after final review I2's fix wave). Stop aborts every
   // controller in the set and clears the whole entry.
   const activeRuns = new Map();
+  // Owner decision Q29: case:attach refuses a chat while a turn runs in it
+  // (src/ipc/case-handlers.js reads this from the context the two share).
+  context.isChatRunning = (chatId) => activeRuns.has(chatId);
 
   const findChat = (chatId, options = { messages: true }) => {
     const id = String(chatId || '').trim();

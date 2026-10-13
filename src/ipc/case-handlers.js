@@ -3,6 +3,7 @@ const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const TelegramBridge = require('../channels/telegram-bridge');
 const DiscordChannel = require('../channels/discord-bridge');
+const { assertChatAttachable, ChatBusyError } = require('../cases/chat-attach');
 
 const summarize = (c) => ({
   id: c.id, slug: c.slug, title: c.title, type: c.type, status: c.status, created: c.created, dir: c.dir
@@ -35,8 +36,25 @@ function registerCaseHandlers(ipcMain, context = {}) {
     return rt;
   };
 
+  // Owner decision Q29 (2026-10-12): a chat that holds management-tool
+  // results about a case other than `caseId` is never given it
+  // (src/cases/chat-attach.js); `caseId` null is a case about to be created.
+  // A turn still running in the chat (one that began with no case, so its
+  // tools read every case) would store its results after the check, so the
+  // attach waits for it. Throws ChatAttachRefusedError or ChatBusyError.
+  // Nothing is awaited between this check and the write in `attach`.
+  const assertAttachable = (chat, caseId) => {
+    if (typeof context.isChatRunning === 'function' && context.isChatRunning(chat.id)) throw new ChatBusyError();
+    assertChatAttachable(chat, caseId);
+  };
+
+  // The one place a chat is given a case (case:attach, and case:create with
+  // a chat). Taking the case away, or naming the case the chat already has,
+  // is never refused.
   const attach = (chatId, caseId) => {
-    if (!chatById(chatId)) throw new Error('Chat not found.');
+    const chat = chatById(chatId);
+    if (!chat) throw new Error('Chat not found.');
+    if (caseId && chat.caseId !== caseId) assertAttachable(chat, caseId);
     const now = new Date().toISOString();
     return patchChat(chatId, { caseId: caseId || null, updatedAt: now });
   };
@@ -55,7 +73,12 @@ function registerCaseHandlers(ipcMain, context = {}) {
     if (type !== undefined && (typeof type !== 'string' || !type.trim())) return { ok: false, error: 'type must be a non-empty string.' };
     if (objective !== undefined && (typeof objective !== 'string' || !objective.trim())) return { ok: false, error: 'objective must be a non-empty string.' };
     if (force !== undefined && typeof force !== 'boolean') return { ok: false, error: 'force must be true or false.' };
-    if (chatId && !chatById(chatId)) return { ok: false, error: 'Chat not found.' };
+    const chatBefore = chatId ? chatById(chatId) : null;
+    if (chatId && !chatBefore) return { ok: false, error: 'Chat not found.' };
+    // Q29: checked before anything is fetched or created, and before the
+    // similar-case refusal, so the owner is never asked to force a create
+    // whose attach would be refused. `force` does not lift it.
+    if (chatBefore) assertAttachable(chatBefore, null);
     // Cases stage 6: the owner's chosen playbooks are checked, fetched and
     // validated before the case exists; any failure refuses the create. The
     // type comes from the playbooks when the form gives none.
@@ -75,7 +98,18 @@ function registerCaseHandlers(ipcMain, context = {}) {
     // The chat is attached before the playbooks: their gating questions are
     // posted to the case's chat (management surfaces §3.4), and with no chat
     // carrying the caseId yet each would create a stray one.
-    const chat = chatId ? attach(chatId, info.id) : null;
+    // `attach` checks the chat again as it is now. A refusal here (a turn
+    // began in the chat while the case was being created) leaves the case
+    // created and the chat without it; the reply says both.
+    let chat = null;
+    try {
+      chat = chatId ? attach(chatId, info.id) : null;
+    } catch (err) {
+      if (err && (err.code === 'CHAT_SAW_OTHER_CASES' || err.code === 'CHAT_BUSY')) {
+        return { ok: false, error: `The case was created, but this chat was not attached to it. ${err.message}`, code: err.code, case: summarize(info) };
+      }
+      throw err;
+    }
     const attached = await playbookIpc.attachPlaybooksAfterCreate(context, info.id, withPlaybooks, { acceptBudgetRaises: acceptBudgetRaises === true });
     // The reply carries the chat as it is now, with the questions posted to it.
     return { ok: true, case: summarize(info), chat: chat && attached.playbooks ? chatById(chatId) : chat, ...attached };

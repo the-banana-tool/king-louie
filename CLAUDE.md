@@ -1138,6 +1138,15 @@ Spec `docs/superpowers/specs/2026-09-30-management-surfaces.md`; ADR
   case is refused `other_case`. `create_case`, `set_away` and
   `get_presence` are unaffected; a chat with no case keeps every case, and
   the MCP surfaces pass no scope.
+- A chat that holds management-tool results about another case is never
+  attached to a case (owner decision Q29, 2026-10-12): `case:attach` and
+  `case:create` with a chat refuse `CHAT_SAW_OTHER_CASES` (no `force`
+  lifts it), and `CHAT_BUSY` while a turn runs in the chat; the owner
+  starts a new chat. The rule is `src/cases/chat-attach.js`, read from the
+  stored `toolUse`/`toolResult` rows; what it cannot tell (a call by slug,
+  a sub-agent that used the tools, another run's text) it refuses. A new
+  case tool blocks until it is in `NO_CASE_DATA`. Chats attached before
+  the rule, imported or migrated, are not re-checked.
 - `in-app-chat` (the model relaying the owner's chat words) is not
   `in-app` (the card's buttons and the IPC: a press, no model between). No
   list that takes a recorded channel as proof of a press names it

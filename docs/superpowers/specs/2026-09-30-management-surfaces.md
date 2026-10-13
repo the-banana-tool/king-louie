@@ -75,7 +75,22 @@ without the agent core). Three registrations read the same definitions:
    case, or your phone, to manage other cases." The scope comes from the host's case context (the
    turn's `caseContext`, or a child run's `guardContext`), never from tool parameters. `create_case`,
    `set_away` and `get_presence` act on no case and are unaffected. The MCP surfaces have no case chat
-   and keep the whole surface. **Never loaded in an unattended turn** (nor in a fleet delegate turn,
+   and keep the whole surface. **A chat that has looked at other cases is never attached to a case**
+   (owner decision Q29, 2026-10-12): a chat with no case reads every case through these tools, and
+   attached afterwards its stored results would reach the case's turns through the tail, recall and
+   `SearchHistory`/`ReadHistory`. So the attach is refused (`case:attach`, and `case:create` with a
+   chat, before anything is created; code `CHAT_SAW_OTHER_CASES`, no `force` lifts it) with "This chat
+   has looked at other cases, so it cannot be attached to a case. Start a new chat for the case."
+   Hiding those rows from case turns, and accepting the leak as a residual, were both rejected. The
+   rule (`src/cases/chat-attach.js`) reads the chat's stored tool rows and prefers refusing to
+   guessing: every case a `list_cases`, `list_questions` or `create_case` result names must be the
+   target case (a `similar` list blocks); every stored call of another case tool must name the target
+   by its id; `get_presence` and `set_away` never block; a sub-agent that used a case tool, and another
+   run's text (`TaskStatus`, `sessions_history`, `RemoteDispatch`), block because the chat does not
+   record which cases they read. An attach is also refused while a turn runs in the chat
+   (`CHAT_BUSY`). Taking a case away is never refused. Not covered: a chat attached before this rule
+   (also one imported or migrated), and a chat moved from one case to another, whose earlier case
+   turns stay in its history. **Never loaded in an unattended turn** (nor in a fleet delegate turn,
    whose client reaches cases only through its own scopes): a wake-up's judge loop stays confined to
    the case tools plus Read, Glob and Grep, so a case can never answer its own question, and with no owner
    message there is no quote to verify anyway.
