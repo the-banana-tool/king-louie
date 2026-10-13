@@ -32,7 +32,26 @@
 
     <!-- Context menus (fixed-position, kept outside sidebar so they remain accessible in start-state) -->
     <div class="context-menu" id="chat-context-menu" hidden>
+      <button class="context-menu-item" type="button" role="menuitemradio" aria-checked="false" data-action="recall-scope" data-scope="chat">Recall from: this chat</button>
+      <button class="context-menu-item" type="button" role="menuitemradio" aria-checked="false" data-action="recall-scope" data-scope="linked">Recall from: linked chats</button>
+      <button class="context-menu-item" type="button" role="menuitemradio" aria-checked="false" data-action="recall-scope" data-scope="all">Recall from: all chats</button>
+      <div class="context-menu-note" id="chat-recall-pin-note" hidden></div>
+      <button class="context-menu-item" type="button" data-action="link-chats">Link chats…</button>
+      <div class="context-menu-separator" aria-hidden="true"></div>
       <button class="context-menu-item danger" type="button" data-action="delete">Delete chat</button>
+    </div>
+    <div class="rename-chat-modal" id="link-chats-dialog" role="dialog" aria-modal="true" aria-labelledby="link-chats-heading" hidden>
+      <div class="rename-chat-card link-chats-card">
+        <h3 id="link-chats-heading">Link chats</h3>
+        <p class="link-chats-note">Links go one way: this chat can read the chats you tick. They cannot read this chat.</p>
+        <p class="link-chats-note">A chat that reads other chats cannot be attached to a case later.</p>
+        <div class="link-chats-list" id="link-chats-list"></div>
+        <div class="rename-chat-error" id="link-chats-error" hidden></div>
+        <div class="rename-chat-actions">
+          <button type="button" class="btn" id="link-chats-cancel-btn">Cancel</button>
+          <button type="button" class="btn btn-primary" id="link-chats-save-btn">Save</button>
+        </div>
+      </div>
     </div>
     <div class="context-menu" id="message-context-menu" hidden>
       <button class="context-menu-item" type="button" data-action="copy"><i class="fas fa-copy"></i> Copy</button>
