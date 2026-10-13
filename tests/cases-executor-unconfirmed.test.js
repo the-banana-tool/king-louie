@@ -279,6 +279,21 @@ describe('M-b: a job that keeps its reservation is recorded as sent', () => {
     return [env.usage?.contacts || [], env.usage?.attempts || {}, (env.payloads || []).map((p) => p.jobId), spent(s, 'contactsPerDay')];
   };
   const SENT = [['+15550100'], { '+15550100': 2 }, ['job-0001'], 1];
+  // The job as a crash between its `submitting` write and the executor's
+  // answer leaves it: reserved, not marked unconfirmed, no poll wake-up.
+  // (The 502 is only how the test gets a submitting job; the executor never
+  // had it.)
+  const crashMidSubmit = async (s) => {
+    server.knobs.failNextStatus = 502;
+    await s.submit();
+    const store = s.reg.jobs(s.meta.id);
+    const job = store.get('job-0001');
+    s.rt.wakeups(s.meta.id).cancel(job.wakeupId);
+    const { unconfirmed, submitErrors, ...rest } = job;
+    store.write({ ...rest, wakeupId: null, error: null, nextPollAt: null });
+    const left = store.get('job-0001');
+    assert.deepStrictEqual([left.state, left.unconfirmed, left.submitErrors, left.reservedContacts], ['submitting', undefined, undefined, 1]);
+  };
 
   it('never confirmed, then unreachable: the envelope and the case count the contact', async () => {
     const s = await setup({ executors: { maxPollErrors: 2 } });
@@ -310,6 +325,42 @@ describe('M-b: a job that keeps its reservation is recorded as sent', () => {
     assert.strictEqual(r.ok, true, r.error);
     assert.strictEqual(s.reg.globalRemaining('phone-agent'), 4);
     assert.deepStrictEqual(record(s), SENT);
+  });
+
+  it('M-c: a job left submitting by a crash, whose executor cannot be asked, is bounded like an unconfirmed one', async () => {
+    const s = await setup({ executors: { maxPollErrors: 3 } });
+    s.rt.addTurnStartHook('executors', (ctx) => s.reg.turnStartHook(ctx));
+    await crashMidSubmit(s);
+    server.knobs.status5xx = true;
+    const { turn } = await fx.openTurn(s.rt, s.meta.id, { turnId: 'turn-2' });
+    await s.rt.endTurn(turn, { summary: 'the lookup failed' });
+    const held = s.reg.jobs(s.meta.id).get('job-0001');
+    assert.deepStrictEqual([held.state, held.submitErrors, held.unconfirmed === true, typeof held.wakeupId], ['submitting', 1, false, 'string'],
+      'counted, given a poll wake-up, and still not one to resubmit');
+    for (let i = 0; i < 2; i += 1) await s.rt.sweep(s.meta.id, s.later());
+    const job = s.reg.jobs(s.meta.id).get('job-0001');
+    assert.deepStrictEqual([job.state, job.submitErrors, job.wakeupId], ['unreachable', 3, null]);
+    assert.match(job.reason, /could not be asked after 3 tries; it may have been sent/);
+    assert.strictEqual(posts().length, 1, 'never resubmitted');
+    assert.strictEqual(s.reg.globalRemaining('phone-agent'), 4, 'it may have been sent');
+    assert.deepStrictEqual(record(s), SENT);
+    assert.deepStrictEqual(s.reg.liveState({ caseId: s.meta.id }), [], 'no longer blocks a duplicate');
+  });
+
+  it('M-c: once the executor answers that it never had the crashed job, it fails as interrupted and is not resubmitted', async () => {
+    const s = await setup({ executors: { maxPollErrors: 3 } });
+    s.rt.addTurnStartHook('executors', (ctx) => s.reg.turnStartHook(ctx));
+    await crashMidSubmit(s);
+    server.knobs.failNextStatus = 503;
+    const { turn } = await fx.openTurn(s.rt, s.meta.id, { turnId: 'turn-2' });
+    await s.rt.endTurn(turn, { summary: 'the lookup failed' });
+    assert.strictEqual(s.reg.jobs(s.meta.id).get('job-0001').state, 'submitting');
+    await s.rt.sweep(s.meta.id, s.later());
+    const job = s.reg.jobs(s.meta.id).get('job-0001');
+    assert.deepStrictEqual([job.state, job.reason, job.wakeupId], ['failed', 'interrupted', null]);
+    assert.deepStrictEqual([posts().length, server.state.jobs.size], [1, 0], 'never resubmitted');
+    assert.strictEqual(s.reg.globalRemaining('phone-agent'), 5, 'the executor never had it');
+    assert.deepStrictEqual(record(s), [[], {}, [], 0]);
   });
 
   it('a cancel that frees the reservation records nothing', async () => {

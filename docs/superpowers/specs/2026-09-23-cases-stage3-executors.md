@@ -510,7 +510,9 @@ about; a browser failure after the click) is recorded as sent, once (`contactsCh
 
 **Turn-start hook** `caseRuntime.addTurnStartHook('executors', fn)`, `fn({ caseId, meta, ownerMessage,
 turnId, source })`: apply pending signed grants; copy background output; reconcile `submitting` jobs (`GET
-/jobs?externalRef=<caseId>/<jobId>`: found → `commitSubmit`, else `failed: interrupted`); `syncPlan`;
+/jobs?externalRef=<caseId>/<jobId>`: found → `commitSubmit`, not found → `failed: interrupted`; a lookup
+that fails keeps the job `submitting`, counts in `submitErrors`, gives it a poll wake-up, and at
+`maxPollErrors` makes it `unreachable` with its contacts counted; it is never resubmitted); `syncPlan`;
 `syncEnvelopes`; `refreshCase(caseId, { budgetMs: refreshBudgetMs })`. Returns `{ notes:
 [renderExecutorSection(caseId, { maxChars: 3000 })] }` (executors in use with kind, authority, availability;
 open jobs with stale markers; active envelopes with caps left; brief rules; ops notes) and no triggers.

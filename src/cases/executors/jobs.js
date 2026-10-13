@@ -888,14 +888,18 @@ function normalizationMismatch(job, contacts) {
 
 // Keeps an unconfirmed job `submitting` (contacts held) and gives it a poll
 // wake-up, so the sweep reconciles it too, not only a turn start.
-async function holdSubmitting(reg, caseId, job, reason) {
+// `resubmit: false` (M-c) is a job a crash left `submitting` whose executor
+// could not be asked whether it has it: counted and bounded the same way,
+// but never marked unconfirmed, so a reconcile only looks it up and never
+// submits it again.
+async function holdSubmitting(reg, caseId, job, reason, { resubmit = true } = {}) {
   const store = new JobStore(reg.caseDir(caseId));
   const fresh = store.get(job.id);
   if (!isObject(fresh) || fresh.state !== 'submitting') return fresh;
   const now = reg.now();
   const entry = reg.get(fresh.executor, { caseId });
   const every = Math.max(MIN_POLL_MS, Number(entry?.pollEveryMs) || reg.settings().pollEveryMs);
-  fresh.unconfirmed = true;
+  if (resubmit) fresh.unconfirmed = true;
   fresh.error = clip(reason);
   fresh.submitErrors = (Number(fresh.submitErrors) || 0) + 1;
   if (!fresh.wakeupId) {
@@ -912,7 +916,7 @@ async function holdSubmitting(reg, caseId, job, reason) {
     fresh.state = 'unreachable';
     fresh.nextPollAt = null;
     fresh.lastChange = now.toISOString();
-    fresh.reason = clip(`never confirmed after ${fresh.submitErrors} tries; it may have been sent: ${fresh.error}`);
+    fresh.reason = clip(`${resubmit ? 'never confirmed' : 'interrupted at submit and the executor could not be asked'} after ${fresh.submitErrors} tries; it may have been sent: ${fresh.error}`);
     finishJob(reg, caseId, reg.caseDir(caseId), fresh, after);
     saveJob(store, fresh);
     after.journal.push(`Job ${fresh.id} on ${fresh.executor} is unreachable: ${fresh.reason}. Its contacts stay counted.`);
@@ -922,7 +926,9 @@ async function holdSubmitting(reg, caseId, job, reason) {
   }
   fresh.nextPollAt = new Date(now.getTime() + every).toISOString();
   saveJob(store, fresh);
-  journal(reg, caseId, `Job ${fresh.id} on ${fresh.executor} was not confirmed (${fresh.error}); it may already be running. It stays submitting with its contacts held and is reconciled with the same idempotency key.`);
+  journal(reg, caseId, resubmit
+    ? `Job ${fresh.id} on ${fresh.executor} was not confirmed (${fresh.error}); it may already be running. It stays submitting with its contacts held and is reconciled with the same idempotency key.`
+    : `Job ${fresh.id} on ${fresh.executor} was interrupted at submit and the executor could not be asked whether it has it (${fresh.error}). It stays submitting with its contacts held; the executor is asked again, and the job is not submitted again.`);
   return fresh;
 }
 
@@ -989,7 +995,8 @@ async function reconcileApply(reg, caseId, listed, outcome) {
   }
   if (outcome.ambiguous) {
     log.warn(`Reconciling ${job.id} failed; trying again later: ${outcome.ambiguous}`);
-    if (job.unconfirmed) await holdSubmitting(reg, caseId, job, outcome.ambiguous);
+    // Counted either way, so neither kind stays submitting for ever (M-c).
+    await holdSubmitting(reg, caseId, job, outcome.ambiguous, { resubmit: job.unconfirmed === true });
     return { jobId: job.id, state: 'submitting' };
   }
   // Interrupted before the executor was ever asked, and it does not have it.
