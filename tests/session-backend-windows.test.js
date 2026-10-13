@@ -48,6 +48,41 @@ describe('LineWorker (any OS, with a fake child)', () => {
     await w.stop();
   });
 
+  // Third security review, hardening (a): a worker's stderr can quote what
+  // it was sent (a PowerShell error record shows the line that failed), and
+  // an input op is sent the text to type.
+  it('a stderr line of a worker that has typed text is logged by its length, never its text, at any level', async () => {
+    const lines = [];
+    const log = { debug: (m, meta) => lines.push(['debug', m, meta]), info: (m) => lines.push(['info', m]), warn: (m) => lines.push(['warn', m]), error: (m) => lines.push(['error', m]), trace: (m) => lines.push(['trace', m]) };
+    let child;
+    const fake = fakeSpawn((req) => ({ id: req.id, ok: true, result: null }));
+    const spawnImpl = (...a) => { child = fake.spawnImpl(...a); return child; };
+    const w = new LineWorker({ file: 'x', args: [], spawnImpl, log, name: 'windows-worker' });
+    await w.call('foreground');
+    child.stderr.write('Add-Type : cannot load\n');
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(lines.map((l) => l[1]), ['windows-worker: Add-Type : cannot load'], 'before any input a line is diagnostics');
+    lines.length = 0;
+    const typed = 'Lakeside lot gate code 4417';
+    const first = `SendInput failed at line 12: ... ${typed} ...`;
+    await w.call('input', { action: { kind: 'type', text: typed } });
+    child.stderr.write(`${first}\n`);
+    // And one that arrives after a later op that types nothing.
+    await w.call('foreground');
+    child.stderr.write(`late: ${typed}\n`);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(lines.length, 2);
+    for (const [level, message, meta] of lines) {
+      assert.equal(level, 'debug');
+      assert.ok(!JSON.stringify([message, meta]).includes('Lakeside') && !JSON.stringify([message, meta]).includes('4417'), message);
+    }
+    assert.deepEqual(lines.map((l) => l[1]), [
+      `windows-worker: worker_stderr (${first.length} characters, not shown)`,
+      `windows-worker: worker_stderr (${`late: ${typed}`.length} characters, not shown)`
+    ]);
+    await w.stop();
+  });
+
   it('a reply with U+2028 or U+2029 inside a string is still one line', async () => {
     // JSON.stringify leaves both raw; node:readline would end the line at each.
     const { spawnImpl } = fakeSpawn((req) => ({ id: req.id, ok: true, result: { title: 'a b c' } }));

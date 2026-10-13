@@ -46,7 +46,8 @@ class LineWorker {
 
   _start() {
     const child = this.spawnImpl(this.file, this.args, { stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true, env: this.env });
-    const worker = { child, pending: new Map() };
+    // typed: an input op has been sent to this child (call()).
+    const worker = { child, pending: new Map(), typed: false };
     this.current = worker;
     onLines(child.stdout, (line) => {
       let msg;
@@ -63,7 +64,18 @@ class LineWorker {
       if (msg.ok === true) p.resolve(msg.result === undefined ? null : msg.result);
       else p.reject(fromWire(msg.error));
     });
-    if (child.stderr) onLines(child.stderr, (line) => this.log.debug(`${this.name}: ${line}`));
+    // A worker's stderr can quote what it was sent (an error record shows
+    // the statement that failed), and an input op is sent the text to type.
+    // A line may also come after the op it belongs to has been answered. So
+    // once a child has been sent an input op, its stderr is logged as a code
+    // and a length, never the line, at any level (third security review,
+    // hardening a). Before that it is diagnostics: why a worker did not start.
+    if (child.stderr) {
+      onLines(child.stderr, (line) => {
+        if (worker.typed) this.log.debug(`${this.name}: worker_stderr (${line.length} characters, not shown)`);
+        else this.log.debug(`${this.name}: ${line}`);
+      });
+    }
     child.on('error', (err) => this._fail(worker, `${this.name} could not start: ${err.message}`));
     child.on('exit', (code) => this._fail(worker, `${this.name} exited (${code})`));
     if (child.stdin) child.stdin.on('error', () => {});
@@ -103,6 +115,7 @@ class LineWorker {
       }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
       worker.pending.set(id, { resolve, reject, timer });
+      if (op === 'input') worker.typed = true;
       worker.child.stdin.write(`${JSON.stringify({ id, op, params })}\n`);
     });
   }
