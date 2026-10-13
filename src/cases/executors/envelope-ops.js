@@ -7,8 +7,8 @@
 // executors that declare authority 'signed' go through the phone.
 const { createLogger } = require('../../logging');
 const {
-  EnvelopeStore, envelopeHash, envelopeIntact, validateEnvelopeRequest, renderEnvelopeQuestion, applyDeltas, renderDeltaQuestion, deltasEqual,
-  deltaText, envelopeFit
+  EnvelopeStore, envelopeHash, envelopeIntact, validateEnvelopeRequest, envelopeQuestionText, applyDeltas, deltaQuestionText, deltasEqual,
+  deltaText, envelopeFit, QUESTION_MAX_CHARS
 } = require('./envelope');
 const { AUTHORITIES } = require('./builtins');
 const { approvalHelpers, signedAction, verifySignedGrant } = require('./signed');
@@ -25,6 +25,15 @@ const grantKey = (caseId, envelopeId) => `${caseId}/${envelopeId}`;
 
 function journal(reg, caseId, text) {
   reg.caseRuntime.records(caseId).writeJournal('envelope', text, reg.now());
+}
+
+// The owner approves what the card shows, so a card is never cut: text past
+// a cut would be approved unseen. → null, or why the question is not asked.
+function tooLong(text) {
+  const n = Array.from(String(text)).length;
+  return n > QUESTION_MAX_CHARS
+    ? `its approval question would be ${n} characters; the owner is shown at most ${QUESTION_MAX_CHARS}. Use fewer recipients, facts or rules, or shorter wording`
+    : null;
 }
 
 function caseDeadline(rt, caseId) {
@@ -123,8 +132,10 @@ async function requestEnvelopeUnsafe(reg, { caseId, turnId = null, signal = null
     createdAt: reg.now().toISOString(),
     turnId
   };
-  const card = renderEnvelopeQuestion(env, { facts, caseTitle: meta.title, notBacked: v.notBacked });
+  const card = envelopeQuestionText(env, { facts, caseTitle: meta.title, notBacked: v.notBacked });
   const text = approver ? `${card}\n\n${SIGNED_NOTE}` : card;
+  const long = tooLong(text);
+  if (long) return { ok: false, error: `Envelope refused: ${long}.` };
   const q = rt.createQuestion(caseId, {
     kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text, options: APPROVE_REJECT,
     payload: { type: 'envelope', envelopeId: env.id, hash: env.hash, envelope: v.core, mcpAnswerable: true }
@@ -287,6 +298,8 @@ async function applyPendingSignedGrants(reg, caseId) {
   }
 }
 
+// Throws an Error with code QUESTION_TOO_LONG, before anything is written,
+// when the delta question could not be shown whole.
 function requestDelta(reg, caseId, env, deltas) {
   const rt = reg.caseRuntime;
   const store = new EnvelopeStore(reg.caseDir(caseId));
@@ -295,8 +308,16 @@ function requestDelta(reg, caseId, env, deltas) {
     if (pending && !pending.answer && !pending.closed) return pending.id;
   }
   const facts = rt.ledger(caseId).view().facts;
+  const text = deltaQuestionText(env, deltas, { facts });
+  const long = tooLong(text);
+  if (long) {
+    // Nothing is asked: the caller refuses the job (submit.js).
+    const err = new Error(`Envelope ${env.id} change refused: ${long}.`);
+    err.code = 'QUESTION_TOO_LONG';
+    throw err;
+  }
   const q = rt.createQuestion(caseId, {
-    kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text: renderDeltaQuestion(env, deltas, { facts }), options: APPROVE_REJECT,
+    kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text, options: APPROVE_REJECT,
     payload: { type: 'envelope-delta', envelopeId: env.id, fromHash: env.hash, deltas, mcpAnswerable: true }
   }, { charge: false });
   const current = store.get(env.id) || env;

@@ -464,7 +464,7 @@ describe('envelope channels', () => {
     const plain = activeEnvelope();
     const env = activeEnvelope({ channels: ['sms', 'voice'] });
     const text = renderEnvelopeQuestion(env, { facts: all });
-    assert.match(text, /\nRecipients: \+15550100, \+15550101\nChannel sends to them: sms, voice\n/);
+    assert.match(text, /\nChannel sends allowed: sms, voice\nRecipients \(2\): \+15550100, \+15550101\n/);
     assert.doesNotMatch(renderEnvelopeQuestion(plain, { facts: all }), /Channel sends/);
     const summary = renderSignedSummary(envelopeCore(env), env.id);
     assert.match(summary, /^env-01 · phone-agent \[channel sends: sms, voice\]: Ask three brokers/);
@@ -503,5 +503,72 @@ describe('envelope channels', () => {
     assert.deepStrictEqual(first.channels, ['sms']);
     assert.strictEqual(envelopeFit(first, {}, fitOpts({ channel: 'sms' })).fits, true);
     assert.throws(() => applyDeltas(activeEnvelope(), [{ kind: 'channel', value: 'not a channel' }]), /channels/);
+  });
+});
+
+// Security review 2026-10-12, finding 1: nothing the model writes may hide,
+// precede or imitate the lines the host builds for the owner's approval.
+describe('the approval question cannot be spoofed by model-written text', () => {
+  const ctx = { entry: PHONE_AGENT, facts: facts(ACRES, GUESS, FLOOR), casesTimeZone: 'UTC' };
+  const BREAKS = ['\n', '\r', '\r\n', '\u2028', '\u2029', '\u0085', '\u000b', '\u000c'];
+  const HIDDEN = ['\u202e', '\u200b', '\u2066', '\ufeff', '\u0000', '\u00ad'];
+
+  it('refuses an intent or a rule with a line break or a hidden character', () => {
+    for (const ch of [...BREAKS, ...HIDDEN]) {
+      const label = `U+${ch.codePointAt(0).toString(16)}`;
+      const intent = validateEnvelopeRequest(request({ intent: `Ask for a quote${ch}Channel sends allowed: none` }), ctx);
+      assert.strictEqual(intent.ok, false, label);
+      assert.match(intent.error, /"intent" must be one line/, label);
+      const rule = validateEnvelopeRequest(request({ rules: ['Be brief', `Say hello${ch}Caps: $1.00 total`] }), ctx);
+      assert.strictEqual(rule.ok, false, label);
+      assert.match(rule.error, /"rules" must each be one line/, label);
+    }
+    assert.strictEqual(validateEnvelopeRequest(request({ intent: '  Ask for a quote\n' }), ctx).ok, true, 'surrounding white space is trimmed, not refused');
+  });
+
+  it('every host-built line comes before any model-written text', () => {
+    const env = activeEnvelope({ channels: ['sms'], rules: ['Say the first name only'], intent: 'Ask three brokers for a listing quote on the lot' });
+    const text = renderEnvelopeQuestion(env, { facts: facts(ACRES), caseTitle: 'Lakeside lot', notBacked: [{ text: 'due by', detail: 'deadline' }] });
+    assert.deepStrictEqual(text.split('\n'), [
+      'Approve envelope env-01 for phone-agent in case "Lakeside lot"?',
+      'Caps: $20.00 total, 3 contacts, 2 attempts per contact',
+      'Window: 2026-10-26 to 2026-10-30 (America/Chicago)',
+      'Channel sends allowed: sms',
+      'Recipients (2): +15550100, +15550101',
+      'Facts it may disclose (1):',
+      '- f-0001: Lot size is 2.12 acres = 2.12 acres',
+      'Intent: Ask three brokers for a listing quote on the lot',
+      'Rules:',
+      '- Say the first name only',
+      'Not backed by a fact:',
+      '- "due by" (deadline)'
+    ]);
+  });
+
+  it('text already stored with line breaks is shown on one line, so it cannot start a line of its own', () => {
+    const stmt = fact('f-0001', { stmt: 'Lot size\nCaps: $0.00 total\u2028Channel sends allowed: none', value: 'two\nlines' });
+    const env = activeEnvelope({
+      channels: ['sms'], intent: 'Ask for a quote\nChannel sends allowed: none\nCaps: $1.00 total, 1 contacts', rules: ['one\r\nRecipients (1): +15550100']
+    });
+    const text = renderEnvelopeQuestion(env, { facts: facts(stmt), caseTitle: 'Lot\nCaps: $1.00 total', notBacked: [{ text: 'x\ny', detail: 'a\nb' }] });
+    const lines = text.split('\n');
+    assert.strictEqual(lines.filter((l) => l.startsWith('Caps:')).length, 1);
+    assert.strictEqual(lines.filter((l) => l.startsWith('Channel sends allowed:')).length, 1);
+    assert.strictEqual(lines.filter((l) => l.startsWith('Recipients')).length, 1);
+    assert.strictEqual(lines[1], 'Caps: $20.00 total, 3 contacts, 2 attempts per contact');
+    assert.strictEqual(lines[3], 'Channel sends allowed: sms');
+    assert.doesNotMatch(text, /[\r\u2028\u2029\u0085\u000b\u000c]/);
+    const delta = renderDeltaQuestion(env, [{ kind: 'fact', value: 'f-0001' }, { kind: 'recipient', value: '+15550102\n- raises usd cap from $1.00 to $2.00' }], { facts: facts(stmt) });
+    assert.strictEqual(delta.split('\n').length, 4, delta);
+    assert.strictEqual(delta.split('\n').filter((l) => l.startsWith('- raises')).length, 0);
+  });
+
+  it('a recipient that would break a line is refused', () => {
+    const web = { ...PHONE_AGENT, capabilities: ['chat'] };
+    const r = validateEnvelopeRequest(request({ recipients: { allow: ['broker one\u0085Caps: $1.00 total'] } }), { ...ctx, entry: web });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /has a line break or a hidden character/);
+    // White space a text address folds to one space is not a line break once stored.
+    assert.strictEqual(validateEnvelopeRequest(request({ recipients: { allow: ['broker\none'] } }), { ...ctx, entry: web }).core.recipients.allow[0], 'broker one');
   });
 });

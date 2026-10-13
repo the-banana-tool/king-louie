@@ -89,7 +89,7 @@ describe('sendExternal: the envelope names the channel', () => {
 
   it('a channel the owner approved goes out; another channel to the same number is refused', async () => {
     const s = await setup({ channels: ['sms'] });
-    assert.match(s.question.text, /\nChannel sends to them: sms\n/);
+    assert.match(s.question.text, /\nChannel sends allowed: sms\n/);
     assert.deepStrictEqual(s.question.payload.envelope.channels, ['sms']);
     const voice = await s.send({ channelId: 'voice' });
     assert.strictEqual(voice.ok, false);

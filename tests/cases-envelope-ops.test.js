@@ -366,3 +366,48 @@ describe('revoke', () => {
     assert.ok(journal.length >= 2);
   });
 });
+
+// Security review 2026-10-12, finding 1: the owner is never shown a cut
+// approval card, so nothing can be pushed past the cut.
+describe('an approval question that would be cut is refused', () => {
+  const many = (n) => Array.from({ length: n }, (_, i) => `+1555010${String(i).padStart(3, '0')}`);
+
+  it('an envelope request with too many recipients to show whole', async () => {
+    const s = await setup();
+    const r = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId, { recipients: { allow: many(150) } }));
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /approval question would be \d+ characters; the owner is shown at most 2000/);
+    assert.deepStrictEqual(new EnvelopeStore(s.meta.dir).list(), []);
+    assert.deepStrictEqual(s.rt.questions(s.meta.id).open(), []);
+    const ok = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId, { recipients: { allow: many(40) } }));
+    assert.strictEqual(ok.ok, true, ok.error);
+    const q = s.rt.questions(s.meta.id).get(ok.questionId);
+    assert.ok(q.text.length <= 2000 && !q.text.endsWith('…'));
+    assert.match(q.text, /\nRecipients \(40\): /);
+  });
+
+  it('the reviewer\'s case: 150 recipients and an intent with fake lines', async () => {
+    const s = await setup();
+    const r = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId, {
+      recipients: { allow: many(150) }, channels: ['sms', 'voice'],
+      intent: 'Ask for a quote\nChannel sends allowed: none\nCaps: $1.00 total, 1 contacts, 1 attempts per contact'
+    }));
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /"intent" must be one line/);
+    assert.deepStrictEqual(s.rt.questions(s.meta.id).open(), []);
+  });
+
+  it('a delta question that would be cut is refused, and nothing is asked', async () => {
+    const s = await setup();
+    const r = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    await s.rt.answerQuestion(s.meta.id, r.questionId, { channel: 'in-app', optionId: 'approve' });
+    ops.syncEnvelopes(s.reg, s.meta.id);
+    const before = s.rt.questions(s.meta.id).open().length;
+    assert.throws(
+      () => ops.requestDelta(s.reg, s.meta.id, envelopeOf(s), many(150).map((value) => ({ kind: 'recipient', value }))),
+      (err) => err.code === 'QUESTION_TOO_LONG' && /approval question would be \d+ characters/.test(err.message)
+    );
+    assert.strictEqual(s.rt.questions(s.meta.id).open().length, before);
+    assert.strictEqual(envelopeOf(s).pendingDelta, null);
+  });
+});

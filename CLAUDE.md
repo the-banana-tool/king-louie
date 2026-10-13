@@ -750,6 +750,13 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
   are gated in query mode, and no tool writes ops memory, the executors folder,
   workflow files or the settings and vault stores (`chat-data.json`,
   `config.json`) in the data dir. `Bash` is not guarded.
+- The approval card (`envelopeQuestionText`, `deltaQuestionText`) is what the
+  owner approves, so it is never cut and never spoofable: an `intent`, rule
+  or recipient with a line break or a hidden character is refused, the
+  host-built lines (caps, window, channels, recipients) come before any
+  model-written text, every model or ledger string is shown through
+  `oneLine`, and a request or delta whose card would pass 2,000 characters
+  is refused (`QUESTION_TOO_LONG`). Keep new card lines in that order.
 - Envelopes activate when the owner approves the envelope question in the app
   or remotely (the question is `mcpAnswerable`), on the desktop and in
   service mode alike. Only an executor that declares `authority: signed`

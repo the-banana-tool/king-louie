@@ -378,10 +378,23 @@ refusals[], deltas[] }`:
 | `now` inside the window | delta `extends window end to <date>`; refusal if `now < start` |
 | a channel send's channel in `channels` (jobs are not checked) | delta `allows channel sends on <channel>` |
 
+**The approval card (security review 2026-10-12).** The owner approves what the card shows, and the
+approval binds to the hash, so the card must show all of it and nothing may imitate it. (a) An `intent`, a
+rule or a normalized recipient with a line-separating character (LF, CR, VT, FF, U+0085, U+2028, U+2029)
+or a hidden character (`src/cases/hidden-chars.js`: controls, zero-width, bidi) is refused. (b) The card
+(`envelopeQuestionText`) puts every host-built line first, in this order: the header, `Caps:`, `Window:`,
+`Channel sends allowed:` (when the envelope has a list), `Recipients (N):`; then the model-written text:
+`Facts it may disclose (N):` with one line per fact, `Intent:`, `Rules:`, `Not backed by a fact:`. Every
+piece of model or ledger text is shown on one line (`oneLine`), so text stored before this rule cannot
+start a line either. (c) A request whose card (with the signed note) is over 2,000 characters is refused,
+never cut, which bounds the recipients, facts and rules; so is a delta question (`requestDelta` throws
+`QUESTION_TOO_LONG` before it writes anything, and `Executor.submit` refuses the job). `cut` remains only
+for showing an envelope stored before the rule.
+
 **Channels (owner decision 2026-10-12).** `channels` lists the contact channels a channel send
 (`ContactRouter.sendExternal`, §3.7) to the envelope's recipients may use, in stored form (`call` is
-`voice`). A request names them explicitly; the owner sees them in the approval question (`Channel sends to
-them: sms, voice`) and, for a `signed` envelope, in the phone summary before the intent. The list is in the
+`voice`). A request names them explicitly; the owner sees them in the approval question (`Channel sends
+allowed: sms, voice`) and, for a `signed` envelope, in the phone summary before the intent. The list is in the
 core, so in the hash, only when the envelope has one: an envelope without the key allows no channel send
 and its core, hash and signed action are byte for byte what they were before the field existed (no approval
 vector changes). A `channels` key that is not a list of distinct channel ids is malformed (`tampered`),

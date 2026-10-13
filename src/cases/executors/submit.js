@@ -269,7 +269,14 @@ async function submitChecked(reg, ctx, params) {
     const fit = envelopeFit(envelope, payload, { facts, recipients, now, estimateUsd, gateBlocked, executorId: entry.id });
     if (fit.refusals.length) return fail(`outside envelope ${envelope.id}: ${fit.refusals.join('; ')}`);
     if (fit.deltas.length) {
-      const questionId = envelopeOps.requestDelta(reg, caseId, envelope, fit.deltas);
+      let questionId;
+      try {
+        questionId = envelopeOps.requestDelta(reg, caseId, envelope, fit.deltas);
+      } catch (err) {
+        // The change could not be shown to the owner whole: nothing is asked.
+        if (err && err.code === 'QUESTION_TOO_LONG') return fail(err.message);
+        throw err;
+      }
       const texts = fit.deltas.map((d) => d.text);
       return { ok: false, needsApproval: true, deltas: texts, questionId, error: `the owner must approve: ${texts.join('; ')}` };
     }
