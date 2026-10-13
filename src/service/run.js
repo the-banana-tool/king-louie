@@ -83,6 +83,29 @@ function loadProfile(profile) {
         });
         let core;
         let fleet = null;
+        // Fleet stage 5: desktop apps through the session helper (null when
+        // gui is off or no helper is installed). configDir falls back to the
+        // same per-platform admin dir service-wiring uses.
+        let gui = null;
+        try {
+          const { createGuiSubsystem, isJobOpen } = require('../gui');
+          const { adminConfigDir } = require('../platform/paths');
+          gui = createGuiSubsystem({
+            nodeConfig, dataDir, configDir: configDir || adminConfigDir({ dataDir }), cipher: servicePorts.cipher, approvals,
+            // R-F5-7, late-bound: the core and the fleet node are built after
+            // this. Until both exist, and for any job neither knows, no job
+            // is open (fail closed).
+            jobOpen: (jobId) => isJobOpen({
+              jobManager: fleet ? fleet.jobManager : null,
+              chatExists: (chatId) => Boolean(core && core.context.getChat(chatId, { messages: false }))
+            }, jobId),
+            ...(adminUid === undefined ? {} : { adminUid })
+          });
+        } catch (err) {
+          await desktopBridge.stop().catch(() => {});
+          await approvals.stop().catch(() => {});
+          throw err;
+        }
         try {
           // createCore itself can throw synchronously (bad deps, a bad
           // phoneApprover.ttlMs, …), not just its start() — both go in the
@@ -105,6 +128,7 @@ function loadProfile(profile) {
             remoteApprovals: 'phone',
             phoneApprover: approvals.phoneApprover,
             auditLedger: approvals.auditLedger,
+            gui, // Fleet stage 5: the GUI subsystem, or null
             approvals, // Cases stage 4 (wave 3): the phone contact channel (relay link, admin approvers, node identity)
             nodePolicy: nodeConfig.policy,
             builtinSkillsDir: path.join(__dirname, '..', '..', 'skills'),
@@ -136,6 +160,7 @@ function loadProfile(profile) {
           // shutdown ahead of stopping approvals.
           await desktopBridge.stop().catch(() => {});
           if (core) await core.shutdown().catch(() => {});
+          if (gui) await gui.stop().catch(() => {});
           await approvals.stop().catch(() => {});
           throw err;
         }
@@ -149,8 +174,10 @@ function loadProfile(profile) {
           // Fleet stage 4 §3.7: the runbook engine, JobManager, delegate
           // sessions and the fleet link methods, hosted by the service.
           const { startFleetNode } = require('../fleet/start');
-          fleet = await startFleetNode({ dataDir, nodeConfig, approvals, core, adminUid });
+          fleet = await startFleetNode({ dataDir, nodeConfig, approvals, core, adminUid, deps: { leaseManager: gui ? gui.leases : null } });
+          if (gui) await gui.start();
         } catch (err) {
+          if (gui) await gui.stop().catch(() => {});
           if (fleet) await fleet.stop().catch(() => {});
           // Don't leave a half-started core (and its cron timers) behind.
           await desktopBridge.stop().catch(() => {});
@@ -167,17 +194,23 @@ function loadProfile(profile) {
           // later step runs even if an earlier stop() throws (a wedged
           // dispatcher, say) — never skip one and leave cron timers, stores
           // or a live relay link running.
+          // The GUI stops before all of them: it ends every lease
+          // service_stopped and closes the helper channel first.
           stop: async () => {
             try {
-              if (fleet) await fleet.stop();
+              if (gui) await gui.stop();
             } finally {
               try {
-                await desktopBridge.stop();
+                if (fleet) await fleet.stop();
               } finally {
                 try {
-                  await core.shutdown();
+                  await desktopBridge.stop();
                 } finally {
-                  await approvals.stop();
+                  try {
+                    await core.shutdown();
+                  } finally {
+                    await approvals.stop();
+                  }
                 }
               }
             }
@@ -186,7 +219,8 @@ function loadProfile(profile) {
           masterKeySource: servicePorts.masterKeySource,
           desktopBridge,
           approvals,
-          fleet
+          fleet,
+          gui
         };
       }
     };

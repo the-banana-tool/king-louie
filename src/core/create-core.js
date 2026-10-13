@@ -2740,6 +2740,9 @@ function createCore(deps = {}) {
     toolRegistry.register(new SessionsListTool(sessionManager));
     toolRegistry.register(new SessionsHistoryTool(sessionManager));
     toolRegistry.register(new SessionsSpawnTool(sessionManager));
+    // Fleet stage 5: the GUI tools, when the service host passed a gui
+    // subsystem (never on Electron).
+    if (deps.gui && typeof deps.gui.registerTools === 'function') deps.gui.registerTools(toolRegistry);
 
     agentExecutorAdapter = {
       execute: async (agent, message, options = {}) => {
@@ -3450,6 +3453,8 @@ function createCore(deps = {}) {
     // 'allow' and 'deny' modes (the Electron host), and null while no device
     // is enrolled or no relay link can deliver.
     getPhoneApprover: () => (remoteApprovals === 'phone' && deps.phoneApprover && deps.phoneApprover.isAvailable() ? deps.phoneApprover : null),
+    // Fleet stage 5 (§5.2): null on Electron, a runbook node, or with no helper installed.
+    getGuiBroker: () => (deps.gui && deps.gui.broker ? deps.gui.broker : null),
 
     // Tool
     pendingApprovalResolvers,

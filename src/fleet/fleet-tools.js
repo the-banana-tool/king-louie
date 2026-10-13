@@ -138,6 +138,13 @@ class FleetToolHandler {
     }
   }
 
+  // Fleet stage 5 §5.2: 'gui' is a capability while the session helper is up.
+  capabilitiesWith(gui) {
+    const caps = Array.isArray(this.nodeConfig.capabilities) ? [...this.nodeConfig.capabilities] : [];
+    if (gui && gui.available === true && !caps.includes('gui')) caps.push('gui');
+    return caps;
+  }
+
   guiBlock() {
     if (!this.gui) return null;
     try {
@@ -202,7 +209,7 @@ class FleetToolHandler {
         {
           name: this.nodeConfig.name,
           profile: this.nodeConfig.profile,
-          capabilities: this.nodeConfig.capabilities,
+          capabilities: this.capabilitiesWith(gui),
           online: true,
           summary: `Node ${this.nodeConfig.name} (${this.nodeConfig.profile})`,
           ...(gui ? { gui } : {})
@@ -227,7 +234,7 @@ class FleetToolHandler {
       return {
         name: this.nodeConfig.name,
         profile: this.nodeConfig.profile,
-        capabilities: this.nodeConfig.capabilities,
+        capabilities: this.capabilitiesWith(gui),
         allowed_roots: this.nodeConfig.policy?.allowed_roots || [],
         max_concurrent_jobs: this.jobManager.maxConcurrentJobs === Infinity ? null : this.jobManager.maxConcurrentJobs,
         runbooks: runbooksList,
