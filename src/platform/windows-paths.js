@@ -10,5 +10,6 @@ function windowsSystemRoot(env = process.env) {
 
 const windowsPowerShellExe = (env) => path.win32.join(windowsSystemRoot(env), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const windowsSchtasksExe = (env) => path.win32.join(windowsSystemRoot(env), 'System32', 'schtasks.exe');
+const windowsIcaclsExe = (env) => path.win32.join(windowsSystemRoot(env), 'System32', 'icacls.exe');
 
-module.exports = { windowsSystemRoot, windowsPowerShellExe, windowsSchtasksExe };
+module.exports = { windowsSystemRoot, windowsPowerShellExe, windowsSchtasksExe, windowsIcaclsExe };
