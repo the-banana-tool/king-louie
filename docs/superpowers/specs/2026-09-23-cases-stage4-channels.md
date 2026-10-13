@@ -244,7 +244,10 @@ King Louie: 2 questions (1 high)
 Reply "#K7QD4M 1 a" / "#K7QD4M 2 b". Expires: 1) Sep 25 18:00.
 ```
 
-Items over `maxChars` are cut to 280 characters plus `(open King Louie for the full text)`. One
+Items over `maxChars` are cut to 280 characters plus `(open King Louie for the full text)`. An approval or
+app-only question whose text is cut that way is only announced (`Answer this in the app: …`, no options,
+`answerable: false`), on every channel, the app and the phone included: it is never answerable from a cut
+text (security review 2026-10-13). A batch line shows at most 60 characters of the case title, on one line. One
 `deliveries.json` entry per batch (§4.3).
 
 **Correlation.** Every token (question and batch) resolves through `deliveries.json`, so a late reply after

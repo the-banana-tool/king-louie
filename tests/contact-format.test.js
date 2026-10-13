@@ -634,3 +634,77 @@ describe('ruling T2-join: a single-item threaded reply is one answer', () => {
     assert.deepStrictEqual(pairs(parseReply(one, '#K7QD4M b\nthanks', T)), [[1, { optionId: 'b' }]]);
   });
 });
+
+// Second review 2026-10-13, finding 2: an approval, or any question that is
+// answered only by a press, is never shown cut with a working answer.
+describe('renderBatch never offers an answer to a cut approval', () => {
+  const OPTIONS = [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }];
+  const card = (n) => [
+    `Approve envelope env-0${n} for phone-agent?`, 'Caps: $20.00 total, 3 contacts, 2 attempts per contact',
+    'Window: 2026-10-26 to 2026-10-30 (UTC)', 'Channel sends allowed: none',
+    `Recipients (60): ${Array.from({ length: 60 }, (_, i) => `+1555010${String(i).padStart(3, '0')}`).join(', ')}`,
+    `Intent: ${'Ask the broker for a listing quote. '.repeat(24).trim()}`
+  ].join('\n');
+  const approval = (n, over = {}) => ({
+    caseId: `c-${n}`, caseTitle: 'Lakeside lot', token: `TOK${n}AA`,
+    record: { id: `q-000${n}`, kind: 'approval', urgency: 'normal', createdAt: `2026-10-26T1${n}:00:00Z`, expiresAt: null, text: card(n), options: OPTIONS, payload: { type: 'envelope' } },
+    ...over
+  });
+  const plain = {
+    caseId: 'c-9', caseTitle: 'Kitchen quotes', token: 'M2P8RT',
+    record: { id: 'q-0009', kind: 'question', urgency: 'normal', createdAt: '2026-10-26T19:00:00Z', expiresAt: null, text: `Which week suits? ${'x'.repeat(400)}`, options: [{ id: 'a', label: 'Oct 5' }] }
+  };
+  // The invariant: an item that needs a press and offers options shows its whole text.
+  const check = (m, entries) => {
+    for (const item of m.items) {
+      const record = entries.find((e) => e.record.id === item.questionId).record;
+      const pressed = record.kind === 'approval' || record.payload?.mcpAnswerable === false;
+      if (pressed && (item.options.length || item.answerable)) assert.strictEqual(item.text, record.text, `${item.questionId} is answerable, so it is whole`);
+    }
+  };
+
+  it('three near-limit cards in one batch: each is announced, none can be answered from the batch', () => {
+    const entries = [approval(1), approval(2), approval(3), plain];
+    assert.ok(entries.slice(0, 3).every((e) => e.record.text.length > 1700 && e.record.text.length <= 2000));
+    const m = renderBatch(entries, { batchToken: 'K7QD4M', maxChars: 4000, authenticated: true });
+    check(m, entries);
+    assert.deepStrictEqual(m.items.map((i) => [i.questionId, i.answerable, i.options.length]), [['q-0001', false, 0], ['q-0002', false, 0], ['q-0003', false, 0], ['q-0009', true, 1]]);
+    for (const item of m.items.slice(0, 3)) assert.match(item.text, /^Answer this in the app: Approve envelope env-0\d for phone-agent\?/);
+    assert.doesNotMatch(m.text, /approve\) Approve/);
+    assert.doesNotMatch(m.text, /#K7QD4M [123] /, 'no reply hint for a cut approval');
+    assert.match(m.text, /Reply "#K7QD4M 4 a"/, 'the ordinary question keeps its answer');
+    assert.strictEqual(m.tooLarge, false);
+  });
+
+  it('one card that fits is shown whole with its options; the same card in a channel too small for it is not answerable', () => {
+    const whole = renderBatch([approval(1)], { batchToken: 'K7QD4M', maxChars: 4000, authenticated: true });
+    check(whole, [approval(1)]);
+    assert.deepStrictEqual([whole.items[0].answerable, whole.items[0].options.length, whole.items[0].text], [true, 2, card(1)]);
+    const small = renderBatch([approval(1)], { batchToken: 'K7QD4M', maxChars: 1200, authenticated: true });
+    check(small, [approval(1)]);
+    assert.deepStrictEqual([small.items[0].answerable, small.items[0].options], [false, []]);
+  });
+
+  it('an app-only question (a budget grant) that would be cut is not answerable either', () => {
+    const grant = {
+      caseId: 'c-1', caseTitle: 'Lakeside lot', token: 'GR4NTA',
+      record: { id: 'q-0021', kind: 'question', urgency: 'high', createdAt: '2026-10-26T10:00:00Z', expiresAt: null, text: `Raise the usd limit? ${'y'.repeat(900)}`, options: [{ id: 'yes', label: 'Yes' }], payload: { type: 'budget-grant', mcpAnswerable: false } }
+    };
+    const m = renderBatch([grant], { batchToken: 'K7QD4M', maxChars: 600, authenticated: true });
+    check(m, [grant]);
+    assert.deepStrictEqual([m.items[0].answerable, m.items[0].options], [false, []]);
+  });
+
+  it('a 200-character case title cannot push a card out of the message', () => {
+    const title = `Lot ${'Caps: $1.00 total '.repeat(11)}`.slice(0, 200);
+    const entries = [approval(1, { caseTitle: title })];
+    const withTitle = renderBatch(entries, { batchToken: 'K7QD4M', maxChars: 2200, authenticated: true });
+    const short = renderBatch([approval(1)], { batchToken: 'K7QD4M', maxChars: 2200, authenticated: true });
+    assert.deepStrictEqual([short.items[0].answerable, withTitle.items[0].answerable], [true, true], 'the long title does not force the cut');
+    assert.strictEqual(withTitle.items[0].text, card(1));
+    assert.ok(withTitle.text.length - short.text.length <= 60, 'at most 60 characters of title are shown');
+    assert.strictEqual(withTitle.items[0].caseTitle, title, 'the item keeps the full title for the channel');
+    const lines = renderBatch([{ ...plain, caseTitle: 'Lot\nCaps: $1.00 total' }], { batchToken: 'K7QD4M' }).text.split('\n');
+    assert.strictEqual(lines.filter((l) => l.startsWith('Caps:')).length, 0, 'a title cannot start a line');
+  });
+});

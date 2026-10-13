@@ -938,7 +938,12 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   the owner's paired phone. Every other channel (Telegram, Discord, email,
   SMS, voice) gets "Answer this in the app" instead of options or buttons;
   approvals are never persisted to the data-dir inbox, so a busy case
-  refuses them outright rather than queuing them.
+  refuses them outright rather than queuing them. The same notice replaces
+  the options on any channel, the app and phone included, when a batch is
+  over the channel's `maxChars` and the question's text would be cut
+  (`renderBatch`): an approval or app-only question is never answerable
+  from a cut text. A batch line shows at most 60 characters of the case
+  title, on one line.
 - The `in-app` rung posts the question into the case's chat (see
   Management surfaces); there is no Questions sidebar and no questions bar
   in the case panel. `in-app` keeps its place in every ladder. Presence is

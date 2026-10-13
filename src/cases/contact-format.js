@@ -315,11 +315,25 @@ function appOnly(record) {
 // An approval or an app-only question: answerable only in-app or on the phone.
 const needsApp = (record) => record?.kind === 'approval' || appOnly(record);
 
+// The case title as a batch line shows it: one line, at most TITLE_SHOWN
+// code points. A title can be model-written and 200 characters long; shown
+// whole it could push a question out of the message (forcing the cut below)
+// or start a line of its own.
+const TITLE_SHOWN = 60;
+function shownTitle(title) {
+  const chars = Array.from(String(title ?? '').replace(/[\s\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, ' ').trim());
+  return chars.length > TITLE_SHOWN ? `${chars.slice(0, TITLE_SHOWN - 1).join('')}…` : chars.join('');
+}
+
 // entries: [{ caseId, caseTitle, token, record }] across cases. Returns the
 // §3.1 message { subject, text, items }. On a channel whose replies cannot
 // answer in the app's name (`authenticated: false`), an approval or an
 // app-only question is only announced: "Answer this in the app: …", with no
-// options and no reply hint (answerable: false).
+// options and no reply hint (answerable: false). The same happens, on any
+// channel, to such a question when the batch is over maxChars and its text
+// would be cut: the owner never answers an approval (or any question that is
+// answered only by a press) from a cut text. An ordinary question may be
+// cut and keep its options.
 function renderBatch(entries, {
   batchToken, maxChars = 4000, maxOptions = 6, authenticated = true, timeZone = '', truncate = false, replies = true
 } = {}) {
@@ -327,10 +341,11 @@ function renderBatch(entries, {
     || String(a.record.createdAt).localeCompare(String(b.record.createdAt)));
   const items = sorted.map((e, i) => {
     const r = e.record;
-    const answerable = authenticated || !needsApp(r);
     let text = r.text;
-    if (truncate && text.length > TRUNCATE_AT) text = `${text.slice(0, TRUNCATE_AT)}${TRUNCATED}`;
-    if (!answerable) text = `Answer this in the app: ${text} (${e.caseTitle})`;
+    const cut = truncate && text.length > TRUNCATE_AT;
+    const answerable = (authenticated || !needsApp(r)) && !(cut && needsApp(r));
+    if (cut) text = `${text.slice(0, TRUNCATE_AT)}${TRUNCATED}`;
+    if (!answerable) text = `Answer this in the app: ${text} (${shownTitle(e.caseTitle)})`;
     const options = answerable ? (r.options || []).slice(0, maxOptions) : [];
     return {
       n: i + 1, token: e.token, caseId: e.caseId, questionId: r.id, caseTitle: e.caseTitle,
@@ -340,7 +355,7 @@ function renderBatch(entries, {
   const lines = [subjectFor(items), ''];
   for (const it of items) {
     const tag = it.urgency === 'high' ? '[HIGH] ' : '';
-    lines.push(it.answerable ? `${it.n}. ${tag}${it.caseTitle} — ${it.text}` : `${it.n}. ${tag}${it.text}`);
+    lines.push(it.answerable ? `${it.n}. ${tag}${shownTitle(it.caseTitle)} — ${it.text}` : `${it.n}. ${tag}${it.text}`);
     if (it.options.length) lines.push(`   ${it.options.map((o) => `${o.id}) ${o.label}`).join('   ')}`);
   }
   // replies: false (a delivery-only channel) → no footer, so no token (ruling T9-token).
