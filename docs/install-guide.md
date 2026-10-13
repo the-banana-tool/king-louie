@@ -542,6 +542,7 @@ What each FAIL means:
 | `DPAPI-wrapped master key present (created on first run)` | the MCP instance has not started yet | start it once (section 8), then run `doctor` again |
 | `node identity record (the identity in … is not the one an administrator recorded in …)` | the data dir holds another node identity than the one recorded with `identity record` | if you replaced or reset the data dir on purpose, run `identity record --replace` (below) and pair phones, relays and desktops again; if you did not, restore the data dir from a backup |
 | `node identity record (… so it does not say which identity an administrator recorded …)` | the record cannot be trusted or read: wrong owner or permissions, a link, or a damaged file | find out who could have changed it, then run `identity record --replace` (below) |
+| `node identity record (… names this identity, but the access list of … lets S-1-… change it …)` | Windows: an account other than SYSTEM or Administrators may change the record or its directory | find out who changed the access list, then run `identity record --replace` (below): it writes the record anew in a new directory with an access list of its own |
 
 A `not checked: uses parameters without defaults` row is not a failure. That
 `sudo` step has a parameter with no default value, so `doctor` cannot know

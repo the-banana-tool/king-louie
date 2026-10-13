@@ -1309,7 +1309,8 @@ protocols `docs/protocol/session-v1.md`, `docs/protocol/lease-v1.md`). Both
 are Electron-free. `tests/service-profile-graph.test.js` keeps `src/session/`
 and `src/gui/` off the runbook, relay and front-door graphs, except
 `src/gui/config.js`, `errors.js` and `status.js` (and, on the relay and
-front-door graphs, `relay-extension.js` and `lease-protocol.js`).
+front-door graphs, `relay-extension.js` and `lease-protocol.js`; on the
+runbook graph, `lease-protocol.js`, for the empty listing below).
 
 - **Off until enabled (owner ruling R-F5-14).** The GUI subsystem starts only
   when `node.yaml` says `gui: enabled: true`. No `gui` block, an empty one
@@ -1425,10 +1426,27 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
     inspector in a PowerShell child (`inspectWindowsOwners`; no `Get-Acl`),
     are Administrators, SYSTEM or the config dir's own owner, the config
     dir is not LOCAL SERVICE's, none is a link, and with `serviceProbe`
-    (the service; never the admin CLI or doctor) this process cannot
-    create a file in `identity/`. An owner nobody could read, a file that
-    is not JSON, extra keys, an id that is not its key's: all `invalid`,
-    never `none`. The key is what is compared, not the id.
+    (the service; never the admin CLI or doctor) this process can neither
+    create a file in `identity/` nor open `node.json` for writing (only
+    `EACCES`/`EPERM` is trusted; fourth security review). An owner nobody
+    could read, a file that is not JSON, extra keys, an id that is not its
+    key's: all `invalid`, never `none`. The key is what is compared, not
+    the id.
+  - Windows, writing: `writeIdentityRecord` never keeps a directory that
+    was there (an inherit-only entry left in it would reach the new file).
+    It builds `.identity.new-*` beside it, gives the directory and then the
+    empty file a protected ACL (SYSTEM and Administrators in full, LOCAL
+    SERVICE read; `windowsRecordDirAclArgs` / `windowsRecordFileAclArgs`)
+    and Administrators as owner, writes the record, swaps the directories
+    with two renames and removes the old one; a failure puts it back. A
+    service run by hand as any account but LOCAL SERVICE cannot read such a
+    record and refuses to start.
+  - Windows, while the service runs: `probeIdentityRecord` is the write
+    probe alone, and the lease manager asks it before every new lease
+    request (`identityProbe`; off where the host ran no probe). A record
+    the service can now write refuses the request
+    (`capability_unavailable: gui (node_identity_invalid: …)`), logged
+    when the answer changes; a running lease is not ended by it.
   - No record: `session install` refuses; the service starts with one
     warning; computer use is off (`node_identity_unrecorded`, with the
     command in the log, `session status` and doctor). A record of another
@@ -1443,10 +1461,17 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
     `desktop pair`, `mcp`). The check is the service's own code: it
     catches an identity replaced in the data dir, not code inside the
     service process. doctor's `node identity record` row compares public
-    keys only.
+    keys only and says so, with what else it did not check
+    (`identityMatchRow`). On Windows it also reads the access lists of
+    `identity\` and `node.json` (`recordAclProblem`: the handle-based
+    inspector, no `Get-Acl`) and fails the row when they let anyone but
+    SYSTEM and Administrators change either, an inherit-only entry
+    included; lists it cannot read are "not checked", never clean. It
+    never runs the write probe (an administrator can always write).
   - Tests write the record with `recordIdentity` and read it with
     `IDENTITY_RECORD_TEST_OPTIONS` (`tests/helpers/identity-record.js`: the
-    Windows owner read answered in place, no write probe), passed as
+    Windows owner read and access lists answered in place, no write
+    probe), passed as
     `deps.identityRecord` to `runSessionCommand`, `runIdentityCommand`,
     `loadProfile(...).start`, `createGuiSubsystem` and `runDoctor`. A test
     that wants a GUI that is on, or an install that goes through, records
@@ -1576,6 +1601,35 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   unreachable (denial is visible, not preventable). A change to the
   listing changes `verifyLeaseListing`, both cores and the `listing-*`
   vectors together.
+- **What the fourth security review added to the listing.**
+  - Three states per pinned node on both phones (`leaseChecks`): not asked
+    (no entry: "Not checked yet: <node>"), confirmed ("Checked <node> at
+    <time>: no computer-use session", or the counts; only from a listing
+    `checkListing` accepted, with the phone's own time), unconfirmed. A
+    locked iOS session asks nothing and keeps the earlier answer with its
+    time; Android writes the state only in `refreshLeases`, on the tap.
+  - Every agent or runbook node with an identity and the relay link
+    answers `lease.list`. Where no lease manager exists (gui not enabled,
+    no helper, no record of the identity, a GUI that could not be built, a
+    runbook node) `answerLeaseListsWithNone` (`run.js`) registers
+    `offLeaseListing` (`lease-protocol.js`), which signs a listing that
+    names nothing: no lease can be live there. A node with a lease manager
+    answers from it. An older build cannot answer.
+  - A listing reuses a lease's newest status (`_listedStatus`) while it
+    still says what the lease is and, for a lease that has not ended, is
+    under `LIST_RESIGN_MS` (5 s) old with a token that has not made
+    contact; an ended lease's status is never signed again. So `lease.list`
+    cannot run up `seq` or flush the contact tokens.
+  - "May still start": both apps remember the leases they sign a grant for
+    (`signedLeaseGrants`, in memory). A node-signed `pending` status of
+    such a lease gives a banner row with the usual Stop
+    (`Leases.mayStillStart`); it goes on a signed `ended`, or when an
+    accepted listing no longer names it after the request expired on both
+    clocks (`dropMayStartRows`, `Leases.keepsMayStart`). Nothing is
+    revoked or sent again by itself.
+  - `Leases.isListing` in both cores is the node's
+    `VALIDATORS['kl.lease.listing']` (exact keys, a real `at`, at most
+    eight leases, each once), checked after the signature.
 - The lease is checked again inside `GuiBroker#input`, after the process
   lookup and immediately before the send; a broker with no lease manager
   sends no input. A click, scroll or drag lands only when the window under
@@ -1689,7 +1743,7 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   (`tests/session-backend-windows.test.js`), which shows the rule is
   written, not that it works. Swift and Kotlin are not compiled by
   `npm test`.
-- Vectors: `node tests/vectors/lease-v1/generate.js --check` (39) and
+- Vectors: `node tests/vectors/lease-v1/generate.js --check` (46) and
   `node tests/vectors/session-v1/generate.js --check` (6).
 - The phones: iOS signs only `kl.lease.watch` with its API session (owner
   ruling R-F5-8) and sends it only while the live lease view is on screen
