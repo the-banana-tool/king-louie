@@ -1311,21 +1311,64 @@ and `src/gui/` off the runbook, relay and front-door graphs, except
 `src/gui/config.js`, `errors.js` and `status.js` (and, on the relay and
 front-door graphs, `relay-extension.js` and `lease-protocol.js`).
 
+- **Off until enabled (owner ruling R-F5-14).** The GUI subsystem starts only
+  when `node.yaml` says `gui: enabled: true`. No `gui` block, an empty one
+  and one that only lists apps mean off; installing the helper enables
+  nothing (`session install`, `session status` and `doctor` say "installed
+  but not enabled in node.yaml" with the lines to add). A test config that
+  means "on" writes `enabled: true`.
 - `king-louie-service session` runs as the logged-in user (one session user
   per node). `session install --user NAME` (root/Administrator) writes
   `<configDir>/session/helper-secret.json` (klc1:), the per-user copy in
   `<configDir>/session/users/` (`<user>.json`; `<SID>.json` on Windows) and
-  the login start; running it again for the same user rotates the secret.
-  Installing for a second user is refused (`session_user_mismatch`) until
-  the first is uninstalled, before anything of the second is written (owner
-  ruling R-F5-2). It needs a node identity and a master key already in the
-  data dir ("start the service once first") and reads the key read-only.
-  `session uninstall --user NAME` removes the login start, the copy and, for
-  the installed user, the canonical secret. Neither asks `[y/N]` (like
-  `install`/`uninstall`), so `--yes` is a usage error; `--session-file` is
-  valid for `session` only. `session status` / `session probe` read the
-  running helper's report from `<dataDir>/session/status.json`; a local
-  probe is labelled as one and loads the real backend.
+  the login start. `session uninstall --user NAME` removes the login start,
+  the copy and the canonical secret. `--session-file` is valid for `session`
+  only. `session status` / `session probe` read the running helper's report
+  from `<dataDir>/session/status.json`; a local probe is labelled as one and
+  loads the real backend.
+- **Consent (R-F5-9).** `session install` and `session uninstall` follow
+  `desktop pair`: they print what is granted or removed first (the user by
+  name and SID, uid off Windows; the node's name and id; what the helper can
+  do; where it starts at login; the files), then ask `[y/N]` on a TTY
+  (default no). Off a TTY they need `--yes` or refuse (exit 2) before
+  anything is resolved or read. Nothing is minted, created or written before
+  the answer. `--dry-run` asks nothing. `--yes` is valid for `desktop pair`,
+  `device apply`, `session install` and `session uninstall` only
+  (`YES_COMMANDS` in `src/service/cli.js`).
+- **Who is installed (R-F5-2, R-F5-10).** One session user per node, decided
+  by the SID the canonical file records (the uid off Windows:
+  `session_sid`, `session_uid`), never the bare name. Another identity is
+  refused (`session_user_mismatch`) until the first is uninstalled. An
+  existing file that cannot be read, parsed or verified (admin-owned,
+  decrypts, a valid secret) or records no identity refuses the install
+  (`session_file_invalid`) and writes nothing (`inspectCanonical` in
+  `session-secret.js`). The same identity rotates: a new secret, the same
+  `endpoint_id` (the running service listens on the endpoint it started
+  with, so no restart is needed). `session uninstall` needs no master key,
+  clears a damaged file, leaves another user's file alone, and works from
+  the recorded identity when the account no longer resolves.
+- **What install checks (R-F5-12).** The master key is resolved read-only
+  with the data dir's owner uid (as `import --from`), so a key file its
+  owner does not own is refused. The node id is read where the store keeps
+  it (the dot path `mesh.identity` of `chat-data.json`) and verified: the
+  public key must be the public half of the private key held under the
+  master key (`readNodeIdentity`, read-only). The identity lives only in
+  the data dir; no admin-owned file names the node id. On Windows install
+  also runs the installers' config-dir check (`WINDOWS_CONFIG_DIRS_SCRIPT`)
+  after consent, creates the per-user copy empty, narrows it with `icacls`,
+  gives it to Administrators and only then writes it (removed if `icacls`
+  fails); the helper checks before every connection that the copy and its
+  directory are owned by SYSTEM or Administrators (`checkUserCopyTrust`,
+  an awaited PowerShell child; tests inject the inspector).
+- **A GUI that cannot start never stops the service (R-F5-11).** A helper
+  file that is there but wrong (owner, not JSON, does not decrypt,
+  malformed, another node's) gives a subsystem that is off with the reason
+  `session_file_invalid`; any other failure to build or start it (the
+  endpoint taken by another process, say) gives `gui_start_failed`.
+  `createGuiSubsystem` and its `start()` never throw. Off means: one error
+  log line without the file's contents, no channel, no leases, the ten tools
+  registered only to refuse with the reason, and `status.json` carrying it
+  for `session status` and `doctor`. Never a weaker mode.
 - The login start (`src/session/autostart.js`): a Windows logon task
   `KingLouie Session <user>` (`schtasks` by absolute path, the user's SID,
   `LeastPrivilege`), a macOS LaunchAgent, a Linux XDG autostart entry. A
@@ -1346,20 +1389,63 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   lease (`job_closed`; `isJobOpen` in `src/gui/index.js`: the fleet
   `JobManager` has it and it is not terminal, or the chat exists). Nothing
   defaults to open (owner ruling R-F5-7, 2026-10-12).
-- A front-door client needs `fleet:unsafe` on the node for `RequestLease`
-  and for an unsafe `LaunchApp`: both read the `refuseUnsafe` mark on the
-  requester `ToolExecutor` hands them (M19) and answer with
-  `REFUSE_UNSAFE_MESSAGE` before anything reaches the phone. A session the
-  node started itself still asks the phone (owner ruling R-F5-3).
+- **No GUI tool without `fleet:unsafe` (R-F5-13, which widens R-F5-3).** A
+  run that refuses unsafe calls (a front-door client whose grant does not
+  cover `fleet:unsafe` here, and its sub-agents, background tasks and
+  workflow children) is refused by all ten GUI tools, `ListApps` and
+  `Screenshot` included: `REFUSE_UNSAFE_MESSAGE`, before parameters are
+  read or the broker, lease manager or helper is touched (the `tool()`
+  wrapper in `src/gui/tools.js` reads the `refuseUnsafe` mark on the
+  requester, M19). Such a delegate turn is not offered the tools either
+  (`delegateToolNames(registry, { refuseUnsafe })`). A session the node
+  started itself, and a client with `fleet:unsafe`, keep them.
+- **Only allowlisted apps launch (R-F5-14).** `LaunchApp` takes an app id
+  from `gui.apps`; a path outside the allowlist is `app_not_allowlisted`
+  and nobody is asked. An allowlisted app with an argument outside its globs
+  or a file outside `allowed_roots` is still an unsafe launch for the phone.
+- **Contact (R-F5-15).** Input needs the granting phone to stay in touch:
+  the grant and every `kl.lease.watch` from that device with a new nonce
+  are contact; `gui.lease.contact_s` (120, at most 300) after the last one
+  the lease is suspended with the reason `no_contact` (input refuses
+  `lease_suspended_no_contact`; what was held is released; no resume request
+  is sent) until that device's next fresh watch, which never moves the
+  expiry. A replayed watch and another device's watch are not contact.
+  Watch and revoke nonces are kept per lease for its lifetime
+  (`LeaseNonces`), not in a 10-minute cache. Lease tests that pass more
+  than two minutes on the fake clock send watches or expect the suspension.
+- The lease is checked again inside `GuiBroker#input`, after the process
+  lookup and immediately before the send; a broker with no lease manager
+  sends no input. A click, scroll or drag lands only when the window under
+  the point is the screenshot's own window (all three backends).
+- **The typed buffer** (`TypedBuffer`, `text-guard.js`) models the keys:
+  text and printable keys append, Enter is a line break (it no longer wipes
+  the buffer), backspace removes one, and anything that moves the caret or
+  edits unseen (navigation keys, tab, delete, every ctrl/alt/meta chord, a
+  click, a drag) leaves what was typed as a piece of unknown place. Text
+  after that is refused when at most four runs of the pieces (one from the
+  new text) spell a vault value. The residuals are listed in that file's
+  header: more than four pieces, text the app adds or moves itself, text
+  already in the field.
+- **What reaches the relay (R-F5-16).** The live view's action log never
+  holds typed text: `Typed 42 characters`, `Key (a character)`; keys that
+  are not text keep their names. Pictures still show the window.
+  `mobile/PRIVACY.md` lists every clear field. Both phones apply a status or
+  view only when its node `seq` is newer than the last applied for that
+  lease, and a view only when `to_device` is this device
+  (`Leases.acceptsStatus` / `acceptsView` in both cores).
 - Case turns keep `ListApps` and `Screenshot` only: the eight acting GUI
   tools are in `CASE_BLOCKED_TOOL_NAMES`. Wake-up turns get no GUI tool;
-  delegate turns get all ten (owner ruling R-F5-4).
+  delegate turns get all ten unless they refuse unsafe calls (owner rulings
+  R-F5-4, R-F5-13). `ListApps` output is marked `untrusted_output`.
 - Tests never touch a real LaunchAgent, autostart entry or scheduled task,
   the real config or data dir, or a real elevated install:
   `tests/session-autostart.test.js` only renders and plans (a fake
   `spawnSync`), and `tests/service-cli-session.test.js` injects `isAdmin`,
-  `resolveSessionUser`, `resolveKey`, `runIcacls`, `execute`, `localProbe`
-  and `runHelper` over temp dirs. A test that calls `runSessionHelper`
+  `isTTY`, `confirm`, `resolveSessionUser`, `resolveKey`, `verifyConfigDir`,
+  `runIcacls`, `execute`, `localProbe` and `runHelper` over temp dirs (its
+  one real PowerShell call only reads a temp dir's ACL, to see it refused).
+  A helper test passes `checkUserCopyTrust` (the real one reads owners
+  through PowerShell). A test that calls `runSessionHelper`
   passes `deps.attachLog: false` (else it writes the user's real helper
   log) and its own `deps.backend`; lease tests sign with the fake phone's
   `leaseGrant` / `leaseRevoke` (`tests/helpers/fake-phone.js`).
@@ -1373,13 +1459,23 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   user-side autostart writer, the Unix socket and its `0711` dir) are
   skipped there; the macOS JXA worker and the real-X11 suite need their own
   OS; no elevated install, logon task, LaunchAgent or autostart entry has
-  been run for real on any OS.
+  been run for real on any OS. The Windows and macOS workers' input paths
+  inject into the real desktop, so no test runs them: their hit-test rules
+  are pinned by reading the worker sources
+  (`tests/session-backend-windows.test.js`), which shows the rule is
+  written, not that it works. Swift and Kotlin are not compiled by
+  `npm test`.
 - Vectors: `node tests/vectors/lease-v1/generate.js --check` (26) and
   `node tests/vectors/session-v1/generate.js --check` (6).
 - The phones: iOS streams the live lease, signing only `kl.lease.watch` with
   its API session (owner ruling R-F5-8); Android fetches on tap, sends each
   Stop, Allow and Refresh once and shows an unanswered send as not confirmed
-  (R-F5-1, R-F5-5), and a lease push there fetches nothing (R-F5-6). The app
+  (R-F5-1, R-F5-5), and a lease push there fetches nothing (R-F5-6). On
+  Android a relay's reply never changes the lease state on screen: only a
+  status or view the pinned node signed does (`applyLease`), so after Stop
+  it says "Stop sent, not yet confirmed by the computer" and Stop stays
+  enabled. Its live screen says "Paused: tap Refresh to let it continue"
+  for `no_contact` (R-F5-15), still with no timer. The app
   modules have no test target, so `tests/mobile-lease-apps.test.js` pins
   these rules by reading the Swift and Kotlin sources (it shows the rules are
   written into the code, not that the apps build). On Android a property that

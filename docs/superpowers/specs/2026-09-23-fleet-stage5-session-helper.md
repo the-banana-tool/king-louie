@@ -5,6 +5,7 @@
 - **Parent:** docs/superpowers/specs/2026-09-21-king-louie-fleet-design.md §4.6, §3.1 (principle 3 exception), §5.3, §6, §8.3, §11 (computer-use row), §13 Q5
 - **Program:** docs/superpowers/specs/2026-09-23-stage-program.md (owns §4.23; consumes §4.12, §4.13, §4.15, §4.16, §4.17; adds `lease-v1` and `session-v1` under §4.15; owns `node.yaml` `gui.*` and `src/service/commands/session.js` under §5)
 - **Depends on:** F3 (merged code); `delegate` (F4) only for job-scoped leases (wave 4). Stubs F3 behind the §5.1 interfaces until it merges.
+- **Later rulings:** 2026-10-12 and 2026-10-13, R-F5-9 to R-F5-16, and the security review of 2026-10-12: dated notes at §3.1 to §3.11.
 - **Owner rulings:** 2026-10-12, R-F5-1 to R-F5-8. Where a ruling differs from the text below, a dated note stands at the section (§3.6, §3.9, §3.10, §4.7, §9) and the text itself is left as written. The plan (Part 1, "Owner rulings (2026-10-12)") lists all eight with their tasks and tests.
 
 ## 1. Outcome
@@ -99,6 +100,13 @@ POSIX `<sessionIpcDir>/<endpointId>.sock` with `sessionIpcDir` = `/var/lib/king-
 service account, `0711`. Socket names are **not** secret (`/proc/net/unix`, `netstat -f unix` list
 them); the protocol (§3.2) is the boundary.
 
+> **Owner rulings and review fixes, 2026-10-12 and 2026-10-13 (R-F5-9, R-F5-10, R-F5-12; review findings 3, 6, 13e).** They change this section.
+> 1. `session install` and `session uninstall` ask first (R-F5-9): they print the user by name and SID (uid off Windows), the node's name and id, what the helper can do and where it starts at login, then ask `[y/N]` on a TTY. Off a TTY they need `--yes` or exit 2. Nothing is minted, created or written before the answer.
+> 2. The canonical file also records `session_uid` (§4.3). Who is installed is the recorded SID or uid, never the name, and a file that cannot be read, parsed or verified, or records no identity, refuses a new install with `session_file_invalid` (R-F5-10). `session uninstall` clears such a file, and works from the recorded identity for an account that no longer exists.
+> 3. Running install again for the same identity rotates the secret and keeps `endpoint_id`: the running service listens on the endpoint it started with (finding 6).
+> 4. The master key is resolved with the data dir's owner uid, and the node id is verified against the private key held under that key before it is written (R-F5-12). The node identity lives only in the data dir; no admin-owned file names it.
+> 5. Windows (finding 3): install verifies the config dir's owner and ACL first; the per-user copy is created empty, narrowed with `icacls`, given to Administrators and then written; the helper checks the owners of the copy and its directory before every connection.
+
 ### 3.2 Helper channel and `kl-session-v1` — `src/gui/helper-channel.js`, `src/gui/helper-protocol.js`
 
 - Windows: `net.createServer().listen({ path, readableAll: true, writableAll: true })` (Node cannot put
@@ -137,6 +145,8 @@ class HelperChannel extends EventEmitter {   // events: 'ready'(info), 'closed'(
 `serviceProof(secret, nodeId, nonceH, nonceS)`, `helperProof(secret, nodeId, nonceS, nonceH)`,
 `deriveSessionKeys(secret, nodeId, nonceH, nonceS) → { kSh, kHs }`,
 `createSealer(key, dir) → { seal(obj) → Buffer }`, `createOpener(key, dir) → { open(buf) → obj }` (throws `GuiError('frame_rejected')`).
+
+> **Review fix, 2026-10-12 (finding 13c).** The ping that asks the current helper whether it is alive gets what is left of the newcomer's 5 s handshake less half a second, not a fresh 5 s, so a helper that hangs is replaced on the newcomer's first attempt.
 
 ### 3.3 Session helper process — `src/session/helper.js`, `src/session/backends/*`
 
@@ -187,6 +197,8 @@ succeeds → X11; else no backend.
 On Linux X11, `_NET_WM_PID` is self-reported by the client and `import -window` can include pixels of
 overlapping windows (§8). `limits` travel in the lease request so the phone can show them (§3.6).
 
+> **Review fixes, 2026-10-12 (findings 7, 8, 10, 11).** On every backend a click, scroll or drag lands only when the window under the point is the screenshot's own window handle, not any window of a leased process; the macOS hit test reads every on-screen layer. X11 refuses an unknown key name (`key_invalid`), always releases the button after a drag, and limits `xdotool type` in proportion to the text, below the service's own wait for it. A worker that does not answer an op is killed and replaced.
+
 ### 3.4 App allowlist — `src/gui/apps.js`, `src/gui/config.js`
 
 `parseGuiConfig(raw, { profile }) → GuiConfig` validates the `gui:` key (§4.4); a present but malformed
@@ -205,6 +217,8 @@ key throws, as elsewhere in `node-config.js`; on `profile: runbook` it returns `
 - `match` (foreground set): the app's real path plus its `processes`. Entries should be absolute paths
   or absolute globs; a bare basename is accepted (packaged Windows apps need it) and `doctor` warns.
   Case-insensitive on Windows/macOS, exact on Linux; on macOS any image inside the `.app` bundle matches.
+
+> **Owner ruling 2026-10-13 (R-F5-14).** Two changes to this section and to §4.4. `gui.enabled` defaults to **false**: the subsystem starts only when `node.yaml` says `gui: enabled: true`, and installing the helper enables nothing. And `resolveLaunch` no longer resolves a path outside the allowlist as `unsafe` / `app_not_allowlisted` for the phone to approve: it is refused outright (`app_not_allowlisted`). An allowlisted app with an argument outside its globs or a file outside `allowed_roots` is still `unsafe` and still goes to the phone.
 
 ### 3.5 GUI broker — `src/gui/broker.js`
 
@@ -309,6 +323,11 @@ class LeaseManager extends EventEmitter {   // 'state'(lease)
 >    request pending" has one exception: a grant for a job that closed ends the pending lease.
 >    `endForJob` is wired in this stage (F4 has merged), not in wave 4.
 
+> **Owner ruling 2026-10-13 (R-F5-15) and review fixes (findings 4, 5).**
+> 1. Contact. A lease's input goes on only while the node has verified a signed message from the granting device within `gui.lease.contact_s` (120 s; 30 to 300): the grant, and every watch from that device with a new nonce. When that lapses the lease is suspended with the reason `no_contact` (`lease_suspended_no_contact` for an input; no resume request is sent), and that device's next fresh watch resumes it without moving `expires_at`. Another device's watch and a replayed one are not contact.
+> 2. `assertUsable` runs again in the broker, after the process lookup and immediately before the input is sent.
+> 3. "Nonce caches 10 min" holds for grants only. Watch and revoke nonces are kept per lease for as long as the node keeps the lease record.
+
 ### 3.7 Live view — `src/gui/live-view.js`
 
 - **Watch.** A `kl.lease.watch` passing steps 1–8 (`type: 'kl.lease.watch'`) and naming a known
@@ -322,6 +341,8 @@ class LeaseManager extends EventEmitter {   // 'state'(lease)
 - Views go out with `relayClient.send(viewEnvelope, { to_device })`; statuses with `send(statusEnvelope)`.
 - **Action log:** each view carries the inputs since the last one (≤ 50); the node keeps 200 per lease
   for new watchers. Frames are never stored or audited; each view carries the frame's `sha256`.
+
+> **Owner ruling 2026-10-13 (R-F5-16).** An action's `summary` never holds typed text: `Typed 42 characters`, `Key (a character)`. Keys that are not text keep their names.
 
 ### 3.8 Text guard and key grammar — `src/gui/text-guard.js`, `src/gui/keys.js`
 
@@ -354,6 +375,8 @@ There is no clipboard op in the helper protocol, and the key grammar denies the 
 - Denied on macOS: `meta+space`, `meta+tab`, `meta+alt+escape`, `ctrl+meta+q`, `ctrl+up|down|left|right`,
   `meta+shift+3|4|5`.
 - `Click`/`Drag` with `button: middle` are refused on Linux (`middle_click_denied`: X11 middle-click pastes the primary selection).
+
+> **Review fixes, 2026-10-12 (findings 9, 13a, 7).** The typed buffer is no longer "reset on `enter`": it models the keys. Text and printable keys append, Enter is a line break, backspace removes one character, and anything that moves the caret or edits unseen (navigation keys, tab, delete, every ctrl/alt/meta chord, a click, a drag) leaves what was typed as a piece whose place is unknown; text typed after that is refused when at most four runs of the typed pieces, one of them from the new text, spell a vault value. It is still forgotten on a foreground change. A click's modifiers pass the key deny list, and on macOS `ctrl+f2` to `ctrl+f8` are denied.
 
 ### 3.9 Tools — `src/gui/tools.js`
 
@@ -404,6 +427,9 @@ before any approval or lease request.
 > 3. The job id is read from the run's origin: `origin.job_id`, else `chat:<origin.session>` (the
 >    chat's id). There is no further fallback; a run with neither is refused a lease.
 
+> **Owner ruling 2026-10-13 (R-F5-13).** It replaces ruling 1 above. A run that refuses unsafe calls gets no GUI tool: all ten, `ListApps` and `Screenshot` included, answer with the node's scope refusal before parameters are read or the broker, the lease manager or the helper is touched, and such a delegate turn is not offered them. The scope check now comes before the capability check.
+> **Review fix (finding 13b).** `ListApps` marks its result `untrusted_output` and returns each window title as one cleaned line.
+
 ### 3.10 Mobile app deltas (to F3's app, F3 §3.14)
 
 | Screen / behaviour | Delta |
@@ -428,6 +454,8 @@ before any approval or lease request.
 >   (R-F5-6). "One biometric prompt" in the kill-switch row does not hold on Android: the revoke and
 >   the request that carries it are two.
 
+> **2026-10-12 and 2026-10-13 (review finding 1, R-F5-15, R-F5-16).** On Android a relay's reply never changes the lease state on screen; only a status or view signed by the pinned node does, so after Stop the screen says "Stop sent, not yet confirmed by the computer" and Stop stays enabled. The Android live screen says "Paused: tap Refresh to let it continue" for `no_contact`. Both phones apply a status or view only when its node `seq` is newer than the last applied for that lease, and a view only when `to_device` is this device.
+
 ### 3.11 Subsystem — `src/gui/index.js`, `src/gui/errors.js`
 
 `createGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, log }) → { broker, leases, registerTools(toolRegistry), start(), stop() } | null`
@@ -436,6 +464,8 @@ builds the channel, broker, lease manager and live view, and registers `lease.gr
 when `gui.enabled` is false, the profile is `runbook`, or `helper-secret.json` is absent.
 `class GuiError extends Error { constructor(code, detail) }` with `code` from §9; tools turn it into
 `{ ok: false, error: '<code>[: detail]' }`.
+
+> **Owner ruling 2026-10-12 (R-F5-11) and review finding 2.** The subsystem is no longer "null or running". A helper file that exists but is wrong, and any other failure to build or start the GUI, give a subsystem that is off with a reason (`session_file_invalid`, `gui_start_failed`): no channel, no leases, the tools registered only to refuse with the reason, the reason in `status.json`. `createGuiSubsystem` and `start()` never throw, so the service always starts.
 
 ## 4. Data formats
 
@@ -536,7 +566,8 @@ Sealed (every frame after `ready`, §3.2), plaintexts:
 ### 4.3 Session files
 
 `<configDir>/session/helper-secret.json`:
-`{ "v": 1, "node_id": "kl-…", "endpoint_id": "32 hex", "secret": "klc1:…", "rotated_at": "RFC3339", "session_user": "alice", "session_sid": "S-1-5-21-…" | null }`.
+`{ "v": 1, "node_id": "kl-…", "endpoint_id": "32 hex", "secret": "klc1:…", "rotated_at": "RFC3339", "session_user": "alice", "session_sid": "S-1-5-21-…" | null, "session_uid": 1000 | null }`
+(`session_uid` added 2026-10-12, R-F5-10: the uid off Windows, as `session_sid` is the identity on Windows).
 
 Per-user `<configDir>/session/users/<user|SID>.json`:
 `{ "v": 1, "node_id": "kl-…", "endpoint": "\\\\.\\pipe\\king-louie-session-<id>" | "/…/<id>.sock", "secret": "64 hex", "rotated_at": "…" }`.
@@ -545,7 +576,7 @@ Per-user `<configDir>/session/users/<user|SID>.json`:
 
 ```yaml
 gui:
-  enabled: true                     # default true on profile agent; forced false on runbook
+  enabled: true                     # default FALSE (owner ruling R-F5-14, 2026-10-13: off until this line is written); forced false on runbook
   apps:
     calculator:
       name: Calculator              # default: the id
@@ -555,7 +586,7 @@ gui:
     textedit: '/System/Applications/TextEdit.app'   # string shorthand = { path }
   screenshot: { max_width: 1280, quality: 70 }       # 320–1920, 30–90
   live_view:  { interval_s: 3, max_width: 960, quality: 60, max_frame_bytes: 184320 }  # 1–5, 320–1280, 30–85, 32768–184320
-  lease:      { default_minutes: 15, max_minutes: 60, yield_ms: 2000, max_inputs_per_minute: 120 }  # 1–60, 1–60, 0–10000, 10–600
+  lease:      { default_minutes: 15, max_minutes: 60, yield_ms: 2000, max_inputs_per_minute: 120, contact_s: 120 }  # 1–60, 1–60, 0–10000, 10–600, 30–300 (contact_s: R-F5-15, 2026-10-13)
 ```
 
 | Key | Type | Rules |
