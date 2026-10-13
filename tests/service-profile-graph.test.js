@@ -8,6 +8,12 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const FORBIDDEN = ['src/providers/', 'src/execution/agent-loop', 'src/tools/', 'src/browser/', 'src/channels/', 'src/mcp/', 'src/core/create-core', 'src/execution/safety-policy',
   'src/mesh/mesh-discovery', 'src/mesh/mesh-swarm', 'src/mesh/mesh-remote-control', 'src/mesh/mesh-channel'];
+// Fleet stage 5 (Deviation 8): node-config.js needs gui/config.js on every
+// profile and fleet/start.js reads gui/status.js; both are dependency-free.
+// The relay and the front door also load the lease routes.
+const GUI_ALLOWED = ['src/gui/config.js', 'src/gui/errors.js', 'src/gui/status.js'];
+const RELAY_GUI_ALLOWED = [...GUI_ALLOWED, 'src/gui/relay-extension.js', 'src/gui/lease-protocol.js'];
+const guiLeak = (p, allowed) => (p.startsWith('src/gui/') && !allowed.includes(p)) || p.startsWith('src/session/');
 
 describe('runbook profile module graph', () => {
   it('never loads the agent stack, even after actually starting and stopping', () => {
@@ -35,7 +41,7 @@ describe('runbook profile module graph', () => {
       assert.ok(loaded.includes('src/fleet/fleet-tools.js'));
       assert.ok(!loaded.includes('src/fleet/delegate-sessions.js'), 'delegate sessions are agent-only');
       assert.ok(fs.existsSync(path.join(dataDir, 'key-check')), 'start() resolved the master key');
-      const bad = loaded.filter((p) => FORBIDDEN.some((f) => p.startsWith(f)));
+      const bad = loaded.filter((p) => FORBIDDEN.some((f) => p.startsWith(f)) || guiLeak(p, GUI_ALLOWED));
       assert.deepStrictEqual(bad, []);
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
@@ -67,7 +73,7 @@ describe('relay module graph', () => {
       }).toString();
       const loaded = JSON.parse(out).map((p) => path.relative(ROOT, p).split(path.sep).join('/'));
       assert.ok(loaded.includes('src/frontdoor/relay.js'));
-      const bad = loaded.filter((p) => FORBIDDEN.some((f) => p.startsWith(f)) || p.startsWith('src/core/'));
+      const bad = loaded.filter((p) => FORBIDDEN.some((f) => p.startsWith(f)) || p.startsWith('src/core/') || guiLeak(p, RELAY_GUI_ALLOWED));
       assert.deepStrictEqual(bad, []);
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
@@ -112,7 +118,7 @@ describe('frontdoor module graph', () => {
       assert.ok(loaded.includes('src/frontdoor/profile.js'));
       const FRONTDOOR_FORBIDDEN = ['src/core/', 'src/providers/', 'src/execution/', 'src/tools/', 'src/runbooks/', 'src/browser/', 'src/channels/', 'src/mcp/',
         'src/mesh/mesh-discovery', 'src/mesh/mesh-remote-control', 'src/mesh/mesh-swarm'];
-      const bad = loaded.filter((p) => FRONTDOOR_FORBIDDEN.some((f) => p.startsWith(f)));
+      const bad = loaded.filter((p) => FRONTDOOR_FORBIDDEN.some((f) => p.startsWith(f)) || guiLeak(p, RELAY_GUI_ALLOWED));
       assert.deepStrictEqual(bad, []);
     } finally {
       fs.rmSync(base, { recursive: true, force: true });
@@ -140,7 +146,7 @@ describe('mcp module graph', () => {
       const loaded = JSON.parse(out).map((p) => path.relative(ROOT, p).split(path.sep).join('/'));
       assert.ok(loaded.includes('src/mcp/stdio-server.js'));
       assert.ok(!loaded.includes('src/mcp/case-tools.js'), 'mcp builds no case tools of its own');
-      const bad = loaded.filter((p) => p.startsWith('src/core/') || p.startsWith('src/providers/') || p.startsWith('src/tools/') || p.startsWith('src/mesh/mesh-discovery'));
+      const bad = loaded.filter((p) => p.startsWith('src/core/') || p.startsWith('src/providers/') || p.startsWith('src/tools/') || p.startsWith('src/mesh/mesh-discovery') || guiLeak(p, GUI_ALLOWED));
       assert.deepStrictEqual(bad, []);
     } finally {
       fs.rmSync(base, { recursive: true, force: true });
@@ -189,7 +195,7 @@ describe('mcp module graph, courier branch', () => {
       assert.ok(!loaded.includes('src/approvals/service-wiring.js'), 'no standalone approvals: the service owns them');
       assert.ok(!loaded.includes('src/mcp/case-tools.js'), 'the case tools run in the service, not in mcp');
       const forbidden = FORBIDDEN.filter((f) => f !== 'src/mcp/');
-      const bad = loaded.filter((p) => forbidden.some((f) => p.startsWith(f)) || p.startsWith('src/core/'));
+      const bad = loaded.filter((p) => forbidden.some((f) => p.startsWith(f)) || p.startsWith('src/core/') || guiLeak(p, GUI_ALLOWED));
       assert.deepStrictEqual(bad, []);
     } finally {
       fs.rmSync(base, { recursive: true, force: true });

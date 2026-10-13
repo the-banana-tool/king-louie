@@ -5,6 +5,7 @@ const { adminConfigDir } = require('../platform/paths');
 const { assertAdminOwned: assertServiceAdminOwned, unknownKeyError } = require('./config');
 const { parseDuration } = require('../platform/duration');
 const { parseFrontDoorConfig, FRONTDOOR_KEYS } = require('../frontdoor/config');
+const { parseGuiConfig, GUI_KEYS } = require('../gui/config');
 
 const NODE_CONFIG_FILE = 'node.yaml';
 
@@ -25,14 +26,16 @@ const DEFAULT_MAX_CONCURRENT_JOBS = 2;
 // same change (fleet stage 3 `approvers`, stage 4 `frontdoor`, stage 5 `gui`)
 // and validates that key's own subtree itself.
 const NODE_YAML_KEYS = Object.freeze({
-  top: Object.freeze(['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir', 'approvers', 'frontdoor', 'delegate']),
+  top: Object.freeze(['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir', 'approvers', 'frontdoor', 'delegate', 'gui']),
   policy: Object.freeze(['allowed_roots', 'remote_sessions', 'max_concurrent_jobs']),
   remote_sessions: Object.freeze(['always_confirm', 'deny']),
   approvers: Object.freeze(['relay', 'request_ttl_s']),
   // Fleet stage 4 (R11): the front door's own block (its deeper levels are
   // checked by parseFrontDoorConfig) and an agent node's delegate sessions.
   frontdoor: FRONTDOOR_KEYS.top,
-  delegate: Object.freeze(['provider', 'model', 'agent', 'idle_close', 'cwd', 'max_sessions'])
+  delegate: Object.freeze(['provider', 'model', 'agent', 'idle_close', 'cwd', 'max_sessions']),
+  // Fleet stage 5: desktop apps and leases; deeper levels are checked by parseGuiConfig.
+  gui: GUI_KEYS.top
 });
 
 // node.yaml and the runbooks beside it decide what this node lets remote
@@ -81,7 +84,8 @@ function defaultNodeConfig(adminDir) {
     runbooksDir: path.join(adminDir, 'runbooks'),
     approvers: { ...DEFAULT_APPROVERS },
     frontdoor: null,
-    delegate: { ...DEFAULT_DELEGATE }
+    delegate: { ...DEFAULT_DELEGATE },
+    gui: parseGuiConfig(undefined, { profile: 'agent' })
   };
 }
 
@@ -298,7 +302,8 @@ function loadNodeConfig({
     runbooksDir,
     approvers: parseApprovers(parsed.approvers, invalid, configFile),
     frontdoor: profile === 'frontdoor' ? parseFrontDoorConfig(parsed.frontdoor, configFile) : null,
-    delegate: parseDelegate(parsed.delegate, invalid, configFile)
+    delegate: parseDelegate(parsed.delegate, invalid, configFile),
+    gui: parseGuiConfig(parsed.gui, { profile, file: configFile })
   };
 }
 

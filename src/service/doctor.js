@@ -39,6 +39,10 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
     const nodeCfg = loadNodeConfig({ dataDir, adminUid });
 
     results.push({ check: 'node configuration loaded', ok: true, detail: `name: ${nodeCfg.name}, profile: ${nodeCfg.profile}` });
+    // Fleet stage 5 §3.4: gui.apps entries that match by bare process name.
+    for (const warning of (nodeCfg.gui && nodeCfg.gui.warnings) || []) {
+      results.push({ check: 'gui app allowlist', ok: true, warn: true, detail: warning });
+    }
 
     if (fs.existsSync(nodeCfg.runbooksDir)) {
       const engine = new RunbookEngine({
