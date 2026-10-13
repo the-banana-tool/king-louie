@@ -89,6 +89,55 @@ describe('case IPC', () => {
     assert.match(dc.error, /discord/i);
   });
 
+  // Owner decision 2026-10-12: case:create with a chat follows case:attach's
+  // bridge rule, before anything is created.
+  it('refuses to create a case for a bridge chat, tagged or by its legacy title, and creates nothing', async () => {
+    const { call, runtime, history } = setup({
+      chats: [
+        { id: 'chat-1', title: 'Chat', messages: [] },
+        { id: 'chat-tg', title: 'Renamed by the owner', origin: 'telegram', messages: [] },
+        { id: 'chat-dc', title: 'Another name', origin: 'discord', messages: [] },
+        { id: 'chat-legacy-tg', title: '📱 Telegram: Alex (123)', messages: [] },
+        { id: 'chat-legacy-dc', title: '👾 Discord: Sam (456)', messages: [] }
+      ]
+    });
+    for (const [chatId, origin] of [['chat-tg', /telegram/i], ['chat-dc', /discord/i], ['chat-legacy-tg', /telegram/i], ['chat-legacy-dc', /discord/i]]) {
+      for (const force of [undefined, true]) {
+        const refused = await call(IPC.CASE_CREATE, { title: 'Lakeside lot', objective: 'Sell the lot', chatId, force });
+        assert.strictEqual(refused.ok, false, chatId);
+        assert.match(refused.error, origin);
+        assert.match(refused.error, /cannot be attached to a case/);
+        assert.strictEqual(refused.code, 'BRIDGE_CHAT');
+        assert.strictEqual(refused.case, undefined, 'no case is reported as created');
+      }
+      assert.strictEqual(history.getChat(chatId).caseId, undefined);
+    }
+    assert.deepStrictEqual(runtime.listCases(), [], 'nothing was created');
+    // The same form with a plain chat, or with no chat, is unaffected.
+    const plain = await call(IPC.CASE_CREATE, { title: 'Lakeside lot', objective: 'Sell the lot', chatId: 'chat-1' });
+    assert.strictEqual(plain.ok, true, plain.error);
+    assert.strictEqual(history.getChat('chat-1').caseId, plain.case.id);
+    assert.strictEqual((await call(IPC.CASE_CREATE, { title: 'Permit filing', objective: 'File the county permit' })).ok, true);
+  });
+
+  it('case:create refuses a bridge chat before the playbooks are fetched or the similar-case check runs', async () => {
+    const { call, runtime } = setup({ chats: [{ id: 'chat-tg', title: 'T', origin: 'telegram', messages: [] }] });
+    assert.strictEqual((await call(IPC.CASE_CREATE, { title: 'Lakeside lot', objective: 'Sell the lot' })).ok, true);
+    // A similar open case exists and the playbook list is malformed: the
+    // bridge refusal still comes first, so the owner is never asked to force.
+    const refused = await call(IPC.CASE_CREATE, { title: 'Lakeside lot', objective: 'Sell the lot', chatId: 'chat-tg', playbooks: [{ nope: true }] });
+    assert.deepStrictEqual([refused.ok, refused.code], [false, 'BRIDGE_CHAT']);
+    assert.strictEqual(runtime.listCases().length, 1);
+  });
+
+  it('case:attach still refuses a bridge chat, with the same message and code as case:create', async () => {
+    const { call } = setup({ chats: [{ id: 'chat-tg', title: 'T', origin: 'telegram', messages: [] }] });
+    const { case: c } = await call(IPC.CASE_CREATE, { title: 'A' });
+    const attach = await call(IPC.CASE_ATTACH, { chatId: 'chat-tg', caseId: c.id });
+    const create = await call(IPC.CASE_CREATE, { title: 'B', chatId: 'chat-tg' });
+    assert.deepStrictEqual([attach.ok, attach.code, attach.error], [false, 'BRIDGE_CHAT', create.error]);
+  });
+
   it('returns the orientation text', async () => {
     const { call } = setup();
     const { case: c } = await call(IPC.CASE_CREATE, { title: 'Lakeside lot' });

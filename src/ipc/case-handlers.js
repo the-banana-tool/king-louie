@@ -24,6 +24,22 @@ const bridgeOriginFor = (chat) => {
   return null;
 };
 
+// A Telegram/Discord bridge chat (F5) can carry messages from a remote
+// sender stamped sender: 'user'. Giving it a case would let those messages
+// satisfy the quote-verified owner-message check (chat-handlers.js), so a
+// case is never attached to one, nor created for one.
+class BridgeChatError extends Error {
+  constructor(origin) {
+    super(`A ${origin} chat cannot be attached to a case; its messages are not verified as the owner's.`);
+    this.name = 'BridgeChatError';
+    this.code = 'BRIDGE_CHAT';
+  }
+}
+const assertNotBridgeChat = (chat) => {
+  const origin = bridgeOriginFor(chat);
+  if (origin) throw new BridgeChatError(origin);
+};
+
 function registerCaseHandlers(ipcMain, context = {}) {
   const chatById = (chatId) => context.getChat(chatId, { messages: true });
   // The renderer replaces its chat with what attach returns, so it keeps
@@ -43,17 +59,21 @@ function registerCaseHandlers(ipcMain, context = {}) {
   // tools read every case) would store its results after the check, so the
   // attach waits for it. Throws ChatAttachRefusedError or ChatBusyError.
   // Nothing is awaited between this check and the write in `attach`.
+  // The bridge rule comes first, for case:attach and case:create alike
+  // (owner decision 2026-10-12: case:create skipped it).
   const assertAttachable = (chat, caseId) => {
+    assertNotBridgeChat(chat);
     if (typeof context.isChatRunning === 'function' && context.isChatRunning(chat.id)) throw new ChatBusyError();
     assertChatAttachable(chat, caseId);
   };
 
   // The one place a chat is given a case (case:attach, and case:create with
-  // a chat). Taking the case away, or naming the case the chat already has,
-  // is never refused.
+  // a chat). Taking the case away is never refused. Naming the case the
+  // chat already has is refused only for a bridge chat.
   const attach = (chatId, caseId) => {
     const chat = chatById(chatId);
     if (!chat) throw new Error('Chat not found.');
+    if (caseId) assertNotBridgeChat(chat);
     if (caseId && chat.caseId !== caseId) assertAttachable(chat, caseId);
     const now = new Date().toISOString();
     return patchChat(chatId, { caseId: caseId || null, updatedAt: now });
@@ -75,9 +95,10 @@ function registerCaseHandlers(ipcMain, context = {}) {
     if (force !== undefined && typeof force !== 'boolean') return { ok: false, error: 'force must be true or false.' };
     const chatBefore = chatId ? chatById(chatId) : null;
     if (chatId && !chatBefore) return { ok: false, error: 'Chat not found.' };
-    // Q29: checked before anything is fetched or created, and before the
-    // similar-case refusal, so the owner is never asked to force a create
-    // whose attach would be refused. `force` does not lift it.
+    // The bridge rule and Q29: checked before anything is fetched or
+    // created, and before the similar-case refusal, so no case is created
+    // for a chat that would then be refused and the owner is never asked to
+    // force such a create. `force` lifts neither.
     if (chatBefore) assertAttachable(chatBefore, null);
     // Cases stage 6: the owner's chosen playbooks are checked, fetched and
     // validated before the case exists; any failure refuses the create. The
@@ -105,7 +126,7 @@ function registerCaseHandlers(ipcMain, context = {}) {
     try {
       chat = chatId ? attach(chatId, info.id) : null;
     } catch (err) {
-      if (err && (err.code === 'CHAT_SAW_OTHER_CASES' || err.code === 'CHAT_BUSY')) {
+      if (err && (err.code === 'CHAT_SAW_OTHER_CASES' || err.code === 'CHAT_BUSY' || err.code === 'BRIDGE_CHAT')) {
         return { ok: false, error: `The case was created, but this chat was not attached to it. ${err.message}`, code: err.code, case: summarize(info) };
       }
       throw err;
@@ -117,14 +138,9 @@ function registerCaseHandlers(ipcMain, context = {}) {
 
   ipcMain.handle(IPC.CASE_ATTACH, wrapHandler(IPC.CASE_ATTACH, async (_event, { chatId, caseId } = {}) => {
     if (caseId) {
+      // An unknown case is refused first; `attach` then applies the bridge
+      // rule (assertNotBridgeChat) and Q29.
       runtime().getCase(caseId);
-      // A Telegram/Discord bridge chat (F5) can carry messages from a
-      // remote sender stamped sender: 'user'. Attaching a case would let
-      // those messages satisfy the quote-verified owner-message check
-      // (chat-handlers.js), so a case may never be attached to one.
-      const chat = chatById(chatId);
-      const origin = bridgeOriginFor(chat);
-      if (origin) throw new Error(`A ${origin} chat cannot be attached to a case; its messages are not verified as the owner's.`);
     }
     return { ok: true, chat: attach(chatId, caseId) };
   }));
