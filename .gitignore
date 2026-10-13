@@ -36,3 +36,6 @@ temp/
 
 # PowerShell redirect artifact ($null is not a file on POSIX shells)
 $null
+
+# Private research notes (competitor reviews, idea lists); never shipped
+docs/research/
