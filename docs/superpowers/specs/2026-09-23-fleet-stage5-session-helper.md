@@ -6,6 +6,7 @@
 - **Program:** docs/superpowers/specs/2026-09-23-stage-program.md (owns §4.23; consumes §4.12, §4.13, §4.15, §4.16, §4.17; adds `lease-v1` and `session-v1` under §4.15; owns `node.yaml` `gui.*` and `src/service/commands/session.js` under §5)
 - **Depends on:** F3 (merged code); `delegate` (F4) only for job-scoped leases (wave 4). Stubs F3 behind the §5.1 interfaces until it merges.
 - **Later rulings:** 2026-10-12 and 2026-10-13, R-F5-9 to R-F5-16, and the security review of 2026-10-12: dated notes at §3.1 to §3.11.
+- **Second security review and R-F5-17 to R-F5-19 (2026-10-13):** thirteen findings and three more rulings; dated notes at §3.1, §3.5, §3.6, §3.8, §3.9, §3.10, §4.1, §4.6, §4.7 and §13. The plan (Part 1, "Second security review (2026-10-13)") lists each with its commit and tests.
 - **Owner rulings:** 2026-10-12, R-F5-1 to R-F5-8. Where a ruling differs from the text below, a dated note stands at the section (§3.6, §3.9, §3.10, §4.7, §9) and the text itself is left as written. The plan (Part 1, "Owner rulings (2026-10-12)") lists all eight with their tasks and tests.
 
 ## 1. Outcome
@@ -106,6 +107,12 @@ them); the protocol (§3.2) is the boundary.
 > 3. Running install again for the same identity rotates the secret and keeps `endpoint_id`: the running service listens on the endpoint it started with (finding 6).
 > 4. The master key is resolved with the data dir's owner uid, and the node id is verified against the private key held under that key before it is written (R-F5-12). The node identity lives only in the data dir; no admin-owned file names it.
 > 5. Windows (finding 3): install verifies the config dir's owner and ACL first; the per-user copy is created empty, narrowed with `icacls`, given to Administrators and then written; the helper checks the owners of the copy and its directory before every connection.
+
+> **Second security review, 2026-10-13 (findings 1, 10, 11, 13).**
+> 1. Windows (finding 1): `session\users` inherits the config dir's protected ACL, so the session user could not read who owns it and the helper exited `session_file_insecure` on every real install. `session install` gives the session user's SID read-control, read-attributes and synchronize on that directory alone (no inheritance) and sets its owner to Administrators; `session uninstall` removes the entry.
+> 2. Node identity (finding 10): a record with its private key in the clear is refused (start the service once: it puts the key under the master key). The store is read only as a regular file of at most 64 MiB, with no link followed and no pipe opened to wait. What this proves is that the id belongs to a key stored by whoever holds this data dir's master key, which the service account does; an admin-owned record of the node's identity is owner ruling R-F5-17, deferred (§13).
+> 3. `session uninstall` (finding 11): `--dry-run` lists everything the real run removes; every path is checked before the question and again before the removal, and a link above one of them refuses with nothing removed (a link at a path itself is removed, never followed); an account deleted and made again under the same name is uninstalled by the identity the helper file records, when that identity belongs to no account any more.
+> 4. `session status`, `session probe` and `doctor` (finding 13) print what the helper or a file supplied only through `shown` (`src/service/commands/io.js`), which keeps one plain line (`plainLineProblem`) and marks anything it altered.
 
 ### 3.2 Helper channel and `kl-session-v1` — `src/gui/helper-channel.js`, `src/gui/helper-protocol.js`
 
@@ -249,6 +256,10 @@ class GuiBroker extends EventEmitter {       // events: 'capability'(snapshot)
   apps' sets; `expect.pids` = their running pids.
 - **`CloseApp force`** kills only pids this job launched; other matching processes get a graceful close.
 
+> **Second security review, 2026-10-13 (findings 4, 5).**
+> 1. Windows (finding 4): the helper's window list holds owned windows too (a Save As or a message box, a pop-up menu, a combo box's list), marked `owned`. `Screenshot` captures the foreground window when it is the app's (a dialog in front), else the app's largest main window; its result names the app's other open windows (`other_windows`, by an id the broker gives the job), and `window` captures one. A menu or a list is never picked by a guess. `point_obscured` tells the model to take a new screenshot and, when a window of the leased apps covers the point, which window id shows it. A click still lands only on the window the screenshot was of. macOS still lists normal-layer windows only.
+> 2. Typed text (finding 5) goes to the helper in pieces of at most 40 code points on every platform, the lease checked immediately before each; the X11 backend kills the `xdotool` that is typing on `release_all`. The typed buffer holds exactly what was sent.
+
 ### 3.6 Leases — `src/gui/leases.js` (state), `src/gui/lease-protocol.js` (pure build/verify)
 
 States: `pending → active ⇄ suspended → ended`. `active` has a `locked` flag. `ended` carries a
@@ -328,6 +339,13 @@ class LeaseManager extends EventEmitter {   // 'state'(lease)
 > 2. `assertUsable` runs again in the broker, after the process lookup and immediately before the input is sent.
 > 3. "Nonce caches 10 min" holds for grants only. Watch and revoke nonces are kept per lease for as long as the node keeps the lease record.
 
+> **Second security review and owner ruling R-F5-18, 2026-10-13 (findings 3, 7, 9, 12).**
+> 1. Contact (finding 3) replaces "every watch from that device with a new nonce" above. The node puts a fresh `contact_token` in every status and view and remembers when it issued each; a watch echoes the newest one its phone has applied; a watch is contact only from the granting device, with a token of this lease issued inside the window that has not made contact before. Any other accepted watch still asks for frames and is never contact. Every accepted watch is answered with a status signed then, and the replies to grant, revoke and watch carry it. A relay can still hold one watch for up to the window: input ends at most two windows after the phone's last signature.
+> 2. Clocks (finding 9): contact, token age, the lease's remaining time and the input rate are measured on a monotonic clock as well as the wall clock; whichever says "over" first is believed. "Expiry is node-clock only" still holds, on both.
+> 3. A suspension keeps what the lease has typed, as a piece of unknown place, and so does its resume (finding 7); only a new lease starts with nothing typed.
+> 4. A lease suspended for want of contact is taken over by any other reason that comes up meanwhile (the helper dropping, the relay link going), which then needs its own resume grant (finding 12).
+> 5. R-F5-18: any enrolled, unrevoked device may revoke a lease and may watch it (never contact); only the granting device resumes it (`not_granting_device` for another's grant of a resume). Every status names the granting device (`granted_by`). `LeaseManager#listFor(deviceId)` answers a phone's listing with statuses signed then.
+
 ### 3.7 Live view — `src/gui/live-view.js`
 
 - **Watch.** A `kl.lease.watch` passing steps 1–8 (`type: 'kl.lease.watch'`) and naming a known
@@ -375,6 +393,10 @@ There is no clipboard op in the helper protocol, and the key grammar denies the 
 - Denied on macOS: `meta+space`, `meta+tab`, `meta+alt+escape`, `ctrl+meta+q`, `ctrl+up|down|left|right`,
   `meta+shift+3|4|5`.
 - `Click`/`Drag` with `button: middle` are refused on Linux (`middle_click_denied`: X11 middle-click pastes the primary selection).
+
+> **Second security review, 2026-10-13 (findings 6, 8).**
+> 1. More chords are denied because they leave the leased app. Linux: `alt+f1`, `alt+f2`, `alt+f3`, `alt+space`, `ctrl+f1` to `ctrl+f12`, `alt+insert`, `alt+delete`. macOS: `meta+shift+q` (with `alt` too), `meta+h`, `meta+alt+h`, `f11`, `ctrl+0` to `ctrl+9`. Windows needs none. `src/gui/keys.js` lists what is denied per platform and what remains.
+> 2. The text guard has a second rule: a vault value is refused when earlier typed pieces, in the order they were typed and in any number, spell it up to the text being typed (the first may give its end, the last its start, pieces between may be skipped). The history keeps 64 pieces and 4096 code points. `src/gui/text-guard.js` lists the residuals (more than four pieces out of order, the US-layout assumption for key presses, a paste chosen from a menu) and the false positives (a short or repetitive vault value).
 
 > **Review fixes, 2026-10-12 (findings 9, 13a, 7).** The typed buffer is no longer "reset on `enter`": it models the keys. Text and printable keys append, Enter is a line break, backspace removes one character, and anything that moves the caret or edits unseen (navigation keys, tab, delete, every ctrl/alt/meta chord, a click, a drag) leaves what was typed as a piece whose place is unknown; text typed after that is refused when at most four runs of the typed pieces, one of them from the new text, spell a vault value. It is still forgotten on a foreground change. A click's modifiers pass the key deny list, and on macOS `ctrl+f2` to `ctrl+f8` are denied.
 
@@ -430,6 +452,8 @@ before any approval or lease request.
 > **Owner ruling 2026-10-13 (R-F5-13).** It replaces ruling 1 above. A run that refuses unsafe calls gets no GUI tool: all ten, `ListApps` and `Screenshot` included, answer with the node's scope refusal before parameters are read or the broker, the lease manager or the helper is touched, and such a delegate turn is not offered them. The scope check now comes before the capability check.
 > **Review fix (finding 13b).** `ListApps` marks its result `untrusted_output` and returns each window title as one cleaned line.
 
+> **Second security review, 2026-10-13 (findings 2, 4, 13).** `Screenshot` takes `window` and may return `other_windows` (§3.5 note). `RequestLease` refuses a `reason` that is not one plain line (`plainLineProblem`). `Type` and `Key` give the form their parameters are audited in (`Tool#auditParameters`): the text's length, and a key's name only when it is not text; the hash in a `tier.decision` entry is taken over that form, and a refused key is not repeated in its refusal (§4.6 note).
+
 ### 3.10 Mobile app deltas (to F3's app, F3 §3.14)
 
 | Screen / behaviour | Delta |
@@ -455,6 +479,11 @@ before any approval or lease request.
 >   the request that carries it are two.
 
 > **2026-10-12 and 2026-10-13 (review finding 1, R-F5-15, R-F5-16).** On Android a relay's reply never changes the lease state on screen; only a status or view signed by the pinned node does, so after Stop the screen says "Stop sent, not yet confirmed by the computer" and Stop stays enabled. The Android live screen says "Paused: tap Refresh to let it continue" for `no_contact`. Both phones apply a status or view only when its node `seq` is newer than the last applied for that lease, and a view only when `to_device` is this device.
+
+> **Owner rulings 2026-10-13 (R-F5-18, R-F5-19) and finding 3.**
+> - R-F5-19: iOS sends `kl.lease.watch` only while the live lease view is on screen with the app in front, as the table says ("while visible"). The earlier build watched from Allow until the lease ended; that is gone. With the view closed the app still polls for statuses, so the banner and Stop stay; the node pauses the lease after the contact window and the banner says "Paused: open to let it continue". Allow presents the live view at once.
+> - R-F5-18: both apps show a banner row with a working Stop for every lease a pinned node reports as running, from statuses the node signs: after a restart, and for a lease another phone granted, where the row says who granted it. iOS asks when the app becomes active with its API session unlocked (never with a prompt of its own) and on pull to refresh. Android asks only when the owner taps "Check for computer-use requests": no fetch at open, no timer, no loop (R-F5-1 holds).
+> - Both apps keep the newest contact token they applied and echo it in each watch (finding 3), and read the status a reply carries only through the pinned, verified path. Android's Refresh asks for a fresh status first when its token is over a minute old: four prompts then, three otherwise.
 
 ### 3.11 Subsystem — `src/gui/index.js`, `src/gui/errors.js`
 
@@ -528,6 +557,8 @@ Cases: `grant-valid`, `grant-narrowed`, `deny-valid`, `resume-capped`, `grant-ph
 `apps-not-requested`, `minutes-over-requested`, `minutes-over-60`, `expired`, `revoke-valid`,
 `revoke-phone-clock-off` (accepted), `revoke-unknown-lease`, `revoke-replayed`, `watch-valid`, and
 phone-side `view-node-sig-valid`, `view-tampered-frame`.
+
+> **2026-10-13 (finding 3, R-F5-18).** `docs/protocol/lease-v1.md` is the current form. `kl.lease.watch` gained `contact_token` (the newest token the phone has applied, or `null`); `kl.lease.status` gained `contact_token` and `granted_by` (`{ device_id, name }` or `null`); `kl.lease.view` gained `contact_token`. Nothing a phone signs for a grant changed. Vectors: 32 (`watch-no-token`, `watch-bad-token`, `status-valid`, `status-no-contact`, `status-pending`, `status-granted-unnamed` are new).
 
 ### 4.2 Helper frames (`docs/protocol/session-v1.md`)
 
@@ -634,6 +665,8 @@ check on `message.submit`; nodes verify phone envelopes (§3.6).
 > carries `after_seq`: the relay mailbox's position before the node heard the watch. A phone that
 > fetches on tap asks `…/views?after_seq=<that>&wait=5` and receives the frame that watch causes,
 > instead of the lease's earlier statuses at once. It is relay transport and part of no signed message.
+
+> **2026-10-13 (finding 3, R-F5-18).** The replies to grant, revoke and watch are `{ state, reason?, status? }`, where `status` is the status the node signed for that answer. `GET /v1/leases` also returns `{ node_id, envelope: null, status }` for each lease that is running or ended lately: the relay asks each of the device's nodes (`lease.list`, `{ device_id }` → `{ statuses }`), and each status is signed by the node for that listing. There is no unsigned listing.
 
 ## 5. Interfaces
 
@@ -872,6 +905,8 @@ Local on-screen lease indicator and stop hotkey (F7) · Wayland Screenshot/Remot
 Linux helper crash restart · multiple session users · a dedicated signed helper binary for macOS
 permissions · front-door `describe_machine` gui propagation (F4) · `delegate` job context and
 `endForJob` wiring (F4, wave 4).
+
+> **Owner ruling 2026-10-13 (R-F5-17), deferred: approved as a follow-up after this stage merges.** An admin-owned record of the node's identity: the node id and public key written into the admin-owned config dir by an administrator command, which `session install` and the service check against. Until then the gap is this. The node's identity lives only in the data dir, which the service account owns, and the service account also holds the master key. So an account that can write the data dir **and** read the master key (the service account, or anything running as it) can replace the stored identity with a key pair of its own, held under the master key like the real one; `session install` then seals that id into the helper's files, and the service presents it. What `session install` does refuse since finding 10: an identity whose private key is stored in the clear, one whose public key is not its private key's, one that does not decrypt under this data dir's master key, and a store that is a link, a pipe or not a regular file. So a writer of the data dir who does **not** hold the master key cannot plant an identity. Nothing here lets such a writer reach the phones' trust: the phones pin the node's key at enrollment, and a changed identity fails every signature they check.
 
 ## 14. Dependencies (npm)
 

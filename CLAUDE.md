@@ -1338,7 +1338,11 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
 - **Who is installed (R-F5-2, R-F5-10).** One session user per node, decided
   by the SID the canonical file records (the uid off Windows:
   `session_sid`, `session_uid`), never the bare name. Another identity is
-  refused (`session_user_mismatch`) until the first is uninstalled. An
+  refused (`session_user_mismatch`) until the first is uninstalled (an
+  account deleted and made again under the same name is another identity:
+  `session uninstall --user NAME` then removes what the file records for
+  the old one, once `sessionIdentityExists` says it belongs to no account;
+  tests inject `deps.identityExists`). An
   existing file that cannot be read, parsed or verified (admin-owned,
   decrypts, a valid secret) or records no identity refuses the install
   (`session_file_invalid`) and writes nothing (`inspectCanonical` in
@@ -1346,20 +1350,47 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   `endpoint_id` (the running service listens on the endpoint it started
   with, so no restart is needed). `session uninstall` needs no master key,
   clears a damaged file, leaves another user's file alone, and works from
-  the recorded identity when the account no longer resolves.
+  the recorded identity when the account no longer resolves. It checks
+  every path before it asks and again before it removes (a link above one
+  refuses with nothing removed; a link at a path is removed itself, never
+  followed: `removeEntry`), and `--dry-run` lists everything the real run
+  removes.
 - **What install checks (R-F5-12).** The master key is resolved read-only
   with the data dir's owner uid (as `import --from`), so a key file its
   owner does not own is refused. The node id is read where the store keeps
   it (the dot path `mesh.identity` of `chat-data.json`) and verified: the
   public key must be the public half of the private key held under the
-  master key (`readNodeIdentity`, read-only). The identity lives only in
-  the data dir; no admin-owned file names the node id. On Windows install
+  master key (`readNodeIdentity`, read-only). A record with its private key
+  in the clear is refused (start the service once: it moves the key under
+  the master key), and the store is read only as a regular file of at most
+  64 MiB, no link followed and no pipe waited on. The identity lives only in
+  the data dir; no admin-owned file names the node id, so an account that
+  can write the data dir and read the master key (the service account) can
+  still replace it. Closing that (an admin-owned record of the node id and
+  public key) is owner ruling R-F5-17: approved, deferred until after F5
+  merges, not built. On Windows install
   also runs the installers' config-dir check (`WINDOWS_CONFIG_DIRS_SCRIPT`)
-  after consent, creates the per-user copy empty, narrows it with `icacls`,
+  after consent, gives the session user's SID read-control, read-attributes
+  and synchronize on `session\users` itself (no inheritance; without it the
+  helper, which runs as that user, cannot read who owns the directory and
+  exits `session_file_insecure`; CreateFile always asks for synchronize),
+  creates the per-user copy empty, narrows it with `icacls`,
   gives it to Administrators and only then writes it (removed if `icacls`
-  fails); the helper checks before every connection that the copy and its
+  fails); uninstall takes that directory entry off again. The helper checks
+  before every connection that the copy and its
   directory are owned by SYSTEM or Administrators (`checkUserCopyTrust`,
-  an awaited PowerShell child; tests inject the inspector).
+  an awaited PowerShell child; tests inject the inspector, except the one
+  in `tests/gui-session-secret.test.js` that runs the real check against a
+  temp dir locked with `icacls` and an OWNER RIGHTS entry, and lifts the
+  lock with one blind DACL write before cleanup).
+- **Helper- and file-supplied text** (what the helper says of itself in
+  `status.json`, a name in the helper file) goes to an administrator's
+  terminal only through `shown` (`src/service/commands/io.js`), which is
+  built on `plainLineProblem` (`src/cases/hidden-chars.js`): one plain line
+  as it is, anything else stripped of control, hidden and bidi characters
+  and marked. `session status`, `session probe`, `session install` and
+  `uninstall` and doctor use it. `RequestLease` refuses a `reason` that is
+  not one plain line by the same definition.
 - **A GUI that cannot start never stops the service (R-F5-11).** A helper
   file that is there but wrong (owner, not JSON, does not decrypt,
   malformed, another node's) gives a subsystem that is off with the reason
@@ -1403,16 +1434,46 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   from `gui.apps`; a path outside the allowlist is `app_not_allowlisted`
   and nobody is asked. An allowlisted app with an argument outside its globs
   or a file outside `allowed_roots` is still an unsafe launch for the phone.
-- **Contact (R-F5-15).** Input needs the granting phone to stay in touch:
-  the grant and every `kl.lease.watch` from that device with a new nonce
-  are contact; `gui.lease.contact_s` (120, at most 300) after the last one
-  the lease is suspended with the reason `no_contact` (input refuses
-  `lease_suspended_no_contact`; what was held is released; no resume request
-  is sent) until that device's next fresh watch, which never moves the
-  expiry. A replayed watch and another device's watch are not contact.
-  Watch and revoke nonces are kept per lease for its lifetime
-  (`LeaseNonces`), not in a 10-minute cache. Lease tests that pass more
-  than two minutes on the fake clock send watches or expect the suspension.
+- **Contact (R-F5-15).** Input needs the granting phone to stay in touch.
+  Contact is the grant and a `kl.lease.watch` from the granting device
+  that echoes a **contact token**: the node puts 16 fresh random bytes in
+  every status and view it signs and remembers when it issued each, a phone
+  echoes the newest it has applied, and a watch counts only with a token of
+  this lease issued inside the window that has not made contact before
+  (using one retires the older ones). So a relay cannot bank watches and
+  feed them in later; it can still hold one for up to the window, so input
+  ends at most two windows after the phone's last signature. Any other
+  accepted watch (another device's, no token, an old one) still asks for
+  frames and is never contact. `gui.lease.contact_s` (120, at most 300)
+  after the last contact the lease is suspended with the reason
+  `no_contact` (input refuses `lease_suspended_no_contact`; what was held is
+  released; no resume request is sent) until the next contact, which never
+  moves the expiry. Every accepted watch is answered with a status signed
+  then, and the replies to grant, revoke and watch carry it
+  (`{ state, reason?, status? }`), so a phone always holds a young token.
+  A lease suspended for want of contact is taken over by any other reason
+  that comes up meanwhile (the helper dropping, the relay link going),
+  which then needs its own resume grant. Watch and revoke nonces are kept
+  per lease for its lifetime (`LeaseNonces`), not in a 10-minute cache.
+  Lease tests that pass more than two minutes on the fake clock send
+  watches that echo the newest token (`watchFrom` in
+  `tests/gui-leases.test.js`) or expect the suspension; the fake clock jumps
+  to the end of an advance before its timers run, so a test that reads when
+  something happened moves a second at a time.
+- **Two clocks.** `LeaseManager` measures contact, token age, what is left
+  of a lease and the input rate on a monotonic clock (`performance.now()`,
+  injectable as `monotonic`) as well as the wall clock, and believes
+  whichever says "over" first: a clock set back cannot extend anything. A
+  test that injects only `clock` gets that one clock for both.
+- **Any enrolled phone can stop a lease (R-F5-18).** A revoke from any
+  enrolled, unrevoked device ends a lease, and any such device may watch
+  it (never contact). Only the granting device resumes it
+  (`not_granting_device`; a deny of a resume is any phone's). Every status
+  names the granting device (`granted_by`). A phone learns what is running
+  with the one device-signed request it already makes: `GET /v1/leases`
+  asks each node (`lease.list` → `LeaseManager#listFor`) and appends
+  `{ node_id, envelope: null, status }` with statuses signed for that
+  listing; there is no unsigned listing.
 - The lease is checked again inside `GuiBroker#input`, after the process
   lookup and immediately before the send; a broker with no lease manager
   sends no input. A click, scroll or drag lands only when the window under
@@ -1421,14 +1482,44 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   text and printable keys append, Enter is a line break (it no longer wipes
   the buffer), backspace removes one, and anything that moves the caret or
   edits unseen (navigation keys, tab, delete, every ctrl/alt/meta chord, a
-  click, a drag) leaves what was typed as a piece of unknown place. Text
-  after that is refused when at most four runs of the pieces (one from the
-  new text) spell a vault value. The residuals are listed in that file's
-  header: more than four pieces, text the app adds or moves itself, text
-  already in the field.
+  click, a drag, and every suspension of the lease) leaves what was typed as
+  a piece of unknown place; only a new lease starts with nothing typed.
+  Text after that is refused when at most four runs of the pieces (one from
+  the new text) spell a vault value in any arrangement, or when the pieces
+  spell it in the order they were typed, in any number, up to the text being
+  typed. The history keeps 64 pieces and 4096 code points. The residuals
+  are listed in that file's header: more than four pieces typed out of
+  order, text the app adds or moves itself, a paste chosen from a menu with
+  a click, text already in the field, and the keyboard layout (a key press
+  is taken for its US character: `SHIFTED` in `keys.js`). A short or
+  repetitive vault value can refuse ordinary typing that happens to spell
+  it piece by piece.
+- **Typed text goes out in pieces** of at most `TYPE_CHUNK` (40) code
+  points, the lease checked before each (`GuiBroker#input`), so a Stop
+  lands within one piece; a failure carries what went out (`err.typed`) and
+  the typed buffer holds exactly that. The X11 backend kills the `xdotool`
+  that is typing on `release_all`.
+- **Key chords that leave the leased app** are denied per platform
+  (`deniedReason`; `LEAVES_THE_APP` in `src/gui/keys.js` is the list the
+  tests walk, and the file's header says what remains). On Linux that
+  includes `ctrl+F1` to `ctrl+F12` (workspaces on Xfce and KDE).
+- **Windows of an app.** The helper lists a process's owned windows too
+  (dialogs, menus, dropdown lists; `owned`). `Screenshot` captures the
+  foreground window when it is the app's, else the largest main window,
+  names the app's other open windows (`other_windows`, by a broker-issued
+  id, never a handle) and takes `window` to capture one. A menu is never
+  picked by a guess. `point_obscured` says to take a new screenshot and
+  which window covers the point. macOS still lists normal-layer windows
+  only.
 - **What reaches the relay (R-F5-16).** The live view's action log never
   holds typed text: `Typed 42 characters`, `Key (a character)`; keys that
-  are not text keep their names. Pictures still show the window.
+  are not text keep their names. Pictures still show the window. The audit
+  ledger is served to the relay's mirror and holds the same and no more: a
+  `Type` entry is `{ length }` (no hash of the text), a `Key` entry names
+  the key only when it is not text, and the `params_sha256` of a
+  `tier.decision` is taken over that form (`Tool#auditParameters`; every
+  other tool is hashed as called). A refused key is not repeated in its
+  refusal, and the helper logs a failed input by its code alone.
   `mobile/PRIVACY.md` lists every clear field. Both phones apply a status or
   view only when its node `seq` is newer than the last applied for that
   lease, and a view only when `to_device` is this device
@@ -1465,12 +1556,23 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   (`tests/session-backend-windows.test.js`), which shows the rule is
   written, not that it works. Swift and Kotlin are not compiled by
   `npm test`.
-- Vectors: `node tests/vectors/lease-v1/generate.js --check` (26) and
+- Vectors: `node tests/vectors/lease-v1/generate.js --check` (32) and
   `node tests/vectors/session-v1/generate.js --check` (6).
-- The phones: iOS streams the live lease, signing only `kl.lease.watch` with
-  its API session (owner ruling R-F5-8); Android fetches on tap, sends each
+- The phones: iOS signs only `kl.lease.watch` with its API session (owner
+  ruling R-F5-8) and sends it only while the live lease view is on screen
+  with the app in front (R-F5-19: `setLiveViewVisible`, called by
+  `LiveLeaseView` alone); with the view closed it still polls for statuses,
+  so the banner and Stop stay, and the banner says "Paused: open to let it
+  continue" for `no_contact`. Both apps echo the newest contact token they
+  applied in each watch and show a banner row with a working Stop for every
+  lease a pinned node reports as running, saying who granted one this phone
+  did not (R-F5-18); iOS asks when it becomes active with its session
+  unlocked, Android only when the owner taps "Check for computer-use
+  requests". Android fetches on tap, sends each
   Stop, Allow and Refresh once and shows an unanswered send as not confirmed
-  (R-F5-1, R-F5-5), and a lease push there fetches nothing (R-F5-6). On
+  (R-F5-1, R-F5-5), and a lease push there fetches nothing (R-F5-6); its
+  Refresh asks for a fresh status first when its token is over a minute old
+  (four prompts then, three otherwise). On
   Android a relay's reply never changes the lease state on screen: only a
   status or view the pinned node signed does (`applyLease`), so after Stop
   it says "Stop sent, not yet confirmed by the computer" and Stop stays

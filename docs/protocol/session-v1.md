@@ -72,6 +72,23 @@ Ops: `launch`, `processes`, `windows`, `foreground`, `focus`, `close`,
 `screenshot`, `input`, `release_all`, `probe` (spec §3.3). Timeouts: 10 s,
 `screenshot` 20 s, `launch` 30 s. There is no clipboard op.
 
+Revised 2026-10-13 (second security review; no frame, proof or sealing
+changed, and the vectors are the same):
+
+- `windows` lists every visible top-level window of the given processes,
+  owned ones too (a dialog, a pop-up menu, a dropdown list), and marks each
+  `owned: true | false` where the backend can tell (Windows; a backend that
+  cannot leaves it out). The service drops a listed window whose `pid` it
+  did not ask for.
+- `input` with `action.kind: "type"` carries at most 40 code points: the
+  service sends longer text as several `input` ops and checks the lease
+  before each. `release_all` also stops typing that is still going on (X11).
+- A `point_obscured` refusal may say what covers the point:
+  `detail.covering = { handle, pid }`. The service uses it only to tell the
+  model which window to look at next, never to let a click through.
+- The helper answers a failed `input` with its code alone (`message` is the
+  code): a backend's own error can quote the command it ran.
+
 ## 6. Vectors
 
 `tests/vectors/session-v1/`, rebuilt by `generate.js`: `handshake` (proofs and
