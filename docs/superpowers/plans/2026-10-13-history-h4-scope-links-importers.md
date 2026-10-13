@@ -93,6 +93,21 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **Titles in `links` and `candidates` are the stored titles**, untouched (`untrustedText: true`). `chatTitle` on a `history:search` excerpt is the header's form (`chatHeaderTitle`), as in `SearchHistory`.
 - **`tests/history-ipc.test.js` needed no change** and is not in the commit. The three allowlist lines pass before the code does (the `history` domain is proxied); they pin it.
 
+**Task 8**
+
+- **`bridge-origin.js` is in `src/history/`** as the task says (no boundary test objects), but it is **not exported from `src/history/index.js`**: it requires the two bridge modules, and with them `discord.js`, which LongHaul and the service CLI must not load through the history index. `create-core.js` and `case-handlers.js` require the file itself; Task 16 does the same or takes `bridgeOriginFor` as an argument.
+- **A linked bridge chat is read under `linked` only, never under `all`** (Task 4's rule, kept: under `all` every chat is asked with `explicit: false`). R-H4-7 says a bridge chat "is left out of `all`; the owner may link it explicitly" and does not say what a chat scoped `all` that also links one reads. The narrower reading is built and pinned by `history-scope-policy › R-H4-7: a bridge chat is left out of "all" and can be linked`. **For the owner:** if `all` should include the chats the owner linked, it is one change in `resolveScope`.
+- **The policy fails closed on what it is not given.** `createScopePolicy` throws a `TypeError` without a `bridgeOriginFor` function; a ref that is not an object counts as a case chat (it reads nothing and nothing reads it); a bridge chat is readable only when `explicit` is exactly `true`. A case or an export mark wins over a bridge origin, so a bridge chat with a `caseId` cannot be linked.
+- **`recalledOtherChats`, where the text leaves room:**
+  - a reply's `context.recalledChats` blocks unless it is missing, `null` or an empty list (a string or an object there blocks);
+  - a `SearchHistory` result passes only as `{ ok: true, excerpts: [...] }` whose excerpts are objects with no `chatTitle` and no `chatId` other than this chat's; the H3 shape (no `scope` key) passes, so chats from before H4 are not blocked;
+  - a `ReadHistory` result passes only as `{ ok: true, chatId: <this chat> }`; a missing or non-string `chatId` blocks;
+  - a refusal that carries a `result` or `data` is not a bare failure and blocks;
+  - a message list that is not an array blocks (`{ seq: null, toolName: null }`), but `assertChatAttachable` leaves a chat with no message list to Q29's existing refusal (`CHAT_SAW_OTHER_CASES`), which an existing test pins.
+- **`ImportedChatError` is also thrown for a chat with `importedFromCase: true` and no `source`** (a mark without its source is still an import).
+- **The codes `case:create` answers after the case exists are one list**, `ATTACH_REFUSALS` in `case-handlers.js`, now with the two new codes.
+- **Tests changed.** `tests/history-core.test.js`: the two cases that pinned the interim closed policy are rewritten to the shipped one. "resolves a history scope from the store under the shipped policy" now expects a stored `all` and links to widen an ordinary chat, a requested scope only to narrow, and a case chat and a bridge chat to resolve to themselves (it also checks `context.getHistoryScopePolicy`). The turn test keeps every assertion for a chat scoped `chat` (the two lines that stored `all` are gone: under the shipped policy a stored scope rightly applies), and a new case next to it runs a turn of a chat the owner scoped `linked`: `ReadHistory` and `SearchHistory` reach the linked chat, a linked case chat is refused and none of its text is stored. `tests/case-chat-attach.test.js`: a new `describe` only; no existing case changed. `tests/history-cross-chat-recall.test.js` and `tests/history-ipc-scope.test.js` needed no change and are not in the commit; the turn-after-attach case is in `tests/history-scope-policy.test.js`.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named).

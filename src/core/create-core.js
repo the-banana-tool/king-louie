@@ -67,8 +67,10 @@ const ContextAssembler = require('../context/context-assembler');
 const {
   HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore, TokenEstimator, Retriever, ContextBuilder,
   EmbedderHost, EmbedRunner, VectorIndex, createVectorSearch, startEmbedIndexer, mergeHistorySettings,
-  resolveScope, CLOSED_POLICY
+  resolveScope
 } = require('../history');
+const { createScopePolicy } = require('../history/scope-policy');
+const { bridgeOriginFor } = require('../history/bridge-origin');
 const { startChunkBackfill } = require('../history/backfill');
 const { createRecallReranker } = require('../history/reranker');
 const { JevReranker } = require('../history/jev-reranker');
@@ -373,9 +375,10 @@ function createCore(deps = {}) {
   // Stage H4 (spec §6.3): which chats a turn of a chat may read, resolved on
   // every call from what the store holds now and never kept. requested is a
   // tool's scope argument and can only narrow. The policy says what a stored
-  // scope may not do; until the shipped policy (scope-policy.js) is wired it
-  // is the closed one, under which every chat reads itself only.
-  const historyScopePolicy = CLOSED_POLICY;
+  // scope may not do (scope-policy.js): a case chat, an imported case-chat
+  // export and a bridge chat read themselves only, and the first two are in
+  // no other chat's scope.
+  const historyScopePolicy = createScopePolicy({ bridgeOriginFor });
   const resolveHistoryScope = (chatId, requested = null) => resolveScope({
     store: historyStore, chatId, requested, policy: historyScopePolicy
   });

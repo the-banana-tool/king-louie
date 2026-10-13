@@ -1,28 +1,12 @@
 // src/ipc/case-handlers.js
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
-const TelegramBridge = require('../channels/telegram-bridge');
-const DiscordChannel = require('../channels/discord-bridge');
+const { bridgeOriginFor } = require('../history/bridge-origin');
 const { assertChatAttachable, ChatBusyError } = require('../cases/chat-attach');
 
 const summarize = (c) => ({
   id: c.id, slug: c.slug, title: c.title, type: c.type, status: c.status, created: c.created, dir: c.dir
 });
-
-// F5 re-review: a chat from before the origin tag existed has none, and
-// the bridges' chat-id maps are in-memory only, so it is never re-tagged
-// by create-core.js's startup migration alone — CASE_ATTACH refuses by
-// title prefix too, as a second, redundant check that needs no tag at
-// all. A chat the owner has since renamed no longer matches either
-// check and cannot be caught here (see final-fix-report.md).
-const LEGACY_BRIDGE_TITLE_PREFIXES = [TelegramBridge.CHAT_TITLE_PREFIX, DiscordChannel.CHAT_TITLE_PREFIX];
-const bridgeOriginFor = (chat) => {
-  if (chat?.origin) return chat.origin;
-  if (typeof chat?.title === 'string' && LEGACY_BRIDGE_TITLE_PREFIXES.some((p) => chat.title.startsWith(p))) {
-    return chat.title.startsWith(TelegramBridge.CHAT_TITLE_PREFIX) ? 'telegram' : 'discord';
-  }
-  return null;
-};
 
 // A Telegram/Discord bridge chat (F5) can carry messages from a remote
 // sender stamped sender: 'user'. Giving it a case would let those messages
@@ -40,6 +24,10 @@ const assertNotBridgeChat = (chat) => {
   if (origin) throw new BridgeChatError(origin);
 };
 
+// Why a chat was not given a case; case:create answers these after the case
+// exists with "The case was created, but this chat was not attached to it."
+const ATTACH_REFUSALS = Object.freeze(['CHAT_SAW_OTHER_CASES', 'CHAT_BUSY', 'BRIDGE_CHAT', 'CHAT_RECALLED_OTHER_CHATS', 'IMPORTED_CHAT']);
+
 function registerCaseHandlers(ipcMain, context = {}) {
   const chatById = (chatId) => context.getChat(chatId, { messages: true });
   // The renderer replaces its chat with what attach returns, so it keeps
@@ -55,6 +43,9 @@ function registerCaseHandlers(ipcMain, context = {}) {
   // Owner decision Q29 (2026-10-12): a chat that holds management-tool
   // results about a case other than `caseId` is never given it
   // (src/cases/chat-attach.js); `caseId` null is a case about to be created.
+  // The same call refuses an imported chat (IMPORTED_CHAT) and a chat that
+  // has read other chats (CHAT_RECALLED_OTHER_CHATS; history stage H4,
+  // rulings R-H4-1 and R-H4-7), before Q29.
   // A turn still running in the chat (one that began with no case, so its
   // tools read every case) would store its results after the check, so the
   // attach waits for it. Throws ChatAttachRefusedError or ChatBusyError.
@@ -126,7 +117,7 @@ function registerCaseHandlers(ipcMain, context = {}) {
     try {
       chat = chatId ? attach(chatId, info.id) : null;
     } catch (err) {
-      if (err && (err.code === 'CHAT_SAW_OTHER_CASES' || err.code === 'CHAT_BUSY' || err.code === 'BRIDGE_CHAT')) {
+      if (err && ATTACH_REFUSALS.includes(err.code)) {
         return { ok: false, error: `The case was created, but this chat was not attached to it. ${err.message}`, code: err.code, case: summarize(info) };
       }
       throw err;

@@ -147,25 +147,47 @@ describe('createCore and the history store', () => {
     assert.strictEqual(typeof getHistoryRetriever().retrieve, 'function');
   });
 
-  // Stage H4. Until the shipped scope policy is wired (plan Task 8) the core
-  // runs on the closed policy: a stored scope and links widen nothing. Task 8
-  // replaces these expectations with its own rules.
-  it('resolves a history scope from the store, and no stored scope widens it yet', () => {
+  // Stage H4: the core runs on the shipped scope policy (scope-policy.js).
+  // A stored scope and links widen what an ordinary chat reads; a case chat
+  // and a bridge chat read themselves only, and a case chat is read by none.
+  it('resolves a history scope from the store under the shipped policy', () => {
     const { deps } = makeDeps([
       { id: 'c1', title: 'Lakeside lot', messages: [msg('m1', 'user', 'blue folder')] },
-      { id: 'c2', title: 'Second', messages: [msg('m2', 'user', 'red folder')] }
+      { id: 'c2', title: 'Second', messages: [msg('m2', 'user', 'red folder')] },
+      { id: 'c3', title: 'Lot sale', caseId: 'case-1', messages: [msg('m3', 'user', 'green folder')] },
+      { id: 'c4', title: 'Field chat', origin: 'telegram', messages: [msg('m4', 'user', 'grey folder')] }
     ]);
     const core = createCore(deps);
-    const { resolveHistoryScope, historyStore } = core.context;
+    const { resolveHistoryScope, getHistoryScopePolicy, historyStore } = core.context;
+    assert.strictEqual(typeof getHistoryScopePolicy().canRead, 'function');
     assert.deepStrictEqual(resolveHistoryScope('c1').chatIds, ['c1']);
+    assert.strictEqual(resolveHistoryScope('c1').pinned, null);
+
+    // An ordinary chat: what is stored applies, and a requested scope only narrows.
     assert.strictEqual(historyStore.setHistoryScope('c1', 'all'), true);
-    assert.deepStrictEqual(historyStore.setLinks('c1', ['c2']), ['c2']);
-    for (const requested of [undefined, null, 'all', 'linked', 'chat']) {
+    assert.deepStrictEqual(historyStore.setLinks('c1', ['c2', 'c3', 'c4']), ['c2', 'c3', 'c4']);
+    for (const [requested, effective, chatIds] of [
+      [undefined, 'all', ['c1', 'c2']], [null, 'all', ['c1', 'c2']], ['all', 'all', ['c1', 'c2']],
+      ['linked', 'linked', ['c1', 'c2', 'c4']], ['chat', 'chat', ['c1']], ['everything', 'all', ['c1', 'c2']]
+    ]) {
       const r = resolveHistoryScope('c1', requested);
       assert.strictEqual(r.stored, 'all');
-      assert.strictEqual(r.effective, 'chat');
-      assert.deepStrictEqual(r.chatIds, ['c1']);
-      assert.strictEqual(r.pinned.reason, 'no-policy');
+      assert.strictEqual(r.effective, effective, String(requested));
+      assert.deepStrictEqual(r.chatIds, chatIds, String(requested));
+      assert.strictEqual(r.pinned, null);
+    }
+    assert.deepStrictEqual(resolveHistoryScope('c1', 'linked').excluded, [{ chatId: 'c3', reason: 'case-chat' }]);
+    // A chat scoped "chat" is not widened by what a caller asks for.
+    assert.deepStrictEqual(resolveHistoryScope('c2', 'all').chatIds, ['c2']);
+
+    // A case chat and a bridge chat read themselves only, whatever is stored.
+    for (const [id, reason] of [['c3', 'case-chat'], ['c4', 'bridge-chat']]) {
+      assert.strictEqual(historyStore.setHistoryScope(id, 'all'), true);
+      historyStore.setLinks(id, ['c1']);
+      for (const requested of [undefined, 'all', 'linked', 'chat']) {
+        const r = resolveHistoryScope(id, requested);
+        assert.deepStrictEqual([r.stored, r.effective, r.chatIds, r.pinned.reason], ['all', 'chat', [id], reason]);
+      }
     }
     assert.deepStrictEqual(resolveHistoryScope('missing').chatIds, ['missing']);
   });
@@ -395,9 +417,9 @@ describe('history: a chat turn through the core', () => {
     });
     core.context.createChat({ id: 'chat-2', title: 'Dock notes', messages: [] });
     core.context.appendMessageToChat('chat-2', 'user', 'The dock gate code is 9001.');
-    // Stored as wide as it goes; the interim policy still keeps the chat to itself.
-    core.context.historyStore.setHistoryScope('chat-1', 'all');
-    core.context.historyStore.setLinks('chat-1', ['chat-2']);
+    // The owner widened nothing: the stored scope is "chat", and what the
+    // model asks for changes nothing.
+    assert.strictEqual(core.context.historyStore.getHistoryScope('chat-1'), 'chat');
     await send('Read the other chat and search everything for the dock gate code.');
     const chat = core.context.getChat('chat-1', { messages: true });
     const resultOf = (name) => chat.messages.find((m) => m.sender === 'toolResult' && m.toolName === name).result;
@@ -410,7 +432,48 @@ describe('history: a chat turn through the core', () => {
     assert.strictEqual(reply.context.scope, 'chat');
     assert.strictEqual(reply.context.scopeChats, 1);
     assert.deepStrictEqual(reply.context.recalledChats, []);
+    assert.strictEqual(reply.context.scopePinned, null);
     assert.ok(!JSON.stringify(chat.messages).includes('9001'));
+    assert.strictEqual(core.context.historyStore.getHistoryScope('chat-1'), 'chat');
+  });
+
+  it('stage H4: a scope the owner stored widens the turn, and a case chat among the links is still not read', async () => {
+    const { send } = await start({
+      script: [
+        { type: 'tool_use', toolName: 'ReadHistory', toolUseId: 'rh-1', parameters: { chatId: 'chat-2', fromSeq: 1, toSeq: 1 } },
+        { type: 'tool_use', toolName: 'ReadHistory', toolUseId: 'rh-2', parameters: { chatId: 'chat-3', fromSeq: 1, toSeq: 1 } },
+        { type: 'tool_use', toolName: 'SearchHistory', toolUseId: 'sh-3', parameters: { query: 'dock gate code', scope: 'all' } },
+        { type: 'text', content: 'Done.' }
+      ]
+    });
+    core.context.createChat({ id: 'chat-2', title: 'Dock notes', messages: [] });
+    core.context.appendMessageToChat('chat-2', 'user', 'The dock gate code is 9001.');
+    core.context.createChat({ id: 'chat-3', title: 'Lot sale', caseId: 'case-1', messages: [] });
+    core.context.appendMessageToChat('chat-3', 'user', 'The dock gate code for the buyer is 7766.');
+    core.context.historyStore.setHistoryScope('chat-1', 'linked');
+    core.context.historyStore.setLinks('chat-1', ['chat-2', 'chat-3']);
+    await send('Read the other chats and search everything for the dock gate code.');
+    const chat = core.context.getChat('chat-1', { messages: true });
+    const results = chat.messages.filter((m) => m.sender === 'toolResult').map((m) => m.result);
+    assert.strictEqual(results.length, 3);
+    const [readDock, readCase, searched] = results;
+    assert.strictEqual(readDock.ok, true);
+    assert.deepStrictEqual([readDock.chatId, readDock.chatTitle], ['chat-2', 'Dock notes']);
+    assert.ok(readDock.text.includes('9001'));
+    assert.deepStrictEqual(readCase, { ok: false, error: 'ReadHistory can read only chats in this chat\'s history scope ("linked").' });
+    assert.strictEqual(searched.scope, 'linked');
+    assert.match(searched.note, /only the owner can widen it in the app/);
+    assert.ok(searched.excerpts.some((e) => e.chatId === 'chat-2' && e.text.includes('9001')));
+    const reply = chat.messages[chat.messages.length - 1];
+    assert.strictEqual(reply.context.scope, 'linked');
+    assert.strictEqual(reply.context.scopeChats, 2);
+    assert.strictEqual(reply.context.scopePinned, null);
+    assert.ok(reply.context.recalledChats.every((id) => id === 'chat-2'));
+    // Nothing of the case chat reached this chat.
+    assert.ok(!JSON.stringify(chat.messages).includes('7766'));
+    // Having read another chat, this chat cannot be given a case (R-H4-1).
+    const { recalledOtherChats } = require('../src/cases/chat-attach');
+    assert.strictEqual(recalledOtherChats(chat.messages, 'chat-1').toolName, 'ReadHistory');
   });
 
   it('SearchHistory in a turn reads this chat from the store', async () => {

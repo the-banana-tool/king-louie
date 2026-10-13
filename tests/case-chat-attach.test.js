@@ -346,3 +346,155 @@ describe('the other direction (Q27): a case chat cannot collect another case', (
     refusedOtherCases(await attach(lot.id));
   });
 });
+
+// Stage H4 (owner rulings R-H4-1, R-H4-7): a chat that has read other chats,
+// or that was imported, is never given a case.
+describe('attaching a chat that read other chats, or was imported (H4)', () => {
+  const {
+    recalledOtherChats, ChatRecalledOtherChatsError, ImportedChatError, RECALLED_OTHER_CHATS_MESSAGE, IMPORTED_CHAT_MESSAGE
+  } = require('../src/cases/chat-attach');
+  const refusedRecalled = (res) => {
+    assert.deepStrictEqual([res.ok, res.code, res.error], [false, 'CHAT_RECALLED_OTHER_CHATS', RECALLED_OTHER_CHATS_MESSAGE]);
+  };
+  const reply = (history, context) => history.appendMessageToChat('chat-1', 'assistant', 'It is 4417.', { context }, { returnChat: false });
+  const excerpt = (extra = {}) => ({ seq: 2, header: '[#2 · user · 2 days ago]', text: 'the gate code is 4417', ...extra });
+  const fromLot = { chatId: 'chat-lot', chatTitle: 'Lot notes' };
+
+  it('the refusals say what the owner does next', () => {
+    assert.strictEqual(RECALLED_OTHER_CHATS_MESSAGE, 'This chat has read other chats, so it cannot be attached to a case. Start a new chat for the case.');
+    assert.strictEqual(IMPORTED_CHAT_MESSAGE, 'An imported chat cannot be attached to a case; its messages are not verified as the owner\'s.');
+    const recalled = new ChatRecalledOtherChatsError({ seq: 4, toolName: 'ReadHistory' });
+    assert.deepStrictEqual([recalled.code, recalled.message, recalled.at], ['CHAT_RECALLED_OTHER_CHATS', RECALLED_OTHER_CHATS_MESSAGE, { seq: 4, toolName: 'ReadHistory' }]);
+    const imported = new ImportedChatError();
+    assert.deepStrictEqual([imported.code, imported.message], ['IMPORTED_CHAT', IMPORTED_CHAT_MESSAGE]);
+  });
+
+  it('R-H4-1: a reply that recalled from another chat blocks attach', async () => {
+    const { attach, call, history, lot, runtime } = await setup();
+    reply(history, { scope: 'chat', recalledChunkIds: [1], recalledChats: [] });
+    assert.strictEqual((await attach(lot.id)).ok, true);
+    assert.strictEqual((await attach(null)).ok, true);
+    reply(history, { scope: 'linked', recalledChunkIds: [7], recalledChats: ['chat-lot'] });
+    refusedRecalled(await attach(lot.id));
+    refusedRecalled(await call(IPC.CASE_CREATE, { title: 'Boat sale', objective: 'Sell the boat', chatId: 'chat-1' }));
+    assert.strictEqual(runtime.listCases().length, 2);
+    assert.ok(!history.getChat('chat-1').caseId);
+    const found = recalledOtherChats(history.getChat('chat-1').messages, 'chat-1');
+    assert.deepStrictEqual(found, { seq: 2, toolName: null });
+  });
+
+  it('R-H4-1: a recalledChats that is not a list blocks; a reply with none does not', () => {
+    const row = (context) => [{ seq: 1, sender: 'assistant', text: 'ok', ...(context === undefined ? {} : { context }) }];
+    for (const context of [undefined, null, {}, { recalledChats: [] }, { recalledChats: null }]) {
+      assert.strictEqual(recalledOtherChats(row(context), 'chat-1'), null, JSON.stringify(context));
+    }
+    for (const recalledChats of [['chat-lot'], 'chat-lot', { 0: 'chat-lot' }, 1, true]) {
+      assert.deepStrictEqual(recalledOtherChats(row({ recalledChats }), 'chat-1'), { seq: 1, toolName: null }, JSON.stringify(recalledChats));
+    }
+    // Only an assistant row's provenance is read; messages that are no list block.
+    assert.strictEqual(recalledOtherChats([{ seq: 1, sender: 'user', text: 'hi', context: { recalledChats: ['x'] } }], 'chat-1'), null);
+    assert.deepStrictEqual(recalledOtherChats(null, 'chat-1'), { seq: null, toolName: null });
+  });
+
+  it('R-H4-1: a SearchHistory or ReadHistory result from another chat blocks attach', async () => {
+    // What does not block: this chat's own excerpts and ranges, and bare failures.
+    const clean = await setup();
+    clean.row('toolUse', 'SearchHistory', { parameters: { query: 'gate code', scope: 'all' } });
+    clean.row('toolResult', 'SearchHistory', { result: { ok: true, scope: 'chat', excerpts: [excerpt()], note: 'This chat\'s history scope is "chat"; only the owner can widen it in the app.' } });
+    clean.row('toolResult', 'SearchHistory', { result: { ok: true, scope: 'chat', excerpts: [], note: 'No matches in this chat.' } });
+    clean.row('toolResult', 'SearchHistory', { result: { ok: true, excerpts: [excerpt()] } });
+    clean.row('toolResult', 'SearchHistory', { result: { ok: false, error: 'query is required.' } });
+    clean.row('toolUse', 'ReadHistory', { parameters: { chatId: 'chat-lot', fromSeq: 1, toSeq: 2 } });
+    clean.row('toolResult', 'ReadHistory', { result: { ok: false, error: 'ReadHistory can read only chats in this chat\'s history scope ("chat").' } });
+    clean.row('toolResult', 'ReadHistory', { result: { ok: true, chatId: 'chat-1', fromSeq: 1, toSeq: 2, text: '[#1 · user]\nhello', truncated: false } });
+    clean.row('toolResult', 'ReadHistory', { result: { success: false, error: 'Denied by node policy.', deniedBy: 'policy' } });
+    assert.strictEqual(recalledOtherChats(clean.history.getChat('chat-1').messages, 'chat-1'), null);
+    assert.strictEqual((await clean.attach(clean.lot.id)).ok, true);
+
+    const blocking = [
+      ['SearchHistory', { ok: true, scope: 'linked', excerpts: [excerpt(), excerpt(fromLot)] }],
+      ['ReadHistory', { ok: true, chatId: 'chat-lot', chatTitle: 'Lot notes', fromSeq: 1, toSeq: 2, text: '[chat "Lot notes" · #1 · user]\nthe gate code is 4417', truncated: false }],
+      // What the rule cannot tell, it refuses.
+      ['SearchHistory', { ok: true, scope: 'linked' }],
+      ['SearchHistory', { ok: true, excerpts: 'the gate code is 4417' }],
+      ['SearchHistory', { ok: true, excerpts: ['the gate code is 4417'] }],
+      ['SearchHistory', 'the gate code is 4417'],
+      ['SearchHistory', { ok: false, error: 'no', result: 'the gate code is 4417' }],
+      ['ReadHistory', { ok: true, fromSeq: 1, toSeq: 2, text: 'the gate code is 4417' }],
+      ['ReadHistory', { ok: true, chatId: 7, text: 'the gate code is 4417' }],
+      ['ReadHistory', 'the gate code is 4417'],
+      ['ReadHistory', null]
+    ];
+    for (const [toolName, result] of blocking) {
+      const s = await setup();
+      s.row('toolResult', toolName, { result });
+      const label = `${toolName} ${JSON.stringify(result)}`;
+      assert.deepStrictEqual(recalledOtherChats(s.history.getChat('chat-1').messages, 'chat-1'), { seq: 1, toolName }, label);
+      refusedRecalled(await s.attach(s.lot.id));
+      refusedRecalled(await s.call(IPC.CASE_CREATE, { title: 'Boat sale', objective: 'Sell the boat', chatId: 'chat-1' }));
+      assert.strictEqual(s.runtime.listCases().length, 2, label);
+      assert.ok(!s.history.getChat('chat-1').caseId, label);
+    }
+  });
+
+  it('R-H4-1: force does not lift CHAT_RECALLED_OTHER_CHATS', async () => {
+    const { call, row, history, runtime } = await setup();
+    row('toolResult', 'SearchHistory', { result: { ok: true, scope: 'all', excerpts: [excerpt(fromLot)] } });
+    for (const extra of [{ force: true }, { force: true, title: 'Lakeside lot', objective: 'Sell the lot' }]) {
+      refusedRecalled(await call(IPC.CASE_CREATE, { title: 'Boat sale', objective: 'Sell the boat', chatId: 'chat-1', ...extra }));
+    }
+    // Before the similar-case question too.
+    refusedRecalled(await call(IPC.CASE_CREATE, { title: 'Lakeside lot', objective: 'Sell the lot', chatId: 'chat-1' }));
+    assert.strictEqual(runtime.listCases().length, 2);
+    assert.ok(!history.getChat('chat-1').caseId);
+    // Without the chat the create is unaffected.
+    assert.strictEqual((await call(IPC.CASE_CREATE, { title: 'Boat sale', objective: 'Sell the boat' })).ok, true);
+  });
+
+  it('R-H4-1: it comes before Q29, and detaching is never refused', async () => {
+    const { attach, row, history, lot, shed } = await setup();
+    assert.strictEqual((await attach(lot.id)).ok, true);
+    // Stored while the chat had its case, say by an older build.
+    row('toolResult', 'ReadHistory', { result: { ok: true, chatId: 'chat-lot', text: 'the gate code is 4417' } });
+    row('toolResult', 'list_cases', { result: { ok: true, result: [{ id: shed.id }] } });
+    assert.strictEqual((await attach(lot.id)).ok, true);
+    assert.strictEqual((await attach(null)).chat.caseId, null);
+    refusedRecalled(await attach(lot.id));
+    assert.ok(!history.getChat('chat-1').caseId);
+  });
+
+  it('R-H4-7: an imported chat is refused IMPORTED_CHAT by case:attach and case:create', async () => {
+    const { attach, call, history, lot, runtime } = await setup();
+    history.createChat({ id: 'chat-imp', title: 'Imported session', source: 'claude-code-jsonl', messages: [] });
+    history.createChat({ id: 'chat-exp', title: 'Exported case chat', source: 'king-louie-json', importedFromCase: true, messages: [] });
+    history.createChat({ id: 'chat-mark', title: 'Marked only', importedFromCase: true, messages: [] });
+    for (const chatId of ['chat-imp', 'chat-exp', 'chat-mark']) {
+      const res = await attach(lot.id, chatId);
+      assert.deepStrictEqual([res.ok, res.code, res.error], [false, 'IMPORTED_CHAT', IMPORTED_CHAT_MESSAGE], chatId);
+      for (const extra of [{}, { force: true }]) {
+        const made = await call(IPC.CASE_CREATE, { title: 'Boat sale', objective: 'Sell the boat', chatId, ...extra });
+        assert.deepStrictEqual([made.ok, made.code, made.error], [false, 'IMPORTED_CHAT', IMPORTED_CHAT_MESSAGE], chatId);
+      }
+      assert.ok(!history.getChat(chatId).caseId);
+      assert.strictEqual((await attach(null, chatId)).ok, true);
+    }
+    assert.strictEqual(runtime.listCases().length, 2);
+    assert.throws(() => assertChatAttachable({ id: 'x', source: 'markdown-transcript', messages: [] }, lot.id), ImportedChatError);
+    assert.throws(() => assertChatAttachable({ id: 'x', messages: [{ seq: 3, sender: 'assistant', context: { recalledChats: ['y'] } }] }, null), ChatRecalledOtherChatsError);
+  });
+
+  it('a chat that turns unattachable while its case is being created keeps the case, unattached', async () => {
+    const { call, history, runtime } = await setup();
+    const realCreate = runtime.createCase.bind(runtime);
+    runtime.createCase = async (...args) => {
+      const info = await realCreate(...args);
+      reply(history, { scope: 'all', recalledChats: ['chat-lot'] });
+      return info;
+    };
+    const res = await call(IPC.CASE_CREATE, { title: 'Boat sale', objective: 'Sell the boat', chatId: 'chat-1' });
+    assert.deepStrictEqual([res.ok, res.code], [false, 'CHAT_RECALLED_OTHER_CHATS']);
+    assert.strictEqual(res.error, `The case was created, but this chat was not attached to it. ${RECALLED_OTHER_CHATS_MESSAGE}`);
+    assert.ok(res.case && res.case.id);
+    assert.ok(!history.getChat('chat-1').caseId);
+  });
+});

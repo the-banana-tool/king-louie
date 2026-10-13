@@ -30,11 +30,26 @@
 //
 // A refusal with nothing in it (`ok: false` or `success: false`, no `data`)
 // carries no case data and never blocks.
+//
+// History stage H4 (owner rulings R-H4-1, R-H4-7, 2026-10-13) adds two
+// refusals, checked before Q29:
+//
+// - An imported chat (`source` set, or the case-export mark) is never given
+//   a case: its `user` rows are a file's, not the owner's verified messages.
+// - A chat that has ever recalled from another chat is never given a case
+//   (`recalledOtherChats`): what it read would reach the case's turns
+//   through the tail and recall. It reads what the send path stores: a
+//   reply's recall provenance (`context.recalledChats`) and the results of
+//   SearchHistory and ReadHistory. A result that is not the tool's own shape
+//   blocks. It cannot see text the owner pasted in, or rows a truncation
+//   removed.
 const { CASE_MCP_TOOLS } = require('./mcp-tool-definitions');
 
 const SAW_OTHER_CASES_MESSAGE = 'This chat has looked at other cases, so it cannot be attached to a case. Start a new chat for the case.';
 const UNVERIFIABLE_MESSAGE = 'This chat holds the reply of another agent run that could read other cases, so it cannot be attached to a case. Start a new chat for the case.';
 const CHAT_BUSY_MESSAGE = 'A reply is still running in this chat. Attach the case when it has finished.';
+const RECALLED_OTHER_CHATS_MESSAGE = 'This chat has read other chats, so it cannot be attached to a case. Start a new chat for the case.';
+const IMPORTED_CHAT_MESSAGE = 'An imported chat cannot be attached to a case; its messages are not verified as the owner\'s.';
 
 // A new case tool carries case data until it is listed here.
 const NO_CASE_DATA = Object.freeze(['get_presence', 'set_away']);
@@ -82,6 +97,57 @@ class ChatBusyError extends Error {
     this.name = 'ChatBusyError';
     this.code = 'CHAT_BUSY';
   }
+}
+
+class ChatRecalledOtherChatsError extends Error {
+  constructor(at = null) {
+    super(RECALLED_OTHER_CHATS_MESSAGE);
+    this.name = 'ChatRecalledOtherChatsError';
+    this.code = 'CHAT_RECALLED_OTHER_CHATS';
+    this.at = at;
+  }
+}
+
+class ImportedChatError extends Error {
+  constructor() {
+    super(IMPORTED_CHAT_MESSAGE);
+    this.name = 'ImportedChatError';
+    this.code = 'IMPORTED_CHAT';
+  }
+}
+
+// Whether a stored history-tool result shows another chat's text, by the
+// tools' own result shapes (src/tools/builtin/history-tools.js). Anything
+// that is not that shape counts as another chat's.
+const HISTORY_RESULT_FROM_OTHER_CHAT = Object.freeze({
+  // { ok: true, excerpts: [{ seq, header, text, chatId?, chatTitle? }] }:
+  // an excerpt names its chat only when it is not this one.
+  SearchHistory: (r, chatId) => !(isObj(r) && r.ok === true && Array.isArray(r.excerpts)
+    && r.excerpts.every((e) => isObj(e) && (e.chatId === undefined || e.chatId === chatId) && e.chatTitle === undefined)),
+  // { ok: true, chatId, ... }: the chat that was read.
+  ReadHistory: (r, chatId) => !(isObj(r) && r.ok === true && isId(r.chatId) && r.chatId === chatId)
+});
+
+// The first row that shows the chat `chatId` has read another chat
+// ({ seq, toolName }), or null: a reply whose recall provenance names other
+// chats, or a SearchHistory / ReadHistory result from one. A bare failure
+// never blocks.
+function recalledOtherChats(messages, chatId) {
+  const at = (m, toolName = null) => ({ seq: (m && m.seq) ?? null, toolName });
+  if (!Array.isArray(messages)) return at(null);
+  const own = isId(chatId) ? chatId : null;
+  for (const m of messages) {
+    if (!isObj(m)) continue;
+    if (m.sender === 'assistant') {
+      const named = isObj(m.context) ? m.context.recalledChats : undefined;
+      if (named === undefined || named === null || (Array.isArray(named) && named.length === 0)) continue;
+      return at(m);
+    }
+    if (m.sender !== 'toolResult' || !Object.hasOwn(HISTORY_RESULT_FROM_OTHER_CHAT, m.toolName)) continue;
+    if (isBareFailure(m.result)) continue;
+    if (HISTORY_RESULT_FROM_OTHER_CHAT[m.toolName](m.result, own)) return at(m, m.toolName);
+  }
+  return null;
 }
 
 // The first row that keeps a chat with these messages from being attached to
@@ -136,14 +202,22 @@ function attachBlock(messages, caseId = null) {
   return null;
 }
 
-// Throws ChatAttachRefusedError when `chat` (with its messages) may not be
-// attached to case `caseId` (null: a case about to be created).
+// Throws when `chat` (with its messages) may not be attached to case
+// `caseId` (null: a case about to be created): ImportedChatError,
+// ChatRecalledOtherChatsError, then Q29's ChatAttachRefusedError. No `force`
+// lifts any of them.
 function assertChatAttachable(chat, caseId = null) {
+  if (chat && (chat.source || chat.importedFromCase === true)) throw new ImportedChatError();
+  // No message list to read is Q29's refusal, below.
+  const read = chat && Array.isArray(chat.messages) ? recalledOtherChats(chat.messages, chat.id) : null;
+  if (read) throw new ChatRecalledOtherChatsError(read);
   const found = attachBlock(chat ? chat.messages : null, caseId);
   if (found) throw new ChatAttachRefusedError(found.reason, { toolName: found.toolName, seq: found.seq });
 }
 
 module.exports = {
   attachBlock, assertChatAttachable, ChatAttachRefusedError, ChatBusyError,
-  CASE_DATA_TOOLS, NO_CASE_DATA, SAW_OTHER_CASES_MESSAGE, UNVERIFIABLE_MESSAGE, CHAT_BUSY_MESSAGE
+  recalledOtherChats, ChatRecalledOtherChatsError, ImportedChatError,
+  CASE_DATA_TOOLS, NO_CASE_DATA, SAW_OTHER_CASES_MESSAGE, UNVERIFIABLE_MESSAGE, CHAT_BUSY_MESSAGE,
+  RECALLED_OTHER_CHATS_MESSAGE, IMPORTED_CHAT_MESSAGE
 };
