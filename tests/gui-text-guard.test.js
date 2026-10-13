@@ -78,11 +78,11 @@ describe('TypedBuffer', () => {
     assert.equal(refused, 'text_looks_secret');
   });
 
-  it('keeps the last 2000 code points and resets', () => {
+  it('keeps the last 4096 code points and resets', () => {
     const buf = new TypedBuffer();
-    buf.append('a'.repeat(1990));
+    buf.append('a'.repeat(4086));
     buf.append('😀'.repeat(20));
-    assert.equal(Array.from(buf.value).length, 2000);
+    assert.equal(Array.from(buf.value).length, 4096);
     assert.ok(buf.value.endsWith('😀'));
     buf.reset();
     assert.equal(buf.value, '');
@@ -176,15 +176,115 @@ describe('TypedBuffer', () => {
     assert.equal(check('rse-battery', buf).code, 'text_looks_secret');
   });
 
-  it('keeps 2000 code points across its pieces, dropping the oldest', () => {
+  it('keeps 4096 code points across its pieces, dropping the oldest', () => {
     const buf = new TypedBuffer();
-    buf.append('a'.repeat(1500));
+    buf.append('a'.repeat(3500));
     buf.navigate();
     buf.append('b'.repeat(1000));
-    assert.equal(Array.from(buf.segments.join('') + buf.value).length, 2000);
+    assert.equal(Array.from(buf.segments.join('') + buf.value).length, 4096);
     assert.equal(buf.value, 'b'.repeat(1000));
     buf.reset();
     assert.deepEqual([buf.value, buf.segments, buf.navigated], ['', [], false]);
+  });
+
+  it('keeps the last 64 pieces, dropping the oldest', () => {
+    const { RUNS_MAX } = require('../src/gui/text-guard');
+    assert.equal(RUNS_MAX, 64);
+    const buf = new TypedBuffer();
+    for (let i = 0; i < 70; i += 1) { buf.append(`p${i}`); buf.navigate(); }
+    assert.equal(buf.segments.length, 64);
+    assert.equal(buf.segments[0], 'p6');
+    assert.equal(buf.segments.at(-1), 'p69');
+    // An empty navigation adds no piece.
+    buf.navigate();
+    assert.equal(buf.segments.length, 64);
+  });
+
+  // Second security review, finding 8. The guard followed at most four runs
+  // of typed pieces, so a value typed as five pieces with a key between them
+  // that moves nothing went through. Pieces typed one after another are now
+  // followed whatever their number: a value that the typed pieces spell in
+  // the order they were typed is refused.
+  describe('second review finding 8: a value spelled by any number of pieces, in the order they were typed', () => {
+    // Types the pieces with a key the guard cannot follow after each; the index of the first refusal, or null.
+    function typeAll(buf, pieces, { vault = VAULT, alwaysConfirm = [] } = {}) {
+      for (let i = 0; i < pieces.length; i += 1) {
+        const r = checkTypeText(pieces[i], { vaultValues: vault, alwaysConfirm, buffer: buf.value, segments: buf.segments });
+        if (!r.ok) return { at: i, code: r.code };
+        buf.append(pieces[i]);
+        buf.navigate();
+      }
+      return null;
+    }
+
+    it('five pieces with a no-op key between them (four passed before; five went through)', () => {
+      assert.deepEqual(typeAll(new TypedBuffer(), ['corr', 'ect-', 'hors', 'e-ba', 'ttery']), { at: 4, code: 'text_looks_secret' });
+      assert.deepEqual(typeAll(new TypedBuffer(), ['co', 'rr', 'ec', 't-', 'ho', 'rs', 'e-', 'ba', 'tt', 'ery']), { at: 9, code: 'text_looks_secret' });
+    });
+
+    it('one key at a time, a no-op key after each: refused at the press that completes it', () => {
+      const value = VAULT[0];
+      assert.deepEqual(typeAll(new TypedBuffer(), Array.from(value)), { at: value.length - 1, code: 'text_looks_secret' });
+    });
+
+    it('other text typed in between (a decoy in another field) does not hide it', () => {
+      const pieces = ['correct-', 'Lakeside lot', 'hor', 'see you at ten', 'se-', 'bat', 'x', 'tery'];
+      assert.deepEqual(typeAll(new TypedBuffer(), pieces), { at: 7, code: 'text_looks_secret' });
+    });
+
+    it('the value may begin inside the first piece and end inside the text being typed', () => {
+      const buf = new TypedBuffer();
+      assert.equal(typeAll(buf, ['my code is corr', 'ect-', 'hors', 'e-ba']), null);
+      assert.equal(check('ttery, as agreed', buf).code, 'text_looks_secret');
+      // And the text being typed may continue what is at the caret already.
+      const b2 = new TypedBuffer();
+      assert.equal(typeAll(b2, ['corr', 'ect-', 'hors', 'e-ba']), null);
+      b2.append('tt');
+      assert.equal(check('ery', b2).code, 'text_looks_secret');
+      assert.equal(check('e', b2).ok, true, 'not yet complete');
+    });
+
+    it('an always_confirm command and a secret pattern in three or more pieces, in order', () => {
+      assert.deepEqual(typeAll(new TypedBuffer(), ['gi', 't pu', 'sh or', 'igin'], { vault: [], alwaysConfirm: ['Bash(git push*)'] }), { at: 2, code: 'text_matches_always_confirm' });
+      assert.deepEqual(typeAll(new TypedBuffer(), ['gh', 'p_ab', 'cdef', 'ghij', 'klmn'], { vault: [] }), { at: 3, code: 'text_looks_secret' });
+    });
+
+    it('ordinary typing in many fields is not refused, and the entropy rule is not applied across pieces', () => {
+      const cells = ['Q3Revenue', '12,400.50', 'Total:', 'Zx8', 'North-East', '2026-10-13', 'correct', 'horse', 'battery', 'ok?', 'Lakeside lot', '+15550100'];
+      assert.equal(typeAll(new TypedBuffer(), cells), null);
+      // A refusal is not sticky: the next ordinary text goes through.
+      const buf = new TypedBuffer();
+      assert.equal(typeAll(buf, ['corr', 'ect-', 'hors', 'e-ba']), null);
+      assert.equal(check('ttery', buf).code, 'text_looks_secret');
+      assert.equal(check('Dear Sam,', buf).ok, true);
+    });
+
+    it('what it still does not follow, pinned so the residuals in the header stay true', () => {
+      // More than four pieces typed out of order.
+      assert.equal(typeAll(new TypedBuffer(), ['ttery', 'e-ba', 'hors', 'ect-', 'corr']), null);
+      // More than four pieces, one of them with text around it that was not typed away with backspace.
+      assert.equal(typeAll(new TypedBuffer(), ['corr', 'ect-', 'horsX', 'e-ba', 'ttery']), null);
+      // A first piece that has left the 64-piece window.
+      const far = ['corr', ...Array.from({ length: 64 }, (_, i) => `cell ${i}`), 'ect-', 'hors', 'e-ba', 'ttery'];
+      assert.equal(typeAll(new TypedBuffer(), far), null);
+    });
+
+    it('a low-entropy vault value can refuse ordinary typing: eight cells of "a" spell "aaaaaaaa" (documented)', () => {
+      assert.deepEqual(typeAll(new TypedBuffer(), Array.from({ length: 8 }, () => 'a'), { vault: ['aaaaaaaa'] }), { at: 7, code: 'text_looks_secret' });
+    });
+
+    // A full history (64 pieces, some 4000 code points) against fifty vault
+    // values costs a few milliseconds a check here; the bound only catches
+    // a check that has become quadratic in the history.
+    it('a full history and fifty vault values: a check stays cheap', () => {
+      const buf = new TypedBuffer();
+      for (let i = 0; i < 64; i += 1) { buf.append(`cell ${i} ${'ab'.repeat(27)}`); buf.navigate(); }
+      assert.equal(buf.segments.length, 64);
+      const values = Array.from({ length: 50 }, (_, i) => `Zx8qL2vN7wK4tR9mB1pC6-${i}-correct-horse-b`);
+      const start = process.hrtime.bigint();
+      for (let i = 0; i < 10; i += 1) assert.equal(checkTypeText('ab'.repeat(40), { vaultValues: values, buffer: buf.value, segments: buf.segments }).ok, true);
+      assert.ok(Number(process.hrtime.bigint() - start) / 1e6 < 10000, 'ten checks');
+    });
   });
 
   it('looksSecret is exported for the Key path', () => {

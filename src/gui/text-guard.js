@@ -12,24 +12,51 @@
 //     follow (arrows, home, end, page keys, tab, delete, insert, escape,
 //     function keys, every ctrl/alt/meta chord, a click, a drag) the text so
 //     far is kept as a piece whose place in the field is unknown, and a new
-//     piece starts. Text typed after that is checked as if it could land at
-//     either end of, or inside, any earlier piece: a vault value that at
-//     most JOIN_PIECES runs of the typed pieces can spell, one of them from
-//     the new text, is refused, and so is an always_confirm command or a
-//     secret pattern that the new piece completes at either end of an
-//     earlier one.
-// Residuals, known and not closed: a value assembled from more than
-// JOIN_PIECES pieces; text the app itself adds, moves or completes
-// (autocomplete, find and replace, macros, an input method, drag and drop of
-// a selection); text that was in the field before the lease; patterns and
-// always_confirm commands split into three or more pieces, or completed by a
-// piece dropped into the middle of another. The pieces are kept through a
+//     piece starts. Text typed after that is checked two ways:
+//       1. in any arrangement, a few pieces: a vault value that at most
+//          JOIN_PIECES runs of the typed pieces can spell (a run is any
+//          part of any piece; one run from the new text) is refused, and so
+//          is an always_confirm command or a secret pattern that the new
+//          piece completes at either end of an earlier one;
+//       2. in the order typed, any number of pieces (second security
+//          review, finding 8: five pieces with a key between them that
+//          moves nothing used to go through): a vault value is refused when
+//          earlier pieces, taken in the order they were typed, spell it up
+//          to the text being typed (the first may give only its end, the
+//          text being typed only its start, the ones between are whole;
+//          pieces typed in between elsewhere may be skipped), and so is an
+//          always_confirm command or a secret pattern (the fixed prefixes,
+//          not the entropy rule) in the pieces joined in that order.
+//     The buffer keeps the last RUNS_MAX pieces and BUFFER_MAX code points.
+// Residuals, known and not closed:
+//   - a value in more than JOIN_PIECES pieces typed out of order, or with
+//     text around a middle piece that was not typed away with backspace, or
+//     with its first piece older than the window;
+//   - text the app itself adds, moves or completes (autocomplete, find and
+//     replace, macros, an input method, drag and drop of a selection), and
+//     a paste chosen from a menu with a click: the clipboard chords are
+//     denied, a click on "Paste" cannot be, and what it pastes is never
+//     seen here;
+//   - text that was in the field before the lease;
+//   - the keyboard layout: a key press is taken for the character it types
+//     on a US layout (SHIFTED in keys.js). On another layout a value spelled
+//     with shifted digit or punctuation keys is another string to this
+//     guard than on the screen. Text sent with Type is exact on any layout;
+//   - a pattern or command completed by a piece dropped into the middle of
+//     another.
+// False positives, known: rule 2 refuses ordinary typing that happens to
+// spell a vault value piece by piece, which a short or repetitive value
+// invites (eight cells holding "a" spell "aaaaaaaa"); and after a fixed
+// token prefix was typed (ghp_, sk-), text that follows it in the pieces is
+// refused until the prefix leaves the window. The pieces are kept through a
 // suspension and its resume (second security review, finding 7: a pause
 // does not empty the field); a new lease starts with none.
 const { patternMatch, SHELL_SEPARATORS } = require('../execution/tool-patterns');
 
 const MAX_TEXT = 2000;
-const BUFFER_MAX = 2000;
+// What a lease's typed history holds: code points, and pieces.
+const BUFFER_MAX = 4096;
+const RUNS_MAX = 64;
 // How many runs of typed pieces may spell a vault value before the guard
 // stops following (see the residuals above).
 const JOIN_PIECES = 4;
@@ -177,8 +204,64 @@ function canJoin(value, pieces, combined, newFrom) {
   return false;
 }
 
+// KMP prefix table of `value`.
+function prefixTable(value) {
+  const pi = new Int32Array(value.length);
+  for (let i = 1, k = 0; i < value.length; i += 1) {
+    while (k > 0 && value[i] !== value[k]) k = pi[k - 1];
+    if (value[i] === value[k]) k += 1;
+    pi[i] = k;
+  }
+  return pi;
+}
+
+// Every length L ≥ 1 for which the last L characters of `piece` are the
+// first L of `value`.
+function suffixPrefixLengths(piece, value, pi) {
+  let k = 0;
+  for (let i = 0; i < piece.length; i += 1) {
+    if (k === value.length) k = pi[k - 1];
+    while (k > 0 && piece[i] !== value[k]) k = pi[k - 1];
+    if (piece[i] === value[k]) k += 1;
+  }
+  const out = [];
+  while (k > 0) { out.push(k); k = pi[k - 1]; }
+  return out;
+}
+
+// Do the typed pieces, in the order they were typed, spell `value` up to
+// the text being typed (finding 8)? A chain: the end of one earlier piece,
+// then whole later pieces, then the start of `combined` with at least one
+// new character (those from `newFrom` on). Pieces between two links of the
+// chain may be skipped; a link is never part of a middle piece. Any number
+// of links.
+function canChain(value, pieces, combined, newFrom) {
+  const n = value.length;
+  if (n === 0 || pieces.length === 0) return false;
+  const pi = prefixTable(value);
+  // reached[p]: value[0, p) is spelled by a chain of the pieces seen so far.
+  const reached = new Uint8Array(n + 1);
+  let any = false;
+  for (const piece of pieces) {
+    const next = [];
+    if (any && piece.length < n) {
+      for (let at = value.indexOf(piece, 1); at !== -1; at = value.indexOf(piece, at + 1)) {
+        if (reached[at] && at + piece.length < n) next.push(at + piece.length);
+      }
+    }
+    for (const len of suffixPrefixLengths(piece, value, pi)) if (len < n) next.push(len);
+    for (const p of next) { reached[p] = 1; any = true; }
+  }
+  if (!any) return false;
+  for (let p = 1; p < n; p += 1) {
+    const rest = n - p;
+    if (reached[p] && rest > newFrom && rest <= combined.length && combined.startsWith(value.slice(p))) return true;
+  }
+  return false;
+}
+
 // `buffer`: what was typed where the caret is. `segments`: earlier pieces,
-// whose place in the field is unknown (TypedBuffer).
+// whose place in the field is unknown (TypedBuffer), oldest first.
 function checkTypeText(text, { alwaysConfirm = [], vaultValues = [], buffer = '', segments = [] } = {}) {
   if (isInvalidText(text)) return { ok: false, code: 'invalid_text' };
   const combined = `${buffer}${text}`;
@@ -190,19 +273,26 @@ function checkTypeText(text, { alwaysConfirm = [], vaultValues = [], buffer = ''
   const joined = pieces.flatMap((s) => [`${s}${combined}`, `${combined}${s}`]);
   if (matchesAlwaysConfirm(joined, alwaysConfirm)) return { ok: false, code: 'text_matches_always_confirm' };
   if (joined.some((j) => looksSecret(j, []))) return { ok: false, code: 'text_looks_secret' };
+  // The pieces in the order they were typed, any number of them (finding 8).
+  const inOrder = `${pieces.join('')}${combined}`;
+  if (matchesAlwaysConfirm([inOrder], alwaysConfirm)) return { ok: false, code: 'text_matches_always_confirm' };
+  if (SECRET_PATTERNS.some((re) => re.test(inOrder))) return { ok: false, code: 'text_looks_secret' };
   for (const value of vaultValues) {
     if (typeof value !== 'string' || value.length < 8 || value.length > 2 * BUFFER_MAX) continue;
+    if (canChain(value, pieces, combined, buffer.length)) return { ok: false, code: 'text_looks_secret' };
     if (canJoin(value, pieces, combined, buffer.length)) return { ok: false, code: 'text_looks_secret' };
   }
   return { ok: true };
 }
 
 // What a lease has typed: the text at the caret (`value`), and the earlier
-// pieces (`segments`) left behind when the caret went somewhere the guard
-// cannot follow. 2000 code points in all; the oldest go first.
+// pieces (`segments`, oldest first) left behind when the caret went
+// somewhere the guard cannot follow. BUFFER_MAX code points and RUNS_MAX
+// pieces in all; the oldest go first.
 class TypedBuffer {
-  constructor(max = BUFFER_MAX) {
+  constructor(max = BUFFER_MAX, maxRuns = RUNS_MAX) {
     this.max = max;
+    this.maxRuns = maxRuns;
     this.chars = [];
     this.parts = [];
     this.navigated = false;
@@ -242,6 +332,7 @@ class TypedBuffer {
   // follow: what was typed stays, as a piece of unknown place.
   navigate() {
     if (this.chars.length) this.parts.push(this.chars);
+    while (this.parts.length > this.maxRuns) this.parts.shift();
     this.chars = [];
     this.navigated = true;
   }
@@ -253,4 +344,4 @@ class TypedBuffer {
   }
 }
 
-module.exports = { checkTypeText, TypedBuffer, looksSecret, isInvalidText, MAX_TEXT, JOIN_PIECES };
+module.exports = { checkTypeText, TypedBuffer, looksSecret, isInvalidText, MAX_TEXT, JOIN_PIECES, BUFFER_MAX, RUNS_MAX };
