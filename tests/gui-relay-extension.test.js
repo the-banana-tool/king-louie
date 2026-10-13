@@ -128,13 +128,16 @@ describe('lease routes', () => {
     const mailbox = new Mailbox();
     registerLeaseRoutes({
       phoneApi: { registerRoute: (method, pattern, spec) => routes.set(`${method} ${pattern}`, spec) },
-      nodeHub: { rpc: async () => ({ state: 'active', after_seq: 999999 }) },
+      nodeHub: { rpc: async () => ({ state: 'active', status: L.buildLeaseStatus({ identity: node, leaseId: request().message.lease_id, seq: 4, state: 'active' }), after_seq: 999999 }) },
       mailbox, devices: { nodesForDevice: () => [{ node_id: NODE, state: 'active' }] }, log: { warn() {}, debug() {}, info() {} }
     });
     const phone = createFakePhone();
     const { message } = request();
     const out = await routes.get('POST /v1/leases/{lease_id}/watch').handler({}, { deviceId: phone.deviceId, params: { lease_id: message.lease_id }, query: {}, body: phone.leaseWatch(NODE, message.lease_id) });
     assert.equal(out.body.after_seq, 0);
+    // The status the node signed for its answer reaches the phone as the node sent it (R-F5-15).
+    assert.equal(out.body.state, 'active');
+    assert.match(open(out.body.status).message.contact_token, /^[A-Za-z0-9_-]{22}$/);
   });
 
   it('refuses a body signed for another device, another lease, the wrong type, or a node it cannot reach', async () => {

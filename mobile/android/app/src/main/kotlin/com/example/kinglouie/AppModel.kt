@@ -382,6 +382,8 @@ class AppModel(context: Context) {
         val frameDropped: Boolean = false, val actions: List<LeaseAction> = emptyList(), val lastSeq: Int = 0,
         /** The newest node seq (statuses and views share it) already applied to this lease (R-F5-16); lastSeq is the relay's mailbox position. */
         val appliedSeq: Int = 0,
+        /** The contact token of the newest status or view applied (R-F5-15): the next watch echoes it. */
+        val contactToken: String? = null,
         /** A Stop or a Refresh is being signed or sent. */
         val busy: Boolean = false,
         /** The last Stop or Refresh got no answer; shown until the next tap. */
@@ -509,7 +511,14 @@ class AppModel(context: Context) {
                     is SendOutcome.Confirmed -> {
                         decidedLeaseRequests.add(id)
                         leaseRequests.removeAll { it.request.requestId == id }
-                        if (grant && outcome.state == "active") openLiveLease(item.request.nodeId, item.request.leaseId, outcome.state)
+                        if (grant && outcome.state == "active") {
+                            openLiveLease(item.request.nodeId, item.request.leaseId, outcome.state)
+                            // The node's answer carries the status it signed for it, and with that the
+                            // first contact token: the first Refresh can echo it (R-F5-15).
+                            val opened = liveLease
+                            val pin = storage.nodes.firstOrNull { it.id == item.request.nodeId }
+                            if (opened != null && pin != null && opened.leaseId == item.request.leaseId) liveLease = applyReplyStatus(sent.json, pin, opened, k.deviceId)
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -549,7 +558,7 @@ class AppModel(context: Context) {
                 // What the screen knows from signed messages; a watch's reply may only lengthen the wait below.
                 var waitForFrame = next.state == "active"
                 if (next.state != "ended") {
-                    val watch = Leases.watch(next.nodeId, next.leaseId, k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
+                    val watch = Leases.watch(next.nodeId, next.leaseId, k.deviceId, next.contactToken, Messages.randomNonce(), Timestamps.string(api.now()))
                     val sent = sendLease(api, "watch", next.leaseId, signEnvelope(k, watch, "Watch computer use", promptText(next.nodeName, 30)))
                     when (val outcome = sent.outcome) {
                         is SendOutcome.Unconfirmed -> {
@@ -568,6 +577,8 @@ class AppModel(context: Context) {
                             waitForFrame = outcome.state == "active"
                             // Views from where the relay's mailbox stood before the node heard this watch.
                             cursor = Leases.cursorAfterWatch(next.lastSeq, sent.json)
+                            // The status the node signed for this watch (R-F5-15): the token the next Refresh echoes.
+                            next = applyReplyStatus(sent.json, pin, next, k.deviceId)
                         }
                     }
                 }
@@ -610,7 +621,10 @@ class AppModel(context: Context) {
         val status = Leases.verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it) }
         if (status != null) {
             if (status.leaseId != live.leaseId || !Leases.acceptsStatus(status, live.appliedSeq)) return live
-            return live.copy(appliedSeq = status.seq, state = status.state, locked = status.locked, reason = status.reason, expiresAtMs = status.expiresAt?.let { Timestamps.epochMillis(it) })
+            return live.copy(
+                appliedSeq = status.seq, state = status.state, locked = status.locked, reason = status.reason,
+                expiresAtMs = status.expiresAt?.let { Timestamps.epochMillis(it) }, contactToken = status.contactToken ?: live.contactToken
+            )
         }
         val check = Leases.verifyView(envelope, pin)
         val view = check.view?.takeIf { check.accepted && it.leaseId == live.leaseId } ?: return live
@@ -619,8 +633,19 @@ class AppModel(context: Context) {
         return live.copy(
             appliedSeq = view.seq, state = view.state, locked = view.locked, expiresAtMs = now + view.remainingS * 1000L,
             frameDropped = view.frameDropped, frame = view.frame ?: live.frame, frameAtMs = if (view.frame != null) now else live.frameAtMs,
-            actions = Leases.mergedActions(live.actions, view.actions)
+            actions = Leases.mergedActions(live.actions, view.actions), contactToken = view.contactToken ?: live.contactToken
         )
+    }
+
+    /**
+     * The status a node's answer may carry: the node signed it for that very
+     * answer (R-F5-15). It goes through applyLease like any other, so it
+     * counts only when the pinned node signed it, about this lease, with a
+     * newer seq. Everything else in an answer is the relay's word.
+     */
+    private fun applyReplyStatus(reply: JsonElement?, pin: NodePin, live: LiveLease, deviceId: String): LiveLease {
+        val signed = reply["status"]?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() } ?: return live
+        return applyLease(signed, pin, live, deviceId)
     }
 
     /** Forgets the lease on this screen (the node's lease is not touched). */
@@ -657,6 +682,11 @@ class AppModel(context: Context) {
                 val message = Leases.revoke(live.nodeId, live.leaseId, "kill_switch", k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
                 val sent = sendLease(api, "revoke", live.leaseId, signEnvelope(k, message, "Stop computer use now", promptText(live.nodeName, 30)))
                 next = next.copy(unconfirmed = Leases.stopNotice(sent.outcome, sent.problem))
+                // The answer may carry the status the node signed for it. Only that, verified by
+                // applyLease, can show the lease as ended here; then there is nothing left to confirm.
+                val pin = storage.nodes.firstOrNull { it.id == live.nodeId }
+                if (pin != null) next = applyReplyStatus(sent.json, pin, next, k.deviceId)
+                if (next.state == "ended") next = next.copy(unconfirmed = null)
             } catch (e: Exception) {
                 // A prompt was cancelled or the key failed: the stop was not sent.
                 next = next.copy(unconfirmed = "The stop was not sent. Tap Stop now again.")

@@ -34,6 +34,9 @@ class LiveView {
   onWatch(envelope) {
     const r = this.leases.verifyWatch(envelope);
     if (!r.accepted) return { state: 'rejected', reason: r.reason };
+    // The reply carries the status the node just signed (its contact token
+    // is what the phone's next watch echoes); `state` beside it is in clear.
+    const reply = { state: r.lease.state, ...(r.lease.state === 'suspended' && r.lease.suspendReason ? { reason: r.lease.suspendReason } : {}), ...(r.status ? { status: r.status } : {}) };
     const list = this.actions.get(r.lease.leaseId) || [];
     const lastSeq = list.length ? list[list.length - 1].seq : 0;
     const existing = this.watchers.get(r.deviceId);
@@ -42,7 +45,7 @@ class LiveView {
       cursor: existing && existing.leaseId === r.lease.leaseId ? existing.cursor : Math.max(0, lastSeq - ACTIONS_KEPT),
       lastFrameAt: existing && existing.leaseId === r.lease.leaseId ? existing.lastFrameAt : -Infinity
     });
-    return { state: r.lease.state };
+    return reply;
   }
 
   recordAction(lease, { tool, summary, result }) {
@@ -74,7 +77,8 @@ class LiveView {
     const make = (frame, dropped) => L.buildLeaseView({
       identity: this.identity, leaseId: lease.leaseId, seq: this.leases.nextSeq(lease), toDevice: deviceId, state: lease.state,
       locked: lease.locked, remainingS: Math.floor(this.leases.remainingMs(lease) / 1000),
-      foreground: { app_id: captured.appId, matches: captured.appId !== null }, frame, frameDropped: dropped, actions: list, now: this.clock()
+      foreground: { app_id: captured.appId, matches: captured.appId !== null }, frame, frameDropped: dropped, actions: list,
+      contactToken: this.leases.mintContactToken(lease), now: this.clock()
     });
     let envelope = make(captured.frame, captured.dropped);
     // The payload is the JCS bytes, so its length is the view's size.

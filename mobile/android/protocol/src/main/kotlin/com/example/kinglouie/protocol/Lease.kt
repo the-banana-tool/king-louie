@@ -51,7 +51,11 @@ data class LeaseRequest(
     }
 }
 
-data class LeaseStatus(val leaseId: String, val nodeId: String, val seq: Int, val state: String, val locked: Boolean, val reason: String?, val expiresAt: String?) {
+data class LeaseStatus(
+    val leaseId: String, val nodeId: String, val seq: Int, val state: String, val locked: Boolean, val reason: String?, val expiresAt: String?,
+    /** The token this status carries for the phone's next watch to echo (owner ruling R-F5-15); null when the message holds none. */
+    val contactToken: String? = null
+) {
     companion object {
         const val TYPE = "kl.lease.status"
 
@@ -59,7 +63,8 @@ data class LeaseStatus(val leaseId: String, val nodeId: String, val seq: Int, va
             if (m["type"].str() != TYPE) return null
             return LeaseStatus(
                 m["lease_id"].str() ?: return null, m["node_id"].str() ?: return null, m["seq"].int() ?: return null,
-                m["state"].str() ?: return null, m["locked"].bool() ?: return null, m["reason"].str(), m["expires_at"].str()
+                m["state"].str() ?: return null, m["locked"].bool() ?: return null, m["reason"].str(), m["expires_at"].str(),
+                m["contact_token"].str()
             )
         }
     }
@@ -69,7 +74,9 @@ data class LeaseAction(val seq: Int, val at: String, val tool: String, val summa
 
 class LeaseView(
     val leaseId: String, val nodeId: String, val seq: Int, val toDevice: String, val state: String, val locked: Boolean, val remainingS: Int,
-    val foregroundAppId: String?, val foregroundMatches: Boolean, val frame: ByteArray?, val frameDropped: Boolean, val actions: List<LeaseAction>
+    val foregroundAppId: String?, val foregroundMatches: Boolean, val frame: ByteArray?, val frameDropped: Boolean, val actions: List<LeaseAction>,
+    /** The token this view carries for the phone's next watch to echo (R-F5-15). */
+    val contactToken: String? = null
 )
 
 data class ViewCheck(val accepted: Boolean, val reason: String?, val view: LeaseView?)
@@ -95,7 +102,8 @@ object Leases {
     /**
      * The reason a node gives when it suspended a lease because the phone
      * that granted it had not been in touch (owner ruling R-F5-15). The node
-     * resumes it on that phone's next watch; nothing is extended.
+     * resumes it on that phone's next watch that echoes a recent contact
+     * token; nothing is extended.
      */
     const val NO_CONTACT = "no_contact"
 
@@ -195,12 +203,22 @@ object Leases {
         )
     )
 
-    fun watch(nodeId: String, leaseId: String, deviceId: String, nonce: String, signedAt: String): JsonObject = JsonObject(
-        mapOf(
-            "v" to jsonNumber("1"), "type" to jsonString("kl.lease.watch"), "node_id" to jsonString(nodeId), "lease_id" to jsonString(leaseId),
-            "device_id" to jsonString(deviceId), "nonce" to jsonString(nonce), "signed_at" to jsonString(signedAt)
+    /**
+     * [contactToken]: the token of the newest status or view of this lease
+     * that this phone has applied, or null when it has applied none (the
+     * message then carries null). The node counts a watch as contact only
+     * when it echoes a token it issued recently (R-F5-15): that shows the
+     * watch was signed after the node sent that message.
+     */
+    fun watch(nodeId: String, leaseId: String, deviceId: String, contactToken: String?, nonce: String, signedAt: String): JsonObject {
+        val token: JsonElement = if (contactToken != null) jsonString(contactToken) else JsonNull
+        return JsonObject(
+            mapOf(
+                "v" to jsonNumber("1"), "type" to jsonString("kl.lease.watch"), "node_id" to jsonString(nodeId), "lease_id" to jsonString(leaseId),
+                "device_id" to jsonString(deviceId), "contact_token" to token, "nonce" to jsonString(nonce), "signed_at" to jsonString(signedAt)
+            )
         )
-    )
+    }
 
     /** A node-signed message whose signature, kid and node_id are all the pinned node's; null otherwise. */
     fun verifiedMessage(envelope: Envelope, pin: NodePin): JsonObject? {
@@ -252,7 +270,8 @@ object Leases {
             m["lease_id"].str() ?: return ViewCheck(false, "malformed", null), pin.id, m["seq"].int() ?: return ViewCheck(false, "malformed", null),
             m["to_device"].str() ?: return ViewCheck(false, "malformed", null),
             m["state"].str() ?: return ViewCheck(false, "malformed", null), m["locked"].bool() ?: false, m["remaining_s"].int() ?: 0,
-            m["foreground"]["app_id"].str(), m["foreground"]["matches"].bool() ?: false, frame, m["frame_dropped"].bool() ?: false, actions
+            m["foreground"]["app_id"].str(), m["foreground"]["matches"].bool() ?: false, frame, m["frame_dropped"].bool() ?: false, actions,
+            m["contact_token"].str()
         )
         return ViewCheck(true, null, view)
     }

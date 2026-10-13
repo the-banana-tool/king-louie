@@ -43,7 +43,11 @@ can see:
   device id (signed; the relay cannot forge or change them); and each change
   of a lease's state: waiting, active, paused, ended or screen locked, the
   reason as a short code (`revoked`, `expired`, `no_contact`,
-  `foreground_changed` and the like) and when it runs out;
+  `foreground_changed` and the like) and when it runs out. Each of those
+  state messages and each picture carries a random token, and each watch
+  your phone sends repeats the newest one it has seen: that is how the node
+  knows the watch was signed just now and not kept back by the relay. The
+  token says nothing else;
 - while a phone watches a lease, **pictures of the leased app's window with
   everything on it**, and the list of what the agent did there. The list
   never holds text the agent typed: a typed text appears as its length only

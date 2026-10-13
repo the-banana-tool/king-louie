@@ -23,6 +23,8 @@ const iso = (ms) => new Date(ms).toISOString();
 const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const sha = (text) => crypto.createHash('sha256').update(String(text)).digest();
 const nonceOf = (label) => sha(`lease nonce ${label}`).toString('base64url');
+// A contact token (16 bytes), fixed per label so the files are stable.
+const tokenOf = (label) => sha(`lease contact token ${label}`).subarray(0, 16).toString('base64url');
 const uuidOf = (label) => {
   const b = sha(`lease uuid ${label}`).subarray(0, 16);
   b[6] = (b[6] & 0x0f) | 0x40;
@@ -142,8 +144,20 @@ function revokeMessage(label, { leaseLabel = label, signedAt = iso(NOW_MS + 5000
   return { v: 1, type: 'kl.lease.revoke', node_id: GPU.nodeId, lease_id: uuidOf(`lease ${leaseLabel}`), reason: 'kill_switch', device_id: DEVICES[device].id, nonce: nonceOf(`revoke ${label}`), signed_at: signedAt };
 }
 
-function watchMessage(label) {
-  return { v: 1, type: 'kl.lease.watch', node_id: GPU.nodeId, lease_id: uuidOf(`lease ${label}`), device_id: DEVICES.A.id, nonce: nonceOf(`watch ${label}`), signed_at: iso(NOW_MS + 5000) };
+// contactToken: the newest token the phone has applied from a status or a
+// view of this lease, or null when it holds none.
+function watchMessage(label, { contactToken = tokenOf(`watch ${label}`) } = {}) {
+  return {
+    v: 1, type: 'kl.lease.watch', node_id: GPU.nodeId, lease_id: uuidOf(`lease ${label}`), device_id: DEVICES.A.id,
+    contact_token: contactToken, nonce: nonceOf(`watch ${label}`), signed_at: iso(NOW_MS + 5000)
+  };
+}
+
+function statusEnvelope(label, { seq = 3, state = 'active', reason = null } = {}) {
+  return L.buildLeaseStatus({
+    identity: GPU, leaseId: uuidOf(`lease ${label}`), seq, state, locked: false, reason, expiresAt: NOW_MS + 10 * 60000,
+    contactToken: tokenOf(`status ${label}`), now: NOW_MS
+  });
 }
 
 function viewEnvelope({ tamperHash = false } = {}) {
@@ -155,7 +169,7 @@ function viewEnvelope({ tamperHash = false } = {}) {
     frame: { mime: 'image/jpeg', width: 960, height: 640, sha256: tamperHash ? sha('other').toString('base64url') : hash, data },
     frameDropped: false,
     actions: [{ seq: 41, at: iso(NOW_MS), tool: 'Type', summary: 'Typed 6 characters', result: 'ok' }],
-    now: NOW_MS
+    contactToken: tokenOf('view'), now: NOW_MS
   });
 }
 
@@ -221,9 +235,30 @@ function buildVectors() {
     out.push({ name: 'revoke-replayed', consumers: ['node'], check: 8, given, input, expect: reject('replay') });
   }
   out.push({ name: 'watch-valid', consumers: PHONES, check: null, given: leaseGiven([uuidOf('lease watch-valid')]), input: phoneSeal('A', watchMessage('watch-valid')), expect: { ...accepted, message: watchMessage('watch-valid') } });
+  // A phone that holds no token yet (it has applied no status or view of the
+  // lease) sends null. The node accepts it as a watch; it is never contact.
+  {
+    const message = watchMessage('watch-no-token', { contactToken: null });
+    out.push({ name: 'watch-no-token', consumers: PHONES, check: null, given: leaseGiven([uuidOf('lease watch-no-token')]), input: phoneSeal('A', message), expect: { ...accepted, message } });
+  }
+  {
+    // A token is 16 bytes of base64url; anything else is not a watch.
+    const message = watchMessage('watch-bad-token', { contactToken: 'not-a-token' });
+    out.push({ name: 'watch-bad-token', consumers: ['node'], check: 1, given: leaseGiven([uuidOf('lease watch-bad-token')]), input: phoneSeal('A', message), expect: reject('malformed') });
+  }
 
   const viewGiven = { now: NOW, node: { id: GPU.nodeId, name: 'gpu-box', key: GPU.spkiHex } };
-  out.push({ name: 'view-node-sig-valid', consumers: PHONES, check: null, given: viewGiven, input: viewEnvelope(), expect: accepted });
+  // What a phone reads from a status and a view: among it the contact token
+  // its next watch echoes (R-F5-15).
+  out.push({
+    name: 'status-valid', consumers: PHONES, check: null, given: viewGiven, input: statusEnvelope('status-valid'),
+    expect: { ...accepted, status: { lease_id: uuidOf('lease status-valid'), seq: 3, state: 'active', reason: null, contact_token: tokenOf('status status-valid') } }
+  });
+  out.push({
+    name: 'status-no-contact', consumers: PHONES, check: null, given: viewGiven, input: statusEnvelope('status-no-contact', { seq: 9, state: 'suspended', reason: 'no_contact' }),
+    expect: { ...accepted, status: { lease_id: uuidOf('lease status-no-contact'), seq: 9, state: 'suspended', reason: 'no_contact', contact_token: tokenOf('status status-no-contact') } }
+  });
+  out.push({ name: 'view-node-sig-valid', consumers: PHONES, check: null, given: viewGiven, input: viewEnvelope(), expect: { ...accepted, contact_token: tokenOf('view') } });
   out.push({ name: 'view-tampered-frame', consumers: PHONES, check: null, given: viewGiven, input: viewEnvelope({ tamperHash: true }), expect: reject('frame_hash_mismatch') });
   return out;
 }

@@ -77,7 +77,10 @@ describe('live view', () => {
 
   it('a watch subscribes the device for 60 s; frames every interval_s; signed views', async () => {
     const lease = await activeLease();
-    assert.deepEqual(view.onWatch(phone.leaseWatch(identity.nodeId, lease.leaseId)), { state: 'active' });
+    const reply = view.onWatch(phone.leaseWatch(identity.nodeId, lease.leaseId));
+    assert.equal(reply.state, 'active');
+    // The reply carries the status the node signed for this watch, with the token the next watch echoes.
+    assert.match(open(reply.status).message.contact_token, /^[A-Za-z0-9_-]{22}$/);
     await at(0);
     assert.equal(relay.views().length, 1);
     await at(1000);
@@ -87,6 +90,12 @@ describe('live view', () => {
     const v = relay.views()[1];
     assert.equal(v.opts.to_device, phone.deviceId);
     assert.equal(verifyLeaseView(v.envelope, { nodeId: identity.nodeId, nodePublicKeyHex: identity.publicKey.toString('hex') }).accepted, true);
+    // Each view carries a contact token of its own, one the lease remembers issuing (R-F5-15).
+    const tokens = relay.views().map((s) => s.message.contact_token);
+    assert.equal(new Set(tokens).size, tokens.length);
+    for (const t of tokens) assert.ok(lease.tokens.has(t));
+    // A watch that echoes the newest one is contact.
+    assert.equal(leases.verifyWatch(phone.leaseWatch(identity.nodeId, lease.leaseId, { contactToken: tokens.at(-1) })).contact, true);
     for (let i = 0; i < 20; i += 1) await at(3000);
     const count = relay.views().length;
     await at(3000);

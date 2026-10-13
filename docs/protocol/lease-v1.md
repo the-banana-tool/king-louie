@@ -24,14 +24,17 @@ Node-signed (Ed25519, `kid` = `node_id`): `kl.lease.request`, `kl.lease.status`,
   "decision": "grant" | "deny", "grant": { "apps": ["calculator"], "minutes": 10 } | null,
   "expires_at" (the request's), "device_id", "signed_at" (informational) }
 { "v": 1, "type": "kl.lease.revoke", "node_id", "lease_id", "reason": "kill_switch" | "owner", "device_id", "nonce" (fresh), "signed_at" }
-{ "v": 1, "type": "kl.lease.watch", "node_id", "lease_id", "device_id", "nonce" (fresh), "signed_at" }
+{ "v": 1, "type": "kl.lease.watch", "node_id", "lease_id", "device_id",
+  "contact_token": "b64url(16)" | null (the newest one this phone has applied for the lease), "nonce" (fresh), "signed_at" }
 { "v": 1, "type": "kl.lease.status", "node_id", "lease_id", "seq", "at", "state": "pending|active|suspended|ended",
-  "locked": false, "reason": "…" | null, "expires_at": "…" | null }
+  "locked": false, "reason": "…" | null, "expires_at": "…" | null, "contact_token": "b64url(16)" }
 { "v": 1, "type": "kl.lease.view", "node_id", "lease_id", "seq", "at", "to_device", "state", "locked", "remaining_s",
   "foreground": { "app_id": "calculator" | null, "matches": true },
   "frame": { "mime": "image/jpeg", "width", "height", "sha256": "b64url(SHA-256(JPEG bytes))", "data": "base64" } | null,
   "frame_dropped": false,
-  "actions": [{ "seq", "at", "tool", "summary" (≤ 120), "result": "ok" | "refused:<code>" }] (≤ 50) }
+  "actions": [{ "seq", "at", "tool", "summary" (≤ 120), "result": "ok" | "refused:<code>" }] (≤ 50),
+  "contact_token": "b64url(16)" }
+  // contact_token (2026-10-13): 16 random bytes, new in every status and view; see "Contact" in §2.
   // summary never holds typed text (owner ruling R-F5-16, 2026-10-13): "Typed 42 characters",
   // "Key (a character)"; keys that are not text keep their names ("Key ctrl+s"); clicks, scrolls
   // and drags give their position in the screenshot.
@@ -70,16 +73,46 @@ missing scope).
 Contact (owner ruling R-F5-15, 2026-10-13). A lease's input goes on only
 while the node has verified a signed message from the device that granted
 it within the last `gui.lease.contact_s` seconds (120; 30 to 300) on the
-node's clock. Contact is the grant itself (a resume grant too) and every
-`kl.lease.watch` from that device whose nonce is new; a replayed watch and
-another enrolled device's watch are not. When the window lapses the node
-suspends the lease (status `suspended`, reason `no_contact`), releases what
-it held and refuses input with `lease_suspended_no_contact`; it sends no
-resume request. The granting device's next fresh watch resumes it (status
-`active`) and never moves `expires_at`; expiry and revoke end it as always.
-No message changed: `no_contact` is a value of the status's free `reason`.
+node's clock. When the window lapses the node suspends the lease (status
+`suspended`, reason `no_contact`), releases what it held and refuses input
+with `lease_suspended_no_contact`; it sends no resume request. The granting
+device's next watch that is contact resumes it (status `active`) and never
+moves `expires_at`; expiry and revoke end it as always. `no_contact` is a
+value of the status's free `reason`.
+
+What counts as contact (revised 2026-10-13, second security review, finding
+3; this changed `kl.lease.watch`, `kl.lease.status` and `kl.lease.view`).
+A watch says nothing the node can believe about when it was signed: the
+phones take their clock from the relay, and the relay carries every watch.
+A relay could keep watches back and feed them in later, one before each
+lapse, long after the owner stopped looking. So:
+
+- The node puts a fresh `contact_token` (16 random bytes) in every status
+  and view it signs, and remembers when it issued each (node clock).
+- A phone keeps the token of the newest status or view it has applied for
+  the lease (applied: node signature against the pin, a newer `seq`, and
+  for a view its own `to_device`) and puts it in each watch; `null` when it
+  holds none.
+- Contact is the grant itself (a resume grant too), and a watch from the
+  granting device whose `contact_token` the node issued for this lease less
+  than `contact_s` ago and that has not made contact before. Using a token
+  retires every older one. Such a watch was signed after the node issued
+  that token.
+- Any other accepted watch (another enrolled device's, a `null` or unknown
+  token, an old or used one) still asks for frames, which the node sends
+  only while the lease is active; it is never contact.
+- The node answers every accepted watch with a status signed then (sent to
+  the phones as always, and carried in the reply, below), so a phone always
+  holds a token young enough for its next watch, also while no frames flow.
+  The grant's reply carries the first one.
+
+What is left: a relay can hold one watch for up to the window before it
+delivers it, so input can go on for at most two windows after the phone's
+last signature (four minutes by default), never longer; and a grant counts
+from when the node verifies it, inside its request's five minutes.
 iOS watches every 20 s while its live view is open; Android sends one watch
-per Refresh tap, so its owner taps Refresh inside the window.
+per Refresh tap, so its owner taps Refresh inside the window, and after a
+pause the first tap is answered with a fresh token and the second resumes.
 
 Revoke and watch: checks 1–8 with their own type, then the `lease_id` must be
 known (`unknown_lease`). Neither message has a validity window of its own, so
@@ -111,9 +144,9 @@ a replayed revoke changes nothing and re-sends the status.
 |---|---|
 | node → relay | `link.send(envelope, { push: { kind: 'lease', id: request_id, expires_at } })` for requests; statuses plain; views with `{ to_device }`; mailbox prefix `kl.lease.`, 5 min, 256 KiB |
 | `GET /v1/leases?wait=0..25` | `[{ node_id, envelope, status }]`: pending requests for the device's nodes with the latest status of each lease |
-| `POST /v1/leases/{lease_id}/grant` · `/revoke` · `/watch` | body = the phone envelope → `202 { state, reason? }`, `503 node_offline`. The `202` for `/watch` also carries `after_seq`: the mailbox position read before the node heard the watch, so a phone that fetches on tap can ask for views from there with `wait` and get the frame this watch causes |
+| `POST /v1/leases/{lease_id}/grant` · `/revoke` · `/watch` | body = the phone envelope → `202 { state, reason?, status? }`, `503 node_offline`. `status` is the `kl.lease.status` envelope the node signed for this answer (absent when it refused the message): a phone verifies and applies it like any other status, and takes its `contact_token` from it; `state` and `reason` beside it are in clear and are never shown as the lease's state. The `202` for `/watch` also carries `after_seq`: the mailbox position read before the node heard the watch, so a phone that fetches on tap can ask for views from there with `wait` and get the frame this watch causes |
 | `GET /v1/leases/{lease_id}/views?after_seq&wait` | `[{ seq, envelope }]` of views to the caller and statuses, oldest first |
-| node methods | `lease.grant`, `lease.revoke`, `lease.watch`: `{ envelope }` → `{ state, reason? }` |
+| node methods | `lease.grant`, `lease.revoke`, `lease.watch`: `{ envelope }` → `{ state, reason?, status? }` |
 
 ## 5. Vectors
 
@@ -121,5 +154,8 @@ a replayed revoke changes nothing and re-sends the status.
 `{ name, consumers, check, given: { now, node, approvers, allow_test_keys, pending, used, gui_apps, jobs_open, gui_max_minutes }, input, expect: { accepted, reason } }`.
 Phone-built vectors also carry `given.request` and `expect.message` (the exact
 message the phone must build). Phones consume `grant-valid`, `grant-narrowed`,
-`deny-valid`, `resume-capped`, `revoke-valid`, `watch-valid`,
-`view-node-sig-valid`, `view-tampered-frame`.
+`deny-valid`, `resume-capped`, `revoke-valid`, `watch-valid`, `watch-no-token`
+(a watch with `contact_token: null`), `status-valid`, `status-no-contact`
+(`expect.status` holds the fields a phone reads, the contact token among
+them), `view-node-sig-valid` (`expect.contact_token`), `view-tampered-frame`.
+Thirty vectors in all.

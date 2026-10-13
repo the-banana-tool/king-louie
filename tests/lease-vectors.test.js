@@ -18,9 +18,11 @@ const EXPECTED = [
   'grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'grant-phone-clock-behind', 'bad-signature', 'revoked-device',
   'unknown-device', 'demo-device', 'test-key', 'wrong-node', 'replay', 'unknown-request', 'lease-hash-mismatch',
   'lease-changed-app-path', 'apps-not-requested', 'minutes-over-requested', 'minutes-over-60', 'expired', 'revoke-valid',
-  'revoke-phone-clock-off', 'revoke-unknown-lease', 'revoke-replayed', 'watch-valid', 'view-node-sig-valid', 'view-tampered-frame'
+  'revoke-phone-clock-off', 'revoke-unknown-lease', 'revoke-replayed', 'watch-valid', 'watch-no-token', 'watch-bad-token',
+  'status-valid', 'status-no-contact', 'view-node-sig-valid', 'view-tampered-frame'
 ];
-const PHONE = ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'view-node-sig-valid', 'view-tampered-frame'];
+const PHONE = ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'watch-no-token',
+  'status-valid', 'status-no-contact', 'view-node-sig-valid', 'view-tampered-frame'];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')));
 const byName = new Map(vectors.map((v) => [v.name, v]));
@@ -31,6 +33,7 @@ async function run(v) {
   const g = v.given;
   const now = Date.parse(g.now);
   if (v.name.startsWith('view-')) return L.verifyLeaseView(v.input, { nodeId: g.node.id, nodePublicKeyHex: g.node.key });
+  if (v.name.startsWith('status-')) return verifyStatus(v.input, g.node);
   const store = await approverStoreWith(g.approvers, { allowTestKeys: g.allow_test_keys, now: () => now });
   stores.push(store);
   const nonces = new NonceCache({ now: () => now });
@@ -44,9 +47,22 @@ async function run(v) {
   }, now);
 }
 
+// What a phone checks on a status: the pinned node's signature over the
+// received bytes, the node id, and the shape.
+function verifyStatus(envelope, node) {
+  const { open, verifyEd25519 } = require('../src/approvals/envelope');
+  const { validateMessage } = require('../src/approvals/messages');
+  if (envelope.alg !== 'Ed25519' || envelope.kid !== node.id) return { accepted: false, reason: 'malformed' };
+  if (!verifyEd25519(envelope, node.key)) return { accepted: false, reason: 'bad_signature' };
+  const { message } = open(envelope);
+  if (validateMessage('kl.lease.status', message)) return { accepted: false, reason: 'malformed' };
+  if (message.node_id !== node.id) return { accepted: false, reason: 'wrong_node' };
+  return { accepted: true, reason: null, message };
+}
+
 describe('lease-v1 vectors', () => {
   it('has exactly the expected set, and phones consume exactly theirs', () => {
-    assert.equal(EXPECTED.length, 26);
+    assert.equal(EXPECTED.length, 30);
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
     for (const phone of ['ios', 'android']) {
       assert.deepEqual(vectors.filter((v) => v.consumers.includes(phone)).map((v) => v.name).sort(), [...PHONE].sort());
@@ -70,6 +86,9 @@ describe('lease-v1 vectors', () => {
       assert.equal(r.accepted, v.expect.accepted, `${name}: ${r.reason}`);
       assert.equal(r.reason, v.expect.reason);
       if (v.check !== null && !name.startsWith('view-')) assert.equal(r.check, v.check);
+      // The fields a phone reads from a status or a view, the contact token among them.
+      if (v.expect.status) for (const [key, value] of Object.entries(v.expect.status)) assert.equal(r.message[key], value, `${name}: ${key}`);
+      if (v.expect.contact_token) assert.equal(r.message.contact_token, v.expect.contact_token);
     });
   }
 
@@ -80,7 +99,7 @@ describe('lease-v1 vectors', () => {
   });
 
   it('the phone-built messages are exactly the signed payloads', () => {
-    for (const name of ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid']) {
+    for (const name of ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'watch-no-token']) {
       const v = byName.get(name);
       const payload = JSON.parse(Buffer.from(v.input.payload, 'base64url').toString('utf8'));
       assert.deepEqual(payload, v.expect.message, name);

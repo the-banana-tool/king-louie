@@ -1,6 +1,7 @@
 package com.example.kinglouie.protocol
 
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertArrayEquals
@@ -35,7 +36,13 @@ class LeaseVectorTest {
     @Test
     fun everyAndroidVectorIsCovered() {
         val names = allVectors().filter { v -> v["consumers"].arr()!!.any { it.str() == "android" } }.map { it["name"].str() }.toSet()
-        assertEquals(setOf("grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "view-node-sig-valid", "view-tampered-frame"), names)
+        assertEquals(
+            setOf(
+                "grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "watch-no-token",
+                "status-valid", "status-no-contact", "view-node-sig-valid", "view-tampered-frame"
+            ),
+            names
+        )
     }
 
     @Test
@@ -56,7 +63,33 @@ class LeaseVectorTest {
     @Test
     fun revokeAndWatch() {
         assertBuilds("revoke-valid") { _, e -> Leases.revoke(s(e, "node_id"), s(e, "lease_id"), s(e, "reason"), s(e, "device_id"), s(e, "nonce"), s(e, "signed_at")) }
-        assertBuilds("watch-valid") { _, e -> Leases.watch(s(e, "node_id"), s(e, "lease_id"), s(e, "device_id"), s(e, "nonce"), s(e, "signed_at")) }
+        // With the token of the newest status or view applied, and with none (null in the message).
+        for (name in listOf("watch-valid", "watch-no-token")) {
+            assertBuilds(name) { _, e -> Leases.watch(s(e, "node_id"), s(e, "lease_id"), s(e, "device_id"), e["contact_token"].str(), s(e, "nonce"), s(e, "signed_at")) }
+        }
+        assertNotNull(vector("watch-valid")["expect"]["message"]["contact_token"].str())
+        assertEquals(JsonNull, vector("watch-no-token")["expect"]["message"]["contact_token"])
+    }
+
+    /** R-F5-15: a status the pinned node signed gives the token the next watch echoes. */
+    @Test
+    fun statuses() {
+        for (name in listOf("status-valid", "status-no-contact")) {
+            val v = vector(name)
+            val message = Leases.verifiedMessage(Envelope.fromJson(v["input"]!!), pin(v)) ?: error("$name verifies against the node pin")
+            val status = LeaseStatus.from(message) ?: error("$name parses")
+            val expect = v["expect"]["status"]
+            assertEquals(name, expect["lease_id"].str(), status.leaseId)
+            assertEquals(name, expect["seq"].int(), status.seq)
+            assertEquals(name, expect["state"].str(), status.state)
+            assertEquals(name, expect["reason"].str(), status.reason)
+            assertEquals(name, expect["contact_token"].str(), status.contactToken)
+            assertEquals(name, name == "status-no-contact", Leases.isPausedForContact(status.state, status.reason))
+        }
+        // Signed by another node's key: not a status of this pin.
+        val v = vector("status-valid")
+        val other = NodePin(pin(v).id, pin(v).name, pin(v).key.reversed())
+        assertNull(Leases.verifiedMessage(Envelope.fromJson(v["input"]!!), other))
     }
 
     @Test
@@ -71,6 +104,7 @@ class LeaseVectorTest {
         val view = Leases.verifyView(Envelope.fromJson(ok["input"]!!), pin(ok)).view
         assertEquals("Type", view?.actions?.first()?.tool)
         assertNotNull(view?.frame)
+        assertEquals(ok["expect"]["contact_token"].str(), view?.contactToken)
     }
 
     @Test

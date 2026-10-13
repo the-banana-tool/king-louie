@@ -84,6 +84,9 @@ public struct LeaseStatus: Equatable {
     public let locked: Bool
     public let reason: String?
     public let expiresAt: String?
+    /// The token this status carries for the phone's next watch to echo
+    /// (owner ruling R-F5-15); nil when the message holds none.
+    public let contactToken: String?
 
     public init?(message: JSONValue) {
         guard message["type"]?.stringValue == Self.messageType, let leaseId = message["lease_id"]?.stringValue,
@@ -96,6 +99,7 @@ public struct LeaseStatus: Equatable {
         self.locked = locked
         self.reason = message["reason"]?.stringValue
         self.expiresAt = message["expires_at"]?.stringValue
+        self.contactToken = message["contact_token"]?.stringValue
     }
 }
 
@@ -129,9 +133,20 @@ public struct LeaseView: Equatable {
     public let frame: Data?
     public let frameDropped: Bool
     public let actions: [LeaseAction]
+    /// The token this view carries for the phone's next watch to echo (R-F5-15).
+    public let contactToken: String?
 }
 
 public enum Leases {
+    /// The reason a node gives when it suspended a lease because the phone
+    /// that granted it had not been in touch (owner ruling R-F5-15). The
+    /// node resumes it on that phone's next watch that echoes a recent
+    /// contact token; nothing is extended.
+    public static let noContact = "no_contact"
+
+    /// Whether a signed state and reason say input is paused for want of contact.
+    public static func isPausedForContact(state: String, reason: String?) -> Bool { state == "suspended" && reason == noContact }
+
     /// Order and addressee (owner ruling R-F5-16). A node numbers the
     /// statuses and views of one lease with one rising `seq`. A relay can
     /// hold a message back and deliver it later, or hand one phone a view
@@ -187,10 +202,16 @@ public enum Leases {
         ])
     }
 
-    public static func watch(nodeId: String, leaseId: String, deviceId: String, nonce: String, signedAt: String) -> JSONValue {
-        .object([
+    /// `contactToken`: the token of the newest status or view of this lease
+    /// that this phone has applied, or nil when it has applied none (the
+    /// message then carries null). The node counts a watch as contact only
+    /// when it echoes a token it issued recently (R-F5-15): that shows the
+    /// watch was signed after the node sent that message.
+    public static func watch(nodeId: String, leaseId: String, deviceId: String, contactToken: String?, nonce: String, signedAt: String) -> JSONValue {
+        let token: JSONValue = contactToken.map { JSONValue.string($0) } ?? JSONValue.null
+        return .object([
             "v": .number("1"), "type": .string("kl.lease.watch"), "node_id": .string(nodeId), "lease_id": .string(leaseId),
-            "device_id": .string(deviceId), "nonce": .string(nonce), "signed_at": .string(signedAt)
+            "device_id": .string(deviceId), "contact_token": token, "nonce": .string(nonce), "signed_at": .string(signedAt)
         ])
     }
 
@@ -225,7 +246,8 @@ public enum Leases {
         let view = LeaseView(leaseId: leaseId, nodeId: pin.id, seq: seq, toDevice: toDevice, state: state, locked: m["locked"]?.boolValue ?? false,
                              remainingS: m["remaining_s"]?.intValue ?? 0, foregroundAppId: m["foreground"]?["app_id"]?.stringValue,
                              foregroundMatches: m["foreground"]?["matches"]?.boolValue ?? false, frame: frame,
-                             frameDropped: m["frame_dropped"]?.boolValue ?? false, actions: actions)
+                             frameDropped: m["frame_dropped"]?.boolValue ?? false, actions: actions,
+                             contactToken: m["contact_token"]?.stringValue)
         return (true, nil, view)
     }
 

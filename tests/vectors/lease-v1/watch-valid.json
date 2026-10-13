@@ -110,8 +110,8 @@
   "input": {
     "alg": "ES256",
     "kid": "d-3vmwrihhdbnit4oi",
-    "payload": "eyJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJsZWFzZV9pZCI6IjcxMzI5NDUxLTAxZTMtNGVlZS1hNmJlLWI4ZjBkODlkMDM2NiIsIm5vZGVfaWQiOiJrbC1obmVmMzI0NzJxemliaTVyIiwibm9uY2UiOiJiTWo2ZUdOb05ubkE3QS1fMlhBMjh5M1lvVjc3N0laUHNIcC1VOHZ0Wl9FIiwic2lnbmVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxNi4yMDFaIiwidHlwZSI6ImtsLmxlYXNlLndhdGNoIiwidiI6MX0",
-    "sig": "ooUn-fKUCoyKEebDHVW3_kmL-mHMP0b3W1hlGJN-TytppV3QLbYdvsSSuiGUHj3DEH7wjpK4xwpHpgsnzv7RkQ"
+    "payload": "eyJjb250YWN0X3Rva2VuIjoiTFgzaFFuWnNkWkNDSk00U0FvYTRpQSIsImRldmljZV9pZCI6ImQtM3Ztd3JpaGhkYm5pdDRvaSIsImxlYXNlX2lkIjoiNzEzMjk0NTEtMDFlMy00ZWVlLWE2YmUtYjhmMGQ4OWQwMzY2Iiwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJub25jZSI6ImJNajZlR05vTm5uQTdBLV8yWEEyOHkzWW9WNzc3SVpQc0hwLVU4dnRaX0UiLCJzaWduZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjE2LjIwMVoiLCJ0eXBlIjoia2wubGVhc2Uud2F0Y2giLCJ2IjoxfQ",
+    "sig": "sEB1i5dlpbeeUb3S1F5xyfKuTGBfs4rOauIpFaalaP-X3T6E19H2s-Rj-jOFUQpmW5rja6wr9wP6bBCs3HHYHg"
   },
   "expect": {
     "accepted": true,
@@ -122,6 +122,7 @@
       "node_id": "kl-hnef32472qzibi5r",
       "lease_id": "71329451-01e3-4eee-a6be-b8f0d89d0366",
       "device_id": "d-3vmwrihhdbnit4oi",
+      "contact_token": "LX3hQnZsdZCCJM4SAoa4iA",
       "nonce": "bMj6eGNoNnnA7A-_2XA28y3YoV777IZPsHp-U8vtZ_E",
       "signed_at": "2026-09-23T18:04:16.201Z"
     }

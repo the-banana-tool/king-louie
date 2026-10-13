@@ -14,6 +14,13 @@ const { isTimestamp, NONCE_RE, DEVICE_ID_RE, NODE_ID_RE, normalizeOrigin, iso, r
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HASH_RE = /^[A-Za-z0-9_-]{43}$/;
 const APP_ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
+// A contact token (R-F5-15, second security review finding 3): 16 random
+// bytes the node puts in every status and view it signs. A watch echoes the
+// newest one its phone has applied, which shows the watch was signed after
+// the node issued that token.
+const CONTACT_TOKEN_RE = /^[A-Za-z0-9_-]{22}$/;
+const CONTACT_TOKEN_BYTES = 16;
+const newContactToken = () => crypto.randomBytes(CONTACT_TOKEN_BYTES).toString('base64url');
 const LEASE_LIMITS = Object.freeze(['no_lock_detect', 'no_human_yield']);
 const STATES = Object.freeze(['pending', 'active', 'suspended', 'ended']);
 const REVOKE_REASONS = Object.freeze(['kill_switch', 'owner']);
@@ -88,13 +95,16 @@ const VALIDATORS = {
   'kl.lease.revoke': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'reason', 'device_id', 'nonce', 'signed_at'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && REVOKE_REASONS.includes(m.reason)
     && DEVICE_ID_RE.test(m.device_id) && NONCE_RE.test(m.nonce) && isTimestamp(m.signed_at),
-  'kl.lease.watch': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'device_id', 'nonce', 'signed_at'])
-    && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && DEVICE_ID_RE.test(m.device_id) && NONCE_RE.test(m.nonce) && isTimestamp(m.signed_at),
-  'kl.lease.status': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'state', 'locked', 'reason', 'expires_at'])
+  'kl.lease.watch': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'device_id', 'contact_token', 'nonce', 'signed_at'])
+    && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && DEVICE_ID_RE.test(m.device_id)
+    && nullOr((v) => isString(v) && CONTACT_TOKEN_RE.test(v))(m.contact_token) && NONCE_RE.test(m.nonce) && isTimestamp(m.signed_at),
+  'kl.lease.status': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'state', 'locked', 'reason', 'expires_at', 'contact_token'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && Number.isInteger(m.seq) && m.seq >= 1 && isTimestamp(m.at)
-    && STATES.includes(m.state) && typeof m.locked === 'boolean' && nullOr((v) => within(v, 64))(m.reason) && nullOr(isTimestamp)(m.expires_at),
-  'kl.lease.view': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'to_device', 'state', 'locked', 'remaining_s', 'foreground', 'frame', 'frame_dropped', 'actions'])
+    && STATES.includes(m.state) && typeof m.locked === 'boolean' && nullOr((v) => within(v, 64))(m.reason) && nullOr(isTimestamp)(m.expires_at)
+    && isString(m.contact_token) && CONTACT_TOKEN_RE.test(m.contact_token),
+  'kl.lease.view': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'to_device', 'state', 'locked', 'remaining_s', 'foreground', 'frame', 'frame_dropped', 'actions', 'contact_token'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && Number.isInteger(m.seq) && m.seq >= 1 && isTimestamp(m.at)
+    && isString(m.contact_token) && CONTACT_TOKEN_RE.test(m.contact_token)
     && DEVICE_ID_RE.test(m.to_device) && STATES.includes(m.state) && typeof m.locked === 'boolean'
     && Number.isInteger(m.remaining_s) && m.remaining_s >= 0
     && isPlainObject(m.foreground) && exactKeys(m.foreground, ['app_id', 'matches']) && nullOr((v) => APP_ID_RE.test(v))(m.foreground.app_id) && typeof m.foreground.matches === 'boolean'
@@ -140,18 +150,23 @@ function buildLeaseRequest({ identity, nodeName, jobId, apps, maxMinutes, reason
   return { message, envelope: seal(message, nodeSigner(identity)) };
 }
 
-function buildLeaseStatus({ identity, leaseId, seq, state, locked = false, reason = null, expiresAt = null, now = Date.now() }) {
+// contactToken: the caller's (the lease manager remembers when it issued
+// each one); a status or view built without one gets a token nobody knows,
+// which no watch can make contact with.
+function buildLeaseStatus({ identity, leaseId, seq, state, locked = false, reason = null, expiresAt = null, contactToken = null, now = Date.now() }) {
   return seal({
     v: 1, type: 'kl.lease.status', node_id: identity.nodeId, lease_id: leaseId, seq, at: iso(now), state, locked,
     reason: reason === null || reason === undefined ? null : String(reason).slice(0, 64),
-    expires_at: expiresAt === null || expiresAt === undefined ? null : iso(expiresAt)
+    expires_at: expiresAt === null || expiresAt === undefined ? null : iso(expiresAt),
+    contact_token: contactToken || newContactToken()
   }, nodeSigner(identity));
 }
 
-function buildLeaseView({ identity, leaseId, seq, toDevice, state, locked, remainingS, foreground, frame, frameDropped, actions, now = Date.now() }) {
+function buildLeaseView({ identity, leaseId, seq, toDevice, state, locked, remainingS, foreground, frame, frameDropped, actions, contactToken = null, now = Date.now() }) {
   return seal({
     v: 1, type: 'kl.lease.view', node_id: identity.nodeId, lease_id: leaseId, seq, at: iso(now), to_device: toDevice, state, locked,
-    remaining_s: Math.max(0, Math.floor(remainingS)), foreground, frame, frame_dropped: frameDropped === true, actions
+    remaining_s: Math.max(0, Math.floor(remainingS)), foreground, frame, frame_dropped: frameDropped === true, actions,
+    contact_token: contactToken || newContactToken()
   }, nodeSigner(identity));
 }
 
@@ -227,7 +242,7 @@ function effectiveExpiry({ verifiedAt, minutes, resumeOf = null }) {
 }
 
 module.exports = {
-  LEASE_LIMITS, STATES, REQUEST_TTL_MS, VIEW_MAX_BYTES, CHECK_OF,
+  LEASE_LIMITS, STATES, REQUEST_TTL_MS, VIEW_MAX_BYTES, CHECK_OF, CONTACT_TOKEN_RE, newContactToken,
   leaseHash, buildLeaseRequest, buildLeaseStatus, buildLeaseView,
   verifyLeaseGrant, verifyLeaseRevoke, verifyLeaseWatch, verifyLeaseView, effectiveExpiry
 };

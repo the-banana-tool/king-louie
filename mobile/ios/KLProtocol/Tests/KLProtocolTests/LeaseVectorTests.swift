@@ -41,7 +41,8 @@ final class LeaseVectorTests: XCTestCase {
 
     func testEveryIosVectorIsCovered() throws {
         let names = Set(try allVectors().filter { ($0["consumers"]?.arrayValue ?? []).contains(.string("ios")) }.compactMap { $0["name"]?.stringValue })
-        XCTAssertEqual(names, ["grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "view-node-sig-valid", "view-tampered-frame"])
+        XCTAssertEqual(names, ["grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "watch-no-token",
+                               "status-valid", "status-no-contact", "view-node-sig-valid", "view-tampered-frame"])
     }
 
     func testGrants() throws {
@@ -68,10 +69,39 @@ final class LeaseVectorTests: XCTestCase {
             Leases.revoke(nodeId: e["node_id"]!.stringValue!, leaseId: e["lease_id"]!.stringValue!, reason: e["reason"]!.stringValue!,
                           deviceId: e["device_id"]!.stringValue!, nonce: e["nonce"]!.stringValue!, signedAt: e["signed_at"]!.stringValue!)
         }
-        try assertBuilds("watch-valid") { _, e in
-            Leases.watch(nodeId: e["node_id"]!.stringValue!, leaseId: e["lease_id"]!.stringValue!, deviceId: e["device_id"]!.stringValue!,
-                         nonce: e["nonce"]!.stringValue!, signedAt: e["signed_at"]!.stringValue!)
+        // With the token of the newest status or view applied, and with none (null in the message).
+        for name in ["watch-valid", "watch-no-token"] {
+            try assertBuilds(name) { _, e in
+                Leases.watch(nodeId: e["node_id"]!.stringValue!, leaseId: e["lease_id"]!.stringValue!, deviceId: e["device_id"]!.stringValue!,
+                             contactToken: e["contact_token"]?.stringValue, nonce: e["nonce"]!.stringValue!, signedAt: e["signed_at"]!.stringValue!)
+            }
         }
+        XCTAssertNotNil(try vector("watch-valid")["expect"]!["message"]!["contact_token"]?.stringValue)
+        XCTAssertEqual(try vector("watch-no-token")["expect"]!["message"]!["contact_token"], JSONValue.null)
+    }
+
+    /// R-F5-15: a status the pinned node signed gives the token the next watch echoes.
+    func testStatuses() throws {
+        for name in ["status-valid", "status-no-contact"] {
+            let v = try vector(name)
+            let message = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)), name)
+            let status = try XCTUnwrap(LeaseStatus(message: message), name)
+            let expect = v["expect"]!["status"]!
+            XCTAssertEqual(status.leaseId, expect["lease_id"]!.stringValue, name)
+            XCTAssertEqual(status.seq, expect["seq"]!.intValue, name)
+            XCTAssertEqual(status.state, expect["state"]!.stringValue, name)
+            XCTAssertEqual(status.reason, expect["reason"]?.stringValue, name)
+            XCTAssertEqual(status.contactToken, expect["contact_token"]!.stringValue, name)
+            XCTAssertEqual(Leases.isPausedForContact(state: status.state, reason: status.reason), name == "status-no-contact", name)
+        }
+        XCTAssertEqual(Leases.noContact, "no_contact")
+        XCTAssertFalse(Leases.isPausedForContact(state: "suspended", reason: "foreground_changed"))
+        XCTAssertFalse(Leases.isPausedForContact(state: "suspended", reason: nil))
+        XCTAssertFalse(Leases.isPausedForContact(state: "active", reason: "no_contact"))
+        // Signed by another node's key: not a status of this pin.
+        let v = try vector("status-valid")
+        let other = NodePin(id: pin(v).id, name: pin(v).name, key: String(pin(v).key.reversed()))
+        XCTAssertNil(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: other))
     }
 
     func testViews() throws {
@@ -84,6 +114,7 @@ final class LeaseVectorTests: XCTestCase {
         let ok = Leases.verifyView(try Envelope(json: try vector("view-node-sig-valid")["input"]!), pin: pin(try vector("view-node-sig-valid")))
         XCTAssertEqual(ok.view?.actions.first?.tool, "Type")
         XCTAssertNotNil(ok.view?.frame)
+        XCTAssertEqual(ok.view?.contactToken, try vector("view-node-sig-valid")["expect"]!["contact_token"]!.stringValue)
     }
 
     func testRefusesWhatTheNodeWouldRefuse() throws {
@@ -117,7 +148,7 @@ final class LeaseVectorTests: XCTestCase {
         }
         func view(_ seq: Int, _ toDevice: String) -> LeaseView {
             LeaseView(leaseId: "lease-1", nodeId: "kl-node", seq: seq, toDevice: toDevice, state: "active", locked: false, remainingS: 60,
-                      foregroundAppId: nil, foregroundMatches: false, frame: nil, frameDropped: false, actions: [])
+                      foregroundAppId: nil, foregroundMatches: false, frame: nil, frameDropped: false, actions: [], contactToken: nil)
         }
         XCTAssertTrue(try Leases.acceptsStatus(status(1), appliedSeq: 0))
         XCTAssertTrue(try Leases.acceptsStatus(status(8), appliedSeq: 7))

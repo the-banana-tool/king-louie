@@ -122,8 +122,11 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
       return seal({ v: 1, type: 'kl.lease.revoke', node_id: nodeId, lease_id: leaseId, reason, device_id: deviceId, nonce: nonce || randomNonce(), signed_at: signedAt }, signer);
     },
 
-    leaseWatch(nodeId, leaseId, { nonce = null, signedAt = new Date().toISOString() } = {}) {
-      return seal({ v: 1, type: 'kl.lease.watch', node_id: nodeId, lease_id: leaseId, device_id: deviceId, nonce: nonce || randomNonce(), signed_at: signedAt }, signer);
+    // contactToken: the newest token this phone has applied from a status or
+    // a view of the lease (null when it has none); only a watch that echoes
+    // one the node issued recently is contact (R-F5-15).
+    leaseWatch(nodeId, leaseId, { nonce = null, signedAt = new Date().toISOString(), contactToken = null } = {}) {
+      return seal({ v: 1, type: 'kl.lease.watch', node_id: nodeId, lease_id: leaseId, device_id: deviceId, contact_token: contactToken, nonce: nonce || randomNonce(), signed_at: signedAt }, signer);
     },
 
     // Headers for a device-authenticated phone API call.

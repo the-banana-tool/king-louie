@@ -92,9 +92,21 @@ beforeEach(async () => {
 async function granted({ appIds = ['calculator'], minutes = 10, jobId = 'job-1' } = {}) {
   const p = leases.request({ jobId, origin: { ...ORIGIN, job_id: jobId }, appIds, minutes: 15, reason: 'Enter the totals' });
   const req = relay.last('kl.lease.request');
-  assert.deepEqual(leases.onGrant(phone.leaseGrant(req.envelope, { minutes })), { state: 'active' });
+  const reply = leases.onGrant(phone.leaseGrant(req.envelope, { minutes }));
+  assert.equal(reply.state, 'active');
+  // The reply carries the status the node just signed: the phone's first contact token.
+  assert.deepEqual(open(reply.status).message, relay.last('kl.lease.status').message);
   return p;
 }
+
+// A reply without the signed status it may carry.
+const plain = ({ status, ...rest }) => rest;
+// The newest contact token the node has sent for the lease, in a status or
+// a view: what a phone that applies everything it receives holds.
+const newestToken = (lease) => [...relay.sent].reverse().map((s) => s.message).find((m) => m.lease_id === lease.leaseId && typeof m.contact_token === 'string').contact_token;
+// A watch as the apps build it: it echoes the newest token the phone holds
+// (R-F5-15: only such a watch, from the granting phone, is contact).
+const watchFrom = (device, lease, extra = {}) => device.leaseWatch(identity.nodeId, lease.leaseId, { signedAt: new Date(clock.now()).toISOString(), contactToken: newestToken(lease), ...extra });
 
 const kinds = () => audits.map((a) => a.kind);
 
@@ -133,7 +145,7 @@ describe('request and grant', () => {
     const env = relay.last('kl.lease.request').envelope;
     assert.deepEqual(leases.onGrant(phone.leaseGrant(env, { minutes: 16 })), { state: 'rejected', reason: 'minutes_out_of_range' });
     assert.ok(audits.some((a) => a.kind === 'lease.rejected' && a.data.check === 12));
-    assert.deepEqual(leases.onGrant(phone.leaseGrant(env, { minutes: 3 })), { state: 'active' });
+    assert.deepEqual(plain(leases.onGrant(phone.leaseGrant(env, { minutes: 3 }))), { state: 'active' });
     await p;
   });
 
@@ -183,7 +195,9 @@ describe('R-F5-7: a lease needs a known, open job', () => {
     const p = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
     const env = relay.last('kl.lease.request').envelope;
     openJobs.delete('job-1');
-    assert.deepEqual(leases.onGrant(phone.leaseGrant(env)), { state: 'ended', reason: 'job_closed' });
+    const reply = leases.onGrant(phone.leaseGrant(env));
+    assert.deepEqual(plain(reply), { state: 'ended', reason: 'job_closed' });
+    assert.deepEqual([open(reply.status).message.state, open(reply.status).message.reason], ['ended', 'job_closed']);
     await assert.rejects(p, (e) => e.code === 'job_closed');
     assert.ok(audits.some((a) => a.kind === 'lease.rejected' && a.data.check === 12 && a.data.reason === 'job_closed'));
     assert.equal(leases.current(), null);
@@ -217,7 +231,7 @@ describe('suspension and resume', () => {
     // Three minutes in, with the granting phone watching (R-F5-15).
     for (let i = 0; i < 3; i += 1) {
       timers.advance(60000);
-      leases.verifyWatch(phone.leaseWatch(identity.nodeId, lease.leaseId));
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, true);
     }
     assert.equal(leases.noteInputOutcome(lease, { code: 'foreground_mismatch' }), true);
     assert.equal(lease.state, 'suspended');
@@ -338,7 +352,8 @@ describe('lock, expiry and revoke', () => {
     const lease = await granted();
     broker.calls.length = 0;
     const out = leases.onRevoke(other.leaseRevoke(identity.nodeId, lease.leaseId));
-    assert.deepEqual(out, { state: 'ended' });
+    assert.deepEqual(plain(out), { state: 'ended' });
+    assert.deepEqual([open(out.status).message.state, open(out.status).message.reason], ['ended', 'revoked'], 'the reply carries the node-signed status');
     assert.ok(broker.calls.includes('releaseAll'));
     assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'lease_revoked');
     assert.equal(relay.last('kl.lease.status').message.reason, 'revoked');
@@ -405,7 +420,7 @@ describe('lock, expiry and revoke', () => {
     const watch = other.leaseWatch(identity.nodeId, lease.leaseId);
     leases.verifyWatch(watch);
     const revoke = phone.leaseRevoke(identity.nodeId, lease.leaseId);
-    assert.deepEqual(leases.onRevoke(revoke), { state: 'ended' });
+    assert.deepEqual(plain(leases.onRevoke(revoke)), { state: 'ended' });
     timers.jump(11 * 60000);
     const rejected = audits.filter((a) => a.kind === 'lease.rejected').length;
     assert.equal(leases.onRevoke(revoke).state, 'ended');
@@ -419,7 +434,7 @@ describe('lock, expiry and revoke', () => {
     lease.controlNonces.max = 3;
     for (let i = 0; i < 3; i += 1) assert.equal(leases.verifyWatch(other.leaseWatch(identity.nodeId, lease.leaseId)).accepted, true);
     assert.deepEqual(leases.verifyWatch(other.leaseWatch(identity.nodeId, lease.leaseId)), { accepted: false, reason: 'too_many_watches' });
-    assert.deepEqual(leases.onRevoke(phone.leaseRevoke(identity.nodeId, lease.leaseId)), { state: 'ended' });
+    assert.deepEqual(plain(leases.onRevoke(phone.leaseRevoke(identity.nodeId, lease.leaseId))), { state: 'ended' });
   });
 
   // R-F5-15 (owner ruling, 2026-10-13): input needs the granting phone to
@@ -428,7 +443,9 @@ describe('lock, expiry and revoke', () => {
   describe('R-F5-15: no contact from the granting phone suspends input', () => {
     const { CONTACT_REASON } = require('../src/gui/leases');
     const WINDOW = 120000;
-    const watchFrom = (device, lease, extra = {}) => device.leaseWatch(identity.nodeId, lease.leaseId, { signedAt: new Date(clock.now()).toISOString(), ...extra });
+    // The fake clock jumps to the end of an advance before its timers run;
+    // where a test reads when something happened, it moves a second at a time.
+    const seconds = (n) => { for (let i = 0; i < n; i += 1) timers.advance(1000); };
 
     it('the window is one constant, 2 minutes by default, set under gui.lease.contact_s and never above 5 minutes', () => {
       const { parseGuiConfig: parse, GUI_KEYS } = require('../src/gui/config');
@@ -473,15 +490,27 @@ describe('lock, expiry and revoke', () => {
     it('a fresh watch from the granting phone keeps it going, and resumes it after a lapse without extending it', async () => {
       const lease = await granted();
       const expiresAt = lease.expiresAt;
-      // Watches a minute apart: never suspended.
-      for (let i = 0; i < 4; i += 1) {
+      // Watches a minute apart, each echoing the token the last answer brought: never suspended.
+      for (let i = 0; i < 3; i += 1) {
         timers.advance(60000);
-        assert.equal(leases.verifyWatch(watchFrom(phone, lease)).accepted, true);
+        const seen = leases.verifyWatch(watchFrom(phone, lease));
+        assert.equal(seen.accepted, true);
+        assert.equal(seen.contact, true);
         assert.equal(lease.state, 'active');
       }
       timers.advance(WINDOW + 1);
       assert.equal(lease.state, 'suspended');
-      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).accepted, true);
+      // The owner stays away for another two minutes. The newest token the
+      // phone can hold (the one in the status that said "suspended") is
+      // older than the window by then: this watch is not contact, but its
+      // answer brings a fresh token.
+      timers.advance(WINDOW);
+      const stale = leases.verifyWatch(watchFrom(phone, lease));
+      assert.deepEqual([stale.accepted, stale.contact], [true, false]);
+      assert.equal(lease.state, 'suspended');
+      assert.equal(open(stale.status).message.contact_token, newestToken(lease));
+      // The next watch echoes it: contact.
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, true);
       assert.equal(lease.state, 'active');
       assert.equal(lease.suspendReason, null);
       assert.equal(leases.assertUsable('job-1'), lease);
@@ -517,10 +546,167 @@ describe('lock, expiry and revoke', () => {
       assert.equal(seen.deviceId, other.deviceId);
       timers.advance(60001);
       assert.equal(lease.state, 'suspended', 'two minutes after the grant, whatever the other phone sent');
-      assert.equal(leases.verifyWatch(watchFrom(other, lease)).accepted, true);
+      // Even echoing a token the node has just issued.
+      const fromOther = leases.verifyWatch(watchFrom(other, lease));
+      assert.deepEqual([fromOther.accepted, fromOther.contact], [true, false]);
       assert.equal(lease.state, 'suspended', 'and it does not resume it');
-      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).accepted, true);
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, true);
       assert.equal(lease.state, 'active');
+    });
+
+    // Second security review, finding 3: the relay passes every watch, and
+    // the phones take their clock from it, so nothing in a watch says when
+    // it was signed. A relay could bank watches and feed them in later.
+    describe('finding 3: a watch is contact only with a token the node issued inside the window', () => {
+      it('banked watches fed in later, one every two minutes, are not contact', async () => {
+        const lease = await granted({ minutes: 15 });
+        // The phone watches for a while; the relay delivers none of it and keeps every watch.
+        const banked = [];
+        for (let i = 0; i < 5; i += 1) banked.push(watchFrom(phone, lease, { signedAt: new Date(clock.now() + i * 20000).toISOString() }));
+        // Then the owner stops looking. The relay feeds the banked watches in, one before each lapse.
+        seconds(119);
+        const first = leases.verifyWatch(banked[0]);
+        assert.deepEqual([first.accepted, first.contact], [true, true], 'the one watch a relay can hold: its token is still inside the window');
+        for (const watch of banked.slice(1)) {
+          seconds(119);
+          const fed = leases.verifyWatch(watch);
+          assert.deepEqual([fed.accepted, fed.contact], [true, false], 'a banked watch echoes a token that is used, or too old');
+        }
+        assert.equal(lease.state, 'suspended');
+        assert.equal(lease.suspendReason, 'no_contact');
+        assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'lease_suspended_no_contact');
+        // Input stopped inside two windows of the phone's last signature (the grant, here).
+        const suspendedAt = Date.parse(relay.all('kl.lease.status').find((s) => s.message.state === 'suspended').message.at);
+        assert.ok(suspendedAt - Date.parse('2026-09-23T18:00:00.000Z') < 2 * WINDOW);
+      });
+
+      it('a watch that echoes a token older than the window is not contact, however new its nonce', async () => {
+        const lease = await granted();
+        timers.advance(WINDOW + 1);
+        assert.equal(lease.state, 'suspended');
+        // The status that said so carries the newest token there is. One
+        // millisecond short of the window it would still make contact...
+        const token = newestToken(lease);
+        const issuedAt = Date.parse(relay.last('kl.lease.status').message.at);
+        timers.advance(issuedAt + WINDOW - clock.now());
+        // ...and at the window it does not, in a watch signed this instant.
+        const late = leases.verifyWatch(watchFrom(phone, lease, { contactToken: token }));
+        assert.deepEqual([late.accepted, late.contact], [true, false]);
+        assert.equal(lease.state, 'suspended');
+        // The same lease, a token one millisecond younger than the window: contact.
+        const fresh = open(late.status).message.contact_token;
+        timers.advance(WINDOW - 1);
+        assert.equal(leases.verifyWatch(watchFrom(phone, lease, { contactToken: fresh })).contact, true);
+        assert.equal(lease.state, 'active');
+      });
+
+      it('a token makes contact once: a second watch that echoes it is not contact', async () => {
+        const lease = await granted();
+        const token = newestToken(lease);
+        timers.advance(30000);
+        assert.equal(leases.verifyWatch(watchFrom(phone, lease, { contactToken: token })).contact, true);
+        timers.advance(60000);
+        assert.equal(leases.verifyWatch(watchFrom(phone, lease, { contactToken: token })).contact, false);
+        timers.advance(60001);
+        assert.equal(lease.state, 'suspended', 'two minutes after the one contact that token made');
+      });
+
+      it('using a token retires the older ones: a watch kept back and delivered after a later one is not contact', async () => {
+        const lease = await granted();
+        const older = watchFrom(phone, lease);
+        timers.advance(20000);
+        leases._sendStatus(lease);
+        assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, true);
+        timers.advance(60000);
+        assert.equal(leases.verifyWatch(older).contact, false);
+      });
+
+      it('no token, a token the node never issued, another lease\'s token: accepted as a watch, never contact', async () => {
+        const lease = await granted();
+        timers.advance(WINDOW + 1);
+        assert.equal(lease.state, 'suspended');
+        for (const contactToken of [null, 'AAAAAAAAAAAAAAAAAAAAAA']) {
+          const seen = leases.verifyWatch(watchFrom(phone, lease, { contactToken }));
+          assert.deepEqual([seen.accepted, seen.contact], [true, false]);
+          assert.equal(lease.state, 'suspended');
+        }
+        // A token that is not 16 bytes of base64url is not a watch at all.
+        assert.equal(leases.verifyWatch(watchFrom(phone, lease, { contactToken: 'short' })).reason, 'malformed');
+        assert.ok(audits.some((a) => a.kind === 'lease.watch' && a.data.contact === false));
+      });
+
+      it('the iPhone\'s cadence (a watch every 20 s, echoing the newest token) keeps the lease alive to its expiry', async () => {
+        const lease = await granted({ minutes: 10 });
+        for (let t = 20000; t < 10 * 60000; t += 20000) {
+          timers.advance(20000);
+          const seen = leases.verifyWatch(watchFrom(phone, lease));
+          assert.equal(seen.contact, true, `at ${t / 1000} s`);
+          assert.equal(lease.state, 'active');
+        }
+        timers.advance(20000);
+        assert.equal(lease.endReason, 'expired');
+      });
+
+      it('a locked screen sends no frames: the status that answers each watch still carries the next token', async () => {
+        const lease = await granted();
+        leases.setLocked(true);
+        const views = relay.all('kl.lease.view').length;
+        for (let i = 0; i < 12; i += 1) {
+          timers.advance(20000);
+          const seen = leases.verifyWatch(watchFrom(phone, lease));
+          assert.equal(seen.contact, true);
+          assert.equal(open(seen.status).message.contact_token, newestToken(lease));
+        }
+        assert.equal(relay.all('kl.lease.view').length, views);
+        assert.equal(lease.state, 'active');
+      });
+
+      it('Android: Refresh after a pause gets a fresh status, and the watch that follows it is contact', async () => {
+        const lease = await granted();
+        // The owner taps Refresh once, a minute in.
+        timers.advance(60000);
+        assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, true);
+        // Then nothing for five minutes: paused at 3:00.
+        seconds(5 * 60);
+        assert.equal(lease.state, 'suspended');
+        // What the phone holds is five minutes old. Its first tap is answered with a status signed now...
+        const first = leases.verifyWatch(watchFrom(phone, lease));
+        assert.equal(first.contact, false);
+        const status = open(first.status).message;
+        assert.deepEqual([status.state, status.reason], ['suspended', 'no_contact']);
+        // ...and the watch after that status makes contact.
+        timers.advance(5000);
+        const second = leases.verifyWatch(watchFrom(phone, lease, { contactToken: status.contact_token }));
+        assert.equal(second.contact, true);
+        assert.equal(open(second.status).message.state, 'active');
+        assert.equal(leases.assertUsable('job-1'), lease);
+      });
+
+      it('the grant is the first contact, and its reply carries the first token: a just-granted lease makes contact with its first watch', async () => {
+        const p = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+        const reply = leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 10 }));
+        const lease = await p;
+        const token = open(reply.status).message.contact_token;
+        assert.match(token, /^[A-Za-z0-9_-]{22}$/);
+        timers.advance(90000);
+        assert.equal(leases.verifyWatch(watchFrom(phone, lease, { contactToken: token })).contact, true);
+        timers.advance(90000);
+        assert.equal(lease.state, 'active', 'three minutes after the grant');
+      });
+
+      it('every status and view carries its own token; an ended lease forgets them all', async () => {
+        const lease = await granted();
+        leases.setLocked(true);
+        leases.setLocked(false);
+        const tokens = relay.all('kl.lease.status').filter((s) => s.message.lease_id === lease.leaseId).map((s) => s.message.contact_token);
+        assert.ok(tokens.length >= 3);
+        assert.equal(new Set(tokens).size, tokens.length);
+        const live = tokens.at(-1);
+        leases.onRevoke(phone.leaseRevoke(identity.nodeId, lease.leaseId));
+        assert.equal(lease.tokens.size, 0);
+        assert.equal(leases.verifyWatch(watchFrom(phone, lease, { contactToken: live })).contact, false);
+        assert.equal(lease.state, 'ended');
+      });
     });
 
     it('expiry and Stop still end a lease that is suspended for no contact', async () => {
@@ -537,7 +723,7 @@ describe('lock, expiry and revoke', () => {
       const second = await granted({ jobId: 'job-2' });
       timers.advance(WINDOW + 1);
       assert.equal(second.state, 'suspended');
-      assert.deepEqual(leases.onRevoke(other.leaseRevoke(identity.nodeId, second.leaseId)), { state: 'ended' });
+      assert.deepEqual(plain(leases.onRevoke(other.leaseRevoke(identity.nodeId, second.leaseId))), { state: 'ended' });
       assert.equal(second.endReason, 'revoked');
       assert.throws(() => leases.assertUsable('job-2'), (e) => e.code === 'lease_revoked');
     });

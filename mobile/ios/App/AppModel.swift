@@ -242,6 +242,8 @@ final class AppModel: ObservableObject {
         var lastSeq = 0
         /// The newest node seq (statuses and views share it) already applied to this lease (R-F5-16); lastSeq is the relay's mailbox position.
         var appliedSeq = 0
+        /// The contact token of the newest status or view applied (R-F5-15): the next watch echoes it.
+        var contactToken: String?
         var revoking = false
     }
 
@@ -317,10 +319,28 @@ final class AppModel: ObservableObject {
             }
             decidedLeaseRequests.insert(item.id)
             leaseRequests.removeAll { $0.id == item.id }
-            if grant, state == "active" { openLiveLease(nodeId: item.request.nodeId, leaseId: item.request.leaseId) }
+            if grant, state == "active" {
+                openLiveLease(nodeId: item.request.nodeId, leaseId: item.request.leaseId)
+                // The node's answer carries the status it signed for it, and with
+                // that the first contact token: the first watch can echo it.
+                applyReplyStatus(result, leaseId: item.request.leaseId)
+            }
         } catch {
             fail(error)
         }
+    }
+
+    /// The status a node's answer may carry: the node signed it for that
+    /// very answer (R-F5-15). It goes through `apply` like any other, so it
+    /// counts only when the pinned node signed it, about this lease, with a
+    /// newer seq; anything else in the answer is the relay's word and is
+    /// never shown as the lease's state.
+    private func applyReplyStatus(_ reply: JSONValue?, leaseId: String) {
+        guard let json = reply?["status"], let signed = try? Envelope(json: json), let key,
+              var current = liveLease, current.leaseId == leaseId,
+              let pin = state.nodes.first(where: { $0.id == current.nodeId }) else { return }
+        apply(signed, pin: pin, deviceId: key.deviceId, to: &current)
+        liveLease = current
     }
 
     /// The live view: a watch every 20 s (signed with the session, never a
@@ -341,6 +361,9 @@ final class AppModel: ObservableObject {
         guard let client, let key else { return }
         liveTask = Task { [weak self] in
             var lastWatch = Date.distantPast
+            // The token the last watch echoed, and whether the one early watch of this 20 s has been used.
+            var lastWatchToken: String?
+            var earlyUsed = false
             while !Task.isCancelled {
                 guard let self, let live = self.liveLease, live.leaseId == leaseId else { return }
                 guard key.isSessionUnlocked else {
@@ -348,17 +371,29 @@ final class AppModel: ObservableObject {
                     continue
                 }
                 do {
-                    if Date().timeIntervalSince(lastWatch) >= 20, live.state != "ended" {
+                    let sinceWatch = Date().timeIntervalSince(lastWatch)
+                    // R-F5-15: a lease paused for want of contact resumes on a watch that echoes a
+                    // recent token. When a newer token has arrived than the last watch echoed, one
+                    // watch goes early instead of waiting out the 20 s (one only: a phone that did
+                    // not grant the lease is never contact, and must not watch in a tight loop).
+                    let early = Leases.isPausedForContact(state: live.state, reason: live.reason) && !earlyUsed
+                        && live.contactToken != nil && live.contactToken != lastWatchToken
+                    if sinceWatch >= 20 || early, live.state != "ended" {
+                        earlyUsed = sinceWatch < 20
                         lastWatch = Date()
-                        let watch = Leases.watch(nodeId: nodeId, leaseId: leaseId, deviceId: key.deviceId, nonce: Messages.randomNonce(),
-                                                 signedAt: Timestamps.string(client.now()))
+                        lastWatchToken = live.contactToken
+                        let watch = Leases.watch(nodeId: nodeId, leaseId: leaseId, deviceId: key.deviceId, contactToken: live.contactToken,
+                                                 nonce: Messages.randomNonce(), signedAt: Timestamps.string(client.now()))
                         let envelope = try await key.signWatchEnvelope(watch)
                         do {
-                            _ = try await client.leaseDecision("watch", leaseId: leaseId, envelope: envelope, signWith: AppModel.sessionOnlySigner(key))
+                            let reply = try await client.leaseDecision("watch", leaseId: leaseId, envelope: envelope, signWith: AppModel.sessionOnlySigner(key))
+                            // The status the node signed for this watch: the token the next one echoes.
+                            self.applyReplyStatus(reply, leaseId: leaseId)
                         } catch is RelayError {
                             // The node is offline or busy: the poll below still shows the lease's state, and the next watch is 20 s away.
                         }
                     }
+                    // (`live` is the lease as this turn began; its mailbox position is what the poll needs.)
                     let entries = try await client.leaseViews(leaseId, afterSeq: live.lastSeq, wait: 20, signWith: AppModel.sessionOnlySigner(key))
                     // Read again: the kill switch may have changed the lease while this waited.
                     guard var current = self.liveLease, current.leaseId == leaseId else { return }
@@ -386,6 +421,7 @@ final class AppModel: ObservableObject {
         if let message = Leases.verifiedMessage(envelope, pin: pin), let status = LeaseStatus(message: message) {
             guard status.leaseId == live.leaseId, Leases.acceptsStatus(status, appliedSeq: live.appliedSeq) else { return }
             live.appliedSeq = status.seq
+            if let token = status.contactToken { live.contactToken = token }
             live.state = status.state
             live.locked = status.locked
             live.reason = status.reason
@@ -397,6 +433,7 @@ final class AppModel: ObservableObject {
         guard check.accepted, let view = check.view, view.leaseId == live.leaseId else { return }
         guard Leases.acceptsView(view, appliedSeq: live.appliedSeq, deviceId: deviceId) else { return }
         live.appliedSeq = view.seq
+        if let token = view.contactToken { live.contactToken = token }
         live.state = view.state
         live.locked = view.locked
         live.expiresAt = Date().addingTimeInterval(TimeInterval(view.remainingS))

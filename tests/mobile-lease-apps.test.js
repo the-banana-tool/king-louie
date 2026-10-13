@@ -50,7 +50,7 @@ describe('iOS lease screens (owner ruling R-F5-8)', () => {
     // AppModel: one use in the whole app, in the live view.
     assert.equal(count(model, 'signWatchEnvelope('), 1);
     assert.equal(count(leases, 'signWatchEnvelope('), 1);
-    assert.match(section(leases, 'func openLiveLease', 'private func apply'), /signWatchEnvelope\(/);
+    assert.match(section(leases, 'func openLiveLease', 'private func apply('), /signWatchEnvelope\(/);
     // No lease message is signed with the session any other way.
     none(leases, ['signForSession', 'signIfUnlocked', 'signRefusalEnvelope'], 'the lease section');
     // Grants and denies take a fresh prompt (signEnvelope), never the session.
@@ -67,7 +67,7 @@ describe('iOS lease screens (owner ruling R-F5-8)', () => {
     // Three fresh prompts in the section and no more: grant, deny, revoke.
     assert.equal(count(live, 'key.signEnvelope('), 3);
     // The watch is the only message the live view builds.
-    const liveView = section(leases, 'func openLiveLease', 'private func apply');
+    const liveView = section(leases, 'func openLiveLease', 'private func apply(');
     assert.equal(count(liveView, 'Leases.watch('), 1);
     none(liveView, ['Leases.grant(', 'Leases.deny(', 'Leases.revoke(', 'key.signEnvelope('], 'the live view');
   });
@@ -75,7 +75,7 @@ describe('iOS lease screens (owner ruling R-F5-8)', () => {
   it('iOS: the live view does not unlock the app by itself', () => {
     const { leases, screens } = ios();
     // It waits while the API session is locked instead of unlocking it.
-    const liveView = section(leases, 'func openLiveLease', 'private func apply');
+    const liveView = section(leases, 'func openLiveLease', 'private func apply(');
     assert.match(liveView, /guard key\.isSessionUnlocked else \{/);
     assert.ok(liveView.indexOf('guard key.isSessionUnlocked else {') < liveView.indexOf('signWatchEnvelope('), 'checked before the watch is signed');
     // Its two relay requests (the watch and the poll) are signed only with a session already unlocked.
@@ -103,7 +103,7 @@ describe('iOS lease screens (owner ruling R-F5-8)', () => {
     assert.match(refresh, /let pin = state\.nodes\.first\(where: \{ \$0\.id == envelope\.kid \}\)/);
     assert.match(refresh, /let message = Leases\.verifiedMessage\(envelope, pin: pin\), let request = LeaseRequest\(message: message\)/);
     assert.match(refresh, /LeaseRequestItem\(request: request, nodeName: pin\.name, status: status\)/);
-    const apply = section(leases, 'private func apply', 'func closeLiveLease');
+    const apply = section(leases, 'private func apply(', 'func closeLiveLease');
     assert.match(apply, /Leases\.verifiedMessage\(envelope, pin: pin\)/);
     assert.match(apply, /let check = Leases\.verifyView\(envelope, pin: pin\)\n\s+guard check\.accepted, let view = check\.view, view\.leaseId == live\.leaseId else \{ return \}/);
     none(live, ['.message()', 'payloadData', 'JSONParser', '.payload'], 'the lease section (an envelope opened outside the core)');
@@ -154,7 +154,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.ok(apply.indexOf('Leases.acceptsView(') < apply.indexOf('state = view.state'));
     assert.match(live, /val appliedSeq: Int = 0/);
     assert.equal(count(model, 'applyLease(envelope, pin, next, k.deviceId)'), 1, 'the live path passes this phone\'s device id');
-    assert.equal(count(model, 'applyLease('), 3, 'declared once, called from Refresh and from the demo');
+    assert.equal(count(model, 'applyLease('), 4, 'declared once, called from Refresh, from the demo and for the status an answer carries');
   });
 
   it('iOS: the core has the rule, and apply applies nothing that fails it', () => {
@@ -164,7 +164,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(core, /let toDevice = m\["to_device"\]\?\.stringValue/);
     const model = read('mobile', 'ios', 'App', 'AppModel.swift');
     const leases = section(model, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
-    const apply = section(leases, 'private func apply', 'func closeLiveLease');
+    const apply = section(leases, 'private func apply(', 'func closeLiveLease');
     assert.match(apply, /private func apply\(_ envelope: Envelope, pin: NodePin, deviceId: String, to live: inout LiveLease\) \{/);
     assert.match(apply, /guard status\.leaseId == live\.leaseId, Leases\.acceptsStatus\(status, appliedSeq: live\.appliedSeq\) else \{ return \}/);
     assert.match(apply, /guard Leases\.acceptsView\(view, appliedSeq: live\.appliedSeq, deviceId: deviceId\) else \{ return \}/);
@@ -175,6 +175,61 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(leases, /var appliedSeq = 0/);
     assert.equal(count(leases, 'self.apply(envelope, pin: pin, deviceId: key.deviceId, to: &current)'), 1);
     assert.equal(count(leases, 'self.apply('), 2, 'the live view and the demo');
+  });
+
+  // R-F5-15 (second security review, finding 3): a watch is contact only
+  // when it echoes a contact token the node issued recently. Each phone
+  // keeps the token of the newest status or view it applied, sends it in
+  // its watch, and takes a fresh one from the status a node's answer
+  // carries, which it verifies like any other status.
+  it('both phones echo the newest contact token in a watch, and read a reply\'s status only through the verified path', () => {
+    // The cores: the watch carries the token (null when there is none); statuses and views give it.
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    assert.match(swift, /public static func watch\(nodeId: String, leaseId: String, deviceId: String, contactToken: String\?, nonce: String, signedAt: String\) -> JSONValue \{/);
+    assert.match(swift, /"contact_token": token,/);
+    assert.match(swift, /let token: JSONValue = contactToken\.map \{ JSONValue\.string\(\$0\) \} \?\? JSONValue\.null/);
+    assert.equal(count(swift, 'self.contactToken = message["contact_token"]?.stringValue'), 1, 'LeaseStatus');
+    assert.equal(count(swift, 'contactToken: m["contact_token"]?.stringValue'), 1, 'LeaseView');
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    assert.match(kotlin, /fun watch\(nodeId: String, leaseId: String, deviceId: String, contactToken: String\?, nonce: String, signedAt: String\): JsonObject \{/);
+    assert.match(kotlin, /val token: JsonElement = if \(contactToken != null\) jsonString\(contactToken\) else JsonNull/);
+    assert.match(kotlin, /"contact_token" to token,/);
+    assert.equal(count(kotlin, 'm["contact_token"].str()'), 2, 'LeaseStatus and LeaseView');
+
+    // iOS: the token is kept by apply (and nowhere else), and the watch echoes it.
+    const ios = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    const iosApply = section(iosLeases, 'private func apply(', 'func closeLiveLease');
+    assert.equal(count(iosApply, 'if let token = status.contactToken { live.contactToken = token }'), 1);
+    assert.equal(count(iosApply, 'if let token = view.contactToken { live.contactToken = token }'), 1);
+    assert.equal(count(iosLeases, 'contactToken = '), 2, 'only apply sets it');
+    assert.match(iosLeases, /Leases\.watch\(nodeId: nodeId, leaseId: leaseId, deviceId: key\.deviceId, contactToken: live\.contactToken,/);
+    // A reply's status goes through the pin and `apply`; nothing else of a reply is applied.
+    const iosReply = section(iosLeases, 'private func applyReplyStatus', '\n    }\n');
+    assert.match(iosReply, /guard let json = reply\?\["status"\], let signed = try\? Envelope\(json: json\), let key,/);
+    assert.match(iosReply, /let pin = state\.nodes\.first\(where: \{ \$0\.id == current\.nodeId \}\) else \{ return \}/);
+    assert.match(iosReply, /apply\(signed, pin: pin, deviceId: key\.deviceId, to: &current\)/);
+    assert.equal(count(iosLeases, 'applyReplyStatus('), 3, 'declared, after Allow, and after each watch');
+    assert.equal(count(iosLeases, '["status"]'), 2, 'the listed request\'s status and a reply\'s: both through verifiedMessage');
+    // One early watch at most per 20 s, so a phone that is never contact does not loop.
+    const iosLive = section(iosLeases, 'func openLiveLease', 'private func apply(');
+    assert.match(iosLive, /let early = Leases\.isPausedForContact\(state: live\.state, reason: live\.reason\) && !earlyUsed\n\s+&& live\.contactToken != nil && live\.contactToken != lastWatchToken/);
+    assert.match(iosLive, /if sinceWatch >= 20 \|\| early, live\.state != "ended" \{\n\s+earlyUsed = sinceWatch < 20\n/);
+
+    // Android: the same, with no loop: the token rides on the one watch a Refresh sends.
+    const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+    const android = read(...kt, 'AppModel.kt');
+    const live = section(android, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+    const apply = section(live, 'private fun applyLease', '\n    }\n');
+    assert.equal(count(apply, 'contactToken = status.contactToken ?: live.contactToken'), 1);
+    assert.equal(count(apply, 'contactToken = view.contactToken ?: live.contactToken'), 1);
+    assert.equal(count(live, 'contactToken = '), 2, 'only applyLease sets it');
+    assert.match(live, /Leases\.watch\(next\.nodeId, next\.leaseId, k\.deviceId, next\.contactToken, Messages\.randomNonce\(\), Timestamps\.string\(api\.now\(\)\)\)/);
+    const reply = section(live, 'private fun applyReplyStatus', '\n    }\n');
+    assert.match(reply, /val signed = reply\["status"\]\?\.takeIf \{ it !is JsonNull \}\?\.let \{ runCatching \{ Envelope\.fromJson\(it\) \}\.getOrNull\(\) \} \?: return live/);
+    assert.match(reply, /return applyLease\(signed, pin, live, deviceId\)/);
+    assert.equal(count(live, 'applyReplyStatus('), 4, 'declared, after Allow, after the watch, after Stop');
+    assert.equal(count(live, '["status"]'), 2, 'the listed request\'s status and a reply\'s: both through verifiedMessage');
   });
 
   it('neither app\'s demo shows typed text in its action log', () => {
@@ -362,7 +417,7 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
     assert.match(live, /val signedAt = Timestamps\.string\(api\.now\(\)\)/);
     assert.match(live, /Leases\.grant\(item\.request, apps\.toList\(\), minutes, k\.deviceId, signedAt\)/);
     assert.match(live, /Leases\.deny\(item\.request, k\.deviceId, signedAt\)/);
-    assert.match(live, /Leases\.watch\(next\.nodeId, next\.leaseId, k\.deviceId, Messages\.randomNonce\(\), Timestamps\.string\(api\.now\(\)\)\)/);
+    assert.match(live, /Leases\.watch\(next\.nodeId, next\.leaseId, k\.deviceId, next\.contactToken, Messages\.randomNonce\(\), Timestamps\.string\(api\.now\(\)\)\)/);
     assert.match(live, /Leases\.revoke\(live\.nodeId, live\.leaseId, "kill_switch", k\.deviceId, Messages\.randomNonce\(\), Timestamps\.string\(api\.now\(\)\)\)/);
     none(live, ['Instant.now()'], 'the live lease section (the phone clock in a signed message)');
     // A request is dropped once it is past its expiry on that clock.
