@@ -965,6 +965,8 @@ module.exports = {
   ensureSafeDataDirParent, DARWIN_LOG_DIR,
   // Fleet stage 7: the desktop's bridge-file owner check reuses the inspector.
   WINDOWS_INSPECT_CSHARP,
+  // Fleet stage 5 (review finding 3): session install runs the same check.
+  WINDOWS_CONFIG_DIRS_SCRIPT,
   // Fleet stage 5: the session helper's login start renders with the same checks.
   sanitizeWindowsPath, assertAbsolutePosixPath, xmlEscape
 };

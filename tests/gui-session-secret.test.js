@@ -145,13 +145,87 @@ describe('per-user copies', () => {
     ]);
   });
 
-  it('Windows: writing a copy runs icacls once on that file', { skip: POSIX }, () => {
+  // Security review finding 3: the secret is never in a file whose ACL is
+  // still the inherited one.
+  it('Windows: the copy is created empty, narrowed and given to Administrators, and only then written', { skip: POSIX }, () => {
     const env = { SystemRoot: 'C:\\Windows' };
     const calls = [];
     const { config } = tempConfig();
-    const file = S.writeUserCopy({ platform: 'win32', configDir: config, sid: 'S-1-5-21-1-2-3-1001', content, runIcacls: (argv) => calls.push(argv), env });
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0][1], file);
+    const file = S.writeUserCopy({
+      platform: 'win32', configDir: config, sid: 'S-1-5-21-1-2-3-1001', content, env,
+      runIcacls: (argv) => calls.push({ argv, bytes: fs.readFileSync(argv[1]).length })
+    });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0].argv, S.windowsUserAclArgs(file, 'S-1-5-21-1-2-3-1001', env));
+    assert.deepEqual(calls[1].argv, ['C:\\Windows\\System32\\icacls.exe', file, '/setowner', '*S-1-5-32-544']);
+    assert.deepEqual(calls.map((c) => c.bytes), [0, 0], 'the file held nothing while its ACL was being set');
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), content);
+  });
+
+  it('Windows: if icacls fails the copy is removed and nothing of the secret was written', { skip: POSIX }, () => {
+    const { config } = tempConfig();
+    const sid = 'S-1-5-21-1-2-3-1001';
+    const file = S.userCopyPath({ platform: 'win32', configDir: config, sid });
+    for (const failAt of [1, 2]) {
+      let n = 0;
+      let seen = null;
+      assert.throws(() => S.writeUserCopy({
+        platform: 'win32', configDir: config, sid, content,
+        runIcacls: (argv) => { n += 1; if (n === failAt) { seen = fs.readFileSync(argv[1]).length; throw new Error('icacls failed'); } }
+      }), /icacls failed/);
+      assert.equal(seen, 0);
+      assert.equal(fs.existsSync(file), false, `removed after icacls call ${failAt} failed`);
+    }
+    // An older copy is gone too: it is never left in place under a failed rotation.
+    S.writeUserCopy({ platform: 'win32', configDir: config, sid, content, runIcacls: () => {} });
+    assert.throws(() => S.writeUserCopy({ platform: 'win32', configDir: config, sid, content, runIcacls: () => { throw new Error('icacls failed'); } }));
+    assert.equal(fs.existsSync(file), false);
+  });
+
+  describe('checkUserCopyTrust (Windows owners, through an injected inspector)', () => {
+    const FILE = 'C:\\cfg\\session\\users\\S-1-5-21-1-2-3-1001.json';
+    const DIR = 'C:\\cfg\\session\\users';
+    const ADMINS = 'S-1-5-32-544';
+    const SYSTEM = 'S-1-5-18';
+    const ME = 'S-1-5-21-1-2-3-1001';
+    const inspector = (entries, seen = []) => async (paths) => { seen.push(paths); return { me: ME, entries }; };
+    const trust = (entries, extra = {}) => S.checkUserCopyTrust({ path: FILE, platform: 'win32', inspectOwners: inspector(entries), ...extra });
+    const codeOf = async (p) => { try { await p; return null; } catch (e) { return e.code; } };
+
+    it('asks for the directory and the file, and accepts Administrators or SYSTEM as owner of both', async () => {
+      const seen = [];
+      await S.checkUserCopyTrust({ path: FILE, platform: 'win32', inspectOwners: inspector([{ owner: ADMINS, link: false }, { owner: SYSTEM, link: false }], seen) });
+      assert.deepEqual(seen, [[DIR, FILE]]);
+    });
+
+    it('refuses a file or a directory owned by anyone else, a link, and a file that is not there', async () => {
+      assert.equal(await codeOf(trust([{ owner: ADMINS, link: false }, { owner: ME, link: false }])), 'session_file_insecure', 'the user owns the file');
+      assert.equal(await codeOf(trust([{ owner: 'S-1-5-21-9-9-9-2001', link: false }, { owner: ADMINS, link: false }])), 'session_file_insecure', 'someone owns the directory');
+      assert.equal(await codeOf(trust([{ owner: ADMINS, link: true }, { owner: ADMINS, link: false }])), 'session_file_insecure');
+      assert.equal(await codeOf(trust([{ owner: ADMINS, link: false }, { owner: ADMINS, link: true }])), 'session_file_insecure');
+      assert.equal(await codeOf(trust([{ owner: ADMINS, link: false }, null])), 'session_not_installed');
+      assert.equal(await codeOf(trust([null, null])), 'session_not_installed');
+    });
+
+    it('no evidence is not trust: an inspector that fails or answers short is refused', async () => {
+      assert.equal(await codeOf(S.checkUserCopyTrust({ path: FILE, platform: 'win32', inspectOwners: async () => { throw new Error('powershell failed'); } })), 'session_file_insecure');
+      assert.equal(await codeOf(trust([{ owner: ADMINS, link: false }])), 'session_file_insecure');
+      assert.equal(await codeOf(S.checkUserCopyTrust({ path: FILE, platform: 'win32', inspectOwners: async () => null })), 'session_file_insecure');
+      assert.equal(await codeOf(trust([{ owner: ADMINS, link: false }, { link: false }])), 'session_file_insecure');
+    });
+
+    it('the current user as owner is accepted only when a test says so', async () => {
+      const mine = [{ owner: ME, link: false }, { owner: ME, link: false }];
+      assert.equal(await codeOf(trust(mine)), 'session_file_insecure');
+      assert.equal(await codeOf(trust(mine, { alsoTrustCurrentUser: true })), null);
+      assert.equal(await codeOf(trust([{ owner: 'S-1-5-21-9-9-9-2001', link: false }, { owner: ME, link: false }], { alsoTrustCurrentUser: true })), 'session_file_insecure');
+    });
+
+    it('off Windows nothing is inspected: readUserCopy checks uid and modes itself', async () => {
+      let called = 0;
+      await S.checkUserCopyTrust({ path: '/etc/kl/session/users/alice.json', platform: 'linux', inspectOwners: async () => { called += 1; return null; } });
+      assert.equal(called, 0);
+    });
   });
 });
 

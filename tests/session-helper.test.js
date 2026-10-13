@@ -69,9 +69,51 @@ async function channelFor(endpoint, secretRef) {
   return channel;
 }
 
-const quick = { delays: [20, 20, 20], rootUid: UID, attachLog: false };
+// checkUserCopyTrust: the Windows owner read is a PowerShell child; these
+// tests' files are a temp dir's, owned by whoever runs them.
+const quick = { delays: [20, 20, 20], rootUid: UID, attachLog: false, checkUserCopyTrust: async () => {} };
 
 describe('runSessionHelper', () => {
+  // Security review finding 3: who owns the helper's file is checked before
+  // it is believed, at the start and before every reconnect.
+  it('finding 3: a per-user file that fails the owner check is never read: exit 1, no connection', async () => {
+    const { configDir, endpoint } = setup();
+    const { file, secret } = writeCopy({ configDir, endpoint });
+    const channel = await channelFor(endpoint, { secret });
+    let authed = 0;
+    channel.on('ready', () => { authed += 1; });
+    const { GuiError } = require('../src/gui/errors');
+    const checked = [];
+    const code = await runSessionHelper({
+      sessionFile: file,
+      deps: { ...quick, backend: fakeBackend([REPORT]), checkUserCopyTrust: async (o) => { checked.push(o); throw new GuiError('session_file_insecure', 'not owned by an administrator'); } }
+    });
+    assert.equal(code, 1);
+    assert.equal(authed, 0);
+    assert.equal(checked.length, 1);
+    assert.equal(checked[0].path, file);
+    assert.equal(checked[0].platform, process.platform);
+  });
+
+  it('finding 3: the owner check runs again before every reconnect, and a file that stopped passing ends the helper', async () => {
+    const { configDir, endpoint } = setup();
+    const { file, secret } = writeCopy({ configDir, endpoint });
+    const channel = await channelFor(endpoint, { secret });
+    const { GuiError } = require('../src/gui/errors');
+    let checks = 0;
+    let swapped = false;
+    const done = runSessionHelper({
+      sessionFile: file,
+      deps: { ...quick, backend: fakeBackend([REPORT]), checkUserCopyTrust: async () => { checks += 1; if (swapped) throw new GuiError('session_file_insecure', 'the file was replaced'); } }
+    });
+    await once(channel, 'ready');
+    assert.equal(checks, 2, 'once at the start, once before the connection');
+    swapped = true;
+    channel._destroy(channel.current, 'test');
+    assert.equal(await done, 1);
+    assert.equal(checks, 3);
+  });
+
   it('exits 1 when the per-user file is missing', async () => {
     const { base } = setup();
     assert.equal(await runSessionHelper({ sessionFile: path.join(base, 'nope.json'), deps: { ...quick, backend: fakeBackend([REPORT]) } }), 1);

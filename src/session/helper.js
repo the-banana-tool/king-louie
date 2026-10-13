@@ -9,7 +9,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { createLogger } = require('../logging');
-const { readUserCopy, userCopyPath } = require('../gui/session-secret');
+const { readUserCopy, userCopyPath, checkUserCopyTrust } = require('../gui/session-secret');
 const { connectToService, createOpHandler } = require('./connection');
 const { selectBackend: defaultSelect, loadBackend, NO_BACKEND_REPORT } = require('./backends');
 const { adminConfigDir, defaultServiceDataDir } = require('../platform/paths');
@@ -71,11 +71,16 @@ async function runSessionHelper({ env = process.env, platform = process.platform
     ...(deps.rootUid === undefined ? {} : { rootUid: deps.rootUid }),
     ...(deps.getuid ? { getuid: deps.getuid } : {})
   };
+  // Who owns the file, before it is believed (Windows; security review
+  // finding 3). deps.trustCurrentUserAsOwner: tests only, like deps.rootUid.
+  const checkTrust = deps.checkUserCopyTrust
+    || ((options) => checkUserCopyTrust({ ...options, alsoTrustCurrentUser: deps.trustCurrentUserAsOwner === true }));
   const connect = deps.connect || connectToService;
   const delays = deps.delays || RECONNECT_DELAYS;
   let file;
   try {
     file = sessionFile || env.KL_SESSION_FILE || defaultSessionFile({ platform, env });
+    await checkTrust({ path: file, platform, env });
     readUserCopy({ path: file, ...readOptions });
   } catch (err) {
     log.error(`${err.message}`);
@@ -99,6 +104,8 @@ async function runSessionHelper({ env = process.env, platform = process.platform
   while (!(signal && signal.aborted)) {
     let copy;
     try {
+      // Again before every connection: the file is re-read each time.
+      await checkTrust({ path: file, platform, env });
       copy = readUserCopy({ path: file, ...readOptions });
     } catch (err) {
       log.error(err.message);

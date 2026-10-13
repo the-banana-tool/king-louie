@@ -79,6 +79,9 @@ function deps(s, extra = {}) {
     configDir: s.configDir,
     ipcDir: s.ipcDir,
     runIcacls: () => {},
+    // The real check runs PowerShell against the config dir's ACL; a temp
+    // dir would fail it, and it is the installers' to test.
+    verifyConfigDir: () => {},
     execute: async (steps) => { executed.push(steps); },
     entryPath: '/opt/kl/bin/king-louie-service.js',
     nodePath: '/usr/bin/node',
@@ -472,6 +475,55 @@ describe('finding 13e: session uninstall for an account that no longer resolves'
     assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s, { resolveSessionUser: gone, isTTY: () => false }) }), 2);
     assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s, { resolveSessionUser: gone, confirm: async () => false }) }), 1);
     assert.deepEqual(tree(s.base), before);
+  });
+});
+
+// Security review finding 3: on Windows the config dir's owner and ACL are
+// verified before the secret goes into it.
+describe('finding 3: session install verifies the Windows config dir', () => {
+  it('runs the check after consent and before anything is written; a failure refuses the install', { skip: POSIX }, async () => {
+    const s = setup();
+    const before = tree(s.base);
+    const order = [];
+    const t = io();
+    const d = deps(s, {
+      confirm: async () => { order.push('consent'); return true; },
+      verifyConfigDir: (configDir) => { order.push('verify'); assert.equal(configDir, s.configDir); assert.deepEqual(tree(s.base), before); throw new Error(`the ACL of ${configDir} is not safe`); }
+    });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 1);
+    assert.deepEqual(order, ['consent', 'verify']);
+    assert.match(t.err.join(''), /is not safe/);
+    assert.match(t.err.join(''), /Nothing was written/);
+    assert.deepEqual(tree(s.base), before);
+    assert.equal(d.executed.length, 0);
+    // A config dir that passes installs.
+    const ok = deps(s, { verifyConfigDir: () => { order.push('verify-ok'); } });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: ok }), 0);
+    assert.equal(order.at(-1), 'verify-ok');
+  });
+
+  it('the real check (the installers\' script, in PowerShell) refuses a config dir that is not the administrators\'', { skip: POSIX }, async () => {
+    // A temp dir this user owns, with the ACL it inherited: exactly what
+    // must be refused. The script only reads it.
+    const s = setup();
+    const before = tree(s.base);
+    const t = io();
+    const d = deps(s, { verifyConfigDir: undefined });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 1);
+    assert.match(t.err.join(''), /is not safe|not Administrators or SYSTEM|unexpected ACE/);
+    assert.match(t.err.join(''), /Nothing was written/);
+    assert.deepEqual(tree(s.base), before);
+    assert.equal(d.executed.length, 0);
+  });
+
+  it('a dry run verifies nothing (the check can create the directory), and off Windows there is no such check', async () => {
+    const s = setup();
+    let called = 0;
+    const d = deps(s, { verifyConfigDir: () => { called += 1; } });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    assert.equal(called, 0);
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    assert.equal(called, POSIX ? 0 : 1);
   });
 });
 

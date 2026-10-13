@@ -101,6 +101,23 @@ function common(dataDir, deps, io) {
   };
 }
 
+// The installers' check of the Windows config dir (WINDOWS_CONFIG_DIRS_SCRIPT:
+// framework types only, the path in an environment variable). Throws with
+// the script's own one-line reason.
+function verifyWindowsConfigDir(configDir) {
+  const { execFileSync } = require('child_process');
+  const { WINDOWS_CONFIG_DIRS_SCRIPT } = require('../installers');
+  const { windowsPowerShellExe } = require('../../platform/windows-paths');
+  try {
+    execFileSync(windowsPowerShellExe(), ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_CONFIG_DIRS_SCRIPT], {
+      env: { ...process.env, KL_CONFIG_DIR: configDir }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000, windowsHide: true
+    });
+  } catch (err) {
+    const first = String(err.stderr || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean);
+    throw new Error(first || `the config dir ${configDir} could not be verified (${err.code || 'powershell failed'})`);
+  }
+}
+
 // Windows account names are compared case-insensitively and stored bare.
 const bareName = (name, platform) => (platform === 'win32' ? String(name).split('\\').pop() : String(name));
 
@@ -202,6 +219,17 @@ async function install({ flags, dataDir, io, deps }) {
   // started with, so a new endpoint id would leave the helper with nowhere
   // to reconnect to until the service restarted. Only for the same identity
   // and a file that verified above (R-F5-10); anything else gets a new one.
+  // Windows (security review finding 3): the config dir the secret goes
+  // into must be the administrators' (owner and ACL, and no link or foreign
+  // owner above it): the installers' own create-or-verify check. After
+  // consent, because it creates the directory when it is missing.
+  if (c.platform === 'win32') {
+    try {
+      (deps.verifyConfigDir || verifyWindowsConfigDir)(c.configDir);
+    } catch (err) {
+      throw new Error(`${String(err.message).replace(/[\s.]+$/, '')}. Nothing was written.`);
+    }
+  }
   const minted = S.mintSessionSecret();
   const secret = minted.secret;
   const endpointId = rotates && installed.endpointId ? installed.endpointId : minted.endpointId;

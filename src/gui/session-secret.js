@@ -229,6 +229,13 @@ function windowsUserAclArgs(file, sid, env = process.env) {
   return [windowsIcaclsExe(env), file, '/inheritance:r', '/grant:r', `*${sid}:(R)`, '*S-1-5-18:(F)', '*S-1-5-32-544:(F)'];
 }
 
+// The copy's owner becomes Administrators, not whichever administrator ran
+// the install: the owner can always rewrite the ACL (as desktop pair does
+// for its bridge file).
+function windowsUserOwnerArgs(file, env = process.env) {
+  return [windowsIcaclsExe(env), file, '/setowner', '*S-1-5-32-544'];
+}
+
 function defaultRunIcacls(argv) {
   execFileSync(argv[0], argv.slice(1), { stdio: 'ignore', windowsHide: true });
 }
@@ -246,18 +253,39 @@ function writeUserCopy({ platform = process.platform, configDir, user, uid, gid,
     if (err.code !== 'ENOENT') throw err;
   }
   const flags = fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW || 0);
+  const text = `${JSON.stringify(content, null, 2)}\n`;
+  if (platform === 'win32') {
+    // Windows (security review finding 3): a new file starts with the ACL it
+    // inherits, so it is created empty, narrowed to this user (read),
+    // SYSTEM and Administrators and given to Administrators, and only then
+    // written. If any of that fails the file is removed: the secret is never
+    // in a file whose ACL nobody set.
+    fs.closeSync(fs.openSync(file, flags, 0o600));
+    try {
+      runIcacls(windowsUserAclArgs(file, sid, env));
+      runIcacls(windowsUserOwnerArgs(file, env));
+      const fd = fs.openSync(file, 'r+');
+      try {
+        fs.writeSync(fd, text);
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (err) {
+      try { fs.unlinkSync(file); } catch { /* already gone */ }
+      throw err;
+    }
+    return file;
+  }
   const fd = fs.openSync(file, flags, 0o600);
   try {
-    fs.writeSync(fd, `${JSON.stringify(content, null, 2)}\n`);
-    if (platform !== 'win32') {
-      fs.fchownSync(fd, uid, gid);
-      fs.fchmodSync(fd, 0o600);
-    }
+    fs.writeSync(fd, text);
+    fs.fchownSync(fd, uid, gid);
+    fs.fchmodSync(fd, 0o600);
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
   }
-  if (platform === 'win32') runIcacls(windowsUserAclArgs(file, sid, env));
   return file;
 }
 
@@ -299,6 +327,40 @@ function readUserCopy({ path: file, platform = process.platform, getuid = () => 
   return { secret: Buffer.from(raw.secret, 'hex'), endpoint: raw.endpoint, nodeId: raw.node_id };
 }
 
+// Windows: who owns the helper's file and its directory (security review
+// finding 3). readUserCopy cannot see that (Node reports no owner there),
+// and a file anyone else could put in place would point the helper at a
+// service of their choosing. Both must be owned by SYSTEM or Administrators
+// and neither may be a link. The read is the installers' handle-based
+// inspector in a PowerShell child, so this is async and awaited, never run
+// on a synchronous path. Off Windows readUserCopy checks uid and modes
+// itself. alsoTrustCurrentUser: tests only, whose temp dirs they own.
+const WINDOWS_ADMIN_OWNERS = Object.freeze(['S-1-5-18', 'S-1-5-32-544']);
+async function checkUserCopyTrust({ path: file, platform = process.platform, env = process.env, alsoTrustCurrentUser = false,
+  inspectOwners = (paths, options) => require('../desktop-bridge/pairing').inspectWindowsOwnersAsync(paths, options) } = {}) {
+  if (platform !== 'win32') return;
+  const dir = path.win32.dirname(file);
+  const paths = [dir, file];
+  let report;
+  try {
+    report = await inspectOwners(paths, { env });
+  } catch {
+    throw new GuiError('session_file_insecure', `the owners of ${file} and its directory could not be read`);
+  }
+  // No evidence is not trust.
+  if (!report || !Array.isArray(report.entries) || report.entries.length !== paths.length) {
+    throw new GuiError('session_file_insecure', `the owners of ${file} and its directory could not be read`);
+  }
+  report.entries.forEach((entry, i) => {
+    const what = paths[i];
+    if (!entry) throw new GuiError('session_not_installed', `${what} is missing (ask the administrator to run "session install")`);
+    if (entry.link) throw new GuiError('session_file_insecure', `${what} is a link`);
+    const owner = typeof entry.owner === 'string' ? entry.owner : null;
+    const ok = owner !== null && (WINDOWS_ADMIN_OWNERS.includes(owner) || (alsoTrustCurrentUser === true && SID_RE.test(owner) && owner === report.me));
+    if (!ok) throw new GuiError('session_file_insecure', `${what} is not owned by SYSTEM or Administrators`);
+  });
+}
+
 function resolveSessionUser(name, { platform = process.platform, execFile = (f, a, o) => execFileSync(f, a, { encoding: 'utf8', windowsHide: true, ...o }), env = process.env, exists = fs.existsSync } = {}) {
   if (typeof name !== 'string' || !name || name.startsWith('-') || name.length > 104 || /[\u0000-\u001f"]/.test(name)) {
     throw new GuiError('invalid_params', `not a user name: ${JSON.stringify(name)}`);
@@ -333,6 +395,6 @@ function resolveSessionUser(name, { platform = process.platform, execFile = (f, 
 
 module.exports = {
   mintSessionSecret, canonicalPath, writeCanonical, readCanonical, canonicalMtime, inspectCanonical, sameSessionIdentity,
-  userCopyPath, writeUserCopy, readUserCopy, removeUserCopy,
+  userCopyPath, writeUserCopy, readUserCopy, removeUserCopy, checkUserCopyTrust, windowsUserOwnerArgs,
   endpointPath, sessionIpcDir, assertSafeComponents, windowsUserAclArgs, resolveSessionUser
 };
