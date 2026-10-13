@@ -717,6 +717,39 @@ describe('input tools', () => {
     assert.match((await tools.Type.execute({ text: 'x hunter2hunter2' }, opts({ vault }))).error, /^text_looks_secret/);
   });
 
+  // Third security review, finding 1, through the tools: a junk character
+  // after each piece, taken away again with End and Backspace, or Delete.
+  it('third review finding 1: junk removed after each piece does not hide a vault value or a command', async () => {
+    const vault = { list: () => ['k'], get: () => 'Zq7mK2pLx9Rt4wYb' };
+    const v = () => opts({ vault });
+    await withLease();
+    for (const piece of ['Zq7#', 'mK2#', 'pLx#', '9Rt#']) {
+      leases.current().inputTimes.length = 0; // not the rate limit's test
+      assert.equal((await tools.Type.execute({ text: piece }, v())).ok, true, piece);
+      assert.equal((await tools.Key.execute({ keys: 'end' }, v())).ok, true);
+      assert.equal((await tools.Key.execute({ keys: 'backspace' }, v())).ok, true);
+    }
+    assert.deepEqual(leases.current().typed.segments, ['Zq7', 'mK2', 'pLx', '9Rt']);
+    assert.match((await tools.Type.execute({ text: '4wYb' }, v())).error, /^text_looks_secret/);
+    leases.current().typed.reset();
+    for (const piece of ['Zq7#', 'mK2#', 'pLx#', '9Rt#']) {
+      leases.current().inputTimes.length = 0; // not the rate limit's test
+      assert.equal((await tools.Type.execute({ text: piece }, v())).ok, true, piece);
+      assert.equal((await tools.Key.execute({ keys: 'left' }, v())).ok, true);
+      assert.equal((await tools.Key.execute({ keys: 'delete' }, v())).ok, true);
+    }
+    assert.equal(leases.current().typed.lossy, true);
+    assert.match((await tools.Type.execute({ text: '4wYb' }, v())).error, /^text_looks_secret/);
+    // A double click selects: what is typed next replaces it.
+    leases.current().typed.reset();
+    leases.current().inputTimes.length = 0;
+    assert.equal((await tools.Type.execute({ text: 'git##' }, opts())).ok, true);
+    const shot = await tools.Screenshot.execute({ app: 'calculator' }, opts());
+    assert.equal((await tools.Click.execute({ screenshot_id: shot.screenshot_id, x: 5, y: 5, count: 2 }, opts())).ok, true);
+    assert.equal(leases.current().typed.selecting, true);
+    assert.match((await tools.Type.execute({ text: ' push origin' }, opts())).error, /^text_matches_always_confirm/);
+  });
+
   it('Key: grammar, denied chords, and printable presses feed the typed buffer', async () => {
     await withLease();
     assert.match((await tools.Key.execute({ keys: 'ctrl+v' }, opts())).error, /^key_denied/);

@@ -7,7 +7,7 @@ const GUI_ERROR_CODES = Object.freeze([
   'capability_unavailable', 'invalid_params', 'app_not_allowlisted', 'app_type_not_supported', 'file_not_found',
   'path_changed', 'app_required', 'app_not_running', 'stale_screenshot', 'window_minimized', 'outside_window',
   'point_obscured', 'foreground_mismatch', 'user_active', 'screen_locked', 'target_elevated', 'invalid_text',
-  'text_matches_always_confirm', 'text_looks_secret', 'key_invalid', 'key_denied', 'middle_click_denied',
+  'text_matches_always_confirm', 'text_looks_secret', 'text_guard_limit', 'key_invalid', 'key_denied', 'middle_click_denied',
   'rate_limited', 'lease_required', 'lease_suspended', 'lease_suspended_no_contact', 'lease_expired', 'lease_revoked', 'lease_busy',
   'lease_pending', 'lease_denied', 'lease_request_expired', 'job_required', 'job_closed', 'approval_unavailable', 'helper_disconnected',
   'helper_already_connected', 'frame_rejected', 'auth_failed', 'op_timeout', 'unknown_op', 'backend_failed',

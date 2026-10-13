@@ -1480,20 +1480,47 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   the point is the screenshot's own window (all three backends).
 - **The typed buffer** (`TypedBuffer`, `text-guard.js`) models the keys:
   text and printable keys append, Enter is a line break (it no longer wipes
-  the buffer), backspace removes one, and anything that moves the caret or
-  edits unseen (navigation keys, tab, delete, every ctrl/alt/meta chord, a
-  click, a drag, and every suspension of the lease) leaves what was typed as
-  a piece of unknown place; only a new lease starts with nothing typed.
-  Text after that is refused when at most four runs of the pieces (one from
-  the new text) spell a vault value in any arrangement, or when the pieces
-  spell it in the order they were typed, in any number, up to the text being
-  typed. The history keeps 64 pieces and 4096 code points. The residuals
-  are listed in that file's header: more than four pieces typed out of
-  order, text the app adds or moves itself, a paste chosen from a menu with
-  a click, text already in the field, and the keyboard layout (a key press
-  is taken for its US character: `SHIFTED` in `keys.js`). A short or
-  repetitive vault value can refuse ordinary typing that happens to spell
-  it piece by piece.
+  the buffer), backspace removes one, and anything that moves the caret
+  (navigation keys, tab, a click, a drag, and every suspension of the
+  lease) leaves what was typed as a piece of unknown place; only a new
+  lease starts with nothing typed. Text after that is refused when at most
+  four runs of the pieces (one from the new text) spell a vault value in
+  any arrangement, or when the pieces spell it in the order they were
+  typed, in any number, up to the text being typed. The history keeps 64
+  pieces and 4096 code points.
+- **Removals (third security review, finding 1).** The guard follows a
+  bare Backspace: in the text at the caret, and past its start after End
+  (it takes from the end of the piece typed last, and of the ones before it
+  while nothing but End has moved the caret; what it took is kept as the
+  piece's `cut`, and the piece is checked with and without it). Nothing
+  else that removes text is followed. Those mark the field **lossy** for
+  the rest of the lease (`keyEffect` / `applyKey` in `text-guard.js`, the
+  one place that says what a key does to the buffer): Delete, Insert,
+  Backspace with a modifier, every ctrl/alt/meta chord that is not a caret
+  key, a Backspace where the caret's place is unknown (or after End once
+  the caret has been elsewhere), a removal whose outcome is unknown, and
+  text or a Backspace after a selection (shift with a caret key, a click
+  that is not a plain single left click, a drag). In a lossy field a link
+  of the in-order check may be a piece less up to `LOSSY_EDGE` (4)
+  characters at each end, or any run of `LOSSY_RUN` (3) or more from it,
+  and the command and token-prefix checks also run with up to 4 characters
+  dropped where pieces join (the same number at every join). Not followed,
+  as that file's header lists: a removal that completes a value or command
+  with nothing typed after it (the guard checks when text is typed, never
+  when it is removed), pieces of one or two characters with more than 4
+  removed beside each, a command whose joins lost different numbers of
+  characters, what tab, escape or a function key does in the app, a menu's
+  Cut/Delete/Paste, more than four pieces typed out of order, text the app
+  adds or moves itself, text already in the field, and the keyboard layout
+  (a key press is taken for its US character: `SHIFTED` in `keys.js`). A
+  short or repetitive vault value can refuse ordinary typing that happens
+  to spell it piece by piece, more easily in a lossy field.
+- **The guard's cost is bounded (third review, finding 2).** A vault value
+  over 512 characters (`VALUE_FOLLOW_MAX`) is checked as a substring of the
+  text only, never across pieces. One check has `STEP_BUDGET` steps for its
+  work across pieces and refuses with `text_guard_limit` when they run out
+  (fail closed; the history that caused it lasts until a new lease). Tests
+  pass `stepBudget` to reach it.
 - **Typed text goes out in pieces** of at most `TYPE_CHUNK` (40) code
   points, the lease checked before each (`GuiBroker#input`), so a Stop
   lands within one piece; a failure carries what went out (`err.typed`) and
