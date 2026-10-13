@@ -45,7 +45,7 @@ describe('mint and the canonical copy', () => {
     S.writeCanonical({ configDir: config, cipher, secret, endpointId, nodeId: 'kl-hnef32472qzibi5r', sessionUser: 'alice', svcGid: POSIX ? GID : null });
     const raw = JSON.parse(fs.readFileSync(S.canonicalPath(config), 'utf8'));
     assert.match(raw.secret, /^klc1:/);
-    assert.deepEqual(Object.keys(raw).sort(), ['endpoint_id', 'node_id', 'rotated_at', 'secret', 'session_sid', 'session_user', 'v']);
+    assert.deepEqual(Object.keys(raw).sort(), ['endpoint_id', 'node_id', 'rotated_at', 'secret', 'session_sid', 'session_uid', 'session_user', 'v']);
     if (POSIX) assert.equal(fs.statSync(S.canonicalPath(config)).mode & 0o777, 0o640);
     const read = S.readCanonical({ configDir: config, cipher, adminUid: UID, geteuid: () => UID });
     assert.ok(read.secret.equals(secret));

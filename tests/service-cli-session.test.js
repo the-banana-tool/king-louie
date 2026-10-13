@@ -42,6 +42,11 @@ function io() {
 }
 
 const account = (name) => ({ user: name, uid: UID, gid: GID, home: os.homedir(), sid: POSIX ? null : 'S-1-5-21-1-2-3-1001' });
+// Another person: a different SID (uid off Windows), whatever the name. On
+// POSIX nothing is ever written for this uid (a test process cannot chown to
+// it): every use of it is an install that must be refused.
+const otherAccount = (name) => ({ user: name, uid: UID + 1, gid: GID, home: os.homedir(), sid: POSIX ? null : 'S-1-5-21-9-9-9-2001' });
+const who = (a) => (POSIX ? `uid ${a.uid}` : `SID ${a.sid}`);
 
 function deps(s, extra = {}) {
   const executed = [];
@@ -118,9 +123,9 @@ describe('session install', () => {
     const t = io();
     const before = tree(s.base);
     assert.ok(Object.keys(before).some((k) => k.endsWith(`${account('alice').sid || 'alice'}.json`)), 'the snapshot holds the first install');
-    const bob = deps(s);
+    const bob = deps(s, { resolveSessionUser: (name) => (name === 'bob' ? otherAccount(name) : account(name)) });
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'bob' }, dataDir: s.dataDir, io: t.io, deps: bob }), 1);
-    assert.match(t.err.join(''), /session_user_mismatch: installed for "alice"; run "session uninstall --user alice" first/);
+    assert.match(t.err.join(''), /session_user_mismatch: installed for "alice" \((SID|uid) [^)]+\), not bob \((SID|uid) [^)]+\); run "session uninstall --user alice" first/);
     assert.deepEqual(tree(s.base), before, 'the refused install wrote, changed and removed nothing');
     assert.equal(bob.executed.length, 0, 'no login-start step ran for bob');
     // Nothing of bob's was written, and alice's install is untouched.
@@ -266,6 +271,104 @@ describe('R-F5-9: session install and uninstall ask for consent', () => {
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
     assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
     assert.deepEqual(tree(s.base), before);
+  });
+});
+
+// R-F5-10 (owner ruling, 2026-10-12): who is installed is the recorded SID
+// (uid off Windows), never the name; a file that cannot answer refuses.
+describe('R-F5-10: the second-user check compares identities and fails closed', () => {
+  // The same bare name for two different people: a local account and a
+  // domain account on Windows, a deleted and re-created user elsewhere.
+  const sameNameOtherPerson = POSIX ? 'alice' : 'CORP\\alice';
+
+  it('the same name with another SID (uid) is another user: refused, nothing written', async () => {
+    const s = setup();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) }), 0);
+    const before = tree(s.base);
+    const t = io();
+    const d = deps(s, { resolveSessionUser: (name) => otherAccount(name) });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: sameNameOtherPerson }, dataDir: s.dataDir, io: t.io, deps: d }), 1);
+    const err = t.err.join('');
+    assert.match(err, /^session_user_mismatch: installed for "alice"/);
+    assert.ok(err.includes(who(account('alice'))) && err.includes(who(otherAccount('alice'))), err);
+    assert.match(err, /run "session uninstall --user alice" first/);
+    assert.deepEqual(tree(s.base), before);
+    assert.equal(d.executed.length, 0);
+  });
+
+  it('the same SID (uid) under another spelling of the name is the same user: the install rotates', async () => {
+    const s = setup();
+    const d = deps(s);
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    const first = canonical(s.configDir);
+    assert.equal(POSIX ? first.session_uid : first.session_sid, POSIX ? UID : account('alice').sid, 'the identity is recorded');
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: POSIX ? 'alice' : 'CORP\\alice' }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    assert.notEqual(canonical(s.configDir).endpoint_id, first.endpoint_id);
+  });
+
+  // Each damages an installed helper file in a way that leaves "who is
+  // installed" unanswerable.
+  const damages = {
+    'is not JSON': (file) => fs.writeFileSync(file, '{ not json'),
+    'records no identity': (file) => {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      delete raw.session_sid;
+      delete raw.session_uid;
+      fs.writeFileSync(file, JSON.stringify(raw));
+    },
+    'records a malformed identity': (file) => {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      fs.writeFileSync(file, JSON.stringify({ ...raw, session_sid: 'alice', session_uid: 'alice' }));
+    },
+    'does not decrypt (another master key)': (file) => {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      fs.writeFileSync(file, JSON.stringify({ ...raw, secret: createAesGcmCipher(crypto.randomBytes(32)).encryptString('ab'.repeat(32)) }));
+    },
+    'holds no valid secret': (file) => {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      fs.writeFileSync(file, JSON.stringify({ ...raw, secret: createAesGcmCipher(KEY).encryptString('nope') }));
+    },
+    'cannot be read as a file (a directory)': (file) => { fs.unlinkSync(file); fs.mkdirSync(file); }
+  };
+
+  for (const [name, damage] of Object.entries(damages)) {
+    it(`an existing helper file that ${name} refuses a new install and writes nothing; uninstall clears it`, async () => {
+      const s = setup();
+      assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) }), 0);
+      const file = S.canonicalPath(s.configDir);
+      damage(file);
+      if (POSIX && fs.statSync(file).isFile()) fs.chmodSync(file, 0o640);
+      const before = tree(s.base);
+      // Refused for the same user and for another one alike.
+      for (const d of [deps(s), deps(s, { resolveSessionUser: (n) => otherAccount(n) })]) {
+        const t = io();
+        const code = await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d });
+        assert.notEqual(code, 0);
+        assert.match(t.err.join(''), /^session_file_invalid: /);
+        assert.match(t.err.join(''), /run "session uninstall --user NAME" to clear it, or fix the file/);
+        assert.doesNotMatch(t.err.join(''), /klc1:/, 'no ciphertext in the message');
+        assert.equal(d.executed.length, 0);
+        assert.deepEqual(tree(s.base), before, 'the refused install wrote nothing');
+      }
+      // The owner is never stuck: uninstall says it clears the damaged file, and does.
+      const t = io();
+      assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: deps(s) }), 0);
+      if (/JSON|identity|directory/.test(name)) assert.match(t.out.join(''), /cannot tell who it was installed for/);
+      assert.equal(fs.existsSync(file), false);
+      assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) }), 0);
+      assert.equal(canonical(s.configDir).session_user, 'alice');
+    });
+  }
+
+  it('uninstalling another user leaves the installed user\'s helper file alone', async () => {
+    const s = setup();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) }), 0);
+    const before = canonical(s.configDir);
+    const t = io();
+    const d = deps(s, { resolveSessionUser: (name) => otherAccount(name) });
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: sameNameOtherPerson }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
+    assert.deepEqual(canonical(s.configDir), before, 'alice (by SID/uid) is still installed');
+    assert.match(t.out.join(''), /stays: it is installed for "alice"/);
   });
 });
 

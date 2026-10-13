@@ -32,14 +32,6 @@ function readNodeId(dataDir) {
   }
 }
 
-function readInstalledUser(configDir) {
-  try {
-    return JSON.parse(fs.readFileSync(require('../../gui/session-secret').canonicalPath(configDir), 'utf8')).session_user || null;
-  } catch {
-    return null;
-  }
-}
-
 async function readStdin(stdin) {
   const chunks = [];
   for await (const chunk of stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8'));
@@ -106,10 +98,6 @@ async function install({ flags, dataDir, io, deps }) {
   // Everything from here to the question only reads.
   const account = c.resolveUser(flags.user);
   const sessionUser = bareName(flags.user, c.platform);
-  const installed = readInstalledUser(c.configDir);
-  if (installed && installed.toLowerCase() !== sessionUser.toLowerCase()) {
-    throw new GuiError('session_user_mismatch', `installed for "${installed}"; run "session uninstall --user ${installed}" first`);
-  }
   const nodeId = readNodeId(dataDir);
   if (!nodeId) throw new Error(`no node identity in ${dataDir}: start the service once first`);
   const resolveKey = deps.resolveKey || (() => require('../../platform/master-key').resolveMasterKeyReadOnly({ dataDir }));
@@ -117,6 +105,20 @@ async function install({ flags, dataDir, io, deps }) {
   if (!resolved) throw new Error(`no master key for ${dataDir}: start the service once first`);
   (deps.verifyKey || ((r) => require('../../platform/master-key').verifyKeyCheck({ dataDir, key: r.key, source: r.source, create: false })))(resolved);
   const cipher = require('../../platform/cipher').createAesGcmCipher(resolved.key);
+  // R-F5-10: who is installed is the recorded SID (uid off Windows), never
+  // the name, and a file that cannot say so refuses the install. Checked with
+  // the cipher, so "installed" means what the service itself would accept.
+  const installed = S.inspectCanonical({
+    configDir: c.configDir, platform: c.platform, cipher,
+    ...(deps.adminUid === undefined ? {} : { adminUid: deps.adminUid }), ...(deps.geteuid ? { geteuid: deps.geteuid } : {})
+  });
+  if (installed.state === 'invalid') {
+    throw new GuiError('session_file_invalid', `${installed.file} ${installed.reason}, so this cannot tell who the helper is installed for; run "session uninstall --user NAME" to clear it, or fix the file, then install again`);
+  }
+  if (installed.state === 'installed' && !S.sameSessionIdentity(installed, account, c.platform)) {
+    throw new GuiError('session_user_mismatch', `installed for "${installed.user}" (${identityText(installed, c.platform)}), not ${sessionUser} (${identityText(account, c.platform)}); run "session uninstall --user ${installed.user}" first`);
+  }
+  const rotates = installed.state === 'installed';
 
   const ipcDir = deps.ipcDir || S.sessionIpcDir(c.platform);
   const sessionFile = S.userCopyPath({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid });
@@ -137,7 +139,7 @@ async function install({ flags, dataDir, io, deps }) {
   io.stdout.write(`  grants: a helper that runs as ${sessionUser} in ${sessionUser}'s desktop session. Through it this node's service can launch the apps in gui.apps, capture their windows and, under a lease signed on the owner's phone, click and type in them.\n`);
   io.stdout.write(`  starts at every login of ${sessionUser}: ${loginStartText({ platform: c.platform, account, sessionUser })}\n`);
   io.stdout.write(`  writes: ${S.canonicalPath(c.configDir)} (the service's secret) and ${sessionFile} (${sessionUser}'s copy)${c.platform === 'win32' ? '' : `; creates ${ipcDir}`}\n`);
-  if (installed) io.stdout.write(`  replaces the secret installed for ${installed}; a running helper reconnects with the new one\n`);
+  if (rotates) io.stdout.write(`  replaces the secret installed for ${installed.user}; a running helper reconnects with the new one\n`);
   if (!(await consented({ flags, c, question: `Install the session helper for ${sessionUser}? [y/N] ` }))) {
     io.stderr.write('Not installing without confirmation. Nothing was written.\n');
     return 1;
@@ -159,7 +161,7 @@ async function install({ flags, dataDir, io, deps }) {
     fs.chownSync(ipcDir, svc.uid, svc.gid);
     fs.chmodSync(ipcDir, 0o711);
   }
-  S.writeCanonical({ configDir: c.configDir, cipher, secret, endpointId, nodeId, sessionUser, sessionSid: account.sid || null, svcGid: svc ? svc.gid : null, platform: c.platform });
+  S.writeCanonical({ configDir: c.configDir, cipher, secret, endpointId, nodeId, sessionUser, sessionSid: account.sid || null, sessionUid: c.platform === 'win32' ? null : account.uid, svcGid: svc ? svc.gid : null, platform: c.platform });
   S.writeUserCopy({
     platform: c.platform, configDir: c.configDir, user: sessionUser, uid: account.uid, gid: account.gid, sid: account.sid,
     content: { v: 1, node_id: nodeId, endpoint, secret: secret.toString('hex'), rotated_at: new Date().toISOString() },
@@ -168,7 +170,7 @@ async function install({ flags, dataDir, io, deps }) {
   await c.execute(steps, { dryRun: false, io, entryPath: c.entryPath, nodePath: c.nodePath });
   io.stdout.write(`Session helper installed for ${sessionUser} (node ${nodeId}).\n`);
   io.stdout.write(`  service secret: ${S.canonicalPath(c.configDir)}\n  user copy:      ${sessionFile}\n  endpoint:       ${endpoint}\n`);
-  io.stdout.write(installed ? 'The secret was rotated; the running service drops the old connection and the helper reconnects.\n' : 'Restart the King Louie service so it starts waiting for the helper.\n');
+  io.stdout.write(rotates ? 'The secret was rotated; the running service drops the old connection and the helper reconnects.\n' : 'Restart the King Louie service so it starts waiting for the helper.\n');
   if (c.platform === 'darwin') {
     io.stdout.write(`At the next login macOS asks for Screen Recording and Accessibility for ${c.nodePath}. Those permissions cover every script ${sessionUser} runs with that node binary.\n`);
   }
@@ -191,22 +193,32 @@ async function uninstall({ flags, dataDir, io, deps }) {
     await c.execute(steps, { dryRun: true, io, entryPath: c.entryPath, nodePath: c.nodePath });
     return 0;
   }
-  const installed = readInstalledUser(c.configDir);
-  const removeCanonical = Boolean(installed) && installed.toLowerCase() === sessionUser.toLowerCase();
+  // R-F5-10: by identity, and with no master key (uninstall must work
+  // without one). A helper file that cannot say who it was installed for is
+  // removed too, so a damaged file never leaves the owner unable to install.
+  const installed = S.inspectCanonical({ configDir: c.configDir, platform: c.platform });
+  const mine = installed.state === 'installed' && S.sameSessionIdentity(installed, account, c.platform);
+  const damaged = installed.state === 'invalid';
   // R-F5-9: what is about to be removed, then the question.
   let nodeName = null;
   try { nodeName = c.nodeName(); } catch { nodeName = null; } // a bad node.yaml must not block a removal
   io.stdout.write(`Removing the session helper of ${sessionUser} (${identityText(account, c.platform)})${nodeName ? ` on node "${nodeName}"` : ''}:\n`);
   io.stdout.write(`  the login start: ${loginStartText({ platform: c.platform, account, sessionUser })}\n`);
   io.stdout.write(`  ${sessionUser}'s copy of the secret: ${copyFile}\n`);
-  if (removeCanonical) io.stdout.write(`  the service's secret: ${S.canonicalPath(c.configDir)} (desktop apps stay off on this node until "session install" runs again)\n`);
+  if (mine) io.stdout.write(`  the service's secret: ${installed.file} (desktop apps stay off on this node until "session install" runs again)\n`);
+  if (damaged) io.stdout.write(`  the service's helper file: ${installed.file} ${installed.reason}, so this cannot tell who it was installed for; it is removed too. If it was installed for another user, run "session uninstall" for that user as well.\n`);
+  if (installed.state === 'installed' && !mine) io.stdout.write(`  ${installed.file} stays: it is installed for "${installed.user}" (${identityText(installed, c.platform)}), not for this user\n`);
   if (!(await consented({ flags, c, question: `Remove the session helper for ${sessionUser}? [y/N] ` }))) {
     io.stderr.write('Not removing without confirmation. Nothing was removed.\n');
     return 1;
   }
   await c.execute(steps, { dryRun: false, io, entryPath: c.entryPath, nodePath: c.nodePath });
   S.removeUserCopy({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid });
-  if (removeCanonical) fs.unlinkSync(S.canonicalPath(c.configDir));
+  if (mine || damaged) {
+    S.assertSafeComponents(installed.file, { root: c.configDir });
+    // Never follows a link: a link is removed itself, a directory with what is in it.
+    fs.rmSync(installed.file, { recursive: damaged, force: true });
+  }
   io.stdout.write(`Session helper removed for ${sessionUser}.\n`);
   return 0;
 }
@@ -218,8 +230,10 @@ function printProbes(io, probes) {
 async function status({ dataDir, io, deps }) {
   const c = common(dataDir, deps, io);
   const record = (deps.readStatus || ((d) => require('../../gui/status').readGuiStatusRecord({ dataDir: d })))(dataDir);
-  const installed = readInstalledUser(c.configDir);
-  io.stdout.write(installed ? `installed for: ${installed}\n` : 'not installed (session install --user NAME)\n');
+  const installed = require('../../gui/session-secret').inspectCanonical({ configDir: c.configDir, platform: c.platform });
+  if (installed.state === 'installed') io.stdout.write(`installed for: ${installed.user} (${identityText(installed, c.platform)})\n`);
+  else if (installed.state === 'invalid') io.stdout.write(`installed, but ${installed.file} ${installed.reason}: run "session uninstall --user NAME", then "session install --user NAME"\n`);
+  else io.stdout.write('not installed (session install --user NAME)\n');
   if (!record) {
     io.stdout.write('helper: no running service reports a session helper\n');
     return 0;

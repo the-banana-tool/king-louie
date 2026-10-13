@@ -11,7 +11,7 @@ const GUI_ERROR_CODES = Object.freeze([
   'rate_limited', 'lease_required', 'lease_suspended', 'lease_expired', 'lease_revoked', 'lease_busy',
   'lease_pending', 'lease_denied', 'lease_request_expired', 'job_required', 'job_closed', 'approval_unavailable', 'helper_disconnected',
   'helper_already_connected', 'frame_rejected', 'auth_failed', 'op_timeout', 'unknown_op', 'backend_failed',
-  'session_not_installed', 'session_file_insecure', 'session_user_mismatch', 'unsafe_path', 'user_not_found',
+  'session_not_installed', 'session_file_insecure', 'session_file_invalid', 'session_user_mismatch', 'unsafe_path', 'user_not_found',
   'home_missing', 'cancelled'
 ]);
 

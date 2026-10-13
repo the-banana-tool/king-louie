@@ -102,7 +102,7 @@ function writeFileAtomic(file, text, mode) {
   fs.renameSync(tmp, file);
 }
 
-function writeCanonical({ configDir, cipher, secret, endpointId, nodeId, sessionUser, sessionSid = null, svcGid = null, platform = process.platform, now = Date.now() }) {
+function writeCanonical({ configDir, cipher, secret, endpointId, nodeId, sessionUser, sessionSid = null, sessionUid = null, svcGid = null, platform = process.platform, now = Date.now() }) {
   ensureAdminDir(path.join(configDir, 'session'), { root: configDir, platform });
   const file = canonicalPath(configDir);
   assertSafeComponents(file, { root: configDir });
@@ -113,7 +113,10 @@ function writeCanonical({ configDir, cipher, secret, endpointId, nodeId, session
     secret: cipher.encryptString(secret.toString('hex')),
     rotated_at: new Date(now).toISOString(),
     session_user: sessionUser,
-    session_sid: sessionSid
+    // Who that is (R-F5-10): the SID on Windows, the uid elsewhere. The name
+    // alone is not an identity.
+    session_sid: sessionSid,
+    session_uid: sessionUid
   };
   writeFileAtomic(file, `${JSON.stringify(record, null, 2)}\n`, 0o640);
   if (platform !== 'win32') {
@@ -154,8 +157,66 @@ function readCanonical({ configDir, cipher, geteuid = () => (typeof process.gete
     nodeId: raw.node_id,
     sessionUser: raw.session_user,
     sessionSid: raw.session_sid || null,
+    sessionUid: Number.isInteger(raw.session_uid) ? raw.session_uid : null,
     mtimeMs: st.mtimeMs
   };
+}
+
+const defaultGeteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1);
+
+// Who the helper is installed for, decided without trusting the file (owner
+// ruling R-F5-10). 'none': there is no file. 'installed': it records an
+// identity (the SID on Windows, the uid elsewhere; never the bare name).
+// 'invalid': anything else, with a reason that never quotes the file. With a
+// cipher the file is also verified as the service reads it: admin-owned, it
+// decrypts, and it holds a valid secret. Without one (uninstall, which must
+// work with no master key) only the recorded identity is read.
+function inspectCanonical({ configDir, platform = process.platform, cipher = null, geteuid = defaultGeteuid, adminUid = 0 }) {
+  const file = canonicalPath(configDir);
+  const invalid = (reason) => ({ state: 'invalid', file, reason });
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch (err) {
+    return err.code === 'ENOENT' ? { state: 'none', file } : invalid(`cannot be read (${err.code || 'error'})`);
+  }
+  if (st.isSymbolicLink() || !st.isFile()) return invalid('is not a regular file');
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    // Never the parser's own message: it quotes the text it could not parse.
+    return invalid(err instanceof SyntaxError ? 'is not valid JSON' : `cannot be read (${err.code || 'error'})`);
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw) || raw.v !== 1 || typeof raw.session_user !== 'string' || !raw.session_user) {
+    return invalid('is malformed');
+  }
+  const sid = typeof raw.session_sid === 'string' && SID_RE.test(raw.session_sid) ? raw.session_sid : null;
+  const uid = Number.isInteger(raw.session_uid) && raw.session_uid >= 0 ? raw.session_uid : null;
+  if ((platform === 'win32' ? sid : uid) === null) {
+    return invalid(`does not record the ${platform === 'win32' ? 'SID' : 'uid'} it was installed for`);
+  }
+  if (cipher) {
+    try {
+      require('../service/node-config').assertAdminOwned(file, geteuid, adminUid, { decides: 'who the session helper is', selfGrant: 'pose as the session helper' });
+    } catch {
+      return invalid('is not owned by the administrator');
+    }
+    try {
+      readCanonical({ configDir, cipher, geteuid, adminUid });
+    } catch (err) {
+      return invalid(err instanceof GuiError ? 'is malformed or holds no valid secret' : 'does not decrypt under this data dir\'s master key');
+    }
+  }
+  return { state: 'installed', file, user: raw.session_user, sid, uid };
+}
+
+// The same person: the same SID on Windows, the same uid elsewhere.
+function sameSessionIdentity(installed, account, platform = process.platform) {
+  if (platform === 'win32') {
+    return typeof installed.sid === 'string' && typeof account.sid === 'string' && installed.sid.toUpperCase() === account.sid.toUpperCase();
+  }
+  return Number.isInteger(installed.uid) && installed.uid === account.uid;
 }
 
 function windowsUserAclArgs(file, sid, env = process.env) {
@@ -265,7 +326,7 @@ function resolveSessionUser(name, { platform = process.platform, execFile = (f, 
 }
 
 module.exports = {
-  mintSessionSecret, canonicalPath, writeCanonical, readCanonical, canonicalMtime,
+  mintSessionSecret, canonicalPath, writeCanonical, readCanonical, canonicalMtime, inspectCanonical, sameSessionIdentity,
   userCopyPath, writeUserCopy, readUserCopy, removeUserCopy,
   endpointPath, sessionIpcDir, assertSafeComponents, windowsUserAclArgs, resolveSessionUser
 };
