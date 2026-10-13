@@ -99,7 +99,6 @@ function schema(properties, required = []) {
 }
 
 const sha256 = (text) => crypto.createHash('sha256').update(String(text), 'utf8').digest('base64url');
-const first = (text, n) => { const cps = Array.from(text); return cps.length > n ? `${cps.slice(0, n).join('')}…` : text; };
 
 function vaultValues(options) {
   const vault = options && options.vault;
@@ -306,7 +305,10 @@ function buildGuiTools(gui) {
       parameters: schema({ text: { type: 'string', minLength: 1, maxLength: 2000 } }, ['text'])
     }, async (params, options) => {
       const text = params.text;
-      const summary = `Type "${first(text, 60)}" (${Array.from(text).length} chars)`;
+      // R-F5-16: the action log crosses the relay in clear, so it says that
+      // text was typed and how much, never what (as the audit ledger does).
+      const typedCount = Array.from(text).length;
+      const summary = `Typed ${typedCount} character${typedCount === 1 ? '' : 's'}`;
       return runInput('Type', params, options, summary, { length: Array.from(text).length, sha256: sha256(text) }, (lease) => {
         const remote = policy().remote_sessions || {};
         const guard = checkTypeText(text, { alwaysConfirm: remote.always_confirm || [], vaultValues: vaultValues(options), buffer: lease.typed.value, segments: lease.typed.segments });
@@ -322,7 +324,17 @@ function buildGuiTools(gui) {
       parameters: schema({ keys: { type: 'string', minLength: 1, maxLength: 64 }, repeat: { type: 'integer', minimum: 1, maximum: 10 } }, ['keys'])
     }, async (params, options) => {
       const repeat = params.repeat || 1;
-      return runInput('Key', params, options, `Key ${params.keys}${repeat > 1 ? ` x${repeat}` : ''}`, params, (lease) => {
+      // R-F5-16: a key that types a character is text spelled one press at a
+      // time, and a string that is not a key name is whatever the model
+      // wrote there; neither is named in the action log. Keys that are not
+      // text (enter, ctrl+s, a denied chord) keep their names.
+      let keyText = '(not a key name)';
+      try {
+        keyText = printableChar(parseKeys(params.keys, platform)) === null ? String(params.keys).toLowerCase() : '(a character)';
+      } catch (err) {
+        if (isGuiError(err) && err.code === 'key_denied') keyText = String(params.keys).toLowerCase();
+      }
+      return runInput('Key', params, options, `Key ${keyText}${repeat > 1 ? ` x${repeat}` : ''}`, params, (lease) => {
         const combo = parseKeys(params.keys, platform);
         const char = printableChar(combo);
         if (char) {

@@ -120,6 +120,7 @@ public struct LeaseView: Equatable {
     public let leaseId: String
     public let nodeId: String
     public let seq: Int
+    public let toDevice: String
     public let state: String
     public let locked: Bool
     public let remainingS: Int
@@ -131,6 +132,16 @@ public struct LeaseView: Equatable {
 }
 
 public enum Leases {
+    /// Order and addressee (owner ruling R-F5-16). A node numbers the
+    /// statuses and views of one lease with one rising `seq`. A relay can
+    /// hold a message back and deliver it later, or hand one phone a view
+    /// made for another; so a status or view is applied only if its seq is
+    /// newer than the newest one already applied for that lease, and a view
+    /// only if it is addressed to this device. Anything else is dropped.
+    public static func acceptsStatus(_ status: LeaseStatus, appliedSeq: Int) -> Bool { status.seq > appliedSeq }
+
+    public static func acceptsView(_ view: LeaseView, appliedSeq: Int, deviceId: String) -> Bool { view.seq > appliedSeq && view.toDevice == deviceId }
+
     /// A view larger than this is dropped unread (§4.1).
     public static let viewMaxBytes = 262144
 
@@ -204,13 +215,14 @@ public enum Leases {
             guard Digest.sha256B64url(data) == hash else { return (false, "frame_hash_mismatch", nil) }
             frame = data
         }
-        guard let leaseId = m["lease_id"]?.stringValue, let seq = m["seq"]?.intValue, let state = m["state"]?.stringValue else { return (false, "malformed", nil) }
+        guard let leaseId = m["lease_id"]?.stringValue, let seq = m["seq"]?.intValue, let state = m["state"]?.stringValue,
+              let toDevice = m["to_device"]?.stringValue else { return (false, "malformed", nil) }
         let actions: [LeaseAction] = (m["actions"]?.arrayValue ?? []).compactMap { a -> LeaseAction? in
             guard let s = a["seq"]?.intValue, let at = a["at"]?.stringValue, let tool = a["tool"]?.stringValue,
                   let summary = a["summary"]?.stringValue, let result = a["result"]?.stringValue else { return nil }
             return LeaseAction(seq: s, at: at, tool: tool, summary: summary, result: result)
         }
-        let view = LeaseView(leaseId: leaseId, nodeId: pin.id, seq: seq, state: state, locked: m["locked"]?.boolValue ?? false,
+        let view = LeaseView(leaseId: leaseId, nodeId: pin.id, seq: seq, toDevice: toDevice, state: state, locked: m["locked"]?.boolValue ?? false,
                              remainingS: m["remaining_s"]?.intValue ?? 0, foregroundAppId: m["foreground"]?["app_id"]?.stringValue,
                              foregroundMatches: m["foreground"]?["matches"]?.boolValue ?? false, frame: frame,
                              frameDropped: m["frame_dropped"]?.boolValue ?? false, actions: actions)

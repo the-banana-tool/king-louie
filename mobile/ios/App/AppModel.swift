@@ -240,6 +240,8 @@ final class AppModel: ObservableObject {
         var frameDropped = false
         var actions: [LeaseAction] = []
         var lastSeq = 0
+        /// The newest node seq (statuses and views share it) already applied to this lease (R-F5-16); lastSeq is the relay's mailbox position.
+        var appliedSeq = 0
         var revoking = false
     }
 
@@ -363,7 +365,7 @@ final class AppModel: ObservableObject {
                     for entry in entries {
                         current.lastSeq = max(current.lastSeq, entry["seq"]?.intValue ?? current.lastSeq)
                         guard let json = entry["envelope"], let envelope = try? Envelope(json: json) else { continue }
-                        self.apply(envelope, pin: pin, to: &current)
+                        self.apply(envelope, pin: pin, deviceId: key.deviceId, to: &current)
                     }
                     self.liveLease = current
                     if current.state == "ended" { return }
@@ -377,10 +379,13 @@ final class AppModel: ObservableObject {
     }
 
     /// One received envelope onto the live lease. Only a status or a view the
-    /// pinned node signed, about this lease, changes anything.
-    private func apply(_ envelope: Envelope, pin: NodePin, to live: inout LiveLease) {
+    /// pinned node signed, about this lease, changes anything; and (R-F5-16)
+    /// only one whose node seq is newer than the newest already applied, and
+    /// a view only when it is addressed to this device.
+    private func apply(_ envelope: Envelope, pin: NodePin, deviceId: String, to live: inout LiveLease) {
         if let message = Leases.verifiedMessage(envelope, pin: pin), let status = LeaseStatus(message: message) {
-            guard status.leaseId == live.leaseId else { return }
+            guard status.leaseId == live.leaseId, Leases.acceptsStatus(status, appliedSeq: live.appliedSeq) else { return }
+            live.appliedSeq = status.seq
             live.state = status.state
             live.locked = status.locked
             live.reason = status.reason
@@ -390,6 +395,8 @@ final class AppModel: ObservableObject {
         }
         let check = Leases.verifyView(envelope, pin: pin)
         guard check.accepted, let view = check.view, view.leaseId == live.leaseId else { return }
+        guard Leases.acceptsView(view, appliedSeq: live.appliedSeq, deviceId: deviceId) else { return }
+        live.appliedSeq = view.seq
         live.state = view.state
         live.locked = view.locked
         live.expiresAt = Date().addingTimeInterval(TimeInterval(view.remainingS))
@@ -473,11 +480,11 @@ final class AppModel: ObservableObject {
                 guard let self, let demo = self.demo, var live = self.liveLease, live.state != "ended" else { return }
                 let frame = AppModel.demoFrame(seq)
                 let action = LeaseAction(seq: seq, at: Timestamps.string(Date()), tool: seq % 2 == 0 ? "Type" : "Click",
-                                         summary: seq % 2 == 0 ? "Type \"12+30=\" (6 chars)" : "Click left at (120, 88) on ss-\(seq)", result: "ok")
+                                         summary: seq % 2 == 0 ? "Typed 6 characters" : "Click left at (120, 88) on ss-\(seq)", result: "ok")
                 if let index = demo.pins.firstIndex(where: { $0.id == live.nodeId }),
                    let envelope = try? demo.leaseView(on: index, leaseId: live.leaseId, seq: seq, toDevice: demo.deviceId, frame: frame,
                                                       remaining: max(0, 900 - seq * 3), actions: [action]) {
-                    self.apply(envelope, pin: demo.pins[index], to: &live)
+                    self.apply(envelope, pin: demo.pins[index], deviceId: demo.deviceId, to: &live)
                     self.liveLease = live
                 }
                 seq += 1

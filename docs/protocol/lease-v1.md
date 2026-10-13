@@ -32,6 +32,9 @@ Node-signed (Ed25519, `kid` = `node_id`): `kl.lease.request`, `kl.lease.status`,
   "frame": { "mime": "image/jpeg", "width", "height", "sha256": "b64url(SHA-256(JPEG bytes))", "data": "base64" } | null,
   "frame_dropped": false,
   "actions": [{ "seq", "at", "tool", "summary" (≤ 120), "result": "ok" | "refused:<code>" }] (≤ 50) }
+  // summary never holds typed text (owner ruling R-F5-16, 2026-10-13): "Typed 42 characters",
+  // "Key (a character)"; keys that are not text keep their names ("Key ctrl+s"); clicks, scrolls
+  // and drags give their position in the screenshot.
 ```
 
 Rules: `lease.apps` 1–8 unique ids from `gui.apps`; `max_minutes` 1–60 and ≤

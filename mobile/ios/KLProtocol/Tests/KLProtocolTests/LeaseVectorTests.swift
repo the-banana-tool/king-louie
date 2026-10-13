@@ -107,6 +107,31 @@ final class LeaseVectorTests: XCTestCase {
         XCTAssertEqual(LeaseRequest(message: message)?.apps.first?.id, "calculator")
     }
 
+    /// R-F5-16: nothing older than what is on screen, and no view made for another device.
+    func testOrderAndAddressee() throws {
+        func status(_ seq: Int) throws -> LeaseStatus {
+            try XCTUnwrap(LeaseStatus(message: .object([
+                "type": .string("kl.lease.status"), "lease_id": .string("lease-1"), "node_id": .string("kl-node"),
+                "seq": .number(String(seq)), "state": .string("active"), "locked": .bool(false)
+            ])))
+        }
+        func view(_ seq: Int, _ toDevice: String) -> LeaseView {
+            LeaseView(leaseId: "lease-1", nodeId: "kl-node", seq: seq, toDevice: toDevice, state: "active", locked: false, remainingS: 60,
+                      foregroundAppId: nil, foregroundMatches: false, frame: nil, frameDropped: false, actions: [])
+        }
+        XCTAssertTrue(try Leases.acceptsStatus(status(1), appliedSeq: 0))
+        XCTAssertTrue(try Leases.acceptsStatus(status(8), appliedSeq: 7))
+        // The same seq again (a replay) and an older one (held back, then delivered) are dropped.
+        XCTAssertFalse(try Leases.acceptsStatus(status(7), appliedSeq: 7))
+        XCTAssertFalse(try Leases.acceptsStatus(status(3), appliedSeq: 7))
+        XCTAssertTrue(Leases.acceptsView(view(8, "d-me"), appliedSeq: 7, deviceId: "d-me"))
+        XCTAssertFalse(Leases.acceptsView(view(7, "d-me"), appliedSeq: 7, deviceId: "d-me"))
+        XCTAssertFalse(Leases.acceptsView(view(2, "d-me"), appliedSeq: 7, deviceId: "d-me"))
+        // Newer, but addressed to another phone.
+        XCTAssertFalse(Leases.acceptsView(view(9, "d-other"), appliedSeq: 7, deviceId: "d-me"))
+        XCTAssertFalse(Leases.acceptsView(view(9, ""), appliedSeq: 7, deviceId: "d-me"))
+    }
+
     /// The live screen's action log: a node sends an action again when a
     /// watch starts over, and the log must hold each one once, newest first.
     func testMergedActionsHoldEachSeqOnce() {

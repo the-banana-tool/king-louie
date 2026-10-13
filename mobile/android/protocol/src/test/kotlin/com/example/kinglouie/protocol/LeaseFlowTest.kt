@@ -52,6 +52,24 @@ class LeaseFlowTest {
         assertTrue(!Leases.isPausedForContact("ended", "no_contact"))
     }
 
+    /** R-F5-16: nothing older than what is on screen, and no view made for another device. */
+    @Test
+    fun orderAndAddressee() {
+        fun status(seq: Int) = LeaseStatus("lease-1", "kl-node", seq, "active", false, null, null)
+        fun view(seq: Int, toDevice: String) = LeaseView("lease-1", "kl-node", seq, toDevice, "active", false, 60, null, false, null, false, emptyList())
+        assertTrue(Leases.acceptsStatus(status(1), 0))
+        assertTrue(Leases.acceptsStatus(status(8), 7))
+        // The same seq again (a replay) and an older one (held back, then delivered) are dropped.
+        assertTrue(!Leases.acceptsStatus(status(7), 7))
+        assertTrue(!Leases.acceptsStatus(status(3), 7))
+        assertTrue(Leases.acceptsView(view(8, "d-me"), 7, "d-me"))
+        assertTrue(!Leases.acceptsView(view(7, "d-me"), 7, "d-me"))
+        assertTrue(!Leases.acceptsView(view(2, "d-me"), 7, "d-me"))
+        // Newer, but addressed to another phone.
+        assertTrue(!Leases.acceptsView(view(9, "d-other"), 7, "d-me"))
+        assertTrue(!Leases.acceptsView(view(9, ""), 7, "d-me"))
+    }
+
     @Test
     fun cursorAfterWatch() {
         assertEquals(5, Leases.REFRESH_WAIT_S)

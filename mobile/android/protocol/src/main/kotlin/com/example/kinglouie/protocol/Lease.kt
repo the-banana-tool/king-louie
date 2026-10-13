@@ -68,7 +68,7 @@ data class LeaseStatus(val leaseId: String, val nodeId: String, val seq: Int, va
 data class LeaseAction(val seq: Int, val at: String, val tool: String, val summary: String, val result: String)
 
 class LeaseView(
-    val leaseId: String, val nodeId: String, val seq: Int, val state: String, val locked: Boolean, val remainingS: Int,
+    val leaseId: String, val nodeId: String, val seq: Int, val toDevice: String, val state: String, val locked: Boolean, val remainingS: Int,
     val foregroundAppId: String?, val foregroundMatches: Boolean, val frame: ByteArray?, val frameDropped: Boolean, val actions: List<LeaseAction>
 )
 
@@ -101,6 +101,18 @@ object Leases {
 
     /** Whether a signed state and reason say input is paused for want of contact. */
     fun isPausedForContact(state: String, reason: String?): Boolean = state == "suspended" && reason == NO_CONTACT
+
+    /**
+     * Order and addressee (owner ruling R-F5-16). A node numbers the statuses
+     * and views of one lease with one rising `seq`. A relay can hold a
+     * message back and deliver it later, or hand one phone a view made for
+     * another; so a status or view is applied only if its seq is newer than
+     * the newest one already applied for that lease, and a view only if it
+     * is addressed to this device. Anything else is dropped unshown.
+     */
+    fun acceptsStatus(status: LeaseStatus, appliedSeq: Int): Boolean = status.seq > appliedSeq
+
+    fun acceptsView(view: LeaseView, appliedSeq: Int, deviceId: String): Boolean = view.seq > appliedSeq && view.toDevice == deviceId
 
     /** A view larger than this is dropped unread (§4.1). */
     const val VIEW_MAX_BYTES = 262144
@@ -238,6 +250,7 @@ object Leases {
         }
         val view = LeaseView(
             m["lease_id"].str() ?: return ViewCheck(false, "malformed", null), pin.id, m["seq"].int() ?: return ViewCheck(false, "malformed", null),
+            m["to_device"].str() ?: return ViewCheck(false, "malformed", null),
             m["state"].str() ?: return ViewCheck(false, "malformed", null), m["locked"].bool() ?: false, m["remaining_s"].int() ?: 0,
             m["foreground"]["app_id"].str(), m["foreground"]["matches"].bool() ?: false, frame, m["frame_dropped"].bool() ?: false, actions
         )

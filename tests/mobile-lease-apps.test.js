@@ -129,6 +129,62 @@ describe('iOS lease screens (owner ruling R-F5-8)', () => {
   });
 });
 
+// R-F5-16 (owner ruling, 2026-10-13): both phones drop a status or a view
+// whose node seq is not newer than the newest one already applied for that
+// lease, and a view that is not addressed to this device. The rule lives in
+// the protocol cores (unit-tested there); these checks show the apps use it.
+describe('both phones enforce order and addressee (owner ruling R-F5-16)', () => {
+  const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+
+  it('Android: the core has the rule, and applyLease applies nothing that fails it', () => {
+    const core = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    assert.match(core, /fun acceptsStatus\(status: LeaseStatus, appliedSeq: Int\): Boolean = status\.seq > appliedSeq/);
+    assert.match(core, /fun acceptsView\(view: LeaseView, appliedSeq: Int, deviceId: String\): Boolean = view\.seq > appliedSeq && view\.toDevice == deviceId/);
+    assert.match(core, /m\["to_device"\]\.str\(\) \?: return ViewCheck\(false, "malformed", null\)/, 'a view without to_device is malformed');
+    const model = read(...kt, 'AppModel.kt');
+    const live = section(model, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+    const apply = section(live, 'private fun applyLease', '\n    }\n');
+    assert.match(apply, /private fun applyLease\(envelope: Envelope, pin: NodePin, live: LiveLease, deviceId: String\): LiveLease \{/);
+    assert.match(apply, /if \(status\.leaseId != live\.leaseId \|\| !Leases\.acceptsStatus\(status, live\.appliedSeq\)\) return live/);
+    assert.match(apply, /if \(!Leases\.acceptsView\(view, live\.appliedSeq, deviceId\)\) return live/);
+    assert.equal(count(apply, 'appliedSeq = status.seq'), 1);
+    assert.equal(count(apply, 'appliedSeq = view.seq'), 1);
+    // Both checks come before anything is copied onto the screen's lease.
+    assert.ok(apply.indexOf('Leases.acceptsStatus(') < apply.indexOf('state = status.state'));
+    assert.ok(apply.indexOf('Leases.acceptsView(') < apply.indexOf('state = view.state'));
+    assert.match(live, /val appliedSeq: Int = 0/);
+    assert.equal(count(model, 'applyLease(envelope, pin, next, k.deviceId)'), 1, 'the live path passes this phone\'s device id');
+    assert.equal(count(model, 'applyLease('), 3, 'declared once, called from Refresh and from the demo');
+  });
+
+  it('iOS: the core has the rule, and apply applies nothing that fails it', () => {
+    const core = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    assert.match(core, /public static func acceptsStatus\(_ status: LeaseStatus, appliedSeq: Int\) -> Bool \{ status\.seq > appliedSeq \}/);
+    assert.match(core, /public static func acceptsView\(_ view: LeaseView, appliedSeq: Int, deviceId: String\) -> Bool \{ view\.seq > appliedSeq && view\.toDevice == deviceId \}/);
+    assert.match(core, /let toDevice = m\["to_device"\]\?\.stringValue/);
+    const model = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const leases = section(model, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    const apply = section(leases, 'private func apply', 'func closeLiveLease');
+    assert.match(apply, /private func apply\(_ envelope: Envelope, pin: NodePin, deviceId: String, to live: inout LiveLease\) \{/);
+    assert.match(apply, /guard status\.leaseId == live\.leaseId, Leases\.acceptsStatus\(status, appliedSeq: live\.appliedSeq\) else \{ return \}/);
+    assert.match(apply, /guard Leases\.acceptsView\(view, appliedSeq: live\.appliedSeq, deviceId: deviceId\) else \{ return \}/);
+    assert.equal(count(apply, 'live.appliedSeq = status.seq'), 1);
+    assert.equal(count(apply, 'live.appliedSeq = view.seq'), 1);
+    assert.ok(apply.indexOf('Leases.acceptsStatus(') < apply.indexOf('live.state = status.state'));
+    assert.ok(apply.indexOf('Leases.acceptsView(') < apply.indexOf('live.state = view.state'));
+    assert.match(leases, /var appliedSeq = 0/);
+    assert.equal(count(leases, 'self.apply(envelope, pin: pin, deviceId: key.deviceId, to: &current)'), 1);
+    assert.equal(count(leases, 'self.apply('), 2, 'the live view and the demo');
+  });
+
+  it('neither app\'s demo shows typed text in its action log', () => {
+    for (const text of [read(...kt, 'AppModel.kt'), read('mobile', 'ios', 'App', 'AppModel.swift')]) {
+      assert.ok(!/Type \\"/.test(text), 'no "Type \"…\"" summary');
+      assert.match(text, /Typed 6 characters/);
+    }
+  });
+});
+
 describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
   const dir = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
   // Read inside each test, so a missing file or marker fails that test by name.

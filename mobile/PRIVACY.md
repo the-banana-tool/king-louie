@@ -34,15 +34,27 @@ can see:
   not implemented yet (spec §11.12);
 - your answers (signed; the relay cannot forge or change them), and the
   history slices you open;
-- every computer-use request a node sends you: the node, the apps it asks
-  for (their names, full paths and process names), for how long, the agent's
-  stated reason, and the job and client that asked; your answer and any stop
-  you send (signed; the relay cannot forge or change them); and each change
-  of a lease's state (waiting, active, paused, ended, screen locked);
+- every computer-use request a node sends you: the node's id and name, the
+  apps it asks for (their ids, names, full paths and process names), for how
+  long, the agent's stated reason (up to 280 characters the agent wrote
+  itself, so it can say anything), the job id, the name of the client that
+  asked and its session id, and what the node cannot detect (no lock
+  detection, say); your answer and any stop or watch you send, with your
+  device id (signed; the relay cannot forge or change them); and each change
+  of a lease's state: waiting, active, paused, ended or screen locked, the
+  reason as a short code (`revoked`, `expired`, `no_contact`,
+  `foreground_changed` and the like) and when it runs out;
 - while a phone watches a lease, **pictures of the leased app's window with
-  everything on it**, and the list of what the agent did there: each click
-  and drag with its position, each key press, and the first 60 characters
-  of each text it typed. A picture is a JPEG, by default at most 960 pixels
+  everything on it**, and the list of what the agent did there. The list
+  never holds text the agent typed: a typed text appears as its length only
+  ("Typed 42 characters") and a key that types a character as "Key (a
+  character)". It does hold each click, scroll and drag with its position in
+  the picture and the picture's number, the names of keys that are not text
+  ("Key ctrl+s", "Key enter"), and whether each was done or the code it was
+  refused with. Each picture also comes with the lease's state, the seconds
+  left, and which allowlisted app is in front (its id). **The pictures
+  themselves still show whatever is on the window, including text once it
+  has been typed into it.** Window titles are not sent. A picture is a JPEG, by default at most 960 pixels
   wide and never more than 180 KB; a node sends at most one a second (one
   every three seconds by default) and none while no phone is watching, the
   lease is paused or the screen is locked. The relay holds each for five

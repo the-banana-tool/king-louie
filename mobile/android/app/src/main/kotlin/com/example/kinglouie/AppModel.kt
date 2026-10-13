@@ -380,6 +380,8 @@ class AppModel(context: Context) {
         val nodeId: String, val nodeName: String, val leaseId: String, val state: String = "pending", val locked: Boolean = false,
         val reason: String? = null, val expiresAtMs: Long? = null, val frame: ByteArray? = null, val frameAtMs: Long? = null,
         val frameDropped: Boolean = false, val actions: List<LeaseAction> = emptyList(), val lastSeq: Int = 0,
+        /** The newest node seq (statuses and views share it) already applied to this lease (R-F5-16); lastSeq is the relay's mailbox position. */
+        val appliedSeq: Int = 0,
         /** A Stop or a Refresh is being signed or sent. */
         val busy: Boolean = false,
         /** The last Stop or Refresh got no answer; shown until the next tap. */
@@ -585,7 +587,7 @@ class AppModel(context: Context) {
                     } catch (e: ProtocolException) {
                         continue
                     }
-                    next = applyLease(envelope, pin, next)
+                    next = applyLease(envelope, pin, next, k.deviceId)
                 }
                 next = next.copy(noFrame = next.state == "active" && !next.locked && next.frameAtMs == frameBefore)
             } catch (e: Exception) {
@@ -598,18 +600,24 @@ class AppModel(context: Context) {
         }
     }
 
-    /** One received envelope onto the live lease. Only a status or a view the pinned node signed, about this lease, changes anything. */
-    private fun applyLease(envelope: Envelope, pin: NodePin, live: LiveLease): LiveLease {
+    /**
+     * One received envelope onto the live lease. Only a status or a view the
+     * pinned node signed, about this lease, changes anything; and (R-F5-16)
+     * only one whose node seq is newer than the newest already applied, and
+     * a view only when it is addressed to this device.
+     */
+    private fun applyLease(envelope: Envelope, pin: NodePin, live: LiveLease, deviceId: String): LiveLease {
         val status = Leases.verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it) }
         if (status != null) {
-            if (status.leaseId != live.leaseId) return live
-            return live.copy(state = status.state, locked = status.locked, reason = status.reason, expiresAtMs = status.expiresAt?.let { Timestamps.epochMillis(it) })
+            if (status.leaseId != live.leaseId || !Leases.acceptsStatus(status, live.appliedSeq)) return live
+            return live.copy(appliedSeq = status.seq, state = status.state, locked = status.locked, reason = status.reason, expiresAtMs = status.expiresAt?.let { Timestamps.epochMillis(it) })
         }
         val check = Leases.verifyView(envelope, pin)
         val view = check.view?.takeIf { check.accepted && it.leaseId == live.leaseId } ?: return live
+        if (!Leases.acceptsView(view, live.appliedSeq, deviceId)) return live
         val now = System.currentTimeMillis()
         return live.copy(
-            state = view.state, locked = view.locked, expiresAtMs = now + view.remainingS * 1000L,
+            appliedSeq = view.seq, state = view.state, locked = view.locked, expiresAtMs = now + view.remainingS * 1000L,
             frameDropped = view.frameDropped, frame = view.frame ?: live.frame, frameAtMs = if (view.frame != null) now else live.frameAtMs,
             actions = Leases.mergedActions(live.actions, view.actions)
         )
@@ -673,10 +681,10 @@ class AppModel(context: Context) {
                 val index = fleet.pins.indexOfFirst { it.id == pin.id }.takeIf { it >= 0 } ?: break
                 val action = LeaseAction(
                     seq, Timestamps.string(java.time.Instant.now()), if (seq % 2 == 0) "Type" else "Click",
-                    if (seq % 2 == 0) "Type \"12+30=\" (6 chars)" else "Click left at (120, 88) on ss-$seq", "ok"
+                    if (seq % 2 == 0) "Typed 6 characters" else "Click left at (120, 88) on ss-$seq", "ok"
                 )
                 val envelope = fleet.leaseView(index, live.leaseId, seq, fleet.deviceId, demoFrame(seq), maxOf(0, 900 - seq * 3), listOf(action))
-                liveLease = applyLease(envelope, pin, live)
+                liveLease = applyLease(envelope, pin, live, fleet.deviceId)
                 seq += 1
                 delay(3000)
             }

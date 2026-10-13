@@ -154,7 +154,7 @@ function viewEnvelope({ tamperHash = false } = {}) {
     foreground: { app_id: 'calculator', matches: true },
     frame: { mime: 'image/jpeg', width: 960, height: 640, sha256: tamperHash ? sha('other').toString('base64url') : hash, data },
     frameDropped: false,
-    actions: [{ seq: 41, at: iso(NOW_MS), tool: 'Type', summary: 'Type "12+30=" (6 chars)', result: 'ok' }],
+    actions: [{ seq: 41, at: iso(NOW_MS), tool: 'Type', summary: 'Typed 6 characters', result: 'ok' }],
     now: NOW_MS
   });
 }

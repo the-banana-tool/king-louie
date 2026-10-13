@@ -444,7 +444,40 @@ describe('input tools', () => {
     const entry = audits.find((a) => a.kind === 'gui.input' && a.data.tool === 'Type');
     assert.deepEqual(entry.data.params, { length: 6, sha256: crypto.createHash('sha256').update('12+30=').digest('base64url') });
     assert.ok(!JSON.stringify(audits).includes('12+30='));
-    assert.equal(actions[0].summary, 'Type "12+30=" (6 chars)');
+    // R-F5-16: the action log says that text was typed and how much, never what.
+    assert.equal(actions[0].summary, 'Typed 6 characters');
+  });
+
+  // R-F5-16 (owner ruling, 2026-10-13): the live view's action log goes
+  // through the relay in clear. No text the agent typed, by Type or one key
+  // at a time, is in it; it matches the audit ledger (length and hash only).
+  it('R-F5-16: no typed text reaches the action log, from Type, from printable keys or from a refused call', async () => {
+    await withLease();
+    const TEXT = 'Meet at Lakeside lot';
+    await tools.Type.execute({ text: TEXT }, opts());
+    await tools.Type.execute({ text: 'x' }, opts());
+    // (Ten inputs a minute in this test's config: four character keys.)
+    for (const ch of ['q', 'shift+z', 'space', '/']) await tools.Key.execute({ keys: ch }, opts());
+    await tools.Key.execute({ keys: 'q', repeat: 3 }, opts());
+    // Refused calls are logged too: the text of one must not be.
+    await tools.Type.execute({ text: 'git push origin main' }, opts());
+    await tools.Key.execute({ keys: 'Lakeside secret words' }, opts());
+    await tools.Key.execute({ keys: 'hyper+lakeside' }, opts());
+    // Keys that are not text keep their names: they say what the agent did.
+    await tools.Key.execute({ keys: 'ctrl+s' }, opts());
+    await tools.Key.execute({ keys: 'enter', repeat: 2 }, opts());
+    await tools.Key.execute({ keys: 'ctrl+v' }, opts());
+    const log = actions.map((a) => `${a.tool}|${a.summary}|${a.result}`);
+    assert.deepEqual(log, [
+      'Type|Typed 20 characters|ok', 'Type|Typed 1 character|ok',
+      'Key|Key (a character)|ok', 'Key|Key (a character)|ok', 'Key|Key (a character)|ok', 'Key|Key (a character)|ok',
+      'Key|Key (a character) x3|ok',
+      'Type|Typed 20 characters|refused:text_matches_always_confirm',
+      'Key|Key (not a key name)|refused:key_invalid', 'Key|Key (not a key name)|refused:key_invalid',
+      'Key|Key ctrl+s|ok', 'Key|Key enter x2|ok', 'Key|Key ctrl+v|refused:key_denied'
+    ]);
+    const all = JSON.stringify(actions);
+    for (const leaked of ['Lakeside', 'lakeside', 'Meet', 'git push', 'secret words']) assert.ok(!all.includes(leaked), leaked);
   });
 
   it('Type refuses always_confirm and secret text before the helper, audited as refused', async () => {
