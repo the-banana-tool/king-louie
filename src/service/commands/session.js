@@ -22,22 +22,78 @@ const SESSION_USAGE = `Usage: king-louie-service session [--session-file PATH]
        king-louie-service session probe [--data-dir DIR]
 `;
 
+// More than any real store holds; a file past it is not read.
+const STORE_MAX_BYTES = 64 * 1024 * 1024;
+
+// The store's text, or null when there is no store yet. The service account
+// controls every name in the data dir and this runs elevated, so the file
+// is read only if it is a regular file of a sane size (second security
+// review, finding 10): a link is not followed, and a pipe put there is
+// neither opened to wait for a writer nor read.
+function readStoreText(file, maxBytes) {
+  const refuse = (why) => new Error(`${file} ${why}; nothing was installed`);
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw refuse(`cannot be checked (${err.code || 'error'})`);
+  }
+  if (st.isSymbolicLink() || !st.isFile()) throw refuse('is not a regular file (a link, a pipe or a directory is refused)');
+  if (st.size > maxBytes) throw refuse(`is larger than ${maxBytes} bytes`);
+  // Between that look and this open the name can change hands. O_NOFOLLOW
+  // refuses a link that appeared; O_NONBLOCK keeps the open of a pipe that
+  // appeared from waiting; the open file is then checked again. (Windows has
+  // neither flag, and no pipes at a path in a directory.)
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
+  let fd;
+  try {
+    fd = fs.openSync(file, flags);
+  } catch (err) {
+    throw refuse(`cannot be opened (${err.code || 'error'})`);
+  }
+  try {
+    const opened = fs.fstatSync(fd);
+    if (!opened.isFile()) throw refuse('is not a regular file (a link, a pipe or a directory is refused)');
+    if (opened.size > maxBytes) throw refuse(`is larger than ${maxBytes} bytes`);
+    const buffer = Buffer.alloc(opened.size);
+    let read = 0;
+    while (read < buffer.length) {
+      const n = fs.readSync(fd, buffer, read, buffer.length - read, read);
+      if (n <= 0) break;
+      read += n;
+    }
+    return buffer.subarray(0, read).toString('utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 // The node's identity, read where the service's store keeps it (the dot path
 // mesh.identity of <dataDir>/chat-data.json) and verified before its id is
 // sealed into anything (owner ruling R-F5-12): the stored public key must be
-// the public half of the stored private key, which is held under the master
-// key (or in the clear, by an older build). Read-only: unlike loadIdentity it
-// never upgrades or writes the record. Null when there is no identity yet;
-// throws when there is one that does not hold together. This proves the id
-// belongs to the key this data dir signs with. It cannot prove more: the
-// identity lives only in the data dir, and no admin-owned file names it.
-function readNodeIdentity(dataDir, cipher) {
+// the public half of the stored private key, and that private key must be
+// held under the master key. A record with its key in the clear is refused
+// (finding 10): anyone who can write the data dir can store a key pair of
+// their own that way, with no master key at all; the service puts an older
+// build's plaintext key under the master key the first time it starts.
+// Read-only: unlike loadIdentity it never upgrades or writes the record.
+// Null when there is no identity yet; throws when there is one that does
+// not hold together. This proves the id belongs to a key that whoever holds
+// this data dir's master key stored. It cannot prove more: the identity
+// lives only in the data dir, and no admin-owned file names it (the
+// service account holds the master key; owner ruling R-F5-17, deferred).
+function readNodeIdentity(dataDir, cipher, { maxBytes = STORE_MAX_BYTES } = {}) {
+  const file = path.join(dataDir, 'chat-data.json');
+  const text = readStoreText(file, maxBytes);
+  if (text === null) return null;
   let record;
   try {
-    const store = JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8'));
+    const store = JSON.parse(text);
     record = store && store.mesh && store.mesh.identity;
   } catch {
-    return null;
+    // Never the parser's own message: it quotes the text it could not parse.
+    throw new Error(`${file} is not valid JSON; nothing was installed`);
   }
   if (!record || typeof record !== 'object' || typeof record.publicKey !== 'string' || !record.publicKey) return null;
   const { deriveNodeId } = require('../../mesh/node-identity');
@@ -52,13 +108,14 @@ function readNodeIdentity(dataDir, cipher) {
   } catch {
     throw refuse('holds no Ed25519 public key');
   }
-  let privateHex = record.privateKey;
-  if (record.keyEncryption === KEY_ENCRYPTION_MARKER) {
-    try {
-      privateHex = cipher.decryptString(record.encryptedPrivateKey);
-    } catch {
-      throw refuse('does not decrypt under this data dir\'s master key');
-    }
+  if (record.keyEncryption !== KEY_ENCRYPTION_MARKER) {
+    throw refuse('holds its private key in the clear, not under the master key: start the service once (it puts the key under the master key), then run this again');
+  }
+  let privateHex;
+  try {
+    privateHex = cipher.decryptString(record.encryptedPrivateKey);
+  } catch {
+    throw refuse('does not decrypt under this data dir\'s master key');
   }
   if (typeof privateHex !== 'string' || !privateHex) throw refuse('has no private key');
   let derived;
@@ -466,4 +523,4 @@ async function runSessionCommand({ sub, arg, flags = {}, dataDir, io, deps = {} 
   }
 }
 
-module.exports = { runSessionCommand, readNodeIdentity, SESSION_USAGE };
+module.exports = { runSessionCommand, readNodeIdentity, SESSION_USAGE, STORE_MAX_BYTES };

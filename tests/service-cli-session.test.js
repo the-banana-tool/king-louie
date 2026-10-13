@@ -717,11 +717,70 @@ describe('R-F5-12: session install checks the key file\'s owner and verifies the
     const s = setup();
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) }), 0);
     assert.equal(canonical(s.configDir).node_id, identity.nodeId);
-    // An identity an older build stored in the clear is the same identity.
+  });
+
+  // Second security review, finding 10. A record with its private key in
+  // the clear proves nothing: anyone who can write the data dir can make a
+  // key pair and store it that way, with no master key at all. The service
+  // puts an older build's plaintext key under the master key the first time
+  // it starts, so a real node's record carries the marker.
+  it('finding 10: refuses an identity whose private key is stored in the clear, even one that holds together', async () => {
+    const s = setup({ withIdentity: false });
+    writeIdentity(s.dataDir, storedIdentity(identity, { plaintext: true }));
+    const err = await refusedInstall(s);
+    assert.match(err, /the node identity in .* holds its private key in the clear, not under the master key: start the service once/);
+    assert.ok(!err.includes(identity.privateHex) && !err.includes(identity.nodeId));
+    // Somebody else's key pair, planted in the clear by whoever can write the data dir: the same refusal.
+    const planted = nodeKeys();
     const s2 = setup({ withIdentity: false });
-    writeIdentity(s2.dataDir, storedIdentity(identity, { plaintext: true }));
-    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s2.dataDir, io: io().io, deps: deps(s2) }), 0);
-    assert.equal(canonical(s2.configDir).node_id, identity.nodeId);
+    writeIdentity(s2.dataDir, storedIdentity(planted, { plaintext: true }));
+    assert.match(await refusedInstall(s2), /holds its private key in the clear/);
+    // A marker that is not the service's is no marker.
+    const s3 = setup({ withIdentity: false });
+    writeIdentity(s3.dataDir, { ...storedIdentity(identity, { plaintext: true }), keyEncryption: 'none' });
+    assert.match(await refusedInstall(s3), /holds its private key in the clear/);
+    // The readNodeIdentity it comes from, directly.
+    assert.throws(() => readNodeIdentity(s.dataDir, createAesGcmCipher(KEY)), /in the clear/);
+  });
+
+  it('finding 10: the store is read only when it is a regular file of a sane size: never a directory, a link or a pipe', async () => {
+    const cipher = createAesGcmCipher(KEY);
+    // A directory where the store should be.
+    const s = setup({ withIdentity: false });
+    fs.mkdirSync(path.join(s.dataDir, 'chat-data.json'));
+    assert.match(await refusedInstall(s), /chat-data\.json is not a regular file \(a link, a pipe or a directory is refused\); nothing was installed/);
+    // Larger than the bound: refused before it is read.
+    const big = setup();
+    assert.throws(() => readNodeIdentity(big.dataDir, cipher, { maxBytes: 64 }), /chat-data\.json is larger than 64 bytes; nothing was installed/);
+    assert.equal(readNodeIdentity(big.dataDir, cipher).nodeId, identity.nodeId, 'the real bound holds a real store');
+    // Not JSON: said as such, and nothing of the file is quoted.
+    const bad = setup({ withIdentity: false });
+    fs.writeFileSync(path.join(bad.dataDir, 'chat-data.json'), '{"mesh": Lakeside');
+    const err = await refusedInstall(bad);
+    assert.match(err, /chat-data\.json is not valid JSON; nothing was installed/);
+    assert.ok(!err.includes('Lakeside'));
+  });
+
+  it('finding 10: a link at the store is refused, not followed', async (t) => {
+    const s = setup({ withIdentity: false });
+    const elsewhere = path.join(s.base, 'elsewhere.json');
+    fs.writeFileSync(elsewhere, JSON.stringify({ mesh: { identity: storedIdentity() } }));
+    try {
+      fs.symlinkSync(elsewhere, path.join(s.dataDir, 'chat-data.json'), 'file');
+    } catch (err) {
+      // Windows without the right to make links: nothing to test here.
+      if (err.code === 'EPERM') { t.skip('this account cannot create a symbolic link'); return; }
+      throw err;
+    }
+    assert.match(await refusedInstall(s), /chat-data\.json is not a regular file/);
+  });
+
+  it('finding 10: a pipe at the store does not hang the install', { skip: !POSIX }, async () => {
+    const s = setup({ withIdentity: false });
+    require('child_process').execFileSync('mkfifo', [path.join(s.dataDir, 'chat-data.json')]);
+    const started = Date.now();
+    assert.match(await refusedInstall(s), /chat-data\.json is not a regular file/);
+    assert.ok(Date.now() - started < 5000, 'no reader waited for a writer');
   });
 
   it('refuses a stored public key that is not the node\'s own (another node\'s id would be sealed)', async () => {
@@ -735,8 +794,8 @@ describe('R-F5-12: session install checks the key file\'s owner and verifies the
 
   it('refuses an identity with no private key, one that does not decrypt under this master key, and one that is not a key', async () => {
     const s = setup({ withIdentity: false });
-    writeIdentity(s.dataDir, { publicKey: identity.publicKey.toString('hex') });
-    assert.match(await refusedInstall(s), /the node identity in .* has no private key/);
+    writeIdentity(s.dataDir, { publicKey: identity.publicKey.toString('hex'), keyEncryption: 'cipher-v1' });
+    assert.match(await refusedInstall(s), /the node identity in .* (has no private key|does not decrypt under this data dir's master key)/);
     const s2 = setup({ withIdentity: false });
     writeIdentity(s2.dataDir, storedIdentity(identity, { key: crypto.randomBytes(32) }));
     assert.match(await refusedInstall(s2), /the node identity in .* does not decrypt under this data dir's master key/);
@@ -744,7 +803,7 @@ describe('R-F5-12: session install checks the key file\'s owner and verifies the
     writeIdentity(s3.dataDir, { publicKey: 'abcd', privateKey: 'abcd' });
     assert.match(await refusedInstall(s3), /the node identity in .* holds no Ed25519 public key/);
     const s4 = setup({ withIdentity: false });
-    writeIdentity(s4.dataDir, { publicKey: identity.publicKey.toString('hex'), privateKey: 'abcd' });
+    writeIdentity(s4.dataDir, { publicKey: identity.publicKey.toString('hex'), privateKey: null, keyEncryption: 'cipher-v1', encryptedPrivateKey: createAesGcmCipher(KEY).encryptString('abcd') });
     assert.match(await refusedInstall(s4), /the node identity in .* holds an unreadable private key/);
   });
 });
