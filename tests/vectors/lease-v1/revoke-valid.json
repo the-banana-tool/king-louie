@@ -1,0 +1,130 @@
+{
+  "name": "revoke-valid",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": null,
+  "given": {
+    "now": "2026-09-23T18:04:17.201Z",
+    "node": {
+      "id": "kl-hnef32472qzibi5r",
+      "name": "gpu-box",
+      "key": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-futyo75nn4w4reil",
+        "name": "Test phone futy",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w",
+          "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": "2026-09-20T00:00:00.000Z",
+        "revoked_by": "console",
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-qspcgdp3ecibkogw",
+        "name": "Test phone qspc",
+        "platform": "demo",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "ZWZ0CFs5J3aGstu0p5ekzB8RVFjxHFNkKVArmQGBZFE",
+          "y": "4E7pC8plxIpQrs88JPZVThXMJcG09vM8A0zZbeeJzP8"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "allow_test_keys": true,
+    "used": [],
+    "gui_apps": {
+      "calculator": {
+        "name": "Calculator",
+        "path": "C:\\Windows\\System32\\calc.exe",
+        "processes": [
+          "CalculatorApp.exe"
+        ]
+      },
+      "notepad": {
+        "name": "Notepad",
+        "path": "C:\\Windows\\System32\\notepad.exe",
+        "processes": []
+      }
+    },
+    "jobs_open": [
+      "job-1758650651201-a1b2c3"
+    ],
+    "gui_max_minutes": 60,
+    "known_leases": [
+      "f621a6da-6880-4478-9193-0cc1a271860c"
+    ]
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJsZWFzZV9pZCI6ImY2MjFhNmRhLTY4ODAtNDQ3OC05MTkzLTBjYzFhMjcxODYwYyIsIm5vZGVfaWQiOiJrbC1obmVmMzI0NzJxemliaTVyIiwibm9uY2UiOiJqMWhLc3lnNHNjS3d2UXpFQjdRR1JiNk94ZEtBZXN4NkJ5endUVDFOVUE0IiwicmVhc29uIjoia2lsbF9zd2l0Y2giLCJzaWduZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjE2LjIwMVoiLCJ0eXBlIjoia2wubGVhc2UucmV2b2tlIiwidiI6MX0",
+    "sig": "YXim8SAdi5EynMDXlyMkoDzHqyPkl_09eLYHGRn6LzOVnY1rJUDJf3PWJ2peU2Cmc0VAJ7v541se8Aw_bTSYSw"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "message": {
+      "v": 1,
+      "type": "kl.lease.revoke",
+      "node_id": "kl-hnef32472qzibi5r",
+      "lease_id": "f621a6da-6880-4478-9193-0cc1a271860c",
+      "reason": "kill_switch",
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "nonce": "j1hKsyg4scKwvQzEB7QGRb6OxdKAesx6ByzwTT1NUA4",
+      "signed_at": "2026-09-23T18:04:16.201Z"
+    }
+  }
+}
