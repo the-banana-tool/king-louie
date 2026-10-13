@@ -52,6 +52,36 @@ class LeaseFlowTest {
         assertTrue(!Leases.isPausedForContact("ended", "no_contact"))
     }
 
+    /** R-F5-18: which leases get a banner, and what a phone says of one it did not grant. */
+    @Test
+    fun liveAndGrantedBy() {
+        assertTrue(Leases.isLive("active"))
+        assertTrue(Leases.isLive("suspended"))
+        assertTrue(!Leases.isLive("pending"))
+        assertTrue(!Leases.isLive("ended"))
+        assertTrue(!Leases.isLive(""))
+        assertEquals(null, Leases.grantedByOther("d-me", "My phone", "d-me"))
+        assertEquals(null, Leases.grantedByOther(null, null, "d-me"))
+        assertEquals("Granted by Owner phone", Leases.grantedByOther("d-other", "Owner phone", "d-me"))
+        assertEquals("Granted by another phone (d-other)", Leases.grantedByOther("d-other", null, "d-me"))
+        assertEquals("Granted by another phone (d-other)", Leases.grantedByOther("d-other", "", "d-me"))
+        // A phone with no key of its own (it cannot be the granting one) still names the granter.
+        assertEquals("Granted by Owner phone", Leases.grantedByOther("d-other", "Owner phone", null))
+        // The name is the node's word for a device: shown escaped.
+        assertTrue(!Leases.grantedByOther("d-other", "Owner‮phone", "d-me")!!.contains('‮'))
+    }
+
+    /** R-F5-15: Refresh asks for a fresh status first when the token it holds is over a minute old, or it holds none. */
+    @Test
+    fun tokenIsStale() {
+        assertEquals(60_000L, Leases.TOKEN_FRESH_MS)
+        assertTrue(Leases.tokenIsStale(null, 5_000L))
+        assertTrue(!Leases.tokenIsStale(1_000L, 1_000L))
+        assertTrue(!Leases.tokenIsStale(1_000L, 60_999L))
+        assertTrue(Leases.tokenIsStale(1_000L, 61_000L))
+        assertTrue(Leases.tokenIsStale(1_000L, 500_000L))
+    }
+
     /** R-F5-16: nothing older than what is on screen, and no view made for another device. */
     @Test
     fun orderAndAddressee() {

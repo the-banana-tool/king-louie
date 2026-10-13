@@ -109,6 +109,8 @@ struct LiveLeaseView: View {
                             Text("No frame for more than 10 s").font(.caption).foregroundStyle(.orange)
                         }
                         if let reason = live.reason, live.state != "active" { Text("Reason: \(Display.escape(reason))").font(.caption) }
+                        // R-F5-18: a lease this phone did not grant says who did.
+                        if let by = model.grantedByOtherText(device: live.grantedByDevice, name: live.grantedByName) { Text(by).font(.caption) }
                         Button(role: .destructive) { Task { await model.killSwitch() } } label: {
                             Text(live.revoking ? "Revoking…" : "Stop now").frame(maxWidth: .infinity).padding()
                         }
@@ -143,26 +145,34 @@ struct LiveLeaseView: View {
     }
 }
 
-/// "Lease active on <node>" with the kill switch, on every tab.
+/// One row, with the kill switch, on every tab, for every lease this phone
+/// knows to be running (R-F5-18): the one it is following, and those a
+/// pinned node listed with a signed status (granted by another phone, or by
+/// this one before a restart). A row of a lease another phone granted says
+/// who granted it.
 struct LeaseBanner: View {
     @EnvironmentObject var model: AppModel
-    @State private var showing = false
 
     var body: some View {
-        // The stack stays (empty) once the lease has ended, so the sheet it
-        // presents can still show how the lease ended.
+        // The stack stays (empty) once no lease is running, so the sheet it
+        // presents can still show how a lease ended.
         VStack(spacing: 0) {
-            if let live = model.liveLease, live.state != "ended" {
+            ForEach(model.bannerLeases) { lease in
                 HStack {
-                    Button("Lease active on \(Display.escape(live.nodeName))") { showing = true }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Button(model.bannerTitle(lease)) { model.showLease(lease) }
+                        if let by = model.grantedByOtherText(device: lease.grantedByDevice, name: lease.grantedByName) {
+                            Text(by).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     Spacer()
-                    Button("Stop", role: .destructive) { Task { await model.killSwitch() } }
+                    Button("Stop", role: .destructive) { Task { await model.stopLease(lease) } }
                         .buttonStyle(.borderedProminent).tint(.red)
-                        .disabled(live.revoking)
+                        .disabled(model.isRevoking(lease))
                 }
                 .padding(8).background(Color.red.opacity(0.1))
             }
         }
-        .sheet(isPresented: $showing) { NavigationStack { LiveLeaseView().environmentObject(model) } }
+        .sheet(isPresented: $model.showLiveLease) { NavigationStack { LiveLeaseView().environmentObject(model) } }
     }
 }

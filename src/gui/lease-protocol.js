@@ -98,10 +98,11 @@ const VALIDATORS = {
   'kl.lease.watch': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'device_id', 'contact_token', 'nonce', 'signed_at'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && DEVICE_ID_RE.test(m.device_id)
     && nullOr((v) => isString(v) && CONTACT_TOKEN_RE.test(v))(m.contact_token) && NONCE_RE.test(m.nonce) && isTimestamp(m.signed_at),
-  'kl.lease.status': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'state', 'locked', 'reason', 'expires_at', 'contact_token'])
+  'kl.lease.status': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'state', 'locked', 'reason', 'expires_at', 'contact_token', 'granted_by'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && Number.isInteger(m.seq) && m.seq >= 1 && isTimestamp(m.at)
     && STATES.includes(m.state) && typeof m.locked === 'boolean' && nullOr((v) => within(v, 64))(m.reason) && nullOr(isTimestamp)(m.expires_at)
-    && isString(m.contact_token) && CONTACT_TOKEN_RE.test(m.contact_token),
+    && isString(m.contact_token) && CONTACT_TOKEN_RE.test(m.contact_token)
+    && nullOr((g) => isPlainObject(g) && exactKeys(g, ['device_id', 'name']) && DEVICE_ID_RE.test(g.device_id) && nullOr((n) => within(n, 64) && n.length > 0)(g.name))(m.granted_by),
   'kl.lease.view': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'to_device', 'state', 'locked', 'remaining_s', 'foreground', 'frame', 'frame_dropped', 'actions', 'contact_token'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && Number.isInteger(m.seq) && m.seq >= 1 && isTimestamp(m.at)
     && isString(m.contact_token) && CONTACT_TOKEN_RE.test(m.contact_token)
@@ -153,12 +154,16 @@ function buildLeaseRequest({ identity, nodeName, jobId, apps, maxMinutes, reason
 // contactToken: the caller's (the lease manager remembers when it issued
 // each one); a status or view built without one gets a token nobody knows,
 // which no watch can make contact with.
-function buildLeaseStatus({ identity, leaseId, seq, state, locked = false, reason = null, expiresAt = null, contactToken = null, now = Date.now() }) {
+// grantedBy (R-F5-18): { deviceId, name } of the phone whose grant made the
+// lease, or null while nobody has granted it. A phone that did not grant a
+// lease shows this beside its Stop.
+function buildLeaseStatus({ identity, leaseId, seq, state, locked = false, reason = null, expiresAt = null, contactToken = null, grantedBy = null, now = Date.now() }) {
   return seal({
     v: 1, type: 'kl.lease.status', node_id: identity.nodeId, lease_id: leaseId, seq, at: iso(now), state, locked,
     reason: reason === null || reason === undefined ? null : String(reason).slice(0, 64),
     expires_at: expiresAt === null || expiresAt === undefined ? null : iso(expiresAt),
-    contact_token: contactToken || newContactToken()
+    contact_token: contactToken || newContactToken(),
+    granted_by: grantedBy && grantedBy.deviceId ? { device_id: grantedBy.deviceId, name: typeof grantedBy.name === 'string' && grantedBy.name ? grantedBy.name : null } : null
   }, nodeSigner(identity));
 }
 

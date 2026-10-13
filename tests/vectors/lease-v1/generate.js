@@ -153,10 +153,11 @@ function watchMessage(label, { contactToken = tokenOf(`watch ${label}`) } = {}) 
   };
 }
 
-function statusEnvelope(label, { seq = 3, state = 'active', reason = null } = {}) {
+// grantedBy: the device whose grant made the lease (null: nobody yet).
+function statusEnvelope(label, { seq = 3, state = 'active', reason = null, grantedBy = { deviceId: DEVICES.A.id, name: 'Owner phone' }, expiresAt = NOW_MS + 10 * 60000 } = {}) {
   return L.buildLeaseStatus({
-    identity: GPU, leaseId: uuidOf(`lease ${label}`), seq, state, locked: false, reason, expiresAt: NOW_MS + 10 * 60000,
-    contactToken: tokenOf(`status ${label}`), now: NOW_MS
+    identity: GPU, leaseId: uuidOf(`lease ${label}`), seq, state, locked: false, reason, expiresAt,
+    contactToken: tokenOf(`status ${label}`), grantedBy, now: NOW_MS
   });
 }
 
@@ -250,13 +251,24 @@ function buildVectors() {
   const viewGiven = { now: NOW, node: { id: GPU.nodeId, name: 'gpu-box', key: GPU.spkiHex } };
   // What a phone reads from a status and a view: among it the contact token
   // its next watch echoes (R-F5-15).
+  // granted_by (R-F5-18): who granted the lease, so a phone that did not can say so beside its Stop.
+  const grantedByA = { device_id: DEVICES.A.id, name: 'Owner phone' };
   out.push({
     name: 'status-valid', consumers: PHONES, check: null, given: viewGiven, input: statusEnvelope('status-valid'),
-    expect: { ...accepted, status: { lease_id: uuidOf('lease status-valid'), seq: 3, state: 'active', reason: null, contact_token: tokenOf('status status-valid') } }
+    expect: { ...accepted, status: { lease_id: uuidOf('lease status-valid'), seq: 3, state: 'active', reason: null, contact_token: tokenOf('status status-valid'), granted_by: grantedByA } }
   });
   out.push({
     name: 'status-no-contact', consumers: PHONES, check: null, given: viewGiven, input: statusEnvelope('status-no-contact', { seq: 9, state: 'suspended', reason: 'no_contact' }),
-    expect: { ...accepted, status: { lease_id: uuidOf('lease status-no-contact'), seq: 9, state: 'suspended', reason: 'no_contact', contact_token: tokenOf('status status-no-contact') } }
+    expect: { ...accepted, status: { lease_id: uuidOf('lease status-no-contact'), seq: 9, state: 'suspended', reason: 'no_contact', contact_token: tokenOf('status status-no-contact'), granted_by: grantedByA } }
+  });
+  // Nobody has granted it yet; and a granting phone whose name the node left out (it shows the device id).
+  out.push({
+    name: 'status-pending', consumers: PHONES, check: null, given: viewGiven, input: statusEnvelope('status-pending', { seq: 1, state: 'pending', grantedBy: null, expiresAt: null }),
+    expect: { ...accepted, status: { lease_id: uuidOf('lease status-pending'), seq: 1, state: 'pending', reason: null, contact_token: tokenOf('status status-pending'), granted_by: null } }
+  });
+  out.push({
+    name: 'status-granted-unnamed', consumers: PHONES, check: null, given: viewGiven, input: statusEnvelope('status-granted-unnamed', { seq: 4, grantedBy: { deviceId: DEVICES.B.id, name: null } }),
+    expect: { ...accepted, status: { lease_id: uuidOf('lease status-granted-unnamed'), seq: 4, state: 'active', reason: null, contact_token: tokenOf('status status-granted-unnamed'), granted_by: { device_id: DEVICES.B.id, name: null } } }
   });
   out.push({ name: 'view-node-sig-valid', consumers: PHONES, check: null, given: viewGiven, input: viewEnvelope(), expect: { ...accepted, contact_token: tokenOf('view') } });
   out.push({ name: 'view-tampered-frame', consumers: PHONES, check: null, given: viewGiven, input: viewEnvelope({ tamperHash: true }), expect: reject('frame_hash_mismatch') });

@@ -154,7 +154,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.ok(apply.indexOf('Leases.acceptsView(') < apply.indexOf('state = view.state'));
     assert.match(live, /val appliedSeq: Int = 0/);
     assert.equal(count(model, 'applyLease(envelope, pin, next, k.deviceId)'), 1, 'the live path passes this phone\'s device id');
-    assert.equal(count(model, 'applyLease('), 4, 'declared once, called from Refresh, from the demo and for the status an answer carries');
+    assert.equal(count(model, 'applyLease('), 7, 'declared once; called from Refresh (the views, and a fresh status first), the demo, a reply\'s status, a listed lease and a followed one');
   });
 
   it('iOS: the core has the rule, and apply applies nothing that fails it', () => {
@@ -209,8 +209,8 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(iosReply, /guard let json = reply\?\["status"\], let signed = try\? Envelope\(json: json\), let key,/);
     assert.match(iosReply, /let pin = state\.nodes\.first\(where: \{ \$0\.id == current\.nodeId \}\) else \{ return \}/);
     assert.match(iosReply, /apply\(signed, pin: pin, deviceId: key\.deviceId, to: &current\)/);
-    assert.equal(count(iosLeases, 'applyReplyStatus('), 3, 'declared, after Allow, and after each watch');
-    assert.equal(count(iosLeases, '["status"]'), 2, 'the listed request\'s status and a reply\'s: both through verifiedMessage');
+    assert.equal(count(iosLeases, 'applyReplyStatus('), 4, 'declared, after Allow, after each watch, and after each revoke');
+    assert.equal(count(iosLeases, '["status"]'), 3, 'a listed request\'s status, a listed lease\'s status and a reply\'s: all through verifiedMessage');
     // One early watch at most per 20 s, so a phone that is never contact does not loop.
     const iosLive = section(iosLeases, 'func openLiveLease', 'private func apply(');
     assert.match(iosLive, /let early = Leases\.isPausedForContact\(state: live\.state, reason: live\.reason\) && !earlyUsed\n\s+&& live\.contactToken != nil && live\.contactToken != lastWatchToken/);
@@ -229,7 +229,107 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(reply, /val signed = reply\["status"\]\?\.takeIf \{ it !is JsonNull \}\?\.let \{ runCatching \{ Envelope\.fromJson\(it\) \}\.getOrNull\(\) \} \?: return live/);
     assert.match(reply, /return applyLease\(signed, pin, live, deviceId\)/);
     assert.equal(count(live, 'applyReplyStatus('), 4, 'declared, after Allow, after the watch, after Stop');
-    assert.equal(count(live, '["status"]'), 2, 'the listed request\'s status and a reply\'s: both through verifiedMessage');
+    assert.equal(count(live, '["status"]'), 4, 'a listed request\'s status, a listed lease\'s (twice: the list, and Refresh\'s own) and a reply\'s: all through verifiedMessage or applyLease');
+    // Refresh asks for a fresh status first only when the token it holds is over a minute old by the phone's running clock.
+    const refresh = section(live, 'fun refreshLiveLease', 'private fun applyLease');
+    assert.match(refresh, /if \(next\.state != "ended" && Leases\.tokenIsStale\(next\.contactTokenAtMs, SystemClock\.elapsedRealtime\(\)\)\) \{\n\s+val fresh = try \{\n\s+api\.leases\(\)\n/);
+    assert.ok(refresh.indexOf('Leases.tokenIsStale(') < refresh.indexOf('Leases.watch('), 'before the watch is built');
+    assert.match(refresh, /if \(!isStatusOnly\(entry\) \|\| entry\["node_id"\]\.str\(\) != pin\.id\) continue\n\s+val signed = .*\n\s+next = applyLease\(signed, pin, next, k\.deviceId\)/);
+    assert.equal(count(apply, 'SystemClock.elapsedRealtime()'), 2, 'the token\'s age is taken when it is applied');
+    assert.match(kotlin, /const val TOKEN_FRESH_MS = 60_000L/);
+    assert.match(kotlin, /fun tokenIsStale\(appliedAtMs: Long\?, nowMs: Long\): Boolean = appliedAtMs == null \|\| nowMs - appliedAtMs >= TOKEN_FRESH_MS/);
+  });
+
+  // R-F5-18 (owner ruling, 2026-10-13): any enrolled phone can stop a
+  // lease. Each phone learns what is running from statuses the node signs,
+  // asked for with the one request it already makes for pending requests,
+  // and shows a banner row with a working Stop for each, saying who granted
+  // a lease this phone did not.
+  it('R-F5-18: both phones list running leases from node-signed statuses, give each a Stop, and say who granted the ones they did not', () => {
+    // The cores.
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    assert.match(swift, /public static func isLive\(state: String\) -> Bool \{ state == "active" \|\| state == "suspended" \}/);
+    assert.match(swift, /public static func grantedByOther\(device: String\?, name: String\?, thisDevice: String\?\) -> String\? \{\n\s+guard let device, device != thisDevice else \{ return nil \}/);
+    assert.match(swift, /return "Granted by \\\(Display\.escape\(name\)\)"/);
+    assert.match(swift, /self\.grantedByDevice = message\["granted_by"\]\?\["device_id"\]\?\.stringValue/);
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    assert.match(kotlin, /fun isLive\(state: String\): Boolean = state == "active" \|\| state == "suspended"/);
+    assert.match(kotlin, /if \(device == null \|\| device == thisDevice\) return null/);
+    assert.match(kotlin, /"Granted by \$\{Display\.escape\(name\)\}"/);
+    assert.match(kotlin, /m\["contact_token"\]\.str\(\), m\["granted_by"\]\["device_id"\]\.str\(\), m\["granted_by"\]\["name"\]\.str\(\)/);
+
+    // iOS.
+    const ios = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    const listed = section(iosLeases, 'private func noteListedLease', '\n    }\n');
+    // Only a status the pinned node it is listed under signed; then by seq, and gone once the node says ended.
+    assert.match(listed, /guard let nodeId = entry\["node_id"\]\?\.stringValue, let pin = state\.nodes\.first\(where: \{ \$0\.id == nodeId \}\),\n\s+let json = entry\["status"\], let signed = try\? Envelope\(json: json\),\n\s+let message = Leases\.verifiedMessage\(signed, pin: pin\), let status = LeaseStatus\(message: message\) else \{ return \}/);
+    assert.match(listed, /apply\(signed, pin: pin, deviceId: deviceId, to: &live\)/);
+    assert.match(listed, /guard Leases\.acceptsStatus\(status, appliedSeq: known\.map \{ runningLeases\[\$0\]\.appliedSeq \} \?\? 0\) else \{ return \}/);
+    assert.match(listed, /guard Leases\.isLive\(state: status\.state\) else \{ return \}/);
+    assert.ok(listed.indexOf('Leases.verifiedMessage(') < listed.indexOf('runningLeases.append('));
+    // It comes with the one list request, and only from entries that carry no request.
+    const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
+    assert.match(refreshIos, /if entry\["envelope"\]\?\.isNull \?\? true \{\n\s+noteListedLease\(entry, deviceId: key\.deviceId\)\n\s+continue\n\s+\}/);
+    assert.equal(count(iosLeases, 'client.leases('), 1, 'one request lists both');
+    assert.equal(count(iosLeases, 'runningLeases.append('), 2, 'a listed lease, and the lease that was on the live screen when another is followed');
+    // On opening the app: only with a session already unlocked, never a prompt of its own.
+    const open = section(iosLeases, 'func loadLeasesWhenUnlocked', '\n    }\n');
+    assert.match(open, /if key\.isSessionUnlocked \{\n\s+await self\.refreshLeases\(onlyIfUnlocked: true\)\n\s+return\n\s+\}/);
+    none(open, ['signEnvelope', 'unlockSession', 'refreshLeases()'], 'loadLeasesWhenUnlocked');
+    assert.match(ios, /if mode == \.live, !pairing \{ loadLeasesWhenUnlocked\(\) \}/);
+    // Stop from a banner row: the lease is followed, then the kill switch as always (a fresh Face ID over the revoke).
+    const stop = section(iosLeases, 'func stopLease', '\n    }\n');
+    assert.match(stop, /follow\(lease\)\n\s+await killSwitch\(\)/);
+    const follow = section(iosLeases, 'private func follow', '\n    }\n');
+    assert.match(follow, /apply\(signed, pin: pin, deviceId: key\.deviceId, to: &live\)/);
+    assert.match(follow, /runningLeases\.append\(runningRow\(old\)\)/);
+    const kill = section(iosLeases, 'func killSwitch', '// Demo:');
+    assert.equal(count(kill, 'key.signEnvelope('), 1);
+    none(kill, ['grantedBy', 'deviceId ==', 'deviceId !='], 'killSwitch (no check that this phone granted the lease)');
+    assert.match(kill, /if reply\?\["state"\]\?\.stringValue == "rejected" \{/);
+    // The banner: one row for each, and who granted the ones this phone did not.
+    const views = read('mobile', 'ios', 'App', 'LeaseViews.swift');
+    const banner = views.slice(views.indexOf('struct LeaseBanner'));
+    assert.match(banner, /ForEach\(model\.bannerLeases\) \{ lease in/);
+    assert.match(banner, /Button\("Stop", role: \.destructive\) \{ Task \{ await model\.stopLease\(lease\) \} \}/);
+    assert.match(banner, /if let by = model\.grantedByOtherText\(device: lease\.grantedByDevice, name: lease\.grantedByName\) \{/);
+    assert.match(banner, /\.sheet\(isPresented: \$model\.showLiveLease\)/);
+    assert.match(iosLeases, /if let live = liveLease, live\.state != "ended" \{ rows\.append\(runningRow\(live\)\) \}\n\s+rows\.append\(contentsOf: runningLeases\.filter \{ \$0\.leaseId != liveLease\?\.leaseId \}\)/);
+    assert.match(views, /if let by = model\.grantedByOtherText\(device: live\.grantedByDevice, name: live\.grantedByName\) \{ Text\(by\)/);
+
+    // Android: the same, on the owner's tap only.
+    const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+    const android = read(...kt, 'AppModel.kt');
+    const live = section(android, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+    const note = section(live, 'private fun noteListedLease', '\n    }\n');
+    assert.match(note, /if \(!isStatusOnly\(entry\)\) return\n\s+val pin = pins\.firstOrNull \{ it\.id == entry\["node_id"\]\.str\(\) \} \?: return/);
+    assert.match(note, /val status = Leases\.verifiedMessage\(signed, pin\)\?\.let \{ LeaseStatus\.from\(it\) \} \?: return/);
+    assert.match(note, /liveLease = applyLease\(signed, pin, live, deviceId \?: ""\)/);
+    assert.match(note, /if \(!Leases\.acceptsStatus\(status, if \(known >= 0\) runningLeases\[known\]\.appliedSeq else 0\)\) return/);
+    assert.match(note, /if \(!Leases\.isLive\(status\.state\)\) return/);
+    assert.ok(note.indexOf('Leases.verifiedMessage(') < note.indexOf('runningLeases.add('));
+    const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
+    assert.match(refreshAndroid, /val listed = api\.leases\(\)\n/);
+    assert.match(refreshAndroid, /for \(entry in listed\) noteListedLease\(entry, pins\)/);
+    assert.equal(count(refreshAndroid, 'api.'), 1, 'one request, one prompt, for the requests and for what is running');
+    // The list is declared where init can reach it, like leaseRequests.
+    assert.ok(android.indexOf('val runningLeases = mutableStateListOf<RunningLease>()') < android.indexOf('\n    init {'));
+    // Stop from a banner row: followed, then the same Stop as always.
+    const stopRow = section(live, 'fun stopRunningLease', '\n    }\n');
+    assert.match(stopRow, /followRunningLease\(lease\)\n\s+if \(liveLease\?\.leaseId == lease\.leaseId\) killSwitch\(\)/);
+    const followRow = section(live, 'private fun followRunningLease', '\n    }\n');
+    none(followRow, ['api.', 'scope.launch', 'signEnvelope'], 'followRunningLease (it fetches and sends nothing)');
+    assert.match(followRow, /liveLease = if \(lease\.status != null\) applyLease\(lease\.status, pin, opened, deviceId \?: ""\) else opened/);
+    const killAndroid = live.slice(live.indexOf('fun killSwitch'));
+    none(killAndroid, ['grantedBy'], 'killSwitch (no check that this phone granted the lease)');
+    const screens = read(...kt, 'LeaseScreens.kt');
+    const bannerKt = screens.slice(screens.indexOf('fun LeaseBanner'));
+    assert.match(bannerKt, /for \(lease in model\.runningLeases\) \{/);
+    assert.match(bannerKt, /Button\(\{ model\.stopRunningLease\(lease\) \}, colors = /);
+    assert.equal(count(bannerKt, 'Leases.grantedByOther('), 2, 'the lease on the live screen, and each listed one');
+    assert.match(screens, /val grantedByOther = Leases\.grantedByOther\(live\.grantedByDevice, live\.grantedByName, model\.deviceId\)/);
+    none(screens, ['LaunchedEffect', 'DisposableEffect', 'SideEffect', 'produceState', 'rememberCoroutineScope', 'delay(', 'while (', 'ticker('], 'LeaseScreens.kt');
   });
 
   it('neither app\'s demo shows typed text in its action log', () => {
@@ -256,20 +356,26 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
     };
   }
   // What the model does for a lease, as the screens call it.
-  const ACTS = ['model.refreshLeases(', 'model.refreshLiveLease(', 'model.killSwitch(', 'model.decideLease(', 'model.openLiveLease('];
+  const ACTS = ['model.refreshLeases(', 'model.refreshLiveLease(', 'model.killSwitch(', 'model.decideLease(', 'model.openLiveLease(', 'model.stopRunningLease(', 'model.openRunningLease('];
 
   it('Android: the live lease section has no loop and no timer', () => {
     const { live, screens, leaseScreens } = android();
     none(live, ['while (', 'while(', 'do {', 'delay(', 'repeat(', 'postDelayed', 'Timer(', 'withTimeout', 'pollJob', '.retry',
       'forEach', 'generateSequence', 'tailrec', 'ticker', 'Handler(', 'schedule', 'LaunchedEffect', '.collect', 'flow {'], 'the live lease section');
-    // The only `for` walks the entries one fetch returned.
-    assert.equal(count(live, 'for ('), 1);
+    // Each `for` walks the entries one fetch returned: the views, the list, and the fresh statuses before a watch.
+    assert.equal(count(live, 'for ('), 3);
     assert.match(live, /for \(entry in entries\)/);
+    assert.match(live, /for \(entry in listed\)/);
+    assert.match(live, /for \(entry in fresh\)/);
     // No function here calls itself or another tap's function: each name appears once, where it is declared.
-    for (const name of ['fun refreshLeases(', 'fun refreshLiveLease(', 'fun killSwitch(', 'fun decideLease(', 'private fun noteLeasePush(']) {
+    for (const name of ['fun refreshLeases(', 'fun refreshLiveLease(', 'fun decideLease(', 'private fun noteLeasePush(', 'fun stopRunningLease(', 'fun openRunningLease(']) {
       assert.equal(count(live, name), 1, name);
       assert.equal(count(live, name.split(' ').pop()), 1, `${name.split(' ').pop()} is called from the section`);
     }
+    // The one exception (R-F5-18): Stop on a banner row is the same Stop, for the lease it names.
+    assert.equal(count(live, 'fun killSwitch('), 1);
+    assert.equal(count(live, 'killSwitch('), 2);
+    assert.match(section(live, 'fun stopRunningLease', '\n    }\n'), /killSwitch\(\)/);
     // One coroutine per tap: the list, a decision, a Refresh, a Stop.
     assert.equal(count(live, 'scope.launch'), 4);
     // The screens: nothing runs by itself. The model is called only from a button's onClick.
@@ -278,7 +384,8 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
     assert.equal(count(leaseScreens, 'OutlinedButton({ model.refreshLiveLease() }'), 1);
     assert.equal(count(leaseScreens, 'Button({ model.killSwitch() }'), 2, 'the live screen and the banner');
     assert.equal(count(leaseScreens, 'Button({ model.decideLease('), 2, 'Allow and Deny');
-    for (const [call, n] of [['model.refreshLeases(', 1], ['model.refreshLiveLease(', 1], ['model.killSwitch(', 2], ['model.decideLease(', 2], ['model.openLiveLease(', 0]]) {
+    for (const [call, n] of [['model.refreshLeases(', 1], ['model.refreshLiveLease(', 1], ['model.killSwitch(', 2], ['model.decideLease(', 2], ['model.openLiveLease(', 0],
+      ['model.stopRunningLease(', 1], ['model.openRunningLease(', 1]]) {
       assert.equal(count(leaseScreens, call), n, `${call} in LeaseScreens.kt`);
     }
     none(screens, ACTS, 'Screens.kt (a lease action outside the lease screens)');
@@ -352,7 +459,9 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
     assert.match(core, /const val NO_CONTACT = "no_contact"/);
     assert.match(core, /fun isPausedForContact\(state: String, reason: String\?\): Boolean = state == "suspended" && reason == NO_CONTACT/);
     // From the signed state only: what applyLease read from a status the pinned node signed.
-    assert.match(leaseScreens, /if \(Leases\.isPausedForContact\(live\.state, live\.reason\)\) Text\("Paused: tap Refresh to let it continue\."/);
+    assert.match(leaseScreens, /if \(Leases\.isPausedForContact\(live\.state, live\.reason\)\) \{\n\s+if \(grantedByOther == null\) Text\("Paused: tap Refresh to let it continue\."/);
+    // A lease another phone granted is not kept going from here, and the screen does not say it is.
+    assert.match(leaseScreens, /else Text\("Paused: the phone that granted it has not been in touch\. You can still stop it here\."/);
     assert.match(leaseScreens, /The computer pauses clicks and typing when this phone has not refreshed for about two minutes\. Tap Refresh to keep it going\./);
     // Nothing new runs by itself (R-F5-1, R-F5-5): the same checks as above, on the changed files.
     none(leaseScreens, ['LaunchedEffect', 'DisposableEffect', 'SideEffect', 'produceState', 'rememberCoroutineScope', 'delay(', 'while (', 'ticker('], 'LeaseScreens.kt');
@@ -379,7 +488,7 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
     assert.match(refresh, /cursor = Leases\.cursorAfterWatch\(next\.lastSeq, sent\.json\)/);
     assert.match(refresh, /api\.leaseViews\(next\.leaseId, cursor, if \(waitForFrame\) Leases\.REFRESH_WAIT_S else 0\)/);
     assert.equal(count(live, 'api.leaseViews('), 1);
-    assert.equal(count(live, 'api.leases('), 1);
+    assert.equal(count(live, 'api.leases('), 2, 'the list the owner asks for, and the fresh status before a watch whose token is old');
     assert.match(api, /views\?after_seq=\$afterSeq&wait=\$waitS/);
     // No frame is not a reason to ask again: the screen says so.
     assert.match(leaseScreens, /if \(live\.noFrame\) Text\(/);

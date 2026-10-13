@@ -87,6 +87,11 @@ public struct LeaseStatus: Equatable {
     /// The token this status carries for the phone's next watch to echo
     /// (owner ruling R-F5-15); nil when the message holds none.
     public let contactToken: String?
+    /// The phone whose grant made the lease (owner ruling R-F5-18): its
+    /// device id, and the name the node knows it by when it gave one. Both
+    /// nil while nobody has granted the lease.
+    public let grantedByDevice: String?
+    public let grantedByName: String?
 
     public init?(message: JSONValue) {
         guard message["type"]?.stringValue == Self.messageType, let leaseId = message["lease_id"]?.stringValue,
@@ -100,6 +105,8 @@ public struct LeaseStatus: Equatable {
         self.reason = message["reason"]?.stringValue
         self.expiresAt = message["expires_at"]?.stringValue
         self.contactToken = message["contact_token"]?.stringValue
+        self.grantedByDevice = message["granted_by"]?["device_id"]?.stringValue
+        self.grantedByName = message["granted_by"]?["name"]?.stringValue
     }
 }
 
@@ -146,6 +153,19 @@ public enum Leases {
 
     /// Whether a signed state and reason say input is paused for want of contact.
     public static func isPausedForContact(state: String, reason: String?) -> Bool { state == "suspended" && reason == noContact }
+
+    /// A lease that is running: it holds, or can get back, the right to
+    /// click and type. Such a lease has a banner and a Stop (R-F5-18).
+    public static func isLive(state: String) -> Bool { state == "active" || state == "suspended" }
+
+    /// What to say beside Stop for a lease another phone granted (R-F5-18):
+    /// nil when this phone granted it or the node has not said who did.
+    /// The text is escaped for display.
+    public static func grantedByOther(device: String?, name: String?, thisDevice: String?) -> String? {
+        guard let device, device != thisDevice else { return nil }
+        if let name, !name.isEmpty { return "Granted by \(Display.escape(name))" }
+        return "Granted by another phone (\(Display.escape(device)))"
+    }
 
     /// Order and addressee (owner ruling R-F5-16). A node numbers the
     /// statuses and views of one lease with one rising `seq`. A relay can

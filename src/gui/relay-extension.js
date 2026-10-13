@@ -8,6 +8,9 @@ const { open } = require('../approvals/envelope');
 const LEASE_TTL_MS = 5 * 60 * 1000;
 const MAX_BYTES = 262144;
 const MAX_WAIT_S = 25;
+// How long a node gets to answer "what is running" before it is left out.
+const LIST_TIMEOUT_MS = 5000;
+const LISTED_PER_NODE = 8;
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACTIONS = { grant: 'kl.lease.grant', revoke: 'kl.lease.revoke', watch: 'kl.lease.watch' };
 
@@ -44,6 +47,30 @@ function registerLeaseRoutes({ phoneApi, nodeHub, mailbox, devices, log }) {
     return requests.map(({ item, leaseId }) => ({ node_id: item.node_id, envelope: item.envelope, status: latest.get(`${item.node_id}|${leaseId}`) || null }));
   }
 
+  // R-F5-18: the leases that are running now, and those that ended lately,
+  // on the device's nodes: each node is asked, and answers with statuses it
+  // signs then. This is the same one device-signed request a phone already
+  // makes for pending requests; nothing here is listed on the relay's own
+  // word. An entry is { node_id, envelope: null, status }. A node that is
+  // offline, too slow or older than this simply lists nothing.
+  async function liveStatuses(deviceId) {
+    const perNode = await Promise.all(activeNodes(deviceId).map(async (nodeId) => {
+      let result;
+      try {
+        result = await nodeHub.rpc(nodeId, 'lease.list', { device_id: deviceId }, { timeoutMs: LIST_TIMEOUT_MS });
+      } catch (err) {
+        log.debug(`lease.list to ${nodeId} gave nothing: ${err.message}`);
+        return [];
+      }
+      const statuses = result !== null && typeof result === 'object' && Array.isArray(result.statuses) ? result.statuses.slice(0, LISTED_PER_NODE) : [];
+      return statuses.filter((status) => {
+        const m = messageOf(status);
+        return m !== null && m.type === 'kl.lease.status' && m.node_id === nodeId;
+      }).map((status) => ({ node_id: nodeId, envelope: null, status }));
+    }));
+    return perNode.flat();
+  }
+
   phoneApi.registerRoute('GET', '/v1/leases', {
     auth: 'device',
     handler: async (req, ctx) => {
@@ -51,7 +78,8 @@ function registerLeaseRoutes({ phoneApi, nodeHub, mailbox, devices, log }) {
       if (ms > 0 && leaseList(ctx.deviceId).length === 0) {
         await mailbox.wait({ nodeIds: activeNodes(ctx.deviceId), typePrefix: 'kl.lease.request', toDevice: ctx.deviceId }, { timeoutMs: ms });
       }
-      return { body: leaseList(ctx.deviceId) };
+      const live = await liveStatuses(ctx.deviceId);
+      return { body: [...leaseList(ctx.deviceId), ...live] };
     }
   });
 

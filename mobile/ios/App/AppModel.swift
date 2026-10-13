@@ -244,11 +244,38 @@ final class AppModel: ObservableObject {
         var appliedSeq = 0
         /// The contact token of the newest status or view applied (R-F5-15): the next watch echoes it.
         var contactToken: String?
+        /// Who granted the lease, as its node signed it (R-F5-18); nil until a status said.
+        var grantedByDevice: String?
+        var grantedByName: String?
+        /// The newest status applied, as the node signed it.
+        var lastStatus: Envelope?
         var revoking = false
+    }
+
+    /// A lease this phone knows to be running from a status its node signed
+    /// (owner ruling R-F5-18): one another phone granted, or one this phone
+    /// granted before it was restarted. Enough for the banner and for Stop.
+    /// `status` is that signed status, so following the lease starts from it.
+    struct RunningLease: Identifiable {
+        var id: String { leaseId }
+        let nodeId: String
+        let nodeName: String
+        let leaseId: String
+        let state: String
+        let reason: String?
+        let appliedSeq: Int
+        let grantedByDevice: String?
+        let grantedByName: String?
+        let status: Envelope?
     }
 
     @Published var leaseRequests: [LeaseRequestItem] = []
     @Published var liveLease: LiveLease?
+    /// Leases a pinned node listed as running that are not the one on the live screen (R-F5-18).
+    @Published var runningLeases: [RunningLease] = []
+    /// Whether the live lease sheet is presented (the banner owns the sheet).
+    @Published var showLiveLease = false
+    private var leaseOpenTask: Task<Void, Never>?
     @Published private(set) var decidingLease: Set<String> = []
     private var decidedLeaseRequests = Set<String>()
     private var liveTask: Task<Void, Never>?
@@ -264,6 +291,12 @@ final class AppModel: ObservableObject {
         do {
             var items: [LeaseRequestItem] = []
             for entry in try await client.leases(signWith: onlyIfUnlocked ? Self.sessionOnlySigner(key) : nil) {
+                // R-F5-18: a lease that is running, or ended lately, comes with no
+                // request: only the status its node signed for this very listing.
+                if entry["envelope"]?.isNull ?? true {
+                    noteListedLease(entry, deviceId: key.deviceId)
+                    continue
+                }
                 guard let json = entry["envelope"], let envelope = try? Envelope(json: json),
                       let pin = state.nodes.first(where: { $0.id == envelope.kid }),
                       let message = Leases.verifiedMessage(envelope, pin: pin), let request = LeaseRequest(message: message),
@@ -422,6 +455,11 @@ final class AppModel: ObservableObject {
             guard status.leaseId == live.leaseId, Leases.acceptsStatus(status, appliedSeq: live.appliedSeq) else { return }
             live.appliedSeq = status.seq
             if let token = status.contactToken { live.contactToken = token }
+            live.lastStatus = envelope
+            if let device = status.grantedByDevice {
+                live.grantedByDevice = device
+                live.grantedByName = status.grantedByName
+            }
             live.state = status.state
             live.locked = status.locked
             live.reason = status.reason
@@ -447,6 +485,107 @@ final class AppModel: ObservableObject {
         liveTask?.cancel()
         demoLeaseTimer?.cancel()
         liveLease = nil
+    }
+
+    /// R-F5-18: on opening the app, what is running on the paired nodes (and
+    /// what waits for an answer), once the API session is unlocked. It asks
+    /// for no unlock of its own: it waits a short while for the one the
+    /// approvals poll brings, then gives up until the owner pulls to refresh.
+    func loadLeasesWhenUnlocked() {
+        leaseOpenTask?.cancel()
+        leaseOpenTask = Task { [weak self] in
+            for _ in 0..<30 {
+                guard let self, !Task.isCancelled, self.mode == .live, !self.pairing, let key = self.key else { return }
+                if key.isSessionUnlocked {
+                    await self.refreshLeases(onlyIfUnlocked: true)
+                    return
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    /// One listed status (R-F5-18), only when the pinned node it is listed
+    /// under signed it. It updates the lease on the live screen through
+    /// `apply`, or the list of running leases: newer than what is known (by
+    /// the node's seq), kept while the lease runs, dropped once the node
+    /// says it ended. Nothing here is taken on the relay's word.
+    private func noteListedLease(_ entry: JSONValue, deviceId: String) {
+        guard let nodeId = entry["node_id"]?.stringValue, let pin = state.nodes.first(where: { $0.id == nodeId }),
+              let json = entry["status"], let signed = try? Envelope(json: json),
+              let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message) else { return }
+        if var live = liveLease, live.leaseId == status.leaseId {
+            apply(signed, pin: pin, deviceId: deviceId, to: &live)
+            liveLease = live
+            return
+        }
+        let known = runningLeases.firstIndex(where: { $0.leaseId == status.leaseId })
+        guard Leases.acceptsStatus(status, appliedSeq: known.map { runningLeases[$0].appliedSeq } ?? 0) else { return }
+        if let known { runningLeases.remove(at: known) }
+        guard Leases.isLive(state: status.state) else { return }
+        runningLeases.append(RunningLease(nodeId: pin.id, nodeName: pin.name, leaseId: status.leaseId, state: status.state, reason: status.reason,
+                                          appliedSeq: status.seq, grantedByDevice: status.grantedByDevice, grantedByName: status.grantedByName,
+                                          status: signed))
+    }
+
+    private func runningRow(_ live: LiveLease) -> RunningLease {
+        RunningLease(nodeId: live.nodeId, nodeName: live.nodeName, leaseId: live.leaseId, state: live.state, reason: live.reason,
+                     appliedSeq: live.appliedSeq, grantedByDevice: live.grantedByDevice, grantedByName: live.grantedByName, status: live.lastStatus)
+    }
+
+    /// The banner's rows (R-F5-18): the lease on the live screen while it
+    /// has not ended, then every other lease this phone knows to be running.
+    var bannerLeases: [RunningLease] {
+        var rows: [RunningLease] = []
+        if let live = liveLease, live.state != "ended" { rows.append(runningRow(live)) }
+        rows.append(contentsOf: runningLeases.filter { $0.leaseId != liveLease?.leaseId })
+        return rows
+    }
+
+    /// What the banner calls a lease.
+    func bannerTitle(_ lease: RunningLease) -> String {
+        "Lease \(lease.state == "suspended" ? "paused" : "active") on \(Display.escape(lease.nodeName))"
+    }
+
+    /// Beside Stop, for a lease another phone granted (R-F5-18); nil for this phone's own.
+    func grantedByOtherText(device: String?, name: String?) -> String? {
+        Leases.grantedByOther(device: device, name: name, thisDevice: deviceId)
+    }
+
+    func isRevoking(_ lease: RunningLease) -> Bool {
+        liveLease?.leaseId == lease.leaseId && liveLease?.revoking == true
+    }
+
+    /// The live view of a lease, from its banner row.
+    func showLease(_ lease: RunningLease) {
+        follow(lease)
+        showLiveLease = true
+    }
+
+    /// Stop, from a banner row, for any lease listed there (R-F5-18): the
+    /// lease becomes the one on the live screen, so the node's signed answer
+    /// is followed, and then the kill switch as always: a fresh Face ID
+    /// over the revoke. Any enrolled phone may stop a lease.
+    func stopLease(_ lease: RunningLease) async {
+        follow(lease)
+        await killSwitch()
+    }
+
+    /// Makes a listed lease the one on the live screen, starting from the
+    /// status its node signed. The lease that was there keeps its banner row
+    /// while it runs.
+    private func follow(_ lease: RunningLease) {
+        guard liveLease?.leaseId != lease.leaseId else { return }
+        if let old = liveLease, Leases.isLive(state: old.state) {
+            runningLeases.removeAll { $0.leaseId == old.leaseId }
+            runningLeases.append(runningRow(old))
+        }
+        runningLeases.removeAll { $0.leaseId == lease.leaseId }
+        openLiveLease(nodeId: lease.nodeId, leaseId: lease.leaseId)
+        guard let signed = lease.status, let key, var live = liveLease, live.leaseId == lease.leaseId,
+              let pin = state.nodes.first(where: { $0.id == live.nodeId }) else { return }
+        apply(signed, pin: pin, deviceId: key.deviceId, to: &live)
+        liveLease = live
     }
 
     /// A signature that was not made because the unlock was cancelled or
@@ -477,7 +616,14 @@ final class AppModel: ObservableObject {
                     // Until a node-signed status says ended, the lease is closed, or the send below gives up.
                     guard let self, let now = self.liveLease, now.leaseId == leaseId, now.state != "ended", now.revoking else { return }
                     do {
-                        _ = try await client.leaseDecision("revoke", leaseId: leaseId, envelope: envelope)
+                        let reply = try await client.leaseDecision("revoke", leaseId: leaseId, envelope: envelope)
+                        // The node's answer carries the status it signed for it: "ended" on its own word.
+                        self.applyReplyStatus(reply, leaseId: leaseId)
+                        if reply?["state"]?.stringValue == "rejected" {
+                            // The same revoke would be refused again (a node that restarted no longer knows the lease).
+                            self.revokeRefused(leaseId, reply?["reason"]?.stringValue)
+                            return
+                        }
                     } catch {
                         if AppModel.isUnlockFailure(error) {
                             self.revokeNotSent(leaseId, error)
@@ -491,6 +637,17 @@ final class AppModel: ObservableObject {
         } catch {
             fail(error)
         }
+    }
+
+    /// The revoke reached the node and was refused. The re-sends stop and the
+    /// owner is told; the lease is not shown as ended on that word (only a
+    /// status the node signed does that).
+    private func revokeRefused(_ leaseId: String, _ reason: String?) {
+        if var current = liveLease, current.leaseId == leaseId {
+            current.revoking = false
+            liveLease = current
+        }
+        banner = "The node refused the stop: \(friendlyReason(reason)). The lease may still be active."
     }
 
     /// The revoke was signed but its request could not be: say so and let the owner tap again.
@@ -655,6 +812,8 @@ final class AppModel: ObservableObject {
         demo = nil
         pending = []
         closeLiveLease()
+        runningLeases = []
+        showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []
         state = StoredState()
@@ -915,6 +1074,8 @@ final class AppModel: ObservableObject {
     func resumePolling() {
         // Alerts are read on every open (spec §3.13), so a chain break is seen even without push.
         if mode == .live, state.frontDoorId != nil, !pairing { Task { await refreshAlerts() } }
+        // R-F5-18: and what is running on the paired nodes, once the session is unlocked (no prompt of its own).
+        if mode == .live, !pairing { loadLeasesWhenUnlocked() }
         guard !needsTap, !pairing else { return }
         startPolling()
     }
@@ -1630,6 +1791,8 @@ final class AppModel: ObservableObject {
         questions = []
         answeredTokens = []
         closeLiveLease()
+        runningLeases = []
+        showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []
         history = nil

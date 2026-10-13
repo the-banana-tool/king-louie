@@ -42,7 +42,8 @@ final class LeaseVectorTests: XCTestCase {
     func testEveryIosVectorIsCovered() throws {
         let names = Set(try allVectors().filter { ($0["consumers"]?.arrayValue ?? []).contains(.string("ios")) }.compactMap { $0["name"]?.stringValue })
         XCTAssertEqual(names, ["grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "watch-no-token",
-                               "status-valid", "status-no-contact", "view-node-sig-valid", "view-tampered-frame"])
+                               "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed",
+                               "view-node-sig-valid", "view-tampered-frame"])
     }
 
     func testGrants() throws {
@@ -82,7 +83,7 @@ final class LeaseVectorTests: XCTestCase {
 
     /// R-F5-15: a status the pinned node signed gives the token the next watch echoes.
     func testStatuses() throws {
-        for name in ["status-valid", "status-no-contact"] {
+        for name in ["status-valid", "status-no-contact", "status-pending", "status-granted-unnamed"] {
             let v = try vector(name)
             let message = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)), name)
             let status = try XCTUnwrap(LeaseStatus(message: message), name)
@@ -93,6 +94,10 @@ final class LeaseVectorTests: XCTestCase {
             XCTAssertEqual(status.reason, expect["reason"]?.stringValue, name)
             XCTAssertEqual(status.contactToken, expect["contact_token"]!.stringValue, name)
             XCTAssertEqual(Leases.isPausedForContact(state: status.state, reason: status.reason), name == "status-no-contact", name)
+            // R-F5-18: who granted it (nobody, a named phone, a phone the node gave no name for).
+            XCTAssertEqual(status.grantedByDevice, expect["granted_by"]?["device_id"]?.stringValue, name)
+            XCTAssertEqual(status.grantedByName, expect["granted_by"]?["name"]?.stringValue, name)
+            XCTAssertEqual(Leases.isLive(state: status.state), name != "status-pending", name)
         }
         XCTAssertEqual(Leases.noContact, "no_contact")
         XCTAssertFalse(Leases.isPausedForContact(state: "suspended", reason: "foreground_changed"))
@@ -136,6 +141,25 @@ final class LeaseVectorTests: XCTestCase {
         let envelope = try fleet.leaseRequest(on: 0, apps: ["calculator"], minutes: 15)
         let message = try XCTUnwrap(Leases.verifiedMessage(envelope, pin: fleet.pins[0]))
         XCTAssertEqual(LeaseRequest(message: message)?.apps.first?.id, "calculator")
+    }
+
+    /// R-F5-18: which leases get a banner, and what a phone says of one it did not grant.
+    func testLiveAndGrantedBy() {
+        XCTAssertTrue(Leases.isLive(state: "active"))
+        XCTAssertTrue(Leases.isLive(state: "suspended"))
+        XCTAssertFalse(Leases.isLive(state: "pending"))
+        XCTAssertFalse(Leases.isLive(state: "ended"))
+        XCTAssertFalse(Leases.isLive(state: ""))
+        XCTAssertNil(Leases.grantedByOther(device: "d-me", name: "My phone", thisDevice: "d-me"))
+        XCTAssertNil(Leases.grantedByOther(device: nil, name: nil, thisDevice: "d-me"))
+        XCTAssertEqual(Leases.grantedByOther(device: "d-other", name: "Owner phone", thisDevice: "d-me"), "Granted by Owner phone")
+        XCTAssertEqual(Leases.grantedByOther(device: "d-other", name: nil, thisDevice: "d-me"), "Granted by another phone (d-other)")
+        XCTAssertEqual(Leases.grantedByOther(device: "d-other", name: "", thisDevice: "d-me"), "Granted by another phone (d-other)")
+        // A phone with no key of its own (it cannot be the granting one) still names the granter.
+        XCTAssertEqual(Leases.grantedByOther(device: "d-other", name: "Owner phone", thisDevice: nil), "Granted by Owner phone")
+        // The name is the node's word for a device: shown escaped.
+        let odd = Leases.grantedByOther(device: "d-other", name: "Owner\u{202E}phone", thisDevice: "d-me")
+        XCTAssertEqual(odd?.unicodeScalars.contains("\u{202E}"), false)
     }
 
     /// R-F5-16: nothing older than what is on screen, and no view made for another device.

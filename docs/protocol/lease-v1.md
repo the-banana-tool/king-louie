@@ -27,7 +27,9 @@ Node-signed (Ed25519, `kid` = `node_id`): `kl.lease.request`, `kl.lease.status`,
 { "v": 1, "type": "kl.lease.watch", "node_id", "lease_id", "device_id",
   "contact_token": "b64url(16)" | null (the newest one this phone has applied for the lease), "nonce" (fresh), "signed_at" }
 { "v": 1, "type": "kl.lease.status", "node_id", "lease_id", "seq", "at", "state": "pending|active|suspended|ended",
-  "locked": false, "reason": "…" | null, "expires_at": "…" | null, "contact_token": "b64url(16)" }
+  "locked": false, "reason": "…" | null, "expires_at": "…" | null, "contact_token": "b64url(16)",
+  "granted_by": { "device_id": "d-…", "name": "…" (≤ 64) | null } | null }
+  // granted_by (2026-10-13, R-F5-18): the phone whose grant made the lease; null while nobody has granted it.
 { "v": 1, "type": "kl.lease.view", "node_id", "lease_id", "seq", "at", "to_device", "state", "locked", "remaining_s",
   "foreground": { "app_id": "calculator" | null, "matches": true },
   "frame": { "mime": "image/jpeg", "width", "height", "sha256": "b64url(SHA-256(JPEG bytes))", "data": "base64" } | null,
@@ -69,6 +71,19 @@ for a run that has neither a job id nor a chat id (`job_required`), for a job
 that is not open (`job_closed`), or for a front-door client whose grant does
 not cover `fleet:unsafe` on this node (refused in the node's own words for a
 missing scope).
+
+Who may do what (owner ruling R-F5-18, 2026-10-13). The first grant of a
+lease may come from any enrolled device, and that device is then the
+granting one (`granted_by` in every status from then on; `name` is its
+approver record's name when that is one plain line, else `null`). Only the
+granting device resumes the lease: a `grant` decision on a resume request
+from any other enrolled device is refused (`not_granting_device`) and leaves
+the request open. Only its watches are contact (below). Any enrolled,
+unrevoked device may stop a lease: a revoke, or a `deny` of a resume
+request, is checked for signature, nonce and lease id like the granting
+device's own, and nothing more. Any enrolled device may also watch a lease,
+to see what it is about to stop; such a watch gets frames and is never
+contact.
 
 Contact (owner ruling R-F5-15, 2026-10-13). A lease's input goes on only
 while the node has verified a signed message from the device that granted
@@ -120,9 +135,9 @@ the node remembers their nonces per lease for as long as it remembers the
 lease (not for ten minutes; revised 2026-10-12): the same bytes again are a
 `replay` however late they come, and the same nonce under other bytes is
 `already_decided`. A lease remembers at most 4096 of them; a watch beyond
-that is refused (`too_many_watches`), a revoke never is. This is node
-behaviour only: no message changed. Any enrolled device may revoke any lease;
-a replayed revoke changes nothing and re-sends the status.
+that is refused (`too_many_watches`), a revoke never is. Any enrolled device
+may revoke any lease (R-F5-18, above); a replayed revoke changes nothing and
+re-sends the status.
 
 ## 3. What the phone checks and shows
 
@@ -143,10 +158,10 @@ a replayed revoke changes nothing and re-sends the status.
 | Route / method | Shape |
 |---|---|
 | node → relay | `link.send(envelope, { push: { kind: 'lease', id: request_id, expires_at } })` for requests; statuses plain; views with `{ to_device }`; mailbox prefix `kl.lease.`, 5 min, 256 KiB |
-| `GET /v1/leases?wait=0..25` | `[{ node_id, envelope, status }]`: pending requests for the device's nodes with the latest status of each lease |
+| `GET /v1/leases?wait=0..25` | `[{ node_id, envelope, status }]`: pending requests for the device's nodes with the latest status of each lease; then (R-F5-18) one `{ node_id, envelope: null, status }` for each lease that is running on those nodes or ended lately, where `status` is a `kl.lease.status` the node signed for this very listing (the relay asks each node, `lease.list`). This is the one device-signed request a phone makes when it opens; there is no unsigned listing, and a phone shows a lease from it only when the pinned node's signature on `status` verifies. A node that is offline, slow or older lists nothing |
 | `POST /v1/leases/{lease_id}/grant` · `/revoke` · `/watch` | body = the phone envelope → `202 { state, reason?, status? }`, `503 node_offline`. `status` is the `kl.lease.status` envelope the node signed for this answer (absent when it refused the message): a phone verifies and applies it like any other status, and takes its `contact_token` from it; `state` and `reason` beside it are in clear and are never shown as the lease's state. The `202` for `/watch` also carries `after_seq`: the mailbox position read before the node heard the watch, so a phone that fetches on tap can ask for views from there with `wait` and get the frame this watch causes |
 | `GET /v1/leases/{lease_id}/views?after_seq&wait` | `[{ seq, envelope }]` of views to the caller and statuses, oldest first |
-| node methods | `lease.grant`, `lease.revoke`, `lease.watch`: `{ envelope }` → `{ state, reason?, status? }` |
+| node methods | `lease.grant`, `lease.revoke`, `lease.watch`: `{ envelope }` → `{ state, reason?, status? }`. `lease.list`: `{ device_id }` (the device the relay authenticated) → `{ statuses: [envelope] }`: a status signed now for the live lease, if any, and for at most the four that ended last; nothing for a device that is not enrolled on the node or is revoked. The node takes the relay's word for who asks only to decide whether to answer: the statuses hold nothing this node's phones are not sent anyway, and whatever a phone then does (watch, stop) it signs itself |
 
 ## 5. Vectors
 
@@ -155,7 +170,8 @@ a replayed revoke changes nothing and re-sends the status.
 Phone-built vectors also carry `given.request` and `expect.message` (the exact
 message the phone must build). Phones consume `grant-valid`, `grant-narrowed`,
 `deny-valid`, `resume-capped`, `revoke-valid`, `watch-valid`, `watch-no-token`
-(a watch with `contact_token: null`), `status-valid`, `status-no-contact`
-(`expect.status` holds the fields a phone reads, the contact token among
-them), `view-node-sig-valid` (`expect.contact_token`), `view-tampered-frame`.
-Thirty vectors in all.
+(a watch with `contact_token: null`), `status-valid`, `status-no-contact`,
+`status-pending` (`granted_by: null`), `status-granted-unnamed` (a granting
+device with `name: null`) (`expect.status` holds the fields a phone reads,
+the contact token and `granted_by` among them), `view-node-sig-valid`
+(`expect.contact_token`), `view-tampered-frame`. Thirty-two vectors in all.

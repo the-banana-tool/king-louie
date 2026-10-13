@@ -1,0 +1,35 @@
+{
+  "name": "status-pending",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": null,
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "node": {
+      "id": "kl-hnef32472qzibi5r",
+      "name": "gpu-box",
+      "key": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950"
+    }
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-hnef32472qzibi5r",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJZTGZQbXcyaDk1UHhiSTNBcnBaSUtRIiwiZXhwaXJlc19hdCI6bnVsbCwiZ3JhbnRlZF9ieSI6bnVsbCwibGVhc2VfaWQiOiJlMjAyOTM1ZS1iOTY3LTQzMTctYjY3Zi01N2Q2M2QyNGJhMGMiLCJsb2NrZWQiOmZhbHNlLCJub2RlX2lkIjoia2wtaG5lZjMyNDcycXppYmk1ciIsInJlYXNvbiI6bnVsbCwic2VxIjoxLCJzdGF0ZSI6InBlbmRpbmciLCJ0eXBlIjoia2wubGVhc2Uuc3RhdHVzIiwidiI6MX0",
+    "sig": "tQE1CM3El-Y-fHJVj9emqesveAXhm_QRuAmozteME77sLUTTbTVXK6Q9gBrc9-VWYmpLC7MJgBwaPKSoIgFbCQ"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "status": {
+      "lease_id": "e202935e-b967-4317-b67f-57d63d24ba0c",
+      "seq": 1,
+      "state": "pending",
+      "reason": null,
+      "contact_token": "YLfPmw2h95PxbI3ArpZIKQ",
+      "granted_by": null
+    }
+  }
+}

@@ -126,16 +126,23 @@ fun LiveLeaseScreen(model: AppModel, close: () -> Unit) {
             if (live.frameDropped) Text("Frame dropped (too large)", color = WARNING)
             if (live.noFrame) Text("No frame arrived in ${Leases.REFRESH_WAIT_S} s. The leased app may not be in front. Tap Refresh to try again.", color = WARNING)
             live.unconfirmed?.let { Text(it, color = Color.Red, fontWeight = FontWeight.Bold) }
-            // R-F5-15: the node pauses input when this phone has not been in touch. This screen
-            // sends nothing by itself (R-F5-1), so it says what the owner has to do.
-            if (Leases.isPausedForContact(live.state, live.reason)) Text("Paused: tap Refresh to let it continue.", color = Color.Red, fontWeight = FontWeight.Bold)
-            else if (live.state == "active") Text("The computer pauses clicks and typing when this phone has not refreshed for about two minutes. Tap Refresh to keep it going.", color = WARNING)
+            // R-F5-18: a lease this phone did not grant says who did. Only that phone keeps it going.
+            val grantedByOther = Leases.grantedByOther(live.grantedByDevice, live.grantedByName, model.deviceId)
+            grantedByOther?.let { Text(it) }
+            // R-F5-15: the node pauses input when the phone that granted the lease has not been in
+            // touch. This screen sends nothing by itself (R-F5-1), so it says what the owner has to do.
+            if (Leases.isPausedForContact(live.state, live.reason)) {
+                if (grantedByOther == null) Text("Paused: tap Refresh to let it continue.", color = Color.Red, fontWeight = FontWeight.Bold)
+                else Text("Paused: the phone that granted it has not been in touch. You can still stop it here.", color = Color.Red, fontWeight = FontWeight.Bold)
+            } else if (live.state == "active" && grantedByOther == null) {
+                Text("The computer pauses clicks and typing when this phone has not refreshed for about two minutes. Tap Refresh to keep it going.", color = WARNING)
+            }
             live.reason?.takeIf { live.state != "active" }?.let { Text("Reason: ${Display.escape(it)}") }
             Button({ model.killSwitch() }, Modifier.fillMaxWidth(), enabled = !live.busy && live.state != "ended",
                 colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text(if (live.busy) "Working…" else "Stop now") }
             if (model.mode == AppMode.LIVE) {
                 OutlinedButton({ model.refreshLiveLease() }, enabled = !live.busy) { Text("Refresh") }
-                Text("Stop asks for your fingerprint twice, Refresh three times. Nothing is sent until you tap.")
+                Text("Stop asks for your fingerprint twice, Refresh three times (four when the last was over a minute ago). Nothing is sent until you tap.")
             }
             // Leaving the screen forgets only a lease that is over. One that is
             // still running keeps its banner, and so its Stop button, on every tab.
@@ -147,13 +154,38 @@ fun LiveLeaseScreen(model: AppModel, close: () -> Unit) {
     }
 }
 
-/** "Lease active on <node>" with the kill switch, above every tab. */
+/**
+ * One row with the kill switch, above every tab, for every lease this phone
+ * knows to be running (R-F5-18): the one on the live screen, and those a
+ * pinned node listed with a signed status the last time the owner tapped
+ * "Check for computer-use requests" (granted by another phone, or by this
+ * one before a restart). A row of a lease another phone granted says who
+ * granted it. Nothing here runs by itself.
+ */
 @Composable
 fun LeaseBanner(model: AppModel, open: () -> Unit) {
-    val live = model.liveLease ?: return
-    if (live.state == "ended") return
-    Row(Modifier.fillMaxWidth().background(Color(0x22FF0000)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-        OutlinedButton(open) { Text("Lease active on ${Display.escape(live.nodeName)}") }
-        Button({ model.killSwitch() }, enabled = !live.busy, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("Stop") }
+    val live = model.liveLease?.takeIf { it.state != "ended" }
+    Column {
+        if (live != null) {
+            Row(Modifier.fillMaxWidth().background(Color(0x22FF0000)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(Modifier.weight(1f)) {
+                    OutlinedButton(open) { Text("Lease ${if (live.state == "suspended") "paused" else "active"} on ${Display.escape(live.nodeName)}") }
+                    Leases.grantedByOther(live.grantedByDevice, live.grantedByName, model.deviceId)?.let { Text(it) }
+                }
+                Button({ model.killSwitch() }, enabled = !live.busy, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("Stop") }
+            }
+        }
+        for (lease in model.runningLeases) {
+            // (The lease on the live screen has its row above.)
+            if (lease.leaseId != live?.leaseId) {
+                Row(Modifier.fillMaxWidth().background(Color(0x22FF0000)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Column(Modifier.weight(1f)) {
+                        OutlinedButton({ model.openRunningLease(lease); open() }) { Text("Lease ${if (lease.state == "suspended") "paused" else "active"} on ${Display.escape(lease.nodeName)}") }
+                        Leases.grantedByOther(lease.grantedByDevice, lease.grantedByName, model.deviceId)?.let { Text(it) }
+                    }
+                    Button({ model.stopRunningLease(lease) }, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("Stop") }
+                }
+            }
+        }
     }
 }

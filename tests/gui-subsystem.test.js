@@ -339,7 +339,7 @@ describe('createGuiSubsystem', () => {
     const a = approvals();
     const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, deps: { endpoint: endpoint(base) } });
     assert.ok(gui);
-    assert.deepEqual([...a.relayClient.methods.keys()], ['lease.grant', 'lease.revoke', 'lease.watch']);
+    assert.deepEqual([...a.relayClient.methods.keys()], ['lease.grant', 'lease.revoke', 'lease.watch', 'lease.list']);
     const registry = new ToolRegistry();
     gui.registerTools(registry);
     assert.equal(registry.list().length, 10);

@@ -18,7 +18,9 @@ relay you pair it with.
   memory for as long as you're looking at it, not written to disk.
 - A computer-use lease you allowed or are watching: its latest picture and
   its list of actions — held in memory while the app is running, not written
-  to disk.
+  to disk. And, for every lease that is running on a paired node, whoever
+  granted it: its state, when it runs out and which phone granted it, as
+  the node signed them the last time the app asked.
 
 Nothing else. There are no analytics, no crash reporters and no third-party
 SDKs besides Firebase Messaging in the Android `fcm` build.
@@ -47,7 +49,12 @@ can see:
   state messages and each picture carries a random token, and each watch
   your phone sends repeats the newest one it has seen: that is how the node
   knows the watch was signed just now and not kept back by the relay. The
-  token says nothing else;
+  token says nothing else. Each state message also names the phone that
+  granted the lease, by its device id and the name it was enrolled under,
+  so that another of your phones can say whose lease it is about to stop;
+  and when a phone opens the app (on Android, when you tap "Check for
+  computer-use requests") the relay asks each of your nodes, for that
+  phone, which leases are running;
 - while a phone watches a lease, **pictures of the leased app's window with
   everything on it**, and the list of what the agent did there. The list
   never holds text the agent typed: a typed text appears as its length only

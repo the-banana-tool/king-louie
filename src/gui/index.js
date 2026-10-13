@@ -140,6 +140,8 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
     relay.registerMethod('lease.grant', async ({ envelope } = {}) => leases.onGrant(envelope));
     relay.registerMethod('lease.revoke', async ({ envelope } = {}) => leases.onRevoke(envelope));
     relay.registerMethod('lease.watch', async ({ envelope } = {}) => liveView.onWatch(envelope));
+    // R-F5-18: statuses signed now, for a phone that opens and asks what is running.
+    relay.registerMethod('lease.list', async ({ device_id: deviceId } = {}) => ({ statuses: leases.listFor(deviceId) }));
   }
 
   let brokerStarted = false;

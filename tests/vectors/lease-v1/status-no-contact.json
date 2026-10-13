@@ -17,8 +17,8 @@
   "input": {
     "alg": "Ed25519",
     "kid": "kl-hnef32472qzibi5r",
-    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiIxZ2RwZGFFOWRraUlUQXJXNWwzX3dnIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MTQ6MTEuMjAxWiIsImxlYXNlX2lkIjoiNTdjYmViN2YtMWY0Yy00NDg4LTljZTctNzMyNjYzMmU1MGM3IiwibG9ja2VkIjpmYWxzZSwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJyZWFzb24iOiJub19jb250YWN0Iiwic2VxIjo5LCJzdGF0ZSI6InN1c3BlbmRlZCIsInR5cGUiOiJrbC5sZWFzZS5zdGF0dXMiLCJ2IjoxfQ",
-    "sig": "-f9OLfbHuzQQhA3iLKs9DO30qFufShliKm6w2uAxorQZdNQSvo6sjMlFC9AUAz-L8rf2weFu2tIErm5uWwhVCg"
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiIxZ2RwZGFFOWRraUlUQXJXNWwzX3dnIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MTQ6MTEuMjAxWiIsImdyYW50ZWRfYnkiOnsiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwibmFtZSI6Ik93bmVyIHBob25lIn0sImxlYXNlX2lkIjoiNTdjYmViN2YtMWY0Yy00NDg4LTljZTctNzMyNjYzMmU1MGM3IiwibG9ja2VkIjpmYWxzZSwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJyZWFzb24iOiJub19jb250YWN0Iiwic2VxIjo5LCJzdGF0ZSI6InN1c3BlbmRlZCIsInR5cGUiOiJrbC5sZWFzZS5zdGF0dXMiLCJ2IjoxfQ",
+    "sig": "nBLl_6je13JFUkTfTUkcyfDgemvfnrpT5OlJJo9gvKA11pZ26nzi-wR90TjtIJ9eY1QTewYOlWTwE00GWeQpDg"
   },
   "expect": {
     "accepted": true,
@@ -28,7 +28,11 @@
       "seq": 9,
       "state": "suspended",
       "reason": "no_contact",
-      "contact_token": "1gdpdaE9dkiITArW5l3_wg"
+      "contact_token": "1gdpdaE9dkiITArW5l3_wg",
+      "granted_by": {
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Owner phone"
+      }
     }
   }
 }

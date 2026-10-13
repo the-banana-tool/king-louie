@@ -12,6 +12,7 @@ const { createLogger } = require('../logging');
 const { GuiError } = require('./errors');
 const { TypedBuffer } = require('./text-guard');
 const { suspendsLease } = require('./broker');
+const { plainLineProblem } = require('../cases/hidden-chars');
 const L = require('./lease-protocol');
 
 const NONCE_TTL_MS = 10 * 60 * 1000;
@@ -45,6 +46,8 @@ const CONTACT_MAX_S = 300;
 // A lease issues a token with each status and view; one only counts inside
 // the window, so the oldest are forgotten first.
 const CONTACT_TOKENS_MAX = 2048;
+// R-F5-18: how many ended leases a phone's listing names besides the live one.
+const LISTED_ENDED = 4;
 
 // The nonces of the watches and revokes one lease has accepted (security
 // review finding 5). Those messages carry no validity window of their own,
@@ -299,7 +302,10 @@ class LeaseManager extends EventEmitter {
       lease = {
         leaseId: crypto.randomUUID(), jobId, origin, reason: String(reason), requestedApps: [...appIds], maxMinutes: minutes,
         // expiresAt is on the wall clock (what the phone is shown), expiresMono the same moment on the monotonic one.
-        apps: [], state: 'pending', locked: false, endReason: null, suspendReason: null, expiresAt: null, expiresMono: null, deviceId: null,
+        // grantedBy: the device whose grant made this lease (R-F5-15, R-F5-18): the only one that
+        // resumes it or keeps it in contact. Any enrolled phone may stop it or watch it.
+        apps: [], state: 'pending', locked: false, endReason: null, suspendReason: null, expiresAt: null, expiresMono: null,
+        grantedBy: null, grantedByName: null,
         seq: 0, typed: new TypedBuffer(), inputTimes: [], waiters: [], expiryTimer: null, controlNonces: new LeaseNonces(),
         lastContact: null, contactTimer: null,
         // Contact tokens: token → { n, at }; how many were issued; and the
@@ -400,12 +406,18 @@ class LeaseManager extends EventEmitter {
       return { state: 'rejected', reason: r.reason };
     }
     const m = r.message;
-    this.grantNonces.add(m.nonce, bytesSha256(r.bytes));
     const entry = this.pending.get(m.request_id);
+    const lease = entry.ref;
+    // R-F5-18: a resume is granted only by the phone that granted the lease
+    // (any enrolled phone may refuse one, as any may stop the lease). The
+    // request stays open for the granting phone.
+    if (entry.resume && m.decision === 'grant' && r.deviceId !== lease.grantedBy) {
+      this._audit('lease.rejected', lease, { check: null, reason: 'not_granting_device', device_id: r.deviceId });
+      return { state: 'rejected', reason: 'not_granting_device' };
+    }
+    this.grantNonces.add(m.nonce, bytesSha256(r.bytes));
     this.pending.delete(m.request_id);
     this.timers.clearTimeout(entry.timer);
-    const lease = entry.ref;
-    lease.deviceId = r.deviceId;
     if (m.decision === 'deny') {
       this._audit('lease.denied', lease, { request_id: m.request_id, device_id: r.deviceId });
       this._end(lease, 'denied');
@@ -416,6 +428,10 @@ class LeaseManager extends EventEmitter {
       return this._reply(lease, { state: 'ended' });
     }
     lease.apps = [...m.grant.apps];
+    if (!entry.resume) {
+      lease.grantedBy = r.deviceId;
+      lease.grantedByName = this._deviceName(r.deviceId);
+    }
     // The same rule on each clock: a resume never outlives the original lease on either.
     lease.expiresAt = L.effectiveExpiry({ verifiedAt: now, minutes: m.grant.minutes, resumeOf: entry.resume ? lease.expiresAt : null });
     lease.expiresMono = L.effectiveExpiry({ verifiedAt: this.monotonic(), minutes: m.grant.minutes, resumeOf: entry.resume ? lease.expiresMono : null });
@@ -509,7 +525,7 @@ class LeaseManager extends EventEmitter {
       this._audit('lease.expired', lease, { reason: 'expired' });
       this._end(lease, 'expired');
     }
-    const contact = lease.deviceId !== null && r.deviceId === lease.deviceId && lease.state !== 'ended'
+    const contact = lease.grantedBy !== null && r.deviceId === lease.grantedBy && lease.state !== 'ended'
       && this._tokenMakesContact(lease, r.message.contact_token);
     this._audit('lease.watch', lease, { device_id: r.deviceId, contact });
     const before = lease.lastStatus;
@@ -660,19 +676,63 @@ class LeaseManager extends EventEmitter {
     this._sendStatus(lease);
   }
 
-  // A status signed now, with a fresh contact token, sent to the phones
-  // (and kept as the lease's newest, for the reply to a phone's message).
-  // Nothing is signed while the relay link is down: nobody could receive it.
-  _sendStatus(lease) {
-    const relay = this.approvals.relayClient;
-    if (!relay || !relay.isConnected()) return;
+  // The name an enrolled device goes by in its approver record, when that
+  // is one plain line of at most 64 characters; null otherwise (the phones
+  // then show the device id).
+  _deviceName(deviceId) {
+    try {
+      const record = this.approvals.approverStore.get(deviceId);
+      const name = record && typeof record.name === 'string' ? record.name : '';
+      return name && Array.from(name).length <= 64 && plainLineProblem(name) === null ? name : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // A status signed now, with a fresh contact token and who granted the
+  // lease; kept as the lease's newest, for the reply to a phone's message.
+  _signStatus(lease) {
     const envelope = L.buildLeaseStatus({
       identity: this.approvals.identity, leaseId: lease.leaseId, seq: this.nextSeq(lease), state: lease.state, locked: lease.locked,
       reason: lease.endReason || lease.suspendReason || null, expiresAt: lease.expiresAt,
-      contactToken: lease.state === 'ended' ? null : this.mintContactToken(lease), now: this.clock()
+      contactToken: lease.state === 'ended' ? null : this.mintContactToken(lease),
+      grantedBy: lease.grantedBy ? { deviceId: lease.grantedBy, name: lease.grantedByName } : null, now: this.clock()
     });
     lease.lastStatus = envelope;
-    relay.send(envelope).catch((err) => this.log.debug(`lease status not sent: ${err.message}`));
+    return envelope;
+  }
+
+  // That status, sent to the phones. Nothing is signed while the relay link
+  // is down: nobody could receive it.
+  _sendStatus(lease) {
+    const relay = this.approvals.relayClient;
+    if (!relay || !relay.isConnected()) return;
+    relay.send(this._signStatus(lease)).catch((err) => this.log.debug(`lease status not sent: ${err.message}`));
+  }
+
+  // R-F5-18: what a phone asks for when it opens (one signed request to the
+  // relay, which names the device it authenticated): a status signed now
+  // for the live lease, if there is one, and for the few that ended last,
+  // so a phone that granted nothing, or was restarted, can show a lease
+  // that is running and stop it, and learns from the node's own signature
+  // that one it knew has ended. Only for a device enrolled here and not
+  // revoked; anyone else gets nothing. Answered to the asker, not
+  // broadcast. The relay's word for who asks decides only whether this is
+  // answered: the statuses say nothing the phones of this node are not sent
+  // anyway, and what a phone does with one (watch, stop) it signs itself.
+  listFor(deviceId) {
+    let enrolled = false;
+    try {
+      const store = this.approvals.approverStore;
+      const record = typeof deviceId === 'string' && store ? store.get(deviceId) : null;
+      enrolled = Boolean(record) && record.platform !== 'demo' && store.isActive(deviceId) === true;
+    } catch {
+      enrolled = false;
+    }
+    if (!enrolled) return [];
+    const live = this.current();
+    const ended = this.leases.filter((l) => l.state === 'ended').slice(-LISTED_ENDED).reverse();
+    return [...(live ? [live] : []), ...ended].map((lease) => this._signStatus(lease));
   }
 }
 

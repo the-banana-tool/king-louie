@@ -19,10 +19,10 @@ const EXPECTED = [
   'unknown-device', 'demo-device', 'test-key', 'wrong-node', 'replay', 'unknown-request', 'lease-hash-mismatch',
   'lease-changed-app-path', 'apps-not-requested', 'minutes-over-requested', 'minutes-over-60', 'expired', 'revoke-valid',
   'revoke-phone-clock-off', 'revoke-unknown-lease', 'revoke-replayed', 'watch-valid', 'watch-no-token', 'watch-bad-token',
-  'status-valid', 'status-no-contact', 'view-node-sig-valid', 'view-tampered-frame'
+  'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame'
 ];
 const PHONE = ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'watch-no-token',
-  'status-valid', 'status-no-contact', 'view-node-sig-valid', 'view-tampered-frame'];
+  'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame'];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')));
 const byName = new Map(vectors.map((v) => [v.name, v]));
@@ -62,7 +62,7 @@ function verifyStatus(envelope, node) {
 
 describe('lease-v1 vectors', () => {
   it('has exactly the expected set, and phones consume exactly theirs', () => {
-    assert.equal(EXPECTED.length, 30);
+    assert.equal(EXPECTED.length, 32);
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
     for (const phone of ['ios', 'android']) {
       assert.deepEqual(vectors.filter((v) => v.consumers.includes(phone)).map((v) => v.name).sort(), [...PHONE].sort());
@@ -87,7 +87,7 @@ describe('lease-v1 vectors', () => {
       assert.equal(r.reason, v.expect.reason);
       if (v.check !== null && !name.startsWith('view-')) assert.equal(r.check, v.check);
       // The fields a phone reads from a status or a view, the contact token among them.
-      if (v.expect.status) for (const [key, value] of Object.entries(v.expect.status)) assert.equal(r.message[key], value, `${name}: ${key}`);
+      if (v.expect.status) for (const [key, value] of Object.entries(v.expect.status)) assert.deepEqual(r.message[key], value, `${name}: ${key}`);
       if (v.expect.contact_token) assert.equal(r.message.contact_token, v.expect.contact_token);
     });
   }

@@ -767,6 +767,160 @@ describe('lock, expiry and revoke', () => {
     });
   });
 
+  // R-F5-18 (owner ruling, 2026-10-13): any enrolled phone can stop a
+  // lease, and can see what it is stopping. Granting, resuming and contact
+  // stay with the phone that granted it. A phone learns of live leases
+  // from statuses this node signs, asked for with one signed request.
+  describe('R-F5-18: any enrolled phone can stop a lease', () => {
+    const WINDOW = 120000;
+
+    it('another enrolled phone revokes a live lease: signature, nonce and lease id checked as for the granting one', async () => {
+      const lease = await granted();
+      const revoke = other.leaseRevoke(identity.nodeId, lease.leaseId);
+      const out = leases.onRevoke(revoke);
+      assert.equal(out.state, 'ended');
+      assert.equal(lease.endReason, 'revoked');
+      assert.ok(audits.some((a) => a.kind === 'lease.revoked' && a.data.device_id === other.deviceId));
+      // The same bytes again: a replay that changes nothing. Its nonce under other bytes: refused.
+      assert.equal(leases.onRevoke(revoke).state, 'ended');
+      const second = await granted({ jobId: 'job-2' });
+      const nonce = require('crypto').randomBytes(32).toString('base64url');
+      assert.equal(leases.onRevoke(other.leaseRevoke(identity.nodeId, '00000000-0000-4000-8000-000000000000', { nonce })).reason, 'unknown_lease');
+      assert.equal(second.state, 'active');
+      // Suspended for want of contact: still stoppable by the other phone.
+      timers.advance(WINDOW + 1);
+      assert.equal(second.state, 'suspended');
+      assert.equal(leases.onRevoke(other.leaseRevoke(identity.nodeId, second.leaseId)).state, 'ended');
+    });
+
+    it('a revoked phone and a phone this node does not know cannot stop it', async () => {
+      const revoked = createFakePhone({ name: 'Lost phone' });
+      const stranger = createFakePhone({ name: 'Stranger' });
+      const store = await approverStoreWith([phone.approverRecord(), other.approverRecord(), revoked.approverRecord({ revokedAt: '2026-09-20T00:00:00.000Z', revokedBy: 'console' })], { now: () => clock.now() });
+      stores.push(store);
+      const strict = new LeaseManager({
+        approvals: { identity, approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true } },
+        guiConfig, broker, audit: { append: async (e) => { audits.push(e); } }, nodeName: 'gpu-box', clock: () => clock.now(), timers, jobOpen: () => true
+      });
+      const p = strict.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      strict.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 10 }));
+      const lease = await p;
+      assert.deepEqual(plain(strict.onRevoke(revoked.leaseRevoke(identity.nodeId, lease.leaseId))), { state: 'rejected', reason: 'revoked_device' });
+      assert.deepEqual(plain(strict.onRevoke(stranger.leaseRevoke(identity.nodeId, lease.leaseId))), { state: 'rejected', reason: 'unknown_device' });
+      assert.equal(lease.state, 'active');
+      // Nor watch it.
+      assert.equal(strict.verifyWatch(revoked.leaseWatch(identity.nodeId, lease.leaseId)).reason, 'revoked_device');
+      assert.equal(strict.verifyWatch(stranger.leaseWatch(identity.nodeId, lease.leaseId)).reason, 'unknown_device');
+      assert.equal(strict.onRevoke(other.leaseRevoke(identity.nodeId, lease.leaseId)).state, 'ended');
+    });
+
+    it('another phone may watch, to see what it is stopping; its watch is never contact, with any token', async () => {
+      const lease = await granted();
+      timers.advance(60000);
+      const seen = leases.verifyWatch(watchFrom(other, lease));
+      assert.deepEqual([seen.accepted, seen.contact, seen.deviceId], [true, false, other.deviceId]);
+      assert.ok(seen.status, 'it gets the signed status too');
+      timers.advance(60001);
+      assert.equal(lease.suspendReason, 'no_contact', 'two minutes after the grant');
+      assert.equal(leases.verifyWatch(watchFrom(other, lease)).contact, false);
+      assert.equal(lease.state, 'suspended');
+    });
+
+    it('a resume is granted only by the phone that granted the lease; any phone may refuse one', async () => {
+      const lease = await granted();
+      leases.suspend(lease.leaseId, 'foreground_changed');
+      const resume = relay.last('kl.lease.request');
+      assert.equal(resume.message.lease.resumes, lease.leaseId);
+      assert.deepEqual(plain(leases.onGrant(other.leaseGrant(resume.envelope, { minutes: 5 }))), { state: 'rejected', reason: 'not_granting_device' });
+      assert.equal(lease.state, 'suspended');
+      assert.ok(audits.some((a) => a.kind === 'lease.rejected' && a.data.reason === 'not_granting_device' && a.data.device_id === other.deviceId));
+      // The request is still open for the phone that granted it.
+      assert.equal(leases.onGrant(phone.leaseGrant(resume.envelope, { minutes: 5 })).state, 'active');
+      assert.equal(lease.grantedBy, phone.deviceId);
+      // A deny from the other phone ends it, as a Stop would.
+      leases.suspend(lease.leaseId, 'foreground_changed');
+      assert.equal(leases.onGrant(other.leaseGrant(relay.last('kl.lease.request').envelope, { decision: 'deny' })).state, 'ended');
+      assert.equal(lease.endReason, 'denied');
+    });
+
+    it('a first request is granted by whichever enrolled phone answers, and that phone is then the granting one', async () => {
+      const p = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      assert.equal(leases.current().grantedBy, null);
+      assert.equal(leases.onGrant(other.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 10 })).state, 'active');
+      const lease = await p;
+      assert.equal(lease.grantedBy, other.deviceId);
+      timers.advance(60000);
+      assert.equal(leases.verifyWatch(watchFrom(other, lease)).contact, true);
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, false);
+    });
+
+    it('every status says who granted the lease: nobody while it is pending or was denied, then the granting phone by id and name', async () => {
+      const p = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      assert.equal(relay.last('kl.lease.status').message.granted_by, null);
+      leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 10 }));
+      const lease = await p;
+      assert.deepEqual(relay.last('kl.lease.status').message.granted_by, { device_id: phone.deviceId, name: 'Owner phone' });
+      leases.onRevoke(other.leaseRevoke(identity.nodeId, lease.leaseId));
+      assert.deepEqual(relay.last('kl.lease.status').message.granted_by, { device_id: phone.deviceId, name: 'Owner phone' }, 'who stopped it is in the audit entry; this is who granted it');
+      const denied = leases.request({ jobId: 'job-2', origin: { ...ORIGIN, job_id: 'job-2' }, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      leases.onGrant(other.leaseGrant(relay.last('kl.lease.request').envelope, { decision: 'deny' }));
+      await assert.rejects(denied, (e) => e.code === 'lease_denied');
+      assert.equal(relay.last('kl.lease.status').message.granted_by, null);
+    });
+
+    it('a name that is not one plain line is left out; the device id is always there', async () => {
+      const odd = createFakePhone({ name: 'Owner‮ phone\nGranted by the node' });
+      const store = await approverStoreWith([odd.approverRecord()], { now: () => clock.now() });
+      stores.push(store);
+      const m = new LeaseManager({
+        approvals: { identity, approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true } },
+        guiConfig, broker, nodeName: 'gpu-box', clock: () => clock.now(), timers, jobOpen: () => true
+      });
+      const p = m.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      m.onGrant(odd.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 10 }));
+      await p;
+      assert.deepEqual(relay.last('kl.lease.status').message.granted_by, { device_id: odd.deviceId, name: null });
+    });
+
+    it('listFor: an enrolled phone gets a status signed now for the live lease and for leases that ended lately; nobody else gets anything', async () => {
+      assert.deepEqual(leases.listFor(phone.deviceId), []);
+      const first = await granted();
+      leases.onRevoke(phone.leaseRevoke(identity.nodeId, first.leaseId));
+      const live = await granted({ jobId: 'job-2' });
+      timers.advance(30000);
+      const sent = relay.all('kl.lease.status').length;
+      const listed = leases.listFor(other.deviceId).map((envelope) => open(envelope).message);
+      assert.deepEqual(listed.map((m) => [m.lease_id, m.state, m.reason]), [[live.leaseId, 'active', null], [first.leaseId, 'ended', 'revoked']]);
+      for (const m of listed) {
+        assert.equal(m.type, 'kl.lease.status');
+        assert.equal(m.at, new Date(clock.now()).toISOString(), 'signed for this request, not an old one');
+        assert.deepEqual(m.granted_by, { device_id: phone.deviceId, name: 'Owner phone' });
+      }
+      assert.equal(relay.all('kl.lease.status').length, sent, 'answered to the phone that asked; not broadcast');
+      // The live one carries a token the granting phone can make contact with.
+      assert.equal(leases.verifyWatch(phone.leaseWatch(identity.nodeId, live.leaseId, { contactToken: listed[0].contact_token })).contact, true);
+      // Each listing is newer than the last (the phones apply by seq).
+      const again = leases.listFor(other.deviceId).map((envelope) => open(envelope).message);
+      assert.ok(again[0].seq > listed[0].seq && again[1].seq > listed[1].seq);
+      // A device this node does not know, a revoked one, and no device at all.
+      assert.deepEqual(leases.listFor(createFakePhone().deviceId), []);
+      assert.deepEqual(leases.listFor(null), []);
+      assert.deepEqual(leases.listFor('not-a-device'), []);
+    });
+
+    it('listFor lists at most the live lease and the four that ended last', async () => {
+      for (let i = 0; i < 6; i += 1) {
+        openJobs.add(`job-x${i}`);
+        const lease = await granted({ jobId: `job-x${i}` });
+        leases.onRevoke(phone.leaseRevoke(identity.nodeId, lease.leaseId));
+      }
+      assert.equal(leases.listFor(phone.deviceId).length, 4);
+      await granted({ jobId: 'job-1' });
+      const listed = leases.listFor(phone.deviceId).map((envelope) => open(envelope).message.state);
+      assert.deepEqual(listed, ['active', 'ended', 'ended', 'ended', 'ended']);
+    });
+  });
+
   // Second security review, finding 12. A lease paused for want of contact
   // is resumed by a watch alone. If the helper dropped (or the relay link
   // went) during the pause, nothing recorded it, and the watch resumed the

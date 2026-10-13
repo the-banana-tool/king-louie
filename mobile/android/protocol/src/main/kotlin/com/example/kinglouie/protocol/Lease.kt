@@ -54,7 +54,14 @@ data class LeaseRequest(
 data class LeaseStatus(
     val leaseId: String, val nodeId: String, val seq: Int, val state: String, val locked: Boolean, val reason: String?, val expiresAt: String?,
     /** The token this status carries for the phone's next watch to echo (owner ruling R-F5-15); null when the message holds none. */
-    val contactToken: String? = null
+    val contactToken: String? = null,
+    /**
+     * The phone whose grant made the lease (owner ruling R-F5-18): its device
+     * id, and the name the node knows it by when it gave one. Both null while
+     * nobody has granted the lease.
+     */
+    val grantedByDevice: String? = null,
+    val grantedByName: String? = null
 ) {
     companion object {
         const val TYPE = "kl.lease.status"
@@ -64,7 +71,7 @@ data class LeaseStatus(
             return LeaseStatus(
                 m["lease_id"].str() ?: return null, m["node_id"].str() ?: return null, m["seq"].int() ?: return null,
                 m["state"].str() ?: return null, m["locked"].bool() ?: return null, m["reason"].str(), m["expires_at"].str(),
-                m["contact_token"].str()
+                m["contact_token"].str(), m["granted_by"]["device_id"].str(), m["granted_by"]["name"].str()
             )
         }
     }
@@ -109,6 +116,31 @@ object Leases {
 
     /** Whether a signed state and reason say input is paused for want of contact. */
     fun isPausedForContact(state: String, reason: String?): Boolean = state == "suspended" && reason == NO_CONTACT
+
+    /** A lease that is running: it holds, or can get back, the right to click and type. Such a lease has a banner and a Stop (R-F5-18). */
+    fun isLive(state: String): Boolean = state == "active" || state == "suspended"
+
+    /**
+     * What to say beside Stop for a lease another phone granted (R-F5-18):
+     * null when this phone granted it or the node has not said who did. The
+     * text is escaped for display.
+     */
+    fun grantedByOther(device: String?, name: String?, thisDevice: String?): String? {
+        if (device == null || device == thisDevice) return null
+        return if (!name.isNullOrEmpty()) "Granted by ${Display.escape(name)}" else "Granted by another phone (${Display.escape(device)})"
+    }
+
+    /**
+     * How old a contact token may be, by this phone's own running clock,
+     * before Refresh asks the node for a fresh status first (R-F5-15). The
+     * node's window is two minutes by default and never under thirty
+     * seconds; a token older than a minute may no longer make contact, and
+     * the watch that echoes it would only be answered with a new one.
+     */
+    const val TOKEN_FRESH_MS = 60_000L
+
+    /** Whether the token applied at [appliedAtMs] (null: none held) is too old at [nowMs] to count on. Both on the same monotonic clock. */
+    fun tokenIsStale(appliedAtMs: Long?, nowMs: Long): Boolean = appliedAtMs == null || nowMs - appliedAtMs >= TOKEN_FRESH_MS
 
     /**
      * Order and addressee (owner ruling R-F5-16). A node numbers the statuses

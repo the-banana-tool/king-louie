@@ -102,6 +102,26 @@ describe('live view', () => {
     assert.equal(relay.views().length, count, 'the watch lapsed after 60 s');
   });
 
+  // R-F5-18: a phone that did not grant the lease may watch it, to see what
+  // it is about to stop. It gets views addressed to it; it is never contact.
+  it('R-F5-18: another enrolled phone that watches gets its own views, and the lease still pauses without the granting phone', async () => {
+    const second = createFakePhone({ name: 'Second phone' });
+    const store = await approverStoreWith([phone.approverRecord(), second.approverRecord()], { now: () => clock.t });
+    stores.push(store);
+    leases.approvals.approverStore = store;
+    const lease = await activeLease();
+    const reply = view.onWatch(second.leaseWatch(identity.nodeId, lease.leaseId, { contactToken: open(relay.sent.at(-1).envelope).message.contact_token }));
+    assert.equal(reply.state, 'active');
+    await at(0);
+    const views = relay.views();
+    assert.equal(views.length, 1);
+    assert.equal(views[0].opts.to_device, second.deviceId);
+    assert.equal(views[0].message.to_device, second.deviceId);
+    // The granting phone sent nothing: two minutes after the grant, input is refused.
+    clock.t += 120001;
+    assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'lease_suspended_no_contact');
+  });
+
   it('at most 1 frame per second overall, even with inputs in between', async () => {
     const lease = await activeLease();
     view.onWatch(phone.leaseWatch(identity.nodeId, lease.leaseId));

@@ -208,6 +208,13 @@ class AppModel(context: Context) {
      */
     val leaseRequests = mutableStateListOf<LeaseRequestItem>()
 
+    /**
+     * Leases a pinned node listed as running that are not the one on the live
+     * screen (owner ruling R-F5-18). Up here with `leaseRequests`, for the
+     * same reason.
+     */
+    val runningLeases = mutableStateListOf<RunningLease>()
+
     val devices = mutableStateListOf<JsonElement>()
     val online = mutableStateMapOf<String, Boolean>()
     val nodes: List<NodePin> get() = storage.nodes
@@ -384,12 +391,30 @@ class AppModel(context: Context) {
         val appliedSeq: Int = 0,
         /** The contact token of the newest status or view applied (R-F5-15): the next watch echoes it. */
         val contactToken: String? = null,
+        /** When that token was applied, on this phone's running clock (SystemClock.elapsedRealtime). */
+        val contactTokenAtMs: Long? = null,
+        /** Who granted the lease, as its node signed it (R-F5-18); null until a status said. */
+        val grantedByDevice: String? = null,
+        val grantedByName: String? = null,
+        /** The newest status applied, as the node signed it. */
+        val lastStatus: Envelope? = null,
         /** A Stop or a Refresh is being signed or sent. */
         val busy: Boolean = false,
         /** The last Stop or Refresh got no answer; shown until the next tap. */
         val unconfirmed: String? = null,
         /** The last Refresh was answered but brought no frame within the wait. */
         val noFrame: Boolean = false
+    )
+
+    /**
+     * A lease this phone knows to be running from a status its node signed
+     * (owner ruling R-F5-18): one another phone granted, or one this phone
+     * granted before it was restarted. Enough for the banner and for Stop.
+     * `status` is that signed status, so following the lease starts from it.
+     */
+    data class RunningLease(
+        val nodeId: String, val nodeName: String, val leaseId: String, val state: String, val reason: String?, val appliedSeq: Int,
+        val grantedByDevice: String?, val grantedByName: String?, val status: Envelope?
     )
 
     /** What one send came to: the node's answer, or why there is none. */
@@ -419,7 +444,11 @@ class AppModel(context: Context) {
         leasePushes += 1
     }
 
-    /** "Check for computer-use requests": one list request, one prompt. */
+    /**
+     * "Check for computer-use requests": one list request, one prompt. The
+     * same answer lists what is running (R-F5-18): for each lease a status
+     * its node signed for this listing, with no request beside it.
+     */
     fun refreshLeases() {
         if (pairing || mode != AppMode.LIVE || isLoadingLeases) return
         val api = client ?: run {
@@ -430,9 +459,11 @@ class AppModel(context: Context) {
         scope.launch {
             try {
                 val pins = storage.nodes
-                val items = api.leases().mapNotNull { entry -> verifiedLeaseRequest(entry, pins, api) }.distinctBy { it.request.requestId }
+                val listed = api.leases()
+                val items = listed.mapNotNull { entry -> verifiedLeaseRequest(entry, pins, api) }.distinctBy { it.request.requestId }
                 leaseRequests.clear()
                 leaseRequests.addAll(items)
+                for (entry in listed) noteListedLease(entry, pins)
                 leaseNotice = false
             } catch (e: Exception) {
                 fail(e)
@@ -464,6 +495,33 @@ class AppModel(context: Context) {
             ?.let { Leases.verifiedMessage(it, pin) }?.let { LeaseStatus.from(it) }?.takeIf { it.leaseId == request.leaseId }
         if (status?.state == "ended") return null
         return LeaseRequestItem(request, pin.name, status)
+    }
+
+    /** Whether a listed entry carries no request: a running (or lately ended) lease, by its status alone. */
+    private fun isStatusOnly(entry: JsonElement): Boolean = entry["envelope"].let { it == null || it is JsonNull }
+
+    /**
+     * One listed status (R-F5-18), only when the pinned node it is listed
+     * under signed it. It updates the lease on the live screen through
+     * applyLease, or the list of running leases: newer than what is known (by
+     * the node's seq), kept while the lease runs, dropped once the node says
+     * it ended. Nothing here is taken on the relay's word.
+     */
+    private fun noteListedLease(entry: JsonElement, pins: List<NodePin>) {
+        if (!isStatusOnly(entry)) return
+        val pin = pins.firstOrNull { it.id == entry["node_id"].str() } ?: return
+        val signed = entry["status"]?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() } ?: return
+        val status = Leases.verifiedMessage(signed, pin)?.let { LeaseStatus.from(it) } ?: return
+        val live = liveLease
+        if (live != null && live.leaseId == status.leaseId) {
+            liveLease = applyLease(signed, pin, live, deviceId ?: "")
+            return
+        }
+        val known = runningLeases.indexOfFirst { it.leaseId == status.leaseId }
+        if (!Leases.acceptsStatus(status, if (known >= 0) runningLeases[known].appliedSeq else 0)) return
+        if (known >= 0) runningLeases.removeAt(known)
+        if (!Leases.isLive(status.state)) return
+        runningLeases.add(RunningLease(pin.id, pin.name, status.leaseId, status.state, status.reason, status.seq, status.grantedByDevice, status.grantedByName, signed))
     }
 
     /** One send, never repeated (R-F5-5): the node's answer, or why there is none. */
@@ -530,6 +588,41 @@ class AppModel(context: Context) {
         }
     }
 
+    /**
+     * A banner row's lease becomes the one on the live screen, starting from
+     * the status its node signed (R-F5-18). Nothing is fetched or sent. The
+     * lease that was there keeps its banner row while it runs.
+     */
+    private fun followRunningLease(lease: RunningLease) {
+        val pin = storage.nodes.firstOrNull { it.id == lease.nodeId } ?: return
+        val old = liveLease
+        if (old != null && old.leaseId == lease.leaseId) return
+        if (old != null && Leases.isLive(old.state)) {
+            runningLeases.removeAll { it.leaseId == old.leaseId }
+            runningLeases.add(RunningLease(old.nodeId, old.nodeName, old.leaseId, old.state, old.reason, old.appliedSeq, old.grantedByDevice, old.grantedByName, old.lastStatus))
+        }
+        runningLeases.removeAll { it.leaseId == lease.leaseId }
+        demoLeaseJob?.cancel()
+        val opened = LiveLease(lease.nodeId, pin.name, lease.leaseId)
+        liveLease = if (lease.status != null) applyLease(lease.status, pin, opened, deviceId ?: "") else opened
+    }
+
+    /** The live screen of a lease, from its banner row. It fetches nothing (R-F5-1): Refresh does. */
+    fun openRunningLease(lease: RunningLease) {
+        followRunningLease(lease)
+    }
+
+    /**
+     * Stop, from a banner row, for a lease this phone is not following
+     * (R-F5-18): it becomes the one on the live screen, and then "Stop now"
+     * as always: one signed revoke, sent one time, two prompts. Any enrolled
+     * phone may stop a lease.
+     */
+    fun stopRunningLease(lease: RunningLease) {
+        followRunningLease(lease)
+        if (liveLease?.leaseId == lease.leaseId) killSwitch()
+    }
+
     /** Opens the live screen with what is already known. It fetches nothing (R-F5-1): Refresh does. */
     fun openLiveLease(nodeId: String, leaseId: String, state: String = "pending") {
         val pin = storage.nodes.firstOrNull { it.id == nodeId } ?: demo?.pins?.firstOrNull { it.id == nodeId } ?: return
@@ -557,6 +650,22 @@ class AppModel(context: Context) {
                 var cursor = next.lastSeq
                 // What the screen knows from signed messages; a watch's reply may only lengthen the wait below.
                 var waitForFrame = next.state == "active"
+                // R-F5-15: a watch is contact only when it echoes a token the node issued a short
+                // while ago. If the one held is over a minute old (or there is none), the node is
+                // asked for a status signed now first: one more request, one more prompt, sent once.
+                if (next.state != "ended" && Leases.tokenIsStale(next.contactTokenAtMs, SystemClock.elapsedRealtime())) {
+                    val fresh = try {
+                        api.leases()
+                    } catch (e: RelayException) {
+                        next = next.copy(unconfirmed = "Refresh not confirmed: ${describe(e).trimEnd('.')}. Tap Refresh again.")
+                        return@launch
+                    }
+                    for (entry in fresh) {
+                        if (!isStatusOnly(entry) || entry["node_id"].str() != pin.id) continue
+                        val signed = entry["status"]?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() } ?: continue
+                        next = applyLease(signed, pin, next, k.deviceId)
+                    }
+                }
                 if (next.state != "ended") {
                     val watch = Leases.watch(next.nodeId, next.leaseId, k.deviceId, next.contactToken, Messages.randomNonce(), Timestamps.string(api.now()))
                     val sent = sendLease(api, "watch", next.leaseId, signEnvelope(k, watch, "Watch computer use", promptText(next.nodeName, 30)))
@@ -623,7 +732,10 @@ class AppModel(context: Context) {
             if (status.leaseId != live.leaseId || !Leases.acceptsStatus(status, live.appliedSeq)) return live
             return live.copy(
                 appliedSeq = status.seq, state = status.state, locked = status.locked, reason = status.reason,
-                expiresAtMs = status.expiresAt?.let { Timestamps.epochMillis(it) }, contactToken = status.contactToken ?: live.contactToken
+                expiresAtMs = status.expiresAt?.let { Timestamps.epochMillis(it) }, contactToken = status.contactToken ?: live.contactToken,
+                contactTokenAtMs = if (status.contactToken != null) SystemClock.elapsedRealtime() else live.contactTokenAtMs,
+                grantedByDevice = status.grantedByDevice ?: live.grantedByDevice, grantedByName = if (status.grantedByDevice != null) status.grantedByName else live.grantedByName,
+                lastStatus = envelope
             )
         }
         val check = Leases.verifyView(envelope, pin)
@@ -633,7 +745,8 @@ class AppModel(context: Context) {
         return live.copy(
             appliedSeq = view.seq, state = view.state, locked = view.locked, expiresAtMs = now + view.remainingS * 1000L,
             frameDropped = view.frameDropped, frame = view.frame ?: live.frame, frameAtMs = if (view.frame != null) now else live.frameAtMs,
-            actions = Leases.mergedActions(live.actions, view.actions), contactToken = view.contactToken ?: live.contactToken
+            actions = Leases.mergedActions(live.actions, view.actions), contactToken = view.contactToken ?: live.contactToken,
+            contactTokenAtMs = if (view.contactToken != null) SystemClock.elapsedRealtime() else live.contactTokenAtMs
         )
     }
 
@@ -853,6 +966,7 @@ class AppModel(context: Context) {
         demo = null
         pending.clear()
         closeLiveLease()
+        runningLeases.clear()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
         decidingLease.clear()
@@ -1920,6 +2034,7 @@ class AppModel(context: Context) {
         questions.clear()
         answeredTokens.clear()
         closeLiveLease()
+        runningLeases.clear()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
         decidingLease.clear()

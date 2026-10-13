@@ -39,7 +39,7 @@ class LeaseVectorTest {
         assertEquals(
             setOf(
                 "grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "watch-no-token",
-                "status-valid", "status-no-contact", "view-node-sig-valid", "view-tampered-frame"
+                "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "view-node-sig-valid", "view-tampered-frame"
             ),
             names
         )
@@ -74,7 +74,7 @@ class LeaseVectorTest {
     /** R-F5-15: a status the pinned node signed gives the token the next watch echoes. */
     @Test
     fun statuses() {
-        for (name in listOf("status-valid", "status-no-contact")) {
+        for (name in listOf("status-valid", "status-no-contact", "status-pending", "status-granted-unnamed")) {
             val v = vector(name)
             val message = Leases.verifiedMessage(Envelope.fromJson(v["input"]!!), pin(v)) ?: error("$name verifies against the node pin")
             val status = LeaseStatus.from(message) ?: error("$name parses")
@@ -85,6 +85,10 @@ class LeaseVectorTest {
             assertEquals(name, expect["reason"].str(), status.reason)
             assertEquals(name, expect["contact_token"].str(), status.contactToken)
             assertEquals(name, name == "status-no-contact", Leases.isPausedForContact(status.state, status.reason))
+            // R-F5-18: who granted it (nobody, a named phone, a phone the node gave no name for).
+            assertEquals(name, expect["granted_by"]["device_id"].str(), status.grantedByDevice)
+            assertEquals(name, expect["granted_by"]["name"].str(), status.grantedByName)
+            assertEquals(name, name != "status-pending", Leases.isLive(status.state))
         }
         // Signed by another node's key: not a status of this pin.
         val v = vector("status-valid")

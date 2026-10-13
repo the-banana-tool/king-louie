@@ -73,6 +73,75 @@ describe('lease routes', () => {
     assert.deepEqual((await call(none, 'GET /v1/leases', phone)).body, []);
   });
 
+  // R-F5-18: the one device-signed request a phone makes for pending
+  // requests also lists what is running, on each node's own signature.
+  describe('R-F5-18: GET /v1/leases lists the leases that are running, as each node signs them', () => {
+    function relayWith(rpc, nodes = [{ node_id: NODE, state: 'active' }]) {
+      const routes = new Map();
+      const rpcs = [];
+      const mailbox = new Mailbox();
+      registerLeaseRoutes({
+        phoneApi: { registerRoute: (method, pattern, spec) => routes.set(`${method} ${pattern}`, spec) },
+        nodeHub: { rpc: async (nodeId, method, params, opts) => { rpcs.push({ nodeId, method, params, opts }); return rpc(nodeId, method, params); } },
+        mailbox, devices: { nodesForDevice: () => nodes }, log: { warn() {}, debug() {}, info() {} }
+      });
+      return { routes, rpcs, mailbox };
+    }
+    const status = (identity, state, seq = 5) => L.buildLeaseStatus({ identity, leaseId: request().message.lease_id, seq, state, grantedBy: { deviceId: 'd-abcdefghjkmnpqrs', name: 'Owner phone' } });
+
+    it('asks each of the device\'s nodes with the device\'s id, and appends what they sign, with no request envelope', async () => {
+      const phone = createFakePhone();
+      const live = status(node, 'active');
+      const ended = status(node, 'ended', 6);
+      const r = relayWith(() => ({ statuses: [live, ended] }));
+      const { envelope } = request();
+      r.mailbox.put(NODE, envelope);
+      const listed = await call(r, 'GET /v1/leases', phone);
+      assert.deepEqual(listed.body, [
+        { node_id: NODE, envelope, status: null },
+        { node_id: NODE, envelope: null, status: live },
+        { node_id: NODE, envelope: null, status: ended }
+      ]);
+      assert.deepEqual(r.rpcs, [{ nodeId: NODE, method: 'lease.list', params: { device_id: phone.deviceId }, opts: { timeoutMs: 5000 } }]);
+      assert.equal(r.routes.get('GET /v1/leases').auth, 'device', 'one device-signed request; there is no unsigned listing');
+      assert.ok(![...r.routes.keys()].some((k) => /live|running/.test(k)), 'no route of its own');
+    });
+
+    it('a node that is offline, slow, older, or answers nonsense lists nothing; the pending requests still come', async () => {
+      const phone = createFakePhone();
+      const { envelope } = request();
+      for (const rpc of [
+        () => { throw Object.assign(new Error('timeout'), { code: 'timeout' }); },
+        () => { throw Object.assign(new Error('no handler for lease.list'), { code: 'unknown_method' }); },
+        () => null, () => ({ state: 'active' }), () => ({ statuses: 'x' }), () => ({ statuses: [{ not: 'an envelope' }, null, 7] })
+      ]) {
+        const r = relayWith(rpc);
+        r.mailbox.put(NODE, envelope);
+        assert.deepEqual((await call(r, 'GET /v1/leases', phone)).body, [{ node_id: NODE, envelope, status: null }]);
+      }
+    });
+
+    it('only statuses, only of the node that was asked, and only from the device\'s active nodes', async () => {
+      const phone = createFakePhone();
+      const other = testNodeIdentity({ key: 'web-01' });
+      const view = L.buildLeaseView({
+        identity: node, leaseId: request().message.lease_id, seq: 9, toDevice: phone.deviceId, state: 'active', locked: false, remainingS: 60,
+        foreground: { app_id: null, matches: false }, frame: null, frameDropped: false, actions: []
+      });
+      const r = relayWith(() => ({ statuses: [status(other, 'active'), view, request().envelope, status(node, 'suspended')] }));
+      const listed = (await call(r, 'GET /v1/leases', phone)).body;
+      assert.equal(listed.length, 1, 'another node\'s status, a view and a request are dropped');
+      assert.equal(open(listed[0].status).message.state, 'suspended');
+      // A node revoked for this device is not asked at all.
+      const none = relayWith(() => ({ statuses: [status(node, 'active')] }), [{ node_id: NODE, state: 'revoked' }]);
+      assert.deepEqual((await call(none, 'GET /v1/leases', phone)).body, []);
+      assert.deepEqual(none.rpcs, []);
+      // At most eight statuses from one node.
+      const many = relayWith(() => ({ statuses: Array.from({ length: 20 }, (_, i) => status(node, 'ended', i + 1)) }));
+      assert.equal((await call(many, 'GET /v1/leases', phone)).body.length, 8);
+    });
+  });
+
   it('long-polls with wait', async () => {
     const r = relay();
     const phone = createFakePhone();
