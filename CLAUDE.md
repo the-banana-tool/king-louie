@@ -1341,8 +1341,15 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   refused (`session_user_mismatch`) until the first is uninstalled (an
   account deleted and made again under the same name is another identity:
   `session uninstall --user NAME` then removes what the file records for
-  the old one, once `sessionIdentityExists` says it belongs to no account;
-  tests inject `deps.identityExists`). An
+  the old one, once `sessionIdentityState` says `gone`: on Windows only a
+  SID of this machine's own accounts (its SID prefix) that maps to nothing.
+  A domain or Entra ID SID that does not map is `unresolved`, since no
+  domain controller may be in reach: its install stays, and is removed by
+  naming the recorded identity exactly, `--user <SID>` (taken with nothing
+  resolved) or the name with its domain. Off Windows a uid that `id` says
+  nobody has is `gone`; a directory account whose directory is out of
+  reach looks the same there, a residual. Tests inject
+  `deps.identityState`, or the older yes/no `deps.identityExists`). An
   existing file that cannot be read, parsed or verified (admin-owned,
   decrypts, a valid secret) or records no identity refuses the install
   (`session_file_invalid`) and writes nothing (`inspectCanonical` in
@@ -1355,6 +1362,21 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   refuses with nothing removed; a link at a path is removed itself, never
   followed: `removeEntry`), and `--dry-run` lists everything the real run
   removes.
+- **One user account (third security review, finding 4).** The helper's
+  file is made readable by the SID it is installed for, so `session
+  install` refuses anything that is not one person's account, before the
+  question: `resolveSessionUser` asks `LookupAccountName` (P/Invoke in an
+  encoded script; no `Microsoft.PowerShell.Security` cmdlet) for the SID
+  and what the name is, and `assertSingleUserAccount` refuses every type
+  but a user (a group, an alias, a well-known group, a computer, no type
+  at all) and every SID that is not an account SID by its form
+  (`classifyWindowsSid`: Everyone, Authenticated Users, SYSTEM, LOCAL and
+  NETWORK SERVICE, Interactive, every `S-1-5-32-*`, `S-1-2-*`, `S-1-3-*`,
+  a domain's own group RIDs; only `S-1-5-21-a-b-c-RID` and Entra ID
+  `S-1-12-1-…` pass). Install checks the SID's form again whoever resolved
+  it. Off Windows root (uid 0) is refused, and a name that is only a group
+  never resolves. `session uninstall` resolves with `singleUser: false`,
+  so an install made before this rule can still be removed.
 - **What install checks (R-F5-12).** The master key is resolved read-only
   with the data dir's owner uid (as `import --from`), so a key file its
   owner does not own is refused. The node id is read where the store keeps
@@ -1451,6 +1473,9 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   moves the expiry. Every accepted watch is answered with a status signed
   then, and the replies to grant, revoke and watch carry it
   (`{ state, reason?, status? }`), so a phone always holds a young token.
+  The contact timer is armed again for what is left when it fires before
+  the window has lapsed on either clock, so the suspension never waits for
+  the next input.
   A lease suspended for want of contact is taken over by any other reason
   that comes up meanwhile (the helper dropping, the relay link going),
   which then needs its own resume grant. Watch and revoke nonces are kept
@@ -1460,6 +1485,18 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   `tests/gui-leases.test.js`) or expect the suspension; the fake clock jumps
   to the end of an advance before its timers run, so a test that reads when
   something happened moves a second at a time.
+- **A revoked device's leases end (third security review, an owner-side
+  decision taken conservatively).** A live lease whose granting device is
+  no longer an active approver ends at once with the reason
+  `device_revoked` (`release_all`, a status, a `lease.ended` audit entry;
+  input then says `lease_revoked`), in whatever state it is: active,
+  paused, or waiting for a resume. `LeaseManager#checkGrantingDevices`
+  runs when a phone's revoke is staged (`ApproverStore#onDeviceRevoked`:
+  at once), before every input, and every `GRANTOR_CHECK_MS` (5 s) while a
+  lease is live, which is how a running node finds what `device revoke` or
+  `device apply` wrote: five seconds at worst. "No longer active" is
+  `isActive` false for any reason, an approver set that has become
+  unreadable or untrusted included (fail closed).
 - **Two clocks.** `LeaseManager` measures contact, token age, what is left
   of a lease and the input rate on a monotonic clock (`performance.now()`,
   injectable as `monotonic`) as well as the wall clock, and believes
@@ -1546,7 +1583,11 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   the key only when it is not text, and the `params_sha256` of a
   `tier.decision` is taken over that form (`Tool#auditParameters`; every
   other tool is hashed as called). A refused key is not repeated in its
-  refusal, and the helper logs a failed input by its code alone.
+  refusal, and the helper logs a failed input by its code alone. A
+  worker's stderr can quote what it was sent, so once a `LineWorker` child
+  has been sent an `input` op its stderr lines are logged as
+  `worker_stderr (N characters, not shown)`, never the line; before that
+  they are diagnostics.
   `mobile/PRIVACY.md` lists every clear field. Both phones apply a status or
   view only when its node `seq` is newer than the last applied for that
   lease, and a view only when `to_device` is this device

@@ -95,6 +95,13 @@ device's next watch that is contact resumes it (status `active`) and never
 moves `expires_at`; expiry and revoke end it as always. `no_contact` is a
 value of the status's free `reason`.
 
+A lease does not outlive the enrollment of the device that granted it
+(2026-10-13, third security review). When that device is revoked (a
+`kl.device.revoke` staged from another phone, or an administrator's
+`device revoke` / `device apply`, which a running node finds within five
+seconds), the node ends the lease: status `ended`, reason
+`device_revoked`, another value of the free `reason`. No message changed.
+
 What counts as contact (revised 2026-10-13, second security review, finding
 3; this changed `kl.lease.watch`, `kl.lease.status` and `kl.lease.view`).
 A watch says nothing the node can believe about when it was signed: the
