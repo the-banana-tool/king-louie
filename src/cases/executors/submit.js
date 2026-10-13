@@ -319,7 +319,11 @@ async function submitChecked(reg, ctx, params) {
     if (remUsd !== null && remUsd < estimateUsd) return fail(`estimate $${estimateUsd.toFixed(2)} exceeds the case's remaining $${remUsd.toFixed(2)}`);
     const known = new Set(envelope?.usage?.contacts || []);
     const newContacts = recipients.filter((r) => !known.has(r)).length;
-    const remContacts = budget.remaining('contactsPerDay');
+    // A job charges its new contacts when it commits; until then they are
+    // only in its file. Subtracting them here (as a channel send's check
+    // does) keeps two jobs checked back to back from both passing.
+    const remToday = budget.remaining('contactsPerDay');
+    const remContacts = remToday === null ? null : Math.max(0, remToday - envelopeOps.pendingJobContacts(reg, caseId));
     if (newContacts && remContacts !== null && remContacts < newContacts) return fail(`the case has ${remContacts} contacts left today; this job needs ${newContacts}`);
     let reserved = 0;
     let reservedDay = null;

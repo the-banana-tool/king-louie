@@ -600,3 +600,51 @@ describe('sendExternal: a release across midnight', () => {
     assert.strictEqual(s.reg.globalRemaining('fake-agent'), 4);
   });
 });
+
+// Second review 2026-10-13, findings 6, 8 and 9.
+describe('jobs, sends and the counting lock', () => {
+  const { submitJob } = require('../src/cases/executors/submit');
+  const { JobStore } = require('../src/cases/executors');
+  const job = (s, target) => submitJob(s.reg, { caseId: s.meta.id, turnId: 'turn-job' }, {
+    executor: 'fake-agent', envelopeId: s.envelopeId,
+    payload: JSON.stringify({ recipients: [{ address: target, name: 'Harbor Realty' }], text: 'Hello, is the lot still listed?', attemptsPerContact: 1 })
+  });
+  const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('two jobs submitted together cannot both pass a case contactsPerDay of one', async () => {
+    const s = await setup({ caseContacts: 1 });
+    s.ctl.submitDelayMs = 150;
+    const results = await Promise.all([job(s, BROKER), job(s, OTHER)]);
+    assert.deepStrictEqual(results.map((r) => r.ok).sort(), [false, true], JSON.stringify(results));
+    assert.match(results.find((r) => !r.ok).error, /the case has 0 contacts left today; this job needs 1/);
+    assert.strictEqual(s.ctl.calls.filter((c) => c[0] === 'submit').length, 1);
+    assert.strictEqual(s.counts().caseToday, 1);
+  });
+
+  // The lock alone: the job has passed its fit and is waiting on the global
+  // cap, with no job file yet and nothing recorded. Only the lock keeps a
+  // send from being counted in that gap.
+  it('a send waits for a job that is between its fit and its job file', async () => {
+    const s = await setup({ caps: { usd: 10, contacts: 2, attemptsPerContact: 1 } });
+    const real = s.reg.reserveContacts.bind(s.reg);
+    let sent = null;
+    let first = true;
+    s.reg.reserveContacts = async (...args) => {
+      if (first) {
+        first = false;
+        // The job is inside its checked section: start a send to the same contact now.
+        assert.deepStrictEqual(new JobStore(s.meta.dir).list(), [], 'no job file yet');
+        sent = s.send();
+        await tick(60);
+      }
+      return real(...args);
+    };
+    const done = await job(s, BROKER);
+    const r = await sent;
+    assert.strictEqual(done.ok, true, JSON.stringify(done));
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, /raises attempts per contact from 1 to 2/);
+    assert.deepStrictEqual(s.sms.plain, []);
+    assert.deepStrictEqual(s.counts().attempts, { [BROKER]: 1 });
+  });
+});
