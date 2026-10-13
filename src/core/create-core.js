@@ -3129,7 +3129,8 @@ function createCore(deps = {}) {
         features,
         getBridges: () => ({ telegram: telegramBridge, discord: discordBridge }),
         getWebhookServer: () => webhookServer,
-        approvals: deps.approvals || null
+        approvals: deps.approvals || null,
+        getExecutorRegistry: () => executorRegistry
       });
       await contactHost.start();
     } catch (err) {

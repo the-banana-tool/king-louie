@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const util = require('../src/cases/executors/util');
-const { EXECUTOR_SETTINGS_DEFAULTS, mergeExecutorSettings, resolveExecutorSettings } = require('../src/cases/executors/defaults');
+const { EXECUTOR_SETTINGS_DEFAULTS, mergeExecutorSettings, resolveExecutorSettings, categoryKeywordProblems } = require('../src/cases/executors/defaults');
 const { canonicalize, sha256b64url } = require('../src/platform/jcs');
 
 const dirs = [];
@@ -104,6 +104,24 @@ describe('executor settings', () => {
     assert.deepStrictEqual(s.outbound.categoryKeywords.health, ['clinic']);
     assert.ok(s.outbound.categoryKeywords.financial.includes('floor price'));
     assert.strictEqual(EXECUTOR_SETTINGS_DEFAULTS.outbound.categoryKeywords.health.includes('clinic'), false, 'defaults are not mutated');
+  });
+
+  it('a malformed category keyword setting keeps the built-in lists and is reported', () => {
+    const builtIn = EXECUTOR_SETTINGS_DEFAULTS.outbound.categoryKeywords;
+    const raw = { health: [42], legal: ['easement', null], financial: 'escrow', personal: ['maiden name'] };
+    for (const additiveKeywords of [false, true]) {
+      const kw = mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, { outbound: { categoryKeywords: raw } }, { additiveKeywords }).outbound.categoryKeywords;
+      assert.deepStrictEqual([kw.health, kw.legal, kw.financial], [builtIn.health, builtIn.legal, builtIn.financial], `additive ${additiveKeywords}`);
+      assert.ok(kw.personal.includes('maiden name'), 'a well-formed list beside them still applies');
+    }
+    assert.deepStrictEqual(categoryKeywordProblems({ outbound: { categoryKeywords: raw } }).map((p) => p.split(' ')[0]).sort(), [
+      'outbound.categoryKeywords.financial', 'outbound.categoryKeywords.health', 'outbound.categoryKeywords.legal'
+    ]);
+    const whole = mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, { outbound: { categoryKeywords: ['escrow'] } });
+    assert.deepStrictEqual(whole.outbound.categoryKeywords, builtIn);
+    assert.strictEqual(categoryKeywordProblems({ outbound: { categoryKeywords: ['escrow'] } }).length, 1);
+    assert.deepStrictEqual(categoryKeywordProblems({ outbound: 'nope' }).length, 1);
+    assert.deepStrictEqual([categoryKeywordProblems(undefined), categoryKeywordProblems({}), categoryKeywordProblems({ outbound: { categoryKeywords: { health: ['clinic'], legal: [] } } })], [[], [], []]);
   });
 
   it('keeps entries from the source only when they are an object', () => {

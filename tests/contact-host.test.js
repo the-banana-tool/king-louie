@@ -41,7 +41,7 @@ class FakeBridge extends LoopbackChannel {
   }
 }
 
-function makeHost({ interactive = true, isService = false, contactConfig = null, settings = {}, features = { channels: true }, webhook = null, extraAdapters = {}, casesRootIsFile = false, fetchImpl = null } = {}) {
+function makeHost({ interactive = true, isService = false, contactConfig = null, settings = {}, features = { channels: true }, webhook = null, extraAdapters = {}, casesRootIsFile = false, fetchImpl = null, hostExtras = {} } = {}) {
   let stored = mergeSettings(settings);
   const events = [];
   const casesRoot = path.join(tmp('kl-host-cases-'), 'cases');
@@ -65,7 +65,8 @@ function makeHost({ interactive = true, isService = false, contactConfig = null,
     getWebhookServer: () => webhook,
     tickMs: 60000,
     fetchImpl: fetchImpl || (async () => { throw new Error('offline in tests'); }),
-    extraAdapters
+    extraAdapters,
+    ...hostExtras
   };
   if (!isService) delete hostOpts.contactConfig;
   const host = createContactHost(hostOpts);
@@ -500,6 +501,34 @@ describe('createContactHost: sendExternal uses the real outbound gate (C3 merge,
       assert.strictEqual(calls.length, 2, 'the owner target is exempt and never gated');
     } finally {
       gates.gateLeaves = real;
+      await t.host.stop();
+    }
+  });
+
+  // C3 follow-up: rule 2 on this path reads the same
+  // settings.executors.outbound.categoryKeywords as an executor submit.
+  it('a non-owner send is gated with the configured category keywords', async () => {
+    const { ExecutorRegistry } = require('../src/cases/executors');
+    const extra = new LoopbackChannel({ id: 'loop-extra', owner: 'owner-1' });
+    let executors = null;
+    const t = makeHost({
+      settings: { executors: { outbound: { categoryKeywords: { financial: ['mortgage', 'escrow'] } } } },
+      extraAdapters: { 'loop-extra': extra },
+      hostExtras: { getExecutorRegistry: () => executors }
+    });
+    executors = new ExecutorRegistry({ dataDir: tmp('kl-host-exec-'), getSettings: t.settings, caseRuntime: t.runtime });
+    try {
+      await t.host.start();
+      const lot = await t.runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+      t.runtime.ledger(lot.id).assert({ stmt: 'The lowest price the owner takes', subject: 'lot', attr: 'floor price', value: 187500, provenance: 'sourced', category: 'financial', source: { kind: 'document', ref: 'notes' } });
+      const { router } = t.host.context();
+      const r = await router.sendExternal({ caseId: lot.id, channelId: 'loop-extra', target: 'broker-1', text: 'Has escrow been opened yet?' });
+      assert.strictEqual(r.ok, false, 'the configured keyword blocks');
+      assert.deepStrictEqual(r.blocked.map((b) => [b.reason, b.detail]), [['category-keyword', 'financial keyword "escrow"']]);
+      assert.deepStrictEqual(extra.plain, []);
+      const plain = await router.sendExternal({ caseId: lot.id, channelId: 'loop-extra', target: 'broker-1', text: 'Is the lot still listed?' });
+      assert.strictEqual(plain.ok, true, JSON.stringify(plain));
+    } finally {
       await t.host.stop();
     }
   });

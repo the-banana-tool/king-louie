@@ -13,7 +13,7 @@ const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 const tmp = (p) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), p)); dirs.push(d); return d; };
 
-async function world({ getGate = () => null, host = null } = {}) {
+async function world({ getGate = () => null, host = null, ...routerOptions } = {}) {
   let now = new Date('2026-09-25T14:00:00Z');
   const clock = () => now;
   const runtime = new CaseRuntime({ root: tmp('kl-contact-cases-'), now: clock, host });
@@ -29,7 +29,7 @@ async function world({ getGate = () => null, host = null } = {}) {
     ['ntfy', new LoopbackChannel({ id: 'ntfy', owner: 'kl-topic', caps: { expectsReplies: false, authenticatedReplies: false, deliveryOnly: true } })]
   ]);
   adapters.get('sms').relayName = 'main';
-  const router = new ContactRouter({ state, runtime, adapters, presence, getGate, clock, getTimeZone: () => 'UTC' });
+  const router = new ContactRouter({ state, runtime, adapters, presence, getGate, clock, getTimeZone: () => 'UTC', ...routerOptions });
   for (const [id, a] of adapters) a.onContactReply((cid, answer, meta) => router.handleReply(id, cid, answer, meta));
   // The two channels ruling T5-m22 lets answer approvals and app-only questions.
   const addChannel = (id, { relayName, ...opts } = {}) => {
@@ -352,6 +352,20 @@ describe('ContactRouter.sendExternal', () => {
     assert.strictEqual(w.router.isOwnerTarget('ntfy', 'kl-topic'), false);
     await w.router.sendExternal({ caseId: w.lot.id, channelId: 'ntfy', target: 'kl-topic', text: 'ping' });
     assert.strictEqual(calls.length, 2, 'ntfy went through the gate');
+  });
+
+  it('gates with the configured category keywords; when they cannot be read nothing is sent', async () => {
+    const calls = [];
+    const keywords = { financial: ['escrow'] };
+    const w = await world({ getGate: gateStub(calls), getCategoryKeywords: () => keywords });
+    assert.strictEqual((await w.router.sendExternal({ caseId: w.lot.id, channelId: 'telegram', target: '-100222', text: 'hello' })).ok, true);
+    assert.strictEqual(calls[0].opts.categoryKeywords, keywords);
+
+    const broken = await world({ getGate: gateStub(calls), getCategoryKeywords: () => { throw new Error('settings unreadable'); } });
+    const r = await broken.router.sendExternal({ caseId: broken.lot.id, channelId: 'telegram', target: '-100222', text: 'hello' });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /settings unreadable/);
+    assert.deepStrictEqual(broken.adapters.get('telegram').plain, []);
   });
 
   it('normalizes the target before the owner check', async () => {

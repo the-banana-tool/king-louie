@@ -1,5 +1,8 @@
 // src/cases/executors/defaults.js
 // settings.executors (cases stage 3 spec §6), merged key by key.
+const { createLogger } = require('../../logging');
+
+const log = createLogger('executors/settings');
 
 const EXECUTOR_SETTINGS_DEFAULTS = Object.freeze({
   // Desktop only; in service mode entries come from the admin service.json (R42).
@@ -29,6 +32,22 @@ const EXECUTOR_SETTINGS_DEFAULTS = Object.freeze({
 });
 
 const isObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+const isKeywordList = (v) => Array.isArray(v) && v.every((k) => typeof k === 'string');
+const warned = new Set();
+
+// What is wrong with a settings.executors value's outbound.categoryKeywords,
+// one line per problem; [] when it is well formed or absent. A malformed
+// part is never applied: its built-in lists stay.
+function categoryKeywordProblems(source) {
+  if (!isObject(source) || source.outbound === undefined) return [];
+  if (!isObject(source.outbound)) return ['outbound is not an object'];
+  const kw = source.outbound.categoryKeywords;
+  if (kw === undefined) return [];
+  if (!isObject(kw)) return ['outbound.categoryKeywords is not an object of keyword lists'];
+  return Object.entries(kw)
+    .filter(([, v]) => !isKeywordList(v))
+    .map(([k]) => `outbound.categoryKeywords.${k} is not a list of strings`);
+}
 
 // `additiveKeywords`: category keywords from `source` only add to the base
 // lists, never replace or empty them. Service mode sets it, because there
@@ -39,12 +58,17 @@ function mergeExecutorSettings(base, source, { additiveKeywords = false } = {}) 
   const s = isObject(source) ? source : {};
   const keywords = {};
   for (const [k, v] of Object.entries(b.outbound?.categoryKeywords || {})) keywords[k] = [...v];
+  for (const problem of categoryKeywordProblems(s)) {
+    if (warned.has(problem)) continue;
+    warned.add(problem);
+    log.warn(`settings.executors.${problem}; the outbound gate keeps its built-in category keywords there`);
+  }
   const sourceKeywords = s.outbound?.categoryKeywords;
   if (isObject(sourceKeywords)) {
     for (const [k, v] of Object.entries(sourceKeywords)) {
-      if (!Array.isArray(v)) continue;
-      const added = v.map(String);
-      keywords[k] = additiveKeywords ? [...new Set([...(keywords[k] || []), ...added])] : added;
+      // Fail closed: a list with a non-string in it is ignored whole.
+      if (!isKeywordList(v)) continue;
+      keywords[k] = additiveKeywords ? [...new Set([...(keywords[k] || []), ...v])] : [...v];
     }
   }
   return {
@@ -60,4 +84,4 @@ function resolveExecutorSettings(raw, options = {}) {
   return mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, raw, options);
 }
 
-module.exports = { EXECUTOR_SETTINGS_DEFAULTS, mergeExecutorSettings, resolveExecutorSettings };
+module.exports = { EXECUTOR_SETTINGS_DEFAULTS, mergeExecutorSettings, resolveExecutorSettings, categoryKeywordProblems };

@@ -411,7 +411,10 @@ never the input (R38).
   coincidental match surfaces as a delta (known false positive; rewording or approving clears it).
 - **Rule 2, category keyword** (`message`): for each of `personal`, `financial`, `legal`, `health` with an
   active non-disclosable fact in the case, a keyword from `settings.executors.outbound.categoryKeywords`
-  blocks (`category-keyword`) unless it is verbatim in the approved `envelope.intent`/`rules`.
+  blocks (`category-keyword`) unless it is verbatim in the approved `envelope.intent`/`rules`. Every path
+  below, C4's `sendExternal` included, gets the lists from `ExecutorRegistry#settings`: a desktop list
+  replaces its built-in one, in service mode the data-dir lists only add, and a list that is not an array of
+  strings is ignored (the built-ins stay) with a warning.
 - **Rule 3, unsourced constraint** (`message`): English detectors `date`, `price`, `deadline`, `commitment`.
   A span passes when its parsed value equals a normalized value of an active disclosable `user` or `sourced`
   fact (`detail: matched <id>`), or its text is verbatim in the approved intent/rules;

@@ -129,7 +129,7 @@ QuestionStore.registerAnswerHandler('conflict', { toFact: conflictFact, onAnswer
 class ContactRouter {
   constructor({
     dir = null, state, runtime, adapters, presence = null, getGate = () => null, clock = () => new Date(),
-    getTimeZone = () => '', log = createLogger('contact/router')
+    getTimeZone = () => '', getCategoryKeywords = null, log = createLogger('contact/router')
   } = {}) {
     if (!state) throw new Error('ContactRouter needs a ContactState');
     this.dir = dir || state.dir;
@@ -138,6 +138,10 @@ class ContactRouter {
     this.adapters = adapters;
     this.presence = presence;
     this.getGate = getGate;
+    // → settings.executors.outbound.categoryKeywords as resolved for this
+    // host, for the outbound gate's rule 2. Without one the gate uses its
+    // built-in lists; a throw refuses the send.
+    this.getCategoryKeywords = typeof getCategoryKeywords === 'function' ? getCategoryKeywords : () => null;
     this.clock = clock;
     this.getTimeZone = getTimeZone;
     this.log = log;
@@ -767,7 +771,8 @@ class ContactRouter {
       }
       const facts = this.runtime.ledger(caseId).view().facts;
       const entityIndex = typeof this.runtime.entityIndex === 'function' ? this.runtime.entityIndex() : null;
-      const r = await gate.gateLeaves({ text: body }, { recipients: [to], envelope, facts, mode: 'message', caseId, entityIndex });
+      const categoryKeywords = this.getCategoryKeywords() || null;
+      const r = await gate.gateLeaves({ text: body }, { recipients: [to], envelope, facts, mode: 'message', caseId, entityIndex, categoryKeywords });
       if (!r || r.ok !== true) return { ok: false, error: 'outbound gate blocked the message', blocked: Array.isArray(r?.blocked) ? r.blocked : [] };
       if (typeof r.rendered?.text !== 'string') return { ok: false, error: 'the outbound gate returned no rendered text' };
       body = r.rendered.text;

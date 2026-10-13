@@ -743,7 +743,12 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
   non-disclosable or superseded fact, after NFKC folding and with grouped,
   locale and scaled number forms; object keys and number leaves get rule 1
   only. Rule 2 (message mode) blocks category keywords while the case holds a
-  private fact of that category. Rule 3 (message mode) blocks a date, price,
+  private fact of that category; the lists are
+  `settings.executors.outbound.categoryKeywords` on every path
+  (`Executor.submit`, envelope requests, drafts, `sendExternal`), read
+  through `ExecutorRegistry#settings`: on the desktop a list replaces its
+  built-in one, in service mode the data dir only adds to it, and a
+  malformed list keeps the built-ins with a warning. Rule 3 (message mode) blocks a date, price,
   deadline or commitment that no `user` or `sourced` fact or approved wording
   backs. Rule 4 blocks C7 entity spans. Known gaps: homoglyphs (confusable
   letters are not folded), values split across sentences or leaves,

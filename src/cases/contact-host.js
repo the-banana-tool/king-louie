@@ -44,7 +44,7 @@ function createContactHost({
   getSettings, setSettings = null, contactConfig = null, isService = false, caseRuntime, channelRegistry = null, vault = null,
   dataDir, features = {}, getBridges = () => ({}), getWebhookServer = () => null, approvals = null,
   clock = () => new Date(), tickMs = Number(process.env.KING_LOUIE_CONTACT_TICK_MS) || 30000, getGate = defaultGetGate,
-  fetchImpl = globalThis.fetch, extraAdapters = {}, log = createLogger('contact/host')
+  fetchImpl = globalThis.fetch, extraAdapters = {}, getExecutorRegistry = () => null, log = createLogger('contact/host')
 } = {}) {
   const host = caseRuntime.host || {};
   const settings = () => {
@@ -108,7 +108,22 @@ function createContactHost({
     isEnabled: (id) => Boolean(adapters.get(id)?.contactConfigured()),
     getTimeZone: () => settings().cases?.timeZone || ''
   });
-  const router = new ContactRouter({ state, runtime: caseRuntime, adapters, presence, getGate, clock, getTimeZone: () => presence.timeZone() });
+  // Rule 2's keywords for sendExternal: the executor registry's resolved
+  // settings.executors.outbound.categoryKeywords (in service mode the data
+  // dir only adds to the built-ins), the lists an executor submit is gated with.
+  let warnedNoRegistry = false;
+  const getCategoryKeywords = () => {
+    const registry = getExecutorRegistry();
+    if (registry && typeof registry.settings === 'function') return registry.settings().outbound.categoryKeywords;
+    if (!warnedNoRegistry) {
+      warnedNoRegistry = true;
+      log.warn('No executor registry: channel sends are gated with the built-in category keywords only');
+    }
+    return null;
+  };
+  const router = new ContactRouter({
+    state, runtime: caseRuntime, adapters, presence, getGate, getCategoryKeywords, clock, getTimeZone: () => presence.timeZone()
+  });
   const ladder = new LadderEngine({
     state, casesRoot: caseRuntime.root, runtime: caseRuntime, router, presence, getPolicy: () => settings().contactPolicy, clock, tickMs, dataDir
   });
