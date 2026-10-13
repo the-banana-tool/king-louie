@@ -80,8 +80,16 @@ function answerLeaseListsWithNone(approvals, gui = null) {
   if (gui && gui.leases) return false;
   const relay = approvals && approvals.relayClient;
   if (!relay || typeof relay.registerMethod !== 'function' || !approvals.identity) return false;
-  relay.registerMethod('lease.list', require('../gui/lease-protocol').offLeaseListing({ identity: approvals.identity, approverStore: approvals.approverStore }));
-  return true;
+  try {
+    relay.registerMethod('lease.list', require('../gui/lease-protocol').offLeaseListing({ identity: approvals.identity, approverStore: approvals.approverStore }));
+    return true;
+  } catch (err) {
+    // The link refuses a name that is taken: a GUI that failed while it was
+    // being built can have registered its own lease.list first (it holds no
+    // lease, so it lists nothing either). Never a reason to stop the service.
+    log.warn(`lease.list was not registered for a node without computer use: ${err.message}`);
+    return false;
+  }
 }
 
 // Each profile is required lazily so the runbook profile never loads the agent stack.

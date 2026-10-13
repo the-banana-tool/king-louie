@@ -80,6 +80,16 @@ describe('answerLeaseListsWithNone', () => {
     assert.strictEqual(answerLeaseListsWithNone({ relayClient: null, identity }, null), false);
     assert.strictEqual(answerLeaseListsWithNone({ relayClient: relay(), identity: null }, null), false);
   });
+
+  // The real relay client refuses a method that is already registered
+  // (method_exists). A GUI that failed while it was being built may have
+  // left its own lease.list there: that must never stop the service.
+  it('never throws: a lease.list that is already registered, or a link that refuses, leaves things as they are', () => {
+    for (const code of ['method_exists', 'method_reserved']) {
+      const link = { registerMethod: () => { throw Object.assign(new Error(`${code}: lease.list`), { code }); } };
+      assert.strictEqual(answerLeaseListsWithNone({ relayClient: link, identity, approverStore: null }, { unavailable: { reason: 'gui_start_failed' }, leases: null }), false);
+    }
+  });
 });
 
 describe('acquireInstanceLock', () => {
