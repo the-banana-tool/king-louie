@@ -25,6 +25,10 @@ const HELP = `Usage:
   king-louie-service device list|revoke <device-id>|apply [--yes] [--data-dir DIR]
   king-louie-service relay run|code <node-name>|nodes|remove-node <node-name>|qr [--data-dir DIR]
   king-louie-service frontdoor enroll-device|code <node-name> [--confirm]|nodes|remove-node <node-name>|rotate-tls-key [--data-dir DIR]
+  king-louie-service session [--session-file PATH]              (the helper, as the logged-in user)
+  king-louie-service session install --user NAME [--data-dir DIR] [--dry-run]
+  king-louie-service session uninstall --user NAME [--data-dir DIR] [--dry-run]
+  king-louie-service session status|probe [--data-dir DIR]
 
 A chat channel with an empty allowlist refuses every sender, and a channel
 approval is denied unless "channel approval" names an owner chat that is not
@@ -37,7 +41,7 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
        king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
 `;
 
-const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint']);
+const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file']);
 // Flags that must never carry a value, whichever form produced it.
 const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm']);
 
@@ -279,6 +283,10 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
     io.stderr.write('Flag "--confirm" is only valid for "frontdoor code".\n');
     return 2;
   }
+  if (flags.sessionFile !== undefined && command !== 'session') {
+    io.stderr.write('Flag "--session-file" is only valid for "session".\n');
+    return 2;
+  }
 
   try {
     switch (command) {
@@ -410,6 +418,11 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       case 'uninstall': {
         const { runInstallCommand } = require('./installers');
         return await runInstallCommand(command, { ...flags, dataDir }, io);
+      }
+
+      case 'session': {
+        const { runSessionCommand } = require('./commands/session');
+        return await runSessionCommand({ sub, arg, flags, dataDir, io });
       }
 
       default:
