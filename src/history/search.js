@@ -12,17 +12,22 @@ const log = createLogger('history-search');
 // the tool anyway, so the cross-encoder's ~2 s at topM 100 is affordable
 // here, under rerank.searchMaxMs, where it is not per turn. rerank.search
 // false, or no reranker, leaves the fused order (or the per-turn opt-in).
-async function searchHistoryExcerpts({ store, retriever, chatId, query, kinds = null, limit = 10, settings, asOf = Date.now(), reranker = null }) {
+// chatIds: the chats to search (a history scope, stage H4; this chat first).
+// Left out, or empty, it is this chat alone: an empty list never means every
+// chat here. chatTitles names the other chats in their excerpts' headers.
+async function searchHistoryExcerpts({ store, retriever, chatId, chatIds = null, chatTitles = new Map(), query, kinds = null, limit = 10, settings, asOf = Date.now(), reranker = null }) {
+  const scope = Array.isArray(chatIds) && chatIds.length ? chatIds : [chatId];
   const rr = settings && settings.rerank ? settings.rerank : null;
   const useRerank = Boolean(reranker && rr && rr.search);
   const s = useRerank ? { ...settings, rerank: { ...rr, enabled: true, maxMs: rr.searchMaxMs } } : settings;
   const hits = await retriever.retrieve({
-    query, chatIds: [chatId], kinds, budgetTokens: null, settings: s, now: asOf, reranker: useRerank ? reranker : null,
-    caseId: useRerank ? caseIdOf(store, chatId) : null
+    query, chatIds: scope, kinds, budgetTokens: null, settings: s, now: asOf, reranker: useRerank ? reranker : null,
+    // One case chat anywhere in scope keeps the rerank off Jev.
+    caseId: useRerank ? caseIdOf(store, scope) : null
   });
   const chunks = hits.map((h) => h.chunk);
   const chunkCounts = store.messageChunkCounts([...new Set(chunks.map((c) => c.messageId))]);
-  return formatExcerpts(chunks, { chatId, asOf, chunkCounts, order: 'given' }).slice(0, limit);
+  return formatExcerpts(chunks, { chatId, asOf, chunkCounts, chatTitles, order: 'given' }).slice(0, limit);
 }
 
 function excerptsForMessage({ store, chatId, seq }) {

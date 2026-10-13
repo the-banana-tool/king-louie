@@ -2269,11 +2269,17 @@ function createCore(deps = {}) {
             : null;
         },
         // Recall stage H2: SearchHistory and ReadHistory read this run's chat.
+        // Stage H4: they read the chat's wider history scope only in the
+        // chat's own turn. The send path alone passes historyCrossChat, and
+        // no child executor is built from a parent's options
+        // (createAgentRuntime names each option it hands on), so a
+        // sub-agent, a background task and a workflow task never get it.
         get history() {
           const cid = executorOptions.chatId;
-          return cid
-            ? { chatId: String(cid), store: historyStore, retriever: historyRetriever, estimator: tokenEstimator, reranker: historyReranker, getSettings }
-            : null;
+          if (!cid) return null;
+          const history = { chatId: String(cid), store: historyStore, retriever: historyRetriever, estimator: tokenEstimator, reranker: historyReranker, getSettings };
+          if (executorOptions.historyCrossChat === true) history.resolveScope = (chatId, requested) => resolveHistoryScope(chatId, requested);
+          return history;
         },
         getAgent,
         listAgents,

@@ -147,6 +147,35 @@ describe('createCore and the history store', () => {
     assert.strictEqual(typeof getHistoryRetriever().retrieve, 'function');
   });
 
+  // Stage H4. Until the shipped scope policy is wired (plan Task 8) the core
+  // runs on the closed policy: a stored scope and links widen nothing. Task 8
+  // replaces these expectations with its own rules.
+  it('resolves a history scope from the store, and no stored scope widens it yet', () => {
+    const { deps } = makeDeps([
+      { id: 'c1', title: 'Lakeside lot', messages: [msg('m1', 'user', 'blue folder')] },
+      { id: 'c2', title: 'Second', messages: [msg('m2', 'user', 'red folder')] }
+    ]);
+    const core = createCore(deps);
+    const { resolveHistoryScope, historyStore } = core.context;
+    assert.deepStrictEqual(resolveHistoryScope('c1').chatIds, ['c1']);
+    assert.strictEqual(historyStore.setHistoryScope('c1', 'all'), true);
+    assert.deepStrictEqual(historyStore.setLinks('c1', ['c2']), ['c2']);
+    for (const requested of [undefined, null, 'all', 'linked', 'chat']) {
+      const r = resolveHistoryScope('c1', requested);
+      assert.strictEqual(r.stored, 'all');
+      assert.strictEqual(r.effective, 'chat');
+      assert.deepStrictEqual(r.chatIds, ['c1']);
+      assert.strictEqual(r.pinned.reason, 'no-policy');
+    }
+    assert.deepStrictEqual(resolveHistoryScope('missing').chatIds, ['missing']);
+  });
+
+  it('a core whose store did not open resolves every chat to itself', () => {
+    const { deps } = makeDeps();
+    const core = createCore({ ...deps, history: { open: false } });
+    assert.deepStrictEqual(core.context.resolveHistoryScope('c1', 'all').chatIds, ['c1']);
+  });
+
   it('chunks what a version-1 store held after start(), not while the core is built', async () => {
     const { dataDir, deps } = makeDeps();
     const file = path.join(dataDir, 'history.sqlite');
@@ -330,6 +359,58 @@ describe('history: a chat turn through the core', () => {
     assert.ok(!String(calls[0].options.systemPromptDynamic || '').includes('<recalled_history>'));
     assert.strictEqual(calls[0].messages.length, 9, 'the default tail of 4 user turns (8 messages) and the new message');
     assert.deepStrictEqual(lastMessage().context.recalledChunkIds, []);
+  });
+
+  it('stage H4: only an executor built for the turn of the chat itself resolves a history scope', async () => {
+    await start();
+    const { createToolExecutorWithApprovals, createAgentRuntime } = core.context;
+    const historyOf = (executor) => executor.extraToolOptions.history;
+    const own = historyOf(await createToolExecutorWithApprovals(null, null, null, { chatId: 'chat-1', historyCrossChat: true }));
+    assert.strictEqual(own.chatId, 'chat-1');
+    assert.strictEqual(typeof own.resolveScope, 'function');
+    assert.deepStrictEqual(own.resolveScope('chat-1', 'all').chatIds, ['chat-1']);
+    for (const historyCrossChat of [undefined, false, 'true', 1, {}]) {
+      const plain = historyOf(await createToolExecutorWithApprovals(null, null, null, { chatId: 'chat-1', historyCrossChat }));
+      assert.strictEqual(plain.chatId, 'chat-1');
+      assert.ok(!('resolveScope' in plain), JSON.stringify(historyCrossChat));
+    }
+    assert.strictEqual(historyOf(await createToolExecutorWithApprovals(null, null, null, { historyCrossChat: true })), null);
+    // A child run (SpawnAgent, BackgroundTask, a workflow task, a delegate
+    // turn) is built by createAgentRuntime, which does not hand the option on
+    // even when its caller passes it.
+    const child = await createAgentRuntime({}, null, null, { chatId: 'chat-1', historyCrossChat: true });
+    const childHistory = historyOf(child.toolExecutor);
+    assert.strictEqual(childHistory.chatId, 'chat-1');
+    assert.ok(!('resolveScope' in childHistory));
+    assert.strictEqual(historyOf((await createAgentRuntime({}, null, null, { historyCrossChat: true })).toolExecutor), null);
+  });
+
+  it('stage H4: the turn of the chat itself asks the scope, and ReadHistory of another chat reads nothing', async () => {
+    const { send } = await start({
+      script: [
+        { type: 'tool_use', toolName: 'ReadHistory', toolUseId: 'rh-1', parameters: { chatId: 'chat-2', fromSeq: 1, toSeq: 1 } },
+        { type: 'tool_use', toolName: 'SearchHistory', toolUseId: 'sh-2', parameters: { query: 'dock gate code', scope: 'all' } },
+        { type: 'text', content: 'Done.' }
+      ]
+    });
+    core.context.createChat({ id: 'chat-2', title: 'Dock notes', messages: [] });
+    core.context.appendMessageToChat('chat-2', 'user', 'The dock gate code is 9001.');
+    // Stored as wide as it goes; the interim policy still keeps the chat to itself.
+    core.context.historyStore.setHistoryScope('chat-1', 'all');
+    core.context.historyStore.setLinks('chat-1', ['chat-2']);
+    await send('Read the other chat and search everything for the dock gate code.');
+    const chat = core.context.getChat('chat-1', { messages: true });
+    const resultOf = (name) => chat.messages.find((m) => m.sender === 'toolResult' && m.toolName === name).result;
+    assert.deepStrictEqual(resultOf('ReadHistory'), { ok: false, error: 'ReadHistory can read only chats in this chat\'s history scope ("chat").' });
+    const searched = resultOf('SearchHistory');
+    assert.strictEqual(searched.scope, 'chat');
+    assert.match(searched.note, /only the owner can widen it in the app/);
+    assert.ok(!JSON.stringify(searched).includes('9001'));
+    const reply = chat.messages[chat.messages.length - 1];
+    assert.strictEqual(reply.context.scope, 'chat');
+    assert.strictEqual(reply.context.scopeChats, 1);
+    assert.deepStrictEqual(reply.context.recalledChats, []);
+    assert.ok(!JSON.stringify(chat.messages).includes('9001'));
   });
 
   it('SearchHistory in a turn reads this chat from the store', async () => {

@@ -72,6 +72,18 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **No file under `src/workflows/` changed**, as expected; the new case in `tests/history-workflows.test.js` runs the real engine and planner over a real builder whose parent chat is `linked`.
 - **`tests/history-context-builder.test.js` and `tests/history-rerank-provenance.test.js` needed no change** and are not in the commit.
 
+**Task 6**
+
+- **Two refusal texts for `ReadHistory`.** With a `resolveScope` on the context, another chat outside the scope gets the task's text (`ReadHistory can read only chats in this chat's history scope ("<effective>").`). Without one (a sub-agent, a workflow task, a delegate turn) the H3 text is kept word for word, since `tests/history-tools.test.js` pins it and "as today" is the rule there. In both the scope is checked before `lastSeq` or `getMessages` is called for the other chat.
+- **The widening note is given only where a scope is resolved.** Without `resolveScope` a `scope` argument is ignored silently, as in H3.
+- **The no-match note names the scope**: the H3 sentence for `chat`, "No matches in this chat or the chats linked to it." for `linked`, "No matches in any chat this chat may read." for `all`. With both notes the no-match one comes first, in one `note` string.
+- **`chatTitle` in a result is the title as the header shows it** (`chatHeaderTitle`: one plain line, at most 60 characters), not the stored title. A range past the end of another chat says "That chat has N messages."
+- **`searchHistoryExcerpts` reads an empty or non-array `chatIds` as this chat alone**: an empty list means every chat to `searchText`, and must never get there from here.
+- **A resolver answer that is not a list starting with this chat, or whose `effective` is not one of the three, is this chat alone** (the same rule as the builder's).
+- **`ReadHistory`'s own description is unchanged** ("Read messages of this chat by number…"); the task rewrites only the three strings it lists.
+- **How children are kept out**: `createAgentRuntime` builds a child's executor options key by key and has no `historyCrossChat`, and nothing spreads a parent's `executorOptions`. The option counts only when it is exactly `true`. `tests/history-core.test.js` pins both on the real core, a child built with the option passed to it included. A bridge chat's turn (Telegram, Discord) and a gateway session also run through `createAgentRuntime`, so today they read their chat alone whatever its scope; only the desktop send path sets the option.
+- **`tests/history-tools.test.js` needed no change** and is not in the commit. `tests/history-core.test.js` also pins the interim closed policy (Task 5); Task 8 replaces those expectations.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named).

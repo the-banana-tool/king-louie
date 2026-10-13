@@ -1,13 +1,16 @@
 // src/tools/builtin/history-tools.js
 // SearchHistory and ReadHistory (recall spec §8): read-only, always loaded,
-// for anything the turn's recalled block left out. The history scope is
-// this chat until H4 adds linked and all chats; a scope argument can only
-// narrow it, so here it changes nothing.
+// for anything the turn's recalled block left out. Which chats they read is
+// the chat's history scope (stage H4), resolved on every call by
+// context.history.resolveScope from what is stored; only the chat's own turn
+// has one, and without it they read this chat alone. A scope argument can
+// only narrow, and no parameter names a chat outside the scope.
 const { Tool } = require('../tool-schema');
 const { mergeHistorySettings } = require('../../history/settings');
 const { searchHistoryExcerpts } = require('../../history/search');
 const { visibleToolParams, toolResultText } = require('../../history/chunker');
-const { senderLabel } = require('../../history/excerpts');
+const { senderLabel, chatHeaderTitle } = require('../../history/excerpts');
+const { SCOPES } = require('../../history/scope');
 const { TokenEstimator } = require('../../history/token-estimator');
 
 const KINDS = ['user', 'assistant', 'tool_use', 'tool_result', 'attachment', 'summary'];
@@ -24,7 +27,28 @@ function settingsOf(h) {
   return mergeHistorySettings((all || {}).history);
 }
 
-function renderForRead(m) {
+// The chats this call may read, this chat first. An answer from the
+// resolver that is not a list starting with this chat is this chat alone.
+function scopeOf(h, requested = null) {
+  const alone = { effective: 'chat', chatIds: [h.chatId], titles: new Map() };
+  if (typeof h.resolveScope !== 'function') return alone;
+  const r = h.resolveScope(h.chatId, SCOPES.includes(requested) ? requested : null);
+  if (!r || !Array.isArray(r.chatIds) || r.chatIds[0] !== h.chatId || !SCOPES.includes(r.effective)) return alone;
+  return {
+    effective: r.effective,
+    chatIds: [...new Set(r.chatIds.filter((id) => typeof id === 'string' && id))],
+    titles: r.titles instanceof Map ? r.titles : new Map()
+  };
+}
+
+const NO_MATCH = {
+  chat: 'No matches in this chat. Try other words, or ReadHistory for a range.',
+  linked: 'No matches in this chat or the chats linked to it. Try other words, or ReadHistory for a range.',
+  all: 'No matches in any chat this chat may read. Try other words, or ReadHistory for a range.'
+};
+
+// chatLabel: the header part naming another chat (a read of this chat has none).
+function renderForRead(m, chatLabel = '') {
   let body;
   // The text the chunker indexes; an unindexed tool (Vault) shows its
   // action and key, and no result.
@@ -35,17 +59,17 @@ function renderForRead(m) {
     ...(Array.isArray(m.images) ? m.images : []).map((i) => `[image${i && i.name ? `: ${i.name}` : ''}]`),
     ...(Array.isArray(m.documents) ? m.documents : []).map((d) => `[document${d && d.name ? `: ${d.name}` : ''}]`)
   ];
-  return [`[#${m.seq} · ${senderLabel(m)} · ${m.timestamp || 'unknown time'}]`, body, ...extras].filter((s) => s !== '').join('\n');
+  return [`[${chatLabel}#${m.seq} · ${senderLabel(m)} · ${m.timestamp || 'unknown time'}]`, body, ...extras].filter((s) => s !== '').join('\n');
 }
 
 const searchHistoryTool = new Tool({
   name: 'SearchHistory',
-  description: "Search this chat's full history (every message, tool call and tool result, kept verbatim) by keywords. Returns excerpts with their message numbers (#seq). Quote a phrase to match it exactly. Read a range in full with ReadHistory.",
+  description: 'Search the history this chat may read (this chat, and other chats when the owner has allowed it) by keywords. Returns excerpts with their message numbers (#seq). Quote a phrase to match it exactly. Read a range in full with ReadHistory.',
   parameters: {
     type: 'object',
     properties: {
       query: { type: 'string', description: 'Keywords, or a "quoted phrase".' },
-      scope: { type: 'string', enum: ['chat', 'linked', 'all'], description: "Which chats to search. It can only narrow this chat's own history scope, which is this chat." },
+      scope: { type: 'string', enum: ['chat', 'linked', 'all'], description: 'Which chats to search. It can only narrow the scope the owner gave this chat.' },
       kinds: { type: 'array', items: { type: 'string', enum: KINDS }, description: 'Only these kinds of chunk.' },
       limit: { type: 'number', default: 10, description: 'Most excerpts to return (1 to 50).' }
     },
@@ -60,21 +84,38 @@ const searchHistoryTool = new Tool({
     if (!query) return { ok: false, error: 'query is required.' };
     const limit = Math.min(50, Math.max(1, Math.floor(Number(params.limit) || 10)));
     const kinds = Array.isArray(params.kinds) ? params.kinds.filter((k) => KINDS.includes(k)) : [];
+    const asked = SCOPES.includes(params.scope) ? params.scope : null;
+    const scope = scopeOf(h, asked);
     const excerpts = await searchHistoryExcerpts({
       store: h.store,
       retriever: h.retriever,
       chatId: h.chatId,
+      chatIds: scope.chatIds,
+      chatTitles: scope.titles,
       query,
       kinds: kinds.length ? kinds : null,
       limit,
       settings: settingsOf(h).recall,
       reranker: typeof h.reranker === 'function' ? h.reranker : null
     });
+    // Asked for more than the chat has (only where a scope is resolved):
+    // say so, since the argument changed nothing.
+    const notes = [];
+    if (!excerpts.length) notes.push(NO_MATCH[scope.effective]);
+    if (typeof h.resolveScope === 'function' && asked && SCOPES.indexOf(asked) > SCOPES.indexOf(scope.effective)) {
+      notes.push(`This chat's history scope is "${scope.effective}"; only the owner can widen it in the app.`);
+    }
     return {
       ok: true,
-      scope: 'chat',
-      excerpts: excerpts.map((e) => ({ seq: e.seq, header: e.header, text: e.text })),
-      ...(excerpts.length ? {} : { note: 'No matches in this chat. Try other words, or ReadHistory for a range.' })
+      scope: scope.effective,
+      // An excerpt from another chat names it; one from this chat does not.
+      excerpts: excerpts.map((e) => ({
+        seq: e.seq,
+        header: e.header,
+        text: e.text,
+        ...(e.chatId !== h.chatId ? { chatId: e.chatId, chatTitle: chatHeaderTitle(scope.titles.get(e.chatId), e.chatId) } : {})
+      })),
+      ...(notes.length ? { note: notes.join(' ') } : {})
     };
   }
 });
@@ -85,7 +126,7 @@ const readHistoryTool = new Tool({
   parameters: {
     type: 'object',
     properties: {
-      chatId: { type: 'string', description: 'Leave out: only this chat can be read.' },
+      chatId: { type: 'string', description: "Leave out for this chat. Another chat's id only when a SearchHistory excerpt gave it." },
       fromSeq: { type: 'integer', description: 'First message number.' },
       toSeq: { type: 'integer', description: 'Last message number, inclusive.' }
     },
@@ -96,16 +137,29 @@ const readHistoryTool = new Tool({
   execute: async (params, context) => {
     const h = historyOf(context);
     if (!h) return { ok: false, error: NO_CHAT };
-    if (params.chatId && String(params.chatId) !== h.chatId) {
-      return { ok: false, error: `ReadHistory can read only this chat (${h.chatId}): this chat's history scope is "chat".` };
+    // Another chat is read only when it is in this chat's scope as stored
+    // now; anything else is refused before a row of it is read (spec §15).
+    const chatId = params.chatId === undefined || params.chatId === null || params.chatId === '' ? h.chatId : String(params.chatId);
+    const other = chatId !== h.chatId;
+    let chatTitle = null;
+    if (other) {
+      if (typeof h.resolveScope !== 'function') {
+        return { ok: false, error: `ReadHistory can read only this chat (${h.chatId}): this chat's history scope is "chat".` };
+      }
+      const scope = scopeOf(h);
+      if (!scope.chatIds.includes(chatId)) {
+        return { ok: false, error: `ReadHistory can read only chats in this chat's history scope ("${scope.effective}").` };
+      }
+      chatTitle = chatHeaderTitle(scope.titles.get(chatId), chatId);
     }
+    const chatLabel = other ? `chat "${chatTitle}" · ` : '';
     const fromSeq = Number(params.fromSeq);
     const toSeq = Number(params.toSeq);
     if (!Number.isInteger(fromSeq) || !Number.isInteger(toSeq) || fromSeq < 1 || toSeq < fromSeq) {
       return { ok: false, error: 'fromSeq and toSeq must be whole numbers with 1 <= fromSeq <= toSeq.' };
     }
-    const last = h.store.lastSeq(h.chatId);
-    if (fromSeq > last) return { ok: false, error: `This chat has ${last} messages.` };
+    const last = h.store.lastSeq(chatId);
+    if (fromSeq > last) return { ok: false, error: `${other ? 'That' : 'This'} chat has ${last} messages.` };
 
     const cap = settingsOf(h).readHistoryMaxTokens;
     const estimator = h.estimator || new TokenEstimator();
@@ -116,8 +170,8 @@ const readHistoryTool = new Tool({
     let cutSeq = null;
     let truncated = false;
     for (let start = fromSeq; start <= end && !truncated; start += PAGE) {
-      for (const m of h.store.getMessages(h.chatId, { fromSeq: start, toSeq: Math.min(end, start + PAGE - 1) })) {
-        const block = renderForRead(m);
+      for (const m of h.store.getMessages(chatId, { fromSeq: start, toSeq: Math.min(end, start + PAGE - 1) })) {
+        const block = renderForRead(m, chatLabel);
         const tokens = estimator.estimate(block);
         if (used + tokens > cap) {
           if (!blocks.length) {
@@ -138,7 +192,7 @@ const readHistoryTool = new Tool({
       : (cutSeq !== null
         ? `Message #${cutSeq} was cut at ${cap} tokens.`
         : `Stopped at #${shown} to stay under ${cap} tokens; call ReadHistory from ${shown + 1} for the rest.`);
-    return { ok: true, chatId: h.chatId, fromSeq, toSeq: shown, text: blocks.join('\n\n'), truncated, ...(note ? { note } : {}) };
+    return { ok: true, chatId, ...(other ? { chatTitle } : {}), fromSeq, toSeq: shown, text: blocks.join('\n\n'), truncated, ...(note ? { note } : {}) };
   }
 });
 

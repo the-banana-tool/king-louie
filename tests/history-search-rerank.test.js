@@ -103,6 +103,27 @@ describe('SearchHistory rerank', () => {
     assert.strictEqual(calls[0].opts.maxMs, 2000);
   });
 
+  it('stage H4: searches the chats given, titles the others, and passes on the first case in scope', async () => {
+    const retriever = setup();
+    seedChat(t.store, { id: 'lot', title: 'Lot notes', caseId: 'case-1', messages: [{ sender: 'user', text: 'The gate by the dock was repainted.' }] });
+    const calls = [];
+    const args = { store: t.store, retriever, chatId: 'chat-1', query: 'gate', limit: 10, settings: recall(), asOf: BASE_TIME };
+    const out = await searchHistoryExcerpts({ ...args, chatIds: ['chat-1', 'lot'], chatTitles: new Map([['lot', 'Lot notes']]), reranker: preferDock(calls) });
+    const other = out.filter((e) => e.chatId === 'lot');
+    assert.strictEqual(other.length, 1);
+    assert.match(other[0].header, /^\[chat "Lot notes" · #1 · user · /);
+    assert.strictEqual(calls[0].opts.caseId, 'case-1');
+    assert.ok(out.filter((e) => e.chatId === 'chat-1').every((e) => e.header.startsWith('[#')));
+
+    // This chat alone has no case, and an empty list is never every chat.
+    calls.length = 0;
+    for (const chatIds of [undefined, null, [], 'lot']) {
+      const own = await searchHistoryExcerpts({ ...args, chatIds, reranker: preferDock(calls) });
+      assert.ok(own.length === 3 && own.every((e) => e.chatId === 'chat-1'), JSON.stringify(chatIds));
+    }
+    assert.ok(calls.every((c) => c.opts.caseId === null));
+  });
+
   it('createHostReranker sends the chunk texts and the budget to the host', async () => {
     const seen = [];
     const rr = createHostReranker({ rerank: async (query, texts, opts) => { seen.push({ query, texts, opts }); return texts.map(() => 1); } });

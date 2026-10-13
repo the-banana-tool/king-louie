@@ -687,6 +687,9 @@ function registerChatHandlers(ipcMain, context = {}) {
         allowedDirectories,
         useSandbox: sandboxMode,
         chatId,
+        // This is the chat's own turn: SearchHistory and ReadHistory read the
+        // chat's history scope (stage H4). Its children are not given this.
+        historyCrossChat: true,
         // SpawnAgent and BackgroundTask children of this turn resolve their
         // models from this turn's frozen TurnModels (spec §6.6).
         turnModels,
