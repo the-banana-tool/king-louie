@@ -568,9 +568,18 @@ class LeaseManager extends EventEmitter {
     return false;
   }
 
+  // Suspends an active lease. One suspended for want of contact is taken
+  // over by any other reason that comes up meanwhile (second security
+  // review, finding 12): the helper dropping or the relay link going during
+  // such a pause used to leave no trace, and the next watch resumed the
+  // lease as if nothing had happened. The stronger reason brings its own
+  // way back: a resume grant on the phone, and the app focused again.
+  // Nothing else replaces a reason already recorded.
   suspend(leaseId, reason) {
     const lease = this.find(leaseId);
-    if (!lease || lease.state !== 'active') return;
+    if (!lease) return;
+    const takesOver = lease.state === 'suspended' && lease.suspendReason === CONTACT_REASON && reason !== CONTACT_REASON;
+    if (lease.state !== 'active' && !takesOver) return;
     lease.state = 'suspended';
     lease.suspendReason = reason;
     // A pause does not empty the field (second security review, finding 7):
@@ -579,7 +588,7 @@ class LeaseManager extends EventEmitter {
     // that moves the caret; this used to be wiped, for every reason.
     lease.typed.navigate();
     if (this.broker) this.broker.releaseAll().catch(() => {});
-    this._audit('lease.suspended', lease, { reason });
+    this._audit('lease.suspended', lease, takesOver ? { reason, was: CONTACT_REASON } : { reason });
     this._status(lease);
     if (this.remainingMs(lease) <= 0) { this._end(lease, 'expired'); return; }
     const relay = this.approvals.relayClient;
@@ -590,7 +599,8 @@ class LeaseManager extends EventEmitter {
 
   onHelperDisconnected() {
     const lease = this.current();
-    if (lease && lease.state === 'active') this.suspend(lease.leaseId, 'helper_disconnected');
+    // suspend() decides: an active lease, or one paused only for want of contact.
+    if (lease && lease.state !== 'pending') this.suspend(lease.leaseId, 'helper_disconnected');
   }
 
   setLocked(locked) {
@@ -602,7 +612,7 @@ class LeaseManager extends EventEmitter {
 
   _relayDown() {
     const lease = this.current();
-    if (lease && lease.state === 'active') this.suspend(lease.leaseId, 'relay_unreachable');
+    if (lease && lease.state !== 'pending') this.suspend(lease.leaseId, 'relay_unreachable');
   }
 
   _relayUp() {

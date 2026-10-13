@@ -767,6 +767,77 @@ describe('lock, expiry and revoke', () => {
     });
   });
 
+  // Second security review, finding 12. A lease paused for want of contact
+  // is resumed by a watch alone. If the helper dropped (or the relay link
+  // went) during the pause, nothing recorded it, and the watch resumed the
+  // lease as if nothing had happened. The stronger reason now takes over,
+  // and with it its own way back: a resume grant on the phone, and the app
+  // brought to the front again.
+  describe('second review finding 12: what happens during a pause for want of contact is not lost', () => {
+    const WINDOW = 120000;
+    const paused = async () => {
+      const lease = await granted();
+      timers.advance(WINDOW + 1);
+      assert.equal(lease.suspendReason, 'no_contact');
+      return lease;
+    };
+
+    it('the helper drops during the pause: the lease is suspended for that, and a watch alone no longer resumes it', async () => {
+      const lease = await paused();
+      const requests = relay.all('kl.lease.request').length;
+      broker.calls.length = 0;
+      leases.onHelperDisconnected();
+      assert.deepEqual([lease.state, lease.suspendReason], ['suspended', 'helper_disconnected']);
+      assert.deepEqual([relay.last('kl.lease.status').message.state, relay.last('kl.lease.status').message.reason], ['suspended', 'helper_disconnected']);
+      assert.ok(audits.some((a) => a.kind === 'lease.suspended' && a.data.reason === 'helper_disconnected' && a.data.was === 'no_contact'));
+      assert.equal(relay.all('kl.lease.request').length, requests + 1, 'the phone is asked to resume, as for any helper disconnect');
+      assert.equal(relay.last('kl.lease.request').message.lease.resumes, lease.leaseId);
+      // The granting phone looks again: contact, but not a resume.
+      const seen = leases.verifyWatch(watchFrom(phone, lease));
+      assert.deepEqual([seen.accepted, seen.contact], [true, true]);
+      assert.deepEqual([lease.state, lease.suspendReason], ['suspended', 'helper_disconnected']);
+      assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'lease_suspended');
+      // Its resume grant brings it back, with the app focused again.
+      assert.equal(leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 5 })).state, 'active');
+      assert.equal(leases.assertUsable('job-1'), lease);
+      assert.ok(broker.calls.some((c) => Array.isArray(c) && c[0] === 'focus'), 'refocused');
+    });
+
+    it('the relay link drops during the pause: suspended for that; the resume is asked when the link returns', async () => {
+      const lease = await paused();
+      const requests = relay.all('kl.lease.request').length;
+      relay.down();
+      assert.deepEqual([lease.state, lease.suspendReason], ['suspended', 'relay_unreachable']);
+      relay.up();
+      assert.equal(relay.all('kl.lease.request').length, requests + 1);
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, true);
+      assert.equal(lease.state, 'suspended', 'a watch does not resume it');
+      leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 5 }));
+      assert.equal(lease.state, 'active');
+    });
+
+    it('a pause for want of contact never replaces another reason, and nothing replaces an ended lease', async () => {
+      const lease = await granted();
+      leases.suspend(lease.leaseId, 'foreground_changed');
+      timers.advance(WINDOW + 1);
+      assert.equal(lease.suspendReason, 'foreground_changed');
+      leases.suspend(lease.leaseId, 'no_contact');
+      assert.equal(lease.suspendReason, 'foreground_changed');
+      // One stronger reason does not replace another either.
+      leases.onHelperDisconnected();
+      assert.equal(lease.suspendReason, 'foreground_changed');
+      leases.onRevoke(phone.leaseRevoke(identity.nodeId, lease.leaseId));
+      leases.onHelperDisconnected();
+      assert.deepEqual([lease.state, lease.endReason], ['ended', 'revoked']);
+    });
+
+    it('with nothing else wrong, the watch still resumes it', async () => {
+      const lease = await paused();
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, true);
+      assert.deepEqual([lease.state, lease.suspendReason], ['active', null]);
+    });
+  });
+
   // Second security review, finding 9. The contact window, the lease's
   // expiry and the age of a contact token were all read off the wall clock,
   // so setting the clock back (an NTP step, a user, anyone who can) stopped
