@@ -68,9 +68,9 @@ async function startChannel(options = {}) {
   return { channel, endpoint, state };
 }
 
-function helper(endpoint, { backend = fakeBackend(), secret = SECRET, user = 'alice', nodeId = NODE_ID } = {}) {
+function helper(endpoint, { backend = fakeBackend(), secret = SECRET, user = 'alice', nodeId = NODE_ID, handshakeMs } = {}) {
   return connectToService({
-    endpoint, secret, nodeId, user, platform: 'linux', pid: 7, helperVersion: 'test',
+    endpoint, secret, nodeId, user, platform: 'linux', pid: 7, helperVersion: 'test', ...(handshakeMs ? { handshakeMs } : {}),
     probeReport: PROBE, handleOp: createOpHandler(backend, { platform: process.platform })
   }).then((session) => { cleanups.push(() => session.close()); return session; });
 }
@@ -283,6 +283,30 @@ describe('lifetime', () => {
     assert.ok(replacement);
     assert.ok(audits.some((a) => a.kind === 'gui.helper.replaced'));
     assert.equal(c2.connected, true);
+  });
+
+  // Security review finding 13c: with the handshake limit and the duplicate
+  // ping limit equal (5 s and 5 s in production), the newcomer's handshake
+  // ran out just before the ping of the silent helper did, so the first
+  // attempt to replace a hung helper always failed.
+  it('finding 13c: a silent helper is replaced on the newcomer\'s first attempt when both limits are equal', async () => {
+    const { channel, endpoint } = await startChannel({ handshakeMs: 600, duplicatePingMs: 600 });
+    const raw = await rawHandshake(endpoint);
+    await once(channel, 'ready');
+    const readyAgain = once(channel, 'ready');
+    const replacement = await helper(endpoint, { handshakeMs: 600 });
+    await raw.closed;
+    await readyAgain;
+    assert.ok(replacement);
+    assert.equal(channel.connected, true);
+  });
+
+  it('finding 13c: a helper that answers its ping is still kept, and the newcomer is told so within its own handshake', async () => {
+    const { channel, endpoint } = await startChannel({ handshakeMs: 600, duplicatePingMs: 600 });
+    await helper(endpoint);
+    await once(channel, 'ready');
+    await assert.rejects(helper(endpoint, { handshakeMs: 600 }), (e) => e.code === 'helper_already_connected');
+    assert.equal(channel.connected, true);
   });
 
   it('an op past its timeout is op_timeout; a drop rejects what is in flight', async () => {

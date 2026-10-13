@@ -38,7 +38,11 @@ not the next expected handshake message closes the connection.
   `hello.user` differs from `session_user`. The whole handshake has 5 s.
 - At most 4 unauthenticated connections at once. One authenticated helper: a
   newcomer is refused (`error` frame above) while the current helper answers a
-  `ping` within 5 s, and replaces it otherwise.
+  `ping` within 5 s, and replaces it otherwise. That ping is part of the
+  newcomer's handshake, so it is given what is left of the newcomer's 5 s less
+  half a second (revised 2026-10-12): the answer always comes before the
+  newcomer's own handshake limit, and a helper that hangs is replaced on the
+  first attempt.
 
 ## 4. Sealing
 

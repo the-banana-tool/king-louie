@@ -117,7 +117,7 @@ class HelperChannel extends EventEmitter {
       socket.destroy();
       return;
     }
-    const conn = { socket, state: 'hello', decoder: new P.FrameDecoder({ maxBytes: P.PLAIN_MAX }), dead: false, probe: null };
+    const conn = { socket, state: 'hello', decoder: new P.FrameDecoder({ maxBytes: P.PLAIN_MAX }), dead: false, probe: null, acceptedAt: Date.now() };
     this.unauth.add(conn);
     this.all.add(conn);
     conn.timer = unref(setTimeout(() => this._destroy(conn, 'handshake_timeout'), this.handshakeMs));
@@ -187,7 +187,13 @@ class HelperChannel extends EventEmitter {
   async _admit(conn) {
     const old = this.current;
     if (old && !old.dead) {
-      if (await this._pingOnce(old, this.duplicatePingMs)) {
+      // The newcomer's own handshake limit (the same on both ends) started
+      // before this ping does. The ping is answered or given up on before
+      // that limit runs out, so a silent helper is replaced on the
+      // newcomer's first attempt instead of the newcomer timing out a
+      // moment before the answer (security review finding 13c).
+      const left = this.handshakeMs - (Date.now() - conn.acceptedAt) - Math.min(500, this.handshakeMs / 4);
+      if (await this._pingOnce(old, Math.max(0, Math.min(this.duplicatePingMs, left)))) {
         if (!conn.dead) conn.socket.end(P.encodeFrame({ t: 'error', code: 'helper_already_connected' }));
         this._destroy(conn, 'helper_already_connected', { end: true });
         return;
