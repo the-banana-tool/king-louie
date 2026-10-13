@@ -106,6 +106,26 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
       }, signer);
     },
 
+    // lease-v1 (fleet stage 5 §4.1): answers a node-signed kl.lease.request
+    // the way the apps do (the request's nonce and expires_at are copied).
+    leaseGrant(requestEnvelope, { decision = 'grant', apps = null, minutes = 10, signedAt = new Date().toISOString(), overrides = {} } = {}) {
+      const { message: req } = open(requestEnvelope);
+      return seal({
+        v: 1, type: 'kl.lease.grant', request_id: req.request_id, lease_id: req.lease_id, node_id: req.node_id,
+        lease_hash: req.lease_hash, nonce: req.nonce, decision,
+        grant: decision === 'grant' ? { apps: apps || req.lease.apps.map((a) => a.id), minutes } : null,
+        expires_at: req.expires_at, device_id: deviceId, signed_at: signedAt, ...overrides
+      }, signer);
+    },
+
+    leaseRevoke(nodeId, leaseId, { reason = 'kill_switch', nonce = null, signedAt = new Date().toISOString() } = {}) {
+      return seal({ v: 1, type: 'kl.lease.revoke', node_id: nodeId, lease_id: leaseId, reason, device_id: deviceId, nonce: nonce || randomNonce(), signed_at: signedAt }, signer);
+    },
+
+    leaseWatch(nodeId, leaseId, { nonce = null, signedAt = new Date().toISOString() } = {}) {
+      return seal({ v: 1, type: 'kl.lease.watch', node_id: nodeId, lease_id: leaseId, device_id: deviceId, nonce: nonce || randomNonce(), signed_at: signedAt }, signer);
+    },
+
     // Headers for a device-authenticated phone API call.
     signApi(method, pathWithQuery, body = '', { timestamp = new Date().toISOString() } = {}) {
       const s = phoneAuthString(method, pathWithQuery, timestamp, body);
