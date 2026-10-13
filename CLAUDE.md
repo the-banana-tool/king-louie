@@ -1299,3 +1299,80 @@ Spec `docs/superpowers/specs/2026-09-30-management-surfaces.md`; ADR
   turns (`DELEGATE_EXCLUDED_TOOLS`) never get them; case turns block the
   acting ones (`CASE_BLOCKED_TOOL_NAMES`) and keep the read ones. Attached, the turn runs in the service, so no new proxied
   domain is needed.
+
+## Session helper (fleet stage 5)
+
+`src/gui/` (service side) and `src/session/` (the helper) implement desktop
+apps and computer use on agent nodes (spec
+`docs/superpowers/specs/2026-09-23-fleet-stage5-session-helper.md`;
+protocols `docs/protocol/session-v1.md`, `docs/protocol/lease-v1.md`). Both
+are Electron-free. `tests/service-profile-graph.test.js` keeps `src/session/`
+and `src/gui/` off the runbook, relay and front-door graphs, except
+`src/gui/config.js`, `errors.js` and `status.js` (and, on the relay and
+front-door graphs, `relay-extension.js` and `lease-protocol.js`).
+
+- `king-louie-service session` runs as the logged-in user (one session user
+  per node). `session install --user NAME` (root/Administrator) writes
+  `<configDir>/session/helper-secret.json` (klc1:), the per-user copy in
+  `<configDir>/session/users/` (`<user>.json`; `<SID>.json` on Windows) and
+  the login start; running it again for the same user rotates the secret.
+  Installing for a second user is refused (`session_user_mismatch`) until
+  the first is uninstalled, before anything of the second is written (owner
+  ruling R-F5-2). It needs a node identity and a master key already in the
+  data dir ("start the service once first") and reads the key read-only.
+  `session uninstall --user NAME` removes the login start, the copy and, for
+  the installed user, the canonical secret. Neither asks `[y/N]` (like
+  `install`/`uninstall`), so `--yes` is a usage error; `--session-file` is
+  valid for `session` only. `session status` / `session probe` read the
+  running helper's report from `<dataDir>/session/status.json`; a local
+  probe is labelled as one and loads the real backend.
+- The login start (`src/session/autostart.js`): a Windows logon task
+  `KingLouie Session <user>` (`schtasks` by absolute path, the user's SID,
+  `LeastPrivilege`), a macOS LaunchAgent, a Linux XDG autostart entry. A
+  file in a user's home is written only by a child running as that user
+  (`session _write-autostart` / `_remove-autostart`, uid and gid dropped by
+  `spawnSync`), never by the elevated process.
+- `KL_SESSION_FILE` (or `--session-file`, which the login start passes)
+  points the helper at its per-user file; it is checked like the default path.
+- GUI tools check the `gui` capability first, so a node without a working
+  helper refuses before any approval or lease. Input needs a phone-signed
+  lease; images reach the model only from tools flagged `emitsImages: true`,
+  and `ToolExecutor` detaches `_images` before anything stores a result (a
+  `PostToolUse` hook's result included). The agent loop places images for
+  the provider that answered each call (`_currentProviderName`).
+- A lease is bound to a job, read from the run's origin: `origin.job_id`,
+  else `chat:<origin.session>`. A run with neither is refused
+  (`job_required`), and a job the node does not know to be open closes its
+  lease (`job_closed`; `isJobOpen` in `src/gui/index.js`: the fleet
+  `JobManager` has it and it is not terminal, or the chat exists). Nothing
+  defaults to open (owner ruling R-F5-7, 2026-10-12).
+- A front-door client needs `fleet:unsafe` on the node for `RequestLease`
+  and for an unsafe `LaunchApp`: both read the `refuseUnsafe` mark on the
+  requester `ToolExecutor` hands them (M19) and answer with
+  `REFUSE_UNSAFE_MESSAGE` before anything reaches the phone. A session the
+  node started itself still asks the phone (owner ruling R-F5-3).
+- Case turns keep `ListApps` and `Screenshot` only: the eight acting GUI
+  tools are in `CASE_BLOCKED_TOOL_NAMES`. Wake-up turns get no GUI tool;
+  delegate turns get all ten (owner ruling R-F5-4).
+- Tests never touch a real LaunchAgent, autostart entry or scheduled task,
+  the real config or data dir, or a real elevated install:
+  `tests/session-autostart.test.js` only renders and plans (a fake
+  `spawnSync`), and `tests/service-cli-session.test.js` injects `isAdmin`,
+  `resolveSessionUser`, `resolveKey`, `runIcacls`, `execute`, `localProbe`
+  and `runHelper` over temp dirs. A test that calls `runSessionHelper`
+  passes `deps.attachLog: false` (else it writes the user's real helper
+  log) and its own `deps.backend`; lease tests sign with the fake phone's
+  `leaseGrant` / `leaseRevoke` (`tests/helpers/fake-phone.js`).
+- No test injects input except the opt-in e2e:
+  `KL_E2E_GUI=1 node --test tests/e2e/session-helper.test.js` on Windows or
+  macOS in an interactive session (drives Calculator and Notepad/TextEdit;
+  hands off the mouse and keyboard while it runs). Without the variable the
+  suite is skipped. It stops its helper child by closing the child's IPC
+  channel: on Windows `child.kill()` runs no `SIGTERM` handler.
+- Checked on Windows only: the POSIX cases (file modes and owners, the
+  user-side autostart writer, the Unix socket and its `0711` dir) are
+  skipped there; the macOS JXA worker and the real-X11 suite need their own
+  OS; no elevated install, logon task, LaunchAgent or autostart entry has
+  been run for real on any OS.
+- Vectors: `node tests/vectors/lease-v1/generate.js --check` (26) and
+  `node tests/vectors/session-v1/generate.js --check` (6).
