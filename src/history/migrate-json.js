@@ -48,7 +48,15 @@ function moveChat(historyStore, chat, seen) {
   if (chat.messages != null && !Array.isArray(chat.messages)) throw new Error('its messages are not a list');
   const expected = Array.isArray(chat.messages) ? chat.messages.length : 0;
   historyStore.transaction(() => {
-    if (historyStore.getChat(id, { messages: false })) {
+    const existing = historyStore.getChat(id, { messages: false });
+    if (existing) {
+      // An import is never the chat an earlier run moved, whatever it holds
+      // (stage H4 review): it is a file's reduced copy, with no case, and
+      // would stand in for this chat. The chat stays in chat-data.json.
+      const imported = (typeof historyStore.importOfChat === 'function' && historyStore.importOfChat(id))
+        || existing.importedFromCase === true
+        || JSON.stringify(existing.source ?? null) !== JSON.stringify(chat.source ?? null);
+      if (imported) throw new Error('an imported chat with this id is already in history.sqlite');
       const stored = historyStore.messageCount(id);
       // Committed by an earlier run that stopped before rewriting the JSON.
       if (stored === expected) return;

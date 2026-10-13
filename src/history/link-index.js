@@ -114,6 +114,11 @@ function chatRef(db, chatId) {
 
 // ── imports ──────────────────────────────────────────────────────────────
 
+// Whether an import row names this chat (running or done).
+function importOfChat(db, chatId) {
+  return Boolean(prepared(db, 'SELECT 1 AS present FROM imports WHERE chat_id = ? LIMIT 1').get(String(chatId)));
+}
+
 const IMPORT_COLUMNS = `id, source_kind AS sourceKind, source_path AS sourcePath, source_hash AS sourceHash,
   chat_id AS chatId, imported_at AS importedAt, state, importer_version AS importerVersion, message_count AS messageCount`;
 const importRow = (row) => (row ? {
@@ -164,5 +169,5 @@ function unfinishedImports(db) {
 module.exports = {
   SCHEMA_V4_SQL, HISTORY_SCOPES, DEFAULT_SCOPE, IMPORT_STATES,
   getHistoryScope, setHistoryScope, getLinks, setLinks, chatRefs, chatRef,
-  findImport, getImport, recordImport, finishImport, unfinishedImports
+  findImport, getImport, importOfChat, recordImport, finishImport, unfinishedImports
 };

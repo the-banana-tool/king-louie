@@ -65,7 +65,7 @@ const { makeRootAssert } = require('../cases/executors/package-loader');
 const { buildChildContext, childRuntimeOptions } = require('../agents/child-context');
 const ContextAssembler = require('../context/context-assembler');
 const {
-  HistoryStore, migrateFromJson, createChatFacade, createUnavailableHistoryStore, TokenEstimator, Retriever, ContextBuilder,
+  HistoryStore, migrateFromJson, MIGRATION_MARKER, createChatFacade, createUnavailableHistoryStore, TokenEstimator, Retriever, ContextBuilder,
   EmbedderHost, EmbedRunner, VectorIndex, createVectorSearch, startEmbedIndexer, mergeHistorySettings,
   resolveScope
 } = require('../history');
@@ -326,6 +326,16 @@ function createCore(deps = {}) {
         const left = store.get('chats', []);
         historyStatus.migrationFailed = Array.isArray(left) ? left.length : 1;
       }
+      // Until every chat has moved, an import (history stage H4) is never
+      // given the id of a chat still in chat-data.json: the next start's
+      // move would find the import under that id and take it for the chat.
+      // Read on every check, so it is the JSON file as it is then.
+      historyStore.reserveChatIds((id) => {
+        if (historyStore.getMeta(MIGRATION_MARKER)) return false;
+        const left = store.get('chats', []);
+        // Not a list: nothing can move out of it, so nothing can collide.
+        return Array.isArray(left) && left.some((chat) => chat && typeof chat === 'object' && String(chat.id ?? '').trim() === id);
+      });
     }
   }
   // Recall stage H2 (spec 2026-09-25 §6): token estimates, BM25 retrieval

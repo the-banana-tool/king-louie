@@ -155,15 +155,19 @@ function requireStore(store) {
 
 // A chat id nothing has: the importer's own when it is a plain id and free,
 // else that id (made plain) with the first 8 characters of the file's hash,
-// then -2, -3, …
+// then -2, -3, … "Free" also means not reserved: an id a chat still in
+// chat-data.json holds is never used (HistoryStore#reserveChatIds), or the
+// move out of the JSON file would take the import for that chat.
 function freeChatId(store, wanted, sourceHash) {
+  const taken = (id) => Boolean(store.chatRef(id)) || (typeof store.isReservedChatId === 'function' && store.isReservedChatId(id));
   const given = typeof wanted === 'string' ? wanted : '';
   const usable = given.length >= 1 && given.length <= ID_MAX_CHARS && ID_PATTERN.test(given);
-  if (usable && !store.chatRef(given)) return given;
+  if (usable && !taken(given)) return given;
   const plain = given.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, ID_BASE_MAX_CHARS);
   const base = `${plain || 'import'}-${sourceHash.slice(0, 8)}`;
   let id = base;
-  for (let n = 2; store.chatRef(id); n += 1) id = `${base}-${n}`;
+  for (let n = 2; taken(id) && n < 100000; n += 1) id = `${base}-${n}`;
+  if (taken(id)) throw fail('IMPORT_INVALID', 'No free chat id for this import.');
   return id;
 }
 

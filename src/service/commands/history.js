@@ -44,6 +44,27 @@ const plain = (value) => Array.from(
   (ch) => (unprintable(ch.codePointAt(0)) ? '?' : ch)
 ).join('');
 
+// How many chats chat-data.json still holds: 0 when there is no such file
+// or its list is empty, null when the file is there and cannot be read as
+// one (the caller refuses).
+function chatsLeftInJson(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    return err && err.code === 'ENOENT' ? 0 : null;
+  }
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) return null;
+  if (data.chats === undefined) return 0;
+  return Array.isArray(data.chats) ? data.chats.length : null;
+}
+
 async function runHistoryCommand({ sub, arg, extra, flags = {}, dataDir, io, deps = {} }) {
   // No fail-open default: a caller that forgets this would write a running
   // service's store underneath it.
@@ -125,7 +146,7 @@ async function runHistoryCommand({ sub, arg, extra, flags = {}, dataDir, io, dep
   }
 
   // Required here: every profile's CLI loads this file's caller.
-  const { HistoryStore, previewImport, importChat, sweepUnfinishedImports } = require('../../history');
+  const { HistoryStore, MIGRATION_MARKER, previewImport, importChat, sweepUnfinishedImports } = require('../../history');
   const pattern = typeof flags.pattern === 'string' && flags.pattern ? flags.pattern : undefined;
 
   // Read once before anything is opened: a file no importer takes, or a
@@ -138,12 +159,29 @@ async function runHistoryCommand({ sub, arg, extra, flags = {}, dataDir, io, dep
     return 1;
   }
 
+  // 5. Chats still in chat-data.json (a data dir from before the history
+  // store that the service has not started on since, or chats that could
+  // not be moved). The service's move takes a chat it finds in the store
+  // under a JSON chat's id for that chat, and this command builds no core
+  // to know those ids, so it waits for the move. Checked before a store is
+  // created; a store that exists is asked for its marker below.
+  const dbPath = path.join(target, 'history.sqlite');
+  const pending = chatsLeftInJson(path.join(target, 'chat-data.json'));
+  const waitForMove = () => {
+    const what = pending === null
+      ? 'chat-data.json in this data dir could not be read'
+      : `${pending} chat${pending === 1 ? ' is' : 's are'} still in chat-data.json in this data dir`;
+    io.stderr.write(`${what}, and the service has not finished moving chats into the history store. Start the service once first, stop it, then run this again. If chats stay in chat-data.json after that (the app's chat list says how many could not be moved), import from the desktop app instead.\n`);
+    return 1;
+  };
+  if (pending !== 0 && !fs.existsSync(dbPath)) return waitForMove();
+
   let store;
   try {
     // A data dir that was never started has no history.sqlite: it is created
-    // at the current schema, as the service would. Chats still in
-    // chat-data.json move at the service's next start, as before.
-    store = HistoryStore.open(path.join(target, 'history.sqlite'));
+    // at the current schema, as the service would.
+    store = HistoryStore.open(dbPath);
+    if (pending !== 0 && !store.getMeta(MIGRATION_MARKER)) return waitForMove();
     // What a crash in the middle of an earlier import left.
     sweepUnfinishedImports(store);
     const out = await importChat({ store, filePath, pattern });

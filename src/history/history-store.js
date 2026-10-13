@@ -644,6 +644,25 @@ class HistoryStore {
     });
   }
 
+  // Chat ids an import must not be given although no chat in this store has
+  // them: the ids of chats still in chat-data.json (the core sets the check;
+  // stage H4 review). The move out of the JSON file would take a chat it
+  // finds under such an id for the original. Held in memory only; a check
+  // that throws reserves the id.
+  reserveChatIds(isReserved) {
+    this._isReservedChatId = typeof isReserved === 'function' ? isReserved : null;
+  }
+  isReservedChatId(chatId) {
+    const id = normalizeId(chatId);
+    if (!id || !this._isReservedChatId) return false;
+    try {
+      return this._isReservedChatId(id) !== false;
+    } catch (err) {
+      log.warn(`Whether a chat id is reserved could not be checked, so it is: ${err.message}`);
+      return true;
+    }
+  }
+
   // Recall stage H4 (spec §3.2, §4.1). A chat's history scope and its links
   // say which chats its turns may read; both are set only by the owner's own
   // action, never from a chat object (rows.js drops historyScope). Neither
@@ -677,6 +696,11 @@ class HistoryStore {
   }
   findImport(sourceHash) { return this.linkable ? linkIndex.findImport(this.db, sourceHash) : null; }
   getImport(id) { return this.linkable ? linkIndex.getImport(this.db, id) : null; }
+  // Whether this chat was made by an import (it has an import row).
+  importOfChat(chatId) {
+    const id = normalizeId(chatId);
+    return Boolean(this.linkable && id && linkIndex.importOfChat(this.db, id));
+  }
   unfinishedImports() { return this.linkable ? linkIndex.unfinishedImports(this.db) : []; }
   // Throws when the hash is already recorded or the chat does not exist.
   recordImport(record = {}) {
