@@ -943,6 +943,24 @@ contextBridge.exposeInMainWorld(
         validateString(payload.query, 'query', { minLength: 1 });
         return ipcRenderer.invoke('history:search', payload);
       },
+      // Stage H4: what a chat recalls from. The scope is widened only here.
+      setScope: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId', { minLength: 1 });
+        validateString(payload.scope, 'scope', { minLength: 1 });
+        return ipcRenderer.invoke('history:scope.set', payload);
+      },
+      getLinks: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId', { minLength: 1 });
+        return ipcRenderer.invoke('history:links.get', payload);
+      },
+      setLinks: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId', { minLength: 1 });
+        if (!Array.isArray(payload.linkedChatIds)) throw new TypeError('linkedChatIds must be an array');
+        return ipcRenderer.invoke('history:links.set', payload);
+      },
       embedderStatus: () => ipcRenderer.invoke('history:embedder.status'),
       saveEmbedder: (payload) => {
         validateObject(payload, 'payload');

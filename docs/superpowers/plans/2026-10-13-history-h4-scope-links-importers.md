@@ -83,6 +83,15 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **`ReadHistory`'s own description is unchanged** ("Read messages of this chat by number…"); the task rewrites only the three strings it lists.
 - **How children are kept out**: `createAgentRuntime` builds a child's executor options key by key and has no `historyCrossChat`, and nothing spreads a parent's `executorOptions`. The option counts only when it is exactly `true`. `tests/history-core.test.js` pins both on the real core, a child built with the option passed to it included. A bridge chat's turn (Telegram, Discord) and a gateway session also run through `createAgentRuntime`, so today they read their chat alone whatever its scope; only the desktop send path sets the option.
 - **`tests/history-tools.test.js` needed no change** and is not in the commit. `tests/history-core.test.js` also pins the interim closed policy (Task 5); Task 8 replaces those expectations.
+**Task 7**
+
+- **The policy reaches the handlers as `context.getHistoryScopePolicy()`**, beside `context.resolveHistoryScope`. A host that gives neither (or a policy without both functions) gets `CLOSED_POLICY`: every candidate is `allowed: false`, `scope.set` to anything wider is `SCOPE_PINNED` and `links.set` of any chat is `LINK_REFUSED`. A resolver answer that is not a list starting with this chat is read as this chat alone, pinned (the builder's and the tools' rule).
+- **`chat:updated` goes out through the calling event's sender**, as `autoNameChat` in `chat-handlers.js` sends it (attached, that sender is the bridge connection's). `links.set` sends it too, not only `scope.set`.
+- **`scope.set` to a scope no wider than the pin is stored**, so a pinned chat can always be set back to `chat`. A store that does not take the write (read-only) answers `{ ok: false, error }`.
+- **`links.set` refuses an empty string like a non-string entry.** The chat itself, a repeated id and an id of no chat are dropped by the store without a refusal. A pinned chat's links can still be saved; they do nothing while the pin holds.
+- **A chat linked earlier and refused by the policy now stays in `links`** (it is what is stored) and shows in `candidates` as `linked: true, allowed: false` with the reason. Sending it back in `links.set` is `LINK_REFUSED`, so Task 14's dialog leaves a candidate that is not allowed out of what it saves.
+- **Titles in `links` and `candidates` are the stored titles**, untouched (`untrustedText: true`). `chatTitle` on a `history:search` excerpt is the header's form (`chatHeaderTitle`), as in `SearchHistory`.
+- **`tests/history-ipc.test.js` needed no change** and is not in the commit. The three allowlist lines pass before the code does (the `history` domain is proxied); they pin it.
 
 ## Owner rulings (2026-10-13)
 

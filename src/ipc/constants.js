@@ -92,6 +92,10 @@ module.exports = {
   // Recall stage H2 (history spec 2026-09-25 §7, §12).
   HISTORY_EXCERPTS: 'history:excerpts',
   HISTORY_SEARCH: 'history:search',
+  // Stage H4: a chat's history scope and its links. Only these widen a scope.
+  HISTORY_SCOPE_SET: 'history:scope.set',
+  HISTORY_LINKS_GET: 'history:links.get',
+  HISTORY_LINKS_SET: 'history:links.set',
   // Recall stage H3: the embedder's state, choice, rebuild and retry.
   HISTORY_EMBEDDER_STATUS: 'history:embedder.status',
   HISTORY_EMBEDDER_SAVE: 'history:embedder.save',

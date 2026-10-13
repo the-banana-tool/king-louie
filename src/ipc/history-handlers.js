@@ -7,8 +7,22 @@ const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const { mergeHistorySettings } = require('../history/settings');
 const { searchHistoryExcerpts, excerptsForMessage } = require('../history/search');
+const { SCOPES, CLOSED_POLICY, resolveScope } = require('../history/scope');
+const { chatHeaderTitle } = require('../history/excerpts');
 
 const view = (e) => ({ seq: e.seq, header: e.header, text: e.text });
+
+const MAX_LINKS = 200;
+// What the owner is told when a chat's scope cannot be widened, by the
+// policy's reason. The reason itself is a code, never shown.
+const PIN_SENTENCES = Object.freeze({
+  'case-chat': 'A case chat recalls only from itself.',
+  'bridge-chat': 'A Telegram or Discord chat recalls only from itself.',
+  'imported-case-chat': 'A chat imported from a case recalls only from itself.'
+});
+const PIN_SENTENCE = 'This chat recalls only from itself.';
+const pinSentence = (reason) => (Object.hasOwn(PIN_SENTENCES, reason) ? PIN_SENTENCES[reason] : PIN_SENTENCE);
+const REFUSED = 'refused';
 
 function registerHistoryHandlers(ipcMain, context = {}) {
   const store = () => {
@@ -16,9 +30,105 @@ function registerHistoryHandlers(ipcMain, context = {}) {
     if (!s) throw new Error('Chat history is not available in this host.');
     return s;
   };
-  const handle = (channel, fn) => ipcMain.handle(channel, wrapHandler(channel, async (_event, payload) => (
-    fn(payload && typeof payload === 'object' ? payload : {})
+  const handle = (channel, fn) => ipcMain.handle(channel, wrapHandler(channel, async (event, payload) => (
+    fn(payload && typeof payload === 'object' ? payload : {}, event)
   )));
+
+  // Stage H4 (spec §6.3). The scope of a chat is resolved on every call
+  // from what the store holds now. A host that gives no policy or resolver
+  // gets the closed one: every chat reads itself only.
+  const scopePolicy = () => {
+    const p = typeof context.getHistoryScopePolicy === 'function' ? context.getHistoryScopePolicy() : null;
+    return p && typeof p.pinnedTo === 'function' && typeof p.canRead === 'function' ? p : CLOSED_POLICY;
+  };
+  const scopeOf = (chatId, requested = null) => {
+    const r = typeof context.resolveHistoryScope === 'function'
+      ? context.resolveHistoryScope(chatId, requested)
+      : resolveScope({ store: store(), chatId, requested, policy: CLOSED_POLICY });
+    // Anything but a list starting with this chat is this chat alone (the
+    // rule the builder and the tools apply).
+    if (!r || !Array.isArray(r.chatIds) || r.chatIds[0] !== chatId || !SCOPES.includes(r.effective)) {
+      return { stored: 'chat', effective: 'chat', chatIds: [chatId], titles: new Map(), pinned: { scope: 'chat', reason: REFUSED } };
+    }
+    return r;
+  };
+  // Only an exact true allows (scope.js).
+  const linkVerdict = (reader, source) => {
+    const answer = scopePolicy().canRead(reader, source, { explicit: true });
+    if (answer === true) return true;
+    return typeof answer === 'string' && answer ? answer : REFUSED;
+  };
+  const NOT_FOUND = Object.freeze({ ok: false, error: 'Chat not found.' });
+  const readerOf = (chatId) => (typeof chatId === 'string' && chatId ? store().chatRef(chatId) : null);
+  // The reply of all three channels. Titles are untrusted text.
+  const linksView = (reader) => {
+    const s = store();
+    const scope = scopeOf(reader.id);
+    const linked = new Set(s.getLinks(reader.id));
+    const candidates = s.chatRefs().filter((ref) => ref.id !== reader.id).map((ref) => {
+      const verdict = linkVerdict(reader, ref);
+      return { id: ref.id, title: ref.title, linked: linked.has(ref.id), allowed: verdict === true, reason: verdict === true ? null : verdict };
+    });
+    return {
+      ok: true,
+      untrustedText: true,
+      scope: s.getHistoryScope(reader.id),
+      effectiveScope: scope.effective,
+      pinned: scope.pinned ? scope.pinned.reason : null,
+      links: candidates.filter((c) => c.linked).map((c) => ({ id: c.id, title: c.title })),
+      candidates
+    };
+  };
+  // The renderer reloads its chat list itself (chat-handlers.js does the
+  // same after a title change); attached, the sender is the bridge's.
+  const chatUpdated = (event, chatId) => {
+    const sender = event && event.sender;
+    if (sender && typeof sender.send === 'function' && !(typeof sender.isDestroyed === 'function' && sender.isDestroyed())) {
+      sender.send('chat:updated', { chatId });
+    }
+  };
+
+  handle(IPC.HISTORY_LINKS_GET, async ({ chatId }) => {
+    const reader = readerOf(chatId);
+    return reader ? linksView(reader) : { ...NOT_FOUND };
+  });
+
+  handle(IPC.HISTORY_SCOPE_SET, async ({ chatId, scope }, event) => {
+    if (typeof scope !== 'string' || !SCOPES.includes(scope)) {
+      return { ok: false, error: `A history scope is one of ${SCOPES.join(', ')}.` };
+    }
+    const reader = readerOf(chatId);
+    if (!reader) return { ...NOT_FOUND };
+    const { pinned } = scopeOf(reader.id);
+    if (pinned && SCOPES.indexOf(scope) > SCOPES.indexOf(pinned.scope)) {
+      return { ok: false, error: pinSentence(pinned.reason), code: 'SCOPE_PINNED', reason: pinned.reason };
+    }
+    if (!store().setHistoryScope(reader.id, scope)) return { ok: false, error: 'The history scope could not be saved.' };
+    chatUpdated(event, reader.id);
+    return linksView(reader);
+  });
+
+  handle(IPC.HISTORY_LINKS_SET, async ({ chatId, linkedChatIds }, event) => {
+    if (!Array.isArray(linkedChatIds) || linkedChatIds.length > MAX_LINKS || !linkedChatIds.every((id) => typeof id === 'string' && id)) {
+      return { ok: false, error: `linkedChatIds must be a list of at most ${MAX_LINKS} chat ids.` };
+    }
+    const reader = readerOf(chatId);
+    if (!reader) return { ...NOT_FOUND };
+    const s = store();
+    // A chat that no longer exists is dropped by the store; one the policy
+    // refuses fails the whole call, so nothing the owner did not see is saved.
+    const refused = [];
+    for (const id of new Set(linkedChatIds)) {
+      const source = id === reader.id ? null : s.chatRef(id);
+      if (!source) continue;
+      const verdict = linkVerdict(reader, source);
+      if (verdict !== true) refused.push({ id: source.id, reason: verdict });
+    }
+    if (refused.length) return { ok: false, error: 'That chat cannot be linked.', code: 'LINK_REFUSED', refused };
+    s.setLinks(reader.id, linkedChatIds);
+    chatUpdated(event, reader.id);
+    return linksView(reader);
+  });
 
   handle(IPC.HISTORY_EXCERPTS, async ({ chatId, seq }) => {
     if (typeof chatId !== 'string' || !chatId || !Number.isInteger(seq) || seq < 1) {
@@ -34,15 +144,26 @@ function registerHistoryHandlers(ipcMain, context = {}) {
     const retriever = typeof context.getHistoryRetriever === 'function' ? context.getHistoryRetriever() : null;
     if (!retriever) throw new Error('History search is not available in this host.');
     const settings = mergeHistorySettings(((typeof context.getSettings === 'function' && context.getSettings()) || {}).history);
+    // The owner's own search reads what the chat's turn may read (stage H4).
+    const scope = scopeOf(chatId);
     const excerpts = await searchHistoryExcerpts({
       store: store(),
       retriever,
       chatId,
+      chatIds: scope.chatIds,
+      chatTitles: scope.titles,
       query,
       limit: Math.min(50, Math.max(1, Math.floor(Number(limit) || 10))),
       settings: settings.recall
     });
-    return { ok: true, untrustedText: true, excerpts: excerpts.map(view) };
+    return {
+      ok: true,
+      untrustedText: true,
+      excerpts: excerpts.map((e) => ({
+        ...view(e),
+        ...(e.chatId && e.chatId !== chatId ? { chatId: e.chatId, chatTitle: chatHeaderTitle(scope.titles.get(e.chatId), e.chatId) } : {})
+      }))
+    };
   });
 
   // The embedder (recall spec §5.2, §14) and the reranker (§6.3 step 6).

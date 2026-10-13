@@ -3416,6 +3416,9 @@ function createCore(deps = {}) {
     getHistoryStore,
     getContextBuilder: () => contextBuilder,
     resolveHistoryScope,
+    // What a stored scope may not do; the history IPC asks it which chats
+    // may be linked.
+    getHistoryScopePolicy: () => historyScopePolicy,
     getTokenEstimator: () => tokenEstimator,
     getHistoryRetriever: () => historyRetriever,
     getHistoryStatus,
