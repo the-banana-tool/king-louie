@@ -310,6 +310,32 @@ public enum Leases {
     /// Under those rows: what it means and what it does not.
     public static let couldNotConfirmDetail = "No signed answer about computer use came from there. It may be off or out of reach, or the relay may be keeping its answer back. A lease could be running."
 
+    /// What a phone says of a pinned node it has not asked yet (fourth
+    /// security review, finding 2). Not "nothing is running": nothing has
+    /// been checked.
+    public static func notCheckedYet(nodeName: String) -> String { "Not checked yet: \(Display.escape(nodeName))" }
+
+    /// Under those rows.
+    public static let notCheckedYetDetail = "This phone has not asked there about computer use yet, so it does not know whether a session is running."
+
+    /// What a phone says of a pinned node whose listing it accepted
+    /// (`checkListing`), and only of such a node: `time` is when this phone
+    /// accepted it, by its own clock, so an old answer never reads as a
+    /// current one. `running` counts the leases it listed that are live,
+    /// `waiting` those still waiting for a phone's answer.
+    public static func checked(nodeName: String, at time: String, running: Int, waiting: Int) -> String {
+        let sessions = running == 0 ? "no computer-use session" : (running == 1 ? "1 computer-use session running" : "\(running) computer-use sessions running")
+        let requests = waiting == 0 ? "" : (waiting == 1 ? "; 1 request waiting for an answer" : "; \(waiting) requests waiting for an answer")
+        return "Checked \(Display.escape(nodeName)) at \(time): \(sessions)\(requests)"
+    }
+
+    /// The statuses an accepted listing names, read. None for a listing
+    /// that was not accepted: such a listing says nothing.
+    public static func listedStatuses(_ check: ListingCheck, pin: NodePin) -> [LeaseStatus] {
+        guard check.accepted else { return [] }
+        return check.statuses.compactMap { envelope in verifiedMessage(envelope, pin: pin).flatMap { LeaseStatus(message: $0) } }
+    }
+
     /// A node-signed message (request, status or view) whose signature, kid
     /// and node_id are all the pinned node's; nil otherwise.
     public static func verifiedMessage(_ envelope: Envelope, pin: NodePin) -> JSONValue? {

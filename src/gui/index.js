@@ -25,8 +25,9 @@ const NODE_IDENTITY_INVALID = 'node_identity_invalid';
 const failureDetail = (err) => String((err && err.message) || err || 'unknown error').slice(0, 300);
 
 // R-F5-11: desktop apps are off, for a reason. No helper channel, no broker,
-// no lease manager and no link method exist; the GUI tools are registered
-// only to refuse with the reason; status.json carries it for "session
+// no lease manager and no link method exist (the host answers lease.list
+// with a signed "nothing" in its place: answerLeaseListsWithNone, run.js);
+// the GUI tools are registered only to refuse with the reason; status.json carries it for "session
 // status" and doctor. The bad file is never read for anything else, and
 // nothing falls back to a weaker mode.
 function unavailableSubsystem({ reason, detail, guiConfig, dataDir, platform, log, clock = Date.now, heartbeatMs = 10000 }) {

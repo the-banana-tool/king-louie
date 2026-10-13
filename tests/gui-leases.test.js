@@ -1139,6 +1139,26 @@ describe('lock, expiry and revoke', () => {
         assert.deepEqual(padded.statuses.map((m) => [m.lease_id, m.seq]), [[live.leaseId, open(answer.statuses[0]).message.seq]]);
       });
 
+      // Fourth security review, finding 2: a node with computer use off
+      // (no lease manager at all) answers too, so "could not confirm" on a
+      // phone means the node did not answer, not that it had nothing to say.
+      it('offLeaseListing: a node with computer use off signs the same answer with nothing in it, for an enrolled phone and its nonce only', async () => {
+        const off = L.offLeaseListing({ identity, approverStore: leases.approvals.approverStore, clock: () => clock.now() });
+        const answer = await off({ device_id: phone.deviceId, nonce: NONCE });
+        assert.deepEqual(answer.statuses, []);
+        assert.deepEqual(open(answer.listing).message, { v: 1, type: 'kl.lease.listing', node_id: identity.nodeId, to_device: phone.deviceId, nonce: NONCE, at: new Date(clock.now()).toISOString(), leases: [] });
+        const r = check(answer);
+        assert.equal(r.accepted, true, r.reason);
+        assert.deepEqual(r.statuses, []);
+        assert.equal(check(await off({ device_id: other.deviceId, nonce: NONCE })).reason, 'wrong_device');
+        for (const nonce of [undefined, null, '', 'short', 'n'.repeat(44), 7]) assert.deepEqual(await off({ device_id: phone.deviceId, nonce }), { statuses: [] });
+        for (const device of [createFakePhone().deviceId, null, 'not-a-device']) assert.deepEqual(await off({ device_id: device, nonce: NONCE }), { statuses: [] });
+        assert.deepEqual(await off(), { statuses: [] });
+        // A store that cannot be read answers nobody.
+        const broken = L.offLeaseListing({ identity, approverStore: { get() { throw new Error('unreadable'); } } });
+        assert.deepEqual(await broken({ device_id: phone.deviceId, nonce: NONCE }), { statuses: [] });
+      });
+
       it('no nonce, or one that is not 32 bytes of base64url: statuses as before and no listing; nobody but an enrolled phone gets one', async () => {
         await granted();
         for (const nonce of [undefined, null, '', 'short', 'n'.repeat(44), 7, {}]) {

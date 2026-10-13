@@ -216,12 +216,15 @@ class AppModel(context: Context) {
     val runningLeases = mutableStateListOf<RunningLease>()
 
     /**
-     * The names of the pinned nodes the last "Check for computer-use
-     * requests" brought no answer from that this phone could accept (owner
-     * ruling R-F5-20): no listing, or one that did not check. Shown as
-     * "Could not confirm with …", never as nothing running.
+     * What this phone knows about computer use on each pinned node, by node
+     * id (owner ruling R-F5-20; fourth security review, finding 2). Three
+     * things can be true, and each is shown as what it is: nothing asked yet
+     * (no entry); a listing the node signed for this phone's own request,
+     * accepted at a time by this phone's clock, with what it listed; or a
+     * request that brought no listing this phone could accept. Written only
+     * by refreshLeases, on the owner's tap. Up here for the same reason.
      */
-    val unconfirmedLeaseNodes = mutableStateListOf<String>()
+    val leaseChecks = mutableStateMapOf<String, LeaseNodeCheck>()
 
     val devices = mutableStateListOf<JsonElement>()
     val online = mutableStateMapOf<String, Boolean>()
@@ -425,6 +428,15 @@ class AppModel(context: Context) {
         val grantedByDevice: String?, val grantedByName: String?, val status: Envelope?
     )
 
+    /** One pinned node's entry in `leaseChecks`; a node without one has not been asked yet. */
+    sealed class LeaseNodeCheck {
+        /** A listing this phone accepted at [atMs] (System.currentTimeMillis): [running] live leases, [waiting] requests not yet answered. */
+        data class Confirmed(val atMs: Long, val running: Int, val waiting: Int) : LeaseNodeCheck()
+
+        /** The last request brought no listing this phone could accept. */
+        object Unconfirmed : LeaseNodeCheck()
+    }
+
     /** What one send came to: the node's answer, or why there is none. */
     private class LeaseReply(val outcome: SendOutcome, val json: JsonElement?, val problem: String?)
 
@@ -479,14 +491,22 @@ class AppModel(context: Context) {
                 // R-F5-20: per pinned node, a listing it signed for this request and this
                 // phone, complete, or no answer. This phone cannot tell a node that is off,
                 // slow or older from a relay that kept its answer back: all "could not confirm".
-                val unconfirmed = pins.filter { !Leases.checkListing(listed, it, nonce, deviceId ?: "").accepted }.map { it.name }
-                unconfirmedLeaseNodes.clear()
-                unconfirmedLeaseNodes.addAll(unconfirmed)
+                // An accepted listing is "confirmed", with the time this phone accepted it and
+                // what the node listed; nothing else is.
+                val checkedAt = System.currentTimeMillis()
+                for (pin in pins) {
+                    val check = Leases.checkListing(listed, pin, nonce, deviceId ?: "")
+                    leaseChecks[pin.id] = if (check.accepted) {
+                        val named = Leases.listedStatuses(check, pin)
+                        LeaseNodeCheck.Confirmed(checkedAt, named.count { Leases.isLive(it.state) }, named.count { it.state == "pending" })
+                    } else {
+                        LeaseNodeCheck.Unconfirmed
+                    }
+                }
                 leaseNotice = false
             } catch (e: Exception) {
                 // No reply at all: nothing was confirmed with any node.
-                unconfirmedLeaseNodes.clear()
-                unconfirmedLeaseNodes.addAll(storage.nodes.map { it.name })
+                for (pin in storage.nodes) leaseChecks[pin.id] = LeaseNodeCheck.Unconfirmed
                 fail(e)
             } finally {
                 isLoadingLeases = false
@@ -988,7 +1008,7 @@ class AppModel(context: Context) {
         pending.clear()
         closeLiveLease()
         runningLeases.clear()
-        unconfirmedLeaseNodes.clear()
+        leaseChecks.clear()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
         decidingLease.clear()
@@ -2057,7 +2077,7 @@ class AppModel(context: Context) {
         answeredTokens.clear()
         closeLiveLease()
         runningLeases.clear()
-        unconfirmedLeaseNodes.clear()
+        leaseChecks.clear()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
         decidingLease.clear()

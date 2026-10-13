@@ -31,6 +31,8 @@ import androidx.compose.ui.unit.dp
 import com.example.kinglouie.protocol.AppMode
 import com.example.kinglouie.protocol.Display
 import com.example.kinglouie.protocol.Leases
+import java.text.DateFormat
+import java.util.Date
 
 // Fleet stage 5 §3.10 on this phone (owner rulings R-F5-1, R-F5-5, R-F5-6):
 // nothing on these screens runs by itself. The model is called only from a
@@ -52,11 +54,23 @@ fun LeaseRequests(model: AppModel, open: (AppModel.LeaseRequestItem) -> Unit) {
         if (model.mode == AppMode.LIVE) {
             OutlinedButton({ model.refreshLeases() }, enabled = !model.isLoadingLeases) { Text(if (model.isLoadingLeases) "Checking…" else "Check for computer-use requests") }
         }
-        // R-F5-20: a paired computer this phone got no signed answer from about computer
-        // use, the last time the owner tapped. Said as such; never left to look like
-        // "nothing is running". Nothing here asks again by itself (R-F5-1, R-F5-5).
-        for (name in model.unconfirmedLeaseNodes) Text(Leases.couldNotConfirm(name), color = WARNING, fontWeight = FontWeight.Bold)
-        if (model.unconfirmedLeaseNodes.isNotEmpty()) Text(Leases.COULD_NOT_CONFIRM_DETAIL + " Tap the button above to ask again.", color = WARNING)
+        // R-F5-20, and the fourth security review's finding 2: what this phone knows of each
+        // paired computer, said as what it is. Not asked yet (nothing has been checked, which
+        // is not "nothing is running"); checked, with the time and what the computer listed;
+        // or no signed answer the last time the owner tapped. Nothing here asks by itself
+        // (R-F5-1, R-F5-5).
+        if (model.mode == AppMode.LIVE) {
+            for (pin in model.nodes) {
+                when (val check = model.leaseChecks[pin.id]) {
+                    null -> Text(Leases.notCheckedYet(pin.name))
+                    is AppModel.LeaseNodeCheck.Confirmed ->
+                        Text(Leases.checked(pin.name, DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(check.atMs)), check.running, check.waiting))
+                    is AppModel.LeaseNodeCheck.Unconfirmed -> Text(Leases.couldNotConfirm(pin.name), color = WARNING, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (model.nodes.any { model.leaseChecks[it.id] == null }) Text(Leases.NOT_CHECKED_YET_DETAIL + " Tap the button above to ask.")
+            if (model.nodes.any { model.leaseChecks[it.id] is AppModel.LeaseNodeCheck.Unconfirmed }) Text(Leases.COULD_NOT_CONFIRM_DETAIL + " Tap the button above to ask again.", color = WARNING)
+        }
         for (item in model.leaseRequests) {
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text(Display.escape(item.nodeName), fontWeight = FontWeight.Bold)

@@ -273,10 +273,55 @@ final class AppModel: ObservableObject {
     @Published var liveLease: LiveLease?
     /// Leases a pinned node listed as running that are not the one on the live screen (R-F5-18).
     @Published var runningLeases: [RunningLease] = []
-    /// Pinned nodes the last listing brought no answer from that this phone
-    /// could accept (owner ruling R-F5-20): no listing, or one that did not
-    /// check. Shown as "Could not confirm with …", never as nothing running.
-    @Published var unconfirmedLeaseNodes: [NodePin] = []
+    /// What this phone knows about computer use on one pinned node (owner
+    /// ruling R-F5-20; fourth security review, finding 2). Three things can
+    /// be true, and each is shown as what it is: nothing asked yet (no entry
+    /// in `leaseChecks`); a listing the node signed for this phone's own
+    /// request, accepted at `at` by this phone's clock, with what it listed;
+    /// or a request that brought no listing this phone could accept.
+    enum LeaseNodeCheck: Equatable {
+        case confirmed(at: Date, running: Int, waiting: Int)
+        case unconfirmed
+    }
+
+    /// One pinned node and what is known of it; `check` nil: not asked yet.
+    struct LeaseCheckRow: Identifiable {
+        let id: String
+        let nodeName: String
+        let check: LeaseNodeCheck?
+    }
+
+    /// Per pinned node id. An entry is written only by `refreshLeases`, from
+    /// a listing it checked or a request that failed. A session that is
+    /// locked asks nothing and changes nothing here: a node confirmed
+    /// earlier keeps the time it was confirmed at, which the row shows.
+    @Published var leaseChecks: [String: LeaseNodeCheck] = [:]
+
+    /// Every pinned node, with what is known of it.
+    var leaseCheckRows: [LeaseCheckRow] {
+        guard mode == .live else { return [] }
+        return state.nodes.map { LeaseCheckRow(id: $0.id, nodeName: $0.name, check: leaseChecks[$0.id]) }
+    }
+
+    /// The nodes no accepted listing came from: the banner's warning rows.
+    var unconfirmedLeaseRows: [LeaseCheckRow] { leaseCheckRows.filter { $0.check == .unconfirmed } }
+
+    /// The nodes not asked yet, or confirmed: said in the Computer use section.
+    var leaseStatusRows: [LeaseCheckRow] { leaseCheckRows.filter { $0.check != .unconfirmed } }
+
+    /// A row's words. A confirmed row always carries its time (and its date
+    /// when that was not today), so an old answer never reads as current.
+    func leaseCheckText(_ row: LeaseCheckRow) -> String {
+        switch row.check {
+        case .none:
+            return Leases.notCheckedYet(nodeName: row.nodeName)
+        case .some(.confirmed(let at, let running, let waiting)):
+            let time = at.formatted(date: Calendar.current.isDateInToday(at) ? .omitted : .abbreviated, time: .shortened)
+            return Leases.checked(nodeName: row.nodeName, at: time, running: running, waiting: waiting)
+        case .some(.unconfirmed):
+            return Leases.couldNotConfirm(nodeName: row.nodeName)
+        }
+    }
     /// Whether the live lease sheet is presented (the banner owns the sheet).
     @Published var showLiveLease = false
     /// Whether the live lease view is on screen with the app in front
@@ -332,12 +377,26 @@ final class AppModel: ObservableObject {
             // this phone, complete, or no answer. This phone cannot tell a node
             // that is off, slow or older from a relay that kept its answer back,
             // so every one of those is "could not confirm".
-            unconfirmedLeaseNodes = state.nodes.filter { !Leases.checkListing(entries, pin: $0, nonce: nonce, deviceId: key.deviceId).accepted }
+            // An accepted listing is "confirmed", with the time this phone
+            // accepted it and what the node listed; nothing else is.
+            let checkedAt = Date()
+            var checks: [String: LeaseNodeCheck] = [:]
+            for pin in state.nodes {
+                let check = Leases.checkListing(entries, pin: pin, nonce: nonce, deviceId: key.deviceId)
+                guard check.accepted else { checks[pin.id] = .unconfirmed; continue }
+                let listed = Leases.listedStatuses(check, pin: pin)
+                checks[pin.id] = .confirmed(at: checkedAt, running: listed.filter { Leases.isLive(state: $0.state) }.count,
+                                            waiting: listed.filter { $0.state == "pending" }.count)
+            }
+            leaseChecks = checks
         } catch is SessionLocked {
-            // The session lapsed: quiet; the owner can pull to refresh.
+            // The session lapsed: quiet; the owner can pull to refresh. Nothing
+            // was asked, so what is shown stays as it was, with its time.
         } catch {
             // No reply at all: nothing was confirmed with any node.
-            unconfirmedLeaseNodes = state.nodes
+            var none: [String: LeaseNodeCheck] = [:]
+            for pin in state.nodes { none[pin.id] = .unconfirmed }
+            leaseChecks = none
             fail(error)
         }
     }
@@ -874,7 +933,7 @@ final class AppModel: ObservableObject {
         pending = []
         closeLiveLease()
         runningLeases = []
-        unconfirmedLeaseNodes = []
+        leaseChecks = [:]
         showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []
@@ -1854,7 +1913,7 @@ final class AppModel: ObservableObject {
         answeredTokens = []
         closeLiveLease()
         runningLeases = []
-        unconfirmedLeaseNodes = []
+        leaseChecks = [:]
         showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []

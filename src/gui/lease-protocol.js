@@ -197,6 +197,34 @@ function buildLeaseListing({ identity, toDevice, nonce, statuses = [], now = Dat
   }, nodeSigner(identity));
 }
 
+// An enrolled, real, unrevoked device of this node; false when that cannot be read.
+function isEnrolledDevice(approverStore, deviceId) {
+  try {
+    const record = typeof deviceId === 'string' && approverStore ? approverStore.get(deviceId) : null;
+    return Boolean(record) && record.platform !== 'demo' && approverStore.isActive(deviceId) === true;
+  } catch {
+    return false;
+  }
+}
+
+// R-F5-20 (fourth security review, finding 2): the `lease.list` answer of a
+// node on which computer use is off: a runbook node, or an agent node whose
+// GUI is not enabled, has no helper installed, has no administrator's record
+// of its identity, or could not be built. Such a node holds no lease manager,
+// so no lease can be live on it, and "nothing to list" is true; it signs
+// that over the phone's nonce like any other node. Without this the node had
+// no `lease.list` at all, and its phones said "Could not confirm" for ever
+// about a node that was up. A host registers this only where no lease
+// manager exists (run.js); a node with one answers from it. As there: no
+// listing without a well-formed nonce, and nothing for a device that is not
+// enrolled here.
+function offLeaseListing({ identity, approverStore, clock = Date.now }) {
+  return async ({ device_id: deviceId, nonce } = {}) => {
+    if (!isEnrolledDevice(approverStore, deviceId) || typeof nonce !== 'string' || !NONCE_RE.test(nonce)) return { statuses: [] };
+    return { statuses: [], listing: buildLeaseListing({ identity, toDevice: deviceId, nonce, statuses: [], now: clock() }) };
+  };
+}
+
 const reject = (reason) => ({ accepted: false, check: CHECK_OF[reason] || null, reason });
 const sameList = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -319,6 +347,6 @@ function effectiveExpiry({ verifiedAt, minutes, resumeOf = null }) {
 
 module.exports = {
   LEASE_LIMITS, STATES, REQUEST_TTL_MS, VIEW_MAX_BYTES, CHECK_OF, CONTACT_TOKEN_RE, LISTING_MAX, LIST_NONCE_RE: NONCE_RE, newContactToken,
-  leaseHash, buildLeaseRequest, buildLeaseStatus, buildLeaseView, buildLeaseListing,
+  leaseHash, buildLeaseRequest, buildLeaseStatus, buildLeaseView, buildLeaseListing, isEnrolledDevice, offLeaseListing,
   verifyLeaseGrant, verifyLeaseRevoke, verifyLeaseWatch, verifyLeaseView, verifyLeaseListing, effectiveExpiry
 };

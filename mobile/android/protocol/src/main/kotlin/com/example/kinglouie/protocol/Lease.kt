@@ -319,6 +319,33 @@ object Leases {
     /** Under those rows: what it means and what it does not. */
     const val COULD_NOT_CONFIRM_DETAIL = "No signed answer about computer use came from there. It may be off or out of reach, or the relay may be keeping its answer back. A lease could be running."
 
+    /**
+     * What a phone says of a pinned node it has not asked yet (fourth
+     * security review, finding 2). Not "nothing is running": nothing has
+     * been checked.
+     */
+    fun notCheckedYet(nodeName: String): String = "Not checked yet: ${Display.escape(nodeName)}"
+
+    /** Under those rows. */
+    const val NOT_CHECKED_YET_DETAIL = "This phone has not asked there about computer use yet, so it does not know whether a session is running."
+
+    /**
+     * What a phone says of a pinned node whose listing it accepted
+     * ([checkListing]), and only of such a node: [time] is when this phone
+     * accepted it, by its own clock, so an old answer never reads as a
+     * current one. [running] counts the leases it listed that are live,
+     * [waiting] those still waiting for a phone's answer.
+     */
+    fun checked(nodeName: String, time: String, running: Int, waiting: Int): String {
+        val sessions = if (running == 0) "no computer-use session" else if (running == 1) "1 computer-use session running" else "$running computer-use sessions running"
+        val requests = if (waiting == 0) "" else if (waiting == 1) "; 1 request waiting for an answer" else "; $waiting requests waiting for an answer"
+        return "Checked ${Display.escape(nodeName)} at $time: $sessions$requests"
+    }
+
+    /** The statuses an accepted listing names, read. None for a listing that was not accepted: such a listing says nothing. */
+    fun listedStatuses(check: ListingCheck, pin: NodePin): List<LeaseStatus> =
+        if (!check.accepted) emptyList() else check.statuses.mapNotNull { envelope -> verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it) } }
+
     /** A node-signed message whose signature, kid and node_id are all the pinned node's; null otherwise. */
     fun verifiedMessage(envelope: Envelope, pin: NodePin): JsonObject? {
         if (envelope.alg != "Ed25519" || envelope.kid != pin.id || !envelope.verifyEd25519(pin.key)) return null

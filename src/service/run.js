@@ -70,6 +70,20 @@ function checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, co
   return { identity, record };
 }
 
+// R-F5-20 (fourth security review, finding 2): a node on which computer use
+// is off still answers a phone's "what is running" with a listing it signs:
+// nothing. Registered only where no lease manager exists (`gui` null, or a
+// subsystem that is off), so no lease can be live and the answer is true; a
+// node with a lease manager answers from it (src/gui/index.js). A node with
+// no relay link has nobody to answer.
+function answerLeaseListsWithNone(approvals, gui = null) {
+  if (gui && gui.leases) return false;
+  const relay = approvals && approvals.relayClient;
+  if (!relay || typeof relay.registerMethod !== 'function' || !approvals.identity) return false;
+  relay.registerMethod('lease.list', require('../gui/lease-protocol').offLeaseListing({ identity: approvals.identity, approverStore: approvals.approverStore }));
+  return true;
+}
+
 // Each profile is required lazily so the runbook profile never loads the agent stack.
 function loadProfile(profile) {
   if (profile === 'agent') {
@@ -143,6 +157,8 @@ function loadProfile(profile) {
           await approvals.stop().catch(() => {});
           throw err;
         }
+        // R-F5-20: with computer use off, this node still tells its phones so.
+        answerLeaseListsWithNone(approvals, gui);
         try {
           // createCore itself can throw synchronously (bad deps, a bad
           // phoneApprover.ttlMs, …), not just its start() — both go in the
@@ -278,6 +294,10 @@ function loadProfile(profile) {
           dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
           nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }, identity: recordedIdentity.identity
         });
+        // R-F5-20: a runbook node never runs computer use, and says so to a
+        // phone that asks (the one file of src/gui/ this profile loads for it
+        // is lease-protocol.js, which holds no agent code).
+        answerLeaseListsWithNone(approvals);
         let fleet;
         try {
           const { startFleetNode } = require('../fleet/start');
@@ -414,4 +434,4 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
   }
 }
 
-module.exports = { runService, loadProfile, assertEnabledListenersBound };
+module.exports = { runService, loadProfile, assertEnabledListenersBound, answerLeaseListsWithNone };

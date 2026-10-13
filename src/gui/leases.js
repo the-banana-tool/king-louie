@@ -812,13 +812,7 @@ class LeaseManager extends EventEmitter {
 
   // An enrolled, real, unrevoked device of this node; false when that cannot be read.
   _enrolled(deviceId) {
-    try {
-      const store = this.approvals.approverStore;
-      const record = typeof deviceId === 'string' && store ? store.get(deviceId) : null;
-      return Boolean(record) && record.platform !== 'demo' && store.isActive(deviceId) === true;
-    } catch {
-      return false;
-    }
+    return L.isEnrolledDevice(this.approvals.approverStore, deviceId);
   }
 
   // R-F5-18: what a phone asks for when it opens (one signed request to the

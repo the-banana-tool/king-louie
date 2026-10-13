@@ -9,7 +9,7 @@ struct LeaseRequestsSection: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        if !model.leaseRequests.isEmpty {
+        if !model.leaseRequests.isEmpty || !model.leaseStatusRows.isEmpty {
             Section("Computer use") {
                 ForEach(model.leaseRequests) { item in
                     NavigationLink { LeaseRequestView(item: item) } label: {
@@ -19,6 +19,16 @@ struct LeaseRequestsSection: View {
                             Text("Job \(Display.escape(item.request.jobId)) · \(Display.escape(item.request.originClient))").font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                }
+                // Fourth security review, finding 2: what this phone knows of
+                // each paired computer, said as what it is. Not asked yet is
+                // not "nothing running"; a checked one carries its time. (A
+                // computer that could not be confirmed is in the banner.)
+                ForEach(model.leaseStatusRows) { row in
+                    Text(model.leaseCheckText(row)).font(.caption).foregroundStyle(.secondary)
+                }
+                if model.leaseStatusRows.contains(where: { $0.check == nil }) {
+                    Text(Leases.notCheckedYetDetail).font(.caption2).foregroundStyle(.secondary)
                 }
             }
         }
@@ -196,10 +206,10 @@ struct LeaseBanner: View {
             // R-F5-20: a paired computer this phone got no signed answer from
             // about computer use. Said as such; never left to look like
             // "nothing is running".
-            if !model.unconfirmedLeaseNodes.isEmpty {
+            if !model.unconfirmedLeaseRows.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(model.unconfirmedLeaseNodes, id: \.id) { node in
-                        Text(Leases.couldNotConfirm(nodeName: node.name)).font(.caption.bold())
+                    ForEach(model.unconfirmedLeaseRows) { row in
+                        Text(model.leaseCheckText(row)).font(.caption.bold())
                     }
                     Text(Leases.couldNotConfirmDetail).font(.caption2).foregroundStyle(.secondary)
                 }

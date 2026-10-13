@@ -1,6 +1,6 @@
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
-const { assertEnabledListenersBound } = require('../src/service/run');
+const { assertEnabledListenersBound, answerLeaseListsWithNone } = require('../src/service/run');
 const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 // createCore treats a failed listener bind as non-fatal on purpose (it only
@@ -57,6 +57,31 @@ describe('assertEnabledListenersBound', () => {
 // down first deleted the shared pidfile, after which `status` reported "not
 // running" for a live service. With the default feature set no listener binds,
 // so a port clash never caught it.
+// R-F5-20 (fourth security review, finding 2): a node with computer use off
+// still answers lease.list, with a listing that names nothing.
+describe('answerLeaseListsWithNone', () => {
+  const identity = { nodeId: 'kl-test', publicKey: Buffer.alloc(0) };
+  const relay = () => { const methods = new Map(); return { methods, registerMethod: (name, fn) => methods.set(name, fn) }; };
+
+  it('registers lease.list where there is no lease manager, and leaves a node that has one alone', async () => {
+    const off = relay();
+    assert.strictEqual(answerLeaseListsWithNone({ relayClient: off, identity, approverStore: { get: () => null } }, null), true);
+    assert.deepStrictEqual([...off.methods.keys()], ['lease.list']);
+    assert.deepStrictEqual(await off.methods.get('lease.list')({ device_id: 'd-aaaaaaaaaaaaaaaa', nonce: 'n'.repeat(43) }), { statuses: [] }, 'a device this node does not know gets nothing');
+    // A subsystem that is off (no lease manager): the same.
+    const unavailable = relay();
+    assert.strictEqual(answerLeaseListsWithNone({ relayClient: unavailable, identity, approverStore: null }, { unavailable: { reason: 'x' }, leases: null }), true);
+    assert.strictEqual(unavailable.methods.size, 1);
+    // A lease manager answers for itself (src/gui/index.js registered it).
+    const on = relay();
+    assert.strictEqual(answerLeaseListsWithNone({ relayClient: on, identity, approverStore: null }, { leases: {} }), false);
+    assert.strictEqual(on.methods.size, 0);
+    // No relay link, or no identity: nobody to answer, nothing to sign with.
+    assert.strictEqual(answerLeaseListsWithNone({ relayClient: null, identity }, null), false);
+    assert.strictEqual(answerLeaseListsWithNone({ relayClient: relay(), identity: null }, null), false);
+  });
+});
+
 describe('acquireInstanceLock', () => {
   const fs = require('fs');
   const os = require('os');
@@ -588,6 +613,82 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
       }
       assert.deepStrictEqual(order, ['gui', 'fleet', 'approvals'], 'the GUI stops first, approvals last');
       assert.strictEqual(running.gui.channel.server, null, 'the helper channel is closed');
+    });
+
+    // R-F5-20 (fourth security review, finding 2): every node with an
+    // identity and the relay link answers lease.list. With computer use off
+    // (not enabled, no helper, no record of the identity; a runbook node) it
+    // signs "nothing"; a node with a lease manager answers from that.
+    it('(i) R-F5-20: a node with computer use off still answers lease.list; an agent node with a lease manager answers from it', async () => {
+      const { EventEmitter } = require('events');
+      const P = require('../src/gui/lease-protocol');
+      const W = require('../src/approvals/service-wiring');
+      const realOff = P.offLeaseListing;
+      const realStart = W.startApprovals;
+      const made = [];
+      const links = [];
+      P.offLeaseListing = (options) => { made.push(options.identity.nodeId); return realOff(options); };
+      // These temp nodes are paired with no relay, so approvals come back
+      // with no link. Give each one a link that records what is registered.
+      W.startApprovals = async (options) => {
+        const approvals = await realStart(options);
+        const link = Object.assign(new EventEmitter(), {
+          methods: new Map(), registerMethod(name, fn) { this.methods.set(name, fn); }, isConnected: () => false,
+          send: async () => { throw new Error('no relay in this test'); }, notify() {}, onMessage() {}
+        });
+        links.push(link);
+        return { ...approvals, relayClient: link };
+      };
+      const NONCE = 'n'.repeat(43);
+      try {
+        // Not enabled in node.yaml, and no helper installed.
+        const a = liveDataDir();
+        const off = await start(a.dataDir, a.workspace, adminDir({ enabled: false }));
+        try {
+          assert.strictEqual(off.gui, null);
+          assert.deepStrictEqual(made, [off.approvals.identity.nodeId]);
+          assert.deepStrictEqual([...links[0].methods.keys()].filter((m) => m.startsWith('lease.')), ['lease.list']);
+          assert.deepStrictEqual(await links[0].methods.get('lease.list')({ device_id: 'd-aaaaaaaaaaaaaaaa', nonce: NONCE }), { statuses: [] }, 'nothing for a device that is not enrolled here');
+        } finally {
+          await off.stop();
+        }
+        // Enabled and installed, but no administrator's record: a subsystem that is off.
+        const b = liveDataDir();
+        const bConfig = adminDir();
+        installHelper(b.dataDir, bConfig, { record: false });
+        const unrecorded = await start(b.dataDir, b.workspace, bConfig);
+        try {
+          assert.strictEqual(unrecorded.gui.unavailable.reason, 'node_identity_unrecorded');
+          assert.deepStrictEqual(made.slice(1), [unrecorded.approvals.identity.nodeId]);
+          assert.deepStrictEqual([...links[1].methods.keys()].filter((m) => m.startsWith('lease.')), ['lease.list']);
+        } finally {
+          await unrecorded.stop();
+        }
+        // On: the lease manager's own lease.list is the one registered; nothing is put over it.
+        const c = liveDataDir();
+        const cConfig = adminDir();
+        installHelper(c.dataDir, cConfig);
+        const on = await start(c.dataDir, c.workspace, cConfig);
+        try {
+          assert.ok(on.gui && on.gui.leases, 'computer use is on');
+          assert.strictEqual(made.length, 2);
+          assert.deepStrictEqual([...links[2].methods.keys()].filter((m) => m.startsWith('lease.')), ['lease.grant', 'lease.revoke', 'lease.watch', 'lease.list']);
+        } finally {
+          await on.stop();
+        }
+        // A runbook node never runs computer use, and says so.
+        const d = liveDataDir();
+        const runbook = await loadProfile('runbook').start({ dataDir: d.dataDir, configDir: adminDir({ enabled: false }), adminUid: UID, deps: { identityRecord: IDENTITY_RECORD_TEST_OPTIONS } });
+        try {
+          assert.deepStrictEqual(made.slice(2), [runbook.approvals.identity.nodeId]);
+          assert.ok(links[3].methods.has('lease.list'));
+        } finally {
+          await runbook.stop();
+        }
+      } finally {
+        P.offLeaseListing = realOff;
+        W.startApprovals = realStart;
+      }
     });
 
     // R-F5-17 (owner ruling, built 2026-10-13): the service holds the

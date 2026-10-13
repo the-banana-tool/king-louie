@@ -60,9 +60,10 @@ can see:
   phone's device id, signed, also when the list is empty. The number says
   nothing else; it is how your phone knows the answer was made for this
   request and is complete, so the relay cannot leave a running lease out
-  unnoticed. The relay can still keep a node's whole answer back; your
-  phone then says "Could not confirm with" that node instead of showing
-  nothing;
+  unnoticed. A node on which computer use is switched off answers as well,
+  with an empty list. The relay can still keep a node's whole answer back;
+  your phone then says "Could not confirm with" that node instead of
+  showing nothing, and for a node that did answer it shows when it checked;
 - while a phone watches a lease, **pictures of the leased app's window with
   everything on it**, and the list of what the agent did there. The list
   never holds text the agent typed: a typed text appears as its length only
