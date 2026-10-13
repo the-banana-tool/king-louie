@@ -25,6 +25,19 @@
 
 Nothing that lets an owner set a scope or import a file reaches `main` before Task 8 (the scope policy): merge steps A to C(iii) as one stage, or keep the branch unmerged until Task 8 is in.
 
+## Deviations
+
+Where the code as built differs from a task's text. Added by each task's implementer in the task's own commit.
+
+**Task 1**
+
+- **Tests changed outside the task's file list.** Step 4 is the first step added since these were written, and each of them rebuilt an older file by hand: `tests/helpers/history-fixture.js` (`downgradeToVersion1` now drops `imports` and `chat_links` too, or the reopened store fails on `CREATE TABLE chat_links`), `tests/history-embeddings-store.test.js` (its own downgrade to version 2 drops the two tables; the version it asserts is 4) and `tests/history-index.test.js` (the version it asserts is 4; the file is otherwise Task 2's). No assertion was weakened.
+- **`getLinks` and `setLinks` return list order**, as the interface says, so `setLinks('a', ['c', 'b'])` returns `['b', 'c']` when `b` is above `c` in the chat list. Step 1's `['b', 'c']` example holds because the test seeds the chats in that list order (`seedChat` puts a new chat at the front).
+- **`chatRefs` and `chatRef` work on a store that is not `linkable`** (they read `chats` only, which every schema version has). A ref's `caseId` and `source` fall back to `meta_json` when the value was not a string (`rows.js` keeps such a value there), so a chat whose `caseId` is truthy on the chat object is never a non-case chat to the policy.
+- **On a read-only store the writing methods answer and do not throw**: `setHistoryScope` false, `setLinks` `[]`, `recordImport` null, `finishImport` false. `setHistoryScope` still throws `RangeError` for a value outside the three on a writable store, whether or not the chat exists.
+- **`recordImport` validates more than the text says**: `id`, `sourceKind`, `sourceHash` and `chatId` must be non-empty strings (`TypeError`), `state` one of `running`, `done` (`RangeError`); a chat that does not exist fails the foreign key.
+- **`rowToChat` also drops a `historyScope` found in `meta_json`**, so a value written there by hand or by an older build is never read back as if it were the chat's scope.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named).

@@ -9,6 +9,7 @@ const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const chunkIndex = require('./chunk-index');
 const embeddingIndex = require('./embedding-index');
+const linkIndex = require('./link-index');
 const { insertChunks, readBackfill, writeBackfill, clearBackfill } = chunkIndex;
 const { applySchema, currentVersion, latestVersion, SchemaVersionError } = require('./schema');
 const rows = require('./rows');
@@ -20,6 +21,8 @@ const BUSY_TIMEOUT_MS = 5000;
 const INDEX_SCHEMA_VERSION = 2;
 // The schema step that adds the embeddings table.
 const EMBEDDINGS_SCHEMA_VERSION = 3;
+// The schema step that adds chat links and import records.
+const LINKS_SCHEMA_VERSION = 4;
 
 const PREVIEW_CHARS = 500;
 const normalizeId = (value) => String(value ?? '').trim();
@@ -110,6 +113,13 @@ class HistoryStore {
   // False for a read-only store opened below schema 3.
   get embeddable() {
     return this.schemaVersion >= EMBEDDINGS_SCHEMA_VERSION;
+  }
+
+  // False for a read-only store opened below schema 4: it has no links and
+  // no import records, and its scope, link and import methods answer with
+  // the neutral value ('chat', [], null, false) and never throw.
+  get linkable() {
+    return this.schemaVersion >= LINKS_SCHEMA_VERSION;
   }
 
   // fn(chatId, seq) after each appendMessage has committed its message and
@@ -563,6 +573,50 @@ class HistoryStore {
     const removed = embeddingIndex.deleteEmbeddings(this.db, model);
     this._bumpVectorEpoch();
     return removed;
+  }
+
+  // Recall stage H4 (spec §3.2, §4.1). A chat's history scope and its links
+  // say which chats its turns may read; both are set only by the owner's own
+  // action, never from a chat object (rows.js drops historyScope). Neither
+  // moves a vector, so neither bumps vectorEpoch.
+  getHistoryScope(chatId) {
+    const id = normalizeId(chatId);
+    return this.linkable && id ? linkIndex.getHistoryScope(this.db, id) : linkIndex.DEFAULT_SCOPE;
+  }
+  setHistoryScope(chatId, scope) {
+    const id = normalizeId(chatId);
+    if (!this.linkable || this.readonly) return false;
+    // An invalid scope throws even for an unknown chat.
+    return linkIndex.setHistoryScope(this.db, id, scope);
+  }
+  // Linked chat ids in the chat list's order (one-directional).
+  getLinks(chatId) {
+    const id = normalizeId(chatId);
+    return this.linkable && id ? linkIndex.getLinks(this.db, id) : [];
+  }
+  setLinks(chatId, ids) {
+    const id = normalizeId(chatId);
+    if (!this.linkable || this.readonly || !id) return [];
+    return this.transaction((db) => linkIndex.setLinks(db, id, ids));
+  }
+  // { id, title, caseId, source, origin, importedFromCase } for every chat in
+  // list order; no message is read. Works on any schema version.
+  chatRefs() { return linkIndex.chatRefs(this.db); }
+  chatRef(chatId) {
+    const id = normalizeId(chatId);
+    return id ? linkIndex.chatRef(this.db, id) : null;
+  }
+  findImport(sourceHash) { return this.linkable ? linkIndex.findImport(this.db, sourceHash) : null; }
+  getImport(id) { return this.linkable ? linkIndex.getImport(this.db, id) : null; }
+  unfinishedImports() { return this.linkable ? linkIndex.unfinishedImports(this.db) : []; }
+  // Throws when the hash is already recorded or the chat does not exist.
+  recordImport(record = {}) {
+    if (!this.linkable || this.readonly) return null;
+    return linkIndex.recordImport(this.db, { ...record, importedAt: record.state === 'done' ? this._now() : null });
+  }
+  finishImport(id, { messageCount = null } = {}) {
+    if (!this.linkable || this.readonly) return false;
+    return linkIndex.finishImport(this.db, id, { messageCount, importedAt: this._now() });
   }
 
   _messagesFor(chatId, { fromSeq = 1, toSeq = Number.MAX_SAFE_INTEGER, limit = -1 } = {}) {

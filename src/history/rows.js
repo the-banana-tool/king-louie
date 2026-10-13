@@ -4,6 +4,10 @@
 // fits; every other field goes to meta_json, so what is written reads back
 // equal (a message gains seq). Pure functions: no database here.
 
+// A chat's history scope is the chats.history_scope column, written only by
+// HistoryStore#setHistoryScope (the owner's own action). It is never taken
+// from a chat object (an import, an export, a patch) and never read into one.
+const STORE_ONLY_CHAT_KEYS = Object.freeze(['historyScope']);
 const DERIVED_CHAT_KEYS = Object.freeze([
   'messageCount', 'userMessageCount', 'assistantMessageCount', 'preview', 'lastMessageText', 'lastMessageAt'
 ]);
@@ -43,6 +47,7 @@ function chatToRow(chat = {}) {
   const meta = {};
   for (const [key, value] of Object.entries(chat || {})) {
     if (value === undefined || key === 'id' || key === 'messages' || DERIVED_CHAT_KEYS.includes(key)) continue;
+    if (STORE_ONLY_CHAT_KEYS.includes(key)) continue;
     const textColumn = CHAT_TEXT_COLUMNS[key];
     if (textColumn && isString(value)) { row[textColumn] = value; continue; }
     const flagColumn = CHAT_FLAG_COLUMNS[key];
@@ -62,6 +67,7 @@ function rowToChat(row) {
     if (present(row[column])) chat[key] = Number(row[column]) === 1;
   }
   if (row.meta_json) Object.assign(chat, JSON.parse(row.meta_json));
+  for (const key of STORE_ONLY_CHAT_KEYS) delete chat[key];
   return chat;
 }
 

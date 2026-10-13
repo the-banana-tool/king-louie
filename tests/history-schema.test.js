@@ -39,6 +39,8 @@ describe('history schema steps', () => {
     assert.strictEqual(applySchema(db, SCHEMA_STEPS), 1, 'a second run changes nothing');
     assert.deepStrictEqual(db.prepare('SELECT version FROM schema_version').all().map((r) => r.version), [1]);
     assert.strictEqual(latestVersion(), ALL_STEPS.length);
+    assert.strictEqual(latestVersion(), 4);
+    assert.deepStrictEqual(ALL_STEPS.map((s) => s.version), [1, 2, 3, 4]);
     db.close();
   });
 

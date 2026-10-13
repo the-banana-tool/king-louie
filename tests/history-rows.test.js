@@ -108,6 +108,14 @@ describe('chat rows', () => {
     assert.deepStrictEqual(rowToChat({ ...chatToRow(chat), id: 'c3' }), chat);
   });
 
+  it('never takes historyScope from a chat object, and never reads one back', () => {
+    assert.strictEqual(chatToRow({ title: 't', historyScope: 'all' }).meta_json, null);
+    assert.deepStrictEqual(
+      rowToChat({ ...chatToRow({ title: 't' }), id: 'c5', meta_json: '{"historyScope":"all","profileId":"p-a"}' }),
+      { id: 'c5', title: 't', profileId: 'p-a' }
+    );
+  });
+
   it('reads a chat without a title back with an empty one', () => {
     assert.deepStrictEqual(rowToChat({ ...chatToRow({ id: 'c4' }), id: 'c4' }), { id: 'c4', title: '' });
   });

@@ -2,12 +2,13 @@
 // The history store's schema as ordered steps (recall spec 2026-09-25 §4.1).
 // Each step runs once, in its own transaction, and bumps schema_version.
 // Later stages append { version: N, up(db) }; never edit a released step.
-// Stage H1 creates only the tables it uses; chunks, FTS, embeddings, links,
-// imports and calibration arrive as later steps (H2: chunks, FTS and
-// calibration; H3: embeddings).
+// Stage H1 creates only the tables it uses; the rest arrive as later steps
+// (H2: chunks, FTS and calibration; H3: embeddings; H4: chat links and
+// imports).
 
 const { SCHEMA_V2_SQL, writeBackfill } = require('./chunk-index');
 const { SCHEMA_V3_SQL } = require('./embedding-index');
+const { SCHEMA_V4_SQL } = require('./link-index');
 
 const SCHEMA_STEPS = [
   {
@@ -85,6 +86,15 @@ const SCHEMA_STEPS = [
     version: 3,
     up(db) {
       db.exec(SCHEMA_V3_SQL);
+    }
+  },
+  // Recall stage H4: which chats a chat may read (chat_links) and what was
+  // imported from where (imports) (spec §4.1). chats.history_scope has been
+  // there since step 1; this is the first step whose code reads it.
+  {
+    version: 4,
+    up(db) {
+      db.exec(SCHEMA_V4_SQL);
     }
   }
 ];
