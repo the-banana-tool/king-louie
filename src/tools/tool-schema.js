@@ -38,6 +38,12 @@ class Tool {
     // conversation (`_images` in its result); ToolExecutor drops them for
     // every other tool.
     this.emitsImages = config.emitsImages === true;
+    // A tool whose parameters must not be audited as they are (Type and Key:
+    // the text and the keys, owner ruling R-F5-16) gives the form that may
+    // be: ToolExecutor hands it to whoever audits a tier decision, and the
+    // hash in that entry is taken over it. Every other tool has none, and
+    // its parameters are hashed as called.
+    this.auditParameters = typeof config.auditParameters === 'function' ? config.auditParameters : null;
   }
 
   toFunctionDefinition() {

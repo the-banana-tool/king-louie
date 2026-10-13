@@ -64,6 +64,19 @@ can see:
   tap Refresh; the node then keeps sending pictures for up to a minute,
   although the app loads only the first to arrive and waits at most five
   seconds for it;
+- each node's audit history (the slices you open, and the copy a relay keeps
+  when it mirrors a node's ledger). For computer use an entry holds the job
+  and lease ids, the tool, the app in front before and after (its path and
+  process id), and the result. It never holds what was typed: a `Type` entry
+  holds the length of the text and nothing else (no hash of it: a plain hash
+  of a short text gives the text to anyone who guesses it), and a `Key` entry
+  names the key only when it is not text ("ctrl+s", "enter"); a key that
+  types a character is "(a character)". The same holds for the hash of a
+  call's parameters that the node records with each tool call: for `Type`
+  and `Key` it is taken over that reduced form, never over the text or the
+  key. Launches are recorded with the program, its arguments and files;
+  screenshots with the app, a number and the picture's hash, never the
+  picture;
 - your devices' names, platforms and public keys, which nodes they approve
   for, and their push tokens;
 - the network addresses your phone and nodes connect from.

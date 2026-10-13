@@ -609,7 +609,7 @@ gui:
 | `gui.helper.connected` / `.disconnected` / `.auth_failed` / `.replaced` | `user, platform, pid, capabilities` / `reason` / `side` (`helper` or `service`) / `old_pid, new_pid` |
 | `gui.launch` | `job_id, app_id, exe, argv, tier, approved_by` (`allowlist` or `phone`), `pid` |
 | `gui.close`, `gui.screenshot` | `job_id, app_id, pids` / `job_id, app_id, screenshot_id, sha256, bytes` |
-| `gui.input` (**one per input, refused ones included**) | `job_id, lease_id, tool, params` (`Type` → `{ length, sha256 }`, never the text), `foreground_before/after: { image, pid }, result` |
+| `gui.input` (**one per input, refused ones included**) | `job_id, lease_id, tool, params` (`Type` → `{ length }`, never the text and, since 2026-10-13, no hash of it; `Key` → `{ keys, repeat }` with `keys` named only when it is not text, else `(a character)` or `(not a key name)`), `foreground_before/after: { image, pid }, result` |
 | `lease.requested / granted / denied / rejected / suspended / resumed / revoked / expired / ended` | `job_id, lease_id, request_id, apps, minutes, device_id, check, reason` |
 | `lease.watch` | `lease_id, device_id` |
 

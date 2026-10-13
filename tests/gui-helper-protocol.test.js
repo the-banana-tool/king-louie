@@ -331,6 +331,31 @@ describe('lifetime', () => {
       (e) => e.code === 'foreground_mismatch' && e.info.image === 'C:\\Windows\\explorer.exe');
   });
 
+  // R-F5-16 (second review finding 2): a backend's own error can quote the
+  // command it ran, and for a key press that command names the key.
+  it('an input that fails in the backend is logged and answered by its code alone, never with the backend\'s message', async () => {
+    const { addSink } = require('../src/logging');
+    const logged = [];
+    const removeSink = addSink((record) => logged.push(record));
+    setLogLevel('trace');
+    try {
+      const { channel, endpoint } = await startChannel();
+      const failing = async () => { throw Object.assign(new Error('Command failed: /usr/bin/xdotool key --clearmodifiers --repeat 1 q'), { code: 1 }); };
+      await helper(endpoint, { backend: fakeBackend({ input: failing, focus: failing }) });
+      await once(channel, 'ready');
+      await assert.rejects(channel.request('input', { expect: { match: [], pids: [] }, yield_ms: 0, action: { kind: 'key', mods: [], key: 'q', repeat: 1 } }),
+        (e) => e.code === 'backend_failed' && !/xdotool/.test(e.message));
+      assert.ok(logged.some((r) => /input failed/.test(JSON.stringify(r))), 'the failure is still logged');
+      assert.ok(!JSON.stringify(logged).includes('xdotool'), 'not with the command line');
+      // Any other op keeps its message in the helper's own log: it names no key.
+      await assert.rejects(channel.request('focus', { handle: 'h1' }), (e) => e.code === 'backend_failed');
+      assert.ok(JSON.stringify(logged).includes('xdotool'));
+    } finally {
+      removeSink();
+      setLogLevel('fatal');
+    }
+  });
+
   it('the helper refuses a launch whose path moved before spawning', async () => {
     const backend = fakeBackend();
     const handle = createOpHandler(backend, { platform: process.platform });

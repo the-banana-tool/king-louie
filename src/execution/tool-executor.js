@@ -435,9 +435,22 @@ class ToolExecutor extends EventEmitter {
           && validTiers.includes(decision.tier);
         const safeDecision = wellFormed ? decision : { tier: 'denied', reason: 'invalid_classification' };
 
+        // A tool that says how its parameters may be audited (Type, Key) is
+        // audited in that form. A redactor that fails gives nothing of the
+        // parameters, never the parameters themselves.
+        let auditParameters;
+        if (typeof tool.auditParameters === 'function') {
+          try {
+            auditParameters = tool.auditParameters(effectiveParameters);
+          } catch {
+            auditParameters = { redacted: true };
+          }
+          if (auditParameters === null || typeof auditParameters !== 'object') auditParameters = { redacted: true };
+        }
         this.emit('tierDecision', {
           toolName,
           parameters: effectiveParameters,
+          ...(auditParameters === undefined ? {} : { auditParameters }),
           tier: safeDecision.tier,
           reason: safeDecision.reason || null
         });

@@ -442,7 +442,9 @@ describe('input tools', () => {
     const input = channel.requests.find((r) => r.op === 'input');
     assert.deepEqual(input.params.action, { kind: 'type', text: '12+30=' });
     const entry = audits.find((a) => a.kind === 'gui.input' && a.data.tool === 'Type');
-    assert.deepEqual(entry.data.params, { length: 6, sha256: crypto.createHash('sha256').update('12+30=').digest('base64url') });
+    // Second review finding 2: how much was typed, and no hash of it (an
+    // unsalted hash of a short text is the text, to anyone with a dictionary).
+    assert.deepEqual(entry.data.params, { length: 6 });
     assert.ok(!JSON.stringify(audits).includes('12+30='));
     // R-F5-16: the action log says that text was typed and how much, never what.
     assert.equal(actions[0].summary, 'Typed 6 characters');
@@ -478,6 +480,112 @@ describe('input tools', () => {
     ]);
     const all = JSON.stringify(actions);
     for (const leaked of ['Lakeside', 'lakeside', 'Meet', 'git push', 'secret words']) assert.ok(!all.includes(leaked), leaked);
+  });
+
+  // Second security review, finding 2 (R-F5-16): the audit ledger is served
+  // to the relay's mirror, so what holds for the action log holds for it.
+  // This runs the tools the way a remote run does: through a ToolExecutor
+  // in phone mode, with the real ledger, the real live view, a broker that
+  // writes status.json and every log line captured.
+  it('R-F5-16: no typed text, printable key or hash that can be turned back into either is in the ledger, its relay slice, the views, status.json or a log line', async () => {
+    const ToolExecutor = require('../src/execution/tool-executor');
+    const { toolRegistry } = require('../src/tools');
+    const { AuditLedger } = require('../src/audit/audit-ledger');
+    const { LiveView } = require('../src/gui/live-view');
+    const { phoneExecutorOptions } = require('../src/approvals/executor-options');
+    const { canonicalize } = require('../src/platform/jcs');
+    const { addSink } = require('../src/logging');
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-audit-'));
+    cleanups.push(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+    const identity = testNodeIdentity({ key: 'gpu-box' });
+    const ledger = new AuditLedger({ dir: path.join(dataDir, 'audit'), identity });
+    const logged = [];
+    const removeSink = addSink((record) => logged.push(record));
+    setLogLevel('trace');
+    try {
+      const store = await approverStoreWith([phone.approverRecord()]);
+      cleanups.push(() => store.cleanup());
+      const ch = new FakeChannel();
+      const rl = new FakeRelay();
+      const policy = () => ({ allowed_roots: [base], remote_sessions: { always_confirm: ['Bash(git push*)'] } });
+      const br = new GuiBroker({ channel: ch, guiConfig, getPolicy: policy, audit: ledger, dataDir, platform: plat, realpath: (p) => p });
+      br.start();
+      cleanups.push(() => br.stop());
+      const lm = new LeaseManager({ approvals: { identity, approverStore: store, relayClient: rl, phoneApprover: { isAvailable: () => true } }, guiConfig, broker: br, audit: ledger, nodeName: 'gpu-box', jobOpen: () => true });
+      br.setLeases(lm);
+      const liveView = new LiveView({ leases: lm, broker: br, identity, relayClient: rl, guiConfig });
+      for (const t of buildGuiTools({ broker: br, leases: lm, liveView, guiConfig, getPolicy: policy, audit: ledger, platform: plat })) toolRegistry.register(t);
+      cleanups.push(() => { for (const n of GUI_TOOL_NAMES) toolRegistry.unregister(n); });
+      const origin = { client: 'claude.ai', session: 's', job_id: 'job-1' };
+      const seam = phoneExecutorOptions({ phoneApprover: { ttlMs: 60000, requestApproval: async () => false }, auditLedger: ledger, nodePolicy: {}, origin, local: false });
+      const executor = new ToolExecutor({ requireApproval: false, ...seam.options, extraToolOptions: { origin } });
+      seam.attach(executor);
+      ch.connect();
+
+      const pending = executor.execute('RequestLease', { apps: ['calculator'], minutes: 10, reason: 'Enter the totals' });
+      for (let i = 0; i < 50 && !rl.sent.some((s) => s.message.type === 'kl.lease.request'); i += 1) await new Promise((r) => setImmediate(r));
+      lm.onGrant(phone.leaseGrant(rl.sent.find((s) => s.message.type === 'kl.lease.request').envelope, { minutes: 10 }));
+      assert.equal((await pending).ok, true);
+
+      const TEXT = 'Meet at Lakeside lot';
+      const LONG = `${'Lakeside lot '.repeat(160)}`;
+      const calls = [
+        ['Type', { text: TEXT }], ['Key', { keys: 'q' }], ['Key', { keys: 'shift+z' }], ['Key', { keys: '/' }], ['Key', { keys: 'q', repeat: 3 }],
+        // Refused ones are audited too.
+        ['Type', { text: 'git push origin main' }], ['Key', { keys: 'Lakeside words' }], ['Key', { keys: 'lakeside+p' }], ['Key', { keys: 'q+lakeside' }],
+        ['Type', { text: LONG }], ['Key', { keys: 'x'.repeat(65) }],
+        // Keys that are not text keep their names.
+        ['Key', { keys: 'ctrl+s' }], ['Key', { keys: 'enter', repeat: 2 }], ['Key', { keys: 'ctrl+v' }]
+      ];
+      for (const [name, params] of calls) await executor.execute(name, params);
+      // A phone watches, so a view with the action log goes out as well.
+      assert.equal(liveView.onWatch(phone.leaseWatch(identity.nodeId, lm.current().leaseId)).state, 'active');
+      await liveView.tick();
+      for (let i = 0; i < 20; i += 1) await new Promise((r) => setImmediate(r));
+
+      const entries = open(ledger.slice()).message.entries;
+      const inputs = entries.filter((e) => e.kind === 'gui.input');
+      assert.equal(inputs.length, 12, 'every input that reached the tool, refused ones too (two were refused by the schema first)');
+      // A Type entry says how much, nothing else; a Key entry names only keys that are not text.
+      for (const e of inputs.filter((x) => x.data.tool === 'Type')) assert.deepEqual(Object.keys(e.data.params), ['length']);
+      // (A refusal is written a tick after the call, so the entries are not in call order.)
+      assert.deepEqual(inputs.filter((x) => x.data.tool === 'Key').map((e) => `${e.data.params.keys} x${e.data.params.repeat}`).sort(), [
+        '(a character) x1', '(a character) x1', '(a character) x1', '(a character) x3',
+        '(not a key name) x1', '(not a key name) x1', '(not a key name) x1',
+        'ctrl+s x1', 'ctrl+v x1', 'enter x2'
+      ]);
+      // The hash in a tier decision is taken over the same form.
+      const decisions = entries.filter((e) => e.kind === 'tier.decision' && ['Type', 'Key'].includes(e.data.tool));
+      assert.ok(decisions.length >= 12);
+      const hashOf = (value) => crypto.createHash('sha256').update(canonicalize(value)).digest('base64url');
+      const allowedHashes = new Set([{ length: 20 }, { length: 2080 }, { keys: '(a character)', repeat: 1 }, { keys: '(a character)', repeat: 3 },
+        { keys: '(not a key name)', repeat: 1 }, { keys: 'ctrl+s', repeat: 1 }, { keys: 'enter', repeat: 2 }, { keys: 'ctrl+v', repeat: 1 }].map(hashOf));
+      for (const d of decisions) assert.ok(allowedHashes.has(d.data.params_sha256), `${d.data.tool}: the hash is of the redacted form`);
+      // Other tools keep the hash of what they were called with.
+      const leaseDecision = entries.find((e) => e.kind === 'tier.decision' && e.data.tool === 'RequestLease');
+      assert.equal(leaseDecision.data.params_sha256, crypto.createHash('sha256').update(canonicalize({ apps: ['calculator'], minutes: 10, reason: 'Enter the totals' })).digest('base64url'));
+
+      const statusJson = fs.readFileSync(path.join(dataDir, 'session', 'status.json'), 'utf8');
+      const ledgerFiles = fs.readdirSync(path.join(dataDir, 'audit')).map((f) => fs.readFileSync(path.join(dataDir, 'audit', f), 'utf8')).join('\n');
+      const haystack = [JSON.stringify(entries), ledgerFiles, statusJson, JSON.stringify(logged), JSON.stringify(rl.sent.map((s) => s.message))].join('\n');
+      for (const leaked of ['Lakeside', 'lakeside', 'Meet at', 'git push', 'xxxxxxxx']) assert.ok(!haystack.includes(leaked), `"${leaked}" is in what the node keeps or sends`);
+      // No hash a dictionary turns back into the text or the key: of the
+      // text itself, or of the parameters as called.
+      const hashes = [];
+      // (Keys that are not text are named, so a hash of them gives nothing away.)
+      const named = ['ctrl+s', 'enter', 'ctrl+v'];
+      for (const [, params] of calls.filter(([, p]) => !named.includes(p.keys))) {
+        for (const input of [params.text, params.keys, JSON.stringify(params), canonicalize(params)].filter((v) => typeof v === 'string')) {
+          const digest = crypto.createHash('sha256').update(input, 'utf8').digest();
+          hashes.push(digest.toString('base64url'), digest.toString('hex'), digest.toString('base64'));
+        }
+      }
+      for (const h of hashes) assert.ok(!haystack.includes(h), 'a plain hash of typed text or of a key is in what the node keeps or sends');
+      assert.ok(!/"sha256"/.test(JSON.stringify(inputs)), 'no hash of the text in a gui.input entry');
+    } finally {
+      removeSink();
+      setLogLevel('fatal');
+    }
   });
 
   it('Type refuses always_confirm and secret text before the helper, audited as refused', async () => {

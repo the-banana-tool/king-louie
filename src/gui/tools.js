@@ -3,7 +3,6 @@
 // first, so a node without a working helper refuses before any approval or
 // lease request. Input tools run: lease → text guard / key grammar → rate
 // limit → broker, and every input (refused ones too) is audited.
-const crypto = require('crypto');
 const { Tool } = require('../tools/tool-schema');
 const { REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
 const { isLocalRequester } = require('../core/origin');
@@ -98,7 +97,30 @@ function schema(properties, required = []) {
   return { type: 'object', properties, required, additionalProperties: false };
 }
 
-const sha256 = (text) => crypto.createHash('sha256').update(String(text), 'utf8').digest('base64url');
+// What a Key call is called in anything the node keeps or sends (the action
+// log, the audit ledger, the hash in a tier decision): R-F5-16. A key that
+// types a character is text spelled one press at a time, and a string that
+// is not a key name is whatever the model wrote there; neither is named.
+// Keys that are not text (enter, ctrl+s, a denied chord) keep their names:
+// they say what the agent did.
+function redactedKeys(keys, platform) {
+  try {
+    return printableChar(parseKeys(keys, platform)) === null ? String(keys).toLowerCase() : '(a character)';
+  } catch (err) {
+    return isGuiError(err) && err.code === 'key_denied' ? String(keys).toLowerCase() : '(not a key name)';
+  }
+}
+
+// The parameters of Type and Key as the audit ledger may hold them. The
+// ledger is served to the relay's mirror (second security review, finding
+// 2), so it gets what the action log gets: how much was typed, never what,
+// and no hash of it either. An unsalted hash of a short text, or of
+// `{"keys":"a"}`, is that text to anyone with a dictionary.
+const typeAuditParams = (params) => ({ length: typeof (params && params.text) === 'string' ? Array.from(params.text).length : 0 });
+const keyAuditParams = (params, platform) => ({
+  keys: redactedKeys(params && params.keys, platform),
+  repeat: Number.isInteger(params && params.repeat) ? params.repeat : 1
+});
 
 function vaultValues(options) {
   const vault = options && options.vault;
@@ -302,14 +324,16 @@ function buildGuiTools(gui) {
     tool({
       name: 'Type',
       description: 'Type text into the leased app in the foreground (at most 2000 characters). Secret-looking text and always_confirm commands are refused.',
-      parameters: schema({ text: { type: 'string', minLength: 1, maxLength: 2000 } }, ['text'])
+      parameters: schema({ text: { type: 'string', minLength: 1, maxLength: 2000 } }, ['text']),
+      // What a tier decision may hash (ToolExecutor, executor-options.js).
+      auditParameters: typeAuditParams
     }, async (params, options) => {
       const text = params.text;
       // R-F5-16: the action log crosses the relay in clear, so it says that
       // text was typed and how much, never what (as the audit ledger does).
       const typedCount = Array.from(text).length;
       const summary = `Typed ${typedCount} character${typedCount === 1 ? '' : 's'}`;
-      return runInput('Type', params, options, summary, { length: Array.from(text).length, sha256: sha256(text) }, (lease) => {
+      return runInput('Type', params, options, summary, typeAuditParams(params), (lease) => {
         const remote = policy().remote_sessions || {};
         const guard = checkTypeText(text, { alwaysConfirm: remote.always_confirm || [], vaultValues: vaultValues(options), buffer: lease.typed.value, segments: lease.typed.segments });
         if (!guard.ok) throw new GuiError(guard.code);
@@ -321,20 +345,14 @@ function buildGuiTools(gui) {
     tool({
       name: 'Key',
       description: 'Press a key or a combination such as "enter", "ctrl+s" or "shift+tab" in the leased app. Clipboard and system shortcuts are refused.',
-      parameters: schema({ keys: { type: 'string', minLength: 1, maxLength: 64 }, repeat: { type: 'integer', minimum: 1, maximum: 10 } }, ['keys'])
+      parameters: schema({ keys: { type: 'string', minLength: 1, maxLength: 64 }, repeat: { type: 'integer', minimum: 1, maximum: 10 } }, ['keys']),
+      auditParameters: (params) => keyAuditParams(params, platform)
     }, async (params, options) => {
       const repeat = params.repeat || 1;
-      // R-F5-16: a key that types a character is text spelled one press at a
-      // time, and a string that is not a key name is whatever the model
-      // wrote there; neither is named in the action log. Keys that are not
-      // text (enter, ctrl+s, a denied chord) keep their names.
-      let keyText = '(not a key name)';
-      try {
-        keyText = printableChar(parseKeys(params.keys, platform)) === null ? String(params.keys).toLowerCase() : '(a character)';
-      } catch (err) {
-        if (isGuiError(err) && err.code === 'key_denied') keyText = String(params.keys).toLowerCase();
-      }
-      return runInput('Key', params, options, `Key ${keyText}${repeat > 1 ? ` x${repeat}` : ''}`, params, (lease) => {
+      // R-F5-16: the action log and the audit entry name the key only when
+      // it is not text (redactedKeys).
+      const keyText = redactedKeys(params.keys, platform);
+      return runInput('Key', params, options, `Key ${keyText}${repeat > 1 ? ` x${repeat}` : ''}`, keyAuditParams(params, platform), (lease) => {
         const combo = parseKeys(params.keys, platform);
         const char = printableChar(combo);
         if (char) {

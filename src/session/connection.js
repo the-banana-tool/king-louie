@@ -66,8 +66,12 @@ class HelperSession extends EventEmitter {
       .then((result) => this._send({ t: 'res', id: msg.id, ok: true, result: result === undefined ? null : result }))
       .catch((err) => {
         const code = isGuiError(err) ? err.code : 'backend_failed';
-        if (!isGuiError(err)) this.log.warn(`${msg.op} failed: ${err.message}`);
-        this._send({ t: 'res', id: msg.id, ok: false, error: { code, message: String(err.message || code).slice(0, 300), detail: isGuiError(err) ? err.info || {} : {} } });
+        // An input's failure is logged and answered by its code alone
+        // (R-F5-16): a backend's own error can quote the command it ran, and
+        // for a key press that command names the key.
+        const quiet = msg.op === 'input';
+        if (!isGuiError(err)) this.log.warn(quiet ? `${msg.op} failed (${err.code || err.name || 'error'})` : `${msg.op} failed: ${err.message}`);
+        this._send({ t: 'res', id: msg.id, ok: false, error: { code, message: quiet ? code : String(err.message || code).slice(0, 300), detail: isGuiError(err) ? err.info || {} : {} } });
       });
   }
 }

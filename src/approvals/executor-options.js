@@ -101,8 +101,15 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
         .then(() => auditLedger.append({ kind, data }))
         .catch((err) => log.warn(`audit ${kind} failed: ${err?.message ?? String(err)}`));
     };
-    executor.on('tierDecision', ({ toolName, parameters, tier, reason }) => {
-      append('tier.decision', { tool: toolName, tier, reason, params_sha256: paramsSha256(parameters), origin });
+    // The hash is of the parameters as called, except for a tool that gives
+    // an audit form of them (Type and Key, R-F5-16): the ledger is served
+    // to the relay's mirror, and a plain hash of a short typed text or of
+    // one key is that text to anyone with a dictionary. Nothing verifies
+    // this hash against a phone signature: what a phone signs for an unsafe
+    // call is the request's action_hash, which is untouched.
+    executor.on('tierDecision', ({ toolName, parameters, auditParameters, tier, reason }) => {
+      const hashed = auditParameters === undefined ? parameters : auditParameters;
+      append('tier.decision', { tool: toolName, tier, reason, params_sha256: paramsSha256(hashed), origin });
     });
     // 'executeStart' fires only after every gate (hooks, rules, node-policy
     // tier, the approval gate, the abort check) has passed, immediately

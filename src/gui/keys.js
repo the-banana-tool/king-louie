@@ -49,11 +49,14 @@ function deniedReason({ mods, key }, platform) {
 function parseKeys(keys, platform = process.platform) {
   if (typeof keys !== 'string' || keys.length < 1 || keys.length > 64) throw new GuiError('key_invalid', 'keys must be 1–64 characters');
   const parts = keys.toLowerCase().split('+');
-  if (parts.some((p) => p === '')) throw new GuiError('key_invalid', `"${keys}" is not mod+key`);
+  // The reasons never repeat what was passed (R-F5-16): a string that is not
+  // a key name is whatever the model wrote there, and a tool's error text is
+  // audited (exec.result) and so reaches the relay's mirror.
+  if (parts.some((p) => p === '')) throw new GuiError('key_invalid', 'keys must be mod+key or one key name');
   const key = parts[parts.length - 1];
   const mods = parts.slice(0, -1);
-  if (!isKeyName(key)) throw new GuiError('key_invalid', `unknown key "${key}"`);
-  for (const m of mods) if (!MODIFIERS.includes(m)) throw new GuiError('key_invalid', `unknown modifier "${m}"`);
+  if (!isKeyName(key)) throw new GuiError('key_invalid', 'unknown key name (a letter, a digit, f1 to f24, a named key such as enter, or a punctuation key)');
+  for (const m of mods) if (!MODIFIERS.includes(m)) throw new GuiError('key_invalid', `unknown modifier (use ${MODIFIERS.join(', ')})`);
   if (new Set(mods).size !== mods.length) throw new GuiError('key_invalid', 'a modifier is repeated');
   const combo = { mods: MODIFIERS.filter((m) => mods.includes(m)), key };
   const denied = deniedReason(combo, platform);
