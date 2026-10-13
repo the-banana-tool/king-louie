@@ -282,7 +282,7 @@ describe('device list | revoke | apply', () => {
     for (const argv of [['device', 'list', '--yes'], ['device', 'revoke', 'd-1', '--yes'], ['enroll-device', '--yes'], ['status', '--yes'], ['desktop', 'list', '--yes']]) {
       io = streamIo();
       assert.equal(await main([...argv, '--data-dir', n.dataDir], io), 2, argv.join(' '));
-      assert.match(io.text.err, /"--yes" is only valid for "desktop pair" and "device apply"/);
+      assert.match(io.text.err, /"--yes" is only valid for "desktop pair", "device apply"/);
     }
   });
 

@@ -26,8 +26,8 @@ const HELP = `Usage:
   king-louie-service relay run|code <node-name>|nodes|remove-node <node-name>|qr [--data-dir DIR]
   king-louie-service frontdoor enroll-device|code <node-name> [--confirm]|nodes|remove-node <node-name>|rotate-tls-key [--data-dir DIR]
   king-louie-service session [--session-file PATH]              (the helper, as the logged-in user)
-  king-louie-service session install --user NAME [--data-dir DIR] [--dry-run]
-  king-louie-service session uninstall --user NAME [--data-dir DIR] [--dry-run]
+  king-louie-service session install --user NAME [--data-dir DIR] [--dry-run] [--yes]
+  king-louie-service session uninstall --user NAME [--data-dir DIR] [--dry-run] [--yes]
   king-louie-service session status|probe [--data-dir DIR]
 
 A chat channel with an empty allowlist refuses every sender, and a channel
@@ -47,7 +47,7 @@ const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm']);
 
 // The commands whose [y/N] question --yes answers (and that HELP documents
 // it for). The scoping is checked in main(), before any command runs.
-const YES_COMMANDS = [['desktop', 'pair'], ['device', 'apply']];
+const YES_COMMANDS = [['desktop', 'pair'], ['device', 'apply'], ['session', 'install'], ['session', 'uninstall']];
 const YES_COMMANDS_TEXT = YES_COMMANDS.map(([c, s]) => `"${c} ${s}"`).join(', ').replace(/, ([^,]*)$/, ' and $1');
 
 function parseArgs(argv) {

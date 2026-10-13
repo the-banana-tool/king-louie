@@ -6,13 +6,17 @@
 //                                per-user copy and the login start; rotates
 //   session uninstall --user NAME
 //   session status | probe
+// install and uninstall say what they are about to do and ask [y/N] first
+// (owner ruling R-F5-9), like "desktop pair": off a terminal they need --yes
+// (exit 2), and nothing is resolved, minted, created or written before the
+// answer. --dry-run asks nothing because it changes nothing.
 const fs = require('fs');
 const path = require('path');
 const { GuiError, isGuiError } = require('../../gui/errors');
 
 const SESSION_USAGE = `Usage: king-louie-service session [--session-file PATH]
-       king-louie-service session install --user NAME [--data-dir DIR] [--dry-run]
-       king-louie-service session uninstall --user NAME [--data-dir DIR] [--dry-run]
+       king-louie-service session install --user NAME [--data-dir DIR] [--dry-run] [--yes]
+       king-louie-service session uninstall --user NAME [--data-dir DIR] [--dry-run] [--yes]
        king-louie-service session status [--data-dir DIR]
        king-louie-service session probe [--data-dir DIR]
 `;
@@ -42,12 +46,21 @@ async function readStdin(stdin) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-function common(dataDir, deps) {
+function common(dataDir, deps, io) {
   const { adminConfigDir } = require('../../platform/paths');
   const platform = deps.platform || process.platform;
+  const configDir = deps.configDir || adminConfigDir({ platform, dataDir });
   return {
     platform,
-    configDir: deps.configDir || adminConfigDir({ platform, dataDir }),
+    configDir,
+    isTTY: deps.isTTY || (() => Boolean(io && io.stdin && io.stdin.isTTY)),
+    confirm: deps.confirm || ((question) => require('./desktop').defaultConfirm(io, question)),
+    // node.yaml is the admin's; a file that fails its owner check throws.
+    nodeName: deps.nodeName || (() => require('../node-config').loadNodeConfig({
+      dataDir, adminConfigDir: configDir,
+      ...(deps.adminUid === undefined ? {} : { adminUid: deps.adminUid }),
+      ...(deps.geteuid ? { geteuid: deps.geteuid } : {})
+    }).name),
     entryPath: deps.entryPath || path.resolve(__dirname, '..', '..', '..', 'bin', 'king-louie-service.js'),
     nodePath: deps.nodePath || process.execPath,
     execute: deps.execute || ((steps, opts) => require('../../session/autostart').executeAutostartSteps(steps, opts)),
@@ -59,12 +72,38 @@ function common(dataDir, deps) {
 // Windows account names are compared case-insensitively and stored bare.
 const bareName = (name, platform) => (platform === 'win32' ? String(name).split('\\').pop() : String(name));
 
+// The account's identity as the consent text shows it: the SID on Windows,
+// the uid elsewhere. The name alone does not say who it is.
+const identityText = (account, platform) => (platform === 'win32' ? `SID ${account.sid}` : `uid ${account.uid}`);
+
+function loginStartText({ platform, account, sessionUser }) {
+  const A = require('../../session/autostart');
+  if (platform === 'win32') return `the logon task "${A.windowsTaskName(sessionUser)}"`;
+  return `${platform === 'darwin' ? 'the LaunchAgent' : 'the autostart entry'} ${A.autostartPath({ platform, home: account.home })}`;
+}
+
+// R-F5-9: off a terminal nobody can be asked, so only --yes goes on. Checked
+// before anything is resolved or read (as "desktop pair" does).
+function refusedUnasked({ flags, io, c, verb }) {
+  if (flags.dryRun || flags.yes || c.isTTY()) return false;
+  io.stderr.write(`Refusing to ${verb} the session helper without confirmation on a non-interactive terminal; pass --yes.\n`);
+  return true;
+}
+
+// Only an explicit yes (or --yes) is consent.
+async function consented({ flags, c, question }) {
+  if (flags.yes) return true;
+  return (await c.confirm(question)) === true;
+}
+
 async function install({ flags, dataDir, io, deps }) {
   const S = require('../../gui/session-secret');
   const A = require('../../session/autostart');
-  const c = common(dataDir, deps);
+  const c = common(dataDir, deps, io);
   if (!flags.user) { io.stderr.write(SESSION_USAGE); return 2; }
   if (!c.isAdmin()) { io.stderr.write('session install needs root (or an elevated Administrator prompt on Windows).\n'); return 1; }
+  if (refusedUnasked({ flags, io, c, verb: 'install' })) return 2;
+  // Everything from here to the question only reads.
   const account = c.resolveUser(flags.user);
   const sessionUser = bareName(flags.user, c.platform);
   const installed = readInstalledUser(c.configDir);
@@ -79,9 +118,7 @@ async function install({ flags, dataDir, io, deps }) {
   (deps.verifyKey || ((r) => require('../../platform/master-key').verifyKeyCheck({ dataDir, key: r.key, source: r.source, create: false })))(resolved);
   const cipher = require('../../platform/cipher').createAesGcmCipher(resolved.key);
 
-  const { secret, endpointId } = S.mintSessionSecret();
   const ipcDir = deps.ipcDir || S.sessionIpcDir(c.platform);
-  const endpoint = S.endpointPath({ platform: c.platform, endpointId, ipcDir });
   const sessionFile = S.userCopyPath({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid });
   const steps = A.planAutostartInstall({ platform: c.platform, account: { ...account, user: sessionUser }, nodePath: c.nodePath, entryPath: c.entryPath, sessionFile });
 
@@ -93,6 +130,21 @@ async function install({ flags, dataDir, io, deps }) {
     return 0;
   }
 
+  // R-F5-9: what is about to be granted, then the question. Nothing has been
+  // minted, created or written yet.
+  io.stdout.write(`Session helper for node "${c.nodeName()}" (${nodeId}):\n`);
+  io.stdout.write(`  session user: ${sessionUser} (${identityText(account, c.platform)})\n`);
+  io.stdout.write(`  grants: a helper that runs as ${sessionUser} in ${sessionUser}'s desktop session. Through it this node's service can launch the apps in gui.apps, capture their windows and, under a lease signed on the owner's phone, click and type in them.\n`);
+  io.stdout.write(`  starts at every login of ${sessionUser}: ${loginStartText({ platform: c.platform, account, sessionUser })}\n`);
+  io.stdout.write(`  writes: ${S.canonicalPath(c.configDir)} (the service's secret) and ${sessionFile} (${sessionUser}'s copy)${c.platform === 'win32' ? '' : `; creates ${ipcDir}`}\n`);
+  if (installed) io.stdout.write(`  replaces the secret installed for ${installed}; a running helper reconnects with the new one\n`);
+  if (!(await consented({ flags, c, question: `Install the session helper for ${sessionUser}? [y/N] ` }))) {
+    io.stderr.write('Not installing without confirmation. Nothing was written.\n');
+    return 1;
+  }
+
+  const { secret, endpointId } = S.mintSessionSecret();
+  const endpoint = S.endpointPath({ platform: c.platform, endpointId, ipcDir });
   let svc = null;
   if (c.platform !== 'win32') {
     const st = fs.statSync(dataDir);
@@ -126,21 +178,35 @@ async function install({ flags, dataDir, io, deps }) {
 async function uninstall({ flags, dataDir, io, deps }) {
   const S = require('../../gui/session-secret');
   const A = require('../../session/autostart');
-  const c = common(dataDir, deps);
+  const c = common(dataDir, deps, io);
   if (!flags.user) { io.stderr.write(SESSION_USAGE); return 2; }
   if (!c.isAdmin()) { io.stderr.write('session uninstall needs root (or an elevated Administrator prompt on Windows).\n'); return 1; }
+  if (refusedUnasked({ flags, io, c, verb: 'remove' })) return 2;
   const account = c.resolveUser(flags.user);
   const sessionUser = bareName(flags.user, c.platform);
   const steps = A.planAutostartUninstall({ platform: c.platform, account: { ...account, user: sessionUser } });
+  const copyFile = S.userCopyPath({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid });
   if (flags.dryRun) {
-    io.stdout.write(`[dry-run] remove ${S.userCopyPath({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid })}\n`);
+    io.stdout.write(`[dry-run] remove ${copyFile}\n`);
     await c.execute(steps, { dryRun: true, io, entryPath: c.entryPath, nodePath: c.nodePath });
     return 0;
   }
+  const installed = readInstalledUser(c.configDir);
+  const removeCanonical = Boolean(installed) && installed.toLowerCase() === sessionUser.toLowerCase();
+  // R-F5-9: what is about to be removed, then the question.
+  let nodeName = null;
+  try { nodeName = c.nodeName(); } catch { nodeName = null; } // a bad node.yaml must not block a removal
+  io.stdout.write(`Removing the session helper of ${sessionUser} (${identityText(account, c.platform)})${nodeName ? ` on node "${nodeName}"` : ''}:\n`);
+  io.stdout.write(`  the login start: ${loginStartText({ platform: c.platform, account, sessionUser })}\n`);
+  io.stdout.write(`  ${sessionUser}'s copy of the secret: ${copyFile}\n`);
+  if (removeCanonical) io.stdout.write(`  the service's secret: ${S.canonicalPath(c.configDir)} (desktop apps stay off on this node until "session install" runs again)\n`);
+  if (!(await consented({ flags, c, question: `Remove the session helper for ${sessionUser}? [y/N] ` }))) {
+    io.stderr.write('Not removing without confirmation. Nothing was removed.\n');
+    return 1;
+  }
   await c.execute(steps, { dryRun: false, io, entryPath: c.entryPath, nodePath: c.nodePath });
   S.removeUserCopy({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid });
-  const installed = readInstalledUser(c.configDir);
-  if (installed && installed.toLowerCase() === sessionUser.toLowerCase()) fs.unlinkSync(S.canonicalPath(c.configDir));
+  if (removeCanonical) fs.unlinkSync(S.canonicalPath(c.configDir));
   io.stdout.write(`Session helper removed for ${sessionUser}.\n`);
   return 0;
 }
@@ -150,7 +216,7 @@ function printProbes(io, probes) {
 }
 
 async function status({ dataDir, io, deps }) {
-  const c = common(dataDir, deps);
+  const c = common(dataDir, deps, io);
   const record = (deps.readStatus || ((d) => require('../../gui/status').readGuiStatusRecord({ dataDir: d })))(dataDir);
   const installed = readInstalledUser(c.configDir);
   io.stdout.write(installed ? `installed for: ${installed}\n` : 'not installed (session install --user NAME)\n');

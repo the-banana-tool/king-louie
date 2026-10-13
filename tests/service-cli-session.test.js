@@ -49,6 +49,9 @@ function deps(s, extra = {}) {
     executed,
     platform: process.platform,
     isAdmin: () => true,
+    // R-F5-9: a terminal whose owner answers yes, unless a test says otherwise.
+    isTTY: () => true,
+    confirm: async () => true,
     resolveSessionUser: (name) => account(name),
     resolveKey: () => ({ key: KEY, source: 'test' }),
     verifyKey: () => {},
@@ -156,6 +159,116 @@ describe('session install', () => {
   });
 });
 
+// R-F5-9 (owner ruling, 2026-10-12): install and uninstall say what they are
+// about to do and ask first, like "desktop pair" and "enroll-device".
+describe('R-F5-9: session install and uninstall ask for consent', () => {
+  const identityText = POSIX ? `uid ${UID}` : 'SID S-1-5-21-1-2-3-1001';
+
+  it('install off a terminal without --yes refuses (exit 2) before it resolves, reads or writes anything', async () => {
+    const s = setup();
+    const before = tree(s.base);
+    const t = io();
+    const touched = [];
+    const d = deps(s, {
+      isTTY: () => false,
+      confirm: async () => { throw new Error('must not ask off a terminal'); },
+      resolveSessionUser: (name) => { touched.push('user'); return account(name); },
+      resolveKey: () => { touched.push('key'); return { key: KEY, source: 'test' }; }
+    });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 2);
+    assert.match(t.err.join(''), /Refusing to install the session helper without confirmation on a non-interactive terminal; pass --yes\./);
+    assert.deepEqual(touched, []);
+    assert.equal(d.executed.length, 0);
+    assert.deepEqual(tree(s.base), before);
+  });
+
+  it('install prints the user by name and SID/uid, the node, what the helper can do and where it starts, then asks; a no writes nothing', async () => {
+    const s = setup();
+    fs.writeFileSync(path.join(s.configDir, 'node.yaml'), 'name: gpu-box\n', { mode: 0o644 });
+    const before = tree(s.base);
+    const t = io();
+    let asked = null;
+    const d = deps(s, {
+      confirm: async (question) => {
+        asked = { question, printed: t.out.join(''), tree: tree(s.base), executed: d.executed.length };
+        return false;
+      }
+    });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 1);
+    assert.ok(asked, 'the owner was asked');
+    assert.match(asked.question, /^Install the session helper for alice\? \[y\/N\] $/);
+    assert.ok(asked.printed.includes(`alice (${identityText})`), asked.printed);
+    assert.ok(asked.printed.includes(`node "gpu-box" (${identity.nodeId})`), asked.printed);
+    assert.match(asked.printed, /launch the apps in gui\.apps, capture their windows and, under a lease signed on the owner's phone, click and type in them/);
+    assert.match(asked.printed, /starts at every login of alice: /);
+    assert.ok(asked.printed.includes(S.canonicalPath(s.configDir)), 'names the file it would write');
+    assert.deepEqual(asked.tree, before, 'nothing existed yet when the question was asked');
+    assert.equal(asked.executed, 0);
+    assert.match(t.err.join(''), /Not installing without confirmation\. Nothing was written\./);
+    assert.deepEqual(tree(s.base), before, 'a no wrote nothing: no secret, no copy, no directory');
+    assert.equal(d.executed.length, 0, 'and no login start');
+  });
+
+  it('install proceeds on a yes at the terminal, and with --yes off a terminal without asking', async () => {
+    const s = setup();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s, { confirm: async () => true }) }), 0);
+    assert.equal(canonical(s.configDir).session_user, 'alice');
+    const s2 = setup();
+    const d2 = deps(s2, { isTTY: () => false, confirm: async () => { throw new Error('must not ask with --yes'); } });
+    const t2 = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice', yes: true }, dataDir: s2.dataDir, io: t2.io, deps: d2 }), 0);
+    assert.equal(canonical(s2.configDir).session_user, 'alice');
+    assert.ok(t2.out.join('').includes(`alice (${identityText})`), '--yes still prints what is granted');
+  });
+
+  it('uninstall off a terminal without --yes refuses (exit 2) and removes nothing', async () => {
+    const s = setup();
+    const d = deps(s);
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    const before = tree(s.base);
+    const t = io();
+    const touched = [];
+    const d2 = deps(s, { isTTY: () => false, confirm: async () => { throw new Error('must not ask'); }, resolveSessionUser: (name) => { touched.push('user'); return account(name); } });
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d2 }), 2);
+    assert.match(t.err.join(''), /Refusing to remove the session helper without confirmation on a non-interactive terminal; pass --yes\./);
+    assert.deepEqual(touched, []);
+    assert.equal(d2.executed.length, 0);
+    assert.deepEqual(tree(s.base), before);
+  });
+
+  it('uninstall says what it removes, then asks; a no removes nothing, a yes or --yes removes it', async () => {
+    const s = setup();
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
+    const before = tree(s.base);
+    const t = io();
+    let asked = null;
+    const d = deps(s, { confirm: async (question) => { asked = { question, printed: t.out.join('') }; return false; } });
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 1);
+    assert.match(asked.question, /^Remove the session helper for alice\? \[y\/N\] $/);
+    assert.ok(asked.printed.includes(`alice (${identityText})`), asked.printed);
+    assert.ok(asked.printed.includes(S.canonicalPath(s.configDir)), 'names the service file it removes');
+    assert.ok(asked.printed.includes(S.userCopyPath({ platform: process.platform, configDir: s.configDir, user: 'alice', sid: account('alice').sid })), 'names the per-user copy');
+    assert.match(asked.printed, /login start/);
+    assert.match(t.err.join(''), /Not removing without confirmation\. Nothing was removed\./);
+    assert.deepEqual(tree(s.base), before);
+    assert.equal(d.executed.length, 0);
+
+    const d2 = deps(s, { isTTY: () => false, confirm: async () => { throw new Error('must not ask with --yes'); } });
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice', yes: true }, dataDir: s.dataDir, io: io().io, deps: d2 }), 0);
+    assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), false);
+    assert.equal(d2.executed.length, 1);
+  });
+
+  it('--dry-run asks nothing and writes nothing, on a terminal or off one', async () => {
+    const s = setup();
+    const before = tree(s.base);
+    const d = deps(s, { isTTY: () => false, confirm: async () => { throw new Error('a dry run asks nothing'); } });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    assert.deepEqual(tree(s.base), before);
+  });
+});
+
 describe('session uninstall, status, probe', () => {
   it('uninstall removes the copy, the canonical secret and the login start', async () => {
     const s = setup();
@@ -205,15 +318,24 @@ describe('the CLI', () => {
     const t2 = io();
     assert.equal(await main(['status', '--session-file', '/x.json'], t2.io), 2);
     assert.match(t2.err.join(''), /only valid for "session"/);
-    // The session commands ask nothing, so --yes is a usage error there too.
+    // R-F5-9: --yes belongs to install and uninstall. (Without --user both
+    // stop at their usage text, so this never reaches a real install.)
     for (const sub of ['install', 'uninstall']) {
       const t3 = io();
-      assert.equal(await main(['session', sub, '--user', 'alice', '--yes'], t3.io), 2);
-      assert.match(t3.err.join(''), /"--yes" is only valid for "desktop pair"/);
+      assert.equal(await main(['session', sub, '--yes'], t3.io), 2);
+      assert.doesNotMatch(t3.err.join(''), /"--yes" is only valid/);
+      assert.match(t3.err.join(''), new RegExp(`session ${sub} --user NAME \\[--data-dir DIR\\] \\[--dry-run\\] \\[--yes\\]`));
+    }
+    // Every other session command still refuses it.
+    for (const argv of [['session', '--yes'], ['session', 'status', '--yes'], ['session', 'probe', '--yes'], ['session', '_write-autostart', '/x', '--yes'], ['session', '_remove-autostart', '/x', '--yes']]) {
+      const t4 = io();
+      assert.equal(await main(argv, t4.io), 2, argv.join(' '));
+      assert.match(t4.err.join(''), /"--yes" is only valid for "desktop pair", "device apply", "session install" and "session uninstall"/);
     }
     const help = io();
     await main(['help'], help.io);
-    assert.match(help.out.join(''), /king-louie-service session install --user NAME/);
+    assert.match(help.out.join(''), /king-louie-service session install --user NAME \[--data-dir DIR\] \[--dry-run\] \[--yes\]/);
+    assert.match(help.out.join(''), /king-louie-service session uninstall --user NAME \[--data-dir DIR\] \[--dry-run\] \[--yes\]/);
   });
 
   it('session runs the helper and returns its exit code', async () => {
