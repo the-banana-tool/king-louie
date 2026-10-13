@@ -106,6 +106,12 @@ const dom = {
   sidebar: document.querySelector('.sidebar'),
   sidebarResizeHandle: document.getElementById('sidebar-resize-handle'),
   chatContextMenu: document.getElementById('chat-context-menu'),
+  chatRecallPinNote: document.getElementById('chat-recall-pin-note'),
+  linkChatsDialog: document.getElementById('link-chats-dialog'),
+  linkChatsList: document.getElementById('link-chats-list'),
+  linkChatsError: document.getElementById('link-chats-error'),
+  linkChatsCancelBtn: document.getElementById('link-chats-cancel-btn'),
+  linkChatsSaveBtn: document.getElementById('link-chats-save-btn'),
   settingsDrawer: document.getElementById('settings-drawer'),
   toggleHistoryBtn: document.getElementById('toggle-history-btn'),
   openSettingsBtn: document.getElementById('open-settings-btn'),
@@ -7506,16 +7512,201 @@ function closeContextMenu() {
   appState.contextChatId = null;
 }
 
-function openContextMenu({ chatId, x, y }) {
-  appState.contextChatId = chatId;
-  dom.chatContextMenu.hidden = false;
+/* --- History H4: what a chat recalls from (the chat menu, "Link chats…") --- */
+// The scope policy's reason is a code and is never shown; these are the
+// words for it. Chat titles and errors here are untrusted: textContent only.
+const RECALL_PIN_TEXTS = {
+  'case-chat': 'A case chat recalls only from itself.',
+  'bridge-chat': 'A Telegram or Discord chat recalls only from itself.',
+  'imported-case-chat': 'A chat imported from a case recalls only from itself.'
+};
+const RECALL_LINK_REFUSED_TEXTS = {
+  'case-chat': 'A case chat cannot be linked.',
+  'imported-case-chat': 'A chat imported from a case cannot be linked.'
+};
 
+function recallPinText(reason) {
+  return typeof reason === 'string' && Object.hasOwn(RECALL_PIN_TEXTS, reason)
+    ? RECALL_PIN_TEXTS[reason]
+    : 'This chat recalls only from itself.';
+}
+
+function recallLinkRefusedText(reason) {
+  return typeof reason === 'string' && Object.hasOwn(RECALL_LINK_REFUSED_TEXTS, reason)
+    ? RECALL_LINK_REFUSED_TEXTS[reason]
+    : 'This chat cannot be linked.';
+}
+
+function recallScopeItemText(scope, linkCount) {
+  if (scope === 'linked') {
+    return Number.isInteger(linkCount) ? `Recall from: linked chats (${linkCount})` : 'Recall from: linked chats';
+  }
+  return scope === 'all' ? 'Recall from: all chats' : 'Recall from: this chat';
+}
+
+let contextMenuPoint = { x: 0, y: 0 };
+
+function placeContextMenu() {
   const menuRect = dom.chatContextMenu.getBoundingClientRect();
   const maxX = window.innerWidth - menuRect.width - 8;
   const maxY = window.innerHeight - menuRect.height - 8;
 
-  dom.chatContextMenu.style.left = `${Math.min(x, maxX)}px`;
-  dom.chatContextMenu.style.top = `${Math.min(y, maxY)}px`;
+  dom.chatContextMenu.style.left = `${Math.max(0, Math.min(contextMenuPoint.x, maxX))}px`;
+  dom.chatContextMenu.style.top = `${Math.max(0, Math.min(contextMenuPoint.y, maxY))}px`;
+}
+
+// `view` is a history:links.get reply, or null while it loads or when it
+// could not be read (nothing is offered then). The choice marked is the
+// effective scope; a pinned chat is not offered a wider one, nor links
+// (they would do nothing while the pin holds).
+function paintRecallMenu(view, failure = '') {
+  const pinned = Boolean(view && view.pinned);
+  const linkCount = view && Array.isArray(view.candidates)
+    ? view.candidates.filter((c) => c.linked && c.allowed).length
+    : undefined;
+  for (const item of dom.chatContextMenu.querySelectorAll('[data-action="recall-scope"]')) {
+    const scope = item.dataset.scope;
+    item.textContent = recallScopeItemText(scope, linkCount);
+    item.setAttribute('aria-checked', String(Boolean(view) && view.effectiveScope === scope));
+    item.disabled = !view || (pinned && scope !== 'chat');
+  }
+  dom.chatContextMenu.querySelector('[data-action="link-chats"]').disabled = !view || pinned;
+  dom.chatRecallPinNote.textContent = pinned ? recallPinText(view.pinned) : failure;
+  dom.chatRecallPinNote.hidden = !dom.chatRecallPinNote.textContent;
+}
+
+async function refreshRecallMenu(chatId) {
+  let view = null;
+  let failure = '';
+  try {
+    const result = await window.electron.history.getLinks({ chatId });
+    if (result && result.ok !== false) view = result;
+    else failure = result?.error || 'What this chat recalls from could not be read.';
+  } catch (err) {
+    failure = `What this chat recalls from could not be read: ${err.message}`;
+  }
+  // The menu was closed, or opened on another chat, while this was read.
+  if (dom.chatContextMenu.hidden || appState.contextChatId !== chatId) return;
+  paintRecallMenu(view, failure);
+  placeContextMenu();
+}
+
+async function setChatRecallScope(chatId, scope) {
+  try {
+    const result = await window.electron.history.setScope({ chatId, scope });
+    if (!result || result.ok === false) {
+      showNotice(result?.error || 'What this chat recalls from could not be changed.');
+    }
+  } catch (err) {
+    showNotice(`What this chat recalls from could not be changed: ${err.message}`);
+  }
+}
+
+function closeLinkChatsDialog() {
+  dom.linkChatsDialog.hidden = true;
+  dom.linkChatsDialog.dataset.chatId = '';
+  dom.linkChatsList.textContent = '';
+  showLinkChatsError('');
+}
+
+function showLinkChatsError(text) {
+  dom.linkChatsError.textContent = text;
+  dom.linkChatsError.hidden = !text;
+}
+
+async function openLinkChatsDialog(chatId) {
+  let view;
+  try {
+    view = await window.electron.history.getLinks({ chatId });
+  } catch (err) {
+    showNotice(`The chats could not be listed: ${err.message}`);
+    return;
+  }
+  if (!view || view.ok === false) {
+    showNotice(view?.error || 'The chats could not be listed.');
+    return;
+  }
+  if (view.pinned) {
+    showNotice(recallPinText(view.pinned));
+    return;
+  }
+
+  dom.linkChatsList.textContent = '';
+  showLinkChatsError('');
+  for (const candidate of Array.isArray(view.candidates) ? view.candidates : []) {
+    const row = document.createElement('label');
+    row.className = 'link-chats-row';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = candidate.id;
+    // A chat the policy refuses is never ticked, even when a link to it is
+    // stored: saving leaves it out, so the list shows what a save will hold.
+    box.disabled = !candidate.allowed;
+    box.checked = candidate.linked && candidate.allowed;
+    const title = document.createElement('span');
+    title.className = 'link-chats-title';
+    title.textContent = candidate.title || 'Untitled chat';
+    row.append(box, title);
+    if (!candidate.allowed) {
+      row.classList.add('disabled');
+      const why = document.createElement('span');
+      why.className = 'link-chats-refused';
+      why.textContent = recallLinkRefusedText(candidate.reason);
+      row.appendChild(why);
+    }
+    dom.linkChatsList.appendChild(row);
+  }
+  if (!dom.linkChatsList.childElementCount) {
+    const empty = document.createElement('div');
+    empty.className = 'link-chats-empty';
+    empty.textContent = 'There are no other chats to link.';
+    dom.linkChatsList.appendChild(empty);
+  }
+  dom.linkChatsSaveBtn.disabled = false;
+  dom.linkChatsDialog.dataset.chatId = chatId;
+  dom.linkChatsDialog.hidden = false;
+  dom.linkChatsCancelBtn.focus();
+}
+
+async function saveLinkChats() {
+  const chatId = dom.linkChatsDialog.dataset.chatId;
+  if (!chatId) return;
+  const linkedChatIds = [...dom.linkChatsList.querySelectorAll('input[type="checkbox"]')]
+    .filter((box) => box.checked && !box.disabled)
+    .map((box) => box.value);
+  dom.linkChatsSaveBtn.disabled = true;
+  let saved = null;
+  try {
+    saved = await window.electron.history.setLinks({ chatId, linkedChatIds });
+  } catch (err) {
+    saved = { ok: false, error: `The links could not be saved: ${err.message}` };
+  }
+  dom.linkChatsSaveBtn.disabled = false;
+  if (!saved || saved.ok === false) {
+    showLinkChatsError(saved?.error || 'The links could not be saved.');
+    return;
+  }
+  closeLinkChatsDialog();
+  // A chat that recalled only from itself starts reading its links; a
+  // chat already on "linked" or "all" keeps the scope it has.
+  if (!Array.isArray(saved.links) || !(saved.scope === 'chat' && saved.links.length > 0) || saved.pinned) return;
+  try {
+    const scoped = await window.electron.history.setScope({ chatId, scope: 'linked' });
+    showNotice(scoped && scoped.ok !== false
+      ? 'This chat now recalls from its linked chats.'
+      : (scoped?.error || 'The links were saved, but this chat still recalls only from itself.'));
+  } catch (err) {
+    showNotice(`The links were saved, but this chat still recalls only from itself: ${err.message}`);
+  }
+}
+
+function openContextMenu({ chatId, x, y }) {
+  appState.contextChatId = chatId;
+  contextMenuPoint = { x, y };
+  paintRecallMenu(null);
+  dom.chatContextMenu.hidden = false;
+  placeContextMenu();
+  refreshRecallMenu(chatId);
 }
 
 function showRenameDialog(currentTitle) {
@@ -8428,11 +8619,20 @@ function recallVia(context) {
   return context?.reranker ? `${via} · reranked` : via;
 }
 
+// The scope a reply's recall read (provenance scope, stage H4): nothing
+// for the chat itself, so that line is what it was before H4.
+function recallScopeWord(context) {
+  if (context?.scope === 'linked') return 'linked chats';
+  if (context?.scope === 'all') return 'all chats';
+  return '';
+}
+
 function recallLineText(context) {
   const count = Number(context?.recalledExcerpts) || 0;
   const recalled = Number(context?.estTokens?.recalled) || 0;
   const full = Number(context?.fullHistoryEstTokens) || 0;
-  return `recalled ${count} ${count === 1 ? 'excerpt' : 'excerpts'} · about ${formatCompactTokens(recalled)} tokens · from ${formatCompactTokens(full)} tokens of history · ${recallVia(context)}`;
+  const scopeWord = recallScopeWord(context);
+  return `recalled ${count} ${count === 1 ? 'excerpt' : 'excerpts'} · about ${formatCompactTokens(recalled)} tokens · from ${formatCompactTokens(full)} tokens of history · ${scopeWord ? `${scopeWord} · ` : ''}${recallVia(context)}`;
 }
 
 function renderRecallLine(messageContent, context, { chatId, seq } = {}) {
@@ -8465,6 +8665,10 @@ function renderRecallLine(messageContent, context, { chatId, seq } = {}) {
       for (const excerpt of result.excerpts || []) {
         const item = document.createElement('div');
         item.className = 'recall-excerpt';
+        // An excerpt of another chat (its header names the chat, stage H4).
+        if (typeof excerpt.header === 'string' && excerpt.header.startsWith('[chat "')) {
+          item.classList.add('recall-excerpt-other-chat');
+        }
         const header = document.createElement('div');
         header.className = 'recall-excerpt-header';
         header.textContent = excerpt.header;
@@ -9194,10 +9398,24 @@ dom.chatContextMenu.addEventListener('click', (e) => {
   if (!actionButton) {
     return;
   }
-  if (actionButton.dataset.action === 'delete' && appState.contextChatId) {
-    handleDeleteChat(appState.contextChatId);
+  const chatId = appState.contextChatId;
+  const { action, scope } = actionButton.dataset;
+  if (chatId && !actionButton.disabled) {
+    if (action === 'delete') handleDeleteChat(chatId);
+    // The only place a chat's history scope is changed: the owner's click.
+    if (action === 'recall-scope') setChatRecallScope(chatId, scope);
+    if (action === 'link-chats') openLinkChatsDialog(chatId);
   }
   closeContextMenu();
+});
+
+dom.linkChatsCancelBtn.addEventListener('click', closeLinkChatsDialog);
+dom.linkChatsSaveBtn.addEventListener('click', saveLinkChats);
+dom.linkChatsDialog.addEventListener('click', (e) => {
+  if (e.target === dom.linkChatsDialog) closeLinkChatsDialog();
+});
+dom.linkChatsDialog.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeLinkChatsDialog();
 });
 
 document.addEventListener('click', (e) => {

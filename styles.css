@@ -457,6 +457,47 @@ body {
   pointer-events: none;
 }
 
+.context-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.context-menu-item:disabled:hover {
+  background: transparent;
+}
+
+/* History H4: the "Recall from" choices; the mark is on the effective one */
+.context-menu-item[data-action="recall-scope"]::before {
+  content: '';
+  display: inline-block;
+  width: 16px;
+}
+
+.context-menu-item[data-action="recall-scope"][aria-checked="true"]::before {
+  content: '\2713';
+}
+
+#chat-context-menu {
+  width: 250px;
+}
+
+.context-menu-note {
+  padding: 2px 12px 6px 28px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.context-menu-note[hidden] {
+  display: none;
+}
+
+.context-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border-subtle);
+}
+
 .context-menu-item i {
   margin-right: 6px;
   width: 14px;
@@ -1096,6 +1137,12 @@ body {
 .recall-excerpt-header {
   font-family: var(--font-mono);
   margin-top: 6px;
+}
+
+/* An excerpt recalled from another chat (stage H4) */
+.recall-excerpt-other-chat {
+  padding-left: 8px;
+  border-left: 2px solid var(--accent);
 }
 
 .recall-excerpt-text {
@@ -2376,6 +2423,64 @@ body {
 }
 
 /* rename-chat buttons inherit from .btn system */
+
+/* --- Link chats dialog (History H4) ------------------------ */
+.rename-chat-modal[hidden] {
+  display: none;
+}
+
+.link-chats-card {
+  width: min(480px, 92vw);
+  max-height: 80vh;
+}
+
+.link-chats-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.link-chats-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 40px;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.link-chats-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.link-chats-row.disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.link-chats-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-chats-refused,
+.link-chats-empty {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}
 
 /* --- Floating settings (legacy, kept for start-state) ------ */
 .floating-settings-btn {
