@@ -141,8 +141,11 @@ function input(p) {
       points.push({ x: b.x + r[0], y: b.y + r[1] });
     });
     points.forEach(function (pt) {
+      // The window the screenshot was of, not just any window of a leased
+      // app (review finding 8): a sheet, a menu or a second window of the
+      // same process over that point is something the model never saw.
       var under = hitTest(pt);
-      if (!under || pids.indexOf(under.pid) < 0) throw new OpError('point_obscured', 'another window covers that point');
+      if (!under || under.handle !== String(action.handle)) throw new OpError('point_obscured', 'another window covers that point');
     });
   }
   var since = $.CGEventSourceSecondsSinceLastEventType(1, 4294967295);

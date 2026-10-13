@@ -308,8 +308,11 @@ namespace KingLouie {
           points.Add(new POINT(ox + r[0], oy + r[1]));
         }
         foreach (var pt in points) {
+          // The window the screenshot was of, not just any window of a leased
+          // app (review finding 8): a dialog, a menu or a second window of
+          // the same process over that point is something the model never saw.
           IntPtr under = Native.GetAncestor(Native.WindowFromPoint(pt), 2);
-          if (under == IntPtr.Zero || !pids.Contains((int)AppPidOf(under))) throw new OpError("point_obscured", "another window covers that point");
+          if (under == IntPtr.Zero || under != target) throw new OpError("point_obscured", "another window covers that point");
         }
       }
       var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO)) };

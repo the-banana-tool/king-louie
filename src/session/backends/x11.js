@@ -103,8 +103,11 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
         points.push([b.x + rx, b.y + ry]);
       }
       for (const [px, py] of points) {
+        // The window the screenshot was of, not just any window of a leased
+        // app: a dialog, a menu or a second window of the same process over
+        // that point is something the model never saw (review finding 8).
         const under = await hitTest({ x: px, y: py });
-        if (!under || !pids.includes(under.pid)) throw new GuiError('point_obscured', 'another window covers that point');
+        if (!under || !pids.includes(under.pid) || under.handle !== String(action.handle)) throw new GuiError('point_obscured', 'another window covers that point');
       }
     }
     const withMods = async (fn) => {

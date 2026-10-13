@@ -175,6 +175,25 @@ describe('the Windows worker script (any OS)', () => {
   });
 });
 
+// Security review finding 8. The Windows and macOS workers' input paths
+// cannot be exercised by a test (they inject into the real desktop), so
+// these read the sources: they show the rule is written, not that it works.
+describe('finding 8, by reading the worker sources: the window under the point is the screenshot\'s own', () => {
+  const read = (name) => fs.readFileSync(path.join(__dirname, '..', 'src', 'session', 'backends', name), 'utf8');
+
+  it('Windows: the root window under each point must be the target handle itself', () => {
+    const src = read('windows-worker.ps1');
+    assert.match(src, /IntPtr under = Native\.GetAncestor\(Native\.WindowFromPoint\(pt\), 2\);\s*\r?\n\s*if \(under == IntPtr\.Zero \|\| under != target\) throw new OpError\("point_obscured"/);
+    assert.doesNotMatch(src, /under == IntPtr\.Zero \|\| !pids\.Contains\(\(int\)AppPidOf\(under\)\)/, 'no longer "any window of a leased pid"');
+  });
+
+  it('macOS: the window under each point must be the target window number itself', () => {
+    const src = read('macos-worker.js');
+    assert.match(src, /if \(!under \|\| under\.handle !== String\(action\.handle\)\) throw new OpError\('point_obscured'/);
+    assert.doesNotMatch(src, /if \(!under \|\| pids\.indexOf\(under\.pid\) < 0\) throw new OpError\('point_obscured'/);
+  });
+});
+
 describe('Windows worker', { skip: !WIN }, () => {
   const { createWindowsBackend } = require('../src/session/backends/windows');
   const backend = WIN ? createWindowsBackend({}) : null;

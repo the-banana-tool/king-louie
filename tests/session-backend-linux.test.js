@@ -87,6 +87,28 @@ describe('X11 backend (scripted xdotool)', () => {
     assert.equal(await code(b3.input({ expect, action: { kind: 'key', mods: [], key: 'a', repeat: 1 }, yieldMs: 0 })), 'screen_locked');
   });
 
+  // Security review finding 8 (and the test the reviewer listed as missing):
+  // the window under the point must be the one the screenshot was of.
+  it('finding 8: a click that would land on a different window of the same leased app is point_obscured', async () => {
+    const expect = { match: ['/usr/bin/gnome-calculator'], pids: [4242] };
+    // Window 43 belongs to the leased pid too (a dialog, a menu, a second
+    // document) and covers the point in window 42.
+    const { calls, execFileImpl } = fakeX([
+      [/^xdotool getmouselocation --shell$/, 'X=1\nY=1\nSCREEN=0\nWINDOW=43\n'],
+      [/^xdotool getwindowpid 43$/, '4242\n'],
+      ...baseScript
+    ]);
+    const b = createX11Backend({ env: { DISPLAY: ':0', XDG_SESSION_ID: '3' }, execFileImpl, readlink, exists: () => true });
+    for (const action of [
+      { kind: 'click', handle: '42', rel: [10, 10], button: 'left', count: 1, mods: [] },
+      { kind: 'scroll', handle: '42', rel: [10, 10], dy: 1 },
+      { kind: 'drag', handle: '42', from: [10, 10], to: [20, 20], button: 'left' }
+    ]) {
+      await assert.rejects(b.input({ expect, action, yieldMs: 0 }), (e) => e.code === 'point_obscured', action.kind);
+    }
+    assert.deepEqual(calls.filter((c) => ['click', 'mousedown', 'mouseup'].includes(c.args[0])), [], 'nothing was pressed');
+  });
+
   it('screenshot: import of one window, the size read from the JPEG itself', async () => {
     // A minimal JPEG header with an SOF0 of 640x480.
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xd9]);
