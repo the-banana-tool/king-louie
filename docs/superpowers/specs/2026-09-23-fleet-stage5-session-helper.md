@@ -5,6 +5,7 @@
 - **Parent:** docs/superpowers/specs/2026-09-21-king-louie-fleet-design.md §4.6, §3.1 (principle 3 exception), §5.3, §6, §8.3, §11 (computer-use row), §13 Q5
 - **Program:** docs/superpowers/specs/2026-09-23-stage-program.md (owns §4.23; consumes §4.12, §4.13, §4.15, §4.16, §4.17; adds `lease-v1` and `session-v1` under §4.15; owns `node.yaml` `gui.*` and `src/service/commands/session.js` under §5)
 - **Depends on:** F3 (merged code); `delegate` (F4) only for job-scoped leases (wave 4). Stubs F3 behind the §5.1 interfaces until it merges.
+- **Owner rulings:** 2026-10-12, R-F5-1 to R-F5-8. Where a ruling differs from the text below, a dated note stands at the section (§3.6, §3.9, §3.10, §4.7, §9) and the text itself is left as written. The plan (Part 1, "Owner rulings (2026-10-12)") lists all eight with their tasks and tests.
 
 ## 1. Outcome
 
@@ -296,6 +297,18 @@ class LeaseManager extends EventEmitter {   // 'state'(lease)
   Until then the job id is `chat:<chatId>` and a lease ends by expiry, revoke or restart. An aborted
   tool `signal` does not end the lease.
 
+> **Owner rulings 2026-10-12 (R-F5-3, R-F5-7).**
+> 1. A lease request from a front-door client needs `fleet:unsafe` for this node. Without it
+>    `RequestLease` is refused for the missing scope before anything is sent, in the words the node
+>    already uses for an unsafe call from such a client; no phone is asked. A session the node started
+>    itself still asks the phone.
+> 2. A lease needs a job. A run with neither a job id nor a chat id is refused one (`job_required`).
+>    A job counts as open only while the node knows it and it has not ended; an unknown job does not
+>    count as open, and it closes the lease (`job_closed`). So "a lease ends by expiry, revoke or
+>    restart" gains "or when its job is no longer known to be open", and "A failed check leaves the
+>    request pending" has one exception: a grant for a job that closed ends the pending lease.
+>    `endForJob` is wired in this stage (F4 has merged), not in wave 4.
+
 ### 3.7 Live view — `src/gui/live-view.js`
 
 - **Watch.** A `kl.lease.watch` passing steps 1–8 (`type: 'kl.lease.watch'`) and naming a known
@@ -383,6 +396,14 @@ before any approval or lease request.
   loop retries that request once without them; when C7's `getCapabilities().vision` fix has merged, the
   loop skips images up front for non-vision models instead.
 
+> **Owner rulings 2026-10-12 (R-F5-3, R-F5-4, R-F5-7).**
+> 1. An `unsafe` `LaunchApp` from a front-door client without `fleet:unsafe` for this node is refused
+>    for the missing scope before the requester is called. The refusal never says a phone denied it.
+> 2. In a case turn the GUI tools are read-only: only `ListApps` and `Screenshot` are available there;
+>    `LaunchApp`, `CloseApp`, `RequestLease`, `Click`, `Type`, `Key`, `Scroll` and `Drag` are blocked.
+> 3. The job id is read from the run's origin: `origin.job_id`, else `chat:<origin.session>` (the
+>    chat's id). There is no further fallback; a run with neither is refused a lease.
+
 ### 3.10 Mobile app deltas (to F3's app, F3 §3.14)
 
 | Screen / behaviour | Delta |
@@ -395,6 +416,17 @@ before any approval or lease request.
 | Demo mode | a fake lease with canned frames for store review |
 | JCS | lease messages contain `null` and integers other than `v`; the apps' canonicalizer must emit both (RFC 8785 numbers, `null`) |
 | Vectors | both apps pass `tests/vectors/lease-v1/` entries whose `consumers` name them |
+
+> **Owner rulings 2026-10-12 (R-F5-1, R-F5-5, R-F5-6, R-F5-8).** The table above is what iOS does.
+> - iOS signs `kl.lease.watch` with its unlocked API session, with no fresh biometric prompt
+>   (R-F5-8, accepted knowingly). Grants, denies and the kill switch keep a fresh prompt.
+> - On Android every signature is a biometric prompt, the relay requests included. So the live view
+>   is fetched when the owner taps Refresh, and nothing polls (R-F5-1). Stop, Allow and Refresh sign
+>   and send once: there is no re-send every 3 s, and a send that got no answer is shown as not
+>   confirmed until the owner taps again (R-F5-5). A `lease` push opens the lease screen without
+>   fetching, and Refresh waits briefly for the node's next capture so the first tap shows a frame
+>   (R-F5-6). "One biometric prompt" in the kill-switch row does not hold on Android: the revoke and
+>   the request that carries it are two.
 
 ### 3.11 Subsystem — `src/gui/index.js`, `src/gui/errors.js`
 
@@ -567,6 +599,11 @@ requires only `src/approvals/envelope.js` and `src/platform/jcs.js` (no agent co
 Push kind `lease` is F3's (P18). The relay verifies nothing about leases beyond F3's node-signature
 check on `message.submit`; nodes verify phone envelopes (§3.6).
 
+> **Owner rulings 2026-10-12 (R-F5-6).** The `202` for `POST /v1/leases/{lease_id}/watch` also
+> carries `after_seq`: the relay mailbox's position before the node heard the watch. A phone that
+> fetches on tap asks `…/views?after_seq=<that>&wait=5` and receives the frame that watch causes,
+> instead of the lease's earlier statuses at once. It is relay transport and part of no signed message.
+
 ## 5. Interfaces
 
 ### 5.1 Consumed
@@ -704,6 +741,14 @@ capture those apps' windows, and, under a lease, inject input. What stops misuse
 | macOS permission missing or lost | sub-capability withdrawn; hint names the `node` binary | `session status` |
 | Frame too large twice | `frame: null, frame_dropped: true` | last frame + "frame dropped" |
 | Service restart | all leases `ended: service_stopped`; helper reconnects | phone status `ended` |
+
+> **Owner rulings 2026-10-12 (R-F5-3, R-F5-7).** Three more rows.
+>
+> | Situation | Behaviour | Owner sees |
+> |---|---|---|
+> | A front-door client without `fleet:unsafe` calls `RequestLease` or an unsafe `LaunchApp` | refused for the missing scope; nothing is sent and no phone is asked | nothing on the phone; the client's error names the scope |
+> | A run with neither a job id nor a chat id calls `RequestLease` or an input tool | `job_required` | error |
+> | A lease's job is not known to be open (unknown, ended, or its chat is gone) | `job_closed`; the lease ends | phone status `ended` |
 
 ## 10. Testing
 

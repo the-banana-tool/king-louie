@@ -2,13 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-The header — Goal, Architecture, Owner questions, **Global Constraints**, **Review Focus**, Interfaces from other stages and **Deviations** — is in Part 1 (`2026-09-23-fleet-stage5-session-helper-part1.md`) and applies to every task here. Part 2 builds on Part 1's commits (Tasks 1–6) on `feat/fleet-stage5`.
+The header — Goal, Architecture, the owner's questions and rulings (2026-10-12), what was checked against main `532efcf`, **Global Constraints**, **Review Focus**, Interfaces from other stages, **Deviations** (1–44) and the task table with review weights — is in Part 1 (`2026-09-23-fleet-stage5-session-helper-part1.md`) and applies to every task here. Part 2 builds on Part 1's commits (Tasks 1–6) on `feat/fleet-stage5`.
 
 **This part:** the service runtime. Task 7 the `kl-session-v1` channel (service side) and the helper's connection (helper side); Task 8 the status file and the GUI broker; Task 9 the lease manager; Task 10 the live view; Task 11 the relay routes.
 
 ---
 
 ### Task 7: The helper channel (service) and the helper connection (helper)
+
+**Review:** trust (who may speak to the service as the helper, and what each side accepts). **On Windows:** the suite runs over named pipes; the Unix-socket branch of `HelperChannel.start` (`lstat` refusal of a symlink, `chmod 0666`) runs only on POSIX.
 
 **Files:**
 - Create: `src/gui/helper-channel.js`
@@ -839,6 +841,10 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 8: The status file and the GUI broker
 
+**Review:** trust (screenshot scope, coordinate mapping, what `list_machines` shows). **On Windows:** all of it can be checked.
+
+R-F5-7 in this task (Deviation 43): the broker keeps per-job state (launched pids, screenshots) only for a run that has a job id.
+
 **Files:**
 - Create: `src/gui/status.js`
 - Create: `src/gui/broker.js`
@@ -1098,6 +1104,20 @@ describe('launch, close and list', () => {
     assert.equal(await code(b.close('terminal', false, ctx)), 'app_not_allowlisted');
   });
 
+  it('R-F5-7: a run with no job id keeps no launched pids and no screenshots', async () => {
+    const { b, channel } = broker({ handlers: { processes: async () => [{ pid: 555, image: CALC.image }] } });
+    channel.connect();
+    const none = { jobId: null, leaseId: null };
+    await b.launch({ tier: 'routine', reason: 'allowlisted', appId: 'calculator', exe: 'C:\\Windows\\System32\\calc.exe', argv: [], files: [], match: [] }, none, { approvedBy: 'allowlist' });
+    await b.close('calculator', true, none);
+    assert.deepEqual(channel.requests.filter((r) => r.op === 'close').map((r) => r.params), [{ pids: [555], force: false }], 'never a kill');
+    const shot = await b.screenshot({ app: 'calculator' }, none);
+    assert.match(shot.screenshotId, /^ss-\d+$/);
+    for (const jobId of [null, undefined]) {
+      assert.throws(() => b.mapPoint(jobId, shot.screenshotId, 1, 1, ['calculator']), (e) => e.code === 'stale_screenshot');
+    }
+  });
+
   it('lists only allowlisted apps, with titles cut to 120 characters', async () => {
     const { b, channel } = broker({ handlers: { windows: async () => [{ handle: 'w1', pid: 100, image: CALC.image, title: 'x'.repeat(200), bounds: {}, scale: 1, minimized: false }] } });
     channel.connect();
@@ -1205,6 +1225,8 @@ class GuiBroker extends EventEmitter {
     super();
     Object.assign(this, { channel, guiConfig, getPolicy, audit, dataDir, platform, clock, log, heartbeatMs, realpath });
     this.leases = null;
+    // Both maps are per job and only for runs that have one (R-F5-7): a run
+    // with no job id gets no entry, so such runs never share a bucket.
     this.shots = new Map(); // jobId → [{ screenshotId, appId, handle, transform, width, height, at, gen }]
     this.launched = new Map(); // jobId → Map(appId → Set(pid))
     this.nextShot = 1;
@@ -1335,7 +1357,7 @@ class GuiBroker extends EventEmitter {
     this.require('gui.launch');
     const result = await this.channel.request('launch', { exe: resolution.exe, argv: resolution.argv, files: resolution.files }, { jobId: ctx.jobId, timeoutMs: 30000 });
     const pid = result && Number.isInteger(result.pid) ? result.pid : null;
-    if (resolution.appId && pid !== null) {
+    if (resolution.appId && pid !== null && ctx.jobId) {
       if (!this.launched.has(ctx.jobId)) this.launched.set(ctx.jobId, new Map());
       const byApp = this.launched.get(ctx.jobId);
       if (!byApp.has(resolution.appId)) byApp.set(resolution.appId, new Set());
@@ -1349,7 +1371,7 @@ class GuiBroker extends EventEmitter {
     this.require('gui.launch');
     this._app(appId);
     const pids = (await this._pids([appId], ctx)).map((p) => p.pid);
-    const mine = (this.launched.get(ctx.jobId) && this.launched.get(ctx.jobId).get(appId)) || new Set();
+    const mine = (ctx.jobId && this.launched.get(ctx.jobId) && this.launched.get(ctx.jobId).get(appId)) || new Set();
     const forced = force ? pids.filter((p) => mine.has(p)) : [];
     const graceful = pids.filter((p) => !forced.includes(p));
     const closed = [];
@@ -1405,10 +1427,13 @@ class GuiBroker extends EventEmitter {
       width: shot.width, height: shot.height, at: this.clock(), gen: this.displaysGen
     };
     this.nextShot += 1;
-    const list = this.shots.get(ctx.jobId) || [];
-    list.push(entry);
-    while (list.length > SCREENSHOTS_PER_JOB) list.shift();
-    this.shots.set(ctx.jobId, list);
+    // A run without a job can hold no lease, so its screenshot is never clicked on.
+    if (ctx.jobId) {
+      const list = this.shots.get(ctx.jobId) || [];
+      list.push(entry);
+      while (list.length > SCREENSHOTS_PER_JOB) list.shift();
+      this.shots.set(ctx.jobId, list);
+    }
     const sha256 = crypto.createHash('sha256').update(bytes).digest('base64url');
     this._audit('gui.screenshot', { job_id: ctx.jobId, app_id: appId, screenshot_id: entry.screenshotId, sha256, bytes: bytes.length });
     return {
@@ -1504,6 +1529,10 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 9: The lease manager
 
+**Review:** trust (it is the lease: who holds it, for which job, until when). **On Windows:** all of it can be checked.
+
+R-F5-7 in this task (Deviations 6, 34, 35, 37): `request` refuses a run without a job (`job_required`) and a job that is not open (`job_closed`) before anything is sent; `jobOpen` defaults to closed; a grant for a closed job ends the pending lease; `assertUsable` ends a lease whose job is gone; a dead job's lease never answers another job with `lease_busy`. `_audit` hands each entry to the ledger at once, in call order, so the tests below can read it without waiting.
+
 **Files:**
 - Create: `src/gui/leases.js`
 - Modify: `tests/helpers/fake-phone.js` (lease-v1 signers)
@@ -1511,15 +1540,15 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `buildLeaseRequest`, `buildLeaseStatus`, `verifyLeaseGrant`, `verifyLeaseRevoke`, `verifyLeaseWatch`, `effectiveExpiry` (Task 6); `NonceCache`, `bytesSha256` (F3); `TypedBuffer` (Task 3); `suspendsLease` (Task 8); `GuiError` (Task 1).
-- Produces (`src/gui/leases.js`): `class LeaseManager extends EventEmitter` — `new LeaseManager({ approvals, guiConfig, broker = null, audit = null, nodeName, clock = Date.now, timers = { setTimeout, clearTimeout }, jobOpen = () => true, log })` where `approvals = { identity, approverStore, relayClient, phoneApprover }`.
+- Produces (`src/gui/leases.js`): `class LeaseManager extends EventEmitter` — `new LeaseManager({ approvals, guiConfig, broker = null, audit = null, nodeName, clock = Date.now, timers = { setTimeout, clearTimeout }, jobOpen = () => false, log })` where `approvals = { identity, approverStore, relayClient, phoneApprover }`. `jobOpen(jobId) → boolean` fails closed: with none given, no job is open (R-F5-7); a `jobOpen` that throws counts as closed.
   - `setBroker(b)`, `setJobOpen(fn)`, `start()`, `stop()`.
   - `available() → boolean` (a relay link and `phoneApprover.isAvailable()`).
   - `current() → Lease | null` (the one not ended); `active(jobId) → Lease | null`; `find(leaseId)`.
-  - `request({ jobId, origin, appIds, minutes, reason, signal }) → Promise<Lease>`; rejects `lease_busy`, `lease_pending`, `lease_denied`, `lease_request_expired`, `approval_unavailable`, `invalid_params`, `cancelled`.
-  - `assertUsable(jobId) → Lease` (throws `lease_required`, `lease_pending`, `lease_suspended`, `lease_expired`, `lease_revoked`, `screen_locked`).
+  - `request({ jobId, origin, appIds, minutes, reason, signal }) → Promise<Lease>`; rejects `job_required` (no job id), `approval_unavailable`, `invalid_params`, `job_closed` (the job is not open, now or when the grant arrives), `lease_busy`, `lease_pending`, `lease_denied`, `lease_request_expired`, `cancelled`. The first four are checked in that order and before anything is sent.
+  - `assertUsable(jobId) → Lease` (throws `lease_required`, `lease_pending`, `lease_suspended`, `lease_expired`, `lease_revoked`, `job_closed`, `screen_locked`).
   - `chargeInput(lease)` (throws `rate_limited` with `retryAfter`).
   - `noteInputOutcome(lease, { code = null, afterMatches = true }) → boolean` (true when it suspended the lease).
-  - `onGrant(envelope)`, `onRevoke(envelope) → { state, reason? }`; `verifyWatch(envelope) → { accepted, reason, lease, deviceId }`.
+  - `onGrant(envelope) → { state, reason? }` (`{ state: 'ended', reason: 'job_closed' }` when check 12 finds the job closed), `onRevoke(envelope) → { state, reason? }`; `verifyWatch(envelope) → { accepted, reason, lease, deviceId }`.
   - `suspend(leaseId, reason)`, `setLocked(locked)`, `onHelperDisconnected()`, `endForJob(jobId, reason = 'job_closed')`, `stopAll(reason = 'service_stopped')`.
   - `statusSummary() → { active, appIds, expiresAt } | null`; `nextSeq(lease) → int`; `remainingMs(lease)`.
   - `Lease = { leaseId, jobId, origin, reason, requestedApps, maxMinutes, apps, state, locked, endReason, suspendReason, expiresAt, deviceId, seq, typed: TypedBuffer, inputTimes }`. Events: `'state'(lease)`.
@@ -1624,8 +1653,10 @@ let timers;
 let broker;
 let audits;
 let leases;
+let openJobs;
 
 beforeEach(async () => {
+  openJobs = new Set(['job-1', 'job-2', 'job-3']);
   phone = createFakePhone({ name: 'Owner phone' });
   other = createFakePhone({ name: 'Second phone' });
   identity = testNodeIdentity({ key: 'gpu-box' });
@@ -1638,7 +1669,8 @@ beforeEach(async () => {
   audits = [];
   leases = new LeaseManager({
     approvals: { identity, approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true } },
-    guiConfig, broker, audit: { append: async (e) => { audits.push(e); } }, nodeName: 'gpu-box', clock: () => clock.now(), timers
+    guiConfig, broker, audit: { append: async (e) => { audits.push(e); } }, nodeName: 'gpu-box', clock: () => clock.now(), timers,
+    jobOpen: (jobId) => openJobs.has(jobId)
   });
   leases.start();
 });
@@ -1711,6 +1743,56 @@ describe('request and grant', () => {
   it('refuses apps not in gui.apps and minutes out of range', async () => {
     await assert.rejects(leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['terminal'], minutes: 15, reason: 'x' }), (e) => e.code === 'invalid_params');
     await assert.rejects(leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 61, reason: 'x' }), (e) => e.code === 'invalid_params');
+  });
+});
+
+describe('R-F5-7: a lease needs a known, open job', () => {
+  it('R-F5-7: no job id is job_required, a job that is not open is job_closed, and nothing goes out', async () => {
+    for (const jobId of [null, undefined, '', 42]) {
+      await assert.rejects(leases.request({ jobId, origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' }), (e) => e.code === 'job_required', String(jobId));
+    }
+    await assert.rejects(leases.request({ jobId: 'job-unknown', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' }), (e) => e.code === 'job_closed');
+    assert.equal(relay.all('kl.lease.request').length, 0);
+    assert.equal(leases.current(), null);
+    assert.ok(!kinds().includes('lease.requested'));
+  });
+
+  it('R-F5-7: with no jobOpen given, no job is open; one that throws counts as closed', async () => {
+    const base = { approvals: leases.approvals, guiConfig, broker, nodeName: 'gpu-box', clock: () => clock.now(), timers };
+    await assert.rejects(new LeaseManager(base).request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' }), (e) => e.code === 'job_closed');
+    const throwing = new LeaseManager({ ...base, jobOpen: () => { throw new Error('store unavailable'); } });
+    await assert.rejects(throwing.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' }), (e) => e.code === 'job_closed');
+    assert.equal(relay.all('kl.lease.request').length, 0);
+  });
+
+  it('R-F5-7: a grant for a job that closed is rejected at check 12 and ends the lease', async () => {
+    const p = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+    const env = relay.last('kl.lease.request').envelope;
+    openJobs.delete('job-1');
+    assert.deepEqual(leases.onGrant(phone.leaseGrant(env)), { state: 'ended', reason: 'job_closed' });
+    await assert.rejects(p, (e) => e.code === 'job_closed');
+    assert.ok(audits.some((a) => a.kind === 'lease.rejected' && a.data.check === 12 && a.data.reason === 'job_closed'));
+    assert.equal(leases.current(), null);
+    assert.equal(relay.last('kl.lease.status').message.reason, 'job_closed');
+    // Nothing is left pending for that request.
+    assert.deepEqual(leases.onGrant(phone.leaseGrant(env)), { state: 'rejected', reason: 'unknown_request' });
+  });
+
+  it('R-F5-7: a lease whose job is gone ends at the next input and does not block another job', async () => {
+    const lease = await granted();
+    openJobs.delete('job-1');
+    assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'job_closed');
+    assert.equal(lease.state, 'ended');
+    assert.equal(lease.endReason, 'job_closed');
+    assert.ok(broker.calls.includes('releaseAll'));
+
+    const second = await granted({ jobId: 'job-2' });
+    openJobs.delete('job-2');
+    // job-3 asks while job-2's lease is still on the books: no lease_busy.
+    const third = leases.request({ jobId: 'job-3', origin: { ...ORIGIN, job_id: 'job-3' }, appIds: ['calculator'], minutes: 15, reason: 'x' });
+    assert.equal(second.endReason, 'job_closed');
+    leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope));
+    assert.equal((await third).jobId, 'job-3');
   });
 });
 
@@ -1916,11 +1998,12 @@ const L = require('./lease-protocol');
 
 const NONCE_TTL_MS = 10 * 60 * 1000;
 const HISTORY_MAX = 32;
-const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', expired: 'lease_expired' };
+const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', expired: 'lease_expired', job_closed: 'job_closed' };
 
 class LeaseManager extends EventEmitter {
+  // jobOpen fails closed (R-F5-7): with none given, no job is open.
   constructor({ approvals, guiConfig, broker = null, audit = null, nodeName = null, clock = Date.now,
-    timers = { setTimeout, clearTimeout }, jobOpen = () => true, log = createLogger('gui/leases') } = {}) {
+    timers = { setTimeout, clearTimeout }, jobOpen = () => false, log = createLogger('gui/leases') } = {}) {
     super();
     Object.assign(this, { approvals, guiConfig, broker, audit, clock, timers, jobOpen, log });
     this.nodeName = nodeName || (approvals.identity && approvals.identity.nodeName) || 'unnamed-node';
@@ -1935,6 +2018,16 @@ class LeaseManager extends EventEmitter {
   setBroker(broker) { this.broker = broker; }
 
   setJobOpen(fn) { this.jobOpen = fn; }
+
+  // Only `true` is open; a check that throws (a store that cannot be read) is closed.
+  _jobIsOpen(jobId) {
+    try {
+      return this.jobOpen(jobId) === true;
+    } catch (err) {
+      this.log.warn(`job check for ${jobId} failed, treating the job as closed: ${err.message}`);
+      return false;
+    }
+  }
 
   start() {
     const relay = this.approvals.relayClient;
@@ -1977,10 +2070,17 @@ class LeaseManager extends EventEmitter {
     return { active: l.state === 'active', appIds: [...l.apps], expiresAt: l.expiresAt === null ? null : new Date(l.expiresAt).toISOString() };
   }
 
+  // The entry is handed to the ledger at once, so entries keep the order of
+  // the calls; only its settling is left to a promise.
   _audit(kind, lease, extra = {}) {
     if (!this.audit) return;
     const data = { job_id: lease ? lease.jobId : null, lease_id: lease ? lease.leaseId : null, ...extra };
-    Promise.resolve().then(() => this.audit.append({ kind, data })).catch((err) => this.log.warn(`audit ${kind} failed: ${err.message}`));
+    const failed = (err) => this.log.warn(`audit ${kind} failed: ${err.message}`);
+    try {
+      Promise.resolve(this.audit.append({ kind, data })).catch(failed);
+    } catch (err) {
+      failed(err);
+    }
   }
 
   _timer(fn, ms) {
@@ -1990,6 +2090,9 @@ class LeaseManager extends EventEmitter {
   }
 
   async request({ jobId, origin, appIds, minutes, reason, signal = null }) {
+    // R-F5-7: a lease is bound to a job. A run with neither a job id nor a
+    // chat id has none, and is refused before anything else is looked at.
+    if (typeof jobId !== 'string' || !jobId) throw new GuiError('job_required', 'this run has no job or chat to bind a lease to');
     if (!this.available()) throw new GuiError('approval_unavailable');
     const cfg = this.guiConfig;
     if (!Array.isArray(appIds) || appIds.length < 1 || appIds.length > 8 || new Set(appIds).size !== appIds.length
@@ -1998,7 +2101,14 @@ class LeaseManager extends EventEmitter {
     }
     const max = Math.min(cfg.lease.maxMinutes, 60);
     if (!Number.isInteger(minutes) || minutes < 1 || minutes > max) throw new GuiError('invalid_params', `"minutes" must be 1–${max}`);
-    const cur = this.current();
+    // R-F5-7: a job that is not known to be open gets no lease; nothing is sent.
+    if (!this._jobIsOpen(jobId)) throw new GuiError('job_closed', 'that job is not open on this node');
+    let cur = this.current();
+    // A lease whose own job is gone must not hold the node's one lease.
+    if (cur && cur.jobId !== jobId && !this._jobIsOpen(cur.jobId)) {
+      this._end(cur, 'job_closed');
+      cur = null;
+    }
     if (cur && cur.jobId !== jobId) throw new GuiError('lease_busy', 'another job holds this node\'s lease');
     if (cur && cur.state === 'active') return cur;
     if (cur && (cur.state === 'pending' || [...this.pending.values()].some((p) => p.ref === cur))) throw new GuiError('lease_pending', 'waiting for the phone');
@@ -2082,12 +2192,24 @@ class LeaseManager extends EventEmitter {
     const now = this.clock();
     const r = L.verifyLeaseGrant(envelope, {
       approverStore: this.approvals.approverStore, nodeId: this.approvals.identity.nodeId, nonces: this.grantNonces,
-      pending: this.pending, guiApps: this.guiConfig.apps, jobOpen: this.jobOpen, guiMaxMinutes: this.guiConfig.lease.maxMinutes
+      pending: this.pending, guiApps: this.guiConfig.apps, jobOpen: (jobId) => this._jobIsOpen(jobId), guiMaxMinutes: this.guiConfig.lease.maxMinutes
     }, now);
     if (!r.accepted) {
-      let leaseId = null;
-      try { leaseId = open(envelope).message.lease_id || null; } catch { leaseId = null; }
-      this._audit('lease.rejected', this.find(leaseId), { check: r.check, reason: r.reason });
+      let claimed = null;
+      try { claimed = open(envelope).message; } catch { claimed = null; }
+      this._audit('lease.rejected', claimed ? this.find(claimed.lease_id) : null, { check: r.check, reason: r.reason });
+      // R-F5-7: a closed job cannot come back, so its pending lease ends here
+      // instead of waiting out the request. job_closed is part of check 12,
+      // which runs only after the device signature, the nonce and the
+      // request binding (checks 1–11) held, so only an enrolled device's
+      // answer to this very request gets this far.
+      if (r.reason === 'job_closed') {
+        const entry = claimed ? this.pending.get(claimed.request_id) : null;
+        if (entry) {
+          this._end(entry.ref, 'job_closed');
+          return { state: 'ended', reason: 'job_closed' };
+        }
+      }
       return { state: 'rejected', reason: r.reason };
     }
     const m = r.message;
@@ -2178,11 +2300,15 @@ class LeaseManager extends EventEmitter {
       this._audit('lease.expired', cur, { reason: 'expired' });
       this._end(cur, 'expired');
     }
+    // R-F5-7: a lease does not outlive its job.
+    const held = this.current();
+    if (held && !this._jobIsOpen(held.jobId)) this._end(held, 'job_closed');
     const lease = this.current();
     if (!lease || lease.jobId !== jobId) {
       const last = [...this.leases].reverse().find((l) => l.jobId === jobId && l.state === 'ended');
       if (last && last.endReason === 'revoked') throw new GuiError('lease_revoked', 'call RequestLease for a new lease');
       if (last && last.endReason === 'expired') throw new GuiError('lease_expired', 'call RequestLease for a new lease');
+      if (last && last.endReason === 'job_closed') throw new GuiError('job_closed', 'the job this lease belonged to is not open');
       throw new GuiError('lease_required', 'call RequestLease first');
     }
     if (lease.state === 'pending') throw new GuiError('lease_pending', 'waiting for the phone');
@@ -2293,6 +2419,8 @@ module.exports = { LeaseManager };
 Notes for the implementer:
 - `leases.js` requires `broker.js` only for `suspendsLease`; `broker.js` never requires `leases.js` (it receives the instance through `setLeases`), so there is no cycle.
 - The resume request's `max_minutes` is `ceil(remaining)`; the grant may carry at most that, and `effectiveExpiry` still clamps to the original expiry.
+- `request`'s checks run in a fixed order: `job_required`, `approval_unavailable`, the parameters (`invalid_params`), then `job_closed`. A manager built with no `jobOpen` therefore still answers `approval_unavailable` when no phone can sign (the "no phone to sign" test), and never sends a request.
+- `job_closed` is the one grant rejection that ends the lease (Deviation 6). Every other failed check still leaves the request pending, as §3.6 says.
 
 - [ ] **Step 5: Run the test to verify it passes**
 
@@ -2311,6 +2439,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ---
 
 ### Task 10: The live view
+
+**Review:** trust (window frames leave the machine here, to a device whose watch verified). **On Windows:** all of it can be checked.
 
 **Files:**
 - Create: `src/gui/live-view.js`
@@ -2382,7 +2512,7 @@ beforeEach(async () => {
       return { appId: 'calculator', width: 960, height: 640, data, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('base64url') };
     }
   };
-  leases = new LeaseManager({ approvals: { identity, approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true } }, guiConfig, broker, nodeName: 'gpu-box', clock: () => clock.t, timers: { setTimeout: () => ({}), clearTimeout: () => {} } });
+  leases = new LeaseManager({ approvals: { identity, approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true } }, guiConfig, broker, nodeName: 'gpu-box', clock: () => clock.t, timers: { setTimeout: () => ({}), clearTimeout: () => {} }, jobOpen: () => true });
   view = new LiveView({ leases, broker, identity, relayClient: relay, guiConfig, clock: () => clock.t });
 });
 
@@ -2631,6 +2761,10 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 11: The relay routes for leases
 
+**Review:** trust (which device may fetch or post what; nothing here verifies a lease, the node does). **On Windows:** all of it can be checked.
+
+R-F5-6 in this task (Deviation 41): the `202` for `POST …/watch` also carries `after_seq`, the mailbox position read before the node hears the watch. The per-route rate limits are Deviation 32.
+
 **Files:**
 - Create: `src/gui/relay-extension.js`
 - Modify: `src/frontdoor/extensions.js` (one line)
@@ -2638,7 +2772,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: F3's extension view `{ phoneApi, nodeHub, mailbox, devices, log }`; `open` (`src/approvals/envelope.js`); `lease-protocol.js` (for the message types it routes).
-- Produces (`src/gui/relay-extension.js`): `registerLeaseRoutes(relay) → void` — mailbox prefix `kl.lease.` (`ttlMs: 300000`, `maxBytes: 262144`); routes `GET /v1/leases`, `POST /v1/leases/{lease_id}/grant|revoke|watch`, `GET /v1/leases/{lease_id}/views` (all `auth: 'device'`); node RPC methods `lease.grant`, `lease.revoke`, `lease.watch` with `{ envelope }` and `timeoutMs: 10000`. `LEASE_TTL_MS = 300000`.
+- Produces (`src/gui/relay-extension.js`): `registerLeaseRoutes(relay) → void` — mailbox prefix `kl.lease.` (`ttlMs: 300000`, `maxBytes: 262144`); routes `GET /v1/leases`, `POST /v1/leases/{lease_id}/grant|revoke|watch`, `GET /v1/leases/{lease_id}/views` (all `auth: 'device'`); node RPC methods `lease.grant`, `lease.revoke`, `lease.watch` with `{ envelope }` and `timeoutMs: 10000`. The `202` body is the node's `{ state, reason? }`; for `watch` it also has `after_seq` (an integer, the mailbox's `seq` before the RPC). `LEASE_TTL_MS = 300000`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2652,6 +2786,7 @@ Create `tests/gui-relay-extension.test.js`:
 // tests/contact-mobile.test.js does for questions.
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const { open } = require('../src/approvals/envelope');
 const { Mailbox } = require('../src/frontdoor/mailbox');
 const { registerLeaseRoutes, LEASE_TTL_MS } = require('../src/gui/relay-extension');
 const L = require('../src/gui/lease-protocol');
@@ -2735,10 +2870,53 @@ describe('lease routes', () => {
       const body = action === 'grant' ? phone.leaseGrant(envelope) : action === 'revoke' ? phone.leaseRevoke(NODE, message.lease_id) : phone.leaseWatch(NODE, message.lease_id);
       const sent = JSON.parse(JSON.stringify(body));
       const out = await call(r, `POST /v1/leases/{lease_id}/${action}`, phone, { params: { lease_id: message.lease_id }, body });
-      assert.deepEqual(out, { status: 202, body: { state: 'active' } });
+      // Only the watch reply carries the mailbox position (R-F5-6); the mailbox is empty here.
+      assert.deepEqual(out, { status: 202, body: action === 'watch' ? { state: 'active', after_seq: 0 } : { state: 'active' } });
       assert.deepEqual(r.rpcs, [{ nodeId: NODE, method: `lease.${action}`, params: { envelope: sent }, opts: { timeoutMs: 10000 } }]);
     });
   }
+
+  it('R-F5-6: the watch reply carries the mailbox position, and a views fetch from it waits for the frame', async () => {
+    const r = relay();
+    const phone = createFakePhone();
+    const { message } = request();
+    // What a granted lease has already left in the mailbox: its statuses.
+    r.mailbox.put(NODE, L.buildLeaseStatus({ identity: node, leaseId: message.lease_id, seq: 1, state: 'pending' }));
+    r.mailbox.put(NODE, L.buildLeaseStatus({ identity: node, leaseId: message.lease_id, seq: 2, state: 'active' }));
+    const route = 'GET /v1/leases/{lease_id}/views';
+    // From 0, `wait` returns at once with the old statuses and no frame.
+    const early = await call(r, route, phone, { params: { lease_id: message.lease_id }, query: { after_seq: '0', wait: '5' } });
+    assert.equal(early.body.length, 2);
+    assert.ok(early.body.every((e) => open(e.envelope).message.type === 'kl.lease.status'));
+
+    const watched = await call(r, 'POST /v1/leases/{lease_id}/watch', phone, { params: { lease_id: message.lease_id }, body: phone.leaseWatch(NODE, message.lease_id) });
+    assert.deepEqual(watched, { status: 202, body: { state: 'active', after_seq: 2 } });
+
+    const polling = call(r, route, phone, { params: { lease_id: message.lease_id }, query: { after_seq: String(watched.body.after_seq), wait: '5' } });
+    const frame = { mime: 'image/jpeg', width: 2, height: 2, sha256: 'A'.repeat(43), data: 'AA==' };
+    const view = L.buildLeaseView({
+      identity: node, leaseId: message.lease_id, seq: 3, toDevice: phone.deviceId, state: 'active', locked: false, remainingS: 60,
+      foreground: { app_id: 'calculator', matches: true }, frame, frameDropped: false, actions: []
+    });
+    setTimeout(() => r.mailbox.put(NODE, view, { to_device: phone.deviceId }), 50);
+    const got = await polling;
+    assert.equal(got.body.length, 1);
+    assert.equal(open(got.body[0].envelope).message.type, 'kl.lease.view');
+  });
+
+  it('a node cannot set after_seq itself', async () => {
+    const routes = new Map();
+    const mailbox = new Mailbox();
+    registerLeaseRoutes({
+      phoneApi: { registerRoute: (method, pattern, spec) => routes.set(`${method} ${pattern}`, spec) },
+      nodeHub: { rpc: async () => ({ state: 'active', after_seq: 999999 }) },
+      mailbox, devices: { nodesForDevice: () => [{ node_id: NODE, state: 'active' }] }, log: { warn() {}, debug() {}, info() {} }
+    });
+    const phone = createFakePhone();
+    const { message } = request();
+    const out = await routes.get('POST /v1/leases/{lease_id}/watch').handler({}, { deviceId: phone.deviceId, params: { lease_id: message.lease_id }, query: {}, body: phone.leaseWatch(NODE, message.lease_id) });
+    assert.equal(out.body.after_seq, 0);
+  });
 
   it('refuses a body signed for another device, another lease, the wrong type, or a node it cannot reach', async () => {
     const r = relay();
@@ -2860,12 +3038,21 @@ function registerLeaseRoutes({ phoneApi, nodeHub, mailbox, devices, log }) {
         if (m.device_id !== ctx.deviceId) throw httpError(403, 'forbidden', 'the envelope is signed for another device');
         if (m.lease_id !== leaseId) throw httpError(400, 'bad_lease', 'the lease id does not match the path');
         if (!activeNodes(ctx.deviceId).includes(m.node_id)) throw httpError(404, 'not_found', 'no such node for this device');
+        // R-F5-6: read before the node hears the watch, so the view this
+        // watch causes is after it. A phone that fetches on tap asks for
+        // views from here with `wait` and gets that frame, not the statuses
+        // the lease left earlier.
+        const position = action === 'watch' && Number.isInteger(mailbox.seq) ? mailbox.seq : null;
         let result;
         try {
           result = await nodeHub.rpc(m.node_id, `lease.${action}`, { envelope: ctx.body }, { timeoutMs: 10000 });
         } catch (err) {
           log.warn(`lease.${action} to ${m.node_id} failed: ${err.message}`);
           throw httpError(503, 'node_offline', 'the node did not answer; try again');
+        }
+        // The relay's field goes last, so a node's reply cannot set it.
+        if (position !== null && result !== null && typeof result === 'object' && !Array.isArray(result)) {
+          return { status: 202, body: { ...result, after_seq: position } };
         }
         return { status: 202, body: result };
       }
@@ -2936,4 +3123,4 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ## After Part 2
 
-Run `npm test` and confirm `# fail 0`. Part 3 (`2026-09-23-fleet-stage5-session-helper-part3.md`) starts at Task 12 on these commits.
+Every test file Tasks 7–11 name shows `# fail 0` (the full suite runs once, in Task 21). Part 3 (`2026-09-23-fleet-stage5-session-helper-part3.md`) starts at Task 12 on these commits.

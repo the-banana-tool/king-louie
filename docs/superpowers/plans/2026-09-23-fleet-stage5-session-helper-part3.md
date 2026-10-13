@@ -2,27 +2,31 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-The header — Goal, Architecture, Owner questions, **Global Constraints**, **Review Focus**, Interfaces from other stages and **Deviations** — is in Part 1 (`2026-09-23-fleet-stage5-session-helper-part1.md`) and applies to every task here. Part 3 builds on Parts 1–2 (Tasks 1–11) on `feat/fleet-stage5`.
+The header — Goal, Architecture, the owner's questions and rulings (2026-10-12), what was checked against main `532efcf`, **Global Constraints**, **Review Focus**, Interfaces from other stages, **Deviations** (1–44) and the task table with review weights — is in Part 1 (`2026-09-23-fleet-stage5-session-helper-part1.md`) and applies to every task here. Part 3 builds on Parts 1–2 (Tasks 1–11) on `feat/fleet-stage5`.
 
-**This part:** Task 12 images in tool results (the `Tool` flag, the executor's detach, the loop's lift and the Anthropic placement); Task 13 the ten GUI tools; Task 14 the subsystem and its host wiring (`createCore`, `run.js`, the fleet handler).
+**This part:** Task 12 images in tool results (the `Tool` flag, the executor's detach, the loop's lift and the Anthropic placement); Task 13 the ten GUI tools, with the scope rule for front-door clients (R-F5-3), the case-turn rule (R-F5-4) and the job rule (R-F5-7); Task 14 the subsystem and its host wiring (`createCore`, `run.js`, the fleet handler).
 
 ---
 
 ### Task 12: Images in tool results
 
+**Review:** trust (what of a screenshot is stored, exported or shown, and which tools may put an image in front of the model). **On Windows:** all of it can be checked.
+
+Against main (Deviations 1, 3, 4): the validator already knows `integer`, so `tool-schema.js` gains only the flag; the detach also covers a result a `PostToolUse` hook puts in place of the tool's; and the loop reads the provider that answered every iteration (`this._currentProviderName()`), because a routed provider can fail over on its first call.
+
 **Files:**
-- Modify: `src/tools/tool-schema.js` (`emitsImages`; `integer` in `validateParameters`)
+- Modify: `src/tools/tool-schema.js` (`emitsImages`)
 - Create: `src/execution/tool-images.js`
-- Modify: `src/execution/tool-executor.js:561` (detach `_images` right after `tool.execute`)
+- Modify: `src/execution/tool-executor.js` (detach `_images` at the `const result = await tool.execute(effectiveParameters, {` call, and on the result a `PostToolUse` hook returns)
 - Modify: `src/execution/agent-loop.js` (lift, cap, placement, retention, retry without images)
-- Modify: `src/providers/anthropic-provider.js:501-559` (`buildToolMessages(…, { images })`, `buildMultiToolMessages` per-entry `images`)
+- Modify: `src/providers/anthropic-provider.js` (`buildToolMessages(…, { images })`, `buildMultiToolMessages` per-entry `images`)
 - Test: `tests/agent-loop-images.test.js`
 
 **Interfaces:**
 - Consumes: `ImageHandler.MAX_IMAGES_PER_MESSAGE`, `ImageHandler.formatForProvider` (`src/media/image-handler.js`).
 - Produces:
-  - `Tool` gains `emitsImages: boolean` (config `emitsImages: true`); `validateParameters` accepts `type: 'integer'` (`Number.isInteger`, with `minimum`/`maximum`).
-  - `src/execution/tool-images.js`: `TOOL_IMAGES` (a `Symbol.for('kl.toolImages')`); `detachImages(tool, result) → result` (drops `_images` from every result; keeps them on the symbol, non-enumerable, only for `tool.emitsImages === true`); `takeImages(result) → [{ base64, mimeType, id }]`; `stubText(id) → '[image <id> omitted]'`; `class ImageTracker { constructor({ providerName, keep = 3, perIteration = 5 }); get disabled; disable(); cap(results) → void (sets entry.images, ≤ 5 per iteration, stubs the earlier ones into the result text); record(entry, providerMessages) / recordUserMessage(message, images); retain() (keeps the last 3 in the conversation); stripAll(); count() }`; `IMAGE_PROVIDERS = ['anthropic', 'openai', 'gemini']`.
+  - `Tool` gains `emitsImages: boolean` (config `emitsImages: true`). `validateParameters` already accepts `type: 'integer'` on main; the test below pins it.
+  - `src/execution/tool-images.js`: `TOOL_IMAGES` (a `Symbol.for('kl.toolImages')`); `detachImages(tool, result) → result` (drops `_images` from every result; keeps them on the symbol, non-enumerable, only for `tool.emitsImages === true`; `tool` may be null, which drops them); `takeImages(result) → [{ base64, mimeType, id }]`; `stubText(id) → '[image <id> omitted]'`; `class ImageTracker { constructor({ providerName = '', keep = 3, perIteration = 5 }); use(providerName) (the provider that answered this iteration's call); get placement → 'tool_result' | 'user_message' | 'none'; get disabled; disable() (the provider refused images: none for the rest of the run); cap(results) → void (sets entry.images, ≤ 5 per iteration, stubs the earlier ones into the result text); recordToolResults(entries, providerMessages); userMessage(entries) → message | null; retain() (keeps the last 3 in the conversation); stripAll(); count() }`; `IMAGE_PROVIDERS = ['anthropic', 'openai', 'gemini']`.
   - Anthropic: `buildToolMessages(response, toolResult, toolCallId, { images = [] } = {})`; `buildMultiToolMessages(response, entries)` reads `entry.images`.
 
 - [ ] **Step 1: Write the failing test**
@@ -60,7 +64,7 @@ const Sneaky = new Tool({
 });
 toolRegistry.register(Shot);
 toolRegistry.register(Sneaky);
-after(() => { toolRegistry.tools.delete('TestShot'); toolRegistry.tools.delete('TestSneaky'); });
+after(() => { toolRegistry.unregister('TestShot'); toolRegistry.unregister('TestSneaky'); });
 
 const anthropicProto = AnthropicProvider.prototype;
 
@@ -107,7 +111,7 @@ const run = (p, ex = executor()) => new AgentLoop(p, ex, { guardrails: false, ma
 const imagesIn = (history) => JSON.stringify(history).split(JPEG).length - 1;
 
 describe('Tool and ToolExecutor', () => {
-  it('integer parameters validate as integers', () => {
+  it('integer parameters validate as integers (main\'s validator, pinned here)', () => {
     const t = new Tool({ name: 'X', execute: () => null, parameters: { type: 'object', properties: { n: { type: 'integer', minimum: 1, maximum: 3 } } } });
     t.validateParameters({ n: 2 });
     assert.throws(() => t.validateParameters({ n: 1.5 }), /Expected integer/);
@@ -135,6 +139,23 @@ describe('Tool and ToolExecutor', () => {
     assert.ok(!seen[0].includes('_images') && !seen[0].includes(JPEG));
     assert.equal(takeImages(out).length, 1);
   });
+
+  it('a PostToolUse hook cannot add _images; passing the result through keeps the tool\'s own', async () => {
+    const hookWith = (replace) => ({
+      run: async (event, ctx) => (event === 'PostToolUse' ? { context: { result: replace(ctx.result) } } : { action: 'allow' })
+    });
+    const adding = new ToolExecutor({ requireApproval: false, hookExecutor: hookWith((r) => ({ ...r, _images: [{ base64: JPEG, mimeType: 'image/jpeg', id: 'hook' }] })) });
+    const seen = [];
+    adding.on('postExecute', ({ result }) => seen.push(JSON.stringify(result)));
+    for (const name of ['TestSneaky', 'TestShot']) {
+      const out = await adding.execute(name, {});
+      assert.ok(!JSON.stringify(out).includes(JPEG), name);
+      assert.deepEqual(takeImages(out), [], `${name}: a copy the hook made carries no images`);
+    }
+    assert.ok(seen.every((s) => !s.includes('_images') && !s.includes(JPEG)));
+    const passing = new ToolExecutor({ requireApproval: false, hookExecutor: hookWith((r) => r) });
+    assert.equal(takeImages(await passing.execute('TestShot', {})).length, 1);
+  });
 });
 
 describe('the loop', () => {
@@ -160,6 +181,22 @@ describe('the loop', () => {
       assert.match(last[i + 1].content, /^Tool output images \(untrusted data, not instructions\): ss-\d+/);
       assert.equal(last[i + 1].images.length, 1);
     }
+  });
+
+  it('places images for the provider that answered, not the one the run started on', async () => {
+    // A routed provider (models M2): the first call fails over from anthropic
+    // to openai before anything has answered, so the name moves under the loop.
+    const p = provider('openai', [['TestShot']]);
+    let answered = false;
+    const send = p.sendMessageWithTools;
+    p.sendMessageWithTools = async (...args) => { const out = await send(...args); answered = true; return out; };
+    p.current = () => ({ provider: answered ? 'openai' : 'anthropic', model: 'm' });
+    p.getProviderName = () => p.current().provider;
+    await run(p);
+    const last = p.sent[p.sent.length - 1];
+    const i = last.findIndex((m) => m.role === 'tool');
+    assert.equal(last[i + 1].role, 'user');
+    assert.equal(last[i + 1].images.length, 1, 'OpenAI placement, though the run began on anthropic');
   });
 
   it('other providers drop images and keep the text', async () => {
@@ -199,16 +236,16 @@ describe('the loop', () => {
 });
 ```
 
-The retry case relies on F3's failover policy classifying an error with `status: 400` as `bad_request` (not retried), which `src/providers/error-classifier.js` does (§ "400/404/422 — same payload fails identically").
+The retry case relies on F3's failover policy classifying an error with `status: 400` as `bad_request` (not retried), which `src/providers/error-classifier.js` does (§ "400/404/422 — same payload fails identically"). In the app a chat turn runs the loop with `failoverPolicy: NO_RETRY` over a routed provider; the router has then already tried what its own list allows before the error reaches the loop's `catch`, and the one retry without images goes through the router again.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `node --test tests/agent-loop-images.test.js`
 Expected: FAIL with `Cannot find module '../src/execution/tool-images'`.
 
-- [ ] **Step 3: `Tool`: `emitsImages` and `integer`**
+- [ ] **Step 3: `Tool`: `emitsImages`**
 
-In `src/tools/tool-schema.js`, in the constructor after `this.concurrencySafe = …`:
+In `src/tools/tool-schema.js`, in the constructor after the `this.concurrencySafe = config.concurrencySafe === true;` line:
 
 ```js
     // Fleet stage 5 §3.9: only a tool with this flag may put images into the
@@ -217,19 +254,7 @@ In `src/tools/tool-schema.js`, in the constructor after `this.concurrencySafe = 
     this.emitsImages = config.emitsImages === true;
 ```
 
-In `validateParameters`, extend `typeOk` and the range check:
-
-```js
-      const typeOk =
-        (descriptor.type === 'string' && typeof value === 'string') ||
-        (descriptor.type === 'number' && typeof value === 'number') ||
-        (descriptor.type === 'integer' && Number.isInteger(value)) ||
-        (descriptor.type === 'boolean' && typeof value === 'boolean') ||
-        (descriptor.type === 'array' && Array.isArray(value)) ||
-        (descriptor.type === 'object' && typeof value === 'object' && !Array.isArray(value));
-```
-
-and change `if (descriptor.type === 'number') {` to `if (descriptor.type === 'number' || descriptor.type === 'integer') {`.
+Nothing else changes in this file. `validateParameters` on main already checks `integer` (`matchesType`) and applies `minimum`/`maximum` to every number (Deviation 1); the test's "integer parameters" case passes before this step and must still pass after it.
 
 - [ ] **Step 4: Write `src/execution/tool-images.js`**
 
@@ -266,17 +291,30 @@ function takeImages(result) {
 }
 
 class ImageTracker {
-  constructor({ providerName, keep = KEEP, perIteration = ImageHandler.MAX_IMAGES_PER_MESSAGE } = {}) {
+  constructor({ providerName = '', keep = KEEP, perIteration = ImageHandler.MAX_IMAGES_PER_MESSAGE } = {}) {
     this.provider = String(providerName || '');
     this.keep = keep;
     this.perIteration = perIteration;
     this.refs = []; // { id, stub() } oldest first
-    this.off = !IMAGE_PROVIDERS.includes(this.provider);
+    this.refused = false;
   }
 
-  get disabled() { return this.off; }
+  // The provider that answered the call whose tool results are being placed.
+  // A routed provider can fail over on its first call, so the loop sets this
+  // every iteration instead of once per run (Deviation 4).
+  use(providerName) { this.provider = String(providerName || ''); }
 
-  disable() { this.off = true; }
+  // Where this iteration's images go: inside each tool_result (Anthropic), in
+  // one user message after the tool messages (OpenAI, Gemini), or nowhere.
+  get placement() {
+    if (this.refused || !IMAGE_PROVIDERS.includes(this.provider)) return 'none';
+    return this.provider === 'anthropic' ? 'tool_result' : 'user_message';
+  }
+
+  get disabled() { return this.placement === 'none'; }
+
+  // The provider refused a request with images: none for the rest of the run.
+  disable() { this.refused = true; }
 
   count() { return this.refs.length; }
 
@@ -285,7 +323,7 @@ class ImageTracker {
   cap(entries) {
     const all = [];
     for (const e of entries) for (const img of e.images || []) all.push({ e, img });
-    const dropped = this.off ? all : all.slice(0, Math.max(0, all.length - this.perIteration));
+    const dropped = this.disabled ? all : all.slice(0, Math.max(0, all.length - this.perIteration));
     for (const { e, img } of dropped) {
       e.images = e.images.filter((x) => x !== img);
       if (e.result && typeof e.result === 'object') e.result = { ...e.result, images_omitted: [...(e.result.images_omitted || []), stubText(img.id)] };
@@ -356,7 +394,7 @@ In `src/execution/tool-executor.js`, add the require near the top:
 const { detachImages } = require('./tool-images');
 ```
 
-and wrap the call at line 561:
+and wrap the one `tool.execute` call in `execute()` (the statement that starts `const result = await tool.execute(effectiveParameters, {`, right after `this.emit('executeStart', …)`):
 
 ```js
       // Fleet stage 5: `_images` never reach postExecute listeners (chat
@@ -364,12 +402,28 @@ and wrap the call at line 561:
       // off-JSON, for the agent loop to lift.
       const result = detachImages(tool, await tool.execute(effectiveParameters, {
         ...this.extraToolOptions,
-        // (the existing option object, unchanged)
-        approvalRequester: this._rethreadedRequester()
+        // (the existing option object, unchanged: on main it ends with
+        // approvalRequester and ownerTurnText)
+        ownerTurnText: this.denyAutoApproval ? null : this.ownerTurnText
       }));
 ```
 
 Keep every existing property of the options object exactly as it is; only the `detachImages(tool, …)` wrapper is new.
+
+A few lines below, a `PostToolUse` hook may put its own result in place of the tool's. Give that result the same detach (with no tool, so nothing a hook adds is kept; the tool's own result passed through unchanged keeps its images):
+
+```js
+        if (postHookResult?.context?.result) {
+          // A hook can pass the tool's result on, but it cannot add images.
+          const replaced = detachImages(null, postHookResult.context.result);
+          this.emit('postExecute', {
+            toolName,
+            parameters: effectiveParameters,
+            result: replaced
+          });
+          return replaced;
+        }
+```
 
 - [ ] **Step 6: Lift and place in `AgentLoop.run`**
 
@@ -379,8 +433,9 @@ In `src/execution/agent-loop.js`:
 2. At the start of `run()`, after `let activeTools = [...tools];`:
 
 ```js
-    // Fleet stage 5 §3.9: screenshots in the conversation (per run).
-    const imageTracker = new ImageTracker({ providerName: this.provider?.getProviderName?.() });
+    // Fleet stage 5 §3.9: screenshots in the conversation (per run). Which
+    // provider they are placed for is set per iteration, below.
+    const imageTracker = new ImageTracker();
     let imageRetryUsed = false;
 ```
 
@@ -417,9 +472,12 @@ In `src/execution/agent-loop.js`:
 
 and change its final `return { ...call, toolCallId, result: toolResult };` to `return { ...call, toolCallId, result: toolResult, images };`.
 
-5. Right after the `results` array is built (before the result-persistence loop), cap the iteration's images:
+5. Right after the `results` array is built (the `const results = calls.map(…).filter(Boolean);` statement, before the result-persistence loop), name the provider that answered and cap the iteration's images:
 
 ```js
+        // The provider that answered this call: a routed provider's current
+        // target, which can differ from the one the run started on.
+        imageTracker.use(this._currentProviderName());
         imageTracker.cap(results);
 ```
 
@@ -430,33 +488,35 @@ and change its final `return { ...call, toolCallId, result: toolResult };` to `r
             { toolName: entry.toolName, parameters: entry.parameters, messageContent: response.messageContent },
             entry.result,
             entry.toolCallId,
-            imageTracker.provider === 'anthropic' ? { images: entry.images || [] } : undefined
+            imageTracker.placement === 'tool_result' ? { images: entry.images || [] } : undefined
           );
           conversationHistory.push(...providerMessages);
-          if (imageTracker.provider === 'anthropic') imageTracker.recordToolResults([entry], providerMessages);
+          if (imageTracker.placement === 'tool_result') imageTracker.recordToolResults([entry], providerMessages);
 ```
 
 For both `buildMultiToolMessages` branches, after `conversationHistory.push(...providerMessages);` add:
 
 ```js
-          if (imageTracker.provider === 'anthropic') imageTracker.recordToolResults(results, providerMessages);
+          if (imageTracker.placement === 'tool_result') imageTracker.recordToolResults(results, providerMessages);
 ```
 
 (`buildMultiToolMessages` reads `entry.images` itself.) Then, after the whole `if/else` that builds messages:
 
 ```js
-        if (!imageTracker.disabled && imageTracker.provider !== 'anthropic') {
+        if (imageTracker.placement === 'user_message') {
           const imageMessage = imageTracker.userMessage(results);
           if (imageMessage) conversationHistory.push(imageMessage);
         }
         imageTracker.retain();
 ```
 
-For a provider not in `IMAGE_PROVIDERS` the tracker starts disabled: `cap` turns every image into a stub note and nothing is placed.
+For a provider not in `IMAGE_PROVIDERS`, and after a refusal, the placement is `none`: `cap` turns every image into a stub note and nothing is placed.
+
+`this._currentProviderName()` is main's helper (it asks a routed provider for `current().provider` and any other provider for `getProviderName()`); the loop already uses it for API compaction. Once a turn's first call has answered, the router cannot move the turn to another provider (`FAILOVER_BLOCKED`), so image blocks already in the history stay with the provider that can read them.
 
 - [ ] **Step 7: Anthropic placement**
 
-In `src/providers/anthropic-provider.js`, add near the top (after the existing requires) nothing new — `ImageHandler` is already required (it is used by `formatMessages`). Replace `buildToolMessages` and `buildMultiToolMessages`:
+In `src/providers/anthropic-provider.js`, add no require: `ImageHandler` is already required at the top of the file. Replace the two methods `buildToolMessages(response, toolResult, toolCallId)` and `buildMultiToolMessages(response, toolCallEntries)` (on `532efcf` they are still exactly the bodies below without the image lines):
 
 ```js
   // Fleet stage 5 §3.9: a tool's images go inside its own tool_result.
@@ -535,7 +595,7 @@ The test borrows these methods off the prototype with `this` bound to a plain ob
 
 - [ ] **Step 8: Run the tests**
 
-Run: `node --test tests/agent-loop-images.test.js tests/agent-loop.test.js tests/approval-rule-precedence.test.js tests/cases-tools.test.js`
+Run: `node --test tests/agent-loop-images.test.js tests/agent-loop.test.js tests/approval-rule-precedence.test.js tests/cases-tools.test.js tests/fleet-core-seams.test.js`
 Expected: PASS, `# fail 0`.
 
 - [ ] **Step 9: Commit**
@@ -551,14 +611,24 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 13: The GUI tools
 
+**Review:** trust (the approval path, the scope check, the lease check and the audit of every input). **On Windows:** all of it can be checked.
+
+Three rulings land here.
+
+- **R-F5-3 (M19).** A front-door client without `fleet:unsafe` for this node never reaches the phone. Main already decides that per run: `DelegateSessions` computes `shouldRefuseUnsafe(origin, nodeConfig)` and passes `refuseUnsafe` to the turn's `ToolExecutor`, which wraps its classifier with `refuseUnsafeGate` and marks the requester it hands to tools (`_rethreadedRequester`: `requester.refuseUnsafe = true`, and the requester itself answers `false` unasked). Unsafe runbooks and unsafe tool calls are refused that way with `REFUSE_UNSAFE_MESSAGE`. `RequestLease` and `LaunchApp` classify `routine`, so the executor lets them through; they check the same mark themselves, after the capability check and before the lease manager or the requester is touched, and return the same message. A session the node started itself (stdio, the service's own chat, a paired desktop) carries no mark and asks the phone as before (Deviation 39).
+- **R-F5-4.** In a case turn only `ListApps` and `Screenshot` remain: the eight acting tools join `CASE_BLOCKED_TOOL_NAMES`, so `shapeToolDefinitions` leaves them out of the turn's tool list and `ToolExecutor` refuses them with `CASE_BLOCKED_TOOL_ERROR`. Wake-up turns get no GUI tool; delegate turns get all ten (Deviation 36).
+- **R-F5-7.** `jobIdOf` reads the run's origin and returns null when there is neither a job id nor a chat id; `RequestLease` and the input tools then refuse `job_required` (Deviation 5).
+
 **Files:**
 - Create: `src/gui/tools.js`
-- Modify: `src/execution/safety-policy.js:14` (`READ_TOOLS` gains `Screenshot`, `ListApps`)
+- Modify: `src/execution/safety-policy.js` (`READ_TOOLS` gains `Screenshot`, `ListApps`)
+- Modify: `src/cases/chat-integration.js` (`CASE_BLOCKED_TOOL_NAMES` gains the eight acting GUI tools; `CASE_BLOCKED_TOOL_ERROR` names the desktop)
+- Modify: `tests/cases-tools.test.js` (the pinned list and its `coreOnly` set)
 - Test: `tests/gui-tools.test.js`
 
 **Interfaces:**
-- Consumes: `Tool` (Task 12); `GuiBroker` (Task 8); `LeaseManager` (Task 9); `LiveView.recordAction` (Task 10); `resolveLaunch` (Task 2); `parseKeys`, `printableChar`, `isEnter`, `checkButton` (Task 3); `checkTypeText` (Task 3); `GuiError`, `toToolResult`, `isGuiError` (Task 1).
-- Produces (`src/gui/tools.js`): `registerGuiTools(toolRegistry, gui) → Tool[]` with `gui = { broker, leases, liveView = null, guiConfig, getPolicy, audit = null, platform }`; `GUI_TOOL_NAMES`; `jobIdOf(options) → string`; `checkParams(schema, params) → void` (throws `GuiError('invalid_params')`); `buildGuiTools(gui) → Tool[]`.
+- Consumes: `Tool` (Task 12); `GuiBroker` (Task 8); `LeaseManager` (Task 9); `LiveView.recordAction` (Task 10); `resolveLaunch` (Task 2); `parseKeys`, `printableChar`, `isEnter`, `checkButton` (Task 3); `checkTypeText` (Task 3); `GuiError`, `toToolResult`, `isGuiError` (Task 1); `REFUSE_UNSAFE_MESSAGE` (`src/approvals/executor-options.js`); `isLocalRequester` (`src/core/origin.js`).
+- Produces (`src/gui/tools.js`): `registerGuiTools(toolRegistry, gui) → Tool[]` with `gui = { broker, leases, liveView = null, guiConfig, getPolicy, audit = null, platform }`; `GUI_TOOL_NAMES`, `GUI_READ_TOOL_NAMES = ['ListApps', 'Screenshot']`, `GUI_ACTING_TOOL_NAMES` (the other eight); `jobIdOf(options) → string | null`; `refusesUnsafe(options) → boolean`; `checkParams(schema, params) → void` (throws `GuiError('invalid_params')`); `buildGuiTools(gui) → Tool[]`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -574,7 +644,9 @@ const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { open } = require('../src/approvals/envelope');
-const { buildGuiTools, registerGuiTools, jobIdOf, GUI_TOOL_NAMES } = require('../src/gui/tools');
+const { buildGuiTools, registerGuiTools, jobIdOf, GUI_TOOL_NAMES, GUI_READ_TOOL_NAMES, GUI_ACTING_TOOL_NAMES } = require('../src/gui/tools');
+const { REFUSE_UNSAFE_MESSAGE } = require('../src/approvals/executor-options');
+const { markLocalRequester } = require('../src/core/origin');
 const { GuiBroker } = require('../src/gui/broker');
 const { LeaseManager } = require('../src/gui/leases');
 const { parseGuiConfig } = require('../src/gui/config');
@@ -589,7 +661,8 @@ setLogLevel('fatal');
 const cleanups = [];
 after(() => { for (const c of cleanups) c(); });
 
-const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-tools-')));
+// Native realpath: resolveLaunch resolves with it, and a Windows CI TEMP is a short path.
+const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-tools-')));
 cleanups.push(() => fs.rmSync(base, { recursive: true, force: true }));
 const plat = process.platform === 'win32' ? 'win32' : 'linux';
 const calcPath = path.join(base, plat === 'win32' ? 'calc.exe' : 'calc');
@@ -644,7 +717,7 @@ beforeEach(async () => {
   broker.start();
   cleanups.push(() => broker.stop());
   relay = new FakeRelay();
-  leases = new LeaseManager({ approvals: { identity: testNodeIdentity({ key: 'gpu-box' }), approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true } }, guiConfig, broker, audit, nodeName: 'gpu-box' });
+  leases = new LeaseManager({ approvals: { identity: testNodeIdentity({ key: 'gpu-box' }), approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true } }, guiConfig, broker, audit, nodeName: 'gpu-box', jobOpen: () => true });
   broker.setLeases(leases);
   actions = [];
   const liveView = { recordAction: (lease, a) => { actions.push(a); return { seq: actions.length }; } };
@@ -654,6 +727,9 @@ beforeEach(async () => {
 
 const opts = (extra = {}) => ({ origin: { client: 'claude.ai', session: 's', job_id: 'job-1' }, ...extra });
 const requester = (answer) => async (...args) => { requesterCalls.push(args); return answer; };
+// What ToolExecutor#_rethreadedRequester hands a tool in a run that refuses
+// unsafe calls (a front-door delegate turn without fleet:unsafe, M19).
+const refusing = () => Object.assign(requester(true), { refuseUnsafe: true });
 
 async function withLease(appIds = ['calculator']) {
   const p = tools.RequestLease.execute({ apps: appIds, minutes: 10, reason: 'Enter the totals' }, opts());
@@ -684,10 +760,14 @@ describe('schemas', () => {
   it('Screenshot and ListApps classify read; the others routine, with no outer gate', () => {
     const registry = require('../src/tools').toolRegistry;
     for (const t of Object.values(tools)) registry.register(t);
-    cleanups.push(() => { for (const n of GUI_TOOL_NAMES) registry.tools.delete(n); });
+    cleanups.push(() => { for (const n of GUI_TOOL_NAMES) registry.unregister(n); });
     assert.equal(classifyToolCall('Screenshot', {}, {}).tier, 'read');
     assert.equal(classifyToolCall('ListApps', {}, {}).tier, 'read');
     for (const n of ['LaunchApp', 'CloseApp', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag']) assert.equal(classifyToolCall(n, {}, {}).tier, 'routine', n);
+    // The set was added to, not written out again: main's other read tools are still read.
+    for (const n of ['Read', 'get_job_logs', 'SearchHistory', 'ReadHistory', 'list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence', 'list_envelopes', 'list_playbooks']) {
+      assert.equal(classifyToolCall(n, {}, {}).tier, 'read', n);
+    }
   });
 
   it('unknown keys and bad types are invalid_params', async () => {
@@ -704,6 +784,8 @@ describe('capability first', () => {
     assert.deepEqual(unsafe, { ok: false, error: 'capability_unavailable: gui' });
     assert.equal(requesterCalls.length, 0, 'the fake approver was never asked');
     assert.deepEqual(await tools.RequestLease.execute({ apps: ['calculator'], reason: 'x' }, opts()), { ok: false, error: 'capability_unavailable: gui' });
+    // The capability comes before the scope check too (R-F5-3).
+    assert.deepEqual(await tools.RequestLease.execute({ apps: ['calculator'], reason: 'x' }, opts({ approvalRequester: refusing() })), { ok: false, error: 'capability_unavailable: gui' });
     assert.equal(relay.sent.length, 0);
     for (const name of ['ListApps', 'Screenshot', 'CloseApp', 'Click', 'Type', 'Key', 'Scroll', 'Drag']) {
       const params = { ListApps: {}, Screenshot: {}, CloseApp: { app: 'calculator' }, Click: { screenshot_id: 'ss-1', x: 1, y: 1 }, Type: { text: 'a' }, Key: { keys: 'a' }, Scroll: { screenshot_id: 'ss-1', x: 1, y: 1, dy: 1 }, Drag: { screenshot_id: 'ss-1', from: { x: 1, y: 1 }, to: { x: 2, y: 2 } } }[name];
@@ -745,6 +827,103 @@ describe('LaunchApp', () => {
 
   it('no requester at all is denied', async () => {
     assert.deepEqual(await tools.LaunchApp.execute({ app: otherPath }, opts()), { ok: false, error: 'denied: phone approval required (no approval channel)' });
+  });
+
+  it('a paired desktop\'s turn is answered on its screen, and the result says so', async () => {
+    const atDesktop = (answer) => markLocalRequester(requester(answer));
+    assert.deepEqual(await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: atDesktop(false) })), { ok: false, error: 'denied: approval denied at the desktop' });
+    assert.deepEqual(await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: atDesktop('timeout') })), { ok: false, error: 'denied: approval timed out at the desktop' });
+    const ok = await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: atDesktop(true) }));
+    assert.equal(ok.ok, true);
+    assert.ok(audits.some((a) => a.kind === 'gui.launch' && a.data.approved_by === 'desktop'));
+  });
+});
+
+describe('R-F5-3: a front-door client needs fleet:unsafe', () => {
+  beforeEach(() => channel.connect());
+
+  it('R-F5-3: a run that refuses unsafe calls is refused a lease for scope; nothing reaches the relay', async () => {
+    const out = await tools.RequestLease.execute({ apps: ['calculator'], minutes: 10, reason: 'x' }, opts({ approvalRequester: refusing() }));
+    assert.deepEqual(out, { ok: false, error: REFUSE_UNSAFE_MESSAGE });
+    assert.match(out.error, /fleet:unsafe not granted/);
+    assert.ok(!/phone approval/.test(out.error), 'no phone was asked, so the refusal does not say one was');
+    assert.equal(relay.sent.length, 0);
+    assert.equal(leases.current(), null);
+    assert.equal(requesterCalls.length, 0);
+  });
+
+  it('R-F5-3: an unsafe LaunchApp is refused for scope and the requester is never called; an allowlisted launch still runs', async () => {
+    const out = await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: refusing() }));
+    assert.deepEqual(out, { ok: false, error: REFUSE_UNSAFE_MESSAGE });
+    assert.equal(requesterCalls.length, 0);
+    assert.ok(!channel.requests.some((r) => r.op === 'launch'));
+    const routine = await tools.LaunchApp.execute({ app: 'calculator' }, opts({ approvalRequester: refusing() }));
+    assert.equal(routine.ok, true);
+    assert.equal(requesterCalls.length, 0);
+  });
+
+  it('R-F5-3: a node-local run still asks the phone', async () => {
+    const leasing = tools.RequestLease.execute({ apps: ['calculator'], minutes: 10, reason: 'x' }, opts({ approvalRequester: requester(true) }));
+    await new Promise((r) => setImmediate(r));
+    const requests = relay.sent.filter((s) => s.message.type === 'kl.lease.request');
+    assert.equal(requests.length, 1);
+    leases.onGrant(phone.leaseGrant(requests[0].envelope, { minutes: 10 }));
+    assert.equal((await leasing).ok, true);
+    const launched = await tools.LaunchApp.execute({ app: otherPath }, opts({ approvalRequester: requester(true) }));
+    assert.equal(launched.ok, true);
+    assert.equal(requesterCalls.length, 1);
+  });
+});
+
+describe('R-F5-4: which turns get GUI tools', () => {
+  const { CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR, CASE_TOOL_NAMES, WAKEUP_BASE_TOOLS, shapeToolDefinitions } = require('../src/cases/chat-integration');
+  const { delegateToolNames, DELEGATE_EXCLUDED_TOOLS } = require('../src/fleet/delegate-sessions');
+  const ToolExecutor = require('../src/execution/tool-executor');
+  const shared = require('../src/tools').toolRegistry;
+
+  function registerShared() {
+    for (const t of Object.values(tools)) shared.register(t);
+    cleanups.push(() => { for (const n of GUI_TOOL_NAMES) shared.unregister(n); });
+  }
+
+  it('R-F5-4: a case turn keeps ListApps and Screenshot; a wake-up turn gets no GUI tool; a delegate turn gets all ten', () => {
+    registerShared();
+    assert.deepEqual([...GUI_READ_TOOL_NAMES], ['ListApps', 'Screenshot']);
+    assert.deepEqual([...GUI_READ_TOOL_NAMES, ...GUI_ACTING_TOOL_NAMES].sort(), [...GUI_TOOL_NAMES].sort());
+    // The list in src/cases/ is written out (cases code does not load src/gui/); it must be these eight.
+    assert.deepEqual(CASE_BLOCKED_TOOL_NAMES.slice(-GUI_ACTING_TOOL_NAMES.length), [...GUI_ACTING_TOOL_NAMES]);
+    for (const name of GUI_READ_TOOL_NAMES) assert.ok(!CASE_BLOCKED_TOOL_NAMES.includes(name), `kept: ${name}`);
+    const defs = GUI_TOOL_NAMES.map((n) => shared.get(n).toFunctionDefinition());
+    const inCase = shapeToolDefinitions(defs, true, shared).map((d) => d.name).filter((n) => GUI_TOOL_NAMES.includes(n));
+    assert.deepEqual(inCase.sort(), ['ListApps', 'Screenshot']);
+    assert.deepEqual(shapeToolDefinitions(defs, false, shared).map((d) => d.name), [...GUI_TOOL_NAMES]);
+    // Wake-up turns (Deviation 36): none, not even the two read tools.
+    const wakeupAllowed = new Set([...CASE_TOOL_NAMES, ...WAKEUP_BASE_TOOLS]);
+    for (const name of GUI_TOOL_NAMES) assert.ok(!wakeupAllowed.has(name), `wake-up: ${name}`);
+    // Delegate turns: all ten; R-F5-3 gates what would reach the phone.
+    const delegate = delegateToolNames(shared);
+    for (const name of GUI_TOOL_NAMES) assert.ok(delegate.has(name) && !DELEGATE_EXCLUDED_TOOLS.includes(name), `delegate: ${name}`);
+  });
+
+  it('R-F5-4: ToolExecutor refuses an acting GUI tool in a case turn', async () => {
+    registerShared();
+    channel.connect();
+    const origin = { client: 'desktop', session: 'chat-1', job_id: null };
+    const executor = new ToolExecutor({ requireApproval: false, extraToolOptions: { caseContext: { caseId: 'c-1', dir: base }, origin } });
+    const acting = {
+      LaunchApp: { app: 'calculator' }, CloseApp: { app: 'calculator' }, RequestLease: { apps: ['calculator'], reason: 'x' },
+      Click: { screenshot_id: 'ss-1', x: 1, y: 1 }, Type: { text: 'a' }, Key: { keys: 'a' },
+      Scroll: { screenshot_id: 'ss-1', x: 1, y: 1, dy: 1 }, Drag: { screenshot_id: 'ss-1', from: { x: 1, y: 1 }, to: { x: 2, y: 2 } }
+    };
+    assert.deepEqual(Object.keys(acting).sort(), [...GUI_ACTING_TOOL_NAMES].sort());
+    for (const [name, params] of Object.entries(acting)) {
+      assert.deepEqual(await executor.execute(name, params), { success: false, error: CASE_BLOCKED_TOOL_ERROR }, name);
+    }
+    assert.match(CASE_BLOCKED_TOOL_ERROR, /acts on the desktop/);
+    assert.ok(!channel.requests.some((r) => ['launch', 'close', 'input'].includes(r.op)));
+    assert.equal(relay.sent.length, 0);
+    assert.equal((await executor.execute('ListApps', {})).ok, true);
+    assert.equal((await executor.execute('Screenshot', { app: 'calculator' })).ok, true);
   });
 });
 
@@ -856,11 +1035,44 @@ describe('input tools', () => {
   });
 });
 
-describe('jobIdOf', () => {
-  it('origin.job_id, then chat:<chatId>, then chat:local', () => {
-    assert.equal(jobIdOf({ origin: { job_id: 'job-9' }, chatId: 'c1' }), 'job-9');
-    assert.equal(jobIdOf({ origin: { job_id: null }, chatId: 'c1' }), 'chat:c1');
-    assert.equal(jobIdOf({}), 'chat:local');
+describe('R-F5-7: the job a lease is bound to', () => {
+  beforeEach(() => channel.connect());
+  // A run started by the gateway's agent:message handler: no chat, no job.
+  const none = () => ({ origin: { client: 'king-louie', session: null, job_id: null } });
+
+  it('R-F5-7: jobIdOf reads the run\'s origin', () => {
+    assert.equal(jobIdOf({ origin: { client: 'Example Client', session: 'mcp-1', job_id: 'job-9' } }), 'job-9');
+    assert.equal(jobIdOf({ origin: { client: 'desktop', session: 'chat-1', job_id: null } }), 'chat:chat-1');
+    // Tools get no options.chatId on main, and there is no chat:local.
+    assert.equal(jobIdOf(none()), null);
+    assert.equal(jobIdOf({ chatId: 'c1' }), null);
+    assert.equal(jobIdOf({ origin: { job_id: '', session: '' } }), null);
+    assert.equal(jobIdOf({}), null);
+    assert.equal(jobIdOf(), null);
+  });
+
+  it('R-F5-7: a run with neither a job id nor a chat id is refused a lease', async () => {
+    const out = await tools.RequestLease.execute({ apps: ['calculator'], reason: 'x' }, none());
+    assert.match(out.error, /^job_required/);
+    assert.equal(relay.sent.length, 0);
+    assert.equal(leases.current(), null);
+    assert.match((await tools.Type.execute({ text: 'a' }, none())).error, /^job_required/);
+    assert.ok(audits.some((a) => a.kind === 'gui.input' && a.data.result === 'refused:job_required' && a.data.job_id === null));
+    // Listing and launching need no lease, so they still work.
+    assert.equal((await tools.ListApps.execute({}, none())).ok, true);
+    assert.equal((await tools.LaunchApp.execute({ app: 'calculator' }, none())).ok, true);
+  });
+
+  it('a chat turn leases under chat:<its chat id>', async () => {
+    const chat = { origin: { client: 'desktop', session: 'chat-1', job_id: null } };
+    const p = tools.RequestLease.execute({ apps: ['calculator'], minutes: 5, reason: 'x' }, chat);
+    await new Promise((r) => setImmediate(r));
+    const req = relay.sent.filter((s) => s.message.type === 'kl.lease.request').pop();
+    assert.equal(req.message.lease.job_id, 'chat:chat-1');
+    assert.deepEqual(req.message.origin, { client: 'desktop', session: 'chat-1', job_id: null });
+    leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 5 }));
+    assert.equal((await p).ok, true);
+    assert.match((await tools.Type.execute({ text: 'a' }, { origin: { client: 'desktop', session: 'chat-2', job_id: null } })).error, /^lease_required/, 'another chat does not share it');
   });
 });
 ```
@@ -880,23 +1092,44 @@ Expected: FAIL with `Cannot find module '../src/gui/tools'`.
 // limit → broker, and every input (refused ones too) is audited.
 const crypto = require('crypto');
 const { Tool } = require('../tools/tool-schema');
+const { REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
+const { isLocalRequester } = require('../core/origin');
 const { GuiError, isGuiError, toToolResult } = require('./errors');
 const { resolveLaunch } = require('./apps');
 const { parseKeys, printableChar, isEnter, checkButton, MODIFIERS } = require('./keys');
 const { checkTypeText } = require('./text-guard');
 
 const GUI_TOOL_NAMES = Object.freeze(['ListApps', 'LaunchApp', 'CloseApp', 'Screenshot', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag']);
+// R-F5-4: what a case turn keeps, and what src/cases/chat-integration.js blocks.
+const GUI_READ_TOOL_NAMES = Object.freeze(['ListApps', 'Screenshot']);
+const GUI_ACTING_TOOL_NAMES = Object.freeze(GUI_TOOL_NAMES.filter((name) => !GUI_READ_TOOL_NAMES.includes(name)));
 const APP_ID = { type: 'string', minLength: 1, maxLength: 32, pattern: '^[a-z][a-z0-9-]{0,31}$' };
 const SCREENSHOT_ID = { type: 'string', minLength: 4, maxLength: 16, pattern: '^ss-[0-9]+$' };
 const COORD = { type: 'integer', minimum: 0, maximum: 100000 };
 const POINT = { type: 'object', properties: { x: COORD, y: COORD }, required: ['x', 'y'], additionalProperties: false };
 
+// R-F5-7: the job a lease is bound to, read from the run's origin only. The
+// host builds the origin (never a tool parameter): a delegate turn's job_id
+// is its job, a chat turn's session is its chat id, and a sub-agent inherits
+// its parent's origin. A run with neither has no job: null, and no lease.
 function jobIdOf(options = {}) {
   const origin = options && options.origin;
-  if (origin && typeof origin.job_id === 'string' && origin.job_id) return origin.job_id;
-  if (options && typeof options.chatId === 'string' && options.chatId) return `chat:${options.chatId}`;
-  return 'chat:local';
+  if (!origin || typeof origin !== 'object') return null;
+  if (typeof origin.job_id === 'string' && origin.job_id) return origin.job_id;
+  if (typeof origin.session === 'string' && origin.session) return `chat:${origin.session}`;
+  return null;
 }
+
+// R-F5-3 (M19): true in a run that refuses unsafe calls: a front-door
+// client's delegate turn without fleet:unsafe for this node, and its
+// sub-agents. ToolExecutor marks the requester it hands to tools; in such a
+// run that requester answers `false` without asking anyone.
+function refusesUnsafe(options) {
+  const requester = options && options.approvalRequester;
+  return typeof requester === 'function' && requester.refuseUnsafe === true;
+}
+
+const NO_JOB = 'this run has no job or chat to bind a lease to';
 
 // Strict JSON-schema subset: what these schemas use, nothing more.
 function checkValue(schema, value, where) {
@@ -996,6 +1229,7 @@ function buildGuiTools(gui) {
     const jobId = jobIdOf(options);
     let lease = null;
     try {
+      if (!jobId) throw new GuiError('job_required', NO_JOB);
       lease = leases.assertUsable(jobId);
       const { action, typed } = build(lease, jobId);
       leases.chargeInput(lease);
@@ -1048,13 +1282,19 @@ function buildGuiTools(gui) {
       const resolution = resolveLaunch(guiConfig, policy(), { app: params.app, args: params.args || [], files: params.files || [] }, { platform });
       let approvedBy = 'allowlist';
       if (resolution.tier === 'unsafe') {
+        // R-F5-3 (M19): this client may not request unsafe actions, so nobody
+        // is asked, and the refusal says that, not that a phone said no.
+        if (refusesUnsafe(options)) return { ok: false, error: REFUSE_UNSAFE_MESSAGE };
         const requester = options.approvalRequester;
         if (typeof requester !== 'function') return { ok: false, error: 'denied: phone approval required (no approval channel)' };
+        // A paired desktop's turn is answered on its own screen; every other
+        // run on the phone (Deviation 40).
+        const atDesktop = isLocalRequester(requester);
         const answer = await requester('LaunchApp', { app: resolution.exe, args: resolution.argv, files: resolution.files }, { tier: 'unsafe', reason: resolution.reason, signal: options.signal || null });
         if (answer === 'unavailable') return { ok: false, error: 'signed approval unavailable' };
-        if (answer === 'timeout') return { ok: false, error: 'denied: phone approval timed out' };
-        if (answer !== true) return { ok: false, error: 'denied: phone approval denied' };
-        approvedBy = 'phone';
+        if (answer === 'timeout') return { ok: false, error: atDesktop ? 'denied: approval timed out at the desktop' : 'denied: phone approval timed out' };
+        if (answer !== true) return { ok: false, error: atDesktop ? 'denied: approval denied at the desktop' : 'denied: phone approval denied' };
+        approvedBy = atDesktop ? 'desktop' : 'phone';
       }
       return { ok: true, ...(await broker.launch(resolution, ctx, { approvedBy })) };
     }),
@@ -1093,6 +1333,11 @@ function buildGuiTools(gui) {
       }, ['apps', 'reason'])
     }, async (params, options, ctx) => {
       broker.require('gui.input');
+      // R-F5-3 (M19): a front-door client without fleet:unsafe puts nothing
+      // on the owner's phone. Checked before the lease manager is touched.
+      if (refusesUnsafe(options)) return { ok: false, error: REFUSE_UNSAFE_MESSAGE };
+      // R-F5-7: a lease is bound to a job; this run has none.
+      if (!ctx.jobId) throw new GuiError('job_required', NO_JOB);
       if (!leases.available()) throw new GuiError('approval_unavailable');
       const lease = await leases.request({
         jobId: ctx.jobId, origin: options.origin || null, appIds: params.apps,
@@ -1200,32 +1445,85 @@ function registerGuiTools(toolRegistry, gui) {
   return tools;
 }
 
-module.exports = { registerGuiTools, buildGuiTools, GUI_TOOL_NAMES, jobIdOf, checkParams };
+module.exports = { registerGuiTools, buildGuiTools, GUI_TOOL_NAMES, GUI_READ_TOOL_NAMES, GUI_ACTING_TOOL_NAMES, jobIdOf, refusesUnsafe, checkParams };
 ```
 
-Two notes for the implementer:
+Notes for the implementer:
 - `Tool.validateParameters` (which `ToolExecutor` runs first) does not know `pattern`, `minItems` or nested objects; `checkParams` inside every tool does, so a call that slips past the shallow check still gets `invalid_params`.
 - `LaunchApp`'s requester metadata carries `tier` and `reason`; the phone approver signs `LaunchApp({ app, args, files })` with the resolved `exe` and `argv`, so the owner sees the exact path and argv (§3.9).
+- The order inside `RequestLease` is fixed and the tests pin it: capability (`capability_unavailable`), scope (`REFUSE_UNSAFE_MESSAGE`), job (`job_required`), then `signed approval unavailable`, then the lease manager (which checks `job_closed`). Nothing before the lease manager sends anything.
+- The scope refusal is not a `GuiError` and has no code of its own: it is main's sentence, the one an unsafe runbook or tool call from the same client gets. In phone mode the executor's audit listener records it as `exec.result` with that error, like any refused tool call; no `lease.*` entry is written, because no lease was asked for.
+- `refusesUnsafe` reads a mark, not scopes: tool options carry F3's three-key origin, which has no `kind` and no `scopes` (Deviation 39). Do not rebuild a scope check here; `shouldRefuseUnsafe` stays the one place that reads them.
 
 - [ ] **Step 4: `READ_TOOLS`**
 
-In `src/execution/safety-policy.js`:
+In `src/execution/safety-policy.js`, add the two names to the set main has. Do not retype the set from an older copy: on `532efcf` it also holds the history and management read tools, and they must stay. After the edit it reads:
 
 ```js
 // Tools that only observe state. classifyToolCall gives any other tool that
-// passes its checks the `routine` tier. Fleet stage 5 adds the GUI read tools.
-const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'status', 'get_state', 'list_machines', 'describe_machine', 'get_job', 'get_job_logs', 'Screenshot', 'ListApps']);
+// passes its checks the `routine` tier.
+const READ_TOOLS = new Set([
+  'Read', 'Glob', 'Grep', 'status', 'get_state', 'list_machines', 'describe_machine', 'get_job', 'get_job_logs', 'SearchHistory', 'ReadHistory',
+  'list_cases', 'open_case', 'get_orientation', 'list_questions', 'get_presence', 'list_envelopes', 'list_playbooks',
+  // Fleet stage 5: the GUI read tools.
+  'Screenshot', 'ListApps'
+]);
 ```
 
-- [ ] **Step 5: Run the tests**
+If main's set has grown again by the time this runs, keep what is there and add only the last two lines.
 
-Run: `node --test tests/gui-tools.test.js tests/approval-rule-precedence.test.js tests/core-remote-approvals.test.js`
+- [ ] **Step 5: The case-turn rule (R-F5-4)**
+
+In `src/cases/chat-integration.js`, extend the comment above `CASE_BLOCKED_TOOL_NAMES` and the list, and reword the error so it is true of a GUI tool too:
+
+```js
+// … A case
+// runs a runbook through the Executor tool instead. The acting desktop tools
+// of fleet stage 5 (owner ruling R-F5-4, 2026-10-12) are out as well: in a
+// case turn the desktop is read-only (ListApps and Screenshot stay), because
+// nothing a case turn types or clicks passes the case's outbound gate.
+const CASE_BLOCKED_TOOL_NAMES = Object.freeze([
+  'SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron',
+  'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas',
+  'run_runbook', 'delegate', 'send_to_job', 'cancel_job',
+  'LaunchApp', 'CloseApp', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag'
+]);
+const CASE_BLOCKED_TOOL_ERROR = 'This tool is not available in case turns: it starts another run, reaches another session, changes the tool list, or acts on the desktop. Do the work in this turn with the case tools and the other tools.';
+```
+
+The names are written out here on purpose: `src/cases/` does not load `src/gui/`. `tests/gui-tools.test.js` checks they are exactly `GUI_ACTING_TOOL_NAMES`. `WAKEUP_BASE_TOOLS` and `DELEGATE_EXCLUDED_TOOLS` are not touched (Deviation 36).
+
+In `tests/cases-tools.test.js`, update the two places that pin the list:
+
+- in `drops tools that start child runs from a case turn, and keeps them otherwise`, the GUI tools are registered only by a service's GUI subsystem, so add them to `coreOnly`:
+
+```js
+    // The desktop tools are registered only by a service's GUI subsystem (fleet stage 5).
+    const coreOnly = new Set(['sessions_spawn', 'sessions_list', 'sessions_history', 'message', 'run_runbook', 'delegate', 'send_to_job', 'cancel_job',
+      'LaunchApp', 'CloseApp', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag']);
+```
+
+- in `blocks tools that reach other sessions or change the tool list in every case turn`, the expected list gains the same eight names as its last line:
+
+```js
+    assert.deepStrictEqual([...CASE_BLOCKED_TOOL_NAMES], [
+      'SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron',
+      'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas',
+      'run_runbook', 'delegate', 'send_to_job', 'cancel_job',
+      'LaunchApp', 'CloseApp', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag'
+    ]);
+    assert.match(CASE_BLOCKED_TOOL_ERROR, /not available in case turns/);
+```
+
+- [ ] **Step 6: Run the tests**
+
+Run: `node --test tests/gui-tools.test.js tests/cases-tools.test.js tests/fleet-chat-tools.test.js tests/management-tools.test.js tests/approval-rule-precedence.test.js tests/core-remote-approvals.test.js`
 Expected: PASS, `# fail 0`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/gui/tools.js src/execution/safety-policy.js tests/gui-tools.test.js
+git add src/gui/tools.js src/execution/safety-policy.js src/cases/chat-integration.js tests/gui-tools.test.js tests/cases-tools.test.js
 git commit -m "feat(gui): ListApps, LaunchApp, CloseApp, Screenshot, RequestLease and input tools
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
@@ -1235,20 +1533,24 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 14: The GUI subsystem and its host wiring
 
+**Review:** trust (it decides whether the node has a GUI at all, which job is open, and what `list_machines` tells a client). **On Windows:** all of it can be checked.
+
+R-F5-7 lands here as `isJobOpen` and the `jobOpen` the service gives the lease manager (Deviations 6 and 38); R-F5-3 gets its test through a real `ToolExecutor`.
+
 **Files:**
 - Create: `src/gui/index.js`
-- Modify: `src/core/create-core.js` (after `toolRegistry.register(new SessionsSpawnTool(sessionManager));` at ~2443; the `context` object near `getPhoneApprover` at ~2965)
+- Modify: `src/core/create-core.js` (after the line `toolRegistry.register(new SessionsSpawnTool(sessionManager));` in `start()`; and in the `context` object, below the `getPhoneApprover: () => (remoteApprovals === 'phone' && …` line)
 - Modify: `src/service/run.js` (agent profile: create the subsystem, pass it to `createCore` and `startFleetNode`, start and stop it)
-- Modify: `src/fleet/fleet-tools.js:184,209` (`'gui'` in `capabilities` while available)
+- Modify: `src/fleet/fleet-tools.js` (the two `capabilities: this.nodeConfig.capabilities,` lines, in `list_machines` and `describe_machine`: `'gui'` while available)
 - Test: `tests/gui-subsystem.test.js`
 
 **Interfaces:**
 - Consumes: everything in Tasks 5–13; `startApprovals` result (F3); `createCore` deps; `startFleetNode({ deps: { leaseManager } })` (F4).
 - Produces:
-  - `src/gui/index.js`: `createGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => true, adminUid, geteuid, log, deps = {} }) → { broker, leases, liveView, channel, registerTools(toolRegistry), start(), stop(), capability() } | null` (`deps.endpoint` overrides the pipe/socket path; tests only). Null (logged at `info`) when `gui.enabled` is false, the profile is not `agent`, or the helper is not installed; null (logged at `error`) when the canonical file names another node.
+  - `src/gui/index.js`: `createGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => false, adminUid, geteuid, log, deps = {} }) → { broker, leases, liveView, channel, registerTools(toolRegistry), start(), stop(), capability() } | null` (`deps.endpoint` overrides the pipe/socket path; tests only). `jobOpen` fails closed: a host that passes none can hold no lease. Null (logged at `info`) when `gui.enabled` is false, the profile is not `agent`, or the helper is not installed; null (logged at `error`) when the canonical file names another node.
   - `core.context.getGuiBroker() → GuiBroker | null`.
   - `FleetToolHandler`: `capabilities` includes `'gui'` while `readGuiStatus(...).available`.
-  - `isJobOpen(jobManager, jobId) → boolean` (exported from `src/gui/index.js`).
+  - `isJobOpen({ jobManager, chatExists }, jobId) → boolean` (exported from `src/gui/index.js`; R-F5-7). True only for a `job-…` id the `JobManager` has and that is not terminal, or a `chat:<id>` for which `chatExists(id) === true`. An unknown id, no `JobManager`, no `chatExists`, a lookup that throws, or a `jobId` that is not a non-empty string: false.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1275,6 +1577,7 @@ const { FleetToolHandler } = require('../src/fleet/fleet-tools');
 const { setLogLevel } = require('../src/logging');
 const { testNodeIdentity } = require('./helpers/fake-phone');
 const { holdEventLoop } = require('./helpers/hold-event-loop');
+const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 setLogLevel('fatal');
 const release = holdEventLoop();
@@ -1287,7 +1590,9 @@ const cipher = createAesGcmCipher(crypto.randomBytes(32));
 const identity = testNodeIdentity({ key: 'gpu-box' });
 
 function dirs() {
-  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-sub-')));
+  // Native realpath: session-secret.js requires the config dir to be its own
+  // native realpath, and a Windows CI TEMP is an 8.3 short path.
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-sub-')));
   cleanups.push(() => fs.rmSync(base, { recursive: true, force: true }));
   const configDir = path.join(base, 'config');
   const dataDir = path.join(base, 'data');
@@ -1363,12 +1668,30 @@ describe('createGuiSubsystem', () => {
     assert.equal(readGuiStatus({ dataDir }).available, false);
   });
 
-  it('isJobOpen: unknown jobs (chats) are open; terminal jobs are not', () => {
-    const jm = { getJob: (id) => (id === 'job-done' ? { job_id: id } : id === 'job-run' ? { job_id: id } : undefined), isTerminal: (id) => id === 'job-done' };
-    assert.equal(isJobOpen(jm, 'chat:c1'), true);
-    assert.equal(isJobOpen(jm, 'job-run'), true);
-    assert.equal(isJobOpen(jm, 'job-done'), false);
-    assert.equal(isJobOpen(null, 'job-done'), true);
+  it('R-F5-7: isJobOpen fails closed', () => {
+    // JobManager#getJob answers null for a job it does not have.
+    const jobManager = { getJob: (id) => (['job-run', 'job-done'].includes(id) ? { job_id: id } : null), isTerminal: (id) => id === 'job-done' };
+    const chats = new Set(['c1']);
+    const deps = { jobManager, chatExists: (id) => chats.has(id) };
+    assert.equal(isJobOpen(deps, 'job-run'), true);
+    assert.equal(isJobOpen(deps, 'job-done'), false, 'terminal');
+    assert.equal(isJobOpen(deps, 'job-forgotten'), false, 'a job the JobManager does not know is not open');
+    assert.equal(isJobOpen(deps, 'chat:c1'), true);
+    assert.equal(isJobOpen(deps, 'chat:gone'), false, 'no such chat');
+    assert.equal(isJobOpen(deps, 'chat:'), false);
+    assert.equal(isJobOpen({ jobManager: null, chatExists: () => true }, 'job-run'), false, 'no fleet node yet');
+    assert.equal(isJobOpen({ jobManager }, 'chat:c1'), false, 'no chat lookup given');
+    assert.equal(isJobOpen({ jobManager, chatExists: () => { throw new Error('store unavailable'); } }, 'chat:c1'), false);
+    assert.equal(isJobOpen({ jobManager, chatExists: () => 'yes' }, 'chat:c1'), false, 'only true is open');
+    for (const bad of [null, undefined, '', 7]) assert.equal(isJobOpen(deps, bad), false, String(bad));
+    assert.equal(isJobOpen(undefined, 'job-run'), false);
+  });
+
+  it('with no jobOpen from its host, the subsystem holds no lease', async () => {
+    const { base, configDir, dataDir } = dirs();
+    install(configDir);
+    const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, deps: { endpoint: endpoint(base) } });
+    await assert.rejects(gui.leases.request({ jobId: 'job-1', origin: null, appIds: ['calculator'], minutes: 5, reason: 'x' }), (e) => e.code === 'job_closed');
   });
 });
 
@@ -1393,12 +1716,58 @@ describe('host wiring', () => {
     assert.ok(!JSON.stringify(described.gui).includes('calc.exe'), 'never paths');
   });
 
+  it('R-F5-3: refuseUnsafe reaches the GUI tools through ToolExecutor', async () => {
+    const ToolExecutor = require('../src/execution/tool-executor');
+    const { toolRegistry } = require('../src/tools');
+    const { buildGuiTools, GUI_TOOL_NAMES } = require('../src/gui/tools');
+    const { shouldRefuseUnsafe } = require('../src/fleet/delegate-sessions');
+    const { REFUSE_UNSAFE_MESSAGE } = require('../src/approvals/executor-options');
+
+    // What DelegateSessions computes for a turn (M19), from the caller's origin.
+    const node = { name: 'gpu-box' };
+    const frontDoor = (scopes) => ({ kind: 'frontdoor', client_id: 'c-1', client_name: 'Example Client', grant_id: 'g-1', scopes });
+    assert.equal(shouldRefuseUnsafe(frontDoor(['fleet:delegate']), node), true);
+    assert.equal(shouldRefuseUnsafe(frontDoor(['fleet:delegate', 'fleet:unsafe;machines=web-01']), node), true, 'fleet:unsafe for another machine does not count');
+    assert.equal(shouldRefuseUnsafe(frontDoor(['fleet:delegate', 'fleet:unsafe']), node), false);
+    assert.equal(shouldRefuseUnsafe({ kind: 'stdio', client: 'stdio-mcp', session: null }, node), false, 'the node\'s own MCP client');
+    assert.equal(shouldRefuseUnsafe({ kind: 'service-chat' }, node), false, 'the service\'s own chat');
+
+    // The tools, on the shared registry, with a lease manager that must not be reached.
+    const reached = [];
+    const leases = { available: () => true, request: async (r) => { reached.push(r); throw new Error('the lease manager was reached'); } };
+    const launched = [];
+    const broker = { require: () => {}, launch: async (r) => { launched.push(r); return { app_id: r.appId, pid: 1, tier: r.tier, launched_at: 'x' }; } };
+    for (const t of buildGuiTools({ broker, leases, guiConfig: nodeConfig().gui, getPolicy: () => ({}) })) toolRegistry.register(t);
+    cleanups.push(() => { for (const n of GUI_TOOL_NAMES) toolRegistry.unregister(n); });
+
+    // The run a front-door delegate turn without fleet:unsafe gets.
+    const origin = { client: 'Example Client', session: 'mcp-1', job_id: 'job-1' };
+    const asked = [];
+    const refusing = new ToolExecutor({
+      requireApproval: false, refuseUnsafe: true, origin, extraToolOptions: { origin },
+      approvalRequester: async (...args) => { asked.push(args); return true; }
+    });
+    assert.deepEqual(await refusing.execute('RequestLease', { apps: ['calculator'], reason: 'x' }), { ok: false, error: REFUSE_UNSAFE_MESSAGE });
+    const exe = process.execPath;
+    assert.deepEqual(await refusing.execute('LaunchApp', { app: exe }), { ok: false, error: REFUSE_UNSAFE_MESSAGE }, 'not allowlisted, so unsafe');
+    assert.deepEqual(reached, []);
+    assert.deepEqual(launched, []);
+    assert.deepEqual(asked, [], 'the phone was never asked');
+
+    // The same call from a run the node started itself goes on to the lease manager.
+    const local = new ToolExecutor({ requireApproval: false, origin, extraToolOptions: { origin } });
+    const out = await local.execute('RequestLease', { apps: ['calculator'], reason: 'x' });
+    assert.equal(reached.length, 1);
+    assert.match(out.error, /the lease manager was reached/);
+  });
+
   it('createCore exposes getGuiBroker and registers the GUI tools at start', async () => {
     const { createCore } = require('../src/core');
     const { JsonFileStore } = require('../src/platform/json-file-store');
     const { createHeadlessPrompter } = require('../src/platform/prompter');
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-core-'));
-    cleanups.push(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+    // On Windows an open history.sqlite keeps its folder from being deleted.
+    cleanups.push(() => { closeOpenHistoryStores(); fs.rmSync(dataDir, { recursive: true, force: true }); });
     const broker = { marker: true };
     let registered = 0;
     const fakeGui = { broker, registerTools: (registry) => { registered += 1; assert.ok(typeof registry.register === 'function'); } };
@@ -1443,13 +1812,27 @@ const { LiveView } = require('./live-view');
 const { registerGuiTools } = require('./tools');
 const { readCanonical, canonicalMtime, endpointPath } = require('./session-secret');
 
-function isJobOpen(jobManager, jobId) {
-  if (!jobManager) return true;
-  const job = jobManager.getJob(jobId);
-  return !job || !jobManager.isTerminal(jobId);
+// R-F5-7: a job is open only while this node knows it and it has not ended.
+// `chat:<id>` is a chat's own job (Deviation 38): open while the chat exists.
+// Any other id is a fleet job: open while the JobManager has it and it is not
+// terminal. An unknown id, a missing JobManager or chat lookup, and a lookup
+// that throws are all closed.
+function isJobOpen({ jobManager = null, chatExists = null } = {}, jobId) {
+  if (typeof jobId !== 'string' || !jobId) return false;
+  try {
+    if (jobId.startsWith('chat:')) {
+      const chatId = jobId.slice('chat:'.length);
+      return Boolean(chatId) && typeof chatExists === 'function' && chatExists(chatId) === true;
+    }
+    if (!jobManager) return false;
+    return Boolean(jobManager.getJob(jobId)) && !jobManager.isTerminal(jobId);
+  } catch {
+    return false;
+  }
 }
 
-function createGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => true,
+// jobOpen fails closed: a host that passes none can hold no lease.
+function createGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => false,
   adminUid = 0, geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1), log = createLogger('gui'), deps = {} } = {}) {
   const gui = nodeConfig.gui;
   if (nodeConfig.profile !== 'agent' || !gui || !gui.enabled) {
@@ -1516,7 +1899,7 @@ module.exports = { createGuiSubsystem, isJobOpen };
 
 - [ ] **Step 4: `createCore`**
 
-In `src/core/create-core.js`, right after `toolRegistry.register(new SessionsSpawnTool(sessionManager));`:
+In `src/core/create-core.js`, right after the line `toolRegistry.register(new SessionsSpawnTool(sessionManager));` (inside `start()`):
 
 ```js
     // Fleet stage 5: the GUI tools, when the service host passed a gui
@@ -1524,7 +1907,7 @@ In `src/core/create-core.js`, right after `toolRegistry.register(new SessionsSpa
     if (deps.gui && typeof deps.gui.registerTools === 'function') deps.gui.registerTools(toolRegistry);
 ```
 
-In the `context` object, below `getPhoneApprover: …`:
+In the `context` object, below the line that starts `getPhoneApprover: () => (remoteApprovals === 'phone' && deps.phoneApprover` (the file has a second `getPhoneApprover:` in a deps object passed to another module; that one is not it):
 
 ```js
     // Fleet stage 5 (§5.2): null on Electron, a runbook node, or with no helper installed.
@@ -1533,9 +1916,9 @@ In the `context` object, below `getPhoneApprover: …`:
 
 - [ ] **Step 5: `run.js`**
 
-In `src/service/run.js`'s agent profile `start()`:
+In `src/service/run.js`'s agent profile `start()` (the anchors are the lines as they read on `532efcf`):
 
-1. After `const approvals = await startApprovals({ … });`, create the subsystem:
+1. The function declares `let core;` and `let fleet = null;` right after `const approvals = await startApprovals({ … });`. Create the subsystem after those two declarations and before the `try {` that calls `createCore`:
 
 ```js
         // Fleet stage 5: desktop apps through the session helper (null when
@@ -1547,19 +1930,25 @@ In `src/service/run.js`'s agent profile `start()`:
           const { adminConfigDir } = require('../platform/paths');
           gui = createGuiSubsystem({
             nodeConfig, dataDir, configDir: configDir || adminConfigDir({ dataDir }), cipher: servicePorts.cipher, approvals,
-            // Late-bound: the fleet node starts after the core.
-            jobOpen: (jobId) => isJobOpen(fleet ? fleet.jobManager : null, jobId),
+            // R-F5-7, late-bound: the core and the fleet node are built after
+            // this. Until both exist, and for any job neither knows, no job
+            // is open (fail closed).
+            jobOpen: (jobId) => isJobOpen({
+              jobManager: fleet ? fleet.jobManager : null,
+              chatExists: (chatId) => Boolean(core && core.context.getChat(chatId, { messages: false }))
+            }, jobId),
             ...(adminUid === undefined ? {} : { adminUid })
           });
         } catch (err) {
+          await desktopBridge.stop().catch(() => {});
           await approvals.stop().catch(() => {});
           throw err;
         }
 ```
 
-2. In the `createCore({ … })` deps, add `gui,` next to `approvals,`.
-3. In the first `catch (err)` (core construction/start failure), before `await approvals.stop()`, add `if (gui) await gui.stop().catch(() => {});`.
-4. Replace the fleet start line with:
+2. In the `createCore({ … })` deps, add `gui,` next to the `approvals,` line (the one commented "Cases stage 4 (wave 3): the phone contact channel").
+3. In the first `catch (err)` (core construction/start failure), before its `await approvals.stop().catch(() => {});`, add `if (gui) await gui.stop().catch(() => {});`.
+4. Replace the line `fleet = await startFleetNode({ dataDir, nodeConfig, approvals, core, adminUid });` with:
 
 ```js
           fleet = await startFleetNode({ dataDir, nodeConfig, approvals, core, adminUid, deps: { leaseManager: gui ? gui.leases : null } });
@@ -1567,7 +1956,7 @@ In `src/service/run.js`'s agent profile `start()`:
 ```
 
 5. In the second `catch (err)`, first line: `if (gui) await gui.stop().catch(() => {});`.
-6. In the returned `stop`, stop the GUI first (it ends every lease `service_stopped` and closes the helper channel before the fleet and core go down):
+6. In the returned object, replace `stop` only (leave `startBackgroundChecks`, `masterKeySource`, `desktopBridge`, `approvals` and `fleet` as they are). Stop the GUI first: it ends every lease `service_stopped` and closes the helper channel before the fleet and core go down:
 
 ```js
           stop: async () => {
@@ -1593,7 +1982,7 @@ In `src/service/run.js`'s agent profile `start()`:
 
 and add `gui` to the returned object beside `fleet`.
 
-`fleet` is declared with `let fleet = null;` before `createCore` in the existing code, so the `jobOpen` closure reads the started node once it exists.
+`core` and `fleet` are declared (`let core;`, `let fleet = null;`) before the subsystem is created, so the `jobOpen` closure reads each once it exists. `core.context.getChat(id, { messages: false })` is the history store's synchronous lookup; it returns nothing for a chat that does not exist, and `isJobOpen` treats a throw (a store that would not open) as closed. A paired desktop's chats are in this store too, because an attached turn runs here.
 
 - [ ] **Step 6: `FleetToolHandler` capabilities**
 
@@ -1612,8 +2001,8 @@ and in both `list_machines` and `describe_machine`, replace `capabilities: this.
 
 - [ ] **Step 7: Run the tests**
 
-Run: `node --test tests/gui-subsystem.test.js tests/core-create.test.js tests/fleet-core-seams.test.js tests/service-profile-graph.test.js tests/mcp-stdio.test.js`
-Expected: PASS, `# fail 0`. Then `npm test` for the full suite (`# fail 0`).
+Run: `node --test tests/gui-subsystem.test.js tests/gui-tools.test.js tests/gui-leases.test.js tests/core-create.test.js tests/fleet-core-seams.test.js tests/fleet-chat-tools.test.js tests/service-profile-graph.test.js tests/mcp-stdio.test.js`
+Expected: PASS, `# fail 0`. (The full suite runs once, in Task 21.)
 
 - [ ] **Step 8: Commit**
 
@@ -1628,4 +2017,4 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ## After Part 3
 
-Run `npm test` and confirm `# fail 0`. Part 4 (`2026-09-23-fleet-stage5-session-helper-part4.md`) starts at Task 15 on these commits.
+Every test file Tasks 12–14 name shows `# fail 0` (the full suite runs once, in Task 21). Part 4 (`2026-09-23-fleet-stage5-session-helper-part4.md`) starts at Task 15 on these commits.

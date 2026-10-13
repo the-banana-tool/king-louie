@@ -10,20 +10,67 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-23-fleet-stage5-session-helper.md`. **Program:** `docs/superpowers/specs/2026-09-23-stage-program.md` (§3, §4.12, §4.13, §4.15–4.17, §4.23, §5). **Parent:** `docs/superpowers/specs/2026-09-21-king-louie-fleet-design.md` §4.6. Executors read the spec beside this plan; where they disagree, the Deviations list below wins.
 
-**Before Task 1:** the worktree has no `node_modules`. Run `npm ci` once in `king-louie-wt/fleet-stage5`, then `npm test` and confirm `# fail 0` on the untouched branch, so any later failure is this plan's.
+**Revised 2026-10-12 for main `532efcf`.** The plan was written against main `d84f4c9`. The branch has since been rebased onto `532efcf` (474 commits later), and every file path, function, signature, constant and test helper the tasks name was read again there. Anchors are quoted text, never line numbers. What changed: the owner's rulings ("Owner rulings (2026-10-12)"), what main already settles or forbids ("Checked against main"), Deviations 1, 3, 4, 5, 6, 11 and 21, and the new Deviations 31–44. Every task header now carries its review weight and says what cannot be checked on Windows ("Tasks, review weight and where each can be checked").
 
-## Owner questions
+**Before Task 1:** the worktree has no `node_modules`. Give it one the way this checkout's other worktrees get theirs: `npm ci`, or a junction to the main checkout's `node_modules`. If it is a junction or a symlink, never run `npm ci`, `git clean` or `git worktree remove` over it; delete the junction first. Then run `node --test tests/service-profile-graph.test.js tests/approvals-protocol.test.js tests/agent-loop.test.js tests/cases-tools.test.js tests/fleet-core-seams.test.js` and confirm `# fail 0` on the untouched branch, so a later failure in a file this plan touches is this plan's.
 
-Only the owner can answer these. The plan proceeds with the recommended default in each case; changing a default touches only the task named.
+**Tests per task, the full suite once.** Each task runs the test files it names. The full `npm test` runs once for the stage, in Task 21.
 
-1. **The live lease view on Android.** Every device-signed request on Android is a biometric prompt (F3's key parameters; F4 Deviation 30). The spec has the phone sign `kl.lease.watch` every 20 s and long-poll views with device-signed requests, which on Android would prompt continuously. **Recommended default (the plan does this, Task 25):** on Android the live lease screen fetches on tap — "Refresh" signs one watch and one view fetch (the prompts Android requires), the kill switch is always one prompt, and a `lease` push or the banner opens the screen without fetching. iOS streams as the spec says, signing the watch with the already-unlocked API session (Task 24). The alternative (a separate non-biometric view key) is F3 app v2 work the spec defers.
-2. **Installing the helper for a second user.** The spec runs one session user per node, and `session install --user NAME` rewrites the canonical secret each run. Installing for user B while user A is installed would leave A's autostart entry and per-user copy behind, pointing at a secret that no longer works. **Recommended default (Task 20):** `session install --user B` refuses with `session_user_mismatch: installed for "A"; run "session uninstall --user A" first`, and re-running install for the same user rotates as the spec says.
+## Owner questions (decided 2026-10-12)
+
+The owner answered both on 2026-10-12, and no task is blocked on the owner. Where carrying a ruling into code needed a reading the ruling's words do not settle, the reading is recorded as a deviation and says so (Deviations 38, 41 and 42), so the owner can overrule it.
+
+1. **The live lease view on Android: fetched on tap (R-F5-1, with R-F5-5 and R-F5-6).** What the app does today (`mobile/android/app`, unchanged on main since this plan was written): the device key needs a biometric prompt for every signature (`DeviceKey.kt`: `setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)`), and every device-authenticated relay request is itself signed (`RelayApi.exchange`), so each request is a prompt of its own. The spec's 20 s watch and long-polled views would prompt without end. So on Android nothing polls and nothing is sent again by itself: one tap signs and sends once. The prompts that follow from the app's key: "Check for computer-use requests" is one (the list request); Allow or Deny is two (the grant, then the request that carries it); Stop is two (the revoke, then its request); Refresh is three (the watch, its request, the views request). The earlier text "the kill switch is always one prompt" was wrong for this app. A send whose answer does not arrive is shown as not confirmed, and the owner taps again (R-F5-5). A `lease` push opens Pending's "Computer use" section and fetches nothing; Refresh asks for views from the position the watch reply gives, with `wait=5`, so the first tap shows the frame that watch causes (R-F5-6; Deviations 41 and 42; Tasks 11, 23, 25). iOS streams as the spec says, signing the watch with the already-unlocked API session (Task 24, R-F5-8). A separate non-biometric view key stays F3 app v2 work the spec defers. One behaviour of F3's client is kept as it is: `RelayApi.exchange` answers a `401 clock_skew` once by correcting its clock and signing the same request again. That is one more prompt in that one case, on every route of the app; it is not a re-send loop and F5 does not change it.
+2. **Installing the helper for a second user: refused until the first is uninstalled (R-F5-2).** The spec runs one session user per node, and `session install --user NAME` rewrites the canonical secret each run. Installing for user B while user A is installed would leave A's autostart entry and per-user copy behind, pointing at a secret that no longer works. `session install --user B` refuses with `session_user_mismatch: installed for "A"; run "session uninstall --user A" first`, and running install again for the same user rotates as the spec says (Task 20).
+
+## Owner rulings (2026-10-12)
+
+Eight rulings: the two questions above and six points the plan had left open. Each row names the tasks that carry the ruling and the tests that pin it. `mobile-lease-apps` is `tests/mobile-lease-apps.test.js`, a Node test that reads the two apps' sources (the app modules have no test target of their own), so it runs in `npm test` on any machine.
+
+| Id | Ruling | Carried by | Pinned by |
+|---|---|---|---|
+| R-F5-1 | On Android the live lease view is fetched when the owner taps. Nothing polls. | Task 25 | `mobile-lease-apps › Android: the live lease section has no loop and no timer`; Task 25 Step 6 hand check |
+| R-F5-2 | Installing the helper for a second user is refused until the first is uninstalled. | Task 20 | `service-cli-session › R-F5-2 (owner question 2): refuses a second session user until the first is uninstalled` |
+| R-F5-3 | A lease request from a front-door client needs `fleet:unsafe`. `RequestLease` and an unsafe `LaunchApp` check the scope before anything reaches the phone (M19 holds; fail closed). A session the node started itself still asks the phone. | Task 13 (the tools), Task 14 (through `ToolExecutor`) | `gui-tools › R-F5-3: a run that refuses unsafe calls is refused a lease for scope; nothing reaches the relay`; `gui-tools › R-F5-3: an unsafe LaunchApp is refused for scope and the requester is never called; an allowlisted launch still runs`; `gui-tools › R-F5-3: a node-local run still asks the phone`; `gui-subsystem › R-F5-3: refuseUnsafe reaches the GUI tools through ToolExecutor` |
+| R-F5-4 | In a case turn the GUI tools are read-only: `ListApps` and `Screenshot` stay; every acting GUI tool joins the case-blocked list. | Task 13 | `gui-tools › R-F5-4: a case turn keeps ListApps and Screenshot; a wake-up turn gets no GUI tool; a delegate turn gets all ten`; `gui-tools › R-F5-4: ToolExecutor refuses an acting GUI tool in a case turn`; `cases-tools › blocks tools that reach other sessions or change the tool list in every case turn` (the pinned list) |
+| R-F5-5 | Android has no automatic re-send. Stop, Allow and Refresh sign and send once; a send that is not confirmed is shown as such and the owner taps again. | Task 23 (`Leases.sendOutcome`), Task 25 | `LeaseFlowTest › sendOutcome` (JVM); `mobile-lease-apps › Android: Stop, Allow and Refresh send once`; Task 25 Step 6 hand check |
+| R-F5-6 | On Android a lease push opens the lease screen without fetching; Refresh waits briefly for the node's next capture, so the first tap shows a frame. | Task 11 (`after_seq` in the watch reply), Task 23 (`Leases.cursorAfterWatch`, `REFRESH_WAIT_S`), Task 25 | `gui-relay-extension › R-F5-6: the watch reply carries the mailbox position, and a views fetch from it waits for the frame`; `LeaseFlowTest › cursorAfterWatch`; `mobile-lease-apps › Android: a lease push fetches nothing; Refresh waits with Leases.REFRESH_WAIT_S` |
+| R-F5-7 | A run with neither a job id nor a chat id is refused a lease, and an unknown job closes the lease (it does not count as open). | Task 1 (codes), Task 8 (no per-job state without a job), Task 9 (lease manager), Task 13 (`jobIdOf`), Task 14 (`isJobOpen`, `run.js`) | `gui-tools › R-F5-7: jobIdOf reads the run's origin`; `gui-tools › R-F5-7: a run with neither a job id nor a chat id is refused a lease`; `gui-leases › R-F5-7: no job id is job_required, a job that is not open is job_closed, and nothing goes out`; `gui-leases › R-F5-7: a grant for a job that closed is rejected at check 12 and ends the lease`; `gui-leases › R-F5-7: a lease whose job is gone ends at the next input and does not block another job`; `gui-broker › R-F5-7: a run with no job id keeps no launched pids and no screenshots`; `gui-subsystem › R-F5-7: isJobOpen fails closed` |
+| R-F5-8 | Accepted: iOS signs `kl.lease.watch` with the API session, with no fresh Face ID; grants, denies and the kill switch keep a fresh prompt. | Task 24 | `mobile-lease-apps › iOS: only the watch is signed with the session`; Task 24 Step 6 hand check |
+
+R-F5-1, R-F5-2 and R-F5-8 confirm what the plan already did; their tasks were checked and only their wording changed. R-F5-3 to R-F5-7 changed code and tests in the tasks named.
+
+## Checked against main (`532efcf`)
+
+What main has that the plan was not written for, and what the plan now does about it. Items with no change are listed so nobody checks them twice.
+
+| Main has | Plan |
+|---|---|
+| `READ_TOOLS` (`src/execution/safety-policy.js`) also holds `SearchHistory`, `ReadHistory` and seven management read tools | Task 13 adds `Screenshot` and `ListApps` to the set main has. It never writes the set out again |
+| M19 (`shouldRefuseUnsafe` in `src/fleet/delegate-sessions.js`; `refuseUnsafeGate`, `REFUSE_UNSAFE_MESSAGE` in `src/approvals/executor-options.js`; `ToolExecutor#_rethreadedRequester` marks the requester it hands to tools with `refuseUnsafe`) | R-F5-3: Task 13 reads that mark (Deviation 39) |
+| Case, wake-up and delegate tool lists (`CASE_BLOCKED_TOOL_NAMES`, `WAKEUP_BASE_TOOLS` in `src/cases/chat-integration.js`; `DELEGATE_EXCLUDED_TOOLS` in `src/fleet/delegate-sessions.js`) | R-F5-4 and Deviation 36: Task 13 |
+| Tools get `options.origin` (`{ client, session, job_id }`, `session` = the chat id of a chat turn) and no `options.chatId` (`createToolExecutorWithApprovals`, `runOrigin`) | R-F5-7: `jobIdOf` reads the origin (Deviation 5) |
+| A routed provider that fails over per call (`InferenceRouter#routedProvider`; `AgentLoop#_currentProviderName`); after its first answer a turn cannot move to another provider (`FAILOVER_BLOCKED`) | Task 12 reads the provider name per iteration (Deviation 4) |
+| `Tool.validateParameters` knows `integer` | Deviation 1: Task 12 no longer edits the validator |
+| Chats are rows in `history.sqlite`; a `toolResult` row is chunked and indexed; a test that builds a core calls `closeOpenHistoryStores()` | Deviation 3 says what of a screenshot is indexed; `tests/gui-subsystem.test.js` calls the helper (Task 14) |
+| A catalog `vision` capability (`src/models/capabilities.js`: `capabilitiesOf`) | Not used: the agent loop has no catalog handle. Task 12 keeps the retry-without-images path; skipping images up front for a non-vision model is a follow-up |
+| Windows CI runs with `TEMP` as an 8.3 short path | Tests build temp roots with `fs.realpathSync.native` (Global Constraints) |
+| `readline` splits JSON lines at U+2028/U+2029 | The helper's line worker splits on `\n` itself (Task 16) |
+| An attached desktop's turn runs in the service with a local origin, so its approvals are on-screen | Deviation 40: an unsafe `LaunchApp` says who approved or refused |
+| `PROXIED_DOMAINS`, `DEFAULT_FEATURES`, `DEFAULT_PORTS`, the four `examples/fleet/*/service.json`, `CASE_YAML_KEYS` | No change: F5 adds no IPC domain, feature, port or `case.yaml` key. An attached desktop's turn runs in the service |
+| `NODE_YAML_KEYS` | Task 1 appends `gui` in the same change that parses it, as the comment above the constant already says |
+| 41 approval-v1 vectors, 37 client-grant-v1 files | Unchanged: F5 adds no approval-v1 message; `lease-v1` and `session-v1` have their own directories (`node tests/vectors/approval-v1/generate.js --check` still says `41 vectors match`) |
+| Program constraint "No new native npm dependencies" | Holds: no task adds a `package.json` entry, native or not; the Android and iOS tasks add no library either |
+| `ToolRegistry#unregister(name)` | Tests that register a tool on the shared registry remove it with `unregister` |
 
 ## Global Constraints
 
 Program §3 and project rules, verbatim where they are quoted:
 
-- Tests: `node --test`, **never Jest**. Pass = `# fail 0` / `# pass N` in the TAP summary. Run one file with `node --test tests/<file>.test.js`; the full suite with `npm test`. E2E needs `unset ELECTRON_RUN_AS_NODE && npm run test:e2e`.
+- Tests: `node --test`, **never Jest**. Pass = `# fail 0` / `# pass N` in the TAP summary. Run one file with `node --test tests/<file>.test.js`; the full suite with `npm test` (once, in Task 21). E2E needs `unset ELECTRON_RUN_AS_NODE && npm run test:e2e`.
+- A test's temp root is `fs.realpathSync.native(fs.mkdtempSync(…))` wherever its path is compared or checked for links (`assertSafeComponents`, `resolveLaunch`, `realResolve`): a Windows CI runner's `TEMP` is an 8.3 short path, which the JS `realpathSync` keeps and the native one expands.
+- A test that builds a core calls `closeOpenHistoryStores()` (`tests/helpers/close-history-stores.js`) before it removes the data dir: on Windows an open `history.sqlite` keeps its folder from being deleted.
+- Fail closed (R-F5-3, R-F5-7): a run that refuses unsafe calls is told so in main's own words (`REFUSE_UNSAFE_MESSAGE`) before anything reaches the phone; a run with no job is refused a lease; a job that is not known to be open is closed. No default in this plan's code is "open" or "allowed".
 - Logging through `createLogger` (`src/logging.js`); no bare `console.*` anywhere in `src/` (CLI output goes to `io.stdout`/`io.stderr`, as `src/service/cli.js` does).
 - `src/` outside `src/ipc/` and the Electron host is Electron-free (`tests/electron-boundary.test.js`). Everything in this plan runs under `king-louie-service`; `src/gui/` and `src/session/` never require `electron`.
 - **No new native npm dependencies** (and no new npm dependency at all in this stage, spec §14): HMAC, HKDF, AES-GCM, Ed25519 and P-256 come from `node:crypto`; JCS is `src/platform/jcs.js`; image encoding is the OS's (`System.Drawing`, `sips`, `import`).
@@ -36,7 +83,7 @@ Program §3 and project rules, verbatim where they are quoted:
 - F5 must not change F3's or F4's message shapes (program §4.13): the 41 approval-v1 vectors and the 37 client-grant-v1 vectors stay byte-for-byte; `lease-v1` and `session-v1` get their own directories and generators.
 - Every file F5 writes is written atomically (temp + rename) or with `O_CREAT|O_EXCL` as the spec says; user-home files are written only by a child running as that user.
 - Tests that touch an admin config dir inject `configDir`/`adminUid`/`rootUid`/`geteuid`; they never use the real per-platform dir. Tests that await unref'd timers call `holdEventLoop()` from `tests/helpers/hold-event-loop.js`.
-- Every commit in this plan ends with the line `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>`.
+- Every commit in this plan ends with the `Co-Authored-By:` line the implementing session is given. The commit blocks below show `Claude Opus 5.5 (1M context)`; use the session's own line where it differs.
 
 Fleet stage 5 spec values (exact):
 
@@ -44,10 +91,10 @@ Fleet stage 5 spec values (exact):
 - Sealing: `keys = HKDF-SHA256(secret, salt = empty, info, 64)`; `k_sh = keys[0..32]`, `k_hs = keys[32..64]`; frame `len(4,BE) ‖ seq(8,BE) ‖ AES-256-GCM ciphertext ‖ tag(16)`, `iv = dir(1) ‖ 0x000000 ‖ seq(8)`, `aad = 'kl-session-v1' ‖ dir ‖ seq`; `dir` `0x01` service → helper, `0x02` helper → service; `seq` from 1 per direction; anything but last + 1 closes.
 - Op timeouts: 10 s, `screenshot` 20 s, `launch` 30 s. Helper reconnect backoff `1, 2, 5, 10, 30 s`; re-probe every 60 s.
 - Leases: one `pending|active|suspended` lease per node; request `expires_at` = +5 min; `1 ≤ grant.minutes ≤ min(lease.max_minutes, gui.lease.max_minutes, 60)`; expiry `verified_at + minutes` on the node clock, a resume never extends; nonce caches 10 min; leases memory-only.
-- Live view: watch lasts 60 s (phone renews every 20 s); frames every `interval_s` (default 3, 1–5) plus one after an input, **≤ 1 frame/s in total**; `max_width` 960, JPEG `quality` 60; `max_frame_bytes` default and max 184320 (re-capture once at quality − 20, else `frame: null, frame_dropped: true`); a view ≤ 256 KiB; ≤ 50 actions per view, 200 kept per lease.
+- Live view: watch lasts 60 s (iOS renews every 20 s; Android sends one watch per Refresh tap, R-F5-1); frames every `interval_s` (default 3, 1–5) plus one after an input, **≤ 1 frame/s in total**; `max_width` 960, JPEG `quality` 60; `max_frame_bytes` default and max 184320 (re-capture once at quality − 20, else `frame: null, frame_dropped: true`); a view ≤ 256 KiB; ≤ 50 actions per view, 200 kept per lease.
 - Tools: `max_inputs_per_minute` default 120 (10–600); screenshots kept per job: last 16, 10 min; ≤ 5 images per iteration; the last 3 screenshots stay in the conversation.
-- Text guard: ≤ 2000 characters; typed buffer = the last 2000 printable characters, reset on `enter` and on a foreground change; the pinned secret regexes of spec §3.8; entropy rule `/\S{24,}/`, ≥ 4.0 bits/char and ≥ 3 character classes, except a plain `http(s)` URL; vault values ≥ 8 characters.
-- Mailbox type `kl.lease.` with `ttlMs: 300000`, `maxBytes: 262144`; relay RPC timeout 10 s; `GET /v1/leases?wait=0..25`.
+- Text guard: ≤ 2000 characters; typed buffer = the last 2000 printable characters, reset on `enter` and on a foreground change; the pinned secret regexes of spec §3.8; entropy rule over runs of 24 or more characters (the spec's `/\S{24,}/`, narrowed to printable ASCII by Deviation 26), ≥ 4.0 bits/char and ≥ 3 character classes, except a plain `http(s)` URL; vault values ≥ 8 characters.
+- Mailbox type `kl.lease.` with `ttlMs: 300000`, `maxBytes: 262144`; relay RPC timeout 10 s; `GET /v1/leases?wait=0..25`; Android's Refresh fetches views with `wait=5` (Deviation 42).
 
 ## Review Focus
 
@@ -61,7 +108,7 @@ Five conditions the spec implies but no spec-listed test reaches, most likely fi
 
 ## Interfaces from other stages
 
-| Contract | On main d84f4c9 | This plan |
+| Contract | On main `532efcf` | This plan |
 |---|---|---|
 | F3 P2 `seal`, `open`, `nodeSigner`, `verifyEs256`, `verifyEd25519` (`src/approvals/envelope.js`) | exists | used as is |
 | F3 P3 `verifyDeviceEnvelope(envelope, { approverStore, type, nodeId, nonces })`, `NonceCache`, `bytesSha256` (`src/approvals/verify-device.js`) | exists; needs the type registered with `registerMessageValidator` | Task 6 registers the six `kl.lease.*` validators on load (as C4's `mobile-app-channel.js` does) |
@@ -69,27 +116,32 @@ Five conditions the spec implies but no spec-listed test reaches, most likely fi
 | F3 P10/P11 `relayClient.send(envelope, { push, to_device })`, `registerMethod`, `isConnected()`, `on('connected'/'disconnected')` | exists; **`send` rejects with `relay_offline` while the link is down** | Task 9 keeps unexpired requests and re-sends them on `connected` (Deviation 12) |
 | F3 P15–P18 `phoneApi.registerRoute`, `nodeHub.rpc`, `mailbox.registerType`, `src/frontdoor/extensions.js`, push kind `lease` | exists; an extension is `(relay) => void` receiving `{ phoneApi, nodeHub, mailbox, pusher, devices, approvals, log }`; push `KINDS` already includes `lease` | Task 11 adds one line to `extensions.js` |
 | F3 P20 `auditLedger.append({ kind, data })` (async) | exists | every `gui.*`/`lease.*` entry |
-| F3 P23/P24 `classifyToolCall`, `READ_TOOLS`, `patternMatch`, `SHELL_SEPARATORS` | exists | Task 13 adds `Screenshot`, `ListApps` to `READ_TOOLS` |
+| F3 P23/P24 `classifyToolCall`, `READ_TOOLS`, `patternMatch`, `SHELL_SEPARATORS` | exists; `READ_TOOLS` has grown (history and management read tools) | Task 13 adds `Screenshot`, `ListApps` to the set as main has it |
 | F3 `core.context.getPhoneApprover()` | exists (null unless `isAvailable()`) | `RequestLease` refuses `signed approval unavailable` when `phoneApprover.isAvailable()` is false |
-| F4 `extraToolOptions.origin` (`src/core/create-core.js:2064`) | exists: every tool gets `options.origin = { client, session, job_id }` | the tools' job id (Task 13) |
+| F4 `extraToolOptions.origin` (`origin: seam.origin` in `createToolExecutorWithApprovals`, `src/core/create-core.js`) | exists: every tool gets `options.origin = { client, session, job_id }` (plus `deviceId` when `client` is `desktop`). `runOrigin` (`src/approvals/executor-options.js`) sets `session` to the run's chat id; a delegate turn passes `approvalOrigin(origin, jobId)`, so `job_id` is its job; a sub-agent inherits its parent's origin. Tools get no `options.chatId` | the tools' job id (Task 13, Deviation 5) |
+| F4 M19: `shouldRefuseUnsafe(origin, nodeConfig)`; the `refuseUnsafe` executor option; `requester.refuseUnsafe` on the requester handed to tools; `REFUSE_UNSAFE_MESSAGE` | exists; `tests/fleet-core-seams.test.js` pins it for unsafe tool calls | R-F5-3: `RequestLease` and an unsafe `LaunchApp` read the mark (Task 13, Deviation 39) |
 | F4 `DelegateSessions({ leaseManager })` calls `leaseManager.endForJob(jobId, 'job_closed')` on close; `startFleetNode({ deps: { leaseManager } })` | exists | Task 14 passes `gui.leases` (Deviation 6) |
+| F4 `JobManager` (`src/runbooks/runbook-engine.js`): `getJob(id) → job \| null`, `isTerminal(id)`; job ids are `job-<ms>-<6 chars>`; jobs stay in its map for the life of the process | exists | `isJobOpen` (Task 14, Deviation 6) |
+| Management surfaces: `CASE_BLOCKED_TOOL_NAMES`, `CASE_BLOCKED_TOOL_ERROR`, `WAKEUP_BASE_TOOLS`, `shapeToolDefinitions` (`src/cases/chat-integration.js`); `DELEGATE_EXCLUDED_TOOLS`, `delegateToolNames` (`src/fleet/delegate-sessions.js`) | exists; `tests/cases-tools.test.js` pins the blocked list | R-F5-4 (Task 13, Deviation 36) |
+| Models M2: `InferenceRouter#routedProvider` (`current()`, `getProviderName()` follow the target that answered; `buildToolMessages` is the answering instance's); `AgentLoop#_currentProviderName()`; chat turns run the loop with `failoverPolicy: NO_RETRY` | exists | Task 12 places images by the provider that answered (Deviation 4) |
+| History H1–H3: `core.context.getChat(id, { messages })`; `tests/helpers/close-history-stores.js` | exists | `isJobOpen` for `chat:` ids (Deviation 38); `tests/gui-subsystem.test.js` |
 | F4 `defaultReadGuiStatus()` in `src/fleet/start.js` requires `src/gui/status` when present; `FleetToolHandler` adds `gui` to `list_machines`/`describe_machine` | exists | Task 8 supplies `readGuiStatus`; Task 14 adds `'gui'` to `capabilities` (Deviation 7) |
 | F7 desktop UI helper status | merged; reads nothing of F5 yet | untouched (F7 reads `readGuiStatus` in a later change; spec §2.2) |
-| C7 `getCapabilities().vision` | not merged | Task 12 uses the retry-without-images path only |
+| C7 `getCapabilities().vision` | merged as the catalog's `capabilitiesOf(catalog, provider, model).vision` (`src/models/capabilities.js`); the agent loop has no catalog handle | Task 12 still uses the retry-without-images path only; skipping up front is a follow-up |
 
 ## Deviations (current code vs the spec, resolved from the spec's intent)
 
-1. **`integer` parameters.** `Tool.validateParameters` (`src/tools/tool-schema.js`) knows `string|number|boolean|array|object` only and throws on `type: 'integer'`; it also ignores `additionalProperties`. Task 12 adds `integer` (with `minimum`/`maximum`) to it, and every GUI tool checks its own params strictly (`checkParams`, Task 13), so the schemas stay typed with `additionalProperties: false` as §3.9 says.
+1. **`integer` parameters.** *Settled by main (2026-10-12).* Main's `Tool.validateParameters` (`src/tools/tool-schema.js`) now accepts `type: 'integer'` (`matchesType`) and range-checks every number, so Task 12 no longer edits the validator (its test still pins the behaviour). The validator still ignores `additionalProperties`, `pattern`, `minItems` and nested objects, so every GUI tool checks its own params strictly (`checkParams`, Task 13), and the schemas stay typed with `additionalProperties: false` as §3.9 says.
 2. **`emitsImages` needs the `Tool` class.** `Tool`'s constructor copies only known fields; Task 12 adds `this.emitsImages = config.emitsImages === true` (spec §7 does not list `tool-schema.js`).
-3. **Where `_images` is lifted.** `ToolExecutor` emits `postExecute` with the tool's result before the agent loop sees it, and `src/ipc/chat-handlers.js` saves that result to chat storage (`appendMessageToChat(chatId, 'toolResult', …)`). Stripping in `agent-loop.js` alone would persist base64 screenshots. So `ToolExecutor` detaches `_images` right after `tool.execute` — kept (as a non-enumerable symbol property, invisible to `JSON.stringify` and spreads) only for a tool with `emitsImages: true`, deleted for every other tool — and the loop lifts them from that symbol (`src/execution/tool-images.js`). The spec's outcome (never persisted, exported or shown to non-image tools) is unchanged.
-4. **Several tool calls in one iteration.** The loop uses `buildMultiToolMessages` when a response has more than one call; the Anthropic provider's `buildMultiToolMessages` also takes images per entry (`entry.images`), placed inside that entry's `tool_result`, beside the spec's 4th argument to `buildToolMessages`.
-5. **Job id.** F4 already hands every tool `options.origin` (the run's `{ client, session, job_id }`); a delegate turn's `job_id` is its node job id. The tools use `options.origin.job_id`, else `chat:<options.chatId>`, else `chat:local` (§3.9's fallback, made total).
-6. **`endForJob` arrives now.** `DelegateSessions` already calls `leaseManager.endForJob(jobId, 'job_closed')` and `startFleetNode` accepts `deps.leaseManager`; run.js passes `gui.leases`, so job-scoped leases work in this stage rather than wave 4. `jobOpen(jobId)` for grant check 12 reads the fleet `JobManager` (open unless it knows the job and it is terminal).
+3. **Where `_images` is lifted.** `ToolExecutor` emits `postExecute` with the tool's result before the agent loop sees it, and `src/ipc/chat-handlers.js` saves that result to chat storage (`appendMessageToChat(chatId, 'toolResult', …)`). Stripping in `agent-loop.js` alone would persist base64 screenshots. So `ToolExecutor` detaches `_images` right after `tool.execute` — kept (as a non-enumerable symbol property, invisible to `JSON.stringify` and spreads) only for a tool with `emitsImages: true`, deleted for every other tool — and the loop lifts them from that symbol (`src/execution/tool-images.js`). A result a `PostToolUse` hook puts in place of the tool's goes through the same detach, so a hook cannot add `_images` either. The spec's outcome (never persisted, exported or shown to non-image tools) is unchanged. *On main (2026-10-12)* that `toolResult` row is a history row, chunked and indexed for recall (History H2). What is stored and indexed of a `Screenshot` result is its text fields only (`screenshot_id`, `app_id`, the sizes, `captured_at`, the note); no image byte reaches `history.sqlite`, the FTS index or an embedding. A `Type` call's text is in its `toolUse` row like any tool parameter; only the audit ledger is limited to its length and hash. `UNINDEXED_TOOLS` is not changed.
+4. **Several tool calls in one iteration; the provider that answered.** The loop uses `buildMultiToolMessages` when a response has more than one call; the Anthropic provider's `buildMultiToolMessages` also takes images per entry (`entry.images`), placed inside that entry's `tool_result`, beside the spec's 4th argument to `buildToolMessages`. *On main (2026-10-12)* a chat turn's provider is a routed one whose first call can fail over to another provider before anything has answered, so the name read when the run starts can be wrong for the whole run. The loop asks `this._currentProviderName()` each iteration, after the call returned, and places that iteration's images for that provider. (After its first answer a turn cannot move to another provider: the router refuses with `FAILOVER_BLOCKED`.)
+5. **Job id.** *Decided (R-F5-7).* F4 hands every tool `options.origin` (the run's `{ client, session, job_id }`); a delegate turn's `job_id` is its node job id, and on main a chat turn's `session` is its chat id (tools get no `options.chatId`). The tools read the origin only: `options.origin.job_id`, else `chat:<options.origin.session>`, else no job id. There is no `chat:local`: a run with neither is refused a lease (`job_required`) and gets no per-job state in the broker (Deviation 43). On main a run started by the gateway's `agent:message` handler (`src/core/create-core.js`) is such a run: it passes no origin and no chat id. Other entry points were not traced one by one; whichever run lacks both is refused the same way.
+6. **`endForJob` arrives now; a job must be known to be open.** *Decided (R-F5-7).* `DelegateSessions` already calls `leaseManager.endForJob(jobId, 'job_closed')` and `startFleetNode` accepts `deps.leaseManager`; run.js passes `gui.leases`, so job-scoped leases work in this stage rather than wave 4. `jobOpen(jobId)` fails closed: a `job-…` id is open only while the fleet `JobManager` knows the job and it is not terminal; a `chat:<id>` job only while that chat exists (Deviation 38); anything else, an unknown id included, is closed. A job that is not open ends its lease `job_closed`: `RequestLease` for it is refused before anything is sent; a grant for it is rejected at check 12 and the pending lease is ended, not left pending; an input finds the lease ended; and another job asking for the node's lease is not told `lease_busy` by a dead job's lease.
 7. **The MCP `gui` block.** F4's `FleetToolHandler` (both the stdio server and the service path) already adds `readGuiStatus({ dataDir })`'s result as `gui` to `list_machines` and `describe_machine` when `src/gui/status.js` exists, so `src/mcp/stdio-server.js` is not edited. Task 14 makes the handler add `'gui'` to `capabilities` while `gui.available`, and `readGuiStatus` returns exactly the MCP-safe block `{ available, capabilities, apps: [{ id, name }], limits, lease: { active } | null }` (no paths, no `args` globs). The front door's own `list_machines` (cached catalog) stays without `gui` (spec §13).
 8. **Module graphs.** `src/service/node-config.js` loads on every profile and now requires `src/gui/config.js`; F4's `src/fleet/start.js` requires `src/gui/status.js` on the runbook profile. Both stay dependency-free (Node built-ins, `src/gui/errors.js`, `src/service/pidfile.js`), and `tests/service-profile-graph.test.js` forbids `src/gui/` except `config.js`, `errors.js`, `status.js` (and `relay-extension.js`, `lease-protocol.js` on the relay and front-door graphs), and all of `src/session/`.
 9. **`gui` on the front door.** §3.4 forces `enabled: false` on `profile: runbook`; `profile: frontdoor` gets the same (neither runs a helper), and `parseGuiConfig` always returns the full shape with `enabled: false` rather than a bare `{ enabled: false }`, so no consumer null-checks.
 10. **`<configDir>/session` is `0755`, not `0750`.** The per-user copies live in `<configDir>/session/users/`, which the helper (a normal user) must reach; a `0750 root:<svc>` `session` dir would lock it out. The canonical file's own `0640 root:<svc>` mode protects it; `users/` stays root-owned `0755` and each copy `0600` owned by its user.
-11. **Components checked for reparse points.** "Every path component" is checked by requiring the admin config dir to equal its own `realpath` (so no link anywhere above it) and `lstat`-ing each component below it; the result is the spec's check without refusing a platform whose `/var` or temp dir is itself a system symlink above a test root.
+11. **Components checked for reparse points.** "Every path component" is checked by requiring the admin config dir to equal its own `realpath` (so no link anywhere above it) and `lstat`-ing each component below it; the result is the spec's check without refusing a platform whose `/var` or temp dir is itself a system symlink above a test root. The comparison ignores case only on Windows and macOS; on Linux it is exact, so a link whose name differs from its target by case alone is refused (revised 2026-10-12: the first draft lower-cased both paths everywhere).
 12. **Lease requests while the relay is down.** `RelayClient.send` rejects with `relay_offline` when the link is down; the lease manager keeps an unexpired request (or resume) and re-sends it on `connected`, like approvals (R16), instead of failing the tool.
 13. **The service account for the POSIX socket dir** is the owner of `--data-dir` (uid and gid from `fs.statSync(dataDir)`), the account the installers created; `session install` has no separate flag for it.
 14. **Node id for `session install`.** The canonical file records `node_id`; `session install` reads it from the service's own identity record (`<dataDir>/chat-data.json`, key `mesh.identity`, `deriveNodeId(publicKey)`), which needs no master key; the master key is only resolved to write the `klc1:` secret, read-only (`resolveMasterKeyReadOnly` + `verifyKeyCheck({ create: false })`, as `import` does). No identity or no key yet → `start the service once first`.
@@ -99,7 +151,7 @@ Five conditions the spec implies but no spec-listed test reaches, most likely fi
 18. **Helper log file names.** `attachServiceLogFile` gains a `{ name }` option so the helper writes `helper.log`/`session.log` in the per-OS directories §3.3 names.
 19. **HKDF `info` encoding.** §3.2 writes `'kl-session-v1 keys' ‖ node_id ‖ nonce_h ‖ nonce_s`; the plan fixes the bytes as UTF-8 of the label, UTF-8 of `node_id` (always 19 characters) and the **raw 32 bytes** of each nonce, so there is no separator ambiguity. `docs/protocol/session-v1.md` and the vectors pin it.
 20. **A refused newcomer.** §3.2 refuses a second helper with `helper_already_connected` after it authenticates; the service sends it one plain frame `{ "t": "error", "code": "helper_already_connected" }` in place of `ready` and closes. `session-v1.md` lists it.
-21. **iOS signs `kl.lease.watch` with the API session.** A watch grants nothing (it only asks for frames of a lease the owner already granted, to a device the node already trusts), so iOS signs it like its API requests, without a fresh Face ID prompt every 20 s; grants, denies and the kill switch keep their fresh prompt. Android: Owner question 1.
+21. **iOS signs `kl.lease.watch` with the API session.** *Decided (R-F5-8): accepted.* A watch grants nothing (it only asks for frames of a lease the owner already granted, to a device the node already trusts), so iOS signs it like its API requests, without a fresh Face ID prompt every 20 s; grants, denies and the kill switch keep their fresh prompt. What the owner accepted with it: anyone holding the phone while its API session is unlocked can open the live view of an active lease with no prompt, and the node cannot tell a session-signed watch from a prompted one. `signWatchEnvelope` refuses every other message type (Task 24). Android: Owner question 1.
 22. **`tests/examples.test.js` needs no edit.** It reads `NODE_YAML_KEYS` from `node-config.js`, so adding `gui` there covers §7's "`NODE_YAML_KEYS += gui`".
 23. **Phone-side lease vectors.** `view-tampered-frame` is a correctly node-signed view whose `frame.sha256` does not match its `frame.data` (reason `frame_hash_mismatch`): a byte flipped in the payload would fail the signature first and test nothing new.
 24. **Vector `given` for leases** adds `allow_test_keys` and `node.key` (the node's SPKI hex), which the node-side runner and the phones need, beside §4.1's listed keys.
@@ -110,9 +162,60 @@ Five conditions the spec implies but no spec-listed test reaches, most likely fi
 29. **History needs no new store** (Tasks 24–25). The node's audit slice (F3's `/v1/nodes/{id}/history`, F4's mirror on a front door) already carries every `lease.*` and `gui.*` entry; the apps only label those kinds "Computer use".
 30. **`status.json` carries `apps`.** §4.5 lists no apps, but `readGuiStatus` must return `apps: [{ id, name }]` (§5.2) without reading `node.yaml`; the broker writes the allowlist's ids and names (never paths) into `status.json`.
 
+Deviations 31–35 were in the plan's code from the start but not in this list; 36–44 come from the rulings and from main.
+
+31. **A bare `*` detail is not a text rule** (Task 3). §3.8 matches any `Name(detail)` whose detail matches the text. `Vault(*)` is in the default `always_confirm`, and its detail `*` matches every text, so every `Type` would be refused; `matchesAlwaysConfirm` drops a detail that is exactly `*`. `Bash(*deploy*)` still matches text containing "deploy".
+32. **Relay rate limits on the lease routes** (Task 11). §4.7 names only the 120 requests/min/device rule. `POST …/watch` has its own budget of 12/min per device and `…/grant` and `…/revoke` 30/min (`registerRoute`'s `rate`), so a looping or hostile phone cannot make a node capture or verify without bound. iOS sends 3 watches a minute.
+33. **`session uninstall` deletes the canonical secret** (Task 20). The spec is silent. Uninstalling the session user that `helper-secret.json` names removes that file as well as the per-user copy and the login start, so the service finds no helper installed at its next start and R-F5-2's check sees no installed user.
+34. **`lease_pending` for an input** (Task 9). §3.6's list for `assertUsable` has no `lease_pending`; an input while the job's lease still waits for the phone returns it, rather than `lease_required`, which would send the model to ask again.
+35. **`RequestLease` on a suspended lease asks to resume** (Task 9). §3.6 gives the same job "the existing lease (or `lease_pending`)". When the job's lease is suspended and its resume request has lapsed, `RequestLease` sends a fresh resume request (the same lease id, `max_minutes` = the time left) and waits for it.
+36. **Which turns get GUI tools** (Task 13). Case turns: `ListApps` and `Screenshot` only (R-F5-4); the eight acting tools join `CASE_BLOCKED_TOOL_NAMES`. Wake-up turns: none. The spec is silent and a wake-up runs with nobody watching, so the conservative reading holds: `WAKEUP_BASE_TOOLS` is not extended, and a wake-up's `allowedToolNames` already excludes every other tool. A case's research children (`case-researcher`) keep their five tools: none. Delegate turns: all ten. The spec expects them there (§5.1's F4 row; job-scoped leases), so `DELEGATE_EXCLUDED_TOOLS` is not extended, and R-F5-3 gates the two calls that would reach the phone.
+37. **Two error codes beyond §9: `job_required` and `job_closed`** (Tasks 1, 9, 13; R-F5-7). `job_required`: the run has neither a job id nor a chat id, so there is nothing to bind a lease to. `job_closed`: the lease's job is not open.
+38. **When a `chat:` job is open** (Task 14). This is the plan's reading of R-F5-7 for chat ids; the ruling's words are "an unknown job closes the lease (it does not count as open)". For a job id `chat:<id>`, known means the chat exists in the history store (`core.context.getChat(id, { messages: false })` returns it). A deleted or never-existing chat, or a store that cannot be read, is closed. Without a rule of this kind a node-local chat could never hold a lease, which R-F5-3 expects it to.
+39. **How a tool knows its run refuses unsafe calls** (Task 13; R-F5-3). The origin tools get is F3's three keys (`approvalOrigin` drops `kind` and `scopes`), so a tool cannot weigh scopes itself. It reads what main already carries for this purpose: `options.approvalRequester.refuseUnsafe === true`, set by `ToolExecutor#_rethreadedRequester` for a run whose `refuseUnsafe` option `DelegateSessions` computed with `shouldRefuseUnsafe(origin, nodeConfig)`, and inherited by that run's sub-agents. The refusal is main's `REFUSE_UNSAFE_MESSAGE`, word for word, so it names the missing scope and never says "phone approval denied".
+40. **An unsafe `LaunchApp` from a paired desktop** (Task 13). An attached desktop's turn runs in the service with a local origin, and main gives such a run the on-screen dialog, not the phone (`approvalSeam`). The spec's audit field `approved_by` is `allowlist` or `phone`; it gains `desktop`, and a refusal names who was asked (`denied: approval denied at the desktop`, `denied: phone approval denied`). `RequestLease` always goes to the phone, whatever the origin.
+41. **The watch reply carries the mailbox position** (Tasks 11, 23, 25; R-F5-6). `GET …/views?after_seq&wait` returns as soon as anything newer than `after_seq` is listed, and a lease's earlier statuses are listed for five minutes, so a first fetch with `wait` alone returns at once, without the frame. The relay's `202` for `POST …/watch` therefore adds `after_seq`: the mailbox's sequence number, read before the node hears the watch. Android fetches views from there with the existing `wait` parameter. iOS ignores the field. It is relay transport and part of no signed message.
+42. **Android under R-F5-5 and R-F5-6** (Task 25). The app repeats no send: Stop, Allow, Deny and Refresh each sign and send once. A send with no answer (no network, `503 node_offline`, a timeout) sets a "not confirmed" line beside its button, which stays enabled. A `lease` push sets a notice and shows the Pending tab; the owner's tap on "Check for computer-use requests" is what fetches. Refresh uses `wait=5` (`Leases.REFRESH_WAIT_S`): the node captures within one 250 ms tick of the watch unless another capture ran in the last second (the 1 frame/s budget), may capture once more at lower quality, and sends the view over the relay link; a status change (suspended, ended) ends the wait at once; 5 s stays far below the relay's 25 s cap and the 60 s life of the watch. The value is a judgement, not a measurement: it is one constant, and Task 25's hand check against a real node is where it is confirmed or changed. With no frame after 5 s the screen says so and the owner taps again.
+43. **Per-job broker state needs a job** (Task 8; R-F5-7). A run with no job id can still list, launch, close and screenshot, but the broker records no launched pid for it (its `CloseApp force` never kills) and keeps none of its screenshots (no click can ever map onto one). Otherwise every such run would share one bucket.
+44. **`readline` is not used for worker replies** (Task 16). `readline` also ends a line at U+2028 and U+2029, which JXA's `JSON.stringify` leaves raw inside strings (a window title can hold one). A reply split that way would be dropped and its op would time out. `LineWorker` splits on `\n` itself.
+
+## Tasks, review weight and where each can be checked
+
+`trust`: an error here grants something or leaks something (owner trust, signatures, leases, scopes, what leaves the machine, privilege and install); it gets the strongest reviewer. `standard`: everything else. The last column says what this stage's work machine (Windows) cannot run.
+
+| Part | Task | What | Review | Not checkable on Windows |
+|---|---|---|---|---|
+| 1 | 1 | `GuiError`, `node.yaml` `gui:`, doctor row, profile-graph rules | standard | — |
+| 1 | 2 | App allowlist: `resolveLaunch` tiers, foreground match sets | trust | — |
+| 1 | 3 | Key grammar and text guard | trust | — |
+| 1 | 4 | `kl-session-v1` framing, proofs, sealing, vectors, protocol doc | trust | — |
+| 1 | 5 | Session secret, per-user copies, endpoint, user resolution | trust | The POSIX cases (modes, owners, hostile symlinks) are skipped; the junction case runs |
+| 1 | 6 | `lease-v1` messages, grant/revoke/watch checks, 26 vectors, doc | trust | — |
+| 2 | 7 | Helper channel (service) and helper connection | trust | The Unix-socket branch (`chmod 0666`, the symlink refusal); the named-pipe branch runs |
+| 2 | 8 | `status.json` and the GUI broker | trust | — |
+| 2 | 9 | Lease manager | trust | — |
+| 2 | 10 | Live view | trust | — |
+| 2 | 11 | Relay routes for leases | trust | — |
+| 3 | 12 | Images in tool results | trust | — |
+| 3 | 13 | The ten GUI tools; scope and case rules | trust | — |
+| 3 | 14 | GUI subsystem and host wiring | trust | — |
+| 4 | 15 | Helper process | standard | The POSIX insecure-file case is skipped |
+| 4 | 16 | Windows backend | trust | — (the real worker suite runs here) |
+| 4 | 17 | macOS backend | trust | The JXA worker suite needs macOS (and its permissions); only the fake-tool plumbing runs. Deviation 27 can only be confirmed there |
+| 4 | 18 | Linux X11 and Wayland backends | trust | The real-X11 suite needs Linux with `DISPLAY` and `xdotool`; the scripted suite runs |
+| 5 | 19 | Login start | trust | The user-side writer suite is POSIX only; the uid/gid drop is asserted only against a fake `spawnSync`; no test touches a real task, LaunchAgent or autostart entry |
+| 5 | 20 | `session` CLI | trust | The POSIX socket-dir assertions; no test runs a real elevated install on any OS |
+| 5 | 21 | Opt-in e2e, `CLAUDE.md`, the full suite | standard | The macOS leg of the e2e (the Windows leg runs here with `KL_E2E_GUI=1`, in an interactive session) |
+| 6 | 22 | `lease-v1` in the iOS protocol core | trust | All of it: `swift test` needs macOS |
+| 6 | 23 | `lease-v1` in the Android protocol core | trust | Runs with a JDK 17 (`../gradlew test`); not without one |
+| 6 | 24 | iOS app | trust | The build and the hand checks need a Mac and a device or simulator; `mobile-lease-apps` runs anywhere |
+| 6 | 25 | Android app | trust | The build needs the Android SDK; the hand checks need a phone with a fingerprint or face unlock; `mobile-lease-apps` runs anywhere |
+
 ---
 
 ### Task 1: GUI errors, `gui:` configuration and the module-graph rules
+
+**Review:** standard. **On Windows:** all of it can be checked (the two `chmod` lines in the test are POSIX only).
 
 **Files:**
 - Create: `src/gui/errors.js`
@@ -141,7 +244,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { parseGuiConfig, GUI_KEYS } = require('../src/gui/config');
-const { GuiError, toToolResult, fromWire, isGuiError } = require('../src/gui/errors');
+const { GuiError, GUI_ERROR_CODES, toToolResult, fromWire, isGuiError } = require('../src/gui/errors');
 const { loadNodeConfig, NODE_YAML_KEYS } = require('../src/service/node-config');
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
@@ -175,6 +278,12 @@ describe('GuiError', () => {
     assert.deepEqual(e.info, { image: 'C:\\Windows\\explorer.exe', pid: 4 });
     assert.equal(fromWire({ code: 'rm -rf', message: 'x' }).code, 'backend_failed');
     assert.equal(fromWire(null).code, 'backend_failed');
+  });
+
+  it('R-F5-7: has the two job codes', () => {
+    assert.ok(GUI_ERROR_CODES.includes('job_required'));
+    assert.ok(GUI_ERROR_CODES.includes('job_closed'));
+    assert.deepEqual(toToolResult(new GuiError('job_required', 'this run has no job or chat to bind a lease to')), { ok: false, error: 'job_required: this run has no job or chat to bind a lease to' });
   });
 });
 
@@ -295,7 +404,7 @@ const GUI_ERROR_CODES = Object.freeze([
   'point_obscured', 'foreground_mismatch', 'user_active', 'screen_locked', 'target_elevated', 'invalid_text',
   'text_matches_always_confirm', 'text_looks_secret', 'key_invalid', 'key_denied', 'middle_click_denied',
   'rate_limited', 'lease_required', 'lease_suspended', 'lease_expired', 'lease_revoked', 'lease_busy',
-  'lease_pending', 'lease_denied', 'lease_request_expired', 'approval_unavailable', 'helper_disconnected',
+  'lease_pending', 'lease_denied', 'lease_request_expired', 'job_required', 'job_closed', 'approval_unavailable', 'helper_disconnected',
   'helper_already_connected', 'frame_rejected', 'auth_failed', 'op_timeout', 'unknown_op', 'backend_failed',
   'session_not_installed', 'session_file_insecure', 'session_user_mismatch', 'unsafe_path', 'user_not_found',
   'home_missing', 'cancelled'
@@ -495,7 +604,7 @@ Add the require under the existing `parseFrontDoorConfig` require:
 const { parseGuiConfig, GUI_KEYS } = require('../gui/config');
 ```
 
-In `NODE_YAML_KEYS`, add `'gui'` to `top` and a `gui` level (the comment above it already promises "stage 5 `gui`"):
+In `NODE_YAML_KEYS`, add `'gui'` to the end of `top` and append a `gui` level; leave every other entry exactly as main has it (the comment above the constant already says "stage 5 `gui`"). On main `532efcf` the result reads:
 
 ```js
 const NODE_YAML_KEYS = Object.freeze({
@@ -528,7 +637,7 @@ In `loadNodeConfig`'s return object, add after `delegate`:
 
 - [ ] **Step 6: Add the doctor row**
 
-In `src/service/doctor.js`, right after `results.push({ check: 'node configuration loaded', … })`:
+In `src/service/doctor.js`, right after the line that starts `results.push({ check: 'node configuration loaded',`:
 
 ```js
     // Fleet stage 5 §3.4: gui.apps entries that match by bare process name.
@@ -539,7 +648,7 @@ In `src/service/doctor.js`, right after `results.push({ check: 'node configurati
 
 - [ ] **Step 7: Forbid `src/gui/` and `src/session/` in the profile graphs**
 
-In `tests/service-profile-graph.test.js`, below `FORBIDDEN`, add:
+In `tests/service-profile-graph.test.js`, below the `const FORBIDDEN = [` declaration, add:
 
 ```js
 // Fleet stage 5 (Deviation 8): node-config.js needs gui/config.js on every
@@ -550,12 +659,12 @@ const RELAY_GUI_ALLOWED = [...GUI_ALLOWED, 'src/gui/relay-extension.js', 'src/gu
 const guiLeak = (p, allowed) => (p.startsWith('src/gui/') && !allowed.includes(p)) || p.startsWith('src/session/');
 ```
 
-Then extend each `bad` filter:
+Then extend each of the file's five `const bad = loaded.filter(…)` lines, keeping what each already tests (main added an `assert.ok(!loaded.includes('src/mcp/case-tools.js'), …)` line above the two mcp filters; leave those):
 
-- runbook graph: `const bad = loaded.filter((p) => FORBIDDEN.some((f) => p.startsWith(f)) || guiLeak(p, GUI_ALLOWED));`
-- relay graph: `const bad = loaded.filter((p) => FORBIDDEN.some((f) => p.startsWith(f)) || p.startsWith('src/core/') || guiLeak(p, RELAY_GUI_ALLOWED));`
-- frontdoor graph: `const bad = loaded.filter((p) => FRONTDOOR_FORBIDDEN.some((f) => p.startsWith(f)) || guiLeak(p, RELAY_GUI_ALLOWED));`
-- both mcp graphs: add `|| guiLeak(p, GUI_ALLOWED)` to their filters.
+- runbook graph (`FORBIDDEN.some(…)` alone): add `|| guiLeak(p, GUI_ALLOWED)`.
+- relay graph (`FORBIDDEN.some(…) || p.startsWith('src/core/')`): add `|| guiLeak(p, RELAY_GUI_ALLOWED)`.
+- frontdoor graph (`FRONTDOOR_FORBIDDEN.some(…)`): add `|| guiLeak(p, RELAY_GUI_ALLOWED)`.
+- both mcp graphs (the one that lists `src/core/`, `src/providers/`, `src/tools/`, `src/mesh/mesh-discovery`, and the courier one with `forbidden.some(…)`): add `|| guiLeak(p, GUI_ALLOWED)` to each.
 
 `src/gui/lease-protocol.js` requires `src/approvals/verify-device.js`, which the relay already loads; Task 11 keeps `relay-extension.js`'s own requires to `envelope.js` and `lease-protocol.js`.
 
@@ -576,6 +685,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ---
 
 ### Task 2: The app allowlist — `resolveLaunch` and foreground match sets
+
+**Review:** trust (it decides which launches run without the phone). **On Windows:** all of it can be checked.
 
 **Batchable:** yes — with Task 3 (both are pure validation modules with table-driven tests and no shared interface).
 
@@ -605,7 +716,8 @@ const path = require('path');
 const { parseGuiConfig } = require('../src/gui/config');
 const { resolveLaunch, imageMatches, matchSetFor, assertPathsUnchanged } = require('../src/gui/apps');
 
-const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-apps-')));
+// Native realpath: resolveLaunch resolves with it, and a Windows CI TEMP is a short path.
+const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-apps-')));
 after(() => fs.rmSync(base, { recursive: true, force: true }));
 const plat = process.platform === 'win32' ? 'win32' : 'linux';
 const exe = path.join(base, plat === 'win32' ? 'tool.exe' : 'tool');
@@ -874,6 +986,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ---
 
 ### Task 3: The key grammar and the text guard
+
+**Review:** trust (it decides what text and which keys may be sent into a leased app). **On Windows:** all of it can be checked.
 
 **Batchable:** yes — with Task 2.
 
@@ -1267,7 +1381,7 @@ class TypedBuffer {
 module.exports = { checkTypeText, TypedBuffer, looksSecret, isInvalidText, MAX_TEXT };
 ```
 
-Note on `Vault(*)`: its detail `*` would match every text, which is not what an owner means by "confirm Vault calls"; `matchesAlwaysConfirm` drops a detail that is exactly `*`. `Bash(*deploy*)` still matches text containing "deploy".
+Note on `Vault(*)` (Deviation 31): its detail `*` would match every text, which is not what an owner means by "confirm Vault calls"; `matchesAlwaysConfirm` drops a detail that is exactly `*`. `Bash(*deploy*)` still matches text containing "deploy".
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -1286,6 +1400,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ---
 
 ### Task 4: `kl-session-v1` framing, proofs and sealing, with vectors and the protocol document
+
+**Review:** trust (the channel's authentication and sealing). **On Windows:** all of it can be checked.
 
 **Files:**
 - Create: `src/gui/helper-protocol.js`
@@ -1750,6 +1866,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 5: The session secret, the per-user copies and the endpoint
 
+**Review:** trust (the secret, and files written with elevation). **On Windows:** the POSIX cases (`0600`/`0640` modes, owners, hostile symlinks, the `0755` directories) and the Linux-only case-alias case are skipped; the junction case and the ACL command line run. Their first real run is on a POSIX machine.
+
 **Files:**
 - Create: `src/gui/session-secret.js`
 - Modify: `src/platform/windows-paths.js` (add `windowsIcaclsExe`)
@@ -1791,7 +1909,9 @@ after(() => { for (const c of cleanups) c(); });
 const cipher = createAesGcmCipher(crypto.randomBytes(32));
 
 function tempConfig() {
-  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-session-secret-')));
+  // Native realpath: assertSafeComponents requires the config dir to be its own
+  // native realpath, and a Windows CI TEMP is an 8.3 short path.
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-session-secret-')));
   cleanups.push(() => fs.rmSync(base, { recursive: true, force: true }));
   const config = path.join(base, 'config');
   fs.mkdirSync(config, { mode: 0o755 });
@@ -1900,6 +2020,14 @@ describe('per-user copies', () => {
     assert.deepEqual(fs.readdirSync(elsewhere), []);
   });
 
+  it('Linux: a config dir reached through a link that differs only by case is refused', { skip: process.platform !== 'linux' }, () => {
+    const { base, config } = tempConfig();
+    const alias = path.join(base, 'Config');
+    fs.symlinkSync(config, alias);
+    assert.equal(code(() => S.writeUserCopy({ platform: 'linux', configDir: alias, user: 'alice', uid: UID, gid: GID, content })), 'unsafe_path');
+    assert.equal(fs.existsSync(path.join(config, 'session')), false, 'nothing was written through the link');
+  });
+
   it('Windows: the ACL command line uses the absolute icacls.exe and the SID', () => {
     const env = { SystemRoot: 'C:\\Windows' };
     assert.equal(windowsIcaclsExe(env), 'C:\\Windows\\System32\\icacls.exe');
@@ -1978,7 +2106,7 @@ Expected: FAIL with `Cannot find module '../src/gui/session-secret'`.
 
 - [ ] **Step 3: Add `windowsIcaclsExe`**
 
-In `src/platform/windows-paths.js`, below `windowsSchtasksExe`:
+In `src/platform/windows-paths.js`, below the `const windowsSchtasksExe = …` line:
 
 ```js
 const windowsIcaclsExe = (env) => path.win32.join(windowsSystemRoot(env), 'System32', 'icacls.exe');
@@ -2050,7 +2178,11 @@ function assertSafeComponents(target, { root }) {
   } catch {
     throw new GuiError('unsafe_path', resolvedRoot);
   }
-  if (real.toLowerCase() !== resolvedRoot.toLowerCase()) throw new GuiError('unsafe_path', `${resolvedRoot} resolves to ${real}`);
+  // Names compare without case only where the filesystem does (Windows, macOS):
+  // on Linux a link that differs from its target by case alone must not pass.
+  const foldsCase = process.platform === 'win32' || process.platform === 'darwin';
+  const same = foldsCase ? real.toLowerCase() === resolvedRoot.toLowerCase() : real === resolvedRoot;
+  if (!same) throw new GuiError('unsafe_path', `${resolvedRoot} resolves to ${real}`);
   const rel = path.relative(resolvedRoot, path.resolve(target));
   if (rel.startsWith('..') || path.isAbsolute(rel)) throw new GuiError('unsafe_path', `${target} is outside ${resolvedRoot}`);
   let current = resolvedRoot;
@@ -2282,6 +2414,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 6: The `lease-v1` protocol — messages, checks, vectors and the document
 
+**Review:** trust (the signatures and the twelve checks behind every lease). **On Windows:** all of it can be checked.
+
 **Files:**
 - Create: `src/gui/lease-protocol.js`
 - Create: `tests/vectors/lease-v1/generate.js` (and the 26 files it writes)
@@ -2296,7 +2430,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
   - `buildLeaseRequest({ identity, nodeName, jobId, apps: [{ id, name, path, processes }], maxMinutes, reason, resumes = null, limits = [], origin, now = Date.now(), requestId, leaseId, nonce }) → { message, envelope }`.
   - `buildLeaseStatus({ identity, leaseId, seq, state, locked, reason, expiresAt, now }) → envelope` (`expiresAt` ms or null).
   - `buildLeaseView({ identity, leaseId, seq, toDevice, state, locked, remainingS, foreground, frame, frameDropped, actions, now }) → envelope`.
-  - `verifyLeaseGrant(envelope, { approverStore, nodeId, nonces, pending, guiApps, jobOpen, guiMaxMinutes }, now) → { accepted, check, reason, message?, bytes?, deviceId?, request? }` where `pending` is a `Map` of `request_id → { request_id, lease_id, nonce, lease_hash, expires_at, lease }`.
+  - `verifyLeaseGrant(envelope, { approverStore, nodeId, nonces, pending, guiApps, jobOpen, guiMaxMinutes }, now) → { accepted, check, reason, message?, bytes?, deviceId?, request? }` where `pending` is a `Map` of `request_id → { request_id, lease_id, nonce, lease_hash, expires_at, lease }`. `jobOpen` defaults to `() => false` (R-F5-7: a caller that does not say a job is open gets `job_closed`).
   - `verifyLeaseRevoke(envelope, { approverStore, nodeId, nonces, knownLease }) → { accepted, check, reason, message? }`; `verifyLeaseWatch(...)` (same shape).
   - `verifyLeaseView(envelope, { nodeId, nodePublicKeyHex, maxBytes = VIEW_MAX_BYTES }) → { accepted, reason }` (the phones' reference; Node uses it in tests).
   - `effectiveExpiry({ verifiedAt, minutes, resumeOf = null }) → ms` (`min(verifiedAt + minutes, resumeOf)` for a resume).
@@ -2847,7 +2981,8 @@ function buildLeaseView({ identity, leaseId, seq, toDevice, state, locked, remai
 const reject = (reason) => ({ accepted: false, check: CHECK_OF[reason] || null, reason });
 const sameList = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => x === b[i]);
 
-function verifyLeaseGrant(envelope, { approverStore, nodeId, nonces, pending, guiApps, jobOpen = () => true, guiMaxMinutes = MAX_MINUTES }, now = Date.now()) {
+// jobOpen fails closed (R-F5-7): a caller that passes none gets job_closed.
+function verifyLeaseGrant(envelope, { approverStore, nodeId, nonces, pending, guiApps, jobOpen = () => false, guiMaxMinutes = MAX_MINUTES }, now = Date.now()) {
   const device = verifyDeviceEnvelope(envelope, { approverStore, type: 'kl.lease.grant', nodeId, nonces });
   if (!device.ok) return reject(device.reason);
   const m = device.message;
@@ -2922,8 +3057,9 @@ module.exports = {
 ```
 
 Two notes for the implementer:
-- Check `src/approvals/messages.js` exports `normalizeOrigin` and `iso` (it does, lines 363–399). `normalizeOrigin` adds `deviceId` for `client: 'desktop'`; `buildLeaseRequest` keeps only the three keys, because GUI tools never run on the Electron host (no `gui` dep there).
-- `verifyLeaseGrant` never marks the nonce used; the caller (`LeaseManager.onGrant`, Task 9) adds it to the cache only when a decision is applied, so a rejected grant leaves the request pending (spec §3.6 "A failed check leaves the request pending").
+- `src/approvals/messages.js` exports `normalizeOrigin`, `iso`, `isTimestamp`, `randomNonce` and the three id patterns in its `module.exports` (checked on `532efcf`). `normalizeOrigin` adds `deviceId` for `client: 'desktop'`, which does occur here: a paired desktop attached to this service runs its chat turns in the service with that client. `buildLeaseRequest` keeps only the three keys, because `kl.lease.request`'s `origin` has exactly those (`checkOrigin`).
+- What the phone's "Asked by" line shows is `origin.client`: a front-door client's declared name (or its client id when the name is empty or one of the reserved local names, `frontDoorClient` in `src/fleet/fleet-tools.js`), `stdio-mcp` for this node's own MCP client, `desktop` for a paired desktop's chat, `king-louie` for the node's other runs. `origin.job_id` is null for a chat run; the lease's own `job_id` (`chat:<id>`) is what binds it.
+- `verifyLeaseGrant` never marks the nonce used; the caller (`LeaseManager.onGrant`, Task 9) adds it to the cache only when a decision is applied, so a rejected grant leaves the request pending (spec §3.6 "A failed check leaves the request pending"). One rejection is different in the caller: `job_closed` ends the pending lease, because a closed job cannot come back (R-F5-7, Task 9).
 
 - [ ] **Step 5: Generate the vectors and run the tests**
 
@@ -2987,9 +3123,19 @@ the requested ids; `1 ≤ grant.minutes ≤ max_minutes`; a view ≤ 256 KiB.
 | 11 | Node clock ≤ `expires_at` | `expired` |
 | 12 | Fresh hash of the pending lease = `lease_hash`, and each app is still in `gui.apps` with the same `path`/`processes`; the job is open; `grant.apps` ⊆ requested; minutes in range | `lease_changed`, `job_closed`, `apps_not_requested`, `minutes_out_of_range` |
 
-A failed check leaves the request pending; every result is audited. Expiry is
+A failed check leaves the request pending; every result is audited. The one
+exception is `job_closed`: the job cannot come back, so the node ends the
+pending lease and answers `{ state: 'ended', reason: 'job_closed' }`. A job is
+open only while the node knows it and it has not ended: a `job-…` id in its
+job table and not terminal, or a `chat:<id>` whose chat still exists. Expiry is
 node-clock only: `verified_at + minutes`, and for a resume `min(that, the
 original expiry)`. `signed_at` is recorded and never judged.
+
+The node sends no request at all, and so nothing reaches the relay or a phone,
+for a run that has neither a job id nor a chat id (`job_required`), for a job
+that is not open (`job_closed`), or for a front-door client whose grant does
+not cover `fleet:unsafe` on this node (refused in the node's own words for a
+missing scope).
 
 Revoke and watch: checks 1–8 with their own type and a 10-minute nonce cache,
 then the `lease_id` must be known (`unknown_lease`). Any enrolled device may
@@ -3015,7 +3161,7 @@ revoke any lease; a replayed revoke changes nothing and re-sends the status.
 |---|---|
 | node → relay | `link.send(envelope, { push: { kind: 'lease', id: request_id, expires_at } })` for requests; statuses plain; views with `{ to_device }`; mailbox prefix `kl.lease.`, 5 min, 256 KiB |
 | `GET /v1/leases?wait=0..25` | `[{ node_id, envelope, status }]`: pending requests for the device's nodes with the latest status of each lease |
-| `POST /v1/leases/{lease_id}/grant` · `/revoke` · `/watch` | body = the phone envelope → `202 { state, reason? }`, `503 node_offline` |
+| `POST /v1/leases/{lease_id}/grant` · `/revoke` · `/watch` | body = the phone envelope → `202 { state, reason? }`, `503 node_offline`. The `202` for `/watch` also carries `after_seq`: the mailbox position read before the node heard the watch, so a phone that fetches on tap can ask for views from there with `wait` and get the frame this watch causes |
 | `GET /v1/leases/{lease_id}/views?after_seq&wait` | `[{ seq, envelope }]` of views to the caller and statuses, oldest first |
 | node methods | `lease.grant`, `lease.revoke`, `lease.watch`: `{ envelope }` → `{ state, reason? }` |
 
@@ -3042,4 +3188,4 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ## After Part 1
 
-Run `npm test` and confirm `# fail 0`. Part 2 (`2026-09-23-fleet-stage5-session-helper-part2.md`) starts at Task 7 on these commits.
+Every test file Tasks 1–6 name shows `# fail 0` (the full suite runs once, in Task 21). Part 2 (`2026-09-23-fleet-stage5-session-helper-part2.md`) starts at Task 7 on these commits.

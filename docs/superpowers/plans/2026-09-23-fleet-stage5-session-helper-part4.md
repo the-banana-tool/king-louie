@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-The header — Goal, Architecture, Owner questions, **Global Constraints**, **Review Focus**, Interfaces from other stages and **Deviations** — is in Part 1 (`2026-09-23-fleet-stage5-session-helper-part1.md`) and applies to every task here. Part 4 builds on Parts 1–3 (Tasks 1–14) on `feat/fleet-stage5`.
+The header — Goal, Architecture, the owner's questions and rulings (2026-10-12), what was checked against main `532efcf`, **Global Constraints**, **Review Focus**, Interfaces from other stages, **Deviations** (1–44) and the task table with review weights — is in Part 1 (`2026-09-23-fleet-stage5-session-helper-part1.md`) and applies to every task here. Part 4 builds on Parts 1–3 (Tasks 1–14) on `feat/fleet-stage5`.
 
 **This part:** the helper process and its OS backends. Task 15 the helper (`runSessionHelper`: file, backend selection, reconnect, re-probe, lock events, log file); Task 16 the Windows backend (PowerShell + C# P/Invoke worker); Task 17 the macOS backend (JXA worker, `open`, `screencapture`, `sips`); Task 18 the Linux backends (X11 through `xdotool`/`import`, Wayland launch-only).
 
@@ -10,9 +10,15 @@ Deviation 27 (listed in Part 1; restated for this part): **macOS typing of non-A
 
 Deviation 28 (listed in Part 1; restated for this part): **a read-only `hitTest` on each backend.** The backend tests must exercise the hit test without injecting input into the tester's desktop, so each backend also exposes `hitTest({ x, y }) → { handle, pid, image } | null`. It is not a `kl-session-v1` op; `createOpHandler` never routes to it.
 
+Deviation 44 (listed in Part 1; new on 2026-10-12): **`readline` is not used for worker replies.** `LineWorker` splits its worker's output on `\n` itself (Task 16).
+
+No owner ruling changes this part: the helper holds no policy, so scopes, jobs and case turns are all decided on the service side (Parts 2 and 3). The files this part touches outside `src/session/` (`src/service/log-file.js`, `src/platform/windows-paths.js`, `src/platform/paths.js`) are unchanged on main since the plan was written, except that `paths.js` gained an unrelated export.
+
 ---
 
 ### Task 15: The session helper process
+
+**Review:** standard (the file checks it relies on are Task 5's; the channel it speaks is Task 7's). **On Windows:** the case "the per-user file is readable by others" is POSIX only and is skipped.
 
 **Files:**
 - Create: `src/session/helper.js`
@@ -59,7 +65,9 @@ const NODE_ID = 'kl-hnef32472qzibi5r';
 const USER = os.userInfo().username;
 
 function setup() {
-  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-helper-')));
+  // Native realpath: writeUserCopy requires the config dir to be its own
+  // native realpath, and a Windows CI TEMP is an 8.3 short path.
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-helper-')));
   cleanups.push(() => fs.rmSync(base, { recursive: true, force: true }));
   const configDir = path.join(base, 'config');
   fs.mkdirSync(configDir, { mode: 0o755 });
@@ -451,6 +459,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 16: The Windows backend
 
+**Review:** trust (the checks and the injection run in one worker call here; a wrong check types into the wrong window). **On Windows:** all of it runs, the real PowerShell/C# worker included. The worker calls no `Microsoft.PowerShell.Security` cmdlet (CLAUDE.md, Testing: those fail to load in a Windows PowerShell child of a pwsh 7 CI step); it uses `Add-Type` and framework types only, and must stay that way.
+
 **Files:**
 - Create: `src/session/backends/line-worker.js`
 - Create: `src/session/backends/windows.js`
@@ -460,7 +470,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `windowsPowerShellExe` (`src/platform/windows-paths.js`); `GuiError`, `fromWire` (Task 1).
 - Produces:
-  - `src/session/backends/line-worker.js`: `class LineWorker { constructor({ file, args, spawnImpl = spawn, env, log, name }); call(op, params = {}, { timeoutMs = 25000 } = {}) → Promise; stop() → Promise }` — one JSON object per line each way, `{ id, op, params }` → `{ id, ok, result | error }`; starts lazily and restarts after a crash; `shell: false`, `windowsHide: true`.
+  - `src/session/backends/line-worker.js`: `class LineWorker { constructor({ file, args, spawnImpl = spawn, env, log, name }); call(op, params = {}, { timeoutMs = 25000 } = {}) → Promise; stop() → Promise }` — one JSON object per line each way, `{ id, op, params }` → `{ id, ok, result | error }`; a line ends at `\n` and nowhere else (Deviation 44); starts lazily and restarts after a crash; `shell: false`, `windowsHide: true`.
   - `src/session/backends/windows.js`: `createWindowsBackend({ env, log, spawnImpl, workerFile }) → backend` implementing §3.3's interface plus `hitTest({ x, y })` (Deviation 28). `launch` spawns `exe` itself (`detached: true`, `windowsHide: false`, Deviation 17).
   - `windows-worker.ps1`: ops `probe`, `processes`, `windows`, `foreground`, `focus`, `close`, `screenshot`, `input`, `release_all`, `locked`, `hit_test`.
 
@@ -514,6 +524,14 @@ describe('LineWorker (any OS, with a fake child)', () => {
     assert.equal(calls.length, 1, 'one worker for many calls');
     assert.equal(calls[0].opts.shell, false);
     assert.equal(calls[0].opts.windowsHide, true);
+    await w.stop();
+  });
+
+  it('a reply with U+2028 or U+2029 inside a string is still one line', async () => {
+    // JSON.stringify leaves both raw; node:readline would end the line at each.
+    const { spawnImpl } = fakeSpawn((req) => ({ id: req.id, ok: true, result: { title: 'a b c' } }));
+    const w = new LineWorker({ file: 'x', args: [], spawnImpl });
+    assert.deepEqual(await w.call('windows', {}, { timeoutMs: 500 }), { title: 'a b c' });
     await w.stop();
   });
 
@@ -593,9 +611,32 @@ Expected: FAIL with `Cannot find module '../src/session/backends/line-worker'`.
 // A persistent OS worker spoken to in JSON lines (fleet stage 5 spec §3.3):
 // op data travels on stdin, never in argv or script text.
 const { spawn } = require('child_process');
-const readline = require('readline');
+const { StringDecoder } = require('string_decoder');
 const { createLogger } = require('../../logging');
 const { GuiError, fromWire } = require('../../gui/errors');
+
+// A reply is at most one sealed frame's worth (8 MiB); twice that with no
+// newline is a worker gone wrong, and its output is dropped.
+const MAX_LINE = 16 * 1024 * 1024;
+
+// One callback per '\n'-terminated line. Not node:readline: that also ends a
+// line at U+2028 and U+2029, which a worker's JSON may hold raw inside a
+// string (a window title), and a reply cut there would be dropped.
+function onLines(stream, onLine) {
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+  stream.on('data', (chunk) => {
+    buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    let end = buffer.indexOf('\n');
+    while (end >= 0) {
+      const line = buffer.slice(0, end).replace(/\r$/, '');
+      buffer = buffer.slice(end + 1);
+      if (line) onLine(line);
+      end = buffer.indexOf('\n');
+    }
+    if (buffer.length > MAX_LINE) buffer = '';
+  });
+}
 
 class LineWorker {
   constructor({ file, args = [], spawnImpl = spawn, env = process.env, log = createLogger('session-helper/worker'), name = 'worker' } = {}) {
@@ -608,7 +649,7 @@ class LineWorker {
   _start() {
     const child = this.spawnImpl(this.file, this.args, { stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true, env: this.env });
     this.child = child;
-    readline.createInterface({ input: child.stdout }).on('line', (line) => {
+    onLines(child.stdout, (line) => {
       let msg;
       try {
         msg = JSON.parse(line);
@@ -623,7 +664,7 @@ class LineWorker {
       if (msg.ok === true) p.resolve(msg.result === undefined ? null : msg.result);
       else p.reject(fromWire(msg.error));
     });
-    if (child.stderr) readline.createInterface({ input: child.stderr }).on('line', (line) => this.log.debug(`${this.name}: ${line}`));
+    if (child.stderr) onLines(child.stderr, (line) => this.log.debug(`${this.name}: ${line}`));
     child.on('error', (err) => this._fail(`${this.name} could not start: ${err.message}`));
     child.on('exit', (code) => this._fail(`${this.name} exited (${code})`));
     if (child.stdin) child.stdin.on('error', () => {});
@@ -1204,6 +1245,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 17: The macOS backend
 
+**Review:** trust (the checks and the injection, and three macOS permissions granted to the `node` binary). **On Windows:** only the fake-tool plumbing suite runs. The JXA worker suite, the permission prompts and Deviation 27 (whether non-ASCII text really needs the `System Events` route) can only be checked on a Mac; the implementer says so in the task report and leaves that run to a machine that has one.
+
 **Batchable:** yes — with Task 18 (same backend interface, same skip-when-absent test shape, no shared code beyond `LineWorker`).
 
 **Files:**
@@ -1693,6 +1736,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ---
 
 ### Task 18: The Linux backends (X11 and Wayland)
+
+**Review:** trust (the checks and the injection; on X11 they are separate calls, which the spec's §8 already names as a limit). **On Windows:** the scripted-`xdotool` suite and the Wayland suite run; the real-X11 suite needs Linux with `DISPLAY`, no Wayland and `/usr/bin/xdotool`.
 
 **Batchable:** yes — with Task 17.
 
@@ -2195,4 +2240,4 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ## After Part 4
 
-Run `npm test` and confirm `# fail 0`. Part 5 (`2026-09-23-fleet-stage5-session-helper-part5.md`) starts at Task 19 on these commits.
+Every test file Tasks 15–18 name shows `# fail 0` (the full suite runs once, in Task 21). Part 5 (`2026-09-23-fleet-stage5-session-helper-part5.md`) starts at Task 19 on these commits.

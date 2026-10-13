@@ -2,17 +2,21 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-The header — Goal, Architecture, Owner questions, **Global Constraints**, **Review Focus**, Interfaces from other stages and **Deviations** — is in Part 1 (`2026-09-23-fleet-stage5-session-helper-part1.md`) and applies to every task here. Part 5 builds on Parts 1–4 (Tasks 1–18) on `feat/fleet-stage5`.
+The header — Goal, Architecture, the owner's questions and rulings (2026-10-12), what was checked against main `532efcf`, **Global Constraints**, **Review Focus**, Interfaces from other stages, **Deviations** (1–44) and the task table with review weights — is in Part 1 (`2026-09-23-fleet-stage5-session-helper-part1.md`) and applies to every task here. Part 5 builds on Parts 1–4 (Tasks 1–18) on `feat/fleet-stage5`.
 
-**This part:** Task 19 login start (`src/session/autostart.js`, the user-home writer child); Task 20 the `session` CLI (`run | install | uninstall | status | probe`); Task 21 the e2e, `CLAUDE.md` and the full-suite check.
+**This part:** Task 19 login start (`src/session/autostart.js`, the user-home writer child); Task 20 the `session` CLI (`run | install | uninstall | status | probe`), which carries R-F5-2; Task 21 the e2e, `CLAUDE.md` and the stage's one full-suite run.
+
+`src/service/installers.js` and `src/platform/master-key.js` are unchanged on main since the plan was written. `src/service/cli.js` gained two commands (`models`, `profiles`) and an async-aware `withServiceCore`; the anchors Task 20 uses (the `frontdoor` help line, `VALUE_FLAGS`, the `--confirm` check, the `switch`) are all still there.
 
 ---
 
 ### Task 19: Login start for the helper
 
+**Review:** trust (an elevated command writes into a user's home and registers a task; every write must be unable to follow a link). **On Windows:** the rendering and planning suites run. The user-side writer suite is POSIX only and is skipped; the drop to the user's uid and gid is asserted only against a fake `spawnSync`; no test on any OS touches a real scheduled task, LaunchAgent or autostart entry.
+
 **Files:**
 - Create: `src/session/autostart.js`
-- Modify: `src/service/installers.js:962` (export `sanitizeWindowsPath`, `assertAbsolutePosixPath`, `xmlEscape`)
+- Modify: `src/service/installers.js` (its closing `module.exports = { … }`: export `sanitizeWindowsPath`, `assertAbsolutePosixPath`, `xmlEscape`)
 - Test: `tests/session-autostart.test.js`
 
 **Interfaces:**
@@ -172,7 +176,7 @@ Expected: FAIL with `Cannot find module '../src/session/autostart'`.
 
 - [ ] **Step 3: Export the installer helpers**
 
-In `src/service/installers.js`, extend `module.exports`:
+In `src/service/installers.js`, extend the `module.exports = {` object at the end of the file (the three functions already exist in it; only the export is new):
 
 ```js
 module.exports = {
@@ -452,6 +456,10 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 20: The `session` command
 
+**Review:** trust (the elevated install: it mints the secret, chooses who may read it, and trusts the data dir for the node id, Deviation 14). **On Windows:** the suite runs with injected `isAdmin`, `resolveSessionUser`, `runIcacls` and `execute`; the POSIX socket-directory assertion (`0711`) is skipped; no test on any OS runs a real elevated install.
+
+R-F5-2 lands here: a second session user is refused until the first is uninstalled. `session uninstall` removing the canonical secret is Deviation 33.
+
 **Files:**
 - Create: `src/service/commands/session.js`
 - Modify: `src/service/cli.js` (HELP, `VALUE_FLAGS` += `session-file`, flag scoping, `case 'session'`)
@@ -489,7 +497,9 @@ const identity = testNodeIdentity({ key: 'gpu-box' });
 const KEY = crypto.randomBytes(32);
 
 function setup({ withIdentity = true } = {}) {
-  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cli-session-')));
+  // Native realpath: session-secret.js requires the config dir to be its own
+  // native realpath, and a Windows CI TEMP is an 8.3 short path.
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cli-session-')));
   cleanups.push(() => fs.rmSync(base, { recursive: true, force: true }));
   const dataDir = path.join(base, 'data');
   const configDir = path.join(base, 'config');
@@ -563,12 +573,20 @@ describe('session install', () => {
     assert.notEqual(cipher.decryptString(second.secret), cipher.decryptString(first.secret));
   });
 
-  it('Owner question 2: refuses a second session user until the first is uninstalled', async () => {
+  it('R-F5-2 (owner question 2): refuses a second session user until the first is uninstalled', async () => {
     const s = setup();
     await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
     const t = io();
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'bob' }, dataDir: s.dataDir, io: t.io, deps: deps(s) }), 1);
     assert.match(t.err.join(''), /session_user_mismatch: installed for "alice"; run "session uninstall --user alice" first/);
+    // Nothing of bob's was written, and alice's install is untouched.
+    assert.equal(canonical(s.configDir).session_user, 'alice');
+    // (On Windows the copy is named by SID, and this test's fake account has one SID for every name.)
+    if (POSIX) assert.equal(fs.existsSync(S.userCopyPath({ platform: process.platform, configDir: s.configDir, user: 'bob' })), false);
+    // After alice is uninstalled, bob installs.
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) }), 0);
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'bob' }, dataDir: s.dataDir, io: io().io, deps: deps(s) }), 0);
+    assert.equal(canonical(s.configDir).session_user, 'bob');
   });
 
   it('refuses before writing when the service never ran (no identity) or there is no master key', async () => {
@@ -909,7 +927,7 @@ module.exports = { runSessionCommand, readNodeId, SESSION_USAGE };
 
 - [ ] **Step 4: Wire it into `src/service/cli.js`**
 
-1. HELP, after the `frontdoor` line:
+1. In the `HELP` text, after the line that starts `  king-louie-service frontdoor enroll-device|code`:
 
 ```
   king-louie-service session [--session-file PATH]              (the helper, as the logged-in user)
@@ -918,8 +936,8 @@ module.exports = { runSessionCommand, readNodeId, SESSION_USAGE };
   king-louie-service session status|probe [--data-dir DIR]
 ```
 
-2. `VALUE_FLAGS`: add `'session-file'`.
-3. After the `--confirm` scoping check:
+2. `VALUE_FLAGS` (`const VALUE_FLAGS = new Set([…])`): add `'session-file'`; `parseArgs` turns it into `flags.sessionFile`.
+3. After the `--confirm` scoping check (the `if (flags.confirm && !(command === 'frontdoor' && sub === 'code'))` block):
 
 ```js
   if (flags.sessionFile !== undefined && command !== 'session') {
@@ -928,7 +946,7 @@ module.exports = { runSessionCommand, readNodeId, SESSION_USAGE };
   }
 ```
 
-4. In the `switch`, before `default`:
+4. In `main`'s `switch (command)`, before its `default:`:
 
 ```js
       case 'session': {
@@ -954,6 +972,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ---
 
 ### Task 21: The end-to-end run, `CLAUDE.md`, and the full suite
+
+**Review:** standard. **On Windows:** the Windows leg of the e2e runs here (`KL_E2E_GUI=1`, in an interactive session, hands off the mouse and keyboard); the macOS leg needs a Mac with Screen Recording and Accessibility granted to `node`. This task is where the stage's one full `npm test` runs.
 
 **Files:**
 - Create: `tests/e2e/session-helper.test.js`
@@ -1051,7 +1071,7 @@ describe('session helper end to end', { skip: !RUN && 'set KL_E2E_GUI=1 on Windo
   const opts = { origin: { client: 'e2e', session: null, job_id: 'job-e2e' } };
 
   before(async () => {
-    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-e2e-gui-')));
+    base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-e2e-gui-')));
     const configDir = path.join(base, 'config');
     const dataDir = path.join(base, 'data');
     fs.mkdirSync(configDir, { mode: 0o755 });
@@ -1077,6 +1097,8 @@ describe('session helper end to end', { skip: !RUN && 'set KL_E2E_GUI=1 on Windo
     gui = createGuiSubsystem({
       nodeConfig, dataDir, configDir, cipher, adminUid: UID, geteuid: () => UID,
       approvals: { identity, approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true }, auditLedger: { append: async () => {} } },
+      // R-F5-7: the subsystem knows no open job unless its host says so.
+      jobOpen: (jobId) => jobId === 'job-e2e',
       deps: { endpoint }
     });
     await gui.start();
@@ -1173,7 +1195,23 @@ protocols `docs/protocol/session-v1.md`, `docs/protocol/lease-v1.md`).
 - GUI tools check the `gui` capability first, so a node without a working
   helper refuses before any approval or lease. Input needs a phone-signed
   lease; images reach the model only from tools flagged `emitsImages: true`,
-  and `ToolExecutor` detaches `_images` before anything stores a result.
+  and `ToolExecutor` detaches `_images` before anything stores a result (a
+  `PostToolUse` hook's result included). The agent loop places images for
+  the provider that answered each call (`_currentProviderName`).
+- A lease is bound to a job, read from the run's origin: `origin.job_id`,
+  else `chat:<origin.session>`. A run with neither is refused
+  (`job_required`), and a job the node does not know to be open closes its
+  lease (`job_closed`; `isJobOpen` in `src/gui/index.js`: the fleet
+  `JobManager` has it and it is not terminal, or the chat exists). Nothing
+  defaults to open (owner ruling R-F5-7, 2026-10-12).
+- A front-door client needs `fleet:unsafe` on the node for `RequestLease`
+  and for an unsafe `LaunchApp`: both read the `refuseUnsafe` mark on the
+  requester `ToolExecutor` hands them (M19) and answer with
+  `REFUSE_UNSAFE_MESSAGE` before anything reaches the phone. A session the
+  node started itself still asks the phone (R-F5-3).
+- Case turns keep `ListApps` and `Screenshot` only: the eight acting GUI
+  tools are in `CASE_BLOCKED_TOOL_NAMES`. Wake-up turns get no GUI tool;
+  delegate turns get all ten (R-F5-4).
 - Tests never touch a real LaunchAgent, autostart entry or scheduled task
   (autostart tests use fake executors) and never inject input except the
   opt-in e2e: `KL_E2E_GUI=1 node --test tests/e2e/session-helper.test.js` on
@@ -1183,10 +1221,10 @@ protocols `docs/protocol/session-v1.md`, `docs/protocol/lease-v1.md`).
   `node tests/vectors/session-v1/generate.js --check`.
 ```
 
-- [ ] **Step 5: Run the full suite**
+- [ ] **Step 5: Run the full suite (the one run for the stage)**
 
 Run: `npm test`
-Expected: `# fail 0`. Then `node tests/vectors/lease-v1/generate.js --check`, `node tests/vectors/session-v1/generate.js --check` and `node tests/vectors/client-grant-v1/generate.js --check` all report a match.
+Expected: `# fail 0`. Then `node tests/vectors/lease-v1/generate.js --check` (`26 vectors match`), `node tests/vectors/session-v1/generate.js --check` (`6 vectors match`), `node tests/vectors/approval-v1/generate.js --check` (`41 vectors match`: F5 added no approval-v1 message) and `node tests/vectors/client-grant-v1/generate.js --check` all report a match.
 
 - [ ] **Step 6: Commit**
 
@@ -1201,4 +1239,4 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ## After Part 5
 
-`npm test` shows `# fail 0` and the three vector generators match. Part 6 (`2026-09-23-fleet-stage5-session-helper-part6.md`) adds the phone side (Tasks 22–25).
+`npm test` shows `# fail 0` and the four vector generators match. Part 6 (`2026-09-23-fleet-stage5-session-helper-part6.md`) adds the phone side (Tasks 22–25); the only Node file it adds is `tests/mobile-lease-apps.test.js`, which its tasks run themselves.

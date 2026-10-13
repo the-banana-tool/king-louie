@@ -2,17 +2,21 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-The header — Goal, Architecture, Owner questions, **Global Constraints**, **Review Focus**, Interfaces from other stages and **Deviations** — is in Part 1 (`2026-09-23-fleet-stage5-session-helper-part1.md`) and applies to every task here. Part 6 builds on Parts 1–5 (Tasks 1–21) on `feat/fleet-stage5`.
+The header — Goal, Architecture, the owner's questions and rulings (2026-10-12), what was checked against main `532efcf`, **Global Constraints**, **Review Focus**, Interfaces from other stages, **Deviations** (1–44) and the task table with review weights — is in Part 1 (`2026-09-23-fleet-stage5-session-helper-part1.md`) and applies to every task here. Part 6 builds on Parts 1–5 (Tasks 1–21) on `feat/fleet-stage5`.
 
-**This part:** the phone side of leases (spec §3.10). Task 22 `lease-v1` in the iOS protocol core; Task 23 the same in the Android protocol core; Task 24 the iOS app (lease requests, the live lease, the kill switch, the banner, push, demo); Task 25 the Android app (the same screens, fetch-on-tap per Owner question 1).
+**This part:** the phone side of leases (spec §3.10). Task 22 `lease-v1` in the iOS protocol core; Task 23 the same in the Android protocol core, plus the three small decisions Android's screens make without a network (R-F5-5, R-F5-6); Task 24 the iOS app (lease requests, the live lease, the kill switch, the banner, push, demo; R-F5-8); Task 25 the Android app (the same screens, fetched on tap: R-F5-1, R-F5-5, R-F5-6).
+
+`mobile/` is unchanged on main since the plan was written, so every name these tasks build on (`signForSession`, `sessionOnlySigner`, `RelayApi.exchange`, `openPushed`, `DemoFleet`, …) is as the plan found it.
 
 Deviation 29 (listed in Part 1; restated for this part): **History needs no new store.** The node's audit slice (F3's `/v1/nodes/{id}/history`, served from F4's mirror on a front door) already carries every `lease.*` and `gui.*` entry, so History shows leases with no app-side log; the apps only label those kinds "Computer use".
 
-Swift and Kotlin run only where their toolchains are (macOS for Swift; any OS with a JDK 17 and Gradle for Kotlin). Steps name the command; on a machine without the toolchain the implementer runs the Node suite and leaves the mobile run to a machine that has it, saying so in the task report.
+Swift and Kotlin run only where their toolchains are: macOS for Swift; any OS with a JDK 17 for the Kotlin protocol module (`../gradlew test` from `mobile/android/protocol`: the wrapper is `mobile/android/gradlew`, and the module needs no Android SDK); the Android SDK as well for the app build. Steps name the command; on a machine without the toolchain the implementer runs the Node tests (`tests/lease-vectors.test.js`, `tests/mobile-lease-apps.test.js`) and leaves the mobile run to a machine that has it, saying so in the task report. The two app modules have no test target of their own, so the rules the owner set for their lease screens are pinned by `tests/mobile-lease-apps.test.js`, which reads their sources and runs anywhere.
 
 ---
 
 ### Task 22: `lease-v1` in the iOS protocol core
+
+**Review:** trust (what the phone accepts as the node's word, and the exact bytes it signs). **On Windows:** none of it runs: `swift test` needs macOS. The same vectors run in Node (`tests/lease-vectors.test.js`), which is the only check available here.
 
 **Files:**
 - Create: `mobile/ios/KLProtocol/Sources/KLProtocol/Lease.swift`
@@ -427,15 +431,20 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 23: `lease-v1` in the Android protocol core
 
+**Review:** trust (what the phone accepts as the node's word, the exact bytes it signs, and what it reads as "the node confirmed"). **On Windows:** runs with a JDK 17 (`../gradlew test` from `mobile/android/protocol`); without one, none of it.
+
+R-F5-5 and R-F5-6 put three small pure pieces here, where the JVM tests can reach them: `Leases.sendOutcome` (an answer with no state is never success), `Leases.cursorAfterWatch` (where to ask for views after a watch) and `Leases.REFRESH_WAIT_S`.
+
 **Files:**
 - Create: `mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/Lease.kt`
 - Modify: `mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/AppCore.kt` (`DemoFleet.leaseRequest`, `DemoFleet.leaseView`)
 - Modify: `mobile/android/protocol/build.gradle.kts` (the `kl.leaseVectors` system property)
 - Test: `mobile/android/protocol/src/test/kotlin/com/example/kinglouie/protocol/LeaseVectorTest.kt`
+- Test: `mobile/android/protocol/src/test/kotlin/com/example/kinglouie/protocol/LeaseFlowTest.kt`
 
 **Interfaces:**
 - Consumes: `JsonText`, `Jcs`, `Envelope`, `Digest`, `NodePin`, `ProtocolException`, the `str()/int()/bool()/arr()/get` helpers, `jsonString` (existing protocol module).
-- Produces (Kotlin, package `com.example.kinglouie.protocol`): `LeaseApp`, `LeaseRequest` (`companion from(message): LeaseRequest?`), `LeaseStatus` (`from`), `LeaseAction`, `LeaseView`, `ViewCheck(accepted, reason, view)`, `object Leases { VIEW_MAX_BYTES; grant(request, apps, minutes, deviceId, signedAt): JsonObject; deny(...); revoke(...); watch(...); verifyView(envelope, pin): ViewCheck; verifiedMessage(envelope, pin): JsonObject? }` — the same names and rules as Task 22.
+- Produces (Kotlin, package `com.example.kinglouie.protocol`): `LeaseApp`, `LeaseRequest` (`companion from(message): LeaseRequest?`), `LeaseStatus` (`from`), `LeaseAction`, `LeaseView`, `ViewCheck(accepted, reason, view)`, `object Leases { VIEW_MAX_BYTES; grant(request, apps, minutes, deviceId, signedAt): JsonObject; deny(...); revoke(...); watch(...); verifyView(envelope, pin): ViewCheck; verifiedMessage(envelope, pin): JsonObject? }` — the same names and rules as Task 22. Android only: `sealed class SendOutcome { Confirmed(state); Rejected(reason); Unconfirmed }`, `Leases.sendOutcome(reply: JsonElement?): SendOutcome`, `Leases.cursorAfterWatch(lastSeq: Int, watchReply: JsonElement?): Int`, `Leases.REFRESH_WAIT_S = 5`.
 
 - [ ] **Step 1: Point the tests at the lease vectors**
 
@@ -555,9 +564,49 @@ class LeaseVectorTest {
 }
 ```
 
+Create `mobile/android/protocol/src/test/kotlin/com/example/kinglouie/protocol/LeaseFlowTest.kt`:
+
+```kotlin
+package com.example.kinglouie.protocol
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/** Owner rulings R-F5-5 and R-F5-6 (2026-10-12): what the Android lease screens decide without a network. */
+class LeaseFlowTest {
+    private fun json(text: String) = JsonText.parse(text.toByteArray())
+
+    @Test
+    fun sendOutcome() {
+        assertEquals(SendOutcome.Confirmed("active"), Leases.sendOutcome(json("""{"state":"active"}""")))
+        assertEquals(SendOutcome.Confirmed("ended"), Leases.sendOutcome(json("""{"state":"ended","reason":"job_closed"}""")))
+        assertEquals(SendOutcome.Rejected("minutes_out_of_range"), Leases.sendOutcome(json("""{"state":"rejected","reason":"minutes_out_of_range"}""")))
+        assertEquals(SendOutcome.Rejected(null), Leases.sendOutcome(json("""{"state":"rejected"}""")))
+        // No answer, or one with no state, is never read as success.
+        assertTrue(Leases.sendOutcome(null) is SendOutcome.Unconfirmed)
+        assertTrue(Leases.sendOutcome(json("""{}""")) is SendOutcome.Unconfirmed)
+        assertTrue(Leases.sendOutcome(json("""{"state":7}""")) is SendOutcome.Unconfirmed)
+        assertTrue(Leases.sendOutcome(json("""[]""")) is SendOutcome.Unconfirmed)
+    }
+
+    @Test
+    fun cursorAfterWatch() {
+        assertEquals(5, Leases.REFRESH_WAIT_S)
+        assertEquals(12, Leases.cursorAfterWatch(0, json("""{"state":"active","after_seq":12}""")))
+        // Never behind what this phone has already seen.
+        assertEquals(20, Leases.cursorAfterWatch(20, json("""{"state":"active","after_seq":12}""")))
+        // A relay that sends no position, or a bad one, leaves the cursor where it was.
+        assertEquals(7, Leases.cursorAfterWatch(7, json("""{"state":"active"}""")))
+        assertEquals(7, Leases.cursorAfterWatch(7, json("""{"state":"active","after_seq":"12"}""")))
+        assertEquals(7, Leases.cursorAfterWatch(7, null))
+    }
+}
+```
+
 - [ ] **Step 3: Run it to verify it fails**
 
-Run (from `mobile/android/protocol`): `./gradlew test --tests '*LeaseVectorTest*'` (or `gradle test --tests '*LeaseVectorTest*'` where the wrapper is the parent's).
+Run (from `mobile/android/protocol`, JDK 17): `../gradlew test --tests '*LeaseVectorTest*' --tests '*LeaseFlowTest*'` (the wrapper is `mobile/android/gradlew`).
 Expected: FAIL to compile — `Unresolved reference: Leases`.
 
 - [ ] **Step 4: Write `Lease.kt`**
@@ -637,9 +686,44 @@ class LeaseView(
 
 data class ViewCheck(val accepted: Boolean, val reason: String?, val view: LeaseView?)
 
+/** What one lease send (grant, deny, revoke, watch) came to. Android shows the third as "not confirmed" and sends nothing again by itself (owner ruling R-F5-5). */
+sealed class SendOutcome {
+    /** The node answered with the lease's state. */
+    data class Confirmed(val state: String) : SendOutcome()
+
+    /** The node answered and refused; `reason` is its word, when it gave one. */
+    data class Rejected(val reason: String?) : SendOutcome()
+
+    /** No usable answer: the request failed or timed out, or the reply carried no state. */
+    object Unconfirmed : SendOutcome()
+}
+
 object Leases {
     /** A view larger than this is dropped unread (§4.1). */
     const val VIEW_MAX_BYTES = 262144
+
+    /**
+     * How long Android's Refresh holds its one views request open for the
+     * frame its watch causes (owner ruling R-F5-6). The node captures within a
+     * 250 ms tick of the watch unless another capture ran in the last second,
+     * may capture once more at lower quality, and the view then crosses the
+     * relay; the relay caps a wait at 25 s and a watch lasts 60 s. A judgement,
+     * to be confirmed against a real node (plan Deviation 42).
+     */
+    const val REFRESH_WAIT_S = 5
+
+    /** The answer to one send. Only a reply that names a state counts as an answer. */
+    fun sendOutcome(reply: JsonElement?): SendOutcome {
+        val state = reply["state"].str() ?: return SendOutcome.Unconfirmed
+        return if (state == "rejected") SendOutcome.Rejected(reply["reason"].str()) else SendOutcome.Confirmed(state)
+    }
+
+    /**
+     * Where to ask for views after a watch: the relay's `after_seq` (its
+     * mailbox position before the node heard the watch), never behind what
+     * this phone has already seen. A reply without one leaves the cursor.
+     */
+    fun cursorAfterWatch(lastSeq: Int, watchReply: JsonElement?): Int = maxOf(lastSeq, watchReply["after_seq"].int() ?: 0)
 
     /** The request's own apps, in its order, kept only if the owner left them on. */
     fun grant(request: LeaseRequest, apps: List<String>, minutes: Int, deviceId: String, signedAt: String): JsonObject {
@@ -771,13 +855,13 @@ Add `import kotlinx.serialization.json.JsonArray` to `AppCore.kt` if it is not t
 
 - [ ] **Step 6: Run it to verify it passes**
 
-Run (from `mobile/android/protocol`): `./gradlew test`
-Expected: every test passes, `ProtocolVectorTest`, `FrontDoorVectorTest` and `QuestionTest` included.
+Run (from `mobile/android/protocol`, JDK 17): `../gradlew test`
+Expected: every test passes, `ProtocolVectorTest`, `FrontDoorVectorTest`, `QuestionTest`, `LeaseVectorTest` and `LeaseFlowTest` included.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/Lease.kt mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/AppCore.kt mobile/android/protocol/build.gradle.kts mobile/android/protocol/src/test/kotlin/com/example/kinglouie/protocol/LeaseVectorTest.kt
+git add mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/Lease.kt mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/AppCore.kt mobile/android/protocol/build.gradle.kts mobile/android/protocol/src/test/kotlin/com/example/kinglouie/protocol/LeaseVectorTest.kt mobile/android/protocol/src/test/kotlin/com/example/kinglouie/protocol/LeaseFlowTest.kt
 git commit -m "feat(android): lease-v1 in the protocol core, with the vectors
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
@@ -787,7 +871,12 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 24: The iOS app — lease requests, the live lease and the kill switch
 
+**Review:** trust (the phone is where the owner grants, watches and stops; and Deviation 21 removes a Face ID prompt from the watch). **On Windows:** `tests/mobile-lease-apps.test.js` runs anywhere. `xcodegen`, `xcodebuild`, `swift test` and the hand checks need a Mac and a device or simulator; without them the implementer runs the Node test and says in the task report that the build and the hand checks are left to a machine that has them.
+
+R-F5-8 (the owner accepted Deviation 21): iOS signs `kl.lease.watch` with the API session, with no fresh Face ID; grants, denies and the kill switch keep a fresh prompt. `signWatchEnvelope` refuses every other message type, and the source test pins that the watch is its only user. R-F5-5's "no automatic re-send" is an Android ruling: on iOS a relay request is signed by the unlocked session without a prompt, so the kill switch keeps the spec's re-send every 3 s (one Face ID for the revoke, none for the re-sends). The relay's watch reply now also carries `after_seq` (Task 11); iOS ignores it, because it long-polls from the last sequence number it saw.
+
 **Files:**
+- Create: `tests/mobile-lease-apps.test.js` (the iOS suite; Task 25 adds Android's)
 - Modify: `mobile/ios/App/RelayAPI.swift` (lease calls, after `answerQuestion`)
 - Modify: `mobile/ios/App/DeviceKey.swift` (`signWatchEnvelope`, Deviation 21)
 - Modify: `mobile/ios/App/AppModel.swift` (a `// MARK: Leases (fleet stage 5)` section; `openPushed` kind `lease`; `reset`; demo)
@@ -1044,7 +1133,11 @@ Add, after the Questions section:
         }
         return image.jpegData(compressionQuality: 0.6) ?? Data()
     }
+
+    // MARK: Leases end
 ```
+
+The two marker comments (`// MARK: Leases (fleet stage 5)` and `// MARK: Leases end`) are what `tests/mobile-lease-apps.test.js` reads between; keep them exactly, and keep the lease code between them.
 
 In `startDemo()`, after the approval requests, add a demo lease request:
 
@@ -1247,10 +1340,69 @@ Then, in demo mode: Pending shows a "Computer use" request; opening it shows bot
 Run (from `mobile/ios/KLProtocol`): `swift test`
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit**
+Also check R-F5-8 by hand on a device: with the app unlocked, open the live lease and leave it open for a minute; frames keep arriving and no Face ID prompt appears. Allow, Deny and "Stop now" each ask for Face ID once.
+
+- [ ] **Step 7: Pin the signing rule in a test that runs anywhere**
+
+Create `tests/mobile-lease-apps.test.js`:
+
+```js
+// tests/mobile-lease-apps.test.js
+//
+// The phone apps have no test target of their own (only their protocol cores
+// do), so the rules the owner set for their lease screens on 2026-10-12 are
+// pinned here by reading the sources, as tests/longhaul-verify-web.test.js
+// does for innerHTML. It runs on any machine and builds nothing.
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+
+const ROOT = path.join(__dirname, '..');
+// A Windows checkout may hold these files with CRLF line endings.
+const read = (...parts) => fs.readFileSync(path.join(ROOT, ...parts), 'utf8').replace(/\r\n/g, '\n');
+const count = (text, needle) => text.split(needle).length - 1;
+// The text from `start` up to (not including) the next `end`; `start` must be there exactly once.
+function section(text, start, end) {
+  assert.equal(count(text, start), 1, `marker "${start}" appears exactly once`);
+  const a = text.indexOf(start);
+  const b = text.indexOf(end, a + start.length);
+  assert.ok(b > a, `"${end}" follows "${start}"`);
+  return text.slice(a, b);
+}
+
+describe('iOS lease screens (owner ruling R-F5-8)', () => {
+  const model = read('mobile', 'ios', 'App', 'AppModel.swift');
+  const key = read('mobile', 'ios', 'App', 'DeviceKey.swift');
+  const leases = section(model, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+
+  it('iOS: only the watch is signed with the session', () => {
+    // DeviceKey: the session signature is for kl.lease.watch and for nothing else.
+    const sign = section(key, 'func signWatchEnvelope', '\n    }\n');
+    assert.match(sign, /guard message\["type"\]\?\.stringValue == "kl\.lease\.watch" else/);
+    assert.match(sign, /signForSession\(/);
+    // AppModel: one use, in the live view.
+    assert.equal(count(leases, 'signWatchEnvelope('), 1);
+    assert.match(section(leases, 'func openLiveLease', 'private func apply'), /signWatchEnvelope\(/);
+    // Grants and denies take a fresh prompt (signEnvelope), never the session.
+    const decide = section(leases, 'func decideLease', 'func openLiveLease');
+    assert.equal(count(decide, 'key.signEnvelope('), 2, 'one for the grant, one for the deny');
+    assert.ok(!decide.includes('signForSession') && !decide.includes('signWatchEnvelope'));
+    // So does the kill switch.
+    const kill = section(leases, 'func killSwitch', '// Demo:');
+    assert.equal(count(kill, 'key.signEnvelope('), 1);
+    assert.ok(!kill.includes('signForSession') && !kill.includes('signWatchEnvelope'));
+  });
+});
+```
+
+Run: `node --test tests/mobile-lease-apps.test.js`
+Expected: PASS, `# fail 0`. (It reads the Swift written in Steps 2 and 3; it would fail if a grant, a deny or the kill switch were ever signed with the session.)
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add mobile/ios/App/RelayAPI.swift mobile/ios/App/DeviceKey.swift mobile/ios/App/AppModel.swift mobile/ios/App/LeaseViews.swift mobile/ios/App/Views.swift mobile/ios/App/KingLouieApp.swift
+git add mobile/ios/App/RelayAPI.swift mobile/ios/App/DeviceKey.swift mobile/ios/App/AppModel.swift mobile/ios/App/LeaseViews.swift mobile/ios/App/Views.swift mobile/ios/App/KingLouieApp.swift tests/mobile-lease-apps.test.js
 git commit -m "feat(ios): lease requests, the live lease and the kill switch
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
@@ -1260,63 +1412,168 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ### Task 25: The Android app — the same screens, fetched on tap
 
+**Review:** trust (the phone is where the owner grants, watches and stops; a wrong state on this screen is a wrong belief about a live lease). **On Windows:** `tests/mobile-lease-apps.test.js` runs anywhere. The build needs the Android SDK, and the hand checks need a phone with a fingerprint or face unlock and a real node; without them the implementer runs the Node test and the protocol tests (Task 23) and says in the task report that the build and the hand checks are left to a machine that has them.
+
+Three owner rulings shape this task (2026-10-12).
+
+- **R-F5-1: fetched on tap.** On this phone every signature is a biometric prompt, and every device-authenticated relay request is signed (`RelayApi.exchange`). So nothing polls. What the owner's taps cost in prompts: "Check for computer-use requests" one; Allow or Deny two (the decision, then the request that carries it); "Stop now" two; Refresh three (the watch, its request, the views request).
+- **R-F5-5: no automatic re-send.** Stop, Allow, Deny and Refresh sign and send once. When no answer comes (no network, `503 node_offline`, a timeout, an answer with no state), the screen says the send is not confirmed and the button is enabled again; the owner taps again. The earlier design re-sent a revoke every 3 s, which on this phone would prompt every 3 s; it is gone. One thing F3's client does on every route is left as it is: `RelayApi.exchange` answers a `401 clock_skew` once by correcting its clock and signing the same request again (one more prompt in that one case).
+- **R-F5-6: the push opens the screen; Refresh waits for the frame.** A `lease` push sets a notice and shows the Pending tab's "Computer use" section. It fetches nothing; the owner's tap on "Check for computer-use requests" does. Refresh sends the watch, takes `after_seq` from the relay's reply (Task 11, Deviation 41) and asks once for views after it with `wait=5` (`Leases.REFRESH_WAIT_S`, Deviation 42), so the fetch returns with the frame that watch causes rather than at once with the lease's earlier statuses. If no frame arrives in that time the screen says so.
+
 **Files:**
+- Modify: `tests/mobile-lease-apps.test.js` (the Android suite)
 - Modify: `mobile/android/app/src/main/kotlin/com/example/kinglouie/RelayApi.kt` (lease calls, after `answerQuestion`)
 - Modify: `mobile/android/app/src/main/kotlin/com/example/kinglouie/AppModel.kt` (a `// ---- Leases (fleet stage 5) ----` section; `openPushed` kind `lease`; `reset`; demo)
 - Create: `mobile/android/app/src/main/kotlin/com/example/kinglouie/LeaseScreens.kt`
-- Modify: `mobile/android/app/src/main/kotlin/com/example/kinglouie/Screens.kt` (`Main` banner and live-lease route; `Pending` section; `History` label)
+- Modify: `mobile/android/app/src/main/kotlin/com/example/kinglouie/Screens.kt` (`Main` banner, live-lease route and the push; `Pending` section; `History` label)
 - Modify: `mobile/android/app/src/fcm/kotlin/com/example/kinglouie/push/Push.kt` (kind `lease` and its text)
+- Modify: `CLAUDE.md` (one bullet in the "Session helper" section Task 21 added)
 
 **Interfaces:**
-- Consumes: Task 23's `LeaseRequest`, `LeaseStatus`, `LeaseView`, `Leases`; the relay routes of Task 11.
-- Produces (app-internal): `AppModel.leaseRequests`, `AppModel.liveLease`, `refreshLeases()`, `decideLease(item, apps, minutes, grant)`, `openLiveLease(nodeId, leaseId)`, `refreshLiveLease()`, `closeLiveLease()`, `killSwitch()`; composables `LeaseRequests`, `LeaseRequestScreen`, `LiveLeaseScreen`, `LeaseBanner`.
+- Consumes: Task 23's `LeaseRequest`, `LeaseStatus`, `LeaseView`, `Leases` (with `sendOutcome`, `cursorAfterWatch`, `REFRESH_WAIT_S`), `SendOutcome`; the relay routes of Task 11 (the watch reply's `after_seq`).
+- Produces (app-internal): `AppModel.leaseRequests`, `AppModel.liveLease`, `leaseNotice`, `leasePushes`, `refreshLeases()`, `decideLease(item, apps, minutes, grant)`, `openLiveLease(nodeId, leaseId, state)`, `refreshLiveLease()`, `closeLiveLease()`, `killSwitch()`; composables `LeaseRequests`, `LeaseRequestScreen`, `LiveLeaseScreen`, `LeaseBanner`.
 
-Owner question 1's default: Android fetches on tap. "Refresh" on the live screen signs one watch and one view fetch (`wait=0`), each a fingerprint prompt as Android requires; nothing polls; the kill switch is one prompt.
+- [ ] **Step 1: Add the Android suite to the source test**
 
-- [ ] **Step 1: `RelayApi` — the lease calls**
+Append to `tests/mobile-lease-apps.test.js` (Task 24 created it with `read`, `section` and `count`):
+
+```js
+describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
+  const dir = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+  const model = read(...dir, 'AppModel.kt');
+  const api = read(...dir, 'RelayApi.kt');
+  const screens = read(...dir, 'Screens.kt');
+  const leaseScreens = read(...dir, 'LeaseScreens.kt');
+  // The live part of the section: everything before the demo, which may loop.
+  const live = section(model, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+
+  it('Android: the live lease section has no loop and no timer', () => {
+    for (const forbidden of ['while (', 'while(', 'do {', 'delay(', 'repeat(', 'postDelayed', 'Timer(', 'withTimeout', 'pollJob', '.retry']) {
+      assert.ok(!live.includes(forbidden), `"${forbidden}" in the live lease section`);
+    }
+    // The only `for` walks the entries one fetch returned.
+    assert.equal(count(live, 'for ('), 1);
+    assert.match(live, /for \(entry in entries\)/);
+  });
+
+  it('Android: Stop, Allow and Refresh send once', () => {
+    // One place posts a lease envelope, and it reports a failure instead of trying again.
+    assert.equal(count(live, 'api.leaseDecision('), 1);
+    const send = section(live, 'private suspend fun sendLease', '\n    }\n');
+    assert.match(send, /Leases\.sendOutcome\(/);
+    assert.match(send, /catch \(e: RelayException\)/);
+    // One call per action, three in all.
+    assert.equal(count(section(live, 'fun decideLease', 'fun openLiveLease'), 'sendLease(api,'), 1);
+    assert.equal(count(section(live, 'fun refreshLiveLease', 'private fun applyLease'), 'sendLease(api,'), 1);
+    assert.equal(count(live.slice(live.indexOf('fun killSwitch')), 'sendLease(api,'), 1);
+    assert.equal(count(live, 'sendLease(api,'), 3);
+    // A send with no answer stays on screen as not confirmed.
+    assert.ok(count(live, 'unconfirmed =') >= 3);
+    assert.match(leaseScreens, /live\.unconfirmed/);
+    assert.match(leaseScreens, /item\.unconfirmed/);
+  });
+
+  it('Android: a lease push fetches nothing; Refresh waits with Leases.REFRESH_WAIT_S', () => {
+    // The push branch only notes that something is waiting.
+    assert.match(model, /"lease" -> noteLeasePush\(\)/);
+    const note = section(live, 'private fun noteLeasePush', '\n    }\n');
+    for (const forbidden of ['api', 'client', 'refresh', 'launch', 'sign']) assert.ok(!note.includes(forbidden), `"${forbidden}" in noteLeasePush`);
+    // The list is fetched from one place: the button the owner taps.
+    assert.equal(count(model, 'refreshLeases()'), 1, 'declared in the model and called from nowhere in it');
+    assert.match(leaseScreens, /model\.refreshLeases\(\)/);
+    assert.match(screens, /LaunchedEffect\(model\.leasePushes\)/);
+    // Refresh: views from the position the watch reply gives, waiting for the frame.
+    const refresh = section(live, 'fun refreshLiveLease', 'private fun applyLease');
+    assert.match(refresh, /Leases\.cursorAfterWatch\(/);
+    assert.match(refresh, /Leases\.REFRESH_WAIT_S/);
+    assert.equal(count(live, 'api.leaseViews('), 1);
+    assert.match(api, /views\?after_seq=\$afterSeq&wait=\$waitS/);
+  });
+});
+```
+
+Run: `node --test tests/mobile-lease-apps.test.js`
+Expected: the iOS suite passes; the Android suite FAILS (`marker "// ---- Leases (fleet stage 5) ----" appears exactly once`, and `LeaseScreens.kt` does not exist yet).
+
+- [ ] **Step 2: `RelayApi` — the lease calls**
 
 After `answerQuestion(...)`:
 
 ```kotlin
-    // Fleet stage 5 (§4.7): lease requests, decisions and views.
+    // Fleet stage 5 (§4.7): lease requests, decisions and views. No call here
+    // repeats itself; the model calls each once per tap (R-F5-1, R-F5-5).
     suspend fun leases(): List<JsonElement> = request("GET", "/v1/leases?wait=0").second.arr() ?: emptyList()
 
-    /** `202 { state, reason? }` from the node, passed through by the relay. */
+    /** `202 { state, reason? }` from the node, passed through by the relay; a watch reply also has `after_seq`. */
     suspend fun leaseDecision(action: String, leaseId: String, envelope: Envelope): JsonElement? =
         request("POST", "/v1/leases/${segment(leaseId)}/$action", envelope.json).second
 
-    suspend fun leaseViews(leaseId: String, afterSeq: Int): List<JsonElement> =
-        request("GET", "/v1/leases/${segment(leaseId)}/views?after_seq=$afterSeq&wait=0").second.arr() ?: emptyList()
+    /** Views and statuses after `afterSeq`; `waitS` > 0 holds the request open until something arrives (the relay caps it at 25). */
+    suspend fun leaseViews(leaseId: String, afterSeq: Int, waitS: Int): List<JsonElement> =
+        request("GET", "/v1/leases/${segment(leaseId)}/views?after_seq=$afterSeq&wait=$waitS").second.arr() ?: emptyList()
 ```
 
-- [ ] **Step 2: `AppModel` — the leases section**
+The client's read timeout is 40 s (`conn.readTimeout = 40000`), well above the 5 s this app waits.
 
-Add after the Questions section:
+- [ ] **Step 3: `AppModel` — the leases section**
+
+Add after the Questions section. The two marker comments (`// ---- Leases (fleet stage 5) ----` and `// ---- Leases: demo ----`) are what the source test reads between; keep them exactly.
 
 ```kotlin
     // ---- Leases (fleet stage 5) ----
-    // Fetched on tap (Owner question 1): every relay request is a biometric
-    // prompt on this phone, so nothing here polls.
+    // Owner rulings R-F5-1, R-F5-5, R-F5-6 (2026-10-12). Every signature on
+    // this phone is a biometric prompt, relay requests included. So each
+    // function below runs on the owner's tap, signs and sends one time, and
+    // shows a send that got no answer as not confirmed. Nothing here polls
+    // and nothing is sent again by itself. tests/mobile-lease-apps.test.js
+    // reads this section up to the demo marker.
 
-    data class LeaseRequestItem(val request: LeaseRequest, val nodeName: String, val status: LeaseStatus?)
+    data class LeaseRequestItem(val request: LeaseRequest, val nodeName: String, val status: LeaseStatus?, val unconfirmed: String? = null)
 
     data class LiveLease(
         val nodeId: String, val nodeName: String, val leaseId: String, val state: String = "pending", val locked: Boolean = false,
         val reason: String? = null, val expiresAtMs: Long? = null, val frame: ByteArray? = null, val frameAtMs: Long? = null,
-        val frameDropped: Boolean = false, val actions: List<LeaseAction> = emptyList(), val lastSeq: Int = 0, val revoking: Boolean = false
+        val frameDropped: Boolean = false, val actions: List<LeaseAction> = emptyList(), val lastSeq: Int = 0,
+        /** A Stop or a Refresh is being signed or sent. */
+        val busy: Boolean = false,
+        /** The last Stop or Refresh got no answer; shown until the next tap. */
+        val unconfirmed: String? = null,
+        /** The last Refresh was answered but brought no frame within the wait. */
+        val noFrame: Boolean = false
     )
+
+    /** What one send came to: the node's answer, or why there is none. */
+    private class LeaseReply(val outcome: SendOutcome, val json: JsonElement?, val problem: String?)
 
     val leaseRequests = mutableStateListOf<LeaseRequestItem>()
     var liveLease by mutableStateOf<LiveLease?>(null)
         private set
     var isLoadingLeases by mutableStateOf(false)
         private set
+    /** A `lease` push arrived and the list has not been fetched since. */
+    var leaseNotice by mutableStateOf(false)
+        private set
+    /** Counts lease pushes, so the screen can show the Pending tab once for each. */
+    var leasePushes by mutableStateOf(0)
+        private set
+    /** Request ids whose decision is being signed or sent. */
+    val decidingLease = mutableStateListOf<String>()
     private val decidedLeaseRequests = HashSet<String>()
-    private var demoLeaseJob: kotlinx.coroutines.Job? = null
+    private var demoLeaseJob: Job? = null
 
+    /** A `lease` push (R-F5-6): say where to look. Nothing is fetched until the owner taps. */
+    private fun noteLeasePush() {
+        leaseNotice = true
+        leasePushes += 1
+    }
+
+    /** "Check for computer-use requests": one list request, one prompt. */
     fun refreshLeases() {
         if (pairing || mode != AppMode.LIVE || isLoadingLeases) return
-        val api = client ?: return
+        val api = client ?: run {
+            banner = "This phone is not paired with a relay."
+            return
+        }
         isLoadingLeases = true
         scope.launch {
             try {
@@ -1324,6 +1581,7 @@ Add after the Questions section:
                 val items = api.leases().mapNotNull { entry -> verifiedLeaseRequest(entry, pins, api) }.distinctBy { it.request.requestId }
                 leaseRequests.clear()
                 leaseRequests.addAll(items)
+                leaseNotice = false
             } catch (e: Exception) {
                 fail(e)
             } finally {
@@ -1339,20 +1597,39 @@ Add after the Questions section:
         if (request.requestId in decidedLeaseRequests) return null
         if ((Timestamps.epochMillis(request.expiresAt) ?: 0) <= api.now().toEpochMilli()) return null
         entry["node_id"].str()?.let { if (it != pin.id) return null }
-        val status = entry["status"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() }
+        val status = entry["status"]?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() }
             ?.let { Leases.verifiedMessage(it, pin) }?.let { LeaseStatus.from(it) }
         if (status?.state == "ended") return null
         return LeaseRequestItem(request, pin.name, status)
     }
 
+    /** One send, never repeated (R-F5-5): the node's answer, or why there is none. */
+    private suspend fun sendLease(api: RelayApi, action: String, leaseId: String, envelope: Envelope): LeaseReply = try {
+        val json = api.leaseDecision(action, leaseId, envelope)
+        val outcome = Leases.sendOutcome(json)
+        LeaseReply(outcome, json, if (outcome is SendOutcome.Unconfirmed) "the answer could not be read" else null)
+    } catch (e: RelayException) {
+        LeaseReply(SendOutcome.Unconfirmed, null, describe(e).trimEnd('.'))
+    }
+
+    private fun markLeaseUnconfirmed(requestId: String, text: String?) {
+        val i = leaseRequests.indexOfFirst { it.request.requestId == requestId }
+        if (i >= 0) leaseRequests[i] = leaseRequests[i].copy(unconfirmed = text)
+    }
+
+    /** Allow or Deny: one signature over the decision, one request that carries it (two prompts). */
     fun decideLease(item: LeaseRequestItem, apps: Set<String>, minutes: Int, grant: Boolean) {
+        val id = item.request.requestId
         if (mode == AppMode.DEMO) {
-            leaseRequests.removeAll { it.request.requestId == item.request.requestId }
-            if (grant) openLiveLease(item.request.nodeId, item.request.leaseId)
+            leaseRequests.removeAll { it.request.requestId == id }
+            if (grant) openLiveLease(item.request.nodeId, item.request.leaseId, "active")
             return
         }
         val k = key ?: return
         val api = client ?: return
+        if (id in decidingLease) return
+        decidingLease.add(id)
+        markLeaseUnconfirmed(id, null)
         scope.launch {
             try {
                 val signedAt = Timestamps.string(api.now())
@@ -1363,56 +1640,98 @@ Add after the Questions section:
                 } else {
                     signEnvelope(k, Leases.deny(item.request, k.deviceId, signedAt), "Deny computer use", promptText(item.nodeName, 30))
                 }
-                val result = api.leaseDecision("grant", item.request.leaseId, envelope)
-                if (result["state"].str() == "rejected") {
-                    banner = "Node rejected: ${friendlyReason(result["reason"].str())}"
-                    return@launch
+                val sent = sendLease(api, "grant", item.request.leaseId, envelope)
+                when (val outcome = sent.outcome) {
+                    is SendOutcome.Unconfirmed ->
+                        markLeaseUnconfirmed(id, "Not confirmed: ${sent.problem}. Tap again, or check for requests to see what the node did.")
+                    is SendOutcome.Rejected -> banner = "Node rejected: ${friendlyReason(outcome.reason)}"
+                    is SendOutcome.Confirmed -> {
+                        decidedLeaseRequests.add(id)
+                        leaseRequests.removeAll { it.request.requestId == id }
+                        if (grant && outcome.state == "active") openLiveLease(item.request.nodeId, item.request.leaseId, outcome.state)
+                    }
                 }
-                decidedLeaseRequests.add(item.request.requestId)
-                leaseRequests.removeAll { it.request.requestId == item.request.requestId }
-                if (grant && result["state"].str() == "active") openLiveLease(item.request.nodeId, item.request.leaseId)
             } catch (e: Exception) {
+                // A prompt was cancelled or the key failed: the decision was not sent.
                 fail(e)
+            } finally {
+                decidingLease.remove(id)
             }
         }
     }
 
-    fun openLiveLease(nodeId: String, leaseId: String) {
+    /** Opens the live screen with what is already known. It fetches nothing (R-F5-1): Refresh does. */
+    fun openLiveLease(nodeId: String, leaseId: String, state: String = "pending") {
         val pin = storage.nodes.firstOrNull { it.id == nodeId } ?: demo?.pins?.firstOrNull { it.id == nodeId } ?: return
-        liveLease = LiveLease(nodeId, pin.name, leaseId)
+        liveLease = LiveLease(nodeId, pin.name, leaseId, state = state)
         if (mode == AppMode.DEMO) startDemoFrames(pin)
     }
 
-    /** One watch and one fetch of what is new: the prompts Android requires, on the owner's tap. */
+    /**
+     * Refresh (R-F5-1, R-F5-6): one watch, then one fetch of what is new,
+     * held open up to Leases.REFRESH_WAIT_S for the frame that watch causes.
+     * Three prompts on this phone (the watch, its request, the fetch), all
+     * from this one tap.
+     */
     fun refreshLiveLease() {
         val live = liveLease ?: return
+        if (live.busy || mode != AppMode.LIVE) return
         val k = key ?: return
         val api = client ?: return
         val pin = storage.nodes.firstOrNull { it.id == live.nodeId } ?: return
+        liveLease = live.copy(busy = true, unconfirmed = null, noFrame = false)
         scope.launch {
+            var next = live.copy(unconfirmed = null, noFrame = false)
             try {
-                if (live.state != "ended") {
-                    val watch = Leases.watch(live.nodeId, live.leaseId, k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
-                    api.leaseDecision("watch", live.leaseId, signEnvelope(k, watch, "Watch computer use", promptText(live.nodeName, 30)))
+                var cursor = next.lastSeq
+                if (next.state != "ended") {
+                    val watch = Leases.watch(next.nodeId, next.leaseId, k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
+                    val sent = sendLease(api, "watch", next.leaseId, signEnvelope(k, watch, "Watch computer use", promptText(next.nodeName, 30)))
+                    when (val outcome = sent.outcome) {
+                        is SendOutcome.Unconfirmed -> {
+                            // No watch reached the node, so no frame is coming: the fetch (one more prompt) is not made.
+                            next = next.copy(unconfirmed = "Refresh not confirmed: ${sent.problem}. Tap Refresh again.")
+                            return@launch
+                        }
+                        is SendOutcome.Rejected -> {
+                            next = next.copy(unconfirmed = "The node refused the watch: ${friendlyReason(outcome.reason)}.")
+                            return@launch
+                        }
+                        is SendOutcome.Confirmed -> {
+                            next = next.copy(state = outcome.state)
+                            // Views from where the relay's mailbox stood before the node heard this watch.
+                            cursor = Leases.cursorAfterWatch(next.lastSeq, sent.json)
+                        }
+                    }
                 }
-                var next = live
-                for (entry in api.leaseViews(live.leaseId, live.lastSeq)) {
+                val frameBefore = next.frameAtMs
+                val entries = try {
+                    api.leaseViews(next.leaseId, cursor, if (next.state == "active") Leases.REFRESH_WAIT_S else 0)
+                } catch (e: RelayException) {
+                    next = next.copy(unconfirmed = "Refresh not confirmed: ${describe(e).trimEnd('.')}. Tap Refresh again.")
+                    return@launch
+                }
+                next = next.copy(lastSeq = maxOf(next.lastSeq, cursor))
+                for (entry in entries) {
                     next = next.copy(lastSeq = maxOf(next.lastSeq, entry["seq"].int() ?: next.lastSeq))
                     val raw = entry["envelope"] ?: continue
                     val envelope = try { Envelope.fromJson(raw) } catch (e: ProtocolException) { continue }
                     next = applyLease(envelope, pin, next)
                 }
-                liveLease = next
+                next = next.copy(noFrame = next.state == "active" && !next.locked && next.frameAtMs == frameBefore)
             } catch (e: Exception) {
+                // A prompt was cancelled or the key failed.
                 fail(e)
+            } finally {
+                // Still the same lease on screen: show what this tap learned.
+                if (liveLease?.leaseId == next.leaseId) liveLease = next.copy(busy = false)
             }
         }
     }
 
     private fun applyLease(envelope: Envelope, pin: NodePin, live: LiveLease): LiveLease {
         Leases.verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it) }?.takeIf { it.leaseId == live.leaseId }?.let { s ->
-            return live.copy(state = s.state, locked = s.locked, reason = s.reason, expiresAtMs = s.expiresAt?.let { Timestamps.epochMillis(it) },
-                revoking = live.revoking && s.state != "ended")
+            return live.copy(state = s.state, locked = s.locked, reason = s.reason, expiresAtMs = s.expiresAt?.let { Timestamps.epochMillis(it) })
         }
         val check = Leases.verifyView(envelope, pin)
         val view = check.view?.takeIf { check.accepted && it.leaseId == live.leaseId } ?: return live
@@ -1428,10 +1747,16 @@ Add after the Questions section:
         liveLease = null
     }
 
-    /** One prompt, then a signed revoke re-sent every 3 s until the node answers ended. */
+    /**
+     * "Stop now" (R-F5-5): one signed revoke, sent one time. Two prompts on
+     * this phone: the revoke, then the request that carries it. If no answer
+     * comes, the screen says the stop is not confirmed and the owner taps
+     * again; a second revoke for a lease that already ended is acknowledged
+     * by the node.
+     */
     fun killSwitch() {
         val live = liveLease ?: return
-        if (live.revoking) return
+        if (live.busy || live.state == "ended") return
         if (mode == AppMode.DEMO) {
             demoLeaseJob?.cancel()
             liveLease = live.copy(state = "ended", reason = "revoked")
@@ -1439,21 +1764,33 @@ Add after the Questions section:
         }
         val k = key ?: return
         val api = client ?: return
+        liveLease = live.copy(busy = true, unconfirmed = null)
         scope.launch {
+            var next = live.copy(unconfirmed = null)
             try {
                 val message = Leases.revoke(live.nodeId, live.leaseId, "kill_switch", k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
-                val envelope = signEnvelope(k, message, "Stop computer use now", promptText(live.nodeName, 30))
-                liveLease = live.copy(revoking = true)
-                while (liveLease?.let { it.leaseId == live.leaseId && it.state != "ended" } == true) {
-                    val result = runCatching { api.leaseDecision("revoke", live.leaseId, envelope) }.getOrNull()
-                    if (result["state"].str() == "ended") liveLease = liveLease?.copy(state = "ended", reason = "revoked", revoking = false)
-                    else kotlinx.coroutines.delay(3000)
+                val sent = sendLease(api, "revoke", live.leaseId, signEnvelope(k, message, "Stop computer use now", promptText(live.nodeName, 30)))
+                next = when (val outcome = sent.outcome) {
+                    is SendOutcome.Confirmed ->
+                        if (outcome.state == "ended") next.copy(state = "ended", reason = "revoked")
+                        else next.copy(state = outcome.state, unconfirmed = "The node answered \"${Display.escape(outcome.state)}\", not ended. Tap Stop now again.")
+                    is SendOutcome.Rejected ->
+                        next.copy(unconfirmed = "The node refused the stop: ${friendlyReason(outcome.reason)}. The lease may still be active.")
+                    is SendOutcome.Unconfirmed ->
+                        next.copy(unconfirmed = "Stop not confirmed: ${sent.problem}. The lease may still be active. Tap Stop now again.")
                 }
             } catch (e: Exception) {
+                // A prompt was cancelled or the key failed: the stop was not sent.
+                next = next.copy(unconfirmed = "The stop was not sent. Tap Stop now again.")
                 fail(e)
+            } finally {
+                if (liveLease?.leaseId == next.leaseId) liveLease = next.copy(busy = false)
             }
         }
     }
+
+    // ---- Leases: demo ----
+    // Canned frames for store review; no network, no key. This part may loop.
 
     private fun startDemoFrames(pin: NodePin) {
         val fleet = demo ?: return
@@ -1469,7 +1806,7 @@ Add after the Questions section:
                 val envelope = fleet.leaseView(index, live.leaseId, seq, fleet.deviceId, demoFrame(seq), maxOf(0, 900 - seq * 3), listOf(action))
                 liveLease = applyLease(envelope, pin, live)
                 seq += 1
-                kotlinx.coroutines.delay(3000)
+                delay(3000)
             }
         }
     }
@@ -1483,7 +1820,7 @@ Add after the Questions section:
     }
 ```
 
-In the demo start (`val fleet = DemoFleet()` at ~454), after the approval requests:
+In the demo start (the block that begins `val fleet = DemoFleet()`), after the approval requests:
 
 ```kotlin
             runCatching { fleet.leaseRequest(0, listOf("calculator", "notepad"), 15) }.getOrNull()?.let { env ->
@@ -1491,11 +1828,13 @@ In the demo start (`val fleet = DemoFleet()` at ~454), after the approval reques
             }
 ```
 
-In `openPushed(kind, id)`, add `"lease" -> refreshLeases()`. In `reset()` (and where the demo is left), add `closeLiveLease(); leaseRequests.clear(); decidedLeaseRequests.clear()`.
+In `openPushed(kind, id)`, add the branch `"lease" -> noteLeasePush()` beside `"question" -> refreshQuestions()`. It must not fetch: a fetch is a prompt the owner did not ask for (R-F5-6). In `reset()` (and where the demo is left), add `closeLiveLease(); leaseRequests.clear(); decidedLeaseRequests.clear(); decidingLease.clear(); leaseNotice = false`.
 
-`promptText`, `friendlyReason`, `fail`, `signEnvelope`, `scope`, `storage`, `demo` are the existing members this file already uses for questions and approvals; add imports for `LeaseRequest`, `LeaseStatus`, `LeaseAction`, `Leases`, `NodePin`, `ProtocolException` from `com.example.kinglouie.protocol` if they are not imported yet.
+`promptText`, `friendlyReason`, `describe`, `fail`, `signEnvelope`, `scope`, `storage`, `demo`, `pairing`, `banner` are the existing members this file already uses for questions and approvals, and `Job`, `delay`, `JsonNull`, `Display` are already imported. Add imports for `LeaseRequest`, `LeaseStatus`, `LeaseAction`, `Leases` and `SendOutcome` from `com.example.kinglouie.protocol` (`NodePin` and `ProtocolException` are imported already). `RelayException` is in this package (`RelayApi.kt`).
 
-- [ ] **Step 3: `LeaseScreens.kt`**
+What an unconfirmed Allow means for the owner: the node may or may not have the grant. A second Allow signs the same decision again; if the first did arrive, the node answers `already_decided` or `unknown_request`, which the app shows as "Node rejected: …", and "Check for computer-use requests" then shows the request gone and the lease's banner is one Refresh away.
+
+- [ ] **Step 4: `LeaseScreens.kt`**
 
 ```kotlin
 package com.example.kinglouie
@@ -1528,16 +1867,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.kinglouie.protocol.AppMode
 import com.example.kinglouie.protocol.Display
+import com.example.kinglouie.protocol.Leases
 
 private val LIMIT_TEXT = mapOf(
     "no_lock_detect" to "This computer cannot detect a locked screen.",
     "no_human_yield" to "This computer cannot detect your own typing, so it will not pause for you."
 )
+private val WARNING = Color(0xFFB26A00)
 
-/** Fleet stage 5 §3.10: lease requests in the Pending tab, fetched on tap. */
+/** Fleet stage 5 §3.10: lease requests in the Pending tab. Nothing is fetched until the owner taps (R-F5-1, R-F5-6). */
 @Composable
 fun LeaseRequests(model: AppModel, open: (AppModel.LeaseRequestItem) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Computer use", fontWeight = FontWeight.Bold)
+        if (model.leaseNotice) Text("A computer-use request arrived. Tap the button below to load it.", color = WARNING)
         if (model.mode == AppMode.LIVE) {
             OutlinedButton({ model.refreshLeases() }, enabled = !model.isLoadingLeases) { Text(if (model.isLoadingLeases) "Checking…" else "Check for computer-use requests") }
         }
@@ -1546,6 +1889,7 @@ fun LeaseRequests(model: AppModel, open: (AppModel.LeaseRequestItem) -> Unit) {
                 Text(Display.escape(item.nodeName), fontWeight = FontWeight.Bold)
                 Text(if (item.request.isResume) "Resume computer use" else "Computer use: ${item.request.apps.joinToString(", ") { Display.escape(it.name) }}")
                 Text("Job ${Display.escape(item.request.jobId)} · ${Display.escape(item.request.originClient)}")
+                item.unconfirmed?.let { Text(it, color = WARNING) }
                 OutlinedButton({ open(item) }) { Text("Review") }
             }
         }
@@ -1556,6 +1900,7 @@ fun LeaseRequests(model: AppModel, open: (AppModel.LeaseRequestItem) -> Unit) {
 fun LeaseRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, done: () -> Unit) {
     var chosen by remember { mutableStateOf(item.request.apps.map { it.id }.toSet()) }
     var minutes by remember { mutableStateOf(item.request.maxMinutes) }
+    val deciding = item.request.requestId in model.decidingLease
     LazyColumn(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Text(Display.escape(item.nodeName), fontWeight = FontWeight.Bold)
@@ -1584,10 +1929,12 @@ fun LeaseRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, done: (
                     OutlinedButton({ if (minutes < item.request.maxMinutes) minutes += 1 }) { Text("+") }
                 }
             }
-            for (limit in item.request.limits) Text(LIMIT_TEXT[limit] ?: Display.escape(limit), color = Color(0xFFB26A00))
+            for (limit in item.request.limits) Text(LIMIT_TEXT[limit] ?: Display.escape(limit), color = WARNING)
+            item.unconfirmed?.let { Text(it, color = WARNING) }
+            Text("Allow and Deny each ask for your fingerprint twice: once for the decision, once to send it.")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button({ model.decideLease(item, chosen, minutes, grant = true); done() }, enabled = chosen.isNotEmpty()) { Text("Allow") }
-                OutlinedButton({ model.decideLease(item, emptySet(), 1, grant = false); done() }) { Text("Deny") }
+                Button({ model.decideLease(item, chosen, minutes, grant = true); done() }, enabled = chosen.isNotEmpty() && !deciding) { Text("Allow") }
+                OutlinedButton({ model.decideLease(item, emptySet(), 1, grant = false); done() }, enabled = !deciding) { Text("Deny") }
             }
         }
     }
@@ -1603,13 +1950,18 @@ fun LiveLeaseScreen(model: AppModel, close: () -> Unit) {
             live.expiresAtMs?.takeIf { live.state != "ended" }?.let { Text(formatLeft(maxOf(0L, it - System.currentTimeMillis()))) }
             val bitmap = live.frame?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
             if (bitmap != null) Image(bitmap.asImageBitmap(), contentDescription = "The leased app's window", modifier = Modifier.fillMaxWidth())
-            else Text("No frame yet")
-            if (live.frameDropped) Text("Frame dropped (too large)", color = Color(0xFFB26A00))
-            live.frameAtMs?.takeIf { System.currentTimeMillis() - it > 10_000 && live.state == "active" }?.let { Text("No frame for more than 10 s", color = Color(0xFFB26A00)) }
+            else Text("No frame loaded. Tap Refresh.")
+            live.frameAtMs?.let { Text("Frame from ${formatLeft(maxOf(0L, System.currentTimeMillis() - it))} ago. This screen does not update by itself.") }
+            if (live.frameDropped) Text("Frame dropped (too large)", color = WARNING)
+            if (live.noFrame) Text("No frame arrived in ${Leases.REFRESH_WAIT_S} s. The leased app may not be in front. Tap Refresh to try again.", color = WARNING)
+            live.unconfirmed?.let { Text(it, color = Color.Red, fontWeight = FontWeight.Bold) }
             live.reason?.takeIf { live.state != "active" }?.let { Text("Reason: ${Display.escape(it)}") }
-            Button({ model.killSwitch() }, Modifier.fillMaxWidth(), enabled = !live.revoking && live.state != "ended",
-                colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text(if (live.revoking) "Revoking…" else "Stop now") }
-            if (model.mode == AppMode.LIVE) OutlinedButton({ model.refreshLiveLease() }) { Text("Refresh") }
+            Button({ model.killSwitch() }, Modifier.fillMaxWidth(), enabled = !live.busy && live.state != "ended",
+                colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text(if (live.busy) "Working…" else "Stop now") }
+            if (model.mode == AppMode.LIVE) {
+                OutlinedButton({ model.refreshLiveLease() }, enabled = !live.busy) { Text("Refresh") }
+                Text("Stop asks for your fingerprint twice, Refresh three times. Nothing is sent until you tap.")
+            }
             OutlinedButton({ model.closeLiveLease(); close() }) { Text("Close") }
             Text("Actions", fontWeight = FontWeight.Bold)
         }
@@ -1624,14 +1976,29 @@ fun LeaseBanner(model: AppModel, open: () -> Unit) {
     if (live.state == "ended") return
     Row(Modifier.fillMaxWidth().background(Color(0x22FF0000)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
         OutlinedButton(open) { Text("Lease active on ${Display.escape(live.nodeName)}") }
-        Button({ model.killSwitch() }, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("Stop") }
+        Button({ model.killSwitch() }, enabled = !live.busy, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("Stop") }
     }
 }
 ```
 
-- [ ] **Step 4: Wire the screens, the push kind and the history label**
+The banner shows the lease this phone granted or opened in this run of the app. The app does not poll for leases granted from another phone (R-F5-1); "Check for computer-use requests" lists what is pending, and the History tab shows what happened.
 
-- `Screens.kt`, `Main`: hold two pieces of state, `var leaseItem by remember { mutableStateOf<AppModel.LeaseRequestItem?>(null) }` and `var showLive by remember { mutableStateOf(false) }`. Below the demo banner, add `LeaseBanner(model) { showLive = true }`. Before the `when (tab)`, route:
+- [ ] **Step 5: Wire the screens, the push kind and the history label**
+
+- `Screens.kt`, `Main`: hold two pieces of state, `var leaseItem by remember { mutableStateOf<AppModel.LeaseRequestItem?>(null) }` and `var showLive by remember { mutableStateOf(false) }`. A lease push shows the Pending tab and nothing else (R-F5-6); add, beside them:
+
+```kotlin
+    // A lease push: show where the request will be listed. The model fetched nothing.
+    LaunchedEffect(model.leasePushes) {
+        if (model.leasePushes > 0) {
+            tab = 0
+            leaseItem = null
+            showLive = false
+        }
+    }
+```
+
+  Below the demo banner, add `LeaseBanner(model) { showLive = true }`. Replace the `when (tab) { … }` block with a route that puts the two lease screens first:
 
 ```kotlin
             val item = leaseItem
@@ -1650,24 +2017,46 @@ fun LeaseBanner(model: AppModel, open: () -> Unit) {
             }
 ```
 
-- `Screens.kt`, `Pending`: add a parameter `openLease: (AppModel.LeaseRequestItem) -> Unit = {}` and render `LeaseRequests(model, openLease)` at the top of its column.
+- `Screens.kt`, `Pending`: add a parameter `openLease: (AppModel.LeaseRequestItem) -> Unit = {}` and render `LeaseRequests(model, openLease)` at the top of its column (above the "Check for requests" button).
 - `Screens.kt`, `History`: where an entry's `kind` is shown, prefix `"Computer use · "` when it starts with `lease.` or `gui.`.
-- `push/Push.kt` (fcm): `if (kind !in setOf("approval", "pairing", "alert", "question", "lease")) return` and, in the content text, `"lease" -> "Computer use requested"`.
+- `push/Push.kt` (fcm): `if (kind !in setOf("approval", "pairing", "alert", "question", "lease")) return` and, in the content text, `"lease" -> "Computer use requested"`. The notification opens `MainActivity`, which calls `model.openPushed(kind, id)` as it does for every kind.
 
-- [ ] **Step 5: Build and check by hand**
+- [ ] **Step 6: Build and check by hand**
 
-Run (from `mobile/android`): `./gradlew :app:assembleNopushDebug :app:assembleFcmDebug`
+Run: `node --test tests/mobile-lease-apps.test.js`
+Expected: PASS, `# fail 0` (both suites).
+
+Run (from `mobile/android`, with the Android SDK): `./gradlew :app:assembleNopushDebug :app:assembleFcmDebug`
 Expected: `BUILD SUCCESSFUL`.
 
-Run (from `mobile/android/protocol`): `./gradlew test`
+Run (from `mobile/android/protocol`, JDK 17): `../gradlew test`
 Expected: all tests pass.
 
-Then, in demo mode: Pending shows the computer-use request; Review shows the apps with paths, the reason labelled unverified and the minutes control; Allow opens the live lease with canned frames every 3 s; Stop ends it. Against a real node: "Check for computer-use requests" (a fingerprint prompt) lists a `RequestLease`; Allow asks once; on the live screen each Refresh asks and shows the latest frame and actions; Stop asks once and the node's next input fails `lease_revoked`.
+Then, in demo mode: Pending shows the computer-use request; Review shows the apps with paths, the reason labelled unverified and the minutes control; Allow opens the live lease with canned frames every 3 s; Stop ends it.
 
-- [ ] **Step 6: Commit**
+Against a real node, on a phone with a fingerprint or face unlock, check each ruling:
+
+- R-F5-1: leave the live screen open for a minute. No prompt appears and the frame does not change until Refresh is tapped.
+- R-F5-6: have the node send a `RequestLease`. The notification opens the app on Pending with "A computer-use request arrived…" and no prompt. "Check for computer-use requests" asks once and lists it. Allow asks twice. On the live screen the first Refresh asks three times and shows a frame; note how long the fetch took. If it regularly comes back empty, `Leases.REFRESH_WAIT_S` is too short for this setup: change that one constant (Deviation 42) and say so in the task report.
+- R-F5-5: put the phone in airplane mode and tap Stop now. After the prompts the screen says "Stop not confirmed…", nothing more is sent, and Stop now is enabled. Turn the network back on and tap it again: the state becomes `ended` and the node's next input fails `lease_revoked`. Do the same for Allow (the request stays listed with "Not confirmed…") and for Refresh.
+
+- [ ] **Step 7: One bullet in `CLAUDE.md`**
+
+Append to the "Session helper (fleet stage 5)" section Task 21 added:
+
+```markdown
+- The phones: iOS streams the live lease, signing only `kl.lease.watch` with
+  its API session (owner ruling R-F5-8); Android fetches on tap, sends each
+  Stop, Allow and Refresh once and shows an unanswered send as not confirmed
+  (R-F5-1, R-F5-5), and a lease push there fetches nothing (R-F5-6). The app
+  modules have no test target, so `tests/mobile-lease-apps.test.js` pins
+  these rules by reading the Swift and Kotlin sources.
+```
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add mobile/android/app/src/main/kotlin/com/example/kinglouie/RelayApi.kt mobile/android/app/src/main/kotlin/com/example/kinglouie/AppModel.kt mobile/android/app/src/main/kotlin/com/example/kinglouie/LeaseScreens.kt mobile/android/app/src/main/kotlin/com/example/kinglouie/Screens.kt mobile/android/app/src/fcm/kotlin/com/example/kinglouie/push/Push.kt
+git add mobile/android/app/src/main/kotlin/com/example/kinglouie/RelayApi.kt mobile/android/app/src/main/kotlin/com/example/kinglouie/AppModel.kt mobile/android/app/src/main/kotlin/com/example/kinglouie/LeaseScreens.kt mobile/android/app/src/main/kotlin/com/example/kinglouie/Screens.kt mobile/android/app/src/fcm/kotlin/com/example/kinglouie/push/Push.kt tests/mobile-lease-apps.test.js CLAUDE.md
 git commit -m "feat(android): lease requests, the live lease and the kill switch, fetched on tap
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
@@ -1677,4 +2066,4 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ## After Part 6
 
-The stage is complete: `npm test` shows `# fail 0`; `swift test` (macOS) and `./gradlew test` pass the lease-v1 vectors; both apps build. The spec's §10 table maps to: `gui-helper-protocol` (Task 7), `session-vectors` (Task 4), `gui-session-secret` (Task 5), `gui-broker` (Task 8), `gui-apps` (Task 2), `gui-tools` (Task 13), `gui-leases` (Task 9), `lease-vectors` (Task 6), `gui-text-guard`/`gui-keys` (Task 3), `gui-live-view` (Task 10), `gui-relay-extension` (Task 11), `agent-loop-images` (Task 12), `session-autostart` (Task 19), `session-backend-{windows,macos,linux}` (Tasks 16–18), and the e2e (Task 21).
+The stage is complete: the stage's one full `npm test` ran in Task 21 with `# fail 0`, and `tests/mobile-lease-apps.test.js` (the only Node file Part 6 adds) passes; `swift test` (macOS) and `../gradlew test` (from `mobile/android/protocol`) pass the lease-v1 vectors; both apps build. What a Windows machine could not check is listed per task in Part 1's task table; each task report says what was left to another machine. Every owner ruling of 2026-10-12 has its tests in Part 1's rulings table. The spec's §10 table maps to: `gui-helper-protocol` (Task 7), `session-vectors` (Task 4), `gui-session-secret` (Task 5), `gui-broker` (Task 8), `gui-apps` (Task 2), `gui-tools` (Task 13), `gui-leases` (Task 9), `lease-vectors` (Task 6), `gui-text-guard`/`gui-keys` (Task 3), `gui-live-view` (Task 10), `gui-relay-extension` (Task 11), `agent-loop-images` (Task 12), `session-autostart` (Task 19), `session-backend-{windows,macos,linux}` (Tasks 16–18), and the e2e (Task 21).
