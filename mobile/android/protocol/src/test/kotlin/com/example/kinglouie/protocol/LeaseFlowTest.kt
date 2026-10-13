@@ -41,6 +41,17 @@ class LeaseFlowTest {
         }
     }
 
+    /** R-F5-15: only the node's own word "suspended, no_contact" is the pause the screen names. */
+    @Test
+    fun pausedForContact() {
+        assertEquals("no_contact", Leases.NO_CONTACT)
+        assertTrue(Leases.isPausedForContact("suspended", "no_contact"))
+        assertTrue(!Leases.isPausedForContact("suspended", "foreground_changed"))
+        assertTrue(!Leases.isPausedForContact("suspended", null))
+        assertTrue(!Leases.isPausedForContact("active", "no_contact"))
+        assertTrue(!Leases.isPausedForContact("ended", "no_contact"))
+    }
+
     @Test
     fun cursorAfterWatch() {
         assertEquals(5, Leases.REFRESH_WAIT_S)

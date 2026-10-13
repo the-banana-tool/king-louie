@@ -12,7 +12,7 @@ const GUI_KEYS = Object.freeze({
   app: Object.freeze(['name', 'path', 'processes', 'args']),
   screenshot: Object.freeze(['max_width', 'quality']),
   live_view: Object.freeze(['interval_s', 'max_width', 'quality', 'max_frame_bytes']),
-  lease: Object.freeze(['default_minutes', 'max_minutes', 'yield_ms', 'max_inputs_per_minute'])
+  lease: Object.freeze(['default_minutes', 'max_minutes', 'yield_ms', 'max_inputs_per_minute', 'contact_s'])
 });
 // [min, max, default, camelCase name] per key.
 const RANGES = Object.freeze({
@@ -23,7 +23,10 @@ const RANGES = Object.freeze({
   },
   lease: {
     default_minutes: [1, 60, 15, 'defaultMinutes'], max_minutes: [1, 60, 60, 'maxMinutes'],
-    yield_ms: [0, 10000, 2000, 'yieldMs'], max_inputs_per_minute: [10, 600, 120, 'maxInputsPerMinute']
+    yield_ms: [0, 10000, 2000, 'yieldMs'], max_inputs_per_minute: [10, 600, 120, 'maxInputsPerMinute'],
+    // R-F5-15: how long input goes on without a signed message from the
+    // granting phone. Two minutes; never more than five.
+    contact_s: [30, 300, 120, 'contactS']
   }
 });
 const SECTION_NAMES = { screenshot: 'screenshot', live_view: 'liveView', lease: 'lease' };

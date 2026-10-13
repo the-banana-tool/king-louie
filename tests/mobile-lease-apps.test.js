@@ -232,6 +232,24 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
     assert.match(leaseScreens, /Button\(\{ model\.killSwitch\(\) \}, Modifier\.fillMaxWidth\(\), enabled = !live\.busy && live\.state != "ended",/);
   });
 
+  // R-F5-15 (owner ruling, 2026-10-13): the node pauses input when the
+  // granting phone has not been in touch. Android fetches on tap (R-F5-1), so
+  // its owner has to tap Refresh inside the window; the screen says so, and
+  // still does nothing by itself.
+  it('Android: the live screen says input is paused for want of contact, and what keeps it going, with no timer', () => {
+    const { live, leaseScreens, core } = android();
+    assert.match(core, /const val NO_CONTACT = "no_contact"/);
+    assert.match(core, /fun isPausedForContact\(state: String, reason: String\?\): Boolean = state == "suspended" && reason == NO_CONTACT/);
+    // From the signed state only: what applyLease read from a status the pinned node signed.
+    assert.match(leaseScreens, /if \(Leases\.isPausedForContact\(live\.state, live\.reason\)\) Text\("Paused: tap Refresh to let it continue\."/);
+    assert.match(leaseScreens, /The computer pauses clicks and typing when this phone has not refreshed for about two minutes\. Tap Refresh to keep it going\./);
+    // Nothing new runs by itself (R-F5-1, R-F5-5): the same checks as above, on the changed files.
+    none(leaseScreens, ['LaunchedEffect', 'DisposableEffect', 'SideEffect', 'produceState', 'rememberCoroutineScope', 'delay(', 'while (', 'ticker('], 'LeaseScreens.kt');
+    none(live, ['delay(', 'while (', 'Timer(', 'postDelayed', 'ticker'], 'the live lease section');
+    assert.equal(count(leaseScreens, 'model.refreshLiveLease('), 1, 'Refresh is still only the button');
+    assert.equal(count(live, 'scope.launch'), 4, 'no coroutine was added');
+  });
+
   it('Android: a lease push fetches nothing; Refresh waits with Leases.REFRESH_WAIT_S', () => {
     const { model, live, api, screens, leaseScreens } = android();
     // The push branch only notes that something is waiting.

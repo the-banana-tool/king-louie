@@ -18,6 +18,18 @@ const HISTORY_MAX = 32;
 // A lease lasts at most an hour and iOS renews its watch every 20 s, so a
 // real lease sees a few hundred control messages.
 const CONTROL_NONCES_MAX = 4096;
+// R-F5-15 (owner ruling, 2026-10-13): input needs the granting phone to stay
+// in touch. A lease's input goes on only while the node has verified a
+// signed message from the device that granted it within the contact window
+// (gui.lease.contact_s: 120 s, at most CONTACT_MAX_S). Contact is the grant
+// itself and every watch from that device whose nonce is new (a replayed
+// watch is refused before it gets here, and another device's watch is not
+// contact). When the window lapses the lease is suspended, not ended, with
+// this reason; a fresh watch from the granting device resumes it and never
+// moves its expiry. All of it on the node's clock.
+const CONTACT_REASON = 'no_contact';
+const CONTACT_DEFAULT_S = 120;
+const CONTACT_MAX_S = 300;
 
 // The nonces of the watches and revokes one lease has accepted (security
 // review finding 5). Those messages carry no validity window of their own,
@@ -58,6 +70,54 @@ class LeaseManager extends EventEmitter {
   }
 
   setBroker(broker) { this.broker = broker; }
+
+  _contactWindowMs() {
+    const s = Number(this.guiConfig.lease && this.guiConfig.lease.contactS);
+    return Math.min(CONTACT_MAX_S, Number.isFinite(s) && s > 0 ? s : CONTACT_DEFAULT_S) * 1000;
+  }
+
+  _contactLapsed(lease, now) {
+    return lease.lastContactAt === null || now - lease.lastContactAt >= this._contactWindowMs();
+  }
+
+  // The granting device was heard from now: the window runs from here.
+  _noteContact(lease, now) {
+    lease.lastContactAt = now;
+    if (lease.contactTimer) this.timers.clearTimeout(lease.contactTimer);
+    lease.contactTimer = this._timer(() => this._checkContact(lease, this.clock()), this._contactWindowMs());
+  }
+
+  // The window ran out with the lease active: suspended for want of contact,
+  // unless the lease's own time is up as well, which ends it as expired.
+  _checkContact(lease, now) {
+    if (lease.state !== 'active' || !this._contactLapsed(lease, now)) return;
+    if (lease.expiresAt !== null && now >= lease.expiresAt) {
+      this._audit('lease.expired', lease, { reason: 'expired' });
+      this._end(lease, 'expired');
+      return;
+    }
+    this.suspend(lease.leaseId, CONTACT_REASON);
+  }
+
+  // A fresh watch from the granting device (verifyWatch): contact. It
+  // resumes a lease that was suspended for want of it, unless the lease's
+  // own time ran out meanwhile; a lease suspended for any other reason
+  // still needs its resume grant.
+  _onContact(lease, now, deviceId) {
+    if (lease.state === 'ended' || lease.state === 'pending') return;
+    this._noteContact(lease, now);
+    if (lease.state !== 'suspended' || lease.suspendReason !== CONTACT_REASON) return;
+    if (lease.expiresAt !== null && now >= lease.expiresAt) {
+      this._audit('lease.expired', lease, { reason: 'expired' });
+      this._end(lease, 'expired');
+      return;
+    }
+    lease.state = 'active';
+    lease.suspendReason = null;
+    lease.typed.reset();
+    this._audit('lease.resumed', lease, { reason: 'contact', device_id: deviceId });
+    this._status(lease);
+  }
 
   // The nonce store for a control message: the one of the lease it names
   // (read before anything is verified; an unknown lease is refused by the
@@ -169,7 +229,8 @@ class LeaseManager extends EventEmitter {
       lease = {
         leaseId: crypto.randomUUID(), jobId, origin, reason: String(reason), requestedApps: [...appIds], maxMinutes: minutes,
         apps: [], state: 'pending', locked: false, endReason: null, suspendReason: null, expiresAt: null, deviceId: null,
-        seq: 0, typed: new TypedBuffer(), inputTimes: [], waiters: [], expiryTimer: null, controlNonces: new LeaseNonces()
+        seq: 0, typed: new TypedBuffer(), inputTimes: [], waiters: [], expiryTimer: null, controlNonces: new LeaseNonces(),
+        lastContactAt: null, contactTimer: null
       };
       this.leases.push(lease);
       this._sendRequest(lease, { resume: false });
@@ -289,6 +350,8 @@ class LeaseManager extends EventEmitter {
       request_id: m.request_id, apps: lease.apps, minutes: m.grant.minutes, device_id: r.deviceId
     });
     if (entry.resume && this.broker) this.broker.focusApp(lease.apps).catch(() => {});
+    // R-F5-15: the grant is the granting device's first contact.
+    this._noteContact(lease, now);
     this._armExpiry(lease);
     this._settle(lease);
     this._status(lease);
@@ -345,6 +408,9 @@ class LeaseManager extends EventEmitter {
     if (lease.controlNonces.full) return { accepted: false, reason: 'too_many_watches' };
     lease.controlNonces.add(r.message.nonce, bytesSha256(r.bytes));
     this._audit('lease.watch', lease, { device_id: r.deviceId });
+    // R-F5-15: a watch with a new nonce, from the device that granted this
+    // lease, is contact. Any other enrolled device may watch; it is not.
+    if (lease.deviceId !== null && r.deviceId === lease.deviceId) this._onContact(lease, this.clock(), r.deviceId);
     return { accepted: true, reason: null, lease, deviceId: r.deviceId };
   }
 
@@ -368,6 +434,12 @@ class LeaseManager extends EventEmitter {
       throw new GuiError('lease_required', 'call RequestLease first');
     }
     if (lease.state === 'pending') throw new GuiError('lease_pending', 'waiting for the phone');
+    // R-F5-15, by the clock itself: never trust that the timer already ran.
+    this._checkContact(lease, now);
+    if (lease.state === 'ended') throw new GuiError('lease_expired', 'call RequestLease for a new lease');
+    if (lease.state === 'suspended' && lease.suspendReason === CONTACT_REASON) {
+      throw new GuiError('lease_suspended_no_contact', 'the phone that granted this lease has not been in touch; input resumes when its owner looks at the live view again');
+    }
     if (lease.state === 'suspended') throw new GuiError('lease_suspended', lease.suspendReason);
     if (lease.locked) throw new GuiError('screen_locked');
     return lease;
@@ -400,7 +472,9 @@ class LeaseManager extends EventEmitter {
     this._status(lease);
     if (this.remainingMs(lease) <= 0) { this._end(lease, 'expired'); return; }
     const relay = this.approvals.relayClient;
-    if (reason !== 'relay_unreachable' && relay && relay.isConnected()) this._sendRequest(lease, { resume: true });
+    // No resume request for want of contact: nothing needs approving again,
+    // a watch from the granting phone resumes it (R-F5-15).
+    if (reason !== 'relay_unreachable' && reason !== CONTACT_REASON && relay && relay.isConnected()) this._sendRequest(lease, { resume: true });
   }
 
   onHelperDisconnected() {
@@ -426,7 +500,7 @@ class LeaseManager extends EventEmitter {
       if (!entry.delivered && now <= Date.parse(entry.expires_at)) this._deliver(entry);
     }
     const lease = this.current();
-    if (lease && lease.state === 'suspended' && ![...this.pending.values()].some((p) => p.ref === lease)) this._sendRequest(lease, { resume: true });
+    if (lease && lease.state === 'suspended' && lease.suspendReason !== CONTACT_REASON && ![...this.pending.values()].some((p) => p.ref === lease)) this._sendRequest(lease, { resume: true });
   }
 
   endForJob(jobId, reason = 'job_closed') {
@@ -442,6 +516,7 @@ class LeaseManager extends EventEmitter {
     lease.state = 'ended';
     lease.endReason = reason;
     if (lease.expiryTimer) this.timers.clearTimeout(lease.expiryTimer);
+    if (lease.contactTimer) this.timers.clearTimeout(lease.contactTimer);
     for (const [id, entry] of this.pending) {
       if (entry.ref === lease) {
         this.timers.clearTimeout(entry.timer);
@@ -469,4 +544,4 @@ class LeaseManager extends EventEmitter {
   }
 }
 
-module.exports = { LeaseManager };
+module.exports = { LeaseManager, CONTACT_REASON, CONTACT_MAX_S };

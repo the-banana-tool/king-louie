@@ -64,6 +64,20 @@ that is not open (`job_closed`), or for a front-door client whose grant does
 not cover `fleet:unsafe` on this node (refused in the node's own words for a
 missing scope).
 
+Contact (owner ruling R-F5-15, 2026-10-13). A lease's input goes on only
+while the node has verified a signed message from the device that granted
+it within the last `gui.lease.contact_s` seconds (120; 30 to 300) on the
+node's clock. Contact is the grant itself (a resume grant too) and every
+`kl.lease.watch` from that device whose nonce is new; a replayed watch and
+another enrolled device's watch are not. When the window lapses the node
+suspends the lease (status `suspended`, reason `no_contact`), releases what
+it held and refuses input with `lease_suspended_no_contact`; it sends no
+resume request. The granting device's next fresh watch resumes it (status
+`active`) and never moves `expires_at`; expiry and revoke end it as always.
+No message changed: `no_contact` is a value of the status's free `reason`.
+iOS watches every 20 s while its live view is open; Android sends one watch
+per Refresh tap, so its owner taps Refresh inside the window.
+
 Revoke and watch: checks 1–8 with their own type, then the `lease_id` must be
 known (`unknown_lease`). Neither message has a validity window of its own, so
 the node remembers their nonces per lease for as long as it remembers the

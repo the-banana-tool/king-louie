@@ -126,6 +126,10 @@ fun LiveLeaseScreen(model: AppModel, close: () -> Unit) {
             if (live.frameDropped) Text("Frame dropped (too large)", color = WARNING)
             if (live.noFrame) Text("No frame arrived in ${Leases.REFRESH_WAIT_S} s. The leased app may not be in front. Tap Refresh to try again.", color = WARNING)
             live.unconfirmed?.let { Text(it, color = Color.Red, fontWeight = FontWeight.Bold) }
+            // R-F5-15: the node pauses input when this phone has not been in touch. This screen
+            // sends nothing by itself (R-F5-1), so it says what the owner has to do.
+            if (Leases.isPausedForContact(live.state, live.reason)) Text("Paused: tap Refresh to let it continue.", color = Color.Red, fontWeight = FontWeight.Bold)
+            else if (live.state == "active") Text("The computer pauses clicks and typing when this phone has not refreshed for about two minutes. Tap Refresh to keep it going.", color = WARNING)
             live.reason?.takeIf { live.state != "active" }?.let { Text("Reason: ${Display.escape(it)}") }
             Button({ model.killSwitch() }, Modifier.fillMaxWidth(), enabled = !live.busy && live.state != "ended",
                 colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text(if (live.busy) "Working…" else "Stop now") }

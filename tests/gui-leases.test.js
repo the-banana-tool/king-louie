@@ -214,7 +214,11 @@ describe('suspension and resume', () => {
   it('a foreground refusal suspends, releases input, and asks to resume without extending', async () => {
     const lease = await granted({ minutes: 10 });
     const originalExpiry = lease.expiresAt;
-    timers.advance(3 * 60000);
+    // Three minutes in, with the granting phone watching (R-F5-15).
+    for (let i = 0; i < 3; i += 1) {
+      timers.advance(60000);
+      leases.verifyWatch(phone.leaseWatch(identity.nodeId, lease.leaseId));
+    }
     assert.equal(leases.noteInputOutcome(lease, { code: 'foreground_mismatch' }), true);
     assert.equal(lease.state, 'suspended');
     assert.ok(broker.calls.includes('releaseAll'));
@@ -416,6 +420,165 @@ describe('lock, expiry and revoke', () => {
     for (let i = 0; i < 3; i += 1) assert.equal(leases.verifyWatch(other.leaseWatch(identity.nodeId, lease.leaseId)).accepted, true);
     assert.deepEqual(leases.verifyWatch(other.leaseWatch(identity.nodeId, lease.leaseId)), { accepted: false, reason: 'too_many_watches' });
     assert.deepEqual(leases.onRevoke(phone.leaseRevoke(identity.nodeId, lease.leaseId)), { state: 'ended' });
+  });
+
+  // R-F5-15 (owner ruling, 2026-10-13): input needs the granting phone to
+  // stay in touch. `phone` grants in these tests; `other` is another
+  // enrolled device. All on the node's (injected) clock.
+  describe('R-F5-15: no contact from the granting phone suspends input', () => {
+    const { CONTACT_REASON } = require('../src/gui/leases');
+    const WINDOW = 120000;
+    const watchFrom = (device, lease, extra = {}) => device.leaseWatch(identity.nodeId, lease.leaseId, { signedAt: new Date(clock.now()).toISOString(), ...extra });
+
+    it('the window is one constant, 2 minutes by default, set under gui.lease.contact_s and never above 5 minutes', () => {
+      const { parseGuiConfig: parse, GUI_KEYS } = require('../src/gui/config');
+      assert.equal(guiConfig.lease.contactS, 120);
+      assert.ok(GUI_KEYS.lease.includes('contact_s'));
+      assert.equal(parse({ enabled: true, lease: { contact_s: 300 } }, { platform: 'win32' }).lease.contactS, 300);
+      assert.equal(parse({ enabled: true, lease: { contact_s: 30 } }, { platform: 'win32' }).lease.contactS, 30);
+      for (const bad of [301, 600, 29, 0, 1.5, '120']) {
+        assert.throws(() => parse({ enabled: true, lease: { contact_s: bad } }, { platform: 'win32' }), /gui\.lease\.contact_s must be an integer from 30 to 300/, String(bad));
+      }
+      assert.equal(CONTACT_REASON, 'no_contact');
+    });
+
+    it('the clock starts at the grant; when the window lapses the lease is suspended, not ended, and what was held is released', async () => {
+      const lease = await granted();
+      const expiresAt = lease.expiresAt;
+      timers.advance(WINDOW - 1000);
+      assert.equal(leases.assertUsable('job-1'), lease, 'still inside the window');
+      broker.calls.length = 0;
+      const requests = relay.all('kl.lease.request').length;
+      timers.advance(1001);
+      assert.equal(lease.state, 'suspended');
+      assert.equal(lease.suspendReason, 'no_contact');
+      assert.ok(broker.calls.includes('releaseAll'), 'held keys and buttons are released');
+      assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'lease_suspended_no_contact');
+      const status = relay.last('kl.lease.status').message;
+      assert.deepEqual([status.state, status.reason], ['suspended', 'no_contact']);
+      assert.equal(relay.all('kl.lease.request').length, requests, 'no resume request is sent to the phone: a watch resumes it');
+      assert.ok(audits.some((a) => a.kind === 'lease.suspended' && a.data.reason === 'no_contact'));
+      assert.equal(lease.expiresAt, expiresAt);
+      assert.equal(leases.current(), lease, 'it still holds the node\'s lease');
+    });
+
+    it('a laptop that slept through the window: the next input finds the lapse without the timer', async () => {
+      const lease = await granted();
+      timers.jump(WINDOW + 1);
+      assert.equal(lease.state, 'active', 'no timer ran');
+      assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'lease_suspended_no_contact');
+      assert.equal(lease.state, 'suspended');
+    });
+
+    it('a fresh watch from the granting phone keeps it going, and resumes it after a lapse without extending it', async () => {
+      const lease = await granted();
+      const expiresAt = lease.expiresAt;
+      // Watches a minute apart: never suspended.
+      for (let i = 0; i < 4; i += 1) {
+        timers.advance(60000);
+        assert.equal(leases.verifyWatch(watchFrom(phone, lease)).accepted, true);
+        assert.equal(lease.state, 'active');
+      }
+      timers.advance(WINDOW + 1);
+      assert.equal(lease.state, 'suspended');
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).accepted, true);
+      assert.equal(lease.state, 'active');
+      assert.equal(lease.suspendReason, null);
+      assert.equal(leases.assertUsable('job-1'), lease);
+      assert.equal(lease.expiresAt, expiresAt, 'a resume never extends the lease');
+      assert.equal(relay.last('kl.lease.status').message.state, 'active');
+      assert.ok(audits.some((a) => a.kind === 'lease.resumed' && a.data.reason === 'contact'));
+      // And the window runs again from that watch.
+      timers.advance(WINDOW + 1);
+      assert.equal(lease.state, 'suspended');
+    });
+
+    it('a replayed watch is not contact', async () => {
+      const lease = await granted();
+      timers.advance(60000);
+      const watch = watchFrom(phone, lease);
+      assert.equal(leases.verifyWatch(watch).accepted, true);
+      // Replayed inside the window: it does not push the window out.
+      timers.advance(90000);
+      assert.equal(leases.verifyWatch(watch).reason, 'replay');
+      timers.advance(30001);
+      assert.equal(lease.state, 'suspended', 'two minutes after the one real watch');
+      // Replayed after the lapse: it does not resume.
+      assert.equal(leases.verifyWatch(watch).reason, 'replay');
+      assert.equal(lease.state, 'suspended');
+      assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'lease_suspended_no_contact');
+    });
+
+    it('only the granting device counts: another enrolled device\'s watch is accepted for the live view and is not contact', async () => {
+      const lease = await granted();
+      timers.advance(60000);
+      const seen = leases.verifyWatch(watchFrom(other, lease));
+      assert.equal(seen.accepted, true);
+      assert.equal(seen.deviceId, other.deviceId);
+      timers.advance(60001);
+      assert.equal(lease.state, 'suspended', 'two minutes after the grant, whatever the other phone sent');
+      assert.equal(leases.verifyWatch(watchFrom(other, lease)).accepted, true);
+      assert.equal(lease.state, 'suspended', 'and it does not resume it');
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).accepted, true);
+      assert.equal(lease.state, 'active');
+    });
+
+    it('expiry and Stop still end a lease that is suspended for no contact', async () => {
+      const lease = await granted({ minutes: 5 });
+      timers.advance(WINDOW + 1);
+      assert.equal(lease.state, 'suspended');
+      timers.advance(5 * 60000);
+      assert.equal(lease.state, 'ended');
+      assert.equal(lease.endReason, 'expired');
+      // A watch after that resumes nothing.
+      leases.verifyWatch(watchFrom(phone, lease));
+      assert.equal(lease.state, 'ended');
+
+      const second = await granted({ jobId: 'job-2' });
+      timers.advance(WINDOW + 1);
+      assert.equal(second.state, 'suspended');
+      assert.deepEqual(leases.onRevoke(other.leaseRevoke(identity.nodeId, second.leaseId)), { state: 'ended' });
+      assert.equal(second.endReason, 'revoked');
+      assert.throws(() => leases.assertUsable('job-2'), (e) => e.code === 'lease_revoked');
+    });
+
+    it('a watch that arrives after the lease\'s own expiry ends it instead of resuming it', async () => {
+      const lease = await granted({ minutes: 3 });
+      timers.jump(WINDOW + 1);
+      assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'lease_suspended_no_contact');
+      timers.jump(2 * 60000);
+      leases.verifyWatch(watchFrom(phone, lease));
+      assert.equal(lease.state, 'ended');
+      assert.equal(lease.endReason, 'expired');
+    });
+
+    it('a lease suspended for another reason is not resumed by a watch; its grant restarts the window', async () => {
+      const lease = await granted();
+      leases.suspend(lease.leaseId, 'foreground_changed');
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).accepted, true);
+      assert.equal(lease.state, 'suspended');
+      assert.equal(lease.suspendReason, 'foreground_changed');
+      timers.advance(WINDOW + 1);
+      assert.equal(lease.suspendReason, 'foreground_changed', 'the reason it was suspended for stands');
+      leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 5 }));
+      assert.equal(lease.state, 'active');
+      timers.advance(WINDOW - 1000);
+      assert.equal(lease.state, 'active', 'the window started again at the resume grant');
+      timers.advance(1001);
+      assert.equal(lease.suspendReason, 'no_contact');
+    });
+
+    it('RequestLease on a lease suspended for no contact asks the phone to resume it, like any suspended lease', async () => {
+      const lease = await granted();
+      timers.advance(WINDOW + 1);
+      const requests = relay.all('kl.lease.request').length;
+      const again = leases.request({ jobId: 'job-1', origin: { ...ORIGIN, job_id: 'job-1' }, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      assert.equal(relay.all('kl.lease.request').length, requests + 1);
+      assert.equal(relay.last('kl.lease.request').message.lease.resumes, lease.leaseId);
+      leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 5 }));
+      assert.equal(await again, lease);
+      assert.equal(lease.state, 'active');
+    });
   });
 
   it('statusSummary for status.json', async () => {

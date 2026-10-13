@@ -92,6 +92,16 @@ sealed class SendOutcome {
 }
 
 object Leases {
+    /**
+     * The reason a node gives when it suspended a lease because the phone
+     * that granted it had not been in touch (owner ruling R-F5-15). The node
+     * resumes it on that phone's next watch; nothing is extended.
+     */
+    const val NO_CONTACT = "no_contact"
+
+    /** Whether a signed state and reason say input is paused for want of contact. */
+    fun isPausedForContact(state: String, reason: String?): Boolean = state == "suspended" && reason == NO_CONTACT
+
     /** A view larger than this is dropped unread (§4.1). */
     const val VIEW_MAX_BYTES = 262144
 

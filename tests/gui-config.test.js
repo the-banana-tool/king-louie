@@ -73,7 +73,7 @@ describe('parseGuiConfig', () => {
     assert.deepEqual(g.apps, {});
     assert.deepEqual(g.screenshot, { maxWidth: 1280, quality: 70 });
     assert.deepEqual(g.liveView, { intervalS: 3, maxWidth: 960, quality: 60, maxFrameBytes: 184320 });
-    assert.deepEqual(g.lease, { defaultMinutes: 15, maxMinutes: 60, yieldMs: 2000, maxInputsPerMinute: 120 });
+    assert.deepEqual(g.lease, { defaultMinutes: 15, maxMinutes: 60, yieldMs: 2000, maxInputsPerMinute: 120, contactS: 120 });
     assert.deepEqual(g.warnings, []);
   });
 
