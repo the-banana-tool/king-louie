@@ -79,6 +79,10 @@ function deps(s, extra = {}) {
     configDir: s.configDir,
     ipcDir: s.ipcDir,
     runIcacls: () => {},
+    // "Does the identity the helper file records still exist?" The real
+    // check asks the OS (read-only); here every recorded identity exists
+    // unless a test says otherwise.
+    identityExists: () => true,
     // The real check runs PowerShell against the config dir's ACL; a temp
     // dir would fail it, and it is the installers' to test.
     verifyConfigDir: () => {},
@@ -572,6 +576,175 @@ describe('second review finding 1: the session user can read who owns the users 
     // The next run finishes it.
     const again = io();
     assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: again.io, deps: d }), 0);
+  });
+});
+
+// Second security review, finding 11: three edges of "session uninstall".
+describe('second review finding 11: session uninstall', () => {
+  const copyOf = (s, a) => S.userCopyPath({ platform: process.platform, configDir: s.configDir, user: a.user, sid: a.sid });
+
+  it('--dry-run lists everything the real run removes (the service\'s secret too), and removes nothing', async () => {
+    const s = setup();
+    const d = deps(s);
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    const before = tree(s.base);
+    const executed = d.executed.length;
+    const t = io();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: t.io, deps: { ...d, isTTY: () => false, confirm: async () => { throw new Error('a dry run asks nothing'); } } }), 0);
+    const out = t.out.join('');
+    assert.ok(out.includes(`[dry-run] remove ${copyOf(s, account('alice'))}`));
+    assert.ok(out.includes(`[dry-run] remove ${S.canonicalPath(s.configDir)} (the service's secret)`));
+    assert.deepEqual(tree(s.base), before);
+    // The login start goes through the executor in dry-run mode, which prints it and runs nothing.
+    assert.equal(d.executed.length, executed + 1);
+    // For another user it says what stays.
+    const t2 = io();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'bob', dryRun: true }, dataDir: s.dataDir, io: t2.io, deps: deps(s, { resolveSessionUser: (n) => otherAccount(n) }) }), 0);
+    assert.match(t2.out.join(''), /\[dry-run\] keep .*helper-secret\.json: it is installed for "alice"/);
+    assert.ok(!t2.out.join('').includes('(the service\'s secret)'));
+    assert.deepEqual(tree(s.base), before);
+    // A damaged helper file is listed as removed, with why.
+    fs.writeFileSync(S.canonicalPath(s.configDir), 'not json');
+    const t3 = io();
+    await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: t3.io, deps: d });
+    assert.match(t3.out.join(''), /\[dry-run\] remove .*helper-secret\.json \(it is not valid JSON, so it cannot say who it was installed for\)/);
+  });
+
+  it('a link above the files is refused before anything is removed: no login start, no copy, no file behind the link', async () => {
+    const s = setup();
+    const d = deps(s);
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    // The session directory is moved away and a link put in its place (a junction on Windows).
+    const real = path.join(s.base, 'moved');
+    fs.renameSync(path.join(s.configDir, 'session'), real);
+    fs.symlinkSync(real, path.join(s.configDir, 'session'), POSIX ? 'dir' : 'junction');
+    const behind = tree(real);
+    const executed = d.executed.length;
+    for (const flags of [{ user: 'alice' }, { user: 'alice', dryRun: true }]) {
+      const t = io();
+      let asked = false;
+      assert.equal(await runSessionCommand({ sub: 'uninstall', flags, dataDir: s.dataDir, io: t.io, deps: { ...d, confirm: async () => { asked = true; return true; } } }), 1);
+      assert.match(t.err.join(''), /^unsafe_path/);
+      assert.match(t.err.join(''), /Nothing was removed/);
+      assert.equal(asked, false, 'refused before the question');
+    }
+    assert.equal(d.executed.length, executed, 'the login start was not touched');
+    assert.deepEqual(tree(real), behind, 'nothing behind the link was removed');
+    assert.equal(fs.lstatSync(path.join(s.configDir, 'session')).isSymbolicLink(), true);
+  });
+
+  it('a directory where the copy should be is refused before anything is removed', async () => {
+    const s = setup();
+    const d = deps(s);
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    const copy = copyOf(s, account('alice'));
+    fs.rmSync(copy);
+    fs.mkdirSync(copy);
+    fs.writeFileSync(path.join(copy, 'inside.txt'), 'keep');
+    const executed = d.executed.length;
+    const t = io();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 1);
+    assert.match(t.err.join(''), /^unsafe_path: .* is not a file\nNothing was removed\./);
+    assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), true);
+    assert.equal(fs.readFileSync(path.join(copy, 'inside.txt'), 'utf8'), 'keep');
+    assert.equal(d.executed.length, executed);
+  });
+
+  it('a link at the helper file\'s own path is removed itself; what it points to is not touched', async (t) => {
+    const s = setup();
+    const d = deps(s);
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    const target = path.join(s.base, 'target.json');
+    fs.writeFileSync(target, 'original');
+    fs.rmSync(S.canonicalPath(s.configDir));
+    try {
+      fs.symlinkSync(target, S.canonicalPath(s.configDir), 'file');
+    } catch (err) {
+      if (err.code === 'EPERM') { t.skip('this account cannot create a symbolic link'); return; }
+      throw err;
+    }
+    const out = io();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: out.io, deps: d }), 0);
+    assert.match(out.out.join(''), /is not a regular file, so this cannot tell who it was installed for; it is removed too/);
+    assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), false);
+    assert.throws(() => fs.lstatSync(S.canonicalPath(s.configDir)), /ENOENT/);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'original');
+  });
+
+  it('removeEntry never follows a link: a junction or a directory link is removed itself, with what is behind it left alone', () => {
+    const s = setup();
+    const real = path.join(s.base, 'real');
+    fs.mkdirSync(real);
+    fs.writeFileSync(path.join(real, 'inside.txt'), 'keep');
+    const link = path.join(s.configDir, 'link');
+    fs.symlinkSync(real, link, POSIX ? 'dir' : 'junction');
+    assert.equal(S.removalKind(link, { root: s.configDir }), 'link');
+    assert.equal(S.removeEntry(link, { root: s.configDir, recursive: true }), true);
+    assert.throws(() => fs.lstatSync(link), /ENOENT/);
+    assert.equal(fs.readFileSync(path.join(real, 'inside.txt'), 'utf8'), 'keep');
+    // A directory goes only when the caller says it may, and nothing is "removed" that is not there.
+    const dir = path.join(s.configDir, 'dir');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'x'), '1');
+    assert.throws(() => S.removeEntry(dir, { root: s.configDir }), (e) => e.code === 'unsafe_path');
+    assert.equal(S.removeEntry(dir, { root: s.configDir, recursive: true }), true);
+    assert.equal(S.removeEntry(dir, { root: s.configDir }), false);
+    assert.equal(S.removalKind(path.join(s.configDir, 'nothing'), { root: s.configDir }), 'none');
+  });
+
+  // The account was deleted and made again: the same name, another SID (uid).
+  it('an account deleted and made again under the same name: uninstall removes what was installed for the old identity, and install then works', async () => {
+    const s = setup();
+    const d = deps(s);
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    const old = account('alice');
+    const again = otherAccount('alice');
+    const reborn = (extra = {}) => deps(s, { resolveSessionUser: () => again, ...extra });
+    // Before the fix: install says "uninstall alice first"...
+    const stuck = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: stuck.io, deps: reborn() }), 1);
+    assert.match(stuck.err.join(''), /^session_user_mismatch/);
+    // ...and uninstall, while the old identity is taken to exist, leaves the helper file: the old dead end.
+    const kept = io();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: kept.io, deps: reborn({ identityExists: () => true }) }), 0);
+    assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), true);
+    assert.match(kept.out.join(''), /stays: it is installed for "alice" .* \(another account of the same name, which still exists: name it with its domain or machine to remove it\)/);
+    // The recorded identity belongs to nobody any more: uninstall says so and removes its install.
+    const asked = [];
+    const t = io();
+    const d2 = reborn({ identityExists: (identity) => { asked.push(identity); return false; }, runIcacls: (argv) => asked.push(argv) });
+    let shownBefore = null;
+    d2.confirm = async () => { shownBefore = t.out.join(''); return true; };
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d2 }), 0);
+    assert.deepEqual(asked[0], { sid: old.sid, uid: POSIX ? old.uid : null });
+    assert.match(shownBefore, /records alice under another identity \(.*\) that no longer exists on this machine: the account was deleted and made again/);
+    assert.ok(shownBefore.includes(who(old)) && shownBefore.includes(who(again)), 'both identities are shown before the question');
+    assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), false);
+    assert.equal(fs.existsSync(copyOf(s, old)), false);
+    if (!POSIX) {
+      // Both SIDs' entries are taken off the users directory.
+      const dir = path.join(s.configDir, 'session', 'users');
+      assert.deepEqual(asked.slice(1), [S.windowsUsersDirRevokeArgs(dir, again.sid), S.windowsUsersDirRevokeArgs(dir, old.sid)]);
+    }
+    // The way out: the new account can be installed.
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s, { resolveSessionUser: (n) => otherAccountForInstall(n) }) }), 0);
+  });
+
+  it('the real identity check: a well-known account exists, a made-up one does not, and a check that cannot run says "exists"', { skip: POSIX }, () => {
+    assert.equal(S.sessionIdentityExists({ sid: 'S-1-5-18' }, { platform: 'win32' }), true, 'SYSTEM');
+    assert.equal(S.sessionIdentityExists({ sid: 'S-1-5-21-1-2-3-1001' }, { platform: 'win32' }), false);
+    assert.equal(S.sessionIdentityExists({ sid: 'S-1-5-21-1-2-3-1001' }, { platform: 'win32', execFile: () => { throw new Error('powershell is gone'); } }), true);
+    assert.equal(S.sessionIdentityExists({ sid: null }, { platform: 'win32', execFile: () => { throw new Error('must not run'); } }), true);
+  });
+
+  it('the identity check off Windows asks id for the uid; only "no such user" is a no', () => {
+    const calls = [];
+    const run = (status) => (file, args) => { calls.push([file, ...args]); if (status !== 0) throw Object.assign(new Error('id failed'), { status }); return 'alice\n'; };
+    assert.equal(S.sessionIdentityExists({ uid: 1001 }, { platform: 'linux', execFile: run(0) }), true);
+    assert.equal(S.sessionIdentityExists({ uid: 1001 }, { platform: 'linux', execFile: run(1) }), false);
+    assert.equal(S.sessionIdentityExists({ uid: 1001 }, { platform: 'darwin', execFile: run(null) }), true, 'id could not be run');
+    assert.equal(S.sessionIdentityExists({ uid: null }, { platform: 'linux', execFile: run(1) }), true);
+    assert.deepEqual(calls[0], ['/usr/bin/id', '-un', '1001']);
   });
 });
 

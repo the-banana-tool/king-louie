@@ -320,16 +320,51 @@ function writeUserCopy({ platform = process.platform, configDir, user, uid, gid,
   return file;
 }
 
+// What is at `target`, for a removal: nothing above it may be a link (the
+// config dir is its own realpath and every directory down to the target's
+// own is a real one; unsafe_path otherwise), and the entry itself is told
+// apart without following it: 'none', 'file', 'link' (a symlink or a
+// junction), 'dir' or 'other'.
+function removalKind(target, { root }) {
+  assertSafeComponents(path.dirname(target), { root });
+  let st;
+  try {
+    st = fs.lstatSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return 'none';
+    throw err;
+  }
+  if (st.isSymbolicLink()) return 'link';
+  if (st.isFile()) return 'file';
+  return st.isDirectory() ? 'dir' : 'other';
+}
+
+// Removes what is at `target` and never follows a link: a link is removed
+// itself (what it points to is not touched), a file is unlinked, and a
+// directory goes with what is in it only when `recursive` says so.
+function removeEntry(target, { root, recursive = false }) {
+  const kind = removalKind(target, { root });
+  if (kind === 'none') return false;
+  if (kind === 'dir') {
+    if (!recursive) throw new GuiError('unsafe_path', `${target} is a directory`);
+    fs.rmSync(target, { recursive: true, force: true });
+    return true;
+  }
+  try {
+    fs.unlinkSync(target);
+  } catch (err) {
+    // A junction (Windows reports it as a link) is a directory entry: removed as one, never entered.
+    if (kind === 'link' && (err.code === 'EPERM' || err.code === 'EISDIR')) fs.rmdirSync(target);
+    else if (err.code !== 'ENOENT') throw err;
+  }
+  return true;
+}
+
 function removeUserCopy({ platform = process.platform, configDir, user, sid, runIcacls = defaultRunIcacls, env = process.env }) {
   const file = userCopyPath({ platform, configDir, user, sid });
-  assertSafeComponents(file, { root: configDir });
-  let removed = true;
-  try {
-    fs.unlinkSync(file);
-  } catch (err) {
-    if (err.code !== 'ENOENT') throw err;
-    removed = false;
-  }
+  // Nothing above the copy may be a link; a link at the copy's own path is
+  // removed itself, and a directory there is refused.
+  const removed = removeEntry(file, { root: configDir });
   // Windows: the entry install gave this SID on the users directory goes
   // too, after the copy (the secret is what matters most) and whether or
   // not a copy was there, so a run that stopped half way is finished by the
@@ -411,6 +446,40 @@ async function checkUserCopyTrust({ path: file, platform = process.platform, env
   });
 }
 
+// Does the identity a helper file records still belong to an account on
+// this machine? Used by "session uninstall" for an account that was deleted
+// and made again under the same name: the name resolves, to another SID
+// (uid), and the recorded one belongs to nobody. Only a clear "no such
+// account" answers false; a check that could not run answers true, so
+// nothing is removed on a guess. Read-only.
+function sessionIdentityExists({ sid = null, uid = null }, { platform = process.platform,
+  execFile = (f, a, o) => execFileSync(f, a, { encoding: 'utf8', windowsHide: true, timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'], ...o }), env = process.env } = {}) {
+  if (platform === 'win32') {
+    if (typeof sid !== 'string' || !SID_RE.test(sid)) return true;
+    const script = [
+      'try {',
+      '  (New-Object System.Security.Principal.SecurityIdentifier($env:KL_SESSION_SID)).Translate([System.Security.Principal.NTAccount]) | Out-Null',
+      "  [Console]::Out.WriteLine('mapped')",
+      '} catch [System.Security.Principal.IdentityNotMappedException] {',
+      "  [Console]::Out.WriteLine('unmapped')",
+      '}'
+    ].join('\n');
+    try {
+      return String(execFile(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...env, KL_SESSION_SID: sid } })).trim() !== 'unmapped';
+    } catch {
+      return true;
+    }
+  }
+  if (!Number.isInteger(uid) || uid < 0) return true;
+  try {
+    execFile('/usr/bin/id', ['-un', String(uid)], {});
+    return true;
+  } catch (err) {
+    // id exits 1 for a uid nobody has; anything else (id is not there, it was killed) is not an answer.
+    return !(err && err.status === 1);
+  }
+}
+
 function resolveSessionUser(name, { platform = process.platform, execFile = (f, a, o) => execFileSync(f, a, { encoding: 'utf8', windowsHide: true, ...o }), env = process.env, exists = fs.existsSync } = {}) {
   if (typeof name !== 'string' || !name || name.startsWith('-') || name.length > 104 || /[\u0000-\u001f"]/.test(name)) {
     throw new GuiError('invalid_params', `not a user name: ${JSON.stringify(name)}`);
@@ -446,6 +515,6 @@ function resolveSessionUser(name, { platform = process.platform, execFile = (f, 
 module.exports = {
   mintSessionSecret, canonicalPath, writeCanonical, readCanonical, canonicalMtime, inspectCanonical, sameSessionIdentity,
   userCopyPath, writeUserCopy, readUserCopy, removeUserCopy, checkUserCopyTrust, windowsUserOwnerArgs,
-  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs,
+  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs, removalKind, removeEntry, sessionIdentityExists,
   endpointPath, sessionIpcDir, assertSafeComponents, windowsUserAclArgs, resolveSessionUser
 };
