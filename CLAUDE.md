@@ -714,10 +714,14 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
       envelope without a field hashes differently. Only `SEND_CHANNELS`
       ids (`telegram`, `discord`, `email`, `sms`, `voice`: the channels
       that address a third party; never `in-app`, `mobile` or `ntfy`) are
-      accepted, each once. With channels the phone summary is
-      host-first (channels, recipients, cap, window, then the intent) and
-      refuses to be built if those would not fit F3's 300-character cut;
-      without channels it keeps its old intent-first layout (it is hashed).
+      accepted, each once. A new request always stores `channels` (`[]`
+      when none is asked), so every new envelope gets the host-first phone
+      summary: executor, recipients, usd cap, contacts, attempts, window,
+      channels, then the intent; only the intent can be cut, and the
+      summary refuses to be built if the host part would not fit F3's 300
+      characters. The phone does not show rules, facts or who the
+      recipients are (the app does). Only an envelope stored before the
+      field has no key; it keeps its hashed intent-first summary.
     - Counting (`executors/channel-send.js`): after the gate,
       `reserveChannelSend` re-checks the envelope on disk and counts the
       send (envelope `usage` and a `reserved` `payloads` entry, the case's

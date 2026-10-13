@@ -450,3 +450,19 @@ describe('activating a signed envelope keeps what was written during its await',
     assert.deepStrictEqual(e.grantedBy.evidence, { request_id: 'r-9', action_hash: outcome.action_hash });
   });
 });
+
+// Second review 2026-10-13, finding 1: what the phone is asked to sign.
+describe('the signed request of a new envelope', () => {
+  it('shows the host-written numbers first, and a request with no channels says so', async () => {
+    const seen = [];
+    const approver = { requestAction: (action) => { seen.push(action); return new Promise(() => {}); } };
+    const s = await setup({ authority: 'signed', approver });
+    const r = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId, {
+      intent: 'Confirm the dentist appointment (1 recipients, $5.00, 2026-10-26 to 2026-10-26) and thank them for their time today'
+    }));
+    assert.strictEqual(r.ok, true, r.error);
+    assert.deepStrictEqual(envelopeOf(s).channels, []);
+    assert.strictEqual(seen.length, 1);
+    assert.ok(seen[0].summary.startsWith('env-01 · fake-agent · 2 recipients · $20.00 cap · 3 contacts · 2 attempts each · 2026-10-26 to 2026-10-30 · channel sends: none · intent: Confirm the dentist'), seen[0].summary);
+  });
+});

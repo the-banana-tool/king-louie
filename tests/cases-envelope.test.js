@@ -449,12 +449,16 @@ describe('envelope channels', () => {
   });
 
   it('a request names channels explicitly; call means voice; none asked, none allowed', () => {
+    // A new request always stores the list, empty when none is asked, so it
+    // gets the host-first phone summary; a stored envelope without the key
+    // (activeEnvelope()) is what allows none by having none.
     const none = validateEnvelopeRequest(request(), ctx);
-    assert.strictEqual(Object.prototype.hasOwnProperty.call(none.core, 'channels'), false);
+    assert.deepStrictEqual(none.core.channels, []);
+    assert.deepStrictEqual(validateEnvelopeRequest(request({ channels: [] }), ctx).core.channels, []);
     const r = validateEnvelopeRequest(request({ channels: ['SMS', ' call ', 'voice', 'sms'] }), ctx);
     assert.strictEqual(r.ok, true, r.error);
     assert.deepStrictEqual(r.core.channels, ['sms', 'voice']);
-    for (const bad of [[], 'sms', null, [42], ['a b'], ['sms', '../x'], [{}]]) {
+    for (const bad of ['sms', null, [42], ['a b'], ['sms', '../x'], [{}]]) {
       const refused = validateEnvelopeRequest(request({ channels: bad }), ctx);
       assert.strictEqual(refused.ok, false, JSON.stringify(bad));
       assert.match(refused.error, /"channels"/);
@@ -468,10 +472,10 @@ describe('envelope channels', () => {
     assert.match(text, /\nChannel sends allowed: sms, voice\nRecipients \(2\): \+15550100, \+15550101\n/);
     assert.doesNotMatch(renderEnvelopeQuestion(plain, { facts: all }), /Channel sends/);
     const summary = renderSignedSummary(envelopeCore(env), env.id);
-    assert.match(summary, /^env-01 · phone-agent · channel sends: sms, voice · 2 recipients · \$20\.00 · 2026-10-26 to 2026-10-30: Ask three brokers/);
+    assert.strictEqual(summary, 'env-01 · phone-agent · 2 recipients · $20.00 cap · 3 contacts · 2 attempts each · 2026-10-26 to 2026-10-30 · channel sends: sms, voice · intent: Ask three brokers for a listing quote on the lot');
     // Before the intent, so F3's 300-character cut never drops it.
     const long = renderSignedSummary(envelopeCore(activeEnvelope({ channels: ['sms'], intent: 'x'.repeat(500) })), 'env-01');
-    assert.ok(long.indexOf('channel sends: sms') < 60);
+    assert.ok(long.indexOf('channel sends: sms') < 130);
   });
 
   it('fit: a channel send needs its channel in the list; a job (no channel) is unaffected', () => {
@@ -688,7 +692,7 @@ describe('envelope channels: known ids only, and a phone summary that keeps them
     const summary = shown(env);
     assert.ok(Array.from(summary).length <= 300);
     assert.ok(summary.endsWith('…'), 'the intent is what gets cut');
-    assert.ok(summary.startsWith(`env-01 · phone-agent · channel sends: ${SEND_CHANNELS.join(', ')} · 150 recipients · $123456.78 · 2026-10-26 to 2026-10-30: Ask about the lot.`), summary);
+    assert.ok(summary.startsWith(`env-01 · phone-agent · 150 recipients · $123456.78 cap · 150 contacts · 9 attempts each · 2026-10-26 to 2026-10-30 · channel sends: ${SEND_CHANNELS.join(', ')} · intent: Ask about the lot.`), summary);
   });
 
   it('a stored multi-line intent cannot break the summary of an envelope with channels', () => {
@@ -700,8 +704,8 @@ describe('envelope channels: known ids only, and a phone summary that keeps them
   it('refuses to build a summary whose host-written part would not fit the cut', () => {
     const core = { ...envelopeCore(activeEnvelope({ channels: ['sms'] })), executor: 'x'.repeat(300) };
     assert.throws(() => renderSignedSummary(core, 'env-01'), /summary/);
-    const fits = { ...envelopeCore(activeEnvelope({ channels: ['sms'] })), executor: 'x'.repeat(200) };
-    assert.ok(Array.from(renderSignedSummary(fits, 'env-01')).length > 200);
+    const fits = { ...envelopeCore(activeEnvelope({ channels: ['sms'] })), executor: 'x'.repeat(150) };
+    assert.ok(Array.from(renderSignedSummary(fits, 'env-01')).length > 150);
     // An envelope without channels keeps the summary it always had.
     assert.strictEqual(
       renderSignedSummary(envelopeCore(activeEnvelope()), 'env-01'),
@@ -737,5 +741,39 @@ describe('envelope channels are limited to those that address a third party', ()
     }
     const all = validateEnvelopeRequest(request({ channels: [...SEND_CHANNELS, 'call'] }), ctx);
     assert.deepStrictEqual(all.core.channels, [...SEND_CHANNELS]);
+  });
+});
+
+// Second review 2026-10-13, finding 1: the phone must show the numbers the
+// owner approves, whatever the intent says.
+describe('the phone summary of a new envelope is host-first', () => {
+  const ctx = { entry: { ...PHONE_AGENT, authority: 'signed' }, facts: facts(ACRES, GUESS, FLOOR), casesTimeZone: 'UTC' };
+  const helpers = approvalHelpers();
+
+  it('an intent that imitates the numbers cannot push the real ones past the cut', () => {
+    const many = Array.from({ length: 40 }, (_, i) => `+1555010${String(i).padStart(3, '0')}`);
+    const intent = `Confirm the dentist appointment (1 recipients, $5.00, 2026-10-26 to 2026-10-26) ${'and thank them kindly '.repeat(18).trim()}`;
+    const r = validateEnvelopeRequest(request({ intent, recipients: { allow: many }, caps: { usd: 5000, contacts: 25, attemptsPerContact: 4 }, facts: [] }), ctx);
+    assert.strictEqual(r.ok, true, r.error);
+    assert.deepStrictEqual(r.core.channels, [], 'no channel asked: the list is stored empty');
+    const summary = signedAction({ id: 'env-01', ...r.core }, 'case-1', helpers).summary;
+    assert.ok(Array.from(summary).length <= 300);
+    assert.ok(summary.startsWith('env-01 · phone-agent · 40 recipients · $5000.00 cap · 25 contacts · 4 attempts each · 2026-10-26 to 2026-10-30 · channel sends: none · intent: Confirm the dentist appointment (1 recipients, $5.00,'), summary);
+    const card = renderEnvelopeQuestion({ id: 'env-01', ...r.core }, {});
+    assert.match(card, /\nChannel sends allowed: none\n/);
+  });
+
+  it('a stored envelope with no channels key keeps its old summary and hash', () => {
+    const env = activeEnvelope({ authority: 'signed' });
+    assert.strictEqual(env.hash, 'sha256:2d6e6e1f8b9a33ee62b4f3754dbea387e4898ce3ad14c61e2b10224179d2d2df');
+    assert.strictEqual(helpers.actionHash(signedAction(env, 'case-1', helpers)), 'WSxjVkGcPoVh7TNlYn_sF_IGWPCQqPCFAFJz6_L8bR8');
+  });
+
+  it('the host-written part is never cut: when it cannot fit, no summary is built', () => {
+    const core = envelopeCore(activeEnvelope({ channels: [] }));
+    assert.throws(() => renderSignedSummary({ ...core, executor: 'x'.repeat(260) }, 'env-01'), /phone summary cannot show/);
+    assert.throws(() => renderSignedSummary({ ...core, window: { ...core.window, end: '9'.repeat(260) } }, 'env-01'), /phone summary cannot show/);
+    const longest = renderSignedSummary({ ...core, executor: `a${'b'.repeat(39)}`, channels: ['telegram', 'discord', 'email', 'sms', 'voice'], caps: { usd: 99999999.99, contacts: 999999, attemptsPerContact: 999 } }, 'env-9999');
+    assert.ok(longest.indexOf(' · intent: ') < 240, 'the longest real host part leaves room for the intent');
   });
 });

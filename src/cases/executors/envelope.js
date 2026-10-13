@@ -203,12 +203,15 @@ function validateEnvelopeRequest(body, {
   if (!DAY_PATTERN.test(String(w.start)) || !DAY_PATTERN.test(String(w.end)) || String(w.end) < String(w.start)) {
     errors.push('"window" needs start and end dates (YYYY-MM-DD) with start ≤ end');
   }
-  // Channel sends are asked for explicitly; an envelope asked without them
-  // carries no list and allows none.
-  let channels = null;
+  // Channel sends are asked for explicitly. A new envelope always stores the
+  // list, empty when none is asked: it allows no channel send, the card says
+  // "Channel sends allowed: none", and the envelope gets the host-first
+  // phone summary (renderSignedSummary). Only an envelope stored before the
+  // field existed has no key.
+  let channels = [];
   if (b.channels !== undefined) {
     const ids = Array.isArray(b.channels) ? b.channels.map(normalizeChannelId) : null;
-    if (!ids || !ids.length || ids.includes(null)) {
+    if (!ids || ids.includes(null)) {
       errors.push(`"channels" must be a list of ${SEND_CHANNELS.join(', ')} (leave it out when no channel send is needed)`);
     } else {
       channels = [...new Set(ids)];
@@ -251,7 +254,7 @@ function validateEnvelopeRequest(body, {
     rules,
     caps: { usd, contacts, attemptsPerContact: attempts },
     window: { start: w.start, end: w.end, tz },
-    ...(channels ? { channels } : {})
+    channels
   };
   const gate = gateLeaves({ intent, rules }, {
     recipients: normalized, envelope: null, facts, mode: 'message', caseId, entityIndex, categoryKeywords
@@ -325,16 +328,22 @@ function renderEnvelopeQuestion(env, options = {}) {
 // with the same core are different actions.
 //
 // Two layouts, chosen by the core alone:
-// - A core with `channels`: every host-written part (id, executor, the
-//   whole channel list, recipient count, usd cap, window) comes first and
-//   the intent, on one line, last, so the cut can only shorten the intent.
-//   If the host-written part alone would not fit, this throws: no signed
-//   request is built whose summary could lose a channel.
-// - A core without `channels` keeps the layout it has always had, intent
-//   first, because the summary is hashed: changing it would unsign every
-//   envelope the phone already approved. There a long intent can push the
-//   recipient count, cap and window past the cut (a known limit that
-//   predates channels); the in-app card shows them whole.
+// - A core with `channels` (every envelope requested since the field
+//   exists; the list is empty when no channel send was asked): the
+//   host-written parts come first, in the order the owner needs them to
+//   decide: executor, recipient count, usd cap, contacts cap, attempts per
+//   contact, window, channels. The intent, one plain line, comes last, so
+//   the cut can only shorten the intent. If the host-written part alone
+//   would not fit, or the intent is not one plain line, this throws: no
+//   signed request is built whose summary would be cut inside host text.
+//   The phone still does not show the rules, the facts that may be
+//   disclosed, who the recipients are, the window's time zone or the intent
+//   past the cut: the app shows the whole envelope.
+// - A core without `channels` (stored before the field existed) keeps the
+//   layout it has always had, intent first, because the summary is hashed:
+//   changing it would unsign every envelope the phone already approved.
+//   There a long intent can push the recipient count, cap and window past
+//   the cut; no new request gets this layout.
 const SUMMARY_MAX = 300;
 function renderSignedSummary(core, envelopeId) {
   if (!Array.isArray(core.channels)) {
@@ -342,19 +351,22 @@ function renderSignedSummary(core, envelopeId) {
   }
   const head = [
     `${field(envelopeId)} · ${field(core.executor)}`,
-    `channel sends: ${core.channels.map(field).join(', ') || 'none'}`,
     `${core.recipients.allow.length} recipients`,
-    money(core.caps.usd),
-    `${field(core.window.start)} to ${field(core.window.end)}`
+    `${money(core.caps.usd)} cap`,
+    `${core.caps.contacts} contacts`,
+    `${core.caps.attemptsPerContact} attempts each`,
+    `${field(core.window.start)} to ${field(core.window.end)}`,
+    `channel sends: ${core.channels.map(field).join(', ') || 'none'}`
   ].join(' · ');
-  // Room for ': ' and at least the cut mark after the host-written part.
-  if (Array.from(head).length > SUMMARY_MAX - 3) {
-    throw new EnvelopeCoreError('the phone summary cannot show the channels, recipients, cap and window whole');
+  const lead = `${head} · intent: `;
+  // Room for at least one character of intent and the cut mark.
+  if (Array.from(lead).length > SUMMARY_MAX - 2) {
+    throw new EnvelopeCoreError('the phone summary cannot show the executor, recipients, caps, window and channels whole');
   }
   // The summary is hashed and signed: an intent that is not one plain line
   // is never signed in any form, flattened or hidden.
   if (!isPlainLine(core.intent)) throw new EnvelopeCoreError(`the phone summary cannot carry the intent: ${plainLineProblem(core.intent)}`);
-  return `${head}: ${core.intent}`;
+  return `${lead}${core.intent}`;
 }
 
 // The owner-facing line for one delta, built from its kind and value against

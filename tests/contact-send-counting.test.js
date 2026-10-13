@@ -76,10 +76,21 @@ const failSend = (adapter, err) => {
 };
 
 describe('sendExternal: the envelope names the channel', () => {
+  it('an envelope stored without the channels key allows no channel send either', async () => {
+    const s = await setup({ channels: null });
+    const { channels, ...legacy } = s.store.get(s.envelopeId);
+    const { envelopeHash, envelopeCore } = require('../src/cases/executors/envelope');
+    s.store.write({ ...legacy, hash: envelopeHash(envelopeCore(legacy)) });
+    const r = await s.send();
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /outside envelope env-01: allows channel sends on sms/);
+    assert.deepStrictEqual(s.sms.plain, []);
+  });
+
   it('an envelope with no channel list allows no channel send, though it is active and lists the recipient', async () => {
     const s = await setup({ channels: null });
-    assert.strictEqual(Object.prototype.hasOwnProperty.call(s.store.get(s.envelopeId), 'channels'), false);
-    assert.doesNotMatch(s.question.text, /Channel sends/);
+    assert.deepStrictEqual(s.store.get(s.envelopeId).channels, [], 'a new envelope stores the empty list');
+    assert.match(s.question.text, /\nChannel sends allowed: none\n/);
     const r = await s.send();
     assert.strictEqual(r.ok, false);
     assert.match(r.error, /outside envelope env-01: allows channel sends on sms/);
