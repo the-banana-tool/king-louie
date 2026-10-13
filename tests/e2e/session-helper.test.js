@@ -77,6 +77,10 @@ describe('session helper end to end', { skip: !RUN && 'set KL_E2E_GUI=1 on Windo
     const { secret, endpointId } = S.mintSessionSecret();
     const endpoint = WIN ? S.endpointPath({ platform: 'win32', endpointId }) : path.join(base, 'h.sock');
     S.writeCanonical({ configDir, cipher, secret, endpointId, nodeId: identity.nodeId, sessionUser: user });
+    // R-F5-17: computer use runs only for an identity an administrator
+    // recorded; this is that record, in the temp config dir.
+    const { recordIdentity, IDENTITY_RECORD_TEST_OPTIONS } = require('../helpers/identity-record');
+    recordIdentity(configDir, identity);
     const file = S.writeUserCopy({
       platform: process.platform, configDir, user, uid: UID, gid: GID, sid,
       content: { v: 1, node_id: identity.nodeId, endpoint, secret: secret.toString('hex'), rotated_at: new Date().toISOString() }, runIcacls: () => {}
@@ -90,7 +94,7 @@ describe('session helper end to end', { skip: !RUN && 'set KL_E2E_GUI=1 on Windo
       approvals: { identity, approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true }, auditLedger: { append: async () => {} } },
       // R-F5-7: the subsystem knows no open job unless its host says so.
       jobOpen: (jobId) => jobId === 'job-e2e',
-      deps: { endpoint }
+      deps: { endpoint, identityRecord: IDENTITY_RECORD_TEST_OPTIONS }
     });
     await gui.start();
     const ready = once(gui.channel, 'ready');

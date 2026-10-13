@@ -9,7 +9,7 @@ struct LeaseRequestsSection: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        if !model.leaseRequests.isEmpty {
+        if !model.leaseRequests.isEmpty || !model.leaseStatusRows.isEmpty {
             Section("Computer use") {
                 ForEach(model.leaseRequests) { item in
                     NavigationLink { LeaseRequestView(item: item) } label: {
@@ -19,6 +19,16 @@ struct LeaseRequestsSection: View {
                             Text("Job \(Display.escape(item.request.jobId)) · \(Display.escape(item.request.originClient))").font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                }
+                // Fourth security review, finding 2: what this phone knows of
+                // each paired computer, said as what it is. Not asked yet is
+                // not "nothing running"; a checked one carries its time. (A
+                // computer that could not be confirmed is in the banner.)
+                ForEach(model.leaseStatusRows) { row in
+                    Text(model.leaseCheckText(row)).font(.caption).foregroundStyle(.secondary)
+                }
+                if model.leaseStatusRows.contains(where: { $0.check == nil }) {
+                    Text(Leases.notCheckedYetDetail).font(.caption2).foregroundStyle(.secondary)
                 }
             }
         }
@@ -185,6 +195,9 @@ struct LeaseBanner: View {
                         if let by = model.grantedByOtherText(device: lease.grantedByDevice, name: lease.grantedByName) {
                             Text(by).font(.caption).foregroundStyle(.secondary)
                         }
+                        // A lease that is not running yet and may still start: what this phone knows of it
+                        // (a grant it remembers signing, or only that its node says a request is waiting).
+                        if lease.state == "pending" { Text(model.pendingDetail(lease)).font(.caption).foregroundStyle(.secondary) }
                     }
                     Spacer()
                     Button("Stop", role: .destructive) { Task { await model.stopLease(lease) } }
@@ -192,6 +205,19 @@ struct LeaseBanner: View {
                         .disabled(model.isRevoking(lease))
                 }
                 .padding(8).background(Color.red.opacity(0.1))
+            }
+            // R-F5-20: a paired computer this phone got no signed answer from
+            // about computer use. Said as such; never left to look like
+            // "nothing is running".
+            if !model.unconfirmedLeaseRows.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(model.unconfirmedLeaseRows) { row in
+                        Text(model.leaseCheckText(row)).font(.caption.bold())
+                    }
+                    Text(Leases.couldNotConfirmDetail).font(.caption2).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8).background(Color.orange.opacity(0.15))
             }
         }
         .sheet(isPresented: $model.showLiveLease) { NavigationStack { LiveLeaseView().environmentObject(model) } }

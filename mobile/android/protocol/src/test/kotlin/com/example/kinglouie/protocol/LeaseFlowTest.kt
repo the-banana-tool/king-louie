@@ -52,6 +52,53 @@ class LeaseFlowTest {
         assertTrue(!Leases.isPausedForContact("ended", "no_contact"))
     }
 
+    /** Fourth security review, finding 3: a pending lease this phone signed a grant for may still start; when its row stays. */
+    @Test
+    fun mayStillStart() {
+        assertTrue(Leases.mayStillStart("pending", true))
+        assertTrue(!Leases.mayStillStart("pending", false))
+        for (state in listOf("active", "suspended", "ended", "")) assertTrue(!Leases.mayStillStart(state, true))
+        // Named by an accepted listing: kept only while still pending.
+        assertTrue(Leases.keepsMayStart("pending", false))
+        assertTrue(Leases.keepsMayStart("pending", true))
+        for (state in listOf("active", "suspended", "ended")) assertTrue(!Leases.keepsMayStart(state, false))
+        // Not named: kept until the request has expired.
+        assertTrue(Leases.keepsMayStart(null, false))
+        assertTrue(!Leases.keepsMayStart(null, true))
+        assertEquals("May still start on gpu-box", Leases.mayStillStartTitle("gpu-box"))
+        assertTrue(!Leases.mayStillStartTitle("gpu\u202Ebox").contains('\u202E'))
+    }
+
+    /** Fifth security review, finding 1: a pending lease an accepted listing names gets a row whatever this phone remembers; what it remembers only chooses the words. */
+    @Test
+    fun listedPendingGetsRow() {
+        // No memory of a grant (a restarted app, or another phone), no request on screen: a row.
+        assertTrue(Leases.listedPendingGetsRow("pending", shownAsRequest = false, signedGrant = false))
+        assertTrue(Leases.listedPendingGetsRow("pending", shownAsRequest = false, signedGrant = true))
+        assertTrue(Leases.listedPendingGetsRow("pending", shownAsRequest = true, signedGrant = true))
+        // The request is on screen, unanswered by this phone: that card is its row.
+        assertTrue(!Leases.listedPendingGetsRow("pending", shownAsRequest = true, signedGrant = false))
+        for (state in listOf("active", "suspended", "ended", "")) assertTrue(!Leases.listedPendingGetsRow(state, shownAsRequest = false, signedGrant = true))
+        assertEquals("May still start on gpu-box", Leases.pendingTitle("gpu-box", true))
+        assertEquals("A request is waiting on gpu-box", Leases.pendingTitle("gpu-box", false))
+        val rlo = Char(0x202E)
+        assertTrue(!Leases.requestWaitingTitle("gpu${rlo}box").contains(rlo))
+        assertEquals(Leases.MAY_STILL_START_DETAIL, Leases.pendingDetail(true))
+        assertEquals(Leases.REQUEST_WAITING_DETAIL, Leases.pendingDetail(false))
+        assertTrue(Leases.REQUEST_WAITING_DETAIL.contains("does not remember allowing it"))
+        assertTrue(!Leases.REQUEST_WAITING_DETAIL.contains("This phone signed"))
+    }
+
+    /** Fourth security review, finding 2: the words for a node not asked yet and for one whose listing was accepted. */
+    @Test
+    fun checkedWords() {
+        assertEquals("Not checked yet: gpu-box", Leases.notCheckedYet("gpu-box"))
+        assertEquals("Checked gpu-box at 14:02: no computer-use session", Leases.checked("gpu-box", "14:02", 0, 0))
+        assertEquals("Checked gpu-box at 14:02: 1 computer-use session running", Leases.checked("gpu-box", "14:02", 1, 0))
+        assertEquals("Checked gpu-box at 14:02: 2 computer-use sessions running; 1 request waiting for an answer", Leases.checked("gpu-box", "14:02", 2, 1))
+        assertEquals("Checked gpu-box at 14:02: no computer-use session; 2 requests waiting for an answer", Leases.checked("gpu-box", "14:02", 0, 2))
+    }
+
     /** R-F5-18: which leases get a banner, and what a phone says of one it did not grant. */
     @Test
     fun liveAndGrantedBy() {

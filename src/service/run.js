@@ -53,6 +53,45 @@ function adminDirApprovalOptions({ adminUid, configDir }) {
   };
 }
 
+// R-F5-17: this node's identity, loaded (or made, on a first start) from the
+// data dir and held against the administrator's record of it in the config
+// dir. Throws when the record names another identity or cannot be trusted;
+// with no record it warns and goes on. → { identity, record }.
+// deps.identityRecord: tests only (how a temp dir's record is read).
+function checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, deps = {} }) {
+  const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');
+  const { assertRecordedIdentity } = require('./identity-record');
+  const { adminConfigDir } = require('../platform/paths');
+  const identity = getOrGenerateNodeIdentity(servicePorts.store, servicePorts.cipher, nodeConfig.name);
+  const record = assertRecordedIdentity({
+    configDir: configDir || adminConfigDir({ dataDir }), dataDir, identity,
+    ...(adminUid === undefined ? {} : { adminUid }), ...(deps.identityRecord || {})
+  });
+  return { identity, record };
+}
+
+// R-F5-20 (fourth security review, finding 2): a node on which computer use
+// is off still answers a phone's "what is running" with a listing it signs:
+// nothing. Registered only where no lease manager exists (`gui` null, or a
+// subsystem that is off), so no lease can be live and the answer is true; a
+// node with a lease manager answers from it (src/gui/index.js). A node with
+// no relay link has nobody to answer.
+function answerLeaseListsWithNone(approvals, gui = null) {
+  if (gui && gui.leases) return false;
+  const relay = approvals && approvals.relayClient;
+  if (!relay || typeof relay.registerMethod !== 'function' || !approvals.identity) return false;
+  try {
+    relay.registerMethod('lease.list', require('../gui/lease-protocol').offLeaseListing({ identity: approvals.identity, approverStore: approvals.approverStore }));
+    return true;
+  } catch (err) {
+    // The link refuses a name that is taken: a GUI that failed while it was
+    // being built can have registered its own lease.list first (it holds no
+    // lease, so it lists nothing either). Never a reason to stop the service.
+    log.warn(`lease.list was not registered for a node without computer use: ${err.message}`);
+    return false;
+  }
+}
+
 // Each profile is required lazily so the runbook profile never loads the agent stack.
 function loadProfile(profile) {
   if (profile === 'agent') {
@@ -76,12 +115,23 @@ function loadProfile(profile) {
         const { createDesktopBridgeHost } = require('../desktop-bridge/service-wiring');
         const desktopBridge = createDesktopBridgeHost({ dataDir, features, ports, adminUid, configDir });
         const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir }));
+        // R-F5-17: the identity in the data dir must be the one an
+        // administrator recorded, before anything is signed with it or any
+        // link is opened. A mismatch, or a record that cannot be trusted,
+        // stops the start; no record is a warning (and no computer use).
+        let recordedIdentity;
+        try {
+          recordedIdentity = checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, deps });
+        } catch (err) {
+          await desktopBridge.stop().catch(() => {});
+          throw err;
+        }
         // Fleet stage 3: an unsafe tool from anything remote (chat channels,
         // gateway clients, cron, webhooks) runs only with a signed phone
         // approval; with no enrolled phone or no relay it is refused.
         const approvals = await startApprovals({
           dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
-          nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }
+          nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }, identity: recordedIdentity.identity
         });
         let core;
         let fleet = null;
@@ -104,13 +154,19 @@ function loadProfile(profile) {
               chatExists: (chatId) => Boolean(core && core.context.getChat(chatId, { messages: false }))
             }, jobId),
             ...(adminUid === undefined ? {} : { adminUid }),
-            ...(deps.gui ? { deps: deps.gui } : {})
+            // R-F5-17: the check made above; only a match turns desktop apps on.
+            identityRecord: recordedIdentity.record,
+            // deps.identityRecord (tests only) also says whether the GUI
+            // runs the record's write probe again before a lease request.
+            ...(deps.gui || deps.identityRecord ? { deps: { ...(deps.identityRecord ? { identityRecord: deps.identityRecord } : {}), ...(deps.gui || {}) } } : {})
           });
         } catch (err) {
           await desktopBridge.stop().catch(() => {});
           await approvals.stop().catch(() => {});
           throw err;
         }
+        // R-F5-20: with computer use off, this node still tells its phones so.
+        answerLeaseListsWithNone(approvals, gui);
         try {
           // createCore itself can throw synchronously (bad deps, a bad
           // phoneApprover.ttlMs, …), not just its start() — both go in the
@@ -232,7 +288,7 @@ function loadProfile(profile) {
   }
   if (profile === 'runbook') {
     return {
-      async start({ dataDir, audit, adminUid, configDir }) {
+      async start({ dataDir, audit, adminUid, configDir, deps = {} }) {
         const { buildServicePorts } = require('./ports');
         const { loadNodeConfig } = require('./node-config');
         const { startApprovals } = require('../approvals/service-wiring');
@@ -240,10 +296,16 @@ function loadProfile(profile) {
         // The runbook profile runs the relay link and the courier that the
         // `mcp` process sends its approval requests through; still no agent stack.
         const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir }));
+        // R-F5-17: as on an agent node, before anything is signed or linked.
+        const recordedIdentity = checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, deps });
         const approvals = await startApprovals({
           dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
-          nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }
+          nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }, identity: recordedIdentity.identity
         });
+        // R-F5-20: a runbook node never runs computer use, and says so to a
+        // phone that asks (the one file of src/gui/ this profile loads for it
+        // is lease-protocol.js, which holds no agent code).
+        answerLeaseListsWithNone(approvals);
         let fleet;
         try {
           const { startFleetNode } = require('../fleet/start');
@@ -380,4 +442,4 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
   }
 }
 
-module.exports = { runService, loadProfile, assertEnabledListenersBound };
+module.exports = { runService, loadProfile, assertEnabledListenersBound, answerLeaseListsWithNone };

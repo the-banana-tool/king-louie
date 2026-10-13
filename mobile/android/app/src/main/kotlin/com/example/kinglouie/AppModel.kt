@@ -30,6 +30,7 @@ import com.example.kinglouie.protocol.LeaseAction
 import com.example.kinglouie.protocol.LeaseRequest
 import com.example.kinglouie.protocol.LeaseStatus
 import com.example.kinglouie.protocol.Leases
+import com.example.kinglouie.protocol.ListingCheck
 import com.example.kinglouie.protocol.Messages
 import com.example.kinglouie.protocol.NodePin
 import com.example.kinglouie.protocol.PairingRequest
@@ -214,6 +215,17 @@ class AppModel(context: Context) {
      * same reason.
      */
     val runningLeases = mutableStateListOf<RunningLease>()
+
+    /**
+     * What this phone knows about computer use on each pinned node, by node
+     * id (owner ruling R-F5-20; fourth security review, finding 2). Three
+     * things can be true, and each is shown as what it is: nothing asked yet
+     * (no entry); a listing the node signed for this phone's own request,
+     * accepted at a time by this phone's clock, with what it listed; or a
+     * request that brought no listing this phone could accept. Written only
+     * by refreshLeases, on the owner's tap. Up here for the same reason.
+     */
+    val leaseChecks = mutableStateMapOf<String, LeaseNodeCheck>()
 
     val devices = mutableStateListOf<JsonElement>()
     val online = mutableStateMapOf<String, Boolean>()
@@ -417,6 +429,15 @@ class AppModel(context: Context) {
         val grantedByDevice: String?, val grantedByName: String?, val status: Envelope?
     )
 
+    /** One pinned node's entry in `leaseChecks`; a node without one has not been asked yet. */
+    sealed class LeaseNodeCheck {
+        /** A listing this phone accepted at [atMs] (System.currentTimeMillis): [running] live leases, [waiting] requests not yet answered. */
+        data class Confirmed(val atMs: Long, val running: Int, val waiting: Int) : LeaseNodeCheck()
+
+        /** The last request brought no listing this phone could accept. */
+        object Unconfirmed : LeaseNodeCheck()
+    }
+
     /** What one send came to: the node's answer, or why there is none. */
     private class LeaseReply(val outcome: SendOutcome, val json: JsonElement?, val problem: String?)
 
@@ -436,6 +457,18 @@ class AppModel(context: Context) {
     /** Request ids whose decision is being signed or sent. */
     val decidingLease = mutableStateListOf<String>()
     private val decidedLeaseRequests = HashSet<String>()
+
+    /**
+     * Leases this phone has signed a grant for, by lease id, with when the
+     * request that grant answers expires (epoch ms; fourth security review,
+     * finding 3). Kept from the signature on, whatever the relay then
+     * answered: a relay can say 503 and deliver the grant later. In memory
+     * only: a phone that was restarted in between no longer knows. It decides
+     * only what a pending lease's row says and how long it stays, never
+     * whether there is one (fifth security review, finding 1:
+     * notePendingListed).
+     */
+    private val signedLeaseGrants = HashMap<String, Long>()
     private var demoLeaseJob: Job? = null
 
     /** A `lease` push (R-F5-6): say where to look. Nothing is fetched until the owner taps. */
@@ -459,13 +492,36 @@ class AppModel(context: Context) {
         scope.launch {
             try {
                 val pins = storage.nodes
-                val listed = api.leases()
+                // R-F5-20: a nonce chosen for this one request. Each node signs its listing
+                // over it, so an answer to an earlier request cannot be played again and no
+                // entry can be left out unseen. Still one request and one prompt.
+                val nonce = Messages.randomNonce()
+                val listed = api.leases(nonce)
                 val items = listed.mapNotNull { entry -> verifiedLeaseRequest(entry, pins, api) }.distinctBy { it.request.requestId }
                 leaseRequests.clear()
                 leaseRequests.addAll(items)
                 for (entry in listed) noteListedLease(entry, pins)
+                // R-F5-20: per pinned node, a listing it signed for this request and this
+                // phone, complete, or no answer. This phone cannot tell a node that is off,
+                // slow or older from a relay that kept its answer back: all "could not confirm".
+                // An accepted listing is "confirmed", with the time this phone accepted it and
+                // what the node listed; nothing else is.
+                val checkedAt = System.currentTimeMillis()
+                for (pin in pins) {
+                    val check = Leases.checkListing(listed, pin, nonce, deviceId ?: "")
+                    leaseChecks[pin.id] = if (check.accepted) {
+                        val named = Leases.listedStatuses(check, pin)
+                        dropMayStartRows(pin, named.map { it.leaseId }.toSet(), api)
+                        notePendingListed(check, pin, items.map { it.request.leaseId }.toSet())
+                        LeaseNodeCheck.Confirmed(checkedAt, named.count { Leases.isLive(it.state) }, named.count { it.state == "pending" })
+                    } else {
+                        LeaseNodeCheck.Unconfirmed
+                    }
+                }
                 leaseNotice = false
             } catch (e: Exception) {
+                // No reply at all: nothing was confirmed with any node.
+                for (pin in storage.nodes) leaseChecks[pin.id] = LeaseNodeCheck.Unconfirmed
                 fail(e)
             } finally {
                 isLoadingLeases = false
@@ -519,9 +575,82 @@ class AppModel(context: Context) {
         }
         val known = runningLeases.indexOfFirst { it.leaseId == status.leaseId }
         if (!Leases.acceptsStatus(status, if (known >= 0) runningLeases[known].appliedSeq else 0)) return
+        // A row that is there stays while its node still signs "pending", whoever signed a
+        // grant (fifth security review, finding 1): a newer status without a listing must
+        // not take it down.
+        if (known >= 0 && status.state == "pending") {
+            runningLeases[known] = RunningLease(pin.id, pin.name, status.leaseId, status.state, status.reason, status.seq, status.grantedByDevice, status.grantedByName, signed)
+            return
+        }
         if (known >= 0) runningLeases.removeAt(known)
-        if (!Leases.isLive(status.state)) return
+        // Finding 3: a lease still waiting for an answer gets a row too when this phone
+        // signed a grant for it ("May still start").
+        if (!Leases.isLive(status.state) && !Leases.mayStillStart(status.state, status.leaseId in signedLeaseGrants)) {
+            if (status.state == "ended") signedLeaseGrants.remove(status.leaseId)
+            return
+        }
         runningLeases.add(RunningLease(pin.id, pin.name, status.leaseId, status.state, status.reason, status.seq, status.grantedByDevice, status.grantedByName, signed))
+    }
+
+    /**
+     * After a listing [pin] signed was accepted: a banner row, with the Stop
+     * every row has, for each lease it names as pending (fifth security
+     * review, finding 1). Not from memory: after a restart this phone no
+     * longer knows what it signed, and another phone never did, while the
+     * relay can still deliver a grant it held back. What this phone
+     * remembers only chooses the words (pendingLeaseTitle). A request that
+     * is on screen with its Allow and Deny, unanswered by this phone, is
+     * that request and gets no second row. Only statuses of a listing that
+     * passed are read, each verified again. Nothing is signed or sent here
+     * (R-F5-5), and it runs only inside the owner's "Check" tap (R-F5-1).
+     */
+    private fun notePendingListed(check: ListingCheck, pin: NodePin, shownAsRequest: Set<String>) {
+        if (!check.accepted) return
+        for (signed in check.statuses) {
+            val status = Leases.verifiedMessage(signed, pin)?.let { LeaseStatus.from(it) } ?: continue
+            if (!Leases.listedPendingGetsRow(status.state, status.leaseId in shownAsRequest, status.leaseId in signedLeaseGrants)) continue
+            // The lease on the live screen has its row; so has one already listed.
+            if (liveLease?.leaseId == status.leaseId) continue
+            if (runningLeases.any { it.leaseId == status.leaseId }) continue
+            if (!Leases.acceptsStatus(status, 0)) continue
+            runningLeases.add(RunningLease(pin.id, pin.name, status.leaseId, status.state, status.reason, status.seq, status.grantedByDevice, status.grantedByName, signed))
+        }
+    }
+
+    /** What a pending lease's row is called: "May still start" only for a grant this phone remembers signing. */
+    fun pendingLeaseTitle(leaseId: String, nodeName: String): String = Leases.pendingTitle(nodeName, leaseId in signedLeaseGrants)
+
+    /** Under that row: which of the two this phone knows. */
+    fun pendingLeaseDetail(leaseId: String): String = Leases.pendingDetail(leaseId in signedLeaseGrants)
+
+    /**
+     * After a listing [pin] signed was accepted: the "May still start" rows
+     * of that node the listing does not name (finding 3). Such a row goes
+     * only once the request its grant answered has expired, on this phone's
+     * clock and on the relay-corrected one (so a relay that pushes the clock
+     * forward gains nothing). A pending row for a lease this phone remembers
+     * no grant for has no such time: it goes as soon as a listing that
+     * passed no longer names the lease. A row the listing names is handled
+     * by its signed status (noteListedLease). Nothing is signed or sent here
+     * (R-F5-5): Stop is the owner's tap.
+     */
+    private fun dropMayStartRows(pin: NodePin, named: Set<String>, api: RelayApi) {
+        val relayNowMs = api.now().toEpochMilli()
+        fun gone(leaseId: String): Boolean {
+            if (leaseId in named) return false
+            val expires = signedLeaseGrants[leaseId]
+            val expired = expires == null || (expires < System.currentTimeMillis() && expires < relayNowMs)
+            return !Leases.keepsMayStart(null, expired)
+        }
+        val dropped = runningLeases.filter { it.nodeId == pin.id && it.state == "pending" && gone(it.leaseId) }.map { it.leaseId }.toMutableSet()
+        // The same lease when it is the one on the live screen (the owner is on Pending when this runs).
+        val live = liveLease
+        if (live != null && live.nodeId == pin.id && live.state == "pending" && !live.busy && gone(live.leaseId)) {
+            dropped.add(live.leaseId)
+            closeLiveLease()
+        }
+        runningLeases.removeAll { it.leaseId in dropped }
+        signedLeaseGrants.keys.removeAll(dropped)
     }
 
     /** One send, never repeated (R-F5-5): the node's answer, or why there is none. */
@@ -561,6 +690,8 @@ class AppModel(context: Context) {
                 } else {
                     signEnvelope(k, Leases.deny(item.request, k.deviceId, signedAt), "Deny computer use", promptText(item.nodeName, 30))
                 }
+                // Signed: from here on the lease may start, whatever the relay answers.
+                if (grant) signedLeaseGrants[item.request.leaseId] = Timestamps.epochMillis(item.request.expiresAt) ?: Long.MAX_VALUE
                 val sent = sendLease(api, "grant", item.request.leaseId, envelope)
                 when (val outcome = sent.outcome) {
                     is SendOutcome.Unconfirmed ->
@@ -597,7 +728,8 @@ class AppModel(context: Context) {
         val pin = storage.nodes.firstOrNull { it.id == lease.nodeId } ?: return
         val old = liveLease
         if (old != null && old.leaseId == lease.leaseId) return
-        if (old != null && Leases.isLive(old.state)) {
+        // A pending lease keeps its row too, once its node has signed a status for it.
+        if (old != null && (Leases.isLive(old.state) || (old.state == "pending" && old.lastStatus != null))) {
             runningLeases.removeAll { it.leaseId == old.leaseId }
             runningLeases.add(RunningLease(old.nodeId, old.nodeName, old.leaseId, old.state, old.reason, old.appliedSeq, old.grantedByDevice, old.grantedByName, old.lastStatus))
         }
@@ -967,6 +1099,8 @@ class AppModel(context: Context) {
         pending.clear()
         closeLiveLease()
         runningLeases.clear()
+        leaseChecks.clear()
+        signedLeaseGrants.clear()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
         decidingLease.clear()
@@ -2035,6 +2169,8 @@ class AppModel(context: Context) {
         answeredTokens.clear()
         closeLiveLease()
         runningLeases.clear()
+        leaseChecks.clear()
+        signedLeaseGrants.clear()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
         decidingLease.clear()

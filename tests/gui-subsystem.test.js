@@ -8,6 +8,7 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const { once } = require('events');
 const { createGuiSubsystem, isJobOpen } = require('../src/gui');
+const { recordIdentity, IDENTITY_RECORD_TEST_OPTIONS } = require('./helpers/identity-record');
 const { parseGuiConfig } = require('../src/gui/config');
 const S = require('../src/gui/session-secret');
 const { connectToService, createOpHandler } = require('../src/session/connection');
@@ -62,7 +63,16 @@ const nodeConfig = (gui = {}, profile = 'agent') => ({
   gui: parseGuiConfig({ enabled: true, apps: { calculator: { path: POSIX ? '/usr/bin/gnome-calculator' : 'C:\\Windows\\System32\\calc.exe' } }, ...gui }, { profile })
 });
 
-function install(configDir, { nodeId = identity.nodeId } = {}) {
+// R-F5-17: the record of the node identity is read without PowerShell and
+// without the write probe (a temp dir is this user's; see the helper).
+const doctor = (options) => runDoctor({ ...options, deps: { identityRecord: IDENTITY_RECORD_TEST_OPTIONS } });
+const createGui = (options) => createGuiSubsystem({ ...options, deps: { identityRecord: IDENTITY_RECORD_TEST_OPTIONS, ...(options.deps || {}) } });
+
+// As "session install" leaves a node: the helper file, and (R-F5-17) the
+// administrator's record of the identity it was installed for, which install
+// requires. record: false is a node from before that ruling.
+function install(configDir, { nodeId = identity.nodeId, record = true } = {}) {
+  if (record) recordIdentity(configDir, identity);
   const { secret, endpointId } = S.mintSessionSecret();
   S.writeCanonical({ configDir, cipher, secret, endpointId, nodeId, sessionUser: 'alice', sessionSid: POSIX ? null : 'S-1-5-21-1-2-3-1001', sessionUid: POSIX ? UID : null });
   return secret;
@@ -85,9 +95,9 @@ describe('createGuiSubsystem', () => {
     const { configDir, dataDir } = dirs();
     const log = spyLog();
     const common = { dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, log };
-    assert.equal(createGuiSubsystem({ ...common, nodeConfig: nodeConfig({ enabled: false }) }), null);
-    assert.equal(createGuiSubsystem({ ...common, nodeConfig: nodeConfig({}, 'runbook') }), null);
-    assert.equal(createGuiSubsystem({ ...common, nodeConfig: nodeConfig() }), null, 'no helper-secret.json yet');
+    assert.equal(createGui({ ...common, nodeConfig: nodeConfig({ enabled: false }) }), null);
+    assert.equal(createGui({ ...common, nodeConfig: nodeConfig({}, 'runbook') }), null);
+    assert.equal(createGui({ ...common, nodeConfig: nodeConfig() }), null, 'no helper-secret.json yet');
     assert.deepEqual(log.errors, []);
   });
 
@@ -101,14 +111,14 @@ describe('createGuiSubsystem', () => {
       const log = spyLog();
       const a = approvals();
       const config = { ...nodeConfig(), gui: parseGuiConfig(raw, { profile: 'agent' }) };
-      assert.equal(createGuiSubsystem({ nodeConfig: config, dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log }), null, JSON.stringify(raw));
+      assert.equal(createGui({ nodeConfig: config, dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log }), null, JSON.stringify(raw));
       assert.equal(a.relayClient.methods.size, 0);
       assert.deepEqual(log.errors, []);
       assert.match(log.all(), /enabled: true/);
     }
     const io = () => { const out = []; return { out, io: { stdout: { write: (t) => out.push(String(t)) }, stderr: { write: () => {} }, stdin: null } }; };
     const status = async () => { const t = io(); assert.equal(await runSessionCommand({ sub: 'status', flags: {}, dataDir, io: t.io, deps: { configDir, platform: process.platform, adminUid: UID } }), 0); return t.out.join(''); };
-    const helperRows = async () => (await runDoctor({ dataDir, adminUid: UID, configDir })).filter((r) => /session helper/.test(r.check));
+    const helperRows = async () => (await doctor({ dataDir, adminUid: UID, configDir })).filter((r) => /session helper/.test(r.check));
 
     // No node.yaml, then one that lists apps but does not enable them.
     for (const yaml of [null, 'name: gpu-box\n', `name: gpu-box\ngui:\n  apps:\n    calculator: '${apps.calculator.path}'\n`]) {
@@ -146,7 +156,7 @@ describe('createGuiSubsystem', () => {
       v: 1, pid: process.pid, available: false, reason: 'gui_start_failed\u001b[2J', detail: 'EADDRINUSE\n[ok] node config‮',
       user: null, platform: null, capabilities: [], probes: [], limits: [], apps: [], since: null, updated_at: new Date().toISOString(), lease: null
     });
-    const rows = (await runDoctor({ dataDir, adminUid: UID, configDir })).filter((r) => /desktop apps|session helper/.test(r.check));
+    const rows = (await doctor({ dataDir, adminUid: UID, configDir })).filter((r) => /desktop apps|session helper/.test(r.check));
     assert.equal(rows.length, 1);
     assert.equal(rows[0].ok, false);
     assert.ok(!DANGEROUS.test(rows[0].detail), JSON.stringify(rows[0].detail));
@@ -156,7 +166,7 @@ describe('createGuiSubsystem', () => {
     const file = require('../src/gui/session-secret').canonicalPath(configDir);
     const record = JSON.parse(fs.readFileSync(file, 'utf8'));
     fs.writeFileSync(file, JSON.stringify({ ...record, session_user: 'alice\u001b[2K\rroot' }), { mode: 0o640 });
-    const named = (await runDoctor({ dataDir, adminUid: UID, configDir })).filter((r) => /session helper/.test(r.check));
+    const named = (await doctor({ dataDir, adminUid: UID, configDir })).filter((r) => /session helper/.test(r.check));
     assert.equal(named.length, 1);
     assert.ok(!DANGEROUS.test(named[0].detail), JSON.stringify(named[0].detail));
     assert.match(named[0].detail, /^installed for alice\[2K root \[hidden or control characters removed\]; /);
@@ -199,7 +209,7 @@ describe('createGuiSubsystem', () => {
       if (POSIX && !wrongAdmin && fs.statSync(file).isFile()) fs.chmodSync(file, 0o640);
       const log = spyLog();
       const a = approvals();
-      const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: wrongAdmin ? UID + 1 : UID, geteuid: () => UID, log });
+      const gui = createGui({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: wrongAdmin ? UID + 1 : UID, geteuid: () => UID, log });
       assert.ok(gui, 'the subsystem exists so that its tools can say why they refuse');
       assert.equal(gui.unavailable.reason, 'session_file_invalid');
       assert.equal(gui.channel, null, 'no helper channel');
@@ -240,7 +250,7 @@ describe('createGuiSubsystem', () => {
       assert.equal(await runSessionCommand({ sub: 'status', flags: {}, dataDir, io, deps: { configDir, platform: process.platform } }), 0);
       assert.match(out.join(''), /helper: off \(session_file_invalid\)/);
       assert.match(out.join(''), /session uninstall --user NAME/);
-      const rows = await runDoctor({ dataDir, adminUid: wrongAdmin ? UID + 1 : UID, configDir });
+      const rows = await doctor({ dataDir, adminUid: wrongAdmin ? UID + 1 : UID, configDir });
       const bad = rows.filter((r) => /session helper|desktop apps/.test(r.check) && r.ok === false);
       assert.equal(bad.length, 1, JSON.stringify(rows.filter((r) => /session helper|desktop apps/.test(r.check))));
       assert.match(bad[0].detail, /session_file_invalid/);
@@ -273,7 +283,7 @@ describe('createGuiSubsystem', () => {
     const ep = await takeEndpoint(base);
     const log = spyLog();
     const a = approvals();
-    const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log, deps: { endpoint: ep } });
+    const gui = createGui({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log, deps: { endpoint: ep } });
     assert.ok(gui && !gui.unavailable, 'built normally');
     const registry = new ToolRegistry();
     gui.registerTools(registry);
@@ -305,7 +315,7 @@ describe('createGuiSubsystem', () => {
     const log = spyLog();
     const a = approvals();
     a.relayClient.registerMethod = () => { throw new Error('the relay client is not what it should be'); };
-    const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log, deps: { endpoint: endpoint(base) } });
+    const gui = createGui({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log, deps: { endpoint: endpoint(base) } });
     assert.ok(gui);
     assert.equal(gui.unavailable.reason, 'gui_start_failed');
     assert.equal(gui.channel, null);
@@ -318,16 +328,16 @@ describe('createGuiSubsystem', () => {
     await gui.start();
     await gui.stop();
     // Even a node config that cannot be read at all does not throw.
-    const broken = createGuiSubsystem({ nodeConfig: null, dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, log: spyLog() });
+    const broken = createGui({ nodeConfig: null, dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, log: spyLog() });
     assert.equal(broken.unavailable.reason, 'gui_start_failed');
   });
 
   it('R-F5-11: doctor is quiet about a helper that is not installed and passes one that is', async () => {
     const { configDir, dataDir } = dirs();
-    let rows = await runDoctor({ dataDir, adminUid: UID, configDir });
+    let rows = await doctor({ dataDir, adminUid: UID, configDir });
     assert.deepEqual(rows.filter((r) => /session helper|desktop apps/.test(r.check)), []);
     install(configDir);
-    rows = await runDoctor({ dataDir, adminUid: UID, configDir });
+    rows = await doctor({ dataDir, adminUid: UID, configDir });
     const row = rows.filter((r) => /session helper/.test(r.check));
     assert.equal(row.length, 1);
     assert.equal(row[0].ok, true);
@@ -337,9 +347,12 @@ describe('createGuiSubsystem', () => {
     const { base, configDir, dataDir } = dirs();
     const secret = install(configDir);
     const a = approvals();
-    const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, deps: { endpoint: endpoint(base) } });
+    const gui = createGui({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, deps: { endpoint: endpoint(base) } });
     assert.ok(gui);
     assert.deepEqual([...a.relayClient.methods.keys()], ['lease.grant', 'lease.revoke', 'lease.watch', 'lease.list']);
+    // R-F5-20: lease.list takes the phone's nonce; a device this node does not know gets no listing, with or without one.
+    assert.deepEqual(await a.relayClient.methods.get('lease.list')({ device_id: 'd-aaaaaaaaaaaaaaaa', nonce: 'n'.repeat(43) }), { statuses: [] });
+    assert.deepEqual(await a.relayClient.methods.get('lease.list')(), { statuses: [] });
     const registry = new ToolRegistry();
     gui.registerTools(registry);
     assert.equal(registry.list().length, 10);
@@ -369,7 +382,7 @@ describe('createGuiSubsystem', () => {
     const { base, configDir, dataDir } = dirs();
     const oldSecret = install(configDir);
     const first = S.readCanonical({ configDir, cipher, adminUid: UID, geteuid: () => UID });
-    const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, deps: { endpoint: endpoint(base) } });
+    const gui = createGui({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, deps: { endpoint: endpoint(base) } });
     await gui.start();
     cleanups.push(() => gui.stop());
     const backend = { probe: async () => ({}), foreground: async () => null };
@@ -403,6 +416,108 @@ describe('createGuiSubsystem', () => {
     assert.equal(gui.capability().available, true);
   });
 
+  // R-F5-17 (owner ruling, built 2026-10-13): computer use runs only for an
+  // identity an administrator recorded. A helper installed before the ruling
+  // (no record) leaves desktop apps off, with what to run; so does a record
+  // that names another identity or cannot be trusted. Never a weaker mode.
+  describe('R-F5-17: no computer use without the administrator\'s record of the node identity', () => {
+    const R = require('../src/service/identity-record');
+    const build = (d, extra = {}, log = spyLog()) => {
+      const a = approvals();
+      const gui = createGui({ nodeConfig: nodeConfig(), dataDir: d.dataDir, configDir: d.configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log, ...extra });
+      return { gui, a, log };
+    };
+    const refusal = async (gui) => {
+      const registry = new ToolRegistry();
+      gui.registerTools(registry);
+      return registry.get('ListApps').execute({}, {});
+    };
+
+    it('a helper installed with no record: off with node_identity_unrecorded; one error line with the command; no channel, no link method, every tool refuses', async () => {
+      const d = dirs();
+      install(d.configDir, { record: false });
+      const { gui, a, log } = build(d);
+      assert.ok(gui && gui.unavailable);
+      assert.equal(gui.unavailable.reason, 'node_identity_unrecorded');
+      assert.equal(gui.channel, null);
+      assert.equal(gui.leases, null);
+      assert.equal(a.relayClient.methods.size, 0);
+      assert.equal(log.errors.length, 1);
+      assert.match(log.errors[0], /king-louie-service identity record/);
+      const result = await refusal(gui);
+      assert.equal(result.ok, false);
+      assert.match(result.error, /capability_unavailable: gui \(node_identity_unrecorded/);
+      await gui.start();
+      cleanups.push(() => gui.stop());
+      const record = readGuiStatusRecord({ dataDir: d.dataDir });
+      assert.equal(record.available, false);
+      assert.equal(record.reason, 'node_identity_unrecorded');
+      // doctor and "session status" say what to run.
+      const rows = await doctor({ dataDir: d.dataDir, adminUid: UID, configDir: d.configDir });
+      assert.ok(rows.some((r) => /desktop apps/.test(r.check) && r.ok === false && /identity record/.test(r.detail)), JSON.stringify(rows));
+    });
+
+    it('a record of another identity, and one that cannot be trusted: off with node_identity_invalid', () => {
+      const other = testNodeIdentity({ key: 'web-01' });
+      const d = dirs();
+      install(d.configDir, { record: false });
+      recordIdentity(d.configDir, other);
+      const wrong = build(d);
+      assert.equal(wrong.gui.unavailable.reason, 'node_identity_invalid');
+      assert.equal(wrong.gui.channel, null);
+      assert.match(wrong.log.errors[0], /is not the one an administrator recorded/);
+
+      const d2 = dirs();
+      install(d2.configDir);
+      fs.writeFileSync(R.recordPath(d2.configDir), '{ broken');
+      const broken = build(d2);
+      assert.equal(broken.gui.unavailable.reason, 'node_identity_invalid');
+      assert.ok(!broken.log.all().includes('broken'), 'the file is never quoted');
+
+      // Windows: a record the service itself could have written (the real probe on a temp dir).
+      const d3 = dirs();
+      install(d3.configDir);
+      const writable = build(d3, { platform: 'win32', deps: { identityRecord: { ...IDENTITY_RECORD_TEST_OPTIONS, serviceProbe: true } } });
+      assert.equal(writable.gui.unavailable.reason, 'node_identity_invalid');
+      assert.match(writable.log.errors[0], /writable by the account running the service/);
+    });
+
+    // Fourth security review, finding 1: the write probe is asked again
+    // before every lease request, with the host's own way of reading.
+    it('the lease manager gets the record\'s write probe where the host ran it (Windows), and none where it did not', () => {
+      const d = dirs();
+      install(d.configDir);
+      const file = R.recordPath(d.configDir);
+      const match = { state: 'match', file, problem: null, recorded: null };
+      const off = build(d, { identityRecord: match, deps: { endpoint: endpoint(d.base) } });
+      assert.equal(off.gui.leases.identityProbe, null, 'the test options run no probe');
+      const fsWith = (writable) => ({ ...fs, openSync: (p, flags, ...rest) => {
+        if (flags === 'wx' || (flags === 'r+' && !writable)) throw Object.assign(new Error('denied'), { code: 'EPERM' });
+        return fs.openSync(p, flags, ...rest);
+      } });
+      const probed = (fsImpl, platform = 'win32') => build(d, { platform, identityRecord: match, deps: { endpoint: endpoint(d.base), identityRecord: { ...IDENTITY_RECORD_TEST_OPTIONS, serviceProbe: true, fsImpl } } }).gui.leases.identityProbe;
+      assert.equal(probed(fsWith(false))(), null);
+      assert.match(probed(fsWith(true))(), /node\.json is writable by the account running the service/);
+      assert.equal(probed(fsWith(true), 'linux')(), null, 'off Windows owner and mode were read at the start');
+    });
+
+    it('the host\'s own check is used when it passes one, and only a match turns the GUI on', () => {
+      const d = dirs();
+      install(d.configDir);
+      const file = R.recordPath(d.configDir);
+      for (const state of ['none', 'mismatch', 'invalid']) {
+        const { gui } = build(d, { identityRecord: { state, file, problem: 'x', recorded: null } });
+        assert.ok(gui.unavailable, state);
+      }
+      const on = build(d, { identityRecord: { state: 'match', file, problem: null, recorded: null }, deps: { endpoint: endpoint(d.base) } });
+      assert.equal(on.gui.unavailable, null);
+      assert.ok(on.gui.channel);
+      // With no check passed it reads the record itself (the matching one install wrote).
+      const self = build(d, { deps: { endpoint: endpoint(d.base) } });
+      assert.equal(self.gui.unavailable, null);
+    });
+  });
+
   it('R-F5-7: isJobOpen fails closed', () => {
     // JobManager#getJob answers null for a job it does not have.
     const jobManager = { getJob: (id) => (['job-run', 'job-done'].includes(id) ? { job_id: id } : null), isTerminal: (id) => id === 'job-done' };
@@ -425,7 +540,7 @@ describe('createGuiSubsystem', () => {
   it('with no jobOpen from its host, the subsystem holds no lease', async () => {
     const { base, configDir, dataDir } = dirs();
     install(configDir);
-    const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, deps: { endpoint: endpoint(base) } });
+    const gui = createGui({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, deps: { endpoint: endpoint(base) } });
     await assert.rejects(gui.leases.request({ jobId: 'job-1', origin: null, appIds: ['calculator'], minutes: 5, reason: 'x' }), (e) => e.code === 'job_closed');
   });
 });

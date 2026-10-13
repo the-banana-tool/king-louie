@@ -273,6 +273,55 @@ final class AppModel: ObservableObject {
     @Published var liveLease: LiveLease?
     /// Leases a pinned node listed as running that are not the one on the live screen (R-F5-18).
     @Published var runningLeases: [RunningLease] = []
+    /// What this phone knows about computer use on one pinned node (owner
+    /// ruling R-F5-20; fourth security review, finding 2). Three things can
+    /// be true, and each is shown as what it is: nothing asked yet (no entry
+    /// in `leaseChecks`); a listing the node signed for this phone's own
+    /// request, accepted at `at` by this phone's clock, with what it listed;
+    /// or a request that brought no listing this phone could accept.
+    enum LeaseNodeCheck: Equatable {
+        case confirmed(at: Date, running: Int, waiting: Int)
+        case unconfirmed
+    }
+
+    /// One pinned node and what is known of it; `check` nil: not asked yet.
+    struct LeaseCheckRow: Identifiable {
+        let id: String
+        let nodeName: String
+        let check: LeaseNodeCheck?
+    }
+
+    /// Per pinned node id. An entry is written only by `refreshLeases`, from
+    /// a listing it checked or a request that failed. A session that is
+    /// locked asks nothing and changes nothing here: a node confirmed
+    /// earlier keeps the time it was confirmed at, which the row shows.
+    @Published var leaseChecks: [String: LeaseNodeCheck] = [:]
+
+    /// Every pinned node, with what is known of it.
+    var leaseCheckRows: [LeaseCheckRow] {
+        guard mode == .live else { return [] }
+        return state.nodes.map { LeaseCheckRow(id: $0.id, nodeName: $0.name, check: leaseChecks[$0.id]) }
+    }
+
+    /// The nodes no accepted listing came from: the banner's warning rows.
+    var unconfirmedLeaseRows: [LeaseCheckRow] { leaseCheckRows.filter { $0.check == .unconfirmed } }
+
+    /// The nodes not asked yet, or confirmed: said in the Computer use section.
+    var leaseStatusRows: [LeaseCheckRow] { leaseCheckRows.filter { $0.check != .unconfirmed } }
+
+    /// A row's words. A confirmed row always carries its time (and its date
+    /// when that was not today), so an old answer never reads as current.
+    func leaseCheckText(_ row: LeaseCheckRow) -> String {
+        switch row.check {
+        case .none:
+            return Leases.notCheckedYet(nodeName: row.nodeName)
+        case .some(.confirmed(let at, let running, let waiting)):
+            let time = at.formatted(date: Calendar.current.isDateInToday(at) ? .omitted : .abbreviated, time: .shortened)
+            return Leases.checked(nodeName: row.nodeName, at: time, running: running, waiting: waiting)
+        case .some(.unconfirmed):
+            return Leases.couldNotConfirm(nodeName: row.nodeName)
+        }
+    }
     /// Whether the live lease sheet is presented (the banner owns the sheet).
     @Published var showLiveLease = false
     /// Whether the live lease view is on screen with the app in front
@@ -282,6 +331,14 @@ final class AppModel: ObservableObject {
     private var leaseOpenTask: Task<Void, Never>?
     @Published private(set) var decidingLease: Set<String> = []
     private var decidedLeaseRequests = Set<String>()
+    /// Leases this phone has signed a grant for, by lease id, with when the
+    /// request that grant answers expires (fourth security review, finding
+    /// 3). Kept from the signature on, whatever the relay then answered: a
+    /// relay can say 503 and deliver the grant later. In memory only: a
+    /// phone that was restarted in between no longer knows. It decides only
+    /// what a pending lease's row says and how long it stays, never whether
+    /// there is one (fifth security review, finding 1: `notePendingListed`).
+    private var signedLeaseGrants: [String: Date] = [:]
     private var liveTask: Task<Void, Never>?
     private var demoLeaseTimer: Task<Void, Never>?
 
@@ -294,7 +351,12 @@ final class AppModel: ObservableObject {
         if onlyIfUnlocked, !key.isSessionUnlocked { return }
         do {
             var items: [LeaseRequestItem] = []
-            for entry in try await client.leases(signWith: onlyIfUnlocked ? Self.sessionOnlySigner(key) : nil) {
+            // R-F5-20: a nonce chosen for this one request. Each node signs its
+            // listing over it, so an answer to an earlier request cannot be
+            // played again and no entry can be left out unseen.
+            let nonce = Messages.randomNonce()
+            let entries = try await client.leases(nonce: nonce, signWith: onlyIfUnlocked ? Self.sessionOnlySigner(key) : nil)
+            for entry in entries {
                 // R-F5-18: a lease that is running, or ended lately, comes with no
                 // request: only the status its node signed for this very listing.
                 if entry["envelope"]?.isNull ?? true {
@@ -319,9 +381,32 @@ final class AppModel: ObservableObject {
                 if !items.contains(where: { $0.id == request.requestId }) { items.append(LeaseRequestItem(request: request, nodeName: pin.name, status: status)) }
             }
             leaseRequests = items
+            // R-F5-20: per pinned node, a listing it signed for this request and
+            // this phone, complete, or no answer. This phone cannot tell a node
+            // that is off, slow or older from a relay that kept its answer back,
+            // so every one of those is "could not confirm".
+            // An accepted listing is "confirmed", with the time this phone
+            // accepted it and what the node listed; nothing else is.
+            let checkedAt = Date()
+            var checks: [String: LeaseNodeCheck] = [:]
+            for pin in state.nodes {
+                let check = Leases.checkListing(entries, pin: pin, nonce: nonce, deviceId: key.deviceId)
+                guard check.accepted else { checks[pin.id] = .unconfirmed; continue }
+                let listed = Leases.listedStatuses(check, pin: pin)
+                dropMayStartRows(of: pin, named: Set(listed.map { $0.leaseId }), relayNow: client.now())
+                notePendingListed(check, pin: pin, shownAsRequest: Set(items.map { $0.request.leaseId }))
+                checks[pin.id] = .confirmed(at: checkedAt, running: listed.filter { Leases.isLive(state: $0.state) }.count,
+                                            waiting: listed.filter { $0.state == "pending" }.count)
+            }
+            leaseChecks = checks
         } catch is SessionLocked {
-            // The session lapsed: quiet; the owner can pull to refresh.
+            // The session lapsed: quiet; the owner can pull to refresh. Nothing
+            // was asked, so what is shown stays as it was, with its time.
         } catch {
+            // No reply at all: nothing was confirmed with any node.
+            var none: [String: LeaseNodeCheck] = [:]
+            for pin in state.nodes { none[pin.id] = .unconfirmed }
+            leaseChecks = none
             fail(error)
         }
     }
@@ -340,6 +425,8 @@ final class AppModel: ObservableObject {
                 let message = try Leases.grant(to: item.request, apps: Array(apps), minutes: minutes, deviceId: key.deviceId, signedAt: signedAt)
                 let names = item.request.apps.filter { apps.contains($0.id) }.map { Self.promptText($0.name, 30) }.joined(separator: ", ")
                 envelope = try await key.signEnvelope(message, reason: "Allow computer use of \(names) on \(Self.promptText(item.nodeName, 30)) for \(minutes) min")
+                // Signed: from here on the lease may start, whatever the relay answers.
+                signedLeaseGrants[item.request.leaseId] = Timestamps.date(item.request.expiresAt) ?? Date.distantFuture
             } else {
                 envelope = try await key.signEnvelope(Leases.deny(item.request, deviceId: key.deviceId, signedAt: signedAt), reason: "Deny computer use on \(Self.promptText(item.nodeName, 30))")
             }
@@ -557,11 +644,77 @@ final class AppModel: ObservableObject {
         }
         let known = runningLeases.firstIndex(where: { $0.leaseId == status.leaseId })
         guard Leases.acceptsStatus(status, appliedSeq: known.map { runningLeases[$0].appliedSeq } ?? 0) else { return }
+        // A row that is there stays while its node still signs "pending",
+        // whoever signed a grant (fifth security review, finding 1): a
+        // newer status without a listing must not take it down.
+        if let known, status.state == "pending" {
+            runningLeases[known] = RunningLease(nodeId: pin.id, nodeName: pin.name, leaseId: status.leaseId, state: status.state, reason: status.reason,
+                                                appliedSeq: status.seq, grantedByDevice: status.grantedByDevice, grantedByName: status.grantedByName,
+                                                status: signed)
+            return
+        }
         if let known { runningLeases.remove(at: known) }
-        guard Leases.isLive(state: status.state) else { return }
+        // Finding 3: a lease still waiting for an answer gets a row too when
+        // this phone signed a grant for it ("May still start").
+        let mayStart = Leases.mayStillStart(state: status.state, signedGrant: signedLeaseGrants[status.leaseId] != nil)
+        guard Leases.isLive(state: status.state) || mayStart else {
+            if status.state == "ended" { signedLeaseGrants[status.leaseId] = nil }
+            return
+        }
         runningLeases.append(RunningLease(nodeId: pin.id, nodeName: pin.name, leaseId: status.leaseId, state: status.state, reason: status.reason,
                                           appliedSeq: status.seq, grantedByDevice: status.grantedByDevice, grantedByName: status.grantedByName,
                                           status: signed))
+    }
+
+    /// After a listing `pin` signed was accepted: a banner row, with the
+    /// Stop every row has, for each lease it names as pending (fifth
+    /// security review, finding 1). Not from memory: after a restart this
+    /// phone no longer knows what it signed, and another phone never did,
+    /// while the relay can still deliver a grant it held back. What this
+    /// phone remembers only chooses the words (`pendingTitle`). A request
+    /// that is on screen with its Allow and Deny, unanswered by this phone,
+    /// is that request and gets no second row. Only statuses of a listing
+    /// that passed are read, each verified again; nothing is sent here.
+    private func notePendingListed(_ check: ListingCheck, pin: NodePin, shownAsRequest: Set<String>) {
+        guard check.accepted else { return }
+        for signed in check.statuses {
+            guard let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message) else { continue }
+            let remembered = signedLeaseGrants[status.leaseId] != nil
+            guard Leases.listedPendingGetsRow(state: status.state, shownAsRequest: shownAsRequest.contains(status.leaseId), signedGrant: remembered) else { continue }
+            // The lease on the live screen has its row; so has one already listed.
+            if liveLease?.leaseId == status.leaseId { continue }
+            if runningLeases.contains(where: { $0.leaseId == status.leaseId }) { continue }
+            guard Leases.acceptsStatus(status, appliedSeq: 0) else { continue }
+            runningLeases.append(RunningLease(nodeId: pin.id, nodeName: pin.name, leaseId: status.leaseId, state: status.state, reason: status.reason,
+                                              appliedSeq: status.seq, grantedByDevice: status.grantedByDevice, grantedByName: status.grantedByName,
+                                              status: signed))
+        }
+    }
+
+    /// After a listing `pin` signed was accepted: the "May still start" rows
+    /// of that node the listing does not name (finding 3). Such a row goes
+    /// only once the request its grant answered has expired, on this phone's
+    /// clock and on the relay-corrected one (so a relay that pushes the
+    /// clock forward gains nothing). A pending row for a lease this phone
+    /// remembers no grant for has no such time: it goes as soon as a listing
+    /// that passed no longer names the lease. A row the listing names is
+    /// handled by its signed status (`noteListedLease`). Nothing is sent here.
+    private func dropMayStartRows(of pin: NodePin, named: Set<String>, relayNow: Date) {
+        func gone(_ leaseId: String) -> Bool {
+            let expired = signedLeaseGrants[leaseId].map { $0 < Date() && $0 < relayNow } ?? true
+            return !Leases.keepsMayStart(listedState: nil, requestExpired: expired)
+        }
+        var dropped: [String] = []
+        for row in runningLeases where row.nodeId == pin.id && row.state == "pending" && !named.contains(row.leaseId) {
+            if gone(row.leaseId) { dropped.append(row.leaseId) }
+        }
+        // The same lease when it is the one being followed, unless its view is open.
+        if let live = liveLease, live.nodeId == pin.id, live.state == "pending", !named.contains(live.leaseId), !showLiveLease, gone(live.leaseId) {
+            dropped.append(live.leaseId)
+            closeLiveLease()
+        }
+        runningLeases.removeAll { dropped.contains($0.leaseId) }
+        for leaseId in dropped { signedLeaseGrants[leaseId] = nil }
     }
 
     private func runningRow(_ live: LiveLease) -> RunningLease {
@@ -583,6 +736,9 @@ final class AppModel: ObservableObject {
     /// again, and this phone watches only with the live view open (R-F5-19):
     /// so for its own lease the banner says what to do.
     func bannerTitle(_ lease: RunningLease) -> String {
+        // Finding 3: not running, and not over: a grant may still reach it. "May still
+        // start" only for a grant this phone remembers signing; otherwise what its node says.
+        if lease.state == "pending" { return Leases.pendingTitle(nodeName: lease.nodeName, signedGrant: signedLeaseGrants[lease.leaseId] != nil) }
         let node = Display.escape(lease.nodeName)
         if Leases.isPausedForContact(state: lease.state, reason: lease.reason) {
             return grantedByOtherText(device: lease.grantedByDevice, name: lease.grantedByName) == nil
@@ -590,6 +746,11 @@ final class AppModel: ObservableObject {
                 : "Paused on \(node): the phone that granted it is not watching"
         }
         return "Lease \(lease.state == "suspended" ? "paused" : "active") on \(node)"
+    }
+
+    /// Under the row of a pending lease: which of the two this phone knows.
+    func pendingDetail(_ lease: RunningLease) -> String {
+        Leases.pendingDetail(signedGrant: signedLeaseGrants[lease.leaseId] != nil)
     }
 
     /// Beside Stop, for a lease another phone granted (R-F5-18); nil for this phone's own.
@@ -621,7 +782,8 @@ final class AppModel: ObservableObject {
     /// while it runs.
     private func follow(_ lease: RunningLease) {
         guard liveLease?.leaseId != lease.leaseId else { return }
-        if let old = liveLease, Leases.isLive(state: old.state) {
+        // A pending lease keeps its row too, once its node has signed a status for it.
+        if let old = liveLease, Leases.isLive(state: old.state) || (old.state == "pending" && old.lastStatus != nil) {
             runningLeases.removeAll { $0.leaseId == old.leaseId }
             runningLeases.append(runningRow(old))
         }
@@ -858,6 +1020,8 @@ final class AppModel: ObservableObject {
         pending = []
         closeLiveLease()
         runningLeases = []
+        leaseChecks = [:]
+        signedLeaseGrants = [:]
         showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []
@@ -1837,6 +2001,8 @@ final class AppModel: ObservableObject {
         answeredTokens = []
         closeLiveLease()
         runningLeases = []
+        leaseChecks = [:]
+        signedLeaseGrants = [:]
         showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []

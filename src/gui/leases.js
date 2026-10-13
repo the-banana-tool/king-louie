@@ -48,6 +48,10 @@ const CONTACT_MAX_S = 300;
 const CONTACT_TOKENS_MAX = 2048;
 // R-F5-18: how many ended leases a phone's listing names besides the live one.
 const LISTED_ENDED = 4;
+// How long a listing may reuse a live lease's newest status before it signs
+// a new one (fourth security review): the relay may ask at will, and each
+// new status costs a seq and a contact token.
+const LIST_RESIGN_MS = 5000;
 
 // The nonces of the watches and revokes one lease has accepted (security
 // review finding 5). Those messages carry no validity window of their own,
@@ -70,7 +74,13 @@ class LeaseNonces {
   add(nonce, sha256) { this.seen.set(nonce, sha256); }
 }
 const NO_NONCES = Object.freeze({ get: () => null });
-const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', device_revoked: 'lease_revoked', expired: 'lease_expired', job_closed: 'job_closed' };
+const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', device_revoked: 'lease_revoked', expired: 'lease_expired', job_closed: 'job_closed', node_identity_invalid: 'capability_unavailable' };
+// Why a suspended lease ends instead of asking to resume: the
+// administrator's record of this node's identity can no longer be trusted
+// (fifth security review, finding 4). Another value of a status's free
+// `reason`, like device_revoked.
+const IDENTITY_REASON = 'node_identity_invalid';
+const IDENTITY_MESSAGE = 'gui (node_identity_invalid: the record of this node identity can no longer be trusted; see the service log)';
 // Why a lease ends when the device that granted it is no longer an
 // enrolled, unrevoked approver, and how often the node looks (an
 // administrator's "device revoke" or "device apply" only writes a file).
@@ -91,9 +101,9 @@ class LeaseManager extends EventEmitter {
   // clock then shows the time that passed.) A caller that injects only
   // `clock` (tests) gets that one clock for both.
   constructor({ approvals, guiConfig, broker = null, audit = null, nodeName = null, clock = Date.now, monotonic = null,
-    timers = { setTimeout, clearTimeout }, jobOpen = () => false, log = createLogger('gui/leases') } = {}) {
+    timers = { setTimeout, clearTimeout }, jobOpen = () => false, identityProbe = null, log = createLogger('gui/leases') } = {}) {
     super();
-    Object.assign(this, { approvals, guiConfig, broker, audit, clock, timers, jobOpen, log });
+    Object.assign(this, { approvals, guiConfig, broker, audit, clock, timers, jobOpen, identityProbe, log });
     this.monotonic = typeof monotonic === 'function' ? monotonic : (clock === Date.now ? () => performance.now() : clock);
     this.nodeName = nodeName || (approvals.identity && approvals.identity.nodeName) || 'unnamed-node';
     this.leases = [];
@@ -105,6 +115,27 @@ class LeaseManager extends EventEmitter {
   }
 
   setBroker(broker) { this.broker = broker; }
+
+  // null, or why the administrator's record of the node identity cannot be
+  // trusted now (identityProbe: probeIdentityRecord, Windows only). A probe
+  // that throws proves nothing, so it is a problem too. Logged when the
+  // answer changes, like the approver set's probe.
+  _identityRecordProblem() {
+    if (typeof this.identityProbe !== 'function') return null;
+    let problem;
+    try {
+      problem = this.identityProbe();
+    } catch (err) {
+      problem = `the administrator's record of this node's identity could not be probed (${err.code || 'error'})`;
+    }
+    problem = problem || null;
+    if (problem !== (this._recordProblem || null)) {
+      if (problem) this.log.error(`no new computer-use lease is requested, and a suspended one ends instead of asking to resume: ${problem}. As root or an Administrator find out who could have changed it, run "king-louie-service identity record --replace" and restart the service.`, { reason: 'node_identity_invalid' });
+      else this.log.info('the record of this node identity is out of reach of this process again; leases can be requested');
+    }
+    this._recordProblem = problem;
+    return problem;
+  }
 
   _contactWindowMs() {
     const s = Number(this.guiConfig.lease && this.guiConfig.lease.contactS);
@@ -346,6 +377,19 @@ class LeaseManager extends EventEmitter {
     // chat id has none, and is refused before anything else is looked at.
     if (typeof jobId !== 'string' || !jobId) throw new GuiError('job_required', 'this run has no job or chat to bind a lease to');
     if (!this.available()) throw new GuiError('approval_unavailable');
+    // Fourth security review, finding 1 (R-F5-17): on Windows the service
+    // asks again, before every new request, whether it can write the
+    // administrator's record of this node's identity. If it now can (or
+    // that cannot be told), the record vouches for nothing: no request goes
+    // out. A lease that is already running is not ended by this; a suspended
+    // one of this job, which this call would have asked to resume, is (as in
+    // _sendRequest).
+    const recordProblem = this._identityRecordProblem();
+    if (recordProblem) {
+      const held = this.current();
+      if (held && held.jobId === jobId && held.state === 'suspended') this._end(held, IDENTITY_REASON);
+      throw new GuiError('capability_unavailable', IDENTITY_MESSAGE);
+    }
     const cfg = this.guiConfig;
     if (!Array.isArray(appIds) || appIds.length < 1 || appIds.length > 8 || new Set(appIds).size !== appIds.length
       || appIds.some((id) => !Object.hasOwn(cfg.apps, id))) {
@@ -380,10 +424,10 @@ class LeaseManager extends EventEmitter {
         tokens: new Map(), tokenIssued: 0, tokenUsedUpTo: 0, lastStatus: null
       };
       this.leases.push(lease);
-      this._sendRequest(lease, { resume: false });
+      this._sendRequest(lease, { resume: false, probed: true });
     } else {
       // A suspended lease whose resume request lapsed: ask again.
-      this._sendRequest(lease, { resume: true });
+      this._sendRequest(lease, { resume: true, probed: true });
     }
     return this._wait(lease, signal);
   }
@@ -409,7 +453,19 @@ class LeaseManager extends EventEmitter {
     for (const w of waiters) (err ? w.reject(err) : w.resolve(lease));
   }
 
-  _sendRequest(lease, { resume }) {
+  // Every request is built here, the ones the node sends by itself included
+  // (a resume after a suspension, and when the relay link returns), so this
+  // is where the record of the node identity is asked about (fifth security
+  // review, finding 4; `probed`: request() asked a moment ago). A request it
+  // refuses ends the lease. Ended, not left suspended: a record this process
+  // can write vouches for nothing until an administrator has written it anew
+  // and restarted the service, so a suspended lease would wait for nothing,
+  // and would ask again at every reconnect.
+  _sendRequest(lease, { resume, probed = false }) {
+    if (!probed && this._identityRecordProblem()) {
+      this._end(lease, IDENTITY_REASON);
+      return;
+    }
     const now = this.clock();
     const cfg = this.guiConfig;
     const ids = resume ? lease.apps : lease.requestedApps;
@@ -624,6 +680,7 @@ class LeaseManager extends EventEmitter {
       if (last && last.endReason === GRANTOR_REVOKED_REASON) throw new GuiError('lease_revoked', 'the phone that granted this lease is no longer enrolled; call RequestLease for a new lease');
       if (last && last.endReason === 'expired') throw new GuiError('lease_expired', 'call RequestLease for a new lease');
       if (last && last.endReason === 'job_closed') throw new GuiError('job_closed', 'the job this lease belonged to is not open');
+      if (last && last.endReason === IDENTITY_REASON) throw new GuiError('capability_unavailable', IDENTITY_MESSAGE);
       throw new GuiError('lease_required', 'call RequestLease first');
     }
     if (lease.state === 'pending') throw new GuiError('lease_pending', 'waiting for the phone');
@@ -735,7 +792,7 @@ class LeaseManager extends EventEmitter {
     }
     if (this.broker) this.broker.releaseAll().catch(() => {});
     if (!['revoked', 'expired', 'denied'].includes(reason)) this._audit('lease.ended', lease, { reason });
-    this._settle(lease, new GuiError(END_ERROR[reason] || 'lease_required', END_ERROR[reason] ? null : reason));
+    this._settle(lease, new GuiError(END_ERROR[reason] || 'lease_required', END_ERROR[reason] ? (reason === IDENTITY_REASON ? IDENTITY_MESSAGE : null) : reason));
     this._status(lease);
     const ended = this.leases.filter((l) => l.state === 'ended');
     if (ended.length > HISTORY_MAX) this.leases = this.leases.filter((l) => l !== ended[0]);
@@ -764,14 +821,42 @@ class LeaseManager extends EventEmitter {
   // A status signed now, with a fresh contact token and who granted the
   // lease; kept as the lease's newest, for the reply to a phone's message.
   _signStatus(lease) {
+    const contactToken = lease.state === 'ended' ? null : this.mintContactToken(lease);
     const envelope = L.buildLeaseStatus({
       identity: this.approvals.identity, leaseId: lease.leaseId, seq: this.nextSeq(lease), state: lease.state, locked: lease.locked,
       reason: lease.endReason || lease.suspendReason || null, expiresAt: lease.expiresAt,
-      contactToken: lease.state === 'ended' ? null : this.mintContactToken(lease),
+      contactToken,
       grantedBy: lease.grantedBy ? { deviceId: lease.grantedBy, name: lease.grantedByName } : null, now: this.clock()
     });
     lease.lastStatus = envelope;
+    // What that status says, when it was signed and with which token: a listing reuses it while all three still hold.
+    lease.lastStatusOf = { says: this._statusSays(lease), at: this._stamp(), token: contactToken };
     return envelope;
+  }
+
+  // Everything a status says of a lease besides its seq, its time and its token.
+  _statusSays(lease) {
+    return JSON.stringify([lease.state, lease.locked, lease.endReason || lease.suspendReason || null, lease.expiresAt, lease.grantedBy, lease.grantedByName]);
+  }
+
+  // The status a listing gives for a lease (fourth security review). Every
+  // lease.list used to sign a new one, and the relay may call lease.list as
+  // often as it likes: each call cost the lease a seq and a contact token,
+  // without bound, and enough of them pushed the tokens its phones hold out
+  // of memory. So the lease's newest status is given again while it still
+  // says what the lease is and, for a lease that has not ended, is under
+  // LIST_RESIGN_MS old on both clocks and carries a token that is still
+  // known and has not made contact (a phone must always get one it can
+  // use). An ended lease's status is never signed again: nothing in it can
+  // change. Otherwise a status is signed now.
+  _listedStatus(lease) {
+    const last = lease.lastStatusOf;
+    if (lease.lastStatus && last && last.says === this._statusSays(lease)) {
+      if (lease.state === 'ended') return lease.lastStatus;
+      const issued = last.token === null ? null : lease.tokens.get(last.token);
+      if (issued && issued.n > lease.tokenUsedUpTo && !this._passed(last.at, LIST_RESIGN_MS)) return lease.lastStatus;
+    }
+    return this._signStatus(lease);
   }
 
   // That status, sent to the phones. Nothing is signed while the relay link
@@ -782,9 +867,15 @@ class LeaseManager extends EventEmitter {
     relay.send(this._signStatus(lease)).catch((err) => this.log.debug(`lease status not sent: ${err.message}`));
   }
 
+  // An enrolled, real, unrevoked device of this node; false when that cannot be read.
+  _enrolled(deviceId) {
+    return L.isEnrolledDevice(this.approvals.approverStore, deviceId);
+  }
+
   // R-F5-18: what a phone asks for when it opens (one signed request to the
-  // relay, which names the device it authenticated): a status signed now
-  // for the live lease, if there is one, and for the few that ended last,
+  // relay, which names the device it authenticated): a status for the live
+  // lease, if there is one (signed now, or its newest when that is a few
+  // seconds old: _listedStatus), and for the few that ended last,
   // so a phone that granted nothing, or was restarted, can show a lease
   // that is running and stop it, and learns from the node's own signature
   // that one it knew has ended. Only for a device enrolled here and not
@@ -793,19 +884,27 @@ class LeaseManager extends EventEmitter {
   // answered: the statuses say nothing the phones of this node are not sent
   // anyway, and what a phone does with one (watch, stop) it signs itself.
   listFor(deviceId) {
-    let enrolled = false;
-    try {
-      const store = this.approvals.approverStore;
-      const record = typeof deviceId === 'string' && store ? store.get(deviceId) : null;
-      enrolled = Boolean(record) && record.platform !== 'demo' && store.isActive(deviceId) === true;
-    } catch {
-      enrolled = false;
-    }
-    if (!enrolled) return [];
+    if (!this._enrolled(deviceId)) return [];
     const live = this.current();
     const ended = this.leases.filter((l) => l.state === 'ended').slice(-LISTED_ENDED).reverse();
-    return [...(live ? [live] : []), ...ended].map((lease) => this._signStatus(lease));
+    return [...(live ? [live] : []), ...ended].map((lease) => this._listedStatus(lease));
+  }
+
+  // R-F5-20 (owner ruling, 2026-10-13): a relay cannot hide a live lease
+  // from a phone. The phone puts a nonce it chose for this request in the
+  // request it signs; the node answers with the statuses above and a listing
+  // it signs over that nonce, that phone and exactly those statuses (each
+  // lease by its id and the seq just signed), also when there are none. A
+  // relay can then neither drop an entry nor replay an earlier "nothing":
+  // the phone accepts the answer whole or not at all. The nonce is not
+  // remembered here: it is the phone that needs it to be fresh. No nonce (an
+  // older relay or phone) gives the statuses alone, and a device that is
+  // not enrolled here gets nothing, as before.
+  listingFor(deviceId, nonce) {
+    const statuses = this.listFor(deviceId);
+    if (!this._enrolled(deviceId) || typeof nonce !== 'string' || !L.LIST_NONCE_RE.test(nonce)) return { statuses, listing: null };
+    return { statuses, listing: L.buildLeaseListing({ identity: this.approvals.identity, toDevice: deviceId, nonce, statuses, now: this.clock() }) };
   }
 }
 
-module.exports = { LeaseManager, CONTACT_REASON, CONTACT_MAX_S, GRANTOR_REVOKED_REASON, GRANTOR_CHECK_MS };
+module.exports = { LeaseManager, CONTACT_REASON, CONTACT_MAX_S, GRANTOR_REVOKED_REASON, GRANTOR_CHECK_MS, LIST_RESIGN_MS };

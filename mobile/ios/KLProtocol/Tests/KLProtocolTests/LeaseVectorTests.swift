@@ -43,7 +43,123 @@ final class LeaseVectorTests: XCTestCase {
         let names = Set(try allVectors().filter { ($0["consumers"]?.arrayValue ?? []).contains(.string("ios")) }.compactMap { $0["name"]?.stringValue })
         XCTAssertEqual(names, ["grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "watch-no-token",
                                "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed",
-                               "view-node-sig-valid", "view-tampered-frame"])
+                               "view-node-sig-valid", "view-tampered-frame",
+                               "listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
+                               "listing-other-device", "listing-bad-signature",
+                               "listing-other-node", "listing-wrong-node", "listing-extra-status", "listing-duplicate-lease",
+                               "listing-too-many", "listing-extra-key", "listing-bad-at"])
+    }
+
+    static let listingVectors = ["listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
+                                 "listing-other-device", "listing-bad-signature",
+                                 // Fourth security review: another pinned node's listing, an extra status beside one, and the shape.
+                                 "listing-other-node", "listing-wrong-node", "listing-extra-status", "listing-duplicate-lease",
+                                 "listing-too-many", "listing-extra-key", "listing-bad-at"]
+
+    /// R-F5-20: a node's listing is taken whole or not at all.
+    func testListings() throws {
+        for name in Self.listingVectors {
+            let v = try vector(name)
+            let given = v["given"]!
+            let statuses = try (given["statuses"]!.arrayValue!).map { try Envelope(json: $0) }
+            let check = Leases.verifyListing(try Envelope(json: v["input"]!), pin: pin(v), nonce: given["nonce"]!.stringValue!,
+                                             deviceId: given["device_id"]!.stringValue!, statuses: statuses)
+            XCTAssertEqual(check.accepted, v["expect"]!["accepted"]!.boolValue!, name)
+            XCTAssertEqual(check.reason, v["expect"]!["reason"]!.stringValue, name)
+            if !check.accepted { XCTAssertTrue(check.statuses.isEmpty, name) }
+            guard let expected = v["expect"]!["leases"]?.arrayValue else { continue }
+            let got = try check.statuses.map { try XCTUnwrap(LeaseStatus(message: try XCTUnwrap(Leases.verifiedMessage($0, pin: pin(v))))) }
+            XCTAssertEqual(got.map { $0.leaseId }, expected.map { $0["lease_id"]!.stringValue! }, name)
+            XCTAssertEqual(got.map { $0.seq }, expected.map { $0["seq"]!.intValue! }, name)
+            XCTAssertEqual(got.map { $0.state }, expected.map { $0["state"]!.stringValue! }, name)
+        }
+        XCTAssertEqual(try vector("listing-none")["expect"]!["leases"]!.arrayValue!.count, 0)
+        XCTAssertEqual(try vector("listing-live")["expect"]!["leases"]!.arrayValue!.count, 2)
+        // An extra signed status beside the listing is not part of it.
+        XCTAssertEqual(try vector("listing-extra-status")["given"]!["statuses"]!.arrayValue!.count, 2)
+        XCTAssertEqual(try vector("listing-extra-status")["expect"]!["leases"]!.arrayValue!.count, 1)
+    }
+
+    /// Fourth security review: the shape of a listing, as the node's
+    /// validator has it. The four vectors are signed by the node, so it is
+    /// the shape alone that refuses them; and each rule is tried by hand.
+    func testListingShape() throws {
+        for name in ["listing-duplicate-lease", "listing-too-many", "listing-extra-key", "listing-bad-at"] {
+            let v = try vector(name)
+            let envelope = try Envelope(json: v["input"]!)
+            XCTAssertTrue(envelope.verifyEd25519(spkiHex: pin(v).key), name)
+            XCTAssertFalse(Leases.isListing(try envelope.message()), name)
+        }
+        let good = try Envelope(json: try vector("listing-live")["input"]!).message()
+        XCTAssertTrue(Leases.isListing(good))
+        XCTAssertTrue(Leases.isListing(try Envelope(json: try vector("listing-none")["input"]!).message()))
+        XCTAssertEqual(Leases.listingMax, 8)
+        func with(_ key: String, _ value: JSONValue?) -> JSONValue {
+            var o = good.objectValue!
+            o[key] = value
+            return .object(o)
+        }
+        let entry = good["leases"]![0]!
+        func leases(_ entries: [JSONValue]) -> JSONValue { with("leases", .array(entries)) }
+        func entryWith(_ key: String, _ value: JSONValue?) -> JSONValue {
+            var o = entry.objectValue!
+            o[key] = value
+            return .object(o)
+        }
+        let bad: [(String, JSONValue)] = [
+            ("a key missing", with("at", nil)), ("a key too many", with("note", .string("x"))),
+            ("v 2", with("v", .number("2"))), ("another type", with("type", .string("kl.lease.status"))),
+            ("node id", with("node_id", .string("gpu-box"))), ("device id", with("to_device", .string("phone"))),
+            ("nonce", with("nonce", .string("short"))), ("at: not a time", with("at", .string("now"))),
+            ("at: no such day", with("at", .string("2026-02-30T18:04:11.201Z"))), ("at: a number", with("at", .number("1"))),
+            ("leases: not a list", with("leases", .object([:]))),
+            ("the same lease twice", leases([entry, entry])),
+            ("nine leases", leases((0..<9).map { _ in entry })),
+            ("an entry that is not an object", leases([.string("x")])),
+            ("an entry with a key too many", leases([entryWith("state", .string("active"))])),
+            ("an entry with no seq", leases([entryWith("seq", nil)])),
+            ("seq 0", leases([entryWith("seq", .number("0"))])), ("seq 1.5", leases([entryWith("seq", .number("1.5"))])),
+            ("seq as text", leases([entryWith("seq", .string("7"))])),
+            ("lease id", leases([entryWith("lease_id", .string("lease-1"))])),
+            ("not an object", .array([]))
+        ]
+        for (why, message) in bad { XCTAssertFalse(Leases.isListing(message), why) }
+    }
+
+    /// R-F5-20: the relay's reply, node by node. No listing for a node is no answer from it.
+    func testCheckListingReadsTheRelayReply() throws {
+        func entries(_ v: JSONValue, nodeId: String? = nil, withListing: Bool = true) -> [JSONValue] {
+            let node = JSONValue.string(nodeId ?? v["given"]!["node"]!["id"]!.stringValue!)
+            var out: [JSONValue] = []
+            if withListing { out.append(.object(["node_id": node, "envelope": .null, "status": .null, "listing": v["input"]!])) }
+            for status in v["given"]!["statuses"]!.arrayValue! { out.append(.object(["node_id": node, "envelope": .null, "status": status])) }
+            return out
+        }
+        for name in Self.listingVectors {
+            let v = try vector(name)
+            let check = Leases.checkListing(entries(v), pin: pin(v), nonce: v["given"]!["nonce"]!.stringValue!, deviceId: v["given"]!["device_id"]!.stringValue!)
+            XCTAssertEqual(check.accepted, v["expect"]!["accepted"]!.boolValue!, name)
+            XCTAssertEqual(check.reason, v["expect"]!["reason"]!.stringValue, name)
+        }
+        let live = try vector("listing-live")
+        let nonce = live["given"]!["nonce"]!.stringValue!
+        let device = live["given"]!["device_id"]!.stringValue!
+        // The listing left out (an offline, slow or older node looks the same): no answer, whatever statuses came.
+        let bare = Leases.checkListing(entries(live, withListing: false), pin: pin(live), nonce: nonce, deviceId: device)
+        XCTAssertEqual(bare, ListingCheck(accepted: false, reason: "no_listing", statuses: []))
+        XCTAssertEqual(Leases.checkListing([], pin: pin(live), nonce: nonce, deviceId: device).reason, "no_listing")
+        // Entries listed under another node are not this node's answer.
+        XCTAssertEqual(Leases.checkListing(entries(live, nodeId: "kl-aaaaaaaaaaaaaaaa"), pin: pin(live), nonce: nonce, deviceId: device).reason, "no_listing")
+        // An entry that carries a request is not part of a listing.
+        let withRequest: [JSONValue] = [.object(["node_id": .string(pin(live).id), "envelope": live["input"]!, "status": .null, "listing": live["input"]!])]
+        XCTAssertEqual(Leases.checkListing(withRequest, pin: pin(live), nonce: nonce, deviceId: device).reason, "no_listing")
+        // A nonce this phone did not choose, and no nonce at all.
+        XCTAssertEqual(Leases.checkListing(entries(live), pin: pin(live), nonce: String(nonce.reversed()), deviceId: device).reason, "nonce_mismatch")
+        XCTAssertEqual(Leases.checkListing(entries(live), pin: pin(live), nonce: "", deviceId: device).reason, "nonce_mismatch")
+        // What the owner is told never says nothing is running, and the node's name is escaped.
+        XCTAssertEqual(Leases.couldNotConfirm(nodeName: "gpu-box"), "Could not confirm with gpu-box")
+        XCTAssertEqual(Leases.couldNotConfirm(nodeName: "gpu\u{202E}box").unicodeScalars.contains("\u{202E}"), false)
+        XCTAssertTrue(Leases.couldNotConfirmDetail.contains("A lease could be running"))
     }
 
     func testGrants() throws {
@@ -144,6 +260,56 @@ final class LeaseVectorTests: XCTestCase {
     }
 
     /// R-F5-18: which leases get a banner, and what a phone says of one it did not grant.
+    /// Fourth security review, finding 3: a pending lease this phone signed
+    /// a grant for may still start; when its row stays.
+    func testMayStillStart() {
+        XCTAssertTrue(Leases.mayStillStart(state: "pending", signedGrant: true))
+        XCTAssertFalse(Leases.mayStillStart(state: "pending", signedGrant: false))
+        for state in ["active", "suspended", "ended", ""] { XCTAssertFalse(Leases.mayStillStart(state: state, signedGrant: true), state) }
+        // Named by an accepted listing: kept only while still pending.
+        XCTAssertTrue(Leases.keepsMayStart(listedState: "pending", requestExpired: false))
+        XCTAssertTrue(Leases.keepsMayStart(listedState: "pending", requestExpired: true))
+        for state in ["active", "suspended", "ended"] { XCTAssertFalse(Leases.keepsMayStart(listedState: state, requestExpired: false), state) }
+        // Not named: kept until the request has expired.
+        XCTAssertTrue(Leases.keepsMayStart(listedState: nil, requestExpired: false))
+        XCTAssertFalse(Leases.keepsMayStart(listedState: nil, requestExpired: true))
+        XCTAssertEqual(Leases.mayStillStartTitle(nodeName: "gpu-box"), "May still start on gpu-box")
+        XCTAssertFalse(Leases.mayStillStartTitle(nodeName: "gpu\u{202E}box").unicodeScalars.contains("\u{202E}"))
+    }
+
+    /// Fifth security review, finding 1: a pending lease an accepted
+    /// listing names gets a row whatever this phone remembers; what it
+    /// remembers only chooses the words.
+    func testListedPendingGetsRow() {
+        // No memory of a grant (a restarted app, or another phone), no request on screen: a row.
+        XCTAssertTrue(Leases.listedPendingGetsRow(state: "pending", shownAsRequest: false, signedGrant: false))
+        XCTAssertTrue(Leases.listedPendingGetsRow(state: "pending", shownAsRequest: false, signedGrant: true))
+        XCTAssertTrue(Leases.listedPendingGetsRow(state: "pending", shownAsRequest: true, signedGrant: true))
+        // The request is on screen, unanswered by this phone: that card is its row.
+        XCTAssertFalse(Leases.listedPendingGetsRow(state: "pending", shownAsRequest: true, signedGrant: false))
+        for state in ["active", "suspended", "ended", ""] {
+            XCTAssertFalse(Leases.listedPendingGetsRow(state: state, shownAsRequest: false, signedGrant: true), state)
+        }
+        XCTAssertEqual(Leases.pendingTitle(nodeName: "gpu-box", signedGrant: true), "May still start on gpu-box")
+        XCTAssertEqual(Leases.pendingTitle(nodeName: "gpu-box", signedGrant: false), "A request is waiting on gpu-box")
+        XCTAssertFalse(Leases.requestWaitingTitle(nodeName: "gpu\u{202E}box").unicodeScalars.contains("\u{202E}"))
+        XCTAssertEqual(Leases.pendingDetail(signedGrant: true), Leases.mayStillStartDetail)
+        XCTAssertEqual(Leases.pendingDetail(signedGrant: false), Leases.requestWaitingDetail)
+        XCTAssertTrue(Leases.requestWaitingDetail.contains("does not remember allowing it"))
+        XCTAssertFalse(Leases.requestWaitingDetail.contains("This phone signed"))
+    }
+
+    /// Fourth security review, finding 2: the words for a node not asked
+    /// yet and for one whose listing was accepted.
+    func testCheckedWords() {
+        XCTAssertEqual(Leases.notCheckedYet(nodeName: "gpu-box"), "Not checked yet: gpu-box")
+        XCTAssertEqual(Leases.checked(nodeName: "gpu-box", at: "14:02", running: 0, waiting: 0), "Checked gpu-box at 14:02: no computer-use session")
+        XCTAssertEqual(Leases.checked(nodeName: "gpu-box", at: "14:02", running: 1, waiting: 0), "Checked gpu-box at 14:02: 1 computer-use session running")
+        XCTAssertEqual(Leases.checked(nodeName: "gpu-box", at: "14:02", running: 2, waiting: 1), "Checked gpu-box at 14:02: 2 computer-use sessions running; 1 request waiting for an answer")
+        XCTAssertEqual(Leases.checked(nodeName: "gpu-box", at: "14:02", running: 0, waiting: 2), "Checked gpu-box at 14:02: no computer-use session; 2 requests waiting for an answer")
+        XCTAssertEqual(Leases.listedStatuses(ListingCheck(accepted: false, reason: "no_listing", statuses: []), pin: NodePin(id: "kl-x", name: "x", key: "")), [])
+    }
+
     func testLiveAndGrantedBy() {
         XCTAssertTrue(Leases.isLive(state: "active"))
         XCTAssertTrue(Leases.isLive(state: "suspended"))

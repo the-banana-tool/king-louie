@@ -31,6 +31,8 @@ import androidx.compose.ui.unit.dp
 import com.example.kinglouie.protocol.AppMode
 import com.example.kinglouie.protocol.Display
 import com.example.kinglouie.protocol.Leases
+import java.text.DateFormat
+import java.util.Date
 
 // Fleet stage 5 §3.10 on this phone (owner rulings R-F5-1, R-F5-5, R-F5-6):
 // nothing on these screens runs by itself. The model is called only from a
@@ -51,6 +53,23 @@ fun LeaseRequests(model: AppModel, open: (AppModel.LeaseRequestItem) -> Unit) {
         if (model.leaseNotice) Text("A computer-use request arrived. Tap the button below to load it.", color = WARNING)
         if (model.mode == AppMode.LIVE) {
             OutlinedButton({ model.refreshLeases() }, enabled = !model.isLoadingLeases) { Text(if (model.isLoadingLeases) "Checking…" else "Check for computer-use requests") }
+        }
+        // R-F5-20, and the fourth security review's finding 2: what this phone knows of each
+        // paired computer, said as what it is. Not asked yet (nothing has been checked, which
+        // is not "nothing is running"); checked, with the time and what the computer listed;
+        // or no signed answer the last time the owner tapped. Nothing here asks by itself
+        // (R-F5-1, R-F5-5).
+        if (model.mode == AppMode.LIVE) {
+            for (pin in model.nodes) {
+                when (val check = model.leaseChecks[pin.id]) {
+                    null -> Text(Leases.notCheckedYet(pin.name))
+                    is AppModel.LeaseNodeCheck.Confirmed ->
+                        Text(Leases.checked(pin.name, DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(check.atMs)), check.running, check.waiting))
+                    is AppModel.LeaseNodeCheck.Unconfirmed -> Text(Leases.couldNotConfirm(pin.name), color = WARNING, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (model.nodes.any { model.leaseChecks[it.id] == null }) Text(Leases.NOT_CHECKED_YET_DETAIL + " Tap the button above to ask.")
+            if (model.nodes.any { model.leaseChecks[it.id] is AppModel.LeaseNodeCheck.Unconfirmed }) Text(Leases.COULD_NOT_CONFIRM_DETAIL + " Tap the button above to ask again.", color = WARNING)
         }
         for (item in model.leaseRequests) {
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
@@ -169,7 +188,10 @@ fun LeaseBanner(model: AppModel, open: () -> Unit) {
         if (live != null) {
             Row(Modifier.fillMaxWidth().background(Color(0x22FF0000)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(Modifier.weight(1f)) {
-                    OutlinedButton(open) { Text("Lease ${if (live.state == "suspended") "paused" else "active"} on ${Display.escape(live.nodeName)}") }
+                    // A lease that is not running yet and may still start says so, in the words for what this phone
+                    // knows of it: a grant it remembers signing, or only that its node says a request is waiting.
+                    OutlinedButton(open) { Text(if (live.state == "pending") model.pendingLeaseTitle(live.leaseId, live.nodeName) else "Lease ${if (live.state == "suspended") "paused" else "active"} on ${Display.escape(live.nodeName)}") }
+                    if (live.state == "pending") Text(model.pendingLeaseDetail(live.leaseId))
                     Leases.grantedByOther(live.grantedByDevice, live.grantedByName, model.deviceId)?.let { Text(it) }
                 }
                 Button({ model.killSwitch() }, enabled = !live.busy, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("Stop") }
@@ -180,7 +202,8 @@ fun LeaseBanner(model: AppModel, open: () -> Unit) {
             if (lease.leaseId != live?.leaseId) {
                 Row(Modifier.fillMaxWidth().background(Color(0x22FF0000)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                     Column(Modifier.weight(1f)) {
-                        OutlinedButton({ model.openRunningLease(lease); open() }) { Text("Lease ${if (lease.state == "suspended") "paused" else "active"} on ${Display.escape(lease.nodeName)}") }
+                        OutlinedButton({ model.openRunningLease(lease); open() }) { Text(if (lease.state == "pending") model.pendingLeaseTitle(lease.leaseId, lease.nodeName) else "Lease ${if (lease.state == "suspended") "paused" else "active"} on ${Display.escape(lease.nodeName)}") }
+                        if (lease.state == "pending") Text(model.pendingLeaseDetail(lease.leaseId))
                         Leases.grantedByOther(lease.grantedByDevice, lease.grantedByName, model.deviceId)?.let { Text(it) }
                     }
                     Button({ model.stopRunningLease(lease) }, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("Stop") }

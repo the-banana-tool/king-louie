@@ -8,7 +8,7 @@ const { parseGuiConfig } = require('../src/gui/config');
 const { setLogLevel } = require('../src/logging');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
-require('../src/gui/lease-protocol');
+const L = require('../src/gui/lease-protocol');
 
 setLogLevel('fatal');
 const stores = [];
@@ -169,6 +169,157 @@ describe('request and grant', () => {
   it('refuses apps not in gui.apps and minutes out of range', async () => {
     await assert.rejects(leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['terminal'], minutes: 15, reason: 'x' }), (e) => e.code === 'invalid_params');
     await assert.rejects(leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 61, reason: 'x' }), (e) => e.code === 'invalid_params');
+  });
+});
+
+// Fourth security review, finding 1 (R-F5-17): on Windows the service's
+// write probe of the administrator's record of the node identity is run
+// again before every new lease request (identityProbe, which the subsystem
+// builds from probeIdentityRecord), as the approver set's probe is on every
+// scan.
+describe('the identity record is probed again before every new lease request', () => {
+  const ask = (m) => m.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+  const manager = (identityProbe, log) => new LeaseManager({
+    approvals: leases.approvals, guiConfig, broker, nodeName: 'gpu-box', clock: () => clock.now(), timers, jobOpen: (jobId) => openJobs.has(jobId), identityProbe, log
+  });
+  const spy = () => { const lines = { error: [], info: [] }; return { lines, error: (m) => lines.error.push(m), info: (m) => lines.info.push(m), warn() {}, debug() {} }; };
+
+  it('a record this process can now write: no request goes out, and it is logged once with what to do', async () => {
+    let problem = '<configDir>/identity/node.json cannot be trusted: it is writable by the account running the service';
+    let asked = 0;
+    const log = spy();
+    const m = manager(() => { asked += 1; return problem; }, log);
+    for (let i = 0; i < 3; i += 1) {
+      await assert.rejects(ask(m), (e) => e.code === 'capability_unavailable' && /node_identity_invalid/.test(e.message) && !/configDir/.test(e.message));
+    }
+    assert.equal(asked, 3, 'asked before every request');
+    assert.equal(relay.all('kl.lease.request').length, 0);
+    assert.equal(m.current(), null);
+    assert.equal(log.lines.error.length, 1, 'logged when the answer changes, not every time');
+    assert.match(log.lines.error[0], /writable by the account running the service/);
+    assert.match(log.lines.error[0], /identity record --replace/);
+    // Out of reach again: requests go out, and that is logged once too.
+    problem = null;
+    const pending = ask(m);
+    assert.equal(relay.all('kl.lease.request').length, 1);
+    assert.equal(log.lines.info.length, 1);
+    pending.catch(() => {});
+    m.stop();
+  });
+
+  it('a probe that throws proves nothing: refused; no probe (off Windows, or a host that ran none) changes nothing', async () => {
+    const m = manager(() => { throw Object.assign(new Error('boom'), { code: 'EIO' }); }, spy());
+    await assert.rejects(ask(m), (e) => e.code === 'capability_unavailable');
+    assert.equal(relay.all('kl.lease.request').length, 0);
+    const pending = ask(manager(null, spy()));
+    assert.equal(relay.all('kl.lease.request').length, 1);
+    pending.catch(() => {});
+  });
+});
+
+// Fifth security review, finding 4: only request() asked. The resume
+// requests the node sends by itself (after a suspension, and when the relay
+// link returns) went out without the probe. It is asked in the one place
+// every request is built, and a resume it refuses ends the lease: a record
+// the service's account can write vouches for nothing, and nothing but an
+// administrator and a restart brings that back, so there is nothing for a
+// suspended lease to wait for.
+describe('the identity record is probed before a resume request too', () => {
+  const WRITABLE = '<configDir>/identity/node.json cannot be trusted: it is writable by the account running the service';
+  const build = () => {
+    const state = { problem: null, asked: 0 };
+    const m = new LeaseManager({
+      approvals: leases.approvals, guiConfig, broker, audit: { append: async (e) => { audits.push(e); } }, nodeName: 'gpu-box', clock: () => clock.now(), timers,
+      jobOpen: (jobId) => openJobs.has(jobId), identityProbe: () => { state.asked += 1; return state.problem; },
+      log: { error() {}, info() {}, warn() {}, debug() {} }
+    });
+    return { m, state };
+  };
+  const grantedOn = async (m) => {
+    const p = m.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+    assert.equal(m.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 10 })).state, 'active');
+    return p;
+  };
+  const ended = (m, lease, sentBefore) => {
+    assert.deepEqual([lease.state, lease.endReason], ['ended', 'node_identity_invalid']);
+    assert.equal(relay.all('kl.lease.request').length, sentBefore, 'no resume request went out');
+    assert.equal(m.current(), null);
+    assert.deepEqual([relay.last('kl.lease.status').message.state, relay.last('kl.lease.status').message.reason], ['ended', 'node_identity_invalid']);
+    assert.ok(audits.some((a) => a.kind === 'lease.ended' && a.data.reason === 'node_identity_invalid'));
+    assert.throws(() => m.assertUsable('job-1'), (e) => e.code === 'capability_unavailable' && /node_identity_invalid/.test(e.message) && !/configDir/.test(e.message));
+  };
+
+  it('a suspension that would ask to resume: the probe is asked, and a record now writable ends the lease', async () => {
+    for (const suspend of [(m) => m.onHelperDisconnected(), (m, lease) => m.noteInputOutcome(lease, { code: 'app_not_running' })]) {
+      const { m, state } = build();
+      const lease = await grantedOn(m);
+      const sent = relay.all('kl.lease.request').length;
+      const asked = state.asked;
+      state.problem = WRITABLE;
+      suspend(m, lease);
+      assert.equal(state.asked, asked + 1, 'asked before the resume request');
+      ended(m, lease, sent);
+      assert.ok(audits.some((a) => a.kind === 'lease.suspended'), 'the suspension itself is still recorded');
+      m.stop();
+    }
+  });
+
+  it('the link returning: no resume request for a record that can no longer be trusted', async () => {
+    const { m, state } = build();
+    m.start();
+    const lease = await grantedOn(m);
+    const sent = relay.all('kl.lease.request').length;
+    relay.down();
+    assert.deepEqual([lease.state, lease.suspendReason], ['suspended', 'relay_unreachable']);
+    state.problem = WRITABLE;
+    relay.up();
+    ended(m, lease, sent);
+    m.stop();
+  });
+
+  it('a probe that throws proves nothing: the resume is refused the same way', async () => {
+    const { m, state } = build();
+    const lease = await grantedOn(m);
+    const sent = relay.all('kl.lease.request').length;
+    Object.defineProperty(state, 'problem', { get() { throw Object.assign(new Error('boom'), { code: 'EIO' }); } });
+    m.onHelperDisconnected();
+    ended(m, lease, sent);
+    m.stop();
+  });
+
+  it('RequestLease on a suspended lease whose resume lapsed: refused, and the lease ends', async () => {
+    const { m, state } = build();
+    const lease = await grantedOn(m);
+    m.onHelperDisconnected();
+    timers.advance(5 * 60000 + 1); // the resume request lapses
+    assert.equal(lease.state, 'suspended');
+    const sent = relay.all('kl.lease.request').length;
+    state.problem = WRITABLE;
+    await assert.rejects(m.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' }), (e) => e.code === 'capability_unavailable' && /node_identity_invalid/.test(e.message));
+    ended(m, lease, sent);
+    m.stop();
+  });
+
+  it('a record still out of reach: the resume goes out as before, asked once', async () => {
+    const { m, state } = build();
+    const lease = await grantedOn(m);
+    const sent = relay.all('kl.lease.request').length;
+    const asked = state.asked;
+    m.onHelperDisconnected();
+    assert.equal(state.asked, asked + 1);
+    assert.equal(relay.all('kl.lease.request').length, sent + 1);
+    assert.equal(relay.last('kl.lease.request').message.lease.resumes, lease.leaseId);
+    m.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 1 }));
+    assert.equal(m.assertUsable('job-1'), lease);
+    m.stop();
+  });
+
+  it('a new request is asked once, not twice', async () => {
+    const { m, state } = build();
+    const p = m.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+    assert.equal(state.asked, 1);
+    p.catch(() => {});
+    m.stop();
   });
 });
 
@@ -1011,19 +1162,111 @@ describe('lock, expiry and revoke', () => {
       assert.deepEqual(listed.map((m) => [m.lease_id, m.state, m.reason]), [[live.leaseId, 'active', null], [first.leaseId, 'ended', 'revoked']]);
       for (const m of listed) {
         assert.equal(m.type, 'kl.lease.status');
-        assert.equal(m.at, new Date(clock.now()).toISOString(), 'signed for this request, not an old one');
         assert.deepEqual(m.granted_by, { device_id: phone.deviceId, name: 'Owner phone' });
       }
+      // The live one is signed for this request (its newest status was 30 s old); the one that
+      // ended is the status signed when it ended, which nothing has changed since.
+      assert.equal(listed[0].at, new Date(clock.now()).toISOString(), 'signed for this request, not an old one');
+      assert.equal(listed[1].at, new Date(clock.now() - 30000).toISOString());
       assert.equal(relay.all('kl.lease.status').length, sent, 'answered to the phone that asked; not broadcast');
       // The live one carries a token the granting phone can make contact with.
       assert.equal(leases.verifyWatch(phone.leaseWatch(identity.nodeId, live.leaseId, { contactToken: listed[0].contact_token })).contact, true);
-      // Each listing is newer than the last (the phones apply by seq).
+      // That token has made contact, so the next listing signs the live lease anew (a phone
+      // always gets a token it can still use); the ended one is never signed again.
       const again = leases.listFor(other.deviceId).map((envelope) => open(envelope).message);
-      assert.ok(again[0].seq > listed[0].seq && again[1].seq > listed[1].seq);
+      assert.equal(again[0].seq, listed[0].seq + 1);
+      assert.equal(again[1].seq, listed[1].seq);
       // A device this node does not know, a revoked one, and no device at all.
       assert.deepEqual(leases.listFor(createFakePhone().deviceId), []);
       assert.deepEqual(leases.listFor(null), []);
       assert.deepEqual(leases.listFor('not-a-device'), []);
+    });
+
+    // Fourth security review, finding 3: a relay can answer a phone's grant
+    // with 503 and deliver it later. Until then the lease is pending, and a
+    // listing names it as such, so the phone that signed the grant can show
+    // "may still start" with a Stop. That Stop is an ordinary revoke.
+    it('a pending lease is listed as pending; a revoke from any enrolled phone ends it, and the grant that was held back is then refused', async () => {
+      const waiting = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      waiting.catch(() => {});
+      const request = relay.last('kl.lease.request').envelope;
+      const held = phone.leaseGrant(request, { minutes: 10 });
+      const leaseId = open(request).message.lease_id;
+      const answer = leases.listingFor(phone.deviceId, 'n'.repeat(43));
+      assert.deepEqual(answer.statuses.map((e) => [open(e).message.lease_id, open(e).message.state]), [[leaseId, 'pending']]);
+      const checked = L.verifyLeaseListing(answer.listing, { nodeId: identity.nodeId, nodePublicKeyHex: identity.publicKey.toString('hex'), nonce: 'n'.repeat(43), deviceId: phone.deviceId, statuses: answer.statuses });
+      assert.equal(checked.accepted, true, checked.reason);
+      // Stop, from the other phone (R-F5-18): the pending lease ends.
+      const stopped = leases.onRevoke(other.leaseRevoke(identity.nodeId, leaseId));
+      assert.equal(stopped.state, 'ended');
+      assert.equal(open(stopped.status).message.state, 'ended');
+      await assert.rejects(waiting, (e) => e.code === 'lease_revoked');
+      // The grant the relay kept back arrives now: there is nothing left to grant.
+      const late = leases.onGrant(held);
+      assert.deepEqual([late.state, late.reason], ['rejected', 'unknown_request']);
+      assert.equal(leases.current(), null);
+      assert.deepEqual(leases.listingFor(phone.deviceId, 'n'.repeat(43)).statuses.map((e) => open(e).message.state), ['ended']);
+    });
+
+    // Fourth security review: every lease.list used to sign a new status for
+    // each lease it listed, so a relay (which may call it at will) could run
+    // a lease's seq up without bound and push the contact tokens its phones
+    // hold out of the node's memory. A listing now reuses the lease's newest
+    // status while that still says what the lease is, is under five seconds
+    // old and carries a token that has not made contact; an ended lease's
+    // status is never signed again.
+    it('listing at will does not run up a lease\'s seq or mint tokens: the newest status is reused for five seconds', async () => {
+      const first = await granted();
+      leases.onRevoke(phone.leaseRevoke(identity.nodeId, first.leaseId));
+      const live = await granted({ jobId: 'job-2' });
+      timers.advance(30000);
+      const lease = leases.find(live.leaseId);
+      const ended = leases.find(first.leaseId);
+      const base = leases.listFor(other.deviceId);
+      const seq = lease.seq;
+      const tokens = lease.tokens.size;
+      const endedSeq = ended.seq;
+      // A relay asking a thousand times, for either phone, with or without a nonce.
+      for (let i = 0; i < 1000; i += 1) {
+        const answer = i % 2 ? leases.listFor(phone.deviceId) : leases.listingFor(other.deviceId, 'n'.repeat(43)).statuses;
+        assert.deepEqual(answer, base);
+      }
+      assert.equal(lease.seq, seq);
+      assert.equal(lease.tokens.size, tokens);
+      assert.equal(ended.seq, endedSeq);
+      // The listing over those reused statuses still checks, for the phone that asked.
+      const answer = leases.listingFor(phone.deviceId, 'n'.repeat(43));
+      const check = L.verifyLeaseListing(answer.listing, { nodeId: identity.nodeId, nodePublicKeyHex: identity.publicKey.toString('hex'), nonce: 'n'.repeat(43), deviceId: phone.deviceId, statuses: answer.statuses });
+      assert.equal(check.accepted, true, check.reason);
+      // Its token still makes contact for the granting phone.
+      assert.equal(leases.verifyWatch(phone.leaseWatch(identity.nodeId, live.leaseId, { contactToken: open(base[0]).message.contact_token })).contact, true);
+      // Asked every 100 ms for a minute: one new status every five seconds, no more.
+      const before = lease.seq;
+      for (let i = 0; i < 600; i += 1) {
+        timers.advance(100);
+        leases.listFor(other.deviceId);
+      }
+      assert.ok(lease.seq - before <= 13, `seq rose by ${lease.seq - before} in a minute of listing`);
+      assert.ok(lease.seq - before >= 11);
+      assert.equal(ended.seq, endedSeq, 'an ended lease is not signed again, however long it is listed');
+      // What the lease is has changed: the next listing says so at once.
+      const fresh = leases.listFor(other.deviceId);
+      leases.onRevoke(other.leaseRevoke(identity.nodeId, live.leaseId));
+      const after = leases.listFor(other.deviceId).map((e) => open(e).message);
+      assert.deepEqual([after[0].lease_id, after[0].state], [live.leaseId, 'ended']);
+      assert.ok(after[0].seq > open(fresh[0]).message.seq);
+    });
+
+    it('a status signed while the relay link was down is not what a listing reuses: the lease is signed as it is now', async () => {
+      const live = await granted();
+      const before = open(leases.listFor(phone.deviceId)[0]).message;
+      // The lease changes with nobody to tell (no status is signed while the link is down).
+      relay.connected = false;
+      leases.setLocked(true);
+      relay.connected = true;
+      const now = open(leases.listFor(phone.deviceId)[0]).message;
+      assert.equal(now.locked, true);
+      assert.equal(now.seq, before.seq + 1);
     });
 
     it('listFor lists at most the live lease and the four that ended last', async () => {
@@ -1036,6 +1279,97 @@ describe('lock, expiry and revoke', () => {
       await granted({ jobId: 'job-1' });
       const listed = leases.listFor(phone.deviceId).map((envelope) => open(envelope).message.state);
       assert.deepEqual(listed, ['active', 'ended', 'ended', 'ended', 'ended']);
+    });
+
+    // R-F5-20 (owner ruling, 2026-10-13): a relay cannot hide a live lease
+    // from a phone. Asked with the nonce the phone chose for this request,
+    // the node also signs a listing: that nonce, the phone, and every lease
+    // it lists by id and by the seq of the status it signed beside it. It is
+    // signed when nothing is live too, so "nothing" can be told from silence.
+    describe('R-F5-20: listingFor signs an answer a phone can check, also when nothing is live', () => {
+      const NONCE = 'n'.repeat(43);
+      const check = (answer, over = {}) => L.verifyLeaseListing(answer.listing, {
+        nodeId: identity.nodeId, nodePublicKeyHex: identity.publicKey.toString('hex'), nonce: NONCE, deviceId: phone.deviceId, statuses: answer.statuses, ...over
+      });
+
+      it('nothing live: a signed listing of no leases, bound to the nonce and the phone', () => {
+        const answer = leases.listingFor(phone.deviceId, NONCE);
+        assert.deepEqual(answer.statuses, []);
+        const m = open(answer.listing).message;
+        assert.deepEqual(m, { v: 1, type: 'kl.lease.listing', node_id: identity.nodeId, to_device: phone.deviceId, nonce: NONCE, at: new Date(clock.now()).toISOString(), leases: [] });
+        const r = check(answer);
+        assert.equal(r.accepted, true, r.reason);
+        assert.deepEqual(r.statuses, []);
+      });
+
+      it('names every lease it lists by id and by the seq of the status signed beside it', async () => {
+        const first = await granted();
+        leases.onRevoke(phone.leaseRevoke(identity.nodeId, first.leaseId));
+        const live = await granted({ jobId: 'job-2' });
+        const answer = leases.listingFor(phone.deviceId, NONCE);
+        const statuses = answer.statuses.map((e) => open(e).message);
+        assert.deepEqual(statuses.map((m) => [m.lease_id, m.state]), [[live.leaseId, 'active'], [first.leaseId, 'ended']]);
+        assert.deepEqual(open(answer.listing).message.leases, statuses.map((m) => ({ lease_id: m.lease_id, seq: m.seq })));
+        const r = check(answer);
+        assert.equal(r.accepted, true, r.reason);
+        assert.deepEqual(r.statuses.map((m) => m.state), ['active', 'ended']);
+      });
+
+      it('a relay that strips a status, swaps in an older one, or replays an old answer is caught', async () => {
+        const live = await granted();
+        const old = leases.listingFor(phone.deviceId, 'o'.repeat(43));
+        // Six seconds on, so the node signs the lease anew (within five it gives its newest status again).
+        timers.advance(6000);
+        const answer = leases.listingFor(phone.deviceId, NONCE);
+        // An entry withheld; the listing itself withheld is simply no answer.
+        assert.equal(check({ listing: answer.listing, statuses: [] }).reason, 'status_missing');
+        // The same lease, but the status signed for an earlier listing.
+        assert.equal(check({ listing: answer.listing, statuses: old.statuses }).reason, 'status_missing');
+        // An answer signed for an earlier request (its own statuses with it).
+        assert.equal(check(old).reason, 'nonce_mismatch');
+        // An answer made for another phone, another node's key, a changed payload.
+        assert.equal(check(leases.listingFor(other.deviceId, NONCE)).reason, 'wrong_device');
+        assert.equal(check(answer, { nodePublicKeyHex: testNodeIdentity({ key: 'web-01' }).publicKey.toString('hex') }).reason, 'bad_signature');
+        assert.equal(check({ listing: { ...answer.listing, sig: old.listing.sig }, statuses: answer.statuses }).reason, 'bad_signature');
+        assert.equal(check({ listing: answer.statuses[0], statuses: answer.statuses }).reason, 'malformed', 'a status is not a listing');
+        assert.equal(check({ listing: null, statuses: [] }).reason, 'malformed');
+        // Statuses beside the ones it names (an older one of the same lease, junk) are not taken.
+        const padded = check({ listing: answer.listing, statuses: [...old.statuses, { not: 'an envelope' }, null, ...answer.statuses] });
+        assert.equal(padded.accepted, true, padded.reason);
+        assert.deepEqual(padded.statuses.map((m) => [m.lease_id, m.seq]), [[live.leaseId, open(answer.statuses[0]).message.seq]]);
+      });
+
+      // Fourth security review, finding 2: a node with computer use off
+      // (no lease manager at all) answers too, so "could not confirm" on a
+      // phone means the node did not answer, not that it had nothing to say.
+      it('offLeaseListing: a node with computer use off signs the same answer with nothing in it, for an enrolled phone and its nonce only', async () => {
+        const off = L.offLeaseListing({ identity, approverStore: leases.approvals.approverStore, clock: () => clock.now() });
+        const answer = await off({ device_id: phone.deviceId, nonce: NONCE });
+        assert.deepEqual(answer.statuses, []);
+        assert.deepEqual(open(answer.listing).message, { v: 1, type: 'kl.lease.listing', node_id: identity.nodeId, to_device: phone.deviceId, nonce: NONCE, at: new Date(clock.now()).toISOString(), leases: [] });
+        const r = check(answer);
+        assert.equal(r.accepted, true, r.reason);
+        assert.deepEqual(r.statuses, []);
+        assert.equal(check(await off({ device_id: other.deviceId, nonce: NONCE })).reason, 'wrong_device');
+        for (const nonce of [undefined, null, '', 'short', 'n'.repeat(44), 7]) assert.deepEqual(await off({ device_id: phone.deviceId, nonce }), { statuses: [] });
+        for (const device of [createFakePhone().deviceId, null, 'not-a-device']) assert.deepEqual(await off({ device_id: device, nonce: NONCE }), { statuses: [] });
+        assert.deepEqual(await off(), { statuses: [] });
+        // A store that cannot be read answers nobody.
+        const broken = L.offLeaseListing({ identity, approverStore: { get() { throw new Error('unreadable'); } } });
+        assert.deepEqual(await broken({ device_id: phone.deviceId, nonce: NONCE }), { statuses: [] });
+      });
+
+      it('no nonce, or one that is not 32 bytes of base64url: statuses as before and no listing; nobody but an enrolled phone gets one', async () => {
+        await granted();
+        for (const nonce of [undefined, null, '', 'short', 'n'.repeat(44), 7, {}]) {
+          const answer = leases.listingFor(phone.deviceId, nonce);
+          assert.equal(answer.listing, null);
+          assert.equal(answer.statuses.length, 1);
+        }
+        for (const device of [createFakePhone().deviceId, null, 'not-a-device']) {
+          assert.deepEqual(leases.listingFor(device, NONCE), { statuses: [], listing: null });
+        }
+      });
     });
   });
 

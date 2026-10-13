@@ -7,10 +7,56 @@ function posixPrivate(file) {
 }
 
 // adminUid is the uid that must own node.yaml and the runbooks on POSIX
+// The "node identity record" row for a record that names the identity in the
+// data dir, with what doctor did not check said in it (fourth security
+// review, finding 5): the row used to read as a plain "ok" where the service
+// could still refuse. `acl`: recordAclProblem's answer on Windows (asked
+// with `whole`: the config dir, the record's directory and the record, with
+// their owners), null elsewhere. "Clean" is said only for that answer
+// (fifth security review, finding 5); every other row says what was read
+// and what was not.
+function identityMatchRow({ seen, platform, acl = null }) {
+  const check = 'node identity record';
+  const privateHalf = 'that the data dir holds this key\'s private half (doctor does not resolve the master key; the service and "session install" check it)';
+  const base = `${seen.recorded.nodeId}, recorded by an administrator in ${seen.file}`;
+  if (platform !== 'win32') {
+    return { check, ok: true, detail: `${base} (public keys compared; owner and mode read). Not checked here: ${privateHalf}` };
+  }
+  const probe = 'whether the account the service runs as can write the record (an administrator always can, so doctor\'s own attempt would show nothing; the service probes it itself when it starts and before each lease request, and refuses a record it can write)';
+  const read = 'public keys compared; owners and access lists read, of the record, its directory and the config dir';
+  if (acl && acl.state === 'writable' && acl.where === 'config') {
+    return {
+      check, ok: false,
+      detail: `${seen.file} names this identity, but ${acl.detail}. Whoever can delete or add in the config dir can put a directory of its own in place of the one that holds the record, and with it a record that vouches for another identity. `
+        + 'As root or an Administrator find out who changed the access list and set it so that only SYSTEM and Administrators can change the config dir (the account the service runs as needs read and execute, nothing more), '
+        + 'then run "king-louie-service identity record --replace", which writes the record anew in a new directory with an access list of its own'
+    };
+  }
+  if (acl && acl.state === 'writable') {
+    return {
+      check, ok: false,
+      detail: `${seen.file} names this identity, but ${acl.detail}. Whoever can change the record can make it vouch for another identity, and the service refuses a record its own account can write. `
+        + 'As root or an Administrator find out who changed the access list, then run "king-louie-service identity record --replace", which writes the record anew in a new directory with an access list of its own'
+    };
+  }
+  if (acl && acl.state === 'clean') {
+    return { check, ok: true, detail: `${base} (${read}: all three are owned by Administrators or SYSTEM, and no entry lets anyone else change them). Not checked here: ${privateHalf}; ${probe}` };
+  }
+  if (acl && acl.state === 'owner') {
+    return {
+      check, ok: true, warn: true,
+      detail: `${base} (${read}: no entry lets anyone but SYSTEM and Administrators change them, but ${acl.detail}). Not checked here: ${privateHalf}; ${probe}`
+    };
+  }
+  const why = (acl && acl.detail) || 'the access lists of the record and its directory were not read';
+  return { check, ok: true, detail: `${base} (public keys compared; owners read). Not checked here: who can change the record (${why}; run doctor from an elevated prompt); ${privateHalf}; ${probe}` };
+}
+
 // (default root). The CLI never passes it; tests pass their own euid so the
 // wiring runs unprivileged too.
 // Async: the approval checks wait for the approver store to load.
-async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, configDir = null }) {
+// deps.identityRecord: tests only (how a temp dir's identity record is read).
+async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, configDir = null, deps = {} }) {
   const results = [];
   const major = Number(process.versions.node.split('.')[0]);
   results.push({ check: 'node >= 22', ok: major >= 22, detail: process.versions.node });
@@ -126,6 +172,51 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
     }
   }
 
+  // R-F5-17: the administrator's record of this node's identity, against the
+  // public key the data dir holds. Doctor does not resolve the master key,
+  // so this compares public keys only; the service and "session install"
+  // also check that the private key is the public key's. Front doors and
+  // relay hosts are not held to a record.
+  {
+    const { adminConfigDir } = require('../platform/paths');
+    const dir = configDir || adminConfigDir({ dataDir });
+    let profile = null;
+    try {
+      profile = require('./node-config').loadNodeConfig({ dataDir, adminConfigDir: dir, adminUid }).profile;
+    } catch {
+      profile = null; // a node.yaml problem is the "node config" row above
+    }
+    let held = null;
+    try {
+      const store = JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8'));
+      const key = store && store.mesh && store.mesh.identity && store.mesh.identity.publicKey;
+      if (typeof key === 'string' && key) held = { publicKey: key };
+    } catch {
+      held = null; // no store yet, or one doctor cannot read: nothing to compare
+    }
+    if (held && profile !== 'frontdoor') {
+      const { checkNodeIdentityRecord } = require('./identity-record');
+      // serviceProbe: false: doctor is run by an administrator, who can
+      // write the directory; the service's own probe is the one that counts.
+      const seen = checkNodeIdentityRecord({ configDir: dir, dataDir, identity: held, platform, adminUid, serviceProbe: false, ...(deps.identityRecord || {}) });
+      if (seen.state === 'match') {
+        // Windows: who the access lists let change the record, which neither
+        // the owner read above nor an administrator's own write would show.
+        const { recordAclProblem } = require('./identity-record');
+        const acl = platform === 'win32' ? recordAclProblem({ configDir: dir, whole: true, ...(deps.identityRecord && deps.identityRecord.inspectAcl ? { inspectAcl: deps.identityRecord.inspectAcl } : {}) }) : null;
+        results.push(identityMatchRow({ seen, platform, acl }));
+      } else if (seen.state === 'none') {
+        results.push({ check: 'node identity record', ok: true, warn: true, detail: `${seen.problem}. Until then the service runs, computer use stays off and "session install" refuses` });
+      } else if (seen.unreadable) {
+        // doctor's own account may not read the record (not elevated): that says
+        // nothing about the record, and nothing about what the service will do.
+        results.push({ check: 'node identity record', ok: false, detail: `${seen.problem}. Nothing about the record was checked` });
+      } else {
+        results.push({ check: 'node identity record', ok: false, detail: `${seen.problem}. The service refuses to start until this is fixed` });
+      }
+    }
+  }
+
   // Fleet stage 4 §3.14: doctor on a front door.
   {
     const { adminConfigDir } = require('../platform/paths');
@@ -209,4 +300,4 @@ async function approvalChecks({ dataDir, platform, adminUid = 0 }) {
   return out;
 }
 
-module.exports = { runDoctor };
+module.exports = { runDoctor, identityMatchRow };

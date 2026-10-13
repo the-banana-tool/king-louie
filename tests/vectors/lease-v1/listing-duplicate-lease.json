@@ -1,0 +1,43 @@
+{
+  "name": "listing-duplicate-lease",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": null,
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "node": {
+      "id": "kl-hnef32472qzibi5r",
+      "name": "gpu-box",
+      "key": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950"
+    },
+    "nonce": "DAQqTIUR5HCwR-kVepKug9ZlYVACagRXdi-j2GWUcg8",
+    "device_id": "d-3vmwrihhdbnit4oi",
+    "statuses": [
+      {
+        "alg": "Ed25519",
+        "kid": "kl-hnef32472qzibi5r",
+        "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJMV1U0azB2NXp2MkdGU2Z3NE9UUE13IiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MTQ6MTEuMjAxWiIsImdyYW50ZWRfYnkiOnsiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwibmFtZSI6Ik93bmVyIHBob25lIn0sImxlYXNlX2lkIjoiZDMwMjYxMjctY2RkNy00ZDgzLWFjNzktY2E0MGM3MTc1NzhlIiwibG9ja2VkIjpmYWxzZSwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJyZWFzb24iOm51bGwsInNlcSI6Nywic3RhdGUiOiJhY3RpdmUiLCJ0eXBlIjoia2wubGVhc2Uuc3RhdHVzIiwidiI6MX0",
+        "sig": "9xvBFeKp9xbXuVEOydd6jBk-QCvdPAPSIF5iEPq7YiM2RiF496XIXGpdSxLSJwex_iBPwAqh26A09PVKlRuLCA"
+      },
+      {
+        "alg": "Ed25519",
+        "kid": "kl-hnef32472qzibi5r",
+        "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJMV1U0azB2NXp2MkdGU2Z3NE9UUE13IiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MTQ6MTEuMjAxWiIsImdyYW50ZWRfYnkiOnsiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwibmFtZSI6Ik93bmVyIHBob25lIn0sImxlYXNlX2lkIjoiZDMwMjYxMjctY2RkNy00ZDgzLWFjNzktY2E0MGM3MTc1NzhlIiwibG9ja2VkIjpmYWxzZSwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJyZWFzb24iOm51bGwsInNlcSI6OCwic3RhdGUiOiJhY3RpdmUiLCJ0eXBlIjoia2wubGVhc2Uuc3RhdHVzIiwidiI6MX0",
+        "sig": "9ahkpvE-SkDWPWGDvW4n-SnukqByA5-r2Ww4_CpODfv5UpCuniO5Sjhuz4Wk0OJ3UF_MXgGHOTOIUxweOvCdCQ"
+      }
+    ]
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-hnef32472qzibi5r",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImxlYXNlcyI6W3sibGVhc2VfaWQiOiJkMzAyNjEyNy1jZGQ3LTRkODMtYWM3OS1jYTQwYzcxNzU3OGUiLCJzZXEiOjd9LHsibGVhc2VfaWQiOiJkMzAyNjEyNy1jZGQ3LTRkODMtYWM3OS1jYTQwYzcxNzU3OGUiLCJzZXEiOjh9XSwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJub25jZSI6IkRBUXFUSVVSNUhDd1Ita1ZlcEt1ZzlabFlWQUNhZ1JYZGktajJHV1VjZzgiLCJ0b19kZXZpY2UiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJ0eXBlIjoia2wubGVhc2UubGlzdGluZyIsInYiOjF9",
+    "sig": "UnGVmtwfSHDHgJ41CfXF_goRP7jwC-19FrytEyW_czIyAFsqOu4AKDwIhPlBz7uY8yuQzO8fQduQZz-LMo5uBQ"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "malformed"
+  }
+}

@@ -11,7 +11,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { seal, verifyEs256, deviceIdFromJwk } = require('../../../src/approvals/envelope');
+const { seal, open, nodeSigner, verifyEs256, deviceIdFromJwk } = require('../../../src/approvals/envelope');
 const { deriveNodeId } = require('../../../src/mesh/node-identity');
 const L = require('../../../src/gui/lease-protocol');
 
@@ -272,6 +272,75 @@ function buildVectors() {
   });
   out.push({ name: 'view-node-sig-valid', consumers: PHONES, check: null, given: viewGiven, input: viewEnvelope(), expect: { ...accepted, contact_token: tokenOf('view') } });
   out.push({ name: 'view-tampered-frame', consumers: PHONES, check: null, given: viewGiven, input: viewEnvelope({ tamperHash: true }), expect: reject('frame_hash_mismatch') });
+
+  // R-F5-20: the node's whole answer to one phone's "what is running". A
+  // phone takes it only with the nonce it chose for that request, made for
+  // itself, and with a signed status for every lease it names (by id and
+  // seq). given.nonce and given.device_id are the phone's own; given.statuses
+  // are the status envelopes that came beside the listing. expect.leases is
+  // what the phone then knows of that node, in the listing's order.
+  // identity: the node that builds and signs the listing. change: the
+  // message altered and then signed again by that node (a listing the node's
+  // own builder would never make, signed all the same).
+  const listingVector = (name, { states = [], nonce = nonceOf(`listing ${name}`), signedNonce = nonce, toDevice = 'A', beside = null, tamper = null, identity = GPU, change = null, expect }) => {
+    const statuses = states.map(([state, seq, reason], i) => statusEnvelope(`${name} ${i}`, { seq, state, reason: reason || null, expiresAt: state === 'ended' ? null : NOW_MS + 10 * 60000 }));
+    let input = L.buildLeaseListing({ identity, toDevice: DEVICES[toDevice].id, nonce: signedNonce, statuses, now: NOW_MS });
+    if (change) input = seal(change(open(input).message), nodeSigner(identity));
+    if (tamper) input = tamper(input);
+    const leases = states.map(([state, seq], i) => ({ lease_id: uuidOf(`lease ${name} ${i}`), seq, state }));
+    return {
+      name, consumers: PHONES, check: null,
+      given: { ...viewGiven, nonce, device_id: DEVICES.A.id, statuses: beside ? beside(statuses) : statuses },
+      input, expect: expect.accepted ? { ...expect, leases } : expect
+    };
+  };
+  // Nothing is running, and the node says so over this request's nonce.
+  out.push(listingVector('listing-none', { expect: accepted }));
+  out.push(listingVector('listing-live', { states: [['active', 7], ['ended', 12, 'revoked']], expect: accepted }));
+  // An answer the node signed for an earlier request, replayed.
+  out.push(listingVector('listing-nonce-mismatch', { signedNonce: nonceOf('an earlier listing request'), expect: reject('nonce_mismatch') }));
+  // The relay left the live lease's status out.
+  out.push(listingVector('listing-status-withheld', { states: [['active', 7], ['ended', 12, 'revoked']], beside: (s) => [s[1]], expect: reject('status_missing') }));
+  // The relay put an older signed status of the same lease in its place.
+  out.push(listingVector('listing-status-stale', {
+    states: [['suspended', 9, 'no_contact']], expect: reject('status_missing'),
+    beside: () => [statusEnvelope('listing-status-stale 0', { seq: 4, state: 'active' })]
+  }));
+  out.push(listingVector('listing-other-device', { toDevice: 'B', expect: reject('wrong_device') }));
+  out.push(listingVector('listing-bad-signature', {
+    expect: reject('bad_signature'),
+    tamper: (e) => ({ ...e, sig: Buffer.concat([sha('bad listing sig a'), sha('bad listing sig b')]).toString('base64url') })
+  }));
+
+  // Fourth security review (2026-10-13): what the first seven left out.
+  // Another node this phone has pinned signs its own listing over this
+  // request's nonce, for this phone, and the relay passes it off as this
+  // node's. Its signature is good under its own key; it is not this node's.
+  out.push(listingVector('listing-other-node', { identity: WEB, expect: reject('malformed') }));
+  // This node's key over a listing that names another node.
+  out.push(listingVector('listing-wrong-node', { change: (m) => ({ ...m, node_id: WEB.nodeId }), expect: reject('wrong_node') }));
+  // A signed status of another lease beside the listing, which the listing
+  // does not name: the listing is taken, and that status is not part of it.
+  out.push(listingVector('listing-extra-status', {
+    states: [['active', 7]], expect: accepted,
+    beside: (s) => [statusEnvelope('listing-extra-status unlisted', { seq: 3, state: 'ended', reason: 'revoked', expiresAt: null }), ...s]
+  }));
+  // The shape (VALIDATORS['kl.lease.listing']); each is signed by the node.
+  // The same lease twice, each time with a status that is there beside it.
+  out.push(listingVector('listing-duplicate-lease', {
+    states: [['active', 7]], expect: reject('malformed'),
+    change: (m) => ({ ...m, leases: [m.leases[0], { lease_id: m.leases[0].lease_id, seq: 8 }] }),
+    beside: (s) => [...s, statusEnvelope('listing-duplicate-lease 0', { seq: 8, state: 'active' })]
+  }));
+  // One lease more than a listing may name.
+  out.push(listingVector('listing-too-many', {
+    expect: reject('malformed'),
+    change: (m) => ({ ...m, leases: Array.from({ length: L.LISTING_MAX + 1 }, (_, i) => ({ lease_id: uuidOf(`lease listing-too-many ${i}`), seq: 1 })) })
+  }));
+  // A key the message does not have.
+  out.push(listingVector('listing-extra-key', { expect: reject('malformed'), change: (m) => ({ ...m, note: 'nothing is running' }) }));
+  // `at` in the right form for a day that does not exist.
+  out.push(listingVector('listing-bad-at', { expect: reject('malformed'), change: (m) => ({ ...m, at: '2026-02-30T18:04:11.201Z' }) }));
   return out;
 }
 

@@ -13,6 +13,10 @@ const FORBIDDEN = ['src/providers/', 'src/execution/agent-loop', 'src/tools/', '
 // The relay and the front door also load the lease routes.
 const GUI_ALLOWED = ['src/gui/config.js', 'src/gui/errors.js', 'src/gui/status.js'];
 const RELAY_GUI_ALLOWED = [...GUI_ALLOWED, 'src/gui/relay-extension.js', 'src/gui/lease-protocol.js'];
+// R-F5-20 (fourth security review): a runbook node answers a phone's
+// "what is running" with a signed "nothing" (offLeaseListing), so it loads
+// the lease messages too. That file holds builders and checks only.
+const RUNBOOK_GUI_ALLOWED = [...GUI_ALLOWED, 'src/gui/lease-protocol.js'];
 const guiLeak = (p, allowed) => (p.startsWith('src/gui/') && !allowed.includes(p)) || p.startsWith('src/session/');
 
 describe('runbook profile module graph', () => {
@@ -41,7 +45,7 @@ describe('runbook profile module graph', () => {
       assert.ok(loaded.includes('src/fleet/fleet-tools.js'));
       assert.ok(!loaded.includes('src/fleet/delegate-sessions.js'), 'delegate sessions are agent-only');
       assert.ok(fs.existsSync(path.join(dataDir, 'key-check')), 'start() resolved the master key');
-      const bad = loaded.filter((p) => FORBIDDEN.some((f) => p.startsWith(f)) || guiLeak(p, GUI_ALLOWED));
+      const bad = loaded.filter((p) => FORBIDDEN.some((f) => p.startsWith(f)) || guiLeak(p, RUNBOOK_GUI_ALLOWED));
       assert.deepStrictEqual(bad, []);
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });

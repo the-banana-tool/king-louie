@@ -88,6 +88,16 @@ class LeaseView(
 
 data class ViewCheck(val accepted: Boolean, val reason: String?, val view: LeaseView?)
 
+/**
+ * What a phone made of one node's answer to "what is running" (owner ruling
+ * R-F5-20). [accepted] means the pinned node signed, for this very request
+ * and this phone, that the leases named are all it has to list; [statuses]
+ * are then the signed statuses it names, in its order (none: the node says
+ * nothing is running). Anything else is no answer at all, and [reason] says
+ * what failed (`no_listing`: none came).
+ */
+data class ListingCheck(val accepted: Boolean, val reason: String?, val statuses: List<Envelope>)
+
 /** What one lease send (grant, deny, revoke, watch) came to. Android shows the third as "not confirmed" and sends nothing again by itself (owner ruling R-F5-5). */
 sealed class SendOutcome {
     /**
@@ -119,6 +129,59 @@ object Leases {
 
     /** A lease that is running: it holds, or can get back, the right to click and type. Such a lease has a banner and a Stop (R-F5-18). */
     fun isLive(state: String): Boolean = state == "active" || state == "suspended"
+
+    /**
+     * A lease that may still start (fourth security review, finding 3). Its
+     * node signed that it is waiting for a phone's answer, and this phone
+     * signed a grant for it that the node never confirmed. A relay can hold
+     * such a grant back (answering 503) and deliver it later, so the lease
+     * is not running and is not over either. It gets a row with a Stop,
+     * like a running one.
+     */
+    fun mayStillStart(state: String, signedGrant: Boolean): Boolean = state == "pending" && signedGrant
+
+    fun mayStillStartTitle(nodeName: String): String = "May still start on ${Display.escape(nodeName)}"
+
+    /** Under that row. */
+    const val MAY_STILL_START_DETAIL = "This phone signed an Allow for it that the computer did not confirm. The relay could still deliver it. Stop cancels it."
+
+    /**
+     * A lease its node says is waiting for a phone's answer, named in a
+     * listing this phone accepted, for which this phone remembers signing no
+     * grant (fifth security review, finding 1). The memory of what was
+     * signed is the app's own: it is gone after a restart, and another phone
+     * never had it. So such a phone cannot say the lease "may still start";
+     * it says what it knows, and gives the same Stop (any enrolled phone's
+     * revoke ends a pending lease).
+     */
+    fun requestWaitingTitle(nodeName: String): String = "A request is waiting on ${Display.escape(nodeName)}"
+
+    /** Under that row. */
+    const val REQUEST_WAITING_DETAIL = "Its computer says a request for computer use is waiting for a phone's answer. This phone does not remember allowing it. An Allow signed before this app was restarted, or on another phone, could still reach it. Stop cancels the request."
+
+    /** What the row of a pending lease is called, and what is said under it. */
+    fun pendingTitle(nodeName: String, signedGrant: Boolean): String = if (signedGrant) mayStillStartTitle(nodeName) else requestWaitingTitle(nodeName)
+
+    fun pendingDetail(signedGrant: Boolean): String = if (signedGrant) MAY_STILL_START_DETAIL else REQUEST_WAITING_DETAIL
+
+    /**
+     * Whether a lease that an accepted listing names gets a banner row for
+     * being pending. Nothing this phone remembers decides it: a pending
+     * lease gets one, unless the request itself is on screen with its Allow
+     * and Deny ([shownAsRequest]) and this phone signed no grant for it,
+     * which is a request nobody has answered yet.
+     */
+    fun listedPendingGetsRow(state: String, shownAsRequest: Boolean, signedGrant: Boolean): Boolean = state == "pending" && (signedGrant || !shownAsRequest)
+
+    /**
+     * Whether such a row stays after a listing its node signed was accepted.
+     * [listedState]: the state the listing gives the lease, null when it
+     * does not name it. Named: it stays while still pending (a live lease
+     * has its ordinary row, an ended one none). Not named: it stays until
+     * the request the grant answered has expired, and goes only then.
+     * Without an accepted listing nothing is dropped.
+     */
+    fun keepsMayStart(listedState: String?, requestExpired: Boolean): Boolean = if (listedState == null) !requestExpired else listedState == "pending"
 
     /**
      * What to say beside Stop for a lease another phone granted (R-F5-18):
@@ -251,6 +314,121 @@ object Leases {
             )
         )
     }
+
+    /** The most leases a listing names (the node lists the live one and the four that ended last; LISTING_MAX in src/gui/lease-protocol.js). */
+    const val LISTING_MAX = 8
+
+    /**
+     * The shape of a kl.lease.listing, exactly as the node's own validator
+     * has it (VALIDATORS['kl.lease.listing'] in src/gui/lease-protocol.js;
+     * fourth security review): these seven keys and no other; v 1; a node
+     * id, a device id, a nonce of 32 bytes, a real time in `at`; at most
+     * LISTING_MAX leases, each `{ lease_id, seq }` and nothing else, a
+     * lowercase UUID v4 and an integer of at least 1, and no lease twice.
+     */
+    internal fun isListing(message: JsonElement): Boolean {
+        val m = message.obj() ?: return false
+        if (!Rules.hasExactKeys(m, listOf("v", "type", "node_id", "to_device", "nonce", "at", "leases"))) return false
+        if (m["v"].int() != 1 || m["type"].str() != "kl.lease.listing") return false
+        if (!Rules.isNodeId(m["node_id"]) || !Rules.isDeviceId(m["to_device"]) || !Rules.isNonce(m["nonce"]) || !Rules.isTimestamp(m["at"])) return false
+        val leases = m["leases"].arr() ?: return false
+        if (leases.size > LISTING_MAX) return false
+        val seen = HashSet<String>()
+        for (entry in leases) {
+            val e = entry.obj() ?: return false
+            if (!Rules.hasExactKeys(e, listOf("lease_id", "seq")) || !Rules.isUuidV4(e["lease_id"])) return false
+            val leaseId = e["lease_id"].str() ?: return false
+            val seq = e["seq"] ?: return false
+            if (!Rules.isInteger(seq) || (seq.int() ?: 0) < 1) return false
+            if (!seen.add(leaseId)) return false
+        }
+        return true
+    }
+
+    /**
+     * One node's listing (R-F5-20), checked the way `verifyLeaseListing` in
+     * src/gui/lease-protocol.js does: the pinned node's signature over the
+     * received bytes; a kl.lease.listing of that node; the nonce this phone
+     * chose for this very request (so an answer to an earlier request cannot
+     * be played again); made for this phone; and, for every lease it names, a
+     * status of that lease with that seq which the same node signed, among
+     * [statuses] (so no entry can be left out or swapped for an older one).
+     * Statuses it does not name are not returned.
+     */
+    fun verifyListing(envelope: Envelope, pin: NodePin, nonce: String, deviceId: String, statuses: List<Envelope>): ListingCheck {
+        fun refused(reason: String) = ListingCheck(false, reason, emptyList())
+        if (envelope.alg != "Ed25519" || envelope.kid != pin.id) return refused("malformed")
+        if (!envelope.verifyEd25519(pin.key)) return refused("bad_signature")
+        val m = try {
+            envelope.message()
+        } catch (e: ProtocolException) {
+            return refused("malformed")
+        }
+        // The shape in full, after the signature and before anything is read from it.
+        if (!isListing(m)) return refused("malformed")
+        val named = m["leases"].arr() ?: return refused("malformed")
+        val signedNonce = m["nonce"].str() ?: return refused("malformed")
+        val toDevice = m["to_device"].str() ?: return refused("malformed")
+        if (m["node_id"].str() != pin.id) return refused("wrong_node")
+        if (nonce.isEmpty() || signedNonce != nonce) return refused("nonce_mismatch")
+        if (toDevice != deviceId) return refused("wrong_device")
+        val signed = statuses.mapNotNull { candidate -> verifiedMessage(candidate, pin)?.let { LeaseStatus.from(it) }?.let { it to candidate } }
+        val listed = ArrayList<Envelope>()
+        for (entry in named) {
+            val leaseId = entry["lease_id"].str() ?: return refused("malformed")
+            val seq = entry["seq"].int() ?: return refused("malformed")
+            val match = signed.firstOrNull { it.first.leaseId == leaseId && it.first.seq == seq } ?: return refused("status_missing")
+            listed.add(match.second)
+        }
+        return ListingCheck(true, null, listed)
+    }
+
+    /**
+     * The same check on the relay's reply to `GET /v1/leases?nonce=…` for one
+     * pinned node: its entries without a request are its listing (`listing`)
+     * and the statuses beside it (`status`). No listing among them is
+     * `no_listing`: the node is offline, slow or older, or the relay kept its
+     * answer back; this phone cannot tell which.
+     */
+    fun checkListing(entries: List<JsonElement>, pin: NodePin, nonce: String, deviceId: String): ListingCheck {
+        fun envelopeOf(json: JsonElement?): Envelope? = json?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() }
+        val mine = entries.filter { entry -> entry["node_id"].str() == pin.id && entry["envelope"].let { it == null || it is JsonNull } }
+        val listing = mine.firstNotNullOfOrNull { envelopeOf(it["listing"]) } ?: return ListingCheck(false, "no_listing", emptyList())
+        return verifyListing(listing, pin, nonce, deviceId, mine.mapNotNull { envelopeOf(it["status"]) })
+    }
+
+    /** What a phone says of a pinned node it has no accepted listing from (R-F5-20). Never "nothing is running": this phone does not know. */
+    fun couldNotConfirm(nodeName: String): String = "Could not confirm with ${Display.escape(nodeName)}"
+
+    /** Under those rows: what it means and what it does not. */
+    const val COULD_NOT_CONFIRM_DETAIL = "No signed answer about computer use came from there. It may be off or out of reach, or the relay may be keeping its answer back. A lease could be running."
+
+    /**
+     * What a phone says of a pinned node it has not asked yet (fourth
+     * security review, finding 2). Not "nothing is running": nothing has
+     * been checked.
+     */
+    fun notCheckedYet(nodeName: String): String = "Not checked yet: ${Display.escape(nodeName)}"
+
+    /** Under those rows. */
+    const val NOT_CHECKED_YET_DETAIL = "This phone has not asked there about computer use yet, so it does not know whether a session is running."
+
+    /**
+     * What a phone says of a pinned node whose listing it accepted
+     * ([checkListing]), and only of such a node: [time] is when this phone
+     * accepted it, by its own clock, so an old answer never reads as a
+     * current one. [running] counts the leases it listed that are live,
+     * [waiting] those still waiting for a phone's answer.
+     */
+    fun checked(nodeName: String, time: String, running: Int, waiting: Int): String {
+        val sessions = if (running == 0) "no computer-use session" else if (running == 1) "1 computer-use session running" else "$running computer-use sessions running"
+        val requests = if (waiting == 0) "" else if (waiting == 1) "; 1 request waiting for an answer" else "; $waiting requests waiting for an answer"
+        return "Checked ${Display.escape(nodeName)} at $time: $sessions$requests"
+    }
+
+    /** The statuses an accepted listing names, read. None for a listing that was not accepted: such a listing says nothing. */
+    fun listedStatuses(check: ListingCheck, pin: NodePin): List<LeaseStatus> =
+        if (!check.accepted) emptyList() else check.statuses.mapNotNull { envelope -> verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it) } }
 
     /** A node-signed message whose signature, kid and node_id are all the pinned node's; null otherwise. */
     fun verifiedMessage(envelope: Envelope, pin: NodePin): JsonObject? {

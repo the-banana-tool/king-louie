@@ -266,13 +266,13 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(listed, /guard let nodeId = entry\["node_id"\]\?\.stringValue, let pin = state\.nodes\.first\(where: \{ \$0\.id == nodeId \}\),\n\s+let json = entry\["status"\], let signed = try\? Envelope\(json: json\),\n\s+let message = Leases\.verifiedMessage\(signed, pin: pin\), let status = LeaseStatus\(message: message\) else \{ return \}/);
     assert.match(listed, /apply\(signed, pin: pin, deviceId: deviceId, to: &live\)/);
     assert.match(listed, /guard Leases\.acceptsStatus\(status, appliedSeq: known\.map \{ runningLeases\[\$0\]\.appliedSeq \} \?\? 0\) else \{ return \}/);
-    assert.match(listed, /guard Leases\.isLive\(state: status\.state\) else \{ return \}/);
+    assert.match(listed, /guard Leases\.isLive\(state: status\.state\) \|\| mayStart else \{\n\s+if status\.state == "ended" \{ signedLeaseGrants\[status\.leaseId\] = nil \}\n\s+return\n\s+\}/);
     assert.ok(listed.indexOf('Leases.verifiedMessage(') < listed.indexOf('runningLeases.append('));
     // It comes with the one list request, and only from entries that carry no request.
     const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
     assert.match(refreshIos, /if entry\["envelope"\]\?\.isNull \?\? true \{\n\s+noteListedLease\(entry, deviceId: key\.deviceId\)\n\s+continue\n\s+\}/);
     assert.equal(count(iosLeases, 'client.leases('), 1, 'one request lists both');
-    assert.equal(count(iosLeases, 'runningLeases.append('), 2, 'a listed lease, and the lease that was on the live screen when another is followed');
+    assert.equal(count(iosLeases, 'runningLeases.append('), 3, 'a listed lease, a pending lease an accepted listing names, and the lease that was on the live screen when another is followed');
     // On opening the app: only with a session already unlocked, never a prompt of its own.
     const open = section(iosLeases, 'func loadLeasesWhenUnlocked', '\n    }\n');
     assert.match(open, /if key\.isSessionUnlocked \{\n\s+await self\.refreshLeases\(onlyIfUnlocked: true\)\n\s+return\n\s+\}/);
@@ -307,10 +307,10 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(note, /val status = Leases\.verifiedMessage\(signed, pin\)\?\.let \{ LeaseStatus\.from\(it\) \} \?: return/);
     assert.match(note, /liveLease = applyLease\(signed, pin, live, deviceId \?: ""\)/);
     assert.match(note, /if \(!Leases\.acceptsStatus\(status, if \(known >= 0\) runningLeases\[known\]\.appliedSeq else 0\)\) return/);
-    assert.match(note, /if \(!Leases\.isLive\(status\.state\)\) return/);
+    assert.match(note, /if \(!Leases\.isLive\(status\.state\) && !Leases\.mayStillStart\(status\.state, status\.leaseId in signedLeaseGrants\)\) \{\n\s+if \(status\.state == "ended"\) signedLeaseGrants\.remove\(status\.leaseId\)\n\s+return\n\s+\}/);
     assert.ok(note.indexOf('Leases.verifiedMessage(') < note.indexOf('runningLeases.add('));
     const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
-    assert.match(refreshAndroid, /val listed = api\.leases\(\)\n/);
+    assert.match(refreshAndroid, /val listed = api\.leases\(nonce\)\n/, 'R-F5-20: the list request carries this request\'s nonce');
     assert.match(refreshAndroid, /for \(entry in listed\) noteListedLease\(entry, pins\)/);
     assert.equal(count(refreshAndroid, 'api.'), 1, 'one request, one prompt, for the requests and for what is running');
     // The list is declared where init can reach it, like leaseRequests.
@@ -330,6 +330,368 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.equal(count(bannerKt, 'Leases.grantedByOther('), 2, 'the lease on the live screen, and each listed one');
     assert.match(screens, /val grantedByOther = Leases\.grantedByOther\(live\.grantedByDevice, live\.grantedByName, model\.deviceId\)/);
     none(screens, ['LaunchedEffect', 'DisposableEffect', 'SideEffect', 'produceState', 'rememberCoroutineScope', 'delay(', 'while (', 'ticker('], 'LeaseScreens.kt');
+  });
+
+  // R-F5-20 (owner ruling, 2026-10-13): a relay cannot hide a live lease
+  // from a phone. Each list request carries a fresh nonce; a node's answer
+  // counts only as a listing it signed over that nonce for this phone, with
+  // a signed status for every lease it names. A pinned node without one is
+  // shown as "Could not confirm with <node>", never as nothing running.
+  it('R-F5-20: both phones ask with a fresh nonce, take a node\'s listing whole or not at all, and say "Could not confirm with" for the rest', () => {
+    // The cores: the check, in the order of verifyLeaseListing (src/gui/lease-protocol.js).
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    const verifySwift = section(swift, 'public static func verifyListing', '\n    }\n');
+    const inOrder = (text, needles, where) => {
+      let at = -1;
+      for (const n of needles) {
+        const next = text.indexOf(n, at + 1);
+        assert.ok(next > at, `"${n}" in ${where}, after the check before it`);
+        at = next;
+      }
+    };
+    inOrder(verifySwift, ['envelope.kid == pin.id', 'envelope.verifyEd25519(spkiHex: pin.key)', 'isListing(m)', 'm["node_id"]?.stringValue == pin.id',
+      'signedNonce == nonce', 'toDevice == deviceId', 'verifiedMessage(candidate, pin: pin)', '$0.status.leaseId == leaseId && $0.status.seq == seq', 'accepted: true'], 'verifyListing (Swift)');
+    assert.match(verifySwift, /guard !nonce\.isEmpty, signedNonce == nonce else \{ return refused\("nonce_mismatch"\) \}/);
+    assert.match(verifySwift, /else \{ return refused\("status_missing"\) \}/);
+    assert.equal(count(verifySwift, 'accepted: true'), 1, 'one way to be accepted');
+    const checkSwift = section(swift, 'public static func checkListing', '\n    }\n');
+    assert.match(checkSwift, /for entry in entries where entry\["node_id"\]\?\.stringValue == pin\.id && \(entry\["envelope"\]\?\.isNull \?\? true\) \{/);
+    assert.match(checkSwift, /guard let listing else \{ return ListingCheck\(accepted: false, reason: "no_listing", statuses: \[\]\) \}\n\s+return verifyListing\(listing, pin: pin, nonce: nonce, deviceId: deviceId, statuses: statuses\)/);
+    assert.match(swift, /public static func couldNotConfirm\(nodeName: String\) -> String \{ "Could not confirm with \\\(Display\.escape\(nodeName\)\)" \}/);
+
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    const verifyKotlin = section(kotlin, 'fun verifyListing', '\n    }\n');
+    inOrder(verifyKotlin, ['envelope.kid != pin.id', '!envelope.verifyEd25519(pin.key)', '!isListing(m)', 'm["node_id"].str() != pin.id',
+      'signedNonce != nonce', 'toDevice != deviceId', 'verifiedMessage(candidate, pin)', 'it.first.leaseId == leaseId && it.first.seq == seq', 'ListingCheck(true, null, listed)'], 'verifyListing (Kotlin)');
+    assert.match(verifyKotlin, /if \(nonce\.isEmpty\(\) \|\| signedNonce != nonce\) return refused\("nonce_mismatch"\)/);
+    assert.match(verifyKotlin, /\?: return refused\("status_missing"\)/);
+    assert.equal(count(verifyKotlin, 'ListingCheck(true'), 1, 'one way to be accepted');
+    const checkKotlin = section(kotlin, 'fun checkListing', '\n    }\n');
+    assert.match(checkKotlin, /entry\["node_id"\]\.str\(\) == pin\.id && entry\["envelope"\]\.let \{ it == null \|\| it is JsonNull \}/);
+    assert.match(checkKotlin, /\?: return ListingCheck\(false, "no_listing", emptyList\(\)\)\n\s+return verifyListing\(listing, pin, nonce, deviceId, /);
+    assert.match(kotlin, /fun couldNotConfirm\(nodeName: String\): String = "Could not confirm with \$\{Display\.escape\(nodeName\)\}"/);
+    // Neither core has words for "nothing is running" to show in its place.
+    for (const core of [swift, kotlin]) none(core, ['No computer-use', 'Nothing is running', 'No leases'], 'the lease core');
+
+    // iOS: a fresh nonce for each list request, in the request it signs; every pinned node is checked against it.
+    const ios = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
+    assert.match(refreshIos, /let nonce = Messages\.randomNonce\(\)\n\s+let entries = try await client\.leases\(nonce: nonce, signWith: onlyIfUnlocked \? Self\.sessionOnlySigner\(key\) : nil\)/);
+    assert.equal(count(refreshIos, 'Messages.randomNonce()'), 1);
+    // Every pinned node is checked: confirmed only by a listing that was accepted, else unconfirmed.
+    assert.match(refreshIos, /for pin in state\.nodes \{\n\s+let check = Leases\.checkListing\(entries, pin: pin, nonce: nonce, deviceId: key\.deviceId\)\n\s+guard check\.accepted else \{ checks\[pin\.id\] = \.unconfirmed; continue \}/);
+    // A request that fails confirms nothing; a locked session asks nothing and changes nothing.
+    assert.match(refreshIos, /\} catch is SessionLocked \{\n(?:\s+\/\/[^\n]*\n)+\s+\} catch \{\n\s+\/\/ No reply at all: nothing was confirmed with any node\.\n\s+var none: \[String: LeaseNodeCheck\] = \[:\]\n\s+for pin in state\.nodes \{ none\[pin\.id\] = \.unconfirmed \}\n\s+leaseChecks = none\n\s+fail\(error\)/);
+    assert.equal(count(iosLeases, 'leaseChecks = '), 2, 'set from the check, and from a request that failed; nowhere else');
+    assert.match(read('mobile', 'ios', 'App', 'RelayAPI.swift'), /func leases\(wait: Int = 0, nonce: String, signWith: Signer\? = nil\) async throws -> \[JSONValue\] \{\n\s+try await request\("GET", "\/v1\/leases\?wait=\\\(wait\)&nonce=\\\(nonce\)", signWith: signWith\)/);
+    // The banner, on every tab: one row for each such node.
+    const views = read('mobile', 'ios', 'App', 'LeaseViews.swift');
+    const banner = views.slice(views.indexOf('struct LeaseBanner'));
+    assert.match(banner, /if !model\.unconfirmedLeaseRows\.isEmpty \{/);
+    assert.match(banner, /ForEach\(model\.unconfirmedLeaseRows\) \{ row in\n\s+Text\(model\.leaseCheckText\(row\)\)/);
+    assert.match(iosLeases, /var unconfirmedLeaseRows: \[LeaseCheckRow\] \{ leaseCheckRows\.filter \{ \$0\.check == \.unconfirmed \} \}/);
+    assert.match(iosLeases, /case \.some\(\.unconfirmed\):\n\s+return Leases\.couldNotConfirm\(nodeName: row\.nodeName\)/);
+    assert.match(banner, /Text\(Leases\.couldNotConfirmDetail\)/);
+    none(views, ['No computer-use', 'Nothing is running', 'No leases'], 'LeaseViews.swift');
+
+    // Android: the same, on the owner's tap only, in the one request that tap already made.
+    const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+    const android = read(...kt, 'AppModel.kt');
+    const live = section(android, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+    const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
+    assert.match(refreshAndroid, /val nonce = Messages\.randomNonce\(\)\n\s+val listed = api\.leases\(nonce\)\n/);
+    assert.equal(count(refreshAndroid, 'api.'), 1, 'R-F5-1, R-F5-5: still one request, one prompt, sent once');
+    assert.match(refreshAndroid, /for \(pin in pins\) \{\n\s+val check = Leases\.checkListing\(listed, pin, nonce, deviceId \?: ""\)\n\s+leaseChecks\[pin\.id\] = if \(check\.accepted\) \{/);
+    assert.match(refreshAndroid, /\} else \{\n\s+LeaseNodeCheck\.Unconfirmed\n\s+\}/);
+    assert.match(refreshAndroid, /\} catch \(e: Exception\) \{\n\s+\/\/ No reply at all: nothing was confirmed with any node\.\n\s+for \(pin in storage\.nodes\) leaseChecks\[pin\.id\] = LeaseNodeCheck\.Unconfirmed\n\s+fail\(e\)/);
+    assert.equal(count(live, 'leaseChecks[pin.id] = '), 2, 'from the check, and from a request that failed; nowhere else');
+    assert.ok(android.indexOf('val leaseChecks = mutableStateMapOf<String, LeaseNodeCheck>()') < android.indexOf('\n    init {'));
+    const api = read(...kt, 'RelayApi.kt');
+    assert.match(api, /suspend fun leases\(nonce: String\? = null\): List<JsonElement> =\n\s+request\("GET", if \(nonce == null\) "\/v1\/leases\?wait=0" else "\/v1\/leases\?wait=0&nonce=\$nonce"\)/);
+    const screens = read(...kt, 'LeaseScreens.kt');
+    const pending = section(screens, 'fun LeaseRequests(', '\n}\n');
+    assert.match(pending, /is AppModel\.LeaseNodeCheck\.Unconfirmed -> Text\(Leases\.couldNotConfirm\(pin\.name\), /);
+    assert.match(pending, /if \(model\.nodes\.any \{ model\.leaseChecks\[it\.id\] is AppModel\.LeaseNodeCheck\.Unconfirmed \}\) Text\(Leases\.COULD_NOT_CONFIRM_DETAIL \+ /);
+    none(screens, ['No computer-use', 'Nothing is running', 'No leases'], 'LeaseScreens.kt');
+  });
+
+  // Fourth security review, finding 4: both phone cores check a listing's
+  // shape as the node's validator does (VALIDATORS['kl.lease.listing'] in
+  // src/gui/lease-protocol.js), after the signature and before they read
+  // anything from it; the listing vectors for it are run by both.
+  it('finding 4: both cores check a listing\'s whole shape (exact keys, a real `at`, at most eight leases, each once) and run every listing vector', () => {
+    const L = require('../src/gui/lease-protocol');
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    assert.equal(L.LISTING_MAX, 8);
+    assert.match(swift, /public static let listingMax = 8\n/);
+    assert.match(kotlin, /const val LISTING_MAX = 8\n/);
+    const shapeSwift = section(swift, 'static func isListing(_ message: JSONValue) -> Bool', '\n    }\n');
+    for (const needle of ['Rules.hasExactKeys(m, ["v", "type", "node_id", "to_device", "nonce", "at", "leases"])', 'm["v"]?.intValue == 1', 'm["type"]?.stringValue == "kl.lease.listing"',
+      'Rules.isNodeId(m["node_id"])', 'Rules.isDeviceId(m["to_device"])', 'Rules.isNonce(m["nonce"])', 'Rules.isTimestamp(m["at"])', 'leases.count <= listingMax',
+      'Rules.hasExactKeys(e, ["lease_id", "seq"])', 'Rules.isUuidV4(e["lease_id"])', 'Rules.isInteger(seq)', 'n >= 1', 'seen.insert(leaseId).inserted']) {
+      assert.ok(shapeSwift.includes(needle), `${needle} in isListing (Swift)`);
+    }
+    const shapeKotlin = section(kotlin, 'internal fun isListing(message: JsonElement): Boolean', '\n    }\n');
+    for (const needle of ['Rules.hasExactKeys(m, listOf("v", "type", "node_id", "to_device", "nonce", "at", "leases"))', 'm["v"].int() != 1', 'm["type"].str() != "kl.lease.listing"',
+      '!Rules.isNodeId(m["node_id"])', '!Rules.isDeviceId(m["to_device"])', '!Rules.isNonce(m["nonce"])', '!Rules.isTimestamp(m["at"])', 'leases.size > LISTING_MAX',
+      '!Rules.hasExactKeys(e, listOf("lease_id", "seq"))', '!Rules.isUuidV4(e["lease_id"])', '!Rules.isInteger(seq)', '(seq.int() ?: 0) < 1', '!seen.add(leaseId)']) {
+      assert.ok(shapeKotlin.includes(needle), `${needle} in isListing (Kotlin)`);
+    }
+    // It refuses as "malformed", as the node's check does.
+    assert.match(section(swift, 'public static func verifyListing', '\n    }\n'), /guard let m = try\? envelope\.message\(\), isListing\(m\),\n[^\n]+\n[^\n]+else \{ return refused\("malformed"\) \}/);
+    assert.match(section(kotlin, 'fun verifyListing', '\n    }\n'), /if \(!isListing\(m\)\) return refused\("malformed"\)/);
+    // Both cores' vector tests name every listing vector the generator marks for phones, and no other.
+    const dir = path.join(ROOT, 'tests', 'vectors', 'lease-v1');
+    const listing = fs.readdirSync(dir).filter((f) => f.startsWith('listing-')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+    assert.equal(listing.length, 14);
+    for (const v of listing) assert.deepEqual(v.consumers.slice().sort(), ['android', 'ios', 'node'], v.name);
+    const names = listing.map((v) => v.name).sort();
+    const swiftTests = read('mobile', 'ios', 'KLProtocol', 'Tests', 'KLProtocolTests', 'LeaseVectorTests.swift');
+    const kotlinTests = read('mobile', 'android', 'protocol', 'src', 'test', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'LeaseVectorTest.kt');
+    const namedIn = (text) => [...new Set(text.match(/"listing-[a-z-]+"/g).map((s) => s.slice(1, -1)))].sort();
+    assert.deepEqual(namedIn(section(swiftTests, 'static let listingVectors = [', ']')), names);
+    assert.deepEqual(namedIn(section(kotlinTests, 'private val listingVectors = setOf(', ')')), names);
+    assert.deepEqual(namedIn(section(swiftTests, 'func testEveryIosVectorIsCovered', '\n    }\n')), names);
+    assert.match(swiftTests, /func testListingShape\(\) throws \{/);
+    assert.match(kotlinTests, /fun listingShape\(\) \{/);
+  });
+
+  // Fourth security review, finding 2. "Never asked" used to look the same
+  // as "the node signed that nothing is running": both were an empty
+  // screen. Each pinned node now has one of three states, each said as what
+  // it is: not asked yet; checked at a time, with what it listed; could not
+  // confirm. Only an accepted listing gives the second, and it always
+  // carries the time this phone accepted it.
+  it('finding 2: per node, "not checked yet", "checked <node> at <time>: …" and "could not confirm" are three different things on both phones', () => {
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    // The words, once in each core. "no computer-use session" exists only inside the sentence that names the time.
+    assert.match(swift, /public static func notCheckedYet\(nodeName: String\) -> String \{ "Not checked yet: \\\(Display\.escape\(nodeName\)\)" \}/);
+    assert.match(kotlin, /fun notCheckedYet\(nodeName: String\): String = "Not checked yet: \$\{Display\.escape\(nodeName\)\}"/);
+    const checkedSwift = section(swift, 'public static func checked(nodeName: String, at time: String, running: Int, waiting: Int)', '\n    }\n');
+    assert.match(checkedSwift, /running == 0 \? "no computer-use session" : /);
+    assert.match(checkedSwift, /return "Checked \\\(Display\.escape\(nodeName\)\) at \\\(time\): \\\(sessions\)\\\(requests\)"/);
+    const checkedKotlin = section(kotlin, 'fun checked(nodeName: String, time: String, running: Int, waiting: Int)', '\n    }\n');
+    assert.match(checkedKotlin, /if \(running == 0\) "no computer-use session" else /);
+    assert.match(checkedKotlin, /return "Checked \$\{Display\.escape\(nodeName\)\} at \$time: \$sessions\$requests"/);
+    for (const core of [swift, kotlin]) assert.equal(count(core, 'no computer-use session'), 1, 'only in the sentence that says when it was checked');
+    // What a listing listed is read only from one that was accepted.
+    assert.match(swift, /public static func listedStatuses\(_ check: ListingCheck, pin: NodePin\) -> \[LeaseStatus\] \{\n\s+guard check\.accepted else \{ return \[\] \}/);
+    assert.match(kotlin, /fun listedStatuses\(check: ListingCheck, pin: NodePin\): List<LeaseStatus> =\n\s+if \(!check\.accepted\) emptyList\(\) else /);
+
+    // iOS: the state per node; absent means not asked.
+    const ios = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    assert.match(iosLeases, /enum LeaseNodeCheck: Equatable \{\n\s+case confirmed\(at: Date, running: Int, waiting: Int\)\n\s+case unconfirmed\n\s+\}/);
+    assert.match(iosLeases, /@Published var leaseChecks: \[String: LeaseNodeCheck\] = \[:\]/);
+    const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
+    // Confirmed: one place, after the check accepted, with this phone's clock and what the node listed.
+    assert.equal(count(ios, '.confirmed(at: '), 1, 'one way to be confirmed');
+    const inOrder = (text, needles) => { let at = -1; for (const n of needles) { const next = text.indexOf(n, at + 1); assert.ok(next > at, `"${n}" after the one before it`); at = next; } };
+    inOrder(refreshIos, ['let checkedAt = Date()', 'guard check.accepted else { checks[pin.id] = .unconfirmed; continue }', 'let listed = Leases.listedStatuses(check, pin: pin)',
+      'checks[pin.id] = .confirmed(at: checkedAt, running: listed.filter { Leases.isLive(state: $0.state) }.count,', 'waiting: listed.filter { $0.state == "pending" }.count)', 'leaseChecks = checks']);
+    // The words of a row: nothing asked is "not checked yet"; a confirmed row always shows its time (and its
+    // date when that was not today), so a session that lapsed does not leave an old answer looking current.
+    const text = section(iosLeases, 'func leaseCheckText', '\n    }\n');
+    assert.match(text, /case \.none:\n\s+return Leases\.notCheckedYet\(nodeName: row\.nodeName\)/);
+    assert.match(text, /case \.some\(\.confirmed\(let at, let running, let waiting\)\):\n\s+let time = at\.formatted\(date: Calendar\.current\.isDateInToday\(at\) \? \.omitted : \.abbreviated, time: \.shortened\)\n\s+return Leases\.checked\(nodeName: row\.nodeName, at: time, running: running, waiting: waiting\)/);
+    assert.equal(count(ios, 'Leases.checked('), 1);
+    // A locked session writes nothing: the catch holds comments only.
+    assert.match(refreshIos, /\} catch is SessionLocked \{\n(?:\s+\/\/[^\n]*\n)+\s+\} catch \{/);
+    assert.equal(count(ios, 'leaseChecks = [:]'), 2, 'emptied when the phone is unpaired or reset');
+    // The screen: every pinned node has a line; the first two states in the Computer use section, the third in the banner.
+    const views = read('mobile', 'ios', 'App', 'LeaseViews.swift');
+    const requests = section(views, 'struct LeaseRequestsSection', '\nstruct LeaseRequestView');
+    assert.match(requests, /if !model\.leaseRequests\.isEmpty \|\| !model\.leaseStatusRows\.isEmpty \{/);
+    assert.match(requests, /ForEach\(model\.leaseStatusRows\) \{ row in\n\s+Text\(model\.leaseCheckText\(row\)\)/);
+    assert.match(requests, /if model\.leaseStatusRows\.contains\(where: \{ \$0\.check == nil \}\) \{\n\s+Text\(Leases\.notCheckedYetDetail\)/);
+    assert.match(iosLeases, /var leaseStatusRows: \[LeaseCheckRow\] \{ leaseCheckRows\.filter \{ \$0\.check != \.unconfirmed \} \}/);
+    assert.match(iosLeases, /return state\.nodes\.map \{ LeaseCheckRow\(id: \$0\.id, nodeName: \$0\.name, check: leaseChecks\[\$0\.id\]\) \}/);
+
+    // Android: the same three, written only on the owner's tap.
+    const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+    const android = read(...kt, 'AppModel.kt');
+    const live = section(android, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+    assert.match(live, /sealed class LeaseNodeCheck \{/);
+    assert.match(live, /data class Confirmed\(val atMs: Long, val running: Int, val waiting: Int\) : LeaseNodeCheck\(\)/);
+    assert.match(live, /object Unconfirmed : LeaseNodeCheck\(\)/);
+    const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
+    assert.equal(count(android, 'LeaseNodeCheck.Confirmed('), 1, 'one way to be confirmed');
+    inOrder(refreshAndroid, ['val checkedAt = System.currentTimeMillis()', 'leaseChecks[pin.id] = if (check.accepted) {', 'val named = Leases.listedStatuses(check, pin)',
+      'LeaseNodeCheck.Confirmed(checkedAt, named.count { Leases.isLive(it.state) }, named.count { it.state == "pending" })']);
+    // Nothing but that tap's function writes an entry; unpairing and reset empty the map.
+    assert.equal(count(android, 'leaseChecks['), 2);
+    assert.equal(count(android, 'leaseChecks.clear()'), 2);
+    assert.equal(count(android.replace(refreshAndroid, ''), 'leaseChecks['), 0, 'written only by refreshLeases (R-F5-1: on the owner\'s tap)');
+    const screens = read(...kt, 'LeaseScreens.kt');
+    const pending = section(screens, 'fun LeaseRequests(', '\n}\n');
+    assert.match(pending, /for \(pin in model\.nodes\) \{\n\s+when \(val check = model\.leaseChecks\[pin\.id\]\) \{\n\s+null -> Text\(Leases\.notCheckedYet\(pin\.name\)\)/);
+    assert.match(pending, /is AppModel\.LeaseNodeCheck\.Confirmed ->\n\s+Text\(Leases\.checked\(pin\.name, DateFormat\.getDateTimeInstance\(DateFormat\.SHORT, DateFormat\.SHORT\)\.format\(Date\(check\.atMs\)\), check\.running, check\.waiting\)\)/);
+    assert.match(pending, /if \(model\.nodes\.any \{ model\.leaseChecks\[it\.id\] == null \}\) Text\(Leases\.NOT_CHECKED_YET_DETAIL \+ /);
+    assert.equal(count(screens, 'Leases.checked('), 1);
+  });
+
+  // Fourth security review, finding 3. A relay can answer a grant with 503
+  // and deliver it just after a verified listing; the lease was "pending"
+  // then, which is not "live", so the phone showed nothing running. A lease
+  // this phone signed a grant for that its node lists as pending is now a
+  // row that says "May still start", with the same Stop as any other row
+  // (a revoke the phone signs; any enrolled phone may stop, R-F5-18). The
+  // row goes when the node signs that the lease ended, or when a listing
+  // that was accepted no longer names it after the request has expired.
+  it('finding 3: a pending lease this phone signed a grant for is shown as "May still start", with a working Stop, until a signed word says it cannot', () => {
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    assert.match(swift, /public static func mayStillStart\(state: String, signedGrant: Bool\) -> Bool \{ state == "pending" && signedGrant \}/);
+    assert.match(kotlin, /fun mayStillStart\(state: String, signedGrant: Boolean\): Boolean = state == "pending" && signedGrant/);
+    assert.match(swift, /public static func mayStillStartTitle\(nodeName: String\) -> String \{ "May still start on \\\(Display\.escape\(nodeName\)\)" \}/);
+    assert.match(kotlin, /fun mayStillStartTitle\(nodeName: String\): String = "May still start on \$\{Display\.escape\(nodeName\)\}"/);
+    // Absent from an accepted listing: gone only once the request has expired. Named: kept only while still pending.
+    assert.match(swift, /public static func keepsMayStart\(listedState: String\?, requestExpired: Bool\) -> Bool \{\n\s+guard let listedState else \{ return !requestExpired \}\n\s+return listedState == "pending"\n\s+\}/);
+    assert.match(kotlin, /fun keepsMayStart\(listedState: String\?, requestExpired: Boolean\): Boolean = if \(listedState == null\) !requestExpired else listedState == "pending"/);
+
+    // iOS.
+    const ios = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    // The grant is remembered once it is signed, before it is sent: whatever the relay then answers.
+    const decideIos = section(iosLeases, 'func decideLease', '\n    }\n');
+    assert.ok(decideIos.indexOf('envelope = try await key.signEnvelope(message, reason: "Allow computer use') < decideIos.indexOf('signedLeaseGrants[item.request.leaseId] = '));
+    assert.ok(decideIos.indexOf('signedLeaseGrants[item.request.leaseId] = ') < decideIos.indexOf('client.leaseDecision("grant"'));
+    assert.equal(count(decideIos, 'signedLeaseGrants['), 1, 'for a grant only, never a deny');
+    // A status its node signed: live, or pending with a grant this phone signed, gets a row; "ended" forgets the grant.
+    const noteIos = section(iosLeases, 'private func noteListedLease', '\n    }\n');
+    assert.match(noteIos, /let mayStart = Leases\.mayStillStart\(state: status\.state, signedGrant: signedLeaseGrants\[status\.leaseId\] != nil\)\n\s+guard Leases\.isLive\(state: status\.state\) \|\| mayStart else \{\n\s+if status\.state == "ended" \{ signedLeaseGrants\[status\.leaseId\] = nil \}\n\s+return\n\s+\}/);
+    assert.ok(noteIos.indexOf('Leases.verifiedMessage(signed, pin: pin)') < noteIos.indexOf('Leases.mayStillStart('), 'only on the pinned node\'s signed word');
+    // Dropped for an absence only after a listing that was accepted, and only once the request has expired on both clocks.
+    const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
+    assert.ok(refreshIos.indexOf('guard check.accepted else { checks[pin.id] = .unconfirmed; continue }') < refreshIos.indexOf('dropMayStartRows(of: pin, named: Set(listed.map { $0.leaseId }), relayNow: client.now())'));
+    assert.equal(count(iosLeases, 'dropMayStartRows('), 2, 'declared, and called from that one place');
+    const dropIos = section(iosLeases, 'private func dropMayStartRows', '\n    }\n');
+    assert.match(dropIos, /signedLeaseGrants\[leaseId\]\.map \{ \$0 < Date\(\) && \$0 < relayNow \} \?\? true/);
+    assert.match(dropIos, /Leases\.keepsMayStart\(listedState: nil, requestExpired: expired\)/);
+    assert.match(dropIos, /where row\.nodeId == pin\.id && row\.state == "pending" && !named\.contains\(row\.leaseId\)/);
+    // The row: its own words, and the Stop every row has. "May still start" only for a grant this phone
+    // remembers signing (fifth security review, finding 1: a pending row no longer needs one).
+    assert.match(section(iosLeases, 'func bannerTitle', '\n    }\n'), /if lease\.state == "pending" \{ return Leases\.pendingTitle\(nodeName: lease\.nodeName, signedGrant: signedLeaseGrants\[lease\.leaseId\] != nil\) \}/);
+    assert.match(swift, /public static func pendingTitle\(nodeName: String, signedGrant: Bool\) -> String \{\n\s+signedGrant \? mayStillStartTitle\(nodeName: nodeName\) : requestWaitingTitle\(nodeName: nodeName\)\n\s+\}/);
+    const views = read('mobile', 'ios', 'App', 'LeaseViews.swift');
+    const banner = views.slice(views.indexOf('struct LeaseBanner'));
+    assert.match(banner, /if lease\.state == "pending" \{ Text\(model\.pendingDetail\(lease\)\)/);
+    assert.match(banner, /Button\("Stop", role: \.destructive\) \{ Task \{ await model\.stopLease\(lease\) \} \}/);
+    // Stop is the owner's tap and nothing else: no revoke is built anywhere but in killSwitch (no automatic revoke after an unconfirmed grant).
+    assert.equal(count(ios, 'Leases.revoke('), 1);
+    assert.equal(count(ios, 'signedLeaseGrants = [:]'), 2, 'emptied when the phone is unpaired or reset');
+
+    // Android: the same, and nothing by itself (R-F5-5).
+    const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+    const android = read(...kt, 'AppModel.kt');
+    const live = section(android, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+    const decide = section(live, 'fun decideLease', '\n    }\n');
+    assert.match(decide, /if \(grant\) signedLeaseGrants\[item\.request\.leaseId\] = Timestamps\.epochMillis\(item\.request\.expiresAt\) \?: Long\.MAX_VALUE\n\s+val sent = sendLease\(api, "grant", /);
+    assert.equal(count(decide, 'sendLease('), 1, 'R-F5-5: the grant is still sent once');
+    const note = section(live, 'private fun noteListedLease', '\n    }\n');
+    assert.match(note, /if \(!Leases\.isLive\(status\.state\) && !Leases\.mayStillStart\(status\.state, status\.leaseId in signedLeaseGrants\)\) \{\n\s+if \(status\.state == "ended"\) signedLeaseGrants\.remove\(status\.leaseId\)\n\s+return\n\s+\}/);
+    const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
+    assert.match(refreshAndroid, /leaseChecks\[pin\.id\] = if \(check\.accepted\) \{\n\s+val named = Leases\.listedStatuses\(check, pin\)\n\s+dropMayStartRows\(pin, named\.map \{ it\.leaseId \}\.toSet\(\), api\)/);
+    assert.equal(count(live, 'dropMayStartRows('), 2, 'declared, and called from that one place');
+    const drop = section(live, 'private fun dropMayStartRows', '\n    }\n');
+    assert.match(drop, /val relayNowMs = api\.now\(\)\.toEpochMilli\(\)/);
+    assert.equal(count(drop, 'api.'), 1, 'the relay-corrected clock, and no request');
+    assert.match(drop, /val expired = expires == null \|\| \(expires < System\.currentTimeMillis\(\) && expires < relayNowMs\)\n\s+return !Leases\.keepsMayStart\(null, expired\)/);
+    assert.match(drop, /it\.nodeId == pin\.id && it\.state == "pending" && gone\(it\.leaseId\)/);
+    // The drop sends nothing and signs nothing; neither does anything else outside a tap.
+    none(drop, ['api.lease', 'sendLease(', 'signEnvelope(', 'killSwitch(', 'scope.launch'], 'dropMayStartRows');
+    assert.equal(count(android, 'Leases.revoke('), 1, 'a revoke is built only by "Stop now", on the owner\'s tap: no automatic revoke');
+    assert.equal(count(live, 'scope.launch'), 4, 'still one coroutine per tap');
+    const screens = read(...kt, 'LeaseScreens.kt');
+    const bannerKt = screens.slice(screens.indexOf('fun LeaseBanner('));
+    // "May still start" only for a grant this phone remembers signing (fifth security review, finding 1).
+    assert.equal(count(bannerKt, 'model.pendingLeaseTitle('), 2, 'the row of the lease on the live screen, and the rows of the others');
+    assert.equal(count(bannerKt, 'model.pendingLeaseDetail('), 2);
+    assert.match(live, /fun pendingLeaseTitle\(leaseId: String, nodeName: String\): String = Leases\.pendingTitle\(nodeName, leaseId in signedLeaseGrants\)/);
+    assert.match(kotlin, /fun pendingTitle\(nodeName: String, signedGrant: Boolean\): String = if \(signedGrant\) mayStillStartTitle\(nodeName\) else requestWaitingTitle\(nodeName\)/);
+    assert.match(bannerKt, /Button\(\{ model\.stopRunningLease\(lease\) \}/);
+    assert.equal(count(android, 'signedLeaseGrants.clear()'), 2);
+  });
+
+  // Fifth security review, finding 1. The memory of signed grants is the
+  // app's own, so after a restart, and on any other enrolled phone, a
+  // listing that passed named a lease as pending and the phone showed "1
+  // request waiting" with no row and no Stop, while the relay could still
+  // deliver the grant it held. Every pending lease a listing that passed
+  // names now gets a row with the Stop every row has, whatever this phone
+  // remembers; what it remembers only chooses the words.
+  it('fifth review, finding 1: a pending lease an accepted listing names gets a row and a Stop on both phones, with no memory of a grant', () => {
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    // The rule, the same in both cores: pending gets a row; only an unanswered request that is on screen as a card does not get a second one.
+    assert.match(swift, /public static func listedPendingGetsRow\(state: String, shownAsRequest: Bool, signedGrant: Bool\) -> Bool \{\n\s+state == "pending" && \(signedGrant \|\| !shownAsRequest\)\n\s+\}/);
+    assert.match(kotlin, /fun listedPendingGetsRow\(state: String, shownAsRequest: Boolean, signedGrant: Boolean\): Boolean = state == "pending" && \(signedGrant \|\| !shownAsRequest\)/);
+    // Honest words: a phone that remembers no grant does not say "may still start".
+    assert.match(swift, /public static func requestWaitingTitle\(nodeName: String\) -> String \{ "A request is waiting on \\\(Display\.escape\(nodeName\)\)" \}/);
+    assert.match(kotlin, /fun requestWaitingTitle\(nodeName: String\): String = "A request is waiting on \$\{Display\.escape\(nodeName\)\}"/);
+    const DETAIL = 'Its computer says a request for computer use is waiting for a phone\'s answer. This phone does not remember allowing it. An Allow signed before this app was restarted, or on another phone, could still reach it. Stop cancels the request.';
+    assert.ok(swift.includes(`public static let requestWaitingDetail = "${DETAIL}"`));
+    assert.ok(kotlin.includes(`const val REQUEST_WAITING_DETAIL = "${DETAIL}"`));
+    assert.match(swift, /public static func pendingDetail\(signedGrant: Bool\) -> String \{ signedGrant \? mayStillStartDetail : requestWaitingDetail \}/);
+    assert.match(kotlin, /fun pendingDetail\(signedGrant: Boolean\): String = if \(signedGrant\) MAY_STILL_START_DETAIL else REQUEST_WAITING_DETAIL/);
+
+    // iOS.
+    const ios = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
+    // Only after that node's listing passed, and after the rows it no longer names were dropped.
+    const accepted = refreshIos.indexOf('guard check.accepted else { checks[pin.id] = .unconfirmed; continue }');
+    const noted = refreshIos.indexOf('notePendingListed(check, pin: pin, shownAsRequest: Set(items.map { $0.request.leaseId }))');
+    assert.ok(accepted > 0 && accepted < refreshIos.indexOf('dropMayStartRows(') && refreshIos.indexOf('dropMayStartRows(') < noted);
+    assert.equal(count(iosLeases, 'notePendingListed('), 2, 'declared, and called from that one place');
+    const pendingIos = section(iosLeases, 'private func notePendingListed', '\n    }\n');
+    assert.match(pendingIos, /guard check\.accepted else \{ return \}\n\s+for signed in check\.statuses \{\n\s+guard let message = Leases\.verifiedMessage\(signed, pin: pin\), let status = LeaseStatus\(message: message\) else \{ continue \}/);
+    assert.match(pendingIos, /guard Leases\.listedPendingGetsRow\(state: status\.state, shownAsRequest: shownAsRequest\.contains\(status\.leaseId\), signedGrant: remembered\) else \{ continue \}/);
+    assert.match(pendingIos, /guard Leases\.acceptsStatus\(status, appliedSeq: 0\) else \{ continue \}\n\s+runningLeases\.append\(RunningLease\(/);
+    assert.match(pendingIos, /status: signed\)\)/, 'the row carries the signed status, so Stop starts from it');
+    // Memory chooses the words and nothing else: no branch here returns for want of a remembered grant.
+    assert.equal(count(pendingIos, 'signedLeaseGrants['), 1);
+    none(pendingIos, ['client.', 'signEnvelope(', 'killSwitch(', 'Task {', 'Leases.revoke('], 'notePendingListed (iOS)');
+    // A row that is there stays while its node still signs "pending", listing or no listing.
+    const noteIos = section(iosLeases, 'private func noteListedLease', '\n    }\n');
+    assert.match(noteIos, /if let known, status\.state == "pending" \{\n\s+runningLeases\[known\] = RunningLease\(/);
+    assert.ok(noteIos.indexOf('guard Leases.acceptsStatus(') < noteIos.indexOf('if let known, status.state == "pending" {'), 'never from an older status');
+    // An unremembered row has no expiry to wait for: it goes with the first accepted listing that does not name it.
+    assert.match(section(iosLeases, 'private func dropMayStartRows', '\n    }\n'), /signedLeaseGrants\[leaseId\]\.map \{ \$0 < Date\(\) && \$0 < relayNow \} \?\? true/);
+    // Stop from that row is the Stop of every row: followed, then the kill switch, which asks nothing about who granted.
+    const kill = section(iosLeases, 'func killSwitch', '// Demo:');
+    none(kill, ['signedLeaseGrants', 'grantedBy'], 'killSwitch (iOS)');
+    assert.match(kill, /guard var live = liveLease, !live\.revoking, live\.state != "ended" else \{ return \}/);
+    assert.match(section(iosLeases, 'private func follow', '\n    }\n'), /if let old = liveLease, Leases\.isLive\(state: old\.state\) \|\| \(old\.state == "pending" && old\.lastStatus != nil\) \{/);
+    assert.equal(count(ios, 'Leases.revoke('), 1, 'still no revoke but the owner\'s Stop');
+
+    // Android: the same, inside the owner's "Check" tap and nowhere else (R-F5-1), sending nothing (R-F5-5).
+    const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+    const android = read(...kt, 'AppModel.kt');
+    const live = section(android, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+    const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
+    assert.match(refreshAndroid, /leaseChecks\[pin\.id\] = if \(check\.accepted\) \{\n\s+val named = Leases\.listedStatuses\(check, pin\)\n\s+dropMayStartRows\(pin, named\.map \{ it\.leaseId \}\.toSet\(\), api\)\n\s+notePendingListed\(check, pin, items\.map \{ it\.request\.leaseId \}\.toSet\(\)\)/);
+    assert.equal(count(live, 'notePendingListed('), 2, 'declared, and called from that one place: the tap');
+    assert.equal(count(refreshAndroid, 'api.'), 1, 'still one request, one prompt');
+    const pendingKt = section(live, 'private fun notePendingListed', '\n    }\n');
+    assert.match(pendingKt, /if \(!check\.accepted\) return\n\s+for \(signed in check\.statuses\) \{\n\s+val status = Leases\.verifiedMessage\(signed, pin\)\?\.let \{ LeaseStatus\.from\(it\) \} \?: continue/);
+    assert.match(pendingKt, /if \(!Leases\.listedPendingGetsRow\(status\.state, status\.leaseId in shownAsRequest, status\.leaseId in signedLeaseGrants\)\) continue/);
+    assert.match(pendingKt, /if \(!Leases\.acceptsStatus\(status, 0\)\) continue\n\s+runningLeases\.add\(RunningLease\(pin\.id, pin\.name, status\.leaseId, status\.state, status\.reason, status\.seq, status\.grantedByDevice, status\.grantedByName, signed\)\)/);
+    none(pendingKt, ['api.', 'sendLease(', 'signEnvelope(', 'killSwitch(', 'scope.launch', 'delay(', 'while'], 'notePendingListed (Android)');
+    const note = section(live, 'private fun noteListedLease', '\n    }\n');
+    assert.match(note, /if \(known >= 0 && status\.state == "pending"\) \{\n\s+runningLeases\[known\] = RunningLease\(/);
+    assert.ok(note.indexOf('if (!Leases.acceptsStatus(') < note.indexOf('if (known >= 0 && status.state == "pending") {'), 'never from an older status');
+    assert.match(section(live, 'private fun dropMayStartRows', '\n    }\n'), /val expired = expires == null \|\| /);
+    const killKt = section(live, 'fun killSwitch', '\n    }\n');
+    none(killKt, ['signedLeaseGrants', 'grantedBy'], 'killSwitch (Android)');
+    assert.equal(count(killKt, 'sendLease('), 1, 'R-F5-5: one revoke, sent once');
+    assert.match(section(live, 'private fun followRunningLease', '\n    }\n'), /if \(old != null && \(Leases\.isLive\(old\.state\) \|\| \(old\.state == "pending" && old\.lastStatus != null\)\)\) \{/);
+    assert.equal(count(live, 'scope.launch'), 4, 'still one coroutine per tap: nothing new runs by itself');
+    assert.equal(count(android, 'Leases.revoke('), 1);
+    assert.match(android, /import com\.example\.kinglouie\.protocol\.ListingCheck\n/);
   });
 
   // R-F5-19 (owner ruling, 2026-10-13): iOS watches only while the live
@@ -420,11 +782,17 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
     const { live, screens, leaseScreens } = android();
     none(live, ['while (', 'while(', 'do {', 'delay(', 'repeat(', 'postDelayed', 'Timer(', 'withTimeout', 'pollJob', '.retry',
       'forEach', 'generateSequence', 'tailrec', 'ticker', 'Handler(', 'schedule', 'LaunchedEffect', '.collect', 'flow {'], 'the live lease section');
-    // Each `for` walks the entries one fetch returned: the views, the list, and the fresh statuses before a watch.
-    assert.equal(count(live, 'for ('), 3);
+    // Each `for` walks the entries one fetch returned (the views, the list, the fresh statuses before a
+    // watch) or, after the one list request, the pinned nodes (what each one's listing came to; fourth
+    // security review, finding 2) and the statuses of a listing that passed (fifth, finding 1). None of
+    // them sends anything.
+    assert.equal(count(live, 'for ('), 6);
+    assert.match(live, /for \(signed in check\.statuses\)/);
     assert.match(live, /for \(entry in entries\)/);
     assert.match(live, /for \(entry in listed\)/);
     assert.match(live, /for \(entry in fresh\)/);
+    assert.match(live, /for \(pin in pins\) \{\n\s+val check = Leases\.checkListing\(/);
+    assert.match(live, /for \(pin in storage\.nodes\) leaseChecks\[pin\.id\] = LeaseNodeCheck\.Unconfirmed/);
     // No function here calls itself or another tap's function: each name appears once, where it is declared.
     for (const name of ['fun refreshLeases(', 'fun refreshLiveLease(', 'fun decideLease(', 'private fun noteLeasePush(', 'fun stopRunningLease(', 'fun openRunningLease(']) {
       assert.equal(count(live, name), 1, name);

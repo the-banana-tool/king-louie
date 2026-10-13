@@ -585,10 +585,46 @@ What each FAIL means:
 | `sudo rules (run doctor as the service account …)` | you ran `doctor` as root, which says nothing about `king-louie`'s rules | run it with `sudo -u king-louie` as shown |
 | `data dir is private (mode …)` | the MCP data dir is readable by others | `chmod 700` it |
 | `DPAPI-wrapped master key present (created on first run)` | the MCP instance has not started yet | start it once (section 8), then run `doctor` again |
+| `node identity record (the identity in … is not the one an administrator recorded in …)` | the data dir holds another node identity than the one recorded with `identity record` | if you replaced or reset the data dir on purpose, run `identity record --replace` (below) and pair phones, relays and desktops again; if you did not, restore the data dir from a backup |
+| `node identity record (… so it does not say which identity an administrator recorded …)` | the record cannot be trusted or read: wrong owner or permissions, a link, or a damaged file | find out who could have changed it, then run `identity record --replace` (below) |
+| `node identity record (… names this identity, but the access list of … lets S-1-… change it …)` | Windows: an account other than SYSTEM or Administrators may change the record or its directory | find out who changed the access list, then run `identity record --replace` (below): it writes the record anew in a new directory with an access list of its own |
+| `node identity record (… names this identity, but the access list of <config dir> lets S-1-… change it …)` | Windows: an account other than SYSTEM or Administrators may delete or add things in the config dir itself, so it could put a directory of its own where `identity\` is | find out who changed the access list; set it so that only SYSTEM and Administrators can change the config dir (the service account needs read and execute only); then run `identity record --replace` (below) |
+| `node identity record (… could not be read by the account this ran as (EPERM) …)` | Windows: the record can be read only by SYSTEM, Administrators and LOCAL SERVICE, and `doctor` ran as none of them | run `doctor` from an elevated prompt. `identity record --replace` writes the same access list again and changes nothing |
+| `WARN  node identity record (… no entry lets anyone but SYSTEM and Administrators change them, but … is owned by S-1-… …)` | Windows: the access lists are clean, but the record, its directory or the config dir is owned by an account that is neither Administrators nor SYSTEM, and an owner can rewrite an access list | not a failure. If the owner is not an account you chose (a hand-made layout), give the three to Administrators: `icacls <path> /setowner "*S-1-5-32-544"` |
 
 A `not checked: uses parameters without defaults` row is not a failure. That
 `sudo` step has a parameter with no default value, so `doctor` cannot know
 the exact command to ask sudo about.
+
+The `node identity record` row says what `doctor` read and what it did not.
+On Windows it says "all three are owned by Administrators or SYSTEM, and no
+entry lets anyone else change them" only after reading the owners and the
+access lists of the record, of `identity\` and of the config dir; otherwise
+it names what it could not read.
+
+A `WARN  node identity record` row that says "no administrator record" is
+not a failure either. It means no
+administrator has recorded this node's identity yet. Runbooks and stdio MCP
+work without a record. Desktop apps (stage 5) do not: the service keeps them
+off, and `session install` refuses, until the identity is recorded. Recording
+it also makes the service refuse to start if the identity in its data dir is
+ever replaced. Start the service (or the MCP instance) once so that it has an
+identity, then, from an elevated PowerShell or as root:
+
+```powershell
+& 'C:\Program Files\nodejs\node.exe' C:\KingLouie\app\bin\king-louie-service.js identity record --data-dir C:\KingLouie\mcp\data
+```
+
+```bash
+sudo /usr/bin/node /opt/king-louie/app/bin/king-louie-service.js identity record --data-dir /opt/king-louie/mcp/data
+```
+
+The command prints the node's name, its id and a fingerprint, and asks before
+it writes anything. If a phone is enrolled for this node, compare the id with
+the one the phone shows. It writes `identity/node.json` in the config dir
+beside that data dir, which only an administrator can change. Run it once for
+each data dir (the service's own data dir takes no `--data-dir`), and restart
+the service afterwards. `identity show` prints what is recorded.
 
 ## 8. Your first runbook over stdio MCP
 
@@ -763,6 +799,11 @@ The examples follow rules that keep a runbook safe to hand to a model:
 | `site.status` fails after its health check passed | `systemctl is-active` exited 3: `site.service` is not active | the job's output says `inactive`; the check's evidence is still recorded |
 | a folder with a space in `allowed_roots` or a step argument | nothing: it is passed as one argument | — |
 | the service and the MCP instance behave differently | the two `node.yaml` copies have drifted apart | compare them (section 5) and run `doctor` on both |
+| the service will not start, with `Refusing to start: the identity in … is not the one an administrator recorded in …` | the node identity in the data dir was replaced after `identity record` | see the `node identity record` rows in section 7; the message names both ids and the command |
+| Windows: the service will not start, with `Refusing to start: … could not be read by the account the service runs as (EPERM) …` | the service runs under an account that may not read the record: `identity record` leaves it readable only by SYSTEM, Administrators and LOCAL SERVICE | run the service as LOCAL SERVICE, as `install` sets it up. `identity record --replace` writes the same access list again and changes nothing |
+| Windows: the service will not start, with `Refusing to start: … the access list of … lets S-1-… change it …` | when it starts, the service reads the access lists of the record and of `identity\` and refuses a record that any account but SYSTEM and Administrators may change | find out who changed the access list, then run `identity record --replace` |
+| Windows: `identity record --replace` ends with `Note: the identity record was written. The directory it replaced was moved to …\.identity.old-… , which holds N entries besides node.json, and was not removed` | the old `identity\` held something the command did not put there. It removes only the old record and the empty directory, never anything else | the new record is in place. Look at what the named directory holds and who put it there, then remove it by hand |
+| a computer-use session ends by itself with `node_identity_invalid` | Windows: the service could write the identity record when it was about to ask a phone to resume a paused lease, so it ended the lease instead | see the service log; find out who could have changed the record, run `identity record --replace` and restart the service |
 | a long job stops when you close Claude, or its program keeps running with no job to report to | the MCP process exits with the session and its jobs go with it; on Windows especially, a step's program can outlive it, orphaned | keep the session open; after closing one mid-job, end any leftover program by hand (Task Manager, or `ps`). Fleet stage 4 moves jobs into the service |
 | `git` refuses `/srv/site` with "detected dubious ownership" | the repository is owned by another account | `chown` it to `king-louie` (section 6). Never set `safe.directory=*` |
 | `runbook-acls.ps1`'s verification step fails, naming a file inside `mcp\data` or `D:\train\runs` that you never put there yourself | that data folder had contents, and old permissions, from before the first time you ran the script | clear the named file or folder by hand (as an administrator) and run the script again |

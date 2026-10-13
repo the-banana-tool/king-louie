@@ -1,7 +1,7 @@
 // src/gui/lease-protocol.js
 // lease-v1 (fleet stage 5 spec §3.6, §4.1; docs/protocol/lease-v1.md): pure
 // builders and checks for computer-use leases. Node-signed: request, status,
-// view. Phone-signed: grant, revoke, watch, each through F3's
+// view, listing. Phone-signed: grant, revoke, watch, each through F3's
 // verifyDeviceEnvelope (checks 1–8) and then the lease checks (9–12).
 // Loaded by the relay (relay-extension.js) too, so it requires no agent code.
 const crypto = require('crypto');
@@ -27,6 +27,9 @@ const REVOKE_REASONS = Object.freeze(['kill_switch', 'owner']);
 const REQUEST_TTL_MS = 5 * 60 * 1000;
 const VIEW_MAX_BYTES = 262144;
 const MAX_MINUTES = 60;
+// R-F5-20: a listing names at most this many leases (the node lists the live
+// one and the four that ended last).
+const LISTING_MAX = 8;
 // Reason → the approval-v1 check number it belongs to (program §4.12).
 const CHECK_OF = Object.freeze({
   malformed: 1, unsupported_version: 1, unknown_device: 3, demo_device: 4, test_key: 4, revoked_device: 5,
@@ -110,7 +113,13 @@ const VALIDATORS = {
     && Number.isInteger(m.remaining_s) && m.remaining_s >= 0
     && isPlainObject(m.foreground) && exactKeys(m.foreground, ['app_id', 'matches']) && nullOr((v) => APP_ID_RE.test(v))(m.foreground.app_id) && typeof m.foreground.matches === 'boolean'
     && checkFrame(m.frame) && typeof m.frame_dropped === 'boolean'
-    && Array.isArray(m.actions) && m.actions.length <= 50 && m.actions.every(checkAction)
+    && Array.isArray(m.actions) && m.actions.length <= 50 && m.actions.every(checkAction),
+  // R-F5-20: the node's whole answer to one phone's "what is running".
+  'kl.lease.listing': (m) => exactKeys(m, ['v', 'type', 'node_id', 'to_device', 'nonce', 'at', 'leases'])
+    && NODE_ID_RE.test(m.node_id) && DEVICE_ID_RE.test(m.to_device) && NONCE_RE.test(m.nonce) && isTimestamp(m.at)
+    && Array.isArray(m.leases) && m.leases.length <= LISTING_MAX
+    && m.leases.every((l) => isPlainObject(l) && exactKeys(l, ['lease_id', 'seq']) && UUID_V4_RE.test(l.lease_id) && Number.isInteger(l.seq) && l.seq >= 1)
+    && new Set(m.leases.map((l) => l.lease_id)).size === m.leases.length
 };
 
 for (const [type, validator] of Object.entries(VALIDATORS)) {
@@ -173,6 +182,47 @@ function buildLeaseView({ identity, leaseId, seq, toDevice, state, locked, remai
     remaining_s: Math.max(0, Math.floor(remainingS)), foreground, frame, frame_dropped: frameDropped === true, actions,
     contact_token: contactToken || newContactToken()
   }, nodeSigner(identity));
+}
+
+// R-F5-20 (owner ruling, 2026-10-13: "I don't want relays to hide a live
+// lease from phones"). The node's answer to one listing request: the nonce
+// the phone chose for that request, the phone, and every lease the node
+// lists, each by its id and by the seq of the status signed beside it. It is
+// signed when there is nothing to list too. `statuses` are the status
+// envelopes that go with it, in the order listed.
+function buildLeaseListing({ identity, toDevice, nonce, statuses = [], now = Date.now() }) {
+  return seal({
+    v: 1, type: 'kl.lease.listing', node_id: identity.nodeId, to_device: toDevice, nonce, at: iso(now),
+    leases: statuses.map((envelope) => { const { message } = open(envelope); return { lease_id: message.lease_id, seq: message.seq }; })
+  }, nodeSigner(identity));
+}
+
+// An enrolled, real, unrevoked device of this node; false when that cannot be read.
+function isEnrolledDevice(approverStore, deviceId) {
+  try {
+    const record = typeof deviceId === 'string' && approverStore ? approverStore.get(deviceId) : null;
+    return Boolean(record) && record.platform !== 'demo' && approverStore.isActive(deviceId) === true;
+  } catch {
+    return false;
+  }
+}
+
+// R-F5-20 (fourth security review, finding 2): the `lease.list` answer of a
+// node on which computer use is off: a runbook node, or an agent node whose
+// GUI is not enabled, has no helper installed, has no administrator's record
+// of its identity, or could not be built. Such a node holds no lease manager,
+// so no lease can be live on it, and "nothing to list" is true; it signs
+// that over the phone's nonce like any other node. Without this the node had
+// no `lease.list` at all, and its phones said "Could not confirm" for ever
+// about a node that was up. A host registers this only where no lease
+// manager exists (run.js); a node with one answers from it. As there: no
+// listing without a well-formed nonce, and nothing for a device that is not
+// enrolled here.
+function offLeaseListing({ identity, approverStore, clock = Date.now }) {
+  return async ({ device_id: deviceId, nonce } = {}) => {
+    if (!isEnrolledDevice(approverStore, deviceId) || typeof nonce !== 'string' || !NONCE_RE.test(nonce)) return { statuses: [] };
+    return { statuses: [], listing: buildLeaseListing({ identity, toDevice: deviceId, nonce, statuses: [], now: clock() }) };
+  };
 }
 
 const reject = (reason) => ({ accepted: false, check: CHECK_OF[reason] || null, reason });
@@ -241,13 +291,62 @@ function verifyLeaseView(envelope, { nodeId, nodePublicKeyHex, maxBytes = VIEW_M
   return { accepted: true, reason: null, message: opened.message };
 }
 
+// A node-signed status as a phone takes it: the pinned key's signature over
+// the received bytes, the shape, the node id. null when any of it fails.
+function openNodeStatus(envelope, { nodeId, nodePublicKeyHex }) {
+  let opened;
+  try {
+    opened = open(envelope);
+  } catch (err) {
+    if (err instanceof EnvelopeError) return null;
+    throw err;
+  }
+  if (envelope.alg !== 'Ed25519' || envelope.kid !== nodeId || !verifyEd25519(envelope, nodePublicKeyHex)) return null;
+  if (messages.validateMessage('kl.lease.status', opened.message) || opened.message.node_id !== nodeId) return null;
+  return opened.message;
+}
+
+// What a phone checks on a listing (R-F5-20), and the reference the phone
+// cores are written against: the pinned node's signature, the shape, the
+// node, the nonce this phone chose for this very request, this phone, and
+// for every lease the listing names a status of that lease with that seq
+// which the same node signed. `statuses` are the envelopes that came beside
+// it; any the listing does not name are left out. Accepted means: this is
+// everything the node had to list when it answered this request. Anything
+// else is no answer at all (a phone then says it could not confirm with the
+// node), never "nothing is running".
+function verifyLeaseListing(envelope, { nodeId, nodePublicKeyHex, nonce, deviceId, statuses = [] }) {
+  let opened;
+  try {
+    opened = open(envelope);
+  } catch (err) {
+    if (err instanceof EnvelopeError) return { accepted: false, reason: 'malformed' };
+    throw err;
+  }
+  if (envelope.alg !== 'Ed25519' || envelope.kid !== nodeId) return { accepted: false, reason: 'malformed' };
+  if (!verifyEd25519(envelope, nodePublicKeyHex)) return { accepted: false, reason: 'bad_signature' };
+  const m = opened.message;
+  if (messages.validateMessage('kl.lease.listing', m)) return { accepted: false, reason: 'malformed' };
+  if (m.node_id !== nodeId) return { accepted: false, reason: 'wrong_node' };
+  if (typeof nonce !== 'string' || m.nonce !== nonce) return { accepted: false, reason: 'nonce_mismatch' };
+  if (m.to_device !== deviceId) return { accepted: false, reason: 'wrong_device' };
+  const signed = (Array.isArray(statuses) ? statuses : []).map((s) => openNodeStatus(s, { nodeId, nodePublicKeyHex })).filter(Boolean);
+  const listed = [];
+  for (const entry of m.leases) {
+    const status = signed.find((s) => s.lease_id === entry.lease_id && s.seq === entry.seq);
+    if (!status) return { accepted: false, reason: 'status_missing' };
+    listed.push(status);
+  }
+  return { accepted: true, reason: null, message: m, statuses: listed };
+}
+
 function effectiveExpiry({ verifiedAt, minutes, resumeOf = null }) {
   const fresh = verifiedAt + minutes * 60000;
   return resumeOf === null ? fresh : Math.min(fresh, resumeOf);
 }
 
 module.exports = {
-  LEASE_LIMITS, STATES, REQUEST_TTL_MS, VIEW_MAX_BYTES, CHECK_OF, CONTACT_TOKEN_RE, newContactToken,
-  leaseHash, buildLeaseRequest, buildLeaseStatus, buildLeaseView,
-  verifyLeaseGrant, verifyLeaseRevoke, verifyLeaseWatch, verifyLeaseView, effectiveExpiry
+  LEASE_LIMITS, STATES, REQUEST_TTL_MS, VIEW_MAX_BYTES, CHECK_OF, CONTACT_TOKEN_RE, LISTING_MAX, LIST_NONCE_RE: NONCE_RE, newContactToken,
+  leaseHash, buildLeaseRequest, buildLeaseStatus, buildLeaseView, buildLeaseListing, isEnrolledDevice, offLeaseListing,
+  verifyLeaseGrant, verifyLeaseRevoke, verifyLeaseWatch, verifyLeaseView, verifyLeaseListing, effectiveExpiry
 };
