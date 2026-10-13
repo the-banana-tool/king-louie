@@ -59,6 +59,9 @@ const account = (name) => ({ user: name, uid: UID, gid: GID, home: os.homedir(),
 // it): every use of it is an install that must be refused.
 const otherAccount = (name) => ({ user: name, uid: UID + 1, gid: GID, home: os.homedir(), sid: POSIX ? null : 'S-1-5-21-9-9-9-2001' });
 const who = (a) => (POSIX ? `uid ${a.uid}` : `SID ${a.sid}`);
+// A second real install in one test: another SID on Windows; elsewhere this
+// process's own uid, the only one a test can write a file for.
+const otherAccountForInstall = (name) => (POSIX ? account(name) : otherAccount(name));
 
 function deps(s, extra = {}) {
   const executed = [];
@@ -415,6 +418,59 @@ describe('security review finding 6: a rotation keeps the endpoint only for the 
     const t = io();
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: deps(s, { confirm: async () => false }) }), 1);
     assert.match(t.out.join(''), /replaces the secret installed for alice; the endpoint stays/);
+    assert.deepEqual(tree(s.base), before);
+  });
+});
+
+// Security review finding 13e: an account that no longer exists must not
+// leave the node unable to install anyone else.
+describe('finding 13e: session uninstall for an account that no longer resolves', () => {
+  const { GuiError } = require('../src/gui/errors');
+  const gone = (name) => { throw new GuiError('user_not_found', name); };
+
+  it('works from the identity the helper file records, says so, and frees the node for another user', async () => {
+    const s = setup();
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
+    const copyFile = S.userCopyPath({ platform: process.platform, configDir: s.configDir, user: 'alice', sid: account('alice').sid });
+    assert.equal(fs.existsSync(copyFile), true);
+    const t = io();
+    const d = deps(s, { resolveSessionUser: gone });
+    let asked = null;
+    d.confirm = async () => { asked = t.out.join(''); return true; };
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
+    assert.match(asked, /no longer exists on this machine/);
+    assert.ok(asked.includes(who(account('alice'))), 'the recorded SID/uid is shown');
+    assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), false);
+    assert.equal(fs.existsSync(copyFile), false);
+    // Windows: the logon task is deleted by name. Elsewhere the login start
+    // is a file in a home that cannot be reached as a user who is gone.
+    assert.equal(d.executed.length, POSIX ? 0 : 1);
+    if (POSIX) assert.match(t.out.join(''), /login start .* could not be removed/);
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'bob' }, dataDir: s.dataDir, io: io().io, deps: deps(s, { resolveSessionUser: (n) => otherAccountForInstall(n) }) }), 0);
+    assert.equal(canonical(s.configDir).session_user, 'bob');
+  });
+
+  it('a name the helper file does not record is still user_not_found, and removes nothing', async () => {
+    const s = setup();
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
+    const before = tree(s.base);
+    const t = io();
+    const d = deps(s, { resolveSessionUser: gone });
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'mallory' }, dataDir: s.dataDir, io: t.io, deps: d }), 1);
+    assert.match(t.err.join(''), /^user_not_found/);
+    assert.deepEqual(tree(s.base), before);
+    assert.equal(d.executed.length, 0);
+    // And with nothing installed at all.
+    const s2 = setup();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s2.dataDir, io: io().io, deps: deps(s2, { resolveSessionUser: gone }) }), 1);
+  });
+
+  it('off a terminal it still needs --yes, and a no removes nothing', async () => {
+    const s = setup();
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
+    const before = tree(s.base);
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s, { resolveSessionUser: gone, isTTY: () => false }) }), 2);
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s, { resolveSessionUser: gone, confirm: async () => false }) }), 1);
     assert.deepEqual(tree(s.base), before);
   });
 });

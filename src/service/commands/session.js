@@ -245,9 +245,29 @@ async function uninstall({ flags, dataDir, io, deps }) {
   if (!flags.user) { io.stderr.write(SESSION_USAGE); return 2; }
   if (!c.isAdmin()) { io.stderr.write('session uninstall needs root (or an elevated Administrator prompt on Windows).\n'); return 1; }
   if (refusedUnasked({ flags, io, c, verb: 'remove' })) return 2;
-  const account = c.resolveUser(flags.user);
   const sessionUser = bareName(flags.user, c.platform);
-  const steps = A.planAutostartUninstall({ platform: c.platform, account: { ...account, user: sessionUser } });
+  // An account that no longer exists cannot be resolved (security review
+  // finding 13e), and must not leave the node unable to install anyone
+  // else: when the helper file records that name, its recorded SID (uid) is
+  // the identity to remove. Any other name is still user_not_found.
+  let account;
+  let gone = false;
+  try {
+    account = c.resolveUser(flags.user);
+  } catch (err) {
+    if (!isGuiError(err) || !['user_not_found', 'home_missing'].includes(err.code)) throw err;
+    const recorded = S.inspectCanonical({ configDir: c.configDir, platform: c.platform });
+    const sameName = recorded.state === 'installed'
+      && (c.platform === 'win32' ? recorded.user.toLowerCase() === sessionUser.toLowerCase() : recorded.user === sessionUser);
+    if (!sameName) throw err;
+    account = { user: sessionUser, sid: recorded.sid, uid: recorded.uid, gid: null, home: null };
+    gone = true;
+  }
+  // A login start in a home directory is removed by a child running as that
+  // user; for a user who is gone there is nobody to run as and no home to
+  // look in. The Windows logon task is deleted by name.
+  const unreachableLoginStart = gone && c.platform !== 'win32';
+  const steps = unreachableLoginStart ? [] : A.planAutostartUninstall({ platform: c.platform, account: { ...account, user: sessionUser } });
   const copyFile = S.userCopyPath({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid });
   if (flags.dryRun) {
     io.stdout.write(`[dry-run] remove ${copyFile}\n`);
@@ -264,7 +284,9 @@ async function uninstall({ flags, dataDir, io, deps }) {
   let nodeName = null;
   try { nodeName = c.nodeName(); } catch { nodeName = null; } // a bad node.yaml must not block a removal
   io.stdout.write(`Removing the session helper of ${sessionUser} (${identityText(account, c.platform)})${nodeName ? ` on node "${nodeName}"` : ''}:\n`);
-  io.stdout.write(`  the login start: ${loginStartText({ platform: c.platform, account, sessionUser })}\n`);
+  if (gone) io.stdout.write(`  ${sessionUser} no longer exists on this machine; this removes what the helper file records for that name\n`);
+  if (unreachableLoginStart) io.stdout.write(`  the login start in ${sessionUser}'s home directory could not be removed (there is no such user to remove it as); it does nothing without the files below\n`);
+  else io.stdout.write(`  the login start: ${loginStartText({ platform: c.platform, account, sessionUser })}\n`);
   io.stdout.write(`  ${sessionUser}'s copy of the secret: ${copyFile}\n`);
   if (mine) io.stdout.write(`  the service's secret: ${installed.file} (desktop apps stay off on this node until "session install" runs again)\n`);
   if (damaged) io.stdout.write(`  the service's helper file: ${installed.file} ${installed.reason}, so this cannot tell who it was installed for; it is removed too. If it was installed for another user, run "session uninstall" for that user as well.\n`);
@@ -273,7 +295,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
     io.stderr.write('Not removing without confirmation. Nothing was removed.\n');
     return 1;
   }
-  await c.execute(steps, { dryRun: false, io, entryPath: c.entryPath, nodePath: c.nodePath });
+  if (steps.length) await c.execute(steps, { dryRun: false, io, entryPath: c.entryPath, nodePath: c.nodePath });
   S.removeUserCopy({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: account.sid });
   if (mine || damaged) {
     S.assertSafeComponents(installed.file, { root: c.configDir });
