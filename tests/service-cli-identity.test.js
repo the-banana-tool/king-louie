@@ -353,6 +353,24 @@ describe('doctor: the node identity record', () => {
     assert.doesNotMatch(t.errors(), /left-behind/);
   });
 
+  // Fifth security review, finding 2, on doctor's side: run from a prompt
+  // that is not elevated, doctor itself may not read the record. That is
+  // said as such, with what to do, and not as something the service does.
+  it('Windows: a record doctor may not read is "nothing was checked", with the elevated prompt as the remedy', { skip: process.platform !== 'win32' }, async () => {
+    const s = setup();
+    recordIdentity(s.configDir, s.keys);
+    const fsImpl = { ...fs, lstatSync: (p, ...rest) => {
+      if (path.basename(String(p)) === 'node.json') throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      return fs.lstatSync(p, ...rest);
+    } };
+    const row = (await runDoctor({ dataDir: s.dataDir, configDir: s.configDir, adminUid: UID, deps: { identityRecord: { ...IDENTITY_RECORD_TEST_OPTIONS, fsImpl } } }))
+      .filter((x) => x.check === 'node identity record')[0];
+    assert.equal(row.ok, false);
+    assert.match(row.detail, /could not be read by the account this ran as \(EPERM\)/);
+    assert.match(row.detail, /run this from an elevated \(Administrator\) prompt\. Nothing about the record was checked$/);
+    assert.doesNotMatch(row.detail, /identity record --replace|The service refuses to start/);
+  });
+
   describe('what the row says it did not check, and the access lists on Windows', () => {
     const { identityMatchRow } = require('../src/service/doctor');
     const seen = { state: 'match', file: 'C:/cfg/identity/node.json', recorded: { nodeId: 'kl-aaaaaaaaaaaaaaaa' } };

@@ -207,6 +207,10 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
         results.push(identityMatchRow({ seen, platform, acl }));
       } else if (seen.state === 'none') {
         results.push({ check: 'node identity record', ok: true, warn: true, detail: `${seen.problem}. Until then the service runs, computer use stays off and "session install" refuses` });
+      } else if (seen.unreadable) {
+        // doctor's own account may not read the record (not elevated): that says
+        // nothing about the record, and nothing about what the service will do.
+        results.push({ check: 'node identity record', ok: false, detail: `${seen.problem}. Nothing about the record was checked` });
       } else {
         results.push({ check: 'node identity record', ok: false, detail: `${seen.problem}. The service refuses to start until this is fixed` });
       }

@@ -422,7 +422,7 @@ function checkNodeIdentityRecord({ configDir, dataDir = null, identity, ...readO
         + 'If the service does run as LOCAL SERVICE, the access list is no longer the one that command writes: an Administrator should find out who changed it before writing the record anew'
       : `${readers}: run this from an elevated (Administrator) prompt`;
     return {
-      state: 'invalid', file: seen.file, recorded: null,
+      state: 'invalid', file: seen.file, recorded: null, unreadable: seen.unreadable,
       problem: `${seen.file} ${seen.reason}, so it does not say which identity an administrator recorded. ${remedy}`
     };
   }
