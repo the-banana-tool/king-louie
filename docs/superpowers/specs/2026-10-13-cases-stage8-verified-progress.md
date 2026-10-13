@@ -1,18 +1,19 @@
 # Cases Stage 8: Verified progress — Design Spec
 
-- **Status:** Draft. Section 2 holds the choices that are the owner's; nothing in it is decided.
+- **Status:** Approved in outline by the owner's rulings of 2026-10-13 (§2). The implementation plan is
+  `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`.
 - **Date:** 2026-10-13
 - **Parent:** `docs/superpowers/specs/2026-09-22-king-louie-cases-design.md` §3.1 (principles), §4.3
   (`brief.md`), §4.5 (`.kl/`), §5.2 (orientation), §5.3 (triggers), §5.5 (turn lifecycle), §5.6 (case
   tools), §7.1 (recommendation gate), §9 (budgets, roles).
 - **Builds on:** stage 2 (`2026-09-23-cases-stage2-unattended.md`: status, questions, budgets, wake-ups,
-  roles), stage 3 (`…-stage3-executors.md`: jobs, envelopes, `external-agent` facts), stage 5
-  (`…-stage5-detours.md`: case types, `software-repo`), stage 7 (`…-stage7-ingest.md`: the verify
-  verdict), management surfaces (`2026-09-30-management-surfaces.md`: spoken and pressed, the chat card,
+  roles), stage 3 (`…-stage3-executors.md` §3.5, §3.6, §3.14: jobs, envelopes, `external-agent` facts), stage 5
+  (`…-stage5-detours.md`: case types, `software-repo`), stage 7 (`…-stage7-ingest.md` §3.3: the verify
+  verdict; §3.7, §3.8: the case tools over MCP), management surfaces (`2026-09-30-management-surfaces.md`: spoken and pressed, the chat card,
   the case tools over MCP), models (`2026-09-27-model-catalog-profiles-roles-design.md`: roles, usage).
 - **Depends on:** C1 to C7 and the management surfaces, all on `main` (a6189a7).
-- **Agreed in outline with the owner on 2026-10-12.** The outline is the five parts of §1. Every detail
-  below is a proposal.
+- **Agreed in outline with the owner on 2026-10-12.** The outline is the five parts of §1. The ten
+  questions of the first draft were ruled on 2026-10-13 (§2).
 
 ## 1. Outcome
 
@@ -36,193 +37,38 @@ A case can say how far along it is, and the answer comes from the record, not fr
 The model proposes closing a case with a pressed question whose card shows the list. Only the owner
 closes it.
 
-## 2. Open questions for the owner
+## 2. Owner rulings (2026-10-13)
 
-Each question says what the code and the earlier specs say today, the options with their cost, and a
-recommendation. The rest of the spec is written to stand whichever way each is answered; sections that
-change with an answer are marked **[depends on Q-x]**.
+The first draft of this spec (84b1868) put ten questions to the owner. All ten were answered on
+2026-10-13. Each row gives what was decided and what the chosen option costs or leaves open; the rest
+of the spec is written the decided way and names a ruling by its id.
 
-### Q-a. May the model propose `done` while a confirmed criterion is not `met`?
+| Id | Question | Decided | Cost or residual of the choice |
+|---|---|---|---|
+| R-C8-1 | May the model propose `done` while a confirmed criterion is not `met`? | Only when every confirmed criterion is `met` (`stale` and `failing` refuse too). The owner's own Done button always works, and shows the list first | A criterion nothing in the record can show ("I'm happy with it") blocks the model's proposal until the owner says so in words (a `user` fact is evidence) or presses Done themselves |
+| R-C8-2 | How is a proposed criterion confirmed, and what does gating need? | Both ways: buttons in the panel and on the scope card, and a spoken answer with a quote. Gating needs at least one `confirmed` criterion; a case already past gating is never sent back to `draft` | Over MCP (`mcp-stdio`, the front door under `cases:answer`) a quote is recorded, not checked, so a client holding that scope can confirm scope the model proposed. A new case needs one more owner step before it goes `active` |
+| R-C8-3 | The check command of a `software-repo` case | Built last and off by default; approved once per exact command and repository on a pressed card; owner turns only, never in a wake-up; off in service mode until the admin enables it; at turn close only, when the tree changed in the turn; capped at 120 s | The approved words can come to mean something else when the repository changes. A criterion backed by the check goes `stale` when the repository moves while the owner is away, and stays so until an owner turn. The turn's last step can take up to the cap. Read-only and offline cannot be enforced (§6.6, §18) |
+| R-C8-4 | The verify pass: when, what it costs, which role | On every changed turn, on the `verify` role, charged to `usd`; `cases.verify.maxPassesPerDay` 24; skipped once the `usd` budget has passed 80 %; `cases.verify.when` may be set to `request` | One `main`-class call per working turn: the criteria plus up to 12,000 characters of records in, at most 1,024 tokens out. The cost is estimated, not measured |
+| R-C8-5 | May `external-agent` facts alone make a criterion `met`? | Yes, with each evidence fact's provenance shown on the criterion's row and on the close card | "Three written quotes received" can be `met` on what a phone agent reported and nobody checked |
+| R-C8-6 | Existing cases | An open case's criteria and objective read `proposed` (origin `legacy`), with "Confirm all" in the panel. Closed cases are untouched | Each open case needs one press before anything counts; until then its summary reads "0 confirmed criteria" |
+| R-C8-7 | `stale` on a case that is already `done` | Frozen at close: the states and the list are recorded when the case closes and never recomputed | A fact corrected later through another path is not reflected in a closed case. There is still no way out of `done` |
+| R-C8-8 | A change to `brief.md` made outside the case tools | Not confirmed: origin `file`, shown as "changed outside the app" | The owner's own edit in an editor needs one press to count, because code cannot tell it from a `Bash` write |
+| R-C8-9 | Which tool results the verify pass sees | Case-tool results only (`Ledger`, `Decide`, `Executor`, `Ingest`, `Progress`) | The pass does not see a `Bash` or `WebFetch` result the turn relied on; it sees the facts recorded from them |
+| R-C8-10 | Does `Fail` add to the abandoned-approaches record? | No. Only `Progress.abandon` writes it | After a direction answer the model has to record the dead approach itself; §6.2 gives it one host line that names the failure report |
 
-**Today.** There is no proposal. `done` is reached only by the owner: the case panel's Done button
-(`CASE_STATUS_ACTIONS` in `renderer.js`, IPC `case:setStatus`, `setStatus(…, { kind: 'owner', by: 'owner'
-})`); `TRANSITIONS` in `src/cases/status.js` has no `runtime` row into `done`. Management surfaces §3.1
-lists "a case's status (pause, resume, close)" as pressed.
+### 2.1 Checked in the code after the first draft
 
-| Option | What it means | Cost |
+The first draft listed things it had not verified. Read on `main` (a6189a7):
+
+| Point | What the code says | Effect on this spec |
 |---|---|---|
-| 1. Only when all are `met` | `Progress.proposeDone` is refused (`NOT_READY`) while any confirmed criterion is `unmet`, `stale` or `failing`. The owner's own Done button still works, with the list shown | A criterion nothing in the record can show (taste, "I'm happy with it") blocks the proposal until the owner says so in words (a `user` fact is evidence) or presses Done themselves |
-| 2. `met` or `stale` | As 1, but `stale` does not block | A case can be proposed as done on evidence that was corrected since |
-| 3. Always, with the list shown | The proposal is always allowed; the card shows what is open | The model can ask to close early and often; `questionsPerDay` and the decline memory (§6.4) are the only brake |
-| 4. Nobody closes while not ready | As 1, and the Done button is refused too until the owner drops or confirms what is open | The owner cannot close a case they are finished with without first editing its criteria |
+| `wordsInText` (`src/tools/owner-quote.js`) | `wordsInText(words, text)` folds both sides (curly quotes, runs of white space, case) and tests the whole of `words` as one contiguous run in `text`, on word boundaries. It is not a bag-of-words test | A criterion confirmed at birth by a quote is the owner's own phrase, verbatim after folding; a paraphrase is refused and becomes a proposal (§6.1) |
+| The objective at `case:create` | The renderer's create form sends a title, the chat and the playbook fields and **no objective** (`window.electron.cases.create({ title, chatId, … })`); `preload.js` and the IPC accept one. `create_case` holds its objective to the owner's quote | A desktop-created case starts with an empty objective, so its first objective is normally the model's (`Brief.update`) and is `proposed`. `objectiveBy: 'owner'` (§6.1) is passed by the IPC only when the form sent one |
+| `.cmd` and `.bat` programs | The project already holds that a program started without a shell cannot be a `.cmd` or `.bat` file: `resolveCommand` in `src/service/doctor-runbooks.js` mirrors libuv's lookup (`.com`, `.exe`), reports a shim as `cmdShim`, and `doctor` tells the admin to call the `.exe` ("npm: node.exe npm-cli.js"). Whether the bundled Node would start one was not tried | The check never goes through `cmd.exe` (§6.6). `npm` is run as `node.exe` with `npm-cli.js`; any other shim is refused (`CHECK_SHIM`). Whether other shims may run is a new owner question, in the plan |
+| The phone and a new question type | `QuestionItem` (`mobile/ios/KLProtocol/Sources/KLProtocol/Questions.swift`) and the Android `Questions.kt` read `kind`, `urgency`, `text` and `options` from `kl.question.ask`; no payload type is sent or read | A new pressed type shows on the phone as its text and its options with no app change. A batch over the channel's `maxChars` shows "Answer this in the app" in place of options (`renderBatch`, `src/cases/contact-format.js`), which a long close card can meet |
+| Section references | Stage 2 §3.1 is the status machine, §3.9 questions, §3.10 turn close; stage 3 §3.5 is the `Executor` tool, §3.6 envelopes, §3.14 the ledger change for `external-agent`; stage 7 §3.3 is proposals and the verify check, §3.7 and §3.8 the case tools over MCP; management surfaces §3.1 lists a case's status as pressed | The header's references now carry the section numbers |
 
-**Recommendation: 1.** The proposal is the model's claim, so it has to rest on the record. The owner is
-never blocked: their Done button always works and shows the list first (the unmet items are written into
-the close record).
-
-### Q-b. How does the owner confirm a proposed criterion, and is gating incomplete while one is only proposed?
-
-**Today.** `brief.successCriteria` is a list of strings; `USER_ONLY_FIELDS` in `src/cases/brief.js` does
-not include it or `objective`, and the `Brief` tool checks a quote only for owner-only fields, so
-`provenance: "user"` on a criterion is accepted with no quote at all. `GATING_REQUIRED` is `objective`,
-`why`, `successCriteria`: a criterion the model wrote itself satisfies gating. There is no IPC that edits
-the brief; the panel has no brief editor.
-
-Confirmation paths:
-
-| Option | What it means | Cost |
-|---|---|---|
-| 1. Panel only (pressed) | A Confirm and a Drop button per criterion in the case panel and on the scope card; `answer_question` refuses the scope question on every channel | The owner must be at the app or the phone; "yes, those are right" typed in the chat confirms nothing |
-| 2. Spoken with a quote | The scope question is spoken: `answer_question` with the owner's quote naming "Confirm all" or "Drop all"; no buttons | Over MCP (`mcp-stdio`, the front door under `cases:answer`) a quote is recorded, not checked, so a client holding that scope can confirm scope the model proposed |
-| 3. Both | Buttons in the panel and on the card, and the spoken answer | Option 2's cost; the most natural for the owner |
-
-A criterion is also `confirmed` at birth, on every option, when the `Brief` tool adds it with a quote that
-`requireOwnerQuote` finds in the owner's messages and the criterion's text is words from that quote, or
-when a playbook gating answer writes it (`applyToBrief`, already `provenance: 'user'` from an answered
-question).
-
-Gating:
-
-| Option | What it means | Cost |
-|---|---|---|
-| A. Unchanged | Any non-empty `successCriteria` satisfies gating | A case can leave `draft`, plan and send with no criterion the owner ever saw |
-| B. At least one confirmed | `missingForGating` reports `successCriteria` until one criterion is `confirmed` | One more owner step before a new case goes `active` |
-| C. None proposed | As B, and gating stays incomplete while any criterion is still `proposed` | The model cannot leave a suggestion standing while work starts |
-
-**Recommendation: 3 and B.** Success criteria are what the owner alone knows, which is what the gating
-pass exists to ask. A case already past gating is never sent back to `draft` (§10).
-
-### Q-c. The check command of a `software-repo` case
-
-**Today.** `software-repo.refresh` runs fixed, read-only `git` and `gh` argv through `execFile` with no
-shell, 5 s each, inside `cases.softwareRepo.refreshBudgetMs` (6 s), at turn start. No case code runs a
-command the owner or the model names. A wake-up turn has no `Bash`, `Write` or `Edit`
-(`allowedToolNames` is the case tools plus `WAKEUP_BASE_TOOLS`), so today nothing in an unattended turn
-executes code. The command named here would be the first host-run program whose behaviour the repository
-decides: `npm test` runs whatever `package.json` says, and the model can edit `package.json` in an owner
-turn. **Read-only cannot be enforced on an arbitrary command, and neither can "no network".** §6.6 says
-what can be held.
-
-| Question | Options | Cost |
-|---|---|---|
-| In stage 8 at all? | 1. Deferred to its own stage. 2. Built last, off by default (`cases.softwareRepo.check.enabled`). 3. Built, on by default | 1: `software-repo` cases get `stale` from the head moving but never `failing`, and no check evidence. 3: a new case type field that runs code as soon as the owner names one |
-| Approval | 1. Every run asks. 2. Once per exact command and repository, by a pressed card that shows the argv. 3. None beyond the owner naming it with a quote | 1: two prompts a turn; nobody keeps it on. 2: the approved words can come to mean something else when the repo changes. 3: the quote proves the owner wrote the words, not that they meant "run this every turn" |
-| Unattended | 1. Never in a wake-up turn. 2. In a wake-up only when head and tree are what the last owner turn left. 3. Always | 1: a criterion backed by the check goes `stale` when the repo moves while the owner is away, and stays so until an owner turn. 2 and 3 put code execution into turns with no one watching |
-| Service mode | 1. Off unless the admin `service.json` enables it. 2. As on the desktop | 1: one more admin key. 2: the service account runs a command named in data-dir files it can write |
-| When it runs | 1. At turn close, only when head or tree changed in the turn, waiting up to a cap. 2. After the turn, in the background, the result landing in the next turn. 3. At both turn start and close, always | 1: the turn's last step can take minutes. 2: "pass to fail across this turn" is reported one turn late. 3: every turn pays the suite's run time twice |
-
-**Recommendation:** build it **last and off by default**; **approved once** per exact command and
-repository on a pressed card; **owner turns only, never in a wake-up**; **off in service mode** until the
-admin enables it; **at close only when the tree changed**, capped at 120 s, with the turn-start state taken
-from the last recorded run rather than a fresh one. Parts 1 to 5 are complete without it.
-
-### Q-d. The verify pass: when it runs, what it costs, which role
-
-**Today.** `orient` and `classify` are one-shot calls charged to the case's `usd` budget through
-`recordOneShotUsage` and `usageHook`. `verify` is already a case role (`src/cases/roles.js`): `main`, on a
-provider family other than `judge`'s when one is usable. Ingest uses it per proposal. `CATEGORIES` in
-`budget.js` is `usd`, `deadline`, `turnsPerDay`, `contactsPerDay`, `questionsPerDay`; a new category
-touches grants, thresholds, triggers and the panel.
-
-| Option | What it means | Cost |
-|---|---|---|
-| 1. Every changed turn | One call at the close of every turn that wrote a fact, a decision or an executor result | One `main`-class call per working turn: roughly the criteria plus up to 12,000 characters of records in, at most 1,024 tokens out. Not measured |
-| 2. On request only | The pass runs when the model calls `Progress.verify` or proposes `done`, and when the owner presses "Check now" | A turn that met a criterion shows `unmet` until someone asks; the model decides when it is judged |
-| 3. Once a day | With the `daily-orientation` wake-up, plus on request | Up to a day late |
-| Budget | (i) charged to `usd` like orient; (ii) a category of its own; (iii) `usd` plus a per-day call cap in settings | (ii) is a schema change in five places for one caller |
-| Role | (i) `verify` (main, other family); (ii) `utility` | (ii) is cheaper and reads the record less well, and it loses the "not the model that did the work" property |
-
-**Recommendation: 1, (iii), (i):** every changed turn, on `verify`, charged to `usd`, with
-`cases.verify.maxPassesPerDay` (default 24) and skipped when the `usd` budget has passed 80 %. The owner
-can set `cases.verify.when` to `request`.
-
-### Q-e. May `external-agent` facts alone make a criterion `met`?
-
-**Today.** `external-agent` never counts as the owner. The recommendation gate accepts it (it refuses only
-`inferred` and `unknown`). The outbound gate's rule 3 does not (`BACKING` is `user`, `sourced`). An
-executor's value never supersedes a `user` or `sourced` fact (`assertExternal`). `external-agent` facts are
-written by host code from a pinned adapter's record; `sourced` facts are declared by the model.
-
-| Option | What it means | Cost |
-|---|---|---|
-| 1. Yes | `user`, `sourced` and `external-agent` are equal as evidence | "Three written quotes received" can be `met` on what a phone agent reported and nobody checked |
-| 2. Only beside a `user` or `sourced` fact | At least one cited fact must be `user` or `sourced` | The model can supply that fact itself by declaring a `sourced` one, which is weaker than the executor's record |
-| 3. Never | `external-agent` ids are rejected as evidence | A criterion about what an executor did can only be met by the owner saying so |
-
-**Recommendation: 1,** with the provenance of every evidence fact shown on the criterion's row and on the
-close card ("reported by phone-agent"). Option 2 looks stricter and is not.
-
-### Q-f. Existing cases: are their criteria `confirmed` or `proposed`?
-
-**Today.** Nothing on disk says who wrote a criterion. The journal has `Brief successCriteria appended
-(model)` lines, but `(user)` there was never checked for this field, and a detour-created case's first
-criterion is the detour's summary (`DetourRouter`, `provenance: 'model'`).
-
-| Option | What it means | Cost |
-|---|---|---|
-| 1. Grandfathered | Every existing criterion reads `confirmed` (origin `legacy`) | Authorship nobody knows is recorded as the owner's |
-| 2. Proposed until confirmed | Every existing criterion of an open case reads `proposed` (origin `legacy`); the panel offers "Confirm all" | Each open case needs one press before anything counts; until then its summary reads "0 confirmed criteria" |
-| 3. Asked once | As 2, and each open case gets one scope question on its first turn after the upgrade | A burst of questions on the first day |
-
-**Recommendation: 2.** A `done` or `abandoned` case is never migrated and reads as it does today (§10).
-The same answer applies to an existing case's objective.
-
-### Q-g. What does `stale` do to a case that is already `done`?
-
-**Today.** `done` is read-only (`ALLOWED.done` is the read ops and `Playbook.propose`), its wake-ups are
-cancelled, and there is no transition out of `done`. A `software-repo` case's repository keeps moving
-after the case closes, so "the tree changed" would make every closed repo case `stale` within days.
-
-| Option | What it means | Cost |
-|---|---|---|
-| 1. Frozen at close | The states and the list are recorded when the case closes and never recomputed | A fact corrected later through another path is not reflected here |
-| 2. Recomputed, shown only | The panel and `open_case` show current states; nothing notifies | Closed repo cases all read `stale`; the word stops meaning anything |
-| 3. Briefing | As 2, and a low briefing when a closed case's criterion goes `stale` from a fact (never from the tree) | Needs a writer into a `done` case, which nothing has today |
-| 4. Reopen | A `done → active` transition | A new status transition and its rules; out of proportion here |
-
-**Recommendation: 1.**
-
-### Q-h. A change to `brief.md` made outside the case tools
-
-**Today.** The owner may edit a case's files in an editor; `beginTurn` commits them as `owner edits`. The
-same bytes can be written by a `Bash` command the model runs (the stage 1 write-guard gap), and code
-cannot tell which it was.
-
-| Option | What it means | Cost |
-|---|---|---|
-| 1. Not the owner's | A criterion or an objective that appears or changes in the file with no tool behind it is `proposed` (origin `file`), with "changed outside the app" beside it | An owner who edits the file confirms the edit with one press |
-| 2. The owner's | A file edit confirms | One `Bash` line confirms any scope the model likes |
-
-**Recommendation: 1.**
-
-### Q-i. Which tool results the verify pass sees
-
-**Today.** `CaseRuntime` never sees a turn's tool results; `endTurn` receives a summary and the assistant's
-final text (which becomes the journal entry). Tool results live in the send path
-(`src/ipc/chat-handlers.js`) and in `AgentLoop`'s return for a wake-up.
-
-| Option | What it means | Cost |
-|---|---|---|
-| 1. Case-tool results only | Results of `Ledger`, `Decide`, `Executor`, `Ingest` and `Progress` calls of this turn | The judge does not see a `Bash` or `WebFetch` result the turn relied on; it sees the facts recorded from them |
-| 2. Every tool result, capped | All of the turn's results, 1,000 characters each, 6,000 in total, framed as untrusted | Third-party text (a web page, command output) reaches the judge; it can argue, though it can never be evidence |
-| 3. None | Only the record | The outline named tool results |
-
-**Recommendation: 1.** Evidence has to be a fact id either way, so a result that was not recorded as a
-fact cannot make anything `met`; option 2 adds an injection surface for no acceptance it can cause.
-
-### Q-j. Does `Fail` add to the abandoned-approaches record?
-
-**Today.** `recordFailure` writes `journal/…-failure.md` and moves the case to `needs-direction`. The
-orientation shows that report only while the case is `needs-direction`; after the owner's direction the
-failed approach is in no orientation section except, by chance, the last journal entry.
-
-| Option | What it means | Cost |
-|---|---|---|
-| 1. No | Only `Progress.abandon` writes the record | After a direction answer the model has to record the dead approach itself or it is forgotten |
-| 2. Yes, on the direction answer | When a `direction` answer resumes the case, code appends one record naming the failure report (`origin: 'failure'`) | The owner's direction may have been "try that again"; the record then says abandoned when it was not, until a `withdraw` line is added |
-
-**Recommendation: 1** for this stage; the orientation line for a resumed case names the last failure
-report so the model can record it.
+Still assumptions, each with what breaks if it is wrong: §17.
 
 ## 3. Scope
 
@@ -235,7 +81,7 @@ report so the model can record it.
 - `src/cases/abandoned.js`: `.kl/abandoned.jsonl`.
 - `src/cases/verify/`: `store.js` (`.kl/verification.json`), `status.js` (pure state computation),
   `evidence.js` (the turn's evidence and the id resolvers), `judge.js` (the verify pass), `readiness.js`
-  (ready to close), `check.js` (the `software-repo` check command, behind Q-c).
+  (ready to close), `check.js` (the `software-repo` check command, behind its setting).
 - The `Progress` case tool (`src/tools/builtin/case-progress-tool.js`): `status`, `abandon`, `abandoned`,
   `askScope`, `proposeDone`.
 - Turn lifecycle: marks at `beginTurn`, a verification turn-start hook, the verify pass and the
@@ -251,7 +97,7 @@ report so the model can record it.
 | Item | Where |
 |---|---|
 | Structured child hand-off whose evidence feeds the verify pass | a later stage; the seam is §6.10 |
-| A way out of `done` (reopen) | not planned; Q-g |
+| A way out of `done` (reopen) | not planned (R-C8-7) |
 | Checks for case types other than `software-repo` | not planned |
 | Blocking a plan that repeats an abandoned approach | deferred (§19); the record is advice in the orientation |
 | Closing the `Bash` write-guard gap | the stage 1 residual, unchanged (§18) |
@@ -323,19 +169,19 @@ never sent to the verify pass, and is never counted in a summary except as "N pr
 | `owner-quote` | `Brief` append with `provenance: "user"`, a quote `requireOwnerQuote` finds, and the item's text passing `wordsInText(item, quote)` | `confirmed` |
 | `gating-answer` | Playbook gating's `applyToBrief` (an answered gating record; carries the answer's `factId`) | `confirmed` |
 | `detour` | `DetourRouter` prefill of a new case (`successCriteria: [summary]`) | `proposed` |
-| `owner-create` | objective only: `createCase` called by IPC `case:create` or by `create_case` (which has already held the objective to the owner's quote) | `confirmed` |
-| `legacy` | Found in `brief.md` when the case first meets stage 8 | **[depends on Q-f]** |
-| `file` | Found in `brief.md` later with no tool write behind it | **[depends on Q-h]**; `proposed` as recommended |
+| `owner-create` | objective only: `createCase` called by IPC `case:create` with an objective in the form, or by `create_case` (which has already held the objective to the owner's quote) | `confirmed` |
+| `legacy` | Found in `brief.md` when the case first meets stage 8 | `proposed` (R-C8-6) |
+| `file` | Found in `brief.md` later with no tool write behind it | `proposed` (R-C8-8), shown as "changed outside the app" |
 
 `createCase` learns who gave the objective from a new option, `objectiveBy: 'owner'`, passed only by the
-two host callers above. Like `force`, no case tool accepts it; the detour router passes nothing, so a
-detour's objective is `proposed`.
+two host callers above. Like `force`, no case tool accepts it; the detour router passes nothing, so a detour's objective is `proposed`. The renderer's create form sends no objective today (§2.1), so the
+usual first objective of a desktop case is the model's, and is `proposed` until the owner confirms it.
 
 **Confirming** (`ScopeStore.confirm(ids, { by, channel, factId, quote })`):
 
 - the panel or the scope card's buttons (IPC `case:confirmScope`, §8.1), recorded as `by: 'owner-action'`;
-- an answer to a `scope-confirm` question (§6.7), recorded with the answer's `factId` **[class depends on
-  Q-b]**;
+- an answer to a `scope-confirm` question (§6.7), recorded with the answer's `factId` (the
+  question is spoken, R-C8-2);
 - at birth, by `owner-quote` or `gating-answer`.
 
 Every confirmation names the entry's `hash` as the caller saw it. A hash that no longer matches is refused
@@ -346,7 +192,8 @@ current numbers and not the ones the question captured.
 
 - `provenance: "user"` on either field now requires a quote, as the owner-only fields do. The quote must
   be in `ctx.ownerMessages`, and the item (or the objective) must be words from the quote
-  (`wordsInText`). A miss is refused (`SCOPE_NOT_IN_QUOTE`): `Quote the owner's words that state this
+  (`wordsInText`: the whole text as one contiguous run, folded for case, spacing and curly quotes, on word
+  boundaries; so it is the owner's own phrase, not a paraphrase). A miss is refused (`SCOPE_NOT_IN_QUOTE`): `Quote the owner's words that state this
   criterion, or add it without provenance "user" as a proposal.`
 - `append` without `provenance: "user"` adds a `proposed` entry and returns `{ ok: true, criterion: { id,
   state: 'proposed' }, note: 'Proposed. It counts for nothing until the owner confirms it. Ask with
@@ -369,8 +216,8 @@ writes that view; it runs only where the case lock is held: in `beginTurn` after
 commit, after each `Brief` tool write, and inside the `systemAction` of every IPC in §8.1. Reads outside
 the lock (the panel, `open_case`) use `view`.
 
-**Gating [depends on Q-b].** `Brief.missingForGating` takes the scope view. Under option B it reports
-`successCriteria` until one entry is `confirmed`; under C, until none is `proposed`. `completeGating`'s
+**Gating (R-C8-2).** `Brief.missingForGating` takes the scope view and reports `successCriteria` until one
+entry is `confirmed`. A proposed entry beside a confirmed one does not hold gating back. `completeGating`'s
 message names what is missing: `Gating pass incomplete; still missing: successCriteria (no criterion is
 confirmed by the owner; ask with Progress askScope).` `gating.complete: true` already in a brief is never
 cleared.
@@ -401,6 +248,11 @@ history, owner-only) and not a `Fail` report (the case stops and waits).
   record stays in the file and leaves the orientation. Nothing is ever edited or removed.
 - Status rules: `Progress.abandon` is allowed in `draft`, `active` and `needs-direction`; `paused`, `done`
   and `abandoned` cases are read-only as for every write.
+
+**`Fail` writes nothing here (R-C8-10).** While a case's `statusReason.kind` is `direction` (it was resumed
+by the owner's direction after a failure report), the section ends with one host line naming that
+report, taken from the direction fact's `attr`: `The last failure report is journal/<name>.md. If the
+approach it describes is dropped, record it with Progress abandon.`
 
 **Shown.** The orientation's `## Abandoned approaches` section (§6.8): the newest 8 active records, one
 line each, at most 1,500 characters, then `… N earlier; Progress abandoned lists them`. `Progress`
@@ -441,7 +293,7 @@ its prefix; an id with no resolver is rejected.
 
 | Prefix | Resolver | Holds when |
 |---|---|---|
-| `f-` | the ledger | the fact exists, is `active`, and its provenance is `user`, `sourced` or `external-agent` **[depends on Q-e]**; never `inferred` or `unknown`; and no active load-bearing unknown sits on the same `subject.attr` (the recommendation gate's `blockers` rule) |
+| `f-` | the ledger | the fact exists, is `active`, and its provenance is `user`, `sourced` or `external-agent`, any of them alone (R-C8-5); never `inferred` or `unknown`; and no active load-bearing unknown sits on the same `subject.attr` (the recommendation gate's `blockers` rule) |
 | `chk-` | the check store (§6.6) | the run exists, exited 0, was made with a clean tree, and its `head` equals the snapshot's `head` now |
 
 **Computation** (`computeCriterionState({ entry, records, facts, checks, snapshot })`, pure):
@@ -472,7 +324,7 @@ computed states with the cached ones in `.kl/verification.json`. A criterion tha
 stale: f-0033 was superseded by f-0060.'`, and a `Since last turn` note. `Reorient` acknowledges it by key
 like any hook trigger. The hook then writes the new cache (under the turn's lock).
 
-**A `done` or `abandoned` case [depends on Q-g].** As recommended, `setStatus` to either status calls
+**A `done` or `abandoned` case (R-C8-7).** `setStatus` to either status calls
 `freezeProgress(id)`: the computed states and the ready-to-close list are written to
 `.kl/verification.json` as `closed: { at, status, summary, criteria, readiness }`, and every later read of
 that case returns `closed` as it is, labelled `as of <date>`. `setStatus` already runs under the lock on
@@ -515,8 +367,8 @@ is counted; the item's note says how many other PRs are open and not counted.
 - allowed only in `active`; refused in `draft` and `needs-direction` (added to `DENIED`); refused while a
   re-orientation is pending (`reoriented: true`, as `Recommend` is);
 - refused with `NO_CONFIRMED_CRITERIA` when nothing is confirmed;
-- **[depends on Q-a]** refused with `NOT_READY` and the open items when the chosen rule is not satisfied
-  (as recommended: any confirmed criterion not `met`);
+- refused with `NOT_READY` and the open items while any confirmed criterion is not `met` (R-C8-1; `stale`
+  and `failing` refuse too);
 - refused with `CLOSE_PROPOSAL_OPEN` while one is open, and with `CLOSE_DECLINED_UNCHANGED` when the owner
   answered "Keep working" to a proposal whose list fingerprint (a hash of item ids and states) equals the
   current one;
@@ -535,13 +387,12 @@ is.
 - `keep`: records the fingerprint as declined; nothing else.
 - `done`: applies only when the recorded answer's channel is `in-app` or `mobile` (the detour router's
   `PRESS_CHANNELS` rule: `in-app-chat` and every `mcp-*` channel are not a press). It recomputes the list
-  now; **[depends on Q-a]** under option 4 a list that is not ready refuses, with a note on the question;
-  otherwise it calls `setStatus(id, 'done', { kind: 'owner', by: 'owner', ref: <answer fact id>, note:
+  now, for the close record only (the owner's press is never refused for an open item, R-C8-1), and calls `setStatus(id, 'done', { kind: 'owner', by: 'owner', ref: <answer fact id>, note:
   'close proposal q-0021; open at close: criteria-met (sc-003)' })`. The handler runs inside
   `answerQuestion`'s `systemAction`, as the direction handler does.
 
 The panel's own Done button stays. Its confirm dialog shows the summary line and the open items first
-(**[depends on Q-a]**: refused when not ready under option 4).
+and is never refused for an open item (R-C8-1).
 
 ### 6.5 The verify pass at turn close — `src/cases/verify/judge.js`
 
@@ -552,7 +403,7 @@ The panel's own Done button stays. Its confirm dialog shows the summary line and
 - the case is `active` or `needs-direction` after the turn, and at least one criterion is `confirmed`;
 - the turn was not stopped, blocked or failed (`turn.signal` not aborted; the caller passed
   `verify: true`, which the stopped, blocked and failed exits of the send path do not);
-- `cases.verify.when` is `changed-turn` **[depends on Q-d]**, the day's pass count is under
+- `cases.verify.when` is `changed-turn` (the default, R-C8-4), the day's pass count is under
   `maxPassesPerDay`, and the `usd` budget has not passed `skipAboveUsdPercent`.
 
 Otherwise it is skipped; a skip for budget or the daily cap writes one journal line a day.
@@ -572,9 +423,11 @@ inside one data fence, at most `cases.verify.maxInputChars` (12,000):
 3. Facts written this turn: id, provenance, `subject.attr`, value, statement, source kind and ref, status.
 4. Decisions written this turn: id, text, fact ids.
 5. Executor results recorded this turn: job id, executor, state, the fact ids they produced.
-6. **[depends on Q-c]** The newest check run: id, pass or fail, head, whether the tree was clean. Never
+6. When a check is approved (§6.6), the newest check run: id, pass or fail, head, whether the tree was clean. Never
    its output.
-7. **[depends on Q-i]** Tool results of this turn, capped, labelled as not evidence.
+7. Results of this turn's case-tool calls only (`Ledger`, `Decide`, `Executor`, `Ingest`, `Progress`;
+   R-C8-9), 1,000 characters each and 4,000 in all, labelled as not evidence. No other tool's result is
+   sent.
 8. Other active `user`, `sourced` and `external-agent` facts as one-line rows, newest first, until the
    budget is used, then a count of what was left out.
 
@@ -625,9 +478,10 @@ The block is written even when the model's text is empty.
 no state, adds `Verify pass: no usable verdict (<reason>)` to the block, and never fails `endTurn`: the
 turn commits as it does today.
 
-### 6.6 The check command of a `software-repo` case — `src/cases/verify/check.js` **[all of §6.6 depends on Q-c]**
+### 6.6 The check command of a `software-repo` case — `src/cases/verify/check.js`
 
-This is the dangerous part of the stage. What follows is the recommended form; Q-c can remove it.
+This is the dangerous part of the stage. It is built last and ships behind
+`cases.softwareRepo.check.enabled`, default off (R-C8-3).
 
 **What it is.** One command per case that says whether the repository is in a good state, such as `npm
 test`. King Louie runs it in the repository and records exit code 0 as a pass.
@@ -702,10 +556,13 @@ running it" button (IPC `case:setCheck` with `approved: false`).
 
 - `child_process.spawn(file, args, { cwd: <repo real path>, shell: false, windowsHide: true, stdio:
   ['ignore', 'pipe', 'pipe'] })`. The repository path goes in as `cwd` only, never as an argument.
-- On Windows a program that resolves to a `.cmd` or `.bat` file (`npm`, `gradlew`) cannot be spawned
-  without a shell on current Node. It is run as `cmd.exe /d /s /c` with the already validated tokens; the
-  token alphabet above excludes everything `cmd.exe` interprets. This path needs its own tests on Windows
-  before it ships (§14).
+- The program is found with `resolveCommand` (`src/service/doctor-runbooks.js`), the lookup `doctor`
+  already uses for runbook steps: on Windows only a `.com` or `.exe` is started. **Nothing is ever run
+  through `cmd.exe`.** A name that resolves only to a `.cmd` or `.bat` shim is refused (`CHECK_SHIM`),
+  with one exception that needs no shell: `npm` is run as the `node.exe` found on `PATH` with
+  `node_modules/npm/bin/npm-cli.js` beside it, then the approved arguments, which is what the shim itself
+  does. When that file is not there, `npm` is refused like any other shim. `pnpm`, `yarn` and
+  `gradlew.bat` therefore cannot be the check on Windows in this stage (plan, New questions).
 - Environment: built from nothing, then `PATH`, `HOME` or `USERPROFILE`, `SystemRoot`, `TEMP`/`TMP`,
   `LANG`, the names in `cases.softwareRepo.check.envAllow` (default empty), `CI=1` and `KL_CASE_CHECK=1`.
   No provider key, no other `KL_*` variable, and never `ELECTRON_RUN_AS_NODE`, reaches it.
@@ -743,8 +600,11 @@ Added to `CASE_TOOL_NAMES`, so it is in owner turns and wake-up turns. Every act
 | `askScope` | `Progress.askScope` | `draft`, `active`, `needs-direction` | Asks the owner to confirm the proposed criteria and, when it is proposed, the objective |
 | `proposeDone` | `Progress.proposeDone` | `active` only; refused while a re-orientation is pending | §6.4 |
 
-There is no action that sets a state, writes a verification record or runs the check. **[depends on Q-d]**
-under "on request", a sixth action `verify` runs the pass of §6.5 on the whole record.
+There is no action that sets a state, writes a verification record or runs the check. With
+`cases.verify.when: 'request'` (R-C8-4) a sixth action, `verify`, runs the pass of §6.5 over the whole
+record, under the same daily cap and budget rule, and `proposeDone` runs it first; with the default the
+action is refused (`VERIFY_NOT_ON_REQUEST`), because the pass already runs at the close of every changed
+turn.
 
 **`askScope`** creates one question through `createQuestion` (charged to `questionsPerDay`; refused with
 `SCOPE_NOTHING_PROPOSED` when nothing is proposed and `SCOPE_QUESTION_OPEN` when one is open): `payload:
@@ -756,9 +616,9 @@ confirms, or drops, exactly the entries whose hash still equals the one in the p
 answer confirms nothing and leaves a note (`Answer with "Confirm all" or "Drop all", or use the buttons
 beside each criterion in the case panel.`). One at a time is done in the panel or on the card.
 
-**[depends on Q-b]** Under "panel only", `scope-confirm` joins `PRESSED_TYPES` and its handler applies
-only from `in-app` or `mobile`. Under "spoken" or "both" it stays spoken: `answer_question` takes it with
-the owner's quote naming the option, on every channel that serves spoken answers.
+`scope-confirm` is a spoken question (R-C8-2): `answer_question` takes it with the owner's quote naming
+the option, on every channel that serves spoken answers, and the card and the panel carry buttons as
+well. It is not added to `PRESSED_TYPES`.
 
 `CASE_MODE_PROMPT` gains three lines: criteria you add are proposals until the owner confirms them; you
 cannot mark a criterion met, so record the evidence as facts; record an approach you drop with `Progress
@@ -798,7 +658,7 @@ orientation.
 - With no criteria at all, `Progress` is one line: `No success criteria yet.` With the stage's files
   absent (a case no turn has touched since the upgrade) the sections are built from `ScopeStore.view`
   alone, in memory.
-- A `done` or `abandoned` case shows the frozen record with `as of <date>` **[depends on Q-g]**.
+- A `done` or `abandoned` case shows the frozen record with `as of <date>` (R-C8-7).
 
 ### 6.9 Turn lifecycle changes — `src/cases/case-runtime.js`
 
@@ -824,7 +684,7 @@ Steps 1 to 3 are wrapped so that nothing in them can keep the turn from committi
 Callers: the owner send path (`src/ipc/chat-handlers.js`) passes `verify: true` and `evidence` only on
 its normal exit (the one that journals `answerText`); its stopped, blocked and failed exits pass
 neither. `runWakeupTurn`'s `close` passes `verify: true` only for the `acted` outcome. `evidence` is `{
-toolResults: [{ tool, action, ok, text }] }` **[contents depend on Q-i]**; the runtime caps it again and
+toolResults: [{ tool, action, ok, text }] }` (this turn's case-tool calls only, R-C8-9); the runtime caps it again and
 never trusts its ids.
 
 `CaseRuntime` gains `scope(id)`, `abandoned(id)`, `verification(id)`, `progress(id)` (the joined view the
@@ -917,7 +777,7 @@ ledger.
 `records` keeps the newest 5 per criterion. `cache.states` is never read as truth (V3); it exists so the
 turn-start hook can see a change and so a commit's diff shows it.
 
-### 7.4 `.kl/checks.json` **[depends on Q-c]**
+### 7.4 `.kl/checks.json`
 
 ```json
 {
@@ -938,7 +798,7 @@ turn-start hook can see a change and so a commit's diff shows it.
 
 | `payload.type` | Created by | Class | Options | Charged |
 |---|---|---|---|---|
-| `scope-confirm` | `Progress.askScope` | **[Q-b]** | `all`, `none` | yes |
+| `scope-confirm` | `Progress.askScope` | spoken | `all`, `none` | yes |
 | `close-proposal` | `Progress.proposeDone` | pressed | `done`, `keep` | yes |
 | `check-approve` | setting or changing `check` | pressed | `approve`, `refuse` | no |
 
@@ -960,7 +820,7 @@ allowlist change; attached, they run on the service.
 |---|---|---|---|
 | `case:progress` | `{ caseId }` | `{ ok, untrustedText: true, objective, criteria, summary, readiness, abandoned, check }` | Read only; no lock; no write |
 | `case:confirmScope` | `{ caseId, action: 'confirm' \| 'drop' \| 'edit' \| 'add', target: 'objective' \| <sc-id> \| 'all-proposed', hash?, text? }` | `{ ok, progress }` | Inside `systemAction`. `confirm` and `drop` need the `hash` the panel showed (`SCOPE_STALE` otherwise). `edit` and `add` take the owner's typed `text`, write it to `brief.md` and record it `confirmed` (`by: 'owner-action'`). The only path that changes a confirmed entry |
-| `case:setCheck` **[Q-c]** | `{ caseId, command?, approved? }` | `{ ok, check, questionId? }` | Sets `brief.check` (validated) and opens the approval question; `approved: false` withdraws every approval |
+| `case:setCheck` | `{ caseId, command?, approved? }` | `{ ok, check, questionId? }` | Sets `brief.check` (validated) and opens the approval question; `approved: false` withdraws every approval |
 | `case:setStatus` (existing) | unchanged | adds `progress` | The Done confirm dialog reads `case:progress` first |
 
 Each is an owner action, like `case:grantBudget`: the model has no path to them.
@@ -981,9 +841,8 @@ Answers:
 - `close-proposal` and `check-approve` are pressed: `answer_question` refuses them on every channel, the
   chat's own (`in-app-chat`) included, with the existing pressed message; the card's buttons
   (`case:answerQuestion`) or the phone answer them.
-- `scope-confirm` **[depends on Q-b]**: when spoken, `answer_question` takes it under `cases:answer` (the
-  front door), over `mcp-stdio`, and in King Louie's chat (where the quote is checked against the owner's
-  message). When pressed, it is refused like the other two.
+- `scope-confirm` is spoken (R-C8-2): `answer_question` takes it under `cases:answer` (the front door),
+  over `mcp-stdio`, and in King Louie's chat (where the quote is checked against the owner's message).
 - `list_questions` already reports each record's class from `answerClass`; nothing changes there.
 
 In a case chat the tools stay confined to that case (`CASE_SCOPED_TOOLS`), and the chat-attach rule
@@ -1003,13 +862,14 @@ In a case chat the tools stay confined to that case (`CASE_SCOPED_TOOLS`), and t
 - A state tag is text, not colour alone: `met`, `stale`, `failing`, `unmet`, `proposed`.
 - The card for `scope-confirm` and `close-proposal` is drawn from the question store plus a live
   `case:progress` read, never from the message text; it redraws on `case:changed` (`what: 'progress'`,
-  which the runtime sends after a confirmation, a verify pass and a close). The close card disables "Mark
-  done" with the reason when the live list refuses it **[depends on Q-a]**.
+  which the runtime sends after a confirmation, a verify pass and a close). The close card never
+  disables "Mark done" (R-C8-1); it shows what is still open beside the button.
 - Buttons act through the IPC of §8.1; a second click while one is in flight is ignored.
 
 ### 8.4 The phone
 
-A pressed question reaches the paired phone as it does today (`kl.question.ask`, the text and options).
+A pressed question reaches the paired phone as it does today (`kl.question.ask`). The apps read `kind`,
+`urgency`, `text` and `options` and no payload type (§2.1), so the new types need nothing from them.
 The close proposal's host-built text carries the summary and the open items, so the phone shows the list
 with no app change. No new message type; `tests/vectors/approval-v1` is untouched.
 
@@ -1019,16 +879,15 @@ with no app change. No new message type; `tests/vectors/approval-v1` is untouche
 
 ```js
 verify: {
-  when: 'changed-turn',          // 'changed-turn' | 'request' | 'off'   [Q-d]
+  when: 'changed-turn',          // 'changed-turn' | 'request' | 'off'   (R-C8-4)
   timeoutMs: 20000,
   maxInputChars: 12000,
   maxPassesPerDay: 24,
-  skipAboveUsdPercent: 80,
-  toolResults: 'case-tools'      // 'case-tools' | 'all' | 'none'        [Q-i]
+  skipAboveUsdPercent: 80
 },
 softwareRepo: {
   refreshBudgetMs: 6000,         // existing
-  check: { enabled: false, timeoutMs: 120000, envAllow: [] }            // [Q-c]
+  check: { enabled: false, timeoutMs: 120000, envAllow: [] }            // R-C8-3
 }
 ```
 
@@ -1049,11 +908,11 @@ and `case.yaml` `roles.verify`; there is no new role.
   shows them as origin `file`, `proposed`. Nothing is trusted that should not be.
 - **First contact.** A case with no `.kl/scope.json` is read through `ScopeStore.view`, which shows every
   criterion and the objective as origin `legacy`, in memory. The first locked moment (`beginTurn`, or the
-  `systemAction` of a panel action) writes the file with `migratedAt`. `legacy` entries are `proposed` or
-  `confirmed` by Q-f.
+  `systemAction` of a panel action) writes the file with `migratedAt`. `legacy` entries are `proposed`
+  (R-C8-6); the panel offers "Confirm all".
 - **`done` and `abandoned` cases** are never opened for writing, so they never get the files. Their
   panel shows the brief as today and one line: `Closed before progress was tracked.`
-- **Gating.** `gating.complete: true` is never cleared, whatever Q-b's answer; the new rule applies to
+- **Gating.** `gating.complete: true` is never cleared (R-C8-2); the new rule applies to
   `completeGating` calls made after the upgrade.
 - **Wake-ups.** A case whose criteria are all `legacy` and unconfirmed keeps running exactly as before:
   nothing in this stage stops a turn, a plan or a send because a criterion is proposed. The summary reads
@@ -1072,15 +931,15 @@ and `case.yaml` `roles.verify`; there is no new role.
 | The model adds criteria | It defines success as what it already did | Proposed entries count for nothing; only a verified owner quote, an owner action or an answered question confirms; confirmation binds to the text's hash |
 | The model rewrites the list | It drops what is unmet | V5: confirmed entries change only through `case:confirmScope` or a verified quote |
 | A quote confirms a criterion | "ok" is quoted to confirm anything | The criterion's text must be words from the quote (`wordsInText`), the rule `create_case` uses for an objective |
-| A spoken scope answer over MCP | A client with `cases:answer` confirms scope | The existing trust in that scope (quotes are recorded, not checked, off the app); the options are only "all" and "none" of exactly the hashed entries; closing stays pressed. Q-b option 1 removes it |
+| A spoken scope answer over MCP | A client with `cases:answer` confirms scope | The existing trust in that scope (quotes are recorded, not checked, off the app); the options are only "all" and "none" of exactly the hashed entries; closing stays pressed. Accepted by R-C8-2 |
 | `met` | The model declares success | No tool sets a state. A record is written only by code after a second model's verdict whose every id code resolved; the state is recomputed on each read |
 | The verify pass reads model-written facts | A `sourced` fact with an invented source is cited | Not prevented: `sourced` is model-declared (parent, stage 1). The row shows each evidence fact's provenance and source; an ingest-verified source is labelled as such; the owner sees the evidence on the close card |
 | The verify prompt carries case text | Injection steers the verdict | A verdict can only name ids; a `met` that code cannot resolve is an opinion. The worst a steered pass does is mark a met criterion `stale` |
-| Tool results in the verify input **[Q-i]** | Third-party text argues for `met` | Option 1 sends case-tool results only; any option frames them as not evidence, and evidence must be a fact id |
+| Tool results in the verify input | Third-party text argues for `met` | Only case-tool results are sent (R-C8-9), framed as not evidence; evidence must be a fact id |
 | The close proposal | The model closes the case | It cannot: `done` is applied only from a press on `in-app` or `mobile`, by `setStatus` with `by: 'owner'`; `TRANSITIONS` gains no `runtime` row into `done` |
 | The close card's text | Model text dressed as the list | Host lines first (summary, items, ids), the model's one-line note last and labelled; never cut; refused over 2,000 characters |
 | Abandoned records | Another case reads them; they leak outbound | Never indexed across cases; no outbound reference syntax; shown only where private facts already are |
-| The check command **[Q-c]** | Code runs on the owner's machine | Off by default; owner-named with an exact quote or typed in the panel; approved once on a pressed card that shows the argv; no shell; a narrow token alphabet; owner turns only; scrubbed environment; time limit; tree kill; output never committed or shown to a model or a remote client; admin-only in service mode |
+| The check command | Code runs on the owner's machine | Off by default; owner-named with an exact quote or typed in the panel; approved once on a pressed card that shows the argv; no shell; a narrow token alphabet; owner turns only; scrubbed environment; time limit; tree kill; output never committed or shown to a model or a remote client; admin-only in service mode |
 | The same, honestly | The repository decides what the command does; the model can edit the repository | **Not controlled.** Stated on the approval card and in §18 |
 | New `.kl/` files | The model edits them | `caseWriteRefusal` already refuses `Write`, `Edit` and `MultiEdit` anywhere under `.kl/` and on `brief.md`; a test names each new file. `Bash` is not covered (§18) |
 | New settings | The model turns the check on | `chat-data.json` is in `DATA_DIR_GUARDED` for case turns; in service mode the key is admin-only. `Bash` is not covered |
@@ -1114,17 +973,19 @@ code, error }`.
 | `ALREADY_ABANDONED` | `Progress.abandon` | An active record has the same approach (names it) |
 | `ABANDON_INVALID` | `Progress.abandon` | A missing or malformed field, or an unknown fact, decision or record id |
 | `NO_CONFIRMED_CRITERIA` | `Progress.proposeDone` | Nothing is confirmed |
-| `NOT_READY` **[Q-a]** | `Progress.proposeDone`; `case:setStatus` and the close answer under option 4 | The rule for proposing or closing is not satisfied; lists the open items |
+| `NOT_READY` | `Progress.proposeDone` | A confirmed criterion is not `met`; lists the open items. Never returned to the owner's own Done |
+| `VERIFY_NOT_ON_REQUEST` | `Progress.verify` | `cases.verify.when` is not `request` |
 | `CLOSE_PROPOSAL_OPEN` | `Progress.proposeDone` | One is already open (names it) |
 | `CLOSE_DECLINED_UNCHANGED` | `Progress.proposeDone` | The owner said keep working and the list has not changed |
 | `QUESTION_TOO_LONG` | `Progress.askScope`, `Progress.proposeDone` | The host-built card would pass 2,000 characters (existing code, new callers) |
-| `CHECK_INVALID` **[Q-c]** | `Brief`, `case:setCheck` | The command fails `validateCheck`; says which rule |
+| `CHECK_INVALID` | `Brief`, `case:setCheck` | The command fails `validateCheck`; says which rule |
 | `CHECK_NOT_IN_QUOTE` | `Brief` | The whole command is not in the owner's message |
 | `CHECK_NO_LOCAL_REPO` | `Brief`, `case:setCheck`, the run | `repo` is a clone URL or a path that is not there |
 | `CHECK_DISABLED` | `case:setCheck`, the run | `cases.softwareRepo.check.enabled` is false |
 | `CHECK_SERVICE_OFF` | the same, in service mode | The admin file does not enable it |
 | `CHECK_NOT_APPROVED` | the run | No approval matches the command and repository |
 | `CHECK_BUSY` | the run | Another check is running in that repository |
+| `CHECK_SHIM` | `case:setCheck`, the run | On Windows the program resolves only to a `.cmd` or `.bat` file (and is not `npm` with `npm-cli.js` beside `node.exe`) |
 
 Reasons an opinion carries (not refusals): `evidence-empty`, `evidence-missing`, `evidence-inactive`,
 `evidence-provenance`, `evidence-blocked`, `check-not-current`.
@@ -1163,14 +1024,14 @@ removing its data dir and `await core.shutdown()`. Timeouts are awaited behind a
   space and curly quotes; `view` never writes; `reconcile` is idempotent; a reworded string becomes a new
   `proposed` entry and the old one moves to `removed`; a duplicate string is one entry; `confirm` with a
   stale hash refuses; origins per writer; a corrupt file is rebuilt; **migration:** a stage-7 case fixture
-  reads unchanged byte for byte until the first locked write, then gets `legacy` entries (both Q-f
-  answers, by setting); a `done` case never gets the file.
+  reads unchanged byte for byte until the first locked write, then gets `legacy` entries, all `proposed`; a `done` case never gets the file.
 - **`tests/cases-tools.test.js` (extended):** `Brief` append without a quote is `proposed`; with a quote
   in `ownerMessages` and the text in the quote, `confirmed`; a quote that is in the messages but does not
   contain the text refuses `SCOPE_NOT_IN_QUOTE`; `provenance: "user"` with no quote refuses (it passed
   before); a list `update` that drops a confirmed entry refuses and one that drops a proposed entry works;
   `objective` rules; limits. Tests supply `ownerMessages`.
-- **`tests/cases-brief.test.js` (extended):** `missingForGating` under each Q-b option; a brief already
+- **`tests/cases-brief.test.js` (extended):** `missingForGating` reports `successCriteria` with none confirmed and
+  stops with one; a brief already
   `gating.complete` stays so.
 - **`tests/cases-abandoned.test.js`:** append, withdraw, duplicate refusal, unknown ids, a bad line
   skipped, the cap in the orientation, status rules per case status.
@@ -1188,15 +1049,15 @@ removing its data dir and `await core.shutdown()`. Timeouts are awaited behind a
   and counts and never a criterion's or question's text (a canary); `ready`; the fingerprint changes when
   a state does. Jobs, envelopes and plans come from `tests/helpers/executor-fixtures.js`; ingest proposals
   from `tests/helpers/ingest-harness.js`.
-- **`tests/cases-progress-tool.test.js`:** each action in each status; `proposeDone` refusals under each
-  Q-a option; the decline memory; the close answer applies from `in-app` and `mobile` and from nothing
+- **`tests/cases-progress-tool.test.js`:** each action in each status; `proposeDone` refuses for an `unmet`, a `stale` and a
+  `failing` criterion; the decline memory; the close answer applies from `in-app` and `mobile` and from nothing
   else (`in-app-chat`, `mcp-stdio`, `mcp-frontdoor`, a contact channel); `setStatus` is called with `by:
   'owner'`; `askScope` confirms only entries whose hash matches; a free-text answer confirms nothing; the
   card text is host lines first and refuses over 2,000 characters. Tests begin a turn before calling
   actions that need one.
 - **`tests/cases-runtime.test.js`, `tests/cases-triggers.test.js` (extended):** marks at `beginTurn`; the
   verification hook raises `criterion-regressed` once and `Reorient` acknowledges it; the journal block is
-  first in the entry; `freezeProgress` at `done` (Q-g).
+  first in the entry; `freezeProgress` at `done` (R-C8-7).
 - **`tests/cases-orientation.test.js` (extended):** the two sections, their caps, a proposed objective, a
   case with no stage-8 files, a frozen case.
 - **`tests/cases-case-guard.test.js` / `tests/cases-chat.test.js` (extended):** `Write`, `Edit` and
@@ -1209,17 +1070,16 @@ removing its data dir and `await core.shutdown()`. Timeouts are awaited behind a
   channels; `SCOPE_STALE`; `untrustedText: true` on the reply; `CASE_BUSY`.
 - **MCP:** the tests for `src/mcp/case-tools.js` (extended): `open_case` carries `progress` inside the
   untrusted wrapper; `list_cases` counts are bare numbers; a case chat's `caseScope` still confines them;
-  `answer_question` refuses `close-proposal` and `check-approve` on every channel, and treats
-  `scope-confirm` by Q-b. Through `tests/helpers/stdio-mcp-client.js` and
+  `answer_question` refuses `close-proposal` and `check-approve` on every channel, and takes `scope-confirm` as a spoken answer. Through `tests/helpers/stdio-mcp-client.js` and
   `tests/helpers/frontdoor-harness.js` for the two remote surfaces.
-- **`tests/cases-check.test.js` [Q-c]:** `validateCheck` accept and refuse tables; `checkInQuote` (whole
+- **`tests/cases-check.test.js`:** `validateCheck` accept and refuse tables; `checkInQuote` (whole
   command, exact case, never assembled from tokens); approval binds to the argv and the repository;
   refused when off, unapproved, in a wake-up turn, in service mode without the admin key, for a clone URL;
   the environment the child sees (a fixture script that prints the names of its variables: no provider
   key, no other `KL_*`, no `ELECTRON_RUN_AS_NODE`); the time limit kills a child and its grandchild; Stop
   kills it; the output tail is under `.kl/runs/` and in no tracked file; pass to fail writes the journal
-  line first. The child is a `node` fixture script in a temp git repository; on Windows a `.cmd` fixture
-  covers the `cmd.exe` path. The file awaits every child, so nothing holds the loop open.
+  line first. The child is a `node` fixture script in a temp git repository; on Windows (by an injected `platform` and `fsCheck`,
+  so it runs anywhere) a `.cmd` shim is refused and `npm` resolves to `node.exe` with `npm-cli.js`. The file awaits every child, so nothing holds the loop open.
 - **`tests/cases-regressions.test.js`:** fixture **F8-progress**: a "Lakeside lot" case where the model
   appends two criteria (proposed), the owner confirms one by quote and one from the panel, a turn records
   `f-0042` and the scripted verify reply cites it (`met`), a later turn supersedes `f-0042` (`stale`, a
@@ -1240,7 +1100,7 @@ removing its data dir and `await core.shutdown()`. Timeouts are awaited behind a
 | The assistant's reply says "all criteria are met" | judge "prose never reaches the pass" |
 | A `done` case's repository moves | runtime "frozen at close" |
 | An older version rewrote the criteria list | scope "strings with no entry after migration are `file`" |
-| The owner hand-edits `brief.md` | scope "file edit is proposed" (Q-h) |
+| The owner hand-edits `brief.md` | scope "file edit is proposed" (R-C8-8) |
 
 ## 15. Build order
 
@@ -1251,7 +1111,7 @@ Each task ends with its own tests green; the full suite runs once at the end of 
 2. **`Brief` tool scope rules:** quote and word rules for criteria and the objective; confirmed entries
    refuse; limits; journal wording.
 3. **Runtime wiring for scope:** `reconcile` in `beginTurn`; `createCase`'s `objectiveBy`; the detour
-   router and playbook gating origins; gating by Q-b.
+   router and playbook gating origins; gating (R-C8-2).
 4. **Abandoned approaches:** the store, the cross-case exclusion, the leak test.
 5. **Verification store and pure state computation:** records, resolvers for `f-`, the summary line.
 6. **Ready to close:** `closeReadiness` with every item, the fingerprint.
@@ -1259,7 +1119,7 @@ Each task ends with its own tests green; the full suite runs once at the end of 
    new fields, the two callers.
 8. **The verify pass:** prompt, strict parse, `acceptVerdict`, charging, skips, the journal block.
 9. **The verification hook and trigger:** `criterion-regressed`, `Since last turn`, the cache, freezing at
-   close (Q-g).
+   close (R-C8-7).
 10. **The `Progress` tool:** five actions, status ops, `scope-confirm` and `close-proposal` with their
     handlers, `PRESSED_TYPES`, the prompt lines.
 11. **Orientation:** the two sections and their caps.
@@ -1267,26 +1127,27 @@ Each task ends with its own tests green; the full suite runs once at the end of 
     Done dialog.
 13. **MCP:** `open_case`, `list_cases`, `get_orientation`; the pressed refusals; the front-door and stdio
     tests.
-14. **The check command, part 1 [Q-c]:** the `check` field, `validateCheck`, the quote rule,
+14. **The check command, part 1:** the `check` field, `validateCheck`, the quote rule,
     `check-approve`, `.kl/checks.json`, the settings and the admin key. Nothing runs yet.
-15. **The check command, part 2 [Q-c]:** `runCheck`, the close run, `chk-` evidence, `failing`, pass to
-    fail, the Windows path.
+15. **The check command, part 2:** `runCheck`, the close run, `chk-` evidence, `failing`, pass to
+    fail, the Windows lookup.
 16. **Regression fixture, e2e, `CLAUDE.md` section, full suite.**
 
-Tasks 1 to 13 and 16 are the stage without the check. Tasks 14 and 15 are dropped if Q-c defers it.
+Tasks 14 and 15 come last and ship behind the setting (R-C8-3); the stage is usable without them. The
+plan splits some of these further.
 
 ## 16. Deviations from the parent
 
 1. **§4.3** shows `successCriteria` as plain strings the owner or the model wrote. Stage 8 keeps the
    shape and adds authorship beside it; a proposed criterion no longer satisfies anything.
 2. **§5.5** closes a turn by rendering, journaling and committing. Stage 8 adds a model call (the verify
-   pass) and, behind Q-c, a host-run command to the close.
+   pass) and, behind its setting, a host-run command to the close.
 3. **§5.6** has seven case tools and the code has twelve; `Progress` is the thirteenth.
 4. **§9.2** gives `verify` to "ledger consistency review; second reading of blocked outbound spans".
    Stage 8 adds the criteria pass to that role.
 5. **Stage 2 §3.1** has no runtime path to `done`. That stands: the model's proposal is a question, and
    the transition is still the owner's.
-6. **Stage 5 §3.7** says `refresh` runs read-only commands with 5 s timeouts. Behind Q-c, the case type
+6. **Stage 5 §3.7** says `refresh` runs read-only commands with 5 s timeouts. Behind its setting, the case type
    also runs one owner-named command, not read-only, with a longer limit, at close only.
 
 ## 17. Assumptions made without asking
@@ -1307,6 +1168,19 @@ Smaller than §2; each is the designer's choice and is easy to change.
 - `branch-merged` looks only at a PR from the current branch.
 - Check output is kept only as an untracked 2,000-character tail.
 
+Not verified, and what breaks if wrong:
+
+- **The verify pass fits in 20 s and costs a few cents a turn.** Not measured. If it is slower, turns
+  close late or the pass times out and nothing is judged; if it is dearer, the daily cap and the 80 %
+  rule bound it.
+- **`npm-cli.js` sits at `node_modules/npm/bin/npm-cli.js` beside `node.exe`.** True of the official
+  Windows installer; a version manager may lay it out differently, and then `npm` is refused
+  (`CHECK_SHIM`) rather than run some other way.
+- **`src/cases/` may require `resolveCommand` from `src/service/doctor-runbooks.js`.** No boundary test
+  was read that forbids it. If one does, the function moves to `src/platform/` unchanged.
+- **A close card stays under the phone channel's `maxChars`.** If not, the phone shows "Answer this in
+  the app" and the owner closes from the app.
+
 ## 18. Residuals
 
 Stated plainly; none is fixed here.
@@ -1326,13 +1200,13 @@ Stated plainly; none is fixed here.
   shell tricks, not a hostile `package.json`. An approval covers words whose meaning can change.
 - **Environment scrubbing is partial.** A program can read files in the home directory (tokens, keys)
   whatever its environment holds.
-- **On Windows the `.cmd` path goes through `cmd.exe`.** The token alphabet is the only thing between a
-  token and `cmd.exe`'s parser.
-- **A spoken scope answer off the app is unchecked** (Q-b options 2 and 3): over MCP the quote is
+- **On Windows only `.exe` programs and `npm` can be the check.** A `.cmd` or `.bat` shim is never
+  started, so `pnpm`, `yarn` and `gradlew.bat` cannot be used until the owner rules on it.
+- **A spoken scope answer off the app is unchecked** (accepted, R-C8-2): over MCP the quote is
   recorded, not verified, as for every spoken answer.
 - **Abandoned records are free text.** The outbound gate does not know them; a model that restates one in
   an outbound payload is stopped only if the text also trips rules 1 to 4 for other reasons.
-- **A hand edit by the owner looks like a `Bash` write** (Q-h), so the owner's own edit to `brief.md`
+- **A hand edit by the owner looks like a `Bash` write** (R-C8-8), so the owner's own edit to `brief.md`
   needs a press to count.
 - **`branch-merged` does not know which PRs are the case's.** A PR the case opened from another branch is
   not counted.
@@ -1342,7 +1216,7 @@ Stated plainly; none is fixed here.
   newer version shows the result as `proposed`, so nothing is trusted, but the owner's confirmations of
   reworded entries are lost.
 - **Imported cases are not re-checked,** as with `facts.jsonl`.
-- **The verify pass's cost is estimated, not measured.**
+- **The verify pass's cost is estimated, not measured** (R-C8-4).
 
 ## 19. Deferred
 
@@ -1351,7 +1225,7 @@ Stated plainly; none is fixed here.
 | Structured child hand-off as an evidence source and id resolver (§6.10) | the next cases stage |
 | Refusing or flagging a `Plan` step that repeats an abandoned approach | unassigned |
 | Recording which PRs and branches a `software-repo` case created | unassigned; would make "PRs merged" exact |
-| A way out of `done` | unassigned; Q-g |
+| A way out of `done` | unassigned (R-C8-7) |
 | Checks for other case types; more than one check per case | unassigned |
 | Running the check in a sandbox or container | unassigned; the only real answer to §18's fourth item |
 | Per-criterion confirmation from the phone or by spoken answer | unassigned; the panel does it today |
