@@ -767,6 +767,113 @@ describe('lock, expiry and revoke', () => {
     });
   });
 
+  // Second security review, finding 9. The contact window, the lease's
+  // expiry and the age of a contact token were all read off the wall clock,
+  // so setting the clock back (an NTP step, a user, anyone who can) stopped
+  // them: no lapse, no expiry. They now run on a monotonic clock as well,
+  // and whichever clock says "over" first is believed.
+  describe('second review finding 9: a clock change cannot extend contact or expiry', () => {
+    const WINDOW = 120000;
+    // A manager with the two clocks apart, and timers that never fire: the checks themselves must see it.
+    async function twoClocks() {
+      const wall = { t: Date.parse('2026-09-23T18:00:00.000Z') };
+      const mono = { t: 5000 };
+      const store = await approverStoreWith([phone.approverRecord(), other.approverRecord()], { now: () => wall.t });
+      stores.push(store);
+      const link = new FakeRelay();
+      const manager = new LeaseManager({
+        approvals: { identity, approverStore: store, relayClient: link, phoneApprover: { isAvailable: () => true } },
+        guiConfig, broker, nodeName: 'gpu-box', clock: () => wall.t, monotonic: () => mono.t,
+        timers: { setTimeout: () => ({}), clearTimeout: () => {} }, jobOpen: () => true
+      });
+      const p = manager.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      const reply = manager.onGrant(phone.leaseGrant(link.last('kl.lease.request').envelope, { minutes: 10 }));
+      const lease = await p;
+      // Real time passes on both; a step moves the wall clock alone.
+      const pass = (ms) => { wall.t += ms; mono.t += ms; };
+      const step = (ms) => { wall.t += ms; };
+      const newest = () => [...link.sent].reverse().map((s) => s.message).find((m) => typeof m.contact_token === 'string').contact_token;
+      const watch = (extra = {}) => manager.verifyWatch(phone.leaseWatch(identity.nodeId, lease.leaseId, { contactToken: newest(), ...extra }));
+      return { manager, lease, link, reply, pass, step, watch, wall, mono };
+    }
+
+    it('the clock set back an hour: input still pauses two minutes after the last contact', async () => {
+      const { manager, lease, pass, step } = await twoClocks();
+      pass(60000);
+      step(-3600000);
+      pass(WINDOW - 60000 - 1);
+      assert.equal(manager.assertUsable('job-1'), lease, 'one millisecond inside the window');
+      pass(1);
+      assert.throws(() => manager.assertUsable('job-1'), (e) => e.code === 'lease_suspended_no_contact');
+    });
+
+    it('the clock set back: the lease still ends ten minutes after the grant, with the phone watching throughout', async () => {
+      const { manager, lease, pass, step, watch } = await twoClocks();
+      step(-86400000);
+      for (let s = 20; s < 600; s += 20) {
+        pass(20000);
+        assert.equal(watch().contact, true, `at ${s} s`);
+        assert.equal(manager.assertUsable('job-1'), lease);
+      }
+      assert.equal(manager.remainingMs(lease), 20000);
+      pass(20000);
+      assert.throws(() => manager.assertUsable('job-1'), (e) => e.code === 'lease_expired');
+      assert.equal(lease.endReason, 'expired');
+    });
+
+    it('the clock set back: a contact token still ages, and a watch that echoes an old one is not contact', async () => {
+      const { manager, lease, reply, pass, step } = await twoClocks();
+      const token = open(reply.status).message.contact_token;
+      step(-3600000);
+      pass(WINDOW);
+      assert.throws(() => manager.assertUsable('job-1'), (e) => e.code === 'lease_suspended_no_contact');
+      assert.equal(manager.verifyWatch(phone.leaseWatch(identity.nodeId, lease.leaseId, { contactToken: token })).contact, false, 'two minutes old, whatever the wall clock says');
+      assert.equal(lease.state, 'suspended');
+    });
+
+    it('the clock set forward ends things early, never late: contact lapses, tokens age, the lease expires', async () => {
+      const a = await twoClocks();
+      a.pass(1000);
+      a.step(WINDOW);
+      assert.throws(() => a.manager.assertUsable('job-1'), (e) => e.code === 'lease_suspended_no_contact');
+      const b = await twoClocks();
+      b.pass(1000);
+      b.step(11 * 60000);
+      assert.throws(() => b.manager.assertUsable('job-1'), (e) => e.code === 'lease_expired');
+      // A resume never outlives the original lease on either clock.
+      const c = await twoClocks();
+      c.pass(60000);
+      c.manager.suspend(c.lease.leaseId, 'foreground_changed');
+      c.step(-3600000);
+      c.manager.onGrant(phone.leaseGrant(c.link.last('kl.lease.request').envelope, { minutes: 9 }));
+      assert.equal(c.lease.state, 'active');
+      assert.equal(c.manager.remainingMs(c.lease), 9 * 60000);
+      c.pass(9 * 60000 - 1);
+      c.manager.verifyWatch(phone.leaseWatch(identity.nodeId, c.lease.leaseId));
+      assert.notEqual(c.lease.state, 'ended');
+      c.pass(1);
+      c.manager.verifyWatch(phone.leaseWatch(identity.nodeId, c.lease.leaseId));
+      assert.equal(c.lease.endReason, 'expired', 'ten minutes of real time after the first grant');
+    });
+
+    it('the rate limit runs on the monotonic clock too', async () => {
+      const { manager, lease, pass, step } = await twoClocks();
+      for (let i = 0; i < 10; i += 1) manager.chargeInput(lease);
+      step(3600000);
+      assert.throws(() => manager.chargeInput(lease), (e) => e.code === 'rate_limited', 'a clock set forward frees nothing');
+      pass(60001);
+      manager.chargeInput(lease);
+    });
+
+    it('with only a wall clock injected both clocks are that one; the service itself runs on performance.now()', async () => {
+      assert.equal(leases.monotonic(), clock.now());
+      const real = new LeaseManager({ approvals: { identity, approverStore: null, relayClient: relay, phoneApprover: { isAvailable: () => true } }, guiConfig, broker });
+      const a = real.monotonic();
+      assert.ok(Number.isFinite(a) && a >= 0 && a < Date.now() / 2, 'not epoch milliseconds');
+      assert.ok(real.monotonic() >= a);
+    });
+  });
+
   it('statusSummary for status.json', async () => {
     assert.equal(leases.statusSummary(), null);
     const lease = await granted();

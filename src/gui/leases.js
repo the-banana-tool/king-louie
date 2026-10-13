@@ -5,6 +5,7 @@
 // Memory only: a restart ends them all (fail-closed).
 const { EventEmitter } = require('events');
 const crypto = require('crypto');
+const { performance } = require('perf_hooks');
 const { open } = require('../approvals/envelope');
 const { NonceCache, bytesSha256 } = require('../approvals/verify-device');
 const { createLogger } = require('../logging');
@@ -70,10 +71,22 @@ const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expi
 
 class LeaseManager extends EventEmitter {
   // jobOpen fails closed (R-F5-7): with none given, no job is open.
-  constructor({ approvals, guiConfig, broker = null, audit = null, nodeName = null, clock = Date.now,
+  //
+  // Two clocks (second security review, finding 9). `clock` is the wall
+  // clock: what messages carry and what a phone is shown (expires_at).
+  // `monotonic` cannot be set: it only counts time passing. How long ago
+  // the granting phone was in touch, how old a contact token is, how much
+  // of a lease is left and the input rate are measured on both, and
+  // whichever says "over" first is believed: a wall clock set back cannot
+  // keep a lease or its contact alive, and one set forward ends them early.
+  // (The monotonic clock may stand still while the machine sleeps; the wall
+  // clock then shows the time that passed.) A caller that injects only
+  // `clock` (tests) gets that one clock for both.
+  constructor({ approvals, guiConfig, broker = null, audit = null, nodeName = null, clock = Date.now, monotonic = null,
     timers = { setTimeout, clearTimeout }, jobOpen = () => false, log = createLogger('gui/leases') } = {}) {
     super();
     Object.assign(this, { approvals, guiConfig, broker, audit, clock, timers, jobOpen, log });
+    this.monotonic = typeof monotonic === 'function' ? monotonic : (clock === Date.now ? () => performance.now() : clock);
     this.nodeName = nodeName || (approvals.identity && approvals.identity.nodeName) || 'unnamed-node';
     this.leases = [];
     this.pending = new Map(); // request_id → { request_id, lease_id, nonce, lease_hash, expires_at, lease, resume, ref, envelope, delivered, timer }
@@ -90,22 +103,37 @@ class LeaseManager extends EventEmitter {
     return Math.min(CONTACT_MAX_S, Number.isFinite(s) && s > 0 ? s : CONTACT_DEFAULT_S) * 1000;
   }
 
-  _contactLapsed(lease, now) {
-    return lease.lastContactAt === null || now - lease.lastContactAt >= this._contactWindowMs();
+  // This instant on both clocks.
+  _stamp() {
+    return { wall: this.clock(), mono: this.monotonic() };
+  }
+
+  // Have `ms` passed since `stamp`, on either clock?
+  _passed(stamp, ms) {
+    return this.monotonic() - stamp.mono >= ms || this.clock() - stamp.wall >= ms;
+  }
+
+  // Is the lease's own time up, on either clock?
+  _expired(lease) {
+    return lease.expiresAt !== null && (this.clock() >= lease.expiresAt || this.monotonic() >= lease.expiresMono);
+  }
+
+  _contactLapsed(lease) {
+    return lease.lastContact === null || this._passed(lease.lastContact, this._contactWindowMs());
   }
 
   // The granting device was heard from now: the window runs from here.
-  _noteContact(lease, now) {
-    lease.lastContactAt = now;
+  _noteContact(lease) {
+    lease.lastContact = this._stamp();
     if (lease.contactTimer) this.timers.clearTimeout(lease.contactTimer);
-    lease.contactTimer = this._timer(() => this._checkContact(lease, this.clock()), this._contactWindowMs());
+    lease.contactTimer = this._timer(() => this._checkContact(lease), this._contactWindowMs());
   }
 
   // The window ran out with the lease active: suspended for want of contact,
   // unless the lease's own time is up as well, which ends it as expired.
-  _checkContact(lease, now) {
-    if (lease.state !== 'active' || !this._contactLapsed(lease, now)) return;
-    if (lease.expiresAt !== null && now >= lease.expiresAt) {
+  _checkContact(lease) {
+    if (lease.state !== 'active' || !this._contactLapsed(lease)) return;
+    if (this._expired(lease)) {
       this._audit('lease.expired', lease, { reason: 'expired' });
       this._end(lease, 'expired');
       return;
@@ -118,7 +146,7 @@ class LeaseManager extends EventEmitter {
   mintContactToken(lease) {
     const token = L.newContactToken();
     lease.tokenIssued += 1;
-    lease.tokens.set(token, { n: lease.tokenIssued, at: this.clock() });
+    lease.tokens.set(token, { n: lease.tokenIssued, at: this._stamp() });
     while (lease.tokens.size > CONTACT_TOKENS_MAX) lease.tokens.delete(lease.tokens.keys().next().value);
     return token;
   }
@@ -128,11 +156,11 @@ class LeaseManager extends EventEmitter {
   // contact: a token is good for one contact, and using one retires the
   // older ones with it (a relay that kept earlier watches back gains
   // nothing by delivering them after a later one).
-  _tokenMakesContact(lease, token, now) {
+  _tokenMakesContact(lease, token) {
     if (typeof token !== 'string') return false;
     const issued = lease.tokens.get(token);
     if (!issued || issued.n <= lease.tokenUsedUpTo) return false;
-    if (now - issued.at >= this._contactWindowMs()) return false;
+    if (this._passed(issued.at, this._contactWindowMs())) return false;
     lease.tokenUsedUpTo = issued.n;
     return true;
   }
@@ -141,11 +169,11 @@ class LeaseManager extends EventEmitter {
   // (verifyWatch): contact. It resumes a lease that was suspended for want
   // of it, unless the lease's own time ran out meanwhile; a lease suspended
   // for any other reason still needs its resume grant.
-  _onContact(lease, now, deviceId) {
+  _onContact(lease, deviceId) {
     if (lease.state === 'ended' || lease.state === 'pending') return;
-    this._noteContact(lease, now);
+    this._noteContact(lease);
     if (lease.state !== 'suspended' || lease.suspendReason !== CONTACT_REASON) return;
-    if (lease.expiresAt !== null && now >= lease.expiresAt) {
+    if (this._expired(lease)) {
       this._audit('lease.expired', lease, { reason: 'expired' });
       this._end(lease, 'expired');
       return;
@@ -211,7 +239,10 @@ class LeaseManager extends EventEmitter {
     return l && l.jobId === jobId && l.state === 'active' ? l : null;
   }
 
-  remainingMs(lease) { return lease.expiresAt === null ? 0 : Math.max(0, lease.expiresAt - this.clock()); }
+  // What is left of the lease: the less of what the two clocks say.
+  remainingMs(lease) {
+    return lease.expiresAt === null ? 0 : Math.max(0, Math.min(lease.expiresAt - this.clock(), lease.expiresMono - this.monotonic()));
+  }
 
   nextSeq(lease) { lease.seq += 1; return lease.seq; }
 
@@ -267,9 +298,10 @@ class LeaseManager extends EventEmitter {
     if (!lease) {
       lease = {
         leaseId: crypto.randomUUID(), jobId, origin, reason: String(reason), requestedApps: [...appIds], maxMinutes: minutes,
-        apps: [], state: 'pending', locked: false, endReason: null, suspendReason: null, expiresAt: null, deviceId: null,
+        // expiresAt is on the wall clock (what the phone is shown), expiresMono the same moment on the monotonic one.
+        apps: [], state: 'pending', locked: false, endReason: null, suspendReason: null, expiresAt: null, expiresMono: null, deviceId: null,
         seq: 0, typed: new TypedBuffer(), inputTimes: [], waiters: [], expiryTimer: null, controlNonces: new LeaseNonces(),
-        lastContactAt: null, contactTimer: null,
+        lastContact: null, contactTimer: null,
         // Contact tokens: token → { n, at }; how many were issued; and the
         // newest one that has made contact.
         tokens: new Map(), tokenIssued: 0, tokenUsedUpTo: 0, lastStatus: null
@@ -379,12 +411,14 @@ class LeaseManager extends EventEmitter {
       this._end(lease, 'denied');
       return this._reply(lease, { state: 'ended' });
     }
-    if (entry.resume && lease.expiresAt !== null && now >= lease.expiresAt) {
+    if (entry.resume && this._expired(lease)) {
       this._end(lease, 'expired');
       return this._reply(lease, { state: 'ended' });
     }
     lease.apps = [...m.grant.apps];
+    // The same rule on each clock: a resume never outlives the original lease on either.
     lease.expiresAt = L.effectiveExpiry({ verifiedAt: now, minutes: m.grant.minutes, resumeOf: entry.resume ? lease.expiresAt : null });
+    lease.expiresMono = L.effectiveExpiry({ verifiedAt: this.monotonic(), minutes: m.grant.minutes, resumeOf: entry.resume ? lease.expiresMono : null });
     lease.state = 'active';
     lease.suspendReason = null;
     // A resume keeps what was typed, as a piece of unknown place (second
@@ -396,7 +430,7 @@ class LeaseManager extends EventEmitter {
     });
     if (entry.resume && this.broker) this.broker.focusApp(lease.apps).catch(() => {});
     // R-F5-15: the grant is the granting device's first contact.
-    this._noteContact(lease, now);
+    this._noteContact(lease);
     this._armExpiry(lease);
     this._settle(lease);
     this._status(lease);
@@ -421,7 +455,7 @@ class LeaseManager extends EventEmitter {
         this._audit('lease.expired', lease, { reason: 'expired' });
         this._end(lease, 'expired');
       }
-    }, lease.expiresAt - this.clock());
+    }, this.remainingMs(lease));
   }
 
   onRevoke(envelope) {
@@ -469,18 +503,17 @@ class LeaseManager extends EventEmitter {
     // with no token, an old one a relay kept back) still asks for frames,
     // which go out only while the lease is active and so only while real
     // contact is being made; it is never contact.
-    const now = this.clock();
     // Never trust that the expiry timer already ran: a lease whose own time
     // is up ends here, whatever this watch echoes.
-    if (lease.state !== 'ended' && lease.state !== 'pending' && lease.expiresAt !== null && now >= lease.expiresAt) {
+    if (lease.state !== 'ended' && lease.state !== 'pending' && this._expired(lease)) {
       this._audit('lease.expired', lease, { reason: 'expired' });
       this._end(lease, 'expired');
     }
     const contact = lease.deviceId !== null && r.deviceId === lease.deviceId && lease.state !== 'ended'
-      && this._tokenMakesContact(lease, r.message.contact_token, now);
+      && this._tokenMakesContact(lease, r.message.contact_token);
     this._audit('lease.watch', lease, { device_id: r.deviceId, contact });
     const before = lease.lastStatus;
-    if (contact) this._onContact(lease, now, r.deviceId);
+    if (contact) this._onContact(lease, r.deviceId);
     // Every accepted watch is answered with a status signed now, so the
     // phone always holds a token young enough for its next watch, also
     // while no frames flow (a locked screen, a suspended lease).
@@ -489,10 +522,9 @@ class LeaseManager extends EventEmitter {
   }
 
   assertUsable(jobId) {
-    const now = this.clock();
     const cur = this.current();
     // Review Focus 2: never trust that the expiry timer already ran.
-    if (cur && cur.expiresAt !== null && now >= cur.expiresAt && cur.state !== 'pending') {
+    if (cur && cur.state !== 'pending' && this._expired(cur)) {
       this._audit('lease.expired', cur, { reason: 'expired' });
       this._end(cur, 'expired');
     }
@@ -509,7 +541,7 @@ class LeaseManager extends EventEmitter {
     }
     if (lease.state === 'pending') throw new GuiError('lease_pending', 'waiting for the phone');
     // R-F5-15, by the clock itself: never trust that the timer already ran.
-    this._checkContact(lease, now);
+    this._checkContact(lease);
     if (lease.state === 'ended') throw new GuiError('lease_expired', 'call RequestLease for a new lease');
     if (lease.state === 'suspended' && lease.suspendReason === CONTACT_REASON) {
       throw new GuiError('lease_suspended_no_contact', 'the phone that granted this lease has not been in touch; input resumes when its owner looks at the live view again');
@@ -520,7 +552,8 @@ class LeaseManager extends EventEmitter {
   }
 
   chargeInput(lease) {
-    const now = this.clock();
+    // On the monotonic clock: a wall clock set forward frees nothing.
+    const now = this.monotonic();
     lease.inputTimes = lease.inputTimes.filter((t) => now - t < 60000);
     if (lease.inputTimes.length >= this.guiConfig.lease.maxInputsPerMinute) {
       throw new GuiError('rate_limited', null, { retryAfter: Math.max(1, Math.ceil((lease.inputTimes[0] + 60000 - now) / 1000)) });
