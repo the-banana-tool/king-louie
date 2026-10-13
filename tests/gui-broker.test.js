@@ -13,7 +13,15 @@ const { setLogLevel } = require('../src/logging');
 
 setLogLevel('fatal');
 const cleanups = [];
-after(() => { for (const c of cleanups) c(); });
+const tempDirs = [];
+after(() => {
+  // Newest first: a broker is stopped before its data dir is removed.
+  // stop() writes one last status.json, and writeGuiStatus creates the
+  // session dir it writes into, so stopping after the removal put the temp
+  // dir back.
+  for (const c of cleanups.reverse()) c();
+  assert.deepEqual(tempDirs.filter((d) => fs.existsSync(d)), [], 'no temp dir is left behind');
+});
 
 const APPS = {
   calculator: { name: 'Calculator', path: 'C:\\Windows\\System32\\calc.exe', processes: ['CalculatorApp.exe'] },
@@ -35,6 +43,7 @@ class FakeChannel extends EventEmitter {
 
 function tempData() {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-broker-'));
+  tempDirs.push(d);
   cleanups.push(() => fs.rmSync(d, { recursive: true, force: true }));
   fs.writeFileSync(path.join(d, 'service.pid'), String(process.pid));
   return d;
