@@ -81,6 +81,59 @@ public final class DemoFleet {
         }
     }
 
+    /// A node-signed lease request, as a real node would send it (demo mode, §3.10).
+    public func leaseRequest(on index: Int, apps: [String], minutes: Int, now: Date = Date()) throws -> Envelope {
+        let node = nodes[index]
+        let lease: JSONValue = .object([
+            "kind": .string("computer_use"),
+            "job_id": .string("job-demo"),
+            "apps": .array(apps.map { id -> JSONValue in
+                .object(["id": .string(id), "name": .string(id.capitalized), "path": .string("/Applications/\(id.capitalized).app"), "processes": .array([])])
+            }),
+            "max_minutes": .number(String(minutes)),
+            "reason": .string("Enter the monthly totals"),
+            "resumes": .null,
+            "limits": .array([])
+        ])
+        let message: JSONValue = .object([
+            "v": .number("1"),
+            "type": .string("kl.lease.request"),
+            "request_id": .string(UUID().uuidString.lowercased()),
+            "lease_id": .string(UUID().uuidString.lowercased()),
+            "node_id": .string(node.pin.id),
+            "node_name": .string(node.pin.name),
+            "lease": lease,
+            "lease_hash": .string(Digest.sha256B64url(JCS.data(lease))),
+            "origin": .object(["client": .string("demo"), "session": .null, "job_id": .string("job-demo")]),
+            "created_at": .string(Timestamps.string(now)),
+            "expires_at": .string(Timestamps.string(now.addingTimeInterval(300))),
+            "nonce": .string(Messages.randomNonce())
+        ])
+        return try Envelope.seal(message, alg: "Ed25519", kid: node.pin.id) { bytes in
+            try node.key.signature(for: bytes)
+        }
+    }
+
+    /// A node-signed view carrying a canned frame (the app draws it).
+    public func leaseView(on index: Int, leaseId: String, seq: Int, toDevice: String, frame: Data, remaining: Int, actions: [LeaseAction], now: Date = Date()) throws -> Envelope {
+        let node = nodes[index]
+        let message: JSONValue = .object([
+            "v": .number("1"), "type": .string("kl.lease.view"), "node_id": .string(node.pin.id), "lease_id": .string(leaseId),
+            "seq": .number(String(seq)), "at": .string(Timestamps.string(now)), "to_device": .string(toDevice),
+            "state": .string("active"), "locked": .bool(false), "remaining_s": .number(String(remaining)),
+            "foreground": .object(["app_id": .string("calculator"), "matches": .bool(true)]),
+            "frame": .object(["mime": .string("image/jpeg"), "width": .number("960"), "height": .number("640"),
+                              "sha256": .string(Digest.sha256B64url(frame)), "data": .string(frame.base64EncodedString())]),
+            "frame_dropped": .bool(false),
+            "actions": .array(actions.map { a -> JSONValue in
+                .object(["seq": .number(String(a.seq)), "at": .string(a.at), "tool": .string(a.tool), "summary": .string(a.summary), "result": .string(a.result)])
+            })
+        ])
+        return try Envelope.seal(message, alg: "Ed25519", kid: node.pin.id) { bytes in
+            try node.key.signature(for: bytes)
+        }
+    }
+
     /// The software key signs demo answers; it is deleted when the owner leaves demo.
     public func sign(_ data: Data) throws -> Data {
         try deviceKey.signature(for: data).rawRepresentation
