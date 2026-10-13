@@ -300,8 +300,11 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
     // Fleet stage 5 (§4.7): lease requests with their latest status, the
     // phone's decisions, and the live view.
-    func leases(wait: Int = 0, signWith: Signer? = nil) async throws -> [JSONValue] {
-        try await request("GET", "/v1/leases?wait=\(wait)", signWith: signWith).1?.arrayValue ?? []
+    /// `nonce` (R-F5-20): 32 random bytes this phone chose for this one
+    /// request. It is in the query, so under the request signature; each
+    /// node signs its listing over it (`Leases.checkListing`).
+    func leases(wait: Int = 0, nonce: String, signWith: Signer? = nil) async throws -> [JSONValue] {
+        try await request("GET", "/v1/leases?wait=\(wait)&nonce=\(nonce)", signWith: signWith).1?.arrayValue ?? []
     }
 
     /// `202 { state, reason? }` from the node, passed through by the relay

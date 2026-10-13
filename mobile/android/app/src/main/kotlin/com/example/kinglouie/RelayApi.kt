@@ -217,7 +217,14 @@ class RelayApi(
 
     // Fleet stage 5 (§4.7): lease requests, decisions and views. No call here
     // repeats itself; the model calls each once per tap (R-F5-1, R-F5-5).
-    suspend fun leases(): List<JsonElement> = request("GET", "/v1/leases?wait=0").second.arr() ?: emptyList()
+    /**
+     * [nonce] (R-F5-20): 32 random bytes this phone chose for this one
+     * request. It is in the query, so under the request signature; each node
+     * signs its listing over it (Leases.checkListing). Without one (the fresh
+     * status Refresh asks for) no listing comes and none is looked for.
+     */
+    suspend fun leases(nonce: String? = null): List<JsonElement> =
+        request("GET", if (nonce == null) "/v1/leases?wait=0" else "/v1/leases?wait=0&nonce=$nonce").second.arr() ?: emptyList()
 
     /** `202 { state, reason? }` from the node, passed through by the relay; a watch reply also has `after_seq`. */
     suspend fun leaseDecision(action: String, leaseId: String, envelope: Envelope): JsonElement? =

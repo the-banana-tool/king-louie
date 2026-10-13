@@ -40,9 +40,69 @@ class LeaseVectorTest {
             setOf(
                 "grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "watch-no-token",
                 "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "view-node-sig-valid", "view-tampered-frame"
-            ),
+            ) + listingVectors,
             names
         )
+    }
+
+    private val listingVectors = setOf(
+        "listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
+        "listing-other-device", "listing-bad-signature"
+    )
+
+    /** R-F5-20: a node's listing is taken whole or not at all. */
+    @Test
+    fun listings() {
+        for (name in listingVectors) {
+            val v = vector(name)
+            val given = v["given"]
+            val statuses = given["statuses"].arr()!!.map { Envelope.fromJson(it) }
+            val check = Leases.verifyListing(Envelope.fromJson(v["input"]!!), pin(v), s(given, "nonce"), s(given, "device_id"), statuses)
+            assertEquals(name, v["expect"]["accepted"].bool(), check.accepted)
+            assertEquals(name, v["expect"]["reason"].str(), check.reason)
+            if (!check.accepted) assertTrue(name, check.statuses.isEmpty())
+            val expected = v["expect"]["leases"].arr() ?: continue
+            val got = check.statuses.map { LeaseStatus.from(Leases.verifiedMessage(it, pin(v))!!)!! }
+            assertEquals(name, expected.map { it["lease_id"].str() }, got.map { it.leaseId })
+            assertEquals(name, expected.map { it["seq"].int() }, got.map { it.seq })
+            assertEquals(name, expected.map { it["state"].str() }, got.map { it.state })
+        }
+        assertEquals(0, vector("listing-none")["expect"]["leases"].arr()!!.size)
+        assertEquals(2, vector("listing-live")["expect"]["leases"].arr()!!.size)
+    }
+
+    /** R-F5-20: the relay's reply, node by node. No listing for a node is no answer from it. */
+    @Test
+    fun checkListingReadsTheRelayReply() {
+        fun entries(v: JsonElement, nodeId: String = s(v["given"]["node"], "id"), withListing: Boolean = true): List<JsonElement> {
+            val node = JsonPrimitive(nodeId)
+            val listing = if (withListing) listOf(JsonObject(mapOf("node_id" to node, "envelope" to JsonNull, "status" to JsonNull, "listing" to v["input"]!!))) else emptyList()
+            return listing + v["given"]["statuses"].arr()!!.map { JsonObject(mapOf("node_id" to node, "envelope" to JsonNull, "status" to it)) }
+        }
+        for (name in listingVectors) {
+            val v = vector(name)
+            val check = Leases.checkListing(entries(v), pin(v), s(v["given"], "nonce"), s(v["given"], "device_id"))
+            assertEquals(name, v["expect"]["accepted"].bool(), check.accepted)
+            assertEquals(name, v["expect"]["reason"].str(), check.reason)
+        }
+        val live = vector("listing-live")
+        val nonce = s(live["given"], "nonce")
+        val device = s(live["given"], "device_id")
+        // The listing left out (an offline, slow or older node looks the same): no answer, whatever statuses came.
+        assertEquals(ListingCheck(false, "no_listing", emptyList()), Leases.checkListing(entries(live, withListing = false), pin(live), nonce, device))
+        assertEquals("no_listing", Leases.checkListing(emptyList(), pin(live), nonce, device).reason)
+        // Entries listed under another node are not this node's answer.
+        assertEquals("no_listing", Leases.checkListing(entries(live, nodeId = "kl-aaaaaaaaaaaaaaaa"), pin(live), nonce, device).reason)
+        // An entry that carries a request is not part of a listing.
+        val withRequest = listOf(JsonObject(mapOf("node_id" to JsonPrimitive(pin(live).id), "envelope" to live["input"]!!, "status" to JsonNull, "listing" to live["input"]!!)))
+        assertEquals("no_listing", Leases.checkListing(withRequest, pin(live), nonce, device).reason)
+        // A nonce this phone did not choose, and no nonce at all.
+        assertEquals("nonce_mismatch", Leases.checkListing(entries(live), pin(live), nonce.reversed(), device).reason)
+        assertEquals("nonce_mismatch", Leases.checkListing(entries(live), pin(live), "", device).reason)
+        // What the owner is told never says nothing is running, and the node's name is escaped.
+        assertEquals("Could not confirm with gpu-box", Leases.couldNotConfirm("gpu-box"))
+        assertTrue(!Leases.couldNotConfirm("gpu\u202Ebox").contains('\u202E'))
+        assertTrue(Leases.COULD_NOT_CONFIRM_DETAIL.contains("A lease could be running"))
     }
 
     @Test

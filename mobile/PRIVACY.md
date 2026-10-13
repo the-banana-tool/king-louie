@@ -54,7 +54,15 @@ can see:
   so that another of your phones can say whose lease it is about to stop;
   and when a phone opens the app (on Android, when you tap "Check for
   computer-use requests") the relay asks each of your nodes, for that
-  phone, which leases are running;
+  phone, which leases are running. That request carries a random number
+  your phone made up for it, and each node's answer repeats it beside a
+  list of the leases it names (their ids and message numbers) and your
+  phone's device id, signed, also when the list is empty. The number says
+  nothing else; it is how your phone knows the answer was made for this
+  request and is complete, so the relay cannot leave a running lease out
+  unnoticed. The relay can still keep a node's whole answer back; your
+  phone then says "Could not confirm with" that node instead of showing
+  nothing;
 - while a phone watches a lease, **pictures of the leased app's window with
   everything on it**, and the list of what the agent did there. The list
   never holds text the agent typed: a typed text appears as its length only

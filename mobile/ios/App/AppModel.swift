@@ -273,6 +273,10 @@ final class AppModel: ObservableObject {
     @Published var liveLease: LiveLease?
     /// Leases a pinned node listed as running that are not the one on the live screen (R-F5-18).
     @Published var runningLeases: [RunningLease] = []
+    /// Pinned nodes the last listing brought no answer from that this phone
+    /// could accept (owner ruling R-F5-20): no listing, or one that did not
+    /// check. Shown as "Could not confirm with …", never as nothing running.
+    @Published var unconfirmedLeaseNodes: [NodePin] = []
     /// Whether the live lease sheet is presented (the banner owns the sheet).
     @Published var showLiveLease = false
     /// Whether the live lease view is on screen with the app in front
@@ -294,7 +298,12 @@ final class AppModel: ObservableObject {
         if onlyIfUnlocked, !key.isSessionUnlocked { return }
         do {
             var items: [LeaseRequestItem] = []
-            for entry in try await client.leases(signWith: onlyIfUnlocked ? Self.sessionOnlySigner(key) : nil) {
+            // R-F5-20: a nonce chosen for this one request. Each node signs its
+            // listing over it, so an answer to an earlier request cannot be
+            // played again and no entry can be left out unseen.
+            let nonce = Messages.randomNonce()
+            let entries = try await client.leases(nonce: nonce, signWith: onlyIfUnlocked ? Self.sessionOnlySigner(key) : nil)
+            for entry in entries {
                 // R-F5-18: a lease that is running, or ended lately, comes with no
                 // request: only the status its node signed for this very listing.
                 if entry["envelope"]?.isNull ?? true {
@@ -319,9 +328,16 @@ final class AppModel: ObservableObject {
                 if !items.contains(where: { $0.id == request.requestId }) { items.append(LeaseRequestItem(request: request, nodeName: pin.name, status: status)) }
             }
             leaseRequests = items
+            // R-F5-20: per pinned node, a listing it signed for this request and
+            // this phone, complete, or no answer. This phone cannot tell a node
+            // that is off, slow or older from a relay that kept its answer back,
+            // so every one of those is "could not confirm".
+            unconfirmedLeaseNodes = state.nodes.filter { !Leases.checkListing(entries, pin: $0, nonce: nonce, deviceId: key.deviceId).accepted }
         } catch is SessionLocked {
             // The session lapsed: quiet; the owner can pull to refresh.
         } catch {
+            // No reply at all: nothing was confirmed with any node.
+            unconfirmedLeaseNodes = state.nodes
             fail(error)
         }
     }
@@ -858,6 +874,7 @@ final class AppModel: ObservableObject {
         pending = []
         closeLiveLease()
         runningLeases = []
+        unconfirmedLeaseNodes = []
         showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []
@@ -1837,6 +1854,7 @@ final class AppModel: ObservableObject {
         answeredTokens = []
         closeLiveLease()
         runningLeases = []
+        unconfirmedLeaseNodes = []
         showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []

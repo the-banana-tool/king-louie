@@ -52,6 +52,11 @@ fun LeaseRequests(model: AppModel, open: (AppModel.LeaseRequestItem) -> Unit) {
         if (model.mode == AppMode.LIVE) {
             OutlinedButton({ model.refreshLeases() }, enabled = !model.isLoadingLeases) { Text(if (model.isLoadingLeases) "Checking…" else "Check for computer-use requests") }
         }
+        // R-F5-20: a paired computer this phone got no signed answer from about computer
+        // use, the last time the owner tapped. Said as such; never left to look like
+        // "nothing is running". Nothing here asks again by itself (R-F5-1, R-F5-5).
+        for (name in model.unconfirmedLeaseNodes) Text(Leases.couldNotConfirm(name), color = WARNING, fontWeight = FontWeight.Bold)
+        if (model.unconfirmedLeaseNodes.isNotEmpty()) Text(Leases.COULD_NOT_CONFIRM_DETAIL + " Tap the button above to ask again.", color = WARNING)
         for (item in model.leaseRequests) {
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text(Display.escape(item.nodeName), fontWeight = FontWeight.Bold)

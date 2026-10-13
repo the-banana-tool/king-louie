@@ -201,6 +201,41 @@ Readings taken where a finding left a detail open, each the conservative one, fo
 
 Not run in this round: nothing on a Mac or with a JDK; no elevated install; the gated desktop suite; no domain-joined machine (finding 5's domain case is tested with an injected lookup only; the real lookup was run on this workgroup machine for a local user, a missing local RID, a made-up domain SID, SYSTEM, Everyone, Administrators and Users).
 
+### Follow-ups after the merge (2026-10-13)
+
+Two follow-ups on `feat/f5-followups` (from main at `161d28a`), each test first: a new ruling, R-F5-20, and R-F5-17, which the table above still calls deferred.
+
+| Id | Ruling | Carried by | Pinned by |
+|---|---|---|---|
+| R-F5-20 | A relay cannot hide a live lease from a phone (owner, 2026-10-13: "I don't want relays to hide a live lease from phones"). Each listing request carries a nonce the phone chose for it, in the query it already signs; each node answers with a `kl.lease.listing` it signs over that nonce, the phone, and every lease it lists (id and status seq), also when it lists none. A phone takes a node's answer whole or not at all; a pinned node without one is shown as "Could not confirm with <node>", never as nothing running, and that is what an offline, slow or older node gives too. R-F5-1, R-F5-5, R-F5-18 and R-F5-19 hold: still one request, and on Android one prompt, on the owner's tap. | `feat(gui): a node signs its lease listing over the phone's nonce …` (`LeaseManager#listingFor`, `lease.list`, `GET /v1/leases?nonce=`, `buildLeaseListing` / `verifyLeaseListing`, seven vectors); `feat(mobile): both phones ask with a nonce …` (`Leases.verifyListing` / `checkListing` in both cores, `unconfirmedLeaseNodes` in both apps, the docs) | `gui-leases › R-F5-20: listingFor signs an answer a phone can check, also when nothing is live` (four); `gui-relay-extension › R-F5-20: with the phone's nonce, each node's signed listing comes with its statuses` (four); `gui-subsystem › builds the channel … registers the tools and the lease link methods`; `lease-vectors` (`listing-none`, `listing-live`, `listing-nonce-mismatch`, `listing-status-withheld`, `listing-status-stale`, `listing-other-device`, `listing-bad-signature`); `mobile-lease-apps › R-F5-20: both phones ask with a fresh nonce, take a node's listing whole or not at all, and say "Could not confirm with" for the rest`; `LeaseVectorTests › testListings`, `testCheckListingReadsTheRelayReply` (Swift); `LeaseVectorTest › listings`, `checkListingReadsTheRelayReply` (JVM) |
+
+Protocol change (`docs/protocol/lease-v1.md`, "Listing" in §2; nothing a phone signs changed):
+
+| Message | Change | Why |
+|---|---|---|
+| `kl.lease.listing` (node-signed, new) | `{ v, type, node_id, to_device, nonce, at, leases: [{ lease_id, seq }] }` | R-F5-20 |
+| `GET /v1/leases`; node method `lease.list` | `?nonce=` (32 bytes, base64url; `400 bad_nonce`); `{ device_id, nonce }` → `{ statuses, listing }`; the reply also holds `{ node_id, envelope: null, status: null, listing }` per node that answered | R-F5-20 |
+
+Vectors: 39 lease-v1 (were 32); approval-v1 stays 41, session-v1 6.
+
+One existing test changed because the request changed: `mobile-lease-apps › R-F5-18: both phones list running leases …` expected `val listed = api.leases()` on Android and now expects `api.leases(nonce)`.
+
+What is left, R-F5-20: a relay can still make a node look unreachable by dropping the request or the answer; the phone then says it could not confirm with that node. Denial is visible, not preventable. A listing says nothing about a request still waiting for an answer, and is as old as its request took (a relay can hold a reply for the 40 s a phone waits).
+
+Readings taken, each the conservative one, for the owner to overrule:
+
+- R-F5-20: the nonce is not a new phone-signed message. It rides in the query of the request the phone already signs, so Android keeps one prompt per check (R-F5-1, R-F5-5); the node therefore cannot check that a phone chose it, and does not need to: only the phone's own comparison gives freshness.
+- R-F5-20: statuses that arrive without a listing that checks are still applied one by one, as before this ruling (a banner row with Stop for a lease the node signed as running), with the "Could not confirm" notice beside them. Dropping them would hide a lease the phone has signed word of.
+- R-F5-20: a list request that fails altogether marks every pinned node as not confirmed.
+- R-F5-20: a listing that checks does not remove a banner row for a lease it does not name (the node lists a lease's end among the last four; a node restart ends leases without a status). Left as before; no row is removed on the strength of an absence.
+- R-F5-20: where it is shown. iOS: in the lease banner, on every tab, one line per node. Android: under "Check for computer-use requests" in Pending, where the owner tapped. A computer that is simply switched off therefore shows such a line until the next check that reaches it.
+- R-F5-20: `at` in a listing is not judged (the phones' clock is the relay's); the nonce is what makes it fresh.
+
+Hand checks still to make for the follow-ups (none was run: Swift and Kotlin were written by hand against the vectors and never compiled; no phone, relay, Mac or JDK here):
+
+19. `swift test` in `mobile/ios/KLProtocol` (`testListings`, `testCheckListingReadsTheRelayReply`, `testEveryIosVectorIsCovered`) and `../gradlew test` in `mobile/android/protocol` (`LeaseVectorTest › listings`, `checkListingReadsTheRelayReply`, `everyAndroidVectorIsCovered`); then build both apps (`AppModel`, `RelayAPI`/`RelayApi`, `LeaseViews`/`LeaseScreens` changed).
+20. R-F5-20 with a phone, a relay and two nodes: with both nodes up and nothing running, open the app (Android: tap "Check for computer-use requests", one prompt): no "Could not confirm" line. Stop one node's service and check again: "Could not confirm with <that node>" appears, and goes when the node is back and the phone checks again. Grant a lease on the other node and check from a second phone: the banner row is there and no line for that node. A node on a build from before this change shows the line while its running lease still gets its row.
+
 ## Checked against main (`532efcf`)
 
 What main has that the plan was not written for, and what the plan now does about it. Items with no change are listed so nobody checks them twice.

@@ -310,7 +310,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(note, /if \(!Leases\.isLive\(status\.state\)\) return/);
     assert.ok(note.indexOf('Leases.verifiedMessage(') < note.indexOf('runningLeases.add('));
     const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
-    assert.match(refreshAndroid, /val listed = api\.leases\(\)\n/);
+    assert.match(refreshAndroid, /val listed = api\.leases\(nonce\)\n/, 'R-F5-20: the list request carries this request\'s nonce');
     assert.match(refreshAndroid, /for \(entry in listed\) noteListedLease\(entry, pins\)/);
     assert.equal(count(refreshAndroid, 'api.'), 1, 'one request, one prompt, for the requests and for what is running');
     // The list is declared where init can reach it, like leaseRequests.
@@ -330,6 +330,86 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.equal(count(bannerKt, 'Leases.grantedByOther('), 2, 'the lease on the live screen, and each listed one');
     assert.match(screens, /val grantedByOther = Leases\.grantedByOther\(live\.grantedByDevice, live\.grantedByName, model\.deviceId\)/);
     none(screens, ['LaunchedEffect', 'DisposableEffect', 'SideEffect', 'produceState', 'rememberCoroutineScope', 'delay(', 'while (', 'ticker('], 'LeaseScreens.kt');
+  });
+
+  // R-F5-20 (owner ruling, 2026-10-13): a relay cannot hide a live lease
+  // from a phone. Each list request carries a fresh nonce; a node's answer
+  // counts only as a listing it signed over that nonce for this phone, with
+  // a signed status for every lease it names. A pinned node without one is
+  // shown as "Could not confirm with <node>", never as nothing running.
+  it('R-F5-20: both phones ask with a fresh nonce, take a node\'s listing whole or not at all, and say "Could not confirm with" for the rest', () => {
+    // The cores: the check, in the order of verifyLeaseListing (src/gui/lease-protocol.js).
+    const swift = read('mobile', 'ios', 'KLProtocol', 'Sources', 'KLProtocol', 'Lease.swift');
+    const verifySwift = section(swift, 'public static func verifyListing', '\n    }\n');
+    const inOrder = (text, needles, where) => {
+      let at = -1;
+      for (const n of needles) {
+        const next = text.indexOf(n, at + 1);
+        assert.ok(next > at, `"${n}" in ${where}, after the check before it`);
+        at = next;
+      }
+    };
+    inOrder(verifySwift, ['envelope.kid == pin.id', 'envelope.verifyEd25519(spkiHex: pin.key)', '"kl.lease.listing"', 'm["node_id"]?.stringValue == pin.id',
+      'signedNonce == nonce', 'toDevice == deviceId', 'verifiedMessage(candidate, pin: pin)', '$0.status.leaseId == leaseId && $0.status.seq == seq', 'accepted: true'], 'verifyListing (Swift)');
+    assert.match(verifySwift, /guard !nonce\.isEmpty, signedNonce == nonce else \{ return refused\("nonce_mismatch"\) \}/);
+    assert.match(verifySwift, /else \{ return refused\("status_missing"\) \}/);
+    assert.equal(count(verifySwift, 'accepted: true'), 1, 'one way to be accepted');
+    const checkSwift = section(swift, 'public static func checkListing', '\n    }\n');
+    assert.match(checkSwift, /for entry in entries where entry\["node_id"\]\?\.stringValue == pin\.id && \(entry\["envelope"\]\?\.isNull \?\? true\) \{/);
+    assert.match(checkSwift, /guard let listing else \{ return ListingCheck\(accepted: false, reason: "no_listing", statuses: \[\]\) \}\n\s+return verifyListing\(listing, pin: pin, nonce: nonce, deviceId: deviceId, statuses: statuses\)/);
+    assert.match(swift, /public static func couldNotConfirm\(nodeName: String\) -> String \{ "Could not confirm with \\\(Display\.escape\(nodeName\)\)" \}/);
+
+    const kotlin = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'Lease.kt');
+    const verifyKotlin = section(kotlin, 'fun verifyListing', '\n    }\n');
+    inOrder(verifyKotlin, ['envelope.kid != pin.id', '!envelope.verifyEd25519(pin.key)', '"kl.lease.listing"', 'm["node_id"].str() != pin.id',
+      'signedNonce != nonce', 'toDevice != deviceId', 'verifiedMessage(candidate, pin)', 'it.first.leaseId == leaseId && it.first.seq == seq', 'ListingCheck(true, null, listed)'], 'verifyListing (Kotlin)');
+    assert.match(verifyKotlin, /if \(nonce\.isEmpty\(\) \|\| signedNonce != nonce\) return refused\("nonce_mismatch"\)/);
+    assert.match(verifyKotlin, /\?: return refused\("status_missing"\)/);
+    assert.equal(count(verifyKotlin, 'ListingCheck(true'), 1, 'one way to be accepted');
+    const checkKotlin = section(kotlin, 'fun checkListing', '\n    }\n');
+    assert.match(checkKotlin, /entry\["node_id"\]\.str\(\) == pin\.id && entry\["envelope"\]\.let \{ it == null \|\| it is JsonNull \}/);
+    assert.match(checkKotlin, /\?: return ListingCheck\(false, "no_listing", emptyList\(\)\)\n\s+return verifyListing\(listing, pin, nonce, deviceId, /);
+    assert.match(kotlin, /fun couldNotConfirm\(nodeName: String\): String = "Could not confirm with \$\{Display\.escape\(nodeName\)\}"/);
+    // Neither core has words for "nothing is running" to show in its place.
+    for (const core of [swift, kotlin]) none(core, ['No computer-use', 'Nothing is running', 'No leases'], 'the lease core');
+
+    // iOS: a fresh nonce for each list request, in the request it signs; every pinned node is checked against it.
+    const ios = read('mobile', 'ios', 'App', 'AppModel.swift');
+    const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
+    const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
+    assert.match(refreshIos, /let nonce = Messages\.randomNonce\(\)\n\s+let entries = try await client\.leases\(nonce: nonce, signWith: onlyIfUnlocked \? Self\.sessionOnlySigner\(key\) : nil\)/);
+    assert.equal(count(refreshIos, 'Messages.randomNonce()'), 1);
+    assert.match(refreshIos, /unconfirmedLeaseNodes = state\.nodes\.filter \{ !Leases\.checkListing\(entries, pin: \$0, nonce: nonce, deviceId: key\.deviceId\)\.accepted \}/);
+    // A request that fails confirms nothing; a locked session asks nothing and changes nothing.
+    assert.match(refreshIos, /\} catch \{\n\s+\/\/ No reply at all: nothing was confirmed with any node\.\n\s+unconfirmedLeaseNodes = state\.nodes\n\s+fail\(error\)/);
+    assert.equal(count(iosLeases, 'unconfirmedLeaseNodes = '), 2, 'set from the check, and from a request that failed; nowhere else');
+    assert.match(read('mobile', 'ios', 'App', 'RelayAPI.swift'), /func leases\(wait: Int = 0, nonce: String, signWith: Signer\? = nil\) async throws -> \[JSONValue\] \{\n\s+try await request\("GET", "\/v1\/leases\?wait=\\\(wait\)&nonce=\\\(nonce\)", signWith: signWith\)/);
+    // The banner, on every tab: one row for each such node.
+    const views = read('mobile', 'ios', 'App', 'LeaseViews.swift');
+    const banner = views.slice(views.indexOf('struct LeaseBanner'));
+    assert.match(banner, /if !model\.unconfirmedLeaseNodes\.isEmpty \{/);
+    assert.match(banner, /ForEach\(model\.unconfirmedLeaseNodes, id: \\\.id\) \{ node in\n\s+Text\(Leases\.couldNotConfirm\(nodeName: node\.name\)\)/);
+    assert.match(banner, /Text\(Leases\.couldNotConfirmDetail\)/);
+    none(views, ['No computer-use', 'Nothing is running', 'No leases'], 'LeaseViews.swift');
+
+    // Android: the same, on the owner's tap only, in the one request that tap already made.
+    const kt = ['mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie'];
+    const android = read(...kt, 'AppModel.kt');
+    const live = section(android, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: demo ----');
+    const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
+    assert.match(refreshAndroid, /val nonce = Messages\.randomNonce\(\)\n\s+val listed = api\.leases\(nonce\)\n/);
+    assert.equal(count(refreshAndroid, 'api.'), 1, 'R-F5-1, R-F5-5: still one request, one prompt, sent once');
+    assert.match(refreshAndroid, /val unconfirmed = pins\.filter \{ !Leases\.checkListing\(listed, it, nonce, deviceId \?: ""\)\.accepted \}\.map \{ it\.name \}\n\s+unconfirmedLeaseNodes\.clear\(\)\n\s+unconfirmedLeaseNodes\.addAll\(unconfirmed\)/);
+    assert.match(refreshAndroid, /\} catch \(e: Exception\) \{\n\s+\/\/ No reply at all: nothing was confirmed with any node\.\n\s+unconfirmedLeaseNodes\.clear\(\)\n\s+unconfirmedLeaseNodes\.addAll\(storage\.nodes\.map \{ it\.name \}\)\n\s+fail\(e\)/);
+    assert.equal(count(live, 'unconfirmedLeaseNodes.addAll('), 2, 'from the check, and from a request that failed; nowhere else');
+    assert.ok(android.indexOf('val unconfirmedLeaseNodes = mutableStateListOf<String>()') < android.indexOf('\n    init {'));
+    const api = read(...kt, 'RelayApi.kt');
+    assert.match(api, /suspend fun leases\(nonce: String\? = null\): List<JsonElement> =\n\s+request\("GET", if \(nonce == null\) "\/v1\/leases\?wait=0" else "\/v1\/leases\?wait=0&nonce=\$nonce"\)/);
+    const screens = read(...kt, 'LeaseScreens.kt');
+    const pending = section(screens, 'fun LeaseRequests(', '\n}\n');
+    assert.match(pending, /for \(name in model\.unconfirmedLeaseNodes\) Text\(Leases\.couldNotConfirm\(name\), /);
+    assert.match(pending, /if \(model\.unconfirmedLeaseNodes\.isNotEmpty\(\)\) Text\(Leases\.COULD_NOT_CONFIRM_DETAIL \+ /);
+    none(screens, ['No computer-use', 'Nothing is running', 'No leases'], 'LeaseScreens.kt');
   });
 
   // R-F5-19 (owner ruling, 2026-10-13): iOS watches only while the live

@@ -1511,6 +1511,25 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   asks each node (`lease.list` → `LeaseManager#listFor`) and appends
   `{ node_id, envelope: null, status }` with statuses signed for that
   listing; there is no unsigned listing.
+- **A relay cannot hide a live lease from a phone (R-F5-20).** A phone's
+  `GET /v1/leases` carries `?nonce=` (32 bytes it chose for that request;
+  in the query, so under the request signature it already makes, and no
+  extra prompt on Android). The relay hands it to each node, and
+  `LeaseManager#listingFor` signs a `kl.lease.listing` over the nonce, the
+  phone (`to_device`) and each listed lease's id and status `seq`, also
+  when it lists nothing. A phone takes a node's answer whole or not at all
+  (`verifyLeaseListing` in `lease-protocol.js` is the reference;
+  `Leases.verifyListing` / `checkListing` in both phone cores): its own
+  nonce, itself, and a signed status for every lease named. A pinned node
+  with no listing that checks is shown as "Could not confirm with <node>"
+  (`unconfirmedLeaseNodes` in both apps), never as nothing running; an
+  offline, slow or older node gives the same, because the phone cannot
+  tell those from a relay that kept the answer back. Statuses that come
+  without a listing are still applied one by one. The node keeps no
+  listing nonces. What is left: a relay can still make a node look
+  unreachable (denial is visible, not preventable). A change to the
+  listing changes `verifyLeaseListing`, both cores and the `listing-*`
+  vectors together.
 - The lease is checked again inside `GuiBroker#input`, after the process
   lookup and immediately before the send; a broker with no lease manager
   sends no input. A click, scroll or drag lands only when the window under
@@ -1624,7 +1643,7 @@ front-door graphs, `relay-extension.js` and `lease-protocol.js`).
   (`tests/session-backend-windows.test.js`), which shows the rule is
   written, not that it works. Swift and Kotlin are not compiled by
   `npm test`.
-- Vectors: `node tests/vectors/lease-v1/generate.js --check` (32) and
+- Vectors: `node tests/vectors/lease-v1/generate.js --check` (39) and
   `node tests/vectors/session-v1/generate.js --check` (6).
 - The phones: iOS signs only `kl.lease.watch` with its API session (owner
   ruling R-F5-8) and sends it only while the live lease view is on screen

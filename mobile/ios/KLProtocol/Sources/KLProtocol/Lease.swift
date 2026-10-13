@@ -144,6 +144,24 @@ public struct LeaseView: Equatable {
     public let contactToken: String?
 }
 
+/// What a phone made of one node's answer to "what is running" (owner
+/// ruling R-F5-20). `accepted` means the pinned node signed, for this very
+/// request and this phone, that the leases named are all it has to list;
+/// `statuses` are then the signed statuses it names, in its order (none:
+/// the node says nothing is running). Anything else is no answer at all,
+/// and `reason` says what failed (`no_listing`: none came).
+public struct ListingCheck: Equatable {
+    public let accepted: Bool
+    public let reason: String?
+    public let statuses: [Envelope]
+
+    public init(accepted: Bool, reason: String?, statuses: [Envelope]) {
+        self.accepted = accepted
+        self.reason = reason
+        self.statuses = statuses
+    }
+}
+
 public enum Leases {
     /// The reason a node gives when it suspended a lease because the phone
     /// that granted it had not been in touch (owner ruling R-F5-15). The
@@ -234,6 +252,63 @@ public enum Leases {
             "device_id": .string(deviceId), "contact_token": token, "nonce": .string(nonce), "signed_at": .string(signedAt)
         ])
     }
+
+    /// One node's listing (R-F5-20), checked the way
+    /// `verifyLeaseListing` in src/gui/lease-protocol.js does: the pinned
+    /// node's signature over the received bytes; a kl.lease.listing of that
+    /// node; the nonce this phone chose for this very request (so an answer
+    /// to an earlier request cannot be played again); made for this phone;
+    /// and, for every lease it names, a status of that lease with that seq
+    /// which the same node signed, among `statuses` (so no entry can be
+    /// left out or swapped for an older one). Statuses it does not name are
+    /// not returned.
+    public static func verifyListing(_ envelope: Envelope, pin: NodePin, nonce: String, deviceId: String, statuses: [Envelope]) -> ListingCheck {
+        func refused(_ reason: String) -> ListingCheck { ListingCheck(accepted: false, reason: reason, statuses: []) }
+        guard envelope.alg == "Ed25519", envelope.kid == pin.id else { return refused("malformed") }
+        guard envelope.verifyEd25519(spkiHex: pin.key) else { return refused("bad_signature") }
+        guard let m = try? envelope.message(), m["type"]?.stringValue == "kl.lease.listing", m["v"]?.intValue == 1,
+              let named = m["leases"]?.arrayValue, let signedNonce = m["nonce"]?.stringValue,
+              let toDevice = m["to_device"]?.stringValue else { return refused("malformed") }
+        guard m["node_id"]?.stringValue == pin.id else { return refused("wrong_node") }
+        guard !nonce.isEmpty, signedNonce == nonce else { return refused("nonce_mismatch") }
+        guard toDevice == deviceId else { return refused("wrong_device") }
+        var signed: [(status: LeaseStatus, envelope: Envelope)] = []
+        for candidate in statuses {
+            if let message = verifiedMessage(candidate, pin: pin), let status = LeaseStatus(message: message) {
+                signed.append((status: status, envelope: candidate))
+            }
+        }
+        var listed: [Envelope] = []
+        for entry in named {
+            guard let leaseId = entry["lease_id"]?.stringValue, let seq = entry["seq"]?.intValue else { return refused("malformed") }
+            guard let match = signed.first(where: { $0.status.leaseId == leaseId && $0.status.seq == seq }) else { return refused("status_missing") }
+            listed.append(match.envelope)
+        }
+        return ListingCheck(accepted: true, reason: nil, statuses: listed)
+    }
+
+    /// The same check on the relay's reply to `GET /v1/leases?nonce=…` for
+    /// one pinned node: its entries without a request are its listing
+    /// (`listing`) and the statuses beside it (`status`). No listing among
+    /// them is `no_listing`: the node is offline, slow or older, or the relay
+    /// kept its answer back; this phone cannot tell which.
+    public static func checkListing(_ entries: [JSONValue], pin: NodePin, nonce: String, deviceId: String) -> ListingCheck {
+        var listing: Envelope?
+        var statuses: [Envelope] = []
+        for entry in entries where entry["node_id"]?.stringValue == pin.id && (entry["envelope"]?.isNull ?? true) {
+            if listing == nil, let json = entry["listing"], let envelope = try? Envelope(json: json) { listing = envelope }
+            if let json = entry["status"], let envelope = try? Envelope(json: json) { statuses.append(envelope) }
+        }
+        guard let listing else { return ListingCheck(accepted: false, reason: "no_listing", statuses: []) }
+        return verifyListing(listing, pin: pin, nonce: nonce, deviceId: deviceId, statuses: statuses)
+    }
+
+    /// What a phone says of a pinned node it has no accepted listing from
+    /// (R-F5-20). Never "nothing is running": this phone does not know.
+    public static func couldNotConfirm(nodeName: String) -> String { "Could not confirm with \(Display.escape(nodeName))" }
+
+    /// Under those rows: what it means and what it does not.
+    public static let couldNotConfirmDetail = "No signed answer about computer use came from there. It may be off or out of reach, or the relay may be keeping its answer back. A lease could be running."
 
     /// A node-signed message (request, status or view) whose signature, kid
     /// and node_id are all the pinned node's; nil otherwise.

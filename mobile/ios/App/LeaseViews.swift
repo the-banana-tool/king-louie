@@ -193,6 +193,19 @@ struct LeaseBanner: View {
                 }
                 .padding(8).background(Color.red.opacity(0.1))
             }
+            // R-F5-20: a paired computer this phone got no signed answer from
+            // about computer use. Said as such; never left to look like
+            // "nothing is running".
+            if !model.unconfirmedLeaseNodes.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(model.unconfirmedLeaseNodes, id: \.id) { node in
+                        Text(Leases.couldNotConfirm(nodeName: node.name)).font(.caption.bold())
+                    }
+                    Text(Leases.couldNotConfirmDetail).font(.caption2).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8).background(Color.orange.opacity(0.15))
+            }
         }
         .sheet(isPresented: $model.showLiveLease) { NavigationStack { LiveLeaseView().environmentObject(model) } }
     }

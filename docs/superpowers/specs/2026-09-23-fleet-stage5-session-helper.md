@@ -6,6 +6,7 @@
 - **Program:** docs/superpowers/specs/2026-09-23-stage-program.md (owns §4.23; consumes §4.12, §4.13, §4.15, §4.16, §4.17; adds `lease-v1` and `session-v1` under §4.15; owns `node.yaml` `gui.*` and `src/service/commands/session.js` under §5)
 - **Depends on:** F3 (merged code); `delegate` (F4) only for job-scoped leases (wave 4). Stubs F3 behind the §5.1 interfaces until it merges.
 - **Later rulings:** 2026-10-12 and 2026-10-13, R-F5-9 to R-F5-16, and the security review of 2026-10-12: dated notes at §3.1 to §3.11.
+- **Follow-ups R-F5-20 and R-F5-17 (2026-10-13, after the merge):** a node-signed lease listing bound to the phone's nonce, so a relay cannot hide a live lease (§4.1, §4.7), and an admin-owned record of the node's identity (§13). The plan (Part 1, "Follow-ups after the merge") lists each with its tests.
 - **Second security review and R-F5-17 to R-F5-19 (2026-10-13):** thirteen findings and three more rulings; dated notes at §3.1, §3.5, §3.6, §3.8, §3.9, §3.10, §4.1, §4.6, §4.7 and §13. The plan (Part 1, "Second security review (2026-10-13)") lists each with its commit and tests.
 - **Owner rulings:** 2026-10-12, R-F5-1 to R-F5-8. Where a ruling differs from the text below, a dated note stands at the section (§3.6, §3.9, §3.10, §4.7, §9) and the text itself is left as written. The plan (Part 1, "Owner rulings (2026-10-12)") lists all eight with their tasks and tests.
 
@@ -560,6 +561,8 @@ phone-side `view-node-sig-valid`, `view-tampered-frame`.
 
 > **2026-10-13 (finding 3, R-F5-18).** `docs/protocol/lease-v1.md` is the current form. `kl.lease.watch` gained `contact_token` (the newest token the phone has applied, or `null`); `kl.lease.status` gained `contact_token` and `granted_by` (`{ device_id, name }` or `null`); `kl.lease.view` gained `contact_token`. Nothing a phone signs for a grant changed. Vectors: 32 (`watch-no-token`, `watch-bad-token`, `status-valid`, `status-no-contact`, `status-pending`, `status-granted-unnamed` are new).
 
+> **2026-10-13 (owner ruling R-F5-20).** A new node-signed message, `kl.lease.listing` (`{ v, type, node_id, to_device, nonce, at, leases: [{ lease_id, seq }] }`): the node's whole answer to one phone's listing request, signed over the nonce the phone chose for that request, also when it lists nothing. A phone takes it only with its own nonce, itself as `to_device`, and a signed status for every lease it names; a pinned node without one is shown as "Could not confirm with <node>", never as nothing running. Nothing a phone signs changed (the nonce travels in the query of the request it already signs). Vectors: 39 (the seven `listing-*` are new).
+
 ### 4.2 Helper frames (`docs/protocol/session-v1.md`)
 
 Plain (before and including `ready`), 4-byte length + JSON:
@@ -667,6 +670,8 @@ check on `message.submit`; nodes verify phone envelopes (§3.6).
 > instead of the lease's earlier statuses at once. It is relay transport and part of no signed message.
 
 > **2026-10-13 (finding 3, R-F5-18).** The replies to grant, revoke and watch are `{ state, reason?, status? }`, where `status` is the status the node signed for that answer. `GET /v1/leases` also returns `{ node_id, envelope: null, status }` for each lease that is running or ended lately: the relay asks each of the device's nodes (`lease.list`, `{ device_id }` → `{ statuses }`), and each status is signed by the node for that listing. There is no unsigned listing.
+
+> **2026-10-13 (owner ruling R-F5-20).** `GET /v1/leases` takes `nonce` (32 bytes of base64url; `400 bad_nonce` otherwise), hands it to each node (`lease.list`, `{ device_id, nonce }` → `{ statuses, listing }`) and returns each node's `kl.lease.listing` as `{ node_id, envelope: null, status: null, listing }` before its statuses. The relay only carries it. What is left: a relay can still make a node look unreachable; the phone then says it could not confirm with that node (denial is visible, not preventable).
 
 ## 5. Interfaces
 

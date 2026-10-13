@@ -43,7 +43,69 @@ final class LeaseVectorTests: XCTestCase {
         let names = Set(try allVectors().filter { ($0["consumers"]?.arrayValue ?? []).contains(.string("ios")) }.compactMap { $0["name"]?.stringValue })
         XCTAssertEqual(names, ["grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "watch-no-token",
                                "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed",
-                               "view-node-sig-valid", "view-tampered-frame"])
+                               "view-node-sig-valid", "view-tampered-frame",
+                               "listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
+                               "listing-other-device", "listing-bad-signature"])
+    }
+
+    static let listingVectors = ["listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
+                                 "listing-other-device", "listing-bad-signature"]
+
+    /// R-F5-20: a node's listing is taken whole or not at all.
+    func testListings() throws {
+        for name in Self.listingVectors {
+            let v = try vector(name)
+            let given = v["given"]!
+            let statuses = try (given["statuses"]!.arrayValue!).map { try Envelope(json: $0) }
+            let check = Leases.verifyListing(try Envelope(json: v["input"]!), pin: pin(v), nonce: given["nonce"]!.stringValue!,
+                                             deviceId: given["device_id"]!.stringValue!, statuses: statuses)
+            XCTAssertEqual(check.accepted, v["expect"]!["accepted"]!.boolValue!, name)
+            XCTAssertEqual(check.reason, v["expect"]!["reason"]!.stringValue, name)
+            if !check.accepted { XCTAssertTrue(check.statuses.isEmpty, name) }
+            guard let expected = v["expect"]!["leases"]?.arrayValue else { continue }
+            let got = try check.statuses.map { try XCTUnwrap(LeaseStatus(message: try XCTUnwrap(Leases.verifiedMessage($0, pin: pin(v))))) }
+            XCTAssertEqual(got.map { $0.leaseId }, expected.map { $0["lease_id"]!.stringValue! }, name)
+            XCTAssertEqual(got.map { $0.seq }, expected.map { $0["seq"]!.intValue! }, name)
+            XCTAssertEqual(got.map { $0.state }, expected.map { $0["state"]!.stringValue! }, name)
+        }
+        XCTAssertEqual(try vector("listing-none")["expect"]!["leases"]!.arrayValue!.count, 0)
+        XCTAssertEqual(try vector("listing-live")["expect"]!["leases"]!.arrayValue!.count, 2)
+    }
+
+    /// R-F5-20: the relay's reply, node by node. No listing for a node is no answer from it.
+    func testCheckListingReadsTheRelayReply() throws {
+        func entries(_ v: JSONValue, nodeId: String? = nil, withListing: Bool = true) -> [JSONValue] {
+            let node = JSONValue.string(nodeId ?? v["given"]!["node"]!["id"]!.stringValue!)
+            var out: [JSONValue] = []
+            if withListing { out.append(.object(["node_id": node, "envelope": .null, "status": .null, "listing": v["input"]!])) }
+            for status in v["given"]!["statuses"]!.arrayValue! { out.append(.object(["node_id": node, "envelope": .null, "status": status])) }
+            return out
+        }
+        for name in Self.listingVectors {
+            let v = try vector(name)
+            let check = Leases.checkListing(entries(v), pin: pin(v), nonce: v["given"]!["nonce"]!.stringValue!, deviceId: v["given"]!["device_id"]!.stringValue!)
+            XCTAssertEqual(check.accepted, v["expect"]!["accepted"]!.boolValue!, name)
+            XCTAssertEqual(check.reason, v["expect"]!["reason"]!.stringValue, name)
+        }
+        let live = try vector("listing-live")
+        let nonce = live["given"]!["nonce"]!.stringValue!
+        let device = live["given"]!["device_id"]!.stringValue!
+        // The listing left out (an offline, slow or older node looks the same): no answer, whatever statuses came.
+        let bare = Leases.checkListing(entries(live, withListing: false), pin: pin(live), nonce: nonce, deviceId: device)
+        XCTAssertEqual(bare, ListingCheck(accepted: false, reason: "no_listing", statuses: []))
+        XCTAssertEqual(Leases.checkListing([], pin: pin(live), nonce: nonce, deviceId: device).reason, "no_listing")
+        // Entries listed under another node are not this node's answer.
+        XCTAssertEqual(Leases.checkListing(entries(live, nodeId: "kl-aaaaaaaaaaaaaaaa"), pin: pin(live), nonce: nonce, deviceId: device).reason, "no_listing")
+        // An entry that carries a request is not part of a listing.
+        let withRequest: [JSONValue] = [.object(["node_id": .string(pin(live).id), "envelope": live["input"]!, "status": .null, "listing": live["input"]!])]
+        XCTAssertEqual(Leases.checkListing(withRequest, pin: pin(live), nonce: nonce, deviceId: device).reason, "no_listing")
+        // A nonce this phone did not choose, and no nonce at all.
+        XCTAssertEqual(Leases.checkListing(entries(live), pin: pin(live), nonce: String(nonce.reversed()), deviceId: device).reason, "nonce_mismatch")
+        XCTAssertEqual(Leases.checkListing(entries(live), pin: pin(live), nonce: "", deviceId: device).reason, "nonce_mismatch")
+        // What the owner is told never says nothing is running, and the node's name is escaped.
+        XCTAssertEqual(Leases.couldNotConfirm(nodeName: "gpu-box"), "Could not confirm with gpu-box")
+        XCTAssertEqual(Leases.couldNotConfirm(nodeName: "gpu\u{202E}box").unicodeScalars.contains("\u{202E}"), false)
+        XCTAssertTrue(Leases.couldNotConfirmDetail.contains("A lease could be running"))
     }
 
     func testGrants() throws {

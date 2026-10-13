@@ -88,6 +88,16 @@ class LeaseView(
 
 data class ViewCheck(val accepted: Boolean, val reason: String?, val view: LeaseView?)
 
+/**
+ * What a phone made of one node's answer to "what is running" (owner ruling
+ * R-F5-20). [accepted] means the pinned node signed, for this very request
+ * and this phone, that the leases named are all it has to list; [statuses]
+ * are then the signed statuses it names, in its order (none: the node says
+ * nothing is running). Anything else is no answer at all, and [reason] says
+ * what failed (`no_listing`: none came).
+ */
+data class ListingCheck(val accepted: Boolean, val reason: String?, val statuses: List<Envelope>)
+
 /** What one lease send (grant, deny, revoke, watch) came to. Android shows the third as "not confirmed" and sends nothing again by itself (owner ruling R-F5-5). */
 sealed class SendOutcome {
     /**
@@ -251,6 +261,63 @@ object Leases {
             )
         )
     }
+
+    /**
+     * One node's listing (R-F5-20), checked the way `verifyLeaseListing` in
+     * src/gui/lease-protocol.js does: the pinned node's signature over the
+     * received bytes; a kl.lease.listing of that node; the nonce this phone
+     * chose for this very request (so an answer to an earlier request cannot
+     * be played again); made for this phone; and, for every lease it names, a
+     * status of that lease with that seq which the same node signed, among
+     * [statuses] (so no entry can be left out or swapped for an older one).
+     * Statuses it does not name are not returned.
+     */
+    fun verifyListing(envelope: Envelope, pin: NodePin, nonce: String, deviceId: String, statuses: List<Envelope>): ListingCheck {
+        fun refused(reason: String) = ListingCheck(false, reason, emptyList())
+        if (envelope.alg != "Ed25519" || envelope.kid != pin.id) return refused("malformed")
+        if (!envelope.verifyEd25519(pin.key)) return refused("bad_signature")
+        val m = try {
+            envelope.message()
+        } catch (e: ProtocolException) {
+            return refused("malformed")
+        }
+        if (m["type"].str() != "kl.lease.listing" || m["v"].int() != 1) return refused("malformed")
+        val named = m["leases"].arr() ?: return refused("malformed")
+        val signedNonce = m["nonce"].str() ?: return refused("malformed")
+        val toDevice = m["to_device"].str() ?: return refused("malformed")
+        if (m["node_id"].str() != pin.id) return refused("wrong_node")
+        if (nonce.isEmpty() || signedNonce != nonce) return refused("nonce_mismatch")
+        if (toDevice != deviceId) return refused("wrong_device")
+        val signed = statuses.mapNotNull { candidate -> verifiedMessage(candidate, pin)?.let { LeaseStatus.from(it) }?.let { it to candidate } }
+        val listed = ArrayList<Envelope>()
+        for (entry in named) {
+            val leaseId = entry["lease_id"].str() ?: return refused("malformed")
+            val seq = entry["seq"].int() ?: return refused("malformed")
+            val match = signed.firstOrNull { it.first.leaseId == leaseId && it.first.seq == seq } ?: return refused("status_missing")
+            listed.add(match.second)
+        }
+        return ListingCheck(true, null, listed)
+    }
+
+    /**
+     * The same check on the relay's reply to `GET /v1/leases?nonce=…` for one
+     * pinned node: its entries without a request are its listing (`listing`)
+     * and the statuses beside it (`status`). No listing among them is
+     * `no_listing`: the node is offline, slow or older, or the relay kept its
+     * answer back; this phone cannot tell which.
+     */
+    fun checkListing(entries: List<JsonElement>, pin: NodePin, nonce: String, deviceId: String): ListingCheck {
+        fun envelopeOf(json: JsonElement?): Envelope? = json?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() }
+        val mine = entries.filter { entry -> entry["node_id"].str() == pin.id && entry["envelope"].let { it == null || it is JsonNull } }
+        val listing = mine.firstNotNullOfOrNull { envelopeOf(it["listing"]) } ?: return ListingCheck(false, "no_listing", emptyList())
+        return verifyListing(listing, pin, nonce, deviceId, mine.mapNotNull { envelopeOf(it["status"]) })
+    }
+
+    /** What a phone says of a pinned node it has no accepted listing from (R-F5-20). Never "nothing is running": this phone does not know. */
+    fun couldNotConfirm(nodeName: String): String = "Could not confirm with ${Display.escape(nodeName)}"
+
+    /** Under those rows: what it means and what it does not. */
+    const val COULD_NOT_CONFIRM_DETAIL = "No signed answer about computer use came from there. It may be off or out of reach, or the relay may be keeping its answer back. A lease could be running."
 
     /** A node-signed message whose signature, kid and node_id are all the pinned node's; null otherwise. */
     fun verifiedMessage(envelope: Envelope, pin: NodePin): JsonObject? {

@@ -215,6 +215,14 @@ class AppModel(context: Context) {
      */
     val runningLeases = mutableStateListOf<RunningLease>()
 
+    /**
+     * The names of the pinned nodes the last "Check for computer-use
+     * requests" brought no answer from that this phone could accept (owner
+     * ruling R-F5-20): no listing, or one that did not check. Shown as
+     * "Could not confirm with …", never as nothing running.
+     */
+    val unconfirmedLeaseNodes = mutableStateListOf<String>()
+
     val devices = mutableStateListOf<JsonElement>()
     val online = mutableStateMapOf<String, Boolean>()
     val nodes: List<NodePin> get() = storage.nodes
@@ -459,13 +467,26 @@ class AppModel(context: Context) {
         scope.launch {
             try {
                 val pins = storage.nodes
-                val listed = api.leases()
+                // R-F5-20: a nonce chosen for this one request. Each node signs its listing
+                // over it, so an answer to an earlier request cannot be played again and no
+                // entry can be left out unseen. Still one request and one prompt.
+                val nonce = Messages.randomNonce()
+                val listed = api.leases(nonce)
                 val items = listed.mapNotNull { entry -> verifiedLeaseRequest(entry, pins, api) }.distinctBy { it.request.requestId }
                 leaseRequests.clear()
                 leaseRequests.addAll(items)
                 for (entry in listed) noteListedLease(entry, pins)
+                // R-F5-20: per pinned node, a listing it signed for this request and this
+                // phone, complete, or no answer. This phone cannot tell a node that is off,
+                // slow or older from a relay that kept its answer back: all "could not confirm".
+                val unconfirmed = pins.filter { !Leases.checkListing(listed, it, nonce, deviceId ?: "").accepted }.map { it.name }
+                unconfirmedLeaseNodes.clear()
+                unconfirmedLeaseNodes.addAll(unconfirmed)
                 leaseNotice = false
             } catch (e: Exception) {
+                // No reply at all: nothing was confirmed with any node.
+                unconfirmedLeaseNodes.clear()
+                unconfirmedLeaseNodes.addAll(storage.nodes.map { it.name })
                 fail(e)
             } finally {
                 isLoadingLeases = false
@@ -967,6 +988,7 @@ class AppModel(context: Context) {
         pending.clear()
         closeLiveLease()
         runningLeases.clear()
+        unconfirmedLeaseNodes.clear()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
         decidingLease.clear()
@@ -2035,6 +2057,7 @@ class AppModel(context: Context) {
         answeredTokens.clear()
         closeLiveLease()
         runningLeases.clear()
+        unconfirmedLeaseNodes.clear()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
         decidingLease.clear()
