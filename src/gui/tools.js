@@ -9,7 +9,7 @@ const { REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
 const { isLocalRequester } = require('../core/origin');
 const { GuiError, isGuiError, toToolResult } = require('./errors');
 const { resolveLaunch } = require('./apps');
-const { parseKeys, printableChar, isEnter, checkButton, MODIFIERS } = require('./keys');
+const { parseKeys, printableChar, isEnter, checkButton, checkClickModifiers, MODIFIERS } = require('./keys');
 const { checkTypeText } = require('./text-guard');
 
 const GUI_TOOL_NAMES = Object.freeze(['ListApps', 'LaunchApp', 'CloseApp', 'Screenshot', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag']);
@@ -284,8 +284,9 @@ function buildGuiTools(gui) {
       const summary = `Click ${button} at (${params.x}, ${params.y}) on ${params.screenshot_id}`;
       return runInput('Click', params, options, summary, params, (lease, jobId) => {
         checkButton(button, platform);
+        const mods = checkClickModifiers(params.modifiers || [], platform);
         const t = point(jobId, lease, params.screenshot_id, params.x, params.y);
-        return { action: { kind: 'click', handle: t.handle, rel: t.rel, button, count: params.count || 1, mods: [...new Set(params.modifiers || [])] } };
+        return { action: { kind: 'click', handle: t.handle, rel: t.rel, button, count: params.count || 1, mods } };
       });
     }),
 

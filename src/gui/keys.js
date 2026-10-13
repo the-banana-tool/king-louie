@@ -68,9 +68,22 @@ function printableChar({ mods, key }) {
 
 const isEnter = (combo) => combo.key === 'enter';
 
+// A click's modifiers (security review finding 13a): the same names and the
+// same deny list as a key's. Only the rules that turn on the modifiers alone
+// can apply (the Windows/Super key, ctrl+alt); the rest name a key.
+function checkClickModifiers(mods, platform = process.platform) {
+  if (!Array.isArray(mods)) throw new GuiError('key_invalid', 'modifiers must be a list');
+  for (const m of mods) if (!MODIFIERS.includes(m)) throw new GuiError('key_invalid', `unknown modifier "${m}"`);
+  if (new Set(mods).size !== mods.length) throw new GuiError('key_invalid', 'a modifier is repeated');
+  const ordered = MODIFIERS.filter((m) => mods.includes(m));
+  const denied = deniedReason({ mods: ordered, key: 'click' }, platform);
+  if (denied) throw new GuiError('key_denied', denied);
+  return ordered;
+}
+
 function checkButton(button, platform = process.platform) {
   // X11 pastes the primary selection on a middle click (§3.8).
   if (button === 'middle' && platform === 'linux') throw new GuiError('middle_click_denied', 'a middle click pastes the primary selection on Linux');
 }
 
-module.exports = { parseKeys, printableChar, isEnter, checkButton, MODIFIERS };
+module.exports = { parseKeys, printableChar, isEnter, checkButton, checkClickModifiers, MODIFIERS };

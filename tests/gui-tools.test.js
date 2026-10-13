@@ -423,6 +423,18 @@ describe('input tools', () => {
     assert.match((await tools.Click.execute({ screenshot_id: 'ss-999', x: 1, y: 1 }, opts())).error, /^stale_screenshot/);
   });
 
+  it('finding 13a: a click with a denied modifier is refused before the helper hears of it', async () => {
+    await withLease();
+    const shot = await tools.Screenshot.execute({ app: 'calculator' }, opts());
+    channel.requests.length = 0;
+    const out = await tools.Click.execute({ screenshot_id: shot.screenshot_id, x: 5, y: 5, modifiers: plat === 'win32' || plat === 'linux' ? ['meta'] : ['ctrl', 'alt'] }, opts());
+    assert.equal(out.ok, false);
+    assert.match(out.error, /^key_denied/);
+    assert.deepEqual(channel.requests.filter((r) => r.op === 'input'), []);
+    const ok = await tools.Click.execute({ screenshot_id: shot.screenshot_id, x: 5, y: 5, modifiers: ['ctrl'] }, opts());
+    assert.equal(ok.ok, true);
+  });
+
   it('Scroll and Drag', async () => {
     await withLease();
     const shot = await tools.Screenshot.execute({ app: 'calculator' }, opts());

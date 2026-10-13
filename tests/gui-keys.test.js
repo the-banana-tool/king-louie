@@ -1,7 +1,7 @@
 // tests/gui-keys.test.js
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseKeys, printableChar, isEnter, checkButton } = require('../src/gui/keys');
+const { parseKeys, printableChar, isEnter, checkButton, checkClickModifiers } = require('../src/gui/keys');
 
 const code = (fn) => { try { fn(); return null; } catch (e) { return e.code; } };
 
@@ -52,6 +52,31 @@ describe('printableChar and isEnter', () => {
     assert.equal(printableChar(parseKeys('ctrl+a', 'linux')), null);
     assert.equal(printableChar(parseKeys('enter', 'linux')), null);
     assert.equal(isEnter(parseKeys('shift+enter', 'linux')), true);
+  });
+});
+
+// Security review finding 13a: a click's modifiers go through the key
+// grammar's deny list too.
+describe('checkClickModifiers', () => {
+  it('denies meta on Windows and Linux and ctrl+alt everywhere, as for a key', () => {
+    for (const platform of ['win32', 'linux']) {
+      assert.equal(code(() => checkClickModifiers(['meta'], platform)), 'key_denied', platform);
+      assert.equal(code(() => checkClickModifiers(['shift', 'meta'], platform)), 'key_denied', platform);
+    }
+    for (const platform of ['win32', 'linux', 'darwin']) {
+      assert.equal(code(() => checkClickModifiers(['ctrl', 'alt'], platform)), 'key_denied', platform);
+      assert.equal(code(() => checkClickModifiers(['ctrl'], platform)), null, platform);
+      assert.equal(code(() => checkClickModifiers(['shift'], platform)), null, platform);
+      assert.equal(code(() => checkClickModifiers(['ctrl', 'shift'], platform)), null, platform);
+      assert.equal(code(() => checkClickModifiers([], platform)), null, platform);
+    }
+    assert.equal(code(() => checkClickModifiers(['meta'], 'darwin')), null, 'a command-click is ordinary on macOS');
+  });
+
+  it('refuses what is not a modifier, and a repeated one', () => {
+    assert.equal(code(() => checkClickModifiers(['hyper'], 'win32')), 'key_invalid');
+    assert.equal(code(() => checkClickModifiers(['ctrl', 'ctrl'], 'win32')), 'key_invalid');
+    assert.equal(code(() => checkClickModifiers('ctrl', 'win32')), 'key_invalid');
   });
 });
 
