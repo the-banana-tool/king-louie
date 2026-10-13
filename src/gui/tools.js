@@ -145,6 +145,14 @@ function buildGuiTools(gui) {
   async function runInput(toolName, params, options, summary, auditParams, build) {
     broker.require('gui.input');
     const jobId = jobIdOf(options);
+    // R-F5-3 for input too (security review finding 13f): a run that refuses
+    // unsafe calls may not drive the desktop, whoever asked for the job's
+    // lease. Refused for scope, in the node's own words, before the lease is
+    // looked at; audited like every other refused input.
+    if (refusesUnsafe(options)) {
+      auditAppend('gui.input', { job_id: jobId, lease_id: null, tool: toolName, params: auditParams, foreground_before: null, foreground_after: null, result: 'refused:scope' });
+      return { ok: false, error: REFUSE_UNSAFE_MESSAGE };
+    }
     let lease = null;
     let typedFn = null;
     try {

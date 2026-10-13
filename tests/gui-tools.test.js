@@ -226,6 +226,31 @@ describe('R-F5-3: a front-door client needs fleet:unsafe', () => {
     assert.equal(requesterCalls.length, 0);
   });
 
+  it('finding 13f: every input tool refuses a run that refuses unsafe calls, for scope, before the lease check and before the helper', async () => {
+    channel.connect();
+    // The job holds an active lease (granted to a run that may ask for one).
+    await withLease();
+    const shot = await tools.Screenshot.execute({ app: 'calculator' }, opts());
+    channel.requests.length = 0;
+    const audited = audits.length;
+    const calls = {
+      Click: { screenshot_id: shot.screenshot_id, x: 5, y: 5 }, Type: { text: 'a' }, Key: { keys: 'a' },
+      Scroll: { screenshot_id: shot.screenshot_id, x: 5, y: 5, dy: 1 }, Drag: { screenshot_id: shot.screenshot_id, from: { x: 1, y: 1 }, to: { x: 2, y: 2 } }
+    };
+    for (const [name, params] of Object.entries(calls)) {
+      const out = await tools[name].execute(params, opts({ approvalRequester: refusing() }));
+      assert.deepEqual(out, { ok: false, error: REFUSE_UNSAFE_MESSAGE }, name);
+    }
+    assert.deepEqual(channel.requests, [], 'the helper heard nothing');
+    assert.equal(requesterCalls.length, 0, 'and nobody was asked');
+    // The same refusal with no lease at all: scope comes before the lease.
+    leases.stopAll();
+    assert.deepEqual(await tools.Key.execute({ keys: 'a' }, opts({ approvalRequester: refusing() })), { ok: false, error: REFUSE_UNSAFE_MESSAGE });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(audits.slice(audited).filter((a) => a.kind === 'gui.input').length, 6, 'each refusal is audited');
+    assert.ok(audits.slice(audited).filter((a) => a.kind === 'gui.input').every((a) => a.data.result === 'refused:scope'));
+  });
+
   it('R-F5-3: a node-local run still asks the phone', async () => {
     const leasing = tools.RequestLease.execute({ apps: ['calculator'], minutes: 10, reason: 'x' }, opts({ approvalRequester: requester(true) }));
     await new Promise((r) => setImmediate(r));
