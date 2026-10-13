@@ -17,8 +17,10 @@
 // reads (Administrators, SYSTEM or the config dir's own owner; never a config
 // dir LOCAL SERVICE owns; no links) and, on the service's side, by a probe
 // that the service can neither create a file beside the record nor open the
-// record itself for writing. Whatever cannot be checked is not trusted. Loads
-// no agent code: every profile's start reads it.
+// record itself for writing, and by the access lists of the record and its
+// directory, which must let nobody but SYSTEM and Administrators change
+// either. Whatever cannot be checked is not trusted. Loads no agent code:
+// every profile's start reads it.
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -113,10 +115,9 @@ function windowsOwnerProblem({ configDir, dir, file, inspectOwners }) {
 // security review, finding 1): a directory can refuse new files and still
 // hand every file in it a write entry through an inherit-only ACE, which the
 // record then inherits. Opening for writing changes nothing in the file.
-// Not asked, because nothing here can ask it without changing the file: the
-// right to delete the record or to rewrite its ACL. The administrator's
-// command gives both the directory and the file a protected ACL of their own
-// (writeIdentityRecord), so neither has an entry it did not write.
+// Not asked, because no attempt can ask it without changing the file: the
+// right to delete the record or to rewrite its ACL. That is read from the
+// access lists instead, when the service starts (windowsAclProblem).
 function windowsProbeProblem({ dir, file, fsImpl }) {
   const denied = (err) => Boolean(err) && (err.code === 'EACCES' || err.code === 'EPERM');
   const probe = path.join(dir, `.probe-${crypto.randomBytes(6).toString('hex')}`);
@@ -152,7 +153,7 @@ function windowsProbeProblem({ dir, file, fsImpl }) {
 // set's probe is run again on every scan): null when the record is still out
 // of this process's reach, or off Windows, where owner and mode were read
 // when the service started; else why it can no longer be trusted. No
-// PowerShell: the owners are not read again here.
+// PowerShell: neither the owners nor the access lists are read again here.
 function probeIdentityRecord({ configDir, platform = process.platform, fsImpl = fs } = {}) {
   if (platform !== 'win32') return null;
   const file = recordPath(configDir);
@@ -160,9 +161,10 @@ function probeIdentityRecord({ configDir, platform = process.platform, fsImpl = 
   return problem === null ? null : `${file} ${problem}`;
 }
 
-// What doctor reads on Windows, which the service's probe cannot ask and an
-// administrator's own write attempt cannot show (fourth security review,
-// finding 5): the access lists of the record's directory and of the record,
+// What the service (when it starts) and doctor read on Windows, which the
+// service's probe cannot ask and an administrator's own write attempt cannot
+// show (fourth security review, finding 5; fifth, finding 3): the access
+// lists of the record's directory and of the record,
 // through the installers' handle-based inspector (one no-follow handle per
 // path, framework types only, no Get-Acl). Reading them needs no privilege
 // beyond being allowed to open the two; an account that is not allowed gets
@@ -254,16 +256,29 @@ function recordAclProblem({ configDir, inspectAcl = defaultInspectAcl } = {}) {
     if (entry.dacl !== true) return { state: 'writable', detail: `${targets[i]} has no access list at all, so anyone can change it` };
     for (const ace of entry.aces) {
       if (!ace || ace.other || !Number.isInteger(ace.type) || !Number.isInteger(ace.mask) || typeof ace.sid !== 'string' || !SID_RE.test(ace.sid)) {
-        return { state: 'unread', detail: `the access list of ${targets[i]} holds an entry of a kind doctor does not read` };
+        return { state: 'unread', detail: `the access list of ${targets[i]} holds an entry of a kind that is not read here` };
       }
       if (ace.type === 1) continue;
-      if (ace.type !== 0) return { state: 'unread', detail: `the access list of ${targets[i]} holds an entry of a kind doctor does not read` };
+      if (ace.type !== 0) return { state: 'unread', detail: `the access list of ${targets[i]} holds an entry of a kind that is not read here` };
       if (WINDOWS_TRUSTED_OWNERS.has(ace.sid) || (ace.mask & WINDOWS_WRITE_RIGHTS) === 0) continue;
       const inherited = i === 0 && (Number(ace.flags) & WINDOWS_ACE_INHERIT_ONLY) ? ', through an entry that the files in it inherit' : '';
       return { state: 'writable', detail: `the access list of ${targets[i]} lets ${ace.sid} change it${inherited}` };
     }
   }
   return { state: 'clean' };
+}
+
+// Windows, the service's side, when it starts (fifth security review,
+// finding 3). The owner read and the probe both pass a record whose access
+// list gives the service's account WRITE_DAC and nothing else: it cannot
+// write the record now, and can once it has rewritten the list. So the lists
+// are read, and only "nobody but SYSTEM and Administrators" is trusted; a
+// list that could not be read is not. One more PowerShell child, so this
+// runs where the owner read does (the start), never before each lease.
+function windowsAclProblem({ configDir, inspectAcl }) {
+  const acl = recordAclProblem({ configDir, inspectAcl });
+  if (acl.state === 'clean') return null;
+  return `${acl.state === 'writable' ? 'cannot be trusted' : 'could not be verified'}: ${acl.detail}`;
 }
 
 // POSIX: the config dir, the record's directory and the record are the
@@ -292,9 +307,11 @@ function posixProblem({ configDir, dir, file, adminUid, fsImpl }) {
 //                                                 be used; `reason` never
 //                                                 quotes the file
 // serviceProbe: true for the service (which must not be able to write the
-// directory), false for the admin CLI and doctor (an administrator can).
+// directory or the record, now or after rewriting an access list), false for
+// the admin CLI and doctor (an administrator can; doctor reads the access
+// lists itself and says what it found).
 function readIdentityRecord({ configDir, platform = process.platform, adminUid = 0, serviceProbe = false, fsImpl = fs,
-  inspectOwners = defaultInspectOwners } = {}) {
+  inspectOwners = defaultInspectOwners, inspectAcl = defaultInspectAcl } = {}) {
   const dir = recordDir(configDir);
   const file = recordPath(configDir);
   const invalid = (reason) => ({ state: 'invalid', file, reason });
@@ -324,7 +341,8 @@ function readIdentityRecord({ configDir, platform = process.platform, adminUid =
   if (st.isSymbolicLink() || !st.isFile()) return invalid('is not a regular file');
   if (st.size > RECORD_MAX_BYTES) return invalid(`is larger than ${RECORD_MAX_BYTES} bytes`);
   const problem = platform === 'win32'
-    ? (windowsOwnerProblem({ configDir, dir, file, inspectOwners }) || (serviceProbe ? windowsProbeProblem({ dir, file, fsImpl }) : null))
+    ? (windowsOwnerProblem({ configDir, dir, file, inspectOwners })
+      || (serviceProbe ? (windowsProbeProblem({ dir, file, fsImpl }) || windowsAclProblem({ configDir, inspectAcl })) : null))
     : posixProblem({ configDir, dir, file, adminUid, fsImpl });
   if (problem) return invalid(problem);
   let raw;

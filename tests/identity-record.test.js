@@ -48,7 +48,7 @@ const cleanAcl = (paths) => paths.map((p, i) => ({
 }));
 // The reader's options in a test: this uid as the administrator; on Windows
 // no probe and Administrators as every owner, unless a test says otherwise.
-const opts = (extra = {}) => ({ adminUid: UID, serviceProbe: false, inspectOwners: owners(), runIcacls: () => {}, ...extra });
+const opts = (extra = {}) => ({ adminUid: UID, serviceProbe: false, inspectOwners: owners(), inspectAcl: cleanAcl, runIcacls: () => {}, ...extra });
 const write = (s, k, extra = {}) => R.writeIdentityRecord({ configDir: s.configDir, nodeId: k.nodeId, publicKey: k.publicKey, ...opts(extra) });
 
 describe('the administrator\'s record of the node identity (R-F5-17)', () => {
@@ -269,6 +269,69 @@ describe('the administrator\'s record of the node identity (R-F5-17)', () => {
       assert.match(probe({ fsImpl: answering({ create: null }) }), /identity is writable by the account running the service/);
       assert.match(probe({ fsImpl: answering({ write: 'EIO' }) }), /could not be verified/);
       assert.equal(R.probeIdentityRecord({ configDir: s.configDir, platform: 'linux', fsImpl: answering({ write: null }) }), null);
+    });
+
+    // Fifth security review, finding 3: only doctor read the access lists.
+    // An allow entry that gives the service's account WRITE_DAC on the
+    // record, and nothing else, passes the owner read and both probes (the
+    // record does not open for writing until the account rewrites its ACL).
+    describe('the service reads the access lists when it starts', () => {
+      const SYSTEM = 'S-1-5-18';
+      const ace = (sid, mask, flags = 0, type = 0) => ({ type, sid, mask, flags });
+      const FULL = 0x1f01ff;
+      const READ = 0x1200a9;
+      const WRITE_DAC = 0x40000;
+      const dirAcl = (...more) => ({ dacl: true, aces: [ace(SYSTEM, FULL, 3), ace(ADMINS, FULL, 3), ace(SERVICE, READ, 3), ...more] });
+      const fileAcl = (...more) => ({ dacl: true, aces: [ace(SYSTEM, FULL), ace(ADMINS, FULL), ace(SERVICE, READ), ...more] });
+      const service = (s, inspectAcl) => win(s, { serviceProbe: true, fsImpl: answering(), inspectAcl });
+
+      it('WRITE_DAC alone for the service account, on the record or on its directory, is refused', () => {
+        const s = recorded();
+        const asked = [];
+        assert.equal(service(s, (paths) => { asked.push(paths); return [dirAcl(), fileAcl()]; }).state, 'recorded');
+        assert.deepEqual(asked, [[path.join(s.configDir, 'identity'), R.recordPath(s.configDir)]], 'the record and its directory, once');
+        const onFile = service(s, () => [dirAcl(), fileAcl(ace(SERVICE, READ | WRITE_DAC))]);
+        assert.equal(onFile.state, 'invalid');
+        assert.match(onFile.reason, /^cannot be trusted: the access list of .*node\.json lets S-1-5-19 change it$/);
+        const onDir = service(s, () => [dirAcl(ace(SERVICE, WRITE_DAC)), fileAcl()]);
+        assert.equal(onDir.state, 'invalid');
+        assert.match(onDir.reason, /^cannot be trusted: the access list of .*identity lets S-1-5-19 change it$/);
+        // Any account that is not SYSTEM or Administrators: the service may be a member of a group.
+        for (const sid of [USER, 'S-1-5-32-545', 'S-1-1-0', 'S-1-5-11']) {
+          assert.equal(service(s, () => [dirAcl(), fileAcl(ace(sid, WRITE_DAC))]).state, 'invalid', sid);
+        }
+        // Inherit-only on the directory: what the record would inherit.
+        assert.match(service(s, () => [dirAcl(ace(SERVICE, 0x1301bf, 0x9)), fileAcl()]).reason, /through an entry that the files in it inherit/);
+      });
+
+      it('access lists that cannot be read or judged are not trusted (fail closed)', () => {
+        const s = recorded();
+        for (const inspectAcl of [
+          () => { throw new Error('powershell failed'); }, () => null, () => [dirAcl()], () => [dirAcl(), null],
+          () => [dirAcl(), { dacl: true, aces: [{ other: true }] }], () => [dirAcl(), fileAcl(ace(USER, READ, 0, 9))]
+        ]) {
+          const seen = service(s, inspectAcl);
+          assert.equal(seen.state, 'invalid');
+          assert.match(seen.reason, /^could not be verified: /);
+        }
+        assert.match(service(s, () => [dirAcl(), { dacl: false, aces: [] }]).reason, /has no access list at all/);
+      });
+
+      it('it stops the start; an administrator\'s read and the probe that runs before each lease read no access list', () => {
+        const s = recorded();
+        const k = keys();
+        write(s, k);
+        const bad = () => [dirAcl(), fileAcl(ace(SERVICE, READ | WRITE_DAC))];
+        assert.throws(() => R.assertRecordedIdentity({ configDir: s.configDir, dataDir: s.dataDir, identity: k, platform: 'win32', log: { warn() {}, error() {}, info() {} }, ...opts({ serviceProbe: true, fsImpl: answering(), inspectAcl: bad }) }),
+          (err) => err.code === 'NODE_IDENTITY_RECORD_INVALID' && /lets S-1-5-19 change it/.test(err.message) && /identity record --replace/.test(err.message));
+        const never = () => { throw new Error('not asked'); };
+        assert.equal(win(s, { serviceProbe: false, inspectAcl: never }).state, 'recorded');
+        assert.equal(R.probeIdentityRecord({ configDir: s.configDir, platform: 'win32', fsImpl: answering(), inspectAcl: never }), null);
+        // The cheap answers come first: a record the probe refuses is never asked about further.
+        assert.match(win(s, { serviceProbe: true, fsImpl: answering({ write: null }), inspectAcl: never }).reason, /is writable by the account running the service/);
+        // Off Windows there are no access lists to read.
+        if (POSIX) assert.equal(R.readIdentityRecord({ configDir: s.configDir, ...opts({ serviceProbe: true, inspectAcl: never }) }).state, 'recorded');
+      });
     });
 
     // Fifth security review, finding 2: a service run by hand as an account
