@@ -2482,6 +2482,95 @@ body {
   color: var(--text-muted);
 }
 
+/* --- Import dialog (History H4) ---------------------------- */
+.import-chat-card {
+  width: min(560px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+}
+
+.import-chat-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.import-chat-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.import-chat-label {
+  flex: 0 0 64px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.import-chat-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.import-chat-pattern {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+
+.import-chat-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.import-chat-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.import-chat-sender {
+  flex: 0 0 64px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.import-chat-heading,
+.import-chat-sample {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.import-chat-state {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.import-chat-state[hidden] {
+  display: none;
+}
+
+.import-chat-warning {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+  border: 1px solid var(--warning, var(--border-default));
+  border-radius: var(--radius-sm);
+}
+
 /* --- Floating settings (legacy, kept for start-state) ------ */
 .floating-settings-btn {
   position: fixed;

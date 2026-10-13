@@ -53,6 +53,21 @@
         </div>
       </div>
     </div>
+    <div class="rename-chat-modal" id="import-chat-dialog" role="dialog" aria-modal="true" aria-labelledby="import-chat-heading" hidden>
+      <div class="rename-chat-card import-chat-card">
+        <h3 id="import-chat-heading">Import a conversation</h3>
+        <div class="import-chat-preview" id="import-chat-preview"></div>
+        <div class="import-chat-state" id="import-chat-state" hidden></div>
+        <p class="import-chat-warning" id="import-chat-warning">This conversation becomes a chat that recall can search. If it contains passwords or keys, they become searchable too, and can be shown to the chat model. Its text is never sent to an embedding service or to typesafe.ai.</p>
+        <p class="link-chats-note" id="import-chat-no-case">An imported chat cannot be attached to a case.</p>
+        <div class="rename-chat-error" id="import-chat-error" hidden></div>
+        <div class="rename-chat-actions">
+          <button type="button" class="btn" id="import-chat-cancel-btn">Cancel</button>
+          <button type="button" class="btn" id="import-chat-open-btn" hidden>Open that chat</button>
+          <button type="button" class="btn btn-primary" id="import-chat-commit-btn">Import</button>
+        </div>
+      </div>
+    </div>
     <div class="context-menu" id="message-context-menu" hidden>
       <button class="context-menu-item" type="button" data-action="copy"><i class="fas fa-copy"></i> Copy</button>
       <button class="context-menu-item" type="button" data-action="copy-code"><i class="fas fa-code"></i> Copy code block</button>
@@ -78,6 +93,7 @@
           <button id="mesh-indicator-btn" class="icon-button mesh-indicator" type="button" title="Mesh network" aria-label="Mesh network" hidden><i class="fas fa-network-wired"></i> <span id="mesh-peer-count">0</span></button>
           <button id="working-dir-btn" class="working-dir-btn" type="button" title="Set working directory" aria-label="Set working directory"><i class="fas fa-folder-open"></i> <span id="working-dir-label" class="working-dir-label">No working directory</span></button>
           <button id="export-chat-btn" class="icon-button" type="button" title="Export chat as JSON" aria-label="Export chat as JSON"><i class="fas fa-file-export"></i></button>
+          <button id="import-chat-btn" class="icon-button" type="button" title="Import a conversation…" aria-label="Import a conversation"><i class="fas fa-file-import"></i></button>
           <button id="chat-mcp-btn" class="icon-button" type="button" title="MCP servers for this chat" aria-label="MCP servers"><i class="fas fa-plug"></i></button>
           <button id="checkpoints-btn" class="icon-button" type="button" title="File checkpoints" aria-label="File checkpoints"><i class="fas fa-clock-rotate-left"></i></button>
           <div class="chat-models-switcher" id="chat-models-switcher" hidden>

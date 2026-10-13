@@ -112,6 +112,16 @@ const dom = {
   linkChatsError: document.getElementById('link-chats-error'),
   linkChatsCancelBtn: document.getElementById('link-chats-cancel-btn'),
   linkChatsSaveBtn: document.getElementById('link-chats-save-btn'),
+  importChatBtn: document.getElementById('import-chat-btn'),
+  importChatDialog: document.getElementById('import-chat-dialog'),
+  importChatPreview: document.getElementById('import-chat-preview'),
+  importChatState: document.getElementById('import-chat-state'),
+  importChatWarning: document.getElementById('import-chat-warning'),
+  importChatNoCase: document.getElementById('import-chat-no-case'),
+  importChatError: document.getElementById('import-chat-error'),
+  importChatCancelBtn: document.getElementById('import-chat-cancel-btn'),
+  importChatOpenBtn: document.getElementById('import-chat-open-btn'),
+  importChatCommitBtn: document.getElementById('import-chat-commit-btn'),
   settingsDrawer: document.getElementById('settings-drawer'),
   toggleHistoryBtn: document.getElementById('toggle-history-btn'),
   openSettingsBtn: document.getElementById('open-settings-btn'),
@@ -9451,7 +9461,273 @@ if (dom.workingDirBtn) {
   });
 }
 
+// --- Import a conversation (recall spec §10.2, stage H4) ---
+// The file is chosen in a dialog the main process opens; this side holds a
+// token for it. Nothing is stored before the Import click. Everything shown
+// comes from the file, so every string is set with textContent.
+const IMPORT_WARNING_TEXT = 'This conversation becomes a chat that recall can search. If it contains passwords or keys, they become searchable too, and can be shown to the chat model. Its text is never sent to an embedding service or to typesafe.ai.';
+const IMPORT_NO_CASE_TEXT = 'An imported chat cannot be attached to a case.';
+const IMPORT_KIND_TEXTS = new Map([
+  ['claude-code-jsonl', 'Claude Code session'],
+  ['markdown-transcript', 'Markdown transcript'],
+  ['king-louie-json', 'King Louie export']
+]);
+const IMPORT_SENDER_TEXTS = new Map([
+  ['user', 'User'],
+  ['assistant', 'Assistant'],
+  ['toolUse', 'Tool call'],
+  ['toolResult', 'Tool result'],
+  ['status', 'Status']
+]);
+
+function importKindText(kind) {
+  return IMPORT_KIND_TEXTS.get(kind) || 'Conversation';
+}
+
+function importSenderText(sender) {
+  return IMPORT_SENDER_TEXTS.get(sender) || 'Other';
+}
+
+function importTurnsText(turns) {
+  if (!Number.isInteger(turns) || turns < 0) return 'Turns not counted';
+  return `${turns} ${turns === 1 ? 'turn' : 'turns'}`;
+}
+
+// The picked file's token and name, the heading pattern the preview on
+// screen was made with, and the chat a file already imported became.
+let importDialogState = { token: null, name: '', pattern: undefined, existingChatId: null, busy: false };
+
+function closeImportDialog() {
+  if (importDialogState.busy) return;
+  dom.importChatDialog.hidden = true;
+  dom.importChatPreview.textContent = '';
+  importDialogState = { token: null, name: '', pattern: undefined, existingChatId: null, busy: false };
+  showImportError('');
+}
+
+function showImportError(text) {
+  dom.importChatError.textContent = text;
+  dom.importChatError.hidden = !text;
+}
+
+function importPreviewRow(label, value) {
+  const row = document.createElement('div');
+  row.className = 'import-chat-row';
+  const name = document.createElement('span');
+  name.className = 'import-chat-label';
+  name.textContent = label;
+  const text = document.createElement('span');
+  text.className = 'import-chat-value';
+  text.textContent = value;
+  row.append(name, text);
+  return row;
+}
+
+// Draws the dialog for the picked file: its preview, or (preview null) only
+// its name, with the Import button off.
+function renderImportDialog(preview) {
+  const box = dom.importChatPreview;
+  box.textContent = '';
+  dom.importChatWarning.textContent = IMPORT_WARNING_TEXT;
+  dom.importChatNoCase.textContent = IMPORT_NO_CASE_TEXT;
+  box.appendChild(importPreviewRow('File', importDialogState.name || 'Unnamed file'));
+
+  let state = '';
+  importDialogState.existingChatId = null;
+  if (preview) {
+    box.appendChild(importPreviewRow('Kind', importKindText(preview.kind)));
+    box.appendChild(importPreviewRow('Title', typeof preview.title === 'string' && preview.title ? preview.title : 'Untitled chat'));
+    box.appendChild(importPreviewRow('Length', importTurnsText(preview.turns)));
+
+    const patterns = Array.isArray(preview.patterns) ? preview.patterns.filter((p) => p && typeof p.id === 'string') : [];
+    if (preview.kind === 'markdown-transcript' && patterns.length > 0) {
+      const row = document.createElement('label');
+      row.className = 'import-chat-row';
+      const name = document.createElement('span');
+      name.className = 'import-chat-label';
+      name.textContent = 'Headings';
+      const select = document.createElement('select');
+      select.className = 'chat-info-select import-chat-pattern';
+      for (const pattern of patterns) {
+        const option = document.createElement('option');
+        option.value = pattern.id;
+        option.textContent = `${typeof pattern.label === 'string' && pattern.label ? pattern.label : pattern.id} (${importTurnsText(pattern.turns)})`;
+        select.appendChild(option);
+      }
+      if (typeof preview.pattern === 'string') select.value = preview.pattern;
+      select.addEventListener('change', () => loadImportPreview(select.value));
+      row.append(name, select);
+      box.appendChild(row);
+    }
+
+    const roles = Array.isArray(preview.roles) ? preview.roles.slice(0, 5) : [];
+    if (roles.length > 0) {
+      const list = document.createElement('div');
+      list.className = 'import-chat-lines';
+      for (const item of roles) {
+        const line = document.createElement('div');
+        line.className = 'import-chat-line';
+        const heading = document.createElement('span');
+        heading.className = 'import-chat-heading';
+        heading.textContent = typeof item?.heading === 'string' ? item.heading : '';
+        const role = document.createElement('span');
+        role.className = 'import-chat-sender';
+        role.textContent = importSenderText(item?.role);
+        line.append(heading, role);
+        list.appendChild(line);
+      }
+      box.appendChild(list);
+    }
+
+    const sample = Array.isArray(preview.sample) ? preview.sample.slice(0, 5) : [];
+    if (sample.length > 0) {
+      const list = document.createElement('div');
+      list.className = 'import-chat-lines';
+      for (const item of sample) {
+        const line = document.createElement('div');
+        line.className = 'import-chat-line';
+        const sender = document.createElement('span');
+        sender.className = 'import-chat-sender';
+        sender.textContent = importSenderText(item?.sender);
+        const text = document.createElement('span');
+        text.className = 'import-chat-sample';
+        text.textContent = typeof item?.text === 'string' ? item.text : '';
+        line.append(sender, text);
+        list.appendChild(line);
+      }
+      box.appendChild(list);
+    }
+
+    if (typeof preview.existingChatId === 'string' && preview.existingChatId) {
+      importDialogState.existingChatId = preview.existingChatId;
+      state = 'This file was already imported.';
+    } else if (preview.serviceUnreachable) {
+      state = 'The service is not reachable; the preview is shown, but the chat cannot be imported now.';
+    }
+  }
+
+  const existing = Boolean(importDialogState.existingChatId);
+  dom.importChatState.textContent = state;
+  dom.importChatState.hidden = !state;
+  dom.importChatOpenBtn.hidden = !existing;
+  dom.importChatCommitBtn.hidden = existing;
+  dom.importChatCommitBtn.disabled = !preview || existing || Boolean(preview.serviceUnreachable);
+  dom.importChatCommitBtn.textContent = 'Import';
+  dom.importChatCancelBtn.disabled = false;
+}
+
+// Previews the picked file, with a Markdown heading pattern when the owner
+// chose one. A pattern that fails leaves the preview on screen as it was.
+async function loadImportPreview(pattern) {
+  const { token } = importDialogState;
+  if (!token || importDialogState.busy) return;
+  let preview;
+  try {
+    preview = await window.electron.history.previewImport(pattern === undefined ? { token } : { token, pattern });
+  } catch (err) {
+    preview = { ok: false, error: `The file could not be read: ${err.message}` };
+  }
+  if (importDialogState.token !== token) return;
+  const opened = !dom.importChatDialog.hidden;
+  if (!preview || preview.ok === false) {
+    if (opened) {
+      const select = dom.importChatPreview.querySelector('select');
+      if (select && importDialogState.pattern !== undefined) select.value = importDialogState.pattern;
+    } else {
+      renderImportDialog(null);
+    }
+    showImportError(preview?.error || 'The file could not be read.');
+  } else {
+    importDialogState.pattern = typeof preview.pattern === 'string' ? preview.pattern : undefined;
+    renderImportDialog(preview);
+    showImportError('');
+  }
+  dom.importChatDialog.hidden = false;
+  if (!opened) dom.importChatCancelBtn.focus();
+}
+
+async function openImportDialog() {
+  if (importDialogState.busy || !dom.importChatDialog.hidden) return;
+  let picked;
+  try {
+    picked = await window.electron.history.pickImport();
+  } catch (err) {
+    showNotice(`The file could not be chosen: ${err.message}`);
+    return;
+  }
+  if (!picked || picked.canceled) return;
+  if (picked.ok === false || typeof picked.token !== 'string' || !picked.token) {
+    showNotice(picked.error || 'The file could not be chosen.');
+    return;
+  }
+  importDialogState = {
+    token: picked.token, name: typeof picked.name === 'string' ? picked.name : '', pattern: undefined, existingChatId: null, busy: false
+  };
+  await loadImportPreview();
+}
+
+async function selectImportedChat(chatId) {
+  if (!appState.chats.some((c) => c.id === chatId)) await loadChats();
+  if (appState.chats.some((c) => c.id === chatId)) await handleSelectChat(chatId);
+}
+
+async function openExistingImport() {
+  const chatId = importDialogState.existingChatId;
+  if (!chatId) return;
+  closeImportDialog();
+  try {
+    await selectImportedChat(chatId);
+  } catch (err) {
+    showNotice(`The chat could not be opened: ${err.message}`);
+  }
+}
+
+// The owner's confirmation: the only call that stores anything.
+async function commitImportDialog() {
+  const { token, pattern } = importDialogState;
+  if (!token || importDialogState.busy || dom.importChatCommitBtn.disabled) return;
+  importDialogState.busy = true;
+  showImportError('');
+  dom.importChatCommitBtn.disabled = true;
+  dom.importChatCancelBtn.disabled = true;
+  dom.importChatCommitBtn.textContent = 'Importing…';
+  let result;
+  try {
+    result = await window.electron.history.commitImport(pattern === undefined ? { token } : { token, pattern });
+  } catch (err) {
+    result = { ok: false, error: `The conversation could not be imported: ${err.message}` };
+  }
+  importDialogState.busy = false;
+  dom.importChatCancelBtn.disabled = false;
+  dom.importChatCommitBtn.textContent = 'Import';
+  if (!result || result.ok === false || typeof result.chatId !== 'string') {
+    // A refused import keeps its file: the owner can try again or pick
+    // another heading pattern.
+    dom.importChatCommitBtn.disabled = false;
+    showImportError(result?.error || 'The conversation could not be imported.');
+    return;
+  }
+  closeImportDialog();
+  if (result.imported === false) showNotice('This file was already imported.');
+  try {
+    await selectImportedChat(result.chatId);
+  } catch (err) {
+    showNotice(`The chat was imported but could not be opened: ${err.message}`);
+  }
+}
+
 // --- Export chat as JSON ---
+if (dom.importChatBtn) dom.importChatBtn.addEventListener('click', openImportDialog);
+dom.importChatCancelBtn.addEventListener('click', closeImportDialog);
+dom.importChatOpenBtn.addEventListener('click', openExistingImport);
+dom.importChatCommitBtn.addEventListener('click', commitImportDialog);
+dom.importChatDialog.addEventListener('click', (e) => {
+  if (e.target === dom.importChatDialog) closeImportDialog();
+});
+dom.importChatDialog.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeImportDialog();
+});
+
 // Attachment bytes stay out of the export; name, type, size and a document's
 // extracted text (what the model read) stay in.
 function omitAttachmentBytes(msg) {
@@ -12252,6 +12528,7 @@ if (window.electron.wizard?.onStart) {
 const commandPaletteActions = [
   { name: 'New Chat', icon: 'fas fa-plus', shortcut: 'Ctrl+N', action: () => handleCreateChat() },
   { name: 'Export as JSON', icon: 'fas fa-file-export', shortcut: 'Ctrl+Shift+E', action: () => document.getElementById('export-chat-btn')?.click() },
+  { name: 'Import a conversation…', icon: 'fas fa-file-import', action: () => document.getElementById('import-chat-btn')?.click() },
   { name: 'Export as Markdown', icon: 'fas fa-file-lines', action: () => exportAsMarkdown() },
   { name: 'Settings', icon: 'fas fa-gear', shortcut: 'Ctrl+,', action: () => document.getElementById('open-settings-btn')?.click() },
   { name: 'Toggle Agent Mode', icon: 'fas fa-robot', action: () => document.getElementById('agent-mode-btn')?.click() },

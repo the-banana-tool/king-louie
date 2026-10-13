@@ -180,6 +180,17 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **`recallScopeWord` takes only the exact strings `linked` and `all`**; any other `scope` gives the H3 line.
 - **Not covered by a test:** the menu and dialog were opened once by hand on a throwaway profile (Playwright `_electron`, `tests/e2e/helpers.js`'s `launchApp`): an ordinary chat, two links saved, `linked` then `all` chosen, and a Discord-titled chat's pinned menu. A candidate with `allowed: false`, a `links.set` refusal and the `recall-excerpt-other-chat` class were not rendered. No e2e test is added here (Task 17's end-to-end check).
 
+**Task 15**
+
+- **The warning is in two places that a test holds equal**: `index.html` carries the sentence in `#import-chat-warning`, and every render sets it again from `IMPORT_WARNING_TEXT`. Nothing in the renderer hides, restyles or removes that element (pinned). The R-H4-7 line is done the same way (`#import-chat-no-case`, `IMPORT_NO_CASE_TEXT`).
+- **Three more text functions**: `importSenderText` (a fixed table for the sender of a sample line and the role of a heading: "User", "Assistant", "Tool call", "Tool result", "Status", else "Other"; the file's own word is never shown) and `importTurnsText` ("1 turn", "12 turns", "Turns not counted" for anything that is not a whole number from 0). A pattern's option reads `<label> (<turns>)`.
+- **A file that cannot be previewed still opens the dialog**, with the file's name, the reply's `error` as text and the Import button disabled, so the refusal stays on screen (a notice goes after five seconds). A heading pattern that is refused leaves the preview on screen as it was, puts the select back and shows the error.
+- **Import sends the pattern the preview on screen reported** (`preview.pattern`), so what is stored is what was previewed; a file with no pattern sends none.
+- **A file already imported**: the button is "Open that chat". A commit that answers `imported: false` (the file was imported between the preview and the click) selects that chat and says "This file was already imported."
+- **While the commit runs, Cancel, Escape and a click outside do nothing** (the commit cannot be cancelled; the dialog would otherwise close over a running import). The button reads "Importing…". A refusal leaves the dialog open with the file still picked (Task 11: a failed commit keeps its token).
+- **The command-list entry clicks the header button** (`#import-chat-btn`), as "Export as JSON" does. No keyboard shortcut.
+- **Not covered by a test:** the dialog was opened once by hand on a throwaway profile (Playwright `_electron`, `launchApp`, `KL_TEST_IMPORT_FILE` set to the Markdown fixture, standalone): the preview with its headings and samples, Import, the new chat selected, and the same file again ("This file was already imported.", "Open that chat"). Not rendered: a Claude Code or King Louie file, a file with more than one fitting pattern, a refusal, `serviceUnreachable`, and anything attached. No e2e test is added (Task 17).
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named).
