@@ -327,7 +327,7 @@ plan step `failed` (`reason: cancelled`). The owner can always cancel via IPC (�
 
 `EnvelopeStore(dir)` over `.kl/envelopes/<id>.json`, ids `env-07`, `env-123` (counter from file names).
 **Request** body: `{ intent, executor, recipients: { allow[] }, facts[], rules[], caps: { usd, contacts,
-attemptsPerContact }, window: { start, end, tz? } }`. Checks: `authority ≠ none`; recipients normalize;
+attemptsPerContact }, window: { start, end, tz? }, channels[]? }`. Checks: `authority ≠ none`; recipients normalize;
 every fact active, not `inferred`/`unknown`, disclosable (else refuse naming each); `caps.contacts ≤
 contactsPerDay × window days`; `window.end ≤` the deadline; `tz` defaults to `callingWindow.tz`, else
 `settings.cases.timeZone`, else host. `gateLeaves` over `intent`, `rules`, `recipients` in `message` mode
@@ -376,6 +376,18 @@ refusals[], deltas[] }`:
 | distinct contacts `≤ caps.contacts` | delta `raises contacts cap` |
 | per recipient `usage.attempts[addr] + payload.attemptsPerContact ≤ caps.attemptsPerContact` | delta `raises attempts per contact` |
 | `now` inside the window | delta `extends window end to <date>`; refusal if `now < start` |
+| a channel send's channel in `channels` (jobs are not checked) | delta `allows channel sends on <channel>` |
+
+**Channels (owner decision 2026-10-12).** `channels` lists the contact channels a channel send
+(`ContactRouter.sendExternal`, §3.7) to the envelope's recipients may use, in stored form (`call` is
+`voice`). A request names them explicitly; the owner sees them in the approval question (`Channel sends to
+them: sms, voice`) and, for a `signed` envelope, in the phone summary before the intent. The list is in the
+core, so in the hash, only when the envelope has one: an envelope without the key allows no channel send
+and its core, hash and signed action are byte for byte what they were before the field existed (no approval
+vector changes). A `channels` key that is not a list of distinct channel ids is malformed (`tampered`),
+never "no list". Adding a channel is a `channel` delta the owner approves like any other widening
+(`applyDeltas`: new version, new hash; a `signed` envelope goes back to the phone); nothing else adds one.
+`Executor`'s tool description does not advertise `channels` while `sendExternal` has no caller.
 
 **Window:** `start`/`end` are dates in `tz`; `now` is inside when `localDate(now, tz)`
 (`Intl.DateTimeFormat('en-CA', { timeZone: tz })`) lies between them inclusive. No offsets are computed, so
@@ -430,14 +442,42 @@ and the `case-researcher` child (`query` mode), and C4's `sendExternal`.
 
 **`sendExternal` and envelopes.** A `sendExternal` to anyone but the owner always needs an envelope (the R42
 floor: an outbound message has authority ≥ `envelope`). The caller passes `envelopeId` and `executorId`;
-`sendEnvelope(reg, { caseId, envelopeId, executorId, recipients })` (`envelope-ops.js`,
+`sendEnvelope(reg, { caseId, envelopeId, executorId, recipients, channelId })` (`envelope-ops.js`,
 `ExecutorRegistry#sendEnvelope`) reads the envelope from `.kl/envelopes/` (an envelope object from the caller
 is never used) and returns it only when the executor is known and available, `envelopeFit` has no refusal
-and no delta (intact hash, that executor's, every recipient in `recipients.allow`, today inside the
-window, caps not passed), its status is `active`, and a `signed` one passes `verifyEnvelopeGrant`. The gate
-then runs against that stored envelope. No registry → every non-owner send is refused. It only checks:
-recording the send against the envelope's caps, and tying the named executor to the channel, are left to
-the first caller (there is none, R39).
+and no delta (intact hash, that executor's, the channel in `channels`, every recipient in
+`recipients.allow`, today inside the window, one more attempt per recipient inside the caps), its status is
+`active`, and a `signed` one passes `verifyEnvelopeGrant`. The gate then runs against that stored envelope.
+No registry → every non-owner send is refused. There is still no caller (R39).
+
+**Channel binding and counting (owner decision 2026-10-12).** Two rules were added before any caller exists.
+(a) The envelope names the channel: `channels` (§3.6) must list `channelId` (`call` = `voice`). An envelope
+with no list allows no channel send, so every envelope approved before this keeps meaning what it meant:
+executor jobs only. (b) The send is counted, the way a job's contacts are (`recordSend`, step 10), in
+`src/cases/executors/channel-send.js` (`ExecutorRegistry#reserveChannelSend` / `settleChannelSend`):
+
+- After the gate and before the adapter is called, `reserveChannelSend` runs `sendEnvelope` again on the
+  envelope as it is on disk (and refuses when its hash is not the one the gate ran against), refuses a case
+  that is not `active` (a conservative reading; no owner decision names the statuses), then counts: `usage.contacts`,
+  `usage.attempts[addr] += 1`, a `payloads[]` entry in state `reserved`, the case's `contactsPerDay` for a
+  contact new to the envelope, and the executor's global daily cap (`reserveContacts`). A cap that would be
+  passed refuses and what was counted is undone; nothing has left.
+- After the adapter: sent → the entry is `sent`, the text is journaled and a `contactsPerDay` crossing is
+  raised. A `ContactDeliveryError` with code `not-configured`, `rejected`, `too-large` or `rate-limited`
+  (refused before leaving) → the entry is removed and its count given back. Anything else (`unreachable`,
+  a timeout, any other error) may have left → `unconfirmed`, still counted, and the caller gets
+  `counted: true`. A crash, or a settle that cannot run, leaves `reserved`: counted.
+- Case files are written through `CaseRuntime.systemAction`: inline inside a turn this process holds, under
+  the lock outside one; a case another process holds refuses the send. Because `systemAction` runs inline
+  for any holder in this process, the check and its writes have no `await` between them and a whole
+  reservation runs under a per-case mutex, so two concurrent sends cannot both pass a cap of one.
+- Residuals: a channel send's money cost is unknown and is not charged (`estimateUsd: 0`; the usd cap is
+  not consumed). A released send gives back a contact only when it alone counted it, so two overlapping
+  sends to one new contact that both fail leave that contact counted for the day (too high, never too
+  low). `sendEnvelope` compares the channel adapter's normalized target with `recipients.allow`, which was
+  normalized for the executor's own channel; a form that differs is refused. Revoking an envelope does not
+  recall a send already past its reservation. The Bash write-guard gap applies to `usage` and `payloads`
+  as to the rest of the envelope file.
 
 ### 3.8 Normalization — `src/cases/executors/normalize.js`
 
@@ -594,7 +634,9 @@ done | failed | cancelled`; `check.status` ∈ `ok | rewritten | flagged | needs
 expired | exhausted | revoked | tampered`), `hash` (over `core`), `questionId`, `window.tz`,
 `recipients.addRequiresApproval: true`, `grantedBy { channel, at, questionId, factId, evidence: null | {
 request_id, action_hash } }`, `deltas[]`, `usage { usd, contacts[], attempts{} }`, `payloads[] { n, at,
-jobId, payload, rendered, hash, estimateUsd }`.
+jobId, payload, rendered, hash, estimateUsd }`, and optionally `channels[]` (in the core when present,
+§3.6). A channel send's `payloads[]` entry has `sendId`, `channel`, `state` (`reserved | sent |
+unconfirmed`), `recipients`, `newContacts`, `budgetDay` instead of `jobId` (§3.7).
 
 **Data dir:** `ops-memory.jsonl` (`{ id: "ops-0004", key, topic, stmt, value, caseId, factId, provenance,
 at, status, supersedes }`); `executors/usage.json` (§3.1); `executors/jobs.json` (`"<caseId>/<jobId>"` → `{

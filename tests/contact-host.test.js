@@ -470,7 +470,13 @@ describe('createContactHost: sendExternal uses the real outbound gate (C3 merge,
     const t = makeHost({
       settings: {},
       extraAdapters: { 'loop-extra': extra },
-      hostExtras: { getExecutorRegistry: () => ({ settings: () => resolveExecutorSettings(), sendEnvelope: () => ({ ok: true, envelope }) }) }
+      hostExtras: {
+        getExecutorRegistry: () => ({
+          settings: () => resolveExecutorSettings(), sendEnvelope: () => ({ ok: true, envelope }),
+          // Counting is covered in contact-send-counting.test.js.
+          reserveChannelSend: (args) => ({ ok: true, reservation: { sendId: args.sendId } }), settleChannelSend: () => ({ ok: true, state: 'sent' })
+        })
+      }
     });
     const real = gates.gateLeaves;
     const calls = [];
@@ -527,6 +533,8 @@ describe('createContactHost: sendExternal uses the real outbound gate (C3 merge,
     });
     executors = new ExecutorRegistry({ dataDir: tmp('kl-host-exec-'), getSettings: t.settings, caseRuntime: t.runtime });
     executors.sendEnvelope = () => ({ ok: true, envelope: { id: 'env-01', status: 'active', facts: [] } });
+    executors.reserveChannelSend = (args) => ({ ok: true, reservation: { sendId: args.sendId } });
+    executors.settleChannelSend = () => ({ ok: true, state: 'sent' });
     try {
       await t.host.start();
       const lot = await t.runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });

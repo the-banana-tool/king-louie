@@ -130,8 +130,22 @@ function createContactHost({
     }
     return registry.sendEnvelope(args);
   };
+  // ... and is counted against that envelope's caps, the case's
+  // contactsPerDay and the global daily cap, through the same registry.
+  const NO_COUNT = 'the send cannot be counted against its envelope (no executor registry), so only the owner can be messaged';
+  const reserveSend = (args) => {
+    const registry = getExecutorRegistry();
+    if (!registry || typeof registry.reserveChannelSend !== 'function') return { ok: false, error: NO_COUNT };
+    return registry.reserveChannelSend(args);
+  };
+  const settleSend = (reservation, outcome) => {
+    const registry = getExecutorRegistry();
+    if (!registry || typeof registry.settleChannelSend !== 'function') return { ok: false, error: NO_COUNT };
+    return registry.settleChannelSend(reservation, outcome);
+  };
   const router = new ContactRouter({
-    state, runtime: caseRuntime, adapters, presence, getGate, getCategoryKeywords, checkEnvelope, clock, getTimeZone: () => presence.timeZone()
+    state, runtime: caseRuntime, adapters, presence, getGate, getCategoryKeywords, checkEnvelope, reserveSend, settleSend, clock,
+    getTimeZone: () => presence.timeZone()
   });
   const ladder = new LadderEngine({
     state, casesRoot: caseRuntime.root, runtime: caseRuntime, router, presence, getPolicy: () => settings().contactPolicy, clock, tickMs, dataDir

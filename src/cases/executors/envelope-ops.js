@@ -440,17 +440,29 @@ async function revokeEnvelope(reg, caseId, envelopeId, reason = 'revoked by the 
   }
 }
 
+// The channel id a send is checked under: 'call' is 'voice', as in the
+// contact ladders. Anything that is not a string is null (refused).
+function sendChannel(channelId) {
+  if (typeof channelId !== 'string' || !channelId) return null;
+  return channelId === 'call' ? 'voice' : channelId;
+}
+
 // For ContactRouter.sendExternal: the envelope a channel send to anyone but
 // the owner goes out under. → { ok: true, envelope } only for the envelope
 // as stored in the case (never a caller's object), intact, `active`, for the
-// named executor, with every recipient in it and today in its window
+// named executor, naming this channel in its `channels` (an envelope with no
+// such list allows no channel send), with every recipient in it, today in
+// its window and one more attempt per recipient inside its caps
 // (envelopeFit; a delta is a refusal here, there is no delta question), and
 // with its phone grant when it is `signed`. Never throws. It reads only:
-// the send is not counted against the envelope's caps (see CLAUDE.md).
-function sendEnvelope(reg, { caseId, envelopeId, executorId, recipients } = {}) {
+// channel-send.js counts the send (reserveChannelSend runs this check again
+// at the moment it counts).
+function sendEnvelope(reg, { caseId, envelopeId, executorId, recipients, channelId } = {}) {
   const refuse = (error) => ({ ok: false, error });
   const NEEDS = 'a send to anyone but the owner needs an owner-approved envelope';
   try {
+    const channel = sendChannel(channelId);
+    if (!channel) return refuse(`${NEEDS} that names the channel; no channel was named`);
     if (typeof envelopeId !== 'string' || !envelopeId) return refuse(`${NEEDS}; none was named`);
     if (typeof executorId !== 'string' || !executorId) return refuse(`${NEEDS} for the executor that sends; no executor was named`);
     const entry = reg.get(executorId, { caseId });
@@ -459,7 +471,7 @@ function sendEnvelope(reg, { caseId, envelopeId, executorId, recipients } = {}) 
     const env = new EnvelopeStore(reg.caseDir(caseId)).get(envelopeId);
     if (!env) return refuse(`${envelopeId} was not found in this case`);
     const fit = envelopeFit(env, {}, {
-      facts: reg.caseRuntime.ledger(caseId).view().facts, recipients, now: reg.now(), estimateUsd: 0, executorId: entry.id
+      facts: reg.caseRuntime.ledger(caseId).view().facts, recipients, now: reg.now(), estimateUsd: 0, executorId: entry.id, channel
     });
     const problems = [...fit.refusals, ...fit.deltas.map((d) => d.text)];
     // envelopeFit also fits `expired` and `exhausted` (they take a delta); a send needs `active`.
@@ -478,6 +490,7 @@ function sendEnvelope(reg, { caseId, envelopeId, executorId, recipients } = {}) 
 
 module.exports = {
   sendEnvelope,
+  sendChannel,
   requestEnvelope,
   syncEnvelopes,
   requestDelta,

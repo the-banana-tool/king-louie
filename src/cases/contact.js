@@ -126,10 +126,15 @@ async function conflictAnswered(record, fact, { runtime, caseId }) {
 
 QuestionStore.registerAnswerHandler('conflict', { toFact: conflictFact, onAnswered: conflictAnswered });
 
+// ContactDeliveryError codes that say a plain send was refused before it
+// left. 'unreachable' is not one: the relay or provider may have taken it.
+const NEVER_LEFT_CODES = new Set(['not-configured', 'rejected', 'too-large', 'rate-limited']);
+
 class ContactRouter {
   constructor({
     dir = null, state, runtime, adapters, presence = null, getGate = () => null, clock = () => new Date(),
-    getTimeZone = () => '', getCategoryKeywords = null, checkEnvelope = null, log = createLogger('contact/router')
+    getTimeZone = () => '', getCategoryKeywords = null, checkEnvelope = null, reserveSend = null, settleSend = null,
+    log = createLogger('contact/router')
   } = {}) {
     if (!state) throw new Error('ContactRouter needs a ContactState');
     this.dir = dir || state.dir;
@@ -146,6 +151,13 @@ class ContactRouter {
     // | { ok: false, error }: the owner-approved envelope a non-owner send
     // needs (envelope-ops.js sendEnvelope). Without one every such send is refused.
     this.checkEnvelope = typeof checkEnvelope === 'function' ? checkEnvelope : null;
+    // Counting a non-owner send against that envelope's caps, the case's
+    // contactsPerDay and the global daily cap (executors/channel-send.js):
+    // reserveSend(args) → { ok: true, reservation } | { ok: false, error }
+    // before the send, settleSend(reservation, outcome) after it. Without
+    // both every such send is refused.
+    this.reserveSend = typeof reserveSend === 'function' ? reserveSend : null;
+    this.settleSend = typeof settleSend === 'function' ? settleSend : null;
     this.clock = clock;
     this.getTimeZone = getTimeZone;
     this.log = log;
@@ -764,7 +776,10 @@ class ContactRouter {
   // `envelopeId` and `executorId` name the owner-approved envelope a send to
   // anyone but the owner goes out under and the executor that sends. The
   // envelope is read from the case by checkEnvelope; an envelope object from
-  // the caller is never used.
+  // the caller is never used. The envelope must name `channelId` in its
+  // `channels`. The send is counted before it leaves (reserveSend) and
+  // settled after: a send that clearly never left gives its count back, one
+  // that may have left stays counted (`counted: true` on the failure).
   async _sendExternal({ caseId, channelId, target, text, envelopeId = null, executorId = null }) {
     const adapter = this.adapter(channelId);
     if (!adapter) return { ok: false, error: `${channelId} is not configured` };
@@ -772,6 +787,7 @@ class ContactRouter {
     if (!to) return { ok: false, error: `"${target}" is not a valid ${channelId} target` };
     const deliveryId = this.state.newDeliveryId();
     let body = String(text ?? '');
+    let reservation = null;
     if (!this.isOwnerTarget(channelId, to)) {
       const gate = this.getGate();
       if (!gate || typeof gate.gateLeaves !== 'function') {
@@ -780,7 +796,10 @@ class ContactRouter {
       if (!this.checkEnvelope) {
         return { ok: false, error: 'no envelope check is available (no executor registry), so only the owner can be messaged' };
       }
-      const checked = await this.checkEnvelope({ caseId, envelopeId, executorId, recipients: [to] });
+      if (!this.reserveSend || !this.settleSend) {
+        return { ok: false, error: 'the send cannot be counted against its envelope (no executor registry), so only the owner can be messaged' };
+      }
+      const checked = await this.checkEnvelope({ caseId, envelopeId, executorId, recipients: [to], channelId });
       if (!checked || checked.ok !== true || !checked.envelope) {
         return { ok: false, error: typeof checked?.error === 'string' && checked.error ? checked.error : 'the envelope check refused the send' };
       }
@@ -791,14 +810,42 @@ class ContactRouter {
       const r = await gate.gateLeaves({ text: body }, { recipients: [to], envelope, facts, mode: 'message', caseId, entityIndex, categoryKeywords });
       if (!r || r.ok !== true) return { ok: false, error: 'outbound gate blocked the message', blocked: Array.isArray(r?.blocked) ? r.blocked : [] };
       if (typeof r.rendered?.text !== 'string') return { ok: false, error: 'the outbound gate returned no rendered text' };
+      const original = body;
       body = r.rendered.text;
+      // Counted before anything leaves; the envelope is checked again, as
+      // it is on disk now, in the same step that counts it.
+      const reserved = await this.reserveSend({
+        caseId, envelopeId, executorId, channelId, recipients: [to], sendId: deliveryId, text: original, rendered: body,
+        expectedHash: typeof envelope.hash === 'string' ? envelope.hash : null
+      });
+      if (!reserved || reserved.ok !== true || !reserved.reservation) {
+        return { ok: false, error: typeof reserved?.error === 'string' && reserved.error ? reserved.error : 'the send could not be counted against its envelope, so nothing was sent' };
+      }
+      reservation = reserved.reservation;
     }
     try {
       await adapter.send(to, body, { [GATE_PASSED]: true, deliveryId });
     } catch (err) {
-      return { ok: false, error: err.message };
+      if (!reservation) return { ok: false, error: err.message };
+      // Only a delivery error that says the message was refused before it
+      // left gives the count back. A timeout, an unreachable relay or any
+      // other error may have left: it stays counted.
+      const neverLeft = err instanceof ContactDeliveryError && NEVER_LEFT_CODES.has(err.code);
+      await this._settleSend(reservation, neverLeft ? { sent: false, reason: err.message } : { sent: true, unconfirmed: true, reason: err.message });
+      return { ok: false, error: err.message, ...(neverLeft ? {} : { counted: true }) };
     }
+    if (reservation) await this._settleSend(reservation, { sent: true });
     return { ok: true, deliveryId };
+  }
+
+  // Never throws: a settle that fails leaves the send counted (channel-send.js).
+  async _settleSend(reservation, outcome) {
+    try {
+      const r = await this.settleSend(reservation, outcome);
+      if (!r || r.ok !== true) this.log.warn(`settling a channel send failed; it stays counted: ${r?.error || 'no result'}`);
+    } catch (err) {
+      this.log.warn(`settling a channel send failed; it stays counted: ${err?.message || err}`);
+    }
   }
 }
 

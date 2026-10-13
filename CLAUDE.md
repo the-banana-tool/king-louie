@@ -702,11 +702,29 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
     caller yet): `message` mode, and always an envelope. The caller names
     `envelopeId` and `executorId`; `sendEnvelope` (`envelope-ops.js`) reads
     the envelope from the case (a caller's envelope object is never used)
-    and refuses unless it is intact, `active`, that executor's, lists the
-    recipient, is inside its window and, when `signed`, has its phone grant.
-    A delta is a refusal there. It only checks: the send is not counted
-    against the envelope's caps, and nothing ties the named executor to the
-    channel; the first caller has to settle both.
+    and refuses unless it is intact, `active`, that executor's, names the
+    channel, lists the recipient, is inside its window and caps and, when
+    `signed`, has its phone grant. A delta is a refusal there.
+    - The channel (owner decision 2026-10-12): the envelope's `channels`
+      must list `channelId` (`call` = `voice`). The owner sees the list in
+      the approval question and the phone summary; it is in the hash only
+      when present, so an envelope without it hashes as before and allows
+      no channel send (executor jobs only). Adding a channel is a `channel`
+      delta the owner approves; never edit `envelopeCore` so that an
+      envelope without a field hashes differently.
+    - Counting (`executors/channel-send.js`): after the gate,
+      `reserveChannelSend` re-checks the envelope on disk and counts the
+      send (envelope `usage` and a `reserved` `payloads` entry, the case's
+      `contactsPerDay`, the global daily cap) before the adapter is called;
+      a cap that would be passed refuses. `settleChannelSend` marks it
+      `sent`, gives the count back when the adapter clearly refused
+      (`ContactDeliveryError` `not-configured`, `rejected`, `too-large`,
+      `rate-limited`), and keeps it counted (`unconfirmed`, `counted: true`)
+      for anything else. It writes through `systemAction` (inline in a
+      turn; another process holding the case refuses the send) and only in
+      an `active` case. The check and its writes
+      have no `await` between them: `systemAction` is no mutex inside one
+      process. A channel send's money cost is not known and not charged.
   - In text, facts are quoted as `{{f-0042}}` references.
 - Only a clear 4xx refusal fails an external submit. A timeout
   (`submitTimeoutMs`, or `host.fetch`'s `requestTimeoutMs`), a network error
@@ -906,10 +924,11 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   settings in service mode too; only the owner and addresses are
   admin-only.
 - Case code that sends to a channel uses `ContactRouter.sendExternal`, which
-  for anyone but the owner needs an owner-approved envelope (`envelopeId`,
-  `executorId`; see Cases: executors), runs C3's outbound gate and sends
-  `rendered`. Without the gate or the executor registry every non-owner
-  send is refused.
+  for anyone but the owner needs an owner-approved envelope that names the
+  channel (`envelopeId`, `executorId`; see Cases: executors), runs C3's
+  outbound gate, counts the send against the envelope and the daily caps
+  and sends `rendered`. Without the gate or the executor registry every
+  non-owner send is refused.
 - Service mode: the owner identity and channel addresses come only from the
   admin `service.json` `contact` block (`contact` joins `ADMIN_ONLY_KEYS`);
   a data-dir `settings.contact` or a `channels.<ch>.contactOwnerUserId` is

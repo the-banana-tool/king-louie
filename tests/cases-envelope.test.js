@@ -6,7 +6,7 @@ const os = require('os');
 const path = require('path');
 const {
   EnvelopeStore, envelopeCore, envelopeHash, validateEnvelopeRequest, renderEnvelopeQuestion,
-  envelopeFit, applyDeltas, renderDeltaQuestion, deltasEqual
+  envelopeFit, applyDeltas, renderDeltaQuestion, deltasEqual, envelopeIntact, renderSignedSummary
 } = require('../src/cases/executors/envelope');
 const { verifySignedGrant, signedAction, approvalHelpers } = require('../src/cases/executors/signed');
 const { buildRequest } = require('../src/approvals/messages');
@@ -403,5 +403,105 @@ describe('signed grants', () => {
     assert.deepStrictEqual(verifySignedGrant(broken, { caseId: 'case-1', outcomes: [] }), { ok: false, error: 'envelope changed since approval; request it again' });
     const throwing = { envelopeAction: () => { throw new Error('non_canonical'); }, actionHash: () => 'x' };
     assert.strictEqual(verifySignedGrant(env, { caseId: 'case-1', helpers: throwing }).ok, false);
+  });
+});
+
+// Owner decision 2026-10-12: a channel send (ContactRouter.sendExternal) to
+// anyone but the owner needs the channel named in the envelope the owner
+// approved. The list is part of the hash only when the envelope has one.
+describe('envelope channels', () => {
+  const ctx = { entry: PHONE_AGENT, facts: facts(ACRES, GUESS, FLOOR), casesTimeZone: 'UTC' };
+  const all = facts(ACRES, ZONING, GUESS);
+  const fitOpts = (over = {}) => ({ facts: all, recipients: ['+15550100'], now: MONDAY_NOON, estimateUsd: 0, executorId: 'phone-agent', ...over });
+
+  it('an envelope without the field hashes, and signs, exactly as before the field existed', () => {
+    const env = activeEnvelope();
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(envelopeCore(env), 'channels'), false);
+    assert.strictEqual(env.hash, 'sha256:799c5609c37ab744f5e3d12bcdcedc9b5217bea84dd51fef94c47f6730fc2cd4');
+    const helpers = approvalHelpers();
+    assert.strictEqual(helpers.actionHash(signedAction(env, 'case-1', helpers)), 'nMFe7-TqOTDjlx-qScVdU6b7saTAnfNf_gtMDPzcHeE');
+    const signed = activeEnvelope({ authority: 'signed' });
+    assert.strictEqual(signed.hash, 'sha256:2d6e6e1f8b9a33ee62b4f3754dbea387e4898ce3ad14c61e2b10224179d2d2df');
+    assert.strictEqual(helpers.actionHash(signedAction(signed, 'case-1', helpers)), 'WSxjVkGcPoVh7TNlYn_sF_IGWPCQqPCFAFJz6_L8bR8');
+    assert.strictEqual(
+      renderSignedSummary(envelopeCore(env), env.id),
+      'env-01 · phone-agent: Ask three brokers for a listing quote on the lot (2 recipients, $20.00, 2026-10-26 to 2026-10-30)'
+    );
+  });
+
+  it('the list is inside the hash: adding, removing or changing it on disk breaks the envelope', () => {
+    const plain = activeEnvelope();
+    const sms = activeEnvelope({ channels: ['sms'] });
+    assert.deepStrictEqual(envelopeCore(sms).channels, ['sms']);
+    assert.notStrictEqual(sms.hash, plain.hash);
+    assert.notStrictEqual(activeEnvelope({ channels: ['sms', 'voice'] }).hash, sms.hash);
+    assert.strictEqual(envelopeIntact(sms), true);
+    assert.strictEqual(envelopeIntact({ ...plain, channels: ['sms'] }), false, 'a channel added to an approved envelope');
+    assert.strictEqual(envelopeIntact({ ...sms, channels: ['sms', 'email'] }), false);
+    const { channels, ...stripped } = sms;
+    assert.strictEqual(envelopeIntact(stripped), false);
+    // A list that is not a clean list of channel ids is malformed, never "no list".
+    for (const bad of [null, 'sms', [42], ['SMS'], ['call'], ['sms', 'sms'], [''], ['a b'], { sms: true }]) {
+      assert.throws(() => envelopeCore({ ...plain, channels: bad }), /channels/, JSON.stringify(bad));
+      assert.strictEqual(envelopeIntact({ ...plain, channels: bad }), false, JSON.stringify(bad));
+    }
+  });
+
+  it('a request names channels explicitly; call means voice; none asked, none allowed', () => {
+    const none = validateEnvelopeRequest(request(), ctx);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(none.core, 'channels'), false);
+    const r = validateEnvelopeRequest(request({ channels: ['SMS', ' call ', 'voice', 'sms'] }), ctx);
+    assert.strictEqual(r.ok, true, r.error);
+    assert.deepStrictEqual(r.core.channels, ['sms', 'voice']);
+    for (const bad of [[], 'sms', null, [42], ['a b'], ['sms', '../x'], [{}]]) {
+      const refused = validateEnvelopeRequest(request({ channels: bad }), ctx);
+      assert.strictEqual(refused.ok, false, JSON.stringify(bad));
+      assert.match(refused.error, /"channels"/);
+    }
+  });
+
+  it('the owner sees the channels in the approval question and on the phone; an envelope without them reads as before', () => {
+    const plain = activeEnvelope();
+    const env = activeEnvelope({ channels: ['sms', 'voice'] });
+    const text = renderEnvelopeQuestion(env, { facts: all });
+    assert.match(text, /\nRecipients: \+15550100, \+15550101\nChannel sends to them: sms, voice\n/);
+    assert.doesNotMatch(renderEnvelopeQuestion(plain, { facts: all }), /Channel sends/);
+    const summary = renderSignedSummary(envelopeCore(env), env.id);
+    assert.match(summary, /^env-01 · phone-agent \[channel sends: sms, voice\]: Ask three brokers/);
+    // Before the intent, so F3's 300-character cut never drops it.
+    const long = renderSignedSummary(envelopeCore(activeEnvelope({ channels: ['sms'], intent: 'x'.repeat(500) })), 'env-01');
+    assert.ok(long.indexOf('[channel sends: sms]') < 60);
+  });
+
+  it('fit: a channel send needs its channel in the list; a job (no channel) is unaffected', () => {
+    const plain = activeEnvelope();
+    const sms = activeEnvelope({ channels: ['sms'] });
+    assert.strictEqual(envelopeFit(plain, {}, fitOpts()).fits, true);
+    assert.strictEqual(envelopeFit(sms, {}, fitOpts()).fits, true, 'an envelope with channels still takes its executor jobs');
+    assert.strictEqual(envelopeFit(sms, {}, fitOpts({ channel: 'sms' })).fits, true);
+    for (const [env, channel] of [[plain, 'sms'], [sms, 'email'], [sms, 'voice'], [activeEnvelope({ channels: [] }), 'sms']]) {
+      const r = envelopeFit(env, {}, fitOpts({ channel }));
+      assert.strictEqual(r.fits, false);
+      assert.deepStrictEqual(r.deltas, [{ kind: 'channel', value: channel, text: `allows channel sends on ${channel}` }]);
+    }
+    for (const channel of ['', 42, {}, 'SMS', 'call']) {
+      const r = envelopeFit(sms, {}, fitOpts({ channel }));
+      assert.deepStrictEqual([r.fits, r.refusals], [false, ['the channel named for the send is not a channel id']], JSON.stringify(channel));
+    }
+  });
+
+  it('adding a channel is a delta the owner approves: a new version and a new hash', () => {
+    const env = activeEnvelope({ channels: ['sms'] });
+    const deltas = [{ kind: 'channel', value: 'email' }];
+    assert.match(renderDeltaQuestion(env, deltas), /\n- allows channel sends on email\n/);
+    const next = applyDeltas(env, deltas, { questionId: 'q-0004', at: '2026-10-26T17:05:00Z' });
+    assert.deepStrictEqual([next.channels, next.version, next.status], [['sms', 'email'], 2, 'active']);
+    assert.notStrictEqual(next.hash, env.hash);
+    assert.strictEqual(envelopeIntact(next), true);
+    assert.deepStrictEqual(env.channels, ['sms'], 'applyDeltas does not mutate its input');
+    const first = applyDeltas(activeEnvelope(), [{ kind: 'channel', value: 'sms' }]);
+    assert.deepStrictEqual(first.channels, ['sms']);
+    assert.strictEqual(envelopeFit(first, {}, fitOpts({ channel: 'sms' })).fits, true);
+    assert.throws(() => applyDeltas(activeEnvelope(), [{ kind: 'channel', value: 'not a channel' }]), /channels/);
   });
 });

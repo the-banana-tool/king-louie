@@ -15,6 +15,7 @@ const {
 const { JobStore, readSnapshot, OPEN_STATES } = require('./job-store');
 const jobs = require('./jobs');
 const envelopeOps = require('./envelope-ops');
+const channelSend = require('./channel-send');
 const turnHook = require('./turn-hook');
 const { OpsMemory, renderOpsNotes } = require('../ops-memory');
 const CaseResearcherAgent = require('../../agents/builtin/case-researcher');
@@ -600,6 +601,16 @@ class ExecutorRegistry {
   // ContactRouter.sendExternal's envelope check for a non-owner send.
   sendEnvelope(args) {
     return envelopeOps.sendEnvelope(this, args);
+  }
+
+  // Counting that send against the envelope, the case's contactsPerDay and
+  // the global daily cap: reserve before it leaves, settle after.
+  reserveChannelSend(args) {
+    return channelSend.reserveChannelSend(this, args);
+  }
+
+  settleChannelSend(reservation, outcome) {
+    return channelSend.settleChannelSend(this, reservation, outcome);
   }
 
   // Registered as caseRuntime.addTurnStartHook('executors', …) by createCore.

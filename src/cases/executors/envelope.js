@@ -89,10 +89,38 @@ function authorityOf(env) {
   return a;
 }
 
-// Throws EnvelopeCoreError for malformed caps or authority; callers that
-// must not throw use envelopeIntact.
+// Channels (owner decision 2026-10-12): the contact channels a channel send
+// (ContactRouter.sendExternal) to this envelope's recipients may use. The
+// owner sees the list in the approval question and it is inside the hash.
+// An envelope with no `channels` key allows no channel send, and its core
+// (so its hash, and the action a phone signs) has no such key: it is what it
+// was before the field existed. A key that is present must be a clean list
+// of channel ids ('call' is stored as 'voice'); anything else is malformed
+// (read as tampered), never "no list".
+const CHANNEL_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
+const isChannelId = (v) => typeof v === 'string' && CHANNEL_ID_RE.test(v) && v !== 'call';
+
+// → the stored form of a channel id ('call' → 'voice'), or null.
+function normalizeChannelId(value) {
+  if (typeof value !== 'string') return null;
+  const id = value.trim().toLowerCase();
+  const stored = id === 'call' ? 'voice' : id;
+  return isChannelId(stored) ? stored : null;
+}
+
+function channelsOf(env) {
+  const list = env.channels;
+  if (!Array.isArray(list) || !list.every(isChannelId) || new Set(list).size !== list.length) {
+    throw new EnvelopeCoreError('channels must be a list of distinct channel ids');
+  }
+  return [...list];
+}
+
+// Throws EnvelopeCoreError for malformed caps, authority or channels;
+// callers that must not throw use envelopeIntact.
 function envelopeCore(env) {
   return {
+    ...(env.channels !== undefined ? { channels: channelsOf(env) } : {}),
     authority: authorityOf(env),
     intent: String(env.intent || ''),
     executor: String(env.executor || ''),
@@ -151,6 +179,17 @@ function validateEnvelopeRequest(body, {
   if (!DAY_PATTERN.test(String(w.start)) || !DAY_PATTERN.test(String(w.end)) || String(w.end) < String(w.start)) {
     errors.push('"window" needs start and end dates (YYYY-MM-DD) with start ≤ end');
   }
+  // Channel sends are asked for explicitly; an envelope asked without them
+  // carries no list and allows none.
+  let channels = null;
+  if (b.channels !== undefined) {
+    const ids = Array.isArray(b.channels) ? b.channels.map(normalizeChannelId) : null;
+    if (!ids || !ids.length || ids.includes(null)) {
+      errors.push('"channels" must list at least one channel id such as "sms" or "email" (leave it out when no channel send is needed)');
+    } else {
+      channels = [...new Set(ids)];
+    }
+  }
   if (errors.length) return { ok: false, error: `Envelope refused: ${errors.join('; ')}.` };
 
   const channel = recipientChannel(entry.capabilities);
@@ -186,7 +225,8 @@ function validateEnvelopeRequest(body, {
     facts: factIds,
     rules,
     caps: { usd, contacts, attemptsPerContact: attempts },
-    window: { start: w.start, end: w.end, tz }
+    window: { start: w.start, end: w.end, tz },
+    ...(channels ? { channels } : {})
   };
   const gate = gateLeaves({ intent, rules }, {
     recipients: normalized, envelope: null, facts, mode: 'message', caseId, entityIndex, categoryKeywords
@@ -212,6 +252,7 @@ function renderEnvelopeQuestion(env, { facts = new Map(), caseTitle = '', notBac
     `Approve envelope ${env.id} for ${env.executor}${caseTitle ? ` in case "${caseTitle}"` : ''}?`,
     `Intent: ${env.intent}`,
     `Recipients: ${(env.recipients?.allow || []).join(', ')}`,
+    ...(Array.isArray(env.channels) ? [`Channel sends to them: ${env.channels.join(', ') || 'none'}`] : []),
     'Facts it may disclose:'
   ];
   if (!(env.facts || []).length) lines.push('- none');
@@ -232,8 +273,11 @@ function renderEnvelopeQuestion(env, { facts = new Map(), caseTitle = '', notBac
 // The phone shows this; F3 cuts it to 300 characters. The summary is part of
 // the hashed action, so the envelope id in front binds an approval to one
 // envelope: two envelopes with the same core are different actions.
+// The channels come before the intent so the cut never drops them; a core
+// with no channels renders exactly as it always did (the summary is hashed).
 function renderSignedSummary(core, envelopeId) {
-  return `${envelopeId} · ${core.executor}: ${core.intent} (${core.recipients.allow.length} recipients, ${money(core.caps.usd)}, ${core.window.start} to ${core.window.end})`;
+  const channels = Array.isArray(core.channels) ? ` [channel sends: ${core.channels.join(', ') || 'none'}]` : '';
+  return `${envelopeId} · ${core.executor}${channels}: ${core.intent} (${core.recipients.allow.length} recipients, ${money(core.caps.usd)}, ${core.window.start} to ${core.window.end})`;
 }
 
 // The owner-facing line for one delta, built from its kind and value against
@@ -245,6 +289,8 @@ function deltaText(env, d, { facts = null } = {}) {
   switch (d?.kind) {
     case 'recipient':
       return `adds recipient ${d.value}`;
+    case 'channel':
+      return `allows channel sends on ${d.value}`;
     case 'fact': {
       const f = facts && typeof facts.get === 'function' ? facts.get(String(d.value)) : null;
       return f ? `discloses ${d.value} "${f.stmt}"` : `discloses ${d.value}`;
@@ -265,7 +311,7 @@ function deltaText(env, d, { facts = null } = {}) {
 }
 
 function envelopeFit(env, payload = {}, {
-  facts = new Map(), recipients = [], now = new Date(), estimateUsd = 0, gateBlocked = [], executorId = null
+  facts = new Map(), recipients = [], now = new Date(), estimateUsd = 0, gateBlocked = [], executorId = null, channel = null
 } = {}) {
   const refusals = [];
   const deltas = [];
@@ -281,6 +327,9 @@ function envelopeFit(env, payload = {}, {
   const per = payload.attemptsPerContact === undefined ? 1 : payload.attemptsPerContact;
   if (!Number.isInteger(per) || per < 1) return refuse('attemptsPerContact must be a positive integer');
   if (typeof estimateUsd !== 'number' || !Number.isFinite(estimateUsd) || estimateUsd < 0) return refuse('estimateUsd must be a finite number ≥ 0');
+  // `channel`: the fit is for a channel send on that channel (stored form).
+  // null is an executor job, which no channel list affects.
+  if (channel !== null && !isChannelId(channel)) return refuse('the channel named for the send is not a channel id');
   // Every limit below is read from the core, the part the owner approved and
   // the hash covers, never from the raw file fields.
   try {
@@ -294,6 +343,8 @@ function envelopeFit(env, payload = {}, {
   if (refusals.length) return { fits: false, refusals, deltas };
 
   const usage = { usd: 0, contacts: [], attempts: {}, ...(env.usage || {}) };
+  // No list, or a list without this channel: the owner has not approved it.
+  if (channel !== null && !(core.channels || []).includes(channel)) addDelta({ kind: 'channel', value: channel });
   for (const r of recipients) {
     if (!core.recipients.allow.includes(r)) addDelta({ kind: 'recipient', value: r });
   }
@@ -348,6 +399,7 @@ function applyDeltas(env, deltas, { questionId = null, factId = null, at = new D
   for (const d of deltas) {
     if (d.kind === 'recipient' && !next.recipients.allow.includes(d.value)) next.recipients.allow.push(d.value);
     else if (d.kind === 'fact' && !next.facts.includes(d.value)) next.facts.push(d.value);
+    else if (d.kind === 'channel' && !(next.channels || []).includes(d.value)) next.channels = [...(next.channels || []), d.value];
     else if (d.kind === 'usd') next.caps.usd = Math.max(Number(next.caps.usd) || 0, Number(d.value) || 0);
     else if (d.kind === 'contacts') next.caps.contacts = Math.max(Number(next.caps.contacts) || 0, Number(d.value) || 0);
     else if (d.kind === 'attempts') next.caps.attemptsPerContact = Math.max(Number(next.caps.attemptsPerContact) || 0, Number(d.value) || 0);
@@ -379,6 +431,7 @@ module.exports = {
   EnvelopeStore,
   EnvelopeCoreError,
   envelopeCore,
+  normalizeChannelId,
   envelopeHash,
   envelopeIntact,
   validateEnvelopeRequest,

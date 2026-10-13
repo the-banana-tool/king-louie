@@ -1,8 +1,9 @@
 // tests/contact-send-envelope.test.js
 // C3 follow-up: ContactRouter.sendExternal to anyone but the owner goes out
 // only under a stored, intact, active, owner-approved envelope that fits the
-// send (envelopeFit), checked through the executor registry. The real gate,
-// the real envelope flow and a loopback channel; no network.
+// send (envelopeFit) and names the channel, checked and counted through the
+// executor registry (the counting is in contact-send-counting.test.js). The
+// real gate, the real envelope flow and a loopback channel; no network.
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
@@ -34,7 +35,8 @@ async function setup({ authority = 'envelope', approve = true, wire = true } = {
   });
   const req = await envelopeOps.requestEnvelope(reg, { caseId: meta.id, turnId: 'turn-1' }, {
     executor: 'fake-agent', intent: 'Ask a broker for a listing quote', recipients: { allow: [BROKER] }, facts: [acres.id],
-    caps: { usd: 10, contacts: 1, attemptsPerContact: 2 }, window: { start: '2026-10-26', end: '2026-10-30' }
+    caps: { usd: 10, contacts: 1, attemptsPerContact: 2 }, window: { start: '2026-10-26', end: '2026-10-30' },
+    channels: ['sms', 'loop-sms']
   });
   assert.strictEqual(req.ok, true, req.error);
   if (approve) {
@@ -45,6 +47,7 @@ async function setup({ authority = 'envelope', approve = true, wire = true } = {
   const state = new ContactState({ dir: path.join(env.dataDir, 'contact'), clock: () => env.clock.now });
   const router = new ContactRouter({
     state, runtime: rt, adapters: new Map([['sms', sms]]), getGate: () => gates, clock: () => env.clock.now,
+    reserveSend: (args) => reg.reserveChannelSend(args), settleSend: (reservation, outcome) => reg.settleChannelSend(reservation, outcome),
     ...(wire ? { checkEnvelope: (args) => envelopeOps.sendEnvelope(reg, args) } : {})
   });
   const send = (over = {}) => router.sendExternal({

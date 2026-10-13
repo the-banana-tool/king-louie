@@ -225,7 +225,7 @@ class ContactRouter({ dir, runtime, adapters, presence, getGate, clock, log })
 async deliver(channelId, entries) → { deliveryId, externalRef }         // throws ContactDeliveryError
 async handleReply(channelId, correlationId, answer, meta) → { ok, outcome, ackText | null }
 async ingestRelayEvents(relayName, events) → { applied, skipped }       // poll and webhook push
-async sendExternal({ caseId, channelId, target, text, envelopeId, executorId }) → { ok, deliveryId } | { ok: false, error, blocked? }
+async sendExternal({ caseId, channelId, target, text, envelopeId, executorId }) → { ok, deliveryId } | { ok: false, error, blocked?, counted? }
 async drainInbox()                                                      // answers queued behind a busy case
 isOwnerTarget(channelId, target) → boolean
 ```
@@ -292,9 +292,14 @@ hint to the configured owner number. Voice and ntfy send no acks; email acks as 
 channel-targeted send by case code; it has no stage-3 consumer. The target is normalized (E.164, lowercase
 email) first. **Owner exemption:** only when `isOwnerTarget(channelId, target)` — the adapter's
 `ownerTarget()` exists, is a private chat/DM or owner address per §3.1, and equals the normalized target;
-ntfy never qualifies. Otherwise it first needs an owner-approved envelope (`envelopeId`, `executorId`; C3 spec §3.7, `sendEnvelope`: the stored envelope, never a caller's object) and refuses without one, then runs `gateLeaves({ text }, { recipients: [target], envelope, facts, mode:
+ntfy never qualifies. Otherwise it first needs an owner-approved envelope (`envelopeId`, `executorId`; C3 spec §3.7, `sendEnvelope`: the stored envelope, never a caller's object) that names `channelId` in its `channels` (owner decision 2026-10-12; an envelope with no list allows no channel send) and refuses without one, then runs `gateLeaves({ text }, { recipients: [target], envelope, facts, mode:
 'message', caseId, entityIndex: runtime.entityIndex?.() })` (C3) and sends **`rendered.text`**, never
-`text`; a block returns `{ ok: false, error: 'outbound gate blocked the message', blocked }`. The new
+`text`; a block returns `{ ok: false, error: 'outbound gate blocked the message', blocked }`. After the gate and
+before the adapter the send is counted against the envelope's caps, the case's `contactsPerDay` and the
+global daily cap (`reserveSend`), and settled after (`settleSend`; C3 spec §3.7): a cap that would be passed
+refuses before anything leaves, a send the adapter clearly refused gives its count back, and one that may
+have left stays counted and returns `{ ok: false, error, counted: true }`. A router without `checkEnvelope`,
+`reserveSend` and `settleSend` refuses every non-owner send. The new
 adapters' plain `send(target, …)` refuses a non-owner target unless `options[GATE_PASSED]` is set, a
 `Symbol` only `contact.js` holds. Before C3 merges `getGate()` is `null` and every non-owner send refuses.
 
@@ -532,7 +537,7 @@ each other's name. Relay requests never follow redirects and read at most 1 MB o
 |---|---|---|
 | `ChannelPlugin` contact methods | `contactCapabilities()`, `sendContact(message, meta)`, `onContactReply(handler)`, `presence()`, `ownerTarget()` (§3.1) | channels |
 | `core.context.getContact()` | `→ { ladder, presence, router } \| null` | IPC, F7 |
-| `ContactRouter.sendExternal({ caseId, channelId, target, text, envelopeId, executorId })` | `→ { ok, deliveryId } \| { ok: false, error, blocked? }`; no stage-3 consumer (R39) | future channel senders |
+| `ContactRouter.sendExternal({ caseId, channelId, target, text, envelopeId, executorId })` | `→ { ok, deliveryId } \| { ok: false, error, blocked?, counted? }`; no stage-3 consumer (R39) | future channel senders |
 | `QuestionStore.recordDelivery(id, { channel, at, deliveryId })` | appends to `deliveries` atomically, idempotent on `deliveryId`, no claim file (C4-owned, §4.3) | C2 in-app delivery, C4 |
 | `Presence.mobileForeground({ deviceId, foreground })` | via the `presence.foreground` link method | F3 relay route (C4-mounted) |
 | Phone routes (R44) | `GET /v1/questions`, `POST /v1/questions/{token}/answer`, `POST /v1/presence` | mobile apps |
