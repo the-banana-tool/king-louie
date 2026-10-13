@@ -123,6 +123,31 @@ describe('LineWorker (any OS, with a fake child)', () => {
     });
   }
 
+  it('a call that times out kills the hung worker; the next call gets a fresh one', async () => {
+    const { children, spawnImpl } = manualSpawn();
+    const w = new LineWorker({ file: 'x', args: [], spawnImpl });
+    const hung = w.call('screenshot', {}, { timeoutMs: 30 });
+    const queued = w.call('foreground', {}, { timeoutMs: 5000 });
+    queued.catch(() => {});
+    await assert.rejects(hung, (e) => e.code === 'op_timeout');
+    assert.equal(children[0].killed, 1, 'the worker that did not answer is killed');
+    // What waited behind the hung op on the same worker fails now, not at its own timeout.
+    await assert.rejects(queued, (e) => e.code === 'backend_failed');
+    const next = w.call('foreground');
+    await tick();
+    assert.equal(children.length, 2, 'a fresh worker');
+    children[1].reply({ ok: 1 });
+    assert.deepEqual(await next, { ok: 1 });
+    // The killed worker's exit arrives late and changes nothing.
+    children[0].emit('exit', null);
+    const after = w.call('foreground');
+    await tick();
+    assert.equal(children.length, 2);
+    children[1].reply({ ok: 2 });
+    assert.deepEqual(await after, { ok: 2 });
+    await w.stop();
+  });
+
   it('a late reply of an old worker settles nothing of its replacement', async () => {
     const { children, spawnImpl } = manualSpawn();
     const w = new LineWorker({ file: 'x', args: [], spawnImpl });

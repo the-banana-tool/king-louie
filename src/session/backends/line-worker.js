@@ -96,6 +96,10 @@ class LineWorker {
       const timer = setTimeout(() => {
         worker.pending.delete(id);
         reject(new GuiError('op_timeout', `${this.name} ${op}`));
+        // A worker answers one op at a time, so one that did not answer
+        // would hold every later op too. It is killed (whatever else waited
+        // on it fails now) and the next call starts a fresh one.
+        this._retire(worker, `${this.name} did not answer ${op} and was restarted`);
       }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
       worker.pending.set(id, { resolve, reject, timer });
