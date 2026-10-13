@@ -45,6 +45,11 @@ const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-
 // Flags that must never carry a value, whichever form produced it.
 const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm']);
 
+// The commands whose [y/N] question --yes answers (and that HELP documents
+// it for). The scoping is checked in main(), before any command runs.
+const YES_COMMANDS = [['desktop', 'pair'], ['device', 'apply']];
+const YES_COMMANDS_TEXT = YES_COMMANDS.map(([c, s]) => `"${c} ${s}"`).join(', ').replace(/, ([^,]*)$/, ' and $1');
+
 function parseArgs(argv) {
   const positional = [];
   const flags = {};
@@ -264,11 +269,11 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
   // above, so the default is used only when the flag was never given.
   const dataDir = flags.dataDir || defaultServiceDataDir();
 
-  // --yes only means anything for "desktop pair" (fix round 2, minor):
-  // every other command either doesn't ask for confirmation or has its own
-  // gate, so accepting the flag there would silently do nothing.
-  if (flags.yes && !(command === 'desktop' && sub === 'pair')) {
-    io.stderr.write('Flag "--yes" is only valid for "desktop pair".\n');
+  // --yes only means anything for the commands in YES_COMMANDS: every other
+  // command either doesn't ask for confirmation or has its own gate, so
+  // accepting the flag there would silently do nothing.
+  if (flags.yes && !YES_COMMANDS.some(([c, s]) => c === command && s === sub)) {
+    io.stderr.write(`Flag "--yes" is only valid for ${YES_COMMANDS_TEXT}.\n`);
     return 2;
   }
   // The same for the front-door flags (fleet stage 4): a flag another

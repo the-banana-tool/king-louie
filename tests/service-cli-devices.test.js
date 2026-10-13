@@ -273,6 +273,19 @@ describe('enroll-device ends without enrolling', () => {
 });
 
 describe('device list | revoke | apply', () => {
+  it('the real CLI entry accepts --yes for "device apply" and refuses it for every other device command', async () => {
+    const n = node();
+    let io = streamIo();
+    const code = await main(['device', 'apply', '--yes', '--data-dir', n.dataDir], io);
+    assert.notEqual(code, 2, io.text.err);
+    assert.doesNotMatch(io.text.err, /"--yes" is only valid/);
+    for (const argv of [['device', 'list', '--yes'], ['device', 'revoke', 'd-1', '--yes'], ['enroll-device', '--yes'], ['status', '--yes'], ['desktop', 'list', '--yes']]) {
+      io = streamIo();
+      assert.equal(await main([...argv, '--data-dir', n.dataDir], io), 2, argv.join(' '));
+      assert.match(io.text.err, /"--yes" is only valid for "desktop pair" and "device apply"/);
+    }
+  });
+
   it('apply --yes enrolls a staged device, list shows it, revoke ends it', async () => {
     const n = node();
     const a = createFakePhone({ name: 'Owner phone' });
