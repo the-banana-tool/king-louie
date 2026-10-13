@@ -2571,6 +2571,28 @@ body {
   border-radius: var(--radius-sm);
 }
 
+/* --- Case nudge (History H4) ------------------------------- */
+.case-nudge-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.case-nudge-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.case-nudge-btn {
+  flex: 0 0 auto;
+}
+
+.case-nudge-btn[hidden] {
+  display: none;
+}
+
 /* --- Floating settings (legacy, kept for start-state) ------ */
 .floating-settings-btn {
   position: fixed;

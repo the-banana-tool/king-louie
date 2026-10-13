@@ -15,6 +15,9 @@ const { targetLabel } = require('../models/roles');
 const { DELEGATION_GUIDANCE } = require('../context/system-sections');
 const { workerIsCheaper } = require('../models/delegation');
 const { getActiveCatalog } = require('../models');
+const { mergeHistorySettings } = require('../history/settings');
+const { bridgeOriginFor } = require('../history/bridge-origin');
+const { offerCaseNudge } = require('../cases/case-nudge');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -920,7 +923,22 @@ function registerChatHandlers(ipcMain, context = {}) {
         autoNameChat({ chatId, userMessage: safeMessage, assistantResponse: fullResponse, sender: event.sender, turnModels }).catch(() => {});
       }
 
-      return updatedChat;
+      // The case nudge (recall spec §9, R-H4-5): after a finished reply in a
+      // chat with no case, once. A status row with a button; the model is
+      // told nothing. The chat it returns holds the row, which is how the
+      // renderer gets every message of this turn.
+      const nudgedChat = caseId ? null : offerCaseNudge({
+        chatId,
+        store: historyStore,
+        threshold: () => mergeHistorySettings((typeof context.getSettings === 'function' ? context.getSettings() : {})?.history).caseNudgeAfterUserTurns,
+        getChat,
+        updateChat,
+        appendMessageToChat,
+        bridgeOriginFor,
+        log
+      });
+
+      return nudgedChat || updatedChat;
     } catch (error) {
       if (abortController.signal.aborted) {
         return finishStopped();

@@ -103,8 +103,12 @@ const HISTORY_DEFAULTS = Object.freeze({
     maxChunksPerToolResult: 0
   }),
   chunk: Object.freeze({ targetChars: 1500, minChars: 40 }),
-  readHistoryMaxTokens: 8000
+  readHistoryMaxTokens: 8000,
+  // The case nudge (spec §9, R-H4-5): a chat with no case is offered one,
+  // once, after this many user messages. 0 turns it off. Not a recall knob.
+  caseNudgeAfterUserTurns: 40
 });
+const CASE_NUDGE_MAX_TURNS = 100000;
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -116,6 +120,8 @@ const atLeast = (value, fallback, min, integer = false) => {
 const positive = (value, fallback) => (finite(value) && value > 0 ? value : fallback);
 const fraction = (value, fallback) => (finite(value) && value >= 0 && value <= 1 ? value : fallback);
 const flag = (value, fallback) => (typeof value === 'boolean' ? value : fallback);
+// A whole number from 0 to max; anything else (a fraction too) is the fallback.
+const wholeUpTo = (value, fallback, max) => (Number.isInteger(value) && value >= 0 && value <= max ? value : fallback);
 const noDotSegment = (v) => !v.split('/').some((seg) => /^\.+$/.test(seg));
 const localModel = (v, fallback) => (typeof v === 'string' && LOCAL_MODEL_RE.test(v) && noDotSegment(v) ? v : fallback);
 const remoteModel = (v, fallback) => (typeof v === 'string' && REMOTE_MODEL_RE.test(v) && noDotSegment(v) ? v : fallback);
@@ -213,7 +219,8 @@ function mergeHistorySettings(source) {
       targetChars: atLeast(c.targetChars, HISTORY_DEFAULTS.chunk.targetChars, 200, true),
       minChars: atLeast(c.minChars, HISTORY_DEFAULTS.chunk.minChars, 0, true)
     },
-    readHistoryMaxTokens: positive(src.readHistoryMaxTokens, HISTORY_DEFAULTS.readHistoryMaxTokens)
+    readHistoryMaxTokens: positive(src.readHistoryMaxTokens, HISTORY_DEFAULTS.readHistoryMaxTokens),
+    caseNudgeAfterUserTurns: wholeUpTo(src.caseNudgeAfterUserTurns, HISTORY_DEFAULTS.caseNudgeAfterUserTurns, CASE_NUDGE_MAX_TURNS)
   };
 }
 

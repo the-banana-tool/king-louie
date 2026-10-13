@@ -569,6 +569,11 @@ class HistoryStore {
   pairedToolMessageId(messageId, options = {}) { return this.indexed ? chunkIndex.pairedToolMessageId(this.db, messageId, options) : null; }
   messageChunkCounts(messageIds) { return this.indexed ? chunkIndex.messageChunkCounts(this.db, messageIds) : new Map(); }
   lastSeq(chatId) { return chunkIndex.lastSeq(this.db, chatId); }
+  // How many messages of the chat have sender 'user' (the case nudge).
+  userMessageCount(chatId) {
+    const row = this._stmt("SELECT COUNT(*) AS n FROM messages WHERE chat_id = ? AND sender = 'user'").get(String(chatId));
+    return Number(row ? row.n : 0);
+  }
   historyChars(chatId, options = {}) { return this.indexed ? chunkIndex.historyChars(this.db, chatId, options) : 0; }
   calibration(model) { return this.indexed ? chunkIndex.getCalibration(this.db, model) : null; }
   setCalibration(model, charsPerToken, samples) {

@@ -39,6 +39,8 @@ describe('history settings', () => {
     assert.deepStrictEqual(s.embedder, EMBEDDER);
     assert.deepStrictEqual(s.chunk, { targetChars: 1500, minChars: 40 });
     assert.strictEqual(s.readHistoryMaxTokens, 8000);
+    assert.strictEqual(s.caseNudgeAfterUserTurns, 40);
+    assert.ok(!('caseNudgeAfterUserTurns' in s.recall), 'the nudge threshold is not a recall knob');
     assert.ok(Object.isFrozen(HISTORY_DEFAULTS.recall));
     assert.ok(Object.isFrozen(HISTORY_DEFAULTS.embedder.ollama));
     assert.ok(!Object.isFrozen(s.recall), 'merged settings are a fresh object');
@@ -52,6 +54,19 @@ describe('history settings', () => {
     assert.strictEqual(s.recall.kindWeights.user, 1.2);
     assert.deepStrictEqual(s.chunk, { targetChars: 1500, minChars: 10 });
     assert.deepStrictEqual(s.embedder, { ...EMBEDDER, kind: 'none' });
+  });
+
+  it('caseNudgeAfterUserTurns: a whole number from 0 (off) to 100,000, else 40', () => {
+    const merged = (v) => mergeHistorySettings({ caseNudgeAfterUserTurns: v }).caseNudgeAfterUserTurns;
+    assert.strictEqual(HISTORY_DEFAULTS.caseNudgeAfterUserTurns, 40);
+    assert.strictEqual(merged(0), 0);
+    assert.strictEqual(merged(1), 1);
+    assert.strictEqual(merged(100000), 100000);
+    for (const bad of [-1, 2.5, '12', 100001, NaN, Infinity, null, true, [3]]) {
+      assert.strictEqual(merged(bad), 40, String(bad));
+    }
+    assert.strictEqual(mergeHistorySettings({ caseNudgeAfterUserTurns: 7 }).version, 3, 'a new key with a default needs no version');
+    assert.strictEqual(mergeHistorySettings(mergeHistorySettings({ caseNudgeAfterUserTurns: 0 })).caseNudgeAfterUserTurns, 0);
   });
 
   it('falls back to the default for a value of the wrong type or out of range', () => {

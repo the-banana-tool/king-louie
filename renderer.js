@@ -475,6 +475,7 @@ function setResponseActive(active, chatId) {
   refreshStopButton();
   updateChatStreamingIndicators();
   applyChatModelsGate();
+  refreshCaseNudgeButtons();
 }
 
 function updateChatStreamingIndicators() {
@@ -1940,6 +1941,7 @@ async function renderChatCaseSection(chat, container) {
   const adopt = async (updatedChat) => {
     if (!updatedChat) return;
     appState.chats = appState.chats.map((c) => (c.id === updatedChat.id ? updatedChat : c));
+    refreshCaseNudgeButtons();
     await renderChatCaseSection(updatedChat, container);
   };
 
@@ -3254,6 +3256,90 @@ function updateEmptyState() {
   dom.container.classList.toggle('start-state', showEmpty);
 }
 
+// --- The case nudge (recall spec §9, stage H4, R-H4-5) ---
+// A status message the send path appends once to a long chat with no case.
+// It is drawn with a button that opens the chat's own "New case" flow, which
+// makes every check itself. Nothing here is sent to the model.
+const CASE_NUDGE_ACTION = 'convertToCase';
+const CASE_NUDGE_BUTTON_TEXT = 'Make this a case';
+
+function isCaseNudge(message) {
+  return Boolean(message && message.sender === 'status' && message.meta && message.meta.action === CASE_NUDGE_ACTION);
+}
+
+// The button is offered while the chat has no case and is not an import.
+function caseNudgeOffered(chat) {
+  return Boolean(chat && !chat.caseId && !chat.source && chat.importedFromCase !== true);
+}
+
+function refreshCaseNudgeButtons() {
+  if (!dom.chatMessages) return;
+  const chat = getActiveChat();
+  const offered = caseNudgeOffered(chat);
+  const busy = Boolean(chat && appState.activeResponses.has(chat.id));
+  dom.chatMessages.querySelectorAll('.case-nudge-btn').forEach((button) => {
+    button.hidden = !offered;
+    button.disabled = busy;
+  });
+}
+
+function renderCaseNudge(message, chat) {
+  flushToolGroup();
+  const messageDiv = document.createElement('div');
+  messageDiv.className = 'message assistant tool-event high-stakes info case-nudge';
+  const content = document.createElement('div');
+  content.className = 'message-content';
+  const row = document.createElement('div');
+  row.className = 'case-nudge-row';
+  const text = document.createElement('span');
+  text.className = 'case-nudge-text';
+  text.textContent = typeof message.text === 'string' ? message.text : '';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn btn-sm case-nudge-btn';
+  button.textContent = CASE_NUDGE_BUTTON_TEXT;
+  button.hidden = !caseNudgeOffered(chat);
+  button.disabled = appState.activeResponses.has(chat.id);
+  button.addEventListener('click', (e) => {
+    // The chat info popover closes on a click outside it.
+    e.stopPropagation();
+    openNewCaseFromNudge(chat.id).catch((err) => chatLog.warn(`Case nudge failed: ${err.message}`));
+  });
+  row.append(text, button);
+  content.appendChild(row);
+  messageDiv.appendChild(content);
+  dom.chatMessages.appendChild(messageDiv);
+}
+
+// Opens the chat info popover at its case section and starts "New case…"
+// there, as if the owner had chosen it.
+async function openNewCaseFromNudge(chatId) {
+  const chat = getActiveChat();
+  if (!chat || chat.id !== chatId || !caseNudgeOffered(chat)) {
+    refreshCaseNudgeButtons();
+    return;
+  }
+  if (appState.activeResponses.has(chatId)) {
+    showNotice('A reply is still running in this chat. Make it a case when it has finished.');
+    return;
+  }
+  renderChatInfoPopover();
+  dom.chatInfoPopover.hidden = false;
+  // The case section fills in once the cases are listed.
+  let select = null;
+  for (let tries = 0; tries < 50 && !select; tries += 1) {
+    select = document.getElementById('chat-case-select');
+    if (!select) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!select || getActiveChat()?.id !== chatId || dom.chatInfoPopover.hidden) {
+    showNotice('The case section could not be opened. Open the chat info and choose "New case…".');
+    return;
+  }
+  select.scrollIntoView({ block: 'center' });
+  select.value = '__new__';
+  select.dispatchEvent(new Event('change'));
+}
+
 function renderChatMessages() {
   const activeChat = getActiveChat();
   dom.chatMessages.innerHTML = '';
@@ -3316,6 +3402,10 @@ function renderChatMessages() {
 
   activeChat.messages.forEach((message) => {
     if (message.sender === 'status') {
+      if (isCaseNudge(message)) {
+        renderCaseNudge(message, activeChat);
+        return;
+      }
       addToolEventCompact('Status', { message: message.text }, 'info', false);
       return;
     }
@@ -8893,7 +8983,8 @@ function renderRetryControl() {
   const lastUser = messages.findLastIndex((m) => m.sender === 'user');
   const lastReply = messages.findLastIndex((m) => m.sender === 'assistant');
   if (lastUser < 0 || lastReply < lastUser) return;
-  const replies = dom.chatMessages.querySelectorAll('.message.assistant');
+  const replies = dom.chatMessages.querySelectorAll('.message.assistant:not(.case-nudge)');
+  // The case nudge sits after the reply; Retry stays on the reply.
   const reply = replies[replies.length - 1];
   if (!reply) return;
   const content = reply.querySelector('.message-content') || reply;
