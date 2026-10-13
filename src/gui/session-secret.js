@@ -446,38 +446,59 @@ async function checkUserCopyTrust({ path: file, platform = process.platform, env
   });
 }
 
-// Does the identity a helper file records still belong to an account on
-// this machine? Used by "session uninstall" for an account that was deleted
-// and made again under the same name: the name resolves, to another SID
-// (uid), and the recorded one belongs to nobody. Only a clear "no such
-// account" answers false; a check that could not run answers true, so
-// nothing is removed on a guess. Read-only.
-function sessionIdentityExists({ sid = null, uid = null }, { platform = process.platform,
+// Is `sid` an account of the machine whose own SID is `machineSid`
+// (S-1-5-21-a-b-c)? Such an account lives in this machine's own account
+// database, so this machine alone can say that it is gone.
+function isLocalMachineSid(sid, machineSid) {
+  if (typeof sid !== 'string' || typeof machineSid !== 'string') return false;
+  if (!/^S-1-5-21-\d+-\d+-\d+$/i.test(machineSid)) return false;
+  return new RegExp(`^${machineSid}-\\d+$`, 'i').test(sid);
+}
+
+// Does the identity a helper file records still belong to an account? Used
+// by "session uninstall" for an account that was deleted and made again
+// under the same name: the name resolves, to another SID (uid), and the
+// recorded one belongs to nobody. Read-only. Answers:
+//   'exists'     it maps to an account;
+//   'gone'       provably no account: on Windows only a SID of this
+//                machine's own accounts (its SID prefix) that does not map.
+//                A domain or Entra ID SID that does not map says nothing: no
+//                domain controller may be reachable (third security review,
+//                finding 5);
+//   'unresolved' anything else: it did not map and is not this machine's to
+//                judge, the machine's SID could not be read, or the check
+//                could not run. Nothing is removed on that.
+// Off Windows a uid that id says nobody has is 'gone' (see the note in
+// CLAUDE.md: a directory account whose directory is unreachable looks the
+// same there).
+function sessionIdentityState({ sid = null, uid = null }, { platform = process.platform,
   execFile = (f, a, o) => execFileSync(f, a, { encoding: 'utf8', windowsHide: true, timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'], ...o }), env = process.env } = {}) {
   if (platform === 'win32') {
-    if (typeof sid !== 'string' || !SID_RE.test(sid)) return true;
-    const script = [
-      'try {',
-      '  (New-Object System.Security.Principal.SecurityIdentifier($env:KL_SESSION_SID)).Translate([System.Security.Principal.NTAccount]) | Out-Null',
-      "  [Console]::Out.WriteLine('mapped')",
-      '} catch [System.Security.Principal.IdentityNotMappedException] {',
-      "  [Console]::Out.WriteLine('unmapped')",
-      '}'
-    ].join('\n');
+    if (typeof sid !== 'string' || !SID_RE.test(sid)) return 'unresolved';
+    const encoded = Buffer.from(WINDOWS_IDENTITY_SCRIPT, 'utf16le').toString('base64');
+    let lines;
     try {
-      return String(execFile(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...env, KL_SESSION_SID: sid } })).trim() !== 'unmapped';
+      lines = String(execFile(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { env: { ...env, KL_SESSION_SID: sid } })).trim().split(/\r?\n/).map((l) => l.trim());
     } catch {
-      return true;
+      return 'unresolved';
     }
+    if (lines[0] === 'mapped') return 'exists';
+    if (lines[0] !== 'unmapped') return 'unresolved';
+    return isLocalMachineSid(sid, lines[1] || '') ? 'gone' : 'unresolved';
   }
-  if (!Number.isInteger(uid) || uid < 0) return true;
+  if (!Number.isInteger(uid) || uid < 0) return 'unresolved';
   try {
     execFile('/usr/bin/id', ['-un', String(uid)], {});
-    return true;
+    return 'exists';
   } catch (err) {
     // id exits 1 for a uid nobody has; anything else (id is not there, it was killed) is not an answer.
-    return !(err && err.status === 1);
+    return err && err.status === 1 ? 'gone' : 'unresolved';
   }
+}
+
+// false only when the identity is provably gone.
+function sessionIdentityExists(identity, options = {}) {
+  return sessionIdentityState(identity, options) !== 'gone';
 }
 
 // What kind of SID this is, by its form alone (third security review,
@@ -537,19 +558,46 @@ function assertSingleUserAccount(account, platform = process.platform, { nameUse
 // The name's SID and what kind of name it is (SID_NAME_USE), from the one
 // lookup: LookupAccountName through P/Invoke, framework types only. Two
 // lines: the SID, the type.
-const WINDOWS_LOOKUP_SCRIPT = [
-  "$ErrorActionPreference = 'Stop'",
+// Lookup-Name: $null when the name maps to nothing, else @(SID, type).
+const WINDOWS_LOOKUP_FUNCTION = [
   "$ProgressPreference = 'SilentlyContinue'",
   "$sig = '[DllImport(\"advapi32.dll\", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool LookupAccountName(string systemName, string accountName, byte[] sid, ref int cbSid, System.Text.StringBuilder domain, ref int cchDomain, out int use);'",
   'Add-Type -Namespace KingLouie -Name AccountLookup -MemberDefinition $sig',
-  '$cb = 0; $cch = 0; $use = 0',
-  '[void][KingLouie.AccountLookup]::LookupAccountName($null, $env:KL_SESSION_USER, $null, [ref]$cb, $null, [ref]$cch, [ref]$use)',
-  'if ($cb -le 0) { exit 3 }',
-  '$sid = New-Object byte[] $cb',
-  '$domain = New-Object System.Text.StringBuilder ([Math]::Max($cch, 1))',
-  'if (-not [KingLouie.AccountLookup]::LookupAccountName($null, $env:KL_SESSION_USER, $sid, [ref]$cb, $domain, [ref]$cch, [ref]$use)) { exit 3 }',
-  '[Console]::Out.WriteLine((New-Object System.Security.Principal.SecurityIdentifier($sid, 0)).Value)',
-  '[Console]::Out.WriteLine($use)'
+  'function Lookup-Name([string]$name) {',
+  '  $cb = 0; $cch = 0; $use = 0',
+  '  [void][KingLouie.AccountLookup]::LookupAccountName($null, $name, $null, [ref]$cb, $null, [ref]$cch, [ref]$use)',
+  '  if ($cb -le 0) { return $null }',
+  '  $sid = New-Object byte[] $cb',
+  '  $domain = New-Object System.Text.StringBuilder ([Math]::Max($cch, 1))',
+  '  if (-not [KingLouie.AccountLookup]::LookupAccountName($null, $name, $sid, [ref]$cb, $domain, [ref]$cch, [ref]$use)) { return $null }',
+  '  return @((New-Object System.Security.Principal.SecurityIdentifier($sid, 0)).Value, $use)',
+  '}'
+];
+const WINDOWS_LOOKUP_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  ...WINDOWS_LOOKUP_FUNCTION,
+  '$found = Lookup-Name $env:KL_SESSION_USER',
+  'if ($null -eq $found) { exit 3 }',
+  '[Console]::Out.WriteLine($found[0])',
+  '[Console]::Out.WriteLine($found[1])'
+].join('\n');
+// Two lines: does $env:KL_SESSION_SID map to an account (mapped, unmapped),
+// then this machine's own SID: what its name maps to when that is a domain
+// (SidTypeDomain, 3: the account domain of the local accounts), or nothing.
+const WINDOWS_IDENTITY_SCRIPT = [
+  ...WINDOWS_LOOKUP_FUNCTION,
+  'try {',
+  '  (New-Object System.Security.Principal.SecurityIdentifier($env:KL_SESSION_SID)).Translate([System.Security.Principal.NTAccount]) | Out-Null',
+  "  [Console]::Out.WriteLine('mapped')",
+  '} catch [System.Security.Principal.IdentityNotMappedException] {',
+  "  [Console]::Out.WriteLine('unmapped')",
+  '}',
+  'try {',
+  '  $machine = Lookup-Name ([Environment]::MachineName)',
+  "  if ($null -ne $machine -and $machine[1] -eq 3) { [Console]::Out.WriteLine($machine[0]) } else { [Console]::Out.WriteLine('') }",
+  '} catch {',
+  "  [Console]::Out.WriteLine('')",
+  '}'
 ].join('\n');
 
 // singleUser (the default; "session install"): anything that is not one
@@ -596,7 +644,7 @@ function resolveSessionUser(name, { platform = process.platform, execFile = (f, 
 module.exports = {
   mintSessionSecret, canonicalPath, writeCanonical, readCanonical, canonicalMtime, inspectCanonical, sameSessionIdentity,
   userCopyPath, writeUserCopy, readUserCopy, removeUserCopy, checkUserCopyTrust, windowsUserOwnerArgs,
-  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs, removalKind, removeEntry, sessionIdentityExists,
+  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs, removalKind, removeEntry, sessionIdentityExists, sessionIdentityState, isLocalMachineSid,
   endpointPath, sessionIpcDir, assertSafeComponents, windowsUserAclArgs, resolveSessionUser,
   classifyWindowsSid, assertSingleUserAccount
 };

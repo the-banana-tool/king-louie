@@ -366,11 +366,17 @@ async function uninstall({ flags, dataDir, io, deps }) {
   if (!flags.user) { io.stderr.write(SESSION_USAGE); return 2; }
   if (!c.isAdmin()) { io.stderr.write('session uninstall needs root (or an elevated Administrator prompt on Windows).\n'); return 1; }
   if (refusedUnasked({ flags, io, c, verb: 'remove' })) return 2;
-  const sessionUser = bareName(flags.user, c.platform);
   const sameName = (a, b) => (c.platform === 'win32' ? String(a).toLowerCase() === String(b).toLowerCase() : a === b);
   // R-F5-10: by identity, and with no master key (uninstall must work
   // without one). Everything from here to the question only reads.
   const installed = S.inspectCanonical({ configDir: c.configDir, platform: c.platform });
+  // Windows: --user may be the SID the helper file records, exactly. That
+  // names the installed identity itself, with nothing to resolve (third
+  // security review, finding 5: the way to remove an install whose account
+  // no domain controller can vouch for or against).
+  const bySid = c.platform === 'win32' && installed.state === 'installed' && typeof installed.sid === 'string'
+    && String(flags.user).trim().toUpperCase() === installed.sid.toUpperCase();
+  const sessionUser = bySid ? installed.user : bareName(flags.user, c.platform);
   const recordedForName = installed.state === 'installed' && sameName(installed.user, sessionUser);
   // An account that no longer exists cannot be resolved (security review
   // finding 13e), and must not leave the node unable to install anyone
@@ -378,13 +384,16 @@ async function uninstall({ flags, dataDir, io, deps }) {
   // the identity to remove. Any other name is still user_not_found.
   let account;
   let gone = false;
-  try {
-    account = c.resolveUser(flags.user, { singleUser: false });
-  } catch (err) {
-    if (!isGuiError(err) || !['user_not_found', 'home_missing'].includes(err.code)) throw err;
-    if (!recordedForName) throw err;
-    account = { user: sessionUser, sid: installed.sid, uid: installed.uid, gid: null, home: null };
-    gone = true;
+  if (bySid) account = { user: sessionUser, sid: installed.sid, uid: null, gid: null, home: null };
+  else {
+    try {
+      account = c.resolveUser(flags.user, { singleUser: false });
+    } catch (err) {
+      if (!isGuiError(err) || !['user_not_found', 'home_missing'].includes(err.code)) throw err;
+      if (!recordedForName) throw err;
+      account = { user: sessionUser, sid: installed.sid, uid: installed.uid, gid: null, home: null };
+      gone = true;
+    }
   }
   const mine = installed.state === 'installed' && S.sameSessionIdentity(installed, account, c.platform);
   // A helper file that cannot say who it was installed for is removed too,
@@ -395,12 +404,19 @@ async function uninstall({ flags, dataDir, io, deps }) {
   // and the one the helper file records belongs to nobody. Without this,
   // install said "uninstall alice first" and uninstall said "that is not
   // alice's": no way out but deleting files by hand. Only when the recorded
-  // identity is clearly gone; an account of the same name that still
+  // identity is provably gone; an account of the same name that still
   // exists (another domain's, say) keeps its install and is named exactly.
-  const identityExists = deps.identityExists || ((identity) => S.sessionIdentityExists(identity, { platform: c.platform }));
-  const stale = !gone && recordedForName && !mine && !identityExists({ sid: installed.sid, uid: installed.uid })
-    ? { user: sessionUser, sid: installed.sid, uid: installed.uid }
-    : null;
+  // Third security review, finding 5: "provably" is a SID of this machine's
+  // own accounts that maps to nothing. A domain account's SID that does not
+  // resolve may only mean no domain controller is reachable: its install
+  // stays until the owner names the recorded identity exactly.
+  const identityState = deps.identityState
+    || (deps.identityExists ? (identity) => (deps.identityExists(identity) ? 'exists' : 'gone') : (identity) => S.sessionIdentityState(identity, { platform: c.platform }));
+  const otherIdentity = !gone && recordedForName && !mine ? identityState({ sid: installed.sid, uid: installed.uid }) : null;
+  const stale = otherIdentity === 'gone' ? { user: sessionUser, sid: installed.sid, uid: installed.uid } : null;
+  const whyKept = otherIdentity === 'unresolved'
+    ? ` (recorded for the same name under an identity that could not be resolved; it may be a domain account with no domain controller in reach. To remove it, name that identity exactly: ${c.platform === 'win32' ? `--user ${installed.sid}, or the name with its domain` : 'the name as its directory knows it, with the directory in reach'})`
+    : ' (another account of the same name, which still exists: name it with its domain or machine to remove it)';
   const removesCanonical = mine || damaged || stale !== null;
   // A login start in a home directory is removed by a child running as that
   // user; for a user who is gone there is nobody to run as and no home to
@@ -442,7 +458,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
     if (mine) io.stdout.write(`[dry-run] remove ${installed.file} (the service's secret)\n`);
     else if (stale) io.stdout.write(`[dry-run] remove ${installed.file} (the service's secret, recorded for ${shown(installed.user)} under ${identityText(installed, c.platform)}, an identity that no longer exists here)\n`);
     else if (damaged) io.stdout.write(`[dry-run] remove ${installed.file} (it ${installed.reason}, so it cannot say who it was installed for)\n`);
-    else if (installed.state === 'installed') io.stdout.write(`[dry-run] keep ${installed.file}: it is installed for "${shown(installed.user)}" (${identityText(installed, c.platform)}), not for this user\n`);
+    else if (installed.state === 'installed') io.stdout.write(`[dry-run] keep ${installed.file}: it is installed for "${shown(installed.user)}" (${identityText(installed, c.platform)}), not for this user${recordedForName ? whyKept : ''}\n`);
     if (unreachableLoginStart) io.stdout.write(`[dry-run] leave the login start in ${sessionUser}'s home directory (there is no such user to remove it as)\n`);
     await c.execute(steps, { dryRun: true, io, entryPath: c.entryPath, nodePath: c.nodePath });
     return 0;
@@ -463,7 +479,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
   if (mine || stale) io.stdout.write(`  the service's secret: ${installed.file} (desktop apps stay off on this node until "session install" runs again)\n`);
   if (damaged) io.stdout.write(`  the service's helper file: ${installed.file} ${installed.reason}, so this cannot tell who it was installed for; it is removed too. If it was installed for another user, run "session uninstall" for that user as well.\n`);
   if (installed.state === 'installed' && !removesCanonical) {
-    io.stdout.write(`  ${installed.file} stays: it is installed for "${shown(installed.user)}" (${identityText(installed, c.platform)}), not for this user${recordedForName ? ' (another account of the same name, which still exists: name it with its domain or machine to remove it)' : ''}\n`);
+    io.stdout.write(`  ${installed.file} stays: it is installed for "${shown(installed.user)}" (${identityText(installed, c.platform)}), not for this user${recordedForName ? whyKept : ''}\n`);
   }
   if (!(await consented({ flags, c, question: `Remove the session helper for ${sessionUser}? [y/N] ` }))) {
     io.stderr.write('Not removing without confirmation. Nothing was removed.\n');

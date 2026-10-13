@@ -764,9 +764,84 @@ describe('second review finding 11: session uninstall', () => {
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s, { resolveSessionUser: (n) => otherAccountForInstall(n) }) }), 0);
   });
 
-  it('the real identity check: a well-known account exists, a made-up one does not, and a check that cannot run says "exists"', { skip: POSIX }, () => {
+  // Third security review, finding 5: only a SID of this machine's own
+  // accounts that maps to nothing is provably gone. A domain account's SID
+  // does not map either while no domain controller is in reach.
+  it('finding 5: the identity check tells "gone" from "could not be resolved" by the machine\'s own SID', () => {
+    const MACHINE = 'S-1-5-21-111-222-333';
+    const answer = (first, machine = MACHINE) => (file, argv, options) => {
+      assert.equal(argv[argv.length - 2], '-EncodedCommand');
+      assert.ok(!Buffer.from(argv[argv.length - 1], 'base64').toString('utf16le').includes(options.env.KL_SESSION_SID), 'the SID goes in the environment');
+      return `${first}\r\n${machine}\r\n`;
+    };
+    const state = (sid, execFile) => S.sessionIdentityState({ sid }, { platform: 'win32', execFile, env: { SystemRoot: 'C:\\Windows' } });
+    assert.equal(state(`${MACHINE}-1001`, answer('mapped')), 'exists');
+    assert.equal(state(`${MACHINE}-1001`, answer('unmapped')), 'gone', 'a local account that maps to nothing');
+    assert.equal(state('S-1-5-21-9-9-9-1105', answer('unmapped')), 'unresolved', 'a domain account: no controller may be in reach');
+    assert.equal(state('S-1-12-1-1-2-3-4', answer('unmapped')), 'unresolved', 'an Entra ID account');
+    assert.equal(state(`${MACHINE}-1001`, answer('unmapped', '')), 'unresolved', 'the machine\'s SID could not be read');
+    assert.equal(state(`${MACHINE}-1001`, answer('unmapped', 'S-1-5-21-111-222-333-500')), 'unresolved', 'not a machine SID');
+    assert.equal(state(`${MACHINE}-1001`, answer('unmapped', 'S-1-5-21-111-222-33')), 'unresolved', 'another machine whose SID is a prefix in text only');
+    assert.equal(state(`${MACHINE}-1001-7`, answer('unmapped')), 'unresolved');
+    assert.equal(state(`${MACHINE}-1001`, answer('')), 'unresolved');
+    assert.equal(state(`${MACHINE}-1001`, () => { throw new Error('powershell is gone'); }), 'unresolved');
+    assert.equal(state(null, () => { throw new Error('must not run'); }), 'unresolved');
+    assert.equal(S.isLocalMachineSid(`${MACHINE}-1001`, MACHINE), true);
+    assert.equal(S.isLocalMachineSid('S-1-5-21-111-222-3334-1001', MACHINE), false);
+    assert.equal(S.isLocalMachineSid(`${MACHINE}-1001`, 'S-1-5-32'), false);
+    // Only "gone" is a no for the old yes-or-no form.
+    assert.equal(S.sessionIdentityExists({ sid: 'S-1-5-21-9-9-9-1105' }, { platform: 'win32', execFile: answer('unmapped') }), true);
+    assert.equal(S.sessionIdentityExists({ sid: `${MACHINE}-1001` }, { platform: 'win32', execFile: answer('unmapped') }), false);
+  });
+
+  it('finding 5: an install recorded under an identity that could not be resolved stays, until --user names it exactly', async () => {
+    const s = setup();
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
+    const old = account('alice');
+    const again = otherAccount('alice');
+    const before = tree(s.base);
+    const d = deps(s, { resolveSessionUser: () => again, identityExists: undefined, identityState: () => 'unresolved', runIcacls: () => {} });
+    for (const flags of [{ user: 'alice', dryRun: true }, { user: 'alice' }]) {
+      const t = io();
+      assert.equal(await runSessionCommand({ sub: 'uninstall', flags, dataDir: s.dataDir, io: t.io, deps: d }), 0);
+      const out = t.out.join('');
+      assert.match(out, /could not be resolved; it may be a domain account with no domain controller in reach\. To remove it, name that identity exactly/);
+      assert.ok(out.includes(who(old)), out);
+      if (!POSIX) assert.ok(out.includes(`--user ${old.sid}`), out);
+      assert.ok(!/no longer exists on this machine/.test(out));
+      assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), true, 'the helper file stays');
+      assert.equal(fs.existsSync(copyOf(s, old)), true, 'and so does the copy of the identity it records');
+    }
+    assert.deepEqual(tree(s.base), before);
+  });
+
+  it('finding 5: --user with the recorded SID removes that install with nothing resolved', { skip: POSIX }, async () => {
+    const s = setup();
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
+    const old = account('alice');
+    const t = io();
+    const revoked = [];
+    const d = deps(s, {
+      resolveSessionUser: () => { throw new Error('must not resolve'); },
+      identityExists: undefined, identityState: () => { throw new Error('must not ask'); },
+      runIcacls: (argv) => revoked.push(argv)
+    });
+    let shownBefore = null;
+    d.confirm = async () => { shownBefore = t.out.join(''); return true; };
+    // Another SID is not the recorded one: it goes to the resolver like any name.
+    await assert.rejects(() => require('../src/service/commands/session').runSessionCommand({ sub: 'uninstall', flags: { user: 'S-1-5-21-9-9-9-2001' }, dataDir: s.dataDir, io: io().io, deps: { ...d, resolveSessionUser: () => { throw new Error('resolver asked'); } } }).then((code) => { if (code !== 0) throw new Error('refused'); }));
+    assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), true);
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: old.sid.toLowerCase() }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
+    assert.match(shownBefore, new RegExp(`Removing the session helper of alice \\(SID ${old.sid}\\)`));
+    assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), false);
+    assert.equal(fs.existsSync(copyOf(s, old)), false);
+    assert.deepEqual(revoked, [S.windowsUsersDirRevokeArgs(path.join(s.configDir, 'session', 'users'), old.sid)]);
+    assert.equal(d.executed.length, 1, 'the logon task named for alice is removed');
+  });
+
+  it('the real identity check: a well-known account exists, a made-up domain SID is not this machine\'s to judge, and a check that cannot run says "exists"', { skip: POSIX }, () => {
     assert.equal(S.sessionIdentityExists({ sid: 'S-1-5-18' }, { platform: 'win32' }), true, 'SYSTEM');
-    assert.equal(S.sessionIdentityExists({ sid: 'S-1-5-21-1-2-3-1001' }, { platform: 'win32' }), false);
+    assert.equal(S.sessionIdentityState({ sid: 'S-1-5-21-1-2-3-1001' }, { platform: 'win32' }), 'unresolved');
     assert.equal(S.sessionIdentityExists({ sid: 'S-1-5-21-1-2-3-1001' }, { platform: 'win32', execFile: () => { throw new Error('powershell is gone'); } }), true);
     assert.equal(S.sessionIdentityExists({ sid: null }, { platform: 'win32', execFile: () => { throw new Error('must not run'); } }), true);
   });
