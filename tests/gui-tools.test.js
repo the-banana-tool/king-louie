@@ -518,7 +518,6 @@ describe('input tools', () => {
     const { canonicalize } = require('../src/platform/jcs');
     const { addSink } = require('../src/logging');
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-audit-'));
-    cleanups.push(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const identity = testNodeIdentity({ key: 'gpu-box' });
     const ledger = new AuditLedger({ dir: path.join(dataDir, 'audit'), identity });
     const logged = [];
@@ -532,7 +531,8 @@ describe('input tools', () => {
       const policy = () => ({ allowed_roots: [base], remote_sessions: { always_confirm: ['Bash(git push*)'] } });
       const br = new GuiBroker({ channel: ch, guiConfig, getPolicy: policy, audit: ledger, dataDir, platform: plat, realpath: (p) => p });
       br.start();
-      cleanups.push(() => br.stop());
+      // Stopped before its data dir is removed: stop() writes one last status.json, which would put the dir back.
+      cleanups.push(() => { br.stop(); fs.rmSync(dataDir, { recursive: true, force: true }); });
       const lm = new LeaseManager({ approvals: { identity, approverStore: store, relayClient: rl, phoneApprover: { isAvailable: () => true } }, guiConfig, broker: br, audit: ledger, nodeName: 'gpu-box', jobOpen: () => true });
       br.setLeases(lm);
       const liveView = new LiveView({ leases: lm, broker: br, identity, relayClient: rl, guiConfig });
