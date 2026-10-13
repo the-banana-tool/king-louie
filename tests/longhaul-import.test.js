@@ -138,6 +138,34 @@ describe('longhaul import', () => {
     assert.match(again.stdout, /already imported/);
   });
 
+  it('imports a Markdown transcript: the shared importers claim it, and its id falls back to im-', async () => {
+    const { env, root } = tmpHome();
+    const file = path.join(tmpDir(), 'lot.md');
+    fs.copyFileSync(path.join(__dirname, 'fixtures', 'history', 'markdown-transcript.md'), file);
+    const r = await run(['import', file], env);
+    assert.strictEqual(r.code, 0, r.stderr);
+    const [id] = fs.readdirSync(path.join(root, 'sessions'));
+    assert.match(id, /^im-[0-9a-f]{12}$/);
+    const s = await loadSession(path.join(root, 'sessions', id));
+    assert.strictEqual(s.manifest.private, true);
+    assert.strictEqual(s.manifest.source, 'markdown-transcript');
+    assert.deepStrictEqual(s.manifest.importer, { kind: 'markdown-transcript', version: 1 });
+    assert.strictEqual(s.manifest.title, 'Lakeside lot planning');
+    assert.strictEqual(s.manifest.sourceRef, 'lot.md');
+    assert.strictEqual(s.manifest.humanMessages, 10);
+    assert.deepStrictEqual(s.manifest.compactions, []);
+    assert.deepStrictEqual(s.manifest.skipped, { preamble: 1 });
+    assert.strictEqual(s.messages.length, 20);
+    assert.strictEqual(s.messages[2].text, 'The side gate code at the Lakeside lot is 4417. Keep that for the site visit.');
+    const again = await run(['import', file], env);
+    assert.strictEqual(again.code, 0);
+    assert.match(again.stdout, /already imported/);
+    // A Markdown file that is not a transcript is still refused.
+    const notes = path.join(tmpDir(), 'notes.md');
+    fs.writeFileSync(notes, ['# Lakeside lot', '', '## Access', '', 'Side gate.', ''].join('\n'));
+    assert.strictEqual((await run(['import', notes], env)).code, 2);
+  });
+
   it('names the supported formats when a file is neither', async () => {
     const { env } = tmpHome();
     const file = path.join(tmpDir(), 'other.json');

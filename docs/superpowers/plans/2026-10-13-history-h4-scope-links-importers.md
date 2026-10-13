@@ -43,6 +43,18 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **Tool pairing follows the cut too.** `Retriever#retrieve` passed `upToSeq` to `store.pairedToolMessageId`, which the task's text does not name. It now passes the cut only for a message of the cut's chat, so a tool call recalled from another chat is paired with its result past the asking chat's `upToSeq`, and a partner in the cut's own chat is still never shown at or after it. Without `upToSeqChatId` the call is what it was.
 - **`upToSeqChatId` is always passed on** (as `null` when unset) to `searchText`, `index.search` and the `vectorSearch` callback, so LongHaul's own `vectorSearch` callbacks receive one more key and ignore it. A named chat with no integer `upToSeq` cuts nothing.
 
+**Task 3**
+
+- **The size limit is injected as an option**: `detect`, `parse` and `preview` take `{ maxBytes }` (default `MAX_BYTES`). `detectImporter` passes none.
+- **Refusals the text does not spell out.** A known pattern that the file does not fit, and a file whose name does not end `.md` or `.markdown` given straight to `parse`, both throw `NOT_A_TRANSCRIPT`. The unknown-pattern check runs before the file is opened.
+- **A section with no text is left out** and counted in `stats.skipped.empty`; "at least two sections with both roles" is judged on the sections that are kept. `stats.skipped` has a key only when its count is above zero, as the other importers do.
+- **`name-assistant` does not fit a file whose other heading is `User`**: that file is `user-assistant-h2`, and listing both would offer the owner the same reading twice.
+- **Numbered sections without a marker alternate from the section before them** (the first is the user), so a marker in the middle moves the alternation. A numbered section is one message even when its text goes on to quote the other speaker.
+- **`turns`, in `preview` and in each `patterns` entry, counts user messages**, as the other two importers' `preview` does. `sample` is the first five messages; a `roles` heading is rebuilt as the hashes and the heading text, cut to 120 characters.
+- **Heading rules**: ATX headings only (setext underlines are not headings), up to three spaces of indent, a space after the hashes; a role heading may be any case, wrapped in emphasis and end in a colon. A numbered heading is `Turn N` or `Message N`, with an optional `#` before the number and an optional `:` or `.` after it.
+- **The fixture is ten user turns** (twenty messages), with a title, one line before the first turn, a fenced block holding a heading, and level-3 headings inside a reply.
+- **LongHaul's refusal for an unsupported file still names only the two older formats** (`src/longhaul/importing.js`), since the task changes no other LongHaul file. The new test also checks that a Markdown file that is not a transcript is refused.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named).
