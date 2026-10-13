@@ -378,18 +378,31 @@ refusals[], deltas[] }`:
 | `now` inside the window | delta `extends window end to <date>`; refusal if `now < start` |
 | a channel send's channel in `channels` (jobs are not checked) | delta `allows channel sends on <channel>` |
 
-**The approval card (security review 2026-10-12).** The owner approves what the card shows, and the
-approval binds to the hash, so the card must show all of it and nothing may imitate it. (a) An `intent`, a
-rule or a normalized recipient with a line-separating character (LF, CR, VT, FF, U+0085, U+2028, U+2029)
-or a hidden character (`src/cases/hidden-chars.js`: controls, zero-width, bidi) is refused. (b) The card
-(`envelopeQuestionText`) puts every host-built line first, in this order: the header, `Caps:`, `Window:`,
-`Channel sends allowed:` (when the envelope has a list), `Recipients (N):`; then the model-written text:
-`Facts it may disclose (N):` with one line per fact, `Intent:`, `Rules:`, `Not backed by a fact:`. Every
-piece of model or ledger text is shown on one line (`oneLine`), so text stored before this rule cannot
-start a line either. (c) A request whose card (with the signed note) is over 2,000 characters is refused,
-never cut, which bounds the recipients, facts and rules; so is a delta question (`requestDelta` throws
-`QUESTION_TOO_LONG` before it writes anything, and `Executor.submit` refuses the job). `cut` remains only
-for showing an envelope stored before the rule.
+**The approval card (security reviews 2026-10-12 and 2026-10-13).** The owner approves what the card
+shows, and the approval binds to the hash, so the card must show all of it and nothing may imitate it.
+
+- *One plain line* is defined once, `plainLineProblem` in `src/cases/hidden-chars.js`. It refuses every
+  code point of `HIDDEN_RANGES` and of `APPROVAL_HIDDEN_RANGES` (the exact approval-v1 §5 table the phones
+  escape; `mobile-app-channel.js` uses the same table), so every control, tab and line break (LF, CR, VT,
+  FF, U+0085, U+2028, U+2029), bidi and default-ignorable character; U+FFF9 to U+FFFC; every space or
+  blank that is not U+0020 (U+00A0, U+1680, U+2000 to U+200A, U+202F, U+205F, U+2800, U+3000; the Hangul
+  fillers are in the hidden tables); two or more spaces in a row; and more than three combining marks in
+  a row. The card is shown `white-space: pre-wrap` in a narrow column, so a wide or invisible gap is a
+  line break in effect. Unassigned and private-use code points are not refused.
+- A request whose `intent`, a rule or a normalized recipient is not one plain line is refused. So is a
+  recipient a job would add by a delta (`Executor.submit`), and a delta on an envelope whose stored intent
+  is not one (`requestDelta` throws `QUESTION_NOT_PLAIN`: request a new envelope).
+- The card (`envelopeQuestionText`) has three parts. First the host-built lines: `Approve envelope <id>
+  for <executor>?`, `Caps:`, `Window:`, `Channel sends allowed:`, `Recipients (N):`, `Facts it may
+  disclose (N): <ids>`. Then, under the host line `The wording below was written by the assistant or
+  comes from the case ledger:`, one labelled line each: `Intent:`, `Rule N:`, `Fact <id>:`, `Not backed
+  by a fact:`. Last, `Case: <title>` (the title can be model-written, and the card head shows it too).
+- Stored text that is not one plain line (a fact statement, value or unit, an old intent or rule, the
+  title) is never flattened into the card: it is shown as `(text hidden: not one plain line)`, and a fact
+  is still listed by its id. The executor is shown by its id; no display name reaches the card.
+- A request whose card (with the signed note) is over 2,000 characters is refused, never cut, which
+  bounds the recipients, facts and rules; so is a delta question (`QUESTION_TOO_LONG`). `cut` remains only
+  for showing an envelope stored before the rule.
 
 **Channels (owner decision 2026-10-12).** `channels` lists the contact channels a channel send
 (`ContactRouter.sendExternal`, §3.7) to the envelope's recipients may use, in stored form (`call` is

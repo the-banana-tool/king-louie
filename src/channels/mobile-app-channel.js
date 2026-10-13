@@ -24,6 +24,7 @@ const messages = require('../approvals/messages');
 const { TOKEN_RE } = require('../cases/contact-format');
 const { TOKEN_IN_TEXT } = require('../cases/contact');
 const { createLogger } = require('../logging');
+const { isApprovalHidden } = require('../cases/hidden-chars');
 
 const SIGNED_AT_SKEW_MS = 300 * 1000;
 const QUESTION_ID = /^q-\d{4,}$/;
@@ -43,18 +44,10 @@ const MAX_OPTIONS = 6;
 
 // approval-v1 §5's hidden code points (Cc, Zl/Zp, Bidi_Control,
 // Default_Ignorable_Code_Point as of Unicode 15.1), the list F3's
-// Display.escape uses on both phones. The node applies the same escape to
-// what it signs, so the payload is clean before the phone escapes it again.
-function isHidden(cp) {
-  return cp <= 0x1f || cp === 0x7f || (cp >= 0x80 && cp <= 0x9f)
-    || cp === 0x2028 || cp === 0x2029
-    || cp === 0x061c || (cp >= 0x200e && cp <= 0x200f) || (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069)
-    || cp === 0x00ad || cp === 0x034f || (cp >= 0x115f && cp <= 0x1160) || (cp >= 0x17b4 && cp <= 0x17b5)
-    || (cp >= 0x180b && cp <= 0x180f) || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x2060 && cp <= 0x206f)
-    || cp === 0x3164 || (cp >= 0xfe00 && cp <= 0xfe0f) || cp === 0xfeff || cp === 0xffa0
-    || (cp >= 0xfff0 && cp <= 0xfff8) || (cp >= 0x1bca0 && cp <= 0x1bca3) || (cp >= 0x1d173 && cp <= 0x1d17a)
-    || (cp >= 0xe0000 && cp <= 0xe0fff);
-}
+// Display.escape uses on both phones; the one table is in
+// src/cases/hidden-chars.js. The node applies the same escape to what it
+// signs, so the payload is clean before the phone escapes it again.
+const isHidden = isApprovalHidden;
 
 // Escaped (‹U+XXXX›) and at most `max` code points after escaping. `newlines`: keep '\n' (the
 // question text may have several lines; titles and labels may not).

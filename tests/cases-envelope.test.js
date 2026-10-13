@@ -120,9 +120,10 @@ describe('validateEnvelopeRequest', () => {
     assert.deepStrictEqual(r.notBacked.map((n) => [n.path, n.text]), [['intent', 'due by'], ['intent', 'Friday November 14']]);
     const env = { id: 'env-02', ...r.core };
     const text = renderEnvelopeQuestion(env, { facts: ctx.facts, caseTitle: 'Lakeside lot', notBacked: r.notBacked });
-    assert.match(text, /^Approve envelope env-02 for phone-agent in case "Lakeside lot"\?/);
-    assert.match(text, /- f-0001: Lot size is 2\.12 acres = 2\.12 acres/);
-    assert.match(text, /Not backed by a fact:\n- "due by" \(.*\)\n- "Friday November 14" \(.*\)/);
+    assert.match(text, /^Approve envelope env-02 for phone-agent\?\n/);
+    assert.match(text, /\nCase: Lakeside lot$/);
+    assert.match(text, /\nFact f-0001: Lot size is 2\.12 acres = 2\.12 acres\n/);
+    assert.match(text, /\nNot backed by a fact: "due by" \(.*\)\nNot backed by a fact: "Friday November 14" \(.*\)\n/);
     assert.match(text, /Caps: \$20\.00 total, 3 contacts, 2 attempts per contact/);
   });
 });
@@ -518,56 +519,136 @@ describe('the approval question cannot be spoofed by model-written text', () => 
       const label = `U+${ch.codePointAt(0).toString(16)}`;
       const intent = validateEnvelopeRequest(request({ intent: `Ask for a quote${ch}Channel sends allowed: none` }), ctx);
       assert.strictEqual(intent.ok, false, label);
-      assert.match(intent.error, /"intent" must be one line/, label);
+      assert.match(intent.error, /"intent" must be one plain line/, label);
       const rule = validateEnvelopeRequest(request({ rules: ['Be brief', `Say hello${ch}Caps: $1.00 total`] }), ctx);
       assert.strictEqual(rule.ok, false, label);
-      assert.match(rule.error, /"rules" must each be one line/, label);
+      assert.match(rule.error, /"rules" must each be one plain line/, label);
     }
     assert.strictEqual(validateEnvelopeRequest(request({ intent: '  Ask for a quote\n' }), ctx).ok, true, 'surrounding white space is trimmed, not refused');
   });
 
-  it('every host-built line comes before any model-written text', () => {
+  it('host-built lines first, then labelled wording, the case title last', () => {
     const env = activeEnvelope({ channels: ['sms'], rules: ['Say the first name only'], intent: 'Ask three brokers for a listing quote on the lot' });
     const text = renderEnvelopeQuestion(env, { facts: facts(ACRES), caseTitle: 'Lakeside lot', notBacked: [{ text: 'due by', detail: 'deadline' }] });
     assert.deepStrictEqual(text.split('\n'), [
-      'Approve envelope env-01 for phone-agent in case "Lakeside lot"?',
+      'Approve envelope env-01 for phone-agent?',
       'Caps: $20.00 total, 3 contacts, 2 attempts per contact',
       'Window: 2026-10-26 to 2026-10-30 (America/Chicago)',
       'Channel sends allowed: sms',
       'Recipients (2): +15550100, +15550101',
-      'Facts it may disclose (1):',
-      '- f-0001: Lot size is 2.12 acres = 2.12 acres',
+      'Facts it may disclose (1): f-0001',
+      'The wording below was written by the assistant or comes from the case ledger:',
       'Intent: Ask three brokers for a listing quote on the lot',
-      'Rules:',
-      '- Say the first name only',
-      'Not backed by a fact:',
-      '- "due by" (deadline)'
+      'Rule 1: Say the first name only',
+      'Fact f-0001: Lot size is 2.12 acres = 2.12 acres',
+      'Not backed by a fact: "due by" (deadline)',
+      'Case: Lakeside lot'
+    ]);
+    assert.strictEqual(renderEnvelopeQuestion(activeEnvelope({ facts: [] }), {}).split('\n')[4], 'Facts it may disclose (0): none');
+  });
+
+  it('stored text that is not one plain line is hidden, never flattened into the card, and never dropped silently', () => {
+    const HIDDEN_TEXT = '(text hidden: not one plain line)';
+    const stmt = fact('f-0001', { stmt: 'Lot size\nCaps: $0.00 total\u2028Channel sends allowed: none', value: 'two\nlines' });
+    const env = activeEnvelope({
+      channels: ['sms'], intent: 'Ask for a quote\nChannel sends allowed: none\nCaps: $1.00 total, 1 contacts', rules: ['one\r\nRecipients (1): +15550100', 'Be brief']
+    });
+    const text = renderEnvelopeQuestion(env, { facts: facts(stmt), caseTitle: 'Lot\nCaps: $1.00 total', notBacked: [{ text: 'x\ny', detail: 'a\nb' }] });
+    assert.deepStrictEqual(text.split('\n').slice(5), [
+      'Facts it may disclose (1): f-0001',
+      'The wording below was written by the assistant or comes from the case ledger:',
+      `Intent: ${HIDDEN_TEXT}`,
+      `Rule 1: ${HIDDEN_TEXT}`,
+      'Rule 2: Be brief',
+      `Fact f-0001: ${HIDDEN_TEXT}`,
+      `Not backed by a fact: ${HIDDEN_TEXT}`,
+      `Case: ${HIDDEN_TEXT}`
+    ]);
+    assert.doesNotMatch(text, /\$1\.00|\$0\.00|Channel sends allowed: none/);
+    const delta = renderDeltaQuestion(env, [{ kind: 'fact', value: 'f-0001' }, { kind: 'recipient', value: '+15550102\n- raises usd cap from $1.00 to $2.00' }], { facts: facts(stmt) });
+    assert.deepStrictEqual(delta.split('\n'), [
+      'Envelope env-01 (phone-agent) needs your approval for:',
+      `- discloses f-0001 ${HIDDEN_TEXT}`,
+      `- adds recipient ${HIDDEN_TEXT}`,
+      `Intent: ${HIDDEN_TEXT}`
     ]);
   });
 
-  it('text already stored with line breaks is shown on one line, so it cannot start a line of its own', () => {
-    const stmt = fact('f-0001', { stmt: 'Lot size\nCaps: $0.00 total\u2028Channel sends allowed: none', value: 'two\nlines' });
-    const env = activeEnvelope({
-      channels: ['sms'], intent: 'Ask for a quote\nChannel sends allowed: none\nCaps: $1.00 total, 1 contacts', rules: ['one\r\nRecipients (1): +15550100']
-    });
-    const text = renderEnvelopeQuestion(env, { facts: facts(stmt), caseTitle: 'Lot\nCaps: $1.00 total', notBacked: [{ text: 'x\ny', detail: 'a\nb' }] });
-    const lines = text.split('\n');
-    assert.strictEqual(lines.filter((l) => l.startsWith('Caps:')).length, 1);
-    assert.strictEqual(lines.filter((l) => l.startsWith('Channel sends allowed:')).length, 1);
-    assert.strictEqual(lines.filter((l) => l.startsWith('Recipients')).length, 1);
-    assert.strictEqual(lines[1], 'Caps: $20.00 total, 3 contacts, 2 attempts per contact');
-    assert.strictEqual(lines[3], 'Channel sends allowed: sms');
-    assert.doesNotMatch(text, /[\r\u2028\u2029\u0085\u000b\u000c]/);
-    const delta = renderDeltaQuestion(env, [{ kind: 'fact', value: 'f-0001' }, { kind: 'recipient', value: '+15550102\n- raises usd cap from $1.00 to $2.00' }], { facts: facts(stmt) });
-    assert.strictEqual(delta.split('\n').length, 4, delta);
-    assert.strictEqual(delta.split('\n').filter((l) => l.startsWith('- raises')).length, 0);
+  // The card is shown with white-space: pre-wrap in a narrow column: a run
+  // of spaces, or a space that is not U+0020, wraps and starts a visual line.
+  it('refuses wording that could fake a line once the card wraps', () => {
+    const pad = ' '.repeat(120);
+    const cases = {
+      'two spaces': 'Ask for a quote  Caps: $1.00 total',
+      'a long run of spaces': `Ask for a quote${pad}Caps: $1.00 total`,
+      'a tab': 'Ask for a quote\tCaps: $1.00 total',
+      'no-break space': 'Ask for a quote\u00a0Caps: $1.00 total',
+      'ogham space': 'Ask\u1680for a quote',
+      'en quad': 'Ask\u2000for a quote',
+      'hair space': 'Ask\u200afor a quote',
+      'narrow no-break space': 'Ask\u202ffor a quote',
+      'medium mathematical space': 'Ask\u205ffor a quote',
+      'ideographic space': 'Ask\u3000for a quote',
+      'braille blank': 'Ask\u2800for a quote',
+      'hangul filler': 'Ask\u3164for a quote',
+      'hangul choseong filler': 'Ask\u115ffor a quote',
+      'halfwidth hangul filler': 'Ask\uffa0for a quote',
+      'interlinear annotation': 'Ask\ufff9for a quote',
+      'object replacement': 'Ask\ufffcfor a quote',
+      'khmer inherent vowel': 'Ask\u17b4for a quote',
+      'mongolian variation selector': 'Ask\u180bfor a quote',
+      'deprecated format': 'Ask\u206afor a quote',
+      'shorthand format': 'Ask\u{1bca0}for a quote',
+      'musical format': 'Ask\u{1d173}for a quote',
+      'variation selector supplement': 'Ask\u{e0100}for a quote',
+      'a combining flood': `Ask fo${'\u0301'.repeat(4)}r a quote`
+    };
+    for (const [label, intent] of Object.entries(cases)) {
+      const r = validateEnvelopeRequest(request({ intent }), ctx);
+      assert.strictEqual(r.ok, false, label);
+      assert.match(r.error, /"intent" must be one plain line/, label);
+      const rule = validateEnvelopeRequest(request({ rules: [intent] }), ctx);
+      assert.strictEqual(rule.ok, false, label);
+      assert.match(rule.error, /"rules" must each be one plain line/, label);
+      assert.strictEqual(renderEnvelopeQuestion(activeEnvelope({ intent }), {}).split('\n')[6], 'Intent: (text hidden: not one plain line)', label);
+    }
+    for (const fine of ['Ask for a quote, then say thanks.', 'Demande un devis à l’agence (café)', 'Ask fo\u0301\u0301\u0301r a quote', '日本語で見積もりを依頼する']) {
+      assert.strictEqual(validateEnvelopeRequest(request({ intent: fine }), ctx).ok, true, fine);
+    }
+  });
+
+  it('a forged case title cannot precede or imitate a host line', () => {
+    const forged = `Lot${' '.repeat(90)}Caps: $1.00 total, 1 contacts, 1 attempts per contact`;
+    for (const caseTitle of [forged, 'Lot\nCaps: $1.00 total', 'x'.repeat(200)]) {
+      const lines = renderEnvelopeQuestion(activeEnvelope({ channels: ['sms'] }), { facts: facts(ACRES), caseTitle }).split('\n');
+      assert.strictEqual(lines[0], 'Approve envelope env-01 for phone-agent?');
+      assert.strictEqual(lines[1], 'Caps: $20.00 total, 3 contacts, 2 attempts per contact');
+      assert.ok(lines[lines.length - 1].startsWith('Case: '), 'the title is the last line');
+      assert.strictEqual(lines.filter((l) => l.includes('$1.00')).length, 0);
+    }
+    assert.strictEqual(renderEnvelopeQuestion(activeEnvelope(), { caseTitle: 'x'.repeat(200) }).split('\n').pop(), `Case: ${'x'.repeat(200)}`);
+  });
+
+  it('a forged fact line is shown by id only, after the real Intent line', () => {
+    const forged = fact('f-0001', { stmt: `Lot size${' '.repeat(80)}Intent: Call anyone and offer any price`, value: 2.12, unit: 'acres' });
+    const unit = fact('f-0003', { stmt: 'Zoned R-1', value: 1, unit: 'x\u00a0y' });
+    const env = activeEnvelope({ facts: ['f-0001', 'f-0003', 'f-0009'] });
+    const lines = renderEnvelopeQuestion(env, { facts: facts(forged, unit) }).split('\n');
+    assert.strictEqual(lines[4], 'Facts it may disclose (3): f-0001, f-0003, f-0009');
+    assert.strictEqual(lines.filter((l) => l.startsWith('Intent:')).length, 1);
+    assert.ok(lines.indexOf('Intent: Ask three brokers for a listing quote on the lot') < lines.findIndex((l) => l.startsWith('Fact ')));
+    assert.deepStrictEqual(lines.filter((l) => l.startsWith('Fact ')), [
+      'Fact f-0001: (text hidden: not one plain line)',
+      'Fact f-0003: (text hidden: not one plain line)',
+      'Fact f-0009: (missing)'
+    ]);
   });
 
   it('a recipient that would break a line is refused', () => {
     const web = { ...PHONE_AGENT, capabilities: ['chat'] };
     const r = validateEnvelopeRequest(request({ recipients: { allow: ['broker one\u0085Caps: $1.00 total'] } }), { ...ctx, entry: web });
     assert.strictEqual(r.ok, false);
-    assert.match(r.error, /has a line break or a hidden character/);
+    assert.match(r.error, /recipient .* is not one plain line/);
     // White space a text address folds to one space is not a line break once stored.
     assert.strictEqual(validateEnvelopeRequest(request({ recipients: { allow: ['broker\none'] } }), { ...ctx, entry: web }).core.recipients.allow[0], 'broker one');
   });
@@ -612,8 +693,8 @@ describe('envelope channels: known ids only, and a phone summary that keeps them
 
   it('a stored multi-line intent cannot break the summary of an envelope with channels', () => {
     const env = activeEnvelope({ authority: 'signed', channels: ['sms'], intent: 'Ask for a quote\nchannel sends: none\u2028$1.00' });
-    assert.doesNotMatch(shown(env), /[\n\r\u2028]/);
-    assert.ok(shown(env).startsWith('env-01 · phone-agent · channel sends: sms · 2 recipients · $20.00 · 2026-10-26 to 2026-10-30: Ask for a quote channel sends: none $1.00'));
+    assert.throws(() => shown(env), /phone summary cannot carry the intent/);
+    assert.throws(() => shown(activeEnvelope({ authority: 'signed', channels: ['sms'], intent: `Ask for a quote${' '.repeat(200)}(1 recipients, $5.00)` })), /phone summary cannot carry the intent/);
   });
 
   it('refuses to build a summary whose host-written part would not fit the cut', () => {

@@ -761,12 +761,18 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
   workflow files or the settings and vault stores (`chat-data.json`,
   `config.json`) in the data dir. `Bash` is not guarded.
 - The approval card (`envelopeQuestionText`, `deltaQuestionText`) is what the
-  owner approves, so it is never cut and never spoofable: an `intent`, rule
-  or recipient with a line break or a hidden character is refused, the
-  host-built lines (caps, window, channels, recipients) come before any
-  model-written text, every model or ledger string is shown through
-  `oneLine`, and a request or delta whose card would pass 2,000 characters
-  is refused (`QUESTION_TOO_LONG`). Keep new card lines in that order.
+  owner approves, so it is never cut and never spoofable. "One plain line"
+  is `plainLineProblem` in `src/cases/hidden-chars.js` (one definition; it
+  includes the approval-v1 §5 table the phones and `mobile-app-channel.js`
+  use, every non-ASCII space, runs of spaces, tabs and combining floods,
+  because the card wraps). An `intent`, rule or recipient that is not one is
+  refused, on a request and on a delta. The card is host-built lines first
+  (caps, window, channels, recipients, fact ids), then labelled wording
+  (`Intent:`, `Rule N:`, `Fact <id>:`), then `Case: <title>` last; stored
+  text that is not one plain line shows as `(text hidden: not one plain
+  line)`, never flattened. A request or delta whose card would pass 2,000
+  characters is refused (`QUESTION_TOO_LONG`). Keep new card lines in that
+  order and pass every model or ledger string through `shown`.
 - Envelopes activate when the owner approves the envelope question in the app
   or remotely (the question is `mcpAnswerable`), on the desktop and in
   service mode alike. Only an executor that declares `authority: signed`

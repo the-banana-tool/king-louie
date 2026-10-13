@@ -289,7 +289,7 @@ async function submitChecked(reg, ctx, params) {
           questionId = envelopeOps.requestDelta(reg, caseId, envelope, fit.deltas);
         } catch (err) {
           // The change could not be shown to the owner whole: nothing is asked.
-          if (err && err.code === 'QUESTION_TOO_LONG') return fail(err.message);
+          if (err && (err.code === 'QUESTION_TOO_LONG' || err.code === 'QUESTION_NOT_PLAIN')) return fail(err.message);
           throw err;
         }
         const texts = fit.deltas.map((d) => d.text);

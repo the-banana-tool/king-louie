@@ -38,7 +38,8 @@ describe('requesting and approving', () => {
     assert.deepStrictEqual([r.envelopeId, r.status], ['env-01', 'requested']);
     const q = s.rt.questions(s.meta.id).get(r.questionId);
     assert.deepStrictEqual([q.kind, q.payload.type, q.payload.envelopeId, q.payload.hash, q.options.map((o) => o.id)], ['approval', 'envelope', 'env-01', r.hash, ['approve', 'reject']]);
-    assert.match(q.text, /^Approve envelope env-01 for fake-agent in case "Lakeside lot"\?/);
+    assert.match(q.text, /^Approve envelope env-01 for fake-agent\?\n/);
+    assert.match(q.text, /\nCase: Lakeside lot$/);
     assert.deepStrictEqual(ops.syncEnvelopes(s.reg, s.meta.id), [], 'nothing changes before the answer');
     await s.rt.answerQuestion(s.meta.id, r.questionId, { channel: 'in-app', optionId: 'approve' });
     assert.deepStrictEqual(ops.syncEnvelopes(s.reg, s.meta.id), [{ envelopeId: 'env-01', status: 'active' }]);
@@ -393,7 +394,7 @@ describe('an approval question that would be cut is refused', () => {
       intent: 'Ask for a quote\nChannel sends allowed: none\nCaps: $1.00 total, 1 contacts, 1 attempts per contact'
     }));
     assert.strictEqual(r.ok, false);
-    assert.match(r.error, /"intent" must be one line/);
+    assert.match(r.error, /"intent" must be one plain line/);
     assert.deepStrictEqual(s.rt.questions(s.meta.id).open(), []);
   });
 
@@ -406,6 +407,16 @@ describe('an approval question that would be cut is refused', () => {
     assert.throws(
       () => ops.requestDelta(s.reg, s.meta.id, envelopeOf(s), many(150).map((value) => ({ kind: 'recipient', value }))),
       (err) => err.code === 'QUESTION_TOO_LONG' && /approval question would be \d+ characters/.test(err.message)
+    );
+    // A stored intent that is not one plain line, or an added recipient that is not, is refused too.
+    assert.throws(
+      () => ops.requestDelta(s.reg, s.meta.id, envelopeOf(s), [{ kind: 'recipient', value: `+15550102${' '.repeat(90)}- raises usd cap from $1.00 to $2.00` }]),
+      (err) => err.code === 'QUESTION_NOT_PLAIN' && /the recipient it adds is not one plain line/.test(err.message)
+    );
+    const stored = { ...envelopeOf(s), intent: 'Ask for a quote  Caps: $1.00 total' };
+    assert.throws(
+      () => ops.requestDelta(s.reg, s.meta.id, stored, [{ kind: 'usd', value: 50 }]),
+      (err) => err.code === 'QUESTION_NOT_PLAIN' && /intent is not one plain line.*request a new envelope/.test(err.message)
     );
     assert.strictEqual(s.rt.questions(s.meta.id).open().length, before);
     assert.strictEqual(envelopeOf(s).pendingDelta, null);

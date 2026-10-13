@@ -10,6 +10,7 @@ const {
   EnvelopeStore, envelopeHash, envelopeIntact, validateEnvelopeRequest, envelopeQuestionText, applyDeltas, deltaQuestionText, deltasEqual,
   deltaText, envelopeFit, QUESTION_MAX_CHARS
 } = require('./envelope');
+const { plainLineProblem } = require('../hidden-chars');
 const { AUTHORITIES } = require('./builtins');
 const { approvalHelpers, signedAction, verifySignedGrant } = require('./signed');
 const { JobStore, isOpen } = require('./job-store');
@@ -313,8 +314,9 @@ async function applyPendingSignedGrants(reg, caseId) {
   }
 }
 
-// Throws an Error with code QUESTION_TOO_LONG, before anything is written,
-// when the delta question could not be shown whole.
+// Throws an Error with code QUESTION_TOO_LONG or QUESTION_NOT_PLAIN, before
+// anything is written, when the delta question could not be shown whole and
+// as written.
 function requestDelta(reg, caseId, env, deltas) {
   const rt = reg.caseRuntime;
   const store = new EnvelopeStore(reg.caseDir(caseId));
@@ -324,12 +326,22 @@ function requestDelta(reg, caseId, env, deltas) {
   }
   const facts = rt.ledger(caseId).view().facts;
   const text = deltaQuestionText(env, deltas, { facts });
-  const long = tooLong(text);
-  if (long) {
-    // Nothing is asked: the caller refuses the job (submit.js).
-    const err = new Error(`Envelope ${env.id} change refused: ${long}.`);
-    err.code = 'QUESTION_TOO_LONG';
+  // Nothing is asked when the owner could not be shown the change whole and
+  // as written: the caller refuses the job (submit.js).
+  const refuseQuestion = (code, why) => {
+    const err = new Error(`Envelope ${env.id} change refused: ${why}.`);
+    err.code = code;
     throw err;
+  };
+  const long = tooLong(text);
+  if (long) refuseQuestion('QUESTION_TOO_LONG', long);
+  // A delta card ends with the envelope's intent; one stored before the
+  // plain-line rule that does not pass it cannot be widened, only replaced.
+  const intentProblem = plainLineProblem(env.intent);
+  if (intentProblem) refuseQuestion('QUESTION_NOT_PLAIN', `the envelope's intent is not one plain line (${intentProblem}); request a new envelope`);
+  for (const d of deltas) {
+    const problem = d && (d.kind === 'recipient' || d.kind === 'channel') ? plainLineProblem(d.value) : null;
+    if (problem) refuseQuestion('QUESTION_NOT_PLAIN', `the ${d.kind} it adds is not one plain line (${problem})`);
   }
   const q = rt.createQuestion(caseId, {
     kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text, options: APPROVE_REJECT,

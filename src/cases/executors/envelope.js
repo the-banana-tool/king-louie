@@ -10,20 +10,21 @@ const {
 } = require('./util');
 const { normalizeRecipient, recipientChannel } = require('./normalize');
 const { gateLeaves } = require('../gates');
-const { HIDDEN_CLASS } = require('../hidden-chars');
+const { plainLineProblem, isPlainLine } = require('../hidden-chars');
 const { SEND_CHANNELS } = require('../contact-format');
 
-// The owner approves an envelope from a card of lines. Model-written text
-// (intent, rules, fact statements) must never be able to start a line of
-// its own or hide part of one: a request with a line-separating or hidden
-// character in it is refused, and text already stored is shown on one line.
-// Built from code points so no such character sits in this file: LF, VT,
-// FF, CR, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR, then hidden-chars.js.
-const LINE_BREAK_CLASS = [0x0a, 0x0b, 0x0c, 0x0d, 0x85, 0x2028, 0x2029].map((c) => String.fromCodePoint(c)).join('');
-const NOT_ONE_LINE = new RegExp(`[${LINE_BREAK_CLASS}${HIDDEN_CLASS}]`, 'u');
-const NOT_ONE_LINE_RUNS = new RegExp(`[${LINE_BREAK_CLASS}${HIDDEN_CLASS}]+`, 'gu');
-const isOneLine = (text) => !NOT_ONE_LINE.test(String(text ?? ''));
-const oneLine = (text) => String(text ?? '').replace(NOT_ONE_LINE_RUNS, ' ').trim();
+// The owner approves an envelope from a card of lines. Model- or
+// ledger-written text (intent, rules, recipients, fact statements, the case
+// title) must never be able to start a line of its own, real or wrapped, or
+// hide part of one. "One plain line" is defined once, in hidden-chars.js
+// (plainLineProblem). A request with text that is not one is refused; text
+// already stored that is not one is never flattened into the card: it is
+// replaced by HIDDEN_TEXT, so the owner sees that something is there.
+const HIDDEN_TEXT = '(text hidden: not one plain line)';
+const shown = (text) => (isPlainLine(text) ? text : HIDDEN_TEXT);
+// A host-validated field (an id, a date, a zone, a count): shown as it is
+// when plain, hidden like any other text when a file edit made it not so.
+const field = (value) => shown(String(value ?? ''));
 // What the owner is shown of an approval question. A question longer than
 // this is refused when it is asked, never cut (envelope-ops.js).
 const QUESTION_MAX_CHARS = 2000;
@@ -182,7 +183,7 @@ function validateEnvelopeRequest(body, {
   const errors = [];
   const intent = typeof b.intent === 'string' ? b.intent.trim() : '';
   if (!intent || intent.length > 500) errors.push('"intent" must be 1 to 500 characters');
-  if (!isOneLine(intent)) errors.push('"intent" must be one line of plain text: no line breaks or hidden characters');
+  if (intent && !isPlainLine(intent)) errors.push(`"intent" must be one plain line: ${plainLineProblem(intent)}`);
   if (b.executor !== undefined && b.executor !== entry.id) errors.push(`"executor" must be ${entry.id}`);
   const allow = Array.isArray(b.recipients?.allow) ? b.recipients.allow : null;
   if (!allow || !allow.length) errors.push('"recipients.allow" must list at least one address');
@@ -190,7 +191,7 @@ function validateEnvelopeRequest(body, {
   if (!factIds) errors.push('"facts" must be a list of fact ids');
   const rules = b.rules === undefined ? [] : (Array.isArray(b.rules) ? b.rules.map((r) => String(r).trim()).filter(Boolean) : null);
   if (!rules) errors.push('"rules" must be a list of strings');
-  else if (!rules.every(isOneLine)) errors.push('"rules" must each be one line of plain text: no line breaks or hidden characters');
+  else if (!rules.every(isPlainLine)) errors.push(`"rules" must each be one plain line: ${plainLineProblem(rules.find((r) => !isPlainLine(r)))}`);
   const caps = b.caps && typeof b.caps === 'object' ? b.caps : {};
   const usd = Number(caps.usd);
   const contacts = Number(caps.contacts);
@@ -220,7 +221,7 @@ function validateEnvelopeRequest(body, {
   for (const address of allow) {
     const n = normalizeRecipient(address, { channel, defaultCountryCode });
     if (!n.ok) errors.push(n.error);
-    else if (!isOneLine(n.value)) errors.push(`recipient "${oneLine(n.value)}" has a line break or a hidden character in it`);
+    else if (!isPlainLine(n.value)) errors.push(`recipient ${normalized.length + 1} is not one plain line: ${plainLineProblem(n.value)}`);
     else if (!normalized.includes(n.value)) normalized.push(n.value);
   }
   for (const id of factIds) {
@@ -271,32 +272,43 @@ function validateEnvelopeRequest(body, {
   return { ok: true, core, notBacked };
 }
 
-// The approval card, whole. The lines the host builds from validated
-// fields (caps, window, channels, recipients) come first; everything the
-// model wrote (fact statements, intent, rules) comes after them, each piece
-// on one line behind a host-written prefix, so no model text can precede or
-// imitate a host line.
+// The approval card, whole. Three parts, in this order:
+// 1. The lines the host builds from validated fields: the header, caps,
+//    window, channels, recipients and the ids of the facts.
+// 2. Under a host line that says so, the wording the model wrote or the
+//    ledger holds, one labelled line each: Intent, Rule N, Fact <id>, Not
+//    backed by a fact. The real `Intent:` is the first of them.
+// 3. The case title, last (the card head shows it too): it can be
+//    model-written, so it precedes no host line.
+// Every piece of part 2 and 3 is one plain line or is replaced by
+// HIDDEN_TEXT; a fact whose text is hidden is still listed by its id.
 function envelopeQuestionText(env, { facts = new Map(), caseTitle = '', notBacked = [] } = {}) {
-  const title = oneLine(caseTitle);
-  const recipients = (env.recipients?.allow || []).map(oneLine);
-  const factIds = env.facts || [];
+  const recipients = (env.recipients?.allow || []).map(shown);
+  const factIds = (env.facts || []).map(field);
   const lines = [
-    `Approve envelope ${oneLine(env.id)} for ${oneLine(env.executor)}${title ? ` in case "${title}"` : ''}?`,
+    `Approve envelope ${field(env.id)} for ${field(env.executor)}?`,
     `Caps: ${money(env.caps.usd)} total, ${env.caps.contacts} contacts, ${env.caps.attemptsPerContact} attempts per contact`,
-    `Window: ${oneLine(env.window.start)} to ${oneLine(env.window.end)} (${oneLine(env.window.tz)})`,
-    ...(Array.isArray(env.channels) ? [`Channel sends allowed: ${env.channels.map(oneLine).join(', ') || 'none'}`] : []),
+    `Window: ${field(env.window.start)} to ${field(env.window.end)} (${field(env.window.tz)})`,
+    ...(Array.isArray(env.channels) ? [`Channel sends allowed: ${env.channels.map(field).join(', ') || 'none'}`] : []),
     `Recipients (${recipients.length}): ${recipients.join(', ')}`,
-    `Facts it may disclose (${factIds.length}):`
+    `Facts it may disclose (${factIds.length}): ${factIds.join(', ') || 'none'}`,
+    'The wording below was written by the assistant or comes from the case ledger:',
+    `Intent: ${shown(env.intent)}`
   ];
-  if (!factIds.length) lines.push('- none');
-  for (const id of factIds) {
+  (env.rules || []).forEach((r, i) => lines.push(`Rule ${i + 1}: ${shown(r)}`));
+  (env.facts || []).forEach((id, i) => {
     const f = facts.get(id);
-    const value = f && f.value !== null && f.value !== undefined ? ` = ${valueText(f.value)}${f.unit ? ` ${f.unit}` : ''}` : '';
-    lines.push(`- ${oneLine(id)}: ${oneLine(f ? `${f.stmt}${value}` : '(missing)')}`);
+    if (!f) {
+      lines.push(`Fact ${factIds[i]}: (missing)`);
+      return;
+    }
+    const value = f.value !== null && f.value !== undefined ? ` = ${valueText(f.value)}${f.unit ? ` ${f.unit}` : ''}` : '';
+    lines.push(`Fact ${factIds[i]}: ${shown(`${f.stmt}${value}`)}`);
+  });
+  for (const n of notBacked) {
+    lines.push(`Not backed by a fact: ${isPlainLine(n.text) && isPlainLine(n.detail) ? `"${n.text}" (${n.detail})` : HIDDEN_TEXT}`);
   }
-  lines.push(`Intent: ${oneLine(env.intent)}`);
-  if ((env.rules || []).length) lines.push('Rules:', ...env.rules.map((r) => `- ${oneLine(r)}`));
-  if (notBacked.length) lines.push('Not backed by a fact:', ...notBacked.map((n) => `- "${oneLine(n.text)}" (${oneLine(n.detail)})`));
+  if (caseTitle) lines.push(`Case: ${shown(caseTitle)}`);
   return lines.join('\n');
 }
 
@@ -329,17 +341,20 @@ function renderSignedSummary(core, envelopeId) {
     return `${envelopeId} · ${core.executor}: ${core.intent} (${core.recipients.allow.length} recipients, ${money(core.caps.usd)}, ${core.window.start} to ${core.window.end})`;
   }
   const head = [
-    `${oneLine(envelopeId)} · ${oneLine(core.executor)}`,
-    `channel sends: ${core.channels.map(oneLine).join(', ') || 'none'}`,
+    `${field(envelopeId)} · ${field(core.executor)}`,
+    `channel sends: ${core.channels.map(field).join(', ') || 'none'}`,
     `${core.recipients.allow.length} recipients`,
     money(core.caps.usd),
-    `${oneLine(core.window.start)} to ${oneLine(core.window.end)}`
+    `${field(core.window.start)} to ${field(core.window.end)}`
   ].join(' · ');
   // Room for ': ' and at least the cut mark after the host-written part.
   if (Array.from(head).length > SUMMARY_MAX - 3) {
     throw new EnvelopeCoreError('the phone summary cannot show the channels, recipients, cap and window whole');
   }
-  return `${head}: ${oneLine(core.intent)}`;
+  // The summary is hashed and signed: an intent that is not one plain line
+  // is never signed in any form, flattened or hidden.
+  if (!isPlainLine(core.intent)) throw new EnvelopeCoreError(`the phone summary cannot carry the intent: ${plainLineProblem(core.intent)}`);
+  return `${head}: ${core.intent}`;
 }
 
 // The owner-facing line for one delta, built from its kind and value against
@@ -350,12 +365,13 @@ function deltaText(env, d, { facts = null } = {}) {
   const num = (v) => Number(v) || 0;
   switch (d?.kind) {
     case 'recipient':
-      return `adds recipient ${oneLine(d.value)}`;
+      return `adds recipient ${field(d.value)}`;
     case 'channel':
-      return `allows channel sends on ${oneLine(d.value)}`;
+      return `allows channel sends on ${field(d.value)}`;
     case 'fact': {
       const f = facts && typeof facts.get === 'function' ? facts.get(String(d.value)) : null;
-      return f ? `discloses ${oneLine(d.value)} "${oneLine(f.stmt)}"` : `discloses ${oneLine(d.value)}`;
+      if (!f) return `discloses ${field(d.value)}`;
+      return isPlainLine(f.stmt) ? `discloses ${field(d.value)} "${f.stmt}"` : `discloses ${field(d.value)} ${HIDDEN_TEXT}`;
     }
     case 'usd':
       return `raises usd cap from ${money(caps.usd)} to ${money(Math.max(num(caps.usd), num(d.value)))}`;
@@ -365,10 +381,10 @@ function deltaText(env, d, { facts = null } = {}) {
       return `raises attempts per contact from ${num(caps.attemptsPerContact)} to ${Math.max(num(caps.attemptsPerContact), num(d.value))}`;
     case 'window': {
       const end = String(env?.window?.end || '');
-      return `extends window end from ${oneLine(end)} to ${oneLine(String(d.value) > end ? d.value : end)}`;
+      return `extends window end from ${field(end)} to ${field(String(d.value) > end ? d.value : end)}`;
     }
     default:
-      return `unrecognised change "${oneLine(d?.kind)}" (it will not be applied)`;
+      return `unrecognised change "${field(d?.kind)}" (it will not be applied)`;
   }
 }
 
@@ -477,9 +493,9 @@ function applyDeltas(env, deltas, { questionId = null, factId = null, at = new D
 // The delta card, whole: the host-built change lines first, the intent last.
 function deltaQuestionText(env, deltas, { facts = null } = {}) {
   return [
-    `Envelope ${oneLine(env.id)} (${oneLine(env.executor)}) needs your approval for:`,
+    `Envelope ${field(env.id)} (${field(env.executor)}) needs your approval for:`,
     ...deltas.map((d) => `- ${deltaText(env, d, { facts })}`),
-    `Intent: ${oneLine(env.intent)}`
+    `Intent: ${shown(env.intent)}`
   ].join('\n');
 }
 
@@ -505,6 +521,7 @@ module.exports = {
   renderEnvelopeQuestion,
   envelopeQuestionText,
   deltaQuestionText,
+  HIDDEN_TEXT,
   QUESTION_MAX_CHARS,
   renderSignedSummary,
   envelopeFit,
