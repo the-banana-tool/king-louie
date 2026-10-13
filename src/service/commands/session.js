@@ -30,8 +30,8 @@ const STORE_MAX_BYTES = 64 * 1024 * 1024;
 // is read only if it is a regular file of a sane size (second security
 // review, finding 10): a link is not followed, and a pipe put there is
 // neither opened to wait for a writer nor read.
-function readStoreText(file, maxBytes) {
-  const refuse = (why) => new Error(`${file} ${why}; nothing was installed`);
+function readStoreText(file, maxBytes, nothing = 'nothing was installed') {
+  const refuse = (why) => new Error(`${file} ${why}; ${nothing}`);
   let st;
   try {
     st = fs.lstatSync(file);
@@ -82,10 +82,13 @@ function readStoreText(file, maxBytes) {
 // not hold together. This proves the id belongs to a key that whoever holds
 // this data dir's master key stored. It cannot prove more: the identity
 // lives only in the data dir, and no admin-owned file names it (the
-// service account holds the master key; owner ruling R-F5-17, deferred).
-function readNodeIdentity(dataDir, cipher, { maxBytes = STORE_MAX_BYTES } = {}) {
+// service account holds the master key). What an administrator vouched for
+// is the record in the config dir (owner ruling R-F5-17,
+// src/service/identity-record.js), which the caller compares this with.
+// `nothing`: how the caller says that it did nothing ("nothing was installed").
+function readNodeIdentity(dataDir, cipher, { maxBytes = STORE_MAX_BYTES, nothing = 'nothing was installed' } = {}) {
   const file = path.join(dataDir, 'chat-data.json');
-  const text = readStoreText(file, maxBytes);
+  const text = readStoreText(file, maxBytes, nothing);
   if (text === null) return null;
   let record;
   try {
@@ -93,13 +96,13 @@ function readNodeIdentity(dataDir, cipher, { maxBytes = STORE_MAX_BYTES } = {}) 
     record = store && store.mesh && store.mesh.identity;
   } catch {
     // Never the parser's own message: it quotes the text it could not parse.
-    throw new Error(`${file} is not valid JSON; nothing was installed`);
+    throw new Error(`${file} is not valid JSON; ${nothing}`);
   }
   if (!record || typeof record !== 'object' || typeof record.publicKey !== 'string' || !record.publicKey) return null;
   const { deriveNodeId } = require('../../mesh/node-identity');
   const { KEY_ENCRYPTION_MARKER } = require('../../mesh/mesh-identity');
   // The reasons never quote the record.
-  const refuse = (why) => new Error(`the node identity in ${dataDir} ${why}; nothing was installed`);
+  const refuse = (why) => new Error(`the node identity in ${dataDir} ${why}; ${nothing}`);
   let publicKey;
   let nodeId;
   try {
@@ -126,7 +129,32 @@ function readNodeIdentity(dataDir, cipher, { maxBytes = STORE_MAX_BYTES } = {}) 
     throw refuse('holds an unreadable private key');
   }
   if (!derived.equals(publicKey)) throw refuse('names a public key that is not its private key\'s');
-  return { nodeId };
+  return { nodeId, publicKey: publicKey.toString('hex') };
+}
+
+// The node identity of a data dir, for an administrator's command: the data
+// dir must be a real directory, the master key is resolved read-only with
+// the data dir's owner uid (R-F5-12: a key file its owner does not own is
+// refused, as "import --from" reads it; Windows has no uid, its key is
+// DPAPI-wrapped), and the identity is verified against it (readNodeIdentity).
+// Reads only. → { nodeId, publicKey, cipher }.
+function resolveNodeIdentity({ dataDir, platform = process.platform, deps = {}, nothing = 'nothing was installed' }) {
+  let dirStat;
+  try {
+    dirStat = fs.lstatSync(dataDir);
+  } catch (err) {
+    throw new Error(err.code === 'ENOENT' ? `${dataDir} does not exist: start the service once first` : `cannot check ${dataDir}: ${err.message}`);
+  }
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) throw new Error(`${dataDir} is not a directory (links are refused)`);
+  const ownerUid = deps.dataDirOwnerUid !== undefined ? deps.dataDirOwnerUid : (platform === 'win32' ? null : dirStat.uid);
+  const resolveKey = deps.resolveKey || ((uid) => require('../../platform/master-key').resolveMasterKeyReadOnly({ platform, dataDir, dataDirOwnerUid: uid }));
+  const resolved = resolveKey(ownerUid);
+  if (!resolved) throw new Error(`no master key for ${dataDir}: start the service once first`);
+  (deps.verifyKey || ((r) => require('../../platform/master-key').verifyKeyCheck({ dataDir, key: r.key, source: r.source, create: false })))(resolved);
+  const cipher = require('../../platform/cipher').createAesGcmCipher(resolved.key);
+  const nodeIdentity = readNodeIdentity(dataDir, cipher, { nothing });
+  if (!nodeIdentity) throw new Error(`no node identity in ${dataDir}: start the service once first`);
+  return { ...nodeIdentity, cipher };
 }
 
 async function readStdin(stdin) {
@@ -242,25 +270,20 @@ async function install({ flags, dataDir, io, deps }) {
   // form again, whoever resolved it. Before the question; nothing is written.
   if (c.platform === 'win32') S.assertSingleUserAccount(account, c.platform);
   const sessionUser = bareName(flags.user, c.platform);
-  let dirStat;
-  try {
-    dirStat = fs.lstatSync(dataDir);
-  } catch (err) {
-    throw new Error(err.code === 'ENOENT' ? `${dataDir} does not exist: start the service once first` : `cannot check ${dataDir}: ${err.message}`);
-  }
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) throw new Error(`${dataDir} is not a directory (links are refused)`);
   // R-F5-12: the service account controls every name in the data dir, so a
-  // key file there counts only when the data dir's owner owns it (as
-  // "import --from" reads it). Windows has no uid; its key is DPAPI-wrapped.
-  const ownerUid = deps.dataDirOwnerUid !== undefined ? deps.dataDirOwnerUid : (c.platform === 'win32' ? null : dirStat.uid);
-  const resolveKey = deps.resolveKey || ((uid) => require('../../platform/master-key').resolveMasterKeyReadOnly({ platform: c.platform, dataDir, dataDirOwnerUid: uid }));
-  const resolved = resolveKey(ownerUid);
-  if (!resolved) throw new Error(`no master key for ${dataDir}: start the service once first`);
-  (deps.verifyKey || ((r) => require('../../platform/master-key').verifyKeyCheck({ dataDir, key: r.key, source: r.source, create: false })))(resolved);
-  const cipher = require('../../platform/cipher').createAesGcmCipher(resolved.key);
-  const nodeIdentity = readNodeIdentity(dataDir, cipher);
-  if (!nodeIdentity) throw new Error(`no node identity in ${dataDir}: start the service once first`);
-  const { nodeId } = nodeIdentity;
+  // key file there counts only when the data dir's owner owns it, and the
+  // identity is verified against that key before its id is sealed.
+  const { nodeId, publicKey, cipher } = resolveNodeIdentity({ dataDir, platform: c.platform, deps });
+  // R-F5-17: and it must be the identity an administrator recorded
+  // ("king-louie-service identity record"). The identity above only proves
+  // that whoever holds this data dir's master key stored it, which the
+  // service account does. No record, another identity, or a record that
+  // cannot be trusted: refused before the question, with nothing written.
+  const recorded = require('../identity-record').checkNodeIdentityRecord({
+    configDir: c.configDir, dataDir, identity: { nodeId, publicKey }, platform: c.platform, serviceProbe: false,
+    ...(deps.adminUid === undefined ? {} : { adminUid: deps.adminUid }), ...(deps.identityRecord || {})
+  });
+  if (recorded.state !== 'match') throw new Error(`${recorded.problem}. Nothing was installed.`);
   // R-F5-10: who is installed is the recorded SID (uid off Windows), never
   // the name, and a file that cannot say so refuses the install. Checked with
   // the cipher, so "installed" means what the service itself would accept.
@@ -615,4 +638,4 @@ async function runSessionCommand({ sub, arg, flags = {}, dataDir, io, deps = {} 
   }
 }
 
-module.exports = { runSessionCommand, readNodeIdentity, SESSION_USAGE, STORE_MAX_BYTES };
+module.exports = { runSessionCommand, readNodeIdentity, resolveNodeIdentity, verifyWindowsConfigDir, SESSION_USAGE, STORE_MAX_BYTES };

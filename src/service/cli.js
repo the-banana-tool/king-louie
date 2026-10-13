@@ -25,6 +25,8 @@ const HELP = `Usage:
   king-louie-service device list|revoke <device-id>|apply [--yes] [--data-dir DIR]
   king-louie-service relay run|code <node-name>|nodes|remove-node <node-name>|qr [--data-dir DIR]
   king-louie-service frontdoor enroll-device|code <node-name> [--confirm]|nodes|remove-node <node-name>|rotate-tls-key [--data-dir DIR]
+  king-louie-service identity record [--replace] [--data-dir DIR] [--dry-run] [--yes]   (admin: record this node's identity)
+  king-louie-service identity show [--data-dir DIR]
   king-louie-service session [--session-file PATH]              (the helper, as the logged-in user)
   king-louie-service session install --user NAME [--data-dir DIR] [--dry-run] [--yes]
   king-louie-service session uninstall --user NAME [--data-dir DIR] [--dry-run] [--yes]
@@ -43,11 +45,11 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
 
 const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file']);
 // Flags that must never carry a value, whichever form produced it.
-const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm']);
+const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'replace']);
 
 // The commands whose [y/N] question --yes answers (and that HELP documents
 // it for). The scoping is checked in main(), before any command runs.
-const YES_COMMANDS = [['desktop', 'pair'], ['device', 'apply'], ['session', 'install'], ['session', 'uninstall']];
+const YES_COMMANDS = [['desktop', 'pair'], ['device', 'apply'], ['identity', 'record'], ['session', 'install'], ['session', 'uninstall']];
 const YES_COMMANDS_TEXT = YES_COMMANDS.map(([c, s]) => `"${c} ${s}"`).join(', ').replace(/, ([^,]*)$/, ' and $1');
 
 function parseArgs(argv) {
@@ -288,6 +290,12 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
     io.stderr.write('Flag "--confirm" is only valid for "frontdoor code".\n');
     return 2;
   }
+  // R-F5-17: --replace overwrites the administrator's record of the node
+  // identity; no other command has anything it could mean.
+  if (flags.replace && !(command === 'identity' && sub === 'record')) {
+    io.stderr.write('Flag "--replace" is only valid for "identity record".\n');
+    return 2;
+  }
   if (flags.sessionFile !== undefined && command !== 'session') {
     io.stderr.write('Flag "--session-file" is only valid for "session".\n');
     return 2;
@@ -423,6 +431,11 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       case 'uninstall': {
         const { runInstallCommand } = require('./installers');
         return await runInstallCommand(command, { ...flags, dataDir }, io);
+      }
+
+      case 'identity': {
+        const { runIdentityCommand } = require('./commands/identity');
+        return await runIdentityCommand({ sub, flags, dataDir, io });
       }
 
       case 'session': {

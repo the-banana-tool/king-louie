@@ -11,6 +11,7 @@ const S = require('../src/gui/session-secret');
 const { writeGuiStatus } = require('../src/gui/status');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { deriveNodeId } = require('../src/mesh/node-identity');
+const { recordIdentity, IDENTITY_RECORD_TEST_OPTIONS } = require('./helpers/identity-record');
 
 const POSIX = process.platform !== 'win32';
 const UID = POSIX ? process.getuid() : 0;
@@ -32,7 +33,9 @@ function storedIdentity(keys = identity, { key = KEY, plaintext = false } = {}) 
 }
 const writeIdentity = (dataDir, record) => fs.writeFileSync(path.join(dataDir, 'chat-data.json'), JSON.stringify({ mesh: { identity: record } }));
 
-function setup({ withIdentity = true } = {}) {
+// withRecord: an administrator has recorded the data dir's identity (R-F5-17),
+// which every install needs; false for the tests of what happens without.
+function setup({ withIdentity = true, withRecord = withIdentity } = {}) {
   // Native realpath: session-secret.js requires the config dir to be its own
   // native realpath, and a Windows CI TEMP is an 8.3 short path.
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cli-session-')));
@@ -44,6 +47,7 @@ function setup({ withIdentity = true } = {}) {
   fs.mkdirSync(configDir, { mode: 0o755 });
   if (POSIX) { fs.chmodSync(base, 0o755); fs.chmodSync(configDir, 0o755); }
   if (withIdentity) writeIdentity(dataDir, storedIdentity());
+  if (withRecord) recordIdentity(configDir, identity);
   return { base, dataDir, configDir, ipcDir };
 }
 
@@ -90,6 +94,8 @@ function deps(s, extra = {}) {
     entryPath: '/opt/kl/bin/king-louie-service.js',
     nodePath: '/usr/bin/node',
     adminUid: UID,
+    // R-F5-17: the record is read without PowerShell (see the helper).
+    identityRecord: IDENTITY_RECORD_TEST_OPTIONS,
     ...extra
   };
 }
@@ -1009,7 +1015,7 @@ describe('the CLI', () => {
     for (const argv of [['session', '--yes'], ['session', 'status', '--yes'], ['session', 'probe', '--yes'], ['session', '_write-autostart', '/x', '--yes'], ['session', '_remove-autostart', '/x', '--yes']]) {
       const t4 = io();
       assert.equal(await main(argv, t4.io), 2, argv.join(' '));
-      assert.match(t4.err.join(''), /"--yes" is only valid for "desktop pair", "device apply", "session install" and "session uninstall"/);
+      assert.match(t4.err.join(''), /"--yes" is only valid for "desktop pair", "device apply", "identity record", "session install" and "session uninstall"/);
     }
     const help = io();
     await main(['help'], help.io);
@@ -1178,5 +1184,80 @@ describe('R-F5-12: session install checks the key file\'s owner and verifies the
     const s4 = setup({ withIdentity: false });
     writeIdentity(s4.dataDir, { publicKey: identity.publicKey.toString('hex'), privateKey: null, keyEncryption: 'cipher-v1', encryptedPrivateKey: createAesGcmCipher(KEY).encryptString('abcd') });
     assert.match(await refusedInstall(s4), /the node identity in .* holds an unreadable private key/);
+  });
+});
+
+// R-F5-17 (owner ruling, built 2026-10-13): the identity `session install`
+// seals must be the one an administrator recorded in the config dir
+// (`king-louie-service identity record`). The data dir alone proves only
+// that whoever holds its master key stored the key pair, and the service
+// account holds that key.
+describe('R-F5-17: session install needs the administrator\'s record of the node identity', () => {
+  const R = require('../src/service/identity-record');
+  const never = { confirm: () => { throw new Error('must not ask'); }, execute: () => { throw new Error('must not run'); } };
+  const install = (s, t, extra = {}) => runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: deps(s, { ...never, ...extra }) });
+
+  it('no record: refused before the question, with the command to run; nothing is written', async () => {
+    const s = setup({ withRecord: false });
+    const before = tree(s.base);
+    const t = io();
+    assert.equal(await install(s, t), 1);
+    assert.match(t.err.join(''), /no administrator record of this node's identity/);
+    assert.ok(t.err.join('').includes(`king-louie-service identity record --data-dir ${s.dataDir}`));
+    assert.match(t.err.join(''), /Nothing was installed\./);
+    assert.deepEqual(tree(s.base), before);
+    // --dry-run is refused the same way: it would print a plan no install can carry out.
+    const t2 = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: t2.io, deps: deps(s, never) }), 1);
+    assert.equal(t2.out.join(''), '');
+  });
+
+  it('the data dir holds another identity than the one recorded: refused, naming both and the remedy', async () => {
+    // An account that can write the data dir and read the master key planted a key pair of its own.
+    const s = setup();
+    const planted = nodeKeys();
+    writeIdentity(s.dataDir, storedIdentity(planted));
+    const before = tree(s.base);
+    const t = io();
+    assert.equal(await install(s, t), 1);
+    const text = t.err.join('');
+    assert.ok(text.includes(planted.nodeId) && text.includes(identity.nodeId));
+    assert.ok(text.includes(`king-louie-service identity record --replace --data-dir ${s.dataDir}`));
+    assert.match(text, /restore it from a backup/);
+    assert.deepEqual(tree(s.base), before);
+  });
+
+  it('a record that cannot be trusted or read: refused (fail closed)', async () => {
+    const s = setup();
+    fs.writeFileSync(R.recordPath(s.configDir), '{ broken');
+    const t = io();
+    assert.equal(await install(s, t), 1);
+    assert.match(t.err.join(''), /is not valid JSON, so it does not say which identity an administrator recorded/);
+    // Owners that say the record is not the administrators' (Windows), or cannot be read.
+    for (const inspectOwners of [
+      () => ({ me: 'x', entries: [{ owner: 'S-1-5-19', link: false }, { owner: 'S-1-5-32-544', link: false }, { owner: 'S-1-5-32-544', link: false }] }),
+      () => { throw new Error('powershell failed'); }
+    ]) {
+      const s2 = setup();
+      const t2 = io();
+      assert.equal(await install(s2, t2, { platform: 'win32', resolveSessionUser: () => ({ ...account('alice'), sid: 'S-1-5-21-1-2-3-1001' }), identityRecord: { serviceProbe: false, inspectOwners } }), 1);
+      assert.match(t2.err.join(''), /cannot be trusted|could not be checked/);
+      assert.equal(fs.existsSync(S.canonicalPath(s2.configDir)), false);
+    }
+  });
+
+  it('POSIX: a record the service account owns is not the administrator\'s', { skip: !POSIX }, async () => {
+    const s = setup();
+    const t = io();
+    // The record is this uid's; the administrator is another.
+    assert.equal(await install(s, t, { identityRecord: { adminUid: UID + 1 } }), 1);
+    assert.match(t.err.join(''), /is not owned by the administrator/);
+  });
+
+  it('a matching record: installs as before', async () => {
+    const s = setup();
+    const t = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: deps(s) }), 0);
+    assert.equal(canonical(s.configDir).node_id, identity.nodeId);
   });
 });
