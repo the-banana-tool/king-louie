@@ -111,3 +111,52 @@ describe('HistoryStore messages', () => {
     assert.deepStrictEqual(seqs(store, 'c1'), [1]);
   });
 });
+
+describe('HistoryStore appendMessages (stage H4, imports)', () => {
+  it('gives dense seqs after the existing messages, chunks each message and emits once', () => {
+    const store = memory();
+    store.createChat({ id: 'c1', title: 'One', updatedAt: '2026-09-01T00:00:00.000Z', messages: [msg('m1', 'user', 'first words here')] });
+    const seen = [];
+    store.onAppend((chatId, seq) => seen.push([chatId, seq]));
+    const out = store.appendMessages('c1', [
+      msg('m2', 'assistant', 'the culvert under the north fence', { timestamp: '2026-09-29T10:01:00.000Z' }),
+      msg('m3', 'user', 'the side gate code', { timestamp: '2026-09-29T10:02:00.000Z' }),
+      msg('m4', 'assistant', 'parking permits', { timestamp: '2026-09-29T10:03:00.000Z' })
+    ]);
+    assert.deepStrictEqual(out, { count: 3, lastSeq: 4 });
+    assert.deepStrictEqual(seqs(store, 'c1'), [1, 2, 3, 4]);
+    for (const id of ['m2', 'm3', 'm4']) assert.ok(store.chunksOfMessage(id).length >= 1, `${id} is chunked`);
+    assert.strictEqual(store.searchText('culvert', { chatIds: ['c1'] }).length, 1);
+    assert.deepStrictEqual(seen, [['c1', 4]]);
+    assert.strictEqual(store.getChat('c1', { messages: false }).updatedAt, '2026-09-29T10:03:00.000Z');
+  });
+
+  it('takes an updatedAt, and an empty list writes and emits nothing', () => {
+    const store = memory();
+    store.createChat({ id: 'c1', title: 'One', updatedAt: 'before' });
+    const seen = [];
+    store.onAppend((chatId, seq) => seen.push([chatId, seq]));
+    assert.deepStrictEqual(store.appendMessages('c1', []), { count: 0, lastSeq: 0 });
+    assert.deepStrictEqual(seen, []);
+    assert.strictEqual(store.getChat('c1', { messages: false }).updatedAt, 'before');
+    store.appendMessages('c1', [msg('m1', 'user', 'a')], { updatedAt: 'given' });
+    assert.strictEqual(store.getChat('c1', { messages: false }).updatedAt, 'given');
+  });
+
+  it('is one transaction: an invalid message in the batch stores none of it', () => {
+    const store = memory();
+    store.createChat({ id: 'c1', title: 'One', updatedAt: 'before' });
+    const seen = [];
+    store.onAppend((chatId, seq) => seen.push([chatId, seq]));
+    assert.throws(() => store.appendMessages('c1', [msg('m1', 'user', 'a'), { text: 'no sender' }]), /sender/);
+    assert.deepStrictEqual(seqs(store, 'c1'), []);
+    assert.deepStrictEqual(seen, []);
+    assert.throws(() => store.appendMessages('c1', 'nope'), /list/);
+  });
+
+  it('returns null for an unknown chat', () => {
+    const store = memory();
+    assert.strictEqual(store.appendMessages('missing', [msg('m1', 'user', 'x')]), null);
+    assert.strictEqual(store.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n, 0);
+  });
+});

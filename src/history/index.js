@@ -15,6 +15,7 @@ const { HISTORY_DEFAULTS, mergeHistorySettings } = require('./settings');
 const { formatExcerpts, formatRecalledBlock } = require('./excerpts');
 const { InvalidMessageError, DERIVED_CHAT_KEYS } = require('./rows');
 const { SCOPES, narrowest, resolveScope, OPEN_POLICY, CLOSED_POLICY } = require('./scope');
+const importChats = require('./import-chats');
 
 module.exports = {
   HistoryStore,
@@ -44,5 +45,6 @@ module.exports = {
   narrowest,
   resolveScope,
   OPEN_POLICY,
-  CLOSED_POLICY
+  CLOSED_POLICY,
+  ...importChats
 };

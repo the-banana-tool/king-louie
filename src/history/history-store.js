@@ -326,6 +326,27 @@ class HistoryStore {
     return out;
   }
 
+  // Several messages in one transaction, through the same insert path as
+  // appendMessage (each is chunked and gets its full-text rows with it): an
+  // import's batch (stage H4). One append emission, with the last seq. Null
+  // for an unknown chat; a message that is refused stores none of the batch.
+  appendMessages(chatId, messages, { updatedAt } = {}) {
+    const id = normalizeId(chatId);
+    if (!id) return null;
+    if (!Array.isArray(messages)) throw new rows.InvalidMessageError('A chat\'s messages must be a list.');
+    const out = this.transaction((db) => {
+      const row = this._chatRow(id);
+      if (!row) return null;
+      let last = null;
+      for (const message of messages) last = this._insertMessage(db, id, message, { fallbackTimestamp: updatedAt });
+      if (!last) return { count: 0, lastSeq: 0 };
+      this._updateChatRow(id, { ...rows.rowToChat(row), updatedAt: updatedAt || last.stored.timestamp });
+      return { count: messages.length, lastSeq: last.seq };
+    });
+    if (out && out.count) this._emitAppend(id, out.lastSeq);
+    return out;
+  }
+
   // Removing messages is only ever "from seq n onward", so seq stays dense
   // from 1 (spec §4.1).
   truncateFrom(chatId, seq) {

@@ -15,7 +15,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 const { downgradeToVersion1 } = require('./helpers/history-fixture');
 const { createCore } = require('../src/core');
-const { HistoryStore } = require('../src/history');
+const { HistoryStore, beginChatImport, appendChatImport, finishChatImport } = require('../src/history');
 const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
@@ -215,6 +215,28 @@ describe('createCore and the history store', () => {
       const result = await core.context.getHistoryBackfill().done;
       assert.deepStrictEqual(result, { indexed: 2, finished: true });
       assert.strictEqual(store.searchText('Lakeside', {}).length, 1);
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('stage H4: start() removes the half chat an import cut off by a crash left, and keeps a finished import', async () => {
+    const { dataDir, deps } = makeDeps();
+    const seed = HistoryStore.open(path.join(dataDir, 'history.sqlite'));
+    const half = beginChatImport({ store: seed, kind: 'markdown-transcript', sourceHash: 'a'.repeat(64), chat: { id: 'md-half', title: 'Half' } });
+    appendChatImport({ store: seed, importId: half.importId, messages: [msg('h1', 'user', 'half of the Lakeside lot notes')] });
+    const whole = beginChatImport({ store: seed, kind: 'markdown-transcript', sourceHash: 'b'.repeat(64), chat: { id: 'md-whole', title: 'Whole' } });
+    appendChatImport({ store: seed, importId: whole.importId, messages: [msg('w1', 'user', 'all of the Lakeside lot notes')] });
+    finishChatImport({ store: seed, importId: whole.importId });
+    seed.close();
+    const core = createCore(deps);
+    const store = core.context.getHistoryStore();
+    assert.deepStrictEqual(store.listChats().map((c) => c.id).sort(), ['md-half', 'md-whole'], 'nothing is removed while the core is built');
+    try {
+      await core.start();
+      assert.deepStrictEqual(store.listChats().map((c) => c.id), ['md-whole']);
+      assert.deepStrictEqual(store.unfinishedImports(), []);
+      assert.strictEqual(store.searchText('half', {}).length, 0);
     } finally {
       await core.shutdown();
     }

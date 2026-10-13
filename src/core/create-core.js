@@ -72,6 +72,7 @@ const {
 const { createScopePolicy } = require('../history/scope-policy');
 const { bridgeOriginFor } = require('../history/bridge-origin');
 const { startChunkBackfill } = require('../history/backfill');
+const { sweepUnfinishedImports } = require('../history/import-chats');
 const { createRecallReranker } = require('../history/reranker');
 const { JevReranker } = require('../history/jev-reranker');
 const TypesafeProvider = require('../providers/typesafe-provider');
@@ -3185,6 +3186,15 @@ function createCore(deps = {}) {
       }));
       meshContext.remoteControl.on('taskCompleted', (info) => ui.send('mesh:taskCompleted', info));
       meshContext.remoteControl.on('taskFailed', (info) => ui.send('mesh:taskFailed', info));
+    }
+    // Recall stage H4: an import a crash cut off left a half chat; it goes
+    // before anything indexes or embeds it.
+    if (historyStatus.available) {
+      try {
+        sweepUnfinishedImports(historyStore);
+      } catch (err) {
+        historyLog.warn(`Removing unfinished imports failed: ${err.message}`);
+      }
     }
     // Recall stage H2: messages stored before the index existed are chunked
     // in the background; search misses them until then. A read-only or
