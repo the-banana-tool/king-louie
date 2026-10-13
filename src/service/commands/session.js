@@ -167,7 +167,9 @@ function common(dataDir, deps, io) {
     nodePath: deps.nodePath || process.execPath,
     execute: deps.execute || ((steps, opts) => require('../../session/autostart').executeAutostartSteps(steps, opts)),
     isAdmin: deps.isAdmin || (() => require('./admin-check').isAdmin({ platform })),
-    resolveUser: deps.resolveSessionUser || ((name) => require('../../gui/session-secret').resolveSessionUser(name, { platform }))
+    // options.singleUser: false for uninstall, which must still resolve
+    // what an older install was made for.
+    resolveUser: deps.resolveSessionUser || ((name, options = {}) => require('../../gui/session-secret').resolveSessionUser(name, { platform, ...options }))
   };
 }
 
@@ -234,6 +236,11 @@ async function install({ flags, dataDir, io, deps }) {
   if (refusedUnasked({ flags, io, c, verb: 'install' })) return 2;
   // Everything from here to the question only reads.
   const account = c.resolveUser(flags.user);
+  // Third security review, finding 4: one user account, never a group or a
+  // built-in identity (the helper's file is made readable by this SID). The
+  // resolver refuses by what the lookup says the name is; this is the SID's
+  // form again, whoever resolved it. Before the question; nothing is written.
+  if (c.platform === 'win32') S.assertSingleUserAccount(account, c.platform);
   const sessionUser = bareName(flags.user, c.platform);
   let dirStat;
   try {
@@ -372,7 +379,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
   let account;
   let gone = false;
   try {
-    account = c.resolveUser(flags.user);
+    account = c.resolveUser(flags.user, { singleUser: false });
   } catch (err) {
     if (!isGuiError(err) || !['user_not_found', 'home_missing'].includes(err.code)) throw err;
     if (!recordedForName) throw err;

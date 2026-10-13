@@ -404,12 +404,77 @@ describe('resolveSessionUser', () => {
 
   it('Windows: the SID through PowerShell with the name in an environment variable', () => {
     let seen;
-    const execFile = (file, argv, options) => { seen = { file, argv, env: options.env }; return 'S-1-5-21-1-2-3-1001\r\n'; };
+    const execFile = (file, argv, options) => { seen = { file, argv, env: options.env }; return 'S-1-5-21-1-2-3-1001\r\n1\r\n'; };
     const r = S.resolveSessionUser('alice', { platform: 'win32', execFile, env: { SystemRoot: 'C:\\Windows' } });
     assert.equal(r.sid, 'S-1-5-21-1-2-3-1001');
     assert.ok(seen.file.endsWith('powershell.exe'));
     assert.ok(!seen.argv.join(' ').includes('alice'), 'the name is never interpolated');
     assert.equal(seen.env.KL_SESSION_USER, 'alice');
+  });
+
+  // Third security review, finding 4: "session install --user Everyone"
+  // would have made the helper's file readable by everyone.
+  describe('third review finding 4: only one user account', () => {
+    it('classifyWindowsSid: account SIDs, and everything that is a group or a built-in identity', () => {
+      for (const sid of ['S-1-5-21-1-2-3-1001', 'S-1-5-21-3623811015-3361044348-30300820-500', 'S-1-12-1-1-2-3-4']) {
+        assert.deepEqual(S.classifyWindowsSid(sid), { account: true }, sid);
+      }
+      const refused = {
+        'S-1-1-0': /Everyone/, 'S-1-5-11': /Authenticated Users/, 'S-1-5-18': /SYSTEM/, 'S-1-5-19': /LOCAL SERVICE/, 'S-1-5-20': /NETWORK SERVICE/,
+        'S-1-5-4': /Interactive/, 'S-1-5-32-544': /built-in group/, 'S-1-5-32-545': /built-in group/, 'S-1-5-32-555': /built-in group/,
+        'S-1-2-0': /well-known/, 'S-1-2-1': /well-known/, 'S-1-3-0': /well-known/, 'S-1-3-4': /well-known/,
+        'S-1-5-21-1-2-3-513': /domain group/, 'S-1-5-21-1-2-3-512': /domain group/, 'S-1-5-21-1-2-3-519': /domain group/,
+        'S-1-5-21-1-2-3': /not the SID of a user account/, 'S-1-5-21-1-2-3-4-5': /not the SID of a user account/,
+        'S-1-5-80-1-2-3-4-5': /not the SID of a user account/, 'S-1-15-2-1': /not the SID of a user account/, 'S-1-16-12288': /not the SID of a user account/,
+        'S-1-5-6': /not the SID of a user account/, 'S-1-5-2': /not the SID of a user account/, 'S-1-0-0': /not the SID of a user account/,
+        'not-a-sid': /not a SID/
+      };
+      for (const [sid, what] of Object.entries(refused)) {
+        const c = S.classifyWindowsSid(sid);
+        assert.equal(c.account, false, sid);
+        assert.match(c.what, what, sid);
+      }
+      assert.deepEqual(S.classifyWindowsSid(null), { account: false, what: 'not a SID' });
+    });
+
+    it('Windows: a name that resolves to a group, an alias or a well-known SID is refused by the lookup\'s own type and by the SID', () => {
+      const lookup = (sid, use) => () => `${sid}\r\n${use === undefined ? '' : use}\r\n`;
+      const resolve = (sid, use, extra = {}) => S.resolveSessionUser('someone', { platform: 'win32', execFile: lookup(sid, use), env: { SystemRoot: 'C:\\Windows' }, ...extra });
+      assert.equal(resolve('S-1-5-21-1-2-3-1001', 1).sid, 'S-1-5-21-1-2-3-1001');
+      for (const [sid, use] of [['S-1-1-0', 5], ['S-1-5-11', 5], ['S-1-5-18', 5], ['S-1-5-32-544', 4], ['S-1-5-4', 5], ['S-1-5-21-1-2-3-513', 2]]) {
+        assert.throws(() => resolve(sid, use), (e) => e.code === 'invalid_params' && /must name one user account/.test(e.message), sid);
+      }
+      // An account-shaped SID that the lookup calls a group, an alias, a computer, or nothing at all.
+      for (const use of [2, 4, 5, 6, 9, undefined]) {
+        assert.throws(() => resolve('S-1-5-21-1-2-3-1105', use), (e) => e.code === 'invalid_params' && /must name one user account/.test(e.message), String(use));
+      }
+      assert.throws(() => resolve('S-1-5-21-1-2-3-1105', 2), /is a group/);
+      // A well-known SID that a lookup calls a user is refused by its form.
+      assert.throws(() => resolve('S-1-5-18', 1), /SYSTEM/);
+      // Uninstall resolves what an older install was made for.
+      assert.equal(resolve('S-1-1-0', 5, { singleUser: false }).sid, 'S-1-1-0');
+    });
+
+    it('Windows: the lookup is one encoded script, framework types only, and no Security cmdlet', () => {
+      let seen;
+      S.resolveSessionUser('alice', { platform: 'win32', execFile: (file, argv) => { seen = argv; return 'S-1-5-21-1-2-3-1001\n1\n'; }, env: { SystemRoot: 'C:\\Windows' } });
+      assert.equal(seen[seen.length - 2], '-EncodedCommand');
+      const script = Buffer.from(seen[seen.length - 1], 'base64').toString('utf16le');
+      assert.match(script, /LookupAccountName/);
+      assert.ok(!/Get-Acl|Set-Acl|Get-LocalUser|Get-LocalGroup|ConvertFrom-SecureString/i.test(script));
+      assert.ok(!script.includes('alice'));
+    });
+
+    it('POSIX: root is refused, and a name that is only a group does not resolve', () => {
+      const root = (file, argv) => (file === '/usr/bin/id' ? '0\n' : 'root:x:0:0:root:/root:/bin/sh\n');
+      assert.throws(() => S.resolveSessionUser('root', { platform: 'linux', execFile: root, exists: () => true }), (e) => e.code === 'invalid_params' && /not root/.test(e.message));
+      assert.equal(S.resolveSessionUser('root', { platform: 'linux', execFile: root, exists: () => true, singleUser: false }).uid, 0, 'uninstall still resolves it');
+      // id -u fails for a group's name: "no such user".
+      const groupOnly = (file, argv) => { if (file === '/usr/bin/id') throw Object.assign(new Error('id: wheel: no such user'), { status: 1 }); return 'wheel:x:10:\n'; };
+      assert.equal(code(() => S.resolveSessionUser('wheel', { platform: 'linux', execFile: groupOnly, exists: () => true })), 'user_not_found');
+      assert.throws(() => S.assertSingleUserAccount({ uid: 0 }, 'darwin'), /not root/);
+      S.assertSingleUserAccount({ uid: 501 }, 'darwin');
+    });
   });
 
   it('unknown user, missing home and a hostile name', () => {

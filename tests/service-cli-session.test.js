@@ -315,6 +315,40 @@ describe('R-F5-10: the second-user check compares identities and fails closed', 
   // domain account on Windows, a deleted and re-created user elsewhere.
   const sameNameOtherPerson = POSIX ? 'alice' : 'CORP\\alice';
 
+  // Third security review, finding 4.
+  it('install for a group or a built-in identity is refused before the question, nothing written', { skip: POSIX }, async () => {
+    for (const sid of ['S-1-1-0', 'S-1-5-11', 'S-1-5-18', 'S-1-5-32-545', 'S-1-5-4', 'S-1-5-21-1-2-3-513']) {
+      const s = setup();
+      const before = tree(s.base);
+      const t = io();
+      const d = deps(s, { resolveSessionUser: (name) => ({ ...account(name), sid }), confirm: async () => { throw new Error('must not ask'); } });
+      assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'Everyone' }, dataDir: s.dataDir, io: t.io, deps: d }), 1, sid);
+      assert.match(t.err.join(''), /^invalid_params: --user must name one user account: /);
+      assert.ok(t.err.join('').includes(sid));
+      assert.deepEqual(tree(s.base), before);
+      assert.equal(d.executed.length, 0);
+      // --yes and --dry-run are refused the same way.
+      assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'Everyone', yes: true }, dataDir: s.dataDir, io: io().io, deps: d }), 1);
+      assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'Everyone', dryRun: true }, dataDir: s.dataDir, io: io().io, deps: d }), 1);
+      assert.deepEqual(tree(s.base), before);
+    }
+  });
+
+  it('the real resolver refuses before the question: nothing is asked or written', async () => {
+    const s = setup();
+    const before = tree(s.base);
+    const t = io();
+    const execFile = POSIX ? ((file) => (file === '/usr/bin/id' ? '0\n' : 'root:x:0:0::/root:/bin/sh\n')) : (() => 'S-1-5-32-545\r\n4\r\n');
+    const d = deps(s, {
+      resolveSessionUser: (name, options = {}) => S.resolveSessionUser(name, { platform: process.platform, execFile, exists: () => true, ...options }),
+      confirm: async () => { throw new Error('must not ask'); }
+    });
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: POSIX ? 'root' : 'Users' }, dataDir: s.dataDir, io: t.io, deps: d }), 1);
+    assert.match(t.err.join(''), /^invalid_params: --user must name one user account/);
+    assert.deepEqual(tree(s.base), before);
+    assert.equal(d.executed.length, 0);
+  });
+
   it('the same name with another SID (uid) is another user: refused, nothing written', async () => {
     const s = setup();
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) }), 0);

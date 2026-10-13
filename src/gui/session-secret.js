@@ -480,7 +480,83 @@ function sessionIdentityExists({ sid = null, uid = null }, { platform = process.
   }
 }
 
-function resolveSessionUser(name, { platform = process.platform, execFile = (f, a, o) => execFileSync(f, a, { encoding: 'utf8', windowsHide: true, ...o }), env = process.env, exists = fs.existsSync } = {}) {
+// What kind of SID this is, by its form alone (third security review,
+// finding 4). The helper's file is made readable by the SID it is installed
+// for, so that SID must be one person's account, never a group or a
+// built-in identity. An account SID is a machine's or a domain's
+// (S-1-5-21-a-b-c-RID) or an Entra ID one (S-1-12-1-a-b-c-d); among the
+// first, the RIDs every domain gives its own groups are refused as well.
+// `{ account: true }` or `{ account: false, what }`.
+const WELL_KNOWN_SIDS = Object.freeze({
+  'S-1-1-0': 'Everyone',
+  'S-1-5-4': 'Interactive (everyone logged on at the desktop)',
+  'S-1-5-7': 'Anonymous',
+  'S-1-5-11': 'Authenticated Users',
+  'S-1-5-18': 'SYSTEM',
+  'S-1-5-19': 'LOCAL SERVICE',
+  'S-1-5-20': 'NETWORK SERVICE'
+});
+const DOMAIN_GROUP_RIDS = Object.freeze([498, 553, 571, 572]);
+function classifyWindowsSid(sid) {
+  if (typeof sid !== 'string' || !SID_RE.test(sid)) return { account: false, what: 'not a SID' };
+  const s = sid.toUpperCase();
+  if (WELL_KNOWN_SIDS[s]) return { account: false, what: WELL_KNOWN_SIDS[s] };
+  const parts = s.split('-').slice(2).map(Number);
+  if (parts[0] === 5 && parts[1] === 32) return { account: false, what: 'a built-in group (BUILTIN)' };
+  if (parts[0] === 2 || parts[0] === 3) return { account: false, what: 'a well-known identity, not an account' };
+  if (parts[0] === 5 && parts[1] === 21 && parts.length === 6) {
+    const rid = parts[5];
+    if ((rid >= 512 && rid <= 527) || DOMAIN_GROUP_RIDS.includes(rid)) return { account: false, what: 'a domain group' };
+    return { account: true };
+  }
+  if (parts[0] === 12 && parts[1] === 1 && parts.length === 6) return { account: true };
+  return { account: false, what: 'not the SID of a user account' };
+}
+
+// SID_NAME_USE, as LookupAccountName reports it. Only SidTypeUser is one
+// person's account.
+const SID_TYPE_USER = 1;
+const SID_TYPE_NAMES = Object.freeze({ 2: 'a group', 3: 'a domain', 4: 'a local group (alias)', 5: 'a well-known group', 6: 'a deleted account', 9: 'a computer account' });
+
+// The session helper is installed for one person. Throws unless the account
+// is a single user account: on Windows by the SID's form and, when the
+// lookup said what the name is (`nameUse`), by that; elsewhere root is
+// refused (a name that is only a group never resolves: id -u fails).
+function assertSingleUserAccount(account, platform = process.platform, { nameUse } = {}) {
+  if (platform === 'win32') {
+    const kind = classifyWindowsSid(account.sid);
+    if (!kind.account) throw new GuiError('invalid_params', `--user must name one user account: ${SID_RE.test(String(account.sid)) ? account.sid : 'what it resolved to'} is ${kind.what}`);
+    if (nameUse !== undefined && nameUse !== SID_TYPE_USER) {
+      throw new GuiError('invalid_params', `--user must name one user account: ${account.sid} is ${SID_TYPE_NAMES[nameUse] || 'not a user account'}`);
+    }
+    return;
+  }
+  if (account.uid === 0) throw new GuiError('invalid_params', '--user must name one user account, not root (uid 0)');
+}
+
+// The name's SID and what kind of name it is (SID_NAME_USE), from the one
+// lookup: LookupAccountName through P/Invoke, framework types only. Two
+// lines: the SID, the type.
+const WINDOWS_LOOKUP_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "$ProgressPreference = 'SilentlyContinue'",
+  "$sig = '[DllImport(\"advapi32.dll\", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool LookupAccountName(string systemName, string accountName, byte[] sid, ref int cbSid, System.Text.StringBuilder domain, ref int cchDomain, out int use);'",
+  'Add-Type -Namespace KingLouie -Name AccountLookup -MemberDefinition $sig',
+  '$cb = 0; $cch = 0; $use = 0',
+  '[void][KingLouie.AccountLookup]::LookupAccountName($null, $env:KL_SESSION_USER, $null, [ref]$cb, $null, [ref]$cch, [ref]$use)',
+  'if ($cb -le 0) { exit 3 }',
+  '$sid = New-Object byte[] $cb',
+  '$domain = New-Object System.Text.StringBuilder ([Math]::Max($cch, 1))',
+  'if (-not [KingLouie.AccountLookup]::LookupAccountName($null, $env:KL_SESSION_USER, $sid, [ref]$cb, $domain, [ref]$cch, [ref]$use)) { exit 3 }',
+  '[Console]::Out.WriteLine((New-Object System.Security.Principal.SecurityIdentifier($sid, 0)).Value)',
+  '[Console]::Out.WriteLine($use)'
+].join('\n');
+
+// singleUser (the default; "session install"): anything that is not one
+// user account is refused here, before anything is asked or written.
+// "session uninstall" passes false: what an older install was made for must
+// still resolve to be removed.
+function resolveSessionUser(name, { platform = process.platform, execFile = (f, a, o) => execFileSync(f, a, { encoding: 'utf8', windowsHide: true, ...o }), env = process.env, exists = fs.existsSync, singleUser = true } = {}) {
   if (typeof name !== 'string' || !name || name.startsWith('-') || name.length > 104 || /[\u0000-\u001f"]/.test(name)) {
     throw new GuiError('invalid_params', `not a user name: ${JSON.stringify(name)}`);
   }
@@ -492,15 +568,20 @@ function resolveSessionUser(name, { platform = process.platform, execFile = (f, 
     }
   };
   if (platform === 'win32') {
-    const script = '(New-Object System.Security.Principal.NTAccount($env:KL_SESSION_USER)).Translate([System.Security.Principal.SecurityIdentifier]).Value';
-    const sid = run(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...env, KL_SESSION_USER: name } }).trim();
+    const encoded = Buffer.from(WINDOWS_LOOKUP_SCRIPT, 'utf16le').toString('base64');
+    const lines = run(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { env: { ...env, KL_SESSION_USER: name }, stdio: ['ignore', 'pipe', 'ignore'] }).trim().split(/\r?\n/);
+    const sid = String(lines[0] || '').trim();
     if (!SID_RE.test(sid)) throw new GuiError('user_not_found', name);
-    return { user: name, uid: null, gid: null, home: null, sid };
+    const account = { user: name, uid: null, gid: null, home: null, sid };
+    // No type is no evidence that this is a user (NaN is not SidTypeUser).
+    if (singleUser) assertSingleUserAccount(account, platform, { nameUse: /^\d+$/.test(String(lines[1] || '').trim()) ? Number(lines[1]) : NaN });
+    return account;
   }
   if (!POSIX_USER_RE.test(name)) throw new GuiError('invalid_params', `not a user name: ${JSON.stringify(name)}`);
   const uid = Number(run('/usr/bin/id', ['-u', name]).trim());
   const gid = Number(run('/usr/bin/id', ['-g', name]).trim());
   if (!Number.isInteger(uid) || !Number.isInteger(gid)) throw new GuiError('user_not_found', name);
+  if (singleUser) assertSingleUserAccount({ uid }, platform);
   let home;
   if (platform === 'darwin') {
     const m = /NFSHomeDirectory:\s*(\S.*)$/m.exec(run('/usr/bin/dscl', ['.', '-read', `/Users/${name}`, 'NFSHomeDirectory']));
@@ -516,5 +597,6 @@ module.exports = {
   mintSessionSecret, canonicalPath, writeCanonical, readCanonical, canonicalMtime, inspectCanonical, sameSessionIdentity,
   userCopyPath, writeUserCopy, readUserCopy, removeUserCopy, checkUserCopyTrust, windowsUserOwnerArgs,
   windowsUsersDirAclArgs, windowsUsersDirRevokeArgs, removalKind, removeEntry, sessionIdentityExists,
-  endpointPath, sessionIpcDir, assertSafeComponents, windowsUserAclArgs, resolveSessionUser
+  endpointPath, sessionIpcDir, assertSafeComponents, windowsUserAclArgs, resolveSessionUser,
+  classifyWindowsSid, assertSingleUserAccount
 };
