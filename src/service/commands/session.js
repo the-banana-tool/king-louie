@@ -191,13 +191,20 @@ async function install({ flags, dataDir, io, deps }) {
   io.stdout.write(`  grants: a helper that runs as ${sessionUser} in ${sessionUser}'s desktop session. Through it this node's service can launch the apps in gui.apps, capture their windows and, under a lease signed on the owner's phone, click and type in them.\n`);
   io.stdout.write(`  starts at every login of ${sessionUser}: ${loginStartText({ platform: c.platform, account, sessionUser })}\n`);
   io.stdout.write(`  writes: ${S.canonicalPath(c.configDir)} (the service's secret) and ${sessionFile} (${sessionUser}'s copy)${c.platform === 'win32' ? '' : `; creates ${ipcDir}`}\n`);
-  if (rotates) io.stdout.write(`  replaces the secret installed for ${installed.user}; a running helper reconnects with the new one\n`);
+  if (rotates) io.stdout.write(`  replaces the secret installed for ${installed.user}; the endpoint stays, so a running service and helper pick the new secret up without a restart\n`);
   if (!(await consented({ flags, c, question: `Install the session helper for ${sessionUser}? [y/N] ` }))) {
     io.stderr.write('Not installing without confirmation. Nothing was written.\n');
     return 1;
   }
 
-  const { secret, endpointId } = S.mintSessionSecret();
+  // A rotation keeps the endpoint and changes only the secret (security
+  // review finding 6): the running service listens on the endpoint it
+  // started with, so a new endpoint id would leave the helper with nowhere
+  // to reconnect to until the service restarted. Only for the same identity
+  // and a file that verified above (R-F5-10); anything else gets a new one.
+  const minted = S.mintSessionSecret();
+  const secret = minted.secret;
+  const endpointId = rotates && installed.endpointId ? installed.endpointId : minted.endpointId;
   const endpoint = S.endpointPath({ platform: c.platform, endpointId, ipcDir });
   let svc = null;
   if (c.platform !== 'win32') {
@@ -222,7 +229,9 @@ async function install({ flags, dataDir, io, deps }) {
   await c.execute(steps, { dryRun: false, io, entryPath: c.entryPath, nodePath: c.nodePath });
   io.stdout.write(`Session helper installed for ${sessionUser} (node ${nodeId}).\n`);
   io.stdout.write(`  service secret: ${S.canonicalPath(c.configDir)}\n  user copy:      ${sessionFile}\n  endpoint:       ${endpoint}\n`);
-  io.stdout.write(rotates ? 'The secret was rotated; the running service drops the old connection and the helper reconnects.\n' : 'Restart the King Louie service so it starts waiting for the helper.\n');
+  io.stdout.write(rotates
+    ? 'The secret was rotated and the endpoint kept. A running service drops the helper\'s connection at its next check (about 10 seconds) and takes only the new secret; the helper reads its new file when it reconnects (its retries are 1 to 30 seconds apart). no restart is needed. A service that was not running, or that started with desktop apps off, needs a start as usual.\n'
+    : 'Restart the King Louie service so it starts waiting for the helper.\n');
   if (c.platform === 'darwin') {
     io.stdout.write(`At the next login macOS asks for Screen Recording and Accessibility for ${c.nodePath}. Those permissions cover every script ${sessionUser} runs with that node binary.\n`);
   }

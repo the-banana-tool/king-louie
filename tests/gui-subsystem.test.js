@@ -292,6 +292,46 @@ describe('createGuiSubsystem', () => {
     assert.equal(readGuiStatus({ dataDir }).available, false);
   });
 
+  // Security review finding 6 (the test the reviewer listed as missing): a
+  // rotation against a running channel.
+  it('finding 6: after a rotation that keeps the endpoint, the running service drops the old helper and takes the new secret, with no restart', async () => {
+    const { base, configDir, dataDir } = dirs();
+    const oldSecret = install(configDir);
+    const first = S.readCanonical({ configDir, cipher, adminUid: UID, geteuid: () => UID });
+    const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, deps: { endpoint: endpoint(base) } });
+    await gui.start();
+    cleanups.push(() => gui.stop());
+    const backend = { probe: async () => ({}), foreground: async () => null };
+    const connect = (secret) => connectToService({
+      endpoint: gui.channel.endpoint, secret, nodeId: identity.nodeId, user: 'alice', platform: process.platform, helperVersion: 'test',
+      probeReport: { capabilities: ['gui.launch'], probes: [], displays: [], limits: [], locked: false }, handleOp: createOpHandler(backend)
+    });
+    let ready = once(gui.channel, 'ready');
+    const helper = await connect(oldSecret);
+    cleanups.push(() => helper.close());
+    await ready;
+    assert.equal(gui.capability().available, true);
+
+    // "session install" again for the same user: a new secret, the same endpoint.
+    const { secret: newSecret } = S.mintSessionSecret();
+    await new Promise((r) => setTimeout(r, 20)); // a later mtime, also on a coarse filesystem clock
+    S.writeCanonical({ configDir, cipher, secret: newSecret, endpointId: first.endpointId, nodeId: identity.nodeId, sessionUser: 'alice' });
+    assert.notEqual(S.canonicalMtime(configDir), first.mtimeMs);
+
+    // The service notices at its next check of the connection and drops it.
+    const closed = once(gui.channel, 'closed');
+    gui.channel._tick(gui.channel.current);
+    await closed;
+    assert.equal(gui.capability().available, false);
+    // The old secret no longer gets in; the new one does, on the same endpoint.
+    await assert.rejects(connect(oldSecret));
+    ready = once(gui.channel, 'ready');
+    const again = await connect(newSecret);
+    cleanups.push(() => again.close());
+    await ready;
+    assert.equal(gui.capability().available, true);
+  });
+
   it('R-F5-7: isJobOpen fails closed', () => {
     // JobManager#getJob answers null for a job it does not have.
     const jobManager = { getJob: (id) => (['job-run', 'job-done'].includes(id) ? { job_id: id } : null), isTerminal: (id) => id === 'job-done' };

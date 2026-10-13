@@ -213,7 +213,8 @@ function inspectCanonical({ configDir, platform = process.platform, cipher = nul
       return invalid(err instanceof GuiError ? 'is malformed or holds no valid secret' : 'does not decrypt under this data dir\'s master key');
     }
   }
-  return { state: 'installed', file, user: raw.session_user, sid, uid };
+  // endpointId: only ever a well-formed one (a rotation reuses it).
+  return { state: 'installed', file, user: raw.session_user, sid, uid, endpointId: ENDPOINT_RE.test(String(raw.endpoint_id)) ? raw.endpoint_id : null };
 }
 
 // The same person: the same SID on Windows, the same uid elsewhere.

@@ -124,10 +124,21 @@ describe('session install', () => {
     assert.match(t.out.join(''), /installed for alice/);
     if (POSIX) assert.equal(fs.statSync(s.ipcDir).mode & 0o777, 0o711);
 
-    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    // A second run rotates the secret and keeps the endpoint (security review
+    // finding 6): the running service listens on the endpoint it started
+    // with, so a new one would leave the helper nowhere to reconnect to.
+    const t2 = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t2.io, deps: d }), 0);
     const second = canonical(s.configDir);
-    assert.notEqual(second.endpoint_id, first.endpoint_id);
+    assert.equal(second.endpoint_id, first.endpoint_id);
     assert.notEqual(cipher.decryptString(second.secret), cipher.decryptString(first.secret));
+    const copy2 = JSON.parse(fs.readFileSync(copyFile, 'utf8'));
+    assert.equal(copy2.endpoint, copy.endpoint);
+    assert.equal(copy2.secret, cipher.decryptString(second.secret));
+    assert.match(t2.out.join(''), /The secret was rotated and the endpoint kept/);
+    assert.match(t2.out.join(''), /no restart is needed/);
+    assert.doesNotMatch(t.out.join(''), /rotated/, 'a first install says to restart the service instead');
+    assert.match(t.out.join(''), /Restart the King Louie service/);
   });
 
   it('R-F5-2 (owner question 2): refuses a second session user until the first is uninstalled', async () => {
@@ -316,7 +327,8 @@ describe('R-F5-10: the second-user check compares identities and fails closed', 
     const first = canonical(s.configDir);
     assert.equal(POSIX ? first.session_uid : first.session_sid, POSIX ? UID : account('alice').sid, 'the identity is recorded');
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: POSIX ? 'alice' : 'CORP\\alice' }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
-    assert.notEqual(canonical(s.configDir).endpoint_id, first.endpoint_id);
+    assert.equal(canonical(s.configDir).endpoint_id, first.endpoint_id, 'a rotation keeps the endpoint (finding 6)');
+    assert.notEqual(canonical(s.configDir).secret, first.secret);
   });
 
   // Each damages an installed helper file in a way that leaves "who is
@@ -382,6 +394,28 @@ describe('R-F5-10: the second-user check compares identities and fails closed', 
     assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: sameNameOtherPerson }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
     assert.deepEqual(canonical(s.configDir), before, 'alice (by SID/uid) is still installed');
     assert.match(t.out.join(''), /stays: it is installed for "alice"/);
+  });
+});
+
+describe('security review finding 6: a rotation keeps the endpoint only for the same, verified install', () => {
+  it('after an uninstall the next install gets a new endpoint', async () => {
+    const s = setup();
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
+    const first = canonical(s.configDir);
+    await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
+    assert.notEqual(canonical(s.configDir).endpoint_id, first.endpoint_id);
+  });
+
+  it('--dry-run and a declined rotation leave the secret and the endpoint as they were', async () => {
+    const s = setup();
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s) });
+    const before = tree(s.base);
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: io().io, deps: deps(s) }), 0);
+    const t = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: deps(s, { confirm: async () => false }) }), 1);
+    assert.match(t.out.join(''), /replaces the secret installed for alice; the endpoint stays/);
+    assert.deepEqual(tree(s.base), before);
   });
 });
 
