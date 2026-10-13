@@ -705,7 +705,10 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
   start or sweep finds it by `externalRef` or resubmits it with the same
   idempotency key; after `maxPollErrors` unconfirmed tries it is `unreachable`,
   its contacts still counted. Cancelling it asks the executor by `externalRef`
-  and cancels what it took. The sweep fetches executor statuses before it
+  and cancels what it took. A job that ends with its contacts still counted
+  (`unreachable`, or cancelled when the executor had it or could not be
+  asked) is recorded as sent, once: the envelope's `payloads` and `usage`
+  and the case's `contactsPerDay`. The sweep fetches executor statuses before it
   takes the case lock and applies them inside it, each result once, and never
   over a newer poll.
 - `external-agent` facts are written only by `Executor.results`;

@@ -503,6 +503,11 @@ and moves its step to `done`/`failed`. An adapter throw sets `stale: true`, `err
 becomes `unreachable`, `material.unreachableJobs` increments, **`stale` is cleared** so C2's executor-change
 trigger compares the entry, and a journal `envelope` line is written. Throws never leave `refreshCase`.
 
+A job that ends with its daily-cap reservation kept because it may have been sent (a never-confirmed submit
+that becomes `unreachable`; a cancel of a `submitting` job the executor had taken or could not be asked
+about; a browser failure after the click) is recorded as sent, once (`contactsCharged`): the envelope's
+`payloads` and `usage.contacts`/`attempts`, and the case's `contactsPerDay`.
+
 **Turn-start hook** `caseRuntime.addTurnStartHook('executors', fn)`, `fn({ caseId, meta, ownerMessage,
 turnId, source })`: apply pending signed grants; copy background output; reconcile `submitting` jobs (`GET
 /jobs?externalRef=<caseId>/<jobId>`: found → `commitSubmit`, else `failed: interrupted`); `syncPlan`;

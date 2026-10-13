@@ -581,6 +581,17 @@ function recordSend(reg, caseId, caseDir, job, after, { at, chargeContacts }) {
   }
 }
 
+// A job that ends with its daily-cap reservation kept may have been sent,
+// so it is recorded as sent (M-b): the cap, the envelope and the case's
+// contactsPerDay then agree. `job` is the job as just re-read from disk,
+// still open; contactsCharged is written ahead so the charge runs once.
+function recordKeptSend(reg, caseId, caseDir, store, job, after, at) {
+  const contactsCharged = job.contactsCharged === true;
+  job.contactsCharged = true;
+  writeAhead(store, job, ['contactsCharged']);
+  recordSend(reg, caseId, caseDir, job, after, { at, chargeContacts: !contactsCharged });
+}
+
 // A submit whose answer cannot be committed: the job fails, nothing is
 // charged, and the executor is asked to drop the job it accepted.
 // `keepReservation`: the contacts may already have been reached (a browser
@@ -738,6 +749,7 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
   // outcome fetched before this cancel sees the job it names is already
   // cancelled and does not send a second cancel (reviewer minor M-a).
   if (cancelledAs) job.externalId = cancelledAs;
+  if (keepReservation && job.state === 'submitting') recordKeptSend(reg, caseId, caseDir, store, job, after, reg.now().toISOString());
   job.state = 'cancelled';
   job.reason = reason;
   job.lastChange = reg.now().toISOString();
@@ -892,9 +904,11 @@ async function holdSubmitting(reg, caseId, job, reason) {
   const max = reg.settings().maxPollErrors;
   if (fresh.submitErrors >= max) {
     // Bounded like a poll (residual N2): unreachable, terminal. The contacts
-    // stay counted (it may have been sent); finishJob drops its wake-up and
-    // fails its plan step, and it no longer blocks a duplicate signature.
+    // stay counted (it may have been sent) and the send is recorded;
+    // finishJob drops its wake-up and fails its plan step, and it no longer
+    // blocks a duplicate signature.
     const after = newAfter();
+    recordKeptSend(reg, caseId, reg.caseDir(caseId), store, fresh, after, now.toISOString());
     fresh.state = 'unreachable';
     fresh.nextPollAt = null;
     fresh.lastChange = now.toISOString();

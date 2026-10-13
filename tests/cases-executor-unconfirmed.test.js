@@ -230,8 +230,10 @@ describe('unconfirmed jobs: cancel, bound, prefetch reuse and stale costs', () =
     assert.match(journalText(s), /job-0001 on phone-agent is unreachable/);
     assert.deepStrictEqual(s.reg.liveState({ caseId: s.meta.id }), [], 'no longer blocks a duplicate');
     server.knobs.status5xx = false;
+    // M-b: the unreachable job counts as sent (2 attempts of the envelope's
+    // 2), so a second submit is not a duplicate but needs the owner.
     const again = await s.submit();
-    assert.strictEqual(again.ok, true, again.error);
+    assert.deepStrictEqual([again.ok, again.needsApproval, again.deltas], [false, true, ['raises attempts per contact from 2 to 4']]);
   });
 
   it('N3: one prefetched failure counts once when two due wake-ups cover the job', async () => {
@@ -261,5 +263,62 @@ describe('unconfirmed jobs: cancel, bound, prefetch reuse and stale costs', () =
     await s.reg.pollWakeup(s.meta.id, dueWakeup(s), { prefetched });
     assert.strictEqual(spent(s, 'usd'), 1.5);
     assert.doesNotMatch(journalText(s), /below the/);
+  });
+});
+
+// ---- C3 follow-up M-b: a kept reservation is a recorded send ----
+// Wherever a job ends with its daily-cap reservation kept (it may have been
+// sent), the envelope's usage and payload record and the case's
+// contactsPerDay count it too, once.
+
+describe('M-b: a job that keeps its reservation is recorded as sent', () => {
+  const jobsLib = require('../src/cases/executors/jobs');
+  const { EnvelopeStore } = require('../src/cases/executors/envelope');
+  const record = (s) => {
+    const env = new EnvelopeStore(s.meta.dir).get('env-01');
+    return [env.usage?.contacts || [], env.usage?.attempts || {}, (env.payloads || []).map((p) => p.jobId), spent(s, 'contactsPerDay')];
+  };
+  const SENT = [['+15550100'], { '+15550100': 2 }, ['job-0001'], 1];
+
+  it('never confirmed, then unreachable: the envelope and the case count the contact', async () => {
+    const s = await setup({ executors: { maxPollErrors: 2 } });
+    server.knobs.status5xx = true;
+    await s.submit();
+    for (let i = 0; i < 2; i += 1) await s.rt.sweep(s.meta.id, s.later());
+    const job = s.reg.jobs(s.meta.id).get('job-0001');
+    assert.deepStrictEqual([job.state, job.contactsCharged], ['unreachable', true]);
+    assert.strictEqual(s.reg.globalRemaining('phone-agent'), 4, 'the daily cap counts it');
+    assert.deepStrictEqual(record(s), SENT, 'so do the envelope and the case');
+  });
+
+  it('cancelled after the executor took it: counted once', async () => {
+    const s = await setup();
+    server.knobs.failAfterWrite = 503;
+    await s.submit();
+    const r = await jobsLib.cancelJob(s.reg, s.meta.id, 'job-0001', 'cancelled by the owner');
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(s.reg.globalRemaining('phone-agent'), 4);
+    assert.deepStrictEqual(record(s), SENT);
+  });
+
+  it('cancelled while the executor could not be asked: counted once', async () => {
+    const s = await setup();
+    server.knobs.failAfterWrite = 503;
+    await s.submit();
+    server.knobs.failNextStatus = 503;
+    const r = await jobsLib.cancelJob(s.reg, s.meta.id, 'job-0001', 'case paused');
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(s.reg.globalRemaining('phone-agent'), 4);
+    assert.deepStrictEqual(record(s), SENT);
+  });
+
+  it('a cancel that frees the reservation records nothing', async () => {
+    const s = await setup();
+    server.knobs.failNextStatus = 502;
+    await s.submit();
+    const r = await jobsLib.cancelJob(s.reg, s.meta.id, 'job-0001', 'cancelled by the owner');
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(s.reg.globalRemaining('phone-agent'), 5, 'the executor never had it');
+    assert.deepStrictEqual(record(s), [[], {}, [], 0]);
   });
 });
