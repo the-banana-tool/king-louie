@@ -72,6 +72,22 @@ describe('renderer: the recall line names the scope', () => {
   });
 });
 
+describe('renderer: an excerpt this chat may no longer read', () => {
+  it('a hidden excerpt is one fixed sentence set as text, and none of its fields is read', () => {
+    const text = block('const RECALL_EXCERPT_HIDDEN_TEXT', '\nfunction renderRecallLine(');
+    const { RECALL_EXCERPT_HIDDEN_TEXT } = new Function(`${text}; return { RECALL_EXCERPT_HIDDEN_TEXT };`)();
+    assert.strictEqual(RECALL_EXCERPT_HIDDEN_TEXT, 'An excerpt from another chat is no longer available.');
+    const line = block('function renderRecallLine(', '\n}\n');
+    const hidden = line.slice(line.indexOf('excerpt.hidden === true'), line.indexOf('continue;'));
+    assert.ok(hidden.length > 0, 'the hidden branch comes before the header and text are read');
+    assert.match(hidden, /item\.textContent = RECALL_EXCERPT_HIDDEN_TEXT;/);
+    assert.match(hidden, /recall-excerpt-hidden/);
+    assert.doesNotMatch(hidden, /excerpt\.(header|text|chatId|chatTitle)/);
+    assert.ok(line.indexOf('continue;') < line.indexOf('excerpt.header'), 'before the header is read');
+    assert.doesNotMatch(line, NO_HTML);
+  });
+});
+
 describe('renderer: the chat menu sets what a chat recalls from', () => {
   const texts = () => block('const RECALL_PIN_TEXTS', '\nfunction placeContextMenu(');
   const load = () => new Function(`${texts()}; return { recallPinText, recallLinkRefusedText, recallScopeItemText };`)();

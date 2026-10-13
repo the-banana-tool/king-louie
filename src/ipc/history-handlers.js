@@ -210,7 +210,16 @@ function registerHistoryHandlers(ipcMain, context = {}) {
     if (typeof chatId !== 'string' || !chatId || !Number.isInteger(seq) || seq < 1) {
       return { ok: false, error: 'chatId and a message number are required.' };
     }
-    return { ok: true, untrustedText: true, excerpts: excerptsForMessage({ store: store(), chatId, seq }).map(view) };
+    // What the reply was given, but another chat's excerpt only while this
+    // chat may still read that chat (the scope as it is now: the policy,
+    // the links and the stored scope). One that has left the scope (it got
+    // a case, it was unlinked) comes back as { hidden: true }, with no
+    // text, header or chat id. Built the cautious way (stage H4 review,
+    // finding 4); the owner may rule that a reply's own record still shows.
+    const readable = new Set(scopeOf(chatId).chatIds);
+    const excerpts = excerptsForMessage({ store: store(), chatId, seq })
+      .map((e) => (e.chatId === chatId || readable.has(e.chatId) ? view(e) : { hidden: true }));
+    return { ok: true, untrustedText: true, excerpts };
   });
 
   handle(IPC.HISTORY_SEARCH, async ({ chatId, query, limit }) => {

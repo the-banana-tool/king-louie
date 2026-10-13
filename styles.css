@@ -1145,6 +1145,11 @@ body {
   border-left: 2px solid var(--accent);
 }
 
+.recall-excerpt-hidden {
+  font-style: italic;
+  opacity: 0.7;
+}
+
 .recall-excerpt-text {
   white-space: pre-wrap;
   word-break: break-word;

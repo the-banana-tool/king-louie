@@ -8735,6 +8735,10 @@ function recallLineText(context) {
   return `recalled ${count} ${count === 1 ? 'excerpt' : 'excerpts'} · about ${formatCompactTokens(recalled)} tokens · from ${formatCompactTokens(full)} tokens of history · ${scopeWord ? `${scopeWord} · ` : ''}${recallVia(context)}`;
 }
 
+// An excerpt of another chat that this chat may no longer read (the host
+// sends { hidden: true } and none of its text).
+const RECALL_EXCERPT_HIDDEN_TEXT = 'An excerpt from another chat is no longer available.';
+
 function renderRecallLine(messageContent, context, { chatId, seq } = {}) {
   const line = document.createElement('div');
   line.className = 'message-recall-line';
@@ -8765,6 +8769,12 @@ function renderRecallLine(messageContent, context, { chatId, seq } = {}) {
       for (const excerpt of result.excerpts || []) {
         const item = document.createElement('div');
         item.className = 'recall-excerpt';
+        if (excerpt && excerpt.hidden === true) {
+          item.classList.add('recall-excerpt-hidden');
+          item.textContent = RECALL_EXCERPT_HIDDEN_TEXT;
+          drawer.appendChild(item);
+          continue;
+        }
         // An excerpt of another chat (its header names the chat, stage H4).
         if (typeof excerpt.header === 'string' && excerpt.header.startsWith('[chat "')) {
           item.classList.add('recall-excerpt-other-chat');
