@@ -21,13 +21,34 @@ const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const validTime = (v) => typeof v === 'string' && !Number.isNaN(Date.parse(v));
 const truncate = (text, max) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
+// The file's text, or null when it is over maxFileBytes: the size is read
+// from the open file, so a file swapped after a caller's own check is still
+// held to it. No limit given reads any size (LongHaul).
+function readText(filePath, maxFileBytes) {
+  const limit = Number.isFinite(maxFileBytes) && maxFileBytes >= 0 ? maxFileBytes : Infinity;
+  if (limit === Infinity) return fs.readFileSync(filePath, 'utf8');
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    if (fs.fstatSync(fd).size > limit) return null;
+    return fs.readFileSync(fd, 'utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 // The file is one chat whose messages carry a sender. An unknown sender is
 // still ours (parse keeps it as an unmapped status message), so at least one
-// stored sender is enough to claim the file.
-function readChat(filePath) {
+// stored sender is enough to claim the file. This is the one place the file
+// is read and parsed: `load` gives the result to a caller that then passes
+// it back to parse or preview as `loaded`.
+function readChat(filePath, { maxFileBytes } = {}) {
   if (!/\.json$/i.test(filePath)) return null;
   let data;
-  try { data = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch { return null; }
+  try {
+    const text = readText(filePath, maxFileBytes);
+    if (text === null) return null;
+    data = JSON.parse(text);
+  } catch { return null; }
   if (!isObject(data) || !Array.isArray(data.messages) || data.messages.length === 0) return null;
   if (!data.messages.every((m) => isObject(m) && typeof m.sender === 'string')) return null;
   if (!data.messages.some((m) => SENDERS.includes(m.sender))) return null;
@@ -44,12 +65,27 @@ function keepAttachments(list, keys) {
   return out.length ? out : undefined;
 }
 
-async function detect(filePath) {
-  try { return readChat(filePath) !== null; } catch { return false; }
+// The export as read, or null when the file is not one. Never throws.
+function load(filePath, options) {
+  try { return readChat(filePath, options); } catch { return null; }
 }
 
-async function parse(filePath) {
-  const data = readChat(filePath);
+async function detect(filePath, options) {
+  return load(filePath, options) !== null;
+}
+
+// Whether the export is of a case chat (owner ruling R-H4-2): the chat
+// object in the file has a caseId. Any value but an empty one counts, so a
+// caseId that is not a string still marks the chat.
+function exportHasCase(data) {
+  if (!isObject(data)) return false;
+  const { caseId } = data;
+  return caseId !== undefined && caseId !== null && caseId !== '' && caseId !== false;
+}
+
+// `loaded`: what `load` returned for this file, so it is not read again.
+async function parse(filePath, { loaded, maxFileBytes } = {}) {
+  const data = isObject(loaded) ? loaded : readChat(filePath, { maxFileBytes });
   if (!data) {
     const err = new Error(`${path.basename(filePath)} is not a King Louie chat export`);
     err.code = 'NOT_KING_LOUIE_EXPORT';
@@ -123,8 +159,8 @@ async function parse(filePath) {
   return { chat, messages, compactions, stats };
 }
 
-async function preview(filePath) {
-  const { chat, messages } = await parse(filePath);
+async function preview(filePath, options) {
+  const { chat, messages } = await parse(filePath, options);
   return {
     title: chat.title,
     turns: messages.filter((m) => m.sender === 'user').length,
@@ -135,4 +171,4 @@ async function preview(filePath) {
   };
 }
 
-module.exports = { kind: KIND, version: VERSION, detect, preview, parse };
+module.exports = { kind: KIND, version: VERSION, detect, load, exportHasCase, preview, parse };

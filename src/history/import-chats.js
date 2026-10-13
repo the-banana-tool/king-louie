@@ -22,7 +22,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { IMPORTERS, detectImporter } = require('./importers');
+const { IMPORTERS, claimImporter } = require('./importers');
 const { visibleToolParams, isUnindexedTool } = require('./chunker');
 const { createLogger } = require('../logging');
 
@@ -40,6 +40,14 @@ const ID_BASE_MAX_CHARS = 160;
 const TITLE_MAX_CHARS = 200;
 const DEFAULT_TITLE = 'Imported chat';
 const DEFAULT_BATCH = 500;
+// The largest file an import reads, checked once before any importer opens
+// it, for every format (the Markdown importer keeps its own lower limit).
+// The largest real session seen is 37 MB; 128 MB leaves three times that
+// and still parses in memory (a JSON export is read whole).
+const MAX_IMPORT_BYTES = 128 * 1024 * 1024;
+// The longest line of a JSONL session. One line is one record; a record this
+// long is refused instead of read to its end.
+const MAX_IMPORT_LINE_CHARS = 32 * 1024 * 1024;
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const validTime = (v) => typeof v === 'string' && v.length <= 64 && !Number.isNaN(Date.parse(v));
@@ -67,30 +75,43 @@ function isSubagentSession(filePath) {
   return /\.jsonl$/i.test(filePath) && path.resolve(filePath).split(/[\\/]/).includes('subagents');
 }
 
-async function importerFor(filePath) {
-  const importer = await detectImporter(filePath);
-  if (!importer && isSubagentSession(filePath)) {
-    const claudeCode = IMPORTERS.find((candidate) => candidate.kind === 'claude-code-jsonl');
-    if (claudeCode) await claudeCode.parse(filePath);
+const megabytes = (bytes) => (bytes / (1024 * 1024)).toFixed(1);
+
+// The one size check, before the file is hashed or any importer opens it.
+// The messages name no path. A limit that is not a number is the default.
+async function checkImportFile(filePath, maxFileBytes) {
+  const limit = typeof maxFileBytes === 'number' && Number.isFinite(maxFileBytes) && maxFileBytes >= 0 ? maxFileBytes : MAX_IMPORT_BYTES;
+  const stat = await fs.promises.stat(filePath);
+  if (!stat.isFile()) throw fail('IMPORT_NOT_A_FILE', 'This is not a file, so it cannot be imported.');
+  if (stat.size > limit) {
+    throw fail('IMPORT_TOO_LARGE', `This file is ${megabytes(stat.size)} MB; an import is at most ${megabytes(limit)} MB.`);
   }
-  if (!importer) throw fail('IMPORT_UNKNOWN_FORMAT', 'This file is not a Claude Code session, a Markdown transcript or a King Louie chat export.');
-  return importer;
+  return limit;
 }
 
-// Whether a King Louie export is of a case chat (owner ruling R-H4-2): the
-// chat object in the file has a caseId. Only that it has one is kept, never
-// the id. Any value but an empty one counts, so a caseId that is not a
-// string still marks the chat.
-function exportHasCase(filePath) {
-  let data;
-  try {
-    data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return false;
+// What every step of one import passes its importer: the limits, and what
+// the importer read while claiming the file (so it is not read again).
+async function openImport(filePath, { pattern, maxBytes, maxFileBytes, maxLineChars } = {}) {
+  const fileLimit = await checkImportFile(filePath, maxFileBytes);
+  const limits = {
+    maxBytes,
+    maxFileBytes: fileLimit,
+    maxLineChars: typeof maxLineChars === 'number' && Number.isFinite(maxLineChars) && maxLineChars > 0 ? maxLineChars : MAX_IMPORT_LINE_CHARS
+  };
+  const sourceHash = await hashFile(filePath);
+  const claimed = await claimImporter(filePath, limits);
+  if (!claimed) {
+    if (isSubagentSession(filePath)) {
+      const claudeCode = IMPORTERS.find((candidate) => candidate.kind === 'claude-code-jsonl');
+      if (claudeCode) await claudeCode.parse(filePath, limits);
+    }
+    throw fail('IMPORT_UNKNOWN_FORMAT', 'This file is not a Claude Code session, a Markdown transcript or a King Louie chat export.');
   }
-  if (!isObject(data)) return false;
-  const { caseId } = data;
-  return caseId !== undefined && caseId !== null && caseId !== '' && caseId !== false;
+  const { importer, loaded } = claimed;
+  // A King Louie export of a case chat (owner ruling R-H4-2). Only that the
+  // file's chat has a caseId is kept, never the id.
+  const fromCase = typeof importer.exportHasCase === 'function' && importer.exportHasCase(loaded);
+  return { importer, sourceHash, fromCase, options: { ...limits, pattern, loaded } };
 }
 
 // The chat an importer gave, as the few fields an import takes.
@@ -104,11 +125,11 @@ function importedChat(chat = {}, { fromCase = false } = {}) {
   return out;
 }
 
-async function parseImport(filePath, { pattern, maxBytes } = {}) {
-  const sourceHash = await hashFile(filePath);
-  const importer = await importerFor(filePath);
-  const parsed = await importer.parse(filePath, { pattern, maxBytes });
-  const fromCase = importer.kind === 'king-louie-json' && exportHasCase(filePath);
+// maxBytes is the Markdown importer's own limit; maxFileBytes the limit for
+// any file (MAX_IMPORT_BYTES) and maxLineChars for a JSONL line.
+async function parseImport(filePath, limits = {}) {
+  const { importer, sourceHash, fromCase, options } = await openImport(filePath, limits);
+  const parsed = await importer.parse(filePath, options);
   return {
     kind: importer.kind,
     importerVersion: importer.version,
@@ -119,10 +140,9 @@ async function parseImport(filePath, { pattern, maxBytes } = {}) {
   };
 }
 
-async function previewImport(filePath, { pattern, maxBytes } = {}) {
-  const sourceHash = await hashFile(filePath);
-  const importer = await importerFor(filePath);
-  const preview = await importer.preview(filePath, { pattern, maxBytes });
+async function previewImport(filePath, limits = {}) {
+  const { importer, sourceHash, options } = await openImport(filePath, limits);
+  const preview = await importer.preview(filePath, options);
   return { ...preview, kind: importer.kind, importerVersion: importer.version, sourceHash };
 }
 
@@ -265,9 +285,11 @@ function abortChatImport({ store, importId } = {}) {
   return store.deleteChat(row.chatId);
 }
 
-async function importChat({ store, filePath, pattern, maxBytes, batchSize = DEFAULT_BATCH, schedule = setImmediate, now, onProgress } = {}) {
+async function importChat({
+  store, filePath, pattern, maxBytes, maxFileBytes, maxLineChars, batchSize = DEFAULT_BATCH, schedule = setImmediate, now, onProgress
+} = {}) {
   requireStore(store);
-  const parsed = await parseImport(filePath, { pattern, maxBytes });
+  const parsed = await parseImport(filePath, { pattern, maxBytes, maxFileBytes, maxLineChars });
   const { kind, stats, messages } = parsed;
   if (!Array.isArray(messages) || !messages.length) throw fail('IMPORT_INVALID', 'This file has no messages to import.');
   const begun = beginChatImport({
@@ -440,7 +462,7 @@ function createImportGate({ getStore, idleMs = IMPORT_IDLE_MS, setTimer = setTim
 
 module.exports = {
   IMPORT_KINDS: KINDS, IMPORT_SENDERS: SENDERS, HASH_PATTERN,
-  MAX_IMPORT_MESSAGES, MAX_BATCH_MESSAGES, MAX_BATCH_CHARS, IMPORT_IDLE_MS,
+  MAX_IMPORT_MESSAGES, MAX_BATCH_MESSAGES, MAX_BATCH_CHARS, IMPORT_IDLE_MS, MAX_IMPORT_BYTES, MAX_IMPORT_LINE_CHARS,
   createImportGate,
   hashFile, parseImport, previewImport, beginChatImport, appendChatImport, finishChatImport, abortChatImport,
   importChat, sweepUnfinishedImports

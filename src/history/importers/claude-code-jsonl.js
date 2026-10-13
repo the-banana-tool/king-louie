@@ -205,11 +205,14 @@ class ClaudeCodeParser {
   }
 }
 
-async function detect(filePath) {
+// maxLineChars (detect, parse, preview): the longest line taken; the app's
+// import passes one, LongHaul none. A line over it is a refusal
+// (IMPORT_LINE_TOO_LONG), from detect too, never "not a session".
+async function detect(filePath, { maxLineChars } = {}) {
   if (!/\.jsonl$/i.test(filePath) || isSubagentPath(filePath)) return false;
   let seen = 0;
   try {
-    for await (const { line } of readJsonlLines(filePath)) {
+    for await (const { line } of readJsonlLines(filePath, { maxLineChars })) {
       seen += 1;
       if (seen > 200) return false;
       let rec;
@@ -217,25 +220,26 @@ async function detect(filePath) {
       if (!rec || (rec.type !== 'user' && rec.type !== 'assistant') || !rec.message || rec.message.content === undefined) continue;
       return rec.isSidechain !== true && !rec.agentId;
     }
-  } catch {
+  } catch (err) {
+    if (err && err.code === 'IMPORT_LINE_TOO_LONG') throw err;
     return false;
   }
   return false;
 }
 
-async function parse(filePath) {
+async function parse(filePath, { maxLineChars } = {}) {
   if (isSubagentPath(filePath)) {
     const err = new Error(`${path.basename(filePath)} is a subagent transcript; subagent files are not imported`);
     err.code = 'SUBAGENT_FILE';
     throw err;
   }
   const parser = new ClaudeCodeParser();
-  for await (const { line, lineNo } of readJsonlLines(filePath)) parser.line(line, lineNo);
+  for await (const { line, lineNo } of readJsonlLines(filePath, { maxLineChars })) parser.line(line, lineNo);
   return parser.result(filePath);
 }
 
-async function preview(filePath) {
-  const { chat, messages } = await parse(filePath);
+async function preview(filePath, options) {
+  const { chat, messages } = await parse(filePath, options);
   return {
     title: chat.title,
     turns: messages.filter((m) => m.sender === 'user').length,
