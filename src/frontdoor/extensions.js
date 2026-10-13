@@ -9,3 +9,6 @@ module.exports = [];
 
 // Cases stage 4 (R44): the phone app's Questions screen.
 module.exports.push(require('./question-routes').registerQuestionRoutes);
+
+// Fleet stage 5 §4.7: computer-use leases (requests, grants, the kill switch and the live view).
+module.exports.push(require('../gui/relay-extension').registerLeaseRoutes);
