@@ -43,6 +43,24 @@ describe('parseKeys', () => {
   });
 });
 
+// Security review finding 7: on macOS ctrl+F2..F8 move the keyboard focus
+// out of the app (menu bar, Dock, the window toolbar, the next window, the
+// floating window, the status menus).
+describe('macOS keyboard routes that leave the app', () => {
+  it('denies ctrl+f2 through ctrl+f8 on darwin, with extra modifiers too, and nowhere else', () => {
+    for (const n of [2, 3, 4, 5, 6, 7, 8]) {
+      assert.equal(code(() => parseKeys(`ctrl+f${n}`, 'darwin')), 'key_denied', `ctrl+f${n}`);
+      assert.equal(code(() => parseKeys(`ctrl+shift+f${n}`, 'darwin')), 'key_denied', `ctrl+shift+f${n}`);
+      assert.equal(code(() => parseKeys(`ctrl+f${n}`, 'win32')), null);
+      assert.equal(code(() => parseKeys(`ctrl+f${n}`, 'linux')), null);
+      assert.equal(code(() => parseKeys(`f${n}`, 'darwin')), null, 'the bare function key is the app\'s');
+    }
+    assert.equal(code(() => parseKeys('ctrl+f1', 'darwin')), null);
+    assert.equal(code(() => parseKeys('ctrl+f9', 'darwin')), null);
+    assert.equal(code(() => parseKeys('ctrl+f20', 'darwin')), null);
+  });
+});
+
 describe('printableChar and isEnter', () => {
   it('knows which presses type a character', () => {
     assert.equal(printableChar(parseKeys('a', 'linux')), 'a');

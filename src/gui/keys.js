@@ -37,6 +37,10 @@ function deniedReason({ mods, key }, platform) {
     if (has(mods, 'meta', 'alt') && key === 'escape') return 'meta+alt+escape opens Force Quit';
     if (has(mods, 'ctrl', 'meta') && key === 'q') return 'ctrl+meta+q locks the screen';
     if (has(mods, 'ctrl') && ARROWS.includes(key)) return 'ctrl+arrow switches Spaces';
+    // Keyboard navigation that leaves the app: the menu bar (F2), the Dock
+    // (F3), the next window of any app (F4), the toolbar (F5), a floating
+    // window (F6), the focus mode (F7) and the status menus (F8).
+    if (has(mods, 'ctrl') && /^f[2-8]$/.test(key)) return 'ctrl+F2 to F8 move the keyboard focus out of the app';
     if (has(mods, 'meta', 'shift') && ['3', '4', '5'].includes(key)) return 'meta+shift+3/4/5 take screenshots';
   }
   return null;

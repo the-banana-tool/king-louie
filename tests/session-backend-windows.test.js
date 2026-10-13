@@ -187,6 +187,20 @@ describe('finding 8, by reading the worker sources: the window under the point i
     assert.doesNotMatch(src, /under == IntPtr\.Zero \|\| !pids\.Contains\(\(int\)AppPidOf\(under\)\)/, 'no longer "any window of a leased pid"');
   });
 
+  // Security review finding 7 (macOS, by reading only): the hit test looks
+  // at every on-screen layer, not only the normal window layer.
+  it('macOS: the hit test reads all on-screen layers, front to back, skipping only fully transparent windows', () => {
+    const src = read('macos-worker.js');
+    const hit = /function hitTest\(p\) \{[\s\S]*?\n\}/.exec(src);
+    assert.ok(hit, 'hitTest is there');
+    assert.match(hit[0], /onscreenWindows\(\)/);
+    assert.doesNotMatch(hit[0], /windowList\(/, 'not the layer-0 list');
+    const all = /function onscreenWindows\(\) \{[\s\S]*?\n\}/.exec(src);
+    assert.ok(all);
+    assert.doesNotMatch(all[0], /kCGWindowLayer/, 'no layer is left out');
+    assert.match(all[0], /kCGWindowAlpha/);
+  });
+
   it('macOS: the window under each point must be the target window number itself', () => {
     const src = read('macos-worker.js');
     assert.match(src, /if \(!under \|\| under\.handle !== String\(action\.handle\)\) throw new OpError\('point_obscured'/);

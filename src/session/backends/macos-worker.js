@@ -63,8 +63,19 @@ function foreground() {
   return { handle: win ? String(win.kCGWindowNumber) : null, pid: pid, image: imageOf(pid), bounds: win ? boundsOf(win) : null, scale: backingScale() };
 }
 function brief(f) { return f ? { image: f.image, pid: f.pid } : null; }
+// Every on-screen window on every layer, front to back (review finding 7):
+// a menu, the Dock, a notification, a system panel or another app's overlay
+// sits above the normal window layer, and a click meant for the window below
+// would land on it. Only fully transparent windows are skipped: they draw
+// nothing and macOS keeps some of them over the whole screen.
+function onscreenWindows() {
+  var raw = $.CGWindowListCopyWindowInfo(1 | 16, 0);
+  var list = ObjC.deepUnwrap(ObjC.castRefToObject(raw)) || [];
+  return list.filter(function (w) { return !(w.kCGWindowAlpha === 0); });
+}
+// The frontmost window that holds the point, whatever its layer or owner.
 function hitTest(p) {
-  var under = windowList(true).filter(function (w) { return contains(boundsOf(w), p); })[0];
+  var under = onscreenWindows().filter(function (w) { return contains(boundsOf(w), p); })[0];
   return under ? { handle: String(under.kCGWindowNumber), pid: under.kCGWindowOwnerPID, image: imageOf(under.kCGWindowOwnerPID) } : null;
 }
 function isLocked() {
