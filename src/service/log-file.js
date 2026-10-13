@@ -7,8 +7,8 @@ const { addSink } = require('../logging');
 
 const SERVICE_LOG_NAME = 'service.log';
 
-function attachServiceLogFile(logsDir, { platform = process.platform } = {}) {
-  const file = path.join(logsDir, SERVICE_LOG_NAME);
+function attachServiceLogFile(logsDir, { platform = process.platform, name = SERVICE_LOG_NAME } = {}) {
+  const file = path.join(logsDir, name);
   const fd = fs.openSync(file, 'a', 0o600);
   // openSync's mode only applies on create and is subject to umask.
   if (platform !== 'win32') fs.fchmodSync(fd, 0o600);
