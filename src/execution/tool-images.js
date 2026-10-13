@@ -120,4 +120,25 @@ class ImageTracker {
   }
 }
 
-module.exports = { TOOL_IMAGES, IMAGE_PROVIDERS, detachImages, takeImages, stubText, ImageTracker };
+// What a failed provider call says about the images in the request
+// (fleet stage 5, security review finding 13d). `reason` is the failover
+// policy's classification of the error.
+//   'refused': the error is about images or content the model cannot take:
+//              the same request without them, and no images for the run.
+//   'unknown': a request error that says nothing either way: the same
+//              request once without them; later images are placed again.
+//   'no':      auth, billing, quota, rate limits, overload, server errors,
+//              timeouts, TLS, a stop: nothing to do with the images. The
+//              error stands; stripping them would hide it and blind the run.
+const IMAGE_ERROR_RE = /\b(images?|image_url|input_image|vision|multi-?modal|modalit(?:y|ies)|media[ _-]?type|content[ _-]?type|unsupported content|attachments?)\b/i;
+const REQUEST_REASONS = Object.freeze(['bad_request', 'context_overflow', 'unknown']);
+function imageRefusalKind(err, reason) {
+  if (!REQUEST_REASONS.includes(reason)) return 'no';
+  const status = err && (err.status || err.statusCode);
+  if ([401, 402, 403, 429].includes(Number(status))) return 'no';
+  const text = [err && err.message, err && err.body && (typeof err.body === 'string' ? err.body : JSON.stringify(err.body))]
+    .filter((t) => typeof t === 'string').join(' ');
+  return IMAGE_ERROR_RE.test(text) ? 'refused' : 'unknown';
+}
+
+module.exports = { TOOL_IMAGES, IMAGE_PROVIDERS, detachImages, takeImages, stubText, ImageTracker, imageRefusalKind };

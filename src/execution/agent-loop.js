@@ -14,7 +14,7 @@ const { createHeadlessPrompter } = require('../platform/prompter');
 const { partialMetricsOf } = require('../providers/abort');
 const { sumLlmCalls } = require('../tracking/llm-totals');
 const UsageTracker = require('../tracking/usage-tracker');
-const { takeImages, ImageTracker } = require('./tool-images');
+const { takeImages, ImageTracker, imageRefusalKind } = require('./tool-images');
 const log = createLogger('agent-loop');
 
 class AgentLoop {
@@ -195,7 +195,6 @@ class AgentLoop {
     // Fleet stage 5 §3.9: screenshots in the conversation (per run). Which
     // provider they are placed for is set per iteration, below.
     const imageTracker = new ImageTracker();
-    let imageRetryUsed = false;
 
     while (iterations < this.maxIterations) {
       if (this.abortSignal?.aborted) {
@@ -239,6 +238,8 @@ class AgentLoop {
       const attemptsByReason = {};
       let response;
       let lastErr;
+      // One retry without images per provider call, never more.
+      let imageRetryUsed = false;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         if (this.abortSignal?.aborted) break;
         try {
@@ -291,12 +292,17 @@ class AgentLoop {
 
           const canRetry = plan.action === 'retry' && attempt < maxAttempts;
           // A provider that refuses images (a non-vision model) gets the same
-          // request once more without them, and no more images this run.
-          if (!canRetry && !imageRetryUsed && imageTracker.count() > 0) {
+          // request once more without them, and no more images this run. An
+          // error that does not say what it is about gets the one retry
+          // without them and later images are placed again. Auth, billing,
+          // quota and the other errors that are not about the request stand
+          // as they are (imageRefusalKind, security review finding 13d).
+          const imageKind = imageRefusalKind(err, plan.reason);
+          if (!canRetry && !imageRetryUsed && imageTracker.count() > 0 && imageKind !== 'no') {
             imageRetryUsed = true;
             imageTracker.stripAll();
-            imageTracker.disable();
-            log.warn(`Provider refused a request with images; retrying once without them: ${err.message}`);
+            if (imageKind === 'refused') imageTracker.disable();
+            log.warn(`${imageKind === 'refused' ? 'Provider refused a request with images' : 'A request with images failed'}; retrying once without them: ${err.message}`);
             attempt -= 1;
             continue;
           }

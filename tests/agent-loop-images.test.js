@@ -34,16 +34,22 @@ const anthropicProto = AnthropicProvider.prototype;
 
 // A provider that asks for `calls` (arrays of tool names) one response at a
 // time, then answers with text; it records what it was sent each time.
-function provider(name, rounds, { rejectImagesOnce = false } = {}) {
+function provider(name, rounds, { rejectImagesOnce = false, failWithImages = null } = {}) {
   const sent = [];
   let i = 0;
   let rejected = false;
+  let failed = 0;
   const p = {
     sent,
     getProviderName: () => name,
     sendMessageWithTools: async (history) => {
       sent.push(JSON.parse(JSON.stringify(history)));
       const hasImages = JSON.stringify(history).includes(JPEG);
+      // failWithImages: { error: () => Error, times } fails that many calls that carry images.
+      if (failWithImages && hasImages && failed < (failWithImages.times || 1)) {
+        failed += 1;
+        throw failWithImages.error();
+      }
       if (rejectImagesOnce && hasImages && !rejected) {
         rejected = true;
         throw Object.assign(new Error('this model does not support image input'), { status: 400 });
@@ -196,5 +202,56 @@ describe('the loop', () => {
     const result = await run(p);
     assert.equal(result.type, 'complete');
     assert.equal(imagesIn(p.sent[p.sent.length - 1]), 0);
+  });
+
+  // Security review finding 13d: "the provider refused" is not "the provider
+  // refused images".
+  for (const [name, status, message] of [
+    ['a refused key', 401, 'invalid x-api-key'],
+    ['no access', 403, 'forbidden'],
+    ['no credit', 402, 'insufficient credit balance'],
+    ['a quota refusal', 429, 'You exceeded your current quota, insufficient_quota']
+  ]) {
+    it(`${name} with screenshots in the conversation is that error, not "images refused": no retry without images`, async () => {
+      const p = provider('anthropic', [['TestShot']], { failWithImages: { error: () => Object.assign(new Error(message), { status }), times: 99 } });
+      await assert.rejects(new AgentLoop(p, executor(), { guardrails: false, maxIterations: 12, failover: { budgets: {} } }).run([{ role: 'user', content: 'go' }], []), new RegExp(message.slice(0, 12)));
+      const withImages = p.sent.filter((h) => imagesIn(h) > 0);
+      assert.ok(withImages.length >= 1);
+      assert.equal(p.sent.filter((h, n) => n > 0 && imagesIn(h) === 0 && JSON.stringify(h).includes('omitted')).length, 0, 'the images were never stripped for a retry');
+    });
+  }
+
+  it('an error that cannot be told to be about images strips them for that one call only: later screenshots are placed again', async () => {
+    // One 400 that says nothing about images, then the provider works.
+    const p = provider('anthropic', [['TestShot'], ['TestShot']], { failWithImages: { error: () => Object.assign(new Error('invalid request: messages.3 is malformed'), { status: 400 }), times: 1 } });
+    const result = await run(p);
+    assert.equal(result.type, 'complete');
+    const failedAt = p.sent.findIndex((h) => imagesIn(h) > 0);
+    assert.equal(imagesIn(p.sent[failedAt + 1]), 0, 'the same call again, without images');
+    assert.ok(p.sent.slice(failedAt + 2).some((h) => imagesIn(h) > 0), 'the next screenshot is in the conversation: images are not off for the run');
+  });
+
+  it('an error that is about images still turns them off for the rest of the run', async () => {
+    for (const message of ['this model does not support image input', 'Invalid content type. image_url is only supported by certain models.', 'Unsupported media type', 'model is not multimodal']) {
+      const p = provider('anthropic', [['TestShot'], ['TestShot'], ['TestShot']], { failWithImages: { error: () => Object.assign(new Error(message), { status: 400 }), times: 1 } });
+      const result = await run(p);
+      assert.equal(result.type, 'complete', message);
+      const failedAt = p.sent.findIndex((h) => imagesIn(h) > 0);
+      assert.ok(p.sent.slice(failedAt + 1).every((h) => imagesIn(h) === 0), `no image after "${message}"`);
+    }
+  });
+
+  it('the one-call retry happens once per call: a provider that keeps failing fails the run', async () => {
+    const p = provider('anthropic', [['TestShot']], { failWithImages: { error: () => Object.assign(new Error('invalid request'), { status: 400 }), times: 99 } });
+    // Every call fails once it has had images in it, with or without them now.
+    const always = p.sendMessageWithTools;
+    let sawImages = false;
+    p.sendMessageWithTools = async (history) => {
+      if (JSON.stringify(history).includes(JPEG)) sawImages = true;
+      if (sawImages) { p.sent.push(JSON.parse(JSON.stringify(history))); throw Object.assign(new Error('invalid request'), { status: 400 }); }
+      return always(history);
+    };
+    await assert.rejects(run(p), /invalid request/);
+    assert.equal(p.sent.filter((h) => imagesIn(h) === 0 && JSON.stringify(h).includes('omitted')).length, 1, 'one retry without images, then the error');
   });
 });
