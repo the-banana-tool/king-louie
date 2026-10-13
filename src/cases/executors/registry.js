@@ -603,6 +603,14 @@ class ExecutorRegistry {
     return envelopeOps.sendEnvelope(this, args);
   }
 
+  // One lock per case for everything that checks an envelope's usage and
+  // then adds to it: a job's fit-to-job-file section (submit.js) and a
+  // channel send's reservation (channel-send.js). In-process only; the case
+  // lock covers other processes.
+  countingLock(caseId, fn) {
+    return this.mutex.run(`envelope-count:${caseId}`, fn);
+  }
+
   // Counting that send against the envelope, the case's contactsPerDay and
   // the global daily cap: reserve before it leaves, settle after.
   reserveChannelSend(args) {

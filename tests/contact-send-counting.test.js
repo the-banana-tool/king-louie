@@ -29,7 +29,7 @@ async function setup({
   wire = {}
 } = {}) {
   const env = fx.setupExecutors({ cases: { timeZone: 'UTC', ...(caseContacts ? { budgets: { contactsPerDay: caseContacts } } : {}) } });
-  fx.withFakeAgent(env, 'fake-agent', { entry: { constraints: { contactsPerDay: perDay } } });
+  const ctl = fx.withFakeAgent(env, 'fake-agent', { entry: { constraints: { contactsPerDay: perDay } } });
   const rt = env.runtime;
   const reg = env.registry;
   const meta = await fx.activeCase(rt);
@@ -62,7 +62,7 @@ async function setup({
       caseToday: rt.budget(meta.id).status().contactsPerDay.spent, globalLeft: reg.globalRemaining('fake-agent')
     };
   };
-  return { env, rt, reg, meta, adapters, sms, router, send, store, counts, question, envelopeId: req.envelopeId };
+  return { env, ctl, rt, reg, meta, adapters, sms, router, send, store, counts, question, envelopeId: req.envelopeId };
 }
 
 const NOTHING = (perDay = 5) => ({ contacts: [], attempts: {}, states: [], caseToday: 0, globalLeft: perDay });
@@ -391,5 +391,104 @@ describe('sendExternal: the case lock', () => {
     }
     assert.deepStrictEqual(s.counts(), NOTHING());
     assert.strictEqual((await s.send()).ok, true);
+  });
+});
+
+// Security review 2026-10-12, finding 3: a channel send and an executor job
+// under one envelope count against the same caps and the same contacts.
+describe('sendExternal and Executor.submit under one envelope', () => {
+  const { submitJob } = require('../src/cases/executors/submit');
+  const { JobStore } = require('../src/cases/executors');
+  const job = (s, target, over = {}) => submitJob(s.reg, { caseId: s.meta.id, turnId: 'turn-job' }, {
+    executor: 'fake-agent', envelopeId: s.envelopeId,
+    payload: JSON.stringify({ recipients: [{ address: target, name: 'Harbor Realty' }], text: 'Hello, is the lot still listed?', attemptsPerContact: 1, ...over })
+  });
+  // Resolves once the job is on disk, still inside adapter.submit.
+  const inSubmit = async (s) => {
+    const jobs = new JobStore(s.meta.dir);
+    for (let i = 0; i < 400; i += 1) {
+      if (jobs.list().some((j) => j.state === 'submitting')) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error('no job reached submitting');
+  };
+  const reserve = (s, target, sendId = 'd-held') => s.reg.reserveChannelSend({
+    caseId: s.meta.id, envelopeId: s.envelopeId, executorId: 'fake-agent', channelId: 'sms', recipients: [target], sendId, rendered: TEXT,
+    expectedHash: s.store.get(s.envelopeId).hash
+  });
+
+  it('a send cannot pass an attempts cap of one while a job to that contact is inside adapter.submit', async () => {
+    const s = await setup({ caps: { usd: 10, contacts: 2, attemptsPerContact: 1 } });
+    s.ctl.submitDelayMs = 400;
+    const pending = job(s, BROKER);
+    await inSubmit(s);
+    assert.deepStrictEqual(s.store.get(s.envelopeId).usage.attempts, {}, 'the job has not recorded its usage yet');
+    const r = await s.send();
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, /raises attempts per contact from 1 to 2/);
+    assert.deepStrictEqual(s.sms.plain, []);
+    const done = await pending;
+    assert.strictEqual(done.ok, true, JSON.stringify(done));
+    assert.deepStrictEqual(s.counts(), { contacts: [BROKER], attempts: { [BROKER]: 1 }, states: [undefined], caseToday: 1, globalLeft: 4 });
+  });
+
+  it('a send cannot pass a contacts cap of one while a job to another contact is inside adapter.submit', async () => {
+    const s = await setup({ caps: { usd: 10, contacts: 1, attemptsPerContact: 2 } });
+    s.ctl.submitDelayMs = 400;
+    const pending = job(s, BROKER);
+    await inSubmit(s);
+    const r = await s.send({ target: OTHER });
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, /raises contacts cap from 1 to 2/);
+    assert.deepStrictEqual(s.sms.plain, []);
+    assert.strictEqual((await pending).ok, true);
+    assert.deepStrictEqual(s.counts().contacts, [BROKER]);
+  });
+
+  it('a send cannot pass a case contactsPerDay of one while a job to another contact is inside adapter.submit', async () => {
+    const s = await setup({ caseContacts: 1 });
+    s.ctl.submitDelayMs = 400;
+    const pending = job(s, BROKER);
+    await inSubmit(s);
+    assert.strictEqual(s.rt.budget(s.meta.id).status().contactsPerDay.spent, 0, 'the job charges its contact only when it commits');
+    const r = await s.send({ target: OTHER });
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, /the case has 0 contacts left today; this send needs 1/);
+    assert.deepStrictEqual(s.sms.plain, []);
+    assert.strictEqual((await pending).ok, true);
+    assert.strictEqual(s.counts().caseToday, 1);
+  });
+
+  it('a job cannot pass a cap of one that a send reserved while the job was still being checked', async () => {
+    const s = await setup({ caps: { usd: 10, contacts: 2, attemptsPerContact: 1 } });
+    // The detour gate awaits after the job read its envelope: a send is counted in that gap.
+    let held = null;
+    s.rt.detourGate = async () => {
+      held = await reserve(s, BROKER);
+      return { ok: true };
+    };
+    const r = await job(s, BROKER);
+    assert.strictEqual(held.ok, true, held.error);
+    assert.strictEqual(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, /raises attempts per contact from 1 to 2/);
+    assert.deepStrictEqual(s.ctl.calls.filter((c) => c[0] === 'submit'), [], 'nothing was submitted');
+    assert.deepStrictEqual(s.counts().attempts, { [BROKER]: 1 });
+  });
+
+  it('a released send never gives back a contact an open job relies on', async () => {
+    const s = await setup();
+    const held = await reserve(s, BROKER);
+    assert.strictEqual(held.ok, true, held.error);
+    assert.deepStrictEqual(s.counts(), { contacts: [BROKER], attempts: { [BROKER]: 1 }, states: ['reserved'], caseToday: 1, globalLeft: 4 });
+    // The job sees the contact as already counted and charges nothing for it.
+    s.ctl.submitDelayMs = 400;
+    const pending = job(s, BROKER);
+    await inSubmit(s);
+    // The send is then clearly refused: its release must not take the contact with it.
+    assert.deepStrictEqual(await s.reg.settleChannelSend(held.reservation, { sent: false }), { ok: true, state: 'released' });
+    const mid = s.counts();
+    assert.deepStrictEqual([mid.contacts, mid.caseToday, mid.globalLeft], [[BROKER], 1, 4]);
+    assert.strictEqual((await pending).ok, true);
+    assert.deepStrictEqual(s.counts(), { contacts: [BROKER], attempts: { [BROKER]: 1 }, states: [undefined], caseToday: 1, globalLeft: 4 });
   });
 });

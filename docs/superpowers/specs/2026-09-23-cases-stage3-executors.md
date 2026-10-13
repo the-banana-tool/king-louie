@@ -493,6 +493,15 @@ executor jobs only. (b) The send is counted, the way a job's contacts are (`reco
   the lock outside one; a case another process holds refuses the send. Because `systemAction` runs inline
   for any holder in this process, the check and its writes have no `await` between them and a whole
   reservation runs under a per-case mutex, so two concurrent sends cannot both pass a cap of one.
+- Jobs and sends share the count (security review 2026-10-12). A job's fit, caps and job file (steps 9
+  to 11 of `Executor.submit`) and a send's reservation run under one per-case lock
+  (`ExecutorRegistry#countingLock`), and the job reads its envelope again inside it. A job records its
+  usage only when it commits, so both fits read the envelope through `withPendingJobs` (open jobs that
+  have not recorded yet count their contacts and attempts), a send's check of the case's `contactsPerDay`
+  subtracts `pendingJobContacts`, and a released send never takes out or refunds a contact that an open
+  job under the envelope names (`openJobRecipients`). Left as it was: two jobs checked back to back can
+  both pass the case's `contactsPerDay` (a job checks it and charges at commit, it does not reserve); and
+  a fresh contact a pending job and a send both count is charged twice for the day (too high).
 - Residuals: a channel send's money cost is unknown and is not charged (`estimateUsd: 0`; the usd cap is
   not consumed). A released send gives back a contact only when it alone counted it, so two overlapping
   sends to one new contact that both fail leave that contact counted for the day (too high, never too

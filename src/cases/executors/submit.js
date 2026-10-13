@@ -195,12 +195,12 @@ async function submitChecked(reg, ctx, params) {
   }
 
   // The envelope, when one is named: it must be this executor's.
-  const envelope = params.envelopeId ? new EnvelopeStore(dir).get(params.envelopeId) : null;
-  if (params.envelopeId && !envelope) return fail(`${params.envelopeId} was not found in this case`);
-  if (envelope && envelope.executor !== entry.id) return fail(`${envelope.id} is for ${envelope.executor}, not ${entry.id}`);
+  const named = params.envelopeId ? new EnvelopeStore(dir).get(params.envelopeId) : null;
+  if (params.envelopeId && !named) return fail(`${params.envelopeId} was not found in this case`);
+  if (named && named.executor !== entry.id) return fail(`${named.id} is for ${named.executor}, not ${entry.id}`);
 
   // 6. Duplicates (R36): refused in this case, noted across cases.
-  const intent = intentOf(payload, envelope);
+  const intent = intentOf(payload, named);
   const signature = jobSignature(entry.id, { kind: entry.kind, recipients, intent });
   const dup = findDuplicateJob({
     executorId: entry.id,
@@ -238,7 +238,7 @@ async function submitChecked(reg, ctx, params) {
   const mode = entry.outbound !== 'none' ? entry.outbound : (kind === 'external' || kind === 'runbook' ? 'query' : null);
   if (mode) {
     const gateOptions = {
-      recipients, envelope, facts, mode, caseId,
+      recipients, envelope: named, facts, mode, caseId,
       entityIndex: typeof rt.entityIndex === 'function' ? rt.entityIndex() : null, categoryKeywords: settings.outbound.categoryKeywords
     };
     const gl = gateLeaves(payload, gateOptions);
@@ -259,87 +259,106 @@ async function submitChecked(reg, ctx, params) {
     rendered = gl.rendered;
   }
 
-  // 9. Envelope fit (§3.6), whenever the executor needs an envelope or one
-  // is named. `signed` (the higher of the recorded and current authority)
-  // also needs the phone grant.
-  const attempts = Number(payload.attemptsPerContact) || 1;
-  const estimateUsd = estimateFor(entry, kind, recipients, attempts);
-  if (entry.authority !== 'none' && !envelope) return fail(`${entry.id} needs an approved envelope; request one with action "envelope"`);
-  if (envelope) {
-    const fit = envelopeFit(envelope, payload, { facts, recipients, now, estimateUsd, gateBlocked, executorId: entry.id });
-    if (fit.refusals.length) return fail(`outside envelope ${envelope.id}: ${fit.refusals.join('; ')}`);
-    if (fit.deltas.length) {
-      let questionId;
-      try {
-        questionId = envelopeOps.requestDelta(reg, caseId, envelope, fit.deltas);
-      } catch (err) {
-        // The change could not be shown to the owner whole: nothing is asked.
-        if (err && err.code === 'QUESTION_TOO_LONG') return fail(err.message);
-        throw err;
-      }
-      const texts = fit.deltas.map((d) => d.text);
-      return { ok: false, needsApproval: true, deltas: texts, questionId, error: `the owner must approve: ${texts.join('; ')}` };
-    }
-    if (envelopeOps.effectiveAuthority(reg, caseId, envelope) === 'signed') {
-      const v = envelopeOps.verifyEnvelopeGrant(reg, caseId, envelope);
-      if (!v.ok) return fail(v.error);
-    }
-  } else {
-    if (gateBlocked.length) return fail('blocked by the outbound gate: a fact outside the envelope');
-    for (const id of Array.isArray(payload.facts) ? payload.facts : []) {
-      const why = factProblem(facts.get(id));
-      if (why) return fail(`${id} cannot be disclosed (${why})`);
-    }
-  }
-
-  // 10. Caps: the case budget, the case's contacts today, the global cap.
-  const budget = rt.budget(caseId);
-  const remUsd = budget.remaining('usd');
-  if (remUsd !== null && remUsd < estimateUsd) return fail(`estimate $${estimateUsd.toFixed(2)} exceeds the case's remaining $${remUsd.toFixed(2)}`);
-  const known = new Set(envelope?.usage?.contacts || []);
-  const newContacts = recipients.filter((r) => !known.has(r)).length;
-  const remContacts = budget.remaining('contactsPerDay');
-  if (newContacts && remContacts !== null && remContacts < newContacts) return fail(`the case has ${remContacts} contacts left today; this job needs ${newContacts}`);
-  let reserved = 0;
-  if (newContacts) {
-    const res = await reg.reserveContacts(entry.id, newContacts, { caseId });
-    if (!res.ok) return fail(res.error);
-    reserved = newContacts;
-  }
-
-  // 11. The job, in `submitting`, then the executor.
-  let job;
-  try {
-    let n = null;
+  // Steps 9 to 11 (the fit, the caps and the job file) run under the case's
+  // counting lock, the one a channel send is counted under (channel-send.js),
+  // so a job and a send can never both be checked against usage that the
+  // other is about to add to. The envelope is read again inside it: the
+  // detour gate above awaits, and a send may have been counted meanwhile.
+  // The usage the fit sees includes jobs still inside their submit
+  // (withPendingJobs), which have not recorded theirs yet.
+  let envelope = named;
+  const staged = await reg.countingLock(caseId, async () => {
     if (envelope) {
-      n = (Number(envelope.nextN) || (envelope.payloads || []).length) + 1;
-      const envelopes = new EnvelopeStore(dir);
-      const fresh = envelopes.get(envelope.id);
-      fresh.nextN = n;
-      envelopes.write(fresh);
+      const fresh = new EnvelopeStore(dir).get(envelope.id);
+      if (!fresh) return fail(`${envelope.id} was not found in this case`);
+      if (fresh.hash !== envelope.hash) return fail(`envelope ${envelope.id} changed while the job was being checked; submit it again`);
+      envelope = fresh;
     }
-    const maxCosts = [envelope ? roundUsd(envelope.caps.usd - (Number(envelope.usage?.usd) || 0)) : null, remUsd].filter((x) => x !== null);
-    job = store.create({
-      caseId, executor: entry.id, kind, envelopeId: envelope ? envelope.id : null, planStepId: step ? step.id : null, retryOf: params.retryOf || null,
-      n, signature, payloadHash: sha256hex(canonicalize(rendered)), intent, state: 'submitting', recipients,
-      payload: rendered, originalPayload: payload, createdAt: now.toISOString(), estimateUsd, reservedContacts: reserved, newContacts,
-      facts: (Array.isArray(payload.facts) ? payload.facts : []).map((id, i) => {
-        const f = facts.get(id);
-        const stmt = Array.isArray(sentStatements) ? sentStatements[i] : f?.stmt;
-        return f ? { id, stmt, value: f.value } : { id, stmt: '', value: null };
-      }),
-      window: envelope ? { ...windowInstants(envelope.window.start, envelope.window.end, envelope.window.tz), tz: envelope.window.tz } : null,
-      maxCostUsd: maxCosts.length ? Math.max(0, Math.min(...maxCosts)) : null
-    });
-    job.idempotencyKey = sha256hex(canonicalize(envelope ? { caseId, envelopeId: envelope.id, n } : { caseId, jobId: job.id }));
-    store.write(job);
-    await reg.indexJob(caseId, job);
-  } catch (err) {
-    // No job holds the reservation yet (or its file cannot be trusted to).
-    if (reserved && !job) await reg.releaseContacts(entry.id, reserved, { caseId });
-    if (job) await kinds.failJob(reg, caseId, job, `could not be written: ${err.message}`);
-    throw err;
-  }
+    // 9. Envelope fit (§3.6), whenever the executor needs an envelope or one
+    // is named. `signed` (the higher of the recorded and current authority)
+    // also needs the phone grant.
+    const attempts = Number(payload.attemptsPerContact) || 1;
+    const estimateUsd = estimateFor(entry, kind, recipients, attempts);
+    if (entry.authority !== 'none' && !envelope) return fail(`${entry.id} needs an approved envelope; request one with action "envelope"`);
+    if (envelope) {
+      const fit = envelopeFit(envelopeOps.withPendingJobs(reg, caseId, envelope), payload, { facts, recipients, now, estimateUsd, gateBlocked, executorId: entry.id });
+      if (fit.refusals.length) return fail(`outside envelope ${envelope.id}: ${fit.refusals.join('; ')}`);
+      if (fit.deltas.length) {
+        let questionId;
+        try {
+          questionId = envelopeOps.requestDelta(reg, caseId, envelope, fit.deltas);
+        } catch (err) {
+          // The change could not be shown to the owner whole: nothing is asked.
+          if (err && err.code === 'QUESTION_TOO_LONG') return fail(err.message);
+          throw err;
+        }
+        const texts = fit.deltas.map((d) => d.text);
+        return { ok: false, needsApproval: true, deltas: texts, questionId, error: `the owner must approve: ${texts.join('; ')}` };
+      }
+      if (envelopeOps.effectiveAuthority(reg, caseId, envelope) === 'signed') {
+        const v = envelopeOps.verifyEnvelopeGrant(reg, caseId, envelope);
+        if (!v.ok) return fail(v.error);
+      }
+    } else {
+      if (gateBlocked.length) return fail('blocked by the outbound gate: a fact outside the envelope');
+      for (const id of Array.isArray(payload.facts) ? payload.facts : []) {
+        const why = factProblem(facts.get(id));
+        if (why) return fail(`${id} cannot be disclosed (${why})`);
+      }
+    }
+
+    // 10. Caps: the case budget, the case's contacts today, the global cap.
+    const budget = rt.budget(caseId);
+    const remUsd = budget.remaining('usd');
+    if (remUsd !== null && remUsd < estimateUsd) return fail(`estimate $${estimateUsd.toFixed(2)} exceeds the case's remaining $${remUsd.toFixed(2)}`);
+    const known = new Set(envelope?.usage?.contacts || []);
+    const newContacts = recipients.filter((r) => !known.has(r)).length;
+    const remContacts = budget.remaining('contactsPerDay');
+    if (newContacts && remContacts !== null && remContacts < newContacts) return fail(`the case has ${remContacts} contacts left today; this job needs ${newContacts}`);
+    let reserved = 0;
+    if (newContacts) {
+      const res = await reg.reserveContacts(entry.id, newContacts, { caseId });
+      if (!res.ok) return fail(res.error);
+      reserved = newContacts;
+    }
+
+    // 11. The job, in `submitting`, then the executor.
+    let job;
+    try {
+      let n = null;
+      if (envelope) {
+        n = (Number(envelope.nextN) || (envelope.payloads || []).length) + 1;
+        const envelopes = new EnvelopeStore(dir);
+        const fresh = envelopes.get(envelope.id);
+        fresh.nextN = n;
+        envelopes.write(fresh);
+      }
+      const maxCosts = [envelope ? roundUsd(envelope.caps.usd - (Number(envelope.usage?.usd) || 0)) : null, remUsd].filter((x) => x !== null);
+      job = store.create({
+        caseId, executor: entry.id, kind, envelopeId: envelope ? envelope.id : null, planStepId: step ? step.id : null, retryOf: params.retryOf || null,
+        n, signature, payloadHash: sha256hex(canonicalize(rendered)), intent, state: 'submitting', recipients,
+        payload: rendered, originalPayload: payload, createdAt: now.toISOString(), estimateUsd, reservedContacts: reserved, newContacts,
+        facts: (Array.isArray(payload.facts) ? payload.facts : []).map((id, i) => {
+          const f = facts.get(id);
+          const stmt = Array.isArray(sentStatements) ? sentStatements[i] : f?.stmt;
+          return f ? { id, stmt, value: f.value } : { id, stmt: '', value: null };
+        }),
+        window: envelope ? { ...windowInstants(envelope.window.start, envelope.window.end, envelope.window.tz), tz: envelope.window.tz } : null,
+        maxCostUsd: maxCosts.length ? Math.max(0, Math.min(...maxCosts)) : null
+      });
+      job.idempotencyKey = sha256hex(canonicalize(envelope ? { caseId, envelopeId: envelope.id, n } : { caseId, jobId: job.id }));
+      store.write(job);
+      await reg.indexJob(caseId, job);
+    } catch (err) {
+      // No job holds the reservation yet (or its file cannot be trusted to).
+      if (reserved && !job) await reg.releaseContacts(entry.id, reserved, { caseId });
+      if (job) await kinds.failJob(reg, caseId, job, `could not be written: ${err.message}`);
+      throw err;
+    }
+    return { ok: true, job };
+  });
+  if (!staged || staged.ok !== true) return staged;
+  const { job } = staged;
 
   const key = `${caseId}/${job.id}`;
   reg.inFlight.add(key);

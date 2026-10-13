@@ -59,7 +59,8 @@ function contactsDay(budget) {
 // caller holds the case lock. → { removed, refunded }: the contacts the
 // envelope no longer lists, and how many the case budget got back.
 // A contact is given back only when this send was the one charged for it,
-// no other send or job holds an attempt on it, and the budget day has not
+// no other send or recorded job holds an attempt on it, no open job under
+// the envelope names it (openJobRecipients), and the budget day has not
 // rolled over; otherwise the count stays (too high is safe, too low is not).
 function undoInCase(reg, { caseId, envelopeId, sendId }) {
   const store = new EnvelopeStore(reg.caseDir(caseId));
@@ -72,6 +73,9 @@ function undoInCase(reg, { caseId, envelopeId, sendId }) {
   env.usage = { usd: 0, contacts: [], attempts: {}, ...(env.usage || {}) };
   const attempts = { ...(env.usage.attempts || {}) };
   const own = Array.isArray(entry.newContacts) ? entry.newContacts : [];
+  // A job still open under this envelope saw these contacts as already
+  // counted and charged nothing for them: they stay, and so does the charge.
+  const relied = envelopeOps.openJobRecipients(reg, caseId, env.id);
   const removed = [];
   for (const r of Array.isArray(entry.recipients) ? entry.recipients : []) {
     const left = (Number(attempts[r]) || 0) - 1;
@@ -80,7 +84,7 @@ function undoInCase(reg, { caseId, envelopeId, sendId }) {
       continue;
     }
     delete attempts[r];
-    if (own.includes(r) && env.usage.contacts.includes(r)) {
+    if (own.includes(r) && !relied.has(r) && env.usage.contacts.includes(r)) {
       env.usage.contacts = env.usage.contacts.filter((c) => c !== r);
       removed.push(r);
     }
@@ -124,7 +128,10 @@ function reserveInCase(reg, { caseId, envelopeId, executorId, channelId, recipie
   const known = new Set(Array.isArray(usage.contacts) ? usage.contacts : []);
   const fresh = recipients.filter((r) => !known.has(r));
   const budget = rt.budget(caseId);
-  const left = budget.remaining('contactsPerDay');
+  // A job charges its new contacts when it commits; until then they are
+  // only in its file. They count here, or a job and a send could both pass.
+  const remaining = budget.remaining('contactsPerDay');
+  const left = remaining === null ? null : Math.max(0, remaining - envelopeOps.pendingJobContacts(reg, caseId));
   if (fresh.length && left !== null && left < fresh.length) {
     return refuse(`the case has ${left} contacts left today; this send needs ${fresh.length}`);
   }
@@ -180,7 +187,7 @@ async function reserveChannelSend(reg, args = {}) {
     text: typeof a.text === 'string' ? a.text : rendered, expectedHash: typeof a.expectedHash === 'string' ? a.expectedHash : null
   };
   try {
-    return await reg.mutex.run(`channel-send:${caseId}`, () => reg.caseRuntime.systemAction(caseId, `channel send ${sendId} reserved`, async () => {
+    return await reg.countingLock(caseId, () => reg.caseRuntime.systemAction(caseId, `channel send ${sendId} reserved`, async () => {
       const held = reserveInCase(reg, input);
       if (!held.ok) return held;
       const reservation = {

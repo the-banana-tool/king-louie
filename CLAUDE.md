@@ -728,7 +728,11 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
       turn; another process holding the case refuses the send) and only in
       an `active` case. The check and its writes
       have no `await` between them: `systemAction` is no mutex inside one
-      process. A channel send's money cost is not known and not charged.
+      process. A job's fit-to-job-file section (`submit.js` steps 9 to 11)
+      and a send's reservation share `ExecutorRegistry#countingLock`; a job
+      records usage only at commit, so every fit reads the envelope through
+      `withPendingJobs`, and a released send never removes a contact an
+      open job names. A channel send's money cost is not known and not charged.
   - In text, facts are quoted as `{{f-0042}}` references.
 - Only a clear 4xx refusal fails an external submit. A timeout
   (`submitTimeoutMs`, or `host.fetch`'s `requestTimeoutMs`), a network error

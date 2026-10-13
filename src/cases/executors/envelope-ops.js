@@ -469,6 +469,52 @@ async function revokeEnvelope(reg, caseId, envelopeId, reason = 'revoked by the 
   }
 }
 
+// Jobs under this envelope that are open but have not recorded their send
+// yet (still inside adapter.submit, or held unconfirmed): recordSend has not
+// added their contacts and attempts to `usage`. → the envelope with a usage
+// that counts them, for a fit; the stored envelope is never changed.
+function withPendingJobs(reg, caseId, env) {
+  if (!env) return env;
+  const recorded = new Set((Array.isArray(env.payloads) ? env.payloads : []).map((p) => p && p.jobId).filter(Boolean));
+  const usage = { usd: 0, contacts: [], attempts: {}, ...(env.usage || {}) };
+  const contacts = [...(Array.isArray(usage.contacts) ? usage.contacts : [])];
+  const attempts = { ...(usage.attempts || {}) };
+  let any = false;
+  for (const job of new JobStore(reg.caseDir(caseId)).list()) {
+    if (!job || job.envelopeId !== env.id || !isOpen(job.state) || recorded.has(job.id)) continue;
+    any = true;
+    const per = Number(job.originalPayload?.attemptsPerContact) || 1;
+    for (const r of Array.isArray(job.recipients) ? job.recipients : []) {
+      if (!contacts.includes(r)) contacts.push(r);
+      attempts[r] = (Number(attempts[r]) || 0) + per;
+    }
+  }
+  return any ? { ...env, usage: { ...usage, contacts, attempts } } : env;
+}
+
+// New contacts of this case's open jobs that the case's contactsPerDay has
+// not been charged for yet (a job charges at commit: jobs.js recordSend).
+function pendingJobContacts(reg, caseId) {
+  let n = 0;
+  for (const job of new JobStore(reg.caseDir(caseId)).list()) {
+    if (!job || !isOpen(job.state) || job.contactsCharged === true) continue;
+    n += Math.max(0, Math.floor(Number(job.newContacts) || 0));
+  }
+  return n;
+}
+
+// Every recipient of a job still open under this envelope. Such a job read
+// the envelope's contacts when it was checked, so none of them may be taken
+// out of `usage.contacts` (or refunded) under it.
+function openJobRecipients(reg, caseId, envelopeId) {
+  const out = new Set();
+  for (const job of new JobStore(reg.caseDir(caseId)).list()) {
+    if (!job || job.envelopeId !== envelopeId || !isOpen(job.state)) continue;
+    for (const r of Array.isArray(job.recipients) ? job.recipients : []) out.add(r);
+  }
+  return out;
+}
+
 // The channel id a send is checked under: 'call' is 'voice', as in the
 // contact ladders. Anything that is not a string is null (refused).
 function sendChannel(channelId) {
@@ -499,7 +545,7 @@ function sendEnvelope(reg, { caseId, envelopeId, executorId, recipients, channel
     if (!entry.available) return refuse(`${entry.id} is unavailable: ${entry.reason}`);
     const env = new EnvelopeStore(reg.caseDir(caseId)).get(envelopeId);
     if (!env) return refuse(`${envelopeId} was not found in this case`);
-    const fit = envelopeFit(env, {}, {
+    const fit = envelopeFit(withPendingJobs(reg, caseId, env), {}, {
       facts: reg.caseRuntime.ledger(caseId).view().facts, recipients, now: reg.now(), estimateUsd: 0, executorId: entry.id, channel
     });
     const problems = [...fit.refusals, ...fit.deltas.map((d) => d.text)];
@@ -520,6 +566,9 @@ function sendEnvelope(reg, { caseId, envelopeId, executorId, recipients, channel
 module.exports = {
   sendEnvelope,
   sendChannel,
+  withPendingJobs,
+  openJobRecipients,
+  pendingJobContacts,
   requestEnvelope,
   syncEnvelopes,
   requestDelta,
