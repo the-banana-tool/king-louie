@@ -89,3 +89,68 @@ describe('E2E: recall', () => {
     assert.match(drawer, /\[#3 · user · /);
   });
 });
+
+// Stage H4: a chat the owner scoped "linked" recalls from the chat it links.
+// The scope and the link are set through the same IPC the chat menu calls
+// (tests/e2e/history-scope-links.test.js drives the menu itself).
+describe('E2E: recall from a linked chat', () => {
+  let ctx;
+  let server;
+  const at = (minute) => new Date(Date.parse('2026-03-01T09:00:00.000Z') + minute * 60000).toISOString();
+  const chat = (id, title, texts) => ({
+    id, title, createdAt: at(0), updatedAt: at(30), agentMode: false, sandboxMode: true,
+    messages: texts.map((text, i) => ({ id: `${id}-m${i + 1}`, sender: i % 2 ? 'assistant' : 'user', text, timestamp: at(i + 1) }))
+  });
+
+  before(async () => {
+    server = await startFakeLlmServer();
+    ctx = await launchApp({
+      seed: {
+        'chat-data.json': {
+          onboardingComplete: true,
+          activeChatId: 'chat-first',
+          chats: [
+            chat('chat-first', 'Site visit', ['Help me plan the site visit.', 'Happy to. Which day suits you?']),
+            chat('chat-second', 'Lot notes', ['Keep this: the gate code for the Lakeside lot is 4417.', 'Kept.'])
+          ],
+          settings: {
+            models: {
+              ollama: { baseUrl: `${server.url}/ollama` },
+              profiles: [{ id: 'p-local', name: 'Local', kind: 'user', roles: { main: [{ provider: 'ollama', model: 'test-model', effort: null }], worker: [], utility: [] } }],
+              defaultProfileId: 'p-local'
+            }
+          }
+        }
+      }
+    });
+    await waitFor(ctx, `document.querySelectorAll('.chat-item').length === 2`, 20000);
+  });
+
+  after(async () => {
+    if (ctx) await closeApp(ctx);
+    if (server) await server.close();
+  });
+
+  it('the reply names the scope and the chat it read, and the recall line says "linked chats"', async () => {
+    const linked = JSON.parse(await evaluate(ctx, `window.electron.history.setLinks({ chatId: 'chat-first', linkedChatIds: ['chat-second'] }).then((r) => JSON.stringify(r))`));
+    assert.strictEqual(linked.ok, true, JSON.stringify(linked));
+    const scoped = JSON.parse(await evaluate(ctx, `window.electron.history.setScope({ chatId: 'chat-first', scope: 'linked' }).then((r) => JSON.stringify(r))`));
+    assert.strictEqual(scoped.ok, true, JSON.stringify(scoped));
+
+    await evaluate(ctx, `(() => {
+      const input = document.getElementById('user-input');
+      input.value = 'what is the gate code for the Lakeside lot';
+      input.dispatchEvent(new Event('input'));
+      document.getElementById('send-btn').click();
+      return true;
+    })()`);
+    const lineText = await waitFor(ctx, `(() => { const all = document.querySelectorAll('.message.assistant .message-recall-toggle'); return all.length ? all[all.length - 1].textContent : null; })()`, 30000);
+    assert.ok(lineText.includes('linked chats'), lineText);
+
+    const first = readHistoryChats(ctx).find((c) => c.id === 'chat-first');
+    const last = first.messages[first.messages.length - 1];
+    assert.strictEqual(last.sender, 'assistant');
+    assert.strictEqual(last.context.scope, 'linked');
+    assert.deepStrictEqual(last.context.recalledChats, ['chat-second']);
+  });
+});
