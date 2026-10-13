@@ -88,6 +88,105 @@ describe('TypedBuffer', () => {
     assert.equal(buf.value, '');
   });
 
+  // Security review finding 9: the buffer models what the keys did.
+  const VAULT = ['correct-horse-battery'];
+  const check = (text, buf) => checkTypeText(text, { vaultValues: VAULT, buffer: buf.value, segments: buf.segments });
+
+  it('backspace removes what it removed: half, a throwaway character, backspace, the other half is the whole value', () => {
+    const buf = new TypedBuffer();
+    assert.equal(check('correct-ho', buf).ok, true);
+    buf.append('correct-ho');
+    buf.append('x');
+    buf.backspace(1);
+    assert.equal(buf.value, 'correct-ho');
+    assert.equal(check('rse-battery', buf).code, 'text_looks_secret');
+    // Several at once, and more than was typed (then the field is unknown).
+    const b2 = new TypedBuffer();
+    b2.append('correct-hoxyz');
+    b2.backspace(3);
+    assert.equal(check('rse-battery', b2).code, 'text_looks_secret');
+    const b3 = new TypedBuffer();
+    b3.append('ab');
+    b3.backspace(5);
+    assert.equal(b3.value, '');
+    assert.equal(b3.navigated, true, 'a backspace into text the buffer never saw');
+  });
+
+  it('after a navigation key the earlier text is kept as a piece: the second half, Home, the first half is refused', () => {
+    const buf = new TypedBuffer();
+    buf.append('rse-battery');
+    buf.navigate(); // home, or ten presses of left
+    assert.equal(buf.value, '', 'the caret is somewhere else: nothing follows on contiguously');
+    assert.deepEqual(buf.segments, ['rse-battery']);
+    assert.equal(check('correct-ho', buf).code, 'text_looks_secret');
+    // The other order, and a piece dropped into the middle.
+    const b2 = new TypedBuffer();
+    b2.append('correct-ho');
+    b2.navigate();
+    assert.equal(check('rse-battery', b2).code, 'text_looks_secret');
+    const b3 = new TypedBuffer();
+    b3.append('correct-battery');
+    b3.navigate();
+    assert.equal(check('horse-', b3).code, 'text_looks_secret');
+    // Three and four pieces, typed last to first.
+    const b4 = new TypedBuffer();
+    for (const piece of ['attery', 'rse-b', 'ct-ho']) { assert.equal(check(piece, b4).ok, true, piece); b4.append(piece); b4.navigate(); }
+    assert.equal(check('corre', b4).code, 'text_looks_secret');
+  });
+
+  it('single key presses after a navigation are caught when they complete the value', () => {
+    const buf = new TypedBuffer();
+    buf.append('orrect-horse-battery');
+    buf.navigate();
+    assert.equal(check('c', buf).code, 'text_looks_secret');
+  });
+
+  it('ordinary typing around navigation is not refused', () => {
+    const buf = new TypedBuffer();
+    buf.append('Dear Sam, the horse is in the stable.');
+    buf.navigate();
+    assert.equal(check('The battery is flat, correct?', buf).ok, true);
+    buf.append('The battery is flat, correct?');
+    buf.navigate();
+    assert.equal(check(' Thanks', buf).ok, true);
+    // Without a navigation the pieces are where they were typed: no join is assumed.
+    const b2 = new TypedBuffer();
+    b2.append('correct-ho and then, much later, ');
+    assert.equal(check('rse-battery', b2).ok, true);
+  });
+
+  it('an always_confirm command split around a navigation is refused in either order', () => {
+    const ALWAYS_CONFIRM = ['Bash(git push*)'];
+    const buf = new TypedBuffer();
+    buf.append('push origin main');
+    buf.navigate();
+    assert.equal(checkTypeText('git ', { alwaysConfirm: ALWAYS_CONFIRM, buffer: buf.value, segments: buf.segments }).code, 'text_matches_always_confirm');
+    const b2 = new TypedBuffer();
+    b2.append('ghp_abc');
+    b2.navigate();
+    assert.equal(checkTypeText('defghijklmnop', { buffer: b2.value, segments: b2.segments }).code, 'text_looks_secret');
+  });
+
+  it('enter is a line break in the buffer, not a clean slate: half, enter, backspace, half is the whole value', () => {
+    const buf = new TypedBuffer();
+    buf.append('correct-ho');
+    buf.append('\n');
+    assert.equal(check('rse-battery', buf).ok, true, 'two lines');
+    buf.backspace(1);
+    assert.equal(check('rse-battery', buf).code, 'text_looks_secret');
+  });
+
+  it('keeps 2000 code points across its pieces, dropping the oldest', () => {
+    const buf = new TypedBuffer();
+    buf.append('a'.repeat(1500));
+    buf.navigate();
+    buf.append('b'.repeat(1000));
+    assert.equal(Array.from(buf.segments.join('') + buf.value).length, 2000);
+    assert.equal(buf.value, 'b'.repeat(1000));
+    buf.reset();
+    assert.deepEqual([buf.value, buf.segments, buf.navigated], ['', [], false]);
+  });
+
   it('looksSecret is exported for the Key path', () => {
     assert.equal(looksSecret('AKIAABCDEFGHIJKLMNOP', []), true);
   });

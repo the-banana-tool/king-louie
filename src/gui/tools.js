@@ -162,7 +162,7 @@ function buildGuiTools(gui) {
       typedFn = typed || null;
       leases.chargeInput(lease);
       const out = await broker.input(action, { jobId, leaseId: lease.leaseId, appIds: lease.apps, yieldMs: guiConfig.lease.yieldMs });
-      if (typed) typed(lease.typed);
+      if (typed) typed(lease.typed, { certain: true });
       const suspended = leases.noteInputOutcome(lease, { afterMatches: out.afterMatches });
       const entry = liveView ? liveView.recordAction(lease, { tool: toolName, summary, result: 'ok' }) : null;
       auditAppend('gui.input', {
@@ -175,7 +175,7 @@ function buildGuiTools(gui) {
       // The typed buffer holds what was sent, not what was confirmed: after
       // a failure that can follow the send (no answer in time, the backend
       // or the helper gone mid-op) the text counts as typed.
-      if (lease && typedFn && MAY_HAVE_SENT.includes(code)) typedFn(lease.typed);
+      if (lease && typedFn && MAY_HAVE_SENT.includes(code)) typedFn(lease.typed, { certain: false });
       if (lease) {
         leases.noteInputOutcome(lease, { code });
         if (liveView) liveView.recordAction(lease, { tool: toolName, summary, result: `refused:${code}` });
@@ -296,7 +296,8 @@ function buildGuiTools(gui) {
         checkButton(button, platform);
         const mods = checkClickModifiers(params.modifiers || [], platform);
         const t = point(jobId, lease, params.screenshot_id, params.x, params.y);
-        return { action: { kind: 'click', handle: t.handle, rel: t.rel, button, count: params.count || 1, mods } };
+        // A click moves the caret: what was typed is now a piece of unknown place.
+        return { action: { kind: 'click', handle: t.handle, rel: t.rel, button, count: params.count || 1, mods }, typed: (buffer) => buffer.navigate() };
       });
     }),
 
@@ -309,14 +310,10 @@ function buildGuiTools(gui) {
       const summary = `Type "${first(text, 60)}" (${Array.from(text).length} chars)`;
       return runInput('Type', params, options, summary, { length: Array.from(text).length, sha256: sha256(text) }, (lease) => {
         const remote = policy().remote_sessions || {};
-        const guard = checkTypeText(text, { alwaysConfirm: remote.always_confirm || [], vaultValues: vaultValues(options), buffer: lease.typed.value });
+        const guard = checkTypeText(text, { alwaysConfirm: remote.always_confirm || [], vaultValues: vaultValues(options), buffer: lease.typed.value, segments: lease.typed.segments });
         if (!guard.ok) throw new GuiError(guard.code);
-        return {
-          action: { kind: 'type', text },
-          typed: (buffer) => {
-            if (text.includes('\n')) { buffer.reset(); buffer.append(text.split('\n').pop()); } else buffer.append(text);
-          }
-        };
+        // A line break is text like any other: it does not wipe the buffer.
+        return { action: { kind: 'type', text }, typed: (buffer) => buffer.append(text) };
       });
     }),
 
@@ -331,12 +328,20 @@ function buildGuiTools(gui) {
         const char = printableChar(combo);
         if (char) {
           const remote = policy().remote_sessions || {};
-          const guard = checkTypeText(char.repeat(repeat), { alwaysConfirm: remote.always_confirm || [], vaultValues: vaultValues(options), buffer: lease.typed.value });
+          const guard = checkTypeText(char.repeat(repeat), { alwaysConfirm: remote.always_confirm || [], vaultValues: vaultValues(options), buffer: lease.typed.value, segments: lease.typed.segments });
           if (!guard.ok) throw new GuiError(guard.code);
         }
+        const bare = combo.mods.every((m) => m === 'shift');
         return {
           action: { kind: 'key', mods: combo.mods, key: combo.key, repeat },
-          typed: (buffer) => { if (isEnter(combo)) buffer.reset(); else if (char) buffer.append(char.repeat(repeat)); }
+          // What the press did to the text at the caret (text-guard.js). A
+          // press whose outcome is not known is never taken as a removal.
+          typed: (buffer, { certain = true } = {}) => {
+            if (char) buffer.append(char.repeat(repeat));
+            else if (isEnter(combo) && bare) buffer.append('\n'.repeat(repeat));
+            else if (certain && combo.key === 'backspace' && combo.mods.length === 0) buffer.backspace(repeat);
+            else buffer.navigate();
+          }
         };
       });
     }),
@@ -368,7 +373,8 @@ function buildGuiTools(gui) {
       return runInput('Drag', params, options, summary, params, (lease, jobId) => {
         const a = point(jobId, lease, params.screenshot_id, params.from.x, params.from.y);
         const b = point(jobId, lease, params.screenshot_id, params.to.x, params.to.y);
-        return { action: { kind: 'drag', handle: a.handle, from: a.rel, to: b.rel, button } };
+        // A drag can move the caret or a selection.
+        return { action: { kind: 'drag', handle: a.handle, from: a.rel, to: b.rel, button }, typed: (buffer) => buffer.navigate() };
       });
     })
   ];

@@ -1,12 +1,37 @@
 // src/gui/text-guard.js
 // What the Type tool (and printable Key presses) may send (fleet stage 5
-// spec §3.8). Checks run over `buffer + text`, where the buffer is the
-// lease's last 2000 typed characters, so a value spelled one call at a time
+// spec §3.8). Checks run over `buffer + text`, where the buffer is what the
+// lease typed where the caret now is, so a value spelled one call at a time
 // is caught; the text alone is checked too, so a buffer cannot mask it.
+//
+// The buffer models what the keys did (security review finding 9, revised
+// 2026-10-12; the spec's "reset on enter" is gone):
+//   - a printable key or typed text is appended; enter is a line break;
+//   - backspace removes the last character;
+//   - after anything that moves the caret or edits in a way the guard cannot
+//     follow (arrows, home, end, page keys, tab, delete, insert, escape,
+//     function keys, every ctrl/alt/meta chord, a click, a drag) the text so
+//     far is kept as a piece whose place in the field is unknown, and a new
+//     piece starts. Text typed after that is checked as if it could land at
+//     either end of, or inside, any earlier piece: a vault value that at
+//     most JOIN_PIECES runs of the typed pieces can spell, one of them from
+//     the new text, is refused, and so is an always_confirm command or a
+//     secret pattern that the new piece completes at either end of an
+//     earlier one.
+// Residuals, known and not closed: a value assembled from more than
+// JOIN_PIECES pieces; text the app itself adds, moves or completes
+// (autocomplete, find and replace, macros, an input method, drag and drop of
+// a selection); text that was in the field before the lease; patterns and
+// always_confirm commands split into three or more pieces, or completed by a
+// piece dropped into the middle of another. The pieces are forgotten when
+// the foreground changes or the lease is suspended, as before.
 const { patternMatch, SHELL_SEPARATORS } = require('../execution/tool-patterns');
 
 const MAX_TEXT = 2000;
 const BUFFER_MAX = 2000;
+// How many runs of typed pieces may spell a vault value before the guard
+// stops following (see the residuals above).
+const JOIN_PIECES = 4;
 const SECRET_PATTERNS = Object.freeze([
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
   /\b(sk-ant-|sk-|ghp_|gho_|ghs_|github_pat_|glpat-|xox[abpr]-)[A-Za-z0-9_-]{8,}/,
@@ -87,32 +112,144 @@ function matchesAlwaysConfirm(texts, patterns) {
   return false;
 }
 
-function checkTypeText(text, { alwaysConfirm = [], vaultValues = [], buffer = '' } = {}) {
+// The longest run of `value` from `pos` that some text holds. Holding a run
+// means holding every shorter one from the same place, so a binary search.
+function longestRun(value, pos, texts) {
+  let lo = 0;
+  let hi = value.length - pos;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    const piece = value.slice(pos, pos + mid);
+    if (texts.some((t) => t.includes(piece))) lo = mid; else hi = mid - 1;
+  }
+  return lo;
+}
+
+// Can at most JOIN_PIECES runs of the typed pieces spell `value`, with one
+// run that includes some of the new text? `combined` is the piece being
+// typed, whose characters from `newFrom` on are new. A run may be any part
+// of any piece (text dropped into a piece splits it), so this answers yes
+// for every arrangement the keys could have made, and for some they could
+// not: it never counts a character twice against the piece that holds it.
+function canJoin(value, pieces, combined, newFrom) {
+  const n = value.length;
+  const texts = [...pieces, combined];
+  const reach = Array.from({ length: n }, (_, p) => longestRun(value, p, texts));
+  // from: positions reached; the result: positions one more run reaches.
+  const step = (from) => {
+    const diff = new Int32Array(n + 2);
+    let any = false;
+    for (let p = 0; p < n; p += 1) {
+      if (from[p] && reach[p] > 0) { diff[p + 1] += 1; diff[p + reach[p] + 1] -= 1; any = true; }
+    }
+    const to = new Uint8Array(n + 1);
+    if (!any) return to;
+    let open = 0;
+    for (let e = 1; e <= n; e += 1) { open += diff[e]; if (open > 0) to[e] = 1; }
+    return to;
+  };
+  // The same, but the run must include new text: it sits in `combined` and
+  // ends after `newFrom`.
+  const stepNew = (from) => {
+    const to = new Uint8Array(n + 1);
+    for (let p = 0; p < n; p += 1) {
+      if (!from[p]) continue;
+      for (let s = Math.max(0, newFrom - (n - p) + 1); s < combined.length; s += 1) {
+        if (combined[s] !== value[p]) continue;
+        let m = 1;
+        while (p + m < n && s + m < combined.length && combined[s + m] === value[p + m]) m += 1;
+        for (let len = Math.max(1, newFrom - s + 1); len <= m; len += 1) to[p + len] = 1;
+      }
+    }
+    return to;
+  };
+  let plain = new Uint8Array(n + 1);
+  plain[0] = 1;
+  let withNew = new Uint8Array(n + 1);
+  for (let used = 1; used <= JOIN_PIECES; used += 1) {
+    const a = step(withNew);
+    const b = stepNew(plain);
+    withNew = a.map((v, i) => (v || b[i] ? 1 : 0));
+    if (withNew[n]) return true;
+    plain = step(plain);
+  }
+  return false;
+}
+
+// `buffer`: what was typed where the caret is. `segments`: earlier pieces,
+// whose place in the field is unknown (TypedBuffer).
+function checkTypeText(text, { alwaysConfirm = [], vaultValues = [], buffer = '', segments = [] } = {}) {
   if (isInvalidText(text)) return { ok: false, code: 'invalid_text' };
   const combined = `${buffer}${text}`;
   if (matchesAlwaysConfirm([text, combined], alwaysConfirm)) return { ok: false, code: 'text_matches_always_confirm' };
   if (looksSecret(text, vaultValues) || looksSecret(combined, vaultValues)) return { ok: false, code: 'text_looks_secret' };
+  const pieces = segments.filter((s) => typeof s === 'string' && s !== '');
+  if (pieces.length === 0) return { ok: true };
+  // The new piece at either end of an earlier one.
+  const joined = pieces.flatMap((s) => [`${s}${combined}`, `${combined}${s}`]);
+  if (matchesAlwaysConfirm(joined, alwaysConfirm)) return { ok: false, code: 'text_matches_always_confirm' };
+  if (joined.some((j) => looksSecret(j, []))) return { ok: false, code: 'text_looks_secret' };
+  for (const value of vaultValues) {
+    if (typeof value !== 'string' || value.length < 8 || value.length > 2 * BUFFER_MAX) continue;
+    if (canJoin(value, pieces, combined, buffer.length)) return { ok: false, code: 'text_looks_secret' };
+  }
   return { ok: true };
 }
 
+// What a lease has typed: the text at the caret (`value`), and the earlier
+// pieces (`segments`) left behind when the caret went somewhere the guard
+// cannot follow. 2000 code points in all; the oldest go first.
 class TypedBuffer {
   constructor(max = BUFFER_MAX) {
     this.max = max;
     this.chars = [];
+    this.parts = [];
+    this.navigated = false;
   }
 
   get value() {
     return this.chars.join('');
   }
 
+  get segments() {
+    return this.parts.map((p) => p.join(''));
+  }
+
+  _trim() {
+    let over = this.parts.reduce((n, p) => n + p.length, this.chars.length) - this.max;
+    while (over > 0 && this.parts.length) {
+      const first = this.parts[0];
+      if (first.length <= over) { over -= first.length; this.parts.shift(); } else { this.parts[0] = first.slice(over); over = 0; }
+    }
+    if (over > 0) this.chars = this.chars.slice(over);
+  }
+
   append(text) {
     this.chars.push(...Array.from(String(text)));
-    if (this.chars.length > this.max) this.chars = this.chars.slice(this.chars.length - this.max);
+    this._trim();
+  }
+
+  // Backspace, `count` times. Past the start of what was typed here it
+  // removes text the buffer never saw: from then on the place is unknown.
+  backspace(count = 1) {
+    const n = Math.max(0, Math.floor(count));
+    if (n > this.chars.length) this.navigated = true;
+    this.chars = this.chars.slice(0, Math.max(0, this.chars.length - n));
+  }
+
+  // The caret moved, or something edited the field in a way the guard cannot
+  // follow: what was typed stays, as a piece of unknown place.
+  navigate() {
+    if (this.chars.length) this.parts.push(this.chars);
+    this.chars = [];
+    this.navigated = true;
   }
 
   reset() {
     this.chars = [];
+    this.parts = [];
+    this.navigated = false;
   }
 }
 
-module.exports = { checkTypeText, TypedBuffer, looksSecret, isInvalidText, MAX_TEXT };
+module.exports = { checkTypeText, TypedBuffer, looksSecret, isInvalidText, MAX_TEXT, JOIN_PIECES };

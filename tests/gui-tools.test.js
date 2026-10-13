@@ -454,6 +454,62 @@ describe('input tools', () => {
     assert.deepEqual(channel.requests.filter((r) => r.op === 'input').pop().params.action, { kind: 'key', mods: [], key: 'enter', repeat: 2 });
   });
 
+  // Security review finding 9, through the tools.
+  describe('finding 9: a vault value typed in pieces', () => {
+    const VALUE = 'correct-horse-battery';
+    const vault = { list: () => ['k'], get: () => VALUE };
+    const v = () => opts({ vault });
+
+    it('the backspace split: half, a throwaway character, backspace, the other half', async () => {
+      await withLease();
+      assert.equal((await tools.Type.execute({ text: 'correct-ho' }, v())).ok, true);
+      assert.equal((await tools.Key.execute({ keys: 'x' }, v())).ok, true);
+      assert.equal((await tools.Key.execute({ keys: 'backspace' }, v())).ok, true);
+      assert.match((await tools.Type.execute({ text: 'rse-battery' }, v())).error, /^text_looks_secret/);
+    });
+
+    for (const [name, keys] of [['the arrow-key split', { keys: 'left', repeat: 10 }], ['the home-key split', { keys: 'home' }], ['a ctrl chord', { keys: 'ctrl+a' }], ['tab', { keys: 'tab' }], ['delete', { keys: 'delete' }]]) {
+      it(`${name}: the second half, ${keys.keys}, the first half`, async () => {
+        await withLease();
+        assert.equal((await tools.Type.execute({ text: 'rse-battery' }, v())).ok, true);
+        assert.equal((await tools.Key.execute(keys, v())).ok, true);
+        assert.match((await tools.Type.execute({ text: 'correct-ho' }, v())).error, /^text_looks_secret/);
+        // Spelled key by key it is refused at the press that completes it.
+        let refusedAt = null;
+        for (const ch of 'correct-ho') {
+          const out = await tools.Key.execute({ keys: ch }, v());
+          if (!out.ok) { refusedAt = ch; assert.match(out.error, /^text_looks_secret/); break; }
+        }
+        assert.ok(refusedAt !== null, 'refused before the value was complete on the screen');
+      });
+    }
+
+    it('a click moves the caret too: the second half, a click, the first half', async () => {
+      await withLease();
+      const shot = await tools.Screenshot.execute({ app: 'calculator' }, opts());
+      assert.equal((await tools.Type.execute({ text: 'rse-battery' }, v())).ok, true);
+      assert.equal((await tools.Click.execute({ screenshot_id: shot.screenshot_id, x: 5, y: 5 }, v())).ok, true);
+      assert.match((await tools.Type.execute({ text: 'correct-ho' }, v())).error, /^text_looks_secret/);
+    });
+
+    it('enter does not wipe the buffer: half, enter, backspace, half', async () => {
+      await withLease();
+      assert.equal((await tools.Type.execute({ text: 'correct-ho' }, v())).ok, true);
+      assert.equal((await tools.Key.execute({ keys: 'enter' }, v())).ok, true);
+      assert.equal((await tools.Key.execute({ keys: 'backspace' }, v())).ok, true);
+      assert.match((await tools.Type.execute({ text: 'rse-battery' }, v())).error, /^text_looks_secret/);
+    });
+
+    it('ordinary editing still works', async () => {
+      await withLease();
+      assert.equal((await tools.Type.execute({ text: 'The horse is in the stable' }, v())).ok, true);
+      assert.equal((await tools.Key.execute({ keys: 'home' }, v())).ok, true);
+      assert.equal((await tools.Type.execute({ text: 'Note: ' }, v())).ok, true);
+      assert.equal((await tools.Key.execute({ keys: 'end' }, v())).ok, true);
+      assert.equal((await tools.Type.execute({ text: ', correct?' }, v())).ok, true);
+    });
+  });
+
   it('Click maps the screenshot point; a stale one is refused', async () => {
     await withLease();
     const shot = await tools.Screenshot.execute({ app: 'calculator' }, opts());
