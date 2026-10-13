@@ -10,8 +10,11 @@ function posixPrivate(file) {
 // The "node identity record" row for a record that names the identity in the
 // data dir, with what doctor did not check said in it (fourth security
 // review, finding 5): the row used to read as a plain "ok" where the service
-// could still refuse. `acl`: recordAclProblem's answer on Windows, null
-// elsewhere.
+// could still refuse. `acl`: recordAclProblem's answer on Windows (asked
+// with `whole`: the config dir, the record's directory and the record, with
+// their owners), null elsewhere. "Clean" is said only for that answer
+// (fifth security review, finding 5); every other row says what was read
+// and what was not.
 function identityMatchRow({ seen, platform, acl = null }) {
   const check = 'node identity record';
   const privateHalf = 'that the data dir holds this key\'s private half (doctor does not resolve the master key; the service and "session install" check it)';
@@ -20,6 +23,15 @@ function identityMatchRow({ seen, platform, acl = null }) {
     return { check, ok: true, detail: `${base} (public keys compared; owner and mode read). Not checked here: ${privateHalf}` };
   }
   const probe = 'whether the account the service runs as can write the record (an administrator always can, so doctor\'s own attempt would show nothing; the service probes it itself when it starts and before each lease request, and refuses a record it can write)';
+  const read = 'public keys compared; owners and access lists read, of the record, its directory and the config dir';
+  if (acl && acl.state === 'writable' && acl.where === 'config') {
+    return {
+      check, ok: false,
+      detail: `${seen.file} names this identity, but ${acl.detail}. Whoever can delete or add in the config dir can put a directory of its own in place of the one that holds the record, and with it a record that vouches for another identity. `
+        + 'As root or an Administrator find out who changed the access list and set it so that only SYSTEM and Administrators can change the config dir (the account the service runs as needs read and execute, nothing more), '
+        + 'then run "king-louie-service identity record --replace", which writes the record anew in a new directory with an access list of its own'
+    };
+  }
   if (acl && acl.state === 'writable') {
     return {
       check, ok: false,
@@ -28,7 +40,13 @@ function identityMatchRow({ seen, platform, acl = null }) {
     };
   }
   if (acl && acl.state === 'clean') {
-    return { check, ok: true, detail: `${base} (public keys compared; owners and access lists read: only SYSTEM and Administrators can change the record or its directory). Not checked here: ${privateHalf}; ${probe}` };
+    return { check, ok: true, detail: `${base} (${read}: all three are owned by Administrators or SYSTEM, and no entry lets anyone else change them). Not checked here: ${privateHalf}; ${probe}` };
+  }
+  if (acl && acl.state === 'owner') {
+    return {
+      check, ok: true, warn: true,
+      detail: `${base} (${read}: no entry lets anyone but SYSTEM and Administrators change them, but ${acl.detail}). Not checked here: ${privateHalf}; ${probe}`
+    };
   }
   const why = (acl && acl.detail) || 'the access lists of the record and its directory were not read';
   return { check, ok: true, detail: `${base} (public keys compared; owners read). Not checked here: who can change the record (${why}; run doctor from an elevated prompt); ${privateHalf}; ${probe}` };
@@ -185,7 +203,7 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
         // Windows: who the access lists let change the record, which neither
         // the owner read above nor an administrator's own write would show.
         const { recordAclProblem } = require('./identity-record');
-        const acl = platform === 'win32' ? recordAclProblem({ configDir: dir, ...(deps.identityRecord && deps.identityRecord.inspectAcl ? { inspectAcl: deps.identityRecord.inspectAcl } : {}) }) : null;
+        const acl = platform === 'win32' ? recordAclProblem({ configDir: dir, whole: true, ...(deps.identityRecord && deps.identityRecord.inspectAcl ? { inspectAcl: deps.identityRecord.inspectAcl } : {}) }) : null;
         results.push(identityMatchRow({ seen, platform, acl }));
       } else if (seen.state === 'none') {
         results.push({ check: 'node identity record', ok: true, warn: true, detail: `${seen.problem}. Until then the service runs, computer use stays off and "session install" refuses` });

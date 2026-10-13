@@ -355,7 +355,8 @@ describe('doctor: the node identity record', () => {
     it('Windows: the three things doctor can come to, each said', () => {
       const ok = identityMatchRow({ seen, platform: 'win32', acl: { state: 'clean' } });
       assert.equal(ok.ok, true);
-      assert.match(ok.detail, /owners and access lists read: only SYSTEM and Administrators can change the record or its directory/);
+      assert.ok(!ok.warn);
+      assert.match(ok.detail, /public keys compared; owners and access lists read, of the record, its directory and the config dir: all three are owned by Administrators or SYSTEM, and no entry lets anyone else change them\)/);
       assert.match(ok.detail, /Not checked here: .*private half.*; whether the account the service runs as can write the record \(an administrator always can/);
       assert.match(ok.detail, /the service probes it itself when it starts and before each lease request/);
       const bad = identityMatchRow({ seen, platform: 'win32', acl: { state: 'writable', detail: `the access list of C:/cfg/identity lets ${SERVICE} change it` } });
@@ -369,6 +370,91 @@ describe('doctor: the node identity record', () => {
         assert.match(r.detail, /whether the account the service runs as can write the record/);
         assert.doesNotMatch(r.detail, /only SYSTEM and Administrators/);
       }
+    });
+
+    // Fifth security review, finding 5: "clean" claimed more than was read.
+    // The config dir was not read (delete-child there lets an account put a
+    // directory of its own where identity is), and an owner that is not
+    // Administrators or SYSTEM can rewrite a list whatever it says.
+    describe('what doctor reads: the config dir too, and the owners', () => {
+      const SYSTEM = 'S-1-5-18';
+      const owned = (owner, ...aces) => ({ dacl: true, owner, aces });
+      const dirAces = () => [ace(SYSTEM, FULL, 3), ace(ADMINS, FULL, 3), ace(SERVICE, READ, 3)];
+      const fileAces = () => [ace(SYSTEM, FULL), ace(ADMINS, FULL), ace(SERVICE, READ)];
+      const three = ({ config = ADMINS, dir = ADMINS, file = ADMINS, configAces = [], dirMore = [], fileMore = [] } = {}) => () => [
+        owned(config, ...dirAces(), ...configAces), owned(dir, ...dirAces(), ...dirMore), owned(file, ...fileAces(), ...fileMore)
+      ];
+      const whole = (inspectAcl) => R.recordAclProblem({ configDir: 'C:/cfg', whole: true, inspectAcl });
+
+      it('asks about the config dir, the directory of the record and the record', () => {
+        const asked = [];
+        assert.deepEqual(whole((paths) => { asked.push(paths); return three()(); }), { state: 'clean' });
+        assert.deepEqual(asked, [['C:/cfg', path.join('C:/cfg', 'identity'), path.join('C:/cfg', 'identity', 'node.json')]]);
+        assert.deepEqual(whole(three({ config: SYSTEM, dir: SYSTEM, file: SYSTEM })), { state: 'clean' });
+      });
+
+      it('an entry on the config dir that lets someone else change what it holds is "writable"', () => {
+        // delete child alone, add subdirectory alone, WRITE_DAC alone, WRITE_OWNER alone, delete alone.
+        for (const mask of [0x40, 0x4, 0x40000, 0x80000, 0x10000]) {
+          const r = whole(three({ configAces: [ace(SERVICE, READ | mask, 0)] }));
+          assert.equal(r.state, 'writable', mask.toString(16));
+          assert.equal(r.detail, 'the access list of C:/cfg lets S-1-5-19 change it');
+          assert.equal(r.where, 'config');
+        }
+        // An inherit-only entry gives nothing on the config dir itself; the directory and the record are read themselves.
+        assert.deepEqual(whole(three({ configAces: [ace(USER, MODIFY, 0xb)] })), { state: 'clean' });
+        // Below the config dir, as before.
+        assert.equal(whole(three({ fileMore: [ace(USER, 0x40000)] })).where, 'record');
+        assert.match(whole(three({ dirMore: [ace(SERVICE, MODIFY, 0x9)] })).detail, /identity lets S-1-5-19 change it, through an entry that the files in it inherit/);
+      });
+
+      it('lists that name nobody else, under an owner that is not Administrators or SYSTEM, are not "clean"', () => {
+        for (const [o, where] of [[{ config: USER }, /C:\/cfg is owned by S-1-5-21-1-2-3-1001/], [{ dir: SERVICE }, /identity is owned by S-1-5-19/], [{ file: USER }, /node\.json is owned by S-1-5-21-1-2-3-1001/]]) {
+          const r = whole(three(o));
+          assert.equal(r.state, 'owner', JSON.stringify(o));
+          assert.match(r.detail, where);
+          assert.match(r.detail, /which is neither Administrators nor SYSTEM: an owner can rewrite an access list whatever it says/);
+        }
+        // An owner the inspector did not report is not assumed.
+        for (const owner of [undefined, null, '', 'nobody']) {
+          const r = whole(() => [owned(ADMINS, ...dirAces()), owned(ADMINS, ...dirAces()), { dacl: true, ...(owner === undefined ? {} : { owner }), aces: fileAces() }]);
+          assert.equal(r.state, 'owner', String(owner));
+          assert.match(r.detail, /the owner of .*node\.json was not read/);
+        }
+        // Somebody who can change it is the stronger finding.
+        assert.equal(whole(three({ config: USER, fileMore: [ace(USER, 0x2)] })).state, 'writable');
+      });
+
+      it('fewer answers than paths asked about is "unread", and says which three', () => {
+        const r = whole(() => three()().slice(1));
+        assert.equal(r.state, 'unread');
+        assert.match(r.detail, /the access lists of .*node\.json, its directory and the config dir could not be read/);
+      });
+
+      it('the row: clean only on a clean answer; an owner that is not an administrator is said, with what was and was not read', () => {
+        const row = (acl) => identityMatchRow({ seen, platform: 'win32', acl });
+        const owner = row(whole(three({ config: USER })));
+        assert.equal(owner.ok, true);
+        assert.equal(owner.warn, true);
+        assert.match(owner.detail, /public keys compared; owners and access lists read, of the record, its directory and the config dir: no entry lets anyone but SYSTEM and Administrators change them, but C:\/cfg is owned by S-1-5-21-1-2-3-1001, which is neither Administrators nor SYSTEM: an owner can rewrite an access list whatever it says\)/);
+        assert.doesNotMatch(owner.detail, /all three are owned by Administrators or SYSTEM/);
+        assert.match(owner.detail, /Not checked here: .*private half/);
+        const config = row(whole(three({ configAces: [ace(SERVICE, 0x40)] })));
+        assert.equal(config.ok, false);
+        assert.match(config.detail, /names this identity, but the access list of C:\/cfg lets S-1-5-19 change it/);
+        assert.match(config.detail, /can put a directory of its own in place of the one that holds the record/);
+        assert.match(config.detail, /identity record --replace/);
+        const unread = row(whole(() => { throw new Error('powershell failed'); }));
+        assert.equal(unread.ok, true);
+        assert.match(unread.detail, /\(public keys compared; owners read\)\. Not checked here: who can change the record \(the access lists of .*node\.json, its directory and the config dir could not be read; run doctor from an elevated prompt\)/);
+      });
+
+      it('the owner is read from the "path" line of the inspector', () => {
+        assert.deepEqual(R.parseAclOutput('path dacl S-1-5-32-544\nace 0 S-1-5-18 001f01ff 3\npath nodacl S-1-5-18\npath dacl -\n'), [
+          { dacl: true, owner: 'S-1-5-32-544', aces: [{ type: 0, sid: 'S-1-5-18', mask: 0x1f01ff, flags: 3 }] }, { dacl: false, owner: 'S-1-5-18', aces: [] }, { dacl: true, aces: [] }
+        ]);
+        for (const bad of ['path dacl Everyone', 'path dacl S-1-5-18 extra', 'path  dacl']) assert.throws(() => R.parseAclOutput(bad), bad);
+      });
     });
 
     it('recordAclProblem: clean only when nobody but SYSTEM and Administrators may change the record or its directory', () => {
@@ -411,10 +497,25 @@ describe('doctor: the node identity record', () => {
       recordIdentity(s.configDir, s.keys);
       const withAcl = async (inspectAcl) => (await runDoctor({ dataDir: s.dataDir, configDir: s.configDir, adminUid: UID, deps: { identityRecord: { ...IDENTITY_RECORD_TEST_OPTIONS, inspectAcl } } }))
         .filter((x) => x.check === 'node identity record')[0];
-      assert.equal((await withAcl(clean)).ok, true);
-      const r = await withAcl(() => [acl(ace(ADMINS, FULL, 3), ace(SERVICE, MODIFY, 0x9)), clean()[1]]);
+      // doctor asks about three paths (fifth security review, finding 5): the config dir first.
+      const config = () => ({ ...clean()[0], owner: ADMINS });
+      const ownedClean = () => [config(), ...clean().map((e) => ({ ...e, owner: ADMINS }))];
+      const cleanRow = await withAcl(ownedClean);
+      assert.equal(cleanRow.ok, true);
+      assert.match(cleanRow.detail, /all three are owned by Administrators or SYSTEM, and no entry lets anyone else change them/);
+      const r = await withAcl(() => [config(), { ...acl(ace(ADMINS, FULL, 3), ace(SERVICE, MODIFY, 0x9)), owner: ADMINS }, ownedClean()[2]]);
       assert.equal(r.ok, false);
       assert.match(r.detail, /lets S-1-5-19 change it, through an entry that the files in it inherit/);
+      const swap = await withAcl(() => [{ ...acl(ace(ADMINS, FULL, 3), ace(SERVICE, READ | 0x40, 0)), owner: ADMINS }, ...ownedClean().slice(1)]);
+      assert.equal(swap.ok, false);
+      assert.match(swap.detail, /the access list of .*config lets S-1-5-19 change it/);
+      // The two-path answer of before is not three: not read, and said so.
+      const two = await withAcl(clean);
+      assert.equal(two.ok, true);
+      assert.match(two.detail, /Not checked here: who can change the record/);
+      // The answer the test helper gives, as every other doctor test gets it.
+      const helper = (await runDoctor({ dataDir: s.dataDir, configDir: s.configDir, adminUid: UID, deps: { identityRecord: IDENTITY_RECORD_TEST_OPTIONS } })).filter((x) => x.check === 'node identity record')[0];
+      assert.match(helper.detail, /all three are owned by Administrators or SYSTEM/);
     });
 
     // The real inspector (PowerShell, nothing injected), on a temp dir this
@@ -429,6 +530,13 @@ describe('doctor: the node identity record', () => {
       // As a temp dir is: this account has full control, inherited.
       const plain = R.recordAclProblem({ configDir: s.configDir });
       assert.equal(plain.state, 'writable', JSON.stringify(plain));
+      // The config dir is read too when doctor asks, and every path comes with its owner.
+      let read = null;
+      const wholeDir = R.recordAclProblem({ configDir: s.configDir, whole: true, inspectAcl: (paths) => { read = R.inspectWindowsAcl(paths); return read; } });
+      assert.equal(wholeDir.state, 'writable', JSON.stringify(wholeDir));
+      assert.equal(wholeDir.where, 'config', 'a temp dir: this account has full control of the config dir itself');
+      assert.equal(read.length, 3);
+      for (const entry of read) assert.match(entry.owner, /^S-1-(\d+-)*\d+$/);
       try {
         // Read and list for this account, and "modify" for every file in the directory, inherit-only.
         execFileSync(sys('icacls.exe'), [dir, '/inheritance:r', '/grant:r', `*${me}:(RX)`, `*${me}:(OI)(IO)(M)`], { stdio: 'ignore', windowsHide: true });

@@ -189,8 +189,10 @@ function aclScript() {
     '    $r = [KlFsInspect]::Inspect($p)',
     "    if ($null -eq $r) { [Console]::Out.WriteLine('missing'); continue }",
     '    $sd = [System.Security.AccessControl.RawSecurityDescriptor]::new([byte[]]$r[1], 0)',
-    "    if ($null -eq $sd.DiscretionaryAcl) { [Console]::Out.WriteLine('path nodacl'); continue }",
-    "    [Console]::Out.WriteLine('path dacl')",
+    "    $o = '-'",
+    '    if ($null -ne $sd.Owner) { $o = $sd.Owner.Value }',
+    "    if ($null -eq $sd.DiscretionaryAcl) { [Console]::Out.WriteLine('path nodacl ' + $o); continue }",
+    "    [Console]::Out.WriteLine('path dacl ' + $o)",
     '    foreach ($ace in $sd.DiscretionaryAcl) {',
     '      if ($ace -is [System.Security.AccessControl.CommonAce]) {',
     "        [Console]::Out.WriteLine(('ace {0} {1} {2:x8} {3}' -f [int]$ace.AceType, $ace.SecurityIdentifier.Value, $ace.AccessMask, [int]$ace.AceFlags))",
@@ -205,16 +207,20 @@ function aclScript() {
   ].join('\n');
 }
 
-// One entry per path asked about: null (nothing there), or { dacl, aces },
-// each ace { type, sid, mask, flags } or { other: true } (a kind this does
-// not read). Throws on output it does not know: no evidence is not trust.
+// One entry per path asked about: null (nothing there), or { dacl, aces }
+// with `owner` (a SID) when the descriptor names one, each ace
+// { type, sid, mask, flags } or { other: true } (a kind this does not
+// read). Throws on output it does not know: no evidence is not trust.
 function parseAclOutput(out) {
   const entries = [];
   for (const raw of String(out).trim().split(/\r?\n/)) {
     const line = raw.trim();
     if (line === 'missing') { entries.push(null); continue; }
-    if (line === 'path nodacl') { entries.push({ dacl: false, aces: [] }); continue; }
-    if (line === 'path dacl') { entries.push({ dacl: true, aces: [] }); continue; }
+    const head = /^path (dacl|nodacl)(?: (-|S-1-[0-9-]+))?$/.exec(line);
+    if (head) {
+      entries.push({ dacl: head[1] === 'dacl', ...(head[2] && head[2] !== '-' ? { owner: head[2] } : {}), aces: [] });
+      continue;
+    }
     const current = entries[entries.length - 1];
     if (!current) throw new Error('unexpected access list output');
     if (line === 'ace other') { current.aces.push({ other: true }); continue; }
@@ -241,9 +247,25 @@ function defaultInspectAcl(paths, { execFile = require('child_process').execFile
 // An entry that only the directory's files inherit counts: that is how a
 // record came to be writable in place while its directory refused new files.
 // A deny entry takes rights away and is not looked at. Windows only.
-function recordAclProblem({ configDir, inspectAcl = defaultInspectAcl } = {}) {
-  const targets = [recordDir(configDir), recordPath(configDir)];
-  const unread = { state: 'unread', detail: `the access lists of ${targets[1]} and its directory could not be read` };
+//
+// whole: what doctor asks (fifth security review, finding 5). The config dir
+// is read as well: whoever may delete or add in it can put a directory of
+// their own where identity\ is. An entry there that only what is in it
+// inherits is passed over, since it gives nothing on the config dir itself
+// and the two below it are read themselves. And the owners are judged, since
+// an owner can rewrite an access list whatever it says:
+//   { state: 'owner', detail }     no entry lets anybody else change the
+//                                  three, but one is not owned by SYSTEM or
+//                                  Administrators, or its owner was not read
+// `where` on a "writable" answer: 'config' or 'record'. The service's own
+// read (windowsAclProblem) asks about the two below the config dir only: its
+// owner rule accepts a config dir owned by another account than the
+// service's (a hand-made layout), which this would refuse.
+function recordAclProblem({ configDir, inspectAcl = defaultInspectAcl, whole = false } = {}) {
+  const below = [recordDir(configDir), recordPath(configDir)];
+  const targets = whole ? [configDir, ...below] : below;
+  const dirAt = targets.length - 2;
+  const unread = { state: 'unread', detail: `the access lists of ${below[1]}${whole ? ', its directory and the config dir' : ' and its directory'} could not be read` };
   let report;
   try {
     report = inspectAcl(targets);
@@ -253,7 +275,8 @@ function recordAclProblem({ configDir, inspectAcl = defaultInspectAcl } = {}) {
   if (!Array.isArray(report) || report.length !== targets.length || report.some((e) => !e || !Array.isArray(e.aces))) return unread;
   for (let i = 0; i < targets.length; i += 1) {
     const entry = report[i];
-    if (entry.dacl !== true) return { state: 'writable', detail: `${targets[i]} has no access list at all, so anyone can change it` };
+    const where = whole && i === 0 ? 'config' : 'record';
+    if (entry.dacl !== true) return { state: 'writable', where, detail: `${targets[i]} has no access list at all, so anyone can change it` };
     for (const ace of entry.aces) {
       if (!ace || ace.other || !Number.isInteger(ace.type) || !Number.isInteger(ace.mask) || typeof ace.sid !== 'string' || !SID_RE.test(ace.sid)) {
         return { state: 'unread', detail: `the access list of ${targets[i]} holds an entry of a kind that is not read here` };
@@ -261,8 +284,19 @@ function recordAclProblem({ configDir, inspectAcl = defaultInspectAcl } = {}) {
       if (ace.type === 1) continue;
       if (ace.type !== 0) return { state: 'unread', detail: `the access list of ${targets[i]} holds an entry of a kind that is not read here` };
       if (WINDOWS_TRUSTED_OWNERS.has(ace.sid) || (ace.mask & WINDOWS_WRITE_RIGHTS) === 0) continue;
-      const inherited = i === 0 && (Number(ace.flags) & WINDOWS_ACE_INHERIT_ONLY) ? ', through an entry that the files in it inherit' : '';
-      return { state: 'writable', detail: `the access list of ${targets[i]} lets ${ace.sid} change it${inherited}` };
+      const inheritOnly = Boolean(Number(ace.flags) & WINDOWS_ACE_INHERIT_ONLY);
+      if (where === 'config' && inheritOnly) continue;
+      const inherited = i === dirAt && inheritOnly ? ', through an entry that the files in it inherit' : '';
+      return { state: 'writable', where, detail: `the access list of ${targets[i]} lets ${ace.sid} change it${inherited}` };
+    }
+  }
+  if (whole) {
+    for (let i = 0; i < targets.length; i += 1) {
+      const owner = report[i].owner;
+      if (typeof owner !== 'string' || !SID_RE.test(owner)) return { state: 'owner', detail: `the owner of ${targets[i]} was not read` };
+      if (!WINDOWS_TRUSTED_OWNERS.has(owner)) {
+        return { state: 'owner', detail: `${targets[i]} is owned by ${owner}, which is neither Administrators nor SYSTEM: an owner can rewrite an access list whatever it says` };
+      }
     }
   }
   return { state: 'clean' };
@@ -587,6 +621,6 @@ function writeIdentityRecord({ configDir, nodeId, publicKey, platform = process.
 module.exports = {
   RECORD_DIR, RECORD_FILE, RECORD_MAX_BYTES, recordPath, publicKeyHex,
   readIdentityRecord, checkNodeIdentityRecord, assertRecordedIdentity, writeIdentityRecord, probeIdentityRecord,
-  recordAclProblem, parseAclOutput,
+  recordAclProblem, parseAclOutput, inspectWindowsAcl: defaultInspectAcl,
   windowsRecordDirAclArgs, windowsRecordFileAclArgs, windowsRecordOwnerArgs
 };
