@@ -25,11 +25,16 @@ function createHostReranker(host) {
 // private facts stay off third parties, as the cases outbound gate keeps
 // them. RERANK_SKIPPED 'case-chat' tells the Retriever to keep the fused
 // order without a warning.
+// The same holds for a chat that was imported (options.keepLocal, owner
+// ruling R-H4-2): with one in scope nothing is sent to Jev, and the reason
+// ('imported-chat') is what RERANK_SKIPPED carries. The local cross-encoder
+// reranks both.
 function createRecallReranker({ host, jev, getSettings }) {
   const local = createHostReranker(host);
   return async (query, chunks, options = {}) => {
     const { kind } = mergeHistorySettings((getSettings() || {}).history).recall.rerank;
     if (kind === 'jev' && options && options.caseId) throw new EmbedError('RERANK_SKIPPED', 'case-chat');
+    if (kind === 'jev' && options && options.keepLocal) throw new EmbedError('RERANK_SKIPPED', String(options.keepLocal));
     if (kind === 'jev' && jev) return jev.rerank(String(query), chunks.map((c) => String(c.text)), options);
     return local(query, chunks, options);
   };
@@ -50,4 +55,18 @@ function caseIdOf(store, chatIdOrIds) {
   return null;
 }
 
-module.exports = { createHostReranker, createRecallReranker, caseIdOf };
+// Why a rerank over these chats must stay on this machine, or null:
+// 'imported-chat' when any of them was imported (its source is set, or it
+// carries the mark of an imported case chat). One imported chat in a turn's
+// history scope keeps the whole rerank off Jev.
+function keepLocalReason(store, chatIdOrIds) {
+  if (!store || typeof store.chatRef !== 'function') return null;
+  for (const chatId of Array.isArray(chatIdOrIds) ? chatIdOrIds : [chatIdOrIds]) {
+    if (!chatId) continue;
+    const ref = store.chatRef(String(chatId));
+    if (ref && (ref.source || ref.importedFromCase === true)) return 'imported-chat';
+  }
+  return null;
+}
+
+module.exports = { createHostReranker, createRecallReranker, caseIdOf, keepLocalReason };

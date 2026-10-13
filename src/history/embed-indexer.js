@@ -18,6 +18,13 @@
 // change ends the idle). The core preloads the reranker from it, so that
 // download never holds the worker while the backfill or query embeddings
 // need it.
+//
+// An imported chat stays on this machine (owner ruling R-H4-2): only an
+// embedder whose key starts 'local:' (the model in the embed worker) is given
+// its chunks. Every other kind counts as hosted, Ollama included: its address
+// is a setting and need not be this machine. Under such a key those chunks
+// are not pending, so progress reaches 100% without them and they are found
+// by BM25 alone.
 const { mergeHistorySettings } = require('./settings');
 const { embedInput } = require('./embedders/vectors');
 const { WORKER_FAILURES } = require('./embed-errors');
@@ -26,6 +33,8 @@ const { createLogger } = require('../logging');
 // Pending and embedded counts are recounted (a full scan) every this many
 // batches, and adjusted in between.
 const RECOUNT_EVERY = 50;
+
+const isLocalKey = (key) => typeof key === 'string' && key.startsWith('local:');
 
 function startEmbedIndexer({
   store, host, getSettings, onProgress = () => {}, onIdle = () => {}, setTimer = setTimeout, clearTimer = clearTimeout,
@@ -94,6 +103,7 @@ function startEmbedIndexer({
     const embedder = host.current();
     if (!embedder) return none;
     const key = embedder.name;
+    const localOnly = isLocalKey(key);
     const cfg = settings();
     if (store.vectorEpoch !== epoch) {
       epoch = store.vectorEpoch;
@@ -102,10 +112,10 @@ function startEmbedIndexer({
       counts = null;
     }
     if (!counts || counts.key !== key || batches % RECOUNT_EVERY === 0) {
-      counts = { key, embedded: store.countEmbedded(key), pending: store.countPending(key, { maxChunksPerToolResult: cfg.maxChunksPerToolResult }) };
+      counts = { key, embedded: store.countEmbedded(key), pending: store.countPending(key, { maxChunksPerToolResult: cfg.maxChunksPerToolResult, localOnly }) };
     }
     batches += 1;
-    const opts = { limit: cfg.batchSize, maxChunksPerToolResult: cfg.maxChunksPerToolResult };
+    const opts = { limit: cfg.batchSize, maxChunksPerToolResult: cfg.maxChunksPerToolResult, localOnly };
     let fromCursor = false;
     let rows = preferred !== null ? store.pendingEmbeddings(key, { ...opts, chatId: preferred }) : [];
     if (!rows.length) {
@@ -186,4 +196,4 @@ function startEmbedIndexer({
   return api;
 }
 
-module.exports = { startEmbedIndexer };
+module.exports = { startEmbedIndexer, isLocalKey };

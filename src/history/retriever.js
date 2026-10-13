@@ -52,10 +52,11 @@ class Retriever {
   // 1-based.
   // vectorOf (optional): (chunk) => its unit vector or null, for the cosine
   // dedupe (step 7 with vectors).
-  // reranker (optional): async (query, chunks, { maxMs, info, caseId }) =>
+  // reranker (optional): async (query, chunks, { maxMs, info, caseId, keepLocal }) =>
   // scores, one finite number per chunk, higher is more relevant; it may
   // name itself in info.name. caseId is the chat's case (null for a chat
-  // with none). Used only when rerank.enabled.
+  // with none); keepLocal is why the chunks must not leave this machine
+  // ('imported-chat') or null. Used only when rerank.enabled.
   constructor({ store, estimator, vectorSearch = null, vectorOf = null, reranker = null }) {
     this.store = store;
     this.estimator = estimator;
@@ -72,9 +73,10 @@ class Retriever {
   // as it was for this turn. stats gets reranker (info.name, set by the
   // reranker: 'local:<model>', 'jev:<model>') or rerankSkipped (why not).
   // A reranker that declines on purpose throws RERANK_SKIPPED with the
-  // reason as its message ('case-chat': Jev never reranks a case chat):
+  // reason as its message ('case-chat': Jev never reranks a case chat;
+  // 'imported-chat': nor a scope that holds an imported one):
   // the fused order, the reason in stats, and no log line.
-  async _rerank(query, items, rerank, reranker, stats = null, caseId = null) {
+  async _rerank(query, items, rerank, reranker, stats = null, caseId = null, keepLocal = null) {
     const note = (name, skipped) => {
       if (stats && typeof stats === 'object') {
         stats.reranker = name;
@@ -90,7 +92,7 @@ class Retriever {
     let scores;
     try {
       scores = await Promise.race([
-        Promise.resolve().then(() => reranker(query, head.map((item) => item.chunk), { maxMs, info, caseId })),
+        Promise.resolve().then(() => reranker(query, head.map((item) => item.chunk), { maxMs, info, caseId, keepLocal })),
         new Promise((resolve) => { timer = setTimeout(resolve, maxMs, TIMED_OUT); })
       ]);
     } catch (err) {
@@ -187,7 +189,7 @@ class Retriever {
   async retrieve({
     query, contextQueries = [], chatIds, kinds = null, excludeMessageIds = [], budgetTokens = null, upToSeq = null,
     upToSeqChatId = null, settings, model = null, now = Date.now(), vectorHits = null, lexical = true, reranker = null, vectorOf = null, stats = null,
-    caseId = null
+    caseId = null, keepLocal = null
   } = {}) {
     const s = { ...HISTORY_DEFAULTS.recall, ...(settings || {}) };
     const rerank = { ...HISTORY_DEFAULTS.recall.rerank, ...(s.rerank || {}) };
@@ -251,7 +253,7 @@ class Retriever {
     });
 
     // Step 6: rerank the first topM.
-    const deduped = rerank.enabled && rerankWith ? await this._rerank(query, unique, rerank, rerankWith, stats, caseId || null) : unique;
+    const deduped = rerank.enabled && rerankWith ? await this._rerank(query, unique, rerank, rerankWith, stats, caseId || null, keepLocal || null) : unique;
 
     // Step 8: per-message cap, then the token budget when one is given.
     // completeMessageTokens > 0: the first hit on a message whose whole text

@@ -22,6 +22,12 @@ const MISSING = 'NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.chunk_id = c.id 
 // maxChunksPerToolResult: only the first n chunks of a tool result.
 const CAPPED = "(? = 0 OR c.kind <> 'tool_result' OR c.idx < ?)";
 const capOf = (n) => (Number.isInteger(n) && n > 0 ? n : 0);
+// An imported chat (chats.source set) stays on this machine (owner ruling
+// R-H4-2): its chunks are pending only for a caller that says it embeds
+// locally (localOnly exactly true, the 'local:' key). A caller that does not
+// say is treated as hosted and is never given them.
+const KEPT_LOCAL = '(? = 1 OR NOT EXISTS (SELECT 1 FROM chats ch WHERE ch.id = c.chat_id AND ch.source IS NOT NULL))';
+const localFlag = (localOnly) => (localOnly === true ? 1 : 0);
 
 // Only for chunks that still exist: a truncate between the read and the
 // write leaves nothing to write, and no foreign-key error.
@@ -37,22 +43,24 @@ function putEmbeddings(db, model, rows) {
   return written;
 }
 
-function pendingEmbeddings(db, model, { limit = 16, chatId = null, afterId = 0, maxChunksPerToolResult = 0 } = {}) {
+function pendingEmbeddings(db, model, { limit = 16, chatId = null, afterId = 0, maxChunksPerToolResult = 0, localOnly = false } = {}) {
   const max = Number.isInteger(limit) && limit > 0 ? limit : 16;
   const cap = capOf(maxChunksPerToolResult);
+  const local = localFlag(localOnly);
   const cols = 'c.id AS id, c.chat_id AS chatId, c.kind AS kind, c.text AS text';
   if (chatId !== null && chatId !== undefined) {
-    return prepared(db, `SELECT ${cols} FROM chunks c WHERE c.chat_id = ? AND ${MISSING} AND ${CAPPED} ORDER BY c.id DESC LIMIT ?`)
-      .all(String(chatId), String(model), cap, cap, max);
+    return prepared(db, `SELECT ${cols} FROM chunks c WHERE c.chat_id = ? AND ${MISSING} AND ${CAPPED} AND ${KEPT_LOCAL} ORDER BY c.id DESC LIMIT ?`)
+      .all(String(chatId), String(model), cap, cap, local, max);
   }
   const after = Number.isInteger(afterId) && afterId > 0 ? afterId : 0;
-  return prepared(db, `SELECT ${cols} FROM chunks c WHERE c.id > ? AND ${MISSING} AND ${CAPPED} ORDER BY c.id LIMIT ?`)
-    .all(after, String(model), cap, cap, max);
+  return prepared(db, `SELECT ${cols} FROM chunks c WHERE c.id > ? AND ${MISSING} AND ${CAPPED} AND ${KEPT_LOCAL} ORDER BY c.id LIMIT ?`)
+    .all(after, String(model), cap, cap, local, max);
 }
 
-function countPending(db, model, { maxChunksPerToolResult = 0 } = {}) {
+function countPending(db, model, { maxChunksPerToolResult = 0, localOnly = false } = {}) {
   const cap = capOf(maxChunksPerToolResult);
-  return Number(prepared(db, `SELECT count(*) AS n FROM chunks c WHERE ${MISSING} AND ${CAPPED}`).get(String(model), cap, cap).n);
+  return Number(prepared(db, `SELECT count(*) AS n FROM chunks c WHERE ${MISSING} AND ${CAPPED} AND ${KEPT_LOCAL}`)
+    .get(String(model), cap, cap, localFlag(localOnly)).n);
 }
 
 function countEmbedded(db, model) {

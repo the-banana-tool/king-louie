@@ -124,6 +124,15 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **The fixture is ten records chosen from the helper's list** (seven messages: two user turns, a reply, two tool calls with their results). `tests/history-core.test.js` gained one case (the sweep at `start()`); nothing in it changed.
 - **`src/history/index.js` exports the import functions** by spreading `import-chats.js` (also `IMPORT_KINDS`, `IMPORT_SENDERS`).
 
+**Task 10**
+
+- **`localOnly` counts only as an exact `true`**; any other value is the hosted reading. `isLocalKey(key)` (exported from `embed-indexer.js`) is the one test of a key: a string starting `local:`.
+- **`keepLocalReason` also names a chat that carries the `importedFromCase` mark without a `source`** (Task 8 treats that mark alone as an import), and takes one id or a list, as `caseIdOf` does. The SQL in `pendingEmbeddings` and `countPending` is the task's (`source IS NOT NULL`); every import sets `source`.
+- **`keepLocal` is always in the reranker's options** (`null` when nothing is imported), beside `caseId`; LongHaul's scorers get one more key and ignore it. A case chat in scope still answers `case-chat` first.
+- **A rebuild** is `deleteEmbeddings` and the same indexer, so it goes through `pendingEmbeddings` and needs no change; a test pins it.
+- **The per-turn query is still embedded by the active embedder, also in a turn of an imported chat** (as "What the rulings cost" says). That query is the owner's new message, which is then stored in the imported chat and, as a chunk, never sent. **For the owner:** if a message typed into an imported chat must not reach a hosted embedder even as the query, the vector search has to be skipped for that chat's turns under a hosted key; not built.
+- **Tests.** The new cases are in `tests/history-imports-local.test.js` and one in `tests/history-embeddings-store.test.js`. `tests/history-embed-indexer.test.js` and `tests/history-jev-reranker.test.js` needed no change (their fake key `fake:bow` is a hosted key and their chats are native) and are not in the commit.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named).

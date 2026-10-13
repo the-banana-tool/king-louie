@@ -6,7 +6,7 @@
 const { mergeHistorySettings } = require('./settings');
 const { toolUseSummary, toolResultText } = require('./chunker');
 const { formatExcerpts, formatRecalledBlock } = require('./excerpts');
-const { caseIdOf } = require('./reranker');
+const { caseIdOf, keepLocalReason } = require('./reranker');
 const { SCOPES } = require('./scope');
 
 const PAGE = 200;
@@ -98,6 +98,8 @@ class ContextBuilder {
         reranker,
         vectorOf,
         caseId: caseIdOf(this.store, scope.chatIds),
+        // An imported chat in scope keeps it off Jev too (R-H4-2).
+        keepLocal: keepLocalReason(this.store, scope.chatIds),
         stats: retrieval
       });
       if (hits.length) {

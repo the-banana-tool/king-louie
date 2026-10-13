@@ -90,6 +90,24 @@ describe('the embeddings table', () => {
     assert.strictEqual(t.store.pendingEmbeddings(KEY, { limit: 1 }).length, 1);
   });
 
+  it('R-H4-2: pending leaves an imported chat out unless localOnly is set', () => {
+    t = openTempStore();
+    seedChat(t.store, { messages: [{ sender: 'user', text: 'first gate note' }] });
+    t.store.createChat({ id: 'imported', title: 'Imported', source: 'markdown-transcript', messages: [] });
+    t.store.appendMessage('imported', { id: 'i1', sender: 'user', text: 'imported fence note', timestamp: '2026-01-02T09:00:00.000Z' });
+    t.store.appendMessage('imported', { id: 'i2', sender: 'assistant', text: 'imported culvert note', timestamp: '2026-01-02T09:01:00.000Z' });
+    // A caller that does not say is treated as hosted.
+    assert.deepStrictEqual(t.store.pendingEmbeddings(KEY, { limit: 10 }).map((r) => r.chatId), ['chat-1']);
+    assert.deepStrictEqual(t.store.pendingEmbeddings(KEY, { limit: 10, localOnly: false }).map((r) => r.chatId), ['chat-1']);
+    assert.deepStrictEqual(t.store.pendingEmbeddings(KEY, { limit: 10, chatId: 'imported' }), []);
+    assert.deepStrictEqual(t.store.pendingEmbeddings(KEY, { limit: 10, chatId: 'imported', localOnly: 'yes' }), [], 'only an exact true');
+    assert.strictEqual(t.store.countPending(KEY), 1);
+    assert.strictEqual(t.store.countPending(KEY, { localOnly: false }), 1);
+    assert.deepStrictEqual(t.store.pendingEmbeddings(KEY, { limit: 10, localOnly: true }).map((r) => r.chatId), ['chat-1', 'imported', 'imported']);
+    assert.deepStrictEqual(t.store.pendingEmbeddings(KEY, { limit: 10, chatId: 'imported', localOnly: true }).map((r) => r.text), ['imported culvert note', 'imported fence note']);
+    assert.strictEqual(t.store.countPending(KEY, { localOnly: true }), 3);
+  });
+
   it('maxChunksPerToolResult caps the chunks of one tool result that are embedded', () => {
     t = openTempStore();
     const long = Array.from({ length: 5 }, (_, i) => `Section ${i + 1} of the survey output. ${'drainage reading '.repeat(100)}`).join('\n\n');

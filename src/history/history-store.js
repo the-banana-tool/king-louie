@@ -585,6 +585,8 @@ class HistoryStore {
     if (!this.embeddable || this.readonly || !Array.isArray(rows) || !rows.length) return 0;
     return this.transaction((db) => embeddingIndex.putEmbeddings(db, model, rows));
   }
+  // options.localOnly (exactly true) is the local embedder's: without it an
+  // imported chat's chunks are never pending (owner ruling R-H4-2).
   pendingEmbeddings(model, options = {}) { return this.embeddable ? embeddingIndex.pendingEmbeddings(this.db, model, options) : []; }
   countPending(model, options = {}) { return this.embeddable ? embeddingIndex.countPending(this.db, model, options) : 0; }
   countEmbedded(model) { return this.embeddable ? embeddingIndex.countEmbedded(this.db, model) : 0; }

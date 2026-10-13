@@ -3,7 +3,7 @@
 // without the budget step (spec §8); the recall line's drawer shows the
 // excerpts one reply was given (§7).
 const { formatExcerpts } = require('./excerpts');
-const { caseIdOf } = require('./reranker');
+const { caseIdOf, keepLocalReason } = require('./reranker');
 const { createLogger } = require('../logging');
 
 const log = createLogger('history-search');
@@ -23,7 +23,9 @@ async function searchHistoryExcerpts({ store, retriever, chatId, chatIds = null,
   const hits = await retriever.retrieve({
     query, chatIds: scope, kinds, budgetTokens: null, settings: s, now: asOf, reranker: useRerank ? reranker : null,
     // One case chat anywhere in scope keeps the rerank off Jev.
-    caseId: useRerank ? caseIdOf(store, scope) : null
+    caseId: useRerank ? caseIdOf(store, scope) : null,
+    // So does one imported chat (R-H4-2).
+    keepLocal: useRerank ? keepLocalReason(store, scope) : null
   });
   const chunks = hits.map((h) => h.chunk);
   const chunkCounts = store.messageChunkCounts([...new Set(chunks.map((c) => c.messageId))]);
