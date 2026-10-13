@@ -1056,15 +1056,20 @@ describe('lock, expiry and revoke', () => {
       assert.deepEqual(listed.map((m) => [m.lease_id, m.state, m.reason]), [[live.leaseId, 'active', null], [first.leaseId, 'ended', 'revoked']]);
       for (const m of listed) {
         assert.equal(m.type, 'kl.lease.status');
-        assert.equal(m.at, new Date(clock.now()).toISOString(), 'signed for this request, not an old one');
         assert.deepEqual(m.granted_by, { device_id: phone.deviceId, name: 'Owner phone' });
       }
+      // The live one is signed for this request (its newest status was 30 s old); the one that
+      // ended is the status signed when it ended, which nothing has changed since.
+      assert.equal(listed[0].at, new Date(clock.now()).toISOString(), 'signed for this request, not an old one');
+      assert.equal(listed[1].at, new Date(clock.now() - 30000).toISOString());
       assert.equal(relay.all('kl.lease.status').length, sent, 'answered to the phone that asked; not broadcast');
       // The live one carries a token the granting phone can make contact with.
       assert.equal(leases.verifyWatch(phone.leaseWatch(identity.nodeId, live.leaseId, { contactToken: listed[0].contact_token })).contact, true);
-      // Each listing is newer than the last (the phones apply by seq).
+      // That token has made contact, so the next listing signs the live lease anew (a phone
+      // always gets a token it can still use); the ended one is never signed again.
       const again = leases.listFor(other.deviceId).map((envelope) => open(envelope).message);
-      assert.ok(again[0].seq > listed[0].seq && again[1].seq > listed[1].seq);
+      assert.equal(again[0].seq, listed[0].seq + 1);
+      assert.equal(again[1].seq, listed[1].seq);
       // A device this node does not know, a revoked one, and no device at all.
       assert.deepEqual(leases.listFor(createFakePhone().deviceId), []);
       assert.deepEqual(leases.listFor(null), []);
@@ -1095,6 +1100,67 @@ describe('lock, expiry and revoke', () => {
       assert.deepEqual([late.state, late.reason], ['rejected', 'unknown_request']);
       assert.equal(leases.current(), null);
       assert.deepEqual(leases.listingFor(phone.deviceId, 'n'.repeat(43)).statuses.map((e) => open(e).message.state), ['ended']);
+    });
+
+    // Fourth security review: every lease.list used to sign a new status for
+    // each lease it listed, so a relay (which may call it at will) could run
+    // a lease's seq up without bound and push the contact tokens its phones
+    // hold out of the node's memory. A listing now reuses the lease's newest
+    // status while that still says what the lease is, is under five seconds
+    // old and carries a token that has not made contact; an ended lease's
+    // status is never signed again.
+    it('listing at will does not run up a lease\'s seq or mint tokens: the newest status is reused for five seconds', async () => {
+      const first = await granted();
+      leases.onRevoke(phone.leaseRevoke(identity.nodeId, first.leaseId));
+      const live = await granted({ jobId: 'job-2' });
+      timers.advance(30000);
+      const lease = leases.find(live.leaseId);
+      const ended = leases.find(first.leaseId);
+      const base = leases.listFor(other.deviceId);
+      const seq = lease.seq;
+      const tokens = lease.tokens.size;
+      const endedSeq = ended.seq;
+      // A relay asking a thousand times, for either phone, with or without a nonce.
+      for (let i = 0; i < 1000; i += 1) {
+        const answer = i % 2 ? leases.listFor(phone.deviceId) : leases.listingFor(other.deviceId, 'n'.repeat(43)).statuses;
+        assert.deepEqual(answer, base);
+      }
+      assert.equal(lease.seq, seq);
+      assert.equal(lease.tokens.size, tokens);
+      assert.equal(ended.seq, endedSeq);
+      // The listing over those reused statuses still checks, for the phone that asked.
+      const answer = leases.listingFor(phone.deviceId, 'n'.repeat(43));
+      const check = L.verifyLeaseListing(answer.listing, { nodeId: identity.nodeId, nodePublicKeyHex: identity.publicKey.toString('hex'), nonce: 'n'.repeat(43), deviceId: phone.deviceId, statuses: answer.statuses });
+      assert.equal(check.accepted, true, check.reason);
+      // Its token still makes contact for the granting phone.
+      assert.equal(leases.verifyWatch(phone.leaseWatch(identity.nodeId, live.leaseId, { contactToken: open(base[0]).message.contact_token })).contact, true);
+      // Asked every 100 ms for a minute: one new status every five seconds, no more.
+      const before = lease.seq;
+      for (let i = 0; i < 600; i += 1) {
+        timers.advance(100);
+        leases.listFor(other.deviceId);
+      }
+      assert.ok(lease.seq - before <= 13, `seq rose by ${lease.seq - before} in a minute of listing`);
+      assert.ok(lease.seq - before >= 11);
+      assert.equal(ended.seq, endedSeq, 'an ended lease is not signed again, however long it is listed');
+      // What the lease is has changed: the next listing says so at once.
+      const fresh = leases.listFor(other.deviceId);
+      leases.onRevoke(other.leaseRevoke(identity.nodeId, live.leaseId));
+      const after = leases.listFor(other.deviceId).map((e) => open(e).message);
+      assert.deepEqual([after[0].lease_id, after[0].state], [live.leaseId, 'ended']);
+      assert.ok(after[0].seq > open(fresh[0]).message.seq);
+    });
+
+    it('a status signed while the relay link was down is not what a listing reuses: the lease is signed as it is now', async () => {
+      const live = await granted();
+      const before = open(leases.listFor(phone.deviceId)[0]).message;
+      // The lease changes with nobody to tell (no status is signed while the link is down).
+      relay.connected = false;
+      leases.setLocked(true);
+      relay.connected = true;
+      const now = open(leases.listFor(phone.deviceId)[0]).message;
+      assert.equal(now.locked, true);
+      assert.equal(now.seq, before.seq + 1);
     });
 
     it('listFor lists at most the live lease and the four that ended last', async () => {
@@ -1146,6 +1212,8 @@ describe('lock, expiry and revoke', () => {
       it('a relay that strips a status, swaps in an older one, or replays an old answer is caught', async () => {
         const live = await granted();
         const old = leases.listingFor(phone.deviceId, 'o'.repeat(43));
+        // Six seconds on, so the node signs the lease anew (within five it gives its newest status again).
+        timers.advance(6000);
         const answer = leases.listingFor(phone.deviceId, NONCE);
         // An entry withheld; the listing itself withheld is simply no answer.
         assert.equal(check({ listing: answer.listing, statuses: [] }).reason, 'status_missing');

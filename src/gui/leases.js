@@ -48,6 +48,10 @@ const CONTACT_MAX_S = 300;
 const CONTACT_TOKENS_MAX = 2048;
 // R-F5-18: how many ended leases a phone's listing names besides the live one.
 const LISTED_ENDED = 4;
+// How long a listing may reuse a live lease's newest status before it signs
+// a new one (fourth security review): the relay may ask at will, and each
+// new status costs a seq and a contact token.
+const LIST_RESIGN_MS = 5000;
 
 // The nonces of the watches and revokes one lease has accepted (security
 // review finding 5). Those messages carry no validity window of their own,
@@ -792,14 +796,42 @@ class LeaseManager extends EventEmitter {
   // A status signed now, with a fresh contact token and who granted the
   // lease; kept as the lease's newest, for the reply to a phone's message.
   _signStatus(lease) {
+    const contactToken = lease.state === 'ended' ? null : this.mintContactToken(lease);
     const envelope = L.buildLeaseStatus({
       identity: this.approvals.identity, leaseId: lease.leaseId, seq: this.nextSeq(lease), state: lease.state, locked: lease.locked,
       reason: lease.endReason || lease.suspendReason || null, expiresAt: lease.expiresAt,
-      contactToken: lease.state === 'ended' ? null : this.mintContactToken(lease),
+      contactToken,
       grantedBy: lease.grantedBy ? { deviceId: lease.grantedBy, name: lease.grantedByName } : null, now: this.clock()
     });
     lease.lastStatus = envelope;
+    // What that status says, when it was signed and with which token: a listing reuses it while all three still hold.
+    lease.lastStatusOf = { says: this._statusSays(lease), at: this._stamp(), token: contactToken };
     return envelope;
+  }
+
+  // Everything a status says of a lease besides its seq, its time and its token.
+  _statusSays(lease) {
+    return JSON.stringify([lease.state, lease.locked, lease.endReason || lease.suspendReason || null, lease.expiresAt, lease.grantedBy, lease.grantedByName]);
+  }
+
+  // The status a listing gives for a lease (fourth security review). Every
+  // lease.list used to sign a new one, and the relay may call lease.list as
+  // often as it likes: each call cost the lease a seq and a contact token,
+  // without bound, and enough of them pushed the tokens its phones hold out
+  // of memory. So the lease's newest status is given again while it still
+  // says what the lease is and, for a lease that has not ended, is under
+  // LIST_RESIGN_MS old on both clocks and carries a token that is still
+  // known and has not made contact (a phone must always get one it can
+  // use). An ended lease's status is never signed again: nothing in it can
+  // change. Otherwise a status is signed now.
+  _listedStatus(lease) {
+    const last = lease.lastStatusOf;
+    if (lease.lastStatus && last && last.says === this._statusSays(lease)) {
+      if (lease.state === 'ended') return lease.lastStatus;
+      const issued = last.token === null ? null : lease.tokens.get(last.token);
+      if (issued && issued.n > lease.tokenUsedUpTo && !this._passed(last.at, LIST_RESIGN_MS)) return lease.lastStatus;
+    }
+    return this._signStatus(lease);
   }
 
   // That status, sent to the phones. Nothing is signed while the relay link
@@ -816,8 +848,9 @@ class LeaseManager extends EventEmitter {
   }
 
   // R-F5-18: what a phone asks for when it opens (one signed request to the
-  // relay, which names the device it authenticated): a status signed now
-  // for the live lease, if there is one, and for the few that ended last,
+  // relay, which names the device it authenticated): a status for the live
+  // lease, if there is one (signed now, or its newest when that is a few
+  // seconds old: _listedStatus), and for the few that ended last,
   // so a phone that granted nothing, or was restarted, can show a lease
   // that is running and stop it, and learns from the node's own signature
   // that one it knew has ended. Only for a device enrolled here and not
@@ -829,7 +862,7 @@ class LeaseManager extends EventEmitter {
     if (!this._enrolled(deviceId)) return [];
     const live = this.current();
     const ended = this.leases.filter((l) => l.state === 'ended').slice(-LISTED_ENDED).reverse();
-    return [...(live ? [live] : []), ...ended].map((lease) => this._signStatus(lease));
+    return [...(live ? [live] : []), ...ended].map((lease) => this._listedStatus(lease));
   }
 
   // R-F5-20 (owner ruling, 2026-10-13): a relay cannot hide a live lease
@@ -849,4 +882,4 @@ class LeaseManager extends EventEmitter {
   }
 }
 
-module.exports = { LeaseManager, CONTACT_REASON, CONTACT_MAX_S, GRANTOR_REVOKED_REASON, GRANTOR_CHECK_MS };
+module.exports = { LeaseManager, CONTACT_REASON, CONTACT_MAX_S, GRANTOR_REVOKED_REASON, GRANTOR_CHECK_MS, LIST_RESIGN_MS };
