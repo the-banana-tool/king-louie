@@ -8,9 +8,16 @@ const R = require('../../src/service/identity-record');
 
 const ADMINISTRATORS = 'S-1-5-32-544';
 const owned = { owner: ADMINISTRATORS, link: false };
+// What doctor reads of the access lists on Windows, answered in place too:
+// what "identity record" leaves (SYSTEM and Administrators in full, LOCAL
+// SERVICE read and execute), for the directory and for the file.
+const adminAcl = (flags) => ({ dacl: true, aces: [
+  { type: 0, sid: 'S-1-5-18', mask: 0x1f01ff, flags }, { type: 0, sid: ADMINISTRATORS, mask: 0x1f01ff, flags }, { type: 0, sid: 'S-1-5-19', mask: 0x1200a9, flags }
+] });
 const IDENTITY_RECORD_TEST_OPTIONS = Object.freeze({
   serviceProbe: false,
-  inspectOwners: () => ({ me: 'S-1-5-21-1-2-3-1001', entries: [owned, owned, owned] })
+  inspectOwners: () => ({ me: 'S-1-5-21-1-2-3-1001', entries: [owned, owned, owned] }),
+  inspectAcl: () => [adminAcl(3), adminAcl(0)]
 });
 
 // identity: { nodeId, publicKey } with the key as DER hex or a Buffer.

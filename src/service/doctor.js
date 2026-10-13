@@ -7,6 +7,33 @@ function posixPrivate(file) {
 }
 
 // adminUid is the uid that must own node.yaml and the runbooks on POSIX
+// The "node identity record" row for a record that names the identity in the
+// data dir, with what doctor did not check said in it (fourth security
+// review, finding 5): the row used to read as a plain "ok" where the service
+// could still refuse. `acl`: recordAclProblem's answer on Windows, null
+// elsewhere.
+function identityMatchRow({ seen, platform, acl = null }) {
+  const check = 'node identity record';
+  const privateHalf = 'that the data dir holds this key\'s private half (doctor does not resolve the master key; the service and "session install" check it)';
+  const base = `${seen.recorded.nodeId}, recorded by an administrator in ${seen.file}`;
+  if (platform !== 'win32') {
+    return { check, ok: true, detail: `${base} (public keys compared; owner and mode read). Not checked here: ${privateHalf}` };
+  }
+  const probe = 'whether the account the service runs as can write the record (an administrator always can, so doctor\'s own attempt would show nothing; the service probes it itself when it starts and before each lease request, and refuses a record it can write)';
+  if (acl && acl.state === 'writable') {
+    return {
+      check, ok: false,
+      detail: `${seen.file} names this identity, but ${acl.detail}. Whoever can change the record can make it vouch for another identity, and the service refuses a record its own account can write. `
+        + 'As root or an Administrator find out who changed the access list, then run "king-louie-service identity record --replace", which writes the record anew in a new directory with an access list of its own'
+    };
+  }
+  if (acl && acl.state === 'clean') {
+    return { check, ok: true, detail: `${base} (public keys compared; owners and access lists read: only SYSTEM and Administrators can change the record or its directory). Not checked here: ${privateHalf}; ${probe}` };
+  }
+  const why = (acl && acl.detail) || 'the access lists of the record and its directory were not read';
+  return { check, ok: true, detail: `${base} (public keys compared; owners read). Not checked here: who can change the record (${why}; run doctor from an elevated prompt); ${privateHalf}; ${probe}` };
+}
+
 // (default root). The CLI never passes it; tests pass their own euid so the
 // wiring runs unprivileged too.
 // Async: the approval checks wait for the approver store to load.
@@ -155,7 +182,11 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
       // write the directory; the service's own probe is the one that counts.
       const seen = checkNodeIdentityRecord({ configDir: dir, dataDir, identity: held, platform, adminUid, serviceProbe: false, ...(deps.identityRecord || {}) });
       if (seen.state === 'match') {
-        results.push({ check: 'node identity record', ok: true, detail: `${seen.recorded.nodeId}, recorded by an administrator in ${seen.file}` });
+        // Windows: who the access lists let change the record, which neither
+        // the owner read above nor an administrator's own write would show.
+        const { recordAclProblem } = require('./identity-record');
+        const acl = platform === 'win32' ? recordAclProblem({ configDir: dir, ...(deps.identityRecord && deps.identityRecord.inspectAcl ? { inspectAcl: deps.identityRecord.inspectAcl } : {}) }) : null;
+        results.push(identityMatchRow({ seen, platform, acl }));
       } else if (seen.state === 'none') {
         results.push({ check: 'node identity record', ok: true, warn: true, detail: `${seen.problem}. Until then the service runs, computer use stays off and "session install" refuses` });
       } else {
@@ -247,4 +278,4 @@ async function approvalChecks({ dataDir, platform, adminUid = 0 }) {
   return out;
 }
 
-module.exports = { runDoctor };
+module.exports = { runDoctor, identityMatchRow };

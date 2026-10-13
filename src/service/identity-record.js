@@ -158,6 +158,112 @@ function probeIdentityRecord({ configDir, platform = process.platform, fsImpl = 
   return problem === null ? null : `${file} ${problem}`;
 }
 
+// What doctor reads on Windows, which the service's probe cannot ask and an
+// administrator's own write attempt cannot show (fourth security review,
+// finding 5): the access lists of the record's directory and of the record,
+// through the installers' handle-based inspector (one no-follow handle per
+// path, framework types only, no Get-Acl). Reading them needs no privilege
+// beyond being allowed to open the two; an account that is not allowed gets
+// "unread", which is said as such.
+//
+// Rights that let their holder change a file, or what a directory holds, or
+// who may: write data / add file, append / add subdirectory, write extended
+// attributes, delete child, write attributes, delete, WRITE_DAC, WRITE_OWNER,
+// GENERIC_ALL, GENERIC_WRITE.
+const WINDOWS_WRITE_RIGHTS = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000;
+const WINDOWS_ACE_INHERIT_ONLY = 0x8;
+
+function aclScript() {
+  const { WINDOWS_INSPECT_CSHARP } = require('./installers');
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    'try {',
+    "  Add-Type -TypeDefinition @'",
+    WINDOWS_INSPECT_CSHARP,
+    "'@",
+    '  foreach ($p in $env:KL_INSPECT_PATHS.Split([char]10)) {',
+    '    $r = [KlFsInspect]::Inspect($p)',
+    "    if ($null -eq $r) { [Console]::Out.WriteLine('missing'); continue }",
+    '    $sd = [System.Security.AccessControl.RawSecurityDescriptor]::new([byte[]]$r[1], 0)',
+    "    if ($null -eq $sd.DiscretionaryAcl) { [Console]::Out.WriteLine('path nodacl'); continue }",
+    "    [Console]::Out.WriteLine('path dacl')",
+    '    foreach ($ace in $sd.DiscretionaryAcl) {',
+    '      if ($ace -is [System.Security.AccessControl.CommonAce]) {',
+    "        [Console]::Out.WriteLine(('ace {0} {1} {2:x8} {3}' -f [int]$ace.AceType, $ace.SecurityIdentifier.Value, $ace.AccessMask, [int]$ace.AceFlags))",
+    "      } else { [Console]::Out.WriteLine('ace other') }",
+    '    }',
+    '  }',
+    '  exit 0',
+    '} catch {',
+    '  [Console]::Error.WriteLine($_.Exception.Message)',
+    '  exit 1',
+    '}'
+  ].join('\n');
+}
+
+// One entry per path asked about: null (nothing there), or { dacl, aces },
+// each ace { type, sid, mask, flags } or { other: true } (a kind this does
+// not read). Throws on output it does not know: no evidence is not trust.
+function parseAclOutput(out) {
+  const entries = [];
+  for (const raw of String(out).trim().split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === 'missing') { entries.push(null); continue; }
+    if (line === 'path nodacl') { entries.push({ dacl: false, aces: [] }); continue; }
+    if (line === 'path dacl') { entries.push({ dacl: true, aces: [] }); continue; }
+    const current = entries[entries.length - 1];
+    if (!current) throw new Error('unexpected access list output');
+    if (line === 'ace other') { current.aces.push({ other: true }); continue; }
+    const m = /^ace (\d+) (S-1-[0-9-]+) ([0-9a-f]{8}) (\d+)$/.exec(line);
+    if (!m) throw new Error('unexpected access list output');
+    current.aces.push({ type: Number(m[1]), sid: m[2], mask: parseInt(m[3], 16), flags: Number(m[4]) });
+  }
+  return entries;
+}
+
+function defaultInspectAcl(paths, { execFile = require('child_process').execFileSync, env = process.env } = {}) {
+  const { windowsPowerShellExe } = require('../platform/windows-paths');
+  return parseAclOutput(execFile(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-Command', aclScript()], {
+    env: { ...env, KL_INSPECT_PATHS: paths.join('\n') }, encoding: 'utf8', windowsHide: true, timeout: 30000, stdio: ['ignore', 'pipe', 'ignore']
+  }));
+}
+
+// Who, besides SYSTEM and Administrators, the access lists of the record and
+// of its directory let change them:
+//   { state: 'clean' }             nobody
+//   { state: 'writable', detail }  somebody: `detail` names the path and the SID
+//   { state: 'unread', detail }    they could not be read, or hold an entry of
+//                                  a kind this does not read
+// An entry that only the directory's files inherit counts: that is how a
+// record came to be writable in place while its directory refused new files.
+// A deny entry takes rights away and is not looked at. Windows only.
+function recordAclProblem({ configDir, inspectAcl = defaultInspectAcl } = {}) {
+  const targets = [recordDir(configDir), recordPath(configDir)];
+  const unread = { state: 'unread', detail: `the access lists of ${targets[1]} and its directory could not be read` };
+  let report;
+  try {
+    report = inspectAcl(targets);
+  } catch {
+    return unread;
+  }
+  if (!Array.isArray(report) || report.length !== targets.length || report.some((e) => !e || !Array.isArray(e.aces))) return unread;
+  for (let i = 0; i < targets.length; i += 1) {
+    const entry = report[i];
+    if (entry.dacl !== true) return { state: 'writable', detail: `${targets[i]} has no access list at all, so anyone can change it` };
+    for (const ace of entry.aces) {
+      if (!ace || ace.other || !Number.isInteger(ace.type) || !Number.isInteger(ace.mask) || typeof ace.sid !== 'string' || !SID_RE.test(ace.sid)) {
+        return { state: 'unread', detail: `the access list of ${targets[i]} holds an entry of a kind doctor does not read` };
+      }
+      if (ace.type === 1) continue;
+      if (ace.type !== 0) return { state: 'unread', detail: `the access list of ${targets[i]} holds an entry of a kind doctor does not read` };
+      if (WINDOWS_TRUSTED_OWNERS.has(ace.sid) || (ace.mask & WINDOWS_WRITE_RIGHTS) === 0) continue;
+      const inherited = i === 0 && (Number(ace.flags) & WINDOWS_ACE_INHERIT_ONLY) ? ', through an entry that the files in it inherit' : '';
+      return { state: 'writable', detail: `the access list of ${targets[i]} lets ${ace.sid} change it${inherited}` };
+    }
+  }
+  return { state: 'clean' };
+}
+
 // POSIX: the config dir, the record's directory and the record are the
 // administrator's and nobody else can write them. Whoever can write a
 // directory can put a file of their own in place of the one inside it.
@@ -437,5 +543,6 @@ function writeIdentityRecord({ configDir, nodeId, publicKey, platform = process.
 module.exports = {
   RECORD_DIR, RECORD_FILE, RECORD_MAX_BYTES, recordPath, publicKeyHex,
   readIdentityRecord, checkNodeIdentityRecord, assertRecordedIdentity, writeIdentityRecord, probeIdentityRecord,
+  recordAclProblem, parseAclOutput,
   windowsRecordDirAclArgs, windowsRecordFileAclArgs, windowsRecordOwnerArgs
 };

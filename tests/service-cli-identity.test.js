@@ -307,6 +307,9 @@ describe('doctor: the node identity record', () => {
     assert.equal(r.ok, true);
     assert.equal(r.warn, undefined);
     assert.ok(r.detail.includes(s.keys.nodeId));
+    // Fourth security review, finding 5: an "ok" says what it did not check.
+    assert.match(r.detail, /public keys compared/);
+    assert.match(r.detail, /Not checked here: .*this key's private half \(doctor does not resolve the master key/);
 
     // Something replaced the identity in the data dir.
     const planted = nodeKeys();
@@ -321,5 +324,121 @@ describe('doctor: the node identity record', () => {
     [r] = await row(s);
     assert.equal(r.ok, false);
     assert.match(r.detail, /is not valid JSON/);
+  });
+
+  // Fourth security review, finding 5. On Windows doctor compared public
+  // keys and read owners, and said "ok" where the service would refuse: it
+  // cannot run the service's write probe (an administrator can always
+  // write). It now reads the access lists, fails when they let anyone but
+  // SYSTEM and Administrators change the record, and says in every "ok"
+  // what it did not check.
+  describe('what the row says it did not check, and the access lists on Windows', () => {
+    const { identityMatchRow } = require('../src/service/doctor');
+    const seen = { state: 'match', file: 'C:/cfg/identity/node.json', recorded: { nodeId: 'kl-aaaaaaaaaaaaaaaa' } };
+    const ADMINS = 'S-1-5-32-544';
+    const SERVICE = 'S-1-5-19';
+    const USER = 'S-1-5-21-1-2-3-1001';
+    const ace = (sid, mask, flags = 0, type = 0) => ({ type, sid, mask, flags });
+    const FULL = 0x1f01ff;
+    const READ = 0x1200a9;
+    const MODIFY = 0x1301bf;
+    const acl = (...aces) => ({ dacl: true, aces });
+    const clean = () => [acl(ace('S-1-5-18', FULL, 3), ace(ADMINS, FULL, 3), ace(SERVICE, READ, 3)), acl(ace('S-1-5-18', FULL), ace(ADMINS, FULL), ace(SERVICE, READ))];
+    const problem = (inspectAcl) => R.recordAclProblem({ configDir: 'C:/cfg', inspectAcl });
+
+    it('off Windows: ok, with what was compared and what was not', () => {
+      const r = identityMatchRow({ seen, platform: 'linux' });
+      assert.equal(r.ok, true);
+      assert.match(r.detail, /^kl-aaaaaaaaaaaaaaaa, recorded by an administrator in .*node\.json \(public keys compared; owner and mode read\)\. Not checked here: that the data dir holds this key's private half/);
+    });
+
+    it('Windows: the three things doctor can come to, each said', () => {
+      const ok = identityMatchRow({ seen, platform: 'win32', acl: { state: 'clean' } });
+      assert.equal(ok.ok, true);
+      assert.match(ok.detail, /owners and access lists read: only SYSTEM and Administrators can change the record or its directory/);
+      assert.match(ok.detail, /Not checked here: .*private half.*; whether the account the service runs as can write the record \(an administrator always can/);
+      assert.match(ok.detail, /the service probes it itself when it starts and before each lease request/);
+      const bad = identityMatchRow({ seen, platform: 'win32', acl: { state: 'writable', detail: `the access list of C:/cfg/identity lets ${SERVICE} change it` } });
+      assert.equal(bad.ok, false);
+      assert.match(bad.detail, /names this identity, but the access list of .* lets S-1-5-19 change it/);
+      assert.match(bad.detail, /identity record --replace/);
+      for (const unread of [{ state: 'unread', detail: 'the access lists of X and its directory could not be read' }, null]) {
+        const r = identityMatchRow({ seen, platform: 'win32', acl: unread });
+        assert.equal(r.ok, true);
+        assert.match(r.detail, /\(public keys compared; owners read\)\. Not checked here: who can change the record \(.*; run doctor from an elevated prompt\)/);
+        assert.match(r.detail, /whether the account the service runs as can write the record/);
+        assert.doesNotMatch(r.detail, /only SYSTEM and Administrators/);
+      }
+    });
+
+    it('recordAclProblem: clean only when nobody but SYSTEM and Administrators may change the record or its directory', () => {
+      assert.deepEqual(problem(clean), { state: 'clean' });
+      // The reviewer's case: nothing new can be made in the directory, and every file in it inherits "modify".
+      const inherit = problem(() => [acl(ace(ADMINS, FULL, 3), ace(SERVICE, READ, 0), ace(SERVICE, MODIFY, 0x9)), clean()[1]]);
+      assert.equal(inherit.state, 'writable');
+      assert.match(inherit.detail, /identity lets S-1-5-19 change it, through an entry that the files in it inherit/);
+      // The record itself; any one write right is enough (WRITE_DAC alone, delete alone).
+      for (const mask of [MODIFY, 0x2, 0x10000, 0x40000, 0x80000, 0x10000000, 0x40000000 | 0, 0x40]) {
+        const r = problem(() => [clean()[0], acl(ace(ADMINS, FULL), ace(USER, READ | mask))]);
+        assert.equal(r.state, 'writable', mask.toString(16));
+        assert.match(r.detail, /node\.json lets S-1-5-21-1-2-3-1001 change it$/);
+      }
+      // Reading is not changing; a deny entry only takes away.
+      assert.deepEqual(problem(() => [clean()[0], acl(ace(ADMINS, FULL), ace(USER, READ), ace(SERVICE, MODIFY, 0, 1))]), { state: 'clean' });
+      // No access list at all.
+      assert.match(problem(() => [clean()[0], { dacl: false, aces: [] }]).detail, /has no access list at all, so anyone can change it/);
+      // Whatever cannot be read or judged is "unread", never "clean".
+      for (const inspectAcl of [
+        () => { throw new Error('powershell failed'); }, () => null, () => [clean()[0]], () => [clean()[0], null],
+        () => [clean()[0], acl({ other: true })], () => [clean()[0], acl(ace(USER, READ, 0, 9))], () => [clean()[0], acl(ace('nobody', READ))],
+        () => [clean()[0], acl({ type: 0, sid: USER, mask: 'ffffffff', flags: 0 })]
+      ]) {
+        assert.equal(problem(inspectAcl).state, 'unread');
+      }
+    });
+
+    it('parseAclOutput reads the inspector\'s lines, and refuses anything else', () => {
+      const out = 'path dacl\r\nace 0 S-1-5-18 001f01ff 3\r\nace 0 S-1-5-19 ffffffff 11\r\nace other\r\nmissing\r\npath nodacl\r\n';
+      assert.deepEqual(R.parseAclOutput(out), [
+        { dacl: true, aces: [{ type: 0, sid: 'S-1-5-18', mask: 0x1f01ff, flags: 3 }, { type: 0, sid: 'S-1-5-19', mask: 0xffffffff, flags: 11 }, { other: true }] },
+        null, { dacl: false, aces: [] }
+      ]);
+      for (const bad of ['ace 0 S-1-5-18 001f01ff 3', 'path dacl\nace 0 Everyone 001f01ff 3', 'path dacl\nsomething else']) assert.throws(() => R.parseAclOutput(bad));
+    });
+
+    it('doctor fails the row when the access lists let someone else change the record (Windows)', { skip: process.platform !== 'win32' }, async () => {
+      const s = setup();
+      recordIdentity(s.configDir, s.keys);
+      const withAcl = async (inspectAcl) => (await runDoctor({ dataDir: s.dataDir, configDir: s.configDir, adminUid: UID, deps: { identityRecord: { ...IDENTITY_RECORD_TEST_OPTIONS, inspectAcl } } }))
+        .filter((x) => x.check === 'node identity record')[0];
+      assert.equal((await withAcl(clean)).ok, true);
+      const r = await withAcl(() => [acl(ace(ADMINS, FULL, 3), ace(SERVICE, MODIFY, 0x9)), clean()[1]]);
+      assert.equal(r.ok, false);
+      assert.match(r.detail, /lets S-1-5-19 change it, through an entry that the files in it inherit/);
+    });
+
+    // The real inspector (PowerShell, nothing injected), on a temp dir this
+    // account owns: as far as an account that is not elevated can show it.
+    it('for real: the access lists of a temp dir are read, and the reviewer\'s inherit-only entry is found', { skip: process.platform !== 'win32' }, () => {
+      const { execFileSync } = require('child_process');
+      const sys = (exe) => path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', exe);
+      const me = execFileSync(sys('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true }).trim().split(',').pop().replace(/"/g, '');
+      const s = setup();
+      recordIdentity(s.configDir, s.keys);
+      const dir = path.dirname(R.recordPath(s.configDir));
+      // As a temp dir is: this account has full control, inherited.
+      const plain = R.recordAclProblem({ configDir: s.configDir });
+      assert.equal(plain.state, 'writable', JSON.stringify(plain));
+      try {
+        // Read and list for this account, and "modify" for every file in the directory, inherit-only.
+        execFileSync(sys('icacls.exe'), [dir, '/inheritance:r', '/grant:r', `*${me}:(RX)`, `*${me}:(OI)(IO)(M)`], { stdio: 'ignore', windowsHide: true });
+        const seen = R.recordAclProblem({ configDir: s.configDir });
+        assert.equal(seen.state, 'writable', JSON.stringify(seen));
+        assert.ok(seen.detail.includes(me));
+        assert.match(seen.detail, /through an entry that the files in it inherit/);
+      } finally {
+        try { execFileSync(sys('icacls.exe'), [dir, '/reset', '/T'], { stdio: 'ignore', windowsHide: true }); } catch { /* cleanup reports what is left */ }
+      }
+    });
   });
 });
