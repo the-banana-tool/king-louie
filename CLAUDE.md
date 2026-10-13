@@ -755,8 +755,9 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
   private fact of that category; the lists are
   `settings.executors.outbound.categoryKeywords` on every path
   (`Executor.submit`, envelope requests, drafts, `sendExternal`), read
-  through `ExecutorRegistry#settings`: on the desktop a list replaces its
-  built-in one, in service mode the data dir only adds to it, and a
+  through `ExecutorRegistry#settings`: a list from settings only adds to
+  its built-in one, on the desktop and in service mode alike (owner
+  decision 2026-10-12; nothing removes or empties a built-in list), and a
   malformed list keeps the built-ins with a warning. Rule 3 (message mode) blocks a date, price,
   deadline or commitment that no `user` or `sourced` fact or approved wording
   backs. Rule 4 blocks C7 entity spans. Known gaps: homoglyphs (confusable

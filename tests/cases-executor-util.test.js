@@ -92,7 +92,7 @@ describe('executor settings', () => {
     assert.deepStrictEqual(s.entries, {});
   });
 
-  it('merges key by key and replaces one category keyword list', () => {
+  it('merges key by key; a category keyword list only adds to its built-in one', () => {
     const s = mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, {
       pollEveryMs: 60000,
       opsMemory: {},
@@ -101,19 +101,36 @@ describe('executor settings', () => {
     assert.strictEqual(s.pollEveryMs, 60000);
     assert.strictEqual(s.submitTimeoutMs, 30000);
     assert.strictEqual(s.opsMemory.maxEntries, 20);
-    assert.deepStrictEqual(s.outbound.categoryKeywords.health, ['clinic']);
+    assert.deepStrictEqual(s.outbound.categoryKeywords.health, [...EXECUTOR_SETTINGS_DEFAULTS.outbound.categoryKeywords.health, 'clinic']);
     assert.ok(s.outbound.categoryKeywords.financial.includes('floor price'));
     assert.strictEqual(EXECUTOR_SETTINGS_DEFAULTS.outbound.categoryKeywords.health.includes('clinic'), false, 'defaults are not mutated');
+  });
+
+  // Owner decision 2026-10-12: a setting can never weaken the outbound gate.
+  it('no category keyword setting removes, empties or replaces a built-in list', () => {
+    const builtIn = EXECUTOR_SETTINGS_DEFAULTS.outbound.categoryKeywords;
+    const merge = (categoryKeywords, options) => mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, { outbound: { categoryKeywords } }, options).outbound.categoryKeywords;
+    for (const options of [undefined, {}, { additiveKeywords: false }, { additiveKeywords: true }]) {
+      const kw = merge({ personal: [], financial: ['escrow', 'salary'], legal: null, vehicles: ['odometer'], empty: [] }, options);
+      assert.deepStrictEqual(kw.personal, builtIn.personal, 'an empty list empties nothing');
+      assert.deepStrictEqual(kw.financial, [...builtIn.financial, 'escrow'], 'the union, built-ins first, no duplicate');
+      assert.deepStrictEqual(kw.legal, builtIn.legal);
+      assert.deepStrictEqual(kw.health, builtIn.health, 'a category the setting does not name stays');
+      assert.deepStrictEqual([kw.vehicles, kw.empty], [['odometer'], []], 'a category the built-ins lack is added');
+    }
+    // Merging twice (a base that already holds a union) still only adds.
+    const once = mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, { outbound: { categoryKeywords: { health: ['clinic'] } } });
+    const twice = mergeExecutorSettings(once, { outbound: { categoryKeywords: { health: [] } } });
+    assert.deepStrictEqual(twice.outbound.categoryKeywords.health, [...builtIn.health, 'clinic']);
+    assert.deepStrictEqual(builtIn, resolveExecutorSettings(undefined).outbound.categoryKeywords, 'defaults are not mutated');
   });
 
   it('a malformed category keyword setting keeps the built-in lists and is reported', () => {
     const builtIn = EXECUTOR_SETTINGS_DEFAULTS.outbound.categoryKeywords;
     const raw = { health: [42], legal: ['easement', null], financial: 'escrow', personal: ['maiden name'] };
-    for (const additiveKeywords of [false, true]) {
-      const kw = mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, { outbound: { categoryKeywords: raw } }, { additiveKeywords }).outbound.categoryKeywords;
-      assert.deepStrictEqual([kw.health, kw.legal, kw.financial], [builtIn.health, builtIn.legal, builtIn.financial], `additive ${additiveKeywords}`);
-      assert.ok(kw.personal.includes('maiden name'), 'a well-formed list beside them still applies');
-    }
+    const kw = mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, { outbound: { categoryKeywords: raw } }).outbound.categoryKeywords;
+    assert.deepStrictEqual([kw.health, kw.legal, kw.financial], [builtIn.health, builtIn.legal, builtIn.financial]);
+    assert.ok(kw.personal.includes('maiden name'), 'a well-formed list beside them still applies');
     assert.deepStrictEqual(categoryKeywordProblems({ outbound: { categoryKeywords: raw } }).map((p) => p.split(' ')[0]).sort(), [
       'outbound.categoryKeywords.financial', 'outbound.categoryKeywords.health', 'outbound.categoryKeywords.legal'
     ]);

@@ -109,8 +109,8 @@ function createContactHost({
     getTimeZone: () => settings().cases?.timeZone || ''
   });
   // Rule 2's keywords for sendExternal: the executor registry's resolved
-  // settings.executors.outbound.categoryKeywords (in service mode the data
-  // dir only adds to the built-ins), the lists an executor submit is gated with.
+  // settings.executors.outbound.categoryKeywords (settings only add to the
+  // built-ins), the lists an executor submit is gated with.
   let warnedNoRegistry = false;
   const getCategoryKeywords = () => {
     const registry = getExecutorRegistry();

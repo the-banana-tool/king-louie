@@ -112,8 +112,9 @@ class ExecutorRegistry {
     } catch (err) {
       log.warn(`Reading executor settings failed: ${err.message}`);
     }
-    // Service mode: the data dir may add outbound keywords, never remove them.
-    return resolveExecutorSettings(raw, { additiveKeywords: this.isService });
+    // Settings may add outbound category keywords, never remove them
+    // (desktop and service mode alike, defaults.js).
+    return resolveExecutorSettings(raw);
   }
 
   casesTimeZone() {

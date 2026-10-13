@@ -412,9 +412,10 @@ never the input (R38).
 - **Rule 2, category keyword** (`message`): for each of `personal`, `financial`, `legal`, `health` with an
   active non-disclosable fact in the case, a keyword from `settings.executors.outbound.categoryKeywords`
   blocks (`category-keyword`) unless it is verbatim in the approved `envelope.intent`/`rules`. Every path
-  below, C4's `sendExternal` included, gets the lists from `ExecutorRegistry#settings`: a desktop list
-  replaces its built-in one, in service mode the data-dir lists only add, and a list that is not an array of
-  strings is ignored (the built-ins stay) with a warning.
+  below, C4's `sendExternal` included, gets the lists from `ExecutorRegistry#settings`: a list from
+  settings only adds to its built-in one, on the desktop and in service mode alike, and a list that is not an
+  array of strings is ignored (the built-ins stay) with a warning. (Owner decision 2026-10-12: before it, a
+  desktop list replaced its built-in one; now no setting can remove, empty or replace a built-in list.)
 - **Rule 3, unsourced constraint** (`message`): English detectors `date`, `price`, `deadline`, `commitment`.
   A span passes when its parsed value equals a normalized value of an active disclosable `user` or `sourced`
   fact (`detail: matched <id>`), or its text is verbatim in the approved intent/rules;
@@ -647,7 +648,8 @@ If F3 has not merged, C3 creates `src/platform/jcs.js` with exactly P1's exports
 
 ## 6. Configuration
 
-`src/core/settings.js`, namespace `executors`, merged key by key:
+`src/core/settings.js`, namespace `executors`, merged key by key (except `outbound.categoryKeywords`,
+which is add-only, see the note below the block):
 
 ```js
 executors: {
@@ -659,6 +661,13 @@ executors: {
   outbound: { categoryKeywords: { personal: [...], financial: [...], legal: [...], health: [...] } }
 }
 ```
+
+Note (owner decision 2026-10-12): `outbound.categoryKeywords` is add-only everywhere, so a setting can
+never weaken the outbound gate. A list given for a category is unioned with the built-in list; a category
+the built-ins do not have is added to the resolved settings (rule 2 itself still reads only `personal`,
+`financial`, `legal` and `health`); `[]`, or a list that is not an array of strings, leaves the built-in
+list as it is. This replaces the earlier rule, under which a desktop list replaced its built-in one and
+only service mode was add-only.
 
 Time zone: `settings.cases.timeZone`. Admin `service.json` gains `executors: { entries: {}, packageRoots: []
 }`; `executors` joins `ADMIN_ONLY_KEYS` (data-dir copy ignored with a warning; unknown keys rejected, R55).

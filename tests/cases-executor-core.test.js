@@ -125,18 +125,20 @@ describe('createCore wiring', () => {
     assert.deepStrictEqual([desktop.assertRoot, desktop.adminUid], [null, 0]);
   }));
 
-  it('in service mode data-dir category keywords only add; on the desktop they replace', withoutCasesRootEnv(() => {
+  // Owner decision 2026-10-12: add-only on the desktop too.
+  it('category keywords from settings only add to the built-in lists, on the desktop and in service mode', withoutCasesRootEnv(() => {
     const defaults = resolveExecutorSettings(undefined).outbound.categoryKeywords;
-    const keywords = { financial: ['escrow'], health: [] };
-    for (const [service, expectFinancial, expectHealth] of [
-      [true, [...new Set([...defaults.financial, 'escrow'])], defaults.health],
-      [false, ['escrow'], []]
-    ]) {
+    const keywords = { financial: ['escrow'], health: [], vehicles: ['odometer'] };
+    for (const service of [true, false]) {
       const { core } = buildCore(service ? { adminExecutors: { entries: {}, packageRoots: [] } } : {});
       const settings = core.getSettings();
       core.context.setSettings({ ...settings, executors: { outbound: { categoryKeywords: keywords } } });
       const got = core.context.getExecutorRegistry().settings().outbound.categoryKeywords;
-      assert.deepStrictEqual([got.financial, got.health, got.legal], [expectFinancial, expectHealth, defaults.legal], `service ${service}`);
+      assert.deepStrictEqual(
+        [got.financial, got.health, got.legal, got.personal, got.vehicles],
+        [[...defaults.financial, 'escrow'], defaults.health, defaults.legal, defaults.personal, ['odometer']],
+        `service ${service}`
+      );
     }
   }));
 

@@ -1,5 +1,6 @@
 // src/cases/executors/defaults.js
-// settings.executors (cases stage 3 spec §6), merged key by key.
+// settings.executors (cases stage 3 spec §6), merged key by key; the outbound
+// category keywords are the one exception: they only add (see below).
 const { createLogger } = require('../../logging');
 
 const log = createLogger('executors/settings');
@@ -49,11 +50,12 @@ function categoryKeywordProblems(source) {
     .map(([k]) => `outbound.categoryKeywords.${k} is not a list of strings`);
 }
 
-// `additiveKeywords`: category keywords from `source` only add to the base
-// lists, never replace or empty them. Service mode sets it, because there
-// the settings come from the service-writable data dir, which must never
-// weaken the outbound gate.
-function mergeExecutorSettings(base, source, { additiveKeywords = false } = {}) {
+// Category keywords from `source` only add to the base lists, on the desktop
+// and in service mode alike (owner decision 2026-10-12): a list is unioned
+// with its built-in one, a category the base lacks is added, and nothing
+// removes, empties or replaces a base list, so no setting can weaken the
+// outbound gate. There is no option that turns this off.
+function mergeExecutorSettings(base, source) {
   const b = isObject(base) ? base : EXECUTOR_SETTINGS_DEFAULTS;
   const s = isObject(source) ? source : {};
   const keywords = {};
@@ -68,7 +70,7 @@ function mergeExecutorSettings(base, source, { additiveKeywords = false } = {}) 
     for (const [k, v] of Object.entries(sourceKeywords)) {
       // Fail closed: a list with a non-string in it is ignored whole.
       if (!isKeywordList(v)) continue;
-      keywords[k] = additiveKeywords ? [...new Set([...(keywords[k] || []), ...v])] : [...v];
+      keywords[k] = [...new Set([...(keywords[k] || []), ...v])];
     }
   }
   return {
@@ -80,8 +82,8 @@ function mergeExecutorSettings(base, source, { additiveKeywords = false } = {}) 
   };
 }
 
-function resolveExecutorSettings(raw, options = {}) {
-  return mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, raw, options);
+function resolveExecutorSettings(raw) {
+  return mergeExecutorSettings(EXECUTOR_SETTINGS_DEFAULTS, raw);
 }
 
 module.exports = { EXECUTOR_SETTINGS_DEFAULTS, mergeExecutorSettings, resolveExecutorSettings, categoryKeywordProblems };
