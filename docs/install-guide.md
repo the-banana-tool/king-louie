@@ -273,7 +273,13 @@ The command refuses, and writes nothing:
   is theirs, and the service could not use it;
 - on Linux and macOS, as any account but the data dir's owner;
 - while the service is running on that data dir;
-- when the data dir does not exist (start the service once first).
+- when the data dir does not exist (start the service once first);
+- while chats are still in the data dir's `chat-data.json` and the service
+  has not finished moving them into the chat history (a data dir from an
+  older version): start the service once, stop it, then run the command
+  again;
+- for a file over 128 MB, or a session with a single line over 32 million
+  characters.
 
 On Windows the data dir's owner is not checked. The command refuses an
 elevated prompt and otherwise relies on Windows: an account that cannot write

@@ -776,8 +776,11 @@ from, and `scopePinned` the policy's reason when the chat is pinned
 wider scope ("… of history · linked chats · BM25", or "all chats"); for
 `chat` it is the H3 line. The excerpt drawer shows another chat's chunk only
 when the reply's `recalledChats` names that chat and the chunk is not newer
-than the reply, whatever the scope is now. `recalledChats` is also what the
-attach rule reads (§9).
+than the reply. Corrected 2026-10-13 (review): and only while the asking
+chat may still read that chat; `history:excerpts` resolves the scope as it
+is now and returns an excerpt of a chat outside it as `{ hidden: true }`,
+with no text, header or chat id (§17). `recalledChats` is also what the
+attach rule reads (§9), beside the chat's recall mark (§17).
 
 ## 8. Tools
 
@@ -899,6 +902,18 @@ As built (H4, 2026-10-13), where it differs from or adds to the above:
   `name-assistant`), a 32 MB cap, synthetic timestamps (the file's mtime plus
   one second per message). A file that fits no pattern is refused
   (`NOT_A_TRANSCRIPT`). A subagent transcript is refused, not skipped.
+- **Size limits** (review, 2026-10-13): one check of the file's size
+  before it is hashed or any importer opens it, for every format and every
+  caller: over 128 MB is refused (`IMPORT_TOO_LARGE`; the Markdown importer
+  keeps its 32 MB). A JSONL line over 32M characters is refused as soon as
+  that much of it is read (`IMPORT_LINE_TOO_LONG`); LongHaul passes no line
+  limit. A King Louie export is read and parsed once per preview or commit.
+  No refusal names the file's path.
+- **An import never takes the place of a chat still in `chat-data.json`**
+  (review, 2026-10-13). In a core an import is never given an id that file
+  still holds; the CLI, which builds no core, refuses while the store has no
+  migration marker and the file holds chats; and the move (§11.1) never
+  counts an imported chat as the chat it is moving.
 - **An import never overwrites a chat** (R-H4-8). The store-level service
   (`src/history/import-chats.js`) gives the chat an id no chat has, builds
   the chat and each message from fixed key lists (nothing else in the file
@@ -1186,7 +1201,9 @@ policy is the owner's (§17):
 - The recalled block's preamble changes only when an excerpt from another
   chat is in it, and a chat title in a header is made one plain line (§6.4).
 - The excerpt drawer shows another chat's chunk only when the reply's
-  provenance names that chat and the chunk is not newer than the reply.
+  provenance names that chat and the chunk is not newer than the reply
+  (after the review: and only while the asking chat may still read that
+  chat, §17).
 - Jev is skipped when any chat in the turn's scope has a `caseId`, not only
   the asking chat.
 - The renderer never names an import path; the file is chosen in the main
@@ -1221,10 +1238,9 @@ names the tests that pin each one.
 
 What the rulings leave (residuals, not promises):
 
-- **R-H4-1, what "ever recalled" can see.** The attach rule reads what is
-  stored in the chat. It cannot see text the owner pasted from one chat into
-  another, or a chat truncated back past those rows (the chat can then be
-  attached again).
+- **R-H4-1, what "ever recalled" can see.** The attach rule reads the
+  chat's recall mark and what is stored in the chat (below, "After the
+  review"). It cannot see text the owner pasted from one chat into another.
 - **R-H4-1, a chat detached from its case** is an ordinary chat again: its
   stored scope applies and other chats may read it by link or `all`,
   although it holds that case's conversation.
@@ -1245,8 +1261,27 @@ What the rulings leave (residuals, not promises):
 - **R-H4-5.** The attachable check runs once, at the threshold (§9).
 - **R-H4-6.** How well `linked` and `all` recall is not known (§6.7).
 
+After the review (2026-10-13; the plan's "Review findings" table):
+
+- **The recall mark.** Recall provenance is stored on a reply, so a turn
+  that failed left none. A chat is now marked (`recalledOtherChatsAt` in the
+  chat's meta, `HistoryStore#markRecalledOtherChats`) before another chat's
+  text reaches a model: by the send path right after the context is built,
+  and by `SearchHistory` and `ReadHistory` before they return such text. The
+  store never clears the mark (not by a patch, a replace, an upsert, a
+  truncation, or the scope set back to `chat`), and `case:attach`,
+  `case:create` and the nudge refuse on it alone. A mark that cannot be
+  written ends the turn before any model call, and a tool call with none of
+  the text.
+- **Import limits and ids**: §10.2.
+- **The excerpt drawer**: §7, and the first open item below.
+
 Open, built the cautious way; the owner may overrule:
 
+- **The excerpt drawer hides another chat's excerpt once the asking chat may
+  no longer read that chat** (it got a case, it was unlinked, the scope went
+  back to `chat`). The other reading: a reply's drawer is a record of what
+  that reply was given and keeps showing it.
 - **Under `all`, a bridge chat the owner linked explicitly is not read**; it
   is read only under `linked`. R-H4-7 does not say which.
 - **In an imported chat the owner's new message is still sent to a hosted

@@ -38,7 +38,8 @@ the chat the request came from.
 "history import" adds one conversation file (a Claude Code session, a Markdown
 transcript or a King Louie chat export) to the data dir's chat history as a new
 chat. Run it with the service stopped, as the account that owns the data dir,
-never as root or Administrator.
+never as root or Administrator. It refuses while chats are still in the data
+dir's chat-data.json: start the service once first.
 On Windows the data dir's owner is not checked: only an elevated prompt is
 refused, and an account that cannot write the data dir fails to open the
 history. A service installed under LOCAL SERVICE has no CLI import; import

@@ -1,7 +1,8 @@
 // src/history/search.js
 // Excerpts on demand: SearchHistory and history:search run retrieval
 // without the budget step (spec §8); the recall line's drawer shows the
-// excerpts one reply was given (§7).
+// excerpts one reply was given (§7). history:excerpts then hides another
+// chat's excerpt that the asking chat may no longer read.
 const { formatExcerpts } = require('./excerpts');
 const { caseIdOf, keepLocalReason } = require('./reranker');
 const { createLogger } = require('../logging');

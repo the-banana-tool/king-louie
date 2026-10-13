@@ -296,14 +296,29 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   the recall line says "linked chats" or "all chats", an excerpt of another
   chat is headed `chat "<title>"` (`chatHeaderTitle`: one plain line, 60
   characters), and the block's preamble changes only when one is in it.
+  `history:excerpts` asks the scope as it is now: an excerpt of another chat
+  the asking chat may no longer read comes back as `{ hidden: true }`, with
+  no text (the cautious reading; the owner may overrule).
 - Attach (R-H4-1, R-H4-7; `assertChatAttachable` in
   `src/cases/chat-attach.js`, before Q29's check): `case:attach` and
   `case:create` refuse `IMPORTED_CHAT` for a chat with `source` set (or the
-  `importedFromCase` mark) and `CHAT_RECALLED_OTHER_CHATS` for a chat whose
-  stored rows show it read another chat (a reply's `context.recalledChats`,
-  a `SearchHistory` or `ReadHistory` result from another chat). `case:create`
-  checks before any case is created, and no `force` lifts either. It cannot
-  see text the owner pasted from another chat, or rows truncated away.
+  `importedFromCase` mark) and `CHAT_RECALLED_OTHER_CHATS` for a chat that
+  carries the recall mark or whose stored rows show it read another chat (a
+  reply's `context.recalledChats`, a `SearchHistory` or `ReadHistory` result
+  from another chat). `case:create` checks before any case is created, and
+  no `force` lifts either. It cannot see text the owner pasted from another
+  chat.
+- The recall mark (`recalledOtherChatsAt` in the chat's meta, written only
+  by `HistoryStore#markRecalledOtherChats`): set before another chat's text
+  reaches a model, by the send path right after `ContextBuilder.build` when
+  `stats.recalledChats` names a chat, and by `SearchHistory`/`ReadHistory`
+  before they return such text, because a turn that fails or is cut off
+  stores no reply and so no provenance. The store never clears it: every
+  chat write (`_updateChatRow`, `createChat` over an id) carries the row's
+  mark over the chat object it is given, and truncation and the scope do
+  not touch it. A mark that cannot be written ends the turn before any
+  model call (`RECALL_MARK_FAILED`), or the tool call with a bare failure.
+  Code that hands a model another chat's text some new way marks first.
 - Imports go through `src/history/import-chats.js` only (`importChat` for a
   file; `createImportGate`'s `begin`/`append`/`finish` for a chat that
   arrives parsed), over the importers in `src/history/importers/`
@@ -311,7 +326,15 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   never overwrites (R-H4-8): the chat gets an id no chat has
   (`freeChatId`), the chat and each message are built from fixed key lists,
   the same file again (by SHA-256) returns the first chat, and a grown copy
-  of a session is a second chat. One import runs at a time per core; a
+  of a session is a second chat. `parseImport`/`previewImport` check the
+  file's size once, before any importer opens it: over 128 MB is
+  `IMPORT_TOO_LARGE` (`MAX_IMPORT_BYTES`; Markdown keeps its 32 MB), and a
+  JSONL line over 32M characters is `IMPORT_LINE_TOO_LONG`
+  (`readJsonlLines`'s `maxLineChars`; LongHaul passes none). No refusal
+  names the path. An import is never given an id `chat-data.json` still
+  holds (`HistoryStore#reserveChatIds`, set by `create-core.js`), and the
+  move out of that file never counts an imported chat as the chat it is
+  moving. One import runs at a time per core; a
   half-written one is removed by the gate (a refused batch, 30 minutes
   without a call, the desktop that began it disconnecting, shutdown) or by
   `sweepUnfinishedImports` at the next start.
@@ -337,7 +360,9 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
 - `king-louie-service history import <file> [--pattern ID]`
   (`src/service/commands/history.js`, R-H4-4) runs with the service
   stopped, only as the account that owns the data dir, never as root or
-  Administrator; it opens the store directly and builds no core. Windows
+  Administrator; it opens the store directly and builds no core, so it
+  refuses while the store has no migration marker and `chat-data.json`
+  still holds chats (start the service once first). Windows
   residual: the owner is not checked there (only an elevated prompt is
   refused), so a service installed under LOCAL SERVICE has no CLI import;
   its owner imports from the attached desktop. `history:index.status`,
@@ -1352,9 +1377,9 @@ Spec `docs/superpowers/specs/2026-09-30-management-surfaces.md`; ADR
   (`assertChatAttachable`) refuses two more chats first (history stage H4,
   owner rulings R-H4-1 and R-H4-7 of 2026-10-13; see History):
   `IMPORTED_CHAT` for a chat imported from a file, and
-  `CHAT_RECALLED_OTHER_CHATS` for a chat whose stored replies or
-  `SearchHistory`/`ReadHistory` results show it read another chat. No
-  `force` lifts either.
+  `CHAT_RECALLED_OTHER_CHATS` for a chat that carries the recall mark, or
+  whose stored replies or `SearchHistory`/`ReadHistory` results show it read
+  another chat. No `force` lifts either.
 - `in-app-chat` (the model relaying the owner's chat words) is not
   `in-app` (the card's buttons and the IPC: a press, no model between). No
   list that takes a recorded channel as proof of a press names it
