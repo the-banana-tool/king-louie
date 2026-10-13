@@ -148,6 +148,15 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
     return unavailableSubsystem({ reason, detail: reason === NODE_IDENTITY_UNRECORDED ? 'no administrator has recorded this node\'s identity' : 'the administrator\'s record of this node\'s identity does not vouch for the identity in the data dir', guiConfig: gui, dataDir, platform, log });
   }
 
+  // Windows (fourth security review, finding 1): the service's write probe
+  // of the record is run again before every new lease request, as the
+  // approver set's probe is on every scan. A record this process has come to
+  // be able to write since the start vouches for nothing any more. Off where
+  // the host's own read ran without the probe (tests on a temp dir).
+  const recordOptions = deps.identityRecord || {};
+  const identityProbe = recordOptions.serviceProbe === false ? null
+    : () => require('../service/identity-record').probeIdentityRecord({ configDir, platform, ...(recordOptions.fsImpl ? { fsImpl: recordOptions.fsImpl } : {}) });
+
   const audit = approvals.auditLedger || null;
   const channel = new HelperChannel({
     endpoint: deps.endpoint || endpointPath({ platform, endpointId: canonical.endpointId }),
@@ -155,7 +164,7 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
   });
   const getPolicy = () => nodeConfig.policy;
   const broker = new GuiBroker({ channel, guiConfig: gui, getPolicy, audit, dataDir, platform });
-  const leases = new LeaseManager({ approvals, guiConfig: gui, broker, audit, nodeName: nodeConfig.name, jobOpen });
+  const leases = new LeaseManager({ approvals, guiConfig: gui, broker, audit, nodeName: nodeConfig.name, jobOpen, identityProbe });
   broker.setLeases(leases);
   const relay = approvals.relayClient || null;
   const liveView = new LiveView({ leases, broker, identity: approvals.identity, relayClient: relay, guiConfig: gui });

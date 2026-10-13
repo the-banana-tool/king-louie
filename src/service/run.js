@@ -134,7 +134,9 @@ function loadProfile(profile) {
             ...(adminUid === undefined ? {} : { adminUid }),
             // R-F5-17: the check made above; only a match turns desktop apps on.
             identityRecord: recordedIdentity.record,
-            ...(deps.gui ? { deps: deps.gui } : {})
+            // deps.identityRecord (tests only) also says whether the GUI
+            // runs the record's write probe again before a lease request.
+            ...(deps.gui || deps.identityRecord ? { deps: { ...(deps.identityRecord ? { identityRecord: deps.identityRecord } : {}), ...(deps.gui || {}) } } : {})
           });
         } catch (err) {
           await desktopBridge.stop().catch(() => {});

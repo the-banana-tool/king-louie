@@ -206,6 +206,17 @@ describe('the administrator\'s record of the node identity (R-F5-17)', () => {
       }
     });
 
+    // What the service's file system answers: `create` for a new file beside
+    // the record, `write` for opening the record itself for writing.
+    const answering = ({ create = 'EPERM', write: w = 'EPERM' } = {}) => ({
+      ...fs,
+      openSync: (p, flags, ...rest) => {
+        const code = flags === 'wx' ? create : (flags === 'r+' ? w : null);
+        if (code) throw Object.assign(new Error(code), { code });
+        return fs.openSync(p, flags, ...rest);
+      }
+    });
+
     it('the service-side probe: a directory this process can create a file in is not the administrator\'s', () => {
       const s = recorded();
       const dir = path.dirname(R.recordPath(s.configDir));
@@ -214,24 +225,172 @@ describe('the administrator\'s record of the node identity (R-F5-17)', () => {
       assert.equal(writable.state, 'invalid');
       assert.match(writable.reason, /is writable by the account running the service/);
       assert.deepEqual(fs.readdirSync(dir), ['node.json'], 'the probe file is removed');
-      // Denied: the ACL is right.
-      const denied = { ...fs, openSync: (p, flags) => { if (flags === 'wx') throw Object.assign(new Error('denied'), { code: 'EPERM' }); return fs.openSync(p, flags); } };
-      assert.equal(win(s, { serviceProbe: true, fsImpl: denied }).state, 'recorded');
+      // Denied, both the new file and the record itself: the ACL is right.
+      assert.equal(win(s, { serviceProbe: true, fsImpl: answering() }).state, 'recorded');
       // Any other failure proves nothing.
-      const broken = { ...fs, openSync: (p, flags) => { if (flags === 'wx') throw Object.assign(new Error('device'), { code: 'EIO' }); return fs.openSync(p, flags); } };
-      const unknown = win(s, { serviceProbe: true, fsImpl: broken });
+      const unknown = win(s, { serviceProbe: true, fsImpl: answering({ create: 'EIO' }) });
       assert.equal(unknown.state, 'invalid');
       assert.match(unknown.reason, /could not be verified/);
     });
 
-    it('writing gives the directory and the file to Administrators', () => {
+    // Fourth security review, finding 1: a directory that refuses new files
+    // can still hand the record a write entry (an inherit-only ACE). So the
+    // record itself is opened for writing, and only "denied" is trusted.
+    it('the service-side probe opens the record itself for writing: a record this process can write is not trusted', () => {
+      const s = recorded();
+      const before = fs.readFileSync(R.recordPath(s.configDir), 'utf8');
+      // No new file can be made, yet node.json opens for writing (the real open, on a temp file).
+      const seen = win(s, { serviceProbe: true, fsImpl: answering({ write: null }) });
+      assert.equal(seen.state, 'invalid');
+      assert.match(seen.reason, /node\.json is writable by the account running the service/);
+      assert.equal(fs.readFileSync(R.recordPath(s.configDir), 'utf8'), before, 'the probe changes nothing in the record');
+      for (const code of ['EIO', 'EBUSY', 'ENOENT']) {
+        const unknown = win(s, { serviceProbe: true, fsImpl: answering({ write: code }) });
+        assert.equal(unknown.state, 'invalid', code);
+        assert.match(unknown.reason, /could not be verified: whether .*node\.json is protected is unknown/);
+      }
+      for (const code of ['EACCES', 'EPERM']) assert.equal(win(s, { serviceProbe: true, fsImpl: answering({ create: code, write: code }) }).state, 'recorded');
+      // The admin CLI and doctor are not probed: an administrator can write it.
+      assert.equal(win(s, { serviceProbe: false }).state, 'recorded');
+    });
+
+    it('probeIdentityRecord is that probe alone, for asking again while the service runs; nothing off Windows', () => {
+      const s = recorded();
+      const probe = (extra = {}) => R.probeIdentityRecord({ configDir: s.configDir, platform: 'win32', ...extra });
+      assert.equal(probe({ fsImpl: answering() }), null);
+      assert.match(probe({ fsImpl: answering({ write: null }) }), /node\.json cannot be trusted: .*node\.json is writable by the account running the service/);
+      assert.match(probe({ fsImpl: answering({ create: null }) }), /identity is writable by the account running the service/);
+      assert.match(probe({ fsImpl: answering({ write: 'EIO' }) }), /could not be verified/);
+      assert.equal(R.probeIdentityRecord({ configDir: s.configDir, platform: 'linux', fsImpl: answering({ write: null }) }), null);
+    });
+
+    const winWrite = (s, k, runIcacls) => R.writeIdentityRecord({
+      configDir: s.configDir, nodeId: k.nodeId, publicKey: k.publicKey, platform: 'win32', ...opts({ runIcacls }), env: { SystemRoot: 'C:\\Windows' }
+    });
+
+    // Fourth security review, finding 1: only the owner was set, so a
+    // directory that was there before kept whatever ACL it had.
+    it('writing makes the directory anew: a protected ACL and Administrators as owner for it and for the file, before the record is in it', () => {
       const s = setup();
       const k = keys();
       const ran = [];
-      R.writeIdentityRecord({ configDir: s.configDir, nodeId: k.nodeId, publicKey: k.publicKey, platform: 'win32', ...opts({ runIcacls: (argv) => ran.push(argv) }), env: { SystemRoot: 'C:\\Windows' } });
-      const file = R.recordPath(s.configDir);
-      assert.deepEqual(ran.map((a) => a.slice(1)), [[path.dirname(file), '/setowner', '*S-1-5-32-544'], [file, '/setowner', '*S-1-5-32-544']]);
+      const seen = [];
+      const file = winWrite(s, k, (argv) => {
+        ran.push(argv);
+        // What exists under the record's own name while the ACLs are set: nothing.
+        seen.push(fs.existsSync(path.join(s.configDir, 'identity')));
+      });
+      assert.equal(file, R.recordPath(s.configDir));
       assert.ok(ran.every((a) => /System32[\\/]icacls\.exe$/i.test(a[0])), 'icacls by its absolute path');
+      const fresh = ran[0][1];
+      assert.match(path.basename(fresh), /^\.identity\.new-[0-9a-f]{8}$/);
+      assert.equal(path.dirname(fresh), s.configDir);
+      assert.deepEqual(ran.map((a) => a.slice(1)), [
+        [fresh, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)', '*S-1-5-19:(OI)(CI)(RX)'],
+        [fresh, '/setowner', '*S-1-5-32-544'],
+        [path.join(fresh, 'node.json'), '/inheritance:r', '/grant:r', '*S-1-5-18:(F)', '*S-1-5-32-544:(F)', '*S-1-5-19:(R)'],
+        [path.join(fresh, 'node.json'), '/setowner', '*S-1-5-32-544']
+      ]);
+      assert.deepEqual(seen, [false, false, false, false]);
+      assert.equal(win(s).nodeId, k.nodeId);
+      assert.deepEqual(fs.readdirSync(s.configDir), ['identity']);
+    });
+
+    it('a directory that was there before is replaced, never kept, with whatever was in it', () => {
+      const s = recorded();
+      const dir = path.join(s.configDir, 'identity');
+      fs.writeFileSync(path.join(dir, 'left-behind.txt'), 'x');
+      const k = keys();
+      const emptyWhenSet = [];
+      winWrite(s, k, (argv) => { if (argv.includes('/setowner') && path.basename(argv[1]) === 'node.json') emptyWhenSet.push(fs.statSync(argv[1]).size); });
+      assert.deepEqual(emptyWhenSet, [0], 'the file has its ACL and its owner before anything is written to it');
+      assert.deepEqual(fs.readdirSync(dir), ['node.json']);
+      assert.deepEqual(fs.readdirSync(s.configDir), ['identity'], 'neither the new directory nor the old one is left beside it');
+      assert.equal(win(s).nodeId, k.nodeId);
+    });
+
+    it('if an ACL cannot be set nothing is recorded and what was there stays', () => {
+      const s = setup();
+      const first = keys();
+      for (const failAt of [0, 1, 2, 3]) {
+        let n = 0;
+        assert.throws(() => winWrite(s, keys(), () => { if (n++ === failAt) throw new Error('icacls failed'); }), /icacls failed/);
+        assert.deepEqual(fs.readdirSync(s.configDir), [], `call ${failAt}: nothing is left`);
+      }
+      winWrite(s, first, () => {});
+      for (const failAt of [0, 1, 2, 3]) {
+        let n = 0;
+        assert.throws(() => winWrite(s, keys(), () => { if (n++ === failAt) throw new Error('icacls failed'); }), /icacls failed/);
+        assert.deepEqual(fs.readdirSync(s.configDir), ['identity']);
+        assert.equal(win(s).nodeId, first.nodeId, 'the earlier record is still the record');
+      }
+    });
+
+    // The real thing, as far as an account that is not elevated can show it
+    // (nothing injected but the owner read, which needs no elevation to be
+    // wrong: this account cannot give a file to Administrators). icacls on a
+    // temp dir this account owns; the lock is lifted before cleanup.
+    describe('for real: icacls on a temp dir', { skip: process.platform !== 'win32' }, () => {
+      const { execFileSync } = require('child_process');
+      const sys = (exe) => path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', exe);
+      const icacls = (...args) => execFileSync(sys('icacls.exe'), args, { encoding: 'utf8', windowsHide: true });
+      const me = () => execFileSync(sys('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true }).trim().split(',').pop().replace(/"/g, '');
+      const elevated = () => /S-1-16-(12288|16384)/.test(execFileSync(sys('whoami.exe'), ['/groups', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true }));
+      // The owner keeps the right to rewrite an ACL whatever it says.
+      const unlock = (...targets) => { for (const t of targets) { try { icacls(t, '/reset'); } catch { /* cleanup reports what is left */ } } };
+
+      it('the reviewer\'s case: no new file can be made in identity\\, the record inherits a write entry, and the probe refuses it', () => {
+        const s = recorded();
+        const dir = path.join(s.configDir, 'identity');
+        const file = R.recordPath(s.configDir);
+        const sid = me();
+        try {
+          // What a service account that once controlled the directory can leave:
+          // read and list for itself, and "modify" for every file in it, inherit-only.
+          icacls(dir, '/inheritance:r', '/grant:r', `*${sid}:(RX)`, `*${sid}:(OI)(IO)(M)`);
+          assert.throws(() => fs.openSync(path.join(dir, '.x'), 'wx'), (err) => err.code === 'EPERM' || err.code === 'EACCES', 'the create probe alone is satisfied');
+          const fd = fs.openSync(file, 'r+');
+          fs.closeSync(fd);
+          const seen = R.readIdentityRecord({ configDir: s.configDir, platform: 'win32', adminUid: UID, serviceProbe: true, inspectOwners: owners() });
+          assert.equal(seen.state, 'invalid');
+          assert.match(seen.reason, /node\.json is writable by the account running the service/);
+          assert.match(R.probeIdentityRecord({ configDir: s.configDir }), /node\.json is writable by the account running the service/);
+        } finally {
+          unlock(dir, file);
+        }
+      });
+
+      it('the ACL the command sets leaves an account that is not SYSTEM, Administrators or LOCAL SERVICE no way in, and nothing inherited', (t) => {
+        if (elevated()) { t.skip('this process is elevated: Administrators are given full control, so it is not kept out'); return; }
+        const s = setup();
+        const dir = path.join(s.configDir, 'identity');
+        const file = path.join(dir, 'node.json');
+        fs.mkdirSync(dir);
+        fs.writeFileSync(file, '{}\n');
+        const sid = me();
+        try {
+          // A directory with an entry of the kind the reviewer left, to show it is gone afterwards.
+          icacls(dir, '/grant', `*${sid}:(OI)(IO)(M)`);
+          // The same arguments writeIdentityRecord runs, the file first (afterwards this account cannot reach it).
+          const run = (argv) => execFileSync(argv[0], argv.slice(1), { stdio: 'ignore', windowsHide: true });
+          const entries = (target) => {
+            const listed = icacls(target).split(/\r?\n/).filter((line) => /:\(/.test(line));
+            assert.equal(listed.length, 3, `${target}: SYSTEM, Administrators and LOCAL SERVICE, nothing else\n${listed.join('\n')}`);
+            assert.ok(listed.every((line) => !/\(I\)/.test(line)), `${target}: nothing inherited`);
+          };
+          run(R.windowsRecordFileAclArgs(file));
+          entries(file); // read now: once the directory is closed to this account, the file's ACL cannot be listed
+          // On a directory that already has entries the command never does this (it makes a new one);
+          // here /reset first stands in for "new", then the same arguments.
+          icacls(dir, '/reset');
+          run(R.windowsRecordDirAclArgs(dir));
+          entries(dir);
+          assert.equal(R.probeIdentityRecord({ configDir: s.configDir }), null, 'the real probe: no new file, and the record does not open for writing');
+          assert.throws(() => fs.openSync(file, 'r+'), (err) => err.code === 'EPERM' || err.code === 'EACCES');
+        } finally {
+          unlock(dir, file);
+        }
+      });
     });
   });
 

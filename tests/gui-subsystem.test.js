@@ -482,6 +482,25 @@ describe('createGuiSubsystem', () => {
       assert.match(writable.log.errors[0], /writable by the account running the service/);
     });
 
+    // Fourth security review, finding 1: the write probe is asked again
+    // before every lease request, with the host's own way of reading.
+    it('the lease manager gets the record\'s write probe where the host ran it (Windows), and none where it did not', () => {
+      const d = dirs();
+      install(d.configDir);
+      const file = R.recordPath(d.configDir);
+      const match = { state: 'match', file, problem: null, recorded: null };
+      const off = build(d, { identityRecord: match, deps: { endpoint: endpoint(d.base) } });
+      assert.equal(off.gui.leases.identityProbe, null, 'the test options run no probe');
+      const fsWith = (writable) => ({ ...fs, openSync: (p, flags, ...rest) => {
+        if (flags === 'wx' || (flags === 'r+' && !writable)) throw Object.assign(new Error('denied'), { code: 'EPERM' });
+        return fs.openSync(p, flags, ...rest);
+      } });
+      const probed = (fsImpl, platform = 'win32') => build(d, { platform, identityRecord: match, deps: { endpoint: endpoint(d.base), identityRecord: { ...IDENTITY_RECORD_TEST_OPTIONS, serviceProbe: true, fsImpl } } }).gui.leases.identityProbe;
+      assert.equal(probed(fsWith(false))(), null);
+      assert.match(probed(fsWith(true))(), /node\.json is writable by the account running the service/);
+      assert.equal(probed(fsWith(true), 'linux')(), null, 'off Windows owner and mode were read at the start');
+    });
+
     it('the host\'s own check is used when it passes one, and only a match turns the GUI on', () => {
       const d = dirs();
       install(d.configDir);

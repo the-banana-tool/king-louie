@@ -16,8 +16,9 @@
 // where files carry no owner Node can see, by the owners a PowerShell child
 // reads (Administrators, SYSTEM or the config dir's own owner; never a config
 // dir LOCAL SERVICE owns; no links) and, on the service's side, by a probe
-// that the service cannot create a file beside the record. Whatever cannot be
-// checked is not trusted. Loads no agent code: every profile's start reads it.
+// that the service can neither create a file beside the record nor open the
+// record itself for writing. Whatever cannot be checked is not trusted. Loads
+// no agent code: every profile's start reads it.
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -104,9 +105,18 @@ function windowsOwnerProblem({ configDir, dir, file, inspectOwners }) {
   return null;
 }
 
-// Windows, the service's side: if this process can create a file beside the
-// record, the directory's ACL is wrong. Only "denied" proves it is right.
-function windowsProbeProblem({ dir, fsImpl }) {
+// Windows, the service's side. Two questions, and only "denied" answers
+// either: can this process create a file beside the record, and can it open
+// the record itself for writing? The second is its own question (fourth
+// security review, finding 1): a directory can refuse new files and still
+// hand every file in it a write entry through an inherit-only ACE, which the
+// record then inherits. Opening for writing changes nothing in the file.
+// Not asked, because nothing here can ask it without changing the file: the
+// right to delete the record or to rewrite its ACL. The administrator's
+// command gives both the directory and the file a protected ACL of their own
+// (writeIdentityRecord), so neither has an entry it did not write.
+function windowsProbeProblem({ dir, file, fsImpl }) {
+  const denied = (err) => Boolean(err) && (err.code === 'EACCES' || err.code === 'EPERM');
   const probe = path.join(dir, `.probe-${crypto.randomBytes(6).toString('hex')}`);
   let fd = null;
   let openErr = null;
@@ -115,13 +125,37 @@ function windowsProbeProblem({ dir, fsImpl }) {
   } catch (err) {
     openErr = err;
   }
-  if (fd === null) {
-    if (openErr && (openErr.code === 'EACCES' || openErr.code === 'EPERM')) return null;
-    return `could not be verified: whether ${dir} is protected is unknown (${(openErr && openErr.code) || 'error'})`;
+  if (fd !== null) {
+    try { fsImpl.closeSync(fd); } catch { /* ignore */ }
+    try { fsImpl.unlinkSync(probe); } catch { /* ignore */ }
+    return `cannot be trusted: ${dir} is writable by the account running the service`;
   }
-  try { fsImpl.closeSync(fd); } catch { /* ignore */ }
-  try { fsImpl.unlinkSync(probe); } catch { /* ignore */ }
-  return `cannot be trusted: ${dir} is writable by the account running the service`;
+  if (!denied(openErr)) return `could not be verified: whether ${dir} is protected is unknown (${(openErr && openErr.code) || 'error'})`;
+  let wfd = null;
+  let writeErr = null;
+  try {
+    wfd = fsImpl.openSync(file, 'r+');
+  } catch (err) {
+    writeErr = err;
+  }
+  if (wfd !== null) {
+    try { fsImpl.closeSync(wfd); } catch { /* ignore */ }
+    return `cannot be trusted: ${file} is writable by the account running the service`;
+  }
+  if (!denied(writeErr)) return `could not be verified: whether ${file} is protected is unknown (${(writeErr && writeErr.code) || 'error'})`;
+  return null;
+}
+
+// The service's probe alone, for asking again while it runs (as the approver
+// set's probe is run again on every scan): null when the record is still out
+// of this process's reach, or off Windows, where owner and mode were read
+// when the service started; else why it can no longer be trusted. No
+// PowerShell: the owners are not read again here.
+function probeIdentityRecord({ configDir, platform = process.platform, fsImpl = fs } = {}) {
+  if (platform !== 'win32') return null;
+  const file = recordPath(configDir);
+  const problem = windowsProbeProblem({ dir: recordDir(configDir), file, fsImpl });
+  return problem === null ? null : `${file} ${problem}`;
 }
 
 // POSIX: the config dir, the record's directory and the record are the
@@ -172,7 +206,7 @@ function readIdentityRecord({ configDir, platform = process.platform, adminUid =
   if (st.isSymbolicLink() || !st.isFile()) return invalid('is not a regular file');
   if (st.size > RECORD_MAX_BYTES) return invalid(`is larger than ${RECORD_MAX_BYTES} bytes`);
   const problem = platform === 'win32'
-    ? (windowsOwnerProblem({ configDir, dir, file, inspectOwners }) || (serviceProbe ? windowsProbeProblem({ dir, fsImpl }) : null))
+    ? (windowsOwnerProblem({ configDir, dir, file, inspectOwners }) || (serviceProbe ? windowsProbeProblem({ dir, file, fsImpl }) : null))
     : posixProblem({ configDir, dir, file, adminUid, fsImpl });
   if (problem) return invalid(problem);
   let raw;
@@ -263,57 +297,145 @@ function assertRealConfigDir(configDir) {
   return resolved;
 }
 
-// Written by the administrator's command only. The whole file is replaced
-// through a rename, so a reader never sees half of one. POSIX: 0755 for the
-// directory and 0644 for the file (the id and the public key are not
+// What the record's directory and the record get on Windows: the ACL the
+// installers give the config dir (WINDOWS_CONFIG_DIR_SDDL in installers.js),
+// set on each of them and protected, so nothing is inherited from above and
+// nothing a directory of that name held before carries over. SYSTEM and
+// Administrators in full; LOCAL SERVICE, the account the installed service
+// runs as, reads. A service run by hand as any other account cannot read a
+// record written this way, and refuses to start for it.
+const WINDOWS_SYSTEM = 'S-1-5-18';
+const WINDOWS_LOCAL_SERVICE = 'S-1-5-19';
+function icaclsExe(env) {
+  return require('../platform/windows-paths').windowsIcaclsExe(env);
+}
+function windowsRecordDirAclArgs(dir, env = process.env) {
+  return [icaclsExe(env), dir, '/inheritance:r', '/grant:r',
+    `*${WINDOWS_SYSTEM}:(OI)(CI)(F)`, `*${WINDOWS_ADMINISTRATORS}:(OI)(CI)(F)`, `*${WINDOWS_LOCAL_SERVICE}:(OI)(CI)(RX)`];
+}
+function windowsRecordFileAclArgs(file, env = process.env) {
+  return [icaclsExe(env), file, '/inheritance:r', '/grant:r', `*${WINDOWS_SYSTEM}:(F)`, `*${WINDOWS_ADMINISTRATORS}:(F)`, `*${WINDOWS_LOCAL_SERVICE}:(R)`];
+}
+// Administrators, not whichever administrator ran the command: a
+// directory's owner can always rewrite its ACL.
+function windowsRecordOwnerArgs(target, env = process.env) {
+  return [icaclsExe(env), target, '/setowner', `*${WINDOWS_ADMINISTRATORS}`];
+}
+
+// Windows (fourth security review, finding 1). A directory that was there
+// before is never kept: whoever once controlled it may have left an entry
+// that every new file inherits (an inherit-only "modify", say), or may still
+// hold a handle that can rewrite its ACL. So the record is built in a new
+// directory beside it, which gets its protected ACL and its owner before
+// anything is in it; the file is created empty, gets its own, and is written
+// only then; and the new directory takes the old one's name (two renames:
+// for that instant there is no record, which every reader takes as "none").
+// The old directory is removed. If anything fails the old one is put back
+// and nothing was recorded.
+function writeWindowsRecord({ root, text, runIcacls, env, log }) {
+  const dir = recordDir(root);
+  const tag = crypto.randomBytes(4).toString('hex');
+  const fresh = path.join(root, `.${RECORD_DIR}.new-${tag}`);
+  const aside = path.join(root, `.${RECORD_DIR}.old-${tag}`);
+  fs.mkdirSync(fresh);
+  let movedAside = false;
+  let swapped = false;
+  try {
+    runIcacls(windowsRecordDirAclArgs(fresh, env));
+    runIcacls(windowsRecordOwnerArgs(fresh, env));
+    const target = path.join(fresh, RECORD_FILE);
+    fs.closeSync(fs.openSync(target, 'wx'));
+    runIcacls(windowsRecordFileAclArgs(target, env));
+    runIcacls(windowsRecordOwnerArgs(target, env));
+    const fd = fs.openSync(target, 'r+');
+    try {
+      fs.writeSync(fd, text);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    try {
+      fs.renameSync(dir, aside);
+      movedAside = true;
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        throw new Error(`${dir} could not be replaced (${err.code || 'error'}): stop the service and anything else that has it open, then run this again; nothing was recorded`);
+      }
+    }
+    fs.renameSync(fresh, dir);
+    swapped = true;
+  } catch (err) {
+    if (movedAside && !swapped) { try { fs.renameSync(aside, dir); } catch { /* the caller's read-back says what is there now */ } }
+    try { fs.rmSync(fresh, { recursive: true, force: true }); } catch { /* never made, or already renamed */ }
+    throw err;
+  }
+  if (movedAside) {
+    try {
+      fs.rmSync(aside, { recursive: true, force: true });
+    } catch (err) {
+      log.warn(`the identity record was written, but the directory it replaced could not be removed (${err.code || 'error'}): remove ${aside} by hand`);
+    }
+  }
+  return recordPath(root);
+}
+
+// Written by the administrator's command only. POSIX: the whole file is
+// replaced through a rename, so a reader never sees half of one; 0755 for
+// the directory and 0644 for the file (the id and the public key are not
 // private; the service account must read them and must not write them).
-// Windows: both inherit the config dir's protected ACL and are given to
-// Administrators, since a directory's owner can always rewrite its ACL.
-function writeIdentityRecord({ configDir, nodeId, publicKey, platform = process.platform, now = Date.now(), runIcacls = defaultRunIcacls, env = process.env } = {}) {
+// Windows: the directory is made anew with the file in it (writeWindowsRecord).
+function writeIdentityRecord({ configDir, nodeId, publicKey, platform = process.platform, now = Date.now(), runIcacls = defaultRunIcacls, env = process.env, log = defaultLog } = {}) {
   const hex = publicKeyHex(publicKey);
   if (hex === null) throw new Error('not an Ed25519 public key; nothing was recorded');
   if (deriveNodeId(hex) !== nodeId) throw new Error(`node id ${nodeId} does not belong to that public key; nothing was recorded`);
   const root = assertRealConfigDir(configDir);
   const dir = recordDir(root);
   const file = recordPath(root);
-  try {
-    fs.mkdirSync(dir, { mode: 0o755 });
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err;
+  if (platform !== 'win32') {
+    try {
+      fs.mkdirSync(dir, { mode: 0o755 });
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
   }
-  const dst = fs.lstatSync(dir);
-  if (dst.isSymbolicLink() || !dst.isDirectory()) throw new Error(`${dir} is not a directory (a link is refused); nothing was recorded`);
+  let dst = null;
   try {
-    const fst = fs.lstatSync(file);
-    if (fst.isSymbolicLink() || !fst.isFile()) throw new Error(`${file} is not a regular file (a link or a directory is refused); nothing was recorded`);
+    dst = fs.lstatSync(dir);
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
   }
+  if (dst && (dst.isSymbolicLink() || !dst.isDirectory())) throw new Error(`${dir} is not a directory (a link is refused); nothing was recorded`);
+  if (dst) {
+    try {
+      const fst = fs.lstatSync(file);
+      if (fst.isSymbolicLink() || !fst.isFile()) throw new Error(`${file} is not a regular file (a link or a directory is refused); nothing was recorded`);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+  }
   const text = `${JSON.stringify({ v: 1, node_id: nodeId, public_key: hex, recorded_at: new Date(now).toISOString() }, null, 2)}\n`;
+  if (platform === 'win32') return writeWindowsRecord({ root, text, runIcacls, env, log });
   const tmp = path.join(dir, `.node.json.tmp-${crypto.randomBytes(4).toString('hex')}`);
   let fd = null;
   try {
-    if (platform !== 'win32') fs.chmodSync(dir, 0o755);
+    fs.chmodSync(dir, 0o755);
     fd = fs.openSync(tmp, 'wx', 0o644);
     fs.writeSync(fd, text);
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = null;
-    if (platform !== 'win32') fs.chmodSync(tmp, 0o644);
+    fs.chmodSync(tmp, 0o644);
     fs.renameSync(tmp, file);
   } catch (err) {
     if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
     try { fs.unlinkSync(tmp); } catch { /* never made, or already renamed */ }
     throw err;
   }
-  if (platform === 'win32') {
-    const { windowsIcaclsExe } = require('../platform/windows-paths');
-    for (const target of [dir, file]) runIcacls([windowsIcaclsExe(env), target, '/setowner', `*${WINDOWS_ADMINISTRATORS}`]);
-  }
   return file;
 }
 
 module.exports = {
   RECORD_DIR, RECORD_FILE, RECORD_MAX_BYTES, recordPath, publicKeyHex,
-  readIdentityRecord, checkNodeIdentityRecord, assertRecordedIdentity, writeIdentityRecord
+  readIdentityRecord, checkNodeIdentityRecord, assertRecordedIdentity, writeIdentityRecord, probeIdentityRecord,
+  windowsRecordDirAclArgs, windowsRecordFileAclArgs, windowsRecordOwnerArgs
 };

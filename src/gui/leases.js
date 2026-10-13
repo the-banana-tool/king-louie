@@ -91,9 +91,9 @@ class LeaseManager extends EventEmitter {
   // clock then shows the time that passed.) A caller that injects only
   // `clock` (tests) gets that one clock for both.
   constructor({ approvals, guiConfig, broker = null, audit = null, nodeName = null, clock = Date.now, monotonic = null,
-    timers = { setTimeout, clearTimeout }, jobOpen = () => false, log = createLogger('gui/leases') } = {}) {
+    timers = { setTimeout, clearTimeout }, jobOpen = () => false, identityProbe = null, log = createLogger('gui/leases') } = {}) {
     super();
-    Object.assign(this, { approvals, guiConfig, broker, audit, clock, timers, jobOpen, log });
+    Object.assign(this, { approvals, guiConfig, broker, audit, clock, timers, jobOpen, identityProbe, log });
     this.monotonic = typeof monotonic === 'function' ? monotonic : (clock === Date.now ? () => performance.now() : clock);
     this.nodeName = nodeName || (approvals.identity && approvals.identity.nodeName) || 'unnamed-node';
     this.leases = [];
@@ -105,6 +105,27 @@ class LeaseManager extends EventEmitter {
   }
 
   setBroker(broker) { this.broker = broker; }
+
+  // null, or why the administrator's record of the node identity cannot be
+  // trusted now (identityProbe: probeIdentityRecord, Windows only). A probe
+  // that throws proves nothing, so it is a problem too. Logged when the
+  // answer changes, like the approver set's probe.
+  _identityRecordProblem() {
+    if (typeof this.identityProbe !== 'function') return null;
+    let problem;
+    try {
+      problem = this.identityProbe();
+    } catch (err) {
+      problem = `the administrator's record of this node's identity could not be probed (${err.code || 'error'})`;
+    }
+    problem = problem || null;
+    if (problem !== (this._recordProblem || null)) {
+      if (problem) this.log.error(`no new computer-use lease is requested: ${problem}. As root or an Administrator find out who could have changed it, run "king-louie-service identity record --replace" and restart the service.`, { reason: 'node_identity_invalid' });
+      else this.log.info('the record of this node identity is out of reach of this process again; leases can be requested');
+    }
+    this._recordProblem = problem;
+    return problem;
+  }
 
   _contactWindowMs() {
     const s = Number(this.guiConfig.lease && this.guiConfig.lease.contactS);
@@ -346,6 +367,13 @@ class LeaseManager extends EventEmitter {
     // chat id has none, and is refused before anything else is looked at.
     if (typeof jobId !== 'string' || !jobId) throw new GuiError('job_required', 'this run has no job or chat to bind a lease to');
     if (!this.available()) throw new GuiError('approval_unavailable');
+    // Fourth security review, finding 1 (R-F5-17): on Windows the service
+    // asks again, before every new request, whether it can write the
+    // administrator's record of this node's identity. If it now can (or
+    // that cannot be told), the record vouches for nothing: no request goes
+    // out. A lease that is already running is not ended by this.
+    const recordProblem = this._identityRecordProblem();
+    if (recordProblem) throw new GuiError('capability_unavailable', 'gui (node_identity_invalid: the record of this node identity can no longer be trusted; see the service log)');
     const cfg = this.guiConfig;
     if (!Array.isArray(appIds) || appIds.length < 1 || appIds.length > 8 || new Set(appIds).size !== appIds.length
       || appIds.some((id) => !Object.hasOwn(cfg.apps, id))) {

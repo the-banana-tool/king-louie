@@ -172,6 +172,51 @@ describe('request and grant', () => {
   });
 });
 
+// Fourth security review, finding 1 (R-F5-17): on Windows the service's
+// write probe of the administrator's record of the node identity is run
+// again before every new lease request (identityProbe, which the subsystem
+// builds from probeIdentityRecord), as the approver set's probe is on every
+// scan.
+describe('the identity record is probed again before every new lease request', () => {
+  const ask = (m) => m.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+  const manager = (identityProbe, log) => new LeaseManager({
+    approvals: leases.approvals, guiConfig, broker, nodeName: 'gpu-box', clock: () => clock.now(), timers, jobOpen: (jobId) => openJobs.has(jobId), identityProbe, log
+  });
+  const spy = () => { const lines = { error: [], info: [] }; return { lines, error: (m) => lines.error.push(m), info: (m) => lines.info.push(m), warn() {}, debug() {} }; };
+
+  it('a record this process can now write: no request goes out, and it is logged once with what to do', async () => {
+    let problem = '<configDir>/identity/node.json cannot be trusted: it is writable by the account running the service';
+    let asked = 0;
+    const log = spy();
+    const m = manager(() => { asked += 1; return problem; }, log);
+    for (let i = 0; i < 3; i += 1) {
+      await assert.rejects(ask(m), (e) => e.code === 'capability_unavailable' && /node_identity_invalid/.test(e.message) && !/configDir/.test(e.message));
+    }
+    assert.equal(asked, 3, 'asked before every request');
+    assert.equal(relay.all('kl.lease.request').length, 0);
+    assert.equal(m.current(), null);
+    assert.equal(log.lines.error.length, 1, 'logged when the answer changes, not every time');
+    assert.match(log.lines.error[0], /writable by the account running the service/);
+    assert.match(log.lines.error[0], /identity record --replace/);
+    // Out of reach again: requests go out, and that is logged once too.
+    problem = null;
+    const pending = ask(m);
+    assert.equal(relay.all('kl.lease.request').length, 1);
+    assert.equal(log.lines.info.length, 1);
+    pending.catch(() => {});
+    m.stop();
+  });
+
+  it('a probe that throws proves nothing: refused; no probe (off Windows, or a host that ran none) changes nothing', async () => {
+    const m = manager(() => { throw Object.assign(new Error('boom'), { code: 'EIO' }); }, spy());
+    await assert.rejects(ask(m), (e) => e.code === 'capability_unavailable');
+    assert.equal(relay.all('kl.lease.request').length, 0);
+    const pending = ask(manager(null, spy()));
+    assert.equal(relay.all('kl.lease.request').length, 1);
+    pending.catch(() => {});
+  });
+});
+
 describe('R-F5-7: a lease needs a known, open job', () => {
   it('R-F5-7: no job id is job_required, a job that is not open is job_closed, and nothing goes out', async () => {
     for (const jobId of [null, undefined, '', 42]) {
