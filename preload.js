@@ -898,6 +898,12 @@ contextBridge.exposeInMainWorld(
         validateString(payload.caseId, 'caseId', { minLength: 1 });
         return ipcRenderer.invoke('case:progress', { caseId: payload.caseId });
       },
+      // "Check now": the owner's press runs one verify pass.
+      verifyNow: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:verifyNow', { caseId: payload.caseId });
+      },
       confirmScope: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.caseId, 'caseId', { minLength: 1 });

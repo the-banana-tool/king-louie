@@ -143,6 +143,17 @@ class RuntimeClosingError extends Error {
   }
 }
 
+// The owner's "Check now" was refused (verifyNow): the case is closed or not
+// running, nothing is confirmed, the pass is off, or the day's passes or the
+// budget are used. `code` says which.
+class VerifyRefusedError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'VerifyRefusedError';
+    this.code = code;
+  }
+}
+
 const expandHome = (p) => (p === '~' || /^~[\\/]/.test(p) ? path.join(os.homedir(), p.slice(1)) : p);
 
 // settings.cases.root: `~` is the home dir and a relative path is under the
@@ -609,6 +620,87 @@ class CaseRuntime {
     return { scope, view, readiness, summary: summaryLine(view, readiness), abandoned, closed: null };
   }
 
+  // The owner's "Check now" (IPC case:verifyNow; owner ruling 2026-10-13):
+  // one verify pass over the whole record, asked for by the owner's press.
+  // No tool and no MCP surface calls this. It is counted against
+  // cases.verify.maxPassesPerDay and skipped past the usd rule like any
+  // pass, and both are checked here first, so a refusal makes no call and
+  // writes nothing. It takes the case lock as a turn of its own (source
+  // 'check'): it never pre-empts a turn or a wake-up (CASE_BUSY), is not a
+  // turn of the day, runs no turn-start hook and leaves the "what it was
+  // last time" cache alone, so a criterion that left `met` still makes the
+  // next turn re-orient. → the pass's result. Throws VerifyRefusedError,
+  // CaseBusyError or RuntimeClosingError.
+  async verifyNow(id) {
+    if (this.closing) throw new RuntimeClosingError();
+    const meta = this.getCase(id);
+    const cfg = this.settings().verify;
+    if (meta.status === 'done' || meta.status === 'abandoned') {
+      throw new VerifyRefusedError('CASE_CLOSED', `Case is ${meta.status}. It is read-only; what it closed with is kept as it was.`);
+    }
+    if (cfg.when === 'off') throw new VerifyRefusedError('VERIFY_OFF', 'The verify pass is turned off for cases (cases.verify.when).');
+    if (meta.status !== 'active' && meta.status !== 'needs-direction') {
+      throw new VerifyRefusedError('VERIFY_NOT_OPEN', `Case is ${meta.status}. A check runs while a case is active or waiting for direction.`);
+    }
+    if (!this.progressView(meta.id).criteria.some((r) => r.scope === 'confirmed')) {
+      throw new VerifyRefusedError('VERIFY_NO_CRITERIA', 'No success criterion is confirmed, so there is nothing to check. Confirm one first.');
+    }
+    const day = localDay(this.now(), this.settings().timeZone);
+    if (this.verification(meta.id).passesOn(day) >= cfg.maxPassesPerDay) {
+      throw new VerifyRefusedError('VERIFY_DAILY_CAP', `The limit of ${cfg.maxPassesPerDay} verify ${cfg.maxPassesPerDay === 1 ? 'pass' : 'passes'} a day is used for this case. It is free again tomorrow.`);
+    }
+    const ratio = this.budget(meta.id).status().usd.ratio;
+    if (ratio !== null && ratio * 100 >= cfg.skipAboveUsdPercent) {
+      throw new VerifyRefusedError('VERIFY_USD_BUDGET', `This case has used ${cfg.skipAboveUsdPercent} % of its usd budget or more, so no verify pass runs. Raise the budget to check.`);
+    }
+    const turnId = `check-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    // Never _acquireForTurn: that would stop an in-process wake-up.
+    this._acquire(meta, turnId);
+    const controller = new AbortController();
+    const turn = {
+      caseId: meta.id,
+      dir: meta.dir,
+      turnId,
+      title: meta.title,
+      orientation: '',
+      source: 'check',
+      ownerMessage: null,
+      triggers: [],
+      reorientPending: false,
+      hookTriggers: [],
+      hookNotes: [],
+      snapshot: null,
+      marks: null,
+      signal: controller.signal,
+      abort: (reason) => controller.abort(reason)
+    };
+    let pass;
+    try {
+      turn.models = this._turnModels(meta.id, null);
+      this.turns.set(meta.id, turn);
+      this._notify('case:changed', { caseId: meta.id, what: 'turn', running: true, source: 'check' });
+      const before = statesOf(this.progressView(meta.id));
+      pass = await runVerifyPass(this, turn, { mode: 'request' });
+      // Shutdown released the case meanwhile: nothing more is written.
+      if (this.turns.get(meta.id) === turn) {
+        try {
+          const block = verificationBlock({ pass, before, after: this.progressView(meta.id) });
+          if (typeof block === 'string' && block.trim()) this.records(meta.id).writeJournal('verify', block.trim(), this.now());
+        } catch (err) {
+          log.warn(`Case ${meta.slug}: the journal entry of a check could not be written: ${err.message}`);
+        }
+        await this._commit(meta.dir, `${turnId}: verify pass asked for by the owner`, meta.id)
+          .catch((err) => log.warn(`Case ${meta.slug}: commit after a check failed: ${err.message}`));
+      }
+    } finally {
+      if (this.turns.get(meta.id) === turn) this.turns.delete(meta.id);
+      this._release(meta.dir, turnId);
+      this._notify('case:changed', { caseId: meta.id, what: 'turn', running: false, source: 'check' });
+      this._notify('case:changed', { caseId: meta.id, what: 'progress' });
+    }
+    return pass;
+  }
+
   // beginTurn's step (spec §6.9, §10): the scope record is written from
   // brief.md as it is now. The first run on a case is its migration (every
   // string `legacy`); later a string with no entry is a file edit. Never
@@ -1040,7 +1132,8 @@ class CaseRuntime {
 
   _abortTurn(caseId, reason) {
     const turn = this.turns.get(caseId);
-    if (turn && turn.source === 'wakeup' && typeof turn.abort === 'function') turn.abort(reason);
+    // A wake-up, or the owner's check (verifyNow): neither has a chat run.
+    if (turn && (turn.source === 'wakeup' || turn.source === 'check') && typeof turn.abort === 'function') turn.abort(reason);
   }
 
   _cancelExecutorJobs(caseId, reason) {
@@ -1859,7 +1952,8 @@ class CaseRuntime {
 
   abortUnattended(reason = 'shutdown') {
     for (const turn of this.turns.values()) {
-      if (turn.source === 'wakeup' && typeof turn.abort === 'function') turn.abort(reason);
+      // A check (verifyNow) has no chat run to stop it either.
+      if ((turn.source === 'wakeup' || turn.source === 'check') && typeof turn.abort === 'function') turn.abort(reason);
     }
   }
 
@@ -2335,6 +2429,6 @@ class CaseRuntime {
 }
 
 module.exports = {
-  CaseRuntime, CaseBusyError, WakeupBusyError, CaseNotFoundError, RuntimeClosingError, SimilarCaseError, resolveCasesRoot,
+  CaseRuntime, CaseBusyError, WakeupBusyError, CaseNotFoundError, RuntimeClosingError, SimilarCaseError, VerifyRefusedError, resolveCasesRoot,
   BUDGET_FACT_NOTE, RELATIONS
 };

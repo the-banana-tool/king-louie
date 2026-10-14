@@ -93,6 +93,25 @@ describe('renderer case progress text', () => {
     assert.ok(block.includes('Closed before progress was tracked.'));
   });
 
+  // Owner ruling 2026-10-13: "Check now" runs a verify pass on the owner's press.
+  it('Check now is shown for an open case, is disabled while a pass runs, and shows the result line as text', () => {
+    const block = progressBlock();
+    const check = functionSource(block, 'caseProgressCheckRow');
+    assert.match(check, /caseButton\('Check now'/);
+    assert.match(check, /window\.electron\.cases\.verifyNow\(\{ caseId \}\)/);
+    // Disabled while this press, or any check or turn of the case, runs.
+    assert.match(check, /caseProgressChecks\.has\(caseId\)/);
+    assert.match(check, /\.disabled = /);
+    assert.match(check, /\.textContent = /);
+    assert.doesNotMatch(check, /innerHTML/);
+    // Only an open case gets the row.
+    const section = functionSource(block, 'renderCaseProgressSection');
+    assert.match(section, /if \(editable\) container\.appendChild\(caseProgressCheckRow\(/);
+    // The preload sends the case id and nothing else.
+    const preload = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+    assert.match(preload, /ipcRenderer\.invoke\('case:verifyNow', \{ caseId: payload\.caseId \}\)/);
+  });
+
   it('the Done confirm shows the summary and the open items first, and the close card never disables its buttons for an open item', () => {
     const block = progressBlock();
     const src = source();

@@ -2999,6 +2999,41 @@ function caseProgressRowButtons(row, act) {
   return actions;
 }
 
+// "Check now" (owner ruling 2026-10-13): the owner's press runs one verify
+// pass. The button is disabled while this window's press, or any turn of
+// the case, runs; the result line is the main process's own words.
+const caseProgressChecks = new Set();
+const caseProgressCheckNotes = new Map();
+function caseProgressCheckRow(chat, container) {
+  const caseId = chat.caseId;
+  const row = caseProgressEl('div', 'chat-info-row case-progress-check-row');
+  const button = caseButton('Check now', 'secondary-button case-progress-check');
+  button.id = 'case-progress-check';
+  const result = caseProgressEl('span', 'case-progress-check-result');
+  result.id = 'case-progress-check-result';
+  button.disabled = caseProgressChecks.has(caseId) || appState.runningCaseTurns.has(caseId);
+  result.textContent = caseProgressChecks.has(caseId) ? 'Checking…' : (caseProgressCheckNotes.get(caseId) || '');
+  button.addEventListener('click', async () => {
+    if (caseProgressChecks.has(caseId)) return;
+    caseProgressChecks.add(caseId);
+    button.disabled = true;
+    result.textContent = 'Checking…';
+    let note;
+    try {
+      const r = await window.electron.cases.verifyNow({ caseId });
+      note = r?.ok ? (r.note || 'Checked.') : (r?.error || 'The check did not run.');
+    } catch (err) {
+      note = err.message;
+    } finally {
+      caseProgressChecks.delete(caseId);
+    }
+    caseProgressCheckNotes.set(caseId, note);
+    await renderCaseProgressSection(chat, container);
+  });
+  row.append(button, result);
+  return row;
+}
+
 // The case's progress in Chat Info. `message` is what the action that just
 // finished has to say (a refusal), shown in this render.
 async function renderCaseProgressSection(chat, container, { message = null } = {}) {
@@ -3035,6 +3070,7 @@ async function renderCaseProgressSection(chat, container, { message = null } = {
   container.appendChild(summary);
   if (p.frozen) container.appendChild(caseProgressEl('div', 'case-progress-note', `As of ${p.at ? formatTimestamp(p.at) : 'its close'}.`));
   if (p.warning) container.appendChild(caseProgressEl('div', 'case-progress-note', p.warning));
+  if (editable) container.appendChild(caseProgressCheckRow(chat, container));
 
   if (!p.frozen) {
     const o = p.objective;

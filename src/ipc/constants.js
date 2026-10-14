@@ -80,6 +80,7 @@ module.exports = {
   // Cases stage 8: progress and the owner's scope actions.
   CASE_PROGRESS: 'case:progress',
   CASE_CONFIRM_SCOPE: 'case:confirmScope',
+  CASE_VERIFY_NOW: 'case:verifyNow',
   EXECUTORS_LIST: 'executors:list',
   CASE_ENVELOPES: 'case:envelopes',
   CASE_CANCEL_JOB: 'case:cancelJob',

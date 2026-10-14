@@ -11,6 +11,7 @@ const { isLocalDesktopEvent } = require('../core/origin');
 
 const BUSY = 'Case is busy with a wake-up; try again in a minute.';
 const NOT_LOCAL = 'This is done only from the King Louie window.';
+const CHECK_BUSY = 'A turn is running in this case; check again when it ends.';
 const ACTIONS = Object.freeze(['confirm', 'drop', 'edit', 'add']);
 const CRITERION_ID = /^sc-\d{3,}$/;
 const HASH_MAX_CHARS = 200;
@@ -98,6 +99,23 @@ function progressReply(rt, caseId) {
   };
 }
 
+const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+// What "Check now" found, in one line of counts and fixed words. A pass's
+// `error` is fixed words too (verify/judge.js), never a provider's message.
+function checkNote(pass) {
+  if (pass.error) return `The check did not finish: ${pass.error}.`;
+  if (pass.skipped) return 'No check ran; the log says why.';
+  const accepted = pass.accepted.length;
+  const refused = pass.opinions.filter((o) => o && o.status === 'met').length;
+  const disagreed = pass.disagreed.length;
+  const parts = [];
+  if (accepted) parts.push(`${count(accepted, 'criterion', 'criteria')} accepted as met.`);
+  if (refused) parts.push(`${count(refused, 'criterion', 'criteria')} not accepted as met; ${refused === 1 ? 'its' : 'their'} evidence does not hold.`);
+  if (disagreed) parts.push(`${count(disagreed, 'criterion is', 'criteria are')} no longer agreed to be met.`);
+  return `Checked: ${parts.length ? parts.join(' ') : 'nothing new is met.'}`;
+}
+
 // The four actions' arguments, checked before the runtime is called.
 // → { args } or { problem }.
 function scopeArgs({ action, target, hash, text }) {
@@ -141,7 +159,8 @@ function registerCaseProgressHandlers(ipcMain, context = {}) {
     try {
       return await fn(isObject(payload) ? payload : {}, event);
     } catch (err) {
-      if (err && err.code === 'CASE_BUSY') return refuse(BUSY, 'CASE_BUSY');
+      if (err && err.code === 'CASE_BUSY') return refuse(channel === IPC.CASE_VERIFY_NOW ? CHECK_BUSY : BUSY, 'CASE_BUSY');
+      if (err && err.name === 'VerifyRefusedError') return refuse(err.message, err.code);
       if (err && err.name === 'ScopeError' && SCOPE_CODES.includes(err.code)) return refuse(err.message, err.code);
       throw err;
     }
@@ -169,6 +188,28 @@ function registerCaseProgressHandlers(ipcMain, context = {}) {
     const rt = runtime();
     await rt.applyScopeAction(payload.caseId, { ...args, by: 'owner-action', channel: 'in-app' });
     return { ok: true, progress: progressReply(rt, payload.caseId) };
+  });
+
+  // "Check now" (owner ruling 2026-10-13): the owner's press runs one
+  // verify pass. No tool and no MCP surface has this path; the runtime
+  // counts it and refuses it like any pass. `note` is the result line.
+  handle(IPC.CASE_VERIFY_NOW, async (payload, event) => {
+    if (!isLocalDesktopEvent(event)) return refuse(NOT_LOCAL, 'NOT_LOCAL_DESKTOP');
+    if (typeof payload.caseId !== 'string' || !payload.caseId) return refuse('caseId is required.');
+    const rt = runtime();
+    const pass = await rt.verifyNow(payload.caseId);
+    const list = (v) => (Array.isArray(v) ? v : []);
+    const out = { ...pass, accepted: list(pass?.accepted), opinions: list(pass?.opinions), disagreed: list(pass?.disagreed) };
+    return {
+      ok: true,
+      untrustedText: true,
+      ran: out.ran === true,
+      accepted: out.accepted.length,
+      notAccepted: out.opinions.filter((o) => o && o.status === 'met').length,
+      disagreed: out.disagreed.length,
+      note: checkNote(out),
+      progress: progressReply(rt, payload.caseId)
+    };
   });
 }
 

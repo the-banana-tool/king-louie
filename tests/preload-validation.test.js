@@ -177,6 +177,20 @@ describe('Preload Validation', () => {
     });
   });
 
+  // Cases stage 8: progress, scope actions and "Check now".
+  describe('cases.progress, cases.confirmScope and cases.verifyNow', () => {
+    it('need a caseId and send the named fields only', async () => {
+      assert.throws(() => api.cases.progress({}), /Invalid caseId: expected string/);
+      assert.throws(() => api.cases.verifyNow(), /Invalid payload: expected object/);
+      assert.throws(() => api.cases.verifyNow({}), /Invalid caseId: expected string/);
+      assert.throws(() => api.cases.confirmScope({ caseId: 'c-1' }), /Invalid action: expected string/);
+      assert.throws(() => api.cases.confirmScope({ caseId: 'c-1', action: 'confirm', hash: 7 }), /Invalid hash: expected object/);
+      await assert.doesNotReject(api.cases.progress({ caseId: 'c-1' }));
+      await assert.doesNotReject(api.cases.verifyNow({ caseId: 'c-1', force: true }));
+      await assert.doesNotReject(api.cases.confirmScope({ caseId: 'c-1', action: 'confirm', target: 'sc-001', hash: 'sha256:00' }));
+    });
+  });
+
   describe('cases.answerQuestion', () => {
     it('requires payload to be an object', () => {
       assert.throws(() => api.cases.answerQuestion(), /Invalid payload: expected object/);

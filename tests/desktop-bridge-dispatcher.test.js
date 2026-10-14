@@ -144,6 +144,25 @@ describe('bridge dispatcher', () => {
     assert.deepStrictEqual(resultFor(a, 2).value, { ok: true, data: [] });
   });
 
+  // Cases stage 8: the owner's presses in an attached desktop reach the
+  // service's handlers as local desktop events, so they are not refused as
+  // coming from somewhere else; an unknown case is the handler's own answer.
+  it('serves the stage-8 progress channels to a paired desktop as its owner\'s press', async () => {
+    const { dispatcher, use } = makeDispatcher();
+    for (const ch of ['case:progress', 'case:confirmScope', 'case:verifyNow']) assert.ok(dispatcher.served.handle.includes(ch), ch);
+    const a = connection();
+    use(a);
+    await dispatcher.handleFrame(a, { t: 'invoke', id: 31, channel: 'case:verifyNow', args: [{ caseId: 'no-such-case' }] });
+    await dispatcher.handleFrame(a, { t: 'invoke', id: 32, channel: 'case:confirmScope', args: [{ caseId: 'no-such-case', action: 'add', text: 'Keys handed over' }] });
+    for (const id of [31, 32]) {
+      const { value, code } = resultFor(a, id);
+      assert.strictEqual(code, undefined);
+      assert.strictEqual(value.ok, false);
+      assert.notStrictEqual(value.code, 'NOT_LOCAL_DESKTOP');
+      assert.match(value.error, /Case not found|not available/);
+    }
+  });
+
   it('ignores a prompt answer from a connection the prompt was not issued to', async () => {
     const { dispatcher, use } = makeDispatcher();
     const a = connection('desk a');
