@@ -65,6 +65,16 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - *A line counts as malformed* when it is not JSON, has an unknown `kind`, is an `abandon` with a bad id, no `approach` or no `why`, repeats an id, or is a `withdraw` of an id that is not there or is already withdrawn. Lengths are not re-checked on read. A new id is one past the highest id any line used, malformed or not.
 - *`abandonedLines`* lists newest first; it takes the store's records (oldest first) and leaves withdrawn ones out itself. A line shows at most 110 characters of the approach, 130 of the reason and the first three fact ids; the 1,500 characters include the count line. Stored text that is not one plain line shows as `(text hidden: not one plain line)`.
 
+**Task 3 (verification records, resolvers, state).**
+
+- *A record that cites no evidence is `stale`, never `met`* (reason `the record cites no evidence`); the task's rule 4 would read "all hold" as true for an empty list. `addRecord` also refuses to write one (it throws, as it does with no criterion or hash). A `resolve` that is missing, throws, or answers anything but `holds === true` does not hold.
+- *The newest record* for a criterion and hash is the one with the highest `v-` number, not the last in the list.
+- *Reasons and labels are ids and fixed words only.* The `f-` resolver gives a label for every id that does not hold (`f-0099 is not in the ledger`, `f-0042 is inferred`, `f-0043 is an open unknown`, `f-0042 is under the open load-bearing unknown f-0050`); the subject and attribute of a fact are never in one. An id with no resolver gets exactly `{ exists: false, holds: false, reason: 'evidence-missing' }` and reads `<id> is not in the record`. A resolver that throws is logged and treated the same.
+- *Shapes, a little wider than written.* A resolved `f-` id also carries `source` and `sourceKind`. An evidence row in `computeCriterionState` and `progressView` is `{ id, holds, reason, provenance, sourceKind, label }`. A `progressView` row also has `hash` (what a Confirm button must send), `recordId` (the regression trigger's key needs it) and `note` (the record's). An opinion is shown only on a confirmed row.
+- *`registerEvidenceResolver` and `registerEvidenceSource`* replace an earlier registration of the same prefix or name and return a function that puts the earlier one back (for tests). A prefix is letters and one dash.
+- *`summaryLine`* lists `failing` before `stale` (their precedence), leaves out every zero count but the first part, and counts as open every readiness item that is neither `ok` nor `n/a` (so `unknown` counts), which is the same rule as `ready`.
+- *`VerificationStore`*: `markDisagreed` returns the record or `null` and never overwrites an earlier mark; `setCache` returns whether it wrote, and compares states whatever their key order; a part of the file that is missing or of the wrong kind reads as empty, and a new id is one past the highest in the file.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.
