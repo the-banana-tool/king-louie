@@ -275,6 +275,8 @@ function registerHistoryHandlers(ipcMain, context = {}) {
       untrustedText: true,
       status: host ? host.status() : { ...OFF },
       progress: indexer ? indexer.progress() : null,
+      // Local inference L1 (§8.4): the keep-local embedder's progress.
+      keepLocalProgress: indexer && typeof indexer.keepLocalProgress === 'function' ? indexer.keepLocalProgress() : null,
       jev: jev ? jev.status() : { ...JEV_OFF, kind: rerank.kind },
       settings: { embedder: history.embedder, rerank: { enabled: rerank.enabled, search: rerank.search, kind: rerank.kind } }
     };

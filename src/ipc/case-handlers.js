@@ -11,7 +11,9 @@ const { createLogger } = require('../logging');
 const log = createLogger('ipc/cases');
 
 const summarize = (c) => ({
-  id: c.id, slug: c.slug, title: c.title, type: c.type, status: c.status, created: c.created, dir: c.dir
+  id: c.id, slug: c.slug, title: c.title, type: c.type, status: c.status, created: c.created, dir: c.dir,
+  // Local inference L1: the case's private mark, for the case panel.
+  ...(c.private === true ? { private: true } : {})
 });
 
 // A Telegram/Discord bridge chat (F5) can carry messages from a remote

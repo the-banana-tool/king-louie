@@ -33,6 +33,10 @@ const PRIVATE_SKIP_CODES = Object.freeze([
   'PRIVATE_NO_LOCAL_MODEL', 'LOCAL_ONLY_ROLE_NO_MODEL', 'LOCAL_MODEL_UNAVAILABLE', 'PRIVATE_HOSTED_TARGET', 'PRIVATE_HOSTED_CALL'
 ]);
 
+// The refusals the renderer words and answers with a button to Settings →
+// Models (local inference spec 2026-10-13 §15).
+const OPEN_MODELS_CODES = Object.freeze(['PRIVATE_NO_LOCAL_MODEL', 'LOCAL_ONLY_ROLE_NO_MODEL', 'LOCAL_MODEL_UNAVAILABLE']);
+
 function messageTimestamp(message = {}) {
   return message.timestamp || message.createdAt || message.updatedAt || null;
 }
@@ -143,6 +147,19 @@ function registerChatHandlers(ipcMain, context = {}) {
   // migration) falls back to the first chat. A history store that did not
   // open answers with no chats and says why; chats are never read from
   // chat-data.json instead (§15).
+  // Local inference L1 (spec 2026-10-13 §15): the renderer shows a lock on a
+  // private chat. Display only: `private` is a store-only key, so a chat
+  // object sent back with it changes nothing (rows.js).
+  const withPrivateMark = (chat) => {
+    if (!chat || typeof chat !== 'object') return chat;
+    try {
+      const store = typeof getHistoryStore === 'function' ? getHistoryStore() : null;
+      const ref = store && typeof store.chatRef === 'function' ? store.chatRef(chat.id) : null;
+      return ref && ref.private === true ? { ...chat, private: true } : chat;
+    } catch {
+      return chat;
+    }
+  };
   const chatListPayload = () => {
     const history = historyStatus();
     if (!history.available) return { chats: [], activeChatId: null, history };
@@ -151,7 +168,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     const activeChatId = metas.some((chat) => chat.id === storedActiveId) ? storedActiveId : (metas[0]?.id || null);
     const activeChat = activeChatId ? getChat(activeChatId, { messages: true }) : null;
     return {
-      chats: metas.map((chat) => (activeChat && chat.id === activeChat.id
+      chats: metas.map((chat) => withPrivateMark(activeChat && chat.id === activeChat.id
         ? chatMetadata(activeChat, { includeMessages: true })
         : chatMetadata(chat))),
       activeChatId,
@@ -266,7 +283,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     if (!chat) {
       return { ok: false, error: 'Chat not found.' };
     }
-    return { ok: true, chat };
+    return { ok: true, chat: withPrivateMark(chat) };
   }));
 
   ipcMain.handle(IPC.CHAT_CREATE, wrapHandler(IPC.CHAT_CREATE, async (_event, title = 'New Chat') => {
@@ -1038,7 +1055,10 @@ function registerChatHandlers(ipcMain, context = {}) {
         responseId,
         error: error.message,
         ...(error?.code === 'MAIN_OVERRIDE_UNUSABLE' ? { action: { kind: 'use-profile-main' } } : {}),
-        ...(error?.code === 'NO_USABLE_MODEL' ? { action: { kind: 'open-models' } } : {})
+        ...(error?.code === 'NO_USABLE_MODEL' ? { action: { kind: 'open-models' } } : {}),
+        // Local inference L1 (§13.6): a turn refused under the private mark
+        // or a local-only role names its code and offers Settings → Models.
+        ...(OPEN_MODELS_CODES.includes(error?.code) ? { code: error.code, action: { kind: 'open-models' } } : {})
       });
       throw error;
     } finally {

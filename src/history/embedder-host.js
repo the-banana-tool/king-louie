@@ -185,7 +185,8 @@ class EmbedderHost extends EventEmitter {
     const keep = this.keep && this.keep.key === key ? this.keep : null;
     if (!keep) return { key, state: 'off', download: null };
     const download = keep.state === 'downloading' ? { role: 'embedder', ...sumFiles(keep.files) } : null;
-    return { key, state: keep.state, download };
+    // Why it is not loaded, for the owner (the Recall pane), not only the log.
+    return { key, state: keep.state, download, ...(keep.state === 'unavailable' && keep.error ? { error: keep.error } : {}) };
   }
 
   // Why this turn's recall cannot use vectors although they are on
