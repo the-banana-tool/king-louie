@@ -890,6 +890,24 @@ contextBridge.exposeInMainWorld(
         validateString(payload.caseId, 'caseId', { minLength: 1 });
         return ipcRenderer.invoke('case:budget', payload);
       },
+      // Cases stage 8: progress. The reply carries untrustedText: true
+      // (render with textContent). Only the named fields are sent; the main
+      // process checks each again and decides who confirmed.
+      progress: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:progress', { caseId: payload.caseId });
+      },
+      confirmScope: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.action, 'action', { minLength: 1 });
+        if (payload.target !== undefined && payload.target !== null) validateString(payload.target, 'target', { minLength: 1 });
+        if (payload.text !== undefined && payload.text !== null) validateString(payload.text, 'text');
+        if (payload.hash !== undefined && payload.hash !== null && typeof payload.hash !== 'string') validateObject(payload.hash, 'hash');
+        const { caseId, action, target, hash, text } = payload;
+        return ipcRenderer.invoke('case:confirmScope', { caseId, action, target, hash, text });
+      },
       grantBudget: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.caseId, 'caseId', { minLength: 1 });

@@ -189,6 +189,16 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - *The prompt.* The orientation, and so both new sections, are in the dynamic part of the system prompt (`buildCaseSystemPrompt` → `systemPromptDynamic`) in owner turns and wake-ups, as before; nothing was added to the cached part. `get_orientation` returns the same text inside its untrusted wrapper.
 - *Tests.* No existing test changed.
 
+**Task 12 (IPC for progress and scope).**
+
+- *The reply, a little wider than written.* `case:progress` also has `caseStatus` (the panel must tell a `done` case with no frozen record from an open one), `at` (when a frozen record was written, else `null`) and, when `brief.md` could not be read, `warning`. A criterion row is `{ id, text, hash, scope, origin, state, evidence, reasons, note, opinion }`: `hash` is what a button sends back. The objective is `{ text, hash, state, origin }`. An abandoned record is `{ id, approach, why, tried, factIds, decisionIds, at }`.
+- *`case:confirmScope` checks that the event is a local desktop event* (`isLocalDesktopEvent`, refused `NOT_LOCAL_DESKTOP`). The standalone host and the bridge dispatcher mark every event, so this changes nothing a window can do; the older pressed handlers (`case:answerQuestion`, `case:setStatus`, `case:grantBudget`) rely on that marking alone and have no check of their own. Tests of the new handlers pass a marked event.
+- *More is refused before the runtime is called* than the task lists: `drop` of the objective, `edit` of `all-proposed`, a `hash` that is not text (for `all-proposed`: not an object of `sc-` ids or `objective` to text), a missing `text` for `edit` and `add`. These have no code. `by`, `channel`, `quote`, `factId` and anything else in the payload are never read; the preload sends the five named fields only.
+- *An objective the owner rewrites* is trimmed and held to 2,000 characters (the limit `create_case` gives one), refused `CRITERION_INVALID`. It is not held to one plain line: no path that sets an objective has that rule, and the cards already hide a text that is not one.
+- *Refusal codes.* `CASE_BUSY` is returned as a `code` beside the existing busy message; `CASE_CLOSED` and `SCOPE_INVALID` come back with their codes too.
+- *`case:setStatus`'s `progress`* is `null` when the progress could not be read; the status is set all the same.
+- *Tests.* `tests/cases-ipc.test.js` gained one test (the two channels are named and registered); no existing test changed.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.

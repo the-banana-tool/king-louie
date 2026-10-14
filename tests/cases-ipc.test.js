@@ -227,6 +227,15 @@ describe('case IPC, stage 2', () => {
     for (const ch of channels) assert.ok(handlers.has(ch), ch);
   });
 
+  // Cases stage 8 (plan Task 12): progress and the owner's scope actions.
+  it('the progress channels are named and registered with the rest', () => {
+    assert.deepStrictEqual([IPC.CASE_PROGRESS, IPC.CASE_CONFIRM_SCOPE], ['case:progress', 'case:confirmScope']);
+    const registered = new Set();
+    const ctx = new Proxy({}, { get: () => (() => {}) });
+    require('../src/ipc/register').registerHandlers({ handle: (ch) => registered.add(ch), on: () => {} }, ctx);
+    for (const ch of ['case:progress', 'case:confirmScope']) assert.ok(registered.has(ch), ch);
+  });
+
   it('lists open questions except for done and abandoned cases, answers one, and refuses a second answer', async () => {
     const { runtime, call } = setup2();
     const a = await activeCase(runtime, 'Lot A');

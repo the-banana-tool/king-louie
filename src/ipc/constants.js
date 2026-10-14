@@ -77,6 +77,9 @@ module.exports = {
   CASE_SET_STATUS: 'case:setStatus',
   CASE_BUDGET: 'case:budget',
   CASE_GRANT_BUDGET: 'case:grantBudget',
+  // Cases stage 8: progress and the owner's scope actions.
+  CASE_PROGRESS: 'case:progress',
+  CASE_CONFIRM_SCOPE: 'case:confirmScope',
   EXECUTORS_LIST: 'executors:list',
   CASE_ENVELOPES: 'case:envelopes',
   CASE_CANCEL_JOB: 'case:cancelJob',

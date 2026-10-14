@@ -47,6 +47,7 @@ function registerHandlers(ipcMain, context = {}) {
   require('./playbook-handlers').registerPlaybookHandlers(ipcMain, context);
   require('./contact-handlers').registerContactHandlers(ipcMain, context);
   require('./case-unattended-handlers').registerCaseUnattendedHandlers(ipcMain, context);
+  require('./case-progress-handlers').registerCaseProgressHandlers(ipcMain, context);
   require('./executor-handlers').registerExecutorHandlers(ipcMain, context);
   require('./detour-handlers').registerDetourHandlers(ipcMain, context);
   require('./desktop-handlers').registerDesktopHandlers(ipcMain, context);

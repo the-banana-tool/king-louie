@@ -7,6 +7,10 @@ const IPC = require('./constants');
 const { CATEGORIES } = require('../cases/budget');
 const { STATUSES } = require('../cases/status');
 const { answerClass } = require('../cases/mcp-tool-definitions');
+const { progressReply } = require('./case-progress-handlers');
+const { createLogger } = require('../logging');
+
+const log = createLogger('ipc/cases');
 
 const BUSY = 'Case is busy with a wake-up; try again in a minute.';
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -86,7 +90,16 @@ function registerCaseUnattendedHandlers(ipcMain, context = {}) {
     const rt = runtime();
     const id = required(caseId, 'caseId');
     const meta = await rt.systemAction(id, `status ${status}`, () => rt.setStatus(id, status, { kind: 'owner', by: 'owner', note: note || '' }));
-    return { ok: true, case: caseSummary(meta) };
+    // Cases stage 8: the progress as it now reads (after done, the record
+    // the case was frozen with). The status is set either way: a progress
+    // read that fails never fails the owner's press.
+    let progress = null;
+    try {
+      progress = progressReply(rt, id);
+    } catch (err) {
+      log.warn(`case:setStatus: the progress of ${id} could not be read: ${err.message}`);
+    }
+    return { ok: true, case: caseSummary(meta), progress };
   });
 
   handle(IPC.CASE_BUDGET, async ({ caseId }) => {
