@@ -7,6 +7,7 @@ const { UsageError } = require('../errors');
 const { validateSessionId } = require('../session-format');
 const { createModelClient } = require('../model');
 const { createFakeModels } = require('../fake-models');
+const { createLocalClient } = require('../local-client');
 const { ModelCache } = require('../model-cache');
 const { loadPrompt } = require('../prompts');
 const { formatEstimate, DEFAULT_MAX_USD } = require('../cost');
@@ -23,11 +24,21 @@ const USAGE = [
   '  --embed-provider: the embedder for kl-recall-vec: openai (default) or local (H3)',
   '  [--jev-mode batched|pointwise] [--jev-model jev-1.13.0] [--jev-max-tokens 20000000] [--jev-base-url <url>]',
   '  --jev-*: kl-recall-jev-rerank and kl-recall-vec-jev-rerank (key TYPESAFE_AI_KEY; unpriced, input tokens reported)',
+  '  [--local-provider ollama|openai-compatible --local-model <id> [--local-base-url <url>] [--local-context <tokens>]]',
+  '  [--rewrite-mode replace|append] [--abstain-mode note|withhold]',
+  '  --local-*: the local model for kl-recall-rewrite and kl-recall-abstain-check (an address on this machine or the LAN;',
+  '  $0; calls cached, made in the evidence-only run, cache-only in the answer stage; --fake-models supplies a fake one)',
   'Answer stage: --answer-provider <p> --answer-model <m> [--answer-base-url <url>] --judge-provider <p> --judge-model <m> [--judge-base-url <url>]',
   '  [--summarizer-provider <p> --summarizer-model <m> [--summarizer-base-url <url>]] [--tier grid|frontier] [--sample 150]',
   '  [--long-context-sample N] [--max-usd 50] [--allow-unpriced] [--dry-run] [--concurrency 4] [--answer-max-tokens 400]',
   '  [--judge-max-tokens 200] [--full-history-tokens 128000] [--compact-every-tokens 10000] [--fake-models]'
 ].join('\n');
+
+// The adapters that call the local model (local inference spec §11.3), and
+// the options that apply only to each.
+const LOCAL_ADAPTERS = Object.freeze(['kl-recall-rewrite', 'kl-recall-abstain-check']);
+const LOCAL_OPTIONS = Object.freeze(['local-provider', 'local-model', 'local-base-url', 'local-context']);
+const MODE_OPTIONS = Object.freeze({ 'rewrite-mode': 'kl-recall-rewrite', 'abstain-mode': 'kl-recall-abstain-check' });
 
 // Options that mean nothing without the answer stage.
 const ANSWER_ONLY = Object.freeze([
@@ -113,6 +124,12 @@ module.exports = {
     'jev-model': { type: 'string' },
     'jev-max-tokens': { type: 'string' },
     'jev-base-url': { type: 'string' },
+    'local-provider': { type: 'string' },
+    'local-model': { type: 'string' },
+    'local-base-url': { type: 'string' },
+    'local-context': { type: 'string' },
+    'rewrite-mode': { type: 'string' },
+    'abstain-mode': { type: 'string' },
     'answer-provider': { type: 'string' },
     'answer-model': { type: 'string' },
     'answer-base-url': { type: 'string' },
@@ -137,7 +154,7 @@ module.exports = {
   },
   exitCodeFor,
   positiveInt,
-  // deps (tests only): providerInstances { answer, judge, summarizer }, catalog, retry.
+  // deps (tests only): providerInstances { answer, judge, summarizer }, catalog, retry, lookup (the local client's DNS).
   async run(ctx, values, _positionals, deps = {}) {
     if (!values.adapters) throw new UsageError(USAGE);
     for (const id of values.session || []) validateSessionId(id);
@@ -160,8 +177,24 @@ module.exports = {
     } else if (!models.answer || !models.judge) {
       throw new UsageError('The answer stage needs both an answer model (--answer-provider, --answer-model) and a judge model (--judge-provider, --judge-model).');
     }
+    // The local model (spec §11.1) is only for the adapters that call it.
+    const localAdapters = adapterNames.filter((n) => LOCAL_ADAPTERS.includes(n));
+    const localNamed = LOCAL_OPTIONS.filter((k) => values[k] !== undefined);
+    if (localNamed.length && !localAdapters.length) {
+      throw new UsageError(`--${localNamed[0]} applies only to the local adapters (${LOCAL_ADAPTERS.join(', ')}).`);
+    }
+    if (localNamed.length && (!values['local-provider'] || !values['local-model'])) {
+      throw new UsageError('--local-provider and --local-model go together.');
+    }
+    for (const [option, adapter] of Object.entries(MODE_OPTIONS)) {
+      if (values[option] !== undefined && !adapterNames.includes(adapter)) throw new UsageError(`--${option} applies only to ${adapter}.`);
+    }
 
     const cache = ModelCache.forHome(ctx.home);
+    // The local adapters' calls: cached, and in the answer stage and its dry
+    // run read from the cache only (LOCAL_CALLS_MISSING), as the Jev
+    // adapters' scores are. The client is set just before the run starts.
+    const local = { client: null, cache, retry: deps.retry || {}, cachedOnly: answering };
     const prompts = { answer: loadPrompt('answer'), judge: loadPrompt('judge'), summarize: loadPrompt('summarize') };
     const summarizer = models.summarizer || models.answer;
     const windowTokens = values['full-history-tokens'] ? positiveInt(values['full-history-tokens'], 'full-history-tokens') : FULL_HISTORY_TOKENS;
@@ -189,6 +222,8 @@ module.exports = {
     const adapterConfig = {
       'kl-recall': { recall, ...(chunk ? { chunk } : {}) },
       'kl-recall-whole': { recall, ...(chunk ? { chunk } : {}) },
+      'kl-recall-rewrite': { recall, ...(chunk ? { chunk } : {}), local, ...(values['rewrite-mode'] ? { rewriteMode: values['rewrite-mode'] } : {}) },
+      'kl-recall-abstain-check': { recall, ...(chunk ? { chunk } : {}), local, ...(values['abstain-mode'] ? { abstainMode: values['abstain-mode'] } : {}) },
       'kl-recall-vec': vec,
       'kl-recall-vec-only': vec,
       // kl-recall-rerank: cross-encoder scores cached under LONGHAUL_HOME/private/rerank.
@@ -227,18 +262,36 @@ module.exports = {
         + `are sent to ${to.join(', ')} (--send-private).\n`)
     } : null;
 
-    const result = await runBenchmark({
-      home: ctx.home,
-      dataRoot: values.sessions ? path.resolve(ctx.cwd, values.sessions) : ctx.home.root,
-      sessionIds: values.session || null,
-      adapterNames,
-      adapterConfig,
-      budgetTokens: values['budget-tokens'] ? positiveInt(values['budget-tokens'], 'budget-tokens') : 6000,
-      seed: values.seed ? positiveInt(values.seed, 'seed') : 1,
-      includeUnverified: values['include-unverified'],
-      now: ctx.now,
-      answer
-    });
+    // The address is checked and pinned here, before anything is sent
+    // (LOCAL_REQUIRED); --fake-models alone supplies a fake local model.
+    if (localNamed.length) {
+      local.client = await createLocalClient({
+        provider: values['local-provider'], model: values['local-model'], baseUrl: values['local-base-url'] || null,
+        context: values['local-context'] !== undefined ? positiveInt(values['local-context'], 'local-context') : null,
+        ...(deps.lookup ? { lookup: deps.lookup } : {})
+      });
+    } else if (localAdapters.length && models.local) {
+      // The fake makes no call, so the smoke run needs no evidence-only run first.
+      local.client = models.local;
+      local.cachedOnly = false;
+    }
+    let result;
+    try {
+      result = await runBenchmark({
+        home: ctx.home,
+        dataRoot: values.sessions ? path.resolve(ctx.cwd, values.sessions) : ctx.home.root,
+        sessionIds: values.session || null,
+        adapterNames,
+        adapterConfig,
+        budgetTokens: values['budget-tokens'] ? positiveInt(values['budget-tokens'], 'budget-tokens') : 6000,
+        seed: values.seed ? positiveInt(values.seed, 'seed') : 1,
+        includeUnverified: values['include-unverified'],
+        now: ctx.now,
+        answer
+      });
+    } finally {
+      if (local.client && typeof local.client.close === 'function') local.client.close();
+    }
     if (result.staleTmpRemoved) ctx.stdout.write(`removed ${result.staleTmpRemoved} temp dirs left in ${ctx.home.tmp} by an interrupted run\n`);
     if (result.dryRun) {
       ctx.stdout.write('dry run: no model was called and no run was written.\n');
@@ -265,7 +318,14 @@ module.exports = {
         + `${others.length ? `; answer accuracy with them left out: ${others.join(', ')}` : ''}\n`);
     }
     // The Jev adapters' own counts (adapter-stats.json): tokens, unpriced.
+    // The local adapters': calls, cache hits, latency ($0).
     for (const [name, st] of Object.entries(result.adapterStats || {})) {
+      if (!('jev' in st)) {
+        const ms = Number.isFinite(st.callMsMedian) ? (st.callMsMedian / 1000).toFixed(2) : '-';
+        ctx.stdout.write(`${name.padEnd(nameWidth)} local ${st.mode}  calls ${st.calls} (cached ${st.cacheHits})  s/call median ${ms}  $0
+`);
+        continue;
+      }
       const j = st.jev;
       const s = Number.isFinite(st.uncachedMsMedian) ? (st.uncachedMsMedian / 1000).toFixed(2) : '-';
       ctx.stdout.write(`${name.padEnd(nameWidth)} ${st.mode} topM ${st.topM}  pairs ${st.rerank?.pairs ?? 0} (cached ${st.rerank?.hits ?? 0})  `
