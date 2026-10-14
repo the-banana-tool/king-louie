@@ -1144,3 +1144,10 @@ The planner's, not the owner's; each can be overturned in review.
 - A job log, adapter training, storage or evaluation (spec §12.4).
 - Any change to `CONTEXT.md`.
 - A change to N1's ruling (2026-10-14): the three tools stay refused in a private chat in L1; L2 revisits it.
+
+## Review fixes (2026-10-14)
+
+An independent review of L1 found the items below; each was confirmed in the code and fixed test-first.
+
+1. **(high) `create_case` from a private chat made an ordinary case.** `src/mcp/case-tools.js` `createCase` now passes `private: true` when the asking chat is private, read as the read tools read it (`hidesPrivate`: on `in-app-chat` only, from the turn's models; MCP never takes a caller's word), as `case:create` and a private case's detour already did. Tests: `cases-private-surfaces › review fixes › item 1` (the handler, the chat tool through `turnModels.egress`, and an ordinary chat and MCP still making ordinary cases).
+2. **(medium) `answer_question` reached into a private case.** The three write tools that act on a case (`answer_question`, `revoke_envelope`, `cancel_case_job`) now refuse a case whose text is hidden here (`refuseHidden`: MCP always, a non-private chat's tools) with `private_case`, right after the case is looked up and before its question, envelope or job is read, so no option label, no existence answer and no fact. A private chat's own tools still act. `set_away` and `create_case` act on no case. The existing test "answer_question on a private case over mcp-stdio still answers" (plan Task 13 step 1) now expects the refusal; see open question below.

@@ -179,12 +179,13 @@ describe('the management tools and a private case (R-LI-32)', { skip: HAS_GIT ? 
     assert.ok('openQuestions' in full, 'a private asker gets the whole row');
   });
 
-  it('answer_question on a private case over mcp-stdio still answers', async () => {
+  // Review fix, item 2: was "still answers". Over MCP a private case gives
+  // id, title and status only, so answering it there is refused too.
+  it('answer_question on a private case over mcp-stdio is refused private_case', async () => {
     const { rt, lake } = await world();
     const q = rt.createQuestion(lake.id, { kind: 'question', text: 'Which listing photo should lead?', options: [{ id: 'a', label: 'Lake view' }, { id: 'b', label: 'Road view' }], urgency: 'normal' }, { charge: false });
-    const r = await handler(rt, 'mcp-stdio').call('answer_question', { case: lake.id, question_id: q.id, option_id: 'a', quote: 'Lead with the lake view' });
-    assert.strictEqual(r.question_id, q.id);
-    assert.strictEqual(rt.questions(lake.id).get(q.id).answer.channel, 'mcp-stdio');
+    await assert.rejects(handler(rt, 'mcp-stdio').call('answer_question', { case: lake.id, question_id: q.id, option_id: 'a', quote: 'Lead with the lake view' }), (err) => err.code === 'private_case');
+    assert.strictEqual(rt.questions(lake.id).get(q.id).answer, null);
   });
 });
 
@@ -238,5 +239,79 @@ describe('the approval cards of a private case (R-LI-24)', () => {
     assert.strictEqual(sent.ok, true, sent.error);
     const [, jobView] = ctl.calls.find((c) => c[0] === 'submit');
     assert.strictEqual(jobView.payload.text, 'Hello, calling about the lot of 2.12 acres.');
+  });
+});
+
+// Review fixes (plan "Review fixes", items 1 and 2).
+describe('review fixes: the write tools and a private case', { skip: HAS_GIT ? false : 'git is not on PATH' }, () => {
+  const handler = (rt, channel) => createCaseToolHandler({ getRuntime: () => rt, channel });
+  const refusal = async (p) => { try { await p; } catch (err) { return err; } assert.fail('expected a refusal'); };
+  const QUOTE = 'Please start a case to fix the gutter';
+  const args = { title: 'Gutter fix', objective: 'fix the gutter', quote: QUOTE };
+
+  it('item 1: create_case from a private chat creates a private case', async () => {
+    const rt = new CaseRuntime({ root: tmp(), getSettings: () => ({ cases: { timeZone: 'UTC' } }) });
+    const r = await handler(rt, 'in-app-chat').call('create_case', args, { ownerTurnText: QUOTE, askerIsPrivate: true });
+    assert.strictEqual(rt.isPrivate(r.case_id), true);
+  });
+
+  it('item 1: the chat tool reads the mark from the turn\'s models', async () => {
+    const rt = new CaseRuntime({ root: tmp(), getSettings: () => ({ cases: { timeZone: 'UTC' } }) });
+    const tool = MANAGEMENT_TOOLS.find((t) => t.name === 'create_case');
+    const caseManagement = handler(rt, 'in-app-chat');
+    const marked = await tool.execute(args, { caseManagement, ownerTurnText: QUOTE, turnModels: { egress: egressPolicy({ reason: 'private-chat', chatId: 'chat-1' }) } });
+    assert.strictEqual(marked.ok, true, marked.error);
+    assert.strictEqual(rt.isPrivate(marked.result.case_id), true);
+    const plain = await tool.execute({ ...args, title: 'Fence paint', objective: 'paint the fence', quote: 'Please start a case to paint the fence' }, { caseManagement, ownerTurnText: 'Please start a case to paint the fence', turnModels: { egress: null } });
+    assert.strictEqual(plain.ok, true, plain.error);
+    assert.strictEqual(rt.isPrivate(plain.result.case_id), false);
+  });
+
+  it('item 1: an ordinary chat and MCP create an ordinary case, whatever a caller says', async () => {
+    const rt = new CaseRuntime({ root: tmp(), getSettings: () => ({ cases: { timeZone: 'UTC' } }) });
+    const a = await handler(rt, 'in-app-chat').call('create_case', args, { ownerTurnText: QUOTE });
+    assert.strictEqual(rt.isPrivate(a.case_id), false);
+    const b = await handler(rt, 'mcp-stdio').call('create_case', { ...args, title: 'Shed roof', objective: 'fix the shed roof', quote: 'start a case to fix the shed roof' }, { askerIsPrivate: true });
+    assert.strictEqual(rt.isPrivate(b.case_id), false);
+  });
+
+  const question = (rt, id) => rt.createQuestion(id, { kind: 'question', text: 'Which listing photo should lead?', options: [{ id: 'a', label: 'Lake view' }, { id: 'b', label: 'Road view' }], urgency: 'normal' }, { charge: false });
+
+  for (const channel of ['mcp-stdio', 'mcp-frontdoor', 'in-app-chat']) {
+    it(`item 2: answer_question on a private case is refused before the question is read (${channel})`, async () => {
+      const { rt, lake } = await world();
+      const q = question(rt, lake.id);
+      // A quote that names no option would have listed the labels.
+      const e = await refusal(handler(rt, channel).call('answer_question', { case: lake.id, question_id: q.id, option_id: 'a', quote: 'the first one please' }, { ownerTurnText: 'the first one please' }));
+      assert.strictEqual(e.code, 'private_case');
+      assert.doesNotMatch(JSON.stringify({ m: e.message, d: e.data }), /Lake view|Road view|listing photo/);
+      const unknown = await refusal(handler(rt, channel).call('answer_question', { case: lake.id, question_id: 'q-9999', text: 'yes', quote: 'yes go ahead now' }, { ownerTurnText: 'yes go ahead now' }));
+      assert.strictEqual(unknown.code, 'private_case', 'no question_not_found oracle');
+      assert.strictEqual(rt.questions(lake.id).get(q.id).answer, null);
+    });
+
+    it(`item 2: revoke_envelope and cancel_case_job on a private case are refused before anything is read (${channel})`, async () => {
+      const { rt, lake } = await world();
+      const h = createCaseToolHandler({ getRuntime: () => rt, channel, getExecutorRegistry: () => ({ revokeEnvelope: async () => ({ ok: true }), cancelJob: async () => ({ ok: true }) }) });
+      const env = await refusal(h.call('revoke_envelope', { case: lake.id, envelope: 'env-01', quote: 'revoke that envelope now' }, { ownerTurnText: 'revoke that envelope now' }));
+      assert.strictEqual(env.code, 'private_case');
+      const job = await refusal(h.call('cancel_case_job', { case: lake.id, job: 'job-0001', quote: 'cancel that job now' }, { ownerTurnText: 'cancel that job now' }));
+      assert.strictEqual(job.code, 'private_case');
+    });
+  }
+
+  it('item 2: from a private asking chat the chat\'s own answer_question answers a private case', async () => {
+    const { rt, lake } = await world();
+    const q = question(rt, lake.id);
+    const r = await handler(rt, 'in-app-chat').call('answer_question', { case: lake.id, question_id: q.id, option_id: 'a', quote: 'Lead with the lake view' }, { ownerTurnText: 'Lead with the lake view', askerIsPrivate: true });
+    assert.strictEqual(r.question_id, q.id);
+    assert.strictEqual(rt.questions(lake.id).get(q.id).answer.channel, 'in-app-chat');
+  });
+
+  it('item 2: an ordinary case still answers over mcp-stdio', async () => {
+    const { rt, door } = await world();
+    const q = question(rt, door.id);
+    const r = await handler(rt, 'mcp-stdio').call('answer_question', { case: door.id, question_id: q.id, option_id: 'a', quote: 'Lead with the lake view' });
+    assert.strictEqual(r.question_id, q.id);
   });
 });
