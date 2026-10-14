@@ -216,13 +216,16 @@ describe('history schema step 5: the private mark', () => {
     assert.strictEqual(embeddingCount(t.store, HOSTED_KEY, 'b'), inB);
     assert.ok(t.store.vectorEpoch > epoch, 'vectorEpoch moved');
 
-    // Nothing to drop: the epoch stays.
+    // Marking a chat that is already private is no mark: the epoch stays.
     const after = t.store.vectorEpoch;
     assert.deepStrictEqual(t.store.markPrivate('a'), { marked: false, droppedVectors: 0 });
     seedChat(t.store, { id: 'c', messages: [{ sender: 'user', text: 'A third chat.' }] });
     embedChat(t.store, 'c', [LOCAL_KEY]);
+    // Review fix, item 6: a mark that drops nothing still moves the epoch
+    // (was: "the epoch stays"), so a hosted batch in flight is not written.
+    assert.strictEqual(t.store.vectorEpoch, after, 'marking a private chat again is no mark');
     assert.deepStrictEqual(t.store.markPrivate('c'), { marked: true, droppedVectors: 0 });
-    assert.strictEqual(t.store.vectorEpoch, after);
+    assert.ok(t.store.vectorEpoch > after, 'every mark moves the epoch');
   });
 
   it('R-LI-10: a mark whose delete fails leaves the chat unmarked and its vectors in place', () => {

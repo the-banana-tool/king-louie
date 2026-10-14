@@ -718,7 +718,10 @@ class HistoryStore {
         WHERE substr(model, 1, 6) <> 'local:' AND chunk_id IN (SELECT id FROM chunks WHERE chat_id = ?)`).run(id).changes);
       return { marked: true, droppedVectors };
     });
-    if (out.droppedVectors > 0) this._bumpVectorEpoch();
+    // Every mark moves the epoch, not only one that dropped vectors: a hosted
+    // batch taken before the mark and still with its embedder must not be
+    // written after it (review fix, item 6; embed-indexer.js embedRows).
+    if (out.marked) this._bumpVectorEpoch();
     return out;
   }
 

@@ -160,6 +160,23 @@ describe('EmbedIndexer', () => {
     assert.strictEqual(t.store.countEmbedded('fake:bow'), 3, 'the rows are pending again and fill on the next tick');
   });
 
+  it('review fix, item 6: a hosted batch in flight across a private mark is not written, though the chat had no vectors to drop', async () => {
+    let open;
+    const gate = new Promise((r) => { open = r; });
+    const s = setup({ embedder: fakeEmbedder('fake:bow', { gate }), history: { embedder: { batchSize: 16 } } });
+    t = s.t;
+    seedChat(t.store, { messages: notes(3) });
+    ix = s.indexer();
+    const inFlight = ix.tick();
+    await new Promise((r) => setImmediate(r));
+    assert.deepStrictEqual(t.store.markPrivate('chat-1'), { marked: true, droppedVectors: 0 });
+    open();
+    await inFlight;
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 0, 'the batch taken before the mark wrote nothing');
+    await ix.tick();
+    assert.strictEqual(t.store.countEmbedded('fake:bow'), 0, 'and a private chat is never pending for a hosted key');
+  });
+
   it('does nothing without a ready embedder, or after stop()', async () => {
     const s = setup({ embedder: null });
     t = s.t;
