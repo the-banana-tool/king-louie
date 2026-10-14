@@ -1396,7 +1396,10 @@ plan `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`
   once, the call goes out with no lock held, and its result lands in a
   system action of its own (a `verification` journal entry, its own commit,
   `case:changed` with `what: 'progress'`). A turn that starts meanwhile drops
-  the result; shutdown stops the call and awaits it. It never fails a turn.
+  the result; shutdown stops the call and awaits it. Every charge of the
+  call, in time or late, is a `verifySystemAction` of its own (`system:
+  verify pass usage`), taken before the landing, so it is committed even
+  when the landing is dropped (review fix, 2026-10-14). It never fails a turn.
   Tests wait with `runtime.verifyIdle(id)`. The panel's **Check now**
   (`case:verifyNow`, a press; refused when `when` is `off`, the case is not
   open, nothing is confirmed, or the cap or the usd mark is reached) runs the

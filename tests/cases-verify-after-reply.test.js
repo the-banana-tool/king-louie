@@ -124,8 +124,11 @@ describe('the verify pass runs after the reply (R-C8-11)', () => {
       ['turn', 'Recorded the signed contract.\n'],
       ['verification', `${HEADING}\n- Now met: sc-001 (${f.id}).\n- Verify pass: 1 accepted, 1 not accepted (sc-002: f-0999 is not in the ledger).\n`]
     ]);
-    assert.strictEqual(await commits(w.dir), before + 2);
+    // Three commits: the turn, the charge (a system action of its own,
+    // review finding 2) and the landing.
+    assert.strictEqual(await commits(w.dir), before + 3);
     assert.strictEqual(await lastCommit(w.dir), 'turn-1: verify pass');
+    assert.strictEqual((await git.git(w.dir, ['log', '-1', '--skip=1', '--format=%s'])).trim(), 'system: verify pass usage');
     assert.strictEqual(await git.isDirty(w.dir), false);
     assert.strictEqual(w.locked(), false);
     // Counted once and charged once.
@@ -330,6 +333,53 @@ describe('the verify pass runs after the reply (R-C8-11)', () => {
     } finally {
       clearTimeout(keep);
     }
+  });
+
+  // Review finding 2 (2026-10-14): the on-time charge of a pass after the
+  // reply was written with no lock (and could pause the case and ask a
+  // budget question outside any system action). Every charge of the pass
+  // now goes through verifySystemAction: committed on its own, before the
+  // landing, so a landing that is dropped leaves nothing uncommitted.
+  it('the charge of a call that settled in time is a system action of its own: committed even when a turn then drops the landing', async () => {
+    const w = await world();
+    const gate = deferred();
+    w.script.reply = () => gate.promise;
+    const { f } = await w.changedTurn();
+    await tick();
+    const head = await commits(w.dir);
+    // Hold the first commit after the reply, and start an owner turn then.
+    const realCommit = w.rt._commit.bind(w.rt);
+    const held = deferred();
+    const letGo = deferred();
+    const messages = [];
+    w.rt._commit = async (...args) => {
+      messages.push(String(args[1]));
+      if (messages.length === 1) {
+        held.resolve(String(args[1]));
+        await letGo.promise;
+      }
+      return realCommit(...args);
+    };
+    gate.resolve(verdict(met('sc-001', f.id)));
+    assert.strictEqual(await held.promise, 'system: verify pass usage');
+    assert.strictEqual(w.locked(), true);
+    const beginning = w.begin();
+    await tick(30);
+    letGo.resolve();
+    const turn = await beginning;
+    await w.rt.verifyIdle(w.id, { settled: true });
+    // The landing was dropped by the turn: no record, no entry.
+    assert.deepStrictEqual(w.file().records, []);
+    assert.ok(!w.journals().some(([kind]) => kind === 'verification'));
+    // The charge is committed, once, in its own commit, not as "owner edits".
+    assert.strictEqual(w.events.length, 1);
+    assert.strictEqual(Math.round(w.spent() * 100) / 100, 0.02);
+    assert.strictEqual(await commits(w.dir), head + 1);
+    assert.strictEqual((await git.git(w.dir, ['log', '-1', '--format=%s', '--', '.kl/budget.json'])).trim(), 'system: verify pass usage');
+    assert.ok(!messages.includes('owner edits'), messages.join(' | '));
+    await w.rt.endTurn(turn, { summary: 'read' });
+    assert.strictEqual(await git.isDirty(w.dir), false);
+    assert.strictEqual(w.events.length, 1);
   });
 
   it('a stopped call that reported partial usage is charged with it', async () => {

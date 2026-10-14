@@ -477,10 +477,12 @@ settles**, whether or not the pass was still waiting for it: a reply in time; a 
 the time limit, or after the pass was dropped; and the partial usage a provider attaches to a call it
 was told to stop (`partialLlmMetrics`, recorded as `usagePartial`, never as $0). The call is also
 aborted for real at the time limit, so a provider that honours the abort stops generating; one that
-does not is charged for what it reports. A charge that arrives late is written in a system action of
-its own (`system: verify pass usage`) so it is committed; while a turn of this process holds the case
-it is written inside that turn; during shutdown it is written directly and committed by the next
-commit. The daily count is taken once, at prepare, and a dropped pass is not counted again.
+does not is charged for what it reports. Every charge, in time or late, is written in a system action
+of its own (`system: verify pass usage`), taken when the call settles and before the result lands, so it
+is committed even when the landing is dropped (review finding 2, 2026-10-14; as first built, a charge in
+time was written with no lock and left for the landing to commit); while a turn or system action of
+this process holds the case it is written inside that one; during shutdown, or while another process
+holds the case, it is written directly and committed by the next commit. The daily count is taken once, at prepare, and a dropped pass is not counted again.
 
 **What it is given** (built by `collectTurnEvidence(runtime, turn, evidence)`, §6.10), in this order,
 inside one data fence, at most `cases.verify.maxInputChars` (12,000):

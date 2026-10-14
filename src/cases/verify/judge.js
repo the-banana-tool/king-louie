@@ -222,11 +222,16 @@ function verifyTools(runtime) {
 // attaches to a call it was told to stop. Nothing the provider billed goes
 // unrecorded because the pass stopped waiting for it.
 //
-// In time, the charge is written at once: the turn, or the landing that
-// follows, commits budget.json. Late, it is written in a system action of
-// its own (so it is committed) when the case is free, and directly when it
-// is not or the app is closing. → a promise that settles when it is written.
-function chargeVerifyUsage(runtime, turn, reply, { late = false } = {}) {
+// Every charge, in time or late, is written in a verify system action
+// (review finding 2, 2026-10-14): the usd charge, and the pause and the
+// budget-grant question a crossing may bring, happen under the case lock.
+// The action is taken synchronously, before the pass's landing, so the
+// charge is committed on its own whether or not the landing follows. When
+// a turn or system action of this process holds the case, it runs inside
+// that one and is committed with it. Only when another process holds the
+// case, or the app is closing, is it written directly.
+// → a promise that settles when it is written.
+function chargeVerifyUsage(runtime, turn, reply) {
   let done = false;
   const charge = () => {
     if (done) return;
@@ -237,16 +242,20 @@ function chargeVerifyUsage(runtime, turn, reply, { late = false } = {}) {
       log.warn(`Charging the verify call of case ${turn.caseId} failed: ${err?.message || err}`);
     }
   };
-  if (!late || runtime.closing || typeof runtime.verifySystemAction !== 'function') {
+  if (runtime.closing || typeof runtime.verifySystemAction !== 'function') {
     charge();
     return Promise.resolve();
   }
-  return Promise.resolve()
-    .then(() => runtime.verifySystemAction(turn.caseId, 'verify pass usage', charge))
-    .catch((err) => {
-      log.debug(`Case ${turn.caseId}: the late verify charge was written outside a system action: ${err?.message || err}`);
-      charge();
-    });
+  let action;
+  try {
+    action = runtime.verifySystemAction(turn.caseId, 'verify pass usage', charge);
+  } catch (err) {
+    action = Promise.reject(err);
+  }
+  return Promise.resolve(action).catch((err) => {
+    log.debug(`Case ${turn.caseId}: the verify charge was written outside a system action: ${err?.message || err}`);
+    charge();
+  });
 }
 
 // One call, bounded by a ref'd timer and by `signal` (the turn's own in a
@@ -259,7 +268,6 @@ async function callVerifyModel(runtime, turn, input, timeoutMs, { signal = turn.
   const onAbort = () => controller.abort(signal.reason);
   let timer = null;
   let aborted = null;
-  let decided = false;
   let settled = Promise.resolve();
   try {
     await runtime.ensureRoleTested(turn.caseId, 'verify', { turn });
@@ -282,11 +290,11 @@ async function callVerifyModel(runtime, turn, input, timeoutMs, { signal = turn.
     const call = Promise.resolve()
       .then(() => provider.sendMessageWithTools([{ sender: 'user', text: input }], verifyTools(runtime), { systemPrompt: VERIFY_SYSTEM, temperature: 0, abortSignal: controller.signal }))
       .then((reply) => {
-        charged = chargeVerifyUsage(runtime, turn, reply, { late: decided });
+        charged = chargeVerifyUsage(runtime, turn, reply);
         return { reply, model: provider.current() };
       }, (err) => {
         // A stopped call: what the provider had reported so far is usage too.
-        if (isObject(err) && isObject(err.partialLlmMetrics)) charged = chargeVerifyUsage(runtime, turn, { llmMetrics: err.partialLlmMetrics }, { late: decided });
+        if (isObject(err) && isObject(err.partialLlmMetrics)) charged = chargeVerifyUsage(runtime, turn, { llmMetrics: err.partialLlmMetrics });
         log.warn(`The verify call of case ${turn.caseId} failed: ${err?.message || err}`);
         return { error: controller.signal.aborted ? 'the call was stopped' : 'the model call failed' };
       });
@@ -297,7 +305,6 @@ async function callVerifyModel(runtime, turn, input, timeoutMs, { signal = turn.
     log.warn(`The verify pass of case ${turn.caseId} could not call a model: ${err?.message || err}`);
     return { error: 'no usable model', settled };
   } finally {
-    decided = true;
     clearTimeout(timer);
     if (aborted && signal) signal.removeEventListener('abort', aborted);
   }
