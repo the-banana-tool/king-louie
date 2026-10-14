@@ -2,7 +2,9 @@
 // Cases stage 8, owner ruling 2026-10-13 (N2): the case panel's "Check now"
 // runs the verify pass on the owner's press. It is counted and skipped like
 // any pass, is refused while the case is closed or busy, and no tool and no
-// MCP surface reaches it. No network and no model: the router is a stub.
+// MCP surface reaches it. It is the pass of R-C8-11 started by a press: no
+// lock is held across its call, and an owner turn that starts meanwhile
+// drops it. No network and no model: the router is a stub.
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -57,7 +59,13 @@ async function world({ settings = {}, reply = null } = {}) {
   const press = (payload = { caseId: id }) => handlers.get(IPC.CASE_VERIFY_NOW)(markLocalDesktopEvent({}), payload);
   const pressUnmarked = (payload = { caseId: id }) => handlers.get(IPC.CASE_VERIFY_NOW)({}, payload);
   const row = (criterion = 'sc-001') => rt.progressView(id).criteria.find((r) => r.id === criterion);
-  return { rt, id, dir: info.dir, clock, calls, notified, script, fact, press, pressUnmarked, row };
+  // Resolves once the check's model call is out (the press first commits
+  // the count of the pass, which takes a moment).
+  const callOut = async (n = 1) => {
+    for (let i = 0; i < 400 && calls.length < n; i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.strictEqual(calls.length, n, 'the verify call is out');
+  };
+  return { rt, id, dir: info.dir, clock, calls, notified, script, fact, press, pressUnmarked, row, callOut };
 }
 
 describe('Check now: the owner asks for a verify pass', () => {
@@ -179,27 +187,88 @@ describe('Check now: the owner asks for a verify pass', () => {
     assert.strictEqual(w.calls.length, 0);
   });
 
-  it('a second press while a check runs is refused, and an owner turn waits for it', async () => {
+  // R-C8-11: the owner's turn wins. (Before the pass moved after the reply,
+  // a check held the case and an owner turn was refused busy until it ended.)
+  it('a second press while a check runs is refused, and an owner turn takes the case and drops the check', async () => {
     const w = await world();
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
-    w.script.reply = async () => { await gate; return verdict(unmet('sc-001')); };
+    w.script.reply = async () => { await gate; return verdict(met('sc-001', w.fact.id)); };
     const keepAlive = setTimeout(() => {}, 30000);
     try {
       const first = w.press();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await w.callOut();
       assert.deepStrictEqual(w.rt.runningTurn(w.id).source, 'check');
+      // No lock is held across the call.
+      assert.strictEqual(fs.existsSync(path.join(w.dir, '.kl', 'lock')), false);
       const second = await w.press();
-      assert.deepStrictEqual([second.ok, second.code], [false, 'CASE_BUSY']);
-      await assert.rejects(() => w.rt.beginTurn(w.id, { turnId: 'turn-1' }), { code: 'CASE_BUSY' });
+      assert.deepStrictEqual(second, { ok: false, code: 'CASE_BUSY', error: 'A check is already running in this case.' });
+      const turn = await w.rt.beginTurn(w.id, { turnId: 'turn-1' });
+      // The check ends without its model: dropped, nothing recorded, and owed.
+      const r = await first;
+      assert.deepStrictEqual([r.ok, r.ran, r.accepted, r.note], [true, true, 0, 'The check did not finish: a turn started in this case.']);
+      assert.strictEqual(w.rt.runningTurn(w.id).source, 'owner');
+      assert.strictEqual(w.rt.verifyOwed.has(w.id), true);
       release();
-      assert.strictEqual((await first).ok, true);
+      assert.strictEqual(w.row().state, 'unmet');
       assert.strictEqual(w.calls.length, 1);
+      // The turn's close runs the owed pass, though the turn wrote nothing.
+      await w.rt.endTurn(turn, { summary: 'after', verify: true });
+      await w.rt.verifyIdle(w.id);
+      assert.strictEqual(w.calls.length, 2);
+      assert.strictEqual(w.row().state, 'met');
+      assert.strictEqual(w.rt.verifyOwed.has(w.id), false);
+      // Each was counted once.
+      assert.strictEqual(w.rt.verification(w.id).passesOn('2026-10-21'), 2);
+      assert.strictEqual(await git.isDirty(w.dir), false);
     } finally {
+      release();
       clearTimeout(keepAlive);
     }
-    const turn = await w.rt.beginTurn(w.id, { turnId: 'turn-2' });
-    await w.rt.endTurn(turn, { summary: 'after' });
+  });
+
+  it('a wake-up waits for a running check, a press waits for a turn\'s own pass, and shutdown ends a check', async () => {
+    const w = await world();
+    let release;
+    let gate = new Promise((resolve) => { release = resolve; });
+    w.script.reply = async () => { await gate; return verdict(met('sc-001', w.fact.id)); };
+    const keepAlive = setTimeout(() => {}, 30000);
+    try {
+      // A wake-up never starts on a case whose check is out, and never drops it.
+      const first = w.press();
+      await w.callOut();
+      await assert.rejects(() => w.rt.beginTurn(w.id, { turnId: 'wake-1', source: 'wakeup' }), { code: 'CASE_BUSY' });
+      release();
+      assert.deepStrictEqual([(await first).accepted, w.row().state], [1, 'met']);
+
+      // The pass of a turn's close is out: a press is refused, not queued.
+      gate = new Promise((resolve) => { release = resolve; });
+      const turn = await w.rt.beginTurn(w.id, { turnId: 'turn-1' });
+      w.rt.ledger(w.id).assert({ stmt: 'The buyer paid the deposit', subject: 'deposit', attr: 'paid', value: true, source: src });
+      await w.rt.endTurn(turn, { summary: 'wrote', verify: true });
+      await w.callOut(2);
+      const during = await w.press();
+      assert.deepStrictEqual([during.ok, during.code, during.error], [false, 'CASE_BUSY', 'A check is already running in this case.']);
+      // Stop does not reach a pass that followed a turn.
+      assert.strictEqual(w.rt.abortTurn(w.id, 'stopped by owner'), false);
+      release();
+      await w.rt.verifyIdle(w.id);
+
+      // Shutdown: the check's call is stopped and nothing is recorded.
+      gate = new Promise((resolve) => { release = resolve; });
+      w.script.reply = async () => { await gate; return verdict(unmet('sc-001')); };
+      const last = w.press();
+      await w.callOut(3);
+      w.rt.beginShutdown();
+      const r = await last;
+      assert.deepStrictEqual([r.ok, r.note], [true, 'The check did not finish: dropped (shutdown).']);
+      await w.rt.verifyIdle(null, { settled: false });
+      assert.strictEqual(w.row().state, 'met');
+      assert.strictEqual(fs.existsSync(path.join(w.dir, '.kl', 'lock')), false);
+    } finally {
+      release();
+      clearTimeout(keepAlive);
+    }
   });
 
   it('Stop from the chat, or pausing the case, ends a running check and nothing is recorded', async () => {
@@ -212,7 +281,7 @@ describe('Check now: the owner asks for a verify pass', () => {
       try {
         let settled = null;
         const first = w.press().then((r) => { settled = r; return r; });
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await w.callOut();
         if (stop === 'stop') assert.strictEqual(w.rt.abortTurn(w.id, 'stopped by owner'), true);
         else w.rt.setStatus(w.id, 'paused', { kind: 'owner', by: 'owner' });
         // The call is still waiting on the gate; the check must end without it.
@@ -222,6 +291,9 @@ describe('Check now: the owner asks for a verify pass', () => {
         const r = await first;
         assert.deepStrictEqual([r.ok, r.accepted, r.note], [true, 0, 'The check did not finish: the turn was stopped.'], stop);
         assert.strictEqual(w.row().state, 'unmet', stop);
+        // A check the owner stopped is not owed to the next close.
+        assert.strictEqual(w.rt.verifyOwed.has(w.id), false, stop);
+        assert.strictEqual(w.rt.runningTurn(w.id), null, stop);
         assert.strictEqual(w.rt.turns.size, 0);
         assert.strictEqual(fs.existsSync(path.join(w.dir, '.kl', 'lock')), false);
       } finally {
@@ -238,6 +310,7 @@ describe('Check now: the owner asks for a verify pass', () => {
     // A turn sees it met and writes the cache.
     const seen = await w.rt.beginTurn(w.id, { turnId: 'turn-1' });
     await w.rt.endTurn(seen, { summary: 'read', verify: true });
+    await w.rt.verifyIdle(w.id);
     // The fact is corrected; then the owner checks.
     w.rt.ledger(w.id).assert({ stmt: 'The contract was signed at 79,000', subject: 'contract', attr: 'signed', value: 79000, source: src, supersedes: w.fact.id });
     w.script.reply = verdict(unmet('sc-001'));

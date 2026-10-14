@@ -2843,6 +2843,9 @@ async function renderCaseUnattendedSection(chat, container, { pendingMessage = n
 if (window.electron?.cases?.onChanged) {
   window.electron.cases.onChanged((payload) => {
     if (payload?.what === 'turn' && payload.caseId) {
+      // The owner's check (source 'check') holds no lock: Send stays, and a
+      // message sent meanwhile wins (R-C8-11). The Progress block has its Stop.
+      if (payload.source === 'check') return;
       if (payload.running) appState.runningCaseTurns.add(payload.caseId);
       else appState.runningCaseTurns.delete(payload.caseId);
       refreshStopButton();
@@ -3021,7 +3024,9 @@ function caseProgressRowButtons(row, act) {
 
 // "Check now" (owner ruling 2026-10-13): the owner's press runs one verify
 // pass. The button is disabled while this window's press, or any turn of
-// the case, runs; the result line is the main process's own words.
+// the case, runs; the result line is the main process's own words. While
+// the check runs the row has its own Stop (the chat keeps Send: a message
+// sent meanwhile starts its turn and ends the check, R-C8-11).
 const caseProgressChecks = new Set();
 const caseProgressCheckNotes = new Map();
 function caseProgressCheckRow(chat, container) {
@@ -3031,12 +3036,23 @@ function caseProgressCheckRow(chat, container) {
   button.id = 'case-progress-check';
   const result = caseProgressEl('span', 'case-progress-check-result');
   result.id = 'case-progress-check-result';
+  const stop = caseButton('Stop', 'secondary-button case-progress-check-stop');
+  stop.id = 'case-progress-check-stop';
   button.disabled = caseProgressChecks.has(caseId) || appState.runningCaseTurns.has(caseId);
+  stop.hidden = !caseProgressChecks.has(caseId);
   result.textContent = caseProgressChecks.has(caseId) ? 'Checking…' : (caseProgressCheckNotes.get(caseId) || '');
+  // The chat's own Stop: with no reply streaming in this chat it reaches
+  // the case's check (chat:stopResponse → CaseRuntime.abortTurn).
+  stop.addEventListener('click', () => {
+    if (!caseProgressChecks.has(caseId) || appState.activeResponses.has(chat.id)) return;
+    stop.disabled = true;
+    window.electron.chat.stopResponse(chat.id).catch((err) => chatLog.warn(`Stopping the check failed: ${err.message}`));
+  });
   button.addEventListener('click', async () => {
     if (caseProgressChecks.has(caseId)) return;
     caseProgressChecks.add(caseId);
     button.disabled = true;
+    stop.hidden = false;
     result.textContent = 'Checking…';
     let note;
     try {
@@ -3050,7 +3066,7 @@ function caseProgressCheckRow(chat, container) {
     caseProgressCheckNotes.set(caseId, note);
     await renderCaseProgressSection(chat, container);
   });
-  row.append(button, result);
+  row.append(button, stop, result);
   return row;
 }
 
@@ -9660,7 +9676,7 @@ async function handleSelectChat(chatId) {
     window.electron.cases.runningTurn({ caseId: chat.caseId })
       .then((r) => {
         const state = unwrapIpcResult(r, 'Unable to read the case turn.');
-        if (state?.running) appState.runningCaseTurns.add(chat.caseId);
+        if (state?.running && state.source !== 'check') appState.runningCaseTurns.add(chat.caseId);
         else appState.runningCaseTurns.delete(chat.caseId);
         refreshStopButton();
       })

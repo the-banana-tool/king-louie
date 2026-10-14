@@ -104,6 +104,18 @@ describe('renderer case progress text', () => {
     assert.match(check, /\.disabled = /);
     assert.match(check, /\.textContent = /);
     assert.doesNotMatch(check, /innerHTML/);
+    // While it runs the row has a Stop, which is the chat's own Stop.
+    assert.match(check, /caseButton\('Stop'/);
+    assert.match(check, /window\.electron\.chat\.stopResponse\(chat\.id\)/);
+    // A check never swaps the chat's Send for Stop (R-C8-11: a message sent
+    // meanwhile wins), on the notification and on the read at chat switch.
+    const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    assert.match(renderer, /if \(payload\.source === 'check'\) return;\s+if \(payload\.running\) appState\.runningCaseTurns\.add/);
+    assert.match(renderer, /state\?\.running && state\.source !== 'check'/);
+    // A pass that lands after the reply says so with what: 'progress', and
+    // the block is drawn again then.
+    assert.match(block, /const CASE_PROGRESS_REDRAW = \[[^\]]*'progress'[^\]]*\]/);
+    assert.match(block, /CASE_PROGRESS_REDRAW\.includes\(payload\.what\)[\s\S]{0,400}renderCaseProgressSection\(chat, slot\)/);
     // Only an open case gets the row.
     const section = functionSource(block, 'renderCaseProgressSection');
     assert.match(section, /if \(editable\) container\.appendChild\(caseProgressCheckRow\(/);

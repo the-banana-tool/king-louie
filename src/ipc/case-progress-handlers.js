@@ -12,6 +12,7 @@ const { isLocalDesktopEvent } = require('../core/origin');
 const BUSY = 'Case is busy with a wake-up; try again in a minute.';
 const NOT_LOCAL = 'This is done only from the King Louie window.';
 const CHECK_BUSY = 'A turn is running in this case; check again when it ends.';
+const CHECK_RUNNING = 'A check is already running in this case.';
 const ACTIONS = Object.freeze(['confirm', 'drop', 'edit', 'add']);
 const CRITERION_ID = /^sc-\d{3,}$/;
 const HASH_MAX_CHARS = 200;
@@ -159,7 +160,8 @@ function registerCaseProgressHandlers(ipcMain, context = {}) {
     try {
       return await fn(isObject(payload) ? payload : {}, event);
     } catch (err) {
-      if (err && err.code === 'CASE_BUSY') return refuse(channel === IPC.CASE_VERIFY_NOW ? CHECK_BUSY : BUSY, 'CASE_BUSY');
+      if (err && err.code === 'CASE_BUSY' && channel === IPC.CASE_VERIFY_NOW) return refuse(err.verifying ? CHECK_RUNNING : CHECK_BUSY, 'CASE_BUSY');
+      if (err && err.code === 'CASE_BUSY') return refuse(BUSY, 'CASE_BUSY');
       if (err && err.name === 'VerifyRefusedError') return refuse(err.message, err.code);
       if (err && err.name === 'ScopeError' && SCOPE_CODES.includes(err.code)) return refuse(err.message, err.code);
       throw err;
@@ -193,6 +195,8 @@ function registerCaseProgressHandlers(ipcMain, context = {}) {
   // "Check now" (owner ruling 2026-10-13): the owner's press runs one
   // verify pass. No tool and no MCP surface has this path; the runtime
   // counts it and refuses it like any pass. `note` is the result line.
+  // The reply waits for the pass, which holds no lock (R-C8-11): a message
+  // the owner sends meanwhile starts its turn and the check ends unfinished.
   handle(IPC.CASE_VERIFY_NOW, async (payload, event) => {
     if (!isLocalDesktopEvent(event)) return refuse(NOT_LOCAL, 'NOT_LOCAL_DESKTOP');
     if (typeof payload.caseId !== 'string' || !payload.caseId) return refuse('caseId is required.');
