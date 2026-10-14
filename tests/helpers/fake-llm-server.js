@@ -15,6 +15,13 @@
 // never answers. setReply(model, text) fixes a model's reply text;
 // setModels(list) and setOllamaModels(map) change what is listed;
 // failNext(status, count, pathSuffix) fails the next matching requests.
+// A streamed request that offers tools gets its tool call as OpenAI-style
+// tool_call deltas (name first, then the arguments in two pieces), as the
+// non-streamed reply names the first tool. setScript(model, steps) makes a
+// streamed request for that model play `steps` instead: each `{ at, delta }`
+// (or `{ at, usage }`, or `{ at, json }` for a raw chunk) is written `at` ms
+// after the request, then [DONE]; `{ at, end: false }` as the last step
+// leaves the stream open (the client ends it).
 const http = require('http');
 
 const TOOL_ARGS = Object.freeze({ q: 'weather' });
@@ -27,7 +34,7 @@ const SLOW_FIRST_TOKEN_MS = 150;
 async function startFakeLlmServer() {
   const state = {
     requests: [], hold: false, closed: 0, waiters: [], open: new Set(),
-    ollamaModels: OLLAMA_MODELS, models: null, replies: new Map(), failures: [], timers: new Set()
+    ollamaModels: OLLAMA_MODELS, models: null, replies: new Map(), scripts: new Map(), failures: [], timers: new Set()
   };
   const named = (model, word) => String(model || '').includes(word);
   const later = (ms, fn) => {
@@ -65,10 +72,38 @@ async function startFakeLlmServer() {
     }
     const fixed = state.replies.has(model) ? state.replies.get(model) : null;
     const usage = (prompt, completion) => (named(model, 'no-usage') ? {} : { usage: { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion } });
+    if (body.stream && state.scripts.has(model)) {
+      startSse(res);
+      const steps = state.scripts.get(model);
+      const last = steps.length ? steps[steps.length - 1] : null;
+      for (const step of steps) {
+        later(step.at || 0, () => {
+          if (res.destroyed || res.writableEnded) return;
+          if (step.delta) data(res, { model, choices: [{ delta: step.delta }] });
+          if (step.usage) data(res, { model, choices: [], usage: step.usage });
+          if (step.json) data(res, step.json);
+          if (step === last && step.end !== false) { data(res, '[DONE]'); res.end(); }
+        });
+      }
+      return;
+    }
     if (body.stream) {
       const run = () => {
         if (res.destroyed) return;
         startSse(res);
+        if (hasTools(body) && fixed === null && !named(model, 'text-only')) {
+          const tool = body.tools[0];
+          const name = tool?.function?.name || tool?.name || 'Lookup';
+          const args = JSON.stringify(TOOL_ARGS);
+          const half = Math.floor(args.length / 2);
+          data(res, { model, choices: [{ delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name, arguments: '' } }] } }] });
+          data(res, { model, choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(0, half) } }] } }] });
+          data(res, { model, choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(half) } }] }, finish_reason: 'tool_calls' }] });
+          if (!named(model, 'no-usage')) data(res, { model, choices: [], ...usage(20, 5) });
+          data(res, '[DONE]');
+          res.end();
+          return;
+        }
         if (fixed !== null) {
           data(res, { model, choices: [{ delta: { content: fixed } }] });
         } else {
@@ -231,6 +266,7 @@ async function startFakeLlmServer() {
     setModels: (list) => { state.models = Array.isArray(list) ? list : null; },
     setOllamaModels: (map) => { state.ollamaModels = map && typeof map === 'object' ? map : OLLAMA_MODELS; },
     setReply: (model, text) => { state.replies.set(String(model), String(text)); },
+    setScript: (model, steps) => { state.scripts.set(String(model), Array.isArray(steps) ? steps : []); },
     failNext: (status = 500, count = 1, suffix = null) => { state.failures.push({ status, count, suffix }); },
     closedCount: () => state.closed,
     waitForClosedStream: (count, timeoutMs = 3000) => new Promise((resolve, reject) => {

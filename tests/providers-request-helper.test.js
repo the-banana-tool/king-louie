@@ -115,15 +115,23 @@ describe('every provider goes through the helper', () => {
       const src = fs.readFileSync(path.join(PROVIDERS_DIR, file), 'utf8');
       // A provider that extends another provider (local-server-provider.js
       // extends OllamaProvider) streams through its parent's method, which
-      // this test checks in the parent's own file: each streaming method it
-      // defines must hand the call to super's, and it reads no stream itself.
+      // this test checks in the parent's own file, or through a stream
+      // reader of its own (local-server-provider.js's _streamChat, which
+      // reads tool-call and reasoning deltas: local inference review fix,
+      // item 3). Each streaming method it defines hands the call to one of
+      // the two, and every reader it has goes through guardStream.
       const parent = inheritsProvider(src);
       if (parent) {
         assert.ok(providerFiles().includes(parent), `${file} extends a provider in ${parent}`);
-        assert.strictEqual((src.match(/async (streamMessage|streamMessageWithTools|_streamResponses)\(/g) || []).length, 0, `${file} reads no stream itself`);
+        const readers = (src.match(/async (streamMessage|streamMessageWithTools|_streamResponses|_streamChat)\(/g) || []).length;
+        assert.strictEqual((src.match(/this\.guardStream\(/g) || []).length, readers, `${file}: ${readers} stream readers, each through guardStream`);
         const own = src.match(/\n {2}(streamMessage|streamMessageWithTools)\([^)]*\) \{[\s\S]*?\n {2}\}/g) || [];
         assert.ok(own.length > 0, `${file} has a streaming method`);
-        for (const body of own) assert.match(body, /super\.(streamMessage|streamMessageWithTools)\(/, `${file}: its streaming method goes through super`);
+        for (const body of own) {
+          const viaOwn = /this\._streamChat\(/.test(body);
+          if (viaOwn) assert.ok(/async _streamChat\(/.test(src), `${file}: _streamChat is its own reader`);
+          assert.ok(viaOwn || /super\.(streamMessage|streamMessageWithTools)\(/.test(body), `${file}: its streaming method goes through super or its own guarded reader`);
+        }
         continue;
       }
       const streams = (src.match(/async (streamMessage|streamMessageWithTools|_streamResponses)\(/g) || []).length;

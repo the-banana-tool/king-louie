@@ -340,3 +340,133 @@ describe('a local call\'s timeout', () => {
     assert.ok(out.llmMetrics);
   });
 });
+
+// Review fix, item 3: a local call in agent mode streams (the router's
+// streamMessageWithTools), so "until first output" means the first streamed
+// output: content, a reasoning delta or a tool-call delta. A role-only chunk
+// is not output.
+describe('review fix: streamed tool calls on a local server (Q-L1-5)', () => {
+  let box;
+  const catalog = fixtureCatalog();
+  const open = [];
+  before(async () => { box = await startFakeLlmServer(); });
+  after(async () => { for (const s of open) s.close(); await box.close(); });
+  const provider = (over = {}) => {
+    const servers = new LocalServers({ getEntries: () => [serverEntry('workstation', `${box.url}/vllm`, over)], catalog });
+    open.push(servers);
+    return servers.providerFor('workstation');
+  };
+  const lastBody = () => box.requests[box.requests.length - 1].body;
+  // Deltas 120 ms apart: past a 150 ms timeout.
+  const drip = (deltas) => deltas.map((delta, i) => ({ at: i * 120, delta }));
+
+  it('the local provider streams a tool call, sending stream: true, and records it as local', async () => {
+    const p = provider();
+    assert.strictEqual(typeof p.streamMessageWithTools, 'function');
+    let streamed = '';
+    const res = await within(5000, p.streamMessageWithTools(HI, TOOLS, { model: 'workstation/test-model', timeoutMs: 1000 }, (c) => { streamed += c; }));
+    assert.strictEqual(lastBody().stream, true);
+    assert.strictEqual(lastBody().tools[0].function.name, 'Lookup');
+    assert.strictEqual(res.type, 'tool_use');
+    assert.strictEqual(res.toolName, 'Lookup');
+    assert.strictEqual(res.toolUseId, 'call_1');
+    assert.deepStrictEqual(res.parameters, { q: 'weather' });
+    assert.strictEqual(res.llmMetrics.model, 'workstation/test-model');
+    assert.strictEqual(res.llmMetrics.costUsd, 0);
+    assert.strictEqual(res.llmMetrics.inputTokens, 20);
+    assert.strictEqual(streamed, '');
+  });
+
+  it('the router streams a local target in agent mode', async () => {
+    const servers = new LocalServers({ getEntries: () => [serverEntry('workstation', `${box.url}/vllm`)], catalog });
+    open.push(servers);
+    const router = new InferenceRouter({
+      getProviderToken: () => null,
+      createProvider: (prov, token, target) => servers.providerFor(servers.splitModel(target.model).serverId),
+      isGuaranteeTarget: (target) => servers.isGuaranteeTarget(target),
+      sleep: async () => {}
+    });
+    const routed = router.routedProvider({ targets: [t('local', 'workstation/test-model')], egress: PRIVATE });
+    const res = await within(5000, routed.streamMessageWithTools(HI, TOOLS, { timeoutMs: 1000 }, () => {}));
+    assert.strictEqual(lastBody().stream, true, 'a streamed request, not a whole-body one');
+    assert.strictEqual(res.toolName, 'Lookup');
+  });
+
+  it('streamed text with tools offered comes back as text, and goes to onChunk', async () => {
+    const p = provider();
+    box.setScript('workstation-text', drip([{ role: 'assistant', content: '' }, { content: 'one' }, { content: ' two' }]));
+    let streamed = '';
+    const res = await within(5000, p.streamMessageWithTools(HI, TOOLS, { model: 'workstation/workstation-text' }, (c) => { streamed += c; }));
+    assert.strictEqual(res.type, 'text');
+    assert.strictEqual(res.content, 'one two');
+    assert.strictEqual(streamed, 'one two');
+  });
+
+  it('Q-L1-5: tool-call deltas that run past the limit complete', async () => {
+    const p = provider();
+    box.setScript('slow-tool', drip([
+      { role: 'assistant', tool_calls: [{ index: 0, id: 'call_9', type: 'function', function: { name: 'Lookup', arguments: '' } }] },
+      { tool_calls: [{ index: 0, function: { arguments: '{"q":' } }] },
+      { tool_calls: [{ index: 0, function: { arguments: '"wea' } }] },
+      { tool_calls: [{ index: 0, function: { arguments: 'ther"' } }] },
+      { tool_calls: [{ index: 0, function: { arguments: '}' } }] }
+    ]));
+    const started = Date.now();
+    const res = await within(5000, p.streamMessageWithTools(HI, TOOLS, { model: 'workstation/slow-tool', timeoutMs: 150 }, () => {}));
+    assert.ok(Date.now() - started >= 400, 'the reply ran well past the 150 ms timeout');
+    assert.deepStrictEqual([res.type, res.toolUseId, res.parameters], ['tool_use', 'call_9', { q: 'weather' }]);
+  });
+
+  for (const key of ['reasoning_content', 'reasoning']) {
+    it(`Q-L1-5: reasoning deltas (${key}) count as first output, and are not the reply's text`, async () => {
+      const p = provider();
+      const model = `think-${key}`;
+      box.setScript(model, drip([{ [key]: 'Let me' }, { [key]: ' think' }, { [key]: ' hard' }, { [key]: ' more' }, { content: 'Done.' }]));
+      for (const call of [
+        (on) => p.streamMessageWithTools(HI, TOOLS, { model: `workstation/${model}`, timeoutMs: 150 }, on),
+        (on) => p.streamMessage(HI, { model: `workstation/${model}`, timeoutMs: 150 }, on)
+      ]) {
+        let streamed = '';
+        const started = Date.now();
+        await within(5000, call((c) => { streamed += c; }));
+        assert.ok(Date.now() - started >= 400);
+        assert.strictEqual(streamed, 'Done.');
+      }
+    });
+  }
+
+  it('a role-only chunk is not output: the timeout still fires', async () => {
+    const p = provider();
+    box.setScript('role-then-late', [{ at: 0, delta: { role: 'assistant', content: '' } }, { at: 1500, delta: { content: 'late' } }]);
+    await within(5000, assert.rejects(
+      p.streamMessageWithTools(HI, TOOLS, { model: 'workstation/role-then-late', timeoutMs: 150 }, () => {}),
+      (err) => err.code === 'LOCAL_TIMEOUT' && err.timeoutMs === 150
+    ));
+  });
+
+  it('a server that never answers a streamed tool call times out as LOCAL_TIMEOUT', async () => {
+    const p = provider();
+    await within(5000, assert.rejects(
+      p.streamMessageWithTools(HI, TOOLS, { model: 'workstation/hang-model', timeoutMs: 150 }, () => {}),
+      (err) => err.code === 'LOCAL_TIMEOUT'
+    ));
+  });
+
+  it('two tool calls in one streamed reply are both returned', async () => {
+    const p = provider();
+    box.setScript('two-tools', drip([
+      { tool_calls: [{ index: 0, id: 'call_a', type: 'function', function: { name: 'Lookup', arguments: '{"q":"a"}' } }] },
+      { tool_calls: [{ index: 1, id: 'call_b', type: 'function', function: { name: 'Lookup', arguments: '{"q":"b"}' } }] }
+    ]));
+    const res = await within(5000, p.streamMessageWithTools(HI, TOOLS, { model: 'workstation/two-tools' }, () => {}));
+    assert.deepStrictEqual(res.toolCalls.map((c) => [c.toolUseId, c.parameters.q]), [['call_a', 'a'], ['call_b', 'b']]);
+  });
+
+  it('a reply with no usage is estimated from the request and the tool call', async () => {
+    const p = provider();
+    box.setScript('no-usage-tool', drip([{ tool_calls: [{ index: 0, id: 'call_c', type: 'function', function: { name: 'Lookup', arguments: '{"q":"c"}' } }] }]));
+    const res = await within(5000, p.streamMessageWithTools(HI, TOOLS, { model: 'workstation/no-usage-tool' }, () => {}));
+    assert.strictEqual(res.llmMetrics.usageEstimated, true);
+    assert.ok(res.llmMetrics.outputTokens > 0);
+  });
+});

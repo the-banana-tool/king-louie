@@ -17,20 +17,33 @@ const EST_CHARS_PER_TOKEN = 4;
 const estimate = (chars) => Math.ceil(Math.max(0, chars) / EST_CHARS_PER_TOKEN);
 const positiveMs = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
 
-// What a finished, non-streamed reply said, for the estimate: its text and
-// the calls it made.
+// What a finished reply said, for the estimate: its text and the calls it
+// made. A streamed reply's text was counted as it arrived, so only its calls
+// are added then (toolChars).
+function toolChars(result) {
+  let n = 0;
+  for (const call of Array.isArray(result?.toolCalls) ? result.toolCalls : []) {
+    if (typeof call?.toolName === 'string') n += call.toolName.length;
+    try { n += JSON.stringify(call?.parameters ?? {}).length; } catch { /* unmeasurable: counted as nothing */ }
+  }
+  return n;
+}
+
 function replyChars(result) {
   if (!result || typeof result !== 'object') return 0;
   let n = 0;
   for (const value of [result.content, result.messageContent]) {
     if (typeof value === 'string') n += value.length;
   }
-  for (const call of Array.isArray(result.toolCalls) ? result.toolCalls : []) {
-    if (typeof call?.toolName === 'string') n += call.toolName.length;
-    try { n += JSON.stringify(call?.parameters ?? {}).length; } catch { /* unmeasurable: counted as nothing */ }
-  }
-  return n;
+  return n + toolChars(result);
 }
+
+// The fields a streamed delta carries a model's reasoning in, by server:
+// vLLM, llama.cpp and LM Studio say reasoning_content, Ollama's /v1 says
+// reasoning. Reasoning is output (it ends the first-output timeout) but is
+// never the reply's text.
+const REASONING_KEYS = Object.freeze(['reasoning_content', 'reasoning', 'thinking']);
+const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
 
 function coded(code, message) {
   const err = new Error(message);
@@ -82,6 +95,9 @@ class LocalServerProvider extends OllamaProvider {
     // Per call, by its bounded abort signal: the timeout to clear when the
     // first byte of a non-streamed reply body arrives (see _bound).
     this._watchBody = new WeakMap();
+    // Per streamed call, by its bounded abort signal: the timeout to clear
+    // when the stream carries its first output (_outputSeen).
+    this._watchStream = new WeakMap();
   }
 
   getName() { return LOCAL_PROVIDER; }
@@ -221,7 +237,7 @@ class LocalServerProvider extends OllamaProvider {
   // cut off by Stop is left as it is (usagePartial, rule 5). A target that
   // names an adapter (§12) sends the adapter's ref and is recorded under the
   // base model, with `adapter` on its metrics.
-  async _call(run, options, onChunk = null) {
+  async _call(run, options, onChunk = null, streamed = false) {
     const { adapter: named = null, ...opts } = options || {};
     const adapter = named === undefined || named === null ? null : named;
     const model = this._serverModel(opts.model);
@@ -232,22 +248,21 @@ class LocalServerProvider extends OllamaProvider {
     const callOptions = { ...opts, model: sent, ...(bound ? { abortSignal: bound.signal } : {}) };
     const sizes = { sent: 0, received: 0 };
     this._sizes.set(callOptions, sizes);
-    // A streamed call's first token ends its timeout; a non-streamed call's
+    // A streamed call's first output (text, reasoning or a tool-call delta:
+    // _streamChat calls _outputSeen) ends its timeout; a non-streamed call's
     // first body byte does (request, above).
-    const counting = typeof onChunk === 'function'
-      ? (chunk) => {
-        if (typeof chunk === 'string') {
-          sizes.received += chunk.length;
-          if (bound && chunk.length > 0) bound.started();
-        }
-        return onChunk(chunk);
+    const counting = (chunk) => {
+      if (typeof chunk === 'string') {
+        sizes.received += chunk.length;
+        if (bound && chunk.length > 0) bound.started();
       }
-      : onChunk;
-    if (bound && typeof onChunk !== 'function') this._watchBody.set(bound.signal, bound);
+      return typeof onChunk === 'function' ? onChunk(chunk) : undefined;
+    };
+    if (bound) (streamed ? this._watchStream : this._watchBody).set(bound.signal, bound);
     try {
-      const result = await run(callOptions, counting);
+      const result = await run(callOptions, streamed ? counting : null);
       if (result && typeof result === 'object' && result.llmMetrics) {
-        if (!counting) sizes.received += replyChars(result);
+        sizes.received += streamed ? toolChars(result) : replyChars(result);
         result.llmMetrics = tag(this._estimated({ ...result.llmMetrics, model: recorded }, sizes));
       }
       return result;
@@ -267,8 +282,139 @@ class LocalServerProvider extends OllamaProvider {
     return this._call((opts) => super.sendMessageWithTools(messages, tools, opts), options);
   }
 
+  // Streamed calls (review fix, item 3): agent mode streams too, through
+  // streamMessageWithTools, so a long agent reply is bounded only until its
+  // first output (Q-L1-5), never as a whole.
   streamMessage(messages, options = {}, onChunk) {
-    return this._call((opts, counting) => super.streamMessage(messages, opts, counting), options, onChunk);
+    return this._call((opts, counting) => this._streamChat(messages, null, opts, counting), options, onChunk, true);
+  }
+
+  streamMessageWithTools(messages, tools = [], options = {}, onChunk) {
+    return this._call((opts, counting) => this._streamChat(messages, tools, opts, counting), options, onChunk, true);
+  }
+
+  // The stream carried output: the first-output timeout ends.
+  _outputSeen(options) {
+    const bound = options && options.abortSignal ? this._watchStream.get(options.abortSignal) : null;
+    if (bound) bound.started();
+  }
+
+  /**
+   * One streamed chat completion at `<baseUrl>/chat/completions`, every kind
+   * alike (OpenAI-compatible SSE). Text deltas go to onChunk; reasoning
+   * deltas and tool-call deltas are output too (they end the first-output
+   * timeout) but are not text. Tool calls are put together from their
+   * deltas by `index` (a delta with no index continues the last call, or
+   * starts one when it brings a new id). With `tools` the result is
+   * parseToolResponse's shape; without, `{ llmMetrics }` as streamMessage
+   * returns. A server that answers a streamed request with one JSON body is
+   * read as that body (its first output is then the whole body).
+   */
+  async _streamChat(messages, tools, options, onChunk) {
+    const requestedModel = options.model || this.getDefaultModel();
+    const withTools = Array.isArray(tools) && tools.length > 0;
+    const prepared = this.prependSystemPrompt(messages, this.systemText(options));
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({
+        model: requestedModel,
+        messages: this.formatMessages(prepared),
+        ...(withTools ? {
+          tools: tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })),
+          tool_choice: 'auto'
+        } : {}),
+        temperature: options.temperature ?? 0.7,
+        stream: true
+      })
+    }, options);
+    if (!response.ok) throw await this.buildError(response);
+
+    let usage = null;
+    let model = requestedModel;
+    let content = '';
+    const calls = [];
+    const emit = (text) => { if (typeof onChunk === 'function') onChunk(text); };
+    const finish = () => {
+      const llmMetrics = this.buildLlmCallMetrics({ model, usage });
+      if (!withTools) return { llmMetrics };
+      const toolCalls = calls.filter(Boolean).map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args } }));
+      return this.parseToolResponse({ choices: [{ message: { content, tool_calls: toolCalls } }] }, llmMetrics);
+    };
+
+    const contentType = String(response.headers?.get?.('content-type') || '');
+    if (contentType.includes('application/json')) {
+      const data = await response.json();
+      this._outputSeen(options);
+      usage = data?.usage || null;
+      model = data?.model || model;
+      const message = data?.choices?.[0]?.message || {};
+      if (nonEmpty(message.content)) { content = message.content; emit(content); }
+      for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+        if (call?.function?.name) calls.push({ id: call.id, name: call.function.name, args: typeof call.function.arguments === 'string' ? call.function.arguments : JSON.stringify(call.function.arguments ?? {}) });
+      }
+      return finish();
+    }
+
+    const takeCall = (delta) => {
+      let slot;
+      if (Number.isInteger(delta.index) && delta.index >= 0 && delta.index < 128) {
+        slot = calls[delta.index] || (calls[delta.index] = { id: null, name: '', args: '' });
+      } else {
+        const last = calls.length ? calls[calls.length - 1] : null;
+        slot = last && (!delta.id || !last.id || last.id === delta.id) ? last : null;
+        if (!slot) { slot = { id: null, name: '', args: '' }; calls.push(slot); }
+      }
+      let seen = false;
+      if (nonEmpty(delta.id) && !slot.id) slot.id = delta.id;
+      const fn = delta.function || {};
+      if (nonEmpty(fn.name)) { if (!slot.name) slot.name = fn.name; seen = true; }
+      if (nonEmpty(fn.arguments)) { slot.args += fn.arguments; seen = true; } else if (fn.arguments && typeof fn.arguments === 'object') { slot.args = JSON.stringify(fn.arguments); seen = true; }
+      return seen;
+    };
+
+    // → true at [DONE].
+    const take = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return false;
+      const data = trimmed.slice(5).trim();
+      if (data === '[DONE]') return true;
+      let parsed;
+      try { parsed = JSON.parse(data); } catch { return false; } // a malformed chunk is skipped
+      if (parsed?.usage) usage = parsed.usage;
+      if (parsed?.model) model = parsed.model;
+      const delta = parsed?.choices?.[0]?.delta;
+      if (!delta || typeof delta !== 'object') return false;
+      let output = false;
+      if (nonEmpty(delta.content)) {
+        content += delta.content;
+        output = true;
+        emit(delta.content);
+      }
+      if (REASONING_KEYS.some((k) => nonEmpty(delta[k]))) output = true;
+      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        if (call && typeof call === 'object' && takeCall(call)) output = true;
+      }
+      if (output) this._outputSeen(options);
+      return false;
+    };
+
+    return this.guardStream(options, () => ({ model, usage }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) if (take(line)) return finish();
+      }
+      buffer += decoder.decode();
+      if (buffer) take(buffer);
+      return finish();
+    });
   }
 
   _estimated(metrics, sizes) {
