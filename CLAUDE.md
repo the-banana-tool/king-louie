@@ -464,6 +464,199 @@ stages M1 to M3). It is Electron-free.
 - `king-louie-service models status|refresh` and `profiles list|show|set-default`
   work on the data dir; the writing ones refuse while the service runs.
 
+## Local models
+
+Spec `docs/superpowers/specs/2026-10-13-local-inference-design.md` (stage
+L1; L2, a node serving the owner's other nodes, gets its own plan); plan
+`docs/superpowers/plans/2026-10-13-local-inference-l1.md` (owner rulings
+R-LI-*, Q-L1-*). Electron-free except `src/ipc/`.
+
+- A local server is an OpenAI-compatible server the owner added, which is
+  the mark that it is local (R-LI-4, R-LI-5). One provider key, `local`;
+  model ids are `<serverId>/<model>` (`{ provider: 'local', model:
+  'workstation/qwen3:8b' }`). `local` is not in `KL_PROVIDERS`:
+  `explainTarget` asks the registry. Every kind (`ollama`, `lmstudio`,
+  `llamacpp`, `vllm`, `openai-compatible`) is spoken to at
+  `<baseUrl>/v1/chat/completions`.
+- `LocalServers` (`src/models/local-servers.js`) owns the entries, their
+  pins and the probe records (`<dataDir>/models/local-probes.json`); a
+  probed model enters the catalog under `local` (`syncCatalog`), which is
+  where the profile picker and the chat header list it from. Probe once,
+  place by hand (R-LI-7). `LocalServerProvider`
+  (`src/providers/local-server-provider.js`) is one instance per server
+  (`providerFor`).
+- Only `src/models/local-transport.js` opens a socket to a local server
+  (calls, the probe and discovery alike). It dials only the pinned
+  addresses, resolves nothing at request time, never follows a redirect
+  (`LOCAL_REDIRECT`), uses no proxy or global agent, destroys a socket
+  whose remote address is not pinned (`LOCAL_ADDRESS_MISMATCH`), checks a
+  `tlsFingerprint` when one is set (`LOCAL_TLS_MISMATCH`) and queues past
+  `maxConcurrent`. Never call `fetch` for a local server.
+- Addresses (`src/models/local-address.js`, `resolveAndPin`): a name is
+  resolved once, at add, at start and on "Check again", and every answer
+  must be allowed. `loopback` and `lan` are allowed; `cgnat`
+  (`100.64.0.0/10`) only with the entry's `allowCgnat` (R-LI-29);
+  link-local, unspecified and public are refused. The grade (R-LI-30):
+  `loopback` carries the guarantee; `lan` and `cgnat` only over https with
+  a `tlsFingerprint`, else the server is for cost only and never used by a
+  private chat or a local-only role.
+- Desktop: `settings.models.localServers` is sealed. Only
+  `LocalServers#write`, from the `models:local.*` handlers, replaces it;
+  the core's `setSettings` keeps the stored value whatever a caller passes,
+  and `import --from` does not carry it. `add`, `remove`, `recheck` and
+  `fromOllama` act only for the app's own window (`NOT_LOCAL_WINDOW`
+  otherwise); `probe` and `setModelInfo` for any marked desktop event. A
+  server's key is the provider token `__local_<id>`.
+  `tests/local-servers-config.test.js` fails when another file under
+  `src/` names `localServers`.
+- Service: local servers come only from the admin `service.json` block
+  `localInference` (`localInference` joins `ADMIN_ONLY_KEYS`); a data-dir
+  `models.localServers` is ignored with one warning, and every change over
+  the bridge is `LOCAL_SERVER_ADMIN_ONLY`. The block is `{ servers: [{ id,
+  name, kind, baseUrl, addresses?, tlsFingerprint?, allowCgnat?,
+  maxConcurrent?, timeoutMs?, key?, adapters? }] }`, strict keys, at most
+  32 servers. `key` is a `${vault:local.<name>}` reference and nothing
+  else (a key written into the file, or a vault key outside `local.`, is
+  refused): the `Vault` tool cannot read, change, delete or list a
+  `local.` key (`src/models/local-vault-keys.js`). `adapters` is
+  `[{ model, id, job, ref }]` (one id per model, at most 32 per model), the
+  only source of adapters there. The pins are made in `start()`.
+- The built-in `ollama` provider is never local (R-LI-31): its calls cost
+  $0 but carry no `local`. "Use this Ollama as a local server"
+  (`models:local.fromOllama`) adds a local server beside it.
+- The egress policy (`src/models/egress.js`): a private chat or case, or a
+  local-only role (`profile.localOnly`), makes a model call local or
+  refused. `snapshotModels` freezes it into `TurnModels`, and a child run
+  takes its parent's. Four checks: the resolver drops every target that is
+  not a guarantee-grade local one (`mustResolve` throws
+  `PRIVATE_NO_LOCAL_MODEL` or `LOCAL_ONLY_ROLE_NO_MODEL`), the router
+  refuses a hosted target (`PRIVATE_HOSTED_TARGET`), a hosted provider
+  refuses to send (`PRIVATE_HOSTED_CALL`), the transport pins. A mark that
+  cannot be read (a closed store, an unknown chat, a `case.yaml` `private`
+  that is not a boolean) is private. Under a policy a role borrows among
+  local models only; an optional job (a title, the detour classifier, the
+  case nudge, a case's verify pass after a reply) is skipped and a
+  load-bearing one refused (R-LI-22). Nothing falls back to a hosted model.
+- **A new model call goes through the router or takes the policy, and
+  `tests/egress-inventory.test.js` lists the file** (with a label, in
+  `tests/fixtures/egress-inventory.json`): a new caller of `fetch`, a
+  socket, a provider, an embedder, a provider class's `this.request(`, or
+  a call by name on a provider (`.sendMessage(`, `.sendMessageWithTools(`,
+  `.streamMessage(`, `.streamMessageWithTools(`, `.rerank(`,
+  `provider.ask(`) under `src/` fails it until someone labels it. A
+  `gated` entry names `check`, the exact code of its policy check, which
+  must be in the file's code (comments do not count); a `behind-gate` one
+  names its `gate` file and that file's `check`. A file whose sends differ
+  (`create-core.js`) is listed by `sites`, one label per construction, and
+  every line of it that can send must match a site. A provider method
+  reached another way (a variable, `oneShot`, a computed name) is out of
+  the walk's scope (the test's header).
+- A user skill's `llmProvider` (`src/skills/skill-models.js`) is held to
+  the calling chat's policy on every call: the caller rides an
+  AsyncLocalStorage set by `SkillRegistry#executeCommand`, a skill's
+  `handleMessage` and `ToolExecutor` (with the run's own policy). Under a
+  policy it is the router's local-only provider (or null, or
+  `PRIVATE_NO_LOCAL_MODEL`); a Telegram or Discord caller has none; a call
+  with no known caller is held to one while any chat is private
+  (`HistoryStore#hasPrivateChats`).
+- The private mark is one way. It is written only by
+  `HistoryStore#markPrivate` (the chat's column; marking deletes the
+  chat's vectors under every key but `local:`, in the same transaction,
+  and moves `vectorEpoch` so a hosted batch in flight is not written)
+  and `CaseRuntime.markPrivate` (`case.yaml` `private: true`; every chat of
+  the case follows, R-LI-23). The owner's paths: `chat:markPrivate` and
+  `case:markPrivate` (`src/ipc/private-mark.js`: the facts first, the mark
+  on `confirm: true`, from the local desktop's event only), attaching with
+  `makeCasePrivate`, "Import as private", an export that says `"private":
+  true`. Nothing clears it (`PRIVATE_ONE_WAY`). A role's `localOnly` is one
+  way for a generic save too (`LOCAL_ONLY_ONE_WAY_HERE`); only
+  `models:local.unsetLocalOnly`, from the window, takes one off.
+- A private chat is in no non-private chat's recall scope (R-LI-11,
+  `private-chat`). A private chat's `create_case` makes a private case, and
+  `answer_question`, `revoke_envelope` and `cancel_case_job` refuse a
+  private case `private_case` wherever its text is hidden (MCP, a
+  non-private chat), before its question, envelope or job is read. A case
+  whose `case.yaml` lost its `private` key is still private while any of
+  its chats carries the store's mark (`caseChatsPrivate`), and a private
+  case's routed provider is under the case's policy even when the turn's
+  models carry none. Marking a case says its questions still go out over
+  the contact ladder (`questionsLeave`). A private case's text never reaches another case's
+  search, the MCP surfaces or a non-private chat's management tools (id,
+  title, status and `private: true` only); its approval card says the send
+  leaves. A private case's detour goes only to a private case: routed to
+  one that is not, it is refused `PRIVATE_CASE_REQUIRED` and asked again,
+  and "new" makes a private case (Q-L1-6). In a private chat `Cron`,
+  `SessionsSpawn`, remote dispatch and workflows are refused
+  (`PRIVATE_NO_DETACHED_RUN`; a plan payload's `chatId` and
+  `options.chatId` are both checked, and chat messages that name no chat
+  are refused while any chat is private), so are `delegate` and the acting fleet tools
+  (`PRIVATE_NO_DELEGATE`) and image generation (R-LI-33); read-aloud uses
+  the system voice. Every other tool behaves as now (R-LI-9).
+- Embeddings (R-LI-25): a private chat's chunks get only `local:` vectors,
+  from the keep-local embedder (the default local model, Q-L1-4) when a
+  hosted embedder is chosen; its query is embedded locally or not at all
+  (`vectorsSkipped: 'private-chat'`), and Jev never reranks it.
+- Cost (R-LI-13): `costUsd: 0` only for `local` (whose metrics carry
+  `local: { server, class }`) and for a non-cloud `ollama` model (no
+  `local`). Nothing else becomes $0. A reply's `llm` adds `localCalls` and
+  `localTokens` (and `localServerIds` per role), the tracker totals local
+  calls by server, and a case budget charges a local call nothing and
+  records `localTokens`.
+- Timeouts (Q-L1-3, Q-L1-5): a local call is bounded by the role timeout,
+  or the entry's `timeoutMs` when that is larger, **only until its first
+  output**; after that nothing cuts the reply, and Stop still stops. A
+  local call streams whenever its caller does, agent mode included
+  (`LocalServerProvider#streamMessageWithTools`, OpenAI-style tool-call
+  deltas at `/v1/chat/completions` for every kind): first output is a text
+  delta, a reasoning delta (`reasoning_content`, `reasoning`, `thinking`;
+  never the reply's text) or a tool-call delta, never a role-only chunk.
+  A non-streamed call's first output is the first byte of its body. It
+  fails `LOCAL_TIMEOUT`, with no retry, and the route moves to the next
+  target (under a policy only a local one). Hosted calls have no such
+  timeout. A refused connection or a name that does not resolve is
+  `LOCAL_UNREACHABLE` and moves on at once; under a policy, every local
+  target failing is `LOCAL_MODEL_UNAVAILABLE` (R-LI-12).
+- Adapters (R-LI-15, the seam only): a `local` target may name `adapter`
+  (a slug); a model's adapter is declared as `{ id, job, ref }` and bound
+  to the model's digest then. `LOCAL_ADAPTER_UNKNOWN`,
+  `LOCAL_ADAPTER_STALE` (the model was pulled again),
+  `LOCAL_ADAPTER_INVALID`.
+- The other refusal codes: `LOCAL_ADDRESS_PUBLIC`,
+  `LOCAL_ADDRESS_UNRESOLVED`, `LOCAL_URL_INVALID`, `LOCAL_PIN_INVALID`,
+  `LOCAL_RECHECK_STALE` (a confirm whose `expected` addresses are not what
+  the name answers now), `LOCAL_SERVER_UNKNOWN`, `LOCAL_SERVER_UNUSABLE`,
+  `LOCAL_SERVER_INVALID`, `LOCAL_SERVER_EXISTS`, `LOCAL_SERVER_IN_USE`
+  (removing a server a profile names), `LOCAL_CLOUD_MODEL` (an id ending `-cloud`/`:cloud`: on an Ollama server always, on any kind never guarantee grade and refused under a policy; an Ollama cloud
+  id on a local server), `LOCAL_MODEL_NOT_LISTED`, `LOCAL_MODEL_UNFIT`,
+  `LOCAL_MODEL_INFO_INVALID`, `LOCAL_TRANSPORT_REQUIRED`;
+  `PRIVATE_CHAT_BUSY` (marking while a turn runs), `PRIVATE_BRIDGE_CHAT` (a
+  Telegram or Discord chat cannot be marked). Inside the transport and the
+  probe: `LOCAL_TRANSPORT_CLOSED`, `LOCAL_TRANSPORT_INVALID`,
+  `LOCAL_URL_OUTSIDE`, `LOCAL_BODY_UNSUPPORTED`, `LOCAL_PROBE_STATUS`,
+  `LOCAL_PROBE_MALFORMED`, `LOCAL_PROBE_TOO_LARGE`, `LOCAL_PROBE_TIMEOUT`.
+  The renderer words `PRIVATE_NO_LOCAL_MODEL`, `LOCAL_ONLY_ROLE_NO_MODEL`
+  and `LOCAL_MODEL_UNAVAILABLE` and adds "Open Models"; the stored error
+  row keeps both (`errorCode`, `errorAction`).
+- `npm run smoke:local` (`KL_SMOKE_LOCAL_URL`, `KL_SMOKE_LOCAL_MODEL`,
+  `KL_SMOKE_LOCAL_KIND`, default `ollama`) adds, probes, streams a reply and
+  makes one tool call against a real local server; with nothing set it
+  says how and exits 0. Not part of `npm test`.
+- Tests use the fake server (`tests/helpers/fake-llm-server.js`, on
+  127.0.0.1; its first path segment says which side a request was for, and
+  its `hang` and `slow` models are for timeouts) and an injected `lookup`
+  for names, never a real local server or the network; a ref'd timer stays
+  alive around every await a timeout should end.
+  `tests/e2e/local-private.test.js` drives the UI end to end. Residuals
+  (R-LI-21): a server that sends text on cannot be detected; which machine
+  holds a LAN address is not proved; `Bash` can rewrite `chat-data.json`; a Markdown export's "This chat was
+  private in King Louie." line is not read back by the Markdown importer
+  (only a King Louie JSON export's `"private": true` imports as private);
+  a server that answers a streamed request with one JSON body, or sends a
+  tool call only when it is done (older Ollama), is bounded until that
+  first output, so a long generation there can still time out; a user
+  skill's model call outside any chat turn or command (its own timer) is
+  held to a policy whenever any chat is private.
+
 ## LongHaul (session memory benchmark)
 
 `src/longhaul/` and `bin/longhaul.js` (spec
@@ -600,6 +793,29 @@ Electron build.
   keys. A flag says this answer model got it right with nothing shown; it
   does not find a mislabelled abstain question (never flagged; `no-context`'s
   own abstain accuracy means nothing).
+- Local recall jobs (local inference R-LI-14, spec §11): `kl-recall-rewrite`
+  (`--rewrite-mode replace|append`), `kl-recall-abstain-check`
+  (`--abstain-mode note|withhold`), `kl-recall-llm-rerank` and
+  `kl-recall-vec-llm-rerank` (`--llm-rerank-mode pointwise|listwise`) and
+  `kl-recall-digest` (`--digest-every-tokens`, `--digest-max-tokens`) run
+  their job on a local model: `--local-provider ollama|openai-compatible
+  --local-model <id> [--local-base-url <url>] [--local-context <tokens>]`
+  (Ollama's default address when no URL is given). The client
+  (`src/longhaul/local-client.js`) checks and pins the address as the app
+  does and sends through `LocalServerProvider` at $0, so no
+  `--send-private`; a LAN http address is accepted (LongHaul measures, it
+  carries no guarantee) and `config.json` records its class. Codes, all
+  exit 2: `LOCAL_REQUIRED` (a local adapter with no local client, an address
+  that fails the check, an Ollama cloud id), `LOCAL_UNREACHABLE` (an Ollama
+  server whose model list cannot be read: its digest is in every cache
+  key), `LOCAL_MODEL_NOT_LISTED` (pull it first), `LOCAL_CALLS_MISSING` (the
+  answer stage and its dry run are cache-only for these adapters: run the
+  evidence-only run with the same settings first; it stops the run). A
+  digest is never evidence, and a shown digest's covered messages count as
+  leaks at or after `askAtSeq`. No product default changed;
+  `--fake-models` supplies a fake local model (not cache-only), so
+  `--adapters kl-recall-rewrite,kl-recall-abstain-check --fake-models` is a
+  $0 smoke run.
 - Smoke run of the answer stage (no models, no network, $0):
   `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models`.
 
@@ -695,7 +911,7 @@ ranges, `+15550100`–`+15550199`, `<placeholder>` path segments.
 unknown keys. A stage that parses a new `node.yaml` top-level key appends it to
 `NODE_YAML_KEYS` in `src/service/node-config.js` in the same change. A new
 feature or port is known once it is in `DEFAULT_FEATURES`/`DEFAULT_PORTS`, and
-the four `examples/fleet/*/service.json` files must list it too.
+the five `examples/fleet/*/service.json` files must list it too.
 
 ## Attached mode
 

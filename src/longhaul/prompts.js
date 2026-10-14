@@ -17,7 +17,13 @@ const PROMPTS = Object.freeze({
   answerNoContext: 'answer-no-context-v1.md',
   judge: 'judge-v1.md',
   summarize: 'summarize-v1.md',
-  author: 'author-v1.md'
+  author: 'author-v1.md',
+  // The local adapters (local inference spec §11.4).
+  rewrite: 'rewrite-v1.md',
+  abstainCheck: 'abstain-check-v1.md',
+  rerankPointwise: 'rerank-llm-pointwise-v1.md',
+  rerankListwise: 'rerank-llm-listwise-v1.md',
+  digest: 'digest-v1.md'
 });
 const PLACEHOLDER = /\{\{(\w+)\}\}/g;
 

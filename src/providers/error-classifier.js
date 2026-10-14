@@ -38,6 +38,16 @@ const FailoverReason = Object.freeze({
 
   // Transport
   TIMEOUT: 'timeout',                           // connect/read timeout, reset — rebuild client, retry
+  // A local server refused the connection or did not answer the dial (the
+  // local transport's LOCAL_UNREACHABLE). A machine that is switched off
+  // stays off for the length of a retry, so the next target takes the call
+  // at once (spec 2026-10-13 §9.3).
+  LOCAL_UNREACHABLE: 'local_unreachable',
+  // A local server that took the call and did not finish it within the
+  // call's timeout (LocalServerProvider's LOCAL_TIMEOUT; spec 2026-10-13
+  // §6.4, owner ruling on Q-L1-3). The same model would be given the same
+  // time again, so the next target takes the call.
+  LOCAL_TIMEOUT: 'local_timeout',
   TLS: 'tls',                                   // cert verification failure — deterministic per host
 
   // Request-shaped
@@ -214,6 +224,18 @@ function retryAfterOf(error) {
   return Number.isFinite(direct) ? direct : null;
 }
 
+// The local transport's "nothing is listening" error, on the error itself or
+// one level down (a wrapped error).
+function isLocalUnreachable(error) {
+  return Boolean(error) && (error.code === 'LOCAL_UNREACHABLE' || error.cause?.code === 'LOCAL_UNREACHABLE');
+}
+
+// A local call that ran past its timeout (LocalServerProvider), on the error
+// itself or one level down.
+function isLocalTimeout(error) {
+  return Boolean(error) && (error.code === 'LOCAL_TIMEOUT' || error.cause?.code === 'LOCAL_TIMEOUT');
+}
+
 function isAggregator(provider) {
   return AGGREGATOR_PROVIDERS.has(String(provider || '').toLowerCase());
 }
@@ -266,6 +288,21 @@ function classifyError(error, context = {}) {
   if (name === 'aborterror' || includesAny(text, ABORT_MARKERS) || context.aborted) {
     return result(FailoverReason.ABORTED, RecoveryAction.ABORT, error,
       'Request was cancelled.', context);
+  }
+
+  // 1b. A local server that is not there. Read from the error's code, before
+  //     any text matching: its message names the refused connection, which
+  //     rule 9 would read as a timeout and retry three times with a backoff.
+  if (isLocalUnreachable(error)) {
+    return result(FailoverReason.LOCAL_UNREACHABLE, RecoveryAction.FALLBACK_MODEL, error,
+      'The local server did not answer — use the next model.', context);
+  }
+  // 1c. A local call that ran past its timeout. It ended through the call's
+  //     own abort signal, but it is not a Stop: the provider throws it as
+  //     LOCAL_TIMEOUT only when the caller's signal was not aborted.
+  if (isLocalTimeout(error)) {
+    return result(FailoverReason.LOCAL_TIMEOUT, RecoveryAction.FALLBACK_MODEL, error,
+      'The local server did not finish within the call\'s timeout — use the next model.', context);
   }
 
   // 2. TLS failures are deterministic for a given host — a TLS-inspecting

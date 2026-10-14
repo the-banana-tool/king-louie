@@ -2,6 +2,7 @@
 // Catalog and availability channels (spec 2026-09-27 §4, §5; stage M1).
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
+const { isLocalDesktopEvent, localDesktopDeviceId } = require('../core/origin');
 
 // What the renderer may ask for; anything else in `needs` is ignored.
 function needsFrom(needs) {
@@ -58,7 +59,12 @@ function registerModelsHandlers(ipcMain, context = {}) {
 
   handle(IPC.MODELS_EXPLAIN, async ({ provider, model, needs }) => {
     if (typeof provider !== 'string' || !provider) return { ok: false, error: 'provider is required.' };
-    const verdict = availability().explain(provider, typeof model === 'string' ? model : '', { needs: needsFrom(needs) });
+    // A model on a local server is the registry's to explain (the core's
+    // explainTarget); every other provider is Availability's.
+    const local = provider.trim().toLowerCase() === 'local' && typeof context.explainTarget === 'function';
+    const verdict = local
+      ? context.explainTarget('local', typeof model === 'string' ? model : '', { needs: needsFrom(needs) })
+      : availability().explain(provider, typeof model === 'string' ? model : '', { needs: needsFrom(needs) });
     return { ok: true, usable: verdict.usable, reasons: verdict.reasons, notes: verdict.notes };
   });
 
@@ -96,9 +102,9 @@ function registerModelsHandlers(ipcMain, context = {}) {
 
   handle(IPC.MODELS_PROFILES, async () => ({ ok: true, ...choices().profilesView() }));
 
-  handle(IPC.MODELS_SAVE_PROFILE, async ({ id, name, roles }) => ({
+  handle(IPC.MODELS_SAVE_PROFILE, async ({ id, name, roles, localOnly }) => ({
     ok: true,
-    profile: choices().saveProfile({ id: text(id) || null, name, roles })
+    profile: choices().saveProfile({ id: text(id) || null, name, roles, ...(localOnly !== undefined ? { localOnly } : {}) })
   }));
 
   handle(IPC.MODELS_DUPLICATE_PROFILE, async ({ id }) => ({ ok: true, profile: choices().duplicateProfile(text(id)) }));
@@ -163,6 +169,132 @@ function registerModelsHandlers(ipcMain, context = {}) {
     ok: true,
     profile: choices().duplicateKingLouie({ name: text(name) || undefined, proposalId: text(proposalId) || undefined })
   }));
+
+  // ---- Local servers (local inference stage L1, spec 2026-10-13 §5.6, §13.2) ----
+  //
+  // Adding a server is the owner's mark that it runs on hardware they
+  // control (R-LI-4), and a model on a marked server may run a private chat.
+  // So the four channels that change the list act only on an event this
+  // app's own window sent: marked by the standalone host's ipcMain wrapper,
+  // with no device id (a paired desktop's bridge event carries one). In
+  // service mode the list is the administrator's and they answer
+  // LOCAL_SERVER_ADMIN_ONLY for every caller. Probing a model and saying
+  // what a model can do change no trust, but they act for the owner: the
+  // window or a paired desktop. A role is made local-only by a profile
+  // save (models:saveProfile); models:local.unsetLocalOnly, below, is the
+  // one way back, for the window only.
+  //
+  // Every reply carries server names, model ids and probe samples that came
+  // from a server or a form: `untrustedText: true`, shown with textContent.
+  const registry = () => {
+    const r = typeof context.getLocalServers === 'function' ? context.getLocalServers() : null;
+    if (!r) throw new Error('Local servers are not available in this host.');
+    return r;
+  };
+  const handleEvent = (channel, fn) => ipcMain.handle(channel, wrapHandler(channel, async (event, payload) => (
+    fn(event, payload && typeof payload === 'object' ? payload : {})
+  )));
+  const fromWindow = (event) => isLocalDesktopEvent(event) && localDesktopDeviceId(event) === null;
+  const NOT_WINDOW = Object.freeze({ ok: false, code: 'NOT_LOCAL_WINDOW', error: 'Local servers are changed only in the King Louie window on this computer.' });
+  const ADMIN_ONLY = Object.freeze({ ok: false, code: 'LOCAL_SERVER_ADMIN_ONLY', error: 'In service mode local servers come only from the administrator\'s service.json.' });
+  // The refusal for a channel that changes the list, or null to go on.
+  const refuseChange = (event) => {
+    if (registry().adminOnly) return { ...ADMIN_ONLY };
+    if (!fromWindow(event)) return { ...NOT_WINDOW };
+    return null;
+  };
+  const serverView = (row) => ({ ...row, models: registry().models(row.id).models });
+  const optional = (value) => (value === undefined || value === '' ? null : value);
+
+  // A role stops being local-only only here (local inference spec
+  // 2026-10-13 §13.2): from this app's own window, never a paired desktop,
+  // a tool or a generic settings save (the core's seal keeps it there).
+  handleEvent(IPC.MODELS_LOCAL_UNSET_LOCAL_ONLY, async (event, { profileId, role }) => {
+    if (!fromWindow(event)) return { ...NOT_WINDOW, error: 'A role stops being local-only only in the King Louie window on this computer.' };
+    const profiles = typeof context.getProfiles === 'function' ? context.getProfiles() : null;
+    if (!profiles) throw new Error('Model profiles are not available in this host.');
+    const id = text(profileId);
+    const current = profiles.get(id);
+    if (!current) return { ok: false, code: 'NOT_FOUND', error: 'No such profile.' };
+    if (typeof role !== 'string' || !(current.localOnly || []).includes(role)) return { ok: false, code: 'NOT_LOCAL_ONLY', error: 'That role is not local-only in this profile.' };
+    const saved = profiles.update(id, { localOnly: current.localOnly.filter((r) => r !== role) }, { allowUnsetLocalOnly: true });
+    return { ok: true, localOnly: saved.localOnly || [] };
+  });
+
+  handleEvent(IPC.MODELS_LOCAL_LIST, async () => ({
+    ok: true,
+    untrustedText: true,
+    adminOnly: registry().adminOnly,
+    servers: registry().list().map(serverView)
+  }));
+
+  handleEvent(IPC.MODELS_LOCAL_ADD, async (event, payload) => {
+    const refused = refuseChange(event);
+    if (refused) return refused;
+    // Exactly what the form holds. A pin and a mark are made by the registry.
+    const input = { ...payload };
+    for (const key of ['name', 'tlsFingerprint', 'maxConcurrent', 'timeoutMs']) {
+      if (key in input) input[key] = optional(input[key]);
+    }
+    const added = await registry().add(input);
+    return { ok: true, untrustedText: true, server: added.server, models: added.models, probeError: added.probeError };
+  });
+
+  handleEvent(IPC.MODELS_LOCAL_REMOVE, async (event, { id }) => {
+    const refused = refuseChange(event);
+    if (refused) return refused;
+    try {
+      return { ok: true, ...(await registry().remove(text(id))) };
+    } catch (err) {
+      if (err && err.code === 'LOCAL_SERVER_IN_USE') {
+        return { ok: false, code: err.code, error: err.message, untrustedText: true, references: err.references || [] };
+      }
+      throw err;
+    }
+  });
+
+  handleEvent(IPC.MODELS_LOCAL_RECHECK, async (event, { id, confirm, expected }) => {
+    const refused = refuseChange(event);
+    if (refused) return refused;
+    const result = await registry().recheck(text(id), {
+      confirm: confirm === true,
+      expected: Array.isArray(expected) ? expected.filter((a) => typeof a === 'string') : null
+    });
+    return { ok: true, untrustedText: true, ...result };
+  });
+
+  handleEvent(IPC.MODELS_LOCAL_PROBE, async (event, { id, model }) => {
+    if (!isLocalDesktopEvent(event)) return { ...NOT_WINDOW };
+    if (typeof id !== 'string' || !id) return { ok: false, error: 'id is required.' };
+    // With a model: probe that one again. Without: list the server's models
+    // and probe the ones that never were.
+    if (typeof model === 'string' && model) {
+      return { ok: true, untrustedText: true, record: await registry().probe(id, model) };
+    }
+    return { ok: true, untrustedText: true, ...(await registry().refresh(id)) };
+  });
+
+  // Owner-entered context and image input, and on the desktop an adapter
+  // (`adapter: { id, job, ref }`, spec §12.1): in service mode adapters come
+  // only from the admin service.json, so declaring one there is refused.
+  handleEvent(IPC.MODELS_LOCAL_SET_MODEL_INFO, async (event, { id, model, context: size, imageInput, adapter }) => {
+    if (!isLocalDesktopEvent(event)) return { ...NOT_WINDOW };
+    if (typeof id !== 'string' || !id || typeof model !== 'string' || !model) return { ok: false, error: 'id and model are required.' };
+    if (adapter !== undefined && registry().adminOnly) {
+      return { ok: false, code: 'LOCAL_SERVER_ADMIN_ONLY', error: 'In service mode adapters come only from the administrator\'s service.json.' };
+    }
+    let record = null;
+    if (adapter === undefined || size !== undefined || imageInput !== undefined) record = registry().setModelInfo(id, model, { context: size, imageInput });
+    if (adapter !== undefined) record = registry().declareAdapter(id, model, adapter);
+    return { ok: true, untrustedText: true, record };
+  });
+
+  handleEvent(IPC.MODELS_LOCAL_FROM_OLLAMA, async (event, { id, rewrite }) => {
+    const refused = refuseChange(event);
+    if (refused) return refused;
+    const result = await registry().fromOllama({ ...(typeof id === 'string' && id ? { id } : {}), rewrite: rewrite === true });
+    return { ok: true, untrustedText: true, ...result };
+  });
 
   // ---- Custom roles (stage M3, spec §6.2, §11) ----
 

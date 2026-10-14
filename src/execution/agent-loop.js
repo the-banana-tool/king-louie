@@ -61,7 +61,14 @@ class AgentLoop {
     // Semantic compaction: when an embeddingProvider is available, use
     // semantic search to preserve relevant old results and only compact
     // irrelevant ones. One cheap batch embedding call per compaction cycle.
-    this.embeddingProvider = options.embeddingProvider || null;
+    // Under an egress policy (options.egress; local inference spec
+    // 2026-10-13 §7.5) the loop takes no embedding provider, whatever it is
+    // handed: the provider is a direct client of a hosted API, and the
+    // query and old tool results would be sent to it. Compaction then goes
+    // by recency.
+    this.embeddingProvider = (options.egress !== null && options.egress !== undefined)
+      ? null
+      : (options.embeddingProvider || null);
     this._toolResultEntries = []; // { historyIndex, toolName, text, compacted }
     this._relevanceThreshold = options.relevanceThreshold ?? 0.3;
 

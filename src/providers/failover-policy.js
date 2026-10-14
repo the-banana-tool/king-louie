@@ -52,6 +52,17 @@ const DEFAULT_BUDGETS = Object.freeze({
     // Never retry the same model — that's the thing that's throttled.
     attempts: 0, baseMs: 0, maxMs: 0, escalateTo: RecoveryAction.FALLBACK_MODEL
   },
+  [FailoverReason.LOCAL_UNREACHABLE]: {
+    // Never retry: a local server that refused the connection is off, and
+    // waiting on it would slow every call that lists it first. The first
+    // failure escalates (spent 0 >= attempts 0), with no wait.
+    attempts: 0, baseMs: 0, maxMs: 0, escalateTo: RecoveryAction.FALLBACK_MODEL
+  },
+  [FailoverReason.LOCAL_TIMEOUT]: {
+    // Never retry: the same model on the same server would be given the same
+    // time again. The first timeout escalates, with no wait.
+    attempts: 0, baseMs: 0, maxMs: 0, escalateTo: RecoveryAction.FALLBACK_MODEL
+  },
   [FailoverReason.UNKNOWN]: {
     attempts: 0, baseMs: 0, maxMs: 0, escalateTo: RecoveryAction.FALLBACK_MODEL
   }

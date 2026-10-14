@@ -52,6 +52,20 @@ const IMAGE_CLIENTS = Object.freeze({
 
 const targetName = (t) => `${t.provider}/${t.model}`;
 
+// The egress policy an image call would be under (local inference spec
+// 2026-10-13 §7.5, R-LI-33): the turn's or a local-only imageGeneration
+// role's, from the turn's frozen models, else the host's word for this
+// run's chat (context.egress). No local server generates images in L1, so
+// under a policy the call is refused before any client is built.
+function imageEgress(context) {
+  const models = context.turnModels || null;
+  if (models) {
+    const policy = typeof models.egressFor === 'function' ? models.egressFor('imageGeneration') : models.egress;
+    if (policy !== null && policy !== undefined) return policy;
+  }
+  return context.egress ?? null;
+}
+
 // The profile's imageGeneration role (spec §8): when it lists models, the
 // tool may use only those; empty, today's image settings apply. Returns
 // { useSettings: true }, { target } or { error }.
@@ -132,6 +146,19 @@ const ImageGenerateTool = new Tool({
 
   async execute(params, context) {
     const { prompt, provider: providerOverride, model, size, quality, count } = params;
+
+    const egress = imageEgress(context || {});
+    if (egress !== null) {
+      const forRole = egress && egress.reason === 'local-only-role';
+      return {
+        ok: false,
+        success: false,
+        code: forRole ? 'LOCAL_ONLY_ROLE_NO_MODEL' : 'PRIVATE_HOSTED_CALL',
+        error: forRole
+          ? 'Image generation is not available on a local model, and the image generation role is local-only.'
+          : 'Image generation is not available in a private chat: it would send the prompt to a hosted model.'
+      };
+    }
 
     const settings = typeof context?.getSettings === 'function' ? (context.getSettings() || {}) : {};
 

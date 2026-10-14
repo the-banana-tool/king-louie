@@ -30,7 +30,15 @@ function profileView(profile, { explain, catalog = null } = {}) {
   for (const [role, list] of Object.entries(profile.roles || {})) {
     roles[role] = list.map((t) => entryView(t, role, { explain, catalog }));
   }
-  return { id: profile.id, name: profile.name, kind: profile.kind, roles, migration: profile.migration || null };
+  return {
+    id: profile.id,
+    name: profile.name,
+    kind: profile.kind,
+    roles,
+    // Local inference L1: the profile's local-only roles, when it has any.
+    ...(Array.isArray(profile.localOnly) && profile.localOnly.length ? { localOnly: [...profile.localOnly] } : {}),
+    migration: profile.migration || null
+  };
 }
 
 module.exports = { profileView, entryView };

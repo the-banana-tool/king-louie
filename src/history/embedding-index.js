@@ -23,10 +23,23 @@ const MISSING = 'NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.chunk_id = c.id 
 const CAPPED = "(? = 0 OR c.kind <> 'tool_result' OR c.idx < ?)";
 const capOf = (n) => (Number.isInteger(n) && n > 0 ? n : 0);
 // An imported chat (chats.source set) stays on this machine (owner ruling
-// R-H4-2): its chunks are pending only for a caller that says it embeds
-// locally (localOnly exactly true, the 'local:' key). A caller that does not
-// say is treated as hosted and is never given them.
-const KEPT_LOCAL = '(? = 1 OR NOT EXISTS (SELECT 1 FROM chats ch WHERE ch.id = c.chat_id AND ch.source IS NOT NULL))';
+// R-H4-2), and so does a private chat (chats.private, local inference spec
+// 2026-10-13 §8.4, R-LI-25: the egress rule for a private chat's text, here
+// for its chunks): their chunks are pending only for a caller that says it
+// embeds locally (localOnly exactly true, the 'local:' key). A caller that
+// does not say is treated as hosted and is never given them. On a file
+// below schema step 5 (no private column; privacyAware false) every chat is
+// kept local, as its mark cannot be read.
+const KEPT_CHATS = 'SELECT id FROM chats WHERE source IS NOT NULL OR private <> 0';
+const keptLocal = (privacyAware) => (privacyAware === true
+  ? `(? = 1 OR c.chat_id NOT IN (${KEPT_CHATS}))`
+  : '(? = 1)');
+// onlyKeptLocal: only the chunks of the chats kept local (the keep-local
+// embedder's pass, beside a hosted active embedder).
+const onlyKept = (onlyKeptLocal, privacyAware) => {
+  if (onlyKeptLocal !== true) return '1';
+  return privacyAware === true ? `c.chat_id IN (${KEPT_CHATS})` : '1';
+};
 const localFlag = (localOnly) => (localOnly === true ? 1 : 0);
 
 // Only for chunks that still exist: a truncate between the read and the
@@ -43,23 +56,27 @@ function putEmbeddings(db, model, rows) {
   return written;
 }
 
-function pendingEmbeddings(db, model, { limit = 16, chatId = null, afterId = 0, maxChunksPerToolResult = 0, localOnly = false } = {}) {
+// privacyAware is the store's (HistoryStore passes its own; a caller's is
+// never used).
+function pendingEmbeddings(db, model, { limit = 16, chatId = null, afterId = 0, maxChunksPerToolResult = 0, localOnly = false, onlyKeptLocal = false, privacyAware = false } = {}) {
   const max = Number.isInteger(limit) && limit > 0 ? limit : 16;
   const cap = capOf(maxChunksPerToolResult);
   const local = localFlag(localOnly);
   const cols = 'c.id AS id, c.chat_id AS chatId, c.kind AS kind, c.text AS text';
+  const kept = `${keptLocal(privacyAware)} AND ${onlyKept(onlyKeptLocal, privacyAware)}`;
   if (chatId !== null && chatId !== undefined) {
-    return prepared(db, `SELECT ${cols} FROM chunks c WHERE c.chat_id = ? AND ${MISSING} AND ${CAPPED} AND ${KEPT_LOCAL} ORDER BY c.id DESC LIMIT ?`)
+    return prepared(db, `SELECT ${cols} FROM chunks c WHERE c.chat_id = ? AND ${MISSING} AND ${CAPPED} AND ${kept} ORDER BY c.id DESC LIMIT ?`)
       .all(String(chatId), String(model), cap, cap, local, max);
   }
   const after = Number.isInteger(afterId) && afterId > 0 ? afterId : 0;
-  return prepared(db, `SELECT ${cols} FROM chunks c WHERE c.id > ? AND ${MISSING} AND ${CAPPED} AND ${KEPT_LOCAL} ORDER BY c.id LIMIT ?`)
+  return prepared(db, `SELECT ${cols} FROM chunks c WHERE c.id > ? AND ${MISSING} AND ${CAPPED} AND ${kept} ORDER BY c.id LIMIT ?`)
     .all(after, String(model), cap, cap, local, max);
 }
 
-function countPending(db, model, { maxChunksPerToolResult = 0, localOnly = false } = {}) {
+function countPending(db, model, { maxChunksPerToolResult = 0, localOnly = false, onlyKeptLocal = false, privacyAware = false } = {}) {
   const cap = capOf(maxChunksPerToolResult);
-  return Number(prepared(db, `SELECT count(*) AS n FROM chunks c WHERE ${MISSING} AND ${CAPPED} AND ${KEPT_LOCAL}`)
+  const kept = `${keptLocal(privacyAware)} AND ${onlyKept(onlyKeptLocal, privacyAware)}`;
+  return Number(prepared(db, `SELECT count(*) AS n FROM chunks c WHERE ${MISSING} AND ${CAPPED} AND ${kept}`)
     .get(String(model), cap, cap, localFlag(localOnly)).n);
 }
 

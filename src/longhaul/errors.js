@@ -15,4 +15,8 @@ class UsageError extends Error {
 // not in jev.js, so run.js does not load the Jev client.
 const JEV_STOP_CODES = Object.freeze(['JEV_SCORES_MISSING', 'JEV_OVER_TOKENS', 'JEV_MODEL_MISMATCH', 'JEV_NO_KEY']);
 
-module.exports = { UsageError, JEV_STOP_CODES };
+// The local adapters' (local-client.js) cache-only miss stops a run too: the
+// answer stage makes no local call outside its plan.
+const LOCAL_STOP_CODES = Object.freeze(['LOCAL_CALLS_MISSING']);
+
+module.exports = { UsageError, JEV_STOP_CODES, LOCAL_STOP_CODES };

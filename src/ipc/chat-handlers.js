@@ -19,10 +19,23 @@ const { getActiveCatalog } = require('../models');
 const { mergeHistorySettings } = require('../history/settings');
 const { bridgeOriginFor } = require('../history/bridge-origin');
 const { offerCaseNudge } = require('../cases/case-nudge');
+const { egressPolicy } = require('../models/egress');
+const { createPrivateMark } = require('./private-mark');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
 const voiceLog = createLogger('voice');
+
+// What an optional model call fails with under an egress policy when no
+// local model can take it (local inference spec 2026-10-13 §7.3): the call
+// is skipped, never moved to a hosted model.
+const PRIVATE_SKIP_CODES = Object.freeze([
+  'PRIVATE_NO_LOCAL_MODEL', 'LOCAL_ONLY_ROLE_NO_MODEL', 'LOCAL_MODEL_UNAVAILABLE', 'PRIVATE_HOSTED_TARGET', 'PRIVATE_HOSTED_CALL'
+]);
+
+// The refusals the renderer words and answers with a button to Settings →
+// Models (local inference spec 2026-10-13 §15).
+const OPEN_MODELS_CODES = Object.freeze(['PRIVATE_NO_LOCAL_MODEL', 'LOCAL_ONLY_ROLE_NO_MODEL', 'LOCAL_MODEL_UNAVAILABLE']);
 
 function messageTimestamp(message = {}) {
   return message.timestamp || message.createdAt || message.updatedAt || null;
@@ -134,6 +147,19 @@ function registerChatHandlers(ipcMain, context = {}) {
   // migration) falls back to the first chat. A history store that did not
   // open answers with no chats and says why; chats are never read from
   // chat-data.json instead (§15).
+  // Local inference L1 (spec 2026-10-13 §15): the renderer shows a lock on a
+  // private chat. Display only: `private` is a store-only key, so a chat
+  // object sent back with it changes nothing (rows.js).
+  const withPrivateMark = (chat) => {
+    if (!chat || typeof chat !== 'object') return chat;
+    try {
+      const store = typeof getHistoryStore === 'function' ? getHistoryStore() : null;
+      const ref = store && typeof store.chatRef === 'function' ? store.chatRef(chat.id) : null;
+      return ref && ref.private === true ? { ...chat, private: true } : chat;
+    } catch {
+      return chat;
+    }
+  };
   const chatListPayload = () => {
     const history = historyStatus();
     if (!history.available) return { chats: [], activeChatId: null, history };
@@ -142,7 +168,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     const activeChatId = metas.some((chat) => chat.id === storedActiveId) ? storedActiveId : (metas[0]?.id || null);
     const activeChat = activeChatId ? getChat(activeChatId, { messages: true }) : null;
     return {
-      chats: metas.map((chat) => (activeChat && chat.id === activeChat.id
+      chats: metas.map((chat) => withPrivateMark(activeChat && chat.id === activeChat.id
         ? chatMetadata(activeChat, { includeMessages: true })
         : chatMetadata(chat))),
       activeChatId,
@@ -171,7 +197,9 @@ function registerChatHandlers(ipcMain, context = {}) {
       }
       const provider = createRoutedProvider({
         targets: utility.targets,
-        meta: { role: 'utility', profileId: turnModels.profileId || null, borrowedFrom: utility.borrowedFrom || null }
+        meta: { role: 'utility', profileId: turnModels.profileId || null, borrowedFrom: utility.borrowedFrom || null },
+        // A private chat's title is made on a local model or not at all.
+        egress: utility.egress ?? null
       });
 
       const titlePrompt = [
@@ -198,6 +226,13 @@ function registerChatHandlers(ipcMain, context = {}) {
         sender.send('chat:updated', { chatId });
       }
     } catch (err) {
+      // Under an egress policy a title is optional work (local inference
+      // spec 2026-10-13 §7.3, R-LI-22): with no local model to make it, the
+      // chat keeps its title and nobody is warned.
+      if (PRIVATE_SKIP_CODES.includes(err?.code)) {
+        log.debug(`No chat title: ${err.code}.`);
+        return;
+      }
       log.warn(`Failed to generate chat title: ${err.message}`);
     }
   }
@@ -215,6 +250,17 @@ function registerChatHandlers(ipcMain, context = {}) {
   const getTtsEngine = () => (
     typeof context.getTtsEngine === 'function' ? context.getTtsEngine() : context.ttsEngine
   );
+
+  // The egress policy of a chat outside a turn (read-aloud of an old reply).
+  // A host that cannot say is treated as saying "private".
+  const chatEgress = (chatId) => {
+    if (typeof context.egressFor !== 'function') return egressPolicy({ reason: 'unknown-mark', chatId: chatId ? String(chatId) : null });
+    return context.egressFor({ chatId }) ?? null;
+  };
+  // Read-aloud under an egress policy (local inference spec 2026-10-13 §7.5,
+  // R-LI-33): ElevenLabs is a hosted call that carries the reply's text, so
+  // the system engine speaks, whatever engine the settings name.
+  const voiceUnder = (voiceSettings, egress) => (egress ? { ...voiceSettings, engine: 'system' } : voiceSettings);
 
   ipcMain.handle(IPC.APP_QUIT_WINDOW, wrapHandler(IPC.APP_QUIT_WINDOW, async () => {
     const mainWindow = getMainWindow();
@@ -237,7 +283,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     if (!chat) {
       return { ok: false, error: 'Chat not found.' };
     }
-    return { ok: true, chat };
+    return { ok: true, chat: withPrivateMark(chat) };
   }));
 
   ipcMain.handle(IPC.CHAT_CREATE, wrapHandler(IPC.CHAT_CREATE, async (_event, title = 'New Chat') => {
@@ -321,6 +367,14 @@ function registerChatHandlers(ipcMain, context = {}) {
     return appendMessageToChat(chatId, sender, text, metadata);
   }));
 
+  // The owner's private mark on a chat (local inference spec 2026-10-13
+  // §8.1; src/ipc/private-mark.js): the confirmation's facts first, the
+  // mark on { confirm: true }, from the local desktop's own event only.
+  const privateMark = createPrivateMark(context);
+  ipcMain.handle(IPC.CHAT_MARK_PRIVATE, wrapHandler(IPC.CHAT_MARK_PRIVATE, async (event, payload) => (
+    privateMark.markChat(event, payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {})
+  )));
+
   ipcMain.handle(IPC.CHAT_SPEAK_LAST, wrapHandler(IPC.CHAT_SPEAK_LAST, async (_event, { chatId, summary = false } = {}) => {
     const chat = findChat(chatId, { messages: true });
     if (!chat) {
@@ -342,9 +396,11 @@ function registerChatHandlers(ipcMain, context = {}) {
       return { ok: false, error: 'Voice output is disabled. Enable it in settings first.' };
     }
 
+    // A private chat is read aloud by the operating system's own voice.
+    const voice = voiceUnder(voiceSettings, chatEgress(chatId));
     const result = summary
-      ? await ttsEngine.speakSummary(lastAssistant.text, voiceSettings)
-      : await ttsEngine.speak(lastAssistant.text, voiceSettings);
+      ? await ttsEngine.speakSummary(lastAssistant.text, voice)
+      : await ttsEngine.speak(lastAssistant.text, voice);
     return { ok: true, result };
   }));
 
@@ -505,6 +561,12 @@ function registerChatHandlers(ipcMain, context = {}) {
       // switch to another model.
       main = turnModels.mustResolve('main', { needs });
       const mainTarget = main.targets[0];
+      // The egress policy this turn's own calls are under (local inference
+      // spec 2026-10-13 §7.1): the chat's or case's private mark, or a
+      // local-only main. The callers below that never pass the router (the
+      // context assembler's and the compaction's embedding client, read-aloud)
+      // ask it themselves (§7.5).
+      const turnEgress = main.egress ?? turnModels.egress ?? null;
 
       // The gate above can run a connection test (20s or more): a Stop
       // pressed during it must end the run here, with no model call, rather
@@ -520,7 +582,8 @@ function registerChatHandlers(ipcMain, context = {}) {
         : createRoutedProvider({
           targets: main.targets,
           signal: abortController.signal,
-          meta: { role: 'main', profileId: turnModels.profileId || null, borrowedFrom: null }
+          meta: { role: 'main', profileId: turnModels.profileId || null, borrowedFrom: null },
+          egress: turnEgress
         });
 
       // Only a case turn (owner messages) or a host without a builder needs
@@ -636,7 +699,10 @@ function registerChatHandlers(ipcMain, context = {}) {
             maxTools: 10,
             maxSections: 4,
             // Memory context is per turn: it goes in systemPromptDynamic.
-            memoryContext: ''
+            memoryContext: '',
+            // Under an egress policy the owner's message is not sent to the
+            // assembler's embedding client (a direct call to a hosted API).
+            ...(turnEgress ? { embed: false } : {})
           });
           options.systemPrompt = assembled.systemPrompt;
           assembledTools = filterMcpTools(assembled.tools);
@@ -761,11 +827,16 @@ function registerChatHandlers(ipcMain, context = {}) {
           log.warn(`Case tools could not be offered for case ${caseId}: ${reason}.`);
         }
         if (canUseAgentMode) {
-          const embeddingProvider = contextAssembler?.embeddingProvider || null;
+          // Semantic compaction embeds the query and old tool results through
+          // the same hosted client: under an egress policy the loop gets none
+          // and compacts by recency.
+          const embeddingProvider = turnEgress ? null : (contextAssembler?.embeddingProvider || null);
           const toolResultsDir = typeof getToolResultsDir === 'function' ? getToolResultsDir() : null;
           const loop = new AgentLoop(provider, executor, {
             maxIterations: 40,
             embeddingProvider,
+            // The loop refuses an embedding provider under a policy too.
+            ...(turnEgress ? { egress: turnEgress } : {}),
             usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
             // The routed provider fails over itself (spec §6.7); the loop never retries.
             failoverPolicy: NO_RETRY,
@@ -945,7 +1016,7 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       const voiceSettings = getVoiceSettings();
       if (voiceSettings.enabled && voiceSettings.speakChatResponses) {
-        speakSummaryText(fullResponse || '(No response)', voiceSettings).catch((error) => {
+        speakSummaryText(fullResponse || '(No response)', voiceUnder(voiceSettings, turnModels.egress ?? null)).catch((error) => {
           voiceLog.warn(`Failed to speak chat response: ${error.message}`);
         });
       }
@@ -984,7 +1055,10 @@ function registerChatHandlers(ipcMain, context = {}) {
         responseId,
         error: error.message,
         ...(error?.code === 'MAIN_OVERRIDE_UNUSABLE' ? { action: { kind: 'use-profile-main' } } : {}),
-        ...(error?.code === 'NO_USABLE_MODEL' ? { action: { kind: 'open-models' } } : {})
+        ...(error?.code === 'NO_USABLE_MODEL' ? { action: { kind: 'open-models' } } : {}),
+        // Local inference L1 (§13.6): a turn refused under the private mark
+        // or a local-only role names its code and offers Settings → Models.
+        ...(OPEN_MODELS_CODES.includes(error?.code) ? { code: error.code, action: { kind: 'open-models' } } : {})
       });
       throw error;
     } finally {

@@ -36,6 +36,7 @@ describe('loadServiceConfig', () => {
       executors: { entries: {}, packageRoots: [] },
       contact: null,
       playbooks: { sources: [], autoUpdate: false },
+      localInference: { servers: [] },
       caseChecks: { enabled: false }
     });
   });

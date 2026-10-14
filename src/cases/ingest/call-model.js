@@ -31,7 +31,10 @@ function createCallModel({ resolveInference, getUsageTracker = () => null, log =
     const images = Array.isArray(attachment?.images) && attachment.images.length ? attachment.images : null;
     // OCR with nothing attached would only invent a page.
     if (purpose === 'ocr' && !documents && !images) throw new IngestError('NO_ATTACHMENT', 'There is no page to send to the vision model.');
-    const resolved = await resolveInference({ provider, model });
+    // The case id lets the host read the case's private mark (local
+    // inference spec 2026-10-13 §7.5): under its policy the resolved
+    // provider is the routed one, which refuses a hosted target.
+    const resolved = await resolveInference({ provider, model, caseId });
     const client = resolved.provider;
     const useModel = resolved.model || model;
     const message = {
@@ -58,6 +61,10 @@ function createCallModel({ resolveInference, getUsageTracker = () => null, log =
     const totalTokens = num(m.totalTokens) || inputTokens + outputTokens;
     let cost = costOf(m.costUsd);
     const usageProvider = m.provider || resolved.providerType || provider;
+    // A local server's call (§9.1): only the local provider names a server.
+    const local = m.local && typeof m.local === 'object' && typeof m.local.server === 'string' && m.local.server
+      ? { server: m.local.server }
+      : null;
     const usageModel = m.model || useModel;
     const tracker = getUsageTracker();
     if (tracker && typeof tracker.record === 'function') {
@@ -79,7 +86,7 @@ function createCallModel({ resolveInference, getUsageTracker = () => null, log =
     }
     return {
       text: out,
-      usage: { provider: usageProvider, model: usageModel, inputTokens, outputTokens, totalTokens, cost }
+      usage: { provider: usageProvider, model: usageModel, inputTokens, outputTokens, totalTokens, cost, ...(local ? { local } : {}) }
     };
   };
 }

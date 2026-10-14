@@ -11,6 +11,9 @@ const { markLocalRequester } = require('../core/origin');
 const { refuseUnsafeGate, REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
 const { createLogger } = require('../logging');
 const { detachImages } = require('./tool-images');
+const { normalizePolicy } = require('../models/egress');
+const { runAsSkillCaller } = require('../skills/skill-models');
+const { privateRefusal } = require('../tools/private-refusals');
 
 const log = createLogger('tool-executor');
 
@@ -179,6 +182,10 @@ class ToolExecutor extends EventEmitter {
     // chat turn resolves against the chat's profile and main override as of
     // turn launch. Null for runs with no parent turn (headless callers).
     this.turnModels = options.turnModels || null;
+    // The run's egress policy when it has no snapshot to read it from (local
+    // inference spec 2026-10-13 §7.1): the host's word for the run's chat.
+    // The snapshot's own policy comes first; see _egressPolicy.
+    this.egress = options.egress ?? null;
     // Where a sub-agent run's model calls go (models spec §10): the chat
     // turn that owns this run rolls them into its reply. Carried on the
     // rethreaded requester like turnModels, so grandchildren report too.
@@ -224,11 +231,36 @@ class ToolExecutor extends EventEmitter {
     return this.runtimeEnvironmentPromise;
   }
 
+  // The policy this run's model calls are under, or null: the turn
+  // snapshot's, else the host's. A value that is not a policy restricts.
+  _egressPolicy() {
+    return normalizePolicy((this.turnModels && this.turnModels.egress) ?? null) || normalizePolicy(this.egress);
+  }
+
+  /**
+   * The refusal for a tool that may not run in a private chat
+   * (src/tools/private-refusals.js), or null. Only under an egress policy.
+   */
+  privateRefusalFor(toolName, parameters = {}) {
+    if (!this._egressPolicy()) return null;
+    const refusal = privateRefusal(toolName, parameters);
+    return refusal ? { success: false, error: refusal.message, code: refusal.code, deniedBy: 'policy' } : null;
+  }
+
   async execute(toolName, parameters = {}, options = {}) {
     if (this.allowedToolNames && !this.allowedToolNames.has(toolName)) {
       const refused = { success: false, error: `Tool "${toolName}" is not available in this turn.` };
       this.emit('postExecute', { toolName, parameters, result: refused });
       return refused;
+    }
+
+    // A private chat (spec 2026-10-13 §7.5, §8.5): a tool that would hand
+    // the chat's text to a model somewhere else is refused by name, before
+    // the registry is asked and before any hook, rule or approval prompt.
+    const privately = this.privateRefusalFor(toolName, parameters);
+    if (privately) {
+      this.emit('postExecute', { toolName, parameters, result: privately });
+      return privately;
     }
 
     const tool = toolRegistry.get(toolName);
@@ -619,7 +651,11 @@ class ToolExecutor extends EventEmitter {
       // Fleet stage 5: `_images` never reach postExecute listeners (chat
       // storage, audit, the renderer); only an emitsImages tool keeps them,
       // off-JSON, for the agent loop to lift.
-      const result = detachImages(tool, await tool.execute(effectiveParameters, {
+      // A tool runs as a skill caller with this run's policy when the run
+      // has one to read (its snapshot or its own egress), so a skill tool's
+      // model call is held to it (src/skills/skill-models.js).
+      const callerPolicy = this.turnModels || this.egress ? { egress: this._egressPolicy() } : {};
+      const result = detachImages(tool, await runAsSkillCaller({ channel: 'tool', ...callerPolicy }, () => tool.execute(effectiveParameters, {
         ...this.extraToolOptions,
         ...options,
         workingDirectory: options.workingDirectory || this.workingDirectory,
@@ -637,7 +673,7 @@ class ToolExecutor extends EventEmitter {
         // option or extra tool option can supply it, and never under
         // denyAutoApproval. answer_question checks its quote against it.
         ownerTurnText: this.denyAutoApproval ? null : this.ownerTurnText
-      }));
+      })));
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
         const postHookResult = await this.hookExecutor.run('PostToolUse', {
@@ -699,6 +735,9 @@ class ToolExecutor extends EventEmitter {
     if (this.refuseUnsafe && this.allowedRoots) requester.allowedRoots = this.allowedRoots;
     if (this.scopedBackgroundTasks) requester.scopedBackgroundTasks = this.scopedBackgroundTasks;
     if (this.turnModels) requester.turnModels = this.turnModels;
+    // A run with a policy and no snapshot hands the policy on by itself.
+    const egress = this._egressPolicy();
+    if (egress) requester.egress = egress;
     if (this.onSubagentLlm) requester.onSubagentLlm = this.onSubagentLlm;
     // A child never gets a tool this run may not use (a case wake-up's list,
     // a delegate turn's T11-sessions limit); childRuntimeOptions intersects.

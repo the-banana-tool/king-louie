@@ -1,6 +1,7 @@
 const { Skill } = require('./skill-interface');
 const ResolutionChain = require('./resolution-chain');
 const { createLogger } = require('../logging');
+const { runAsSkillCaller } = require('./skill-models');
 const log = createLogger('skill-registry');
 
 /**
@@ -104,7 +105,13 @@ class SkillRegistry {
    * @param {{ forcePrompt?: boolean }} options
    * @returns {Promise<Object>}
    */
-  async executeCommand(command, args = [], context = {}, options = {}) {
+  // The skill runs as its caller (src/skills/skill-models.js), so a model
+  // call it makes is held to that chat's egress policy.
+  executeCommand(command, args = [], context = {}, options = {}) {
+    return runAsSkillCaller({ chatId: context?.chatId, channel: context?.channel }, () => this._executeCommand(command, args, context, options));
+  }
+
+  async _executeCommand(command, args = [], context = {}, options = {}) {
     const skill = this.getSkillForCommand(command);
     if (!skill) {
       return {

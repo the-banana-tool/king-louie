@@ -60,6 +60,22 @@ function normalizeRoles(roles) {
   return out;
 }
 
+// A profile's local-only roles (local inference spec 2026-10-13 §7.1,
+// §13.1): role ids of this profile or core roles, each once, in order;
+// anything else is dropped. A stored value that is not a list cannot be
+// read, so every role of the profile is local-only (fail closed). Written
+// only when it holds a role.
+function normalizeLocalOnly(raw, roles) {
+  if (raw === undefined || raw === null) return [];
+  const known = [...new Set([...R.CORE_ROLES, ...Object.keys(roles || {})])];
+  if (!Array.isArray(raw)) return known;
+  const out = [];
+  for (const role of raw) {
+    if (typeof role === 'string' && known.includes(role) && !out.includes(role)) out.push(role);
+  }
+  return out;
+}
+
 function normalizeProfile(raw, { requireId = true } = {}) {
   if (!isPlainObject(raw)) throw new ProfileError('BAD_PROFILE', 'A profile must be an object.');
   const name = String(raw.name || '').trim();
@@ -70,6 +86,8 @@ function normalizeProfile(raw, { requireId = true } = {}) {
   const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : null;
   if (requireId && !id) throw new ProfileError('BAD_ID', 'A stored profile needs an id.');
   const profile = { id, name, kind, roles: normalizeRoles(raw.roles) };
+  const localOnly = normalizeLocalOnly(raw.localOnly, profile.roles);
+  if (localOnly.length) profile.localOnly = localOnly;
   if (isPlainObject(raw.migration)) {
     profile.migration = {
       at: String(raw.migration.at || ''),
@@ -131,11 +149,37 @@ function checkEffort(catalog, target, { role = 'main' } = {}) {
   }
 }
 
+// The seal on local-only roles (local inference spec 2026-10-13 §13.2): a
+// settings object about to be saved keeps every local-only role the stored
+// one has, for each profile it still holds (a profile it leaves out was
+// deleted, which is not a role being turned off). A role may be added.
+// Only Profiles#update with allowUnsetLocalOnly, through the host's
+// unsealed writer, ever takes one away. → the settings to save.
+function sealLocalOnly(next, stored) {
+  const storedProfiles = Array.isArray(stored?.models?.profiles) ? stored.models.profiles : [];
+  const kept = new Map();
+  for (const raw of storedProfiles) {
+    if (!isPlainObject(raw) || typeof raw.id !== 'string') continue;
+    const list = normalizeLocalOnly(raw.localOnly, isPlainObject(raw.roles) ? raw.roles : {});
+    if (list.length) kept.set(raw.id, list);
+  }
+  if (!kept.size || !isPlainObject(next) || !isPlainObject(next.models) || !Array.isArray(next.models.profiles)) return next;
+  const profiles = next.models.profiles.map((p) => {
+    if (!isPlainObject(p) || !kept.has(p.id)) return p;
+    const given = Array.isArray(p.localOnly) ? p.localOnly.filter((r) => typeof r === 'string') : [];
+    return { ...p, localOnly: [...new Set([...kept.get(p.id), ...given])] };
+  });
+  return { ...next, models: { ...next.models, profiles } };
+}
+
 class Profiles {
-  constructor({ getSettings, setSettings, catalog = null, createId = () => crypto.randomBytes(4).toString('hex') } = {}) {
+  // `writeUnsealed`: the host's writer that bypasses the local-only seal,
+  // used only by update(..., { allowUnsetLocalOnly: true }).
+  constructor({ getSettings, setSettings, writeUnsealed = null, catalog = null, createId = () => crypto.randomBytes(4).toString('hex') } = {}) {
     if (typeof getSettings !== 'function' || typeof setSettings !== 'function') throw new Error('Profiles needs getSettings() and setSettings().');
     this.getSettings = getSettings;
     this.setSettings = setSettings;
+    this.writeUnsealed = typeof writeUnsealed === 'function' ? writeUnsealed : null;
     this.catalog = catalog;
     this.createId = createId;
   }
@@ -156,7 +200,7 @@ class Profiles {
   // one (final review m5). A stored usable profile is replaced by the one
   // of the same id in `profiles`, or dropped when it is not there; new
   // profiles go at the end.
-  _write(profiles, defaultProfileId) {
+  _write(profiles, defaultProfileId, { unsealed = false } = {}) {
     const settings = this.getSettings() || {};
     const next = new Map(profiles.map((p) => [p.id, p]));
     const placed = new Set();
@@ -175,7 +219,8 @@ class Profiles {
       }
     }
     for (const p of profiles) if (!placed.has(p.id)) out.push(p);
-    this.setSettings({ ...settings, models: { ...(settings.models || {}), profiles: out, defaultProfileId } });
+    const write = unsealed && this.writeUnsealed ? this.writeUnsealed : this.setSettings;
+    write({ ...settings, models: { ...(settings.models || {}), profiles: out, defaultProfileId } });
   }
 
   list() {
@@ -288,8 +333,8 @@ class Profiles {
     }
   }
 
-  create({ name, kind = 'user', roles = {}, migration } = {}) {
-    const profile = normalizeProfile({ id: `p-${this.createId()}`, name, kind, roles, ...(migration ? { migration } : {}) });
+  create({ name, kind = 'user', roles = {}, migration, localOnly } = {}) {
+    const profile = normalizeProfile({ id: `p-${this.createId()}`, name, kind, roles, ...(migration ? { migration } : {}), ...(localOnly !== undefined ? { localOnly } : {}) });
     this._checkName(profile.name);
     this._checkEfforts(profile);
     const list = this.list();
@@ -305,19 +350,29 @@ class Profiles {
     return profile;
   }
 
-  update(id, patch = {}) {
+  // `patch.localOnly` may add roles; one that would take a role away is
+  // refused (LOCAL_ONLY_ONE_WAY_HERE) unless `allowUnsetLocalOnly` is
+  // exactly true, which only models:local.unsetLocalOnly passes, for the
+  // app's own window. That write skips the host's seal.
+  update(id, patch = {}, { allowUnsetLocalOnly = false } = {}) {
     const current = this.get(id);
     if (!current) throw new ProfileError('NOT_FOUND', `No profile with id ${id}.`);
     const next = normalizeProfile({
       ...current,
       ...(patch.name !== undefined ? { name: patch.name } : {}),
       ...(patch.roles !== undefined ? { roles: patch.roles } : {}),
+      ...(patch.localOnly !== undefined ? { localOnly: patch.localOnly } : {}),
       id: current.id,
       kind: current.kind
     });
+    const unset = allowUnsetLocalOnly === true;
+    const lost = (current.localOnly || []).filter((r) => !(next.localOnly || []).includes(r));
+    if (lost.length && !unset) {
+      throw new ProfileError('LOCAL_ONLY_ONE_WAY_HERE', `${lost.join(', ')} ${lost.length === 1 ? 'is' : 'are'} local-only in "${current.name}". Turn local-only off with its own switch in Settings → Models.`);
+    }
     this._checkName(next.name, id);
     this._checkEfforts(next);
-    this._write(this.list().map((p) => (p.id === id ? next : p)), this.defaultId());
+    this._write(this.list().map((p) => (p.id === id ? next : p)), this.defaultId(), { unsealed: unset && lost.length > 0 });
     return next;
   }
 
@@ -328,7 +383,9 @@ class Profiles {
     const taken = new Set(this.list().map((p) => p.name.toLowerCase()));
     let candidate = base;
     for (let n = 2; taken.has(candidate.toLowerCase()); n += 1) candidate = `${base} ${n}`;
-    return this.create({ name: candidate, kind: 'user', roles: source.roles });
+    // A copy keeps the source's local-only roles: a duplicate is never a way
+    // round the one-way switch (local inference spec 2026-10-13 §13.2).
+    return this.create({ name: candidate, kind: 'user', roles: source.roles, ...(source.localOnly ? { localOnly: source.localOnly } : {}) });
   }
 
   remove(id) {
@@ -351,22 +408,27 @@ class Profiles {
 
   // The frozen view one turn uses (spec §6.6). An unknown id falls back to
   // the default, logged: a chat or case can outlive the profile it named.
-  snapshot({ profileId = null, mainOverride = null, explain } = {}) {
+  // `egress` is the turn's egress policy (a private chat or case; spec
+  // 2026-10-13 §7.1) and `isGuaranteeTarget` the local server registry's
+  // answer; both go to the resolver as given, which reads anything that is
+  // not null or a policy as a mark it could not read.
+  snapshot({ profileId = null, mainOverride = null, explain, egress = null, isGuaranteeTarget = null } = {}) {
     let profile = profileId ? this.get(profileId) : null;
     if (profileId && !profile) log.warn(`Profile ${profileId} no longer exists; using the default profile.`);
     if (!profile) profile = this.getDefault();
-    return createTurnModels({ profile, mainOverride, customRoles: this.customRoles(), explain });
+    // The profile's local-only roles go with it (spec 2026-10-13 §7.1).
+    return createTurnModels({ profile, mainOverride, customRoles: this.customRoles(), explain, egress, localOnly: profile?.localOnly || [], isGuaranteeTarget });
   }
 }
 
 // A snapshot straight from a settings object, for a host with no Profiles
 // instance (a case runtime built without a core). Read-only.
-function snapshotFromSettings(settings, { profileId = null, mainOverride = null, explain } = {}) {
+function snapshotFromSettings(settings, { profileId = null, mainOverride = null, explain, egress = null, isGuaranteeTarget = null } = {}) {
   const view = new Profiles({
     getSettings: () => settings || {},
     setSettings: () => { throw new Error('snapshotFromSettings is read-only.'); }
   });
-  return view.snapshot({ profileId, mainOverride, explain });
+  return view.snapshot({ profileId, mainOverride, explain, egress, isGuaranteeTarget });
 }
 
-module.exports = { Profiles, ProfileError, PROFILE_KINDS, normalizeProfile, normalizeCustomRole, validateCustomRole, snapshotFromSettings, checkEffort };
+module.exports = { Profiles, ProfileError, PROFILE_KINDS, normalizeProfile, normalizeLocalOnly, sealLocalOnly, normalizeCustomRole, validateCustomRole, snapshotFromSettings, checkEffort };

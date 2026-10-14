@@ -330,7 +330,13 @@ describe('example roles: load through the real loaders', () => {
       const service = loadServiceConfig(path.join(root, 'data'), {}, { adminConfigDir: config, geteuid: () => -1, adminUid: EUID });
       assert.equal(service.profile, expect.profile);
       const rawService = JSON.parse(fs.readFileSync(path.join(config, 'service.json'), 'utf8'));
-      assert.deepEqual(Object.keys(rawService), ['profile', 'features', 'ports', 'playbooks']);
+      // Local inference L1: only gpu-box shows the optional localInference block.
+      assert.deepEqual(Object.keys(rawService), role === 'gpu-box' ? ['profile', 'features', 'ports', 'playbooks', 'localInference'] : ['profile', 'features', 'ports', 'playbooks']);
+      if (role === 'gpu-box') {
+        assert.deepEqual(service.localInference.servers.map((s) => [s.id, s.kind, s.baseUrl, s.maxConcurrent]), [['workstation', 'ollama', 'http://127.0.0.1:11434', 2]]);
+      } else {
+        assert.deepEqual(service.localInference, { servers: [] });
+      }
       assert.deepEqual(service.playbooks, { sources: [], autoUpdate: false }, 'examples ship { sources: [], autoUpdate: false }: no URL sources, local folders unrestricted, no auto-update');
       assert.deepEqual(Object.keys(rawService.features), Object.keys(DEFAULT_FEATURES));
       assert.deepEqual(Object.keys(rawService.ports), Object.keys(DEFAULT_PORTS));

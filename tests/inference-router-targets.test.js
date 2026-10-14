@@ -234,7 +234,7 @@ describe('cost tags on routed calls (spec 2026-09-27 §10)', () => {
       [res.llmMetrics.role, res.llmMetrics.profileId, res.llmMetrics.borrowedFrom, res.llmMetrics.failover, res.llmMetrics.model],
       ['utility', 'p-1', 'worker', true, 'gpt-5.5']
     );
-    assert.deepStrictEqual(routed.callTags(), { role: 'utility', profileId: 'p-1', borrowedFrom: 'worker', failover: true });
+    assert.deepStrictEqual(routed.callTags(), { role: 'utility', profileId: 'p-1', borrowedFrom: 'worker', failover: true, failoverFrom: 'groq/llama' });
   });
 
   it('marks the first target\'s answer as no failover', async () => {

@@ -69,7 +69,13 @@ const EXCLUDED = Object.freeze({
   channelTokens: 'bot tokens stay with the desktop',
   'settings.activeProvider': 'model choice moved to profiles; set the models up under Settings → Models on the service',
   'settings.providerModels': 'model choice moved to profiles; set the models up under Settings → Models on the service',
-  'settings.inference': 'tiers became profiles; set the models up under Settings → Models on the service'
+  'settings.inference': 'tiers became profiles; set the models up under Settings → Models on the service',
+  // Local inference stage L1 (R-LI-6): settings.models, and with it
+  // models.localServers, is not in IMPORTED_SETTINGS_KEYS. On a service a
+  // local server comes only from the administrator's service.json, and the
+  // core's setSettings keeps the stored models.localServers whatever an
+  // import passes.
+  'settings.models': 'model profiles are set up on the service; a local server comes only from the administrator\'s service.json'
 });
 
 class ImportError extends Error {

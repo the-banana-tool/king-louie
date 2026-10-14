@@ -27,8 +27,20 @@
 // reranker whose model did not load (MODEL_UNAVAILABLE) is RERANK_UNAVAILABLE
 // (silent in the Retriever) until retryMs passes or retry(); a worker crash,
 // timeout or stop during the load holds nothing off.
+//
+// The keep-local embedder (local inference spec 2026-10-13 §8.4, R-LI-25):
+// a private chat's chunks and query, and an imported chat's chunks, are
+// embedded only in the embed worker. When the active embedder is hosted
+// (openai, ollama), a second embedder with the default local model
+// (HISTORY_DEFAULTS.embedder.model) does that, on the same runner. It is
+// built the first time ensureKeepLocal() is called (the indexer calls it
+// when such a chunk is pending), never before start() (and so never under
+// KL_TEST_MODE), and is dropped on any switch of the active embedder. With
+// the active embedder local, keepLocal() is the active one; with kind none
+// nothing is embedded at all. A keep-local model that does not load is
+// retried after retryMs and logged once; it never stops the active one.
 const { EventEmitter } = require('node:events');
-const { mergeHistorySettings, embedderKey } = require('./settings');
+const { mergeHistorySettings, embedderKey, HISTORY_DEFAULTS } = require('./settings');
 const { createLocalEmbedder } = require('./embedders/local');
 const { createRemoteEmbedder } = require('./embedders/remote');
 const { EmbedError, NOT_FAILURES } = require('./embed-errors');
@@ -73,6 +85,8 @@ class EmbedderHost extends EventEmitter {
     this.rerankLoad = null;
     this.rerankFailed = null;
     this.rerankFiles = new Map();
+    // { key, model, embedder, loading, state, error, files, until } or null.
+    this.keep = null;
   }
 
   _settings() {
@@ -94,7 +108,85 @@ class EmbedderHost extends EventEmitter {
     let download = null;
     if (this.state === 'downloading') download = { role: 'embedder', ...sumFiles(this.files) };
     else if (this.rerankLoad && this.rerankFiles.size) download = { role: 'reranker', ...sumFiles(this.rerankFiles) };
-    return { kind: this.kind, key: this.key, state: this.state, download, error: this.error, tokens: this.embedder ? this.embedder.tokens : 0 };
+    return {
+      kind: this.kind, key: this.key, state: this.state, download, error: this.error, tokens: this.embedder ? this.embedder.tokens : 0,
+      keepLocal: this._keepStatus()
+    };
+  }
+
+  // ── the keep-local embedder (see the header) ───────────────────────────
+
+  // The key of a separate keep-local embedder: only while the active
+  // embedder is started and hosted. null when the active one is local (it
+  // embeds every chat itself), with kind none, and before start().
+  keepLocalKey() {
+    this._sync();
+    if (!this.started || !this.key || this.kind === 'local') return null;
+    return `local:${HISTORY_DEFAULTS.embedder.model}`;
+  }
+
+  // The local embedder a private chat's text may go to, when it is ready:
+  // the active one when it is local, else the keep-local one. Never builds
+  // or loads anything.
+  keepLocal() {
+    this._sync();
+    if (!this.started || !this.key) return null;
+    if (this.kind === 'local') return this.state === 'ready' ? this.embedder : null;
+    const keep = this.keep;
+    return keep && keep.state === 'ready' && keep.key === this.keepLocalKey() ? keep.embedder : null;
+  }
+
+  // keepLocal(), building and loading the keep-local embedder first if it
+  // is needed and not held off. Returns null until it is ready.
+  ensureKeepLocal() {
+    const key = this.keepLocalKey();
+    if (!key) return this.keepLocal();
+    const keep = this.keep;
+    if (keep && keep.key === key && (keep.state !== 'unavailable' || this.now() < keep.until)) return this.keepLocal();
+    this._startKeep(key);
+    return this.keepLocal();
+  }
+
+  _startKeep(key) {
+    const model = key.slice('local:'.length);
+    const embedder = createLocalEmbedder({ runner: this._runner(), model, modelsDir: this.modelsDir });
+    const keep = { key, model, embedder, loading: true, state: 'starting', error: null, files: new Map(), until: 0 };
+    this.keep = keep;
+    embedder.ready().then(() => {
+      if (this.keep !== keep) return;
+      keep.loading = false;
+      keep.files = new Map();
+      keep.state = 'ready';
+    }, (err) => {
+      if (this.keep !== keep) return;
+      this._keepFailed(err);
+    });
+  }
+
+  _keepFailed(err, { forever = false } = {}) {
+    const keep = this.keep;
+    if (!keep) return;
+    const code = err && err.code;
+    keep.loading = false;
+    keep.files = new Map();
+    keep.error = String((err && err.message) || err).slice(0, MESSAGE_MAX);
+    keep.state = 'unavailable';
+    keep.until = forever ? Infinity : this.now() + this.retryMs;
+    const warnKey = `keep\u0000${keep.key}\u0000${code || 'error'}`;
+    if (this.warned.has(warnKey)) return;
+    this.warned.add(warnKey);
+    this.log.warn(`Private and imported chats are not embedded for now (the local model ${keep.model} is not available): ${keep.error}`);
+  }
+
+  _keepStatus() {
+    if (!this.started || !this.key) return { key: null, state: 'off', download: null };
+    if (this.kind === 'local') return { key: this.key, state: this.state, download: null };
+    const key = `local:${HISTORY_DEFAULTS.embedder.model}`;
+    const keep = this.keep && this.keep.key === key ? this.keep : null;
+    if (!keep) return { key, state: 'off', download: null };
+    const download = keep.state === 'downloading' ? { role: 'embedder', ...sumFiles(keep.files) } : null;
+    // Why it is not loaded, for the owner (the Recall pane), not only the log.
+    return { key, state: keep.state, download, ...(keep.state === 'unavailable' && keep.error ? { error: keep.error } : {}) };
   }
 
   // Why this turn's recall cannot use vectors although they are on
@@ -123,6 +215,10 @@ class EmbedderHost extends EventEmitter {
   // (NOT_FAILURES).
   fail(err, key) {
     const code = err && err.code;
+    if (!NOT_FAILURES.has(code) && this.keep && key === this.keep.key && key !== this.key) {
+      this._keepFailed(err);
+      return;
+    }
     if (NOT_FAILURES.has(code) || key !== this.key) return;
     this.embedder = null;
     this.loading = null;
@@ -235,12 +331,19 @@ class EmbedderHost extends EventEmitter {
           if (this.rerankLoad && p.model === this.rerankModel) this.rerankFiles.set(p.file, { loaded: Number(p.loaded) || 0, total: Number(p.total) || 0 });
           return;
         }
+        if (p.role === 'embedder' && this.keep && this.keep.loading && p.model === this.keep.model) {
+          this.keep.files.set(p.file, { loaded: Number(p.loaded) || 0, total: Number(p.total) || 0 });
+          this.keep.state = 'downloading';
+          return;
+        }
         if (p.role !== 'embedder' || !this.loading || p.model !== this.loading.model) return;
         this.files.set(p.file, { loaded: Number(p.loaded) || 0, total: Number(p.total) || 0 });
         this._set('downloading');
       });
       this.runner.on('disabled', () => {
-        if (this.kind === 'local') this.fail(new EmbedError('EMBED_DISABLED', 'the embedding worker crashed three times in ten minutes; local embedding is off for this session'), this.key);
+        const disabled = new EmbedError('EMBED_DISABLED', 'the embedding worker crashed three times in ten minutes; local embedding is off for this session');
+        if (this.kind === 'local') this.fail(disabled, this.key);
+        else if (this.keep) this._keepFailed(disabled, { forever: true });
       });
     }
     return this.runner;
@@ -253,6 +356,8 @@ class EmbedderHost extends EventEmitter {
   }
 
   _switch(key, cfg) {
+    // The keep-local embedder belongs to the embedder it stands beside.
+    this.keep = null;
     this.key = key;
     this.kind = key ? cfg.kind : 'none';
     this.embedder = null;

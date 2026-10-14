@@ -7,7 +7,7 @@ const EventEmitter = require('events');
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
-const { normalizeProvider, isOllamaCloudModelId } = require('./provider-ids');
+const { normalizeProvider, isOllamaCloudModelId, LOCAL_PROVIDER } = require('./provider-ids');
 const N = require('./normalize');
 const { priceWithCost } = require('./pricing');
 
@@ -22,9 +22,10 @@ const CATALOG_DEFAULTS = Object.freeze({
   scoresUrl: 'https://openrouter.ai/api/v1/models'
 });
 
-// A local Ollama model's cost, matching normalize.js's localEntry() (final
-// review I4).
-const LOCAL_OLLAMA_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: null, tiers: [] });
+// A local model's cost (a non-cloud Ollama id, or a model on a local server
+// the owner registered), matching normalize.js's localEntry() (final review
+// I4; spec 2026-10-13 §9.1).
+const LOCAL_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: null, tiers: [] });
 
 function readJson(file) {
   let text;
@@ -77,6 +78,7 @@ class Catalog extends EventEmitter {
     this._overridesSig = '';
     this._suppressEnsure = false;
     this._refreshInFlight = null;
+    this._localServerCheck = null;
     this._deps = { snapshotDir: DEFAULT_SNAPSHOT_DIR, cacheDir: null, fetch: globalThis.fetch, getSettings: () => ({}), now: () => new Date() };
   }
 
@@ -139,6 +141,16 @@ class Catalog extends EventEmitter {
       const id = ref.slice(colon + 1).trim();
       if (!id) continue;
       const key = N.entryKey(provider, id);
+      if (provider === LOCAL_PROVIDER) {
+        // A model on a local server (spec 2026-10-13 §6.5): an override may
+        // change what it can do, never its cost or its `local` flag, and it
+        // makes no local model the registry did not put here.
+        const held = index.get(key);
+        if (!held) continue;
+        const { cost: _cost, local: _local, ...capabilities } = patch;
+        index.set(key, mergeEntry(held, capabilities, 'override', { deep: true }));
+        continue;
+      }
       const base = index.get(key) || { ...N.normalizeModel(provider, { id }), sources: [] };
       index.set(key, mergeEntry(base, patch, 'override', { deep: true }));
     }
@@ -199,10 +211,34 @@ class Catalog extends EventEmitter {
     // Cloud catalog entries. This holds independent of whether a local
     // discovery has (yet) added its own entry to the index (final review I4).
     if (p === 'ollama' && id && !isOllamaCloudModelId(id)) {
-      return priceWithCost(LOCAL_OLLAMA_COST, usage);
+      return priceWithCost(LOCAL_COST, usage);
     }
+    // A model on a local server ("<serverId>/<model>", provider `local`) is
+    // $0 when the local server registry says that server is one of its own
+    // (spec 2026-10-13 §9.1 rule 1). The registry is asked, never the id: a
+    // server nobody registered, or a catalog with no registry, prices nothing
+    // here, so the model stays unpriced like any unknown one (rule 3).
+    if (p === LOCAL_PROVIDER) return this._isLocalServerModel(id) ? priceWithCost(LOCAL_COST, usage) : null;
     const entry = this._lookup(provider, modelId);
     return entry ? priceWithCost(entry.cost, usage) : null;
+  }
+
+  // Set by the local server registry (src/models/local-servers.js):
+  // (serverId) => true only for a server it holds and may dial.
+  setLocalServerCheck(fn) {
+    this._localServerCheck = typeof fn === 'function' ? fn : null;
+  }
+
+  _isLocalServerModel(id) {
+    if (typeof this._localServerCheck !== 'function') return false;
+    const slash = id.indexOf('/');
+    if (slash <= 0 || slash === id.length - 1) return false;
+    try {
+      return this._localServerCheck(id.slice(0, slash)) === true;
+    } catch (err) {
+      log.warn(`Asking the local server registry failed; the model is unpriced: ${err.message}`);
+      return false;
+    }
   }
 
   setLocalModels(provider, entries = []) {

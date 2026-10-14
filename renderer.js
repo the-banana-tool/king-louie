@@ -85,11 +85,21 @@ const appState = {
       loaded: []
     }
   },
-  canvasVisible: false
+  canvasVisible: false,
+  // Local inference L1: local server names by id (models:local.list).
+  localServerNames: new Map()
 };
 
 const dom = {
   userInput: document.getElementById('user-input'),
+  privateComposerLine: document.getElementById('private-composer-line'),
+  modelsLocalList: document.getElementById('models-local-list'),
+  modelsLocalStatus: document.getElementById('models-local-status'),
+  modelsLocalActions: document.getElementById('models-local-actions'),
+  modelsLocalAddBtn: document.getElementById('models-local-add-btn'),
+  modelsLocalOllamaBtn: document.getElementById('models-local-ollama-btn'),
+  modelsLocalUsage: document.getElementById('models-local-usage'),
+  importChatPrivate: document.getElementById('import-chat-private'),
   inputContainer: document.getElementById('input-container'),
   inputResizeHandle: document.getElementById('input-resize-handle'),
   sendBtn: document.getElementById('send-btn'),
@@ -1791,6 +1801,187 @@ function formatTokenCount(value = 0) {
   return Number(value || 0).toLocaleString();
 }
 
+/* --- Local inference L1: local servers and the private mark (spec 2026-10-13 §15) --- */
+// Pure helpers: words for what the host reports. Every server name, model
+// id, address, probe sample, chat or case title they are given is shown by
+// the callers with textContent only, never parsed as HTML or markdown.
+
+const LOCAL_CLASS_WORDS = Object.freeze({ loopback: 'this machine', lan: 'your network', cgnat: 'your overlay network' });
+function localServerClassWords(cls) {
+  return typeof cls === 'string' && Object.hasOwn(LOCAL_CLASS_WORDS, cls) ? LOCAL_CLASS_WORDS[cls] : 'an address King Louie cannot place';
+}
+
+function localServerGradeText(grade) {
+  return grade === 'guarantee'
+    ? 'private chats can use it'
+    : 'for cost only: a private chat needs https with a pinned certificate';
+}
+
+// The add dialog's two fixed sentences (R-LI-21): the mark is the owner's
+// word, and a server that sends text on cannot be detected.
+const LOCAL_ADD_SENTENCES = Object.freeze([
+  'This server runs on hardware you control. King Louie will treat its models as local.',
+  'King Louie cannot tell whether this server sends your text on. Mark it local only if it does not.'
+]);
+const LOCAL_CGNAT_SENTENCE = 'This address is in 100.64.0.0/10, the range overlay networks such as Tailscale use. Use it only if it is your own overlay network.';
+const LOCAL_ADMIN_SENTENCE = 'Set by the administrator in service.json.';
+
+// Under the composer in a private chat, always (R-LI-9).
+const PRIVATE_COMPOSER_LINE = 'Private: model calls stay on your hardware. Tools still send what they send.';
+const PRIVATE_TOOLS_LINE = 'Tools still do what they do: a web search sends its query to the web.';
+// A case's questions still reach the owner over the contact ladder (review
+// fix, item 9a).
+const PRIVATE_QUESTIONS_LINE = 'Its questions to you still go out over your contact ladder (Telegram, Discord, email, SMS, voice, the phone app), as before: the mark keeps model calls on your hardware, not the questions.';
+const PRIVATE_CONFIRM_FIXED = Object.freeze(['What was already sent stays sent.', 'This cannot be undone for this chat.']);
+
+// The confirmation's lines (§8.1) from chat:markPrivate's or
+// case:markPrivate's facts, in order: what was sent, the vectors, what will
+// be refused, who recalled it, the chats it covers, the tools line, the
+// fixed lines.
+function privateConfirmLines(facts, { forCase = false } = {}) {
+  const f = facts && typeof facts === 'object' ? facts : {};
+  const lines = [];
+  const sent = f.alreadySent && typeof f.alreadySent === 'object' ? f.alreadySent : { messages: 0, providers: [] };
+  const n = Number(sent.messages) || 0;
+  const providers = Array.isArray(sent.providers) ? sent.providers.filter((p) => typeof p === 'string') : [];
+  lines.push(n > 0
+    ? `${n} ${n === 1 ? 'reply' : 'replies'} already sent text to a hosted model (${providers.join(', ') || 'a hosted provider'}).`
+    : 'Nothing in it was sent to a hosted model.');
+  if (f.hostedVectors === true) lines.push('A hosted embedding service holds vectors of it; they are deleted and made again on this computer.');
+  for (const m of Array.isArray(f.missing) ? f.missing : []) {
+    if (m && typeof m.role === 'string') lines.push(`${m.role}: ${typeof m.why === 'string' ? m.why : 'no local model can take it.'}`);
+  }
+  const readers = Array.isArray(f.recalledBy) ? f.recalledBy : [];
+  if (readers.length) lines.push(`Read before by: ${readers.map((r) => (r && r.title) || (r && r.chatId) || 'a chat').join(', ')}. They will not read it again.`);
+  const chats = Array.isArray(f.chats) ? f.chats : [];
+  if (forCase || chats.length > 1) lines.push(`Chats made private with it: ${chats.map((c) => (c && c.title) || (c && c.id) || 'a chat').join(', ') || 'none'}.`);
+  if (f.readAloud === 'system') lines.push('Read-aloud uses this computer\'s own voice in it.');
+  if (f.questionsLeave === true) lines.push(PRIVATE_QUESTIONS_LINE);
+  lines.push(PRIVATE_TOOLS_LINE);
+  lines.push(...PRIVATE_CONFIRM_FIXED);
+  return lines;
+}
+
+// The name a local server is shown by: its configured name, else its id.
+function localServerName(id, names) {
+  const name = names && typeof names.get === 'function' ? names.get(id) : null;
+  return typeof name === 'string' && name ? name : String(id || '');
+}
+
+// A failover label "local/<server>/<model>" names its server; anything else
+// is shown as it is.
+function failoverFromText(label, names) {
+  const s = String(label || '');
+  if (s.startsWith('local/')) {
+    const server = s.slice('local/'.length).split('/')[0];
+    return localServerName(server, names);
+  }
+  return s;
+}
+
+// A reply's cost line when it made local calls (§9.2): "local · 3,104
+// tokens · $0.00" when every call was local; otherwise each role as
+// "utility: local (Workstation) 826 tokens", "main $0.0412", or both
+// for a role that used both. null when there was no local call, so the
+// line is exactly what it was before.
+function formatLocalCostLine(llm, names) {
+  const totals = llm && llm.totals;
+  if (!totals || !(Number(totals.localCalls) > 0)) return null;
+  const byRole = llm.byRole && typeof llm.byRole === 'object' ? llm.byRole : {};
+  const roles = Object.keys(byRole);
+  const order = ['main', 'worker', 'utility', 'vision', 'imageGeneration'];
+  const ordered = [...order.filter((r) => roles.includes(r)), ...roles.filter((r) => !order.includes(r)).sort()];
+  const allLocal = ordered.length > 0 && ordered.every((r) => Number(byRole[r]?.localCalls) > 0 && Number(byRole[r].localCalls) === Number(byRole[r].calls));
+  if (allLocal) return `local · ${formatTokenCount(totals.totalTokens)} tokens · ${formatCompactUsd(0)}`;
+  const parts = ordered.map((r) => {
+    const e = byRole[r] || {};
+    const servers = (Array.isArray(e.localServerIds) ? e.localServerIds : []).map((id) => localServerName(id, names)).join(', ');
+    const localPart = Number(e.localCalls) > 0 ? `local (${servers}) ${formatTokenCount(e.localTokens)} tokens` : '';
+    const hostedPart = Number(e.localCalls) === Number(e.calls) ? '' : `${formatCompactUsd(e.costUsd)}${e.unpriced ? '+' : ''}`;
+    return localPart ? `${r}: ${localPart}${hostedPart ? ` + ${hostedPart}` : ''}` : `${r} ${hostedPart}`;
+  });
+  return parts.join(' · ');
+}
+
+// The failover notes (§9.3): "utility: Workstation did not answer; ran on
+// openai/gpt-5.4-mini $0.0006", one per role, from the calls that carry
+// failoverFrom. And whether any local call's tokens were estimated.
+function localFailoverNotes(llm, names) {
+  const calls = [...(Array.isArray(llm?.calls) ? llm.calls : []), ...(Array.isArray(llm?.subagents) ? llm.subagents.flatMap((r) => (Array.isArray(r?.calls) ? r.calls : [])) : [])];
+  const seen = new Set();
+  const notes = [];
+  for (const c of calls) {
+    if (!c || typeof c.failoverFrom !== 'string' || !c.failoverFrom) continue;
+    const role = typeof c.role === 'string' && c.role ? c.role : 'other';
+    if (seen.has(role)) continue;
+    seen.add(role);
+    notes.push(`${role}: ${failoverFromText(c.failoverFrom, names)} did not answer; ran on ${c.provider}/${c.model} ${formatCompactUsd(c.costUsd)}`);
+  }
+  return { notes, estimated: calls.some((c) => c && c.usageEstimated === true) };
+}
+
+// A turn refused under the private mark or a local-only role: the sentence
+// for its code; each comes with a button to Settings → Models.
+const PRIVATE_REFUSAL_SENTENCES = Object.freeze({
+  PRIVATE_NO_LOCAL_MODEL: 'This needs a local model, and none in the profile can take it.',
+  LOCAL_ONLY_ROLE_NO_MODEL: 'This role is local-only, and it has no local model.',
+  LOCAL_MODEL_UNAVAILABLE: 'The local model did not answer, so nothing was sent anywhere else.'
+});
+function privateRefusalSentence(code) {
+  return typeof code === 'string' && Object.hasOwn(PRIVATE_REFUSAL_SENTENCES, code) ? PRIVATE_REFUSAL_SENTENCES[code] : '';
+}
+
+// How a picker shows a model (§15): a local one with a "local" badge and
+// its server's name; in a private chat a hosted one is disabled, "not local".
+function pickerChoiceView(c, { isPrivate = false, names = null, inMainText = '(profile\'s main)' } = {}) {
+  const local = c && c.provider === 'local';
+  const server = local ? localServerName(String(c.model || '').split('/')[0], names) : '';
+  const base = c && c.inMain ? `${c.name} ${inMainText}` : `${c?.name} (${local ? `local · ${server}` : c?.provider})`;
+  const disabled = Boolean(isPrivate) && !local;
+  return { text: disabled ? `${base}: not local` : (local && c.inMain ? `${base} · local · ${server}` : base), disabled };
+}
+
+// Exports (R-LI-28): the JSON of a private chat carries "private": true;
+// the Markdown starts with a line saying it was private.
+const PRIVATE_EXPORT_WARNING = 'This file is plain text outside King Louie.';
+const PRIVATE_MARKDOWN_LINE = 'This chat was private in King Louie.';
+function exportChatData(chat, messages) {
+  const { private: _mark, ...rest } = chat || {};
+  return chat && chat.private === true ? { ...rest, private: true, messages } : { ...rest, messages };
+}
+function markdownExportLines(chat) {
+  return chat && chat.private === true ? [`${PRIVATE_MARKDOWN_LINE}\n`] : [];
+}
+
+// The keep-local embedder's state (§8.4) for Settings → History, and the
+// owner-visible sentence when it could not load.
+function keepLocalStatusText(keep, progress) {
+  const k = keep && typeof keep === 'object' ? keep : null;
+  if (!k || !k.key || k.state === 'off') return '';
+  const p = progress && typeof progress === 'object' ? progress : null;
+  switch (k.state) {
+    case 'ready': return p && Number(p.pending) > 0
+      ? `Private and imported chats: embedding on this computer (${Number(p.pending)} chunks to go).`
+      : 'Private and imported chats are embedded on this computer.';
+    case 'starting':
+    case 'downloading': return 'Private and imported chats: loading the local embedding model…';
+    case 'unavailable':
+    case 'disabled': return `Private and imported chats are not embedded for now: the local embedding model did not load (${k.error || 'unknown error'}). Recall uses keyword search for them.`;
+    default: return '';
+  }
+}
+
+// Local calls by server (§9.2) from the usage tracker's byServer table.
+function localUsageLines(byServer, names) {
+  const table = byServer && typeof byServer === 'object' ? byServer : {};
+  return Object.keys(table).sort().map((id) => {
+    const row = table[id] || {};
+    const calls = Number(row.calls) || 0;
+    return `${localServerName(id, names)}: ${calls} ${calls === 1 ? 'call' : 'calls'}, ${formatTokenCount(row.tokens)} tokens, ${formatCompactUsd(0)}`;
+  });
+}
+/* --- end local inference L1 helpers --- */
+
 function renderChatList() {
   dom.chatList.innerHTML = '';
   if (appState.historyStatus?.available === false) {
@@ -1825,6 +2016,14 @@ function renderChatList() {
     const titleDiv = document.createElement('div');
     titleDiv.className = 'chat-item-title';
     titleDiv.textContent = chat.title;
+    // Local inference L1: a private chat shows a lock.
+    if (isPrivateChat(chat)) {
+      const lock = document.createElement('span');
+      lock.className = 'chat-item-private';
+      lock.title = 'Private';
+      lock.appendChild(faIcon('fas fa-lock'));
+      titleDiv.prepend(lock, document.createTextNode(' '));
+    }
 
     const previewDiv = document.createElement('div');
     previewDiv.className = 'chat-item-preview';
@@ -1917,7 +2116,23 @@ async function renderChatCaseSection(chat, container) {
   orientation.className = 'chat-case-orientation';
   orientation.hidden = true;
 
-  container.append(row, orientationBtn, orientation, error);
+  // Local inference L1: the case's private mark, from its panel.
+  const casePrivate = Boolean(chat.caseId && cases.find((c) => c.id === chat.caseId)?.private === true);
+  const privateBtn = document.createElement('button');
+  privateBtn.type = 'button';
+  privateBtn.id = 'chat-case-private-btn';
+  privateBtn.className = 'btn btn-sm chat-case-private-btn';
+  privateBtn.textContent = casePrivate ? 'Private case' : 'Make this case private…';
+  privateBtn.disabled = casePrivate;
+  privateBtn.hidden = !chat.caseId || caseMissing;
+  privateBtn.addEventListener('click', async () => {
+    if (await openPrivateMarkFlow({ caseId: chat.caseId })) {
+      const fresh = appState.chats.find((c) => c.id === chat.id) || chat;
+      await renderChatCaseSection(fresh, container);
+    }
+  });
+
+  container.append(row, orientationBtn, privateBtn, orientation, error);
 
   // Cases stage 6: the playbooks of the attached case. The create-form
   // picker lives in the New case dialog.
@@ -2024,8 +2239,14 @@ async function renderChatCaseSection(chat, container) {
       }
       return;
     }
-    const result = await window.electron.cases.attach({ chatId: chat.id, caseId: select.value || null });
-    if (!result?.ok) { showError(result?.error || 'Could not attach the case.'); return; }
+    let result = await window.electron.cases.attach({ chatId: chat.id, caseId: select.value || null });
+    // Local inference L1: a private chat goes only to a private case; the
+    // owner may make the case private in the same step.
+    if (!result?.ok && result?.code === 'PRIVATE_CASE_REQUIRED'
+      && await showConfirmDialog('This chat is private and the case is not. Make the case private too?', { before: [PRIVATE_TOOLS_LINE, ...PRIVATE_CONFIRM_FIXED] })) {
+      result = await window.electron.cases.attach({ chatId: chat.id, caseId: select.value || null, makeCasePrivate: true });
+    }
+    if (!result?.ok) { showError(result?.error || 'Could not attach the case.'); select.value = previousValue; return; }
     await adopt(result.chat);
   });
 
@@ -3940,6 +4161,7 @@ function renderChatMessages() {
     toolGroupBuffer.timeout = null;
   }
 
+  paintPrivateChatState(null);
   if (!activeChat) {
     dom.chatHeaderTitle.textContent = 'King Louie Chat';
     dom.chatHeaderMeta.textContent = 'Start a new conversation';
@@ -3960,6 +4182,7 @@ function renderChatMessages() {
   }
 
   dom.chatHeaderTitle.textContent = activeChat.title;
+  paintPrivateChatState(activeChat);
   const chatTotals = activeChat.llmTotals || sumChatLlmTotals(activeChat);
   dom.chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)}`;
   if (dom.workingDirBtn) {
@@ -4038,7 +4261,9 @@ function renderChatMessages() {
       seq: message?.seq,
       chatId: activeChat.id,
       question: message?.question,
-      messageId: message?.id
+      messageId: message?.id,
+      errorCode: message?.errorCode,
+      errorAction: message?.errorAction
     });
   });
 
@@ -4083,6 +4308,7 @@ function switchSettingsTab(tabName) {
   // Usability changes with every key test; re-read it whenever the tab opens.
   if (tabName === 'models' && typeof loadModelProfiles === 'function') {
     loadModelProfiles().catch((err) => settingsLog.warn(`loading model profiles failed: ${err.message}`));
+    loadLocalServers().catch((err) => settingsLog.warn(`loading local servers failed: ${err.message}`));
     loadKingLouie().catch((err) => settingsLog.warn(`loading the King Louie profile failed: ${err.message}`));
   }
   // History and recall: its status is read while the pane is open.
@@ -4184,6 +4410,14 @@ async function refreshHistoryEmbedderStatus() {
     : `Could not read the embedding status: ${(out && out.error) || 'unknown error'}`;
   const rerankEl = document.getElementById('history-rerank-status');
   if (rerankEl && out && out.ok) rerankEl.textContent = historyRerankStatusText(out.jev);
+  // Local inference L1 (§8.4): the keep-local embedder, and its failure to load.
+  const keepEl = document.getElementById('history-keep-local-status');
+  if (keepEl) {
+    const keepText = out && out.ok ? keepLocalStatusText(out.status?.keepLocal, out.keepLocalProgress) : '';
+    keepEl.textContent = keepText;
+    keepEl.hidden = !keepText;
+    keepEl.classList.toggle('error', Boolean(out?.status?.keepLocal?.error));
+  }
   return out;
 }
 
@@ -7464,6 +7698,8 @@ function renderModelProfileList() {
     summary.textContent = `Main: ${mainNames.length ? mainNames.join(', ') : '(none)'}${unusable ? ` · ${unusable} model${unusable === 1 ? '' : 's'} not usable now` : ''}`;
     card.appendChild(summary);
     if (workerBorrowsFromMain(profile.roles)) card.appendChild(workerBorrowNotice());
+    // Local inference L1: the profile's local-only switches.
+    card.appendChild(localOnlyRow(profile));
 
     // The migration's notes (spec §13): which old model ids were mapped or kept.
     const notes = profile.migration && Array.isArray(profile.migration.notes) ? profile.migration.notes : [];
@@ -7667,7 +7903,9 @@ async function openModelPicker(role, block) {
       item.className = 'models-picker-item';
       item.dataset.provider = c.provider;
       item.dataset.model = c.model;
-      item.textContent = `${c.name} (${[c.provider, c.local ? 'local' : formatModelPrice(c.cost), formatContext(c.context)].filter(Boolean).join(' · ')})`;
+      // Local inference L1: a model on a local server names its server.
+      const where = c.provider === 'local' ? `local · ${localServerName(String(c.model || '').split('/')[0], appState.localServerNames)}` : c.provider;
+      item.textContent = `${c.name} (${[where, c.provider === 'local' ? null : (c.local ? 'local' : formatModelPrice(c.cost)), formatContext(c.context)].filter(Boolean).join(' · ')})`;
       item.addEventListener('click', () => {
         profileDraft.roles[role] = [...(profileDraft.roles[role] || []), { provider: c.provider, model: c.model, effort: null, name: c.name, usable: true, reasons: [], cost: c.cost, context: c.context, efforts: [] }];
         renderProfileEditor();
@@ -7707,6 +7945,511 @@ async function saveProfileDraft() {
     setModelsStatus(err.message, true);
   }
 }
+
+
+/* --- Local inference L1: the UI (spec 2026-10-13 §15) --- */
+// What the owner sees of local servers and the private mark. Every server
+// name, model id, address, probe sample, chat or case title comes from the
+// host and is set with textContent, never parsed as HTML or markdown.
+const localUiLog = createLogger('local-inference');
+
+// Server names for the cost line and the pickers, read from
+// models:local.list (ids are what the calls record).
+async function refreshLocalServerNames() {
+  if (!window.electron?.models?.local?.list) return null;
+  try {
+    const view = await window.electron.models.local.list();
+    if (!view || view.ok === false) return null;
+    appState.localServerNames = new Map((view.servers || []).filter((s) => s && typeof s.id === 'string').map((s) => [s.id, typeof s.name === 'string' && s.name ? s.name : s.id]));
+    return view;
+  } catch (err) {
+    localUiLog.warn(`reading the local servers failed: ${err.message}`);
+    return null;
+  }
+}
+
+function isPrivateChat(chat) {
+  return Boolean(chat && chat.private === true);
+}
+
+// The lock in the chat header and the line under the composer (R-LI-9).
+function paintPrivateChatState(chat) {
+  const line = dom.privateComposerLine;
+  const isPrivate = isPrivateChat(chat);
+  if (line) {
+    line.textContent = isPrivate ? PRIVATE_COMPOSER_LINE : '';
+    line.hidden = !isPrivate;
+  }
+  if (dom.chatHeaderTitle && isPrivate) {
+    const badge = document.createElement('span');
+    badge.className = 'chat-private-badge';
+    badge.title = 'Private: model calls stay on your hardware';
+    badge.appendChild(faIcon('fas fa-lock'));
+    badge.appendChild(document.createTextNode(' Private'));
+    dom.chatHeaderTitle.appendChild(document.createTextNode(' '));
+    dom.chatHeaderTitle.appendChild(badge);
+  }
+}
+
+// "Make private…" for a chat (the chat menu) or a case (the case panel):
+// the host's facts first, then the owner's confirmation, then the mark.
+async function openPrivateMarkFlow({ chatId = null, caseId = null } = {}) {
+  const ask = (payload) => (caseId ? window.electron.cases.markPrivate({ caseId, ...payload }) : window.electron.chat.markPrivate({ chatId, ...payload }));
+  let first;
+  try {
+    first = await ask({});
+  } catch (err) {
+    showNotice(`What making it private would mean could not be read: ${err.message}`);
+    return false;
+  }
+  if (!first || first.ok === false) {
+    showNotice(first?.error || 'What making it private would mean could not be read.');
+    return false;
+  }
+  if (first.facts?.bridge) {
+    showNotice('A Telegram or Discord chat cannot be made private: its messages pass through that service.');
+    return false;
+  }
+  const lines = privateConfirmLines(first.facts, { forCase: Boolean(caseId) });
+  const question = caseId ? 'Make this case and its chats private?' : 'Make this chat private?';
+  if (!(await showConfirmDialog(question, { before: lines }))) return false;
+  let done;
+  try {
+    done = await ask({ confirm: true });
+  } catch (err) {
+    showNotice(`It could not be made private: ${err.message}`);
+    return false;
+  }
+  if (!done || done.ok === false) {
+    showNotice(done?.error || 'It could not be made private.');
+    return false;
+  }
+  await loadChats();
+  showNotice(caseId ? 'The case and its chats are private.' : 'This chat is private.');
+  return true;
+}
+
+/* Settings → Models: local servers */
+
+function setLocalStatus(text, isError = false) {
+  if (!dom.modelsLocalStatus) return;
+  dom.modelsLocalStatus.textContent = text;
+  dom.modelsLocalStatus.classList.toggle('error', Boolean(isError));
+}
+
+function localModelLine(serverId, m, { readOnly }) {
+  const row = document.createElement('div');
+  row.className = 'models-local-model';
+  const name = document.createElement('span');
+  name.className = 'models-local-model-name';
+  name.textContent = m.id;
+  row.appendChild(name);
+  const r = m.record || {};
+  const facts = [];
+  if (m.cloud) facts.push('runs on Ollama\'s cloud: not local');
+  if (Number.isFinite(r.context)) facts.push(formatContext(r.context));
+  facts.push(`tools: ${r.toolCall === 'yes' ? 'yes' : r.toolCall === 'no' ? 'no' : 'not known'}`);
+  if (r.imageInput === 'yes') facts.push('image input');
+  if (Number.isFinite(r.firstTokenMs)) facts.push(`first token ${Math.round(r.firstTokenMs)} ms`);
+  if (Number.isFinite(r.tokensPerSecond)) facts.push(`${Math.round(r.tokensPerSecond)} tokens/s`);
+  if (!m.record && !m.cloud) facts.push('not probed yet');
+  if (r.error) facts.push(`probe: ${r.error}`);
+  const info = document.createElement('span');
+  info.className = 'models-local-model-info';
+  info.textContent = facts.join(' · ');
+  row.appendChild(info);
+  if (!m.cloud) {
+    const probe = document.createElement('button');
+    probe.type = 'button';
+    probe.className = 'btn btn-sm';
+    probe.textContent = 'Probe again';
+    probe.dataset.localAction = 'probe';
+    probe.dataset.serverId = serverId;
+    probe.dataset.model = m.id;
+    row.appendChild(probe);
+    if (!readOnly) {
+      const ctx = document.createElement('button');
+      ctx.type = 'button';
+      ctx.className = 'btn btn-sm';
+      ctx.textContent = 'Set context…';
+      ctx.dataset.localAction = 'context';
+      ctx.dataset.serverId = serverId;
+      ctx.dataset.model = m.id;
+      row.appendChild(ctx);
+    }
+  }
+  return row;
+}
+
+function localServerCard(server, { readOnly }) {
+  const card = document.createElement('div');
+  card.className = 'provider-card models-local-card';
+  card.dataset.serverId = server.id;
+  const header = document.createElement('div');
+  header.className = 'provider-header';
+  const title = document.createElement('div');
+  title.className = 'provider-title';
+  title.textContent = server.name || server.id;
+  header.appendChild(title);
+  const badge = document.createElement('span');
+  badge.className = server.grade === 'guarantee' ? 'active-provider-badge' : 'models-broken-badge';
+  badge.textContent = server.grade === 'guarantee' ? 'Private chats' : 'Cost only';
+  header.appendChild(badge);
+  card.appendChild(header);
+  const line = (text, cls = 'provider-message') => {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.textContent = text;
+    card.appendChild(el);
+  };
+  line(`Address: ${server.baseUrl || ''} (${server.kind || 'server'})`);
+  const pinned = server.pinned && Array.isArray(server.pinned.addresses) ? server.pinned.addresses : [];
+  line(`Pinned to ${pinned.join(', ') || 'no address'}: ${localServerClassWords(server.pinned?.class)}.`);
+  line(`${localServerGradeText(server.grade)}.`);
+  if (server.problem) line(server.problem, 'provider-message error');
+  const models = Array.isArray(server.models) ? server.models : [];
+  for (const m of models) card.appendChild(localModelLine(server.id, m, { readOnly }));
+  const actions = document.createElement('div');
+  actions.className = 'provider-actions';
+  const button = (label, action, cls = 'btn') => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = cls;
+    b.textContent = label;
+    b.dataset.localAction = action;
+    b.dataset.serverId = server.id;
+    return b;
+  };
+  actions.appendChild(button('List models', 'list'));
+  if (!readOnly) {
+    actions.appendChild(button('Check again', 'recheck'));
+    actions.appendChild(button('Remove', 'remove', 'btn btn-danger'));
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+function renderLocalServers(view) {
+  const list = dom.modelsLocalList;
+  if (!list) return;
+  list.textContent = '';
+  const readOnly = Boolean(view?.adminOnly);
+  if (dom.modelsLocalActions) dom.modelsLocalActions.hidden = readOnly;
+  const servers = Array.isArray(view?.servers) ? view.servers : [];
+  if (readOnly) setLocalStatus(LOCAL_ADMIN_SENTENCE);
+  if (!servers.length) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = readOnly ? 'The administrator has listed no local server.' : 'No local server yet.';
+    list.appendChild(empty);
+    return;
+  }
+  for (const server of servers) list.appendChild(localServerCard(server, { readOnly }));
+}
+
+async function renderLocalUsage() {
+  const box = dom.modelsLocalUsage;
+  if (!box || !window.electron?.usage?.getDaily) return;
+  box.textContent = '';
+  try {
+    const daily = await window.electron.usage.getDaily({});
+    const usage = daily && daily.ok !== false ? (daily.usage || daily.data || daily) : null;
+    const lines = localUsageLines(usage && usage.byServer, appState.localServerNames);
+    if (!lines.length) return;
+    const heading = document.createElement('div');
+    heading.className = 'provider-message';
+    heading.textContent = `Local calls today: ${Number(usage.localCalls) || 0}, ${formatTokenCount(usage.localTokens)} tokens.`;
+    box.appendChild(heading);
+    for (const text of lines) {
+      const el = document.createElement('div');
+      el.className = 'provider-message';
+      el.textContent = text;
+      box.appendChild(el);
+    }
+  } catch (err) {
+    localUiLog.warn(`reading local usage failed: ${err.message}`);
+  }
+}
+
+async function loadLocalServers() {
+  const view = await refreshLocalServerNames();
+  if (!view) {
+    setLocalStatus('The local servers could not be read.', true);
+    return;
+  }
+  renderLocalServers(view);
+  renderLocalUsage().catch(() => {});
+}
+
+// The add dialog: name, kind, address, optional fingerprint; the overlay
+// network confirmation for 100.64.0.0/10 (R-LI-29); the two fixed
+// sentences (R-LI-21). Resolves with the add payload, or null.
+function showAddLocalServerDialog() {
+  return new Promise((resolve) => {
+    const modal = document.createElement('div');
+    modal.className = 'rename-chat-modal';
+    const card = document.createElement('div');
+    card.className = 'rename-chat-card models-local-add';
+    const heading = document.createElement('h3');
+    heading.textContent = 'Add a local server';
+    card.appendChild(heading);
+    const field = (labelText, input) => {
+      const label = document.createElement('label');
+      label.className = 'models-local-field';
+      label.textContent = labelText;
+      label.appendChild(input);
+      card.appendChild(label);
+      return input;
+    };
+    const text = (placeholder) => {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'rename-chat-input';
+      input.placeholder = placeholder;
+      input.spellcheck = false;
+      return input;
+    };
+    const name = field('Name', text('Workstation'));
+    const kind = document.createElement('select');
+    kind.className = 'chat-info-select';
+    for (const [value, label] of [['ollama', 'Ollama'], ['lmstudio', 'LM Studio'], ['llamacpp', 'llama.cpp'], ['vllm', 'vLLM'], ['openai-compatible', 'OpenAI-compatible']]) {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      kind.appendChild(opt);
+    }
+    field('Kind', kind);
+    const address = field('Address', text('http://127.0.0.1:11434'));
+    const fingerprint = field('Certificate fingerprint (https, optional)', text('64 hex characters'));
+    const cgnatRow = document.createElement('label');
+    cgnatRow.className = 'models-local-field';
+    const cgnat = document.createElement('input');
+    cgnat.type = 'checkbox';
+    cgnatRow.appendChild(cgnat);
+    cgnatRow.appendChild(document.createTextNode(` ${LOCAL_CGNAT_SENTENCE}`));
+    cgnatRow.hidden = true;
+    card.appendChild(cgnatRow);
+    for (const sentence of LOCAL_ADD_SENTENCES) {
+      const p = document.createElement('p');
+      p.className = 'models-local-sentence';
+      p.textContent = sentence;
+      card.appendChild(p);
+    }
+    const error = document.createElement('div');
+    error.className = 'rename-chat-error';
+    error.hidden = true;
+    card.appendChild(error);
+    const inOverlay = () => /^https?:\/\/100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(address.value.trim());
+    address.addEventListener('input', () => { cgnatRow.hidden = !inOverlay(); });
+    const actions = document.createElement('div');
+    actions.className = 'rename-chat-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn';
+    cancel.textContent = 'Cancel';
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'btn btn-primary';
+    ok.textContent = 'Add';
+    const close = (value) => { modal.remove(); resolve(value); };
+    cancel.addEventListener('click', () => close(null));
+    ok.addEventListener('click', () => {
+      const shownName = name.value.trim();
+      const id = shownName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/^[^a-z]+/, '').slice(0, 40);
+      if (!id || id.length < 2) { error.textContent = 'Give the server a name that starts with a letter.'; error.hidden = false; return; }
+      if (!address.value.trim()) { error.textContent = 'Give the server\'s address.'; error.hidden = false; return; }
+      if (inOverlay() && !cgnat.checked) { error.textContent = 'Confirm that this is your own overlay network.'; error.hidden = false; return; }
+      close({
+        id,
+        name: shownName,
+        kind: kind.value,
+        baseUrl: address.value.trim(),
+        ...(fingerprint.value.trim() ? { tlsFingerprint: fingerprint.value.trim() } : {}),
+        ...(inOverlay() ? { allowCgnat: true } : {})
+      });
+    });
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(null); });
+    actions.append(cancel, ok);
+    card.appendChild(actions);
+    modal.appendChild(card);
+    document.body.appendChild(modal);
+    name.focus();
+  });
+}
+
+async function addLocalServerFlow() {
+  const payload = await showAddLocalServerDialog();
+  if (!payload) return;
+  setLocalStatus('Checking the address and listing its models…');
+  try {
+    const r = unwrapIpcResult(await window.electron.models.local.add(payload), 'The local server could not be added.');
+    setLocalStatus(r.probeError ? `Added. Its models could not be listed yet: ${r.probeError.message || r.probeError.code || 'unknown error'}` : 'Added.');
+  } catch (err) {
+    setLocalStatus(err.message, true);
+  }
+  await loadLocalServers();
+}
+
+async function recheckLocalServer(id) {
+  try {
+    const first = unwrapIpcResult(await window.electron.models.local.recheck({ id }), 'The address could not be checked.');
+    const before = first.previous?.addresses?.join(', ') || 'none';
+    const after = first.resolved?.addresses?.join(', ') || 'none';
+    if (!first.changed) { setLocalStatus(`The address still answers ${after}.`); return; }
+    if (!(await showConfirmDialog(`Pin this server to the new address?`, { before: [`Was: ${before}`, `Now: ${after} (${localServerClassWords(first.resolved?.class)})`] }))) return;
+    unwrapIpcResult(await window.electron.models.local.recheck({ id, confirm: true, expected: first.resolved.addresses }), 'The new address could not be pinned.');
+    setLocalStatus(`Pinned to ${after}.`);
+  } catch (err) {
+    setLocalStatus(err.message, true);
+  }
+  await loadLocalServers();
+}
+
+async function removeLocalServer(id) {
+  if (!(await showConfirmDialog('Remove this local server? Its probe results and its key go with it.'))) return;
+  try {
+    const r = await window.electron.models.local.remove(id);
+    if (r && r.ok === false && Array.isArray(r.references) && r.references.length) {
+      setLocalStatus(`${r.error} ${r.references.map(String).join('; ')}`, true);
+      return;
+    }
+    unwrapIpcResult(r, 'The local server could not be removed.');
+    setLocalStatus('Removed.');
+  } catch (err) {
+    setLocalStatus(err.message, true);
+  }
+  await loadLocalServers();
+}
+
+async function probeLocalModel(id, model) {
+  setLocalStatus(model ? 'Probing…' : 'Listing its models…');
+  try {
+    unwrapIpcResult(await window.electron.models.local.probe(model ? { id, model } : { id }), 'The probe failed.');
+    setLocalStatus('Done.');
+  } catch (err) {
+    setLocalStatus(err.message, true);
+  }
+  await loadLocalServers();
+}
+
+async function setLocalModelContext(id, model) {
+  const value = await showTextInputDialog({ heading: `Context of ${model}`, placeholder: 'Tokens, for example 32768', confirmLabel: 'Save' });
+  if (value === null) return;
+  const n = Number(String(value).trim());
+  try {
+    unwrapIpcResult(await window.electron.models.local.setModelInfo({ id, model, context: Number.isFinite(n) && n > 0 ? Math.floor(n) : null }), 'The context could not be saved.');
+    setLocalStatus('Saved.');
+  } catch (err) {
+    setLocalStatus(err.message, true);
+  }
+  await loadLocalServers();
+}
+
+// R-LI-31: the built-in Ollama provider's address as a local server, then
+// the offer to move the profiles' Ollama models onto it, listing them.
+async function useOllamaAsLocal() {
+  try {
+    const first = unwrapIpcResult(await window.electron.models.local.fromOllama({}), 'The Ollama server could not be added.');
+    const targets = [];
+    for (const p of appState.modelProfiles?.profiles || []) {
+      for (const [role, list] of Object.entries(p.roles || {})) {
+        for (const e of list || []) if (e && e.provider === 'ollama') targets.push(`${p.name}, ${role}: ${e.model}`);
+      }
+    }
+    if (targets.length && await showConfirmDialog('Move these profile models onto the local server?', { before: targets })) {
+      unwrapIpcResult(await window.electron.models.local.fromOllama({ rewrite: true }), 'The profiles could not be changed.');
+      await loadModelProfiles();
+    }
+    setLocalStatus(first.added ? 'Ollama is a local server now.' : 'Ollama was already a local server.');
+  } catch (err) {
+    setLocalStatus(err.message, true);
+  }
+  await loadLocalServers();
+}
+
+// A profile card's local-only switches (§13.2): turning one on is a profile
+// save; turning one off asks first and goes through its own channel.
+function localOnlyRow(profile) {
+  const row = document.createElement('div');
+  row.className = 'models-local-only';
+  const label = document.createElement('span');
+  label.className = 'provider-message';
+  label.textContent = 'Local only:';
+  row.appendChild(label);
+  const on = Array.isArray(profile.localOnly) ? profile.localOnly : [];
+  for (const role of MODEL_ROLE_ORDER.filter((r) => r !== 'imageGeneration' && (r in (profile.roles || {}) || ['main', 'worker', 'utility'].includes(r)))) {
+    const item = document.createElement('label');
+    item.className = 'models-local-only-role';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = on.includes(role);
+    box.dataset.localOnlyRole = role;
+    box.dataset.profileId = profile.id;
+    box.disabled = profile.kind === 'king-louie';
+    item.appendChild(box);
+    item.appendChild(document.createTextNode(` ${role}`));
+    row.appendChild(item);
+    const list = (profile.roles || {})[role] || [];
+    if (on.includes(role) && !list.some((e) => e && e.provider === 'local')) {
+      const warn = document.createElement('span');
+      warn.className = 'provider-message error';
+      warn.textContent = ` ${role} has no local model: its calls are refused.`;
+      row.appendChild(warn);
+    } else if (!on.includes(role) && list.some((e) => e && e.provider === 'local') && list.some((e) => e && e.provider !== 'local')) {
+      const note = document.createElement('span');
+      note.className = 'provider-message';
+      note.textContent = ` ${role} fails over to a hosted model.`;
+      row.appendChild(note);
+    }
+  }
+  return row;
+}
+
+async function setLocalOnly(profileId, role, turnOn) {
+  const profile = (appState.modelProfiles?.profiles || []).find((p) => p.id === profileId);
+  if (!profile) return;
+  try {
+    if (turnOn) {
+      const roles = {};
+      for (const [r, list] of Object.entries(profile.roles || {})) roles[r] = (list || []).map((e) => ({ provider: e.provider, model: e.model, effort: e.effort || null }));
+      unwrapIpcResult(await window.electron.models.saveProfile({ id: profile.id, name: profile.name, roles, localOnly: [...new Set([...(profile.localOnly || []), role])] }), 'The role could not be made local-only.');
+      setModelsStatus(`${role} in ${profile.name} is local-only now.`);
+    } else {
+      if (!(await showConfirmDialog(`Let ${role} in ${profile.name} use hosted models again?`))) { await loadModelProfiles(); return; }
+      unwrapIpcResult(await window.electron.models.local.unsetLocalOnly({ profileId: profile.id, role }), 'The role could not be changed.');
+      setModelsStatus(`${role} in ${profile.name} may use hosted models again.`);
+    }
+  } catch (err) {
+    setModelsStatus(err.message, true);
+  }
+  await loadModelProfiles();
+}
+
+function wireLocalInferenceUi() {
+  dom.modelsLocalAddBtn?.addEventListener('click', () => { addLocalServerFlow().catch((err) => setLocalStatus(err.message, true)); });
+  dom.modelsLocalOllamaBtn?.addEventListener('click', () => { useOllamaAsLocal().catch((err) => setLocalStatus(err.message, true)); });
+  dom.modelsLocalList?.addEventListener('click', (event) => {
+    const btn = event.target.closest('button[data-local-action]');
+    if (!btn) return;
+    const { localAction, serverId, model } = btn.dataset;
+    const run = {
+      recheck: () => recheckLocalServer(serverId),
+      remove: () => removeLocalServer(serverId),
+      list: () => probeLocalModel(serverId, null),
+      probe: () => probeLocalModel(serverId, model),
+      context: () => setLocalModelContext(serverId, model)
+    }[localAction];
+    if (run) run().catch((err) => setLocalStatus(err.message, true));
+  });
+  dom.modelsProfileList?.addEventListener('change', (event) => {
+    const box = event.target.closest('input[data-local-only-role]');
+    if (!box) return;
+    setLocalOnly(box.dataset.profileId, box.dataset.localOnlyRole, box.checked).catch((err) => setModelsStatus(err.message, true));
+  });
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wireLocalInferenceUi);
+else wireLocalInferenceUi();
+refreshLocalServerNames().catch(() => {});
 
 function renderCatalogSettings() {
   const models = appState.settings?.modelsSettings || {};
@@ -8208,6 +8951,8 @@ const RECALL_PIN_TEXTS = {
   'imported-case-chat': 'A chat imported from a case recalls only from itself.'
 };
 const RECALL_LINK_REFUSED_TEXTS = {
+  // Local inference L1 (R-LI-11): a private chat is read only by private chats.
+  'private-chat': 'A private chat is read only by private chats.',
   'case-chat': 'A case chat cannot be linked.',
   'imported-case-chat': 'A chat imported from a case cannot be linked.'
 };
@@ -8391,6 +9136,12 @@ function openContextMenu({ chatId, x, y }) {
   appState.contextChatId = chatId;
   contextMenuPoint = { x, y };
   paintRecallMenu(null);
+  const privateItem = dom.chatContextMenu.querySelector('[data-action="make-private"]');
+  if (privateItem) {
+    const chat = appState.chats.find((c) => c.id === chatId);
+    privateItem.disabled = isPrivateChat(chat);
+    privateItem.textContent = isPrivateChat(chat) ? 'Private' : 'Make private…';
+  }
   dom.chatContextMenu.hidden = false;
   placeContextMenu();
   refreshRecallMenu(chatId);
@@ -9015,7 +9766,7 @@ async function sendMessage() {
     // onMessageError may have already displayed this error via IPC event.
     // Only add a fallback message if no error element was rendered yet.
     const alreadyShown = dom.chatMessages.querySelector('.message.assistant:last-child .message-content p');
-    if (!alreadyShown || !alreadyShown.textContent.startsWith('Error:')) {
+    if (!alreadyShown || !(alreadyShown.textContent.startsWith('Error:') || Object.values(PRIVATE_REFUSAL_SENTENCES).some((t) => alreadyShown.textContent.startsWith(t)))) {
       addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
     }
     refreshUI();
@@ -9144,7 +9895,7 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
       appState.chats = data.chats || [];
     } catch { /* best-effort reload */ }
     const alreadyShown = dom.chatMessages.querySelector('.message.assistant:last-child .message-content p');
-    if (!alreadyShown || !alreadyShown.textContent.startsWith('Error:')) {
+    if (!alreadyShown || !(alreadyShown.textContent.startsWith('Error:') || Object.values(PRIVATE_REFUSAL_SENTENCES).some((t) => alreadyShown.textContent.startsWith(t)))) {
       addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
     }
     refreshUI();
@@ -9302,7 +10053,9 @@ function formatCompactTokens(value = 0) {
 function recallVia(context) {
   let via = 'BM25';
   if (context?.embedder && context.embedder !== 'none') via = 'BM25 + vectors';
+  else if (context?.vectorsSkipped === 'private-chat') via = 'BM25 only: this chat is private and the local embedder is not ready';
   else if (context?.vectorsSkipped) via = `BM25 only: ${context.vectorsSkipped}`;
+  if (typeof context?.rerankSkipped === 'string' && context.rerankSkipped.startsWith('private-chat')) via += ' · not sent to Jev (private chat)';
   return context?.reranker ? `${via} · reranked` : via;
 }
 
@@ -9405,7 +10158,10 @@ function addMessage(sender, text, metadata = {}) {
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
 
-  if (sender === 'assistant') {
+  if (sender === 'assistant' && metadata?.errorAction && typeof text === 'string' && text.startsWith('Error: ')) {
+    // A stored error row with its button (see fillMessageError).
+    fillMessageError(messageContent, { error: text.slice('Error: '.length), code: metadata.errorCode, action: metadata.errorAction });
+  } else if (sender === 'assistant') {
     renderAssistantMessageContent(messageContent, text, metadata?.format || 'markdown');
   } else {
     const messagePara = document.createElement('p');
@@ -9433,7 +10189,12 @@ function addMessage(sender, text, metadata = {}) {
 
     const callSpan = document.createElement('span');
     callSpan.className = 'message-metrics-call';
-    callSpan.textContent = `${formatTokenCount(callTotals.totalTokens)} tokens · ${formatCompactUsd(callTotals.costUsd)}${formatRoleCosts(metadata.llm.byRole)}`;
+    // Local inference L1 (§9.2): a reply with local calls says so by role.
+    const localLine = formatLocalCostLine(metadata.llm, appState.localServerNames);
+    callSpan.textContent = localLine || `${formatTokenCount(callTotals.totalTokens)} tokens · ${formatCompactUsd(callTotals.costUsd)}${formatRoleCosts(metadata.llm.byRole)}`;
+    const failover = localFailoverNotes(metadata.llm, appState.localServerNames);
+    for (const note of failover.notes) callSpan.textContent += ` · ${note}`;
+    if (failover.estimated) callSpan.textContent += ' · local tokens estimated';
 
     if (runningTotals) {
       callSpan.textContent += ` · session ${formatTokenCount(runningTotals.totalTokens)} tokens · ${formatCompactUsd(runningTotals.costUsd)}`;
@@ -9521,11 +10282,16 @@ function renderChatModels(view) {
     current.textContent = 'Main: none. Add one in Settings → Models';
   }
   main.appendChild(current);
+  const privateNow = isPrivateChat(getActiveChat());
   for (const c of view.choices) {
     if (view.main && c.provider === view.main.provider && c.model === view.main.model) continue;
     const opt = document.createElement('option');
     opt.value = JSON.stringify(choiceTarget(c));
-    opt.textContent = c.inMain ? `${c.name} (profile's main)` : `${c.name} (${c.provider})`;
+    // Local inference L1: a local model shows its server; in a private chat
+    // a hosted one is disabled, "not local".
+    const shown = pickerChoiceView(c, { isPrivate: privateNow, names: appState.localServerNames });
+    opt.textContent = shown.text;
+    opt.disabled = shown.disabled;
     main.appendChild(opt);
   }
   if (view.overridden) {
@@ -9614,7 +10380,9 @@ function renderRetryControl() {
     for (const c of view?.choices || []) {
       const opt = document.createElement('option');
       opt.value = JSON.stringify(choiceTarget(c));
-      opt.textContent = c.inMain ? `${c.name} (profile's main)` : `${c.name} (${c.provider})`;
+      const shown = pickerChoiceView(c, { isPrivate: isPrivateChat(chat), names: appState.localServerNames });
+      opt.textContent = shown.text;
+      opt.disabled = shown.disabled;
       select.appendChild(opt);
     }
   });
@@ -10103,6 +10871,8 @@ dom.chatContextMenu.addEventListener('click', (e) => {
     // The only place a chat's history scope is changed: the owner's click.
     if (action === 'recall-scope') setChatRecallScope(chatId, scope);
     if (action === 'link-chats') openLinkChatsDialog(chatId);
+    // Local inference L1: the owner's private mark, after a confirmation.
+    if (action === 'make-private') openPrivateMarkFlow({ chatId }).catch((err) => showNotice(err.message));
   }
   closeContextMenu();
 });
@@ -10302,6 +11072,7 @@ function renderImportDialog(preview) {
   dom.importChatCommitBtn.disabled = !preview || existing || Boolean(preview.serviceUnreachable);
   dom.importChatCommitBtn.textContent = 'Import';
   dom.importChatCancelBtn.disabled = false;
+  if (dom.importChatPrivate) dom.importChatPrivate.disabled = existing;
 }
 
 // Previews the picked file, with a Markdown heading pattern when the owner
@@ -10381,7 +11152,8 @@ async function commitImportDialog() {
   dom.importChatCommitBtn.textContent = 'Importing…';
   let result;
   try {
-    result = await window.electron.history.commitImport(pattern === undefined ? { token } : { token, pattern });
+    const asPrivate = Boolean(dom.importChatPrivate?.checked);
+    result = await window.electron.history.commitImport({ token, ...(pattern === undefined ? {} : { pattern }), ...(asPrivate ? { asPrivate: true } : {}) });
   } catch (err) {
     result = { ok: false, error: `The conversation could not be imported: ${err.message}` };
   }
@@ -10427,9 +11199,11 @@ function omitAttachmentBytes(msg) {
   return out;
 }
 
-dom.exportChatBtn.addEventListener('click', () => {
+dom.exportChatBtn.addEventListener('click', async () => {
   const chat = appState.chats.find(c => c.id === appState.activeChatId);
   if (!chat) return;
+  // Local inference L1 (R-LI-28): a private chat is exported after a warning.
+  if (isPrivateChat(chat) && !(await showConfirmDialog('Export this private chat?', { before: [PRIVATE_EXPORT_WARNING] }))) return;
 
   // Enrich messages: extract XML tool blocks from assistant text into structured toolCalls
   const enrichedMessages = chat.messages.map(omitAttachmentBytes).map((msg) => {
@@ -10439,7 +11213,7 @@ dom.exportChatBtn.addEventListener('click', () => {
     return { ...msg, text: cleanText, toolCalls: toolBlocks };
   });
 
-  const exportData = { ...chat, messages: enrichedMessages };
+  const exportData = exportChatData(chat, enrichedMessages);
   const json = JSON.stringify(exportData, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -12085,7 +12859,43 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
   }
 }));
 
-unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error, action }) => {
+// A failed turn's message (spec 2026-09-27 §15; local inference L1 §15): a
+// refusal under the private mark says why first, and an action gets its
+// button (the profile's main, or Settings → Models). Drawn the same way when
+// the error arrives and when a stored error row is drawn again, so a redraw
+// keeps the sentence and the button.
+const MESSAGE_ERROR_ACTIONS = Object.freeze(['use-profile-main', 'open-models']);
+function messageErrorExtras({ code, action } = {}) {
+  const kind = action && typeof action === 'object' ? action.kind : action;
+  return {
+    errorCode: typeof code === 'string' && privateRefusalSentence(code) ? code : null,
+    errorAction: typeof kind === 'string' && MESSAGE_ERROR_ACTIONS.includes(kind) ? kind : null
+  };
+}
+function fillMessageError(messageDiv, { error, code, action }) {
+  const { errorCode, errorAction } = messageErrorExtras({ code, action });
+  const p = document.createElement('p');
+  const refusal = privateRefusalSentence(errorCode);
+  p.textContent = refusal ? `${refusal} ${error}` : `Error: ${error}`;
+  messageDiv.textContent = '';
+  messageDiv.appendChild(p);
+  if (!errorAction) return;
+  const fix = document.createElement('button');
+  fix.type = 'button';
+  fix.className = 'btn btn-sm message-error-action';
+  fix.textContent = errorAction === 'use-profile-main' ? 'Use the profile\'s main' : 'Open Models';
+  fix.addEventListener('click', async () => {
+    if (errorAction === 'use-profile-main') {
+      if (await switchMainModel(null)) fix.disabled = true;
+    } else {
+      openSettingsDrawer();
+      switchSettingsTab('models');
+    }
+  });
+  messageDiv.appendChild(fix);
+}
+
+unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error, action, code }) => {
   appState.streamBuffers.delete(responseId);
   streamTextOffsets.delete(responseId);
   if (appState.streamRenderedTools) appState.streamRenderedTools.clear();
@@ -12110,33 +12920,14 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
     dom.chatMessages.appendChild(newWrapper);
   }
 
-  const p = document.createElement('p');
-  p.textContent = `Error: ${error}`;
-  messageDiv.textContent = '';
-  messageDiv.appendChild(p);
-
-  // An unusable main override offers the profile's main in one click; no
-  // usable main at all offers the Models tab (spec 2026-09-27 §15).
-  if (action && (action.kind === 'use-profile-main' || action.kind === 'open-models')) {
-    const fix = document.createElement('button');
-    fix.type = 'button';
-    fix.className = 'btn btn-sm message-error-action';
-    fix.textContent = action.kind === 'use-profile-main' ? 'Use the profile\'s main' : 'Open Models';
-    fix.addEventListener('click', async () => {
-      if (action.kind === 'use-profile-main') {
-        if (await switchMainModel(null)) fix.disabled = true;
-      } else {
-        openSettingsDrawer();
-        switchSettingsTab('models');
-      }
-    });
-    messageDiv.appendChild(fix);
-  }
+  fillMessageError(messageDiv, { error, code, action });
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 
-  // Persist the error so refreshUI / renderChatMessages doesn't wipe it
+  // Persist the error so refreshUI / renderChatMessages doesn't wipe it,
+  // with its code and its button, so a redraw shows them again.
   const errorText = `Error: ${error}`;
-  window.electron.chat.addMessage({ chatId, sender: 'assistant', text: errorText })
+  const kept = messageErrorExtras({ code, action });
+  window.electron.chat.addMessage({ chatId, sender: 'assistant', text: errorText, ...(kept.errorCode ? { errorCode: kept.errorCode } : {}), ...(kept.errorAction ? { errorAction: kept.errorAction } : {}) })
     .catch((err) => chatLog.warn(`error message persistence failed: ${err.message}`));
 }));
 
@@ -13309,8 +14100,9 @@ document.addEventListener('keydown', (e) => {
 async function exportAsMarkdown() {
   const chat = getActiveChat();
   if (!chat) return;
+  if (isPrivateChat(chat) && !(await showConfirmDialog('Export this private chat?', { before: [PRIVATE_EXPORT_WARNING] }))) return;
 
-  const lines = [`# ${chat.title}\n`];
+  const lines = [...markdownExportLines(chat), `# ${chat.title}\n`];
   lines.push(`_Exported ${new Date().toISOString()}_\n`);
 
   for (const msg of chat.messages) {

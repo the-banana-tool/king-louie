@@ -34,6 +34,12 @@ const OPENROUTER_VENDORS = Object.freeze({
 
 const DEFAULT_OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
 
+// The one provider key for every local server the owner added and marked
+// local (spec 2026-10-13 §5.1, D-LI-1). Its model ids are
+// "<serverId>/<model>". It is not one of KL_PROVIDERS (those map onto
+// models.dev), and the built-in `ollama` provider is not it (R-LI-31).
+const LOCAL_PROVIDER = 'local';
+
 function normalizeProvider(provider) {
   return String(provider || '').trim().toLowerCase();
 }
@@ -63,6 +69,7 @@ module.exports = {
   MODELS_DEV_IDS,
   OPENROUTER_VENDORS,
   DEFAULT_OLLAMA_BASE_URL,
+  LOCAL_PROVIDER,
   normalizeProvider,
   modelsDevIdFor,
   providerForModelsDevId,

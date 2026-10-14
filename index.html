@@ -37,6 +37,7 @@
       <button class="context-menu-item" type="button" role="menuitemradio" aria-checked="false" data-action="recall-scope" data-scope="all">Recall from: all chats</button>
       <div class="context-menu-note" id="chat-recall-pin-note" hidden></div>
       <button class="context-menu-item" type="button" data-action="link-chats">Link chats…</button>
+      <button class="context-menu-item" type="button" data-action="make-private">Make private…</button>
       <div class="context-menu-separator" aria-hidden="true"></div>
       <button class="context-menu-item danger" type="button" data-action="delete">Delete chat</button>
     </div>
@@ -60,6 +61,7 @@
         <div class="import-chat-state" id="import-chat-state" hidden></div>
         <p class="import-chat-warning" id="import-chat-warning">This conversation becomes a chat that recall can search. If it contains passwords or keys, they become searchable too, and can be shown to the chat model. Its text is never sent to an embedding service or to typesafe.ai.</p>
         <p class="link-chats-note" id="import-chat-no-case">An imported chat cannot be attached to a case.</p>
+        <label class="import-chat-private-row"><input type="checkbox" id="import-chat-private"> Import as private: its model calls stay on your hardware</label>
         <div class="rename-chat-error" id="import-chat-error" hidden></div>
         <div class="rename-chat-actions">
           <button type="button" class="btn" id="import-chat-cancel-btn">Cancel</button>
@@ -149,6 +151,7 @@
           placeholder="Type your message here..."
           rows="3"
         ></textarea>
+        <div id="private-composer-line" class="private-composer-line" hidden></div>
         <div class="input-actions">
           <input id="image-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,.txt,.md,text/csv,.csv,application/pdf,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-excel,.xls" multiple hidden>
           <button id="attach-image-btn" class="icon-button" type="button" title="Attach files" aria-label="Attach files"><i class="fas fa-paperclip"></i></button>
@@ -341,6 +344,18 @@
             </div>
             <div class="provider-list" id="models-profile-list"></div>
             <div class="models-profile-editor" id="models-profile-editor" hidden></div>
+          </section>
+
+          <section class="template-variables-card" id="models-local-servers-card">
+            <h3>Local servers</h3>
+            <p>A server you run on this computer or your own network: Ollama, LM Studio, llama.cpp, vLLM or any OpenAI-compatible server. Its models cost nothing and can run private chats.</p>
+            <div class="provider-actions" id="models-local-actions">
+              <button type="button" class="btn btn-primary" id="models-local-add-btn"><i class="fas fa-plus"></i> Add a local server</button>
+              <button type="button" class="btn" id="models-local-ollama-btn">Use this Ollama as a local server</button>
+            </div>
+            <div class="provider-message" id="models-local-status"></div>
+            <div class="provider-list" id="models-local-list"></div>
+            <div class="models-local-usage" id="models-local-usage"></div>
           </section>
 
           <section class="template-variables-card" id="models-king-louie-card">
@@ -942,6 +957,7 @@
               <button id="history-embedder-rebuild-btn" type="button" class="btn btn-danger">Rebuild embeddings</button>
               <span id="history-embedder-status" class="provider-message">Loading…</span>
             </div>
+            <div id="history-keep-local-status" class="provider-message" hidden></div>
           </section>
         </div>
 

@@ -204,7 +204,7 @@ class Retriever {
     // lexical: false leaves BM25 out (a vector-only probe; LongHaul).
     const lists = lexical === false ? [] : texts.map((text) => this._lexical({ query: text, chatIds, kinds, upToSeq, upToSeqChatId: cutChat, settings: s }));
     let vectors = vectorHits;
-    if (!Array.isArray(vectors) && this.vectorSearch) vectors = await this.vectorSearch({ query, chatIds, kinds, upToSeq, upToSeqChatId: cutChat, settings: s, stats });
+    if (!Array.isArray(vectors) && this.vectorSearch) vectors = await this.vectorSearch({ query, chatIds, kinds, upToSeq, upToSeqChatId: cutChat, settings: s, stats, keepLocal: keepLocal || null });
     const vectorList = this._vector(vectors, s);
     if (vectorList.length) lists.push(vectorList);
     const fused = this._fuse(lists, s);

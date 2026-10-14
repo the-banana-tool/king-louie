@@ -291,7 +291,10 @@ describe('the new-case form', () => {
 
   it('has an Objective field and sends what was typed on the first create and on "Create anyway"', () => {
     const start = renderer.indexOf("if (select.value === '__new__') {");
-    const end = renderer.indexOf('const result = await window.electron.cases.attach({ chatId: chat.id, caseId: select.value || null });', start);
+    // The attach after the branch is `let result` since local inference L1
+    // (a private chat may ask again with makeCasePrivate); either spelling
+    // ends the branch.
+    const end = renderer.indexOf('result = await window.electron.cases.attach({ chatId: chat.id, caseId: select.value || null });', start);
     assert.ok(start > 0 && end > start, 'the new-case branch is found');
     const form = renderer.slice(start, end);
     assert.match(form, /chat-case-new-objective/);

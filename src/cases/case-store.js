@@ -55,7 +55,10 @@ const CASE_YAML_KEYS = Object.freeze({
   channels: 'C4',
   // Models M2 (spec 2026-09-27 §6.5, §14): the case's profile and main override.
   profile: 'M2',
-  mainOverride: 'M2'
+  mainOverride: 'M2',
+  // Local inference L1 (spec 2026-10-13 §8.1): the case's private mark,
+  // written only by CaseRuntime#markPrivate (or at creation), never removed.
+  private: 'L1'
 });
 
 // case.yaml through the strict parser (program §4.11): core schema only, so
@@ -77,7 +80,10 @@ class CaseStore {
     this.root = root;
   }
 
-  async create({ title, type = 'general', objective = '' } = {}) {
+  // `private: true` (exactly) writes the case's private mark into its
+  // first commit (a case a private case's detour creates, spec 2026-10-13
+  // §8.2); any other value writes nothing.
+  async create({ title, type = 'general', objective = '', private: asPrivate = false } = {}) {
     assertKnownType(type);
     if (!(await git.isGitAvailable())) throw new git.GitUnavailableError();
     fs.mkdirSync(this.root, { recursive: true });
@@ -91,7 +97,8 @@ class CaseStore {
       status: 'draft',
       created: new Date().toISOString(),
       playbooks: [],
-      related: []
+      related: [],
+      ...(asPrivate === true ? { private: true } : {})
     };
     fs.mkdirSync(dir);
     try {
@@ -148,6 +155,11 @@ class CaseStore {
     if (!current) throw new Error(`Case not found: ${idOrSlug}`);
     if (patch.status !== undefined && !STATUSES.has(patch.status)) {
       throw new Error(`Invalid case status: ${patch.status}`);
+    }
+    // The private mark is one way (spec 2026-10-13 §8.1, R-LI-10): a patch
+    // may only set it, never clear or change it.
+    if (Object.prototype.hasOwnProperty.call(patch, 'private') && patch.private !== true) {
+      throw Object.assign(new Error('A case\'s private mark cannot be removed; start a new case instead.'), { code: 'PRIVATE_ONE_WAY' });
     }
     const { dir, ...meta } = { ...current, ...patch, id: current.id, slug: current.slug };
     fs.writeFileSync(path.join(dir, 'case.yaml'), yaml.dump(meta, { noRefs: true }));

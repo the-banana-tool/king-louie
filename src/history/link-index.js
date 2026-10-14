@@ -31,6 +31,13 @@ CREATE TABLE imports (
 CREATE INDEX imports_chat ON imports(chat_id);
 `;
 
+// Schema step 5 (local inference spec 2026-10-13 §8.1): a chat's private
+// mark. 0 or 1; the store only ever writes 1 (HistoryStore#markPrivate, a
+// private createChat). It is one-way: nothing writes it back.
+const SCHEMA_V5_SQL = `
+ALTER TABLE chats ADD COLUMN private INTEGER NOT NULL DEFAULT 0;
+`;
+
 // Narrowest first.
 const HISTORY_SCOPES = Object.freeze(['chat', 'linked', 'all']);
 const DEFAULT_SCOPE = 'chat';
@@ -82,8 +89,10 @@ function setLinks(db, chatId, ids) {
 
 // What the scope policy needs to know about a chat, without its messages or
 // the list's message aggregate. origin and importedFromCase live in
-// meta_json; so does a caseId or source that is not a string.
-function refOf(row) {
+// meta_json; so does a caseId or source that is not a string. `private` is
+// the chats.private column; on a file below schema step 5 (privacyAware
+// false) the mark cannot be read, and what cannot be read is private.
+function refOf(row, privacyAware) {
   let meta = null;
   try {
     meta = row.meta_json ? JSON.parse(row.meta_json) : null;
@@ -97,19 +106,21 @@ function refOf(row) {
     caseId: row.case_id || fromMeta('caseId'),
     source: row.source || fromMeta('source'),
     origin: fromMeta('origin'),
-    importedFromCase: Boolean(meta) && meta.importedFromCase === true
+    importedFromCase: Boolean(meta) && meta.importedFromCase === true,
+    private: privacyAware === true ? Number(row.private) !== 0 : true
   };
 }
 
 const REF_COLUMNS = 'id, title, case_id, source, meta_json';
+const refColumns = (privacyAware) => (privacyAware === true ? `${REF_COLUMNS}, private` : REF_COLUMNS);
 
-function chatRefs(db) {
-  return prepared(db, `SELECT ${REF_COLUMNS} FROM chats ORDER BY position, rowid`).all().map(refOf);
+function chatRefs(db, { privacyAware = false } = {}) {
+  return prepared(db, `SELECT ${refColumns(privacyAware)} FROM chats ORDER BY position, rowid`).all().map((row) => refOf(row, privacyAware));
 }
 
-function chatRef(db, chatId) {
-  const row = prepared(db, `SELECT ${REF_COLUMNS} FROM chats WHERE id = ?`).get(String(chatId));
-  return row ? refOf(row) : null;
+function chatRef(db, chatId, { privacyAware = false } = {}) {
+  const row = prepared(db, `SELECT ${refColumns(privacyAware)} FROM chats WHERE id = ?`).get(String(chatId));
+  return row ? refOf(row, privacyAware) : null;
 }
 
 // ── imports ──────────────────────────────────────────────────────────────
@@ -167,7 +178,7 @@ function unfinishedImports(db) {
 }
 
 module.exports = {
-  SCHEMA_V4_SQL, HISTORY_SCOPES, DEFAULT_SCOPE, IMPORT_STATES,
+  SCHEMA_V4_SQL, SCHEMA_V5_SQL, HISTORY_SCOPES, DEFAULT_SCOPE, IMPORT_STATES,
   getHistoryScope, setHistoryScope, getLinks, setLinks, chatRefs, chatRef,
   findImport, getImport, importOfChat, recordImport, finishImport, unfinishedImports
 };

@@ -24,7 +24,7 @@ const { selectQuestions, planCalls, answerAndJudge, answerPromptFor, mapPool, sp
 const { estimateCalls, checkBudget, SpendGuard, DEFAULT_MAX_USD, EST_CHARS_PER_TOKEN } = require('./cost');
 const { JUDGE_RULES_SHA256 } = require('./judge');
 const { retryable, callErrorCode, stopErrorFor, STOP_CODES } = require('./retry');
-const { UsageError, JEV_STOP_CODES } = require('./errors');
+const { UsageError, JEV_STOP_CODES, LOCAL_STOP_CODES } = require('./errors');
 const { round8 } = require('./format');
 const { createLogger } = require('../logging');
 
@@ -42,8 +42,9 @@ const ANSWER_PROMPT_OVERHEAD_TOKENS = 1000;
 // refused key, an exhausted account (retry.js STOP_CODES), and the Jev
 // adapters' cache-only miss, token cap, model mismatch and missing key
 // (errors.js JEV_STOP_CODES, kept there so run.js does not load the Jev
-// client). Every other context error is recorded on its question.
-const RUN_STOP_CODES = new Set([...STOP_CODES, ...JEV_STOP_CODES]);
+// client), and the local adapters' cache-only miss (LOCAL_STOP_CODES).
+// Every other context error is recorded on its question.
+const RUN_STOP_CODES = new Set([...STOP_CODES, ...JEV_STOP_CODES, ...LOCAL_STOP_CODES]);
 
 // Temp dirs an interrupted run or embed (Ctrl-C, crash) left behind.
 // prefix narrows it (embed removes only kl-embed-* dirs).
@@ -166,7 +167,9 @@ async function scoreOne({ runId, adapter, handle, session, q, budgetTokens }) {
       // null for an adapter that never reports cutting (kl-recall, oracle):
       // "not known", not "not cut".
       contextTruncated: typeof r.truncated === 'boolean' ? r.truncated : null,
-      leaked: [...shown, ...partial].filter((s) => s >= q.askAtSeq).length,
+      // A digest (kl-recall-digest) counts by the messages it covers: it
+      // is never evidence, but it leaks like the messages it holds.
+      leaked: [...shown, ...partial, ...(Array.isArray(r.coveredSeqs) ? r.coveredSeqs : [])].filter((s) => s >= q.askAtSeq).length,
       error: null
     };
     return { record, text: String(r.text ?? '') };
@@ -176,7 +179,22 @@ async function scoreOne({ runId, adapter, handle, session, q, budgetTokens }) {
   }
 }
 
+// The local model the run's local adapters used (local inference spec
+// §11.1, §11.4), and their prompts' hashes; null when none ran.
+function localConfig(adapters) {
+  const uses = adapters.map((a) => a.localUse).filter((u) => u && u.client);
+  if (!uses.length) return null;
+  const c = uses[0].client;
+  const prompts = {};
+  for (const u of uses) Object.assign(prompts, u.prompts || {});
+  return {
+    provider: c.kind || c.provider, model: c.model, baseUrl: c.baseUrl ?? null, addressClass: c.addressClass ?? null,
+    context: c.context ?? null, digest: c.digest ?? null, prompts
+  };
+}
+
 function baseConfig(run, runId) {
+  const local = localConfig(run.adapters);
   return {
     runId,
     createdAt: run.now().toISOString(),
@@ -196,7 +214,8 @@ function baseConfig(run, runId) {
       license: session.manifest.license, questions: questions.length, verifiedQuestions: verified, questionsSha256
     })),
     skippedSessions: run.skipped,
-    skippedAdapters: run.skippedAdapters
+    skippedAdapters: run.skippedAdapters,
+    ...(local ? { local } : {})
   };
 }
 

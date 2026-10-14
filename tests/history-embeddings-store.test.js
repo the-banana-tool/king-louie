@@ -41,12 +41,12 @@ describe('the embeddings table', () => {
     t = openTempStore();
     seedChat(t.store, { messages: [{ sender: 'user', text: GATE }, { sender: 'assistant', text: 'Noted, the gate code is saved for the site visit.' }] });
     const db = readDb(t.dbPath);
-    assert.strictEqual(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 4);
+    assert.strictEqual(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 5);
     assert.deepStrictEqual(db.prepare("SELECT name FROM pragma_table_info('embeddings') ORDER BY cid").all().map((r) => r.name), ['chunk_id', 'model', 'dim', 'vec']);
     db.close();
     t.store.close();
     const raw = new DatabaseSync(t.dbPath);
-    raw.exec('DROP TABLE imports; DROP TABLE chat_links; DROP TABLE embeddings; UPDATE schema_version SET version = 2;');
+    raw.exec('ALTER TABLE chats DROP COLUMN private; DROP TABLE imports; DROP TABLE chat_links; DROP TABLE embeddings; UPDATE schema_version SET version = 2;');
     raw.close();
     t.store = HistoryStore.open(t.dbPath);
     assert.strictEqual(t.store.embeddable, true);

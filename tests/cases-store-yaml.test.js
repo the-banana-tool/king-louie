@@ -41,7 +41,9 @@ const SAMPLES = {
   autonomy: { onExecutorNoAnswer: 'retry-within-envelope', onQuestionSilence: 'stop' },
   channels: { high: ['present', 'sms', { channel: 'voice', afterMin: 20 }], 'urgency.normal': ['present', 'email'] },
   profile: 'p-3f9a1c2e',
-  mainOverride: { provider: 'openai', model: 'gpt-5.5', effort: null }
+  mainOverride: { provider: 'openai', model: 'gpt-5.5', effort: null },
+  // Local inference L1 (spec 2026-10-13 §8.1): the case's private mark.
+  private: true
 };
 
 function writeCase(root, name, text) {
@@ -57,6 +59,7 @@ describe('case.yaml keys', () => {
     assert.strictEqual(CASE_YAML_KEYS.channels, 'C4');
     assert.strictEqual(CASE_YAML_KEYS.budget, 'C2');
     assert.strictEqual(CASE_YAML_KEYS.mainOverride, 'M2');
+    assert.strictEqual(CASE_YAML_KEYS.private, 'L1');
   });
 
   it('loads every key as written by yaml.dump', () => {

@@ -11,6 +11,15 @@ const { fixtureCatalog } = require('./helpers/models-fixture');
 
 const PROVIDERS_DIR = path.join(__dirname, '..', 'src', 'providers');
 const providerFiles = () => fs.readdirSync(PROVIDERS_DIR).filter((f) => f.endsWith('-provider.js') && f !== 'base-provider.js');
+// The file of the provider a provider class extends ("class X extends
+// OllamaProvider" with require('./ollama-provider')), or null when it
+// extends BaseLLMProvider.
+function inheritsProvider(src) {
+  const m = src.match(/class \w+ extends (\w+Provider) \{/);
+  if (!m || m[1] === 'BaseLLMProvider') return null;
+  const req = src.match(new RegExp(`const ${m[1]} = require\\('\\./([a-z-]+-provider)'\\)`));
+  return req ? `${req[1]}.js` : 'unknown';
+}
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
@@ -104,6 +113,27 @@ describe('every provider goes through the helper', () => {
     const DECIDE_ONLY = new Set(['typesafe-provider.js']);
     for (const file of providerFiles().filter((f) => !DECIDE_ONLY.has(f))) {
       const src = fs.readFileSync(path.join(PROVIDERS_DIR, file), 'utf8');
+      // A provider that extends another provider (local-server-provider.js
+      // extends OllamaProvider) streams through its parent's method, which
+      // this test checks in the parent's own file, or through a stream
+      // reader of its own (local-server-provider.js's _streamChat, which
+      // reads tool-call and reasoning deltas: local inference review fix,
+      // item 3). Each streaming method it defines hands the call to one of
+      // the two, and every reader it has goes through guardStream.
+      const parent = inheritsProvider(src);
+      if (parent) {
+        assert.ok(providerFiles().includes(parent), `${file} extends a provider in ${parent}`);
+        const readers = (src.match(/async (streamMessage|streamMessageWithTools|_streamResponses|_streamChat)\(/g) || []).length;
+        assert.strictEqual((src.match(/this\.guardStream\(/g) || []).length, readers, `${file}: ${readers} stream readers, each through guardStream`);
+        const own = src.match(/\n {2}(streamMessage|streamMessageWithTools)\([^)]*\) \{[\s\S]*?\n {2}\}/g) || [];
+        assert.ok(own.length > 0, `${file} has a streaming method`);
+        for (const body of own) {
+          const viaOwn = /this\._streamChat\(/.test(body);
+          if (viaOwn) assert.ok(/async _streamChat\(/.test(src), `${file}: _streamChat is its own reader`);
+          assert.ok(viaOwn || /super\.(streamMessage|streamMessageWithTools)\(/.test(body), `${file}: its streaming method goes through super or its own guarded reader`);
+        }
+        continue;
+      }
       const streams = (src.match(/async (streamMessage|streamMessageWithTools|_streamResponses)\(/g) || []).length;
       const guarded = (src.match(/this\.guardStream\(/g) || []).length;
       assert.ok(streams > 0, `${file} has a streaming method`);
@@ -114,6 +144,9 @@ describe('every provider goes through the helper', () => {
   it('every listModels takes options', () => {
     for (const file of providerFiles()) {
       const src = fs.readFileSync(path.join(PROVIDERS_DIR, file), 'utf8');
+      // An inheriting provider with no listModels of its own uses its
+      // parent's, which this loop checks in the parent's file.
+      if (inheritsProvider(src) && !/listModels\(/.test(src)) continue;
       assert.match(src, /async listModels\(options = \{\}\)/, file);
     }
   });

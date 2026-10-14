@@ -228,6 +228,9 @@ class ContextAssembler {
    * @param {number} [options.maxTools=10]       - max tools to return (semantic mode)
    * @param {number} [options.maxSections=4]     - max sections to return
    * @param {string} [options.memoryContext='']   - pre-built memory context string
+   * @param {boolean} [options.embed=true]       - false: never send the message to the
+   *   embedding provider (a turn under an egress policy, local inference spec
+   *   2026-10-13 §7.5); semantic mode then returns everything
    * @returns {{ systemPrompt: string, tools: Array, allToolNames: string[] }}
    */
   async assemble(userMessage, options = {}) {
@@ -289,8 +292,10 @@ class ContextAssembler {
     const maxSections = options.maxSections || 4;
     const memoryContext = options.memoryContext || '';
 
-    // If no embedding provider, fall back to returning everything
-    if (!this.embeddingProvider || !this._indexed) {
+    // If no embedding provider, fall back to returning everything. The same
+    // when the caller says the message may not be embedded (embed: false,
+    // an egress policy): the provider is a direct client of a hosted API.
+    if (options.embed === false || !this.embeddingProvider || !this._indexed) {
       return this._fallbackAll(memoryContext);
     }
 

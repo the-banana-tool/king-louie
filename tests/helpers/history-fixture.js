@@ -38,11 +38,12 @@ function seedChat(store, { id = 'chat-1', title = 'Test chat', caseId = null, me
 // A second, read-only connection (WAL lets it read while the store writes).
 const readDb = (dbPath) => new DatabaseSync(dbPath, { readOnly: true });
 
-// What an H1 profile looks like: every later step's tables dropped,
-// schema_version 1. Takes a raw DatabaseSync on the store's file (the store
-// closed).
+// What an H1 profile looks like: every later step's tables and columns
+// dropped, schema_version 1. Takes a raw DatabaseSync on the store's file
+// (the store closed).
 function downgradeToVersion1(db) {
-  db.exec(`DROP TABLE IF EXISTS imports; DROP TABLE IF EXISTS chat_links;
+  db.exec(`ALTER TABLE chats DROP COLUMN private;
+    DROP TABLE IF EXISTS imports; DROP TABLE IF EXISTS chat_links;
     DROP TABLE IF EXISTS embeddings;
     DROP TRIGGER chunks_ai; DROP TRIGGER chunks_ad; DROP TRIGGER chunks_au;
     DROP TABLE chunks_fts; DROP TABLE chunks; DROP TABLE calibration;

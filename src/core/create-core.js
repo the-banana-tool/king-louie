@@ -46,6 +46,9 @@ const {
   SessionsSpawnTool
 } = require('../tools/builtin/sessions-tools');
 const { SkillLoader, skillRegistry, PinManager } = require('../skills');
+const { createSkillModels } = require('../skills/skill-models');
+// A Telegram or Discord skill caller's chat id is the channel's, not a chat's.
+const BRIDGE_SKILL_CHANNELS = new Set(['telegram', 'discord']);
 const UserProfile = require('../telos/user-profile');
 const { loadProjectContext } = require('../telos/project-context');
 const HookRegistry = require('../hooks/hook-registry');
@@ -80,11 +83,13 @@ const { buildSystemSections, readGitContext } = require('../context/system-secti
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
 const { localEntry } = require('../models/normalize');
-const { Profiles } = require('../models/profiles');
+const { Profiles, sealLocalOnly } = require('../models/profiles');
 const { KingLouieProfile } = require('../models/king-louie');
 const { roleTimeoutMs } = require('../models/resolver');
 const { runTierMigration } = require('../models/migrate-tiers');
-const { KL_PROVIDERS } = require('../models/provider-ids');
+const { KL_PROVIDERS, LOCAL_PROVIDER } = require('../models/provider-ids');
+const { egressPolicy } = require('../models/egress');
+const { LocalServers, pinAdminServers } = require('../models/local-servers');
 const { roleForAgent, CORE_ROLES, BUILTIN_ROLES, targetKey, targetLabel } = require('../models/roles');
 const { NO_RETRY } = require('../providers/failover-policy');
 const { classifyError, FailoverReason } = require('../providers/error-classifier');
@@ -170,6 +175,19 @@ function createCore(deps = {}) {
     if (dir) registerSecretDataDir(dir);
   }
   const shutdownTimeoutMs = deps.shutdownTimeoutMs ?? 5000;
+  // Service mode, as the policy sources below read it (see the comment
+  // above the contact host): explicit, or implied by any admin-config dep.
+  const hasDep = (key) => Object.prototype.hasOwnProperty.call(deps, key);
+  const serviceMode = deps.isService === true
+    || hasDep('contactConfig')
+    || hasDep('adminExecutors')
+    || hasDep('playbooksConfig')
+    || hasDep('caseChecksConfig')
+    || deps.remoteApprovals === 'phone';
+  // Local inference stage L1 (R-LI-6): in service mode, or whenever the host
+  // hands over the admin's localInference block, local servers come from
+  // that block alone and nothing in this process may change them.
+  const localServersFromAdmin = serviceMode || hasDep('localInference');
   // 'allow' (default, the Electron app's behaviour): an approval requester
   // attached by a remote origin (a chat channel's Approve button, a gateway
   // client, a child agent of one) may approve unsafe tools. 'deny': every such
@@ -464,9 +482,40 @@ function createCore(deps = {}) {
   const setApiStatus = (status) => store.set('apiStatus', status);
   const getSettings = () => mergeSettings(store.get('settings', DEFAULT_SETTINGS));
   const cacheMbOf = (s) => mergeHistorySettings((s || {}).history).recall.vectorCacheMb;
+  // THE SEAL (local inference stage L1, plan
+  // docs/superpowers/plans/2026-10-13-local-inference-l1.md Task 7; spec
+  // 2026-10-13 §5.6, R-LI-6). settings.models.localServers says which servers
+  // are local, and so which models a private chat may run on. Every settings
+  // save in the app comes through setSettings below, and setSettings keeps
+  // the stored list whatever it was passed: a settings pane, a models save,
+  // a /llm command, an import, a stale read-modify-write and a profile
+  // command can neither add, change nor remove a local server. The one code
+  // that replaces the list is writeLocalServers, which is handed only to the
+  // local server registry (LocalServers#write) and is not on core.context.
+  // What this cannot cover is stated in the spec: Bash can rewrite
+  // chat-data.json itself.
+  const storedLocalServers = () => {
+    const raw = store.get('settings', null);
+    const models = raw && typeof raw === 'object' && raw.models && typeof raw.models === 'object' ? raw.models : null;
+    return models && Object.prototype.hasOwnProperty.call(models, 'localServers') ? models.localServers : undefined;
+  };
+  const withLocalServers = (settings, list) => {
+    const models = { ...(settings.models || {}) };
+    if (list === undefined) delete models.localServers;
+    else models.localServers = list;
+    return { ...settings, models };
+  };
+  const writeLocalServers = (entries) => {
+    store.set('settings', withLocalServers(mergeSettings(store.get('settings', DEFAULT_SETTINGS)), entries));
+  };
+  // The second seal (Task 14; spec 2026-10-13 §13.2): a profile's
+  // local-only roles survive every settings save as the stored ones were;
+  // a save may add one. Only Profiles#update with allowUnsetLocalOnly
+  // (models:local.unsetLocalOnly, the window only) writes through
+  // writeSettingsUnsealed, which keeps the local server seal.
   const setSettings = (settings) => {
     const before = cacheMbOf(getSettings());
-    const next = mergeSettings(settings);
+    const next = sealLocalOnly(withLocalServers(mergeSettings(settings), storedLocalServers()), store.get('settings', null));
     store.set('settings', next);
     // Recall stage H3: a chat VectorIndex skipped as too large for the old
     // cap stays skipped until clear(), so a new cap starts a fresh cache.
@@ -1043,7 +1092,60 @@ function createCore(deps = {}) {
     ...(providerType === 'ollama' ? { serverUrl: getSettings().models?.ollama?.baseUrl } : {})
   });
 
-  const createProviderInstance = (providerType, token) => {
+  // Local servers (spec 2026-10-13-local-inference-design.md §5.1): the
+  // entries the owner added and marked local. Each gets one transport that
+  // dials only its pinned address and one provider instance; a server's key,
+  // when it wants one, is the provider token `__local_<id>`.
+  // Who may change them (R-LI-6, spec §5.6). Desktop: the registry's own
+  // add, remove, recheck and fromOllama, reached only from the app's window
+  // (src/ipc/models-handlers.js); they write through writeLocalServers, the
+  // one writer the seal above leaves. Service: the administrator's
+  // service.json alone. The entries are pinned in start(), there is no
+  // writer, and the data-dir settings are not read.
+  let adminLocalServers = { entries: [], keys: new Map(), adapters: new Map() };
+  const localServers = new LocalServers({
+    getEntries: () => (localServersFromAdmin ? adminLocalServers.entries : (getSettings().models?.localServers || [])),
+    getToken: (serverId) => {
+      if (localServersFromAdmin) {
+        // A ${vault:<key>} reference in the admin block.
+        const ref = /^\$\{vault:([A-Za-z0-9._-]+)\}$/.exec(adminLocalServers.keys.get(serverId) || '');
+        return ref ? vault.get(ref[1]) : null;
+      }
+      const encrypted = getApiTokens()[`__local_${serverId}`];
+      return encrypted ? decryptToken(encrypted) : null;
+    },
+    ...(localServersFromAdmin ? {} : { writeEntries: writeLocalServers }),
+    // Service mode: a server's adapters come only from the admin block (spec §12.1).
+    ...(localServersFromAdmin ? { getAdminAdapters: (serverId) => adminLocalServers.adapters.get(serverId) || [] } : {}),
+    getProfiles: () => profiles,
+    getOllamaBaseUrl: () => getSettings().models?.ollama?.baseUrl,
+    // A removed server's key goes with it: its id may name another machine later.
+    onRemoved: (serverId) => {
+      const tokens = getApiTokens();
+      if (!Object.prototype.hasOwnProperty.call(tokens, `__local_${serverId}`)) return;
+      delete tokens[`__local_${serverId}`];
+      setApiTokens(tokens);
+    },
+    ...(typeof deps.lookup === 'function' ? { lookup: deps.lookup } : {}),
+    catalog,
+    // What a probe found out about each model (§6.1). Read here, at build,
+    // with no request made: a model is probed when it is first used or when
+    // the owner asks, never because the app started.
+    probeFile: path.join(userDataPath, 'models', 'local-probes.json')
+  });
+
+  // `target` is the resolved target the instance is for. Only `local` needs
+  // it: its model id names the server ("<serverId>/<model>").
+  const createProviderInstance = (providerType, token, target = null) => {
+    if (providerType === LOCAL_PROVIDER) {
+      const split = localServers.splitModel(target?.model);
+      if (!split) {
+        const err = new Error('A local model is named "<server>/<model>", and this one names no local server.');
+        err.code = 'LOCAL_SERVER_UNKNOWN';
+        throw err;
+      }
+      return localServers.providerFor(split.serverId);
+    }
     // OAuth mode is decided by whether Anthropic OAuth is connected, not by
     // getDecryptedProviderToken's '__anthropic_oauth__' placeholder, which
     // only appears before the access token is cached — once cached it
@@ -1059,7 +1161,7 @@ function createCore(deps = {}) {
   };
 
   const hasProviderCredential = (provider) => {
-    if (provider === 'ollama') return true;
+    if (provider === 'ollama' || provider === LOCAL_PROVIDER) return true;
     if (provider === 'anthropic' && anthropicOAuth.isConnected()) return true;
     return Boolean(getApiTokens()[provider]);
   };
@@ -1125,7 +1227,10 @@ function createCore(deps = {}) {
     accountModels: Object.fromEntries(Object.entries(getApiStatus() || {})
       .map(([provider, status]) => [provider, Array.isArray(status?.models) ? status.models : []]))
   });
-  const profiles = new Profiles({ getSettings, setSettings, catalog });
+  const writeSettingsUnsealed = (settings) => {
+    store.set('settings', withLocalServers(mergeSettings(settings), storedLocalServers()));
+  };
+  const profiles = new Profiles({ getSettings, setSettings, writeUnsealed: writeSettingsUnsealed, catalog });
 
   // The King Louie profile (spec §7): proposals from the usable models,
   // their prices and scores; the owner accepts. Recomputed when the catalog
@@ -1153,6 +1258,8 @@ function createCore(deps = {}) {
   // it has a credential. Everything else is Availability's verdict (§5.1).
   const explainTarget = (provider, model, options = {}) => {
     const p = normalizeProvider(provider);
+    // A model on a local server: the registry's verdict, never Availability's.
+    if (p === LOCAL_PROVIDER) return localServers.explain(model, options);
     if (!KL_PROVIDERS.includes(p) && ProviderFactory.listRegistered().includes(p)) {
       return hasProviderCredential(p)
         ? { usable: true, reasons: [], notes: [`${p} is a registered provider with no connection test.`], entry: null }
@@ -2225,6 +2332,9 @@ function createCore(deps = {}) {
     const allowedToolNames = rawAllowedToolNames == null
       ? null
       : (rawAllowedToolNames instanceof Set || Array.isArray(rawAllowedToolNames) ? rawAllowedToolNames : new Set());
+    const runEgress = (executorOptions.turnModels && executorOptions.turnModels.egress)
+      ?? executorOptions.egress
+      ?? runEgressFor(executorOptions.chatId || null);
     const executor = new ToolExecutor({
       workingDirectory,
       allowedDirectories: executorOptions.allowedDirectories || [],
@@ -2232,6 +2342,9 @@ function createCore(deps = {}) {
       scopedBackgroundTasks: executorOptions.scopedBackgroundTasks || null,
       // The turn's frozen models, handed on to this run's children (§6.6).
       turnModels: executorOptions.turnModels || null,
+      // The run's egress policy (spec 2026-10-13 §7.1): the snapshot's, else
+      // its chat's own mark, for the tools refused in a private chat.
+      egress: runEgress,
       // A sub-agent's calls roll up into the turn's reply (spec §10).
       onSubagentLlm: executorOptions.onSubagentLlm || null,
       // The owner's message for this turn (local chat send only): a browser
@@ -2311,6 +2424,9 @@ function createCore(deps = {}) {
         // tool's imageGeneration, spec §8); a run with no parent turn uses
         // the default profile through snapshotModels.
         turnModels: executorOptions.turnModels || null,
+        // The run's egress policy, for a tool that sends by itself (the
+        // image tool) on a run with no snapshot.
+        egress: runEgress,
         snapshotModels: (options) => snapshotModels(options),
         ensureTargetsTested: (targets) => ensureTargetsTested(targets),
         userDataPath: userDataPath,
@@ -2373,8 +2489,12 @@ function createCore(deps = {}) {
   };
 
   const inferenceRouter = new InferenceRouter({
-    getProviderToken: getDecryptedProviderToken,
-    createProvider: (providerType, token) => createProviderInstance(providerType, token),
+    // A local server's key is the registry's to read, per server.
+    getProviderToken: (providerType) => (providerType === LOCAL_PROVIDER ? null : getDecryptedProviderToken(providerType)),
+    createProvider: (providerType, token, target) => createProviderInstance(providerType, token, target),
+    // Under an egress policy the router sends only to a target the local
+    // server registry vouches for (spec 2026-10-13 §7.2 item 2).
+    isGuaranteeTarget: (target) => localServers.isGuaranteeTarget(target),
     onProviderError: reportProviderError,
     // Once per provider per turn: an Anthropic OAuth session needs a fresh
     // access token before its first call (the routed path's ensureOAuthToken).
@@ -2407,16 +2527,91 @@ function createCore(deps = {}) {
     }
   };
 
+  // ---- The egress policy (local inference spec 2026-10-13 §7.1) ----
+
+  // A case's private mark (spec §8.1): case.yaml's `private`, read by the
+  // case runtime, which answers true for a case it cannot read.
+  const readCasePrivate = (caseId) => caseRuntime.isPrivate(caseId);
+
+  // Every chat of a case is marked in the history store when the case is
+  // (R-LI-23: one mark, on the case; the chats' column serves the store's
+  // own filters). Marking is one way and a marked chat is left as it is.
+  const markChatsPrivate = (caseId) => {
+    const id = String(caseId || '');
+    if (!id) return 0;
+    let marked = 0;
+    for (const ref of historyStore.chatRefs()) {
+      if (ref && ref.caseId === id && ref.private !== true && historyStore.markPrivate(ref.id).marked) marked += 1;
+    }
+    return marked;
+  };
+
+  // Whether any chat of the case carries the private mark (review fix,
+  // item 8): the case stays private if case.yaml loses its key. A ref whose
+  // mark is not exactly false counts; a store that cannot be read throws,
+  // and the runtime takes that as yes.
+  const caseChatsPrivate = (caseId) => {
+    const id = String(caseId || '');
+    if (!id) return false;
+    return historyStore.chatRefs().some((ref) => ref && ref.caseId === id && ref.private !== false);
+  };
+
+  // The policy a chat's or a case's mark puts on its model calls, or null
+  // for none. Fail closed: a chat the store does not know, a mark that is
+  // not a plain "no", and any failure to read one all give a policy. A run
+  // that belongs to no chat and no case has none.
+  // The case's mark is read first: a private case's chats are marked too
+  // (R-LI-23), and its turns say the case is private.
+  const egressFor = ({ chatId = null, caseId = null } = {}) => {
+    try {
+      const theCaseId = caseId || (chatId ? getChat(chatId, { messages: false })?.caseId || null : null);
+      if (theCaseId && readCasePrivate(theCaseId) !== false) {
+        return egressPolicy({ reason: 'private-case', chatId: chatId ? String(chatId) : null, caseId: String(theCaseId) });
+      }
+      if (chatId && historyStore.isPrivate(chatId) !== false) return egressPolicy({ reason: 'private-chat', chatId: String(chatId), caseId: theCaseId });
+      return null;
+    } catch (err) {
+      log.warn(`A private mark could not be read, so its model calls stay local or are refused: ${err.message}`);
+      return egressPolicy({ reason: 'unknown-mark', chatId: chatId ? String(chatId) : null, caseId: caseId ? String(caseId) : null });
+    }
+  };
+
+  // The policy of a run that has a chat id and no parent snapshot. A fleet
+  // delegate turn's id ("delegate:<job>", src/fleet/delegate-sessions.js)
+  // names a job, not a chat: it scopes the session's tools and leases, and
+  // no chat row ever has it. Such a run belongs to no chat (§7.1) and has
+  // no policy, but only while the store can be read and holds no chat
+  // under that id; every other id goes to egressFor, where an unknown chat
+  // is private.
+  const runEgressFor = (chatId) => {
+    if (!chatId) return null;
+    if (typeof chatId === 'string' && chatId.startsWith('delegate:')) {
+      try {
+        if (historyStore.chatRef(chatId) === null) return null;
+      } catch { /* a store that cannot be read: egressFor decides */ }
+    }
+    return egressFor({ chatId });
+  };
+
   // Precedence (§6.3): the case's profile and main override, else the
   // chat's profile and main override, else the default profile. In a case
   // chat the override lives in case.yaml, so unattended turns follow it.
-  const snapshotModels = ({ chatId = null, caseId = null, profileId = null } = {}) => {
+  // The snapshot is frozen with the egress policy: a parent run's (`egress`,
+  // which a chat with no mark of its own never lifts), else the chat's or
+  // the case's own mark.
+  const snapshotModels = ({ chatId = null, caseId = null, profileId = null, egress = null } = {}) => {
     const chat = chatId ? getChat(chatId, { messages: false }) || null : null;
     const theCaseId = caseId || chat?.caseId || null;
     const caseChoice = readCaseModelChoice(theCaseId);
     const chosen = profileId || caseChoice?.profile || chat?.profileId || null;
     const mainOverride = theCaseId ? (caseChoice?.mainOverride || null) : (chat?.mainOverride || null);
-    return profiles.snapshot({ profileId: chosen, mainOverride, explain: explainTarget });
+    return profiles.snapshot({
+      profileId: chosen,
+      mainOverride,
+      explain: explainTarget,
+      egress: egress ?? egressFor({ chatId, caseId: theCaseId }),
+      isGuaranteeTarget: (target) => localServers.isGuaranteeTarget(target)
+    });
   };
 
   // Every provider a role could use is tested before the resolve, if it
@@ -2425,34 +2620,65 @@ function createCore(deps = {}) {
   const ensureTargetsTested = async (targets) => {
     const providers = [...new Set((targets || []).map((x) => String(x?.provider || '').toLowerCase()))]
       .filter((p) => KL_PROVIDERS.includes(p) && hasProviderCredential(p));
-    await Promise.all(providers.map((p) => availability.refreshForUse(p)));
+    await Promise.all([
+      ...providers.map((p) => availability.refreshForUse(p)),
+      // A local model that was never probed is probed now, once (spec
+      // 2026-10-13 §6.2); only the models asked about, and never under
+      // KL_TEST_MODE. A server that does not answer is left to the call.
+      ...(process.env.KL_TEST_MODE ? [] : [localServers.ensureProbed(targets || [])])
+    ]);
   };
 
   // One role for one call (spec §6.3, §6.4): the usable targets in order, a
   // prepared instance of the first (for callers making one direct call) and
-  // a routed provider that fails over across them all (§6.7).
+  // a routed provider that fails over across them all (§6.7). Under an
+  // egress policy (the turn's, or a local-only role's) `provider` is the
+  // routed provider too, so a caller that makes its one call on it directly
+  // is behind the router's check without knowing (spec 2026-10-13 §7.2).
   const resolveRole = async (role = 'main', { needs = {}, explicit = null, chatId = null, caseId = null, profileId = null, turnModels = null } = {}) => {
     const models = turnModels || snapshotModels({ chatId, caseId, profileId });
-    await ensureTargetsTested(explicit ? [explicit] : models.candidatesFor(role));
+    // Under a policy the explicit target is tested only when the role's
+    // filtered candidates hold it: a private turn sends no connection test
+    // to a hosted provider.
+    const candidates = models.candidatesFor(role);
+    const underPolicy = typeof models.egressFor === 'function' ? models.egressFor(role) : (models.egress ?? null);
+    const toTest = explicit
+      ? ((!underPolicy || candidates.some((x) => targetKey(x) === targetKey(explicit))) ? [explicit] : [])
+      : candidates;
+    await ensureTargetsTested(toTest);
     const resolved = models.mustResolve(role, { needs, explicit });
     const first = resolved.targets[0];
     if (!first) throw new Error(`${role} has no model of its own; its own settings apply.`);
-    const instance = createProviderInstance(first.provider, getDecryptedProviderToken(first.provider));
-    await ensureOAuthToken({ providerType: first.provider, provider: instance });
+    const egress = resolved.egress ?? null;
+    const routed = inferenceRouter.routedProvider({
+      targets: resolved.targets,
+      meta: { role, profileId: models.profileId || null, borrowedFrom: resolved.borrowedFrom || null },
+      egress
+    });
+    let instance = routed;
+    // A first target that names an adapter (spec 2026-10-13 §12) is reached
+    // only through the router, which hands the adapter to the provider: a
+    // direct call names the model alone and would run the base model.
+    if (!egress && !first.adapter) {
+      instance = createProviderInstance(
+        first.provider,
+        first.provider === LOCAL_PROVIDER ? null : getDecryptedProviderToken(first.provider),
+        first
+      );
+      await ensureOAuthToken({ providerType: first.provider, provider: instance });
+    }
     return {
       role,
       turnModels: models,
       targets: resolved.targets,
       skipped: resolved.skipped,
       borrowedFrom: resolved.borrowedFrom,
+      egress,
       providerType: first.provider,
       model: first.model,
       effort: first.effort || null,
       provider: instance,
-      routed: inferenceRouter.routedProvider({
-        targets: resolved.targets,
-        meta: { role, profileId: models.profileId || null, borrowedFrom: resolved.borrowedFrom || null }
-      }),
+      routed,
       timeoutMs: roleTimeoutMs(getSettings(), role, profiles.customRoles())
     };
   };
@@ -2519,7 +2745,15 @@ function createCore(deps = {}) {
   ) => {
     const sel = selection && typeof selection === 'object' ? selection : {};
     const role = typeof sel.role === 'string' && sel.role ? sel.role : 'main';
-    const turnModels = (!sel.profileId && runtimeOptions.turnModels) || snapshotModels({ profileId: sel.profileId || null });
+    // The run's egress policy (spec 2026-10-13 §7.1): its parent's, else its
+    // own chat's mark. It is only ever added on the way down: a profile
+    // named for a child never drops the parent's policy, and a run with a
+    // chat and no parent takes the chat's. The profile is chosen as before.
+    const parent = runtimeOptions.turnModels || null;
+    const policy = (parent && parent.egress) ?? runtimeOptions.egress ?? runEgressFor(runtimeOptions.chatId || null);
+    const turnModels = (parent && !sel.profileId && (parent.egress || !policy))
+      ? parent
+      : snapshotModels({ profileId: sel.profileId || (parent && parent.profileId) || null, egress: policy });
     const explicit = sel.requireInProfile === true
       ? profileTargetFor(sel, turnModels, role)
       : explicitTargetFor(sel, turnModels, role);
@@ -2819,6 +3053,8 @@ function createCore(deps = {}) {
             // carried on the rethreaded requester as chatId-like run state;
             // with no parent turn, the default profile applies (§12).
             turnModels: (options.approvalRequester && options.approvalRequester.turnModels) || null,
+            // A parent that had a policy and no snapshot hands the policy on.
+            egress: (options.approvalRequester && options.approvalRequester.egress) ?? null,
             // A sub-agent's calls roll up into the turn's reply (spec §10);
             // a detached run (BackgroundTask) outlives the turn, so it never does.
             onSubagentLlm: options.detached === true ? null : ((options.approvalRequester && options.approvalRequester.onSubagentLlm) || null)
@@ -2862,7 +3098,20 @@ function createCore(deps = {}) {
       getContextBuilder: () => contextBuilder,
       // Cases stage 3: a case workflow's children run with the extras the
       // registry rebuilds from its job index, never the workflow file's own.
-      resolveExecuteExtras: (wf) => executorRegistry?.workflowChildExtras(wf.id) ?? null
+      resolveExecuteExtras: (wf) => {
+        // A workflow's tasks reach the adapter with no chat and no parent
+        // snapshot, so they would run on the default profile with the
+        // chat's tail and recalled text in the prompt. Until a task can
+        // carry its chat's policy, a workflow of a private chat does not
+        // run (local inference stage L1, Task 8; fail closed).
+        const chatId = wf?.metadata?.chatId || null;
+        if (chatId && egressFor({ chatId })) {
+          const err = new Error('this chat is private, and a workflow\'s tasks do not run under a chat\'s private mark yet. Nothing was sent to a hosted model');
+          err.code = 'PRIVATE_NO_DETACHED_RUN';
+          throw err;
+        }
+        return executorRegistry?.workflowChildExtras(wf.id) ?? null;
+      }
     });
     await workflowEngine.initialize();
 
@@ -3010,6 +3259,32 @@ function createCore(deps = {}) {
       fs.mkdirSync(userSkillsDir, { recursive: true });
     }
 
+    // With no policy: the default profile's first usable main model, when
+    // it is one of the two providers skills know how to talk to (as
+    // before). Under one: the router's provider for main, which sends only
+    // to a guarantee-grade local model or refuses.
+    const skillModels = createSkillModels({
+      egressFor: ({ chatId }) => egressFor({ chatId }),
+      anyPrivate: () => historyStore.hasPrivateChats(),
+      routed: (policy, caller) => {
+        // The calling chat's own profile, when there is a chat.
+        const models = snapshotModels({ chatId: caller && caller.chatId && !BRIDGE_SKILL_CHANNELS.has(caller.channel) ? caller.chatId : null, egress: policy });
+        const resolved = models.mustResolve('main');
+        return inferenceRouter.routedProvider({
+          targets: resolved.targets,
+          meta: { role: 'main', profileId: models.profileId || null, borrowedFrom: resolved.borrowedFrom || null },
+          egress: resolved.egress ?? policy
+        });
+      },
+      direct: () => {
+        const main = snapshotModels({}).resolve('main');
+        const target = main.targets.find((x) => ['openai', 'anthropic'].includes(x.provider));
+        if (!target) return null;
+        return createProviderInstance(target.provider, getDecryptedProviderToken(target.provider));
+      },
+      log: skillsLog
+    });
+
     skillLoader = new SkillLoader({
       skillsDirectory: userSkillsDir,
       builtinSkillsDirectory: deps.builtinSkillsDir,
@@ -3025,19 +3300,11 @@ function createCore(deps = {}) {
           // Could also send to UI here if needed
           return Promise.resolve();
         },
-        // Provide LLM provider for skills that need AI capabilities
+        // Provide LLM provider for skills that need AI capabilities. It is
+        // held to the calling chat's egress policy on every call
+        // (src/skills/skill-models.js; local inference review fix, item 4a).
         get llmProvider() {
-          try {
-            // The default profile's first usable main model, when it is one
-            // of the two providers skills know how to talk to.
-            const main = snapshotModels({}).resolve('main');
-            const target = main.targets.find((x) => ['openai', 'anthropic'].includes(x.provider));
-            if (!target) return null;
-            return createProviderInstance(target.provider, getDecryptedProviderToken(target.provider));
-          } catch (error) {
-            skillsLog.warn(`LLM provider not available: ${error.message}`);
-            return null;
-          }
+          return skillModels.provider();
         }
       }
     });
@@ -3096,13 +3363,8 @@ function createCore(deps = {}) {
   // admin config and never from data-dir settings: the contact owner and
   // addresses (C4), the executor registry (C3, R42) and the playbook
   // allowlist and autoUpdate (C6, ruling T14-admin).
-  const hasDep = (key) => Object.prototype.hasOwnProperty.call(deps, key);
-  const serviceMode = deps.isService === true
-    || hasDep('contactConfig')
-    || hasDep('adminExecutors')
-    || hasDep('playbooksConfig')
-    || hasDep('caseChecksConfig')
-    || deps.remoteApprovals === 'phone';
+  // (hasDep and serviceMode are defined near the top of createCore: the
+  // local server registry reads them when it is built.)
 
   // Cases stage 4: contact channels, presence and the ladder
   // (docs/superpowers/specs/2026-09-23-cases-stage4-channels.md §7).
@@ -3141,7 +3403,32 @@ function createCore(deps = {}) {
     }
   }
 
+  // Service mode (spec 2026-10-13 §5.6): the administrator's local servers
+  // are pinned once per start, an address as written and a host name through
+  // one lookup. An entry that fails is left out with one error line, and the
+  // service starts. Only a DNS answer is waited for here, each bounded; no
+  // server is contacted and no model is probed.
+  const pinAdminLocalServers = async () => {
+    if (!localServersFromAdmin) return;
+    const stored = storedLocalServers();
+    if (stored !== undefined && !(Array.isArray(stored) && stored.length === 0)) {
+      log.warn('Ignoring models.localServers in the data-dir settings: in service mode a local server comes only from the localInference block of the admin service.json.');
+    }
+    const block = deps.localInference && typeof deps.localInference === 'object' ? deps.localInference : {};
+    const { entries, keys, adapters, failures } = await pinAdminServers(block.servers, {
+      ...(typeof deps.lookup === 'function' ? { lookup: deps.lookup } : {}),
+      ...(Number.isFinite(deps.localPinTimeoutMs) && deps.localPinTimeoutMs > 0 ? { timeoutMs: deps.localPinTimeoutMs } : {})
+    });
+    for (const failure of failures) {
+      const refused = failure.refused.length ? `; not allowed: ${failure.refused.map((r) => `${r.address} (${r.class})`).join(', ')}` : '';
+      log.error(`The local server ${failure.id} from the admin service.json is left out (${failure.code})${refused}.`);
+    }
+    for (const entry of entries) log.info(`Local server ${entry.id} is pinned at ${entry.pinned.addresses.join(', ')} (${entry.pinned.class}).`);
+    adminLocalServers = { entries, keys, adapters };
+  };
+
   const start = async () => {
+    await pinAdminLocalServers();
     migrateLegacyBridgeChatOrigins();
     initializeTools();
     await initializeAgentInfrastructure();
@@ -3299,6 +3586,12 @@ function createCore(deps = {}) {
     await withTimeout(embedderHost.stop(), shutdownTimeoutMs, 'Embed worker shutdown', warnTimeout)
       .catch((err) => log.warn(`Embed worker shutdown failed: ${err.message}`));
     await jevReranker.stop();
+    // Every local server's transport: open sockets and waiting calls end here.
+    try {
+      localServers.close();
+    } catch (err) {
+      log.warn(`Closing the local server transports failed: ${err.message}`);
+    }
     try {
       historyStore.close();
     } catch (err) {
@@ -3314,6 +3607,11 @@ function createCore(deps = {}) {
     host: {
       inferenceRouter,
       snapshotModels,
+      // Local inference L1 (spec 2026-10-13 §7.1, §8.2): the policy of a case
+      // whose turn has no snapshot, and the case's chats' marks.
+      egressFor,
+      markChatsPrivate,
+      caseChatsPrivate,
       // A case role's providers are tested (or a stale non-auth failure
       // retested) before it resolves, as resolveRole does (final review I2).
       ensureTargetsTested,
@@ -3441,7 +3739,9 @@ function createCore(deps = {}) {
       // An ingest call names its model (the case's draft, verify or vision
       // target): an explicit target, still checked (spec §6.3).
       callModel: createCallModel({
-        resolveInference: ({ provider, model }) => resolveRole('main', { explicit: { provider, model } }),
+        // The case id carries the case's private mark (spec 2026-10-13
+        // §7.5): under it resolveRole hands out the routed provider.
+        resolveInference: ({ provider, model, caseId }) => resolveRole('main', { explicit: { provider, model }, caseId: caseId || null }),
         getUsageTracker: () => usageTracker
       }),
       getCapabilities: (provider, model) => capabilitiesOf(catalog, provider, model),
@@ -3570,11 +3870,13 @@ function createCore(deps = {}) {
     getAvailability: () => availability,
     getProfiles: () => profiles,
     getKingLouie: () => kingLouie,
+    getLocalServers: () => localServers,
     getModelMigration: () => modelMigration,
     explainTarget,
     snapshotModels,
+    egressFor,
     resolveRole,
-    routedProvider: ({ targets, signal = null, meta = null } = {}) => inferenceRouter.routedProvider({ targets, signal, meta }),
+    routedProvider: ({ targets, signal = null, meta = null, egress = null } = {}) => inferenceRouter.routedProvider({ targets, signal, meta, egress }),
     getModelChoices: () => modelChoices,
     getProviderOptions: providerOptionsFor,
     testProviderConnection,

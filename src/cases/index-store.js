@@ -124,7 +124,11 @@ const keyHasValue = (k) => k.slice(k.indexOf(':') + 1).trim() !== '';
 const sameFingerprint = (a, b) => JSON.stringify(a || null) === JSON.stringify(b || null);
 
 class CrossCaseIndex {
-  constructor(root, { store = null, log = null } = {}) {
+  // `isPrivateCase(caseId)`: the case's private mark (local inference spec
+  // 2026-10-13 §8.5), from the case runtime. A case it calls private is
+  // hidden from every case that is not: its hits carry no text and no title,
+  // and the case lists below leave it out. A throw counts as private.
+  constructor(root, { store = null, log = null, isPrivateCase = null } = {}) {
     if (!root) throw new Error('CrossCaseIndex requires the cases root.');
     this.root = root;
     this.dir = path.join(root, '.index');
@@ -138,6 +142,29 @@ class CrossCaseIndex {
     this.loaded = false;
     this.memoryOnly = false;
     this.warned = new Set();
+    this.isPrivateCase = typeof isPrivateCase === 'function' ? isPrivateCase : null;
+  }
+
+  // → (caseId) => true when that case is private and `forCaseId` (the asking
+  // case, or none) is not private and is not that case. Each case is asked
+  // once per call. Between two private cases nothing is hidden by this.
+  _hiddenFrom(forCaseId) {
+    if (!this.isPrivateCase) return () => false;
+    const memo = new Map();
+    const isPrivate = (id) => {
+      if (!memo.has(id)) {
+        let v;
+        try {
+          v = this.isPrivateCase(id) !== false;
+        } catch {
+          v = true;
+        }
+        memo.set(id, v);
+      }
+      return memo.get(id);
+    };
+    const asker = forCaseId !== null && forCaseId !== undefined && forCaseId !== '' ? forCaseId : null;
+    return (caseId) => caseId !== asker && isPrivate(caseId) && !(asker !== null && isPrivate(asker));
   }
 
   attachEntities(entityIndex) {
@@ -513,6 +540,7 @@ class CrossCaseIndex {
   search({ text = '', subject, attr, kinds, forCaseId = null, excludeCaseId = null, statuses, limit = 20, includePrivate = false } = {}) {
     return this._fresh(() => {
       const { hits } = this._rank({ text, subject, attr });
+      const hidden = this._hiddenFrom(forCaseId);
       return hits
         .filter((h) => !Array.isArray(kinds) || kinds.includes(h.doc.kind))
         .filter((h) => !excludeCaseId || h.rec.caseId !== excludeCaseId)
@@ -522,7 +550,10 @@ class CrossCaseIndex {
           const own = forCaseId !== null && forCaseId !== undefined && h.rec.caseId === forCaseId;
           const shareable = (h.doc.kind === 'fact' && h.doc.disclosable === true)
             || (h.doc.kind === 'brief' && (h.doc.id === 'title' || h.doc.id === 'objective'));
-          const visible = includePrivate === true || own || shareable;
+          // A private case's hit to a case that is not private shows nothing,
+          // a disclosable fact and the brief's title and objective included.
+          const secret = !own && hidden(h.rec.caseId);
+          const visible = includePrivate === true || own || (shareable && !secret);
           // Hidden text hides its names too: a redacted fact keeps its slugs
           // unless the caller named that pair, and a live-state id carries
           // the branch name or PR number.
@@ -533,7 +564,7 @@ class CrossCaseIndex {
           const slugs = visible || (h.doc.kind !== 'fact' && !journal) || h.key;
           return {
             caseId: h.rec.caseId,
-            title: h.rec.title,
+            title: secret && includePrivate !== true ? null : h.rec.title,
             kind: h.doc.kind,
             id: visible || !hiddenId ? h.doc.id : null,
             score: round(h.score),
@@ -556,15 +587,19 @@ class CrossCaseIndex {
   // is kept when it matched two distinct query tokens or one of its keys.
   // Private text scores here but never leaves: rows carry no text, so a
   // forCaseId option changes nothing and is not read.
-  searchCases({ text = '', excludeCaseId = null, statuses, kinds, limit = 5 } = {}) {
+  // A private case is left out for an asking case (`forCaseId`) that is
+  // not private: its title would reach that case's question and journal.
+  searchCases({ text = '', forCaseId = null, excludeCaseId = null, statuses, kinds, limit = 5 } = {}) {
     return this._fresh(() => {
       const { hits } = this._rank({ text });
+      const hidden = this._hiddenFrom(forCaseId);
       const lower = String(text || '').toLowerCase();
       const byCase = new Map();
       for (const h of hits) {
         if (Array.isArray(kinds) && !kinds.includes(h.doc.kind)) continue;
         if (excludeCaseId && h.rec.caseId === excludeCaseId) continue;
         if (Array.isArray(statuses) && !statuses.includes(h.rec.status)) continue;
+        if (hidden(h.rec.caseId)) continue;
         if (!byCase.has(h.rec.caseId)) byCase.set(h.rec.caseId, { rec: h.rec, scores: [], tokens: new Set() });
         const g = byCase.get(h.rec.caseId);
         g.scores.push(h.score);
@@ -590,18 +625,23 @@ class CrossCaseIndex {
     }, []);
   }
 
-  casesWithKey(key) {
+  // `forCaseId`: the asking case; a private case is left out for one that
+  // is not private (none given: every case, as before).
+  casesWithKey(key, { forCaseId = undefined } = {}) {
     const wanted = norm(key);
+    const hidden = forCaseId === undefined ? () => false : this._hiddenFrom(forCaseId);
     return this._fresh(() => [...this.records.values()]
-      .filter((r) => r.keys.includes(wanted))
+      .filter((r) => r.keys.includes(wanted) && !hidden(r.caseId))
       .sort((a, b) => a.created.localeCompare(b.created))
       .map((r) => ({ caseId: r.caseId, title: r.title, status: r.status })), []);
   }
 
   // Exact per-case fields for findSimilarCases (one-token titles included).
-  openCaseHeads() {
+  // `forCaseId`: as casesWithKey. The owner's create check passes none.
+  openCaseHeads({ forCaseId = undefined } = {}) {
+    const hidden = forCaseId === undefined ? () => false : this._hiddenFrom(forCaseId);
     return this._fresh(() => [...this.records.values()]
-      .filter((r) => OPEN_STATUSES.includes(r.status))
+      .filter((r) => OPEN_STATUSES.includes(r.status) && !hidden(r.caseId))
       .sort((a, b) => a.created.localeCompare(b.created))
       .map((r) => ({ caseId: r.caseId, title: r.title, objective: r.objective, status: r.status })), []);
   }

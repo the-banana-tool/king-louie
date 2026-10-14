@@ -103,6 +103,12 @@ describe('chat rows', () => {
     assert.deepStrictEqual(rowToChat({ ...row, id: 'c2' }), { id: 'c2', title: 'Two' });
   });
 
+  it('never takes the private mark from a chat object, and never reads one into it', () => {
+    assert.strictEqual(chatToRow({ title: 't', private: true }).meta_json, null);
+    assert.strictEqual(chatToRow({ title: 't', private: false }).meta_json, null);
+    assert.deepStrictEqual(rowToChat({ id: 'c3', title: 't', private: 1, meta_json: JSON.stringify({ private: false, origin: 'telegram' }) }), { id: 'c3', title: 't', origin: 'telegram' });
+  });
+
   it('keeps a value of the wrong type for its column in meta_json', () => {
     const chat = { id: 'c3', title: 'Three', agentMode: 'yes', caseId: 42 };
     assert.deepStrictEqual(rowToChat({ ...chatToRow(chat), id: 'c3' }), chat);

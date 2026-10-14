@@ -25,6 +25,14 @@
 // is a setting and need not be this machine. Under such a key those chunks
 // are not pending, so progress reaches 100% without them and they are found
 // by BM25 alone.
+//
+// The same holds for a private chat (local inference spec 2026-10-13 §8.4,
+// R-LI-25). With an active key that is not local, a second pass hands the
+// chunks of the chats kept local (private and imported) to the host's
+// keep-local embedder (host.keepLocalKey(), host.ensureKeepLocal()), under
+// its own 'local:' key, with the same batch size and tombstones. That pass
+// keeps its own cursor, runs after the active key's batch on every tick, and
+// asks the host to load the embedder only when such a chunk is pending.
 const { mergeHistorySettings } = require('./settings');
 const { embedInput } = require('./embedders/vectors');
 const { WORKER_FAILURES } = require('./embed-errors');
@@ -50,6 +58,8 @@ function startEmbedIndexer({
   // Per key: the id-order cursor, and whether a full pass found nothing.
   const cursor = new Map();
   const idle = new Set();
+  // The keep-local pass's id-order cursor, per key.
+  const keepCursor = new Map();
 
   const settings = () => mergeHistorySettings((getSettings() || {}).history).embedder;
   const eligible = () => Boolean(store && store.isOpen && store.embeddable && !store.readonly && store.dbPath !== ':memory:');
@@ -100,17 +110,46 @@ function startEmbedIndexer({
   async function tick() {
     const none = { embedded: 0, skipped: 0 };
     if (stopped || !eligible()) return none;
-    const embedder = host.current();
-    if (!embedder) return none;
-    const key = embedder.name;
-    const localOnly = isLocalKey(key);
     const cfg = settings();
     if (store.vectorEpoch !== epoch) {
       epoch = store.vectorEpoch;
       cursor.clear();
+      keepCursor.clear();
       idle.clear();
       counts = null;
     }
+    const active = await activeTick(cfg);
+    if (stopped) return active;
+    const kept = await keepLocalTick(cfg);
+    return { embedded: active.embedded + kept.embedded, skipped: active.skipped + kept.skipped };
+  }
+
+  // The keep-local pass (see the header).
+  async function keepLocalTick(cfg) {
+    const none = { embedded: 0, skipped: 0 };
+    const key = typeof host.keepLocalKey === 'function' ? host.keepLocalKey() : null;
+    if (!key || !isLocalKey(key)) return none;
+    const opts = { limit: cfg.batchSize, maxChunksPerToolResult: cfg.maxChunksPerToolResult, localOnly: true, onlyKeptLocal: true };
+    const rows = store.pendingEmbeddings(key, { ...opts, afterId: keepCursor.get(key) || 0 });
+    if (!rows.length) {
+      // From the start again next tick: a chat marked since may have chunks
+      // below the cursor.
+      keepCursor.delete(key);
+      return none;
+    }
+    const embedder = typeof host.ensureKeepLocal === 'function' ? host.ensureKeepLocal() : null;
+    if (!embedder || embedder.name !== key) return none;
+    const out = await embedBatch(embedder, key, rows);
+    if (out.handled) keepCursor.set(key, Math.max(keepCursor.get(key) || 0, ...rows.map((r) => r.id)));
+    return { embedded: out.embedded, skipped: out.skipped };
+  }
+
+  async function activeTick(cfg) {
+    const none = { embedded: 0, skipped: 0 };
+    const embedder = host.current();
+    if (!embedder) return none;
+    const key = embedder.name;
+    const localOnly = isLocalKey(key);
     if (!counts || counts.key !== key || batches % RECOUNT_EVERY === 0) {
       counts = { key, embedded: store.countEmbedded(key), pending: store.countPending(key, { maxChunksPerToolResult: cfg.maxChunksPerToolResult, localOnly }) };
     }
@@ -182,6 +221,18 @@ function startEmbedIndexer({
     },
     tick,
     progress,
+    // The keep-local pass's key and counts (the Recall pane), or null when
+    // there is no separate keep-local embedder.
+    keepLocalProgress() {
+      const key = typeof host.keepLocalKey === 'function' ? host.keepLocalKey() : null;
+      if (!key || !eligible()) return null;
+      const cfg = settings();
+      return {
+        key,
+        embedded: store.countEmbedded(key),
+        pending: store.countPending(key, { maxChunksPerToolResult: cfg.maxChunksPerToolResult, localOnly: true, onlyKeptLocal: true })
+      };
+    },
     // Whether the last full pass found nothing pending for the active key.
     idle: () => Boolean(counts && idle.has(counts.key)),
     async stop() {

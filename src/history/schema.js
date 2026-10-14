@@ -4,11 +4,11 @@
 // Later stages append { version: N, up(db) }; never edit a released step.
 // Stage H1 creates only the tables it uses; the rest arrive as later steps
 // (H2: chunks, FTS and calibration; H3: embeddings; H4: chat links and
-// imports).
+// imports; local inference L1: the chat's private mark).
 
 const { SCHEMA_V2_SQL, writeBackfill } = require('./chunk-index');
 const { SCHEMA_V3_SQL } = require('./embedding-index');
-const { SCHEMA_V4_SQL } = require('./link-index');
+const { SCHEMA_V4_SQL, SCHEMA_V5_SQL } = require('./link-index');
 
 const SCHEMA_STEPS = [
   {
@@ -95,6 +95,14 @@ const SCHEMA_STEPS = [
     version: 4,
     up(db) {
       db.exec(SCHEMA_V4_SQL);
+    }
+  },
+  // Local inference L1: a chat's private mark (spec 2026-10-13 §8.1). Every
+  // chat stored before this step is not private.
+  {
+    version: 5,
+    up(db) {
+      db.exec(SCHEMA_V5_SQL);
     }
   }
 ];

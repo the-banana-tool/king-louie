@@ -36,6 +36,10 @@ const SIMILAR_MESSAGE = 'a similar case is already open, so nothing was created.
 // ledger and executor payloads, and the outbound gate knows only that case's
 // private facts, so in a case chat the tools that act on a case see that
 // case alone. create_case, set_away and get_presence act on no case.
+// A private case's questions, envelopes and jobs are acted on only where its
+// text may be shown (local inference review fix, item 2): the app, the
+// phone, or a private chat's own tools.
+const PRIVATE_CASE_MESSAGE = 'This case is private. Act on it in the app, on your phone, or from a private chat.';
 const OTHER_CASE_MESSAGE = 'In a case chat these tools act only on this case. Use a chat that is not attached to a case, or your phone, to manage other cases.';
 const CASE_SCOPED_TOOLS = new Set([
   'list_cases', 'open_case', 'get_orientation', 'list_questions', 'list_envelopes', 'list_playbooks',
@@ -276,12 +280,37 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     }
   };
 
-  function listCases(rt, scope = null) {
+  // A private case (local inference spec 2026-10-13 §8.5, R-LI-32) is shown
+  // as its id, title and status only, with `private: true`: always over MCP,
+  // and in King Louie's chat unless the asking chat is private (its model
+  // calls stay local). `askerIsPrivate` counts on the in-app-chat channel
+  // only, where the chat tools read it from the turn's models.
+  const privateOf = (rt, id) => {
+    try {
+      return typeof rt.isPrivate === 'function' ? rt.isPrivate(id) === true : false;
+    } catch {
+      return true;
+    }
+  };
+  const hidesPrivate = (askerIsPrivate) => !(channel === CHAT_CHANNEL && askerIsPrivate === true);
+  const privateShape = (meta) => ({ id: meta.id, status: meta.status, private: true, data: untrusted({ title: meta.title }) });
+  // → the private shape when the case's text is not shown here, else null.
+  const hiddenCase = (rt, meta, askerIsPrivate) => (privateOf(rt, meta.id) && hidesPrivate(askerIsPrivate) ? privateShape(meta) : null);
+  // The write tools on a case whose text is not shown here are refused
+  // before anything of the case is read: no option labels, no
+  // question/envelope/job existence, no fact written.
+  const refuseHidden = (rt, meta, askerIsPrivate) => {
+    if (hiddenCase(rt, meta, askerIsPrivate)) throw fail('private_case', PRIVATE_CASE_MESSAGE);
+  };
+
+  function listCases(rt, scope = null, askerIsPrivate = false) {
     // Titles and slugs can be model-authored (ruling T12-titles): they go
     // back inside the untrusted wrapper; id and status stay bare.
     // Progress (cases stage 8): counts and a boolean only, so they are
     // bare; `criteria` is null when the progress could not be read.
     return rt.listCases().filter((meta) => scope === null || meta.id === scope).map((meta) => {
+      const hidden = hiddenCase(rt, meta, askerIsPrivate);
+      if (hidden) return hidden;
       const p = progressOf(rt, meta);
       const frozen = p && isObj(p.closed);
       const readiness = p ? (frozen ? p.closed.readiness : p.readiness) : null;
@@ -295,13 +324,16 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
         budget: usdBudget(rt, meta.id),
         criteria: p ? criteriaCounts(frozen ? p.closed.criteria : p.view && p.view.criteria) : null,
         ready: isObj(readiness) && readiness.ready === true,
+        ...(privateOf(rt, meta.id) ? { private: true } : {}),
         data: untrusted({ title: meta.title, slug: meta.slug })
       };
     });
   }
 
-  function openCase(rt, ref) {
+  function openCase(rt, ref, askerIsPrivate = false) {
     const meta = caseOf(rt, ref);
+    const hidden = hiddenCase(rt, meta, askerIsPrivate);
+    if (hidden) return hidden;
     const facts = [...rt.ledger(meta.id).view().facts.values()].filter((f) => f.status === 'active');
     let brief = null;
     try {
@@ -323,6 +355,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
       id: meta.id,
       type: meta.type,
       status: meta.status,
+      ...(privateOf(rt, meta.id) ? { private: true } : {}),
       counts: {
         facts: facts.length,
         loadBearingUnknowns: facts.filter((f) => f.provenance === 'unknown' && f.loadBearing).length,
@@ -351,8 +384,14 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
   // Every open question in the open cases (or in one case), oldest first,
   // with the shared spoken/pressed class. Text, options and titles can be
   // model-authored: they go back inside the untrusted wrapper.
-  function listQuestions(rt, ref) {
-    const cases = ref === undefined ? rt.listCases() : [caseOf(rt, ref)];
+  function listQuestions(rt, ref, askerIsPrivate = false) {
+    if (ref !== undefined) {
+      const hidden = hiddenCase(rt, caseOf(rt, ref), askerIsPrivate);
+      if (hidden) return hidden;
+    }
+    // Across cases, a private case's questions are left out where its text
+    // is not shown.
+    const cases = (ref === undefined ? rt.listCases() : [caseOf(rt, ref)]).filter((meta) => !hiddenCase(rt, meta, askerIsPrivate));
     let ladder = null;
     const c = contact();
     if (c && typeof c.ladderState === 'function') {
@@ -475,7 +514,10 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
   // In a case chat (caseScope set) a similar-case refusal names no other
   // case: the list of other cases' ids, titles and statuses would reach the
   // case turn's context (Q27), so only the message goes back.
-  async function createCase(rt, args, ownerTurnText, caseScope = null) {
+  // A private chat's new case is created private, as case:create and a
+  // private case's detour make it (spec 2026-10-13 §8.2); the mark counts on
+  // the in-app-chat channel only (hidesPrivate), never over MCP.
+  async function createCase(rt, args, ownerTurnText, caseScope = null, askerIsPrivate = false) {
     checkQuote(args.quote, ownerTurnText);
     if (!fold(args.title)) throw fail('invalid_params', '"title" must not be blank');
     if (!wordsInText(args.objective, args.quote)) throw fail('objective_not_in_quote', 'the objective must be the owner\'s words from the quote');
@@ -485,7 +527,8 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
       // Cases stage 8: the objective was held to the quote above; the quote
       // is the owner's only where checkQuote checked it (R-C8-N3).
       const objectiveBy = channel === CHAT_CHANNEL ? 'owner' : 'mcp';
-      info = await rt.createCase({ title: args.title.trim(), type: args.type || 'general', objective: args.objective, objectiveBy });
+      const asPrivate = !hidesPrivate(askerIsPrivate);
+      info = await rt.createCase({ title: args.title.trim(), type: args.type || 'general', objective: args.objective, objectiveBy, ...(asPrivate ? { private: true } : {}) });
     } catch (err) {
       releaseSlot();
       if (err && err.code === 'SIMILAR_CASES') {
@@ -524,9 +567,10 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
 
   // revoke_envelope: IPC case:revokeEnvelope's path (the registry's
   // revokeEnvelope, in systemAction), with the quote in the reason.
-  async function revokeEnvelope(rt, args, ownerTurnText) {
+  async function revokeEnvelope(rt, args, ownerTurnText, askerIsPrivate = false) {
     checkQuote(args.quote, ownerTurnText);
     const meta = caseOf(rt, args.case);
+    refuseHidden(rt, meta, askerIsPrivate);
     const reg = registry();
     if (!isObj(new EnvelopeStore(meta.dir).get(args.envelope))) throw fail('envelope_not_found', 'no such envelope in this case');
     const releaseSlot = takeRateSlot();
@@ -542,9 +586,10 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
 
   // cancel_case_job: IPC case:cancelJob's path (the registry's cancelJob,
   // in systemAction), with the quote in the reason.
-  async function cancelCaseJob(rt, args, ownerTurnText) {
+  async function cancelCaseJob(rt, args, ownerTurnText, askerIsPrivate = false) {
     checkQuote(args.quote, ownerTurnText);
     const meta = caseOf(rt, args.case);
+    refuseHidden(rt, meta, askerIsPrivate);
     const reg = registry();
     const job = new JobStore(meta.dir).get(args.job);
     if (!isObj(job)) throw fail('job_not_found', 'no such job in this case');
@@ -601,13 +646,14 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
   // (ownerTurnText, from the executor only); over MCP it is recorded, not
   // checked. An option must be named in the quote; free text is the quote,
   // or words from it. A spoken briefing is acknowledged.
-  async function answerQuestion(rt, args, ownerTurnText) {
+  async function answerQuestion(rt, args, ownerTurnText, askerIsPrivate = false) {
     const hasText = args.text !== undefined;
     const hasOption = args.option_id !== undefined;
     if (hasText && hasOption) throw fail('invalid_params', 'give text or option_id, not both');
     const quote = args.quote;
     checkQuote(quote, ownerTurnText);
     const meta = caseOf(rt, args.case);
+    refuseHidden(rt, meta, askerIsPrivate);
     if (meta.status === 'done' || meta.status === 'abandoned') throw fail('case_closed', 'the case is done or abandoned');
     const q = rt.questions(meta.id).get(args.question_id);
     if (!q) throw fail('question_not_found', 'no such question in this case');
@@ -687,7 +733,9 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
   // case id, from the host's case context (the chat's tools pass it from
   // their execute context; never a tool argument): the case-scoped tools
   // then act on that case alone (Q27). The MCP surfaces pass none.
-  async function call(name, args = {}, { ownerTurnText = null, caseScope = null } = {}) {
+  // `askerIsPrivate`: the asking chat's turn is under a private mark (the
+  // chat tools read it from the turn's models); read on in-app-chat only.
+  async function call(name, args = {}, { ownerTurnText = null, caseScope = null, askerIsPrivate = false } = {}) {
     const tool = byName.get(name);
     if (!tool) throw fail('unknown_tool', 'no such case tool');
     validate(tool, args || {});
@@ -698,17 +746,20 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     try {
       if (scope !== null && args.case !== undefined) checkScope(rt, args.case, scope);
       switch (name) {
-        case 'list_cases': return listCases(rt, scope);
-        case 'open_case': return openCase(rt, args.case);
-        case 'get_orientation': return untrusted({ text: rt.orientation(caseOf(rt, args.case).id) });
-        case 'list_questions': return listQuestions(rt, args.case ?? scope ?? undefined);
+        case 'list_cases': return listCases(rt, scope, askerIsPrivate);
+        case 'open_case': return openCase(rt, args.case, askerIsPrivate);
+        case 'get_orientation': {
+          const meta = caseOf(rt, args.case);
+          return hiddenCase(rt, meta, askerIsPrivate) || untrusted({ text: rt.orientation(meta.id) });
+        }
+        case 'list_questions': return listQuestions(rt, args.case ?? scope ?? undefined, askerIsPrivate);
         case 'get_presence': return getPresence();
-        case 'list_envelopes': return listEnvelopes(rt, args.case);
-        case 'list_playbooks': return listPlaybooks(rt, args.case);
-        case 'create_case': return await createCase(rt, args, ownerTurnText, caseScope);
-        case 'revoke_envelope': return await revokeEnvelope(rt, args, ownerTurnText);
-        case 'cancel_case_job': return await cancelCaseJob(rt, args, ownerTurnText);
-        case 'answer_question': return await answerQuestion(rt, args, ownerTurnText);
+        case 'list_envelopes': return hiddenCase(rt, caseOf(rt, args.case), askerIsPrivate) || listEnvelopes(rt, args.case);
+        case 'list_playbooks': return hiddenCase(rt, caseOf(rt, args.case), askerIsPrivate) || listPlaybooks(rt, args.case);
+        case 'create_case': return await createCase(rt, args, ownerTurnText, caseScope, askerIsPrivate);
+        case 'revoke_envelope': return await revokeEnvelope(rt, args, ownerTurnText, askerIsPrivate);
+        case 'cancel_case_job': return await cancelCaseJob(rt, args, ownerTurnText, askerIsPrivate);
+        case 'answer_question': return await answerQuestion(rt, args, ownerTurnText, askerIsPrivate);
         case 'set_away': return await setAway(args, ownerTurnText);
         default: throw fail('unknown_tool', 'no such case tool');
       }

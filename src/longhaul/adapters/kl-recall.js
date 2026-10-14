@@ -144,7 +144,10 @@ const TMP_PREFIX = 'kl-';
 // adapter builds; resultFromBuild counts a message's chunks with the same.
 // rerankerFor (optional; kl-recall-rerank): (handle, question) => the
 // reranker callback for that question's build (recall spec §6.3 step 6).
-function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, chunk = {}, tmpRoot, rerankerFor = null, name = 'kl-recall' } = {}) {
+// queryFor (optional; kl-recall-rewrite): async (handle, question) => the
+// message build() searches with, in place of the question; its time is in
+// the question's latency.
+function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, chunk = {}, tmpRoot, rerankerFor = null, queryFor = null, name = 'kl-recall' } = {}) {
   if (typeof tmpRoot !== 'string' || !tmpRoot) throw new Error('kl-recall needs a tmpRoot (LONGHAUL_HOME/tmp)');
   const settings = recallSettings(recall, budgetTokens, chunk);
   return {
@@ -187,7 +190,8 @@ function createKlRecallAdapter({ budgetTokens = 6000, recall = {}, chunk = {}, t
       return measured(async () => {
         // build() takes the new user message as a string; upToSeq is exclusive.
         const reranker = rerankerFor ? rerankerFor(handle, question) : null;
-        const out = await handle.builder.build({ chatId: handle.chatId, message: question.question, model: ESTIMATOR_MODEL, upToSeq: askAtSeq, reranker });
+        const message = queryFor ? await queryFor(handle, question) : question.question;
+        const out = await handle.builder.build({ chatId: handle.chatId, message, model: ESTIMATOR_MODEL, upToSeq: askAtSeq, reranker });
         return resultFromBuild(handle, out);
       });
     },

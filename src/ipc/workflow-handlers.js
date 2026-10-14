@@ -9,6 +9,46 @@ const log = createLogger('workflow-handlers');
 function registerWorkflowHandlers(ipcMain, context) {
   const findChat = (chatId) => (chatId ? context.getChat(chatId, { messages: true }) : null);
 
+  // A workflow's planner and tasks reach the model with no chat and no
+  // parent snapshot, so they would run on the default profile with the
+  // chat's tail and recalled text in the prompt. Until a workflow can carry
+  // its chat's egress policy, none is planned from a private chat (local
+  // inference stage L1, Tasks 8 and 9; the core refuses its tasks the same
+  // way). A host that cannot say whether the chat is private refuses too.
+  const assertNotPrivate = (chatId) => {
+    if (!chatId) return;
+    const policy = typeof context.egressFor === 'function' ? context.egressFor({ chatId }) : true;
+    if (policy === null || policy === undefined) return;
+    const err = new Error('This chat is private, and a workflow\'s planner and tasks do not run under a chat\'s private mark yet. Nothing was sent to a hosted model.');
+    err.code = 'PRIVATE_NO_DETACHED_RUN';
+    throw err;
+  };
+
+  // Every chat a plan payload can name is checked (review fix, item 5):
+  // its own chatId and its options' (mergePlanOptions takes both), and an id
+  // that is not a string fails closed. Chat messages that name no chat could
+  // be any chat's: they are refused while any chat is private, or when the
+  // store cannot say (the cautious reading).
+  const assertPayloadNotPrivate = (payload) => {
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const options = p.options && typeof p.options === 'object' ? p.options : {};
+    const ids = [p.chatId, options.chatId].filter((id) => id !== undefined && id !== null && id !== '');
+    for (const id of ids) assertNotPrivate(typeof id === 'string' ? id : 'not-a-chat-id');
+    const messages = p.chatMessages !== undefined || options.chatMessages !== undefined;
+    if (!messages || ids.length) return;
+    let any = true;
+    try {
+      const store = typeof context.getHistoryStore === 'function' ? context.getHistoryStore() : null;
+      any = store && typeof store.hasPrivateChats === 'function' ? store.hasPrivateChats() !== false : true;
+    } catch {
+      any = true;
+    }
+    if (!any) return;
+    const err = new Error('These messages name no chat, and a chat is private: a workflow is planned from a chat that is not private. Nothing was sent to a hosted model.');
+    err.code = 'PRIVATE_NO_DETACHED_RUN';
+    throw err;
+  };
+
   const mergePlanOptions = (payload) => {
     const options = { ...(payload.options || {}) };
     if (payload.chatId) options.chatId = payload.chatId;
@@ -22,6 +62,7 @@ function registerWorkflowHandlers(ipcMain, context) {
     wrapHandler('workflow:plan', async (event, payload) => {
       const planner = context.getPlannerExecutor();
       if (!planner) throw new Error('Planner not available');
+      assertPayloadNotPrivate(payload);
       try {
         const taskGraph = await planner.plan(payload.goal, mergePlanOptions(payload));
         return { ok: true, taskGraph };
@@ -42,6 +83,7 @@ function registerWorkflowHandlers(ipcMain, context) {
     wrapHandler('workflow:planAndExecute', async (event, payload) => {
       const planner = context.getPlannerExecutor();
       if (!planner) throw new Error('Planner not available');
+      assertPayloadNotPrivate(payload);
       const options = {
         ...mergePlanOptions(payload),
         background: payload.background !== false

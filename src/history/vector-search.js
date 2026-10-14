@@ -8,6 +8,16 @@
 // stats.vectorsSkipped says why (provenance, the recall line). A query that
 // failed for a reason other than the worker crashing, a model switch or a
 // shutdown is reported to the host (host.fail) under the embedder's key.
+//
+// A private chat in scope (keepLocal 'private-chat', local inference spec
+// 2026-10-13 §8.4, R-LI-25): the egress rule for a private chat's text
+// covers the query too. It is embedded by the local embedder in the embed
+// worker (host.keepLocal(): the active one when it is local, else the
+// keep-local embedder) and searched under that key, or not embedded at all
+// (vectorsSkipped 'private-chat', BM25 only). A turn never starts the
+// keep-local embedder; the indexer does. Any keepLocal other than null and
+// 'imported-chat' is read as private. An imported chat that is not private
+// keeps the active embedder (the open H4 item).
 const { WORKER_FAILURES, NOT_FAILURES } = require('./embed-errors');
 const { createLogger } = require('../logging');
 
@@ -17,9 +27,10 @@ const { createLogger } = require('../logging');
 const QUERY_TIMEOUT_MS = 1500;
 const TIMED_OUT = Symbol('query embedding timed out');
 const OVER_CAP = 'this chat has more vectors than history.recall.vectorCacheMb holds';
+const PRIVATE_CHAT = 'private-chat';
 
 function createVectorSearch({ host, index, queryTimeoutMs = QUERY_TIMEOUT_MS, setTimer = setTimeout, clearTimer = clearTimeout, log = createLogger('history/vector-search') }) {
-  async function vectorSearch({ query, chatIds, kinds = null, upToSeq = null, upToSeqChatId = null, settings, stats = null }) {
+  async function vectorSearch({ query, chatIds, kinds = null, upToSeq = null, upToSeqChatId = null, settings, stats = null, keepLocal = null }) {
     const note = (reason) => {
       if (stats) {
         stats.embedder = 'none';
@@ -27,8 +38,15 @@ function createVectorSearch({ host, index, queryTimeoutMs = QUERY_TIMEOUT_MS, se
       }
       return [];
     };
-    const embedder = host.current();
-    if (!embedder) return note(host.reason());
+    const kept = keepLocal !== null && keepLocal !== undefined && keepLocal !== 'imported-chat';
+    let embedder;
+    if (kept) {
+      embedder = typeof host.keepLocal === 'function' ? host.keepLocal() : null;
+      if (!embedder || typeof embedder.name !== 'string' || !embedder.name.startsWith('local:')) return note(PRIVATE_CHAT);
+    } else {
+      embedder = host.current();
+      if (!embedder) return note(host.reason());
+    }
     let timer = null;
     let vecs;
     try {

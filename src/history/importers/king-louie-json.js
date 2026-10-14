@@ -156,6 +156,9 @@ async function parse(filePath, { loaded, maxFileBytes } = {}) {
     updatedAt: validTime(data.updatedAt) ? data.updatedAt : messages.at(-1)?.timestamp ?? null
   };
   if (isObject(data.llmTotals)) chat.llmTotals = data.llmTotals;
+  // An export of a private chat says so (local inference spec 2026-10-13
+  // §8.6, R-LI-28): only an exact true counts, and it is imported private.
+  if (data.private === true) chat.private = true;
   return { chat, messages, compactions, stats };
 }
 

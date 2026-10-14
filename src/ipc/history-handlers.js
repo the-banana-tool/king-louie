@@ -171,10 +171,10 @@ function registerHistoryHandlers(ipcMain, context = {}) {
   });
 
   handle(IPC.HISTORY_IMPORT_COMMIT, async (payload, event) => {
-    const { token, pattern } = importRequest(payload);
+    const { token, pattern, asPrivate } = importRequest(payload);
     const filePath = picks.pathFor(token);
     if (!filePath) return { ...NO_FILE };
-    const out = await readingPickedFile(() => importGate().run(() => importChat({ store: store(), filePath, pattern })));
+    const out = await readingPickedFile(() => importGate().run(() => importChat({ store: store(), filePath, pattern, asPrivate })));
     if (out.ok === false) return out;
     picks.spend(token);
     chatUpdated(event, out.chatId);
@@ -275,6 +275,8 @@ function registerHistoryHandlers(ipcMain, context = {}) {
       untrustedText: true,
       status: host ? host.status() : { ...OFF },
       progress: indexer ? indexer.progress() : null,
+      // Local inference L1 (§8.4): the keep-local embedder's progress.
+      keepLocalProgress: indexer && typeof indexer.keepLocalProgress === 'function' ? indexer.keepLocalProgress() : null,
       jev: jev ? jev.status() : { ...JEV_OFF, kind: rerank.kind },
       settings: { embedder: history.embedder, rerank: { enabled: rerank.enabled, search: rerank.search, kind: rerank.kind } }
     };

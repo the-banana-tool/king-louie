@@ -45,6 +45,15 @@ function parseOrient(text) {
   }
 }
 
+// A wake-up a private case's mark refused (local inference spec 2026-10-13
+// §7.3, R-LI-22) fails like any other, and its record names the refusal's
+// code first, so the backoff, the briefing and the panel say which it was.
+const EGRESS_CODES = Object.freeze(['PRIVATE_NO_LOCAL_MODEL', 'LOCAL_ONLY_ROLE_NO_MODEL', 'LOCAL_MODEL_UNAVAILABLE', 'PRIVATE_HOSTED_TARGET', 'PRIVATE_HOSTED_CALL']);
+function failureText(err) {
+  const message = err?.message || String(err);
+  return err && EGRESS_CODES.includes(err.code) && !message.startsWith(`${err.code}:`) ? `${err.code}: ${message}` : message;
+}
+
 const dueLines = (due) => due.map((w) => `- ${w.id} ${w.kind}${w.payload?.key ? ` (${w.payload.key})` : ''}, due ${w.nextAt}`);
 
 // Every failure path — inside a live turn, inside the sweep, or a case this
@@ -59,7 +68,7 @@ const dueLines = (due) => due.map((w) => `- ${w.id} ${w.kind}${w.payload?.key ? 
 // happened before it had a due list of its own (a sweep that crashed, or a
 // turn that never opened).
 async function markWakeupsFailed(runtime, caseId, ids, err, title) {
-  const message = err?.message || String(err);
+  const message = failureText(err);
   try {
     await runtime.systemAction(caseId, 'wake-up failed', () => {
       const now = runtime.now();
@@ -205,7 +214,7 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
     };
     const failed = async (err) => {
       if (turn.signal.aborted) return skipped(String(turn.signal.reason || 'aborted'));
-      const message = err?.message || String(err);
+      const message = failureText(err);
       await markWakeupsFailed(runtime, caseId, ids, err, turn.title);
       return close('failed', `failed: ${oneLine(message, 300)}`, 'wake-up failed');
     };
@@ -303,7 +312,7 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
   } catch (err) {
     log.warn(`Wake-up turn on case ${caseId} failed: ${err.message}`);
     await markWakeupsFailed(runtime, caseId, ids, err, turn.title);
-    return close('failed', `failed: ${oneLine(err.message, 300)}`, 'wake-up failed');
+    return close('failed', `failed: ${oneLine(failureText(err), 300)}`, 'wake-up failed');
   }
 }
 

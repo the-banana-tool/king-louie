@@ -1,0 +1,467 @@
+{
+  "src/auth/anthropic-oauth.js": {
+    "label": "no-chat-text",
+    "why": "the Anthropic OAuth token exchange and refresh: credentials only, never a chat's text"
+  },
+  "src/browser/playwright-browser.js": {
+    "label": "tool",
+    "why": "the browser tools' Playwright driver; browsing is a tool and behaves as now (R-LI-9)"
+  },
+  "src/cases/contact-host.js": {
+    "label": "transport",
+    "why": "hands fetch to the contact channels that carry a case's questions to the owner and the answers back; not a model call"
+  },
+  "src/cases/detours/classifier.js": {
+    "label": "behind-gate",
+    "gate": "src/cases/case-runtime.js",
+    "check": "router.newRouteState(tags, egress)",
+    "why": "the detour classifier's call on a case role's routed provider; the route state carries the case turn's policy"
+  },
+  "src/cases/executors/package-loader.js": {
+    "label": "transport",
+    "why": "an external executor's host.fetch: it sends a job's gated payload to the executor the owner's envelope names (R-LI-24); not a model call"
+  },
+  "src/cases/executors/results.js": {
+    "label": "behind-gate",
+    "gate": "src/cases/case-runtime.js",
+    "check": "router.newRouteState(tags, egress)",
+    "why": "the draft role's call on a case role's routed provider; the route state carries the case turn's policy"
+  },
+  "src/cases/ingest/call-model.js": {
+    "label": "behind-gate",
+    "gate": "src/core/create-core.js",
+    "check": "if (!egress && !first.adapter) {",
+    "why": "ingest's OCR and extract calls on the client resolveRole hands it, which under a policy is the routed provider"
+  },
+  "src/cases/ingest/pdf-sandbox.js": {
+    "label": "no-chat-text",
+    "why": "requests to the PDF worker, a child process on this machine over a pipe; nothing leaves the machine"
+  },
+  "src/cases/ingest/pdf-worker.js": {
+    "label": "no-chat-text",
+    "why": "the PDF worker writes its framed results to its parent process on fd 3: a pipe on this machine, no network"
+  },
+  "src/cases/turn-runner.js": {
+    "label": "behind-gate",
+    "gate": "src/cases/case-runtime.js",
+    "check": "router.newRouteState(tags, egress)",
+    "why": "a wake-up's orient and judge calls on the case's routed providers; the route state carries the case's policy"
+  },
+  "src/cases/verify/judge.js": {
+    "label": "behind-gate",
+    "gate": "src/cases/case-runtime.js",
+    "check": "router.newRouteState(tags, egress)",
+    "why": "the verify pass's call on a case role's routed provider; the route state carries the case turn's policy"
+  },
+  "src/channels/discord-bridge.js": {
+    "label": "transport",
+    "why": "the Discord bridge: a bridge chat's text passes through Discord by design, and a bridge chat cannot be marked private (spec §8.2; refused in Task 14)"
+  },
+  "src/channels/email-transports.js": {
+    "label": "transport",
+    "why": "SMTP and IMAP for the email contact channel: case questions to the owner's own address and the replies; not a model call"
+  },
+  "src/channels/relay-client.js": {
+    "label": "transport",
+    "why": "the SMS and voice relay for the contact ladder: questions to the owner's own number; not a model call"
+  },
+  "src/channels/slack-bridge.js": {
+    "label": "transport",
+    "why": "the Slack channel bridge: its text passes through Slack by design; it runs on a session, never on a history chat that could be marked"
+  },
+  "src/channels/telegram-bridge.js": {
+    "label": "transport",
+    "why": "the Telegram bridge, its voice replies included: a bridge chat's text passes through Telegram by design and it cannot be marked private (spec §8.2; refused in Task 14)"
+  },
+  "src/context/context-assembler.js": {
+    "label": "behind-gate",
+    "gate": "src/ipc/chat-handlers.js",
+    "check": "...(turnEgress ? { embed: false } : {})",
+    "why": "semantic tool selection embeds the owner's message through a direct OpenAI client; the chat send path passes assemble({ embed: false }) under a policy. index() embeds tool descriptions only"
+  },
+  "src/core/create-core.js": {
+    "sites": {
+      "embedder-host-hosted": {
+        "match": "ProviderFactory.createProvider('ollama', null, { catalog, serverUrl: cfg.ollama.baseUrl })",
+        "label": "behind-gate",
+        "gate": "src/history/embedding-index.js",
+        "check": "const KEPT_CHATS = 'SELECT id FROM chats WHERE source IS NOT NULL OR private <> 0';",
+        "why": "the embedder host's hosted embedders (OpenAI through createProviderInstance('openai', ...), and Ollama): the indexer hands them no private or imported chat's chunk, and vector-search.js embeds a private chat's query only locally"
+      },
+      "embedder-host-openai": {
+        "match": "? createProviderInstance('openai', getDecryptedProviderToken('openai'))",
+        "label": "behind-gate",
+        "gate": "src/history/vector-search.js",
+        "check": "const kept = keepLocal !== null && keepLocal !== undefined && keepLocal !== 'imported-chat';",
+        "why": "the hosted OpenAI embedder built for the embedder host: a private chat's query is embedded locally or not at all, and its chunks are never pending for it (embedding-index.js)"
+      },
+      "jev": {
+        "match": "new TypesafeProvider(key, { catalog })",
+        "label": "behind-gate",
+        "gate": "src/history/reranker.js",
+        "check": "if (kind === 'jev' && options && options.keepLocal) throw new EmbedError('RERANK_SKIPPED', String(options.keepLocal));",
+        "why": "typesafe.ai's Jev client for the hosted reranker: the dispatcher never sends it a rerank whose scope holds a private, imported or case chat (keepLocalReason, caseId)"
+      },
+      "models-fetch": {
+        "match": "const modelsFetch = typeof deps.fetch === 'function' ? deps.fetch : globalThis.fetch;",
+        "label": "no-chat-text",
+        "why": "the fetch the catalog refresh and the provider connection tests use: model lists and prices, no text of any chat"
+      },
+      "provider-instances": {
+        "match": "ProviderFactory.createProvider(providerType",
+        "label": "gated",
+        "check": "egress: egress ?? egressFor({ chatId, caseId: theCaseId })",
+        "why": "createProviderInstance, which builds every hosted instance the router and resolveRole use: snapshotModels freezes the chat's policy, and under one resolveRole hands out only the routed provider"
+      },
+      "connection-test-oauth": {
+        "match": "ProviderFactory.createProvider('anthropic', accessToken",
+        "label": "no-chat-text",
+        "why": "Availability's connection test of Anthropic under OAuth: a model list request, no text of any chat"
+      },
+      "default-models": {
+        "match": "ProviderFactory.create(provider, 'model-probe-token')",
+        "label": "no-chat-text",
+        "why": "builds a provider with a placeholder key only to read its default model id; it sends nothing"
+      },
+      "telegram-test": {
+        "match": "await fetch(`https://api.telegram.org/bot${token}/getMe`)",
+        "label": "no-chat-text",
+        "why": "the Telegram connection test (getMe): the bot token only, no text of any chat"
+      },
+      "skill-send": {
+        "match": "return telegramBridge.sendMessage(chatId, message);",
+        "label": "transport",
+        "why": "a skill's sendMessage to a Telegram chat: the bridge carries it by design, and a bridge chat cannot be marked private"
+      },
+      "skills-llm": {
+        "match": "const skillModels = createSkillModels({",
+        "label": "behind-gate",
+        "gate": "src/skills/skill-models.js",
+        "check": "if (caller && caller.chatId) return egressFor({ chatId: caller.chatId });",
+        "why": "the skills' llmProvider: on every call it is held to the calling chat's policy (the router's local-only provider under one), and a call with no known caller is held to one while any chat is private"
+      }
+    }
+  },
+  "src/desktop-bridge/bridge-client.js": {
+    "label": "transport",
+    "why": "the attached desktop's WebSocket to the service on 127.0.0.1; the turn and its model calls run in the service, under the service's marks (spec §8.7)"
+  },
+  "src/desktop-bridge/bridge-server.js": {
+    "label": "transport",
+    "why": "the service's loopback listener for a paired desktop (127.0.0.1 only); it carries IPC, and makes no model call"
+  },
+  "src/execution/agent-loop.js": {
+    "label": "gated",
+    "why": "semantic compaction embeds the query and old tool results through the embedding provider it was handed; given an egress policy the loop takes no provider, and the chat send path hands it none",
+    "check": "this.embeddingProvider = (options.egress !== null && options.egress !== undefined)"
+  },
+  "src/fleet/doctor-checks.js": {
+    "label": "no-chat-text",
+    "why": "doctor's TLS reachability check of the relay or front door: a handshake, no text"
+  },
+  "src/frontdoor/doctor-checks.js": {
+    "label": "no-chat-text",
+    "why": "the front door's doctor checks its own listener over https; a front door runs no chat"
+  },
+  "src/frontdoor/oauth/cimd.js": {
+    "label": "no-chat-text",
+    "why": "fetches an OAuth client's metadata document for the front door; a front door runs no chat"
+  },
+  "src/frontdoor/probe.js": {
+    "label": "no-chat-text",
+    "why": "the front door's self-probe of its own names and certificate; no text of any chat"
+  },
+  "src/frontdoor/push/apns.js": {
+    "label": "transport",
+    "why": "pushes an approval or question notice to the owner's enrolled phone through APNs from the relay; not a model call"
+  },
+  "src/frontdoor/tls/acme.js": {
+    "label": "no-chat-text",
+    "why": "the front door's ACME certificate orders; no text of any chat"
+  },
+  "src/gateway/gateway-server.js": {
+    "label": "transport",
+    "why": "the local gateway's WebSocket server on 127.0.0.1 for sessions; a session belongs to no chat and has no mark (spec §7.1)"
+  },
+  "src/history/embed-indexer.js": {
+    "label": "behind-gate",
+    "gate": "src/history/embedding-index.js",
+    "why": "hands each embedder only the chunks the store's pending query returns: no private or imported chat's chunk for a key that is not local:, and those chunks to the keep-local embedder",
+    "check": "const KEPT_CHATS = 'SELECT id FROM chats WHERE source IS NOT NULL OR private <> 0';"
+  },
+  "src/history/embed-worker.js": {
+    "label": "no-chat-text",
+    "why": "the embed worker, a child process on this machine: it runs the local embedder and cross-encoder and answers its parent on fd 3; it downloads model files and sends no text"
+  },
+  "src/history/embedder-host.js": {
+    "label": "no-chat-text",
+    "why": "reranks with the local cross-encoder in the embed worker, a child process on this machine; the hosted embedders it holds are listed where they are built"
+  },
+  "src/history/embedders/local-backend.js": {
+    "label": "no-chat-text",
+    "why": "loads the local models inside the embed worker; the only request is the one-time download of model files"
+  },
+  "src/history/embedders/local.js": {
+    "label": "no-chat-text",
+    "why": "hands text to the embed worker, a child process on this machine; nothing leaves it"
+  },
+  "src/history/embedders/remote.js": {
+    "label": "behind-gate",
+    "gate": "src/history/embedding-index.js",
+    "why": "the hosted and Ollama embedder: it embeds what the indexer hands it (never a private or imported chat's chunk) and a query vector-search.js hands it (never a private chat's)",
+    "check": "const KEPT_CHATS = 'SELECT id FROM chats WHERE source IS NOT NULL OR private <> 0';"
+  },
+  "src/history/jev-reranker.js": {
+    "label": "behind-gate",
+    "gate": "src/history/reranker.js",
+    "check": "if (kind === 'jev' && options && options.keepLocal) throw new EmbedError('RERANK_SKIPPED', String(options.keepLocal));",
+    "why": "asks typesafe.ai's Jev through TypesafeProvider; only the dispatcher calls it, never with a private, imported or case chat in scope"
+  },
+  "src/history/reranker.js": {
+    "label": "behind-gate",
+    "gate": "src/history/context-builder.js",
+    "check": "keepLocal: keepLocalReason(this.store, scope.chatIds),",
+    "why": "the recall rerank dispatcher: it sends to Jev only when the turn's scope holds no private, imported or case chat (keepLocal, caseId); SearchHistory asks the same through search.js"
+  },
+  "src/history/vector-search.js": {
+    "label": "gated",
+    "why": "embeds a turn's query with the active embedder, except with a private chat in scope: then only with the local embedder, or not at all (vectorsSkipped private-chat)",
+    "check": "const kept = keepLocal !== null && keepLocal !== undefined && keepLocal !== 'imported-chat';"
+  },
+  "src/ipc/chat-handlers.js": {
+    "label": "gated",
+    "check": "const turnEgress = main.egress ?? turnModels.egress ?? null;",
+    "why": "the chat send path: the title, the reply and the advisor review run on the turn's routed providers, which carry the chat's policy"
+  },
+  "src/ipc/memory-handlers.js": {
+    "label": "no-chat-text",
+    "why": "the Memory pane's own form; no chat turn calls capture"
+  },
+  "src/ipc/settings-handlers.js": {
+    "label": "no-chat-text",
+    "why": "connection tests for the search and image keys, with a fixed test query; no text of any chat"
+  },
+  "src/media/image-generation/fal-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/tools/builtin/image-generate-tool.js",
+    "why": "an image client built only by the ImageGenerate tool, which refuses under a policy before it builds one (R-LI-33)",
+    "check": "const egress = imageEgress(context || {});"
+  },
+  "src/media/image-generation/openai-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/tools/builtin/image-generate-tool.js",
+    "why": "an image client built only by the ImageGenerate tool, which refuses under a policy before it builds one (R-LI-33)",
+    "check": "const egress = imageEgress(context || {});"
+  },
+  "src/media/image-handler.js": {
+    "label": "no-chat-text",
+    "why": "downloads an image the owner attached by URL: a GET of that URL, with nothing of the chat in it"
+  },
+  "src/memory/embedding-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/ipc/chat-handlers.js",
+    "check": "...(turnEgress ? { embed: false } : {})",
+    "why": "the direct OpenAI embeddings client; only the context assembler builds one, and the send path tells it not to embed under a policy (the agent loop also drops its provider then)"
+  },
+  "src/memory/memory-manager.js": {
+    "label": "no-chat-text",
+    "why": "the Memory pane's own form; no chat turn calls capture, and it embeds only with a provider the core never gives it (both pinned in tests/egress-inventory.test.js)"
+  },
+  "src/memory/memory-retrieval.js": {
+    "label": "no-chat-text",
+    "why": "embeds a query only with a provider it is handed, and the core hands memory none (pinned in tests/egress-inventory.test.js)"
+  },
+  "src/mesh/mesh-discovery.js": {
+    "label": "no-chat-text",
+    "why": "announces and finds mesh peers on the local network (mDNS); no text of any chat"
+  },
+  "src/mesh/mesh-pairing.js": {
+    "label": "no-chat-text",
+    "why": "the mesh pairing handshake between the owner's machines: keys and codes, no text of any chat"
+  },
+  "src/mesh/mesh-transport.js": {
+    "label": "transport",
+    "why": "links to the owner's other machines; the tool that sends a task over them (RemoteDispatch) is refused in a private chat (src/tools/private-refusals.js)"
+  },
+  "src/models/availability.js": {
+    "label": "no-chat-text",
+    "why": "provider connection tests: a model list request with the key, no text of any chat; a private turn's filtered candidates name no hosted provider to test"
+  },
+  "src/models/catalog.js": {
+    "label": "no-chat-text",
+    "why": "the catalog refresh from models.dev and OpenRouter; no text of any chat"
+  },
+  "src/models/local-servers.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/inference-router.js",
+    "why": "builds each local server's provider on its pinned transport; its isGuaranteeTarget is what the resolver and the router ask under a policy",
+    "check": "const verdict = targetAllowed(egress, target, this.isGuaranteeTarget);"
+  },
+  "src/models/local-transport.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "why": "the only module that dials a local server, and only its pinned address: this is where a private chat's text is allowed to go",
+    "check": "if (options && options.egress !== null && options.egress !== undefined"
+  },
+  "src/models/ollama.js": {
+    "label": "no-chat-text",
+    "why": "lists the built-in Ollama provider's models; no text of any chat"
+  },
+  "src/notifications/channels/ntfy-channel.js": {
+    "label": "transport",
+    "why": "task and question notices to the owner's own ntfy topic; delivery only, not a model call"
+  },
+  "src/providers/anthropic-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/base-provider.js": {
+    "label": "gated",
+    "why": "every provider request passes request(), which refuses under an egress policy unless the provider's transport is guarantee grade",
+    "check": "if (options && options.egress !== null && options.egress !== undefined"
+  },
+  "src/providers/cohere-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/copilot-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/deepseek-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/fireworks-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/gemini-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/groq-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/inference-router.js": {
+    "label": "gated",
+    "check": "const verdict = targetAllowed(egress, target, this.isGuaranteeTarget);",
+    "why": "every routed call: under a policy a target that is not a guarantee-grade local model is refused before an instance is made"
+  },
+  "src/providers/local-server-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "why": "a local server's provider: every call, embed included, goes through request() on the server's pinned transport",
+    "check": "if (options && options.egress !== null && options.egress !== undefined"
+  },
+  "src/providers/mistral-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/ollama-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "the built-in Ollama provider (never local, R-LI-31): it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/one-shot.js": {
+    "label": "behind-gate",
+    "gate": "src/ipc/chat-handlers.js",
+    "check": "const turnEgress = main.egress ?? turnModels.egress ?? null;",
+    "why": "one call on the provider it is handed (a chat title, an advisor review); the send path hands it the turn's routed provider"
+  },
+  "src/providers/openai-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/openrouter-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/provider-factory.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "why": "builds the 14 hosted providers; each sends only through request(), which refuses under a policy, and local is not registered here",
+    "check": "if (options && options.egress !== null && options.egress !== undefined"
+  },
+  "src/providers/qwen-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/together-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/providers/typesafe-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/history/reranker.js",
+    "check": "if (kind === 'jev' && options && options.keepLocal) throw new EmbedError('RERANK_SKIPPED', String(options.keepLocal));",
+    "why": "typesafe.ai's Jev client (not registered, not in the catalog); only the hosted reranker uses it, behind the dispatcher's keep-local check"
+  },
+  "src/providers/xai-provider.js": {
+    "label": "behind-gate",
+    "gate": "src/providers/base-provider.js",
+    "check": "if (options && options.egress !== null && options.egress !== undefined",
+    "why": "a hosted provider class: it sends only through request(), which refuses under an egress policy"
+  },
+  "src/service/commands/pair-front-door.js": {
+    "label": "no-chat-text",
+    "why": "the administrator's pairing request to the front door: a code and an identity, no text of any chat"
+  },
+  "src/session/connection.js": {
+    "label": "no-chat-text",
+    "why": "the session helper's local socket to the service on the same machine (fleet stage 5); nothing leaves the machine"
+  },
+  "src/tools/builtin/image-generate-tool.js": {
+    "label": "gated",
+    "why": "refuses PRIVATE_HOSTED_CALL under an egress policy before any image client is built (R-LI-33)",
+    "check": "const egress = imageEgress(context || {});"
+  },
+  "src/tools/builtin/web-fetch-tool.js": {
+    "label": "tool",
+    "why": "WebFetch fetches the URL the model asks for; tools behave as now (R-LI-9)"
+  },
+  "src/voice/engines/elevenlabs.js": {
+    "label": "behind-gate",
+    "gate": "src/ipc/chat-handlers.js",
+    "why": "the hosted read-aloud engine: a chat's read-aloud asks for the system engine under a policy (R-LI-33); its other callers are agent-panel runs and bridge chats, which are never private",
+    "check": "const voiceUnder = (voiceSettings, egress) => (egress ? { ...voiceSettings, engine: 'system' } : voiceSettings);"
+  },
+  "src/web-search/providers/brave-search.js": {
+    "label": "tool",
+    "why": "WebSearch sends its query to the search provider; tools behave as now (R-LI-9)"
+  },
+  "src/web-search/providers/duckduckgo.js": {
+    "label": "tool",
+    "why": "WebSearch sends its query to the search provider; tools behave as now (R-LI-9)"
+  },
+  "src/web-search/providers/tavily.js": {
+    "label": "tool",
+    "why": "WebSearch sends its query to the search provider; tools behave as now (R-LI-9)"
+  }
+}

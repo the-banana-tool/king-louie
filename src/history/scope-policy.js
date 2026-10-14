@@ -14,9 +14,17 @@
 //   R-H4-7  A bridge chat (Telegram, Discord) reads itself only and is left
 //           out of 'all'; the owner may link it explicitly, and a chat that
 //           links it reads it under 'linked' and under 'all'.
+//   R-LI-11 A private chat (local inference spec 2026-10-13 §8.3) is in no
+//           chat's scope unless the reader is private too, and an explicit
+//           link does not lift that: the reader's next model call could go
+//           to a hosted model. A private reader reads an ordinary chat under
+//           its stored scope (the text then stays on the owner's hardware).
+//           Only a mark that is exactly false is "not private"; a reader is
+//           private only by an exact true.
 //
-// The first rule that matches a chat wins, in that order. An imported chat
-// with no case mark is an ordinary chat here: it may read and be read.
+// The first rule that matches a chat wins, in that order; the private rule
+// is checked after the other three. An imported chat with no case mark is
+// an ordinary chat here: it may read and be read.
 const PINS = Object.freeze({
   'case-chat': Object.freeze({ scope: 'chat', reason: 'case-chat' }),
   'imported-case-chat': Object.freeze({ scope: 'chat', reason: 'imported-case-chat' }),
@@ -39,11 +47,11 @@ function createScopePolicy({ bridgeOriginFor } = {}) {
       const kind = kindOf(readerRef);
       return kind ? PINS[kind] : null;
     },
-    canRead(_readerRef, sourceRef, { explicit = false } = {}) {
+    canRead(readerRef, sourceRef, { explicit = false } = {}) {
       const kind = kindOf(sourceRef);
-      if (!kind) return true;
-      if (kind === 'bridge-chat' && explicit === true) return true;
-      return kind;
+      if (kind && !(kind === 'bridge-chat' && explicit === true)) return kind;
+      if (sourceRef.private !== false && !(readerRef && typeof readerRef === 'object' && readerRef.private === true)) return 'private-chat';
+      return true;
     }
   });
 }

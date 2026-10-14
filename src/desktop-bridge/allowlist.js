@@ -71,7 +71,10 @@ const LONG_CHANNEL_TIMEOUT_MS = 10 * 60 * 1000;
 // exemption of every case:ingest* channel: a bounded wait, never none.
 const LONG_CHANNELS = new Set([
   'case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook', 'case:applyPlaybookProposal',
-  'case:ingestFiles', 'case:ingestExtract', 'case:reviewProposal', 'case:acceptVerified'
+  'case:ingestFiles', 'case:ingestExtract', 'case:reviewProposal', 'case:acceptVerified',
+  // A local model's probe: a listing (20 s) and steps of up to 60 s each
+  // (src/models/local-probe.js, local-servers.js) can pass the default.
+  'models:local.probe'
 ]);
 
 function domainOf(channel) {

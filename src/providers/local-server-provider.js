@@ -1,0 +1,479 @@
+// src/providers/local-server-provider.js
+// The provider "local" (spec 2026-10-13-local-inference-design.md §5.1, §5.5,
+// §9.1): OllamaProvider's OpenAI-compatible code, sent through one local
+// server's pinned transport. One instance per server, built only by the
+// local server registry (src/models/local-servers.js); it is not in the
+// provider factory, so nothing can build one without a transport.
+//
+// A target's model is "<serverId>/<model>". The part after the first slash
+// is what the server is asked for; the whole id is what a call is recorded
+// under. Only this class marks a call local and prices it at $0 (R-LI-13).
+const OllamaProvider = require('./ollama-provider');
+const { LOCAL_PROVIDER, isOllamaCloudModelId } = require('../models/provider-ids');
+
+const SERVER_ID_RE = /^[a-z][a-z0-9-]{1,39}$/;
+// A server that reports no usage is estimated at this rate (spec §9.1 rule 4).
+const EST_CHARS_PER_TOKEN = 4;
+const estimate = (chars) => Math.ceil(Math.max(0, chars) / EST_CHARS_PER_TOKEN);
+const positiveMs = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
+
+// What a finished reply said, for the estimate: its text and the calls it
+// made. A streamed reply's text was counted as it arrived, so only its calls
+// are added then (toolChars).
+function toolChars(result) {
+  let n = 0;
+  for (const call of Array.isArray(result?.toolCalls) ? result.toolCalls : []) {
+    if (typeof call?.toolName === 'string') n += call.toolName.length;
+    try { n += JSON.stringify(call?.parameters ?? {}).length; } catch { /* unmeasurable: counted as nothing */ }
+  }
+  return n;
+}
+
+function replyChars(result) {
+  if (!result || typeof result !== 'object') return 0;
+  let n = 0;
+  for (const value of [result.content, result.messageContent]) {
+    if (typeof value === 'string') n += value.length;
+  }
+  return n + toolChars(result);
+}
+
+// The fields a streamed delta carries a model's reasoning in, by server:
+// vLLM, llama.cpp and LM Studio say reasoning_content, Ollama's /v1 says
+// reasoning. Reasoning is output (it ends the first-output timeout) but is
+// never the reply's text.
+const REASONING_KEYS = Object.freeze(['reasoning_content', 'reasoning', 'thinking']);
+const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
+
+function coded(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
+class LocalServerProvider extends OllamaProvider {
+  /**
+   * @param {string|null} apiKey - the server's key, when it wants one
+   * @param {object} options
+   * @param {string} options.baseUrl - the API base, `<server baseUrl>/v1`
+   * @param {{ fetch: Function }} options.transport - the server's pinned transport
+   * @param {string} options.serverId
+   * @param {string} [options.addressClass] - recorded on each call's metrics
+   * @param {string} [options.kind] - the server's kind; without it a cloud id is refused as on Ollama
+   * @param {number|null} [options.timeoutMs] - the server entry's timeoutMs (§6.4)
+   * @param {Function} [options.adapterRef] - (model, adapterId) → the adapter's ref, or throws (§12.3)
+   * @param {object} [options.catalog]
+   */
+  constructor(apiKey, options = {}) {
+    const transport = options.transport;
+    if (!transport || typeof transport.fetch !== 'function') {
+      throw coded('LOCAL_TRANSPORT_REQUIRED', 'A local server provider needs its server\'s pinned transport.');
+    }
+    if (typeof options.serverId !== 'string' || !SERVER_ID_RE.test(options.serverId)) {
+      throw coded('LOCAL_SERVER_UNKNOWN', 'A local server provider needs a server id.');
+    }
+    if (typeof options.baseUrl !== 'string' || !options.baseUrl.trim()) {
+      throw new Error('A local server provider needs its API base URL.');
+    }
+    const key = typeof apiKey === 'string' && apiKey.trim() ? apiKey.trim() : null;
+    super(key, options);
+    this.transport = transport;
+    this.serverId = options.serverId;
+    this.addressClass = typeof options.addressClass === 'string' && options.addressClass
+      ? options.addressClass
+      : (typeof transport.addressClass === 'string' ? transport.addressClass : 'unknown');
+    this.kind = typeof options.kind === 'string' ? options.kind : null;
+    this.timeoutMs = positiveMs(options.timeoutMs);
+    // (model, adapterId) → what the server calls that adapter; the registry
+    // checks it is declared and made for the model's current version.
+    this._adapterRef = typeof options.adapterRef === 'function' ? options.adapterRef : null;
+    this._key = key;
+    // Per call: the characters sent and received, for the estimate when the
+    // server reports no usage. Keyed by the call's own options object, which
+    // the parent hands to request() unchanged.
+    this._sizes = new WeakMap();
+    // Per call, by its bounded abort signal: the timeout to clear when the
+    // first byte of a non-streamed reply body arrives (see _bound).
+    this._watchBody = new WeakMap();
+    // Per streamed call, by its bounded abort signal: the timeout to clear
+    // when the stream carries its first output (_outputSeen).
+    this._watchStream = new WeakMap();
+  }
+
+  getName() { return LOCAL_PROVIDER; }
+  getLabel() { return 'Local server'; }
+
+  getProviderName() {
+    return LOCAL_PROVIDER;
+  }
+
+  getHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    if (this._key) headers.Authorization = `Bearer ${this._key}`;
+    return headers;
+  }
+
+  // "<this server>/<model>" → the id the server is asked for. Anything else
+  // is refused before a request is made (§5.5). `egress` is the call's
+  // policy, when it has one.
+  _serverModel(id, egress = null) {
+    const text = typeof id === 'string' ? id : '';
+    const prefix = `${this.serverId}/`;
+    if (!text.startsWith(prefix) || text.length === prefix.length) {
+      throw coded('LOCAL_SERVER_UNKNOWN', `A model on the local server ${this.serverId} is named "${this.serverId}/<model>".`);
+    }
+    const model = text.slice(prefix.length);
+    // On an Ollama server an id that says "cloud" runs on Ollama's cloud,
+    // not here. With no kind given this cannot be told apart, so it is refused.
+    if ((this.kind === 'ollama' || this.kind === null) && isOllamaCloudModelId(model)) {
+      throw coded('LOCAL_CLOUD_MODEL', `${model} runs on Ollama's cloud, not on the local server ${this.serverId}.`);
+    }
+    // Under a policy a cloud id is refused on any kind of server (review
+    // fix, item 7): a server that hands the call on to Ollama's cloud would
+    // not say so, and the name says it might.
+    if (egress !== null && egress !== undefined && isOllamaCloudModelId(model)) {
+      throw coded('LOCAL_CLOUD_MODEL', `${model} is named as an Ollama cloud model, so a private chat or a local-only role does not use it on the local server ${this.serverId}.`);
+    }
+    return model;
+  }
+
+  /**
+   * The model a request names (spec §12.3, the adapter seam): the adapter's
+   * `ref` when the target names one, else the server's own id for the model.
+   * An adapter that is not declared for the model, or was made for another
+   * version of it, throws (LOCAL_ADAPTER_UNKNOWN, LOCAL_ADAPTER_STALE) before
+   * any request. If a server kind ever needs a request field instead, this
+   * returns `{ model, extra }` and nothing else moves.
+   * @param {{ model: string, adapter?: string|null }} target
+   * @returns {string}
+   */
+  requestModelFor(target) {
+    const model = this._serverModel(target && target.model);
+    const adapter = target ? target.adapter : null;
+    if (adapter === undefined || adapter === null) return model;
+    if (!this._adapterRef) {
+      throw coded('LOCAL_ADAPTER_UNKNOWN', `${model} on the local server ${this.serverId} has no adapter ${typeof adapter === 'string' ? adapter.slice(0, 40) : ''}.`);
+    }
+    return this._adapterRef(model, adapter);
+  }
+
+  // Counts what a call sends, for the estimate (see _call).
+  // Also: for a non-streamed call under a timeout, the reply body is watched
+  // for its first byte, which ends the timeout (owner ruling on Q-L1-5).
+  async request(url, init = {}, options = {}) {
+    const sizes = options && typeof options === 'object' ? this._sizes.get(options) : null;
+    if (sizes && init && typeof init.body === 'string') sizes.sent += init.body.length;
+    const response = await super.request(url, init, options);
+    const bound = options && options.abortSignal ? this._watchBody.get(options.abortSignal) : null;
+    if (!bound || !response || !response.body || typeof response.body.getReader !== 'function') return response;
+    const reader = response.body.getReader();
+    const watched = new ReadableStream({
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) { controller.close(); return; }
+        if (value && value.byteLength > 0) bound.started();
+        controller.enqueue(value);
+      },
+      cancel(reason) { return reader.cancel(reason); }
+    });
+    return new Response(watched, { status: response.status, statusText: response.statusText, headers: response.headers });
+  }
+
+  /**
+   * How long a call to this server may wait for its first output (spec
+   * §6.4; owner rulings on Q-L1-3 and Q-L1-5, 2026-10-14): the role's
+   * timeout, replaced by the server entry's `timeoutMs` when that is larger.
+   * With neither, null: no timeout, as before. Hosted providers have no
+   * such rule.
+   */
+  callTimeoutMs(roleTimeoutMs) {
+    const role = positiveMs(roleTimeoutMs);
+    if (role === null) return this.timeoutMs;
+    if (this.timeoutMs === null) return role;
+    return Math.max(role, this.timeoutMs);
+  }
+
+  // The one abort path: a call's timeout aborts the call's own signal, which
+  // the transport already honours while the call waits for a slot and for
+  // the reply. The timeout runs only until the first output arrives (the
+  // first streamed token, or the first byte of a non-streamed reply body):
+  // `started()` clears it, so a long reply is never cut by it (Q-L1-5). The
+  // caller's signal is forwarded for the whole call, so Stop still stops.
+  // Returns null when there is no timeout.
+  _bound(callerSignal, ms) {
+    if (ms === null) return null;
+    const controller = new AbortController();
+    let fired = false;
+    const forward = () => controller.abort(callerSignal.reason);
+    if (callerSignal) {
+      if (callerSignal.aborted) forward();
+      else callerSignal.addEventListener('abort', forward, { once: true });
+    }
+    const message = `The local server ${this.serverId} did not answer within ${ms} ms.`;
+    const timer = setTimeout(() => {
+      fired = true;
+      controller.abort(new DOMException(message, 'TimeoutError'));
+    }, ms);
+    return {
+      signal: controller.signal,
+      // A call that failed because the timeout fired (and not because the
+      // caller stopped it) is LOCAL_TIMEOUT, never an AbortError: a Stop
+      // ends a turn, a timeout fails over (error-classifier.js rule 1c).
+      failure: (err) => {
+        if (!fired || callerSignal?.aborted) return err;
+        const timedOut = coded('LOCAL_TIMEOUT', message);
+        timedOut.timeoutMs = ms;
+        timedOut.serverId = this.serverId;
+        timedOut.cause = err;
+        if (err && typeof err === 'object' && err.partialLlmMetrics) timedOut.partialLlmMetrics = err.partialLlmMetrics;
+        return timedOut;
+      },
+      started: () => { clearTimeout(timer); },
+      done: () => {
+        clearTimeout(timer);
+        if (callerSignal) callerSignal.removeEventListener('abort', forward);
+      }
+    };
+  }
+
+  // Run one of the parent's calls with the server's own model id, and record
+  // it under the id the target named (a server may call the model anything).
+  // A finished call whose server reported no usage at all, with a reply that
+  // has text, is estimated at one token per four characters of the request
+  // body and of the reply, and marked usageEstimated (§9.1 rule 4). A call
+  // cut off by Stop is left as it is (usagePartial, rule 5). A target that
+  // names an adapter (§12) sends the adapter's ref and is recorded under the
+  // base model, with `adapter` on its metrics.
+  async _call(run, options, onChunk = null, streamed = false) {
+    const { adapter: named = null, ...opts } = options || {};
+    const adapter = named === undefined || named === null ? null : named;
+    const model = this._serverModel(opts.model, opts.egress);
+    const recorded = `${this.serverId}/${model}`;
+    const sent = adapter === null ? model : this.requestModelFor({ model: opts.model, adapter });
+    const tag = (metrics) => (adapter === null ? metrics : { ...metrics, adapter });
+    const bound = this._bound(opts.abortSignal || null, this.callTimeoutMs(opts.timeoutMs));
+    const callOptions = { ...opts, model: sent, ...(bound ? { abortSignal: bound.signal } : {}) };
+    const sizes = { sent: 0, received: 0 };
+    this._sizes.set(callOptions, sizes);
+    // A streamed call's first output (text, reasoning or a tool-call delta:
+    // _streamChat calls _outputSeen) ends its timeout; a non-streamed call's
+    // first body byte does (request, above).
+    const counting = (chunk) => {
+      if (typeof chunk === 'string') {
+        sizes.received += chunk.length;
+        if (bound && chunk.length > 0) bound.started();
+      }
+      return typeof onChunk === 'function' ? onChunk(chunk) : undefined;
+    };
+    if (bound) (streamed ? this._watchStream : this._watchBody).set(bound.signal, bound);
+    try {
+      const result = await run(callOptions, streamed ? counting : null);
+      if (result && typeof result === 'object' && result.llmMetrics) {
+        sizes.received += streamed ? toolChars(result) : replyChars(result);
+        result.llmMetrics = tag(this._estimated({ ...result.llmMetrics, model: recorded }, sizes));
+      }
+      return result;
+    } catch (err) {
+      if (err && typeof err === 'object' && err.partialLlmMetrics) err.partialLlmMetrics = tag({ ...err.partialLlmMetrics, model: recorded });
+      throw bound ? bound.failure(err) : err;
+    } finally {
+      if (bound) bound.done();
+    }
+  }
+
+  sendMessage(messages, options = {}) {
+    return this._call((opts) => super.sendMessage(messages, opts), options);
+  }
+
+  sendMessageWithTools(messages, tools = [], options = {}) {
+    return this._call((opts) => super.sendMessageWithTools(messages, tools, opts), options);
+  }
+
+  // Streamed calls (review fix, item 3): agent mode streams too, through
+  // streamMessageWithTools, so a long agent reply is bounded only until its
+  // first output (Q-L1-5), never as a whole.
+  streamMessage(messages, options = {}, onChunk) {
+    return this._call((opts, counting) => this._streamChat(messages, null, opts, counting), options, onChunk, true);
+  }
+
+  streamMessageWithTools(messages, tools = [], options = {}, onChunk) {
+    return this._call((opts, counting) => this._streamChat(messages, tools, opts, counting), options, onChunk, true);
+  }
+
+  // The stream carried output: the first-output timeout ends.
+  _outputSeen(options) {
+    const bound = options && options.abortSignal ? this._watchStream.get(options.abortSignal) : null;
+    if (bound) bound.started();
+  }
+
+  /**
+   * One streamed chat completion at `<baseUrl>/chat/completions`, every kind
+   * alike (OpenAI-compatible SSE). Text deltas go to onChunk; reasoning
+   * deltas and tool-call deltas are output too (they end the first-output
+   * timeout) but are not text. Tool calls are put together from their
+   * deltas by `index` (a delta with no index continues the last call, or
+   * starts one when it brings a new id). With `tools` the result is
+   * parseToolResponse's shape; without, `{ llmMetrics }` as streamMessage
+   * returns. A server that answers a streamed request with one JSON body is
+   * read as that body (its first output is then the whole body).
+   */
+  async _streamChat(messages, tools, options, onChunk) {
+    const requestedModel = options.model || this.getDefaultModel();
+    const withTools = Array.isArray(tools) && tools.length > 0;
+    const prepared = this.prependSystemPrompt(messages, this.systemText(options));
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({
+        model: requestedModel,
+        messages: this.formatMessages(prepared),
+        ...(withTools ? {
+          tools: tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })),
+          tool_choice: 'auto'
+        } : {}),
+        temperature: options.temperature ?? 0.7,
+        stream: true
+      })
+    }, options);
+    if (!response.ok) throw await this.buildError(response);
+
+    let usage = null;
+    let model = requestedModel;
+    let content = '';
+    const calls = [];
+    const emit = (text) => { if (typeof onChunk === 'function') onChunk(text); };
+    const finish = () => {
+      const llmMetrics = this.buildLlmCallMetrics({ model, usage });
+      if (!withTools) return { llmMetrics };
+      const toolCalls = calls.filter(Boolean).map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args } }));
+      return this.parseToolResponse({ choices: [{ message: { content, tool_calls: toolCalls } }] }, llmMetrics);
+    };
+
+    const contentType = String(response.headers?.get?.('content-type') || '');
+    if (contentType.includes('application/json')) {
+      const data = await response.json();
+      this._outputSeen(options);
+      usage = data?.usage || null;
+      model = data?.model || model;
+      const message = data?.choices?.[0]?.message || {};
+      if (nonEmpty(message.content)) { content = message.content; emit(content); }
+      for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+        if (call?.function?.name) calls.push({ id: call.id, name: call.function.name, args: typeof call.function.arguments === 'string' ? call.function.arguments : JSON.stringify(call.function.arguments ?? {}) });
+      }
+      return finish();
+    }
+
+    const takeCall = (delta) => {
+      let slot;
+      if (Number.isInteger(delta.index) && delta.index >= 0 && delta.index < 128) {
+        slot = calls[delta.index] || (calls[delta.index] = { id: null, name: '', args: '' });
+      } else {
+        const last = calls.length ? calls[calls.length - 1] : null;
+        slot = last && (!delta.id || !last.id || last.id === delta.id) ? last : null;
+        if (!slot) { slot = { id: null, name: '', args: '' }; calls.push(slot); }
+      }
+      let seen = false;
+      if (nonEmpty(delta.id) && !slot.id) slot.id = delta.id;
+      const fn = delta.function || {};
+      if (nonEmpty(fn.name)) { if (!slot.name) slot.name = fn.name; seen = true; }
+      if (nonEmpty(fn.arguments)) { slot.args += fn.arguments; seen = true; } else if (fn.arguments && typeof fn.arguments === 'object') { slot.args = JSON.stringify(fn.arguments); seen = true; }
+      return seen;
+    };
+
+    // → true at [DONE].
+    const take = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return false;
+      const data = trimmed.slice(5).trim();
+      if (data === '[DONE]') return true;
+      let parsed;
+      try { parsed = JSON.parse(data); } catch { return false; } // a malformed chunk is skipped
+      if (parsed?.usage) usage = parsed.usage;
+      if (parsed?.model) model = parsed.model;
+      const delta = parsed?.choices?.[0]?.delta;
+      if (!delta || typeof delta !== 'object') return false;
+      let output = false;
+      if (nonEmpty(delta.content)) {
+        content += delta.content;
+        output = true;
+        emit(delta.content);
+      }
+      if (REASONING_KEYS.some((k) => nonEmpty(delta[k]))) output = true;
+      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        if (call && typeof call === 'object' && takeCall(call)) output = true;
+      }
+      if (output) this._outputSeen(options);
+      return false;
+    };
+
+    return this.guardStream(options, () => ({ model, usage }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) if (take(line)) return finish();
+      }
+      buffer += decoder.decode();
+      if (buffer) take(buffer);
+      return finish();
+    });
+  }
+
+  _estimated(metrics, sizes) {
+    if (metrics.usagePartial || sizes.received <= 0) return metrics;
+    const reported = ['inputTokens', 'outputTokens', 'totalTokens', 'cachedInputTokens', 'cacheCreationInputTokens']
+      .reduce((n, k) => n + (Number(metrics[k]) || 0), 0);
+    if (reported > 0) return metrics;
+    const input = estimate(sizes.sent);
+    const output = estimate(sizes.received);
+    return {
+      ...metrics,
+      ...this.buildLlmCallMetrics({
+        model: metrics.model,
+        usage: { prompt_tokens: input, completion_tokens: output, total_tokens: input + output }
+      }),
+      usageEstimated: true
+    };
+  }
+
+  // Embeddings stay on the server too (its /api/embed, through the transport).
+  // Bounded by the call's timeout like a chat call.
+  async embed(inputs, options = {}) {
+    const opts = options || {};
+    const model = this._serverModel(opts.model, opts.egress);
+    const bound = this._bound(opts.abortSignal || null, this.callTimeoutMs(opts.timeoutMs));
+    if (bound) this._watchBody.set(bound.signal, bound);
+    try {
+      return await super.embed(inputs, { ...opts, model, ...(bound ? { abortSignal: bound.signal } : {}) });
+    } catch (err) {
+      throw bound ? bound.failure(err) : err;
+    } finally {
+      if (bound) bound.done();
+    }
+  }
+
+  /**
+   * One call's metrics (§9.1): tokens as the server reported them, $0, never
+   * unpriced, and marked local with the server and its address class.
+   */
+  buildLlmCallMetrics({ model, usage, partial = false } = {}) {
+    const prefix = `${this.serverId}/`;
+    const named = typeof model === 'string' && model ? model : '';
+    const base = super.buildLlmCallMetrics({ model: named || `${prefix}unknown`, usage, partial });
+    delete base.unpriced;
+    return {
+      ...base,
+      provider: LOCAL_PROVIDER,
+      model: named.startsWith(prefix) ? named : `${prefix}${named || 'unknown'}`,
+      costUsd: 0,
+      local: { server: this.serverId, class: this.addressClass }
+    };
+  }
+}
+
+module.exports = LocalServerProvider;
