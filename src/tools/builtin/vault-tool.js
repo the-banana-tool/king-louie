@@ -4,6 +4,10 @@ const { Tool } = require('../tool-schema');
 // under `contact.`; the model can neither read nor list them, however it
 // spells the key (see isContactVaultKey).
 const { isContactVaultKey } = require('../../cases/contact-settings');
+// Local inference stage L1: an administrator's key for a local server lives
+// under `local.` (src/models/local-vault-keys.js), out of the model's reach
+// the same way.
+const { isLocalServerVaultKey } = require('../../models/local-vault-keys');
 
 /**
  * Vault Tool — Secure credential storage and retrieval.
@@ -61,6 +65,9 @@ const vaultTool = new Tool({
     if (action !== 'list' && isContactVaultKey(key)) {
       return { ok: false, error: 'contact credentials are managed in settings, not by the model' };
     }
+    if (action !== 'list' && isLocalServerVaultKey(key)) {
+      return { ok: false, error: 'local server keys are managed by the administrator, not by the model' };
+    }
     // The desktop vault treats a backslash as an escape, so such a key would
     // not name what it appears to name.
     if (action !== 'list' && String(key).includes('\\')) {
@@ -86,7 +93,7 @@ const vaultTool = new Tool({
         }
 
         case 'list': {
-          const keys = vault.list().filter((k) => !isContactVaultKey(k));
+          const keys = vault.list().filter((k) => !isContactVaultKey(k) && !isLocalServerVaultKey(k));
           return { ok: true, keys, count: keys.length };
         }
 

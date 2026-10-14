@@ -162,6 +162,12 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **Inventory:** `pending` is gone. `history/vector-search.js` is `gated`; `history/embed-indexer.js` and `history/embedders/remote.js` are `behind-gate`, gate `src/history/embedding-index.js`.
 - **Test helper note:** the Jev test needs a recalled excerpt to reach a rerank; with `tailUserTurns: 1` a chat of one exchange recalls nothing, so its control adds two later turns.
 
+**Leftovers of Tasks 5 to 7** (one commit after Task 10):
+
+- **The Vault tool and an admin-stored local server key.** As for `contact.`: a new `src/models/local-vault-keys.js` (`isLocalServerVaultKey`, the same spelling fold as `isContactVaultKey`) names the namespace `local.`; the Vault tool refuses `retrieve`, `store` and `delete` of such a key and leaves it out of `list`. So that every admin key is under it, `parseLocalInferenceConfig` now also refuses a `key` reference outside `local.` (`${vault:local.<name>}`; the spec's own example). Stricter than Task 7: an admin block with `${vault:lan-box}` no longer loads. On the desktop a server's key is `__local_<id>` in `apiTokens`, which no tool reads; nothing changed there.
+- **`models:local.probe` is in the bridge's `LONG_CHANNELS`** (10 minutes): one probe is a listing (20 s) and two steps of up to 60 s each, more than the 120 s default. `add` and `fromOllama` also probe, but over the bridge they are refused at once in service mode (`LOCAL_SERVER_ADMIN_ONLY`), so they were left out.
+- **A server's `timeoutMs` is still not applied.** Spec §6.4 says it replaces the role timeout "for calls to that server when it is larger", but the role timeout (`roleTimeoutMs`) is not applied to any model call today: it is put in the call options (`timeoutMs`) by the chat send path, `oneShot` callers and `resolveRole`, and no provider, the router or the agent loop reads it. There is nothing for the entry's value to replace, and enforcing a call timeout would be a new rule. Left as it is; see Q-L1-3.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named). Rulings that belong to L2 only are listed so nobody looks for them here.
@@ -205,6 +211,9 @@ Found while building. Each is built the cautious way until the owner rules; none
 
 - **Q-L1-1. May a workflow run from a private chat?** Today a workflow's tasks are not children of the chat's turn: they reach the model with no chat and no snapshot, on the default profile, with the chat's tail and recalled text in the prompt. **Built: a private chat's workflow is not planned and does not run** (`PRIVATE_NO_DETACHED_RUN`), also when the profile has a local model. The other choice is to let a task carry its workflow's chat to the snapshot, so it runs local or refused like a sub-agent (spec §7.3 lists "a workflow task" beside sub-agents); that is a change to `WorkflowEngine`'s task options, which Task 8's text says not to make.
 - **Q-L1-2. A workflow whose chat no longer exists** (deleted after the workflow was made) is refused like a private chat's, because an unknown chat is private. Before this stage it ran. Keep, or let a workflow with a chat id the store definitely does not hold run with no policy?
+
+- **Q-L1-3. Should a model call have a timeout at all, and from where?** `roleTimeoutMs` (`models.roleTimeoutsMs`) is computed and handed to every call as `options.timeoutMs`, but nothing enforces it, so a local server's `timeoutMs` (spec §6.4: "replaces the role timeout … when it is larger") has nothing to replace. **Built: nothing**; the value is validated and stored only. Enforcing the role timeout would change every hosted call too.
+- **Q-L1-4. The keep-local embedder's model.** The spec and the plan say the default local model; an owner who chose another local model (`history.embedder.model`) and then a hosted kind gets the default one for private and imported chats. **Built: the default model.**
 
 ## Global Constraints
 

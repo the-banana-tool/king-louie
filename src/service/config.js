@@ -244,6 +244,11 @@ function parseLocalInferenceConfig(raw, file) {
     if (entry.key !== undefined && entry.key !== null && (typeof entry.key !== 'string' || !LOCAL_KEY_REF.test(entry.key))) {
       throw bad('.key must be a ${vault:<key>} reference; store the key in the vault');
     }
+    // Under local. only: the Vault tool refuses and hides that namespace
+    // (src/models/local-vault-keys.js), so the model cannot read the key.
+    if (entry.key !== undefined && entry.key !== null && !require('../models/local-vault-keys').isLocalServerVaultKey(entry.key.slice('${vault:'.length, -1))) {
+      throw bad('.key must name a vault key under local. (${vault:local.<name>}); the model cannot read that namespace');
+    }
     if (entry.adapters !== undefined && !(Array.isArray(entry.adapters) && entry.adapters.length <= 64 && entry.adapters.every((a) => isPlainObject(a) || (typeof a === 'string' && a)))) {
       throw bad('.adapters must be a list');
     }
