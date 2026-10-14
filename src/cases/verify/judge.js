@@ -213,43 +213,90 @@ function verifyTools(runtime) {
   return VERIFY_TOOLS.map((n) => registry.get(n)).filter(Boolean).map((t) => t.toFunctionDefinition());
 }
 
-// One call, bounded by a ref'd timer and by the turn's own signal.
-// → { reply } or { error: <fixed words> }.
-async function callVerifyModel(runtime, turn, input, timeoutMs) {
+// Whatever the verify call reports is charged to the case, once, when the
+// call settles: a reply that came in time, a reply that came after the time
+// limit or after its result was dropped, and the partial usage a provider
+// attaches to a call it was told to stop. Nothing the provider billed goes
+// unrecorded because the pass stopped waiting for it.
+//
+// In time, the charge is written at once: the turn, or the landing that
+// follows, commits budget.json. Late, it is written in a system action of
+// its own (so it is committed) when the case is free, and directly when it
+// is not or the app is closing. → a promise that settles when it is written.
+function chargeVerifyUsage(runtime, turn, reply, { late = false } = {}) {
+  let done = false;
+  const charge = () => {
+    if (done) return;
+    done = true;
+    try {
+      recordOneShotUsage(runtime, turn, reply);
+    } catch (err) {
+      log.warn(`Charging the verify call of case ${turn.caseId} failed: ${err?.message || err}`);
+    }
+  };
+  if (!late || runtime.closing || typeof runtime.verifySystemAction !== 'function') {
+    charge();
+    return Promise.resolve();
+  }
+  return Promise.resolve()
+    .then(() => runtime.verifySystemAction(turn.caseId, 'verify pass usage', charge))
+    .catch((err) => {
+      log.debug(`Case ${turn.caseId}: the late verify charge was written outside a system action: ${err?.message || err}`);
+      charge();
+    });
+}
+
+// One call, bounded by a ref'd timer and by `signal` (the turn's own in a
+// turn; the pass's own after the reply). → { reply, model, settled } or
+// { error: <fixed words>, settled }. `settled` resolves when the provider
+// call itself has ended and its usage is written, which can be after this
+// function returned (a time limit, a stop).
+async function callVerifyModel(runtime, turn, input, timeoutMs, { signal = turn.signal || null } = {}) {
   const controller = new AbortController();
-  const onAbort = () => controller.abort(turn.signal.reason);
+  const onAbort = () => controller.abort(signal.reason);
   let timer = null;
   let aborted = null;
+  let decided = false;
+  let settled = Promise.resolve();
   try {
     await runtime.ensureRoleTested(turn.caseId, 'verify', { turn });
-    if (turn.signal?.aborted) return { error: 'the turn was stopped' };
+    if (signal?.aborted) return { error: 'the turn was stopped', settled };
     const provider = runtime.routedProvider(turn, { role: 'verify' });
     const stopped = new Promise((resolve) => {
       timer = setTimeout(() => {
         controller.abort(new Error('verify timeout'));
         resolve({ error: `timed out after ${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`}` });
       }, timeoutMs);
-      if (turn.signal) {
+      if (signal) {
         aborted = () => {
           onAbort();
           resolve({ error: 'the turn was stopped' });
         };
-        turn.signal.addEventListener('abort', aborted, { once: true });
+        signal.addEventListener('abort', aborted, { once: true });
       }
     });
+    let charged = Promise.resolve();
     const call = Promise.resolve()
       .then(() => provider.sendMessageWithTools([{ sender: 'user', text: input }], verifyTools(runtime), { systemPrompt: VERIFY_SYSTEM, temperature: 0, abortSignal: controller.signal }))
-      .then((reply) => ({ reply, model: provider.current() }), (err) => {
+      .then((reply) => {
+        charged = chargeVerifyUsage(runtime, turn, reply, { late: decided });
+        return { reply, model: provider.current() };
+      }, (err) => {
+        // A stopped call: what the provider had reported so far is usage too.
+        if (isObject(err) && isObject(err.partialLlmMetrics)) charged = chargeVerifyUsage(runtime, turn, { llmMetrics: err.partialLlmMetrics }, { late: decided });
         log.warn(`The verify call of case ${turn.caseId} failed: ${err?.message || err}`);
         return { error: controller.signal.aborted ? 'the call was stopped' : 'the model call failed' };
       });
-    return await Promise.race([call, stopped]);
+    settled = call.then(() => charged).catch(() => {});
+    const result = await Promise.race([call, stopped]);
+    return { ...result, settled };
   } catch (err) {
     log.warn(`The verify pass of case ${turn.caseId} could not call a model: ${err?.message || err}`);
-    return { error: 'no usable model' };
+    return { error: 'no usable model', settled };
   } finally {
+    decided = true;
     clearTimeout(timer);
-    if (aborted && turn.signal) turn.signal.removeEventListener('abort', aborted);
+    if (aborted && signal) signal.removeEventListener('abort', aborted);
   }
 }
 
@@ -258,14 +305,19 @@ const SKIP_NOTES = Object.freeze({
   'usd-budget': (cfg) => `not run (the usd budget is past ${cfg.skipAboveUsdPercent} %)`
 });
 
-// → { ran, skipped, accepted, opinions, disagreed, error, note }. `mode`
-// is 'close' (the end of a turn) or 'request' (asked for by name). Never
-// throws.
-async function runVerifyPass(runtime, turn, { turnEvidence = null, mode = 'close' } = {}) {
+// The part of a pass that needs no model, done under the case lock: every
+// reason to skip, what the model will be shown, and the count of the pass.
+// → { out, plan }: `out` is the pass's result so far ({ ran, skipped,
+// accepted, opinions, disagreed, error, note }); `plan` is null when the
+// pass is skipped, else what the call and `applyVerifyReply` need. `mode`
+// is 'close' (the end of a turn) or 'request' (asked for by name). `owed`:
+// an earlier pass of this case was dropped before it could land, so a close
+// runs one even when this turn wrote nothing. Never throws.
+function prepareVerifyPass(runtime, turn, { turnEvidence = null, mode = 'close', owed = false } = {}) {
   const out = { ran: false, skipped: null, accepted: [], opinions: [], disagreed: [], error: null, note: null };
   const skip = (reason) => {
     out.skipped = reason;
-    return out;
+    return { out, plan: null };
   };
   try {
     const cfg = runtime.settings().verify;
@@ -273,7 +325,7 @@ async function runVerifyPass(runtime, turn, { turnEvidence = null, mode = 'close
     if (mode === 'close' && cfg.when === 'request') return skip('on-request');
     if (turn.signal?.aborted) return skip('stopped');
     if (runtime.closing) return skip('shutdown');
-    if (mode === 'close' && !(turnEvidence && turnEvidence.changed === true)) return skip('nothing-written');
+    if (mode === 'close' && owed !== true && !(turnEvidence && turnEvidence.changed === true)) return skip('nothing-written');
     const meta = runtime.getCase(turn.caseId);
     if (meta.status !== 'active' && meta.status !== 'needs-direction') return skip('case-not-open');
     const store = runtime.verification(meta.id);
@@ -293,35 +345,37 @@ async function runVerifyPass(runtime, turn, { turnEvidence = null, mode = 'close
       view, turnEvidence, facts: runtime.ledger(meta.id).view().facts, maxChars: cfg.maxInputChars
     });
     const shownHash = new Map(confirmed.map((r) => [r.id, r.hash]));
-    // Counted before the call: a provider that fails every time is bounded too.
+    // Counted before the call, once: a provider that fails every time is
+    // bounded too, and a pass that is dropped later is not counted again.
     store.countPass(day);
     out.ran = true;
-    const called = await callVerifyModel(runtime, turn, input, cfg.timeoutMs);
-    // Whether this turn still owns the case: a stop, a pause or a shutdown
-    // while the model was thinking leaves the record as it is.
-    const live = runtime.turns.get(turn.caseId) === turn && !turn.signal?.aborted && !runtime.closing;
-    if (called.reply) {
-      try {
-        recordOneShotUsage(runtime, turn, called.reply);
-      } catch (err) {
-        log.warn(`Charging the verify call of case ${meta.slug} failed: ${err.message}`);
-      }
-    }
-    if (!called.reply) {
-      out.error = called.error || 'the model call failed';
-      return out;
-    }
-    if (!live) {
-      out.error = 'the turn was stopped';
-      return out;
-    }
-    const verdicts = parseVerifyReply(textOf(called.reply), confirmed.map((r) => r.id));
+    return {
+      out,
+      plan: { caseId: meta.id, turnId: turn.turnId, input, shown, shownHash, confirmedIds: confirmed.map((r) => r.id), timeoutMs: cfg.timeoutMs }
+    };
+  } catch (err) {
+    log.warn(`The verify pass of case ${turn?.caseId} could not be prepared: ${err?.message || err}`);
+    out.error = 'the pass failed; the log says why';
+    return { out, plan: null };
+  }
+}
+
+// What code does with the reply (spec §6.5), against the record as it is
+// now. Synchronous, so a caller that holds the case lock applies a whole
+// reply or none of it. Fills `out` and returns it. Never throws.
+function applyVerifyReply(runtime, plan, called, out) {
+  try {
+    const meta = runtime.getCase(plan.caseId);
+    const store = runtime.verification(meta.id);
+    const { shown, shownHash } = plan;
+    const turn = { turnId: plan.turnId };
+    const verdicts = parseVerifyReply(textOf(called.reply), plan.confirmedIds);
     if (!verdicts) {
       out.error = 'the reply was not in the expected shape';
       return out;
     }
-    // The record may have changed while the model was thinking (an answer
-    // applied inline): every check below reads it as it is now.
+    // The record may have changed while the model was thinking (an answer,
+    // a scope change): every check below reads it as it is now.
     const now = runtime.progressView(meta.id);
     const ctx = { facts: runtime.ledger(meta.id).view().facts, checks: null, snapshot: null };
     try {
@@ -373,6 +427,34 @@ async function runVerifyPass(runtime, turn, { turnEvidence = null, mode = 'close
       out.accepted.push({ id: verdict.id, evidence: verdict.evidence, recordId: record.id });
     }
     return out;
+  } catch (err) {
+    log.warn(`The verify reply of case ${plan?.caseId} could not be applied: ${err?.message || err}`);
+    out.error = 'the pass failed; the log says why';
+    return out;
+  }
+}
+
+// A whole pass inside a turn that holds the case: the request mode of the
+// Progress tool (spec §6.5). The pass at the close of a turn runs after the
+// turn instead (CaseRuntime._startVerifyPass), from the same three parts.
+// → { ran, skipped, accepted, opinions, disagreed, error, note }. Never throws.
+async function runVerifyPass(runtime, turn, { turnEvidence = null, mode = 'close' } = {}) {
+  const { out, plan } = prepareVerifyPass(runtime, turn, { turnEvidence, mode });
+  if (!plan) return out;
+  try {
+    const called = await callVerifyModel(runtime, turn, plan.input, plan.timeoutMs);
+    if (!called.reply) {
+      out.error = called.error || 'the model call failed';
+      return out;
+    }
+    // Whether this turn still owns the case: a stop, a pause or a shutdown
+    // while the model was thinking leaves the record as it is.
+    const live = runtime.turns.get(turn.caseId) === turn && !turn.signal?.aborted && !runtime.closing;
+    if (!live) {
+      out.error = 'the turn was stopped';
+      return out;
+    }
+    return applyVerifyReply(runtime, plan, called, out);
   } catch (err) {
     log.warn(`The verify pass of case ${turn?.caseId} failed: ${err?.message || err}`);
     out.error = 'the pass failed; the log says why';
@@ -429,5 +511,6 @@ function verificationBlock({ pass = null, before = null, after = null, check = n
 }
 
 module.exports = {
-  VERIFY_SYSTEM, VERIFY_TOOLS, HEADING, buildVerifyInput, composeVerifyInput, parseVerifyReply, acceptVerdict, runVerifyPass, verificationBlock
+  VERIFY_SYSTEM, VERIFY_TOOLS, HEADING, buildVerifyInput, composeVerifyInput, parseVerifyReply, acceptVerdict,
+  prepareVerifyPass, callVerifyModel, applyVerifyReply, runVerifyPass, verificationBlock
 };

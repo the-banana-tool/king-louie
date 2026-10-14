@@ -181,6 +181,12 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
     } catch (err) {
       log.warn(`Wake-up commit for case ${caseId} failed: ${err.message}`);
     }
+    // The verify pass runs after the turn released the case (R-C8-11), as
+    // it does after an owner turn. Nobody waits for a wake-up, so it waits
+    // for its own pass: the sweep stays one case at a time, and shutdown,
+    // which awaits the sweep, awaits the pass with it (beginShutdown stops
+    // the call). An owner turn that starts meanwhile still takes the case.
+    if (outcome === 'acted' && typeof runtime.verifyIdle === 'function') await runtime.verifyIdle(turn.caseId);
     return { outcome };
   };
 
@@ -322,8 +328,9 @@ async function runDueWakeups(runtime, now = runtime.now()) {
     // handles whichever turn is already running.
     if (runtime.closing) break;
     const meta = ordered[i];
-    // An owner is mid-turn on this case in this process: leave it alone.
-    if (runtime.turns.has(meta.id)) {
+    // An owner is mid-turn on this case in this process, or the verify pass
+    // of its last turn is still out: leave it alone.
+    if (runtime.turns.has(meta.id) || (typeof runtime.verifyRunning === 'function' && runtime.verifyRunning(meta.id))) {
       counts.busy += 1;
       continue;
     }

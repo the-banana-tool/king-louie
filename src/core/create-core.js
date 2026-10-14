@@ -3258,6 +3258,12 @@ function createCore(deps = {}) {
         shutdownTimeoutMs, 'cases:wakeups drain', warnTimeout
       );
     }
+    // Cases stage 8 (R-C8-11): a verify pass that was still out after its
+    // turn's reply had its call stopped by beginShutdown() above. Wait for
+    // it to end (and for a result already being written to commit) before
+    // releaseAll() below can force a lock away.
+    await withTimeout(caseRuntime.verifyIdle(null, { settled: true }), shutdownTimeoutMs, 'Verify pass drain', warnTimeout)
+      .catch((err) => log.warn(`Verify pass drain failed: ${err.message}`));
     await withTimeout(
       runHookEvent('SessionEnd', { source: 'main', endedAt: new Date().toISOString(), workingDirectory: hostWorkingDirectory }),
       shutdownTimeoutMs, 'SessionEnd hook', warnTimeout

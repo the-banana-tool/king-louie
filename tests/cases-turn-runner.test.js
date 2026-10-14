@@ -103,9 +103,12 @@ function dueWakeup(rt, c, clock) {
   return id;
 }
 
-const wakeupJournals = (c) => fs.readdirSync(path.join(c.dir, 'journal'))
-  .filter((n) => /-wakeup(-\d+)?\.md$/.test(n))
+const journalsOf = (kind) => (c) => fs.readdirSync(path.join(c.dir, 'journal'))
+  .filter((n) => new RegExp(`-${kind}(-\\d+)?\\.md$`).test(n))
   .map((n) => fs.readFileSync(path.join(c.dir, 'journal', n), 'utf8'));
+const wakeupJournals = journalsOf('wakeup');
+// The entry a verify pass writes when it lands after the turn (R-C8-11).
+const verificationJournals = journalsOf('verification');
 
 describe('parseOrient', () => {
   it('reads {changed, why} from the reply and rejects anything else', () => {
@@ -601,7 +604,7 @@ describe('runWakeupTurn: what the close receives (cases stage 8)', () => {
 describe('runWakeupTurn: the verify pass at the close (cases stage 8)', () => {
   const assertFact = { action: 'assert', stmt: 'The sale closed on 1 December', subject: 'sale', attr: 'closed', value: '2026-12-01', source: src };
 
-  it('a wake-up that wrote a fact is verified on the verify role, charged, and the block leads its journal entry', async () => {
+  it('a wake-up that wrote a fact is verified on the verify role and charged; the pass writes its own journal entry before the wake-up returns', async () => {
     const { runtime, clock, calls } = harness({
       judge: [
         { type: 'tool_use', toolCalls: [{ toolName: 'Ledger', toolUseId: 't1', parameters: assertFact }], llmMetrics: metrics(0.25) },
@@ -620,16 +623,11 @@ describe('runWakeupTurn: the verify pass at the close (cases stage 8)', () => {
     // Nothing the judge said is in it.
     assert.ok(!verifyCall.text.includes('Recorded the closing.'));
     assert.deepStrictEqual(calls.judgeTools[2], ['Read']);
-    assert.deepStrictEqual(wakeupJournals(c), [[
-      '## Verification (written by King Louie)',
-      '- Now met: sc-001 (f-0001).',
-      '- Verify pass: 1 accepted.',
-      '',
-      `# Wake-up ${id}`,
-      '',
-      'Recorded the closing.',
-      ''
-    ].join('\n')]);
+    // The pass ran after the turn released the case (R-C8-11); the wake-up
+    // waited for it, so everything below is already there.
+    assert.deepStrictEqual(wakeupJournals(c), [`# Wake-up ${id}\n\nRecorded the closing.\n`]);
+    assert.deepStrictEqual(verificationJournals(c), ['## Verification (written by King Louie)\n- Now met: sc-001 (f-0001).\n- Verify pass: 1 accepted.\n']);
+    assert.strictEqual(runtime.verifyRunning(c.id), false);
     assert.strictEqual(runtime.progressView(c.id).criteria[0].state, 'met');
     assert.strictEqual(runtime.budget(c.id).status().usd.spent, 0.55);
     assert.strictEqual(await git.isDirty(c.dir), false);
@@ -648,9 +646,8 @@ describe('runWakeupTurn: the verify pass at the close (cases stage 8)', () => {
     const id = dueWakeup(runtime, c, clock);
     assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, ran: 1 });
     assert.strictEqual(calls.judge, 3);
-    assert.deepStrictEqual(wakeupJournals(c), [
-      `## Verification (written by King Louie)\n- Verify pass: no usable verdict (the model call failed).\n\n# Wake-up ${id}\n\nRecorded the closing.\n`
-    ]);
+    assert.deepStrictEqual(wakeupJournals(c), [`# Wake-up ${id}\n\nRecorded the closing.\n`]);
+    assert.deepStrictEqual(verificationJournals(c), ['## Verification (written by King Louie)\n- Verify pass: no usable verdict (the model call failed).\n']);
     assert.strictEqual(runtime.progressView(c.id).criteria[0].state, 'unmet');
     assert.strictEqual(runtime.wakeups(c.id).list().some((w) => w.id === id), false);
     assert.strictEqual(fs.existsSync(path.join(c.dir, '.kl', 'lock')), false);
@@ -675,6 +672,9 @@ describe('runWakeupTurn: the verify pass at the close (cases stage 8)', () => {
     const c = await activeCase(h.runtime);
     dueWakeup(h.runtime, c, h.clock);
     assert.deepStrictEqual(await h.runtime.runDueWakeups(h.clock.now), { ...zero, ran: 1 });
+    // The pass was out, after the turn, when shutdown began: nothing landed.
+    assert.strictEqual(h.runtime.verifyRunning(c.id), false);
+    assert.deepStrictEqual(verificationJournals(c), []);
     assert.deepStrictEqual(h.runtime.verification(c.id).read().records, []);
     assert.strictEqual(h.runtime.progressView(c.id).criteria[0].state, 'unmet');
     assert.strictEqual(h.runtime.turns.size, 0);
