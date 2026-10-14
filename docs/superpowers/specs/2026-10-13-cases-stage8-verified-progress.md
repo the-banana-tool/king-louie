@@ -1385,6 +1385,9 @@ Stated plainly; none is fixed here.
   reworded entries are lost.
 - **Imported cases are not re-checked,** as with `facts.jsonl`.
 - **The verify pass's cost is estimated, not measured** (R-C8-4).
+- **A quote holds any run of the owner's words, whatever surrounds them.** The quote check takes any
+  contiguous run of the owner's message, so "don't count it as done just because the tests pass" can
+  yield a confirmed criterion "the tests pass" (review finding 3, 2026-10-14; the rule is unchanged).
 
 ## 19. Deferred
 

@@ -1342,7 +1342,7 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
 
 Spec: `docs/superpowers/specs/2026-10-13-cases-stage8-verified-progress.md`;
 plan `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`
-(owner rulings R-C8-1 to R-C8-11 and R-C8-N3 to N6, and its Deviations).
+(owner rulings R-C8-1 to R-C8-11 and R-C8-N3 to N9, its Deviations and its review fixes).
 
 - **Scope.** `brief.md` keeps `successCriteria` as strings; who wrote each
   one is `.kl/scope.json` (`ScopeStore`, `src/cases/scope.js`), keyed by
@@ -1444,7 +1444,9 @@ plan `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`
 - Residuals: `Bash` can write every new file under `.kl/` (the write guard
   covers Write, Edit and MultiEdit only), and `sourced` is model-declared;
   the check runs the repository's own scripts with the account's access,
-  network and all, which nothing here makes read-only.
+  network and all, which nothing here makes read-only. A quote holds any run of
+  the owner's words, so "don't count it as done just because the tests
+  pass" can yield a confirmed criterion "the tests pass".
 
 ## Management surfaces
 
