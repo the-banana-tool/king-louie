@@ -482,7 +482,7 @@ describe('a private case: the mark, and every case model call behind it', { skip
     assert.strictEqual(rt.isPrivate(r.linkedCaseId), true);
   });
 
-  it('a detour of a private case is not attached to a case that is not private (cautious reading; open question)', async () => {
+  it('Q-L1-6: a detour of a private case is not attached to a case that is not private', async () => {
     const door = await activeCase({ title: 'Rear door quotes', objective: 'Three written quotes for the rear door' });
     const phone = await activeCase({ marked: false, title: 'Phone agent maintenance', objective: 'Keep the phone agent answering and reporting call status' });
     const router = new DetourRouter({ runtime: rt });

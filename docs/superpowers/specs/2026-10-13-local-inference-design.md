@@ -4,7 +4,7 @@
   draft ruled on the same day (§3). The L1 implementation plan is
   `docs/superpowers/plans/2026-10-13-local-inference-l1.md`. L2 gets its plan after L1. The owner's
   rulings of 2026-10-14 on the plan's open questions are in that plan ("Owner rulings (2026-10-14)")
-  and are reflected below (§6.4, §7.5, §8.4, §8.5, §13.6, §21).
+  and are reflected below (§6.4, §7.5, §8.2, §8.4, §8.5, §13.6, §21).
 - **Date:** 2026-10-13
 - **Builds on:** models (`2026-09-27-model-catalog-profiles-roles-design.md`: catalog, availability,
   profiles, roles, `TurnModels`, failover, cost records), recall
@@ -608,6 +608,7 @@ The confirmation, which is the same dialog for a new and an existing chat, reads
 | A case chat (R-LI-23) | Private exactly when its case is. The chat's own column is set too, for the store's filters. Marking it marks the case and every chat of the case, in one confirmation that names them |
 | Attaching a chat to a case | A private chat attaches only to a private case, or makes the case private in the same confirmation (`PRIVATE_CASE_REQUIRED` otherwise). A non-private chat attached to a private case becomes private. The existing attach refusals (`CHAT_SAW_OTHER_CASES`, `CHAT_RECALLED_OTHER_CHATS`, `IMPORTED_CHAT`) are unchanged and checked first |
 | A case created by a detour from a private case | Created private |
+| A private case's detour routed to an existing case | Only to a private case. Routed to one that is not private, the resolution is refused (`PRIVATE_CASE_REQUIRED`) and the detour is asked again, because its summary and reason would reach that case's journal and its next turn's model; "new" makes a private case. Owner ruling Q-L1-6 (2026-10-14) |
 | An imported chat | May be marked; the import dialog gains "Import as private", which sets the mark before the first chunk is written, so nothing is ever embedded elsewhere. An imported King Louie export that says `"private": true` is imported private (R-LI-28) |
 | A bridge chat (Telegram, Discord) | Cannot be marked (`PRIVATE_BRIDGE_CHAT`): its text passes through the bridge's servers, and a mark there would mislead. Designer decision D-LI-3 |
 | A chat opened with `--kl-standalone-once` | Uses the desktop's own store and local servers; the mark behaves as on any standalone desktop |
@@ -1075,7 +1076,7 @@ L1 (errors carry `code`; the message is the owner-facing sentence):
 | `PRIVATE_HOSTED_CALL` | A hosted client was asked to send under a policy (a provider, an embedder, the image or voice client) |
 | `PRIVATE_CHAT_BUSY` | Marking while a turn runs |
 | `PRIVATE_BRIDGE_CHAT` | Marking a bridge chat |
-| `PRIVATE_CASE_REQUIRED` | Attaching a private chat to a case that is not private, without the confirmation |
+| `PRIVATE_CASE_REQUIRED` | Attaching a private chat to a case that is not private, without the confirmation; routing a private case's detour to an existing case that is not private (Q-L1-6) |
 | `PRIVATE_NO_DELEGATE` | A fleet acting tool in a private chat |
 | `PRIVATE_NO_DETACHED_RUN` | `Cron`, `SessionsSpawn` or `RemoteDispatch` creating a run from a private chat |
 | `LOCAL_UNREACHABLE` | A local server refused the connection or its name did not resolve; the router moves to the next target at once |
