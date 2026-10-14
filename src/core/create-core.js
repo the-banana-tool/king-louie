@@ -2318,6 +2318,9 @@ function createCore(deps = {}) {
     const allowedToolNames = rawAllowedToolNames == null
       ? null
       : (rawAllowedToolNames instanceof Set || Array.isArray(rawAllowedToolNames) ? rawAllowedToolNames : new Set());
+    const runEgress = (executorOptions.turnModels && executorOptions.turnModels.egress)
+      ?? executorOptions.egress
+      ?? runEgressFor(executorOptions.chatId || null);
     const executor = new ToolExecutor({
       workingDirectory,
       allowedDirectories: executorOptions.allowedDirectories || [],
@@ -2325,6 +2328,9 @@ function createCore(deps = {}) {
       scopedBackgroundTasks: executorOptions.scopedBackgroundTasks || null,
       // The turn's frozen models, handed on to this run's children (§6.6).
       turnModels: executorOptions.turnModels || null,
+      // The run's egress policy (spec 2026-10-13 §7.1): the snapshot's, else
+      // its chat's own mark, for the tools refused in a private chat.
+      egress: runEgress,
       // A sub-agent's calls roll up into the turn's reply (spec §10).
       onSubagentLlm: executorOptions.onSubagentLlm || null,
       // The owner's message for this turn (local chat send only): a browser
@@ -2404,6 +2410,9 @@ function createCore(deps = {}) {
         // tool's imageGeneration, spec §8); a run with no parent turn uses
         // the default profile through snapshotModels.
         turnModels: executorOptions.turnModels || null,
+        // The run's egress policy, for a tool that sends by itself (the
+        // image tool) on a run with no snapshot.
+        egress: runEgress,
         snapshotModels: (options) => snapshotModels(options),
         ensureTargetsTested: (targets) => ensureTargetsTested(targets),
         userDataPath: userDataPath,
@@ -2702,7 +2711,7 @@ function createCore(deps = {}) {
     // named for a child never drops the parent's policy, and a run with a
     // chat and no parent takes the chat's. The profile is chosen as before.
     const parent = runtimeOptions.turnModels || null;
-    const policy = (parent && parent.egress) ?? runEgressFor(runtimeOptions.chatId || null);
+    const policy = (parent && parent.egress) ?? runtimeOptions.egress ?? runEgressFor(runtimeOptions.chatId || null);
     const turnModels = (parent && !sel.profileId && (parent.egress || !policy))
       ? parent
       : snapshotModels({ profileId: sel.profileId || (parent && parent.profileId) || null, egress: policy });
@@ -3005,6 +3014,8 @@ function createCore(deps = {}) {
             // carried on the rethreaded requester as chatId-like run state;
             // with no parent turn, the default profile applies (§12).
             turnModels: (options.approvalRequester && options.approvalRequester.turnModels) || null,
+            // A parent that had a policy and no snapshot hands the policy on.
+            egress: (options.approvalRequester && options.approvalRequester.egress) ?? null,
             // A sub-agent's calls roll up into the turn's reply (spec §10);
             // a detached run (BackgroundTask) outlives the turn, so it never does.
             onSubagentLlm: options.detached === true ? null : ((options.approvalRequester && options.approvalRequester.onSubagentLlm) || null)

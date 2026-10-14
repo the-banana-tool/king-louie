@@ -614,6 +614,10 @@ describe("createCore remoteApprovals: 'phone'", () => {
       try {
         configureFakeProvider(core);
         const { event, sent } = desktopEvent();
+        // The run's chat exists: a chat the store does not know is treated
+        // as private (local inference stage L1), and its child would be
+        // refused a hosted model.
+        core.context.createChat({ id: 'chat-1', title: 'Chat', messages: [] });
         const parent = await core.context.createToolExecutorWithApprovals(event, null, null, { chatId: 'chat-1' });
         await parent.execute(CAPTURE_TOOL, {});
 
@@ -640,6 +644,8 @@ describe("createCore remoteApprovals: 'phone'", () => {
       const { core, calls } = await startedPhoneCore();
       try {
         configureFakeProvider(core);
+        // As above: the run's chat exists.
+        core.context.createChat({ id: 'chat-2', title: 'Chat', messages: [] });
         const remote = await core.context.createToolExecutorWithApprovals(null, null, null, { chatId: 'chat-2' });
         await remote.execute(CAPTURE_TOOL, {});
 

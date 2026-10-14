@@ -9,6 +9,21 @@ const log = createLogger('workflow-handlers');
 function registerWorkflowHandlers(ipcMain, context) {
   const findChat = (chatId) => (chatId ? context.getChat(chatId, { messages: true }) : null);
 
+  // A workflow's planner and tasks reach the model with no chat and no
+  // parent snapshot, so they would run on the default profile with the
+  // chat's tail and recalled text in the prompt. Until a workflow can carry
+  // its chat's egress policy, none is planned from a private chat (local
+  // inference stage L1, Tasks 8 and 9; the core refuses its tasks the same
+  // way). A host that cannot say whether the chat is private refuses too.
+  const assertNotPrivate = (chatId) => {
+    if (!chatId) return;
+    const policy = typeof context.egressFor === 'function' ? context.egressFor({ chatId }) : true;
+    if (policy === null || policy === undefined) return;
+    const err = new Error('This chat is private, and a workflow\'s planner and tasks do not run under a chat\'s private mark yet. Nothing was sent to a hosted model.');
+    err.code = 'PRIVATE_NO_DETACHED_RUN';
+    throw err;
+  };
+
   const mergePlanOptions = (payload) => {
     const options = { ...(payload.options || {}) };
     if (payload.chatId) options.chatId = payload.chatId;
@@ -22,6 +37,7 @@ function registerWorkflowHandlers(ipcMain, context) {
     wrapHandler('workflow:plan', async (event, payload) => {
       const planner = context.getPlannerExecutor();
       if (!planner) throw new Error('Planner not available');
+      assertNotPrivate(payload?.chatId);
       try {
         const taskGraph = await planner.plan(payload.goal, mergePlanOptions(payload));
         return { ok: true, taskGraph };
@@ -42,6 +58,7 @@ function registerWorkflowHandlers(ipcMain, context) {
     wrapHandler('workflow:planAndExecute', async (event, payload) => {
       const planner = context.getPlannerExecutor();
       if (!planner) throw new Error('Planner not available');
+      assertNotPrivate(payload?.chatId);
       const options = {
         ...mergePlanOptions(payload),
         background: payload.background !== false
