@@ -46,6 +46,9 @@ const {
   SessionsSpawnTool
 } = require('../tools/builtin/sessions-tools');
 const { SkillLoader, skillRegistry, PinManager } = require('../skills');
+const { createSkillModels } = require('../skills/skill-models');
+// A Telegram or Discord skill caller's chat id is the channel's, not a chat's.
+const BRIDGE_SKILL_CHANNELS = new Set(['telegram', 'discord']);
 const UserProfile = require('../telos/user-profile');
 const { loadProjectContext } = require('../telos/project-context');
 const HookRegistry = require('../hooks/hook-registry');
@@ -3246,6 +3249,32 @@ function createCore(deps = {}) {
       fs.mkdirSync(userSkillsDir, { recursive: true });
     }
 
+    // With no policy: the default profile's first usable main model, when
+    // it is one of the two providers skills know how to talk to (as
+    // before). Under one: the router's provider for main, which sends only
+    // to a guarantee-grade local model or refuses.
+    const skillModels = createSkillModels({
+      egressFor: ({ chatId }) => egressFor({ chatId }),
+      anyPrivate: () => historyStore.hasPrivateChats(),
+      routed: (policy, caller) => {
+        // The calling chat's own profile, when there is a chat.
+        const models = snapshotModels({ chatId: caller && caller.chatId && !BRIDGE_SKILL_CHANNELS.has(caller.channel) ? caller.chatId : null, egress: policy });
+        const resolved = models.mustResolve('main');
+        return inferenceRouter.routedProvider({
+          targets: resolved.targets,
+          meta: { role: 'main', profileId: models.profileId || null, borrowedFrom: resolved.borrowedFrom || null },
+          egress: resolved.egress ?? policy
+        });
+      },
+      direct: () => {
+        const main = snapshotModels({}).resolve('main');
+        const target = main.targets.find((x) => ['openai', 'anthropic'].includes(x.provider));
+        if (!target) return null;
+        return createProviderInstance(target.provider, getDecryptedProviderToken(target.provider));
+      },
+      log: skillsLog
+    });
+
     skillLoader = new SkillLoader({
       skillsDirectory: userSkillsDir,
       builtinSkillsDirectory: deps.builtinSkillsDir,
@@ -3261,19 +3290,11 @@ function createCore(deps = {}) {
           // Could also send to UI here if needed
           return Promise.resolve();
         },
-        // Provide LLM provider for skills that need AI capabilities
+        // Provide LLM provider for skills that need AI capabilities. It is
+        // held to the calling chat's egress policy on every call
+        // (src/skills/skill-models.js; local inference review fix, item 4a).
         get llmProvider() {
-          try {
-            // The default profile's first usable main model, when it is one
-            // of the two providers skills know how to talk to.
-            const main = snapshotModels({}).resolve('main');
-            const target = main.targets.find((x) => ['openai', 'anthropic'].includes(x.provider));
-            if (!target) return null;
-            return createProviderInstance(target.provider, getDecryptedProviderToken(target.provider));
-          } catch (error) {
-            skillsLog.warn(`LLM provider not available: ${error.message}`);
-            return null;
-          }
+          return skillModels.provider();
         }
       }
     });

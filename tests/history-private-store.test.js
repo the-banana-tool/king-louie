@@ -188,8 +188,10 @@ describe('history schema step 5: the private mark', () => {
       assert.ok(!/unmarkPrivate|unmark\(|clearPrivate|setPrivate\b/i.test(source), `${file} has something that unmarks`);
     }
     const methods = Object.getOwnPropertyNames(HistoryStore.prototype).filter((name) => /private/i.test(name));
-    // _privateMark reads the row; isPrivate reads; markPrivate is the one writer.
-    assert.deepStrictEqual(methods.sort(), ['_privateMark', 'isPrivate', 'markPrivate']);
+    // _privateMark reads the row; isPrivate and hasPrivateChats (review fix,
+    // item 4a: a skill call with no known caller) read; markPrivate is the
+    // one writer.
+    assert.deepStrictEqual(methods.sort(), ['_privateMark', 'hasPrivateChats', 'isPrivate', 'markPrivate']);
     // Every statement that writes the column sets it to 1.
     const store = fs.readFileSync(path.join(dir, 'history-store.js'), 'utf8') + fs.readFileSync(path.join(dir, 'link-index.js'), 'utf8');
     const writes = store.match(/SET\s+[^;`']*\bprivate\b\s*=\s*[^,\s]+/gi) || [];
@@ -319,5 +321,20 @@ describe('history schema step 5: the private mark', () => {
     assert.strictEqual(extra.isPrivate('b'), false);
     assert.throws(() => extra.markPrivate('b'), /read-only/);
     assert.strictEqual(extra.isPrivate('b'), false);
+  });
+});
+
+describe('review fix, item 4a: whether any chat is private', () => {
+  it('hasPrivateChats is false only for a store that answers none, and true once one is marked or the store cannot answer', () => {
+    const store = HistoryStore.open(':memory:');
+    try {
+      store.createChat({ id: 'c-1', title: 'one', createdAt: '2026-10-13T09:00:00.000Z', updatedAt: '2026-10-13T09:00:00.000Z', messages: [] });
+      assert.strictEqual(store.hasPrivateChats(), false);
+      store.markPrivate('c-1');
+      assert.strictEqual(store.hasPrivateChats(), true);
+    } finally {
+      store.close();
+    }
+    assert.strictEqual(store.hasPrivateChats(), true, 'a closed store cannot say none');
   });
 });

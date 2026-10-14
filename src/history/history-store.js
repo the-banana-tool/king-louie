@@ -687,6 +687,18 @@ class HistoryStore {
     }
   }
 
+  // Whether any chat is private (review fix, item 4a: a skill's model call
+  // with no known caller). Only a store that answers "none" gives false.
+  hasPrivateChats() {
+    try {
+      if (this._closed || !this.privacyAware) return true;
+      return Boolean(this._stmt('SELECT 1 AS one FROM chats WHERE private <> 0 LIMIT 1').get());
+    } catch (err) {
+      log.warn(`Whether any chat is private could not be read, so it is taken that one is: ${err.message}`);
+      return true;
+    }
+  }
+
   // Marks the chat private and, in the same transaction, deletes every
   // vector of its chunks that a hosted embedder made (any key that does not
   // start "local:"; the local embedder fills its own key again). A failure

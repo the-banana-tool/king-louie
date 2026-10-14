@@ -4,6 +4,7 @@ const Module = require('module');
 const { registry } = require('./skill-registry');
 const { isCommandAvailable } = require('../execution/runtime-environment');
 const { createLogger } = require('../logging');
+const { runAsSkillCaller } = require('./skill-models');
 const log = createLogger('skill-loader');
 
 // Hook into Node's module resolution so that require('king-louie/...')
@@ -303,6 +304,17 @@ class SkillLoader {
       if (typeof skillInstance.handleCommand !== 'function') {
         log.warn(`Skill in ${skillPath} missing handleCommand() method`);
         return null;
+      }
+
+      // A message handled by the skill runs as its caller
+      // (src/skills/skill-models.js): its model calls are held to that
+      // chat's egress policy. handleCommand is reached through the
+      // registry's executeCommand, which does the same.
+      if (typeof skillInstance.handleMessage === 'function') {
+        const handleMessage = skillInstance.handleMessage;
+        skillInstance.handleMessage = function handleMessageAsCaller(text, context, ...rest) {
+          return runAsSkillCaller({ chatId: context?.chatId, channel: context?.channel }, () => handleMessage.call(this, text, context, ...rest));
+        };
       }
 
       // Track where this skill lives on disk

@@ -93,6 +93,29 @@ describe('private refusals (src/tools/private-refusals.js)', () => {
     }
   });
 
+  it("review fix, item 4a: a tool runs as a skill caller with its run's policy, so a skill tool's model call is held to it", async () => {
+    const { Tool } = require('../src/tools/tool-schema');
+    const { toolRegistry } = require('../src/tools');
+    const { currentSkillCaller } = require('../src/skills/skill-models');
+    const name = 'KlSkillCallerProbe';
+    toolRegistry.register(new Tool({ name, description: 'probe', parameters: { type: 'object', properties: {} }, execute: async () => ({ caller: currentSkillCaller() }) }));
+    try {
+      const ex = (options) => new ToolExecutor({ workingDirectory: os.tmpdir(), requireApproval: false, ...options });
+      const marked = await ex({ turnModels: { egress: PRIVATE } }).execute(name, {});
+      assert.deepStrictEqual(marked.caller.egress, PRIVATE);
+      const open = await ex({ turnModels: { egress: null } }).execute(name, {});
+      assert.strictEqual(open.caller.egress, null);
+      const host = await ex({ egress: PRIVATE }).execute(name, {});
+      assert.deepStrictEqual(host.caller.egress, PRIVATE);
+      // A run with nothing to read its policy from is an unknown caller.
+      const none = await ex({}).execute(name, {});
+      assert.strictEqual(none.caller.egress, undefined);
+      assert.strictEqual(none.caller.channel, 'tool');
+    } finally {
+      toolRegistry.unregister(name);
+    }
+  });
+
   it('the executor refuses a listed tool before any hook, rule or prompt, and only under a policy', async () => {
     const asked = [];
     const hooks = [];

@@ -29,6 +29,29 @@ const AT = '2026-10-13T09:00:00.000Z';
 const HI = [{ role: 'user', content: 'hi' }];
 const t = (provider, model, effort = null) => ({ provider, model, effort });
 const HOSTED = t('openai', 'gpt-5.5');
+// The skill records what its provider did on globalThis.__klEgressProbe.
+const SKILL_PROBE_SOURCE = `
+class Probe {
+  getMetadata() { return { id: 'kl-egress-probe', name: 'Egress probe', commands: ['klprobe'], version: '1.0.0' }; }
+  async initialize(ctx) { this.ctx = ctx; globalThis.__klEgressProbe = this; }
+  async use(p) {
+    if (!p) return 'no-provider';
+    try { return await p.sendMessage([{ role: 'user', content: 'hi' }], {}); } catch (err) { return 'refused:' + (err.code || err.message); }
+  }
+  async handleCommand(command, args) {
+    const p = this.ctx.llmProvider;
+    if (args[0] === 'keep') { this.kept = p; this.last = p ? p.getProviderName() : null; }
+    else if (args[0] === 'kept') this.last = await this.use(this.kept);
+    else this.last = await this.use(p);
+    return { ok: true, message: 'done' };
+  }
+  async handleMessage(text) {
+    this.last = await this.use(this.ctx.llmProvider);
+    return { ok: true, message: 'done' };
+  }
+}
+module.exports = Probe;
+`;
 const LOCAL = t('local', 'workstation/test-model');
 
 describe('the egress policy in the core', () => {
@@ -55,6 +78,11 @@ describe('the egress policy in the core', () => {
     };
     delete process.env.KL_CASES_ROOT;
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-egress-core-'));
+    // A user skill that uses its context's llmProvider (review fix, item 4a).
+    const probeDir = path.join(dataDir, 'skills', 'kl-egress-probe');
+    fs.mkdirSync(probeDir, { recursive: true });
+    fs.writeFileSync(path.join(probeDir, 'package.json'), JSON.stringify({ name: 'kl-egress-probe', main: 'index.js' }));
+    fs.writeFileSync(path.join(probeDir, 'index.js'), SKILL_PROBE_SOURCE);
     const store = new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: { chats: [], activeChatId: null, apiTokens: {}, apiStatus: {}, toolApprovals: { alwaysApproveTools: {} } } });
     store.set('settings', {
       models: {
@@ -109,6 +137,51 @@ describe('the egress policy in the core', () => {
     assert.match(err.message, /Nothing was sent to a hosted model\.$/);
     return true;
   };
+
+  describe('review fix, item 4a: a skill\'s llmProvider follows the calling chat\'s policy', () => {
+    const { registry: skills } = require('../src/skills/skill-registry');
+    const probe = () => globalThis.__klEgressProbe;
+    // The hosted provider's connection test, so an ordinary chat's skill has
+    // the hosted model to be given (it carries no chat text).
+    before(async () => { await ctx.resolveRole('main', { chatId: 'chat-open' }); });
+    const run = async (chatId, arg, channel = 'ui') => {
+      await skills.executeCommand('klprobe', arg ? [arg] : [], { chatId, channel, userId: chatId });
+      return probe().last;
+    };
+
+    it('a private chat\'s skill gets no hosted model, and nothing is sent', async () => {
+      assert.ok(probe(), 'the probe skill loaded');
+      assert.strictEqual(await run('chat-private'), 'no-provider');
+      await probe().handleMessage('hi', { chatId: 'chat-private', channel: 'ui' });
+      assert.strictEqual(probe().last, 'no-provider');
+      assert.strictEqual(await run('no-such-chat'), 'no-provider', 'a chat the store does not know is private');
+      assert.deepStrictEqual(sent(), []);
+    });
+
+    it('a private chat on a profile with a local model answers from it', async () => {
+      const before = box.requests.length;
+      assert.strictEqual(await run('chat-private-local'), 'Hello there');
+      assert.ok(box.requests.length > before);
+      assert.deepStrictEqual(sent(), []);
+    });
+
+    it('an ordinary chat keeps the hosted model, as before', async () => {
+      assert.strictEqual(await run('chat-open', 'keep'), 'openai');
+      assert.strictEqual(await run('42', 'keep', 'telegram'), 'openai', 'a bridge chat is never private');
+    });
+
+    it('a provider kept from an ordinary chat is held to a private chat\'s policy when used there', async () => {
+      await run('chat-open', 'keep');
+      assert.strictEqual(await run('chat-private', 'kept'), 'refused:PRIVATE_NO_LOCAL_MODEL');
+      assert.deepStrictEqual(sent(), []);
+    });
+
+    it('a call with no known caller is held to a policy while any chat is private', async () => {
+      await run('chat-open', 'keep');
+      assert.strictEqual(await probe().use(probe().kept), 'refused:PRIVATE_NO_LOCAL_MODEL');
+      assert.deepStrictEqual(sent(), []);
+    });
+  });
 
   it('a snapshot carries its chat\'s mark: a private chat, an ordinary chat, a chat the store does not know', () => {
     const marked = ctx.snapshotModels({ chatId: 'chat-private' });

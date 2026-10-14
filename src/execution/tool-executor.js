@@ -12,6 +12,7 @@ const { refuseUnsafeGate, REFUSE_UNSAFE_MESSAGE } = require('../approvals/execut
 const { createLogger } = require('../logging');
 const { detachImages } = require('./tool-images');
 const { normalizePolicy } = require('../models/egress');
+const { runAsSkillCaller } = require('../skills/skill-models');
 const { privateRefusal } = require('../tools/private-refusals');
 
 const log = createLogger('tool-executor');
@@ -650,7 +651,11 @@ class ToolExecutor extends EventEmitter {
       // Fleet stage 5: `_images` never reach postExecute listeners (chat
       // storage, audit, the renderer); only an emitsImages tool keeps them,
       // off-JSON, for the agent loop to lift.
-      const result = detachImages(tool, await tool.execute(effectiveParameters, {
+      // A tool runs as a skill caller with this run's policy when the run
+      // has one to read (its snapshot or its own egress), so a skill tool's
+      // model call is held to it (src/skills/skill-models.js).
+      const callerPolicy = this.turnModels || this.egress ? { egress: this._egressPolicy() } : {};
+      const result = detachImages(tool, await runAsSkillCaller({ channel: 'tool', ...callerPolicy }, () => tool.execute(effectiveParameters, {
         ...this.extraToolOptions,
         ...options,
         workingDirectory: options.workingDirectory || this.workingDirectory,
@@ -668,7 +673,7 @@ class ToolExecutor extends EventEmitter {
         // option or extra tool option can supply it, and never under
         // denyAutoApproval. answer_question checks its quote against it.
         ownerTurnText: this.denyAutoApproval ? null : this.ownerTurnText
-      }));
+      })));
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
         const postHookResult = await this.hookExecutor.run('PostToolUse', {
