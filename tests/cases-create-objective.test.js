@@ -174,6 +174,58 @@ describe('every caller of createCase and the objective it ends up with', () => {
     }
   });
 
+  // Owner ruling R-C8-N7 (2026-10-14): create_case over MCP posts a pressed
+  // scope-confirm question about the objective at creation, so the owner can
+  // confirm it from the app or the phone without waiting for the model. It
+  // goes up the contact ladder like any question, uncharged. The chat's
+  // create_case (objective confirmed) asks nothing.
+  it('create_case over MCP asks the owner, pressed, to confirm the objective at once', async () => {
+    const { answerClass } = require('../src/cases/mcp-tool-definitions');
+    for (const channel of ['mcp-stdio', 'mcp-frontdoor']) {
+      const { runtime, objective } = setup();
+      const h = createCaseToolHandler({ getRuntime: () => runtime, channel });
+      const made = await h.call('create_case', { title: 'Shed', objective: 'build a shed', quote: 'Build a shed by spring' });
+      const o = objective(made.case_id);
+      const open = runtime.questions(made.case_id).open();
+      assert.strictEqual(open.length, 1, channel);
+      const [q] = open;
+      assert.strictEqual(answerClass(q), 'pressed', channel);
+      assert.deepStrictEqual([q.kind, q.payload.type, q.payload.key, q.payload.mcpAnswerable, q.payload.objective, q.payload.entries],
+        ['question', 'scope-confirm', 'scope-confirm:created', false, o.hash, []], channel);
+      assert.deepStrictEqual(q.options, [{ id: 'all', label: 'Confirm' }, { id: 'none', label: 'Not now' }]);
+      assert.deepStrictEqual(q.text.split('\n'), [
+        'Case: Shed',
+        'This case was created over MCP. Confirm its objective? It counts for nothing until you confirm it.',
+        '"Not now" leaves it proposed; edit it in the case panel.',
+        'Objective: build a shed'
+      ]);
+      // Uncharged: a host-made question.
+      assert.strictEqual(runtime.budget(made.case_id).status().questionsPerDay?.spent ?? 0, 0);
+      // Pressed: no MCP answer takes it.
+      const refused = await refusal(h.call('answer_question', { case: made.case_id, question_id: q.id, option_id: 'all', quote: 'Confirm, the shed objective is right' }));
+      assert.strictEqual(refused.code, 'not_answerable_here', channel);
+      assert.strictEqual(objective(made.case_id).state, 'proposed');
+      // The owner's press on the phone confirms it.
+      const res = await runtime.answerQuestion(made.case_id, q.id, { channel: 'mobile', optionId: 'all' });
+      assert.deepStrictEqual(res.effect.confirmed, ['objective'], channel);
+      const after = objective(made.case_id);
+      assert.deepStrictEqual([after.state, after.confirmed.by, after.confirmed.channel], ['confirmed', 'question', 'mobile'], channel);
+    }
+    // Confirmed in the panel first: the question is closed, not left on the ladder.
+    const { runtime, objective } = setup();
+    const h = createCaseToolHandler({ getRuntime: () => runtime, channel: 'mcp-stdio' });
+    const made = await h.call('create_case', { title: 'Shed', objective: 'build a shed', quote: 'Build a shed by spring' });
+    const [q] = runtime.questions(made.case_id).open();
+    await runtime.applyScopeAction(made.case_id, { action: 'confirm', target: 'objective', hash: objective(made.case_id).hash, by: 'owner-action', channel: 'in-app' });
+    assert.deepStrictEqual(runtime.questions(made.case_id).open(), []);
+    assert.strictEqual(runtime.questions(made.case_id).get(q.id).closed.by, 'system');
+    // In the chat, the objective is confirmed and nothing is asked.
+    const chat = setup();
+    const c = createCaseToolHandler({ getRuntime: () => chat.runtime, channel: 'in-app-chat' });
+    const inChat = await c.call('create_case', { title: 'Shed', objective: 'build a shed', quote: 'Build a shed by spring' }, { ownerTurnText: 'Build a shed by spring.' });
+    assert.deepStrictEqual(chat.runtime.questions(inChat.case_id).open(), []);
+  });
+
   // Owner ruling R-C8-N8 (2026-10-14): the fact create_case records over MCP
   // stays (provenance user, its MCP channel and the unchecked quote), but it
   // can never stand behind a met criterion: the evidence check refuses it

@@ -21,7 +21,7 @@ const { prepareVerifyPass, callVerifyModel, applyVerifyReply, verificationBlock 
 const { registerVerificationHook, freezeProgress, REGRESSED: REGRESSED_STATES } = require('./verify/hook');
 const { closeReadiness } = require('./verify/readiness');
 const { CheckStore, CheckError, CHECK_TYPE, currentCheck, closeCheck } = require('./verify/check');
-const { checkQuestionText } = require('./verify/questions');
+const { checkQuestionText, createdObjectiveQuestion, CREATED_OBJECTIVE_KEY } = require('./verify/questions');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
 const { Budget, CATEGORIES, PER_DAY } = require('./budget');
@@ -356,9 +356,37 @@ class CaseRuntime {
     try {
       await this.systemAction(info.id, 'scope', async (meta) => {
         this.scope(meta.id).reconcile(this.brief(meta.id).read().data, { origins: { objective: born }, addedBy: born.origin });
+        // R-C8-N7: an objective set over MCP is asked about at once, pressed.
+        if (objectiveBy === 'mcp') this._askCreatedObjective(meta, this.scopeView(meta.id));
       }, { commitMessage: 'case created: who gave the objective' });
     } catch (err) {
       log.warn(`Case ${info.slug}: recording who gave the objective failed: ${err.message}`);
+    }
+  }
+
+  // The pressed scope question about an objective create_case set over MCP
+  // (R-C8-N7): host-made, so never charged to questionsPerDay; it goes up
+  // the contact ladder like any question. Never fails the create.
+  _askCreatedObjective(meta, view) {
+    try {
+      const record = createdObjectiveQuestion(meta, view);
+      if (record) this.createQuestion(meta.id, record, { charge: false });
+    } catch (err) {
+      log.warn(`Case ${meta.slug}: asking the owner to confirm the objective failed: ${err.message}`);
+    }
+  }
+
+  // Once the objective is confirmed, the question create_case asked about it
+  // has nothing left to ask: it is closed, not left on the ladder.
+  _closeCreatedObjectiveQuestion(meta) {
+    try {
+      if (this.scopeView(meta.id).objective?.state !== 'confirmed') return;
+      const store = this.questions(meta.id);
+      for (const q of store.open().filter((r) => r.payload?.key === CREATED_OBJECTIVE_KEY)) {
+        store.close(q.id, { reason: 'the objective was confirmed', by: 'system' });
+      }
+    } catch (err) {
+      log.warn(`Case ${meta.slug}: closing the objective question failed: ${err.message}`);
     }
   }
 
@@ -588,6 +616,7 @@ class CaseRuntime {
       const r = act();
       if (r.changed) {
         this.records(meta.id).writeJournal('scope', `Scope: ${r.line} (by ${oneLine(by, 40)}${channel ? `, ${oneLine(channel, 40)}` : ''}).`, this.now());
+        this._closeCreatedObjectiveQuestion(meta);
       }
       return r;
     });

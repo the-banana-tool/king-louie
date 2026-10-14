@@ -7,7 +7,8 @@
 //   answer in the owner's words through answer_question, both confirm or
 //   drop exactly the entries the question showed. The objective is
 //   confirmed only by a press or King Louie's chat (review finding 1,
-//   2026-10-14).
+//   2026-10-14). The one asked when create_case runs over MCP is pressed
+//   (`mcpAnswerable: false`, R-C8-N7).
 // - `close-proposal` is pressed: only "Mark done" pressed in the app or on
 //   the paired phone closes the case. The model proposes; it never decides.
 //
@@ -82,6 +83,37 @@ function scopeQuestionText(meta, view) {
   });
   if (objective) lines.push(`Objective: ${shown(objective.text)}`);
   return whole(lines, 'The scope question');
+}
+
+// The scope question King Louie asks itself when create_case made the case
+// over MCP (owner ruling R-C8-N7): the objective only, pressed, so the owner
+// confirms it in the app or on the phone without waiting for the model to
+// ask. Its key is its own, so the model's askScope is never refused for it.
+const CREATED_OBJECTIVE_KEY = 'scope-confirm:created';
+const CREATED_OBJECTIVE_OPTIONS = Object.freeze([Object.freeze({ id: 'all', label: 'Confirm' }), Object.freeze({ id: 'none', label: 'Not now' })]);
+
+function createdObjectiveQuestionText(meta, objective) {
+  return whole([
+    `Case: ${shown(meta?.title)}`,
+    'This case was created over MCP. Confirm its objective? It counts for nothing until you confirm it.',
+    '"Not now" leaves it proposed; edit it in the case panel.',
+    `Objective: ${shown(objective?.text)}`
+  ], 'The objective question');
+}
+
+// → the question record for CaseRuntime.createQuestion, or null when the
+// objective is not there or already confirmed.
+function createdObjectiveQuestion(meta, view) {
+  const objective = isObject(view?.objective) ? view.objective : null;
+  if (!objective || objective.state === 'confirmed' || typeof objective.hash !== 'string' || !HASH.test(objective.hash)) return null;
+  return {
+    kind: 'question',
+    urgency: 'normal',
+    text: createdObjectiveQuestionText(meta, objective),
+    options: CREATED_OBJECTIVE_OPTIONS.map((o) => ({ ...o })),
+    defaultOnSilence: 'hold',
+    payload: { type: SCOPE_TYPE, key: CREATED_OBJECTIVE_KEY, disclosable: false, mcpAnswerable: false, entries: [], objective: objective.hash }
+  };
 }
 
 const isOpenItem = (item) => isObject(item) && item.state !== 'ok' && item.state !== 'n/a';
@@ -323,4 +355,7 @@ function onCheckAnswered(record, fact, { runtime, caseId }) {
 
 QuestionStore.registerAnswerHandler(CHECK_TYPE, { toFact: factOf('check command', 'check-approve'), onAnswered: onCheckAnswered });
 
-module.exports = { scopeQuestionText, closeQuestionText, checkQuestionText, PRESS_CHANNELS, SCOPE_TYPE, CLOSE_TYPE, CHECK_TYPE, QUESTION_MAX_CHARS };
+module.exports = {
+  scopeQuestionText, closeQuestionText, checkQuestionText, createdObjectiveQuestion, PRESS_CHANNELS, SCOPE_TYPE, CLOSE_TYPE, CHECK_TYPE,
+  CREATED_OBJECTIVE_KEY, QUESTION_MAX_CHARS
+};

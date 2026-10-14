@@ -1350,8 +1350,10 @@ plan `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`
   `proposed` or `confirmed`; a proposed one counts for nothing. Origins
   (`ORIGINS`): `model`, `detour`, `legacy` (open cases from before stage 8),
   `file` (an edit outside the tools), `mcp-create` (an objective
-  `create_case` set over MCP, whose quote nobody checked; R-C8-N3) are born
-  proposed; `owner-quote` (the `Brief` tool with a quote whose words are the
+  `create_case` set over MCP, whose quote nobody checked; R-C8-N3; it also
+  posts a pressed `scope-confirm` question, key `scope-confirm:created`,
+  `mcpAnswerable: false`, uncharged, closed once the objective is confirmed
+  another way: R-C8-N7) are born proposed; `owner-quote` (the `Brief` tool with a quote whose words are the
   criterion, `wordsInText`), `gating-answer`, `owner-create` (the form's
   objective, or `create_case` in the chat) and `owner-action` are born
   confirmed. Otherwise only a press (`case:confirmScope`, by the hash the
@@ -1410,7 +1412,8 @@ plan `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`
   (`NOT_READY`) unless every confirmed criterion is `met` (R-C8-1), and then
   asks a pressed `close-proposal` question; only the owner closes. The
   owner's Done (and "Mark done") is never refused for an open item; it shows
-  the list first. Question types: `scope-confirm` (spoken), `close-proposal`
+  the list first. Question types: `scope-confirm` (spoken; pressed for the
+  one `create_case` over MCP asks), `close-proposal`
   and `check-approve` (pressed); a press is `in-app` or `mobile`
   (`PRESS_CHANNELS`), never `in-app-chat` or MCP. At `done` or `abandoned`
   the states and the list are frozen in `verification.json` and never
