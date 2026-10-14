@@ -3214,6 +3214,7 @@ body {
 .case-progress-abandoned-item { margin-top: 4px; padding-left: 12px; }
 .case-progress-check-row { justify-content: flex-start; gap: 8px; }
 .case-progress-check-result { color: var(--text-secondary); overflow-wrap: anywhere; }
+.chat-case-new-objective { margin-bottom: 8px; }
 .case-progress-live { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; font-size: 12px; }
 .confirm-dialog-before { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--text-primary); overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
 

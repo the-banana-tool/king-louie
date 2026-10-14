@@ -8,6 +8,7 @@ const IPC = require('../src/ipc/constants');
 const { CaseRuntime } = require('../src/cases');
 const { historyContext } = require('./helpers/history-context');
 const { confirmAll } = require('./helpers/case-scope');
+const { markLocalDesktopEvent } = require('../src/core/origin');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -23,7 +24,9 @@ function setup({ withRuntime = true, chats: initialChats = [{ id: 'chat-1', titl
   };
   const handlers = new Map();
   registerCaseHandlers({ handle: (ch, fn) => handlers.set(ch, fn), on: () => {} }, context);
-  const call = (channel, payload) => handlers.get(channel)({}, payload);
+  // The host marks every IPC event before a handler sees it; case:create
+  // confirms the form's objective only for such an event (cases stage 8).
+  const call = (channel, payload) => handlers.get(channel)(markLocalDesktopEvent({}), payload);
   return { runtime, call, history, context };
 }
 

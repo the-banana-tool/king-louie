@@ -226,6 +226,23 @@ Not a task of the plan as written; the owner ruled after it that the case panel 
 - *Looked at* in the real app on a throwaway profile (no provider there): the button on a new case, the refusal on a draft case, "Checking…" with the button disabled right after the press, and `The check did not finish: no usable model.` with the pass counted. A pass that accepts a verdict was exercised only in the unit tests (a stub router).
 - *Tests.* New: `tests/cases-verify-now.test.js`. Extended: `tests/renderer-progress-text.test.js`, `tests/preload-validation.test.js`, the two bridge tests. No existing test changed.
 
+**Addition B: an Objective field in the new-case form (owner ruling 2026-10-13, answers N3).**
+
+Not a task of the plan as written; the owner ruled after it that the form gets the field.
+
+- *What was built.* The New case dialog has a second field, `#chat-case-new-objective` ("Objective (optional): what this case is for"), above the playbook picker. What is typed is sent as `objective` on the first `case:create` and again on "Create anyway"; an empty field sends no `objective` at all, and the case is then as before (no objective; the model's first one reads `proposed`). The runtime side was already there from Task 4 (`objectiveBy: 'owner'` → origin `owner-create`, confirmed).
+- *The rules it is held to.* `case:create` trims it and refuses one that is not text, is blank, or is over 2,000 characters (`ownerObjective`, the same check as the panel's Edit; the limit is `create_case`'s). No path that sets an objective requires one plain line, so the form does not either; the field is a one-line input. The similar-case check reads the objective as before. Before this, the handler passed the objective on untrimmed.
+- *Only the app's own window confirms.* `case:create` passes `objectiveBy: 'owner'` only when the event is a local desktop event (the Electron window, or a paired desktop over the bridge). For any other event the case is still created and the objective is recorded proposed, origin `model`, with a warning in the log. No such caller exists today; the form cannot name `objectiveBy` or `force` a confirmation.
+- *How each caller of `CaseRuntime.createCase` ends up* (pinned by `tests/cases-create-objective.test.js`):
+  - IPC `case:create` with the form's objective: `confirmed`, origin `owner-create`. Without one: no objective.
+  - `create_case` in King Louie's chat (`in-app-chat`): `confirmed`, origin `owner-create`, only when the objective is words from the quote and the quote is in the owner's message of this turn; otherwise nothing is created.
+  - `create_case` over `mcp-stdio` and `mcp-frontdoor`: `confirmed`, origin `owner-create`, with the objective held to the quote. The quote itself is recorded and not checked there (management surfaces, Q28; the `cases:manage` scope is the gate), which is what spec §6.1's table says. **For the owner to weigh:** this is the one path where an objective is confirmed on words nobody verified. `src/mcp/case-tools.js` was not changed.
+  - A detour routed to "new" (`DetourRouter`): `proposed`, origin `detour`.
+  - Any other value of `objectiveBy`, or none: `proposed`, origin `model`.
+  - Playbooks never call `createCase`; a playbook chosen in the form rides `case:create`.
+- *Existing tests changed.* `tests/cases-ipc.test.js`: the harness's `call` now passes an event marked by `markLocalDesktopEvent`, as the host does; without it "case:create with an objective records it confirmed" would assert the old rule. No assertion changed.
+- *Looked at* in the real app on a throwaway profile: the form with both fields filled, and the new case's Progress block reading `Objective confirmed Convert the lot to cash` with the scope record `owner-create`.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.
@@ -234,7 +251,7 @@ Found while writing the tasks out. None is decided here; each step named is writ
 |---|---|---|
 | N1 | On Windows, may the check be a program that exists only as a `.cmd` or `.bat` shim (`pnpm`, `yarn`, `gradlew.bat`)? Starting one needs `cmd.exe`, and the project's own rule for runbooks is never to (`doctor`: "call the .exe"). | Task 15 refuses every shim (`CHECK_SHIM`) except `npm`, which Task 16 runs as `node.exe` with `npm-cli.js` and no shell. Nothing goes through `cmd.exe` |
 | N2 | With `cases.verify.when: 'request'`, should the owner have a "Check now" button in the panel? R-C8-4 allows the setting and does not say who may ask. | Task 10 gives the model `Progress.verify` in that mode, and `proposeDone` runs the pass first. No owner button is built. **Ruled 2026-10-13: yes, in every mode; built as Addition A (see Deviations)** |
-| N3 | Should the case-create form gain an objective field? Today the renderer sends none, so a desktop case's first objective is the model's and reads `proposed`. | Nothing is added to the create form. Task 13 gives the panel Confirm and Edit for the objective, which is the owner's path |
+| N3 | Should the case-create form gain an objective field? Today the renderer sends none, so a desktop case's first objective is the model's and reads `proposed`. | Nothing is added to the create form. Task 13 gives the panel Confirm and Edit for the objective, which is the owner's path. **Ruled 2026-10-13: yes; built as Addition B (see Deviations)** |
 
 ## Global Constraints
 

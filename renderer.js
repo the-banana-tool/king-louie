@@ -1970,6 +1970,26 @@ async function renderChatCaseSection(chat, container) {
     if (select.value === '__new__') {
       let created = null;
       const extra = document.createElement('div');
+      // Cases stage 8 (owner ruling 2026-10-13): what the owner types here
+      // is the case's objective, confirmed from the start. Left empty, the
+      // case has none yet and one the model drafts reads proposed.
+      const objectiveInput = document.createElement('input');
+      objectiveInput.type = 'text';
+      objectiveInput.className = 'rename-chat-input chat-case-new-objective';
+      objectiveInput.id = 'chat-case-new-objective';
+      objectiveInput.placeholder = 'Objective (optional): what this case is for';
+      objectiveInput.maxLength = 2000;
+      objectiveInput.setAttribute('aria-label', 'Objective');
+      objectiveInput.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        document.getElementById('chat-case-new-confirm')?.click();
+      });
+      extra.appendChild(objectiveInput);
+      const objectiveField = () => {
+        const objective = objectiveInput.value.trim();
+        return objective ? { objective } : {};
+      };
       const playbookPicker = buildPlaybookPicker(extra);
       await showTextInputDialog({
         heading: 'New case',
@@ -1980,12 +2000,12 @@ async function renderChatCaseSection(chat, container) {
         onSubmit: async (value) => {
           const title = value.trim();
           if (!title) return 'Give the case a title.';
-          let result = await window.electron.cases.create({ title, chatId: chat.id, ...playbookPicker.fields() });
+          let result = await window.electron.cases.create({ title, chatId: chat.id, ...objectiveField(), ...playbookPicker.fields() });
           // Cases stage 5: a similar open case exists; create anyway, or attach to it.
           if (!result?.ok && result?.code === 'SIMILAR_CASES' && Array.isArray(result.similar) && result.similar.length) {
             const match = result.similar[0];
             if (await showConfirmDialog(`A similar case exists: "${match.title}" (${match.status}). Create anyway?`)) {
-              result = await window.electron.cases.create({ title, chatId: chat.id, force: true, ...playbookPicker.fields() });
+              result = await window.electron.cases.create({ title, chatId: chat.id, force: true, ...objectiveField(), ...playbookPicker.fields() });
             } else {
               result = await window.electron.cases.attach({ chatId: chat.id, caseId: match.caseId });
             }

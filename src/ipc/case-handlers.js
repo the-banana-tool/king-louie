@@ -3,6 +3,11 @@ const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const { bridgeOriginFor } = require('../history/bridge-origin');
 const { assertChatAttachable, ChatBusyError } = require('../cases/chat-attach');
+const { isLocalDesktopEvent } = require('../core/origin');
+const { ownerObjective } = require('./case-progress-handlers');
+const { createLogger } = require('../logging');
+
+const log = createLogger('ipc/cases');
 
 const summarize = (c) => ({
   id: c.id, slug: c.slug, title: c.title, type: c.type, status: c.status, created: c.created, dir: c.dir
@@ -74,15 +79,24 @@ function registerCaseHandlers(ipcMain, context = {}) {
     { ok: true, cases: runtime().listCases().map(summarize) }
   )));
 
-  ipcMain.handle(IPC.CASE_CREATE, wrapHandler(IPC.CASE_CREATE, async (_event, payload) => {
+  ipcMain.handle(IPC.CASE_CREATE, wrapHandler(IPC.CASE_CREATE, async (event, payload) => {
     // A non-object payload (null, an array) counts as {} and gets the fixed
     // title error below, never a destructuring TypeError.
     const form = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
     let { type } = form;
-    const { title, objective, chatId, force, playbooks, acceptBudgetRaises } = form;
+    const { title, chatId, force, playbooks, acceptBudgetRaises } = form;
     if (typeof title !== 'string' || !title.trim()) return { ok: false, error: 'A case needs a title.' };
     if (type !== undefined && (typeof type !== 'string' || !type.trim())) return { ok: false, error: 'type must be a non-empty string.' };
-    if (objective !== undefined && (typeof objective !== 'string' || !objective.trim())) return { ok: false, error: 'objective must be a non-empty string.' };
+    // Cases stage 8 (owner ruling 2026-10-13): the form's Objective field.
+    // What the owner typed, trimmed and held to the rules of an objective
+    // the owner rewrites in the panel; nothing else in the form says whose
+    // it is.
+    let objective = '';
+    if (form.objective !== undefined) {
+      const typed = ownerObjective(form.objective);
+      if (typed.problem) return { ok: false, error: `objective must be a non-empty string. ${typed.problem}` };
+      objective = typed.value;
+    }
     if (force !== undefined && typeof force !== 'boolean') return { ok: false, error: 'force must be true or false.' };
     const chatBefore = chatId ? chatById(chatId) : null;
     if (chatId && !chatBefore) return { ok: false, error: 'Chat not found.' };
@@ -100,9 +114,13 @@ function registerCaseHandlers(ipcMain, context = {}) {
     if (!type && withPlaybooks.type) type = withPlaybooks.type;
     let info;
     try {
-      // Cases stage 8: an objective typed in the form is the owner's.
+      // Cases stage 8: an objective typed in the form is the owner's, and
+      // confirmed from the start. The form is the app's own window (or a
+      // paired desktop's): an event the host did not mark never confirms one.
+      const ownForm = isLocalDesktopEvent(event);
+      if (objective && !ownForm) log.warn('case:create: the event is not the local desktop\'s; the objective is recorded as proposed.');
       info = await runtime().createCase({
-        title: title.trim(), type: type || 'general', objective: objective || '', force: force === true, ...(objective ? { objectiveBy: 'owner' } : {})
+        title: title.trim(), type: type || 'general', objective, force: force === true, ...(objective && ownForm ? { objectiveBy: 'owner' } : {})
       });
     } catch (err) {
       // Cases stage 5: a similar open case needs the owner's confirmation (force).

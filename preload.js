@@ -825,6 +825,9 @@ contextBridge.exposeInMainWorld(
       create: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.title, 'title', { minLength: 1 });
+        // The form's Objective field (cases stage 8); the main process trims
+        // and checks it again.
+        if (payload.objective !== undefined) validateString(payload.objective, 'objective', { minLength: 1 });
         if (payload.force !== undefined && typeof payload.force !== 'boolean') throw new Error('Invalid force: expected boolean');
         return ipcRenderer.invoke('case:create', payload);
       },
