@@ -543,6 +543,14 @@ class DetourRouter {
       // "Attach to this case" (the similar-case question named the detour's
       // own case): the work stays here; no relation to itself.
       if (target.id === meta.id) return finish('attached', meta.id);
+      // A private case's work is not handed to a case that is not private
+      // (local inference spec 2026-10-13 §8.2): its summary would reach that
+      // case's journal and, through its turns, a hosted model. The cautious
+      // reading, until the owner rules (plan, open question Q-L1-6): the
+      // resolution fails and the detour is asked again.
+      if (rt.isPrivate(meta.id) && !rt.isPrivate(target.id)) {
+        return retry(`"${target.title}" is not private, and this case is: its work is not attached there. Pick another option.`, [], 'PRIVATE_CASE_REQUIRED');
+      }
       try {
         await rt.systemAction(target.id, `detour ${detourId} from ${meta.slug}`, async () => {
           rt.addRelation(target.id, { id: meta.id, relation: p.blocks ? 'blocks' : 'related', note: p.summary, detour: detourId });
@@ -585,10 +593,14 @@ class DetourRouter {
       const newObjective = !force && objective && String(objective).trim() ? String(objective).trim() : p.newCase.objective;
       // An earlier attempt created the case and then failed: finish that one.
       let created = d.status === 'failed' && d.last?.targetCaseId ? rt.store.get(d.last.targetCaseId) : null;
+      // One made before this case was marked becomes private too.
+      if (created && rt.isPrivate(meta.id) && !rt.isPrivate(created.id)) await rt.markPrivate(created.id);
       if (!created) {
         try {
           // Cases stage 8: the router wrote this objective; nobody confirmed it.
-          created = await rt.createCase({ title: newTitle, type: p.newCase.type, objective: newObjective, objectiveBy: 'detour', force });
+          // A detour of a private case creates a private case (local
+          // inference spec 2026-10-13 §8.2).
+          created = await rt.createCase({ title: newTitle, type: p.newCase.type, objective: newObjective, objectiveBy: 'detour', force, private: rt.isPrivate(meta.id) });
         } catch (err) {
           if (err && err.code === 'SIMILAR_CASES') {
             const similarTo = { caseIds: err.similar.map((s) => s.caseId), newCase: { ...p.newCase, title: newTitle, objective: newObjective } };

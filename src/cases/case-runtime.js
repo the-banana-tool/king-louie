@@ -17,7 +17,7 @@ const { AbandonedStore } = require('./abandoned');
 const { VerificationStore } = require('./verify/store');
 const { progressView, summaryLine } = require('./verify/status');
 const { resolveEvidence, turnMarks, collectTurnEvidence, statesOf } = require('./verify/evidence');
-const { prepareVerifyPass, callVerifyModel, applyVerifyReply, verificationBlock } = require('./verify/judge');
+const { prepareVerifyPass, callVerifyModel, applyVerifyReply, verificationBlock, verifyModelRefusal } = require('./verify/judge');
 const { registerVerificationHook, freezeProgress, REGRESSED: REGRESSED_STATES } = require('./verify/hook');
 const { closeReadiness } = require('./verify/readiness');
 const { CheckStore, CheckError, CHECK_TYPE, currentCheck, closeCheck } = require('./verify/check');
@@ -33,6 +33,7 @@ const { readJson, writeJsonIfChanged } = require('./jsonfile');
 const { resolveCaseSettings } = require('./defaults');
 const { resolveCaseRole, caseRoleSpec } = require('./roles');
 const { snapshotFromSettings } = require('../models/profiles');
+const { egressPolicy } = require('../models/egress');
 const { CrossCaseIndex } = require('./index-store');
 const { findSimilarCases } = require('./gates');
 const { assertKnownType, resolveCaseType, briefFieldsFor, gatingQuestionsFor } = require('./case-types');
@@ -330,7 +331,7 @@ class CaseRuntime {
     }
     this.creating = (this.creating || 0) + 1;
     try {
-      const info = await this.store.create({ title: opts.title, type: opts.type, objective: opts.objective });
+      const info = await this.store.create({ title: opts.title, type: opts.type, objective: opts.objective, private: opts.private === true });
       await this._recordCreatedObjective(info, opts.objective, opts.objectiveBy);
       this._reindex(info.id);
       return info;
@@ -773,6 +774,12 @@ class CaseRuntime {
     // its usage, and the models.
     const turn = { caseId: meta.id, dir: meta.dir, turnId, title: meta.title, source: 'check', signal: null };
     turn.models = this._turnModels(meta.id, null);
+    // The owner asked for this pass by name, so it is vital (local inference
+    // spec 2026-10-13 §7.3, "skip optional, refuse vital"): with no local
+    // model under a private case's policy it is refused, before anything is
+    // counted or written, with the resolver's words.
+    const refusal = verifyModelRefusal(this, turn);
+    if (refusal) throw new VerifyRefusedError(refusal.code, refusal.message);
     let out = null;
     let plan = null;
     await this.systemAction(meta.id, 'check', () => {
@@ -1645,8 +1652,13 @@ class CaseRuntime {
           abort: (reason) => controller.abort(reason)
         };
         turn.orientation = this.orientation(fresh.id, { triggers, hookNotes: hook.notes });
+        // A private case's chats carry the mark in the history store too
+        // (local inference spec 2026-10-13 §8.2, R-LI-23): one made since the
+        // case was marked (a question's card, an attach) is marked now.
+        this._markCaseChats(fresh.id);
         // The models this turn uses, frozen at launch (models spec
         // 2026-09-27 §6.6): a switch during the turn applies to the next one.
+        // A private case's snapshot carries its egress policy.
         turn.models = this._turnModels(fresh.id, chatId);
         // Cases stage 8 (spec §6.9): where the record stood when the turn
         // began, so its close can tell what the turn wrote. Taken last.
@@ -2174,13 +2186,18 @@ class CaseRuntime {
       try {
         const totalTokens = Number(ev.totalTokens) || 0;
         const rawCost = Number(ev.cost);
-        // Real providers report costUsd: 0 for a model with no price table
-        // (base-provider.js), not cost: null — both must count as unpriced.
-        // A non-finite cost (NaN, Infinity) is unusable data, treated the
-        // same way rather than charged or silently dropped (spec §3.5, F4).
-        const unpriced = ev.cost === null || ev.cost === undefined || !Number.isFinite(rawCost)
-          || (rawCost === 0 && totalTokens > 0);
-        let cost = unpriced ? 0 : rawCost;
+        // A call to a local server (local inference spec 2026-10-13 §9.1,
+        // §9.2; R-LI-13): its `local` names the server (only the local
+        // provider sets it). It is free: usd is charged nothing, its tokens
+        // are recorded as local, and none of them counts as unpriced.
+        const local = Boolean(ev.local && typeof ev.local === 'object' && typeof ev.local.server === 'string' && ev.local.server);
+        // Otherwise a cost of zero with tokens is unpriced, as a null or
+        // missing cost is. A non-finite cost (NaN, Infinity) is unusable
+        // data, treated the same way rather than charged or silently
+        // dropped (spec §3.5, F4).
+        const unpriced = !local && (ev.cost === null || ev.cost === undefined || !Number.isFinite(rawCost)
+          || (rawCost === 0 && totalTokens > 0));
+        let cost = unpriced || local ? 0 : rawCost;
         if (cost < 0) {
           log.warn(`Case ${turn.caseId}: usage event reported a negative cost (${cost}); clamped to 0.`);
           cost = 0;
@@ -2189,7 +2206,8 @@ class CaseRuntime {
           turnId: turn.turnId,
           provider: ev.provider,
           model: ev.model,
-          unpricedTokens: unpriced ? totalTokens : 0
+          unpricedTokens: unpriced ? totalTokens : 0,
+          ...(local ? { localTokens: totalTokens } : {})
         });
         if (r.crossedNow.length) this.onCrossings(turn.caseId, 'usd', r.crossedNow);
       } catch (err) {
@@ -2233,7 +2251,7 @@ class CaseRuntime {
       return null;
     }
     try {
-      return postQuestionToChat({ chats, meta, rec, now: () => this.now(), onlyIfMissing });
+      return postQuestionToChat({ chats, meta, rec, now: () => this.now(), onlyIfMissing, asPrivate: this.isPrivate(meta.id) });
     } catch (err) {
       log.warn(`Posting ${rec.id} of case ${meta.slug} to its chat failed: ${err.message}`);
       return null;
@@ -2644,6 +2662,68 @@ class CaseRuntime {
     }));
   }
 
+  // ---- The private mark (local inference spec 2026-10-13 §8.1, §8.2) ----
+
+  // Whether a case is private: `private: true` in case.yaml. A missing key
+  // is not; any other value, and a case that cannot be read, is (fail
+  // closed), with one warning per case that names no value from the file.
+  isPrivate(id) {
+    let meta;
+    try {
+      meta = this.getCase(id);
+    } catch {
+      return true;
+    }
+    if (!Object.prototype.hasOwnProperty.call(meta, 'private')) return false;
+    if (meta.private === true) return true;
+    if (!this._privateWarned) this._privateWarned = new Set();
+    if (!this._privateWarned.has(meta.id)) {
+      this._privateWarned.add(meta.id);
+      log.warn(`Case ${meta.slug}: case.yaml's private is not true or false as written by King Louie; the case is treated as private.`);
+    }
+    return true;
+  }
+
+  // The owner's mark (Task 14 adds the press; no tool calls this): sets
+  // `private: true` through a system action, committed, and marks every
+  // chat of the case in the history store (R-LI-23: one mark, on the case).
+  // There is no inverse. Marking a private case again writes nothing.
+  async markPrivate(id) {
+    const meta = this.getCase(id);
+    if (meta.private !== true) {
+      await this.systemAction(meta.id, 'private', async (m) => {
+        if (m.private !== true) this.store.updateMeta(m.id, { private: true });
+      }, { commitMessage: 'case marked private' });
+    }
+    this._markCaseChats(meta.id, { throwOnFailure: true });
+    return this.getCase(meta.id);
+  }
+
+  // Marks the case's chats in the history store when the case is private
+  // (the host's markChatsPrivate). Never fails a turn: a failure is logged,
+  // and the case's own mark still puts every chat of it under the policy.
+  _markCaseChats(id, { throwOnFailure = false } = {}) {
+    const mark = this.host?.markChatsPrivate;
+    if (typeof mark !== 'function' || !this.isPrivate(id)) return;
+    try {
+      mark(id);
+    } catch (err) {
+      if (throwOnFailure) throw err;
+      log.warn(`Marking the chats of private case ${id} failed: ${err.message}`);
+    }
+  }
+
+  // The egress policy of a turn whose models could not be snapshotted: the
+  // host's reading of the case's mark, else a private-case policy when the
+  // case is private (fail closed). → policy | null.
+  _egressOf(turn) {
+    if (turn && turn.models) return null;
+    try {
+      if (typeof this.host?.egressFor === 'function') return this.host.egressFor({ caseId: turn.caseId });
+    } catch { /* below */ }
+    return this.isPrivate(turn.caseId) ? egressPolicy({ reason: 'private-case', caseId: String(turn.caseId) }) : null;
+  }
+
   // ---- Model roles (spec §3.8; models spec 2026-09-27 §6, §8) ----
 
   _settingsSafe() {
@@ -2784,8 +2864,24 @@ class CaseRuntime {
       throw new Error('A routed provider needs a role or targets.');
     }
     if (tags) tags.profileId = turn.models?.profileId || null;
-    const list = targets.map((x) => ({ provider: String(x.provider).toLowerCase(), model: String(x.model || ''), effort: x.effort || null }));
-    const state = typeof router.newRouteState === 'function' ? router.newRouteState(tags) : undefined;
+    const list = targets.map((x) => {
+      const provider = String(x.provider).toLowerCase();
+      const kept = { provider, model: String(x.model || ''), effort: x.effort || null };
+      // A local target's adapter goes with it, as in the router's own
+      // routedProvider (local inference spec 2026-10-13 §12.2).
+      if (provider === 'local' && typeof x.adapter === 'string' && x.adapter) kept.adapter = x.adapter;
+      return kept;
+    });
+    // The egress policy of this call's model role (local inference spec
+    // 2026-10-13 §7.2): the turn's (a private case's, or a local-only
+    // role's), on the route state, so the router refuses a hosted target
+    // whatever list it is handed. A turn with no snapshot reads the mark.
+    const modelRole = (tags && tags.role) || 'main';
+    const models = turn.models || null;
+    const egress = models
+      ? ((typeof models.egressFor === 'function' ? models.egressFor(modelRole) : models.egress) ?? null)
+      : this._egressOf(turn);
+    const state = typeof router.newRouteState === 'function' ? router.newRouteState(tags, egress) : undefined;
     const call = (messages, opts = {}, tools = null, onChunk = null) => router.routeTargets(list, messages, {
       ...(opts || {}),
       ...(Array.isArray(tools) ? { tools } : {}),

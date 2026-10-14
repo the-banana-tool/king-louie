@@ -107,6 +107,11 @@ class Budget {
       if (category === 'usd') {
         const unpriced = Number(meta?.unpricedTokens);
         if (Number.isFinite(unpriced) && unpriced > 0) e.unpricedTokens = (Number(e.unpricedTokens) || 0) + unpriced;
+        // Tokens a local server answered (local inference spec 2026-10-13
+        // §9.2): free, so they are recorded beside the spend, never in it.
+        // The key appears with the first local call.
+        const local = Number(meta?.localTokens);
+        if (Number.isFinite(local) && local > 0) e.localTokens = (Number(e.localTokens) || 0) + local;
       }
     }
     const crossedNow = this._settle(category, e);

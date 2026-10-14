@@ -64,6 +64,9 @@ const JOURNAL_CAP = 4000;
 const PAGES_SPEC_CAP = 2000;
 // A cached page price above this was not written by the host.
 const MAX_PAGE_USD = 100;
+// The resolver's refusals when a private case's (or a local-only role's)
+// policy leaves no local model (local inference spec 2026-10-13 §7.3).
+const NO_LOCAL_MODEL_CODES = Object.freeze(['PRIVATE_NO_LOCAL_MODEL', 'LOCAL_ONLY_ROLE_NO_MODEL']);
 // Owner review (spec §3.5). Only the owner reviews: from the panel, or by
 // answering a review question. The model has no path here.
 const REVIEW_ACTIONS = new Set(['accept', 'edit', 'reject']);
@@ -610,6 +613,9 @@ class IngestService {
     const tokens = Number.isFinite(Number(usage?.totalTokens)) && Number(usage.totalTokens) > 0 ? Number(usage.totalTokens) : 0;
     const who = `${oneLine(usage?.provider, 40)}:${oneLine(usage?.model, 80)}`;
     if (typeof cost === 'number' && Number.isFinite(cost) && cost > 0) return { usd: cost, estimated: false, unpriced: 0 };
+    // A local server's call is free (local inference spec 2026-10-13 §9.2):
+    // nothing is charged or estimated, and no token of it is unpriced.
+    if (usage?.local && typeof usage.local.server === 'string' && usage.local.server) return { usd: 0, estimated: false, unpriced: 0, local: tokens };
     if (cost === 0 && tokens === 0) return { usd: 0, estimated: false, unpriced: 0 };
     if (purpose === 'ocr') {
       this.log.warn(`No price for ${who}; charging the OCR estimate of $${cfg.ocrUsdPerPageEstimate} for this page.`);
@@ -627,7 +633,7 @@ class IngestService {
   _charge(caseId, purpose, price, meta) {
     let crossedNow;
     try {
-      ({ crossedNow } = this.runtime.budget(caseId).charge('usd', price.usd, { kind: `ingest:${purpose}`, ...meta, unpricedTokens: price.unpriced || 0 }));
+      ({ crossedNow } = this.runtime.budget(caseId).charge('usd', price.usd, { kind: `ingest:${purpose}`, ...meta, unpricedTokens: price.unpriced || 0, ...(price.local ? { localTokens: price.local } : {}) }));
     } catch (err) {
       this.log.error(`Charging ingest ${purpose} to case ${caseId} failed; stopping this read: ${err.message}`);
       return { stop: true, recorded: false };
@@ -880,8 +886,23 @@ class IngestService {
     const proposed = new Set(done);
     let usd = rec.usd.extract;
     await this.runtime.ensureRoleTested(meta.id, 'draft');
-    const sel = this.runtime.roleModel(meta.id, 'draft');
+    // A private case with no local model for draft (local inference spec
+    // 2026-10-13 §7.3): nothing is sent; every chunk waits as a failed chunk
+    // with the reason, and a later Extract proposes it again.
+    let sel;
+    let noLocal = false;
+    try {
+      sel = this.runtime.roleModel(meta.id, 'draft');
+    } catch (err) {
+      if (!NO_LOCAL_MODEL_CODES.includes(err?.code)) throw err;
+      noLocal = true;
+      this.log.warn(`Extract for ${rec.docId} waits: ${err.code}`);
+    }
     for (const chunk of chunks) {
+      if (noLocal) {
+        failedChunks.push({ fromPage: chunk.fromPage, toPage: chunk.toPage, reason: 'private-no-local-model' });
+        continue;
+      }
       if (!ctx.stop && this._budgetGone(meta.id)) ctx.stop = true;
       if (ctx.stop) {
         failedChunks.push({ fromPage: chunk.fromPage, toPage: chunk.toPage, reason: 'budget' });

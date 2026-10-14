@@ -51,13 +51,16 @@ function questionMessageText(meta, rec) {
 // `onlyIfMissing` (a duplicate of an open question, asked again): posts
 // only when the chosen chat holds no message for the record, say because a
 // resend or an edit truncated the chat past it; returns null otherwise.
-function postQuestionToChat({ chats, meta, rec, now = () => new Date(), onlyIfMissing = false }) {
+// `asPrivate`: the case is private (local inference spec 2026-10-13 §8.2),
+// so a chat made for it here is created private.
+function postQuestionToChat({ chats, meta, rec, now = () => new Date(), onlyIfMissing = false, asPrivate = false }) {
   let chat = pickCaseChat(chats.listChats({ messages: false }), meta.id);
   if (onlyIfMissing && chat && chatHasQuestion(chats, chat.id, rec.id)) return null;
   let created = false;
   if (!chat) {
     const at = now().toISOString();
-    chat = chats.createChat({ id: chats.createId(), title: meta.title, caseId: meta.id, createdAt: at, updatedAt: at, messages: [] });
+    const fields = { id: chats.createId(), title: meta.title, caseId: meta.id, createdAt: at, updatedAt: at, messages: [] };
+    chat = asPrivate === true ? chats.createChat(fields, { private: true }) : chats.createChat(fields);
     if (!chat) throw new Error('the chat could not be created');
     created = true;
   }

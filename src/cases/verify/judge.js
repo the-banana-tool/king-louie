@@ -310,9 +310,25 @@ async function callVerifyModel(runtime, turn, input, timeoutMs, { signal = turn.
   }
 }
 
+// The refusal a verify call would get under the turn's egress policy
+// (PRIVATE_NO_LOCAL_MODEL, LOCAL_ONLY_ROLE_NO_MODEL) when no local model
+// can take it, or null: any other outcome, a model or another error, is
+// left to the call, as before. No model call.
+const NO_LOCAL_MODEL_CODES = Object.freeze(['PRIVATE_NO_LOCAL_MODEL', 'LOCAL_ONLY_ROLE_NO_MODEL']);
+function verifyModelRefusal(runtime, turn) {
+  try {
+    runtime.roleModel(turn.caseId, 'verify', { turn });
+    return null;
+  } catch (err) {
+    return err && NO_LOCAL_MODEL_CODES.includes(err.code) ? err : null;
+  }
+}
+
 const SKIP_NOTES = Object.freeze({
   'daily-cap': (cfg) => `not run (the limit of ${cfg.maxPassesPerDay} passes a day is used)`,
-  'usd-budget': (cfg) => `not run (the usd budget is past ${cfg.skipAboveUsdPercent} %)`
+  'usd-budget': (cfg) => `not run (the usd budget is past ${cfg.skipAboveUsdPercent} %)`,
+  'private-no-local-model': () => 'not run (this case is private and no local model can take the verify pass; nothing was sent to a hosted model)',
+  'local-only-no-model': () => 'not run (the verify role is local-only and has no local model; nothing was sent to a hosted model)'
 });
 
 // The part of a pass that needs no model, done under the case lock: every
@@ -347,6 +363,13 @@ function prepareVerifyPass(runtime, turn, { turnEvidence = null, mode = 'close',
       if (store.noteSkip(day, reason)) out.note = SKIP_NOTES[reason](cfg);
       return skip(reason);
     };
+    // The pass is optional (local inference spec 2026-10-13 §7.3, the
+    // owner's "skip optional, refuse vital"): under a private case's policy
+    // (or a local-only role) with no local model for it, it is skipped,
+    // uncounted, and the journal says why once a day. Resolving needs no
+    // model call.
+    const refusal = verifyModelRefusal(runtime, turn);
+    if (refusal) return noted(refusal.code === 'LOCAL_ONLY_ROLE_NO_MODEL' ? 'local-only-no-model' : 'private-no-local-model');
     if (store.passesOn(day) >= cfg.maxPassesPerDay) return noted('daily-cap');
     const ratio = runtime.budget(meta.id).status().usd.ratio;
     if (ratio !== null && ratio * 100 >= cfg.skipAboveUsdPercent) return noted('usd-budget');
@@ -527,5 +550,5 @@ function verificationBlock({ pass = null, before = null, after = null, check = n
 
 module.exports = {
   VERIFY_SYSTEM, VERIFY_TOOLS, HEADING, buildVerifyInput, composeVerifyInput, parseVerifyReply, acceptVerdict,
-  prepareVerifyPass, callVerifyModel, applyVerifyReply, runVerifyPass, verificationBlock
+  prepareVerifyPass, callVerifyModel, applyVerifyReply, runVerifyPass, verificationBlock, verifyModelRefusal
 };

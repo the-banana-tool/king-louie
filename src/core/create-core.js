@@ -2518,24 +2518,36 @@ function createCore(deps = {}) {
 
   // ---- The egress policy (local inference spec 2026-10-13 §7.1) ----
 
-  // A case's private mark. Cases get theirs in stage L1's Task 12 (the
-  // rebase on cases stage 8); until then no case is private.
-  const readCasePrivate = () => false;
+  // A case's private mark (spec §8.1): case.yaml's `private`, read by the
+  // case runtime, which answers true for a case it cannot read.
+  const readCasePrivate = (caseId) => caseRuntime.isPrivate(caseId);
+
+  // Every chat of a case is marked in the history store when the case is
+  // (R-LI-23: one mark, on the case; the chats' column serves the store's
+  // own filters). Marking is one way and a marked chat is left as it is.
+  const markChatsPrivate = (caseId) => {
+    const id = String(caseId || '');
+    if (!id) return 0;
+    let marked = 0;
+    for (const ref of historyStore.chatRefs()) {
+      if (ref && ref.caseId === id && ref.private !== true && historyStore.markPrivate(ref.id).marked) marked += 1;
+    }
+    return marked;
+  };
 
   // The policy a chat's or a case's mark puts on its model calls, or null
   // for none. Fail closed: a chat the store does not know, a mark that is
   // not a plain "no", and any failure to read one all give a policy. A run
   // that belongs to no chat and no case has none.
+  // The case's mark is read first: a private case's chats are marked too
+  // (R-LI-23), and its turns say the case is private.
   const egressFor = ({ chatId = null, caseId = null } = {}) => {
     try {
-      let theCaseId = caseId || null;
-      if (chatId) {
-        if (historyStore.isPrivate(chatId) !== false) return egressPolicy({ reason: 'private-chat', chatId: String(chatId), caseId: theCaseId });
-        theCaseId = theCaseId || getChat(chatId, { messages: false })?.caseId || null;
-      }
+      const theCaseId = caseId || (chatId ? getChat(chatId, { messages: false })?.caseId || null : null);
       if (theCaseId && readCasePrivate(theCaseId) !== false) {
         return egressPolicy({ reason: 'private-case', chatId: chatId ? String(chatId) : null, caseId: String(theCaseId) });
       }
+      if (chatId && historyStore.isPrivate(chatId) !== false) return egressPolicy({ reason: 'private-chat', chatId: String(chatId), caseId: theCaseId });
       return null;
     } catch (err) {
       log.warn(`A private mark could not be read, so its model calls stay local or are refused: ${err.message}`);
@@ -3556,6 +3568,10 @@ function createCore(deps = {}) {
     host: {
       inferenceRouter,
       snapshotModels,
+      // Local inference L1 (spec 2026-10-13 §7.1, §8.2): the policy of a case
+      // whose turn has no snapshot, and the case's chats' marks.
+      egressFor,
+      markChatsPrivate,
       // A case role's providers are tested (or a stale non-auth failure
       // retested) before it resolves, as resolveRole does (final review I2).
       ensureTargetsTested,
@@ -3683,7 +3699,9 @@ function createCore(deps = {}) {
       // An ingest call names its model (the case's draft, verify or vision
       // target): an explicit target, still checked (spec §6.3).
       callModel: createCallModel({
-        resolveInference: ({ provider, model }) => resolveRole('main', { explicit: { provider, model } }),
+        // The case id carries the case's private mark (spec 2026-10-13
+        // §7.5): under it resolveRole hands out the routed provider.
+        resolveInference: ({ provider, model, caseId }) => resolveRole('main', { explicit: { provider, model }, caseId: caseId || null }),
         getUsageTracker: () => usageTracker
       }),
       getCapabilities: (provider, model) => capabilitiesOf(catalog, provider, model),
