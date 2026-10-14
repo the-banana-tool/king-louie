@@ -15,6 +15,7 @@ const { plainLineProblem } = require('../hidden-chars');
 const { localDay } = require('../clock');
 const { recordOneShotUsage, textOf } = require('../one-shot-usage');
 const { ELIGIBLE_PROVENANCE, resolveEvidence, statesOf } = require('./evidence');
+const { CheckStore, checkLine } = require('./check');
 const { createLogger } = require('../../logging');
 
 const log = createLogger('cases/verify-judge');
@@ -341,8 +342,10 @@ function prepareVerifyPass(runtime, turn, { turnEvidence = null, mode = 'close',
     const ratio = runtime.budget(meta.id).status().usd.ratio;
     if (ratio !== null && ratio * 100 >= cfg.skipAboveUsdPercent) return noted('usd-budget');
 
+    // The newest run of the check command: its id and result, never its output.
     const { text: input, shown } = composeVerifyInput({
-      view, turnEvidence, facts: runtime.ledger(meta.id).view().facts, maxChars: cfg.maxInputChars
+      view, turnEvidence, facts: runtime.ledger(meta.id).view().facts, maxChars: cfg.maxInputChars,
+      newestCheck: new CheckStore(meta.dir).newestRun()
     });
     const shownHash = new Map(confirmed.map((r) => [r.id, r.hash]));
     // Counted before the call, once: a provider that fails every time is
@@ -377,7 +380,7 @@ function applyVerifyReply(runtime, plan, called, out) {
     // The record may have changed while the model was thinking (an answer,
     // a scope change): every check below reads it as it is now.
     const now = runtime.progressView(meta.id);
-    const ctx = { facts: runtime.ledger(meta.id).view().facts, checks: null, snapshot: null };
+    const ctx = { facts: runtime.ledger(meta.id).view().facts, checks: new CheckStore(meta.dir).read().runs, snapshot: null };
     try {
       ctx.snapshot = runtime.caseTypeSnapshot(meta.id);
     } catch {
@@ -466,13 +469,16 @@ async function runVerifyPass(runtime, turn, { turnEvidence = null, mode = 'close
 // null when there is nothing to say. `before` is { <criterion id>: state }
 // as the turn began; `after` is the progress view now. Ids, counts and
 // fixed words only: no criterion's text and nothing the verify model wrote.
-// A criterion that left `met` is the first line.
+// `check` is what the close run of the check command gave ({ run,
+// baseline }; verify/check.js): its line is first, so a check that went
+// from pass to fail is the first thing read. Then a criterion that left `met`.
 function verificationBlock({ pass = null, before = null, after = null, check = null } = {}) {
-  void check;
   const was = isObject(before) ? before : {};
   const rows = (Array.isArray(after?.criteria) ? after.criteria : []).filter((r) => isObject(r) && r.scope === 'confirmed');
   const now = statesOf(after);
   const lines = [];
+  const ran = checkLine(check);
+  if (ran) lines.push(ran);
   const lost = [];
   for (const id of Object.keys(was).sort()) {
     if (was[id] !== 'met' || now[id] === 'met') continue;

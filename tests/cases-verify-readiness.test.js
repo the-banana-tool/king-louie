@@ -66,16 +66,16 @@ describe('closeReadiness', () => {
     assert.deepStrictEqual(r.items.map((i) => i.id), [...ITEM_IDS]);
     assert.deepStrictEqual(ITEM_IDS, [
       'objective-confirmed', 'criteria-confirmed', 'criteria-met', 'unknowns-resolved', 'questions-answered', 'jobs-settled',
-      'plan-settled', 'envelopes-closed', 'detours-settled', 'documents-reviewed', 'tree-clean', 'branch-merged'
+      'plan-settled', 'envelopes-closed', 'detours-settled', 'documents-reviewed', 'tree-clean', 'branch-merged', 'check-passing'
     ]);
     assert.strictEqual(r.computedAt, NOW.toISOString());
     assert.deepStrictEqual(Object.fromEntries(r.items.map((i) => [i.id, i.state])), {
       'objective-confirmed': 'ok', 'criteria-confirmed': 'ok', 'criteria-met': 'open', 'unknowns-resolved': 'ok', 'questions-answered': 'ok',
-      'jobs-settled': 'ok', 'plan-settled': 'ok', 'envelopes-closed': 'ok', 'detours-settled': 'ok', 'documents-reviewed': 'ok', 'tree-clean': 'n/a', 'branch-merged': 'n/a'
+      'jobs-settled': 'ok', 'plan-settled': 'ok', 'envelopes-closed': 'ok', 'detours-settled': 'ok', 'documents-reviewed': 'ok', 'tree-clean': 'n/a', 'branch-merged': 'n/a', 'check-passing': 'n/a'
     });
     assert.deepStrictEqual(Object.fromEntries(r.items.map((i) => [i.id, i.by])), {
       'objective-confirmed': 'owner', 'criteria-confirmed': 'owner', 'criteria-met': 'case', 'unknowns-resolved': 'either', 'questions-answered': 'owner',
-      'jobs-settled': 'case', 'plan-settled': 'case', 'envelopes-closed': 'owner', 'detours-settled': 'owner', 'documents-reviewed': 'owner', 'tree-clean': 'either', 'branch-merged': 'either'
+      'jobs-settled': 'case', 'plan-settled': 'case', 'envelopes-closed': 'owner', 'detours-settled': 'owner', 'documents-reviewed': 'owner', 'tree-clean': 'either', 'branch-merged': 'either', 'check-passing': 'case'
     });
     assert.strictEqual(r.ready, false);
     for (const i of r.items) {
@@ -241,6 +241,55 @@ describe('closeReadiness', () => {
     assert.strictEqual(item('documents-reviewed').fix, 'Owner: 1 document proposal waits for review.');
   });
 
+  // Cases stage 8 (plan Task 16; spec §6.4, §6.6): the check command.
+  it('check-passing is n/a unless checks are on and the command is approved, then reads the newest run against the snapshot', async () => {
+    const repo = fs.realpathSync.native(tmp());
+    const settings = { cases: { timeZone: 'UTC', softwareRepo: { check: { enabled: true } } } };
+    const rt = new CaseRuntime({ root: tmp(), now: () => NOW, getSettings: () => settings });
+    const info = await rt.createCase({ title: 'Lakeside lot site', type: 'software-repo', objective: 'Ship the Lakeside lot site', objectiveBy: 'owner' });
+    rt.brief(info.id).update('why', 'The listing goes live in spring', { provenance: 'user' });
+    rt.brief(info.id).update('repo', repo, { provenance: 'user' });
+    await rt.applyScopeAction(info.id, { action: 'add', text: 'The test suite passes', by: 'owner-action' });
+    rt.completeGating(info.id);
+    const item = () => rt.closeReadiness(info.id).items.find((i) => i.id === 'check-passing');
+    const snap = (head, extra = {}) => {
+      if (rt._typeSnapshots instanceof Map) rt._typeSnapshots.delete(info.id);
+      writeJson(kl(info.dir, 'case-type.json'), { type: 'software-repo', fetchedAt: NOW.toISOString(), stale: false, state: { repo, branch: 'main', head, dirty: 0, openPrs: [] }, notes: [], ...extra });
+    };
+    const run = (result, head, dirty = 0) => rt.checks(info.id).addRun({ hash: 'sha256:x', head, dirty, result, exitCode: result === 'pass' ? 0 : 1, timedOut: result === 'timeout', ms: 5, turnId: 'turn-1' });
+    // No command, then a command that is not approved: n/a.
+    assert.strictEqual(item().state, 'n/a');
+    rt.brief(info.id).update('check', 'npm test', { provenance: 'user' });
+    assert.strictEqual(item().state, 'n/a');
+    const { pathKey } = require('../src/cases/case-types/software-repo');
+    rt.checks(info.id).approve({ argv: ['npm', 'test'], repo: pathKey(repo), by: 'question', ref: 'q-0001', channel: 'in-app' });
+    snap('abc1234def');
+    assert.deepStrictEqual([item().state, item().by, item().fix], ['unknown', 'case', 'The check has not run yet. It runs again at the end of a turn you start, when the repository has changed.']);
+    run('pass', 'abc1234def');
+    assert.deepStrictEqual(item(), { id: 'check-passing', state: 'ok', by: 'case', count: 0, refs: [], fix: null, note: null });
+    run('fail', 'abc1234def');
+    assert.deepStrictEqual([item().state, item().refs, item().fix], ['open', ['chk-0002'], 'Case: the check last failed (chk-0002). Fix it and it runs again at the end of the turn.']);
+    run('timeout', 'abc1234def');
+    assert.strictEqual(item().fix, 'Case: the check last timed out (chk-0003). Fix it and it runs again at the end of the turn.');
+    run('pass', 'abc1234def', 3);
+    assert.deepStrictEqual([item().state, item().refs], ['open', ['chk-0004']]);
+    assert.match(item().fix, /uncommitted changes \(chk-0004\)/);
+    run('pass', '9999999aaa');
+    assert.strictEqual(item().state, 'unknown');
+    assert.match(item().fix, /another commit \(chk-0005\)/);
+    run('spawn-failed', 'abc1234def');
+    assert.match(item().fix, /could not be started \(chk-0006\)/);
+    run('pass', 'abc1234def');
+    snap('abc1234def', { stale: true });
+    assert.deepStrictEqual([item().state, item().fix], ['unknown', 'The repository state is not known yet. It is read at the start of a turn.']);
+    snap('abc1234def');
+    assert.strictEqual(item().state, 'ok');
+    assert.strictEqual(rt.closeReadiness(info.id).ready, false, 'other items are open');
+    // Off again: n/a, whatever the runs say.
+    settings.cases.softwareRepo.check.enabled = false;
+    assert.strictEqual(item().state, 'n/a');
+  });
+
   it('tree-clean and branch-merged apply to a software-repo case and read the snapshot', async () => {
     const { rt, id, dir, item } = await world({ type: 'software-repo', title: 'Phone agent maintenance' });
     const snap = (state, extra = {}) => {
@@ -280,11 +329,16 @@ describe('closeReadiness', () => {
   });
 
   it('fix never carries case text', async () => {
-    const rt = new CaseRuntime({ root: tmp(), now: () => NOW, getSettings: () => ({ cases: { timeZone: 'UTC' } }) });
+    // Checks on and a local repository, so check-passing is read too (Task 16).
+    const rt = new CaseRuntime({ root: tmp(), now: () => NOW, getSettings: () => ({ cases: { timeZone: 'UTC', softwareRepo: { check: { enabled: true } } } }) });
     const info = await rt.createCase({ title: `Lot ${CANARY}`, type: 'software-repo', objective: `Sell ${CANARY}` });
     const { id, dir } = info;
     rt.brief(id).update('why', 'Need the cash', { provenance: 'user' });
-    rt.brief(id).update('repo', 'https://github.com/example/phone-agent.git', { provenance: 'user' });
+    const repo = fs.realpathSync.native(tmp());
+    rt.brief(id).update('repo', repo, { provenance: 'user' });
+    rt.brief(id).update('check', 'npm test', { provenance: 'user' });
+    rt.checks(id).approve({ argv: ['npm', 'test'], repo: require('../src/cases/case-types/software-repo').pathKey(repo), by: 'question', ref: 'q-0001', channel: 'in-app' });
+    rt.checks(id).addRun({ hash: 'sha256:x', head: CANARY, dirty: 0, result: 'fail', exitCode: 1, timedOut: false, ms: 5, turnId: CANARY });
     await rt.applyScopeAction(id, { action: 'add', text: `Signed ${CANARY} contract`, by: 'owner-action' });
     rt.brief(id).append('successCriteria', `Proposed ${CANARY} thing`, { provenance: 'model' });
     rt.completeGating(id);

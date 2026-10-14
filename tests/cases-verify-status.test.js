@@ -302,3 +302,26 @@ describe('progressView', () => {
     assert.strictEqual(summaryLine(null), '0 of 0 confirmed criteria met');
   });
 });
+
+// Cases stage 8 (plan Task 16): a run of the check command as evidence.
+describe('the chk- evidence resolver', () => {
+  const runs = [
+    { id: 'chk-0001', result: 'pass', head: 'aaaaaaa1111', dirty: 0 },
+    { id: 'chk-0002', result: 'pass', head: 'aaaaaaa1111', dirty: 4 },
+    { id: 'chk-0003', result: 'fail', head: 'aaaaaaa1111', dirty: 0 },
+    { id: 'chk-0004', result: 'pass', head: 'bbbbbbb2222', dirty: 0 }
+  ];
+  const at = (head, extra = {}) => ({ checks: runs, snapshot: { stale: false, state: { head }, ...extra } });
+
+  it('holds only for a passing run with a clean tree at the commit the repository is at', () => {
+    assert.deepStrictEqual(resolveEvidence('chk-0001', at('aaaaaaa1111')), { exists: true, provenance: 'check', source: null, sourceKind: 'check', holds: true, reason: null, label: null });
+    const not = (id, ctx) => { const r = resolveEvidence(id, ctx); return [r.exists, r.holds, r.reason, r.label]; };
+    assert.deepStrictEqual(not('chk-0002', at('aaaaaaa1111')), [true, false, 'check-not-current', 'chk-0002 ran with uncommitted changes']);
+    assert.deepStrictEqual(not('chk-0003', at('aaaaaaa1111')), [true, false, 'check-not-current', 'chk-0003 did not pass']);
+    assert.deepStrictEqual(not('chk-0004', at('aaaaaaa1111')), [true, false, 'check-not-current', 'chk-0004 ran at bbbbbbb; the repository is now at aaaaaaa']);
+    assert.deepStrictEqual(not('chk-0001', at('aaaaaaa1111', { stale: true })), [true, false, 'check-not-current', 'chk-0001: the repository state is stale or not known']);
+    assert.deepStrictEqual(not('chk-0001', { checks: runs, snapshot: null }), [true, false, 'check-not-current', 'chk-0001: the repository state is stale or not known']);
+    assert.deepStrictEqual(not('chk-0009', at('aaaaaaa1111')), [false, false, 'evidence-missing', 'chk-0009 is not a recorded check run']);
+    assert.deepStrictEqual(not('chk-0001', { checks: null, snapshot: at('aaaaaaa1111').snapshot }), [false, false, 'evidence-missing', 'chk-0001 is not a recorded check run']);
+  });
+});

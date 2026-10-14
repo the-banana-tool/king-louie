@@ -20,7 +20,7 @@ const { resolveEvidence, turnMarks, collectTurnEvidence, statesOf } = require('.
 const { prepareVerifyPass, callVerifyModel, applyVerifyReply, verificationBlock } = require('./verify/judge');
 const { registerVerificationHook, freezeProgress } = require('./verify/hook');
 const { closeReadiness } = require('./verify/readiness');
-const { CheckStore, CheckError, CHECK_TYPE, currentCheck } = require('./verify/check');
+const { CheckStore, CheckError, CHECK_TYPE, currentCheck, closeCheck } = require('./verify/check');
 const { checkQuestionText } = require('./verify/questions');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
@@ -266,6 +266,14 @@ class CaseRuntime {
     // result will not be written. The host awaits verifyIdle() before it
     // releases the locks.
     this.abortVerifyPasses('shutdown');
+    // A check command that is running is killed with everything it started.
+    this.abortChecks('shutdown');
+  }
+
+  // Stops every run of a check command this runtime started (spec §6.6):
+  // the process tree is killed and nothing of the run is recorded.
+  abortChecks(reason = 'stopped') {
+    for (const controller of this._checkRuns instanceof Set ? this._checkRuns : []) controller.abort(reason);
   }
 
   get root() {
@@ -642,14 +650,21 @@ class CaseRuntime {
     } catch (err) {
       log.warn(`Progress of ${meta.slug}: the case-type snapshot is unavailable: ${err.message}`);
     }
-    // No check has run in this stage's first part: `checks` and
-    // `newestCheck` are filled in with the check command.
-    const ctx = { facts, checks: null, snapshot };
+    // The runs of the check command (spec §6.6): a `chk-` id is resolved
+    // against them, and a failed newest run makes a criterion that cites
+    // a check `failing`.
+    let runs = [];
+    try {
+      runs = this.checks(meta.id).read().runs;
+    } catch (err) {
+      log.warn(`Progress of ${meta.slug}: the check runs are unavailable: ${err.message}`);
+    }
+    const ctx = { facts, checks: runs, snapshot };
     return progressView({
       scopeView: scope || this.scopeView(meta.id),
       file: file || this.verification(meta.id).read(),
       resolve: (evidenceId) => resolveEvidence(evidenceId, ctx),
-      newestCheck: null
+      newestCheck: runs.length ? runs[runs.length - 1] : null
     });
   }
 
@@ -1651,28 +1666,51 @@ class CaseRuntime {
   // pass `verify`.
   //
   // Nothing here calls a model. What needs none is done now, under the
-  // turn's lock and in its commit: what the turn wrote, every reason to
-  // skip the pass, the count of the pass against the day's limit, and the
-  // block's lines about what the turn itself changed (a criterion whose
-  // fact the turn superseded is said here, first, as before).
+  // turn's lock and in its commit: the check command's close run (first, so
+  // the pass can cite it), what the turn wrote, every reason to skip the
+  // pass, the count of the pass against the day's limit, and the block's
+  // lines about what the turn itself changed (a check that went from pass
+  // to fail, then a criterion whose fact the turn superseded, are said
+  // here, first).
   async _closeProgress(turn, { evidence = null, verify = false } = {}) {
     if (!verify) return { block: null, plan: null };
     const closed = (status) => status === 'done' || status === 'abandoned';
     if (closed(this.getCase(turn.caseId).status)) return { block: null, plan: null };
+    // Step 1 (spec §6.6, §6.9): the check command, only in an owner turn
+    // and only when everything in closeCheck holds. It can take up to its
+    // time limit; the owner's Stop (the turn's signal) and shutdown end it.
+    // Nothing in it can fail the close.
+    let check = null;
+    try {
+      check = await closeCheck(this, turn, typeof this.host?.runCheck === 'function' ? { run: this.host.runCheck } : {});
+    } catch (err) {
+      log.warn(`Case ${turn.caseId}: the check command's close run failed: ${err.message}`);
+    }
     const turnEvidence = collectTurnEvidence(this, turn, evidence || {});
     // As the turn began, so a criterion that left `met` during the turn is
     // named; as it is now when no marks were taken.
     const before = turn.marks && turn.marks.states ? turn.marks.states : statesOf(this.progressView(turn.caseId));
-    const { out, plan } = prepareVerifyPass(this, turn, { turnEvidence, owed: this.verifyOwed.has(turn.caseId) });
+    // A run that was just recorded is something new for the pass to read,
+    // whether or not the turn wrote a fact.
+    const { out, plan } = prepareVerifyPass(this, turn, { turnEvidence, owed: this.verifyOwed.has(turn.caseId) || Boolean(check) });
     const after = this.progressView(turn.caseId);
     // A pass that will run says its part when it lands; one that will not
     // says why here (the day's limit, the budget), once a day.
-    const block = verificationBlock({ pass: plan ? null : out, before, after });
+    const block = verificationBlock({ pass: plan ? null : out, before, after, check });
     // The cache follows what the entry just said. A close that is not
     // verified (stopped, blocked, failed) leaves it, so the next turn's
     // `verification` hook still sees a criterion that left `met`.
     const states = statesOf(after);
-    this.verification(turn.caseId).setCache(states);
+    // A criterion the close run took from `met` to `failing` stays `met`
+    // here, so the next turn's hook raises it too (a note and a blocking
+    // trigger): the journal line alone is not read until then.
+    const cached = { ...states };
+    if (check) {
+      for (const [id, was] of Object.entries(before)) {
+        if (was === 'met' && cached[id] === 'failing') cached[id] = 'met';
+      }
+    }
+    this.verification(turn.caseId).setCache(cached);
     if (plan) {
       plan.out = out;
       // What the pass's own entry is compared with: the states this close left.

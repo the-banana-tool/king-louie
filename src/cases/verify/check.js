@@ -20,7 +20,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { readJson, writeJson } = require('../jsonfile');
+const { spawn, execFile } = require('child_process');
+const { StringDecoder } = require('string_decoder');
+const { readJson, writeJson, writeAtomic } = require('../jsonfile');
 const { plainLineProblem } = require('../hidden-chars');
 const { isCloneUrl, pathKey } = require('../case-types/software-repo');
 const { createLogger } = require('../../logging');
@@ -36,6 +38,15 @@ const TOKEN = /^[A-Za-z0-9_./:=@,+-]+$/;
 const RUN_ID = /^chk-(\d{4,})$/;
 const HASH = /^sha256:[0-9a-f]{64}$/;
 const RESULTS = Object.freeze(['pass', 'fail', 'timeout', 'spawn-failed']);
+// What is kept of each of a run's two streams: its last characters.
+const TAIL_CHARS = 2000;
+// How long a killed run is waited for before its pipes are dropped.
+const KILL_WAIT_MS = 5000;
+// The whole environment of a run, beside cases.softwareRepo.check.envAllow:
+// where programs are, where the account's files are, and nothing else.
+const FIXED_ENV = Object.freeze(['PATH', 'HOME', 'USERPROFILE', 'SystemRoot', 'TEMP', 'TMP', 'LANG']);
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const envNameRefused = (name) => /^(KL_|KING_LOUIE_)/i.test(name) || name.toUpperCase() === 'ELECTRON_RUN_AS_NODE';
 // The only programs that may be the check (owner ruling: npm only).
 const ALLOWED_PROGRAMS = Object.freeze(['npm']);
 // What npm may be asked to do: run the repository's own script.
@@ -360,7 +371,249 @@ function checkView(runtime, caseId) {
   }
 }
 
+// ---- Running it (spec §6.6) ----
+
+// Built from nothing: no provider key, no King Louie variable and never
+// ELECTRON_RUN_AS_NODE reaches the command, whatever `envAllow` lists.
+function checkEnv(env, envAllow, platform) {
+  const source = isObject(env) ? env : {};
+  const find = (name) => (platform === 'win32'
+    ? Object.keys(source).find((k) => k.toUpperCase() === name.toUpperCase())
+    : (Object.prototype.hasOwnProperty.call(source, name) ? name : undefined));
+  const out = {};
+  const allowed = (Array.isArray(envAllow) ? envAllow : []).filter((n) => typeof n === 'string' && ENV_NAME.test(n) && !envNameRefused(n));
+  for (const name of [...FIXED_ENV, ...allowed]) {
+    const key = find(name);
+    if (key !== undefined && typeof source[key] === 'string') out[key] = source[key];
+  }
+  out.CI = '1';
+  out.KL_CASE_CHECK = '1';
+  return out;
+}
+
+// The last TAIL_CHARS characters of a stream, read to its end.
+function tailOf(stream) {
+  const decoder = new StringDecoder('utf8');
+  const box = { text: '' };
+  const add = (s) => { box.text = (box.text + s).slice(-TAIL_CHARS); };
+  stream.on('data', (chunk) => add(decoder.write(chunk)));
+  stream.on('end', () => add(decoder.end()));
+  stream.on('error', () => {});
+  return box;
+}
+
+// Kills the child and everything it started.
+function killTree(child, platform, env) {
+  if (!child || !Number.isInteger(child.pid)) return;
+  if (platform === 'win32') {
+    const key = Object.keys(env || {}).find((k) => k.toUpperCase() === 'SYSTEMROOT');
+    const taskkill = path.win32.join(key ? env[key] : 'C:\\Windows', 'System32', 'taskkill.exe');
+    execFile(taskkill, ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, (err) => {
+      if (!err) return;
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    });
+    return;
+  }
+  try {
+    // The child leads its own process group (detached).
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+// Starts `argv` in `cwd` with no shell and waits for it. → { result,
+// exitCode, timedOut, ms, tail }; `result` is 'pass' (exit 0), 'fail',
+// 'timeout', 'spawn-failed' (the program is not there, or could not be
+// started) or 'stopped' (`signal` was aborted: the owner's Stop, a
+// shutdown). On the time limit and on a stop the whole process tree is
+// killed and the child is awaited, so no handle outlives the call. `tail`
+// is the last 2,000 characters of each stream: third-party text, never to
+// be committed or shown to a model. Never rejects.
+function runCheck({ argv, cwd, timeoutMs = 120000, envAllow = [], signal = null, platform = process.platform, env = process.env } = {}) {
+  const started = Date.now();
+  const done = (result, extra = {}) => ({ result, exitCode: null, timedOut: false, ms: Date.now() - started, tail: '', ...extra });
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve(done('stopped'));
+      return;
+    }
+    let program;
+    let child;
+    try {
+      program = resolveProgram(argv, { platform, env, cwd });
+      child = spawn(program.file, program.args, {
+        cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: checkEnv(env, envAllow, platform), detached: platform !== 'win32'
+      });
+    } catch (err) {
+      log.warn(`The check could not be started: ${err?.code || err?.message || err}`);
+      resolve(done('spawn-failed'));
+      return;
+    }
+    const out = tailOf(child.stdout);
+    const errs = tailOf(child.stderr);
+    let why = null;
+    let settled = false;
+    let timer = null;
+    let giveUp = null;
+    const finish = (result, extra = {}) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(giveUp);
+      if (signal) signal.removeEventListener('abort', onAbort);
+      const tail = [out.text, errs.text ? `--- stderr ---\n${errs.text}` : ''].filter(Boolean).join('\n');
+      resolve(done(result, { ...extra, tail }));
+    };
+    const stop = (reason) => {
+      if (why || settled) return;
+      why = reason;
+      killTree(child, platform, env);
+      // A tree that will not die must not hold the turn: drop its pipes.
+      giveUp = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(why, { timedOut: why === 'timeout' });
+      }, KILL_WAIT_MS);
+    };
+    function onAbort() {
+      stop('stopped');
+    }
+    // Ref'd: the turn is waiting for this run.
+    timer = setTimeout(() => stop('timeout'), Math.max(1, timeoutMs));
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    child.on('error', (err) => {
+      log.warn(`The check could not be started: ${err?.code || err?.message || err}`);
+      finish('spawn-failed');
+    });
+    child.on('close', (code) => {
+      if (why) finish(why, { timedOut: why === 'timeout' });
+      else finish(code === 0 ? 'pass' : 'fail', { exitCode: Number.isInteger(code) ? code : null });
+    });
+  });
+}
+
+// One run at a time per repository in this process: two cases can share one.
+const running = new Map();
+
+// The close run (spec §6.6): → null (nothing ran, or nothing was kept) or
+// { run, baseline }. It runs only when all of this holds: the turn is the
+// owner's; checks are on; the case is a software-repo case whose brief
+// names a repository on this machine and a command; that exact command in
+// that exact place is approved; the repository's state was read just now;
+// and its head or its count of uncommitted changes differs from the turn's
+// start, or no run exists for the head it is at. `baseline` is the newest
+// run recorded for the state the turn began at, or null. Called by the
+// turn's close, under the case lock. Never throws.
+async function closeCheck(runtime, turn, { run = runCheck } = {}) {
+  let key = null;
+  try {
+    if (!turn || (turn.source || 'owner') !== 'owner') return null;
+    if (!checkPolicy(runtime).enabled) return null;
+    const meta = runtime.getCase(turn.caseId);
+    if (meta.type !== CASE_TYPE || meta.status === 'done' || meta.status === 'abandoned') return null;
+    let current = null;
+    try {
+      current = currentCheck(runtime, meta.id);
+    } catch (err) {
+      if (!(err instanceof CheckError)) throw err;
+      log.info(`Case ${meta.slug}: no check ran (${err.code}).`);
+    }
+    if (!current) return null;
+    const store = new CheckStore(meta.dir, { now: () => runtime.now() });
+    if (!store.isApproved(current.argv, current.key)) return null;
+    if (running.has(current.key)) {
+      log.info(`Case ${meta.slug}: no check ran (CHECK_BUSY: one is running in this repository).`);
+      return null;
+    }
+    key = current.key;
+    const controller = new AbortController();
+    running.set(key, controller);
+    // Stop and shutdown reach the run through this (runtime.abortChecks).
+    if (!(runtime._checkRuns instanceof Set)) runtime._checkRuns = new Set();
+    runtime._checkRuns.add(controller);
+    const onStop = () => controller.abort(turn.signal.reason);
+    if (turn.signal) {
+      if (turn.signal.aborted) controller.abort(turn.signal.reason);
+      else turn.signal.addEventListener('abort', onStop, { once: true });
+    }
+    try {
+      // The state the run is tied to is read now, not taken from the turn's start.
+      await require('../detours/hooks').refreshCaseType(runtime, meta);
+      const snapshot = runtime.caseTypeSnapshot(meta.id);
+      const state = isObject(snapshot) && !snapshot.stale && isObject(snapshot.state) ? snapshot.state : null;
+      if (!state || typeof state.head !== 'string' || !state.head || !Number.isInteger(state.dirty)) {
+        log.info(`Case ${meta.slug}: no check ran (the repository's state is not known).`);
+        return null;
+      }
+      const marks = isObject(turn.marks) ? turn.marks : {};
+      const moved = state.head !== marks.head || state.dirty !== marks.dirty;
+      if (!moved && store.read().runs.some((r) => r.head === state.head)) return null;
+      if (controller.signal.aborted || runtime.closing) return null;
+      const settings = runtime.settings().softwareRepo.check;
+      const result = await run({
+        argv: current.argv,
+        // The repository is the working directory only, never an argument.
+        cwd: current.repo,
+        timeoutMs: settings.timeoutMs,
+        // On a service the data dir's settings do not widen what a run is given.
+        envAllow: runtime.host?.caseChecks?.isService === true ? [] : settings.envAllow,
+        signal: controller.signal
+      });
+      // Stopped, or the turn no longer owns the case: nothing is kept.
+      if (!isObject(result) || !RESULTS.includes(result.result) || runtime.turns.get(meta.id) !== turn) return null;
+      const baseline = store.runFor({ head: marks.head, dirty: marks.dirty });
+      const recorded = store.addRun({
+        hash: current.hash, head: state.head, dirty: state.dirty, result: result.result, exitCode: result.exitCode,
+        timedOut: result.timedOut, ms: result.ms, turnId: turn.turnId
+      });
+      try {
+        // .kl/runs/ is in the case's .gitignore: the tail is never committed.
+        writeAtomic(path.join(meta.dir, '.kl', 'runs', 'checks', `${recorded.id}.txt`), typeof result.tail === 'string' ? result.tail : '');
+      } catch (err) {
+        log.warn(`Case ${meta.slug}: the output of ${recorded.id} could not be kept: ${err.message}`);
+      }
+      return { run: recorded, baseline };
+    } finally {
+      if (turn.signal) turn.signal.removeEventListener('abort', onStop);
+      runtime._checkRuns.delete(controller);
+      if (running.get(key) === controller) running.delete(key);
+    }
+  } catch (err) {
+    log.warn(`The check of case ${turn?.caseId} failed to run: ${err?.message || err}`);
+    return null;
+  }
+}
+
+// The check's line of the turn's verification block (verify/judge.js), or
+// null. Ids, short commit ids and fixed words only.
+function checkLine(check) {
+  if (!isObject(check) || !isObject(check.run)) return null;
+  const { run, baseline } = check;
+  const at = (r) => `${r.id}${typeof r.head === 'string' && r.head ? ` at ${r.head.slice(0, 7)}` : ''}`;
+  const dirty = Number.isInteger(run.dirty) && run.dirty > 0;
+  if (run.result === 'spawn-failed') return `- Check: not run (${run.id}: the program could not be started).`;
+  if (run.result === 'pass') {
+    return `- Check: passed at the end of this turn (${at(run)}${dirty ? '; with uncommitted changes, so it is not evidence' : ''}).`;
+  }
+  const how = run.result === 'timeout' ? 'TIMED OUT' : 'FAIL';
+  if (isObject(baseline) && baseline.result === 'pass') {
+    return `- Check: pass → ${how} during this turn (${at(baseline)} → ${at(run)}${dirty ? ', uncommitted changes' : ''}).`;
+  }
+  if (isObject(baseline)) return `- Check: still not passing at the end of this turn (${at(run)}).`;
+  return `- Check: ${run.result === 'timeout' ? 'timed out' : 'failed'} at the end of this turn (no result for the turn's start).`;
+}
+
 module.exports = {
-  CHECK_TYPE, ALLOWED_PROGRAMS, REFUSED_PROGRAMS, POLICY_OFF, CheckError, CheckStore,
-  validateCheck, checkArgv, checkHash, checkInQuote, checkPolicy, resolveProgram, currentCheck, checkView
+  CHECK_TYPE, ALLOWED_PROGRAMS, REFUSED_PROGRAMS, POLICY_OFF, RESULTS, CheckError, CheckStore,
+  validateCheck, checkArgv, checkHash, checkInQuote, checkPolicy, resolveProgram, currentCheck, checkView,
+  checkEnv, runCheck, closeCheck, checkLine
 };

@@ -1,8 +1,8 @@
 // src/cases/verify/evidence.js
 // Cases stage 8 (spec §6.3): what may stand behind a `met` criterion. An
 // evidence id is accepted only through the resolver for its prefix (`f-`
-// the ledger; a later task adds `chk-` for check runs); an id with no
-// resolver holds nothing. Evidence sources (what a turn wrote, for the
+// the ledger, `chk-` a run of the check command); an id with no resolver
+// holds nothing. Evidence sources (what a turn wrote, for the
 // verify pass) are registered here too, with the marks a turn takes when it
 // begins and the collector that reads what it wrote since (spec §6.9, §6.10).
 const fs = require('fs');
@@ -24,6 +24,7 @@ const missing = () => ({ ...MISSING });
 
 const resolvers = new Map();
 const sources = new Map();
+const isObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 
 // `fn(id, ctx) → { exists, holds, reason, provenance?, label? }`; `ctx` is
 // whatever the caller of resolveEvidence passes. → a function that puts
@@ -104,6 +105,28 @@ function resolveFact(id, ctx) {
 
 registerEvidenceResolver('f-', resolveFact);
 
+// A run of the check command (spec §6.3, §6.6). `ctx.checks` is the runs of
+// .kl/checks.json and `ctx.snapshot` the case-type snapshot. A run holds
+// only when it passed, with a clean tree, at the commit the repository is
+// at now; when that commit is not known it does not hold.
+function resolveCheck(id, ctx) {
+  const run = (Array.isArray(ctx?.checks) ? ctx.checks : []).find((r) => isObject(r) && r.id === id);
+  if (!run) return { exists: false, holds: false, reason: 'evidence-missing', label: `${id} is not a recorded check run` };
+  const base = { exists: true, provenance: 'check', source: null, sourceKind: 'check' };
+  const not = (label) => ({ ...base, holds: false, reason: 'check-not-current', label });
+  const short = (head) => String(head).slice(0, 7);
+  if (run.result !== 'pass') return not(`${id} did not pass`);
+  if (run.dirty !== 0) return not(`${id} ran with uncommitted changes`);
+  const snapshot = isObject(ctx?.snapshot) && !ctx.snapshot.stale && isObject(ctx.snapshot.state) ? ctx.snapshot.state : null;
+  if (!snapshot || typeof snapshot.head !== 'string' || !snapshot.head) return not(`${id}: the repository state is stale or not known`);
+  if (typeof run.head !== 'string' || run.head !== snapshot.head) {
+    return not(`${id} ran at ${typeof run.head === 'string' && run.head ? short(run.head) : 'an unknown commit'}; the repository is now at ${short(snapshot.head)}`);
+  }
+  return { ...base, holds: true, reason: null, label: null };
+}
+
+registerEvidenceResolver('chk-', resolveCheck);
+
 // ---- What a turn wrote (spec §6.5, §6.9) ----
 
 // The only tools whose results may go to the verify pass (R-C8-9). A shell,
@@ -116,7 +139,6 @@ const ROW_TEXT_CHARS = 200;
 const UNREADABLE_RESULT = '(result could not be read)';
 const SOURCE_REF = /^sources\/([a-z][a-z0-9-]{1,39})\/(job-\d+)\//;
 
-const isObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 const flat = (v, max) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 
 // One tool call of a turn, as the close of the turn may receive it:

@@ -13,13 +13,14 @@ const { JobStore, TERMINAL_STATES } = require('../executors/job-store');
 const { EnvelopeStore, ENVELOPE_STATUSES } = require('../executors/envelope');
 const { listRecords } = require('../ingest/files');
 const { readJson } = require('../jsonfile');
+const { CheckStore, CheckError, checkPolicy, currentCheck } = require('./check');
 const { createLogger } = require('../../logging');
 
 const log = createLogger('cases/verify/readiness');
 
 const ITEM_IDS = Object.freeze([
   'objective-confirmed', 'criteria-confirmed', 'criteria-met', 'unknowns-resolved', 'questions-answered', 'jobs-settled',
-  'plan-settled', 'envelopes-closed', 'detours-settled', 'documents-reviewed', 'tree-clean', 'branch-merged'
+  'plan-settled', 'envelopes-closed', 'detours-settled', 'documents-reviewed', 'tree-clean', 'branch-merged', 'check-passing'
 ]);
 // Whose each item is to fix.
 const BY = Object.freeze({
@@ -34,7 +35,8 @@ const BY = Object.freeze({
   'detours-settled': 'owner',
   'documents-reviewed': 'owner',
   'tree-clean': 'either',
-  'branch-merged': 'either'
+  'branch-merged': 'either',
+  'check-passing': 'case'
 });
 const SETTLED_PLAN = Object.freeze(['done', 'rejected', 'superseded']);
 const FINISHED_STEP = Object.freeze(['done', 'cancelled']);
@@ -238,6 +240,34 @@ function branchMerged(ctx) {
   return open(n, numbers.length === n ? refs : [], `${what} from this branch ${plural(n, 'is', 'are')} still open. Merge or close ${plural(n, 'it', 'them')}.`, note);
 }
 
+// The check command (spec §6.4, §6.6): n/a unless checks are on and this
+// case's command is approved for its repository. Then ok only when the
+// newest run passed, with a clean tree, at the commit the repository is at.
+const CHECK_RUNS_AGAIN = 'It runs again at the end of a turn you start, when the repository has changed.';
+function checkPassing(ctx) {
+  const { runtime, meta } = ctx;
+  if (meta.type !== REPO_TYPE || !checkPolicy(runtime).enabled) return na();
+  let current = null;
+  try {
+    current = currentCheck(runtime, meta.id);
+  } catch (err) {
+    if (!(err instanceof CheckError)) throw err;
+  }
+  const store = new CheckStore(meta.dir, { now: () => runtime.now() });
+  if (!current || !store.isApproved(current.argv, current.key)) return na();
+  const run = store.newestRun();
+  if (!run) return unknown(`The check has not run yet. ${CHECK_RUNS_AGAIN}`);
+  if (run.result === 'fail' || run.result === 'timeout') {
+    return open(1, [run.id], `Case: the check last ${run.result === 'timeout' ? 'timed out' : 'failed'} (${run.id}). Fix it and it runs again at the end of the turn.`);
+  }
+  if (run.result !== 'pass') return unknown(`The check could not be started (${run.id}). ${CHECK_RUNS_AGAIN}`);
+  if (run.dirty !== 0) return open(1, [run.id], `The check last passed with uncommitted changes (${run.id}), which does not count. Commit or discard them. ${CHECK_RUNS_AGAIN}`);
+  const state = repoState(ctx);
+  if (!state || typeof state.head !== 'string' || !state.head) return unknown(REPO_UNKNOWN);
+  if (run.head !== state.head) return unknown(`The check last passed at another commit (${run.id}). ${CHECK_RUNS_AGAIN}`);
+  return ok();
+}
+
 const READERS = Object.freeze({
   'objective-confirmed': objectiveConfirmed,
   'criteria-confirmed': criteriaConfirmed,
@@ -250,14 +280,14 @@ const READERS = Object.freeze({
   'detours-settled': detoursSettled,
   'documents-reviewed': documentsReviewed,
   'tree-clean': treeClean,
-  'branch-merged': branchMerged
+  'branch-merged': branchMerged,
+  'check-passing': checkPassing
 });
 
 // `view`: the progress view (verify/status.js `progressView`); read from
 // the runtime when not given. → { ready, items, computedAt }; an item is
 // { id, state: 'ok' | 'open' | 'unknown' | 'n/a', by, count, refs, fix, note }.
 // One item's read failing makes that item `unknown`, never the whole list.
-// (`check-passing` joins the list with the check command.)
 function closeReadiness(runtime, id, { view = null } = {}) {
   const meta = runtime.getCase(id);
   const ctx = { runtime, meta, view: view || runtime.progressView(meta.id) };

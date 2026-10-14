@@ -317,6 +317,26 @@ The two were built in parallel streams and merged. The merge was clean as text a
   - `tests/cases-progress-ipc.test.js`: `setup` takes settings and a `caseChecks` host block; no assertion changed.
 - *Not looked at in the real app.* The panel's row was not exercised in Electron; `tests/renderer-progress-text.test.js` reads its source.
 
+**Task 16 (the check command, part 2: running it at the close of an owner turn).**
+
+- *Where it runs.* `closeCheck` is step 1 of `_closeProgress`, before `prepareVerifyPass` (stream B's note), so it runs only at a verified close: the normal exit of an owner turn. A stopped, blocked or failed turn, a wake-up, a system action and the owner's **Check now** (`verifyNow` never reaches `_closeProgress`) run nothing. That Check now does not run the check command is the cautious reading of an open point (N4).
+- *A fifth outcome, `stopped`.* `runCheck` returns `result: 'stopped'` when its signal is aborted (the owner's Stop through the turn's signal, or shutdown); the task has it end "the same way" as a timeout. A stopped run is not recorded at all: recording it as `timeout` would make every criterion that cites a check `failing` because the owner pressed Stop. `checks.json` keeps the four results of spec §7.4.
+- *Shutdown.* `beginShutdown` calls `abortChecks`, which aborts every run this runtime started (the task relies on the turn's own abort, which shutdown does not send to an owner turn).
+- *Killing.* `taskkill.exe` is started by its full path under `SystemRoot`, never looked up on `PATH`; elsewhere the child leads its own process group and the group gets `SIGKILL`. A tree that has not closed its pipes 5 s after the kill has them dropped, so a run can never hold the turn past its limit by more than that.
+- *The environment.* As the task lists. On a service, `envAllow` from the data dir is ignored (the run gets the fixed names only): the administrator's key turns checks on, and the data dir must not widen what a run is given.
+- *What the run is tied to.* The `head` and `dirty` recorded are the ones the refresh read just before the run (the command may itself change the tree).
+- *A recorded run makes the verify pass run* even when the turn wrote no fact (`owed || check` in `prepareVerifyPass`): the new run is something for the pass to read and cite. In `request` mode a close still runs no pass.
+- *The regression notice.* A criterion the close run takes from `met` to `failing` is left `met` in the cache, as R-C8-11 does at a landing, so the next turn's hook raises its note and a blocking `criterion-regressed` trigger; the journal line alone is read only at that next turn. Spec §6.6 says "a `Since last turn` note and a `criterion-regressed` trigger carry it into the next turn", which this makes true.
+- *The block's check line.* The two lines of the task, plus: `pass → TIMED OUT` for a timeout, `passed at the end of this turn (chk-… at …)` (with "with uncommitted changes, so it is not evidence" when the tree was dirty), `still not passing at the end of this turn (…)`, and `not run (chk-…: the program could not be started)`. The check line is always the first line of the block.
+- *`check-passing`* is the last item of the ready-to-close list, `by: 'case'`. `n/a` unless checks are on and the brief's command is approved for its repository; `unknown` when no run exists, the last run could not be started, it passed at another commit, or the repository state is stale; `open` (with the run's id) for a failed or timed-out newest run and for a pass with uncommitted changes; `ok` only for a pass with a clean tree at the snapshot's head. The list's fingerprint changes with the new item, so a close proposal the owner declined before this stage can be proposed once more.
+- *The `chk-` resolver's labels* are ids and short commit ids: `chk-0012 ran at 3f2a91c; the repository is now at 77c0de4`, `… ran with uncommitted changes`, `… did not pass`, `…: the repository state is stale or not known`.
+- *A test seam.* `host.runCheck` replaces the spawn in a runtime (as `host.exec` replaces git); `create-core` never sets it.
+- *Existing tests changed:*
+  - `tests/cases-verify-readiness.test.js` › "lists the items in order…": the id list and the state and owner maps gained `check-passing` (`n/a`, `case`).
+  - `tests/cases-verify-readiness.test.js` › "fix never carries case text": the fixture now turns checks on, uses a local repository, approves `npm test` and records a failing run whose head is the canary, so that the new item is open and read like every other; no assertion changed.
+  - `tests/cases-progress-tool.test.js` › the `failing` case of `proposeDone`: the stub that forced the state (left by Task 10) is replaced by a real run and a record that cites it; the assertions are the same, and one more pins the computed reason.
+- *Verified here:* Windows only. The tests run real `node` and `npm` children (`npm` as `node.exe` with `npm-cli.js`, under the built environment) and kill a real child and grandchild with `taskkill`. The POSIX path (a process group and `SIGKILL`, `npm` found on `PATH`) was not run.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.

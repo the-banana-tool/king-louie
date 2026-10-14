@@ -15,10 +15,12 @@ const { BriefTool } = require('../src/tools/builtin/case-tools');
 const { answerClass } = require('../src/cases/mcp-tool-definitions');
 const {
   validateCheck, checkArgv, checkHash, checkInQuote, CheckStore, checkPolicy, resolveProgram,
-  REFUSED_PROGRAMS, ALLOWED_PROGRAMS, CHECK_TYPE
+  REFUSED_PROGRAMS, ALLOWED_PROGRAMS, CHECK_TYPE, runCheck, closeCheck, checkEnv, checkLine
 } = require('../src/cases/verify/check');
 const { checkQuestionText } = require('../src/cases/verify/questions');
 const { CASE_SETTINGS_DEFAULTS, resolveCaseSettings } = require('../src/cases/defaults');
+const { pathKey } = require('../src/cases/case-types/software-repo');
+const { withCaseProfile } = require('./helpers/profile-settings');
 const { addSink, setLogLevel } = require('../src/logging');
 
 setLogLevel('warn');
@@ -49,14 +51,24 @@ function repoDir(script = 'pass.js') {
 
 // An active software-repo case on `repo`, with one confirmed criterion.
 // `check`: the cases.softwareRepo.check setting; `host`: host.caseChecks.
-async function world({ check = { enabled: true }, caseChecks = undefined, type = 'software-repo', repo = undefined, script = 'pass.js' } = {}) {
+// `run` stands in for the spawn (host.runCheck); `router` gives the runtime a
+// verify model; `exec` replaces git for the repository's state.
+async function world({ check = { enabled: true }, caseChecks = undefined, type = 'software-repo', repo = undefined, script = 'pass.js', run = undefined, router = undefined, exec = undefined, refreshBudgetMs = 6000 } = {}) {
   const clock = { now: new Date('2026-10-21T09:00:00.000Z') };
   const local = repo === undefined ? repoDir(script) : repo;
   const rt = new CaseRuntime({
     root: tmp(),
     now: () => clock.now,
-    getSettings: () => ({ cases: { timeZone: 'UTC', verify: { when: 'off' }, softwareRepo: { check } } }),
-    host: { notify: () => {}, ...(caseChecks ? { caseChecks } : {}) }
+    getSettings: () => (router
+      ? withCaseProfile({ cases: { timeZone: 'UTC', softwareRepo: { refreshBudgetMs, check } } })
+      : { cases: { timeZone: 'UTC', verify: { when: 'off' }, softwareRepo: { refreshBudgetMs, check } } }),
+    host: {
+      notify: () => {},
+      ...(caseChecks ? { caseChecks } : {}),
+      ...(run ? { runCheck: run } : {}),
+      ...(exec ? { exec } : {}),
+      ...(router ? { inferenceRouter: router, getUsageTracker: () => ({ record: (e) => ({ provider: e.provider, model: e.model, totalTokens: e.totalTokens, cost: e.costUsd }) }) } : {})
+    }
   });
   const info = await rt.createCase({ title: 'Lakeside lot site', type, objective: 'Ship the Lakeside lot site', objectiveBy: 'owner' });
   const id = info.id;
@@ -431,3 +443,455 @@ describe('naming the check with the Brief tool, and the owner\'s approval', () =
     assert.strictEqual(w.rt.checks(w.id).isApproved(['npm', 'test'], pathKey(repoDir())), false);
   });
 });
+
+// ---- Task 16: running it ----
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function gone(pid) {
+  for (let i = 0; i < 100 && alive(pid); i += 1) await wait(100);
+  return !alive(pid);
+}
+async function pidsIn(dir) {
+  const read = (name) => { try { return Number(fs.readFileSync(path.join(dir, name), 'utf8')) || null; } catch { return null; } };
+  for (let i = 0; i < 200 && !(read('parent.pid') && read('child.pid')); i += 1) await wait(50);
+  return [read('parent.pid'), read('child.pid')];
+}
+// What a run gives, for the stand-in of the spawn.
+const ran = (result, extra = {}) => ({ result, exitCode: result === 'pass' ? 0 : result === 'fail' ? 1 : null, timedOut: result === 'timeout', ms: 12, tail: 'SECRET-CANARY output', ...extra });
+
+// A world whose brief names `npm test` and whose approval is recorded.
+async function approvedWorld(options = {}) {
+  const w = await world(options);
+  await w.rt.systemAction(w.id, 'check approved', () => {
+    w.rt.brief(w.id).update('check', 'npm test', { provenance: 'user' });
+    if (options.approve !== false) w.rt.checks(w.id).approve({ argv: ['npm', 'test'], repo: pathKey(w.repo), by: 'question', ref: 'q-0001', channel: 'in-app' });
+  });
+  let n = 0;
+  w.begin = async (extra = {}) => {
+    n += 1;
+    w.clock.now = new Date(w.clock.now.getTime() + 60000);
+    return w.rt.beginTurn(w.id, { turnId: `turn-${n}`, ...extra });
+  };
+  w.end = async (turn, extra = {}) => {
+    await w.rt.endTurn(turn, { summary: 'worked', journal: 'Worked on the site.', verify: true, ...extra });
+    await w.rt.verifyIdle(w.id);
+  };
+  w.runs = () => w.rt.checks(w.id).read().runs;
+  w.commit = (name = `file-${Date.now()}.txt`) => {
+    fs.writeFileSync(path.join(w.repo, name), 'changed\n');
+    git(w.repo, 'add', '-A');
+    git(w.repo, 'commit', '-q', '-m', 'change');
+    return git(w.repo, 'rev-parse', 'HEAD').trim();
+  };
+  w.dirty = (name = 'scratch.txt') => fs.writeFileSync(path.join(w.repo, name), `${Date.now()}\n`);
+  w.journal = () => {
+    const dir = path.join(w.dir, 'journal');
+    return fs.readdirSync(dir).filter((f) => f.endsWith('.md')).sort().map((f) => fs.readFileSync(path.join(dir, f), 'utf8'));
+  };
+  return w;
+}
+
+describe('runCheck: one program, no shell, a built environment, a time limit', () => {
+  it('a passing program passes, a failing one fails, and one that is not there is spawn-failed', async () => {
+    const cwd = repoDir();
+    const pass = await runCheck({ argv: ['node', 'pass.js'], cwd, timeoutMs: 30000 });
+    assert.deepStrictEqual([pass.result, pass.exitCode, pass.timedOut], ['pass', 0, false]);
+    assert.match(pass.tail, /1 passing/);
+    assert.ok(pass.ms >= 0);
+    const fail = await runCheck({ argv: ['node', 'fail.js'], cwd, timeoutMs: 30000 });
+    assert.deepStrictEqual([fail.result, fail.exitCode, fail.timedOut], ['fail', 1, false]);
+    assert.match(fail.tail, /0 passing[\s\S]*--- stderr ---[\s\S]*1 failing/);
+    const missing = await runCheck({ argv: ['kl-no-such-program', 'x'], cwd, timeoutMs: 30000 });
+    assert.deepStrictEqual([missing.result, missing.exitCode, missing.tail], ['spawn-failed', null, '']);
+    const nowhere = await runCheck({ argv: ['node', 'pass.js'], cwd: path.join(cwd, 'no-such-folder'), timeoutMs: 30000 });
+    assert.strictEqual(nowhere.result, 'spawn-failed');
+  });
+
+  it('the child sees no provider key', async () => {
+    const cwd = repoDir();
+    const env = { ...process.env, OPENAI_API_KEY: 'sk-CANARY', ANTHROPIC_API_KEY: 'sk-CANARY', KL_CASES_ROOT: 'x', KING_LOUIE_LOG_LEVEL: 'debug', ELECTRON_RUN_AS_NODE: '1', NODE_ENV: 'test', LAKESIDE_FLAG: 'yes' };
+    const r = await runCheck({ argv: ['node', 'print-env.js'], cwd, timeoutMs: 30000, env, envAllow: ['LAKESIDE_FLAG', 'ELECTRON_RUN_AS_NODE', 'KL_CASES_ROOT', 'not a name'] });
+    assert.strictEqual(r.result, 'pass');
+    const names = r.tail.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    for (const hidden of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'KL_CASES_ROOT', 'KING_LOUIE_LOG_LEVEL', 'ELECTRON_RUN_AS_NODE', 'NODE_ENV']) {
+      assert.ok(!names.includes(hidden), `${hidden} reached the check`);
+    }
+    for (const given of ['CI', 'KL_CASE_CHECK', 'LAKESIDE_FLAG']) assert.ok(names.includes(given), `${given} was given`);
+    assert.doesNotMatch(r.tail, /CANARY/);
+    // Built from nothing: only the fixed names, the allowed ones and the two marks.
+    const built = checkEnv({ PATH: '/usr/bin', HOME: '/home/owner', LANG: 'C', SECRET: 'x', TZ: 'UTC' }, ['TZ'], 'linux');
+    assert.deepStrictEqual(built, { PATH: '/usr/bin', HOME: '/home/owner', LANG: 'C', TZ: 'UTC', CI: '1', KL_CASE_CHECK: '1' });
+    assert.deepStrictEqual(checkEnv({ Path: 'C:\\tools', SystemRoot: 'C:\\Windows', ComSpec: 'x' }, [], 'win32'), { Path: 'C:\\tools', SystemRoot: 'C:\\Windows', CI: '1', KL_CASE_CHECK: '1' });
+  });
+
+  it('the time limit kills the child and its grandchild', async () => {
+    const cwd = repoDir();
+    const pidDir = tmp('kl-check-pids-');
+    const keepAlive = setTimeout(() => {}, 60000);
+    try {
+      const started = Date.now();
+      const r = await runCheck({ argv: ['node', 'sleep.js', pidDir], cwd, timeoutMs: 4000 });
+      assert.deepStrictEqual([r.result, r.timedOut, r.exitCode], ['timeout', true, null]);
+      assert.ok(Date.now() - started < 30000, 'it did not wait for the sleepers');
+      const [parent, child] = await pidsIn(pidDir);
+      assert.ok(parent && child, 'both wrote their pid before the limit');
+      assert.strictEqual(await gone(parent), true, 'the child is gone');
+      assert.strictEqual(await gone(child), true, 'the grandchild is gone');
+    } finally {
+      clearTimeout(keepAlive);
+    }
+  });
+
+  it('an aborted signal ends the run the same way, as stopped', async () => {
+    const cwd = repoDir();
+    const pidDir = tmp('kl-check-pids-');
+    const controller = new AbortController();
+    const keepAlive = setTimeout(() => {}, 60000);
+    try {
+      const run = runCheck({ argv: ['node', 'sleep.js', pidDir], cwd, timeoutMs: 60000, signal: controller.signal });
+      const [parent, child] = await pidsIn(pidDir);
+      assert.ok(parent && child);
+      controller.abort('stopped by owner');
+      const r = await run;
+      assert.deepStrictEqual([r.result, r.timedOut], ['stopped', false]);
+      assert.strictEqual(await gone(parent), true);
+      assert.strictEqual(await gone(child), true);
+      // Already aborted: nothing is started.
+      const none = await runCheck({ argv: ['node', 'sleep.js', pidDir], cwd, timeoutMs: 60000, signal: controller.signal });
+      assert.strictEqual(none.result, 'stopped');
+    } finally {
+      clearTimeout(keepAlive);
+    }
+  });
+
+  it('only the last 2,000 characters of each stream are kept', async () => {
+    const r = await runCheck({ argv: ['node', 'long.js'], cwd: repoDir(), timeoutMs: 30000 });
+    assert.strictEqual(r.result, 'pass');
+    assert.match(r.tail, /TAIL-OF-OUTPUT/);
+    assert.match(r.tail, /TAIL-OF-ERRORS/);
+    assert.doesNotMatch(r.tail, /HEAD-OF/);
+    assert.ok(r.tail.length <= 4100, String(r.tail.length));
+  });
+
+  it('npm test runs the repository\'s own script, with no shell of King Louie\'s', async () => {
+    const pass = await runCheck({ argv: ['npm', 'test'], cwd: repoDir('pass.js'), timeoutMs: 120000 });
+    assert.deepStrictEqual([pass.result, pass.exitCode], ['pass', 0], pass.tail);
+    const fail = await runCheck({ argv: ['npm', 'test'], cwd: repoDir('fail.js'), timeoutMs: 120000 });
+    assert.strictEqual(fail.result, 'fail', fail.tail);
+    assert.notStrictEqual(fail.exitCode, 0);
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'cases', 'verify', 'check.js'), 'utf8');
+    assert.match(source, /shell: false/);
+    // No shell, no cmd.exe, and never child_process.exec (a RegExp's .exec is not one).
+    assert.doesNotMatch(source, /shell: true|cmd\.exe'|execSync|[^.\w]exec\(/);
+  });
+});
+
+describe('closeCheck: when the check runs', () => {
+  it('nothing runs while the setting is off', async () => {
+    const calls = [];
+    const run = async (args) => { calls.push(args); return ran('pass'); };
+    const w = await approvedWorld({ check: { enabled: false } });
+    const turn = await w.begin();
+    w.commit();
+    assert.strictEqual(await closeCheck(w.rt, turn, { run }), null);
+    await w.end(turn);
+    // On a service, the data dir's own "enabled" is not the administrator's.
+    const service = await approvedWorld({ check: { enabled: true }, caseChecks: { isService: true, enabled: false }, run });
+    const t = await service.begin();
+    service.commit();
+    assert.strictEqual(await closeCheck(service.rt, t, { run }), null);
+    await service.end(t);
+    assert.strictEqual(calls.length, 0);
+    assert.deepStrictEqual([w.runs().length, service.runs().length], [0, 0]);
+  });
+
+  it('a wake-up turn never runs the check', async () => {
+    const calls = [];
+    const run = async (args) => { calls.push(args); return ran('pass'); };
+    const w = await approvedWorld({ run });
+    const turn = await w.begin({ source: 'wakeup' });
+    w.commit();
+    assert.strictEqual(await closeCheck(w.rt, turn, { run }), null);
+    await w.end(turn);
+    assert.strictEqual(calls.length, 0);
+    assert.strictEqual(w.runs().length, 0);
+  });
+
+  it('runs only an approved command, only in a software-repo case, and only what was approved', async () => {
+    const calls = [];
+    const run = async (args) => { calls.push(args); return ran('pass'); };
+    const unapproved = await approvedWorld({ approve: false });
+    const u = await unapproved.begin();
+    unapproved.commit();
+    assert.strictEqual(await closeCheck(unapproved.rt, u, { run }), null);
+    await unapproved.end(u);
+
+    const general = await world({ type: 'general' });
+    const g = await general.rt.beginTurn(general.id, { turnId: 'turn-1' });
+    assert.strictEqual(await closeCheck(general.rt, g, { run }), null);
+    await general.rt.endTurn(g, { summary: 'x' });
+
+    // Approved for `npm test`; the brief now names another command.
+    const changed = await approvedWorld();
+    await changed.rt.systemAction(changed.id, 'edit', () => { changed.rt.brief(changed.id).update('check', 'npm run check', { provenance: 'user' }); });
+    const c = await changed.begin();
+    changed.commit();
+    assert.strictEqual(await closeCheck(changed.rt, c, { run }), null);
+    await changed.end(c);
+    assert.strictEqual(calls.length, 0);
+
+    // Approved: the argv that runs is the argv that was approved, in the repository.
+    const w = await approvedWorld({ check: { enabled: true, timeoutMs: 7000, envAllow: ['LAKESIDE_FLAG'] } });
+    const turn = await w.begin();
+    const head = w.commit();
+    const out = await closeCheck(w.rt, turn, { run });
+    assert.strictEqual(calls.length, 1);
+    assert.deepStrictEqual([calls[0].argv, calls[0].cwd, calls[0].timeoutMs, calls[0].envAllow], [['npm', 'test'], w.repo, 7000, ['LAKESIDE_FLAG']]);
+    assert.ok(calls[0].signal instanceof AbortSignal);
+    assert.deepStrictEqual([out.run.id, out.run.result, out.run.head, out.run.dirty, out.run.turnId, out.baseline], ['chk-0001', 'pass', head, 0, 'turn-1', null]);
+    assert.strictEqual(out.run.hash, checkHash(['npm', 'test'], pathKey(w.repo)));
+    await w.end(turn);
+
+    // On a service the data dir's envAllow does not widen what a run is given.
+    const service = await approvedWorld({ check: { enabled: true, envAllow: ['LAKESIDE_FLAG'] }, caseChecks: { isService: true, enabled: true } });
+    const s = await service.begin();
+    service.commit();
+    await closeCheck(service.rt, s, { run });
+    assert.deepStrictEqual(calls[1].envAllow, []);
+    await service.end(s);
+  });
+
+  it('the close run happens only when head or dirty changed', async () => {
+    const calls = [];
+    const run = async (args) => { calls.push(args); return ran('pass'); };
+    const w = await approvedWorld({ run });
+    // No run exists for the head: the first verified close runs it, though nothing changed.
+    let turn = await w.begin();
+    await w.end(turn);
+    assert.deepStrictEqual(w.runs().map((r) => r.id), ['chk-0001']);
+    // Nothing changed, and a run exists for the head.
+    turn = await w.begin();
+    await w.end(turn);
+    assert.strictEqual(calls.length, 1);
+    // A new commit.
+    turn = await w.begin();
+    const head = w.commit();
+    await w.end(turn);
+    assert.deepStrictEqual(w.runs().map((r) => [r.id, r.head, r.dirty]).pop(), ['chk-0002', head, 0]);
+    // A dirtied tree.
+    turn = await w.begin();
+    w.dirty();
+    await w.end(turn);
+    assert.deepStrictEqual(w.runs().map((r) => [r.id, r.head, r.dirty]).pop(), ['chk-0003', head, 1]);
+    // A close that is not verified (a stopped or a failed turn) runs nothing.
+    turn = await w.begin();
+    w.commit();
+    await w.rt.endTurn(turn, { summary: 'stopped' });
+    assert.strictEqual(calls.length, 3);
+  });
+
+  it('a stale repository state runs nothing, and two closes on one repository make one run', async () => {
+    const calls = [];
+    // git answers too late for the refresh budget: the state is stale.
+    const slow = () => new Promise((resolve) => setTimeout(() => resolve({ stdout: '', stderr: '', code: 1 }), 400));
+    const stale = await approvedWorld({ exec: slow, refreshBudgetMs: 50, run: async (args) => { calls.push(args); return ran('pass'); } });
+    const t = await stale.begin();
+    assert.strictEqual(await closeCheck(stale.rt, t, { run: async (args) => { calls.push(args); return ran('pass'); } }), null);
+    await stale.end(t);
+    await wait(600);
+    assert.strictEqual(calls.length, 0);
+
+    // Two cases on one repository, closing at once.
+    const repo = repoDir();
+    const a = await approvedWorld({ repo });
+    const b = await approvedWorld({ repo });
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const run = async (args) => { calls.push(args); await gate; return ran('pass'); };
+    const ta = await a.begin();
+    const tb = await b.begin();
+    const keepAlive = setTimeout(() => {}, 30000);
+    try {
+      const first = closeCheck(a.rt, ta, { run });
+      const second = await closeCheck(b.rt, tb, { run });
+      assert.strictEqual(second, null);
+      release();
+      assert.strictEqual((await first).run.id, 'chk-0001');
+      assert.strictEqual(calls.length, 1);
+    } finally {
+      release();
+      clearTimeout(keepAlive);
+    }
+    await a.rt.endTurn(ta, { summary: 'x' });
+    await b.rt.endTurn(tb, { summary: 'x' });
+  });
+
+  it('Stop and shutdown end a run and nothing of it is recorded', async () => {
+    for (const how of ['stop', 'shutdown']) {
+      let seen = null;
+      // Ends when its signal is aborted, as runCheck does.
+      const run = ({ signal }) => new Promise((resolve) => {
+        seen = signal;
+        signal.addEventListener('abort', () => resolve({ result: 'stopped', exitCode: null, timedOut: false, ms: 5, tail: '' }), { once: true });
+      });
+      const w = await approvedWorld();
+      const turn = await w.begin();
+      w.commit();
+      const keepAlive = setTimeout(() => {}, 30000);
+      try {
+        const closing = closeCheck(w.rt, turn, { run });
+        for (let i = 0; i < 200 && !seen; i += 1) await wait(25);
+        assert.ok(seen, how);
+        if (how === 'stop') turn.abort('stopped by owner');
+        else w.rt.beginShutdown();
+        assert.strictEqual(await closing, null, how);
+        assert.strictEqual(seen.aborted, true, how);
+        assert.strictEqual(w.runs().length, 0, how);
+      } finally {
+        clearTimeout(keepAlive);
+      }
+      if (how === 'stop') await w.rt.endTurn(turn, { summary: 'stopped' });
+      else w.rt.releaseAll();
+    }
+  });
+});
+
+describe('the close run in the turn: what is kept, what is said, what it means', () => {
+  it('keeps the output\'s tail out of git and out of checks.json', async () => {
+    const w = await approvedWorld({ run: async () => ran('fail') });
+    const turn = await w.begin();
+    await w.end(turn);
+    const tail = path.join(w.dir, '.kl', 'runs', 'checks', 'chk-0001.txt');
+    assert.strictEqual(fs.readFileSync(tail, 'utf8'), 'SECRET-CANARY output');
+    assert.doesNotMatch(fs.readFileSync(path.join(w.dir, '.kl', 'checks.json'), 'utf8'), /CANARY/);
+    assert.strictEqual(git(w.dir, 'status', '--porcelain').trim(), '');
+    assert.strictEqual(git(w.dir, 'ls-files', '.kl/runs').trim(), '');
+    assert.match(git(w.dir, 'ls-files', '.kl/checks.json'), /checks\.json/);
+    // Not in the journal, the orientation or the progress the panel reads.
+    assert.doesNotMatch(w.journal().join('\n'), /CANARY/);
+    assert.doesNotMatch(w.rt.orientation(w.id), /CANARY/);
+    assert.doesNotMatch(JSON.stringify(w.rt.progress(w.id)), /CANARY/);
+  });
+
+  it('pass to fail writes the journal line first', async () => {
+    let next = 'pass';
+    const w = await approvedWorld({ run: async () => ran(next) });
+    let turn = await w.begin();
+    await w.end(turn);
+    const head = git(w.repo, 'rev-parse', 'HEAD').trim().slice(0, 7);
+    assert.match(w.journal().pop(), new RegExp(`## Verification \\(written by King Louie\\)\\n- Check: passed at the end of this turn \\(chk-0001 at ${head}\\)\\.`));
+    // The turn dirties the tree and the check now fails.
+    next = 'fail';
+    turn = await w.begin();
+    w.dirty();
+    await w.end(turn);
+    const entry = w.journal().pop();
+    const lines = entry.slice(entry.indexOf('## Verification (written by King Louie)')).split('\n');
+    assert.strictEqual(lines[1], `- Check: pass → FAIL during this turn (chk-0001 at ${head} → chk-0002 at ${head}, uncommitted changes).`);
+    assert.ok(entry.indexOf('## Verification') < entry.indexOf('Worked on the site.'), 'the block is first in the entry');
+    // No result for the turn's start: said so.
+    assert.strictEqual(checkLine({ run: { id: 'chk-0004', head: 'abcdef0123', dirty: 0, result: 'fail' }, baseline: null }), '- Check: failed at the end of this turn (no result for the turn\'s start).');
+    assert.strictEqual(checkLine({ run: { id: 'chk-0004', head: 'abcdef0123', dirty: 0, result: 'timeout' }, baseline: { id: 'chk-0003', head: 'abcdef0123', dirty: 0, result: 'pass' } }),
+      '- Check: pass → TIMED OUT during this turn (chk-0003 at abcdef0 → chk-0004 at abcdef0).');
+    assert.strictEqual(checkLine({ run: { id: 'chk-0004', head: 'abcdef0123', dirty: 0, result: 'spawn-failed' }, baseline: null }), '- Check: not run (chk-0004: the program could not be started).');
+    assert.strictEqual(checkLine(null), null);
+  });
+
+  it('a passing run at the current head with a clean tree is evidence; a failing newest run makes the criterion failing and the next turn is told', async () => {
+    let next = 'pass';
+    const w = await approvedWorld({ run: async () => ran(next) });
+    let turn = await w.begin();
+    await w.end(turn);
+    const row = () => w.rt.progressView(w.id).criteria.find((r) => r.id === 'sc-001');
+    // Code accepted a verdict that cited the run (written here as the pass would).
+    w.rt.verification(w.id).addRecord({ criterion: 'sc-001', criterionHash: row().hash, evidence: ['chk-0001'], note: 'The suite passes.', turnId: 'turn-1', model: 'example-provider:example-model' });
+    assert.strictEqual(row().state, 'met');
+    assert.deepStrictEqual(row().evidence.map((e) => [e.id, e.holds, e.provenance]), [['chk-0001', true, 'check']]);
+    // A turn sees it met.
+    turn = await w.begin();
+    await w.end(turn);
+    // The next turn commits a change and the check fails.
+    next = 'fail';
+    turn = await w.begin();
+    w.commit();
+    await w.end(turn);
+    assert.strictEqual(row().state, 'failing');
+    assert.deepStrictEqual(row().reasons, ['the newest check run (chk-0002) failed']);
+    const entry = w.journal().pop();
+    assert.match(entry, /- Check: pass → FAIL during this turn \(chk-0001 at [0-9a-f]{7} → chk-0002 at [0-9a-f]{7}\)\.\n- Now failing: sc-001/);
+    const item = w.rt.closeReadiness(w.id).items.find((i) => i.id === 'check-passing');
+    assert.deepStrictEqual([item.state, item.by, item.refs, item.fix], ['open', 'case', ['chk-0002'], 'Case: the check last failed (chk-0002). Fix it and it runs again at the end of the turn.']);
+    // The next turn must re-orient on it.
+    turn = await w.begin();
+    assert.ok(turn.triggers.some((t) => t.kind === 'criterion-regressed'), 'the regression is raised at the next turn start');
+    await w.rt.endTurn(turn, { summary: 'read' });
+    // Fixed and committed: the new run passes, but the record cites the old run, at another commit.
+    next = 'pass';
+    turn = await w.begin();
+    turn.reorientPending = false;
+    w.commit();
+    await w.end(turn);
+    assert.strictEqual(row().state, 'stale');
+    assert.match(row().reasons[0], /^chk-0001 ran at [0-9a-f]{7}; the repository is now at [0-9a-f]{7}$/);
+    assert.strictEqual(w.rt.closeReadiness(w.id).items.find((i) => i.id === 'check-passing').state, 'ok');
+  });
+
+  it('the verify pass is shown the newest run and may cite it; a run with uncommitted changes is not evidence', async () => {
+    const calls = [];
+    const script = { reply: null };
+    const router = { async routeTargets(targets, messages) { calls.push(messages); return script.reply; } };
+    const verdict = (...evidence) => ({ type: 'text', content: JSON.stringify({ criteria: [{ id: 'sc-001', status: 'met', evidence, note: 'The suite passes.' }] }), llmMetrics: { provider: 'openai', model: 'judge-model', inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0.01 } });
+    const w = await approvedWorld({ router, run: async () => ran('pass') });
+    const row = () => w.rt.progressView(w.id).criteria.find((r) => r.id === 'sc-001');
+    script.reply = verdict('chk-0001');
+    // The turn wrote no fact; the run alone is something for the pass to read.
+    let turn = await w.begin();
+    await w.end(turn);
+    assert.strictEqual(calls.length, 1);
+    const input = calls[0][0].text;
+    assert.match(input, /Newest check run:\n- chk-0001: pass; head [0-9a-f]{40}; tree clean/);
+    assert.doesNotMatch(input, /CANARY/);
+    assert.strictEqual(row().state, 'met');
+    assert.deepStrictEqual(row().evidence.map((e) => e.id), ['chk-0001']);
+    // A run with uncommitted changes is recorded and shown, and is not evidence.
+    script.reply = verdict('chk-0002');
+    turn = await w.begin();
+    w.dirty();
+    await w.end(turn);
+    assert.match(calls[1][0].text, /- chk-0002: pass; head [0-9a-f]{40}; tree not clean/);
+    assert.deepStrictEqual(row().opinion.rejected, [{ id: 'chk-0002', reason: 'check-not-current' }]);
+    assert.match(w.journal().join('\n'), /- Check: passed at the end of this turn \(chk-0002 at [0-9a-f]{7}; with uncommitted changes, so it is not evidence\)\./);
+  });
+
+  it('Check now runs the verify pass only, never the check command', async () => {
+    const calls = [];
+    const router = { async routeTargets() { return { type: 'text', content: JSON.stringify({ criteria: [{ id: 'sc-001', status: 'unmet', evidence: [], note: 'Nothing shows it.' }] }), llmMetrics: { provider: 'openai', model: 'judge-model', inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0.01 } }; } };
+    const w = await approvedWorld({ router, run: async (args) => { calls.push(args); return ran('pass'); } });
+    w.commit();
+    const pass = await w.rt.verifyNow(w.id);
+    assert.strictEqual(pass.ran, true);
+    assert.strictEqual(calls.length, 0);
+    assert.strictEqual(w.runs().length, 0);
+  });
+
+  it('a real npm test runs at the close of an owner turn and its result is recorded at the repository\'s head', async () => {
+    const w = await approvedWorld({ script: 'pass.js' });
+    let turn = await w.begin();
+    await w.end(turn);
+    const head = git(w.repo, 'rev-parse', 'HEAD').trim();
+    assert.deepStrictEqual(w.runs().map((r) => [r.id, r.result, r.exitCode, r.head, r.dirty, r.timedOut]), [['chk-0001', 'pass', 0, head, 0, false]]);
+    assert.match(fs.readFileSync(path.join(w.dir, '.kl', 'runs', 'checks', 'chk-0001.txt'), 'utf8'), /1 passing/);
+    // The turn changes the script the command runs: the same approved words now fail.
+    turn = await w.begin();
+    const pkg = JSON.parse(fs.readFileSync(path.join(w.repo, 'package.json'), 'utf8'));
+    pkg.scripts.test = 'node fail.js';
+    fs.writeFileSync(path.join(w.repo, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`);
+    git(w.repo, 'commit', '-q', '-am', 'break it');
+    await w.end(turn);
+    assert.deepStrictEqual(w.runs().map((r) => r.result), ['pass', 'fail']);
+    assert.match(w.journal().pop(), /- Check: pass → FAIL during this turn/);
+    assert.strictEqual(git(w.dir, 'status', '--porcelain').trim(), '');
+  });
+});
+

@@ -430,20 +430,14 @@ describe('Progress proposeDone', () => {
     assert.ok(s.open.some((i) => i.id === 'criteria-met' && /sc-001 is stale/.test(i.fix)));
     await stale.end();
 
-    // `failing` needs a check run, which arrives with the check command
-    // (Task 16): until then the computed view is given the state by a stub.
+    // `failing`: the record cites a check run, and the newest run failed.
     const failing = await world();
-    failing.meet();
-    const real = failing.rt.progressView.bind(failing.rt);
-    failing.rt.progressView = (...args) => {
-      const view = real(...args);
-      const row = view.criteria.find((c) => c.id === 'sc-001');
-      row.state = 'failing';
-      row.reasons = ['the newest check run (chk-0001) failed'];
-      view.counts.met -= 1;
-      view.counts.failing += 1;
-      return view;
-    };
+    const checks = failing.rt.checks(failing.id);
+    const passed = checks.addRun({ hash: 'sha256:x', head: 'abc1234', dirty: 0, result: 'pass', exitCode: 0, timedOut: false, ms: 5, turnId: 'turn-0' });
+    const criterion = failing.rt.scopeView(failing.id).criteria.find((r) => r.id === 'sc-001');
+    failing.rt.verification(failing.id).addRecord({ criterion: 'sc-001', criterionHash: criterion.hash, evidence: [passed.id], note: 'The suite passed.', turnId: 'turn-0', model: 'example-provider:example-model' });
+    checks.addRun({ hash: 'sha256:x', head: 'abc1234', dirty: 0, result: 'fail', exitCode: 1, timedOut: false, ms: 5, turnId: 'turn-0' });
+    assert.deepStrictEqual(failing.rt.progressView(failing.id).criteria.find((c) => c.id === 'sc-001').reasons, ['the newest check run (chk-0002) failed']);
     await failing.begin();
     const f = await failing.run({ action: 'proposeDone' });
     assert.deepStrictEqual([f.ok, f.code], [false, 'NOT_READY']);
