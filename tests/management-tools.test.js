@@ -1215,3 +1215,58 @@ describe('answer_question and the progress questions', () => {
     assert.deepStrictEqual(rt.brief(lot.id).read().data.successCriteria, ['Signed contract at or above the floor']);
   });
 });
+
+// Cases stage 8 (plan Task 14): progress is read through the management
+// tools under the same case scope (Q27), and nothing here answers a pressed
+// progress question.
+describe('progress through the management tools', () => {
+  const { ProgressTool } = require('../src/tools/builtin/case-progress-tool');
+
+  it('in a case chat open_case gives this case\'s progress, and another case is still refused other_case', async () => {
+    const { rt, lot, shed } = await fixture();
+    const h = handlerFor(rt, 'in-app-chat');
+    const scope = { caseScope: lot.id };
+    const open = await h.call('open_case', { case: lot.id }, scope);
+    assert.strictEqual(open.data.data.progress.frozen, false);
+    assert.deepStrictEqual(open.data.data.progress.objective, { state: 'proposed', origin: 'model' });
+    const listed = await h.call('list_cases', {}, scope);
+    assert.deepStrictEqual(listed.map((r) => [r.id, r.criteria, r.ready]), [[lot.id, { confirmed: 0, met: 0, proposed: 0 }, false]]);
+    const e = await refusal(h.call('open_case', { case: shed.id }, scope));
+    assert.deepStrictEqual([e.code, e.message], ['other_case', `other_case: ${OTHER_CASE_MESSAGE}`]);
+    assert.doesNotMatch(JSON.stringify(e.data || {}), /progress|Build a shed/);
+  });
+
+  it('answer_question refuses a close-proposal and a check-approve record on every channel', async () => {
+    const { rt, lot } = await fixture();
+    const pressed = ['close-proposal', 'check-approve'].map((type) => rt.createQuestion(lot.id, {
+      kind: 'question', urgency: 'normal', text: `A ${type} question.`, options: [{ id: 'done', label: 'Mark done' }, { id: 'approve', label: 'Approve' }],
+      payload: { type, key: type, disclosable: false }
+    }, { charge: false }));
+    for (const channel of CHANNELS) {
+      for (const qq of pressed) {
+        for (const option of ['done', 'approve']) {
+          const e = await refusal(handlerFor(rt, channel).call('answer_question', { case: lot.id, question_id: qq.id, option_id: option, quote: 'yes mark done, approve' }, { ownerTurnText: 'Yes mark done, approve.' }));
+          assert.deepStrictEqual([e.code, e.message], ['not_answerable_here', `not_answerable_here: ${PRESSED_MESSAGE}`], `${channel} ${qq.payload.type}`);
+        }
+      }
+    }
+    for (const qq of pressed) assert.strictEqual(rt.questions(lot.id).get(qq.id).answer, null);
+    assert.strictEqual(rt.getCase(lot.id).status, 'active');
+  });
+
+  it('no management tool takes a state, a status or a criterion: only answer_question reaches a scope question', () => {
+    for (const t of defs.CASE_MCP_TOOLS) {
+      for (const key of Object.keys(t.inputSchema.properties)) {
+        assert.ok(!['state', 'status', 'criterion', 'criteria', 'evidence', 'force', 'verification'].includes(key), `${t.name}.${key}`);
+      }
+    }
+    assert.deepStrictEqual(defs.CASE_MCP_TOOLS.map((t) => t.name), ALL);
+    assert.strictEqual(typeof ProgressTool.execute, 'function');
+    assert.ok(!MANAGEMENT_TOOL_NAMES.includes('Progress'));
+  });
+
+  it('the chat-attach rule still treats open_case and list_cases as carrying case data', () => {
+    const { NO_CASE_DATA } = require('../src/cases/chat-attach');
+    assert.deepStrictEqual([...NO_CASE_DATA], ['get_presence', 'set_away']);
+  });
+});

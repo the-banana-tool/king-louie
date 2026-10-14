@@ -189,6 +189,18 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - *The prompt.* The orientation, and so both new sections, are in the dynamic part of the system prompt (`buildCaseSystemPrompt` → `systemPromptDynamic`) in owner turns and wake-ups, as before; nothing was added to the cached part. `get_orientation` returns the same text inside its untrusted wrapper.
 - *Tests.* No existing test changed.
 
+**Task 14 (progress over MCP and in the chat's management tools).**
+
+- *No tool, scope or list changed*, as the task says: `CASE_MCP_TOOLS` has the same twelve names, `CASE_SCOPES` the same three, `CASE_SCOPED_TOOLS` and `NO_CASE_DATA` are as they were (so a chat that read another case's progress through `open_case` or `list_cases` is still refused a case, Q29), and only `list_cases` and `list_questions` fan out. Only the two descriptions changed in `mcp-tool-definitions.js`.
+- *`progress` is rebuilt field by field* from `CaseRuntime.progress` (the files behind it are Bash-writable): a value of the wrong kind reads `null`, a list that is not one reads empty. A proposed row always has `verification: null`, no evidence and no reason, whatever the row holds.
+- *`reason`* is every reason of the row joined with `; ` (as the regression note does), `null` when there is none.
+- *A frozen case* (`frozen: true`) gives the rows and the list it closed with, and `objective: null` (the frozen record keeps no objective row). A case closed before progress was tracked reads as an open one does (`frozen: false`, computed).
+- *`abandoned`* counts the approaches that still stand (withdrawn ones are left out) and lists the newest five, newest first.
+- *`readiness`* is `{ ready: false, items: [] }` when the runtime gave none.
+- *`list_cases` when the progress cannot be read*: `criteria: null` and `ready: false` for that row; the other fields are as before. For a frozen case the counts are those of the frozen rows and `ready` is the frozen list's.
+- *Cost.* `list_cases` now computes each case's progress, which reads the ready-to-close list's files (jobs, envelopes, questions, the plan) for every case on the node. Nothing is written.
+- *Tests.* No existing test changed. The fixtures' owner-given objective reads origin `owner-create`.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.

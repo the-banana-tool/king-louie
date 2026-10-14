@@ -501,3 +501,78 @@ describe('front-door case tools', () => {
     }
   });
 });
+
+// Cases stage 8 (plan Task 14): progress is read under cases:read; the scope
+// question is spoken (cases:answer, with a quote that is recorded and not
+// checked here); the proposal to close is pressed and refused.
+describe('front-door case tools and progress', () => {
+  const { ProgressTool } = require('../src/tools/builtin/case-progress-tool');
+  const src = { kind: 'url', ref: 'https://records.example.org/1' };
+
+  async function progressFixture() {
+    const rt = new CaseRuntime({ root: tmp('kl-fd-progress-') });
+    const lot = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot', objectiveBy: 'owner' });
+    rt.brief(lot.id).update('why', 'Need the cash', { provenance: 'user' });
+    await rt.applyScopeAction(lot.id, { action: 'add', text: 'Signed contract at or above the floor', by: 'owner-action' });
+    rt.completeGating(lot.id);
+    rt.brief(lot.id).append('successCriteria', 'Title search is clean', { provenance: 'model' });
+    const fact = rt.ledger(lot.id).assert({ stmt: 'The contract was signed at 81,000', subject: 'contract', attr: 'signed', value: 81000, provenance: 'sourced', source: src });
+    const row = rt.scopeView(lot.id).criteria[0];
+    rt.verification(lot.id).addRecord({ criterion: row.id, criterionHash: row.hash, evidence: [fact.id], note: 'Signed.', turnId: 'turn-0', model: 'example-provider:example-model' });
+    const turn = await rt.beginTurn(lot.id, { turnId: 'turn-1' });
+    const opts = { caseContext: rt.caseContext(turn, { ownerMessages: [] }) };
+    const scope = await ProgressTool.execute({ action: 'askScope' }, opts);
+    const close = await ProgressTool.execute({ action: 'proposeDone', note: 'Signed and recorded.' }, opts);
+    assert.deepStrictEqual([scope.ok, close.ok], [true, true]);
+    await rt.endTurn(turn, { summary: 'asked' });
+    return { rt, lot, fact, scopeId: scope.questionId, closeId: close.questionId };
+  }
+
+  it('open_case and list_cases under cases:read return progress; without the scope nothing is read', async () => {
+    const { rt, lot, fact } = await progressFixture();
+    const t = await frontDoor(rt);
+    const open = await t.call('open_case', { machine: 'gpu-box', case: lot.id }, ['cases:read']);
+    const p = open.data.data.progress;
+    assert.strictEqual(open.data.untrusted_output, true);
+    assert.deepStrictEqual(p.criteria.map((r) => [r.state, r.verification, r.evidence]), [['confirmed', 'met', [{ id: fact.id, provenance: 'sourced' }]], ['proposed', null, []]]);
+    assert.strictEqual(p.readiness.ready, false);
+    assert.strictEqual(open.progress, undefined);
+    const listed = await t.call('list_cases', {}, ['cases:read']);
+    assert.deepStrictEqual(listed.rows.map((r) => [r.id, r.machine, r.criteria, r.ready]), [[lot.id, 'gpu-box', { confirmed: 1, met: 1, proposed: 1 }, false]]);
+    assert.strictEqual((await t.call('open_case', { machine: 'gpu-box', case: lot.id }, ['fleet:read'])).error.code, 'insufficient_scope');
+  });
+
+  it('a cases:answer grant confirms the scope question in the owner\'s words; the proposal to close is refused and the case stays open', async () => {
+    const { rt, lot, scopeId, closeId } = await progressFixture();
+    const t = await frontDoor(rt);
+    const base = { machine: 'gpu-box', case: lot.id };
+    // cases:read alone confirms nothing.
+    const readOnly = await t.call('answer_question', { ...base, question_id: scopeId, option_id: 'all', quote: 'confirm all of those' }, ['cases:read']);
+    assert.deepStrictEqual([readOnly.error.code, readOnly.error.required], ['insufficient_scope', 'cases:answer']);
+    assert.deepStrictEqual(rt.scopeView(lot.id).criteria.map((r) => r.state), ['confirmed', 'proposed']);
+    for (const option of ['done', 'keep']) {
+      const r = await t.call('answer_question', { ...base, question_id: closeId, option_id: option, quote: 'yes mark it done' }, ANSWER_SCOPES, ANSWER);
+      assert.strictEqual(r.error.code, 'not_answerable_here', option);
+    }
+    assert.strictEqual(rt.questions(lot.id).get(closeId).answer, null);
+    assert.strictEqual(rt.getCase(lot.id).status, 'active');
+    const ok = await t.call('answer_question', { ...base, question_id: scopeId, option_id: 'all', quote: 'confirm all of those' }, ANSWER_SCOPES, ANSWER);
+    assert.match(ok.fact_id, /^f-\d{4,}$/);
+    const rows = rt.scopeView(lot.id).criteria;
+    assert.deepStrictEqual(rows.map((r) => r.state), ['confirmed', 'confirmed']);
+    assert.deepStrictEqual([rows[1].confirmed.by, rows[1].confirmed.channel, rows[1].confirmed.quote], ['question', 'mcp-frontdoor', 'confirm all of those']);
+    // Confirming is not verifying: the row the answer confirmed is unmet.
+    const p = (await t.call('open_case', base, ['cases:read'])).data.data.progress;
+    assert.deepStrictEqual(p.criteria.map((r) => r.verification), ['met', 'unmet']);
+  });
+
+  it('the registered case scopes are exactly the three, and only list_cases and list_questions fan out', () => {
+    assert.deepStrictEqual(Object.keys(CASE_SCOPES), ['cases:read', 'cases:answer', 'cases:manage']);
+    const scopeRegistry = createFleetScopeRegistry();
+    const tools = [];
+    registerFrontDoorCaseTools({ scopeRegistry, router: { registerTool: (def, opts) => tools.push([def, opts]) } });
+    assert.deepStrictEqual(tools.map(([d]) => d.name).sort(), TOOL_SCOPES.map(([name]) => name).sort());
+    assert.deepStrictEqual(tools.filter(([, o]) => o.fanout === true).map(([d]) => d.name).sort(), ['list_cases', 'list_questions']);
+    assert.deepStrictEqual(tools.filter(([, o]) => o.perGrantLimit === true).map(([d]) => d.name).sort(), ['answer_question', 'cancel_case_job', 'create_case', 'revoke_envelope', 'set_away']);
+  });
+});
