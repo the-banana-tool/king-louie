@@ -54,8 +54,11 @@ class BaseLLMProvider {
    */
   async request(url, init = {}, options = {}) {
     const signal = options?.abortSignal || null;
+    // A provider with a transport (a local server's, which dials only its
+    // pinned address) sends through it; every other provider uses fetch.
+    const send = this.transport && typeof this.transport.fetch === 'function' ? this.transport.fetch : globalThis.fetch;
     try {
-      return await globalThis.fetch(url, signal ? { ...init, signal } : init);
+      return await send(url, signal ? { ...init, signal } : init);
     } catch (err) {
       if (signal?.aborted) {
         const aborted = this.abortError(err, signal);
