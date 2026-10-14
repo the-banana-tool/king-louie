@@ -55,18 +55,24 @@ function caseIdOf(store, chatIdOrIds) {
   return null;
 }
 
-// Why a rerank over these chats must stay on this machine, or null:
+// Why the text of these chats must stay on this machine, or null:
+// 'private-chat' when any of them is private (local inference spec
+// 2026-10-13 §8.4; a ref whose mark is not exactly false counts), else
 // 'imported-chat' when any of them was imported (its source is set, or it
-// carries the mark of an imported case chat). One imported chat in a turn's
-// history scope keeps the whole rerank off Jev.
+// carries the mark of an imported case chat). One such chat in a turn's
+// history scope keeps the whole rerank off Jev; a private one also keeps the
+// query off every embedder that is not local (vector-search.js).
 function keepLocalReason(store, chatIdOrIds) {
   if (!store || typeof store.chatRef !== 'function') return null;
+  let imported = false;
   for (const chatId of Array.isArray(chatIdOrIds) ? chatIdOrIds : [chatIdOrIds]) {
     if (!chatId) continue;
     const ref = store.chatRef(String(chatId));
-    if (ref && (ref.source || ref.importedFromCase === true)) return 'imported-chat';
+    if (!ref) continue;
+    if (ref.private !== false) return 'private-chat';
+    if (ref.source || ref.importedFromCase === true) imported = true;
   }
-  return null;
+  return imported ? 'imported-chat' : null;
 }
 
 module.exports = { createHostReranker, createRecallReranker, caseIdOf, keepLocalReason };

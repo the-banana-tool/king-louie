@@ -90,8 +90,7 @@
   "src/history/embed-indexer.js": {
     "label": "behind-gate",
     "gate": "src/history/embedding-index.js",
-    "pending": "Task 10",
-    "why": "hands the active embedder the chunks the store's pending query returns; the store never returns a private chat's chunks for a key that is not local:"
+    "why": "hands each embedder only the chunks the store's pending query returns: no private or imported chat's chunk for a key that is not local:, and those chunks to the keep-local embedder"
   },
   "src/history/embed-worker.js": {
     "label": "no-chat-text",
@@ -108,14 +107,11 @@
   "src/history/embedders/remote.js": {
     "label": "behind-gate",
     "gate": "src/history/embedding-index.js",
-    "pending": "Task 10",
-    "why": "the hosted and Ollama embedder: it sends only what the indexer and the vector search hand it, and neither hands it a private chat's chunks or query"
+    "why": "the hosted and Ollama embedder: it embeds what the indexer hands it (never a private or imported chat's chunk) and a query vector-search.js hands it (never a private chat's)"
   },
   "src/history/vector-search.js": {
-    "label": "behind-gate",
-    "gate": "src/history/embedding-index.js",
-    "pending": "Task 10",
-    "why": "embeds a turn's query with the active embedder; with a private chat in scope it uses the keep-local embedder or does not embed"
+    "label": "gated",
+    "why": "embeds a turn's query with the active embedder, except with a private chat in scope: then only with the local embedder, or not at all (vectorsSkipped private-chat)"
   },
   "src/ipc/memory-handlers.js": {
     "label": "no-chat-text",

@@ -25,14 +25,6 @@ const path = require('node:path');
 const ROOT = path.join(__dirname, '..');
 const FIXTURE = path.join(__dirname, 'fixtures', 'egress-inventory.json');
 const LABELS = ['gated', 'behind-gate', 'no-chat-text', 'tool', 'transport'];
-// Entries whose gate a later task of stage L1 builds; `pending` names the
-// task, and the checks of the gate are skipped for them until it lands.
-// Nothing can set a private mark before Task 14.
-const PENDING = Object.freeze({
-  'src/history/embed-indexer.js': 'Task 10',
-  'src/history/embedders/remote.js': 'Task 10',
-  'src/history/vector-search.js': 'Task 10'
-});
 
 // What "can send" looks like in this codebase.
 const SENDS = Object.freeze({
@@ -90,18 +82,17 @@ describe('the egress inventory', () => {
 
   it('every entry has one of the five labels and a one-line reason', () => {
     for (const [rel, entry] of Object.entries(inventory)) {
-      const keys = ['label', 'why', ...(entry.label === 'behind-gate' ? ['gate'] : []), ...(PENDING[rel] ? ['pending'] : [])];
+      const keys = ['label', 'why', ...(entry.label === 'behind-gate' ? ['gate'] : [])];
       assert.deepStrictEqual(Object.keys(entry).sort(), keys.sort(), rel);
       assert.ok(LABELS.includes(entry.label), `${rel}: ${entry.label}`);
       assert.ok(typeof entry.why === 'string' && entry.why.trim().length >= 20 && !/[\r\n]/.test(entry.why), rel);
-      if (PENDING[rel]) assert.strictEqual(entry.pending, PENDING[rel], rel);
     }
     assert.deepStrictEqual(Object.keys(inventory), [...Object.keys(inventory)].sort(), 'the list is kept sorted');
   });
 
   it('a gated file names the egress policy', () => {
     const silent = Object.entries(inventory)
-      .filter(([rel, entry]) => entry.label === 'gated' && !PENDING[rel] && !/egress/.test(read(rel)))
+      .filter(([rel, entry]) => entry.label === 'gated' && !/egress/.test(read(rel)))
       .map(([rel]) => rel);
     assert.deepStrictEqual(silent, []);
   });
@@ -109,7 +100,7 @@ describe('the egress inventory', () => {
   it('a file behind a gate names a gate that exists and names the egress policy', () => {
     const loose = [];
     for (const [rel, entry] of Object.entries(inventory)) {
-      if (entry.label !== 'behind-gate' || PENDING[rel]) continue;
+      if (entry.label !== 'behind-gate') continue;
       const gate = String(entry.gate || '');
       if (!/^src\/[\w./-]+\.js$/.test(gate) || gate === rel || !fs.existsSync(path.join(ROOT, gate)) || !/egress/.test(read(gate))) loose.push(`${rel} → ${gate}`);
     }

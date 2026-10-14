@@ -98,7 +98,8 @@ class ContextBuilder {
         reranker,
         vectorOf,
         caseId: caseIdOf(this.store, scope.chatIds),
-        // An imported chat in scope keeps it off Jev too (R-H4-2).
+        // An imported or private chat in scope keeps it off Jev too (R-H4-2,
+        // R-LI-25), and a private one keeps the query off a hosted embedder.
         keepLocal: keepLocalReason(this.store, scope.chatIds),
         stats: retrieval
       });

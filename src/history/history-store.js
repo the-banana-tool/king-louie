@@ -622,8 +622,9 @@ class HistoryStore {
   }
   // options.localOnly (exactly true) is the local embedder's: without it an
   // imported chat's chunks are never pending (owner ruling R-H4-2).
-  pendingEmbeddings(model, options = {}) { return this.embeddable ? embeddingIndex.pendingEmbeddings(this.db, model, options) : []; }
-  countPending(model, options = {}) { return this.embeddable ? embeddingIndex.countPending(this.db, model, options) : 0; }
+  // The store says whether it can read the private mark; a caller cannot.
+  pendingEmbeddings(model, options = {}) { return this.embeddable ? embeddingIndex.pendingEmbeddings(this.db, model, { ...options, privacyAware: this.privacyAware }) : []; }
+  countPending(model, options = {}) { return this.embeddable ? embeddingIndex.countPending(this.db, model, { ...options, privacyAware: this.privacyAware }) : 0; }
   countEmbedded(model) { return this.embeddable ? embeddingIndex.countEmbedded(this.db, model) : 0; }
   vectorRows(model, chatId, options = {}) { return this.embeddable ? embeddingIndex.vectorRows(this.db, model, chatId, options) : []; }
   deleteEmbeddings(model) {

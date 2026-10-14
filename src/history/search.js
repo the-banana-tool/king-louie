@@ -25,8 +25,10 @@ async function searchHistoryExcerpts({ store, retriever, chatId, chatIds = null,
     query, chatIds: scope, kinds, budgetTokens: null, settings: s, now: asOf, reranker: useRerank ? reranker : null,
     // One case chat anywhere in scope keeps the rerank off Jev.
     caseId: useRerank ? caseIdOf(store, scope) : null,
-    // So does one imported chat (R-H4-2).
-    keepLocal: useRerank ? keepLocalReason(store, scope) : null
+    // So does one imported or private chat (R-H4-2, R-LI-25); a private one
+    // also keeps the query off a hosted embedder, so it is asked whether
+    // the search reranks or not.
+    keepLocal: keepLocalReason(store, scope)
   });
   const chunks = hits.map((h) => h.chunk);
   const chunkCounts = store.messageChunkCounts([...new Set(chunks.map((c) => c.messageId))]);
