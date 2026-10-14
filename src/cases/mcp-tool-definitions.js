@@ -153,9 +153,13 @@ const NEVER_OVER_MCP = new Set(['ingest:review']);
 // phone, never by a model relaying words. Pure, so every surface (the MCP
 // handler, King Louie's chat tools, the chat's question card) classifies a
 // record the same way.
+// Cases stage 8: a proposal to close a case and the approval of a check
+// command are pressed. The scope question (`scope-confirm`) is spoken
+// (owner ruling R-C8-2), so it is not here.
 const PRESSED_TYPES = new Set([
   'envelope', 'envelope-delta', 'plan', 'budget-grant', 'budget-daily', 'direction', 'commit-failed',
-  'wakeups-failing', 'gating-pending', 'owner-task', 'conflict', 'ingest:review', 'detour-similar'
+  'wakeups-failing', 'gating-pending', 'owner-task', 'conflict', 'ingest:review', 'detour-similar',
+  'close-proposal', 'check-approve'
 ]);
 
 function answerClass(question) {

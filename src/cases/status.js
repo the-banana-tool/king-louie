@@ -25,8 +25,12 @@ const TRANSITIONS = Object.freeze([
 ]);
 
 // Cases stage 3: reading a plan or an executor's jobs is allowed wherever
-// Ledger.query is.
-const READ_OPS = Object.freeze(['Ledger.query', 'Brief.read', 'Playbook.list', 'Playbook.read', 'Plan.status', 'Executor.status', 'Executor.results']);
+// Ledger.query is. Cases stage 8: so are a case's progress and its
+// abandoned approaches.
+const READ_OPS = Object.freeze([
+  'Ledger.query', 'Brief.read', 'Playbook.list', 'Playbook.read', 'Plan.status', 'Executor.status', 'Executor.results',
+  'Progress.status', 'Progress.abandoned'
+]);
 
 // Narrow statuses use an allowlist; the others a denylist (spec §3.1).
 const ALLOWED = Object.freeze({
@@ -35,10 +39,13 @@ const ALLOWED = Object.freeze({
   abandoned: READ_OPS
 });
 
+// Cases stage 8 (spec §6.7): the model proposes `done` only in an active
+// case. Progress.abandon, askScope and verify run wherever writing does;
+// the allowlists above keep them out of paused, done and abandoned cases.
 const DENIED = Object.freeze({
-  draft: Object.freeze(['Recommend', 'Plan', 'Executor.submit', 'Fail']),
+  draft: Object.freeze(['Recommend', 'Plan', 'Executor.submit', 'Fail', 'Progress.proposeDone']),
   active: Object.freeze([]),
-  'needs-direction': Object.freeze(['Plan', 'Recommend', 'Fail', 'Executor.submit'])
+  'needs-direction': Object.freeze(['Plan', 'Recommend', 'Fail', 'Executor.submit', 'Progress.proposeDone'])
 });
 
 const AUTONOMY_KEY = Object.freeze({

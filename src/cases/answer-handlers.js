@@ -115,3 +115,6 @@ QuestionStore.registerAnswerHandler('detour-similar', {
     return { applied: false, note: `The detour was not settled (${why}).` };
   }
 });
+
+// Cases stage 8: the scope question and the proposal to close.
+require('./verify/questions');

@@ -1145,3 +1145,73 @@ describe("in King Louie's chat, revoke, cancel, away and create ask first", () =
     assert.deepStrictEqual(asked, []);
   });
 });
+
+// Cases stage 8 (spec §6.4, §6.7; R-C8-1, R-C8-2): the scope question is
+// spoken; the proposal to close is pressed.
+describe('answer_question and the progress questions', () => {
+  const { ProgressTool } = require('../src/tools/builtin/case-progress-tool');
+  const src = { kind: 'url', ref: 'https://records.example.org/1' };
+
+  // An active case with one confirmed criterion that is met and two the
+  // model proposed, and the two questions the Progress tool asks about it.
+  async function progressFixture() {
+    const rt = new CaseRuntime({ root: tmp('kl-mgmt-progress-') });
+    const lot = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot', objectiveBy: 'owner' });
+    rt.brief(lot.id).update('why', 'Need the cash', { provenance: 'user' });
+    await rt.applyScopeAction(lot.id, { action: 'add', text: 'Signed contract at or above the floor', by: 'owner-action' });
+    rt.completeGating(lot.id);
+    for (const text of ['Title search is clean', 'Both owners of record have signed']) rt.brief(lot.id).append('successCriteria', text, { provenance: 'model' });
+    const fact = rt.ledger(lot.id).assert({ stmt: 'The contract was signed at 81,000', subject: 'contract', attr: 'signed', value: 81000, source: src });
+    const row = rt.scopeView(lot.id).criteria[0];
+    rt.verification(lot.id).addRecord({ criterion: row.id, criterionHash: row.hash, evidence: [fact.id], note: 'Signed.', turnId: 'turn-0', model: 'example-provider:example-model' });
+    const turn = await rt.beginTurn(lot.id, { turnId: 'turn-1' });
+    const opts = { caseContext: rt.caseContext(turn, { ownerMessages: [] }) };
+    const scope = await ProgressTool.execute({ action: 'askScope' }, opts);
+    const close = await ProgressTool.execute({ action: 'proposeDone', note: 'Signed and recorded.' }, opts);
+    assert.deepStrictEqual([scope.ok, close.ok], [true, true]);
+    await rt.endTurn(turn, { summary: 'asked' });
+    return { rt, lot, scopeId: scope.questionId, closeId: close.questionId };
+  }
+
+  it('answer_question on a close-proposal is refused on every channel with the pressed message', async () => {
+    const { rt, lot, closeId } = await progressFixture();
+    assert.strictEqual(defs.answerClass(rt.questions(lot.id).get(closeId)), 'pressed');
+    for (const channel of ['in-app-chat', 'mcp-stdio', 'mcp-frontdoor']) {
+      for (const option of ['done', 'keep']) {
+        const e = await refusal(handlerFor(rt, channel).call('answer_question', { case: lot.id, question_id: closeId, option_id: option, quote: 'yes mark it done' }, { ownerTurnText: 'Yes mark it done.' }));
+        assert.deepStrictEqual([e.code, e.message], ['not_answerable_here', `not_answerable_here: ${PRESSED_MESSAGE}`], `${channel} ${option}`);
+      }
+    }
+    assert.strictEqual(rt.questions(lot.id).get(closeId).answer, null);
+    assert.strictEqual(rt.getCase(lot.id).status, 'active');
+    const listed = await handlerFor(rt, 'mcp-stdio').call('list_questions', { case: lot.id });
+    assert.deepStrictEqual(Object.fromEntries(listed.map((x) => [x.type, x.answer])), { 'scope-confirm': 'spoken', 'close-proposal': 'pressed' });
+  });
+
+  it("answer_question confirms scope with the owner's quote", async () => {
+    const { rt, lot, scopeId } = await progressFixture();
+    const h = handlerFor(rt, 'in-app-chat');
+    // The quote must be the owner's, and must name the option.
+    const notSaid = await refusal(h.call('answer_question', { case: lot.id, question_id: scopeId, option_id: 'all', quote: 'confirm all of those' }, { ownerTurnText: 'Looks fine to me.' }));
+    assert.strictEqual(notSaid.code, 'quote_not_found');
+    const unnamed = await refusal(h.call('answer_question', { case: lot.id, question_id: scopeId, option_id: 'all', quote: 'those look fine' }, { ownerTurnText: 'Those look fine.' }));
+    assert.strictEqual(unnamed.code, 'option_not_in_quote');
+    assert.deepStrictEqual(rt.scopeView(lot.id).criteria.map((r) => r.state), ['confirmed', 'proposed', 'proposed']);
+
+    const r = await h.call('answer_question', { case: lot.id, question_id: scopeId, option_id: 'all', quote: 'confirm all of those' }, { ownerTurnText: 'Yes, confirm all of those.' });
+    const rows = rt.scopeView(lot.id).criteria;
+    assert.deepStrictEqual(rows.map((x) => x.state), ['confirmed', 'confirmed', 'confirmed']);
+    for (const row of rows.slice(1)) {
+      assert.deepStrictEqual([row.confirmed.by, row.confirmed.channel, row.confirmed.quote, row.confirmed.factId], ['question', 'in-app-chat', 'confirm all of those', r.fact_id]);
+    }
+    const fact = factOf(rt, lot, r.fact_id);
+    assert.deepStrictEqual([fact.provenance, fact.disclosable, fact.source.quote], ['user', false, 'confirm all of those']);
+  });
+
+  it("over MCP the scope answer's quote is recorded, not checked", async () => {
+    const { rt, lot, scopeId } = await progressFixture();
+    await handlerFor(rt, 'mcp-stdio').call('answer_question', { case: lot.id, question_id: scopeId, option_id: 'none', quote: 'drop all of them' });
+    assert.deepStrictEqual(rt.scopeView(lot.id).criteria.map((x) => x.state), ['confirmed']);
+    assert.deepStrictEqual(rt.brief(lot.id).read().data.successCriteria, ['Signed contract at or above the floor']);
+  });
+});

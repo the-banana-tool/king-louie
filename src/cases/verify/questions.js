@@ -1,0 +1,233 @@
+// src/cases/verify/questions.js
+// Cases stage 8 (spec §6.4, §6.7, §7.5): the text of the two questions the
+// Progress tool asks, and what their answers do.
+//
+// - `scope-confirm` is spoken (owner ruling R-C8-2): the buttons, and an
+//   answer in the owner's words through answer_question, both confirm or
+//   drop exactly the entries the question showed.
+// - `close-proposal` is pressed: only "Mark done" pressed in the app or on
+//   the paired phone closes the case. The model proposes; it never decides.
+//
+// A card is host-built: host lines first, then labelled text from the case.
+// Text that is not one plain line is shown as hidden, never flattened, and
+// a card that would be too long is refused, never cut.
+const { QuestionStore, QuestionError } = require('../questions');
+const { plainLineProblem } = require('../hidden-chars');
+const { createLogger } = require('../../logging');
+
+const log = createLogger('cases/verify/questions');
+
+// A recorded answer's channel proves a press only for these (the detour
+// router's PRESS_CHANNELS, contact.js's APP_ANSWER_CHANNELS). `in-app-chat`
+// (a model relaying words) and every `mcp-*` channel are never one.
+const PRESS_CHANNELS = Object.freeze(['in-app', 'mobile']);
+
+const SCOPE_TYPE = 'scope-confirm';
+const CLOSE_TYPE = 'close-proposal';
+const QUESTION_MAX_CHARS = 2000;
+const NOTE_MAX_CHARS = 300;
+const HIDDEN = '(text hidden: not one plain line)';
+const CRITERION_ID = /^sc-\d{3,}$/;
+const HASH = /^sha256:[0-9a-f]{64}$/;
+
+const HOW_TO_ANSWER_SCOPE = 'Answer with "Confirm all" or "Drop all", or use the buttons beside each criterion in the case panel.';
+const OBJECTIVE_STAYS = 'The objective is never dropped. Edit it in the case panel.';
+const NOT_A_PRESS = 'Not applied: a case is closed only by the button on this question in the app, or on the paired phone.';
+const USE_THE_BUTTONS = 'Not applied: answer with "Mark done" or "Keep working".';
+
+const isObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+// Text a case holds (a title, a criterion, an objective, a note), as a card
+// may show it.
+const shown = (text) => (typeof text === 'string' && text.trim() && !plainLineProblem(text.trim()) ? text.trim() : HIDDEN);
+
+function whole(lines, what) {
+  const text = lines.join('\n');
+  if (text.length > QUESTION_MAX_CHARS) {
+    throw new QuestionError('QUESTION_TOO_LONG', `${what} would be ${text.length} characters; the owner is shown at most ${QUESTION_MAX_CHARS}, and a question is never cut.`);
+  }
+  return text;
+}
+
+// What the owner is asked to confirm: every proposed criterion and, when it
+// is proposed, the objective. `view` is ScopeStore.view().
+function scopeQuestionText(meta, view) {
+  const rows = (Array.isArray(view?.criteria) ? view.criteria : []).filter((r) => isObject(r) && r.state !== 'confirmed');
+  const objective = isObject(view?.objective) && view.objective.state !== 'confirmed' ? view.objective : null;
+  const lines = [`Case: ${shown(meta?.title)}`];
+  if (rows.length) {
+    lines.push(`Confirm these success criteria${objective ? ' and the objective' : ''}? They count for nothing until you confirm them.`);
+  } else {
+    lines.push('Confirm the objective? You have not confirmed it yet.');
+  }
+  if (objective) lines.push('"Drop all" leaves the objective as it is; edit it in the case panel.');
+  rows.forEach((row, i) => {
+    const id = typeof row.id === 'string' && CRITERION_ID.test(row.id) ? row.id : 'sc-???';
+    lines.push(`${i + 1}. ${id}: ${shown(row.text)}`);
+  });
+  if (objective) lines.push(`Objective: ${shown(objective.text)}`);
+  return whole(lines, 'The scope question');
+}
+
+const isOpenItem = (item) => isObject(item) && item.state !== 'ok' && item.state !== 'n/a';
+
+// The proposal to close: the title, the summary line, one fixed line per
+// open item of the ready-to-close list, then the model's note, last and
+// labelled. `progress` is CaseRuntime.progress().
+function closeQuestionText(meta, progress, note = null) {
+  const lines = [
+    `Case: ${shown(meta?.title)}`,
+    'The case proposes to close as done.',
+    typeof progress?.summary === 'string' && progress.summary ? progress.summary : 'Its progress could not be summarised.'
+  ];
+  for (const item of (Array.isArray(progress?.readiness?.items) ? progress.readiness.items : []).filter(isOpenItem)) {
+    // A fix line is fixed wording filled with ids and counts (readiness.js).
+    lines.push(typeof item.fix === 'string' && item.fix ? item.fix : `${String(item.id)} is open.`);
+  }
+  if (typeof note === 'string' && note.trim()) {
+    const text = shown(note);
+    if (text !== HIDDEN && text.length > NOTE_MAX_CHARS) {
+      throw new QuestionError('QUESTION_TOO_LONG', `"note" is one plain line of at most ${NOTE_MAX_CHARS} characters; this one is ${text.length}. A question is never cut.`);
+    }
+    lines.push(`Note from the case: ${text}`);
+  }
+  return whole(lines, 'The close proposal');
+}
+
+function note(runtime, caseId, questionId, text) {
+  try {
+    runtime.questions(caseId).note(questionId, text);
+  } catch (err) {
+    log.warn(`Could not note on ${questionId}: ${err.message}`);
+  }
+}
+
+// The answer's fact names the question by id and kind, never by its text:
+// the text holds criteria the model wrote.
+const factOf = (what, subject) => (record, answer) => {
+  const option = answer.optionId ? (record.options || []).find((o) => o.id === answer.optionId) : null;
+  const value = option ? option.label : answer.text;
+  return { stmt: `Owner answered ${record.id} (${what}): ${value}`, subject, attr: record.id, value };
+};
+
+// ---- scope-confirm ----
+
+// Confirms, or drops, exactly the payload's entries whose words are still
+// the ones shown. Runs inside answerQuestion's systemAction.
+async function onScopeAnswered(record, fact, { runtime, caseId }) {
+  const optionId = record.answer?.optionId;
+  if (optionId !== 'all' && optionId !== 'none') {
+    note(runtime, caseId, record.id, HOW_TO_ANSWER_SCOPE);
+    return { applied: false, note: HOW_TO_ANSWER_SCOPE };
+  }
+  const payload = isObject(record.payload) ? record.payload : {};
+  const entries = (Array.isArray(payload.entries) ? payload.entries : [])
+    .filter((e) => isObject(e) && typeof e.id === 'string' && CRITERION_ID.test(e.id) && typeof e.hash === 'string' && HASH.test(e.hash));
+  const action = optionId === 'all' ? 'confirm' : 'drop';
+  const stamp = {
+    by: 'question',
+    channel: typeof record.answer.channel === 'string' ? record.answer.channel : null,
+    quote: typeof record.answer.quote === 'string' ? record.answer.quote : null,
+    factId: fact?.id ?? null
+  };
+  const view = runtime.scopeView(caseId);
+  const rows = Array.isArray(view?.criteria) ? view.criteria : [];
+  const confirmed = [];
+  const dropped = [];
+  const changed = [];
+  const kept = [];
+  const apply = async (target, hash) => {
+    try {
+      await runtime.applyScopeAction(caseId, { action, target, hash, ...stamp });
+      return true;
+    } catch (err) {
+      log.warn(`${record.id}: ${action} of ${target} was not applied: ${err.message}`);
+      return false;
+    }
+  };
+  for (const entry of entries) {
+    const row = rows.find((r) => r.id === entry.id);
+    if (!row || row.hash !== entry.hash) {
+      changed.push(entry.id);
+    } else if (row.state === 'confirmed') {
+      // Confirmed meanwhile, by a button: an "all" has nothing to add, and
+      // a "none" never drops what the owner confirmed.
+      if (action === 'drop') kept.push(entry.id);
+    } else if (await apply(entry.id, entry.hash)) {
+      (action === 'confirm' ? confirmed : dropped).push(entry.id);
+    } else {
+      changed.push(entry.id);
+    }
+  }
+  if (typeof payload.objective === 'string' && payload.objective) {
+    const objective = isObject(view?.objective) ? view.objective : null;
+    if (action === 'drop') {
+      note(runtime, caseId, record.id, OBJECTIVE_STAYS);
+    } else if (!objective || objective.hash !== payload.objective) {
+      changed.push('objective');
+    } else if (objective.state !== 'confirmed') {
+      if (await apply('objective', payload.objective)) confirmed.push('objective');
+      else changed.push('objective');
+    }
+  }
+  if (changed.length) {
+    note(runtime, caseId, record.id, `Not applied to ${changed.join(', ')}: the words changed after this was asked. Confirm or drop what is there now in the case panel.`);
+  }
+  if (kept.length) note(runtime, caseId, record.id, `Not dropped: ${kept.join(', ')} ${kept.length === 1 ? 'was' : 'were'} confirmed after this was asked.`);
+  return { applied: 'scope', confirmed, dropped, skipped: [...changed, ...kept] };
+}
+
+QuestionStore.registerAnswerHandler(SCOPE_TYPE, { toFact: factOf('scope', 'scope'), onAnswered: onScopeAnswered });
+
+// ---- close-proposal ----
+
+// "criteria-met (sc-003), questions-answered (q-0012)" or "none": item ids
+// and the ids the list itself gives, for the close's status note.
+function openAtClose(runtime, caseId) {
+  try {
+    const open = runtime.closeReadiness(caseId).items.filter(isOpenItem);
+    if (!open.length) return 'none';
+    return open.map((i) => `${i.id}${Array.isArray(i.refs) && i.refs.length ? ` (${i.refs.join(', ')})` : ''}`).join(', ');
+  } catch (err) {
+    log.warn(`${caseId}: the ready-to-close list could not be read for the close: ${err.message}`);
+    return 'not known';
+  }
+}
+
+// `keep` records what the owner declined. `done` closes the case only when
+// the recorded answer is a press; the owner's press is never refused for an
+// open item (R-C8-1). Runs inside answerQuestion's systemAction.
+function onCloseAnswered(record, fact, { runtime, caseId }) {
+  const optionId = record.answer?.optionId;
+  if (optionId === 'keep') {
+    runtime.verification(caseId).setDeclinedClose(record.payload?.fingerprint);
+    return { applied: 'declined' };
+  }
+  if (optionId !== 'done') {
+    note(runtime, caseId, record.id, USE_THE_BUTTONS);
+    return { applied: false, note: USE_THE_BUTTONS };
+  }
+  if (!PRESS_CHANNELS.includes(record.answer.channel)) {
+    log.warn(`${record.id}: "done" from ${String(record.answer.channel)} is not a press; the case stays open.`);
+    note(runtime, caseId, record.id, NOT_A_PRESS);
+    return { applied: false, note: NOT_A_PRESS };
+  }
+  try {
+    runtime.setStatus(caseId, 'done', {
+      kind: 'owner',
+      by: 'owner',
+      ref: fact?.id || record.id,
+      note: `close proposal ${record.id}; open at close: ${openAtClose(runtime, caseId)}`
+    });
+  } catch (err) {
+    // A case that cannot go to done from where it is now (already closed).
+    log.warn(`${record.id}: the case was not closed: ${err.message}`);
+    const text = 'Not applied: the case could not be closed from its current status.';
+    note(runtime, caseId, record.id, text);
+    return { applied: false, note: text };
+  }
+  return { applied: 'done' };
+}
+
+QuestionStore.registerAnswerHandler(CLOSE_TYPE, { toFact: factOf('close proposal', 'close-proposal'), onAnswered: onCloseAnswered });
+
+module.exports = { scopeQuestionText, closeQuestionText, PRESS_CHANNELS, SCOPE_TYPE, CLOSE_TYPE, QUESTION_MAX_CHARS };
