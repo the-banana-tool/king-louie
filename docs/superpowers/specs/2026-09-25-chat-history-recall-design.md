@@ -480,8 +480,9 @@ owner rulings R-H4-1, R-H4-2 and R-H4-7, §17):
 - A King Louie export of a case chat (`importedFromCase`, §10.2) is kept out
   of every other chat's scope in the same way, and reads itself only.
 - A Telegram or Discord bridge chat reads itself only and is left out of
-  `all`; the owner may link it, and it is then read under `linked` (under
-  `all` it is not read even when linked: open, §17).
+  `all`; the owner may link it, and the chat that links it then reads it
+  under `linked` and under `all` (owner ruling 2026-10-13, §17). A bridge
+  chat that is not linked stays out of `all`.
 - Any other chat, an imported one included, may read and be read.
 
 Only the chat's own turn uses the wider scope (`crossChat`): a sub-agent, a
@@ -1232,7 +1233,7 @@ names the tests that pin each one.
 | R-H4-4 | **The CLI refuses as root or Administrator.** `history import` runs only as the data dir's owner, with the service stopped. |
 | R-H4-5 | **The nudge is a button only.** One `status` message, only when the chat could be attached; no sentence to the model; `caseNudgedAt` is set either way. |
 | R-H4-6 | **No recall default changes.** `linked` and `all` ship opt-in per chat and unmeasured (§6.7). |
-| R-H4-7 | **Imported and bridge chats.** An imported chat cannot be attached to a case (`IMPORTED_CHAT`). A bridge chat's effective scope is always `chat`; it is left out of `all`; the owner may link it explicitly. |
+| R-H4-7 | **Imported and bridge chats.** An imported chat cannot be attached to a case (`IMPORTED_CHAT`). A bridge chat's effective scope is always `chat`; it is left out of `all`; the owner may link it explicitly, and the chat that links it then reads it under `linked` and under `all` (owner ruling 2026-10-13: under `all`, `resolveScope` asks the chat's own links as explicit). A link never brings in a case chat or a case-chat export. |
 | R-H4-8 | **A second import of a grown session is a second, separate chat.** An import never overwrites a chat. |
 | R-H4-9 | **`history:index.status`, `history:reindex` and the `reindex`/`status` CLI commands are not built.** §12 is corrected to what exists. |
 
@@ -1282,8 +1283,6 @@ Open, built the cautious way; the owner may overrule:
   no longer read that chat** (it got a case, it was unlinked, the scope went
   back to `chat`). The other reading: a reply's drawer is a record of what
   that reply was given and keeps showing it.
-- **Under `all`, a bridge chat the owner linked explicitly is not read**; it
-  is read only under `linked`. R-H4-7 does not say which.
 - **In an imported chat the owner's new message is still sent to a hosted
   embedder as the turn's query** when one is active (§5.2). Keeping it local
   would mean skipping the vector search for that chat's turns; not built.

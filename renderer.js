@@ -10682,7 +10682,7 @@ if (dom.chatInfoCloseBtn) {
 document.addEventListener('click', (e) => {
   if (dom.chatInfoPopover && !dom.chatInfoPopover.hidden &&
       !e.target.closest('.chat-info-popover') && !e.target.closest('#chat-info-btn') &&
-      !e.target.closest('.rename-chat-modal')) {
+      !e.target.closest('.rename-chat-modal, .static-chat-modal')) {
     dom.chatInfoPopover.hidden = true;
   }
   if (dom.chatMcpPopover && !dom.chatMcpPopover.hidden &&

@@ -212,3 +212,49 @@ describe('renderer: the "Link chats…" dialog', () => {
     }
   });
 });
+
+// `.rename-chat-modal` is a dialog built when it opens and removed when it
+// closes (showConfirmDialog, showTextInputDialog), so the app's e2e tests and
+// anything else can read "one is in the document" as "one is on screen". A
+// dialog that stays in index.html must not carry that class: hidden, it would
+// be the first match of `document.querySelector('.rename-chat-modal')` ahead
+// of every confirm dialog.
+describe('renderer: a dialog that stays in index.html is not a .rename-chat-modal', () => {
+  const css = read('styles.css');
+  const classOf = (id) => {
+    const m = html.match(new RegExp(`<div class="([^"]*)" id="${id}"[^>]*>`));
+    assert.ok(m, `found #${id}`);
+    return { classes: m[1].split(/\s+/), tag: m[0] };
+  };
+
+  it('index.html has no .rename-chat-modal element', () => {
+    assert.doesNotMatch(html, /class="[^"]*\brename-chat-modal\b[^"]*"/);
+  });
+
+  it('the link and import dialogs are hidden .static-chat-modal elements', () => {
+    for (const id of ['link-chats-dialog', 'import-chat-dialog']) {
+      const { classes, tag } = classOf(id);
+      assert.deepStrictEqual(classes, ['static-chat-modal'], id);
+      assert.match(tag, / hidden>$/, `${id} starts hidden`);
+    }
+  });
+
+  it('.static-chat-modal has the modal layout, and hidden wins over its display', () => {
+    assert.match(css, /\.rename-chat-modal,\n\.static-chat-modal \{\n  position: fixed;/);
+    assert.match(css, /\.static-chat-modal\[hidden\] \{\n  display: none;\n\}/);
+    assert.ok(css.indexOf('.static-chat-modal[hidden]') > css.indexOf('.static-chat-modal {'), 'the hidden rule comes later');
+  });
+
+  it('the dialogs built on open keep .rename-chat-modal and are removed on close', () => {
+    for (const [start, end] of [['function showConfirmDialog(', '\n/**'], ['function showTextInputDialog(', '\n}\n']]) {
+      const fn = block(start, end);
+      assert.match(fn, /modal\.className = 'rename-chat-modal'/);
+      assert.match(fn, /modal\.remove\(\)/);
+      assert.match(fn, /document\.body\.appendChild\(modal\)/);
+    }
+  });
+
+  it('a click inside either kind of dialog does not close the chat info popover', () => {
+    assert.match(src, /!e\.target\.closest\('\.rename-chat-modal, \.static-chat-modal'\)/);
+  });
+});
