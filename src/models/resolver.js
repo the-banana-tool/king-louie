@@ -110,7 +110,10 @@ function createTurnModels({ profile = null, mainOverride = null, customRoles = [
     const targets = [];
     const skipped = [];
     for (const target of list) {
-      const verdict = explain(target.provider, target.model, { needs }) || {};
+      // A local target's adapter is part of the target (spec 2026-10-13
+      // §12.2): an unknown or stale one makes it unusable, with a reason.
+      const adapter = R.adapterOf(target);
+      const verdict = explain(target.provider, target.model, adapter ? { needs, adapter } : { needs }) || {};
       if (verdict.usable) {
         targets.push({ ...target });
       } else {

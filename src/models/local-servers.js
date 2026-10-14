@@ -26,7 +26,8 @@ const { LOCAL_PROVIDER, isOllamaCloudModelId } = require('./provider-ids');
 const { parseBaseUrl, checkPinned, canonicalAddress, isTlsFingerprint, resolveAndPin } = require('./local-address');
 const { createLocalTransport } = require('./local-transport');
 const { localEntry } = require('./normalize');
-const { discoverModels, probeModel, readRecord, emptyRecord, plainModelId, MAX_CONTEXT } = require('./local-probe');
+const { discoverModels, probeModel, readRecord, emptyRecord, plainModelId, MAX_CONTEXT, ADAPTER_JOBS, MAX_ADAPTERS, checkAdapterDeclaration } = require('./local-probe');
+const { isAdapterId } = require('./roles');
 
 const log = createLogger('models/local-servers');
 
@@ -171,6 +172,7 @@ const sameAddresses = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length
 async function pinAdminServers(servers, { lookup = undefined, timeoutMs = DEFAULT_PIN_TIMEOUT_MS, now = () => new Date() } = {}) {
   const entries = [];
   const keys = new Map();
+  const adapters = new Map();
   const failures = [];
   const results = await Promise.all((Array.isArray(servers) ? servers : []).map(async (server) => {
     const id = isPlainObject(server) && typeof server.id === 'string' ? server.id : '(no id)';
@@ -206,7 +208,11 @@ async function pinAdminServers(servers, { lookup = undefined, timeoutMs = DEFAUL
       };
       const { entry, problem } = readEntry(candidate);
       if (problem) throw new LocalServerError('LOCAL_SERVER_INVALID', problem);
-      return { entry, key: typeof server.key === 'string' && server.key ? server.key : null };
+      return {
+        entry,
+        key: typeof server.key === 'string' && server.key ? server.key : null,
+        adapters: Array.isArray(server.adapters) ? server.adapters.filter(isPlainObject).map((a) => ({ ...a })) : []
+      };
     } catch (err) {
       return { failure: { id, code: typeof err?.code === 'string' ? err.code : 'LOCAL_SERVER_INVALID', refused: Array.isArray(err?.refused) ? err.refused : [] } };
     } finally {
@@ -219,9 +225,10 @@ async function pinAdminServers(servers, { lookup = undefined, timeoutMs = DEFAUL
     else {
       entries.push(result.entry);
       if (result.key) keys.set(result.entry.id, result.key);
+      if (result.adapters.length) adapters.set(result.entry.id, result.adapters);
     }
   }
-  return { entries, keys, failures };
+  return { entries, keys, adapters, failures };
 }
 
 const transportSignature = (entry) => JSON.stringify([entry.baseUrl, entry.pinned.addresses, entry.tlsFingerprint, entry.maxConcurrent]);
@@ -250,7 +257,7 @@ class LocalServers {
   constructor({
     getEntries, getToken = () => null, catalog = null, probeFile = null, probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
     writeEntries = null, getProfiles = null, getOllamaBaseUrl = null, onRemoved = null, lookup = null,
-    createTransport = createLocalTransport, now = () => new Date()
+    getAdminAdapters = null, createTransport = createLocalTransport, now = () => new Date()
   } = {}) {
     if (typeof getEntries !== 'function') throw new Error('LocalServers needs getEntries().');
     this.getEntries = getEntries;
@@ -259,6 +266,9 @@ class LocalServers {
     this.getOllamaBaseUrl = typeof getOllamaBaseUrl === 'function' ? getOllamaBaseUrl : null;
     this.onRemoved = typeof onRemoved === 'function' ? onRemoved : null;
     this.lookup = typeof lookup === 'function' ? lookup : null;
+    // Service mode: the adapters the admin block declares for a server,
+    // `[{ model, id, job, ref }]` (spec §12.1). The only source there.
+    this.getAdminAdapters = typeof getAdminAdapters === 'function' ? getAdminAdapters : null;
     this.getToken = typeof getToken === 'function' ? getToken : () => null;
     this.catalog = catalog || null;
     this.probeFile = typeof probeFile === 'string' && probeFile ? probeFile : null;
@@ -448,6 +458,9 @@ class LocalServers {
       addressClass: transport.addressClass,
       kind: row.kind,
       timeoutMs: row.timeoutMs,
+      // A target's adapter → what the server calls it (spec §12.3), checked
+      // at each call: unknown or stale throws before any request.
+      adapterRef: (model, adapterId) => this.adapterRef(id, model, adapterId),
       catalog: this.catalog
     });
     this._providers.set(id, { transport, key, kind: row.kind, timeoutMs: row.timeoutMs, provider });
@@ -561,7 +574,7 @@ class LocalServers {
   /** What the probe (or the owner) recorded about one model, or null. */
   probeRecord(id, model) {
     const record = this._probes.get(`${id}/${model}`);
-    return record ? { ...record, adapters: [...record.adapters] } : null;
+    return record ? { ...record, adapters: record.adapters.map((a) => ({ ...a })) } : null;
   }
 
   /**
@@ -587,9 +600,11 @@ class LocalServers {
     return { id, listedAt: listed ? listed.at : null, models: out };
   }
 
-  // A fresh probe replaces a record, except for what the owner entered.
+  // A fresh probe replaces a record, except for what the owner entered and
+  // the adapters declared for the model (spec §12.1). A new digest leaves an
+  // adapter in place, made for another version (explain says so).
   _merge(fresh, existing) {
-    const record = { ...fresh };
+    const record = { ...fresh, adapters: existing ? existing.adapters : [] };
     if (existing && existing.contextSource === 'owner' && existing.context !== null) {
       record.context = existing.context;
       record.contextSource = 'owner';
@@ -758,7 +773,7 @@ class LocalServers {
    * (plus `code` when it cannot).
    * @returns {{ usable: boolean, reasons: string[], notes: string[], entry: object|null, code?: string }}
    */
-  explain(modelId, { needs = {} } = {}) {
+  explain(modelId, { needs = {}, adapter = null } = {}) {
     const refuse = (code, reason) => ({ usable: false, reasons: [reason], notes: [], entry: null, code });
     const split = splitModel(typeof modelId === 'string' ? modelId.trim() : modelId);
     if (!split) return refuse('LOCAL_SERVER_UNKNOWN', 'A local model is named "<server>/<model>", and this one names no local server.');
@@ -771,6 +786,12 @@ class LocalServers {
     const listed = this._listed.get(row.id);
     if (listed && !listed.models.some((m) => sameModel(row.kind, m.id, split.model))) {
       return refuse('LOCAL_MODEL_NOT_LISTED', `${split.model} is not in ${row.name}'s model list.`);
+    }
+    // A target that names an adapter (spec §12.2): unknown or made for
+    // another version of the model is unusable, and the next target is tried.
+    if (adapter !== null && adapter !== undefined) {
+      const found = this._adapter(row, split.model, adapter);
+      if (found.code) return refuse(found.code, found.reason);
     }
     const key = `${row.id}/${split.model}`;
     const record = this._probes.get(key) || null;
@@ -795,6 +816,102 @@ class LocalServers {
     }
     if (reasons.length) return { usable: false, reasons, notes, entry, code: 'LOCAL_MODEL_UNFIT' };
     return { usable: true, reasons: [], notes, entry };
+  }
+
+  // ---- Adapters (spec §12; R-LI-15). Nothing here trains, stores or evaluates one. ----
+
+  /**
+   * Declare an adapter for a probed model: `{ id, job, ref }`, with the
+   * model's current digest kept as `baseDigest`. The same id again replaces
+   * it (one per id, per model), bound to the digest the model has now. On
+   * the desktop the owner declares (models:local.setModelInfo); in service
+   * mode only the admin block does, through `getAdminAdapters`.
+   * @returns {object} the model's record
+   */
+  declareAdapter(id, model, declaration, { admin = false } = {}) {
+    if (!admin && this.adminOnly) {
+      throw new LocalServerError('LOCAL_SERVER_ADMIN_ONLY', 'In service mode adapters come only from the administrator\'s service.json.');
+    }
+    const row = this._require(id);
+    const invalid = (message) => new LocalServerError('LOCAL_ADAPTER_INVALID', message);
+    if (plainModelId(model) === null) throw invalid('That is not a model id.');
+    if (row.kind === 'ollama' && isOllamaCloudModelId(model)) {
+      throw new LocalServerError('LOCAL_CLOUD_MODEL', `${model} runs on Ollama's cloud, not on ${row.name}.`);
+    }
+    const { declaration: checked, problem } = checkAdapterDeclaration(declaration);
+    if (problem) throw invalid(problem);
+    const key = `${id}/${model}`;
+    const record = this._probes.get(key);
+    if (!record || !record.probedAt) {
+      throw invalid(`${model} on ${row.name} has not been probed. Probe it first, so the adapter is tied to this version of the model.`);
+    }
+    const adapters = [...record.adapters.filter((a) => a.id !== checked.id), { ...checked, baseDigest: record.digest, addedAt: this.now().toISOString() }];
+    if (adapters.length > MAX_ADAPTERS) throw invalid(`A model holds at most ${MAX_ADAPTERS} adapters.`);
+    this._store(key, readRecord({ ...record, adapters }));
+    log.info(`Adapter ${checked.id} (${checked.job}) declared for ${key}.`);
+    return this.probeRecord(id, model);
+  }
+
+  // The admin block's adapters for one server, read fail-closed: anything
+  // but a list of objects is none.
+  _adminAdapters(serverId) {
+    if (!this.getAdminAdapters) return [];
+    try {
+      const list = this.getAdminAdapters(serverId);
+      return Array.isArray(list) ? list.filter(isPlainObject) : [];
+    } catch (err) {
+      log.warn(`Reading the admin adapters of the local server ${serverId} failed: ${err.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * The declared adapter a target names, or why it may not be used:
+   * `{ adapter }` or `{ code, reason }`. In service mode an adapter the admin
+   * block does not list is unknown whatever the record holds; one it lists
+   * is declared the first time it is asked for after the model was probed.
+   */
+  _adapter(row, model, adapterId) {
+    const unknown = { code: 'LOCAL_ADAPTER_UNKNOWN', reason: `${model} on ${row.name} has no adapter ${isAdapterId(adapterId) ? adapterId : '(not an adapter id)'}.` };
+    if (!isAdapterId(adapterId)) return unknown;
+    const key = `${row.id}/${model}`;
+    let record = this._probes.get(key) || null;
+    let declared = record ? record.adapters.find((a) => a.id === adapterId) || null : null;
+    if (this.adminOnly) {
+      const listed = this._adminAdapters(row.id).find((a) => a.id === adapterId && typeof a.model === 'string' && sameModel(row.kind, a.model, model));
+      if (!listed) return unknown;
+      if (!declared || declared.ref !== listed.ref || declared.job !== listed.job) {
+        if (!record || !record.probedAt) {
+          return { code: 'LOCAL_ADAPTER_UNKNOWN', reason: `${adapterId} cannot be used until ${model} on ${row.name} is probed.` };
+        }
+        try {
+          this.declareAdapter(row.id, model, { id: listed.id, job: listed.job, ref: listed.ref }, { admin: true });
+        } catch (err) {
+          return { code: 'LOCAL_ADAPTER_UNKNOWN', reason: `${adapterId} in the admin service.json cannot be used: ${err.message}` };
+        }
+        record = this._probes.get(key) || null;
+        declared = record ? record.adapters.find((a) => a.id === adapterId) || null : null;
+      }
+    }
+    if (!declared) return unknown;
+    // The model was pulled again, or replaced, since the adapter was
+    // declared (spec §12.1). With no digest on either side nothing can be
+    // told apart (assumption A9).
+    if (declared.baseDigest !== (record.digest ?? null)) {
+      return { code: 'LOCAL_ADAPTER_STALE', reason: `${adapterId} was made for another version of ${model}.` };
+    }
+    return { adapter: { ...declared } };
+  }
+
+  /**
+   * What the server calls the adapter a target names (spec §12.3), checked
+   * now. Throws LOCAL_ADAPTER_UNKNOWN or LOCAL_ADAPTER_STALE.
+   */
+  adapterRef(id, model, adapterId) {
+    const row = this._require(id);
+    const found = this._adapter(row, model, adapterId);
+    if (found.code) throw new LocalServerError(found.code, found.reason);
+    return found.adapter.ref;
   }
 
   // ---- Who may change the list (§5.6, R-LI-6) ----
@@ -1037,4 +1154,4 @@ class LocalServers {
   }
 }
 
-module.exports = { LocalServers, LocalServerError, SERVER_ID_RE, SERVER_KINDS, LOCAL_PROVIDER, splitModel, readEntry, pinAdminServers };
+module.exports = { LocalServers, LocalServerError, SERVER_ID_RE, SERVER_KINDS, LOCAL_PROVIDER, ADAPTER_JOBS, splitModel, readEntry, pinAdminServers };

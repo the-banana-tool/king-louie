@@ -14,6 +14,7 @@
 // "yes"), and nothing here can make a model local or guarantee-grade.
 // The reply's first characters are stored as `sample` and never logged.
 const { isOllamaCloudModelId } = require('./provider-ids');
+const { isAdapterId } = require('./roles');
 
 const PROBE_TOOL_PROMPT = 'Call the ok tool.';
 const PROBE_SMOKE_PROMPT = 'Reply with the word ok.';
@@ -39,6 +40,15 @@ const CONTROL = new RegExp(`[\\x00-\\x1f\\x7f-\\x9f${String.fromCharCode(0x2028,
 const CONTROL_ALL = new RegExp(CONTROL.source, 'g');
 
 const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+
+// Adapters (spec §12.1, §12.4): what the owner or the administrator declared
+// for a model, kept in its record through every new probe. The job ids are
+// fixed so that a later stage does not have to change what L1 stored.
+const ADAPTER_JOBS = Object.freeze(['title', 'classify', 'orient', 'rewrite', 'rerank', 'digest', 'abstain-check']);
+const ADAPTER_KEYS = Object.freeze(['id', 'job', 'ref']);
+const MAX_ADAPTERS = 32;
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T/;
 const root = (baseUrl) => String(baseUrl || '').replace(/\/+$/, '');
 
 function coded(code, message, extra = {}) {
@@ -204,6 +214,43 @@ function emptyRecord() {
  * field holds becomes "unknown" (or null); a key that is not a record's is
  * dropped. Returns null for something that is not a record at all.
  */
+/**
+ * A declaration of an adapter, as the owner or the administrator gives it:
+ * exactly `{ id, job, ref }`. `id` is a slug, `job` one of ADAPTER_JOBS and
+ * `ref` what the server calls it (one plain line). Returns the declaration
+ * or the sentence that says what is wrong with it.
+ */
+function checkAdapterDeclaration(raw) {
+  if (!isPlainObject(raw)) return { problem: 'An adapter is { id, job, ref }.' };
+  const extra = Object.keys(raw).filter((k) => !ADAPTER_KEYS.includes(k));
+  if (extra.length) return { problem: `An adapter is { id, job, ref }; ${extra.length === 1 ? 'this key is' : 'these keys are'} not: ${extra.map((k) => JSON.stringify(k).slice(0, 40)).join(', ')}.` };
+  if (!isAdapterId(raw.id)) return { problem: 'An adapter id is 2 to 40 lowercase letters, digits and dashes, starting with a letter.' };
+  if (!ADAPTER_JOBS.includes(raw.job)) return { problem: `An adapter's job is one of ${ADAPTER_JOBS.join(', ')}.` };
+  if (plainModelId(raw.ref) === null) return { problem: `An adapter's ref is what the server calls it: one line of at most ${MAX_ID_LENGTH} characters.` };
+  return { declaration: { id: raw.id, job: raw.job, ref: raw.ref } };
+}
+
+// A stored adapter, read back field by field; null when it is not one.
+function readAdapter(raw) {
+  if (!isPlainObject(raw)) return null;
+  const { declaration } = checkAdapterDeclaration({ id: raw.id, job: raw.job, ref: raw.ref });
+  if (!declaration) return null;
+  return {
+    ...declaration,
+    baseDigest: typeof raw.baseDigest === 'string' && DIGEST_RE.test(raw.baseDigest) ? raw.baseDigest : null,
+    addedAt: typeof raw.addedAt === 'string' && ISO_RE.test(raw.addedAt) && !Number.isNaN(Date.parse(raw.addedAt)) ? raw.addedAt : null
+  };
+}
+
+function readAdapters(list) {
+  const out = [];
+  for (const raw of Array.isArray(list) ? list : []) {
+    const adapter = readAdapter(raw);
+    if (adapter && !out.some((a) => a.id === adapter.id) && out.length < MAX_ADAPTERS) out.push(adapter);
+  }
+  return out;
+}
+
 function readRecord(raw) {
   if (!isPlainObject(raw)) return null;
   const record = emptyRecord();
@@ -220,7 +267,8 @@ function readRecord(raw) {
   record.firstTokenMs = number(raw.firstTokenMs);
   record.tokensPerSecond = number(raw.tokensPerSecond);
   record.sample = typeof raw.sample === 'string' ? sampleOf(raw.sample) : '';
-  record.digest = typeof raw.digest === 'string' && /^sha256:[0-9a-f]{64}$/.test(raw.digest) ? raw.digest : null;
+  record.digest = typeof raw.digest === 'string' && DIGEST_RE.test(raw.digest) ? raw.digest : null;
+  record.adapters = readAdapters(raw.adapters);
   record.error = typeof raw.error === 'string' && raw.error ? oneLine(raw.error).slice(0, 200) : null;
   // The owner said so (LocalServers#setModelInfo): kept through a new probe.
   if (raw.imageInputSource === 'owner' && record.imageInput !== 'unknown') record.imageInputSource = 'owner';
@@ -443,6 +491,9 @@ async function probeModel(server, model, { provider = null, fetch: fetchImpl = n
 }
 
 module.exports = {
+  ADAPTER_JOBS,
+  MAX_ADAPTERS,
+  checkAdapterDeclaration,
   PROBE_TOOL_PROMPT,
   PROBE_SMOKE_PROMPT,
   MAX_CONTEXT,

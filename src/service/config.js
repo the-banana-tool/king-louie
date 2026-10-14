@@ -249,8 +249,28 @@ function parseLocalInferenceConfig(raw, file) {
     if (entry.key !== undefined && entry.key !== null && !require('../models/local-vault-keys').isLocalServerVaultKey(entry.key.slice('${vault:'.length, -1))) {
       throw bad('.key must name a vault key under local. (${vault:local.<name>}); the model cannot read that namespace');
     }
-    if (entry.adapters !== undefined && !(Array.isArray(entry.adapters) && entry.adapters.length <= 64 && entry.adapters.every((a) => isPlainObject(a) || (typeof a === 'string' && a)))) {
-      throw bad('.adapters must be a list');
+    // Adapters (spec §12.1): { model, id, job, ref } each, one id per model.
+    // The model's digest is not written here: it is read from the server
+    // when the adapter is first used after the model was probed.
+    if (entry.adapters !== undefined) {
+      const { checkAdapterDeclaration, plainModelId, MAX_ADAPTERS } = require('../models/local-probe');
+      if (!Array.isArray(entry.adapters) || entry.adapters.length > 64) throw bad('.adapters must be a list of at most 64 adapters');
+      const ids = new Set();
+      entry.adapters.forEach((a, j) => {
+        const at = `.adapters[${j}]`;
+        if (!isPlainObject(a)) throw bad(`${at} must be an object { model, id, job, ref }`);
+        rejectUnknownKeys(a, ['model', 'id', 'job', 'ref'], `${where}${at}`, file);
+        if (plainModelId(a.model) === null) throw bad(`${at}.model must be the server's id for the model`);
+        const { model, ...declared } = a;
+        const { problem } = checkAdapterDeclaration(declared);
+        if (problem) throw bad(`${at}: ${problem}`);
+        const key = JSON.stringify([model, a.id]);
+        if (ids.has(key)) throw bad(`${at}: adapters declares ${a.id} for ${model} twice`);
+        ids.add(key);
+      });
+      const perModel = new Map();
+      for (const a of entry.adapters) perModel.set(a.model, (perModel.get(a.model) || 0) + 1);
+      if ([...perModel.values()].some((n) => n > MAX_ADAPTERS)) throw bad(`.adapters may declare at most ${MAX_ADAPTERS} adapters for one model`);
     }
     // Every address written in the file is classified now (§5.2).
     const allowed = (cls) => cls === 'loopback' || cls === 'lan' || (cls === 'cgnat' && allowCgnat);

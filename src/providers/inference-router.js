@@ -140,7 +140,15 @@ class InferenceRouter {
   // options.model never overrides it (the agent loop still passes one).
   async executeTarget(instance, target, messages, options = {}) {
     const { onChunk, tools, ...rest } = options || {};
-    const opts = { ...rest, model: target.model, ...(target.effort ? { effort: target.effort } : {}) };
+    const opts = {
+      ...rest,
+      model: target.model,
+      ...(target.effort ? { effort: target.effort } : {}),
+      // A local target's adapter (spec 2026-10-13 §12): the local server's
+      // provider sends the adapter's ref as the model. Never a caller's own.
+      adapter: target.provider === LOCAL_PROVIDER && target.adapter ? target.adapter : undefined
+    };
+    if (opts.adapter === undefined) delete opts.adapter;
     if (Array.isArray(tools) && tools.length > 0) {
       if (typeof onChunk === 'function' && typeof instance.streamMessageWithTools === 'function') {
         return instance.streamMessageWithTools(messages, tools, opts, onChunk);
@@ -305,7 +313,13 @@ class InferenceRouter {
   routedProvider({ targets, signal = null, meta = null, egress = null } = {}) {
     const list = (Array.isArray(targets) ? targets : [])
       .filter((x) => x && x.provider && x.model)
-      .map((x) => ({ provider: String(x.provider).toLowerCase(), model: String(x.model), effort: x.effort || null }));
+      .map((x) => {
+        const provider = String(x.provider).toLowerCase();
+        const kept = { provider, model: String(x.model), effort: x.effort || null };
+        // A local target's adapter goes with it (spec 2026-10-13 §12.2).
+        if (provider === LOCAL_PROVIDER && typeof x.adapter === 'string' && x.adapter) kept.adapter = x.adapter;
+        return kept;
+      });
     if (!list.length) throw new Error('A routed provider needs at least one target.');
     const state = this.newRouteState(meta, egress);
     const call = (messages, opts = {}, tools = null, onChunk = null) => this.routeTargets(list, messages, {

@@ -258,10 +258,19 @@ function registerModelsHandlers(ipcMain, context = {}) {
     return { ok: true, untrustedText: true, ...(await registry().refresh(id)) };
   });
 
-  handleEvent(IPC.MODELS_LOCAL_SET_MODEL_INFO, async (event, { id, model, context: size, imageInput }) => {
+  // Owner-entered context and image input, and on the desktop an adapter
+  // (`adapter: { id, job, ref }`, spec §12.1): in service mode adapters come
+  // only from the admin service.json, so declaring one there is refused.
+  handleEvent(IPC.MODELS_LOCAL_SET_MODEL_INFO, async (event, { id, model, context: size, imageInput, adapter }) => {
     if (!isLocalDesktopEvent(event)) return { ...NOT_WINDOW };
     if (typeof id !== 'string' || !id || typeof model !== 'string' || !model) return { ok: false, error: 'id and model are required.' };
-    return { ok: true, untrustedText: true, record: registry().setModelInfo(id, model, { context: size, imageInput }) };
+    if (adapter !== undefined && registry().adminOnly) {
+      return { ok: false, code: 'LOCAL_SERVER_ADMIN_ONLY', error: 'In service mode adapters come only from the administrator\'s service.json.' };
+    }
+    let record = null;
+    if (adapter === undefined || size !== undefined || imageInput !== undefined) record = registry().setModelInfo(id, model, { context: size, imageInput });
+    if (adapter !== undefined) record = registry().declareAdapter(id, model, adapter);
+    return { ok: true, untrustedText: true, record };
   });
 
   handleEvent(IPC.MODELS_LOCAL_FROM_OLLAMA, async (event, { id, rewrite }) => {

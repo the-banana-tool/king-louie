@@ -48,6 +48,7 @@ class LocalServerProvider extends OllamaProvider {
    * @param {string} [options.addressClass] - recorded on each call's metrics
    * @param {string} [options.kind] - the server's kind; without it a cloud id is refused as on Ollama
    * @param {number|null} [options.timeoutMs] - the server entry's timeoutMs (§6.4)
+   * @param {Function} [options.adapterRef] - (model, adapterId) → the adapter's ref, or throws (§12.3)
    * @param {object} [options.catalog]
    */
   constructor(apiKey, options = {}) {
@@ -70,6 +71,9 @@ class LocalServerProvider extends OllamaProvider {
       : (typeof transport.addressClass === 'string' ? transport.addressClass : 'unknown');
     this.kind = typeof options.kind === 'string' ? options.kind : null;
     this.timeoutMs = positiveMs(options.timeoutMs);
+    // (model, adapterId) → what the server calls that adapter; the registry
+    // checks it is declared and made for the model's current version.
+    this._adapterRef = typeof options.adapterRef === 'function' ? options.adapterRef : null;
     this._key = key;
     // Per call: the characters sent and received, for the estimate when the
     // server reports no usage. Keyed by the call's own options object, which
@@ -105,6 +109,26 @@ class LocalServerProvider extends OllamaProvider {
       throw coded('LOCAL_CLOUD_MODEL', `${model} runs on Ollama's cloud, not on the local server ${this.serverId}.`);
     }
     return model;
+  }
+
+  /**
+   * The model a request names (spec §12.3, the adapter seam): the adapter's
+   * `ref` when the target names one, else the server's own id for the model.
+   * An adapter that is not declared for the model, or was made for another
+   * version of it, throws (LOCAL_ADAPTER_UNKNOWN, LOCAL_ADAPTER_STALE) before
+   * any request. If a server kind ever needs a request field instead, this
+   * returns `{ model, extra }` and nothing else moves.
+   * @param {{ model: string, adapter?: string|null }} target
+   * @returns {string}
+   */
+  requestModelFor(target) {
+    const model = this._serverModel(target && target.model);
+    const adapter = target ? target.adapter : null;
+    if (adapter === undefined || adapter === null) return model;
+    if (!this._adapterRef) {
+      throw coded('LOCAL_ADAPTER_UNKNOWN', `${model} on the local server ${this.serverId} has no adapter ${typeof adapter === 'string' ? adapter.slice(0, 40) : ''}.`);
+    }
+    return this._adapterRef(model, adapter);
   }
 
   // Counts what a call sends, for the estimate (see _call).
@@ -171,13 +195,18 @@ class LocalServerProvider extends OllamaProvider {
   // A finished call whose server reported no usage at all, with a reply that
   // has text, is estimated at one token per four characters of the request
   // body and of the reply, and marked usageEstimated (§9.1 rule 4). A call
-  // cut off by Stop is left as it is (usagePartial, rule 5).
+  // cut off by Stop is left as it is (usagePartial, rule 5). A target that
+  // names an adapter (§12) sends the adapter's ref and is recorded under the
+  // base model, with `adapter` on its metrics.
   async _call(run, options, onChunk = null) {
-    const opts = options || {};
+    const { adapter: named = null, ...opts } = options || {};
+    const adapter = named === undefined || named === null ? null : named;
     const model = this._serverModel(opts.model);
     const recorded = `${this.serverId}/${model}`;
+    const sent = adapter === null ? model : this.requestModelFor({ model: opts.model, adapter });
+    const tag = (metrics) => (adapter === null ? metrics : { ...metrics, adapter });
     const bound = this._bound(opts.abortSignal || null, this.callTimeoutMs(opts.timeoutMs));
-    const callOptions = { ...opts, model, ...(bound ? { abortSignal: bound.signal } : {}) };
+    const callOptions = { ...opts, model: sent, ...(bound ? { abortSignal: bound.signal } : {}) };
     const sizes = { sent: 0, received: 0 };
     this._sizes.set(callOptions, sizes);
     const counting = typeof onChunk === 'function'
@@ -187,11 +216,11 @@ class LocalServerProvider extends OllamaProvider {
       const result = await run(callOptions, counting);
       if (result && typeof result === 'object' && result.llmMetrics) {
         if (!counting) sizes.received += replyChars(result);
-        result.llmMetrics = this._estimated({ ...result.llmMetrics, model: recorded }, sizes);
+        result.llmMetrics = tag(this._estimated({ ...result.llmMetrics, model: recorded }, sizes));
       }
       return result;
     } catch (err) {
-      if (err && typeof err === 'object' && err.partialLlmMetrics) err.partialLlmMetrics.model = recorded;
+      if (err && typeof err === 'object' && err.partialLlmMetrics) err.partialLlmMetrics = tag({ ...err.partialLlmMetrics, model: recorded });
       throw bound ? bound.failure(err) : err;
     } finally {
       if (bound) bound.done();

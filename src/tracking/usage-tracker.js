@@ -8,7 +8,9 @@
 // A local call (spec 2026-10-13 §9: its metrics carry `local`, which only the
 // local server provider sets) is free and is never an unpriced call; every
 // total counts it in localCalls and localTokens, and byServer keeps calls
-// and tokens per local server.
+// and tokens per local server. A local call that ran a declared adapter
+// (spec 2026-10-13 §12.2) carries its id as `adapter`; no total is kept by it.
+const { isAdapterId } = require('../models/roles');
 const USAGE_PARTS = Object.freeze(['input', 'cachedInput', 'cacheWrite', 'output', 'reasoning']);
 const OTHER_ROLE = 'other';
 
@@ -83,6 +85,7 @@ class UsageTracker {
       ...(pricing ? { pricingUsage: Object.fromEntries(USAGE_PARTS.map((k) => [k, positive(pricing[k])])) } : {}),
       ...(m.usagePartial ? { usagePartial: true } : {}),
       ...(local ? { local } : {}),
+      ...(local && isAdapterId(m.adapter) ? { adapter: m.adapter } : {}),
       ...(m.usageEstimated === true ? { usageEstimated: true } : {}),
       durationMs: Number(durationMs) || 0
     };
@@ -208,6 +211,7 @@ class UsageTracker {
       ...applied,
       ...(event.usagePartial ? { usagePartial: true } : {}),
       ...(local ? { local } : {}),
+      ...(local && isAdapterId(event.adapter) ? { adapter: event.adapter } : {}),
       ...(event.usageEstimated === true ? { usageEstimated: true } : {}),
       durationMs: Number(event.durationMs) || 0
     };

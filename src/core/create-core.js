@@ -1093,7 +1093,7 @@ function createCore(deps = {}) {
   // one writer the seal above leaves. Service: the administrator's
   // service.json alone. The entries are pinned in start(), there is no
   // writer, and the data-dir settings are not read.
-  let adminLocalServers = { entries: [], keys: new Map() };
+  let adminLocalServers = { entries: [], keys: new Map(), adapters: new Map() };
   const localServers = new LocalServers({
     getEntries: () => (localServersFromAdmin ? adminLocalServers.entries : (getSettings().models?.localServers || [])),
     getToken: (serverId) => {
@@ -1106,6 +1106,8 @@ function createCore(deps = {}) {
       return encrypted ? decryptToken(encrypted) : null;
     },
     ...(localServersFromAdmin ? {} : { writeEntries: writeLocalServers }),
+    // Service mode: a server's adapters come only from the admin block (spec §12.1).
+    ...(localServersFromAdmin ? { getAdminAdapters: (serverId) => adminLocalServers.adapters.get(serverId) || [] } : {}),
     getProfiles: () => profiles,
     getOllamaBaseUrl: () => getSettings().models?.ollama?.baseUrl,
     // A removed server's key goes with it: its id may name another machine later.
@@ -2620,7 +2622,10 @@ function createCore(deps = {}) {
       egress
     });
     let instance = routed;
-    if (!egress) {
+    // A first target that names an adapter (spec 2026-10-13 §12) is reached
+    // only through the router, which hands the adapter to the provider: a
+    // direct call names the model alone and would run the base model.
+    if (!egress && !first.adapter) {
       instance = createProviderInstance(
         first.provider,
         first.provider === LOCAL_PROVIDER ? null : getDecryptedProviderToken(first.provider),
@@ -3358,7 +3363,7 @@ function createCore(deps = {}) {
       log.warn('Ignoring models.localServers in the data-dir settings: in service mode a local server comes only from the localInference block of the admin service.json.');
     }
     const block = deps.localInference && typeof deps.localInference === 'object' ? deps.localInference : {};
-    const { entries, keys, failures } = await pinAdminServers(block.servers, {
+    const { entries, keys, adapters, failures } = await pinAdminServers(block.servers, {
       ...(typeof deps.lookup === 'function' ? { lookup: deps.lookup } : {}),
       ...(Number.isFinite(deps.localPinTimeoutMs) && deps.localPinTimeoutMs > 0 ? { timeoutMs: deps.localPinTimeoutMs } : {})
     });
@@ -3367,7 +3372,7 @@ function createCore(deps = {}) {
       log.error(`The local server ${failure.id} from the admin service.json is left out (${failure.code})${refused}.`);
     }
     for (const entry of entries) log.info(`Local server ${entry.id} is pinned at ${entry.pinned.addresses.join(', ')} (${entry.pinned.class}).`);
-    adminLocalServers = { entries, keys };
+    adminLocalServers = { entries, keys, adapters };
   };
 
   const start = async () => {
