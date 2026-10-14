@@ -468,8 +468,10 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
 
   // create_case: the case the app's case:create makes (no playbooks, no
   // chat), never with force. The objective must be words from the quote on
-  // every channel; the quote itself is checked in-app only. The objective is
-  // recorded as the owner's (CaseRuntime.recordOwnerObjective).
+  // every channel; the quote itself is checked in-app only. The quote is
+  // recorded (CaseRuntime.recordOwnerObjective). Only in the chat, where the
+  // quote was checked, is the objective born confirmed; over MCP it is
+  // proposed until the owner confirms it (owner ruling R-C8-N3, 2026-10-14).
   // In a case chat (caseScope set) a similar-case refusal names no other
   // case: the list of other cases' ids, titles and statuses would reach the
   // case turn's context (Q27), so only the message goes back.
@@ -480,8 +482,10 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     const releaseSlot = takeRateSlot();
     let info;
     try {
-      // Cases stage 8: the objective was held to the owner's quote above.
-      info = await rt.createCase({ title: args.title.trim(), type: args.type || 'general', objective: args.objective, objectiveBy: 'owner' });
+      // Cases stage 8: the objective was held to the quote above; the quote
+      // is the owner's only where checkQuote checked it (R-C8-N3).
+      const objectiveBy = channel === CHAT_CHANNEL ? 'owner' : 'mcp';
+      info = await rt.createCase({ title: args.title.trim(), type: args.type || 'general', objective: args.objective, objectiveBy });
     } catch (err) {
       releaseSlot();
       if (err && err.code === 'SIMILAR_CASES') {

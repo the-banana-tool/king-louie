@@ -2871,7 +2871,7 @@ if (window.electron?.cases?.onChanged) {
 const CASE_PROGRESS_STATES = ['met', 'stale', 'failing', 'unmet'];
 // R-C8-5: where an evidence id comes from, in words.
 const CASE_PROGRESS_PROVENANCE = { user: 'from the owner', sourced: 'sourced', 'external-agent': 'reported by an executor' };
-const CASE_PROGRESS_ORIGIN_NOTES = { legacy: 'from before progress was tracked', file: 'changed outside the app' };
+const CASE_PROGRESS_ORIGIN_NOTES = { legacy: 'from before progress was tracked', file: 'changed outside the app', 'mcp-create': 'set over MCP; not checked against your words' };
 const CASE_PROGRESS_GROUPS = [['owner', 'Yours'], ['case', 'The case\'s'], ['either', 'Yours or the case\'s']];
 const CASE_PROGRESS_STALE = 'This changed; check it again.';
 const CASE_PROGRESS_REDRAW = ['progress', 'questions', 'status'];

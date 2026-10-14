@@ -189,6 +189,8 @@ describe('buildOrientation: progress and abandoned approaches', () => {
       /\n- Objective: Convert the lot to cash \(proposed by the model; the owner has not confirmed it\)\n/);
     assert.match(withObjective(objective({ state: 'proposed', origin: 'detour' })),
       /\n- Objective: Convert the lot to cash \(proposed by the model; the owner has not confirmed it\)\n/);
+    assert.match(withObjective(objective({ state: 'proposed', origin: 'mcp-create' })),
+      /\n- Objective: Convert the lot to cash \(set over MCP; the owner has not confirmed it\)\n/);
     assert.match(withObjective(objective({ state: 'proposed', origin: 'file' })),
       /\n- Objective: Convert the lot to cash \(changed outside the app; not confirmed\)\n/);
     assert.match(withObjective(objective({ state: 'proposed', origin: 'legacy' })),

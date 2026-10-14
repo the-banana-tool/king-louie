@@ -90,6 +90,7 @@ describe('renderer case progress text', () => {
     assert.match(block, /SCOPE_STALE/);
     assert.ok(block.includes('from before progress was tracked'));
     assert.ok(block.includes('changed outside the app'));
+    assert.ok(block.includes("'mcp-create': 'set over MCP; not checked against your words'"));
     assert.ok(block.includes('Closed before progress was tracked.'));
   });
 

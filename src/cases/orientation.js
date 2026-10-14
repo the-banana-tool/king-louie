@@ -43,6 +43,7 @@ function objectiveMark(progress) {
   if (!objective || objective.state === 'confirmed') return '';
   if (objective.origin === 'file') return ' (changed outside the app; not confirmed)';
   if (objective.origin === 'legacy') return ' (from before progress was tracked; the owner has not confirmed it)';
+  if (objective.origin === 'mcp-create') return ' (set over MCP; the owner has not confirmed it)';
   return ' (proposed by the model; the owner has not confirmed it)';
 }
 

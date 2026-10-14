@@ -125,6 +125,7 @@ describe('every caller of createCase and the objective it ends up with', () => {
     assert.deepStrictEqual(await by('Lakeside lot', 'Convert the lot to cash', 'owner'), ['confirmed', 'owner-create']);
     assert.deepStrictEqual(await by('Roof quotes', 'Get three written roof quotes', 'detour'), ['proposed', 'detour']);
     assert.deepStrictEqual(await by('Permit filing', 'File the county building permit', undefined), ['proposed', 'model']);
+    assert.deepStrictEqual(await by('Garden shed', 'Build a shed by spring', 'mcp'), ['proposed', 'mcp-create']);
     for (const [i, value] of ['model', 'owner-create', 'owner-action', 'user', true, { by: 'owner' }].entries()) {
       assert.deepStrictEqual(await by(`Errand ${i}`, `Deliver parcel number ${i} across town`, value), ['proposed', 'model'], String(value));
     }
@@ -147,10 +148,13 @@ describe('every caller of createCase and the objective it ends up with', () => {
     assert.deepStrictEqual([fact.provenance, fact.source.channel, fact.source.quote], ['user', 'in-app-chat', 'start a case to sell the boat']);
   });
 
-  // Spec §6.1's origins table: create_case holds the objective to the quote
-  // on every channel. Over MCP the quote is recorded and not checked
-  // (management surfaces, Q28): the grant's cases:manage scope is the gate.
-  it('create_case over MCP: the objective must still be words from the quote; it is confirmed with the quote on record', async () => {
+  // Owner ruling R-C8-N3 (2026-10-14): over MCP the quote is recorded and
+  // not checked (management surfaces, Q28; the grant's cases:manage scope is
+  // the gate), so nobody verified the words. The objective must still be
+  // words from the quote, and the case is made with it proposed (origin
+  // mcp-create); the owner confirms it in the app (or answers a scope
+  // question). In the chat, where the quote is checked, it stays confirmed.
+  it('create_case over MCP: the objective must still be words from the quote, and it is proposed until the owner confirms it', async () => {
     for (const channel of ['mcp-stdio', 'mcp-frontdoor']) {
       const { runtime, objective } = setup();
       const h = createCaseToolHandler({ getRuntime: () => runtime, channel });
@@ -158,9 +162,15 @@ describe('every caller of createCase and the objective it ends up with', () => {
       assert.strictEqual((await refusal(h.call('create_case', { title: 'Shed', objective: 'build a shed' }))).code, 'invalid_params');
       assert.deepStrictEqual(runtime.listCases(), [], channel);
       const made = await h.call('create_case', { title: 'Shed', objective: 'build a shed', quote: 'Build a shed by spring' });
-      assert.deepStrictEqual([objective(made.case_id).state, objective(made.case_id).origin], ['confirmed', 'owner-create'], channel);
+      const o = objective(made.case_id);
+      assert.deepStrictEqual([o.text, o.state, o.origin, o.confirmed], ['build a shed', 'proposed', 'mcp-create', null], channel);
+      // The quote is on record, as before; it confirms nothing.
       const fact = runtime.ledger(made.case_id).view().facts.get(made.fact_id);
       assert.deepStrictEqual([fact.source.channel, fact.source.quote], [channel, 'Build a shed by spring']);
+      // The owner's press in the app confirms it.
+      await runtime.applyScopeAction(made.case_id, { action: 'confirm', target: 'objective', hash: o.hash, by: 'owner-action', channel: 'in-app' });
+      const after = objective(made.case_id);
+      assert.deepStrictEqual([after.state, after.origin, after.confirmed.by], ['confirmed', 'mcp-create', 'owner-action'], channel);
     }
   });
 
@@ -184,8 +194,10 @@ describe('every caller of createCase and the objective it ends up with', () => {
     assert.deepStrictEqual(calls.sort(), [
       ['src/cases/detours/router.js', 'detour'],
       ['src/ipc/case-handlers.js', 'owner'],
-      ['src/mcp/case-tools.js', 'owner']
+      ['src/mcp/case-tools.js', 'host-decided']
     ]);
+    // create_case confirms only on the channel whose quote is checked (R-C8-N3).
+    assert.match(fs.readFileSync(path.join(ROOT, 'src/mcp/case-tools.js'), 'utf8'), /const objectiveBy = channel === CHAT_CHANNEL \? 'owner' : 'mcp';/);
     // The form's objective is the owner's only when the event is the app's own.
     assert.match(fs.readFileSync(path.join(ROOT, 'src/ipc/case-handlers.js'), 'utf8'), /const ownForm = isLocalDesktopEvent\(event\);/);
     // create_case's schema has no such parameter (and no force).

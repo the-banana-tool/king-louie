@@ -341,15 +341,18 @@ class CaseRuntime {
 
   // Cases stage 8 (spec §6.1): who gave the objective a case was created
   // with. `objectiveBy` is the host's to pass, like `force`: 'owner' (IPC
-  // case:create with the form's objective; create_case, which held it to the
-  // owner's quote) is the only value that confirms; 'detour' is the router's
-  // prefill; anything else is the model's. Never fails the create: without
-  // the record the objective reads `legacy` and proposed.
+  // case:create with the form's objective; create_case in the chat, which
+  // checked the quote in the owner's turn) is the only value that confirms;
+  // 'mcp' is create_case over MCP, whose quote nobody checked (R-C8-N3:
+  // proposed, origin mcp-create); 'detour' is the router's prefill; anything
+  // else is the model's. Never fails the create: without the record the
+  // objective reads `legacy` and proposed.
   async _recordCreatedObjective(info, objective, objectiveBy) {
     if (typeof objective !== 'string' || !objective.trim()) return;
+    const PROPOSED_BY = { detour: 'detour', mcp: 'mcp-create' };
     const born = objectiveBy === 'owner'
       ? { origin: 'owner-create', confirmed: { by: 'owner-create', at: this.now().toISOString() } }
-      : { origin: objectiveBy === 'detour' ? 'detour' : 'model', confirmed: null };
+      : { origin: Object.prototype.hasOwnProperty.call(PROPOSED_BY, objectiveBy) ? PROPOSED_BY[objectiveBy] : 'model', confirmed: null };
     try {
       await this.systemAction(info.id, 'scope', async (meta) => {
         this.scope(meta.id).reconcile(this.brief(meta.id).read().data, { origins: { objective: born }, addedBy: born.origin });

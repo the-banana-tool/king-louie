@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const { addSink } = require('../src/logging');
 const {
-  ScopeStore, ScopeError, textHash, validateCriterionText, MAX_CRITERIA, MAX_PROPOSED, ORIGINS
+  ScopeStore, ScopeError, textHash, validateCriterionText, MAX_CRITERIA, MAX_PROPOSED, ORIGINS, CONFIRMING_ORIGINS
 } = require('../src/cases/scope');
 
 const dirs = [];
@@ -341,7 +341,9 @@ describe('ScopeStore.limitsProblem', () => {
 });
 
 describe('scope origins', () => {
-  it('are the eight of the spec', () => {
-    assert.deepStrictEqual([...ORIGINS], ['model', 'owner-quote', 'gating-answer', 'detour', 'owner-create', 'owner-action', 'legacy', 'file']);
+  // R-C8-N3 (2026-10-14) added mcp-create: an objective create_case set over MCP, proposed.
+  it('are the nine of the spec', () => {
+    assert.deepStrictEqual([...ORIGINS], ['model', 'owner-quote', 'gating-answer', 'detour', 'owner-create', 'mcp-create', 'owner-action', 'legacy', 'file']);
+    assert.ok(!CONFIRMING_ORIGINS.includes('mcp-create'));
   });
 });

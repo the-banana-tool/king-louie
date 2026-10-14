@@ -28,6 +28,17 @@ Each row names the tasks that carry the ruling and the tests that pin it (file �
 | R-C8-10 | `Fail` does not write the abandoned record | 2, 11 | `cases-abandoned.test.js` › "recordFailure appends nothing"; `cases-orientation.test.js` › "a resumed case names its last failure report" |
 | R-C8-11 | **After the reply** (ruled after Tasks 1 to 11 were built): the verify pass runs after the reply. The reply completes at once; the pass runs outside the turn, with no case lock held across its call, and the criteria states update when it lands (`case:changed`, `what: 'progress'`) | 8 (as amended; see "After the reply" under Deviations) | `cases-verify-after-reply.test.js` › "endTurn commits and releases the case before the verify call settles; the states update when the pass lands", "a second turn starting mid-pass drops the pass…", "shutdown mid-pass stops the call and is awaited…", "a call that settles after the time limit is still charged, once…"; `cases-chat.test.js` › "the reply completes before the verify pass; the criteria states update when the pass lands"; `cases-service-wakeups.test.js` › "shutdown stops a verify pass that is still out after its turn and waits for it…" |
 
+## Owner rulings (2026-10-14)
+
+The open points of "New questions" below, ruled after Tasks 1 to 16 were built. Spec §2.2 has them with what each costs.
+
+| Id | Ruling | Carried by | Pinned by |
+|---|---|---|---|
+| R-C8-N3 | `create_case` over MCP (`mcp-stdio`, `mcp-frontdoor`) creates the case with its objective **proposed**, not confirmed, because the quote cannot be verified there; the owner confirms it in the app or on the phone. In-app chat (quote verified in the owner's turn) and the form stay confirmed | The rulings commit (see "R-C8-N3" under Deviations) | `cases-create-objective.test.js` › "create_case over MCP: the objective must still be words from the quote, and it is proposed until the owner confirms it", "the runtime confirms only for objectiveBy \"owner\"…", "no tool takes objectiveBy…"; `cases-scope.test.js` › "are the nine of the spec"; `cases-orientation.test.js` › "marks a proposed objective by who wrote it…" |
+| R-C8-N4 | **Check now** does not run the check command (as built); the command runs only at an owner turn's close | 16 | `cases-check.test.js` (Task 16's "Check now runs nothing") — unchanged |
+| R-C8-N5 | "npm only" means the program must be npm: `npm test` / `npm run <script>` (as built) | 15 | `cases-check.test.js` (Task 15's `validateCheck` cases) — unchanged |
+| R-C8-N6 | No npm flags before the script and no other npm commands (as built) | 15 | `cases-check.test.js` (Task 15's `validateCheck` cases) — unchanged |
+
 ## Task order: what is sequential and what may run in parallel
 
 "In parallel" means in separate worktrees with **no file in common**; the groups were made from each task's file list.
@@ -237,7 +248,7 @@ Not a task of the plan as written; the owner ruled after it that the form gets t
 - *How each caller of `CaseRuntime.createCase` ends up* (pinned by `tests/cases-create-objective.test.js`):
   - IPC `case:create` with the form's objective: `confirmed`, origin `owner-create`. Without one: no objective.
   - `create_case` in King Louie's chat (`in-app-chat`): `confirmed`, origin `owner-create`, only when the objective is words from the quote and the quote is in the owner's message of this turn; otherwise nothing is created.
-  - `create_case` over `mcp-stdio` and `mcp-frontdoor`: `confirmed`, origin `owner-create`, with the objective held to the quote. The quote itself is recorded and not checked there (management surfaces, Q28; the `cases:manage` scope is the gate), which is what spec §6.1's table says. **For the owner to weigh:** this is the one path where an objective is confirmed on words nobody verified. `src/mcp/case-tools.js` was not changed.
+  - `create_case` over `mcp-stdio` and `mcp-frontdoor`: as first built, `confirmed`, origin `owner-create`, with the objective held to the quote and the quote recorded, not checked. **Changed by R-C8-N3 (2026-10-14):** now `proposed`, origin `mcp-create` (see "R-C8-N3" below).
   - A detour routed to "new" (`DetourRouter`): `proposed`, origin `detour`.
   - Any other value of `objectiveBy`, or none: `proposed`, origin `model`.
   - Playbooks never call `createCase`; a playbook chosen in the form rides `case:create`.
@@ -337,6 +348,20 @@ The two were built in parallel streams and merged. The merge was clean as text a
   - `tests/cases-progress-tool.test.js` › the `failing` case of `proposeDone`: the stub that forced the state (left by Task 10) is replaced by a real run and a record that cites it; the assertions are the same, and one more pins the computed reason.
 - *Verified here:* Windows only. The tests run real `node` and `npm` children (`npm` as `node.exe` with `npm-cli.js`, under the built environment) and kill a real child and grandchild with `taskkill`. The POSIX path (a process group and `SIGKILL`, `npm` found on `PATH`) was not run.
 
+**R-C8-N3 (owner ruling 2026-10-14): an objective `create_case` sets over MCP is proposed.**
+
+The ruling answers the "for the owner to weigh" point of Addition B (whose question was N3 in the table below; the id is the owner's).
+
+- *What changed.* `createCase` in `src/mcp/case-tools.js` passes `objectiveBy: 'owner'` only on `in-app-chat` (where `checkQuote` found the quote in the owner's message of this turn) and `objectiveBy: 'mcp'` on `mcp-stdio` and `mcp-frontdoor`. `CaseRuntime._recordCreatedObjective` maps `'mcp'` to a new origin, `mcp-create`, born `proposed`; it is not in `CONFIRMING_ORIGINS`, so no caller can have it born confirmed. The objective must still be words from the quote, and `recordOwnerObjective` still records the quote as before (a `user` fact whose quote nobody checked; unchanged by this ruling, and a residual worth knowing: that fact can be cited as evidence).
+- *Shown as.* The orientation's objective line says `(set over MCP; the owner has not confirmed it)`; the panel's origin note says `set over MCP; not checked against your words`; `open_case` reports `{ state: 'proposed', origin: 'mcp-create' }`.
+- *How the owner confirms it.* The panel's Confirm (or Confirm all), as for any proposed objective; or a `scope-confirm` question, which the model asks with `Progress askScope` and which the owner can answer in the app or on the phone. Nothing creates that question at `create_case` time: the phone path needs the model to ask first.
+- *Spec.* §6.1's origins table gains `mcp-create`, `owner-create` names only the form and the chat, and §2.2 lists the rulings of 2026-10-14. §6.6 records R-C8-N5 and R-C8-N6 as the narrowing Task 15 built.
+- *Existing tests changed.*
+  - `tests/cases-create-objective.test.js` › "create_case over MCP…": asserted `confirmed`, `owner-create`; now asserts `proposed`, `mcp-create`, `confirmed: null`, and that the owner's press then confirms it. Renamed to say so. This is the ruling, not a weakening.
+  - `tests/cases-create-objective.test.js` › "no tool takes objectiveBy…": `src/mcp/case-tools.js`'s call now passes a value the host decides (`'host-decided'` in the test's reading), and the test pins the exact line that decides it.
+  - `tests/cases-scope.test.js` › "are the eight of the spec" became "are the nine of the spec" (`mcp-create` added), and asserts `mcp-create` is not a confirming origin.
+  - Extended only: `tests/cases-orientation.test.js` (the `mcp-create` mark), `tests/renderer-progress-text.test.js` (the origin note), and the runtime case of `objectiveBy: 'mcp'`.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.
@@ -345,9 +370,9 @@ Found while writing the tasks out. None is decided here; each step named is writ
 |---|---|---|
 | N1 | On Windows, may the check be a program that exists only as a `.cmd` or `.bat` shim (`pnpm`, `yarn`, `gradlew.bat`)? Starting one needs `cmd.exe`, and the project's own rule for runbooks is never to (`doctor`: "call the .exe"). | Task 15 refuses every shim (`CHECK_SHIM`) except `npm`, which Task 16 runs as `node.exe` with `npm-cli.js` and no shell. Nothing goes through `cmd.exe`. **Ruled 2026-10-13: npm only, no other runner** (how far that reaches is N5) |
 | N2 | With `cases.verify.when: 'request'`, should the owner have a "Check now" button in the panel? R-C8-4 allows the setting and does not say who may ask. | Task 10 gives the model `Progress.verify` in that mode, and `proposeDone` runs the pass first. No owner button is built. **Ruled 2026-10-13: yes, in every mode; built as Addition A (see Deviations)** |
-| N4 | Does the panel's **Check now** also run the check command? Not ruled. | No: Check now runs the verify pass only. The check command runs only at the close of a turn the owner started, when the repository changed in it (R-C8-3: "at turn close only"). A press is the owner's, so running it there would not break "never while you are away", but it would be a second moment a program starts, outside a turn and with no Stop of its own |
-| N5 | "npm only (no other runner)": does it mean the check's program must be npm, or only that npm is the one `.cmd` shim allowed on Windows (N1 as the plan had it), with `node`, `make`, `cargo` and `./gradlew` still allowed where they are real programs? | The strict reading: the program is `npm`, and the command is `npm test` or `npm run <script>`. Widening is one list (`ALLOWED_PROGRAMS` in `src/cases/verify/check.js`) and the npm-shape rule below it |
-| N6 | May the owner give the check options of npm's own (`--prefix`, `--if-present`, `--silent`) or other npm commands (`npm exec`)? | No: words that start with `-` only after `--`; only `test` and `run` |
+| N4 | Does the panel's **Check now** also run the check command? **Ruled 2026-10-14 (R-C8-N4): no, as built.** | No: Check now runs the verify pass only. The check command runs only at the close of a turn the owner started, when the repository changed in it (R-C8-3: "at turn close only"). A press is the owner's, so running it there would not break "never while you are away", but it would be a second moment a program starts, outside a turn and with no Stop of its own |
+| N5 | **Ruled 2026-10-14 (R-C8-N5): the program must be npm, as built.** "npm only (no other runner)": does it mean the check's program must be npm, or only that npm is the one `.cmd` shim allowed on Windows (N1 as the plan had it), with `node`, `make`, `cargo` and `./gradlew` still allowed where they are real programs? | The strict reading: the program is `npm`, and the command is `npm test` or `npm run <script>`. Widening is one list (`ALLOWED_PROGRAMS` in `src/cases/verify/check.js`) and the npm-shape rule below it |
+| N6 | May the owner give the check options of npm's own (`--prefix`, `--if-present`, `--silent`) or other npm commands (`npm exec`)? **Ruled 2026-10-14 (R-C8-N6): no, as built.** | No: words that start with `-` only after `--`; only `test` and `run` |
 | N3 | Should the case-create form gain an objective field? Today the renderer sends none, so a desktop case's first objective is the model's and reads `proposed`. | Nothing is added to the create form. Task 13 gives the panel Confirm and Edit for the objective, which is the owner's path. **Ruled 2026-10-13: yes; built as Addition B (see Deviations)** |
 
 ## Global Constraints

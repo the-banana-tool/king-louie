@@ -21,7 +21,9 @@ const MAX_CRITERIA = 12;
 const MAX_PROPOSED = 6;
 const MIN_CRITERION_CHARS = 3;
 const MAX_CRITERION_CHARS = 300;
-const ORIGINS = Object.freeze(['model', 'owner-quote', 'gating-answer', 'detour', 'owner-create', 'owner-action', 'legacy', 'file']);
+// `mcp-create` (owner ruling R-C8-N3, 2026-10-14): an objective create_case
+// set over MCP, where the quote is recorded and not checked; proposed.
+const ORIGINS = Object.freeze(['model', 'owner-quote', 'gating-answer', 'detour', 'owner-create', 'mcp-create', 'owner-action', 'legacy', 'file']);
 // The origins an entry may be born `confirmed` with. Every other origin is
 // born `proposed`, whatever the caller passes beside it.
 const CONFIRMING_ORIGINS = Object.freeze(['owner-quote', 'gating-answer', 'owner-create', 'owner-action']);

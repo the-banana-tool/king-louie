@@ -59,6 +59,17 @@ of the spec is written the decided way and names a ruling by its id.
 | R-C8-10 | Does `Fail` add to the abandoned-approaches record? | No. Only `Progress.abandon` writes it | After a direction answer the model has to record the dead approach itself; §6.2 gives it one host line that names the failure report |
 | R-C8-11 | Does the owner wait for the verify pass? (asked after the pass was built inside the turn's close, where a reply waited up to 20 s for it) | No: **the verify pass runs after the reply.** The turn commits and releases the case at once; the pass makes its call with no lock held and writes its result when it lands (§6.5, §6.9) | A criterion reads its old state for the seconds the pass is out. A turn that starts in that time drops the pass's result; the case's next verified close runs the pass again. What the pass found is a journal entry of its own, not the first lines of the turn's entry |
 
+### 2.2 Owner rulings (2026-10-14)
+
+Asked by the plan (its "New questions") after the build; each is written into this spec where it applies.
+
+| Id | Question | Decided | Cost or residual of the choice |
+|---|---|---|---|
+| R-C8-N3 | `create_case` over MCP holds the objective to the quote, but the quote is recorded there, not checked (management surfaces, Q28). Is the objective confirmed? | No. Over `mcp-stdio` and `mcp-frontdoor` the case is created with its objective `proposed` (origin `mcp-create`); the owner confirms it in the app (the panel's Confirm, or a scope question answered there or on the phone). In King Louie's chat, where the quote is checked in the owner's turn, and from the app's own create form, it is `confirmed` (§6.1) | A case made over MCP needs one more owner step before its objective counts. The fact `create_case` records still carries the unchecked quote with `provenance: 'user'`, as before this stage |
+| R-C8-N4 | Does the panel's **Check now** also run the check command? | No (as built). Check now runs the verify pass only; the check command runs only at the close of an owner turn in which the repository changed (§6.6) | A check result is only as new as the last owner turn that changed the tree |
+| R-C8-N5 | "npm only": must the check's program be npm? | Yes (as built): the program is `npm`, and the command is `npm test` or `npm run <script>` (§6.6) | `node --test`, `make`, `cargo` and `./gradlew` cannot be a case's check. Widening is one list in `src/cases/verify/check.js` |
+| R-C8-N6 | May the check pass npm options of its own or use other npm commands? | No (as built): no word that starts with `-` before the script (only after `--`), and no npm command but `test` and `run` (§6.6) | `npm test --silent` and `npm run --if-present x` are refused |
+
 ### 2.1 Checked in the code after the first draft
 
 The first draft listed things it had not verified. Read on `main` (a6189a7):
@@ -172,12 +183,14 @@ never sent to the verify pass, and is never counted in a summary except as "N pr
 | `owner-quote` | `Brief` append with `provenance: "user"`, a quote `requireOwnerQuote` finds, and the item's text passing `wordsInText(item, quote)` | `confirmed` |
 | `gating-answer` | Playbook gating's `applyToBrief` (an answered gating record; carries the answer's `factId`) | `confirmed` |
 | `detour` | `DetourRouter` prefill of a new case (`successCriteria: [summary]`) | `proposed` |
-| `owner-create` | objective only: `createCase` called by IPC `case:create` with an objective in the form, or by `create_case` (which has already held the objective to the owner's quote) | `confirmed` |
+| `owner-create` | objective only: `createCase` called by IPC `case:create` with an objective in the form (an event of the app's own window), or by `create_case` in King Louie's chat (`in-app-chat`, which has held the objective to the quote and found the quote in the owner's message of this turn) | `confirmed` |
+| `mcp-create` | objective only: `createCase` called by `create_case` over `mcp-stdio` or `mcp-frontdoor`, which holds the objective to the quote but cannot check the quote is the owner's (R-C8-N3) | `proposed`, shown as "set over MCP" |
 | `legacy` | Found in `brief.md` when the case first meets stage 8 | `proposed` (R-C8-6) |
 | `file` | Found in `brief.md` later with no tool write behind it | `proposed` (R-C8-8), shown as "changed outside the app" |
 
-`createCase` learns who gave the objective from a new option, `objectiveBy: 'owner'`, passed only by the
-two host callers above. Like `force`, no case tool accepts it; the detour router passes nothing, so a detour's objective is `proposed`. The renderer's create form sends no objective today (§2.1), so the
+`createCase` learns who gave the objective from a new option, `objectiveBy`: `'owner'` is passed only by
+the two confirming host callers above, `'mcp'` by `create_case` over MCP, and `'detour'` by the detour
+router; any other value or none is the model's. Like `force`, no case tool accepts it; the detour router passes nothing, so a detour's objective is `proposed`. The renderer's create form sends no objective today (§2.1), so the
 usual first objective of a desktop case is the model's, and is `proposed` until the owner confirms it.
 
 **Confirming** (`ScopeStore.confirm(ids, { by, channel, factId, quote })`):
@@ -582,6 +595,12 @@ when, for how long, with what environment, and what is kept of its output.
   command line.
 
 The list is a filter against the obvious, not a sandbox: `node scripts/anything.js` passes.
+
+**Narrowed by the owner (R-C8-N5, R-C8-N6; built so in Task 15).** On top of the rules above, the program
+is exactly `npm` and the command is `npm test` or `npm run <script>`; no word that starts with `-` comes
+before the script (npm's own options are refused; words after `--` go to the script), and no other npm
+command is accepted. So of the examples above only `npm run test:unit` is a valid check, and
+`node scripts/anything.js` is refused.
 
 **Approving it.** Setting or changing `check` runs nothing. It creates a pressed question (`type:
 'check-approve'`, `key: 'check-approve'`, `mcpAnswerable: false`, never charged), whose host-built text is:
