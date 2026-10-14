@@ -1,7 +1,8 @@
 # Local Inference — Design Spec
 
-- **Status:** Draft. The outline was approved by the owner on 2026-10-13 (§2). Twelve questions are open
-  (§3); the sections that depend on one say so. No implementation plan exists yet.
+- **Status:** Approved in outline by the owner on 2026-10-13 (§2), with the twelve questions of the first
+  draft ruled on the same day (§3). The L1 implementation plan is
+  `docs/superpowers/plans/2026-10-13-local-inference-l1.md`. L2 gets its plan after L1.
 - **Date:** 2026-10-13
 - **Builds on:** models (`2026-09-27-model-catalog-profiles-roles-design.md`: catalog, availability,
   profiles, roles, `TurnModels`, failover, cost records), recall
@@ -57,8 +58,9 @@ with the prompts sealed end to end between the two nodes.
 
 ## 2. Owner decisions (2026-10-13)
 
-These were approved by the owner as the outline. They are decisions, not options; the rest of the spec
-is designed to fit them and names them by id.
+R-LI-1 to R-LI-21 were approved by the owner as the outline. R-LI-22 to R-LI-33 are the owner's
+answers to the first draft's questions (§3). They are decisions, not options; the rest of the spec is
+designed to fit them and names them by id.
 
 | Id | Decision |
 |---|---|
@@ -83,160 +85,39 @@ is designed to fit them and names them by id.
 | R-LI-19 | **L2 and the guarantee.** A model on a paired node counts as local. Usage records which node ran it |
 | R-LI-20 | **Order.** L2 ships after L1, and L1's design leaves the seam |
 | R-LI-21 | **Accepted residuals:** a local server that itself forwards to the cloud cannot be detected; tool calls in a private chat can still send text out; in L2 the relay sees that inference happens and how much |
+| R-LI-22 | **No local model for a role in a private chat.** Borrow as today but only among local models; with none, an optional job is skipped and a load-bearing one refuses the turn (§7.3) |
+| R-LI-23 | **One mark, on the case.** A chat with a `caseId` is private exactly when its case is (§8.2) |
+| R-LI-24 | **Executors in a private case work as now.** The approval card adds a line saying the case is private and the send leaves the owner's hardware |
+| R-LI-25 | **A private chat is embedded only by the embed worker** (`local:`), which runs alongside a hosted embedder when one is configured. An embedder on a marked local server counting as local is a follow-up |
+| R-LI-26 | **L2 needs the identity record on both nodes** |
+| R-LI-27 | **L2 is for service nodes only**; an attached desktop gets it through its service |
+| R-LI-28 | **Exports, logs, audit.** An export of a private chat is allowed with a warning and carries a private flag; an import can add the mark and never remove it. No chat text in a log line at `info` or above, as a tested rule for the paths this spec adds. Inference audit entries carry ids and counts, never text |
+| R-LI-29 | **`100.64.0.0/10` is allowed per server**, by the owner's confirmation (an admin flag in service mode) |
+| R-LI-30 | **Plain `http` to a LAN address is for cost only.** A private chat or a local-only role uses a server that is not loopback only over `https` with a pinned certificate fingerprint |
+| R-LI-31 | **The built-in Ollama provider stays and never counts as local.** One owner action converts it into a local server |
+| R-LI-32 | **Other surfaces.** In a private chat memory is read and never written, and `delegate` is refused. The MCP surfaces give a private case's id, title and status only. Memory entries tagged private are deferred |
+| R-LI-33 | **Images and voice.** Image generation is refused in a private chat, with a message; read-aloud falls back to the system engine |
 
-## 3. Open questions for the owner
+## 3. Owner rulings on the open questions (2026-10-13)
 
-Each gives what the code says, the options with their costs, and a recommendation. The spec is written
-the recommended way; a section that would change is named.
+The first draft of this spec (3b109db) put twelve questions to the owner. All twelve were answered
+the same day. Each row gives what was decided and what the choice costs or leaves open; the rest of
+the spec is written the decided way.
 
-**Q1. A private chat needs a role that has no local model. Refuse the turn, or run without it?**
-The resolver lets an empty `utility` borrow `worker` then `main`, and `worker` borrow `main`
-(`borrowChain`, `src/models/resolver.js`). A title is one `oneShot` on `utility`
-(`src/ipc/chat-handlers.js`); case `orient` needs tool calling and `judge` runs on `main`
-(`src/cases/roles.js`).
-- (a) Refuse the whole turn whenever any role it will use has no local model. Simple; a missing
-  `utility` blocks a chat that only needed a title.
-- (b) Borrow as today but only among local models; when no local model fills a role, skip the call if
-  the job is optional (a title, the case nudge, the detour classifier, which already fails open) and
-  refuse the turn if it is load-bearing (`main`, a sub-agent, `orient`, `judge`, `draft`, `verify`,
-  ingest, a wake-up). Cost: two classes of job to keep straight; an untitled chat keeps its first
-  words as its title.
-- (c) As (b), and also drop a capability the local model lacks (no tool calling: the turn runs without
-  tools). Cost: a chat that silently cannot act.
-- **Recommended: (b).** §7.3 is written this way.
-
-**Q2. Does marking a case private mark its chats, and the other way round?**
-A case turn snapshots models by case (`snapshotModels({ caseId, chatId })`, `create-core.js`); a wake-up
-has a case and may have no chat. R-H4-1 already pins every case chat to itself.
-- (a) The mark lives on the case (`case.yaml`), and a chat with a `caseId` is private exactly when its
-  case is. Marking a case chat marks the case, after a dialog that names the case. Attaching a private
-  chat needs a private case or makes it one in the same confirmation. Cost: one mark covers a whole
-  case; the owner cannot keep one chat of a case private and another not.
-- (b) Independent marks. Cost: a private chat's turn writes facts into a case whose wake-ups then send
-  them to a hosted model; the guarantee would have a hole the UI cannot explain.
-- **Recommended: (a).** §8.2.
-
-**Q3. May a private case use an executor or an external agent at all?**
-An executor sends `rendered`, the payload the outbound gate passed, under an owner-approved envelope
-where authority needs one (`src/cases/executors/`, `gates.js`). R-LI-9 says tools behave as now.
-- (a) As now. The model calls around the send (`draft`, `judge`) are local; the send itself leaves the
-  machine as the owner approved it; the approval card adds one line saying the case is private and
-  this leaves the machine. Cost: "private" does not mean "nothing leaves".
-- (b) Refuse every executor with an outbound capability, and the browser, in a private case. Cost: a
-  private case can only read and think.
-- (c) Allow, but require a fresh press per send even inside an active envelope. Cost: more presses.
-- **Recommended: (a).** §8.2, §16.2.
-
-**Q4. With a hosted embedder configured, what do a private chat's vectors use?**
-`EmbedderHost` holds one embedder (`settings.history.embedder.kind`: `local`, `ollama`, `openai`,
-`none`). The default is `local`. An imported chat is already embedded only under a `local:` key
-(`isLocalKey`, `src/history/embed-indexer.js`), and Ollama counts as hosted there because "its address
-is a setting and need not be this machine". R-LI-10 says a private chat's vectors are rebuilt locally.
-- (a) A private chat is embedded only by the embed worker (`local:`), whatever is configured. With
-  `openai` or `ollama` configured the host runs the local embedder as well, for private chats only.
-  Cost: `EmbedderHost` learns to hold two embedders; a first-time model download; a second set of
-  vector matrices.
-- (b) Only the `local:` key counts, and nothing runs alongside: with a hosted embedder configured a
-  private chat is found by BM25 alone until the owner switches the embedder to `local`. Cost: R-LI-10's
-  "rebuilt locally" is not met for that owner until they switch.
-- (c) As (a), and an embedder on a marked local server (§5) also counts as local. Cost: a second kind
-  of "local" in recall; gain: the owner's own embedding model on their GPU.
-- **Recommended: (a) for L1, (c) as a follow-up** once local servers exist. §8.4.
-
-**Q5. Does L2 inference need the admin-owned identity record on both nodes?**
-A node's Ed25519 key lives in the data dir, encrypted, where the service account can replace it
-(`mesh.identity`, `src/mesh/node-identity.js`). The identity record
-(`<configDir>/identity/node.json`, R-F5-17) is the administrator's statement of which key is this
-node's; with no record the service starts with a warning (`checkRecordedIdentity`,
-`src/service/run.js`).
-- (a) Both: a node serves, and a node uses another node's models, only while its record state is
-  `match`. Cost: one more administrator step (`identity record`) on nodes that never needed one.
-- (b) The serving node only. Cost: the serving node's allow list then names a key the consuming
-  node's service account could have swapped.
-- (c) Neither. Cost: the keys the administrators exchange by hand are not the administrator's own.
-- **Recommended: (a).** §14.3.
-
-**Q6. Can a standalone desktop use a fleet node's models in L2?**
-A standalone desktop has no node identity, no hub link and no `RelayClient`
-(`getOrGenerateNodeIdentity` is called only under `src/service`, `src/approvals`, `src/frontdoor` and
-the desktop bridge's service wiring).
-- (a) Service nodes only. An attached desktop gets it for free, because its turns run in the service.
-- (b) Give the standalone desktop a node identity and a hub pairing. Cost: the desktop becomes a fleet
-  node, with its own enrolment, key storage and removal; a stage of its own.
-- (c) Let a serving node also open an HTTP listener on the LAN that a desktop adds as an L1 local
-  server. Cost: a new listener on a service, with no node identity on the client side.
-- **Recommended: (a).** §14.
-
-**Q7. A private chat's text in exports, logs, the audit ledger and crash reports.**
-Export is renderer code that writes the chat as JSON or Markdown (`renderer.js`,
-`#export-chat-btn`). The store never takes a scope-like field from a chat object
-(`STORE_ONLY_CHAT_KEYS`, `src/history/rows.js`). No crash reporter is wired (no `crashReporter` in
-`main.js` or `src/`). The audit ledger takes any `kind` with free `data`.
-- Export: (a) allowed, after a line saying the file is plain text outside the app's control; the JSON
-  carries `"private": true`, and importing such a file marks the new chat private before anything is
-  indexed (an import can add the mark, never remove it). (b) Refused. **Recommended: (a).**
-- Logs: the rule "no chat text in a log line at `info` or above" is proposed for every chat; whether
-  today's code keeps it was not audited (§21). **Recommended:** make it a rule, test it for the paths
-  this spec adds, and list the rest as a residual.
-- Audit ledger: inference entries carry ids, model names, token counts and sizes, never text (§14.9).
-- Crash reports: nothing to do while none exists; a future one must not carry message text.
-- §8.6.
-
-**Q8. Is the carrier-NAT range (100.64.0.0/10) a "private LAN address"?**
-Overlay networks hand out addresses in it. `src/frontdoor/net.js` treats it as private for the relay's
-mesh listener. A carrier can also route it, so an address there need not be the owner's hardware.
-- (a) Refuse it. Cost: an owner whose machines talk over an overlay network cannot add one in L1.
-- (b) Allow it like RFC 1918. Cost: a weaker meaning of "private".
-- (c) Allow it per server, only after the owner confirms "this address is on my own overlay network"
-  (the admin sets `allowCgnat: true` in service mode).
-- **Recommended: (c).** §5.2.
-
-**Q9. Plain `http` to a LAN address: allow, or require proof of which server answers?**
-A pinned LAN address says where the request goes, not who is there. On another network the same
-address is somebody else's machine.
-- (a) Allow `http` to a LAN address, with a warning at add time. Cost: on a foreign network a private
-  prompt can reach a stranger's host that happens to hold the pinned address.
-- (b) For anything but loopback require `https` with a pinned certificate fingerprint. Cost: most
-  local servers need a TLS proxy in front (not verified per server kind, §21).
-- (c) (a), plus the server is used only while the machine's default gateway is the one seen when the
-  owner added it. Cost: a new platform probe on three operating systems; false refusals after a
-  router change.
-- **Recommended: (b) for a private chat or a local-only role, (a) otherwise.** A LAN server over plain
-  `http` then lowers cost but does not carry the guarantee; the UI shows which it is. L2 is the
-  answer for another machine with a proven identity. §5.3, §16.
-
-**Q10. What happens to the built-in Ollama provider?**
-`ollama` is one of the 14 providers; its address is `settings.models.ollama.baseUrl`, and any
-`ollama` model whose id does not end `-cloud` or `:cloud` is already priced at $0 and flagged
-`local: true` in the catalog whatever the address is (`Catalog#price`, `localEntry`).
-- (a) It stays as it is and never counts as local for the guarantee. The Models tab offers "Use this
-  Ollama as a local server", which adds a local server at the same address (if it passes the check)
-  and, on a second confirmation, rewrites the owner's profile targets from `ollama/<m>` to
-  `local/<id>/<m>`. Cost: one owner action after the upgrade.
-- (b) Convert automatically at upgrade when the stored address is loopback. Cost: a mark the owner
-  never made.
-- (c) Make `ollama` itself markable. Cost: two kinds of local target in every check.
-- **Recommended: (a).** §5.1, §9.
-
-**Q11. Surfaces that hand a private chat's or case's text to another model without King Louie calling
-one.**
-- Memory: entries are written through `MemoryManager#capture*` and `memory:capture`, and the memory
-  context is sent with every chat's prompt (`options.systemPromptDynamic`). Text from a private chat
-  stored there would reach a hosted model in the next ordinary chat.
-- The fleet `delegate` tool starts a turn on another node, on that node's own models
-  (`src/fleet/delegate-sessions.js`).
-- The case tools over MCP (`open_case`, `get_orientation`, …) return case text to whatever client
-  holds the scope (`src/mcp/case-tools.js`), often a hosted assistant.
-- Options: (a) treat all three as tools (R-LI-9) and say so; (b) in a private chat memory is read but
-  never written, `delegate` is refused, and the MCP surfaces give a private case's id, title and
-  status only; (c) tag memory entries private and show them only to private chats.
-- **Recommended: (b) in L1; (c) deferred.** §8.5.
-
-**Q12. The image and voice paths.** `ImageGenerate` calls OpenAI or fal directly
-(`src/media/image-generation/`); read-aloud can use ElevenLabs (`src/voice/engines/elevenlabs.js`).
-Both are hosted model calls, so R-LI-8 refuses them in a private chat. The question is only the
-behaviour: (a) refuse with a message; (b) for voice, fall back to the system engine
-(`system-tts.js`) without asking. **Recommended: (a) for images, (b) for voice.** §7.5.
+| Id | Question | Decided | Cost or residual of the choice |
+|---|---|---|---|
+| R-LI-22 | A private chat needs a role that has no local model | Borrow only among local models; skip an optional job (a title, the case nudge, the detour classifier); refuse a load-bearing one (`main`, a sub-agent, `orient`, `judge`, `draft`, `verify`, ingest, a wake-up) | Two classes of job to keep straight. An untitled private chat keeps its first words as its title. A private case with no local model for `orient` cannot take a turn at all |
+| R-LI-23 | Case and chat marks | The mark lives on the case; its chats follow. Marking a case chat marks the case; attaching a private chat needs a private case or makes it one in the same confirmation | The owner cannot keep one chat of a case private and another not. A case becomes private as a whole, for good |
+| R-LI-24 | Executors and external agents in a private case | As now, under the outbound gate and the envelope; the approval card adds one line | "Private" does not mean "nothing leaves": an approved send still leaves the machine |
+| R-LI-25 | A private chat's vectors when a hosted embedder is configured | The embed worker's `local:` embedder runs alongside, for private and imported chats | `EmbedderHost` holds two embedders; a first-time model download; a second set of vector matrices. The owner's own embedding model on a local server does not count yet |
+| R-LI-26 | The identity record in L2 | Required on both nodes; without `match` a node neither serves nor uses another node's models | One more administrator step on nodes that never needed a record |
+| R-LI-27 | A standalone desktop in L2 | No. Service nodes only | A desktop that is not attached to a service cannot use another machine's GPU except as an L1 server on the LAN, under R-LI-30 |
+| R-LI-28 | Exports, logs, the audit ledger | Export allowed with a warning and a carried flag; the no-text log rule tested for the paths this spec adds; audit entries without text | An exported file is plain text outside the app. Log lines elsewhere in the app were not audited and are a residual (§18). A crash reporter, if one is ever added, must follow the same rule |
+| R-LI-29 | The carrier-NAT range | Per server, by the owner's confirmation; `allowCgnat: true` from the administrator in service mode | The app takes the owner's word that the address is on their own overlay network |
+| R-LI-30 | Plain `http` on a LAN | Allowed for cost and offline work. The guarantee needs loopback, or `https` with a pinned fingerprint | Most local servers need a TLS proxy in front before a private chat can use them from another machine (not verified per server kind, §21). Without one, on a foreign network a non-private prompt can reach whoever holds the pinned address |
+| R-LI-31 | The built-in Ollama provider | Unchanged and never local; "Use this Ollama as a local server" converts it and, on a second confirmation, rewrites the profile targets | One owner action after the upgrade before an existing Ollama setup can serve a private chat |
+| R-LI-32 | Memory, `delegate`, the case tools over MCP | Memory read, never written; `delegate` refused; MCP gives id, title and status | A private case's title is still shown. A private chat cannot hand work to another node. Nothing learned in a private chat reaches memory |
+| R-LI-33 | Images and voice | Image generation refused; read-aloud uses the system engine | No image generation in a private chat until a local image model exists (§20.3); the system voice instead of the chosen one |
 
 ## 4. What exists (so nothing is rebuilt)
 
@@ -329,10 +210,10 @@ not added to `KL_PROVIDERS` (which maps onto models.dev); `explainTarget` (`crea
 already has a branch for a registered provider outside the 14, asks the local server registry
 instead.
 
-**Designer decision D-LI-2 (depends on Q10).** The built-in `ollama` provider is unchanged: same
+**R-LI-31.** The built-in `ollama` provider is unchanged: same
 address setting, same $0 price, same profiles. It is never local for the guarantee, because its
 address is an ordinary setting with no mark and no check. The owner turns it into a local server
-with one action (Q10 (a)).
+with one action (`models:local.fromOllama`, §13.2).
 
 `src/models/local-servers.js` (new, Electron-free) is the registry: `list()`, `get(id)`,
 `explain(model, { needs })`, `transportFor(id)`, `providerFor(id)`, `probe(id, model)`, and on the
@@ -355,7 +236,7 @@ local server speaks the same message format.
 |---|---|---|
 | `loopback` | `127.0.0.0/8`, `::1` | allowed |
 | `lan` | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` (ULA) | allowed |
-| `cgnat` | `100.64.0.0/10` | refused unless the entry says `allowCgnat` (Q8) |
+| `cgnat` | `100.64.0.0/10` | refused unless the entry says `allowCgnat` (R-LI-29) |
 | `link-local` | `169.254.0.0/16`, `fe80::/10` | refused |
 | `unspecified` | `0.0.0.0`, `::` | refused |
 | `public` | everything else, including `64:ff9b::/96` (NAT64), `2002::/16` (6to4), the documentation ranges and multicast | refused |
@@ -388,14 +269,14 @@ Rules:
    the socket's remote address is the proxy's, and a proxy on a pinned address is the owner's own.
 8. **`https` is allowed** to any allowed class, verified against the system roots, or against
    `tlsFingerprint` (SHA-256 of the certificate, hex) when the entry has one; with a fingerprint the
-   chain is not consulted. `http` is allowed to `loopback`, and to `lan` subject to Q9.
+   chain is not consulted. `http` is allowed to `loopback`, and to `lan` for cost only (R-LI-30, §5.3).
 9. **Only `http:` and `https:`**, no credentials in the URL, no query, no fragment, a port from 1 to
    65535.
 
 The check runs when an entry is added, at every start, on "Check again", and before a probe. It does
 not run per request: rule 4 makes the pinned address the only one a request can reach.
 
-**What "pinned" does not prove** (Q9, §16): which machine holds a LAN address. The class recorded in
+**What "pinned" does not prove** (R-LI-30, §16): which machine holds a LAN address. The class recorded in
 `pinned.class` is shown in the UI as "this machine", "your network" or (L2) a node name.
 
 ### 5.3 What carries the guarantee
@@ -403,14 +284,11 @@ not run per request: rule 4 makes the pinned address the only one a request can 
 An entry is **guarantee-grade** when a private chat or a local-only role may use it:
 
 - `loopback`: always;
-- `lan` or `cgnat`: with `https` and a `tlsFingerprint` (Q9 as recommended); otherwise the server is
+- `lan` or `cgnat`: with `https` and a `tlsFingerprint` (R-LI-30); otherwise the server is
   usable for cost and offline work but not in a private chat or a local-only role, and
   `explain` says "Workstation answers over plain http on your network; a private chat needs a pinned
   certificate";
 - `node` (L2): always, since the node's key is pinned (§14.3).
-
-If the owner rules Q9 the other way, every allowed class is guarantee-grade and this subsection is
-one line shorter.
 
 ### 5.4 The transport
 
@@ -464,7 +342,7 @@ What this spec adds:
 2. **No `/llm` action** for local servers, and the desktop import (`import --from`) does not carry
    `models.localServers`.
 3. **Changing `models.ollama.baseUrl` does not touch a local server** made from it; the two are
-   separate entries after Q10 (a).
+   separate entries (R-LI-31).
 4. A test that greps `src/` for writes to `models.localServers` outside `local-servers.js`.
 
 Residual, as for `facts.jsonl` and the envelopes: `Bash` can rewrite `chat-data.json`.
@@ -562,8 +440,14 @@ One value says whether a model call may leave the owner's hardware:
 
 - **Private.** `snapshotModels({ chatId, caseId })` reads the chat's and the case's mark (§8.1) and
   passes `egress` to `createTurnModels`, which freezes it with the profile. Everything that takes the
-  turn's `TurnModels` (sub-agents, background and workflow tasks, an agent-panel run, the case
-  roles) inherits it without knowing.
+  turn's `TurnModels` inherits it without knowing: the case roles, and every child run, because
+  `agentExecutorAdapter.execute` hands a child the parent's snapshot from the rethreaded requester
+  (`options.approvalRequester.turnModels`).
+- **A run with a chat and no parent snapshot.** Today `createAgentRuntime` falls back to
+  `snapshotModels({ profileId })`, the default profile with no chat. It will pass
+  `runtimeOptions.chatId` to the snapshot, so such a run takes its chat's mark. A run with neither
+  (a gateway session, a cron job, a webhook, an agent-panel run) belongs to no chat and has no
+  policy.
 - **Local-only role.** A profile gains `localOnly: ['utility', …]`, a list of role ids. `resolve`
   applies it to that role's call whatever the chat is.
 
@@ -575,7 +459,7 @@ inventory test (§7.6) is there to catch.
 
 1. **The resolver explains.** Under a policy, `resolve` drops every target that is not a
    guarantee-grade local target (§5.3) into `skipped` with the reason "… is not a local model and
-   this chat is private" (or "… and `<role>` is local-only"). Borrowing still happens (Q1 (b)), over
+   this chat is private" (or "… and `<role>` is local-only"). Borrowing still happens (R-LI-22), over
    the filtered lists: a private chat's empty `utility` borrows a local `worker` or `main`, never a
    hosted one. The main override and an explicit target (`delegate.model`, a `SpawnAgent` model, an
    ingest role's named model, "Retry with…") go through the same filter. `mustResolve` then throws
@@ -593,7 +477,7 @@ A provider instance for one of the 14, asked to send under a policy, also refuse
 in the call options, so this is a fourth check on the routed path and the only one on a path that
 holds a provider instance directly (ingest, §7.5).
 
-### 7.3 When no local model can take the call (Q1 as recommended)
+### 7.3 When no local model can take the call (R-LI-22)
 
 | Job | Private chat or case, no local model for it |
 |---|---|
@@ -627,7 +511,8 @@ under `src/` that calls `fetch` or opens a socket.
 | Chat title | `chat-handlers.js`, `oneShot` on `utility` | router | §7.2; skipped when none (§7.3) |
 | Advisor review | `src/execution/advisor.js`, `oneShot(this.provider, …)` | the provider it was given | It must be given the routed provider of the turn; pinned by a test |
 | Sub-agents, `SpawnAgent`, `BackgroundTask`, workflow tasks, agent-panel runs | `createAgentRuntime` (`create-core.js`), `runtimeOptions.turnModels` | router | Inherit the parent's snapshot; a run with no parent snapshot takes the chat's |
-| Bridge and gateway turns | through `createAgentRuntime` (not traced one by one, §21) | router | A bridge chat cannot be private (§8.2) |
+| Bridge turns | through `agentExecutorAdapter.execute` | router | A bridge chat cannot be private (§8.2) |
+| Gateway sessions, cron jobs, webhooks, agent-panel runs | `agentExecutorAdapter.execute` or `createAgentRuntime` with a session and no chat (§21) | router | Never private. The tools that create one from a chat (`Cron`, `SessionsSpawn`, `RemoteDispatch`) are refused in a private chat until the owner rules on them (the L1 plan's "New questions") |
 | Case `orient`, `judge` | `src/cases/turn-runner.js`, `runtime.routedProvider(turn, { role })` | router | §7.2 |
 | Detour classify | `src/cases/detours/classifier.js` | router | §7.2; fails open |
 | Executor result drafting | `src/cases/executors/results.js` (`draft`) | router | §7.2 |
@@ -641,10 +526,10 @@ under `src/` that calls `fetch` or opens a socket.
 | Semantic context selection | `ContextAssembler#_assembleSemantic` (`src/context/context-assembler.js`) embeds the owner's message through `OpenAIEmbeddingProvider` | **a direct `fetch` to `api.openai.com`**, whenever an OpenAI key is saved | Called with no embedding provider for a private chat; `_fallbackAll` already exists |
 | Semantic compaction | `AgentLoop#_semanticCompact` embeds the user query and old tool results through the same provider (`chat-handlers.js` passes `contextAssembler.embeddingProvider`) | same direct `fetch` | The loop gets no `embeddingProvider`; the recency fallback already exists |
 | Memory vectors | `MemoryManager` with an `embeddingProvider` | none is constructed today (`create-core.js`) | Stays off for a private chat if one is ever wired |
-| Image generation | `ImageGenerate` → `src/media/image-generation/openai-provider.js`, `fal-provider.js` | direct `fetch` | Refused `PRIVATE_HOSTED_CALL` (Q12) |
-| Read-aloud | `TTSEngine` → `engines/elevenlabs.js` or `system-tts.js` | hosted or the operating system | ElevenLabs refused; the system engine speaks (Q12) |
+| Image generation | `ImageGenerate` → `src/media/image-generation/openai-provider.js`, `fal-provider.js` | direct `fetch` | Refused `PRIVATE_HOSTED_CALL` (R-LI-33) |
+| Read-aloud | `TTSEngine` → `engines/elevenlabs.js` or `system-tts.js` | hosted or the operating system | ElevenLabs refused; the system engine speaks (R-LI-33) |
 | Speech to text | none found in `src/` | | |
-| Fleet `delegate` | `src/fleet/delegate-sessions.js` on another node | that node's models | Refused in a private chat (Q11) |
+| Fleet `delegate` | `src/fleet/delegate-sessions.js` on another node | that node's models | Refused in a private chat (R-LI-32) |
 | Catalog refresh, connection tests, OAuth | `catalog.js`, `availability.js`, `anthropic-oauth.js` | hosted, no chat text | Not gated |
 
 The paths in bold are why "enforced in the router" is not enough by itself: the router is one of
@@ -664,7 +549,7 @@ rules. A new model caller then cannot appear without someone deciding which it i
 Tools behave as now. In a private chat `WebSearch` sends its query, `WebFetch` fetches, the browser
 tools browse, `Bash` runs, `Message` sends, an executor sends what its gate passed. Three tools are
 not "tools" for this rule because what they do is run a model: `ImageGenerate`, `SpawnAgent` and
-`BackgroundTask` (which inherit the policy), and `delegate` (Q11).
+`BackgroundTask` (which inherit the policy), and `delegate` (R-LI-32).
 
 The UI says so in the same place as the mark (§15): "Private: King Louie's own model calls stay on
 your hardware. Tools still do what they do: a web search sends its query to the web."
@@ -706,14 +591,14 @@ The confirmation, which is the same dialog for a new and an existing chat, reads
 | Chat | Rule |
 |---|---|
 | An ordinary chat | May be marked at any time |
-| A case chat (Q2 as recommended) | Private exactly when its case is. The chat's own column is set too, for the store's filters. Marking it marks the case and every chat of the case, in one confirmation that names them |
+| A case chat (R-LI-23) | Private exactly when its case is. The chat's own column is set too, for the store's filters. Marking it marks the case and every chat of the case, in one confirmation that names them |
 | Attaching a chat to a case | A private chat attaches only to a private case, or makes the case private in the same confirmation (`PRIVATE_CASE_REQUIRED` otherwise). A non-private chat attached to a private case becomes private. The existing attach refusals (`CHAT_SAW_OTHER_CASES`, `CHAT_RECALLED_OTHER_CHATS`, `IMPORTED_CHAT`) are unchanged and checked first |
 | A case created by a detour from a private case | Created private |
-| An imported chat | May be marked; the import dialog gains "Import as private", which sets the mark before the first chunk is written, so nothing is ever embedded elsewhere. An imported King Louie export that says `"private": true` is imported private (Q7) |
+| An imported chat | May be marked; the import dialog gains "Import as private", which sets the mark before the first chunk is written, so nothing is ever embedded elsewhere. An imported King Louie export that says `"private": true` is imported private (R-LI-28) |
 | A bridge chat (Telegram, Discord) | Cannot be marked (`PRIVATE_BRIDGE_CHAT`): its text passes through the bridge's servers, and a mark there would mislead. Designer decision D-LI-3 |
 | A chat opened with `--kl-standalone-once` | Uses the desktop's own store and local servers; the mark behaves as on any standalone desktop |
 
-In a private case (Q3 as recommended) executors, envelopes and the outbound gate work as now. The
+In a private case (R-LI-24) executors, envelopes and the outbound gate work as now. The
 envelope and delta cards get one host-built line, after the caps and before the wording: "This case
 is private. This send leaves your hardware." A research child (`case-researcher`) inherits the
 policy.
@@ -736,7 +621,7 @@ showing a now-private chat's excerpts, by the open H4 item's cautious reading.
 Not solved by scope: text from a now-private chat that an ordinary chat recalled before the mark is
 in that chat's stored replies and tool results. The confirmation counts those chats and names them.
 
-### 8.4 Embeddings and rerank (Q4 as recommended)
+### 8.4 Embeddings and rerank (R-LI-25)
 
 - **Index.** `pendingEmbeddings` and `countPending` already take `localOnly` and leave an imported
   chat's chunks out for any key that is not `local:`. A private chat is treated the same way in the
@@ -756,14 +641,18 @@ in that chat's stored replies and tool results. The confirmation counts those ch
 - **Rerank.** `keepLocalReason` returns `private-chat` for a scope that holds one; the local
   cross-encoder runs, Jev does not.
 
-### 8.5 Other stores a private chat touches (Q11 as recommended)
+### 8.5 Other stores a private chat touches (R-LI-32)
 
 - **Memory.** A private chat's prompt gets the memory context as any chat does (it goes to a local
-  model). Nothing is captured from a private chat: `capture*` calls that carry a private chat's id
-  are dropped, and the memory pane's manual "remember this" is refused there.
-- **Cron, background results, checkpoints.** A job or task created in a private chat stores the
-  chat id and runs under that chat's snapshot. A result posted into another chat is refused unless
-  that chat is private.
+  model). Nothing is written from a private chat. That is true today by construction: the only
+  caller of `MemoryManager#capture*` is the Memory pane's own form (`memory:capture`), which belongs
+  to no chat (§21). A test pins that no code under a chat turn calls `capture*`, and the inventory
+  test (§7.6) lists `memory-manager.js`, so an automatic capture added later has to skip a private
+  chat to pass.
+- **Background tasks** started in a private chat run under that chat's snapshot (§7.1). **Cron
+  jobs, spawned sessions and remote dispatch** start a run that belongs to no chat, on the default
+  profile; creating one from a private chat is refused (`PRIVATE_NO_DETACHED_RUN`) until the owner
+  rules whether such a run may carry the mark (the L1 plan's "New questions").
 - **The cross-case index** (`<casesRoot>/.index/`, BM25, no model). A private case's hits to a case
   that is not private are always `text: null, redacted: true`, including a disclosable fact and the
   brief's title and objective, because that text would enter a hosted model's prompt there. Between
@@ -775,7 +664,7 @@ in that chat's stored replies and tool results. The confirmation counts those ch
 - **`delegate`** and the other acting fleet chat tools are refused in a private chat
   (`PRIVATE_NO_DELEGATE`).
 
-### 8.6 Exports, logs, LongHaul (Q7 as recommended)
+### 8.6 Exports, logs, LongHaul (R-LI-28)
 
 - **Export.** Allowed after a one-line warning. The JSON export carries `"private": true`; the
   Markdown export starts with a line saying the chat was private. Import honours the JSON flag.
@@ -840,8 +729,12 @@ Rules:
 
 ### 9.3 When a local model is down (R-LI-12)
 
-A refused connection, a timeout or a 5xx from a local server is a failure like any other to
-`FailoverPolicy`. What the router does next depends only on the list it was given:
+A timeout or a 5xx from a local server is a failure like any other to `FailoverPolicy`. A refused
+connection or a name that does not resolve is not: the classifier reads those as a timeout and
+retries three times with a backoff before it moves on (§21), which would make a switched-off local
+server slow down every call that lists it first. The local transport therefore throws
+`LOCAL_UNREACHABLE`, and the classifier sends that to the next target at once. What the router does
+next depends only on the list it was given:
 
 - **No policy.** It fails over along the list. `callTags` gains `failoverFrom:
   'local/workstation/qwen3:8b'` beside the existing `failover: true`, and the cost line says
@@ -861,9 +754,9 @@ the local embedder and cross-encoder run in the embed worker.
 
 - A profile whose roles all hold local targets needs no network for a turn.
 - A list with a hosted target first and a local one after it answers offline through failover, once
-  the hosted call fails. How fast depends on how the failure is classified (a refused or unresolved
-  connection should fail over at once; a timeout is retried first). The plan measures this on the
-  fake server and, if needed, makes a name-resolution failure fail over without a retry.
+  the hosted call fails. That takes a few seconds per call: a hosted provider that cannot be reached
+  is retried three times with a backoff before the router moves on (§21). An owner who works offline
+  often puts the local model first.
 - What still needs the network offline: the web tools, hosted embedders, the catalog refresh (which
   keeps its cached copy), and the first download of the embed worker's models.
 
@@ -1065,7 +958,7 @@ works simply shows no "add adapter" control.
 | `models:local.recheck` | Resolves again, shows old and new addresses; the owner confirms a new pin | |
 | `models:local.probe` | Probes one model again | |
 | `models:local.setModelInfo` | Owner-entered context, image input, adapters | |
-| `models:local.fromOllama` | Q10 (a): makes a local server from `models.ollama.baseUrl`; a second call rewrites profile targets | |
+| `models:local.fromOllama` | R-LI-31: makes a local server from `models.ollama.baseUrl`; a second call rewrites profile targets | |
 | `chat:markPrivate` | §8.1 | Returns the confirmation's facts first (`{ confirm: false }`), marks on `{ confirm: true }` |
 | `case:markPrivate` | §8.1, §8.2 | Same two-step shape |
 | `models:profiles.*` (existing) | Carries `localOnly` | A save may add a role to it; removing one needs `models:local.unsetLocalOnly`, a window-only channel |
@@ -1099,7 +992,8 @@ name, a model's name or a probe's reply text is marked `untrustedText: true` (§
 - No block (the default) means no local server in service mode.
 - No feature and no port is added: L1 opens no listener, so `DEFAULT_FEATURES` and `DEFAULT_PORTS`
   do not change and the example `service.json` files stay valid as they are. `examples/fleet/` holds
-  five of them (`frontdoor`, `gpu-box`, `laptop`, `mac`, `web-01`), not the four `CLAUDE.md` says.
+  five of them (`frontdoor`, `gpu-box`, `laptop`, `mac`, `web-01`), not the four `CLAUDE.md` says;
+  the L1 docs task corrects that line.
 - An example is added to `examples/fleet/gpu-box/service.json` with a loopback server only.
   `tests/helpers/example-denylist.js` allows `127.0.0.1`, `0.0.0.0` and the documentation ranges and
   nothing else, and the documentation ranges are public addresses that §5.2 refuses, so an example
@@ -1166,6 +1060,8 @@ L1 (errors carry `code`; the message is the owner-facing sentence):
 | `PRIVATE_BRIDGE_CHAT` | Marking a bridge chat |
 | `PRIVATE_CASE_REQUIRED` | Attaching a private chat to a case that is not private, without the confirmation |
 | `PRIVATE_NO_DELEGATE` | A fleet acting tool in a private chat |
+| `PRIVATE_NO_DETACHED_RUN` | `Cron`, `SessionsSpawn` or `RemoteDispatch` creating a run from a private chat |
+| `LOCAL_UNREACHABLE` | A local server refused the connection or its name did not resolve; the router moves to the next target at once |
 | `PRIVATE_ONE_WAY` | Anything that tries to clear a mark |
 
 LongHaul: `LOCAL_REQUIRED`, `LOCAL_CALLS_MISSING`. L2 wire codes are in §14.8.
@@ -1177,7 +1073,7 @@ One node (the **serving node**) offers local models its administrator listed. An
 consuming node → hub → serving node over the links both already hold to the same hub, sealed between
 the two nodes. Off by default on every node and on the hub.
 
-L2 is for service nodes (Q6 as recommended). An attached desktop gets it through its service; a
+L2 is for service nodes (R-LI-27). An attached desktop gets it through its service; a
 standalone desktop does not.
 
 ### 14.1 The seam L1 leaves
@@ -1210,7 +1106,7 @@ the hub, and a sealed channel. The hub is not trusted for any of them beyond del
 The hub could hand each node the other's public key, and a dishonest hub could hand out its own. So
 the keys move by hand, once, administrator to administrator:
 
-1. On each node the administrator has an identity record (Q5 as recommended): `king-louie-service
+1. On each node the administrator has an identity record (R-LI-26): `king-louie-service
    identity record`. A node whose record state is not `match` neither serves nor uses L2
    (`identity_unrecorded`).
 2. On each node, `king-louie-service inference offer` prints one line built from the record:
@@ -1250,7 +1146,9 @@ exactly as L1 cannot verify who owns a marked server.
 
 ### 14.4 The hub forwards, and nothing more
 
-Two new node messages, on both kinds of hub (the F3 relay and the front door):
+Two new node messages. Both kinds of hub build their node side through one function
+(`startRelay`, `src/frontdoor/relay.js`, called by `relay run` and by the front door profile, which
+calls `registerNodeMethods`), so this is one implementation with a switch per host:
 
 | Message | Kind | Hub does |
 |---|---|---|
@@ -1496,7 +1394,7 @@ code for the local servers card, as `tests/longhaul-verify-web.test.js` does for
 | T11 | A model call that never passes the router | The provider-level refusal, the per-caller changes of §7.5, and the inventory test (§7.6) |
 | T12 | A hosted embedder or reranker receives a private chat's text | The store's `localOnly` filter, the query rule, `keepLocalReason` (§8.4) |
 | T13 | Another chat recalls a private chat into a hosted model's prompt | The scope rule (§8.3). Text recalled before the mark stays where it was copied (§18) |
-| T14 | A pinned LAN address is another machine on another network | Q9: a private chat needs a pinned certificate for anything but loopback |
+| T14 | A pinned LAN address is another machine on another network | R-LI-30: a private chat needs a pinned certificate for anything but loopback |
 | T15 | A hostile server on the LAN answers with tool calls or instructions | It is a model's output like any other: tool approvals, the outbound gate and the untrusted-text rules are unchanged. The owner marked it |
 | T16 | The probe is used to make the app send requests into the LAN | Only the owner (desktop) or the administrator (service) can add a server; a probe sends fixed strings |
 | T17 | A compromised renderer presses "Add" or "Make private" | It can press what the owner can press, as everywhere in the app; it cannot unmark, and it cannot add a server that fails the check |
@@ -1508,7 +1406,7 @@ code for the local servers card, as `tests/longhaul-verify-web.test.js` does for
 | T23 | L2: a node that is not on the allow list, or an OAuth client, asks for inference | A signed refusal; no MCP route exists |
 | T24 | L2: the serving node used as an open proxy into its LAN | A fixed path, a parsed body with a fixed key list, its own pinned transport, only offered models (§14.5) |
 | T25 | L2: a serving node passes requests on to a hosted model or another node | It can offer only its own guarantee-grade local servers (§14.7); what those servers do is R-LI-21 |
-| T26 | L2: the service account rewrites the allow list or the trusted servers | Admin-owned directories the service cannot write, with the `approvers/` rules; the identity record (Q5) |
+| T26 | L2: the service account rewrites the allow list or the trusted servers | Admin-owned directories the service cannot write, with the `approvers/` rules; the identity record (R-LI-26) |
 | T27 | L2: a consuming node's service account is compromised | It can use that node's daily limit and read that node's own prompts; it cannot raise the limit or reach models not allowed to it |
 | T28 | L2: one session's keys are used to pose as another node or in another session | Both node ids are signed and in the key derivation; the session id is in every frame's associated data |
 
@@ -1562,7 +1460,9 @@ Following from the design, stated so nobody is surprised:
   probe file and, on a desktop, a local server's entry or a chat's mark. This is the stage 1 gap,
   unchanged. In service mode the local servers, the allow list and the trusted nodes are admin-owned
   and out of the service account's reach.
-- **Plain `http` on a LAN** (if Q9 is ruled (a)): the pinned address proves a place, not a machine.
+- **Plain `http` on a LAN** is allowed for cost only (R-LI-30): the pinned address proves a place,
+  not a machine, so a prompt from a chat that is not private can reach whoever holds that address on
+  another network. A private chat never uses such a server.
 - **What was sent stays sent**, and text an ordinary chat recalled from a chat before it was marked
   stays in that chat.
 - **A hosted embedder's provider may keep what it was sent**; dropping the vectors removes the local
@@ -1575,7 +1475,8 @@ Following from the design, stated so nobody is surprised:
   its text is withheld.
 - **Usage a server does not report** is estimated; a daily token limit in L2 is then approximate.
 - **L2 delay.** A hub that drops a `cancel` keeps the serving node busy for up to 30 s.
-- **Existing log lines** were not audited for message text (§21).
+- **Log lines.** The files this spec touches log no message text today (§21); a provider's own
+  error message is logged as it came and could quote a request. The rest of the app was not audited.
 - **Only the Windows x64 package** has been checked for the embed worker; the keep-local embedder
   inherits that.
 
@@ -1636,7 +1537,7 @@ No unit test touches the network or a real model.
   no chaining, no text in the ledger or the log.
 - `inference-consuming.test.js`: a `node` server through the registry, streaming, credit, Stop with
   and without a delivered `cancel`, a broken session, failover with and without a policy.
-- `inference-hub.test.js`: forwarding off by default, the checks, the byte limit, on both hub kinds.
+- `inference-hub.test.js`: forwarding off by default, the checks, the byte limit, under both hosts' switches.
 - `service-cli-inference.test.js`: `offer`, `trust`, `allow`, `list`, `remove`, the prompts, `--yes`.
 - `inference-e2e.test.js`: real processes, a hub and two nodes on loopback with test certificates,
   on Windows or as root, as `tests/approvals-e2e.test.js` runs.
@@ -1652,25 +1553,39 @@ one tool call and prints what the probe found. It costs nothing and needs a real
 
 ### 20.1 Stage L1
 
+The plan is `docs/superpowers/plans/2026-10-13-local-inference-l1.md`. The order is set by one rule:
+**the guarantee is never half on.** Nothing lets an owner mark a chat or a case private, or a role
+local-only, until every model-call path is behind the check. So the checks and the callers that
+bypass the router come first (tasks 3, 8, 9, 10, 12, 13), and the owner's paths to the marks come
+after them (task 14). Each item of §22 is carried by the task named there.
+
 | # | Task | One line |
 |---|---|---|
-| L1-1 | Address classes | `local-address.js`: the classifier, the resolve-and-pin step, its tests |
-| L1-2 | The pinned transport | `local-transport.js`, and `BaseLLMProvider#request` using an instance's transport |
-| L1-3 | The registry and the provider | `local-servers.js`, `LocalServerProvider`, the `local` key in `explainTarget` and the router's instances |
-| L1-4 | Config authority | The sealed settings key and IPC on the desktop; `localInference` in the admin `service.json`, `ADMIN_ONLY_KEYS`, the example |
-| L1-5 | The probe and the catalog | Probe steps, `local-probes.json`, `setLocalModels('local', …)`, the cloud id rule |
-| L1-6 | The egress policy in the resolver and the router | `egress.js`, `localOnly` on profiles, the filter, the fail-closed check, the provider-level refusal |
-| L1-7 | The private mark | Schema step 5, `markPrivate`, `case.yaml` `private`, the two IPC channels, the refusals of §8.2 |
-| L1-8 | The callers outside the router | Ingest, the context assembler, compaction, image generation, voice, `delegate`; the inventory test |
-| L1-9 | Recall | The scope rule, the embedding rules, the keep-local embedder, Jev's reason |
-| L1-10 | Usage | `local` on metrics and events, the reply's line, the totals, the case budget, `failoverFrom` |
-| L1-11 | UI | The local servers card, badges, the mark and its dialog, the composer line, the refusal messages |
-| L1-12 | LongHaul | The local client, the four adapters, their prompts and caches |
-| L1-13 | The adapter seam | The `adapter` field on a target, the declared adapters, `requestModelFor` |
-| L1-14 | Smoke, docs, the full suite | `smoke:local`, `CLAUDE.md`, the install guide, one `npm test` and `npm run test:e2e` |
+| 1 | Address classes | `local-address.js`: the classifier and the resolve-and-pin step |
+| 2 | The pinned transport | `local-transport.js`; `BaseLLMProvider#request` uses an instance's transport |
+| 3 | The egress policy in the resolver | `egress.js`; the filter, borrowing among local targets, the two codes; `localOnly` read but not yet saveable |
+| 4 | The private column | Schema step 5, `HistoryStore#markPrivate`, `private` on chat refs; no caller yet |
+| 5 | The registry and the provider | `local-servers.js`, `LocalServerProvider`, the `local` key in the core and the router (one instance per server), $0 for `local`, an unreachable local server fails over at once |
+| 6 | The probe and the catalog | Probe steps, `local-probes.json`, `setLocalModels('local', …)`, the cloud id rule |
+| 7 | Who may configure it | The sealed key and `models:local.*` on the desktop; `localInference` in the admin `service.json`; the Ollama conversion |
+| 8 | The policy through the core and the router | The snapshot reads the marks; child runs and runs with only a chat id; the router's fail-closed check; the provider-level refusal |
+| 9 | The callers that bypass the router, and the inventory test | The context assembler, loop compaction, image generation, voice, the advisor, tools that start a run elsewhere; `tests/egress-inventory.test.js` |
+| 10 | Recall | The scope rule, embeddings (`local:` only, the keep-local embedder, the query), Jev's reason, the marking transaction |
+| 11 | Usage | `local` on metrics and events, totals, `failoverFrom` |
+| 12 | Cases: model calls | `case.yaml` `private`, `CaseRuntime#routedProvider`, ingest, wake-ups, the stage 8 verify pass, the budget hook |
+| 13 | Cases: surfaces | The cross-case index, the case tools over MCP and in chat, the envelope card's line |
+| 14 | The owner's paths | `chat:markPrivate`, `case:markPrivate`, `localOnly` on a profile, attach rules, the export flag and its import |
+| 15 | UI | The local servers card, badges, the mark and its dialog, the composer line, cost lines, refusals |
+| 16 | The adapter seam | `adapter` on a target, declared adapters, `requestModelFor` |
+| 17 | LongHaul: the local client, rewrite, abstain check | No product default changes |
+| 18 | LongHaul: LLM rerank, digests | No product default changes |
+| 19 | End to end | One new e2e file; the whole e2e suite once |
+| 20 | Docs, examples, the smoke script, the full suite | `CLAUDE.md`, the five example `service.json` files, `smoke:local`, one `npm test` |
 
-L1-1 to L1-6 are in order; L1-7 to L1-13 can follow in any order after L1-6, with L1-8 and L1-9
-before the stage is called done, because the guarantee is not true without them.
+Tasks 1 to 4 may run in parallel; 5 to 10 are one after another; 11 and 16 and the LongHaul pair run
+beside them; 12 to 15 follow a rebase on cases stage 8, which is being built at the same time and
+edits `src/cases/`, `src/ipc/chat-handlers.js`, the renderer, the MCP tool definitions and
+`CLAUDE.md`. Stage 8's verify pass is one more model call the check must cover (task 12).
 
 ### 20.2 Stage L2
 
@@ -1679,7 +1594,7 @@ before the stage is called done, because the guarantee is not true without them.
 | L2-1 | The protocol document and vectors | `docs/protocol/inference-v1.md`, `tests/vectors/inference-v1/` |
 | L2-2 | Handshake and key schedule | Signed `open`, `accept`, `refuse`; X25519; HKDF |
 | L2-3 | Frames | The shared sealer with a label and a session id; sequence rules; the inner types |
-| L2-4 | Hub forwarding | The two messages on the relay and the front door, their switches and the byte limit |
+| L2-4 | Hub forwarding | The two messages in the one hub code path, the two hosts' switches and the byte limit |
 | L2-5 | Trust files and the CLI | `offer`, `trust`, `allow`, `list`, `remove`; the directory rules; the identity record check |
 | L2-6 | `node.yaml` | The `inference` key in `NODE_YAML_KEYS`, the example on `gpu-box` |
 | L2-7 | The serving node | `NodeInferenceService`: offers, the body rules, its transport to the local server |
@@ -1693,8 +1608,8 @@ before the stage is called done, because the guarantee is not true without them.
 
 - Padding or cover traffic in L2.
 - Comparing the four recall jobs against a hosted model of the same size.
-- Private memory entries (Q11 (c)); an embedder on a local server as "local" (Q4 (c)).
-- A standalone desktop as an L2 client (Q6).
+- Private memory entries (R-LI-32); an embedder on a local server as "local" (R-LI-25).
+- A standalone desktop as an L2 client (R-LI-27).
 - A way to tell which machine holds a LAN address without TLS.
 - Speech to text (none exists); a local image model.
 - Adapter training, storage and evaluation (step 6).
@@ -1713,64 +1628,81 @@ that leans on it; none is stated as fact above.
 | A4 | Some of them report a context size in their model listing | Context is `unknown` and owner-entered for that kind |
 | A5 | A local model's first call after idle can take longer than 15 s | `timeoutMs` is unused |
 | A6 | How each server kind loads an adapter (§12.3) | The one function of §12.3 changes |
-| A7 | The bundled Node's `crypto` has X25519 key agreement and HKDF (nothing in `src/` uses either today) | L2 would need a dependency; the protocol is unchanged |
+| A7 | Electron 41's bundled Node has X25519 key agreement and HKDF in `crypto`. Checked in this worktree's Node (v24.13.0), where both work; nothing in `src/` uses either today, and the packaged app was not run | L2 would need a dependency; the protocol is unchanged |
 | A8 | A streamed OpenAI-compatible reply can be asked to end with a usage record, and each kind honours it | Tokens are estimated (§9.1 rule 4) |
 | A9 | An Ollama server reports a digest per model | The digest is absent and a re-pulled tag is not noticed |
 
-Read in the code, but not all the way:
+Read in the code after the first draft (on `main`, 9ec78a3), and what each changes:
 
-- That every bridge and gateway turn reaches `createAgentRuntime` with a snapshot that knows its
-  chat. A bridge chat cannot be private, so this matters only for the inventory test.
-- Which code calls `MemoryManager#capture*` during a chat turn.
-- Whether an agent-panel run (`snapshotModels({})` in `src/ipc/agent-handlers.js`) can be started
-  from a chat. If it can, it needs that chat's id.
+| Point | What the code says | Effect on this spec |
+|---|---|---|
+| Child runs and their snapshot | `agentExecutorAdapter.execute` (`create-core.js`) passes `turnModels` from the parent's rethreaded requester (`options.approvalRequester.turnModels`). With no parent turn, `createAgentRuntime` calls `snapshotModels({ profileId })` with no chat: "with no parent turn, the default profile applies". The chat id travels separately (`executorOptions.chatId`) and is not used for the snapshot | `SpawnAgent`, `BackgroundTask` and a workflow started under a turn inherit the policy through the requester. A run that has a chat id and no parent snapshot must snapshot by that chat (§7.1); L1 task 8 |
+| Gateway, cron and webhook runs | `gatewayServer.on('agent:message')`, `CronExecutor` and `WebhookHandler` call `agentExecutorAdapter.execute` with a session, not a chat | They are never private. A job or session created from a private chat is a new owner question (the plan's "New questions"); until ruled, the tools that create one are refused there |
+| Agent-panel runs | `src/ipc/agent-handlers.js` takes agent ids and no chat id; `runOptions()` is `snapshotModels({})` | Not chat-bound; no policy applies, and none can |
+| Memory capture | `MemoryManager#capture*` has one caller outside the class: the `memory:capture` IPC, called only from the Memory pane's own form (`handleCaptureMemory`, `renderer.js`). No chat turn writes memory, and the IPC carries no chat id | R-LI-32's "never written" is true today by construction; §8.5 pins it with a test so a later automatic capture cannot add a private chat's text |
+| A refused connection | `classifyError` (`src/providers/error-classifier.js`) puts `econnrefused`, `enotfound`, `eai_again` and `fetch failed` in `TIMEOUT_MARKERS`: retried up to three times with a 1 s to 10 s backoff, then `FALLBACK_MODEL` (`failover-policy.js`) | A local server that is not running would delay every call by seconds before failing over. The local transport throws `LOCAL_UNREACHABLE`, which the classifier sends to the next target at once (§9.3) |
+| One hub code path | `startRelay` (`src/frontdoor/relay.js`) is called by `relay run` (`src/service/commands/relay.js`) and by the front door profile (`src/frontdoor/profile.js`), and it calls `registerNodeMethods` | L2's forwarding is one implementation with two switches (§14.4) |
+| Log lines on the paths this spec touches | `chat-handlers.js`, `base-provider.js`, `ollama-provider.js`, `inference-router.js`, `vector-search.js`, `embed-indexer.js`, `embedder-host.js`, `call-model.js`, `context-assembler.js`, `availability.js`, `ollama.js`: every `info`, `warn` and `error` line carries a label, a count or `err.message`, never a message's text | The rule of R-LI-28 holds there today. A provider's error message is written as it came and could quote a request; that is the residual (§18) |
+| X25519 and HKDF | In this worktree's Node (v24.13.0) `crypto.generateKeyPairSync('x25519')`, `crypto.diffieHellman` and `crypto.hkdfSync` work | A7 holds for Node 24. Electron 41's bundled Node was not run; the L2 plan checks it in the packaged app |
+
+Still not verified:
+
 - Whether the gateway exposes any call that saves settings. None was found by a search for
   `setSettings`; the sealed key covers it either way.
-- Whether the F3 relay host and the front door build their hub through the same code.
-  `registerNodeMethods` is called from one place (`src/frontdoor/relay.js`); whether both hosts go
-  through it was not read. L2-4 treats them as two places until shown otherwise.
-- How `FailoverPolicy` classifies a refused connection and a failed name lookup (§10).
-- Whether existing log lines carry message text.
-- The case `verify` role's caller: stage 8 is specified on `spec/cases-c8`, not on `main`.
+- Whether a workflow's tasks keep the parent turn's requester all the way down
+  (`planner-executor.js`, `workflow-engine.js`). L1 task 8 tests it and refuses the workflow in a
+  private chat if they do not.
+- The case `verify` role's caller: stage 8 is on `feat/cases-c8`, not on `main`. L1 is rebased on it
+  before its cases tasks.
+- Log lines outside the files listed above.
 
-Differences from `CLAUDE.md` found while reading: `examples/fleet/` has five `service.json` files;
-the case budget's comment that real providers report `costUsd: 0` for an unknown model no longer
-matches `buildLlmCallMetrics`, which reports `null`.
+Differences from `CLAUDE.md` found while reading, corrected by the L1 docs task: `examples/fleet/`
+has five `service.json` files, not four; the case budget's comment that real providers report
+`costUsd: 0` for an unknown model no longer matches `buildLlmCallMetrics`, which reports `null`.
 
 ## 22. Where the approved design is harder than it sounds
+
+Each item names the L1 task (§20.1) or the L2 section that carries it.
 
 1. **"Enforced in the router" covers most calls, not all.** Ingest holds a provider instance
    directly; the context assembler and the loop's compaction send the owner's message and old tool
    results to `api.openai.com` through a client that never passes `BaseProvider.request`; image
-   generation and ElevenLabs have their own clients; the embedder is process-wide. §7.2 adds a
-   provider-level refusal, §7.5 changes each caller, §7.6 keeps the list honest.
-2. **The router has no idea what chat it serves.** The policy has to be frozen into `TurnModels`
-   and carried by every child run; any snapshot built without its chat is a hole.
+   generation and ElevenLabs have their own clients; the embedder is process-wide. Tasks 8 (the
+   provider-level refusal), 9 (each caller and the inventory test), 10 (the embedder) and 12
+   (ingest).
+2. **The router has no idea what chat it serves.** The policy is frozen into `TurnModels` and
+   carried by every child run; a run with a chat id and no parent snapshot takes the chat's. Tasks 3
+   and 8.
 3. **"The sealed `kl-session-v1` channel" cannot carry this.** It is a local pipe protocol with a
    pre-shared secret. Two nodes share no secret and no code agrees one. L2 is a new protocol with its
    own key agreement (§14.5).
 4. **"The existing pinned hub links" end at the hub.** No hub forwards between nodes and link RPC
-   has no stream. L2 changes both hubs (§14.4).
+   has no stream. L2 adds forwarding to the one hub code path (§14.4).
 5. **A node knows no other node.** Pinning needs an administrator step on each side (§14.3), and
-   arguably the identity record on both (Q5).
+   the identity record on both (R-LI-26).
 6. **$0 already exists, and is not tied to "local".** Any non-cloud `ollama` id is $0 at any
    address, and the case budget reads a $0 call with tokens as unpriced. §9 separates "free" from
-   "local" and teaches the budget the difference.
+   "local"; tasks 5 and 11 mark local calls, task 12 teaches the budget the difference.
 7. **A target's provider must be one of the 14, with one instance per provider.** Many local servers
    under one key need the model id to carry the server and the router to key instances by server
-   (§5.1).
+   (§5.1). Task 5.
 8. **"Rebuilt locally" needs two embedders at once** when the owner's configured embedder is hosted
-   (Q4). `EmbedderHost` holds one.
+   (R-LI-25). `EmbedderHost` holds one. Task 10.
 9. **An imported chat's query still goes to a hosted embedder today.** A private chat must not do
-   that, so the query path gains a rule the import rule never had (§8.4).
+   that, so the query path gains a rule the import rule never had (§8.4). Task 10.
 10. **The example rules and the address rules disagree.** The examples may show only loopback and
     the documentation ranges; the documentation ranges are public, which the check refuses. LAN
-    examples have to be host names (§13.3).
-11. **A pinned LAN address is not a machine** (Q9), and overlay-network addresses sit in a range
-    that is not private in the usual sense (Q8).
+    examples are host names (§13.3). Tasks 7 and 20. There are five example `service.json` files;
+    `CLAUDE.md` says four, and task 20 corrects it.
+11. **A pinned LAN address is not a machine** (R-LI-30), and overlay-network addresses sit in a
+    range that is not private in the usual sense (R-LI-29). Tasks 1 and 5.
 12. **The three per-question recall jobs do not fit LongHaul's model-call plan**, which is built for
-    per-session setup calls. They follow the Jev adapters' two-run convention instead (§11.2).
+    per-session setup calls. They follow the Jev adapters' two-run convention instead (§11.2). Tasks
+    17 and 18.
 13. **A private chat can leak without any model call by King Louie**: through memory, a delegate
-    session on another node, and the case tools over MCP (Q11).
+    session on another node, and the case tools over MCP (R-LI-32). Tasks 9 and 13.
 14. **Private needs a capable local `main` in a case**, although judging on a local model is not a
-    goal (§7.4).
+    goal (§7.4). The confirmation says what is missing (task 14).
+15. **A refused connection is retried before it fails over** (§21). A local server that is switched
+    off would slow every call that lists it first. Task 5.
+16. **A run with no parent turn snapshots the default profile, not its chat** (§21). Task 8.
