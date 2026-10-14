@@ -552,3 +552,48 @@ describe('runDueWakeups', () => {
     assert.deepStrictEqual([w.lastOutcome, w.attempts], ['failed', 1]);
   });
 });
+
+describe('runWakeupTurn: what the close receives (cases stage 8)', () => {
+  // Every endTurn of the runtime, with the fields it was given.
+  const spy = (runtime) => {
+    const ends = [];
+    const endTurn = runtime.endTurn.bind(runtime);
+    runtime.endTurn = (turn, fields) => { ends.push(fields); return endTurn(turn, fields); };
+    return ends;
+  };
+
+  it('the acted close passes verify and the case-tool results of the turn', async () => {
+    const { runtime, clock } = harness({
+      judge: [
+        { type: 'tool_use', toolCalls: [{ toolName: 'Ledger', toolUseId: 't1', parameters: { action: 'query' } }] },
+        { type: 'tool_use', toolCalls: [{ toolName: 'Read', toolUseId: 't2', parameters: { file_path: 'brief.md' } }] },
+        { type: 'text', content: 'Checked the ledger.' }
+      ]
+    });
+    const c = await activeCase(runtime);
+    dueWakeup(runtime, c, clock);
+    const ends = spy(runtime);
+    assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, ran: 1 });
+    assert.strictEqual(ends.length, 1);
+    assert.strictEqual(ends[0].verify, true);
+    assert.deepStrictEqual(ends[0].evidence.toolResults.map((r) => [r.tool, r.action, r.ok]), [['Ledger', 'query', true]]);
+    assert.strictEqual(ends[0].journalKind, 'wakeup');
+  });
+
+  it('the quiet, skipped and failed closes pass no verify', async () => {
+    const quiet = harness({ orient: '{"changed": false, "why": "nothing new"}' });
+    const skipped = harness({ settings: { budgets: { turnsPerDay: 1 } } });
+    const failed = harness({ judge: [() => { throw new Error('judge boom'); }] });
+    const expected = [[quiet, 'quiet'], [skipped, 'skipped'], [failed, 'failed']];
+    for (const [h, outcome] of expected) {
+      const c = await activeCase(h.runtime);
+      if (outcome === 'skipped') h.runtime.budget(c.id).charge('turnsPerDay', 1);
+      dueWakeup(h.runtime, c, h.clock);
+      const ends = spy(h.runtime);
+      assert.deepStrictEqual(await h.runtime.runDueWakeups(h.clock.now), { ...zero, [outcome]: 1 }, outcome);
+      assert.strictEqual(ends.length, 1, outcome);
+      assert.strictEqual(ends[0].verify, undefined, outcome);
+      assert.strictEqual(ends[0].evidence, undefined, outcome);
+    }
+  });
+});

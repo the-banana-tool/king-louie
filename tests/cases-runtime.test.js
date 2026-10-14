@@ -464,3 +464,62 @@ describe('CaseRuntime scope', () => {
     assert.strictEqual(rt.brief(info.id).isGatingComplete(), true);
   });
 });
+
+describe('CaseRuntime turn close (cases stage 8)', () => {
+  const journals = (dir) => fs.readdirSync(path.join(dir, 'journal')).filter((n) => n.endsWith('.md')).sort().map((n) => fs.readFileSync(path.join(dir, 'journal', n), 'utf8'));
+
+  it('a turn carries the marks taken when it began', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot' });
+    rt.ledger(info.id).assert({ stmt: 'Plat says 2.12 acres', subject: 'lot', attr: 'acreage', value: 2.12, source: src });
+    const turn = await rt.beginTurn(info.id, { turnId: 'turn-1' });
+    assert.deepStrictEqual(
+      [turn.marks.ledgerLines, turn.marks.decisions, turn.marks.jobRecords, turn.marks.head, turn.marks.dirty],
+      [1, 0, 0, null, null]
+    );
+    await rt.endTurn(turn, { summary: 'read' });
+  });
+
+  it('hands evidence and verify to the close step, and only when the caller passed them', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot' });
+    const seen = [];
+    rt._closeProgress = async (turn, opts) => { seen.push([turn.turnId, opts]); return { block: null }; };
+    await rt.endTurn(await rt.beginTurn(info.id, { turnId: 'turn-1' }), { summary: 'plain' });
+    const evidence = { toolResults: [{ tool: 'Ledger', action: 'query', ok: true, text: 'none' }] };
+    await rt.endTurn(await rt.beginTurn(info.id, { turnId: 'turn-2' }), { summary: 'normal', evidence, verify: true });
+    assert.deepStrictEqual(seen, [['turn-1', { evidence: null, verify: false }], ['turn-2', { evidence, verify: true }]]);
+  });
+
+  it('a close step that throws still commits the turn and releases the lock', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot' });
+    const before = await commitCount(info.dir);
+    rt._closeProgress = async () => { throw new Error('boom'); };
+    const turn = await rt.beginTurn(info.id, { turnId: 'turn-1' });
+    rt.ledger(info.id).assert({ stmt: 'Plat says 2.12 acres', subject: 'lot', attr: 'acreage', value: 2.12, source: src });
+    await rt.endTurn(turn, { summary: 'wrote', journal: 'Recorded the acreage.', verify: true });
+    assert.strictEqual(await commitCount(info.dir), before + 1);
+    assert.strictEqual(fs.existsSync(path.join(info.dir, '.kl', 'lock')), false);
+    assert.strictEqual(rt.runningTurn(info.id), null);
+    assert.deepStrictEqual(journals(info.dir), ['Recorded the acreage.\n']);
+    assert.strictEqual(await git.isDirty(info.dir), false);
+  });
+
+  it('a block the close step returns is the first text of the journal entry, and is written with no other text too', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot' });
+    const block = '## Verification (written by King Louie)\n- Now met: sc-001 (f-0001).';
+    rt._closeProgress = async () => ({ block });
+    await rt.endTurn(await rt.beginTurn(info.id, { turnId: 'turn-1' }), { summary: 'one', journal: 'The contract is signed.', verify: true });
+    assert.deepStrictEqual(journals(info.dir), [`${block}\n\nThe contract is signed.\n`]);
+    fs.rmSync(path.join(info.dir, 'journal'), { recursive: true });
+    fs.mkdirSync(path.join(info.dir, 'journal'));
+    await rt.endTurn(await rt.beginTurn(info.id, { turnId: 'turn-2' }), { summary: 'two', journal: null, verify: true });
+    assert.deepStrictEqual(journals(info.dir), [`${block}\n`]);
+    // Anything but a non-empty string is no block.
+    rt._closeProgress = async () => ({ block: 42 });
+    await rt.endTurn(await rt.beginTurn(info.id, { turnId: 'turn-3' }), { summary: 'three', journal: null, verify: true });
+    assert.strictEqual(journals(info.dir).length, 1);
+  });
+});

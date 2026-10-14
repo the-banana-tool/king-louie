@@ -7,6 +7,7 @@ const {
   CASE_TOOL_NAMES, WAKEUP_BASE_TOOLS, shapeToolDefinitions, buildCaseSystemPrompt, casePrompter
 } = require('./chat-integration');
 const { NO_RETRY } = require('./roles');
+const { toolResultRow } = require('./verify/evidence');
 const { createLogger } = require('../logging');
 const UsageTracker = require('../tracking/usage-tracker');
 
@@ -186,11 +187,17 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
   // failure before `due`/`ids` are recomputed below (or the outer catch
   // itself) must still have something to mark failed.
   let ids = dueIds;
+  // Cases stage 8 (R-C8-9): the results of this turn's case-tool calls, for
+  // the close of a turn that acted.
+  const caseToolResults = [];
   const close = async (outcome, journal, summary) => {
     if (closed) return { outcome };
     closed = true;
     try {
-      await runtime.endTurn(turn, { summary, journal, journalKind: 'wakeup' });
+      // Only a wake-up that acted is verified (spec §6.9); a quiet, skipped
+      // or failed one passes neither field.
+      const progress = outcome === 'acted' ? { evidence: { toolResults: caseToolResults }, verify: true } : {};
+      await runtime.endTurn(turn, { summary, journal, journalKind: 'wakeup', ...progress });
     } catch (err) {
       log.warn(`Wake-up commit for case ${caseId} failed: ${err.message}`);
     }
@@ -274,6 +281,12 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
         // The turn's frozen models (spec 2026-09-27 §6.6).
         turnModels: turn.models || null
       });
+      if (executor && typeof executor.on === 'function') {
+        executor.on('postExecute', ({ toolName, parameters, result }) => {
+          const row = toolResultRow(toolName, parameters, result);
+          if (row) caseToolResults.push(row);
+        });
+      }
       await runtime.ensureRoleTested(turn.caseId, 'judge', { turn });
       const Loop = host.AgentLoop;
       const loop = new Loop(runtime.routedProvider(turn, { role: 'judge' }), executor, {

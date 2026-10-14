@@ -116,6 +116,18 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - *`tree-clean` and `branch-merged`* are also `unknown` when `dirty` is not a number, and when the snapshot has no branch (nothing to match a PR's head against).
 - *`CaseRuntime.progressView(id, { scope, file })`* is the computed view on its own (what `closeReadiness` reads when no view is handed in). `progress` of a closed case with a frozen record returns `{ scope: null, view: null, readiness: null, summary: <the frozen one>, abandoned, closed: { …, frozen: true } }`; a closed case with no frozen record (closed before this stage) has `closed: null` and the view computed from what is there.
 
+**Task 7 (what a turn wrote).**
+
+- *`turn.marks` is a little wider than written.* It also has `jobs` (`{ <job id>: <recorded results> }`; the sum alone cannot say which job grew) and `states` (each confirmed criterion's computed state when the turn began, `null` when it could not be computed or the case is closed), which Task 8's block reads to name a criterion that left `met` during the turn. `turnMarks(runtime, caseId)` and `statesOf(view)` are exported from `evidence.js`. Marks that cannot be taken are `null` and never fail `beginTurn`; a turn with no marks finds only the facts that carry its id, and no decision.
+- *Jobs are read with `JobStore` from the case's files*, with or without an executor registry (as Task 6 reads them), so `jobRecords` is not forced to 0 when the host has no registry.
+- *`CaseRecords.decisions()` returns a list* (the note under Task 2 says `{ entries, errors }`; that is `readJsonl` in `jsonl.js`, which `records.js` unwraps). `marks.decisions` is its length, as this task says.
+- *`postExecute` already carries the call's `parameters`*, so the row's `action` is read there and no `preExecute` is matched.
+- *`toolResultRow`.* `ok` is `result.ok === true`; `action` is `parameters.action` on one line, at most 40 characters, else `null`; a result that cannot be made JSON reads `(result could not be read)`. The 4,000 characters are kept by cutting the row that crosses the limit and dropping the rows after it.
+- *An evidence source is called `fn(runtime, turn, { facts, decisions })`*: the third argument is what the collector already found this turn (the executor-results source needs the facts). Every row is reduced to `{ kind, id, text, refs }` (40, 40 and 200 characters, `refs` strings only); a row with no `kind` or `id` is dropped; a source that throws is logged and skipped. A job row's `refs` are the facts found this turn whose source is under `sources/<executor>/<job id>/`.
+- *`changed` is exactly the three lists.* A turn that only retracted a fact, or whose only new rows came from an extra source, is not `changed`, so no pass runs for it; the states are recomputed on read all the same.
+- *The close steps run only when `verify` is passed*; `endTurn` ignores a `block` that is not a non-empty string.
+- *Tests.* The harness of `tests/cases-chat.test.js` gained `toolEvents` (what the executor emits while the loop runs) and keeps the executor's listeners; no assertion of an existing test changed.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.

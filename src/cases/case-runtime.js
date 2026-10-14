@@ -16,7 +16,7 @@ const { CaseRecords } = require('./records');
 const { AbandonedStore } = require('./abandoned');
 const { VerificationStore } = require('./verify/store');
 const { progressView, summaryLine } = require('./verify/status');
-const { resolveEvidence } = require('./verify/evidence');
+const { resolveEvidence, turnMarks, collectTurnEvidence } = require('./verify/evidence');
 const { closeReadiness } = require('./verify/readiness');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
@@ -1380,6 +1380,9 @@ class CaseRuntime {
         // The models this turn uses, frozen at launch (models spec
         // 2026-09-27 §6.6): a switch during the turn applies to the next one.
         turn.models = this._turnModels(fresh.id, chatId);
+        // Cases stage 8 (spec §6.9): where the record stood when the turn
+        // began, so its close can tell what the turn wrote. Taken last.
+        turn.marks = this._turnMarks(fresh);
         this.turns.set(fresh.id, turn);
         this._notify('case:changed', { caseId: fresh.id, what: 'turn', running: true, source });
         return turn;
@@ -1406,8 +1409,39 @@ class CaseRuntime {
     };
   }
 
-  async endTurn(turn, { summary = '', journal = null, journalKind = 'turn' } = {}) {
+  // Never fails the turn: a turn with no marks finds only what carries its id.
+  _turnMarks(meta) {
     try {
+      return turnMarks(this, meta.id);
+    } catch (err) {
+      log.warn(`Case ${meta.slug}: the turn's marks could not be taken: ${err.message}`);
+      return null;
+    }
+  }
+
+  // The guarded steps of a turn's close (cases stage 8 spec §6.9), before
+  // the render, the journal and the commit: → { block }, host-written text
+  // that goes first in the turn's journal entry, or null. `evidence` is
+  // { toolResults } from the caller, this turn's case-tool calls only; it is
+  // filtered and capped again here and its ids are never trusted. Only the
+  // normal exit of an owner turn and a wake-up that acted pass `verify`.
+  async _closeProgress(turn, { evidence = null, verify = false } = {}) {
+    if (!verify) return { block: null };
+    collectTurnEvidence(this, turn, evidence || {});
+    return { block: null };
+  }
+
+  async endTurn(turn, { summary = '', journal = null, journalKind = 'turn', evidence = null, verify = false } = {}) {
+    try {
+      // Nothing in the close steps may keep the turn from committing and
+      // releasing its lock (spec §6.9).
+      let block = null;
+      try {
+        const closed = await this._closeProgress(turn, { evidence, verify });
+        if (closed && typeof closed.block === 'string' && closed.block.trim()) block = closed.block.trim();
+      } catch (err) {
+        log.warn(`Case ${turn.caseId}: the progress steps of the turn's close failed: ${err.message}`);
+      }
       const records = new CaseRecords(turn.dir);
       let blockers = [];
       try {
@@ -1416,7 +1450,10 @@ class CaseRuntime {
         log.warn(`Blockers for ${turn.caseId} unavailable: ${err.message}`);
       }
       records.renderOpenItems(new FactLedger(turn.dir).view().facts, { blockers });
-      if (journal && String(journal).trim()) records.writeJournal(journalKind, journal, this.now());
+      // The host-written block goes first; it is written with no other text too.
+      const text = journal && String(journal).trim() ? String(journal) : '';
+      const entry = block ? (text ? `${block}\n\n${text}` : block) : text;
+      if (entry) records.writeJournal(journalKind, entry, this.now());
       this._closeTurnMeta(turn);
       const committed = await this._commit(turn.dir, `${turn.turnId}: ${oneLine(summary) || 'turn'}`, turn.caseId);
       this._reindex(turn.caseId);
