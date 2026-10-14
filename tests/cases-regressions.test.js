@@ -544,3 +544,149 @@ describe('F5-doc: a document in one case informs and guards another (cases stage
     assert.ok(r.blocked.some((x) => x.reason === 'non-disclosable-entity'));
   });
 });
+
+// Cases stage 8 (spec §1, §6; plan Task 17): a case says how far along it is
+// from its record. The model's criteria count for nothing until the owner
+// confirms them; a criterion is met only on evidence code checked; a fact
+// that changes makes it stale and stops the model's close proposal; only the
+// owner's press closes, and the list is frozen then. One case, one step per
+// test. The verify pass runs after the reply (R-C8-11): its result lands in
+// its own journal entry, and the test waits for it with verifyIdle. No
+// network and no model: the router is a stub with a scripted reply.
+describe('F8-progress: progress comes from the record, and only the owner closes', () => {
+  const { ProgressTool } = require('../src/tools/builtin/case-progress-tool');
+  const HEADING = '## Verification (written by King Louie)';
+  const OWNER = ['We are done when the lot has closed within 90 days of listing. Yes, confirm both of those criteria.'];
+  const metrics = { provider: 'openai', model: 'judge-model', inputTokens: 100, outputTokens: 20, totalTokens: 120, costUsd: 0.02 };
+  const verdict = (...criteria) => ({ type: 'text', content: JSON.stringify({ criteria }), llmMetrics: metrics });
+  const met = (id, ...evidence) => ({ id, status: 'met', evidence, note: 'The record shows it.' });
+  const s = {};
+
+  const begin = async () => {
+    s.n += 1;
+    s.clock.now = new Date(s.clock.now.getTime() + 60000);
+    s.turn = await s.rt.beginTurn(s.id, { turnId: `turn-${s.n}` });
+    s.opts = { caseContext: s.rt.caseContext(s.turn, { ownerMessages: OWNER }) };
+    return s.turn;
+  };
+  const end = async (verify) => {
+    await s.rt.endTurn(s.turn, { summary: 'test', journal: `Turn ${s.n}.`, verify });
+    await s.rt.verifyIdle(s.id);
+  };
+  const row = (id) => s.rt.progressView(s.id).criteria.find((r) => r.id === id);
+  const journals = () => {
+    const dir = path.join(s.dir, 'journal');
+    return fs.readdirSync(dir).filter((f) => f.endsWith('.md')).sort()
+      .map((name) => [name.replace(/^[\d-]+-/, '').replace(/\.md$/, ''), fs.readFileSync(path.join(dir, name), 'utf8')]);
+  };
+  const lastJournal = (kind = null) => journals().filter(([k]) => !kind || k === kind).pop();
+  const sourced = (stmt, value, over = {}) => LedgerTool.execute({ action: 'assert', provenance: 'sourced', stmt, subject: 'sale', attr: 'contract', value, source: { kind: 'url', ref: 'https://records.example.org/lakeside' }, ...over }, s.opts);
+
+  it("the model's two criteria are proposed, and gating waits for the owner", async () => {
+    s.clock = { now: new Date('2026-10-21T09:00:00.000Z') };
+    s.n = 0;
+    s.script = { reply: null };
+    const router = { routeTargets: async () => (typeof s.script.reply === 'function' ? s.script.reply() : s.script.reply) };
+    const tracker = { record: (e) => ({ provider: e.provider, model: e.model, totalTokens: e.totalTokens, cost: e.costUsd }) };
+    s.rt = new CaseRuntime({
+      root: tmp(),
+      now: () => s.clock.now,
+      getSettings: () => withCaseProfile({ cases: { timeZone: 'UTC' } }),
+      host: { inferenceRouter: router, getUsageTracker: () => tracker }
+    });
+    const info = await s.rt.createCase({ title: 'Lakeside lot', objective: 'Convert the lot to cash', objectiveBy: 'owner' });
+    Object.assign(s, { id: info.id, dir: info.dir });
+    s.rt.brief(s.id).update('why', 'Cash is needed for another repair', { provenance: 'user' });
+    await begin();
+    for (const item of ['Signed contract at or above the floor', 'Closed within 90 days of listing']) {
+      const r = await BriefTool.execute({ action: 'append', field: 'successCriteria', item }, s.opts);
+      assert.strictEqual(r.criterion.state, 'proposed');
+    }
+    assert.deepStrictEqual(s.rt.scopeView(s.id).criteria.map((r) => [r.id, r.state, r.origin]), [['sc-001', 'proposed', 'model'], ['sc-002', 'proposed', 'model']]);
+    assert.throws(() => s.rt.completeGating(s.id), /no criterion is confirmed by the owner/);
+    // A quote that is not the owner's own phrase confirms nothing.
+    const paraphrase = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Sold inside three months', provenance: 'user', quote: 'closed within 90 days of listing' }, s.opts);
+    assert.strictEqual(paraphrase.code, 'SCOPE_NOT_IN_QUOTE');
+    assert.match(s.rt.progress(s.id).summary, /^0 of 0 confirmed criteria met · 2 proposed \(not counted\) · not ready to close/);
+  });
+
+  it('the owner confirms one by a press and one by a quoted answer; gating completes', async () => {
+    const first = row('sc-001');
+    await s.rt.applyScopeAction(s.id, { action: 'confirm', target: 'sc-001', hash: first.hash, by: 'owner-action', channel: 'in-app' });
+    const asked = await ProgressTool.execute({ action: 'askScope' }, s.opts);
+    assert.strictEqual(asked.ok, true);
+    await end(false);
+    const quote = 'Yes, confirm both of those criteria.';
+    await s.rt.answerQuestion(s.id, asked.questionId, { channel: 'in-app-chat', optionId: 'all', quote });
+    const rows = s.rt.scopeView(s.id).criteria;
+    assert.deepStrictEqual(rows.map((r) => [r.id, r.state, r.confirmed.by]), [['sc-001', 'confirmed', 'owner-action'], ['sc-002', 'confirmed', 'question']]);
+    assert.strictEqual(rows[1].confirmed.quote, quote);
+    s.rt.completeGating(s.id);
+    assert.strictEqual(s.rt.getCase(s.id).status, 'active');
+    assert.deepStrictEqual(s.rt.progressView(s.id).criteria.map((r) => r.state), ['unmet', 'unmet']);
+  });
+
+  it('a turn records a sourced fact and the verify pass cites it: met, in a verification entry of its own', async () => {
+    await begin();
+    const f = await sourced('The contract was signed at 81,000', 81000);
+    s.fact = f.fact;
+    s.script.reply = verdict(met('sc-001', s.fact.id), met('sc-002', 'f-0999'));
+    await end(true);
+    assert.strictEqual(row('sc-001').state, 'met');
+    assert.deepStrictEqual(row('sc-001').evidence.map((e) => e.id), [s.fact.id]);
+    // Code refused the verdict that cites a fact the ledger does not hold.
+    assert.strictEqual(row('sc-002').state, 'unmet');
+    const [kind, text] = lastJournal();
+    assert.strictEqual(kind, 'verification');
+    assert.ok(text.startsWith(`${HEADING}\n- Now met: sc-001 (${s.fact.id}).`), text);
+  });
+
+  // The turn that supersedes the fact is told at its own close (the block
+  // that heads its journal entry), and the cache then reads stale, so the
+  // next turn start raises no criterion-regressed trigger for it: that
+  // trigger is for a change between turns (cases-runtime.test.js pins it).
+  it("a later turn supersedes the fact: stale, said at that turn's close, and the model cannot propose done", async () => {
+    await begin();
+    s.script.reply = verdict();
+    const newer = await sourced('The buyer withdrew; the contract is void', 0, { supersedes: s.fact.id });
+    s.voided = newer.fact;
+    await end(true);
+    assert.strictEqual(row('sc-001').state, 'stale');
+    assert.match(row('sc-001').reasons.join(' '), new RegExp(`${s.fact.id} was superseded by ${s.voided.id}`));
+    const [, entry] = lastJournal('turn');
+    assert.ok(entry.startsWith(`${HEADING}
+- Now stale: sc-001 (${s.fact.id} was superseded by ${s.voided.id}).`), entry);
+    const turn = await begin();
+    assert.deepStrictEqual(turn.triggers.filter((t) => t.kind === 'criterion-regressed'), []);
+    assert.match(turn.orientation, /sc-001 \[stale\]/);
+    const refused = await ProgressTool.execute({ action: 'proposeDone' }, s.opts);
+    assert.deepStrictEqual([refused.ok, refused.code], [false, 'NOT_READY']);
+    assert.ok(refused.open.some((i) => i.id === 'criteria-met' && /sc-001 is stale/.test(i.fix)));
+  });
+
+  it('new evidence and an accepted verdict make both met, and the model proposes done', async () => {
+    const signed = await sourced('A second buyer signed at 83,500', 83500);
+    const closed = await sourced('The sale closed 61 days after listing', 61, { attr: 'closed-after-days' });
+    s.script.reply = verdict(met('sc-001', signed.fact.id), met('sc-002', closed.fact.id));
+    await end(true);
+    assert.deepStrictEqual(s.rt.progressView(s.id).criteria.map((r) => [r.id, r.state]), [['sc-001', 'met'], ['sc-002', 'met']]);
+    await begin();
+    const proposed = await ProgressTool.execute({ action: 'proposeDone', note: 'Both criteria are met on the record.' }, s.opts);
+    assert.strictEqual(proposed.ok, true);
+    s.closeQuestion = proposed.questionId;
+    await end(false);
+    // Proposing closes nothing.
+    assert.strictEqual(s.rt.getCase(s.id).status, 'active');
+  });
+
+  it("the owner's press closes the case, and the list is frozen", async () => {
+    const res = await s.rt.answerQuestion(s.id, s.closeQuestion, { channel: 'in-app', optionId: 'done' });
+    assert.deepStrictEqual(res.effect, { applied: 'done' });
+    const meta = s.rt.getCase(s.id);
+    assert.deepStrictEqual([meta.status, meta.statusReason.by], ['done', 'owner']);
+    const p = s.rt.progress(s.id);
+    assert.strictEqual(p.closed.frozen, true);
+    assert.deepStrictEqual(p.closed.criteria.map((c) => [c.id, c.state]), [['sc-001', 'met'], ['sc-002', 'met']]);
+    assert.strictEqual(p.view, null);
+  });
+});
