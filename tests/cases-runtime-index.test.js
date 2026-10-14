@@ -11,6 +11,7 @@ const yaml = require('js-yaml');
 const { CaseRuntime, SimilarCaseError } = require('../src/cases');
 const { mergeSettings } = require('../src/core/settings');
 const { resolveCaseSettings } = require('../src/cases/defaults');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -22,6 +23,7 @@ const newRuntime = () => new CaseRuntime({ root: tmp(), now: clock });
 async function activate(rt, id) {
   rt.brief(id).update('why', 'Need it done', { provenance: 'user' });
   rt.brief(id).append('successCriteria', 'Done by year end', { provenance: 'model' });
+  confirmAll(rt, id);
   return rt.completeGating(id);
 }
 
@@ -97,9 +99,12 @@ describe('type-aware briefs and extras', () => {
     const c = await rt.createCase({ title: 'Phone agent maintenance', type: 'software-repo', objective: 'Keep the phone agent healthy' });
     rt.brief(c.id).update('why', 'Calls get dropped', { provenance: 'user' });
     rt.brief(c.id).append('successCriteria', 'No dropped calls for a week', { provenance: 'model' });
-    assert.throws(() => rt.completeGating(c.id), /still missing: repo/);
+    // Cases stage 8 (R-C8-2): the model's criterion counts for nothing yet.
+    assert.throws(() => rt.completeGating(c.id), /still missing: successCriteria \(no criterion is confirmed by the owner; ask with Progress askScope\), repo\./);
     assert.throws(() => rt.brief(c.id).update('repo', '/work/phone-agent', { provenance: 'model' }), /"repo" can only be set/);
     rt.brief(c.id).update('repo', 'https://github.com/example/phone-agent.git', { provenance: 'user' });
+    assert.throws(() => rt.completeGating(c.id), /still missing: successCriteria \(no criterion is confirmed by the owner; ask with Progress askScope\)\./);
+    confirmAll(rt, c.id);
     assert.strictEqual(rt.completeGating(c.id).status, 'active');
     const general = await rt.createCase({ title: 'Garage sale' });
     assert.throws(() => rt.brief(general.id).update('repo', '/work/x', { provenance: 'user' }), /Unknown brief field "repo"/);

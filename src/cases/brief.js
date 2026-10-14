@@ -48,6 +48,11 @@ const isEmpty = (v) => v === undefined || v === null
   || (typeof v === 'string' && !v.trim())
   || (Array.isArray(v) && v.length === 0);
 
+// A scope view that cannot be read (`{ error }`) has no confirmed criterion.
+const hasConfirmedCriterion = (scopeView) => Array.isArray(scopeView?.criteria)
+  && scopeView.criteria.some((row) => row && row.state === 'confirmed');
+const NO_CONFIRMED_CRITERION = 'no criterion is confirmed by the owner; ask with Progress askScope';
+
 class Brief {
   // extraFields: the case type's brief fields ([{ name, kind: 'text',
   // userOnly, validate? }]); gatingFields: the fields of required
@@ -140,10 +145,15 @@ class Brief {
     return labor;
   }
 
-  missingForGating() {
+  // Cases stage 8 (spec §6.1, R-C8-2): with a scope view (ScopeStore.view),
+  // `successCriteria` is missing until the owner confirmed one criterion; a
+  // proposed criterion counts for nothing. Callers that have no view get the
+  // rule as it was (the list is not empty).
+  missingForGating({ scopeView = null } = {}) {
     const { data } = this.read();
     const required = [...GATING_REQUIRED, ...this.gatingFields.filter((f) => !GATING_REQUIRED.includes(f))];
-    return required.filter((f) => isEmpty(data[f]));
+    const scoped = scopeView !== null && scopeView !== undefined;
+    return required.filter((f) => (f === 'successCriteria' && scoped ? !hasConfirmedCriterion(scopeView) : isEmpty(data[f])));
   }
 
   // The named writer for the prose under the front matter.
@@ -157,11 +167,17 @@ class Brief {
     return Boolean(this.read().data?.gating?.complete);
   }
 
-  completeGating() {
-    const missing = this.missingForGating();
+  // A brief that is already `gating.complete` is never cleared and never
+  // refused for the scope rule: a case past gating is not sent back (R-C8-2).
+  completeGating({ scopeView = null } = {}) {
+    const already = this.isGatingComplete();
+    const scoped = !already && scopeView !== null && scopeView !== undefined;
+    const missing = this.missingForGating(scoped ? { scopeView } : {});
     if (missing.length) {
-      throw new BriefError(`Gating pass incomplete; still missing: ${missing.join(', ')}.`);
+      const named = missing.map((f) => (f === 'successCriteria' && scoped ? `${f} (${NO_CONFIRMED_CRITERION})` : f));
+      throw new BriefError(`Gating pass incomplete; still missing: ${named.join(', ')}.`);
     }
+    if (already) return this.read().data;
     const { data, body } = this.read();
     data.gating = { ...(data.gating || {}), complete: true, completedAt: new Date().toISOString() };
     this._write(data, body);

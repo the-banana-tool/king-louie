@@ -16,6 +16,7 @@ const { CaseRuntime } = require('../src/cases');
 const { LedgerTool, BriefTool, DecideTool, RecommendTool } = require('../src/tools/builtin/case-tools');
 const { AskTool, FailTool } = require('../src/tools/builtin/case-unattended-tools');
 const { withCaseProfile } = require('./helpers/profile-settings');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -27,6 +28,7 @@ async function openCase(runtime, title, { active = true, ownerMessages = [] } = 
   if (active) {
     runtime.brief(info.id).update('why', 'Cash is needed for another repair', { provenance: 'user' });
     runtime.brief(info.id).append('successCriteria', 'Closed within 90 days', { provenance: 'model' });
+    confirmAll(runtime, info.id);
     runtime.completeGating(info.id);
   }
   // Stage 2: Decide and Recommend need a registered turn (requireReoriented).
@@ -337,11 +339,13 @@ describe('F4-detour: off-objective work is routed, not done inline', () => {
     const door = await runtime.createCase({ title: 'Rear door quotes', type: 'outreach', objective: 'Three written quotes for the rear door' });
     runtime.brief(door.id).update('why', 'Rain gets in under the door', { provenance: 'user' });
     runtime.brief(door.id).append('successCriteria', 'Three written quotes', { provenance: 'model' });
+    confirmAll(runtime, door.id);
     runtime.completeGating(door.id);
     const phone = await runtime.createCase({ title: 'Phone agent maintenance', type: 'software-repo', objective: 'Keep the phone agent reporting call status correctly' });
     runtime.brief(phone.id).update('why', 'Dropped calls show as completed', { provenance: 'user' });
     runtime.brief(phone.id).append('successCriteria', 'Status polling reports dropped calls', { provenance: 'model' });
     runtime.brief(phone.id).update('repo', repo, { provenance: 'user' });
+    confirmAll(runtime, phone.id);
     runtime.completeGating(phone.id);
     const phoneTurn = await runtime.beginTurn(phone.id, { turnId: 'wakeup-1', source: 'wakeup' });
     await runtime.endTurn(phoneTurn, { summary: 'looked at the repository' });

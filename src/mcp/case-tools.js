@@ -381,7 +381,8 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     const releaseSlot = takeRateSlot();
     let info;
     try {
-      info = await rt.createCase({ title: args.title.trim(), type: args.type || 'general', objective: args.objective });
+      // Cases stage 8: the objective was held to the owner's quote above.
+      info = await rt.createCase({ title: args.title.trim(), type: args.type || 'general', objective: args.objective, objectiveBy: 'owner' });
     } catch (err) {
       releaseSlot();
       if (err && err.code === 'SIMILAR_CASES') {

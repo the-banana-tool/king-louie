@@ -100,7 +100,10 @@ function registerCaseHandlers(ipcMain, context = {}) {
     if (!type && withPlaybooks.type) type = withPlaybooks.type;
     let info;
     try {
-      info = await runtime().createCase({ title: title.trim(), type: type || 'general', objective: objective || '', force: force === true });
+      // Cases stage 8: an objective typed in the form is the owner's.
+      info = await runtime().createCase({
+        title: title.trim(), type: type || 'general', objective: objective || '', force: force === true, ...(objective ? { objectiveBy: 'owner' } : {})
+      });
     } catch (err) {
       // Cases stage 5: a similar open case needs the owner's confirmation (force).
       if (err && err.code === 'SIMILAR_CASES') return { ok: false, error: err.message, code: 'SIMILAR_CASES', similar: err.similar };

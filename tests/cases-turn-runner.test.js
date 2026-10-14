@@ -18,6 +18,7 @@ const { parseOrient } = require('../src/cases/turn-runner');
 const { withCaseProfile } = require('./helpers/profile-settings');
 const InferenceRouter = require('../src/providers/inference-router');
 const UsageTracker = require('../src/tracking/usage-tracker');
+const { confirmAll } = require('./helpers/case-scope');
 
 initializeTools();
 
@@ -90,6 +91,7 @@ async function activeCase(rt, title = 'Lakeside lot') {
   const info = await rt.createCase({ title, objective: 'Convert the lot to cash', force: true });
   rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
   rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+  confirmAll(rt, info.id);
   rt.completeGating(info.id);
   return rt.getCase(info.id);
 }

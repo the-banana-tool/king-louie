@@ -11,6 +11,7 @@ const git = require('./git');
 const { CaseStore } = require('./case-store');
 const { FactLedger } = require('./ledger');
 const { Brief, BriefError } = require('./brief');
+const { ScopeStore, ScopeError, textHash, validateCriterionText, ORIGINS, CONFIRMING_ORIGINS } = require('./scope');
 const { CaseRecords } = require('./records');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
@@ -45,6 +46,22 @@ const BUDGET_FACT_NOTE = "Budget limits change only through the owner's answer o
 // one is running, or a wake-up's own beginTurn finding another wake-up
 // still in flight). `sameProcess` routes to one of two fixed messages
 // instead, and never builds the quit/delete sentence at all.
+// Cases stage 8: the owner's scope actions (applyScopeAction).
+const SCOPE_ACTIONS = Object.freeze(['confirm', 'drop', 'edit', 'add']);
+
+// What writeScope is told of a new string, checked before brief.md is
+// touched (ScopeStore checks it again when it writes): an origin it knows,
+// and a confirmation only with an origin that may be born confirmed and a
+// `by` naming who confirmed.
+function assertBirth({ origin, confirmed }) {
+  if (!ORIGINS.includes(origin)) throw new ScopeError('SCOPE_INVALID', `A scope origin is one of ${ORIGINS.join(', ')}.`);
+  if (confirmed === null || confirmed === undefined) return;
+  if (!CONFIRMING_ORIGINS.includes(origin)) throw new ScopeError('SCOPE_INVALID', `An entry of origin ${origin} is proposed until the owner confirms it.`);
+  if (typeof confirmed !== 'object' || typeof confirmed.by !== 'string' || !confirmed.by) {
+    throw new ScopeError('SCOPE_INVALID', 'A confirmation names who confirmed ("by").');
+  }
+}
+
 class CaseBusyError extends Error {
   constructor(title, { pid, lockPath, sameProcess = false, holderIsWakeup = false } = {}) {
     let message;
@@ -252,10 +269,31 @@ class CaseRuntime {
     this.creating = (this.creating || 0) + 1;
     try {
       const info = await this.store.create({ title: opts.title, type: opts.type, objective: opts.objective });
+      await this._recordCreatedObjective(info, opts.objective, opts.objectiveBy);
       this._reindex(info.id);
       return info;
     } finally {
       this.creating -= 1;
+    }
+  }
+
+  // Cases stage 8 (spec §6.1): who gave the objective a case was created
+  // with. `objectiveBy` is the host's to pass, like `force`: 'owner' (IPC
+  // case:create with the form's objective; create_case, which held it to the
+  // owner's quote) is the only value that confirms; 'detour' is the router's
+  // prefill; anything else is the model's. Never fails the create: without
+  // the record the objective reads `legacy` and proposed.
+  async _recordCreatedObjective(info, objective, objectiveBy) {
+    if (typeof objective !== 'string' || !objective.trim()) return;
+    const born = objectiveBy === 'owner'
+      ? { origin: 'owner-create', confirmed: { by: 'owner-create', at: this.now().toISOString() } }
+      : { origin: objectiveBy === 'detour' ? 'detour' : 'model', confirmed: null };
+    try {
+      await this.systemAction(info.id, 'scope', async (meta) => {
+        this.scope(meta.id).reconcile(this.brief(meta.id).read().data, { origins: { objective: born }, addedBy: born.origin });
+      }, { commitMessage: 'case created: who gave the objective' });
+    } catch (err) {
+      log.warn(`Case ${info.slug}: recording who gave the objective failed: ${err.message}`);
     }
   }
 
@@ -288,6 +326,225 @@ class CaseRuntime {
   }
 
   records(id) { return new CaseRecords(this.getCase(id).dir); }
+
+  // ---- Scope (cases stage 8 spec §6.1): who wrote each criterion ----
+
+  scope(id) {
+    return new ScopeStore(this.getCase(id).dir, { now: () => this.now() });
+  }
+
+  // brief.md joined with .kl/scope.json, in memory. Never writes, so it is
+  // safe outside the lock (the panel, open_case, a closed case). A brief
+  // that cannot be read gives { error } (and so no confirmed criterion).
+  scopeView(id) {
+    const meta = this.getCase(id);
+    let data;
+    try {
+      // Reading needs no case-type fields, so no playbook package is loaded.
+      data = new Brief(meta.dir).read().data;
+    } catch (err) {
+      if (err instanceof BriefError) return { error: err.message };
+      log.warn(`Scope of ${meta.slug}: brief.md unreadable: ${err.message}`);
+      return { error: 'brief.md is missing or unreadable' };
+    }
+    return this.scope(meta.id).view(data);
+  }
+
+  // The one path that writes a criterion list or the objective AND who
+  // wrote it. Call it with the case lock held (a turn or a systemAction).
+  // `field` is 'successCriteria' (value: the new full list) or 'objective'
+  // (value: the text). Every string that is new gets `origin`, and is born
+  // confirmed only when `confirmed` ({ by, channel, quote, factId }) is
+  // given with a confirming origin (ScopeStore refuses the rest). Strings
+  // that were already there keep their entry, except those whose hash is in
+  // `alsoConfirm`, which `confirmed` confirms too (a gating answer that
+  // repeats a proposal). Nothing here decides that the owner said it: the
+  // caller did, and no tool parameter reaches `confirmed`.
+  // → { view, added: [rows], removed: [rows] }. Throws ScopeError.
+  writeScope(id, { field, value, origin, confirmed = null, addedBy = null, removedBy = null, alsoConfirm = [] } = {}) {
+    const meta = this.getCase(id);
+    if (meta.status === 'done' || meta.status === 'abandoned') {
+      throw new ScopeError('CASE_CLOSED', `Case is ${meta.status}. Its scope is read-only.`);
+    }
+    if (field !== 'successCriteria' && field !== 'objective') {
+      throw new ScopeError('SCOPE_INVALID', 'writeScope writes "successCriteria" or "objective".');
+    }
+    const brief = this.brief(meta.id);
+    const store = this.scope(meta.id);
+    // Strings that are in brief.md with no entry yet (first contact, a file
+    // edit) get their own origin first, so `origin` below marks only what
+    // this call adds.
+    const before = store.reconcile(brief.read().data);
+    const born = { origin, confirmed: confirmed || null };
+    const confirming = confirmed ? { by: confirmed.by, channel: confirmed.channel ?? null, quote: confirmed.quote ?? null, factId: confirmed.factId ?? null } : null;
+
+    if (field === 'objective') {
+      if (typeof value !== 'string') throw new ScopeError('SCOPE_INVALID', 'The objective is text.');
+      const hash = value.trim() ? textHash(value) : null;
+      const isNew = hash !== null && before.objective?.hash !== hash;
+      const origins = isNew ? { objective: born } : {};
+      // Checked before brief.md is touched: a refused origin writes nothing.
+      if (isNew) assertBirth(born);
+      brief.update('objective', value, { provenance: confirmed ? 'user' : 'model' });
+      let view = store.reconcile(brief.read().data, { origins, addedBy });
+      if (!isNew && confirming && view.objective && view.objective.state !== 'confirmed') {
+        assertBirth(born);
+        store.confirm(['objective'], { hashes: { objective: view.objective.hash }, ...confirming });
+        view = store.view(brief.read().data);
+      }
+      return { view, added: isNew ? [view.objective] : [], removed: [] };
+    }
+
+    if (!Array.isArray(value) || !value.every((v) => typeof v === 'string' && v.trim())) {
+      throw new ScopeError('SCOPE_INVALID', 'successCriteria is a list of non-empty strings.');
+    }
+    const hashes = value.map(textHash);
+    if (new Set(hashes).size !== hashes.length) {
+      throw new ScopeError('CRITERION_DUPLICATE', 'The same words are already a success criterion.');
+    }
+    const known = new Map(before.criteria.map((row) => [row.hash, row]));
+    const added = hashes.filter((h) => !known.has(h));
+    const kept = before.criteria.filter((row) => hashes.includes(row.hash));
+    const removed = before.criteria.filter((row) => !hashes.includes(row.hash));
+    if (added.length) {
+      assertBirth(born);
+      const problem = store.limitsProblem({ criteria: kept }, { adding: added.length, addingProposed: confirmed ? 0 : added.length });
+      if (problem) throw problem;
+    }
+    const again = (Array.isArray(alsoConfirm) ? alsoConfirm : []).map((h) => known.get(h)).filter((row) => row && row.state !== 'confirmed' && hashes.includes(row.hash));
+    if (again.length) {
+      if (!confirming) throw new ScopeError('SCOPE_INVALID', 'A confirmation names who confirmed ("by").');
+      assertBirth(born);
+    }
+    brief.update('successCriteria', value, { provenance: confirmed ? 'user' : 'model' });
+    const origins = Object.fromEntries(added.map((h) => [h, born]));
+    let view = store.reconcile(brief.read().data, { origins, addedBy, removedTexts: before, removedBy: removedBy || addedBy });
+    if (again.length) {
+      store.confirm(again.map((row) => row.id), { hashes: Object.fromEntries(again.map((row) => [row.id, row.hash])), ...confirming });
+      view = store.view(brief.read().data);
+    }
+    return { view, added: view.criteria.filter((row) => added.includes(row.hash)), removed };
+  }
+
+  // The owner's own scope actions (the panel and the card's buttons through
+  // IPC case:confirmScope, and the answer to a scope question). No case tool
+  // reaches this. `target` is 'objective', an `sc-` id or 'all-proposed';
+  // `confirm` and `drop` need the hash the owner was shown (for
+  // 'all-proposed' an object { [id]: hash }, with `objective` when the
+  // objective is meant too) and refuse SCOPE_STALE when the words changed;
+  // `edit` and `add` take the owner's typed `text` and record it confirmed,
+  // origin owner-action. → the new view.
+  async applyScopeAction(id, { action, target = null, hash = null, text = null, by = null, channel = null, quote = null, factId = null } = {}) {
+    const meta = this.getCase(id);
+    if (!SCOPE_ACTIONS.includes(action)) throw new ScopeError('SCOPE_INVALID', `A scope action is one of ${SCOPE_ACTIONS.join(', ')}.`);
+    if (typeof by !== 'string' || !by) throw new ScopeError('SCOPE_INVALID', 'A scope action names who made it ("by").');
+    if (meta.status === 'done' || meta.status === 'abandoned') {
+      throw new ScopeError('CASE_CLOSED', `Case is ${meta.status}. Its scope is read-only.`);
+    }
+    const act = () => {
+      const brief = this.brief(meta.id);
+      const store = this.scope(meta.id);
+      const before = store.reconcile(brief.read().data);
+      const stamp = { by, channel, quote, factId };
+      const rowOf = (ref) => {
+        const row = before.criteria.find((r) => r.id === ref);
+        if (!row) throw new ScopeError('CRITERION_NOT_FOUND', `No success criterion ${String(ref)} in this case.`);
+        return row;
+      };
+      const shown = (row, seen, name) => {
+        if (typeof seen !== 'string' || seen !== row.hash) throw new ScopeError('SCOPE_STALE', `${name} changed since it was shown; read it again.`);
+      };
+      const list = () => before.criteria.map((r) => r.text);
+
+      if (action === 'add') {
+        const clean = validateCriterionText(text);
+        if (before.criteria.some((r) => r.hash === textHash(clean))) throw new ScopeError('CRITERION_DUPLICATE', 'The same words are already a success criterion.');
+        const w = this.writeScope(meta.id, { field: 'successCriteria', value: [...list(), clean], origin: 'owner-action', confirmed: stamp, addedBy: by });
+        return { changed: true, line: `added ${w.added.map((r) => r.id).join(', ')}` };
+      }
+
+      if (action === 'edit') {
+        if (target === 'objective') {
+          if (typeof text !== 'string' || !text.trim()) throw new ScopeError('CRITERION_INVALID', 'An objective is text.');
+          if (before.objective && typeof hash === 'string') shown(before.objective, hash, 'The objective');
+          this.writeScope(meta.id, { field: 'objective', value: text.trim(), origin: 'owner-action', confirmed: stamp, addedBy: by });
+          return { changed: true, line: 'the objective was rewritten' };
+        }
+        const row = rowOf(target);
+        if (typeof hash === 'string') shown(row, hash, row.id);
+        const clean = validateCriterionText(text);
+        const newHash = textHash(clean);
+        if (before.criteria.some((r) => r.hash === newHash && r.id !== row.id)) throw new ScopeError('CRITERION_DUPLICATE', 'The same words are already a success criterion.');
+        const value = before.criteria.map((r) => (r.id === row.id ? clean : r.text));
+        const w = this.writeScope(meta.id, {
+          field: 'successCriteria', value, origin: 'owner-action', confirmed: stamp, addedBy: by, alsoConfirm: [newHash]
+        });
+        return { changed: true, line: newHash === row.hash ? `confirmed ${row.id}` : `${row.id} was rewritten as ${w.added.map((r) => r.id).join(', ')}` };
+      }
+
+      // confirm and drop: the rows the owner was shown.
+      let rows;
+      let objective = false;
+      if (target === 'all-proposed') {
+        const seen = hash && typeof hash === 'object' && !Array.isArray(hash) ? hash : {};
+        rows = before.criteria.filter((r) => r.state !== 'confirmed');
+        for (const row of rows) shown(row, seen[row.id], row.id);
+        if (action === 'confirm' && before.objective && before.objective.state !== 'confirmed' && seen.objective !== undefined) {
+          shown(before.objective, seen.objective, 'The objective');
+          objective = true;
+        }
+      } else if (target === 'objective') {
+        if (action === 'drop') throw new ScopeError('SCOPE_INVALID', 'The objective is rewritten, never dropped.');
+        if (!before.objective) throw new ScopeError('CRITERION_NOT_FOUND', 'This case has no objective to confirm.');
+        shown(before.objective, hash, 'The objective');
+        rows = [];
+        objective = before.objective.state !== 'confirmed';
+      } else {
+        const row = rowOf(target);
+        shown(row, hash, row.id);
+        rows = action === 'confirm' && row.state === 'confirmed' ? [] : [row];
+      }
+      if (!rows.length && !objective) return { changed: false };
+
+      if (action === 'confirm') {
+        const targets = [...rows.map((r) => r.id), ...(objective ? ['objective'] : [])];
+        const hashes = Object.fromEntries(rows.map((r) => [r.id, r.hash]));
+        if (objective) hashes.objective = before.objective.hash;
+        store.confirm(targets, { hashes, ...stamp });
+        return { changed: true, line: `confirmed ${targets.join(', ')}` };
+      }
+      const gone = new Set(rows.map((r) => r.id));
+      this.writeScope(meta.id, { field: 'successCriteria', value: before.criteria.filter((r) => !gone.has(r.id)).map((r) => r.text), origin: 'owner-action', addedBy: by, removedBy: by });
+      return { changed: true, line: `dropped ${[...gone].join(', ')}` };
+    };
+    // One journal entry per action that changed something: ids only, so it
+    // can be shown wherever the last journal entry is.
+    const result = await this.systemAction(meta.id, `scope ${action}`, async () => {
+      const r = act();
+      if (r.changed) {
+        this.records(meta.id).writeJournal('scope', `Scope: ${r.line} (by ${oneLine(by, 40)}${channel ? `, ${oneLine(channel, 40)}` : ''}).`, this.now());
+      }
+      return r;
+    });
+    if (result.changed) {
+      this._reindex(meta.id);
+      this._notify('case:changed', { caseId: meta.id, what: 'progress' });
+    }
+    return this.scopeView(meta.id);
+  }
+
+  // beginTurn's step (spec §6.9, §10): the scope record is written from
+  // brief.md as it is now. The first run on a case is its migration (every
+  // string `legacy`); later a string with no entry is a file edit. Never
+  // for a closed case, and never fails the turn.
+  _reconcileScope(meta) {
+    if (meta.status === 'done' || meta.status === 'abandoned') return;
+    try {
+      this.scope(meta.id).reconcile(new Brief(meta.dir).read().data);
+    } catch (err) {
+      log.warn(`Case ${meta.slug}: the scope record was not reconciled: ${err.message}`);
+    }
+  }
 
   // The cross-case entity index (cases stage 7 spec §3.6, R46): attached to
   // C5's CrossCaseIndex (which then keeps it current through rebuild,
@@ -575,7 +832,8 @@ class CaseRuntime {
     const meta = this.getCase(id);
     // Cases stage 6: required playbook gating questions come first.
     if (this.playbooks) this.playbooks.assertGatingComplete(meta.id);
-    this.brief(meta.id).completeGating();
+    // Cases stage 8 (R-C8-2): one criterion the owner confirmed.
+    this.brief(meta.id).completeGating({ scopeView: this.scopeView(meta.id) });
     if (meta.status === 'draft') this.setStatus(meta.id, 'active', { kind: 'gating' });
     this._reindex(meta.id);
     return this.getCase(meta.id);
@@ -1017,6 +1275,8 @@ class CaseRuntime {
         const r = budget.charge('turnsPerDay', 1, { turnId });
         if (r.crossedNow.length) this.onCrossings(meta.id, 'turnsPerDay', r.crossedNow);
       }
+      // Cases stage 8: after the owner-edits commit, before the hooks.
+      this._reconcileScope(meta);
       // Cases stage 6 (final review M-6): the playbook packages load once for
       // the hooks, the triggers and the orientation below.
       const closeEntriesScope = this.playbooks && typeof this.playbooks.beginEntriesScope === 'function'

@@ -7,6 +7,7 @@ const path = require('path');
 const { FactLedger, LedgerError } = require('../src/cases/ledger');
 const { QuestionStore, QuestionError } = require('../src/cases/questions');
 const { CaseRecords } = require('../src/cases/records');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -266,6 +267,7 @@ describe('answers through the runtime', () => {
     const info = await rt.createCase({ title, objective: 'Convert the lot to cash' });
     rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
     rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+    confirmAll(rt, info.id);
     rt.completeGating(info.id);
     return rt.getCase(info.id);
   }

@@ -7,6 +7,7 @@ const { registerCaseHandlers } = require('../src/ipc/case-handlers');
 const IPC = require('../src/ipc/constants');
 const { CaseRuntime } = require('../src/cases');
 const { historyContext } = require('./helpers/history-context');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -36,6 +37,20 @@ describe('case IPC', () => {
     assert.strictEqual(history.getChat('chat-1').caseId, created.case.id);
     const listed = await call(IPC.CASE_LIST);
     assert.deepStrictEqual(listed.cases.map((c) => c.id), [created.case.id]);
+  });
+
+  // Cases stage 8 (spec §6.1): the form's objective is the owner's.
+  it('case:create with an objective records it confirmed; without one there is no objective row', async () => {
+    const { call, runtime } = setup();
+    const withObjective = await call(IPC.CASE_CREATE, { title: 'Lakeside lot', objective: 'Convert the lot to cash' });
+    const o = runtime.scopeView(withObjective.case.id).objective;
+    assert.deepStrictEqual([o.state, o.origin, o.confirmed.by], ['confirmed', 'owner-create', 'owner-create']);
+    // objectiveBy is the host's to pass: the form cannot claim or disclaim it.
+    const claimed = await call(IPC.CASE_CREATE, { title: 'Permit filing', objective: 'File the county permit', objectiveBy: 'model' });
+    assert.strictEqual(runtime.scopeView(claimed.case.id).objective.origin, 'owner-create');
+    const without = await call(IPC.CASE_CREATE, { title: 'Roof quotes', objectiveBy: 'owner' });
+    assert.strictEqual(runtime.scopeView(without.case.id).objective, null);
+    assert.deepStrictEqual(runtime.scopeView(without.case.id).criteria, []);
   });
 
   it('attaches, detaches and refuses unknown cases or chats', async () => {
@@ -200,6 +215,7 @@ describe('case IPC, stage 2', () => {
     const info = await runtime.createCase({ title, objective: 'Convert the lot to cash', force: true });
     runtime.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
     runtime.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+    confirmAll(runtime, info.id);
     runtime.completeGating(info.id);
     return runtime.getCase(info.id);
   }

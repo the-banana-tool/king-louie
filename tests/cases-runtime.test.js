@@ -1,11 +1,13 @@
 // tests/cases-runtime.test.js
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const git = require('../src/cases/git');
 const { CaseRuntime, CaseBusyError, CaseNotFoundError, resolveCasesRoot } = require('../src/cases');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -223,6 +225,9 @@ describe('CaseRuntime', () => {
     assert.throws(() => rt.completeGating(info.id), /why/);
     rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
     rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+    // Cases stage 8 (R-C8-2): the model's criterion is a proposal.
+    assert.throws(() => rt.completeGating(info.id), /successCriteria/);
+    confirmAll(rt, info.id);
     assert.strictEqual(rt.completeGating(info.id).status, 'active');
   });
 
@@ -241,5 +246,221 @@ describe('CaseRuntime', () => {
   it('throws CaseNotFoundError for an unknown case', () => {
     const rt = new CaseRuntime({ root: tmp() });
     assert.throws(() => rt.getCase('nope'), CaseNotFoundError);
+  });
+});
+
+// Cases stage 8 (spec §6.1, §10): the scope record beside the brief.
+describe('CaseRuntime scope', () => {
+  const scopeFile = (dir) => path.join(dir, '.kl', 'scope.json');
+  // Every file of the case outside .git, with a hash of its bytes.
+  const snapshot = (dir) => {
+    const out = {};
+    const walk = (rel) => {
+      for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+        const next = rel ? `${rel}/${e.name}` : e.name;
+        if (e.name === '.git') continue;
+        if (e.isDirectory()) walk(next);
+        else out[next] = crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, next))).digest('hex');
+      }
+    };
+    walk('');
+    return out;
+  };
+  // A case as stage 7 left it: criteria in brief.md, no scope record.
+  const legacyCase = async (rt) => {
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    const brief = rt.brief(info.id);
+    brief.update('objective', 'Sell the Lakeside lot', { provenance: 'model' });
+    brief.update('successCriteria', ['Signed contract at or above the floor', 'Closed within 90 days'], { provenance: 'model' });
+    await rt.endTurn(await rt.beginTurn(info.id, { turnId: 'turn-0' }), { summary: 'setup' });
+    fs.rmSync(scopeFile(info.dir), { force: true });
+    return info;
+  };
+  const journals = (dir, kind) => fs.readdirSync(path.join(dir, 'journal')).filter((n) => n.includes(`-${kind}`));
+
+  it('a case created before this stage reads unchanged', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await legacyCase(rt);
+    const before = snapshot(info.dir);
+    const view = rt.scopeView(info.id);
+    assert.deepStrictEqual(view.criteria.map((r) => [r.id, r.state, r.origin, r.provisional]), [['sc-001', 'proposed', 'legacy', true], ['sc-002', 'proposed', 'legacy', true]]);
+    assert.deepStrictEqual([view.objective.state, view.objective.origin], ['proposed', 'legacy']);
+    rt.orientation(info.id);
+    assert.deepStrictEqual(snapshot(info.dir), before);
+
+    const turn = await rt.beginTurn(info.id, { turnId: 'turn-1' });
+    const during = snapshot(info.dir);
+    assert.deepStrictEqual(Object.keys(during).filter((f) => !(f in before)).sort(), ['.kl/lock', '.kl/scope.json']);
+    assert.strictEqual(during['brief.md'], before['brief.md']);
+    assert.strictEqual(during['case.yaml'], before['case.yaml']);
+    const stored = JSON.parse(fs.readFileSync(scopeFile(info.dir), 'utf8'));
+    assert.deepStrictEqual(stored.criteria.map((e) => [e.id, e.state, e.origin]), [['sc-001', 'proposed', 'legacy'], ['sc-002', 'proposed', 'legacy']]);
+    assert.deepStrictEqual([stored.objective.state, stored.objective.origin], ['proposed', 'legacy']);
+    await rt.endTurn(turn, { summary: 'first turn of this stage' });
+    assert.strictEqual(await git.isDirty(info.dir), false);
+  });
+
+  it('a done case never gets the file', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await legacyCase(rt);
+    rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
+    rt.brief(info.id).completeGating();
+    rt.setStatus(info.id, 'active', { kind: 'gating' });
+    rt.setStatus(info.id, 'done', { kind: 'owner', by: 'owner' });
+    const before = snapshot(info.dir);
+    assert.strictEqual(rt.scopeView(info.id).criteria.length, 2);
+    await assert.rejects(rt.applyScopeAction(info.id, { action: 'add', text: 'Three written offers', by: 'owner-action' }), (err) => err.code === 'CASE_CLOSED');
+    assert.deepStrictEqual(snapshot(info.dir), before);
+  });
+
+  it('an owner edit to brief.md is proposed until pressed', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await legacyCase(rt);
+    await rt.endTurn(await rt.beginTurn(info.id, { turnId: 'turn-1' }), { summary: 'migrated' });
+    const brief = rt.brief(info.id);
+    const { data, body } = brief.read();
+    data.successCriteria.push('Buyer pays the closing costs');
+    brief._write(data, body);
+    const turn = await rt.beginTurn(info.id, { turnId: 'turn-2' });
+    const row = rt.scopeView(info.id).criteria[2];
+    assert.deepStrictEqual([row.id, row.state, row.origin, row.provisional], ['sc-003', 'proposed', 'file', false]);
+    await rt.endTurn(turn, { summary: 'saw the edit' });
+    const view = await rt.applyScopeAction(info.id, { action: 'confirm', target: 'sc-003', hash: row.hash, by: 'owner-action', channel: 'in-app' });
+    assert.deepStrictEqual([view.criteria[2].state, view.criteria[2].origin, view.criteria[2].confirmed.by, view.criteria[2].confirmed.channel], ['confirmed', 'file', 'owner-action', 'in-app']);
+    assert.strictEqual(await git.isDirty(info.dir), false);
+  });
+
+  it('applyScopeAction: a stale hash refuses, drop removes the words, edit and add are the owner\'s, all-proposed confirms the rest', async () => {
+    const events = [];
+    const rt = new CaseRuntime({ root: tmp(), host: { notify: (event, payload) => events.push([event, payload]) } });
+    const info = await legacyCase(rt);
+    const first = rt.scopeView(info.id);
+    const [a, b] = first.criteria;
+    const stale = 'sha256:' + '0'.repeat(64);
+    await assert.rejects(rt.applyScopeAction(info.id, { action: 'confirm', target: a.id, hash: stale, by: 'owner-action' }), (err) => err.code === 'SCOPE_STALE');
+    await assert.rejects(rt.applyScopeAction(info.id, { action: 'confirm', target: a.id, by: 'owner-action' }), (err) => err.code === 'SCOPE_STALE');
+    await assert.rejects(rt.applyScopeAction(info.id, { action: 'drop', target: b.id, hash: stale, by: 'owner-action' }), (err) => err.code === 'SCOPE_STALE');
+    await assert.rejects(rt.applyScopeAction(info.id, { action: 'confirm', target: 'sc-099', hash: stale, by: 'owner-action' }), (err) => err.code === 'CRITERION_NOT_FOUND');
+    await assert.rejects(rt.applyScopeAction(info.id, { action: 'confirm', target: a.id, hash: a.hash }), (err) => err.code === 'SCOPE_INVALID');
+    await assert.rejects(rt.applyScopeAction(info.id, { action: 'promote', target: a.id, hash: a.hash, by: 'owner-action' }), (err) => err.code === 'SCOPE_INVALID');
+    assert.deepStrictEqual(rt.scopeView(info.id).criteria.map((r) => r.state), ['proposed', 'proposed']);
+    assert.deepStrictEqual(journals(info.dir, 'scope'), []);
+    events.length = 0;
+
+    // confirm one
+    let view = await rt.applyScopeAction(info.id, { action: 'confirm', target: a.id, hash: a.hash, by: 'owner-action', channel: 'in-app' });
+    assert.deepStrictEqual(view.criteria.map((r) => [r.id, r.state]), [['sc-001', 'confirmed'], ['sc-002', 'proposed']]);
+    assert.strictEqual(journals(info.dir, 'scope').length, 1);
+    assert.deepStrictEqual(events.filter(([e, p]) => e === 'case:changed' && p.what === 'progress').map(([, p]) => p.caseId), [info.id]);
+
+    // drop the other: the words leave brief.md and are kept in `removed`
+    view = await rt.applyScopeAction(info.id, { action: 'drop', target: b.id, hash: b.hash, by: 'owner-action' });
+    assert.deepStrictEqual(rt.brief(info.id).read().data.successCriteria, ['Signed contract at or above the floor']);
+    assert.deepStrictEqual(view.removed.map((r) => [r.id, r.text, r.by]), [['sc-002', 'Closed within 90 days', 'owner-action']]);
+
+    // edit a confirmed criterion: new words, still confirmed, the owner's
+    view = await rt.applyScopeAction(info.id, { action: 'edit', target: a.id, hash: a.hash, text: 'Signed contract at 40,000 dollars or more', by: 'owner-action', channel: 'in-app' });
+    assert.deepStrictEqual(rt.brief(info.id).read().data.successCriteria, ['Signed contract at 40,000 dollars or more']);
+    assert.deepStrictEqual(view.criteria.map((r) => [r.id, r.state, r.origin, r.confirmed.by]), [['sc-003', 'confirmed', 'owner-action', 'owner-action']]);
+    await assert.rejects(rt.applyScopeAction(info.id, { action: 'edit', target: 'sc-003', text: 'two\nlines', by: 'owner-action' }), (err) => err.code === 'CRITERION_INVALID');
+
+    // add: confirmed at birth; a duplicate refuses
+    view = await rt.applyScopeAction(info.id, { action: 'add', text: 'Closed before the new year', by: 'owner-action' });
+    assert.deepStrictEqual(view.criteria.map((r) => [r.id, r.state, r.origin]), [['sc-003', 'confirmed', 'owner-action'], ['sc-004', 'confirmed', 'owner-action']]);
+    await assert.rejects(rt.applyScopeAction(info.id, { action: 'add', text: 'CLOSED before the new year', by: 'owner-action' }), (err) => err.code === 'CRITERION_DUPLICATE');
+
+    // all-proposed: every proposed row whose words the owner saw, and the
+    // objective when its hash came too; confirmed rows are left alone.
+    rt.brief(info.id).append('successCriteria', 'Three written offers', { provenance: 'model' });
+    rt.brief(info.id).append('successCriteria', 'Survey on file', { provenance: 'model' });
+    const shown = rt.scopeView(info.id);
+    const proposed = shown.criteria.filter((r) => r.state === 'proposed');
+    assert.strictEqual(proposed.length, 2);
+    await assert.rejects(rt.applyScopeAction(info.id, { action: 'confirm', target: 'all-proposed', hash: { [proposed[0].id]: proposed[0].hash }, by: 'owner-action' }), (err) => err.code === 'SCOPE_STALE');
+    assert.strictEqual(rt.scopeView(info.id).criteria.filter((r) => r.state === 'proposed').length, 2);
+    const at003 = shown.criteria[0].confirmed.at;
+    view = await rt.applyScopeAction(info.id, {
+      action: 'confirm', target: 'all-proposed', by: 'owner-action', channel: 'in-app',
+      hash: { ...Object.fromEntries(proposed.map((r) => [r.id, r.hash])), objective: shown.objective.hash }
+    });
+    assert.deepStrictEqual(view.criteria.map((r) => r.state), ['confirmed', 'confirmed', 'confirmed', 'confirmed']);
+    assert.strictEqual(view.criteria[0].confirmed.at, at003);
+    assert.deepStrictEqual([view.objective.state, view.objective.origin], ['confirmed', 'legacy']);
+    assert.strictEqual(await git.isDirty(info.dir), false);
+    assert.strictEqual(fs.existsSync(path.join(info.dir, '.kl', 'lock')), false);
+  });
+
+  it('applyScopeAction inside a turn runs inline and the turn commits it', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await legacyCase(rt);
+    const turn = await rt.beginTurn(info.id, { turnId: 'turn-1' });
+    const row = rt.scopeView(info.id).criteria[0];
+    await rt.applyScopeAction(info.id, { action: 'confirm', target: row.id, hash: row.hash, by: 'question', channel: 'in-app-chat', quote: 'confirm all of those', factId: 'f-0001' });
+    const stored = rt.scopeView(info.id).criteria[0];
+    assert.deepStrictEqual([stored.state, stored.confirmed.by, stored.confirmed.channel, stored.confirmed.quote, stored.confirmed.factId], ['confirmed', 'question', 'in-app-chat', 'confirm all of those', 'f-0001']);
+    assert.ok(fs.existsSync(path.join(info.dir, '.kl', 'lock')));
+    await rt.endTurn(turn, { summary: 'confirmed one' });
+    assert.strictEqual(await git.isDirty(info.dir), false);
+  });
+
+  it('writeScope records the origin of what it writes, and confirms only with a confirming origin', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    await rt.systemAction(info.id, 'test', async () => {
+      rt.writeScope(info.id, { field: 'successCriteria', value: ['Three written offers'], origin: 'model', addedBy: 'turn-9' });
+      rt.writeScope(info.id, {
+        field: 'successCriteria', value: ['Three written offers', 'Closed within 90 days'], origin: 'owner-quote',
+        confirmed: { by: 'owner-quote', channel: 'in-app-chat', quote: 'closed within 90 days' }, addedBy: 'turn-9'
+      });
+      assert.throws(() => rt.writeScope(info.id, { field: 'successCriteria', value: ['Three written offers', 'Closed within 90 days', 'Survey on file'], origin: 'model', confirmed: { by: 'model' } }), (err) => err.code === 'SCOPE_INVALID');
+      assert.throws(() => rt.writeScope(info.id, { field: 'successCriteria', value: ['Three written offers', 'three written  offers'], origin: 'model' }), (err) => err.code === 'CRITERION_DUPLICATE');
+      assert.throws(() => rt.writeScope(info.id, { field: 'why', value: 'x', origin: 'model' }), (err) => err.code === 'SCOPE_INVALID');
+      rt.writeScope(info.id, { field: 'objective', value: 'Sell the Lakeside lot', origin: 'model' });
+    });
+    const view = rt.scopeView(info.id);
+    assert.deepStrictEqual(rt.brief(info.id).read().data.successCriteria, ['Three written offers', 'Closed within 90 days']);
+    assert.deepStrictEqual(view.criteria.map((r) => [r.id, r.state, r.origin, r.addedBy]), [['sc-001', 'proposed', 'model', 'turn-9'], ['sc-002', 'confirmed', 'owner-quote', 'turn-9']]);
+    assert.deepStrictEqual([view.objective.state, view.objective.origin], ['proposed', 'model']);
+    // The 7th proposal is refused, and nothing is written.
+    await rt.systemAction(info.id, 'test', async () => {
+      const list = rt.brief(info.id).read().data.successCriteria;
+      const more = ['Offer one', 'Offer two', 'Offer three', 'Offer four', 'Offer five'];
+      rt.writeScope(info.id, { field: 'successCriteria', value: [...list, ...more], origin: 'model' });
+      assert.throws(() => rt.writeScope(info.id, { field: 'successCriteria', value: [...list, ...more, 'Offer six'], origin: 'model' }), (err) => err.code === 'CRITERION_LIMIT');
+    });
+    assert.strictEqual(rt.brief(info.id).read().data.successCriteria.length, 7);
+  });
+
+  it('createCase records who gave the objective: the owner confirms it, anything else proposes it', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const owned = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot', objectiveBy: 'owner' });
+    const o = rt.scopeView(owned.id).objective;
+    assert.deepStrictEqual([o.state, o.origin, o.confirmed.by, o.provisional], ['confirmed', 'owner-create', 'owner-create', false]);
+    const modelled = await rt.createCase({ title: 'Permit filing', objective: 'File the county permit' });
+    const m = rt.scopeView(modelled.id).objective;
+    assert.deepStrictEqual([m.state, m.origin, m.confirmed, m.provisional], ['proposed', 'model', null, false]);
+    const claimed = await rt.createCase({ title: 'Fence repair', objective: 'Mend the north fence', objectiveBy: 'model', confirmed: true, state: 'confirmed' });
+    assert.strictEqual(rt.scopeView(claimed.id).objective.state, 'proposed');
+    const bare = await rt.createCase({ title: 'Roof quotes' });
+    assert.strictEqual(rt.scopeView(bare.id).objective, null);
+    assert.strictEqual(fs.existsSync(scopeFile(bare.dir)), false);
+    for (const c of [owned, modelled, claimed, bare]) assert.strictEqual(await git.isDirty(c.dir), false);
+  });
+
+  it('completeGating waits for a criterion the owner confirmed, and never sends an active case back', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'A', objective: 'Sell it' });
+    rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
+    rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+    assert.throws(() => rt.completeGating(info.id), /still missing: successCriteria \(no criterion is confirmed by the owner; ask with Progress askScope\)\./);
+    assert.strictEqual(rt.getCase(info.id).status, 'draft');
+    const row = rt.scopeView(info.id).criteria[0];
+    await rt.applyScopeAction(info.id, { action: 'confirm', target: row.id, hash: row.hash, by: 'owner-action' });
+    assert.strictEqual(rt.completeGating(info.id).status, 'active');
+    // The owner drops the only criterion: the case stays active and gated.
+    await rt.applyScopeAction(info.id, { action: 'drop', target: row.id, hash: row.hash, by: 'owner-action' });
+    rt.brief(info.id).append('successCriteria', 'Sold by spring', { provenance: 'model' });
+    assert.strictEqual(rt.completeGating(info.id).status, 'active');
+    assert.strictEqual(rt.brief(info.id).isGatingComplete(), true);
   });
 });

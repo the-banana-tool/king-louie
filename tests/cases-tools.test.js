@@ -8,6 +8,7 @@ const { initializeTools, toolRegistry } = require('../src/tools');
 const ToolExecutor = require('../src/execution/tool-executor');
 const { CaseRuntime } = require('../src/cases');
 const { LedgerTool, BriefTool, DecideTool, RecommendTool } = require('../src/tools/builtin/case-tools');
+const { confirmAll } = require('./helpers/case-scope');
 const {
   CASE_TOOL_NAMES, CASE_MODE_PROMPT, shapeToolDefinitions, buildCaseSystemPrompt, isProtectedCasePath,
   CASE_BLOCKED_TOOL_NAMES, requireOwnerQuote
@@ -32,6 +33,7 @@ async function setup(title = 'Lakeside lot', ownerMessages) {
 async function activate(runtime, id) {
   runtime.brief(id).update('why', 'Need the cash', { provenance: 'user' });
   runtime.brief(id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+  confirmAll(runtime, id);
   runtime.completeGating(id);
 }
 
@@ -108,6 +110,9 @@ describe('case tools', () => {
     assert.strictEqual(refused.ok, false);
     await BriefTool.execute({ action: 'update', field: 'why', value: 'Need the cash', provenance: 'user', reason: 'Owner said so', quote: 'I need the cash' }, opts);
     await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Closed by year end' }, opts);
+    // Cases stage 8 (R-C8-2): the model's criterion is a proposal until the owner confirms it.
+    assert.match((await BriefTool.execute({ action: 'completeGating' }, opts)).error, /successCriteria \(no criterion is confirmed by the owner/);
+    confirmAll(runtime, info.id);
     const done = await BriefTool.execute({ action: 'completeGating' }, opts);
     assert.deepStrictEqual(done, { ok: true, status: 'active' });
     assert.match(runtime.records(info.id).lastJournal().file, /-brief/);

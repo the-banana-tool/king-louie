@@ -22,6 +22,7 @@ const ToolExecutor = require('../src/execution/tool-executor');
 const { classifyToolCall } = require('../src/execution/safety-policy');
 const { CASE_TOOL_NAMES, WAKEUP_BASE_TOOLS, shapeToolDefinitions } = require('../src/cases/chat-integration');
 const { setLogLevel } = require('../src/logging');
+const { confirmAll } = require('./helpers/case-scope');
 
 setLogLevel('fatal');
 initializeTools();
@@ -428,6 +429,7 @@ describe('answer_question takes the owner\'s quote', () => {
       const info = await rt.createCase({ title, objective, force: true });
       rt.brief(info.id).update('why', 'The owner asked for it', { provenance: 'user' });
       rt.brief(info.id).append('successCriteria', objective, { provenance: 'model' });
+      confirmAll(rt, info.id);
       rt.completeGating(info.id);
       return rt.getCase(info.id);
     };
@@ -451,6 +453,7 @@ describe('answer_question takes the owner\'s quote', () => {
     const info = await rt.createCase({ title: 'Rear door quotes', objective: 'Three written quotes for the rear door', force: true });
     rt.brief(info.id).update('why', 'The owner asked for it', { provenance: 'user' });
     rt.brief(info.id).append('successCriteria', 'Three quotes', { provenance: 'model' });
+    confirmAll(rt, info.id);
     rt.completeGating(info.id);
     const door = rt.getCase(info.id);
     const p = await rt.detours.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand', source: 'detour-tool' });
@@ -617,6 +620,9 @@ describe('create_case', () => {
     const fact = factOf(rt, meta, r.fact_id);
     assert.deepStrictEqual([fact.provenance, fact.subject, fact.attr, fact.value, fact.disclosable], ['user', 'brief', 'objective', 'sell the boat', false]);
     assert.deepStrictEqual([fact.source.kind, fact.source.ref, fact.source.channel, fact.source.quote], ['owner-action', 'create-case', 'in-app-chat', 'start a case to sell the boat']);
+    // Cases stage 8: the objective was held to the owner's quote, so it is confirmed.
+    const objective = rt.scopeView(meta.id).objective;
+    assert.deepStrictEqual([objective.state, objective.origin, objective.confirmed.by], ['confirmed', 'owner-create', 'owner-create']);
   });
 
   it('never forces: a similar open case refuses it on every channel, lists the similar case and says to open the app', async () => {

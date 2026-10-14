@@ -14,6 +14,7 @@ const { CaseRuntime } = require('../src/cases');
 const { DetourLog } = require('../src/cases/detours/log');
 const { withCaseProfile } = require('./helpers/profile-settings');
 const { createTurnModels } = require('../src/models/resolver');
+const { confirmAll } = require('./helpers/case-scope');
 
 initializeTools();
 
@@ -42,6 +43,7 @@ async function activeCase(rt, title, objective, type = 'general', repo = null) {
   rt.brief(info.id).update('why', 'The owner asked for it', { provenance: 'user' });
   rt.brief(info.id).append('successCriteria', objective, { provenance: 'model' });
   if (repo) rt.brief(info.id).update('repo', repo, { provenance: 'user' });
+  confirmAll(rt, info.id);
   rt.completeGating(info.id);
   return rt.getCase(info.id);
 }

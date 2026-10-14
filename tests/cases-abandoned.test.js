@@ -8,6 +8,7 @@ const os = require('os');
 const path = require('path');
 const { AbandonedStore, AbandonedError, abandonedLines } = require('../src/cases/abandoned');
 const { CaseRuntime } = require('../src/cases');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -226,6 +227,7 @@ describe('Fail and the abandoned record', () => {
     const info = await runtime.createCase({ title: 'Lakeside lot', objective: 'Convert the lot to cash' });
     runtime.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
     runtime.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+    confirmAll(runtime, info.id);
     runtime.completeGating(info.id);
     const meta = runtime.getCase(info.id);
     assert.strictEqual(meta.status, 'active');

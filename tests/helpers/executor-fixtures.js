@@ -8,6 +8,7 @@ const path = require('path');
 const { CaseRuntime } = require('../../src/cases');
 const { ExecutorRegistry } = require('../../src/cases/executors');
 const { computePackageSha256 } = require('../../src/cases/executors/package-loader');
+const { confirmAll } = require('./case-scope');
 
 const made = [];
 function tempDir(prefix = 'kl-exec-') {
@@ -159,6 +160,7 @@ async function activeCase(runtime, { title = 'Lakeside lot', brief = {} } = {}) 
   b.update('why', 'Paying for a move', { provenance: 'user' });
   b.update('successCriteria', ['Sold within the year'], { provenance: 'model' });
   for (const [field, value] of Object.entries(brief)) b.update(field, value, { provenance: 'user' });
+  confirmAll(runtime, info.id);
   runtime.completeGating(info.id);
   return runtime.getCase(info.id);
 }

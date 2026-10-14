@@ -10,6 +10,7 @@ const { CaseRuntime } = require('../src/cases');
 const { DetourRouter } = require('../src/cases/detours/router');
 const { DetourLog } = require('../src/cases/detours/log');
 const { answerClass } = require('../src/cases/mcp-tool-definitions');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -34,6 +35,7 @@ async function activeCase(rt, title, objective, type = 'general') {
   rt.brief(info.id).update('why', 'The owner asked for it', { provenance: 'user' });
   rt.brief(info.id).append('successCriteria', objective, { provenance: 'model' });
   if (type === 'software-repo') rt.brief(info.id).update('repo', 'https://github.com/example/phone-agent.git', { provenance: 'user' });
+  confirmAll(rt, info.id);
   rt.completeGating(info.id);
   return rt.getCase(info.id);
 }
@@ -200,6 +202,11 @@ describe('DetourRouter.resolve', () => {
     assert.deepStrictEqual(brief.data.successCriteria, ['Book a piano tuner for the living room']);
     assert.strictEqual(brief.data.objective, 'Book a piano tuner for the living room');
     assert.strictEqual(brief.body, 'Spawned from case "Rear door quotes": Unrelated errand\n');
+    // Cases stage 8: nobody confirmed the new case's scope; the router wrote it.
+    const scope = rt.scopeView(created.id);
+    assert.deepStrictEqual(scope.criteria.map((c) => [c.id, c.state, c.origin, c.provisional]), [['sc-001', 'proposed', 'detour', false]]);
+    assert.deepStrictEqual([scope.objective.state, scope.objective.origin, scope.objective.provisional], ['proposed', 'detour', false]);
+    assert.deepStrictEqual(rt.brief(created.id).missingForGating({ scopeView: scope }), ['why', 'successCriteria']);
     assert.deepStrictEqual(rt.getCase(door.id).related.map((x) => [x.id, x.relation]), [[created.id, 'spawned']]);
     assert.deepStrictEqual(rt.getCase(created.id).related.map((x) => [x.id, x.relation]), [[door.id, 'related']]);
     const git = require('../src/cases/git');
