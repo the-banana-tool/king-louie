@@ -18,6 +18,7 @@ const { VerificationStore } = require('./verify/store');
 const { progressView, summaryLine } = require('./verify/status');
 const { resolveEvidence, turnMarks, collectTurnEvidence, statesOf } = require('./verify/evidence');
 const { runVerifyPass, verificationBlock } = require('./verify/judge');
+const { registerVerificationHook, freezeProgress } = require('./verify/hook');
 const { closeReadiness } = require('./verify/readiness');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
@@ -210,6 +211,9 @@ class CaseRuntime {
     // Cases stage 5: detour routing and the case-type refresh (spec §3.6).
     // Registered last, once every field above exists (controller ruling M3).
     registerDetourHooks(this);
+    // Cases stage 8 (spec §6.3): after the detour hooks, so it runs after
+    // the case-type refresh and sees the repository as it is now.
+    registerVerificationHook(this);
   }
 
   // Called once shutdown begins (create-core, right after the scheduler
@@ -934,7 +938,26 @@ class CaseRuntime {
       resumeTo: (status === 'paused' && (resumeTo === 'active' || resumeTo === 'needs-direction')) ? resumeTo : null,
       at: this.now().toISOString()
     };
+    // Cases stage 8 (R-C8-7): what the case closes with is read while it is
+    // still open and written once the status has changed. Neither step may
+    // stop the status change.
+    const closes = (status === 'done' || status === 'abandoned') && meta.status !== 'done' && meta.status !== 'abandoned';
+    let closingProgress = null;
+    if (closes) {
+      try {
+        closingProgress = this.progress(meta.id);
+      } catch (err) {
+        log.warn(`Case ${meta.slug}: its progress could not be read for the close: ${err.message}`);
+      }
+    }
     const updated = this.store.updateMeta(meta.id, { status, statusReason });
+    if (closes && closingProgress) {
+      try {
+        freezeProgress(this, meta.id, { status, progress: closingProgress });
+      } catch (err) {
+        log.warn(`Case ${meta.slug}: its progress was not frozen at the close: ${err.message}`);
+      }
+    }
     this._notify('case:changed', { caseId: meta.id, what: 'status' });
     if (STOPS_WORK.has(status)) {
       this._abortTurn(meta.id, `case ${status}`);
@@ -1443,7 +1466,12 @@ class CaseRuntime {
     // closed meanwhile: nothing more is read or said.
     if (this.turns.get(turn.caseId) !== turn || closed(this.getCase(turn.caseId).status)) return { block: null };
     const after = this.progressView(turn.caseId);
-    return { block: verificationBlock({ pass, before, after }) };
+    const block = verificationBlock({ pass, before, after });
+    // The cache follows what the entry just said. A close that is not
+    // verified (stopped, blocked, failed) leaves it, so the next turn's
+    // `verification` hook still sees a criterion that left `met`.
+    this.verification(turn.caseId).setCache(statesOf(after));
+    return { block };
   }
 
   async endTurn(turn, { summary = '', journal = null, journalKind = 'turn', evidence = null, verify = false } = {}) {

@@ -523,3 +523,173 @@ describe('CaseRuntime turn close (cases stage 8)', () => {
     assert.strictEqual(journals(info.dir).length, 1);
   });
 });
+
+describe('CaseRuntime progress: regressions and the freeze (cases stage 8)', () => {
+  // An active case with one confirmed criterion, sc-001.
+  async function world(opts = {}) {
+    const rt = new CaseRuntime({ root: tmp(), ...opts });
+    const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot', objectiveBy: 'owner' });
+    rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
+    await rt.applyScopeAction(info.id, { action: 'add', text: 'Signed contract at or above the floor', by: 'owner-action' });
+    rt.completeGating(info.id);
+    return { rt, id: info.id, dir: info.dir };
+  }
+  // A sourced fact and a verification record citing it: sc-001 is met.
+  function meet(rt, id) {
+    const fact = rt.ledger(id).assert({ stmt: 'The contract was signed at 81,000', subject: 'contract', attr: 'signed', value: 81000, source: src });
+    const row = rt.scopeView(id).criteria.find((r) => r.id === 'sc-001');
+    rt.verification(id).addRecord({ criterion: 'sc-001', criterionHash: row.hash, evidence: [fact.id], note: 'Signed.', turnId: 'turn-0', model: 'example-provider:example-model' });
+    return fact;
+  }
+  const regressed = (turn) => turn.triggers.filter((t) => t.kind === 'criterion-regressed');
+  const cache = (rt, id) => rt.verification(id).read().cache;
+
+  it('a criterion that left met between turns asks for re-orientation, once', async () => {
+    const { rt, id } = await world();
+    const fact = meet(rt, id);
+    let turn = await rt.beginTurn(id, { turnId: 'turn-1' });
+    assert.deepStrictEqual(regressed(turn), []);
+    assert.deepStrictEqual(cache(rt, id).states, { 'sc-001': 'met' });
+    await rt.endTurn(turn, { summary: 'read' });
+
+    // Corrected outside a turn (an answered question, an ingest review).
+    const newer = rt.ledger(id).assert({ stmt: 'The contract was not signed after all', subject: 'contract', attr: 'signed', value: 0, source: src, supersedes: fact.id });
+    turn = await rt.beginTurn(id, { turnId: 'turn-2' });
+    const detail = `sc-001 ("Signed contract at or above the floor") was met and is now stale: ${fact.id} was superseded by ${newer.id}.`;
+    assert.deepStrictEqual(regressed(turn), [{ kind: 'criterion-regressed', key: 'criterion:sc-001:v-0001:stale', blocking: true, detail }]);
+    assert.strictEqual(turn.reorientPending, true);
+    assert.match(turn.orientation, /## Since last turn\n(- .*\n)*- sc-001 was met and is now stale: f-0001 was superseded by f-0002\.\n/);
+    assert.match(rt.requireReoriented(id).error, /Re-orientation is required first: sc-001 \("Signed contract at or above the floor"\) was met and is now stale/);
+    assert.deepStrictEqual(cache(rt, id).states, { 'sc-001': 'stale' });
+
+    rt.recordReorientation(id, turn, { changed: 'The contract fell through', affects: [], action: 'Look for another buyer', note: 'sc-001 is open again' });
+    assert.strictEqual(turn.reorientPending, false);
+    assert.strictEqual(rt.requireReoriented(id), null);
+    await rt.endTurn(turn, { summary: 're-oriented' });
+
+    turn = await rt.beginTurn(id, { turnId: 'turn-3' });
+    assert.deepStrictEqual(regressed(turn), []);
+    assert.strictEqual(turn.reorientPending, false);
+    assert.doesNotMatch(turn.orientation, /- sc-001 was met and is now stale/);
+    await rt.endTurn(turn, { summary: 'read' });
+    assert.strictEqual(await git.isDirty(rt.getCase(id).dir), false);
+  });
+
+  it('a wake-up turn is told too, and the text of a criterion in the trigger is one cut line', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot', objectiveBy: 'owner' });
+    rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
+    const long = `Signed contract at or above the floor ${'and every page initialled '.repeat(6)}`.trim();
+    await rt.applyScopeAction(info.id, { action: 'add', text: long, by: 'owner-action' });
+    rt.completeGating(info.id);
+    const fact = meet(rt, info.id);
+    await rt.endTurn(await rt.beginTurn(info.id, { turnId: 'turn-1' }), { summary: 'read' });
+    rt.ledger(info.id).retract(fact.id, 'wrong lot');
+    const turn = await rt.beginTurn(info.id, { turnId: 'wakeup-1', source: 'wakeup' });
+    const [t] = regressed(turn);
+    assert.strictEqual(t.detail, `sc-001 ("${long.slice(0, 80)}") was met and is now stale: ${fact.id} was retracted.`);
+    assert.strictEqual(turn.reorientPending, true);
+    await rt.endTurn(turn, { summary: 'wake-up' });
+  });
+
+  it('a hook that cannot read the record never fails the turn', async () => {
+    const { rt, id, dir } = await world();
+    meet(rt, id);
+    fs.writeFileSync(path.join(dir, '.kl', 'verification.json'), '{ not json');
+    const turn = await rt.beginTurn(id, { turnId: 'turn-1' });
+    assert.deepStrictEqual(regressed(turn), []);
+    await rt.endTurn(turn, { summary: 'read' });
+    // A draft case with nothing confirmed gets no file from the hook.
+    const plain = await rt.createCase({ title: 'Roof quotes', objective: 'Get three roof quotes' });
+    await rt.endTurn(await rt.beginTurn(plain.id, { turnId: 'turn-1' }), { summary: 'read' });
+    assert.strictEqual(fs.existsSync(path.join(plain.dir, '.kl', 'verification.json')), false);
+  });
+
+  it('the close of a verified turn writes the cache; a close that is not verified leaves it for the next turn to notice', async () => {
+    const { rt, id } = await world();
+    const fact = meet(rt, id);
+    let turn = await rt.beginTurn(id, { turnId: 'turn-1' });
+    // The turn itself corrects the fact, and is stopped: no verify, no block.
+    rt.ledger(id).assert({ stmt: 'The contract was not signed after all', subject: 'contract', attr: 'signed', value: 0, source: src, supersedes: fact.id, addedBy: 'turn-1' });
+    await rt.endTurn(turn, { summary: 'turn stopped by owner', journal: null });
+    assert.deepStrictEqual(cache(rt, id).states, { 'sc-001': 'met' });
+    turn = await rt.beginTurn(id, { turnId: 'turn-2' });
+    assert.deepStrictEqual(regressed(turn).map((t) => t.key), ['criterion:sc-001:v-0001:stale']);
+    await rt.endTurn(turn, { summary: 'read' });
+
+    // A verified close: the entry says it first, and the cache follows.
+    const other = await world();
+    const cited = meet(other.rt, other.id);
+    turn = await other.rt.beginTurn(other.id, { turnId: 'turn-1' });
+    other.rt.ledger(other.id).retract(cited.id, 'wrong lot');
+    await other.rt.endTurn(turn, { summary: 'retracted', journal: 'Retracted the signing.', verify: true });
+    assert.deepStrictEqual(cache(other.rt, other.id).states, { 'sc-001': 'stale' });
+    assert.match(other.rt.records(other.id).lastJournal().text, /^## Verification \(written by King Louie\)\n- Now stale: sc-001 \(f-0001 was retracted\)\.\n\nRetracted the signing\./);
+    turn = await other.rt.beginTurn(other.id, { turnId: 'turn-2' });
+    assert.deepStrictEqual(regressed(turn), []);
+    await other.rt.endTurn(turn, { summary: 'read' });
+    assert.strictEqual(await git.isDirty(other.rt.getCase(other.id).dir), false);
+  });
+
+  it('progress is frozen at done and not recomputed', async () => {
+    const at = new Date('2026-10-21T09:00:00.000Z');
+    const { rt, id, dir } = await world({ now: () => at });
+    const fact = meet(rt, id);
+    const live = rt.progress(id);
+    assert.strictEqual(live.view.criteria[0].state, 'met');
+    rt.setStatus(id, 'done', { kind: 'owner', by: 'owner' });
+    // The ledger changes after the close, by hand.
+    fs.appendFileSync(path.join(dir, 'facts.jsonl'), `${JSON.stringify({ kind: 'retract', target: fact.id, reason: 'edited after the close', at: at.toISOString() })}\n`);
+    assert.strictEqual(rt.ledger(id).view().facts.get(fact.id).status, 'retracted');
+    const p = rt.progress(id);
+    assert.strictEqual(p.closed.frozen, true);
+    assert.deepStrictEqual([p.closed.at, p.closed.status, p.closed.summary], [at.toISOString(), 'done', live.summary]);
+    assert.deepStrictEqual(p.closed.criteria.map((c) => [c.id, c.state, c.evidence.map((e) => e.id)]), [['sc-001', 'met', [fact.id]]]);
+    assert.deepStrictEqual(p.closed.readiness.items.map((i) => [i.id, i.state]), live.readiness.items.map((i) => [i.id, i.state]));
+    assert.deepStrictEqual([p.view, p.readiness, p.scope, p.summary], [null, null, null, live.summary]);
+    // The frozen record is what the file holds; a turn on the closed case
+    // neither recomputes it nor raises a regression.
+    const frozen = JSON.stringify(rt.verification(id).read().closed);
+    const turn = await rt.beginTurn(id, { turnId: 'turn-1' });
+    assert.deepStrictEqual(regressed(turn), []);
+    assert.strictEqual(turn.marks.states, null);
+    await rt.endTurn(turn, { summary: 'read', verify: true });
+    assert.strictEqual(JSON.stringify(rt.verification(id).read().closed), frozen);
+    assert.strictEqual(rt.progress(id).closed.criteria[0].state, 'met');
+  });
+
+  it('a case set abandoned is frozen too, with what was open', async () => {
+    const { rt, id } = await world();
+    const live = rt.progress(id);
+    rt.setStatus(id, 'abandoned', { kind: 'owner', by: 'owner' });
+    const p = rt.progress(id);
+    assert.deepStrictEqual([p.closed.frozen, p.closed.status, p.closed.summary], [true, 'abandoned', live.summary]);
+    assert.deepStrictEqual(p.closed.criteria.map((c) => c.state), ['unmet']);
+    assert.strictEqual(p.closed.readiness.ready, false);
+    // A pause is not a close.
+    const paused = await world();
+    paused.rt.setStatus(paused.id, 'paused', { kind: 'owner', by: 'owner' });
+    assert.strictEqual(paused.rt.verification(paused.id).read().closed, null);
+    assert.strictEqual(paused.rt.progress(paused.id).closed, null);
+  });
+
+  it('a freeze that throws does not stop setStatus', async () => {
+    const { rt, id } = await world();
+    meet(rt, id);
+    const real = rt.verification.bind(rt);
+    rt.verification = (caseId) => {
+      const store = real(caseId);
+      store.freeze = () => { throw new Error('disk full'); };
+      return store;
+    };
+    assert.strictEqual(rt.setStatus(id, 'done', { kind: 'owner', by: 'owner' }).status, 'done');
+    assert.strictEqual(rt.getCase(id).status, 'done');
+    // Nothing was frozen: the case reads as one closed before progress was tracked.
+    assert.strictEqual(rt.progress(id).closed, null);
+
+    // Nor does a progress read that throws.
+    const second = await world();
+    second.rt.progress = () => { throw new Error('boom'); };
+    assert.strictEqual(second.rt.setStatus(second.id, 'abandoned', { kind: 'owner', by: 'owner' }).status, 'abandoned');
+  });
+});
