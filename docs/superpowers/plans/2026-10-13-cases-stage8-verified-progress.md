@@ -45,6 +45,17 @@ Nothing in steps A to C runs a program the owner did not run before. Step D adds
 
 Where the code as built differs from a task's text. Added by each task's implementer in the task's own commit.
 
+**Task 1 (`ScopeStore`).**
+
+- *The hash test.* `normalizeForQuote` folds a curly quote to a straight one; it does not remove it. So "the same words with curly quotes around a word" is tested as curly against straight quotes around the word (`The "signed" contract`), not as quoted against unquoted, which are different hashes.
+- *`reconcile` options.* It also takes `removedTexts` (named in the task's text but not in its signature; either the view read before the change, or a plain object of texts keyed by criterion id or by hash) and `removedBy` (who is recorded as `by` on a `removed` entry; `addedBy` when not given).
+- *A new refusal code, `SCOPE_INVALID`* (fail closed, a caller's mistake and never shown to the model): an `origins` entry whose origin is not in `ORIGINS`; a `confirmed` passed with an origin that is born proposed (`model`, `detour`, `legacy`, `file`; the confirming ones are exported as `CONFIRMING_ORIGINS`); a confirmation with no `by`, at birth or in `confirm`. Nothing is written in any of the three.
+- *A stored entry is not believed on its `state` alone.* An entry that says `confirmed` with no `confirmed.by` reads `proposed`; an entry with a bad id, hash, state or origin is left out, so its string reads `file` and `proposed` with a new id. `.kl/` is not guarded against `Bash`, as for the other case files.
+- *`origins` apply to new strings only*, the objective included: a string that already has an entry (even a `legacy` one written at first contact) is changed only by `confirm`.
+- *The objective has no `removed` history.* A reworded objective replaces the stored entry; `removed` holds criteria only (the shape of spec §7.1).
+- *`limitsProblem`.* `adding` counts every criterion about to be added and `addingProposed` how many of those are born proposed (so one proposal is `{ adding: 1, addingProposed: 1 }`; `{ addingProposed: 1 }` alone reads the same). The proposed limit is checked only when a proposal is being added.
+- *Shapes, a little wider than written.* The view's objective row also has `at` and `provisional`; a `duplicates` entry is `{ text, hash }`; `confirm` returns the file as written.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.
