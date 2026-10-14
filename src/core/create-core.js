@@ -2546,6 +2546,16 @@ function createCore(deps = {}) {
     return marked;
   };
 
+  // Whether any chat of the case carries the private mark (review fix,
+  // item 8): the case stays private if case.yaml loses its key. A ref whose
+  // mark is not exactly false counts; a store that cannot be read throws,
+  // and the runtime takes that as yes.
+  const caseChatsPrivate = (caseId) => {
+    const id = String(caseId || '');
+    if (!id) return false;
+    return historyStore.chatRefs().some((ref) => ref && ref.caseId === id && ref.private !== false);
+  };
+
   // The policy a chat's or a case's mark puts on its model calls, or null
   // for none. Fail closed: a chat the store does not know, a mark that is
   // not a plain "no", and any failure to read one all give a policy. A run
@@ -3601,6 +3611,7 @@ function createCore(deps = {}) {
       // whose turn has no snapshot, and the case's chats' marks.
       egressFor,
       markChatsPrivate,
+      caseChatsPrivate,
       // A case role's providers are tested (or a stale non-auth failure
       // retested) before it resolves, as resolveRole does (final review I2).
       ensureTargetsTested,

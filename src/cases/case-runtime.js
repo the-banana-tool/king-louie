@@ -2665,8 +2665,11 @@ class CaseRuntime {
   // ---- The private mark (local inference spec 2026-10-13 §8.1, §8.2) ----
 
   // Whether a case is private: `private: true` in case.yaml. A missing key
-  // is not; any other value, and a case that cannot be read, is (fail
-  // closed), with one warning per case that names no value from the file.
+  // is not, unless any chat of the case carries the history store's private
+  // mark (the host's caseChatsPrivate; review fix, item 8: a Bash edit or a
+  // git restore can take the key out of case.yaml, never a chat's mark);
+  // any other value, and a case that cannot be read, is (fail closed), with
+  // one warning per case that names no value from the file.
   isPrivate(id) {
     let meta;
     try {
@@ -2674,7 +2677,7 @@ class CaseRuntime {
     } catch {
       return true;
     }
-    if (!Object.prototype.hasOwnProperty.call(meta, 'private')) return false;
+    if (!Object.prototype.hasOwnProperty.call(meta, 'private')) return this._chatsMarkedPrivate(meta.id);
     if (meta.private === true) return true;
     if (!this._privateWarned) this._privateWarned = new Set();
     if (!this._privateWarned.has(meta.id)) {
@@ -2682,6 +2685,19 @@ class CaseRuntime {
       log.warn(`Case ${meta.slug}: case.yaml's private is not true or false as written by King Louie; the case is treated as private.`);
     }
     return true;
+  }
+
+  // Whether any chat of the case carries the private mark. A host that
+  // cannot say (it throws) says yes; a host with no history store (tests, a
+  // bare host) has no chat to ask.
+  _chatsMarkedPrivate(id) {
+    const ask = this.host?.caseChatsPrivate;
+    if (typeof ask !== 'function') return false;
+    try {
+      return ask(id) !== false;
+    } catch {
+      return true;
+    }
   }
 
   // The owner's mark (Task 14 adds the press; no tool calls this): sets

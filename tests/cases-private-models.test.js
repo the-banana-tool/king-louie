@@ -236,6 +236,32 @@ describe('a private case: the mark, and every case model call behind it', { skip
     assert.strictEqual(rt.isPrivate('no-such-case'), true, 'a case that cannot be read is private');
   });
 
+  it('review fix, item 8: a case whose case.yaml lost its private key stays private while any of its chats carries the mark', async () => {
+    const c = await activeCase({ marked: false });
+    ctx.createChat({ id: `${c.id}-m`, title: c.title, caseId: c.id, createdAt: AT, updatedAt: AT, messages: [] });
+    await rt.markPrivate(c.id);
+    const file = path.join(c.dir, 'case.yaml');
+    // What a Bash edit or a git restore of an older case.yaml would leave.
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/^private:.*\n/m, ''));
+    assert.ok(!Object.prototype.hasOwnProperty.call(rt.getCase(c.id), 'private'), 'the key is gone');
+    assert.strictEqual(rt.isPrivate(c.id), true);
+    assert.strictEqual(ctx.egressFor({ caseId: c.id }).reason, 'private-case');
+    // A case with no key and no marked chat is not private.
+    const plain = await activeCase({ marked: false });
+    ctx.createChat({ id: `${plain.id}-m`, title: plain.title, caseId: plain.id, createdAt: AT, updatedAt: AT, messages: [] });
+    assert.strictEqual(rt.isPrivate(plain.id), false);
+    // A store that cannot say: private.
+    const store = ctx.getHistoryStore();
+    const real = store.chatRefs;
+    store.chatRefs = () => { throw new Error('the store is gone'); };
+    try {
+      assert.strictEqual(rt.isPrivate(plain.id), true);
+    } finally {
+      store.chatRefs = real;
+    }
+    assert.strictEqual(rt.isPrivate(plain.id), false);
+  });
+
   it('a case created private carries the key from its first commit; createCase takes nothing but exactly true', async () => {
     const made = await rt.createCase({ title: 'Lakeside lot private', objective: 'Convert the lot to cash', force: true, private: true });
     assert.strictEqual(rt.getCase(made.id).private, true);
