@@ -8,6 +8,7 @@
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const { isLocalDesktopEvent } = require('../core/origin');
+const { validateCheck, checkPolicy, currentCheck, resolveProgram, checkView, CheckError, POLICY_OFF, CHECK_TYPE } = require('../cases/verify/check');
 
 const BUSY = 'Case is busy with a wake-up; try again in a minute.';
 const NOT_LOCAL = 'This is done only from the King Louie window.';
@@ -72,7 +73,10 @@ function progressReply(rt, caseId) {
   const p = rt.progress(meta.id);
   const records = (Array.isArray(p.abandoned) ? p.abandoned : []).filter(isObject).map(abandonedOut);
   const base = { ok: true, untrustedText: true, caseStatus: meta.status };
-  const tail = { abandoned: { count: records.length, records }, check: null };
+  // The check command of a software-repo case (spec §6.6); null for any
+  // other case and for a closed one.
+  const closed = meta.status === 'done' || meta.status === 'abandoned';
+  const tail = { abandoned: { count: records.length, records }, check: closed ? null : checkView(rt, meta.id) };
   if (p.closed) {
     // A closed case: the record it closed with, as it is (R-C8-7).
     return {
@@ -163,6 +167,7 @@ function registerCaseProgressHandlers(ipcMain, context = {}) {
       if (err && err.code === 'CASE_BUSY' && channel === IPC.CASE_VERIFY_NOW) return refuse(err.verifying ? CHECK_RUNNING : CHECK_BUSY, 'CASE_BUSY');
       if (err && err.code === 'CASE_BUSY') return refuse(BUSY, 'CASE_BUSY');
       if (err && err.name === 'VerifyRefusedError') return refuse(err.message, err.code);
+      if (err instanceof CheckError) return refuse(err.message, err.code);
       if (err && err.name === 'ScopeError' && SCOPE_CODES.includes(err.code)) return refuse(err.message, err.code);
       throw err;
     }
@@ -214,6 +219,44 @@ function registerCaseProgressHandlers(ipcMain, context = {}) {
       note: checkNote(out),
       progress: progressReply(rt, payload.caseId)
     };
+  });
+
+  // The check command of a software-repo case, typed by the owner in the
+  // case panel (spec §6.6; R-C8-3). `command` names it: nothing runs, and a
+  // pressed question asks for the approval. `approved: false` is "Stop
+  // running it": every approval is withdrawn. Only the app's own window.
+  handle(IPC.CASE_SET_CHECK, async (payload, event) => {
+    if (!isLocalDesktopEvent(event)) return refuse(NOT_LOCAL, 'NOT_LOCAL_DESKTOP');
+    if (typeof payload.caseId !== 'string' || !payload.caseId) return refuse('caseId is required.');
+    const rt = runtime();
+    const meta = rt.getCase(payload.caseId);
+    if (meta.status === 'done' || meta.status === 'abandoned') return refuse(`Case is ${meta.status}. It is read-only.`, 'CASE_CLOSED');
+    if (payload.approved === false && payload.command === undefined) {
+      await rt.systemAction(meta.id, 'check withdrawn', () => {
+        const withdrawn = rt.checks(meta.id).withdrawAll();
+        const store = rt.questions(meta.id);
+        for (const q of store.open().filter((r) => r.payload?.type === CHECK_TYPE)) store.close(q.id, { reason: 'withdrawn by the owner', by: 'panel' });
+        if (withdrawn) rt.records(meta.id).writeJournal('brief', 'The check command\'s approval was withdrawn by the owner in the app. It no longer runs.', rt.now());
+      });
+      rt._notify('case:changed', { caseId: meta.id, what: 'progress' });
+      return { ok: true, check: checkView(rt, meta.id) };
+    }
+    if (typeof payload.command !== 'string' || payload.approved !== undefined) return refuse('Give the command, or approved: false to stop running it.');
+    const policy = checkPolicy(rt);
+    if (!policy.enabled) return refuse(POLICY_OFF[policy.reason], policy.reason);
+    const command = validateCheck(payload.command);
+    // Refused before anything is written: no repository on this machine,
+    // or a program that cannot be started without a shell.
+    const wanted = currentCheck(rt, meta.id, { command });
+    resolveProgram(wanted.argv, { cwd: wanted.repo });
+    const question = await rt.systemAction(meta.id, 'check named', () => {
+      rt.brief(meta.id).update('check', command, { provenance: 'user' });
+      rt.records(meta.id).writeJournal('brief', `Brief check updated (user) by the owner in the app\n\n${JSON.stringify(command)}`, rt.now());
+      rt.checks(meta.id).withdrawAll();
+      return rt.requestCheckApproval(meta.id);
+    });
+    rt._notify('case:changed', { caseId: meta.id, what: 'progress' });
+    return { ok: true, check: checkView(rt, meta.id), questionId: question.id };
   });
 }
 

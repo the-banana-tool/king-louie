@@ -907,6 +907,16 @@ contextBridge.exposeInMainWorld(
         validateString(payload.caseId, 'caseId', { minLength: 1 });
         return ipcRenderer.invoke('case:verifyNow', { caseId: payload.caseId });
       },
+      // The check command of a software-repo case: `command` names it (the
+      // owner approves it on a pressed question; nothing runs before), and
+      // `approved: false` stops it running. Only these fields are sent.
+      setCheck: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        if (payload.approved === false) return ipcRenderer.invoke('case:setCheck', { caseId: payload.caseId, approved: false });
+        validateString(payload.command, 'command', { minLength: 1 });
+        return ipcRenderer.invoke('case:setCheck', { caseId: payload.caseId, command: payload.command });
+      },
       confirmScope: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.caseId, 'caseId', { minLength: 1 });

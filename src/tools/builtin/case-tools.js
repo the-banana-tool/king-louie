@@ -9,6 +9,7 @@ const { ScopeError, textHash, validateCriterionText } = require('../../cases/sco
 const { wordsInText } = require('../owner-quote');
 const { caseTypeForField, resolveCaseType } = require('../../cases/case-types');
 const { validateRepo, repoInQuote } = require('../../cases/case-types/software-repo');
+const { validateCheck, checkInQuote, checkPolicy, currentCheck, CheckError, POLICY_OFF } = require('../../cases/verify/check');
 const { toMs } = require('../../cases/clock');
 const { oneLine } = require('../../cases/ingest/store');
 
@@ -75,7 +76,7 @@ function entityHitsElsewhere(ctx, text) {
 }
 const VALUE_DESCRIPTION = 'numbers and lists as JSON text';
 // Brief fields whose value is text: never parse these, so "2027" stays text.
-const BRIEF_TEXT_FIELDS = new Set(['objective', 'why', 'deadline', 'repo']);
+const BRIEF_TEXT_FIELDS = new Set(['objective', 'why', 'deadline', 'repo', 'check']);
 
 // `value` is declared as a string so every provider accepts the schema
 // (Gemini needs a type on each property). JSON text for a number, list or
@@ -406,7 +407,7 @@ const BriefTool = acceptAnyValue(new Tool({
     type: 'object',
     properties: {
       action: { type: 'string', enum: ['read', 'update', 'append', 'completeGating'] },
-      field: { type: 'string', enum: ['objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried', 'resources', 'deadline', 'materiality', 'safeDefaults', 'repo'] },
+      field: { type: 'string', enum: ['objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried', 'resources', 'deadline', 'materiality', 'safeDefaults', 'repo', 'check'] },
       value: { type: 'string', description: `For update: the new value; ${VALUE_DESCRIPTION}` },
       item: { type: 'string', description: 'For append: one list entry' },
       provenance: { type: 'string', enum: ['user', 'model'] },
@@ -458,6 +459,33 @@ const BriefTool = acceptAnyValue(new Tool({
           return { ok: false, error: `The owner's quote must contain the repo value itself (${JSON.stringify(repo)}). Ask the owner for the repository path or clone URL.` };
         }
       }
+      // Cases stage 8 (spec §6.6, R-C8-3): the check command is the owner's
+      // own words, whole: the exact command as one run of the quote and of
+      // the owner's message (never a reworded one, never words gathered
+      // from across it). Naming it runs nothing; the owner approves it on a
+      // pressed question, and it is refused outright while checks are off.
+      if (params.field === 'check') {
+        if (params.action !== 'update') return { ok: false, error: 'The check command is set with "update".' };
+        const policy = checkPolicy(ctx.runtime);
+        if (!policy.enabled) return { ok: false, code: policy.reason, error: POLICY_OFF[policy.reason] };
+        try {
+          const command = validateCheck(params.value);
+          const said = ctx.ownerMessages[check.messageIndex];
+          if (!checkInQuote(command, check.quote, said)) {
+            return {
+              ok: false,
+              code: 'CHECK_NOT_IN_QUOTE',
+              error: `The owner's quote must contain the check command itself, exactly (${JSON.stringify(command)}). Ask the owner for the command.`
+            };
+          }
+          // Where it would run: a repository on this machine.
+          currentCheck(ctx.runtime, ctx.caseId, { command });
+          params = { ...params, value: command };
+        } catch (err) {
+          if (err instanceof CheckError) return { ok: false, code: err.code, error: err.message };
+          throw err;
+        }
+      }
       quoteNote = ` (quote: ${JSON.stringify(check.quote)})`;
     }
     const data = params.action === 'append'
@@ -467,6 +495,18 @@ const BriefTool = acceptAnyValue(new Tool({
       'brief',
       `Brief ${params.field} ${params.action === 'append' ? 'appended' : 'updated'} (${provenance})${params.reason ? `: ${params.reason}` : ''}${quoteNote}\n\n${JSON.stringify(params.action === 'append' ? params.item : params.value)}`
     );
+    if (params.field === 'check') {
+      // A new command is a new approval: what was approved before is
+      // withdrawn, and the owner is asked about this one.
+      ctx.runtime.checks(ctx.caseId).withdrawAll();
+      const question = ctx.runtime.requestCheckApproval(ctx.caseId);
+      return {
+        ok: true,
+        brief: data,
+        questionId: question.id,
+        note: 'Recorded. Nothing runs until the owner approves this command with the button on the question. Do not say it is approved.'
+      };
+    }
     return { ok: true, brief: data };
   }, { params })
 }));

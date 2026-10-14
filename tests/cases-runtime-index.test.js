@@ -35,7 +35,8 @@ describe('stage 5 settings', () => {
     const merged = mergeSettings({}).cases;
     assert.deepStrictEqual(merged.detours, { classifyOwnerMessages: true, minConfidence: 0.7, classifyTimeoutMs: 4000, recentDays: 30, maxCandidates: 2 });
     assert.deepStrictEqual(merged.duplicates, { createSimilarity: 0.6 });
-    assert.deepStrictEqual(merged.softwareRepo, { refreshBudgetMs: 6000 });
+    // `check` joined in cases stage 8 (R-C8-3): off by default.
+    assert.deepStrictEqual(merged.softwareRepo, { refreshBudgetMs: 6000, check: { enabled: false, timeoutMs: 120000, envAllow: [] } });
     const partial = mergeSettings({ cases: { detours: { minConfidence: 0.9 } } }).cases;
     assert.deepStrictEqual([partial.detours.minConfidence, partial.detours.maxCandidates], [0.9, 2]);
     const fixed = resolveCaseSettings({ detours: { minConfidence: 5, classifyTimeoutMs: -1, classifyOwnerMessages: false }, duplicates: { createSimilarity: 0 }, softwareRepo: { refreshBudgetMs: 'x' } });

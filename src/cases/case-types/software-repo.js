@@ -376,7 +376,13 @@ module.exports = {
     answerable: 'owner'
   }],
   materialFields: () => ['head', 'branch', 'openPrs'],
-  briefFields: () => [{ name: 'repo', kind: 'text', userOnly: true, validate: validateRepo }],
+  // `check` (cases stage 8, R-C8-3): the one command that says whether the
+  // repository is in a good state. Required lazily: verify/check.js reads
+  // this module.
+  briefFields: () => [
+    { name: 'repo', kind: 'text', userOnly: true, validate: validateRepo },
+    { name: 'check', kind: 'text', userOnly: true, validate: (value) => require('../verify/check').validateCheck(value) }
+  ],
   refresh,
   indexKeys,
   // Helpers for the runtime, the detour hooks and tests.

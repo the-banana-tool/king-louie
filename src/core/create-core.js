@@ -3101,6 +3101,7 @@ function createCore(deps = {}) {
     || hasDep('contactConfig')
     || hasDep('adminExecutors')
     || hasDep('playbooksConfig')
+    || hasDep('caseChecksConfig')
     || deps.remoteApprovals === 'phone';
 
   // Cases stage 4: contact channels, presence and the ladder
@@ -3336,7 +3337,11 @@ function createCore(deps = {}) {
       // bridge-connected check; otherwise "a UI is attached" (the Electron host).
       interactive: deps.host?.interactive ?? (() => Boolean(deps.ui)),
       // Cases stage 3.
-      getExecutorRegistry: () => executorRegistry
+      getExecutorRegistry: () => executorRegistry,
+      // Cases stage 8 (R-C8-3): in service mode a case runs its check
+      // command only when the admin service.json says so
+      // (deps.caseChecksConfig); the data-dir setting is ignored there.
+      caseChecks: Object.freeze({ isService: serviceMode, enabled: serviceMode && deps.caseChecksConfig?.enabled === true })
     }
   });
 

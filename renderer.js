@@ -3070,6 +3070,73 @@ function caseProgressCheckRow(chat, container) {
   return row;
 }
 
+// The check command of a software-repo case (cases stage 8, R-C8-3): the
+// command, whether the owner approved it, the last result, a field to name
+// one and "Stop running it". `check` is case:progress's; the command is
+// case text and every line is set with textContent. While checks are off
+// the row says so and offers nothing.
+const CASE_CHECK_RESULTS = { pass: 'passed', fail: 'failed', timeout: 'ran out of time', 'spawn-failed': 'could not be started' };
+function caseProgressCommandRow(chat, container, check) {
+  const caseId = chat.caseId;
+  const box = caseProgressEl('div', 'case-progress-command');
+  box.id = 'case-progress-command';
+  const head = caseProgressEl('div', 'case-progress-row-head');
+  head.append(caseProgressEl('span', 'case-progress-id', 'Check command'));
+  box.appendChild(head);
+  if (!check.enabled) {
+    head.append(caseProgressEl('span', 'case-progress-text case-progress-missing', check.reason === 'CHECK_SERVICE_OFF'
+      ? 'Off on this service until its administrator turns it on. Nothing is run.'
+      : 'Off (cases.softwareRepo.check.enabled). Nothing is run.'));
+    return box;
+  }
+  if (check.command) {
+    const tag = caseProgressEl('span', `case-progress-tag case-progress-tag-${check.approved ? 'confirmed' : 'proposed'}`);
+    tag.textContent = check.approved ? 'approved' : 'waiting for your approval';
+    head.append(tag, caseProgressEl('span', 'case-progress-text case-progress-command-text', check.command));
+    const run = check.lastRun;
+    const last = run && CASE_CHECK_RESULTS[run.result]
+      ? `Last run (${run.id}): ${CASE_CHECK_RESULTS[run.result]}${run.at ? `, ${formatTimestamp(run.at)}` : ''}${run.dirty ? ', with uncommitted changes' : ''}.`
+      : 'Not run yet. It runs at the end of a turn you started, when the repository changed in that turn.';
+    box.appendChild(caseProgressEl('div', 'case-progress-note', check.approved ? last : 'It does not run until you approve it with the button on its question in the chat.'));
+  } else {
+    head.append(caseProgressEl('span', 'case-progress-text case-progress-missing', 'None. Only npm test or npm run <script> can be the check.'));
+  }
+  const send = async (fields) => {
+    let message = null;
+    try {
+      const r = await window.electron.cases.setCheck({ caseId, ...fields });
+      if (!r?.ok) message = r?.error || 'The check command was not changed.';
+    } catch (err) {
+      message = err.message;
+    }
+    await renderCaseProgressSection(chat, container, { message });
+  };
+  const actions = caseProgressEl('div', 'chat-info-row case-progress-add');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'chat-info-input';
+  input.id = 'case-progress-command-input';
+  input.placeholder = check.command ? 'Another command, such as npm run check' : 'npm test';
+  const set = caseButton(check.command ? 'Change' : 'Set', 'secondary-button case-progress-command-set');
+  set.id = 'case-progress-command-set';
+  set.addEventListener('click', () => {
+    const value = input.value.trim();
+    if (!value) { input.focus(); return; }
+    set.disabled = true;
+    send({ command: value });
+  });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') set.click(); });
+  actions.append(input, set);
+  if (check.approved) {
+    const stop = caseButton('Stop running it', 'secondary-button case-progress-command-stop');
+    stop.id = 'case-progress-command-stop';
+    stop.addEventListener('click', () => { stop.disabled = true; send({ approved: false }); });
+    actions.appendChild(stop);
+  }
+  box.appendChild(actions);
+  return box;
+}
+
 // The case's progress in Chat Info. `message` is what the action that just
 // finished has to say (a refusal), shown in this render.
 async function renderCaseProgressSection(chat, container, { message = null } = {}) {
@@ -3107,6 +3174,7 @@ async function renderCaseProgressSection(chat, container, { message = null } = {
   if (p.frozen) container.appendChild(caseProgressEl('div', 'case-progress-note', `As of ${p.at ? formatTimestamp(p.at) : 'its close'}.`));
   if (p.warning) container.appendChild(caseProgressEl('div', 'case-progress-note', p.warning));
   if (editable) container.appendChild(caseProgressCheckRow(chat, container));
+  if (editable && p.check) container.appendChild(caseProgressCommandRow(chat, container, p.check));
 
   if (!p.frozen) {
     const o = p.objective;

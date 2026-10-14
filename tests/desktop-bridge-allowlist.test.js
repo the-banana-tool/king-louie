@@ -94,6 +94,9 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
       assert.strictEqual(channelTimeoutMs(ch, 120000), 120000, ch);
     }
     assert.deepStrictEqual(servedChannels({ handle: ['case:verifyNow', 'case:progress', 'case:confirmScope'] }).handle, ['case:verifyNow', 'case:progress', 'case:confirmScope']);
+    // The check command (R-C8-3): named on the service, under its admin's policy.
+    assert.strictEqual(IPC.CASE_SET_CHECK, 'case:setCheck');
+    assert.strictEqual(classifyChannel('case:setCheck'), 'proxy');
   });
 
   it('lists the proxied domains', () => {

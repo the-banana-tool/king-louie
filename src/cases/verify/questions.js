@@ -1,6 +1,7 @@
 // src/cases/verify/questions.js
-// Cases stage 8 (spec §6.4, §6.7, §7.5): the text of the two questions the
-// Progress tool asks, and what their answers do.
+// Cases stage 8 (spec §6.4, §6.6, §6.7, §7.5): the text of the two questions
+// the Progress tool asks and of the check command's approval, and what
+// their answers do.
 //
 // - `scope-confirm` is spoken (owner ruling R-C8-2): the buttons, and an
 //   answer in the owner's words through answer_question, both confirm or
@@ -8,11 +9,16 @@
 // - `close-proposal` is pressed: only "Mark done" pressed in the app or on
 //   the paired phone closes the case. The model proposes; it never decides.
 //
+// - `check-approve` is pressed: only "Approve" pressed in the app or on the
+//   paired phone lets the case run its check command, and only the command
+//   and repository the card showed.
+//
 // A card is host-built: host lines first, then labelled text from the case.
 // Text that is not one plain line is shown as hidden, never flattened, and
 // a card that would be too long is refused, never cut.
 const { QuestionStore, QuestionError } = require('../questions');
 const { plainLineProblem } = require('../hidden-chars');
+const { CHECK_TYPE, CheckError, currentCheck } = require('./check');
 const { createLogger } = require('../../logging');
 
 const log = createLogger('cases/verify/questions');
@@ -34,6 +40,9 @@ const HOW_TO_ANSWER_SCOPE = 'Answer with "Confirm all" or "Drop all", or use the
 const OBJECTIVE_STAYS = 'The objective is never dropped. Edit it in the case panel.';
 const NOT_A_PRESS = 'Not applied: a case is closed only by the button on this question in the app, or on the paired phone.';
 const USE_THE_BUTTONS = 'Not applied: answer with "Mark done" or "Keep working".';
+const CHECK_NOT_A_PRESS = 'Not applied: a check command is approved only by the button on this question in the app, or on the paired phone.';
+const CHECK_USE_THE_BUTTONS = 'Not applied: answer with "Approve" or "Do not run".';
+const CHECK_CHANGED = 'Not applied: the command or the repository changed after this was asked.';
 
 const isObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 // Text a case holds (a title, a criterion, an objective, a note), as a card
@@ -230,4 +239,63 @@ function onCloseAnswered(record, fact, { runtime, caseId }) {
 
 QuestionStore.registerAnswerHandler(CLOSE_TYPE, { toFact: factOf('close proposal', 'close-proposal'), onAnswered: onCloseAnswered });
 
-module.exports = { scopeQuestionText, closeQuestionText, PRESS_CHANNELS, SCOPE_TYPE, CLOSE_TYPE, QUESTION_MAX_CHARS };
+// ---- check-approve ----
+
+// The approval card of a check command (spec §6.6). Host lines first: the
+// program and its arguments on lines of their own (each word passed
+// validateCheck, so none can end its line), where it runs, when, and what
+// cannot be promised. The case's title is last. Never cut.
+function checkQuestionText(meta, { argv, repo } = {}) {
+  const words = Array.isArray(argv) ? argv : [];
+  return whole([
+    'Run a check command in this case\'s repository?',
+    `Program: ${words[0] || ''}`,
+    `Arguments: ${words.length > 1 ? words.slice(1).join(' ') : '(none)'}`,
+    `Runs in: ${shown(repo)}`,
+    'When: at the end of a turn you started, when the repository changed in that turn. Never while you are away.',
+    'It runs with your account\'s access. It can do whatever the repository\'s own scripts do, including writing files and using the network. King Louie cannot make it read-only.',
+    `Case: ${shown(meta?.title)}`
+  ], 'The check question');
+}
+
+// `approve` records the approval only when the recorded answer is a press
+// and the brief's command and repository are still the ones the card
+// showed (the hash in the payload). A changed command is asked about
+// again. `refuse` records nothing. Runs inside answerQuestion's systemAction.
+function onCheckAnswered(record, fact, { runtime, caseId }) {
+  const optionId = record.answer?.optionId;
+  if (optionId === 'refuse') return { applied: 'refused' };
+  if (optionId !== 'approve') {
+    note(runtime, caseId, record.id, CHECK_USE_THE_BUTTONS);
+    return { applied: false, note: CHECK_USE_THE_BUTTONS };
+  }
+  if (!PRESS_CHANNELS.includes(record.answer.channel)) {
+    log.warn(`${record.id}: "approve" from ${String(record.answer.channel)} is not a press; the check is not approved.`);
+    note(runtime, caseId, record.id, CHECK_NOT_A_PRESS);
+    return { applied: false, note: CHECK_NOT_A_PRESS };
+  }
+  let current = null;
+  try {
+    current = currentCheck(runtime, caseId);
+  } catch (err) {
+    if (!(err instanceof CheckError)) throw err;
+    log.warn(`${record.id}: the check is not approved: ${err.message}`);
+  }
+  if (!current || current.hash !== record.payload?.hash) {
+    note(runtime, caseId, record.id, CHECK_CHANGED);
+    if (current) {
+      try {
+        runtime.requestCheckApproval(caseId);
+      } catch (err) {
+        log.warn(`${record.id}: the changed check could not be asked about: ${err.message}`);
+      }
+    }
+    return { applied: false, note: CHECK_CHANGED };
+  }
+  runtime.checks(caseId).approve({ argv: current.argv, repo: current.key, by: 'question', ref: record.id, channel: record.answer.channel });
+  return { applied: 'approved' };
+}
+
+QuestionStore.registerAnswerHandler(CHECK_TYPE, { toFact: factOf('check command', 'check-approve'), onAnswered: onCheckAnswered });
+
+module.exports = { scopeQuestionText, closeQuestionText, checkQuestionText, PRESS_CHANNELS, SCOPE_TYPE, CLOSE_TYPE, CHECK_TYPE, QUESTION_MAX_CHARS };

@@ -13,12 +13,16 @@ const { confirmAll } = require('./helpers/case-scope');
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 
-function setup() {
+function setup({ cases = {}, caseChecks = null } = {}) {
   const { registerCaseProgressHandlers } = require('../src/ipc/case-progress-handlers');
   const { registerCaseUnattendedHandlers } = require('../src/ipc/case-unattended-handlers');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cases-progress-ipc-'));
   dirs.push(root);
-  const runtime = new CaseRuntime({ root, getSettings: () => ({ cases: { timeZone: 'UTC' } }), host: { interactive: () => true, notify: () => {} } });
+  const runtime = new CaseRuntime({
+    root,
+    getSettings: () => ({ cases: { timeZone: 'UTC', ...cases } }),
+    host: { interactive: () => true, notify: () => {}, ...(caseChecks ? { caseChecks } : {}) }
+  });
   const handlers = new Map();
   const ipcMain = { handle: (ch, fn) => handlers.set(ch, fn), on: () => {} };
   const context = { getCaseRuntime: () => runtime };
@@ -275,6 +279,110 @@ describe('case progress IPC', () => {
     assert.ok(before.criteria.some((x) => x.state === 'unmet') && before.criteria.some((x) => x.scope === 'proposed'));
     const r = await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'done' });
     assert.deepStrictEqual([r.ok, r.case.status], [true, 'done']);
+  });
+
+  // Cases stage 8 (plan Task 15; R-C8-3): the check command of a
+  // software-repo case, named in the panel. Nothing here runs anything.
+  describe('case:setCheck and the check part of case:progress', () => {
+    const CHECK_ON = { cases: { softwareRepo: { check: { enabled: true } } } };
+    async function repoCase(runtime, { repo = undefined } = {}) {
+      const local = repo === undefined ? fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cases-progress-repo-'))) : repo;
+      if (repo === undefined) dirs.push(local);
+      const info = await runtime.createCase({ title: 'Lakeside lot site', type: 'software-repo', objective: 'Ship the Lakeside lot site', force: true });
+      runtime.brief(info.id).update('why', 'The listing goes live in spring', { provenance: 'user' });
+      runtime.brief(info.id).update('repo', local, { provenance: 'user' });
+      runtime.brief(info.id).append('successCriteria', 'The test suite passes', { provenance: 'model' });
+      confirmAll(runtime, info.id);
+      runtime.completeGating(info.id);
+      return { ...runtime.getCase(info.id), repo: local };
+    }
+
+    it('is registered, and case:progress has no check for a case that is not a software-repo one', async () => {
+      const { runtime, handlers, call } = setup(CHECK_ON);
+      assert.strictEqual(IPC.CASE_SET_CHECK, 'case:setCheck');
+      assert.ok(handlers.has(IPC.CASE_SET_CHECK));
+      const general = await openCase(runtime);
+      assert.strictEqual((await call(IPC.CASE_PROGRESS, { caseId: general.id })).check, null);
+      const r = await call(IPC.CASE_SET_CHECK, { caseId: general.id, command: 'npm test' });
+      assert.deepStrictEqual([r.ok, r.code], [false, 'CHECK_NOT_SOFTWARE_REPO']);
+    });
+
+    it('names the command as the owner, asks one pressed question, and shows it waiting until the press', async () => {
+      const { runtime, call } = setup(CHECK_ON);
+      const c = await repoCase(runtime);
+      assert.deepStrictEqual((await call(IPC.CASE_PROGRESS, { caseId: c.id })).check, { enabled: true, reason: null, command: null, approved: false, lastRun: null });
+      const r = await call(IPC.CASE_SET_CHECK, { caseId: c.id, command: ' npm test ', by: 'question', channel: 'mobile' });
+      assert.strictEqual(r.ok, true, r.error);
+      assert.deepStrictEqual(r.check, { enabled: true, reason: null, command: 'npm test', approved: false, lastRun: null });
+      assert.strictEqual(runtime.brief(c.id).read().data.check, 'npm test');
+      const open = runtime.questions(c.id).open().filter((q) => q.payload?.type === 'check-approve');
+      assert.deepStrictEqual(open.map((q) => q.id), [r.questionId]);
+      assert.ok(open[0].text.split('\n').includes(`Runs in: ${c.repo}`));
+      // Setting it approved nothing, whatever the payload said.
+      assert.strictEqual(runtime.checks(c.id).read().approved.length, 0);
+      // The case is committed and unlocked.
+      assert.strictEqual(fs.existsSync(path.join(c.dir, '.kl', 'lock')), false);
+
+      await runtime.answerQuestion(c.id, r.questionId, { channel: 'in-app', optionId: 'approve' });
+      assert.strictEqual((await call(IPC.CASE_PROGRESS, { caseId: c.id })).check.approved, true);
+      // A run is shown by id and result only.
+      runtime.checks(c.id).addRun({ hash: 'sha256:x', head: 'abc123', dirty: 0, result: 'fail', exitCode: 1, timedOut: false, ms: 12, turnId: 'turn-1' });
+      const shown = (await call(IPC.CASE_PROGRESS, { caseId: c.id })).check.lastRun;
+      assert.deepStrictEqual([shown.id, shown.result, shown.head, shown.dirty], ['chk-0001', 'fail', 'abc123', 0]);
+      assert.deepStrictEqual(Object.keys(shown).sort(), ['at', 'dirty', 'head', 'id', 'result']);
+
+      // Another command withdraws the approval and asks again.
+      const changed = await call(IPC.CASE_SET_CHECK, { caseId: c.id, command: 'npm run check' });
+      assert.deepStrictEqual([changed.ok, changed.check.command, changed.check.approved], [true, 'npm run check', false]);
+      assert.strictEqual(runtime.questions(c.id).open().filter((q) => q.payload?.type === 'check-approve').length, 1);
+
+      // "Stop running it": every approval is withdrawn and the open question is closed.
+      await runtime.answerQuestion(c.id, changed.questionId, { channel: 'in-app', optionId: 'approve' });
+      assert.strictEqual((await call(IPC.CASE_PROGRESS, { caseId: c.id })).check.approved, true);
+      const stopped = await call(IPC.CASE_SET_CHECK, { caseId: c.id, approved: false });
+      assert.deepStrictEqual([stopped.ok, stopped.check.command, stopped.check.approved], [true, 'npm run check', false]);
+      assert.strictEqual(runtime.checks(c.id).read().approved.length, 0);
+    });
+
+    it('is refused, with nothing written: off, a bad command, no local repository, a closed case, an unmarked event, a bad payload', async () => {
+      const off = setup();
+      const offCase = await repoCase(off.runtime);
+      assert.deepStrictEqual((await off.call(IPC.CASE_PROGRESS, { caseId: offCase.id })).check, { enabled: false, reason: 'CHECK_DISABLED', command: null, approved: false, lastRun: null });
+      const before = snapshot(offCase.dir);
+      const d = await off.call(IPC.CASE_SET_CHECK, { caseId: offCase.id, command: 'npm test' });
+      assert.deepStrictEqual([d.ok, d.code], [false, 'CHECK_DISABLED']);
+      assert.deepStrictEqual(snapshot(offCase.dir), before);
+
+      // A service: the data dir's setting is not the administrator's.
+      const service = setup({ ...CHECK_ON, caseChecks: { isService: true, enabled: false } });
+      const serviceCase = await repoCase(service.runtime);
+      const s = await service.call(IPC.CASE_SET_CHECK, { caseId: serviceCase.id, command: 'npm test' });
+      assert.deepStrictEqual([s.ok, s.code], [false, 'CHECK_SERVICE_OFF']);
+      assert.strictEqual((await service.call(IPC.CASE_PROGRESS, { caseId: serviceCase.id })).check.reason, 'CHECK_SERVICE_OFF');
+
+      const { runtime, call, callUnmarked } = setup(CHECK_ON);
+      const c = await repoCase(runtime);
+      const start = snapshot(c.dir);
+      for (const command of ['make check', 'npm test; rm -rf x', 'npm install', 'npx cowsay', 'npm test --script-shell=x']) {
+        const r = await call(IPC.CASE_SET_CHECK, { caseId: c.id, command });
+        assert.deepStrictEqual([r.ok, r.code], [false, 'CHECK_INVALID'], command);
+      }
+      const unmarked = await callUnmarked(IPC.CASE_SET_CHECK, { caseId: c.id, command: 'npm test' });
+      assert.deepStrictEqual([unmarked.ok, unmarked.code], [false, 'NOT_LOCAL_DESKTOP']);
+      for (const payload of [{}, { caseId: c.id }, { caseId: c.id, command: 7 }, { caseId: c.id, approved: true }, { caseId: c.id, command: 'npm test', approved: true }]) {
+        assert.strictEqual((await call(IPC.CASE_SET_CHECK, payload)).ok, false, JSON.stringify(payload));
+      }
+      assert.deepStrictEqual(snapshot(c.dir), start);
+
+      const remote = await repoCase(runtime, { repo: 'https://git.example.com/lakeside/site.git' });
+      const u = await call(IPC.CASE_SET_CHECK, { caseId: remote.id, command: 'npm test' });
+      assert.deepStrictEqual([u.ok, u.code], [false, 'CHECK_NO_LOCAL_REPO']);
+
+      runtime.setStatus(c.id, 'done', { kind: 'owner', by: 'owner' });
+      const closed = await call(IPC.CASE_SET_CHECK, { caseId: c.id, command: 'npm test' });
+      assert.deepStrictEqual([closed.ok, closed.code], [false, 'CASE_CLOSED']);
+      assert.strictEqual((await call(IPC.CASE_PROGRESS, { caseId: c.id })).check, null);
+    });
   });
 
   it('after done the reply\'s progress is the frozen record, and so is every later read', async () => {

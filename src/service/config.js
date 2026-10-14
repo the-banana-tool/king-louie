@@ -29,8 +29,9 @@ const CONFIG_FILE = 'service.json';
 // packages load, from where) joined in cases stage 3 (R42). `contact` (cases
 // stage 4, R55): who the owner is, where to reach them and through which relays.
 // `playbooks` (cases stage 6, ruling T14-admin): the playbook source
-// allowlist and same-major auto-update.
-const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'executors', 'contact', 'playbooks'];
+// allowlist and same-major auto-update. `caseChecks` (cases stage 8,
+// R-C8-3): whether a software-repo case may run its check command.
+const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'executors', 'contact', 'playbooks', 'caseChecks'];
 const EXECUTOR_KEYS = ['entries', 'packageRoots'];
 const RELAY_DEFAULTS = { phoneListen: { host: '0.0.0.0', port: 8443 }, meshPort: 18795, auditRetentionDays: 365 };
 
@@ -195,6 +196,16 @@ function parsePlaybooksConfig(raw, file) {
   });
   if (raw.autoUpdate !== undefined && typeof raw.autoUpdate !== 'boolean') throw new Error(`Invalid ${file}: playbooks.autoUpdate must be true or false`);
   return { sources: out, autoUpdate: raw.autoUpdate === true };
+}
+
+// Cases stage 8 (R-C8-3): on a service a case runs its check command only
+// when the administrator says so here. Off unless `enabled` is exactly true.
+function parseCaseChecksConfig(raw, file) {
+  if (raw === undefined) return { enabled: false };
+  if (!isPlainObject(raw)) throw new Error(`Invalid ${file}: "caseChecks" must be an object`);
+  rejectUnknownKeys(raw, ['enabled'], 'caseChecks', file);
+  if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') throw new Error(`Invalid ${file}: caseChecks.enabled must be true or false`);
+  return { enabled: raw.enabled === true };
 }
 
 // Cases stage 4 (R55): who the owner is and where to reach them comes only
@@ -368,8 +379,9 @@ function loadServiceConfig(dataDir, overrides = {}, {
     audit: parseAuditConfig(adminCfg.audit, adminFile),
     executors: validateExecutors(adminCfg.executors, adminFile),
     contact: validateContactConfig(adminCfg.contact, adminFile, { unknownKeyError }),
-    playbooks: parsePlaybooksConfig(adminCfg.playbooks, adminFile)
+    playbooks: parsePlaybooksConfig(adminCfg.playbooks, adminFile),
+    caseChecks: parseCaseChecksConfig(adminCfg.caseChecks, adminFile)
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };
+module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, parseCaseChecksConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

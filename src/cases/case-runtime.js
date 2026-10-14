@@ -20,6 +20,8 @@ const { resolveEvidence, turnMarks, collectTurnEvidence, statesOf } = require('.
 const { prepareVerifyPass, callVerifyModel, applyVerifyReply, verificationBlock } = require('./verify/judge');
 const { registerVerificationHook, freezeProgress } = require('./verify/hook');
 const { closeReadiness } = require('./verify/readiness');
+const { CheckStore, CheckError, CHECK_TYPE, currentCheck } = require('./verify/check');
+const { checkQuestionText } = require('./verify/questions');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
 const { Budget, CATEGORIES, PER_DAY } = require('./budget');
@@ -593,6 +595,39 @@ class CaseRuntime {
 
   verification(id) {
     return new VerificationStore(this.getCase(id).dir, { now: () => this.now() });
+  }
+
+  // The check command's approvals and runs (.kl/checks.json; spec §6.6).
+  checks(id) {
+    return new CheckStore(this.getCase(id).dir, { now: () => this.now() });
+  }
+
+  // Asks the owner to approve the check command the brief names now (spec
+  // §6.6): a pressed question, never charged. An open one about an earlier
+  // command is closed first. Called under the case lock (a turn, or a
+  // system action). → the question. Throws CheckError when there is no
+  // command, or no repository on this machine to run it in.
+  requestCheckApproval(id) {
+    const meta = this.getCase(id);
+    const current = currentCheck(this, meta.id);
+    if (!current) throw new CheckError('CHECK_INVALID', 'This case has no check command.');
+    const store = this.questions(meta.id);
+    for (const q of store.open().filter((r) => r.payload?.type === CHECK_TYPE)) {
+      try {
+        store.close(q.id, { reason: 'superseded', by: 'system' });
+      } catch (err) {
+        log.warn(`Could not close superseded check question ${q.id}: ${err.message}`);
+      }
+    }
+    return this.createQuestion(meta.id, {
+      kind: 'question',
+      urgency: 'normal',
+      text: checkQuestionText(meta, current),
+      options: [{ id: 'approve', label: 'Approve' }, { id: 'refuse', label: 'Do not run' }],
+      defaultOnSilence: 'hold',
+      // Pressed: answered only by the buttons on its card or the phone.
+      payload: { type: CHECK_TYPE, key: CHECK_TYPE, mcpAnswerable: false, disclosable: false, hash: current.hash }
+    }, { charge: false });
   }
 
   // Each criterion with its state as the record says it now (spec §6.3):

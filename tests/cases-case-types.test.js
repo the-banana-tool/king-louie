@@ -58,7 +58,12 @@ describe('case-type registry', () => {
     assert.strictEqual(types.caseTypeForField('repo'), 'software-repo');
     assert.strictEqual(types.caseTypeForField('why'), null);
     assert.deepStrictEqual(types.briefFieldsFor('general'), []);
-    assert.deepStrictEqual(types.briefFieldsFor('software-repo').map((f) => [f.name, f.kind, f.userOnly]), [['repo', 'text', true]]);
+    // Cases stage 8 (R-C8-3): the check command joins repo, owner-only too.
+    assert.deepStrictEqual(types.briefFieldsFor('software-repo').map((f) => [f.name, f.kind, f.userOnly]), [['repo', 'text', true], ['check', 'text', true]]);
+    assert.strictEqual(types.caseTypeForField('check'), 'software-repo');
+    const check = types.briefFieldsFor('software-repo').find((f) => f.name === 'check');
+    assert.doesNotThrow(() => check.validate('npm test'));
+    assert.throws(() => check.validate('npm test; rm -rf x'), { code: 'CHECK_INVALID' });
   });
 
   it('gatingQuestionsFor lists the type\'s questions, then each source\'s, tagged by origin', () => {

@@ -124,6 +124,31 @@ describe('renderer case progress text', () => {
     assert.match(preload, /ipcRenderer\.invoke\('case:verifyNow', \{ caseId: payload\.caseId \}\)/);
   });
 
+  // Cases stage 8 (R-C8-3): the check command's row.
+  it('the check command row is text, offers nothing while checks are off, and sends only a command or approved: false', () => {
+    const block = progressBlock();
+    const row = functionSource(block, 'caseProgressCommandRow');
+    assert.doesNotMatch(row, /innerHTML|insertAdjacentHTML|marked/);
+    // The command is case text: an element's text, never markup.
+    assert.match(row, /caseProgressEl\('span', 'case-progress-text case-progress-command-text', check\.command\)/);
+    // Off: the reason, then nothing else.
+    assert.match(row, /if \(!check\.enabled\) \{[\s\S]*?return box;\s+\}/);
+    assert.ok(row.indexOf('return box;') < row.indexOf('setCheck'), 'no field and no button before the off return');
+    assert.match(row, /waiting for your approval/);
+    assert.match(row, /window\.electron\.cases\.setCheck\(\{ caseId, \.\.\.fields \}\)/);
+    assert.match(row, /send\(\{ command: value \}\)/);
+    assert.match(row, /send\(\{ approved: false \}\)/);
+    // "Stop running it" only for an approved command; no button approves one.
+    assert.match(row, /if \(check\.approved\) \{\s+const stop = caseButton\('Stop running it'/);
+    assert.doesNotMatch(row, /approved: true/);
+    // Only an open software-repo case gets the row (check is null otherwise).
+    const section = functionSource(block, 'renderCaseProgressSection');
+    assert.match(section, /if \(editable && p\.check\) container\.appendChild\(caseProgressCommandRow\(/);
+    const preload = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+    assert.match(preload, /ipcRenderer\.invoke\('case:setCheck', \{ caseId: payload\.caseId, command: payload\.command \}\)/);
+    assert.match(preload, /ipcRenderer\.invoke\('case:setCheck', \{ caseId: payload\.caseId, approved: false \}\)/);
+  });
+
   it('the Done confirm shows the summary and the open items first, and the close card never disables its buttons for an open item', () => {
     const block = progressBlock();
     const src = source();
