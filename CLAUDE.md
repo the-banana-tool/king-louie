@@ -279,7 +279,10 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
   exported from the history index because it loads the channel bridges). The
   first two are in no other chat's scope, by link or by `all`
   (`history:links.set` answers `LINK_REFUSED`); a bridge chat is left out of
-  `all` and is read only through an explicit link, under `linked`. A host
+  `all` and is read only through an explicit link: by the chat that links
+  it, under `linked` and under `all` (owner ruling 2026-10-13; under `all`,
+  `resolveScope` asks the chat's own links with `explicit: true` and every
+  other chat with `explicit: false`). A host
   with no policy gets `CLOSED_POLICY` (every chat reads itself);
   `OPEN_POLICY` is for unit tests and LongHaul.
 - Only the chat's own turn reads the wider scope: the desktop send path
@@ -388,8 +391,7 @@ ADR `docs/adr/0001-history-messages-as-rows.md`). It is Electron-free.
 - H4 residuals and open questions are the plan's "What is left" section.
   The ones that change what a reader may assume: a chat detached from its
   case is an ordinary chat again (its stored scope applies and other chats
-  may read it); two chats of one case cannot recall from each other; under
-  `all` a bridge chat the owner linked is still not read; in an imported
+  may read it); two chats of one case cannot recall from each other; in an imported
   chat the owner's new message is still embedded as the turn's query by
   whatever embedder is active; a case-chat export is recognised only by the
   `caseId` in the file; desktop-to-service copies carry no scope or links.

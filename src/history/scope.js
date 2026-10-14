@@ -20,8 +20,9 @@ function narrowest(a, b) {
 // A policy says what the stored scope may not do:
 //   pinnedTo(readerRef) → null, or { scope, reason } capping the chat's scope;
 //   canRead(readerRef, sourceRef, { explicit }) → true, or a reason string
-//   (refused). explicit is true for a chat the owner linked, false for one
-//   that is in scope only because the scope is 'all'.
+//   (refused). explicit is true for a chat the owner linked to the reader
+//   (under 'linked' and under 'all' alike: owner ruling of 2026-10-13),
+//   false for one that is in scope only because the scope is 'all'.
 // The refs are HistoryStore#chatRefs() rows.
 
 // No restriction: unit tests and LongHaul. The app never runs on it.
@@ -74,8 +75,12 @@ function resolveScope({ store, chatId, requested = null, policy = OPEN_POLICY } 
       else excluded.push({ chatId: source.id, reason: answer });
     }
   } else if (effective === 'all') {
+    // The chat's own links are explicit here too, so a chat a policy allows
+    // only when linked (a bridge chat) is read under 'all' once it is linked.
+    // A refused chat is left out silently, linked or not.
+    const linked = new Set(store.getLinks(id));
     for (const source of store.chatRefs()) {
-      if (source.id !== id && verdict(source, false) === true) refs.push(source);
+      if (source.id !== id && verdict(source, linked.has(source.id)) === true) refs.push(source);
     }
   }
   return {

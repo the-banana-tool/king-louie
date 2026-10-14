@@ -12,7 +12,8 @@
 //           out of every other chat's scope like a case chat, and (new
 //           question N3) reads itself only.
 //   R-H4-7  A bridge chat (Telegram, Discord) reads itself only and is left
-//           out of 'all'; the owner may link it explicitly.
+//           out of 'all'; the owner may link it explicitly, and a chat that
+//           links it reads it under 'linked' and under 'all'.
 //
 // The first rule that matches a chat wins, in that order. An imported chat
 // with no case mark is an ordinary chat here: it may read and be read.

@@ -126,6 +126,37 @@ describe('resolveScope', () => {
     assert.deepStrictEqual(calls, [{ reader: 'a', source: 'b', explicit: true }, { reader: 'a', source: 'c', explicit: true }]);
   });
 
+  it('under "all" the links of the chat are asked as explicit and every other chat is not', () => {
+    const store = seeded();
+    const calls = [];
+    // Allowed only when linked: d. Never allowed: c.
+    const policy = {
+      pinnedTo: () => null,
+      canRead: (reader, source, options) => {
+        calls.push([source.id, options.explicit]);
+        if (source.caseId) return 'case-chat';
+        if (source.id === 'd') return options.explicit === true ? true : 'bridge-chat';
+        return true;
+      }
+    };
+    store.setHistoryScope('a', 'all');
+    assert.deepStrictEqual(resolveScope({ store, chatId: 'a', policy }).chatIds, ['a', 'b', 'e']);
+
+    store.setLinks('a', ['d', 'c']);
+    calls.length = 0;
+    const all = resolveScope({ store, chatId: 'a', policy });
+    // In list order, not link order; a refused link is left out silently.
+    assert.deepStrictEqual(all.chatIds, ['a', 'b', 'd', 'e']);
+    assert.deepStrictEqual(all.excluded, []);
+    assert.deepStrictEqual(calls, [['b', false], ['c', true], ['d', true], ['e', false]]);
+    // A tool's scope argument still only narrows; the links are explicit in both.
+    assert.deepStrictEqual(resolveScope({ store, chatId: 'a', requested: 'all', policy }).chatIds, ['a', 'b', 'd', 'e']);
+    const linked = resolveScope({ store, chatId: 'a', requested: 'linked', policy });
+    assert.deepStrictEqual(linked.chatIds, ['a', 'd']);
+    assert.deepStrictEqual(linked.excluded, [{ chatId: 'c', reason: 'case-chat' }]);
+    assert.deepStrictEqual(resolveScope({ store, chatId: 'a', requested: 'chat', policy }).chatIds, ['a']);
+  });
+
   it('a policy answer that is not exactly true refuses', () => {
     const store = seeded();
     store.setHistoryScope('a', 'linked');
