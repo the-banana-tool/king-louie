@@ -285,7 +285,11 @@ function validateEnvelopeRequest(body, {
 //    model-written, so it precedes no host line.
 // Every piece of part 2 and 3 is one plain line or is replaced by
 // HIDDEN_TEXT; a fact whose text is hidden is still listed by its id.
-function envelopeQuestionText(env, { facts = new Map(), caseTitle = '', notBacked = [] } = {}) {
+// `private`: the case is private (local inference spec 2026-10-13 §8.2,
+// R-LI-24); one host line says the send leaves the owner's hardware, after
+// the host-built lines and before the labelled wording.
+const PRIVATE_SEND_LINE = 'This case is private. This send leaves your hardware.';
+function envelopeQuestionText(env, { facts = new Map(), caseTitle = '', notBacked = [], private: isPrivate = false } = {}) {
   const recipients = (env.recipients?.allow || []).map(shown);
   const factIds = (env.facts || []).map(field);
   const lines = [
@@ -295,6 +299,7 @@ function envelopeQuestionText(env, { facts = new Map(), caseTitle = '', notBacke
     ...(Array.isArray(env.channels) ? [`Channel sends allowed: ${env.channels.map(field).join(', ') || 'none'}`] : []),
     `Recipients (${recipients.length}): ${recipients.join(', ')}`,
     `Facts it may disclose (${factIds.length}): ${factIds.join(', ') || 'none'}`,
+    ...(isPrivate === true ? [PRIVATE_SEND_LINE] : []),
     'The wording below was written by the assistant or comes from the case ledger:',
     `Intent: ${shown(env.intent)}`
   ];
@@ -503,10 +508,11 @@ function applyDeltas(env, deltas, { questionId = null, factId = null, at = new D
 }
 
 // The delta card, whole: the host-built change lines first, the intent last.
-function deltaQuestionText(env, deltas, { facts = null } = {}) {
+function deltaQuestionText(env, deltas, { facts = null, private: isPrivate = false } = {}) {
   return [
     `Envelope ${field(env.id)} (${field(env.executor)}) needs your approval for:`,
     ...deltas.map((d) => `- ${deltaText(env, d, { facts })}`),
+    ...(isPrivate === true ? [PRIVATE_SEND_LINE] : []),
     `Intent: ${shown(env.intent)}`
   ].join('\n');
 }
@@ -533,6 +539,7 @@ module.exports = {
   renderEnvelopeQuestion,
   envelopeQuestionText,
   deltaQuestionText,
+  PRIVATE_SEND_LINE,
   HIDDEN_TEXT,
   QUESTION_MAX_CHARS,
   renderSignedSummary,

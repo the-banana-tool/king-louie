@@ -157,7 +157,7 @@ class DetourRouter {
       }
       const keys = type.indexKeys({ brief, snapshot: rt.caseTypeSnapshot(meta.id) });
       const onRepo = new Set();
-      for (const k of keys) for (const c of index.casesWithKey(k)) if (OPEN_CASE_STATUSES.includes(c.status)) onRepo.add(c.caseId);
+      for (const k of keys) for (const c of index.casesWithKey(k, { forCaseId: meta.id })) if (OPEN_CASE_STATUSES.includes(c.status)) onRepo.add(c.caseId);
       for (const caseId of onRepo) bump(caseId, 3);
     }
     let live = [];
@@ -212,7 +212,7 @@ class DetourRouter {
     const similar = findSimilarCases({
       title: prefill.title,
       objective: prefill.objective,
-      candidates: this.index.openCaseHeads().filter((h) => h.caseId !== meta.id),
+      candidates: this.index.openCaseHeads({ forCaseId: meta.id }).filter((h) => h.caseId !== meta.id),
       threshold: cfg.duplicates.createSimilarity
     });
     const first = [...(Array.isArray(extraAttach) ? extraAttach : []), ...[...similar.exact, ...similar.similar].map((s) => s.caseId)];

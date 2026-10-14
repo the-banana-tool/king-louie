@@ -297,7 +297,7 @@ class CaseRuntime {
 
   // The cross-case index at <root>/.index/ (cases stage 5 spec §3.1).
   get index() {
-    if (!this._index) this._index = new CrossCaseIndex(this.root, { store: this.store });
+    if (!this._index) this._index = new CrossCaseIndex(this.root, { store: this.store, isPrivateCase: (id) => this.isPrivate(id) });
     return this._index;
   }
 

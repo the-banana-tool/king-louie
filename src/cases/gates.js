@@ -67,7 +67,8 @@ function recommendationGate({ status, claims, facts }) {
   return { ok: failures.length === 0, failures };
 }
 
-const privateStmt = (title) => `(private fact in "${title}" — open that case to see it)`;
+// A private case's hit names no title (local inference spec 2026-10-13 §8.5).
+const privateStmt = (title) => (title ? `(private fact in "${title}" — open that case to see it)` : '(private fact in a private case — open that case to see it)');
 
 // Exact: an active non-inferred fact on the same (subject, attr) in this
 // case. Similar: cross-case index hits of kind `fact` with the same key or

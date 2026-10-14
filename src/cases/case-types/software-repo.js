@@ -288,7 +288,7 @@ function otherCasesOnRepo(runtime, id, keys) {
   const self = runtime.getCase(id);
   const out = [];
   for (const k of keys) {
-    for (const c of runtime.index.casesWithKey(k)) {
+    for (const c of runtime.index.casesWithKey(k, { forCaseId: self.id })) {
       if (c.caseId !== self.id && !out.some((o) => o.caseId === c.caseId)) out.push(c);
     }
   }

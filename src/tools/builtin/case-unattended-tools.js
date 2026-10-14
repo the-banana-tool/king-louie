@@ -146,7 +146,8 @@ const AskTool = new Tool({
     if (dup.exact) {
       return { ok: false, error: `This question is already open as ${dup.exact.id} (asked ${String(dup.exact.createdAt).slice(0, 10)}). Wait for its answer instead of asking again.` };
     }
-    for (const title of [...new Set(dup.elsewhere.map((e) => e.caseTitle))]) notes.push(`A similar question is open in case "${title}".`);
+    // A private case's hit names no title (local inference spec 2026-10-13 §8.5).
+    for (const title of [...new Set(dup.elsewhere.map((e) => e.caseTitle))]) notes.push(title ? `A similar question is open in case "${title}".` : 'A similar question is open in a private case.');
     const payload = { type: 'ask', turnId: ctx.turnId };
     if (params.resolves) payload.resolves = params.resolves;
     if (about) payload.about = { subject: String(about.subject || ''), attr: String(about.attr || '') };

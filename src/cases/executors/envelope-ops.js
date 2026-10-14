@@ -30,6 +30,18 @@ function journal(reg, caseId, text) {
 
 // The owner approves what the card shows, so a card is never cut: text past
 // a cut would be approved unseen. → null, or why the question is not asked.
+// Whether the case is private, for the approval cards' line (local
+// inference spec 2026-10-13 §8.2, R-LI-24). A runtime that cannot tell
+// (no isPrivate) is read as not private; a read that throws, as private.
+function casePrivate(rt, caseId) {
+  if (!rt || typeof rt.isPrivate !== 'function') return false;
+  try {
+    return rt.isPrivate(caseId) === true;
+  } catch {
+    return true;
+  }
+}
+
 function tooLong(text) {
   const n = Array.from(String(text)).length;
   return n > QUESTION_MAX_CHARS
@@ -133,7 +145,7 @@ async function requestEnvelopeUnsafe(reg, { caseId, turnId = null, signal = null
     createdAt: reg.now().toISOString(),
     turnId
   };
-  const card = envelopeQuestionText(env, { facts, caseTitle: meta.title, notBacked: v.notBacked });
+  const card = envelopeQuestionText(env, { facts, caseTitle: meta.title, notBacked: v.notBacked, private: casePrivate(rt, caseId) });
   const text = approver ? `${card}\n\n${SIGNED_NOTE}` : card;
   const long = tooLong(text);
   if (long) return { ok: false, error: `Envelope refused: ${long}.` };
@@ -325,7 +337,7 @@ function requestDelta(reg, caseId, env, deltas) {
     if (pending && !pending.answer && !pending.closed) return pending.id;
   }
   const facts = rt.ledger(caseId).view().facts;
-  const text = deltaQuestionText(env, deltas, { facts });
+  const text = deltaQuestionText(env, deltas, { facts, private: casePrivate(rt, caseId) });
   // Nothing is asked when the owner could not be shown the change whole and
   // as written: the caller refuses the job (submit.js).
   const refuseQuestion = (code, why) => {

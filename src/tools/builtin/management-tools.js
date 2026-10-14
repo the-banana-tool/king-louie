@@ -65,7 +65,11 @@ function managementTool(def) {
       if (caseScope === false) return { ok: false, error: UNAVAILABLE };
       try {
         const ownerTurnText = typeof context.ownerTurnText === 'string' ? context.ownerTurnText : null;
-        return { ok: true, result: await handler.call(def.name, params || {}, { ownerTurnText, caseScope }) };
+        // A private case's text is shown in a private chat only (local
+        // inference spec 2026-10-13 §8.5): the turn's own egress policy, or
+        // the host's for a run with no snapshot; never a parameter.
+        const askerIsPrivate = context.turnModels ? Boolean(context.turnModels.egress) : Boolean(context.egress);
+        return { ok: true, result: await handler.call(def.name, params || {}, { ownerTurnText, caseScope, askerIsPrivate }) };
       } catch (err) {
         // The handler's refusals are fixed sentences; anything else it
         // already turned into `internal`.
