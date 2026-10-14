@@ -351,22 +351,26 @@ class Profiles {
 
   // The frozen view one turn uses (spec §6.6). An unknown id falls back to
   // the default, logged: a chat or case can outlive the profile it named.
-  snapshot({ profileId = null, mainOverride = null, explain } = {}) {
+  // `egress` is the turn's egress policy (a private chat or case; spec
+  // 2026-10-13 §7.1) and `isGuaranteeTarget` the local server registry's
+  // answer; both go to the resolver as given, which reads anything that is
+  // not null or a policy as a mark it could not read.
+  snapshot({ profileId = null, mainOverride = null, explain, egress = null, isGuaranteeTarget = null } = {}) {
     let profile = profileId ? this.get(profileId) : null;
     if (profileId && !profile) log.warn(`Profile ${profileId} no longer exists; using the default profile.`);
     if (!profile) profile = this.getDefault();
-    return createTurnModels({ profile, mainOverride, customRoles: this.customRoles(), explain });
+    return createTurnModels({ profile, mainOverride, customRoles: this.customRoles(), explain, egress, isGuaranteeTarget });
   }
 }
 
 // A snapshot straight from a settings object, for a host with no Profiles
 // instance (a case runtime built without a core). Read-only.
-function snapshotFromSettings(settings, { profileId = null, mainOverride = null, explain } = {}) {
+function snapshotFromSettings(settings, { profileId = null, mainOverride = null, explain, egress = null, isGuaranteeTarget = null } = {}) {
   const view = new Profiles({
     getSettings: () => settings || {},
     setSettings: () => { throw new Error('snapshotFromSettings is read-only.'); }
   });
-  return view.snapshot({ profileId, mainOverride, explain });
+  return view.snapshot({ profileId, mainOverride, explain, egress, isGuaranteeTarget });
 }
 
 module.exports = { Profiles, ProfileError, PROFILE_KINDS, normalizeProfile, normalizeCustomRole, validateCustomRole, snapshotFromSettings, checkEffort };

@@ -8,6 +8,7 @@
 const { FailoverPolicy } = require('./failover-policy');
 const { RecoveryAction } = require('./error-classifier');
 const { LOCAL_PROVIDER } = require('../models/provider-ids');
+const { normalizePolicy, targetAllowed } = require('../models/egress');
 const { createLogger } = require('../logging');
 const log = createLogger('inference-router');
 
@@ -45,18 +46,49 @@ class InferenceRouter {
     this.prepareProvider = typeof options.prepareProvider === 'function'
       ? options.prepareProvider
       : null;
+
+    // The local server registry's answer to "may a private chat use this
+    // target" (spec 2026-10-13 §5.3, §7.2 item 2): exactly `true`, or the
+    // sentence that says why not. Without one, every target is refused
+    // under an egress policy.
+    this.isGuaranteeTarget = typeof options.isGuaranteeTarget === 'function'
+      ? options.isGuaranteeTarget
+      : null;
   }
 
   // ---- Resolved target lists (spec 2026-09-27 §6.7) ----
 
-  newRouteState(tags = null) {
+  // `egress` is the route's egress policy (src/models/egress.js) or null.
+  // Anything else that is not a policy is a mark that could not be read,
+  // and restricts like one.
+  newRouteState(tags = null, egress = null) {
     return {
       index: 0,
       answered: false,
       instances: new Map(),
       lastInstance: null,
-      tags: tags && typeof tags === 'object' ? { ...tags } : null
+      tags: tags && typeof tags === 'object' ? { ...tags } : null,
+      egress: normalizePolicy(egress)
     };
+  }
+
+  // The policy one call runs under: the route's, else one the caller put in
+  // the call's own options. A caller's options never lift the route's.
+  _egressOf(state, options) {
+    return normalizePolicy(state ? state.egress : null) || normalizePolicy(options ? options.egress : null);
+  }
+
+  // The fail-closed line (spec 2026-10-13 §7.2 item 2): under a policy a
+  // target that is not a guarantee-grade local model is never given an
+  // instance. It holds when a caller built its list some other way than
+  // through the resolver, which filters the same way.
+  _assertMaySend(target, egress) {
+    if (!egress) return;
+    const verdict = targetAllowed(egress, target, this.isGuaranteeTarget);
+    if (verdict === true) return;
+    const err = new Error(`${verdict} Nothing was sent to a hosted model.`);
+    err.code = 'PRIVATE_HOSTED_TARGET';
+    throw err;
   }
 
   // Cost records (spec 2026-09-27 §10): the role, profile and borrow a call
@@ -129,12 +161,14 @@ class InferenceRouter {
   // the history built so far is in that provider's format (every local
   // server speaks the same one, so another local server may take over).
   // skipProviders holds instance keys: a key one local server rejected says
-  // nothing about another server.
-  _nextTarget(list, state, skipProviders, failed) {
+  // nothing about another server. Under an egress policy only another
+  // guarantee-grade local target may take over; every other one is passed by.
+  _nextTarget(list, state, skipProviders, failed, egress = null) {
     let crossProvider = null;
     for (let i = state.index + 1; i < list.length; i += 1) {
       const candidate = list[i];
       if (skipProviders.has(this._instanceKey(candidate))) continue;
+      if (egress && targetAllowed(egress, candidate, this.isGuaranteeTarget) !== true) continue;
       if (!state.answered || candidate.provider === failed.provider) return { index: i, crossProvider: null };
       if (!crossProvider) crossProvider = candidate;
     }
@@ -150,6 +184,23 @@ class InferenceRouter {
     const attemptsByReason = {};
     const flags = { totalAttempts: 0, credentialRefreshed: false, contextCompressed: false };
     const skipProviders = new Set();
+    // The call's egress policy, handed to the provider too: a hosted
+    // provider refuses to send under one (BaseLLMProvider#request).
+    const egress = this._egressOf(state, options);
+    const callOptions = egress ? { ...options, egress } : options;
+    // Under a policy, a route that ran out of local targets says so, and
+    // that nothing went to a hosted model (spec 2026-10-13 §9.3, R-LI-12).
+    const unavailable = (target, err) => {
+      if (!egress) return err;
+      const slash = String(target.model).indexOf('/');
+      const server = slash === -1 ? String(target.model) : String(target.model).slice(0, slash);
+      const wrapped = new Error(
+        `The local model ${label(target)} could not take this call (${err && err.message ? err.message : 'no answer'}), and no other local model on the list could. The local server ${server} was the last one tried, so nothing was sent to a hosted model.`
+      );
+      wrapped.code = 'LOCAL_MODEL_UNAVAILABLE';
+      wrapped.cause = err;
+      return wrapped;
+    };
 
     for (let guard = 0; guard <= this.policy.maxTotalAttempts; guard += 1) {
       const target = list[state.index];
@@ -158,8 +209,11 @@ class InferenceRouter {
       // attempt's onChunk is wrapped to remember whether that happened.
       let streamed = false;
       const attemptOptions = typeof options.onChunk === 'function'
-        ? { ...options, onChunk: (chunk) => { streamed = true; return options.onChunk(chunk); } }
-        : options;
+        ? { ...callOptions, onChunk: (chunk) => { streamed = true; return options.onChunk(chunk); } }
+        : callOptions;
+      // Outside the try: a refused target is never retried and the route
+      // never moves on from it.
+      this._assertMaySend(target, egress);
       try {
         const instance = await this._instanceFor(target, state);
         const response = await this.executeTarget(instance, target, payload, attemptOptions);
@@ -213,7 +267,7 @@ class InferenceRouter {
             continue;
           }
         }
-        const next = this._nextTarget(list, state, skipProviders, target);
+        const next = this._nextTarget(list, state, skipProviders, target, egress);
         if (next.index === -1) {
           if (next.crossProvider) {
             const blocked = new Error(
@@ -223,8 +277,8 @@ class InferenceRouter {
             blocked.cause = err;
             throw blocked;
           }
-          log.warn(`${label(target)} failed (${plan.reason}) and the resolved list has nothing left.`);
-          throw err;
+          log.warn(`${label(target)} failed (${plan.reason}) and the resolved list has nothing left${egress ? ' that may take a call under the egress policy' : ''}.`);
+          throw unavailable(target, err);
         }
         log.warn(`${label(target)} failed (${plan.reason}); failing over to ${label(list[next.index])}.`);
         state.index = next.index;
@@ -238,12 +292,12 @@ class InferenceRouter {
   // A provider-shaped object over one resolved list, for an agent loop or a
   // single call. Its state (where it is in the list, whether anything has
   // answered) lives as long as the object: one per conversation history.
-  routedProvider({ targets, signal = null, meta = null } = {}) {
+  routedProvider({ targets, signal = null, meta = null, egress = null } = {}) {
     const list = (Array.isArray(targets) ? targets : [])
       .filter((x) => x && x.provider && x.model)
       .map((x) => ({ provider: String(x.provider).toLowerCase(), model: String(x.model), effort: x.effort || null }));
     if (!list.length) throw new Error('A routed provider needs at least one target.');
-    const state = this.newRouteState(meta);
+    const state = this.newRouteState(meta, egress);
     const call = (messages, opts = {}, tools = null, onChunk = null) => this.routeTargets(list, messages, {
       ...(opts || {}),
       ...(Array.isArray(tools) ? { tools } : {}),

@@ -54,6 +54,18 @@ class BaseLLMProvider {
    */
   async request(url, init = {}, options = {}) {
     const signal = options?.abortSignal || null;
+    // Under an egress policy (spec 2026-10-13 §7.2) only a local server's
+    // provider may send, and only over a transport the guarantee accepts.
+    // This is the one check on a path that holds a provider instance
+    // directly, and the fourth on the routed path. Any value but null or
+    // undefined is a policy: a mark that cannot be read restricts too.
+    if (options && options.egress !== null && options.egress !== undefined
+      && !(this.transport && typeof this.transport.fetch === 'function' && this.transport.grade === 'guarantee')) {
+      const name = typeof this.getProviderName === 'function' ? this.getProviderName() : 'this provider';
+      const err = new Error(`This call may not leave your hardware, and ${name} is not a local model the guarantee accepts. Nothing was sent.`);
+      err.code = 'PRIVATE_HOSTED_CALL';
+      throw err;
+    }
     // A provider with a transport (a local server's, which dials only its
     // pinned address) sends through it; every other provider uses fetch.
     const send = this.transport && typeof this.transport.fetch === 'function' ? this.transport.fetch : globalThis.fetch;

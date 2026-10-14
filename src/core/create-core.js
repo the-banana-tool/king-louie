@@ -85,6 +85,7 @@ const { KingLouieProfile } = require('../models/king-louie');
 const { roleTimeoutMs } = require('../models/resolver');
 const { runTierMigration } = require('../models/migrate-tiers');
 const { KL_PROVIDERS, LOCAL_PROVIDER } = require('../models/provider-ids');
+const { egressPolicy } = require('../models/egress');
 const { LocalServers, pinAdminServers } = require('../models/local-servers');
 const { roleForAgent, CORE_ROLES, BUILTIN_ROLES, targetKey, targetLabel } = require('../models/roles');
 const { NO_RETRY } = require('../providers/failover-policy');
@@ -2468,6 +2469,9 @@ function createCore(deps = {}) {
     // A local server's key is the registry's to read, per server.
     getProviderToken: (providerType) => (providerType === LOCAL_PROVIDER ? null : getDecryptedProviderToken(providerType)),
     createProvider: (providerType, token, target) => createProviderInstance(providerType, token, target),
+    // Under an egress policy the router sends only to a target the local
+    // server registry vouches for (spec 2026-10-13 §7.2 item 2).
+    isGuaranteeTarget: (target) => localServers.isGuaranteeTarget(target),
     onProviderError: reportProviderError,
     // Once per provider per turn: an Anthropic OAuth session needs a fresh
     // access token before its first call (the routed path's ensureOAuthToken).
@@ -2500,16 +2504,69 @@ function createCore(deps = {}) {
     }
   };
 
+  // ---- The egress policy (local inference spec 2026-10-13 §7.1) ----
+
+  // A case's private mark. Cases get theirs in stage L1's Task 12 (the
+  // rebase on cases stage 8); until then no case is private.
+  const readCasePrivate = () => false;
+
+  // The policy a chat's or a case's mark puts on its model calls, or null
+  // for none. Fail closed: a chat the store does not know, a mark that is
+  // not a plain "no", and any failure to read one all give a policy. A run
+  // that belongs to no chat and no case has none.
+  const egressFor = ({ chatId = null, caseId = null } = {}) => {
+    try {
+      let theCaseId = caseId || null;
+      if (chatId) {
+        if (historyStore.isPrivate(chatId) !== false) return egressPolicy({ reason: 'private-chat', chatId: String(chatId), caseId: theCaseId });
+        theCaseId = theCaseId || getChat(chatId, { messages: false })?.caseId || null;
+      }
+      if (theCaseId && readCasePrivate(theCaseId) !== false) {
+        return egressPolicy({ reason: 'private-case', chatId: chatId ? String(chatId) : null, caseId: String(theCaseId) });
+      }
+      return null;
+    } catch (err) {
+      log.warn(`A private mark could not be read, so its model calls stay local or are refused: ${err.message}`);
+      return egressPolicy({ reason: 'unknown-mark', chatId: chatId ? String(chatId) : null, caseId: caseId ? String(caseId) : null });
+    }
+  };
+
+  // The policy of a run that has a chat id and no parent snapshot. A fleet
+  // delegate turn's id ("delegate:<job>", src/fleet/delegate-sessions.js)
+  // names a job, not a chat: it scopes the session's tools and leases, and
+  // no chat row ever has it. Such a run belongs to no chat (§7.1) and has
+  // no policy, but only while the store can be read and holds no chat
+  // under that id; every other id goes to egressFor, where an unknown chat
+  // is private.
+  const runEgressFor = (chatId) => {
+    if (!chatId) return null;
+    if (typeof chatId === 'string' && chatId.startsWith('delegate:')) {
+      try {
+        if (historyStore.chatRef(chatId) === null) return null;
+      } catch { /* a store that cannot be read: egressFor decides */ }
+    }
+    return egressFor({ chatId });
+  };
+
   // Precedence (§6.3): the case's profile and main override, else the
   // chat's profile and main override, else the default profile. In a case
   // chat the override lives in case.yaml, so unattended turns follow it.
-  const snapshotModels = ({ chatId = null, caseId = null, profileId = null } = {}) => {
+  // The snapshot is frozen with the egress policy: a parent run's (`egress`,
+  // which a chat with no mark of its own never lifts), else the chat's or
+  // the case's own mark.
+  const snapshotModels = ({ chatId = null, caseId = null, profileId = null, egress = null } = {}) => {
     const chat = chatId ? getChat(chatId, { messages: false }) || null : null;
     const theCaseId = caseId || chat?.caseId || null;
     const caseChoice = readCaseModelChoice(theCaseId);
     const chosen = profileId || caseChoice?.profile || chat?.profileId || null;
     const mainOverride = theCaseId ? (caseChoice?.mainOverride || null) : (chat?.mainOverride || null);
-    return profiles.snapshot({ profileId: chosen, mainOverride, explain: explainTarget });
+    return profiles.snapshot({
+      profileId: chosen,
+      mainOverride,
+      explain: explainTarget,
+      egress: egress ?? egressFor({ chatId, caseId: theCaseId }),
+      isGuaranteeTarget: (target) => localServers.isGuaranteeTarget(target)
+    });
   };
 
   // Every provider a role could use is tested before the resolve, if it
@@ -2529,33 +2586,51 @@ function createCore(deps = {}) {
 
   // One role for one call (spec §6.3, §6.4): the usable targets in order, a
   // prepared instance of the first (for callers making one direct call) and
-  // a routed provider that fails over across them all (§6.7).
+  // a routed provider that fails over across them all (§6.7). Under an
+  // egress policy (the turn's, or a local-only role's) `provider` is the
+  // routed provider too, so a caller that makes its one call on it directly
+  // is behind the router's check without knowing (spec 2026-10-13 §7.2).
   const resolveRole = async (role = 'main', { needs = {}, explicit = null, chatId = null, caseId = null, profileId = null, turnModels = null } = {}) => {
     const models = turnModels || snapshotModels({ chatId, caseId, profileId });
-    await ensureTargetsTested(explicit ? [explicit] : models.candidatesFor(role));
+    // Under a policy the explicit target is tested only when the role's
+    // filtered candidates hold it: a private turn sends no connection test
+    // to a hosted provider.
+    const candidates = models.candidatesFor(role);
+    const underPolicy = typeof models.egressFor === 'function' ? models.egressFor(role) : (models.egress ?? null);
+    const toTest = explicit
+      ? ((!underPolicy || candidates.some((x) => targetKey(x) === targetKey(explicit))) ? [explicit] : [])
+      : candidates;
+    await ensureTargetsTested(toTest);
     const resolved = models.mustResolve(role, { needs, explicit });
     const first = resolved.targets[0];
     if (!first) throw new Error(`${role} has no model of its own; its own settings apply.`);
-    const instance = createProviderInstance(
-      first.provider,
-      first.provider === LOCAL_PROVIDER ? null : getDecryptedProviderToken(first.provider),
-      first
-    );
-    await ensureOAuthToken({ providerType: first.provider, provider: instance });
+    const egress = resolved.egress ?? null;
+    const routed = inferenceRouter.routedProvider({
+      targets: resolved.targets,
+      meta: { role, profileId: models.profileId || null, borrowedFrom: resolved.borrowedFrom || null },
+      egress
+    });
+    let instance = routed;
+    if (!egress) {
+      instance = createProviderInstance(
+        first.provider,
+        first.provider === LOCAL_PROVIDER ? null : getDecryptedProviderToken(first.provider),
+        first
+      );
+      await ensureOAuthToken({ providerType: first.provider, provider: instance });
+    }
     return {
       role,
       turnModels: models,
       targets: resolved.targets,
       skipped: resolved.skipped,
       borrowedFrom: resolved.borrowedFrom,
+      egress,
       providerType: first.provider,
       model: first.model,
       effort: first.effort || null,
       provider: instance,
-      routed: inferenceRouter.routedProvider({
-        targets: resolved.targets,
-        meta: { role, profileId: models.profileId || null, borrowedFrom: resolved.borrowedFrom || null }
-      }),
+      routed,
       timeoutMs: roleTimeoutMs(getSettings(), role, profiles.customRoles())
     };
   };
@@ -2622,7 +2697,15 @@ function createCore(deps = {}) {
   ) => {
     const sel = selection && typeof selection === 'object' ? selection : {};
     const role = typeof sel.role === 'string' && sel.role ? sel.role : 'main';
-    const turnModels = (!sel.profileId && runtimeOptions.turnModels) || snapshotModels({ profileId: sel.profileId || null });
+    // The run's egress policy (spec 2026-10-13 §7.1): its parent's, else its
+    // own chat's mark. It is only ever added on the way down: a profile
+    // named for a child never drops the parent's policy, and a run with a
+    // chat and no parent takes the chat's. The profile is chosen as before.
+    const parent = runtimeOptions.turnModels || null;
+    const policy = (parent && parent.egress) ?? runEgressFor(runtimeOptions.chatId || null);
+    const turnModels = (parent && !sel.profileId && (parent.egress || !policy))
+      ? parent
+      : snapshotModels({ profileId: sel.profileId || (parent && parent.profileId) || null, egress: policy });
     const explicit = sel.requireInProfile === true
       ? profileTargetFor(sel, turnModels, role)
       : explicitTargetFor(sel, turnModels, role);
@@ -2965,7 +3048,20 @@ function createCore(deps = {}) {
       getContextBuilder: () => contextBuilder,
       // Cases stage 3: a case workflow's children run with the extras the
       // registry rebuilds from its job index, never the workflow file's own.
-      resolveExecuteExtras: (wf) => executorRegistry?.workflowChildExtras(wf.id) ?? null
+      resolveExecuteExtras: (wf) => {
+        // A workflow's tasks reach the adapter with no chat and no parent
+        // snapshot, so they would run on the default profile with the
+        // chat's tail and recalled text in the prompt. Until a task can
+        // carry its chat's policy, a workflow of a private chat does not
+        // run (local inference stage L1, Task 8; fail closed).
+        const chatId = wf?.metadata?.chatId || null;
+        if (chatId && egressFor({ chatId })) {
+          const err = new Error('this chat is private, and a workflow\'s tasks do not run under a chat\'s private mark yet. Nothing was sent to a hosted model');
+          err.code = 'PRIVATE_NO_DETACHED_RUN';
+          throw err;
+        }
+        return executorRegistry?.workflowChildExtras(wf.id) ?? null;
+      }
     });
     await workflowEngine.initialize();
 
@@ -3693,8 +3789,9 @@ function createCore(deps = {}) {
     getModelMigration: () => modelMigration,
     explainTarget,
     snapshotModels,
+    egressFor,
     resolveRole,
-    routedProvider: ({ targets, signal = null, meta = null } = {}) => inferenceRouter.routedProvider({ targets, signal, meta }),
+    routedProvider: ({ targets, signal = null, meta = null, egress = null } = {}) => inferenceRouter.routedProvider({ targets, signal, meta, egress }),
     getModelChoices: () => modelChoices,
     getProviderOptions: providerOptionsFor,
     testProviderConnection,
