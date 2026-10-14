@@ -2,7 +2,9 @@
 
 - **Status:** Approved in outline by the owner on 2026-10-13 (§2), with the twelve questions of the first
   draft ruled on the same day (§3). The L1 implementation plan is
-  `docs/superpowers/plans/2026-10-13-local-inference-l1.md`. L2 gets its plan after L1.
+  `docs/superpowers/plans/2026-10-13-local-inference-l1.md`. L2 gets its plan after L1. The owner's
+  rulings of 2026-10-14 on the plan's open questions are in that plan ("Owner rulings (2026-10-14)")
+  and are reflected below (§6.4, §7.5, §8.4, §8.5, §13.6, §21).
 - **Date:** 2026-10-13
 - **Builds on:** models (`2026-09-27-model-catalog-profiles-roles-design.md`: catalog, availability,
   profiles, roles, `TurnModels`, failover, cost records), recall
@@ -416,6 +418,16 @@ than `utility`'s 15 s on its first call (assumption A5); an entry's `timeoutMs`,
 the role timeout for calls to that server when it is larger. `maxConcurrent` (default 2) queues calls
 per server; time in the queue counts against the timeout.
 
+**Enforced for local calls only** (owner ruling on Q-L1-3, 2026-10-14). `LocalServerProvider` aborts
+a call through the call's own abort signal (the one Stop uses; no second mechanism) once its timeout
+passes: the role timeout the caller hands it (`options.timeoutMs`), or the entry's `timeoutMs` when
+that is larger. An entry with no `timeoutMs` uses the role timeout; with neither, a call has no
+timeout, as before. The timeout covers the whole call: the queue, the wait for the reply and a reply
+still streaming. A timed-out call fails `LOCAL_TIMEOUT` (a Stop stays a Stop), which the classifier
+sends to the next target at once, with no retry; under a policy only another guarantee-grade local
+target may take it, else `LOCAL_MODEL_UNAVAILABLE` (§9.3). Hosted calls are unchanged: nothing
+enforces their `roleTimeoutMs`.
+
 ### 6.5 Three things that must not change by accident
 
 - The King Louie profile's suggester (`src/models/suggester.js`) skips every `local` model
@@ -512,7 +524,7 @@ under `src/` that calls `fetch` or opens a socket.
 | Advisor review | `src/execution/advisor.js`, `oneShot(this.provider, …)` | the provider it was given | It must be given the routed provider of the turn; pinned by a test |
 | Sub-agents, `SpawnAgent`, `BackgroundTask`, workflow tasks, agent-panel runs | `createAgentRuntime` (`create-core.js`), `runtimeOptions.turnModels` | router | Inherit the parent's snapshot; a run with no parent snapshot takes the chat's |
 | Bridge turns | through `agentExecutorAdapter.execute` | router | A bridge chat cannot be private (§8.2) |
-| Gateway sessions, cron jobs, webhooks, agent-panel runs | `agentExecutorAdapter.execute` or `createAgentRuntime` with a session and no chat (§21) | router | Never private. The tools that create one from a chat (`Cron`, `SessionsSpawn`, `RemoteDispatch`) are refused in a private chat until the owner rules on them (the L1 plan's "New questions") |
+| Gateway sessions, cron jobs, webhooks, agent-panel runs | `agentExecutorAdapter.execute` or `createAgentRuntime` with a session and no chat (§21) | router | Never private. The tools that create one from a chat (`Cron`, `SessionsSpawn`, `RemoteDispatch`) are refused in a private chat in L1 (owner ruling on N1, 2026-10-14; revisited in L2) |
 | Case `orient`, `judge` | `src/cases/turn-runner.js`, `runtime.routedProvider(turn, { role })` | router | §7.2 |
 | Detour classify | `src/cases/detours/classifier.js` | router | §7.2; fails open |
 | Executor result drafting | `src/cases/executors/results.js` (`draft`) | router | §7.2 |
@@ -631,8 +643,10 @@ in that chat's stored replies and tool results. The confirmation counts those ch
   are rebuilt. The embed worker then fills the `local:` key.
 - **A hosted embedder is configured.** The `EmbedderHost` keeps a second, `local:` embedder for
   private and imported chats ("the keep-local embedder"): started lazily when the first such chat has
-  pending chunks, on the same worker, with the default local model. The Recall pane says so and shows
-  its download and progress beside the main one.
+  pending chunks, on the same worker, with the default local model (owner ruling on Q-L1-4,
+  2026-10-14: also when the owner chose another local model in `history.embedder.model` before
+  switching to a hosted kind). The Recall pane says so and shows its download and progress beside the
+  main one.
 - **Query.** `vectorSearch` is told when any chat in scope is private and then embeds the query with
   the `local:` embedder and searches only `local:` vectors; with no local embedder ready it does not
   embed (`vectorsSkipped: 'private-chat'`) and the turn is BM25 only. This also closes, for private
@@ -651,8 +665,9 @@ in that chat's stored replies and tool results. The confirmation counts those ch
   chat to pass.
 - **Background tasks** started in a private chat run under that chat's snapshot (§7.1). **Cron
   jobs, spawned sessions and remote dispatch** start a run that belongs to no chat, on the default
-  profile; creating one from a private chat is refused (`PRIVATE_NO_DETACHED_RUN`) until the owner
-  rules whether such a run may carry the mark (the L1 plan's "New questions").
+  profile; creating one from a private chat is refused (`PRIVATE_NO_DETACHED_RUN`), and a private
+  chat's workflow is neither planned nor run (owner ruling on N1 and Q-L1-1, 2026-10-14: as built,
+  for L1). Whether such a run may carry the mark is revisited in L2.
 - **The cross-case index** (`<casesRoot>/.index/`, BM25, no model). A private case's hits to a case
   that is not private are always `text: null, redacted: true`, including a disclosable fact and the
   brief's title and objective, because that text would enter a hosted model's prompt there. Between
@@ -1062,6 +1077,7 @@ L1 (errors carry `code`; the message is the owner-facing sentence):
 | `PRIVATE_NO_DELEGATE` | A fleet acting tool in a private chat |
 | `PRIVATE_NO_DETACHED_RUN` | `Cron`, `SessionsSpawn` or `RemoteDispatch` creating a run from a private chat |
 | `LOCAL_UNREACHABLE` | A local server refused the connection or its name did not resolve; the router moves to the next target at once |
+| `LOCAL_TIMEOUT` | A local call did not finish within its timeout (§6.4); the router moves to the next target at once, under a policy only to a local one |
 | `PRIVATE_ONE_WAY` | Anything that tries to clear a mark |
 
 LongHaul: `LOCAL_REQUIRED`, `LOCAL_CALLS_MISSING`. L2 wire codes are in §14.8.
@@ -1626,7 +1642,7 @@ that leans on it; none is stated as fact above.
 | A2 | A WHATWG URL cannot carry an IPv6 zone id, so a link-local IPv6 server could not be typed anyway | Link-local stays refused by rule 2; nothing else changes |
 | A3 | Ollama, LM Studio, a llama.cpp server and vLLM each answer `GET /v1/models` and `POST /v1/chat/completions` in the OpenAI shape. Only Ollama's use is in this repository (`OllamaProvider`, the fake server) | That kind's list comes from the owner typing model ids; the smoke call still tells whether chat works |
 | A4 | Some of them report a context size in their model listing | Context is `unknown` and owner-entered for that kind |
-| A5 | A local model's first call after idle can take longer than 15 s | `timeoutMs` is unused |
+| A5 | A local model's first call after idle can take longer than 15 s | Without a larger `timeoutMs` on the entry the call fails `LOCAL_TIMEOUT` and fails over (§6.4) |
 | A6 | How each server kind loads an adapter (§12.3) | The one function of §12.3 changes |
 | A7 | Electron 41's bundled Node has X25519 key agreement and HKDF in `crypto`. Checked in this worktree's Node (v24.13.0), where both work; nothing in `src/` uses either today, and the packaged app was not run | L2 would need a dependency; the protocol is unchanged |
 | A8 | A streamed OpenAI-compatible reply can be asked to end with a usage record, and each kind honours it | Tokens are estimated (§9.1 rule 4) |
@@ -1637,7 +1653,7 @@ Read in the code after the first draft (on `main`, 9ec78a3), and what each chang
 | Point | What the code says | Effect on this spec |
 |---|---|---|
 | Child runs and their snapshot | `agentExecutorAdapter.execute` (`create-core.js`) passes `turnModels` from the parent's rethreaded requester (`options.approvalRequester.turnModels`). With no parent turn, `createAgentRuntime` calls `snapshotModels({ profileId })` with no chat: "with no parent turn, the default profile applies". The chat id travels separately (`executorOptions.chatId`) and is not used for the snapshot | `SpawnAgent`, `BackgroundTask` and a workflow started under a turn inherit the policy through the requester. A run that has a chat id and no parent snapshot must snapshot by that chat (§7.1); L1 task 8 |
-| Gateway, cron and webhook runs | `gatewayServer.on('agent:message')`, `CronExecutor` and `WebhookHandler` call `agentExecutorAdapter.execute` with a session, not a chat | They are never private. A job or session created from a private chat is a new owner question (the plan's "New questions"); until ruled, the tools that create one are refused there |
+| Gateway, cron and webhook runs | `gatewayServer.on('agent:message')`, `CronExecutor` and `WebhookHandler` call `agentExecutorAdapter.execute` with a session, not a chat | They are never private. The tools that create one are refused in a private chat in L1 (owner ruling on N1, 2026-10-14; revisited in L2) |
 | Agent-panel runs | `src/ipc/agent-handlers.js` takes agent ids and no chat id; `runOptions()` is `snapshotModels({})` | Not chat-bound; no policy applies, and none can |
 | Memory capture | `MemoryManager#capture*` has one caller outside the class: the `memory:capture` IPC, called only from the Memory pane's own form (`handleCaptureMemory`, `renderer.js`). No chat turn writes memory, and the IPC carries no chat id | R-LI-32's "never written" is true today by construction; §8.5 pins it with a test so a later automatic capture cannot add a private chat's text |
 | A refused connection | `classifyError` (`src/providers/error-classifier.js`) puts `econnrefused`, `enotfound`, `eai_again` and `fetch failed` in `TIMEOUT_MARKERS`: retried up to three times with a 1 s to 10 s backoff, then `FALLBACK_MODEL` (`failover-policy.js`) | A local server that is not running would delay every call by seconds before failing over. The local transport throws `LOCAL_UNREACHABLE`, which the classifier sends to the next target at once (§9.3) |
@@ -1651,7 +1667,7 @@ Still not verified:
   `setSettings`; the sealed key covers it either way.
 - Whether a workflow's tasks keep the parent turn's requester all the way down
   (`planner-executor.js`, `workflow-engine.js`). L1 task 8 tests it and refuses the workflow in a
-  private chat if they do not.
+  private chat if they do not. (They do not; the refusal stands for L1, owner ruling on Q-L1-1.)
 - The case `verify` role's caller: stage 8 is on `feat/cases-c8`, not on `main`. L1 is rebased on it
   before its cases tasks.
 - Log lines outside the files listed above.

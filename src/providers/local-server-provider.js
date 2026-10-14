@@ -15,6 +15,7 @@ const SERVER_ID_RE = /^[a-z][a-z0-9-]{1,39}$/;
 // A server that reports no usage is estimated at this rate (spec §9.1 rule 4).
 const EST_CHARS_PER_TOKEN = 4;
 const estimate = (chars) => Math.ceil(Math.max(0, chars) / EST_CHARS_PER_TOKEN);
+const positiveMs = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
 
 // What a finished, non-streamed reply said, for the estimate: its text and
 // the calls it made.
@@ -46,6 +47,7 @@ class LocalServerProvider extends OllamaProvider {
    * @param {string} options.serverId
    * @param {string} [options.addressClass] - recorded on each call's metrics
    * @param {string} [options.kind] - the server's kind; without it a cloud id is refused as on Ollama
+   * @param {number|null} [options.timeoutMs] - the server entry's timeoutMs (§6.4)
    * @param {object} [options.catalog]
    */
   constructor(apiKey, options = {}) {
@@ -67,6 +69,7 @@ class LocalServerProvider extends OllamaProvider {
       ? options.addressClass
       : (typeof transport.addressClass === 'string' ? transport.addressClass : 'unknown');
     this.kind = typeof options.kind === 'string' ? options.kind : null;
+    this.timeoutMs = positiveMs(options.timeoutMs);
     this._key = key;
     // Per call: the characters sent and received, for the estimate when the
     // server reports no usage. Keyed by the call's own options object, which
@@ -111,6 +114,58 @@ class LocalServerProvider extends OllamaProvider {
     return super.request(url, init, options);
   }
 
+  /**
+   * How long one call to this server may take (spec §6.4; owner ruling on
+   * Q-L1-3, 2026-10-14): the role's timeout, replaced by the server entry's
+   * `timeoutMs` when that is larger. With neither, null: no timeout, as
+   * before. Hosted providers have no such rule.
+   */
+  callTimeoutMs(roleTimeoutMs) {
+    const role = positiveMs(roleTimeoutMs);
+    if (role === null) return this.timeoutMs;
+    if (this.timeoutMs === null) return role;
+    return Math.max(role, this.timeoutMs);
+  }
+
+  // The one abort path: a call's timeout aborts the call's own signal, which
+  // the transport already honours while the call waits for a slot, while it
+  // waits for the reply and while the reply streams. The caller's signal is
+  // forwarded, so Stop still stops. Returns null when there is no timeout.
+  _bound(callerSignal, ms) {
+    if (ms === null) return null;
+    const controller = new AbortController();
+    let fired = false;
+    const forward = () => controller.abort(callerSignal.reason);
+    if (callerSignal) {
+      if (callerSignal.aborted) forward();
+      else callerSignal.addEventListener('abort', forward, { once: true });
+    }
+    const message = `The local server ${this.serverId} did not answer within ${ms} ms.`;
+    const timer = setTimeout(() => {
+      fired = true;
+      controller.abort(new DOMException(message, 'TimeoutError'));
+    }, ms);
+    return {
+      signal: controller.signal,
+      // A call that failed because the timeout fired (and not because the
+      // caller stopped it) is LOCAL_TIMEOUT, never an AbortError: a Stop
+      // ends a turn, a timeout fails over (error-classifier.js rule 1c).
+      failure: (err) => {
+        if (!fired || callerSignal?.aborted) return err;
+        const timedOut = coded('LOCAL_TIMEOUT', message);
+        timedOut.timeoutMs = ms;
+        timedOut.serverId = this.serverId;
+        timedOut.cause = err;
+        if (err && typeof err === 'object' && err.partialLlmMetrics) timedOut.partialLlmMetrics = err.partialLlmMetrics;
+        return timedOut;
+      },
+      done: () => {
+        clearTimeout(timer);
+        if (callerSignal) callerSignal.removeEventListener('abort', forward);
+      }
+    };
+  }
+
   // Run one of the parent's calls with the server's own model id, and record
   // it under the id the target named (a server may call the model anything).
   // A finished call whose server reported no usage at all, with a reply that
@@ -121,7 +176,8 @@ class LocalServerProvider extends OllamaProvider {
     const opts = options || {};
     const model = this._serverModel(opts.model);
     const recorded = `${this.serverId}/${model}`;
-    const callOptions = { ...opts, model };
+    const bound = this._bound(opts.abortSignal || null, this.callTimeoutMs(opts.timeoutMs));
+    const callOptions = { ...opts, model, ...(bound ? { abortSignal: bound.signal } : {}) };
     const sizes = { sent: 0, received: 0 };
     this._sizes.set(callOptions, sizes);
     const counting = typeof onChunk === 'function'
@@ -136,7 +192,9 @@ class LocalServerProvider extends OllamaProvider {
       return result;
     } catch (err) {
       if (err && typeof err === 'object' && err.partialLlmMetrics) err.partialLlmMetrics.model = recorded;
-      throw err;
+      throw bound ? bound.failure(err) : err;
+    } finally {
+      if (bound) bound.done();
     }
   }
 
@@ -170,9 +228,18 @@ class LocalServerProvider extends OllamaProvider {
   }
 
   // Embeddings stay on the server too (its /api/embed, through the transport).
-  embed(inputs, options = {}) {
+  // Bounded by the call's timeout like a chat call.
+  async embed(inputs, options = {}) {
     const opts = options || {};
-    return super.embed(inputs, { ...opts, model: this._serverModel(opts.model) });
+    const model = this._serverModel(opts.model);
+    const bound = this._bound(opts.abortSignal || null, this.callTimeoutMs(opts.timeoutMs));
+    try {
+      return await super.embed(inputs, { ...opts, model, ...(bound ? { abortSignal: bound.signal } : {}) });
+    } catch (err) {
+      throw bound ? bound.failure(err) : err;
+    } finally {
+      if (bound) bound.done();
+    }
   }
 
   /**

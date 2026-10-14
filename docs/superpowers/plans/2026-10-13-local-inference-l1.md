@@ -85,7 +85,7 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - `LocalServerProvider` also takes `kind` (the cloud-id check needs it); with no kind a cloud id is refused as on Ollama. A model that does not start with this server's `<serverId>/` is refused `LOCAL_SERVER_UNKNOWN` before any request. A call is recorded under the id the target named, not the name the server reports for itself. `costUsd` is 0 on a stopped call that reported nothing too (spec §9.1 rule 1: 0 exactly when `local` is present). `embed` strips the prefix as the chat calls do.
 - Router: the "this provider's key was rejected, skip its other models" set is keyed like the instances (`local:<serverId>`), so a key one local server rejects does not skip another server. `prepareProvider` and `onProviderError` still get the provider key (`local`). The core hands the router `null` as the `local` token (`getDecryptedProviderToken('local')` would throw "No token saved"); a server's key is `__local_<id>` in `apiTokens`, read by the registry.
 - `classifyError` reads `LOCAL_UNREACHABLE` straight after the cancellation rule, before the TLS and text rules (the text says "before rule 9").
-- **Not done, and in no task's text:** spec §6.4's "an entry's `timeoutMs` replaces the role timeout when larger". The value is validated and listed; nothing applies it yet.
+- **Not done, and in no task's text:** spec §6.4's "an entry's `timeoutMs` replaces the role timeout when larger". The value is validated and listed; nothing applies it yet. (Applied since the owner's ruling on Q-L1-3 of 2026-10-14; see "Owner rulings of 2026-10-14" below.)
 - The core's wiring is tested in `tests/inference-router-local.test.js` (`local servers in the core`).
 
 **Task 6:**
@@ -166,7 +166,7 @@ Where the code as built differs from a task's text. Added by each task's impleme
 
 - **The Vault tool and an admin-stored local server key.** As for `contact.`: a new `src/models/local-vault-keys.js` (`isLocalServerVaultKey`, the same spelling fold as `isContactVaultKey`) names the namespace `local.`; the Vault tool refuses `retrieve`, `store` and `delete` of such a key and leaves it out of `list`. So that every admin key is under it, `parseLocalInferenceConfig` now also refuses a `key` reference outside `local.` (`${vault:local.<name>}`; the spec's own example). Stricter than Task 7: an admin block with `${vault:lan-box}` no longer loads. On the desktop a server's key is `__local_<id>` in `apiTokens`, which no tool reads; nothing changed there.
 - **`models:local.probe` is in the bridge's `LONG_CHANNELS`** (10 minutes): one probe is a listing (20 s) and two steps of up to 60 s each, more than the 120 s default. `add` and `fromOllama` also probe, but over the bridge they are refused at once in service mode (`LOCAL_SERVER_ADMIN_ONLY`), so they were left out.
-- **A server's `timeoutMs` is still not applied.** Spec §6.4 says it replaces the role timeout "for calls to that server when it is larger", but the role timeout (`roleTimeoutMs`) is not applied to any model call today: it is put in the call options (`timeoutMs`) by the chat send path, `oneShot` callers and `resolveRole`, and no provider, the router or the agent loop reads it. There is nothing for the entry's value to replace, and enforcing a call timeout would be a new rule. Left as it is; see Q-L1-3.
+- **A server's `timeoutMs` is still not applied.** Spec §6.4 says it replaces the role timeout "for calls to that server when it is larger", but the role timeout (`roleTimeoutMs`) is not applied to any model call today: it is put in the call options (`timeoutMs`) by the chat send path, `oneShot` callers and `resolveRole`, and no provider, the router or the agent loop reads it. There is nothing for the entry's value to replace, and enforcing a call timeout would be a new rule. Left as it is; see Q-L1-3. (Ruled 2026-10-14 and built; see "Owner rulings of 2026-10-14" below.)
 
 **Task 11:**
 
@@ -204,6 +204,15 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **Test changed:** `tests/longhaul-adapters.test.js › lists the built-in adapters and refuses an unknown one` lists the three new names; nothing was removed.
 - **Not checked:** nothing compares a prompt with the local model's window. A digest window is about 10,000 tokens plus the prompt; a server that loads a model with a smaller context (Ollama's default `num_ctx`) cuts it without saying so. `config.json` records `--local-context` or the listed window.
 
+**Owner rulings of 2026-10-14** (one commit after Task 18, before Task 16):
+
+- **The local call timeout (Q-L1-3).** `LocalServerProvider` bounds each call (`sendMessage`, `sendMessageWithTools`, `streamMessage`, and `embed`) with `callTimeoutMs(options.timeoutMs)`: the role timeout the caller passes, replaced by the server entry's `timeoutMs` when that is larger (spec §6.4's own rule, so no default had to be invented); an entry with no `timeoutMs` uses the role timeout, and a call with neither has no timeout, as before. One abort path: a timer aborts an `AbortController` that also forwards the caller's signal, and that controller's signal is the call's `abortSignal`, so the transport's existing abort handling ends the queue wait, the wait for the reply or a streaming reply. The timer is ref'd and cleared when the call settles.
+- **A timeout is not a Stop.** When the timer fired and the caller's signal did not, the provider throws `LOCAL_TIMEOUT` (a plain `Error`, not `AbortError`) with `timeoutMs`, `serverId`, the partial metrics the abort carried and the abort as `cause`; a Stop stays an `AbortError`. `classifyError` reads `LOCAL_TIMEOUT` (on the error or one level down) right after `LOCAL_UNREACHABLE`, as `FailoverReason.LOCAL_TIMEOUT` with `FALLBACK_MODEL`; `FailoverPolicy` gives it no retry (the same model would get the same time again). So with no policy the route moves to the next target at once and `failoverFrom` names the local target; under a policy only to another guarantee-grade local target, else `LOCAL_MODEL_UNAVAILABLE` with the timeout as `cause`. A reply that already streamed a chunk is not failed over (as for every failure): the turn ends with `LOCAL_TIMEOUT`. A timed-out call's usage is not recorded, as for any failed call.
+- **Hosted calls are unchanged:** no hosted provider, the router or the agent loop reads `timeoutMs`.
+- **The timeout covers the whole call**, a reply still streaming included (spec §6.4: "time in the queue counts against the timeout"). With `main`'s 90 s a long local reply can be cut; an entry's larger `timeoutMs` is the remedy. See Q-L1-5.
+- `LocalServers#providerFor` hands the entry's `timeoutMs` to the provider and builds a new provider when it changes. New code `LOCAL_TIMEOUT` (spec §13.6). Tests: `tests/local-timeout.test.js` (a fake server that never answers, short timeouts, a ref'd guard timer around every await).
+- Q-L1-1, N1 and Q-L1-4 changed no code (as built); Q-L1-2 was not ruled on.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named). Rulings that belong to L2 only are listed so nobody looks for them here.
@@ -235,21 +244,33 @@ Each row names the tasks that carry the ruling and the tests that pin it (file �
 | R-LI-33 | Images refused; read-aloud on the system engine | Task 9 | `egress-callers › R-LI-33: ImageGenerate is refused PRIVATE_HOSTED_CALL`; `› R-LI-33: read-aloud uses the system engine` |
 | R-LI-16 to 20, 26, 27 | L2 | The L2 plan | |
 
+## Owner rulings (2026-10-14)
+
+On the open questions below. Each closes its question; Q-L1-2 stays open.
+
+| Id | Ruling | Carried by | Pinned by |
+|---|---|---|---|
+| N1, Q-L1-1 | A private chat's detached runs (workflows, `Cron` creating or changing a job, `SessionsSpawn`, remote dispatch) stay refused in L1, as built (`PRIVATE_NO_DETACHED_RUN`). Revisit in L2 | Tasks 8, 9 (no new code) | `egress-callers › N1: Cron create, SessionsSpawn and remote dispatch are refused PRIVATE_NO_DETACHED_RUN`; `› N1: a workflow is not planned from a private chat`; `egress-core › a workflow started in a private chat sends nothing: its tasks are refused` |
+| Q-L1-3 | Enforce a timeout for local calls only: the entry's `timeoutMs` aborts that server's calls through the call's abort signal; hosted calls unchanged; a timed-out call fails over only as the policy allows and is reported like any other failure | The 2026-10-14 commit (Deviations: "Owner rulings of 2026-10-14") | `local-timeout` (every test) |
+| Q-L1-4 | The keep-local embedder uses the default local model, as built | Task 10 (no new code) | `history-private-embeddings › R-LI-25: the keep-local embedder fills them` |
+| Q-L1-2 | No ruling asked; left as built and still open | | |
+
 ## New questions
 
 Found while writing the tasks out. Each is built the fail-closed way until the owner rules.
 
-- **N1. A run created from a private chat that belongs to no chat.** `Cron` (creating a job), `SessionsSpawn` and `RemoteDispatch` start a run on a session, on the default profile, with no chat (`CronExecutor`, the gateway's `agent:message`, `create-core.js`). A job created in a private chat would later run the prompt a local model wrote from private text on a hosted model. Options: (a) refuse these three tools in a private chat; (b) let the created job or session carry the mark, so its runs are local or refused (a new field on cron jobs and sessions, and the snapshot reading it); (c) treat them as tools under R-LI-9. **Built: (a)**, code `PRIVATE_NO_DETACHED_RUN` (Task 9). Recommendation: (a) for L1, (b) if the owner wants scheduled work in private chats.
+- **N1 (closed 2026-10-14: (a), as built, for L1; revisit in L2). A run created from a private chat that belongs to no chat.** `Cron` (creating a job), `SessionsSpawn` and `RemoteDispatch` start a run on a session, on the default profile, with no chat (`CronExecutor`, the gateway's `agent:message`, `create-core.js`). A job created in a private chat would later run the prompt a local model wrote from private text on a hosted model. Options: (a) refuse these three tools in a private chat; (b) let the created job or session carry the mark, so its runs are local or refused (a new field on cron jobs and sessions, and the snapshot reading it); (c) treat them as tools under R-LI-9. **Built: (a)**, code `PRIVATE_NO_DETACHED_RUN` (Task 9). Recommendation: (a) for L1, (b) if the owner wants scheduled work in private chats.
 
 ## Open questions for the owner
 
 Found while building. Each is built the cautious way until the owner rules; none was decided by an implementer.
 
-- **Q-L1-1. May a workflow run from a private chat?** Today a workflow's tasks are not children of the chat's turn: they reach the model with no chat and no snapshot, on the default profile, with the chat's tail and recalled text in the prompt. **Built: a private chat's workflow is not planned and does not run** (`PRIVATE_NO_DETACHED_RUN`), also when the profile has a local model. The other choice is to let a task carry its workflow's chat to the snapshot, so it runs local or refused like a sub-agent (spec §7.3 lists "a workflow task" beside sub-agents); that is a change to `WorkflowEngine`'s task options, which Task 8's text says not to make.
-- **Q-L1-2. A workflow whose chat no longer exists** (deleted after the workflow was made) is refused like a private chat's, because an unknown chat is private. Before this stage it ran. Keep, or let a workflow with a chat id the store definitely does not hold run with no policy?
+- **Q-L1-1 (closed 2026-10-14: no, in L1, as built; revisit in L2). May a workflow run from a private chat?** Today a workflow's tasks are not children of the chat's turn: they reach the model with no chat and no snapshot, on the default profile, with the chat's tail and recalled text in the prompt. **Built: a private chat's workflow is not planned and does not run** (`PRIVATE_NO_DETACHED_RUN`), also when the profile has a local model. The other choice is to let a task carry its workflow's chat to the snapshot, so it runs local or refused like a sub-agent (spec §7.3 lists "a workflow task" beside sub-agents); that is a change to `WorkflowEngine`'s task options, which Task 8's text says not to make.
+- **Q-L1-2 (open; no ruling asked on 2026-10-14, left as built). A workflow whose chat no longer exists** (deleted after the workflow was made) is refused like a private chat's, because an unknown chat is private. Before this stage it ran. Keep, or let a workflow with a chat id the store definitely does not hold run with no policy?
 
-- **Q-L1-3. Should a model call have a timeout at all, and from where?** `roleTimeoutMs` (`models.roleTimeoutsMs`) is computed and handed to every call as `options.timeoutMs`, but nothing enforces it, so a local server's `timeoutMs` (spec §6.4: "replaces the role timeout … when it is larger") has nothing to replace. **Built: nothing**; the value is validated and stored only. Enforcing the role timeout would change every hosted call too.
-- **Q-L1-4. The keep-local embedder's model.** The spec and the plan say the default local model; an owner who chose another local model (`history.embedder.model`) and then a hosted kind gets the default one for private and imported chats. **Built: the default model.**
+- **Q-L1-3 (closed 2026-10-14: enforced for local calls only; see Deviations, "Owner rulings of 2026-10-14"). Should a model call have a timeout at all, and from where?** `roleTimeoutMs` (`models.roleTimeoutsMs`) is computed and handed to every call as `options.timeoutMs`, but nothing enforces it, so a local server's `timeoutMs` (spec §6.4: "replaces the role timeout … when it is larger") has nothing to replace. **Built: nothing**; the value is validated and stored only. Enforcing the role timeout would change every hosted call too.
+- **Q-L1-4 (closed 2026-10-14: the default local model, as built). The keep-local embedder's model.** The spec and the plan say the default local model; an owner who chose another local model (`history.embedder.model`) and then a hosted kind gets the default one for private and imported chats. **Built: the default model.**
+- **Q-L1-5. Should a local call's timeout cut a reply that is still streaming?** The ruling on Q-L1-3 is built as spec §6.4 reads: the timeout covers the whole call, so a local `main` reply that streams for longer than 90 s (or the entry's larger `timeoutMs`) ends with `LOCAL_TIMEOUT` mid-reply. The other reading bounds only the wait for the first byte (or the gaps between chunks), which is what catches a server that hangs. **Built: the whole call.**
 
 ## Global Constraints
 
@@ -1048,4 +1069,4 @@ The planner's, not the owner's; each can be overturned in review.
 - Promoting any of the four recall jobs to the product: a separate change with its own LongHaul run.
 - A job log, adapter training, storage or evaluation (spec §12.4).
 - Any change to `CONTEXT.md`.
-- A ruling on N1; until then the three tools are refused in a private chat.
+- A change to N1's ruling (2026-10-14): the three tools stay refused in a private chat in L1; L2 revisits it.

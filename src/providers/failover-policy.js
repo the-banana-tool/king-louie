@@ -58,6 +58,11 @@ const DEFAULT_BUDGETS = Object.freeze({
     // failure escalates (spent 0 >= attempts 0), with no wait.
     attempts: 0, baseMs: 0, maxMs: 0, escalateTo: RecoveryAction.FALLBACK_MODEL
   },
+  [FailoverReason.LOCAL_TIMEOUT]: {
+    // Never retry: the same model on the same server would be given the same
+    // time again. The first timeout escalates, with no wait.
+    attempts: 0, baseMs: 0, maxMs: 0, escalateTo: RecoveryAction.FALLBACK_MODEL
+  },
   [FailoverReason.UNKNOWN]: {
     attempts: 0, baseMs: 0, maxMs: 0, escalateTo: RecoveryAction.FALLBACK_MODEL
   }

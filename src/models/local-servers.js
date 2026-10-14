@@ -431,13 +431,13 @@ class LocalServers {
     }
   }
 
-  /** One LocalServerProvider per server, rebuilt when its transport, key or kind changes. */
+  /** One LocalServerProvider per server, rebuilt when its transport, key, kind or timeout changes. */
   providerFor(id) {
     const row = this._require(id);
     const transport = this.transportFor(id);
     const key = this._key(id);
     const held = this._providers.get(id);
-    if (held && held.transport === transport && held.key === key && held.kind === row.kind) return held.provider;
+    if (held && held.transport === transport && held.key === key && held.kind === row.kind && held.timeoutMs === row.timeoutMs) return held.provider;
     // Required here, not at the top: the provider module requires the models
     // index, so a top-level require would make a cycle of the two folders.
     const LocalServerProvider = require('../providers/local-server-provider');
@@ -447,9 +447,10 @@ class LocalServers {
       serverId: id,
       addressClass: transport.addressClass,
       kind: row.kind,
+      timeoutMs: row.timeoutMs,
       catalog: this.catalog
     });
-    this._providers.set(id, { transport, key, kind: row.kind, provider });
+    this._providers.set(id, { transport, key, kind: row.kind, timeoutMs: row.timeoutMs, provider });
     return provider;
   }
 
