@@ -24,6 +24,31 @@ function registerWorkflowHandlers(ipcMain, context) {
     throw err;
   };
 
+  // Every chat a plan payload can name is checked (review fix, item 5):
+  // its own chatId and its options' (mergePlanOptions takes both), and an id
+  // that is not a string fails closed. Chat messages that name no chat could
+  // be any chat's: they are refused while any chat is private, or when the
+  // store cannot say (the cautious reading).
+  const assertPayloadNotPrivate = (payload) => {
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const options = p.options && typeof p.options === 'object' ? p.options : {};
+    const ids = [p.chatId, options.chatId].filter((id) => id !== undefined && id !== null && id !== '');
+    for (const id of ids) assertNotPrivate(typeof id === 'string' ? id : 'not-a-chat-id');
+    const messages = p.chatMessages !== undefined || options.chatMessages !== undefined;
+    if (!messages || ids.length) return;
+    let any = true;
+    try {
+      const store = typeof context.getHistoryStore === 'function' ? context.getHistoryStore() : null;
+      any = store && typeof store.hasPrivateChats === 'function' ? store.hasPrivateChats() !== false : true;
+    } catch {
+      any = true;
+    }
+    if (!any) return;
+    const err = new Error('These messages name no chat, and a chat is private: a workflow is planned from a chat that is not private. Nothing was sent to a hosted model.');
+    err.code = 'PRIVATE_NO_DETACHED_RUN';
+    throw err;
+  };
+
   const mergePlanOptions = (payload) => {
     const options = { ...(payload.options || {}) };
     if (payload.chatId) options.chatId = payload.chatId;
@@ -37,7 +62,7 @@ function registerWorkflowHandlers(ipcMain, context) {
     wrapHandler('workflow:plan', async (event, payload) => {
       const planner = context.getPlannerExecutor();
       if (!planner) throw new Error('Planner not available');
-      assertNotPrivate(payload?.chatId);
+      assertPayloadNotPrivate(payload);
       try {
         const taskGraph = await planner.plan(payload.goal, mergePlanOptions(payload));
         return { ok: true, taskGraph };
@@ -58,7 +83,7 @@ function registerWorkflowHandlers(ipcMain, context) {
     wrapHandler('workflow:planAndExecute', async (event, payload) => {
       const planner = context.getPlannerExecutor();
       if (!planner) throw new Error('Planner not available');
-      assertNotPrivate(payload?.chatId);
+      assertPayloadNotPrivate(payload);
       const options = {
         ...mergePlanOptions(payload),
         background: payload.background !== false

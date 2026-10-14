@@ -538,6 +538,45 @@ describe('the callers that bypass the router, in a core', () => {
     assert.deepStrictEqual(planned, [['Repair the fence', open], ['Repair the fence', undefined]]);
   });
 
+  it('review fix, item 5: every chat id a plan payload can carry is checked, and chat messages with no chat are refused while any chat is private', async () => {
+    const handlers = new Map();
+    const planned = [];
+    const view = Object.assign(Object.create(ctx), {
+      getPlannerExecutor: () => ({
+        plan: async (goal, options) => { planned.push([goal, options.chatId ?? null]); return { goal, tasks: [] }; },
+        planAndExecute: async (goal, options) => { planned.push([goal, options.chatId ?? null]); return { id: 'wf-1' }; }
+      })
+    });
+    registerWorkflowHandlers({ handle: (channel, fn) => handlers.set(channel, fn), on: () => {} }, view);
+    const marked = newChat({ marked: true });
+    const open = newChat();
+    const history = [{ sender: 'user', text: 'the private words' }];
+    const refusals = [
+      { goal: 'Repair the fence', options: { chatId: marked } },
+      { goal: 'Repair the fence', options: { chatId: 'no-such-chat' } },
+      { goal: 'Repair the fence', chatId: open, options: { chatId: marked } },
+      { goal: 'Repair the fence', options: { chatId: 42 } },
+      { goal: 'Repair the fence', chatMessages: history },
+      { goal: 'Repair the fence', options: { chatMessages: history } }
+    ];
+    for (const channel of [IPC.WORKFLOW_PLAN, IPC.WORKFLOW_PLAN_AND_EXECUTE]) {
+      for (const payload of refusals) {
+        const refused = await handlers.get(channel)({}, payload);
+        assert.strictEqual(refused.ok, false, `${channel} ${JSON.stringify(payload)}`);
+        assert.strictEqual(refused.code, 'PRIVATE_NO_DETACHED_RUN', `${channel} ${JSON.stringify(payload)}`);
+      }
+    }
+    assert.deepStrictEqual(planned, []);
+    // An ordinary chat's id anywhere, with its messages, still plans.
+    assert.strictEqual((await handlers.get(IPC.WORKFLOW_PLAN)({}, { goal: 'Repair the fence', options: { chatId: open }, chatMessages: history })).ok, true);
+    assert.deepStrictEqual(planned, [['Repair the fence', open]]);
+    // With no chat private at all, messages with no chat plan as before.
+    const quiet = Object.assign(Object.create(view), { getHistoryStore: () => ({ hasPrivateChats: () => false }) });
+    const quietHandlers = new Map();
+    registerWorkflowHandlers({ handle: (channel, fn) => quietHandlers.set(channel, fn), on: () => {} }, quiet);
+    assert.strictEqual((await quietHandlers.get(IPC.WORKFLOW_PLAN)({}, { goal: 'Repair the fence', chatMessages: history })).ok, true);
+  });
+
   it('R-LI-9: WebSearch and WebFetch run in a private chat', async () => {
     const marked = newChat({ marked: true });
     const env = await ctx.getRuntimeEnvironment({ workingDirectory: dataDir });
