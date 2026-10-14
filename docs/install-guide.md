@@ -361,6 +361,60 @@ the node from loading, and the error names it:
 `Invalid /opt/king-louie/mcp/config/node.yaml: unknown key "policy.allowed_root" (known: allowed_roots, remote_sessions, max_concurrent_jobs)`.
 `service.json` does the same for keys under `features` and `ports`.
 
+### Local models (optional)
+
+A service node can run its model calls on a model server you run yourself
+(Ollama, LM Studio, llama.cpp, vLLM, or any OpenAI-compatible server). Chats
+and cases marked private then use only such a server, and its calls cost
+nothing. On a service node the list of local servers comes **only** from the
+`localInference` block of the admin `service.json`; a `models.localServers`
+setting in the data dir is ignored with one warning in the log, and the
+desktop cannot add, change or remove one over the bridge. `gpu-box` shows the
+block:
+
+```json
+"localInference": { "servers": [{ "id": "workstation", "name": "Workstation", "kind": "ollama", "baseUrl": "http://127.0.0.1:11434", "maxConcurrent": 2 }] }
+```
+
+Keys per server: `id` (2 to 40 lowercase letters, digits and dashes, starting
+with a letter), `name`, `kind` (`ollama`, `lmstudio`, `llamacpp`, `vllm` or
+`openai-compatible`), `baseUrl`, and optionally `addresses`,
+`tlsFingerprint`, `allowCgnat`, `maxConcurrent`, `timeoutMs`, `key` and
+`adapters`. An unknown key stops the service with the key named.
+
+- **The address must be this machine or your own network.** The service
+  resolves `baseUrl`'s host once at each start (or takes the `addresses` you
+  list, 1 to 8 IP addresses) and dials only those addresses: it never
+  resolves again per request, never follows a redirect and never uses a
+  proxy. An address written in the file that is public or link-local stops
+  the service with the entry named; a name that answers with any such
+  address leaves that server out, with an error in the log, and the service
+  starts without it.
+- **A server on another machine** carries the private-chat guarantee only
+  over `https` with the certificate's SHA-256 fingerprint in
+  `tlsFingerprint` (64 hex characters, no colons; the chain is then not
+  consulted). Over plain `http` on your network it is used for cost only and
+  never by a private chat. For example
+  `"baseUrl": "https://workstation.example.com:8443", "tlsFingerprint": "<64 hex characters>"`.
+- **An overlay network** (the carrier-grade NAT range that Tailscale and
+  similar VPNs hand out) is refused unless that server's entry says
+  `"allowCgnat": true`. Set it only for your own overlay network.
+- **A key**, when the server wants one, is never written into
+  `service.json`: store it with `king-louie-service vault set local.<name>`
+  (the value is read from stdin) and write `"key": "${vault:local.<name>}"`.
+  Only keys under `local.` are accepted there, because the model's `Vault`
+  tool cannot read that namespace.
+- **`timeoutMs`** bounds a call only until its first output arrives (the
+  first streamed token or the first byte of the reply), when it is longer
+  than the role's own timeout; a long reply is never cut.
+- **`adapters`** is a list of `{ "model": "<the server's model id>", "id":
+  "<slug>", "job": "<job>", "ref": "<what the server loads>" }`, one id per
+  model. It is the only place adapters are declared on a service node.
+
+King Louie cannot tell whether a server passes your text on to someone
+else's machine; list only servers that do not. `npm run smoke:local` checks
+a server from a checkout (see its header for the variables).
+
 ## 6. Grant exact privileges
 
 ### Linux: sudoers (`web-01`)

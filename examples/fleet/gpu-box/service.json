@@ -2,5 +2,6 @@
   "profile": "agent",
   "features": { "gateway": false, "webhooks": false, "mesh": false, "channels": false, "appDiscovery": false, "desktopBridge": false },
   "ports": { "gateway": 18793, "webhook": 18794, "desktopBridge": 18796 },
-  "playbooks": { "sources": [], "autoUpdate": false }
+  "playbooks": { "sources": [], "autoUpdate": false },
+  "localInference": { "servers": [{ "id": "workstation", "name": "Workstation", "kind": "ollama", "baseUrl": "http://127.0.0.1:11434", "maxConcurrent": 2 }] }
 }

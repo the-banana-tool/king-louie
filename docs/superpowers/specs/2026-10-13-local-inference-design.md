@@ -1,7 +1,9 @@
 # Local Inference — Design Spec
 
-- **Status:** Approved in outline by the owner on 2026-10-13 (§2), with the twelve questions of the first
-  draft ruled on the same day (§3). The L1 implementation plan is
+- **Status:** L1 built on `feat/local-inference` (plan Tasks 1 to 20; the last code commit is
+  f3972ac, Task 19's end-to-end check, and the docs commit that writes this line closes the stage);
+  not merged. L2 not started. Approved in outline by the owner on 2026-10-13 (§2), with the twelve
+  questions of the first draft ruled on the same day (§3). The L1 implementation plan is
   `docs/superpowers/plans/2026-10-13-local-inference-l1.md`. L2 gets its plan after L1. The owner's
   rulings of 2026-10-14 on the plan's open questions are in that plan ("Owner rulings (2026-10-14)")
   and are reflected below (§6.4, §7.5, §8.2, §8.4, §8.5, §13.6, §21).
@@ -1664,6 +1666,14 @@ Read in the code after the first draft (on `main`, 9ec78a3), and what each chang
 | Log lines on the paths this spec touches | `chat-handlers.js`, `base-provider.js`, `ollama-provider.js`, `inference-router.js`, `vector-search.js`, `embed-indexer.js`, `embedder-host.js`, `call-model.js`, `context-assembler.js`, `availability.js`, `ollama.js`: every `info`, `warn` and `error` line carries a label, a count or `err.message`, never a message's text | The rule of R-LI-28 holds there today. A provider's error message is written as it came and could quote a request; that is the residual (§18) |
 | X25519 and HKDF | In this worktree's Node (v24.13.0) `crypto.generateKeyPairSync('x25519')`, `crypto.diffieHellman` and `crypto.hkdfSync` work | A7 holds for Node 24. Electron 41's bundled Node was not run; the L2 plan checks it in the packaged app |
 
+Checked while L1 was built (2026-10-14):
+
+| # | Result |
+|---|---|
+| A1 | Holds on Node 24.13.0 (this worktree's Node): `local-transport › R-LI-5: a proxy in the environment is not used` sets the proxy variables and the request still reaches only the pinned address. Node 22 and Electron 41's main process were not run against a proxy; the end-to-end check (`tests/e2e/local-private.test.js`) shows local calls work from Electron's main process, with no proxy set |
+| A3, A4 | Not verified against a real server: no local server was at hand. `npm run smoke:local` was run against the fake server only (kinds `ollama` and `openai-compatible`: pinned to 127.0.0.1, loopback, guarantee grade, probed, streamed, one tool call). The fake answers `/v1/models` without a context field, so an `openai-compatible` listing's context reads `unknown` there |
+| A8, A9 | Not verified against a real server (the same reason) |
+
 Still not verified:
 
 - Whether the gateway exposes any call that saves settings. None was found by a search for
@@ -1676,8 +1686,14 @@ Still not verified:
 - Log lines outside the files listed above.
 
 Differences from `CLAUDE.md` found while reading, corrected by the L1 docs task: `examples/fleet/`
-has five `service.json` files, not four; the case budget's comment that real providers report
-`costUsd: 0` for an unknown model no longer matches `buildLlmCallMetrics`, which reports `null`.
+has five `service.json` files, not four (corrected in `CLAUDE.md` by Task 20); the case budget's
+comment that real providers report `costUsd: 0` for an unknown model no longer matches
+`buildLlmCallMetrics`, which reports `null` (the comment went with Task 12).
+
+Found wrong while building, beyond the plan's Deviations: the profile picker and the chat header
+listed only the 14 providers' models, so a probed local model could not be placed by hand, and a
+refused turn's sentence and "Open Models" button were wiped when the chat was drawn again. Both
+were found by the end-to-end check and fixed in Task 19.
 
 ## 22. Where the approved design is harder than it sounds
 
