@@ -53,6 +53,17 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - `local-transport.js` requires `./local-address` (the two tasks are no longer independent of each other; they were built one after the other).
 - **Proxy variables (spec assumption A1): holds** on Node 24.13.0. The test's control (the same URL through `node:http`'s global agent in the same child) goes to the test's proxy; the transport's call does not. On a Node older than 24 the control is reported but not required to hit the proxy.
 
+**Task 3:**
+
+- **Only `null` / `undefined` is "no policy".** `createTurnModels({ egress })` and `targetAllowed` read any other value that is not a policy object (`false`, `true`, `''`, `{}`, a string) as an unreadable mark and restrict under an `unknown-mark` policy (`normalizePolicy`, exported). A caller with no policy passes `null` or leaves the key out. Likewise a `localOnly` that is not an array (and not null) makes every role local-only.
+- A `local-only-role` policy carries the role: `{ localOnly, reason, chatId, caseId, role }`. The `role` key is present only on that reason; the other three policies have exactly the four keys the text gives. `egressPolicy` takes `role` as a fourth, optional field.
+- `targetAllowed` is asked for the `local` provider only: a registry that answers `true` for an `ollama` or hosted target is not believed. `isGuaranteeTarget` throwing, or answering anything that is neither `true` nor a non-empty string, refuses with "<target> is not a local model the guarantee accepts and this chat is private." Sentences for the other reasons: "… and this case is private.", "… and this chat's private mark could not be read, so it is treated as private."
+- **`candidatesFor(role)` is filtered under the role's policy too**, with the same borrow rule (the text names `resolve` only). Its callers (`ensureTargetsTested` in the core and the case runtime, the default-provider previews) would otherwise send a connection test to a hosted provider for a private turn. `configuredFor` still returns the profile's list as written.
+- A policy is the **asking** role's and is carried through a borrow and a custom role's fallback; the role that lends its list never changes it (a `utility` call that borrows a local-only `worker`'s list is not local-only; a local-only custom role stays local-only through its fallback).
+- `imageGeneration` under a policy: an `explicit` target is refused too, a local one included (no local server generates images in L1), and `candidatesFor('imageGeneration')` is empty. The one skipped entry's `target` is the role's first configured target, or `{ provider: 'settings', model: 'imageGeneration', effort: null }` when the role is empty, so code that labels a skipped target has one. Under a local-only role the reason reads "Image generation is not available on a local model."
+- Under a policy `mustResolve` always throws the policy's code, also when the role's local targets exist but `explain` says none is usable (a server that is down): the message lists them under "Skipped:" and ends "Nothing was sent to a hosted model."
+- `egress.js` also exports `refusalSubject(policy, role)` (the opening of that message), for Task 8's wording.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named). Rulings that belong to L2 only are listed so nobody looks for them here.
