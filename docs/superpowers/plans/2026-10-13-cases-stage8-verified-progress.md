@@ -56,6 +56,15 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - *`limitsProblem`.* `adding` counts every criterion about to be added and `addingProposed` how many of those are born proposed (so one proposal is `{ adding: 1, addingProposed: 1 }`; `{ addingProposed: 1 }` alone reads the same). The proposed limit is checked only when a proposal is being added.
 - *Shapes, a little wider than written.* The view's objective row also has `at` and `provisional`; a `duplicates` entry is `{ text, hash }`; `confirm` returns the file as written.
 
+**Task 2 (`AbandonedStore`).**
+
+- *"Different case and spacing"* is tested as different case and spaces around the text. Two spaces in a row inside an `approach` are not one plain line (`plainLineProblem`), so that text is refused `ABANDON_INVALID` before the duplicate check, not folded.
+- *Step 2's "the leak test passes already"* does not hold as written: the new leak test writes case B's record through `AbandonedStore`, so it failed on the missing module until Step 3, and passed with no change to `index-store.js`.
+- *`decisions`* may be a list of records or ids, a `Set`, a `Map`, or what `CaseRecords.decisions()` really returns (`{ entries, errors }`, not a list). Ids that cannot be checked (no `facts`, no `decisions` passed) are refused `ABANDON_INVALID`.
+- *`withdraw` needs a `why`* (one plain line, 5 to 300 characters) and returns the record as it now reads.
+- *A line counts as malformed* when it is not JSON, has an unknown `kind`, is an `abandon` with a bad id, no `approach` or no `why`, repeats an id, or is a `withdraw` of an id that is not there or is already withdrawn. Lengths are not re-checked on read. A new id is one past the highest id any line used, malformed or not.
+- *`abandonedLines`* lists newest first; it takes the store's records (oldest first) and leaves withdrawn ones out itself. A line shows at most 110 characters of the approach, 130 of the reason and the first three fact ids; the 1,500 characters include the count line. Stored text that is not one plain line shows as `(text hidden: not one plain line)`.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.

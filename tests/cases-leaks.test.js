@@ -104,6 +104,42 @@ describe('cross-case leak paths', () => {
     const hits = rt.index.search({ text: 'house loan payoff letter', forCaseId: a.id, excludeCaseId: a.id, kinds: ['fact'] });
     assert.strictEqual(hits[0].text, `${PRIVATE_STMT} ${PRIVATE_VALUE}`);
   });
+
+  // Cases stage 8 (spec §6.2): the abandoned record is case data like a
+  // non-disclosable fact. This pins that nobody adds the file to the index.
+  it("an abandoned approach of case B is in no hit returned to case A and in no index document", async () => {
+    const { AbandonedStore } = require('../src/cases/abandoned');
+    const { rt, a, b } = await fixture();
+    const approach = 'Zephyrquoll brokerage cold calls';
+    const why = 'The marmotfjord office declined twice';
+    const tried = 'Rang the plumbthistle desk on a weekday';
+    const dir = rt.getCase(b.id).dir;
+    await rt.systemAction(b.id, 'abandon an approach', () => {
+      new AbandonedStore(dir).abandon({ approach, why, tried: [tried] });
+    });
+    assert.match(fs.readFileSync(path.join(dir, '.kl', 'abandoned.jsonl'), 'utf8'), /Zephyrquoll/, 'the record is on disk in case B');
+    const held = (value) => /zephyrquoll|marmotfjord|plumbthistle/i.test(JSON.stringify(value));
+    const indexFiles = () => {
+      const casesDir = path.join(rt.index.dir, 'cases');
+      return fs.readdirSync(casesDir).map((name) => fs.readFileSync(path.join(casesDir, name), 'utf8'));
+    };
+
+    for (const refresh of [() => rt.index.upsertCase(b.id), () => rt.index.rebuild()]) {
+      refresh();
+      for (const text of [approach, why, tried, `${approach} ${why} ${tried}`, 'zephyrquoll', 'marmotfjord plumbthistle']) {
+        const hits = rt.index.search({ text, forCaseId: a.id, excludeCaseId: a.id });
+        assert.strictEqual(held(hits), false, `search: ${text}`);
+        assert.ok(!hits.some((h) => h.caseId === b.id && /abandon/i.test(`${h.kind} ${h.id}`)), `no abandoned document: ${text}`);
+        const cases = rt.index.searchCases({ text, forCaseId: a.id, excludeCaseId: a.id });
+        assert.strictEqual(held(cases), false, `searchCases: ${text}`);
+        assert.deepStrictEqual(rt.index.search({ text: 'zephyrquoll marmotfjord plumbthistle', forCaseId: a.id, excludeCaseId: a.id }), [], 'its words find nothing at all');
+      }
+      const files = indexFiles();
+      assert.ok(files.length >= 2, 'both cases are indexed');
+      assert.ok(files.some((f) => f.includes(b.id)), "case B's documents are there");
+      assert.strictEqual(files.some(held), false, 'no stored document is built from abandoned.jsonl');
+    }
+  });
 });
 
 describe('cross-case leak paths through detours', () => {
