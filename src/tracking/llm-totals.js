@@ -47,8 +47,8 @@ function costByRole(calls = []) {
     if (server) {
       entry.localCalls = (entry.localCalls || 0) + 1;
       entry.localTokens = (entry.localTokens || 0) + (Number(call.totalTokens) || 0);
-      entry.localServers = entry.localServers || [];
-      if (!entry.localServers.includes(server)) entry.localServers.push(server);
+      entry.localServerIds = entry.localServerIds || [];
+      if (!entry.localServerIds.includes(server)) entry.localServerIds.push(server);
     }
     // A role with no models of its own ran on the role it borrowed from
     // (spec §6.4); the cost line says so (final review m3).

@@ -93,7 +93,7 @@ describe('a reply\'s totals', () => {
   it('cost by role names the local servers a role ran on', () => {
     const byRole = costByRole([localCall('workstation', 100), localCall('gpu-box', 40), localCall('workstation', 10), pricedCall(0.02)]);
     assert.deepStrictEqual(byRole.utility, {
-      calls: 3, totalTokens: 150, costUsd: 0, localCalls: 3, localTokens: 150, localServers: ['workstation', 'gpu-box']
+      calls: 3, totalTokens: 150, costUsd: 0, localCalls: 3, localTokens: 150, localServerIds: ['workstation', 'gpu-box']
     });
     assert.deepStrictEqual(byRole.main, { calls: 1, totalTokens: 110, costUsd: 0.02 });
   });
@@ -102,7 +102,7 @@ describe('a reply\'s totals', () => {
     const out = summarizeTurnLlm({ calls: [pricedCall(0.01)], subagents: [{ agentId: 'a1', role: 'worker', calls: [localCall('workstation', 30, 'worker')] }] });
     assert.strictEqual(out.totals.localCalls, 1);
     assert.strictEqual(out.subagents[0].totals.localCalls, 1);
-    assert.deepStrictEqual(out.byRole.worker.localServers, ['workstation']);
+    assert.deepStrictEqual(out.byRole.worker.localServerIds, ['workstation']);
   });
 });
 

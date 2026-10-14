@@ -422,8 +422,10 @@ per server; time in the queue counts against the timeout.
 a call through the call's own abort signal (the one Stop uses; no second mechanism) once its timeout
 passes: the role timeout the caller hands it (`options.timeoutMs`), or the entry's `timeoutMs` when
 that is larger. An entry with no `timeoutMs` uses the role timeout; with neither, a call has no
-timeout, as before. The timeout covers the whole call: the queue, the wait for the reply and a reply
-still streaming. A timed-out call fails `LOCAL_TIMEOUT` (a Stop stays a Stop), which the classifier
+timeout, as before. The timeout runs only until the first output arrives (owner ruling on Q-L1-5,
+2026-10-14): the queue and the wait for the reply count, and the first streamed token, or the first
+byte of a non-streamed reply body, clears it, so a long reply is never cut by it; Stop still stops
+it. A call with no output in time fails `LOCAL_TIMEOUT` (a Stop stays a Stop), which the classifier
 sends to the next target at once, with no retry; under a policy only another guarantee-grade local
 target may take it, else `LOCAL_MODEL_UNAVAILABLE` (§9.3). Hosted calls are unchanged: nothing
 enforces their `roleTimeoutMs`.
@@ -1077,7 +1079,7 @@ L1 (errors carry `code`; the message is the owner-facing sentence):
 | `PRIVATE_NO_DELEGATE` | A fleet acting tool in a private chat |
 | `PRIVATE_NO_DETACHED_RUN` | `Cron`, `SessionsSpawn` or `RemoteDispatch` creating a run from a private chat |
 | `LOCAL_UNREACHABLE` | A local server refused the connection or its name did not resolve; the router moves to the next target at once |
-| `LOCAL_TIMEOUT` | A local call did not finish within its timeout (§6.4); the router moves to the next target at once, under a policy only to a local one |
+| `LOCAL_TIMEOUT` | A local call gave no output (no streamed token, no byte of the reply body) within its timeout (§6.4); the router moves to the next target at once, under a policy only to a local one |
 | `PRIVATE_ONE_WAY` | Anything that tries to clear a mark |
 
 LongHaul: `LOCAL_REQUIRED`, `LOCAL_CALLS_MISSING`. L2 wire codes are in §14.8.
@@ -1642,7 +1644,7 @@ that leans on it; none is stated as fact above.
 | A2 | A WHATWG URL cannot carry an IPv6 zone id, so a link-local IPv6 server could not be typed anyway | Link-local stays refused by rule 2; nothing else changes |
 | A3 | Ollama, LM Studio, a llama.cpp server and vLLM each answer `GET /v1/models` and `POST /v1/chat/completions` in the OpenAI shape. Only Ollama's use is in this repository (`OllamaProvider`, the fake server) | That kind's list comes from the owner typing model ids; the smoke call still tells whether chat works |
 | A4 | Some of them report a context size in their model listing | Context is `unknown` and owner-entered for that kind |
-| A5 | A local model's first call after idle can take longer than 15 s | Without a larger `timeoutMs` on the entry the call fails `LOCAL_TIMEOUT` and fails over (§6.4) |
+| A5 | A local model's first call after idle can take longer than 15 s to give its first output | Without a larger `timeoutMs` on the entry the call fails `LOCAL_TIMEOUT` and fails over (§6.4) |
 | A6 | How each server kind loads an adapter (§12.3) | The one function of §12.3 changes |
 | A7 | Electron 41's bundled Node has X25519 key agreement and HKDF in `crypto`. Checked in this worktree's Node (v24.13.0), where both work; nothing in `src/` uses either today, and the packaged app was not run | L2 would need a dependency; the protocol is unchanged |
 | A8 | A streamed OpenAI-compatible reply can be asked to end with a usage record, and each kind honours it | Tokens are estimated (§9.1 rule 4) |

@@ -79,6 +79,9 @@ class LocalServerProvider extends OllamaProvider {
     // server reports no usage. Keyed by the call's own options object, which
     // the parent hands to request() unchanged.
     this._sizes = new WeakMap();
+    // Per call, by its bounded abort signal: the timeout to clear when the
+    // first byte of a non-streamed reply body arrives (see _bound).
+    this._watchBody = new WeakMap();
   }
 
   getName() { return LOCAL_PROVIDER; }
@@ -132,17 +135,33 @@ class LocalServerProvider extends OllamaProvider {
   }
 
   // Counts what a call sends, for the estimate (see _call).
-  request(url, init = {}, options = {}) {
+  // Also: for a non-streamed call under a timeout, the reply body is watched
+  // for its first byte, which ends the timeout (owner ruling on Q-L1-5).
+  async request(url, init = {}, options = {}) {
     const sizes = options && typeof options === 'object' ? this._sizes.get(options) : null;
     if (sizes && init && typeof init.body === 'string') sizes.sent += init.body.length;
-    return super.request(url, init, options);
+    const response = await super.request(url, init, options);
+    const bound = options && options.abortSignal ? this._watchBody.get(options.abortSignal) : null;
+    if (!bound || !response || !response.body || typeof response.body.getReader !== 'function') return response;
+    const reader = response.body.getReader();
+    const watched = new ReadableStream({
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) { controller.close(); return; }
+        if (value && value.byteLength > 0) bound.started();
+        controller.enqueue(value);
+      },
+      cancel(reason) { return reader.cancel(reason); }
+    });
+    return new Response(watched, { status: response.status, statusText: response.statusText, headers: response.headers });
   }
 
   /**
-   * How long one call to this server may take (spec §6.4; owner ruling on
-   * Q-L1-3, 2026-10-14): the role's timeout, replaced by the server entry's
-   * `timeoutMs` when that is larger. With neither, null: no timeout, as
-   * before. Hosted providers have no such rule.
+   * How long a call to this server may wait for its first output (spec
+   * §6.4; owner rulings on Q-L1-3 and Q-L1-5, 2026-10-14): the role's
+   * timeout, replaced by the server entry's `timeoutMs` when that is larger.
+   * With neither, null: no timeout, as before. Hosted providers have no
+   * such rule.
    */
   callTimeoutMs(roleTimeoutMs) {
     const role = positiveMs(roleTimeoutMs);
@@ -152,9 +171,12 @@ class LocalServerProvider extends OllamaProvider {
   }
 
   // The one abort path: a call's timeout aborts the call's own signal, which
-  // the transport already honours while the call waits for a slot, while it
-  // waits for the reply and while the reply streams. The caller's signal is
-  // forwarded, so Stop still stops. Returns null when there is no timeout.
+  // the transport already honours while the call waits for a slot and for
+  // the reply. The timeout runs only until the first output arrives (the
+  // first streamed token, or the first byte of a non-streamed reply body):
+  // `started()` clears it, so a long reply is never cut by it (Q-L1-5). The
+  // caller's signal is forwarded for the whole call, so Stop still stops.
+  // Returns null when there is no timeout.
   _bound(callerSignal, ms) {
     if (ms === null) return null;
     const controller = new AbortController();
@@ -183,6 +205,7 @@ class LocalServerProvider extends OllamaProvider {
         if (err && typeof err === 'object' && err.partialLlmMetrics) timedOut.partialLlmMetrics = err.partialLlmMetrics;
         return timedOut;
       },
+      started: () => { clearTimeout(timer); },
       done: () => {
         clearTimeout(timer);
         if (callerSignal) callerSignal.removeEventListener('abort', forward);
@@ -209,9 +232,18 @@ class LocalServerProvider extends OllamaProvider {
     const callOptions = { ...opts, model: sent, ...(bound ? { abortSignal: bound.signal } : {}) };
     const sizes = { sent: 0, received: 0 };
     this._sizes.set(callOptions, sizes);
+    // A streamed call's first token ends its timeout; a non-streamed call's
+    // first body byte does (request, above).
     const counting = typeof onChunk === 'function'
-      ? (chunk) => { if (typeof chunk === 'string') sizes.received += chunk.length; return onChunk(chunk); }
+      ? (chunk) => {
+        if (typeof chunk === 'string') {
+          sizes.received += chunk.length;
+          if (bound && chunk.length > 0) bound.started();
+        }
+        return onChunk(chunk);
+      }
       : onChunk;
+    if (bound && typeof onChunk !== 'function') this._watchBody.set(bound.signal, bound);
     try {
       const result = await run(callOptions, counting);
       if (result && typeof result === 'object' && result.llmMetrics) {
@@ -262,6 +294,7 @@ class LocalServerProvider extends OllamaProvider {
     const opts = options || {};
     const model = this._serverModel(opts.model);
     const bound = this._bound(opts.abortSignal || null, this.callTimeoutMs(opts.timeoutMs));
+    if (bound) this._watchBody.set(bound.signal, bound);
     try {
       return await super.embed(inputs, { ...opts, model, ...(bound ? { abortSignal: bound.signal } : {}) });
     } catch (err) {

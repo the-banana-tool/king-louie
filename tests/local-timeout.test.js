@@ -206,6 +206,81 @@ describe('a local call\'s timeout', () => {
     }
   });
 
+  // A server that starts its reply at once and then takes longer than the
+  // timeout to finish it: a stream of tokens 120 ms apart, or a JSON body
+  // whose first bytes come at once and the rest 400 ms later.
+  async function startDrippingServer() {
+    const timers = new Set();
+    const later = (ms, fn) => { const t = setTimeout(() => { timers.delete(t); fn(); }, ms); timers.add(t); };
+    const srv = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        const body = JSON.parse(raw || '{}');
+        if (body.stream) {
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          const words = ['one', ' two', ' three', ' four'];
+          words.forEach((w, i) => later(i * 120, () => res.write(`data: ${JSON.stringify({ model: body.model, choices: [{ delta: { content: w } }] })}\n\n`)));
+          later(words.length * 120, () => { res.write('data: [DONE]\n\n'); res.end(); });
+          return;
+        }
+        const text = JSON.stringify({ model: body.model, choices: [{ message: { role: 'assistant', content: 'a long reply' } }], usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.write(text.slice(0, 10));
+        later(400, () => res.end(text.slice(10)));
+      });
+    });
+    await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    return {
+      url: `http://127.0.0.1:${srv.address().port}`,
+      close: async () => { for (const t of timers) clearTimeout(t); srv.closeAllConnections(); await new Promise((resolve) => srv.close(resolve)); }
+    };
+  }
+
+  it('Q-L1-5: a server that starts promptly and streams past the limit completes', async () => {
+    const drip = await startDrippingServer();
+    try {
+      const provider = registry([serverEntry('workstation', drip.url)]).providerFor('workstation');
+      let streamed = '';
+      const started = Date.now();
+      const out = await within(5000, provider.streamMessage(HI, { model: 'workstation/m', timeoutMs: 150 }, (c) => { streamed += c; }));
+      assert.strictEqual(streamed, 'one two three four');
+      assert.ok(out.llmMetrics);
+      assert.ok(Date.now() - started >= 300, 'the reply ran well past the 150 ms timeout');
+    } finally {
+      await drip.close();
+    }
+  });
+
+  it('Q-L1-5: a non-streamed reply whose body starts in time is not cut, however long the rest takes', async () => {
+    const drip = await startDrippingServer();
+    try {
+      const provider = registry([serverEntry('workstation', drip.url)]).providerFor('workstation');
+      const res = await within(5000, provider.sendMessageWithTools(HI, TOOLS, { model: 'workstation/m', timeoutMs: 150 }));
+      assert.strictEqual(res.type, 'text');
+      assert.strictEqual(res.llmMetrics.local.server, 'workstation');
+    } finally {
+      await drip.close();
+    }
+  });
+
+  it('Q-L1-5: once output has started, Stop still stops', async () => {
+    const drip = await startDrippingServer();
+    try {
+      const provider = registry([serverEntry('workstation', drip.url)]).providerFor('workstation');
+      const stop = new AbortController();
+      let streamed = '';
+      const call = provider.streamMessage(HI, { model: 'workstation/m', timeoutMs: 5000, abortSignal: stop.signal }, (c) => {
+        streamed += c;
+        if (streamed === 'one') stop.abort('Stopped by the owner');
+      });
+      await within(4000, assert.rejects(call, (err) => err.name === 'AbortError' && err.code !== 'LOCAL_TIMEOUT'));
+      assert.strictEqual(streamed, 'one');
+    } finally {
+      await drip.close();
+    }
+  });
+
   it('with no policy, a timed-out local target fails over at once and is named', async () => {
     const { router, sleeps } = harness([serverEntry('workstation', `${box.url}/vllm`)]);
     const before = hosted.requests.length;
