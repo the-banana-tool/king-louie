@@ -34,6 +34,11 @@ const FACTORIES = {
   // in the answer stage.
   'kl-recall-rewrite': (config) => require('./kl-recall-rewrite').createKlRecallRewriteAdapter(config),
   'kl-recall-abstain-check': (config) => require('./kl-recall-abstain-check').createKlRecallAbstainCheckAdapter(config),
+  // A local model in place of the cross-encoder (same candidates), and
+  // periodic digests as recall material.
+  'kl-recall-llm-rerank': (config) => require('./kl-recall-llm-rerank').createKlRecallLlmRerankAdapter(config),
+  'kl-recall-vec-llm-rerank': (config) => require('./kl-recall-llm-rerank').createKlRecallLlmRerankAdapter({ ...config, candidates: 'fused' }),
+  'kl-recall-digest': (config) => require('./kl-recall-digest').createKlRecallDigestAdapter(config),
   'kl-recall-whole': (config) => require('./kl-recall').createKlRecallAdapter({
     ...config, name: 'kl-recall-whole', recall: { ...(config.recall || {}), ...WHOLE_MESSAGES }
   }),

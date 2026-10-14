@@ -25,8 +25,9 @@ const USAGE = [
   '  [--jev-mode batched|pointwise] [--jev-model jev-1.13.0] [--jev-max-tokens 20000000] [--jev-base-url <url>]',
   '  --jev-*: kl-recall-jev-rerank and kl-recall-vec-jev-rerank (key TYPESAFE_AI_KEY; unpriced, input tokens reported)',
   '  [--local-provider ollama|openai-compatible --local-model <id> [--local-base-url <url>] [--local-context <tokens>]]',
-  '  [--rewrite-mode replace|append] [--abstain-mode note|withhold]',
-  '  --local-*: the local model for kl-recall-rewrite and kl-recall-abstain-check (an address on this machine or the LAN;',
+  '  [--rewrite-mode replace|append] [--abstain-mode note|withhold] [--llm-rerank-mode pointwise|listwise]',
+  '  [--digest-every-tokens 10000] [--digest-max-tokens 400]',
+  '  --local-*: the local model for kl-recall-rewrite, kl-recall-abstain-check, kl-recall(-vec)-llm-rerank and kl-recall-digest (an address on this machine or the LAN;',
   '  $0; calls cached, made in the evidence-only run, cache-only in the answer stage; --fake-models supplies a fake one)',
   'Answer stage: --answer-provider <p> --answer-model <m> [--answer-base-url <url>] --judge-provider <p> --judge-model <m> [--judge-base-url <url>]',
   '  [--summarizer-provider <p> --summarizer-model <m> [--summarizer-base-url <url>]] [--tier grid|frontier] [--sample 150]',
@@ -36,9 +37,15 @@ const USAGE = [
 
 // The adapters that call the local model (local inference spec §11.3), and
 // the options that apply only to each.
-const LOCAL_ADAPTERS = Object.freeze(['kl-recall-rewrite', 'kl-recall-abstain-check']);
+const LOCAL_ADAPTERS = Object.freeze(['kl-recall-rewrite', 'kl-recall-abstain-check', 'kl-recall-llm-rerank', 'kl-recall-vec-llm-rerank', 'kl-recall-digest']);
 const LOCAL_OPTIONS = Object.freeze(['local-provider', 'local-model', 'local-base-url', 'local-context']);
-const MODE_OPTIONS = Object.freeze({ 'rewrite-mode': 'kl-recall-rewrite', 'abstain-mode': 'kl-recall-abstain-check' });
+const MODE_OPTIONS = Object.freeze({
+  'rewrite-mode': ['kl-recall-rewrite'],
+  'abstain-mode': ['kl-recall-abstain-check'],
+  'llm-rerank-mode': ['kl-recall-llm-rerank', 'kl-recall-vec-llm-rerank'],
+  'digest-every-tokens': ['kl-recall-digest'],
+  'digest-max-tokens': ['kl-recall-digest']
+});
 
 // Options that mean nothing without the answer stage.
 const ANSWER_ONLY = Object.freeze([
@@ -130,6 +137,9 @@ module.exports = {
     'local-context': { type: 'string' },
     'rewrite-mode': { type: 'string' },
     'abstain-mode': { type: 'string' },
+    'llm-rerank-mode': { type: 'string' },
+    'digest-every-tokens': { type: 'string' },
+    'digest-max-tokens': { type: 'string' },
     'answer-provider': { type: 'string' },
     'answer-model': { type: 'string' },
     'answer-base-url': { type: 'string' },
@@ -186,8 +196,8 @@ module.exports = {
     if (localNamed.length && (!values['local-provider'] || !values['local-model'])) {
       throw new UsageError('--local-provider and --local-model go together.');
     }
-    for (const [option, adapter] of Object.entries(MODE_OPTIONS)) {
-      if (values[option] !== undefined && !adapterNames.includes(adapter)) throw new UsageError(`--${option} applies only to ${adapter}.`);
+    for (const [option, adapters] of Object.entries(MODE_OPTIONS)) {
+      if (values[option] !== undefined && !adapters.some((a) => adapterNames.includes(a))) throw new UsageError(`--${option} applies only to ${adapters.join(' and ')}.`);
     }
 
     const cache = ModelCache.forHome(ctx.home);
@@ -219,11 +229,20 @@ module.exports = {
       ...(values['jev-max-tokens'] ? { maxTokens: positiveInt(values['jev-max-tokens'], 'jev-max-tokens') } : {}),
       ...(values['jev-base-url'] ? { jevBaseUrl: values['jev-base-url'] } : {})
     };
+    const llmRerank = values['llm-rerank-mode'] ? { llmRerankMode: values['llm-rerank-mode'] } : {};
     const adapterConfig = {
       'kl-recall': { recall, ...(chunk ? { chunk } : {}) },
       'kl-recall-whole': { recall, ...(chunk ? { chunk } : {}) },
       'kl-recall-rewrite': { recall, ...(chunk ? { chunk } : {}), local, ...(values['rewrite-mode'] ? { rewriteMode: values['rewrite-mode'] } : {}) },
       'kl-recall-abstain-check': { recall, ...(chunk ? { chunk } : {}), local, ...(values['abstain-mode'] ? { abstainMode: values['abstain-mode'] } : {}) },
+      // A local model in place of the cross-encoder: scores cached under private/rerank.
+      'kl-recall-llm-rerank': { recall, privateRoot: ctx.home.private, local, ...llmRerank },
+      'kl-recall-vec-llm-rerank': { ...vec, local, ...llmRerank },
+      'kl-recall-digest': {
+        recall, ...(chunk ? { chunk } : {}), local,
+        ...(values['digest-every-tokens'] ? { digestEveryTokens: positiveInt(values['digest-every-tokens'], 'digest-every-tokens') } : {}),
+        ...(values['digest-max-tokens'] ? { digestMaxTokens: positiveInt(values['digest-max-tokens'], 'digest-max-tokens') } : {})
+      },
       'kl-recall-vec': vec,
       'kl-recall-vec-only': vec,
       // kl-recall-rerank: cross-encoder scores cached under LONGHAUL_HOME/private/rerank.

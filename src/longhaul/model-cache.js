@@ -15,9 +15,10 @@ const { withRetries } = require('./retry');
 const { createLogger } = require('../logging');
 
 const log = createLogger('longhaul/model-cache');
-// rewrite and abstain-check: the local adapters' calls (local inference
-// spec §11.1). The stage is part of every key, so a new one changes none.
-const STAGES = Object.freeze(['answer', 'judge', 'summary', 'rewrite', 'abstain-check']);
+// rewrite, abstain-check and digest: the local adapters' calls (local
+// inference spec §11.1). The stage is part of every key, so a new one
+// changes none.
+const STAGES = Object.freeze(['answer', 'judge', 'summary', 'rewrite', 'abstain-check', 'digest']);
 const CACHE_VERSION = 1;
 const KEY_RE = /^[0-9a-f]{64}$/;
 const NO_HOOKS = Object.freeze({ beforeCall: () => 0, afterCall: () => {}, cancel: () => {} });

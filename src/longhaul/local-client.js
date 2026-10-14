@@ -127,6 +127,25 @@ function median(xs, p = 0.5) {
   return s[Math.min(s.length - 1, Math.floor(p * s.length))];
 }
 
+// The local client an adapter was given; refused (LOCAL_REQUIRED) when there
+// is none, or when it is not local.
+function requireLocalClient(local, adapterName) {
+  const client = local && local.client;
+  if (!client || typeof client.complete !== 'function') {
+    throw new UsageError(`${adapterName} needs a local model: --local-provider and --local-model, or --fake-models.`, 'LOCAL_REQUIRED');
+  }
+  if (client.local !== true) {
+    throw new UsageError(`${adapterName} measures a local model, and ${client.provider}/${client.model} is not one.`, 'LOCAL_REQUIRED');
+  }
+  return client;
+}
+
+// The answer stage's refusal of a local call that is not cached.
+function localCallsMissing(adapterName, what) {
+  return new UsageError(`${adapterName}: ${what} is not cached for these settings, and the answer stage makes no call `
+    + 'outside its plan; nothing was sent. Run the evidence-only run with the same settings first.', 'LOCAL_CALLS_MISSING');
+}
+
 /**
  * The local calls of one adapter (spec §11.2): every call goes through the
  * model cache, keyed by the stage, the client (provider, model, base URL,
@@ -138,13 +157,8 @@ function median(xs, p = 0.5) {
  * @param {string} adapterName
  */
 function createLocalCaller(local, adapterName) {
-  const client = local && local.client;
-  if (!client || typeof client.complete !== 'function' || !local.cache) {
-    throw new UsageError(`${adapterName} needs a local model: --local-provider and --local-model, or --fake-models.`, 'LOCAL_REQUIRED');
-  }
-  if (client.local !== true) {
-    throw new UsageError(`${adapterName} measures a local model, and ${client.provider}/${client.model} is not one.`, 'LOCAL_REQUIRED');
-  }
+  const client = requireLocalClient(local, adapterName);
+  if (!local.cache) throw new Error(`${adapterName} needs the model cache for its local calls.`);
   const stats = { calls: 0, cacheHits: 0, ms: [] };
   return {
     client,
@@ -157,10 +171,7 @@ function createLocalCaller(local, adapterName) {
     },
     async call({ stage, prompt, promptFile, maxTokens, meta = {} }) {
       const key = this.keyFor({ stage, prompt, promptFile, maxTokens });
-      if (local.cachedOnly === true && !local.cache.get(stage, key)) {
-        throw new UsageError(`${adapterName}: a local ${stage} call is not cached for these settings, and the answer stage makes no call `
-          + 'outside its plan; nothing was sent. Run the evidence-only run with the same settings first.', 'LOCAL_CALLS_MISSING');
-      }
+      if (local.cachedOnly === true && !local.cache.get(stage, key)) throw localCallsMissing(adapterName, `a local ${stage} call`);
       const out = await cachedCall({ cache: local.cache, stage, key, client, prompt, maxTokens, retry: local.retry || {}, meta });
       if (out.cached) {
         stats.cacheHits += 1;
@@ -179,4 +190,6 @@ function createLocalCaller(local, adapterName) {
 // What config.json and describe() say of the local model.
 const localModelLabel = (client) => `${client.kind || client.provider}/${client.model}`;
 
-module.exports = { createLocalClient, createLocalCaller, localModelLabel, LOCAL_PROVIDERS, DEFAULT_OLLAMA_URL };
+module.exports = {
+  createLocalClient, createLocalCaller, requireLocalClient, localCallsMissing, localModelLabel, median, LOCAL_PROVIDERS, DEFAULT_OLLAMA_URL
+};

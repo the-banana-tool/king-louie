@@ -167,7 +167,9 @@ async function scoreOne({ runId, adapter, handle, session, q, budgetTokens }) {
       // null for an adapter that never reports cutting (kl-recall, oracle):
       // "not known", not "not cut".
       contextTruncated: typeof r.truncated === 'boolean' ? r.truncated : null,
-      leaked: [...shown, ...partial].filter((s) => s >= q.askAtSeq).length,
+      // A digest (kl-recall-digest) counts by the messages it covers: it
+      // is never evidence, but it leaks like the messages it holds.
+      leaked: [...shown, ...partial, ...(Array.isArray(r.coveredSeqs) ? r.coveredSeqs : [])].filter((s) => s >= q.askAtSeq).length,
       error: null
     };
     return { record, text: String(r.text ?? '') };
