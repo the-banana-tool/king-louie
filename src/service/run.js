@@ -98,7 +98,7 @@ function loadProfile(profile) {
     return {
       // deps: tests only (deps.gui reaches createGuiSubsystem's deps, for a
       // helper endpoint under a temp dir); runService passes none.
-      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, adminUid, configDir, executors, deps = {} }) {
+      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, caseChecks = null, adminUid, configDir, executors, deps = {} }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -185,6 +185,9 @@ function loadProfile(profile) {
             // Cases stage 6 (ruling T14-admin): the playbook source allowlist
             // and autoUpdate, from the admin service.json only.
             playbooksConfig: playbooks ?? { sources: [], autoUpdate: false },
+            // Cases stage 8 (R-C8-3): whether a case may run its check
+            // command, from the admin service.json only. Off without it.
+            caseChecksConfig: { enabled: caseChecks?.enabled === true },
             isService: true,
             remoteApprovals: 'phone',
             phoneApprover: approvals.phoneApprover,
@@ -412,7 +415,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, adminUid, executors: config.executors, serviceConfig: config });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, caseChecks: config.caseChecks, adminUid, executors: config.executors, serviceConfig: config });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

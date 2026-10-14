@@ -8,6 +8,7 @@ const { initializeTools, toolRegistry } = require('../src/tools');
 const ToolExecutor = require('../src/execution/tool-executor');
 const { CaseRuntime } = require('../src/cases');
 const { LedgerTool, BriefTool, DecideTool, RecommendTool } = require('../src/tools/builtin/case-tools');
+const { confirmAll } = require('./helpers/case-scope');
 const {
   CASE_TOOL_NAMES, CASE_MODE_PROMPT, shapeToolDefinitions, buildCaseSystemPrompt, isProtectedCasePath,
   CASE_BLOCKED_TOOL_NAMES, requireOwnerQuote
@@ -32,6 +33,7 @@ async function setup(title = 'Lakeside lot', ownerMessages) {
 async function activate(runtime, id) {
   runtime.brief(id).update('why', 'Need the cash', { provenance: 'user' });
   runtime.brief(id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+  confirmAll(runtime, id);
   runtime.completeGating(id);
 }
 
@@ -101,13 +103,19 @@ describe('case tools', () => {
   });
 
   it('Brief reads, refuses owner-only fields from the model, journals updates and completes gating', async () => {
-    const { runtime, info, opts } = await setup('Lakeside lot', ['I need the cash from selling this lot.']);
+    const { runtime, info, opts } = await setup('Lakeside lot', ['I need the cash from selling this lot.', 'We are done when it is closed by year end.']);
     const read = await BriefTool.execute({ action: 'read' }, opts);
     assert.deepStrictEqual(read.missingForGating, ['why', 'successCriteria']);
     const refused = await BriefTool.execute({ action: 'update', field: 'why', value: 'I think they need cash', provenance: 'model' }, opts);
     assert.strictEqual(refused.ok, false);
     await BriefTool.execute({ action: 'update', field: 'why', value: 'Need the cash', provenance: 'user', reason: 'Owner said so', quote: 'I need the cash' }, opts);
-    await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Closed by year end' }, opts);
+    // Cases stage 8 (R-C8-2): the model's criterion is a proposal, and gating
+    // waits for one the owner stated or confirmed.
+    await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Three written offers' }, opts);
+    assert.deepStrictEqual((await BriefTool.execute({ action: 'read' }, opts)).missingForGating, ['successCriteria']);
+    assert.match((await BriefTool.execute({ action: 'completeGating' }, opts)).error, /successCriteria \(no criterion is confirmed by the owner/);
+    await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Closed by year end', provenance: 'user', quote: 'it is closed by year end' }, opts);
+    assert.deepStrictEqual((await BriefTool.execute({ action: 'read' }, opts)).missingForGating, []);
     const done = await BriefTool.execute({ action: 'completeGating' }, opts);
     assert.deepStrictEqual(done, { ok: true, status: 'active' });
     assert.match(runtime.records(info.id).lastJournal().file, /-brief/);
@@ -165,6 +173,191 @@ describe('case tools', () => {
     assert.strictEqual(ok.ok, true);
     assert.ok(ok.rendered.indexOf('Is there a water tap?') < ok.rendered.indexOf('List at 35k per acre'), 'unknowns first');
     assert.strictEqual(runtime.ledger(info.id).view().facts.get(f.id).loadBearing, true);
+  });
+});
+
+// Cases stage 8 (spec §6.1): success criteria and the objective are proposals
+// unless the owner's own quoted words state them.
+describe('Brief scope rules', () => {
+  const OWNER = ['We are done when there is a signed contract at or above the floor, and it has closed within 90 days.', 'yes do that', 'The goal is to sell the Lakeside lot this year.'];
+  const briefData = (runtime, info) => runtime.brief(info.id).read().data;
+  const rows = (runtime, info) => runtime.scopeView(info.id).criteria.map((r) => [r.id, r.state, r.origin]);
+  const lastJournalHeader = (runtime, info) => runtime.records(info.id).lastJournal().text.split('\n')[0];
+  const ownerAdds = (runtime, info, text) => runtime.applyScopeAction(info.id, { action: 'add', text, by: 'owner-action', channel: 'in-app' });
+
+  it('append without a quote is a proposal', async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', OWNER);
+    const r = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Three written offers', reason: 'A guess' }, opts);
+    assert.strictEqual(r.ok, true);
+    assert.deepStrictEqual(r.criterion, { id: 'sc-001', state: 'proposed' });
+    assert.strictEqual(r.note, 'Proposed. It counts for nothing until the owner confirms it. Ask with Progress askScope.');
+    assert.deepStrictEqual(r.brief.successCriteria, ['Three written offers']);
+    assert.deepStrictEqual(rows(runtime, info), [['sc-001', 'proposed', 'model']]);
+    assert.strictEqual(runtime.scopeView(info.id).criteria[0].addedBy, 'turn-1');
+    assert.strictEqual(lastJournalHeader(runtime, info), 'Brief successCriteria appended (proposed, sc-001): A guess');
+    // provenance "model" says the same thing.
+    const m = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Survey on file', provenance: 'model', quote: 'signed contract at or above the floor' }, opts);
+    assert.deepStrictEqual(m.criterion, { id: 'sc-002', state: 'proposed' });
+  });
+
+  it("append with the owner's quoted words is confirmed", async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', OWNER);
+    const r = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Signed contract at or above the floor', provenance: 'user', quote: 'a signed contract at or above the floor' }, opts);
+    assert.strictEqual(r.ok, true);
+    assert.deepStrictEqual(r.criterion, { id: 'sc-001', state: 'confirmed' });
+    assert.strictEqual(r.note, undefined);
+    const row = runtime.scopeView(info.id).criteria[0];
+    assert.deepStrictEqual([row.state, row.origin, row.confirmed.by, row.confirmed.channel, row.confirmed.quote], ['confirmed', 'owner-quote', 'owner-quote', 'in-app-chat', 'a signed contract at or above the floor']);
+    assert.strictEqual(lastJournalHeader(runtime, info), 'Brief successCriteria appended (confirmed, sc-001, quote: "a signed contract at or above the floor")');
+  });
+
+  it('a quote of yes does not confirm', async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', OWNER);
+    const r = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Three written quotes', provenance: 'user', quote: 'yes do that' }, opts);
+    assert.deepStrictEqual(r, { ok: false, code: 'SCOPE_NOT_IN_QUOTE', error: 'Quote the owner\'s words that state this criterion, or add it without provenance "user" as a proposal.' });
+    // A paraphrase of what the owner said is not the owner's phrase either.
+    const p = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Contract signed above the floor', provenance: 'user', quote: 'a signed contract at or above the floor' }, opts);
+    assert.strictEqual(p.code, 'SCOPE_NOT_IN_QUOTE');
+    assert.deepStrictEqual(briefData(runtime, info).successCriteria, []);
+    assert.deepStrictEqual(rows(runtime, info), []);
+  });
+
+  it('provenance user needs a quote, and the quote must be the owner\'s', async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', OWNER);
+    // It passed before this stage.
+    const none = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Signed contract at or above the floor', provenance: 'user' }, opts);
+    assert.strictEqual(none.ok, false);
+    assert.match(none.error, /quote/i);
+    const invented = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Sold to a neighbour', provenance: 'user', quote: 'it must be sold to a neighbour' }, opts);
+    assert.deepStrictEqual(invented, requireOwnerQuote({ quote: 'it must be sold to a neighbour', ownerMessages: OWNER }));
+    assert.strictEqual(invented.ok, false);
+    const list = await BriefTool.execute({ action: 'update', field: 'successCriteria', value: ['Signed contract at or above the floor'], provenance: 'user' }, opts);
+    assert.strictEqual(list.ok, false);
+    const objective = await BriefTool.execute({ action: 'update', field: 'objective', value: 'Sell the Lakeside lot', provenance: 'user' }, opts);
+    assert.strictEqual(objective.ok, false);
+    assert.deepStrictEqual(briefData(runtime, info).successCriteria, []);
+    assert.strictEqual(briefData(runtime, info).objective, 'Convert the lot to cash');
+    // No owner messages at all (a wake-up turn): nothing is confirmed.
+    const wake = await setup('Lakeside lot');
+    const w = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Signed contract at or above the floor', provenance: 'user', quote: 'signed contract at or above the floor' }, wake.opts);
+    assert.strictEqual(w.ok, false);
+  });
+
+  it('a list update cannot drop or reword a confirmed criterion, and can drop a proposed one', async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', OWNER);
+    await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Signed contract at or above the floor', provenance: 'user', quote: 'a signed contract at or above the floor' }, opts);
+    await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Three written offers' }, opts);
+    const before = fs.readFileSync(path.join(info.dir, 'brief.md'), 'utf8');
+    const scopeBefore = fs.readFileSync(path.join(info.dir, '.kl', 'scope.json'), 'utf8');
+
+    const dropped = await BriefTool.execute({ action: 'update', field: 'successCriteria', value: '["Three written offers"]' }, opts);
+    assert.deepStrictEqual(dropped, { ok: false, code: 'CRITERION_CONFIRMED', error: 'sc-001 was confirmed by the owner. Only the owner changes or drops it; ask.' });
+    const reworded = await BriefTool.execute({ action: 'update', field: 'successCriteria', value: ['Signed contract at any price', 'Three written offers'] }, opts);
+    assert.strictEqual(reworded.code, 'CRITERION_CONFIRMED');
+    const emptied = await BriefTool.execute({ action: 'update', field: 'successCriteria', value: [] }, opts);
+    assert.strictEqual(emptied.code, 'CRITERION_CONFIRMED');
+    assert.strictEqual(fs.readFileSync(path.join(info.dir, 'brief.md'), 'utf8'), before);
+    assert.strictEqual(fs.readFileSync(path.join(info.dir, '.kl', 'scope.json'), 'utf8'), scopeBefore);
+
+    // Dropping the proposal and adding another works; the confirmed row keeps its words.
+    const ok = await BriefTool.execute({ action: 'update', field: 'successCriteria', value: ['SIGNED contract at or above the floor', 'Survey on file'], reason: 'Tidied' }, opts);
+    assert.strictEqual(ok.ok, true);
+    assert.deepStrictEqual(ok.brief.successCriteria, ['Signed contract at or above the floor', 'Survey on file']);
+    assert.deepStrictEqual(ok.criteria, [{ id: 'sc-003', state: 'proposed' }]);
+    assert.deepStrictEqual(ok.removed, ['sc-002']);
+    assert.deepStrictEqual(rows(runtime, info), [['sc-001', 'confirmed', 'owner-quote'], ['sc-003', 'proposed', 'model']]);
+    assert.deepStrictEqual(runtime.scopeView(info.id).removed.map((r) => [r.id, r.text, r.state]), [['sc-002', 'Three written offers', 'proposed']]);
+    assert.strictEqual(lastJournalHeader(runtime, info), 'Brief successCriteria updated (proposed, sc-003; removed sc-002): Tidied');
+
+    // With a quote every new string must be the owner's words.
+    const mixed = await BriefTool.execute({ action: 'update', field: 'successCriteria', value: ['Signed contract at or above the floor', 'Survey on file', 'Closed within 90 days', 'Buyer pays the closing costs'], provenance: 'user', quote: 'it has closed within 90 days' }, opts);
+    assert.strictEqual(mixed.code, 'SCOPE_NOT_IN_QUOTE');
+    const quoted = await BriefTool.execute({ action: 'update', field: 'successCriteria', value: ['Signed contract at or above the floor', 'Survey on file', 'Closed within 90 days'], provenance: 'user', quote: 'it has closed within 90 days' }, opts);
+    assert.deepStrictEqual(quoted.criteria, [{ id: 'sc-004', state: 'confirmed' }]);
+    // The quote confirms what it adds, never a proposal that was already there.
+    assert.deepStrictEqual(rows(runtime, info), [['sc-001', 'confirmed', 'owner-quote'], ['sc-003', 'proposed', 'model'], ['sc-004', 'confirmed', 'owner-quote']]);
+    assert.strictEqual((await BriefTool.execute({ action: 'update', field: 'successCriteria', value: 'not a list' }, opts)).ok, false);
+  });
+
+  it('refuses the 13th criterion, the 7th proposal, a duplicate and a criterion that is not one plain line', async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', OWNER);
+    for (let n = 1; n <= 6; n += 1) {
+      assert.strictEqual((await BriefTool.execute({ action: 'append', field: 'successCriteria', item: `Proposal number ${n}` }, opts)).ok, true);
+    }
+    const seventh = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Proposal number 7' }, opts);
+    assert.strictEqual(seventh.ok, false);
+    assert.strictEqual(seventh.code, 'CRITERION_LIMIT');
+    const viaList = await BriefTool.execute({ action: 'update', field: 'successCriteria', value: [...briefData(runtime, info).successCriteria, 'Proposal number 7'] }, opts);
+    assert.strictEqual(viaList.code, 'CRITERION_LIMIT');
+
+    const dup = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'proposal NUMBER 3' }, opts);
+    assert.strictEqual(dup.ok, false);
+    assert.strictEqual(dup.code, 'CRITERION_DUPLICATE');
+    const dupList = await BriefTool.execute({ action: 'update', field: 'successCriteria', value: ['Proposal number 1', 'proposal number 1'] }, opts);
+    assert.strictEqual(dupList.code, 'CRITERION_DUPLICATE');
+
+    for (const item of ['two\nlines', 'a\ttab', 'ab', 'x'.repeat(301), 'zero\u200bwidth']) {
+      const bad = await BriefTool.execute({ action: 'append', field: 'successCriteria', item }, opts);
+      assert.strictEqual(bad.code, 'CRITERION_INVALID', JSON.stringify(item));
+    }
+    assert.strictEqual((await BriefTool.execute({ action: 'update', field: 'successCriteria', value: ['Proposal number 1', 'two\nlines'] }, opts)).code, 'CRITERION_INVALID');
+    assert.strictEqual(briefData(runtime, info).successCriteria.length, 6);
+
+    // The owner fills the list to twelve; the model cannot add a 13th even with a quote.
+    for (let n = 1; n <= 6; n += 1) await ownerAdds(runtime, info, `Owner criterion ${n}`);
+    assert.strictEqual(briefData(runtime, info).successCriteria.length, 12);
+    const thirteenth = await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Closed within 90 days', provenance: 'user', quote: 'closed within 90 days' }, opts);
+    assert.strictEqual(thirteenth.code, 'CRITERION_LIMIT');
+    assert.strictEqual(briefData(runtime, info).successCriteria.length, 12);
+  });
+
+  it('the objective: a model rewrite stays proposed, a confirmed one is the owner\'s, a quote confirms', async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', OWNER);
+    assert.deepStrictEqual([runtime.scopeView(info.id).objective.state, runtime.scopeView(info.id).objective.origin], ['proposed', 'model']);
+    const rewrite = await BriefTool.execute({ action: 'update', field: 'objective', value: 'Turn the lot into cash' }, opts);
+    assert.strictEqual(rewrite.ok, true);
+    assert.deepStrictEqual(rewrite.objective, { state: 'proposed' });
+    assert.strictEqual(rewrite.brief.objective, 'Turn the lot into cash');
+    assert.deepStrictEqual([runtime.scopeView(info.id).objective.state, runtime.scopeView(info.id).objective.origin], ['proposed', 'model']);
+    assert.strictEqual(lastJournalHeader(runtime, info), 'Brief objective updated (proposed)');
+
+    const wrong = await BriefTool.execute({ action: 'update', field: 'objective', value: 'Sell the Lakeside lot to a neighbour', provenance: 'user', quote: 'sell the Lakeside lot this year' }, opts);
+    assert.strictEqual(wrong.code, 'SCOPE_NOT_IN_QUOTE');
+    const quoted = await BriefTool.execute({ action: 'update', field: 'objective', value: 'Sell the Lakeside lot this year', provenance: 'user', quote: 'The goal is to sell the Lakeside lot this year' }, opts);
+    assert.deepStrictEqual(quoted.objective, { state: 'confirmed' });
+    const o = runtime.scopeView(info.id).objective;
+    assert.deepStrictEqual([o.state, o.origin, o.confirmed.by, o.confirmed.quote], ['confirmed', 'owner-quote', 'owner-quote', 'The goal is to sell the Lakeside lot this year']);
+    assert.strictEqual(lastJournalHeader(runtime, info), 'Brief objective updated (confirmed, quote: "The goal is to sell the Lakeside lot this year")');
+
+    const model = await BriefTool.execute({ action: 'update', field: 'objective', value: 'Lease the lot instead' }, opts);
+    assert.deepStrictEqual(model, { ok: false, code: 'OBJECTIVE_CONFIRMED', error: 'The objective was confirmed by the owner. Only the owner changes it; ask.' });
+    assert.strictEqual(briefData(runtime, info).objective, 'Sell the Lakeside lot this year');
+    assert.strictEqual(runtime.scopeView(info.id).objective.state, 'confirmed');
+    assert.strictEqual((await BriefTool.execute({ action: 'append', field: 'objective', item: 'and the shed' }, opts)).ok, false);
+  });
+
+  it('a proposed objective the owner then states in the same words is confirmed', async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', ['Yes: convert the lot to cash.']);
+    const r = await BriefTool.execute({ action: 'update', field: 'objective', value: 'Convert the lot to cash', provenance: 'user', quote: 'convert the lot to cash' }, opts);
+    assert.deepStrictEqual(r.objective, { state: 'confirmed' });
+    assert.deepStrictEqual([runtime.scopeView(info.id).objective.state, runtime.scopeView(info.id).objective.origin], ['confirmed', 'model']);
+  });
+
+  it('extra parameters confirm nothing', async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', OWNER);
+    const r = await BriefTool.execute({
+      action: 'append', field: 'successCriteria', item: 'Three written offers', state: 'confirmed', force: true, confirmed: { by: 'owner-action' }, origin: 'owner-action', objectiveBy: 'owner'
+    }, opts);
+    assert.deepStrictEqual(r.criterion, { id: 'sc-001', state: 'proposed' });
+    const o = await BriefTool.execute({ action: 'update', field: 'objective', value: 'Sell the Lakeside lot', state: 'confirmed', force: true, confirmed: true }, opts);
+    assert.deepStrictEqual(o.objective, { state: 'proposed' });
+    assert.deepStrictEqual(rows(runtime, info), [['sc-001', 'proposed', 'model']]);
+    assert.strictEqual((await BriefTool.execute({ action: 'completeGating', force: true }, opts)).ok, false);
+  });
+
+  it('the description says criteria without the owner\'s quoted words are proposals, and the schema is unchanged', () => {
+    assert.match(BriefTool.description, /without the owner's quoted words are proposals/);
+    assert.deepStrictEqual(Object.keys(BriefTool.parameters.properties), ['action', 'field', 'value', 'item', 'provenance', 'quote', 'reason']);
   });
 });
 
@@ -437,6 +630,36 @@ describe('ToolExecutor ledger write guard', () => {
     }
     assert.strictEqual(fs.readFileSync(factsPath, 'utf8'), before);
   });
+
+  // Cases stage 8 (plan Task 18): the new case files sit under .kl/, which
+  // is guarded whole. One test per file, so a later narrowing of the guard
+  // fails here by name.
+  for (const rel of ['.kl/scope.json', '.kl/abandoned.jsonl', '.kl/verification.json', '.kl/checks.json', '.kl/runs/checks/chk-0001.txt']) {
+    it(`refuses Write, Edit and MultiEdit on ${rel}`, async () => {
+      const { info } = await setup();
+      const file = path.join(info.dir, ...rel.split('/'));
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      // Content holding the old_string, so Edit and MultiEdit would succeed
+      // if the guard were gone.
+      fs.writeFileSync(file, 'a\n');
+      const executor = new ToolExecutor({
+        workingDirectory: info.dir,
+        allowedDirectories: [info.dir],
+        runtimeEnvironment: { platform: process.platform },
+        requireApproval: false,
+        useSandbox: false,
+        extraToolOptions: { caseContext: { dir: info.dir } }
+      });
+      const w = await executor.execute('Write', { file_path: file, content: '{}\n' });
+      const e = await executor.execute('Edit', { file_path: file, old_string: 'a', new_string: 'b' });
+      const m = await executor.execute('MultiEdit', { edits: [{ file_path: file, old_string: 'a', new_string: 'b' }] });
+      for (const [name, r] of [['Write', w], ['Edit', e], ['MultiEdit', m]]) {
+        assert.strictEqual(r.success, false, name);
+        assert.match(r.error, /Ledger tool/, name);
+      }
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), 'a\n');
+    });
+  }
 });
 
 describe('stage 2 confinement helpers', () => {
@@ -490,7 +713,7 @@ describe('stage 2 case tools', () => {
   const report = { failureClass: 'dead-end', what: 'County listing', tried: ['Listed on the county site'], why: 'No replies in 60 days' };
 
   it('registers Reorient, Ask and Fail with the other case tools, none needing approval', () => {
-    assert.deepStrictEqual([...CASE_TOOL_NAMES], ['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour', 'Plan', 'Executor', 'Playbook', 'Ingest']);
+    assert.deepStrictEqual([...CASE_TOOL_NAMES], ['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour', 'Plan', 'Executor', 'Playbook', 'Ingest', 'Progress']);
     for (const name of ['Reorient', 'Ask', 'Fail']) {
       assert.ok(toolRegistry.get(name), `${name} registered`);
       assert.strictEqual(toolRegistry.get(name).requiresApproval, false);

@@ -1338,6 +1338,116 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
   and never registered, so listing it in `scopes_enabled` stops the front
   door at startup. The pressed class is refused here as on every channel.
 
+## Cases: verified progress (stage 8)
+
+Spec: `docs/superpowers/specs/2026-10-13-cases-stage8-verified-progress.md`;
+plan `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`
+(owner rulings R-C8-1 to R-C8-11 and R-C8-N3 to N9, its Deviations and its review fixes).
+
+- **Scope.** `brief.md` keeps `successCriteria` as strings; who wrote each
+  one is `.kl/scope.json` (`ScopeStore`, `src/cases/scope.js`), keyed by
+  `sc-NNN` and a hash of the folded text. A criterion or the objective is
+  `proposed` or `confirmed`; a proposed one counts for nothing. Origins
+  (`ORIGINS`): `model`, `detour`, `legacy` (open cases from before stage 8),
+  `file` (an edit outside the tools), `mcp-create` (an objective
+  `create_case` set over MCP, whose quote nobody checked; R-C8-N3; it also
+  posts a pressed `scope-confirm` question, key `scope-confirm:created`,
+  `mcpAnswerable: false`, uncharged, closed once the objective is confirmed
+  another way: R-C8-N7) are born proposed; `owner-quote` (the `Brief` tool with a quote whose words are the
+  criterion, `wordsInText`), `gating-answer`, `owner-create` (the form's
+  objective, or `create_case` in the chat) and `owner-action` are born
+  confirmed. Otherwise only a press (`case:confirmScope`, by the hash the
+  owner was shown; `SCOPE_STALE` when it changed) or an answered
+  `scope-confirm` question confirms. A scope answer confirms the
+  objective only from a press (`in-app`, `mobile`) or King Louie's chat
+  (`in-app-chat`, quote checked); over MCP or a contact channel it confirms
+  the criteria alone (R-C8-2) and leaves the objective proposed (review fix,
+  2026-10-14). The model never changes or drops a
+  confirmed one (`CRITERION_CONFIRMED`, `OBJECTIVE_CONFIRMED`), and the
+  `Brief` tool cannot confirm one it proposed (`CRITERION_DUPLICATE`).
+  `createCase`'s `objectiveBy` is the host's, like `force`; no tool takes
+  it. Gating needs one confirmed criterion; a brief already past gating is
+  never sent back. Tests confirm with `confirmAll`
+  (`tests/helpers/case-scope.js`).
+- **Abandoned approaches**: `.kl/abandoned.jsonl` (`src/cases/abandoned.js`),
+  append-only, written only by `Progress.abandon`, never in the cross-case
+  index. `Fail` does not write it (R-C8-10).
+- **States** (`unmet`, `met`, `stale`, `failing`) are computed on every read
+  from `.kl/verification.json`'s records, the ledger and the check runs
+  (`src/cases/verify/status.js`); the stored cache is only "what it was last
+  time", for the regression trigger, and no reader takes it as a state. A
+  record is written only through `acceptVerdict` (`verify/judge.js`), and
+  only when every cited id holds. Evidence ids resolve by prefix
+  (`registerEvidenceResolver`: `f-` facts, `chk-` check runs) and the pass's
+  inputs come from `registerEvidenceSource` (`verify/evidence.js`); a later
+  stage plugs in there. `external-agent` facts alone may make a criterion met
+  (R-C8-5); each evidence row shows its provenance. A `user` fact whose
+  `source.channel` starts with `mcp-` (the owner's words as an MCP client
+  recorded them, unchecked: `create_case`'s objective fact over MCP, an
+  answer given over MCP) is kept but never evidence: the `f-` resolver
+  refuses it `evidence-provenance` and the pass is not shown it (R-C8-N8).
+- **The verify pass** (`verify/judge.js`, `cases.verify`): on the `verify`
+  case role (default `main`), charged to the case's `usd`, at most
+  `maxPassesPerDay` (24), skipped past `skipAboveUsdPercent` (80) of `usd`,
+  when the turn wrote nothing, with nothing confirmed, or when `when` is
+  `request` / `off`. It sees the criteria and the case-tool results of the
+  turn (R-C8-9), never the model's prose, up to `maxInputChars`. **It runs
+  after the reply** (R-C8-11): `endTurn` commits and releases the case at
+  once, the call goes out with no lock held, and its result lands in a
+  system action of its own (a `verification` journal entry, its own commit,
+  `case:changed` with `what: 'progress'`). A turn that starts meanwhile drops
+  the result; shutdown stops the call and awaits it. Every charge of the
+  call, in time or late, is a `verifySystemAction` of its own (`system:
+  verify pass usage`), taken before the landing, so it is committed even
+  when the landing is dropped (review fix, 2026-10-14). It never fails a turn.
+  Tests wait with `runtime.verifyIdle(id)`. The panel's **Check now**
+  (`case:verifyNow`, a press; refused when `when` is `off`, the case is not
+  open, nothing is confirmed, or the cap or the usd mark is reached) runs the
+  same pass outside a turn.
+- **Regressions**: a criterion that was `met` and is `stale` or `failing`
+  at the next turn start raises a blocking `criterion-regressed` trigger
+  (`verify/hook.js`). A change the turn made itself (it superseded the fact,
+  or the close run failed) is said in that turn's close block and is also
+  raised at the next turn start: the close leaves it `met` in the cache
+  (R-C8-N9).
+- **Closing.** `readiness.js` computes the ready-to-close list (each item's
+  owner: `owner`, `case`, `either`). `Progress.proposeDone` is refused
+  (`NOT_READY`) unless every confirmed criterion is `met` (R-C8-1), and then
+  asks a pressed `close-proposal` question; only the owner closes. The
+  owner's Done (and "Mark done") is never refused for an open item; it shows
+  the list first. Question types: `scope-confirm` (spoken; pressed for the
+  one `create_case` over MCP asks), `close-proposal`
+  and `check-approve` (pressed); a press is `in-app` or `mobile`
+  (`PRESS_CHANNELS`), never `in-app-chat` or MCP. At `done` or `abandoned`
+  the states and the list are frozen in `verification.json` and never
+  recomputed (R-C8-7).
+- **The check command** (`verify/check.js`; R-C8-3, N4 to N6): a
+  `software-repo` case's `check` brief field, named by the owner (a quote
+  holding the whole command, or the panel's `case:setCheck`). npm only:
+  `npm test` or `npm run <script>`, no npm option before the script, no
+  other npm command. Off by default (`cases.softwareRepo.check.enabled`);
+  in service mode only the admin `service.json` `caseChecks.enabled` turns it
+  on (`caseChecks` is in `ADMIN_ONLY_KEYS`). Approved once per exact argv and
+  repository on a pressed `check-approve` card (`.kl/checks.json`). It runs
+  only at the close of an owner turn in which the repository's head or dirty
+  state changed, never in a wake-up, a system action or **Check now**, capped
+  at `timeoutMs` (120 s) with the child and its children killed, and stopped
+  with the turn. No shell and never `cmd.exe`: npm runs as `node.exe
+  npm-cli.js` on Windows and every other `.cmd`/`.bat` is refused
+  (`CHECK_SHIM`). The environment is `FIXED_ENV` plus `envAllow` (none in
+  service mode); `KL_*`, `KING_LOUIE_*` and `ELECTRON_RUN_AS_NODE` never pass.
+  The kept output tail is under `.kl/runs/`, which the case's `.gitignore`
+  leaves out. A run is `chk-NNNN` evidence; tests replace the spawn with
+  `host.runCheck`.
+- No `case.yaml` key, MCP tool or scope was added; `open_case` and
+  `list_cases` carry progress inside the untrusted wrapper.
+- Residuals: `Bash` can write every new file under `.kl/` (the write guard
+  covers Write, Edit and MultiEdit only), and `sourced` is model-declared;
+  the check runs the repository's own scripts with the account's access,
+  network and all, which nothing here makes read-only. A quote holds any run of
+  the owner's words, so "don't count it as done just because the tests
+  pass" can yield a confirmed criterion "the tests pass".
+
 ## Management surfaces
 
 Spec `docs/superpowers/specs/2026-09-30-management-surfaces.md`; ADR

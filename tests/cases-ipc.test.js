@@ -7,6 +7,8 @@ const { registerCaseHandlers } = require('../src/ipc/case-handlers');
 const IPC = require('../src/ipc/constants');
 const { CaseRuntime } = require('../src/cases');
 const { historyContext } = require('./helpers/history-context');
+const { confirmAll } = require('./helpers/case-scope');
+const { markLocalDesktopEvent } = require('../src/core/origin');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -22,7 +24,9 @@ function setup({ withRuntime = true, chats: initialChats = [{ id: 'chat-1', titl
   };
   const handlers = new Map();
   registerCaseHandlers({ handle: (ch, fn) => handlers.set(ch, fn), on: () => {} }, context);
-  const call = (channel, payload) => handlers.get(channel)({}, payload);
+  // The host marks every IPC event before a handler sees it; case:create
+  // confirms the form's objective only for such an event (cases stage 8).
+  const call = (channel, payload) => handlers.get(channel)(markLocalDesktopEvent({}), payload);
   return { runtime, call, history, context };
 }
 
@@ -36,6 +40,20 @@ describe('case IPC', () => {
     assert.strictEqual(history.getChat('chat-1').caseId, created.case.id);
     const listed = await call(IPC.CASE_LIST);
     assert.deepStrictEqual(listed.cases.map((c) => c.id), [created.case.id]);
+  });
+
+  // Cases stage 8 (spec §6.1): the form's objective is the owner's.
+  it('case:create with an objective records it confirmed; without one there is no objective row', async () => {
+    const { call, runtime } = setup();
+    const withObjective = await call(IPC.CASE_CREATE, { title: 'Lakeside lot', objective: 'Convert the lot to cash' });
+    const o = runtime.scopeView(withObjective.case.id).objective;
+    assert.deepStrictEqual([o.state, o.origin, o.confirmed.by], ['confirmed', 'owner-create', 'owner-create']);
+    // objectiveBy is the host's to pass: the form cannot claim or disclaim it.
+    const claimed = await call(IPC.CASE_CREATE, { title: 'Permit filing', objective: 'File the county permit', objectiveBy: 'model' });
+    assert.strictEqual(runtime.scopeView(claimed.case.id).objective.origin, 'owner-create');
+    const without = await call(IPC.CASE_CREATE, { title: 'Roof quotes', objectiveBy: 'owner' });
+    assert.strictEqual(runtime.scopeView(without.case.id).objective, null);
+    assert.deepStrictEqual(runtime.scopeView(without.case.id).criteria, []);
   });
 
   it('attaches, detaches and refuses unknown cases or chats', async () => {
@@ -200,6 +218,7 @@ describe('case IPC, stage 2', () => {
     const info = await runtime.createCase({ title, objective: 'Convert the lot to cash', force: true });
     runtime.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
     runtime.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+    confirmAll(runtime, info.id);
     runtime.completeGating(info.id);
     return runtime.getCase(info.id);
   }
@@ -209,6 +228,15 @@ describe('case IPC, stage 2', () => {
     const channels = [IPC.CASE_QUESTIONS, IPC.CASE_ANSWER_QUESTION, IPC.CASE_ACKNOWLEDGE_BRIEFING, IPC.CASE_SET_STATUS, IPC.CASE_BUDGET, IPC.CASE_GRANT_BUDGET];
     assert.deepStrictEqual(channels, ['case:questions', 'case:answerQuestion', 'case:acknowledgeBriefing', 'case:setStatus', 'case:budget', 'case:grantBudget']);
     for (const ch of channels) assert.ok(handlers.has(ch), ch);
+  });
+
+  // Cases stage 8 (plan Task 12): progress and the owner's scope actions.
+  it('the progress channels are named and registered with the rest', () => {
+    assert.deepStrictEqual([IPC.CASE_PROGRESS, IPC.CASE_CONFIRM_SCOPE], ['case:progress', 'case:confirmScope']);
+    const registered = new Set();
+    const ctx = new Proxy({}, { get: () => (() => {}) });
+    require('../src/ipc/register').registerHandlers({ handle: (ch) => registered.add(ch), on: () => {} }, ctx);
+    for (const ch of ['case:progress', 'case:confirmScope']) assert.ok(registered.has(ch), ch);
   });
 
   it('lists open questions except for done and abandoned cases, answers one, and refuses a second answer', async () => {

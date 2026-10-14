@@ -127,3 +127,22 @@ describe('detectTriggers', () => {
     assert.ok(deepEqual(null, null));
   });
 });
+
+describe('detectTriggers: a regressed criterion (cases stage 8)', () => {
+  const trigger = {
+    kind: 'criterion-regressed', key: 'criterion:sc-002:v-0007:stale', blocking: true,
+    detail: 'sc-002 ("Closed within the deadline") was met and is now stale: f-0033 was superseded by f-0060.'
+  };
+
+  it('passes through as a blocking trigger, and is dropped once its key is acknowledged', () => {
+    assert.deepStrictEqual(detectTriggers(input({ hookTriggers: [trigger] })), [trigger]);
+    // A wake-up is told as well.
+    assert.deepStrictEqual(detectTriggers(input({ source: 'wakeup', hookTriggers: [trigger] })), [trigger]);
+    const acknowledged = { ...emptyBaseline(), acknowledgedKeys: [trigger.key] };
+    assert.deepStrictEqual(detectTriggers(input({ hookTriggers: [trigger], baseline: acknowledged })), []);
+    // The same criterion failing, or stale on a newer record, is another key.
+    const failing = { ...trigger, key: 'criterion:sc-002:v-0007:failing' };
+    const newer = { ...trigger, key: 'criterion:sc-002:v-0009:stale' };
+    assert.deepStrictEqual(kinds(detectTriggers(input({ hookTriggers: [failing, newer], baseline: acknowledged }))), ['criterion-regressed', 'criterion-regressed']);
+  });
+});

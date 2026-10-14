@@ -237,6 +237,68 @@ describe('cases:wakeups in a service-style core', () => {
     }
   });
 
+  // Cases stage 8, R-C8-11: the verify pass runs after the turn's reply, so
+  // it can still be out when the app quits.
+  it('shutdown stops a verify pass that is still out after its turn and waits for it: no verdict, no lock', async () => {
+    delete process.env.KL_CASES_ROOT;
+    const deps = serviceDeps();
+    const { VERIFY_SYSTEM } = require('../src/cases/verify/judge');
+    const seen = { verify: 0, aborted: 0 };
+    const stub = class {
+      constructor(apiKey) { this.apiKey = apiKey; }
+      getProviderName() { return 'stub'; }
+      getDefaultModel() { return 'stub-default'; }
+      async sendMessage() { throw new Error('sendMessage must not be used: it never reports usage.'); }
+      async sendMessageWithTools(_messages, _tools, options) {
+        if (options.systemPrompt !== VERIFY_SYSTEM) return { type: 'text', content: '{}' };
+        seen.verify += 1;
+        // A verify model that answers only when it is told to stop.
+        return new Promise((_resolve, reject) => {
+          options.abortSignal.addEventListener('abort', () => {
+            seen.aborted += 1;
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          }, { once: true });
+        });
+      }
+    };
+    ProviderFactory.registerProvider('stub', stub);
+    try {
+      deps.store.set('settings', profileSettings({}, { main: [{ provider: 'stub', model: 'stub-judge', effort: null }] }));
+      const core = createCore(deps);
+      core.saveProviderToken('stub', 'stub-token');
+      await core.start();
+      let shutDown = false;
+      try {
+        const runtime = core.context.getCaseRuntime();
+        const info = await runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot', objectiveBy: 'owner' });
+        runtime.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
+        await runtime.applyScopeAction(info.id, { action: 'add', text: 'Signed contract at or above the floor', by: 'owner-action' });
+        runtime.completeGating(info.id);
+        const turn = await runtime.beginTurn(info.id, { turnId: 'turn-1' });
+        runtime.ledger(info.id).assert({
+          stmt: 'The contract was signed at 81,000', subject: 'contract', attr: 'signed', value: 81000,
+          source: { kind: 'url', ref: 'https://records.example.org/1' }, addedBy: turn.turnId
+        });
+        await runtime.endTurn(turn, { summary: 'wrote', journal: 'Recorded the signed contract.', verify: true });
+        for (let i = 0; i < 400 && seen.verify === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+        assert.strictEqual(seen.verify, 1);
+        assert.strictEqual(runtime.verifyRunning(info.id), true);
+        await core.shutdown();
+        shutDown = true;
+        assert.strictEqual(seen.aborted, 1);
+        assert.strictEqual(runtime.verifyRunning(info.id), false);
+        assert.strictEqual(runtime.verifyJobs.size, 0);
+        assert.deepStrictEqual(runtime.verification(info.id).read().records, []);
+        assert.strictEqual(fs.existsSync(path.join(info.dir, '.kl', 'lock')), false);
+        assert.ok(!fs.readdirSync(path.join(info.dir, 'journal')).some((n) => /-verification/.test(n)));
+      } finally {
+        if (!shutDown) await core.shutdown();
+      }
+    } finally {
+      ProviderFactory._registry.delete('stub');
+    }
+  });
+
   it('shutdown drains an in-flight wake-up before releasing its lock, and never starts a second case (I1)', async () => {
     delete process.env.KL_CASES_ROOT;
     const deps = serviceDeps();

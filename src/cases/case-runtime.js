@@ -11,7 +11,17 @@ const git = require('./git');
 const { CaseStore } = require('./case-store');
 const { FactLedger } = require('./ledger');
 const { Brief, BriefError } = require('./brief');
+const { ScopeStore, ScopeError, textHash, validateCriterionText, ORIGINS, CONFIRMING_ORIGINS } = require('./scope');
 const { CaseRecords } = require('./records');
+const { AbandonedStore } = require('./abandoned');
+const { VerificationStore } = require('./verify/store');
+const { progressView, summaryLine } = require('./verify/status');
+const { resolveEvidence, turnMarks, collectTurnEvidence, statesOf } = require('./verify/evidence');
+const { prepareVerifyPass, callVerifyModel, applyVerifyReply, verificationBlock } = require('./verify/judge');
+const { registerVerificationHook, freezeProgress, REGRESSED: REGRESSED_STATES } = require('./verify/hook');
+const { closeReadiness } = require('./verify/readiness');
+const { CheckStore, CheckError, CHECK_TYPE, currentCheck, closeCheck } = require('./verify/check');
+const { checkQuestionText, createdObjectiveQuestion, CREATED_OBJECTIVE_KEY } = require('./verify/questions');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
 const { Budget, CATEGORIES, PER_DAY } = require('./budget');
@@ -45,8 +55,27 @@ const BUDGET_FACT_NOTE = "Budget limits change only through the owner's answer o
 // one is running, or a wake-up's own beginTurn finding another wake-up
 // still in flight). `sameProcess` routes to one of two fixed messages
 // instead, and never builds the quit/delete sentence at all.
+// Cases stage 8: the owner's scope actions (applyScopeAction).
+const SCOPE_ACTIONS = Object.freeze(['confirm', 'drop', 'edit', 'add']);
+// Cases stage 8: a failure report's journal name without its extension
+// (what CaseRecords.writeJournal('failure', …) names it).
+const FAILURE_REPORT_NAME = /^\d{4}-\d{2}-\d{2}-\d{4}-failure(?:-\d+)?$/;
+
+// What writeScope is told of a new string, checked before brief.md is
+// touched (ScopeStore checks it again when it writes): an origin it knows,
+// and a confirmation only with an origin that may be born confirmed and a
+// `by` naming who confirmed.
+function assertBirth({ origin, confirmed }) {
+  if (!ORIGINS.includes(origin)) throw new ScopeError('SCOPE_INVALID', `A scope origin is one of ${ORIGINS.join(', ')}.`);
+  if (confirmed === null || confirmed === undefined) return;
+  if (!CONFIRMING_ORIGINS.includes(origin)) throw new ScopeError('SCOPE_INVALID', `An entry of origin ${origin} is proposed until the owner confirms it.`);
+  if (typeof confirmed !== 'object' || typeof confirmed.by !== 'string' || !confirmed.by) {
+    throw new ScopeError('SCOPE_INVALID', 'A confirmation names who confirmed ("by").');
+  }
+}
+
 class CaseBusyError extends Error {
-  constructor(title, { pid, lockPath, sameProcess = false, holderIsWakeup = false } = {}) {
+  constructor(title, { pid, lockPath, sameProcess = false, holderIsWakeup = false, verifying = false } = {}) {
     let message;
     if (sameProcess) {
       message = holderIsWakeup
@@ -62,6 +91,8 @@ class CaseBusyError extends Error {
     super(message);
     this.name = 'CaseBusyError';
     this.code = 'CASE_BUSY';
+    // A verify pass of this process is out, not a turn (verifyNow).
+    this.verifying = verifying === true;
   }
 }
 
@@ -116,6 +147,17 @@ class RuntimeClosingError extends Error {
   }
 }
 
+// The owner's "Check now" was refused (verifyNow): the case is closed or not
+// running, nothing is confirmed, the pass is off, or the day's passes or the
+// budget are used. `code` says which.
+class VerifyRefusedError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'VerifyRefusedError';
+    this.code = code;
+  }
+}
+
 const expandHome = (p) => (p === '~' || /^~[\\/]/.test(p) ? path.join(os.homedir(), p.slice(1)) : p);
 
 // settings.cases.root: `~` is the home dir and a relative path is under the
@@ -153,6 +195,13 @@ function readLock(lock) {
 }
 
 const HOOK_PHASES = Object.freeze(['turn-start', 'owner-message']);
+// The journal entry a verify pass writes when it lands after the turn
+// (cases stage 8, R-C8-11). The orientation's "last journal entry" skips it:
+// that is the turn's own entry, and what the pass found is in the Progress
+// section and the turn-start notes.
+const VERIFY_JOURNAL_KIND = 'verification';
+// What the owner's check (verifyNow) reports when a turn took the case first.
+const CHECK_SUPERSEDED = 'a turn started in this case';
 const STOPS_WORK = new Set(['paused', 'done', 'abandoned']);
 
 class CaseRuntime {
@@ -184,9 +233,27 @@ class CaseRuntime {
     this.creating = 0;
     // Set by beginShutdown(): no new wake-up turn may start once true.
     this.closing = false;
+    // Cases stage 8 (R-C8-11): the verify passes that run after a turn's
+    // reply. caseId -> the pass whose result may still land; every pass
+    // whose call has not ended (a dropped one too) is in verifyJobs; a case
+    // in verifyOwed had a pass dropped before it landed, so its next
+    // verified close runs one even when that turn wrote nothing. All three
+    // are this process's memory only.
+    this.verifying = new Map();
+    this.verifyJobs = new Set();
+    this.verifyOwed = new Set();
+    // caseId -> the system action in which a pass is writing right now (its
+    // result, or a late charge): an owner turn waits for it (_acquireForTurn).
+    this.verifyWrites = new Map();
+    // How long a pass that is ready to land waits for a system action of
+    // this process to release the case, and an owner turn for a landing.
+    this.verifyLandWaitMs = 5000;
     // Cases stage 5: detour routing and the case-type refresh (spec §3.6).
     // Registered last, once every field above exists (controller ruling M3).
     registerDetourHooks(this);
+    // Cases stage 8 (spec §6.3): after the detour hooks, so it runs after
+    // the case-type refresh and sees the repository as it is now.
+    registerVerificationHook(this);
   }
 
   // Called once shutdown begins (create-core, right after the scheduler
@@ -195,6 +262,18 @@ class CaseRuntime {
   // still recognizes as held.
   beginShutdown() {
     this.closing = true;
+    // A verify pass still out (cases stage 8): its call is stopped and its
+    // result will not be written. The host awaits verifyIdle() before it
+    // releases the locks.
+    this.abortVerifyPasses('shutdown');
+    // A check command that is running is killed with everything it started.
+    this.abortChecks('shutdown');
+  }
+
+  // Stops every run of a check command this runtime started (spec §6.6):
+  // the process tree is killed and nothing of the run is recorded.
+  abortChecks(reason = 'stopped') {
+    for (const controller of this._checkRuns instanceof Set ? this._checkRuns : []) controller.abort(reason);
   }
 
   get root() {
@@ -252,10 +331,62 @@ class CaseRuntime {
     this.creating = (this.creating || 0) + 1;
     try {
       const info = await this.store.create({ title: opts.title, type: opts.type, objective: opts.objective });
+      await this._recordCreatedObjective(info, opts.objective, opts.objectiveBy);
       this._reindex(info.id);
       return info;
     } finally {
       this.creating -= 1;
+    }
+  }
+
+  // Cases stage 8 (spec §6.1): who gave the objective a case was created
+  // with. `objectiveBy` is the host's to pass, like `force`: 'owner' (IPC
+  // case:create with the form's objective; create_case in the chat, which
+  // checked the quote in the owner's turn) is the only value that confirms;
+  // 'mcp' is create_case over MCP, whose quote nobody checked (R-C8-N3:
+  // proposed, origin mcp-create); 'detour' is the router's prefill; anything
+  // else is the model's. Never fails the create: without the record the
+  // objective reads `legacy` and proposed.
+  async _recordCreatedObjective(info, objective, objectiveBy) {
+    if (typeof objective !== 'string' || !objective.trim()) return;
+    const PROPOSED_BY = { detour: 'detour', mcp: 'mcp-create' };
+    const born = objectiveBy === 'owner'
+      ? { origin: 'owner-create', confirmed: { by: 'owner-create', at: this.now().toISOString() } }
+      : { origin: Object.prototype.hasOwnProperty.call(PROPOSED_BY, objectiveBy) ? PROPOSED_BY[objectiveBy] : 'model', confirmed: null };
+    try {
+      await this.systemAction(info.id, 'scope', async (meta) => {
+        this.scope(meta.id).reconcile(this.brief(meta.id).read().data, { origins: { objective: born }, addedBy: born.origin });
+        // R-C8-N7: an objective set over MCP is asked about at once, pressed.
+        if (objectiveBy === 'mcp') this._askCreatedObjective(meta, this.scopeView(meta.id));
+      }, { commitMessage: 'case created: who gave the objective' });
+    } catch (err) {
+      log.warn(`Case ${info.slug}: recording who gave the objective failed: ${err.message}`);
+    }
+  }
+
+  // The pressed scope question about an objective create_case set over MCP
+  // (R-C8-N7): host-made, so never charged to questionsPerDay; it goes up
+  // the contact ladder like any question. Never fails the create.
+  _askCreatedObjective(meta, view) {
+    try {
+      const record = createdObjectiveQuestion(meta, view);
+      if (record) this.createQuestion(meta.id, record, { charge: false });
+    } catch (err) {
+      log.warn(`Case ${meta.slug}: asking the owner to confirm the objective failed: ${err.message}`);
+    }
+  }
+
+  // Once the objective is confirmed, the question create_case asked about it
+  // has nothing left to ask: it is closed, not left on the ladder.
+  _closeCreatedObjectiveQuestion(meta) {
+    try {
+      if (this.scopeView(meta.id).objective?.state !== 'confirmed') return;
+      const store = this.questions(meta.id);
+      for (const q of store.open().filter((r) => r.payload?.key === CREATED_OBJECTIVE_KEY)) {
+        store.close(q.id, { reason: 'the objective was confirmed', by: 'system' });
+      }
+    } catch (err) {
+      log.warn(`Case ${meta.slug}: closing the objective question failed: ${err.message}`);
     }
   }
 
@@ -288,6 +419,400 @@ class CaseRuntime {
   }
 
   records(id) { return new CaseRecords(this.getCase(id).dir); }
+
+  // ---- Scope (cases stage 8 spec §6.1): who wrote each criterion ----
+
+  scope(id) {
+    return new ScopeStore(this.getCase(id).dir, { now: () => this.now() });
+  }
+
+  // brief.md joined with .kl/scope.json, in memory. Never writes, so it is
+  // safe outside the lock (the panel, open_case, a closed case). A brief
+  // that cannot be read gives { error } (and so no confirmed criterion).
+  scopeView(id) {
+    const meta = this.getCase(id);
+    let data;
+    try {
+      // Reading needs no case-type fields, so no playbook package is loaded.
+      data = new Brief(meta.dir).read().data;
+    } catch (err) {
+      if (err instanceof BriefError) return { error: err.message };
+      log.warn(`Scope of ${meta.slug}: brief.md unreadable: ${err.message}`);
+      return { error: 'brief.md is missing or unreadable' };
+    }
+    return this.scope(meta.id).view(data);
+  }
+
+  // The one path that writes a criterion list or the objective AND who
+  // wrote it. Call it with the case lock held (a turn or a systemAction).
+  // `field` is 'successCriteria' (value: the new full list) or 'objective'
+  // (value: the text). Every string that is new gets `origin`, and is born
+  // confirmed only when `confirmed` ({ by, channel, quote, factId }) is
+  // given with a confirming origin (ScopeStore refuses the rest). Strings
+  // that were already there keep their entry, except those whose hash is in
+  // `alsoConfirm`, which `confirmed` confirms too (a gating answer that
+  // repeats a proposal). Nothing here decides that the owner said it: the
+  // caller did, and no tool parameter reaches `confirmed`.
+  // → { view, added: [rows], removed: [rows] }. Throws ScopeError.
+  writeScope(id, { field, value, origin, confirmed = null, addedBy = null, removedBy = null, alsoConfirm = [] } = {}) {
+    const meta = this.getCase(id);
+    if (meta.status === 'done' || meta.status === 'abandoned') {
+      throw new ScopeError('CASE_CLOSED', `Case is ${meta.status}. Its scope is read-only.`);
+    }
+    if (field !== 'successCriteria' && field !== 'objective') {
+      throw new ScopeError('SCOPE_INVALID', 'writeScope writes "successCriteria" or "objective".');
+    }
+    const brief = this.brief(meta.id);
+    const store = this.scope(meta.id);
+    // Strings that are in brief.md with no entry yet (first contact, a file
+    // edit) get their own origin first, so `origin` below marks only what
+    // this call adds.
+    const before = store.reconcile(brief.read().data);
+    const born = { origin, confirmed: confirmed || null };
+    const confirming = confirmed ? { by: confirmed.by, channel: confirmed.channel ?? null, quote: confirmed.quote ?? null, factId: confirmed.factId ?? null } : null;
+
+    if (field === 'objective') {
+      if (typeof value !== 'string') throw new ScopeError('SCOPE_INVALID', 'The objective is text.');
+      const hash = value.trim() ? textHash(value) : null;
+      const isNew = hash !== null && before.objective?.hash !== hash;
+      const origins = isNew ? { objective: born } : {};
+      // Checked before brief.md is touched: a refused origin writes nothing.
+      if (isNew) assertBirth(born);
+      brief.update('objective', value, { provenance: confirmed ? 'user' : 'model' });
+      let view = store.reconcile(brief.read().data, { origins, addedBy });
+      if (!isNew && confirming && view.objective && view.objective.state !== 'confirmed') {
+        assertBirth(born);
+        store.confirm(['objective'], { hashes: { objective: view.objective.hash }, ...confirming });
+        view = store.view(brief.read().data);
+      }
+      return { view, added: isNew ? [view.objective] : [], removed: [] };
+    }
+
+    if (!Array.isArray(value) || !value.every((v) => typeof v === 'string' && v.trim())) {
+      throw new ScopeError('SCOPE_INVALID', 'successCriteria is a list of non-empty strings.');
+    }
+    const hashes = value.map(textHash);
+    if (new Set(hashes).size !== hashes.length) {
+      throw new ScopeError('CRITERION_DUPLICATE', 'The same words are already a success criterion.');
+    }
+    const known = new Map(before.criteria.map((row) => [row.hash, row]));
+    const added = hashes.filter((h) => !known.has(h));
+    const kept = before.criteria.filter((row) => hashes.includes(row.hash));
+    const removed = before.criteria.filter((row) => !hashes.includes(row.hash));
+    if (added.length) {
+      assertBirth(born);
+      const problem = store.limitsProblem({ criteria: kept }, { adding: added.length, addingProposed: confirmed ? 0 : added.length });
+      if (problem) throw problem;
+    }
+    const again = (Array.isArray(alsoConfirm) ? alsoConfirm : []).map((h) => known.get(h)).filter((row) => row && row.state !== 'confirmed' && hashes.includes(row.hash));
+    if (again.length) {
+      if (!confirming) throw new ScopeError('SCOPE_INVALID', 'A confirmation names who confirmed ("by").');
+      assertBirth(born);
+    }
+    brief.update('successCriteria', value, { provenance: confirmed ? 'user' : 'model' });
+    const origins = Object.fromEntries(added.map((h) => [h, born]));
+    let view = store.reconcile(brief.read().data, { origins, addedBy, removedTexts: before, removedBy: removedBy || addedBy });
+    if (again.length) {
+      store.confirm(again.map((row) => row.id), { hashes: Object.fromEntries(again.map((row) => [row.id, row.hash])), ...confirming });
+      view = store.view(brief.read().data);
+    }
+    return { view, added: view.criteria.filter((row) => added.includes(row.hash)), removed };
+  }
+
+  // The owner's own scope actions (the panel and the card's buttons through
+  // IPC case:confirmScope, and the answer to a scope question). No case tool
+  // reaches this. `target` is 'objective', an `sc-` id or 'all-proposed';
+  // `confirm` and `drop` need the hash the owner was shown (for
+  // 'all-proposed' an object { [id]: hash }, with `objective` when the
+  // objective is meant too) and refuse SCOPE_STALE when the words changed;
+  // `edit` and `add` take the owner's typed `text` and record it confirmed,
+  // origin owner-action. → the new view.
+  async applyScopeAction(id, { action, target = null, hash = null, text = null, by = null, channel = null, quote = null, factId = null } = {}) {
+    const meta = this.getCase(id);
+    if (!SCOPE_ACTIONS.includes(action)) throw new ScopeError('SCOPE_INVALID', `A scope action is one of ${SCOPE_ACTIONS.join(', ')}.`);
+    if (typeof by !== 'string' || !by) throw new ScopeError('SCOPE_INVALID', 'A scope action names who made it ("by").');
+    if (meta.status === 'done' || meta.status === 'abandoned') {
+      throw new ScopeError('CASE_CLOSED', `Case is ${meta.status}. Its scope is read-only.`);
+    }
+    const act = () => {
+      const brief = this.brief(meta.id);
+      const store = this.scope(meta.id);
+      const before = store.reconcile(brief.read().data);
+      const stamp = { by, channel, quote, factId };
+      const rowOf = (ref) => {
+        const row = before.criteria.find((r) => r.id === ref);
+        if (!row) throw new ScopeError('CRITERION_NOT_FOUND', `No success criterion ${String(ref)} in this case.`);
+        return row;
+      };
+      const shown = (row, seen, name) => {
+        if (typeof seen !== 'string' || seen !== row.hash) throw new ScopeError('SCOPE_STALE', `${name} changed since it was shown; read it again.`);
+      };
+      const list = () => before.criteria.map((r) => r.text);
+
+      if (action === 'add') {
+        const clean = validateCriterionText(text);
+        if (before.criteria.some((r) => r.hash === textHash(clean))) throw new ScopeError('CRITERION_DUPLICATE', 'The same words are already a success criterion.');
+        const w = this.writeScope(meta.id, { field: 'successCriteria', value: [...list(), clean], origin: 'owner-action', confirmed: stamp, addedBy: by });
+        return { changed: true, line: `added ${w.added.map((r) => r.id).join(', ')}` };
+      }
+
+      if (action === 'edit') {
+        if (target === 'objective') {
+          if (typeof text !== 'string' || !text.trim()) throw new ScopeError('CRITERION_INVALID', 'An objective is text.');
+          if (before.objective && typeof hash === 'string') shown(before.objective, hash, 'The objective');
+          this.writeScope(meta.id, { field: 'objective', value: text.trim(), origin: 'owner-action', confirmed: stamp, addedBy: by });
+          return { changed: true, line: 'the objective was rewritten' };
+        }
+        const row = rowOf(target);
+        if (typeof hash === 'string') shown(row, hash, row.id);
+        const clean = validateCriterionText(text);
+        const newHash = textHash(clean);
+        if (before.criteria.some((r) => r.hash === newHash && r.id !== row.id)) throw new ScopeError('CRITERION_DUPLICATE', 'The same words are already a success criterion.');
+        const value = before.criteria.map((r) => (r.id === row.id ? clean : r.text));
+        const w = this.writeScope(meta.id, {
+          field: 'successCriteria', value, origin: 'owner-action', confirmed: stamp, addedBy: by, alsoConfirm: [newHash]
+        });
+        return { changed: true, line: newHash === row.hash ? `confirmed ${row.id}` : `${row.id} was rewritten as ${w.added.map((r) => r.id).join(', ')}` };
+      }
+
+      // confirm and drop: the rows the owner was shown.
+      let rows;
+      let objective = false;
+      if (target === 'all-proposed') {
+        const seen = hash && typeof hash === 'object' && !Array.isArray(hash) ? hash : {};
+        rows = before.criteria.filter((r) => r.state !== 'confirmed');
+        for (const row of rows) shown(row, seen[row.id], row.id);
+        if (action === 'confirm' && before.objective && before.objective.state !== 'confirmed' && seen.objective !== undefined) {
+          shown(before.objective, seen.objective, 'The objective');
+          objective = true;
+        }
+      } else if (target === 'objective') {
+        if (action === 'drop') throw new ScopeError('SCOPE_INVALID', 'The objective is rewritten, never dropped.');
+        if (!before.objective) throw new ScopeError('CRITERION_NOT_FOUND', 'This case has no objective to confirm.');
+        shown(before.objective, hash, 'The objective');
+        rows = [];
+        objective = before.objective.state !== 'confirmed';
+      } else {
+        const row = rowOf(target);
+        shown(row, hash, row.id);
+        rows = action === 'confirm' && row.state === 'confirmed' ? [] : [row];
+      }
+      if (!rows.length && !objective) return { changed: false };
+
+      if (action === 'confirm') {
+        const targets = [...rows.map((r) => r.id), ...(objective ? ['objective'] : [])];
+        const hashes = Object.fromEntries(rows.map((r) => [r.id, r.hash]));
+        if (objective) hashes.objective = before.objective.hash;
+        store.confirm(targets, { hashes, ...stamp });
+        return { changed: true, line: `confirmed ${targets.join(', ')}` };
+      }
+      const gone = new Set(rows.map((r) => r.id));
+      this.writeScope(meta.id, { field: 'successCriteria', value: before.criteria.filter((r) => !gone.has(r.id)).map((r) => r.text), origin: 'owner-action', addedBy: by, removedBy: by });
+      return { changed: true, line: `dropped ${[...gone].join(', ')}` };
+    };
+    // One journal entry per action that changed something: ids only, so it
+    // can be shown wherever the last journal entry is.
+    const result = await this.systemAction(meta.id, `scope ${action}`, async () => {
+      const r = act();
+      if (r.changed) {
+        this.records(meta.id).writeJournal('scope', `Scope: ${r.line} (by ${oneLine(by, 40)}${channel ? `, ${oneLine(channel, 40)}` : ''}).`, this.now());
+        this._closeCreatedObjectiveQuestion(meta);
+      }
+      return r;
+    });
+    if (result.changed) {
+      this._reindex(meta.id);
+      this._notify('case:changed', { caseId: meta.id, what: 'progress' });
+    }
+    return this.scopeView(meta.id);
+  }
+
+  // ---- Progress (cases stage 8 spec §6.2 to §6.4) ----
+
+  abandoned(id) {
+    return new AbandonedStore(this.getCase(id).dir, { now: () => this.now() });
+  }
+
+  verification(id) {
+    return new VerificationStore(this.getCase(id).dir, { now: () => this.now() });
+  }
+
+  // The check command's approvals and runs (.kl/checks.json; spec §6.6).
+  checks(id) {
+    return new CheckStore(this.getCase(id).dir, { now: () => this.now() });
+  }
+
+  // Asks the owner to approve the check command the brief names now (spec
+  // §6.6): a pressed question, never charged. An open one about an earlier
+  // command is closed first. Called under the case lock (a turn, or a
+  // system action). → the question. Throws CheckError when there is no
+  // command, or no repository on this machine to run it in.
+  requestCheckApproval(id) {
+    const meta = this.getCase(id);
+    const current = currentCheck(this, meta.id);
+    if (!current) throw new CheckError('CHECK_INVALID', 'This case has no check command.');
+    const store = this.questions(meta.id);
+    for (const q of store.open().filter((r) => r.payload?.type === CHECK_TYPE)) {
+      try {
+        store.close(q.id, { reason: 'superseded', by: 'system' });
+      } catch (err) {
+        log.warn(`Could not close superseded check question ${q.id}: ${err.message}`);
+      }
+    }
+    return this.createQuestion(meta.id, {
+      kind: 'question',
+      urgency: 'normal',
+      text: checkQuestionText(meta, current),
+      options: [{ id: 'approve', label: 'Approve' }, { id: 'refuse', label: 'Do not run' }],
+      defaultOnSilence: 'hold',
+      // Pressed: answered only by the buttons on its card or the phone.
+      payload: { type: CHECK_TYPE, key: CHECK_TYPE, mcpAnswerable: false, disclosable: false, hash: current.hash }
+    }, { charge: false });
+  }
+
+  // Each criterion with its state as the record says it now (spec §6.3):
+  // recomputed on every call from the verification records, the ledger and
+  // the case-type snapshot. Nothing stored is taken as a state. Reads only.
+  progressView(id, { scope = null, file = null } = {}) {
+    const meta = this.getCase(id);
+    const { facts } = this.ledger(meta.id).view();
+    let snapshot = null;
+    try {
+      snapshot = this.caseTypeSnapshot(meta.id);
+    } catch (err) {
+      log.warn(`Progress of ${meta.slug}: the case-type snapshot is unavailable: ${err.message}`);
+    }
+    // The runs of the check command (spec §6.6): a `chk-` id is resolved
+    // against them, and a failed newest run makes a criterion that cites
+    // a check `failing`.
+    let runs = [];
+    try {
+      runs = this.checks(meta.id).read().runs;
+    } catch (err) {
+      log.warn(`Progress of ${meta.slug}: the check runs are unavailable: ${err.message}`);
+    }
+    const ctx = { facts, checks: runs, snapshot };
+    return progressView({
+      scopeView: scope || this.scopeView(meta.id),
+      file: file || this.verification(meta.id).read(),
+      resolve: (evidenceId) => resolveEvidence(evidenceId, ctx),
+      newestCheck: runs.length ? runs[runs.length - 1] : null
+    });
+  }
+
+  // The ready-to-close list (spec §6.4). Reads only.
+  closeReadiness(id, { view = null } = {}) {
+    return closeReadiness(this, id, { view });
+  }
+
+  // What the panel, the Progress tool and MCP all read:
+  // { scope, view, readiness, summary, abandoned, closed }. Never writes.
+  // A done or abandoned case that was frozen at its close gets that record
+  // back as `closed` ({ frozen: true, at, status, summary, criteria,
+  // readiness }) and nothing is computed; a case closed before progress was
+  // tracked has `closed: null`.
+  progress(id) {
+    const meta = this.getCase(id);
+    const file = this.verification(meta.id).read();
+    let abandoned = [];
+    try {
+      abandoned = this.abandoned(meta.id).active();
+    } catch (err) {
+      log.warn(`Progress of ${meta.slug}: the abandoned approaches are unavailable: ${err.message}`);
+    }
+    if ((meta.status === 'done' || meta.status === 'abandoned') && file.closed) {
+      const closed = { ...file.closed, frozen: true };
+      return { scope: null, view: null, readiness: null, summary: typeof closed.summary === 'string' ? closed.summary : null, abandoned, closed };
+    }
+    const scope = this.scopeView(meta.id);
+    const view = this.progressView(meta.id, { scope, file });
+    const readiness = this.closeReadiness(meta.id, { view });
+    return { scope, view, readiness, summary: summaryLine(view, readiness), abandoned, closed: null };
+  }
+
+  // The owner's "Check now" (IPC case:verifyNow; owner ruling 2026-10-13):
+  // one verify pass over the whole record, asked for by the owner's press.
+  // No tool and no MCP surface calls this. It is the pass of a turn's close
+  // (R-C8-11) started by a press instead: prepared and counted under the
+  // case lock in a commit of its own, then run by _startVerifyPass with no
+  // lock held, and landed, charged, dropped and stopped as that one is. So
+  // an owner turn that starts meanwhile drops it (the case is owed a pass),
+  // and a wake-up waits for it. What differs: every reason to skip is
+  // checked here first and refused, so a refused press makes no call and
+  // writes nothing; it never starts while a turn, a system action or
+  // another pass has the case (CASE_BUSY); and Stop, a pause or a close
+  // ends it with nothing recorded (_stopCheck). It is not a turn: nothing
+  // is charged to turnsPerDay and no turn-start hook runs. → the pass's
+  // result. Throws VerifyRefusedError, CaseBusyError or RuntimeClosingError.
+  async verifyNow(id) {
+    if (this.closing) throw new RuntimeClosingError();
+    const meta = this.getCase(id);
+    const cfg = this.settings().verify;
+    if (meta.status === 'done' || meta.status === 'abandoned') {
+      throw new VerifyRefusedError('CASE_CLOSED', `Case is ${meta.status}. It is read-only; what it closed with is kept as it was.`);
+    }
+    if (cfg.when === 'off') throw new VerifyRefusedError('VERIFY_OFF', 'The verify pass is turned off for cases (cases.verify.when).');
+    if (meta.status !== 'active' && meta.status !== 'needs-direction') {
+      throw new VerifyRefusedError('VERIFY_NOT_OPEN', `Case is ${meta.status}. A check runs while a case is active or waiting for direction.`);
+    }
+    if (!this.progressView(meta.id).criteria.some((r) => r.scope === 'confirmed')) {
+      throw new VerifyRefusedError('VERIFY_NO_CRITERIA', 'No success criterion is confirmed, so there is nothing to check. Confirm one first.');
+    }
+    const day = localDay(this.now(), this.settings().timeZone);
+    if (this.verification(meta.id).passesOn(day) >= cfg.maxPassesPerDay) {
+      throw new VerifyRefusedError('VERIFY_DAILY_CAP', `The limit of ${cfg.maxPassesPerDay} verify ${cfg.maxPassesPerDay === 1 ? 'pass' : 'passes'} a day is used for this case. It is free again tomorrow.`);
+    }
+    const ratio = this.budget(meta.id).status().usd.ratio;
+    if (ratio !== null && ratio * 100 >= cfg.skipAboveUsdPercent) {
+      throw new VerifyRefusedError('VERIFY_USD_BUDGET', `This case has used ${cfg.skipAboveUsdPercent} % of its usd budget or more, so no verify pass runs. Raise the budget to check.`);
+    }
+    if (this.verifyRunning(meta.id)) throw new CaseBusyError(meta.title, { sameProcess: true, verifying: true });
+    if (this._holdsLock(meta.dir)) throw new CaseBusyError(meta.title, { sameProcess: true });
+    const turnId = `check-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    // What the pass needs of a turn: the case, an id for its records and
+    // its usage, and the models.
+    const turn = { caseId: meta.id, dir: meta.dir, turnId, title: meta.title, source: 'check', signal: null };
+    turn.models = this._turnModels(meta.id, null);
+    let out = null;
+    let plan = null;
+    await this.systemAction(meta.id, 'check', () => {
+      ({ out, plan } = prepareVerifyPass(this, turn, { mode: 'request' }));
+      if (!plan) return;
+      plan.out = out;
+      // What the pass's entry is compared with: the states as they are now.
+      plan.before = statesOf(this.progressView(meta.id));
+    }, { commitMessage: `${turnId}: verify pass asked for by the owner` });
+    if (!plan) return out;
+    // The commit above was awaited: a turn may have taken the case since.
+    // The pass was counted and is owed to that turn's close.
+    if (this.closing || this._holdsLock(meta.dir) || this.verifyRunning(meta.id)) {
+      this.verifyOwed.add(meta.id);
+      out.error = this.closing ? 'dropped (shutdown)' : CHECK_SUPERSEDED;
+      out.dropped = true;
+      return out;
+    }
+    const job = this._startVerifyPass(turn, plan, { check: true });
+    this._notify('case:changed', { caseId: meta.id, what: 'turn', running: true, source: 'check' });
+    try {
+      return (await job.promise) || out;
+    } finally {
+      this._notify('case:changed', { caseId: meta.id, what: 'turn', running: false, source: 'check' });
+      this._notify('case:changed', { caseId: meta.id, what: 'progress' });
+    }
+  }
+
+  // beginTurn's step (spec §6.9, §10): the scope record is written from
+  // brief.md as it is now. The first run on a case is its migration (every
+  // string `legacy`); later a string with no entry is a file edit. Never
+  // for a closed case, and never fails the turn.
+  _reconcileScope(meta) {
+    if (meta.status === 'done' || meta.status === 'abandoned') return;
+    try {
+      this.scope(meta.id).reconcile(new Brief(meta.dir).read().data);
+    } catch (err) {
+      log.warn(`Case ${meta.slug}: the scope record was not reconciled: ${err.message}`);
+    }
+  }
 
   // The cross-case entity index (cases stage 7 spec §3.6, R46): attached to
   // C5's CrossCaseIndex (which then keeps it current through rebuild,
@@ -369,12 +894,17 @@ class CaseRuntime {
     const nextWakeup = safely('wake-ups', () => this.wakeups(meta.id).list()
       .slice()
       .sort((a, b) => Date.parse(a.nextAt) - Date.parse(b.nextAt))[0] || null, null);
+    // Cases stage 8 (spec §6.8): each read costs one line when it fails,
+    // never the orientation. All three only read.
+    const progress = safely('progress', () => this.progress(meta.id), { error: true });
+    const abandoned = safely('abandoned approaches', () => this.abandoned(meta.id).list(), { records: [], unavailable: true });
+    const lastFailure = safely('last failure report', () => this._lastFailure(meta, facts), null);
     return buildOrientation({
       meta,
       brief,
       facts,
       decisions: records.decisions(),
-      lastJournal: records.lastJournal(),
+      lastJournal: records.lastJournal({ skipKinds: [VERIFY_JOURNAL_KIND] }),
       ledgerErrors: errors,
       maxChars: this.orientationMaxChars,
       triggers,
@@ -386,8 +916,25 @@ class CaseRuntime {
       nextWakeup,
       now: this.now(),
       detours: safely('detours', () => this._detourLines(meta), []),
-      extras: this._extras(meta)
+      extras: this._extras(meta),
+      progress,
+      abandoned,
+      lastFailure
     });
+  }
+
+  // The failure report a case was resumed from (R-C8-10): while the status
+  // reason is the owner's direction, the direction fact's `attr` is the
+  // report's name when the answer came through the direction question. A
+  // direction recorded from chat has an attr the model chose, so the name is
+  // used only when it is a failure report's and that file is in the case.
+  _lastFailure(meta, facts) {
+    if (meta.statusReason?.kind !== 'direction') return null;
+    const fact = facts.get(meta.statusReason.ref);
+    if (!fact || fact.subject !== 'direction' || typeof fact.attr !== 'string') return null;
+    if (!FAILURE_REPORT_NAME.test(fact.attr)) return null;
+    if (!fs.existsSync(path.join(meta.dir, 'journal', `${fact.attr}.md`))) return null;
+    return { file: `journal/${fact.attr}.md` };
   }
 
   // `## Case type: <type>`: the type's extras from the cached snapshot.
@@ -575,7 +1122,8 @@ class CaseRuntime {
     const meta = this.getCase(id);
     // Cases stage 6: required playbook gating questions come first.
     if (this.playbooks) this.playbooks.assertGatingComplete(meta.id);
-    this.brief(meta.id).completeGating();
+    // Cases stage 8 (R-C8-2): one criterion the owner confirmed.
+    this.brief(meta.id).completeGating({ scopeView: this.scopeView(meta.id) });
     if (meta.status === 'draft') this.setStatus(meta.id, 'active', { kind: 'gating' });
     this._reindex(meta.id);
     return this.getCase(meta.id);
@@ -607,7 +1155,26 @@ class CaseRuntime {
       resumeTo: (status === 'paused' && (resumeTo === 'active' || resumeTo === 'needs-direction')) ? resumeTo : null,
       at: this.now().toISOString()
     };
+    // Cases stage 8 (R-C8-7): what the case closes with is read while it is
+    // still open and written once the status has changed. Neither step may
+    // stop the status change.
+    const closes = (status === 'done' || status === 'abandoned') && meta.status !== 'done' && meta.status !== 'abandoned';
+    let closingProgress = null;
+    if (closes) {
+      try {
+        closingProgress = this.progress(meta.id);
+      } catch (err) {
+        log.warn(`Case ${meta.slug}: its progress could not be read for the close: ${err.message}`);
+      }
+    }
     const updated = this.store.updateMeta(meta.id, { status, statusReason });
+    if (closes && closingProgress) {
+      try {
+        freezeProgress(this, meta.id, { status, progress: closingProgress });
+      } catch (err) {
+        log.warn(`Case ${meta.slug}: its progress was not frozen at the close: ${err.message}`);
+      }
+    }
     this._notify('case:changed', { caseId: meta.id, what: 'status' });
     if (STOPS_WORK.has(status)) {
       this._abortTurn(meta.id, `case ${status}`);
@@ -666,6 +1233,8 @@ class CaseRuntime {
   _abortTurn(caseId, reason) {
     const turn = this.turns.get(caseId);
     if (turn && turn.source === 'wakeup' && typeof turn.abort === 'function') turn.abort(reason);
+    // The owner's check (verifyNow) has no turn: it is a pass that is out.
+    this._stopCheck(caseId, reason);
   }
 
   _cancelExecutorJobs(caseId, reason) {
@@ -693,11 +1262,30 @@ class CaseRuntime {
   // meant for a different process, not this runtime's own turn. A wake-up
   // turn never preempts anything: it just takes the normal busy error.
   async _acquireForTurn(meta, turnId, source) {
-    try {
+    // Cases stage 8: the pass of the turn before is dropped the moment a
+    // turn takes the case, with no await between (see _supersedeVerify).
+    const take = () => {
       this._acquire(meta, turnId);
+      this._supersedeVerify(meta.id, 'a newer turn started');
+    };
+    try {
+      take();
       return;
     } catch (err) {
       if (err.code !== 'CASE_BUSY' || source === 'wakeup') throw err;
+      // A verify pass of this process is writing (its result or a late
+      // charge; a commit's length): the owner's turn waits for it instead
+      // of being refused.
+      const writing = this.verifyWrites.get(meta.id);
+      if (writing) {
+        await this._waitFor(writing, this.verifyLandWaitMs);
+        try {
+          take();
+          return;
+        } catch (again) {
+          if (again.code !== 'CASE_BUSY') throw again;
+        }
+      }
       const holder = readLock(this._lockPath(meta.dir));
       const held = holder && Number.isInteger(holder.pid) ? this.turns.get(meta.id) : null;
       const inProcessWakeup = Boolean(
@@ -709,7 +1297,7 @@ class CaseRuntime {
       const released = await this._waitForLockRelease(meta.dir, held.turnId, this.wakeupPreemptTimeoutMs);
       if (!released) throw new WakeupBusyError();
       try {
-        this._acquire(meta, turnId);
+        take();
       } catch {
         throw new WakeupBusyError();
       }
@@ -1003,6 +1591,12 @@ class CaseRuntime {
     // Shutting down: refuse before even taking the lock.
     if (source === 'wakeup' && this.closing) throw new RuntimeClosingError();
     const meta = this.getCase(id);
+    // Cases stage 8 (R-C8-11): a wake-up waits its turn behind a verify
+    // pass that is still out (it runs again within the minute); an owner
+    // turn takes the case and the pass is dropped (_acquireForTurn).
+    if (source === 'wakeup' && this.verifyRunning(meta.id)) {
+      throw new CaseBusyError(meta.title, { pid: process.pid, lockPath: this._lockPath(meta.dir), sameProcess: true });
+    }
     await this._acquireForTurn(meta, turnId, source);
     try {
       if (await git.isDirty(meta.dir)) await this._commit(meta.dir, 'owner edits', meta.id);
@@ -1017,6 +1611,8 @@ class CaseRuntime {
         const r = budget.charge('turnsPerDay', 1, { turnId });
         if (r.crossedNow.length) this.onCrossings(meta.id, 'turnsPerDay', r.crossedNow);
       }
+      // Cases stage 8: after the owner-edits commit, before the hooks.
+      this._reconcileScope(meta);
       // Cases stage 6 (final review M-6): the playbook packages load once for
       // the hooks, the triggers and the orientation below.
       const closeEntriesScope = this.playbooks && typeof this.playbooks.beginEntriesScope === 'function'
@@ -1052,6 +1648,9 @@ class CaseRuntime {
         // The models this turn uses, frozen at launch (models spec
         // 2026-09-27 §6.6): a switch during the turn applies to the next one.
         turn.models = this._turnModels(fresh.id, chatId);
+        // Cases stage 8 (spec §6.9): where the record stood when the turn
+        // began, so its close can tell what the turn wrote. Taken last.
+        turn.marks = this._turnMarks(fresh);
         this.turns.set(fresh.id, turn);
         this._notify('case:changed', { caseId: fresh.id, what: 'turn', running: true, source });
         return turn;
@@ -1078,8 +1677,297 @@ class CaseRuntime {
     };
   }
 
-  async endTurn(turn, { summary = '', journal = null, journalKind = 'turn' } = {}) {
+  // Never fails the turn: a turn with no marks finds only what carries its id.
+  _turnMarks(meta) {
     try {
+      return turnMarks(this, meta.id);
+    } catch (err) {
+      log.warn(`Case ${meta.slug}: the turn's marks could not be taken: ${err.message}`);
+      return null;
+    }
+  }
+
+  // The guarded steps of a turn's close (cases stage 8 spec §6.9), before
+  // the render, the journal and the commit: → { block, plan }. `block` is
+  // host-written text that goes first in the turn's journal entry, or null.
+  // `plan` is the verify pass this close prepared, or null; endTurn starts
+  // it once the turn has committed and released the case (R-C8-11).
+  // `evidence` is { toolResults } from the caller, this turn's case-tool
+  // calls only; it is filtered and capped again here and its ids are never
+  // trusted. Only the normal exit of an owner turn and a wake-up that acted
+  // pass `verify`.
+  //
+  // Nothing here calls a model. What needs none is done now, under the
+  // turn's lock and in its commit: the check command's close run (first, so
+  // the pass can cite it), what the turn wrote, every reason to skip the
+  // pass, the count of the pass against the day's limit, and the block's
+  // lines about what the turn itself changed (a check that went from pass
+  // to fail, then a criterion whose fact the turn superseded, are said
+  // here, first).
+  async _closeProgress(turn, { evidence = null, verify = false } = {}) {
+    if (!verify) return { block: null, plan: null };
+    const closed = (status) => status === 'done' || status === 'abandoned';
+    if (closed(this.getCase(turn.caseId).status)) return { block: null, plan: null };
+    // Step 1 (spec §6.6, §6.9): the check command, only in an owner turn
+    // and only when everything in closeCheck holds. It can take up to its
+    // time limit; the owner's Stop (the turn's signal) and shutdown end it.
+    // Nothing in it can fail the close.
+    let check = null;
+    try {
+      check = await closeCheck(this, turn, typeof this.host?.runCheck === 'function' ? { run: this.host.runCheck } : {});
+    } catch (err) {
+      log.warn(`Case ${turn.caseId}: the check command's close run failed: ${err.message}`);
+    }
+    const turnEvidence = collectTurnEvidence(this, turn, evidence || {});
+    // As the turn began, so a criterion that left `met` during the turn is
+    // named; as it is now when no marks were taken.
+    const before = turn.marks && turn.marks.states ? turn.marks.states : statesOf(this.progressView(turn.caseId));
+    // A run that was just recorded is something new for the pass to read,
+    // whether or not the turn wrote a fact.
+    const { out, plan } = prepareVerifyPass(this, turn, { turnEvidence, owed: this.verifyOwed.has(turn.caseId) || Boolean(check) });
+    const after = this.progressView(turn.caseId);
+    // A pass that will run says its part when it lands; one that will not
+    // says why here (the day's limit, the budget), once a day.
+    const block = verificationBlock({ pass: plan ? null : out, before, after, check });
+    // The cache follows what the entry just said. A close that is not
+    // verified (stopped, blocked, failed) leaves it, so the next turn's
+    // `verification` hook still sees a criterion that left `met`.
+    const states = statesOf(after);
+    // A criterion that left `met` during this turn (the turn superseded the
+    // fact behind it, or the close run failed) stays `met` here, so the next
+    // turn's hook raises it exactly as a change made between turns (a note
+    // and a blocking trigger; owner ruling R-C8-N9): the journal line alone
+    // is not read until then.
+    const cached = { ...states };
+    for (const [id, was] of Object.entries(before)) {
+      if (was === 'met' && REGRESSED_STATES.includes(cached[id])) cached[id] = 'met';
+    }
+    this.verification(turn.caseId).setCache(cached);
+    if (plan) {
+      plan.out = out;
+      // What the pass's own entry is compared with: the states this close left.
+      plan.before = states;
+    }
+    return { block, plan };
+  }
+
+  // ---- The verify pass after the reply (cases stage 8, R-C8-11) ----
+  //
+  // endTurn commits and releases the case, then the pass makes its model
+  // call with no lock held and nobody waiting. Its result is written in one
+  // system action (the verdicts, a journal entry of its own, the cache, one
+  // commit), and only while it is still the newest thing known about the
+  // case: a turn that takes the case first drops it.
+
+  // Whether a pass of this case may still land.
+  verifyRunning(caseId) {
+    const job = this.verifying.get(caseId);
+    return Boolean(job && !job.done && !job.superseded);
+  }
+
+  // Resolves when no pass is out: for one case or, with no id, for all. With
+  // `settled`, also when every provider call a pass made has ended and its
+  // usage is written (a call can outlive the pass that stopped waiting for
+  // it). Never rejects.
+  async verifyIdle(caseId = null, { settled = false } = {}) {
+    for (;;) {
+      const jobs = [...this.verifyJobs].filter((j) => (caseId === null || j.caseId === caseId) && (settled || !j.done));
+      if (!jobs.length) return;
+      await Promise.allSettled(jobs.map((j) => (settled ? Promise.allSettled([j.promise, j.settled]) : j.promise)));
+    }
+  }
+
+  // Stops every pass that is out: its call is aborted and its result is not
+  // written. Called by beginShutdown.
+  abortVerifyPasses(reason = 'stopped') {
+    for (const job of this.verifyJobs) {
+      if (job.done) continue;
+      job.superseded = true;
+      job.why = reason;
+      job.controller.abort(reason);
+    }
+  }
+
+  // A turn has taken the case: the pass that was out is no longer the
+  // newest thing known about it. Synchronous, and called with no await
+  // after the lock is taken, so a pass can never see "not superseded" and
+  // the newer turn's lock at once.
+  _supersedeVerify(caseId, reason) {
+    const job = this.verifying.get(caseId);
+    if (!job || job.done || job.superseded) return;
+    job.superseded = true;
+    job.why = reason;
+    if (job.check) job.error = CHECK_SUPERSEDED;
+    this.verifyOwed.add(caseId);
+    job.controller.abort(reason);
+    log.info(`Case ${caseId}: the verify pass of ${job.turnId} was dropped (${reason}).`);
+  }
+
+  // Stop from the chat, a pause or a close reaches one pass only: the one
+  // the owner asked for (verifyNow). It ends with nothing recorded, and is
+  // not owed: the owner stopped it. A pass that followed a turn is never
+  // stopped this way (the turn it belonged to is over). → whether one was.
+  _stopCheck(caseId, reason) {
+    const job = this.verifying.get(caseId);
+    if (!job || !job.check || job.done || job.superseded) return false;
+    job.superseded = true;
+    job.why = reason;
+    job.error = 'the turn was stopped';
+    job.owed = false;
+    job.controller.abort(reason);
+    log.info(`Case ${caseId}: the check ${job.turnId} was stopped (${reason}).`);
+    return true;
+  }
+
+  // A promise, or a time limit. The timer is ref'd: this is a wait for work
+  // this process itself is doing.
+  _waitFor(promise, ms) {
+    let timer = null;
+    return Promise.race([
+      Promise.resolve(promise).catch(() => {}),
+      new Promise((resolve) => { timer = setTimeout(resolve, Math.max(0, ms)); })
+    ]).finally(() => clearTimeout(timer));
+  }
+
+  // A system action made by a verify pass (its result, a late charge).
+  // Listed in verifyWrites while it holds the case, so a turn that arrives
+  // then waits the length of its commit instead of reading "busy".
+  verifySystemAction(caseId, label, fn, options = {}) {
+    const action = this.systemAction(caseId, label, fn, options);
+    const tracked = Promise.resolve(action).catch(() => {}).finally(() => {
+      if (this.verifyWrites.get(caseId) === tracked) this.verifyWrites.delete(caseId);
+    });
+    this.verifyWrites.set(caseId, tracked);
+    return action;
+  }
+
+  // Starts the pass a close, or the owner's check (`check`), prepared.
+  // → the job ({ promise, settled, ... }).
+  _startVerifyPass(turn, plan, { check = false } = {}) {
+    const caseId = turn.caseId;
+    const controller = new AbortController();
+    const job = {
+      caseId, turnId: turn.turnId, controller, check, superseded: false, why: null, error: null, owed: true,
+      done: false, promise: null, settled: Promise.resolve(), result: null
+    };
+    this._supersedeVerify(caseId, 'a newer pass started');
+    this.verifyOwed.delete(caseId);
+    this.verifying.set(caseId, job);
+    this.verifyJobs.add(job);
+    job.promise = this._runVerifyJob(turn, plan, job)
+      .catch((err) => {
+        log.warn(`Case ${caseId}: the verify pass of ${turn.turnId} failed: ${err?.message || err}`);
+        return null;
+      })
+      .then((result) => {
+        job.result = result;
+        job.done = true;
+        if (this.verifying.get(caseId) === job) this.verifying.delete(caseId);
+        // The job stays listed until its provider call has ended too.
+        Promise.resolve(job.settled).catch(() => {}).then(() => this.verifyJobs.delete(job));
+        return result;
+      });
+    return job;
+  }
+
+  async _runVerifyJob(turn, plan, job) {
+    const caseId = turn.caseId;
+    const pass = plan.out;
+    const dropped = () => {
+      const why = job.superseded ? (job.why || 'superseded') : (this.closing ? 'shutdown' : null);
+      if (!why) return false;
+      pass.error = job.error || `dropped (${why})`;
+      pass.dropped = true;
+      // A pass that did not land is owed to the case's next verified close;
+      // a check the owner stopped is not.
+      if (job.owed) this.verifyOwed.add(caseId);
+      return true;
+    };
+    if (dropped()) return pass;
+    // The turn's own signal is spent (the reply is over): the pass has its own.
+    const called = await callVerifyModel(this, turn, plan.input, plan.timeoutMs, { signal: job.controller.signal });
+    job.settled = called.settled || Promise.resolve();
+    if (dropped()) return pass;
+    // A system action of this process holds the case (an answer, a panel
+    // action): running inside it could miss its commit, so wait it out. A
+    // turn that takes the case meanwhile drops this pass.
+    const dir = this.getCase(caseId).dir;
+    const deadline = Date.now() + this.verifyLandWaitMs;
+    while (this._holdsLock(dir) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      if (dropped()) return pass;
+    }
+    if (this._holdsLock(dir)) {
+      job.superseded = true;
+      job.why = 'the case stayed busy';
+      dropped();
+      return pass;
+    }
+    let landed = false;
+    try {
+      // No await between the checks above and the lock: systemAction takes
+      // it synchronously, and `land` is synchronous, so the result is
+      // applied whole or not at all.
+      await this.verifySystemAction(caseId, 'verify pass', (meta) => {
+        if (dropped()) return;
+        // Closed while the model was thinking: the case keeps the progress
+        // it closed with (R-C8-7).
+        if (meta.status === 'done' || meta.status === 'abandoned') {
+          pass.error = 'the case closed during the pass';
+          pass.dropped = true;
+          return;
+        }
+        if (called.reply) applyVerifyReply(this, plan, called, pass);
+        else pass.error = called.error || 'the model call failed';
+        const after = this.progressView(caseId);
+        const block = verificationBlock({ pass, before: plan.before, after });
+        if (block) new CaseRecords(meta.dir).writeJournal(VERIFY_JOURNAL_KIND, block, this.now());
+        // A criterion this pass took out of `met` stays `met` in the cache,
+        // so the next turn's `verification` hook raises it (a note and a
+        // blocking trigger): that turn's orientation is where the model
+        // reads it, since this entry is not the turn's own.
+        // Read from the cache as it is, not from what the pass began with: a
+        // check starts from the record as the owner sees it, which may
+        // already have left what the last turn saw.
+        const states = statesOf(after);
+        const store = this.verification(caseId);
+        const cached = store.read().cache;
+        for (const [id, was] of Object.entries(cached ? cached.states : {})) {
+          if (was === 'met' && id in states && states[id] !== 'met') states[id] = 'met';
+        }
+        store.setCache(states);
+        landed = true;
+      }, { commitMessage: `${turn.turnId}: verify pass` });
+    } catch (err) {
+      // Another process holds the case, or the write failed.
+      log.warn(`Case ${caseId}: the verify pass of ${turn.turnId} could not be written: ${err?.message || err}`);
+      pass.error = 'the result could not be written';
+      this.verifyOwed.add(caseId);
+    }
+    if (landed) {
+      this._reindex(caseId);
+      this._notify('case:changed', { caseId, what: 'progress' });
+    }
+    return pass;
+  }
+
+  async endTurn(turn, { summary = '', journal = null, journalKind = 'turn', evidence = null, verify = false } = {}) {
+    // The verify pass this close prepared (cases stage 8, R-C8-11). It is
+    // started below, after the commit and the release: the caller gets its
+    // commit back at once and the pass runs with no lock held.
+    let plan = null;
+    let committedOk = false;
+    try {
+      // Nothing in the close steps may keep the turn from committing and
+      // releasing its lock (spec §6.9).
+      let block = null;
+      try {
+        const closed = await this._closeProgress(turn, { evidence, verify });
+        if (closed && typeof closed.block === 'string' && closed.block.trim()) block = closed.block.trim();
+        if (closed && closed.plan) plan = closed.plan;
+      } catch (err) {
+        log.warn(`Case ${turn.caseId}: the progress steps of the turn's close failed: ${err.message}`);
+      }
       const records = new CaseRecords(turn.dir);
       let blockers = [];
       try {
@@ -1088,15 +1976,35 @@ class CaseRuntime {
         log.warn(`Blockers for ${turn.caseId} unavailable: ${err.message}`);
       }
       records.renderOpenItems(new FactLedger(turn.dir).view().facts, { blockers });
-      if (journal && String(journal).trim()) records.writeJournal(journalKind, journal, this.now());
+      // The host-written block goes first; it is written with no other text too.
+      const text = journal && String(journal).trim() ? String(journal) : '';
+      const entry = block ? (text ? `${block}\n\n${text}` : block) : text;
+      if (entry) records.writeJournal(journalKind, entry, this.now());
       this._closeTurnMeta(turn);
       const committed = await this._commit(turn.dir, `${turn.turnId}: ${oneLine(summary) || 'turn'}`, turn.caseId);
       this._reindex(turn.caseId);
+      committedOk = true;
       return committed;
     } finally {
-      if (this.turns.get(turn.caseId) === turn) this.turns.delete(turn.caseId);
+      const owned = this.turns.get(turn.caseId) === turn;
+      if (owned) this.turns.delete(turn.caseId);
       this._release(turn.dir, turn.turnId);
       this._notify('case:changed', { caseId: turn.caseId, what: 'turn', running: false, source: turn.source || 'owner' });
+      if (plan) {
+        // Started with no await after the release. A turn that did not
+        // commit, or that no longer owned the case (shutdown released it),
+        // starts none; the pass was counted and is owed to the next close.
+        if (committedOk && owned && !this.closing) {
+          try {
+            this._startVerifyPass(turn, plan);
+          } catch (err) {
+            log.warn(`Case ${turn.caseId}: the verify pass could not be started: ${err.message}`);
+            this.verifyOwed.add(turn.caseId);
+          }
+        } else {
+          this.verifyOwed.add(turn.caseId);
+        }
+      }
     }
   }
 
@@ -1439,11 +2347,17 @@ class CaseRuntime {
       return null;
     }
     const turn = this.turns.get(id);
-    return turn ? { turnId: turn.turnId, source: turn.source || 'owner' } : null;
+    if (turn) return { turnId: turn.turnId, source: turn.source || 'owner' };
+    // The owner's check (verifyNow) holds no lock and is no turn, but it is
+    // what Stop reaches, so it is reported here. A caller that asks whether
+    // the owner can send reads `source`: a check never keeps a message out.
+    const job = this.verifying.get(id);
+    return job && job.check && !job.done && !job.superseded ? { turnId: job.turnId, source: 'check' } : null;
   }
 
   // Stop from the case's chat (spec 2026-09-27 §9): aborts the running turn,
-  // an owner turn or a wake-up. False when no turn runs.
+  // an owner turn or a wake-up, or the owner's check when no turn runs.
+  // False when there is nothing to stop.
   abortTurn(caseId, reason = 'stopped by owner') {
     let id;
     try {
@@ -1452,7 +2366,8 @@ class CaseRuntime {
       return false;
     }
     const turn = this.turns.get(id);
-    if (!turn || typeof turn.abort !== 'function') return false;
+    if (!turn) return this._stopCheck(id, reason);
+    if (typeof turn.abort !== 'function') return false;
     turn.abort(reason);
     return true;
   }
@@ -1902,6 +2817,6 @@ class CaseRuntime {
 }
 
 module.exports = {
-  CaseRuntime, CaseBusyError, WakeupBusyError, CaseNotFoundError, RuntimeClosingError, SimilarCaseError, resolveCasesRoot,
+  CaseRuntime, CaseBusyError, WakeupBusyError, CaseNotFoundError, RuntimeClosingError, SimilarCaseError, VerifyRefusedError, resolveCasesRoot,
   BUDGET_FACT_NOTE, RELATIONS
 };

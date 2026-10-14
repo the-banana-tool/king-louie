@@ -145,11 +145,35 @@ describe('per-status rules', () => {
     assert.match(r.error, /archived/);
   });
 
+  // Cases stage 8 (spec §6.7): the Progress ops.
+  it('the two Progress read ops are allowed in every status', () => {
+    for (const status of STATUSES) {
+      for (const op of ['Progress.status', 'Progress.abandoned']) assert.strictEqual(check(status, op), null, `${status} ${op}`);
+    }
+    assert.ok(READ_OPS.includes('Progress.status') && READ_OPS.includes('Progress.abandoned'));
+  });
+
+  it('Progress.proposeDone is denied in draft and needs-direction, and every Progress write in a read-only status', () => {
+    assert.strictEqual(check('active', 'Progress.proposeDone'), null);
+    assert.strictEqual(check('draft', 'Progress.proposeDone').ok, false);
+    assert.strictEqual(check('needs-direction', 'Progress.proposeDone').ok, false);
+    assert.ok(DENIED.draft.includes('Progress.proposeDone') && DENIED['needs-direction'].includes('Progress.proposeDone'));
+    for (const status of ['draft', 'active', 'needs-direction']) {
+      for (const op of ['Progress.abandon', 'Progress.askScope']) assert.strictEqual(check(status, op), null, `${status} ${op}`);
+    }
+    for (const status of ['paused', 'done', 'abandoned']) {
+      for (const op of ['Progress.abandon', 'Progress.askScope', 'Progress.proposeDone', 'Progress.verify']) {
+        assert.strictEqual(check(status, op).ok, false, `${status} ${op}`);
+      }
+    }
+  });
+
   it('exposes the allowlists and denylists the spec names', () => {
-    assert.deepStrictEqual([...READ_OPS], ['Ledger.query', 'Brief.read', 'Playbook.list', 'Playbook.read', 'Plan.status', 'Executor.status', 'Executor.results']);
+    assert.deepStrictEqual([...READ_OPS], ['Ledger.query', 'Brief.read', 'Playbook.list', 'Playbook.read', 'Plan.status', 'Executor.status', 'Executor.results', 'Progress.status', 'Progress.abandoned']);
     assert.deepStrictEqual([...ALLOWED.done], [...READ_OPS, 'Playbook.propose']);
     assert.deepStrictEqual([...ALLOWED.abandoned], [...READ_OPS]);
-    assert.deepStrictEqual([...DENIED.draft], ['Recommend', 'Plan', 'Executor.submit', 'Fail']);
+    assert.deepStrictEqual([...DENIED.draft], ['Recommend', 'Plan', 'Executor.submit', 'Fail', 'Progress.proposeDone']);
+    assert.deepStrictEqual([...DENIED['needs-direction']], ['Plan', 'Recommend', 'Fail', 'Executor.submit', 'Progress.proposeDone']);
   });
 });
 

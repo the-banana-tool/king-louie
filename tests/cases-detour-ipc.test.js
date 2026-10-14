@@ -11,6 +11,7 @@ const { registerCaseHandlers } = require('../src/ipc/case-handlers');
 const IPC = require('../src/ipc/constants');
 const { CaseRuntime } = require('../src/cases');
 const { historyContext } = require('./helpers/history-context');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -32,6 +33,7 @@ async function activeCase(runtime, title, objective) {
   const info = await runtime.createCase({ title, objective, force: true });
   runtime.brief(info.id).update('why', 'The owner asked for it', { provenance: 'user' });
   runtime.brief(info.id).append('successCriteria', objective, { provenance: 'model' });
+  confirmAll(runtime, info.id);
   runtime.completeGating(info.id);
   return runtime.getCase(info.id);
 }

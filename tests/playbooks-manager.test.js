@@ -13,6 +13,7 @@ const { hashPackage } = require('../src/cases/playbooks/format');
 const { readState, writeState } = require('../src/cases/playbooks/changes');
 const { listProposals } = require('../src/cases/playbooks/proposals');
 const { PLAYBOOK_YAML, STEPS_MD, writePackage, makeGitPackage, commitPackage, withYaml, GIT_ID } = require('./helpers/playbook-fixture');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -475,6 +476,7 @@ describe('updates', () => {
         rt.brief(id).update('why', 'Need the cash', { provenance: 'user' });
         rt.brief(id).append('successCriteria', 'Sold', { provenance: 'model' });
         for (const q of rt.questions(id).open()) await rt.answerQuestion(id, q.id, { text: q.options?.length ? null : '250000', optionId: q.options?.[0]?.id ?? null });
+        confirmAll(rt, id);
         rt.completeGating(id);
       }
       rt.setStatus(id, status, { kind: 'owner', by: 'owner' });
@@ -740,6 +742,7 @@ describe('proposals through the manager', () => {
     w.rt.brief(w.id).update('why', 'Need the cash', { provenance: 'user' });
     w.rt.brief(w.id).append('successCriteria', 'Sold', { provenance: 'model' });
     for (const q of w.rt.questions(w.id).open()) await w.rt.answerQuestion(w.id, q.id, { text: q.options?.length ? null : '250000', optionId: q.options?.[0]?.id ?? null });
+    confirmAll(w.rt, w.id);
     w.rt.completeGating(w.id);
     return w;
   }

@@ -18,6 +18,7 @@ const { parseOrient } = require('../src/cases/turn-runner');
 const { withCaseProfile } = require('./helpers/profile-settings');
 const InferenceRouter = require('../src/providers/inference-router');
 const UsageTracker = require('../src/tracking/usage-tracker');
+const { confirmAll } = require('./helpers/case-scope');
 
 initializeTools();
 
@@ -90,6 +91,7 @@ async function activeCase(rt, title = 'Lakeside lot') {
   const info = await rt.createCase({ title, objective: 'Convert the lot to cash', force: true });
   rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
   rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+  confirmAll(rt, info.id);
   rt.completeGating(info.id);
   return rt.getCase(info.id);
 }
@@ -101,9 +103,12 @@ function dueWakeup(rt, c, clock) {
   return id;
 }
 
-const wakeupJournals = (c) => fs.readdirSync(path.join(c.dir, 'journal'))
-  .filter((n) => /-wakeup(-\d+)?\.md$/.test(n))
+const journalsOf = (kind) => (c) => fs.readdirSync(path.join(c.dir, 'journal'))
+  .filter((n) => new RegExp(`-${kind}(-\\d+)?\\.md$`).test(n))
   .map((n) => fs.readFileSync(path.join(c.dir, 'journal', n), 'utf8'));
+const wakeupJournals = journalsOf('wakeup');
+// The entry a verify pass writes when it lands after the turn (R-C8-11).
+const verificationJournals = journalsOf('verification');
 
 describe('parseOrient', () => {
   it('reads {changed, why} from the reply and rejects anything else', () => {
@@ -548,5 +553,132 @@ describe('runDueWakeups', () => {
     assert.strictEqual(await git.isDirty(c.dir), false);
     const w = runtime.wakeups(c.id).list().find((x) => x.id === id);
     assert.deepStrictEqual([w.lastOutcome, w.attempts], ['failed', 1]);
+  });
+});
+
+describe('runWakeupTurn: what the close receives (cases stage 8)', () => {
+  // Every endTurn of the runtime, with the fields it was given.
+  const spy = (runtime) => {
+    const ends = [];
+    const endTurn = runtime.endTurn.bind(runtime);
+    runtime.endTurn = (turn, fields) => { ends.push(fields); return endTurn(turn, fields); };
+    return ends;
+  };
+
+  it('the acted close passes verify and the case-tool results of the turn', async () => {
+    const { runtime, clock } = harness({
+      judge: [
+        { type: 'tool_use', toolCalls: [{ toolName: 'Ledger', toolUseId: 't1', parameters: { action: 'query' } }] },
+        { type: 'tool_use', toolCalls: [{ toolName: 'Read', toolUseId: 't2', parameters: { file_path: 'brief.md' } }] },
+        { type: 'text', content: 'Checked the ledger.' }
+      ]
+    });
+    const c = await activeCase(runtime);
+    dueWakeup(runtime, c, clock);
+    const ends = spy(runtime);
+    assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, ran: 1 });
+    assert.strictEqual(ends.length, 1);
+    assert.strictEqual(ends[0].verify, true);
+    assert.deepStrictEqual(ends[0].evidence.toolResults.map((r) => [r.tool, r.action, r.ok]), [['Ledger', 'query', true]]);
+    assert.strictEqual(ends[0].journalKind, 'wakeup');
+  });
+
+  it('the quiet, skipped and failed closes pass no verify', async () => {
+    const quiet = harness({ orient: '{"changed": false, "why": "nothing new"}' });
+    const skipped = harness({ settings: { budgets: { turnsPerDay: 1 } } });
+    const failed = harness({ judge: [() => { throw new Error('judge boom'); }] });
+    const expected = [[quiet, 'quiet'], [skipped, 'skipped'], [failed, 'failed']];
+    for (const [h, outcome] of expected) {
+      const c = await activeCase(h.runtime);
+      if (outcome === 'skipped') h.runtime.budget(c.id).charge('turnsPerDay', 1);
+      dueWakeup(h.runtime, c, h.clock);
+      const ends = spy(h.runtime);
+      assert.deepStrictEqual(await h.runtime.runDueWakeups(h.clock.now), { ...zero, [outcome]: 1 }, outcome);
+      assert.strictEqual(ends.length, 1, outcome);
+      assert.strictEqual(ends[0].verify, undefined, outcome);
+      assert.strictEqual(ends[0].evidence, undefined, outcome);
+    }
+  });
+});
+
+describe('runWakeupTurn: the verify pass at the close (cases stage 8)', () => {
+  const assertFact = { action: 'assert', stmt: 'The sale closed on 1 December', subject: 'sale', attr: 'closed', value: '2026-12-01', source: src };
+
+  it('a wake-up that wrote a fact is verified on the verify role and charged; the pass writes its own journal entry before the wake-up returns', async () => {
+    const { runtime, clock, calls } = harness({
+      judge: [
+        { type: 'tool_use', toolCalls: [{ toolName: 'Ledger', toolUseId: 't1', parameters: assertFact }], llmMetrics: metrics(0.25) },
+        { type: 'text', content: 'Recorded the closing.', llmMetrics: metrics(0.25) },
+        // The verify call: in this harness verify falls back to the judge's model.
+        { type: 'text', content: '{"criteria": [{"id": "sc-001", "status": "met", "evidence": ["f-0001"], "note": "Closed on 1 December."}]}', llmMetrics: metrics(0.05) }
+      ]
+    });
+    const c = await activeCase(runtime);
+    const id = dueWakeup(runtime, c, clock);
+    assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, ran: 1 });
+    assert.strictEqual(calls.judge, 3);
+    const [verifyCall] = calls.judgeMessages[2];
+    assert.match(verifyCall.text, /- sc-001: "Closed by year end"/);
+    assert.match(verifyCall.text, /- f-0001 \[sourced\] "sale\.closed"/);
+    // Nothing the judge said is in it.
+    assert.ok(!verifyCall.text.includes('Recorded the closing.'));
+    assert.deepStrictEqual(calls.judgeTools[2], ['Read']);
+    // The pass ran after the turn released the case (R-C8-11); the wake-up
+    // waited for it, so everything below is already there.
+    assert.deepStrictEqual(wakeupJournals(c), [`# Wake-up ${id}\n\nRecorded the closing.\n`]);
+    assert.deepStrictEqual(verificationJournals(c), ['## Verification (written by King Louie)\n- Now met: sc-001 (f-0001).\n- Verify pass: 1 accepted.\n']);
+    assert.strictEqual(runtime.verifyRunning(c.id), false);
+    assert.strictEqual(runtime.progressView(c.id).criteria[0].state, 'met');
+    assert.strictEqual(runtime.budget(c.id).status().usd.spent, 0.55);
+    assert.strictEqual(await git.isDirty(c.dir), false);
+    assert.strictEqual(runtime.turns.size, 0);
+  });
+
+  it('a verify call that fails leaves the wake-up acted, committed and unlocked', async () => {
+    const { runtime, clock, calls } = harness({
+      judge: [
+        { type: 'tool_use', toolCalls: [{ toolName: 'Ledger', toolUseId: 't1', parameters: assertFact }] },
+        { type: 'text', content: 'Recorded the closing.' },
+        () => { throw Object.assign(new Error('503 Service Unavailable'), { status: 503 }); }
+      ]
+    });
+    const c = await activeCase(runtime);
+    const id = dueWakeup(runtime, c, clock);
+    assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, ran: 1 });
+    assert.strictEqual(calls.judge, 3);
+    assert.deepStrictEqual(wakeupJournals(c), [`# Wake-up ${id}\n\nRecorded the closing.\n`]);
+    assert.deepStrictEqual(verificationJournals(c), ['## Verification (written by King Louie)\n- Verify pass: no usable verdict (the model call failed).\n']);
+    assert.strictEqual(runtime.progressView(c.id).criteria[0].state, 'unmet');
+    assert.strictEqual(runtime.wakeups(c.id).list().some((w) => w.id === id), false);
+    assert.strictEqual(fs.existsSync(path.join(c.dir, '.kl', 'lock')), false);
+    assert.strictEqual(await git.isDirty(c.dir), false);
+  });
+
+  it('shutdown during the verify call ends the wake-up without a verdict', async () => {
+    let runtimeRef = null;
+    const h = harness({
+      judge: [
+        { type: 'tool_use', toolCalls: [{ toolName: 'Ledger', toolUseId: 't1', parameters: assertFact }] },
+        { type: 'text', content: 'Recorded the closing.' },
+        // create-core's shutdown: no new wake-up, and the running one is told to stop.
+        () => {
+          runtimeRef.beginShutdown();
+          runtimeRef.abortUnattended();
+          return { type: 'text', content: '{"criteria": [{"id": "sc-001", "status": "met", "evidence": ["f-0001"], "note": ""}]}' };
+        }
+      ]
+    });
+    runtimeRef = h.runtime;
+    const c = await activeCase(h.runtime);
+    dueWakeup(h.runtime, c, h.clock);
+    assert.deepStrictEqual(await h.runtime.runDueWakeups(h.clock.now), { ...zero, ran: 1 });
+    // The pass was out, after the turn, when shutdown began: nothing landed.
+    assert.strictEqual(h.runtime.verifyRunning(c.id), false);
+    assert.deepStrictEqual(verificationJournals(c), []);
+    assert.deepStrictEqual(h.runtime.verification(c.id).read().records, []);
+    assert.strictEqual(h.runtime.progressView(c.id).criteria[0].state, 'unmet');
+    assert.strictEqual(h.runtime.turns.size, 0);
+    assert.strictEqual(fs.existsSync(path.join(c.dir, '.kl', 'lock')), false);
+    assert.strictEqual(await git.isDirty(c.dir), false);
   });
 });

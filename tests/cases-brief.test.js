@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const { CaseStore } = require('../src/cases/case-store');
 const { Brief, BriefError } = require('../src/cases/brief');
+const { ScopeStore } = require('../src/cases/scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -55,6 +56,55 @@ describe('Brief', () => {
     b.update('why', 'Need cash to repair the family house', { provenance: 'user' });
     b.append('successCriteria', 'Closed within 90 days', { provenance: 'model' });
     b.completeGating();
+    assert.strictEqual(b.isGatingComplete(), true);
+  });
+
+  // Cases stage 8 (R-C8-2): with a scope view, a criterion counts for gating
+  // only once the owner confirmed it.
+  const gated = async () => {
+    const b = await newBrief();
+    b.update('why', 'Need cash to repair the family house', { provenance: 'user' });
+    b.append('successCriteria', 'Closed within 90 days', { provenance: 'model' });
+    const scope = new ScopeStore(b.dir);
+    return { b, scope, view: () => scope.view(b.read().data) };
+  };
+
+  it('gating waits for one confirmed criterion', async () => {
+    const { b, scope, view } = await gated();
+    assert.deepStrictEqual(b.missingForGating({ scopeView: view() }), ['successCriteria']);
+    assert.throws(() => b.completeGating({ scopeView: view() }), (err) => err instanceof BriefError
+      && err.message === 'Gating pass incomplete; still missing: successCriteria (no criterion is confirmed by the owner; ask with Progress askScope).');
+    assert.strictEqual(b.isGatingComplete(), false);
+    const row = scope.reconcile(b.read().data).criteria[0];
+    scope.confirm([row.id], { hashes: { [row.id]: row.hash }, by: 'owner-action', channel: 'in-app' });
+    assert.deepStrictEqual(b.missingForGating({ scopeView: view() }), []);
+    b.completeGating({ scopeView: view() });
+    assert.strictEqual(b.isGatingComplete(), true);
+  });
+
+  it('a proposed criterion beside a confirmed one does not hold gating back', async () => {
+    const { b, scope, view } = await gated();
+    const row = scope.reconcile(b.read().data).criteria[0];
+    scope.confirm([row.id], { hashes: { [row.id]: row.hash }, by: 'owner-action' });
+    b.append('successCriteria', 'Three written offers', { provenance: 'model' });
+    assert.deepStrictEqual(view().criteria.map((r) => r.state), ['confirmed', 'proposed']);
+    assert.deepStrictEqual(b.missingForGating({ scopeView: view() }), []);
+    b.completeGating({ scopeView: view() });
+    assert.strictEqual(b.isGatingComplete(), true);
+  });
+
+  it('a brief already gating.complete stays complete', async () => {
+    const { b, view } = await gated();
+    b.completeGating();
+    const completedAt = b.read().data.gating.completedAt;
+    assert.strictEqual(view().criteria[0].state, 'proposed');
+    // No criterion is confirmed: the rule is reported, and the brief is
+    // neither refused nor cleared.
+    assert.deepStrictEqual(b.missingForGating({ scopeView: view() }), ['successCriteria']);
+    b.completeGating({ scopeView: view() });
+    assert.strictEqual(b.isGatingComplete(), true);
+    assert.strictEqual(b.read().data.gating.completedAt, completedAt);
+    b.update('objective', 'Sell the Lakeside lot', { provenance: 'model' });
     assert.strictEqual(b.isGatingComplete(), true);
   });
 

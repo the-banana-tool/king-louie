@@ -8,6 +8,7 @@ const git = require('../src/cases/git');
 const { addSink } = require('../src/logging');
 const { CaseRuntime, CaseBusyError } = require('../src/cases');
 const { StatusError } = require('../src/cases/status');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -36,6 +37,7 @@ async function activeCase(rt, title = 'Lakeside lot') {
   const info = await rt.createCase({ title, objective: 'Convert the lot to cash', force: true });
   rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
   rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+  confirmAll(rt, info.id);
   rt.completeGating(info.id);
   return rt.getCase(info.id);
 }
@@ -85,6 +87,7 @@ describe('setStatus', () => {
     rt.budget(draft.id).charge('usd', 1);
     rt.brief(draft.id).update('why', 'Need the cash', { provenance: 'user' });
     rt.brief(draft.id).append('successCriteria', 'Sold', { provenance: 'model' });
+    confirmAll(rt, draft.id);
     assert.throws(() => rt.completeGating(draft.id), exhausted);
     assert.strictEqual(rt.getCase(draft.id).status, 'draft');
 

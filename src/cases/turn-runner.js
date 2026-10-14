@@ -7,8 +7,9 @@ const {
   CASE_TOOL_NAMES, WAKEUP_BASE_TOOLS, shapeToolDefinitions, buildCaseSystemPrompt, casePrompter
 } = require('./chat-integration');
 const { NO_RETRY } = require('./roles');
+const { toolResultRow } = require('./verify/evidence');
 const { createLogger } = require('../logging');
-const UsageTracker = require('../tracking/usage-tracker');
+const { recordOneShotUsage, textOf } = require('./one-shot-usage');
 
 const log = createLogger('cases/wakeups');
 
@@ -30,12 +31,6 @@ const WAKEUP_PROMPT = [
 
 const oneLine = (s, max = 200) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 
-function textOf(reply) {
-  if (typeof reply === 'string') return reply;
-  if (reply && typeof reply.content === 'string') return reply.content;
-  return '';
-}
-
 function parseOrient(text) {
   const s = String(text || '');
   const start = s.indexOf('{');
@@ -48,20 +43,6 @@ function parseOrient(text) {
   } catch {
     return null;
   }
-}
-
-// The orient call goes through sendMessageWithTools (see the comment at its
-// call site) precisely so it reports metrics; a bare-text reply (no metrics
-// object at all) still charges nothing rather than guessing at a cost. The
-// routed case provider stamps the call's model role and pricingUsage on the
-// metrics, and eventFromMetrics keeps both, so UsageTracker files orient and
-// classify under utility and can reprice them (final review I3).
-function recordOneShotUsage(runtime, turn, reply) {
-  const m = reply && typeof reply === 'object' ? reply.llmMetrics : null;
-  if (!m) return;
-  const tracker = typeof runtime.host?.getUsageTracker === 'function' ? runtime.host.getUsageTracker() : null;
-  if (!tracker || typeof tracker.record !== 'function') return;
-  runtime.usageHook(turn)(tracker.record(UsageTracker.eventFromMetrics(m)));
 }
 
 const dueLines = (due) => due.map((w) => `- ${w.id} ${w.kind}${w.payload?.key ? ` (${w.payload.key})` : ''}, due ${w.nextAt}`);
@@ -186,14 +167,26 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
   // failure before `due`/`ids` are recomputed below (or the outer catch
   // itself) must still have something to mark failed.
   let ids = dueIds;
+  // Cases stage 8 (R-C8-9): the results of this turn's case-tool calls, for
+  // the close of a turn that acted.
+  const caseToolResults = [];
   const close = async (outcome, journal, summary) => {
     if (closed) return { outcome };
     closed = true;
     try {
-      await runtime.endTurn(turn, { summary, journal, journalKind: 'wakeup' });
+      // Only a wake-up that acted is verified (spec §6.9); a quiet, skipped
+      // or failed one passes neither field.
+      const progress = outcome === 'acted' ? { evidence: { toolResults: caseToolResults }, verify: true } : {};
+      await runtime.endTurn(turn, { summary, journal, journalKind: 'wakeup', ...progress });
     } catch (err) {
       log.warn(`Wake-up commit for case ${caseId} failed: ${err.message}`);
     }
+    // The verify pass runs after the turn released the case (R-C8-11), as
+    // it does after an owner turn. Nobody waits for a wake-up, so it waits
+    // for its own pass: the sweep stays one case at a time, and shutdown,
+    // which awaits the sweep, awaits the pass with it (beginShutdown stops
+    // the call). An owner turn that starts meanwhile still takes the case.
+    if (outcome === 'acted' && typeof runtime.verifyIdle === 'function') await runtime.verifyIdle(turn.caseId);
     return { outcome };
   };
 
@@ -274,6 +267,12 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
         // The turn's frozen models (spec 2026-09-27 §6.6).
         turnModels: turn.models || null
       });
+      if (executor && typeof executor.on === 'function') {
+        executor.on('postExecute', ({ toolName, parameters, result }) => {
+          const row = toolResultRow(toolName, parameters, result);
+          if (row) caseToolResults.push(row);
+        });
+      }
       await runtime.ensureRoleTested(turn.caseId, 'judge', { turn });
       const Loop = host.AgentLoop;
       const loop = new Loop(runtime.routedProvider(turn, { role: 'judge' }), executor, {
@@ -329,8 +328,9 @@ async function runDueWakeups(runtime, now = runtime.now()) {
     // handles whichever turn is already running.
     if (runtime.closing) break;
     const meta = ordered[i];
-    // An owner is mid-turn on this case in this process: leave it alone.
-    if (runtime.turns.has(meta.id)) {
+    // An owner is mid-turn on this case in this process, or the verify pass
+    // of its last turn is still out: leave it alone.
+    if (runtime.turns.has(meta.id) || (typeof runtime.verifyRunning === 'function' && runtime.verifyRunning(meta.id))) {
       counts.busy += 1;
       continue;
     }

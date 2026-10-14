@@ -587,7 +587,8 @@ class DetourRouter {
       let created = d.status === 'failed' && d.last?.targetCaseId ? rt.store.get(d.last.targetCaseId) : null;
       if (!created) {
         try {
-          created = await rt.createCase({ title: newTitle, type: p.newCase.type, objective: newObjective, force });
+          // Cases stage 8: the router wrote this objective; nobody confirmed it.
+          created = await rt.createCase({ title: newTitle, type: p.newCase.type, objective: newObjective, objectiveBy: 'detour', force });
         } catch (err) {
           if (err && err.code === 'SIMILAR_CASES') {
             const similarTo = { caseIds: err.similar.map((s) => s.caseId), newCase: { ...p.newCase, title: newTitle, objective: newObjective } };
@@ -598,7 +599,9 @@ class DetourRouter {
       }
       onCreated(created.id);
       await rt.systemAction(created.id, `detour ${detourId} from ${meta.slug}`, async () => {
-        rt.brief(created.id).update('successCriteria', p.newCase.successCriteria, { provenance: 'model' });
+        // Proposed, origin `detour`: the owner chose where the work goes, not
+        // what counts as done (cases stage 8 spec §6.1).
+        rt.writeScope(created.id, { field: 'successCriteria', value: p.newCase.successCriteria, origin: 'detour', addedBy: 'detour' });
         rt.brief(created.id).writeBody(p.newCase.body);
         rt.records(created.id).writeJournal('detour', `# Spawned by detour ${detourId} from "${meta.title}"\n\nSummary: ${p.summary}\nReason: ${p.reason || '—'}${routedFrom}`, this.now());
         rt.addRelation(created.id, { id: meta.id, relation: 'related', note: p.summary, detour: detourId });

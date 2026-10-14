@@ -16,9 +16,9 @@ initializeTools();
 function harness({
   caseId = 'case-1', beginError = null, inferenceErrorOnCall = 0, loopWait = null, loopError = null, hookResult = null,
   loopContent = 'Answer text', contextAssembler = null, providerHasTools = true, streamMessageResult = null, usageTracker = null,
-  reportProviderError = null
+  reportProviderError = null, toolEvents = [], caseRuntime = null, onRun = null
 } = {}) {
-  const calls = { begin: [], end: [], executorOptions: null, run: null, snapshots: 0, ownerHooks: [], routed: [], usage: [] };
+  const calls = { begin: [], end: [], executorOptions: null, run: null, snapshots: 0, ownerHooks: [], routed: [], usage: [], listeners: {}, sent: [] };
   const chat = { id: 'chat-1', title: 'Case chat', caseId, messages: [{ id: 'm0', sender: 'assistant', text: 'How can I help you?' }] };
   const runtime = {
     beginTurn: async (id, opts) => {
@@ -51,6 +51,9 @@ function harness({
 
     async run(messages, tools, options) {
       calls.run = { messages, tools, options };
+      // What the executor would emit while the loop runs its tool calls.
+      for (const ev of toolEvents) for (const fn of calls.listeners.postExecute || []) fn(ev);
+      if (onRun) await onRun(calls);
       if (loopWait) await loopWait;
       if (loopError) throw loopError;
       return { content: loopContent, llm: { calls: [], totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 } } };
@@ -84,21 +87,22 @@ function harness({
     buildRuntimeSystemPrompt: () => 'BASE-PROMPT',
     createToolExecutorWithApprovals: async (_event, _env, _req, opts) => {
       calls.executorOptions = opts;
-      return { on() {}, execute: async () => ({ ok: true }) };
+      return { on(name, fn) { (calls.listeners[name] = calls.listeners[name] || []).push(fn); }, execute: async () => ({ ok: true }) };
     },
     toolRegistry,
     withNotificationTiming: async (_label, fn) => fn(),
     AgentLoop: FakeLoop,
     getSettings: () => ({}),
     getVoiceSettings: () => ({ enabled: false }),
-    getCaseRuntime: () => runtime,
+    // A real CaseRuntime when the test brings one; the stub above otherwise.
+    getCaseRuntime: () => caseRuntime || runtime,
     createId: () => `id-${Math.random().toString(16).slice(2)}`,
     ...(reportProviderError ? { reportProviderError } : {})
   };
   const context = new Proxy(overrides, { get: (target, key) => (key in target ? target[key] : () => null) });
   const handlers = new Map();
   registerChatHandlers({ handle: (channel, fn) => handlers.set(channel, fn), on: () => {} }, context);
-  const event = { sender: { send() {}, isDestroyed: () => false } };
+  const event = { sender: { send(channel, payload) { calls.sent.push([channel, payload]); }, isDestroyed: () => false } };
   const send = (payload = {}) => handlers.get(IPC.CHAT_SEND_MESSAGE)(event, { chatId: 'chat-1', message: 'What should I do next?', ...payload });
   const stop = () => handlers.get(IPC.CHAT_STOP_RESPONSE)(event, { chatId: 'chat-1' });
   return { calls, send, stop, chat };
@@ -426,5 +430,124 @@ describe('write guard: playbooks (cases stage 6)', () => {
     assert.strictEqual(pbFs.existsSync(pbPath.join(dir, '.gitmodules')), false);
     assert.strictEqual(pbFs.existsSync(pbPath.join(dir, 'playbooks')), false);
     assert.strictEqual(pbFs.existsSync(pbPath.join(dir, '.git')), false);
+  });
+});
+
+describe('chat:sendMessage case turn, stage 8: what the close receives', () => {
+  const toolEvents = [
+    { toolName: 'Ledger', parameters: { action: 'assert' }, result: { ok: true, fact: { id: 'f-0001' } } },
+    { toolName: 'Bash', parameters: { command: 'ls' }, result: { ok: true, output: 'CANARY' } },
+    { toolName: 'WebFetch', parameters: { url: 'https://records.example.org/1' }, result: { ok: true, content: 'CANARY' } },
+    { toolName: 'Decide', parameters: { decision: 'Accept the offer' }, result: { ok: false, error: 'Re-orientation is required first.' } }
+  ];
+
+  it('the normal exit passes verify and the case-tool results of this turn, and nothing from another tool', async () => {
+    const { calls, send } = harness({ toolEvents });
+    assert.strictEqual((await send()).ok, true);
+    assert.strictEqual(calls.end.length, 1);
+    assert.strictEqual(calls.end[0].verify, true);
+    assert.deepStrictEqual(calls.end[0].evidence, {
+      toolResults: [
+        { tool: 'Ledger', action: 'assert', ok: true, text: '{"ok":true,"fact":{"id":"f-0001"}}' },
+        { tool: 'Decide', action: null, ok: false, text: '{"ok":false,"error":"Re-orientation is required first."}' }
+      ]
+    });
+    assert.ok(!JSON.stringify(calls.end[0].evidence).includes('CANARY'));
+    // The reply is the journal, as before; it is not in the evidence.
+    assert.strictEqual(calls.end[0].journal, 'Answer text');
+    assert.ok(!JSON.stringify(calls.end[0].evidence).includes('Answer text'));
+  });
+
+  // Owner ruling R-C8-11 (2026-10-13): the verify pass runs after the reply.
+  // A real CaseRuntime behind the send path, and a verify model that does
+  // not answer until the test lets it.
+  it('the reply completes before the verify pass; the criteria states update when the pass lands', async () => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const { CaseRuntime } = require('../src/cases');
+    const { VERIFY_SYSTEM } = require('../src/cases/verify/judge');
+    const { withCaseProfile } = require('./helpers/profile-settings');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-chat-verify-'));
+    try {
+      let answer;
+      const gate = new Promise((resolve) => { answer = resolve; });
+      const verifyCalls = [];
+      const notes = [];
+      const router = {
+        async routeTargets(_targets, messages, opts) {
+          if (opts.systemPrompt !== VERIFY_SYSTEM) return { type: 'text', content: '{}' };
+          verifyCalls.push(messages);
+          return gate;
+        }
+      };
+      const rt = new CaseRuntime({
+        root,
+        getSettings: () => withCaseProfile({ cases: { timeZone: 'UTC' } }),
+        host: { inferenceRouter: router, notify: (name, payload) => notes.push([name, payload]) }
+      });
+      const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot', objectiveBy: 'owner' });
+      rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
+      await rt.applyScopeAction(info.id, { action: 'add', text: 'Signed contract at or above the floor', by: 'owner-action' });
+      rt.completeGating(info.id);
+      const state = () => rt.progressView(info.id).criteria[0].state;
+      let fact;
+      // The turn records a sourced fact, as a Ledger call would.
+      const onRun = () => {
+        fact = rt.ledger(info.id).assert({
+          stmt: 'The contract was signed at 81,000', subject: 'contract', attr: 'signed', value: 81000,
+          source: { kind: 'url', ref: 'https://records.example.org/1' }, addedBy: rt.turns.get(info.id).turnId
+        });
+      };
+      const { calls, send } = harness({ caseId: info.id, caseRuntime: rt, onRun });
+      const result = await send();
+      assert.strictEqual(result.ok, true, JSON.stringify(result));
+      // The reply is complete and the case is free while the pass is still out.
+      const complete = calls.sent.filter(([channel]) => channel === 'chat:messageComplete');
+      assert.deepStrictEqual(complete.map(([, p]) => [p.message, p.stopped]), [['Answer text', undefined]]);
+      assert.strictEqual(rt.runningTurn(info.id), null);
+      assert.strictEqual(fs.existsSync(path.join(info.dir, '.kl', 'lock')), false);
+      assert.strictEqual(rt.verifyRunning(info.id), true);
+      assert.strictEqual(state(), 'unmet');
+      const progressNotes = () => notes.filter(([name, p]) => name === 'case:changed' && p.what === 'progress' && p.caseId === info.id).length;
+      const before = progressNotes();
+      await new Promise((r) => setTimeout(r, 10));
+      assert.strictEqual(verifyCalls.length, 1);
+      assert.ok(!JSON.stringify(verifyCalls[0]).includes('Answer text'), 'the reply is not given to the pass');
+      answer({ type: 'text', content: JSON.stringify({ criteria: [{ id: 'sc-001', status: 'met', evidence: [fact.id], note: 'Signed.' }] }) });
+      await rt.verifyIdle(info.id);
+      assert.strictEqual(state(), 'met');
+      assert.strictEqual(progressNotes(), before + 1);
+      rt.releaseAll();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a stopped turn passes no verify', async () => {
+    let release;
+    const loopWait = new Promise((r) => { release = r; });
+    const { calls, send, stop } = harness({ toolEvents, loopWait });
+    const sending = send();
+    while (!calls.run) await new Promise((r) => setImmediate(r));
+    assert.strictEqual((await stop()).ok, true);
+    release();
+    await sending;
+    assert.strictEqual(calls.end.length, 1);
+    assert.match(calls.end[0].summary, /^turn stopped by owner: /);
+    assert.strictEqual(calls.end[0].verify, undefined);
+    assert.strictEqual(calls.end[0].evidence, undefined);
+  });
+
+  it('a blocked turn and a failed turn pass no verify', async () => {
+    const blocked = harness({ hookResult: { action: 'deny', message: 'not right now' } });
+    await blocked.send();
+    const failed = harness({ toolEvents, loopError: new Error('provider exploded') });
+    await failed.send();
+    for (const h of [blocked, failed]) {
+      assert.strictEqual(h.calls.end.length, 1);
+      assert.strictEqual(h.calls.end[0].verify, undefined);
+      assert.strictEqual(h.calls.end[0].evidence, undefined);
+    }
   });
 });

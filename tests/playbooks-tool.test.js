@@ -13,6 +13,7 @@ const { CASE_TOOL_NAMES } = require('../src/cases/chat-integration');
 const { PlaybookTool } = require('../src/tools/builtin/playbook-tool');
 const { writePackage, STEPS_MD, BRIEF_RULES_MD, PLAYBOOK_YAML } = require('./helpers/playbook-fixture');
 const { outsideFrames, frameProblems } = require('./helpers/frame-check');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -34,6 +35,7 @@ async function world({ packages = { 'land-sale': {} }, gate = true } = {}) {
     for (const q of rt.questions(info.id).open()) {
       await rt.answerQuestion(info.id, q.id, q.options?.length ? { optionId: q.options[0].id } : { text: '250000' });
     }
+    confirmAll(rt, info.id);
     rt.completeGating(info.id);
   }
   const opts = { caseContext: { caseId: info.id, runtime: rt, turnId: 'turn-7' } };

@@ -84,6 +84,21 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
     for (const ch of caseChannels) assert.strictEqual(classifyChannel(ch), 'proxy', ch);
   });
 
+  // Cases stage 8: progress, the owner's scope actions and "Check now" run
+  // on the service when the desktop is attached. They ride the case domain.
+  it('proxies the stage-8 progress channels, each with the default timeout', () => {
+    assert.deepStrictEqual([IPC.CASE_PROGRESS, IPC.CASE_CONFIRM_SCOPE, IPC.CASE_VERIFY_NOW], ['case:progress', 'case:confirmScope', 'case:verifyNow']);
+    for (const ch of ['case:progress', 'case:confirmScope', 'case:verifyNow']) {
+      assert.strictEqual(classifyChannel(ch), 'proxy', ch);
+      assert.strictEqual(isTimeoutExempt(ch), false, ch);
+      assert.strictEqual(channelTimeoutMs(ch, 120000), 120000, ch);
+    }
+    assert.deepStrictEqual(servedChannels({ handle: ['case:verifyNow', 'case:progress', 'case:confirmScope'] }).handle, ['case:verifyNow', 'case:progress', 'case:confirmScope']);
+    // The check command (R-C8-3): named on the service, under its admin's policy.
+    assert.strictEqual(IPC.CASE_SET_CHECK, 'case:setCheck');
+    assert.strictEqual(classifyChannel('case:setCheck'), 'proxy');
+  });
+
   it('lists the proxied domains', () => {
     assert.deepStrictEqual([...PROXIED_DOMAINS], ['chat', 'settings', 'case', 'cron', 'memory', 'tool', 'usage', 'checkpoint', 'canvas', 'executors', 'contact', 'contactPolicy', 'presence', 'models', 'history']);
   });
