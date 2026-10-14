@@ -104,6 +104,18 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - *The confirmation's `channel` is always `in-app-chat`*, as the task says; only a chat with owner messages can pass the quote check.
 - *An existing test changed* (R-C8-2 and spec §10): `cases-tools.test.js` › "Brief reads, refuses owner-only fields from the model, journals updates and completes gating" appended a criterion with no quote and completed gating; it now asserts that this is refused and completes gating with a criterion appended from the owner's quoted words.
 
+**Task 6 (ready to close).**
+
+- *`pendingProposals` was not moved.* `src/cases/` may not require `src/mcp/`, so `readiness.js` reads the same records the same way (`listRecords` from `src/cases/ingest/files.js`, a proposal with no `review` object counts), and `src/mcp/case-tools.js` is unchanged.
+- *An item also has `note`* (`null`, or fixed words and a count): `branch-merged` uses it for `2 other open PRs are not counted.`, on an `ok` item too. `ITEM_IDS` (the twelve ids, in the spec's order) is exported.
+- *`criteria-met` is `n/a` when no criterion is confirmed* (the spec's "every confirmed criterion is met" would read as `ok` for none); `criteria-confirmed` is the open item then.
+- *Ids in a `fix` come from file names and the stores' own patterns*, never from what a file says of itself: a job's and an envelope's id is its file name; a criterion, fact, question, detour and plan id is shown only when it matches its pattern, and a PR number only when it is a positive integer. When one cannot be shown the line gives the count instead (`2 PRs from this branch are still open.`).
+- *Fail closed on what cannot be read.* A job file that is not an object, or whose `state` is not a terminal one, is open. An envelope is closed only in a status the store knows other than `requested` and `active`; anything else counts as active. A `plan.json` that is not an object is `unknown`; a plan that is not settled with no unfinished step reads `Case: the plan is not settled.` Jobs are read with `JobStore` from the case's files, with or without an executor registry.
+- *More fixed wordings than the spec's table*: no objective at all (`Owner: give the case an objective in the case panel.`), no criterion at all (`Owner: add or confirm a success criterion in the case panel.`), a requested envelope (`env-07 waits for your approval. Approve or reject it.`), a detour with no routing question yet (`Owner: 1 detour waits to be routed (d-0002).`), an unknown repository state (`The repository state is not known yet. It is read at the start of a turn.`), and an item whose read threw (`King Louie could not read this; the log says why.`).
+- *`detours-settled`* counts detours in `proposed`, `held` and `awaiting-mapping`, and a `pending:` blocker in `related` that no such detour accounts for; a detour list that reports an error is `unknown`.
+- *`tree-clean` and `branch-merged`* are also `unknown` when `dirty` is not a number, and when the snapshot has no branch (nothing to match a PR's head against).
+- *`CaseRuntime.progressView(id, { scope, file })`* is the computed view on its own (what `closeReadiness` reads when no view is handed in). `progress` of a closed case with a frozen record returns `{ scope: null, view: null, readiness: null, summary: <the frozen one>, abandoned, closed: { …, frozen: true } }`; a closed case with no frozen record (closed before this stage) has `closed: null` and the view computed from what is there.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.

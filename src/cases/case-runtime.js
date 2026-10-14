@@ -13,6 +13,11 @@ const { FactLedger } = require('./ledger');
 const { Brief, BriefError } = require('./brief');
 const { ScopeStore, ScopeError, textHash, validateCriterionText, ORIGINS, CONFIRMING_ORIGINS } = require('./scope');
 const { CaseRecords } = require('./records');
+const { AbandonedStore } = require('./abandoned');
+const { VerificationStore } = require('./verify/store');
+const { progressView, summaryLine } = require('./verify/status');
+const { resolveEvidence } = require('./verify/evidence');
+const { closeReadiness } = require('./verify/readiness');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
 const { Budget, CATEGORIES, PER_DAY } = require('./budget');
@@ -531,6 +536,69 @@ class CaseRuntime {
       this._notify('case:changed', { caseId: meta.id, what: 'progress' });
     }
     return this.scopeView(meta.id);
+  }
+
+  // ---- Progress (cases stage 8 spec §6.2 to §6.4) ----
+
+  abandoned(id) {
+    return new AbandonedStore(this.getCase(id).dir, { now: () => this.now() });
+  }
+
+  verification(id) {
+    return new VerificationStore(this.getCase(id).dir, { now: () => this.now() });
+  }
+
+  // Each criterion with its state as the record says it now (spec §6.3):
+  // recomputed on every call from the verification records, the ledger and
+  // the case-type snapshot. Nothing stored is taken as a state. Reads only.
+  progressView(id, { scope = null, file = null } = {}) {
+    const meta = this.getCase(id);
+    const { facts } = this.ledger(meta.id).view();
+    let snapshot = null;
+    try {
+      snapshot = this.caseTypeSnapshot(meta.id);
+    } catch (err) {
+      log.warn(`Progress of ${meta.slug}: the case-type snapshot is unavailable: ${err.message}`);
+    }
+    // No check has run in this stage's first part: `checks` and
+    // `newestCheck` are filled in with the check command.
+    const ctx = { facts, checks: null, snapshot };
+    return progressView({
+      scopeView: scope || this.scopeView(meta.id),
+      file: file || this.verification(meta.id).read(),
+      resolve: (evidenceId) => resolveEvidence(evidenceId, ctx),
+      newestCheck: null
+    });
+  }
+
+  // The ready-to-close list (spec §6.4). Reads only.
+  closeReadiness(id, { view = null } = {}) {
+    return closeReadiness(this, id, { view });
+  }
+
+  // What the panel, the Progress tool and MCP all read:
+  // { scope, view, readiness, summary, abandoned, closed }. Never writes.
+  // A done or abandoned case that was frozen at its close gets that record
+  // back as `closed` ({ frozen: true, at, status, summary, criteria,
+  // readiness }) and nothing is computed; a case closed before progress was
+  // tracked has `closed: null`.
+  progress(id) {
+    const meta = this.getCase(id);
+    const file = this.verification(meta.id).read();
+    let abandoned = [];
+    try {
+      abandoned = this.abandoned(meta.id).active();
+    } catch (err) {
+      log.warn(`Progress of ${meta.slug}: the abandoned approaches are unavailable: ${err.message}`);
+    }
+    if ((meta.status === 'done' || meta.status === 'abandoned') && file.closed) {
+      const closed = { ...file.closed, frozen: true };
+      return { scope: null, view: null, readiness: null, summary: typeof closed.summary === 'string' ? closed.summary : null, abandoned, closed };
+    }
+    const scope = this.scopeView(meta.id);
+    const view = this.progressView(meta.id, { scope, file });
+    const readiness = this.closeReadiness(meta.id, { view });
+    return { scope, view, readiness, summary: summaryLine(view, readiness), abandoned, closed: null };
   }
 
   // beginTurn's step (spec §6.9, §10): the scope record is written from
