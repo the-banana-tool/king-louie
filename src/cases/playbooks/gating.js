@@ -5,6 +5,7 @@
 // never satisfies an owner question.
 const { norm } = require('../jsonl');
 const { BriefError } = require('../brief');
+const { textHash } = require('../scope');
 const { caseTypes } = require('./case-types-bridge');
 // Third-party text folded to one line and capped (shared with the frame).
 const { oneLine, neutralize } = require('./frame');
@@ -214,7 +215,10 @@ function answerValue(record) {
 // "user": the answer came through a question record. Only the gating set of
 // fields, and only a gating record the owner answered: a playbook names the
 // field, it never supplies the value.
-function applyToBrief(brief, field, record) {
+// Cases stage 8 (spec §6.1): with `{ runtime, caseId }`, a success criterion
+// goes through runtime.writeScope and is recorded confirmed, origin
+// `gating-answer`, with the answer's fact id.
+function applyToBrief(brief, field, record, { runtime = null, caseId = null } = {}) {
   if (record?.payload?.type !== 'gating') throw new Error('the record is not a gating record');
   // Every write below is provenance "user", which Brief checks against its
   // own isUserOnly (type fields included). That claim rests on this check.
@@ -225,6 +229,21 @@ function applyToBrief(brief, field, record) {
   const question = oneLine(neutralize(String(record.text || '')).replace(/^\[[^\]]*\]\s*/, ''), MAX_TEXT);
   if (field === 'hardConstraints') {
     brief.append('hardConstraints', `${question}: ${answer}`, { provenance: 'user' });
+  } else if (field === 'successCriteria' && runtime && typeof runtime.writeScope === 'function' && caseId) {
+    const current = brief.read().data.successCriteria;
+    const list = Array.isArray(current) ? current.filter((v) => typeof v === 'string' && v.trim()) : [];
+    const hash = textHash(answer);
+    const there = list.some((text) => textHash(text) === hash);
+    runtime.writeScope(caseId, {
+      field,
+      value: there ? list : [...list, answer],
+      origin: 'gating-answer',
+      confirmed: { by: 'gating-answer', channel: record.answer.channel || null, factId: record.answer.factId },
+      addedBy: 'gating-answer',
+      // The same words were already there as a proposal: the owner's answer
+      // confirms them.
+      alsoConfirm: [hash]
+    });
   } else if (field === 'alreadyTried' || field === 'successCriteria') {
     brief.append(field, answer, { provenance: 'user' });
   } else if (field === 'why') {
@@ -324,7 +343,7 @@ function syncGating(runtime, caseId, { gatingQuestionsFor = caseTypes().gatingQu
     }
     try {
       brief = brief || runtime.brief(meta.id);
-      applyToBrief(brief, field, { ...r, answer: { ...r.answer, text: String(fact.value ?? ''), optionId: null } });
+      applyToBrief(brief, field, { ...r, answer: { ...r.answer, text: String(fact.value ?? ''), optionId: null } }, { runtime, caseId: meta.id });
       briefApplied.push(r.id);
     } catch (err) {
       notes.push(`${r.id}: the answer was kept as a fact but not written to the brief's ${field} (${err.message}).`);

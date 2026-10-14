@@ -22,6 +22,7 @@ const ToolExecutor = require('../src/execution/tool-executor');
 const { classifyToolCall } = require('../src/execution/safety-policy');
 const { CASE_TOOL_NAMES, WAKEUP_BASE_TOOLS, shapeToolDefinitions } = require('../src/cases/chat-integration');
 const { setLogLevel } = require('../src/logging');
+const { confirmAll } = require('./helpers/case-scope');
 
 setLogLevel('fatal');
 initializeTools();
@@ -428,6 +429,7 @@ describe('answer_question takes the owner\'s quote', () => {
       const info = await rt.createCase({ title, objective, force: true });
       rt.brief(info.id).update('why', 'The owner asked for it', { provenance: 'user' });
       rt.brief(info.id).append('successCriteria', objective, { provenance: 'model' });
+      confirmAll(rt, info.id);
       rt.completeGating(info.id);
       return rt.getCase(info.id);
     };
@@ -451,6 +453,7 @@ describe('answer_question takes the owner\'s quote', () => {
     const info = await rt.createCase({ title: 'Rear door quotes', objective: 'Three written quotes for the rear door', force: true });
     rt.brief(info.id).update('why', 'The owner asked for it', { provenance: 'user' });
     rt.brief(info.id).append('successCriteria', 'Three quotes', { provenance: 'model' });
+    confirmAll(rt, info.id);
     rt.completeGating(info.id);
     const door = rt.getCase(info.id);
     const p = await rt.detours.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand', source: 'detour-tool' });
@@ -617,6 +620,9 @@ describe('create_case', () => {
     const fact = factOf(rt, meta, r.fact_id);
     assert.deepStrictEqual([fact.provenance, fact.subject, fact.attr, fact.value, fact.disclosable], ['user', 'brief', 'objective', 'sell the boat', false]);
     assert.deepStrictEqual([fact.source.kind, fact.source.ref, fact.source.channel, fact.source.quote], ['owner-action', 'create-case', 'in-app-chat', 'start a case to sell the boat']);
+    // Cases stage 8: the objective was held to the owner's quote, so it is confirmed.
+    const objective = rt.scopeView(meta.id).objective;
+    assert.deepStrictEqual([objective.state, objective.origin, objective.confirmed.by], ['confirmed', 'owner-create', 'owner-create']);
   });
 
   it('never forces: a similar open case refuses it on every channel, lists the similar case and says to open the app', async () => {
@@ -1137,5 +1143,130 @@ describe("in King Louie's chat, revoke, cancel, away and create ask first", () =
     const r = await ex.execute('answer_question', { case: lot.id, question_id: q.cadence.id, option_id: 'weekly', quote: 'go with Weekly' });
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.deepStrictEqual(asked, []);
+  });
+});
+
+// Cases stage 8 (spec §6.4, §6.7; R-C8-1, R-C8-2): the scope question is
+// spoken; the proposal to close is pressed.
+describe('answer_question and the progress questions', () => {
+  const { ProgressTool } = require('../src/tools/builtin/case-progress-tool');
+  const src = { kind: 'url', ref: 'https://records.example.org/1' };
+
+  // An active case with one confirmed criterion that is met and two the
+  // model proposed, and the two questions the Progress tool asks about it.
+  async function progressFixture() {
+    const rt = new CaseRuntime({ root: tmp('kl-mgmt-progress-') });
+    const lot = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot', objectiveBy: 'owner' });
+    rt.brief(lot.id).update('why', 'Need the cash', { provenance: 'user' });
+    await rt.applyScopeAction(lot.id, { action: 'add', text: 'Signed contract at or above the floor', by: 'owner-action' });
+    rt.completeGating(lot.id);
+    for (const text of ['Title search is clean', 'Both owners of record have signed']) rt.brief(lot.id).append('successCriteria', text, { provenance: 'model' });
+    const fact = rt.ledger(lot.id).assert({ stmt: 'The contract was signed at 81,000', subject: 'contract', attr: 'signed', value: 81000, source: src });
+    const row = rt.scopeView(lot.id).criteria[0];
+    rt.verification(lot.id).addRecord({ criterion: row.id, criterionHash: row.hash, evidence: [fact.id], note: 'Signed.', turnId: 'turn-0', model: 'example-provider:example-model' });
+    const turn = await rt.beginTurn(lot.id, { turnId: 'turn-1' });
+    const opts = { caseContext: rt.caseContext(turn, { ownerMessages: [] }) };
+    const scope = await ProgressTool.execute({ action: 'askScope' }, opts);
+    const close = await ProgressTool.execute({ action: 'proposeDone', note: 'Signed and recorded.' }, opts);
+    assert.deepStrictEqual([scope.ok, close.ok], [true, true]);
+    await rt.endTurn(turn, { summary: 'asked' });
+    return { rt, lot, scopeId: scope.questionId, closeId: close.questionId };
+  }
+
+  it('answer_question on a close-proposal is refused on every channel with the pressed message', async () => {
+    const { rt, lot, closeId } = await progressFixture();
+    assert.strictEqual(defs.answerClass(rt.questions(lot.id).get(closeId)), 'pressed');
+    for (const channel of ['in-app-chat', 'mcp-stdio', 'mcp-frontdoor']) {
+      for (const option of ['done', 'keep']) {
+        const e = await refusal(handlerFor(rt, channel).call('answer_question', { case: lot.id, question_id: closeId, option_id: option, quote: 'yes mark it done' }, { ownerTurnText: 'Yes mark it done.' }));
+        assert.deepStrictEqual([e.code, e.message], ['not_answerable_here', `not_answerable_here: ${PRESSED_MESSAGE}`], `${channel} ${option}`);
+      }
+    }
+    assert.strictEqual(rt.questions(lot.id).get(closeId).answer, null);
+    assert.strictEqual(rt.getCase(lot.id).status, 'active');
+    const listed = await handlerFor(rt, 'mcp-stdio').call('list_questions', { case: lot.id });
+    assert.deepStrictEqual(Object.fromEntries(listed.map((x) => [x.type, x.answer])), { 'scope-confirm': 'spoken', 'close-proposal': 'pressed' });
+  });
+
+  it("answer_question confirms scope with the owner's quote", async () => {
+    const { rt, lot, scopeId } = await progressFixture();
+    const h = handlerFor(rt, 'in-app-chat');
+    // The quote must be the owner's, and must name the option.
+    const notSaid = await refusal(h.call('answer_question', { case: lot.id, question_id: scopeId, option_id: 'all', quote: 'confirm all of those' }, { ownerTurnText: 'Looks fine to me.' }));
+    assert.strictEqual(notSaid.code, 'quote_not_found');
+    const unnamed = await refusal(h.call('answer_question', { case: lot.id, question_id: scopeId, option_id: 'all', quote: 'those look fine' }, { ownerTurnText: 'Those look fine.' }));
+    assert.strictEqual(unnamed.code, 'option_not_in_quote');
+    assert.deepStrictEqual(rt.scopeView(lot.id).criteria.map((r) => r.state), ['confirmed', 'proposed', 'proposed']);
+
+    const r = await h.call('answer_question', { case: lot.id, question_id: scopeId, option_id: 'all', quote: 'confirm all of those' }, { ownerTurnText: 'Yes, confirm all of those.' });
+    const rows = rt.scopeView(lot.id).criteria;
+    assert.deepStrictEqual(rows.map((x) => x.state), ['confirmed', 'confirmed', 'confirmed']);
+    for (const row of rows.slice(1)) {
+      assert.deepStrictEqual([row.confirmed.by, row.confirmed.channel, row.confirmed.quote, row.confirmed.factId], ['question', 'in-app-chat', 'confirm all of those', r.fact_id]);
+    }
+    const fact = factOf(rt, lot, r.fact_id);
+    assert.deepStrictEqual([fact.provenance, fact.disclosable, fact.source.quote], ['user', false, 'confirm all of those']);
+  });
+
+  it("over MCP the scope answer's quote is recorded, not checked", async () => {
+    const { rt, lot, scopeId } = await progressFixture();
+    await handlerFor(rt, 'mcp-stdio').call('answer_question', { case: lot.id, question_id: scopeId, option_id: 'none', quote: 'drop all of them' });
+    assert.deepStrictEqual(rt.scopeView(lot.id).criteria.map((x) => x.state), ['confirmed']);
+    assert.deepStrictEqual(rt.brief(lot.id).read().data.successCriteria, ['Signed contract at or above the floor']);
+  });
+});
+
+// Cases stage 8 (plan Task 14): progress is read through the management
+// tools under the same case scope (Q27), and nothing here answers a pressed
+// progress question.
+describe('progress through the management tools', () => {
+  const { ProgressTool } = require('../src/tools/builtin/case-progress-tool');
+
+  it('in a case chat open_case gives this case\'s progress, and another case is still refused other_case', async () => {
+    const { rt, lot, shed } = await fixture();
+    const h = handlerFor(rt, 'in-app-chat');
+    const scope = { caseScope: lot.id };
+    const open = await h.call('open_case', { case: lot.id }, scope);
+    assert.strictEqual(open.data.data.progress.frozen, false);
+    assert.deepStrictEqual(open.data.data.progress.objective, { state: 'proposed', origin: 'model' });
+    const listed = await h.call('list_cases', {}, scope);
+    assert.deepStrictEqual(listed.map((r) => [r.id, r.criteria, r.ready]), [[lot.id, { confirmed: 0, met: 0, proposed: 0 }, false]]);
+    const e = await refusal(h.call('open_case', { case: shed.id }, scope));
+    assert.deepStrictEqual([e.code, e.message], ['other_case', `other_case: ${OTHER_CASE_MESSAGE}`]);
+    assert.doesNotMatch(JSON.stringify(e.data || {}), /progress|Build a shed/);
+  });
+
+  it('answer_question refuses a close-proposal and a check-approve record on every channel', async () => {
+    const { rt, lot } = await fixture();
+    const pressed = ['close-proposal', 'check-approve'].map((type) => rt.createQuestion(lot.id, {
+      kind: 'question', urgency: 'normal', text: `A ${type} question.`, options: [{ id: 'done', label: 'Mark done' }, { id: 'approve', label: 'Approve' }],
+      payload: { type, key: type, disclosable: false }
+    }, { charge: false }));
+    for (const channel of CHANNELS) {
+      for (const qq of pressed) {
+        for (const option of ['done', 'approve']) {
+          const e = await refusal(handlerFor(rt, channel).call('answer_question', { case: lot.id, question_id: qq.id, option_id: option, quote: 'yes mark done, approve' }, { ownerTurnText: 'Yes mark done, approve.' }));
+          assert.deepStrictEqual([e.code, e.message], ['not_answerable_here', `not_answerable_here: ${PRESSED_MESSAGE}`], `${channel} ${qq.payload.type}`);
+        }
+      }
+    }
+    for (const qq of pressed) assert.strictEqual(rt.questions(lot.id).get(qq.id).answer, null);
+    assert.strictEqual(rt.getCase(lot.id).status, 'active');
+  });
+
+  it('no management tool takes a state, a status or a criterion: only answer_question reaches a scope question', () => {
+    for (const t of defs.CASE_MCP_TOOLS) {
+      for (const key of Object.keys(t.inputSchema.properties)) {
+        assert.ok(!['state', 'status', 'criterion', 'criteria', 'evidence', 'force', 'verification'].includes(key), `${t.name}.${key}`);
+      }
+    }
+    assert.deepStrictEqual(defs.CASE_MCP_TOOLS.map((t) => t.name), ALL);
+    assert.strictEqual(typeof ProgressTool.execute, 'function');
+    assert.ok(!MANAGEMENT_TOOL_NAMES.includes('Progress'));
+  });
+
+  it('the chat-attach rule still treats open_case and list_cases as carrying case data', () => {
+    const { NO_CASE_DATA } = require('../src/cases/chat-attach');
+    assert.deepStrictEqual([...NO_CASE_DATA], ['get_presence', 'set_away']);
   });
 });

@@ -31,8 +31,9 @@ const CONFIG_FILE = 'service.json';
 // `playbooks` (cases stage 6, ruling T14-admin): the playbook source
 // allowlist and same-major auto-update. `localInference` (local inference
 // stage L1, R-LI-6): which servers count as local, and so which models a
-// private chat may run on.
-const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'executors', 'contact', 'playbooks', 'localInference'];
+// private chat may run on. `caseChecks` (cases stage 8, R-C8-3): whether a
+// software-repo case may run its check command.
+const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'executors', 'contact', 'playbooks', 'localInference', 'caseChecks'];
 const EXECUTOR_KEYS = ['entries', 'packageRoots'];
 const RELAY_DEFAULTS = { phoneListen: { host: '0.0.0.0', port: 8443 }, meshPort: 18795, auditRetentionDays: 365 };
 
@@ -328,6 +329,16 @@ function parseLocalInferenceConfig(raw, file) {
   return { servers };
 }
 
+// Cases stage 8 (R-C8-3): on a service a case runs its check command only
+// when the administrator says so here. Off unless `enabled` is exactly true.
+function parseCaseChecksConfig(raw, file) {
+  if (raw === undefined) return { enabled: false };
+  if (!isPlainObject(raw)) throw new Error(`Invalid ${file}: "caseChecks" must be an object`);
+  rejectUnknownKeys(raw, ['enabled'], 'caseChecks', file);
+  if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') throw new Error(`Invalid ${file}: caseChecks.enabled must be true or false`);
+  return { enabled: raw.enabled === true };
+}
+
 // Cases stage 4 (R55): who the owner is and where to reach them comes only
 // from the admin service.json, never from the service-writable data dir.
 const { validateContactConfig } = require('../cases/contact-settings');
@@ -500,8 +511,9 @@ function loadServiceConfig(dataDir, overrides = {}, {
     executors: validateExecutors(adminCfg.executors, adminFile),
     contact: validateContactConfig(adminCfg.contact, adminFile, { unknownKeyError }),
     playbooks: parsePlaybooksConfig(adminCfg.playbooks, adminFile),
-    localInference: parseLocalInferenceConfig(adminCfg.localInference, adminFile)
+    localInference: parseLocalInferenceConfig(adminCfg.localInference, adminFile),
+    caseChecks: parseCaseChecksConfig(adminCfg.caseChecks, adminFile)
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, parseLocalInferenceConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };
+module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, parseLocalInferenceConfig, parseCaseChecksConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

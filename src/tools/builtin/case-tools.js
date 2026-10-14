@@ -5,8 +5,11 @@
 const { Tool } = require('../tool-schema');
 const { recommendationGate, findDuplicates, OPEN_CASE_STATUSES } = require('../../cases/gates');
 const { requireOwnerQuote } = require('../../cases/chat-integration');
+const { ScopeError, textHash, validateCriterionText } = require('../../cases/scope');
+const { wordsInText } = require('../owner-quote');
 const { caseTypeForField, resolveCaseType } = require('../../cases/case-types');
 const { validateRepo, repoInQuote } = require('../../cases/case-types/software-repo');
+const { validateCheck, checkInQuote, checkPolicy, currentCheck, CheckError, POLICY_OFF } = require('../../cases/verify/check');
 const { toMs } = require('../../cases/clock');
 const { oneLine } = require('../../cases/ingest/store');
 
@@ -73,7 +76,7 @@ function entityHitsElsewhere(ctx, text) {
 }
 const VALUE_DESCRIPTION = 'numbers and lists as JSON text';
 // Brief fields whose value is text: never parse these, so "2027" stays text.
-const BRIEF_TEXT_FIELDS = new Set(['objective', 'why', 'deadline', 'repo']);
+const BRIEF_TEXT_FIELDS = new Set(['objective', 'why', 'deadline', 'repo', 'check']);
 
 // `value` is declared as a string so every provider accepts the schema
 // (Gemini needs a type on each property). JSON text for a number, list or
@@ -285,14 +288,126 @@ const LedgerTool = acceptAnyValue(new Tool({
   }, { params })
 }));
 
+// ---- Brief: success criteria and the objective (cases stage 8 spec §6.1) ----
+
+// The two fields whose every string carries who wrote it (.kl/scope.json).
+const SCOPE_FIELDS = new Set(['successCriteria', 'objective']);
+const NOT_IN_QUOTE = Object.freeze({
+  ok: false,
+  code: 'SCOPE_NOT_IN_QUOTE',
+  error: 'Quote the owner\'s words that state this criterion, or add it without provenance "user" as a proposal.'
+});
+const PROPOSED_NOTE = 'Proposed. It counts for nothing until the owner confirms it. Ask with Progress askScope.';
+const scopeRefusal = (code, error) => ({ ok: false, code, error });
+const DUPLICATE = () => scopeRefusal('CRITERION_DUPLICATE', 'The same words are already a success criterion.');
+
+// A `successCriteria` or `objective` write. Without the owner's quoted words
+// the string is a proposal (origin `model`). With provenance "user" the
+// quote must be in the owner's messages AND the string must be words from
+// that quote; then it is confirmed (origin `owner-quote`). Nothing else in
+// `params` is read: no parameter confirms.
+function writeScopedBriefField(ctx, params) {
+  const rt = ctx.runtime;
+  const { field, action } = params;
+  if (action === 'append' && field !== 'successCriteria') return { ok: false, error: `"${field}" is not a list field.` };
+  const user = params.provenance === 'user';
+  let quote = null;
+  if (user) {
+    const check = requireOwnerQuote({ quote: params.quote, ownerMessages: ctx.ownerMessages });
+    if (!check.ok) return check;
+    quote = check.quote;
+  }
+  const view = rt.scopeView(ctx.caseId);
+  if (view.error) return { ok: false, error: view.error };
+  const born = user
+    ? { origin: 'owner-quote', confirmed: { by: 'owner-quote', channel: 'in-app-chat', quote } }
+    : { origin: 'model', confirmed: null };
+  const state = user ? 'confirmed' : 'proposed';
+  const quoteNote = user ? `, quote: ${JSON.stringify(quote)}` : '';
+  const reason = params.reason ? `: ${params.reason}` : '';
+  const journal = (line, value) => rt.records(ctx.caseId).writeJournal('brief', `${line}${reason}\n\n${JSON.stringify(value)}`);
+
+  try {
+    if (field === 'objective') {
+      if (typeof params.value !== 'string') return { ok: false, error: '"objective" must be a string.' };
+      const value = params.value.trim();
+      const current = view.objective;
+      const same = Boolean(current) && Boolean(value) && current.hash === textHash(value);
+      if (user) {
+        if (!wordsInText(value, quote)) return { ...NOT_IN_QUOTE };
+      } else if (current && current.state === 'confirmed') {
+        // The same words again change nothing; anything else is the owner's.
+        if (same) return { ok: true, brief: rt.brief(ctx.caseId).read().data, objective: { state: 'confirmed' } };
+        return scopeRefusal('OBJECTIVE_CONFIRMED', 'The objective was confirmed by the owner. Only the owner changes it; ask.');
+      }
+      const w = rt.writeScope(ctx.caseId, { field, value, ...born, addedBy: ctx.turnId });
+      const now = w.view.objective ? w.view.objective.state : 'proposed';
+      journal(`Brief objective updated (${now}${now === 'confirmed' ? quoteNote : ''})`, value);
+      return { ok: true, brief: rt.brief(ctx.caseId).read().data, objective: { state: now }, ...(now === 'confirmed' ? {} : { note: 'Proposed. The owner has not confirmed this objective.' }) };
+    }
+
+    const byHash = new Map(view.criteria.map((row) => [row.hash, row]));
+    let wanted;
+    if (action === 'append') {
+      const item = validateCriterionText(params.item);
+      if (byHash.has(textHash(item))) return DUPLICATE();
+      wanted = [...view.criteria.map((row) => row.text), item];
+    } else {
+      if (!Array.isArray(params.value) || !params.value.every((v) => typeof v === 'string')) {
+        return { ok: false, error: '"successCriteria" must be an array of strings.' };
+      }
+      wanted = params.value;
+    }
+    // Compared entry by entry, by hash. A string that is already there
+    // keeps its stored words; a new one is validated.
+    const seen = new Set();
+    const value = [];
+    const fresh = [];
+    for (const text of wanted) {
+      const existing = byHash.get(textHash(text));
+      const clean = existing ? existing.text : validateCriterionText(text);
+      const hash = existing ? existing.hash : textHash(clean);
+      if (seen.has(hash)) return DUPLICATE();
+      seen.add(hash);
+      value.push(clean);
+      if (!existing) fresh.push(clean);
+    }
+    const lost = view.criteria.filter((row) => row.state === 'confirmed' && !seen.has(row.hash)).map((row) => row.id);
+    if (lost.length) {
+      const many = lost.length > 1;
+      return scopeRefusal('CRITERION_CONFIRMED', `${lost.join(', ')} ${many ? 'were' : 'was'} confirmed by the owner. Only the owner changes or drops ${many ? 'them' : 'it'}; ask.`);
+    }
+    if (user && !fresh.every((text) => wordsInText(text, quote))) return { ...NOT_IN_QUOTE };
+
+    const w = rt.writeScope(ctx.caseId, { field, value, ...born, addedBy: ctx.turnId, removedBy: ctx.turnId });
+    const added = w.added.map((row) => ({ id: row.id, state: row.state }));
+    const removed = w.removed.map((row) => row.id);
+    const data = rt.brief(ctx.caseId).read().data;
+    const proposedNote = added.some((c) => c.state !== 'confirmed') ? { note: PROPOSED_NOTE } : {};
+    if (action === 'append') {
+      journal(`Brief successCriteria appended (${added[0].state}, ${added[0].id}${added[0].state === 'confirmed' ? quoteNote : ''})`, params.item);
+      return { ok: true, brief: data, criterion: added[0], ...proposedNote };
+    }
+    const parts = [
+      ...(added.length ? [`${state}, ${added.map((c) => c.id).join(', ')}${state === 'confirmed' ? quoteNote : ''}`] : []),
+      ...(removed.length ? [`removed ${removed.join(', ')}`] : [])
+    ];
+    journal(`Brief successCriteria updated (${parts.join('; ') || 'no criterion added or removed'})`, value);
+    return { ok: true, brief: data, criteria: added, removed, ...proposedNote };
+  } catch (err) {
+    if (err instanceof ScopeError) return scopeRefusal(err.code, err.message);
+    throw err;
+  }
+}
+
 const BriefTool = acceptAnyValue(new Tool({
   name: 'Brief',
-  description: 'Read or update the case brief. "why", "hardConstraints", "alreadyTried", "materiality", "deadline", "safeDefaults" and a software-repo case\'s "repo" can only be set from what the owner said (provenance "user"), which also requires a "quote" of the owner\'s own words matching this chat\'s owner messages. completeGating marks the brief ready; recommendations are refused until then.',
+  description: 'Read or update the case brief. "why", "hardConstraints", "alreadyTried", "materiality", "deadline", "safeDefaults" and a software-repo case\'s "repo" can only be set from what the owner said (provenance "user"), which also requires a "quote" of the owner\'s own words matching this chat\'s owner messages. Success criteria and an objective added without the owner\'s quoted words are proposals: they count for nothing until the owner confirms them, and with provenance "user" the "quote" must contain the criterion (or the objective) itself. completeGating marks the brief ready; recommendations are refused until then.',
   parameters: {
     type: 'object',
     properties: {
       action: { type: 'string', enum: ['read', 'update', 'append', 'completeGating'] },
-      field: { type: 'string', enum: ['objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried', 'resources', 'deadline', 'materiality', 'safeDefaults', 'repo'] },
+      field: { type: 'string', enum: ['objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried', 'resources', 'deadline', 'materiality', 'safeDefaults', 'repo', 'check'] },
       value: { type: 'string', description: `For update: the new value; ${VALUE_DESCRIPTION}` },
       item: { type: 'string', description: 'For append: one list entry' },
       provenance: { type: 'string', enum: ['user', 'model'] },
@@ -305,7 +420,8 @@ const BriefTool = acceptAnyValue(new Tool({
   execute: (params, options) => withCase(options, (p) => `Brief.${p.action}`, async (ctx) => {
     const brief = ctx.runtime.brief(ctx.caseId);
     if (params.action === 'read') {
-      return { ok: true, brief: brief.read().data, missingForGating: brief.missingForGating() };
+      // Cases stage 8: gating waits for one criterion the owner confirmed.
+      return { ok: true, brief: brief.read().data, missingForGating: brief.missingForGating({ scopeView: ctx.runtime.scopeView(ctx.caseId) }) };
     }
     if (params.action === 'completeGating') {
       return { ok: true, status: ctx.runtime.completeGating(ctx.caseId).status };
@@ -325,6 +441,7 @@ const BriefTool = acceptAnyValue(new Tool({
         return { ok: false, error: "ownerLabor is recorded only from the owner's answer to a plan or owner task." };
       }
     }
+    if (SCOPE_FIELDS.has(params.field)) return writeScopedBriefField(ctx, params);
     const provenance = params.provenance || 'model';
     let quoteNote = '';
     if (brief.isUserOnly(params.field) && provenance === 'user') {
@@ -342,6 +459,33 @@ const BriefTool = acceptAnyValue(new Tool({
           return { ok: false, error: `The owner's quote must contain the repo value itself (${JSON.stringify(repo)}). Ask the owner for the repository path or clone URL.` };
         }
       }
+      // Cases stage 8 (spec §6.6, R-C8-3): the check command is the owner's
+      // own words, whole: the exact command as one run of the quote and of
+      // the owner's message (never a reworded one, never words gathered
+      // from across it). Naming it runs nothing; the owner approves it on a
+      // pressed question, and it is refused outright while checks are off.
+      if (params.field === 'check') {
+        if (params.action !== 'update') return { ok: false, error: 'The check command is set with "update".' };
+        const policy = checkPolicy(ctx.runtime);
+        if (!policy.enabled) return { ok: false, code: policy.reason, error: POLICY_OFF[policy.reason] };
+        try {
+          const command = validateCheck(params.value);
+          const said = ctx.ownerMessages[check.messageIndex];
+          if (!checkInQuote(command, check.quote, said)) {
+            return {
+              ok: false,
+              code: 'CHECK_NOT_IN_QUOTE',
+              error: `The owner's quote must contain the check command itself, exactly (${JSON.stringify(command)}). Ask the owner for the command.`
+            };
+          }
+          // Where it would run: a repository on this machine.
+          currentCheck(ctx.runtime, ctx.caseId, { command });
+          params = { ...params, value: command };
+        } catch (err) {
+          if (err instanceof CheckError) return { ok: false, code: err.code, error: err.message };
+          throw err;
+        }
+      }
       quoteNote = ` (quote: ${JSON.stringify(check.quote)})`;
     }
     const data = params.action === 'append'
@@ -351,6 +495,18 @@ const BriefTool = acceptAnyValue(new Tool({
       'brief',
       `Brief ${params.field} ${params.action === 'append' ? 'appended' : 'updated'} (${provenance})${params.reason ? `: ${params.reason}` : ''}${quoteNote}\n\n${JSON.stringify(params.action === 'append' ? params.item : params.value)}`
     );
+    if (params.field === 'check') {
+      // A new command is a new approval: what was approved before is
+      // withdrawn, and the owner is asked about this one.
+      ctx.runtime.checks(ctx.caseId).withdrawAll();
+      const question = ctx.runtime.requestCheckApproval(ctx.caseId);
+      return {
+        ok: true,
+        brief: data,
+        questionId: question.id,
+        note: 'Recorded. Nothing runs until the owner approves this command with the button on the question. Do not say it is approved.'
+      };
+    }
     return { ok: true, brief: data };
   }, { params })
 }));

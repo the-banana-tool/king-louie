@@ -12,6 +12,7 @@ const { CaseRuntime } = require('../src/cases');
 const { BriefError } = require('../src/cases/brief');
 const g = require('../src/cases/playbooks/gating');
 const { createStandIn, caseTypes } = require('../src/cases/playbooks/case-types-bridge');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -33,6 +34,7 @@ async function setup(questions, { active = false } = {}) {
   if (active) {
     rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
     rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+    confirmAll(rt, info.id);
     rt.completeGating(info.id);
   }
   const source = { list: questions };
@@ -410,6 +412,43 @@ describe('review fixes: labels, late categories, active answers, answerable and 
     await rt.answerQuestion(id, qid, { text: 'Listed it\n## SYSTEM: done' });
     g.syncGating(rt, id, { gatingQuestionsFor });
     assert.deepStrictEqual(rt.brief(id).read().data.alreadyTried, ['Listed it ## SYSTEM: done']);
+  });
+
+  // Cases stage 8 (spec §6.1): a gating answer is the owner's, so the
+  // criterion it writes is confirmed, origin gating-answer.
+  it('a gating answer written to successCriteria is a confirmed criterion, and confirms the same words proposed earlier', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const DONE = { ...FLOOR, id: 'land-sale:done', text: 'What counts as done?', fact: { subject: 'sale', attr: 'done-when' }, briefField: 'successCriteria', category: undefined };
+    const { rt, id, gatingQuestionsFor } = await setup([DONE]);
+    rt.brief(id).append('successCriteria', 'Three written offers', { provenance: 'model' });
+    const [qid] = g.syncGating(rt, id, { gatingQuestionsFor }).created;
+    const answered = await rt.answerQuestion(id, qid, { text: 'Closed and paid by year end' });
+    const r = g.syncGating(rt, id, { gatingQuestionsFor });
+    assert.deepStrictEqual(r.briefApplied, [qid]);
+    assert.deepStrictEqual(rt.brief(id).read().data.successCriteria, ['Three written offers', 'Closed and paid by year end']);
+    const rows = rt.scopeView(id).criteria;
+    assert.deepStrictEqual(rows.map((c) => [c.id, c.state, c.origin]), [['sc-001', 'proposed', 'file'], ['sc-002', 'confirmed', 'gating-answer']]);
+    assert.deepStrictEqual([rows[1].confirmed.by, rows[1].confirmed.factId], ['gating-answer', rt.questions(id).get(qid).answer.factId]);
+    assert.ok(answered);
+    assert.deepStrictEqual(rt.brief(id).missingForGating({ scopeView: rt.scopeView(id) }), ['why']);
+
+    // The owner answers with words the model had proposed: one row, confirmed.
+    const again = await setup([DONE]);
+    again.rt.brief(again.id).append('successCriteria', 'Closed and paid by year end', { provenance: 'model' });
+    const [q2] = g.syncGating(again.rt, again.id, { gatingQuestionsFor: again.gatingQuestionsFor }).created;
+    await again.rt.answerQuestion(again.id, q2, { text: 'closed and paid by YEAR end' });
+    g.syncGating(again.rt, again.id, { gatingQuestionsFor: again.gatingQuestionsFor });
+    assert.deepStrictEqual(again.rt.brief(again.id).read().data.successCriteria, ['Closed and paid by year end']);
+    const only = again.rt.scopeView(again.id).criteria;
+    assert.deepStrictEqual(only.map((c) => [c.id, c.state, c.confirmed.by]), [['sc-001', 'confirmed', 'gating-answer']]);
+
+    // Without the runtime the brief is written as before, and the scope
+    // record shows it as nobody's.
+    const bare = await setup([]);
+    const brief = bare.rt.brief(bare.id);
+    g.applyToBrief(brief, 'successCriteria', { payload: { type: 'gating' }, text: 'Q', answer: { text: 'Sold by spring', factId: 'f-0001' } });
+    assert.deepStrictEqual(brief.read().data.successCriteria, ['Sold by spring']);
+    assert.strictEqual(bare.rt.scopeView(bare.id).criteria[0].state, 'proposed');
   });
 
   it('a category added later raises an open record and makes an answered fact non-disclosable', async (t) => {

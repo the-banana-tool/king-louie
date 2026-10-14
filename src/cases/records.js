@@ -54,11 +54,14 @@ class CaseRecords {
     return `journal/${name}`;
   }
 
-  lastJournal() {
+  // `skipKinds`: entry kinds to pass over (an entry's kind is the end of its
+  // file name, as writeJournal made it).
+  lastJournal({ skipKinds = [] } = {}) {
     const journalDir = path.join(this.dir, 'journal');
+    const skipped = (n) => skipKinds.some((kind) => new RegExp(`-${kind}(?:-\\d+)?\\.md$`).test(n));
     let names;
     try {
-      names = fs.readdirSync(journalDir).filter((n) => n.endsWith('.md'));
+      names = fs.readdirSync(journalDir).filter((n) => n.endsWith('.md') && !skipped(n));
     } catch (err) {
       if (err.code === 'ENOENT') return null;
       throw err;

@@ -166,9 +166,11 @@ describe('createCore and the history store', () => {
     // An ordinary chat: what is stored applies, and a requested scope only narrows.
     assert.strictEqual(historyStore.setHistoryScope('c1', 'all'), true);
     assert.deepStrictEqual(historyStore.setLinks('c1', ['c2', 'c3', 'c4']), ['c2', 'c3', 'c4']);
+    // The linked bridge chat (c4) is read under "all" as under "linked"
+    // (owner ruling 2026-10-13); the linked case chat (c3) under neither.
     for (const [requested, effective, chatIds] of [
-      [undefined, 'all', ['c1', 'c2']], [null, 'all', ['c1', 'c2']], ['all', 'all', ['c1', 'c2']],
-      ['linked', 'linked', ['c1', 'c2', 'c4']], ['chat', 'chat', ['c1']], ['everything', 'all', ['c1', 'c2']]
+      [undefined, 'all', ['c1', 'c2', 'c4']], [null, 'all', ['c1', 'c2', 'c4']], ['all', 'all', ['c1', 'c2', 'c4']],
+      ['linked', 'linked', ['c1', 'c2', 'c4']], ['chat', 'chat', ['c1']], ['everything', 'all', ['c1', 'c2', 'c4']]
     ]) {
       const r = resolveHistoryScope('c1', requested);
       assert.strictEqual(r.stored, 'all');
@@ -177,6 +179,9 @@ describe('createCore and the history store', () => {
       assert.strictEqual(r.pinned, null);
     }
     assert.deepStrictEqual(resolveHistoryScope('c1', 'linked').excluded, [{ chatId: 'c3', reason: 'case-chat' }]);
+    // Not linked, the bridge chat stays out of "all".
+    historyStore.setLinks('c1', ['c2', 'c3']);
+    assert.deepStrictEqual(resolveHistoryScope('c1').chatIds, ['c1', 'c2']);
     // A chat scoped "chat" is not widened by what a caller asks for.
     assert.deepStrictEqual(resolveHistoryScope('c2', 'all').chatIds, ['c2']);
 

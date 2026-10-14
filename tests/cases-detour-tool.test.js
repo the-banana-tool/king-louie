@@ -13,6 +13,7 @@ const { AskTool } = require('../src/tools/builtin/case-unattended-tools');
 const { BriefTool } = require('../src/tools/builtin/case-tools');
 const { CASE_TOOL_NAMES, CASE_MODE_PROMPT } = require('../src/cases/chat-integration');
 const { DetourLog } = require('../src/cases/detours/log');
+const { confirmAll } = require('./helpers/case-scope');
 
 initializeTools();
 
@@ -25,6 +26,7 @@ async function activeCase(rt, title, objective, type = 'general') {
   rt.brief(info.id).update('why', 'The owner asked for it', { provenance: 'user' });
   rt.brief(info.id).append('successCriteria', objective, { provenance: 'model' });
   if (type === 'software-repo') rt.brief(info.id).update('repo', 'https://github.com/example/phone-agent.git', { provenance: 'user' });
+  confirmAll(rt, info.id);
   rt.completeGating(info.id);
   return rt.getCase(info.id);
 }

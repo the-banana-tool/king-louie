@@ -19,6 +19,7 @@ const { historyContext } = require('./helpers/history-context');
 const { createBridgeDispatcher } = require('../src/desktop-bridge/bridge-dispatcher');
 const { createConnection } = require('../src/desktop-bridge/connection');
 const { writePackage, makeGitPackage, PLAYBOOK_YAML, STEPS_MD, withYaml } = require('./helpers/playbook-fixture');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -120,6 +121,7 @@ describe('playbook channels', () => {
     runtime.brief(id).update('why', 'Need the cash', { provenance: 'user' });
     runtime.brief(id).append('successCriteria', 'Sold', { provenance: 'model' });
     for (const q of runtime.questions(id).open()) await runtime.answerQuestion(id, q.id, q.options?.length ? { optionId: q.options[0].id } : { text: '250000' });
+    confirmAll(runtime, id);
     runtime.completeGating(id);
     runtime.setStatus(id, 'done', { kind: 'owner', by: 'owner' });
     const proposed = await runtime.playbooks.propose(id, { playbook: 'land-sale', files: [{ path: 'steps.md', content: STEPS_MD.replace('Call the buyers on the list;', 'Call the largest buyers first;') }], rationale: 'Faster answers.', factIds: [] });
@@ -142,6 +144,7 @@ describe('patch text', () => {
     runtime.brief(id).update('why', 'Need the cash', { provenance: 'user' });
     runtime.brief(id).append('successCriteria', 'Sold', { provenance: 'model' });
     for (const q of runtime.questions(id).open()) await runtime.answerQuestion(id, q.id, q.options?.length ? { optionId: q.options[0].id } : { text: '250000' });
+    confirmAll(runtime, id);
     runtime.completeGating(id);
     runtime.setStatus(id, 'done', { kind: 'owner', by: 'owner' });
     const proposed = await runtime.playbooks.propose(id, { playbook: 'land-sale', files: [{ path: 'steps.md', content: STEPS_MD.replace('Call the buyers on the list;', 'Call the largest buyers first;') }], rationale: 'Faster answers.', factIds: [] });

@@ -9,6 +9,7 @@ const os = require('os');
 const path = require('path');
 const git = require('../src/cases/git');
 const { CaseRuntime } = require('../src/cases');
+const { confirmAll } = require('./helpers/case-scope');
 const { installPlaybooks, PlaybookManager, HOOK_FAILED_NOTE } = require('../src/cases/playbooks');
 const { CASE_MODE_PROMPT } = require('../src/cases/chat-integration');
 const { GATING_SYNC_FAILED_NOTE } = require('../src/cases/playbooks/manager');
@@ -27,6 +28,7 @@ async function world({ host = null } = {}) {
   const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
   rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
   rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+  confirmAll(rt, info.id);
   return { rt, mgr, id: info.id, dir: info.dir };
 }
 

@@ -132,6 +132,74 @@ function optionsInQuote(quote, options) {
   return named;
 }
 
+// Cases stage 8 (spec §6.8): the progress of a case as the read tools give
+// it. Built from CaseRuntime.progress, which only reads: no call here
+// confirms a criterion, writes a verification record or changes a status.
+// The stores' files are Bash-writable, so every value is reduced to the
+// shape below; a criterion's words, a fix line and an abandoned approach are
+// case content and go back inside the untrusted wrapper only.
+const PROGRESS_ERROR = Object.freeze({ error: 'progress could not be read' });
+const VERIFICATION_STATES = ['unmet', 'met', 'stale', 'failing'];
+const ABANDONED_SHOWN = 5;
+const strOrNull = (v) => (typeof v === 'string' ? v : null);
+const arr = (v) => (Array.isArray(v) ? v : []);
+const count = (v) => (Number.isInteger(v) && v > 0 ? v : 0);
+
+function criterionOut(row) {
+  const confirmed = row.scope === 'confirmed';
+  const reasons = arr(row.reasons).filter((r) => typeof r === 'string' && r);
+  return {
+    id: strOrNull(row.id),
+    text: strOrNull(row.text),
+    state: confirmed ? 'confirmed' : 'proposed',
+    // A proposed criterion has no verification state: it counts for nothing.
+    verification: confirmed && VERIFICATION_STATES.includes(row.state) ? row.state : null,
+    evidence: confirmed ? arr(row.evidence).filter(isObj).map((e) => ({ id: strOrNull(e.id), provenance: strOrNull(e.provenance) })) : [],
+    reason: confirmed && reasons.length ? reasons.join('; ') : null
+  };
+}
+
+function readinessOut(r) {
+  if (!isObj(r)) return { ready: false, items: [] };
+  return {
+    ready: r.ready === true,
+    items: arr(r.items).filter(isObj).map((i) => ({ id: strOrNull(i.id), state: strOrNull(i.state), by: strOrNull(i.by), fix: strOrNull(i.fix), refs: arr(i.refs).filter((x) => typeof x === 'string') }))
+  };
+}
+
+// The counts list_cases gives bare: numbers only, from the rows themselves.
+function criteriaCounts(rows) {
+  const out = { confirmed: 0, met: 0, proposed: 0 };
+  for (const row of arr(rows).filter(isObj)) {
+    if (row.scope !== 'confirmed') out.proposed += 1;
+    else {
+      out.confirmed += 1;
+      if (row.state === 'met') out.met += 1;
+    }
+  }
+  return out;
+}
+
+// `p` is CaseRuntime.progress(id): a closed case that was frozen at its
+// close gives that record as it is (R-C8-7); nothing is recomputed.
+function progressOut(p) {
+  const frozen = isObj(p.closed);
+  const rows = frozen ? arr(p.closed.criteria) : arr(p.view && p.view.criteria);
+  const objective = !frozen && isObj(p.view && p.view.objective) ? { state: p.view.objective.state === 'confirmed' ? 'confirmed' : 'proposed', origin: strOrNull(p.view.objective.origin) } : null;
+  const abandoned = arr(p.abandoned).filter(isObj);
+  return {
+    frozen,
+    summary: strOrNull(p.summary),
+    objective,
+    criteria: rows.filter(isObj).map(criterionOut),
+    readiness: readinessOut(frozen ? p.closed.readiness : p.readiness),
+    abandoned: {
+      count: abandoned.length,
+      newest: abandoned.slice(-ABANDONED_SHOWN).reverse().map((r) => ({ id: strOrNull(r.id), approach: strOrNull(r.approach), why: strOrNull(r.why) }))
+    }
+  };
+}
+
 // A payload type goes back bare only when it looks like one (records are
 // Bash-writable); anything else is null.
 const cleanType = (t) => (typeof t === 'string' && /^[a-z][a-z:-]{0,31}$/.test(t) ? t : null);
@@ -196,19 +264,40 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     return { usd: { spent: usd.spent ?? 0, limit: usd.limit ?? null } };
   };
 
+  // CaseRuntime.progress, or null when it cannot be read (logged; the
+  // reason is never sent back).
+  const progressOf = (rt, meta) => {
+    try {
+      const p = rt.progress(meta.id);
+      return isObj(p) ? p : null;
+    } catch (err) {
+      log.warn(`Reading the progress of ${meta.slug} failed: ${err && err.message}`);
+      return null;
+    }
+  };
+
   function listCases(rt, scope = null) {
     // Titles and slugs can be model-authored (ruling T12-titles): they go
     // back inside the untrusted wrapper; id and status stay bare.
-    return rt.listCases().filter((meta) => scope === null || meta.id === scope).map((meta) => ({
-      id: meta.id,
-      type: meta.type,
-      status: meta.status,
-      created: meta.created,
-      openQuestions: openQuestions(rt, meta.id).length,
-      pendingProposals: pendingProposals(meta.dir),
-      budget: usdBudget(rt, meta.id),
-      data: untrusted({ title: meta.title, slug: meta.slug })
-    }));
+    // Progress (cases stage 8): counts and a boolean only, so they are
+    // bare; `criteria` is null when the progress could not be read.
+    return rt.listCases().filter((meta) => scope === null || meta.id === scope).map((meta) => {
+      const p = progressOf(rt, meta);
+      const frozen = p && isObj(p.closed);
+      const readiness = p ? (frozen ? p.closed.readiness : p.readiness) : null;
+      return {
+        id: meta.id,
+        type: meta.type,
+        status: meta.status,
+        created: meta.created,
+        openQuestions: openQuestions(rt, meta.id).length,
+        pendingProposals: pendingProposals(meta.dir),
+        budget: usdBudget(rt, meta.id),
+        criteria: p ? criteriaCounts(frozen ? p.closed.criteria : p.view && p.view.criteria) : null,
+        ready: isObj(readiness) && readiness.ready === true,
+        data: untrusted({ title: meta.title, slug: meta.slug })
+      };
+    });
   }
 
   function openCase(rt, ref) {
@@ -220,6 +309,15 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     } catch (err) {
       log.warn(`Reading the brief of ${meta.slug} failed: ${err.message}`);
       brief = { error: 'the brief could not be read' };
+    }
+    let progress = PROGRESS_ERROR;
+    const p = progressOf(rt, meta);
+    if (p) {
+      try {
+        progress = progressOut(p);
+      } catch (err) {
+        log.warn(`Shaping the progress of ${meta.slug} failed: ${err && err.message}`);
+      }
     }
     return {
       id: meta.id,
@@ -235,6 +333,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
         title: meta.title,
         slug: meta.slug,
         brief,
+        progress,
         questions: openQuestions(rt, meta.id).map((q) => ({
           id: q.id,
           kind: q.kind,
@@ -369,8 +468,10 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
 
   // create_case: the case the app's case:create makes (no playbooks, no
   // chat), never with force. The objective must be words from the quote on
-  // every channel; the quote itself is checked in-app only. The objective is
-  // recorded as the owner's (CaseRuntime.recordOwnerObjective).
+  // every channel; the quote itself is checked in-app only. The quote is
+  // recorded (CaseRuntime.recordOwnerObjective). Only in the chat, where the
+  // quote was checked, is the objective born confirmed; over MCP it is
+  // proposed until the owner confirms it (owner ruling R-C8-N3, 2026-10-14).
   // In a case chat (caseScope set) a similar-case refusal names no other
   // case: the list of other cases' ids, titles and statuses would reach the
   // case turn's context (Q27), so only the message goes back.
@@ -381,7 +482,10 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     const releaseSlot = takeRateSlot();
     let info;
     try {
-      info = await rt.createCase({ title: args.title.trim(), type: args.type || 'general', objective: args.objective });
+      // Cases stage 8: the objective was held to the quote above; the quote
+      // is the owner's only where checkQuote checked it (R-C8-N3).
+      const objectiveBy = channel === CHAT_CHANNEL ? 'owner' : 'mcp';
+      info = await rt.createCase({ title: args.title.trim(), type: args.type || 'general', objective: args.objective, objectiveBy });
     } catch (err) {
       releaseSlot();
       if (err && err.code === 'SIMILAR_CASES') {

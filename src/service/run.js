@@ -98,7 +98,7 @@ function loadProfile(profile) {
     return {
       // deps: tests only (deps.gui reaches createGuiSubsystem's deps, for a
       // helper endpoint under a temp dir); runService passes none.
-      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, localInference = null, adminUid, configDir, executors, deps = {} }) {
+      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, localInference = null, caseChecks = null, adminUid, configDir, executors, deps = {} }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -188,6 +188,9 @@ function loadProfile(profile) {
             // Local inference stage L1 (R-LI-6): which servers are local comes
             // from the admin service.json only. The key is always present.
             localInference: localInference ?? { servers: [] },
+            // Cases stage 8 (R-C8-3): whether a case may run its check
+            // command, from the admin service.json only. Off without it.
+            caseChecksConfig: { enabled: caseChecks?.enabled === true },
             isService: true,
             remoteApprovals: 'phone',
             phoneApprover: approvals.phoneApprover,
@@ -415,7 +418,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, adminUid, executors: config.executors, serviceConfig: config });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, serviceConfig: config });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

@@ -825,6 +825,9 @@ contextBridge.exposeInMainWorld(
       create: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.title, 'title', { minLength: 1 });
+        // The form's Objective field (cases stage 8); the main process trims
+        // and checks it again.
+        if (payload.objective !== undefined) validateString(payload.objective, 'objective', { minLength: 1 });
         if (payload.force !== undefined && typeof payload.force !== 'boolean') throw new Error('Invalid force: expected boolean');
         return ipcRenderer.invoke('case:create', payload);
       },
@@ -889,6 +892,40 @@ contextBridge.exposeInMainWorld(
         validateObject(payload, 'payload');
         validateString(payload.caseId, 'caseId', { minLength: 1 });
         return ipcRenderer.invoke('case:budget', payload);
+      },
+      // Cases stage 8: progress. The reply carries untrustedText: true
+      // (render with textContent). Only the named fields are sent; the main
+      // process checks each again and decides who confirmed.
+      progress: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:progress', { caseId: payload.caseId });
+      },
+      // "Check now": the owner's press runs one verify pass.
+      verifyNow: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:verifyNow', { caseId: payload.caseId });
+      },
+      // The check command of a software-repo case: `command` names it (the
+      // owner approves it on a pressed question; nothing runs before), and
+      // `approved: false` stops it running. Only these fields are sent.
+      setCheck: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        if (payload.approved === false) return ipcRenderer.invoke('case:setCheck', { caseId: payload.caseId, approved: false });
+        validateString(payload.command, 'command', { minLength: 1 });
+        return ipcRenderer.invoke('case:setCheck', { caseId: payload.caseId, command: payload.command });
+      },
+      confirmScope: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.action, 'action', { minLength: 1 });
+        if (payload.target !== undefined && payload.target !== null) validateString(payload.target, 'target', { minLength: 1 });
+        if (payload.text !== undefined && payload.text !== null) validateString(payload.text, 'text');
+        if (payload.hash !== undefined && payload.hash !== null && typeof payload.hash !== 'string') validateObject(payload.hash, 'hash');
+        const { caseId, action, target, hash, text } = payload;
+        return ipcRenderer.invoke('case:confirmScope', { caseId, action, target, hash, text });
       },
       grantBudget: (payload) => {
         validateObject(payload, 'payload');

@@ -5,6 +5,7 @@ const Advisor = require('../execution/advisor');
 const { createLogger } = require('../logging');
 const { buildCaseSystemPrompt, shapeToolDefinitions, casePrompter } = require('../cases/chat-integration');
 const { NO_RETRY } = require('../cases/roles');
+const { toolResultRow } = require('../cases/verify/evidence');
 const { roleTimeoutMs } = require('../models/resolver');
 const { KL_PROVIDERS } = require('../models/provider-ids');
 const { partialMetricsOf } = require('../providers/abort');
@@ -427,6 +428,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     // `return` or a `throw` below needs its own endCaseTurn call.
     let fullResponse = '';
     let answerText = '';
+    const caseToolResults = [];
     // Recall (history spec 2026-09-25 §6, §7): the provenance every reply of
     // this turn records, and the tool list sent (for token calibration).
     let turnContext = null;
@@ -767,7 +769,13 @@ function registerChatHandlers(ipcMain, context = {}) {
         safeSend(event.sender, 'chat:toolUse', { chatId, runId, toolName, parameters });
       });
 
-      executor.on('postExecute', ({ toolName, result }) => {
+      executor.on('postExecute', ({ toolName, parameters, result }) => {
+        // Cases stage 8 (R-C8-9): the close of a case turn receives the
+        // results of this turn's case-tool calls, and of no other tool.
+        if (caseTurn) {
+          const row = toolResultRow(toolName, parameters, result);
+          if (row) caseToolResults.push(row);
+        }
         if (abortController.signal.aborted) return;
         appendMessageToChat(chatId, 'toolResult', '', { toolName, result, runId }, { returnChat: false });
         safeSend(event.sender, 'chat:toolResult', { chatId, runId, toolName, result });
@@ -962,7 +970,13 @@ function registerChatHandlers(ipcMain, context = {}) {
       }
       // Never journal the '(No response)' placeholder — it isn't an answer.
       const journal = answerText && answerText !== '(No response)' ? answerText : null;
-      await endCaseTurn({ summary: safeMessage, journal });
+      // The normal exit only: the stopped, blocked and failed exits pass
+      // neither, so no verify pass follows them (cases stage 8 spec §6.9).
+      // endTurn commits and releases the case and returns; the verify pass
+      // it prepared runs after it, so the reply below is never held for it
+      // (R-C8-11). The criteria states update when the pass lands
+      // (case:changed, what: 'progress').
+      await endCaseTurn({ summary: safeMessage, journal, evidence: { toolResults: caseToolResults }, verify: true });
 
       const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)', withProvenance({
         llm: llmSummary

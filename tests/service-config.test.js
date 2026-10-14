@@ -36,8 +36,35 @@ describe('loadServiceConfig', () => {
       executors: { entries: {}, packageRoots: [] },
       contact: null,
       playbooks: { sources: [], autoUpdate: false },
-      localInference: { servers: [] }
+      localInference: { servers: [] },
+      caseChecks: { enabled: false }
     });
+  });
+
+  // Cases stage 8 (R-C8-3): whether a case may run its check command is the
+  // administrator's to say, and only theirs.
+  it('reads caseChecks from the admin file only, off unless enabled is exactly true, and rejects an unknown key under it', () => {
+    const admin = tmp();
+    writeAdmin(admin, { caseChecks: { enabled: true } });
+    assert.deepStrictEqual(loadServiceConfig(tmp(), {}, opts(admin)).caseChecks, { enabled: true });
+    writeAdmin(admin, { caseChecks: {} });
+    assert.deepStrictEqual(loadServiceConfig(tmp(), {}, opts(admin)).caseChecks, { enabled: false });
+    writeAdmin(admin, { caseChecks: { enabled: 'true' } });
+    assert.throws(() => loadServiceConfig(tmp(), {}, opts(admin)), /caseChecks\.enabled must be true or false/);
+    writeAdmin(admin, { caseChecks: { enabled: true, timeoutMs: 5 } });
+    assert.throws(() => loadServiceConfig(tmp(), {}, opts(admin)), /caseChecks/);
+    writeAdmin(admin, { caseChecks: true });
+    assert.throws(() => loadServiceConfig(tmp(), {}, opts(admin)), /"caseChecks" must be an object/);
+
+    // In the service's own, service-writable file it is ignored, and said so.
+    const dir = tmp();
+    writeCfg(dir, { caseChecks: { enabled: true } });
+    const warnings = [];
+    const remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    let cfg;
+    try { cfg = loadServiceConfig(dir, {}, opts(tmp())); } finally { remove(); }
+    assert.deepStrictEqual(cfg.caseChecks, { enabled: false });
+    assert.ok(warnings.some((m) => /ignoring "caseChecks"/.test(m)), warnings.join(' | '));
   });
   it('reads the profile from the admin config and lets CLI overrides win', () => {
     const admin = tmp();

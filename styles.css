@@ -3189,6 +3189,41 @@ body {
 .case-related-heading { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
 .case-related-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
 
+/* Cases stage 8: progress (the case panel's block and the scope and close cards) */
+.case-progress-section { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; font-size: 12px; }
+.case-progress-section:empty { display: none; }
+.case-progress-head, .case-progress-subhead { font-weight: 600; color: var(--text-secondary); }
+.case-progress-summary { color: var(--text-primary); }
+.case-progress-rows { display: flex; flex-direction: column; gap: 6px; }
+.case-progress-row, .case-progress-objective { display: flex; flex-direction: column; gap: 3px; }
+.case-progress-row-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.case-progress-id { font-family: var(--font-mono, monospace); color: var(--text-secondary); }
+.case-progress-text { flex: 1 1 160px; overflow-wrap: anywhere; }
+.case-progress-missing { color: var(--text-secondary); }
+.case-progress-tag { border: 1px solid var(--border-default); border-radius: 4px; padding: 0 4px; font-size: 11px; color: var(--text-secondary); }
+.case-progress-tag-met, .case-progress-tag-confirmed { border-color: var(--success, #3fb950); color: var(--success, #3fb950); }
+.case-progress-tag-stale, .case-progress-tag-failing { border-color: var(--error, #d9534f); color: var(--error, #d9534f); }
+.case-progress-tag-proposed { border-style: dashed; }
+.case-progress-evidence, .case-progress-note, .case-progress-reason { color: var(--text-secondary); overflow-wrap: anywhere; }
+.case-progress-evidence { padding-left: 12px; }
+.case-progress-evidence-item.is-not-holding, .case-progress-reason { color: var(--error, #d9534f); }
+.case-progress-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.case-progress-confirm-all { align-self: flex-start; }
+.case-progress-add { gap: 6px; }
+.case-progress-add .chat-info-input { flex: 1 1 160px; }
+.case-progress-group-head { color: var(--text-secondary); }
+.case-progress-items { margin: 0; padding-left: 18px; }
+.case-progress-item { overflow-wrap: anywhere; }
+.case-progress-abandoned summary { cursor: pointer; color: var(--text-secondary); }
+.case-progress-abandoned-item { margin-top: 4px; padding-left: 12px; }
+.case-progress-check-row { justify-content: flex-start; gap: 8px; }
+.case-progress-check-result { color: var(--text-secondary); overflow-wrap: anywhere; }
+.case-progress-command { display: flex; flex-direction: column; gap: 3px; }
+.case-progress-command-text { font-family: var(--font-mono, monospace); }
+.chat-case-new-objective { margin-bottom: 8px; }
+.case-progress-live { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; font-size: 12px; }
+.confirm-dialog-before { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--text-primary); overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+
 /* Settings > Local service (fleet stage 7) */
 .service-pane .service-pane-status p,
 .service-pane .service-pane-import p,

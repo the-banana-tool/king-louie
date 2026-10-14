@@ -11,6 +11,7 @@ const { CaseRuntime } = require('../src/cases');
 const { DetourClassifier, CLASSIFY_SYSTEM, parseClassification } = require('../src/cases/detours/classifier');
 const { DetourLog } = require('../src/cases/detours/log');
 const { withCaseProfile } = require('./helpers/profile-settings');
+const { confirmAll } = require('./helpers/case-scope');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -54,6 +55,7 @@ async function activeCase(h, settings = {}) {
   rt.brief(info.id).update('why', 'The door lets rain in', { provenance: 'user' });
   rt.brief(info.id).append('successCriteria', 'Three written quotes', { provenance: 'model' });
   rt.brief(info.id).update('hardConstraints', ['Under 2,000 dollars'], { provenance: 'user' });
+  confirmAll(rt, info.id);
   rt.completeGating(info.id);
   const turn = await rt.beginTurn(info.id, { turnId: 'turn-41', source: 'owner', ownerMessage: 'x' });
   return { rt, info, turn, classifier: new DetourClassifier({ runtime: rt }) };
@@ -122,6 +124,7 @@ describe('DetourClassifier', () => {
     const info = await rt.createCase({ title: 'Rear door quotes', type: 'outreach', objective: 'Three written quotes for the rear door' });
     rt.brief(info.id).update('why', 'The door lets rain in', { provenance: 'user' });
     rt.brief(info.id).append('successCriteria', 'Three written quotes', { provenance: 'model' });
+    confirmAll(rt, info.id);
     rt.completeGating(info.id);
     const turn = await rt.beginTurn(info.id, { turnId: 'turn-42', source: 'owner', ownerMessage: 'x' });
     // A mid-turn profile edit empties every role: it applies to the next turn only.

@@ -175,7 +175,7 @@ describe('the shipped scope policy', () => {
     }
   });
 
-  it('R-H4-7: a bridge chat is left out of "all" and can be linked', async () => {
+  it('R-H4-7: a bridge chat is left out of "all" unless linked, and can be linked', async () => {
     const { store, resolve, call, candidate } = setup();
     store.setHistoryScope('a', 'all');
     assert.deepStrictEqual(resolve('a').chatIds, ['a', 'b', 'imp']);
@@ -184,12 +184,32 @@ describe('the shipped scope policy', () => {
     const saved = await call(IPC.HISTORY_LINKS_SET, { chatId: 'a', linkedChatIds: ['tg', 'legacy'] });
     assert.strictEqual(saved.ok, true);
     assert.deepStrictEqual(saved.links.map((l) => l.id), ['tg', 'legacy']);
-    // Under "all" a linked bridge chat is still left out: it is read under
-    // "linked" only.
-    assert.deepStrictEqual(resolve('a').chatIds, ['a', 'b', 'imp']);
+    // Owner ruling 2026-10-13: under "all" the chat's own links count as
+    // explicit, so a linked bridge chat is read there too (list order).
+    assert.deepStrictEqual(resolve('a').chatIds, ['a', 'b', 'tg', 'legacy', 'imp']);
+    assert.deepStrictEqual(resolve('a', 'all').chatIds, ['a', 'b', 'tg', 'legacy', 'imp']);
+    assert.deepStrictEqual(resolve('a', 'linked').chatIds, ['a', 'tg', 'legacy']);
+    // One link: the other bridge chat stays out of "all".
+    store.setLinks('a', ['tg']);
+    assert.deepStrictEqual(resolve('a').chatIds, ['a', 'b', 'tg', 'imp']);
+    // The bridge chat itself still reads itself only.
+    store.setHistoryScope('tg', 'all');
+    store.setLinks('tg', ['a']);
+    assert.deepStrictEqual([resolve('tg').effective, resolve('tg').chatIds], ['chat', ['tg']]);
+    store.setLinks('a', ['tg', 'legacy']);
     store.setHistoryScope('a', 'linked');
     assert.deepStrictEqual(resolve('a').chatIds, ['a', 'tg', 'legacy']);
     assert.deepStrictEqual(resolve('a').excluded, []);
+  });
+
+  it('under "all" a link never brings in a case chat or a case export', () => {
+    const { store, resolve } = setup();
+    store.setHistoryScope('a', 'all');
+    store.setLinks('a', ['case', 'export', 'tg']);
+    assert.deepStrictEqual(resolve('a').chatIds, ['a', 'b', 'tg', 'imp']);
+    // A bridge chat with a case is a case chat: linked or not, it stays out.
+    store.updateChat('tg', { caseId: 'case-9' });
+    assert.deepStrictEqual(resolve('a').chatIds, ['a', 'b', 'imp']);
   });
 
   it('a case or an export mark wins over a bridge origin, linked or not', () => {
