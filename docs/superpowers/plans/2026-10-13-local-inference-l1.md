@@ -212,7 +212,7 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - ~~The timeout covers the whole call~~ (as first built). **Since the owner's ruling on Q-L1-5 (2026-10-14) the timeout runs only until the first output arrives:** the first streamed token (the provider's chunk callback), or the first byte of a non-streamed reply body (`LocalServerProvider#request` hands the parent a `Response` whose body is the server's, read through a stream that notes the first non-empty chunk; `embed` too). Then the timer is cleared and nothing cuts the reply; the caller's signal stays forwarded, so Stop still stops. Time in the queue and the wait for the reply still count. Same abort path, same `LOCAL_TIMEOUT`.
 - **Task 11's `byRole[*].localServers` is renamed `localServerIds`** (`src/tracking/llm-totals.js`, `tests/local-usage.test.js`, the Task 11 and Task 15 notes), so that `local-servers-config › only the registry, the core's seal and the import's exclusion name models.localServers in src/` passes as written; it had failed since Task 11. No other reader of the field existed.
 - `LocalServers#providerFor` hands the entry's `timeoutMs` to the provider and builds a new provider when it changes. New code `LOCAL_TIMEOUT` (spec §13.6). Tests: `tests/local-timeout.test.js` (a fake server that never answers, short timeouts, a ref'd guard timer around every await).
-- Q-L1-1, N1 and Q-L1-4 changed no code (as built); Q-L1-2 was not ruled on.
+- Q-L1-1, N1 and Q-L1-4 changed no code (as built); Q-L1-2 was ruled the same day: kept refused (as built).
 
 **Task 16:**
 
@@ -258,7 +258,7 @@ Each row names the tasks that carry the ruling and the tests that pin it (file �
 
 ## Owner rulings (2026-10-14)
 
-On the open questions below. Each closes its question; Q-L1-2 stays open.
+On the open questions below. Each closes its question.
 
 | Id | Ruling | Carried by | Pinned by |
 |---|---|---|---|
@@ -266,7 +266,7 @@ On the open questions below. Each closes its question; Q-L1-2 stays open.
 | Q-L1-3 | Enforce a timeout for local calls only: the entry's `timeoutMs` aborts that server's calls through the call's abort signal; hosted calls unchanged; a timed-out call fails over only as the policy allows and is reported like any other failure | The 2026-10-14 commit (Deviations: "Owner rulings of 2026-10-14") | `local-timeout` (every test) |
 | Q-L1-4 | The keep-local embedder uses the default local model, as built | Task 10 (no new code) | `history-private-embeddings › R-LI-25: the keep-local embedder fills them` |
 | Q-L1-5 | A local call's timeout runs only until the first output (the first streamed token, or the first byte of a non-streamed reply body); after that the timer is cleared and a long reply is never cut by it; Stop still works; one abort path | The 2026-10-14 follow-up commit (Deviations: "Owner rulings of 2026-10-14") | `local-timeout › Q-L1-5:` three tests; the "never answers" tests still end `LOCAL_TIMEOUT` |
-| Q-L1-2 | No ruling asked; left as built and still open | | |
+| Q-L1-2 | A workflow whose chat no longer exists stays refused (fail closed: a chat that cannot be read cannot show it is not private) | None (as built, Task 8) | `egress-core` (the refused-workflow tests) |
 
 ## New questions
 
@@ -279,7 +279,7 @@ Found while writing the tasks out. Each is built the fail-closed way until the o
 Found while building. Each is built the cautious way until the owner rules; none was decided by an implementer.
 
 - **Q-L1-1 (closed 2026-10-14: no, in L1, as built; revisit in L2). May a workflow run from a private chat?** Today a workflow's tasks are not children of the chat's turn: they reach the model with no chat and no snapshot, on the default profile, with the chat's tail and recalled text in the prompt. **Built: a private chat's workflow is not planned and does not run** (`PRIVATE_NO_DETACHED_RUN`), also when the profile has a local model. The other choice is to let a task carry its workflow's chat to the snapshot, so it runs local or refused like a sub-agent (spec §7.3 lists "a workflow task" beside sub-agents); that is a change to `WorkflowEngine`'s task options, which Task 8's text says not to make.
-- **Q-L1-2 (open; no ruling asked on 2026-10-14, left as built). A workflow whose chat no longer exists** (deleted after the workflow was made) is refused like a private chat's, because an unknown chat is private. Before this stage it ran. Keep, or let a workflow with a chat id the store definitely does not hold run with no policy?
+- **Q-L1-2 (closed 2026-10-14: kept refused, as built). A workflow whose chat no longer exists** (deleted after the workflow was made) is refused like a private chat's, because an unknown chat is private. Before this stage it ran. Keep, or let a workflow with a chat id the store definitely does not hold run with no policy?
 
 - **Q-L1-3 (closed 2026-10-14: enforced for local calls only; see Deviations, "Owner rulings of 2026-10-14"). Should a model call have a timeout at all, and from where?** `roleTimeoutMs` (`models.roleTimeoutsMs`) is computed and handed to every call as `options.timeoutMs`, but nothing enforces it, so a local server's `timeoutMs` (spec §6.4: "replaces the role timeout … when it is larger") has nothing to replace. **Built: nothing**; the value is validated and stored only. Enforcing the role timeout would change every hosted call too.
 - **Q-L1-4 (closed 2026-10-14: the default local model, as built). The keep-local embedder's model.** The spec and the plan say the default local model; an owner who chose another local model (`history.embedder.model`) and then a hosted kind gets the default one for private and imported chats. **Built: the default model.**
