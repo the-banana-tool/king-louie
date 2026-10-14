@@ -630,6 +630,36 @@ describe('ToolExecutor ledger write guard', () => {
     }
     assert.strictEqual(fs.readFileSync(factsPath, 'utf8'), before);
   });
+
+  // Cases stage 8 (plan Task 18): the new case files sit under .kl/, which
+  // is guarded whole. One test per file, so a later narrowing of the guard
+  // fails here by name.
+  for (const rel of ['.kl/scope.json', '.kl/abandoned.jsonl', '.kl/verification.json', '.kl/checks.json', '.kl/runs/checks/chk-0001.txt']) {
+    it(`refuses Write, Edit and MultiEdit on ${rel}`, async () => {
+      const { info } = await setup();
+      const file = path.join(info.dir, ...rel.split('/'));
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      // Content holding the old_string, so Edit and MultiEdit would succeed
+      // if the guard were gone.
+      fs.writeFileSync(file, 'a\n');
+      const executor = new ToolExecutor({
+        workingDirectory: info.dir,
+        allowedDirectories: [info.dir],
+        runtimeEnvironment: { platform: process.platform },
+        requireApproval: false,
+        useSandbox: false,
+        extraToolOptions: { caseContext: { dir: info.dir } }
+      });
+      const w = await executor.execute('Write', { file_path: file, content: '{}\n' });
+      const e = await executor.execute('Edit', { file_path: file, old_string: 'a', new_string: 'b' });
+      const m = await executor.execute('MultiEdit', { edits: [{ file_path: file, old_string: 'a', new_string: 'b' }] });
+      for (const [name, r] of [['Write', w], ['Edit', e], ['MultiEdit', m]]) {
+        assert.strictEqual(r.success, false, name);
+        assert.match(r.error, /Ledger tool/, name);
+      }
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), 'a\n');
+    });
+  }
 });
 
 describe('stage 2 confinement helpers', () => {

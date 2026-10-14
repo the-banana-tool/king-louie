@@ -1,7 +1,7 @@
 # Cases Stage 8: Verified progress — Design Spec
 
-- **Status:** Approved in outline by the owner's rulings of 2026-10-13 (§2). The implementation plan is
-  `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`.
+- **Status:** Built (plan 2026-10-13-cases-stage8-verified-progress.md). Approved in outline by the
+  owner's rulings of 2026-10-13 (§2) and 2026-10-14 (§2.2); what the build changed is §16.1.
 - **Date:** 2026-10-13
 - **Parent:** `docs/superpowers/specs/2026-09-22-king-louie-cases-design.md` §3.1 (principles), §4.3
   (`brief.md`), §4.5 (`.kl/`), §5.2 (orientation), §5.3 (triggers), §5.5 (turn lifecycle), §5.6 (case
@@ -1260,6 +1260,32 @@ plan splits some of these further.
    the transition is still the owner's.
 6. **Stage 5 §3.7** says `refresh` runs read-only commands with 5 s timeouts. Behind its setting, the case type
    also runs one owner-named command, not read-only, with a longer limit, at close only.
+
+### 16.1 Deviations from this spec, recorded while building
+
+Each is in the plan's Deviations with its tests; the ones that change what a reader of this spec would
+assume:
+
+1. **Check now** (owner ruling 2026-10-13, the plan's N2): the case panel has a button that runs the
+   verify pass outside a turn on the owner's press (`case:verifyNow`), in every `when` but `off`. It does
+   not run the check command (R-C8-N4).
+2. **The create form has an Objective field** (owner ruling 2026-10-13, the plan's N3): §2.1's "sends no
+   objective" is no longer so. What the owner types there is confirmed (origin `owner-create`), and only
+   for an event of the app's own window.
+3. **`create_case` over MCP** makes the objective `proposed`, origin `mcp-create` (R-C8-N3; §6.1).
+4. **npm only** (R-C8-N5, N6): §6.6's list of what may be named is narrowed to `npm test` and
+   `npm run <script>`.
+5. **The verify pass's result is a journal entry of its own** (kind `verification`, R-C8-11), not the first
+   lines of the turn's entry; §7.6's journal kinds gain it. A check that changed something on **Check
+   now** writes the same kind.
+6. **A regression the turn made itself raises no trigger at the next turn start.** The turn is told at its
+   own close (the block heading its journal entry) and the close writes the state cache;
+   `criterion-regressed` is raised for a change between turns.
+7. **The `Brief` tool does not confirm a criterion the model already proposed** (`CRITERION_DUPLICATE`
+   for the same words with a quote). The owner confirms it by a press or by answering a `scope-confirm`
+   question.
+8. **A new refusal code, `SCOPE_INVALID`**, for a caller's malformed scope action or origin (never shown
+   to the model).
 
 ## 17. Assumptions made without asking
 

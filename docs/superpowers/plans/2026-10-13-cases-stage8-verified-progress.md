@@ -372,6 +372,14 @@ The ruling answers the "for the owner to weigh" point of Addition B (whose quest
   - `tests/cases-scope.test.js` › "are the eight of the spec" became "are the nine of the spec" (`mcp-create` added), and asserts `mcp-create` is not a confirming origin.
   - Extended only: `tests/cases-orientation.test.js` (the `mcp-create` mark), `tests/renderer-progress-text.test.js` (the origin note), and the runtime case of `objectiveBy: 'mcp'`.
 
+**Task 18 (the documents, the guard tests, the full run).**
+
+- *Guard tests* (`tests/cases-tools.test.js`, in "ToolExecutor ledger write guard", not the "isProtectedCasePath hardening" `describe` the task names: that one tests the path function, this one goes through the `ToolExecutor` as the task asks): one test per file, `Write`, `Edit` and `MultiEdit` each refused with the file unchanged. They passed with no code change.
+- *What did not change*, run: `cases-store-yaml`, `management-tools`, `frontdoor-case-tools`, `electron-boundary`, `cases-leaks` (110 pass). No `case.yaml` key was added.
+- *`CLAUDE.md`*: `## Cases: verified progress (stage 8)` after the stage 7 section, with everything Step 3 lists, plus R-C8-11 (the pass after the reply, `verifyIdle`), Check now, the 2026-10-14 rulings (`mcp-create`, npm only) and Task 17's finding on regressions a turn made itself.
+- *The spec*: the status line, and §16.1 for the build's deviations from the spec (§16 itself is the spec's deviations from its parent and is kept). §2 gained §2.2 (the 2026-10-14 rulings) in the rulings commit, as the rulings asked; §2 and §2.1 are otherwise as they were.
+- *Boxes*: every step of Tasks 1 to 18 is ticked except Task 18's Step 5, whose result is below.
+
 ## New questions
 
 Found while writing the tasks out. None is decided here; each step named is written the conservative way and stays so until the owner rules.
@@ -486,7 +494,7 @@ Parallel with Tasks 2 and 3.
   - `store.confirm(targets, { hashes, by, channel = null, quote = null, factId = null })` where `targets` is a list of `sc-` ids and/or `'objective'` and `hashes[target]` is the hash the caller saw: throws `ScopeError('CRITERION_NOT_FOUND')` or `ScopeError('SCOPE_STALE')`; sets `state: 'confirmed'` and `confirmed`. Confirming a confirmed entry is a no-op.
   - `store.limitsProblem(view, { addingProposed = 0, adding = 0 })` → `null` or a `ScopeError('CRITERION_LIMIT')`.
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-scope.test.js`, on a temp dir with a `.kl/` folder and brief data passed as plain objects:
+- [x] **Step 1: Write the failing tests.** `tests/cases-scope.test.js`, on a temp dir with a `.kl/` folder and brief data passed as plain objects:
   - `textHash` is equal for `"Signed  contract"`, `"signed contract"` and the same words with curly quotes around a word; different for one changed letter;
   - "first contact marks every string legacy and proposed": no file, `view({ objective: 'Sell the Lakeside lot', successCriteria: ['A', 'B'] })` gives two rows `proposed`/`legacy`/`provisional: true` with ids `sc-001`, `sc-002` and an objective row `proposed`/`legacy`; **no file exists afterwards**;
   - `reconcile` writes the same rows, sets `migratedAt`, and a second `reconcile` with the same data changes no byte;
@@ -498,10 +506,10 @@ Parallel with Tasks 2 and 3.
   - a file holding `"not json"` or `[]` reads as absent with one warning, and the next `reconcile` replaces it with entries of origin `file` (`legacy` is used only when there was no file at all);
   - `validateCriterionText`: 2 characters, 301 characters, a newline, a tab and a zero-width character each throw `CRITERION_INVALID`;
   - `limitsProblem` at 12 criteria and at 6 proposed.
-- [ ] **Step 2: Run them and see them fail.** `node --test tests/cases-scope.test.js` — expected: cannot find module `../src/cases/scope`.
-- [ ] **Step 3: Implement** `src/cases/scope.js` as specified. Keep it free of `Brief` and `CaseRuntime` (it takes brief data as an argument). A corrupt file is treated as "migrated" (so its strings read `file`, the conservative origin).
-- [ ] **Step 4: Run** `node --test tests/cases-scope.test.js tests/electron-boundary.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run them and see them fail.** `node --test tests/cases-scope.test.js` — expected: cannot find module `../src/cases/scope`.
+- [x] **Step 3: Implement** `src/cases/scope.js` as specified. Keep it free of `Brief` and `CaseRuntime` (it takes brief data as an argument). A corrupt file is treated as "migrated" (so its strings read `file`, the conservative origin).
+- [x] **Step 4: Run** `node --test tests/cases-scope.test.js tests/electron-boundary.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/scope.js tests/cases-scope.test.js
@@ -529,11 +537,11 @@ Parallel with Tasks 1 and 3.
   - `store.withdraw(id, { why, turnId = null })` → appends `{ kind: 'withdraw', target, at, turnId, why }`; unknown or already withdrawn id → `ABANDON_INVALID`.
   - `abandonedLines(records, { max = 8, maxChars = 1500 } = {})` → `string[]`: the newest `max` active records, one line each (`- ab-0002 2026-10-09 <approach>: <why> [f-0017]`, each field cut with an ellipsis so a line is at most 300 characters), then `- … N earlier; Progress abandoned lists them` when some were left out by either cap.
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-abandoned.test.js`: append and read back; ids count up; `tried` over 6 and a two-line `approach` refuse; an unknown fact id and an unknown decision id refuse; a superseded fact id is accepted; the same approach with different case and spacing refuses `ALREADY_ABANDONED`; after `withdraw` the same approach is accepted again and the first record is still in `list()` with `withdrawn` set; a bad line in the file is skipped and reported; `abandonedLines` caps at 8 records and at 1,500 characters and adds the count line; "recordFailure appends nothing": build a `CaseRuntime` on a temp root, make a case `active`, call `runtime.recordFailure(…)` and assert `.kl/abandoned.jsonl` does not exist. In `tests/cases-leaks.test.js` add: with an abandoned record in case B naming an invented phrase, `runtime.index.search({ text: <phrase>, forCaseId: A })` and `searchCases` return no hit whose text or key holds it, and the index's stored documents for B hold no document built from the file (follow the file's existing style for reading the index).
-- [ ] **Step 2: Run** `node --test tests/cases-abandoned.test.js tests/cases-leaks.test.js` — expected: the new file fails on the missing module; the leak test passes already (it pins that nobody adds the file to the index later).
-- [ ] **Step 3: Implement** `src/cases/abandoned.js`. Do not touch `src/cases/index-store.js`.
-- [ ] **Step 4: Run** the two files again and `node --test tests/electron-boundary.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing tests.** `tests/cases-abandoned.test.js`: append and read back; ids count up; `tried` over 6 and a two-line `approach` refuse; an unknown fact id and an unknown decision id refuse; a superseded fact id is accepted; the same approach with different case and spacing refuses `ALREADY_ABANDONED`; after `withdraw` the same approach is accepted again and the first record is still in `list()` with `withdrawn` set; a bad line in the file is skipped and reported; `abandonedLines` caps at 8 records and at 1,500 characters and adds the count line; "recordFailure appends nothing": build a `CaseRuntime` on a temp root, make a case `active`, call `runtime.recordFailure(…)` and assert `.kl/abandoned.jsonl` does not exist. In `tests/cases-leaks.test.js` add: with an abandoned record in case B naming an invented phrase, `runtime.index.search({ text: <phrase>, forCaseId: A })` and `searchCases` return no hit whose text or key holds it, and the index's stored documents for B hold no document built from the file (follow the file's existing style for reading the index).
+- [x] **Step 2: Run** `node --test tests/cases-abandoned.test.js tests/cases-leaks.test.js` — expected: the new file fails on the missing module; the leak test passes already (it pins that nobody adds the file to the index later).
+- [x] **Step 3: Implement** `src/cases/abandoned.js`. Do not touch `src/cases/index-store.js`.
+- [x] **Step 4: Run** the two files again and `node --test tests/electron-boundary.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/abandoned.js tests/cases-abandoned.test.js tests/cases-leaks.test.js
@@ -565,11 +573,11 @@ Parallel with Tasks 1 and 2.
   - `progressView({ scopeView, file, resolve, newestCheck })` → `{ objective, criteria: [{ id, text, scope, origin, provisional, state, evidence: [{ id, holds, provenance, label }], reasons, opinion }], counts: { confirmed, met, stale, failing, unmet, proposed } }`. A proposed row has `state: null`.
   - `summaryLine(view, readiness = null)` → the one line of spec §6.3; without `readiness` it ends before the "ready" part.
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-verify-status.test.js`, with facts built as plain `Map`s: every rule above; precedence `failing` over `stale` over `met`; a reworded entry (same id never happens; a different hash) is `unmet`; "an external-agent fact alone holds"; an `inferred` and an `unknown` fact do not; an eligible fact under an active load-bearing unknown on the same `subject.attr` does not; a superseded fact gives `stale` with the label naming the superseding id; an id with an unregistered prefix is `evidence-missing`; proposed rows have `state: null` and are counted only in `proposed`; `summaryLine` for the spec's example; "a cached status is never believed": a file whose `cache.states` says `met` for a criterion with no record gives `unmet`. `tests/cases-verify-store.test.js`: the empty shape; ids count up; 5 kept per criterion; an unreadable file reads empty and is replaced by the next write; `setCache` with equal states writes nothing (compare mtime or bytes).
-- [ ] **Step 2: Run** `node --test tests/cases-verify-status.test.js tests/cases-verify-store.test.js` — expected: missing modules.
-- [ ] **Step 3: Implement** the three files. `status.js` requires nothing but `evidence.js`'s constants (or nothing).
-- [ ] **Step 4: Run** the two files and `node --test tests/electron-boundary.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing tests.** `tests/cases-verify-status.test.js`, with facts built as plain `Map`s: every rule above; precedence `failing` over `stale` over `met`; a reworded entry (same id never happens; a different hash) is `unmet`; "an external-agent fact alone holds"; an `inferred` and an `unknown` fact do not; an eligible fact under an active load-bearing unknown on the same `subject.attr` does not; a superseded fact gives `stale` with the label naming the superseding id; an id with an unregistered prefix is `evidence-missing`; proposed rows have `state: null` and are counted only in `proposed`; `summaryLine` for the spec's example; "a cached status is never believed": a file whose `cache.states` says `met` for a criterion with no record gives `unmet`. `tests/cases-verify-store.test.js`: the empty shape; ids count up; 5 kept per criterion; an unreadable file reads empty and is replaced by the next write; `setCache` with equal states writes nothing (compare mtime or bytes).
+- [x] **Step 2: Run** `node --test tests/cases-verify-status.test.js tests/cases-verify-store.test.js` — expected: missing modules.
+- [x] **Step 3: Implement** the three files. `status.js` requires nothing but `evidence.js`'s constants (or nothing).
+- [x] **Step 4: Run** the two files and `node --test tests/electron-boundary.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/verify tests/cases-verify-status.test.js tests/cases-verify-store.test.js
@@ -602,16 +610,16 @@ After Tasks 1 to 3. First task of the sequential run.
   - Router: after its `rt.brief(created.id).update('successCriteria', …)` call, replace that call with `rt.writeScope(created.id, { field: 'successCriteria', value: p.newCase.successCriteria, origin: 'detour' })` (it already runs inside `systemAction`), and record the objective as `detour` in the same block.
   - Gating: `applyToBrief(brief, field, record)` gains an optional fourth argument `{ runtime, caseId }`; for `successCriteria` it calls `runtime.writeScope(caseId, { field, value: [...current, answer], origin: 'gating-answer', confirmed: { by: 'gating-answer', factId: record.answer.factId, … } })` when given, and keeps its present `brief.append` otherwise. Pass the argument from its caller in the same file.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - `tests/cases-runtime.test.js`: "a case created before this stage reads unchanged": build a case, delete `.kl/scope.json` if present, hash every tracked file, call `runtime.scopeView`, `runtime.orientation` — no file changed and none added; the first `beginTurn` adds exactly `.kl/scope.json` with every criterion `legacy`/`proposed`; "an owner edit to brief.md is proposed until pressed": append a criterion to `brief.md` on disk between turns → after `beginTurn` it is `file`/`proposed`; `applyScopeAction` confirm with a stale hash throws `SCOPE_STALE`; `drop` removes the string from `brief.md`; `edit` of a confirmed criterion keeps it `confirmed` with origin `owner-action`; `all-proposed` confirms every proposed row and leaves confirmed ones alone; a `scope` journal entry is written; `createCase({ objective, objectiveBy: 'owner' })` gives a confirmed objective and `createCase({ objective })` a proposed one.
   - `tests/cases-brief.test.js`: "gating waits for one confirmed criterion"; "a proposed criterion beside a confirmed one does not hold gating back"; "a brief already gating.complete stays complete".
   - `tests/cases-detour-router.test.js`: a detour resolved as "new" creates a case whose one criterion and objective are `detour`/`proposed`.
   - `tests/cases-ipc.test.js`: `case:create` with an objective → confirmed; without → no objective row.
   - `tests/management-tools.test.js` (in "create_case"): the created case's objective is `confirmed`, origin `owner-create`.
-- [ ] **Step 2: Run** `node --test tests/cases-runtime.test.js tests/cases-brief.test.js tests/cases-detour-router.test.js tests/cases-ipc.test.js tests/management-tools.test.js` — expected: the new tests fail.
-- [ ] **Step 3: Implement.** Existing tests that call `completeGating` after the model set `successCriteria` will now fail: give each such test a confirmed criterion through `runtime.applyScopeAction(id, { action: 'add', target: 'all-proposed', text: …, by: 'owner-action' })` or a small helper `tests/helpers/case-scope.js` (`confirmAll(runtime, id)`), and list every test file you touched in this task's Deviations entry.
-- [ ] **Step 4: Run** the five files again, then `node --test tests/cases-tools.test.js tests/cases-core.test.js tests/cases-regressions.test.js tests/cases-turn-runner.test.js tests/cases-runtime-unattended.test.js tests/cases-plan-executor-tools.test.js tests/cases-chat.test.js` — expected: `# fail 0` (fix gating fall-out with the helper).
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/cases-runtime.test.js tests/cases-brief.test.js tests/cases-detour-router.test.js tests/cases-ipc.test.js tests/management-tools.test.js` — expected: the new tests fail.
+- [x] **Step 3: Implement.** Existing tests that call `completeGating` after the model set `successCriteria` will now fail: give each such test a confirmed criterion through `runtime.applyScopeAction(id, { action: 'add', target: 'all-proposed', text: …, by: 'owner-action' })` or a small helper `tests/helpers/case-scope.js` (`confirmAll(runtime, id)`), and list every test file you touched in this task's Deviations entry.
+- [x] **Step 4: Run** the five files again, then `node --test tests/cases-tools.test.js tests/cases-core.test.js tests/cases-regressions.test.js tests/cases-turn-runner.test.js tests/cases-runtime-unattended.test.js tests/cases-plan-executor-tools.test.js tests/cases-chat.test.js` — expected: `# fail 0` (fix gating fall-out with the helper).
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/case-runtime.js src/cases/brief.js src/cases/detours/router.js src/cases/playbooks/gating.js src/ipc/case-handlers.js src/mcp/case-tools.js tests
@@ -635,11 +643,11 @@ git commit -m "feat(cases): the runtime records who wrote each criterion; gating
   - `update objective`: with a verified quote → confirmed, origin `owner-quote`; without, refused `OBJECTIVE_CONFIRMED` when the current objective is confirmed, else written as origin `model`.
   - The journal line reads `Brief successCriteria appended (proposed, sc-004)` or `(confirmed, sc-004, quote: "…")`; never `(user)` for these two fields.
 
-- [ ] **Step 1: Write the failing tests** in `tests/cases-tools.test.js` (a new `describe('Brief scope rules')`, each test supplying `ownerMessages` in the case context): append without a quote → `proposed`; with a quote found in `ownerMessages` and containing the item → `confirmed`; "a quote of yes does not confirm": `ownerMessages: ['yes do that']`, quote `'yes do that'`, item `'Three written quotes'` → `SCOPE_NOT_IN_QUOTE`; `provenance: 'user'` with no quote → refused (it passed before this task); a quote not in `ownerMessages` → the existing quote error; list `update` dropping a confirmed row → `CRITERION_CONFIRMED` and the file unchanged; dropping a proposed row works; the 13th criterion and the 7th proposed → `CRITERION_LIMIT`; a duplicate → `CRITERION_DUPLICATE`; a two-line item → `CRITERION_INVALID`; objective: model rewrite of a confirmed objective → `OBJECTIVE_CONFIRMED`; of a proposed one → allowed and still proposed; with a quote → confirmed; extra parameters (`state: 'confirmed'`, `force: true`) are ignored.
-- [ ] **Step 2: Run** `node --test tests/cases-tools.test.js` — expected: the new tests fail.
-- [ ] **Step 3: Implement.** Keep the tool's schema as it is (no new parameter); update only the description sentence to say that criteria added without the owner's quoted words are proposals.
-- [ ] **Step 4: Run** `node --test tests/cases-tools.test.js tests/cases-regressions.test.js tests/cases-chat.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing tests** in `tests/cases-tools.test.js` (a new `describe('Brief scope rules')`, each test supplying `ownerMessages` in the case context): append without a quote → `proposed`; with a quote found in `ownerMessages` and containing the item → `confirmed`; "a quote of yes does not confirm": `ownerMessages: ['yes do that']`, quote `'yes do that'`, item `'Three written quotes'` → `SCOPE_NOT_IN_QUOTE`; `provenance: 'user'` with no quote → refused (it passed before this task); a quote not in `ownerMessages` → the existing quote error; list `update` dropping a confirmed row → `CRITERION_CONFIRMED` and the file unchanged; dropping a proposed row works; the 13th criterion and the 7th proposed → `CRITERION_LIMIT`; a duplicate → `CRITERION_DUPLICATE`; a two-line item → `CRITERION_INVALID`; objective: model rewrite of a confirmed objective → `OBJECTIVE_CONFIRMED`; of a proposed one → allowed and still proposed; with a quote → confirmed; extra parameters (`state: 'confirmed'`, `force: true`) are ignored.
+- [x] **Step 2: Run** `node --test tests/cases-tools.test.js` — expected: the new tests fail.
+- [x] **Step 3: Implement.** Keep the tool's schema as it is (no new parameter); update only the description sentence to say that criteria added without the owner's quoted words are proposals.
+- [x] **Step 4: Run** `node --test tests/cases-tools.test.js tests/cases-regressions.test.js tests/cases-chat.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/tools/builtin/case-tools.js tests/cases-tools.test.js
@@ -663,11 +671,11 @@ git commit -m "feat(cases): the Brief tool adds criteria as proposals unless the
   - `closeReadiness(runtime, id, { view })` → `{ ready, items, computedAt }`, items as in spec §6.4 **without** `check-passing` (Task 16 adds it). Each item `{ id, state: 'ok' | 'open' | 'unknown' | 'n/a', by, count, refs, fix }`; `fix` is built from fixed wording, ids and counts only. `tree-clean` and `branch-merged` are `n/a` unless the case type is `software-repo`; `unknown` when the snapshot is missing or `stale`, or (`branch-merged`) when `state.openPrs` is `null`.
   - `readinessFingerprint(readiness)` → `'sha256:…'` over the sorted `[id, state]` pairs.
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-verify-readiness.test.js` on a real runtime in a temp root, with jobs, envelopes and a plan written through `tests/helpers/executor-fixtures.js` where it offers them and as plain files under `.kl/` where it does not: each item in each of its states; "fix never carries case text": give a criterion, a question and a job a canary string and assert no `fix` holds it; `ready` is true only when all are `ok` or `n/a`; an open `close-proposal` question does not count against `questions-answered`; an `expired` envelope does not count and an `active` one does; `branch-merged` counts only a PR whose `headRefName` equals the snapshot's `branch`, and its `count` of other open PRs is in the item; the fingerprint changes when one state changes and not when only `computedAt` does; `runtime.progress` of a case with no stage files writes nothing.
-- [ ] **Step 2: Run** `node --test tests/cases-verify-readiness.test.js` — expected: missing module.
-- [ ] **Step 3: Implement.** Wrap each item's read in a guard: a read that throws makes that item `unknown`, never the whole list.
-- [ ] **Step 4: Run** the file and `node --test tests/cases-runtime.test.js tests/electron-boundary.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing tests.** `tests/cases-verify-readiness.test.js` on a real runtime in a temp root, with jobs, envelopes and a plan written through `tests/helpers/executor-fixtures.js` where it offers them and as plain files under `.kl/` where it does not: each item in each of its states; "fix never carries case text": give a criterion, a question and a job a canary string and assert no `fix` holds it; `ready` is true only when all are `ok` or `n/a`; an open `close-proposal` question does not count against `questions-answered`; an `expired` envelope does not count and an `active` one does; `branch-merged` counts only a PR whose `headRefName` equals the snapshot's `branch`, and its `count` of other open PRs is in the item; the fingerprint changes when one state changes and not when only `computedAt` does; `runtime.progress` of a case with no stage files writes nothing.
+- [x] **Step 2: Run** `node --test tests/cases-verify-readiness.test.js` — expected: missing module.
+- [x] **Step 3: Implement.** Wrap each item's read in a guard: a read that throws makes that item `unknown`, never the whole list.
+- [x] **Step 4: Run** the file and `node --test tests/cases-runtime.test.js tests/electron-boundary.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/verify/readiness.js src/cases/case-runtime.js tests/cases-verify-readiness.test.js
@@ -695,11 +703,11 @@ git commit -m "feat(cases): a ready-to-close list computed from the record, each
   - `chat-handlers.js`: an array `caseToolResults` filled in the existing `executor.on('postExecute', …)` listener through `toolResultRow` (parameters come from the matching `preExecute`); the normal exit calls `endCaseTurn({ summary: safeMessage, journal, evidence: { toolResults: caseToolResults }, verify: true })`; the stopped, blocked and failed exits are unchanged.
   - `turn-runner.js`: the same collection on the wake-up's executor (`executor.on('postExecute', …)` after `createToolExecutor`); `close('acted', …)` passes `evidence` and `verify: true`; every other outcome passes neither.
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-verify-evidence.test.js`: "only case-tool results are kept" (`Bash`, `WebFetch`, `Read` rows are dropped by `toolResultRow` and again by `collectTurnEvidence` when handed in directly); the 1,000 and 4,000 character caps; facts written in the turn are found by `addedBy` and by the line mark (a fact written by an answered question during the turn, `addedBy: 'question:q-0001'`, is found by the mark); decisions past the mark; `changed` false for a turn that only read; a registered extra source's rows appear in `extra`. `tests/cases-runtime.test.js`: `turn.marks` is set; `endTurn` with a `_closeProgress` that throws still commits and releases the lock; a returned `block` is the first text of the journal entry. `tests/cases-turn-runner.test.js`: the `acted` close passes `verify: true`, the `quiet`, `skipped` and `failed` closes do not (spy on `runtime.endTurn`). `tests/cases-chat.test.js`: a stopped turn passes no `verify`.
-- [ ] **Step 2: Run** `node --test tests/cases-verify-evidence.test.js tests/cases-runtime.test.js tests/cases-turn-runner.test.js tests/cases-chat.test.js` — expected: the new tests fail.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the four files again and `node --test tests/cases-stop.test.js tests/cases-service-wakeups.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing tests.** `tests/cases-verify-evidence.test.js`: "only case-tool results are kept" (`Bash`, `WebFetch`, `Read` rows are dropped by `toolResultRow` and again by `collectTurnEvidence` when handed in directly); the 1,000 and 4,000 character caps; facts written in the turn are found by `addedBy` and by the line mark (a fact written by an answered question during the turn, `addedBy: 'question:q-0001'`, is found by the mark); decisions past the mark; `changed` false for a turn that only read; a registered extra source's rows appear in `extra`. `tests/cases-runtime.test.js`: `turn.marks` is set; `endTurn` with a `_closeProgress` that throws still commits and releases the lock; a returned `block` is the first text of the journal entry. `tests/cases-turn-runner.test.js`: the `acted` close passes `verify: true`, the `quiet`, `skipped` and `failed` closes do not (spy on `runtime.endTurn`). `tests/cases-chat.test.js`: a stopped turn passes no `verify`.
+- [x] **Step 2: Run** `node --test tests/cases-verify-evidence.test.js tests/cases-runtime.test.js tests/cases-turn-runner.test.js tests/cases-chat.test.js` — expected: the new tests fail.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** the four files again and `node --test tests/cases-stop.test.js tests/cases-service-wakeups.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/verify/evidence.js src/cases/case-runtime.js src/ipc/chat-handlers.js src/cases/turn-runner.js tests
@@ -727,7 +735,7 @@ git commit -m "feat(cases): a turn knows what it wrote, and its close receives t
   - `verificationBlock({ pass, before, after, check = null })` → the host-written journal block of spec §6.5 or `null` when there is nothing to say. A regression (a criterion that left `met`) is its first line.
   - `_closeProgress(turn, { evidence, verify })`: when `verify`, `collectTurnEvidence`, compute the view before, `runVerifyPass`, compute the view after, return `{ block }`.
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-verify-judge.test.js`, with a runtime whose `host.inferenceRouter` is a stub returning a scripted reply with `llmMetrics` (copy the shape `tests/cases-turn-runner.test.js` uses) and a `host.getUsageTracker` stub:
+- [x] **Step 1: Write the failing tests.** `tests/cases-verify-judge.test.js`, with a runtime whose `host.inferenceRouter` is a stub returning a scripted reply with `llmMetrics` (copy the shape `tests/cases-turn-runner.test.js` uses) and a `host.getUsageTracker` stub:
   - each skip reason, by name: "skipped when nothing was written", "skipped with no confirmed criterion", "skipped when stopped", "skipped over the daily cap", "skipped past 80 % of usd", "request mode runs only when asked";
   - "prose never reaches the pass": the assistant's reply and the journal text both hold a canary; the message the stub received does not, and `buildVerifyInput.length` (its parameter list) has no slot for either;
   - the input holds each confirmed criterion's id and text, no proposed criterion, this turn's facts with provenance and source, and no `inferred` or `unknown` fact; it is at most `maxInputChars`;
@@ -736,10 +744,10 @@ git commit -m "feat(cases): a turn knows what it wrote, and its close receives t
   - a stub that never settles: the pass returns after `timeoutMs` (set to 50 in the test, with a ref'd timer held by the test) with `error` set, and `endTurn` commits;
   - "charged to the case and filed under the verify role": `.kl/budget.json`'s `usd.spent` grew by the stub's cost and the tracker stub received an event whose `role` is the verify model role;
   - the journal entry of the turn starts with `## Verification (written by King Louie)` when a criterion changed state, and has no block when the pass was skipped for "nothing written".
-- [ ] **Step 2: Run** `node --test tests/cases-verify-judge.test.js` — expected: missing module.
-- [ ] **Step 3: Implement.** Move `recordOneShotUsage` and `textOf` to `src/cases/one-shot-usage.js` without changing them.
-- [ ] **Step 4: Run** `node --test tests/cases-verify-judge.test.js tests/cases-turn-runner.test.js tests/cases-runtime.test.js tests/cases-roles.test.js tests/cases-budget.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/cases-verify-judge.test.js` — expected: missing module.
+- [x] **Step 3: Implement.** Move `recordOneShotUsage` and `textOf` to `src/cases/one-shot-usage.js` without changing them.
+- [x] **Step 4: Run** `node --test tests/cases-verify-judge.test.js tests/cases-turn-runner.test.js tests/cases-runtime.test.js tests/cases-roles.test.js tests/cases-budget.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/verify/judge.js src/cases/one-shot-usage.js src/cases/turn-runner.js src/cases/defaults.js src/cases/case-runtime.js tests/cases-verify-judge.test.js
@@ -761,11 +769,11 @@ git commit -m "feat(cases): a verify pass at the close of a changed turn reads t
   - `_closeProgress` ends with `setCache(states)`.
   - `freezeProgress(runtime, id)`: `verification(id).freeze({ at, status, summary, criteria: view.criteria, readiness })`. Called from `CaseRuntime.setStatus` when the new status is `done` or `abandoned`, after `updateMeta`, inside a guard (a failure logs; the status change stands). `runtime.progress` returns the frozen record for such a case (Task 6 already reads `file.closed`).
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-runtime.test.js`: a case with a `met` criterion (write a verification record through the store, citing an active sourced fact); supersede the fact through the ledger; the next `beginTurn` has a `criterion-regressed` trigger and a `Since last turn` note, and `turn.reorientPending` is true; `recordReorientation` acknowledges it and the turn after has no such trigger; the cache file now says `stale`; "progress is frozen at done and not recomputed": set the case `done`, then supersede a cited fact by appending to `facts.jsonl` directly — `runtime.progress(id)` still returns the frozen `met`, labelled frozen; a case set `abandoned` is frozen too; a `freeze` that throws does not stop `setStatus`. `tests/cases-triggers.test.js`: a hook trigger of kind `criterion-regressed` passes through `detectTriggers` and is dropped once its key is in `acknowledgedKeys`.
-- [ ] **Step 2: Run** `node --test tests/cases-runtime.test.js tests/cases-triggers.test.js` — expected: the new tests fail.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the two files and `node --test tests/cases-status.test.js tests/cases-runtime-unattended.test.js tests/cases-detour-hooks.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing tests.** `tests/cases-runtime.test.js`: a case with a `met` criterion (write a verification record through the store, citing an active sourced fact); supersede the fact through the ledger; the next `beginTurn` has a `criterion-regressed` trigger and a `Since last turn` note, and `turn.reorientPending` is true; `recordReorientation` acknowledges it and the turn after has no such trigger; the cache file now says `stale`; "progress is frozen at done and not recomputed": set the case `done`, then supersede a cited fact by appending to `facts.jsonl` directly — `runtime.progress(id)` still returns the frozen `met`, labelled frozen; a case set `abandoned` is frozen too; a `freeze` that throws does not stop `setStatus`. `tests/cases-triggers.test.js`: a hook trigger of kind `criterion-regressed` passes through `detectTriggers` and is dropped once its key is in `acknowledgedKeys`.
+- [x] **Step 2: Run** `node --test tests/cases-runtime.test.js tests/cases-triggers.test.js` — expected: the new tests fail.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** the two files and `node --test tests/cases-status.test.js tests/cases-runtime-unattended.test.js tests/cases-detour-hooks.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/verify/hook.js src/cases/case-runtime.js tests/cases-runtime.test.js tests/cases-triggers.test.js
@@ -796,7 +804,7 @@ git commit -m "feat(cases): a criterion that leaves met asks for re-orientation;
   - `PRESSED_TYPES` gains `'close-proposal'` and `'check-approve'`. `'scope-confirm'` is **not** added.
   - `CASE_TOOL_NAMES` gains `'Progress'`; `CASE_MODE_PROMPT` gains: `- Success criteria you add are proposals until the owner confirms them; ask with Progress askScope.`, `- You cannot mark a criterion met. Record the evidence as facts; King Louie checks them at the end of the turn.`, `- When you drop an approach, record it with Progress abandon. Do not retry an approach the orientation lists as abandoned without a new fact.`
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-progress-tool.test.js` (begin a turn before any action that needs one; supply a `caseContext` as `tests/cases-tools.test.js` does):
+- [x] **Step 1: Write the failing tests.** `tests/cases-progress-tool.test.js` (begin a turn before any action that needs one; supply a `caseContext` as `tests/cases-tools.test.js` does):
   - each action against a `draft`, `active`, `needs-direction`, `paused` and `done` case, per the spec's table;
   - `abandon` writes the record and a journal entry; a duplicate returns `ALREADY_ABANDONED`; `withdraw` works;
   - `askScope`: `SCOPE_NOTHING_PROPOSED`; one question with the two options and the hashed entries; a second call returns `SCOPE_QUESTION_OPEN`; "scope-confirm is a spoken question" (`answerClass(record) === 'spoken'`); answering `all` through `runtime.answerQuestion(…, { channel: 'in-app-chat', optionId: 'all', quote: 'confirm all three please' })` confirms the entries; a criterion reworded after the question was asked is skipped and noted; a free-text answer confirms nothing; `none` removes the strings from `brief.md`;
@@ -807,10 +815,10 @@ git commit -m "feat(cases): a criterion that leaves met asks for re-orientation;
   - extra parameters (`state`, `status`, `force`, `evidence`) change nothing.
   - `tests/cases-status.test.js`: the two read ops in every status; `Progress.proposeDone` denied in `draft` and `needs-direction`.
   - `tests/management-tools.test.js`: `answer_question` on a `close-proposal` is refused on `in-app-chat`, `mcp-stdio` and `mcp-frontdoor` with the pressed message; "answer_question confirms scope with the owner's quote" (quote "confirm all of those" naming the option label).
-- [ ] **Step 2: Run** `node --test tests/cases-progress-tool.test.js tests/cases-status.test.js tests/management-tools.test.js` — expected: the new tests fail.
-- [ ] **Step 3: Implement.** Check the wake-up path: `allowedToolNames` is built from `CASE_TOOL_NAMES`, so `Progress` is available there with no further change.
-- [ ] **Step 4: Run** the three files and `node --test tests/cases-tools.test.js tests/cases-questions.test.js tests/cases-question-chat.test.js tests/cases-turn-runner.test.js tests/cases-chat.test.js tests/case-chat-attach.test.js` — expected: `# fail 0` (tests that list the case tools by name need `Progress` added).
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/cases-progress-tool.test.js tests/cases-status.test.js tests/management-tools.test.js` — expected: the new tests fail.
+- [x] **Step 3: Implement.** Check the wake-up path: `allowedToolNames` is built from `CASE_TOOL_NAMES`, so `Progress` is available there with no further change.
+- [x] **Step 4: Run** the three files and `node --test tests/cases-tools.test.js tests/cases-questions.test.js tests/cases-question-chat.test.js tests/cases-turn-runner.test.js tests/cases-chat.test.js tests/case-chat-attach.test.js` — expected: `# fail 0` (tests that list the case tools by name need `Progress` added).
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/tools/builtin/case-progress-tool.js src/cases/verify/questions.js src/tools/index.js src/cases/chat-integration.js src/cases/status.js src/cases/mcp-tool-definitions.js src/cases/answer-handlers.js tests
@@ -832,11 +840,11 @@ git commit -m "feat(cases): the Progress tool: status, abandoned approaches, a s
   - `## Abandoned approaches (do not retry one without a new fact; say what changed if you do)` after the load-bearing unknowns, from `abandonedLines`; left out when there is none and no `lastFailure`. When `lastFailure` is given (the case's `statusReason.kind` is `direction`; the runtime derives `journal/<attr>.md` from the direction fact named by `statusReason.ref`), the section ends with `- The last failure report is journal/<name>.md. If the approach it describes is dropped, record it with Progress abandon.`
   - Each new input is read in `CaseRuntime.orientation` through its `safely` wrapper.
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-orientation.test.js`: the section order (Brief, Progress, load-bearing unknowns, Abandoned approaches); the spec's example rows; a proposed objective's mark for origins `model` and `file`; both caps, with the "more" lines; a criterion text holding a newline or 400 characters is one cut line; no `progress` input gives exactly today's output (compare with a snapshot taken before the change in the same test file, built from the same inputs); a frozen case's heading; "a resumed case names its last failure report". `tests/cases-orientation-unattended.test.js`: an orientation built by the runtime for a case with no stage files has the Progress section from the in-memory view and writes no file.
-- [ ] **Step 2: Run** `node --test tests/cases-orientation.test.js tests/cases-orientation-unattended.test.js` — expected: the new tests fail.
-- [ ] **Step 3: Implement.** The new sections are part of `head`, which is never trimmed; the fact budget shrinks by their length (no other change to the budget code).
-- [ ] **Step 4: Run** the two files and `node --test tests/cases-runtime.test.js tests/mcp-case-tools.test.js tests/cases-regressions.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing tests.** `tests/cases-orientation.test.js`: the section order (Brief, Progress, load-bearing unknowns, Abandoned approaches); the spec's example rows; a proposed objective's mark for origins `model` and `file`; both caps, with the "more" lines; a criterion text holding a newline or 400 characters is one cut line; no `progress` input gives exactly today's output (compare with a snapshot taken before the change in the same test file, built from the same inputs); a frozen case's heading; "a resumed case names its last failure report". `tests/cases-orientation-unattended.test.js`: an orientation built by the runtime for a case with no stage files has the Progress section from the in-memory view and writes no file.
+- [x] **Step 2: Run** `node --test tests/cases-orientation.test.js tests/cases-orientation-unattended.test.js` — expected: the new tests fail.
+- [x] **Step 3: Implement.** The new sections are part of `head`, which is never trimmed; the fact budget shrinks by their length (no other change to the budget code).
+- [x] **Step 4: Run** the two files and `node --test tests/cases-runtime.test.js tests/mcp-case-tools.test.js tests/cases-regressions.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/orientation.js src/cases/case-runtime.js tests/cases-orientation.test.js tests/cases-orientation-unattended.test.js
@@ -861,11 +869,11 @@ Stream C(i), first. Parallel with Task 14.
   - `case:setStatus` is unchanged in what it allows (never refused for an open item); its reply gains `progress` (the frozen record after `done`).
   - Both new channels are in the `case` domain, which `PROXIED_DOMAINS` already proxies; no allowlist change.
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-progress-ipc.test.js`, with the fake `ipcMain` pattern of `tests/cases-ipc.test.js`: the reply shape and `untrustedText: true`; a read changes no file; confirm one, confirm `all-proposed`, drop, edit, add; `SCOPE_STALE` with an old hash; a bad `action` and a bad `target` are refused and the runtime is not called; a held case lock (another turn id) gives the busy message; "case:setStatus done is never refused for an open item"; after `done` the reply's `progress.frozen` is true. In `tests/cases-ipc.test.js` assert the two constants exist and the handlers are registered.
-- [ ] **Step 2: Run** `node --test tests/cases-progress-ipc.test.js tests/cases-ipc.test.js` — expected: the new tests fail.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the two files and `node --test tests/electron-boundary.test.js tests/desktop-bridge-allowlist.test.js tests/preload-bridge.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing tests.** `tests/cases-progress-ipc.test.js`, with the fake `ipcMain` pattern of `tests/cases-ipc.test.js`: the reply shape and `untrustedText: true`; a read changes no file; confirm one, confirm `all-proposed`, drop, edit, add; `SCOPE_STALE` with an old hash; a bad `action` and a bad `target` are refused and the runtime is not called; a held case lock (another turn id) gives the busy message; "case:setStatus done is never refused for an open item"; after `done` the reply's `progress.frozen` is true. In `tests/cases-ipc.test.js` assert the two constants exist and the handlers are registered.
+- [x] **Step 2: Run** `node --test tests/cases-progress-ipc.test.js tests/cases-ipc.test.js` — expected: the new tests fail.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** the two files and `node --test tests/electron-boundary.test.js tests/desktop-bridge-allowlist.test.js tests/preload-bridge.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/ipc/case-progress-handlers.js src/ipc/constants.js src/ipc/register.js src/ipc/case-unattended-handlers.js preload.js tests/cases-progress-ipc.test.js tests/cases-ipc.test.js
@@ -890,11 +898,11 @@ Stream C(i), second.
 - The panel's **Done** button: its confirm dialog shows the summary line and the open items (from `cases.progress`) before the existing wording.
 - Every case string is set with `textContent`. The only `innerHTML` uses in the new code clear a container (`= ''`).
 
-- [ ] **Step 1: Write the failing test.** `tests/renderer-progress-text.test.js`, modelled on `tests/renderer-playbooks-text.test.js`: extract the source of `renderCaseProgressSection` and of the two card branches from `renderer.js`; assert there is no `insertAdjacentHTML`, `outerHTML`, `marked` or `innerHTML +=`, and that every `.innerHTML =` assigns `''`; "each evidence id is drawn with its provenance" (the block's source reads `provenance` for every evidence entry it draws); the state tag is text (the source sets `textContent` from the state name).
-- [ ] **Step 2: Run** `node --test tests/renderer-progress-text.test.js` — expected: fails (no such function).
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `node --test tests/renderer-progress-text.test.js tests/renderer-playbooks-text.test.js tests/renderer-sources-text.test.js` — expected: `# fail 0`. Then check by hand in the app (`unset ELECTRON_RUN_AS_NODE && npm start`, a throwaway case): a proposed criterion, Confirm, a `stale` row after a correction, the close card. Say in Deviations what you saw.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing test.** `tests/renderer-progress-text.test.js`, modelled on `tests/renderer-playbooks-text.test.js`: extract the source of `renderCaseProgressSection` and of the two card branches from `renderer.js`; assert there is no `insertAdjacentHTML`, `outerHTML`, `marked` or `innerHTML +=`, and that every `.innerHTML =` assigns `''`; "each evidence id is drawn with its provenance" (the block's source reads `provenance` for every evidence entry it draws); the state tag is text (the source sets `textContent` from the state name).
+- [x] **Step 2: Run** `node --test tests/renderer-progress-text.test.js` — expected: fails (no such function).
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `node --test tests/renderer-progress-text.test.js tests/renderer-playbooks-text.test.js tests/renderer-sources-text.test.js` — expected: `# fail 0`. Then check by hand in the app (`unset ELECTRON_RUN_AS_NODE && npm start`, a throwaway case): a proposed criterion, Confirm, a `stale` row after a correction, the close card. Say in Deviations what you saw.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add renderer.js index.html styles.css tests/renderer-progress-text.test.js
@@ -919,11 +927,11 @@ Stream C(ii). Parallel with Tasks 12 and 13.
   - No tool, no scope and no entry in `CASE_SCOPES` is added; `CASE_MCP_TOOLS` is unchanged except that `open_case`'s and `list_cases`'s descriptions name the new fields. `CASE_SCOPED_TOOLS` and `NO_CASE_DATA` (`src/cases/chat-attach.js`) are unchanged.
   - A read that throws while building `progress` gives `progress: { error: 'progress could not be read' }` and the rest of the reply as today.
 
-- [ ] **Step 1: Write the failing tests.** `tests/mcp-case-tools.test.js`: `open_case` carries `progress` inside the untrusted wrapper and nowhere outside it; `list_cases` counts are numbers outside the wrapper; a case with no stage files gives legacy/proposed rows and writes nothing. `tests/management-tools.test.js`: in a case chat (`caseScope` set) `open_case` of another case is still refused `other_case`; `answer_question` refuses `close-proposal` and `check-approve` (build a record with that payload type directly) on `in-app-chat`. `tests/frontdoor-case-tools.test.js`: `open_case` under `cases:read` returns `progress`; `answer_question` under `cases:answer` on a `scope-confirm` question confirms it and on a `close-proposal` is refused; the registered scopes are exactly the three of today.
-- [ ] **Step 2: Run** `node --test tests/mcp-case-tools.test.js tests/management-tools.test.js tests/frontdoor-case-tools.test.js` — expected: the new tests fail.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the three files and `node --test tests/case-chat-attach.test.js tests/mcp-stdio.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Write the failing tests.** `tests/mcp-case-tools.test.js`: `open_case` carries `progress` inside the untrusted wrapper and nowhere outside it; `list_cases` counts are numbers outside the wrapper; a case with no stage files gives legacy/proposed rows and writes nothing. `tests/management-tools.test.js`: in a case chat (`caseScope` set) `open_case` of another case is still refused `other_case`; `answer_question` refuses `close-proposal` and `check-approve` (build a record with that payload type directly) on `in-app-chat`. `tests/frontdoor-case-tools.test.js`: `open_case` under `cases:read` returns `progress`; `answer_question` under `cases:answer` on a `scope-confirm` question confirms it and on a `close-proposal` is refused; the registered scopes are exactly the three of today.
+- [x] **Step 2: Run** `node --test tests/mcp-case-tools.test.js tests/management-tools.test.js tests/frontdoor-case-tools.test.js` — expected: the new tests fail.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** the three files and `node --test tests/case-chat-attach.test.js tests/mcp-stdio.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/mcp/case-tools.js src/cases/mcp-tool-definitions.js tests/mcp-case-tools.test.js tests/management-tools.test.js tests/frontdoor-case-tools.test.js
@@ -955,7 +963,7 @@ After stream C. Behind `cases.softwareRepo.check.enabled`, default **false**.
   - `case:setCheck` `{ caseId, command, approved }`: `command` (a string) validates, writes `brief.check` with provenance `user` inside `systemAction`, and requests approval → `{ ok, check, questionId }`; `approved: false` → `withdrawAll()`; refusals `CHECK_INVALID`, `CHECK_NO_LOCAL_REPO`, `CHECK_DISABLED`, `CHECK_SERVICE_OFF`, `CHECK_SHIM`. `case:progress`'s `check` becomes `{ enabled, reason, command, approved, lastRun }` for a `software-repo` case and stays `null` otherwise.
   - Panel: for a `software-repo` case, one row: the command (or a field to type one), "approved" or "waiting for your approval", the last result, and "Stop running it". When the policy is off the row says so and offers nothing.
 
-- [ ] **Step 1: Write the failing tests.** `tests/cases-check.test.js`:
+- [x] **Step 1: Write the failing tests.** `tests/cases-check.test.js`:
   - `validateCheck` accepts `npm test`, `npm run test:unit`, `node --test tests/unit`, `./gradlew test`, `cargo test --locked`, `make check`; refuses, each by name: an empty string, 13 tokens, a double space, each of `;`, `&`, `|`, `<`, `>`, `$`, a backtick, `(`, `*`, `?`, `~`, `!`, `%`, `^`, a backslash, a quote, a newline; `FOO=1 npm test`; `-rf x`; `../x/run`; an absolute path; each name in `REFUSED_PROGRAMS` with and without `.exe` and in upper case; `node -e 1`, `node --eval 1`, `node --eval=1` and `node --print=1` (the flag rule covers a listed flag alone and a listed flag followed by `=`);
   - `checkInQuote`: the whole command in backticks, in quotes, at the end of a sentence followed by a space; refused when the case differs, when a word is missing, when the tokens are spread across the message, and when it is a prefix of a longer command (`npm test` inside `npm test:all`);
   - `CheckStore`: "an approval covers one command and one repository" (another argv or another repo path is not approved); `withdrawAll`; 20 runs kept; ids count up;
@@ -964,10 +972,10 @@ After stream C. Behind `cases.softwareRepo.check.enabled`, default **false**.
   - the `Brief` tool: `check` with a quote holding the exact command → written and one `check-approve` question whose text holds the program and arguments on their own lines; with the command reworded in the quote → `CHECK_NOT_IN_QUOTE`; without `provenance: 'user'` → the existing owner-only refusal; on a `general` case → the existing "only for software-repo cases" refusal; with a clone-URL `repo` → `CHECK_NO_LOCAL_REPO`;
   - the approval: `approve` from `in-app` records it; from `in-app-chat` and `mcp-stdio` it does not; changing the command after the question was asked and then pressing does not approve the new command.
   - `tests/cases-case-types.test.js`: `briefFields()` now has `repo` and `check`. `tests/service-config.test.js`: `caseChecks` in the service's own file is ignored with the admin-only warning; in the admin file `{ enabled: true }` is read; an unknown key under it is rejected. `tests/cases-progress-ipc.test.js`: `case:setCheck` and the `check` part of `case:progress`.
-- [ ] **Step 2: Run** `node --test tests/cases-check.test.js tests/cases-case-types.test.js tests/service-config.test.js tests/cases-progress-ipc.test.js` — expected: the new tests fail.
-- [ ] **Step 3: Implement.** Nothing in this task spawns a process. If `src/cases/` requiring `src/service/doctor-runbooks.js` trips a boundary test, move `resolveCommand` (and what it needs) to `src/platform/resolve-command.js`, re-export it from `doctor-runbooks.js`, and say so in Deviations. Add `caseChecks` to the four `examples/fleet/*/service.json` files only if `tests/examples.test.js` requires every admin key to be listed (run it; say what you found).
-- [ ] **Step 4: Run** the four files and `node --test tests/cases-tools.test.js tests/electron-boundary.test.js tests/examples.test.js tests/renderer-progress-text.test.js` — expected: `# fail 0`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/cases-check.test.js tests/cases-case-types.test.js tests/service-config.test.js tests/cases-progress-ipc.test.js` — expected: the new tests fail.
+- [x] **Step 3: Implement.** Nothing in this task spawns a process. If `src/cases/` requiring `src/service/doctor-runbooks.js` trips a boundary test, move `resolveCommand` (and what it needs) to `src/platform/resolve-command.js`, re-export it from `doctor-runbooks.js`, and say so in Deviations. Add `caseChecks` to the four `examples/fleet/*/service.json` files only if `tests/examples.test.js` requires every admin key to be listed (run it; say what you found).
+- [x] **Step 4: Run** the four files and `node --test tests/cases-tools.test.js tests/electron-boundary.test.js tests/examples.test.js tests/renderer-progress-text.test.js` — expected: `# fail 0`.
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/verify/check.js src/cases/verify/questions.js src/cases/case-types/software-repo.js src/cases/defaults.js src/service src/tools/builtin/case-tools.js src/ipc preload.js renderer.js src/cases/case-runtime.js tests examples
@@ -993,7 +1001,7 @@ git commit -m "feat(cases): a software-repo case can be given a check command an
   - `_closeProgress`: step 1 is `closeCheck` (guarded), before the verify pass; the pass's input gets item 6 (id, result, head, clean or not; never the tail); `verificationBlock` gets `check: { run, baseline }` and writes `- Check: pass → FAIL during this turn (chk-0012 at 3f2a91c → chk-0013 at 3f2a91c, uncommitted changes).` as its first line when the baseline passed and the run did not, or `- Check: failed at the end of this turn (no result for the turn's start).` when there is no baseline.
   - The verification hook (Task 9) already raises `criterion-regressed` for a row that went from `met` to `failing`.
 
-- [ ] **Step 1: Write the failing tests.** In `tests/cases-check.test.js`, with a temp git repository as the case's `repo` (create it with `git init`, one commit) and the fixture scripts run as `node <fixture>` (copy the fixture into the repo and name it by a relative path so the command passes `validateCheck`):
+- [x] **Step 1: Write the failing tests.** In `tests/cases-check.test.js`, with a temp git repository as the case's `repo` (create it with `git init`, one commit) and the fixture scripts run as `node <fixture>` (copy the fixture into the repo and name it by a relative path so the command passes `validateCheck`):
   - `runCheck`: `pass.js` → `pass`, exit 0; `fail.js` → `fail`, exit 1; a program that is not there → `spawn-failed`; "the child sees no provider key": set `OPENAI_API_KEY`, `KL_CASES_ROOT` and `ELECTRON_RUN_AS_NODE` in the parent env passed in, run `print-env.js` (it prints the **names** of its variables), and assert none of the three is in the tail while `CI` and `KL_CASE_CHECK` are; a name in `envAllow` is passed;
   - "the time limit kills the child and its grandchild": `sleep.js` starts a child that writes its pid to a file and both sleep 60 s; with `timeoutMs: 500`, the result is `timeout` and, after the call returns, both pids are gone (`process.kill(pid, 0)` throws). Hold a ref'd timer across the await;
   - an aborted `signal` ends the run the same way;
@@ -1002,10 +1010,10 @@ git commit -m "feat(cases): a software-repo case can be given a check command an
   - the tail is under `.kl/runs/checks/` and `git status --porcelain` of the case shows no such file; `.kl/checks.json` holds the run without any output;
   - "pass to fail writes the journal line first": a baseline pass at the turn's start, a failing close run → the turn's journal entry's first line under the heading is the `pass → FAIL` line.
   - `tests/cases-verify-status.test.js`: the `chk-` resolver at another head, with `dirty: 4`, with `result: 'fail'`, and holding. `tests/cases-verify-readiness.test.js`: `check-passing` in each state. `tests/cases-progress-tool.test.js`: the `failing` case of `proposeDone` (remove the `todo` from Task 10 if one was left).
-- [ ] **Step 2: Run** `node --test tests/cases-check.test.js tests/cases-verify-status.test.js tests/cases-verify-readiness.test.js tests/cases-progress-tool.test.js` — expected: the new tests fail.
-- [ ] **Step 3: Implement.** Use `turn.signal` as the run's `signal`, so the owner's Stop and shutdown (`abortUnattended` does not reach owner turns; the turn's own abort does) end it. Do not add a `cmd.exe` path, whatever a test on Windows suggests: a shim is refused (N1).
-- [ ] **Step 4: Run** the four files and `node --test tests/cases-verify-judge.test.js tests/cases-runtime.test.js tests/cases-turn-runner.test.js tests/cases-stop.test.js tests/cases-case-types.test.js` — expected: `# fail 0`. Run `tests/cases-check.test.js` twice in a row and confirm it exits promptly both times (no leaked child).
-- [ ] **Step 5: Commit.**
+- [x] **Step 2: Run** `node --test tests/cases-check.test.js tests/cases-verify-status.test.js tests/cases-verify-readiness.test.js tests/cases-progress-tool.test.js` — expected: the new tests fail.
+- [x] **Step 3: Implement.** Use `turn.signal` as the run's `signal`, so the owner's Stop and shutdown (`abortUnattended` does not reach owner turns; the turn's own abort does) end it. Do not add a `cmd.exe` path, whatever a test on Windows suggests: a shim is refused (N1).
+- [x] **Step 4: Run** the four files and `node --test tests/cases-verify-judge.test.js tests/cases-runtime.test.js tests/cases-turn-runner.test.js tests/cases-stop.test.js tests/cases-case-types.test.js` — expected: `# fail 0`. Run `tests/cases-check.test.js` twice in a row and confirm it exits promptly both times (no leaked child).
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/cases/verify src/cases/case-runtime.js tests/cases-check.test.js tests/cases-verify-status.test.js tests/cases-verify-readiness.test.js tests/cases-progress-tool.test.js tests/fixtures/cases/check
@@ -1024,9 +1032,9 @@ git commit -m "feat(cases): an approved check runs at the close of an owner turn
 - **F8-progress** (unit, scripted provider): a "Lakeside lot" case; the model appends two criteria (both `proposed`); the owner confirms one by a quote through the `Brief` tool and one through `applyScopeAction`; gating completes; a turn records `f-0042` (`sourced`) and the scripted verify reply cites it → that criterion is `met` and the journal entry starts with the verification block; a later turn supersedes `f-0042` → `stale`, a `criterion-regressed` trigger, and `Progress.proposeDone` returns `NOT_READY`; a new fact and a new accepted verdict → both `met`; `proposeDone` succeeds; the answer `done` over `in-app` sets the case `done` and `runtime.progress` returns the frozen list. One `it` per step, sharing the case.
 - **E2E** (`launchApp({ seed })`, `KL_CASES_ROOT` seeded with one case that has a proposed criterion, a confirmed `unmet` one, and an open `close-proposal` question; build the seed with the real stores in the test's setup): the case panel shows the summary line and a row tagged `proposed`; clicking its Confirm (through `page.evaluate(() => document.getElementById(id).click())`) changes the tag to `unmet`; the close card in the case's chat shows the summary line, an open item and the two buttons; clicking "Keep working" settles the card and the case stays `active`. Dismiss the onboarding wizard with `#wizard-skip-btn`.
 
-- [ ] **Step 1: Write the tests** as above.
-- [ ] **Step 2: Run** `node --test tests/cases-regressions.test.js` — expected: `# fail 0` (the mechanisms exist; a failure here is a real defect: fix it in the module that owns it and name the fix in Deviations). Then `unset ELECTRON_RUN_AS_NODE && node --test tests/e2e/cases.test.js` (or the new file) — expected: `# fail 0`.
-- [ ] **Step 3: Commit.**
+- [x] **Step 1: Write the tests** as above.
+- [x] **Step 2: Run** `node --test tests/cases-regressions.test.js` — expected: `# fail 0` (the mechanisms exist; a failure here is a real defect: fix it in the module that owns it and name the fix in Deviations). Then `unset ELECTRON_RUN_AS_NODE && node --test tests/e2e/cases.test.js` (or the new file) — expected: `# fail 0`.
+- [x] **Step 3: Commit.**
 
 ```bash
 git add tests/cases-regressions.test.js tests/e2e
@@ -1043,12 +1051,12 @@ git commit -m "test(cases): the verified-progress regression fixture and its end
 
 **Steps:**
 
-- [ ] **Step 1: Write-guard tests.** In the `describe` that already covers `isProtectedCasePath` (`tests/cases-tools.test.js`, "isProtectedCasePath hardening"), add one named test per new file: `Write`, `Edit` and `MultiEdit` to `.kl/scope.json`, `.kl/abandoned.jsonl`, `.kl/verification.json`, `.kl/checks.json` and `.kl/runs/checks/chk-0001.txt` are each refused in a case turn through the `ToolExecutor` (follow "ToolExecutor ledger write guard" in the same file). They pass with no code change (the whole of `.kl/` is guarded); they are there so a later narrowing of the guard fails loudly. Run `node --test tests/cases-tools.test.js` — expected: `# fail 0`.
-- [ ] **Step 2: Confirm what did not change**, each by its own test file: `node --test tests/cases-store-yaml.test.js` (`CASE_YAML_KEYS` untouched: no key was added; if a task added one, add it to `CASE_YAML_KEYS` and to this test and say why in Deviations); `node --test tests/management-tools.test.js tests/frontdoor-case-tools.test.js` (the MCP tool list and the three scopes are as before; only two descriptions changed); `node --test tests/electron-boundary.test.js tests/cases-leaks.test.js`.
-- [ ] **Step 3: `CLAUDE.md`.** Add a section `## Cases: verified progress (stage 8)` after `## Cases: document ingest (stage 7)`, in the style of its neighbours, covering: the spec path; `brief.md` keeps strings and `.kl/scope.json` holds who wrote each criterion (origins; `proposed` counts for nothing; only an owner quote whose words contain the criterion, an owner action, or an answered question confirms; the model never changes a confirmed one); gating needs one confirmed criterion and tests use `tests/helpers/case-scope.js`; `.kl/abandoned.jsonl` (append-only, never indexed across cases, `Fail` does not write it); states are computed on every read and the stored cache is never trusted; a verification record is written only by `acceptVerdict`; evidence resolvers by prefix and where a later stage plugs in (`registerEvidenceSource`, `registerEvidenceResolver`); the verify pass (role, when it is skipped, what it is given, that it never sees prose, that it never fails a turn); ready to close and `Progress.proposeDone` (`NOT_READY`; the owner's Done is never refused); the three question types and their classes; a press is `in-app` or `mobile`; frozen at close; the check command (off by default, the admin key in service mode, owner turns only, approved once, no shell and no `cmd.exe`, `CHECK_SHIM`, the scrubbed environment, output never tracked); the residuals in two lines (Bash can write every new file; `sourced` is model-declared; the check runs the repository's code).
-- [ ] **Step 4: The spec.** Add the tasks' recorded deviations to §16 and set the status line to `Built (plan 2026-10-13-cases-stage8-verified-progress.md)`. Keep §2 as it is.
+- [x] **Step 1: Write-guard tests.** In the `describe` that already covers `isProtectedCasePath` (`tests/cases-tools.test.js`, "isProtectedCasePath hardening"), add one named test per new file: `Write`, `Edit` and `MultiEdit` to `.kl/scope.json`, `.kl/abandoned.jsonl`, `.kl/verification.json`, `.kl/checks.json` and `.kl/runs/checks/chk-0001.txt` are each refused in a case turn through the `ToolExecutor` (follow "ToolExecutor ledger write guard" in the same file). They pass with no code change (the whole of `.kl/` is guarded); they are there so a later narrowing of the guard fails loudly. Run `node --test tests/cases-tools.test.js` — expected: `# fail 0`.
+- [x] **Step 2: Confirm what did not change**, each by its own test file: `node --test tests/cases-store-yaml.test.js` (`CASE_YAML_KEYS` untouched: no key was added; if a task added one, add it to `CASE_YAML_KEYS` and to this test and say why in Deviations); `node --test tests/management-tools.test.js tests/frontdoor-case-tools.test.js` (the MCP tool list and the three scopes are as before; only two descriptions changed); `node --test tests/electron-boundary.test.js tests/cases-leaks.test.js`.
+- [x] **Step 3: `CLAUDE.md`.** Add a section `## Cases: verified progress (stage 8)` after `## Cases: document ingest (stage 7)`, in the style of its neighbours, covering: the spec path; `brief.md` keeps strings and `.kl/scope.json` holds who wrote each criterion (origins; `proposed` counts for nothing; only an owner quote whose words contain the criterion, an owner action, or an answered question confirms; the model never changes a confirmed one); gating needs one confirmed criterion and tests use `tests/helpers/case-scope.js`; `.kl/abandoned.jsonl` (append-only, never indexed across cases, `Fail` does not write it); states are computed on every read and the stored cache is never trusted; a verification record is written only by `acceptVerdict`; evidence resolvers by prefix and where a later stage plugs in (`registerEvidenceSource`, `registerEvidenceResolver`); the verify pass (role, when it is skipped, what it is given, that it never sees prose, that it never fails a turn); ready to close and `Progress.proposeDone` (`NOT_READY`; the owner's Done is never refused); the three question types and their classes; a press is `in-app` or `mobile`; frozen at close; the check command (off by default, the admin key in service mode, owner turns only, approved once, no shell and no `cmd.exe`, `CHECK_SHIM`, the scrubbed environment, output never tracked); the residuals in two lines (Bash can write every new file; `sourced` is model-declared; the check runs the repository's code).
+- [x] **Step 4: The spec.** Add the tasks' recorded deviations to §16 and set the status line to `Built (plan 2026-10-13-cases-stage8-verified-progress.md)`. Keep §2 as it is.
 - [ ] **Step 5: The full suite, once, by the controller.** `npm test` — expected: `# fail 0`. Then `unset ELECTRON_RUN_AS_NODE && npm run test:e2e`. A failure is fixed in the module that owns it, with its covering test file re-run, and recorded in Deviations.
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git add CLAUDE.md docs/superpowers/specs/2026-10-13-cases-stage8-verified-progress.md docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md tests/cases-tools.test.js
