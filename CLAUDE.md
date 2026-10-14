@@ -1356,7 +1356,11 @@ plan `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`
   objective, or `create_case` in the chat) and `owner-action` are born
   confirmed. Otherwise only a press (`case:confirmScope`, by the hash the
   owner was shown; `SCOPE_STALE` when it changed) or an answered
-  `scope-confirm` question confirms. The model never changes or drops a
+  `scope-confirm` question confirms. A scope answer confirms the
+  objective only from a press (`in-app`, `mobile`) or King Louie's chat
+  (`in-app-chat`, quote checked); over MCP or a contact channel it confirms
+  the criteria alone (R-C8-2) and leaves the objective proposed (review fix,
+  2026-10-14). The model never changes or drops a
   confirmed one (`CRITERION_CONFIRMED`, `OBJECTIVE_CONFIRMED`), and the
   `Brief` tool cannot confirm one it proposed (`CRITERION_DUPLICATE`).
   `createCase`'s `objectiveBy` is the host's, like `force`; no tool takes

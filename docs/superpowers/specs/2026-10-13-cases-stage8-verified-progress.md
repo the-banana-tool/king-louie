@@ -707,7 +707,13 @@ beside each criterion in the case panel.`). One at a time is done in the panel o
 
 `scope-confirm` is a spoken question (R-C8-2): `answer_question` takes it with the owner's quote naming
 the option, on every channel that serves spoken answers, and the card and the panel carry buttons as
-well. It is not added to `PRESSED_TYPES`.
+well. It is not added to `PRESSED_TYPES`. **The objective is narrower** (review finding 1, 2026-10-14): an answer of `all` confirms
+a proposed objective only when its channel is a press (`in-app`, `mobile`) or King Louie's chat
+(`in-app-chat`, with the quote on record, checked there in the owner's turn). Over MCP or a contact
+channel the answer is recorded, confirms the criteria as R-C8-2 allows, and leaves the objective
+`proposed` with a note (`objectiveHeld` in the effect). R-C8-2 names criteria; nothing in it lets an
+unchecked answer confirm the objective, and R-C8-N3 already keeps an MCP objective proposed until the
+owner confirms it.
 
 `CASE_MODE_PROMPT` gains three lines: criteria you add are proposals until the owner confirms them; you
 cannot mark a criterion met, so record the evidence as facts; record an approach you drop with `Progress
@@ -953,6 +959,7 @@ Answers:
   (`case:answerQuestion`) or the phone answer them.
 - `scope-confirm` is spoken (R-C8-2): `answer_question` takes it under `cases:answer` (the front door),
   over `mcp-stdio`, and in King Louie's chat (where the quote is checked against the owner's message).
+  Off the app it confirms criteria only, never the objective (§6.7, review finding 1).
 - `list_questions` already reports each record's class from `answerClass`; nothing changes there.
 
 In a case chat the tools stay confined to that case (`CASE_SCOPED_TOOLS`), and the chat-attach rule
@@ -1041,7 +1048,7 @@ and `case.yaml` `roles.verify`; there is no new role.
 | The model adds criteria | It defines success as what it already did | Proposed entries count for nothing; only a verified owner quote, an owner action or an answered question confirms; confirmation binds to the text's hash |
 | The model rewrites the list | It drops what is unmet | V5: confirmed entries change only through `case:confirmScope` or a verified quote |
 | A quote confirms a criterion | "ok" is quoted to confirm anything | The criterion's text must be words from the quote (`wordsInText`), the rule `create_case` uses for an objective |
-| A spoken scope answer over MCP | A client with `cases:answer` confirms scope | The existing trust in that scope (quotes are recorded, not checked, off the app); the options are only "all" and "none" of exactly the hashed entries; closing stays pressed. Accepted by R-C8-2 |
+| A spoken scope answer over MCP | A client with `cases:answer` confirms scope | The existing trust in that scope (quotes are recorded, not checked, off the app); the options are only "all" and "none" of exactly the hashed entries; closing stays pressed; the objective is never confirmed this way (review finding 1). Accepted by R-C8-2 |
 | `met` | The model declares success | No tool sets a state. A record is written only by code after a second model's verdict whose every id code resolved; the state is recomputed on each read |
 | The verify pass reads model-written facts | A `sourced` fact with an invented source is cited | Not prevented: `sourced` is model-declared (parent, stage 1). The row shows each evidence fact's provenance and source; an ingest-verified source is labelled as such; the owner sees the evidence on the close card |
 | The verify prompt carries case text | Injection steers the verdict | **Bounded, not prevented.** A verdict can only name ids, and a `met` that code cannot resolve is an opinion. But a statement can steer the pass into a **false `met`** that cites facts that are real, active, shown to it and of an allowed provenance (`user`, `sourced`, `external-agent`): code checks that the cited facts hold, not that they show the criterion. It can also turn a met criterion `stale`. It cannot cite a fact that is missing, inactive, inferred, an open unknown, under a load-bearing unknown, or not shown; it cannot touch a proposed criterion; and it cannot close the case. The owner sees the cited evidence, with its provenance, on the criterion's row and on the close card, and only the owner's press closes (§18) |
@@ -1359,7 +1366,8 @@ Stated plainly; none is fixed here.
 - **On Windows only `.exe` programs and `npm` can be the check.** A `.cmd` or `.bat` shim is never
   started, so `pnpm`, `yarn` and `gradlew.bat` cannot be used until the owner rules on it.
 - **A spoken scope answer off the app is unchecked** (accepted, R-C8-2): over MCP the quote is
-  recorded, not verified, as for every spoken answer.
+  recorded, not verified, as for every spoken answer. It confirms criteria; it never confirms the
+  objective (review finding 1, 2026-10-14).
 - **Abandoned records are free text.** The outbound gate does not know them; a model that restates one in
   an outbound payload is stopped only if the text also trips rules 1 to 4 for other reasons.
 - **A hand edit by the owner looks like a `Bash` write** (R-C8-8), so the owner's own edit to `brief.md`

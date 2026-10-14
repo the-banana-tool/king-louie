@@ -5,7 +5,9 @@
 //
 // - `scope-confirm` is spoken (owner ruling R-C8-2): the buttons, and an
 //   answer in the owner's words through answer_question, both confirm or
-//   drop exactly the entries the question showed.
+//   drop exactly the entries the question showed. The objective is
+//   confirmed only by a press or King Louie's chat (review finding 1,
+//   2026-10-14).
 // - `close-proposal` is pressed: only "Mark done" pressed in the app or on
 //   the paired phone closes the case. The model proposes; it never decides.
 //
@@ -27,6 +29,10 @@ const log = createLogger('cases/verify/questions');
 // router's PRESS_CHANNELS, contact.js's APP_ANSWER_CHANNELS). `in-app-chat`
 // (a model relaying words) and every `mcp-*` channel are never one.
 const PRESS_CHANNELS = Object.freeze(['in-app', 'mobile']);
+// King Louie's chat: the management tool checks the quote in the owner's
+// own message of the turn (ToolExecutor's ownerTurnText) before it records
+// an answer on this channel.
+const CHECKED_CHAT_CHANNEL = 'in-app-chat';
 
 const SCOPE_TYPE = 'scope-confirm';
 const CLOSE_TYPE = 'close-proposal';
@@ -38,6 +44,7 @@ const HASH = /^sha256:[0-9a-f]{64}$/;
 
 const HOW_TO_ANSWER_SCOPE = 'Answer with "Confirm all" or "Drop all", or use the buttons beside each criterion in the case panel.';
 const OBJECTIVE_STAYS = 'The objective is never dropped. Edit it in the case panel.';
+const OBJECTIVE_HELD = 'The objective was not confirmed: an answer from outside the app confirms only the criteria. Confirm the objective in the case panel or on your phone.';
 const NOT_A_PRESS = 'Not applied: a case is closed only by the button on this question in the app, or on the paired phone.';
 const USE_THE_BUTTONS = 'Not applied: answer with "Mark done" or "Keep working".';
 const CHECK_NOT_A_PRESS = 'Not applied: a check command is approved only by the button on this question in the app, or on the paired phone.';
@@ -120,6 +127,17 @@ const factOf = (what, subject) => (record, answer) => {
 
 // ---- scope-confirm ----
 
+// Whether a recorded scope answer may confirm the objective (review finding
+// 1, 2026-10-14): a press (`in-app`, `mobile`), or King Louie's chat with a
+// quote on record (checked there in the owner's turn). An answer over MCP
+// (quote recorded, not checked) or a contact channel confirms the criteria
+// as R-C8-2 allows, and leaves the objective proposed.
+function confirmsObjective(answer) {
+  if (!isObject(answer)) return false;
+  if (PRESS_CHANNELS.includes(answer.channel)) return true;
+  return answer.channel === CHECKED_CHAT_CHANNEL && typeof answer.quote === 'string' && answer.quote.trim() !== '';
+}
+
 // Confirms, or drops, exactly the payload's entries whose words are still
 // the ones shown. Runs inside answerQuestion's systemAction.
 async function onScopeAnswered(record, fact, { runtime, caseId }) {
@@ -167,10 +185,17 @@ async function onScopeAnswered(record, fact, { runtime, caseId }) {
       changed.push(entry.id);
     }
   }
+  let objectiveHeld = false;
   if (typeof payload.objective === 'string' && payload.objective) {
     const objective = isObject(view?.objective) ? view.objective : null;
     if (action === 'drop') {
       note(runtime, caseId, record.id, OBJECTIVE_STAYS);
+    } else if (!confirmsObjective(record.answer)) {
+      if (objective && objective.state !== 'confirmed') {
+        objectiveHeld = true;
+        log.info(`${record.id}: "all" from ${String(record.answer.channel)} leaves the objective proposed.`);
+        note(runtime, caseId, record.id, OBJECTIVE_HELD);
+      }
     } else if (!objective || objective.hash !== payload.objective) {
       changed.push('objective');
     } else if (objective.state !== 'confirmed') {
@@ -182,7 +207,7 @@ async function onScopeAnswered(record, fact, { runtime, caseId }) {
     note(runtime, caseId, record.id, `Not applied to ${changed.join(', ')}: the words changed after this was asked. Confirm or drop what is there now in the case panel.`);
   }
   if (kept.length) note(runtime, caseId, record.id, `Not dropped: ${kept.join(', ')} ${kept.length === 1 ? 'was' : 'were'} confirmed after this was asked.`);
-  return { applied: 'scope', confirmed, dropped, skipped: [...changed, ...kept] };
+  return { applied: 'scope', confirmed, dropped, skipped: [...changed, ...kept], ...(objectiveHeld ? { objectiveHeld: true } : {}) };
 }
 
 QuestionStore.registerAnswerHandler(SCOPE_TYPE, { toFact: factOf('scope', 'scope'), onAnswered: onScopeAnswered });

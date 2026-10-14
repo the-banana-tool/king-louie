@@ -396,6 +396,41 @@ describe('Progress askScope', () => {
     assert.deepStrictEqual(res.effect.dropped, []);
   });
 
+  // Review finding 1 (2026-10-14): a scope answer confirms the objective
+  // only from a press (in-app, mobile) or from King Louie's chat, where the
+  // quote was checked in the owner's turn. An answer over MCP or a contact
+  // channel is recorded and leaves the objective proposed. Criteria are as
+  // R-C8-2 says (a spoken answer with a quote confirms them), unchanged.
+  it('the objective is confirmed by a scope answer only from a press or the checked chat; other channels confirm the criteria alone', async () => {
+    const answer = async (channel, quote) => {
+      const w = await world({ gate: false, objectiveBy: null, proposed: THREE });
+      await w.begin();
+      const { questionId } = await w.run({ action: 'askScope' });
+      await w.end();
+      const res = await w.rt.answerQuestion(w.id, questionId, { channel, optionId: 'all', ...(quote ? { quote } : {}) });
+      const view = w.rt.scopeView(w.id);
+      return { w, questionId, res, objective: view.objective, criteria: view.criteria.map((r) => r.state) };
+    };
+    for (const channel of ['mcp-stdio', 'mcp-frontdoor', 'telegram', 'discord', 'email', 'sms', 'voice']) {
+      const { w, questionId, res, objective, criteria } = await answer(channel, 'confirm all of them please');
+      assert.strictEqual(objective.state, 'proposed', channel);
+      assert.deepStrictEqual(criteria, ['confirmed', 'confirmed', 'confirmed'], channel);
+      assert.deepStrictEqual(res.effect, { applied: 'scope', confirmed: ['sc-001', 'sc-002', 'sc-003'], dropped: [], skipped: [], objectiveHeld: true }, channel);
+      assert.deepStrictEqual(w.rt.questions(w.id).get(questionId).notes.map((n) => n.text),
+        ['The objective was not confirmed: an answer from outside the app confirms only the criteria. Confirm the objective in the case panel or on your phone.'], channel);
+      // The answer itself is recorded.
+      assert.strictEqual(w.rt.questions(w.id).get(questionId).answer.channel, channel);
+    }
+    // King Louie's chat with no quote on record does not count as checked.
+    assert.strictEqual((await answer('in-app-chat', null)).objective.state, 'proposed');
+    for (const [channel, quote] of [['in-app', null], ['mobile', null], ['in-app-chat', 'confirm all of them please']]) {
+      const { objective, criteria, res } = await answer(channel, quote);
+      assert.deepStrictEqual([objective.state, objective.confirmed.channel], ['confirmed', channel], channel);
+      assert.deepStrictEqual(criteria, ['confirmed', 'confirmed', 'confirmed'], channel);
+      assert.deepStrictEqual(res.effect.confirmed, ['sc-001', 'sc-002', 'sc-003', 'objective'], channel);
+    }
+  });
+
   it('the card text hides what is not one plain line and is refused, not cut, when too long', () => {
     const meta = { title: 'Lakeside lot' };
     const row = (id, text) => ({ id, text, state: 'proposed' });
