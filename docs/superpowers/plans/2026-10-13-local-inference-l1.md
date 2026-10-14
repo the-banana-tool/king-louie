@@ -30,6 +30,15 @@
 
 Where the code as built differs from a task's text. Added by each task's implementer in the task's own commit.
 
+**Task 1** (all stricter than the text, none looser):
+
+- `gradeOf` does not trust `pinned.class`: it runs `checkPinned` on the whole `pinned` and grades from the class the stored **addresses** give. A pin with no `addresses`, with an address that is no longer allowed, or whose stored `class` is not the one its addresses give is `cost-only`. Callers pass the entry's full `pinned`, never `{ class }` alone. An unknown `protocol` is `cost-only` too.
+- `checkPinned` returns `LOCAL_PIN_INVALID` (a new code) for a pin with no addresses or with a stored `class` that differs from the recomputed one; an address that is not allowed is `LOCAL_ADDRESS_PUBLIC` as written.
+- `classifyAddress` answers `public` for an address with a zone id that is not link-local (`::1%lo0`, `fd12::1%eth0`): a zone belongs to link-local only, and what cannot be vouched for is not local. `fe80::1%eth0` is `link-local`.
+- `parseBaseUrl` also refuses, as `LOCAL_URL_INVALID`: a space or control character anywhere (the URL parser would drop a tab or newline), a `\` (read as `/`), a `%` (decoded in a host; also refuses a zone id), a `.` or `..` path segment, any `@`, an empty query or fragment (`/?`, `/#`), and a value that is not a string. A path is allowed (`http://127.0.0.1:8080/api`). A number spelling of an IPv4 host (`2130706433`, `0177.0.0.1`, `0x7f.1`, `127.1`, `127.0.0.1.`) is not refused: the URL parser turns it into the dotted address, which is then what is classified, stored in `href` and dialled.
+- `resolveAndPin` stores canonical addresses (`canonicalAddress`, also exported: an IPv4-mapped address as its IPv4 address, IPv6 lower case and compressed) and keeps a repeated answer once. A lookup answer that is not an IP literal is refused under `LOCAL_ADDRESS_PUBLIC` with `class: 'invalid'` in `refused`; a lookup that throws is `LOCAL_ADDRESS_UNRESOLVED` with the `cause`. `allowCgnat` counts only when it is exactly `true`.
+- Extra exports: `canonicalAddress`, `isTlsFingerprint` (64 hex characters), used by the transport.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named). Rulings that belong to L2 only are listed so nobody looks for them here.
