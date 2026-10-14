@@ -69,6 +69,7 @@ Asked by the plan (its "New questions") after the build; each is written into th
 | R-C8-N4 | Does the panel's **Check now** also run the check command? | No (as built). Check now runs the verify pass only; the check command runs only at the close of an owner turn in which the repository changed (§6.6) | A check result is only as new as the last owner turn that changed the tree |
 | R-C8-N5 | "npm only": must the check's program be npm? | Yes (as built): the program is `npm`, and the command is `npm test` or `npm run <script>` (§6.6) | `node --test`, `make`, `cargo` and `./gradlew` cannot be a case's check. Widening is one list in `src/cases/verify/check.js` |
 | R-C8-N6 | May the check pass npm options of its own or use other npm commands? | No (as built): no word that starts with `-` before the script (only after `--`), and no npm command but `test` and `run` (§6.6) | `npm test --silent` and `npm run --if-present x` are refused |
+| R-C8-N8 | The `user` fact `create_case` records over MCP carries a quote nobody checked. May the verify pass cite it for `met`? | It is still recorded (provenance `user`, its MCP channel and the quote on its source), but it is never evidence. The rule, enforced where evidence is checked (the `f-` resolver, so `acceptVerdict` refuses it like any other ineligible id, and the pass is not shown it): a fact with `provenance: 'user'` whose `source.channel` starts with `mcp-` (§6.3) | It also covers an answer to a spoken question given over MCP (its fact carries the same channel): such an answer still does what the question does (R-C8-2), but its fact cannot stand behind a criterion. A user fact with no channel, or one recorded in the app, on the phone or over a contact channel, is unaffected |
 
 ### 2.1 Checked in the code after the first draft
 
@@ -309,7 +310,7 @@ its prefix; an id with no resolver is rejected.
 
 | Prefix | Resolver | Holds when |
 |---|---|---|
-| `f-` | the ledger | the fact exists, is `active`, and its provenance is `user`, `sourced` or `external-agent`, any of them alone (R-C8-5); never `inferred` or `unknown`; and no active load-bearing unknown sits on the same `subject.attr` (the recommendation gate's `blockers` rule) |
+| `f-` | the ledger | the fact exists, is `active`, and its provenance is `user`, `sourced` or `external-agent`, any of them alone (R-C8-5); never `inferred` or `unknown`; never a `user` fact whose `source.channel` starts with `mcp-` (the owner's words as an MCP client recorded them, unchecked: create_case's objective fact over MCP, an answer given over MCP; R-C8-N8), refused `evidence-provenance` and not shown to the verify pass; and no active load-bearing unknown sits on the same `subject.attr` (the recommendation gate's `blockers` rule) |
 | `chk-` | the check store (§6.6) | the run exists, exited 0, was made with a clean tree, and its `head` equals the snapshot's `head` now |
 
 **Computation** (`computeCriterionState({ entry, records, facts, checks, snapshot })`, pure):

@@ -174,6 +174,33 @@ describe('every caller of createCase and the objective it ends up with', () => {
     }
   });
 
+  // Owner ruling R-C8-N8 (2026-10-14): the fact create_case records over MCP
+  // stays (provenance user, its MCP channel and the unchecked quote), but it
+  // can never stand behind a met criterion: the evidence check refuses it
+  // like any other ineligible id, and the verify pass is not shown it. The
+  // chat's fact, whose quote was checked in the owner's turn, still can.
+  it("the objective fact create_case records over MCP is never evidence; the chat's is", async () => {
+    const { resolveEvidence } = require('../src/cases/verify/evidence');
+    const { acceptVerdict, composeVerifyInput } = require('../src/cases/verify/judge');
+    const row = { id: 'sc-001', scope: 'confirmed', hash: `sha256:${'1'.repeat(64)}` };
+    const check = async (channel, ownerTurnText) => {
+      const { runtime } = setup();
+      const h = createCaseToolHandler({ getRuntime: () => runtime, channel });
+      const made = await h.call('create_case', { title: 'Shed', objective: 'build a shed', quote: 'Build a shed by spring' }, { ownerTurnText });
+      const facts = runtime.ledger(made.case_id).view().facts;
+      const verdict = acceptVerdict({ verdict: { id: 'sc-001', status: 'met', evidence: [made.fact_id] }, row, resolve: (id) => resolveEvidence(id, { facts }) });
+      const { shown } = composeVerifyInput({ view: { criteria: [{ ...row, text: 'A shed stands', state: 'unmet', evidence: [] }] }, facts });
+      return { verdict, shown: shown.has(made.fact_id), factId: made.fact_id };
+    };
+    for (const channel of ['mcp-stdio', 'mcp-frontdoor']) {
+      const { verdict, shown, factId } = await check(channel, null);
+      assert.deepStrictEqual(verdict, { accept: false, rejected: [{ id: factId, reason: 'evidence-provenance', label: `${factId} is the owner's words as an MCP client recorded them, unchecked` }] }, channel);
+      assert.strictEqual(shown, false, channel);
+    }
+    const chat = await check('in-app-chat', 'Please build a shed by spring.');
+    assert.deepStrictEqual([chat.verdict, chat.shown], [{ accept: true }, true]);
+  });
+
   it('no tool takes objectiveBy, and only the form, create_case and the detour router pass it', () => {
     const naming = [];
     const walk = (dir) => {

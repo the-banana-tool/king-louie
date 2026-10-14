@@ -1375,7 +1375,11 @@ plan `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`
   (`registerEvidenceResolver`: `f-` facts, `chk-` check runs) and the pass's
   inputs come from `registerEvidenceSource` (`verify/evidence.js`); a later
   stage plugs in there. `external-agent` facts alone may make a criterion met
-  (R-C8-5); each evidence row shows its provenance.
+  (R-C8-5); each evidence row shows its provenance. A `user` fact whose
+  `source.channel` starts with `mcp-` (the owner's words as an MCP client
+  recorded them, unchecked: `create_case`'s objective fact over MCP, an
+  answer given over MCP) is kept but never evidence: the `f-` resolver
+  refuses it `evidence-provenance` and the pass is not shown it (R-C8-N8).
 - **The verify pass** (`verify/judge.js`, `cases.verify`): on the `verify`
   case role (default `main`), charged to the case's `usd`, at most
   `maxPassesPerDay` (24), skipped past `skipAboveUsdPercent` (80) of `usd`,

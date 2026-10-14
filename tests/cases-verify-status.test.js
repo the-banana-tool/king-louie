@@ -47,6 +47,26 @@ describe('evidence resolvers', () => {
     assert.strictEqual(state([record(1)], facts).state, 'met');
   });
 
+  // Owner ruling R-C8-N8 (2026-10-14): a user fact whose
+  // quote came over an MCP channel (create_case's objective, an MCP answer)
+  // is recorded, but nobody checked the quote, so it is never evidence.
+  it('a user fact recorded over an MCP channel does not hold; the same fact from the app or a contact channel does', () => {
+    const over = (id, channel, extra = {}) => fact(id, { provenance: 'user', source: { kind: 'owner-action', ref: 'create-case', channel, quote: 'Build a shed by spring' }, ...extra });
+    const facts = ledger(
+      over('f-0042', 'mcp-stdio'), over('f-0043', 'mcp-frontdoor'), over('f-0044', 'mcp-future'),
+      over('f-0045', 'in-app-chat'), over('f-0046', 'in-app'), over('f-0047', 'telegram'),
+      fact('f-0048', { provenance: 'user', source: { kind: 'question', ref: 'q-0001', channel: 'mcp-stdio', at: '2026-10-21T09:00:00.000Z' } })
+    );
+    for (const id of ['f-0042', 'f-0043', 'f-0044', 'f-0048']) {
+      const r = resolveEvidence(id, { facts });
+      assert.deepStrictEqual([r.exists, r.holds, r.reason, r.provenance], [true, false, 'evidence-provenance', 'user'], id);
+      assert.strictEqual(r.label, `${id} is the owner's words as an MCP client recorded them, unchecked`);
+    }
+    for (const id of ['f-0045', 'f-0046', 'f-0047']) assert.strictEqual(resolveEvidence(id, { facts }).holds, true, id);
+    assert.strictEqual(state([record(1)], facts).state, 'stale');
+    assert.strictEqual(state([record(1, { evidence: ['f-0045'] })], facts).state, 'met');
+  });
+
   it('an inferred and an unknown fact do not', () => {
     const facts = ledger(fact('f-0042', { provenance: 'inferred' }), fact('f-0043', { provenance: 'unknown', value: null, source: null }));
     for (const id of ['f-0042', 'f-0043']) {

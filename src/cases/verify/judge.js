@@ -14,7 +14,7 @@ const { fence, newFenceId, parseReplyObject } = require('../ingest/propose');
 const { plainLineProblem } = require('../hidden-chars');
 const { localDay } = require('../clock');
 const { recordOneShotUsage, textOf } = require('../one-shot-usage');
-const { ELIGIBLE_PROVENANCE, resolveEvidence, statesOf } = require('./evidence');
+const { evidenceEligible, resolveEvidence, statesOf } = require('./evidence');
 const { CheckStore, checkLine } = require('./check');
 const { createLogger } = require('../../logging');
 
@@ -73,13 +73,15 @@ function factRow(fact) {
   return `- ${fact.id} [${flat(fact.provenance, 20)}] ${quoted(`${fact.subject}.${fact.attr}`, 120)}${value}; ${quoted(fact.stmt)}${source}; ${flat(fact.status, 20)}`;
 }
 
-const eligible = (fact) => isObject(fact) && typeof fact.id === 'string' && ELIGIBLE_PROVENANCE.includes(fact.provenance);
+// Never a fact the evidence check would refuse for its provenance or its
+// channel (R-C8-5, R-C8-N8): the pass is not shown what it may not cite.
+const eligible = (fact) => isObject(fact) && typeof fact.id === 'string' && evidenceEligible(fact);
 
 // → { text, shown }: the message for the verify model and the evidence ids
 // it was shown. The eight parts of spec §6.5 in order, in one data fence;
 // rows that do not fit `maxChars` are left out, last parts first, and
-// counted. Proposed criteria, inferred facts and open unknowns are never in
-// it.
+// counted. Proposed criteria, inferred facts, open unknowns and the owner's
+// words as an MCP client recorded them are never in it.
 function composeVerifyInput({ view, turnEvidence = null, facts = null, newestCheck = null, maxChars = 12000 } = {}) {
   const limit = Math.max(MIN_INPUT_CHARS, Number.isInteger(maxChars) ? maxChars : 12000);
   const fenceId = newFenceId();

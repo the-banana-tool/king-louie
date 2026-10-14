@@ -18,6 +18,17 @@ const log = createLogger('cases/verify-evidence');
 // A fact of any of these alone may hold a criterion (R-C8-5); never
 // `inferred`, never `unknown`.
 const ELIGIBLE_PROVENANCE = Object.freeze(['user', 'sourced', 'external-agent']);
+
+// Owner ruling R-C8-N8 (2026-10-14): a `user` fact whose source names an
+// MCP channel (`mcp-stdio`, `mcp-frontdoor`, any `mcp-` channel) holds the
+// owner's words as an MCP client sent them; nobody checked them (management
+// surfaces, Q28). It stays in the ledger and is never evidence: create_case's
+// objective fact over MCP and an answer given over MCP alike.
+const isMcpChannel = (channel) => typeof channel === 'string' && channel.startsWith('mcp-');
+const isUncheckedOwnerWords = (fact) => isObject(fact) && fact.provenance === 'user' && isObject(fact.source) && isMcpChannel(fact.source.channel);
+// A fact that may stand behind a `met` criterion, as far as its provenance
+// and channel go. The verify pass is shown only these.
+const evidenceEligible = (fact) => isObject(fact) && ELIGIBLE_PROVENANCE.includes(fact.provenance) && !isUncheckedOwnerWords(fact);
 const PREFIX_RE = /^[A-Za-z]+-$/;
 const MISSING = Object.freeze({ exists: false, holds: false, reason: 'evidence-missing' });
 const missing = () => ({ ...MISSING });
@@ -91,6 +102,9 @@ function resolveFact(id, ctx) {
   if (!ELIGIBLE_PROVENANCE.includes(fact.provenance)) {
     const what = fact.provenance === 'unknown' ? 'an open unknown' : fact.provenance === 'inferred' ? 'inferred' : 'not a sourced fact';
     return { ...base, holds: false, reason: 'evidence-provenance', label: `${id} is ${what}` };
+  }
+  if (isUncheckedOwnerWords(fact)) {
+    return { ...base, holds: false, reason: 'evidence-provenance', label: `${id} is the owner's words as an MCP client recorded them, unchecked` };
   }
   // The recommendation gate's `blockers` rule (gates.js): an active
   // load-bearing unknown on the same subject.attr.
@@ -318,6 +332,7 @@ function collectTurnEvidence(runtime, turn, evidence = {}) {
 
 module.exports = {
   ELIGIBLE_PROVENANCE,
+  evidenceEligible,
   registerEvidenceResolver,
   resolveEvidence,
   registerEvidenceSource,
