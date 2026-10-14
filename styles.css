@@ -2364,7 +2364,11 @@ body {
 }
 
 /* --- Rename modal ------------------------------------------ */
-.rename-chat-modal {
+/* .rename-chat-modal is a dialog built when it opens and removed when it
+   closes, so one in the document is one on screen. A dialog that stays in
+   index.html (hidden until opened) is .static-chat-modal instead. */
+.rename-chat-modal,
+.static-chat-modal {
   position: fixed;
   inset: 0;
   z-index: 2400;
@@ -2430,7 +2434,7 @@ body {
 /* rename-chat buttons inherit from .btn system */
 
 /* --- Link chats dialog (History H4) ------------------------ */
-.rename-chat-modal[hidden] {
+.static-chat-modal[hidden] {
   display: none;
 }
 
