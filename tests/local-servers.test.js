@@ -240,6 +240,19 @@ describe('LocalServers#isGuaranteeTarget (R-LI-30, R-LI-31)', () => {
     servers.close();
   });
 
+  it('review fix, item 7: a cloud id is not a guarantee target on any kind of server', () => {
+    for (const kind of SERVER_KINDS) {
+      const { servers } = registry([entry({ kind })]);
+      for (const model of ['workstation/gpt-oss:120b-cloud', 'workstation/qwen3:cloud']) {
+        const verdict = servers.isGuaranteeTarget({ provider: 'local', model });
+        assert.strictEqual(typeof verdict, 'string', `${kind} ${model}`);
+        assert.match(verdict, /cloud/);
+      }
+      assert.strictEqual(servers.isGuaranteeTarget({ provider: 'local', model: 'workstation/qwen3:8b' }), true, kind);
+      servers.close();
+    }
+  });
+
   it('the grade is the transport\'s own, not the entry\'s say-so', () => {
     const { servers } = registry([{ ...lanHttp(), grade: 'guarantee', usable: true, pinned: { addresses: ['192.168.1.20'], class: 'lan', at: AT, grade: 'guarantee' } }]);
     assert.strictEqual(servers.list()[0].grade, 'cost-only');

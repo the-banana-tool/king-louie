@@ -114,8 +114,9 @@ class LocalServerProvider extends OllamaProvider {
   }
 
   // "<this server>/<model>" → the id the server is asked for. Anything else
-  // is refused before a request is made (§5.5).
-  _serverModel(id) {
+  // is refused before a request is made (§5.5). `egress` is the call's
+  // policy, when it has one.
+  _serverModel(id, egress = null) {
     const text = typeof id === 'string' ? id : '';
     const prefix = `${this.serverId}/`;
     if (!text.startsWith(prefix) || text.length === prefix.length) {
@@ -126,6 +127,12 @@ class LocalServerProvider extends OllamaProvider {
     // not here. With no kind given this cannot be told apart, so it is refused.
     if ((this.kind === 'ollama' || this.kind === null) && isOllamaCloudModelId(model)) {
       throw coded('LOCAL_CLOUD_MODEL', `${model} runs on Ollama's cloud, not on the local server ${this.serverId}.`);
+    }
+    // Under a policy a cloud id is refused on any kind of server (review
+    // fix, item 7): a server that hands the call on to Ollama's cloud would
+    // not say so, and the name says it might.
+    if (egress !== null && egress !== undefined && isOllamaCloudModelId(model)) {
+      throw coded('LOCAL_CLOUD_MODEL', `${model} is named as an Ollama cloud model, so a private chat or a local-only role does not use it on the local server ${this.serverId}.`);
     }
     return model;
   }
@@ -240,7 +247,7 @@ class LocalServerProvider extends OllamaProvider {
   async _call(run, options, onChunk = null, streamed = false) {
     const { adapter: named = null, ...opts } = options || {};
     const adapter = named === undefined || named === null ? null : named;
-    const model = this._serverModel(opts.model);
+    const model = this._serverModel(opts.model, opts.egress);
     const recorded = `${this.serverId}/${model}`;
     const sent = adapter === null ? model : this.requestModelFor({ model: opts.model, adapter });
     const tag = (metrics) => (adapter === null ? metrics : { ...metrics, adapter });
@@ -438,7 +445,7 @@ class LocalServerProvider extends OllamaProvider {
   // Bounded by the call's timeout like a chat call.
   async embed(inputs, options = {}) {
     const opts = options || {};
-    const model = this._serverModel(opts.model);
+    const model = this._serverModel(opts.model, opts.egress);
     const bound = this._bound(opts.abortSignal || null, this.callTimeoutMs(opts.timeoutMs));
     if (bound) this._watchBody.set(bound.signal, bound);
     try {

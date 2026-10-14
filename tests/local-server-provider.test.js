@@ -12,6 +12,7 @@ const ProviderFactory = require('../src/providers/provider-factory');
 const { LocalServers, SERVER_KINDS } = require('../src/models/local-servers');
 const { createLocalTransport } = require('../src/models/local-transport');
 const { startFakeLlmServer } = require('./helpers/fake-llm-server');
+const { egressPolicy } = require('../src/models/egress');
 const { fixtureCatalog } = require('./helpers/models-fixture');
 const { checkStreaming, checkToolCall, LOOKUP_TOOL } = require('../scripts/lib/provider-checks');
 const { setLogLevel } = require('../src/logging');
@@ -118,6 +119,17 @@ describe('LocalServerProvider', () => {
     assert.strictEqual(server.requests.length, sent);
     // On another kind of server the suffix means nothing.
     assert.strictEqual(await make(null, { kind: 'vllm' }).sendMessage(HI, { model: 'workstation/qwen3:cloud' }), 'Hello there');
+  });
+
+  it('review fix, item 7: under a policy a cloud id is refused on any kind of server, before any request', async () => {
+    const policy = egressPolicy({ reason: 'private-chat', chatId: 'chat-1' });
+    for (const kind of ['vllm', 'lmstudio', 'llamacpp', 'openai-compatible']) {
+      const provider = make(null, { kind });
+      const sent = server.requests.length;
+      await assert.rejects(provider.sendMessage(HI, { model: 'workstation/qwen3:cloud', egress: policy }), (err) => err.code === 'LOCAL_CLOUD_MODEL', kind);
+      await assert.rejects(provider.streamMessageWithTools(HI, [LOOKUP_TOOL], { model: 'workstation/gpt-oss:120b-cloud', egress: policy }, () => {}), (err) => err.code === 'LOCAL_CLOUD_MODEL', kind);
+      assert.strictEqual(server.requests.length, sent, kind);
+    }
   });
 
   it('streams a reply and makes a tool call', async () => {

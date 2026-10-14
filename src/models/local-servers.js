@@ -479,8 +479,12 @@ class LocalServers {
     const row = this._row(split.serverId);
     if (!row) return `No local server "${split.serverId}" is configured.`;
     if (!row.usable) return row.problem;
-    if (row.kind === 'ollama' && isOllamaCloudModelId(split.model)) {
-      return `${split.model} runs on Ollama's cloud, not on ${row.name}.`;
+    // A cloud id is never guarantee grade, on any kind of server (review
+    // fix, item 7): a server that hands the call on would not say so.
+    if (isOllamaCloudModelId(split.model)) {
+      return row.kind === 'ollama'
+        ? `${split.model} runs on Ollama's cloud, not on ${row.name}.`
+        : `${split.model} is named as an Ollama cloud model, so a private chat or a local-only role does not use it on ${row.name}.`;
     }
     const held = this._transports.get(row.id);
     if (!held || held.transport.grade !== 'guarantee') {
