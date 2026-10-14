@@ -927,6 +927,10 @@ function registerChatHandlers(ipcMain, context = {}) {
       const journal = answerText && answerText !== '(No response)' ? answerText : null;
       // The normal exit only: the stopped, blocked and failed exits pass
       // neither, so no verify pass follows them (cases stage 8 spec §6.9).
+      // endTurn commits and releases the case and returns; the verify pass
+      // it prepared runs after it, so the reply below is never held for it
+      // (R-C8-11). The criteria states update when the pass lands
+      // (case:changed, what: 'progress').
       await endCaseTurn({ summary: safeMessage, journal, evidence: { toolResults: caseToolResults }, verify: true });
 
       const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)', withProvenance({

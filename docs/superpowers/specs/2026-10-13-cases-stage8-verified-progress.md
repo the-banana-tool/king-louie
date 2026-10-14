@@ -13,7 +13,9 @@
   the case tools over MCP), models (`2026-09-27-model-catalog-profiles-roles-design.md`: roles, usage).
 - **Depends on:** C1 to C7 and the management surfaces, all on `main` (a6189a7).
 - **Agreed in outline with the owner on 2026-10-12.** The outline is the five parts of §1. The ten
-  questions of the first draft were ruled on 2026-10-13 (§2).
+  questions of the first draft were ruled on 2026-10-13 (§2). An eleventh ruling of the same day
+  (R-C8-11, "the verify pass runs after the reply") was made while the stage was being built; §6.5,
+  §6.9, §11, §13 and §18 are written to it.
 
 ## 1. Outcome
 
@@ -55,6 +57,7 @@ of the spec is written the decided way and names a ruling by its id.
 | R-C8-8 | A change to `brief.md` made outside the case tools | Not confirmed: origin `file`, shown as "changed outside the app" | The owner's own edit in an editor needs one press to count, because code cannot tell it from a `Bash` write |
 | R-C8-9 | Which tool results the verify pass sees | Case-tool results only (`Ledger`, `Decide`, `Executor`, `Ingest`, `Progress`) | The pass does not see a `Bash` or `WebFetch` result the turn relied on; it sees the facts recorded from them |
 | R-C8-10 | Does `Fail` add to the abandoned-approaches record? | No. Only `Progress.abandon` writes it | After a direction answer the model has to record the dead approach itself; §6.2 gives it one host line that names the failure report |
+| R-C8-11 | Does the owner wait for the verify pass? (asked after the pass was built inside the turn's close, where a reply waited up to 20 s for it) | No: **the verify pass runs after the reply.** The turn commits and releases the case at once; the pass makes its call with no lock held and writes its result when it lands (§6.5, §6.9) | A criterion reads its old state for the seconds the pass is out. A turn that starts in that time drops the pass's result; the case's next verified close runs the pass again. What the pass found is a journal entry of its own, not the first lines of the turn's entry |
 
 ### 2.1 Checked in the code after the first draft
 
@@ -394,9 +397,21 @@ is.
 The panel's own Done button stays. Its confirm dialog shows the summary line and the open items first
 and is never refused for an open item (R-C8-1).
 
-### 6.5 The verify pass at turn close — `src/cases/verify/judge.js`
+### 6.5 The verify pass after a turn's close — `src/cases/verify/judge.js`
 
-**When.** In `endTurn`, before `renderOpenItems` and the commit, when all of these hold:
+**When (R-C8-11).** The pass is decided and counted in `endTurn`, and runs after it. Three parts:
+
+1. **Prepared in the turn** (`prepareVerifyPass`, no model, under the turn's lock and in its commit):
+   whether the pass runs, what the model will be shown, and the count of the pass against the day's
+   limit. The pass is counted here, once, before any call.
+2. **Called after the turn** (`callVerifyModel`): `endTurn` commits, releases the case and returns, so
+   the owner's reply completes at once. The model call is made with no lock held and nobody waiting.
+3. **Landed in a system action** (`applyVerifyReply`, synchronous, inside
+   `CaseRuntime.verifySystemAction`): the verdicts, a journal entry, the cache and one commit
+   (`<turn id>: verify pass`), then `case:changed` with `what: 'progress'`, which is what the panel and
+   every other reader of the states refresh on.
+
+It is prepared when all of these hold:
 
 - the turn wrote something: a fact with `addedBy` this turn or a ledger line count above the mark taken
   at `beginTurn`; a decision count above its mark; or a job whose results were recorded this turn;
@@ -406,14 +421,48 @@ and is never refused for an open item (R-C8-1).
 - `cases.verify.when` is `changed-turn` (the default, R-C8-4), the day's pass count is under
   `maxPassesPerDay`, and the `usd` budget has not passed `skipAboveUsdPercent`.
 
-Otherwise it is skipped; a skip for budget or the daily cap writes one journal line a day.
+Otherwise it is skipped; a skip for budget or the daily cap writes one journal line a day (in the turn's
+own entry: a skip needs no model).
+
+**A result lands only while it is the newest thing known about the case.**
+
+- *A turn starts while the pass is out.* An owner turn takes the case at once (no "busy", no wait): the
+  pass is marked dropped in the same synchronous step that takes the lock, its call is stopped, and
+  nothing of its result is written, whenever the reply arrives. The case is then **owed** a pass: its
+  next verified close prepares one even when that turn wrote nothing (the facts of the dropped turn are
+  among the active facts it is shown). "Owed" is this process's memory; after a restart the next
+  changed turn verifies.
+- *A wake-up* does not start on a case whose pass is out (`CASE_BUSY`; the sweep counts it `busy` and
+  comes back within the minute). A wake-up that acted waits for its own pass before it returns, so the
+  sweep stays one case at a time and nothing of a wake-up outlives the sweep that shutdown awaits. Its
+  pass still runs with the case released, so an owner turn that arrives takes the case as above.
+- *The record changed while the model was thinking* (an answer, a panel action: system actions, not
+  turns). The result is still applied, against the record as it is at landing: a criterion whose words
+  changed is skipped (`criterion-changed`), and every cited id is resolved then.
+- *The case closed meanwhile.* Nothing is written; the case keeps the progress it closed with (R-C8-7).
+- *Another system action of this process holds the case.* The landing waits for it (at most 5 s), then
+  writes; if the case stays busy, or another process holds it, the result is dropped and the pass owed.
+- *An owner turn arrives during the landing's commit.* It waits for the commit instead of being
+  refused.
 
 **The call.** One call: `runtime.ensureRoleTested(caseId, 'verify', { turn })`, then
 `runtime.routedProvider(turn, { role: 'verify' }).sendMessageWithTools(messages, [], { systemPrompt,
 abortSignal })` (the tool-taking path, with no tools, because it is the path that returns `llmMetrics`),
 then `recordOneShotUsage(runtime, turn, reply)` so the call is charged to the case's `usd` budget and
 filed by role like orient. The helper moves from `turn-runner.js` to a shared module. A ref'd timer
-bounds the call at `cases.verify.timeoutMs` (20 s) and aborts it.
+bounds the call at `cases.verify.timeoutMs` (20 s) and aborts it. The pass has an abort signal of its
+own (the turn's is spent once the reply is over): a newer turn, shutdown and the time limit all stop
+the call through it.
+
+**Charging (R-C8-11).** Whatever the call reports is charged to the case, exactly once, **when the call
+settles**, whether or not the pass was still waiting for it: a reply in time; a reply that arrives after
+the time limit, or after the pass was dropped; and the partial usage a provider attaches to a call it
+was told to stop (`partialLlmMetrics`, recorded as `usagePartial`, never as $0). The call is also
+aborted for real at the time limit, so a provider that honours the abort stops generating; one that
+does not is charged for what it reports. A charge that arrives late is written in a system action of
+its own (`system: verify pass usage`) so it is committed; while a turn of this process holds the case
+it is written inside that turn; during shutdown it is written directly and committed by the next
+commit. The daily count is taken once, at prepare, and a dropped pass is not counted again.
 
 **What it is given** (built by `collectTurnEvidence(runtime, turn, evidence)`, §6.10), in this order,
 inside one data fence, at most `cases.verify.maxInputChars` (12,000):
@@ -461,8 +510,25 @@ Criteria the reply leaves out are untouched.
 An opinion is kept in `.kl/verification.json` (the newest per criterion) and shown as such: `the verify
 pass thought sc-003 was met but cited f-0099, which is inferred`. It is never a state.
 
-**After the pass**, `endTurn` writes the turn's journal entry with a host-written block ahead of the
-model's text:
+**The journal (R-C8-11).** The host-written block is now in two places, each written by whoever knows
+it:
+
+- *The turn's own entry* still starts with the block for what needs no model: a criterion that left
+  `met` because of what the turn itself wrote (it superseded or retracted a cited fact), the check's
+  result (§6.6), and the one line a day for a pass that was skipped for the limit or the budget. The
+  cache is written with it.
+- *The pass's entry*, kind `verification`, written when the pass lands: `Now met`, `Now stale` (a
+  verdict that no longer agrees), and the `Verify pass:` line. It is compared with the states the turn's
+  close left, so nothing is said twice. A pass with nothing to say writes no entry.
+
+A criterion that **the pass** took out of `met` cannot be the first lines of the turn's entry any more.
+It is told to the next turn instead: the landing leaves that criterion `met` in the cache, so the next
+turn's `verification` hook (§6.3) finds the difference and raises a "since last turn" note and a
+blocking `criterion-regressed` trigger in that turn's orientation, where the model must re-orient. The
+orientation's "last journal entry" skips `verification` entries: it stays the turn's own entry, and
+what the pass found is in the Progress section.
+
+The block as a whole, when both parts are read together:
 
 ```
 ## Verification (written by King Louie)
@@ -471,12 +537,12 @@ model's text:
 - Verify pass: 1 accepted, 1 not accepted (sc-003: f-0099 is inferred).
 ```
 
-A regression (a check that went from pass to fail, a criterion that left `met`) is always the first line.
-The block is written even when the model's text is empty.
+A regression (a check that went from pass to fail, a criterion that left `met`) is always the first line
+of the entry it is in. The turn's block is written even when the model's text is empty.
 
 **Failure is quiet and safe.** A timeout, a provider error, no usable model, or an unusable reply changes
-no state, adds `Verify pass: no usable verdict (<reason>)` to the block, and never fails `endTurn`: the
-turn commits as it does today.
+no state and writes `Verify pass: no usable verdict (<reason>)` as the pass's entry. Nothing in the pass
+can fail `endTurn`: the turn has committed and released the case before the call is made.
 
 ### 6.6 The check command of a `software-repo` case — `src/cases/verify/check.js`
 
@@ -674,12 +740,29 @@ orientation.
 `endTurn(turn, { summary, journal, journalKind, evidence, verify })`:
 
 1. **new, when `verify` is true and the turn is an owner turn:** the close check of §6.6;
-2. **new, when `verify` is true:** the verify pass of §6.5;
+2. **new, when `verify` is true:** the verify pass of §6.5 is **prepared** (no model call: the skips,
+   the input, the day's count);
 3. **new:** write the verification cache;
 4. `renderOpenItems`, the journal entry (now with the host block first), `_closeTurnMeta`, commit,
-   reindex, release (unchanged).
+   reindex, release (unchanged);
+5. **new (R-C8-11), after the release and with no `await` between:** the prepared pass is started.
+   `endTurn` does not wait for it. A turn that did not commit, that no longer owned the case, or that
+   closed after shutdown began starts none (the pass is owed).
 
 Steps 1 to 3 are wrapped so that nothing in them can keep the turn from committing and releasing.
+
+**The case lock and the pass.** The lock is never held across the verify call. The pass writes only in
+its landing, a system action taken after the call, and the checks that decide whether it may land and
+the taking of the lock have no `await` between them (`systemAction` takes the lock synchronously and
+the landing is synchronous), so a result is applied whole or not at all. `beginTurn` drops a pass that
+is out in the same synchronous step that takes the lock (`_acquireForTurn`), so a pass can never see
+"not dropped" and the newer turn's lock together.
+
+**Shutdown.** `beginShutdown` stops every pass that is out (`abortVerifyPasses`: the call is aborted
+and its result will not be written) and refuses new ones; `create-core`'s `shutdown()` awaits
+`verifyIdle(null, { settled: true })` within `shutdownTimeoutMs` before `releaseAll`, so a landing that
+had already taken the lock finishes its commit and no lock or half-written file is left. A pass
+stopped by shutdown wrote nothing but its count, which the turn committed.
 
 Callers: the owner send path (`src/ipc/chat-handlers.js`) passes `verify: true` and `evidence` only on
 its normal exit (the one that journals `answerText`); its stopped, blocked and failed exits pass
@@ -688,7 +771,9 @@ toolResults: [{ tool, action, ok, text }] }` (this turn's case-tool calls only, 
 never trusts its ids.
 
 `CaseRuntime` gains `scope(id)`, `abandoned(id)`, `verification(id)`, `progress(id)` (the joined view the
-panel, the tool and MCP all read) and `closeReadiness(id)`.
+panel, the tool and MCP all read) and `closeReadiness(id)`; and, for the pass after the reply,
+`verifyRunning(id)`, `verifyIdle(id?, { settled })`, `abortVerifyPasses(reason)` and
+`verifySystemAction(id, label, fn)`.
 
 ### 6.10 The seam for child hand-off
 
@@ -807,7 +892,9 @@ All three carry `disclosable: false`, so the `user` fact an answer writes is pri
 ### 7.6 Journal kinds
 
 `abandon` (one per abandoned record or withdrawal), `scope` (a confirmation or a drop made outside a
-turn). The verification block is part of the turn's own entry, not a kind.
+turn), `verification` (what a verify pass found, written when it lands after the turn, R-C8-11; ids,
+counts and fixed words only). The part of the verification block that needs no model is still the
+first lines of the turn's own entry.
 
 ## 8. Interfaces
 
@@ -833,7 +920,7 @@ No new tool, no new scope, nothing added to `CASE_SCOPES`. Three read tools retu
 | Tool | Added |
 |---|---|
 | `list_cases` | per row, bare: `criteria: { confirmed, met, proposed }`, `ready: true \| false` |
-| `open_case` | inside `data` (the `untrusted()` wrapper): `progress: { summary, objective: { state }, criteria: [{ id, text, state, verification, evidence, reason }], readiness: { ready, items: [{ id, state, by, fix, refs }] }, abandoned: { count, newest: [{ id, approach, why }] } }` |
+| `open_case` | inside `data` (the `untrusted()` wrapper): `progress: { frozen, summary, objective: { state, origin } \| null, criteria: [{ id, text, state, verification, evidence: [{ id, provenance }], reason }], readiness: { ready, items: [{ id, state, by, fix, refs }] }, abandoned: { count, newest: [{ id, approach, why }] } }`; `{ error: 'progress could not be read' }` when it cannot be read. `state` is `proposed` or `confirmed`; `verification` is `null` for a proposed row |
 | `get_orientation` | the text now holds the `Progress` and `Abandoned approaches` sections |
 
 Answers:
@@ -934,7 +1021,7 @@ and `case.yaml` `roles.verify`; there is no new role.
 | A spoken scope answer over MCP | A client with `cases:answer` confirms scope | The existing trust in that scope (quotes are recorded, not checked, off the app); the options are only "all" and "none" of exactly the hashed entries; closing stays pressed. Accepted by R-C8-2 |
 | `met` | The model declares success | No tool sets a state. A record is written only by code after a second model's verdict whose every id code resolved; the state is recomputed on each read |
 | The verify pass reads model-written facts | A `sourced` fact with an invented source is cited | Not prevented: `sourced` is model-declared (parent, stage 1). The row shows each evidence fact's provenance and source; an ingest-verified source is labelled as such; the owner sees the evidence on the close card |
-| The verify prompt carries case text | Injection steers the verdict | A verdict can only name ids; a `met` that code cannot resolve is an opinion. The worst a steered pass does is mark a met criterion `stale` |
+| The verify prompt carries case text | Injection steers the verdict | **Bounded, not prevented.** A verdict can only name ids, and a `met` that code cannot resolve is an opinion. But a statement can steer the pass into a **false `met`** that cites facts that are real, active, shown to it and of an allowed provenance (`user`, `sourced`, `external-agent`): code checks that the cited facts hold, not that they show the criterion. It can also turn a met criterion `stale`. It cannot cite a fact that is missing, inactive, inferred, an open unknown, under a load-bearing unknown, or not shown; it cannot touch a proposed criterion; and it cannot close the case. The owner sees the cited evidence, with its provenance, on the criterion's row and on the close card, and only the owner's press closes (§18) |
 | Tool results in the verify input | Third-party text argues for `met` | Only case-tool results are sent (R-C8-9), framed as not evidence; evidence must be a fact id |
 | The close proposal | The model closes the case | It cannot: `done` is applied only from a press on `in-app` or `mobile`, by `setStatus` with `by: 'owner'`; `TRANSITIONS` gains no `runtime` row into `done` |
 | The close card's text | Model text dressed as the list | Host lines first (summary, items, ids), the model's one-line note last and labelled; never cut; refused over 2,000 characters |
@@ -1000,11 +1087,15 @@ Reasons an opinion carries (not refusals): `evidence-empty`, `evidence-missing`,
 | `brief.md` unreadable (`BriefError`) | Scope and progress are unavailable; the orientation's existing brief error line stands; no pass runs | The existing "brief.md could not be read" |
 | The same criterion text twice in `brief.md` | One entry; the second string is ignored and noted | A note beside the criterion |
 | No usable `verify` model (`NoUsableModelError`) | `resolveCaseRole` falls back to `judge`'s target, as today; with none at all the pass is skipped | The journal block says the pass did not run and why |
-| The verify call times out, errors, or replies with the wrong shape | No state changes; usage that was reported is still charged | `Verify pass: no usable verdict (…)` in the journal |
+| The verify call times out, errors, or replies with the wrong shape | No state changes; usage that was reported is still charged | `Verify pass: no usable verdict (…)` in the journal, as the pass's own entry |
+| The verify call settles after the time limit, or after the pass was dropped | Its verdict is not applied; its usage is charged once, when it settles (§6.5) | The spend; nothing else |
+| A turn starts while the pass is out | The pass is dropped: its call is stopped and nothing of its result is written; the case's next verified close runs the pass it is owed | The criterion keeps its state until that close |
+| The owner sends a message while the pass is writing its result | The turn waits for that commit (at most 5 s), then starts | Nothing |
 | The reply names a criterion twice or an unknown id | The whole reply is dropped | The same |
 | The `usd` budget reaches 100 % during the pass | `usageHook` pauses the case through `onCrossings` as for any call; the verdicts already parsed are applied | The existing budget pause |
-| The owner presses Stop | The turn's abort signal ends the check and the pass; the stopped exit passes no `verify` | Nothing new |
-| Shutdown during a close | `abortUnattended` and the turn signal abort both; the check's process tree is killed and awaited | Nothing new |
+| The owner presses Stop | The turn's abort signal ends the check; the stopped exit passes no `verify`, so no pass is prepared. A pass that is already out belongs to a turn that is over and is not stopped by Stop | Nothing new |
+| Shutdown while a pass is out | `beginShutdown` stops its call; `shutdown()` awaits it within `shutdownTimeoutMs`; nothing of its result is written, no lock is left | Nothing new |
+| Shutdown during a close | `abortUnattended` and the turn signal abort the turn; the check's process tree is killed and awaited; a turn that closes after shutdown began prepares no pass | Nothing new |
 | The check's program is not installed | `spawn-failed`; no state changes | `Check: not run (npm was not found)` in the panel |
 | The check passes the time limit | Killed; recorded `timeout`; check-backed criteria `failing` | `failing`, with "timed out after 120 s" |
 | The snapshot is missing or stale at close | No check is run (the head it would be tied to is not known); `chk-` evidence resolves as `check-not-current` | `stale`, "repository state is stale" |
@@ -1140,8 +1231,9 @@ plan splits some of these further.
 
 1. **§4.3** shows `successCriteria` as plain strings the owner or the model wrote. Stage 8 keeps the
    shape and adds authorship beside it; a proposed criterion no longer satisfies anything.
-2. **§5.5** closes a turn by rendering, journaling and committing. Stage 8 adds a model call (the verify
-   pass) and, behind its setting, a host-run command to the close.
+2. **§5.5** closes a turn by rendering, journaling and committing. Stage 8 adds, behind its setting, a
+   host-run command to the close, and a model call (the verify pass) that the close prepares and that
+   runs after the turn released the case (R-C8-11), with a commit of its own.
 3. **§5.6** has seven case tools and the code has twelve; `Progress` is the thirteenth.
 4. **§9.2** gives `verify` to "ledger consistency review; second reading of blocked outbound spans".
    Stage 8 adds the criteria pass to that role.
@@ -1170,9 +1262,9 @@ Smaller than §2; each is the designer's choice and is easy to change.
 
 Not verified, and what breaks if wrong:
 
-- **The verify pass fits in 20 s and costs a few cents a turn.** Not measured. If it is slower, turns
-  close late or the pass times out and nothing is judged; if it is dearer, the daily cap and the 80 %
-  rule bound it.
+- **The verify pass fits in 20 s and costs a few cents a turn.** Not measured. If it is slower, the
+  states update late or the pass times out and nothing is judged (no turn closes late for it:
+  R-C8-11); if it is dearer, the daily cap and the 80 % rule bound it.
 - **`npm-cli.js` sits at `node_modules/npm/bin/npm-cli.js` beside `node.exe`.** True of the official
   Windows installer; a version manager may lay it out differently, and then `npm` is refused
   (`CHECK_SHIM`) rather than run some other way.
@@ -1195,6 +1287,19 @@ Stated plainly; none is fixed here.
   nobody opened. The row shows the provenance; nothing checks the source.
 - **The verify pass is a model.** It can be wrong in both directions. Code bounds what a wrong `met` can
   rest on (real, active, eligible facts); it cannot tell whether those facts add up to the criterion.
+- **A fact's statement can steer the verify pass into a false `met`.** The pass reads statements the
+  case model, a document or an external agent wrote. A statement written to argue ("this shows sc-002
+  is met") can get a `met` that cites real, active, shown facts of an allowed provenance, and code
+  accepts it: every cited id holds. What limits it: it cannot cite a missing, inactive, inferred,
+  unknown-blocked or unshown fact; it cannot touch a proposed criterion; it cannot close the case. The
+  owner sees the cited evidence and its provenance on the row and on the close card, and only the
+  owner's press closes. A wrong `met` does let the model's `proposeDone` through to that card.
+- **The states lag the reply by the length of the verify call** (R-C8-11), and a pass dropped by a newer
+  turn is made up only at the case's next verified close in the same run of the app. A criterion can
+  read `unmet` on evidence that is already recorded until then.
+- **A provider that bills for a stopped call and reports nothing** is not charged to the case: the
+  charge is what the call reports when it settles (a full reply, or the partial usage attached to the
+  abort).
 - **The check command runs the repository's code** with the account's access, and the model can change
   that code in an owner turn. Read-only and offline are not enforced and cannot be. The token rules stop
   shell tricks, not a hostile `package.json`. An approval covers words whose meaning can change.

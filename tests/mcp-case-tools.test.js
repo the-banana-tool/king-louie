@@ -436,3 +436,131 @@ describe('MCP case tools through the running service (courier, R24)', () => {
     }
   });
 });
+
+// Cases stage 8 (spec §6.8; plan Task 14): the read tools carry progress.
+// No tool, scope or channel here confirms a criterion or closes a case.
+describe('progress in open_case and list_cases', () => {
+  const src = { kind: 'url', ref: 'https://records.example.org/1' };
+
+  // An active case: one confirmed criterion met on a sourced fact, one the
+  // model proposed, and one abandoned approach.
+  async function progressSetup() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-mcp-progress-'));
+    dirs.push(root);
+    const rt = new CaseRuntime({ root });
+    const lot = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the Lakeside lot', objectiveBy: 'owner' });
+    rt.brief(lot.id).update('why', 'Need the cash', { provenance: 'user' });
+    await rt.applyScopeAction(lot.id, { action: 'add', text: 'Signed contract at or above the floor', by: 'owner-action' });
+    rt.completeGating(lot.id);
+    rt.brief(lot.id).append('successCriteria', 'Title search is clean', { provenance: 'model' });
+    const fact = rt.ledger(lot.id).assert({ stmt: 'The contract was signed at 81,000', subject: 'contract', attr: 'signed', value: 81000, provenance: 'sourced', source: src });
+    const row = rt.scopeView(lot.id).criteria[0];
+    rt.verification(lot.id).addRecord({ criterion: row.id, criterionHash: row.hash, evidence: [fact.id], note: 'Signed.', turnId: 'turn-0', model: 'example-provider:example-model' });
+    rt.abandoned(lot.id).abandon({ approach: 'List the lot at auction', why: 'The reserve would sit below the floor' }, { facts: rt.ledger(lot.id).view().facts, decisions: [] });
+    return { rt, lot, fact, row };
+  }
+
+  it('open_case carries progress inside the untrusted wrapper and nowhere outside it', async () => {
+    const { rt, lot, fact, row } = await progressSetup();
+    const open = await stdioTools(rt).call('open_case', { case: lot.id });
+    assert.deepStrictEqual(Object.keys(open), ['id', 'type', 'status', 'counts', 'data']);
+    assert.strictEqual(open.data.untrusted_output, true);
+    const p = open.data.data.progress;
+    assert.deepStrictEqual(Object.keys(p), ['frozen', 'summary', 'objective', 'criteria', 'readiness', 'abandoned']);
+    assert.strictEqual(p.frozen, false);
+    assert.match(p.summary, /^1 of 1 confirmed criteria met · 1 proposed \(not counted\) · not ready to close/);
+    assert.deepStrictEqual(p.objective, { state: 'confirmed', origin: 'owner-create' });
+    assert.deepStrictEqual(p.criteria, [
+      { id: row.id, text: 'Signed contract at or above the floor', state: 'confirmed', verification: 'met', evidence: [{ id: fact.id, provenance: 'sourced' }], reason: null },
+      { id: p.criteria[1].id, text: 'Title search is clean', state: 'proposed', verification: null, evidence: [], reason: null }
+    ]);
+    assert.strictEqual(p.readiness.ready, false);
+    for (const item of p.readiness.items) assert.deepStrictEqual(Object.keys(item), ['id', 'state', 'by', 'fix', 'refs']);
+    assert.ok(p.readiness.items.some((i) => i.id === 'criteria-confirmed' && i.state === 'open'));
+    assert.deepStrictEqual(p.abandoned, { count: 1, newest: [{ id: 'ab-0001', approach: 'List the lot at auction', why: 'The reserve would sit below the floor' }] });
+    // Nothing of the case's own words outside the wrapper.
+    const { data, ...bare } = open;
+    assert.doesNotMatch(JSON.stringify(bare), /Signed contract|Title search|auction/);
+  });
+
+  it('a stale criterion gives its reason; the newest five abandoned approaches are listed, newest first', async () => {
+    const { rt, lot, fact } = await progressSetup();
+    rt.ledger(lot.id).assert({ stmt: 'The contract was signed at 79,000', subject: 'contract', attr: 'signed', value: 79000, provenance: 'sourced', source: src, supersedes: fact.id });
+    for (let i = 2; i <= 7; i += 1) rt.abandoned(lot.id).abandon({ approach: `Approach number ${i} for the lot`, why: 'It did not hold up' }, { facts: rt.ledger(lot.id).view().facts, decisions: [] });
+    const p = (await stdioTools(rt).call('open_case', { case: lot.id })).data.data.progress;
+    assert.strictEqual(p.criteria[0].verification, 'stale');
+    assert.match(p.criteria[0].reason, new RegExp(`^${fact.id} was superseded by f-\\d{4}$`));
+    assert.strictEqual(p.abandoned.count, 7);
+    assert.deepStrictEqual(p.abandoned.newest.map((r) => r.id), ['ab-0007', 'ab-0006', 'ab-0005', 'ab-0004', 'ab-0003']);
+  });
+
+  it('list_cases gives the counts and ready as bare numbers and a boolean, outside the wrapper', async () => {
+    const { rt, lot } = await progressSetup();
+    const [listed] = await stdioTools(rt).call('list_cases', {});
+    assert.deepStrictEqual([listed.id, listed.criteria, listed.ready], [lot.id, { confirmed: 1, met: 1, proposed: 1 }, false]);
+    assert.deepStrictEqual(listed.data.data, { title: 'Lakeside lot', slug: 'lakeside-lot' });
+    // Over the stdio server too.
+    const c = connect({ caseTools: stdioTools(rt) });
+    const [overStdio] = await c.call('list_cases', {});
+    assert.deepStrictEqual([overStdio.criteria, overStdio.ready], [{ confirmed: 1, met: 1, proposed: 1 }, false]);
+    c.close();
+  });
+
+  it('a case with no stage files gives legacy, proposed rows and writes nothing', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-mcp-progress-'));
+    dirs.push(root);
+    const rt = new CaseRuntime({ root });
+    const lot = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+    rt.brief(lot.id).append('successCriteria', 'Signed contract', { provenance: 'model' });
+    rt.store.updateMeta(lot.id, { status: 'active' });
+    const kl = path.join(lot.dir, '.kl');
+    // A case from before the stage: none of its files.
+    for (const name of ['scope.json', 'verification.json', 'abandoned.jsonl']) fs.rmSync(path.join(kl, name), { force: true });
+    const filesIn = (dir) => fs.readdirSync(dir, { recursive: true }).map(String).filter((f) => !f.startsWith('.git')).sort();
+    const before = filesIn(lot.dir);
+    const h = stdioTools(rt);
+    const p = (await h.call('open_case', { case: lot.id })).data.data.progress;
+    assert.deepStrictEqual(p.objective, { state: 'proposed', origin: 'legacy' });
+    assert.deepStrictEqual(p.criteria.map((r) => [r.text, r.state, r.verification]), [['Signed contract', 'proposed', null]]);
+    assert.deepStrictEqual(p.abandoned, { count: 0, newest: [] });
+    const [listed] = await h.call('list_cases', {});
+    assert.deepStrictEqual([listed.criteria, listed.ready], [{ confirmed: 0, met: 0, proposed: 1 }, false]);
+    assert.deepStrictEqual(filesIn(lot.dir), before);
+    for (const name of ['scope.json', 'verification.json', 'abandoned.jsonl']) assert.strictEqual(fs.existsSync(path.join(kl, name)), false, name);
+  });
+
+  it('a closed case gives the progress it closed with, marked frozen', async () => {
+    const { rt, lot, fact } = await progressSetup();
+    await rt.setStatus(lot.id, 'done', { kind: 'owner', by: 'owner' });
+    // Not recomputed: a change to the ledger after the close is not read.
+    rt.ledger(lot.id).assert({ stmt: 'The contract was signed at 79,000', subject: 'contract', attr: 'signed', value: 79000, provenance: 'sourced', source: src, supersedes: fact.id });
+    const h = stdioTools(rt);
+    const p = (await h.call('open_case', { case: lot.id })).data.data.progress;
+    assert.strictEqual(p.frozen, true);
+    assert.strictEqual(p.objective, null);
+    assert.deepStrictEqual(p.criteria.map((r) => [r.state, r.verification]), [['confirmed', 'met'], ['proposed', null]]);
+    assert.strictEqual(p.readiness.ready, false);
+    const [listed] = await h.call('list_cases', {});
+    assert.deepStrictEqual(listed.criteria, { confirmed: 1, met: 1, proposed: 1 });
+  });
+
+  it('a progress read that throws gives a fixed error and the rest of the reply', async () => {
+    const { rt, lot } = await progressSetup();
+    rt.progress = () => { throw new Error('a path that must not be echoed'); };
+    const h = stdioTools(rt);
+    const open = await h.call('open_case', { case: lot.id });
+    assert.deepStrictEqual(open.data.data.progress, { error: 'progress could not be read' });
+    assert.strictEqual(open.data.data.title, 'Lakeside lot');
+    const [listed] = await h.call('list_cases', {});
+    assert.deepStrictEqual([listed.id, listed.criteria, listed.ready], [lot.id, null, false]);
+  });
+
+  it('the two descriptions name the new fields; no tool was added', () => {
+    assert.deepStrictEqual(CASE_MCP_TOOLS.map((t) => t.name), CASE_NAMES);
+    const desc = Object.fromEntries(CASE_MCP_TOOLS.map((t) => [t.name, t.description]));
+    assert.match(desc.list_cases, /criteria/);
+    assert.match(desc.list_cases, /ready to close/);
+    assert.match(desc.open_case, /progress/);
+    assert.match(desc.open_case, /abandoned/);
+  });
+});

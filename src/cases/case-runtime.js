@@ -17,7 +17,7 @@ const { AbandonedStore } = require('./abandoned');
 const { VerificationStore } = require('./verify/store');
 const { progressView, summaryLine } = require('./verify/status');
 const { resolveEvidence, turnMarks, collectTurnEvidence, statesOf } = require('./verify/evidence');
-const { runVerifyPass, verificationBlock } = require('./verify/judge');
+const { prepareVerifyPass, callVerifyModel, applyVerifyReply, verificationBlock } = require('./verify/judge');
 const { registerVerificationHook, freezeProgress } = require('./verify/hook');
 const { closeReadiness } = require('./verify/readiness');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
@@ -191,6 +191,11 @@ function readLock(lock) {
 }
 
 const HOOK_PHASES = Object.freeze(['turn-start', 'owner-message']);
+// The journal entry a verify pass writes when it lands after the turn
+// (cases stage 8, R-C8-11). The orientation's "last journal entry" skips it:
+// that is the turn's own entry, and what the pass found is in the Progress
+// section and the turn-start notes.
+const VERIFY_JOURNAL_KIND = 'verification';
 const STOPS_WORK = new Set(['paused', 'done', 'abandoned']);
 
 class CaseRuntime {
@@ -222,6 +227,21 @@ class CaseRuntime {
     this.creating = 0;
     // Set by beginShutdown(): no new wake-up turn may start once true.
     this.closing = false;
+    // Cases stage 8 (R-C8-11): the verify passes that run after a turn's
+    // reply. caseId -> the pass whose result may still land; every pass
+    // whose call has not ended (a dropped one too) is in verifyJobs; a case
+    // in verifyOwed had a pass dropped before it landed, so its next
+    // verified close runs one even when that turn wrote nothing. All three
+    // are this process's memory only.
+    this.verifying = new Map();
+    this.verifyJobs = new Set();
+    this.verifyOwed = new Set();
+    // caseId -> the system action in which a pass is writing right now (its
+    // result, or a late charge): an owner turn waits for it (_acquireForTurn).
+    this.verifyWrites = new Map();
+    // How long a pass that is ready to land waits for a system action of
+    // this process to release the case, and an owner turn for a landing.
+    this.verifyLandWaitMs = 5000;
     // Cases stage 5: detour routing and the case-type refresh (spec §3.6).
     // Registered last, once every field above exists (controller ruling M3).
     registerDetourHooks(this);
@@ -236,6 +256,10 @@ class CaseRuntime {
   // still recognizes as held.
   beginShutdown() {
     this.closing = true;
+    // A verify pass still out (cases stage 8): its call is stopped and its
+    // result will not be written. The host awaits verifyIdle() before it
+    // releases the locks.
+    this.abortVerifyPasses('shutdown');
   }
 
   get root() {
@@ -804,7 +828,7 @@ class CaseRuntime {
       brief,
       facts,
       decisions: records.decisions(),
-      lastJournal: records.lastJournal(),
+      lastJournal: records.lastJournal({ skipKinds: [VERIFY_JOURNAL_KIND] }),
       ledgerErrors: errors,
       maxChars: this.orientationMaxChars,
       triggers,
@@ -1161,11 +1185,30 @@ class CaseRuntime {
   // meant for a different process, not this runtime's own turn. A wake-up
   // turn never preempts anything: it just takes the normal busy error.
   async _acquireForTurn(meta, turnId, source) {
-    try {
+    // Cases stage 8: the pass of the turn before is dropped the moment a
+    // turn takes the case, with no await between (see _supersedeVerify).
+    const take = () => {
       this._acquire(meta, turnId);
+      this._supersedeVerify(meta.id, 'a newer turn started');
+    };
+    try {
+      take();
       return;
     } catch (err) {
       if (err.code !== 'CASE_BUSY' || source === 'wakeup') throw err;
+      // A verify pass of this process is writing (its result or a late
+      // charge; a commit's length): the owner's turn waits for it instead
+      // of being refused.
+      const writing = this.verifyWrites.get(meta.id);
+      if (writing) {
+        await this._waitFor(writing, this.verifyLandWaitMs);
+        try {
+          take();
+          return;
+        } catch (again) {
+          if (again.code !== 'CASE_BUSY') throw again;
+        }
+      }
       const holder = readLock(this._lockPath(meta.dir));
       const held = holder && Number.isInteger(holder.pid) ? this.turns.get(meta.id) : null;
       const inProcessWakeup = Boolean(
@@ -1177,7 +1220,7 @@ class CaseRuntime {
       const released = await this._waitForLockRelease(meta.dir, held.turnId, this.wakeupPreemptTimeoutMs);
       if (!released) throw new WakeupBusyError();
       try {
-        this._acquire(meta, turnId);
+        take();
       } catch {
         throw new WakeupBusyError();
       }
@@ -1471,6 +1514,12 @@ class CaseRuntime {
     // Shutting down: refuse before even taking the lock.
     if (source === 'wakeup' && this.closing) throw new RuntimeClosingError();
     const meta = this.getCase(id);
+    // Cases stage 8 (R-C8-11): a wake-up waits its turn behind a verify
+    // pass that is still out (it runs again within the minute); an owner
+    // turn takes the case and the pass is dropped (_acquireForTurn).
+    if (source === 'wakeup' && this.verifyRunning(meta.id)) {
+      throw new CaseBusyError(meta.title, { pid: process.pid, lockPath: this._lockPath(meta.dir), sameProcess: true });
+    }
     await this._acquireForTurn(meta, turnId, source);
     try {
       if (await git.isDirty(meta.dir)) await this._commit(meta.dir, 'owner edits', meta.id);
@@ -1562,37 +1611,225 @@ class CaseRuntime {
   }
 
   // The guarded steps of a turn's close (cases stage 8 spec §6.9), before
-  // the render, the journal and the commit: → { block }, host-written text
-  // that goes first in the turn's journal entry, or null. `evidence` is
-  // { toolResults } from the caller, this turn's case-tool calls only; it is
-  // filtered and capped again here and its ids are never trusted. Only the
-  // normal exit of an owner turn and a wake-up that acted pass `verify`.
+  // the render, the journal and the commit: → { block, plan }. `block` is
+  // host-written text that goes first in the turn's journal entry, or null.
+  // `plan` is the verify pass this close prepared, or null; endTurn starts
+  // it once the turn has committed and released the case (R-C8-11).
+  // `evidence` is { toolResults } from the caller, this turn's case-tool
+  // calls only; it is filtered and capped again here and its ids are never
+  // trusted. Only the normal exit of an owner turn and a wake-up that acted
+  // pass `verify`.
   //
-  // The verify pass (spec §6.5) makes one model call with the case lock
-  // held, as the rest of the turn does; cases.verify.timeoutMs bounds it,
-  // and the turn's own signal (Stop, a pause, shutdown) ends it at once.
+  // Nothing here calls a model. What needs none is done now, under the
+  // turn's lock and in its commit: what the turn wrote, every reason to
+  // skip the pass, the count of the pass against the day's limit, and the
+  // block's lines about what the turn itself changed (a criterion whose
+  // fact the turn superseded is said here, first, as before).
   async _closeProgress(turn, { evidence = null, verify = false } = {}) {
-    if (!verify) return { block: null };
+    if (!verify) return { block: null, plan: null };
     const closed = (status) => status === 'done' || status === 'abandoned';
-    if (closed(this.getCase(turn.caseId).status)) return { block: null };
+    if (closed(this.getCase(turn.caseId).status)) return { block: null, plan: null };
     const turnEvidence = collectTurnEvidence(this, turn, evidence || {});
     // As the turn began, so a criterion that left `met` during the turn is
     // named; as it is now when no marks were taken.
     const before = turn.marks && turn.marks.states ? turn.marks.states : statesOf(this.progressView(turn.caseId));
-    const pass = await runVerifyPass(this, turn, { turnEvidence });
-    // The turn no longer owns the case (shutdown released it), or the case
-    // closed meanwhile: nothing more is read or said.
-    if (this.turns.get(turn.caseId) !== turn || closed(this.getCase(turn.caseId).status)) return { block: null };
+    const { out, plan } = prepareVerifyPass(this, turn, { turnEvidence, owed: this.verifyOwed.has(turn.caseId) });
     const after = this.progressView(turn.caseId);
-    const block = verificationBlock({ pass, before, after });
+    // A pass that will run says its part when it lands; one that will not
+    // says why here (the day's limit, the budget), once a day.
+    const block = verificationBlock({ pass: plan ? null : out, before, after });
     // The cache follows what the entry just said. A close that is not
     // verified (stopped, blocked, failed) leaves it, so the next turn's
     // `verification` hook still sees a criterion that left `met`.
-    this.verification(turn.caseId).setCache(statesOf(after));
-    return { block };
+    const states = statesOf(after);
+    this.verification(turn.caseId).setCache(states);
+    if (plan) {
+      plan.out = out;
+      // What the pass's own entry is compared with: the states this close left.
+      plan.before = states;
+    }
+    return { block, plan };
+  }
+
+  // ---- The verify pass after the reply (cases stage 8, R-C8-11) ----
+  //
+  // endTurn commits and releases the case, then the pass makes its model
+  // call with no lock held and nobody waiting. Its result is written in one
+  // system action (the verdicts, a journal entry of its own, the cache, one
+  // commit), and only while it is still the newest thing known about the
+  // case: a turn that takes the case first drops it.
+
+  // Whether a pass of this case may still land.
+  verifyRunning(caseId) {
+    const job = this.verifying.get(caseId);
+    return Boolean(job && !job.done && !job.superseded);
+  }
+
+  // Resolves when no pass is out: for one case or, with no id, for all. With
+  // `settled`, also when every provider call a pass made has ended and its
+  // usage is written (a call can outlive the pass that stopped waiting for
+  // it). Never rejects.
+  async verifyIdle(caseId = null, { settled = false } = {}) {
+    for (;;) {
+      const jobs = [...this.verifyJobs].filter((j) => (caseId === null || j.caseId === caseId) && (settled || !j.done));
+      if (!jobs.length) return;
+      await Promise.allSettled(jobs.map((j) => (settled ? Promise.allSettled([j.promise, j.settled]) : j.promise)));
+    }
+  }
+
+  // Stops every pass that is out: its call is aborted and its result is not
+  // written. Called by beginShutdown.
+  abortVerifyPasses(reason = 'stopped') {
+    for (const job of this.verifyJobs) {
+      if (job.done) continue;
+      job.superseded = true;
+      job.why = reason;
+      job.controller.abort(reason);
+    }
+  }
+
+  // A turn has taken the case: the pass that was out is no longer the
+  // newest thing known about it. Synchronous, and called with no await
+  // after the lock is taken, so a pass can never see "not superseded" and
+  // the newer turn's lock at once.
+  _supersedeVerify(caseId, reason) {
+    const job = this.verifying.get(caseId);
+    if (!job || job.done || job.superseded) return;
+    job.superseded = true;
+    job.why = reason;
+    this.verifyOwed.add(caseId);
+    job.controller.abort(reason);
+    log.info(`Case ${caseId}: the verify pass of ${job.turnId} was dropped (${reason}).`);
+  }
+
+  // A promise, or a time limit. The timer is ref'd: this is a wait for work
+  // this process itself is doing.
+  _waitFor(promise, ms) {
+    let timer = null;
+    return Promise.race([
+      Promise.resolve(promise).catch(() => {}),
+      new Promise((resolve) => { timer = setTimeout(resolve, Math.max(0, ms)); })
+    ]).finally(() => clearTimeout(timer));
+  }
+
+  // A system action made by a verify pass (its result, a late charge).
+  // Listed in verifyWrites while it holds the case, so a turn that arrives
+  // then waits the length of its commit instead of reading "busy".
+  verifySystemAction(caseId, label, fn, options = {}) {
+    const action = this.systemAction(caseId, label, fn, options);
+    const tracked = Promise.resolve(action).catch(() => {}).finally(() => {
+      if (this.verifyWrites.get(caseId) === tracked) this.verifyWrites.delete(caseId);
+    });
+    this.verifyWrites.set(caseId, tracked);
+    return action;
+  }
+
+  // Starts the pass a close prepared. → the job ({ promise, settled, ... }).
+  _startVerifyPass(turn, plan) {
+    const caseId = turn.caseId;
+    const controller = new AbortController();
+    const job = { caseId, turnId: turn.turnId, controller, superseded: false, why: null, done: false, promise: null, settled: Promise.resolve(), result: null };
+    this._supersedeVerify(caseId, 'a newer pass started');
+    this.verifyOwed.delete(caseId);
+    this.verifying.set(caseId, job);
+    this.verifyJobs.add(job);
+    job.promise = this._runVerifyJob(turn, plan, job)
+      .catch((err) => {
+        log.warn(`Case ${caseId}: the verify pass of ${turn.turnId} failed: ${err?.message || err}`);
+        return null;
+      })
+      .then((result) => {
+        job.result = result;
+        job.done = true;
+        if (this.verifying.get(caseId) === job) this.verifying.delete(caseId);
+        // The job stays listed until its provider call has ended too.
+        Promise.resolve(job.settled).catch(() => {}).then(() => this.verifyJobs.delete(job));
+        return result;
+      });
+    return job;
+  }
+
+  async _runVerifyJob(turn, plan, job) {
+    const caseId = turn.caseId;
+    const pass = plan.out;
+    const dropped = () => {
+      const why = job.superseded ? (job.why || 'superseded') : (this.closing ? 'shutdown' : null);
+      if (!why) return false;
+      pass.error = `dropped (${why})`;
+      pass.dropped = true;
+      // A pass that did not land is owed to the case's next verified close.
+      this.verifyOwed.add(caseId);
+      return true;
+    };
+    if (dropped()) return pass;
+    // The turn's own signal is spent (the reply is over): the pass has its own.
+    const called = await callVerifyModel(this, turn, plan.input, plan.timeoutMs, { signal: job.controller.signal });
+    job.settled = called.settled || Promise.resolve();
+    if (dropped()) return pass;
+    // A system action of this process holds the case (an answer, a panel
+    // action): running inside it could miss its commit, so wait it out. A
+    // turn that takes the case meanwhile drops this pass.
+    const dir = this.getCase(caseId).dir;
+    const deadline = Date.now() + this.verifyLandWaitMs;
+    while (this._holdsLock(dir) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      if (dropped()) return pass;
+    }
+    if (this._holdsLock(dir)) {
+      job.superseded = true;
+      job.why = 'the case stayed busy';
+      dropped();
+      return pass;
+    }
+    let landed = false;
+    try {
+      // No await between the checks above and the lock: systemAction takes
+      // it synchronously, and `land` is synchronous, so the result is
+      // applied whole or not at all.
+      await this.verifySystemAction(caseId, 'verify pass', (meta) => {
+        if (dropped()) return;
+        // Closed while the model was thinking: the case keeps the progress
+        // it closed with (R-C8-7).
+        if (meta.status === 'done' || meta.status === 'abandoned') {
+          pass.error = 'the case closed during the pass';
+          pass.dropped = true;
+          return;
+        }
+        if (called.reply) applyVerifyReply(this, plan, called, pass);
+        else pass.error = called.error || 'the model call failed';
+        const after = this.progressView(caseId);
+        const block = verificationBlock({ pass, before: plan.before, after });
+        if (block) new CaseRecords(meta.dir).writeJournal(VERIFY_JOURNAL_KIND, block, this.now());
+        // A criterion this pass took out of `met` stays `met` in the cache,
+        // so the next turn's `verification` hook raises it (a note and a
+        // blocking trigger): that turn's orientation is where the model
+        // reads it, since this entry is not the turn's own.
+        const states = statesOf(after);
+        for (const [id, was] of Object.entries(plan.before || {})) {
+          if (was === 'met' && id in states && states[id] !== 'met') states[id] = 'met';
+        }
+        this.verification(caseId).setCache(states);
+        landed = true;
+      }, { commitMessage: `${turn.turnId}: verify pass` });
+    } catch (err) {
+      // Another process holds the case, or the write failed.
+      log.warn(`Case ${caseId}: the verify pass of ${turn.turnId} could not be written: ${err?.message || err}`);
+      pass.error = 'the result could not be written';
+      this.verifyOwed.add(caseId);
+    }
+    if (landed) {
+      this._reindex(caseId);
+      this._notify('case:changed', { caseId, what: 'progress' });
+    }
+    return pass;
   }
 
   async endTurn(turn, { summary = '', journal = null, journalKind = 'turn', evidence = null, verify = false } = {}) {
+    // The verify pass this close prepared (cases stage 8, R-C8-11). It is
+    // started below, after the commit and the release: the caller gets its
+    // commit back at once and the pass runs with no lock held.
+    let plan = null;
+    let committedOk = false;
     try {
       // Nothing in the close steps may keep the turn from committing and
       // releasing its lock (spec §6.9).
@@ -1600,6 +1837,7 @@ class CaseRuntime {
       try {
         const closed = await this._closeProgress(turn, { evidence, verify });
         if (closed && typeof closed.block === 'string' && closed.block.trim()) block = closed.block.trim();
+        if (closed && closed.plan) plan = closed.plan;
       } catch (err) {
         log.warn(`Case ${turn.caseId}: the progress steps of the turn's close failed: ${err.message}`);
       }
@@ -1618,11 +1856,28 @@ class CaseRuntime {
       this._closeTurnMeta(turn);
       const committed = await this._commit(turn.dir, `${turn.turnId}: ${oneLine(summary) || 'turn'}`, turn.caseId);
       this._reindex(turn.caseId);
+      committedOk = true;
       return committed;
     } finally {
-      if (this.turns.get(turn.caseId) === turn) this.turns.delete(turn.caseId);
+      const owned = this.turns.get(turn.caseId) === turn;
+      if (owned) this.turns.delete(turn.caseId);
       this._release(turn.dir, turn.turnId);
       this._notify('case:changed', { caseId: turn.caseId, what: 'turn', running: false, source: turn.source || 'owner' });
+      if (plan) {
+        // Started with no await after the release. A turn that did not
+        // commit, or that no longer owned the case (shutdown released it),
+        // starts none; the pass was counted and is owed to the next close.
+        if (committedOk && owned && !this.closing) {
+          try {
+            this._startVerifyPass(turn, plan);
+          } catch (err) {
+            log.warn(`Case ${turn.caseId}: the verify pass could not be started: ${err.message}`);
+            this.verifyOwed.add(turn.caseId);
+          }
+        } else {
+          this.verifyOwed.add(turn.caseId);
+        }
+      }
     }
   }
 

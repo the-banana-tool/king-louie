@@ -2,6 +2,12 @@
 // Cases stage 8 (spec §6.5; R-C8-4, R-C8-9): the verify pass at the close of
 // a turn that changed the record. No network and no model: the router is a
 // stub that returns a scripted reply.
+//
+// Owner ruling R-C8-11 (2026-10-13): the pass at a turn's close runs after
+// the turn released the case, so a test that closes a turn with
+// `verify: true` awaits `rt.verifyIdle(id)` before it reads what the pass
+// did, and the pass's lines are a journal entry of their own
+// (tests/cases-verify-after-reply.test.js has the timing itself).
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -206,6 +212,7 @@ describe('what the pass is given', () => {
       },
       verify: true
     });
+    await w.rt.verifyIdle(w.id);
     assert.strictEqual(w.calls.length, 1);
     const { messages, opts } = w.calls[0];
     assert.strictEqual(messages.length, 1);
@@ -427,14 +434,18 @@ describe('what code does with a verdict', () => {
       const out = await w.pass(turn);
       assert.deepStrictEqual([out.ran, out.error, out.accepted], [true, 'timed out after 50 ms', []]);
       assert.strictEqual(w.calls[0].opts.abortSignal.aborted, true);
+      // The close starts a pass of its own, after the turn; it times out too.
       await w.rt.endTurn(turn, { summary: 'wrote', journal: 'Recorded the contract.', verify: true });
+      await w.rt.verifyIdle(w.id);
     } finally {
       clearTimeout(keep);
     }
-    assert.strictEqual(Number((await git.git(w.dir, ['rev-list', '--count', 'HEAD'])).trim()), before + 1);
+    // The turn committed; the pass that timed out says so in an entry and a
+    // commit of its own.
+    assert.strictEqual(Number((await git.git(w.dir, ['rev-list', '--count', 'HEAD'])).trim()), before + 2);
     assert.strictEqual(fs.existsSync(path.join(w.dir, '.kl', 'lock')), false);
     assert.strictEqual(await git.isDirty(w.dir), false);
-    assert.deepStrictEqual(w.journals().slice(-1), [`${HEADING}\n- Verify pass: no usable verdict (timed out after 50 ms).\n\nRecorded the contract.\n`]);
+    assert.deepStrictEqual(w.journals().slice(-2), ['Recorded the contract.\n', `${HEADING}\n- Verify pass: no usable verdict (timed out after 50 ms).\n`]);
   });
 
   it('charged to the case and filed under the verify role', async () => {
@@ -471,18 +482,17 @@ describe('what code does with a verdict', () => {
 });
 
 describe('the journal block', () => {
-  it('starts the entry when a criterion changed state, and is absent when nothing was written', async () => {
+  it("is an entry of its own after the turn's when a criterion changed state, and is absent when nothing was written", async () => {
     const w = await world();
     let turn = await w.begin();
     const f = w.fact(turn);
     w.script.reply = verdict(met('sc-001', f.id), met('sc-002', 'f-0999'));
     await w.rt.endTurn(turn, { summary: 'wrote', journal: 'Recorded the signed contract.', verify: true });
-    assert.deepStrictEqual(w.journals().slice(-1), [[
+    await w.rt.verifyIdle(w.id);
+    assert.deepStrictEqual(w.journals().slice(-2), ['Recorded the signed contract.\n', [
       HEADING,
       `- Now met: sc-001 (${f.id}).`,
       '- Verify pass: 1 accepted, 1 not accepted (sc-002: f-0999 is not in the ledger).',
-      '',
-      'Recorded the signed contract.',
       ''
     ].join('\n')]);
     assert.strictEqual(await git.isDirty(w.dir), false);
@@ -493,12 +503,13 @@ describe('the journal block', () => {
     assert.strictEqual(w.calls.length, 1);
   });
 
-  it('a criterion that left met during the turn is the first line', async () => {
+  it("a criterion that left met during the turn is the first line of the turn's own entry", async () => {
     const w = await world();
     let turn = await w.begin();
     const f = w.fact(turn);
     w.script.reply = verdict(met('sc-001', f.id));
     await w.rt.endTurn(turn, { summary: 'wrote', journal: 'Signed.', verify: true });
+    await w.rt.verifyIdle(w.id);
     assert.strictEqual(w.row('sc-001').state, 'met');
 
     // The turn corrects the fact: the pass runs and accepts something else.
@@ -508,15 +519,13 @@ describe('the journal block', () => {
     const closed = w.fact(turn, { subject: 'closing', attr: 'done', value: true, stmt: 'Closing happened on day 40' });
     w.script.reply = verdict(met('sc-002', closed.id));
     await w.rt.endTurn(turn, { summary: 'corrected', journal: 'Corrected the record.', verify: true });
-    assert.deepStrictEqual(w.journals().slice(-1), [[
-      HEADING,
-      `- Now stale: sc-001 (${f.id} was superseded by ${corrected.id}).`,
-      `- Now met: sc-002 (${closed.id}).`,
-      '- Verify pass: 1 accepted.',
-      '',
-      'Corrected the record.',
-      ''
-    ].join('\n')]);
+    await w.rt.verifyIdle(w.id);
+    // What the turn itself undid needs no model: it leads the turn's entry.
+    // What the pass found follows in its own.
+    assert.deepStrictEqual(w.journals().slice(-2), [
+      [HEADING, `- Now stale: sc-001 (${f.id} was superseded by ${corrected.id}).`, '', 'Corrected the record.', ''].join('\n'),
+      [HEADING, `- Now met: sc-002 (${closed.id}).`, '- Verify pass: 1 accepted.', ''].join('\n')
+    ]);
 
     // A retraction alone runs no pass; the block still says what it did.
     turn = await w.begin();
