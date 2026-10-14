@@ -8,6 +8,13 @@
 //
 // Hold mode: a stream stops after its first text chunk and stays open until
 // the client goes away — how the Stop tests catch an abort mid-stream.
+//
+// For the local server probe (tests/local-probe.test.js), the OpenAI dialect
+// also switches on the model's name: "text-only" answers a tool request in
+// text, "no-usage" reports no usage, "slow" delays its first token, "hang"
+// never answers. setReply(model, text) fixes a model's reply text;
+// setModels(list) and setOllamaModels(map) change what is listed;
+// failNext(status, count, pathSuffix) fails the next matching requests.
 const http = require('http');
 
 const TOOL_ARGS = Object.freeze({ q: 'weather' });
@@ -15,9 +22,18 @@ const OLLAMA_MODELS = Object.freeze({
   'test-model': { model_info: { 'llama.context_length': 8192 }, capabilities: ['completion', 'tools'] },
   'vision-model': { model_info: {}, capabilities: ['completion', 'vision'] }
 });
+const SLOW_FIRST_TOKEN_MS = 150;
 
 async function startFakeLlmServer() {
-  const state = { requests: [], hold: false, closed: 0, waiters: [], open: new Set() };
+  const state = {
+    requests: [], hold: false, closed: 0, waiters: [], open: new Set(),
+    ollamaModels: OLLAMA_MODELS, models: null, replies: new Map(), failures: [], timers: new Set()
+  };
+  const named = (model, word) => String(model || '').includes(word);
+  const later = (ms, fn) => {
+    const timer = setTimeout(() => { state.timers.delete(timer); fn(); }, ms);
+    state.timers.add(timer);
+  };
 
   const sendJson = (res, status, body) => {
     res.writeHead(status, { 'content-type': 'application/json' });
@@ -41,25 +57,45 @@ async function startFakeLlmServer() {
 
   const openaiChat = (res, body) => {
     const model = body.model || 'test-model';
-    if (body.stream) {
-      startSse(res);
-      data(res, { model, choices: [{ delta: { content: 'Hello' } }] });
-      if (state.hold) return;
-      data(res, { model, choices: [{ delta: { content: ' there' } }] });
-      data(res, { model, choices: [], usage: { prompt_tokens: 12, completion_tokens: 2, total_tokens: 14 } });
-      data(res, '[DONE]');
-      res.end();
+    // Never answers: the request stays open until the client or close() ends it.
+    if (named(model, 'hang')) {
+      state.open.add(res);
+      res.on('close', () => state.open.delete(res));
       return;
     }
-    if (hasTools(body)) {
+    const fixed = state.replies.has(model) ? state.replies.get(model) : null;
+    const usage = (prompt, completion) => (named(model, 'no-usage') ? {} : { usage: { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion } });
+    if (body.stream) {
+      const run = () => {
+        if (res.destroyed) return;
+        startSse(res);
+        if (fixed !== null) {
+          data(res, { model, choices: [{ delta: { content: fixed } }] });
+        } else {
+          data(res, { model, choices: [{ delta: { content: 'Hello' } }] });
+          if (state.hold) return;
+          data(res, { model, choices: [{ delta: { content: ' there' } }] });
+        }
+        if (!named(model, 'no-usage')) data(res, { model, choices: [], ...usage(12, 2) });
+        data(res, '[DONE]');
+        res.end();
+      };
+      if (named(model, 'slow')) later(SLOW_FIRST_TOKEN_MS, run);
+      else run();
+      return;
+    }
+    if (hasTools(body) && fixed === null && !named(model, 'text-only')) {
+      // The call names the first tool the request offered.
+      const tool = body.tools[0];
+      const name = tool?.function?.name || tool?.name || 'Lookup';
       sendJson(res, 200, {
         model,
-        choices: [{ message: { role: 'assistant', content: '', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'Lookup', arguments: JSON.stringify(TOOL_ARGS) } }] } }],
-        usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 }
+        choices: [{ message: { role: 'assistant', content: '', tool_calls: [{ id: 'call_1', type: 'function', function: { name, arguments: JSON.stringify(TOOL_ARGS) } }] } }],
+        ...usage(20, 5)
       });
       return;
     }
-    sendJson(res, 200, { model, choices: [{ message: { role: 'assistant', content: 'Hello there' } }], usage: { prompt_tokens: 12, completion_tokens: 2, total_tokens: 14 } });
+    sendJson(res, 200, { model, choices: [{ message: { role: 'assistant', content: fixed !== null ? fixed : 'Hello there' } }], ...usage(12, 2) });
   };
 
   const anthropicMessages = (res, body) => {
@@ -136,7 +172,7 @@ async function startFakeLlmServer() {
   const modelsList = (res, provider) => {
     if (provider === 'gemini') return sendJson(res, 200, { models: [{ name: 'models/test-model', supportedGenerationMethods: ['generateContent'] }] });
     if (provider === 'cohere') return sendJson(res, 200, { models: [{ name: 'test-model' }] });
-    return sendJson(res, 200, { data: [{ id: 'test-model' }] });
+    return sendJson(res, 200, { data: state.models || [{ id: 'test-model' }] });
   };
 
   const server = http.createServer((req, res) => {
@@ -153,17 +189,26 @@ async function startFakeLlmServer() {
         body = {};
       }
       state.requests.push({ provider, method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), headers: req.headers, body });
+      const failing = state.failures.find((f) => !f.suffix || url.pathname.endsWith(f.suffix));
+      if (failing) {
+        failing.count -= 1;
+        if (failing.count <= 0) state.failures.splice(state.failures.indexOf(failing), 1);
+        sendJson(res, failing.status, { error: { message: `fake failure ${failing.status}` } });
+        return;
+      }
       if (tail.endsWith('/copilot_internal/v2/token')) {
         sendJson(res, 200, { token: 'copilot-session', expires_at: Math.floor(Date.now() / 1000) + 3600 });
         return;
       }
       if (provider === 'ollama' && tail === '/api/tags') {
-        sendJson(res, 200, { models: Object.keys(OLLAMA_MODELS).map((name) => ({ name })) });
+        sendJson(res, 200, {
+          models: Object.entries(state.ollamaModels).map(([name, info]) => ({ name, ...(info.digest ? { digest: info.digest } : {}) }))
+        });
         return;
       }
       if (provider === 'ollama' && tail === '/api/show') {
-        const info = OLLAMA_MODELS[body.model];
-        if (info) sendJson(res, 200, info);
+        const info = state.ollamaModels[body.model];
+        if (info) sendJson(res, 200, { model_info: info.model_info, capabilities: info.capabilities });
         else sendJson(res, 404, { error: 'model not found' });
         return;
       }
@@ -183,6 +228,10 @@ async function startFakeLlmServer() {
     url: `http://127.0.0.1:${port}`,
     requests: state.requests,
     setHold: (on) => { state.hold = Boolean(on); },
+    setModels: (list) => { state.models = Array.isArray(list) ? list : null; },
+    setOllamaModels: (map) => { state.ollamaModels = map && typeof map === 'object' ? map : OLLAMA_MODELS; },
+    setReply: (model, text) => { state.replies.set(String(model), String(text)); },
+    failNext: (status = 500, count = 1, suffix = null) => { state.failures.push({ status, count, suffix }); },
     closedCount: () => state.closed,
     waitForClosedStream: (count, timeoutMs = 3000) => new Promise((resolve, reject) => {
       if (state.closed >= count) { resolve(); return; }
@@ -198,6 +247,8 @@ async function startFakeLlmServer() {
       state.waiters.push(check);
     }),
     close: () => new Promise((resolve) => {
+      for (const timer of state.timers) clearTimeout(timer);
+      state.timers.clear();
       for (const res of state.open) res.destroy();
       if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
       server.close(() => resolve());

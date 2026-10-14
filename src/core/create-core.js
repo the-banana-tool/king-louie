@@ -1054,7 +1054,11 @@ function createCore(deps = {}) {
       const encrypted = getApiTokens()[`__local_${serverId}`];
       return encrypted ? decryptToken(encrypted) : null;
     },
-    catalog
+    catalog,
+    // What a probe found out about each model (§6.1). Read here, at build,
+    // with no request made: a model is probed when it is first used or when
+    // the owner asks, never because the app started.
+    probeFile: path.join(userDataPath, 'models', 'local-probes.json')
   });
 
   // `target` is the resolved target the instance is for. Only `local` needs
@@ -2453,7 +2457,13 @@ function createCore(deps = {}) {
   const ensureTargetsTested = async (targets) => {
     const providers = [...new Set((targets || []).map((x) => String(x?.provider || '').toLowerCase()))]
       .filter((p) => KL_PROVIDERS.includes(p) && hasProviderCredential(p));
-    await Promise.all(providers.map((p) => availability.refreshForUse(p)));
+    await Promise.all([
+      ...providers.map((p) => availability.refreshForUse(p)),
+      // A local model that was never probed is probed now, once (spec
+      // 2026-10-13 §6.2); only the models asked about, and never under
+      // KL_TEST_MODE. A server that does not answer is left to the call.
+      ...(process.env.KL_TEST_MODE ? [] : [localServers.ensureProbed(targets || [])])
+    ]);
   };
 
   // One role for one call (spec §6.3, §6.4): the usable targets in order, a

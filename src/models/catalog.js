@@ -141,6 +141,16 @@ class Catalog extends EventEmitter {
       const id = ref.slice(colon + 1).trim();
       if (!id) continue;
       const key = N.entryKey(provider, id);
+      if (provider === LOCAL_PROVIDER) {
+        // A model on a local server (spec 2026-10-13 §6.5): an override may
+        // change what it can do, never its cost or its `local` flag, and it
+        // makes no local model the registry did not put here.
+        const held = index.get(key);
+        if (!held) continue;
+        const { cost: _cost, local: _local, ...capabilities } = patch;
+        index.set(key, mergeEntry(held, capabilities, 'override', { deep: true }));
+        continue;
+      }
       const base = index.get(key) || { ...N.normalizeModel(provider, { id }), sources: [] };
       index.set(key, mergeEntry(base, patch, 'override', { deep: true }));
     }

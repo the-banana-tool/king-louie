@@ -88,6 +88,21 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - **Not done, and in no task's text:** spec §6.4's "an entry's `timeoutMs` replaces the role timeout when larger". The value is validated and listed; nothing applies it yet.
 - The core's wiring is tested in `tests/inference-router-local.test.js` (`local servers in the core`).
 
+**Task 6:**
+
+- **An Ollama server is listed with one `/api/tags` call, and `/api/show` is asked per model only when that model is probed**, not through `discoverOllama` (which shows every model on every listing, drops the `digest` the record stores, and reads a missing capability list as "no images" where the record needs `unknown`). `local-probe.js` exports `discoverModels` (`[{ id, cloud, context, digest }]`) beside `listModels` (the ids).
+- Limits the text does not give: a listing is at most 500 models, 4 MB and 20 s; a model id must be one plain line of at most 200 characters (others are dropped); a probe reply is read to at most 256 KB. A reply over the cap fails its step.
+- `probeModel` sends through `provider.request` (the server's `LocalServerProvider`, so the transport and the server's key) when it is given a provider, else through `fetch`. The tool step also sends `temperature: 0` and `max_tokens: 256`; the smoke step sends no `stream_options`, the same request shape the provider's own stream sends, so `usageReported` says what a real call will see. **For Task 11:** a server that reports stream usage only when asked (`stream_options.include_usage`) reads `usageReported: false`, and its calls will be estimated.
+- What an Ollama server says about tools (`/api/show` `capabilities`) is used one way only: when the tool step fails and the server said "no tools", the record says `no`; a server that says "tools" with a failed tool step stays `unknown`.
+- **`ensureTargetsTested` calls `localServers.ensureProbed(targets)`**, which lists a server once and probes only the models the role names (`refresh(id, { only })`), not every model the server holds: a turn does not wait while models it will not use are loaded. A listing that fails is not asked for again on a turn's behalf for 60 s, and a model the server's list did not hold is not asked about again. Skipped under `KL_TEST_MODE`.
+- **Nothing lists or probes at start.** The probe file is read when the core is built (no request); `startModelsBackgroundChecks` is unchanged. A model is probed when a server is added (Task 7), when a turn first uses it, or when the owner asks.
+- A probe whose steps all failed is still a record (with `error` and `probedAt`) and is not retried by itself: `toolCall: 'unknown'`, never `yes`. A probe cut off by shutdown or by its entry changing is not stored.
+- `probe(id, model)` lists the server first and refuses a model that is not in the list (`LOCAL_MODEL_NOT_LISTED`) or a cloud id (`LOCAL_CLOUD_MODEL`). `explain` says "not in the server's list" only for a list fetched in this process (the list is not stored; the records are), and answers `LOCAL_MODEL_UNFIT` for a capability the call needs. An owner override that says the model calls tools (`models.overrides`, spec §6.5) lifts a probed `no`.
+- A record has one optional key more than the text: `imageInputSource: 'owner'`, so an owner-entered image input survives a new probe as the owner-entered context does. A stored record is read back field by field (`readRecord`): a value that is not what the field holds becomes `unknown` or null, and other keys are dropped.
+- A record for a server that is not configured, or is unusable, stays in the file and out of the catalog.
+- **`src/models/catalog.js` is edited (not in the task's file list):** an override for `local:<id>` loses its `cost` and `local` keys, and is ignored when the registry put no such entry in the catalog (an override makes no local model).
+- **For later tasks:** the catalog entry's `toolCall` is true only for a probed `yes` (as written), so `capabilitiesOf(catalog, 'local', id).toolCalling` is false for a model whose probe was `unknown`, while `explain` does not refuse it a tool job.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named). Rulings that belong to L2 only are listed so nobody looks for them here.
