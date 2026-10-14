@@ -457,6 +457,15 @@ contextBridge.exposeInMainWorld(
         return ipcRenderer.invoke('chat:addMessage', payload);
       },
       speakLast: (payload) => ipcRenderer.invoke('chat:speakLast', payload),
+      // Local inference L1: the owner's private mark. Without confirm the
+      // reply is the confirmation's facts (untrustedText: set with
+      // textContent); with confirm: true it marks, one way. Only these
+      // fields are sent.
+      markPrivate: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId', { minLength: 1 });
+        return ipcRenderer.invoke('chat:markPrivate', { chatId: payload.chatId, confirm: payload.confirm === true });
+      },
       sendMessage: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.chatId, 'chatId');
@@ -834,7 +843,15 @@ contextBridge.exposeInMainWorld(
       attach: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.chatId, 'chatId', { minLength: 1 });
+        if (payload.makeCasePrivate !== undefined && typeof payload.makeCasePrivate !== 'boolean') throw new Error('Invalid makeCasePrivate: expected boolean');
         return ipcRenderer.invoke('case:attach', payload);
+      },
+      // Local inference L1: the owner's private mark on a case, in the
+      // same two steps as a chat's.
+      markPrivate: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:markPrivate', { caseId: payload.caseId, confirm: payload.confirm === true });
       },
       orientation: (payload) => {
         validateObject(payload, 'payload');
@@ -1012,7 +1029,7 @@ contextBridge.exposeInMainWorld(
         validateObject(payload, 'payload');
         validateString(payload.token, 'token', { minLength: 1 });
         if (payload.pattern !== undefined) validateString(payload.pattern, 'pattern');
-        return ipcRenderer.invoke('history:import.commit', { token: payload.token, pattern: payload.pattern });
+        return ipcRenderer.invoke('history:import.commit', { token: payload.token, pattern: payload.pattern, asPrivate: payload.asPrivate === true });
       },
       embedderStatus: () => ipcRenderer.invoke('history:embedder.status'),
       saveEmbedder: (payload) => {
@@ -1140,6 +1157,13 @@ contextBridge.exposeInMainWorld(
         fromOllama: (payload = {}) => {
           validateObject(payload, 'payload');
           return ipcRenderer.invoke('models:local.fromOllama', payload);
+        },
+        // The one way a role stops being local-only (this window only).
+        unsetLocalOnly: (payload) => {
+          validateObject(payload, 'payload');
+          validateString(payload.profileId, 'profileId', { minLength: 1 });
+          validateString(payload.role, 'role', { minLength: 1 });
+          return ipcRenderer.invoke('models:local.unsetLocalOnly', { profileId: payload.profileId, role: payload.role });
         }
       }
     },

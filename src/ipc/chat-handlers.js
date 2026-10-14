@@ -20,6 +20,7 @@ const { mergeHistorySettings } = require('../history/settings');
 const { bridgeOriginFor } = require('../history/bridge-origin');
 const { offerCaseNudge } = require('../cases/case-nudge');
 const { egressPolicy } = require('../models/egress');
+const { createPrivateMark } = require('./private-mark');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -348,6 +349,14 @@ function registerChatHandlers(ipcMain, context = {}) {
     const { chatId, sender, text, ...metadata } = payload;
     return appendMessageToChat(chatId, sender, text, metadata);
   }));
+
+  // The owner's private mark on a chat (local inference spec 2026-10-13
+  // §8.1; src/ipc/private-mark.js): the confirmation's facts first, the
+  // mark on { confirm: true }, from the local desktop's own event only.
+  const privateMark = createPrivateMark(context);
+  ipcMain.handle(IPC.CHAT_MARK_PRIVATE, wrapHandler(IPC.CHAT_MARK_PRIVATE, async (event, payload) => (
+    privateMark.markChat(event, payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {})
+  )));
 
   ipcMain.handle(IPC.CHAT_SPEAK_LAST, wrapHandler(IPC.CHAT_SPEAK_LAST, async (_event, { chatId, summary = false } = {}) => {
     const chat = findChat(chatId, { messages: true });

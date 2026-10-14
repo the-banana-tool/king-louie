@@ -87,11 +87,13 @@ function createImportPicks({ pickFile, now = Date.now } = {}) {
 
 // What a renderer's preview or commit call may say: the token and, for a
 // Markdown transcript, the heading pattern. Every other key is ignored.
+// `asPrivate`: the dialog's "Import as private", only when exactly true.
 function importRequest(payload) {
   const p = payload && typeof payload === 'object' ? payload : {};
   return {
     token: typeof p.token === 'string' ? p.token : '',
-    pattern: typeof p.pattern === 'string' && p.pattern ? p.pattern : undefined
+    pattern: typeof p.pattern === 'string' && p.pattern ? p.pattern : undefined,
+    asPrivate: p.asPrivate === true
   };
 }
 
@@ -172,7 +174,7 @@ function createAttachedImport({ picks, invoke, parse = parseImport, preview = pr
     },
 
     async commit(payload) {
-      const { token, pattern } = importRequest(payload);
+      const { token, pattern, asPrivate } = importRequest(payload);
       const filePath = picks.pathFor(token);
       if (!filePath) return { ...NO_FILE };
       if (running) return { ...BUSY };
@@ -192,7 +194,7 @@ function createAttachedImport({ picks, invoke, parse = parseImport, preview = pr
           importerVersion: parsed.importerVersion,
           sourceHash: parsed.sourceHash,
           sourceName: sourceBaseName(path.basename(filePath)),
-          chat: parsed.chat,
+          chat: asPrivate ? { ...parsed.chat, private: true } : parsed.chat,
           total: messages.length
         }]);
         if (!begun || begun.ok !== true) return refusedReply(begun);

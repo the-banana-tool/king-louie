@@ -710,6 +710,45 @@ class HistoryStore {
     return out;
   }
 
+  // What the private mark's confirmation says (local inference spec
+  // 2026-10-13 §8.1): how many vectors of the chat's chunks a hosted
+  // embedder made (any key that is not "local:"), and which other chats'
+  // replies say they recalled this one (`context.recalledChats`). Reads
+  // only; a store that cannot answer gives null.
+  hostedVectorCount(chatId) {
+    const id = normalizeId(chatId);
+    if (!id || !this.embeddable) return 0;
+    try {
+      return Number(this._stmt(`SELECT count(*) AS n FROM embeddings
+        WHERE substr(model, 1, 6) <> 'local:' AND chunk_id IN (SELECT id FROM chunks WHERE chat_id = ?)`).get(id).n);
+    } catch (err) {
+      log.warn(`Counting a chat's hosted vectors failed: ${err.message}`);
+      return null;
+    }
+  }
+  chatsRecalling(chatId) {
+    const id = normalizeId(chatId);
+    if (!id) return [];
+    try {
+      const rows = this._stmt('SELECT DISTINCT chat_id AS chatId, context_json AS context FROM messages WHERE chat_id <> ? AND context_json IS NOT NULL AND instr(context_json, ?) > 0').all(id, id);
+      const out = [];
+      for (const row of rows) {
+        let ctx = null;
+        try {
+          ctx = JSON.parse(row.context);
+        } catch {
+          ctx = null;
+        }
+        const named = ctx && Array.isArray(ctx.recalledChats) ? ctx.recalledChats : [];
+        if (named.includes(id) && !out.includes(row.chatId)) out.push(row.chatId);
+      }
+      return out;
+    } catch (err) {
+      log.warn(`Finding the chats that recalled a chat failed: ${err.message}`);
+      return null;
+    }
+  }
+
   // Chat ids an import must not be given although no chat in this store has
   // them: the ids of chats still in chat-data.json (the core sets the check;
   // stage H4 review). The move out of the JSON file would take a chat it

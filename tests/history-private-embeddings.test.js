@@ -7,7 +7,7 @@
 // is never sent a scope that holds a private chat. The hosted embedder is a
 // fake provider that records what it is given; the embed worker is the
 // in-process fake runner; Jev is a loopback fake. Chats are marked through
-// the store (nothing else can mark until Task 14).
+// the store.
 const { describe, it, before, after, afterEach } = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');

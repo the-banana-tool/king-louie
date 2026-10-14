@@ -53,6 +53,7 @@ const UNVERIFIABLE_MESSAGE = 'This chat holds the reply of another agent run tha
 const CHAT_BUSY_MESSAGE = 'A reply is still running in this chat. Attach the case when it has finished.';
 const RECALLED_OTHER_CHATS_MESSAGE = 'This chat has read other chats, so it cannot be attached to a case. Start a new chat for the case.';
 const IMPORTED_CHAT_MESSAGE = 'An imported chat cannot be attached to a case; its messages are not verified as the owner\'s.';
+const PRIVATE_CASE_REQUIRED_MESSAGE = 'This chat is private and the case is not. Make the case private too, or attach the chat to a private case.';
 
 // A new case tool carries case data until it is listed here.
 const NO_CASE_DATA = Object.freeze(['get_presence', 'set_away']);
@@ -116,6 +117,17 @@ class ImportedChatError extends Error {
     super(IMPORTED_CHAT_MESSAGE);
     this.name = 'ImportedChatError';
     this.code = 'IMPORTED_CHAT';
+  }
+}
+
+// Local inference L1 (spec 2026-10-13 §8.2, R-LI-23): a private chat is
+// given only a private case, or one the owner makes private in the same
+// action. Checked after every other refusal.
+class PrivateCaseRequiredError extends Error {
+  constructor() {
+    super(PRIVATE_CASE_REQUIRED_MESSAGE);
+    this.name = 'PrivateCaseRequiredError';
+    this.code = 'PRIVATE_CASE_REQUIRED';
   }
 }
 
@@ -215,8 +227,11 @@ function attachBlock(messages, caseId = null) {
 // Throws when `chat` (with its messages) may not be attached to case
 // `caseId` (null: a case about to be created): ImportedChatError,
 // ChatRecalledOtherChatsError, then Q29's ChatAttachRefusedError. No `force`
-// lifts any of them.
-function assertChatAttachable(chat, caseId = null) {
+// lifts any of them. Then, given the marks (local inference L1): a private
+// chat and a case that is not private is PrivateCaseRequiredError unless
+// `makeCasePrivate` is exactly true (the caller then marks the case). A
+// case about to be created is created private, so it never refuses.
+function assertChatAttachable(chat, caseId = null, { chatPrivate = false, casePrivate = false, makeCasePrivate = false } = {}) {
   if (chat && (chat.source || chat.importedFromCase === true)) throw new ImportedChatError();
   if (recallMarked(chat)) throw new ChatRecalledOtherChatsError({ seq: null, toolName: null });
   // No message list to read is Q29's refusal, below.
@@ -224,10 +239,11 @@ function assertChatAttachable(chat, caseId = null) {
   if (read) throw new ChatRecalledOtherChatsError(read);
   const found = attachBlock(chat ? chat.messages : null, caseId);
   if (found) throw new ChatAttachRefusedError(found.reason, { toolName: found.toolName, seq: found.seq });
+  if (caseId && chatPrivate === true && casePrivate !== true && makeCasePrivate !== true) throw new PrivateCaseRequiredError();
 }
 
 module.exports = {
-  attachBlock, assertChatAttachable, ChatAttachRefusedError, ChatBusyError,
+  attachBlock, assertChatAttachable, ChatAttachRefusedError, ChatBusyError, PrivateCaseRequiredError, PRIVATE_CASE_REQUIRED_MESSAGE,
   recalledOtherChats, recallMarked, ChatRecalledOtherChatsError, ImportedChatError,
   CASE_DATA_TOOLS, NO_CASE_DATA, SAW_OTHER_CASES_MESSAGE, UNVERIFIABLE_MESSAGE, CHAT_BUSY_MESSAGE,
   RECALLED_OTHER_CHATS_MESSAGE, IMPORTED_CHAT_MESSAGE

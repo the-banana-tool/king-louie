@@ -102,9 +102,9 @@ function registerModelsHandlers(ipcMain, context = {}) {
 
   handle(IPC.MODELS_PROFILES, async () => ({ ok: true, ...choices().profilesView() }));
 
-  handle(IPC.MODELS_SAVE_PROFILE, async ({ id, name, roles }) => ({
+  handle(IPC.MODELS_SAVE_PROFILE, async ({ id, name, roles, localOnly }) => ({
     ok: true,
-    profile: choices().saveProfile({ id: text(id) || null, name, roles })
+    profile: choices().saveProfile({ id: text(id) || null, name, roles, ...(localOnly !== undefined ? { localOnly } : {}) })
   }));
 
   handle(IPC.MODELS_DUPLICATE_PROFILE, async ({ id }) => ({ ok: true, profile: choices().duplicateProfile(text(id)) }));
@@ -180,8 +180,9 @@ function registerModelsHandlers(ipcMain, context = {}) {
   // service mode the list is the administrator's and they answer
   // LOCAL_SERVER_ADMIN_ONLY for every caller. Probing a model and saying
   // what a model can do change no trust, but they act for the owner: the
-  // window or a paired desktop. No channel here marks a chat private or a
-  // role local-only.
+  // window or a paired desktop. A role is made local-only by a profile
+  // save (models:saveProfile); models:local.unsetLocalOnly, below, is the
+  // one way back, for the window only.
   //
   // Every reply carries server names, model ids and probe samples that came
   // from a server or a form: `untrustedText: true`, shown with textContent.
@@ -204,6 +205,21 @@ function registerModelsHandlers(ipcMain, context = {}) {
   };
   const serverView = (row) => ({ ...row, models: registry().models(row.id).models });
   const optional = (value) => (value === undefined || value === '' ? null : value);
+
+  // A role stops being local-only only here (local inference spec
+  // 2026-10-13 §13.2): from this app's own window, never a paired desktop,
+  // a tool or a generic settings save (the core's seal keeps it there).
+  handleEvent(IPC.MODELS_LOCAL_UNSET_LOCAL_ONLY, async (event, { profileId, role }) => {
+    if (!fromWindow(event)) return { ...NOT_WINDOW, error: 'A role stops being local-only only in the King Louie window on this computer.' };
+    const profiles = typeof context.getProfiles === 'function' ? context.getProfiles() : null;
+    if (!profiles) throw new Error('Model profiles are not available in this host.');
+    const id = text(profileId);
+    const current = profiles.get(id);
+    if (!current) return { ok: false, code: 'NOT_FOUND', error: 'No such profile.' };
+    if (typeof role !== 'string' || !(current.localOnly || []).includes(role)) return { ok: false, code: 'NOT_LOCAL_ONLY', error: 'That role is not local-only in this profile.' };
+    const saved = profiles.update(id, { localOnly: current.localOnly.filter((r) => r !== role) }, { allowUnsetLocalOnly: true });
+    return { ok: true, localOnly: saved.localOnly || [] };
+  });
 
   handleEvent(IPC.MODELS_LOCAL_LIST, async () => ({
     ok: true,

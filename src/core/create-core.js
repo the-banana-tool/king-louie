@@ -80,7 +80,7 @@ const { buildSystemSections, readGitContext } = require('../context/system-secti
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
 const { localEntry } = require('../models/normalize');
-const { Profiles } = require('../models/profiles');
+const { Profiles, sealLocalOnly } = require('../models/profiles');
 const { KingLouieProfile } = require('../models/king-louie');
 const { roleTimeoutMs } = require('../models/resolver');
 const { runTierMigration } = require('../models/migrate-tiers');
@@ -505,9 +505,14 @@ function createCore(deps = {}) {
   const writeLocalServers = (entries) => {
     store.set('settings', withLocalServers(mergeSettings(store.get('settings', DEFAULT_SETTINGS)), entries));
   };
+  // The second seal (Task 14; spec 2026-10-13 §13.2): a profile's
+  // local-only roles survive every settings save as the stored ones were;
+  // a save may add one. Only Profiles#update with allowUnsetLocalOnly
+  // (models:local.unsetLocalOnly, the window only) writes through
+  // writeSettingsUnsealed, which keeps the local server seal.
   const setSettings = (settings) => {
     const before = cacheMbOf(getSettings());
-    const next = withLocalServers(mergeSettings(settings), storedLocalServers());
+    const next = sealLocalOnly(withLocalServers(mergeSettings(settings), storedLocalServers()), store.get('settings', null));
     store.set('settings', next);
     // Recall stage H3: a chat VectorIndex skipped as too large for the old
     // cap stays skipped until clear(), so a new cap starts a fresh cache.
@@ -1219,7 +1224,10 @@ function createCore(deps = {}) {
     accountModels: Object.fromEntries(Object.entries(getApiStatus() || {})
       .map(([provider, status]) => [provider, Array.isArray(status?.models) ? status.models : []]))
   });
-  const profiles = new Profiles({ getSettings, setSettings, catalog });
+  const writeSettingsUnsealed = (settings) => {
+    store.set('settings', withLocalServers(mergeSettings(settings), storedLocalServers()));
+  };
+  const profiles = new Profiles({ getSettings, setSettings, writeUnsealed: writeSettingsUnsealed, catalog });
 
   // The King Louie profile (spec §7): proposals from the usable models,
   // their prices and scores; the owner accepts. Recomputed when the catalog

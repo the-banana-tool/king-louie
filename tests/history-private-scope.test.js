@@ -5,7 +5,7 @@
 // explicit link does not lift that. A private reader reads an ordinary chat
 // under its stored scope. Checked through resolveScope with the shipped
 // policy, the history IPC, a real ContextBuilder and the real history tools.
-// Chats are marked through the store (nothing else can mark until Task 14).
+// Chats are marked through the store.
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
 const IPC = require('../src/ipc/constants');

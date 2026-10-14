@@ -6,7 +6,7 @@
 // a fetch stub that records every request: it answers OpenAI's model list
 // and its embeddings (both are what a chat that is not private may send)
 // and fails the test's turn for anything else. Chats are marked through
-// the store; nothing else can mark until Task 14.
+// the store.
 const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const crypto = require('node:crypto');

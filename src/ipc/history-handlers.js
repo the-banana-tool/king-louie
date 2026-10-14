@@ -171,10 +171,10 @@ function registerHistoryHandlers(ipcMain, context = {}) {
   });
 
   handle(IPC.HISTORY_IMPORT_COMMIT, async (payload, event) => {
-    const { token, pattern } = importRequest(payload);
+    const { token, pattern, asPrivate } = importRequest(payload);
     const filePath = picks.pathFor(token);
     if (!filePath) return { ...NO_FILE };
-    const out = await readingPickedFile(() => importGate().run(() => importChat({ store: store(), filePath, pattern })));
+    const out = await readingPickedFile(() => importGate().run(() => importChat({ store: store(), filePath, pattern, asPrivate })));
     if (out.ok === false) return out;
     picks.spend(token);
     chatUpdated(event, out.chatId);

@@ -115,6 +115,8 @@ async function openImport(filePath, { pattern, maxBytes, maxFileBytes, maxLineCh
 }
 
 // The chat an importer gave, as the few fields an import takes.
+// `private` (local inference spec 2026-10-13 §8.2, R-LI-28): the export
+// said so, exactly true. Nothing in a file can make a chat less private.
 function importedChat(chat = {}, { fromCase = false } = {}) {
   const out = {};
   if (typeof chat.id === 'string') out.id = chat.id;
@@ -122,6 +124,7 @@ function importedChat(chat = {}, { fromCase = false } = {}) {
   if (validTime(chat.createdAt)) out.createdAt = chat.createdAt;
   if (validTime(chat.updatedAt)) out.updatedAt = chat.updatedAt;
   if (fromCase) out.importedFromCase = true;
+  if (chat.private === true) out.private = true;
   return out;
 }
 
@@ -178,7 +181,12 @@ function beginChatImport({ store, kind, importerVersion = null, sourceHash, sour
   if (!isObject(chat) || typeof chat.title !== 'string') throw fail('IMPORT_INVALID', 'An import needs a chat with a title.');
 
   const found = store.findImport(sourceHash);
-  if (found && found.state === 'done') return { existingChatId: found.chatId };
+  if (found && found.state === 'done') {
+    // The same file imported again as private marks the chat it returns:
+    // an import adds the mark, never removes it.
+    if (chat.private === true && store.chatRef(found.chatId) && store.isPrivate(found.chatId) === false) store.markPrivate(found.chatId);
+    return { existingChatId: found.chatId };
+  }
   // An import of this file that never finished: its half chat goes first.
   if (found) store.deleteChat(found.chatId);
 
@@ -198,7 +206,9 @@ function beginChatImport({ store, kind, importerVersion = null, sourceHash, sour
     // an id that exists would delete that chat (R-H4-8).
     const chatId = freeChatId(store, chat.id, sourceHash);
     if (store.chatRef(chatId)) throw fail('IMPORT_INVALID', 'No free chat id for this import.');
-    store.createChat({ id: chatId, ...record, messages: [] }, { position: 'front' });
+    // A private import is private from its creation, before its first
+    // message (and so its first chunk) is written.
+    store.createChat({ id: chatId, ...record, messages: [] }, { position: 'front', ...(chat.private === true ? { private: true } : {}) });
     const row = store.recordImport({
       id: importId, sourceKind: kind, sourcePath: typeof sourcePath === 'string' && sourcePath ? sourcePath : null,
       sourceHash, chatId, importerVersion: Number.isInteger(importerVersion) ? importerVersion : null, state: 'running'
@@ -289,11 +299,13 @@ function abortChatImport({ store, importId } = {}) {
   return store.deleteChat(row.chatId);
 }
 
+// `asPrivate` (exactly true): the import dialog's "Import as private".
 async function importChat({
-  store, filePath, pattern, maxBytes, maxFileBytes, maxLineChars, batchSize = DEFAULT_BATCH, schedule = setImmediate, now, onProgress
+  store, filePath, pattern, maxBytes, maxFileBytes, maxLineChars, batchSize = DEFAULT_BATCH, schedule = setImmediate, now, onProgress, asPrivate = false
 } = {}) {
   requireStore(store);
   const parsed = await parseImport(filePath, { pattern, maxBytes, maxFileBytes, maxLineChars });
+  if (asPrivate === true) parsed.chat.private = true;
   const { kind, stats, messages } = parsed;
   if (!Array.isArray(messages) || !messages.length) throw fail('IMPORT_INVALID', 'This file has no messages to import.');
   const begun = beginChatImport({

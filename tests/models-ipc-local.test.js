@@ -256,10 +256,4 @@ describe('models:local.* IPC', () => {
     assert.strictEqual(refused.usable, false);
     assert.strictEqual((await explain({ provider: 'local', model: 'gone/m' })).usable, false);
   });
-
-  it('no channel sets a private mark or a local-only role yet', () => {
-    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'ipc', 'models-handlers.js'), 'utf8');
-    assert.ok(!/markPrivate|localOnly/.test(source));
-    assert.ok(!/markPrivate|localOnly/.test(fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8')));
-  });
 });

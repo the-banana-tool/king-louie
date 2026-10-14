@@ -3,6 +3,7 @@ const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const { bridgeOriginFor } = require('../history/bridge-origin');
 const { assertChatAttachable, ChatBusyError } = require('../cases/chat-attach');
+const { createPrivateMark } = require('./private-mark');
 const { isLocalDesktopEvent } = require('../core/origin');
 const { ownerObjective } = require('./case-progress-handlers');
 const { createLogger } = require('../logging');
@@ -31,7 +32,7 @@ const assertNotBridgeChat = (chat) => {
 
 // Why a chat was not given a case; case:create answers these after the case
 // exists with "The case was created, but this chat was not attached to it."
-const ATTACH_REFUSALS = Object.freeze(['CHAT_SAW_OTHER_CASES', 'CHAT_BUSY', 'BRIDGE_CHAT', 'CHAT_RECALLED_OTHER_CHATS', 'IMPORTED_CHAT']);
+const ATTACH_REFUSALS = Object.freeze(['CHAT_SAW_OTHER_CASES', 'CHAT_BUSY', 'BRIDGE_CHAT', 'CHAT_RECALLED_OTHER_CHATS', 'IMPORTED_CHAT', 'PRIVATE_CASE_REQUIRED']);
 
 function registerCaseHandlers(ipcMain, context = {}) {
   const chatById = (chatId) => context.getChat(chatId, { messages: true });
@@ -57,22 +58,45 @@ function registerCaseHandlers(ipcMain, context = {}) {
   // Nothing is awaited between this check and the write in `attach`.
   // The bridge rule comes first, for case:attach and case:create alike
   // (owner decision 2026-10-12: case:create skipped it).
-  const assertAttachable = (chat, caseId) => {
+  // Local inference L1 (spec 2026-10-13 §8.2, R-LI-23): the marks the
+  // attach rule reads. A chat whose mark cannot be read is private; so is
+  // a case (CaseRuntime#isPrivate). A host with no history store has no
+  // private chats.
+  const historyStore = () => (typeof context.getHistoryStore === 'function' ? context.getHistoryStore() : null);
+  const chatPrivate = (chatId) => {
+    const s = historyStore();
+    return Boolean(s && typeof s.isPrivate === 'function' && s.isPrivate(chatId) !== false);
+  };
+  const casePrivate = (caseId) => {
+    const rt = typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
+    return Boolean(caseId && rt && typeof rt.isPrivate === 'function' && rt.isPrivate(caseId));
+  };
+  const assertAttachable = (chat, caseId, { makeCasePrivate = false } = {}) => {
     assertNotBridgeChat(chat);
     if (typeof context.isChatRunning === 'function' && context.isChatRunning(chat.id)) throw new ChatBusyError();
-    assertChatAttachable(chat, caseId);
+    assertChatAttachable(chat, caseId, { chatPrivate: chatPrivate(chat.id), casePrivate: casePrivate(caseId), makeCasePrivate });
   };
 
   // The one place a chat is given a case (case:attach, and case:create with
   // a chat). Taking the case away is never refused. Naming the case the
-  // chat already has is refused only for a bridge chat.
-  const attach = (chatId, caseId) => {
+  // chat already has is refused only for a bridge chat. Under the private
+  // mark: a private chat goes only to a private case, or to one the owner
+  // makes private in the same action (`makeCasePrivate`, exactly true); a
+  // chat that is not private given a private case is marked.
+  const attach = async (chatId, caseId, { makeCasePrivate = false } = {}) => {
     const chat = chatById(chatId);
     if (!chat) throw new Error('Chat not found.');
     if (caseId) assertNotBridgeChat(chat);
-    if (caseId && chat.caseId !== caseId) assertAttachable(chat, caseId);
+    const changing = Boolean(caseId) && chat.caseId !== caseId;
+    if (changing) assertAttachable(chat, caseId, { makeCasePrivate: makeCasePrivate === true });
+    if (changing && makeCasePrivate === true && chatPrivate(chat.id) && !casePrivate(caseId)) await runtime().markPrivate(caseId);
     const now = new Date().toISOString();
-    return patchChat(chatId, { caseId: caseId || null, updatedAt: now });
+    const patched = patchChat(chatId, { caseId: caseId || null, updatedAt: now });
+    if (caseId && casePrivate(caseId) && !chatPrivate(chatId)) {
+      historyStore().markPrivate(chatId);
+      return chatById(chatId);
+    }
+    return patched;
   };
 
   ipcMain.handle(IPC.CASE_LIST, wrapHandler(IPC.CASE_LIST, async () => (
@@ -105,6 +129,8 @@ function registerCaseHandlers(ipcMain, context = {}) {
     // for a chat that would then be refused and the owner is never asked to
     // force such a create. `force` lifts neither.
     if (chatBefore) assertAttachable(chatBefore, null);
+    // A private chat's new case is created private (spec 2026-10-13 §8.2).
+    const asPrivate = Boolean(chatBefore) && chatPrivate(chatBefore.id);
     // Cases stage 6: the owner's chosen playbooks are checked, fetched and
     // validated before the case exists; any failure refuses the create. The
     // type comes from the playbooks when the form gives none.
@@ -120,7 +146,8 @@ function registerCaseHandlers(ipcMain, context = {}) {
       const ownForm = isLocalDesktopEvent(event);
       if (objective && !ownForm) log.warn('case:create: the event is not the local desktop\'s; the objective is recorded as proposed.');
       info = await runtime().createCase({
-        title: title.trim(), type: type || 'general', objective, force: force === true, ...(objective && ownForm ? { objectiveBy: 'owner' } : {})
+        title: title.trim(), type: type || 'general', objective, force: force === true, ...(objective && ownForm ? { objectiveBy: 'owner' } : {}),
+        ...(asPrivate ? { private: true } : {})
       });
     } catch (err) {
       // Cases stage 5: a similar open case needs the owner's confirmation (force).
@@ -136,7 +163,7 @@ function registerCaseHandlers(ipcMain, context = {}) {
     // created and the chat without it; the reply says both.
     let chat = null;
     try {
-      chat = chatId ? attach(chatId, info.id) : null;
+      chat = chatId ? await attach(chatId, info.id) : null;
     } catch (err) {
       if (err && ATTACH_REFUSALS.includes(err.code)) {
         return { ok: false, error: `The case was created, but this chat was not attached to it. ${err.message}`, code: err.code, case: summarize(info) };
@@ -148,14 +175,21 @@ function registerCaseHandlers(ipcMain, context = {}) {
     return { ok: true, case: summarize(info), chat: chat && attached.playbooks ? chatById(chatId) : chat, ...attached };
   }));
 
-  ipcMain.handle(IPC.CASE_ATTACH, wrapHandler(IPC.CASE_ATTACH, async (_event, { chatId, caseId } = {}) => {
+  ipcMain.handle(IPC.CASE_ATTACH, wrapHandler(IPC.CASE_ATTACH, async (_event, { chatId, caseId, makeCasePrivate } = {}) => {
     if (caseId) {
       // An unknown case is refused first; `attach` then applies the bridge
-      // rule (assertNotBridgeChat) and Q29.
+      // rule (assertNotBridgeChat), Q29 and the private mark's rule.
       runtime().getCase(caseId);
     }
-    return { ok: true, chat: attach(chatId, caseId) };
+    return { ok: true, chat: await attach(chatId, caseId, { makeCasePrivate: makeCasePrivate === true }) };
   }));
+
+  // The owner's private mark on a case (local inference spec 2026-10-13
+  // §8.1, §8.2; src/ipc/private-mark.js): the same two steps as a chat's.
+  const privateMark = createPrivateMark(context);
+  ipcMain.handle(IPC.CASE_MARK_PRIVATE, wrapHandler(IPC.CASE_MARK_PRIVATE, async (event, payload) => (
+    privateMark.markCase(event, payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {})
+  )));
 
   ipcMain.handle(IPC.CASE_ORIENTATION, wrapHandler(IPC.CASE_ORIENTATION, async (_event, { caseId } = {}) => (
     { ok: true, text: runtime().orientation(caseId) }

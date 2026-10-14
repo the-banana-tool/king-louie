@@ -9,6 +9,8 @@ module.exports = {
   CHAT_DELETE: 'chat:delete',
   CHAT_ADD_MESSAGE: 'chat:addMessage',
   CHAT_SPEAK_LAST: 'chat:speakLast',
+  // Local inference L1, Task 14: the owner's private mark on a chat.
+  CHAT_MARK_PRIVATE: 'chat:markPrivate',
   CHAT_SEND_MESSAGE: 'chat:sendMessage',
   CHAT_STOP_RESPONSE: 'chat:stopResponse',
   CHAT_SET_AGENT_MODE: 'chat:setAgentMode',
@@ -81,6 +83,8 @@ module.exports = {
   CASE_PROGRESS: 'case:progress',
   CASE_CONFIRM_SCOPE: 'case:confirmScope',
   CASE_VERIFY_NOW: 'case:verifyNow',
+  // Local inference L1, Task 14: the owner's private mark on a case.
+  CASE_MARK_PRIVATE: 'case:markPrivate',
   CASE_SET_CHECK: 'case:setCheck',
   EXECUTORS_LIST: 'executors:list',
   CASE_ENVELOPES: 'case:envelopes',
@@ -156,6 +160,8 @@ module.exports = {
   MODELS_LOCAL_PROBE: 'models:local.probe',
   MODELS_LOCAL_SET_MODEL_INFO: 'models:local.setModelInfo',
   MODELS_LOCAL_FROM_OLLAMA: 'models:local.fromOllama',
+  // Local inference L1, Task 14: the one way a role stops being local-only.
+  MODELS_LOCAL_UNSET_LOCAL_ONLY: 'models:local.unsetLocalOnly',
 
   SETTINGS_LOAD: 'settings:load',
   SETTINGS_SAVE_TEMPLATE_VARIABLES: 'settings:saveTemplateVariables',

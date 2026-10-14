@@ -184,12 +184,15 @@ function createModelChoices({
     };
   }
 
-  function saveProfile({ id = null, name, roles } = {}) {
+  // `localOnly` (local inference L1) may add roles; Profiles#update refuses
+  // one that would take a role away (LOCAL_ONLY_ONE_WAY_HERE).
+  function saveProfile({ id = null, name, roles, localOnly } = {}) {
     // The King Louie profile changes only by accepting a proposal (spec §7).
     if (id && profiles.get(id)?.kind === 'king-louie') {
       throw new ProfileError('KING_LOUIE_READ_ONLY', 'The King Louie profile changes only when you accept a proposal. Duplicate it to make your own.');
     }
-    const saved = id ? profiles.update(id, { name, roles }) : profiles.create({ name, roles });
+    const withLocalOnly = localOnly !== undefined ? { localOnly } : {};
+    const saved = id ? profiles.update(id, { name, roles, ...withLocalOnly }) : profiles.create({ name, roles, ...withLocalOnly });
     return profileView(saved, { explain: explainTarget, catalog });
   }
 

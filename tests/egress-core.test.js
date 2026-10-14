@@ -5,8 +5,8 @@
 // with a chat and no parent takes the chat's, and with only hosted models
 // the call is refused before anything is sent. The local server is a fake
 // on 127.0.0.1; the "hosted" provider is OpenAI behind a fetch stub that
-// answers its model list and fails the test for anything else. Nothing can
-// set the mark until Task 14: the tests mark through the store.
+// answers its model list and fails the test for anything else. The tests
+// mark through the store.
 const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const crypto = require('node:crypto');
@@ -279,22 +279,5 @@ describe('the egress policy in the core', () => {
     } finally {
       engine.off('workflow:failed', onFailed);
     }
-  });
-
-  it('nothing outside tests can mark yet', () => {
-    // Removed by Task 14, which adds the owner's paths to the marks.
-    const root = path.join(__dirname, '..');
-    const files = [path.join(root, 'preload.js')];
-    const walk = (dir) => {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith('.js')) files.push(full);
-      }
-    };
-    for (const dir of ['ipc', 'tools', 'mcp', 'service']) walk(path.join(root, 'src', dir));
-    assert.ok(files.length > 50);
-    const naming = files.filter((file) => /markPrivate|localOnly/.test(fs.readFileSync(file, 'utf8'))).map((file) => path.relative(root, file));
-    assert.deepStrictEqual(naming, []);
   });
 });

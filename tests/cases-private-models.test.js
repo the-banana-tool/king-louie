@@ -9,8 +9,8 @@
 //
 // A real core on a temp data dir, a fake local server on 127.0.0.1, an
 // OpenAI key, and a fetch stub that answers only OpenAI's model list (a
-// connection test, no case text) and records every request. Nothing in the
-// app can mark a case yet (Task 14): the tests call CaseRuntime#markPrivate.
+// connection test, no case text) and records every request. The tests mark
+// a case with CaseRuntime#markPrivate (what case:markPrivate calls).
 const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const crypto = require('node:crypto');

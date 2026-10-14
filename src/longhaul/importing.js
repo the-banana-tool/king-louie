@@ -50,6 +50,9 @@ async function importSession(home, sourcePath, { id, license, publicSession = fa
 
   const { chat, messages, compactions, stats } = await importer.parse(real);
   if (messages.length === 0) throw new UsageError(`${path.basename(real)} has no conversation messages.`);
+  // An export of a chat King Louie kept private (local inference R-LI-28)
+  // is a private session: --public is refused for it.
+  if (chat.private === true && publicSession) throw new UsageError(`${path.basename(real)} is an export of a private chat; it is always a private session and --public is refused.`);
   const sourceRef = isInside(real, rootReal) ? path.relative(rootReal, real).split(path.sep).join('/') : path.basename(real);
   const manifest = buildManifest({
     sessionId,
