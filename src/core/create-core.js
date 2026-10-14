@@ -84,7 +84,8 @@ const { Profiles } = require('../models/profiles');
 const { KingLouieProfile } = require('../models/king-louie');
 const { roleTimeoutMs } = require('../models/resolver');
 const { runTierMigration } = require('../models/migrate-tiers');
-const { KL_PROVIDERS } = require('../models/provider-ids');
+const { KL_PROVIDERS, LOCAL_PROVIDER } = require('../models/provider-ids');
+const { LocalServers } = require('../models/local-servers');
 const { roleForAgent, CORE_ROLES, BUILTIN_ROLES, targetKey, targetLabel } = require('../models/roles');
 const { NO_RETRY } = require('../providers/failover-policy');
 const { classifyError, FailoverReason } = require('../providers/error-classifier');
@@ -1043,7 +1044,31 @@ function createCore(deps = {}) {
     ...(providerType === 'ollama' ? { serverUrl: getSettings().models?.ollama?.baseUrl } : {})
   });
 
-  const createProviderInstance = (providerType, token) => {
+  // Local servers (spec 2026-10-13-local-inference-design.md §5.1): the
+  // entries the owner added and marked local. Each gets one transport that
+  // dials only its pinned address and one provider instance; a server's key,
+  // when it wants one, is the provider token `__local_<id>`.
+  const localServers = new LocalServers({
+    getEntries: () => getSettings().models?.localServers || [],
+    getToken: (serverId) => {
+      const encrypted = getApiTokens()[`__local_${serverId}`];
+      return encrypted ? decryptToken(encrypted) : null;
+    },
+    catalog
+  });
+
+  // `target` is the resolved target the instance is for. Only `local` needs
+  // it: its model id names the server ("<serverId>/<model>").
+  const createProviderInstance = (providerType, token, target = null) => {
+    if (providerType === LOCAL_PROVIDER) {
+      const split = localServers.splitModel(target?.model);
+      if (!split) {
+        const err = new Error('A local model is named "<server>/<model>", and this one names no local server.');
+        err.code = 'LOCAL_SERVER_UNKNOWN';
+        throw err;
+      }
+      return localServers.providerFor(split.serverId);
+    }
     // OAuth mode is decided by whether Anthropic OAuth is connected, not by
     // getDecryptedProviderToken's '__anthropic_oauth__' placeholder, which
     // only appears before the access token is cached — once cached it
@@ -1059,7 +1084,7 @@ function createCore(deps = {}) {
   };
 
   const hasProviderCredential = (provider) => {
-    if (provider === 'ollama') return true;
+    if (provider === 'ollama' || provider === LOCAL_PROVIDER) return true;
     if (provider === 'anthropic' && anthropicOAuth.isConnected()) return true;
     return Boolean(getApiTokens()[provider]);
   };
@@ -1153,6 +1178,8 @@ function createCore(deps = {}) {
   // it has a credential. Everything else is Availability's verdict (§5.1).
   const explainTarget = (provider, model, options = {}) => {
     const p = normalizeProvider(provider);
+    // A model on a local server: the registry's verdict, never Availability's.
+    if (p === LOCAL_PROVIDER) return localServers.explain(model, options);
     if (!KL_PROVIDERS.includes(p) && ProviderFactory.listRegistered().includes(p)) {
       return hasProviderCredential(p)
         ? { usable: true, reasons: [], notes: [`${p} is a registered provider with no connection test.`], entry: null }
@@ -2373,8 +2400,9 @@ function createCore(deps = {}) {
   };
 
   const inferenceRouter = new InferenceRouter({
-    getProviderToken: getDecryptedProviderToken,
-    createProvider: (providerType, token) => createProviderInstance(providerType, token),
+    // A local server's key is the registry's to read, per server.
+    getProviderToken: (providerType) => (providerType === LOCAL_PROVIDER ? null : getDecryptedProviderToken(providerType)),
+    createProvider: (providerType, token, target) => createProviderInstance(providerType, token, target),
     onProviderError: reportProviderError,
     // Once per provider per turn: an Anthropic OAuth session needs a fresh
     // access token before its first call (the routed path's ensureOAuthToken).
@@ -2437,7 +2465,11 @@ function createCore(deps = {}) {
     const resolved = models.mustResolve(role, { needs, explicit });
     const first = resolved.targets[0];
     if (!first) throw new Error(`${role} has no model of its own; its own settings apply.`);
-    const instance = createProviderInstance(first.provider, getDecryptedProviderToken(first.provider));
+    const instance = createProviderInstance(
+      first.provider,
+      first.provider === LOCAL_PROVIDER ? null : getDecryptedProviderToken(first.provider),
+      first
+    );
     await ensureOAuthToken({ providerType: first.provider, provider: instance });
     return {
       role,
@@ -3292,6 +3324,12 @@ function createCore(deps = {}) {
     await withTimeout(embedderHost.stop(), shutdownTimeoutMs, 'Embed worker shutdown', warnTimeout)
       .catch((err) => log.warn(`Embed worker shutdown failed: ${err.message}`));
     await jevReranker.stop();
+    // Every local server's transport: open sockets and waiting calls end here.
+    try {
+      localServers.close();
+    } catch (err) {
+      log.warn(`Closing the local server transports failed: ${err.message}`);
+    }
     try {
       historyStore.close();
     } catch (err) {
@@ -3559,6 +3597,7 @@ function createCore(deps = {}) {
     getAvailability: () => availability,
     getProfiles: () => profiles,
     getKingLouie: () => kingLouie,
+    getLocalServers: () => localServers,
     getModelMigration: () => modelMigration,
     explainTarget,
     snapshotModels,

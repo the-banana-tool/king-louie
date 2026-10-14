@@ -7,6 +7,7 @@
 // provider after it. Tiers, smart routing and the LLM router are gone (§13).
 const { FailoverPolicy } = require('./failover-policy');
 const { RecoveryAction } = require('./error-classifier');
+const { LOCAL_PROVIDER } = require('../models/provider-ids');
 const { createLogger } = require('../logging');
 const log = createLogger('inference-router');
 
@@ -72,14 +73,25 @@ class InferenceRouter {
     return { ...metrics, ...this.callTags(state) };
   }
 
-  async _instanceFor(provider, state) {
-    if (state.instances.has(provider)) return state.instances.get(provider);
+  // What one instance serves: a provider, or for `local` (one provider key
+  // over many servers, spec 2026-10-13 §5.1) one server, named by the part
+  // of the model id before its first slash.
+  _instanceKey(target) {
+    if (target.provider !== LOCAL_PROVIDER) return target.provider;
+    const model = String(target.model || '');
+    const slash = model.indexOf('/');
+    return `${LOCAL_PROVIDER}:${slash === -1 ? model : model.slice(0, slash)}`;
+  }
+
+  async _instanceFor(target, state) {
+    const key = this._instanceKey(target);
+    if (state.instances.has(key)) return state.instances.get(key);
     if (typeof this.getProviderToken !== 'function' || typeof this.createProvider !== 'function') {
       throw new Error('InferenceRouter requires getProviderToken() and createProvider()');
     }
-    const instance = this.createProvider(provider, this.getProviderToken(provider));
-    if (this.prepareProvider) await this.prepareProvider(instance, provider);
-    state.instances.set(provider, instance);
+    const instance = this.createProvider(target.provider, this.getProviderToken(target.provider), { ...target });
+    if (this.prepareProvider) await this.prepareProvider(instance, target.provider);
+    state.instances.set(key, instance);
     return instance;
   }
 
@@ -114,12 +126,15 @@ class InferenceRouter {
 
   // The next target after a failure. Before the first answer any provider
   // may take over; after it, only the failed target's own provider, since
-  // the history built so far is in that provider's format.
+  // the history built so far is in that provider's format (every local
+  // server speaks the same one, so another local server may take over).
+  // skipProviders holds instance keys: a key one local server rejected says
+  // nothing about another server.
   _nextTarget(list, state, skipProviders, failed) {
     let crossProvider = null;
     for (let i = state.index + 1; i < list.length; i += 1) {
       const candidate = list[i];
-      if (skipProviders.has(candidate.provider)) continue;
+      if (skipProviders.has(this._instanceKey(candidate))) continue;
       if (!state.answered || candidate.provider === failed.provider) return { index: i, crossProvider: null };
       if (!crossProvider) crossProvider = candidate;
     }
@@ -146,7 +161,7 @@ class InferenceRouter {
         ? { ...options, onChunk: (chunk) => { streamed = true; return options.onChunk(chunk); } }
         : options;
       try {
-        const instance = await this._instanceFor(target.provider, state);
+        const instance = await this._instanceFor(target, state);
         const response = await this.executeTarget(instance, target, payload, attemptOptions);
         state.answered = true;
         state.lastInstance = instance;
@@ -168,7 +183,7 @@ class InferenceRouter {
         if (authFailure) {
           this._reportAuth(target.provider, err);
           // The key is rejected: the provider's other models fail the same way.
-          skipProviders.add(target.provider);
+          skipProviders.add(this._instanceKey(target));
         }
         let action = plan.action;
         if (action === RecoveryAction.ROTATE_CREDENTIAL && !this.rotateCredential) action = RecoveryAction.FALLBACK_MODEL;
