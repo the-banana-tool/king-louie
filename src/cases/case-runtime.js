@@ -2729,11 +2729,12 @@ class CaseRuntime {
     }
   }
 
-  // The egress policy of a turn whose models could not be snapshotted: the
-  // host's reading of the case's mark, else a private-case policy when the
-  // case is private (fail closed). → policy | null.
+  // The egress policy the case's own mark puts on a turn: the host's
+  // reading of it, else a private-case policy when the case is private
+  // (fail closed). Asked for a turn whose models could not be snapshotted,
+  // and for one whose models carry no policy (review fix, item 9b: a
+  // private case is never left without one). → policy | null.
   _egressOf(turn) {
-    if (turn && turn.models) return null;
     try {
       if (typeof this.host?.egressFor === 'function') return this.host.egressFor({ caseId: turn.caseId });
     } catch { /* below */ }
@@ -2894,9 +2895,10 @@ class CaseRuntime {
     // whatever list it is handed. A turn with no snapshot reads the mark.
     const modelRole = (tags && tags.role) || 'main';
     const models = turn.models || null;
-    const egress = models
+    const fromModels = models
       ? ((typeof models.egressFor === 'function' ? models.egressFor(modelRole) : models.egress) ?? null)
-      : this._egressOf(turn);
+      : null;
+    const egress = fromModels ?? this._egressOf(turn);
     const state = typeof router.newRouteState === 'function' ? router.newRouteState(tags, egress) : undefined;
     const call = (messages, opts = {}, tools = null, onChunk = null) => router.routeTargets(list, messages, {
       ...(opts || {}),

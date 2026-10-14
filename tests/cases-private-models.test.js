@@ -262,6 +262,29 @@ describe('a private case: the mark, and every case model call behind it', { skip
     assert.strictEqual(rt.isPrivate(plain.id), false);
   });
 
+  it('review fix, item 9b: a private case\'s routed provider is under the case\'s policy even when the turn\'s models carry none', async () => {
+    const c = await activeCase();
+    const plain = await activeCase({ marked: false });
+    const seen = [];
+    const real = rt.host.inferenceRouter;
+    rt.host.inferenceRouter = { routeTargets: async () => 'ok', newRouteState: (tags, egress) => { seen.push(egress); return { index: 0 }; }, callTags: () => ({}) };
+    try {
+      // Turn models with no policy, as a snapshot taken without the case.
+      const bare = ctx.snapshotModels({});
+      assert.strictEqual(bare.egressFor('main'), null);
+      rt.routedProvider({ caseId: c.id, models: bare }, { targets: [HOSTED] });
+      assert.strictEqual(seen[0] && seen[0].reason, 'private-case');
+      rt.routedProvider({ caseId: plain.id, models: bare }, { targets: [HOSTED] });
+      assert.strictEqual(seen[1], null, 'a case that is not private keeps the turn\'s models\' answer');
+      // A local-only role's policy from the turn's models still stands.
+      const local = ctx.snapshotModels({ caseId: c.id });
+      rt.routedProvider({ caseId: c.id, models: local }, { targets: [HOSTED] });
+      assert.strictEqual(seen[2] && seen[2].reason, 'private-case');
+    } finally {
+      rt.host.inferenceRouter = real;
+    }
+  });
+
   it('a case created private carries the key from its first commit; createCase takes nothing but exactly true', async () => {
     const made = await rt.createCase({ title: 'Lakeside lot private', objective: 'Convert the lot to cash', force: true, private: true });
     assert.strictEqual(rt.getCase(made.id).private, true);
