@@ -11,6 +11,15 @@ const { fixtureCatalog } = require('./helpers/models-fixture');
 
 const PROVIDERS_DIR = path.join(__dirname, '..', 'src', 'providers');
 const providerFiles = () => fs.readdirSync(PROVIDERS_DIR).filter((f) => f.endsWith('-provider.js') && f !== 'base-provider.js');
+// The file of the provider a provider class extends ("class X extends
+// OllamaProvider" with require('./ollama-provider')), or null when it
+// extends BaseLLMProvider.
+function inheritsProvider(src) {
+  const m = src.match(/class \w+ extends (\w+Provider) \{/);
+  if (!m || m[1] === 'BaseLLMProvider') return null;
+  const req = src.match(new RegExp(`const ${m[1]} = require\\('\\./([a-z-]+-provider)'\\)`));
+  return req ? `${req[1]}.js` : 'unknown';
+}
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
@@ -104,6 +113,19 @@ describe('every provider goes through the helper', () => {
     const DECIDE_ONLY = new Set(['typesafe-provider.js']);
     for (const file of providerFiles().filter((f) => !DECIDE_ONLY.has(f))) {
       const src = fs.readFileSync(path.join(PROVIDERS_DIR, file), 'utf8');
+      // A provider that extends another provider (local-server-provider.js
+      // extends OllamaProvider) streams through its parent's method, which
+      // this test checks in the parent's own file: each streaming method it
+      // defines must hand the call to super's, and it reads no stream itself.
+      const parent = inheritsProvider(src);
+      if (parent) {
+        assert.ok(providerFiles().includes(parent), `${file} extends a provider in ${parent}`);
+        assert.strictEqual((src.match(/async (streamMessage|streamMessageWithTools|_streamResponses)\(/g) || []).length, 0, `${file} reads no stream itself`);
+        const own = src.match(/\n {2}(streamMessage|streamMessageWithTools)\([^)]*\) \{[\s\S]*?\n {2}\}/g) || [];
+        assert.ok(own.length > 0, `${file} has a streaming method`);
+        for (const body of own) assert.match(body, /super\.(streamMessage|streamMessageWithTools)\(/, `${file}: its streaming method goes through super`);
+        continue;
+      }
       const streams = (src.match(/async (streamMessage|streamMessageWithTools|_streamResponses)\(/g) || []).length;
       const guarded = (src.match(/this\.guardStream\(/g) || []).length;
       assert.ok(streams > 0, `${file} has a streaming method`);
@@ -114,6 +136,9 @@ describe('every provider goes through the helper', () => {
   it('every listModels takes options', () => {
     for (const file of providerFiles()) {
       const src = fs.readFileSync(path.join(PROVIDERS_DIR, file), 'utf8');
+      // An inheriting provider with no listModels of its own uses its
+      // parent's, which this loop checks in the parent's file.
+      if (inheritsProvider(src) && !/listModels\(/.test(src)) continue;
       assert.match(src, /async listModels\(options = \{\}\)/, file);
     }
   });
