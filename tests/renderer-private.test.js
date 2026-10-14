@@ -24,7 +24,7 @@ function block(start, end) {
 
 const NO_HTML = /innerHTML|insertAdjacentHTML|outerHTML/;
 const H = () => new Function(`${block('function formatCompactUsd(', '/* --- end local inference L1 helpers --- */')}
-  return { PRIVATE_COMPOSER_LINE, PRIVATE_TOOLS_LINE, PRIVATE_CONFIRM_FIXED, privateConfirmLines, formatLocalCostLine, localFailoverNotes,
+  return { PRIVATE_COMPOSER_LINE, PRIVATE_TOOLS_LINE, PRIVATE_QUESTIONS_LINE, PRIVATE_CONFIRM_FIXED, privateConfirmLines, formatLocalCostLine, localFailoverNotes,
     privateRefusalSentence, exportChatData, markdownExportLines, PRIVATE_EXPORT_WARNING, keepLocalStatusText };`)();
 const tok = (n) => n.toLocaleString();
 
@@ -63,6 +63,14 @@ describe('renderer: the private mark', () => {
     const forCase = privateConfirmLines({ chats: [{ id: 'a', title: 'Lot A' }, { id: 'b', title: 'Lot B' }] }, { forCase: true });
     assert.ok(forCase.includes('Chats made private with it: Lot A, Lot B.'));
     assert.deepStrictEqual(privateConfirmLines(null).slice(-3), [PRIVATE_TOOLS_LINE, ...PRIVATE_CONFIRM_FIXED]);
+  });
+
+  it('review fix, item 9a: a case\'s confirmation says its questions still go out over the contact ladder', () => {
+    const { privateConfirmLines, PRIVATE_QUESTIONS_LINE, PRIVATE_TOOLS_LINE } = H();
+    assert.strictEqual(PRIVATE_QUESTIONS_LINE, 'Its questions to you still go out over your contact ladder (Telegram, Discord, email, SMS, voice, the phone app), as before: the mark keeps model calls on your hardware, not the questions.');
+    const lines = privateConfirmLines({ chats: [{ id: 'a', title: 'Lot A' }], questionsLeave: true }, { forCase: true });
+    assert.strictEqual(lines[lines.indexOf(PRIVATE_TOOLS_LINE) - 1], PRIVATE_QUESTIONS_LINE);
+    assert.ok(!privateConfirmLines({ chats: [{ id: 'a', title: 'Fence' }] }).includes(PRIVATE_QUESTIONS_LINE));
   });
 
   it('the flow asks for the facts first and marks only on the owner\'s confirmation', () => {

@@ -14,6 +14,10 @@
 // - recalledBy: other chats whose replies say they recalled this one.
 // - chats: the chats the mark covers (a case's, or the chat alone).
 // - bridge: a Telegram or Discord chat, which cannot be marked.
+// - questionsLeave: for a case, its questions to the owner still go out over
+//   the contact ladder (Telegram, Discord, email, SMS, voice, the phone
+//   app): the mark keeps model calls local, not the questions (review fix,
+//   item 9a).
 //
 // Pure reads. Titles are stored text: the IPC reply carries untrustedText.
 // Electron-free.
@@ -108,6 +112,7 @@ function privateFacts({ store, chatId = null, caseId = null, turnModels = null, 
     bridge,
     // Read-aloud on ElevenLabs is switched to the system voice (R-LI-33).
     ...(isObj(voiceSettings) && voiceSettings.engine === 'elevenlabs' ? { readAloud: 'system' } : {}),
+    ...(caseId ? { questionsLeave: true } : {}),
     ...(keepLocal ? { localVectors: keepLocal } : {})
   };
 }

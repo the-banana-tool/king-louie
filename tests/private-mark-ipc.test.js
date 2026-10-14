@@ -233,11 +233,19 @@ describe('chat:markPrivate and case:markPrivate', { skip: HAS_GIT ? false : 'git
     const b = newChat({ caseId: c.id });
     const facts = await invoke(IPC.CHAT_MARK_PRIVATE, { chatId: a });
     assert.deepStrictEqual(facts.facts.chats.map((x) => x.id).sort(), [a, b].sort());
+    // Review fix, item 9a: a case's questions still go out over the ladder.
+    assert.strictEqual(facts.facts.questionsLeave, true);
     const r = await invoke(IPC.CHAT_MARK_PRIVATE, { chatId: a, confirm: true });
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.strictEqual(rt.isPrivate(c.id), true);
     assert.strictEqual(store().isPrivate(a), true);
     assert.strictEqual(store().isPrivate(b), true);
+  });
+
+  it('review fix, item 9a: a chat with no case says nothing of questions', async () => {
+    const chatId = newChat();
+    const facts = await invoke(IPC.CHAT_MARK_PRIVATE, { chatId });
+    assert.strictEqual(facts.facts.questionsLeave, undefined);
   });
 
   it('case:markPrivate has the same two steps', async () => {
@@ -247,6 +255,7 @@ describe('chat:markPrivate and case:markPrivate', { skip: HAS_GIT ? false : 'git
     reply(a, [call('openai', 'gpt-5.5')]);
     const first = await invoke(IPC.CASE_MARK_PRIVATE, { caseId: c.id });
     assert.deepStrictEqual([first.ok, first.confirm, first.untrustedText], [true, false, true]);
+    assert.strictEqual(first.facts.questionsLeave, true, 'review fix, item 9a');
     assert.deepStrictEqual(first.facts.alreadySent, { messages: 1, providers: ['openai'] });
     assert.ok(first.facts.missing.some((m) => m.role === 'judge' || m.role === 'main'));
     assert.strictEqual(rt.isPrivate(c.id), false);

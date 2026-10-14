@@ -1829,6 +1829,9 @@ const LOCAL_ADMIN_SENTENCE = 'Set by the administrator in service.json.';
 // Under the composer in a private chat, always (R-LI-9).
 const PRIVATE_COMPOSER_LINE = 'Private: model calls stay on your hardware. Tools still send what they send.';
 const PRIVATE_TOOLS_LINE = 'Tools still do what they do: a web search sends its query to the web.';
+// A case's questions still reach the owner over the contact ladder (review
+// fix, item 9a).
+const PRIVATE_QUESTIONS_LINE = 'Its questions to you still go out over your contact ladder (Telegram, Discord, email, SMS, voice, the phone app), as before: the mark keeps model calls on your hardware, not the questions.';
 const PRIVATE_CONFIRM_FIXED = Object.freeze(['What was already sent stays sent.', 'This cannot be undone for this chat.']);
 
 // The confirmation's lines (§8.1) from chat:markPrivate's or
@@ -1853,6 +1856,7 @@ function privateConfirmLines(facts, { forCase = false } = {}) {
   const chats = Array.isArray(f.chats) ? f.chats : [];
   if (forCase || chats.length > 1) lines.push(`Chats made private with it: ${chats.map((c) => (c && c.title) || (c && c.id) || 'a chat').join(', ') || 'none'}.`);
   if (f.readAloud === 'system') lines.push('Read-aloud uses this computer\'s own voice in it.');
+  if (f.questionsLeave === true) lines.push(PRIVATE_QUESTIONS_LINE);
   lines.push(PRIVATE_TOOLS_LINE);
   lines.push(...PRIVATE_CONFIRM_FIXED);
   return lines;
