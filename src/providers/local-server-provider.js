@@ -12,6 +12,24 @@ const OllamaProvider = require('./ollama-provider');
 const { LOCAL_PROVIDER, isOllamaCloudModelId } = require('../models/provider-ids');
 
 const SERVER_ID_RE = /^[a-z][a-z0-9-]{1,39}$/;
+// A server that reports no usage is estimated at this rate (spec §9.1 rule 4).
+const EST_CHARS_PER_TOKEN = 4;
+const estimate = (chars) => Math.ceil(Math.max(0, chars) / EST_CHARS_PER_TOKEN);
+
+// What a finished, non-streamed reply said, for the estimate: its text and
+// the calls it made.
+function replyChars(result) {
+  if (!result || typeof result !== 'object') return 0;
+  let n = 0;
+  for (const value of [result.content, result.messageContent]) {
+    if (typeof value === 'string') n += value.length;
+  }
+  for (const call of Array.isArray(result.toolCalls) ? result.toolCalls : []) {
+    if (typeof call?.toolName === 'string') n += call.toolName.length;
+    try { n += JSON.stringify(call?.parameters ?? {}).length; } catch { /* unmeasurable: counted as nothing */ }
+  }
+  return n;
+}
 
 function coded(code, message) {
   const err = new Error(message);
@@ -50,6 +68,10 @@ class LocalServerProvider extends OllamaProvider {
       : (typeof transport.addressClass === 'string' ? transport.addressClass : 'unknown');
     this.kind = typeof options.kind === 'string' ? options.kind : null;
     this._key = key;
+    // Per call: the characters sent and received, for the estimate when the
+    // server reports no usage. Keyed by the call's own options object, which
+    // the parent hands to request() unchanged.
+    this._sizes = new WeakMap();
   }
 
   getName() { return LOCAL_PROVIDER; }
@@ -82,15 +104,35 @@ class LocalServerProvider extends OllamaProvider {
     return model;
   }
 
+  // Counts what a call sends, for the estimate (see _call).
+  request(url, init = {}, options = {}) {
+    const sizes = options && typeof options === 'object' ? this._sizes.get(options) : null;
+    if (sizes && init && typeof init.body === 'string') sizes.sent += init.body.length;
+    return super.request(url, init, options);
+  }
+
   // Run one of the parent's calls with the server's own model id, and record
   // it under the id the target named (a server may call the model anything).
-  async _call(run, options) {
+  // A finished call whose server reported no usage at all, with a reply that
+  // has text, is estimated at one token per four characters of the request
+  // body and of the reply, and marked usageEstimated (§9.1 rule 4). A call
+  // cut off by Stop is left as it is (usagePartial, rule 5).
+  async _call(run, options, onChunk = null) {
     const opts = options || {};
     const model = this._serverModel(opts.model);
     const recorded = `${this.serverId}/${model}`;
+    const callOptions = { ...opts, model };
+    const sizes = { sent: 0, received: 0 };
+    this._sizes.set(callOptions, sizes);
+    const counting = typeof onChunk === 'function'
+      ? (chunk) => { if (typeof chunk === 'string') sizes.received += chunk.length; return onChunk(chunk); }
+      : onChunk;
     try {
-      const result = await run({ ...opts, model });
-      if (result && typeof result === 'object' && result.llmMetrics) result.llmMetrics.model = recorded;
+      const result = await run(callOptions, counting);
+      if (result && typeof result === 'object' && result.llmMetrics) {
+        if (!counting) sizes.received += replyChars(result);
+        result.llmMetrics = this._estimated({ ...result.llmMetrics, model: recorded }, sizes);
+      }
       return result;
     } catch (err) {
       if (err && typeof err === 'object' && err.partialLlmMetrics) err.partialLlmMetrics.model = recorded;
@@ -107,7 +149,24 @@ class LocalServerProvider extends OllamaProvider {
   }
 
   streamMessage(messages, options = {}, onChunk) {
-    return this._call((opts) => super.streamMessage(messages, opts, onChunk), options);
+    return this._call((opts, counting) => super.streamMessage(messages, opts, counting), options, onChunk);
+  }
+
+  _estimated(metrics, sizes) {
+    if (metrics.usagePartial || sizes.received <= 0) return metrics;
+    const reported = ['inputTokens', 'outputTokens', 'totalTokens', 'cachedInputTokens', 'cacheCreationInputTokens']
+      .reduce((n, k) => n + (Number(metrics[k]) || 0), 0);
+    if (reported > 0) return metrics;
+    const input = estimate(sizes.sent);
+    const output = estimate(sizes.received);
+    return {
+      ...metrics,
+      ...this.buildLlmCallMetrics({
+        model: metrics.model,
+        usage: { prompt_tokens: input, completion_tokens: output, total_tokens: input + output }
+      }),
+      usageEstimated: true
+    };
   }
 
   // Embeddings stay on the server too (its /api/embed, through the transport).

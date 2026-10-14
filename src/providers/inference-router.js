@@ -68,7 +68,9 @@ class InferenceRouter {
       instances: new Map(),
       lastInstance: null,
       tags: tags && typeof tags === 'object' ? { ...tags } : null,
-      egress: normalizePolicy(egress)
+      egress: normalizePolicy(egress),
+      // The label of the first target this route failed over from.
+      failoverFrom: null
     };
   }
 
@@ -93,11 +95,18 @@ class InferenceRouter {
 
   // Cost records (spec 2026-09-27 §10): the role, profile and borrow a call
   // ran under, and whether a failover target (not the list's first)
-  // answered. Only a route built with tags has them.
+  // answered; after a failover, `failoverFrom` names the first target that
+  // failed ("local/workstation/qwen3:8b", spec 2026-10-13 §9.3). Only a
+  // route built with tags has them.
   callTags(state) {
     if (!state || !state.tags) return {};
     const { role = null, profileId = null, borrowedFrom = null, caseRole = null } = state.tags;
-    return { role, profileId, borrowedFrom, failover: state.index > 0, ...(caseRole ? { caseRole } : {}) };
+    const failover = state.index > 0;
+    return {
+      role, profileId, borrowedFrom, failover,
+      ...(failover && state.failoverFrom ? { failoverFrom: state.failoverFrom } : {}),
+      ...(caseRole ? { caseRole } : {})
+    };
   }
 
   _stamp(metrics, state) {
@@ -178,7 +187,7 @@ class InferenceRouter {
   async routeTargets(targets, messages, options = {}, state = this.newRouteState()) {
     const list = (Array.isArray(targets) ? targets : []).filter((x) => x && x.provider && x.model);
     if (!list.length) throw new Error('No model to call: the resolved list is empty.');
-    if (state.index >= list.length) state.index = 0;
+    if (state.index >= list.length) { state.index = 0; state.failoverFrom = null; }
     const label = (x) => `${x.provider}/${x.model}`;
     let payload = messages;
     const attemptsByReason = {};
@@ -281,6 +290,7 @@ class InferenceRouter {
           throw unavailable(target, err);
         }
         log.warn(`${label(target)} failed (${plan.reason}); failing over to ${label(list[next.index])}.`);
+        if (!state.failoverFrom) state.failoverFrom = label(target);
         state.index = next.index;
         flags.credentialRefreshed = false;
         for (const key of Object.keys(attemptsByReason)) delete attemptsByReason[key];
