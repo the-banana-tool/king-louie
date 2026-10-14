@@ -7,7 +7,11 @@
 // A chat's history scope is the chats.history_scope column, written only by
 // HistoryStore#setHistoryScope (the owner's own action). It is never taken
 // from a chat object (an import, an export, a patch) and never read into one.
-const STORE_ONLY_CHAT_KEYS = Object.freeze(['historyScope']);
+// The same holds for a chat's private mark (chats.private, local inference
+// spec 2026-10-13 §8.1): only HistoryStore#markPrivate and a private
+// createChat write it, and HistoryStore#isPrivate, chatRef and chatRefs read
+// it.
+const STORE_ONLY_CHAT_KEYS = Object.freeze(['historyScope', 'private']);
 const DERIVED_CHAT_KEYS = Object.freeze([
   'messageCount', 'userMessageCount', 'assistantMessageCount', 'preview', 'lastMessageText', 'lastMessageAt'
 ]);

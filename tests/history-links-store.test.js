@@ -44,23 +44,23 @@ describe('history schema step 4', () => {
     while (dirs.length) fs.rmSync(dirs.pop(), { recursive: true, force: true });
   });
 
-  it('a new store is at version 4 with chat_links and imports', () => {
+  it('a new store is at the latest version (5) with chat_links and imports', () => {
     t = openTempStore();
-    assert.strictEqual(latestVersion(), 4);
-    assert.strictEqual(t.store.schemaVersion, 4);
+    assert.strictEqual(latestVersion(), 5);
+    assert.strictEqual(t.store.schemaVersion, 5);
     assert.strictEqual(t.store.linkable, true);
     const db = readDb(t.dbPath);
-    assert.strictEqual(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 4);
+    assert.strictEqual(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 5);
     const cols = (table) => db.prepare(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`).all().map((r) => r.name);
     assert.deepStrictEqual(cols('chat_links'), ['chat_id', 'linked_chat_id']);
     assert.deepStrictEqual(cols('imports'), ['id', 'source_kind', 'source_path', 'source_hash', 'chat_id', 'imported_at', 'state', 'importer_version', 'message_count']);
     db.close();
   });
 
-  it('a store at version 3 opens at 4 with its chat intact and scope "chat"', () => {
+  it('a store at version 3 opens at the latest version with its chat intact and scope "chat"', () => {
     const file = versionThreeFile();
     extra = HistoryStore.open(file);
-    assert.strictEqual(extra.schemaVersion, 4);
+    assert.strictEqual(extra.schemaVersion, 5);
     assert.strictEqual(extra.linkable, true);
     const chat = extra.getChat('old');
     assert.strictEqual(chat.title, 'Lakeside lot');
@@ -236,19 +236,19 @@ describe('chat refs', () => {
   let t;
   afterEach(() => { if (t) { t.cleanup(); t = null; } });
 
-  it('chatRefs gives id, title, caseId, source, origin and importedFromCase in list order, with no messages', () => {
+  it('chatRefs gives id, title, caseId, source, origin, importedFromCase and private in list order, with no messages', () => {
     t = openTempStore();
     t.store.createChat({ id: 'd', title: 'Imported from a case', source: 'king-louie-json', importedFromCase: true, messages: [] });
     t.store.createChat({ id: 'c', title: 'Imported', source: 'claude-code-jsonl', importedFromCase: 'yes', messages: [] });
     t.store.createChat({ id: 'b', title: 'Bridge', origin: 'telegram', messages: [] });
     seedChat(t.store, { id: 'a', title: 'Case chat', caseId: 'case-1', messages: [{ sender: 'user', text: 'the Lakeside lot' }] });
     assert.deepStrictEqual(t.store.chatRefs(), [
-      { id: 'a', title: 'Case chat', caseId: 'case-1', source: null, origin: null, importedFromCase: false },
-      { id: 'b', title: 'Bridge', caseId: null, source: null, origin: 'telegram', importedFromCase: false },
-      { id: 'c', title: 'Imported', caseId: null, source: 'claude-code-jsonl', origin: null, importedFromCase: false },
-      { id: 'd', title: 'Imported from a case', caseId: null, source: 'king-louie-json', origin: null, importedFromCase: true }
+      { id: 'a', title: 'Case chat', caseId: 'case-1', source: null, origin: null, importedFromCase: false, private: false },
+      { id: 'b', title: 'Bridge', caseId: null, source: null, origin: 'telegram', importedFromCase: false, private: false },
+      { id: 'c', title: 'Imported', caseId: null, source: 'claude-code-jsonl', origin: null, importedFromCase: false, private: false },
+      { id: 'd', title: 'Imported from a case', caseId: null, source: 'king-louie-json', origin: null, importedFromCase: true, private: false }
     ]);
-    assert.deepStrictEqual(t.store.chatRef('b'), { id: 'b', title: 'Bridge', caseId: null, source: null, origin: 'telegram', importedFromCase: false });
+    assert.deepStrictEqual(t.store.chatRef('b'), { id: 'b', title: 'Bridge', caseId: null, source: null, origin: 'telegram', importedFromCase: false, private: false });
     assert.strictEqual(t.store.chatRef('missing'), null);
     assert.strictEqual(t.store.chatRef(''), null);
   });

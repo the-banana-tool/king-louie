@@ -23,6 +23,8 @@ const INDEX_SCHEMA_VERSION = 2;
 const EMBEDDINGS_SCHEMA_VERSION = 3;
 // The schema step that adds chat links and import records.
 const LINKS_SCHEMA_VERSION = 4;
+// The schema step that adds a chat's private mark.
+const PRIVATE_SCHEMA_VERSION = 5;
 // The chat meta key of the recall mark (markRecalledOtherChats).
 const RECALL_MARK_KEY = 'recalledOtherChatsAt';
 
@@ -122,6 +124,12 @@ class HistoryStore {
   // the neutral value ('chat', [], null, false) and never throw.
   get linkable() {
     return this.schemaVersion >= LINKS_SCHEMA_VERSION;
+  }
+
+  // False for a read-only store opened below schema 5: it has no private
+  // column, so every chat in it reads as private (isPrivate, chatRefs).
+  get privacyAware() {
+    return this.schemaVersion >= PRIVATE_SCHEMA_VERSION;
   }
 
   // fn(chatId, seq) after each appendMessage has committed its message and
@@ -235,15 +243,21 @@ class HistoryStore {
     return messages ? { ...chat, messages: this._messagesFor(key) } : chat;
   }
 
-  createChat(chat, { position = 'front' } = {}) {
+  // options.private (exactly true) creates the chat private. `private` on
+  // the chat object is ignored (rows.js drops it). A chat created over an
+  // existing id keeps that chat's private mark, whatever the options say.
+  createChat(chat, { position = 'front', private: asPrivate = false } = {}) {
     const id = normalizeId(chat?.id);
     if (!id || typeof chat !== 'object') return null;
     return this.transaction(() => {
       // A chat created over an id keeps that id's recall mark.
       const mark = this._recallMark(id);
+      const wasPrivate = this._privateMark(id) === true;
       // Only a chat that replaced an existing one can drop vectors.
       if (Number(this._stmt('DELETE FROM chats WHERE id = ?').run(id).changes) > 0) this._bumpVectorEpoch();
       this._insertChatRow(id, mark === undefined ? chat : { ...chat, [RECALL_MARK_KEY]: mark }, this._nextPosition(position));
+      // Before the first message row: the chat is private from the start.
+      if (this.privacyAware && (wasPrivate || asPrivate === true)) this._stmt('UPDATE chats SET private = 1 WHERE id = ?').run(id);
       this._insertMessages(id, chat.messages, textOrNull(chat.updatedAt) || textOrNull(chat.createdAt));
       return this.getChat(id);
     });
@@ -644,6 +658,57 @@ class HistoryStore {
     });
   }
 
+  // The private mark (local inference spec 2026-10-13 §8.1, §8.4; owner
+  // ruling R-LI-10): a private chat makes no model call that leaves the
+  // owner's hardware. It is the chats.private column and it is one-way:
+  // markPrivate and a private createChat set it, and nothing clears it (no
+  // method here writes the column any other way; _updateChatRow, replaceChat,
+  // the upsert path and truncation never name it, and rows.js drops a
+  // `private` found on a chat object). The only way out is a new chat.
+
+  // The row's mark: true, false, or undefined for no such chat.
+  _privateMark(id) {
+    if (!this.privacyAware) return undefined;
+    const row = this._stmt('SELECT private FROM chats WHERE id = ?').get(id);
+    return row ? Number(row.private) !== 0 : undefined;
+  }
+
+  // Whether the chat is private. A mark that cannot be read is private: an
+  // unknown chat id, a store below schema 5, a closed store, a failed read.
+  isPrivate(chatId) {
+    try {
+      const id = typeof chatId === 'string' ? normalizeId(chatId) : '';
+      if (!id || this._closed || !this.privacyAware) return true;
+      return this._privateMark(id) !== false;
+    } catch (err) {
+      log.warn(`A chat's private mark could not be read, so the chat is treated as private: ${err.message}`);
+      return true;
+    }
+  }
+
+  // Marks the chat private and, in the same transaction, deletes every
+  // vector of its chunks that a hosted embedder made (any key that does not
+  // start "local:"; the local embedder fills its own key again). A failure
+  // leaves the chat unmarked and its vectors in place. `marked` is false for
+  // an unknown chat or one that is already private (nothing is deleted
+  // then). Throws on a read-only store.
+  markPrivate(chatId) {
+    if (this.readonly) throw new Error('The history store is read-only; a chat cannot be marked private in it.');
+    if (!this.privacyAware) throw new Error(`history.sqlite has schema version ${this.schemaVersion}; it has no private mark.`);
+    const id = typeof chatId === 'string' ? normalizeId(chatId) : '';
+    const out = this.transaction(() => {
+      if (!id || this._privateMark(id) !== false) return { marked: false, droppedVectors: 0 };
+      this._stmt('UPDATE chats SET private = 1 WHERE id = ?').run(id);
+      // substr, not LIKE: LIKE ignores case, and only the exact prefix is
+      // the local embedder's.
+      const droppedVectors = Number(this._stmt(`DELETE FROM embeddings
+        WHERE substr(model, 1, 6) <> 'local:' AND chunk_id IN (SELECT id FROM chunks WHERE chat_id = ?)`).run(id).changes);
+      return { marked: true, droppedVectors };
+    });
+    if (out.droppedVectors > 0) this._bumpVectorEpoch();
+    return out;
+  }
+
   // Chat ids an import must not be given although no chat in this store has
   // them: the ids of chats still in chat-data.json (the core sets the check;
   // stage H4 review). The move out of the JSON file would take a chat it
@@ -687,12 +752,13 @@ class HistoryStore {
     if (!this.linkable || this.readonly || !id) return [];
     return this.transaction((db) => linkIndex.setLinks(db, id, ids));
   }
-  // { id, title, caseId, source, origin, importedFromCase } for every chat in
-  // list order; no message is read. Works on any schema version.
-  chatRefs() { return linkIndex.chatRefs(this.db); }
+  // { id, title, caseId, source, origin, importedFromCase, private } for
+  // every chat in list order; no message is read. Works on any schema
+  // version; below schema 5 every chat's `private` is true (unreadable).
+  chatRefs() { return linkIndex.chatRefs(this.db, { privacyAware: this.privacyAware }); }
   chatRef(chatId) {
     const id = normalizeId(chatId);
-    return id ? linkIndex.chatRef(this.db, id) : null;
+    return id ? linkIndex.chatRef(this.db, id, { privacyAware: this.privacyAware }) : null;
   }
   findImport(sourceHash) { return this.linkable ? linkIndex.findImport(this.db, sourceHash) : null; }
   getImport(id) { return this.linkable ? linkIndex.getImport(this.db, id) : null; }

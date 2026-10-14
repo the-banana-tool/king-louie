@@ -64,6 +64,16 @@ Where the code as built differs from a task's text. Added by each task's impleme
 - Under a policy `mustResolve` always throws the policy's code, also when the role's local targets exist but `explain` says none is usable (a server that is down): the message lists them under "Skipped:" and ends "Nothing was sent to a hosted model."
 - `egress.js` also exports `refusalSubject(policy, role)` (the opening of that message), for Task 8's wording.
 
+**Task 4:**
+
+- **`chatRefs()` / `chatRef()` on a store that is not `privacyAware` give `private: true` for every chat**, as `isPrivate` does there (the mark cannot be read). Such a store is only ever a read-only file opened with `allowOlderSchema` (a desktop import's source). A file below step 5 cannot hold a marked chat, so code that copies chats out of one (Task 14's import) checks `store.privacyAware` before it reads `private` as a mark.
+- `isPrivate` is also `true` for an id that is not a string, for a stored value other than 0, and when the read throws (one warning, with the error's message and no chat id or text). `markPrivate` returns `{ marked: false, droppedVectors: 0 }` for such an id and throws on a store below schema 5 as it does on a read-only one.
+- `createChat`'s `private` option counts only when it is exactly `true`. `{ private: false }` over the id of a private chat keeps the mark. `upsertChat(chat, { private: true })` marks only a chat it creates; over an existing chat it changes nothing. A chat that is **deleted** takes its mark with it: a later chat under the same id starts unmarked (`isPrivate` is `true` in between, the id being unknown).
+- The hosted vectors are matched with `substr(model, 1, 6) <> 'local:'`, not `LIKE`: `LIKE` ignores case and `isLocalKey` does not. `vectorEpoch` moves after the transaction commits, and only when a row was deleted.
+- The step's SQL (`SCHEMA_V5_SQL`) lives in `link-index.js` beside step 4's; the mark's methods are in `history-store.js`. The store's truncation method is `truncateFrom` (`truncateChatFrom` is the facade's).
+- The "delete throws" test makes the database refuse the delete with a trigger instead of stubbing a statement, so the rollback tested is SQLite's own.
+- **Tests changed outside the task's file list**, each because it pinned the latest version or rebuilt an older file by hand: `tests/history-embeddings-store.test.js` (asserts 5; its downgrade to version 2 drops the `private` column first, or step 5 fails on a duplicate column), `tests/history-index.test.js` (asserts 5), `tests/history-links-store.test.js` (asserts 5 in three places, two test titles reworded; the `chatRefs` / `chatRef` rows it compares gain `private: false`). No assertion was weakened or removed.
+
 ## Owner rulings (2026-10-13)
 
 Each row names the tasks that carry the ruling and the tests that pin it (file › test name; the tests are written by the task named). Rulings that belong to L2 only are listed so nobody looks for them here.
