@@ -1397,8 +1397,10 @@ plan `docs/superpowers/plans/2026-10-13-cases-stage8-verified-progress.md`
   same pass outside a turn.
 - **Regressions**: a criterion that was `met` and is `stale` or `failing`
   at the next turn start raises a blocking `criterion-regressed` trigger
-  (`verify/hook.js`). A change the turn made itself is said in that turn's
-  close block instead, and raises none.
+  (`verify/hook.js`). A change the turn made itself (it superseded the fact,
+  or the close run failed) is said in that turn's close block and is also
+  raised at the next turn start: the close leaves it `met` in the cache
+  (R-C8-N9).
 - **Closing.** `readiness.js` computes the ready-to-close list (each item's
   owner: `owner`, `case`, `either`). `Progress.proposeDone` is refused
   (`NOT_READY`) unless every confirmed criterion is `met` (R-C8-1), and then

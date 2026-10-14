@@ -72,4 +72,4 @@ function freezeProgress(runtime, id, { status, progress }) {
   });
 }
 
-module.exports = { registerVerificationHook, verificationTurnStart, freezeProgress, TRIGGER_KIND };
+module.exports = { registerVerificationHook, verificationTurnStart, freezeProgress, TRIGGER_KIND, REGRESSED };

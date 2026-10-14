@@ -605,7 +605,7 @@ describe('CaseRuntime progress: regressions and the freeze (cases stage 8)', () 
     assert.strictEqual(fs.existsSync(path.join(plain.dir, '.kl', 'verification.json')), false);
   });
 
-  it('the close of a verified turn writes the cache; a close that is not verified leaves it for the next turn to notice', async () => {
+  it('a close that is not verified leaves the cache for the next turn to notice; a verified close that undid a met criterion keeps it met there too (R-C8-N9)', async () => {
     const { rt, id } = await world();
     const fact = meet(rt, id);
     let turn = await rt.beginTurn(id, { turnId: 'turn-1' });
@@ -617,15 +617,22 @@ describe('CaseRuntime progress: regressions and the freeze (cases stage 8)', () 
     assert.deepStrictEqual(regressed(turn).map((t) => t.key), ['criterion:sc-001:v-0001:stale']);
     await rt.endTurn(turn, { summary: 'read' });
 
-    // A verified close: the entry says it first, and the cache follows.
+    // A verified close: the entry says it first, and the cache keeps the
+    // criterion met, so the next turn is re-oriented too (R-C8-N9).
     const other = await world();
     const cited = meet(other.rt, other.id);
     turn = await other.rt.beginTurn(other.id, { turnId: 'turn-1' });
     other.rt.ledger(other.id).retract(cited.id, 'wrong lot');
     await other.rt.endTurn(turn, { summary: 'retracted', journal: 'Retracted the signing.', verify: true });
-    assert.deepStrictEqual(cache(other.rt, other.id).states, { 'sc-001': 'stale' });
+    assert.deepStrictEqual(cache(other.rt, other.id).states, { 'sc-001': 'met' });
     assert.match(other.rt.records(other.id).lastJournal().text, /^## Verification \(written by King Louie\)\n- Now stale: sc-001 \(f-0001 was retracted\)\.\n\nRetracted the signing\./);
     turn = await other.rt.beginTurn(other.id, { turnId: 'turn-2' });
+    assert.deepStrictEqual(regressed(turn).map((t) => t.key), ['criterion:sc-001:v-0001:stale']);
+    assert.deepStrictEqual(cache(other.rt, other.id).states, { 'sc-001': 'stale' });
+    other.rt.recordReorientation(other.id, turn, { changed: 'The signing was on the wrong lot', affects: [], action: 'Find the right contract', note: 'sc-001 is open again' });
+    await other.rt.endTurn(turn, { summary: 'read' });
+    // Raised once.
+    turn = await other.rt.beginTurn(other.id, { turnId: 'turn-3' });
     assert.deepStrictEqual(regressed(turn), []);
     await other.rt.endTurn(turn, { summary: 'read' });
     assert.strictEqual(await git.isDirty(other.rt.getCase(other.id).dir), false);

@@ -18,7 +18,7 @@ const { VerificationStore } = require('./verify/store');
 const { progressView, summaryLine } = require('./verify/status');
 const { resolveEvidence, turnMarks, collectTurnEvidence, statesOf } = require('./verify/evidence');
 const { prepareVerifyPass, callVerifyModel, applyVerifyReply, verificationBlock } = require('./verify/judge');
-const { registerVerificationHook, freezeProgress } = require('./verify/hook');
+const { registerVerificationHook, freezeProgress, REGRESSED: REGRESSED_STATES } = require('./verify/hook');
 const { closeReadiness } = require('./verify/readiness');
 const { CheckStore, CheckError, CHECK_TYPE, currentCheck, closeCheck } = require('./verify/check');
 const { checkQuestionText } = require('./verify/questions');
@@ -1704,14 +1704,14 @@ class CaseRuntime {
     // verified (stopped, blocked, failed) leaves it, so the next turn's
     // `verification` hook still sees a criterion that left `met`.
     const states = statesOf(after);
-    // A criterion the close run took from `met` to `failing` stays `met`
-    // here, so the next turn's hook raises it too (a note and a blocking
-    // trigger): the journal line alone is not read until then.
+    // A criterion that left `met` during this turn (the turn superseded the
+    // fact behind it, or the close run failed) stays `met` here, so the next
+    // turn's hook raises it exactly as a change made between turns (a note
+    // and a blocking trigger; owner ruling R-C8-N9): the journal line alone
+    // is not read until then.
     const cached = { ...states };
-    if (check) {
-      for (const [id, was] of Object.entries(before)) {
-        if (was === 'met' && cached[id] === 'failing') cached[id] = 'met';
-      }
+    for (const [id, was] of Object.entries(before)) {
+      if (was === 'met' && REGRESSED_STATES.includes(cached[id])) cached[id] = 'met';
     }
     this.verification(turn.caseId).setCache(cached);
     if (plan) {

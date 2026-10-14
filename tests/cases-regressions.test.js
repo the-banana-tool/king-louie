@@ -642,10 +642,10 @@ describe('F8-progress: progress comes from the record, and only the owner closes
   });
 
   // The turn that supersedes the fact is told at its own close (the block
-  // that heads its journal entry), and the cache then reads stale, so the
-  // next turn start raises no criterion-regressed trigger for it: that
-  // trigger is for a change between turns (cases-runtime.test.js pins it).
-  it("a later turn supersedes the fact: stale, said at that turn's close, and the model cannot propose done", async () => {
+  // that heads its journal entry), and the next turn is forced to
+  // re-orient: it gets the blocking criterion-regressed trigger exactly as a
+  // change made between turns does (owner ruling R-C8-N9, 2026-10-14).
+  it("a later turn supersedes the fact: stale, said at that turn's close, the next turn must re-orient, and the model cannot propose done", async () => {
     await begin();
     s.script.reply = verdict();
     const newer = await sourced('The buyer withdrew; the contract is void', 0, { supersedes: s.fact.id });
@@ -657,8 +657,18 @@ describe('F8-progress: progress comes from the record, and only the owner closes
     assert.ok(entry.startsWith(`${HEADING}
 - Now stale: sc-001 (${s.fact.id} was superseded by ${s.voided.id}).`), entry);
     const turn = await begin();
-    assert.deepStrictEqual(turn.triggers.filter((t) => t.kind === 'criterion-regressed'), []);
+    const detail = `sc-001 ("Signed contract at or above the floor") was met and is now stale: ${s.fact.id} was superseded by ${s.voided.id}.`;
+    assert.deepStrictEqual(turn.triggers.filter((t) => t.kind === 'criterion-regressed'), [
+      { kind: 'criterion-regressed', key: `criterion:sc-001:${row('sc-001').recordId}:stale`, blocking: true, detail }
+    ]);
+    assert.strictEqual(turn.reorientPending, true);
+    assert.match(turn.orientation, /sc-001 was met and is now stale/);
     assert.match(turn.orientation, /sc-001 \[stale\]/);
+    // Until it re-orients, the turn cannot even propose.
+    const blocked = await ProgressTool.execute({ action: 'proposeDone' }, s.opts);
+    assert.strictEqual(blocked.ok, false);
+    assert.match(blocked.error, /^Re-orientation is required first: sc-001 /);
+    s.rt.recordReorientation(s.id, turn, { changed: 'The buyer withdrew', affects: [], action: 'Look for another buyer', note: 'sc-001 is open again' });
     const refused = await ProgressTool.execute({ action: 'proposeDone' }, s.opts);
     assert.deepStrictEqual([refused.ok, refused.code], [false, 'NOT_READY']);
     assert.ok(refused.open.some((i) => i.id === 'criteria-met' && /sc-001 is stale/.test(i.fix)));

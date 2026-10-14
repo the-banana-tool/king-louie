@@ -70,6 +70,7 @@ Asked by the plan (its "New questions") after the build; each is written into th
 | R-C8-N5 | "npm only": must the check's program be npm? | Yes (as built): the program is `npm`, and the command is `npm test` or `npm run <script>` (§6.6) | `node --test`, `make`, `cargo` and `./gradlew` cannot be a case's check. Widening is one list in `src/cases/verify/check.js` |
 | R-C8-N6 | May the check pass npm options of its own or use other npm commands? | No (as built): no word that starts with `-` before the script (only after `--`), and no npm command but `test` and `run` (§6.6) | `npm test --silent` and `npm run --if-present x` are refused |
 | R-C8-N8 | The `user` fact `create_case` records over MCP carries a quote nobody checked. May the verify pass cite it for `met`? | It is still recorded (provenance `user`, its MCP channel and the quote on its source), but it is never evidence. The rule, enforced where evidence is checked (the `f-` resolver, so `acceptVerdict` refuses it like any other ineligible id, and the pass is not shown it): a fact with `provenance: 'user'` whose `source.channel` starts with `mcp-` (§6.3) | It also covers an answer to a spoken question given over MCP (its fact carries the same channel): such an answer still does what the question does (R-C8-2), but its fact cannot stand behind a criterion. A user fact with no channel, or one recorded in the app, on the phone or over a contact channel, is unaffected |
+| R-C8-N9 | A turn that supersedes the fact behind a `met` criterion is told at its own close. Is the next turn also forced to re-orient? | Yes: the next turn gets the blocking `criterion-regressed` trigger exactly as a change made between turns does (§6.3). The close leaves such a criterion `met` in the state cache | The model is told twice (its close block, then the trigger it must acknowledge with `Reorient`), and the next turn cannot recommend, decide or fail until it re-orients |
 
 ### 2.1 Checked in the code after the first draft
 
@@ -339,7 +340,9 @@ computed states with the cached ones in `.kl/verification.json`. A criterion tha
 `stale` or `failing` raises a blocking trigger, `kind: 'criterion-regressed'`, `key:
 'criterion:<id>:<recordId>:<state>'`, `detail: 'sc-002 ("Closed within the deadline") was met and is now
 stale: f-0033 was superseded by f-0060.'`, and a `Since last turn` note. `Reorient` acknowledges it by key
-like any hook trigger. The hook then writes the new cache (under the turn's lock).
+like any hook trigger. The hook then writes the new cache (under the turn's lock). A criterion that left
+`met` during a turn (the turn superseded its fact, or the close run failed) is said in that turn's close
+block and also raised at the next turn start: the close leaves it `met` in the cache (R-C8-N9).
 
 **A `done` or `abandoned` case (R-C8-7).** `setStatus` to either status calls
 `freezeProgress(id)`: the computed states and the ready-to-close list are written to
@@ -1279,9 +1282,11 @@ assume:
 5. **The verify pass's result is a journal entry of its own** (kind `verification`, R-C8-11), not the first
    lines of the turn's entry; §7.6's journal kinds gain it. A check that changed something on **Check
    now** writes the same kind.
-6. **A regression the turn made itself raises no trigger at the next turn start.** The turn is told at its
-   own close (the block heading its journal entry) and the close writes the state cache;
-   `criterion-regressed` is raised for a change between turns.
+6. **A regression the turn made itself is said at its close and raised again at the next turn start**
+   (owner ruling R-C8-N9, 2026-10-14; as first built it raised no trigger). The turn is told at its own
+   close (the block heading its journal entry); the close leaves a criterion that left `met` during the
+   turn as `met` in the state cache, so the next turn's hook raises the blocking `criterion-regressed`
+   trigger exactly as for a change made between turns.
 7. **The `Brief` tool does not confirm a criterion the model already proposed** (`CRITERION_DUPLICATE`
    for the same words with a quote). The owner confirms it by a press or by answering a `scope-confirm`
    question.
