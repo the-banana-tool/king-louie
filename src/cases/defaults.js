@@ -32,8 +32,14 @@ const CASE_SETTINGS_DEFAULTS = Object.freeze({
     maxCandidates: 2
   }),
   duplicates: Object.freeze({ createSimilarity: 0.6 }),
-  softwareRepo: Object.freeze({ refreshBudgetMs: 6000 })
+  softwareRepo: Object.freeze({ refreshBudgetMs: 6000 }),
+  // Cases stage 8 (spec §6.5, §9; R-C8-4): the verify pass at the close of
+  // a turn that changed the record. `when`: 'changed-turn', 'request' (only
+  // when asked for) or 'off'.
+  verify: Object.freeze({ when: 'changed-turn', timeoutMs: 20000, maxInputChars: 12000, maxPassesPerDay: 24, skipAboveUsdPercent: 80 })
 });
+
+const VERIFY_WHEN = Object.freeze(['changed-turn', 'request', 'off']);
 
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
 // Plain, unfrozen copies: settings objects are edited by the settings UI.
@@ -54,7 +60,8 @@ function mergeCaseSettings(base = {}, source = {}) {
     wakeups: { ...d.wakeups, ...obj(b.wakeups), ...obj(s.wakeups) },
     detours: { ...d.detours, ...obj(b.detours), ...obj(s.detours) },
     duplicates: { ...d.duplicates, ...obj(b.duplicates), ...obj(s.duplicates) },
-    softwareRepo: { ...d.softwareRepo, ...obj(b.softwareRepo), ...obj(s.softwareRepo) }
+    softwareRepo: { ...d.softwareRepo, ...obj(b.softwareRepo), ...obj(s.softwareRepo) },
+    verify: { ...d.verify, ...obj(b.verify), ...obj(s.verify) }
   };
 }
 
@@ -65,6 +72,10 @@ const positive = (v, fallback) => {
 const positiveInt = (v, fallback) => {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : fallback;
+};
+const percent = (v, fallback) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 && n <= 100 ? n : fallback;
 };
 const fraction = (v, fallback) => {
   const n = Number(v);
@@ -96,7 +107,15 @@ function resolveCaseSettings(source = {}) {
       maxCandidates: positiveInt(m.detours.maxCandidates, d.detours.maxCandidates)
     },
     duplicates: { ...m.duplicates, createSimilarity: fraction(m.duplicates.createSimilarity, d.duplicates.createSimilarity) },
-    softwareRepo: { ...m.softwareRepo, refreshBudgetMs: positiveInt(m.softwareRepo.refreshBudgetMs, d.softwareRepo.refreshBudgetMs) }
+    softwareRepo: { ...m.softwareRepo, refreshBudgetMs: positiveInt(m.softwareRepo.refreshBudgetMs, d.softwareRepo.refreshBudgetMs) },
+    verify: {
+      ...m.verify,
+      when: VERIFY_WHEN.includes(m.verify.when) ? m.verify.when : d.verify.when,
+      timeoutMs: positiveInt(m.verify.timeoutMs, d.verify.timeoutMs),
+      maxInputChars: positiveInt(m.verify.maxInputChars, d.verify.maxInputChars),
+      maxPassesPerDay: positiveInt(m.verify.maxPassesPerDay, d.verify.maxPassesPerDay),
+      skipAboveUsdPercent: percent(m.verify.skipAboveUsdPercent, d.verify.skipAboveUsdPercent)
+    }
   };
 }
 

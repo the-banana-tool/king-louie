@@ -167,3 +167,25 @@ describe('VerificationStore', () => {
     assert.strictEqual(store.addRecord(verdict()).id, 'v-0008', 'an id in the file is never handed out again');
   });
 });
+
+describe('VerificationStore.noteSkip (the verify pass says a skip once a day)', () => {
+  it('is true the first time a reason is noted on a day, and the file has no such key before', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-vstore-skip-'));
+    try {
+      fs.mkdirSync(path.join(d, '.kl'));
+      const store = new VerificationStore(d, { now: () => new Date('2026-10-21T09:00:00.000Z') });
+      assert.strictEqual('skipNoted' in store.read(), false);
+      assert.strictEqual(store.noteSkip('2026-10-21', 'daily-cap'), true);
+      assert.strictEqual(store.noteSkip('2026-10-21', 'daily-cap'), false);
+      assert.strictEqual(store.noteSkip('2026-10-21', 'usd-budget'), true);
+      assert.strictEqual(store.noteSkip('2026-10-22', 'usd-budget'), true);
+      assert.deepStrictEqual(store.read().skipNoted, { day: '2026-10-22', reason: 'usd-budget' });
+      assert.throws(() => store.noteSkip('', 'daily-cap'));
+      // Counting a pass keeps it.
+      store.countPass('2026-10-22');
+      assert.deepStrictEqual(store.read().skipNoted, { day: '2026-10-22', reason: 'usd-budget' });
+    } finally {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+});

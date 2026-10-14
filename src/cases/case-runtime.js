@@ -16,7 +16,8 @@ const { CaseRecords } = require('./records');
 const { AbandonedStore } = require('./abandoned');
 const { VerificationStore } = require('./verify/store');
 const { progressView, summaryLine } = require('./verify/status');
-const { resolveEvidence, turnMarks, collectTurnEvidence } = require('./verify/evidence');
+const { resolveEvidence, turnMarks, collectTurnEvidence, statesOf } = require('./verify/evidence');
+const { runVerifyPass, verificationBlock } = require('./verify/judge');
 const { closeReadiness } = require('./verify/readiness');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
@@ -1425,10 +1426,24 @@ class CaseRuntime {
   // { toolResults } from the caller, this turn's case-tool calls only; it is
   // filtered and capped again here and its ids are never trusted. Only the
   // normal exit of an owner turn and a wake-up that acted pass `verify`.
+  //
+  // The verify pass (spec §6.5) makes one model call with the case lock
+  // held, as the rest of the turn does; cases.verify.timeoutMs bounds it,
+  // and the turn's own signal (Stop, a pause, shutdown) ends it at once.
   async _closeProgress(turn, { evidence = null, verify = false } = {}) {
     if (!verify) return { block: null };
-    collectTurnEvidence(this, turn, evidence || {});
-    return { block: null };
+    const closed = (status) => status === 'done' || status === 'abandoned';
+    if (closed(this.getCase(turn.caseId).status)) return { block: null };
+    const turnEvidence = collectTurnEvidence(this, turn, evidence || {});
+    // As the turn began, so a criterion that left `met` during the turn is
+    // named; as it is now when no marks were taken.
+    const before = turn.marks && turn.marks.states ? turn.marks.states : statesOf(this.progressView(turn.caseId));
+    const pass = await runVerifyPass(this, turn, { turnEvidence });
+    // The turn no longer owns the case (shutdown released it), or the case
+    // closed meanwhile: nothing more is read or said.
+    if (this.turns.get(turn.caseId) !== turn || closed(this.getCase(turn.caseId).status)) return { block: null };
+    const after = this.progressView(turn.caseId);
+    return { block: verificationBlock({ pass, before, after }) };
   }
 
   async endTurn(turn, { summary = '', journal = null, journalKind = 'turn', evidence = null, verify = false } = {}) {

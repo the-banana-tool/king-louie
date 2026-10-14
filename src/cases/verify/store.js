@@ -81,6 +81,8 @@ class VerificationStore {
       opinions,
       cache: isObject(raw.cache) && isObject(raw.cache.states) ? raw.cache : null,
       passes: isObject(raw.passes) && typeof raw.passes.day === 'string' && Number.isInteger(raw.passes.count) ? raw.passes : null,
+      // Only present once a skip was noted (noteSkip).
+      ...(isObject(raw.skipNoted) && typeof raw.skipNoted.day === 'string' && typeof raw.skipNoted.reason === 'string' ? { skipNoted: raw.skipNoted } : {}),
       declinedClose: isObject(raw.declinedClose) && typeof raw.declinedClose.fingerprint === 'string' ? raw.declinedClose : null,
       closed: isObject(raw.closed) ? raw.closed : null
     };
@@ -174,6 +176,17 @@ class VerificationStore {
   passesOn(day) {
     const { passes } = this.read();
     return passes && passes.day === day ? passes.count : 0;
+  }
+
+  // A pass skipped for the day's limit or the budget is said in the journal
+  // once a day (spec §6.5). → true the first time `reason` is noted on `day`.
+  noteSkip(day, reason) {
+    if (typeof day !== 'string' || !day || typeof reason !== 'string' || !reason) throw new Error('noteSkip needs the day and the reason.');
+    const file = this.read();
+    if (file.skipNoted && file.skipNoted.day === day && file.skipNoted.reason === reason) return false;
+    file.skipNoted = { day, reason };
+    this._write(file);
+    return true;
   }
 
   setDeclinedClose(fingerprint) {
