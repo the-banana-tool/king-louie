@@ -55,6 +55,9 @@ const BUDGET_FACT_NOTE = "Budget limits change only through the owner's answer o
 // instead, and never builds the quit/delete sentence at all.
 // Cases stage 8: the owner's scope actions (applyScopeAction).
 const SCOPE_ACTIONS = Object.freeze(['confirm', 'drop', 'edit', 'add']);
+// Cases stage 8: a failure report's journal name without its extension
+// (what CaseRecords.writeJournal('failure', …) names it).
+const FAILURE_REPORT_NAME = /^\d{4}-\d{2}-\d{2}-\d{4}-failure(?:-\d+)?$/;
 
 // What writeScope is told of a new string, checked before brief.md is
 // touched (ScopeStore checks it again when it writes): an origin it knows,
@@ -699,6 +702,11 @@ class CaseRuntime {
     const nextWakeup = safely('wake-ups', () => this.wakeups(meta.id).list()
       .slice()
       .sort((a, b) => Date.parse(a.nextAt) - Date.parse(b.nextAt))[0] || null, null);
+    // Cases stage 8 (spec §6.8): each read costs one line when it fails,
+    // never the orientation. All three only read.
+    const progress = safely('progress', () => this.progress(meta.id), { error: true });
+    const abandoned = safely('abandoned approaches', () => this.abandoned(meta.id).list(), { records: [], unavailable: true });
+    const lastFailure = safely('last failure report', () => this._lastFailure(meta, facts), null);
     return buildOrientation({
       meta,
       brief,
@@ -716,8 +724,25 @@ class CaseRuntime {
       nextWakeup,
       now: this.now(),
       detours: safely('detours', () => this._detourLines(meta), []),
-      extras: this._extras(meta)
+      extras: this._extras(meta),
+      progress,
+      abandoned,
+      lastFailure
     });
+  }
+
+  // The failure report a case was resumed from (R-C8-10): while the status
+  // reason is the owner's direction, the direction fact's `attr` is the
+  // report's name when the answer came through the direction question. A
+  // direction recorded from chat has an attr the model chose, so the name is
+  // used only when it is a failure report's and that file is in the case.
+  _lastFailure(meta, facts) {
+    if (meta.statusReason?.kind !== 'direction') return null;
+    const fact = facts.get(meta.statusReason.ref);
+    if (!fact || fact.subject !== 'direction' || typeof fact.attr !== 'string') return null;
+    if (!FAILURE_REPORT_NAME.test(fact.attr)) return null;
+    if (!fs.existsSync(path.join(meta.dir, 'journal', `${fact.attr}.md`))) return null;
+    return { file: `journal/${fact.attr}.md` };
   }
 
   // `## Case type: <type>`: the type's extras from the cached snapshot.

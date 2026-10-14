@@ -2,6 +2,8 @@
 // Builds the orientation block every case turn starts from (spec §5.2).
 // Pure: callers read the case from disk and pass the pieces in.
 const { neutralize, oneLine: frameOneLine } = require('./playbooks/frame');
+const { abandonedLines } = require('./abandoned');
+const { plainLineProblem } = require('./hidden-chars');
 
 const DEFAULT_MAX_CHARS = 28000;
 const JOURNAL_MAX = 2000;
@@ -32,14 +34,44 @@ function unknownLine(u) {
   return `- ${u.id} ${u.subject}.${u.attr} — ${u.stmt}\n  Changes: ${u.changes || '—'} · Answerable by: ${u.answerable || '—'} · How: ${u.how || '—'}`;
 }
 
-function briefLines(brief) {
+const isObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+
+// Cases stage 8 (spec §6.8): who wrote an objective the owner has not
+// confirmed. Fixed words; a confirmed objective has no mark.
+function objectiveMark(progress) {
+  const objective = isObject(progress?.view?.objective) ? progress.view.objective : null;
+  if (!objective || objective.state === 'confirmed') return '';
+  if (objective.origin === 'file') return ' (changed outside the app; not confirmed)';
+  if (objective.origin === 'legacy') return ' (from before progress was tracked; the owner has not confirmed it)';
+  return ' (proposed by the model; the owner has not confirmed it)';
+}
+
+// The criteria the Progress section lists, or null when there is no view
+// (no progress input, or one that could not be computed).
+function progressRows(progress) {
+  if (!isObject(progress)) return null;
+  if (isObject(progress.closed)) return Array.isArray(progress.closed.criteria) ? progress.closed.criteria.filter(isObject) : [];
+  return Array.isArray(progress.view?.criteria) ? progress.view.criteria.filter(isObject) : null;
+}
+
+function briefLines(brief, progress = null) {
   if (!brief || brief.error) return [`- brief.md could not be read: ${brief?.error || 'missing'}. Ask the owner to fix it or rewrite it with the Brief tool.`];
   const d = brief.data || {};
   const list = (v) => (Array.isArray(v) && v.length ? v.join('; ') : '—');
+  // With the Progress section below, the brief gives the counts and the
+  // section gives the texts, each with its state.
+  const rows = progressRows(progress);
+  let criteria = list(d.successCriteria);
+  if (rows && rows.length) {
+    const confirmed = rows.filter((r) => r.scope === 'confirmed').length;
+    criteria = `${confirmed} confirmed, ${rows.length - confirmed} proposed; see Progress`;
+  } else if (rows) {
+    criteria = '—';
+  }
   return [
-    `- Objective: ${d.objective || '—'}`,
+    `- Objective: ${d.objective || '—'}${d.objective ? objectiveMark(progress) : ''}`,
     `- Why: ${d.why || '—'}`,
-    `- Success criteria: ${list(d.successCriteria)}`,
+    `- Success criteria: ${criteria}`,
     `- Hard constraints: ${list(d.hardConstraints)}`,
     `- Already tried: ${list(d.alreadyTried)}`,
     `- Deadline: ${d.deadline || '—'}`,
@@ -53,6 +85,116 @@ function briefLines(brief) {
 
 const clip = (text, max = JOURNAL_MAX) => (text.length > max ? `${text.slice(0, max)}…` : text);
 const oneLine = (s, max) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+
+// ---- Progress and abandoned approaches (cases stage 8 spec §6.8) ----
+
+const PROGRESS_HEADING = '## Progress (computed by King Louie; you cannot set these)';
+const ABANDONED_HEADING = '## Abandoned approaches (do not retry one without a new fact; say what changed if you do)';
+const PROGRESS_MAX = 2500;
+const CRITERION_TEXT_MAX = 160;
+const REASON_MAX = 160;
+const ITEM_REFS_MAX = 5;
+const HIDDEN_TEXT = '(text hidden: not one plain line)';
+const CRITERION_ID = /^sc-\d{3,}$/;
+const EVIDENCE_ID = /^[a-z]{1,4}-\d{1,8}$/;
+const ITEM_ID = /^[a-z][a-z-]{1,39}$/;
+// What the ready-to-close list gives as refs: the stores' ids and `#12`.
+const REF = /^(?:[a-z]{1,6}-\d{1,8}|#\d{1,8})$/i;
+const CRITERION_STATES = ['unmet', 'met', 'stale', 'failing'];
+const FAILURE_FILE = /^journal\/\d{4}-\d{2}-\d{2}-\d{4}-failure(?:-\d+)?\.md$/;
+const GROUP_LABEL = [['owner', 'Owner'], ['case', 'Case'], ['either', 'Either']];
+
+// A criterion's text on one line, cut. The model can write a proposed one,
+// so line breaks are folded and what is still not a plain line is hidden.
+function criterionText(text) {
+  const flat = oneLine(text, 2000);
+  if (!flat || plainLineProblem(flat)) return HIDDEN_TEXT;
+  return flat.length > CRITERION_TEXT_MAX ? `${flat.slice(0, CRITERION_TEXT_MAX - 1)}…` : flat;
+}
+
+function criterionLine(row) {
+  const id = typeof row.id === 'string' && CRITERION_ID.test(row.id) ? row.id : 'sc-???';
+  const text = criterionText(row.text);
+  if (row.scope !== 'confirmed') return `- ${id} [proposed, not counted] ${text}`;
+  const state = CRITERION_STATES.includes(row.state) ? row.state : 'unmet';
+  let detail = '';
+  if (state === 'met') {
+    const ids = (Array.isArray(row.evidence) ? row.evidence : []).map((e) => e?.id).filter((e) => typeof e === 'string' && EVIDENCE_ID.test(e));
+    if (ids.length) detail = ` (evidence ${ids.join(', ')})`;
+  } else if (state !== 'unmet') {
+    // Reasons are ids and fixed words (verify/status.js): the first one.
+    const reason = Array.isArray(row.reasons) && typeof row.reasons[0] === 'string' ? oneLine(row.reasons[0], REASON_MAX) : '';
+    if (reason && !plainLineProblem(reason)) detail = ` (${reason})`;
+  }
+  return `- ${id} [${state}] ${text}${detail}`;
+}
+
+// "Ready to close: no. Owner: criteria-confirmed (sc-004). Case: …": the
+// open items by whose they are to fix, as item ids and refs only.
+function readyLine(readiness) {
+  if (!isObject(readiness)) return null;
+  const open = (Array.isArray(readiness.items) ? readiness.items : [])
+    .filter((i) => isObject(i) && i.state !== 'ok' && i.state !== 'n/a' && typeof i.id === 'string' && ITEM_ID.test(i.id));
+  if (readiness.ready === true && !open.length) return '- Ready to close: yes.';
+  const named = (item) => {
+    const refs = (Array.isArray(item.refs) ? item.refs : []).filter((r) => typeof r === 'string' && REF.test(r));
+    if (!refs.length) return item.state === 'unknown' ? `${item.id} (not known)` : item.id;
+    const shown = refs.slice(0, ITEM_REFS_MAX);
+    if (refs.length > shown.length) shown.push(`… ${refs.length - shown.length} more`);
+    return `${item.id} (${shown.join(', ')})`;
+  };
+  const groups = GROUP_LABEL
+    .map(([by, label]) => [label, open.filter((i) => (by === 'either' ? i.by !== 'owner' && i.by !== 'case' : i.by === by))])
+    .filter(([, items]) => items.length)
+    .map(([label, items]) => `${label}: ${items.map(named).join(', ')}.`);
+  return `- Ready to close: no.${groups.length ? ` ${groups.join(' ')}` : ''}`;
+}
+
+// Directly after the brief. In the head, which is never trimmed, so it is
+// capped: rows past the cap become one line saying how many.
+function progressSection(progress) {
+  if (!isObject(progress)) return [];
+  const closed = isObject(progress.closed) ? progress.closed : null;
+  const rows = progressRows(progress);
+  const date = closed && /^\d{4}-\d{2}-\d{2}/.test(String(closed.at || '')) ? String(closed.at).slice(0, 10) : null;
+  const heading = closed ? `${PROGRESS_HEADING} — as of ${date || 'its close'}` : PROGRESS_HEADING;
+  if (!rows) return [heading, '- Progress could not be computed; the log says why.', ''];
+  if (!rows.length) return [heading, '- No success criteria yet.', ''];
+  const summary = typeof progress.summary === 'string' && progress.summary.trim() && !plainLineProblem(progress.summary.trim())
+    ? `- ${oneLine(progress.summary, 300)}`
+    : null;
+  const ready = readyLine(closed ? closed.readiness : progress.readiness);
+  const fixed = [heading, summary, ready].filter(Boolean);
+  const moreLine = (n) => `- … ${n} more; Progress status lists them`;
+  const room = PROGRESS_MAX - fixed.join('\n').length - 1;
+  const lines = [];
+  let used = 0;
+  for (let i = 0; i < rows.length; i += 1) {
+    const line = criterionLine(rows[i]);
+    const left = rows.length - i - 1;
+    const reserve = left > 0 ? moreLine(left).length + 1 : 0;
+    if (used + line.length + 1 + reserve > room) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  if (lines.length < rows.length) lines.push(moreLine(rows.length - lines.length));
+  return [heading, ...(summary ? [summary] : []), ...lines, ...(ready ? [ready] : []), ''];
+}
+
+// After the load-bearing unknowns. `abandoned` is the store's records
+// (oldest first), or { records, errors, unavailable }. `lastFailure` names
+// the failure report a case was resumed from (R-C8-10: Fail writes no
+// abandoned record, so the model is told where the report is).
+function abandonedSection(abandoned, lastFailure) {
+  const given = Array.isArray(abandoned) ? { records: abandoned } : (isObject(abandoned) ? abandoned : {});
+  const lines = abandonedLines(Array.isArray(given.records) ? given.records : []);
+  const skipped = Array.isArray(given.errors) ? given.errors.length : 0;
+  if (skipped) lines.push(`- ${skipped} ${skipped === 1 ? 'line' : 'lines'} of the abandoned record could not be read and ${skipped === 1 ? 'is' : 'are'} not shown.`);
+  if (given.unavailable === true) lines.push('- The abandoned approaches could not be read; the log says why.');
+  const file = isObject(lastFailure) && typeof lastFailure.file === 'string' && FAILURE_FILE.test(lastFailure.file) ? lastFailure.file : null;
+  if (file) lines.push(`- The last failure report is ${file}. If the approach it describes is dropped, record it with Progress abandon.`);
+  return lines.length ? [ABANDONED_HEADING, ...lines, ''] : [];
+}
 
 function reorientationSection(triggers = []) {
   const blocking = triggers.filter((t) => t && t.blocking);
@@ -143,7 +285,7 @@ function nextWakeupSection(w) {
 function buildOrientation({
   meta, brief, facts = new Map(), decisions = [], lastJournal = null, ledgerErrors = [], maxChars = DEFAULT_MAX_CHARS,
   triggers = [], hookNotes = [], statusReason = null, failure = null, questions = [], budget: budgetStatus = null, nextWakeup = null,
-  now = new Date(), detours = [], extras = null
+  now = new Date(), detours = [], extras = null, progress = null, abandoned = [], lastFailure = null
 }) {
   const all = [...facts.values()];
   const active = all.filter((f) => f.status === 'active');
@@ -158,11 +300,13 @@ function buildOrientation({
     ...sinceLastTurnSection(hookNotes),
     ...statusSection(meta, statusReason, failure),
     '## Brief',
-    ...briefLines(brief),
+    ...briefLines(brief, progress),
     '',
+    ...progressSection(progress),
     '## Load-bearing unknowns (resolve or work around these before anything else)',
     ...(lbUnknowns.length ? lbUnknowns : ['- none recorded']),
     '',
+    ...abandonedSection(abandoned, lastFailure),
     ...questionsSection(questions, now),
     ...detoursSection(detours),
     ...budgetSection(budgetStatus),
