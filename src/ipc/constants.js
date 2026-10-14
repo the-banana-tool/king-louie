@@ -141,6 +141,16 @@ module.exports = {
   // Models M3: custom roles (spec 2026-09-27 §6.2, §11).
   MODELS_SAVE_CUSTOM_ROLE: 'models:saveCustomRole',
   MODELS_REMOVE_CUSTOM_ROLE: 'models:removeCustomRole',
+  // Local inference stage L1 (spec 2026-10-13 §13.2): local servers. add,
+  // remove, recheck and fromOllama act only for the app's own window, and
+  // never in service mode.
+  MODELS_LOCAL_LIST: 'models:local.list',
+  MODELS_LOCAL_ADD: 'models:local.add',
+  MODELS_LOCAL_REMOVE: 'models:local.remove',
+  MODELS_LOCAL_RECHECK: 'models:local.recheck',
+  MODELS_LOCAL_PROBE: 'models:local.probe',
+  MODELS_LOCAL_SET_MODEL_INFO: 'models:local.setModelInfo',
+  MODELS_LOCAL_FROM_OLLAMA: 'models:local.fromOllama',
 
   SETTINGS_LOAD: 'settings:load',
   SETTINGS_SAVE_TEMPLATE_VARIABLES: 'settings:saveTemplateVariables',

@@ -29,8 +29,10 @@ const CONFIG_FILE = 'service.json';
 // packages load, from where) joined in cases stage 3 (R42). `contact` (cases
 // stage 4, R55): who the owner is, where to reach them and through which relays.
 // `playbooks` (cases stage 6, ruling T14-admin): the playbook source
-// allowlist and same-major auto-update.
-const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'executors', 'contact', 'playbooks'];
+// allowlist and same-major auto-update. `localInference` (local inference
+// stage L1, R-LI-6): which servers count as local, and so which models a
+// private chat may run on.
+const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'executors', 'contact', 'playbooks', 'localInference'];
 const EXECUTOR_KEYS = ['entries', 'packageRoots'];
 const RELAY_DEFAULTS = { phoneListen: { host: '0.0.0.0', port: 8443 }, meshPort: 18795, auditRetentionDays: 365 };
 
@@ -195,6 +197,110 @@ function parsePlaybooksConfig(raw, file) {
   });
   if (raw.autoUpdate !== undefined && typeof raw.autoUpdate !== 'boolean') throw new Error(`Invalid ${file}: playbooks.autoUpdate must be true or false`);
   return { sources: out, autoUpdate: raw.autoUpdate === true };
+}
+
+// Local inference stage L1 (spec 2026-10-13 §5.6, §13.3; R-LI-6, R-LI-29):
+// in service mode a local server exists only because the administrator
+// listed it here. That listing is the mark: a model on such a server may run
+// a private chat, so nothing the service account can write adds one.
+//
+// An IP address written here (in baseUrl or addresses) is checked now, and a
+// public one stops the load. A host name is not resolved here: the service
+// resolves and pins it at start, so loading this file needs no resolver.
+const LOCAL_SERVER_KEYS = ['id', 'name', 'kind', 'baseUrl', 'addresses', 'tlsFingerprint', 'allowCgnat', 'maxConcurrent', 'timeoutMs', 'key', 'adapters'];
+const MAX_LOCAL_SERVERS = 32;
+const LOCAL_KEY_REF = /^\$\{vault:[A-Za-z0-9._-]+\}$/;
+function parseLocalInferenceConfig(raw, file) {
+  if (raw === undefined) return { servers: [] };
+  if (!isPlainObject(raw)) throw new Error(`Invalid ${file}: "localInference" must be an object`);
+  rejectUnknownKeys(raw, ['servers'], 'localInference', file);
+  const list = raw.servers === undefined ? [] : raw.servers;
+  if (!Array.isArray(list) || list.length > MAX_LOCAL_SERVERS) {
+    throw new Error(`Invalid ${file}: localInference.servers must be a list of at most ${MAX_LOCAL_SERVERS} servers`);
+  }
+  const { SERVER_ID_RE, SERVER_KINDS, readEntry } = require('../models/local-servers');
+  const { parseBaseUrl, classifyAddress, canonicalAddress, isTlsFingerprint } = require('../models/local-address');
+  const seen = new Set();
+  const servers = list.map((entry, i) => {
+    const where = `localInference.servers[${i}]`;
+    const bad = (message) => new Error(`Invalid ${file}: ${where}${message}`);
+    if (!isPlainObject(entry)) throw bad(' must be an object');
+    rejectUnknownKeys(entry, LOCAL_SERVER_KEYS, where, file);
+    if (typeof entry.id !== 'string' || !SERVER_ID_RE.test(entry.id)) throw bad('.id must be 2 to 40 lowercase letters, digits and dashes, starting with a letter');
+    if (seen.has(entry.id)) throw bad(`.id "${entry.id}" is used twice`);
+    seen.add(entry.id);
+    if (!SERVER_KINDS.includes(entry.kind)) throw bad(`.kind must be one of ${SERVER_KINDS.join(', ')}`);
+    let url;
+    try {
+      url = parseBaseUrl(entry.baseUrl);
+    } catch (err) {
+      throw bad(`.baseUrl: ${err.message}`);
+    }
+    if (entry.allowCgnat !== undefined && typeof entry.allowCgnat !== 'boolean') throw bad('.allowCgnat must be true or false');
+    const allowCgnat = entry.allowCgnat === true;
+    if (entry.tlsFingerprint !== undefined && entry.tlsFingerprint !== null && !isTlsFingerprint(entry.tlsFingerprint)) {
+      throw bad('.tlsFingerprint must be 64 hex characters (SHA-256)');
+    }
+    if (entry.key !== undefined && entry.key !== null && (typeof entry.key !== 'string' || !LOCAL_KEY_REF.test(entry.key))) {
+      throw bad('.key must be a ${vault:<key>} reference; store the key in the vault');
+    }
+    if (entry.adapters !== undefined && !(Array.isArray(entry.adapters) && entry.adapters.length <= 64 && entry.adapters.every((a) => isPlainObject(a) || (typeof a === 'string' && a)))) {
+      throw bad('.adapters must be a list');
+    }
+    // Every address written in the file is classified now (§5.2).
+    const allowed = (cls) => cls === 'loopback' || cls === 'lan' || (cls === 'cgnat' && allowCgnat);
+    const classify = (address, field) => {
+      let cls;
+      let canonical;
+      try {
+        cls = classifyAddress(address);
+        canonical = canonicalAddress(address);
+      } catch {
+        throw bad(`${field} must hold IP addresses; "${String(address).slice(0, 80)}" is not one`);
+      }
+      if (!allowed(cls)) {
+        throw bad(`${field}: ${canonical} is ${cls === 'cgnat' ? 'in 100.64.0.0/10, which needs allowCgnat: true' : `a ${cls} address`}; a local server must be on this machine or your own network`);
+      }
+      return canonical;
+    };
+    let addresses = null;
+    if (entry.addresses !== undefined && entry.addresses !== null) {
+      if (!Array.isArray(entry.addresses) || entry.addresses.length === 0 || entry.addresses.length > 8) throw bad('.addresses must be a list of 1 to 8 IP addresses');
+      addresses = [...new Set(entry.addresses.map((a) => classify(a, '.addresses')))];
+    }
+    if (url.isIpLiteral) {
+      const written = classify(url.hostname, '.baseUrl');
+      if (addresses && (addresses.length !== 1 || addresses[0] !== written)) {
+        throw bad('.addresses cannot name another address than the one in baseUrl');
+      }
+    }
+    const out = {
+      id: entry.id,
+      name: entry.name === undefined || entry.name === null ? entry.id : entry.name,
+      kind: entry.kind,
+      baseUrl: url.href,
+      addresses,
+      tlsFingerprint: entry.tlsFingerprint ? entry.tlsFingerprint.toLowerCase() : null,
+      allowCgnat,
+      maxConcurrent: entry.maxConcurrent === undefined || entry.maxConcurrent === null ? 2 : entry.maxConcurrent,
+      timeoutMs: entry.timeoutMs === undefined ? null : entry.timeoutMs,
+      key: entry.key || null,
+      adapters: entry.adapters === undefined ? [] : JSON.parse(JSON.stringify(entry.adapters))
+    };
+    // The rest of the shape is the registry's own check, with a stand-in pin
+    // (a real one is made at start).
+    const standIn = url.isIpLiteral ? canonicalAddress(url.hostname) : (addresses ? addresses[0] : '127.0.0.1');
+    const standInClass = classifyAddress(standIn);
+    const { problem } = readEntry({
+      id: out.id, name: out.name, kind: out.kind, baseUrl: out.baseUrl, tlsFingerprint: out.tlsFingerprint, allowCgnat: out.allowCgnat,
+      maxConcurrent: out.maxConcurrent, timeoutMs: out.timeoutMs,
+      pinned: { addresses: [standIn], class: standInClass, at: null },
+      markedLocalAt: 'admin'
+    });
+    if (problem) throw bad(`: ${problem}`);
+    return out;
+  });
+  return { servers };
 }
 
 // Cases stage 4 (R55): who the owner is and where to reach them comes only
@@ -368,8 +474,9 @@ function loadServiceConfig(dataDir, overrides = {}, {
     audit: parseAuditConfig(adminCfg.audit, adminFile),
     executors: validateExecutors(adminCfg.executors, adminFile),
     contact: validateContactConfig(adminCfg.contact, adminFile, { unknownKeyError }),
-    playbooks: parsePlaybooksConfig(adminCfg.playbooks, adminFile)
+    playbooks: parsePlaybooksConfig(adminCfg.playbooks, adminFile),
+    localInference: parseLocalInferenceConfig(adminCfg.localInference, adminFile)
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };
+module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, parseLocalInferenceConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

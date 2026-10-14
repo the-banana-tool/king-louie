@@ -85,7 +85,7 @@ const { KingLouieProfile } = require('../models/king-louie');
 const { roleTimeoutMs } = require('../models/resolver');
 const { runTierMigration } = require('../models/migrate-tiers');
 const { KL_PROVIDERS, LOCAL_PROVIDER } = require('../models/provider-ids');
-const { LocalServers } = require('../models/local-servers');
+const { LocalServers, pinAdminServers } = require('../models/local-servers');
 const { roleForAgent, CORE_ROLES, BUILTIN_ROLES, targetKey, targetLabel } = require('../models/roles');
 const { NO_RETRY } = require('../providers/failover-policy');
 const { classifyError, FailoverReason } = require('../providers/error-classifier');
@@ -171,6 +171,18 @@ function createCore(deps = {}) {
     if (dir) registerSecretDataDir(dir);
   }
   const shutdownTimeoutMs = deps.shutdownTimeoutMs ?? 5000;
+  // Service mode, as the policy sources below read it (see the comment
+  // above the contact host): explicit, or implied by any admin-config dep.
+  const hasDep = (key) => Object.prototype.hasOwnProperty.call(deps, key);
+  const serviceMode = deps.isService === true
+    || hasDep('contactConfig')
+    || hasDep('adminExecutors')
+    || hasDep('playbooksConfig')
+    || deps.remoteApprovals === 'phone';
+  // Local inference stage L1 (R-LI-6): in service mode, or whenever the host
+  // hands over the admin's localInference block, local servers come from
+  // that block alone and nothing in this process may change them.
+  const localServersFromAdmin = serviceMode || hasDep('localInference');
   // 'allow' (default, the Electron app's behaviour): an approval requester
   // attached by a remote origin (a chat channel's Approve button, a gateway
   // client, a child agent of one) may approve unsafe tools. 'deny': every such
@@ -465,9 +477,35 @@ function createCore(deps = {}) {
   const setApiStatus = (status) => store.set('apiStatus', status);
   const getSettings = () => mergeSettings(store.get('settings', DEFAULT_SETTINGS));
   const cacheMbOf = (s) => mergeHistorySettings((s || {}).history).recall.vectorCacheMb;
+  // THE SEAL (local inference stage L1, plan
+  // docs/superpowers/plans/2026-10-13-local-inference-l1.md Task 7; spec
+  // 2026-10-13 §5.6, R-LI-6). settings.models.localServers says which servers
+  // are local, and so which models a private chat may run on. Every settings
+  // save in the app comes through setSettings below, and setSettings keeps
+  // the stored list whatever it was passed: a settings pane, a models save,
+  // a /llm command, an import, a stale read-modify-write and a profile
+  // command can neither add, change nor remove a local server. The one code
+  // that replaces the list is writeLocalServers, which is handed only to the
+  // local server registry (LocalServers#write) and is not on core.context.
+  // What this cannot cover is stated in the spec: Bash can rewrite
+  // chat-data.json itself.
+  const storedLocalServers = () => {
+    const raw = store.get('settings', null);
+    const models = raw && typeof raw === 'object' && raw.models && typeof raw.models === 'object' ? raw.models : null;
+    return models && Object.prototype.hasOwnProperty.call(models, 'localServers') ? models.localServers : undefined;
+  };
+  const withLocalServers = (settings, list) => {
+    const models = { ...(settings.models || {}) };
+    if (list === undefined) delete models.localServers;
+    else models.localServers = list;
+    return { ...settings, models };
+  };
+  const writeLocalServers = (entries) => {
+    store.set('settings', withLocalServers(mergeSettings(store.get('settings', DEFAULT_SETTINGS)), entries));
+  };
   const setSettings = (settings) => {
     const before = cacheMbOf(getSettings());
-    const next = mergeSettings(settings);
+    const next = withLocalServers(mergeSettings(settings), storedLocalServers());
     store.set('settings', next);
     // Recall stage H3: a chat VectorIndex skipped as too large for the old
     // cap stays skipped until clear(), so a new cap starts a fresh cache.
@@ -1048,12 +1086,35 @@ function createCore(deps = {}) {
   // entries the owner added and marked local. Each gets one transport that
   // dials only its pinned address and one provider instance; a server's key,
   // when it wants one, is the provider token `__local_<id>`.
+  // Who may change them (R-LI-6, spec §5.6). Desktop: the registry's own
+  // add, remove, recheck and fromOllama, reached only from the app's window
+  // (src/ipc/models-handlers.js); they write through writeLocalServers, the
+  // one writer the seal above leaves. Service: the administrator's
+  // service.json alone. The entries are pinned in start(), there is no
+  // writer, and the data-dir settings are not read.
+  let adminLocalServers = { entries: [], keys: new Map() };
   const localServers = new LocalServers({
-    getEntries: () => getSettings().models?.localServers || [],
+    getEntries: () => (localServersFromAdmin ? adminLocalServers.entries : (getSettings().models?.localServers || [])),
     getToken: (serverId) => {
+      if (localServersFromAdmin) {
+        // A ${vault:<key>} reference in the admin block.
+        const ref = /^\$\{vault:([A-Za-z0-9._-]+)\}$/.exec(adminLocalServers.keys.get(serverId) || '');
+        return ref ? vault.get(ref[1]) : null;
+      }
       const encrypted = getApiTokens()[`__local_${serverId}`];
       return encrypted ? decryptToken(encrypted) : null;
     },
+    ...(localServersFromAdmin ? {} : { writeEntries: writeLocalServers }),
+    getProfiles: () => profiles,
+    getOllamaBaseUrl: () => getSettings().models?.ollama?.baseUrl,
+    // A removed server's key goes with it: its id may name another machine later.
+    onRemoved: (serverId) => {
+      const tokens = getApiTokens();
+      if (!Object.prototype.hasOwnProperty.call(tokens, `__local_${serverId}`)) return;
+      delete tokens[`__local_${serverId}`];
+      setApiTokens(tokens);
+    },
+    ...(typeof deps.lookup === 'function' ? { lookup: deps.lookup } : {}),
     catalog,
     // What a probe found out about each model (§6.1). Read here, at build,
     // with no request made: a model is probed when it is first used or when
@@ -3138,12 +3199,8 @@ function createCore(deps = {}) {
   // admin config and never from data-dir settings: the contact owner and
   // addresses (C4), the executor registry (C3, R42) and the playbook
   // allowlist and autoUpdate (C6, ruling T14-admin).
-  const hasDep = (key) => Object.prototype.hasOwnProperty.call(deps, key);
-  const serviceMode = deps.isService === true
-    || hasDep('contactConfig')
-    || hasDep('adminExecutors')
-    || hasDep('playbooksConfig')
-    || deps.remoteApprovals === 'phone';
+  // (hasDep and serviceMode are defined near the top of createCore: the
+  // local server registry reads them when it is built.)
 
   // Cases stage 4: contact channels, presence and the ladder
   // (docs/superpowers/specs/2026-09-23-cases-stage4-channels.md §7).
@@ -3182,7 +3239,32 @@ function createCore(deps = {}) {
     }
   }
 
+  // Service mode (spec 2026-10-13 §5.6): the administrator's local servers
+  // are pinned once per start, an address as written and a host name through
+  // one lookup. An entry that fails is left out with one error line, and the
+  // service starts. Only a DNS answer is waited for here, each bounded; no
+  // server is contacted and no model is probed.
+  const pinAdminLocalServers = async () => {
+    if (!localServersFromAdmin) return;
+    const stored = storedLocalServers();
+    if (stored !== undefined && !(Array.isArray(stored) && stored.length === 0)) {
+      log.warn('Ignoring models.localServers in the data-dir settings: in service mode a local server comes only from the localInference block of the admin service.json.');
+    }
+    const block = deps.localInference && typeof deps.localInference === 'object' ? deps.localInference : {};
+    const { entries, keys, failures } = await pinAdminServers(block.servers, {
+      ...(typeof deps.lookup === 'function' ? { lookup: deps.lookup } : {}),
+      ...(Number.isFinite(deps.localPinTimeoutMs) && deps.localPinTimeoutMs > 0 ? { timeoutMs: deps.localPinTimeoutMs } : {})
+    });
+    for (const failure of failures) {
+      const refused = failure.refused.length ? `; not allowed: ${failure.refused.map((r) => `${r.address} (${r.class})`).join(', ')}` : '';
+      log.error(`The local server ${failure.id} from the admin service.json is left out (${failure.code})${refused}.`);
+    }
+    for (const entry of entries) log.info(`Local server ${entry.id} is pinned at ${entry.pinned.addresses.join(', ')} (${entry.pinned.class}).`);
+    adminLocalServers = { entries, keys };
+  };
+
   const start = async () => {
+    await pinAdminLocalServers();
     migrateLegacyBridgeChatOrigins();
     initializeTools();
     await initializeAgentInfrastructure();

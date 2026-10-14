@@ -23,7 +23,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createLogger } = require('../logging');
 const { LOCAL_PROVIDER, isOllamaCloudModelId } = require('./provider-ids');
-const { parseBaseUrl, checkPinned, canonicalAddress, isTlsFingerprint } = require('./local-address');
+const { parseBaseUrl, checkPinned, canonicalAddress, isTlsFingerprint, resolveAndPin } = require('./local-address');
 const { createLocalTransport } = require('./local-transport');
 const { localEntry } = require('./normalize');
 const { discoverModels, probeModel, readRecord, emptyRecord, plainModelId, MAX_CONTEXT } = require('./local-probe');
@@ -151,6 +151,79 @@ function readEntry(raw) {
   return { entry, problem: null };
 }
 
+// What the owner types when adding a server. A pin and a mark are made here,
+// never taken from a caller.
+const ADD_KEYS = Object.freeze(['id', 'name', 'kind', 'baseUrl', 'tlsFingerprint', 'allowCgnat', 'maxConcurrent', 'timeoutMs']);
+const DEFAULT_PIN_TIMEOUT_MS = 5000;
+
+const sameAddresses = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length
+  && [...a].sort().every((value, i) => value === [...b].sort()[i]);
+
+/**
+ * Service mode: turn the administrator's `localInference.servers` into
+ * registry entries, each with its pin (spec §5.6). An address the admin
+ * wrote is the pin; a host name is resolved once, now. An entry whose address
+ * is refused, does not resolve or does not answer in time is left out and
+ * reported; the others are kept. Never throws.
+ *
+ * @returns {Promise<{ entries: object[], keys: Map<string, string>, failures: { id: string, code: string, refused: object[] }[] }>}
+ */
+async function pinAdminServers(servers, { lookup = undefined, timeoutMs = DEFAULT_PIN_TIMEOUT_MS, now = () => new Date() } = {}) {
+  const entries = [];
+  const keys = new Map();
+  const failures = [];
+  const results = await Promise.all((Array.isArray(servers) ? servers : []).map(async (server) => {
+    const id = isPlainObject(server) && typeof server.id === 'string' ? server.id : '(no id)';
+    let timer = null;
+    try {
+      if (!isPlainObject(server)) throw new LocalServerError('LOCAL_SERVER_INVALID', 'This local server entry is not an object.');
+      const allowCgnat = server.allowCgnat === true;
+      const listed = Array.isArray(server.addresses) && server.addresses.length ? server.addresses : null;
+      const pin = resolveAndPin(server.baseUrl, {
+        allowCgnat,
+        now,
+        // The admin's own addresses stand in for the answer; nothing is resolved.
+        ...(listed ? { lookup: async () => listed.map((address) => ({ address })) } : (lookup ? { lookup } : {}))
+      });
+      const pinned = await Promise.race([
+        pin,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new LocalServerError('LOCAL_ADDRESS_UNRESOLVED', `Resolving the address did not finish in ${timeoutMs} ms.`)), timeoutMs);
+        })
+      ]);
+      const candidate = {
+        id: server.id,
+        name: server.name === undefined || server.name === null ? server.id : server.name,
+        kind: server.kind,
+        baseUrl: server.baseUrl,
+        tlsFingerprint: server.tlsFingerprint ?? null,
+        allowCgnat,
+        maxConcurrent: server.maxConcurrent ?? DEFAULT_MAX_CONCURRENT,
+        timeoutMs: server.timeoutMs ?? null,
+        pinned,
+        // The administrator listing the server is the mark (R-LI-6).
+        markedLocalAt: now().toISOString()
+      };
+      const { entry, problem } = readEntry(candidate);
+      if (problem) throw new LocalServerError('LOCAL_SERVER_INVALID', problem);
+      return { entry, key: typeof server.key === 'string' && server.key ? server.key : null };
+    } catch (err) {
+      return { failure: { id, code: typeof err?.code === 'string' ? err.code : 'LOCAL_SERVER_INVALID', refused: Array.isArray(err?.refused) ? err.refused : [] } };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }));
+  for (const result of results) {
+    if (result.failure) failures.push(result.failure);
+    else if (entries.some((e) => e.id === result.entry.id)) failures.push({ id: result.entry.id, code: 'LOCAL_SERVER_EXISTS', refused: [] });
+    else {
+      entries.push(result.entry);
+      if (result.key) keys.set(result.entry.id, result.key);
+    }
+  }
+  return { entries, keys, failures };
+}
+
 const transportSignature = (entry) => JSON.stringify([entry.baseUrl, entry.pinned.addresses, entry.tlsFingerprint, entry.maxConcurrent]);
 
 // Ollama reads "name" and "name:latest" as one model.
@@ -165,12 +238,27 @@ class LocalServers {
    * @param {object|null} [options.catalog] - told which servers exist (so it prices their models at $0) and which models were probed
    * @param {string|null} [options.probeFile] - where probe records are kept; without one they last until restart
    * @param {number} [options.probeTimeoutMs] - per probe request
+   * @param {Function|null} [options.writeEntries] - `(entries) => void`: replaces the stored list. Absent in
+   *   service mode, where the list is the administrator's and every change is refused (R-LI-6).
+   * @param {Function} [options.getProfiles] - `() => Profiles`, for the profile targets that name a server's models
+   * @param {Function} [options.getOllamaBaseUrl] - the built-in Ollama provider's address (`fromOllama`)
+   * @param {Function} [options.onRemoved] - `(serverId) => void`, after a server is removed (its key is cleared)
+   * @param {Function} [options.lookup] - `dns.promises.lookup`, for `add` and `recheck`
    * @param {Function} [options.createTransport]
    * @param {Function} [options.now]
    */
-  constructor({ getEntries, getToken = () => null, catalog = null, probeFile = null, probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS, createTransport = createLocalTransport, now = () => new Date() } = {}) {
+  constructor({
+    getEntries, getToken = () => null, catalog = null, probeFile = null, probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
+    writeEntries = null, getProfiles = null, getOllamaBaseUrl = null, onRemoved = null, lookup = null,
+    createTransport = createLocalTransport, now = () => new Date()
+  } = {}) {
     if (typeof getEntries !== 'function') throw new Error('LocalServers needs getEntries().');
     this.getEntries = getEntries;
+    this._writeEntries = typeof writeEntries === 'function' ? writeEntries : null;
+    this.getProfiles = typeof getProfiles === 'function' ? getProfiles : null;
+    this.getOllamaBaseUrl = typeof getOllamaBaseUrl === 'function' ? getOllamaBaseUrl : null;
+    this.onRemoved = typeof onRemoved === 'function' ? onRemoved : null;
+    this.lookup = typeof lookup === 'function' ? lookup : null;
     this.getToken = typeof getToken === 'function' ? getToken : () => null;
     this.catalog = catalog || null;
     this.probeFile = typeof probeFile === 'string' && probeFile ? probeFile : null;
@@ -708,6 +796,235 @@ class LocalServers {
     return { usable: true, reasons: [], notes, entry };
   }
 
+  // ---- Who may change the list (§5.6, R-LI-6) ----
+
+  /** True when the list is the administrator's (service mode): nothing here changes it. */
+  get adminOnly() {
+    return this._writeEntries === null;
+  }
+
+  _requireWritable() {
+    if (this._closed) throw new LocalServerError('LOCAL_SERVER_UNKNOWN', 'The local server registry is closed.');
+    if (this._writeEntries === null) {
+      throw new LocalServerError('LOCAL_SERVER_ADMIN_ONLY', 'In service mode local servers come only from the administrator\'s service.json.');
+    }
+  }
+
+  /**
+   * The one function that replaces `settings.models.localServers` (the
+   * core's settings save keeps the stored list whatever it is passed). Only
+   * `add`, `remove`, `recheck` and `fromOllama` call it.
+   */
+  write(entries) {
+    this._requireWritable();
+    this._writeEntries(entries.map((entry) => ({ ...entry })));
+    this._memo = null;
+    this._rows();
+  }
+
+  _lookupOption(lookup) {
+    const fn = typeof lookup === 'function' ? lookup : this.lookup;
+    return fn ? { lookup: fn } : {};
+  }
+
+  _dropRecords(id) {
+    const prefix = `${id}/`;
+    let dropped = false;
+    for (const key of [...this._probes.keys()]) {
+      if (!key.startsWith(prefix)) continue;
+      this._probes.delete(key);
+      dropped = true;
+    }
+    if (dropped) {
+      this._saveProbes();
+      this.syncCatalog();
+    }
+  }
+
+  /**
+   * Add a server. This is the owner's mark (R-LI-4, R-LI-5): the address is
+   * resolved once, every answer must be on this machine or the owner's own
+   * network, and what it answered is stored as the pin. Then its models are
+   * listed and probed. A caller's own `pinned` or `markedLocalAt` is refused.
+   *
+   * @returns {Promise<{ server: object, models: object[], probeError: { code: string|null, status: number|null }|null }>}
+   * @throws LOCAL_SERVER_ADMIN_ONLY, LOCAL_SERVER_INVALID, LOCAL_SERVER_EXISTS, LOCAL_URL_INVALID,
+   *   LOCAL_ADDRESS_PUBLIC, LOCAL_ADDRESS_UNRESOLVED; nothing is stored then
+   */
+  async add(input, { lookup = null, refresh = true } = {}) {
+    this._requireWritable();
+    const invalid = (message) => new LocalServerError('LOCAL_SERVER_INVALID', message);
+    if (!isPlainObject(input)) throw invalid('A local server is an object with an id, a kind and an address.');
+    for (const key of Object.keys(input)) {
+      if (!ADD_KEYS.includes(key)) throw invalid(`A local server has no "${shown(key) || 'that'}" setting to give: ${ADD_KEYS.join(', ')}.`);
+    }
+    if (typeof input.id !== 'string' || !SERVER_ID_RE.test(input.id)) throw invalid('A local server id is 2 to 40 lowercase letters, digits and dashes, starting with a letter.');
+    if (!SERVER_KINDS.includes(input.kind)) throw invalid(`A local server needs a kind: ${SERVER_KINDS.join(', ')}.`);
+    if (input.allowCgnat !== undefined && input.allowCgnat !== null && typeof input.allowCgnat !== 'boolean') throw invalid('allowCgnat must be true or false.');
+    const taken = () => this._readEntries().some((e) => isPlainObject(e) && e.id === input.id);
+    if (taken()) throw new LocalServerError('LOCAL_SERVER_EXISTS', `A local server with the id ${input.id} already exists.`);
+
+    const allowCgnat = input.allowCgnat === true;
+    const pinned = await resolveAndPin(input.baseUrl, { allowCgnat, now: this.now, ...this._lookupOption(lookup) });
+    const { entry, problem } = readEntry({
+      id: input.id,
+      name: input.name === undefined || input.name === null ? input.id : input.name,
+      kind: input.kind,
+      baseUrl: input.baseUrl,
+      tlsFingerprint: input.tlsFingerprint ?? null,
+      allowCgnat,
+      maxConcurrent: input.maxConcurrent ?? DEFAULT_MAX_CONCURRENT,
+      timeoutMs: input.timeoutMs ?? null,
+      pinned,
+      markedLocalAt: this.now().toISOString()
+    });
+    if (problem) throw invalid(problem);
+    // The lookup was awaited: the list may have changed meanwhile.
+    this._requireWritable();
+    if (taken()) throw new LocalServerError('LOCAL_SERVER_EXISTS', `A local server with the id ${input.id} already exists.`);
+    // Whatever was once observed under this id was another machine's.
+    this._dropRecords(entry.id);
+    this.write([...this._readEntries(), entry]);
+    log.info(`Added the local server ${entry.id} at ${entry.pinned.addresses.join(', ')} (${entry.pinned.class}).`);
+
+    let probeError = null;
+    if (refresh) {
+      try {
+        await this.refresh(entry.id);
+      } catch (err) {
+        probeError = { code: typeof err?.code === 'string' ? err.code : null, status: Number.isFinite(err?.status) ? err.status : null };
+        log.warn(`The local server ${entry.id} was added, but its models could not be listed (${probeError.code || probeError.status || 'error'}).`);
+      }
+    }
+    return { server: this.get(entry.id), models: this.models(entry.id).models, probeError };
+  }
+
+  /** The profile targets that name one of a server's models. */
+  references(id) {
+    const profiles = this.getProfiles ? this.getProfiles() : null;
+    const out = [];
+    if (!profiles || typeof profiles.list !== 'function') return out;
+    for (const profile of profiles.list()) {
+      for (const [role, targets] of Object.entries(profile.roles || {})) {
+        for (const target of Array.isArray(targets) ? targets : []) {
+          if (target.provider !== LOCAL_PROVIDER) continue;
+          if (splitModel(target.model)?.serverId === id) out.push({ profileId: profile.id, profileName: profile.name, role, model: target.model });
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Remove a server. Refused while a profile target names one of its models
+   * (`LOCAL_SERVER_IN_USE`, with `references`). Its probe records go too.
+   */
+  async remove(id, { references = [] } = {}) {
+    this._requireWritable();
+    const stored = this._readEntries();
+    if (typeof id !== 'string' || !stored.some((e) => isPlainObject(e) && e.id === id)) {
+      throw new LocalServerError('LOCAL_SERVER_UNKNOWN', `No local server "${shown(String(id)) || ''}" is configured.`);
+    }
+    const refs = [...this.references(id), ...(Array.isArray(references) ? references : [])];
+    if (refs.length) {
+      throw new LocalServerError('LOCAL_SERVER_IN_USE', `The local server ${id} is still used by ${refs.length} model${refs.length === 1 ? '' : 's'} in your profiles. Remove them there first.`, { references: refs });
+    }
+    this.write(stored.filter((e) => !(isPlainObject(e) && e.id === id)));
+    this._dropRecords(id);
+    if (this.onRemoved) {
+      try {
+        this.onRemoved(id);
+      } catch (err) {
+        log.warn(`Clearing what belonged to the removed local server ${id} failed: ${err.message}`);
+      }
+    }
+    log.info(`Removed the local server ${id}.`);
+    return { removed: id };
+  }
+
+  /**
+   * Resolve a server's address again and show the old and the new answer.
+   * The pin changes only with `confirm: true` and `expected` holding the
+   * addresses the owner was shown: an answer that changed in between is
+   * refused (`LOCAL_RECHECK_STALE`). An answer that is not allowed is refused
+   * as on `add`, and the pin is kept.
+   * @returns {Promise<{ previous: object|null, resolved: object, changed: boolean, stored: boolean }>}
+   */
+  async recheck(id, { lookup = null, confirm = false, expected = null } = {}) {
+    this._requireWritable();
+    const find = () => this._readEntries().find((e) => isPlainObject(e) && e.id === id) || null;
+    const raw = typeof id === 'string' ? find() : null;
+    if (!raw) throw new LocalServerError('LOCAL_SERVER_UNKNOWN', `No local server "${shown(String(id)) || ''}" is configured.`);
+    const previous = isPlainObject(raw.pinned) ? { addresses: Array.isArray(raw.pinned.addresses) ? [...raw.pinned.addresses] : [], class: raw.pinned.class ?? null, at: raw.pinned.at ?? null } : null;
+    const resolved = await resolveAndPin(raw.baseUrl, { allowCgnat: raw.allowCgnat === true, now: this.now, ...this._lookupOption(lookup) });
+    const changed = !previous || !sameAddresses(previous.addresses, resolved.addresses) || previous.class !== resolved.class;
+    if (confirm !== true) return { previous, resolved, changed, stored: false };
+    if (!sameAddresses(expected, resolved.addresses)) {
+      throw new LocalServerError('LOCAL_RECHECK_STALE', 'The address answered differently from what was shown. Check it again.');
+    }
+    if (!changed) return { previous, resolved, changed, stored: false };
+    this._requireWritable();
+    const current = find();
+    if (!current || JSON.stringify(current.pinned) !== JSON.stringify(raw.pinned) || current.baseUrl !== raw.baseUrl) {
+      throw new LocalServerError('LOCAL_RECHECK_STALE', 'The local server changed while its address was checked. Check it again.');
+    }
+    this.write(this._readEntries().map((e) => (isPlainObject(e) && e.id === id ? { ...e, pinned: resolved } : e)));
+    log.info(`The local server ${id} is now pinned at ${resolved.addresses.join(', ')} (${resolved.class}).`);
+    return { previous, resolved, changed, stored: true };
+  }
+
+  /**
+   * R-LI-31: make a local server from the built-in Ollama provider's
+   * address. The built-in provider, its address setting and its targets stay
+   * as they are; with `rewrite: true` every `ollama/<model>` profile target
+   * becomes `local/<id>/<model>` (a cloud id is left alone).
+   * @returns {Promise<{ added: boolean, server: object, models: object[], probeError: object|null, rewritten: { profileId: string, role: string, from: string, to: string }[] }>}
+   */
+  async fromOllama({ id = 'ollama-local', rewrite = false, lookup = null } = {}) {
+    this._requireWritable();
+    if (typeof id !== 'string' || !SERVER_ID_RE.test(id)) throw new LocalServerError('LOCAL_SERVER_INVALID', 'A local server id is 2 to 40 lowercase letters, digits and dashes, starting with a letter.');
+    const baseUrl = this.getOllamaBaseUrl ? this.getOllamaBaseUrl() : null;
+    const wanted = parseBaseUrl(baseUrl).href;
+    const existing = this._readEntries().find((e) => isPlainObject(e) && e.id === id) || null;
+    let added = false;
+    let probeError = null;
+    if (existing) {
+      let held = null;
+      try { held = parseBaseUrl(existing.baseUrl).href; } catch { /* not this server */ }
+      if (existing.kind !== 'ollama' || held !== wanted) {
+        throw new LocalServerError('LOCAL_SERVER_EXISTS', `Another local server already has the id ${id}.`);
+      }
+    } else {
+      ({ probeError } = await this.add({ id, name: 'Ollama', kind: 'ollama', baseUrl: wanted }, { lookup }));
+      added = true;
+    }
+    const rewritten = [];
+    if (rewrite === true) {
+      this._require(id);
+      const profiles = this.getProfiles ? this.getProfiles() : null;
+      if (!profiles || typeof profiles.list !== 'function' || typeof profiles.update !== 'function') {
+        throw new LocalServerError('LOCAL_SERVER_INVALID', 'Profiles are not available in this host.');
+      }
+      for (const profile of profiles.list()) {
+        const roles = {};
+        const moved = [];
+        for (const [role, targets] of Object.entries(profile.roles || {})) {
+          roles[role] = (Array.isArray(targets) ? targets : []).map((target) => {
+            if (target.provider !== 'ollama' || isOllamaCloudModelId(target.model)) return target;
+            const to = { provider: LOCAL_PROVIDER, model: `${id}/${target.model}`, effort: null };
+            moved.push({ profileId: profile.id, role, from: `ollama/${target.model}`, to: `${LOCAL_PROVIDER}/${to.model}` });
+            return to;
+          });
+        }
+        if (!moved.length) continue;
+        profiles.update(profile.id, { roles });
+        rewritten.push(...moved);
+      }
+      if (rewritten.length) log.info(`Moved ${rewritten.length} profile target${rewritten.length === 1 ? '' : 's'} from the built-in Ollama provider to the local server ${id}.`);
+    }
+    return { added, server: this.get(id), models: this.models(id).models, probeError, rewritten };
+  }
+
   /** Close every transport. The registry lists and dials nothing afterwards. */
   close() {
     if (this._closed) return;
@@ -719,4 +1036,4 @@ class LocalServers {
   }
 }
 
-module.exports = { LocalServers, LocalServerError, SERVER_ID_RE, SERVER_KINDS, LOCAL_PROVIDER, splitModel, readEntry };
+module.exports = { LocalServers, LocalServerError, SERVER_ID_RE, SERVER_KINDS, LOCAL_PROVIDER, splitModel, readEntry, pinAdminServers };

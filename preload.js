@@ -1075,6 +1075,35 @@ contextBridge.exposeInMainWorld(
       removeCustomRole: (id) => {
         validateString(id, 'id', { minLength: 1 });
         return ipcRenderer.invoke('models:removeCustomRole', { id });
+      },
+      // Local inference stage L1: the servers the owner added and marked
+      // local. Every reply is untrustedText: set with textContent.
+      local: {
+        list: () => ipcRenderer.invoke('models:local.list'),
+        add: (payload) => {
+          validateObject(payload, 'payload');
+          return ipcRenderer.invoke('models:local.add', payload);
+        },
+        remove: (id) => {
+          validateString(id, 'id', { minLength: 1 });
+          return ipcRenderer.invoke('models:local.remove', { id });
+        },
+        recheck: (payload) => {
+          validateObject(payload, 'payload');
+          return ipcRenderer.invoke('models:local.recheck', payload);
+        },
+        probe: (payload) => {
+          validateObject(payload, 'payload');
+          return ipcRenderer.invoke('models:local.probe', payload);
+        },
+        setModelInfo: (payload) => {
+          validateObject(payload, 'payload');
+          return ipcRenderer.invoke('models:local.setModelInfo', payload);
+        },
+        fromOllama: (payload = {}) => {
+          validateObject(payload, 'payload');
+          return ipcRenderer.invoke('models:local.fromOllama', payload);
+        }
       }
     },
     cron: {

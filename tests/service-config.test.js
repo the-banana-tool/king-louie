@@ -35,7 +35,8 @@ describe('loadServiceConfig', () => {
       audit: { retentionDays: 365 },
       executors: { entries: {}, packageRoots: [] },
       contact: null,
-      playbooks: { sources: [], autoUpdate: false }
+      playbooks: { sources: [], autoUpdate: false },
+      localInference: { servers: [] }
     });
   });
   it('reads the profile from the admin config and lets CLI overrides win', () => {
