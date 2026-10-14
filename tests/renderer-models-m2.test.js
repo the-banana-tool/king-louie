@@ -98,9 +98,18 @@ describe('renderer: the chat header and Retry with…', () => {
   it('an unusable override error offers the profile\'s main in one click', () => {
     const i = src.indexOf('window.electron.chat.onMessageError(');
     const handler = src.slice(i, src.indexOf('\n}));', i));
-    assert.match(handler, /use-profile-main/);
-    assert.match(handler, /switchMainModel\(null\)/);
-    assert.match(handler, /open-models/);
+    // The message and its button are drawn by fillMessageError (local
+    // inference L1, Task 19), the same way when a stored error row is drawn
+    // again, and the row is stored with its action.
+    assert.match(handler, /fillMessageError\(messageDiv, \{ error, code, action \}\)/);
+    assert.match(handler, /errorAction: kept\.errorAction/);
+    const fill = block('function fillMessageError(');
+    assert.match(src, /MESSAGE_ERROR_ACTIONS = Object\.freeze\(\['use-profile-main', 'open-models'\]\)/);
+    assert.match(fill, /use-profile-main/);
+    assert.match(fill, /switchMainModel\(null\)/);
+    assert.match(fill, /switchSettingsTab\('models'\)/);
+    assert.match(block('function addMessage(sender, text, metadata = {})'), /fillMessageError\(messageContent, \{ error: text\.slice/);
+    assert.match(block('function renderChatMessages()'), /errorAction: message\?\.errorAction/);
   });
 
   it('disables the header selects while a turn is running for this chat (fix round 1)', () => {

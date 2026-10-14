@@ -9,10 +9,11 @@ const { createModelChoices } = require('../src/core/model-choices');
 const { Profiles } = require('../src/models/profiles');
 const { mergeSettings } = require('../src/core/settings');
 const { fixtureCatalog } = require('./helpers/models-fixture');
+const { localEntry } = require('../src/models/normalize');
 
 const t = (provider, model, effort = null) => ({ provider, model, effort });
 
-function setup({ chats = [], unusable = {}, cases = {}, historyUnavailable = false } = {}) {
+function setup({ chats = [], unusable = {}, cases = {}, historyUnavailable = false, localModels = null } = {}) {
   let settings = mergeSettings({
     models: {
       profiles: [
@@ -48,9 +49,11 @@ function setup({ chats = [], unusable = {}, cases = {}, historyUnavailable = fal
     ]
   };
   const facadeCalls = [];
+  const catalog = fixtureCatalog();
+  if (localModels) catalog.setLocalModels('local', localModels.map((id) => localEntry('local', { id, name: id.split('/')[1], context: 8192, toolCall: true })));
   const choices = createModelChoices({
     profiles,
-    catalog: fixtureCatalog(),
+    catalog,
     availability,
     explainTarget,
     snapshotModels,
@@ -268,5 +271,16 @@ describe('profiles', () => {
     const vision = picker.unusable.find((c) => c.model === 'llama-vision-preview');
     assert.deepStrictEqual([vision.usable, vision.reasons], [false, ['No token saved for Groq.']]);
     assert.ok(!picker.unusable.some((c) => c.model === 'gpt-image-1'), 'no image-only models');
+  });
+
+  it('lists a usable model on a local server in the picker and the header, and leaves out one the registry refuses (local inference L1)', () => {
+    const { choices } = setup({ chats: [{ id: 'c1' }], localModels: ['box/test-model', 'box/down-model'], unusable: { 'local/box/down-model': 'Workstation did not answer.' } });
+    const picker = choices.pickerView({ needs: {} });
+    const local = picker.usable.filter((c) => c.provider === 'local');
+    assert.deepStrictEqual(local.map((c) => [c.model, c.name, c.local, c.usable]), [['box/test-model', 'test-model', true, true]]);
+    const down = picker.unusable.find((c) => c.model === 'box/down-model');
+    assert.deepStrictEqual(down.reasons, ['Workstation did not answer.']);
+    const v = choices.chatView('c1');
+    assert.deepStrictEqual(v.choices.filter((c) => c.provider === 'local').map((c) => [c.model, c.inMain]), [['box/test-model', false]]);
   });
 });

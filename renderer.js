@@ -4257,7 +4257,9 @@ function renderChatMessages() {
       seq: message?.seq,
       chatId: activeChat.id,
       question: message?.question,
-      messageId: message?.id
+      messageId: message?.id,
+      errorCode: message?.errorCode,
+      errorAction: message?.errorAction
     });
   });
 
@@ -7897,7 +7899,9 @@ async function openModelPicker(role, block) {
       item.className = 'models-picker-item';
       item.dataset.provider = c.provider;
       item.dataset.model = c.model;
-      item.textContent = `${c.name} (${[c.provider, c.local ? 'local' : formatModelPrice(c.cost), formatContext(c.context)].filter(Boolean).join(' · ')})`;
+      // Local inference L1: a model on a local server names its server.
+      const where = c.provider === 'local' ? `local · ${localServerName(String(c.model || '').split('/')[0], appState.localServerNames)}` : c.provider;
+      item.textContent = `${c.name} (${[where, c.provider === 'local' ? null : (c.local ? 'local' : formatModelPrice(c.cost)), formatContext(c.context)].filter(Boolean).join(' · ')})`;
       item.addEventListener('click', () => {
         profileDraft.roles[role] = [...(profileDraft.roles[role] || []), { provider: c.provider, model: c.model, effort: null, name: c.name, usable: true, reasons: [], cost: c.cost, context: c.context, efforts: [] }];
         renderProfileEditor();
@@ -9758,7 +9762,7 @@ async function sendMessage() {
     // onMessageError may have already displayed this error via IPC event.
     // Only add a fallback message if no error element was rendered yet.
     const alreadyShown = dom.chatMessages.querySelector('.message.assistant:last-child .message-content p');
-    if (!alreadyShown || !alreadyShown.textContent.startsWith('Error:')) {
+    if (!alreadyShown || !(alreadyShown.textContent.startsWith('Error:') || Object.values(PRIVATE_REFUSAL_SENTENCES).some((t) => alreadyShown.textContent.startsWith(t)))) {
       addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
     }
     refreshUI();
@@ -9887,7 +9891,7 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
       appState.chats = data.chats || [];
     } catch { /* best-effort reload */ }
     const alreadyShown = dom.chatMessages.querySelector('.message.assistant:last-child .message-content p');
-    if (!alreadyShown || !alreadyShown.textContent.startsWith('Error:')) {
+    if (!alreadyShown || !(alreadyShown.textContent.startsWith('Error:') || Object.values(PRIVATE_REFUSAL_SENTENCES).some((t) => alreadyShown.textContent.startsWith(t)))) {
       addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
     }
     refreshUI();
@@ -10150,7 +10154,10 @@ function addMessage(sender, text, metadata = {}) {
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
 
-  if (sender === 'assistant') {
+  if (sender === 'assistant' && metadata?.errorAction && typeof text === 'string' && text.startsWith('Error: ')) {
+    // A stored error row with its button (see fillMessageError).
+    fillMessageError(messageContent, { error: text.slice('Error: '.length), code: metadata.errorCode, action: metadata.errorAction });
+  } else if (sender === 'assistant') {
     renderAssistantMessageContent(messageContent, text, metadata?.format || 'markdown');
   } else {
     const messagePara = document.createElement('p');
@@ -12848,6 +12855,42 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
   }
 }));
 
+// A failed turn's message (spec 2026-09-27 §15; local inference L1 §15): a
+// refusal under the private mark says why first, and an action gets its
+// button (the profile's main, or Settings → Models). Drawn the same way when
+// the error arrives and when a stored error row is drawn again, so a redraw
+// keeps the sentence and the button.
+const MESSAGE_ERROR_ACTIONS = Object.freeze(['use-profile-main', 'open-models']);
+function messageErrorExtras({ code, action } = {}) {
+  const kind = action && typeof action === 'object' ? action.kind : action;
+  return {
+    errorCode: typeof code === 'string' && privateRefusalSentence(code) ? code : null,
+    errorAction: typeof kind === 'string' && MESSAGE_ERROR_ACTIONS.includes(kind) ? kind : null
+  };
+}
+function fillMessageError(messageDiv, { error, code, action }) {
+  const { errorCode, errorAction } = messageErrorExtras({ code, action });
+  const p = document.createElement('p');
+  const refusal = privateRefusalSentence(errorCode);
+  p.textContent = refusal ? `${refusal} ${error}` : `Error: ${error}`;
+  messageDiv.textContent = '';
+  messageDiv.appendChild(p);
+  if (!errorAction) return;
+  const fix = document.createElement('button');
+  fix.type = 'button';
+  fix.className = 'btn btn-sm message-error-action';
+  fix.textContent = errorAction === 'use-profile-main' ? 'Use the profile\'s main' : 'Open Models';
+  fix.addEventListener('click', async () => {
+    if (errorAction === 'use-profile-main') {
+      if (await switchMainModel(null)) fix.disabled = true;
+    } else {
+      openSettingsDrawer();
+      switchSettingsTab('models');
+    }
+  });
+  messageDiv.appendChild(fix);
+}
+
 unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error, action, code }) => {
   appState.streamBuffers.delete(responseId);
   streamTextOffsets.delete(responseId);
@@ -12873,35 +12916,14 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
     dom.chatMessages.appendChild(newWrapper);
   }
 
-  const p = document.createElement('p');
-  // Local inference L1: a turn refused under the private mark says why first.
-  const refusal = privateRefusalSentence(code);
-  p.textContent = refusal ? `${refusal} ${error}` : `Error: ${error}`;
-  messageDiv.textContent = '';
-  messageDiv.appendChild(p);
-
-  // An unusable main override offers the profile's main in one click; no
-  // usable main at all offers the Models tab (spec 2026-09-27 §15).
-  if (action && (action.kind === 'use-profile-main' || action.kind === 'open-models')) {
-    const fix = document.createElement('button');
-    fix.type = 'button';
-    fix.className = 'btn btn-sm message-error-action';
-    fix.textContent = action.kind === 'use-profile-main' ? 'Use the profile\'s main' : 'Open Models';
-    fix.addEventListener('click', async () => {
-      if (action.kind === 'use-profile-main') {
-        if (await switchMainModel(null)) fix.disabled = true;
-      } else {
-        openSettingsDrawer();
-        switchSettingsTab('models');
-      }
-    });
-    messageDiv.appendChild(fix);
-  }
+  fillMessageError(messageDiv, { error, code, action });
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 
-  // Persist the error so refreshUI / renderChatMessages doesn't wipe it
+  // Persist the error so refreshUI / renderChatMessages doesn't wipe it,
+  // with its code and its button, so a redraw shows them again.
   const errorText = `Error: ${error}`;
-  window.electron.chat.addMessage({ chatId, sender: 'assistant', text: errorText })
+  const kept = messageErrorExtras({ code, action });
+  window.electron.chat.addMessage({ chatId, sender: 'assistant', text: errorText, ...(kept.errorCode ? { errorCode: kept.errorCode } : {}), ...(kept.errorAction ? { errorAction: kept.errorAction } : {}) })
     .catch((err) => chatLog.warn(`error message persistence failed: ${err.message}`));
 }));
 

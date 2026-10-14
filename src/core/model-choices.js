@@ -62,6 +62,13 @@ function createModelChoices({
   };
   // A case chat and an agent-mode chat call tools; so must their main.
   const needsFor = (chat) => (chat.caseId || chat.agentMode ? { toolCall: true } : {});
+  // Models on the owner's local servers (local inference L1, R-LI-7: placed
+  // by hand). Availability lists the fourteen providers only; a probed local
+  // model is in the catalog under provider `local`, and the registry's
+  // verdict (through explainTarget) says whether it can take the role.
+  const usableLocal = (needs) => (catalog ? catalog.list('local') : [])
+    .filter((e) => Array.isArray(e.output) && e.output.includes('text') && explainTarget(e.provider, e.id, { needs }).usable)
+    .map((e) => ({ provider: e.provider, model: e.id, name: e.name || e.id, priced: true, cost: e.cost ? { input: e.cost.input, output: e.cost.output } : null, context: e.limits?.context ?? null, local: true }));
 
   // The main model actually in use: the first usable target, else the first
   // configured one so there is still something to name (spec §6.5). Shared
@@ -85,7 +92,7 @@ function createModelChoices({
       // The profile's own effort travels with its main entries, so picking
       // one sets an override that keeps it (final review m4).
       .map((x) => ({ provider: x.provider, model: x.model, effort: x.effort || null, name: nameOf(x), inMain: true }));
-    const others = (availability && typeof availability.usable === 'function' ? availability.usable({ needs: { textOutput: true, ...needs } }) : [])
+    const others = [...(availability && typeof availability.usable === 'function' ? availability.usable({ needs: { textOutput: true, ...needs } }) : []), ...usableLocal(needs)]
       .filter((c) => !mainKeys.has(targetKey(c)))
       .map((c) => ({ provider: c.provider, model: c.model, name: c.name || c.model, inMain: false }));
     return {
@@ -209,6 +216,7 @@ function createModelChoices({
   function pickerView({ needs = {} } = {}) {
     const usable = (availability && typeof availability.usable === 'function' ? availability.usable({ needs: { textOutput: true, ...needs } }) : [])
       .map((c) => ({ provider: c.provider, model: c.model, name: c.name || c.model, usable: true, reasons: [], priced: Boolean(c.priced), cost: c.cost ? { input: c.cost.input, output: c.cost.output } : null, context: c.context ?? null, local: Boolean(c.local) }));
+    for (const c of usableLocal(needs)) usable.push({ ...c, usable: true, reasons: [] });
     const seen = new Set(usable.map(targetKey));
     const unusable = [];
     for (const entry of catalog ? catalog.list() : []) {
