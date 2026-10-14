@@ -540,11 +540,29 @@ R-LI-*, Q-L1-*). Electron-free except `src/ipc/`.
 - **A new model call goes through the router or takes the policy, and
   `tests/egress-inventory.test.js` lists the file** (with a label, in
   `tests/fixtures/egress-inventory.json`): a new caller of `fetch`, a
-  socket, a provider or an embedder under `src/` fails it until someone
-  labels it.
+  socket, a provider, an embedder, a provider class's `this.request(`, or
+  a call by name on a provider (`.sendMessage(`, `.sendMessageWithTools(`,
+  `.streamMessage(`, `.streamMessageWithTools(`, `.rerank(`,
+  `provider.ask(`) under `src/` fails it until someone labels it. A
+  `gated` entry names `check`, the exact code of its policy check, which
+  must be in the file's code (comments do not count); a `behind-gate` one
+  names its `gate` file and that file's `check`. A file whose sends differ
+  (`create-core.js`) is listed by `sites`, one label per construction, and
+  every line of it that can send must match a site. A provider method
+  reached another way (a variable, `oneShot`, a computed name) is out of
+  the walk's scope (the test's header).
+- A user skill's `llmProvider` (`src/skills/skill-models.js`) is held to
+  the calling chat's policy on every call: the caller rides an
+  AsyncLocalStorage set by `SkillRegistry#executeCommand`, a skill's
+  `handleMessage` and `ToolExecutor` (with the run's own policy). Under a
+  policy it is the router's local-only provider (or null, or
+  `PRIVATE_NO_LOCAL_MODEL`); a Telegram or Discord caller has none; a call
+  with no known caller is held to one while any chat is private
+  (`HistoryStore#hasPrivateChats`).
 - The private mark is one way. It is written only by
   `HistoryStore#markPrivate` (the chat's column; marking deletes the
-  chat's vectors under every key but `local:`, in the same transaction)
+  chat's vectors under every key but `local:`, in the same transaction,
+  and moves `vectorEpoch` so a hosted batch in flight is not written)
   and `CaseRuntime.markPrivate` (`case.yaml` `private: true`; every chat of
   the case follows, R-LI-23). The owner's paths: `chat:markPrivate` and
   `case:markPrivate` (`src/ipc/private-mark.js`: the facts first, the mark
@@ -554,14 +572,24 @@ R-LI-*, Q-L1-*). Electron-free except `src/ipc/`.
   way for a generic save too (`LOCAL_ONLY_ONE_WAY_HERE`); only
   `models:local.unsetLocalOnly`, from the window, takes one off.
 - A private chat is in no non-private chat's recall scope (R-LI-11,
-  `private-chat`). A private case's text never reaches another case's
+  `private-chat`). A private chat's `create_case` makes a private case, and
+  `answer_question`, `revoke_envelope` and `cancel_case_job` refuse a
+  private case `private_case` wherever its text is hidden (MCP, a
+  non-private chat), before its question, envelope or job is read. A case
+  whose `case.yaml` lost its `private` key is still private while any of
+  its chats carries the store's mark (`caseChatsPrivate`), and a private
+  case's routed provider is under the case's policy even when the turn's
+  models carry none. Marking a case says its questions still go out over
+  the contact ladder (`questionsLeave`). A private case's text never reaches another case's
   search, the MCP surfaces or a non-private chat's management tools (id,
   title, status and `private: true` only); its approval card says the send
   leaves. A private case's detour goes only to a private case: routed to
   one that is not, it is refused `PRIVATE_CASE_REQUIRED` and asked again,
   and "new" makes a private case (Q-L1-6). In a private chat `Cron`,
   `SessionsSpawn`, remote dispatch and workflows are refused
-  (`PRIVATE_NO_DETACHED_RUN`), so are `delegate` and the acting fleet tools
+  (`PRIVATE_NO_DETACHED_RUN`; a plan payload's `chatId` and
+  `options.chatId` are both checked, and chat messages that name no chat
+  are refused while any chat is private), so are `delegate` and the acting fleet tools
   (`PRIVATE_NO_DELEGATE`) and image generation (R-LI-33); read-aloud uses
   the system voice. Every other tool behaves as now (R-LI-9).
 - Embeddings (R-LI-25): a private chat's chunks get only `local:` vectors,
@@ -576,8 +604,13 @@ R-LI-*, Q-L1-*). Electron-free except `src/ipc/`.
   records `localTokens`.
 - Timeouts (Q-L1-3, Q-L1-5): a local call is bounded by the role timeout,
   or the entry's `timeoutMs` when that is larger, **only until its first
-  output** (the first streamed token, or the first byte of a non-streamed
-  reply body); after that nothing cuts the reply, and Stop still stops. It
+  output**; after that nothing cuts the reply, and Stop still stops. A
+  local call streams whenever its caller does, agent mode included
+  (`LocalServerProvider#streamMessageWithTools`, OpenAI-style tool-call
+  deltas at `/v1/chat/completions` for every kind): first output is a text
+  delta, a reasoning delta (`reasoning_content`, `reasoning`, `thinking`;
+  never the reply's text) or a tool-call delta, never a role-only chunk.
+  A non-streamed call's first output is the first byte of its body. It
   fails `LOCAL_TIMEOUT`, with no retry, and the route moves to the next
   target (under a policy only a local one). Hosted calls have no such
   timeout. A refused connection or a name that does not resolve is
@@ -593,7 +626,7 @@ R-LI-*, Q-L1-*). Electron-free except `src/ipc/`.
   `LOCAL_RECHECK_STALE` (a confirm whose `expected` addresses are not what
   the name answers now), `LOCAL_SERVER_UNKNOWN`, `LOCAL_SERVER_UNUSABLE`,
   `LOCAL_SERVER_INVALID`, `LOCAL_SERVER_EXISTS`, `LOCAL_SERVER_IN_USE`
-  (removing a server a profile names), `LOCAL_CLOUD_MODEL` (an Ollama cloud
+  (removing a server a profile names), `LOCAL_CLOUD_MODEL` (an id ending `-cloud`/`:cloud`: on an Ollama server always, on any kind never guarantee grade and refused under a policy; an Ollama cloud
   id on a local server), `LOCAL_MODEL_NOT_LISTED`, `LOCAL_MODEL_UNFIT`,
   `LOCAL_MODEL_INFO_INVALID`, `LOCAL_TRANSPORT_REQUIRED`;
   `PRIVATE_CHAT_BUSY` (marking while a turn runs), `PRIVATE_BRIDGE_CHAT` (a
@@ -615,7 +648,14 @@ R-LI-*, Q-L1-*). Electron-free except `src/ipc/`.
   alive around every await a timeout should end.
   `tests/e2e/local-private.test.js` drives the UI end to end. Residuals
   (R-LI-21): a server that sends text on cannot be detected; which machine
-  holds a LAN address is not proved; `Bash` can rewrite `chat-data.json`.
+  holds a LAN address is not proved; `Bash` can rewrite `chat-data.json`; a Markdown export's "This chat was
+  private in King Louie." line is not read back by the Markdown importer
+  (only a King Louie JSON export's `"private": true` imports as private);
+  a server that answers a streamed request with one JSON body, or sends a
+  tool call only when it is done (older Ollama), is bounded until that
+  first output, so a long generation there can still time out; a user
+  skill's model call outside any chat turn or command (its own timer) is
+  held to a policy whenever any chat is private.
 
 ## LongHaul (session memory benchmark)
 
