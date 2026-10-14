@@ -1346,7 +1346,7 @@ function showNotice(text) {
  * Show a confirm dialog using in-app modal (replaces confirm()).
  * Returns a promise that resolves to true (confirm) or false (cancel).
  */
-function showConfirmDialog(message) {
+function showConfirmDialog(message, { before = [] } = {}) {
   return new Promise((resolve) => {
     const modal = document.createElement('div');
     modal.className = 'rename-chat-modal';
@@ -1388,6 +1388,17 @@ function showConfirmDialog(message) {
     actions.appendChild(cancelBtn);
     actions.appendChild(confirmBtn);
     card.appendChild(heading);
+    // Lines shown above the question (plain text, one per line).
+    if (Array.isArray(before) && before.length) {
+      const lines = document.createElement('div');
+      lines.className = 'confirm-dialog-before';
+      before.forEach((text) => {
+        const line = document.createElement('div');
+        line.textContent = String(text);
+        lines.appendChild(line);
+      });
+      card.appendChild(lines);
+    }
     card.appendChild(body);
     card.appendChild(actions);
     modal.appendChild(card);
@@ -1926,6 +1937,15 @@ async function renderChatCaseSection(chat, container) {
   container.appendChild(unattended);
   if (chat.caseId && !caseMissing) {
     renderCaseUnattendedSection(chat, unattended).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
+  }
+
+  // Cases stage 8: the case's progress, computed from its record.
+  const progress = document.createElement('div');
+  progress.id = 'case-progress-section';
+  progress.className = 'case-progress-section';
+  container.appendChild(progress);
+  if (chat.caseId && !caseMissing) {
+    renderCaseProgressSection(chat, progress).catch((err) => chatLog.warn(`Progress panel failed: ${err.message}`));
   }
 
   // Cases stage 5: related cases. A detour's routing question is a card in
@@ -2572,9 +2592,18 @@ function fillChatQuestionCard(card, q, error) {
     // Spoken: the owner answers in words, under the card, and the next turn
     // relays it. The options are shown, not pressed.
     (q.options || []).forEach((o, i) => line('chat-question-option', `${i + 1}. ${o.label}`));
-    line('chat-question-hint', 'Reply below.');
+    // Cases stage 8: a scope question also shows the proposed rows as they
+    // are now, each with its own buttons.
+    const scopeLive = caseProgressCardLive(q, 'scope');
+    if (scopeLive) card.appendChild(scopeLive);
+    line('chat-question-hint', scopeLive ? 'Reply below, or use the buttons.' : 'Reply below.');
     return;
   }
+
+  // Cases stage 8: a proposal to close shows the list as it is now, above
+  // its two buttons. "Mark done" is never disabled for an open item.
+  const closeLive = caseProgressCardLive(q, 'close');
+  if (closeLive) card.appendChild(closeLive);
 
   const actions = document.createElement('div');
   actions.className = 'case-question-actions';
@@ -2774,7 +2803,10 @@ async function renderCaseUnattendedSection(chat, container, { pendingMessage = n
       const b = caseButton(action.label);
       b.id = `case-status-${action.status}`;
       b.addEventListener('click', async () => {
-        if (action.confirm && !(await showConfirmDialog(action.confirm))) return;
+        // Cases stage 8: the Done confirm shows the summary and what is
+        // still open first. It is never refused for an open item.
+        const before = action.status === 'done' ? await caseProgressCloseLines(chat.caseId) : [];
+        if (action.confirm && !(await showConfirmDialog(action.confirm, { before }))) return;
         const r = await window.electron.cases.setStatus({ caseId: chat.caseId, status: action.status });
         if (!r?.ok) { showError(r?.error || 'Could not change the status.'); return; }
         refresh();
@@ -2804,6 +2836,421 @@ if (window.electron?.cases?.onChanged) {
     if (relatedSlot) renderCaseRelatedSection(chat, relatedSlot).catch((err) => chatLog.warn(`Related cases failed: ${err.message}`));
   });
 }
+
+/* --- Cases stage 8: progress (docs/superpowers/specs/2026-10-13-cases-stage8-verified-progress.md §8.3).
+   The case panel's Progress block, and the live part of the scope and close
+   cards. Everything here comes from case:progress, whose reply carries
+   untrustedText: true: a criterion, the objective, an abandoned approach, a
+   fix line and a verify note are set with textContent, never parsed. Only
+   the owner's press confirms or drops: each button sends the hash its row
+   was drawn with, and the main process decides who confirmed. --- */
+
+const CASE_PROGRESS_STATES = ['met', 'stale', 'failing', 'unmet'];
+// R-C8-5: where an evidence id comes from, in words.
+const CASE_PROGRESS_PROVENANCE = { user: 'from the owner', sourced: 'sourced', 'external-agent': 'reported by an executor' };
+const CASE_PROGRESS_ORIGIN_NOTES = { legacy: 'from before progress was tracked', file: 'changed outside the app' };
+const CASE_PROGRESS_GROUPS = [['owner', 'Yours'], ['case', 'The case\'s'], ['either', 'Yours or the case\'s']];
+const CASE_PROGRESS_STALE = 'This changed; check it again.';
+const CASE_PROGRESS_REDRAW = ['progress', 'questions', 'status'];
+
+function caseProgressEl(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined && text !== null) el.textContent = String(text);
+  return el;
+}
+
+const caseProgressClosed = (p) => p.caseStatus === 'done' || p.caseStatus === 'abandoned';
+const caseProgressOpenItems = (p) => (Array.isArray(p.readiness?.items) ? p.readiness.items : [])
+  .filter((item) => item && item.state !== 'ok' && item.state !== 'n/a');
+
+async function caseProgressRead(caseId) {
+  try {
+    const p = await window.electron.cases.progress({ caseId });
+    return p?.ok ? p : { ok: false, error: p?.error || 'The progress could not be read.' };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// A state tag is text, not colour alone. A confirmed row whose state is not
+// one of the four reads unmet, never met.
+function caseProgressStateTag(row) {
+  const state = row.scope === 'confirmed' ? (CASE_PROGRESS_STATES.includes(row.state) ? row.state : 'unmet') : 'proposed';
+  const tag = caseProgressEl('span', `case-progress-tag case-progress-tag-${state}`);
+  tag.textContent = state;
+  return tag;
+}
+
+function caseProgressProvenance(e) {
+  if (Object.prototype.hasOwnProperty.call(CASE_PROGRESS_PROVENANCE, e.provenance)) return CASE_PROGRESS_PROVENANCE[e.provenance];
+  return String(e.id).startsWith('chk-') ? 'a check run' : 'source not known';
+}
+
+// One line per evidence id, each with its provenance.
+function caseProgressEvidenceList(evidence) {
+  const list = caseProgressEl('div', 'case-progress-evidence');
+  (Array.isArray(evidence) ? evidence : []).forEach((e) => {
+    const item = caseProgressEl('div', `case-progress-evidence-item${e.holds ? '' : ' is-not-holding'}`);
+    item.textContent = `${e.id} (${caseProgressProvenance(e)}${e.holds ? '' : '; it no longer holds'})`;
+    list.appendChild(item);
+  });
+  return list;
+}
+
+function caseProgressOriginNote(origin) {
+  return Object.prototype.hasOwnProperty.call(CASE_PROGRESS_ORIGIN_NOTES, origin) ? CASE_PROGRESS_ORIGIN_NOTES[origin] : null;
+}
+
+// The row of one criterion: id, state tag, the text; then for a confirmed
+// row its evidence and, when stale or failing, the first reason.
+function caseProgressRow(row) {
+  const el = caseProgressEl('div', `case-progress-row case-progress-row-${row.scope === 'confirmed' ? 'confirmed' : 'proposed'}`);
+  el.dataset.criterionId = row.id;
+  const head = caseProgressEl('div', 'case-progress-row-head');
+  head.append(caseProgressEl('span', 'case-progress-id', row.id), caseProgressStateTag(row), caseProgressEl('span', 'case-progress-text', row.text));
+  el.appendChild(head);
+  const origin = row.scope === 'confirmed' ? null : caseProgressOriginNote(row.origin);
+  if (origin) el.appendChild(caseProgressEl('div', 'case-progress-note', origin));
+  if (row.scope === 'confirmed') {
+    if (Array.isArray(row.evidence) && row.evidence.length) el.appendChild(caseProgressEvidenceList(row.evidence));
+    if ((row.state === 'stale' || row.state === 'failing') && Array.isArray(row.reasons) && row.reasons.length) {
+      el.appendChild(caseProgressEl('div', 'case-progress-reason', row.reasons[0]));
+    }
+  }
+  return el;
+}
+
+// The ready-to-close list: each open item's fix line, grouped by whose it is.
+function caseProgressReadiness(p) {
+  const wrap = caseProgressEl('div', 'case-progress-readiness');
+  const open = caseProgressOpenItems(p);
+  if (!p.readiness) {
+    wrap.appendChild(caseProgressEl('div', 'case-progress-note', 'The ready-to-close list could not be read.'));
+    return wrap;
+  }
+  const heading = p.frozen
+    ? (open.length ? 'Still open when it closed' : 'Nothing was open when it closed')
+    : (open.length ? 'Before this case is ready to close' : 'Ready to close');
+  wrap.appendChild(caseProgressEl('div', 'case-progress-subhead', heading));
+  CASE_PROGRESS_GROUPS.forEach(([by, label]) => {
+    const items = open.filter((item) => (by === 'either' ? item.by !== 'owner' && item.by !== 'case' : item.by === by));
+    if (!items.length) return;
+    const group = caseProgressEl('div', 'case-progress-group');
+    group.dataset.by = by;
+    group.appendChild(caseProgressEl('div', 'case-progress-group-head', label));
+    const list = caseProgressEl('ul', 'case-progress-items');
+    items.forEach((item) => {
+      const li = caseProgressEl('li', 'case-progress-item', item.fix || `${item.id} is open.`);
+      if (item.note) li.appendChild(caseProgressEl('div', 'case-progress-note', item.note));
+      list.appendChild(li);
+    });
+    group.appendChild(list);
+    wrap.appendChild(group);
+  });
+  return wrap;
+}
+
+// The abandoned approaches, collapsed under a count.
+function caseProgressAbandoned(p) {
+  const records = Array.isArray(p.abandoned?.records) ? p.abandoned.records : [];
+  if (!records.length) return null;
+  const details = caseProgressEl('details', 'case-progress-abandoned');
+  details.appendChild(caseProgressEl('summary', null, `${records.length} abandoned ${records.length === 1 ? 'approach' : 'approaches'}`));
+  records.forEach((a) => {
+    const item = caseProgressEl('div', 'case-progress-abandoned-item');
+    item.appendChild(caseProgressEl('div', 'case-progress-abandoned-approach', `${a.id}: ${a.approach}`));
+    item.appendChild(caseProgressEl('div', 'case-progress-note', `Why: ${a.why}`));
+    (Array.isArray(a.tried) ? a.tried : []).forEach((line) => item.appendChild(caseProgressEl('div', 'case-progress-note', `Tried: ${line}`)));
+    details.appendChild(item);
+  });
+  return details;
+}
+
+// One scope call at a time per case: a second click while one is in flight
+// is ignored. → null, or what to say under the block.
+const caseProgressInFlight = new Set();
+async function caseProgressScopeCall(caseId, fields) {
+  if (caseProgressInFlight.has(caseId)) return { ignored: true };
+  caseProgressInFlight.add(caseId);
+  try {
+    const r = await window.electron.cases.confirmScope({ caseId, ...fields });
+    if (r?.ok) return { message: null };
+    // The words changed, or the row is gone: either way what was pressed is
+    // not what is there now.
+    const stale = r?.code === 'SCOPE_STALE' || r?.code === 'CRITERION_NOT_FOUND';
+    return { message: stale ? CASE_PROGRESS_STALE : (r?.error || 'The scope was not changed.') };
+  } catch (err) {
+    return { message: err.message };
+  } finally {
+    caseProgressInFlight.delete(caseId);
+  }
+}
+
+// Confirm and Drop for one proposed row, each with the hash the row was
+// drawn with.
+function caseProgressRowButtons(row, act) {
+  const actions = caseProgressEl('div', 'case-progress-actions');
+  const confirm = caseButton('Confirm', 'secondary-button case-progress-confirm');
+  confirm.addEventListener('click', () => act({ action: 'confirm', target: row.id, hash: row.hash }));
+  const drop = caseButton('Drop', 'secondary-button case-progress-drop');
+  drop.addEventListener('click', () => act({ action: 'drop', target: row.id, hash: row.hash }));
+  actions.append(confirm, drop);
+  return actions;
+}
+
+// The case's progress in Chat Info. `message` is what the action that just
+// finished has to say (a refusal), shown in this render.
+async function renderCaseProgressSection(chat, container, { message = null } = {}) {
+  if (!container) return;
+  if (!chat?.caseId || !window.electron?.cases?.progress) {
+    container.innerHTML = '';
+    return;
+  }
+  const caseId = chat.caseId;
+  const p = await caseProgressRead(caseId);
+  container.innerHTML = '';
+  container.appendChild(caseProgressEl('div', 'case-progress-head', 'Progress'));
+  const error = caseProgressEl('div', 'chat-case-error case-progress-error');
+  error.id = 'case-progress-error';
+  if (!p.ok) {
+    error.textContent = p.error;
+    container.appendChild(error);
+    return;
+  }
+  const closed = caseProgressClosed(p);
+  if (closed && !p.frozen) {
+    container.appendChild(caseProgressEl('div', 'case-progress-note', 'Closed before progress was tracked.'));
+    return;
+  }
+  const act = async (fields) => {
+    const out = await caseProgressScopeCall(caseId, fields);
+    if (out.ignored) return;
+    await renderCaseProgressSection(chat, container, { message: out.message });
+  };
+  const editable = !closed;
+
+  const summary = caseProgressEl('div', 'case-progress-summary', p.summary || '');
+  summary.id = 'case-progress-summary';
+  container.appendChild(summary);
+  if (p.frozen) container.appendChild(caseProgressEl('div', 'case-progress-note', `As of ${p.at ? formatTimestamp(p.at) : 'its close'}.`));
+  if (p.warning) container.appendChild(caseProgressEl('div', 'case-progress-note', p.warning));
+
+  if (!p.frozen) {
+    const o = p.objective;
+    const objective = caseProgressEl('div', 'case-progress-objective');
+    objective.id = 'case-progress-objective';
+    const head = caseProgressEl('div', 'case-progress-row-head');
+    head.append(caseProgressEl('span', 'case-progress-id', 'Objective'));
+    if (o) {
+      const tag = caseProgressEl('span', `case-progress-tag case-progress-tag-${o.state === 'confirmed' ? 'confirmed' : 'proposed'}`);
+      tag.textContent = o.state === 'confirmed' ? 'confirmed' : 'proposed';
+      head.append(tag, caseProgressEl('span', 'case-progress-text', o.text));
+    } else {
+      head.append(caseProgressEl('span', 'case-progress-text case-progress-missing', 'None yet.'));
+    }
+    objective.appendChild(head);
+    const origin = o && o.state !== 'confirmed' ? caseProgressOriginNote(o.origin) : null;
+    if (origin) objective.appendChild(caseProgressEl('div', 'case-progress-note', origin));
+    if (editable) {
+      const actions = caseProgressEl('div', 'case-progress-actions');
+      if (o && o.state !== 'confirmed') {
+        const confirm = caseButton('Confirm', 'secondary-button case-progress-confirm');
+        confirm.id = 'case-objective-confirm';
+        confirm.addEventListener('click', () => act({ action: 'confirm', target: 'objective', hash: o.hash }));
+        actions.appendChild(confirm);
+      }
+      const edit = caseButton(o ? 'Edit' : 'Set', 'secondary-button case-progress-edit');
+      edit.id = 'case-objective-edit';
+      edit.addEventListener('click', async () => {
+        let said = null;
+        const typed = await showTextInputDialog({
+          heading: 'Objective',
+          value: o ? o.text : '',
+          placeholder: 'What this case is for',
+          confirmLabel: 'Save',
+          idPrefix: 'case-objective-edit',
+          onSubmit: async (value) => {
+            if (!value.trim()) return 'Give the case an objective.';
+            const out = await caseProgressScopeCall(caseId, { action: 'edit', target: 'objective', hash: o ? o.hash : null, text: value.trim() });
+            if (out.ignored) return 'Another change is still being saved.';
+            // A stale objective is redrawn, not retried from this dialog.
+            if (out.message === CASE_PROGRESS_STALE) { said = out.message; return null; }
+            return out.message;
+          }
+        });
+        if (typed !== null) await renderCaseProgressSection(chat, container, { message: said });
+      });
+      actions.appendChild(edit);
+      objective.appendChild(actions);
+    }
+    container.appendChild(objective);
+  }
+
+  const rows = Array.isArray(p.criteria) ? p.criteria : [];
+  const list = caseProgressEl('div', 'case-progress-rows');
+  list.id = 'case-progress-rows';
+  if (!rows.length) list.appendChild(caseProgressEl('div', 'case-progress-note', 'No success criteria yet.'));
+  rows.forEach((row) => {
+    const el = caseProgressRow(row);
+    if (editable && row.scope !== 'confirmed') el.appendChild(caseProgressRowButtons(row, act));
+    list.appendChild(el);
+  });
+  container.appendChild(list);
+
+  if (editable) {
+    const proposed = rows.filter((row) => row.scope !== 'confirmed');
+    if (proposed.length > 1) {
+      const all = caseButton('Confirm all', 'secondary-button case-progress-confirm-all');
+      all.id = 'case-progress-confirm-all';
+      // Every proposed row's hash, as drawn.
+      all.addEventListener('click', () => act({
+        action: 'confirm', target: 'all-proposed', hash: Object.fromEntries(proposed.map((row) => [row.id, row.hash]))
+      }));
+      container.appendChild(all);
+    }
+    const addRow = caseProgressEl('div', 'chat-info-row case-progress-add');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'chat-info-input';
+    input.id = 'case-progress-add-input';
+    input.placeholder = 'Add a success criterion';
+    const add = caseButton('Add');
+    add.id = 'case-progress-add-btn';
+    add.addEventListener('click', () => {
+      const value = input.value.trim();
+      if (!value) { input.focus(); return; }
+      act({ action: 'add', text: value });
+    });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') add.click(); });
+    addRow.append(input, add);
+    container.appendChild(addRow);
+  }
+
+  container.appendChild(caseProgressReadiness(p));
+  const abandoned = caseProgressAbandoned(p);
+  if (abandoned) container.appendChild(abandoned);
+  if (message) error.textContent = message;
+  container.appendChild(error);
+}
+
+// What the Done confirm shows before its own wording: the summary line and
+// each open item. Done is never refused for one (R-C8-1), and a read that
+// fails says so and does not stop the owner.
+async function caseProgressCloseLines(caseId) {
+  if (!window.electron?.cases?.progress) return [];
+  const p = await caseProgressRead(caseId);
+  if (!p.ok) return ['The progress of this case could not be read.'];
+  const open = caseProgressOpenItems(p);
+  return [
+    p.summary || '',
+    ...(open.length ? ['Still open:'] : []),
+    ...open.map((item) => `- ${item.fix || `${item.id} is open.`}`)
+  ].filter(Boolean);
+}
+
+// The live part of a scope card: the proposed rows as they are now, each
+// with Confirm and Drop (a press, like the panel's).
+function caseProgressScopeCard(el, p) {
+  const caseId = el.dataset.caseId;
+  const act = async (fields) => {
+    const out = await caseProgressScopeCall(caseId, fields);
+    if (out.ignored) return;
+    await fillCaseProgressLive(el, out.message);
+  };
+  const o = p.objective;
+  const rows = (Array.isArray(p.criteria) ? p.criteria : []).filter((row) => row.scope !== 'confirmed');
+  if (caseProgressClosed(p)) {
+    el.appendChild(caseProgressEl('div', 'case-progress-note', 'This case is closed.'));
+    return;
+  }
+  if (o && o.state !== 'confirmed') {
+    const objective = caseProgressEl('div', 'case-progress-row case-progress-row-proposed');
+    const head = caseProgressEl('div', 'case-progress-row-head');
+    const tag = caseProgressEl('span', 'case-progress-tag case-progress-tag-proposed');
+    tag.textContent = 'proposed';
+    head.append(caseProgressEl('span', 'case-progress-id', 'Objective'), tag, caseProgressEl('span', 'case-progress-text', o.text));
+    const actions = caseProgressEl('div', 'case-progress-actions');
+    const confirm = caseButton('Confirm', 'secondary-button case-progress-confirm');
+    confirm.addEventListener('click', () => act({ action: 'confirm', target: 'objective', hash: o.hash }));
+    actions.appendChild(confirm);
+    objective.append(head, actions);
+    el.appendChild(objective);
+  }
+  rows.forEach((row) => {
+    const line = caseProgressRow(row);
+    line.appendChild(caseProgressRowButtons(row, act));
+    el.appendChild(line);
+  });
+  if (!rows.length && !(o && o.state !== 'confirmed')) {
+    el.appendChild(caseProgressEl('div', 'case-progress-note', 'Nothing is waiting to be confirmed.'));
+  }
+}
+
+// The live part of a close card: the summary, what is still open, and each
+// met criterion's evidence with its provenance. It draws no control: the
+// card's own two buttons stay as they are whatever is open (R-C8-1).
+function caseProgressCloseCard(el, p) {
+  el.appendChild(caseProgressEl('div', 'case-progress-subhead', 'As the case reads now'));
+  el.appendChild(caseProgressEl('div', 'case-progress-summary', p.summary || ''));
+  if (p.frozen) el.appendChild(caseProgressEl('div', 'case-progress-note', `As of ${p.at ? formatTimestamp(p.at) : 'its close'}.`));
+  const open = caseProgressOpenItems(p);
+  if (open.length) {
+    el.appendChild(caseProgressEl('div', 'case-progress-subhead', 'Still open'));
+    const list = caseProgressEl('ul', 'case-progress-items');
+    open.forEach((item) => list.appendChild(caseProgressEl('li', 'case-progress-item', item.fix || `${item.id} is open.`)));
+    el.appendChild(list);
+  }
+  (Array.isArray(p.criteria) ? p.criteria : []).filter((row) => row.scope === 'confirmed').forEach((row) => el.appendChild(caseProgressRow(row)));
+}
+
+// Fills the live part of a card from case:progress, as the case reads now.
+async function fillCaseProgressLive(el, message = null) {
+  const p = await caseProgressRead(el.dataset.caseId);
+  el.replaceChildren();
+  if (!p.ok) {
+    el.appendChild(caseProgressEl('div', 'case-question-error', p.error));
+    return;
+  }
+  if (caseProgressClosed(p) && !p.frozen) {
+    el.appendChild(caseProgressEl('div', 'case-progress-note', 'Closed before progress was tracked.'));
+  } else if (el.dataset.kind === 'scope') {
+    caseProgressScopeCard(el, p);
+  } else {
+    caseProgressCloseCard(el, p);
+  }
+  if (message) el.appendChild(caseProgressEl('div', 'case-question-error', message));
+}
+
+// The live part of the card of a 'scope-confirm' (kind 'scope') or a
+// 'close-proposal' (kind 'close') question, or null for any other card.
+function caseProgressCardLive(q, kind) {
+  const type = kind === 'scope' ? 'scope-confirm' : 'close-proposal';
+  if (q.payload?.type !== type || !window.electron?.cases?.progress) return null;
+  const el = caseProgressEl('div', `case-progress-live case-progress-live-${kind}`);
+  el.dataset.caseId = q.caseId;
+  el.dataset.kind = kind;
+  fillCaseProgressLive(el).catch((err) => chatLog.warn(`Progress card failed: ${err.message}`));
+  return el;
+}
+
+if (window.electron?.cases?.onChanged) {
+  window.electron.cases.onChanged((payload) => {
+    if (!payload?.caseId) return;
+    const turnEnded = payload.what === 'turn' && payload.running === false;
+    if (!CASE_PROGRESS_REDRAW.includes(payload.what) && !turnEnded) return;
+    const chat = getActiveChat();
+    const slot = document.getElementById('case-progress-section');
+    if (slot && chat?.caseId === payload.caseId) {
+      renderCaseProgressSection(chat, slot).catch((err) => chatLog.warn(`Progress panel failed: ${err.message}`));
+    }
+    document.querySelectorAll('.case-progress-live').forEach((el) => {
+      if (el.dataset.caseId === payload.caseId) fillCaseProgressLive(el).catch((err) => chatLog.warn(`Progress card failed: ${err.message}`));
+    });
+  });
+}
+
+/* --- end of cases stage 8: progress --- */
 
 /* --- Cases stage 5: related cases (docs/superpowers/specs/2026-09-23-cases-stage5-detours.md §7) --- */
 
