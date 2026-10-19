@@ -7,6 +7,18 @@ const log = createLogger('sandbox-executor');
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
+// What one stream of a command keeps (the exec paths' maxBuffer).
+const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+
+// Stops a shell child and what it started. On Windows killing cmd.exe leaves
+// its command running with the pipes open, so taskkill /T takes the tree.
+function stopTree(child) {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  const killTop = () => { try { child.kill('SIGKILL'); } catch { /* already gone */ } };
+  if (process.platform !== 'win32') return killTop();
+  const taskkill = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'taskkill.exe') : 'taskkill';
+  execFile(taskkill, ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, killTop);
+}
 
 // Children print UTF-8 even when Python would default to the console code
 // page (cp1252 on Windows) and crash writing a character like "—".
@@ -200,7 +212,7 @@ class SandboxExecutor {
       const timeout = options.timeout || this.config.timeoutMs;
       const { stdout, stderr } = await execFileAsync('docker', args, {
         timeout: Math.min(timeout, 600000),
-        maxBuffer: 10 * 1024 * 1024,
+        maxBuffer: this.config.maxOutputBytes || MAX_OUTPUT_BYTES,
         // signal: when the agent loop's abort fires, child_process kills
         // the docker exec subprocess. Without this, a cancelled turn would
         // leave a 60-second command running in the container.
@@ -247,7 +259,7 @@ class SandboxExecutor {
     try {
       const { stdout, stderr } = await execAsync(command, {
         timeout: Math.min(timeout, 600000),
-        maxBuffer: 10 * 1024 * 1024,
+        maxBuffer: this.config.maxOutputBytes || MAX_OUTPUT_BYTES,
         cwd: options.workingDirectory || process.cwd(),
         env: hostChildEnv(),
         shell: true,
@@ -310,10 +322,24 @@ class SandboxExecutor {
       let stderr = '';
       let lineCount = 0;
       let lastProgressAt = 0;
+      // The exec path's maxBuffer, for this path: a command that writes
+      // without end would otherwise grow a string past V8's limit, and the
+      // RangeError is thrown in the main process.
+      const maxBytes = this.config.maxOutputBytes || MAX_OUTPUT_BYTES;
+      let overflow = false;
+      const keep = (kept, text) => {
+        if (overflow) return kept;
+        if (kept.length + text.length <= maxBytes) return kept + text;
+        overflow = true;
+        stopTree(child);
+        child.stdout.destroy();
+        child.stderr.destroy();
+        return kept + text.slice(0, maxBytes - kept.length);
+      };
 
       child.stdout.on('data', (chunk) => {
         const text = chunk.toString();
-        stdout += text;
+        stdout = keep(stdout, text);
         lineCount += (text.match(/\n/g) || []).length;
         const now = Date.now();
         // Throttle progress updates to every 200ms so we don't flood
@@ -330,14 +356,15 @@ class SandboxExecutor {
       });
 
       child.stderr.on('data', (chunk) => {
-        stderr += chunk.toString();
+        stderr = keep(stderr, chunk.toString());
       });
 
       child.on('close', (code) => {
+        const note = overflow ? `output passed ${maxBytes} bytes; the command was stopped` : '';
         resolve({
-          success: code === 0,
+          success: code === 0 && !overflow,
           stdout: stdout.trim(),
-          stderr: stderr.trim(),
+          stderr: [stderr.trim(), note].filter(Boolean).join('\n'),
           exitCode: typeof code === 'number' ? code : 1,
           environment: { platform: process.platform, shell: hostShell, sandbox: false }
         });

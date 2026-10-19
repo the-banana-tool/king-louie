@@ -98,6 +98,20 @@ describe('SandboxExecutor', () => {
     assert.strictEqual(spawnResult.environment.sandbox, false);
   });
 
+  // A case turn's command that wrote without end grew stdout past V8's
+  // string limit, and the RangeError took down the desktop's main process.
+  // The spawn path keeps at most maxOutputBytes per stream, as the exec
+  // path's maxBuffer does, and stops the command when it passes it.
+  it('stops a command whose output passes maxOutputBytes and keeps what fit', async () => {
+    const executor = new SandboxExecutor({ maxOutputBytes: 64 * 1024 });
+    const command = `"${process.execPath}" -e "setInterval(() => process.stdout.write('x'.repeat(16384)), 1)"`;
+    const result = await executor._executeDirect(command, { onProgress: () => {}, timeout: 60000 });
+    assert.strictEqual(result.success, false);
+    assert.ok(result.stdout.length <= 64 * 1024, `kept ${result.stdout.length}`);
+    assert.ok(result.stdout.length > 0);
+    assert.match(result.stderr, /output passed 65536 bytes; the command was stopped/);
+  });
+
   // On Windows, spawn(cmd.exe, ['/c', command]) escaped every " as \", so
   // `python -c "..."` saw a broken string and `findstr "a b"` saw one file
   // per word. Both paths must hand the shell the command verbatim.
