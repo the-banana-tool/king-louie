@@ -57,7 +57,10 @@ function createAdapter(config, host) {
     }
     if (!res.ok) {
       const retryAfterSeconds = res.status === 429 ? Number(res.headers.get('retry-after')) || null : null;
-      throw new ErrandsError(codeFor(res.status), json?.error?.message || `errands API answered ${res.status}`, { status: res.status, retryAfterSeconds });
+      // error.problems says what to change; the model needs it to fix the job.
+      const problems = Array.isArray(json?.error?.problems) ? json.error.problems.filter((p) => typeof p === 'string') : [];
+      const message = json?.error?.message || `errands API answered ${res.status}`;
+      throw new ErrandsError(codeFor(res.status), problems.length ? `${message} (${problems.join(' ')})` : message, { status: res.status, retryAfterSeconds });
     }
     return json;
   }

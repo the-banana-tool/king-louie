@@ -11,7 +11,7 @@ async function startFakeErrandsServer({ token = 'tok-test', pageSize = 2 } = {})
     res.writeHead(status, { 'content-type': 'application/json', ...headers });
     res.end(body === undefined ? '' : JSON.stringify(body));
   };
-  const fail = (res, status, code, message, headers) => send(res, status, { error: { code, message } }, headers);
+  const fail = (res, status, code, message, headers, problems) => send(res, status, { error: { code, message, ...(problems ? { problems } : {}) } }, headers);
   const view = (j) => JSON.parse(JSON.stringify(j));
 
   const server = http.createServer((req, res) => {
@@ -36,7 +36,7 @@ async function startFakeErrandsServer({ token = 'tok-test', pageSize = 2 } = {})
       if (knobs.status429) return fail(res, 429, 'rate-limited', 'slow down', { 'retry-after': String(knobs.status429) });
       if (knobs.status5xx) return fail(res, 503, 'unavailable', 'maintenance');
       if (knobs.status404) return fail(res, 404, 'not-found', 'no such job');
-      if (knobs.status422) return fail(res, 422, 'invalid', 'bad request body');
+      if (knobs.status422) return fail(res, 422, 'invalid', 'bad request body', {}, Array.isArray(knobs.status422) ? knobs.status422 : null);
       const parts = url.pathname.split('/').filter(Boolean);
       if (req.method === 'POST' && url.pathname === '/jobs') {
         // A refusal of POST /jobs only (other routes answer as usual).

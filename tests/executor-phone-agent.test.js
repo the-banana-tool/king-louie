@@ -94,6 +94,16 @@ describe('errands API contract', () => {
     await assert.rejects(adapter('wrong').status('job_1'), code('auth'));
   });
 
+  // The errands API says what to change in error.problems; without them the
+  // model saw only "That job isn't usable." and could not fix the job.
+  it('carries the API\'s problems in a refusal\'s message', async () => {
+    const a = adapter();
+    server.knobs.status422 = ['The text is 1285 characters; the most is 1000.', 'Recipient 2 repeats +15550100.'];
+    await assert.rejects(a.submit(job({ idempotencyKey: 'k-9' }), null), (err) => code('invalid')(err)
+      && err.message === 'bad request body (The text is 1285 characters; the most is 1000. Recipient 2 repeats +15550100.)');
+    server.knobs.status422 = false;
+  });
+
   it('reports job status in node states', async () => {
     const a = adapter();
     const { jobId } = await a.submit(job({ idempotencyKey: 'k-4' }), null);

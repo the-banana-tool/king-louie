@@ -119,6 +119,7 @@ components:
           properties:
             code: { type: string, enum: [auth, not-found, conflict, invalid, rate-limited, unavailable, forced] }
             message: { type: string }
+            problems: { type: array, items: { type: string }, description: "On 422: what to change, one sentence each" }
     JobRequest:
       type: object
       required: [externalRef, text, recipients, maxAttemptsPerContact, window]
