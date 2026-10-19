@@ -92,6 +92,24 @@ describe('validateEnvelopeRequest', () => {
     assert.strictEqual(utc.core.window.tz, 'UTC');
   });
 
+  // A real case (2026-10-19): the rules said "May say: ... 2.120 acres; ... PID 65282" and the
+  // envelope carried only the price, so the phone agent was told the price and nothing else. The
+  // executor is given the envelope's facts, never its rules' wording.
+  it('refuses a rule that names a shareable fact the envelope does not carry', () => {
+    const PID = fact('f-0011', { value: 65282, stmt: 'Burnet CAD PID is 65282' });
+    const PLAT = fact('f-0009', { value: '2.120', stmt: 'The recorded plat says 2.120 acres' });
+    const all = { ...ctx, facts: facts(ACRES, ZONING, FLOOR, PID, PLAT) };
+    const r = validateEnvelopeRequest(request({ facts: ['f-0001'], rules: ['May say: plat 2.120 acres; Burnet CAD PID 65282; zoned R-1'] }), all);
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /rule 1 names f-0009 \("2\.120"\), f-0011 \("65282"\), f-0003 \("R-1"\)/);
+    assert.match(r.error, /given only the facts in "facts"/);
+    const ok = validateEnvelopeRequest(request({ facts: ['f-0001', 'f-0003', 'f-0009', 'f-0011'], rules: ['May say: plat 2.120 acres; Burnet CAD PID 65282; zoned R-1'] }), all);
+    assert.strictEqual(ok.ok, true, ok.error);
+    // A private fact's value is the gate's business, never a reason to attach it; short numbers are not names.
+    const quiet = validateEnvelopeRequest(request({ rules: ['Call each broker 2 times at most'] }), { ...ctx, facts: facts(ACRES, fact('f-0020', { value: 2 })) });
+    assert.strictEqual(quiet.ok, true, quiet.error);
+  });
+
   it('refuses facts that may not leave, naming each', () => {
     const r = validateEnvelopeRequest(request({ facts: ['f-0001', 'f-0004', 'f-0005', 'f-0099'] }), ctx);
     assert.strictEqual(r.ok, false);

@@ -172,6 +172,36 @@ function envelopeIntact(env) {
   }
 }
 
+// The shareable facts (active, disclosable, user or sourced) a rule names by value but the
+// envelope does not carry. A real case (2026-10-19): "May say: ... 2.120 acres; ... PID 65282"
+// with only the price attached, and the phone agent knew the price alone. Values are matched
+// whole, case-insensitively; a number of fewer than three digits is too common to count.
+function unattachedFactsNamed(rules, facts, attached) {
+  const forms = (value) => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      const plain = String(value);
+      if (plain.replace(/\D/g, '').length < 3) return [];
+      return [...new Set([plain, value.toLocaleString('en-US')])];
+    }
+    if (typeof value !== 'string') return [];
+    const v = value.trim();
+    return v.length >= 3 && /[0-9A-Za-z]/.test(v) ? [v] : [];
+  };
+  const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const out = [];
+  rules.forEach((rule, i) => {
+    const hits = [];
+    for (const f of facts.values()) {
+      if (attached.has(f.id) || f.status !== 'active' || !f.disclosable) continue;
+      if (f.provenance !== 'user' && f.provenance !== 'sourced') continue;
+      const text = forms(f.value).find((form) => new RegExp(`(?<![\\w.])${escape(form)}(?![\\w]|\\.\\d)`, 'i').test(rule));
+      if (text) hits.push({ id: f.id, text });
+    }
+    if (hits.length) out.push({ rule: i + 1, facts: hits.sort((a, b) => rule.indexOf(a.text) - rule.indexOf(b.text)) });
+  });
+  return out;
+}
+
 function validateEnvelopeRequest(body, {
   entry, facts = new Map(), deadline = null, casesTimeZone = '', defaultCountryCode = '', categoryKeywords = null, entityIndex = null, caseId = null
 } = {}) {
@@ -234,6 +264,17 @@ function validateEnvelopeRequest(body, {
     else if (f.provenance === 'inferred') errors.push(`${id} is inferred`);
     else if (f.provenance === 'unknown') errors.push(`${id} is an open unknown`);
     else if (!f.disclosable) errors.push(`${id} is not disclosable`);
+  }
+  if (rules && factIds) {
+    const named = unattachedFactsNamed(rules, facts, new Set(factIds));
+    if (named.length) {
+      return {
+        ok: false,
+        error: `Envelope refused: ${named.map((n) => `rule ${n.rule} names ${n.facts.map((f) => `${f.id} ("${f.text}")`).join(', ')}`).join('; ')}, `
+          + 'not in "facts". The executor is given only the facts in "facts", never the rules\' wording: '
+          + 'list there every fact the agent may share.'
+      };
+    }
   }
   const callingWindow = entry.constraints?.callingWindow || null;
   const tz = pickTimeZone(w.tz, callingWindow?.tz, casesTimeZone);
