@@ -417,7 +417,8 @@ class ToolExecutor extends EventEmitter {
     // refused by policy here, before any approver (a service node's phone is
     // never asked), and a look-only one (caseToolGuard has already held it to
     // BROWSER_ALLOWED) skips the approval gate below. A deny rule and an
-    // `unsafe` tier still apply to it.
+    // `unsafe` tier still apply to it, except a node policy's
+    // `tool_requires_approval` (see the tier block).
     const wakeupBrowser = caseContext?.source === 'wakeup' && BROWSER_TOOLS.has(toolName);
     if (wakeupBrowser && isActingBrowserCall(toolName, effectiveParameters)) {
       const refused = { success: false, error: WAKEUP_BROWSER_ACTING_REFUSAL, deniedBy: 'policy', code: 'wakeup_browser_acting' };
@@ -510,7 +511,18 @@ class ToolExecutor extends EventEmitter {
           this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
           return denied;
         }
-        tierUnsafe = safeDecision.tier === 'unsafe';
+        // A service node's classifier calls every requiresApproval tool
+        // `unsafe` / `tool_requires_approval`, the per-tool flag in another
+        // form. For a wake-up's look-only browser call the guards above have
+        // already made that judgment (a look-only action, the kl-cases
+        // profile), so that one verdict does not send it to a phone nobody is
+        // watching (spec docs/superpowers/specs/2026-10-20-outreach-wakeup-browser.md,
+        // review of 2026-10-20). Every other verdict stands: `denied` above,
+        // and `unsafe` for an always_confirm match, a dangerous operation, a
+        // path outside allowed_roots or any other reason still gates it. The
+        // tierDecision event above keeps the classifier's own verdict.
+        const requiresApprovalOnly = safeDecision.tier === 'unsafe' && safeDecision.reason === 'tool_requires_approval';
+        tierUnsafe = safeDecision.tier === 'unsafe' && !(wakeupLookOnly && requiresApprovalOnly);
       }
     }
 

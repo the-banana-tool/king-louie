@@ -169,7 +169,12 @@ acting call (`isActingBrowserCall`) is refused `{ success: false, error:
 WAKEUP_BROWSER_ACTING_REFUSAL, deniedBy: 'policy', code: 'wakeup_browser_acting' }`
 before any approver; any other (look-only) call is left out of
 `toolWouldGate`, so it runs without a prompt. A `deny` rule and an `unsafe`
-tier still apply. Tests: the outreach wake-up test in
+tier still apply. Second review fix (2026-10-20): on a service node the
+classifier's `unsafe` / `tool_requires_approval` verdict (every
+`requiresApproval` tool) no longer sets `tierUnsafe` for a look-only wake-up
+browser call, so it is not sent to the phone; `denied`, `matched_always_confirm`,
+`dangerous_operation` and path reasons still gate it (tests: "on a service node
+(node policy classifier)" in the same describe). Tests: the outreach wake-up test in
 `tests/cases-turn-runner.test.js` (status runs, click refused by policy) and
 "ToolExecutor wake-up browser gate" in `tests/tool-executor.test.js`.
 

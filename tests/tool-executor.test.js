@@ -1,4 +1,4 @@
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, after } = require('node:test');
 const assert = require('node:assert');
 
 // We need to set up the tool registry before importing ToolExecutor
@@ -770,7 +770,15 @@ describe('ToolExecutor ownerTurnText in a tool\'s context (management surfaces s
 describe('ToolExecutor wake-up browser gate', () => {
   const { configureCaseGuard } = require('../src/cases/executors/case-guard');
   const { WAKEUP_BROWSER_ACTING_REFUSAL } = require('../src/cases/executors/case-guard');
+  const { classifyToolCall } = require('../src/execution/safety-policy');
   const ran = [];
+  // The fake Browser goes back out of the shared registry (or the entry it
+  // replaced comes back) so the file does not depend on test order.
+  const previousBrowser = toolRegistry.get('Browser');
+  after(() => {
+    if (previousBrowser) toolRegistry.register(previousBrowser);
+    else toolRegistry.unregister('Browser');
+  });
   toolRegistry.register(new Tool({
     name: 'Browser',
     description: 'a fake browser tool',
@@ -779,7 +787,7 @@ describe('ToolExecutor wake-up browser gate', () => {
     execute: async (params) => { ran.push(params.action); return { ok: true, action: params.action }; }
   }));
 
-  const run = async (source, params) => {
+  const run = async (source, params, executorOptions = {}) => {
     const asked = [];
     configureCaseGuard({ browserProfile: async () => ({ ok: true, running: true, active: 'kl-cases' }) });
     try {
@@ -787,6 +795,7 @@ describe('ToolExecutor wake-up browser gate', () => {
         requireApproval: true,
         denyAutoApproval: true,
         useSandbox: false,
+        ...executorOptions,
         approvalRequester: async (name, p) => { asked.push([name, p.action]); return true; },
         extraToolOptions: { caseContext: { caseId: 'case-1', source } }
       });
@@ -817,5 +826,64 @@ describe('ToolExecutor wake-up browser gate', () => {
     const { result, asked } = await run('owner', { action: 'status' });
     assert.deepStrictEqual(asked, [['Browser', 'status']]);
     assert.strictEqual(result.ok, true);
+  });
+
+  it('runs a look-only call through the full guard path (profile checked) without asking anyone', async () => {
+    const { result, asked } = await run('wakeup', { action: 'content' });
+    assert.strictEqual(result.ok, true);
+    assert.deepStrictEqual(asked, []);
+    assert.deepStrictEqual(ran, ['content']);
+  });
+
+  // A service node's classifier (review of 2026-10-20): every requiresApproval
+  // tool is `unsafe` / `tool_requires_approval` there, which must not send a
+  // wake-up's look-only call to a phone nobody is watching.
+  describe('on a service node (node policy classifier)', () => {
+    const nodePolicy = (policy) => ({
+      classifyCall: (toolName, params, ctx) => classifyToolCall(toolName, params, policy, ctx)
+    });
+
+    it('classifies the fake Browser as tool_requires_approval', () => {
+      assert.deepStrictEqual(classifyToolCall('Browser', { action: 'content' }, {}), { tier: 'unsafe', reason: 'tool_requires_approval' });
+    });
+
+    it('runs a look-only call without asking anyone', async () => {
+      for (const action of ['status', 'content']) {
+        ran.length = 0;
+        const { result, asked } = await run('wakeup', { action }, nodePolicy({}));
+        assert.strictEqual(result.ok, true, action);
+        assert.deepStrictEqual(asked, [], action);
+        assert.deepStrictEqual(ran, [action]);
+      }
+    });
+
+    it('refuses an acting call by policy and never asks an approver', async () => {
+      const { result, asked } = await run('wakeup', { action: 'click', selector: '#send' }, nodePolicy({}));
+      assert.deepStrictEqual(result, { success: false, error: WAKEUP_BROWSER_ACTING_REFUSAL, deniedBy: 'policy', code: 'wakeup_browser_acting' });
+      assert.deepStrictEqual(asked, []);
+      assert.deepStrictEqual(ran, []);
+    });
+
+    it('still asks for a look-only call the policy names in always_confirm', async () => {
+      const { result, asked } = await run('wakeup', { action: 'content' },
+        nodePolicy({ remote_sessions: { always_confirm: ['Browser'] } }));
+      assert.deepStrictEqual(asked, [['Browser', 'content']]);
+      assert.strictEqual(result.ok, true);
+    });
+
+    it('still refuses a look-only call the policy denies', async () => {
+      const { result, asked } = await run('wakeup', { action: 'content' },
+        nodePolicy({ remote_sessions: { deny: ['Browser'] } }));
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.deniedBy, 'policy');
+      assert.deepStrictEqual(asked, []);
+      assert.deepStrictEqual(ran, []);
+    });
+
+    it('still gates a look-only call outside a wake-up', async () => {
+      const { result, asked } = await run('owner', { action: 'content' }, nodePolicy({}));
+      assert.deepStrictEqual(asked, [['Browser', 'content']]);
+      assert.strictEqual(result.ok, true);
+    });
   });
 });

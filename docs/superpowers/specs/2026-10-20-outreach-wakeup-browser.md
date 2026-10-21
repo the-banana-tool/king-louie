@@ -31,7 +31,12 @@ Nothing else about a wake-up changes:
   (`click` and the rest of `ACTING_ACTIONS`) is refused by policy with
   `wakeup_browser_acting` before any approver is asked, so a service node's
   phone is never asked for one. A `deny` rule and an `unsafe` tier still
-  apply. A wake-up navigates, reads, extracts and screenshots, and sends only
+  apply, with one exception (second review fix, 2026-10-20): on a service
+  node the policy classifier calls every `requiresApproval` tool `unsafe` /
+  `tool_requires_approval`, and that verdict does not gate a look-only
+  wake-up browser call either; a `denied` tier and `unsafe` for
+  `matched_always_confirm`, `dangerous_operation` or a path outside
+  `allowed_roots` still do. A wake-up navigates, reads, extracts and screenshots, and sends only
   through Executor jobs.
 - `navigate` and `open_tab` URLs stay gated in query mode by the guard.
 - Both the orient call's tool list and the judge loop's `allowedToolNames` use
