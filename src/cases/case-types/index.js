@@ -44,6 +44,13 @@ function briefFieldsFor(type) {
   return typeof t.briefFields === 'function' ? t.briefFields() : [];
 }
 
+// The tools a wake-up of this type adds to WAKEUP_BASE_TOOLS, a fresh array
+// each call; none for a type without the hook (an unknown type is general).
+function wakeupToolsFor(type) {
+  const t = resolveCaseType(type);
+  return typeof t.wakeupTools === 'function' ? [...t.wakeupTools()] : [];
+}
+
 // The type that declares a brief field, or null.
 function caseTypeForField(name) {
   for (const t of TYPES.values()) {
@@ -86,6 +93,7 @@ module.exports = {
   resolveCaseType,
   assertKnownType,
   briefFieldsFor,
+  wakeupToolsFor,
   caseTypeForField,
   registerGatingSource,
   gatingQuestionsFor

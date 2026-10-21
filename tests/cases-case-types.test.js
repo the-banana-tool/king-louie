@@ -66,6 +66,16 @@ describe('case-type registry', () => {
     assert.throws(() => check.validate('npm test; rm -rf x'), { code: 'CHECK_INVALID' });
   });
 
+  it('wakeupToolsFor: outreach declares the four browser tools, the other types and an unknown type declare none', () => {
+    assert.deepStrictEqual(types.wakeupToolsFor('outreach'), ['Browser', 'BrowserSession', 'BrowserPage', 'BrowserExtract']);
+    assert.deepStrictEqual(types.wakeupToolsFor('general'), []);
+    assert.deepStrictEqual(types.wakeupToolsFor('software-repo'), []);
+    assert.deepStrictEqual(types.wakeupToolsFor('no-such-type'), []);
+    // A fresh array each call: a caller that pushes into it changes nothing for the next.
+    types.wakeupToolsFor('outreach').push('Bash');
+    assert.deepStrictEqual(types.wakeupToolsFor('outreach'), ['Browser', 'BrowserSession', 'BrowserPage', 'BrowserExtract']);
+  });
+
   it('gatingQuestionsFor lists the type\'s questions, then each source\'s, tagged by origin', () => {
     const runtime = { getCase: (id) => ({ id, slug: id, type: id === 'c-repo' ? 'software-repo' : 'general' }) };
     assert.deepStrictEqual(types.gatingQuestionsFor(runtime, 'c-plain'), []);
