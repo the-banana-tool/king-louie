@@ -2,11 +2,11 @@ const { EventEmitter } = require('events');
 const { toolRegistry } = require('../tools');
 const { getRuntimeEnvironment } = require('./runtime-environment');
 const { evaluateRules, describeRule } = require('../tools/permission-rules');
-const { isActingBrowserCall, ownerQuoteInTurn } = require('../tools/browser-acting');
+const { BROWSER_TOOLS, isActingBrowserCall, ownerQuoteInTurn } = require('../tools/browser-acting');
 const path = require('path');
 const { caseWriteRefusal, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
 const { UNVERIFIABLE_PATH_ERROR } = require('../cases/safe-path');
-const { caseToolGuard, caseBrowserProfileGuard } = require('../cases/executors/case-guard');
+const { caseToolGuard, caseBrowserProfileGuard, WAKEUP_BROWSER_ACTING_REFUSAL } = require('../cases/executors/case-guard');
 const { markLocalRequester } = require('../core/origin');
 const { refuseUnsafeGate, REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
 const { createLogger } = require('../logging');
@@ -411,6 +411,21 @@ class ToolExecutor extends EventEmitter {
       }
     }
 
+    // A wake-up's browser only looks (owner ruling 2026-10-20, spec
+    // docs/superpowers/specs/2026-10-20-outreach-wakeup-browser.md). A wake-up
+    // runs under denyAutoApproval with no owner to ask, so an acting action is
+    // refused by policy here, before any approver (a service node's phone is
+    // never asked), and a look-only one (caseToolGuard has already held it to
+    // BROWSER_ALLOWED) skips the approval gate below. A deny rule and an
+    // `unsafe` tier still apply to it.
+    const wakeupBrowser = caseContext?.source === 'wakeup' && BROWSER_TOOLS.has(toolName);
+    if (wakeupBrowser && isActingBrowserCall(toolName, effectiveParameters)) {
+      const refused = { success: false, error: WAKEUP_BROWSER_ACTING_REFUSAL, deniedBy: 'policy', code: 'wakeup_browser_acting' };
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
+      return refused;
+    }
+    const wakeupLookOnly = wakeupBrowser; // the acting ones were refused above
+
     if (tool.isDangerous(effectiveParameters) && !options.bypassSafety) {
       throw new Error(`Dangerous operation detected: ${toolName}`);
     }
@@ -501,7 +516,7 @@ class ToolExecutor extends EventEmitter {
 
     const ruleSaysAsk = ruleMatch.matched && ruleMatch.action === 'ask';
     // What this tool would face with no rule written for it at all.
-    const toolWouldGate = tool.requiresApproval && this.requireApproval;
+    const toolWouldGate = tool.requiresApproval && this.requireApproval && !wakeupLookOnly;
     // Under denyAutoApproval an `allow` rule is demoted to `ask`: it neither
     // announces an auto-grant nor skips the gate, so it cannot be used to
     // pre-approve an unsafe tool for a remote origin. Only for a tool the gate

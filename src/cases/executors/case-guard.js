@@ -29,6 +29,10 @@ const URL_GATED = Object.freeze({
 const WEB_GATED = Object.freeze({ WebFetch: 'url', WebSearch: 'query' });
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
 const BROWSER_REFUSAL = 'In a case, anything typed into a page goes through Executor submit with executor "browser" so the outbound gate and envelope apply.';
+// An acting browser action in a wake-up (owner ruling 2026-10-20, spec
+// docs/superpowers/specs/2026-10-20-outreach-wakeup-browser.md): ToolExecutor
+// refuses it by policy, before any approver is asked.
+const WAKEUP_BROWSER_ACTING_REFUSAL = 'In a wake-up the browser only looks: this action would type, click or run code on a page. Anything that leaves the case goes through Executor submit under an envelope.';
 const BROWSER_START_REFUSAL = `In a case, the browser starts only with profile "${CASES_BROWSER_PROFILE}" and never a user data path, so the owner's own cookies are never used.`;
 // Top-level names under the data dir that only King Louie writes (compared
 // case-folded where the file system is): ops memory, executor packages and
@@ -165,4 +169,6 @@ async function caseBrowserProfileGuard(toolName, params = {}, ctx = {}) {
   };
 }
 
-module.exports = { caseToolGuard, caseBrowserProfileGuard, configureCaseGuard, BROWSER_ALLOWED, BROWSER_REFUSAL };
+module.exports = {
+  caseToolGuard, caseBrowserProfileGuard, configureCaseGuard, BROWSER_ALLOWED, BROWSER_REFUSAL, WAKEUP_BROWSER_ACTING_REFUSAL
+};

@@ -23,9 +23,15 @@ Nothing else about a wake-up changes:
   run to the look-and-click browser actions in the `kl-cases` profile and
   refuses typing (`fill`, `type`, `press`, …) with the message that typed text
   goes through Executor submit.
-- A wake-up runs with `denyAutoApproval: true` and no approval requester, so an
-  acting browser action (`click` and the rest of `ACTING_ACTIONS`) is refused
-  there: a wake-up navigates, reads, extracts and screenshots, and sends only
+- A wake-up runs with `denyAutoApproval: true`, which denies every call that
+  needs approval, look-only ones included, so `ToolExecutor` treats wake-up
+  browser calls itself (review fix, 2026-10-20): a look-only browser call in
+  a wake-up (`caseContext.source === 'wakeup'`, an action the guard allows
+  and not in `ACTING_ACTIONS`) skips the approval gate, and an acting one
+  (`click` and the rest of `ACTING_ACTIONS`) is refused by policy with
+  `wakeup_browser_acting` before any approver is asked, so a service node's
+  phone is never asked for one. A `deny` rule and an `unsafe` tier still
+  apply. A wake-up navigates, reads, extracts and screenshots, and sends only
   through Executor jobs.
 - `navigate` and `open_tab` URLs stay gated in query mode by the guard.
 - Both the orient call's tool list and the judge loop's `allowedToolNames` use
@@ -37,6 +43,11 @@ Nothing else about a wake-up changes:
 read from the type module's optional `wakeupTools()`; a missing hook or an
 unknown type gives `[]`. The turn runner reads the case's type from
 `runtime.getCase(caseId).type`.
+
+`src/cases/executors/case-guard.js` exports `WAKEUP_BROWSER_ACTING_REFUSAL`,
+the error of the `{ success: false, deniedBy: 'policy', code:
+'wakeup_browser_acting' }` refusal `ToolExecutor` gives an acting browser
+action in a wake-up.
 
 ## Out of scope
 

@@ -74,6 +74,11 @@ git commit -m "feat(cases): a case type may declare wake-up tools; outreach decl
 
 ### Task 2: the wake-up turn offers and allows the type's tools
 
+> Review note (2026-10-20): this task's click assertion was too weak. It
+> checked only that the click failed for some reason other than the guard,
+> which "User denied permission" satisfied, while every look-only call was
+> denied the same way. Task 2b fixes it.
+
 **Files:**
 - Modify: `src/cases/turn-runner.js:234-235` (orient `baseDefs`) and `:275` (`allowedToolNames`)
 - Modify: `CLAUDE.md`, section "Cases: unattended (stage 2)", the wake-ups bullet
@@ -146,6 +151,27 @@ Expected: `# fail 0`.
 git add src/cases/turn-runner.js tests/cases-turn-runner.test.js CLAUDE.md
 git commit -m "feat(cases): outreach wake-ups get the look-only browser tools"
 ```
+
+---
+
+### Task 2b: the wake-up browser gate (review fix, 2026-10-20)
+
+The defect: all four browser tools declare `requiresApproval: true` and a
+wake-up runs under `denyAutoApproval`, so every browser call in a wake-up,
+`status`, `content` and `navigate` included, reached `requestApproval`. On the
+desktop nothing answers it ("User denied permission", counted by the denial
+tracker); on a service node with phone approvals the phone was asked for each
+call, and an approved `click` would have run.
+
+The fix, in `ToolExecutor` after the case guard and the profile guard: for a
+wake-up (`caseContext.source === 'wakeup'`) and one of `BROWSER_TOOLS`, an
+acting call (`isActingBrowserCall`) is refused `{ success: false, error:
+WAKEUP_BROWSER_ACTING_REFUSAL, deniedBy: 'policy', code: 'wakeup_browser_acting' }`
+before any approver; any other (look-only) call is left out of
+`toolWouldGate`, so it runs without a prompt. A `deny` rule and an `unsafe`
+tier still apply. Tests: the outreach wake-up test in
+`tests/cases-turn-runner.test.js` (status runs, click refused by policy) and
+"ToolExecutor wake-up browser gate" in `tests/tool-executor.test.js`.
 
 ---
 

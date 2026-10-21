@@ -861,7 +861,7 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage2-unattended.md`.
   `ensureWakeupJob`) calls `CaseRuntime.runDueWakeups`. A wake-up turn makes one
   `orient` call (charged like any other usage), then runs a `judge` loop
   confined to the case tools plus Read, Glob and Grep (`allowedToolNames`,
-  `denyAutoApproval`, no owner messages). A case type may add wake-up tools (`wakeupToolsFor` in `src/cases/case-types/index.js`); `outreach` adds the four browser tools, look only: the case guard refuses typing and `denyAutoApproval` refuses `click`, so a wake-up reads an inbox and sends only through Executor jobs (spec `docs/superpowers/specs/2026-10-20-outreach-wakeup-browser.md`). A wake-up that fails backs off
+  `denyAutoApproval`, no owner messages). A case type may add wake-up tools (`wakeupToolsFor` in `src/cases/case-types/index.js`); `outreach` adds the four browser tools, look only: the case guard refuses typing, and in a wake-up an acting browser action is refused by policy (`wakeup_browser_acting`, never sent to an approver) while look-only ones run without a prompt, so a wake-up reads an inbox and sends only through Executor jobs (spec `docs/superpowers/specs/2026-10-20-outreach-wakeup-browser.md`). A wake-up that fails backs off
   through `retryBackoffMinutes` and briefs the owner on the third strike.
   Settings: `settings.cases.wakeups`; off with `enabled: false`.
 - Budgets live in `.kl/budget.json`. `usd` and `deadline` at 100 % pause the

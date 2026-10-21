@@ -763,3 +763,59 @@ describe('ToolExecutor ownerTurnText in a tool\'s context (management surfaces s
     assert.strictEqual(await probe({ ownerTurnText: 'go with Weekly', denyAutoApproval: true }), null);
   });
 });
+
+// Outreach wake-ups (spec docs/superpowers/specs/2026-10-20-outreach-wakeup-browser.md,
+// owner ruling 2026-10-20): a look-only browser call in a wake-up skips the
+// approval gate, and an acting one is refused by policy before any approver.
+describe('ToolExecutor wake-up browser gate', () => {
+  const { configureCaseGuard } = require('../src/cases/executors/case-guard');
+  const { WAKEUP_BROWSER_ACTING_REFUSAL } = require('../src/cases/executors/case-guard');
+  const ran = [];
+  toolRegistry.register(new Tool({
+    name: 'Browser',
+    description: 'a fake browser tool',
+    requiresApproval: true,
+    parameters: { type: 'object', properties: { action: { type: 'string' }, selector: { type: 'string' } }, required: ['action'] },
+    execute: async (params) => { ran.push(params.action); return { ok: true, action: params.action }; }
+  }));
+
+  const run = async (source, params) => {
+    const asked = [];
+    configureCaseGuard({ browserProfile: async () => ({ ok: true, running: true, active: 'kl-cases' }) });
+    try {
+      const executor = new ToolExecutor({
+        requireApproval: true,
+        denyAutoApproval: true,
+        useSandbox: false,
+        approvalRequester: async (name, p) => { asked.push([name, p.action]); return true; },
+        extraToolOptions: { caseContext: { caseId: 'case-1', source } }
+      });
+      const result = await executor.execute('Browser', params);
+      return { result, asked };
+    } finally {
+      configureCaseGuard({});
+    }
+  };
+
+  beforeEach(() => { ran.length = 0; });
+
+  it('runs a look-only call without asking anyone', async () => {
+    const { result, asked } = await run('wakeup', { action: 'status' });
+    assert.strictEqual(result.ok, true);
+    assert.deepStrictEqual(asked, []);
+    assert.deepStrictEqual(ran, ['status']);
+  });
+
+  it('refuses an acting call by policy and never asks an approver', async () => {
+    const { result, asked } = await run('wakeup', { action: 'click', selector: '#send' });
+    assert.deepStrictEqual(result, { success: false, error: WAKEUP_BROWSER_ACTING_REFUSAL, deniedBy: 'policy', code: 'wakeup_browser_acting' });
+    assert.deepStrictEqual(asked, []);
+    assert.deepStrictEqual(ran, []);
+  });
+
+  it('still gates a look-only call outside a wake-up', async () => {
+    const { result, asked } = await run('owner', { action: 'status' });
+    assert.deepStrictEqual(asked, [['Browser', 'status']]);
+    assert.strictEqual(result.ok, true);
+  });
+});

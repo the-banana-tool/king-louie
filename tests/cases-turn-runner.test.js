@@ -168,10 +168,13 @@ describe('runDueWakeups', () => {
   });
 
   it('an outreach case wake-up offers and allows the browser tools, look only (spec 2026-10-20)', async () => {
-    const { BROWSER_REFUSAL } = require('../src/cases/executors/case-guard');
+    const { BROWSER_REFUSAL, WAKEUP_BROWSER_ACTING_REFUSAL, configureCaseGuard } = require('../src/cases/executors/case-guard');
+    // No real browser is consulted: the profile guard reads this instead.
+    configureCaseGuard({ browserProfile: async () => ({ ok: true, running: true, active: 'kl-cases' }) });
     const { runtime, clock, calls } = harness({
       judge: [
         { type: 'tool_use', toolCalls: [
+          { toolName: 'Browser', toolUseId: 't0', parameters: { action: 'status' } },
           { toolName: 'Browser', toolUseId: 't1', parameters: { action: 'fill', selector: '#msg', text: 'hello' } },
           { toolName: 'Browser', toolUseId: 't2', parameters: { action: 'click', selector: '#send' } }
         ] },
@@ -180,17 +183,24 @@ describe('runDueWakeups', () => {
     });
     const c = await activeOutreachCase(runtime);
     dueWakeup(runtime, c, clock);
-    await runtime.runDueWakeups(clock.now);
+    try {
+      await runtime.runDueWakeups(clock.now);
+    } finally {
+      configureCaseGuard({});
+    }
     const opts = calls.executorOptions;
     const browserTools = ['Browser', 'BrowserSession', 'BrowserPage', 'BrowserExtract'];
     assert.deepStrictEqual([...opts.allowedToolNames].sort(), [...CASE_TOOL_NAMES, 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', ...browserTools].sort());
     for (const name of browserTools) assert.ok(calls.judgeTools[0].includes(name), name);
     assert.strictEqual(opts.denyAutoApproval, true);
-    // Typing is refused by the case guard; an acting click is refused because nothing can approve it in a wake-up.
-    const [fill, click] = calls.results.filter(([name]) => name === 'Browser').map(([, r]) => r);
+    // A look-only call runs with no prompt (the real status reads state and
+    // launches nothing); typing is refused by the case guard; an acting click
+    // is refused by policy before any approver is asked.
+    const [status, fill, click] = calls.results.filter(([name]) => name === 'Browser').map(([, r]) => r);
+    assert.notStrictEqual(status.error, 'User denied permission');
+    assert.strictEqual(status.ok, true);
     assert.deepStrictEqual([fill.success, fill.error], [false, BROWSER_REFUSAL]);
-    assert.strictEqual(click.success, false);
-    assert.notStrictEqual(click.error, BROWSER_REFUSAL);
+    assert.deepStrictEqual(click, { success: false, error: WAKEUP_BROWSER_ACTING_REFUSAL, deniedBy: 'policy', code: 'wakeup_browser_acting' });
   });
 
   it('a general case wake-up still offers no browser tool', async () => {

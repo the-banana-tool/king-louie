@@ -7,6 +7,6 @@ module.exports = {
   gatingQuestions: () => [],
   materialFields: () => [],
   // Wake-ups may look in the browser (spec 2026-10-20-outreach-wakeup-browser, owner ruling
-  // 2026-10-20): the case guard refuses typing and the wake-up's denyAutoApproval refuses a click.
+  // 2026-10-20): the case guard refuses typing and ToolExecutor refuses an acting action in a wake-up.
   wakeupTools: () => ['Browser', 'BrowserSession', 'BrowserPage', 'BrowserExtract']
 };
