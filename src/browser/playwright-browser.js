@@ -95,6 +95,10 @@ class PlaywrightBrowser {
       // Suppress Chromium's built-in password manager / autofill prompts —
       // king-louie's vault is the source of truth.
       '--disable-features=PasswordManagerOnboarding,AutofillServerCommunication,PasswordManager',
+      // Without this, every page sees navigator.webdriver === true and the
+      // bot walls on sites like Zillow (PerimeterX "Press & Hold") refuse even
+      // the owner pressing the button by hand in the headed window.
+      '--disable-blink-features=AutomationControlled',
     ];
 
     const launch = async (channel) => {
