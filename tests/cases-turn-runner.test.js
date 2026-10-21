@@ -96,6 +96,15 @@ async function activeCase(rt, title = 'Lakeside lot') {
   return rt.getCase(info.id);
 }
 
+async function activeOutreachCase(rt, title = 'Lakeside lot outreach') {
+  const info = await rt.createCase({ title, objective: 'Reach the buyers of the lot', type: 'outreach', force: true });
+  rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
+  rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+  confirmAll(rt, info.id);
+  rt.completeGating(info.id);
+  return rt.getCase(info.id);
+}
+
 // A one-shot wake-up due one minute from now; the clock is then moved there.
 function dueWakeup(rt, c, clock) {
   const id = rt.wakeups(c.id).register({ kind: 'retry', at: clock.now.toISOString(), payload: { key: 'test' } });
@@ -156,6 +165,43 @@ describe('runDueWakeups', () => {
     // Nor do the fleet tools of a service-run chat (spec §3.6).
     for (const name of FLEET_CHAT_TOOL_NAMES) assert.ok(!offered.includes(name) && !opts.allowedToolNames.has(name), name);
     assert.deepStrictEqual(calls.results.map(([name, r]) => [name, r.ok]), [['Ledger', true]]);
+  });
+
+  it('an outreach case wake-up offers and allows the browser tools, look only (spec 2026-10-20)', async () => {
+    const { BROWSER_REFUSAL } = require('../src/cases/executors/case-guard');
+    const { runtime, clock, calls } = harness({
+      judge: [
+        { type: 'tool_use', toolCalls: [
+          { toolName: 'Browser', toolUseId: 't1', parameters: { action: 'fill', selector: '#msg', text: 'hello' } },
+          { toolName: 'Browser', toolUseId: 't2', parameters: { action: 'click', selector: '#send' } }
+        ] },
+        { type: 'text', content: 'Done.' }
+      ]
+    });
+    const c = await activeOutreachCase(runtime);
+    dueWakeup(runtime, c, clock);
+    await runtime.runDueWakeups(clock.now);
+    const opts = calls.executorOptions;
+    const browserTools = ['Browser', 'BrowserSession', 'BrowserPage', 'BrowserExtract'];
+    assert.deepStrictEqual([...opts.allowedToolNames].sort(), [...CASE_TOOL_NAMES, 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', ...browserTools].sort());
+    for (const name of browserTools) assert.ok(calls.judgeTools[0].includes(name), name);
+    assert.strictEqual(opts.denyAutoApproval, true);
+    // Typing is refused by the case guard; an acting click is refused because nothing can approve it in a wake-up.
+    const [fill, click] = calls.results.filter(([name]) => name === 'Browser').map(([, r]) => r);
+    assert.deepStrictEqual([fill.success, fill.error], [false, BROWSER_REFUSAL]);
+    assert.strictEqual(click.success, false);
+    assert.notStrictEqual(click.error, BROWSER_REFUSAL);
+  });
+
+  it('a general case wake-up still offers no browser tool', async () => {
+    const { runtime, clock, calls } = harness({ judge: [{ type: 'text', content: 'Done.' }] });
+    const c = await activeCase(runtime);
+    dueWakeup(runtime, c, clock);
+    await runtime.runDueWakeups(clock.now);
+    for (const name of ['Browser', 'BrowserSession', 'BrowserPage', 'BrowserExtract']) {
+      assert.ok(!calls.judgeTools[0].includes(name), name);
+      assert.ok(!calls.executorOptions.allowedToolNames.has(name), name);
+    }
   });
 
   it('orient usage is charged too (I2): total usd delta equals the orient charge plus the judge charge', async () => {

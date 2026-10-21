@@ -7,6 +7,7 @@ const {
   CASE_TOOL_NAMES, WAKEUP_BASE_TOOLS, shapeToolDefinitions, buildCaseSystemPrompt, casePrompter
 } = require('./chat-integration');
 const { NO_RETRY } = require('./roles');
+const { wakeupToolsFor } = require('./case-types');
 const { toolResultRow } = require('./verify/evidence');
 const { createLogger } = require('../logging');
 const { recordOneShotUsage, textOf } = require('./one-shot-usage');
@@ -219,19 +220,21 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
       return close('failed', `failed: ${oneLine(message, 300)}`, 'wake-up failed');
     };
 
-    const status = runtime.getCase(caseId).status;
+    const { status, type } = runtime.getCase(caseId);
     if (status !== 'active' && status !== 'needs-direction') return await skipped(`case is ${status}`);
     if (turn.dailyTurnsSpent) return await skipped('daily turn budget spent');
 
-    // The same confined tool list the judge loop below gets. Orient is a
+    // The same confined tool list the judge loop below gets: the base
+    // wake-up tools plus the case type's own wake-up tools. Orient is a
     // one-shot classification call with no executor attached — nothing
     // ever runs a tool it names — but it must go through sendMessageWithTools
     // (the path judge/AgentLoop uses) rather than the plain sendMessage a
     // tool-less call would take, because only that path returns llmMetrics
     // for the providers King Louie ships (sendMessage returns bare text).
     // Without this, orient calls are never charged to the case's usd budget.
+    const wakeupTools = [...WAKEUP_BASE_TOOLS, ...wakeupToolsFor(type)];
     const registry = host.toolRegistry;
-    const baseDefs = WAKEUP_BASE_TOOLS.map((n) => registry.get(n)).filter(Boolean).map((t) => t.toFunctionDefinition());
+    const baseDefs = wakeupTools.map((n) => registry.get(n)).filter(Boolean).map((t) => t.toFunctionDefinition());
     const toolDefs = shapeToolDefinitions(baseDefs, true, registry);
 
     let why = null;
@@ -272,7 +275,7 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
         allowedDirectories: [],
         caseContext: runtime.caseContext(turn, { ownerMessages: [], ownerMessageTimes: [] }),
         denyAutoApproval: true,
-        allowedToolNames: new Set([...CASE_TOOL_NAMES, ...WAKEUP_BASE_TOOLS]),
+        allowedToolNames: new Set([...CASE_TOOL_NAMES, ...wakeupTools]),
         // The turn's frozen models (spec 2026-09-27 §6.6).
         turnModels: turn.models || null
       });
