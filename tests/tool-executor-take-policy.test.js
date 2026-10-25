@@ -180,6 +180,27 @@ describe('ToolExecutor with a take policy', () => {
     assert.equal(calls.length, 1);
     assert.equal(result.success, true);
   });
+
+  it('a call the take allowed runs under the take\'s browser key even when the take ends before it runs', async () => {
+    const { browserKeyOf, getBrowser } = require('../src/tools/builtin/browser-registry');
+    const { ex, calls, holder } = executor();
+    // The take ends between its decision and the tool running (a phone Stop, say).
+    holder.set({ browserKey: 'take:gone', decide: async () => { holder.clear(); return { allow: true }; } });
+    const result = await ex.execute('BrowserPage', { action: 'screenshot' });
+    assert.equal(result.success, true);
+    assert.equal(calls.length, 0);
+    assert.equal(holder.current, null);
+    assert.equal(seenContext.browserKey, 'take:gone');
+    assert.equal(Object.getOwnPropertyDescriptor(seenContext, 'browserKey').writable, false);
+    assert.equal(browserKeyOf(seenContext), 'take:gone', 'never default');
+    assert.throws(() => getBrowser(seenContext), (e) => e.code === 'take_browser_unavailable');
+  });
+
+  it('with no take the call carries no browser key, whatever an option says', async () => {
+    const { ex } = executor();
+    await ex.execute('Read', {}, { browserKey: 'take:other' });
+    assert.equal(seenContext.browserKey, null);
+  });
 });
 
 // Take.run_steps' steps are held to the node's deny rules and tier through the

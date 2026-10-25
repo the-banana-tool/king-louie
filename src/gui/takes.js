@@ -14,6 +14,7 @@ const path = require('path');
 const { createLogger } = require('../logging');
 const { GuiError, isGuiError } = require('./errors');
 const { SITE_RE, TAKE_MAX_MINUTES } = require('./lease-protocol');
+const { newLeaseId } = require('./leases');
 const { createTakePolicy, BROWSER_ACTIONS, BROWSER_TOOLS } = require('./take-policy');
 const { plainLineProblem } = require('../cases/hidden-chars');
 
@@ -239,15 +240,10 @@ class TakeManager {
       throw new GuiError('lease_required', `the take ended (${t.endReason || t.leaseEndReason || 'ended'})`);
     };
 
-    // 1. The lease: one tap on the phone approves the whole take. The lease this request makes
-    // is found by its first 'state' event, emitted inside the request call (state pending);
-    // only that lease is ever ended by this take, and only its end reason is recorded.
-    let capturing = true;
+    // 1. The lease: one tap on the phone approves the whole take. Its id is minted here, so only
+    // that lease is ever ended by this take, and only its end reason is recorded.
+    t.leaseId = newLeaseId();
     t.listener = (l) => {
-      if (!t.leaseId) {
-        if (!capturing || l.jobId !== jobId || l.kind !== 'take' || l.state !== 'pending') return;
-        t.leaseId = l.leaseId;
-      }
       if (l.leaseId !== t.leaseId) return;
       if (l.state === 'ended') {
         t.leaseEndReason = l.endReason || 'lease_ended';
@@ -259,16 +255,11 @@ class TakeManager {
     this.leases.on('state', t.listener);
     let lease;
     try {
-      let requested;
-      try {
-        requested = this.leases.request({
-          jobId, origin, appIds: [cfg.browser, ...p.apps], minutes: p.minutes, reason: p.reason, signal, kind: 'take',
-          take: { name: p.name, sites: p.sites, browser: p.browser, credentials: p.credentials, unattended: true }, nodeLocalOrigin
-        });
-      } finally {
-        capturing = false;
-      }
-      lease = await requested;
+      lease = await this.leases.request({
+        jobId, origin, appIds: [cfg.browser, ...p.apps], minutes: p.minutes, reason: p.reason, signal, kind: 'take',
+        take: { name: p.name, sites: p.sites, browser: p.browser, credentials: p.credentials, unattended: true }, nodeLocalOrigin,
+        leaseId: t.leaseId
+      });
     } catch (err) {
       await this.end(takeId, t.leaseEndReason || (isGuiError(err) ? err.code : 'lease_failed'));
       throw err;

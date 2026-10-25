@@ -55,11 +55,15 @@ function typeChunks(text) {
   return out;
 }
 
+// closeLaunched: how long a process asked to close may take before it is forced.
+const CLOSE_WAIT_MS = 5000;
+const CLOSE_POLL_MS = 500;
+
 class GuiBroker extends EventEmitter {
   constructor({ channel, guiConfig, getPolicy = () => ({}), audit = null, dataDir = null, platform = process.platform, clock = Date.now,
-    log = createLogger('gui/broker'), heartbeatMs = 10000, realpath = realResolve } = {}) {
+    log = createLogger('gui/broker'), heartbeatMs = 10000, realpath = realResolve, timers = { setTimeout, clearTimeout } } = {}) {
     super();
-    Object.assign(this, { channel, guiConfig, getPolicy, audit, dataDir, platform, clock, log, heartbeatMs, realpath });
+    Object.assign(this, { channel, guiConfig, getPolicy, audit, dataDir, platform, clock, log, heartbeatMs, realpath, timers });
     this.leases = null;
     // Both maps are per job and only for runs that have one (R-F5-7): a run
     // with no job id gets no entry, so such runs never share a bucket.
@@ -280,16 +284,32 @@ class GuiBroker extends EventEmitter {
   }
 
   // Ends one process this job launched (a take's Chrome), by its pid: asked
-  // to close first, then forced. A pid the job did not launch is refused.
+  // to close, watched through the helper's process listing for up to
+  // CLOSE_WAIT_MS (a close that was sent is not a process that exited: a
+  // "Leave site?" dialog or a hung browser keeps it up), then forced. A pid
+  // the job did not launch is refused.
   async closeLaunched(pid, ctx = {}) {
     const byApp = ctx.jobId ? this.launched.get(ctx.jobId) : null;
-    if (!Number.isInteger(pid) || !byApp || ![...byApp.values()].some((pids) => pids.has(pid))) {
-      throw new GuiError('invalid_params', 'not a process this job launched');
+    const appId = byApp && Number.isInteger(pid) ? [...byApp.entries()].find(([, pids]) => pids.has(pid))?.[0] : undefined;
+    if (appId === undefined) throw new GuiError('invalid_params', 'not a process this job launched');
+    const req = { jobId: ctx.jobId };
+    await this.channel.request('close', { pids: [pid], force: false }, req);
+    const alive = async () => (await this._pids([appId], ctx)).some((p) => p.pid === pid);
+    // Ref'd timers: the wait itself keeps the process up until it is over.
+    const sleep = (ms) => new Promise((resolve) => { this.timers.setTimeout(resolve, ms); });
+    let forced = false;
+    let running = await alive();
+    for (let waited = 0; running && waited < CLOSE_WAIT_MS; waited += CLOSE_POLL_MS) {
+      await sleep(CLOSE_POLL_MS);
+      running = await alive();
     }
-    let closed = (await this.channel.request('close', { pids: [pid], force: false }, { jobId: ctx.jobId })).closed || [];
-    if (!closed.includes(pid)) closed = (await this.channel.request('close', { pids: [pid], force: true }, { jobId: ctx.jobId })).closed || [];
-    this._audit('gui.close', { job_id: ctx.jobId, pids: closed });
-    return { closed };
+    if (running) {
+      await this.channel.request('close', { pids: [pid], force: true }, req);
+      forced = true;
+    }
+    for (const pids of byApp.values()) pids.delete(pid);
+    this._audit('gui.close', { job_id: ctx.jobId, app_id: appId, pids: [pid], forced });
+    return { closed: [pid], forced };
   }
 
   // The id a job names one window by. A handle keeps its id for the job.

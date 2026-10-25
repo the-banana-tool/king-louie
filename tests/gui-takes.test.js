@@ -496,6 +496,22 @@ describe('a take ends cleanly, whatever it holds', () => {
     assert.equal(registry.set.has(`take:${out.take_id}`), false);
   });
 
+  it('the take mints its lease id and ends exactly that lease', async () => {
+    const asked = [];
+    const request = leases.request.bind(leases);
+    leases.request = (args) => { asked.push(args.leaseId); return request(args); };
+    const out = await started();
+    assert.equal(asked.length, 1);
+    assert.match(asked[0], /^[0-9a-f]{8}-[0-9a-f]{4}-4/);
+    assert.equal(out.lease_id, asked[0]);
+    assert.equal(relay.last('kl.lease.request').message.lease_id, asked[0]);
+    await takes.stop(out.take_id);
+    assert.equal(leases.find(asked[0]).state, 'ended');
+    assert.equal(leases.find(asked[0]).endReason, 'take_done');
+    await assert.rejects(leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes: 5, reason: 'x', leaseId: asked[0] }),
+      (e) => e.code === 'invalid_params', 'an id already used is refused');
+  });
+
   it('a job holding a computer_use lease gets lease_busy, and that lease survives', async () => {
     const cu = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes: 10, reason: 'other work' });
     leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 10 }));
@@ -608,6 +624,56 @@ describe('a take ends cleanly, whatever it holds', () => {
     assert.deepEqual(closes, []);
     assert.deepEqual(broker.closed, []);
     assert.equal(attached.at(-1).stopped, true, 'only disconnected');
+  });
+});
+
+describe('GuiBroker#closeLaunched', () => {
+  const { GuiBroker } = require('../src/gui/broker');
+  function brokerWith(exitAfterPolls) {
+    const requests = [];
+    let polls = 0;
+    const channel = {
+      on() {}, off() {},
+      async request(op, params) {
+        requests.push([op, params]);
+        if (op === 'processes') { polls += 1; return polls > exitAfterPolls ? [] : [{ pid: 7 }]; }
+        if (op === 'close') return { closed: params.pids };
+        return null;
+      }
+    };
+    const b = new GuiBroker({ channel, guiConfig, platform: 'win32', timers });
+    b._recordLaunched('job-1', 'chrome', 7);
+    return { b, requests };
+  }
+  const closes = (requests) => requests.filter((r) => r[0] === 'close').map((r) => r[1]);
+  async function drive(promise) {
+    let done = false;
+    promise.then(() => { done = true; }, () => { done = true; });
+    for (let i = 0; i < 40 && !done; i += 1) { await tick(); timers.advance(500); }
+    return promise;
+  }
+
+  it('a Chrome that exits when asked is not forced', async () => {
+    const { b, requests } = brokerWith(1);
+    const out = await drive(b.closeLaunched(7, { jobId: 'job-1' }));
+    assert.deepEqual(closes(requests), [{ pids: [7], force: false }]);
+    assert.equal(out.forced, false);
+  });
+
+  it('a Chrome still running after 5 s is forced', async () => {
+    const { b, requests } = brokerWith(Infinity);
+    const start = clock.now();
+    const out = await drive(b.closeLaunched(7, { jobId: 'job-1' }));
+    assert.deepEqual(closes(requests), [{ pids: [7], force: false }, { pids: [7], force: true }]);
+    assert.equal(out.forced, true);
+    assert.ok(clock.now() - start >= 5000);
+  });
+
+  it('a pid the job did not launch is refused, and nothing is sent', async () => {
+    const { b, requests } = brokerWith(0);
+    await assert.rejects(b.closeLaunched(8, { jobId: 'job-1' }), (e) => e.code === 'invalid_params');
+    await assert.rejects(b.closeLaunched(7, { jobId: 'job-2' }), (e) => e.code === 'invalid_params');
+    assert.deepEqual(requests, []);
   });
 });
 

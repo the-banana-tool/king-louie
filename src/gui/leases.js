@@ -5,6 +5,9 @@
 // Memory only: a restart ends them all (fail-closed).
 const { EventEmitter } = require('events');
 const crypto = require('crypto');
+// A lease id: a random UUID v4, as lease-v1 requires.
+const LEASE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const newLeaseId = () => crypto.randomUUID();
 const { performance } = require('perf_hooks');
 const { open } = require('../approvals/envelope');
 const { NonceCache, bytesSha256 } = require('../approvals/verify-device');
@@ -377,10 +380,15 @@ class LeaseManager extends EventEmitter {
   // kind 'take' (spec 2026-10-24 §6): take = { name, sites, browser,
   // credentials, unattended }, from a session the node started itself only
   // (nodeLocalOrigin), and only while gui.take.enabled is on.
-  async request({ jobId, origin, appIds, minutes, reason, signal = null, kind = 'computer_use', take = null, nodeLocalOrigin = true }) {
+  // leaseId: the id a new lease gets, minted by the caller (newLeaseId) so it
+  // knows its own lease without watching events; a fresh one when not given.
+  async request({ jobId, origin, appIds, minutes, reason, signal = null, kind = 'computer_use', take = null, nodeLocalOrigin = true, leaseId = null }) {
     // R-F5-7: a lease is bound to a job. A run with neither a job id nor a
     // chat id has none, and is refused before anything else is looked at.
     if (typeof jobId !== 'string' || !jobId) throw new GuiError('job_required', 'this run has no job or chat to bind a lease to');
+    if (leaseId !== null && (typeof leaseId !== 'string' || !LEASE_ID_RE.test(leaseId) || this.find(leaseId))) {
+      throw new GuiError('invalid_params', '"leaseId" must be a fresh lease id (newLeaseId)');
+    }
     if (!L.LEASE_KINDS.includes(kind)) throw new GuiError('invalid_params', `"kind" must be one of ${L.LEASE_KINDS.join(', ')}`);
     const isTake = kind === 'take';
     if (isTake) {
@@ -425,7 +433,7 @@ class LeaseManager extends EventEmitter {
     let lease = cur;
     if (!lease) {
       lease = {
-        leaseId: crypto.randomUUID(), jobId, origin, reason: String(reason), requestedApps: [...appIds], maxMinutes: minutes,
+        leaseId: leaseId || newLeaseId(), jobId, origin, reason: String(reason), requestedApps: [...appIds], maxMinutes: minutes,
         // kind and the take's block as requested; an unattended take has no contact window and never pauses (R-D1-7).
         kind, take: isTake ? take : null, unattended: isTake && take.unattended === true, name: isTake ? take.name : null,
         // expiresAt is on the wall clock (what the phone is shown), expiresMono the same moment on the monotonic one.
@@ -941,4 +949,4 @@ class LeaseManager extends EventEmitter {
   }
 }
 
-module.exports = { LeaseManager, CONTACT_REASON, CONTACT_MAX_S, GRANTOR_REVOKED_REASON, GRANTOR_CHECK_MS, LIST_RESIGN_MS };
+module.exports = { LeaseManager, newLeaseId, CONTACT_REASON, CONTACT_MAX_S, GRANTOR_REVOKED_REASON, GRANTOR_CHECK_MS, LIST_RESIGN_MS };

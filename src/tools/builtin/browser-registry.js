@@ -13,7 +13,10 @@ const registry = { default: null, byKey: new Map() };
 // Name of the profile backing each key's running browser, if any.
 const activeProfiles = new Map();
 
+// The key a call was decided under (ToolExecutor binds it when a take allows
+// the call), else the live take's, else `default`.
 function browserKeyOf(context) {
+  if (context && typeof context.browserKey === 'string' && context.browserKey) return context.browserKey;
   const key = context && context.takePolicy && context.takePolicy.current
     && context.takePolicy.current.browserKey;
   return key || DEFAULT_KEY;

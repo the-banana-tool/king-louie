@@ -472,6 +472,11 @@ class ToolExecutor extends EventEmitter {
     // (`passthrough`), which then refuses where it would have asked. A path
     // outside the allowed roots is never lifted by the take's allow.
     let takeAllowed = false;
+    // The browser key the call was decided under: a call the take let through
+    // runs on the take's browser even if the take ends before it runs (the
+    // registry then refuses it, take_browser_unavailable), never on the
+    // owner's default browser.
+    let decidedBrowserKey = null;
     const take = this._liveTake();
     if (take) {
       const d = await take.decide(toolName, effectiveParameters);
@@ -481,6 +486,7 @@ class ToolExecutor extends EventEmitter {
         this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
         return refused;
       }
+      if (typeof take.browserKey === 'string' && take.browserKey) decidedBrowserKey = take.browserKey;
       if (d.allow === true && !d.passthrough && !(tierUnsafe && tierReason === 'path_outside_allowed_roots')) {
         takeAllowed = true;
         approvalSource = { type: 'take' };
@@ -646,7 +652,7 @@ class ToolExecutor extends EventEmitter {
       // has one to read (its snapshot or its own egress), so a skill tool's
       // model call is held to it (src/skills/skill-models.js).
       const callerPolicy = this.turnModels || this.egress ? { egress: this._egressPolicy() } : {};
-      const result = detachImages(tool, await runAsSkillCaller({ channel: 'tool', ...callerPolicy }, () => tool.execute(effectiveParameters, {
+      const executeContext = {
         ...this.extraToolOptions,
         ...options,
         workingDirectory: options.workingDirectory || this.workingDirectory,
@@ -671,7 +677,11 @@ class ToolExecutor extends EventEmitter {
         // The deny rules and the node tier for a call a tool makes itself
         // (Take.run_steps' steps); from this executor, never from options.
         checkDenied: (name, params) => this._checkDenied(name, params, options)
-      })));
+      };
+      // Set here only, and not writable: no option or tool changes which
+      // browser this call was approved for (src/tools/builtin/browser-registry.js).
+      Object.defineProperty(executeContext, 'browserKey', { value: decidedBrowserKey, writable: false, enumerable: true, configurable: false });
+      const result = detachImages(tool, await runAsSkillCaller({ channel: 'tool', ...callerPolicy }, () => tool.execute(effectiveParameters, executeContext)));
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
         const postHookResult = await this.hookExecutor.run('PostToolUse', {

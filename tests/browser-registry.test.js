@@ -16,6 +16,13 @@ describe('browser registry', () => {
     assert.equal(browserKeyOf({ takePolicy: { current: { browserKey: 'take:7' } } }), 'take:7');
   });
 
+  it('the key a call was decided under comes first, then the live take\'s, then default', () => {
+    assert.equal(browserKeyOf({ browserKey: 'take:1', takePolicy: { current: { browserKey: 'take:2' } } }), 'take:1');
+    assert.equal(browserKeyOf({ browserKey: 'take:1', takePolicy: { current: null } }), 'take:1');
+    assert.equal(browserKeyOf({ browserKey: null, takePolicy: { current: { browserKey: 'take:2' } } }), 'take:2');
+    assert.equal(browserKeyOf({ browserKey: null, takePolicy: { current: null } }), 'default');
+  });
+
   it('two contexts resolve two browsers; the default is shared', () => {
     const takeBrowser = new PlaywrightBrowser();
     setBrowser('take:1', takeBrowser);
