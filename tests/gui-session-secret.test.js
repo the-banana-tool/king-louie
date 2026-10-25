@@ -239,7 +239,9 @@ describe('per-user copies', () => {
       const sid = 'S-1-5-21-1-2-3-1001';
       // An unrelated entry icacls can resolve: BUILTIN\Users.
       const other = 'S-1-5-32-545';
-      const me = /"(S-1-[0-9-]+)"/.exec(execFileSync('whoami', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' }))[1];
+      // whoami.exe by absolute path: a bare `whoami` resolves to coreutils' under Git Bash.
+      const whoamiExe = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'whoami.exe');
+      const me = /"(S-1-[0-9-]+)"/.exec(execFileSync(whoamiExe, ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true }))[1];
       const aces = (p) => inspectWindowsAcl([p])[0].aces;
       const entries = (p) => aces(p).filter((a) => a.sid === sid);
       const run = (mode, dataDir, expected = S.windowsFinalPath(dataDir), names = ['outbox', 'inbox']) => S.runCourierAcl({ mode, sid, dataDir, expected, names });

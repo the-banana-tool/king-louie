@@ -53,7 +53,7 @@ describe('NODE_YAML_KEYS', () => {
     assert.deepEqual([...NODE_YAML_KEYS.approvers], ['relay', 'request_ttl_s']);
     assert.deepEqual([...NODE_YAML_KEYS.frontdoor], ['domain', 'listen', 'acme', 'tls', 'oauth', 'mcp', 'audit']);
     assert.deepEqual([...NODE_YAML_KEYS.delegate], ['provider', 'model', 'agent', 'idle_close', 'cwd', 'max_sessions']);
-    assert.deepEqual([...NODE_YAML_KEYS.gui], ['enabled', 'apps', 'screenshot', 'live_view', 'lease']);
+    assert.deepEqual([...NODE_YAML_KEYS.gui], ['enabled', 'apps', 'screenshot', 'live_view', 'lease', 'take', 'browser', 'recorder']);
     assert.ok(Object.isFrozen(NODE_YAML_KEYS));
     for (const level of Object.values(NODE_YAML_KEYS)) assert.ok(Object.isFrozen(level));
   });
