@@ -70,7 +70,7 @@ describe('ToolExecutor with a take policy', () => {
     assert.equal(calls.length, 0);
     assert.deepEqual(ran, ['BrowserPage']);
     assert.equal(granted.length, 1);
-    assert.equal(granted[0].source, 'take');
+    assert.deepEqual(granted[0].source, { type: 'take' });
     assert.equal(granted[0].toolName, 'BrowserPage');
   });
 

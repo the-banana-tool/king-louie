@@ -569,7 +569,7 @@ class ToolExecutor extends EventEmitter {
       }
       if (d.allow === true && !d.passthrough && !(tierUnsafe && tierReason === 'path_outside_allowed_roots')) {
         takeAllowed = true;
-        approvalSource = 'take';
+        approvalSource = { type: 'take' };
         this.emit('approvalAutoGranted', { toolName, parameters: effectiveParameters, source: approvalSource });
       }
     }
