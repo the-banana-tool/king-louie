@@ -131,7 +131,7 @@ const VALIDATORS = {
     && isString(m.contact_token) && CONTACT_TOKEN_RE.test(m.contact_token)
     && nullOr((g) => isPlainObject(g) && exactKeys(g, ['device_id', 'name']) && DEVICE_ID_RE.test(g.device_id) && nullOr((n) => within(n, 64) && n.length > 0)(g.name))(m.granted_by)
     // 2026-10-24: the lease's kind, whether it runs unattended, and a take's name (null for computer_use).
-    && LEASE_KINDS.includes(m.kind) && typeof m.unattended === 'boolean'
+    && LEASE_KINDS.includes(m.kind) && typeof m.unattended === 'boolean' && (m.kind === 'take' || m.unattended === false)
     && (m.kind === 'take' ? within(m.name, 60) && m.name.length > 0 && plainLineProblem(m.name) === null : m.name === null),
   'kl.lease.view': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'to_device', 'state', 'locked', 'remaining_s', 'foreground', 'frame', 'frame_dropped', 'actions', 'contact_token'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && Number.isInteger(m.seq) && m.seq >= 1 && isTimestamp(m.at)

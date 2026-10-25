@@ -376,8 +376,9 @@ Rules:
   `min(max_minutes, gui.take.max_minutes, 240)` for a take and
   `min(max_minutes, gui.lease.max_minutes, 60)` for `computer_use`, else
   `minutes_out_of_range` (check 12).
-- A status's `kind` is one of `computer_use`, `take`; `unattended` a boolean;
-  `name` the take's name (as above) for a take and `null` otherwise.
+- A status's `kind` is one of `computer_use`, `take`; `unattended` a boolean,
+  and `false` for `computer_use`; `name` the take's name (as above) for a take
+  and `null` otherwise.
 - **Unattended.** A lease whose request says `unattended: true` has no contact
   window and is never suspended: it ends only by expiry, revoke, device
   revocation, job close or the take's own endings. A watch is still accepted
@@ -387,7 +388,9 @@ Rules:
 Vectors: the given of a grant vector may carry `gui_take_max_minutes`.
 Phones consume five more: `take-grant` (a take of 180 minutes granted for
 180; `given.request` and `expect.message` as for the other phone-built
-grants), `take-grant-minutes-over-cap` (241 minutes: `minutes_out_of_range`),
+grants), `take-grant-minutes-over-cap` (the admin's take cap,
+`gui_take_max_minutes: 120`, below the requested 180: a grant of 150 is
+`minutes_out_of_range`),
 `take-request-missing-name` and `computer-use-with-unattended` (`check:
 'request'`: a node-signed request whose lease, hashed again, has the wrong
 keys for its kind; `VALIDATORS['kl.lease.request']` refuses it,

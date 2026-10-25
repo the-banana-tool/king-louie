@@ -355,8 +355,10 @@ function buildVectors() {
     requestOptions: takeRequest, grantOptions: { minutes: 180 }, given: { gui_take_max_minutes: 240 },
     expect: accepted, consumers: PHONES, withRequest: true
   }));
+  // The admin's take cap (gui.take.max_minutes, 120 here) binds below the
+  // request's 180 minutes.
   out.push(grantVector('take-grant-minutes-over-cap', {
-    requestOptions: takeRequest, grantOptions: { minutes: 241 }, given: { gui_take_max_minutes: 240 },
+    requestOptions: takeRequest, grantOptions: { minutes: 150 }, given: { gui_take_max_minutes: 120 },
     expect: reject('minutes_out_of_range'), check: 12, consumers: PHONES, withRequest: true
   }));
   // A request the node signed with its lease altered and hashed again, so

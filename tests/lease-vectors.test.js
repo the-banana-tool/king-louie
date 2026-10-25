@@ -175,6 +175,38 @@ describe('lease-v1 vectors', () => {
 });
 
 describe('lease-v1 message shapes', () => {
+  describe('the take lease (2026-10-24)', () => {
+    const { open } = require('../src/approvals/envelope');
+    const take = open(byName.get('take-grant').given.request).message.lease;
+
+    it('checkLease accepts the take-grant lease, and 240 minutes', () => {
+      assert.equal(take.kind, 'take');
+      assert.equal(L.checkLease(take), true);
+      assert.equal(L.checkLease({ ...take, max_minutes: 240 }), true);
+    });
+
+    const mutations = {
+      'a site with capitals': { sites: ['ChatGPT.com'] },
+      'a site with no dot': { sites: ['chatgpt'] },
+      'an empty browser list': { browser: [] },
+      'a name of 61 characters': { name: 'x'.repeat(61) },
+      'a name with a zero-width character': { name: 'BSEOA\u200Bin ChatGPT' },
+      'credentials that is not a boolean': { credentials: 'no' },
+      'unattended that is not a boolean': { unattended: 'yes' },
+      'max_minutes over 240': { max_minutes: 241 },
+      'a kind that is neither known kind': { kind: 'screen_share' }
+    };
+    for (const [label, change] of Object.entries(mutations)) {
+      it(`checkLease refuses ${label}`, () => assert.equal(L.checkLease({ ...take, ...change }), false));
+    }
+
+    it('a computer_use status must say unattended: false', () => {
+      const status = open(byName.get('status-valid').input).message;
+      assert.equal(L.VALIDATORS['kl.lease.status'](status), true);
+      assert.equal(L.VALIDATORS['kl.lease.status']({ ...status, unattended: true }), false);
+    });
+  });
+
   it('the node-signed request validates and hashes its lease', () => {
     const v = byName.get('grant-valid');
     const { open } = require('../src/approvals/envelope');
