@@ -22,6 +22,7 @@ const ROOT = path.join(__dirname, '..');
 const EXAMPLES = path.join(ROOT, 'examples');
 const RUNBOOKS = path.join(EXAMPLES, 'runbooks');
 const GUIDE = path.join(ROOT, 'docs', 'install-guide.md');
+const DRIVING_GUIDE = path.join(ROOT, 'docs', 'driving-king-louie.md');
 const EUID = typeof process.geteuid === 'function' ? process.geteuid() : 0;
 const POSIX = process.platform !== 'win32';
 
@@ -123,8 +124,8 @@ describe('personal-value denylist', () => {
     assert.ok(Object.isFrozen(ALLOWED_HOSTS));
   });
 
-  it('finds nothing personal in examples/ or the install guide', () => {
-    const files = [...listFiles(EXAMPLES), GUIDE].filter((f) => fs.existsSync(f));
+  it('finds nothing personal in examples/, the install guide or the driver guide', () => {
+    const files = [...[...listFiles(EXAMPLES), GUIDE].filter((f) => fs.existsSync(f)), DRIVING_GUIDE];
     const problems = [];
     for (const file of files) {
       for (const finding of scanForPersonalValues(fs.readFileSync(file, 'utf8'))) {
@@ -952,6 +953,12 @@ describe('MCP client configs', () => {
       '-c',
       'cd /opt/king-louie/mcp/work && exec /usr/local/bin/node /opt/king-louie/app/bin/king-louie-service.js mcp --data-dir /opt/king-louie/mcp/data'
     ]);
+  });
+
+  it('Claude Code on Windows: runs node.exe on the service script against the service data dir', () => {
+    const server = read('claude-code.windows.json').mcpServers['king-louie'];
+    assert.ok(server.command.endsWith('node.exe'), server.command);
+    assert.deepEqual(server.args, ['C:\\KingLouie\\app\\bin\\king-louie-service.js', 'mcp', '--data-dir', 'C:\\ProgramData\\KingLouie\\data']);
   });
 
   it('Windows: the same argument shape runs through cmd.exe with a spaced directory', { skip: POSIX ? 'cmd.exe only' : false }, () => {
