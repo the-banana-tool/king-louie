@@ -23,17 +23,25 @@ const STOP_WAIT_MS = 15000;
 const KILL_WAIT_MS = 2000;
 
 const DRIVE_PATH = /^[A-Za-z]:[\\/]/;
-const hasDotSegment = (p) => p.split(/[\\/]/).some((s) => s === '..' || s === '.');
 
-// The take's profile must be strictly below
-// %LOCALAPPDATA%\KingLouie\browser-profiles: a drive path, no '.' or '..'
-// segment anywhere (even one that would stay inside), case-insensitive.
-function profileInsideRoot(profileDir, env) {
-  if (typeof profileDir !== 'string' || !DRIVE_PATH.test(profileDir) || hasDotSegment(profileDir)) return false;
-  if (!env || typeof env.LOCALAPPDATA !== 'string' || !DRIVE_PATH.test(env.LOCALAPPDATA)) return false;
-  const root = path.win32.resolve(env.LOCALAPPDATA, 'KingLouie', 'browser-profiles');
-  const rel = path.win32.relative(root, path.win32.resolve(profileDir));
-  return rel !== '' && !rel.startsWith('..') && !path.win32.isAbsolute(rel);
+// The service names a profile and a take; the helper, as the user, puts
+// them under the user's own %LOCALAPPDATA%\KingLouie (the service, LOCAL
+// SERVICE, cannot know where that is). The name rules make an escape
+// impossible: no separator, no dot.
+const PROFILE_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+const TAKE_ID = /^take-[0-9a-f]{12}$/;
+
+// Switches that would move the profile or the debugging endpoint the
+// helper fixed (Chromium keeps the last of a repeated switch).
+const RESERVED_SWITCHES = new Set(['user-data-dir', 'profile-directory', 'remote-debugging-port', 'remote-debugging-address', 'remote-debugging-pipe']);
+function reservedSwitch(arg) {
+  const m = /^-{1,2}([^=]*)/.exec(arg);
+  return Boolean(m) && RESERVED_SWITCHES.has(m[1].trim().toLowerCase());
+}
+
+function kingLouieDir(env) {
+  if (!env || typeof env.LOCALAPPDATA !== 'string' || !DRIVE_PATH.test(env.LOCALAPPDATA)) throw new GuiError('invalid_params');
+  return path.win32.join(env.LOCALAPPDATA, 'KingLouie');
 }
 
 // Two lines: the port, then /devtools/browser/<id>. Anything else (not yet
@@ -51,7 +59,8 @@ const evenSide = (n) => Number.isInteger(n) && n >= 16 && n <= 16384 && n % 2 ==
 
 function createWindowsBackend({
   env = process.env, log = createLogger('session-helper/windows'), spawnImpl = spawn, workerFile = path.join(__dirname, 'windows-worker.ps1'),
-  readFile = fs.promises.readFile, unlink = fs.promises.unlink, statSync = fs.statSync, clock = Date.now, timers = { setTimeout, clearTimeout }
+  readFile = fs.promises.readFile, unlink = fs.promises.unlink, mkdir = fs.promises.mkdir, statSync = fs.statSync, clock = Date.now,
+  timers = { setTimeout, clearTimeout }
 } = {}) {
   const worker = new LineWorker({
     file: windowsPowerShellExe(env),
@@ -72,11 +81,21 @@ function createWindowsBackend({
 
   // pid -> { pid, child, path, startedAt, exited, code, endedAt, done }
   const recordings = new Map();
+  // Stops under way, so stopRecordings (the helper ending) waits for them too.
+  const stopping = new Set();
 
-  async function recordStop({ pid } = {}) {
+  function recordStop({ pid } = {}) {
     const rec = recordings.get(pid);
-    if (!rec) throw new GuiError('unknown_recording');
+    if (!rec) return Promise.reject(new GuiError('unknown_recording'));
     recordings.delete(pid);
+    const p = finish(rec);
+    stopping.add(p);
+    const forget = () => stopping.delete(p);
+    p.then(forget, forget);
+    return p;
+  }
+
+  async function finish(rec) {
     const duration = () => Math.round(((rec.endedAt === null ? clock() : rec.endedAt) - rec.startedAt) / 100) / 10;
     const bytes = () => {
       try { return statSync(rec.path).size; } catch { return 0; }
@@ -111,10 +130,12 @@ function createWindowsBackend({
       child.unref();
       return { pid: child.pid };
     },
-    async launchBrowser({ exe, profileDir, args = [] } = {}) {
+    async launchBrowser({ exe, profile, args = [] } = {}) {
       if (!/\.exe$/i.test(String(exe))) throw new GuiError('app_type_not_supported');
-      if (!profileInsideRoot(profileDir, env)) throw new GuiError('profile_outside_root');
-      if (!Array.isArray(args) || !args.every((a) => typeof a === 'string')) throw new GuiError('invalid_params');
+      if (typeof profile !== 'string' || !PROFILE_NAME.test(profile)) throw new GuiError('invalid_params');
+      if (!Array.isArray(args) || !args.every((a) => typeof a === 'string' && !reservedSwitch(a))) throw new GuiError('invalid_params');
+      const profileDir = path.win32.join(kingLouieDir(env), 'browser-profiles', profile);
+      try { await mkdir(profileDir, { recursive: true }); } catch { throw new GuiError('browser_launch_failed'); }
       const portFile = path.win32.join(profileDir, PORT_FILE);
       // A file left by an earlier run would hand back a dead port.
       try { await unlink(portFile); } catch { /* none there */ }
@@ -136,12 +157,22 @@ function createWindowsBackend({
         await sleep(PORT_POLL_MS);
       }
     },
-    async recordStart({ ffmpeg, path: out, fps = 30, size = null } = {}) {
-      if (!/\.exe$/i.test(String(ffmpeg))) throw new GuiError('app_type_not_supported');
-      if (typeof out !== 'string' || !DRIVE_PATH.test(out) || hasDotSegment(out) || !/\.mp4$/i.test(out)) throw new GuiError('invalid_params');
+    async recordStart({ ffmpeg = null, takeId, path: given = null, fps = 30, size = null } = {}) {
+      if (typeof takeId !== 'string' || !TAKE_ID.test(takeId)) throw new GuiError('invalid_params');
+      // Given, the path is the service's, already checked against the
+      // session's working directory: used as it is, if absolute.
+      if (given !== null && (typeof given !== 'string' || !DRIVE_PATH.test(given))) throw new GuiError('invalid_params');
       if (!Number.isInteger(fps) || fps < 1 || fps > 120) throw new GuiError('invalid_params');
       // libx264 with yuv420p needs even sides.
       if (size !== null && !(size && evenSide(size.width) && evenSide(size.height))) throw new GuiError('invalid_params');
+      if (!ffmpeg) throw new GuiError('recorder_missing');
+      if (!/\.exe$/i.test(String(ffmpeg))) throw new GuiError('app_type_not_supported');
+      let out = given;
+      if (out === null) {
+        const dir = path.win32.join(kingLouieDir(env), 'recordings', takeId);
+        try { await mkdir(dir, { recursive: true }); } catch { throw new GuiError('recorder_failed'); }
+        out = path.win32.join(dir, 'take.mp4');
+      }
       const args = ['-y', '-f', 'gdigrab', '-framerate', String(fps), '-i', 'desktop',
         ...(size ? ['-vf', `scale=${size.width}:${size.height}`] : []),
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out];
@@ -162,13 +193,20 @@ function createWindowsBackend({
       if (child.stdin && typeof child.stdin.on === 'function') child.stdin.on('error', () => {});
       rec.pid = child.pid;
       rec.startedAt = clock();
+      // A pid Windows gave again: the old entry is finalised first (an
+      // exited one at once; a live one, which cannot be, stopped and
+      // tracked), never overwritten unseen.
+      if (recordings.has(rec.pid)) recordStop({ pid: rec.pid }).catch(() => {});
       recordings.set(rec.pid, rec);
-      return { pid: rec.pid, startedAt: rec.startedAt };
+      return { pid: rec.pid, startedAt: rec.startedAt, path: out };
     },
     recordStop,
-    // Every live recording, at once (the service gone 30 s, the helper stopping).
+    // Every live recording, at once (the service gone 30 s, the helper
+    // stopping), and every stop already under way.
     async stopRecordings() {
+      const inFlight = [...stopping];
       const results = await Promise.all([...recordings.keys()].map((pid) => recordStop({ pid }).catch(() => null)));
+      await Promise.all(inFlight.map((p) => p.catch(() => null)));
       return results.filter(Boolean);
     },
     keepAwake: ({ on } = {}) => worker.call('keep_awake', { on: on === true }),
@@ -186,4 +224,4 @@ function createWindowsBackend({
   };
 }
 
-module.exports = { createWindowsBackend, profileInsideRoot, parsePortFile };
+module.exports = { createWindowsBackend, parsePortFile, reservedSwitch, PROFILE_NAME, TAKE_ID };

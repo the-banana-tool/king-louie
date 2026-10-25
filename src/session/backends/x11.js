@@ -10,7 +10,8 @@ const { promisify } = require('util');
 const { createLogger } = require('../../logging');
 const { GuiError } = require('../../gui/errors');
 const { imageMatches } = require('../../gui/apps');
-const { listProcesses, launchDetached, jpegSize, keysym, modifierKeys, windowsOnlyTakeOps } = require('./linux-common');
+const { listProcesses, launchDetached, jpegSize, keysym, modifierKeys } = require('./linux-common');
+const { windowsOnlyTakeOps } = require('./take-ops');
 
 const execFileP = promisify(execFile);
 const XDOTOOL = '/usr/bin/xdotool';

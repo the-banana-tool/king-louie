@@ -60,7 +60,8 @@ Each sealed frame: `len(4, BE) ‖ seq(8, BE) ‖ AES-256-GCM ciphertext ‖ tag
 
 ## 5. Messages after `ready`
 
-The helper's first sealed frame is its `probe_report`. Then:
+The helper's first sealed frame is its `probe_report` (with `recorder`
+since 2026-10-24, below). Then:
 
 - `{ "t": "req", "id", "op", "job_id", "lease_id", "params" }` → `{ "t": "res", "id", "ok": true, "result" }`
   or `{ "t": "res", "id", "ok": false, "error": { "code", "message", "detail" } }`.
@@ -98,25 +99,47 @@ ops, on the Windows backend only; every other backend answers
 `capability_unavailable` ("recording and browser launch are Windows only in
 D1"):
 
-- `launch_browser` `{ exe, profile_dir, args? }` → `{ pid, cdp: { port, path } }`.
+The service runs as LOCAL SERVICE and cannot know the user's
+`%LOCALAPPDATA%` or `PATH`, so the helper, which runs as the user, resolves
+every user-side path itself. The service sends names; the helper places them.
+
+- `probe_report` (and `probe_changed`'s `data`) carries
+  `"recorder": { "ffmpeg": <absolute path> | null }`: the `ffmpeg.exe` the
+  helper found once at startup by walking its own `PATH` in order (only
+  when `PATHEXT` lists `.exe`; relative entries skipped; no shell). `null`
+  when there is none, and on every backend but Windows. The service keeps
+  an absolute path of 1 to 1024 characters with no control characters, and
+  `null` otherwise.
+- `launch_browser` `{ exe, profile, args? }` → `{ pid, cdp: { port, path } }`.
   `exe` is an `.exe`, re-resolved as `launch`'s is (`path_changed`).
-  `profile_dir` must be strictly below
-  `%LOCALAPPDATA%\KingLouie\browser-profiles\` of the helper's user: a drive
-  path, no `.` or `..` segment, compared without case; anything else is
-  `profile_outside_root` and nothing is started. The helper removes a stale
-  `DevToolsActivePort` from the profile, starts `exe` detached with
-  `--user-data-dir=<profile_dir> --remote-debugging-port=0 --no-first-run
-  --no-default-browser-check` and then `args`, and reads
-  `<profile_dir>\DevToolsActivePort` every 200 ms for up to 10 s for an
-  integer port and a `/devtools/browser/<id>` path. When none comes it kills
-  the browser and answers `browser_launch_failed`. The service attaches over
-  CDP at `http://127.0.0.1:<port>`; `close` with the pid ends it.
-- `record_start` `{ ffmpeg, path, fps?, size? }` → `{ pid, startedAt }`
-  (`startedAt` in ms on the helper's clock). Runs `ffmpeg` (an `.exe`) as
-  the user: `-y -f gdigrab -framerate <fps, 30> -i desktop`, then
-  `-vf scale=<w>:<h>` when `size` (even integers) is given, `-c:v libx264
-  -preset veryfast -crf 23 -pix_fmt yuv420p -an -movflags +faststart
-  <path>` (an absolute `.mp4`). A failure to start is `recorder_failed`.
+  `profile` is a name matching `^[A-Za-z0-9_-]{1,64}$`; the helper creates
+  `%LOCALAPPDATA%\KingLouie\browser-profiles\<profile>` (the user's) and
+  uses it as the profile. `args` are strings, and none may name the switch
+  `user-data-dir`, `profile-directory`, `remote-debugging-port`,
+  `remote-debugging-address` or `remote-debugging-pipe` (one or two dashes,
+  the name before any `=`, without case): Chromium keeps the last of a
+  repeated switch. Any of these wrong is `invalid_params`, and nothing is
+  started. The helper removes a stale `DevToolsActivePort` from the
+  profile, starts `exe` detached with `--user-data-dir=<profile dir>
+  --remote-debugging-port=0 --no-first-run --no-default-browser-check` and
+  then `args`, and reads `DevToolsActivePort` every 200 ms for up to 10 s
+  for an integer port and a `/devtools/browser/<id>` path. When none comes
+  it kills the browser and answers `browser_launch_failed`. The service
+  attaches over CDP at `http://127.0.0.1:<port>`; `close` with the pid ends
+  it.
+- `record_start` `{ ffmpeg?, take_id, path?, fps?, size? }` →
+  `{ pid, startedAt, path }` (`startedAt` in ms on the helper's clock;
+  `path` is the file being written). `take_id` matches
+  `^take-[0-9a-f]{12}$`. Without `path` the helper writes
+  `%LOCALAPPDATA%\KingLouie\recordings\<take_id>\take.mp4` (creating the
+  directory); a given `path` must be absolute and is used as it is (the
+  service has checked it against the session's working directory). Without
+  `ffmpeg` the helper uses its `recorder.ffmpeg`; with neither the answer is
+  `recorder_missing`. It runs ffmpeg (an `.exe`) as the user: `-y -f
+  gdigrab -framerate <fps, 30> -i desktop`, then `-vf scale=<w>:<h>` when
+  `size` (even integers) is given, `-c:v libx264 -preset veryfast -crf 23
+  -pix_fmt yuv420p -an -movflags +faststart <path>`. A bad parameter is
+  `invalid_params`; a failure to start is `recorder_failed`.
 - `record_stop` `{ pid }` → `{ path, durationS, bytes, truncated }`. The
   helper writes `q` to ffmpeg's stdin and waits up to 15 s for it to exit,
   else kills it and says `truncated: true`. `bytes` is the file's size (0
@@ -128,8 +151,8 @@ D1"):
   `ES_CONTINUOUS` off). It lasts while the worker runs.
 - 30 s after the service connection closes, the helper stops every live
   recording as `record_stop` would; a reconnect within 30 s keeps them. A
-  helper that stops (logout, exit) stops them first. Nothing deletes a
-  recording's file.
+  helper that stops (logout, exit) stops them first, and waits for any stop
+  already under way. Nothing deletes a recording's file.
 - These four, like `input`, are answered and logged by their code alone:
   their errors could quote the argv, a path or ffmpeg's output. ffmpeg's
   stderr is drained and never read or logged.

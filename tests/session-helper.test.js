@@ -213,23 +213,44 @@ describe('take ops', () => {
       keepAwake: async (a) => { calls.push(['keepAwake', a]); return { on: a.on }; }
     };
     const realpath = (p) => p;
-    const handle = createOpHandler(backend, { platform: 'win32', realpath });
+    const handle = createOpHandler(backend, { platform: 'win32', realpath, recorder: { ffmpeg: 'C:\\Users\\alice\\bin\\ffmpeg.exe' } });
     const exe = 'C:\\x\\chrome.exe';
-    assert.deepEqual(await handle('launch_browser', { exe, profile_dir: 'C:\\p\\demo', args: ['--a'] }), { pid: 1, cdp: { port: 9222, path: '/devtools/browser/x' } });
-    assert.deepEqual(await handle('launch_browser', { exe, profile_dir: 'C:\\p\\demo' }), { pid: 1, cdp: { port: 9222, path: '/devtools/browser/x' } });
-    assert.deepEqual(await handle('record_start', { ffmpeg: 'C:\\ff\\ffmpeg.exe', path: 'C:\\r\\a.mp4', fps: 24, size: { width: 1280, height: 720 } }), { pid: 2, startedAt: 5 });
+    const take = 'take-0123456789ab';
+    assert.deepEqual(await handle('launch_browser', { exe, profile: 'demo', args: ['--a'] }), { pid: 1, cdp: { port: 9222, path: '/devtools/browser/x' } });
+    assert.deepEqual(await handle('launch_browser', { exe, profile: 'demo' }), { pid: 1, cdp: { port: 9222, path: '/devtools/browser/x' } });
+    assert.deepEqual(await handle('record_start', { ffmpeg: 'C:\\ff\\ffmpeg.exe', take_id: take, path: 'C:\\r\\a.mp4', fps: 24, size: { width: 1280, height: 720 } }), { pid: 2, startedAt: 5 });
+    await handle('record_start', { take_id: take });
     assert.deepEqual(await handle('record_stop', { pid: 2 }), { path: 'C:\\r\\a.mp4', durationS: 1, bytes: 3, truncated: false });
     assert.deepEqual(await handle('keep_awake', { on: true }), { on: true });
     assert.deepEqual(await handle('keep_awake', { on: 'yes' }), { on: false }, 'only true is on');
     assert.deepEqual(calls, [
-      ['launchBrowser', { exe, profileDir: 'C:\\p\\demo', args: ['--a'] }],
-      ['launchBrowser', { exe, profileDir: 'C:\\p\\demo', args: [] }],
-      ['recordStart', { ffmpeg: 'C:\\ff\\ffmpeg.exe', path: 'C:\\r\\a.mp4', fps: 24, size: { width: 1280, height: 720 } }],
+      ['launchBrowser', { exe, profile: 'demo', args: ['--a'] }],
+      ['launchBrowser', { exe, profile: 'demo', args: [] }],
+      ['recordStart', { ffmpeg: 'C:\\ff\\ffmpeg.exe', takeId: take, path: 'C:\\r\\a.mp4', fps: 24, size: { width: 1280, height: 720 } }],
+      // No ffmpeg named: the one the helper found; no path: the helper's default.
+      ['recordStart', { ffmpeg: 'C:\\Users\\alice\\bin\\ffmpeg.exe', takeId: take, path: null, fps: undefined, size: null }],
       ['recordStop', { pid: 2 }],
       ['keepAwake', { on: true }],
       ['keepAwake', { on: false }]
     ]);
     await assert.rejects(handle('record_everything', {}), (e) => e.code === 'unknown_op');
+    // No recorder found and none named: null reaches the backend, which says recorder_missing.
+    const bare = createOpHandler(backend, { platform: 'win32', realpath });
+    await bare('record_start', { take_id: take });
+    assert.equal(calls.at(-1)[1].ffmpeg, null);
+  });
+
+  it('findFfmpeg walks PATH for ffmpeg.exe as the user, with no shell', () => {
+    const { findFfmpeg } = require('../src/session/recorder');
+    const have = new Set(['C:\\tools\\ffmpeg\\bin\\ffmpeg.exe', 'C:\\later\\ffmpeg.exe']);
+    const isFile = (p) => have.has(p);
+    const env = { PATH: 'bin;C:\\Windows\\System32;"C:\\tools\\ffmpeg\\bin";C:\\later', PATHEXT: '.COM;.EXE;.BAT' };
+    assert.equal(findFfmpeg({ platform: 'win32', env, isFile }), 'C:\\tools\\ffmpeg\\bin\\ffmpeg.exe', 'the first PATH entry that has it');
+    assert.equal(findFfmpeg({ platform: 'win32', env: { ...env, PATH: '.;bin' }, isFile: () => true }), null, 'a relative entry is never searched');
+    assert.equal(findFfmpeg({ platform: 'win32', env: { ...env, PATHEXT: '.COM;.BAT' }, isFile }), null, 'not when PATHEXT leaves .exe out');
+    assert.equal(findFfmpeg({ platform: 'win32', env: { Path: 'C:\\later' }, isFile }), 'C:\\later\\ffmpeg.exe');
+    assert.equal(findFfmpeg({ platform: 'win32', env: {}, isFile }), null);
+    assert.equal(findFfmpeg({ platform: 'linux', env, isFile: () => true }), null, 'Windows only in D1');
   });
 
   it('launch_browser re-resolves the browser exe as launch does', async () => {
@@ -277,6 +298,69 @@ describe('take ops', () => {
     assert.equal(stops, 3);
     await t.advance(30_000);
     assert.equal(stops, 3);
+  });
+
+  // Review M-6: the wiring in runSessionHelper, not only the guard.
+  it('runSessionHelper: a drop with a reconnect keeps the recordings; 30 s without the service stops them', async () => {
+    const { configDir, endpoint } = setup();
+    const { file, secret } = writeCopy({ configDir, endpoint });
+    let channel = await channelFor(endpoint, { secret });
+    const backend = fakeBackend([REPORT]);
+    const t = manualTimers();
+    const ac = new AbortController();
+    cleanups.push(() => ac.abort());
+    const armed = () => t.list.filter((h) => !h.done).length;
+    let ready = once(channel, 'ready');
+    const done = runSessionHelper({ sessionFile: file, signal: ac.signal, deps: { ...quick, backend, timers: t, findFfmpeg: () => 'C:\\ff\\ffmpeg.exe' } });
+    const [info] = await ready;
+    const stops = () => backend.calls.filter((c) => c === 'stopRecordings').length;
+
+    // A drop, then the helper is back within 29 s (it reconnects at once here).
+    ready = once(channel, 'ready');
+    channel._destroy(channel.current, 'test');
+    await ready;
+    await t.advance(29_000);
+    assert.equal(armed(), 0, 'the reconnect cleared the timer');
+    await t.advance(10_000);
+    assert.equal(stops(), 0, 'a reconnect keeps the recording');
+
+    // The service goes away and stays away.
+    await channel.stop();
+    while (armed() === 0) await new Promise((r) => setImmediate(r));
+    await t.advance(29_999);
+    assert.equal(stops(), 0);
+    await t.advance(1);
+    assert.equal(stops(), 1, 'stopped once 30 s passed');
+
+    // The recorder rides in the probe report, and the service keeps it.
+    assert.deepEqual(info.recorder, { ffmpeg: 'C:\\ff\\ffmpeg.exe' });
+    channel = null;
+    ac.abort();
+    assert.equal(await done, 0);
+  });
+
+  it('the probe_report the helper sends carries recorder: { ffmpeg }', async () => {
+    const { configDir, endpoint } = setup();
+    const { file } = writeCopy({ configDir, endpoint });
+    const reports = [];
+    const ac = new AbortController();
+    const connect = async ({ probeReport }) => {
+      reports.push(probeReport);
+      const { EventEmitter } = require('events');
+      const s = new EventEmitter();
+      s.close = () => s.emit('closed');
+      s.sendEvent = () => {};
+      setImmediate(() => ac.abort());
+      return s;
+    };
+    for (const found of ['C:\\ff\\ffmpeg.exe', null]) {
+      reports.length = 0;
+      const ctl = new AbortController();
+      ac.abort = () => ctl.abort();
+      assert.equal(await runSessionHelper({ sessionFile: file, signal: ctl.signal, deps: { ...quick, backend: fakeBackend([REPORT]), connect, findFfmpeg: () => found } }), 0);
+      assert.deepEqual(reports[0].recorder, { ffmpeg: found });
+      assert.deepEqual(reports[0].capabilities, REPORT.capabilities);
+    }
   });
 
   it('a backend without stopRecordings, or one that fails, changes nothing', async () => {

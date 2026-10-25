@@ -11,6 +11,7 @@ const { execFileSync } = require('child_process');
 const { createLogger } = require('../logging');
 const { readUserCopy, userCopyPath, checkUserCopyTrust } = require('../gui/session-secret');
 const { connectToService, createOpHandler, createRecordingGuard } = require('./connection');
+const { findFfmpeg } = require('./recorder');
 const { selectBackend: defaultSelect, loadBackend, NO_BACKEND_REPORT } = require('./backends');
 const { adminConfigDir, defaultServiceDataDir } = require('../platform/paths');
 const { windowsPowerShellExe } = require('../platform/windows-paths');
@@ -96,8 +97,14 @@ async function runSessionHelper({ env = process.env, platform = process.platform
   if (backend && typeof backend.requestPermissions === 'function') {
     await backend.requestPermissions().catch((err) => log.warn(`permission prompt failed: ${err.message}`));
   }
-  let report = backend ? await safeProbe(backend, log) : NO_BACKEND_REPORT('no desktop session was found for this helper (no display, or Wayland without portals)');
-  const handleOp = createOpHandler(backend, { platform });
+  // The user's ffmpeg, found once, as the user (demo takes §9). It rides in
+  // every probe_report and probe_changed as `recorder`.
+  let ffmpeg = null;
+  try { ffmpeg = (deps.findFfmpeg || findFfmpeg)({ platform, env }) || null; } catch { ffmpeg = null; }
+  const recorder = Object.freeze({ ffmpeg });
+  const withRecorder = (r) => ({ ...r, recorder });
+  let report = withRecorder(backend ? await safeProbe(backend, log) : NO_BACKEND_REPORT('no desktop session was found for this helper (no display, or Wayland without portals)'));
+  const handleOp = createOpHandler(backend, { platform, recorder });
   const recordingGuard = createRecordingGuard({ backend, log, ...(deps.timers ? { timers: deps.timers } : {}) });
   let attempt = 0;
   let exitCode = 0;
@@ -124,7 +131,7 @@ async function runSessionHelper({ env = process.env, platform = process.platform
       let lastLocked = report.locked;
       const reprobe = setInterval(async () => {
         if (!backend) return;
-        const next = await safeProbe(backend, log);
+        const next = withRecorder(await safeProbe(backend, log));
         if (JSON.stringify(next.capabilities) !== JSON.stringify(report.capabilities) || JSON.stringify(next.limits) !== JSON.stringify(report.limits)) {
           report = next;
           session.sendEvent('probe_changed', next);

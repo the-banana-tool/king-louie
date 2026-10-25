@@ -20,7 +20,9 @@ const QUIET_OPS = new Set(['input', 'launch_browser', 'record_start', 'record_st
 // its recordings (demo takes spec §9). A reconnect before then keeps them.
 const RECORDING_GRACE_MS = 30000;
 
-function createOpHandler(backend, { platform = process.platform, realpath } = {}) {
+// `recorder`: what the helper found at startup ({ ffmpeg: <path> | null });
+// a record_start that names no ffmpeg uses it.
+function createOpHandler(backend, { platform = process.platform, realpath, recorder = { ffmpeg: null } } = {}) {
   const pathOptions = { platform, ...(realpath ? { realpath } : {}) };
   const ops = {
     launch: (p) => {
@@ -31,9 +33,15 @@ function createOpHandler(backend, { platform = process.platform, realpath } = {}
     launch_browser: (p) => {
       // The browser is an allowlisted app: re-resolved as launch's exe is.
       assertPathsUnchanged({ exe: p.exe, files: [] }, pathOptions);
-      return backend.launchBrowser({ exe: p.exe, profileDir: p.profile_dir, args: p.args || [] });
+      return backend.launchBrowser({ exe: p.exe, profile: p.profile, args: p.args || [] });
     },
-    record_start: (p) => backend.recordStart({ ffmpeg: p.ffmpeg, path: p.path, fps: p.fps, size: p.size === undefined ? null : p.size }),
+    record_start: (p) => backend.recordStart({
+      ffmpeg: p.ffmpeg || (recorder && recorder.ffmpeg) || null,
+      takeId: p.take_id,
+      path: p.path === undefined ? null : p.path,
+      fps: p.fps,
+      size: p.size === undefined ? null : p.size
+    }),
     record_stop: (p) => backend.recordStop({ pid: p.pid }),
     keep_awake: (p) => backend.keepAwake({ on: p.on === true }),
     processes: (p) => backend.processes({ match: p.match || [] }),
