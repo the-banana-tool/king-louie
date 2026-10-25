@@ -1696,6 +1696,23 @@ describe('take leases', () => {
     assert.deepEqual([listed[0].kind, listed[0].unattended, listed[0].name], ['take', true, 'BSEOA demo']);
   });
 
+  it('a job holding an active computer_use lease that asks for a take is refused lease_busy, and nothing is sent', async () => {
+    const lease = await granted();
+    const before = relay.all('kl.lease.request').length;
+    await assert.rejects(takeRequest(), (e) => e.code === 'lease_busy' && e.detail === 'this job already holds a computer_use lease');
+    assert.equal(relay.all('kl.lease.request').length, before);
+    assert.equal(leases.current(), lease);
+  });
+
+  it('a job holding an active take that asks for computer_use is refused lease_busy, and nothing is sent', async () => {
+    const lease = await grantedTake();
+    const before = relay.all('kl.lease.request').length;
+    await assert.rejects(leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes: 10, reason: 'x' }),
+      (e) => e.code === 'lease_busy' && e.detail === 'this job already holds a take lease');
+    assert.equal(relay.all('kl.lease.request').length, before);
+    assert.equal(leases.current(), lease);
+  });
+
   it('a computer_use lease still suspends at 120 s and on relay down', async () => {
     const lease = await granted();
     const status = relay.last('kl.lease.status').message;
