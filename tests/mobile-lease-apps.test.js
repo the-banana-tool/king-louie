@@ -976,6 +976,97 @@ describe('take leases on the phones', () => {
       for (const k of ['sites', 'credentials', 'unattended', 'max_minutes']) assert.match(src, new RegExp(`"${k}"`));
     });
   }
+
+  // The mirror, against the node itself. The node does not export LEASE_KEYS,
+  // so each kind's key list is read from a lease the node's checkLease accepts
+  // (the take-grant and grant-valid vectors), and checkLease must refuse that
+  // lease with any one key taken away or one added: so the list read is the
+  // node's exact list. Each core's literal list must then be that list.
+  const protocol = require('../src/gui/lease-protocol.js');
+  const vectorLease = (name) => JSON.parse(read('tests', 'vectors', 'lease-v1', `${name}.json`)).given.pending[0].lease;
+  function nodeKeys(name, kind) {
+    const lease = vectorLease(name);
+    assert.equal(lease.kind, kind);
+    assert.ok(protocol.checkLease(lease), `${name}: the node accepts the lease`);
+    const keys = Object.keys(lease);
+    for (const k of keys) {
+      const less = { ...lease };
+      delete less[k];
+      assert.equal(protocol.checkLease(less), false, `${kind} without ${k}`);
+    }
+    assert.equal(protocol.checkLease({ ...lease, extra: true }), false, `${kind} with a key too many`);
+    return [...keys].sort();
+  }
+  const strings = (text) => [...text.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  const CORES = {
+    iOS: {
+      file: 'mobile/ios/KLProtocol/Sources/KLProtocol/Lease.swift',
+      list: (src, kind) => strings(src.match(new RegExp(`^\\s+"${kind}": \\[([^\\]]*)\\]`, 'm'))[1]),
+      caps: [/public static let maxMinutes = (\d+)\n/, /public static let takeMaxMinutes = (\d+)\n/],
+      maxRange: '(1...(take ? takeMaxMinutes : maxMinutes)).contains(minutes)',
+      grantCap: ['let cap = min(request.maxMinutes, request.isTake ? takeMaxMinutes : maxMinutes)', 'guard cap >= 1, (1...cap).contains(minutes) else { throw'],
+      status: ['let kind = message["kind"]?.stringValue, Leases.leaseKinds.contains(kind)',
+        'let unattended = message["unattended"]?.boolValue, kind == "take" || !unattended',
+        'let nameValue = message["name"], (kind == "take" ? Leases.isTakeName(nameValue) : nameValue.isNull) else { return nil }'],
+      kinds: /static let leaseKinds = \["computer_use", "take"\]/
+    },
+    Android: {
+      file: 'mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/Lease.kt',
+      list: (src, kind) => strings(src.match(new RegExp(`^\\s+"${kind}" to listOf\\(([^)]*)\\)`, 'm'))[1]),
+      caps: [/const val MAX_MINUTES = (\d+)\n/, /const val TAKE_MAX_MINUTES = (\d+)\n/],
+      maxRange: 'if (minutes !in 1..(if (take) TAKE_MAX_MINUTES else MAX_MINUTES)) return false',
+      grantCap: ['val cap = minOf(request.maxMinutes, if (request.isTake) TAKE_MAX_MINUTES else MAX_MINUTES)', 'if (minutes !in 1..cap) throw ProtocolException('],
+      status: ['val kind = m["kind"].str()?.takeIf { it in Leases.LEASE_KINDS } ?: return null',
+        'val unattended = m["unattended"].bool() ?: return null',
+        'if (kind != "take" && unattended) return null',
+        'val name = m["name"] ?: return null',
+        'if (if (kind == "take") !Leases.isTakeName(name) else name !is JsonNull) return null'],
+      kinds: /val LEASE_KINDS = listOf\("computer_use", "take"\)/
+    }
+  };
+  for (const [label, core] of Object.entries(CORES)) {
+    it(`${label} core holds the node's exact key lists, caps, grant cap and status agreement`, () => {
+      const src = read(core.file);
+      assert.deepEqual([...core.list(src, 'take')].sort(), nodeKeys('take-grant', 'take'), 'the take key list');
+      assert.deepEqual([...core.list(src, 'computer_use')].sort(), nodeKeys('grant-valid', 'computer_use'), 'the computer_use key list');
+      assert.equal(Number(src.match(core.caps[0])[1]), protocol.MAX_MINUTES);
+      assert.equal(Number(src.match(core.caps[1])[1]), protocol.TAKE_MAX_MINUTES);
+      assert.equal(protocol.TAKE_MAX_MINUTES, 240);
+      assert.deepEqual(protocol.LEASE_KINDS, ['computer_use', 'take']);
+      assert.match(src, core.kinds);
+      // checkLease's max_minutes by kind, the grant's cap (the request's, and never past the kind's), the status rules.
+      assert.equal(count(src, core.maxRange), 1, 'max_minutes by kind');
+      for (const line of core.grantCap) assert.equal(count(src, line), 1, line);
+      for (const line of core.status) assert.equal(count(src, line), 1, line);
+      // The node's own status rules, so the pinned clauses are the right ones.
+      const ok = { kind: 'take', unattended: true, name: 'A take' };
+      const status = protocol.VALIDATORS['kl.lease.status'];
+      const take = JSON.parse(Buffer.from(JSON.parse(read('tests', 'vectors', 'lease-v1', 'status-take.json')).input.payload, 'base64url').toString());
+      assert.ok(status(take));
+      assert.equal(status({ ...take, kind: 'computer_use', name: null, unattended: true }), false, 'computer_use is never unattended');
+      assert.equal(status({ ...take, kind: 'computer_use' }), false, 'computer_use has no name');
+      assert.equal(status({ ...take, name: null }), false, 'a take has a name');
+      assert.ok(status({ ...take, ...ok, unattended: false }));
+    });
+  }
+  // Review minor 5: the take's browser (its first app) cannot be left out of the grant.
+  it('a take request keeps its browser app on in both apps', () => {
+    const ios = read('mobile', 'ios', 'App', 'LeaseViews.swift');
+    assert.equal(count(ios, '.disabled(item.request.isResume || isTakeBrowser(app))'), 1);
+    assert.match(ios, /private func isTakeBrowser\(_ app: LeaseApp\) -> Bool \{ item\.request\.isTake && app\.id == item\.request\.apps\.first\?\.id \}/);
+    const kt = read('mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'LeaseScreens.kt');
+    assert.equal(count(kt, 'enabled = !item.request.isResume && !takeBrowser'), 1);
+    assert.match(kt, /val takeBrowser = item\.request\.isTake && app\.id == item\.request\.apps\.firstOrNull\(\)\?\.id/);
+    // The choice starts with every requested app, so the browser is on and stays on.
+    assert.ok(ios.includes('chosen = Set(item.request.apps.map { $0.id })'));
+    assert.ok(kt.includes('mutableStateOf(item.request.apps.map { it.id }.toSet())'));
+  });
+  // Review minor 1: the listed actions come from the request, so they carry a host label.
+  it('listed browser actions carry a host label in both apps', () => {
+    assert.ok(read('mobile', 'ios', 'App', 'LeaseViews.swift').includes('Text("Browser actions: " + actions.map { Display.escape($0) }.joined(separator: ", "))'));
+    assert.ok(read('mobile', 'android', 'app', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'LeaseScreens.kt')
+      .includes('item.request.browserActions?.let { "Browser actions: " + it.joinToString(", ") { a -> Display.escape(a) } } ?: BROWSER_TRUE_LINE'));
+  });
   for (const [label, file] of [['iOS', 'mobile/ios/App/LeaseViews.swift'], ['Android', 'mobile/android/app/src/main/kotlin/com/example/kinglouie/LeaseScreens.kt']]) {
     it(`${label} shows the unattended line, the browser line and the banner prefix`, () => {
       const src = read(file);

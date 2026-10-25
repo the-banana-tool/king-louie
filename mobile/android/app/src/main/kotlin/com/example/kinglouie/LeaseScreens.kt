@@ -116,7 +116,7 @@ fun LeaseRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, back: (
                 LeaseMinutes(item, minutes) { minutes = it }
                 Text("Sites", fontWeight = FontWeight.Bold)
                 for (site in item.request.sites) Text(Display.escape(site), fontFamily = FontFamily.Monospace)
-                Text(item.request.browserActions?.joinToString(", ") { Display.escape(it) } ?: BROWSER_TRUE_LINE)
+                Text(item.request.browserActions?.let { "Browser actions: " + it.joinToString(", ") { a -> Display.escape(a) } } ?: BROWSER_TRUE_LINE)
                 if (item.request.credentials) Text(CREDENTIALS_LINE)
             } else {
                 Text(Display.escape(item.nodeName), fontWeight = FontWeight.Bold)
@@ -133,7 +133,9 @@ fun LeaseRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, back: (
                     Text(Display.escape(app.path), fontFamily = FontFamily.Monospace)
                     if (app.processes.isNotEmpty()) Text(app.processes.joinToString(", ") { Display.escape(it) }, fontFamily = FontFamily.Monospace)
                 }
-                Switch(checked = app.id in chosen, enabled = !item.request.isResume, onCheckedChange = { on -> chosen = if (on) chosen + app.id else chosen - app.id })
+                // A take's first app is its browser: it stays on, so a grant never leaves the take's browser out.
+                val takeBrowser = item.request.isTake && app.id == item.request.apps.firstOrNull()?.id
+                Switch(checked = app.id in chosen, enabled = !item.request.isResume && !takeBrowser, onCheckedChange = { on -> chosen = if (on) chosen + app.id else chosen - app.id })
             }
         }
         item {

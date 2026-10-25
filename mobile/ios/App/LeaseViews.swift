@@ -78,10 +78,13 @@ struct LeaseRequestView: View {
                         if !app.processes.isEmpty { Text(app.processes.map { Display.escape($0) }.joined(separator: ", ")).font(.caption2.monospaced()).foregroundStyle(.secondary) }
                     }
                 }
-                .disabled(item.request.isResume)
+                .disabled(item.request.isResume || isTakeBrowser(app))
             }
         }
     }
+
+    /// A take's first app is its browser: it stays on, so a grant never leaves the take's browser out.
+    private func isTakeBrowser(_ app: LeaseApp) -> Bool { item.request.isTake && app.id == item.request.apps.first?.id }
 
     private var minutesSection: some View {
         Section("For how long") {
@@ -106,7 +109,7 @@ struct LeaseRequestView: View {
                 Section("Sites") {
                     ForEach(item.request.sites, id: \.self) { Text(Display.escape($0)).font(.body.monospaced()) }
                     if let actions = item.request.browserActions {
-                        Text(actions.map { Display.escape($0) }.joined(separator: ", "))
+                        Text("Browser actions: " + actions.map { Display.escape($0) }.joined(separator: ", "))
                     } else {
                         Text(Self.browserTrueLine)
                     }
