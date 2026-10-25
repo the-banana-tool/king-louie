@@ -127,10 +127,12 @@ async function setup({ maxSessions = 4, maxJobs = 2, idleCloseMs = 7200000, with
   const ended = [];
   // One log of what the take and the lease were told, in order (demo takes Task 14).
   const events = [];
+  const takeEnds = [];
   const takeManager = takeSummary === undefined ? null : {
     onTurnStart: (jobId) => events.push(['take.onTurnStart', jobId]),
     onTurnEnd: (jobId) => events.push(['take.onTurnEnd', jobId]),
-    endForJob: async (jobId, reason) => { events.push(['take.endForJob', jobId, reason]); return null; },
+    // Resolves only when the test calls finishTake(): the take's teardown (the recorder stopping) takes a while.
+    endForJob: (jobId, reason) => { events.push(['take.endForJob', jobId, reason]); return new Promise((resolve) => { takeEnds.push(() => { events.push(['take.ended', jobId]); resolve(null); }); }); },
     summaryFor: (jobId) => { events.push(['take.summaryFor', jobId]); return takeSummary; }
   };
   const nodeConfig = {
@@ -146,7 +148,8 @@ async function setup({ maxSessions = 4, maxJobs = 2, idleCloseMs = 7200000, with
     now: () => now, fullTranscriptTools: [PLANNER], sweepMs: 3600000
   });
   running.push(async () => { sessions.stop(); await core.shutdown(); });
-  return { core, sessions, jobs, calls, audit, ended, events, root, dataDir, advance: (ms) => { now += ms; } };
+  const finishTake = async () => { while (takeEnds.length) takeEnds.shift()(); await new Promise((r) => setImmediate(r)); };
+  return { core, sessions, jobs, calls, audit, ended, events, finishTake, root, dataDir, advance: (ms) => { now += ms; } };
 }
 
 const origin = (scopes, grantId = 'gr_y') => ({ kind: 'frontdoor', client_id: 'dcr_x', client_name: 'Example Client', grant_id: grantId, scopes, mcp_session: 'mcp-1' });
@@ -306,7 +309,10 @@ describe('DelegateSessions', () => {
     assert.deepEqual(t.events, [['take.onTurnStart', jobId], ['take.onTurnEnd', jobId]]);
     t.events.length = 0;
     assert.equal(t.sessions.cancel(jobId, { origin: STDIO_ORIGIN }).success, true);
-    assert.deepEqual(t.events, [['take.endForJob', jobId, 'job_closed'], ['lease.endForJob', jobId, 'job_closed']]);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(t.events, [['take.endForJob', jobId, 'job_closed']], 'the lease waits for the take to finish ending');
+    await t.finishTake();
+    assert.deepEqual(t.events, [['take.endForJob', jobId, 'job_closed'], ['take.ended', jobId], ['lease.endForJob', jobId, 'job_closed']]);
   });
 
   it("a turn that throws still ends the take's turn, before the session closes the take and the lease", async () => {
@@ -315,9 +321,10 @@ describe('DelegateSessions', () => {
     const { job_id: jobId } = await t.sessions.start({ task: 'x', origin: STDIO_ORIGIN });
     await t.sessions.turns.get(jobId);
     assert.equal(t.jobs.getJob(jobId).status, 'failed');
+    await t.finishTake();
     assert.deepEqual(t.events, [
       ['take.onTurnStart', jobId], ['take.onTurnEnd', jobId],
-      ['take.endForJob', jobId, 'job_closed'], ['lease.endForJob', jobId, 'job_closed']
+      ['take.endForJob', jobId, 'job_closed'], ['take.ended', jobId], ['lease.endForJob', jobId, 'job_closed']
     ]);
   });
 
@@ -328,10 +335,12 @@ describe('DelegateSessions', () => {
     await waitFor(() => slowStarted, 'the slow tool to start');
     t.sessions.cancel(jobId, { origin: STDIO_ORIGIN });
     await t.sessions.turns.get(jobId);
+    await t.finishTake();
     assert.deepEqual(t.events, [
       ['take.onTurnStart', jobId],
-      ['take.endForJob', jobId, 'job_closed'], ['lease.endForJob', jobId, 'job_closed'],
-      ['take.onTurnEnd', jobId]
+      ['take.endForJob', jobId, 'job_closed'],
+      ['take.onTurnEnd', jobId],
+      ['take.ended', jobId], ['lease.endForJob', jobId, 'job_closed']
     ]);
   });
 

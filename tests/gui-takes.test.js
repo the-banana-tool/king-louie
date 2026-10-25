@@ -439,6 +439,19 @@ describe('ending a take', () => {
     assert.equal(store.get(out.take_id).ended.reason, 'service_stopped');
     assert.equal(takes.summaryFor('job-1').state, 'ended');
     assert.equal(takes.summaryFor('job-9'), null);
+    // get_job asks summaryFor on every call: a job with no take reads no file.
+    const realList = store.list.bind(store);
+    const realGet = store.get.bind(store);
+    let reads = 0;
+    store.list = () => { reads += 1; return realList(); };
+    store.get = (id) => { reads += 1; return realGet(id); };
+    try {
+      assert.equal(takes.summaryFor('job-9'), null);
+      assert.equal(reads, 0, 'no folder scan, no record read');
+    } finally {
+      store.list = realList;
+      store.get = realGet;
+    }
     const left = store.create({ name: 'left', job_id: 'job-3', state: 'live' });
     new TakeManager({ leases, broker, store, guiConfig, registry, clock: () => clock.now(), timers });
     assert.equal(store.get(left.take_id).ended.reason, 'service_restarted');

@@ -359,7 +359,8 @@ class DelegateSessions {
   _takeHook(method, jobId) {
     if (!this.takeManager) return;
     try {
-      this.takeManager[method](jobId);
+      Promise.resolve(this.takeManager[method](jobId))
+        .catch((err) => log.warn(`take ${method}(${jobId}) failed: ${err.message}`));
     } catch (err) {
       log.warn(`take ${method}(${jobId}) failed: ${err.message}`);
     }
@@ -487,24 +488,31 @@ class DelegateSessions {
     } catch (err) {
       log.warn(`closing ${session.jobId}: an update listener failed: ${err.message}`);
     }
-    // The take ends first, so it records job_closed rather than the end of
-    // its lease. Its end runs synchronously up to its first await (it is
-    // marked ended and stops listening to the lease), then stops the
-    // recording and lets go of the browser in the background.
-    if (this.takeManager) {
-      try {
-        Promise.resolve(this.takeManager.endForJob(session.jobId, 'job_closed'))
-          .catch((err) => log.warn(`ending the take of ${session.jobId} failed: ${err.message}`));
-      } catch (err) {
-        log.warn(`ending the take of ${session.jobId} failed: ${err.message}`);
-      }
-    }
-    if (this.leaseManager && typeof this.leaseManager.endForJob === 'function') {
+    const endLeases = () => {
+      if (!this.leaseManager || typeof this.leaseManager.endForJob !== 'function') return;
       try {
         this.leaseManager.endForJob(session.jobId, 'job_closed');
       } catch (err) {
         log.warn(`endForJob(${session.jobId}) failed: ${err.message}`);
       }
+    };
+    // The take ends first, so it records job_closed rather than the end of
+    // its lease, and the job's leases end only once its teardown (the
+    // recorder stopping, the browser let go) is over: another job cannot be
+    // granted the screen while this take's recorder is still stopping.
+    // With no take manager the leases end at once.
+    if (this.takeManager) {
+      let ending;
+      try {
+        ending = Promise.resolve(this.takeManager.endForJob(session.jobId, 'job_closed'));
+      } catch (err) {
+        ending = Promise.reject(err);
+      }
+      ending
+        .catch((err) => log.warn(`ending the take of ${session.jobId} failed: ${err.message}`))
+        .finally(endLeases);
+    } else {
+      endLeases();
     }
     if (this.auditLedger) {
       Promise.resolve()

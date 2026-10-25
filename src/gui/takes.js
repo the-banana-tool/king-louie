@@ -100,8 +100,10 @@ class TakeManager {
     return records.at(-1) || null;
   }
 
+  // get_job asks this on every call: the in-memory map only, never a folder scan.
   summaryFor(jobId) {
-    const record = this.forJob(jobId);
+    const id = this.byJob.get(jobId);
+    const record = id ? this.store.get(id) : null;
     return record ? this.store.summary(record) : null;
   }
 
