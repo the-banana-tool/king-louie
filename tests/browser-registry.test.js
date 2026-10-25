@@ -64,4 +64,16 @@ describe('PlaywrightBrowser#attach', () => {
     assert.equal(b.isRunning, false);
     assert.equal(chrome.child.exitCode, null, 'the process is still alive');
   });
+
+  it('attach to a Chromium that has just started waits for its first tab', async () => {
+    const fresh = await launchDebuggableChromium({ waitForPage: false });
+    const b = new PlaywrightBrowser();
+    try {
+      await b.attach({ cdpUrl: fresh.cdpUrl });
+      assert.equal((await b.getPages()).length, 1, 'no second page opened');
+    } finally {
+      await b.stop();
+      await fresh.close();
+    }
+  });
 });

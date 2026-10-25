@@ -151,6 +151,12 @@ class PlaywrightBrowser {
     this._persistent = false;
     this._attached = true;
     this.context = this.browser.contexts()[0];
+    // A Chrome that has just started may not list its first tab yet: wait up
+    // to 2 s for it (a ref'd timer) before opening a page of our own.
+    const deadline = Date.now() + 2000;
+    while (this.context.pages().length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
     this.page = this.context.pages()[0] || await this.context.newPage();
     this._attachPageListeners(this.page);
   }

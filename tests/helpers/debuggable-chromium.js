@@ -26,7 +26,9 @@ function hasPage(port) {
   });
 }
 
-async function launchDebuggableChromium({ timeoutMs = 20000 } = {}) {
+// `waitForPage: false` returns as soon as the port is known, before
+// Chromium lists its first tab (to test that attach() waits for it).
+async function launchDebuggableChromium({ timeoutMs = 20000, waitForPage = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cdp-'));
   const child = spawn(chromium.executablePath(), [
     '--headless=new', '--remote-debugging-port=0', '--no-first-run', `--user-data-dir=${dir}`, 'about:blank',
@@ -49,7 +51,7 @@ async function launchDebuggableChromium({ timeoutMs = 20000 } = {}) {
     try { lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean); } catch { /* not yet */ }
     // Wait for the about:blank tab too: attaching before Chromium lists it
     // would make attach() open a second page.
-    if (lines.length >= 2 && await hasPage(Number(lines[0]))) {
+    if (lines.length >= 2 && (!waitForPage || await hasPage(Number(lines[0])))) {
       const port = Number(lines[0]);
       return { child, port, cdpUrl: `http://127.0.0.1:${port}`, close };
     }
