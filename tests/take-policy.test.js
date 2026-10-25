@@ -127,6 +127,28 @@ describe('decide', () => {
     assert.equal((await offPage.decide('BrowserSession', { action: 'login', url: 'https://app.example.com/login' })).code, 'take_site_not_allowed');
   });
 
+  it('credential actions check params.host against the sites', async () => {
+    const onPage = policy({ credentials: true }, 'https://app.example.com/');
+    assert.equal((await onPage.decide('BrowserSession', { action: 'fill_credentials', host: 'bank.example.net' })).code, 'take_site_not_allowed');
+    assert.deepEqual(await onPage.decide('BrowserSession', { action: 'fill_credentials', host: 'app.example.com' }), { allow: true });
+    // fill_credentials keeps the page check too.
+    const offPage = policy({ credentials: true }, 'https://bank.example.net/');
+    assert.equal((await offPage.decide('BrowserSession', { action: 'fill_credentials', host: 'app.example.com' })).code, 'take_site_not_allowed');
+    // set_http_auth and save_credentials with a host act on it, not on the page.
+    const blank = policy({ credentials: true }, null);
+    assert.deepEqual(await blank.decide('BrowserSession', { action: 'set_http_auth', host: 'app.example.com' }), { allow: true });
+    assert.equal((await blank.decide('BrowserSession', { action: 'set_http_auth', host: 'bank.example.net' })).code, 'take_site_not_allowed');
+    assert.deepEqual(await blank.decide('Browser', { action: 'save_credentials', host: 'APP.example.com.' }), { allow: true });
+    assert.equal((await blank.decide('Browser', { action: 'save_credentials', host: 'bank.example.net' })).code, 'take_site_not_allowed');
+    // Without a host they fall back to the page, so the page check applies.
+    assert.equal((await blank.decide('BrowserSession', { action: 'save_credentials' })).code, 'take_site_not_allowed');
+  });
+
+  it('the credentials flag alone governs the second column', async () => {
+    const p = policy({ browser: ['navigate'], credentials: true }, 'https://app.example.com/');
+    assert.deepEqual(await p.decide('BrowserSession', { action: 'fill_credentials', host: 'app.example.com' }), { allow: true });
+  });
+
   it('wait_for_url is look-only and takes a pattern anywhere', async () => {
     assert.deepEqual(await policy({}, 'https://elsewhere.test/').decide('BrowserPage', { action: 'wait_for_url', url: '**/done' }), { allow: true });
     assert.deepEqual(await policy({}, null).decide('BrowserPage', { action: 'wait_for_url', url: '**/done' }), { allow: true });

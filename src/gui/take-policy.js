@@ -62,6 +62,10 @@ const LOOK_ONLY_ACTIONS = Object.freeze([
 // pattern.
 const TARGET_URL_ACTIONS = Object.freeze(['navigate', 'open_tab']);
 
+// Act on params.host when it is given (checked against the sites), not on the current page.
+// Every other action with params.host (fill_credentials) is checked on both.
+const HOST_TARGET_ACTIONS = Object.freeze(['set_http_auth', 'save_credentials']);
+
 // `Bash` is the only shell tool under src/tools/builtin/ today; `PowerShell` is named for
 // any host that registers one.
 const SHELL_TOOLS = Object.freeze(['Bash', 'PowerShell']);
@@ -169,8 +173,20 @@ function createTakePolicy(grant, { currentUrl } = {}) {
         if (!host || !hostAllowed(host, sites)) return siteRefusal(host || '(invalid URL)');
       }
 
+      // Any acting action naming a host (the credential actions pick their vault entry by it):
+      // that host must be one of the take's sites.
+      const hasHost = p.host !== undefined && p.host !== null && p.host !== '';
+      if (hasHost && !hostAllowed(p.host, sites)) {
+        return siteRefusal(normalizeHost(p.host) || '(invalid host)');
+      }
+
       // navigate and open_tab go to their target (open_tab with no url is a blank tab).
       if (TARGET_URL_ACTIONS.includes(action)) return { allow: true };
+
+      // set_http_auth and save_credentials with a host act on that host, not the page (the
+      // tool's help says to set HTTP auth before navigating). Without one they fall back to
+      // the page's host, so the page check below applies.
+      if (hasHost && HOST_TARGET_ACTIONS.includes(action)) return { allow: true };
 
       // Every other acting action checks the page it acts on.
       const url = typeof currentUrl === 'function' ? await currentUrl() : null;
@@ -196,6 +212,7 @@ module.exports = {
   MANAGED_ACTIONS,
   LOOK_ONLY_ACTIONS,
   TARGET_URL_ACTIONS,
+  HOST_TARGET_ACTIONS,
   SHELL_TOOLS,
   BROWSER_TOOLS,
   TAKE_CODES,
