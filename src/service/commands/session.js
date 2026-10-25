@@ -263,8 +263,8 @@ function ensureCourierDirs(dataDir) {
   return courierDirs(dataDir);
 }
 
-// The courier directories uninstall asks icacls about: only real ones (a
-// missing one holds no entry, and a link is never followed).
+// The courier directories uninstall acts on: only real ones (a missing one
+// holds no entry, and a link is never followed).
 function existingCourierDirs(dataDir) {
   return courierDirs(dataDir).filter((dir) => {
     try {
@@ -274,6 +274,23 @@ function existingCourierDirs(dataDir) {
       return false;
     }
   });
+}
+
+// The grant and the revoke go through a handle opened on each directory
+// (runCourierAcl in gui/session-secret.js), which checks that the handle's
+// final path is this one: the data dir's native realpath, taken here, and
+// the fixed names below it. A junction anywhere on the way after that shows
+// as path_moved (or reparse_point at the directory itself). One code per
+// directory; a runner that fails says acl_failed for each.
+function courierAcl({ mode, sid, dirs, dataDir, deps }) {
+  const run = deps.runCourierAcl || ((req) => require('../../gui/session-secret').runCourierAcl(req));
+  const finalPath = require('../../gui/session-secret').windowsFinalPath;
+  try {
+    const root = (deps.realpath || fs.realpathSync.native)(dataDir);
+    const codes = run({ mode, sid, dirs: dirs.map((dir) => ({ path: dir, expected: finalPath(path.join(root, path.relative(dataDir, dir))) })) });
+    if (Array.isArray(codes) && codes.length === dirs.length) return codes;
+  } catch { /* below */ }
+  return dirs.map(() => 'acl_failed');
 }
 
 // R-F5-9: off a terminal nobody can be asked, so only --yes goes on. Checked
@@ -409,13 +426,24 @@ async function install({ flags, dataDir, io, deps }) {
     ...(deps.runIcacls ? { runIcacls: deps.runIcacls } : {})
   });
   if (c.platform === 'win32') {
-    const runIcacls = deps.runIcacls || S.defaultRunIcacls;
-    for (const dir of ensureCourierDirs(dataDir)) {
-      try {
-        runIcacls(S.windowsCourierAclArgs(dir, account.sid));
-      } catch (err) {
-        throw new Error(`${account.sid} could not be given modify on ${dir} (${err.message}); the helper files are written but the login start is not: run "session install --user ${sessionUser}" again`);
-      }
+    const halfDone = `the helper files are written but the login start is not: run "session install --user ${sessionUser}" again`;
+    let dirs;
+    try {
+      dirs = ensureCourierDirs(dataDir);
+    } catch (err) {
+      // The same error (an unsafe_path keeps its code), saying what is done.
+      err.message = `${String(err.message).replace(/[\s.]+$/, '')}; ${halfDone}`;
+      throw err;
+    }
+    const codes = courierAcl({ mode: 'grant', sid: account.sid, dirs, dataDir, deps });
+    const failed = dirs.filter((_, i) => codes[i] !== 'ok');
+    if (failed.length) {
+      // None of the grant stays when part of it failed.
+      const granted = dirs.filter((_, i) => codes[i] === 'ok');
+      const undone = granted.length ? courierAcl({ mode: 'revoke', sid: account.sid, dirs: granted, dataDir, deps }) : [];
+      const left = granted.filter((_, i) => undone[i] !== 'ok');
+      const why = failed.map((dir) => `${dir} (${codes[dirs.indexOf(dir)]})`).join(', ');
+      throw new Error(`${account.sid} could not be given modify on ${why}${left.length ? `; the grant on ${left.join(', ')} could not be taken back` : ''}; ${halfDone}`);
     }
   }
   await c.execute(steps, { dryRun: false, io, entryPath: c.entryPath, nodePath: c.nodePath });
@@ -550,7 +578,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
     io.stdout.write(`  ${sessionUser}'s copy of the secret: ${file}\n`);
     if (c.platform === 'win32') io.stdout.write(`  ${sessionUser}'s right to read who owns ${path.dirname(file)}\n`);
   }
-  if (c.platform === 'win32') io.stdout.write(`  ${sessionUser}'s right to post requests to ${COURIER_TEXT}\n`);
+  if (c.platform === 'win32' && existingCourierDirs(dataDir).length) io.stdout.write(`  ${sessionUser}'s right to post requests to ${COURIER_TEXT}\n`);
   if (stale) io.stdout.write(`  the helper file records ${sessionUser} under another identity (${identityText(stale, c.platform)}) that no longer exists on this machine: the account was deleted and made again. What was installed for it is removed with this.\n`);
   if (mine || stale) io.stdout.write(`  the service's secret: ${installed.file} (desktop apps stay off on this node until "session install" runs again)\n`);
   if (damaged) io.stdout.write(`  the service's helper file: ${installed.file} ${installed.reason}, so this cannot tell who it was installed for; it is removed too. If it was installed for another user, run "session uninstall" for that user as well.\n`);
@@ -583,14 +611,12 @@ async function uninstall({ flags, dataDir, io, deps }) {
       aclLeft.push(err.message);
     }
     if (c.platform !== 'win32') continue;
-    const runIcacls = deps.runIcacls || S.defaultRunIcacls;
-    for (const dir of existingCourierDirs(dataDir)) {
-      try {
-        runIcacls(S.windowsCourierRevokeArgs(dir, who.sid));
-      } catch {
-        aclLeft.push(`the entry for ${who.sid} could not be taken off ${dir}; as an administrator run: icacls "${dir}" /remove:g *${who.sid}`);
-      }
-    }
+    const dirs = existingCourierDirs(dataDir);
+    if (!dirs.length) continue;
+    const codes = courierAcl({ mode: 'revoke', sid: who.sid, dirs, dataDir, deps });
+    dirs.forEach((dir, i) => {
+      if (codes[i] !== 'ok') aclLeft.push(`the entry for ${who.sid} could not be taken off ${dir} (${codes[i]}); once it is a real directory again, as an administrator run: icacls "${dir}" /remove:g *${who.sid}`);
+    });
   }
   // Never follows a link: a link is removed itself, a directory (a damaged
   // helper "file" can be one) with what is in it.

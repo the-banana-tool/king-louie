@@ -264,18 +264,143 @@ function windowsUsersDirRevokeArgs(dir, sid, env = process.env) {
 
 // The session user runs `king-louie-service mcp`, which posts to the service
 // through the file courier under the data dir (approvals\outbox and
-// approvals\inbox), where only the service account could write. Modify, and
-// (OI)(CI) so the requests and the per-client inbox directories put there
-// inherit it. /grant:r replaces an older entry for the same SID.
-function windowsCourierAclArgs(dir, sid, env = process.env) {
-  if (!SID_RE.test(String(sid))) throw new GuiError('invalid_params', 'a Windows session user is named by its SID');
-  return [windowsIcaclsExe(env), dir, '/grant:r', `*${sid}:(OI)(CI)(M)`];
+// approvals\inbox), where only the service account could write. The grant is
+// Modify, (OI)(CI), so what is put in them inherits it; the revoke takes every
+// explicit allow entry of that SID off again.
+//
+// Not icacls by name (task 16 review, I-1): the data dir is the service
+// account's, so it can put a junction where `approvals`, `outbox` or `inbox`
+// was between any check and an elevated grant by name, and the inheritable
+// grant would land on whatever the junction points to. Here each directory
+// is opened once, no reparse point followed (FILE_FLAG_OPEN_REPARSE_POINT),
+// with READ_CONTROL | WRITE_DAC; the handle must be a directory, not a
+// reparse point, and its final path must be the expected one (which catches
+// a junction above it); the DACL is read, changed and written back through
+// that same handle, which pins the object. SetKernelObjectSecurity sets the
+// directory's own DACL and walks no children, so nothing under a directory
+// the service controls is followed either: what is created there afterwards
+// inherits the entry as it is created. One JSON line per directory, a code,
+// never a path: ok, not_a_directory, reparse_point, path_moved, acl_failed.
+const COURIER_ACL_CODES = new Set(['ok', 'not_a_directory', 'reparse_point', 'path_moved', 'acl_failed']);
+// FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE: icacls's (M).
+const COURIER_MODIFY_MASK = 0x1301bf;
+const WINDOWS_COURIER_ACL_CSHARP = [
+  'using System;',
+  'using System.Collections.Generic;',
+  'using System.Runtime.InteropServices;',
+  'using System.Security.AccessControl;',
+  'using System.Security.Principal;',
+  'using System.Text;',
+  'using Microsoft.Win32.SafeHandles;',
+  'public static class KlCourierAcl {',
+  '  [StructLayout(LayoutKind.Sequential)]',
+  '  struct BY_HANDLE_FILE_INFORMATION {',
+  '    public uint FileAttributes;',
+  '    public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;',
+  '    public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;',
+  '  }',
+  '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+  '  static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);',
+  '  [DllImport("kernel32.dll", SetLastError = true)]',
+  '  static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION info);',
+  '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+  '  static extern uint GetFinalPathNameByHandleW(SafeFileHandle h, StringBuilder buf, uint len, uint flags);',
+  '  [DllImport("advapi32.dll", SetLastError = true)]',
+  '  static extern bool GetKernelObjectSecurity(SafeFileHandle h, uint info, byte[] sd, uint len, out uint needed);',
+  '  [DllImport("advapi32.dll", SetLastError = true)]',
+  '  static extern bool SetKernelObjectSecurity(SafeFileHandle h, uint info, byte[] sd);',
+  '  const uint DACL_SECURITY_INFORMATION = 4;',
+  '  public static string Apply(string path, string expected, string sid, bool grant, int mask) {',
+  '    // READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES; share read/write/delete; OPEN_EXISTING;',
+  '    // FILE_FLAG_BACKUP_SEMANTICS (a directory) | FILE_FLAG_OPEN_REPARSE_POINT (never followed).',
+  '    SafeFileHandle h = CreateFileW(path, 0x00060080, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);',
+  '    if (h.IsInvalid) return "acl_failed";',
+  '    using (h) {',
+  '      BY_HANDLE_FILE_INFORMATION info;',
+  '      if (!GetFileInformationByHandle(h, out info)) return "acl_failed";',
+  '      if ((info.FileAttributes & 0x400) != 0) return "reparse_point";',
+  '      if ((info.FileAttributes & 0x10) == 0) return "not_a_directory";',
+  '      StringBuilder buf = new StringBuilder(32768);',
+  '      uint n = GetFinalPathNameByHandleW(h, buf, (uint)buf.Capacity, 0);',
+  '      if (n == 0 || n >= (uint)buf.Capacity) return "acl_failed";',
+  '      if (!String.Equals(buf.ToString(), expected, StringComparison.OrdinalIgnoreCase)) return "path_moved";',
+  '      try {',
+  '        uint needed;',
+  '        GetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION, null, 0, out needed);',
+  '        if (needed == 0) return "acl_failed";',
+  '        byte[] bytes = new byte[needed];',
+  '        if (!GetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION, bytes, needed, out needed)) return "acl_failed";',
+  '        CommonSecurityDescriptor sd = new CommonSecurityDescriptor(true, false, new RawSecurityDescriptor(bytes, 0));',
+  '        DiscretionaryAcl dacl = sd.DiscretionaryAcl;',
+  '        if (dacl == null || !dacl.IsCanonical) return "acl_failed";',
+  '        SecurityIdentifier who = new SecurityIdentifier(sid);',
+  '        List<CommonAce> mine = new List<CommonAce>();',
+  '        for (int i = 0; i < dacl.Count; i++) {',
+  '          CommonAce ace = dacl[i] as CommonAce;',
+  '          if (ace != null && !ace.IsInherited && ace.AceQualifier == AceQualifier.AccessAllowed && ace.SecurityIdentifier == who) mine.Add(ace);',
+  '        }',
+  '        foreach (CommonAce ace in mine) dacl.RemoveAccessSpecific(AccessControlType.Allow, who, ace.AccessMask, ace.InheritanceFlags, ace.PropagationFlags);',
+  '        if (grant) dacl.AddAccess(AccessControlType.Allow, who, mask, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None);',
+  '        byte[] result = new byte[sd.BinaryLength];',
+  '        sd.GetBinaryForm(result, 0);',
+  '        if (!SetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION, result)) return "acl_failed";',
+  '        return "ok";',
+  '      } catch (Exception) {',
+  '        return "acl_failed";',
+  '      }',
+  '    }',
+  '  }',
+  '}'
+].join('\n');
+// Paths, expected final paths, the SID and the mode travel in the
+// environment, never in the script text.
+const WINDOWS_COURIER_ACL_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  'try {',
+  "  Add-Type -TypeDefinition @'",
+  WINDOWS_COURIER_ACL_CSHARP,
+  "'@",
+  '  $paths = $env:KL_COURIER_PATHS.Split([char]10)',
+  '  $expected = $env:KL_COURIER_EXPECTED.Split([char]10)',
+  "  $grant = $env:KL_COURIER_MODE -eq 'grant'",
+  '  for ($i = 0; $i -lt $paths.Length; $i++) {',
+  '    $code = [KlCourierAcl]::Apply($paths[$i], $expected[$i], $env:KL_COURIER_SID, $grant, [int]$env:KL_COURIER_MASK)',
+  `    [Console]::Out.WriteLine('{"code":"' + $code + '"}')`,
+  '  }',
+  '  exit 0',
+  '} catch {',
+  '  [Console]::Error.WriteLine($_.Exception.Message)',
+  '  exit 1',
+  '}'
+].join('\n');
+
+// The final path GetFinalPathNameByHandle gives for `p` (a native realpath):
+// \\?\C:\... for a drive path, \\?\UNC\server\share\... for a share.
+function windowsFinalPath(p) {
+  const s = String(p);
+  return s.startsWith('\\\\') ? `\\\\?\\UNC\\${s.slice(2)}` : `\\\\?\\${s}`;
 }
 
-// Uninstall takes it off again, by SID.
-function windowsCourierRevokeArgs(dir, sid, env = process.env) {
+// { mode: 'grant' | 'revoke', sid, dirs: [{ path, expected }] } → one code
+// per directory, in order. Elevated (the admin CLI), synchronous.
+function runCourierAcl({ mode, sid, dirs }, { execFile = execFileSync, env = process.env } = {}) {
+  if (mode !== 'grant' && mode !== 'revoke') throw new GuiError('invalid_params', 'mode is grant or revoke');
   if (!SID_RE.test(String(sid))) throw new GuiError('invalid_params', 'a Windows session user is named by its SID');
-  return [windowsIcaclsExe(env), dir, '/remove:g', `*${sid}`];
+  if (!Array.isArray(dirs) || !dirs.length || dirs.some((d) => !d || /[\r\n]/.test(`${d.path}${d.expected}`))) throw new GuiError('invalid_params', 'courier directories');
+  const encoded = Buffer.from(WINDOWS_COURIER_ACL_SCRIPT, 'utf16le').toString('base64');
+  const out = String(execFile(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+    encoding: 'utf8', windowsHide: true, timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'],
+    env: {
+      ...env,
+      KL_COURIER_MODE: mode, KL_COURIER_SID: sid, KL_COURIER_MASK: String(COURIER_MODIFY_MASK),
+      KL_COURIER_PATHS: dirs.map((d) => d.path).join('\n'), KL_COURIER_EXPECTED: dirs.map((d) => d.expected).join('\n')
+    }
+  }));
+  const codes = out.trim().split(/\r?\n/).filter((l) => l.trim()).map((l) => {
+    try { return JSON.parse(l).code; } catch { return null; }
+  });
+  if (codes.length !== dirs.length || codes.some((c) => !COURIER_ACL_CODES.has(c))) throw new Error('unexpected output from the courier ACL script');
+  return codes;
 }
 
 function defaultRunIcacls(argv) {
@@ -660,7 +785,7 @@ function resolveSessionUser(name, { platform = process.platform, execFile = (f, 
 module.exports = {
   mintSessionSecret, canonicalPath, writeCanonical, readCanonical, canonicalMtime, inspectCanonical, sameSessionIdentity,
   userCopyPath, writeUserCopy, readUserCopy, removeUserCopy, checkUserCopyTrust, windowsUserOwnerArgs,
-  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs, windowsCourierAclArgs, windowsCourierRevokeArgs, defaultRunIcacls, removalKind, removeEntry, sessionIdentityExists, sessionIdentityState, isLocalMachineSid,
+  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs, runCourierAcl, windowsFinalPath, COURIER_MODIFY_MASK, removalKind, removeEntry, sessionIdentityExists, sessionIdentityState, isLocalMachineSid,
   endpointPath, sessionIpcDir, assertSafeComponents, windowsUserAclArgs, resolveSessionUser,
   classifyWindowsSid, assertSingleUserAccount
 };
