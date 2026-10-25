@@ -472,8 +472,9 @@ const actions = {
       return { ok: true, message: `Scrolled ${params.selector} into view` };
     }
     // Scroll page by delta
-    const deltaX = params.delta_x || 0;
-    const deltaY = params.delta_y || 500;
+    // `??`: a delta of 0 is a delta (dy: 0 with dx: 300 scrolls sideways only).
+    const deltaX = params.delta_x ?? 0;
+    const deltaY = params.delta_y ?? 500;
     await b.page.mouse.wheel(deltaX, deltaY);
     return { ok: true, message: `Scrolled page by (${deltaX}, ${deltaY})` };
   },

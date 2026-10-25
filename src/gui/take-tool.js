@@ -6,9 +6,12 @@
 // passes it in), so a run that refuses unsafe calls is refused before anything here is read.
 
 const path = require('path');
+const { createLogger } = require('../logging');
 const { GuiError, isGuiError, toToolResult, TAKE_TOOL_NAME } = require('./errors');
 const { validateSteps, runSteps, STEP_KINDS, MAX_STEPS } = require('./take-steps');
 const { TAKE_MAX_MINUTES } = require('./lease-protocol');
+
+const log = createLogger('gui/take-tool');
 
 const ACTIONS = Object.freeze(['start', 'run_steps', 'status', 'note', 'stop']);
 const SIZE = {
@@ -46,8 +49,8 @@ const PARAMETERS = {
       items: { type: 'object', properties: { step: { type: 'string', enum: [...STEP_KINDS] } }, required: ['step'], additionalProperties: true },
       description: 'run_steps: the script, in order; each { step, ...its fields }: navigate {url}; click, dblclick, hover, focus, check, '
         + 'uncheck, clear {selector}; fill, type {selector, text}; press {key, selector?}; select_option {selector, value}; '
-        + 'scroll {selector?, dx, dy}; wait_for {selector, state?, timeout_ms?}; wait_for_url {url, timeout_ms?}; '
-        + 'wait_for_text {selector, text, timeout_ms?}; pause {ms} (pacing only, 10 s each, 60 s a run); screenshot {name?}; note {text}'
+        + 'scroll {selector} or {dx, dy}; wait_for {selector, state?, timeout_ms?}; wait_for_url {url, timeout_ms?}; '
+        + 'wait_for_text {selector (CSS or role=), text, timeout_ms?}; pause {ms} (pacing only, 10 s each, 60 s a run); screenshot {name?}; note {text}'
     },
     from: { type: 'integer', minimum: 0, maximum: MAX_STEPS - 1, description: 'run_steps: the index to start at (resume after a failure)' },
     continue_on_error: { type: 'boolean', description: 'run_steps: run the rest after a step fails' },
@@ -70,6 +73,8 @@ const refusal = (err) => ({ ...toToolResult(err), ...(isGuiError(err) ? { code: 
 const defaultBrowserActions = () => require('../tools/builtin/browser-tool').actions;
 
 function buildTakeTool({ takes, tool, jobIdOf, browserActions = defaultBrowserActions }) {
+  // Takes whose steps are running now.
+  const running = new Set();
   return tool({
     name: TAKE_TOOL_NAME,
     description: 'Run one screen-recorded browser demo (a take). start asks the owner\'s phone once for the whole take '
@@ -97,7 +102,7 @@ function buildTakeTool({ takes, tool, jobIdOf, browserActions = defaultBrowserAc
       }
       const record = takes.forJob(jobId);
       if (!record) throw new GuiError('invalid_params', 'this session has no take; start one first');
-      if (action === 'run_steps') return await runTakeSteps(takes, record, params, options, browserActions);
+      if (action === 'run_steps') return await runTakeSteps(takes, record, params, options, browserActions, running);
       if (action === 'status') return { ok: true, untrusted_output: true, ...(await takes.status(record.take_id)) };
       if (action === 'note') {
         if (params.text === undefined) throw new GuiError('invalid_params', '"text" is required');
@@ -112,37 +117,59 @@ function buildTakeTool({ takes, tool, jobIdOf, browserActions = defaultBrowserAc
   });
 }
 
-// Take.run_steps (spec §10): validates, runs the steps on the take's browser under the take's
-// policy, keeps the results on the record, and stops the take when it asked to stop when done.
-async function runTakeSteps(takes, record, params, options, browserActions) {
+// Take.run_steps (spec §10): validates, runs the steps on the take's browser under the node's
+// deny rules and the take's policy, keeps the results on the record, and stops the take when it
+// asked to stop when done. One run at a time per take: two would interleave on one browser.
+async function runTakeSteps(takes, record, params, options, browserActions, running) {
   const takeId = record.take_id;
   const live = takes.context(takeId);
   if (!live) throw new GuiError('invalid_params', 'the take has ended');
   const from = params.from ?? 0;
   const valid = validateSteps(params.steps, { from });
   if (!valid.ok) throw new GuiError('invalid_params', valid.error.message);
+  if (running.has(takeId)) throw new GuiError('take_busy', 'steps are already running in this take');
+  // The executor hands every tool its deny rules and tier; a call that came another way has none.
+  if (typeof options.checkDenied !== 'function') throw new GuiError('capability_unavailable', 'run_steps needs the node\'s rules');
   // Stills and failure captures go in the take's own folder under the store, never the
   // recording's: the service runs as LOCAL SERVICE and cannot write the user's paths.
   const takeDir = path.join(takes.store.dir, takeId);
-  const out = await runSteps({ steps: valid.steps, from, continueOnError: params.continue_on_error === true }, {
-    actions: browserActions(),
-    // The Take call's own context: its holder's browserKey resolves the take's browser.
-    context: options,
-    policy: live.policy,
-    takeDir,
-    clock: takes.clock,
-    timers: takes.timers,
-    onNote: (text) => takes.note(takeId, text),
-    isLive: () => takes.context(takeId) !== null,
-    signal: options.signal || null
-  });
+  running.add(takeId);
+  let out;
+  try {
+    out = await runSteps({ steps: valid.steps, from, continueOnError: params.continue_on_error === true }, {
+      actions: browserActions(),
+      // Pinned to the take's own browser key, never the call's holder: once the take ends the
+      // holder is cleared, and a `take:` key with no browser never falls back to the owner's.
+      context: Object.freeze({ takePolicy: Object.freeze({ current: Object.freeze({ browserKey: live.policy.browserKey }) }) }),
+      policy: live.policy,
+      checkDenied: options.checkDenied,
+      takeDir,
+      clock: takes.clock,
+      timers: takes.timers,
+      onNote: (text) => takes.note(takeId, text),
+      isLive: () => takes.context(takeId) !== null,
+      signal: options.signal || null
+    });
+  } finally {
+    running.delete(takeId);
+  }
   // A resumed run replaces what it ran again; the steps before `from` keep their outcome.
   const earlier = (Array.isArray(record.steps) ? record.steps : []).filter((s) => s && s.index < from);
-  takes.recordSteps(takeId, [...earlier, ...out.results]);
+  const merged = [...earlier, ...out.results];
+  try {
+    takes.recordSteps(takeId, merged);
+  } catch (err) {
+    log.warn(`the steps of ${takeId} were not written to its record: ${err.message}`);
+  }
   const result = { ok: true, untrusted_output: true, results: out.results, stopped_at: out.stopped_at, take_dir: takeDir };
   const last = out.results.at(-1);
-  if (live.stopWhenDone && last && last.index === valid.steps.length - 1 && out.results.every((r) => r.ok) && takes.context(takeId)) {
-    result.stopped = await takes.stop(takeId, {});
+  if (live.stopWhenDone && last && last.index === valid.steps.length - 1 && merged.every((r) => r.ok) && takes.context(takeId)) {
+    try {
+      result.stopped = await takes.stop(takeId, {});
+    } catch (err) {
+      log.warn(`${takeId} did not stop when its steps were done: ${err.message}`);
+      result.stop_error = isGuiError(err) ? err.code : 'stop_failed';
+    }
   }
   return result;
 }

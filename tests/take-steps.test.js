@@ -8,6 +8,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { validateSteps, runSteps, STEP_KINDS } = require('../src/gui/take-steps');
+const { setLogLevel } = require('../src/logging');
+
+// The tool logs a record it could not write; the tests that cause it say so themselves.
+setLogLevel('fatal');
 
 const cleanups = [];
 after(() => { for (const c of cleanups.reverse()) c(); });
@@ -83,7 +87,7 @@ function fakePolicy(refuse = () => null) {
   return p;
 }
 
-function setup({ fail, refuse } = {}) {
+function setup({ fail, refuse, denyIf = () => null } = {}) {
   const clock = fakeClock();
   const timers = fakeTimers(clock);
   const shotDir = tempDir();
@@ -91,8 +95,10 @@ function setup({ fail, refuse } = {}) {
   const actions = fakeActions({ shotDir, fail });
   const policy = fakePolicy(refuse);
   const context = { takePolicy: { current: { browserKey: 'take:take-1' } } };
-  const deps = { actions, context, policy, takeDir, clock: () => clock.now(), timers };
-  return { clock, timers, actions, policy, context, takeDir, deps };
+  const denials = [];
+  const checkDenied = (toolName, params) => { denials.push({ toolName, params }); return denyIf(toolName, params) || null; };
+  const deps = { actions, context, policy, checkDenied, takeDir, clock: () => clock.now(), timers };
+  return { clock, timers, actions, policy, context, takeDir, shotDir, deps, denials };
 }
 
 const browserCalls = (actions) => actions.calls.map((c) => c.name);
@@ -134,7 +140,7 @@ describe('validateSteps', () => {
       { step: 'fill', selector: '#a', text: 'hello' }, { step: 'type', selector: '#a', text: 'hello' },
       { step: 'press', key: 'Enter' }, { step: 'press', key: 'Enter', selector: '#a' },
       { step: 'select_option', selector: '#a', value: 'b' },
-      { step: 'scroll', dx: 0, dy: 400 }, { step: 'scroll', selector: '#a', dx: 0, dy: 0 },
+      { step: 'scroll', dx: 0, dy: 400 }, { step: 'scroll', selector: '#a' }, { step: 'select_option', selector: '#a', value: '' },
       { step: 'wait_for', selector: '#a', state: 'hidden' }, { step: 'wait_for_url', url: '**/done' },
       { step: 'wait_for_text', selector: '#a', text: 'Ready', timeout_ms: 60000 },
       { step: 'pause', ms: 500 }, { step: 'screenshot' }, { step: 'screenshot', name: 'hero' },
@@ -150,6 +156,10 @@ describe('validateSteps', () => {
       { step: 'press', selector: '#a' },
       { step: 'scroll', dx: 1 },
       { step: 'scroll', dx: 1.5, dy: 2 },
+      { step: 'scroll', selector: '#a', dy: 100 },
+      { step: 'scroll', selector: '#a', dx: 0, dy: 0 },
+      { step: 'screenshot', name: 'step-3' },
+      { step: 'screenshot', name: 'step-3-failed' },
       { step: 'wait_for', selector: '#a', state: 'gone' },
       { step: 'wait_for_url', url: 'x', timeout_ms: 0 },
       { step: 'pause', ms: 10001 },
@@ -266,7 +276,7 @@ describe('runSteps', () => {
       { step: 'wait_for_url', url: '**/done', timeout_ms: 45000 }
     ] }, s.deps);
     assert.deepEqual(s.actions.calls.map((c) => [c.name, c.params]), [
-      ['wait_for', { selector: '.answer >> text=Done', state: 'visible', timeout: 90000 }],
+      ['wait_for', { selector: '.answer >> internal:text="Done"i', state: 'visible', timeout: 90000 }],
       ['wait_for', { selector: '#a', state: 'attached', timeout: 30000 }],
       ['wait_for_url', { url: '**/done', timeout: 45000 }]
     ]);
@@ -339,7 +349,7 @@ describe('runSteps', () => {
     s.actions.fill = async () => { live = false; return { ok: true }; };
     const out = await runSteps({ steps: script }, { ...s.deps, isLive: () => live });
     assert.equal(out.stopped_at, 2);
-    assert.equal(out.results[2].error.code, 'lease_required');
+    assert.equal(out.results[2].error.code, 'take_ended');
     assert.deepEqual(browserCalls(s.actions), ['navigate']);
   });
 });
@@ -350,7 +360,7 @@ describe('Take.run_steps', () => {
 
   function fakeTakes({ recording = null, stopWhenDone = false, steps = [] } = {}) {
     const clock = fakeClock();
-    const policy = fakePolicy();
+    const policy = Object.assign(fakePolicy(), { browserKey: 'take:take-1' });
     const t = {
       record: { take_id: 'take-1', job_id: 'job-1', recording, steps },
       live: true, notes: [], stops: [], policy,
@@ -372,6 +382,8 @@ describe('Take.run_steps', () => {
     return { Take, actions };
   }
 
+  const OPTS = Object.freeze({ checkDenied: () => null });
+
   const three = () => [
     { step: 'note', text: 'Open the app' },
     { step: 'navigate', url: 'https://app.example.com/' },
@@ -382,7 +394,7 @@ describe('Take.run_steps', () => {
     const recDir = tempDir();
     const takes = fakeTakes({ recording: { path: path.join(recDir, 'take-1.mp4') } });
     const { Take, actions } = build(takes, { click: true });
-    const options = { takePolicy: { current: { browserKey: 'take:take-1' } } };
+    const options = { takePolicy: { current: { browserKey: 'take:other' } }, checkDenied: () => null };
     const out = await Take.execute({ action: 'run_steps', steps: three() }, options);
     assert.equal(out.ok, true);
     assert.equal(out.untrusted_output, true);
@@ -392,7 +404,9 @@ describe('Take.run_steps', () => {
     assert.equal(out.results[2].screenshot, path.join(takeDir, 'step-2-failed.png'));
     assert.ok(fs.existsSync(out.results[2].screenshot));
     assert.deepEqual(fs.readdirSync(recDir), [], 'nothing is written beside the recording');
-    assert.ok(actions.calls.every((c) => c.ctx === options));
+    // The context is pinned to the take's key, never the call's holder (which a take's end clears).
+    assert.ok(actions.calls.every((c) => c.ctx !== options && c.ctx.takePolicy.current.browserKey === 'take:take-1'));
+    assert.ok(Object.isFrozen(actions.calls[0].ctx.takePolicy.current));
     assert.deepEqual(takes.policy.calls.map((c) => c.params.action), ['navigate', 'click', 'screenshot']);
     assert.deepEqual(takes.notes, ['Open the app']);
     assert.deepEqual(takes.record.steps.map((s) => [s.index, s.action, s.ok]), [[0, 'note', true], [1, 'navigate', true], [2, 'click', false]]);
@@ -407,7 +421,7 @@ describe('Take.run_steps', () => {
   it('a take with no recording keeps its stills in its own folder', async () => {
     const takes = fakeTakes();
     const { Take } = build(takes);
-    const out = await Take.execute({ action: 'run_steps', steps: [{ step: 'screenshot', name: 'hero' }] }, {});
+    const out = await Take.execute({ action: 'run_steps', steps: [{ step: 'screenshot', name: 'hero' }] }, OPTS);
     assert.equal(out.results[0].screenshot, path.join(takes.store.dir, 'take-1', 'hero.png'));
     assert.equal(out.take_dir, path.join(takes.store.dir, 'take-1'));
     assert.ok(fs.statSync(out.take_dir).isDirectory(), 'made on first use');
@@ -415,13 +429,13 @@ describe('Take.run_steps', () => {
 
   it('stop_when_done stops the take when the last step passes, and not after a failure', async () => {
     const done = fakeTakes({ stopWhenDone: true });
-    const out = await build(done).Take.execute({ action: 'run_steps', steps: [{ step: 'click', selector: '#a' }] }, {});
+    const out = await build(done).Take.execute({ action: 'run_steps', steps: [{ step: 'click', selector: '#a' }] }, OPTS);
     assert.equal(out.stopped.ended, 'take_done');
     assert.equal(done.stops.length, 1);
     const failing = fakeTakes({ stopWhenDone: true });
     const bad = await build(failing, { click: true }).Take.execute({
       action: 'run_steps', continue_on_error: true, steps: [{ step: 'click', selector: '#a' }, { step: 'hover', selector: '#b' }]
-    }, {});
+    }, OPTS);
     assert.equal(bad.stopped, undefined);
     assert.equal(failing.stops.length, 0);
   });
@@ -429,16 +443,147 @@ describe('Take.run_steps', () => {
   it('bad steps, a take that has ended and no take are refused before the browser', async () => {
     const takes = fakeTakes();
     const { Take, actions } = build(takes);
-    const bad = await Take.execute({ action: 'run_steps', steps: [{ step: 'pause', ms: 20000 }] }, {});
+    const bad = await Take.execute({ action: 'run_steps', steps: [{ step: 'pause', ms: 20000 }] }, OPTS);
     assert.equal(bad.code, 'invalid_params');
     assert.match(bad.error, /^invalid_params: step 0 \(pause\)/);
     takes.live = false;
-    const ended = await Take.execute({ action: 'run_steps', steps: [{ step: 'click', selector: '#a' }] }, {});
+    const ended = await Take.execute({ action: 'run_steps', steps: [{ step: 'click', selector: '#a' }] }, OPTS);
     assert.equal(ended.code, 'invalid_params');
     assert.match(ended.error, /ended/);
     takes.record = null;
-    const none = await Take.execute({ action: 'run_steps', steps: [{ step: 'click', selector: '#a' }] }, {});
+    const none = await Take.execute({ action: 'run_steps', steps: [{ step: 'click', selector: '#a' }] }, OPTS);
     assert.match(none.error, /no take/);
     assert.deepEqual(actions.calls, []);
+  });
+
+  it('a call with no checkDenied (not through the executor) runs nothing', async () => {
+    const takes = fakeTakes();
+    const { Take, actions } = build(takes);
+    const out = await Take.execute({ action: 'run_steps', steps: [{ step: 'click', selector: '#a' }] }, {});
+    assert.equal(out.code, 'capability_unavailable');
+    assert.deepEqual(actions.calls, []);
+  });
+
+  it('a second run_steps while one runs is take_busy', async () => {
+    const takes = fakeTakes();
+    const { Take } = build(takes);
+    const first = Take.execute({ action: 'run_steps', steps: [{ step: 'pause', ms: 1000 }] }, OPTS);
+    const second = await Take.execute({ action: 'run_steps', steps: [{ step: 'click', selector: '#a' }] }, OPTS);
+    assert.equal(second.code, 'take_busy');
+    await new Promise((r) => setImmediate(r));
+    takes.timers.advance(1000);
+    assert.equal((await first).ok, true);
+    assert.equal((await Take.execute({ action: 'run_steps', steps: [{ step: 'click', selector: '#a' }] }, OPTS)).ok, true);
+  });
+
+  it('stop_when_done looks at the merged list: a failure kept from before `from` prevents the stop', async () => {
+    const takes = fakeTakes({ stopWhenDone: true, steps: [{ index: 0, action: 'click', ok: false, ms: 1 }] });
+    const out = await build(takes).Take.execute({ action: 'run_steps', from: 1, steps: [{ step: 'click', selector: '#a' }, { step: 'click', selector: '#b' }] }, OPTS);
+    assert.equal(out.stopped, undefined);
+    assert.equal(takes.stops.length, 0);
+  });
+
+  it('a record that cannot be written or a stop that fails keeps the results', async () => {
+    const takes = fakeTakes({ stopWhenDone: true });
+    takes.recordSteps = () => { throw new Error('disk full'); };
+    takes.stop = async () => { throw new Error('nope'); };
+    const out = await build(takes).Take.execute({ action: 'run_steps', steps: [{ step: 'click', selector: '#a' }] }, OPTS);
+    assert.equal(out.ok, true);
+    assert.equal(out.results[0].ok, true);
+    assert.equal(out.stop_error, 'stop_failed');
+  });
+});
+
+describe('runSteps: the node\'s rules, the take and the turn', () => {
+  it('checkDenied runs before the policy for every browser call; a denial is the step error', async () => {
+    const s = setup({ denyIf: (toolName, p) => (p.action === 'click' ? { code: 'denied_by_rule', message: 'Blocked by rule: Browser(click)' } : null) });
+    const out = await runSteps({ steps: [{ step: 'navigate', url: 'https://app.example.com/' }, { step: 'click', selector: '#a' }, { step: 'hover', selector: '#b' }] }, s.deps);
+    assert.equal(out.stopped_at, 1);
+    assert.deepEqual(out.results[1].error, { code: 'denied_by_rule', message: 'Blocked by rule: Browser(click)' });
+    assert.ok(!browserCalls(s.actions).includes('click'));
+    assert.ok(!s.policy.calls.some((c) => c.params.action === 'click'), 'the take policy is not asked after a denial');
+    // Asked for Browser and for the split tool the action belongs to.
+    assert.deepEqual(s.denials.slice(0, 2).map((d) => d.toolName), ['Browser', 'BrowserPage']);
+    assert.deepEqual(s.denials[0].params, { action: 'navigate', url: 'https://app.example.com/' });
+  });
+
+  it('no checkDenied: the runner refuses to run', async () => {
+    const s = setup();
+    await assert.rejects(runSteps({ steps: [{ step: 'click', selector: '#a' }] }, { ...s.deps, checkDenied: undefined }), (e) => e.code === 'invalid_params');
+    assert.deepEqual(browserCalls(s.actions), []);
+  });
+
+  it('a take that ends during a failing step: take_ended, no URL read, no capture, the run stops', async () => {
+    const s = setup();
+    let live = true;
+    let statusReads = 0;
+    s.actions.status = async () => { statusReads += 1; return { currentUrl: 'https://owner.example.org/' }; };
+    s.actions.click = async () => { live = false; throw new Error('Target closed'); };
+    const out = await runSteps({ steps: [{ step: 'click', selector: '#a' }, { step: 'click', selector: '#b' }], continueOnError: true }, { ...s.deps, isLive: () => live });
+    assert.equal(out.stopped_at, 0);
+    assert.equal(out.results.length, 1);
+    assert.equal(out.results[0].url, null);
+    assert.equal(out.results[0].screenshot, undefined);
+    assert.equal(statusReads, 0);
+    assert.deepEqual(browserCalls(s.actions), []);
+  });
+
+  it('a take that ends between steps stops at the next one with take_ended', async () => {
+    const s = setup();
+    let live = true;
+    s.actions.navigate = async () => { live = false; return { ok: true }; };
+    const out = await runSteps({ steps: [{ step: 'navigate', url: 'https://app.example.com/' }, { step: 'click', selector: '#a' }] }, { ...s.deps, isLive: () => live });
+    assert.deepEqual(out.results.map((r) => [r.index, r.ok, r.error && r.error.code]), [[0, true, undefined], [1, false, 'take_ended']]);
+    assert.equal(out.results[0].url, null);
+    assert.equal(out.stopped_at, 1);
+  });
+
+  it('a stopped turn ends a pause at once: cancelled, and the run stops', async () => {
+    const s = setup();
+    const ac = new AbortController();
+    const p = runSteps({ steps: [{ step: 'pause', ms: 10000 }, { step: 'click', selector: '#a' }], continueOnError: true }, { ...s.deps, signal: ac.signal });
+    await new Promise((r) => setImmediate(r));
+    ac.abort();
+    const out = await p;
+    assert.equal(out.results[0].error.code, 'cancelled');
+    assert.equal(out.results[0].screenshot, undefined);
+    assert.equal(out.stopped_at, 0);
+    assert.deepEqual(s.timers.pending(), [], 'the pause timer is cleared');
+  });
+
+  it('a timed-out step stops the run even with continue_on_error', async () => {
+    const s = setup({ fail: { hover: 'hang' } });
+    const p = runSteps({ steps: [{ step: 'hover', selector: '#a' }, { step: 'click', selector: '#b' }], continueOnError: true }, s.deps);
+    await new Promise((r) => setImmediate(r));
+    s.timers.advance(20000);
+    const out = await p;
+    assert.equal(out.results[0].error.code, 'op_timeout');
+    assert.equal(out.stopped_at, 0);
+    assert.ok(!browserCalls(s.actions).includes('click'));
+  });
+
+  it('wait_for_text refuses the keyword selectors the browser tool resolves whole', () => {
+    const { KEYWORD_SELECTOR_PREFIXES } = require('../src/gui/take-steps');
+    assert.deepEqual([...KEYWORD_SELECTOR_PREFIXES], ['label=', 'placeholder=', 'testid=', 'alt=', 'title=']);
+    for (const prefix of KEYWORD_SELECTOR_PREFIXES) {
+      const r = validateSteps([{ step: 'click', selector: '#a' }, { step: 'wait_for_text', selector: `${prefix}Email`, text: 'Done' }]);
+      assert.equal(r.ok, false, prefix);
+      assert.equal(r.error.code, 'invalid_params');
+      assert.match(r.error.message, /^step 1 \(wait_for_text\)/);
+      // The same selector is fine where nothing is chained onto it.
+      assert.equal(validateSteps([{ step: 'click', selector: `${prefix}Email` }]).ok, true);
+    }
+    for (const selector of ['.answer', 'xpath=//div', 'text=Answer', 'role=main']) {
+      assert.equal(validateSteps([{ step: 'wait_for_text', selector, text: 'Done' }]).ok, true, selector);
+    }
+  });
+
+  it('the page URL in a row is cut to 2048 characters, and a moved still leaves no temp file', async () => {
+    const s = setup();
+    s.actions.status = async () => ({ currentUrl: `https://app.example.com/${'a'.repeat(5000)}` });
+    const out = await runSteps({ steps: [{ step: 'screenshot', name: 'hero' }] }, s.deps);
+    assert.equal(Array.from(out.results[0].url).length, 2048);
+    assert.ok(fs.existsSync(out.results[0].screenshot));
+    assert.deepEqual(fs.readdirSync(s.shotDir), [], 'the temp file of the browser tool is gone');
   });
 });

@@ -462,95 +462,9 @@ class ToolExecutor extends EventEmitter {
     // Rule evaluation uses the hook-decorated parameters so a hook that
     // normalises a command (e.g. resolving aliases) feeds the same key
     // the user saw in the approval dialog.
-    const ruleMatch = evaluateRules(this.permissionRules, toolName, effectiveParameters);
+    const { refused: refusedByRuleOrTier, ruleMatch, tierUnsafe, tierReason } = this._rulesAndTier(tool, toolName, effectiveParameters, options, { wakeupLookOnly });
+    if (refusedByRuleOrTier) return refusedByRuleOrTier;
     let approvalSource = null;
-
-    if (ruleMatch.matched) {
-      if (ruleMatch.action === 'deny') {
-        const denied = {
-          success: false,
-          error: `Blocked by rule: ${describeRule(ruleMatch.rule)}`,
-          deniedBy: 'rule',
-          rule: { tool: ruleMatch.rule.tool, pattern: ruleMatch.rule.pattern, source: ruleMatch.rule.source }
-        };
-        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
-        return denied;
-      }
-      // 'ask' falls through to the regular approval flow below.
-    }
-
-    // Node policy tier, after the permission rules and before the gate. A
-    // classifyCall that throws, or returns anything other than null or a
-    // well-formed { tier: read|routine|unsafe|denied, reason? } object,
-    // fails closed: treated as `denied` rather than let the call run
-    // unclassified.
-    let tierUnsafe = false;
-    let tierReason = null;
-    if (this.classifyCall) {
-      let raw;
-      try {
-        raw = this.classifyCall(toolName, effectiveParameters, {
-          cwd: options.workingDirectory || this.workingDirectory
-        });
-      } catch (classifyError) {
-        log.warn('classifyCall threw', { toolName, error: classifyError?.message ?? String(classifyError) });
-        raw = { tier: 'denied', reason: 'invalid_classification' };
-      }
-      // Only null/undefined means "no opinion" and falls through to the
-      // ordinary rule/gate flow. Every other value — including a falsy one
-      // like 0, '' or false — is not a valid decision and must be denied
-      // below, not silently treated as unclassified.
-      const decision = raw === null || raw === undefined ? null : raw;
-      if (decision !== null) {
-        const validTiers = ['read', 'routine', 'unsafe', 'denied'];
-        const wellFormed = typeof decision === 'object'
-          && !Array.isArray(decision)
-          && validTiers.includes(decision.tier);
-        const safeDecision = wellFormed ? decision : { tier: 'denied', reason: 'invalid_classification' };
-
-        // A tool that says how its parameters may be audited (Type, Key) is
-        // audited in that form. A redactor that fails gives nothing of the
-        // parameters, never the parameters themselves.
-        let auditParameters;
-        if (typeof tool.auditParameters === 'function') {
-          try {
-            auditParameters = tool.auditParameters(effectiveParameters);
-          } catch {
-            auditParameters = { redacted: true };
-          }
-          if (auditParameters === null || typeof auditParameters !== 'object') auditParameters = { redacted: true };
-        }
-        this.emit('tierDecision', {
-          toolName,
-          parameters: effectiveParameters,
-          ...(auditParameters === undefined ? {} : { auditParameters }),
-          tier: safeDecision.tier,
-          reason: safeDecision.reason || null
-        });
-        if (safeDecision.tier === 'denied') {
-          const denied = {
-            success: false,
-            error: typeof safeDecision.message === 'string' && safeDecision.message ? safeDecision.message : 'Denied by node policy.',
-            deniedBy: 'policy'
-          };
-          this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
-          return denied;
-        }
-        // A service node's classifier calls every requiresApproval tool
-        // `unsafe` / `tool_requires_approval`, the per-tool flag in another
-        // form. For a wake-up's look-only browser call the guards above have
-        // already made that judgment (a look-only action, the kl-cases
-        // profile), so that one verdict does not send it to a phone nobody is
-        // watching (spec docs/superpowers/specs/2026-10-20-outreach-wakeup-browser.md,
-        // review of 2026-10-20). Every other verdict stands: `denied` above,
-        // and `unsafe` for an always_confirm match, a dangerous operation, a
-        // path outside allowed_roots or any other reason still gates it. The
-        // tierDecision event above keeps the classifier's own verdict.
-        const requiresApprovalOnly = safeDecision.tier === 'unsafe' && safeDecision.reason === 'tool_requires_approval';
-        tierUnsafe = safeDecision.tier === 'unsafe' && !(wakeupLookOnly && requiresApprovalOnly);
-        tierReason = safeDecision.reason || null;
-      }
-    }
 
     // A live take (demo takes spec §7.2), after the deny rules and the tier,
     // so a `denied` tier has already refused: the policy refuses at once, or
@@ -753,7 +667,10 @@ class ToolExecutor extends EventEmitter {
         // This run's take holder and origin locality, from this executor's
         // own fields (the Take tool reads them).
         takePolicy: this.takePolicy,
-        nodeLocalOrigin: this.nodeLocalOrigin
+        nodeLocalOrigin: this.nodeLocalOrigin,
+        // The deny rules and the node tier for a call a tool makes itself
+        // (Take.run_steps' steps); from this executor, never from options.
+        checkDenied: (name, params) => this._checkDenied(name, params, options)
       })));
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
@@ -789,6 +706,111 @@ class ToolExecutor extends EventEmitter {
       this.emit('postExecute', { toolName, parameters: effectiveParameters, result: errorResult });
       return errorResult;
     }
+  }
+
+  // The permission rules' deny and the node policy's tier for one call, in that
+  // order, with the events the audit hangs off (postExecute for a refusal,
+  // tierDecision for every classification). Shared by execute() and by
+  // checkDenied (a take's run_steps holds each step to the same two checks).
+  _rulesAndTier(tool, toolName, effectiveParameters, options = {}, { wakeupLookOnly = false } = {}) {
+    const ruleMatch = evaluateRules(this.permissionRules, toolName, effectiveParameters);
+    if (ruleMatch.matched) {
+      if (ruleMatch.action === 'deny') {
+        const denied = {
+          success: false,
+          error: `Blocked by rule: ${describeRule(ruleMatch.rule)}`,
+          deniedBy: 'rule',
+          rule: { tool: ruleMatch.rule.tool, pattern: ruleMatch.rule.pattern, source: ruleMatch.rule.source }
+        };
+        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
+        return { refused: denied, ruleMatch, tierUnsafe: false, tierReason: null };
+      }
+      // 'ask' falls through to the regular approval flow below.
+    }
+
+    // Node policy tier, after the permission rules and before the gate. A
+    // classifyCall that throws, or returns anything other than null or a
+    // well-formed { tier: read|routine|unsafe|denied, reason? } object,
+    // fails closed: treated as `denied` rather than let the call run
+    // unclassified.
+    let tierUnsafe = false;
+    let tierReason = null;
+    if (this.classifyCall) {
+      let raw;
+      try {
+        raw = this.classifyCall(toolName, effectiveParameters, {
+          cwd: options.workingDirectory || this.workingDirectory
+        });
+      } catch (classifyError) {
+        log.warn('classifyCall threw', { toolName, error: classifyError?.message ?? String(classifyError) });
+        raw = { tier: 'denied', reason: 'invalid_classification' };
+      }
+      // Only null/undefined means "no opinion" and falls through to the
+      // ordinary rule/gate flow. Every other value — including a falsy one
+      // like 0, '' or false — is not a valid decision and must be denied
+      // below, not silently treated as unclassified.
+      const decision = raw === null || raw === undefined ? null : raw;
+      if (decision !== null) {
+        const validTiers = ['read', 'routine', 'unsafe', 'denied'];
+        const wellFormed = typeof decision === 'object'
+          && !Array.isArray(decision)
+          && validTiers.includes(decision.tier);
+        const safeDecision = wellFormed ? decision : { tier: 'denied', reason: 'invalid_classification' };
+
+        // A tool that says how its parameters may be audited (Type, Key) is
+        // audited in that form. A redactor that fails gives nothing of the
+        // parameters, never the parameters themselves.
+        let auditParameters;
+        if (tool && typeof tool.auditParameters === 'function') {
+          try {
+            auditParameters = tool.auditParameters(effectiveParameters);
+          } catch {
+            auditParameters = { redacted: true };
+          }
+          if (auditParameters === null || typeof auditParameters !== 'object') auditParameters = { redacted: true };
+        }
+        this.emit('tierDecision', {
+          toolName,
+          parameters: effectiveParameters,
+          ...(auditParameters === undefined ? {} : { auditParameters }),
+          tier: safeDecision.tier,
+          reason: safeDecision.reason || null
+        });
+        if (safeDecision.tier === 'denied') {
+          const denied = {
+            success: false,
+            error: typeof safeDecision.message === 'string' && safeDecision.message ? safeDecision.message : 'Denied by node policy.',
+            deniedBy: 'policy'
+          };
+          this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
+          return { refused: denied, ruleMatch, tierUnsafe: false, tierReason: null };
+        }
+        // A service node's classifier calls every requiresApproval tool
+        // `unsafe` / `tool_requires_approval`, the per-tool flag in another
+        // form. For a wake-up's look-only browser call the guards above have
+        // already made that judgment (a look-only action, the kl-cases
+        // profile), so that one verdict does not send it to a phone nobody is
+        // watching (spec docs/superpowers/specs/2026-10-20-outreach-wakeup-browser.md,
+        // review of 2026-10-20). Every other verdict stands: `denied` above,
+        // and `unsafe` for an always_confirm match, a dangerous operation, a
+        // path outside allowed_roots or any other reason still gates it. The
+        // tierDecision event above keeps the classifier's own verdict.
+        const requiresApprovalOnly = safeDecision.tier === 'unsafe' && safeDecision.reason === 'tool_requires_approval';
+        tierUnsafe = safeDecision.tier === 'unsafe' && !(wakeupLookOnly && requiresApprovalOnly);
+        tierReason = safeDecision.reason || null;
+      }
+    }
+    return { refused: null, ruleMatch, tierUnsafe, tierReason };
+  }
+
+  // For a tool that drives another tool's calls itself (Take.run_steps): the
+  // node's deny rules and `denied` tier for that call, as execute() applies
+  // them, → null or { code, message }. PreToolUse hooks are not run.
+  _checkDenied(toolName, parameters, options = {}) {
+    const params = parameters && typeof parameters === 'object' ? parameters : {};
+    const { refused } = this._rulesAndTier(toolRegistry.get(toolName) || null, toolName, params, options);
+    if (!refused) return null;
+    return { code: refused.deniedBy === 'rule' ? 'denied_by_rule' : 'denied_by_policy', message: refused.error };
   }
 
   // A refuseUnsafe run never asks anyone: a call that would need a person's

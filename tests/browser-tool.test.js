@@ -51,6 +51,21 @@ describe('Browser Tool - unit', () => {
     assert.ok(result.error.includes('not running'));
   });
 
+  it('scroll takes a zero delta as zero, and defaults only a missing one', async () => {
+    const wheels = [];
+    const fake = { isRunning: true, page: { mouse: { wheel: async (x, y) => { wheels.push([x, y]); } } } };
+    const ctx = { takePolicy: { current: { browserKey: 'take:scroll-test' } } };
+    setBrowser('take:scroll-test', fake);
+    try {
+      await actions.scroll({ delta_x: 300, delta_y: 0 }, ctx);
+      await actions.scroll({ delta_x: 0, delta_y: 0 }, ctx);
+      await actions.scroll({}, ctx);
+    } finally {
+      removeBrowser('take:scroll-test');
+    }
+    assert.deepStrictEqual(wheels, [[300, 0], [0, 0], [0, 500]]);
+  });
+
   it('requires url param for navigate', async () => {
     await browserTool._cleanup();
     const result = await browserTool.execute({ action: 'navigate' });

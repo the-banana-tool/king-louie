@@ -181,3 +181,64 @@ describe('ToolExecutor with a take policy', () => {
     assert.equal(result.success, true);
   });
 });
+
+// Take.run_steps' steps are held to the node's deny rules and tier through the
+// checkDenied the executor hands every tool (spec §7.2).
+describe('checkDenied: a step a tool runs itself is held to the node\'s rules', () => {
+  const RUNNER = 'KlStepRunner';
+  const { runSteps } = require('../src/gui/take-steps');
+  let clicks = 0;
+  before(() => {
+    toolRegistry.register(new Tool({
+      name: RUNNER,
+      description: 'test',
+      parameters: { type: 'object', properties: {} },
+      requiresApproval: false,
+      execute: async (params, context) => runSteps({ steps: [{ step: 'click', selector: '#go' }] }, {
+        actions: { click: async () => { clicks += 1; return { ok: true }; }, status: async () => ({ currentUrl: 'https://a.example.com/' }) },
+        context: {},
+        policy: { decide: async () => ({ allow: true }) },
+        checkDenied: context.checkDenied,
+        takeDir: null
+      })
+    }));
+  });
+  after(() => toolRegistry.unregister(RUNNER));
+
+  it('a deny rule for Browser(click) makes a click step fail with the rule\'s code, and the executor\'s refusal event is emitted', async () => {
+    clicks = 0;
+    const { ex } = executor({ permissionRules: [{ tool: 'Browser', pattern: 'click', action: 'deny', source: 'user' }] });
+    const events = [];
+    ex.on('postExecute', (evt) => events.push(evt));
+    const out = await ex.execute(RUNNER, {}, { checkDenied: () => null });
+    assert.equal(clicks, 0);
+    assert.equal(out.stopped_at, 0);
+    assert.equal(out.results[0].error.code, 'denied_by_rule');
+    assert.match(out.results[0].error.message, /^Blocked by rule: /);
+    const refusal = events.find((e) => e.toolName === 'Browser');
+    assert.ok(refusal, 'the same postExecute refusal the executor records for a Browser call');
+    assert.equal(refusal.result.deniedBy, 'rule');
+    assert.deepEqual(refusal.parameters, { action: 'click', selector: '#go' });
+  });
+
+  it('a rule for the split tool counts too, and a denied tier is denied_by_policy with its tierDecision', async () => {
+    clicks = 0;
+    const split = executor({ permissionRules: [{ tool: 'BrowserPage', pattern: 'click', action: 'deny', source: 'user' }] });
+    assert.equal((await split.ex.execute(RUNNER, {})).results[0].error.code, 'denied_by_rule');
+    const tiered = executor({ classifyCall: (toolName) => (toolName === 'Browser' ? { tier: 'denied', reason: 'matched_deny_policy' } : null) });
+    const tiers = [];
+    tiered.ex.on('tierDecision', (evt) => tiers.push(evt));
+    const out = await tiered.ex.execute(RUNNER, {});
+    assert.equal(out.results[0].error.code, 'denied_by_policy');
+    assert.ok(tiers.some((t) => t.toolName === 'Browser' && t.tier === 'denied'));
+    assert.equal(clicks, 0);
+  });
+
+  it('with no rule the step runs', async () => {
+    clicks = 0;
+    const { ex } = executor();
+    const out = await ex.execute(RUNNER, {});
+    assert.equal(out.results[0].ok, true);
+    assert.equal(clicks, 1);
+  });
+});
