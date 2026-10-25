@@ -326,7 +326,11 @@ describe('take ops', () => {
 
     // The service goes away and stays away.
     await channel.stop();
-    while (armed() === 0) await new Promise((r) => setImmediate(r));
+    // Bounded: a helper that never arms the timer fails here, not at the file timeout.
+    for (let i = 0; armed() === 0; i += 1) {
+      assert.ok(i < 100, 'the 30 s timer was never armed after the service went away');
+      await new Promise((r) => setImmediate(r));
+    }
     await t.advance(29_999);
     assert.equal(stops(), 0);
     await t.advance(1);

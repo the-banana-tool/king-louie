@@ -382,15 +382,18 @@ describe('Windows backend: launch_browser, record_start, record_stop (any OS, fa
     for (const arg of [
       '--user-data-dir=C:\\anywhere', '--USER-DATA-DIR=C:\\anywhere', '-user-data-dir=C:\\x', '--user-data-dir',
       '--profile-directory=Default', '--remote-debugging-port=9222', '--Remote-Debugging-Port=9222',
-      '--remote-debugging-address=0.0.0.0', '--remote-debugging-pipe'
+      '--remote-debugging-address=0.0.0.0', '--remote-debugging-pipe',
+      // Every form Chromium reads as a switch (it trims; Windows takes '/').
+      '/user-data-dir=C:\\x', ' --user-data-dir=x', '\t-profile-directory=x ', '/Remote-Debugging-Port=1',
+      '--REMOTE-DEBUGGING-PORT=9222', '--remote-debugging-io-pipes', '--remote-debugging-targets=x'
     ]) {
       await assert.rejects(backend.launchBrowser({ exe: 'C:\\x\\chrome.exe', profile: 'demo', args: ['--window-size=1280,800', arg] }),
         (e) => e.code === 'invalid_params' && e.message === 'invalid_params', arg);
     }
     await assert.rejects(backend.launchBrowser({ exe: 'C:\\x\\chrome.exe', profile: 'demo', args: [3] }), (e) => e.code === 'invalid_params');
     assert.equal(calls.length, 0, 'nothing spawned');
-    // A switch that only starts the same is still allowed.
-    await backend.launchBrowser({ exe: 'C:\\x\\chrome.exe', profile: 'demo', args: ['--user-data-dir-x=1', '--remote-debugging-targets=x'] });
+    // Another switch, even one that starts like a reserved one, and a non-switch argument pass.
+    await backend.launchBrowser({ exe: 'C:\\x\\chrome.exe', profile: 'demo', args: ['--user-data-dir-x=1', '--window-size=1280,800', 'https://example.com/'] });
     assert.equal(calls.length, 1);
   });
 

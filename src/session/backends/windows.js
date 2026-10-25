@@ -32,11 +32,17 @@ const PROFILE_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const TAKE_ID = /^take-[0-9a-f]{12}$/;
 
 // Switches that would move the profile or the debugging endpoint the
-// helper fixed (Chromium keeps the last of a repeated switch).
-const RESERVED_SWITCHES = new Set(['user-data-dir', 'profile-directory', 'remote-debugging-port', 'remote-debugging-address', 'remote-debugging-pipe']);
+// helper fixed (Chromium keeps the last of a repeated switch). Chromium
+// trims an argument and, on Windows, takes `/name=value` as well as `--` and
+// `-`, so every such form is read as a switch; every `remote-debugging*`
+// name is refused, today's and any later one (fail closed). An argument that
+// is not a switch passes.
+const RESERVED_SWITCHES = new Set(['user-data-dir', 'profile-directory']);
 function reservedSwitch(arg) {
-  const m = /^-{1,2}([^=]*)/.exec(arg);
-  return Boolean(m) && RESERVED_SWITCHES.has(m[1].trim().toLowerCase());
+  const m = /^(?:--|-|\/)([^=]*)/.exec(String(arg).trim());
+  if (!m) return false;
+  const name = m[1].trim().toLowerCase();
+  return RESERVED_SWITCHES.has(name) || name.startsWith('remote-debugging');
 }
 
 function kingLouieDir(env) {

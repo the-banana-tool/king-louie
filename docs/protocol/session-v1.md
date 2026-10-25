@@ -114,11 +114,12 @@ every user-side path itself. The service sends names; the helper places them.
   `exe` is an `.exe`, re-resolved as `launch`'s is (`path_changed`).
   `profile` is a name matching `^[A-Za-z0-9_-]{1,64}$`; the helper creates
   `%LOCALAPPDATA%\KingLouie\browser-profiles\<profile>` (the user's) and
-  uses it as the profile. `args` are strings, and none may name the switch
-  `user-data-dir`, `profile-directory`, `remote-debugging-port`,
-  `remote-debugging-address` or `remote-debugging-pipe` (one or two dashes,
-  the name before any `=`, without case): Chromium keeps the last of a
-  repeated switch. Any of these wrong is `invalid_params`, and nothing is
+  uses it as the profile. `args` are strings, and none may be the switch
+  `user-data-dir`, `profile-directory` or any name starting
+  `remote-debugging` in any form Chromium reads as a switch: trimmed, after
+  `--`, `-` or `/`, the name before any `=`, without case. Chromium keeps
+  the last of a repeated switch; an argument that is not a switch passes.
+  Any of these wrong is `invalid_params`, and nothing is
   started. The helper removes a stale `DevToolsActivePort` from the
   profile, starts `exe` detached with `--user-data-dir=<profile dir>
   --remote-debugging-port=0 --no-first-run --no-default-browser-check` and
