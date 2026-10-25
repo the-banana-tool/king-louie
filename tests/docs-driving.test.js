@@ -10,6 +10,12 @@ const { MCP_TOOLS } = require('../src/fleet/tool-definitions');
 const browserPageTool = require('../src/tools/builtin/browser-page-tool');
 const { mapApprovalResult } = require('../src/execution/tool-executor');
 const { REFUSE_UNSAFE_MESSAGE } = require('../src/approvals/executor-options');
+const { TAKE_CODES } = require('../src/gui/take-policy');
+const { TAKE_ACTIONS } = require('../src/gui/take-tool');
+const { STEP_KINDS } = require('../src/gui/take-steps');
+const { parseGuiConfig } = require('../src/gui/config');
+const { parseYaml } = require('../src/platform/yaml');
+const { WAIT_MS_MAX } = require('../src/fleet/tool-definitions');
 
 const DOC = path.join(__dirname, '..', 'docs', 'driving-king-louie.md');
 const read = () => fs.readFileSync(DOC, 'utf8');
@@ -17,6 +23,22 @@ const TOOL_NAMES = new Set(MCP_TOOLS.map((t) => t.name));
 // A backticked snake_case word with one of these prefixes reads as an MCP
 // tool name, so it must be one.
 const TOOL_PREFIXES = /^(list|describe|get|run|send|cancel)_[a-z_]+$/;
+
+// The text of one "## N. <title>" section, up to the next one.
+function section(title) {
+  const lines = read().split(/\r?\n/);
+  const start = lines.findIndex((l) => /^## \d+\. /.test(l) && l.replace(/^## \d+\. /, '') === title);
+  assert.ok(start >= 0, `the guide has a section "${title}"`);
+  const end = lines.findIndex((l, i) => i > start && l.startsWith('## '));
+  return lines.slice(start + 1, end < 0 ? lines.length : end).join('\n');
+}
+
+// A fenced block inside a list item is indented with it: strip the common indent.
+function dedent(block) {
+  const lines = block.split('\n');
+  const indent = Math.min(...lines.filter((l) => l.trim()).map((l) => l.length - l.trimStart().length));
+  return lines.map((l) => l.slice(indent)).join('\n');
+}
 
 async function help() {
   let out = '';
@@ -51,11 +73,13 @@ describe('docs/driving-king-louie.md', () => {
       assert.ok(text.includes(`\`${name}\``), `the guide names ${name}`);
     }
     for (const word of words) {
-      if (TOOL_PREFIXES.test(word)) assert.ok(TOOL_NAMES.has(word), `${word} is an MCP tool`);
-      if (word.startsWith('wait_for')) assert.ok(browserPageTool.parameters.properties.action.enum.includes(word), `${word} is a BrowserPage action`);
+      // Take's own actions (run_steps) read like tool names and are not MCP tools.
+      if (TOOL_PREFIXES.test(word) && !TAKE_ACTIONS.includes(word)) assert.ok(TOOL_NAMES.has(word), `${word} is an MCP tool`);
+      if (word.startsWith('wait_for')) {
+        assert.ok(browserPageTool.parameters.properties.action.enum.includes(word) || STEP_KINDS.includes(word), `${word} is a BrowserPage action or a step`);
+      }
     }
-    assert.ok(words.has('wait_for') && words.has('wait_for_url'), 'names the browser waits that exist');
-    assert.ok(!words.has('wait_for_text'), 'wait_for_text arrives with D1, not yet');
+    assert.ok(words.has('wait_for') && words.has('wait_for_url') && words.has('wait_for_text'), 'names the waits that exist');
   });
 
   it('quotes the refusals as the code words them', () => {
@@ -67,9 +91,34 @@ describe('docs/driving-king-louie.md', () => {
     assert.ok(text.includes(timeout), 'quotes the approval timeout');
   });
 
-  it('marks what is not there yet', () => {
-    const text = read();
-    assert.match(text, /from D1 part C/);
-    assert.match(text, /arrives with D1 part D/);
+  it('no longer marks the take as not there yet', () => {
+    assert.doesNotMatch(read(), /D1 part [A-D]/);
+  });
+
+  it('gives node.yaml lines for takes that node.yaml accepts', () => {
+    const blocks = [...section('Setting up the desktop').matchAll(/```yaml\n([\s\S]*?)```/g)].map((m) => parseYaml(dedent(m[1])));
+    const yaml = blocks.find((y) => y && y.gui);
+    assert.ok(yaml, 'section 2 has a node.yaml block with gui');
+    const gui = parseGuiConfig(yaml.gui, { profile: 'agent', platform: 'win32' });
+    assert.equal(gui.enabled, true);
+    assert.equal(gui.take.enabled, true);
+    assert.equal(gui.take.maxMinutes, 240);
+    assert.equal(gui.browser, 'chrome');
+    assert.ok(gui.apps.chrome, 'the browser is one of gui.apps');
+  });
+
+  it('describes the take as the Take tool has it', () => {
+    const take = section('Recording a take');
+    for (const name of ['Take', 'start', 'run_steps', 'stop', 'wait_ms']) assert.ok(take.includes(`\`${name}\``), `section 4 names ${name}`);
+    for (const action of TAKE_ACTIONS) assert.ok(take.includes(`\`${action}\``), `section 4 names the ${action} action`);
+    for (const step of STEP_KINDS) assert.ok(take.includes(`\`${step}\``), `section 4 names the ${step} step`);
+    assert.ok(take.replace(/[\s,]/g, '').includes(String(WAIT_MS_MAX)), 'section 4 gives the wait cap');
+    assert.match(take, /STUCK at step N/);
+    assert.match(take, /30 minutes/);
+  });
+
+  it('lists every take code in section 5', () => {
+    const refuses = section('What refuses, and why');
+    for (const code of TAKE_CODES) assert.ok(refuses.includes(`\`${code}\``), `section 5 names ${code}`);
   });
 });

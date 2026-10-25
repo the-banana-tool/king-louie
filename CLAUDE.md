@@ -2279,7 +2279,7 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
   (`tests/session-backend-windows.test.js`), which shows the rule is
   written, not that it works. Swift and Kotlin are not compiled by
   `npm test`.
-- Vectors: `node tests/vectors/lease-v1/generate.js --check` (46) and
+- Vectors: `node tests/vectors/lease-v1/generate.js --check` (51) and
   `node tests/vectors/session-v1/generate.js --check` (6).
 - The phones: iOS signs only `kl.lease.watch` with its API session (owner
   ruling R-F5-8) and sends it only while the live lease view is on screen
@@ -2307,3 +2307,162 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
   `AppModel`'s `init` reaches (through `startDemo`) is declared above `init`:
   `leaseRequests` is, for that reason. `mobile/PRIVACY.md` says what a relay
   operator sees of a lease.
+
+## Demo takes (D1)
+
+Spec `docs/superpowers/specs/2026-10-24-agent-driven-demo-takes-design.md`
+(owner rulings R-D1-1 to R-D1-7, the author's calls C-1 to C-13); plan
+`.superpowers/sdd/2026-10-24-agent-driven-demo-takes-d1/`. The driver's side
+is `docs/driving-king-louie.md`; `tests/docs-driving.test.js` holds it to the
+code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
+`parseGuiConfig`).
+
+- **What a take is (R-D1-1, R-D1-6).** One screen-recorded browser demo
+  run by a delegate session's agent with the `Take` tool
+  (`src/gui/take-tool.js`: `start`, `run_steps`, `status`, `note`, `stop`;
+  `requiresApproval: false`, the take grant is the approval). The driver, a
+  Claude Code session on the same machine, sends the script and the intent
+  through `king-louie-service mcp`; a stuck step ends the turn with a report
+  and the driver answers with `send_to_job`, the recording still rolling.
+  `TakeManager` (`src/gui/takes.js`) holds one live take per node (it holds
+  the node's one lease; another `start` is `take_busy`, naming the other
+  take only) and one per delegate session. The record is
+  `<dataDir>/takes/<take_id>.json` (`TakeStore`, one writer; states
+  `requested`, `live`, `waiting`, `ended`); a take found unfinished at start
+  is ended `service_restarted`.
+- **Off until enabled (C-1).** `node.yaml` `gui.take: { enabled: true,
+  max_minutes: 240 }` (1 to 240; `gui.lease.max_minutes` does not bind a
+  take), `gui.browser` (a `gui.apps` id), `gui.recorder.ffmpeg` (an absolute
+  `.exe`, optional). The `Take` tool is one of `GUI_TOOL_NAMES`, so a run
+  that refuses unsafe calls is refused it like the other GUI tools; it is in
+  `CASE_BLOCKED_TOOL_NAMES` and refuses a case context itself; a wake-up has
+  no GUI tool. `start` needs a node-local origin (`stdio`, `service-chat`,
+  the owner's chat: `nodeLocalOrigin`, set by `delegate-sessions.js` from
+  `LOCAL_ORIGIN_KINDS`), else `take_requires_local_origin` (C-2).
+- **The one-tap grant (R-D1-4, R-D1-5).** A lease of kind `take`
+  (lease-v1 "Revised 2026-10-24"): `name`, `sites`, `browser`,
+  `credentials`, `unattended: true`, up to 240 minutes, the browser's
+  `gui.apps` entry always first among the apps (C-10). Both phones show it
+  host-built ("Unattended: no check-ins; runs until it ends or you stop
+  it") and show a live take in the banner ("Unattended take: <name>, ends
+  <time>") with the same Stop. Every lease status now carries `kind`,
+  `unattended` and `name`, and phones built from this change require them:
+  a node from before takes shows "Could not confirm" and its running leases
+  lose their banner row until it is upgraded. Upgrade nodes before phones.
+- **Unattended takes never pause (R-D1-7).** No contact timer is armed for
+  an unattended lease, and `LeaseManager#suspend` only records
+  `lease.event` for one: the wrong window in front, the app gone, the helper
+  reconnecting and the relay link down refuse the one input or are logged,
+  and the take, its recording and its lease go on. A lost relay link does
+  not end it; the approved duration is the bound, and Stop lands when the
+  link is back. It ends on expiry, a revoke from any phone, the granting
+  device being revoked (`device_revoked`), the job closing (`job_closed`:
+  `cancel_job`, the idle close, a failed turn), 30 minutes of driver
+  silence after a turn ends (`driver_silent`, C-6; a turn start clears the
+  timer), the recorder exiting (`recorder_failed`), the screen locking
+  (`screen_locked`, through the lease's `locked`, C-12), `Take.stop`
+  (`take_done`), service shutdown (`service_stopped`). Every ending stops
+  the recording and keeps the file, closes the take's Chrome by CDP or by
+  pid, clears the policy at once (from that instant every call it would
+  have allowed is `take_ended`), and ends only the lease whose id the take
+  minted. Nothing deletes a recording.
+- **What a take may do (§7, C-7, C-8).** `createTakePolicy`
+  (`src/gui/take-policy.js`) is consulted in `ToolExecutor` where it would
+  ask, after the deny patterns, the `denied` tier and the roots check, so
+  the node's refusals still win. Browser actions: §7.1's first column on the
+  take's sites (exact host or `*.domain`, no paths; `navigate`/`open_tab`
+  check the target, every other acting action the current page, look-only
+  ones run anywhere), the credential actions only with `credentials`,
+  scripts, network rewriting, cookies, storage and uploads never
+  (`take_action_not_allowed`; the take's own browser and profiles are
+  `take_browser_managed`). `LaunchApp` only the take's `apps`. `Bash` and
+  `PowerShell` are `take_tool_not_allowed`. A call that would go to the
+  phone is `take_no_mid_take_approval`. Every refusal is a tool error with a
+  `code`, never a prompt. A browser call is bound to the browser of the
+  take it was decided under (the per-run registry,
+  `src/tools/builtin/browser-registry.js`); after the take ends it is
+  `take_browser_unavailable`. `TAKE_CODES` lists every code;
+  `GUI_ERROR_CODES` writes them out again.
+- **Steps (§10).** `Take.run_steps` runs `{ step, ...fields }` objects
+  (`validateSteps` in `src/gui/take-steps.js`: exactly each kind's fields,
+  200 steps, 64 KiB, `pause` 10 s each and 60 s a run, waits 30 s by default
+  and 120 s at most, `wait_for.state` `visible` unless given, `wait_for_text`
+  refusing `label=`/`placeholder=`/`testid=`/`alt=`/`title=` selectors, a
+  `scroll` taking a selector or `dx`/`dy`, not both) with no model between
+  them. Each acting step is held to `checkDenied` (the node's deny rules and
+  `denied` tier, handed to the Take call by the executor) and then to the
+  take's policy, and runs on the take's own browser key. Step stills and
+  failure captures go under `<dataDir>/takes/<take_id>/`, returned as
+  `take_dir`. `Take` is in `FULL_TRANSCRIPT_TOOLS`, so the driver reads its
+  results whole in `get_job_logs`.
+- **The helper ops (session-v1 "Revised 2026-10-24", Windows only).** The
+  service runs as LOCAL SERVICE and resolves no user path; the helper, as
+  the user, does. `launch_browser { exe, profile, args? }`: `profile` is a
+  name (`^[A-Za-z0-9_-]{1,64}$`), kept under
+  `%LOCALAPPDATA%\KingLouie\browser-profiles\<name>`; Chrome starts with
+  `--remote-debugging-port=0`, the helper reads `DevToolsActivePort` (10 s,
+  else `browser_launch_failed`) and the service attaches with
+  `PlaywrightBrowser#attach`. An argument that moves the profile or the
+  debugging endpoint (`--user-data-dir`, `--profile-directory`,
+  `--remote-debugging*`, in any switch form) is refused. `record_start
+  { ffmpeg?, take_id, path?, fps?, size? }` runs ffmpeg (`gdigrab` of the
+  whole desktop, libx264, no audio) into
+  `%LOCALAPPDATA%\KingLouie\recordings\<take_id>\take.mp4`, or
+  `<record.dir>\<take_id>.mp4` when the take names a folder under the
+  session's working directory. ffmpeg is `gui.recorder.ffmpeg`, else the
+  `ffmpeg.exe` the helper found on the user's `PATH` at startup
+  (`findFfmpeg`, `src/session/recorder.js`; reported on the probe as
+  `recorder.ffmpeg`, so `winget install Gyan.FFmpeg` as the user works after
+  the helper restarts); with neither, `start` with `record: true` refuses
+  `recorder_missing` before any phone request. `record_stop` sends `q` and
+  waits 15 s. `keep_awake` sets `SetThreadExecutionState`. The helper stops
+  its recordings 30 s after the service connection goes. These ops answer
+  and log by their code alone.
+- **The driver's side (§11, C-9).** `wait_ms` (0 to 25000) exists only on
+  `king-louie-service mcp`'s `send_to_job` and `get_job` with a service
+  running (the courier-backed list; `CourierFleetClient`,
+  `src/fleet/courier-client.js`), never on the front door. The mcp process
+  polls `get_job` once a second until the session is not in a turn, the job
+  is terminal or the time is up, and adds `wait: { ended }` (`idle`,
+  `terminal`, `timeout`, or `poll_failed` with `code`); a failed poll after
+  a sent message never throws, so a driver never resends. The last poll
+  still runs under the courier's 30 s request timeout. `get_job` and
+  `get_job_logs` carry `take: { take_id, name, state, steps: { done, failed,
+  total }, recording: { path, duration_s } | null, lease: { expires_at } }`
+  inside the untrusted wrapper when the session has a take, and no `take`
+  key otherwise.
+- **The courier grant (C-13).** `session install --user NAME` also gives
+  the session user Modify on `<dataDir>\approvals\outbox` and `inbox`, so
+  `king-louie-service mcp` run as that user can post to the service. An
+  elevated script sets it through directory handles pinned from the data
+  dir down, so a junction planted anywhere under the data dir is refused;
+  a half-granted install is revoked. `session uninstall` revokes it. This
+  widens who can post a request, not who can forge one (the courier's
+  signatures are its protection).
+- Residuals: `PreToolUse` hooks do not run for steps in D1. Keep-awake
+  holds only while the helper's PowerShell worker lives: a worker restarted
+  after an op timeout drops it until the next `keep_awake`. The take ends
+  `recorder_failed` only when its stop finds ffmpeg already gone
+  (`onRecorderExit` has no helper event calling it), and a helper gone 30 s
+  stops the recording without ending the take, whose stop then finds no
+  recording. A hand-made `--data-dir` whose ancestor the service account can
+  write is outside the courier grant's pinning. Chrome's debugging port is
+  open to the user's own processes while a take runs. The recording is the
+  whole primary screen, King Louie's own window included unless the task
+  says to minimise it. macOS and Linux recording, two displays, audio, an
+  attended take and a take from a front-door client are not done.
+- Tests never start a real take on the owner's screen, a real ffmpeg, a
+  real Chrome in the user's session or a real phone: `tests/gui-takes.test.js`
+  runs a real `LeaseManager` with a fake relay and phone and a fake broker;
+  `tests/take-policy.test.js`, `tests/take-steps.test.js`,
+  `tests/take-store.test.js` and `tests/tool-executor-take-policy.test.js`
+  cover the policy, the steps, the record and the executor seam; CDP attach
+  is tested against Playwright's headless Chromium
+  (`tests/helpers/debuggable-chromium.js`); the helper ops by reading the
+  worker source and with a fake `spawn`. The opt-in
+  `KL_E2E_TAKE=1 node --test tests/e2e/demo-take.test.js` (Windows, an
+  interactive session) launches Playwright's Chromium through the real
+  Windows backend under a temporary `LOCALAPPDATA`, attaches, records five
+  seconds with the ffmpeg on `PATH` and checks the mp4 with `ffprobe`; no
+  helper child, no input, no lease. Without the variable it is skipped, and
+  with no ffmpeg it skips its one test.

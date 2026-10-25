@@ -24,16 +24,18 @@ The tools a driver uses:
 - `delegate` `{ machine, task, cwd? }`: starts a multi-turn agent session on
   the machine and returns its `job_id` at once, with the first turn (your
   `task`) already running.
-- `send_to_job` `{ job_id, message }`: sends the next message to an open
-  session and returns at once. While a turn is running it is refused with
-  `node_busy`: there is no queue, so wait for the turn to end.
-- `get_job` `{ job_id }`: the job's status and timing, `session` (`turn`
-  while a turn runs, `idle` between turns), `result` (the agent's last reply),
-  `output` and `evidence`.
+- `send_to_job` `{ job_id, message, wait_ms? }`: sends the next message to an
+  open session. While a turn is running it is refused with `node_busy`: there
+  is no queue, so wait for the turn to end.
+- `get_job` `{ job_id, wait_ms? }`: the job's status and timing, `session`
+  (`turn` while a turn runs, `idle` between turns), `result` (the agent's last
+  reply), `output`, `evidence`, and `take` while the session has a take
+  (section 4).
 - `get_job_logs` `{ job_id, since?, tail? }`: the session's transcript, one
   line per event: `> user: …` for what you sent, `tool <name> <params> → ok|error
   <result>` for each tool call, `< assistant: …` for each reply. Pass the
-  previous answer's `next_since` as `since` to get only the new lines.
+  previous answer's `next_since` as `since` to get only the new lines. It
+  carries `take` too.
 - `cancel_job` `{ job_id }`: ends the session (and stops the turn, if one is
   running).
 
@@ -55,6 +57,18 @@ themselves. That includes:
   `LaunchApp`, `CloseApp`, `Screenshot`, `RequestLease`, `Click`, `Type`,
   `Key`, `Scroll` and `Drag`. Looking needs nothing more; input needs a lease
   your phone signs. `LaunchApp` starts only the apps `node.yaml` lists.
+- **`Take`**, when `node.yaml` turns takes on (section 2): a screen-recorded
+  demo approved with one tap on the phone (section 4).
+
+`wait_ms` (0 to 25000) on `send_to_job` and `get_job` makes the call wait for
+the turn: the `mcp` process sends the call, then asks `get_job` once a second
+until `session` is not `turn`, the job has ended, or the time is up, and
+answers with the job and `wait: { ended }`: `idle`, `terminal`, `timeout`, or
+`poll_failed` with a `code`. A poll that fails after your message went out
+never fails the call, so you never send a message twice. Each poll is still
+one courier request under the 30 s request limit, so a 25 s wait can take
+about 25 s plus one request. `wait_ms` exists only on `king-louie-service mcp`
+with the service running behind it; the front door has none.
 
 A session you start through `king-louie-service mcp` on the machine itself is
 a local one: an unsafe call in it is not refused, it waits for your phone to
@@ -86,9 +100,10 @@ elevated prompt (Administrator).
       answer `y` at its `[y/N]` prompt to enrol the phone.
 
    Then record the node's identity: `king-louie-service identity record`.
-2. Edit `node.yaml` in the admin config dir. Turn the GUI on, list Chrome and
-   every app you will demo under `gui.apps`, and set how many delegate
-   sessions may be open at once:
+2. Edit `node.yaml` in the admin config dir. Turn the GUI and takes on, list
+   Chrome and every app you will demo under `gui.apps`, name the Chrome entry
+   as the take's browser, and set how many delegate sessions may be open at
+   once:
 
    ```yaml
    gui:
@@ -96,48 +111,65 @@ elevated prompt (Administrator).
      apps:
        chrome: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
        notepad: 'C:\Windows\System32\notepad.exe'
+     take:
+       enabled: true
+       max_minutes: 240
+     browser: chrome
    delegate:
      max_sessions: 2
    ```
 
-   Three more `gui` keys come from D1 part C: `gui.take: { enabled: true,
-   max_minutes: 240 }`, `gui.browser: chrome` (the id of the Chrome entry in
-   `gui.apps`) and `gui.recorder.ffmpeg` (the path to `ffmpeg.exe`, only if it
-   is not on `PATH`). Do not add them before then: `node.yaml` refuses keys it
-   does not know, and the service will not start.
+   `gui.take.max_minutes` (1 to 240) caps how long one take may run;
+   `gui.lease.max_minutes` keeps capping ordinary leases and does not bind a
+   take. `gui.browser` is the id of an entry in `gui.apps`. Add
+   `recorder: { ffmpeg: 'C:\<ffmpeg dir>\ffmpeg.exe' }` under `gui` only
+   when the helper should not use the `ffmpeg.exe` it finds on your `PATH`
+   (step 5).
 3. Install the session helper for your own account:
-   `king-louie-service session install --user <owner>`. Sign in to Windows once
-   as that user so the helper starts, then check that
-   `king-louie-service session status` says the GUI is enabled.
+   `king-louie-service session install --user <owner>`. Besides the helper's
+   own files it gives that account Modify on the courier's
+   `approvals\outbox` and `approvals\inbox` under the data dir, so
+   `king-louie-service mcp`, run as you, can post to the service
+   (`session uninstall` takes it away again). Sign in to Windows once as that
+   user so the helper starts, then check that
+   `king-louie-service session status` says the GUI is enabled. A take needs
+   the helper even when the demo is all in the browser: the service runs as
+   `LOCAL SERVICE` and cannot show a window, so the helper, as you, starts
+   the take's Chrome and the recorder.
 4. Pair the desktop app with the service: turn on `features.desktopBridge` in
    the admin `service.json`, start pairing from the app's Settings > Local
    service, and run the command it shows (`king-louie-service desktop pair
    <request>`). Attach the app. To bring your standalone chats and settings
    along, stop the service and run
    `king-louie-service import --from <desktop user-data dir>`.
-5. Install ffmpeg: `winget install Gyan.FFmpeg`.
+5. Install ffmpeg, as yourself: `winget install Gyan.FFmpeg`. The helper looks
+   for `ffmpeg.exe` on your `PATH` once, when it starts, and tells the service
+   what it found; sign out and in again after installing, so the helper
+   starts afresh and finds it. Without one, a take that records is refused
+   `recorder_missing` before the phone is asked.
 6. Add the MCP server block to the driver's repository (for Claude Code, the
    `mcpServers` block in its MCP config; `examples/mcp/claude-code.windows.json`
    has one with example paths). Then call `list_machines` from the driver: it
    should name the desktop.
 
-Not checked yet: that your own account, running `king-louie-service mcp`, may
-write the courier's `outbox/` and read its `inbox/` under a data dir the
-service owns as `LOCAL SERVICE`. If the first call times out or is refused,
-look there first.
+Upgrade the service before the phone apps. Phones built for takes expect
+every lease status to say its `kind`, `unattended` and `name`; a node that
+predates takes says none of them, so its running leases show "Could not
+confirm" and lose their banner row until the node is upgraded.
 
 ## 3. Driving a session
 
-The loop, as it is today:
+The loop:
 
 1. `delegate` with the machine and the task. Keep the `job_id`.
-2. Call `get_job` every few seconds until `session` is `idle` (the turn has
-   ended) or the job's status is no longer running. Read the reply in
-   `result`.
+2. Call `get_job` with `wait_ms: 25000` until the answer's `wait.ended` is
+   `idle` (the turn has ended) or `terminal` (the job has ended); on
+   `timeout`, call again. Read the reply in `result`.
 3. For the detail, call `get_job_logs`, passing `next_since` each time so you
    read only what is new. The tool lines are the evidence of what was done.
-4. Send the next message with `send_to_job` and go back to step 2. Never send
-   while `session` is `turn`: you get `node_busy`.
+4. Send the next message with `send_to_job` (with `wait_ms` it sends and
+   waits in one call) and go back to step 2. Never send while `session` is
+   `turn`: you get `node_busy`.
 5. When you are done, `cancel_job`. An idle session also closes by itself after
    `delegate.idle_close` (two hours unless `node.yaml` says otherwise).
 
@@ -164,10 +196,151 @@ What a good task looks like:
 
 ## 4. Recording a take
 
-A take will be a screen-recorded run of a scripted demo: you ask King Louie to
-run a script of steps on the desktop under one approval from your phone, and
-you get back the recording and how each step went. It arrives with D1 part D.
-Until then, drive the steps as an ordinary session (section 3).
+A take is a screen-recorded run of a scripted demo: you ask King Louie to run
+a script of browser steps on the desktop under one approval from your phone,
+and you get back the recording and how each step went. It is an ordinary
+delegate session (section 3) whose agent uses the `Take` tool. A take needs
+section 2 done in full: takes on in `node.yaml`, the session helper running
+as you (even for a demo that is all in the browser), and ffmpeg unless the
+take does not record. It is started only from a session the node started
+itself, which a `delegate` through `king-louie-service mcp` on the machine is.
+
+### The task you send
+
+Send one `delegate` whose task holds:
+
+- The take's name (one plain line, 60 characters at most: the phone shows
+  it), the sites it acts on (hosts in lower case, `app.example.com`, or
+  `*.example.com` for the domain and every subdomain; no paths), how many minutes it may run, and
+  the browser profile to use (a name such as `demo`; a login made in it is
+  kept for the next take).
+- The script, as a JSON list the agent passes to `Take.run_steps` unchanged:
+
+  ```json
+  [
+    { "step": "navigate", "url": "https://app.example.com/" },
+    { "step": "click", "selector": "role=button[name=\"New audit\"]" },
+    { "step": "fill", "selector": "#site", "text": "https://www.example.com" },
+    { "step": "press", "key": "Enter" },
+    { "step": "wait_for_text", "selector": "#results", "text": "Audit complete", "timeout_ms": 90000 },
+    { "step": "pause", "ms": 3000 },
+    { "step": "screenshot", "name": "results" }
+  ]
+  ```
+
+- The intent of each step in one sentence, by its index ("Step 4: wait for
+  the audit, so the viewer sees it finish"). A step holds only its own
+  fields, so the intent goes in the task text, or in a `note` step.
+- What to do when stuck: fix it with the browser and GUI tools and run the
+  rest with `from` set to the failed index; failing that, stop and end the
+  turn with `STUCK at step N: what I see, what I tried, what I need`.
+- To call `Take.stop` when the last step passes (or to pass
+  `stop_when_done: true` to `start`), and to reply with the recording's path.
+- To minimise King Louie's own window first if it is open: the recording is
+  the whole screen.
+
+The steps, each `{ "step": <kind>, ...its fields }` and nothing else:
+
+| Step | Fields |
+|---|---|
+| `navigate` | `url` |
+| `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `clear` | `selector` |
+| `fill`, `type` | `selector`, `text` (`type` presses one key at a time) |
+| `press` | `key`, `selector` (optional) |
+| `select_option` | `selector`, `value` |
+| `scroll` | `selector`, or `dx` and `dy` (not both) |
+| `wait_for` | `selector`, `state` (`visible` unless given: `attached`, `detached`, `visible`, `hidden`), `timeout_ms` |
+| `wait_for_url` | `url`, `timeout_ms` |
+| `wait_for_text` | `selector` (CSS or `role=`, never `label=`, `placeholder=`, `testid=`, `alt=` or `title=`), `text`, `timeout_ms` |
+| `pause` | `ms` (10 s at most, 60 s a run: for pacing the video, never for waiting on a page) |
+| `screenshot` | `name` (optional) |
+| `note` | `text` (one line for the take's log) |
+
+A wait's `timeout_ms` is 30 s unless given and 120 s at most. A list holds 200
+steps and 64 KiB at most. To wait, use a wait step, never a pause and never a
+shell.
+
+### What happens
+
+1. **`start`.** The agent calls `Take.start` with the name, `sites`,
+   `minutes` (up to `gui.take.max_minutes`), `profile` (`take` unless
+   given), and optionally `browser` (`true` unless given; a list of browser
+   actions narrows it), `apps` (`gui.apps` ids it may also launch), `credentials`
+   (logins from the vault on the sites), `record` (`true` by default; `false`,
+   or `{ dir, fps, size }`), `reason` and `stop_when_done`. Your phone gets
+   one request; the call waits for your tap. Once you allow it, the helper
+   starts Chrome on your screen with the profile, the service attaches to it,
+   the recording starts and the screen is kept awake. The answer carries
+   `take_id`, `expires_at` and the recording's `path`.
+2. **`run_steps`.** The steps run in order with no model between them. The
+   answer lists each step as `{ index, step, action, ok, ms, url, error?,
+   screenshot? }`, says `stopped_at`, and gives `take_dir`, the folder of the
+   step stills and the failure captures (`<dataDir>/takes/<take_id>/`, the
+   service's). The run stops at the first failure unless
+   `continue_on_error`.
+3. **Stuck.** When the agent cannot fix a step it ends its turn with the
+   report. The session is `idle`, the take is `waiting`, and the recording
+   and the lease go on. Read the report in `result`; the `tool Take …` lines
+   in `get_job_logs` are the evidence. Answer with `send_to_job`, and the
+   agent runs the rest of the list from the failed index.
+4. **`stop`.** `Take.stop` stops the recording, closes the take's browser
+   (unless `keep_browser`), releases the lease, and answers with the
+   recording's `path`, `duration_s` and `bytes` and the step counts. `status`
+   and `note` are there in between: where the take is, and a line in its log
+   for what the agent changed.
+
+While the session has a take, `get_job` and `get_job_logs` carry `take: {
+take_id, name, state, steps: { done, failed, total }, recording: { path,
+duration_s } | null, lease: { expires_at } }`, inside the untrusted wrapper
+like the rest. `state` is `requested`, `live`, `waiting` or `ended`. Loop on
+`get_job` with `wait_ms` at its cap, 25000, until `wait.ended` is `idle`,
+then read `take` and `result`. A turn waiting on your tap at `start` stays a
+`turn` until you answer the phone.
+
+### What one tap approves
+
+The phone shows the name, "Unattended: no check-ins; runs until it ends or you
+stop it", how long (you can shorten it), the sites, the browser allowance
+("drive the browser on these sites (no scripts, no network changes, no
+uploads)", or the actions listed), "credentials from the vault" when asked,
+the apps, and the reason. Inside what you allowed nothing asks again; outside
+it a call fails at once with a code the agent reads (section 5), never a
+prompt nobody is watching.
+
+- The browser tools act only on the sites. `navigate` and `open_tab` check
+  where they go; every other action that acts checks the page it is on, so a
+  page that wandered off the sites refuses until a `navigate` back. Looking
+  (screenshots, content, tabs, the waits, closing a tab) works anywhere.
+  Scripts (`evaluate`), network rewriting, cookies, storage and file uploads
+  are never inside a take; logins only with `credentials`.
+- The GUI tools work under the take's lease; `LaunchApp` starts only the
+  take's `apps`.
+- A shell is never inside a take. A call the node would send to your phone is
+  refused instead.
+- The node's own deny rules and `denied` tier still win over the take, for
+  the agent's calls and for every step.
+
+An unattended take never pauses. The wrong window in front, an app gone, the
+helper reconnecting or the relay link down refuse the one input that met it,
+or are only logged; the take, its recording and its lease go on. While the
+relay is down your Stop cannot reach the node, and the minutes you approved
+are the bound. A take ends when its time runs out, when any of your phones
+stops it, when the phone that approved it is revoked, when the session
+closes (`cancel_job`, the idle close, a failed turn), when the screen locks,
+when the service stops, or after **30 minutes** with no word from you once a
+turn has ended. Every ending stops the recording and keeps the file; nothing
+deletes a recording.
+
+### The recording
+
+The recording is the whole primary screen, silent (no microphone, no system
+sound): everything on it is in the video, notifications and other windows
+included. It is 30 frames a second unless `record.fps` says otherwise. The
+file is yours: by default
+`%LOCALAPPDATA%\KingLouie\recordings\<take_id>\take.mp4` under your own
+account, or `<dir>\<take_id>.mp4` when `record.dir` names a folder under the
+session's working folder (the `cwd` you passed to `delegate`). The browser
+profile is yours too, under `%LOCALAPPDATA%\KingLouie\browser-profiles\<name>`.
 
 ## 5. What refuses, and why
 
@@ -190,6 +363,44 @@ Until then, drive the steps as an ordinary session (section 3).
   the user to pre-approve this tool." In service mode N is the phone request's
   lifetime plus 15 s. Nothing ran; ask again when you are watching the phone.
 - "User denied permission": you said no on the phone. Nothing ran.
+- `invalid_params` on `wait_ms`: it is a whole number from 0 to 25000.
+
+Inside a take every refusal is a tool error the agent reads, `{ ok: false,
+error, code }`, never a prompt and never a wait. The codes:
+
+- `take_requires_local_origin`: the take was asked for from a session the
+  node did not start itself (a front-door client, say). Start it through
+  `king-louie-service mcp` on the machine.
+- `take_busy`: another take is live on the node (the refusal names it), or
+  `run_steps` is already running in this take. One take at a time.
+- `recorder_missing`: the take records and the helper found no ffmpeg. The
+  message says "Install ffmpeg (winget install Gyan.FFmpeg) or set
+  gui.recorder.ffmpeg in node.yaml". Nothing was asked of the phone.
+- `recorder_failed`: ffmpeg would not start, or the recording's folder could
+  not be made; as an ending, ffmpeg had already exited when the take
+  stopped, so the video is not all there.
+- `browser_launch_failed`: Chrome did not start, did not open its debugging
+  port within 10 s, or could not be attached to. The take ends.
+- `take_app_not_allowed`: `LaunchApp` of an app that is not one of the take's
+  `apps`, or the phone did not allow the browser.
+- `take_action_not_allowed`: a browser action outside what the take was
+  allowed (a script, a network rewrite, cookies, an upload, or a login
+  without `credentials`); the refusal lists the actions it may use.
+- `take_browser_managed`: the take owns its browser. Starting or stopping
+  it, its profiles and its saved storage are the take's (`Take.start`,
+  `Take.stop`), and a browser call may not name another profile.
+- `take_site_not_allowed`: the page, or where a call would go, is not one of
+  the take's sites. `navigate` back to one.
+- `take_tool_not_allowed`: a shell in a take (use a wait step instead), or a
+  take from a case.
+- `take_no_mid_take_approval`: the call would have needed your phone. Nothing
+  was sent; ask for it in the next take's `start`.
+- `take_ended`: the take has ended; a call it would have allowed is refused,
+  and a step list stops.
+- `take_browser_unavailable`: a browser call allowed while the take was live
+  arrived after its browser was gone.
+- A step list that does not check is `invalid_params`, naming the index and
+  the field.
 - "This client may not request unsafe actions (fleet:unsafe not granted).
   Nothing ran." A client that reaches the node through the front door without
   `fleet:unsafe` for it is refused every unsafe call and every GUI tool. A
