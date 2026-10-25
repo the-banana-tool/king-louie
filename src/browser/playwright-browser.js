@@ -72,6 +72,7 @@ class PlaywrightBrowser {
     this.page = null;
     this.consoleMessages = [];
     this._persistent = false; // Whether using persistent context
+    this._attached = false; // Whether attached over CDP to a Chrome another process launched
     this._dialogAction = 'dismiss'; // 'accept', 'dismiss', or 'prompt:text'
     this._routes = [];
   }
@@ -138,7 +139,25 @@ class PlaywrightBrowser {
     this._attachPageListeners(this.page);
   }
 
+  /**
+   * Attach over CDP to a Chromium someone else launched with a debugging
+   * port (a take's Chrome, launched on the owner's screen by the session
+   * helper). Drives its first context and first page.
+   */
+  async attach({ cdpUrl } = {}) {
+    if (this.isRunning) return;
+    if (!cdpUrl) throw new Error('attach requires cdpUrl');
+    this.browser = await chromium.connectOverCDP(cdpUrl);
+    this._persistent = false;
+    this._attached = true;
+    this.context = this.browser.contexts()[0];
+    this.page = this.context.pages()[0] || await this.context.newPage();
+    this._attachPageListeners(this.page);
+  }
+
   async stop() {
+    // When attached, browser.close() disconnects Playwright only; the Chrome
+    // process belongs to whoever launched it and keeps running.
     try {
       if (this._persistent && this.context) {
         await this.context.close();
@@ -153,6 +172,7 @@ class PlaywrightBrowser {
     this.page = null;
     this.consoleMessages = [];
     this._persistent = false;
+    this._attached = false;
     this._routes = [];
   }
 

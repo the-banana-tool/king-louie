@@ -4,6 +4,39 @@ const fs = require('fs');
 const path = require('path');
 const browserTool = require('../src/tools/builtin/browser-tool');
 const PlaywrightBrowser = require('../src/browser/playwright-browser');
+const os = require('os');
+const { spawn } = require('child_process');
+const { chromium } = require('playwright');
+const { actions } = browserTool;
+const { setBrowser, removeBrowser } = require('../src/tools/builtin/browser-registry');
+
+// Launch Playwright's bundled Chromium with a debugging port, as a take's
+// Chrome is launched by another process, and read the port it chose.
+async function launchDebuggableChromium() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cdp-'));
+  const child = spawn(chromium.executablePath(), [
+    '--headless=new', '--remote-debugging-port=0', '--no-first-run', `--user-data-dir=${dir}`, 'about:blank',
+  ], { stdio: 'ignore' });
+  const file = path.join(dir, 'DevToolsActivePort');
+  const deadline = Date.now() + 20000;
+  for (;;) {
+    let lines = [];
+    try { lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean); } catch { /* not yet */ }
+    if (lines.length >= 2) return { child, dir, port: Number(lines[0]) };
+    if (Date.now() > deadline) { child.kill(); throw new Error('Chromium wrote no DevToolsActivePort'); }
+    // A ref'd timer keeps the event loop alive across the wait.
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+async function killChromium(proc) {
+  if (proc.child.exitCode === null && proc.child.signalCode === null) {
+    const exited = new Promise((r) => proc.child.once('exit', r));
+    proc.child.kill();
+    await exited;
+  }
+  try { fs.rmSync(proc.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch { /* best effort */ }
+}
 
 // ─── Unit tests (no browser needed) ─────────────────────────────────────────
 
@@ -695,6 +728,27 @@ describe('Browser Tool - integration', () => {
 
     // Close the extra tab
     await browserTool.execute({ action: 'close_tab', tab_index: tabs.tabs.length - 1 });
+  });
+
+  it('a take key gets its own tabs', async () => {
+    const proc = await launchDebuggableChromium();
+    const attachedBrowser = new PlaywrightBrowser();
+    try {
+      await attachedBrowser.attach({ cdpUrl: `http://127.0.0.1:${proc.port}` });
+      await attachedBrowser.page.goto('data:text/html,<title>take tab</title>');
+      setBrowser('take:x', attachedBrowser);
+      const take = await actions.tabs({}, { takePolicy: { current: { browserKey: 'take:x' } } });
+      assert.strictEqual(take.ok, true);
+      assert.deepStrictEqual(take.tabs.map((t) => t.title), ['take tab']);
+      const mine = await actions.tabs({}, {});
+      assert.strictEqual(mine.ok, true);
+      assert.ok(mine.tabs.length >= 1);
+      assert.ok(!mine.tabs.some((t) => t.title === 'take tab'), 'the default browser has its own tabs');
+    } finally {
+      removeBrowser('take:x');
+      await attachedBrowser.stop();
+      await killChromium(proc);
+    }
   });
 
   // ── Console capture ────────────────────────────────────────────────────────

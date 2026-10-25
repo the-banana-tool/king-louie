@@ -1,7 +1,6 @@
 const { Tool } = require('../tool-schema');
 const { OWNER_QUOTE_PARAM } = require('../browser-acting');
 const { validateUrl } = require('./web-fetch-utils');
-const PlaywrightBrowser = require('../../browser/playwright-browser');
 const fs = require('fs');
 const path = require('path');
 
@@ -9,20 +8,18 @@ const path = require('path');
 // This prevents wasting iterations on long waits for invisible/missing elements.
 const MAX_ACTION_TIMEOUT = 15000;
 
+// Bounds the action timeouts passed to Playwright calls. The waits
+// (wait_for, wait_for_url, wait_for_load_state, wait_for_response) never used it.
 function clampTimeout(requested, fallback) {
   const t = requested || fallback;
   return Math.min(t, MAX_ACTION_TIMEOUT);
 }
 
-// Singleton browser instance reused across tool calls
-let pw = null;
-// Name of the profile backing the currently-running browser, if any.
-let activeProfile = null;
-
-function getPw() {
-  if (!pw) pw = new PlaywrightBrowser();
-  return pw;
-}
+// One browser per run (browser-registry.js): a take's run drives its own,
+// every other run shares the default one.
+const {
+  browserKeyOf, getBrowser, activeProfileOf, setActiveProfile, allBrowsers,
+} = require('./browser-registry');
 
 const VAULT_CRED_PREFIX = 'browser_cred:';
 
@@ -52,8 +49,8 @@ function hostFromUrl(u) {
   try { return new URL(u).hostname.toLowerCase(); } catch { return null; }
 }
 
-function requireRunning() {
-  const b = getPw();
+function requireRunning(ctx) {
+  const b = getBrowser(ctx);
   if (!b.isRunning || !b.page) {
     throw new Error('Browser is not running. Call the start action first.');
   }
@@ -151,21 +148,22 @@ const actions = {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async start(params, ctx) {
-    const b = getPw();
+    const key = browserKeyOf(ctx);
+    const b = getBrowser(ctx);
     if (b.isRunning) {
-      return { ok: true, message: 'Browser already running', profile: activeProfile };
+      return { ok: true, message: 'Browser already running', profile: activeProfileOf(key) };
     }
     const opts = {};
     if (params.profile) {
       const dir = resolveProfileDir(ctx, params.profile);
       fs.mkdirSync(dir, { recursive: true });
       opts.userDataPath = dir;
-      activeProfile = params.profile;
+      setActiveProfile(key, params.profile);
     } else if (params.userDataPath) {
       opts.userDataPath = params.userDataPath;
-      activeProfile = null;
+      setActiveProfile(key, null);
     } else {
-      activeProfile = null;
+      setActiveProfile(key, null);
     }
     // v1 default: headed, so the user can watch the automation.
     opts.headless = params.headless === true;
@@ -173,14 +171,14 @@ const actions = {
     return {
       ok: true,
       message: `Browser started (Playwright, ${opts.headless ? 'headless' : 'headed'})`,
-      profile: activeProfile,
+      profile: activeProfileOf(key),
     };
   },
 
-  async stop() {
-    const b = getPw();
+  async stop(_params, ctx) {
+    const b = getBrowser(ctx);
     await b.stop();
-    activeProfile = null;
+    setActiveProfile(browserKeyOf(ctx), null);
     return { ok: true, message: 'Browser stopped' };
   },
 
@@ -192,7 +190,7 @@ const actions = {
     const names = fs.readdirSync(root, { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name);
-    return { ok: true, profiles: names, active: activeProfile };
+    return { ok: true, profiles: names, active: activeProfileOf(browserKeyOf(ctx)) };
   },
 
   async profile_create(params, ctx) {
@@ -207,7 +205,7 @@ const actions = {
 
   async profile_delete(params, ctx) {
     if (!params.profile) return { ok: false, error: '"profile" parameter is required.' };
-    if (activeProfile === params.profile && getPw().isRunning) {
+    if (activeProfileOf(browserKeyOf(ctx)) === params.profile && getBrowser(ctx).isRunning) {
       return { ok: false, error: `Profile "${params.profile}" is in use. Call stop first.` };
     }
     const dir = resolveProfileDir(ctx, params.profile);
@@ -218,16 +216,17 @@ const actions = {
     return { ok: true, message: `Profile "${params.profile}" deleted.` };
   },
 
-  async profile_current() {
-    return { ok: true, active: activeProfile, running: getPw().isRunning };
+  async profile_current(_params, ctx) {
+    return { ok: true, active: activeProfileOf(browserKeyOf(ctx)), running: getBrowser(ctx).isRunning };
   },
 
   // ── Vault-backed credentials ───────────────────────────────────────────────
 
   async save_credentials(params, ctx) {
-    const profile = params.profile || activeProfile;
+    const profile = params.profile || activeProfileOf(browserKeyOf(ctx));
     if (!profile) return { ok: false, error: 'No active profile. Pass "profile" or start the browser with one.' };
-    const host = params.host || (getPw().page && hostFromUrl(getPw().page.url()));
+    const page = getBrowser(ctx).page;
+    const host = params.host || (page && hostFromUrl(page.url()));
     if (!host) return { ok: false, error: '"host" parameter is required when no page is loaded.' };
     if (!params.username || !params.password) {
       return { ok: false, error: '"username" and "password" parameters are required.' };
@@ -239,13 +238,13 @@ const actions = {
   },
 
   async set_http_auth(params, ctx) {
-    const b = requireRunning();
+    const b = requireRunning(ctx);
     let username = params.username;
     let password = params.password;
     // If username/password aren't passed directly, pull from the vault using the
     // profile+host convention save_credentials uses.
     if (!username || !password) {
-      const profile = params.profile || activeProfile;
+      const profile = params.profile || activeProfileOf(browserKeyOf(ctx));
       const host = params.host;
       if (!profile || !host) {
         return { ok: false, error: 'Provide either (username+password) or (profile+host) to look up vault creds.' };
@@ -267,8 +266,8 @@ const actions = {
   },
 
   async fill_credentials(params, ctx) {
-    const b = requireRunning();
-    const profile = params.profile || activeProfile;
+    const b = requireRunning(ctx);
+    const profile = params.profile || activeProfileOf(browserKeyOf(ctx));
     if (!profile) return { ok: false, error: 'No active profile. Start the browser with a profile first.' };
     const host = params.host || hostFromUrl(b.page.url());
     if (!host) return { ok: false, error: 'Cannot determine host from current URL.' };
@@ -308,15 +307,15 @@ const actions = {
     return { ok: true, message: `Filled credentials for ${profile}@${host}.`, host, profile };
   },
 
-  async status() {
-    const b = getPw();
+  async status(_params, ctx) {
+    const b = getBrowser(ctx);
     return { ok: true, running: b.isRunning, currentUrl: b.page ? b.page.url() : null };
   },
 
   // ── Navigation ─────────────────────────────────────────────────────────────
 
-  async navigate(params) {
-    const b = requireRunning();
+  async navigate(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.url) return { ok: false, error: 'url parameter is required' };
     await validateUrl(params.url);
     const response = await b.page.goto(params.url, {
@@ -330,28 +329,28 @@ const actions = {
     };
   },
 
-  async go_back() {
-    const b = requireRunning();
+  async go_back(_params, ctx) {
+    const b = requireRunning(ctx);
     await b.page.goBack({ waitUntil: 'domcontentloaded' });
     return { ok: true, url: b.page.url() };
   },
 
-  async go_forward() {
-    const b = requireRunning();
+  async go_forward(_params, ctx) {
+    const b = requireRunning(ctx);
     await b.page.goForward({ waitUntil: 'domcontentloaded' });
     return { ok: true, url: b.page.url() };
   },
 
-  async reload() {
-    const b = requireRunning();
+  async reload(_params, ctx) {
+    const b = requireRunning(ctx);
     await b.page.reload({ waitUntil: 'domcontentloaded' });
     return { ok: true, url: b.page.url() };
   },
 
   // ── Element interaction ────────────────────────────────────────────────────
 
-  async click(params) {
-    const b = requireRunning();
+  async click(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     const opts = { timeout: clampTimeout(params.timeout, 10000) };
     if (params.button) opts.button = params.button; // 'left', 'right', 'middle'
@@ -361,23 +360,23 @@ const actions = {
     return { ok: true, message: `Clicked ${params.selector}` };
   },
 
-  async dblclick(params) {
-    const b = requireRunning();
+  async dblclick(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     await loc.dblclick({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Double-clicked ${params.selector}` };
   },
 
-  async fill(params) {
-    const b = requireRunning();
+  async fill(params, ctx) {
+    const b = requireRunning(ctx);
     if (params.text === undefined) return { ok: false, error: 'text parameter is required' };
     const loc = resolveLocator(b.page, params.selector);
     await loc.fill(params.text, { timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Filled ${params.selector}` };
   },
 
-  async type(params) {
-    const b = requireRunning();
+  async type(params, ctx) {
+    const b = requireRunning(ctx);
     if (params.text === undefined) return { ok: false, error: 'text parameter is required' };
     const loc = resolveLocator(b.page, params.selector);
     await loc.pressSequentially(params.text, {
@@ -387,8 +386,8 @@ const actions = {
     return { ok: true, message: `Typed into ${params.selector}` };
   },
 
-  async press(params) {
-    const b = requireRunning();
+  async press(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.key) return { ok: false, error: 'key parameter is required (e.g. "Enter", "Tab", "Control+a")' };
     if (params.selector) {
       const loc = resolveLocator(b.page, params.selector);
@@ -399,15 +398,15 @@ const actions = {
     return { ok: true, message: `Pressed ${params.key}` };
   },
 
-  async clear(params) {
-    const b = requireRunning();
+  async clear(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     await loc.clear({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Cleared ${params.selector}` };
   },
 
-  async select_option(params) {
-    const b = requireRunning();
+  async select_option(params, ctx) {
+    const b = requireRunning(ctx);
     if (params.value === undefined && !params.label && !params.index) {
       return { ok: false, error: 'Provide value, label, or index to select' };
     }
@@ -419,36 +418,36 @@ const actions = {
     return { ok: true, selected };
   },
 
-  async check(params) {
-    const b = requireRunning();
+  async check(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     await loc.check({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Checked ${params.selector}` };
   },
 
-  async uncheck(params) {
-    const b = requireRunning();
+  async uncheck(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     await loc.uncheck({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Unchecked ${params.selector}` };
   },
 
-  async hover(params) {
-    const b = requireRunning();
+  async hover(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     await loc.hover({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Hovered over ${params.selector}` };
   },
 
-  async focus(params) {
-    const b = requireRunning();
+  async focus(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     await loc.focus({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Focused ${params.selector}` };
   },
 
-  async drag_and_drop(params) {
-    const b = requireRunning();
+  async drag_and_drop(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.target_selector) return { ok: false, error: 'target_selector parameter is required' };
     const source = resolveLocator(b.page, params.selector);
     const target = resolveLocator(b.page, params.target_selector);
@@ -456,16 +455,16 @@ const actions = {
     return { ok: true, message: `Dragged ${params.selector} to ${params.target_selector}` };
   },
 
-  async set_input_files(params) {
-    const b = requireRunning();
+  async set_input_files(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.files) return { ok: false, error: 'files parameter is required (path string or array of paths)' };
     const loc = resolveLocator(b.page, params.selector);
     await loc.setInputFiles(params.files, { timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Set files on ${params.selector}` };
   },
 
-  async scroll(params) {
-    const b = requireRunning();
+  async scroll(params, ctx) {
+    const b = requireRunning(ctx);
     if (params.selector) {
       const loc = resolveLocator(b.page, params.selector);
       await loc.scrollIntoViewIfNeeded({ timeout: clampTimeout(params.timeout, 5000) });
@@ -480,8 +479,8 @@ const actions = {
 
   // ── Page content / info ────────────────────────────────────────────────────
 
-  async screenshot(params) {
-    const b = requireRunning();
+  async screenshot(params, ctx) {
+    const b = requireRunning(ctx);
     const fs = require('fs');
     const os = require('os');
     const path = require('path');
@@ -507,8 +506,8 @@ const actions = {
     };
   },
 
-  async pdf(params) {
-    const b = requireRunning();
+  async pdf(params, ctx) {
+    const b = requireRunning(ctx);
     const fs = require('fs');
     const os = require('os');
     const path = require('path');
@@ -524,63 +523,63 @@ const actions = {
     return { ok: true, message: `PDF saved to ${pdfPath}`, savedTo: pdfPath };
   },
 
-  async evaluate(params) {
-    const b = requireRunning();
+  async evaluate(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.expression) return { ok: false, error: 'expression parameter is required' };
     const result = await b.page.evaluate(params.expression);
     return { ok: true, result };
   },
 
-  async content() {
-    const b = requireRunning();
+  async content(_params, ctx) {
+    const b = requireRunning(ctx);
     const html = await b.page.content();
     // Return truncated HTML to avoid context bloat
     return { ok: true, html: html.substring(0, 50000), truncated: html.length > 50000 };
   },
 
-  async title() {
-    const b = requireRunning();
+  async title(_params, ctx) {
+    const b = requireRunning(ctx);
     return { ok: true, title: await b.page.title(), url: b.page.url() };
   },
 
-  async get_text(params) {
-    const b = requireRunning();
+  async get_text(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     const text = await loc.innerText({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, text };
   },
 
-  async get_attribute(params) {
-    const b = requireRunning();
+  async get_attribute(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.attribute) return { ok: false, error: 'attribute parameter is required' };
     const loc = resolveLocator(b.page, params.selector);
     const value = await loc.getAttribute(params.attribute, { timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, value };
   },
 
-  async get_value(params) {
-    const b = requireRunning();
+  async get_value(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     const value = await loc.inputValue({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, value };
   },
 
-  async is_visible(params) {
-    const b = requireRunning();
+  async is_visible(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     const visible = await loc.isVisible();
     return { ok: true, visible };
   },
 
-  async count(params) {
-    const b = requireRunning();
+  async count(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     const count = await loc.count();
     return { ok: true, count };
   },
 
-  async bounding_box(params) {
-    const b = requireRunning();
+  async bounding_box(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     const box = await loc.boundingBox({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, box };
@@ -588,30 +587,30 @@ const actions = {
 
   // ── Waiting ────────────────────────────────────────────────────────────────
 
-  async wait_for(params) {
-    const b = requireRunning();
+  async wait_for(params, ctx) {
+    const b = requireRunning(ctx);
     const loc = resolveLocator(b.page, params.selector);
     const state = params.state || 'visible'; // 'attached', 'detached', 'visible', 'hidden'
     await loc.waitFor({ state, timeout: params.timeout || 30000 });
     return { ok: true, message: `Selector ${params.selector} is ${state}` };
   },
 
-  async wait_for_url(params) {
-    const b = requireRunning();
+  async wait_for_url(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.url) return { ok: false, error: 'url parameter is required (string or regex pattern)' };
     await b.page.waitForURL(params.url, { timeout: params.timeout || 30000 });
     return { ok: true, url: b.page.url() };
   },
 
-  async wait_for_load_state(params) {
-    const b = requireRunning();
+  async wait_for_load_state(params, ctx) {
+    const b = requireRunning(ctx);
     const state = params.state || 'networkidle'; // 'load', 'domcontentloaded', 'networkidle'
     await b.page.waitForLoadState(state, { timeout: params.timeout || 30000 });
     return { ok: true, message: `Page reached ${state} state` };
   },
 
-  async wait_for_response(params) {
-    const b = requireRunning();
+  async wait_for_response(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.url) return { ok: false, error: 'url parameter is required (URL substring or pattern to match)' };
     const response = await b.page.waitForResponse(
       resp => resp.url().includes(params.url),
@@ -627,29 +626,29 @@ const actions = {
 
   // ── Tab / page management ──────────────────────────────────────────────────
 
-  async tabs() {
-    const b = requireRunning();
+  async tabs(_params, ctx) {
+    const b = requireRunning(ctx);
     const pages = await b.getPages();
     return { ok: true, tabs: pages };
   },
 
-  async open_tab(params) {
-    const b = requireRunning();
+  async open_tab(params, ctx) {
+    const b = requireRunning(ctx);
     if (params.url) await validateUrl(params.url);
     await b.newPage(params.url || null);
     return { ok: true, message: `Opened new tab${params.url ? ` at ${params.url}` : ''}` };
   },
 
-  async close_tab(params) {
-    const b = requireRunning();
+  async close_tab(params, ctx) {
+    const b = requireRunning(ctx);
     const index = params.tab_index !== undefined ? params.tab_index : -1;
     if (index < 0) return { ok: false, error: 'tab_index parameter is required' };
     await b.closePage(index);
     return { ok: true, message: `Closed tab ${index}` };
   },
 
-  async switch_tab(params) {
-    const b = requireRunning();
+  async switch_tab(params, ctx) {
+    const b = requireRunning(ctx);
     if (params.tab_index === undefined) return { ok: false, error: 'tab_index parameter is required' };
     b.switchToPage(params.tab_index);
     return { ok: true, message: `Switched to tab ${params.tab_index}`, url: b.page.url() };
@@ -657,16 +656,16 @@ const actions = {
 
   // ── Network ────────────────────────────────────────────────────────────────
 
-  async route_block(params) {
-    const b = requireRunning();
+  async route_block(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.pattern) return { ok: false, error: 'pattern parameter is required (URL glob like "**/*.png" or "**google-analytics**")' };
     await b.page.route(params.pattern, route => route.abort());
     b._routes.push(params.pattern);
     return { ok: true, message: `Blocking requests matching: ${params.pattern}` };
   },
 
-  async route_fulfill(params) {
-    const b = requireRunning();
+  async route_fulfill(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.pattern) return { ok: false, error: 'pattern parameter is required' };
     const fulfillOpts = {};
     if (params.status) fulfillOpts.status = params.status;
@@ -677,8 +676,8 @@ const actions = {
     return { ok: true, message: `Fulfilling requests matching: ${params.pattern}` };
   },
 
-  async unroute(params) {
-    const b = requireRunning();
+  async unroute(params, ctx) {
+    const b = requireRunning(ctx);
     if (params.pattern) {
       await b.page.unroute(params.pattern);
       b._routes = b._routes.filter(r => r !== params.pattern);
@@ -692,16 +691,16 @@ const actions = {
     return { ok: true, message: 'Removed all routes' };
   },
 
-  async console() {
-    const b = requireRunning();
+  async console(_params, ctx) {
+    const b = requireRunning(ctx);
     const logs = b.drainConsole();
     return { ok: true, logs };
   },
 
   // ── Frames / iframes ───────────────────────────────────────────────────────
 
-  async frames() {
-    const b = requireRunning();
+  async frames(_params, ctx) {
+    const b = requireRunning(ctx);
     const frames = b.page.frames().map((f, i) => ({
       index: i,
       name: f.name() || '',
@@ -710,23 +709,23 @@ const actions = {
     return { ok: true, frames };
   },
 
-  async fill_in_frame(params) {
-    const f = resolveFrame(requireRunning().page, params);
+  async fill_in_frame(params, ctx) {
+    const f = resolveFrame(requireRunning(ctx).page, params);
     if (!params.selector) return { ok: false, error: 'selector parameter is required' };
     if (params.text === undefined) return { ok: false, error: 'text parameter is required' };
     await f.locator(params.selector).fill(params.text, { timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Filled ${params.selector} in frame ${params.frame_name || params.frame_url || '(index)'}` };
   },
 
-  async click_in_frame(params) {
-    const f = resolveFrame(requireRunning().page, params);
+  async click_in_frame(params, ctx) {
+    const f = resolveFrame(requireRunning(ctx).page, params);
     if (!params.selector) return { ok: false, error: 'selector parameter is required' };
     await f.locator(params.selector).click({ timeout: clampTimeout(params.timeout, 10000) });
     return { ok: true, message: `Clicked ${params.selector} in frame ${params.frame_name || params.frame_url || '(index)'}` };
   },
 
-  async type_in_frame(params) {
-    const f = resolveFrame(requireRunning().page, params);
+  async type_in_frame(params, ctx) {
+    const f = resolveFrame(requireRunning(ctx).page, params);
     if (!params.selector) return { ok: false, error: 'selector parameter is required' };
     if (params.text === undefined) return { ok: false, error: 'text parameter is required' };
     await f.locator(params.selector).pressSequentially(params.text, {
@@ -736,8 +735,8 @@ const actions = {
     return { ok: true, message: `Typed into ${params.selector} in frame ${params.frame_name || params.frame_url || '(index)'}` };
   },
 
-  async evaluate_in_frame(params) {
-    const f = resolveFrame(requireRunning().page, params);
+  async evaluate_in_frame(params, ctx) {
+    const f = resolveFrame(requireRunning(ctx).page, params);
     if (!params.expression) return { ok: false, error: 'expression parameter is required' };
     const result = await f.evaluate(params.expression);
     return { ok: true, result };
@@ -745,8 +744,8 @@ const actions = {
 
   // ── Auth & state ───────────────────────────────────────────────────────────
 
-  async signup(params) {
-    const b = requireRunning();
+  async signup(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.url) return { ok: false, error: 'url parameter is required' };
     await validateUrl(params.url);
 
@@ -822,8 +821,8 @@ const actions = {
     return { ok: true, message: `Signup attempted at ${params.url}`, currentUrl: finalUrl, ...results };
   },
 
-  async fill_payment(params) {
-    const b = requireRunning();
+  async fill_payment(params, ctx) {
+    const b = requireRunning(ctx);
     const results = {};
 
     // Apply coupon first if provided
@@ -964,8 +963,8 @@ const actions = {
     return { ok: true, message: 'Payment form filled', ...results };
   },
 
-  async login(params) {
-    const b = requireRunning();
+  async login(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.url) return { ok: false, error: 'url parameter is required' };
     if (!params.username || !params.password) return { ok: false, error: 'username and password are required' };
     await validateUrl(params.url);
@@ -1016,15 +1015,15 @@ const actions = {
     };
   },
 
-  async save_storage_state(params) {
-    const b = requireRunning();
+  async save_storage_state(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.path) return { ok: false, error: 'path parameter is required (file path to save state to)' };
     await b.context.storageState({ path: params.path });
     return { ok: true, message: `Storage state saved to ${params.path}` };
   },
 
-  async load_storage_state(params) {
-    const b = requireRunning();
+  async load_storage_state(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.path) return { ok: false, error: 'path parameter is required (file path to load state from)' };
     // Loading storage state requires creating a new context
     const fs = require('fs');
@@ -1038,23 +1037,23 @@ const actions = {
     return { ok: true, message: `Storage state loaded from ${params.path}` };
   },
 
-  async get_cookies(params) {
-    const b = requireRunning();
+  async get_cookies(params, ctx) {
+    const b = requireRunning(ctx);
     const urls = params.url ? [params.url] : undefined;
     const cookies = await b.context.cookies(urls);
     return { ok: true, cookies };
   },
 
-  async clear_cookies() {
-    const b = requireRunning();
+  async clear_cookies(_params, ctx) {
+    const b = requireRunning(ctx);
     await b.context.clearCookies();
     return { ok: true, message: 'Cookies cleared' };
   },
 
   // ── Dialog handling ────────────────────────────────────────────────────────
 
-  async handle_dialog(params) {
-    const b = requireRunning();
+  async handle_dialog(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.response) return { ok: false, error: 'response parameter is required: "accept", "dismiss", or "prompt:your text"' };
     b._dialogAction = params.response;
     return { ok: true, message: `Dialog handler set to: ${params.response}` };
@@ -1062,8 +1061,8 @@ const actions = {
 
   // ── Viewport / emulation ───────────────────────────────────────────────────
 
-  async set_viewport(params) {
-    const b = requireRunning();
+  async set_viewport(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.width || !params.height) return { ok: false, error: 'width and height are required' };
     await b.page.setViewportSize({ width: params.width, height: params.height });
     return { ok: true, message: `Viewport set to ${params.width}x${params.height}` };
@@ -1071,22 +1070,22 @@ const actions = {
 
   // ── Keyboard ───────────────────────────────────────────────────────────────
 
-  async keyboard_type(params) {
-    const b = requireRunning();
+  async keyboard_type(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.text) return { ok: false, error: 'text parameter is required' };
     await b.page.keyboard.type(params.text, { delay: params.delay || 0 });
     return { ok: true, message: 'Typed text via keyboard' };
   },
 
-  async keyboard_down(params) {
-    const b = requireRunning();
+  async keyboard_down(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.key) return { ok: false, error: 'key parameter is required' };
     await b.page.keyboard.down(params.key);
     return { ok: true, message: `Key down: ${params.key}` };
   },
 
-  async keyboard_up(params) {
-    const b = requireRunning();
+  async keyboard_up(params, ctx) {
+    const b = requireRunning(ctx);
     if (!params.key) return { ok: false, error: 'key parameter is required' };
     await b.page.keyboard.up(params.key);
     return { ok: true, message: `Key up: ${params.key}` };
@@ -1094,8 +1093,8 @@ const actions = {
 
   // ── Mouse ──────────────────────────────────────────────────────────────────
 
-  async mouse_click(params) {
-    const b = requireRunning();
+  async mouse_click(params, ctx) {
+    const b = requireRunning(ctx);
     if (params.x === undefined || params.y === undefined) return { ok: false, error: 'x and y coordinates are required' };
     await b.page.mouse.click(params.x, params.y, {
       button: params.button || 'left',
@@ -1104,15 +1103,15 @@ const actions = {
     return { ok: true, message: `Mouse clicked at (${params.x}, ${params.y})` };
   },
 
-  async mouse_move(params) {
-    const b = requireRunning();
+  async mouse_move(params, ctx) {
+    const b = requireRunning(ctx);
     if (params.x === undefined || params.y === undefined) return { ok: false, error: 'x and y coordinates are required' };
     await b.page.mouse.move(params.x, params.y, { steps: params.steps || 1 });
     return { ok: true, message: `Mouse moved to (${params.x}, ${params.y})` };
   },
 
-  async mouse_wheel(params) {
-    const b = requireRunning();
+  async mouse_wheel(params, ctx) {
+    const b = requireRunning(ctx);
     await b.page.mouse.wheel(params.delta_x || 0, params.delta_y || 0);
     return { ok: true, message: `Mouse wheel scrolled` };
   },
@@ -1364,12 +1363,9 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
   },
 });
 
-// For testing — clean up singleton
+// For testing — stop every browser in the registry
 browserTool._cleanup = async () => {
-  if (pw) {
-    await pw.stop();
-    pw = null;
-  }
+  for (const b of allBrowsers()) await b.stop();
 };
 
 // Exported so the split tools (BrowserSession/BrowserPage/BrowserExtract)
