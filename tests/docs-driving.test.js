@@ -14,6 +14,7 @@ const { TAKE_CODES } = require('../src/gui/take-policy');
 const { TAKE_ACTIONS } = require('../src/gui/take-tool');
 const { STEP_KINDS } = require('../src/gui/take-steps');
 const { parseGuiConfig } = require('../src/gui/config');
+const { GUI_ERROR_CODES } = require('../src/gui/errors');
 const { parseYaml } = require('../src/platform/yaml');
 const { WAIT_MS_MAX } = require('../src/fleet/tool-definitions');
 
@@ -120,5 +121,9 @@ describe('docs/driving-king-louie.md', () => {
   it('lists every take code in section 5', () => {
     const refuses = section('What refuses, and why');
     for (const code of TAKE_CODES) assert.ok(refuses.includes(`\`${code}\``), `section 5 names ${code}`);
+    // And nothing take-looking that is not a real code.
+    for (const [, word] of refuses.matchAll(/`((?:take|recorder|browser)_[a-z_]+)`/g)) {
+      assert.ok(TAKE_CODES.includes(word) || GUI_ERROR_CODES.includes(word), `${word} is a real code`);
+    }
   });
 });

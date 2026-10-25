@@ -64,7 +64,9 @@ themselves. That includes:
 the turn: the `mcp` process sends the call, then asks `get_job` once a second
 until `session` is not `turn`, the job has ended, or the time is up, and
 answers with the job and `wait: { ended }`: `idle`, `terminal`, `timeout`, or
-`poll_failed` with a `code`. A poll that fails after your message went out
+`poll_failed` with a `code` (when a `send_to_job`'s first poll fails, beside
+its acknowledgement rather than the job). A `wait_ms` above 0 adds `wait`; 0
+is a plain call. A poll that fails after your message went out
 never fails the call, so you never send a message twice. Each poll is still
 one courier request under the 30 s request limit, so a 25 s wait can take
 about 25 s plus one request. `wait_ms` exists only on `king-louie-service mcp`
@@ -164,7 +166,8 @@ The loop:
 1. `delegate` with the machine and the task. Keep the `job_id`.
 2. Call `get_job` with `wait_ms: 25000` until the answer's `wait.ended` is
    `idle` (the turn has ended) or `terminal` (the job has ended); on
-   `timeout`, call again. Read the reply in `result`.
+   `timeout`, call again; on `poll_failed`, call `get_job` again (do not
+   resend). Read the reply in `result`.
 3. For the detail, call `get_job_logs`, passing `next_since` each time so you
    read only what is new. The tool lines are the evidence of what was done.
 4. Send the next message with `send_to_job` (with `wait_ms` it sends and
@@ -333,9 +336,10 @@ deletes a recording.
 
 ### The recording
 
-The recording is the whole primary screen, silent (no microphone, no system
-sound): everything on it is in the video, notifications and other windows
-included. It is 30 frames a second unless `record.fps` says otherwise. The
+The recording is the whole Windows desktop, every display (a second monitor
+is in the video too; capturing only the primary display is not done in D1),
+and silent (no microphone, no system sound): everything on screen is in the
+video, notifications and other windows included. It is 30 frames a second unless `record.fps` says otherwise. The
 file is yours: by default
 `%LOCALAPPDATA%\KingLouie\recordings\<take_id>\take.mp4` under your own
 account, or `<dir>\<take_id>.mp4` when `record.dir` names a folder under the
@@ -365,8 +369,8 @@ profile is yours too, under `%LOCALAPPDATA%\KingLouie\browser-profiles\<name>`.
 - "User denied permission": you said no on the phone. Nothing ran.
 - `invalid_params` on `wait_ms`: it is a whole number from 0 to 25000.
 
-Inside a take every refusal is a tool error the agent reads, `{ ok: false,
-error, code }`, never a prompt and never a wait. The codes:
+Inside a take every refusal is a tool error the agent reads, with an `error`
+and a `code`, never a prompt and never a wait. The take's codes:
 
 - `take_requires_local_origin`: the take was asked for from a session the
   node did not start itself (a front-door client, say). Start it through
@@ -396,11 +400,18 @@ error, code }`, never a prompt and never a wait. The codes:
 - `take_no_mid_take_approval`: the call would have needed your phone. Nothing
   was sent; ask for it in the next take's `start`.
 - `take_ended`: the take has ended; a call it would have allowed is refused,
-  and a step list stops.
+  and a step list already running stops (a new `run_steps`, `note` or `stop`
+  after the end is `invalid_params`).
 - `take_browser_unavailable`: a browser call allowed while the take was live
   arrived after its browser was gone.
 - A step list that does not check is `invalid_params`, naming the index and
-  the field.
+  the field; so is a `start` while takes are off in `node.yaml` or
+  `gui.browser` is not set. A run with no job to bind a take to is
+  `job_required`.
+- In `run_steps` results, a failed step's `error.code` is one of the codes
+  above, or `step_failed`, `op_timeout` (the step outran its bound; the run
+  stops), `cancelled` (the turn was stopped), `denied_by_rule` or
+  `denied_by_policy` (the node's own rules).
 - "This client may not request unsafe actions (fleet:unsafe not granted).
   Nothing ran." A client that reaches the node through the front door without
   `fleet:unsafe` for it is refused every unsafe call and every GUI tool. A

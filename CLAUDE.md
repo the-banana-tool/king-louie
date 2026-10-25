@@ -2324,6 +2324,12 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   Claude Code session on the same machine, sends the script and the intent
   through `king-louie-service mcp`; a stuck step ends the turn with a report
   and the driver answers with `send_to_job`, the recording still rolling.
+  The model stays in the loop from the first version (R-D1-2): the steps run
+  deterministically, and the model watches the screen, fixes popups, stray
+  tabs and failed steps with the browser and GUI tools, resumes `run_steps`
+  from the failed index with `from`, and reports only when stuck. The
+  capture is the whole screen and silent (R-D1-3): every display, no
+  microphone, narration added afterwards.
   `TakeManager` (`src/gui/takes.js`) holds one live take per node (it holds
   the node's one lease; another `start` is `take_busy`, naming the other
   take only) and one per delegate session. The record is
@@ -2359,11 +2365,12 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   device being revoked (`device_revoked`), the job closing (`job_closed`:
   `cancel_job`, the idle close, a failed turn), 30 minutes of driver
   silence after a turn ends (`driver_silent`, C-6; a turn start clears the
-  timer), the recorder exiting (`recorder_failed`), the screen locking
+  timer), a stop that finds the recorder already exited
+  (`recorder_failed`), the screen locking
   (`screen_locked`, through the lease's `locked`, C-12), `Take.stop`
   (`take_done`), service shutdown (`service_stopped`). Every ending stops
   the recording and keeps the file, closes the take's Chrome by CDP or by
-  pid, clears the policy at once (from that instant every call it would
+  pid (unless `Take.stop` passed `keep_browser`), clears the policy at once (from that instant every call it would
   have allowed is `take_ended`), and ends only the lease whose id the take
   minted. Nothing deletes a recording.
 - **What a take may do (§7, C-7, C-8).** `createTakePolicy`
@@ -2389,7 +2396,8 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   and 120 s at most, `wait_for.state` `visible` unless given, `wait_for_text`
   refusing `label=`/`placeholder=`/`testid=`/`alt=`/`title=` selectors, a
   `scroll` taking a selector or `dx`/`dy`, not both) with no model between
-  them. Each acting step is held to `checkDenied` (the node's deny rules and
+  them. Every step that makes a browser call (all but `note` and `pause`,
+  look-only ones and failure captures included) is held to `checkDenied` (the node's deny rules and
   `denied` tier, handed to the Take call by the executor) and then to the
   take's policy, and runs on the take's own browser key. Step stills and
   failure captures go under `<dataDir>/takes/<take_id>/`, returned as
@@ -2405,8 +2413,8 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   `PlaywrightBrowser#attach`. An argument that moves the profile or the
   debugging endpoint (`--user-data-dir`, `--profile-directory`,
   `--remote-debugging*`, in any switch form) is refused. `record_start
-  { ffmpeg?, take_id, path?, fps?, size? }` runs ffmpeg (`gdigrab` of the
-  whole desktop, libx264, no audio) into
+  { ffmpeg?, take_id, path?, fps?, size? }` runs ffmpeg (`gdigrab -i desktop`:
+  the whole virtual desktop, every display; libx264, no audio) into
   `%LOCALAPPDATA%\KingLouie\recordings\<take_id>\take.mp4`, or
   `<record.dir>\<take_id>.mp4` when the take names a folder under the
   session's working directory. ffmpeg is `gui.recorder.ffmpeg`, else the
@@ -2448,8 +2456,9 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   recording. A hand-made `--data-dir` whose ancestor the service account can
   write is outside the courier grant's pinning. Chrome's debugging port is
   open to the user's own processes while a take runs. The recording is the
-  whole primary screen, King Louie's own window included unless the task
-  says to minimise it. macOS and Linux recording, two displays, audio, an
+  whole Windows desktop, every display, King Louie's own window included
+  unless the task says to minimise it. macOS and Linux recording, capturing
+  the primary display only, audio, an
   attended take and a take from a front-door client are not done.
 - Tests never start a real take on the owner's screen, a real ffmpeg, a
   real Chrome in the user's session or a real phone: `tests/gui-takes.test.js`
