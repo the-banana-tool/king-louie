@@ -6,7 +6,7 @@ const { EventEmitter } = require('events');
 const crypto = require('crypto');
 const fs = require('fs');
 const net = require('net');
-const path = require('path');
+const { plainLineProblem } = require('../cases/hidden-chars');
 const { createLogger } = require('../logging');
 const P = require('./helper-protocol');
 const { GuiError, fromWire } = require('./errors');
@@ -37,11 +37,12 @@ function sanitizeProbe(msg) {
 }
 
 // The ffmpeg the helper found (`recorder: { ffmpeg }` in its probe report):
-// an absolute path of one plain line, or null.
+// one plain line that is a drive path (`C:\...`) or a POSIX absolute path,
+// or null. UNC (`\\server\...`) and device (`\\?\...`) forms are refused.
 function recorderPath(recorder) {
   const p = isPlainObject(recorder) ? recorder.ffmpeg : null;
-  if (typeof p !== 'string' || p.length === 0 || p.length > 1024 || /[\u0000-\u001f\u007f]/.test(p)) return null;
-  return path.win32.isAbsolute(p) || path.posix.isAbsolute(p) ? p : null;
+  if (typeof p !== 'string' || p.length === 0 || p.length > 1024 || plainLineProblem(p)) return null;
+  return /^[A-Za-z]:\\/.test(p) || /^\/(?!\/)/.test(p) ? p : null;
 }
 
 class HelperChannel extends EventEmitter {

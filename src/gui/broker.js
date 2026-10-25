@@ -249,8 +249,9 @@ class GuiBroker extends EventEmitter {
     if (ffmpeg !== undefined) params.ffmpeg = ffmpeg;
     if (path !== undefined) params.path = path;
     const result = await this.channel.request('record_start', params, { jobId: ctx.jobId });
-    const pid = result && Number.isInteger(result.pid) ? result.pid : null;
-    this._audit('gui.record.start', { job_id: ctx.jobId, pid });
+    // A recording with no pid never started, or cannot be stopped: not one.
+    if (!result || !Number.isInteger(result.pid)) throw new GuiError('recorder_failed', 'the recorder reported no process');
+    this._audit('gui.record.start', { job_id: ctx.jobId, pid: result.pid });
     return result;
   }
 

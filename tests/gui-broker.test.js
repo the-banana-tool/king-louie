@@ -568,12 +568,14 @@ describe('the take ops: launch_browser, record_start, record_stop, keep_awake', 
     assert.equal(sent.take_id, 'tk-1');
   });
 
-  it('recordStart on an empty result audits a null pid instead of throwing a TypeError', async () => {
-    const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: { ...takeHandlers, record_start: async () => null } });
-    channel.connect();
-    assert.equal(await b.recordStart({ takeId: 'tk-1' }, ctx), null);
-    await new Promise((r) => setImmediate(r));
-    assert.deepEqual(audits, [{ kind: 'gui.record.start', data: { job_id: 'job-1', pid: null } }]);
+  it('recordStart with no integer pid in the result is recorder_failed and audits nothing', async () => {
+    for (const answer of [null, {}, { pid: '777' }]) {
+      const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: { ...takeHandlers, record_start: async () => answer } });
+      channel.connect();
+      assert.equal(await code(b.recordStart({ takeId: 'tk-1' }, ctx)), 'recorder_failed');
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(audits, []);
+    }
   });
 
   it('recorder() is the ffmpeg the connected helper reported, else null', () => {
@@ -594,6 +596,11 @@ describe('the take ops: launch_browser, record_start, record_stop, keep_awake', 
     assert.equal(ffmpeg('C:\\ffmpeg\\bin\\ffmpeg.exe'), 'C:\\ffmpeg\\bin\\ffmpeg.exe');
     assert.equal(ffmpeg('/usr/bin/ffmpeg'), '/usr/bin/ffmpeg');
     for (const bad of ['ffmpeg.exe', 'C:\\a\nb.exe', 'C:\\' + 'x'.repeat(1100), 42, null, undefined]) assert.equal(ffmpeg(bad), null);
+    assert.equal(ffmpeg('C:\\ffmpeg\\\u202Eexe.gepmff'), null, 'a bidi override is not one plain line');
+    assert.equal(ffmpeg('\\\\server\\share\\ffmpeg.exe'), null, 'UNC');
+    assert.equal(ffmpeg('\\\\?\\C:\\ffmpeg\\ffmpeg.exe'), null, 'device path');
+    assert.equal(ffmpeg('//server/share/ffmpeg'), null, 'POSIX-spelled UNC');
+    assert.equal(ffmpeg('C:ffmpeg.exe'), null, 'drive-relative');
     assert.equal(sanitizeProbe({}).recorder.ffmpeg, null);
   });
 
