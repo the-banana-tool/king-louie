@@ -14,6 +14,7 @@ const { covers } = require('./scope-rules');
 const { MCP_TOOLS } = require('./tool-definitions');
 const { CASE_MCP_TOOLS } = require('../cases/mcp-tool-definitions');
 const { GUI_TOOL_NAMES } = require('../gui/errors');
+const { createTakeHolder } = require('../gui/take-holder');
 
 const log = createLogger('fleet/delegate');
 
@@ -233,7 +234,9 @@ class DelegateSessions {
     const job = this.jobs.createDelegateJob({ machine: this.nodeConfig.name, task, cwd: dir });
     const session = {
       jobId: job.job_id, cwd: dir, state: 'idle', history: [], evidence: new EvidenceLedger(),
-      lastActivity: this.now(), turnAbort: null, requestId, owner, backgroundTaskIds: new Set(), backgroundView: null
+      lastActivity: this.now(), turnAbort: null, requestId, owner, backgroundTaskIds: new Set(), backgroundView: null,
+      // One take holder for the session's whole life (demo takes spec §7.2).
+      takeHolder: createTakeHolder()
     };
     this.sessions.set(job.job_id, session);
     this.jobs.getSignal(job.job_id).addEventListener('abort', () => this._onJobAborted(session), { once: true });
@@ -376,7 +379,11 @@ class DelegateSessions {
           // allows paths under the session's cwd and nowhere else.
           allowedRoots: [session.cwd],
           // T11-taskstatus: this session's background tasks only.
-          ...(session.backgroundView ? { scopedBackgroundTasks: session.backgroundView } : {})
+          ...(session.backgroundView ? { scopedBackgroundTasks: session.backgroundView } : {}),
+          // Demo takes §7.2: the session's take holder, and whether this
+          // turn's origin is one the node started itself (a take needs one).
+          takePolicy: session.takeHolder,
+          nodeLocalOrigin: origin == null || LOCAL_ORIGIN_KINDS.includes(origin.kind)
         }
       });
       this._record(session, message, result);

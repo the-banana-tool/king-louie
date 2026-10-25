@@ -206,6 +206,29 @@ class ToolExecutor extends EventEmitter {
     // A delegate session's background-task view, handed on to sub-agents so
     // their BackgroundTask/TaskStatus calls stay inside the session.
     this.scopedBackgroundTasks = options.scopedBackgroundTasks || null;
+    // A delegate session's take holder (demo takes spec §7.2): while it holds
+    // a policy, the policy's decision replaces the approval prompt, and
+    // nothing asks a person mid-take. Carried to sub-agents.
+    this.takePolicy = options.takePolicy || null;
+    // Whether the run's origin is one this node started itself (the desktop,
+    // the service's own chat, a stdio session); a take needs one.
+    this.nodeLocalOrigin = options.nodeLocalOrigin !== false;
+  }
+
+  // The live take policy, or null.
+  _liveTake() {
+    return this.takePolicy && this.takePolicy.current ? this.takePolicy.current : null;
+  }
+
+  // Inside a take nothing is sent to the phone: a call that would ask is refused.
+  _noMidTakeApprovalResult(toolName, parameters) {
+    const refused = {
+      success: false,
+      error: `this take did not ask for ${toolName}; nothing was sent to the phone`,
+      code: 'take_no_mid_take_approval'
+    };
+    this.emit('postExecute', { toolName, parameters, result: refused });
+    return refused;
   }
 
   get permissionRules() {
@@ -335,6 +358,7 @@ class ToolExecutor extends EventEmitter {
 
       if (action === 'confirm') {
         if (this.refuseUnsafe) return this._refuseUnsafeResult(toolName, effectiveParameters);
+        if (this._liveTake()) return this._noMidTakeApprovalResult(toolName, effectiveParameters);
         const hookMetadata = {
           reason: preHookResult?.message || 'Hook policy requires explicit confirmation.',
           signal: options.signal || null,
@@ -461,6 +485,7 @@ class ToolExecutor extends EventEmitter {
     // fails closed: treated as `denied` rather than let the call run
     // unclassified.
     let tierUnsafe = false;
+    let tierReason = null;
     if (this.classifyCall) {
       let raw;
       try {
@@ -523,6 +548,29 @@ class ToolExecutor extends EventEmitter {
         // tierDecision event above keeps the classifier's own verdict.
         const requiresApprovalOnly = safeDecision.tier === 'unsafe' && safeDecision.reason === 'tool_requires_approval';
         tierUnsafe = safeDecision.tier === 'unsafe' && !(wakeupLookOnly && requiresApprovalOnly);
+        tierReason = safeDecision.reason || null;
+      }
+    }
+
+    // A live take (demo takes spec §7.2), after the deny rules and the tier,
+    // so a `denied` tier has already refused: the policy refuses at once, or
+    // allows without asking, or leaves the call to the logic below
+    // (`passthrough`), which then refuses where it would have asked. A path
+    // outside the allowed roots is never lifted by the take's allow.
+    let takeAllowed = false;
+    const take = this._liveTake();
+    if (take) {
+      const d = await take.decide(toolName, effectiveParameters);
+      if (d.allow === false) {
+        const refused = { success: false, error: d.error, code: d.code, ...(d.allowed ? { allowed: d.allowed } : {}) };
+        this.emit('approvalDenied', { toolName, parameters: effectiveParameters, deniedBy: 'take', code: d.code });
+        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
+        return refused;
+      }
+      if (d.allow === true && !d.passthrough && !(tierUnsafe && tierReason === 'path_outside_allowed_roots')) {
+        takeAllowed = true;
+        approvalSource = 'take';
+        this.emit('approvalAutoGranted', { toolName, parameters: effectiveParameters, source: approvalSource });
       }
     }
 
@@ -543,7 +591,7 @@ class ToolExecutor extends EventEmitter {
     const needsApprovalGate = tierUnsafe || ruleSaysAsk || allowRuleDemoted
       || (!ruleMatch.matched && toolWouldGate);
 
-    if (ruleSaysAllow) {
+    if (ruleSaysAllow && !takeAllowed) {
       approvalSource = { type: 'rule', rule: describeRule(ruleMatch.rule) };
       this.emit('approvalAutoGranted', {
         toolName,
@@ -552,7 +600,7 @@ class ToolExecutor extends EventEmitter {
       });
     }
 
-    if (needsApprovalGate && !ruleSaysAllow) {
+    if (needsApprovalGate && !ruleSaysAllow && !takeAllowed) {
       if (this.refuseUnsafe) return this._refuseUnsafeResult(toolName, effectiveParameters);
       // An `ask` rule is the user saying "always check with me for this one",
       // so it outranks both auto-approve paths — which is what the comment
@@ -603,6 +651,8 @@ class ToolExecutor extends EventEmitter {
             return denied;
           }
         }
+
+        if (this._liveTake()) return this._noMidTakeApprovalResult(toolName, effectiveParameters);
 
         const gateMetadata = {
           ruleHint: ruleSaysAsk || allowRuleDemoted ? describeRule(ruleMatch.rule) : null,
@@ -699,7 +749,11 @@ class ToolExecutor extends EventEmitter {
         // field only (the local chat send path sets it): last, so no call
         // option or extra tool option can supply it, and never under
         // denyAutoApproval. answer_question checks its quote against it.
-        ownerTurnText: this.denyAutoApproval ? null : this.ownerTurnText
+        ownerTurnText: this.denyAutoApproval ? null : this.ownerTurnText,
+        // This run's take holder and origin locality, from this executor's
+        // own fields (the Take tool reads them).
+        takePolicy: this.takePolicy,
+        nodeLocalOrigin: this.nodeLocalOrigin
       })));
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
@@ -769,6 +823,9 @@ class ToolExecutor extends EventEmitter {
     // A child never gets a tool this run may not use (a case wake-up's list,
     // a delegate turn's T11-sessions limit); childRuntimeOptions intersects.
     if (this.allowedToolNames) requester.allowedToolNames = Object.freeze([...this.allowedToolNames]);
+    // A child of a take's run is held to the same take, and to its origin.
+    if (this.takePolicy) requester.takePolicy = this.takePolicy;
+    requester.nodeLocalOrigin = this.nodeLocalOrigin;
     return this.localOrigin ? markLocalRequester(requester) : requester;
   }
 

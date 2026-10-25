@@ -29,6 +29,9 @@ const GATED = 'KlDelegateGated';
 const SLOW = 'KlDelegateSlow';
 const PLANNER = 'KlDelegatePlanner';
 const BGSLOW = 'KlDelegateBgSlow';
+const PROBE = 'KlDelegateTakeProbe';
+// What each PROBE call's execute context held.
+let probes = [];
 let script = [];
 let slowStarted = false;
 // A run whose first user message is a key here reads its replies from that
@@ -63,6 +66,7 @@ before(() => {
   const reg = (name, execute) => { if (!toolRegistry.get(name)) toolRegistry.register(new Tool({ name, description: 'test', parameters: { type: 'object', properties: {} }, requiresApproval: false, execute })); };
   reg(ROUTINE, async () => ({ ok: true, value: 'r'.repeat(6000) }));
   reg(GATED, async () => ({ ok: true }));
+  reg(PROBE, async (params, opts) => { probes.push({ takePolicy: opts.takePolicy, nodeLocalOrigin: opts.nodeLocalOrigin }); return { ok: true }; });
   reg(PLANNER, async () => ({ ok: true, plan: 'p'.repeat(10000) }));
   reg(BGSLOW, (params, opts) => new Promise((resolve) => {
     const run = { aborted: false };
@@ -87,6 +91,7 @@ afterEach(async () => {
   byTask = new Map();
   seen = [];
   bgRuns = [];
+  probes = [];
   providerError = null;
 });
 
@@ -256,6 +261,29 @@ describe('DelegateSessions', () => {
     const plan = logs.find((l) => l.startsWith(`tool ${PLANNER}`));
     assert.ok(plan.includes('p'.repeat(10000)), 'the planner result is not cut');
     assert.equal(t.jobs.getJob(jobId).result, 'second');
+  });
+
+  it("a turn sees nodeLocalOrigin from its origin and one take holder across the session's turns", async () => {
+    const t = await setup();
+    script = [use(PROBE), { type: 'text', content: 'first' }];
+    const { job_id: jobId } = await t.sessions.start({ task: 'one', origin: STDIO_ORIGIN });
+    await t.sessions.turns.get(jobId);
+    script = [use(PROBE), { type: 'text', content: 'second' }];
+    await t.sessions.send(jobId, 'two', { origin: STDIO_ORIGIN });
+    await t.sessions.turns.get(jobId);
+    assert.equal(probes.length, 2);
+    assert.equal(probes[0].nodeLocalOrigin, true);
+    assert.equal(probes[1].nodeLocalOrigin, true);
+    assert.ok(probes[0].takePolicy && typeof probes[0].takePolicy.set === 'function', "the turn carries the session's holder");
+    assert.equal(probes[0].takePolicy.current, null);
+    assert.equal(probes[1].takePolicy, probes[0].takePolicy, 'one holder per session');
+
+    script = [use(PROBE), { type: 'text', content: 'remote' }];
+    const remote = await t.sessions.start({ task: 'three', origin: origin(['fleet:delegate', 'fleet:unsafe']) });
+    await t.sessions.turns.get(remote.job_id);
+    assert.equal(probes.length, 3);
+    assert.equal(probes[2].nodeLocalOrigin, false);
+    assert.notEqual(probes[2].takePolicy, probes[0].takePolicy, 'another session has its own holder');
   });
 
   it('at most delegate.max_sessions open sessions', async () => {

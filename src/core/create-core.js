@@ -2340,6 +2340,10 @@ function createCore(deps = {}) {
       allowedDirectories: executorOptions.allowedDirectories || [],
       requireApproval: true,
       scopedBackgroundTasks: executorOptions.scopedBackgroundTasks || null,
+      // A delegate session's take holder and whether its origin is this
+      // node's own (demo takes spec §7.2), handed on to this run's children.
+      takePolicy: executorOptions.takePolicy || null,
+      nodeLocalOrigin: executorOptions.nodeLocalOrigin !== false,
       // The turn's frozen models, handed on to this run's children (§6.6).
       turnModels: executorOptions.turnModels || null,
       // The run's egress policy (spec 2026-10-13 §7.1): the snapshot's, else
@@ -2789,6 +2793,9 @@ function createCore(deps = {}) {
         ...(runtimeOptions.refuseUnsafe === true ? { refuseUnsafe: true } : {}),
         ...(Array.isArray(runtimeOptions.allowedRoots) ? { allowedRoots: runtimeOptions.allowedRoots } : {}),
         ...(runtimeOptions.scopedBackgroundTasks ? { scopedBackgroundTasks: runtimeOptions.scopedBackgroundTasks } : {}),
+        // A delegate session's take holder and origin locality (demo takes §7.2).
+        ...(runtimeOptions.takePolicy ? { takePolicy: runtimeOptions.takePolicy } : {}),
+        ...(runtimeOptions.nodeLocalOrigin === false ? { nodeLocalOrigin: false } : {}),
         // The run's models reach its own children in turn (§6.6).
         turnModels,
         // So does the top-level reply's sub-agent cost sink (§10).
@@ -3049,6 +3056,13 @@ function createCore(deps = {}) {
             // A delegate session's background-task view (T11-taskstatus).
             scopedBackgroundTasks: (options.approvalRequester && options.approvalRequester.scopedBackgroundTasks)
               || (options.executorOptions && options.executorOptions.scopedBackgroundTasks) || null,
+            // A delegate session's take holder (demo takes §7.2), and whether
+            // the run's origin is this node's own: either side saying it is
+            // not makes it not.
+            takePolicy: (options.approvalRequester && options.approvalRequester.takePolicy)
+              || (options.executorOptions && options.executorOptions.takePolicy) || null,
+            nodeLocalOrigin: !((options.approvalRequester && options.approvalRequester.nodeLocalOrigin === false)
+              || (options.executorOptions && options.executorOptions.nodeLocalOrigin === false)),
             // A child of a chat turn runs on that turn's frozen models (§6.6),
             // carried on the rethreaded requester as chatId-like run state;
             // with no parent turn, the default profile applies (§12).
