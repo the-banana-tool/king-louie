@@ -325,7 +325,7 @@ function writeScopedBriefField(ctx, params) {
   const state = user ? 'confirmed' : 'proposed';
   const quoteNote = user ? `, quote: ${JSON.stringify(quote)}` : '';
   const reason = params.reason ? `: ${params.reason}` : '';
-  const journal = (line, value) => rt.records(ctx.caseId).writeJournal('brief', `${line}${reason}\n\n${JSON.stringify(value)}`);
+  const journal = (line, value) => rt.records(ctx.caseId).writeJournal('brief', `${line}${reason}\n\n${JSON.stringify(value)}`, rt.now());
 
   try {
     if (field === 'objective') {
@@ -493,7 +493,8 @@ const BriefTool = acceptAnyValue(new Tool({
       : brief.update(params.field, params.value, { provenance });
     ctx.runtime.records(ctx.caseId).writeJournal(
       'brief',
-      `Brief ${params.field} ${params.action === 'append' ? 'appended' : 'updated'} (${provenance})${params.reason ? `: ${params.reason}` : ''}${quoteNote}\n\n${JSON.stringify(params.action === 'append' ? params.item : params.value)}`
+      `Brief ${params.field} ${params.action === 'append' ? 'appended' : 'updated'} (${provenance})${params.reason ? `: ${params.reason}` : ''}${quoteNote}\n\n${JSON.stringify(params.action === 'append' ? params.item : params.value)}`,
+      ctx.runtime.now()
     );
     if (params.field === 'check') {
       // A new command is a new approval: what was approved before is
