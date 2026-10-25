@@ -372,6 +372,98 @@ describe('CourierFleetClient wait_ms (spec §11, C-9)', () => {
     assert.equal(seen.length, 2);
   });
 
+  it('a clock set back never extends the wait (review A1)', async () => {
+    let now = 50000;
+    const seen = [];
+    const client = new CourierFleetClient({
+      courier: {
+        callService: async (m) => {
+          seen.push(m);
+          if (seen.length === 1) now = 0; // set back 50 s during the plain call
+          else if (seen.length === 2) now += 25001;
+          if (seen.length > 5) throw new Error('still polling past wait_ms');
+          return { result: { ...turn.result, n: seen.length } };
+        }
+      },
+      pollMs: 0,
+      clock: () => now
+    });
+    const r = await client.call('get_job', { job_id: 'j', wait_ms: 25000 });
+    assert.equal(r.n, 2);
+    assert.equal(seen.length, 2);
+  });
+
+  it('the default clock is monotonic: Date.now going back does not extend the wait', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: 1e12 });
+    const seen = [];
+    const client = new CourierFleetClient({
+      courier: { callService: async (m) => { seen.push(m); if (seen.length >= 20) throw new Error('still polling'); t.mock.timers.setTime(0); return turn; } },
+      pollMs: 5
+    });
+    const r = await client.call('get_job', { job_id: 'j', wait_ms: 30 });
+    assert.equal(r.session, 'turn');
+    assert.equal(r.wait, undefined);
+    assert.ok(seen.length >= 2 && seen.length < 20, String(seen.length));
+  });
+
+  it('send_to_job: a failed poll after the send returns the send, marked poll_failed (review B1)', async () => {
+    const { CourierError } = require('../src/approvals/courier');
+    const seen = [];
+    const client = new CourierFleetClient({
+      courier: {
+        callService: async (m) => {
+          seen.push(m);
+          if (m === 'fleet.send_to_job') return { result: { job_id: 'j', status: 'running', session: 'turn' } };
+          throw new CourierError('timeout', 'x');
+        }
+      },
+      pollMs: 0
+    });
+    const r = await client.call('send_to_job', { job_id: 'j', message: 'hi', wait_ms: 25000 });
+    assert.deepEqual(r, { job_id: 'j', status: 'running', session: 'turn', wait: { ended: 'poll_failed', code: 'timeout' } });
+    assert.deepEqual(seen, ['fleet.send_to_job', 'fleet.get_job']);
+  });
+
+  it('a failed poll after a good get_job returns that reply, marked poll_failed', async () => {
+    const replies = [turn, { result: { ...turn.result, n: 2 } }, { tool_error: { code: 'job_not_found', message: 'job_not_found: gone' } }];
+    const { client } = fakeClient(replies);
+    const r = await client.call('get_job', { job_id: 'j', wait_ms: 25000 });
+    assert.equal(r.n, 2);
+    assert.deepEqual(r.wait, { ended: 'poll_failed', code: 'job_not_found' });
+  });
+
+  it('a null reply ends the wait as it came (review B5)', async () => {
+    const { client, seen } = fakeClient([turn, { result: null }, turn]);
+    assert.equal(await client.call('get_job', { job_id: 'j', wait_ms: 25000 }), null);
+    assert.equal(seen.length, 2);
+  });
+
+  it('polls once per pollMs, the last sleep capped to the time left (review B2)', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+    const seen = [];
+    const client = new CourierFleetClient({
+      courier: { callService: async (m) => { seen.push(m); return turn; } },
+      pollMs: 1000,
+      clock: Date.now
+    });
+    let done = false;
+    const p = client.call('get_job', { job_id: 'j', wait_ms: 2500 }).then((r) => { done = true; return r; });
+    await flush();
+    assert.equal(seen.length, 1);
+    t.mock.timers.tick(999); await flush();
+    assert.equal(seen.length, 1);
+    t.mock.timers.tick(1); await flush();
+    assert.equal(seen.length, 2);
+    t.mock.timers.tick(1000); await flush();
+    assert.equal(seen.length, 3);
+    assert.equal(done, false);
+    t.mock.timers.tick(500); await flush();
+    assert.equal(seen.length, 4);
+    assert.equal(done, true);
+    assert.equal((await p).session, 'turn');
+  });
+
   it('wait_ms over 25000 is invalid_params, and nothing is sent', async () => {
     const { client, seen } = fakeClient([turn]);
     await assert.rejects(client.call('get_job', { job_id: 'j', wait_ms: 25001 }),

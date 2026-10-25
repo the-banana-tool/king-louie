@@ -58,6 +58,8 @@ const POLL_MS = 1000;
 // Done waiting: the job is terminal, or it is a delegate session whose turn
 // has ended. A job with no session (a runbook job) waits for its end.
 function waitSettled(job) {
+  // No job to look at (a null result): nothing to wait for, so the reply is
+  // returned as it came.
   if (!job || typeof job !== 'object') return true;
   if (TERMINAL_STATUSES.has(job.status)) return true;
   return typeof job.session === 'string' && job.session !== 'turn';
@@ -70,9 +72,21 @@ function readWaitMs(v) {
 }
 // A ref'd timer: it keeps the process up for the wait.
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Elapsed time on `clock` that only moves forward: a step back adds nothing,
+// so even a clock that can be set back never extends the wait.
+function stopwatch(clock) {
+  let last = clock();
+  let spent = 0;
+  return () => {
+    const now = clock();
+    if (now > last) spent += now - last;
+    last = now;
+    return spent;
+  };
+}
 
 class CourierFleetClient {
-  constructor({ courier, nodeConfig = null, timeoutMs = 30000, pollMs = POLL_MS, clock = Date.now } = {}) {
+  constructor({ courier, nodeConfig = null, timeoutMs = 30000, pollMs = POLL_MS, clock = () => performance.now() } = {}) {
     this.courier = courier;
     this.nodeConfig = nodeConfig;
     this.timeoutMs = timeoutMs;
@@ -105,19 +119,28 @@ class CourierFleetClient {
   }
 
   // The plain call, then get_job every pollMs until the turn ends, the job
-  // is terminal or waitMs has passed; the reply is the last get_job's.
+  // is terminal or waitMs has passed (on a monotonic clock); the reply is the
+  // last get_job's. Once the plain call has gone through, a failed poll ends
+  // the wait with the last good reply marked `wait: { ended: 'poll_failed',
+  // code }`, never as an error: a send_to_job that throws after its message
+  // went out would invite the driver to send it again.
   async callAndWait(name, args, waitMs) {
-    const started = this.clock();
+    const elapsed = stopwatch(this.clock);
     let job = await this.call(name, args);
     // send_to_job answers with an acknowledgement, not the job: always look.
     let looked = name === 'get_job';
     const jobId = args.job_id;
     for (;;) {
       if (looked && waitSettled(job)) return job;
-      const left = waitMs - (this.clock() - started);
+      const left = waitMs - elapsed();
       if (left <= 0 && looked) return job;
       if (left > 0) await sleep(Math.min(this.pollMs, left));
-      job = await this.call('get_job', { job_id: jobId });
+      try {
+        job = await this.call('get_job', { job_id: jobId });
+      } catch (err) {
+        const wait = { ended: 'poll_failed', code: err instanceof ToolError ? err.code : 'internal' };
+        return job && typeof job === 'object' ? { ...job, wait } : { wait };
+      }
       looked = true;
     }
   }

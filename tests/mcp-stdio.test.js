@@ -138,6 +138,20 @@ describe('Local Stdio MCP Server: protocol', () => {
     c.close();
   });
 
+  it('wait_ms is on the two fleet tools and on no case tool when the service lists the case tools (review B4)', async () => {
+    const { CourierFleetClient } = require('../src/fleet/courier-client');
+    const { MCP_TOOLS } = require('../src/fleet/tool-definitions');
+    const { CASE_MCP_TOOLS } = require('../src/cases/mcp-tool-definitions');
+    const names = [...MCP_TOOLS, ...CASE_MCP_TOOLS].map((t) => ({ name: t.name }));
+    const courier = { callService: async (m) => (m === 'mcp.tools_list' ? { result: names } : null) };
+    const c = connect({ handler: new CourierFleetClient({ courier, nodeConfig: NODE }) });
+    const { tools } = (await c.request(1, 'tools/list')).result;
+    assert.ok(tools.some((t) => t.name === CASE_MCP_TOOLS[0].name));
+    const withWait = tools.filter((t) => 'wait_ms' in (t.inputSchema.properties || {})).map((t) => t.name).sort();
+    assert.deepEqual(withWait, ['get_job', 'send_to_job']);
+    c.close();
+  });
+
   it('the front door and the service-chat fleet tools offer no wait_ms', () => {
     const { MCP_TOOLS } = require('../src/fleet/tool-definitions');
     const { FleetRouter } = require('../src/frontdoor/router/router');
