@@ -6,6 +6,7 @@ const { EventEmitter } = require('events');
 const crypto = require('crypto');
 const fs = require('fs');
 const net = require('net');
+const path = require('path');
 const { createLogger } = require('../logging');
 const P = require('./helper-protocol');
 const { GuiError, fromWire } = require('./errors');
@@ -30,8 +31,17 @@ function sanitizeProbe(msg) {
     })),
     displays: list(msg.displays, 16).filter(isPlainObject),
     limits: list(msg.limits, 4).filter((l) => LEASE_LIMITS.includes(l)),
-    locked: msg.locked === true
+    locked: msg.locked === true,
+    recorder: { ffmpeg: recorderPath(msg.recorder) }
   };
+}
+
+// The ffmpeg the helper found (`recorder: { ffmpeg }` in its probe report):
+// an absolute path of one plain line, or null.
+function recorderPath(recorder) {
+  const p = isPlainObject(recorder) ? recorder.ffmpeg : null;
+  if (typeof p !== 'string' || p.length === 0 || p.length > 1024 || /[\u0000-\u001f\u007f]/.test(p)) return null;
+  return path.win32.isAbsolute(p) || path.posix.isAbsolute(p) ? p : null;
 }
 
 class HelperChannel extends EventEmitter {

@@ -505,7 +505,7 @@ describe('the take ops: launch_browser, record_start, record_stop, keep_awake', 
   const takeConfig = parseGuiConfig({ enabled: true, apps: { ...APPS, chrome: { name: 'Chrome', path: CHROME } }, browser: 'chrome' }, { platform: 'win32' });
   const takeHandlers = {
     launch_browser: async () => ({ pid: 4242, cdp: { port: 9333, path: '/devtools/browser/abc' } }),
-    record_start: async () => ({ pid: 777, startedAt: '2026-09-23T18:00:01.000Z' }),
+    record_start: async () => ({ pid: 777, startedAt: '2026-09-23T18:00:01.000Z', path: 'C:\\rec\\tk-1\\take.mp4' }),
     record_stop: async () => ({ path: 'C:\\rec\\take.mp4', durationS: 12.5, bytes: 123456, truncated: false }),
     keep_awake: async ({ on }) => ({ on })
   };
@@ -513,11 +513,11 @@ describe('the take ops: launch_browser, record_start, record_stop, keep_awake', 
   it('launchBrowser sends launch_browser with a 15 s timeout, records the pid under the browser app id and audits gui.browser.launch', async () => {
     const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
     channel.connect();
-    const profileDir = 'C:\\Users\\alice\\AppData\\Local\\KingLouie\\browser-profiles\\demo';
-    const result = await b.launchBrowser({ exe: CHROME, profileDir, args: ['--window-size=1280,720'] }, ctx);
+    const result = await b.launchBrowser({ exe: CHROME, profile: 'demo', args: ['--window-size=1280,720'] }, ctx);
     assert.deepEqual(result, { pid: 4242, cdp: { port: 9333, path: '/devtools/browser/abc' } });
     const sent = channel.requests.find((r) => r.op === 'launch_browser');
-    assert.deepEqual(sent.params, { exe: CHROME, profileDir, args: ['--window-size=1280,720'] });
+    assert.deepEqual(sent.params, { exe: CHROME, profile: 'demo', args: ['--window-size=1280,720'] });
+    assert.deepEqual(Object.keys(sent.params).sort(), ['args', 'exe', 'profile'], 'no profile_dir or profileDir on the wire');
     assert.deepEqual(sent.opts, { jobId: 'job-1', timeoutMs: 15000 });
     assert.deepEqual([...b.launched.get('job-1').get('chrome')], [4242]);
     await new Promise((r) => setImmediate(r));
@@ -527,27 +527,74 @@ describe('the take ops: launch_browser, record_start, record_stop, keep_awake', 
   it('launchBrowser with no job id keeps no pid', async () => {
     const { b, channel } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
     channel.connect();
-    await b.launchBrowser({ exe: CHROME, profileDir: 'C:\\p' }, { jobId: null });
+    await b.launchBrowser({ exe: CHROME, profile: 'demo' }, { jobId: null });
     assert.equal(b.launched.size, 0);
     assert.deepEqual(channel.requests.find((r) => r.op === 'launch_browser').params.args, []);
+  });
+
+  it('launchBrowser with no gui.browser refuses invalid_params and sends nothing', async () => {
+    const { b, channel } = broker({ handlers: takeHandlers });
+    channel.connect();
+    assert.equal(await code(b.launchBrowser({ exe: CHROME, profile: 'demo' }, ctx)), 'invalid_params');
+    assert.deepEqual(channel.requests.filter((r) => r.op === 'launch_browser'), []);
   });
 
   it('a failed launch_browser throws its code and audits nothing', async () => {
     const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: { ...takeHandlers, launch_browser: async () => { throw new GuiError('browser_launch_failed', 'x'); } } });
     channel.connect();
-    assert.equal(await code(b.launchBrowser({ exe: CHROME, profileDir: 'C:\\p' }, ctx)), 'browser_launch_failed');
+    assert.equal(await code(b.launchBrowser({ exe: CHROME, profile: 'demo' }, ctx)), 'browser_launch_failed');
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(audits, []);
   });
 
-  it('recordStart sends record_start and audits gui.record.start', async () => {
+  it('recordStart sends record_start with take_id, returns the helper result and audits gui.record.start', async () => {
     const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
     channel.connect();
-    const params = { ffmpeg: 'C:\\ffmpeg\\ffmpeg.exe', path: 'C:\\rec\\take.mp4', fps: 30, size: '1280x720' };
-    assert.deepEqual(await b.recordStart(params, ctx), { pid: 777, startedAt: '2026-09-23T18:00:01.000Z' });
-    assert.deepEqual(channel.requests.find((r) => r.op === 'record_start').params, params);
+    const result = await b.recordStart({ ffmpeg: 'C:\\ffmpeg\\ffmpeg.exe', takeId: 'tk-1', path: 'C:\\rec\\take.mp4', fps: 30, size: '1280x720' }, ctx);
+    assert.deepEqual(result, { pid: 777, startedAt: '2026-09-23T18:00:01.000Z', path: 'C:\\rec\\tk-1\\take.mp4' });
+    const sent = channel.requests.find((r) => r.op === 'record_start');
+    assert.deepEqual(sent.params, { ffmpeg: 'C:\\ffmpeg\\ffmpeg.exe', take_id: 'tk-1', path: 'C:\\rec\\take.mp4', fps: 30, size: '1280x720' });
+    assert.deepEqual(sent.opts, { jobId: 'job-1' });
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(audits.filter((a) => a.kind === 'gui.record.start'), [{ kind: 'gui.record.start', data: { job_id: 'job-1', pid: 777 } }]);
+  });
+
+  it('recordStart leaves ffmpeg and path off the wire when not given', async () => {
+    const { b, channel } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
+    channel.connect();
+    await b.recordStart({ takeId: 'tk-1', fps: 30 }, ctx);
+    const sent = channel.requests.find((r) => r.op === 'record_start').params;
+    assert.ok(!('ffmpeg' in sent) && !('path' in sent));
+    assert.equal(sent.take_id, 'tk-1');
+  });
+
+  it('recordStart on an empty result audits a null pid instead of throwing a TypeError', async () => {
+    const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: { ...takeHandlers, record_start: async () => null } });
+    channel.connect();
+    assert.equal(await b.recordStart({ takeId: 'tk-1' }, ctx), null);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(audits, [{ kind: 'gui.record.start', data: { job_id: 'job-1', pid: null } }]);
+  });
+
+  it('recorder() is the ffmpeg the connected helper reported, else null', () => {
+    const { b, channel } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
+    assert.equal(b.recorder(), null, 'no helper');
+    channel.connect({ ...INFO, recorder: { ffmpeg: 'C:\\ffmpeg\\bin\\ffmpeg.exe' } });
+    assert.equal(b.recorder(), 'C:\\ffmpeg\\bin\\ffmpeg.exe');
+    channel.drop();
+    channel.connect({ ...INFO, recorder: { ffmpeg: null } });
+    assert.equal(b.recorder(), null, 'the helper found none');
+    channel.drop();
+    assert.equal(b.recorder(), null);
+  });
+
+  it('the channel keeps only an absolute, plain-line recorder.ffmpeg from the probe', () => {
+    const { sanitizeProbe } = require('../src/gui/helper-channel');
+    const ffmpeg = (v) => sanitizeProbe({ recorder: { ffmpeg: v } }).recorder.ffmpeg;
+    assert.equal(ffmpeg('C:\\ffmpeg\\bin\\ffmpeg.exe'), 'C:\\ffmpeg\\bin\\ffmpeg.exe');
+    assert.equal(ffmpeg('/usr/bin/ffmpeg'), '/usr/bin/ffmpeg');
+    for (const bad of ['ffmpeg.exe', 'C:\\a\nb.exe', 'C:\\' + 'x'.repeat(1100), 42, null, undefined]) assert.equal(ffmpeg(bad), null);
+    assert.equal(sanitizeProbe({}).recorder.ffmpeg, null);
   });
 
   it('recordStop sends record_stop with a 20 s timeout and audits gui.record.stop with duration_s', async () => {
@@ -567,7 +614,7 @@ describe('the take ops: launch_browser, record_start, record_stop, keep_awake', 
     channel.connect();
     assert.deepEqual(await b.keepAwake(true, ctx), { on: true });
     assert.deepEqual(await b.keepAwake(false), { on: false });
-    assert.deepEqual(channel.requests.filter((r) => r.op === 'keep_awake').map((r) => r.params), [{ on: true }, { on: false }]);
+    assert.deepEqual(channel.requests.filter((r) => r.op === 'keep_awake').map((r) => [r.params, r.opts]), [[{ on: true }, { jobId: 'job-1' }], [{ on: false }, { jobId: undefined }]]);
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(audits, []);
   });

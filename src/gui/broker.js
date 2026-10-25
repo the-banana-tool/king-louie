@@ -222,20 +222,36 @@ class GuiBroker extends EventEmitter {
   }
 
   // A take's browser (gui.browser), started by the helper with a DevTools
-  // port the service then attaches to. Its pid counts as launched by the job.
-  async launchBrowser({ exe, profileDir, args = [] }, ctx = {}) {
+  // port the service then attaches to. `profile` is a profile name: the
+  // helper puts it under its own profiles root. Its pid counts as launched
+  // by the job.
+  async launchBrowser({ exe, profile, args = [] }, ctx = {}) {
     this.require('gui.launch');
-    const result = await this.channel.request('launch_browser', { exe, profileDir, args }, { jobId: ctx.jobId, timeoutMs: 15000 });
+    if (!this.guiConfig.browser) throw new GuiError('invalid_params', 'no browser in node.yaml (gui.browser)');
+    const result = await this.channel.request('launch_browser', { exe, profile, args }, { jobId: ctx.jobId, timeoutMs: 15000 });
     const pid = result && Number.isInteger(result.pid) ? result.pid : null;
     this._recordLaunched(ctx.jobId, this.guiConfig.browser, pid);
     this._audit('gui.browser.launch', { job_id: ctx.jobId, exe, pid });
     return result;
   }
 
-  async recordStart({ ffmpeg, path, fps, size }, ctx = {}) {
-    const result = await this.channel.request('record_start', { ffmpeg, path, fps, size }, { jobId: ctx.jobId });
-    this._audit('gui.record.start', { job_id: ctx.jobId, pid: result.pid });
-    return { pid: result.pid, startedAt: result.startedAt };
+  // The ffmpeg the connected helper found for its user (its probe report's
+  // `recorder.ffmpeg`, kept by the channel's sanitizeProbe), or null.
+  recorder() {
+    const info = !this.off && this.channel.connected ? this.channel.info : null;
+    return (info && info.recorder && info.recorder.ffmpeg) || null;
+  }
+
+  // `ffmpeg` and `path` are left out when not given: the helper then uses
+  // the ffmpeg it found and a path of its own for the take.
+  async recordStart({ ffmpeg, takeId, path, fps, size }, ctx = {}) {
+    const params = { take_id: takeId, fps, size };
+    if (ffmpeg !== undefined) params.ffmpeg = ffmpeg;
+    if (path !== undefined) params.path = path;
+    const result = await this.channel.request('record_start', params, { jobId: ctx.jobId });
+    const pid = result && Number.isInteger(result.pid) ? result.pid : null;
+    this._audit('gui.record.start', { job_id: ctx.jobId, pid });
+    return result;
   }
 
   async recordStop({ pid }, ctx = {}) {
