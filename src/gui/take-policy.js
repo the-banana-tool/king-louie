@@ -56,8 +56,11 @@ const LOOK_ONLY_ACTIONS = Object.freeze([
   'go_back', 'go_forward', 'reload',
 ]);
 
-// Checked against the target URL's host (params.url), not the current page's.
-const TARGET_URL_ACTIONS = Object.freeze(['navigate', 'open_tab', 'wait_for_url']);
+// Act on where they go, not on the current page: only the target (params.url) is checked.
+// Every other acting action that carries a params.url has it checked as well as the current
+// page (login, signup). wait_for_url is look-only: it acts on nothing and its url may be a
+// pattern.
+const TARGET_URL_ACTIONS = Object.freeze(['navigate', 'open_tab']);
 
 // `Bash` is the only shell tool under src/tools/builtin/ today; `PowerShell` is named for
 // any host that registers one.
@@ -158,13 +161,16 @@ function createTakePolicy(grant, { currentUrl } = {}) {
         return actionRefusal(action, { allowed: [...allowance] });
       }
 
-      if (TARGET_URL_ACTIONS.includes(action)) {
+      if (LOOK_ONLY_ACTIONS.includes(action)) return { allow: true };
+
+      // Any acting action with a target URL: its host must be one of the take's sites.
+      if (p.url !== undefined && p.url !== null && p.url !== '') {
         const host = hostOf(p.url);
         if (!host || !hostAllowed(host, sites)) return siteRefusal(host || '(invalid URL)');
-        return { allow: true };
       }
 
-      if (LOOK_ONLY_ACTIONS.includes(action)) return { allow: true };
+      // navigate and open_tab go to their target (open_tab with no url is a blank tab).
+      if (TARGET_URL_ACTIONS.includes(action)) return { allow: true };
 
       // Every other acting action checks the page it acts on.
       const url = typeof currentUrl === 'function' ? await currentUrl() : null;

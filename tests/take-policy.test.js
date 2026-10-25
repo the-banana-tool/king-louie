@@ -118,6 +118,27 @@ describe('decide', () => {
     );
   });
 
+  it('login and signup check their target url as well as the page', async () => {
+    const p = policy({ credentials: true }, 'https://app.example.com/');
+    assert.equal((await p.decide('BrowserSession', { action: 'login', url: 'https://accounts.example.net/' })).code, 'take_site_not_allowed');
+    assert.deepEqual(await p.decide('BrowserSession', { action: 'login', url: 'https://app.example.com/login' }), { allow: true });
+    assert.equal((await p.decide('Browser', { action: 'signup', url: 'https://accounts.example.net/' })).code, 'take_site_not_allowed');
+    const offPage = policy({ credentials: true }, 'https://accounts.example.net/');
+    assert.equal((await offPage.decide('BrowserSession', { action: 'login', url: 'https://app.example.com/login' })).code, 'take_site_not_allowed');
+  });
+
+  it('wait_for_url is look-only and takes a pattern anywhere', async () => {
+    assert.deepEqual(await policy({}, 'https://elsewhere.test/').decide('BrowserPage', { action: 'wait_for_url', url: '**/done' }), { allow: true });
+    assert.deepEqual(await policy({}, null).decide('BrowserPage', { action: 'wait_for_url', url: '**/done' }), { allow: true });
+  });
+
+  it('open_tab with no url is a blank tab; with an off-list url it refuses', async () => {
+    const p = policy({}, 'https://elsewhere.test/');
+    assert.deepEqual(await p.decide('BrowserSession', { action: 'open_tab' }), { allow: true });
+    assert.equal((await p.decide('BrowserSession', { action: 'open_tab', url: 'https://evil.example.net' })).code, 'take_site_not_allowed');
+    assert.deepEqual(await p.decide('BrowserSession', { action: 'open_tab', url: 'https://app.example.com/' }), { allow: true });
+  });
+
   it('a narrowed list refuses what it leaves out and lists what it allows', async () => {
     const p = policy({ browser: ['navigate', 'click'] }, 'https://app.example.com/');
     assert.deepEqual(await p.decide('BrowserPage', { action: 'type', selector: 'a', text: 'x' }), {
