@@ -208,14 +208,44 @@ class GuiBroker extends EventEmitter {
     this.require('gui.launch');
     const result = await this.channel.request('launch', { exe: resolution.exe, argv: resolution.argv, files: resolution.files }, { jobId: ctx.jobId, timeoutMs: 30000 });
     const pid = result && Number.isInteger(result.pid) ? result.pid : null;
-    if (resolution.appId && pid !== null && ctx.jobId) {
-      if (!this.launched.has(ctx.jobId)) this.launched.set(ctx.jobId, new Map());
-      const byApp = this.launched.get(ctx.jobId);
-      if (!byApp.has(resolution.appId)) byApp.set(resolution.appId, new Set());
-      byApp.get(resolution.appId).add(pid);
-    }
+    this._recordLaunched(ctx.jobId, resolution.appId, pid);
     this._audit('gui.launch', { job_id: ctx.jobId, app_id: resolution.appId, exe: resolution.exe, argv: [...resolution.argv, ...resolution.files], tier: resolution.tier, approved_by: approvedBy, pid });
     return { app_id: resolution.appId, pid, tier: resolution.tier, launched_at: new Date(this.clock()).toISOString() };
+  }
+
+  _recordLaunched(jobId, appId, pid) {
+    if (!appId || pid === null || !jobId) return;
+    if (!this.launched.has(jobId)) this.launched.set(jobId, new Map());
+    const byApp = this.launched.get(jobId);
+    if (!byApp.has(appId)) byApp.set(appId, new Set());
+    byApp.get(appId).add(pid);
+  }
+
+  // A take's browser (gui.browser), started by the helper with a DevTools
+  // port the service then attaches to. Its pid counts as launched by the job.
+  async launchBrowser({ exe, profileDir, args = [] }, ctx = {}) {
+    this.require('gui.launch');
+    const result = await this.channel.request('launch_browser', { exe, profileDir, args }, { jobId: ctx.jobId, timeoutMs: 15000 });
+    const pid = result && Number.isInteger(result.pid) ? result.pid : null;
+    this._recordLaunched(ctx.jobId, this.guiConfig.browser, pid);
+    this._audit('gui.browser.launch', { job_id: ctx.jobId, exe, pid });
+    return result;
+  }
+
+  async recordStart({ ffmpeg, path, fps, size }, ctx = {}) {
+    const result = await this.channel.request('record_start', { ffmpeg, path, fps, size }, { jobId: ctx.jobId });
+    this._audit('gui.record.start', { job_id: ctx.jobId, pid: result.pid });
+    return { pid: result.pid, startedAt: result.startedAt };
+  }
+
+  async recordStop({ pid }, ctx = {}) {
+    const result = await this.channel.request('record_stop', { pid }, { jobId: ctx.jobId, timeoutMs: 20000 });
+    this._audit('gui.record.stop', { job_id: ctx.jobId, pid, duration_s: result.durationS, bytes: result.bytes, truncated: result.truncated });
+    return result;
+  }
+
+  async keepAwake(on, ctx = {}) {
+    return this.channel.request('keep_awake', { on }, { jobId: ctx.jobId });
   }
 
   async close(appId, force, ctx) {

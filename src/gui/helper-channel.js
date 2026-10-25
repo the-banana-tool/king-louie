@@ -11,7 +11,7 @@ const P = require('./helper-protocol');
 const { GuiError, fromWire } = require('./errors');
 const { LEASE_LIMITS } = require('./lease-protocol');
 
-const OP_TIMEOUTS = Object.freeze({ screenshot: 20000, launch: 30000 });
+const OP_TIMEOUTS = Object.freeze({ screenshot: 20000, launch: 30000, launch_browser: 15000, record_stop: 20000 });
 const DEFAULT_OP_TIMEOUT = 10000;
 const GUI_CAPABILITIES = Object.freeze(['gui.launch', 'gui.screenshot', 'gui.input']);
 const EVENT_KINDS = Object.freeze(['locked', 'unlocked', 'displays_changed', 'probe_changed']);

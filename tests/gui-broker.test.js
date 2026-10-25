@@ -70,7 +70,7 @@ function broker(opts = {}) {
   const audits = [];
   let t = Date.parse('2026-09-23T18:00:00.000Z');
   const b = new GuiBroker({
-    channel, guiConfig, getPolicy: () => ({ allowed_roots: [] }), audit: { append: async (e) => { audits.push(e); } },
+    channel, guiConfig: opts.guiConfig || guiConfig, getPolicy: () => ({ allowed_roots: [] }), audit: { append: async (e) => { audits.push(e); } },
     dataDir: opts.dataDir || null, platform: 'win32', clock: () => t, heartbeatMs: 60000, realpath: (p) => p
   });
   // The broker sends no input without a lease manager (finding 4); these
@@ -497,5 +497,84 @@ describe('launch, close and list', () => {
     const apps = await b.listApps(ctx);
     assert.deepEqual(apps.map((a) => [a.id, a.running]), [['calculator', true], ['notepad', false]]);
     assert.equal(apps[0].windows[0].title.length, 120);
+  });
+});
+
+describe('the take ops: launch_browser, record_start, record_stop, keep_awake', () => {
+  const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+  const takeConfig = parseGuiConfig({ enabled: true, apps: { ...APPS, chrome: { name: 'Chrome', path: CHROME } }, browser: 'chrome' }, { platform: 'win32' });
+  const takeHandlers = {
+    launch_browser: async () => ({ pid: 4242, cdp: { port: 9333, path: '/devtools/browser/abc' } }),
+    record_start: async () => ({ pid: 777, startedAt: '2026-09-23T18:00:01.000Z' }),
+    record_stop: async () => ({ path: 'C:\\rec\\take.mp4', durationS: 12.5, bytes: 123456, truncated: false }),
+    keep_awake: async ({ on }) => ({ on })
+  };
+
+  it('launchBrowser sends launch_browser with a 15 s timeout, records the pid under the browser app id and audits gui.browser.launch', async () => {
+    const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
+    channel.connect();
+    const profileDir = 'C:\\Users\\alice\\AppData\\Local\\KingLouie\\browser-profiles\\demo';
+    const result = await b.launchBrowser({ exe: CHROME, profileDir, args: ['--window-size=1280,720'] }, ctx);
+    assert.deepEqual(result, { pid: 4242, cdp: { port: 9333, path: '/devtools/browser/abc' } });
+    const sent = channel.requests.find((r) => r.op === 'launch_browser');
+    assert.deepEqual(sent.params, { exe: CHROME, profileDir, args: ['--window-size=1280,720'] });
+    assert.deepEqual(sent.opts, { jobId: 'job-1', timeoutMs: 15000 });
+    assert.deepEqual([...b.launched.get('job-1').get('chrome')], [4242]);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(audits.filter((a) => a.kind === 'gui.browser.launch'), [{ kind: 'gui.browser.launch', data: { job_id: 'job-1', exe: CHROME, pid: 4242 } }]);
+  });
+
+  it('launchBrowser with no job id keeps no pid', async () => {
+    const { b, channel } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
+    channel.connect();
+    await b.launchBrowser({ exe: CHROME, profileDir: 'C:\\p' }, { jobId: null });
+    assert.equal(b.launched.size, 0);
+    assert.deepEqual(channel.requests.find((r) => r.op === 'launch_browser').params.args, []);
+  });
+
+  it('a failed launch_browser throws its code and audits nothing', async () => {
+    const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: { ...takeHandlers, launch_browser: async () => { throw new GuiError('browser_launch_failed', 'x'); } } });
+    channel.connect();
+    assert.equal(await code(b.launchBrowser({ exe: CHROME, profileDir: 'C:\\p' }, ctx)), 'browser_launch_failed');
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(audits, []);
+  });
+
+  it('recordStart sends record_start and audits gui.record.start', async () => {
+    const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
+    channel.connect();
+    const params = { ffmpeg: 'C:\\ffmpeg\\ffmpeg.exe', path: 'C:\\rec\\take.mp4', fps: 30, size: '1280x720' };
+    assert.deepEqual(await b.recordStart(params, ctx), { pid: 777, startedAt: '2026-09-23T18:00:01.000Z' });
+    assert.deepEqual(channel.requests.find((r) => r.op === 'record_start').params, params);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(audits.filter((a) => a.kind === 'gui.record.start'), [{ kind: 'gui.record.start', data: { job_id: 'job-1', pid: 777 } }]);
+  });
+
+  it('recordStop sends record_stop with a 20 s timeout and audits gui.record.stop with duration_s', async () => {
+    const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
+    channel.connect();
+    const result = await b.recordStop({ pid: 777 }, ctx);
+    assert.deepEqual(result, { path: 'C:\\rec\\take.mp4', durationS: 12.5, bytes: 123456, truncated: false });
+    const sent = channel.requests.find((r) => r.op === 'record_stop');
+    assert.deepEqual(sent.params, { pid: 777 });
+    assert.equal(sent.opts.timeoutMs, 20000);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(audits.filter((a) => a.kind === 'gui.record.stop'), [{ kind: 'gui.record.stop', data: { job_id: 'job-1', pid: 777, duration_s: 12.5, bytes: 123456, truncated: false } }]);
+  });
+
+  it('keepAwake sends keep_awake and audits nothing', async () => {
+    const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
+    channel.connect();
+    assert.deepEqual(await b.keepAwake(true, ctx), { on: true });
+    assert.deepEqual(await b.keepAwake(false), { on: false });
+    assert.deepEqual(channel.requests.filter((r) => r.op === 'keep_awake').map((r) => r.params), [{ on: true }, { on: false }]);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(audits, []);
+  });
+
+  it('OP_TIMEOUTS gives launch_browser 15 s and record_stop 20 s', () => {
+    const { OP_TIMEOUTS } = require('../src/gui/helper-channel');
+    assert.equal(OP_TIMEOUTS.launch_browser, 15000);
+    assert.equal(OP_TIMEOUTS.record_stop, 20000);
   });
 });
