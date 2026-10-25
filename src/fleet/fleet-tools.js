@@ -293,6 +293,10 @@ class FleetToolHandler {
       });
     }
 
+    // send_to_job and get_job take wait_ms (spec §11, C-9), and this handler
+    // ignores it: `king-louie-service mcp` waits on its side of the courier
+    // (CourierFleetClient), one short get_job at a time, and a front-door or
+    // chat caller gets the plain call.
     if (toolName === 'send_to_job') {
       // A stdio caller can name any string: the audit keeps 200 code points.
       this.auditInbound('send_to_job', { message: args.message }, origin, typeof args.job_id === 'string' ? cut(args.job_id, 200) : null);

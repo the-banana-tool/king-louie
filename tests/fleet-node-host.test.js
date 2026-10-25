@@ -317,6 +317,90 @@ describe('CourierFleetClient transport errors (review item 4)', () => {
   });
 });
 
+describe('CourierFleetClient wait_ms (spec §11, C-9)', () => {
+  const fakeClient = (replies, extra = {}) => {
+    const seen = [];
+    const client = new CourierFleetClient({
+      courier: { callService: async (m, p) => { seen.push([m, p.args]); return replies.shift(); } },
+      pollMs: 0,
+      ...extra
+    });
+    return { client, seen };
+  };
+  const turn = { result: { job_id: 'j', kind: 'delegate', session: 'turn', status: 'running' } };
+
+  it('get_job with wait_ms polls until the turn ends', async () => {
+    const { client, seen } = fakeClient([turn, turn, { result: { job_id: 'j', session: 'idle', status: 'running' } }]);
+    const r = await client.call('get_job', { job_id: 'j', wait_ms: 25000 });
+    assert.equal(r.session, 'idle');
+    assert.equal(seen.length, 3);
+    assert.ok(seen.every(([m]) => m === 'fleet.get_job'));
+    assert.ok(seen.every(([, a]) => !('wait_ms' in a)));
+  });
+
+  it('send_to_job with wait_ms sends once then polls get_job', async () => {
+    const { client, seen } = fakeClient([
+      { result: { job_id: 'j', status: 'running', session: 'turn' } },
+      turn,
+      { result: { job_id: 'j', session: 'idle', status: 'running', result: 'reply' } }
+    ]);
+    const r = await client.call('send_to_job', { job_id: 'j', message: 'hi', wait_ms: 5000 });
+    assert.equal(r.result, 'reply');
+    assert.equal(seen[0][0], 'fleet.send_to_job');
+    assert.deepEqual(seen[0][1], { job_id: 'j', message: 'hi' });
+    assert.deepEqual(seen.slice(1).map(([m, a]) => [m, a]), [['fleet.get_job', { job_id: 'j' }], ['fleet.get_job', { job_id: 'j' }]]);
+  });
+
+  it('stops polling when the job is terminal', async () => {
+    const { client, seen } = fakeClient([turn, { result: { job_id: 'j', session: 'turn', status: 'cancelled' } }, turn]);
+    const r = await client.call('get_job', { job_id: 'j', wait_ms: 25000 });
+    assert.equal(r.status, 'cancelled');
+    assert.equal(seen.length, 2);
+  });
+
+  it('wait_ms returns at the cap with the last reply', async () => {
+    let now = 1000;
+    const replies = [turn, { result: { ...turn.result, n: 2 } }, { result: { ...turn.result, n: 3 } }];
+    const seen = [];
+    const client = new CourierFleetClient({
+      courier: { callService: async (m, p) => { seen.push(m); const r = replies.shift(); if (seen.length === 2) now += 25001; return r; } },
+      pollMs: 0,
+      clock: () => now
+    });
+    const r = await client.call('get_job', { job_id: 'j', wait_ms: 25000 });
+    assert.equal(r.n, 2);
+    assert.equal(seen.length, 2);
+  });
+
+  it('wait_ms over 25000 is invalid_params, and nothing is sent', async () => {
+    const { client, seen } = fakeClient([turn]);
+    await assert.rejects(client.call('get_job', { job_id: 'j', wait_ms: 25001 }),
+      (err) => err instanceof ToolError && err.code === 'invalid_params' && /wait_ms is at most 25000/.test(err.message));
+    await assert.rejects(client.call('send_to_job', { job_id: 'j', message: 'm', wait_ms: -1 }),
+      (err) => err instanceof ToolError && err.code === 'invalid_params');
+    await assert.rejects(client.call('get_job', { job_id: 'j', wait_ms: 1.5 }),
+      (err) => err instanceof ToolError && err.code === 'invalid_params');
+    assert.equal(seen.length, 0);
+  });
+
+  it('wait_ms 0 is the plain call, with wait_ms left off', async () => {
+    const { client, seen } = fakeClient([turn]);
+    const r = await client.call('get_job', { job_id: 'j', wait_ms: 0 });
+    assert.equal(r.session, 'turn');
+    assert.deepEqual(seen, [['fleet.get_job', { job_id: 'j' }]]);
+  });
+
+  it('the service handler accepts and ignores wait_ms', async () => {
+    const { FleetToolHandler } = require('../src/fleet/fleet-tools');
+    const { JobManager } = require('../src/runbooks/runbook-engine');
+    const jobManager = new JobManager();
+    const job = jobManager.createJob({ machine: 'n', runbook: 'rb' });
+    const handler = new FleetToolHandler({ nodeConfig: { name: 'n', profile: 'runbook', capabilities: [], policy: { allowed_roots: [] } }, jobManager });
+    const r = await handler.call('get_job', { job_id: job.job_id, wait_ms: 25000 });
+    assert.equal(r.job_id, job.job_id);
+  });
+});
+
 describe('mcp run as root (review item 7)', () => {
   const { assertCourierDirsSafe } = require('../src/service/commands/mcp');
   const asRoot = { getuid: () => 0 };

@@ -116,6 +116,12 @@ describe('Local Stdio MCP Server: protocol', () => {
     const logs = tools.find((t) => t.name === 'get_job_logs');
     assert.equal(logs.inputSchema.properties.since.type, 'integer');
     assert.match(logs.inputSchema.properties.since.description, /offset/);
+    for (const name of ['send_to_job', 'get_job']) {
+      const { wait_ms: waitMs } = tools.find((t) => t.name === name).inputSchema.properties;
+      assert.equal(waitMs.type, 'integer', name);
+      assert.equal(waitMs.minimum, 0, name);
+      assert.equal(waitMs.maximum, 25000, name);
+    }
     c.close();
   });
 

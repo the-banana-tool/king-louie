@@ -2,6 +2,7 @@
 // tool call goes to the service's FleetToolHandler through the file courier,
 // so one JobManager, one set of limits and one rate limiter serve the node.
 const { ToolError, MCP_TOOLS } = require('./fleet-tools');
+const { WAIT_MS_MAX } = require('./tool-definitions');
 // Pure definitions (no requires): the courier branch never loads src/mcp/.
 const { CASE_MCP_TOOLS } = require('../cases/mcp-tool-definitions');
 const { createLogger } = require('../logging');
@@ -47,17 +48,47 @@ const WITH_CASES_NAMES = WITH_CASES.map((t) => t.name).sort();
 const FLEET_NAMES = MCP_TOOLS.map((t) => t.name).sort();
 const sameNames = (a, b) => a.length === b.length && a.every((n, i) => n === b[i]);
 
+// wait_ms (spec §11, C-9): the wait lives here, in the mcp process, as a
+// plain call then one short get_job per poll, so no courier request is held
+// open for the whole wait. JobManager's terminal statuses (src/runbooks/ is
+// not loaded on this branch).
+const WAIT_TOOLS = new Set(['send_to_job', 'get_job']);
+const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'denied', 'expired']);
+const POLL_MS = 1000;
+// Done waiting: the job is terminal, or it is a delegate session whose turn
+// has ended. A job with no session (a runbook job) waits for its end.
+function waitSettled(job) {
+  if (!job || typeof job !== 'object') return true;
+  if (TERMINAL_STATUSES.has(job.status)) return true;
+  return typeof job.session === 'string' && job.session !== 'turn';
+}
+function readWaitMs(v) {
+  if (v === undefined || v === null) return 0;
+  if (!Number.isInteger(v) || v < 0) throw new ToolError('invalid_params', 'invalid_params: wait_ms must be a non-negative integer');
+  if (v > WAIT_MS_MAX) throw new ToolError('invalid_params', `invalid_params: wait_ms is at most ${WAIT_MS_MAX}`);
+  return v;
+}
+// A ref'd timer: it keeps the process up for the wait.
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 class CourierFleetClient {
-  constructor({ courier, nodeConfig = null, timeoutMs = 30000 } = {}) {
+  constructor({ courier, nodeConfig = null, timeoutMs = 30000, pollMs = POLL_MS, clock = Date.now } = {}) {
     this.courier = courier;
     this.nodeConfig = nodeConfig;
     this.timeoutMs = timeoutMs;
+    this.pollMs = pollMs;
+    this.clock = clock;
     this.jobManager = null;
     this.jobRuns = new Map();
     this.runbookEngine = null;
   }
 
   async call(name, args = {}) {
+    if (WAIT_TOOLS.has(name) && args && typeof args === 'object' && 'wait_ms' in args) {
+      const { wait_ms: raw, ...plain } = args;
+      const waitMs = readWaitMs(raw);
+      return waitMs > 0 ? this.callAndWait(name, plain, waitMs) : this.call(name, plain);
+    }
     let reply;
     try {
       reply = await this.courier.callService(`fleet.${name}`, { args: args || {} }, { timeoutMs: this.timeoutMs });
@@ -69,6 +100,24 @@ class CourierFleetClient {
       throw new ToolError(code, message, data || {});
     }
     return reply ? reply.result : null;
+  }
+
+  // The plain call, then get_job every pollMs until the turn ends, the job
+  // is terminal or waitMs has passed; the reply is the last get_job's.
+  async callAndWait(name, args, waitMs) {
+    const started = this.clock();
+    let job = await this.call(name, args);
+    // send_to_job answers with an acknowledgement, not the job: always look.
+    let looked = name === 'get_job';
+    const jobId = args.job_id;
+    for (;;) {
+      if (looked && waitSettled(job)) return job;
+      const left = waitMs - (this.clock() - started);
+      if (left <= 0 && looked) return job;
+      if (left > 0) await sleep(Math.min(this.pollMs, left));
+      job = await this.call('get_job', { job_id: jobId });
+      looked = true;
+    }
   }
 
   // The service's tool list (the case tools only when the service has a
