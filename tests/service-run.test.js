@@ -614,6 +614,9 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
         assert.strictEqual(jobOpen('chat:no-such-chat'), false);
         running.fleet.jobManager.cancelJob(job.job_id);
         assert.strictEqual(jobOpen(job.job_id), false, 'a job that ended is closed');
+        // Demo takes Task 14: the delegate sessions own the GUI's take manager.
+        assert.ok(running.gui.takes, 'the GUI built a take manager');
+        assert.strictEqual(running.fleet.delegateSessions.takeManager, running.gui.takes);
         for (const [name, part] of [['gui', running.gui], ['fleet', running.fleet], ['approvals', running.approvals]]) {
           const stop = part.stop.bind(part);
           part.stop = async () => { order.push(name); return stop(); };

@@ -241,7 +241,7 @@ function loadProfile(profile) {
           // Fleet stage 4 §3.7: the runbook engine, JobManager, delegate
           // sessions and the fleet link methods, hosted by the service.
           const { startFleetNode } = require('../fleet/start');
-          fleet = await startFleetNode({ dataDir, nodeConfig, approvals, core, adminUid, deps: { leaseManager: gui ? gui.leases : null } });
+          fleet = await startFleetNode({ dataDir, nodeConfig, approvals, core, adminUid, deps: { leaseManager: gui ? gui.leases : null, takeManager: gui ? gui.takes : null } });
           if (gui) await gui.start();
         } catch (err) {
           if (gui) await gui.stop().catch(() => {});

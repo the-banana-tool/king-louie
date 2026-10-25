@@ -21,7 +21,7 @@ const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend',
 const CASE_BLOCKED_TOOL_NAMES = Object.freeze([
   'SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron',
   'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas',
-  'run_runbook', 'delegate', 'send_to_job', 'cancel_job',
+  'run_runbook', 'delegate', 'send_to_job', 'cancel_job', 'Take',
   'LaunchApp', 'CloseApp', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag'
 ]);
 const CASE_BLOCKED_TOOL_ERROR = 'This tool is not available in case turns: it starts another run, reaches another session, changes the tool list, or acts on the desktop. Do the work in this turn with the case tools and the other tools.';

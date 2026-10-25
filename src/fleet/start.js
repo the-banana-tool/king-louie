@@ -108,7 +108,8 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
       // eslint-disable-next-line global-require -- agent profile only (it loads the provider registry)
       const { DelegateSessions } = require('./delegate-sessions');
       delegateSessions = new DelegateSessions({
-        core, nodeConfig, jobManager, auditLedger: approvals.auditLedger, leaseManager: deps.leaseManager || null
+        core, nodeConfig, jobManager, auditLedger: approvals.auditLedger, leaseManager: deps.leaseManager || null,
+        takeManager: deps.takeManager || null
       });
       // Cases stage 7 (spec §3.7): the MCP case tools for this node's local
       // clients (mcp reaches them through the courier, R24).

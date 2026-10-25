@@ -371,11 +371,13 @@ describe('case-mode helpers', () => {
   it('drops tools that start child runs from a case turn, and keeps them otherwise', () => {
     assert.ok(CASE_BLOCKED_TOOL_NAMES.includes('SpawnAgent'));
     assert.ok(CASE_BLOCKED_TOOL_NAMES.includes('BackgroundTask'));
+    // Demo takes: the Take tool refuses a case turn itself; the turn is not offered it.
+    assert.ok(CASE_BLOCKED_TOOL_NAMES.includes('Take'));
     // message and the sessions_* tools are registered by createCore, not initializeTools.
     // The fleet tools are registered only while a service's fleet node runs.
     // The desktop tools are registered only by a service's GUI subsystem (fleet stage 5).
     const coreOnly = new Set(['sessions_spawn', 'sessions_list', 'sessions_history', 'message', 'run_runbook', 'delegate', 'send_to_job', 'cancel_job',
-      'LaunchApp', 'CloseApp', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag']);
+      'Take', 'LaunchApp', 'CloseApp', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag']);
     for (const name of CASE_BLOCKED_TOOL_NAMES) assert.ok(toolRegistry.get(name) || coreOnly.has(name), `${name} is not a registered tool`);
     const base = [{ name: 'Read' }, ...CASE_BLOCKED_TOOL_NAMES.map((name) => ({ name }))];
     assert.deepStrictEqual(shapeToolDefinitions(base, true, toolRegistry).map((d) => d.name), ['Read', ...CASE_TOOL_NAMES]);
@@ -669,7 +671,7 @@ describe('stage 2 confinement helpers', () => {
     assert.deepStrictEqual([...CASE_BLOCKED_TOOL_NAMES], [
       'SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron',
       'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas',
-      'run_runbook', 'delegate', 'send_to_job', 'cancel_job',
+      'run_runbook', 'delegate', 'send_to_job', 'cancel_job', 'Take',
       'LaunchApp', 'CloseApp', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag'
     ]);
     assert.match(CASE_BLOCKED_TOOL_ERROR, /not available in case turns/);

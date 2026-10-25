@@ -23,7 +23,7 @@ const RESULT_CAP = 4096;
 const FULL_CAP = 256 * 1024;
 // The calls that start or report planner/workflow task graphs: kept in full
 // (up to 256 KiB) so plans show up in exports (Deviation 23).
-const FULL_TRANSCRIPT_TOOLS = Object.freeze(['SpawnAgent', 'BackgroundTask', 'TaskStatus']);
+const FULL_TRANSCRIPT_TOOLS = Object.freeze(['SpawnAgent', 'BackgroundTask', 'TaskStatus', 'Take']);
 const EDITED_PATHS_MAX = 50;
 const OPEN_STATES = new Set(['idle', 'turn']);
 const LIVE_BACKGROUND_STATES = new Set(['pending', 'running']);
@@ -133,7 +133,7 @@ function scopedBackgroundTasks(manager, ids) {
 }
 
 class DelegateSessions {
-  constructor({ core, nodeConfig, jobManager, auditLedger = null, leaseManager = null, now = Date.now,
+  constructor({ core, nodeConfig, jobManager, auditLedger = null, leaseManager = null, takeManager = null, now = Date.now,
     fullTranscriptTools = FULL_TRANSCRIPT_TOOLS, providers = null, sweepMs = 60000, toolRegistry = null, closedRetainMs = CLOSED_RETAIN_MS } = {}) {
     if (!core || !core.context || typeof core.context.getAgentExecutorAdapter !== 'function') {
       throw new TypeError('DelegateSessions needs the agent core (profile: agent)');
@@ -148,6 +148,10 @@ class DelegateSessions {
     // F5's LeaseManager when it lands (wave 4); its job-scoped leases end
     // when the session does.
     this.leaseManager = leaseManager;
+    // Demo takes: the GUI's TakeManager (injected; src/fleet never loads
+    // src/gui). A session's take is told when each turn starts and ends, and
+    // ends when the session does.
+    this.takeManager = takeManager;
     this.now = now;
     this.closedRetainMs = closedRetainMs;
     this.fullTools = new Set(fullTranscriptTools);
@@ -346,13 +350,30 @@ class DelegateSessions {
     };
   }
 
+  // The take summary get_job and get_job_logs carry (spec §11), or null.
+  takeSummary(jobId) {
+    return this.takeManager ? this.takeManager.summaryFor(jobId) : null;
+  }
+
+  // A take hook never fails a turn or a close.
+  _takeHook(method, jobId) {
+    if (!this.takeManager) return;
+    try {
+      this.takeManager[method](jobId);
+    } catch (err) {
+      log.warn(`take ${method}(${jobId}) failed: ${err.message}`);
+    }
+  }
+
   // Everything that can throw sits inside the try; the finally frees the
   // slot on every exit (a result, an abort, a throw), so none can leak.
+  // The take hears of the turn's start and end on every exit too.
   async _runTurn(session, message, origin) {
     const jobId = session.jobId;
     session.turnAbort = new AbortController();
     let failure = null;
     try {
+      this._takeHook('onTurnStart', jobId);
       this._append(jobId, [`> user: ${message}`]);
       // History is user/assistant text pairs; tool detail stays in the
       // transcript and is not replayed.
@@ -392,6 +413,7 @@ class DelegateSessions {
     } finally {
       session.turnAbort = null;
       session.lastActivity = this.now();
+      this._takeHook('onTurnEnd', jobId);
       try {
         this.jobs.endTurn(jobId);
       } catch (err) {
@@ -464,6 +486,18 @@ class DelegateSessions {
       this.jobs.updateJob(session.jobId, { status, session: state, ...(error ? { reason: error } : {}) });
     } catch (err) {
       log.warn(`closing ${session.jobId}: an update listener failed: ${err.message}`);
+    }
+    // The take ends first, so it records job_closed rather than the end of
+    // its lease. Its end runs synchronously up to its first await (it is
+    // marked ended and stops listening to the lease), then stops the
+    // recording and lets go of the browser in the background.
+    if (this.takeManager) {
+      try {
+        Promise.resolve(this.takeManager.endForJob(session.jobId, 'job_closed'))
+          .catch((err) => log.warn(`ending the take of ${session.jobId} failed: ${err.message}`));
+      } catch (err) {
+        log.warn(`ending the take of ${session.jobId} failed: ${err.message}`);
+      }
     }
     if (this.leaseManager && typeof this.leaseManager.endForJob === 'function') {
       try {
