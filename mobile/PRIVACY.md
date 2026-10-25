@@ -38,7 +38,8 @@ can see:
   history slices you open;
 - every computer-use request a node sends you: the node's id and name, the
   apps it asks for (their ids, names, full paths and process names), for how
-  long, the agent's stated reason (up to 280 characters the agent wrote
+  long, for a take (a screen-recorded demo) the take's name and the hosts it
+  may visit, the agent's stated reason (up to 280 characters the agent wrote
   itself, so it can say anything), the job id, the name of the client that
   asked and its session id, and what the node cannot detect (no lock
   detection, say); your answer and any stop or watch you send, with your

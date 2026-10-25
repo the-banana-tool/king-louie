@@ -98,9 +98,12 @@ const GUI_APPS = {
 const appsFor = (ids, apps = GUI_APPS) => ids.map((id) => ({ id, name: apps[id].name, path: apps[id].path, processes: [...apps[id].processes] }));
 const JOB = 'job-1758650651201-a1b2c3';
 
-function requestFor(label, { appIds = ['calculator', 'notepad'], maxMinutes = 15, resumes = null, leaseLabel = label } = {}) {
+// kind, take (2026-10-24): a take lease (demo takes spec §6) carries
+// take = { name, sites, browser, credentials, unattended }.
+function requestFor(label, { appIds = ['calculator', 'notepad'], maxMinutes = 15, resumes = null, leaseLabel = label, kind = 'computer_use', take = null } = {}) {
   return L.buildLeaseRequest({
     identity: GPU, nodeName: 'gpu-box', jobId: JOB, apps: appsFor(appIds), maxMinutes, reason: 'Enter the totals', resumes: resumes ? uuidOf(`lease ${leaseLabel}`) : null,
+    kind, take,
     limits: [], origin: { client: 'claude.ai', session: 'mcp-session-1', job_id: JOB }, now: NOW_MS,
     requestId: uuidOf(`request ${label}`), leaseId: uuidOf(`lease ${leaseLabel}`), nonce: nonceOf(`request ${label}`)
   });
@@ -154,10 +157,11 @@ function watchMessage(label, { contactToken = tokenOf(`watch ${label}`) } = {}) 
 }
 
 // grantedBy: the device whose grant made the lease (null: nobody yet).
-function statusEnvelope(label, { seq = 3, state = 'active', reason = null, grantedBy = { deviceId: DEVICES.A.id, name: 'Owner phone' }, expiresAt = NOW_MS + 10 * 60000 } = {}) {
+// kind, unattended, name (2026-10-24): every status says which kind of lease it is.
+function statusEnvelope(label, { seq = 3, state = 'active', reason = null, grantedBy = { deviceId: DEVICES.A.id, name: 'Owner phone' }, expiresAt = NOW_MS + 10 * 60000, kind = 'computer_use', unattended = false, name = null } = {}) {
   return L.buildLeaseStatus({
     identity: GPU, leaseId: uuidOf(`lease ${label}`), seq, state, locked: false, reason, expiresAt,
-    contactToken: tokenOf(`status ${label}`), grantedBy, now: NOW_MS
+    contactToken: tokenOf(`status ${label}`), grantedBy, kind, unattended, name, now: NOW_MS
   });
 }
 
@@ -341,6 +345,35 @@ function buildVectors() {
   out.push(listingVector('listing-extra-key', { expect: reject('malformed'), change: (m) => ({ ...m, note: 'nothing is running' }) }));
   // `at` in the right form for a day that does not exist.
   out.push(listingVector('listing-bad-at', { expect: reject('malformed'), change: (m) => ({ ...m, at: '2026-02-30T18:04:11.201Z' }) }));
+
+  // Revised 2026-10-24 (agent-driven demo takes, spec §6): a take lease, its
+  // grant, its cap (gui.take.max_minutes, 240 at most), its status, and two
+  // requests whose lease has the wrong keys for its kind.
+  const TAKE = { name: 'BSEOA in ChatGPT', sites: ['chatgpt.com', '*.chatgpt.com'], browser: true, credentials: false, unattended: true };
+  const takeRequest = { kind: 'take', take: TAKE, appIds: ['notepad'], maxMinutes: 180 };
+  out.push(grantVector('take-grant', {
+    requestOptions: takeRequest, grantOptions: { minutes: 180 }, given: { gui_take_max_minutes: 240 },
+    expect: accepted, consumers: PHONES, withRequest: true
+  }));
+  out.push(grantVector('take-grant-minutes-over-cap', {
+    requestOptions: takeRequest, grantOptions: { minutes: 241 }, given: { gui_take_max_minutes: 240 },
+    expect: reject('minutes_out_of_range'), check: 12, consumers: PHONES, withRequest: true
+  }));
+  // A request the node signed with its lease altered and hashed again, so
+  // that only the shape (VALIDATORS['kl.lease.request']) is wrong.
+  const requestVector = (name, { requestOptions, change }) => {
+    const { message } = requestFor(name, requestOptions);
+    const lease = change({ ...message.lease });
+    const input = seal({ ...message, lease, lease_hash: L.leaseHash(lease) }, nodeSigner(GPU));
+    return { name, consumers: PHONES, check: 'request', given: viewGiven, input, expect: reject('malformed') };
+  };
+  out.push(requestVector('take-request-missing-name', { requestOptions: takeRequest, change: (l) => { delete l.name; return l; } }));
+  out.push(requestVector('computer-use-with-unattended', { requestOptions: {}, change: (l) => ({ ...l, unattended: true }) }));
+  out.push({
+    name: 'status-take', consumers: PHONES, check: null, given: viewGiven,
+    input: statusEnvelope('status-take', { seq: 5, kind: 'take', unattended: true, name: TAKE.name, expiresAt: NOW_MS + 180 * 60000 }),
+    expect: { ...accepted, status: { lease_id: uuidOf('lease status-take'), seq: 5, state: 'active', reason: null, contact_token: tokenOf('status status-take'), granted_by: grantedByA, kind: 'take', unattended: true, name: TAKE.name } }
+  });
   return out;
 }
 

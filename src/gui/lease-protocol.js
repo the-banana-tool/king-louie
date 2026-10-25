@@ -9,6 +9,7 @@ const { seal, open, nodeSigner, verifyEd25519, EnvelopeError } = require('../app
 const messages = require('../approvals/messages');
 const { verifyDeviceEnvelope } = require('../approvals/verify-device');
 const { canonicalize, sha256b64url } = require('../platform/jcs');
+const { plainLineProblem } = require('../cases/hidden-chars');
 
 const { isTimestamp, NONCE_RE, DEVICE_ID_RE, NODE_ID_RE, normalizeOrigin, iso, randomNonce } = messages;
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -27,6 +28,16 @@ const REVOKE_REASONS = Object.freeze(['kill_switch', 'owner']);
 const REQUEST_TTL_MS = 5 * 60 * 1000;
 const VIEW_MAX_BYTES = 262144;
 const MAX_MINUTES = 60;
+// Revised 2026-10-24 (agent-driven demo takes, spec §6): a take is a lease of
+// its own kind, a screen-recorded demo approved with one tap, capped by
+// gui.take.max_minutes and never past this.
+const TAKE_MAX_MINUTES = 240;
+const LEASE_KINDS = Object.freeze(['computer_use', 'take']);
+const LEASE_KEYS = Object.freeze({
+  computer_use: Object.freeze(['kind', 'job_id', 'apps', 'max_minutes', 'reason', 'resumes', 'limits']),
+  take: Object.freeze(['kind', 'job_id', 'name', 'sites', 'apps', 'browser', 'credentials', 'max_minutes', 'unattended', 'reason', 'resumes', 'limits'])
+});
+const SITE_RE = /^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 // R-F5-20: a listing names at most this many leases (the node lists the live
 // one and the four that ended last).
 const LISTING_MAX = 8;
@@ -55,15 +66,28 @@ function checkApp(a) {
     && APP_ID_RE.test(a.id) && within(a.name, 64) && within(a.path, 1024) && isStringList(a.processes, 16, (s) => within(s, 1024));
 }
 
+// The fields only a take has: a name (one plain line), the hosts it may
+// visit, the browser allowance (true, or the browser actions it may use),
+// whether it may fill credentials from the vault, and whether it runs with
+// no contact window.
+function checkTakeFields(l) {
+  return within(l.name, 60) && l.name.length > 0 && plainLineProblem(l.name) === null
+    && isStringList(l.sites, 32, (s) => SITE_RE.test(s)) && l.sites.length >= 1
+    && (l.browser === true || (isStringList(l.browser, 64, (s) => s.length > 0) && l.browser.length >= 1))
+    && typeof l.credentials === 'boolean' && typeof l.unattended === 'boolean';
+}
+
 function checkLease(l) {
-  return isPlainObject(l) && exactKeys(l, ['kind', 'job_id', 'apps', 'max_minutes', 'reason', 'resumes', 'limits'])
-    && l.kind === 'computer_use' && within(l.job_id, 200) && l.job_id.length > 0
+  if (!isPlainObject(l) || !Object.hasOwn(LEASE_KEYS, l.kind) || !exactKeys(l, LEASE_KEYS[l.kind])) return false;
+  const take = l.kind === 'take';
+  return within(l.job_id, 200) && l.job_id.length > 0
     && Array.isArray(l.apps) && l.apps.length >= 1 && l.apps.length <= 8 && l.apps.every(checkApp)
     && new Set(l.apps.map((a) => a.id)).size === l.apps.length
-    && Number.isInteger(l.max_minutes) && l.max_minutes >= 1 && l.max_minutes <= MAX_MINUTES
+    && Number.isInteger(l.max_minutes) && l.max_minutes >= 1 && l.max_minutes <= (take ? TAKE_MAX_MINUTES : MAX_MINUTES)
     && within(l.reason, 280) && l.reason.length > 0
     && nullOr((v) => UUID_V4_RE.test(v))(l.resumes)
-    && isStringList(l.limits, LEASE_LIMITS.length, (s) => LEASE_LIMITS.includes(s)) && uniqueSorted(l.limits);
+    && isStringList(l.limits, LEASE_LIMITS.length, (s) => LEASE_LIMITS.includes(s)) && uniqueSorted(l.limits)
+    && (!take || checkTakeFields(l));
 }
 
 function checkOrigin(o) {
@@ -101,11 +125,14 @@ const VALIDATORS = {
   'kl.lease.watch': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'device_id', 'contact_token', 'nonce', 'signed_at'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && DEVICE_ID_RE.test(m.device_id)
     && nullOr((v) => isString(v) && CONTACT_TOKEN_RE.test(v))(m.contact_token) && NONCE_RE.test(m.nonce) && isTimestamp(m.signed_at),
-  'kl.lease.status': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'state', 'locked', 'reason', 'expires_at', 'contact_token', 'granted_by'])
+  'kl.lease.status': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'state', 'locked', 'reason', 'expires_at', 'contact_token', 'granted_by', 'kind', 'unattended', 'name'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && Number.isInteger(m.seq) && m.seq >= 1 && isTimestamp(m.at)
     && STATES.includes(m.state) && typeof m.locked === 'boolean' && nullOr((v) => within(v, 64))(m.reason) && nullOr(isTimestamp)(m.expires_at)
     && isString(m.contact_token) && CONTACT_TOKEN_RE.test(m.contact_token)
-    && nullOr((g) => isPlainObject(g) && exactKeys(g, ['device_id', 'name']) && DEVICE_ID_RE.test(g.device_id) && nullOr((n) => within(n, 64) && n.length > 0)(g.name))(m.granted_by),
+    && nullOr((g) => isPlainObject(g) && exactKeys(g, ['device_id', 'name']) && DEVICE_ID_RE.test(g.device_id) && nullOr((n) => within(n, 64) && n.length > 0)(g.name))(m.granted_by)
+    // 2026-10-24: the lease's kind, whether it runs unattended, and a take's name (null for computer_use).
+    && LEASE_KINDS.includes(m.kind) && typeof m.unattended === 'boolean'
+    && (m.kind === 'take' ? within(m.name, 60) && m.name.length > 0 && plainLineProblem(m.name) === null : m.name === null),
   'kl.lease.view': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'to_device', 'state', 'locked', 'remaining_s', 'foreground', 'frame', 'frame_dropped', 'actions', 'contact_token'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && Number.isInteger(m.seq) && m.seq >= 1 && isTimestamp(m.at)
     && isString(m.contact_token) && CONTACT_TOKEN_RE.test(m.contact_token)
@@ -132,17 +159,35 @@ for (const [type, validator] of Object.entries(VALIDATORS)) {
 
 const leaseHash = (lease) => sha256b64url(canonicalize(lease));
 
-function buildLeaseRequest({ identity, nodeName, jobId, apps, maxMinutes, reason, resumes = null, limits = [], origin, now = Date.now(), requestId = null, leaseId = null, nonce = null }) {
+// kind 'take' (2026-10-24): take = { name, sites, browser, credentials, unattended }.
+function buildLeaseRequest({ identity, nodeName, jobId, apps, maxMinutes, reason, resumes = null, limits = [], origin, now = Date.now(), requestId = null, leaseId = null, nonce = null, kind = 'computer_use', take = null }) {
   const lid = leaseId || crypto.randomUUID();
-  const lease = {
-    kind: 'computer_use',
-    job_id: String(jobId),
-    apps: apps.map((a) => ({ id: a.id, name: a.name, path: a.path, processes: [...a.processes] })),
-    max_minutes: maxMinutes,
-    reason: String(reason),
-    resumes: resumes ? lid : null,
-    limits: [...new Set(limits)].filter((l) => LEASE_LIMITS.includes(l)).sort()
-  };
+  const appList = apps.map((a) => ({ id: a.id, name: a.name, path: a.path, processes: [...a.processes] }));
+  const limitList = [...new Set(limits)].filter((l) => LEASE_LIMITS.includes(l)).sort();
+  const lease = kind === 'take'
+    ? {
+      kind: 'take',
+      job_id: String(jobId),
+      name: take.name,
+      sites: [...take.sites],
+      browser: Array.isArray(take.browser) ? [...take.browser] : take.browser,
+      apps: appList,
+      credentials: take.credentials,
+      max_minutes: maxMinutes,
+      unattended: take.unattended,
+      reason: String(reason),
+      resumes: resumes ? lid : null,
+      limits: limitList
+    }
+    : {
+      kind: 'computer_use',
+      job_id: String(jobId),
+      apps: appList,
+      max_minutes: maxMinutes,
+      reason: String(reason),
+      resumes: resumes ? lid : null,
+      limits: limitList
+    };
   const message = {
     v: 1,
     type: 'kl.lease.request',
@@ -166,13 +211,16 @@ function buildLeaseRequest({ identity, nodeName, jobId, apps, maxMinutes, reason
 // grantedBy (R-F5-18): { deviceId, name } of the phone whose grant made the
 // lease, or null while nobody has granted it. A phone that did not grant a
 // lease shows this beside its Stop.
-function buildLeaseStatus({ identity, leaseId, seq, state, locked = false, reason = null, expiresAt = null, contactToken = null, grantedBy = null, now = Date.now() }) {
+// kind, unattended, name (2026-10-24): every status says which kind of lease
+// it is; name is a take's, null for computer_use.
+function buildLeaseStatus({ identity, leaseId, seq, state, locked = false, reason = null, expiresAt = null, contactToken = null, grantedBy = null, kind = 'computer_use', unattended = false, name = null, now = Date.now() }) {
   return seal({
     v: 1, type: 'kl.lease.status', node_id: identity.nodeId, lease_id: leaseId, seq, at: iso(now), state, locked,
     reason: reason === null || reason === undefined ? null : String(reason).slice(0, 64),
     expires_at: expiresAt === null || expiresAt === undefined ? null : iso(expiresAt),
     contact_token: contactToken || newContactToken(),
-    granted_by: grantedBy && grantedBy.deviceId ? { device_id: grantedBy.deviceId, name: typeof grantedBy.name === 'string' && grantedBy.name ? grantedBy.name : null } : null
+    granted_by: grantedBy && grantedBy.deviceId ? { device_id: grantedBy.deviceId, name: typeof grantedBy.name === 'string' && grantedBy.name ? grantedBy.name : null } : null,
+    kind, unattended: unattended === true, name: kind === 'take' ? name : null
   }, nodeSigner(identity));
 }
 
@@ -229,7 +277,7 @@ const reject = (reason) => ({ accepted: false, check: CHECK_OF[reason] || null, 
 const sameList = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => x === b[i]);
 
 // jobOpen fails closed (R-F5-7): a caller that passes none gets job_closed.
-function verifyLeaseGrant(envelope, { approverStore, nodeId, nonces, pending, guiApps, jobOpen = () => false, guiMaxMinutes = MAX_MINUTES }, now = Date.now()) {
+function verifyLeaseGrant(envelope, { approverStore, nodeId, nonces, pending, guiApps, jobOpen = () => false, guiMaxMinutes = MAX_MINUTES, guiTakeMaxMinutes = TAKE_MAX_MINUTES }, now = Date.now()) {
   const device = verifyDeviceEnvelope(envelope, { approverStore, type: 'kl.lease.grant', nodeId, nonces });
   if (!device.ok) return reject(device.reason);
   const m = device.message;
@@ -249,7 +297,9 @@ function verifyLeaseGrant(envelope, { approverStore, nodeId, nonces, pending, gu
     const requested = request.lease.apps.map((a) => a.id);
     const apps = m.grant.apps;
     if (new Set(apps).size !== apps.length || !apps.every((id) => requested.includes(id))) return reject('apps_not_requested');
-    const cap = Math.min(request.lease.max_minutes, guiMaxMinutes, MAX_MINUTES);
+    // The kind's cap (2026-10-24): gui.take.max_minutes for a take, gui.lease.max_minutes otherwise.
+    const kindCap = request.lease.kind === 'take' ? Math.min(guiTakeMaxMinutes, TAKE_MAX_MINUTES) : Math.min(guiMaxMinutes, MAX_MINUTES);
+    const cap = Math.min(request.lease.max_minutes, kindCap);
     if (m.grant.minutes < 1 || m.grant.minutes > cap) return reject('minutes_out_of_range');
   }
   return { accepted: true, check: null, reason: null, message: m, bytes: device.bytes, deviceId: device.deviceId, request };
@@ -347,6 +397,7 @@ function effectiveExpiry({ verifiedAt, minutes, resumeOf = null }) {
 
 module.exports = {
   LEASE_LIMITS, STATES, REQUEST_TTL_MS, VIEW_MAX_BYTES, CHECK_OF, CONTACT_TOKEN_RE, LISTING_MAX, LIST_NONCE_RE: NONCE_RE, newContactToken,
+  MAX_MINUTES, TAKE_MAX_MINUTES, LEASE_KINDS, VALIDATORS, checkLease,
   leaseHash, buildLeaseRequest, buildLeaseStatus, buildLeaseView, buildLeaseListing, isEnrolledDevice, offLeaseListing,
   verifyLeaseGrant, verifyLeaseRevoke, verifyLeaseWatch, verifyLeaseView, verifyLeaseListing, effectiveExpiry
 };

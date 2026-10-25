@@ -334,3 +334,63 @@ that status is not part of what the phone then knows), and four for the
 shape, each signed by the node: `listing-duplicate-lease`,
 `listing-too-many` (nine entries), `listing-extra-key`, `listing-bad-at`
 (a day that does not exist). Forty-six vectors in all.
+
+## Revised 2026-10-24: the take lease
+
+A take (agent-driven demo takes, spec
+`docs/superpowers/specs/2026-10-24-agent-driven-demo-takes-design.md` §6) is a
+screen-recorded demo approved with one tap: a lease of a second kind, `take`.
+`kl.lease.request`, `kl.lease.grant`, `kl.lease.revoke`, `kl.lease.watch`,
+`kl.lease.view` and `kl.lease.listing` keep their shapes; `lease` may now be a
+take, and every status gains three keys.
+
+```jsonc
+"lease": { "kind": "take", "job_id": "job-…",
+           "name": "Site audit demo" (1–60, one plain line),
+           "sites": ["app.example.com", "*.example.com"] (1–32),
+           "browser": true | ["…"] (1–64 non-empty strings),
+           "apps": [{ "id": "notepad", "name": "Notepad", "path": "C:\\Windows\\System32\\notepad.exe", "processes": [] }],
+           "credentials": false, "max_minutes": 180, "unattended": true,
+           "reason": "Record the demo", "resumes": null, "limits": [] }
+{ "v": 1, "type": "kl.lease.status", …, "granted_by": …,
+  "kind": "computer_use" | "take", "unattended": false, "name": "…" | null }
+  // kind, unattended, name (2026-10-24): in every status. A computer_use
+  // lease's status says "kind": "computer_use", "unattended": false, "name": null;
+  // a take's carries its kind, its unattended flag and its name.
+```
+
+Rules:
+
+- A lease has exactly the keys of its kind. `computer_use` keeps the seven it
+  has (`kind`, `job_id`, `apps`, `max_minutes`, `reason`, `resumes`,
+  `limits`); only `take` has `name`, `sites`, `browser`, `credentials` and
+  `unattended`, so a `computer_use` lease carrying `unattended` is malformed.
+- `name` is a non-empty string of at most 60 characters and one plain line
+  (`plainLineProblem`, `src/cases/hidden-chars.js`). Each of `sites` is a
+  lower-case host, `^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+$` (`*.` for its
+  subdomains). `browser` is `true` (browser actions on these sites) or the
+  list of browser actions it may use. `credentials` and `unattended` are
+  booleans. `apps` is 1–8 apps as for `computer_use`.
+- The cap is the kind's: a take's `max_minutes` is 1–240
+  (`TAKE_MAX_MINUTES`); a grant's `minutes` is at most
+  `min(max_minutes, gui.take.max_minutes, 240)` for a take and
+  `min(max_minutes, gui.lease.max_minutes, 60)` for `computer_use`, else
+  `minutes_out_of_range` (check 12).
+- A status's `kind` is one of `computer_use`, `take`; `unattended` a boolean;
+  `name` the take's name (as above) for a take and `null` otherwise.
+- **Unattended.** A lease whose request says `unattended: true` has no contact
+  window and is never suspended: it ends only by expiry, revoke, device
+  revocation, job close or the take's own endings. A watch is still accepted
+  and answered with a signed status; it makes no difference to the lease's
+  life.
+
+Vectors: the given of a grant vector may carry `gui_take_max_minutes`.
+Phones consume five more: `take-grant` (a take of 180 minutes granted for
+180; `given.request` and `expect.message` as for the other phone-built
+grants), `take-grant-minutes-over-cap` (241 minutes: `minutes_out_of_range`),
+`take-request-missing-name` and `computer-use-with-unattended` (`check:
+'request'`: a node-signed request whose lease, hashed again, has the wrong
+keys for its kind; `VALIDATORS['kl.lease.request']` refuses it,
+`malformed`), and `status-take` (`expect.status` holds `kind`, `unattended`
+and `name` too). The four `status-*` vectors before it, and the listing
+vectors that carry statuses, now carry the three keys. Fifty-one vectors in all.

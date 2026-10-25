@@ -22,12 +22,15 @@ const EXPECTED = [
   'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame',
   'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature',
   // Fourth security review: another pinned node's listing, an extra status beside one, and the shape (each lease once, at most eight, exact keys, a real time).
-  'listing-other-node', 'listing-wrong-node', 'listing-extra-status', 'listing-duplicate-lease', 'listing-too-many', 'listing-extra-key', 'listing-bad-at'
+  'listing-other-node', 'listing-wrong-node', 'listing-extra-status', 'listing-duplicate-lease', 'listing-too-many', 'listing-extra-key', 'listing-bad-at',
+  // Revised 2026-10-24: the take lease (demo takes spec §6).
+  'take-grant', 'take-grant-minutes-over-cap', 'take-request-missing-name', 'computer-use-with-unattended', 'status-take'
 ];
 const PHONE = ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'watch-no-token',
   'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame',
   'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature',
-  'listing-other-node', 'listing-wrong-node', 'listing-extra-status', 'listing-duplicate-lease', 'listing-too-many', 'listing-extra-key', 'listing-bad-at'];
+  'listing-other-node', 'listing-wrong-node', 'listing-extra-status', 'listing-duplicate-lease', 'listing-too-many', 'listing-extra-key', 'listing-bad-at',
+  'take-grant', 'take-grant-minutes-over-cap', 'take-request-missing-name', 'computer-use-with-unattended', 'status-take'];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')));
 const byName = new Map(vectors.map((v) => [v.name, v]));
@@ -39,6 +42,8 @@ async function run(v) {
   const now = Date.parse(g.now);
   if (v.name.startsWith('view-')) return L.verifyLeaseView(v.input, { nodeId: g.node.id, nodePublicKeyHex: g.node.key });
   if (v.name.startsWith('status-')) return verifyStatus(v.input, g.node);
+  // A node-signed request checked for its shape (VALIDATORS['kl.lease.request']).
+  if (v.check === 'request') return verifyRequest(v.input, g.node);
   // R-F5-20: what a phone checks on a listing, with its own nonce and device id.
   if (v.name.startsWith('listing-')) return L.verifyLeaseListing(v.input, { nodeId: g.node.id, nodePublicKeyHex: g.node.key, nonce: g.nonce, deviceId: g.device_id, statuses: g.statuses });
   const store = await approverStoreWith(g.approvers, { allowTestKeys: g.allow_test_keys, now: () => now });
@@ -50,7 +55,7 @@ async function run(v) {
   const pending = new Map(g.pending.map((p) => [p.request_id, p]));
   return L.verifyLeaseGrant(v.input, {
     approverStore: store, nodeId: g.node.id, nonces, pending, guiApps: g.gui_apps,
-    jobOpen: (jobId) => g.jobs_open.includes(jobId), guiMaxMinutes: g.gui_max_minutes
+    jobOpen: (jobId) => g.jobs_open.includes(jobId), guiMaxMinutes: g.gui_max_minutes, guiTakeMaxMinutes: g.gui_take_max_minutes
   }, now);
 }
 
@@ -64,6 +69,17 @@ function verifyStatus(envelope, node) {
   const { message } = open(envelope);
   if (validateMessage('kl.lease.status', message)) return { accepted: false, reason: 'malformed' };
   if (message.node_id !== node.id) return { accepted: false, reason: 'wrong_node' };
+  return { accepted: true, reason: null, message };
+}
+
+// What a phone checks on a request: the pinned node's signature, the shape, the lease hash.
+function verifyRequest(envelope, node) {
+  const { open, verifyEd25519 } = require('../src/approvals/envelope');
+  if (envelope.alg !== 'Ed25519' || envelope.kid !== node.id) return { accepted: false, reason: 'malformed' };
+  if (!verifyEd25519(envelope, node.key)) return { accepted: false, reason: 'bad_signature' };
+  const { message } = open(envelope);
+  if (!L.VALIDATORS['kl.lease.request'](message)) return { accepted: false, reason: 'malformed' };
+  if (message.lease_hash !== L.leaseHash(message.lease)) return { accepted: false, reason: 'lease_hash_mismatch' };
   return { accepted: true, reason: null, message };
 }
 
@@ -110,7 +126,7 @@ describe('lease-v1 vectors', () => {
   });
 
   it('has exactly the expected set, and phones consume exactly theirs', () => {
-    assert.equal(EXPECTED.length, 46);
+    assert.equal(EXPECTED.length, 51);
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
     for (const phone of ['ios', 'android']) {
       assert.deepEqual(vectors.filter((v) => v.consumers.includes(phone)).map((v) => v.name).sort(), [...PHONE].sort());
@@ -133,7 +149,7 @@ describe('lease-v1 vectors', () => {
       const r = await run(v);
       assert.equal(r.accepted, v.expect.accepted, `${name}: ${r.reason}`);
       assert.equal(r.reason, v.expect.reason);
-      if (v.check !== null && !name.startsWith('view-') && !name.startsWith('listing-')) assert.equal(r.check, v.check);
+      if (v.check !== null && v.check !== 'request' && !name.startsWith('view-') && !name.startsWith('listing-')) assert.equal(r.check, v.check);
       // The fields a phone reads from a status or a view, the contact token among them.
       if (v.expect.status) for (const [key, value] of Object.entries(v.expect.status)) assert.deepEqual(r.message[key], value, `${name}: ${key}`);
       if (v.expect.contact_token) assert.equal(r.message.contact_token, v.expect.contact_token);
@@ -150,7 +166,7 @@ describe('lease-v1 vectors', () => {
   });
 
   it('the phone-built messages are exactly the signed payloads', () => {
-    for (const name of ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'watch-no-token']) {
+    for (const name of ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'take-grant', 'revoke-valid', 'watch-valid', 'watch-no-token']) {
       const v = byName.get(name);
       const payload = JSON.parse(Buffer.from(v.input.payload, 'base64url').toString('utf8'));
       assert.deepEqual(payload, v.expect.message, name);

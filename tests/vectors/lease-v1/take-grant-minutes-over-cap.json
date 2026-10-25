@@ -1,0 +1,176 @@
+{
+  "name": "take-grant-minutes-over-cap",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": 12,
+  "given": {
+    "now": "2026-09-23T18:04:17.201Z",
+    "node": {
+      "id": "kl-hnef32472qzibi5r",
+      "name": "gpu-box",
+      "key": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-futyo75nn4w4reil",
+        "name": "Test phone futy",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w",
+          "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": "2026-09-20T00:00:00.000Z",
+        "revoked_by": "console",
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-qspcgdp3ecibkogw",
+        "name": "Test phone qspc",
+        "platform": "demo",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "ZWZ0CFs5J3aGstu0p5ekzB8RVFjxHFNkKVArmQGBZFE",
+          "y": "4E7pC8plxIpQrs88JPZVThXMJcG09vM8A0zZbeeJzP8"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "allow_test_keys": true,
+    "used": [],
+    "gui_apps": {
+      "calculator": {
+        "name": "Calculator",
+        "path": "C:\\Windows\\System32\\calc.exe",
+        "processes": [
+          "CalculatorApp.exe"
+        ]
+      },
+      "notepad": {
+        "name": "Notepad",
+        "path": "C:\\Windows\\System32\\notepad.exe",
+        "processes": []
+      }
+    },
+    "jobs_open": [
+      "job-1758650651201-a1b2c3"
+    ],
+    "gui_max_minutes": 60,
+    "pending": [
+      {
+        "request_id": "cf902e4d-8aa1-4d83-b45a-145c4dbe8ff5",
+        "lease_id": "9c51f961-614d-4357-9791-09e18e9740c8",
+        "nonce": "rzQlcoyltPTUAk7LeVTpiIa-i64vO88ZP-DTiBU8Nw8",
+        "lease_hash": "rFh8IVPJGL5O4boeblMjMwB6vB4FyyAdQegreSauVn0",
+        "expires_at": "2026-09-23T18:09:11.201Z",
+        "lease": {
+          "kind": "take",
+          "job_id": "job-1758650651201-a1b2c3",
+          "name": "BSEOA in ChatGPT",
+          "sites": [
+            "chatgpt.com",
+            "*.chatgpt.com"
+          ],
+          "browser": true,
+          "apps": [
+            {
+              "id": "notepad",
+              "name": "Notepad",
+              "path": "C:\\Windows\\System32\\notepad.exe",
+              "processes": []
+            }
+          ],
+          "credentials": false,
+          "max_minutes": 180,
+          "unattended": true,
+          "reason": "Enter the totals",
+          "resumes": null,
+          "limits": []
+        }
+      }
+    ],
+    "gui_take_max_minutes": 240,
+    "request": {
+      "alg": "Ed25519",
+      "kid": "kl-hnef32472qzibi5r",
+      "payload": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsImxlYXNlIjp7ImFwcHMiOlt7ImlkIjoibm90ZXBhZCIsIm5hbWUiOiJOb3RlcGFkIiwicGF0aCI6IkM6XFxXaW5kb3dzXFxTeXN0ZW0zMlxcbm90ZXBhZC5leGUiLCJwcm9jZXNzZXMiOltdfV0sImJyb3dzZXIiOnRydWUsImNyZWRlbnRpYWxzIjpmYWxzZSwiam9iX2lkIjoiam9iLTE3NTg2NTA2NTEyMDEtYTFiMmMzIiwia2luZCI6InRha2UiLCJsaW1pdHMiOltdLCJtYXhfbWludXRlcyI6MTgwLCJuYW1lIjoiQlNFT0EgaW4gQ2hhdEdQVCIsInJlYXNvbiI6IkVudGVyIHRoZSB0b3RhbHMiLCJyZXN1bWVzIjpudWxsLCJzaXRlcyI6WyJjaGF0Z3B0LmNvbSIsIiouY2hhdGdwdC5jb20iXSwidW5hdHRlbmRlZCI6dHJ1ZX0sImxlYXNlX2hhc2giOiJyRmg4SVZQSkdMNU80Ym9lYmxNak13QjZ2QjRGeXlBZFFlZ3JlU2F1Vm4wIiwibGVhc2VfaWQiOiI5YzUxZjk2MS02MTRkLTQzNTctOTc5MS0wOWUxOGU5NzQwYzgiLCJub2RlX2lkIjoia2wtaG5lZjMyNDcycXppYmk1ciIsIm5vZGVfbmFtZSI6ImdwdS1ib3giLCJub25jZSI6InJ6UWxjb3lsdFBUVUFrN0xlVlRwaUlhLWk2NHZPODhaUC1EVGlCVThOdzgiLCJvcmlnaW4iOnsiY2xpZW50IjoiY2xhdWRlLmFpIiwiam9iX2lkIjoiam9iLTE3NTg2NTA2NTEyMDEtYTFiMmMzIiwic2Vzc2lvbiI6Im1jcC1zZXNzaW9uLTEifSwicmVxdWVzdF9pZCI6ImNmOTAyZTRkLThhYTEtNGQ4My1iNDVhLTE0NWM0ZGJlOGZmNSIsInR5cGUiOiJrbC5sZWFzZS5yZXF1ZXN0IiwidiI6MX0",
+      "sig": "sQzMokapXmtDyR7olqIoIVWwINp0GXw1vRammWYRHw8kwhN0hu_EQHtX2473WtA_TYgewk-sAnNp_xSxTieiDA"
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJkZWNpc2lvbiI6ImdyYW50IiwiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsImdyYW50Ijp7ImFwcHMiOlsibm90ZXBhZCJdLCJtaW51dGVzIjoyNDF9LCJsZWFzZV9oYXNoIjoickZoOElWUEpHTDVPNGJvZWJsTWpNd0I2dkI0Rnl5QWRRZWdyZVNhdVZuMCIsImxlYXNlX2lkIjoiOWM1MWY5NjEtNjE0ZC00MzU3LTk3OTEtMDllMThlOTc0MGM4Iiwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJub25jZSI6InJ6UWxjb3lsdFBUVUFrN0xlVlRwaUlhLWk2NHZPODhaUC1EVGlCVThOdzgiLCJyZXF1ZXN0X2lkIjoiY2Y5MDJlNGQtOGFhMS00ZDgzLWI0NWEtMTQ1YzRkYmU4ZmY1Iiwic2lnbmVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxNi4yMDFaIiwidHlwZSI6ImtsLmxlYXNlLmdyYW50IiwidiI6MX0",
+    "sig": "VRnsADDo9L-aWJl06Ckl1D22GHJ0MatGMJ1GWnuOLEWy3nQArVkTaETTC5CNbEhEHqMURYi0d2K-TMMQySixvg"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "minutes_out_of_range",
+    "message": {
+      "v": 1,
+      "type": "kl.lease.grant",
+      "request_id": "cf902e4d-8aa1-4d83-b45a-145c4dbe8ff5",
+      "lease_id": "9c51f961-614d-4357-9791-09e18e9740c8",
+      "node_id": "kl-hnef32472qzibi5r",
+      "lease_hash": "rFh8IVPJGL5O4boeblMjMwB6vB4FyyAdQegreSauVn0",
+      "nonce": "rzQlcoyltPTUAk7LeVTpiIa-i64vO88ZP-DTiBU8Nw8",
+      "decision": "grant",
+      "grant": {
+        "apps": [
+          "notepad"
+        ],
+        "minutes": 241
+      },
+      "expires_at": "2026-09-23T18:09:11.201Z",
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "signed_at": "2026-09-23T18:04:16.201Z"
+    }
+  }
+}

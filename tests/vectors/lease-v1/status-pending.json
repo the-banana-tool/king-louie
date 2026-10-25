@@ -17,8 +17,8 @@
   "input": {
     "alg": "Ed25519",
     "kid": "kl-hnef32472qzibi5r",
-    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJZTGZQbXcyaDk1UHhiSTNBcnBaSUtRIiwiZXhwaXJlc19hdCI6bnVsbCwiZ3JhbnRlZF9ieSI6bnVsbCwibGVhc2VfaWQiOiJlMjAyOTM1ZS1iOTY3LTQzMTctYjY3Zi01N2Q2M2QyNGJhMGMiLCJsb2NrZWQiOmZhbHNlLCJub2RlX2lkIjoia2wtaG5lZjMyNDcycXppYmk1ciIsInJlYXNvbiI6bnVsbCwic2VxIjoxLCJzdGF0ZSI6InBlbmRpbmciLCJ0eXBlIjoia2wubGVhc2Uuc3RhdHVzIiwidiI6MX0",
-    "sig": "tQE1CM3El-Y-fHJVj9emqesveAXhm_QRuAmozteME77sLUTTbTVXK6Q9gBrc9-VWYmpLC7MJgBwaPKSoIgFbCQ"
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJZTGZQbXcyaDk1UHhiSTNBcnBaSUtRIiwiZXhwaXJlc19hdCI6bnVsbCwiZ3JhbnRlZF9ieSI6bnVsbCwia2luZCI6ImNvbXB1dGVyX3VzZSIsImxlYXNlX2lkIjoiZTIwMjkzNWUtYjk2Ny00MzE3LWI2N2YtNTdkNjNkMjRiYTBjIiwibG9ja2VkIjpmYWxzZSwibmFtZSI6bnVsbCwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJyZWFzb24iOm51bGwsInNlcSI6MSwic3RhdGUiOiJwZW5kaW5nIiwidHlwZSI6ImtsLmxlYXNlLnN0YXR1cyIsInVuYXR0ZW5kZWQiOmZhbHNlLCJ2IjoxfQ",
+    "sig": "NOudDHzbkuLVqfeuNx8xsjl8oVBwobv1dxWkZQ7IiFnMvVl_aahjCtR05XdVvOdTSP0qVQMjFPMtcc91xkmGDA"
   },
   "expect": {
     "accepted": true,
