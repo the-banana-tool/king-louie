@@ -150,14 +150,16 @@ class TakeStore {
 
   summary(record) {
     const steps = Array.isArray(record.steps) ? record.steps : [];
-    const count = (status) => steps.filter((s) => s && s.status === status).length;
+    // A step is a `Take.run_steps` result, `{ index, action, ok, ms, error?, url?, screenshot? }`;
+    // one with no `ok` yet counts in neither.
+    const count = (ok) => steps.filter((s) => s && s.ok === ok).length;
     const rec = record.recording && typeof record.recording === 'object' ? record.recording : null;
     const grant = record.grant && typeof record.grant === 'object' ? record.grant : null;
     return {
       take_id: record.take_id,
       name: record.name,
       state: record.state,
-      steps: { done: count('done'), failed: count('failed'), total: steps.length },
+      steps: { done: count(true), failed: count(false), total: steps.length },
       recording: rec ? { path: rec.path ?? null, duration_s: rec.duration_s ?? null } : null,
       lease: { expires_at: grant?.expires_at ?? null },
     };

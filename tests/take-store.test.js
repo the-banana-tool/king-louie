@@ -53,7 +53,7 @@ describe('TakeStore', () => {
 
     assert.deepEqual(store.get(rec.take_id), rec);
 
-    const updated = store.update(rec.take_id, { state: 'live', lease_id: 'lease-9', steps: [{ status: 'done' }] });
+    const updated = store.update(rec.take_id, { state: 'live', lease_id: 'lease-9', steps: [{ index: 0, action: 'click', ok: true, ms: 12 }] });
     assert.equal(updated.state, 'live');
     assert.equal(updated.lease_id, 'lease-9');
     assert.equal(updated.name, 'Signup demo');
@@ -105,7 +105,8 @@ describe('TakeStore', () => {
       name: 'Signup demo',
       state: 'live',
       grant: { sites: ['https://example.com'], minutes: 10, expires_at: '2026-10-24T12:10:00.000Z' },
-      steps: [{ n: 1, status: 'done' }, { n: 2, status: 'done' }, { n: 3, status: 'failed' }, { n: 4, status: 'running' }],
+      steps: [{ index: 0, action: 'click', ok: true, ms: 12 }, { index: 1, action: 'type', ok: true, ms: 30 },
+        { index: 2, action: 'click', ok: false, ms: 5, error: 'not found' }, { index: 3, action: 'wait' }],
       recording: { path: 'C:\\takes\\a.mp4', started_at: 't0', stopped_at: null, duration_s: 42, bytes: 1000 },
     });
     assert.deepEqual(store.summary(rec), {
