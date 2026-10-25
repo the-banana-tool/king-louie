@@ -20,7 +20,9 @@ const guiConfig = parseGuiConfig({
     calculator: { name: 'Calculator', path: 'C:\\Windows\\System32\\calc.exe', processes: ['CalculatorApp.exe'] },
     notepad: { name: 'Notepad', path: 'C:\\Windows\\System32\\notepad.exe' }
   },
-  lease: { max_inputs_per_minute: 10 }
+  lease: { max_inputs_per_minute: 10 },
+  take: { enabled: true },
+  browser: 'notepad'
 }, { platform: 'win32' });
 const ORIGIN = { client: 'claude.ai', session: 's-1', job_id: 'job-1' };
 
@@ -1555,5 +1557,155 @@ describe('lock, expiry and revoke', () => {
     assert.equal(leases.statusSummary(), null);
     const lease = await granted();
     assert.deepEqual(leases.statusSummary(), { active: true, appIds: ['calculator'], expiresAt: new Date(lease.expiresAt).toISOString() });
+  });
+});
+
+// Agent-driven demo takes (spec 2026-10-24 §6.3, R-D1-7): a take is a lease
+// of its own kind; an unattended one has no contact window and never pauses.
+describe('take leases', () => {
+  const TAKE = { name: 'BSEOA demo', sites: ['*.example.com'], browser: true, credentials: false, unattended: true };
+  const takeRequest = (extra = {}) => leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes: 180, reason: 'demo', kind: 'take', take: TAKE, ...extra });
+
+  async function grantedTake({ minutes = 180 } = {}) {
+    const p = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes, reason: 'demo', kind: 'take', take: { ...TAKE } });
+    const reply = leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes }));
+    assert.equal(reply.state, 'active');
+    return p;
+  }
+
+  it('a take request carries kind, name, sites and unattended', async () => {
+    const lease = await grantedTake();
+    const req = relay.last('kl.lease.request').message.lease;
+    assert.equal(req.kind, 'take');
+    assert.equal(req.name, 'BSEOA demo');
+    assert.deepEqual(req.sites, ['*.example.com']);
+    assert.equal(req.unattended, true);
+    assert.equal(req.max_minutes, 180);
+    assert.deepEqual([lease.kind, lease.unattended, lease.name], ['take', true, 'BSEOA demo']);
+    assert.deepEqual(lease.take, TAKE);
+  });
+
+  it('a take may run 180 minutes; computer_use still caps at 60', async () => {
+    const lease = await grantedTake({ minutes: 180 });
+    assert.equal(lease.expiresAt, clock.now() + 180 * 60000);
+    leases.stopAll();
+    await assert.rejects(leases.request({ jobId: 'job-2', origin: ORIGIN, appIds: ['notepad'], minutes: 61, reason: 'x' }), (e) => e.code === 'invalid_params' && /1–60/.test(e.message));
+    await assert.rejects(takeRequest({ minutes: 241 }), (e) => e.code === 'invalid_params' && /1–240/.test(e.message));
+  });
+
+  it('takes off in node.yaml refuse', async () => {
+    const off = new LeaseManager({
+      approvals: leases.approvals, guiConfig: { ...guiConfig, take: { ...guiConfig.take, enabled: false } }, broker, nodeName: 'gpu-box', clock: () => clock.now(), timers, jobOpen: () => true
+    });
+    const before = relay.all('kl.lease.request').length;
+    await assert.rejects(off.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes: 30, reason: 'demo', kind: 'take', take: TAKE }),
+      (e) => e.code === 'invalid_params' && /takes are off/.test(e.message));
+    assert.equal(relay.all('kl.lease.request').length, before);
+  });
+
+  it('a take from a non-local origin is refused before anything is sent', async () => {
+    const before = relay.all('kl.lease.request').length;
+    await assert.rejects(takeRequest({ nodeLocalOrigin: false }), (e) => e.code === 'take_requires_local_origin');
+    assert.equal(relay.all('kl.lease.request').length, before);
+    assert.equal(leases.current(), null);
+  });
+
+  it('two hours with no watch: still active, no no_contact', async () => {
+    const lease = await grantedTake();
+    timers.advance(2 * 3600000);
+    assert.equal(lease.state, 'active');
+    assert.equal(lease.contactTimer, null, 'no contact timer is ever armed');
+    assert.ok(!kinds().includes('lease.suspended'));
+    assert.equal(leases.assertUsable('job-1'), lease);
+  });
+
+  it('relay down does not suspend a take; status resumes when up', async () => {
+    const lease = await grantedTake();
+    const requests = relay.all('kl.lease.request').length;
+    const statuses = relay.all('kl.lease.status').length;
+    relay.down();
+    assert.equal(lease.state, 'active');
+    assert.ok(audits.some((a) => a.kind === 'lease.event' && a.data.reason === 'relay_unreachable' && a.data.lease_id === lease.leaseId));
+    assert.ok(!kinds().includes('lease.suspended'));
+    relay.up();
+    assert.equal(relay.all('kl.lease.request').length, requests, 'no resume request');
+    leases.verifyWatch(watchFrom(phone, lease));
+    assert.ok(relay.all('kl.lease.status').length > statuses, 'statuses flow again once the link is back');
+    assert.equal(lease.state, 'active');
+  });
+
+  it('a foreground_mismatch input refuses but does not suspend', async () => {
+    const lease = await grantedTake();
+    const requests = relay.all('kl.lease.request').length;
+    assert.equal(leases.noteInputOutcome(lease, { code: 'foreground_mismatch' }), false);
+    assert.equal(leases.noteInputOutcome(lease, { afterMatches: false }), false);
+    assert.equal(lease.state, 'active');
+    assert.ok(audits.some((a) => a.kind === 'lease.event' && a.data.reason === 'foreground_mismatch'));
+    assert.ok(audits.some((a) => a.kind === 'lease.event' && a.data.reason === 'foreground_changed'));
+    assert.equal(relay.all('kl.lease.request').length, requests);
+  });
+
+  it('helper disconnect does not suspend a take', async () => {
+    const lease = await grantedTake();
+    leases.onHelperDisconnected();
+    assert.equal(lease.state, 'active');
+    assert.ok(audits.some((a) => a.kind === 'lease.event' && a.data.reason === 'helper_disconnected'));
+  });
+
+  it('a revoke from the other phone still ends it', async () => {
+    const lease = await grantedTake();
+    assert.equal(leases.onRevoke(other.leaseRevoke(identity.nodeId, lease.leaseId)).state, 'ended');
+    assert.equal(lease.state, 'ended');
+    assert.equal(lease.endReason, 'revoked');
+  });
+
+  it('device_revoked still ends it', async () => {
+    const lease = await grantedTake();
+    assert.equal(leases.approvals.approverStore.stage(other.revoke(phone.deviceId, { now: clock.now() })).state, 'revoked-pending-apply');
+    assert.equal(lease.state, 'ended');
+    assert.equal(lease.endReason, 'device_revoked');
+  });
+
+  it('expiry still ends it on both clocks', async () => {
+    const lease = await grantedTake();
+    timers.advance(179 * 60000);
+    assert.equal(lease.state, 'active');
+    timers.advance(2 * 60000);
+    assert.equal(lease.state, 'ended');
+    assert.equal(lease.endReason, 'expired');
+    // The monotonic clock alone says over: the lease ends too.
+    const wall = { t: clock.now() };
+    const mono = { t: 0 };
+    const twoClocks = new LeaseManager({
+      approvals: leases.approvals, guiConfig, broker, nodeName: 'gpu-box', clock: () => wall.t, monotonic: () => mono.t,
+      timers: { setTimeout: () => ({}), clearTimeout: () => {} }, jobOpen: () => true
+    });
+    const p = twoClocks.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes: 180, reason: 'demo', kind: 'take', take: TAKE });
+    twoClocks.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 180 }));
+    const take = await p;
+    mono.t += 180 * 60000;
+    assert.throws(() => twoClocks.assertUsable('job-1'), (e) => e.code === 'lease_expired');
+    assert.equal(take.endReason, 'expired');
+  });
+
+  it('the signed status says take, unattended and the name', async () => {
+    await grantedTake();
+    const status = relay.last('kl.lease.status').message;
+    assert.deepEqual([status.kind, status.unattended, status.name], ['take', true, 'BSEOA demo']);
+    const listed = leases.listFor(phone.deviceId).map((e) => open(e).message);
+    assert.deepEqual([listed[0].kind, listed[0].unattended, listed[0].name], ['take', true, 'BSEOA demo']);
+  });
+
+  it('a computer_use lease still suspends at 120 s and on relay down', async () => {
+    const lease = await granted();
+    const status = relay.last('kl.lease.status').message;
+    assert.deepEqual([status.kind, status.unattended, status.name], ['computer_use', false, null]);
+    assert.deepEqual([lease.kind, lease.unattended], ['computer_use', false]);
+    timers.advance(120000);
+    assert.equal(lease.state, 'suspended');
+    assert.equal(lease.suspendReason, 'no_contact');
+    relay.down();
+    assert.equal(lease.suspendReason, 'relay_unreachable');
+    assert.ok(!kinds().includes('lease.event'));
   });
 });

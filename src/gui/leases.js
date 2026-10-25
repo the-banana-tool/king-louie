@@ -167,8 +167,10 @@ class LeaseManager extends EventEmitter {
     this._armContact(lease, this._contactWindowMs());
   }
 
-  // One contact timer a lease, due in `ms`.
+  // One contact timer a lease, due in `ms`. An unattended take has no
+  // contact window (spec 2026-10-24 §6.3): no timer is ever armed for it.
   _armContact(lease, ms) {
+    if (lease.unattended === true) return;
     if (lease.contactTimer) this.timers.clearTimeout(lease.contactTimer);
     lease.contactTimer = this._timer(() => this._checkContact(lease), ms);
   }
@@ -186,7 +188,7 @@ class LeaseManager extends EventEmitter {
   // or early timer; third security review, finding 3) is armed again for
   // what is left, so the suspension never waits for the next input.
   _checkContact(lease) {
-    if (lease.state !== 'active') return;
+    if (lease.unattended === true || lease.state !== 'active') return;
     if (!this._contactLapsed(lease)) {
       this._armContact(lease, Math.max(1, Math.ceil(this._contactLeftMs(lease))));
       return;
@@ -372,10 +374,20 @@ class LeaseManager extends EventEmitter {
     return t;
   }
 
-  async request({ jobId, origin, appIds, minutes, reason, signal = null }) {
+  // kind 'take' (spec 2026-10-24 §6): take = { name, sites, browser,
+  // credentials, unattended }, from a session the node started itself only
+  // (nodeLocalOrigin), and only while gui.take.enabled is on.
+  async request({ jobId, origin, appIds, minutes, reason, signal = null, kind = 'computer_use', take = null, nodeLocalOrigin = true }) {
     // R-F5-7: a lease is bound to a job. A run with neither a job id nor a
     // chat id has none, and is refused before anything else is looked at.
     if (typeof jobId !== 'string' || !jobId) throw new GuiError('job_required', 'this run has no job or chat to bind a lease to');
+    if (!L.LEASE_KINDS.includes(kind)) throw new GuiError('invalid_params', `"kind" must be one of ${L.LEASE_KINDS.join(', ')}`);
+    const isTake = kind === 'take';
+    if (isTake) {
+      if (!(this.guiConfig.take && this.guiConfig.take.enabled === true)) throw new GuiError('invalid_params', 'takes are off in node.yaml');
+      if (nodeLocalOrigin === false) throw new GuiError('take_requires_local_origin', 'a take is started only from a session this node started itself');
+      if (!take || typeof take !== 'object' || Array.isArray(take)) throw new GuiError('invalid_params', 'a take needs its "take" block');
+    }
     if (!this.available()) throw new GuiError('approval_unavailable');
     // Fourth security review, finding 1 (R-F5-17): on Windows the service
     // asks again, before every new request, whether it can write the
@@ -395,7 +407,7 @@ class LeaseManager extends EventEmitter {
       || appIds.some((id) => !Object.hasOwn(cfg.apps, id))) {
       throw new GuiError('invalid_params', '"apps" must be 1–8 distinct allowlisted app ids');
     }
-    const max = Math.min(cfg.lease.maxMinutes, 60);
+    const max = isTake ? Math.min(cfg.take.maxMinutes, L.TAKE_MAX_MINUTES) : Math.min(cfg.lease.maxMinutes, L.MAX_MINUTES);
     if (!Number.isInteger(minutes) || minutes < 1 || minutes > max) throw new GuiError('invalid_params', `"minutes" must be 1–${max}`);
     // R-F5-7: a job that is not known to be open gets no lease; nothing is sent.
     if (!this._jobIsOpen(jobId)) throw new GuiError('job_closed', 'that job is not open on this node');
@@ -412,6 +424,8 @@ class LeaseManager extends EventEmitter {
     if (!lease) {
       lease = {
         leaseId: crypto.randomUUID(), jobId, origin, reason: String(reason), requestedApps: [...appIds], maxMinutes: minutes,
+        // kind and the take's block as requested; an unattended take has no contact window and never pauses (R-D1-7).
+        kind, take: isTake ? take : null, unattended: isTake && take.unattended === true, name: isTake ? take.name : null,
         // expiresAt is on the wall clock (what the phone is shown), expiresMono the same moment on the monotonic one.
         // grantedBy: the device whose grant made this lease (R-F5-15, R-F5-18): the only one that
         // resumes it or keeps it in contact. Any enrolled phone may stop it or watch it.
@@ -474,7 +488,8 @@ class LeaseManager extends EventEmitter {
     const { message, envelope } = L.buildLeaseRequest({
       identity: this.approvals.identity, nodeName: this.nodeName, jobId: lease.jobId,
       apps: ids.map((id) => ({ id, name: cfg.apps[id].name, path: cfg.apps[id].path, processes: cfg.apps[id].processes })),
-      maxMinutes, reason: lease.reason, resumes: resume, limits, origin: lease.origin, now, leaseId: lease.leaseId
+      maxMinutes, reason: lease.reason, resumes: resume, limits, origin: lease.origin, now, leaseId: lease.leaseId,
+      kind: lease.kind, take: lease.take
     });
     const entry = {
       request_id: message.request_id, lease_id: message.lease_id, nonce: message.nonce, lease_hash: message.lease_hash,
@@ -508,7 +523,8 @@ class LeaseManager extends EventEmitter {
     const now = this.clock();
     const r = L.verifyLeaseGrant(envelope, {
       approverStore: this.approvals.approverStore, nodeId: this.approvals.identity.nodeId, nonces: this.grantNonces,
-      pending: this.pending, guiApps: this.guiConfig.apps, jobOpen: (jobId) => this._jobIsOpen(jobId), guiMaxMinutes: this.guiConfig.lease.maxMinutes
+      pending: this.pending, guiApps: this.guiConfig.apps, jobOpen: (jobId) => this._jobIsOpen(jobId), guiMaxMinutes: this.guiConfig.lease.maxMinutes,
+      guiTakeMaxMinutes: this.guiConfig.take ? this.guiConfig.take.maxMinutes : L.TAKE_MAX_MINUTES
     }, now);
     if (!r.accepted) {
       let claimed = null;
@@ -707,8 +723,9 @@ class LeaseManager extends EventEmitter {
 
   noteInputOutcome(lease, { code = null, afterMatches = true } = {}) {
     if (lease.state !== 'active') return false;
-    if (code && suspendsLease(code)) { this.suspend(lease.leaseId, code); return true; }
-    if (!code && !afterMatches) { this.suspend(lease.leaseId, 'foreground_changed'); return true; }
+    // An unattended take is not suspended (suspend() records the event); the input's own refusal still stands.
+    if (code && suspendsLease(code)) { this.suspend(lease.leaseId, code); return lease.unattended !== true; }
+    if (!code && !afterMatches) { this.suspend(lease.leaseId, 'foreground_changed'); return lease.unattended !== true; }
     return false;
   }
 
@@ -719,9 +736,17 @@ class LeaseManager extends EventEmitter {
   // lease as if nothing had happened. The stronger reason brings its own
   // way back: a resume grant on the phone, and the app focused again.
   // Nothing else replaces a reason already recorded.
+  //
+  // An unattended take never pauses (R-D1-7, spec 2026-10-24 §6.3): the
+  // event is recorded (lease.event) and the lease carries on; no resume
+  // request is ever sent for it. What ends a lease still ends it.
   suspend(leaseId, reason) {
     const lease = this.find(leaseId);
     if (!lease) return;
+    if (lease.unattended === true) {
+      if (lease.state === 'active') this._audit('lease.event', lease, { reason });
+      return;
+    }
     const takesOver = lease.state === 'suspended' && lease.suspendReason === CONTACT_REASON && reason !== CONTACT_REASON;
     if (lease.state !== 'active' && !takesOver) return;
     lease.state = 'suspended';
@@ -826,7 +851,8 @@ class LeaseManager extends EventEmitter {
       identity: this.approvals.identity, leaseId: lease.leaseId, seq: this.nextSeq(lease), state: lease.state, locked: lease.locked,
       reason: lease.endReason || lease.suspendReason || null, expiresAt: lease.expiresAt,
       contactToken,
-      grantedBy: lease.grantedBy ? { deviceId: lease.grantedBy, name: lease.grantedByName } : null, now: this.clock()
+      grantedBy: lease.grantedBy ? { deviceId: lease.grantedBy, name: lease.grantedByName } : null,
+      kind: lease.kind, unattended: lease.unattended === true, name: lease.name || null, now: this.clock()
     });
     lease.lastStatus = envelope;
     // What that status says, when it was signed and with which token: a listing reuses it while all three still hold.
