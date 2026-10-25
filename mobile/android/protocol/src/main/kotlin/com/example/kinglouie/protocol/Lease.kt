@@ -17,21 +17,39 @@ data class LeaseApp(val id: String, val name: String, val path: String, val proc
 data class LeaseRequest(
     val requestId: String, val leaseId: String, val nodeId: String, val nodeName: String, val jobId: String,
     val apps: List<LeaseApp>, val maxMinutes: Int, val reason: String, val resumes: String?, val limits: List<String>,
-    val originClient: String, val leaseHash: String, val nonce: String, val createdAt: String, val expiresAt: String
+    val originClient: String, val leaseHash: String, val nonce: String, val createdAt: String, val expiresAt: String,
+    /** Revised 2026-10-24 (agent-driven demo takes): `computer_use` or `take`. */
+    val kind: String = "computer_use",
+    /** A take's name (one plain line, 1–60 characters); null for computer_use. */
+    val name: String? = null,
+    /** The hosts a take may visit; empty for computer_use. */
+    val sites: List<String> = emptyList(),
+    /** A take's browser allowance: null when it is `true` (browser actions on its sites), else the browser actions it may use. Null for computer_use. */
+    val browserActions: List<String>? = null,
+    /** Whether a take may fill credentials from the vault; false for computer_use. */
+    val credentials: Boolean = false,
+    /** Whether a take runs with no contact window; false for computer_use. */
+    val unattended: Boolean = false
 ) {
     val isResume: Boolean get() = resumes != null
+    val isTake: Boolean get() = kind == "take"
 
     companion object {
         const val TYPE = "kl.lease.request"
 
-        /** null unless [message] is a complete kl.lease.request whose lease_hash is the hash of its lease. */
+        /**
+         * null unless [message] is a complete kl.lease.request whose lease_hash is the hash of its lease,
+         * and whose lease has exactly the keys of its kind ([Leases.isLease]).
+         */
         fun from(message: JsonElement): LeaseRequest? {
             if (message["type"].str() != TYPE || message["v"].int() != 1) return null
             val lease = message["lease"].obj() ?: return null
             val leaseHash = message["lease_hash"].str() ?: return null
-            if (lease["kind"].str() != "computer_use") return null
+            if (!Leases.isLease(lease)) return null
+            val kind = lease["kind"].str() ?: return null
+            val take = kind == "take"
             if (Digest.sha256B64url(Jcs.bytes(lease)) != leaseHash) return null
-            val maxMinutes = lease["max_minutes"].int()?.takeIf { it in 1..60 } ?: return null
+            val maxMinutes = lease["max_minutes"].int() ?: return null
             val apps = (lease["apps"].arr() ?: return null).map { a ->
                 LeaseApp(
                     a["id"].str() ?: return null, a["name"].str() ?: return null, a["path"].str() ?: return null,
@@ -45,7 +63,13 @@ data class LeaseRequest(
                 lease["job_id"].str() ?: return null, apps, maxMinutes, lease["reason"].str() ?: return null,
                 lease["resumes"].str(), (lease["limits"].arr() ?: JsonArray(emptyList())).mapNotNull { it.str() },
                 message["origin"]["client"].str() ?: "", leaseHash, message["nonce"].str() ?: return null,
-                message["created_at"].str() ?: return null, message["expires_at"].str() ?: return null
+                message["created_at"].str() ?: return null, message["expires_at"].str() ?: return null,
+                kind = kind,
+                name = if (take) lease["name"].str() else null,
+                sites = if (take) (lease["sites"].arr() ?: JsonArray(emptyList())).mapNotNull { it.str() } else emptyList(),
+                browserActions = if (take) lease["browser"].arr()?.mapNotNull { it.str() } else null,
+                credentials = take && lease["credentials"].bool() == true,
+                unattended = take && lease["unattended"].bool() == true
             )
         }
     }
@@ -61,17 +85,32 @@ data class LeaseStatus(
      * nobody has granted the lease.
      */
     val grantedByDevice: String? = null,
-    val grantedByName: String? = null
+    val grantedByName: String? = null,
+    /**
+     * Revised 2026-10-24: the lease's kind, whether it runs unattended
+     * (always false for computer_use), and a take's name (null for
+     * computer_use). A status without them, or whose three do not agree, is
+     * not read (the node's VALIDATORS['kl.lease.status']).
+     */
+    val kind: String = "computer_use",
+    val unattended: Boolean = false,
+    val name: String? = null
 ) {
     companion object {
         const val TYPE = "kl.lease.status"
 
         fun from(m: JsonElement): LeaseStatus? {
             if (m["type"].str() != TYPE) return null
+            val kind = m["kind"].str()?.takeIf { it in Leases.LEASE_KINDS } ?: return null
+            val unattended = m["unattended"].bool() ?: return null
+            if (kind != "take" && unattended) return null
+            val name = m["name"] ?: return null
+            if (if (kind == "take") !Leases.isTakeName(name) else name !is JsonNull) return null
             return LeaseStatus(
                 m["lease_id"].str() ?: return null, m["node_id"].str() ?: return null, m["seq"].int() ?: return null,
                 m["state"].str() ?: return null, m["locked"].bool() ?: return null, m["reason"].str(), m["expires_at"].str(),
-                m["contact_token"].str(), m["granted_by"]["device_id"].str(), m["granted_by"]["name"].str()
+                m["contact_token"].str(), m["granted_by"]["device_id"].str(), m["granted_by"]["name"].str(),
+                kind, unattended, name.str()
             )
         }
     }
@@ -270,11 +309,121 @@ object Leases {
     fun mergedActions(shown: List<LeaseAction>, fresh: List<LeaseAction>): List<LeaseAction> =
         (fresh + shown).distinctBy { it.seq }.sortedByDescending { it.seq }.take(ACTIONS_KEPT)
 
-    /** The request's own apps, in its order, kept only if the owner left them on. */
+    // ---- the lease, by kind (revised 2026-10-24; checkLease in src/gui/lease-protocol.js) ----
+
+    /** The most minutes a computer_use lease asks for (MAX_MINUTES), and a take (TAKE_MAX_MINUTES). */
+    const val MAX_MINUTES = 60
+    const val TAKE_MAX_MINUTES = 240
+    val LEASE_KINDS = listOf("computer_use", "take")
+
+    /** A lease has exactly the keys of its kind (LEASE_KEYS). */
+    private val LEASE_KEYS = mapOf(
+        "computer_use" to listOf("kind", "job_id", "apps", "max_minutes", "reason", "resumes", "limits"),
+        "take" to listOf("kind", "job_id", "name", "sites", "apps", "browser", "credentials", "max_minutes", "unattended", "reason", "resumes", "limits")
+    )
+    private val LEASE_LIMITS = listOf("no_lock_detect", "no_human_yield")
+    private val APP_ID = Regex("^[a-z][a-z0-9-]{0,31}$")
+    private val SITE = Regex("^(\\*\\.)?[a-z0-9-]+(\\.[a-z0-9-]+)+$")
+
+    /** A list of strings, at most [max], each passing [each] (isStringList). */
+    private fun isStringList(v: JsonElement?, max: Int, each: (String) -> Boolean): Boolean {
+        val list = v.arr() ?: return false
+        return list.size <= max && list.all { item -> item.str()?.let(each) ?: false }
+    }
+
+    private fun codePoints(s: String): Int = s.codePointCount(0, s.length)
+
+    /** APP_ID_RE, SITE_RE: ASCII patterns, matched whole. */
+    internal fun isAppId(s: String): Boolean = APP_ID.matches(s)
+
+    internal fun isSite(s: String): Boolean = SITE.matches(s)
+
+    /**
+     * One plain line: plainLineProblem in src/cases/hidden-chars.js, whole.
+     * Refused: every hidden code point (HIDDEN_RANGES, which lies inside
+     * approval-v1 §5's table, [Display.isHidden]), U+FFF9–U+FFFC, every
+     * space or blank that is not U+0020, two U+0020 in a row, and more than
+     * three combining marks (\p{M}) in a row.
+     */
+    fun isPlainLine(text: String): Boolean {
+        var spaces = 0
+        var marks = 0
+        var i = 0
+        while (i < text.length) {
+            val cp = text.codePointAt(i)
+            i += Character.charCount(cp)
+            if (Display.isHidden(cp) || cp in 0xFFF9..0xFFFC) return false
+            if (cp == 0x00A0 || cp == 0x1680 || cp in 0x2000..0x200A || cp == 0x202F || cp == 0x205F || cp == 0x2800 || cp == 0x3000) return false
+            spaces = if (cp == 0x20) spaces + 1 else 0
+            if (spaces > 1) return false
+            val type = Character.getType(cp)
+            marks = if (type == Character.NON_SPACING_MARK.toInt() || type == Character.COMBINING_SPACING_MARK.toInt() || type == Character.ENCLOSING_MARK.toInt()) marks + 1 else 0
+            if (marks > 3) return false
+        }
+        return true
+    }
+
+    /** A take's name: 1–60 characters, one plain line. */
+    fun isTakeName(v: JsonElement?): Boolean {
+        val s = v.str() ?: return false
+        return s.isNotEmpty() && codePoints(s) <= 60 && isPlainLine(s)
+    }
+
+    private fun isApp(v: JsonElement): Boolean {
+        val a = v.obj() ?: return false
+        if (!Rules.hasExactKeys(a, listOf("id", "name", "path", "processes"))) return false
+        val id = a["id"].str() ?: return false
+        return isAppId(id) && Rules.withinLength(a["name"], 64) && Rules.withinLength(a["path"], 1024) &&
+            isStringList(a["processes"], 16) { codePoints(it) <= 1024 }
+    }
+
+    /** The fields only a take has (checkTakeFields). */
+    private fun isTakeFields(l: JsonObject): Boolean {
+        if (!isTakeName(l["name"])) return false
+        if (!isStringList(l["sites"], 32) { isSite(it) } || l["sites"].arr()!!.isEmpty()) return false
+        if (l["credentials"].bool() == null || l["unattended"].bool() == null) return false
+        if (l["browser"].bool() == true) return true
+        return isStringList(l["browser"], 64) { it.isNotEmpty() } && l["browser"].arr()!!.isNotEmpty()
+    }
+
+    /**
+     * checkLease: exactly the keys of its kind; a job; 1–8 apps, each once;
+     * max_minutes 1–60 (1–240 for a take); a reason; resumes null or a lease
+     * id; the limits known, sorted, each once; and a take's own fields.
+     */
+    fun isLease(v: JsonElement?): Boolean {
+        val l = v.obj() ?: return false
+        val kind = l["kind"].str() ?: return false
+        val keys = LEASE_KEYS[kind] ?: return false
+        if (!Rules.hasExactKeys(l, keys)) return false
+        val take = kind == "take"
+        val jobId = l["job_id"].str() ?: return false
+        if (jobId.isEmpty() || codePoints(jobId) > 200) return false
+        val apps = l["apps"].arr() ?: return false
+        if (apps.size !in 1..8 || !apps.all { isApp(it) } || apps.map { it["id"].str() }.toSet().size != apps.size) return false
+        val mm = l["max_minutes"] ?: return false
+        if (!Rules.isInteger(mm)) return false
+        val minutes = mm.int() ?: return false
+        if (minutes !in 1..(if (take) TAKE_MAX_MINUTES else MAX_MINUTES)) return false
+        val reason = l["reason"].str() ?: return false
+        if (reason.isEmpty() || codePoints(reason) > 280) return false
+        if (l["resumes"] !is JsonNull && !Rules.isUuidV4(l["resumes"])) return false
+        if (!isStringList(l["limits"], LEASE_LIMITS.size) { it in LEASE_LIMITS }) return false
+        val limits = l["limits"].arr()!!.map { it.str()!! }
+        if (limits.zipWithNext().any { (a, b) -> a >= b }) return false
+        return !take || isTakeFields(l)
+    }
+
+    /**
+     * The request's own apps, in its order, kept only if the owner left them on.
+     * The minutes are at most the request's, and never past the kind's cap
+     * (60, or 240 for a take); the admin's own caps are the node's to check.
+     */
     fun grant(request: LeaseRequest, apps: List<String>, minutes: Int, deviceId: String, signedAt: String): JsonObject {
         val chosen = apps.toSet()
         if (chosen.isEmpty() || !request.apps.map { it.id }.containsAll(chosen)) throw ProtocolException("pick at least one of the requested apps")
-        if (minutes !in 1..request.maxMinutes) throw ProtocolException("minutes must be 1–${request.maxMinutes}")
+        val cap = minOf(request.maxMinutes, if (request.isTake) TAKE_MAX_MINUTES else MAX_MINUTES)
+        if (minutes !in 1..cap) throw ProtocolException("minutes must be 1–$cap")
         val ordered = request.apps.map { it.id }.filter { it in chosen }
         val grant = JsonObject(mapOf("apps" to JsonArray(ordered.map { jsonString(it) }), "minutes" to jsonNumber(minutes.toString())))
         return decision(request, "grant", grant, deviceId, signedAt)

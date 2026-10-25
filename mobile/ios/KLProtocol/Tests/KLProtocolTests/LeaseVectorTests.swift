@@ -47,7 +47,10 @@ final class LeaseVectorTests: XCTestCase {
                                "listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
                                "listing-other-device", "listing-bad-signature",
                                "listing-other-node", "listing-wrong-node", "listing-extra-status", "listing-duplicate-lease",
-                               "listing-too-many", "listing-extra-key", "listing-bad-at"])
+                               "listing-too-many", "listing-extra-key", "listing-bad-at",
+                               // Revised 2026-10-24: the take lease.
+                               "take-grant", "take-grant-minutes-over-cap", "take-request-missing-name", "computer-use-with-unattended",
+                               "status-take"])
     }
 
     static let listingVectors = ["listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
@@ -163,7 +166,8 @@ final class LeaseVectorTests: XCTestCase {
     }
 
     func testGrants() throws {
-        for name in ["grant-valid", "grant-narrowed", "resume-capped"] {
+        // A take is built like any grant; the admin's take cap (120 in the second) is the node's to refuse.
+        for name in ["grant-valid", "grant-narrowed", "resume-capped", "take-grant", "take-grant-minutes-over-cap"] {
             try assertBuilds(name) { v, expect in
                 let req = try request(v)
                 let apps = expect["grant"]!["apps"]!.arrayValue!.compactMap { $0.stringValue }
@@ -173,6 +177,58 @@ final class LeaseVectorTests: XCTestCase {
         }
         let resume = try request(try vector("resume-capped"))
         XCTAssertTrue(resume.isResume)
+        XCTAssertFalse(resume.isTake)
+        let take = try request(try vector("take-grant"))
+        XCTAssertTrue(take.isTake)
+        XCTAssertEqual(take.name, "BSEOA in ChatGPT")
+        XCTAssertEqual(take.sites, ["chatgpt.com", "*.chatgpt.com"])
+        XCTAssertNil(take.browserActions)
+        XCTAssertFalse(take.credentials)
+        XCTAssertTrue(take.unattended)
+        XCTAssertEqual(take.maxMinutes, 180)
+        // The phone's cap is the request's, and never past 240 for a take.
+        XCTAssertThrowsError(try Leases.grant(to: take, apps: ["notepad"], minutes: 181, deviceId: "d-aaaaaaaaaaaaaaaa", signedAt: "2026-09-23T18:04:16.201Z"))
+        XCTAssertEqual(Leases.takeMaxMinutes, 240)
+        XCTAssertEqual(Leases.maxMinutes, 60)
+    }
+
+    /// Revised 2026-10-24: a node-signed request whose lease has the wrong
+    /// keys for its kind is not read (a take with no name; a computer_use
+    /// lease that says unattended).
+    func testRequestsWithTheWrongKeysForTheirKind() throws {
+        for name in ["take-request-missing-name", "computer-use-with-unattended"] {
+            let v = try vector(name)
+            let message = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)), name)
+            XCTAssertNil(LeaseRequest(message: message), name)
+            XCTAssertFalse(Leases.isLease(message["lease"]), name)
+            XCTAssertEqual(v["expect"]!["reason"]!.stringValue, "malformed", name)
+        }
+        let given = try vector("take-grant")
+        let lease = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: given["given"]!["request"]!), pin: pin(given))?["lease"])
+        XCTAssertTrue(Leases.isLease(lease))
+        func with(_ key: String, _ value: JSONValue?) -> JSONValue {
+            var o = lease.objectValue!
+            o[key] = value
+            return .object(o)
+        }
+        let bad: [(String, JSONValue)] = [
+            ("an unknown kind", with("kind", .string("screen"))), ("no name", with("name", nil)),
+            ("an empty name", with("name", .string(""))), ("a name of 61", with("name", .string(String(repeating: "a", count: 61)))),
+            ("a line break", with("name", .string("a\nb"))), ("two spaces", with("name", .string("a  b"))),
+            ("a no-break space", with("name", .string("a\u{00A0}b"))), ("a bidi override", with("name", .string("a\u{202E}b"))),
+            ("an object replacement", with("name", .string("a\u{FFFC}b"))),
+            ("four combining marks", with("name", .string("a\u{0301}\u{0301}\u{0301}\u{0301}"))),
+            ("no sites", with("sites", .array([]))), ("an upper-case host", with("sites", .array([.string("Example.com")]))),
+            ("a bare label", with("sites", .array([.string("localhost")]))), ("a path", with("sites", .array([.string("example.com/x")]))),
+            ("browser false", with("browser", .bool(false))), ("browser empty", with("browser", .array([]))),
+            ("an empty browser action", with("browser", .array([.string("")]))),
+            ("credentials not a boolean", with("credentials", .string("no"))), ("unattended not a boolean", with("unattended", .null)),
+            ("241 minutes", with("max_minutes", .number("241")))
+        ]
+        for (why, value) in bad { XCTAssertFalse(Leases.isLease(value), why) }
+        XCTAssertTrue(Leases.isLease(with("name", .string("a\u{0301}\u{0301}\u{0301}"))))
+        XCTAssertTrue(Leases.isLease(with("browser", .array([.string("navigate"), .string("click")]))))
+        XCTAssertTrue(Leases.isLease(with("max_minutes", .number("240"))))
     }
 
     func testDeny() throws {
@@ -199,7 +255,7 @@ final class LeaseVectorTests: XCTestCase {
 
     /// R-F5-15: a status the pinned node signed gives the token the next watch echoes.
     func testStatuses() throws {
-        for name in ["status-valid", "status-no-contact", "status-pending", "status-granted-unnamed"] {
+        for name in ["status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "status-take"] {
             let v = try vector(name)
             let message = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)), name)
             let status = try XCTUnwrap(LeaseStatus(message: message), name)
@@ -214,7 +270,28 @@ final class LeaseVectorTests: XCTestCase {
             XCTAssertEqual(status.grantedByDevice, expect["granted_by"]?["device_id"]?.stringValue, name)
             XCTAssertEqual(status.grantedByName, expect["granted_by"]?["name"]?.stringValue, name)
             XCTAssertEqual(Leases.isLive(state: status.state), name != "status-pending", name)
+            // Revised 2026-10-24: every status says its kind, whether it runs unattended, and a take's name.
+            XCTAssertEqual(status.kind, expect["kind"]?.stringValue ?? "computer_use", name)
+            XCTAssertEqual(status.unattended, expect["unattended"]?.boolValue ?? false, name)
+            XCTAssertEqual(status.name, expect["name"]?.stringValue, name)
         }
+        // The three must agree: computer_use is never unattended and has no name; a take has a name.
+        let plainVector = try vector("status-valid")
+        let plain = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: plainVector["input"]!), pin: pin(plainVector)))
+        func status(_ changes: [String: JSONValue?]) -> LeaseStatus? {
+            var o = plain.objectValue!
+            for (k, v) in changes { o[k] = v }
+            return LeaseStatus(message: .object(o))
+        }
+        XCTAssertNotNil(status([:]))
+        XCTAssertNil(status(["unattended": .bool(true)]))
+        XCTAssertNil(status(["name": .string("A take")]))
+        XCTAssertNil(status(["kind": .string("take")]))
+        XCTAssertNotNil(status(["kind": .string("take"), "name": .string("A take"), "unattended": .bool(true)]))
+        XCTAssertNotNil(status(["kind": .string("take"), "name": .string("A take"), "unattended": .bool(false)]))
+        XCTAssertNil(status(["kind": .string("take"), "name": .string("A  take"), "unattended": .bool(true)]))
+        XCTAssertNil(status(["kind": .string("screen")]))
+        XCTAssertNil(status(["kind": nil]))
         XCTAssertEqual(Leases.noContact, "no_contact")
         XCTAssertFalse(Leases.isPausedForContact(state: "suspended", reason: "foreground_changed"))
         XCTAssertFalse(Leases.isPausedForContact(state: "suspended", reason: nil))
@@ -333,7 +410,8 @@ final class LeaseVectorTests: XCTestCase {
         func status(_ seq: Int) throws -> LeaseStatus {
             try XCTUnwrap(LeaseStatus(message: .object([
                 "type": .string("kl.lease.status"), "lease_id": .string("lease-1"), "node_id": .string("kl-node"),
-                "seq": .number(String(seq)), "state": .string("active"), "locked": .bool(false)
+                "seq": .number(String(seq)), "state": .string("active"), "locked": .bool(false),
+                "kind": .string("computer_use"), "unattended": .bool(false), "name": .null
             ])))
         }
         func view(_ seq: Int, _ toDevice: String) -> LeaseView {

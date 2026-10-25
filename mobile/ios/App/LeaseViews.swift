@@ -15,7 +15,11 @@ struct LeaseRequestsSection: View {
                     NavigationLink { LeaseRequestView(item: item) } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(Display.escape(item.nodeName)).font(.headline)
-                            Text(item.request.isResume ? "Resume computer use" : "Computer use: \(item.request.apps.map { Display.escape($0.name) }.joined(separator: ", "))")
+                            if item.request.isTake, let name = item.request.name {
+                                Text("Take: \(Display.escape(name))")
+                            } else {
+                                Text(item.request.isResume ? "Resume computer use" : "Computer use: \(item.request.apps.map { Display.escape($0.name) }.joined(separator: ", "))")
+                            }
                             Text("Job \(Display.escape(item.request.jobId)) · \(Display.escape(item.request.originClient))").font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -45,32 +49,77 @@ struct LeaseRequestView: View {
     private static let limitText = ["no_lock_detect": "This computer cannot detect a locked screen.",
                                     "no_human_yield": "This computer cannot detect your own typing, so it will not pause for you."]
 
+    // Revised 2026-10-24 (agent-driven demo takes): the host's own words for
+    // what a take may do. Each is chosen by a signed field, never taken from
+    // a string the request sent.
+    static let unattendedLine = "Unattended: no check-ins; runs until it ends or you stop it"
+    static let browserTrueLine = "drive the browser on these sites (no scripts, no network changes, no uploads)"
+    static let credentialsLine = "credentials from the vault"
+
+    private var nodeSection: some View {
+        Section("Node") {
+            Text(Display.escape(item.nodeName)).font(.headline)
+            LabeledContent("Job", value: Display.escape(item.request.jobId))
+            LabeledContent("Asked by", value: Display.escape(item.request.originClient))
+        }
+    }
+
+    private var reasonSection: some View {
+        Section("Agent's reason (unverified)") { Text(Display.escape(item.request.reason)) }
+    }
+
+    private var appsSection: some View {
+        Section("Apps it may control") {
+            ForEach(item.request.apps) { app in
+                Toggle(isOn: Binding(get: { chosen.contains(app.id) }, set: { on in if on { _ = chosen.insert(app.id) } else { _ = chosen.remove(app.id) } })) {
+                    VStack(alignment: .leading) {
+                        Text(Display.escape(app.name))
+                        Text(Display.escape(app.path)).font(.caption.monospaced())
+                        if !app.processes.isEmpty { Text(app.processes.map { Display.escape($0) }.joined(separator: ", ")).font(.caption2.monospaced()).foregroundStyle(.secondary) }
+                    }
+                }
+                .disabled(item.request.isResume)
+            }
+        }
+    }
+
+    private var minutesSection: some View {
+        Section("For how long") {
+            if item.request.isResume {
+                Text("The \(item.request.maxMinutes) min that were left; a resume never extends the lease.")
+            } else {
+                Stepper("\(minutes) min", value: $minutes, in: 1...item.request.maxMinutes)
+            }
+        }
+    }
+
     var body: some View {
         Form {
-            Section("Node") {
-                Text(Display.escape(item.nodeName)).font(.headline)
-                LabeledContent("Job", value: Display.escape(item.request.jobId))
-                LabeledContent("Asked by", value: Display.escape(item.request.originClient))
-            }
-            Section("Agent's reason (unverified)") { Text(Display.escape(item.request.reason)) }
-            Section("Apps it may control") {
-                ForEach(item.request.apps) { app in
-                    Toggle(isOn: Binding(get: { chosen.contains(app.id) }, set: { on in if on { _ = chosen.insert(app.id) } else { _ = chosen.remove(app.id) } })) {
-                        VStack(alignment: .leading) {
-                            Text(Display.escape(app.name))
-                            Text(Display.escape(app.path)).font(.caption.monospaced())
-                            if !app.processes.isEmpty { Text(app.processes.map { Display.escape($0) }.joined(separator: ", ")).font(.caption2.monospaced()).foregroundStyle(.secondary) }
-                        }
+            if item.request.isTake {
+                // A take, in this order: its name, unattended, how long, the
+                // sites and what it may do there, the apps, the reason.
+                Section("Take") {
+                    Text(Display.escape(item.request.name ?? "")).font(.headline)
+                    if item.request.unattended { Text(Self.unattendedLine).foregroundStyle(.orange) }
+                }
+                minutesSection
+                Section("Sites") {
+                    ForEach(item.request.sites, id: \.self) { Text(Display.escape($0)).font(.body.monospaced()) }
+                    if let actions = item.request.browserActions {
+                        Text(actions.map { Display.escape($0) }.joined(separator: ", "))
+                    } else {
+                        Text(Self.browserTrueLine)
                     }
-                    .disabled(item.request.isResume)
+                    if item.request.credentials { Text(Self.credentialsLine) }
                 }
-            }
-            Section("For how long") {
-                if item.request.isResume {
-                    Text("The \(item.request.maxMinutes) min that were left; a resume never extends the lease.")
-                } else {
-                    Stepper("\(minutes) min", value: $minutes, in: 1...item.request.maxMinutes)
-                }
+                appsSection
+                reasonSection
+                nodeSection
+            } else {
+                nodeSection
+                reasonSection
+                appsSection
+                minutesSection
             }
             if !item.request.limits.isEmpty {
                 Section("Warnings") { ForEach(item.request.limits, id: \.self) { Text(Self.limitText[$0] ?? Display.escape($0)).foregroundStyle(.orange) } }
@@ -86,7 +135,7 @@ struct LeaseRequestView: View {
                 .disabled(model.decidingLease.contains(item.id))
             }
         }
-        .navigationTitle("Computer use")
+        .navigationTitle(item.request.isTake ? "Take" : "Computer use")
         .onAppear {
             chosen = Set(item.request.apps.map { $0.id })
             minutes = item.request.maxMinutes
@@ -184,6 +233,14 @@ struct LiveLeaseView: View {
 struct LeaseBanner: View {
     @EnvironmentObject var model: AppModel
 
+    /// Revised 2026-10-24: a running lease its node signed as an unattended
+    /// take is named by that take and the time it ends; nil for any other
+    /// row, which keeps the model's title. The Stop beside it is the same.
+    private func takeTitle(_ lease: AppModel.RunningLease) -> String? {
+        guard let take = model.unattendedTake(lease) else { return nil }
+        return "Unattended take: " + Display.escape(take.name) + ", ends " + take.ends.formatted(date: .omitted, time: .shortened)
+    }
+
     var body: some View {
         // The stack stays (empty) once no lease is running, so the sheet it
         // presents can still show how a lease ended.
@@ -191,7 +248,11 @@ struct LeaseBanner: View {
             ForEach(model.bannerLeases) { lease in
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Button(model.bannerTitle(lease)) { model.showLease(lease) }
+                        if let take = takeTitle(lease) {
+                            Button(take) { model.showLease(lease) }
+                        } else {
+                            Button(model.bannerTitle(lease)) { model.showLease(lease) }
+                        }
                         if let by = model.grantedByOtherText(device: lease.grantedByDevice, name: lease.grantedByName) {
                             Text(by).font(.caption).foregroundStyle(.secondary)
                         }

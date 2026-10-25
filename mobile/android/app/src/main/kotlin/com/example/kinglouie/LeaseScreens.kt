@@ -45,6 +45,20 @@ private val LIMIT_TEXT = mapOf(
 )
 private val WARNING = Color(0xFFB26A00)
 
+// Revised 2026-10-24 (agent-driven demo takes): the host's own words for what
+// a take may do. Each is chosen by a signed field, never taken from a string
+// the request sent.
+private const val UNATTENDED_LINE = "Unattended: no check-ins; runs until it ends or you stop it"
+private const val BROWSER_TRUE_LINE = "drive the browser on these sites (no scripts, no network changes, no uploads)"
+private const val CREDENTIALS_LINE = "credentials from the vault"
+
+/**
+ * What a banner row calls an unattended take, as its node signed it ([AppModel.unattendedTake]): its name and
+ * the time it ends. Null for any other lease, whose row keeps its usual title. The Stop beside it is the same.
+ */
+private fun takeTitle(take: Pair<String, Long>?): String? =
+    take?.let { "Unattended take: " + Display.escape(it.first) + ", ends " + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(it.second)) }
+
 /** Lease requests in the Pending tab. Nothing is fetched until the owner taps (R-F5-1, R-F5-6). */
 @Composable
 fun LeaseRequests(model: AppModel, open: (AppModel.LeaseRequestItem) -> Unit) {
@@ -74,7 +88,8 @@ fun LeaseRequests(model: AppModel, open: (AppModel.LeaseRequestItem) -> Unit) {
         for (item in model.leaseRequests) {
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text(Display.escape(item.nodeName), fontWeight = FontWeight.Bold)
-                Text(if (item.request.isResume) "Resume computer use" else "Computer use: ${item.request.apps.joinToString(", ") { Display.escape(it.name) }}")
+                if (item.request.isTake) Text("Take: ${Display.escape(item.request.name ?: "")}")
+                else Text(if (item.request.isResume) "Resume computer use" else "Computer use: ${item.request.apps.joinToString(", ") { Display.escape(it.name) }}")
                 Text("Job ${Display.escape(item.request.jobId)} · ${Display.escape(item.request.originClient)}")
                 item.unconfirmed?.let { Text(it, color = WARNING) }
                 OutlinedButton({ open(item) }) { Text("Review") }
@@ -89,13 +104,26 @@ fun LeaseRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, back: (
     var chosen by remember { mutableStateOf(item.request.apps.map { it.id }.toSet()) }
     var minutes by remember { mutableStateOf(item.request.maxMinutes) }
     val deciding = item.request.requestId in model.decidingLease
+    val take = item.request.isTake
     LazyColumn(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             TextButton(back) { Text("Back") }
-            Text(Display.escape(item.nodeName), fontWeight = FontWeight.Bold)
-            Text("Job ${Display.escape(item.request.jobId)} · asked by ${Display.escape(item.request.originClient)}")
-            Text("Agent's reason (unverified)", fontWeight = FontWeight.Bold)
-            Text(Display.escape(item.request.reason))
+            if (take) {
+                // A take, in this order: its name, unattended, how long, the sites and what it may do there,
+                // the apps, the reason (then who asks).
+                Text(Display.escape(item.request.name ?: ""), fontWeight = FontWeight.Bold)
+                if (item.request.unattended) Text(UNATTENDED_LINE, color = WARNING)
+                LeaseMinutes(item, minutes) { minutes = it }
+                Text("Sites", fontWeight = FontWeight.Bold)
+                for (site in item.request.sites) Text(Display.escape(site), fontFamily = FontFamily.Monospace)
+                Text(item.request.browserActions?.joinToString(", ") { Display.escape(it) } ?: BROWSER_TRUE_LINE)
+                if (item.request.credentials) Text(CREDENTIALS_LINE)
+            } else {
+                Text(Display.escape(item.nodeName), fontWeight = FontWeight.Bold)
+                Text("Job ${Display.escape(item.request.jobId)} · asked by ${Display.escape(item.request.originClient)}")
+                Text("Agent's reason (unverified)", fontWeight = FontWeight.Bold)
+                Text(Display.escape(item.request.reason))
+            }
             Text("Apps it may control", fontWeight = FontWeight.Bold)
         }
         items(item.request.apps) { app ->
@@ -109,14 +137,13 @@ fun LeaseRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, back: (
             }
         }
         item {
-            if (item.request.isResume) {
-                Text("The ${item.request.maxMinutes} min that were left; a resume never extends the lease.")
+            if (take) {
+                Text("Agent's reason (unverified)", fontWeight = FontWeight.Bold)
+                Text(Display.escape(item.request.reason))
+                Text(Display.escape(item.nodeName), fontWeight = FontWeight.Bold)
+                Text("Job ${Display.escape(item.request.jobId)} · asked by ${Display.escape(item.request.originClient)}")
             } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton({ if (minutes > 1) minutes -= 1 }) { Text("−") }
-                    Text("  $minutes min  ")
-                    OutlinedButton({ if (minutes < item.request.maxMinutes) minutes += 1 }) { Text("+") }
-                }
+                LeaseMinutes(item, minutes) { minutes = it }
             }
             for (limit in item.request.limits) Text(LIMIT_TEXT[limit] ?: Display.escape(limit), color = WARNING)
             item.unconfirmed?.let { Text(it, color = WARNING) }
@@ -125,6 +152,20 @@ fun LeaseRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, back: (
                 Button({ model.decideLease(item, chosen, minutes, grant = true); done() }, enabled = chosen.isNotEmpty() && !deciding) { Text("Allow") }
                 OutlinedButton({ model.decideLease(item, emptySet(), 1, grant = false); done() }, enabled = !deciding) { Text("Deny") }
             }
+        }
+    }
+}
+
+/** For how long: up to the request's own max_minutes, or the minutes a resume has left. */
+@Composable
+private fun LeaseMinutes(item: AppModel.LeaseRequestItem, minutes: Int, set: (Int) -> Unit) {
+    if (item.request.isResume) {
+        Text("The ${item.request.maxMinutes} min that were left; a resume never extends the lease.")
+    } else {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton({ if (minutes > 1) set(minutes - 1) }) { Text("−") }
+            Text("  $minutes min  ")
+            OutlinedButton({ if (minutes < item.request.maxMinutes) set(minutes + 1) }) { Text("+") }
         }
     }
 }
@@ -190,7 +231,7 @@ fun LeaseBanner(model: AppModel, open: () -> Unit) {
                 Column(Modifier.weight(1f)) {
                     // A lease that is not running yet and may still start says so, in the words for what this phone
                     // knows of it: a grant it remembers signing, or only that its node says a request is waiting.
-                    OutlinedButton(open) { Text(if (live.state == "pending") model.pendingLeaseTitle(live.leaseId, live.nodeName) else "Lease ${if (live.state == "suspended") "paused" else "active"} on ${Display.escape(live.nodeName)}") }
+                    OutlinedButton(open) { Text(takeTitle(model.unattendedTake(live)) ?: if (live.state == "pending") model.pendingLeaseTitle(live.leaseId, live.nodeName) else "Lease ${if (live.state == "suspended") "paused" else "active"} on ${Display.escape(live.nodeName)}") }
                     if (live.state == "pending") Text(model.pendingLeaseDetail(live.leaseId))
                     Leases.grantedByOther(live.grantedByDevice, live.grantedByName, model.deviceId)?.let { Text(it) }
                 }
@@ -202,7 +243,7 @@ fun LeaseBanner(model: AppModel, open: () -> Unit) {
             if (lease.leaseId != live?.leaseId) {
                 Row(Modifier.fillMaxWidth().background(Color(0x22FF0000)).padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                     Column(Modifier.weight(1f)) {
-                        OutlinedButton({ model.openRunningLease(lease); open() }) { Text(if (lease.state == "pending") model.pendingLeaseTitle(lease.leaseId, lease.nodeName) else "Lease ${if (lease.state == "suspended") "paused" else "active"} on ${Display.escape(lease.nodeName)}") }
+                        OutlinedButton({ model.openRunningLease(lease); open() }) { Text(takeTitle(model.unattendedTake(lease)) ?: if (lease.state == "pending") model.pendingLeaseTitle(lease.leaseId, lease.nodeName) else "Lease ${if (lease.state == "suspended") "paused" else "active"} on ${Display.escape(lease.nodeName)}") }
                         if (lease.state == "pending") Text(model.pendingLeaseDetail(lease.leaseId))
                         Leases.grantedByOther(lease.grantedByDevice, lease.grantedByName, model.deviceId)?.let { Text(it) }
                     }

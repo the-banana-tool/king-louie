@@ -959,3 +959,34 @@ describe('Android lease screens (owner rulings R-F5-1, R-F5-5, R-F5-6)', () => {
     assert.match(live, /\(Timestamps\.epochMillis\(request\.expiresAt\) \?: 0L\) <= api\.now\(\)\.toEpochMilli\(\)/);
   });
 });
+
+// Revised 2026-10-24 (agent-driven demo takes, spec §6): a take is a lease of
+// a second kind. Both cores check its exact keys, both request screens say
+// what it may do in host-built lines, and both banners name it.
+describe('take leases on the phones', () => {
+  const UNATTENDED_LINE = 'Unattended: no check-ins; runs until it ends or you stop it';
+  const BROWSER_TRUE_LINE = 'drive the browser on these sites (no scripts, no network changes, no uploads)';
+  const CREDENTIALS_LINE = 'credentials from the vault';
+  const SWIFT_VECTOR_TEST = 'mobile/ios/KLProtocol/Tests/KLProtocolTests/LeaseVectorTests.swift';
+  const KOTLIN_VECTOR_TEST = 'mobile/android/protocol/src/test/kotlin/com/example/kinglouie/protocol/LeaseVectorTest.kt';
+  for (const [label, file] of [['iOS', 'mobile/ios/KLProtocol/Sources/KLProtocol/Lease.swift'], ['Android', 'mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/Lease.kt']]) {
+    it(`${label} core validates kind take with its exact keys`, () => {
+      const src = read(file);
+      assert.match(src, /"take"/);
+      for (const k of ['sites', 'credentials', 'unattended', 'max_minutes']) assert.match(src, new RegExp(`"${k}"`));
+    });
+  }
+  for (const [label, file] of [['iOS', 'mobile/ios/App/LeaseViews.swift'], ['Android', 'mobile/android/app/src/main/kotlin/com/example/kinglouie/LeaseScreens.kt']]) {
+    it(`${label} shows the unattended line, the browser line and the banner prefix`, () => {
+      const src = read(file);
+      for (const s of [UNATTENDED_LINE, BROWSER_TRUE_LINE, CREDENTIALS_LINE, 'Unattended take: ']) assert.ok(src.includes(s), s);
+    });
+  }
+  it('both vector tests list the five take vectors', () => {
+    for (const f of [SWIFT_VECTOR_TEST, KOTLIN_VECTOR_TEST]) {
+      for (const n of ['take-grant', 'take-grant-minutes-over-cap', 'take-request-missing-name', 'computer-use-with-unattended', 'status-take']) {
+        assert.ok(read(f).includes(`"${n}"`), `${f} ${n}`);
+      }
+    }
+  });
+});

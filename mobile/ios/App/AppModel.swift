@@ -748,6 +748,17 @@ final class AppModel: ObservableObject {
         return "Lease \(lease.state == "suspended" ? "paused" : "active") on \(node)"
     }
 
+    /// Revised 2026-10-24: an unattended take's name and the time it ends,
+    /// from the row's status, verified again against the pinned node; nil
+    /// for any other lease (and for one not running yet).
+    func unattendedTake(_ lease: RunningLease) -> (name: String, ends: Date)? {
+        guard lease.state != "pending", let signed = lease.status, let pin = state.nodes.first(where: { $0.id == lease.nodeId }),
+              let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message),
+              status.leaseId == lease.leaseId, status.unattended, let name = status.name,
+              let ends = status.expiresAt.flatMap({ Timestamps.date($0) }) else { return nil }
+        return (name: name, ends: ends)
+    }
+
     /// Under the row of a pending lease: which of the two this phone knows.
     func pendingDetail(_ lease: RunningLease) -> String {
         Leases.pendingDetail(signedGrant: signedLeaseGrants[lease.leaseId] != nil)

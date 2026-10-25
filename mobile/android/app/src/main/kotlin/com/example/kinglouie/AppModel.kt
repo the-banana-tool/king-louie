@@ -624,6 +624,25 @@ class AppModel(context: Context) {
     fun pendingLeaseDetail(leaseId: String): String = Leases.pendingDetail(leaseId in signedLeaseGrants)
 
     /**
+     * Revised 2026-10-24: an unattended take's name and when it ends (epoch
+     * ms), from a lease's signed status, verified again against the pinned
+     * node; null for any other lease, and for one not running yet.
+     */
+    fun unattendedTake(lease: RunningLease): Pair<String, Long>? = unattendedTake(lease.nodeId, lease.leaseId, lease.state, lease.status)
+
+    fun unattendedTake(lease: LiveLease): Pair<String, Long>? = unattendedTake(lease.nodeId, lease.leaseId, lease.state, lease.lastStatus)
+
+    private fun unattendedTake(nodeId: String, leaseId: String, state: String, signed: Envelope?): Pair<String, Long>? {
+        if (state == "pending" || signed == null) return null
+        val pin = storage.nodes.firstOrNull { it.id == nodeId } ?: return null
+        val status = Leases.verifiedMessage(signed, pin)?.let { LeaseStatus.from(it) } ?: return null
+        if (status.leaseId != leaseId || !status.unattended) return null
+        val name = status.name ?: return null
+        val ends = status.expiresAt?.let { Timestamps.epochMillis(it) } ?: return null
+        return name to ends
+    }
+
+    /**
      * After a listing [pin] signed was accepted: the "May still start" rows
      * of that node the listing does not name (finding 3). Such a row goes
      * only once the request its grant answered has expired, on this phone's

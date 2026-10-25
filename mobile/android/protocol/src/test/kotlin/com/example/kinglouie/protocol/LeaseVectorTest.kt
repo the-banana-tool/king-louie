@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -40,7 +41,9 @@ class LeaseVectorTest {
         assertEquals(
             setOf(
                 "grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "watch-no-token",
-                "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "view-node-sig-valid", "view-tampered-frame"
+                "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "view-node-sig-valid", "view-tampered-frame",
+                // Revised 2026-10-24: the take lease.
+                "take-grant", "take-grant-minutes-over-cap", "take-request-missing-name", "computer-use-with-unattended", "status-take"
             ) + listingVectors,
             names
         )
@@ -157,12 +160,65 @@ class LeaseVectorTest {
 
     @Test
     fun grants() {
-        for (name in listOf("grant-valid", "grant-narrowed", "resume-capped")) {
+        // A take is built like any grant; the admin's take cap (120 in the second) is the node's to refuse.
+        for (name in listOf("grant-valid", "grant-narrowed", "resume-capped", "take-grant", "take-grant-minutes-over-cap")) {
             assertBuilds(name) { v, e ->
                 Leases.grant(request(v), e["grant"]["apps"].arr()!!.map { it.str()!! }, e["grant"]["minutes"].int()!!, s(e, "device_id"), s(e, "signed_at"))
             }
         }
         assertTrue(request(vector("resume-capped")).isResume)
+        assertFalse(request(vector("resume-capped")).isTake)
+        val take = request(vector("take-grant"))
+        assertTrue(take.isTake)
+        assertEquals("BSEOA in ChatGPT", take.name)
+        assertEquals(listOf("chatgpt.com", "*.chatgpt.com"), take.sites)
+        assertNull(take.browserActions)
+        assertFalse(take.credentials)
+        assertTrue(take.unattended)
+        assertEquals(180, take.maxMinutes)
+        // The phone's cap is the request's, and never past 240 for a take.
+        try {
+            Leases.grant(take, listOf("notepad"), 181, "d-aaaaaaaaaaaaaaaa", "2026-09-23T18:04:16.201Z")
+            fail("expected a ProtocolException")
+        } catch (e: ProtocolException) {
+            // refused before anything is signed
+        }
+        assertEquals(240, Leases.TAKE_MAX_MINUTES)
+        assertEquals(60, Leases.MAX_MINUTES)
+    }
+
+    /** Revised 2026-10-24: a node-signed request whose lease has the wrong keys for its kind is not read. */
+    @Test
+    fun requestsWithTheWrongKeysForTheirKind() {
+        for (name in listOf("take-request-missing-name", "computer-use-with-unattended")) {
+            val v = vector(name)
+            val message = Leases.verifiedMessage(Envelope.fromJson(v["input"]!!), pin(v)) ?: error("$name verifies against the node pin")
+            assertNull(name, LeaseRequest.from(message))
+            assertFalse(name, Leases.isLease(message["lease"]))
+            assertEquals(name, "malformed", v["expect"]["reason"].str())
+        }
+        val given = vector("take-grant")
+        val lease = Leases.verifiedMessage(Envelope.fromJson(given["given"]["request"]!!), pin(given))!!["lease"].obj()!!
+        assertTrue(Leases.isLease(lease))
+        fun leaseWith(key: String, value: JsonElement?): JsonObject = JsonObject(if (value == null) lease - key else lease + (key to value))
+        val bad = listOf(
+            "an unknown kind" to leaseWith("kind", JsonPrimitive("screen")), "no name" to leaseWith("name", null),
+            "an empty name" to leaseWith("name", JsonPrimitive("")), "a name of 61" to leaseWith("name", JsonPrimitive("a".repeat(61))),
+            "a line break" to leaseWith("name", JsonPrimitive("a\nb")), "two spaces" to leaseWith("name", JsonPrimitive("a  b")),
+            "a no-break space" to leaseWith("name", JsonPrimitive("a\u00A0b")), "a bidi override" to leaseWith("name", JsonPrimitive("a\u202Eb")),
+            "an object replacement" to leaseWith("name", JsonPrimitive("a\uFFFCb")),
+            "four combining marks" to leaseWith("name", JsonPrimitive("a\u0301\u0301\u0301\u0301")),
+            "no sites" to leaseWith("sites", JsonArray(emptyList())), "an upper-case host" to leaseWith("sites", JsonArray(listOf(JsonPrimitive("Example.com")))),
+            "a bare label" to leaseWith("sites", JsonArray(listOf(JsonPrimitive("localhost")))), "a path" to leaseWith("sites", JsonArray(listOf(JsonPrimitive("example.com/x")))),
+            "browser false" to leaseWith("browser", JsonPrimitive(false)), "browser empty" to leaseWith("browser", JsonArray(emptyList())),
+            "an empty browser action" to leaseWith("browser", JsonArray(listOf(JsonPrimitive("")))),
+            "credentials not a boolean" to leaseWith("credentials", JsonPrimitive("no")), "unattended not a boolean" to leaseWith("unattended", JsonNull),
+            "241 minutes" to leaseWith("max_minutes", JsonPrimitive(241))
+        )
+        for ((why, value) in bad) assertFalse(why, Leases.isLease(value))
+        assertTrue(Leases.isLease(leaseWith("name", JsonPrimitive("a\u0301\u0301\u0301"))))
+        assertTrue(Leases.isLease(leaseWith("browser", JsonArray(listOf(JsonPrimitive("navigate"), JsonPrimitive("click"))))))
+        assertTrue(Leases.isLease(leaseWith("max_minutes", JsonPrimitive(240))))
     }
 
     @Test
@@ -184,7 +240,7 @@ class LeaseVectorTest {
     /** R-F5-15: a status the pinned node signed gives the token the next watch echoes. */
     @Test
     fun statuses() {
-        for (name in listOf("status-valid", "status-no-contact", "status-pending", "status-granted-unnamed")) {
+        for (name in listOf("status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "status-take")) {
             val v = vector(name)
             val message = Leases.verifiedMessage(Envelope.fromJson(v["input"]!!), pin(v)) ?: error("$name verifies against the node pin")
             val status = LeaseStatus.from(message) ?: error("$name parses")
@@ -199,7 +255,28 @@ class LeaseVectorTest {
             assertEquals(name, expect["granted_by"]["device_id"].str(), status.grantedByDevice)
             assertEquals(name, expect["granted_by"]["name"].str(), status.grantedByName)
             assertEquals(name, name != "status-pending", Leases.isLive(status.state))
+            // Revised 2026-10-24: every status says its kind, whether it runs unattended, and a take's name.
+            assertEquals(name, expect["kind"].str() ?: "computer_use", status.kind)
+            assertEquals(name, expect["unattended"].bool() ?: false, status.unattended)
+            assertEquals(name, expect["name"].str(), status.name)
         }
+        // The three must agree: computer_use is never unattended and has no name; a take has a name.
+        val plainVector = vector("status-valid")
+        val plain = Leases.verifiedMessage(Envelope.fromJson(plainVector["input"]!!), pin(plainVector))!!
+        fun status(vararg changes: Pair<String, JsonElement?>): LeaseStatus? {
+            var o: Map<String, JsonElement> = plain
+            for ((k, value) in changes) o = if (value == null) o - k else o + (k to value)
+            return LeaseStatus.from(JsonObject(o))
+        }
+        assertNotNull(status())
+        assertNull(status("unattended" to JsonPrimitive(true)))
+        assertNull(status("name" to JsonPrimitive("A take")))
+        assertNull(status("kind" to JsonPrimitive("take")))
+        assertNotNull(status("kind" to JsonPrimitive("take"), "name" to JsonPrimitive("A take"), "unattended" to JsonPrimitive(true)))
+        assertNotNull(status("kind" to JsonPrimitive("take"), "name" to JsonPrimitive("A take"), "unattended" to JsonPrimitive(false)))
+        assertNull(status("kind" to JsonPrimitive("take"), "name" to JsonPrimitive("A  take"), "unattended" to JsonPrimitive(true)))
+        assertNull(status("kind" to JsonPrimitive("screen")))
+        assertNull(status("kind" to null))
         // Signed by another node's key: not a status of this pin.
         val v = vector("status-valid")
         val other = NodePin(pin(v).id, pin(v).name, pin(v).key.reversed())
