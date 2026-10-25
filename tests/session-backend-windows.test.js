@@ -443,12 +443,12 @@ describe('Windows backend: launch_browser, record_start, record_stop (any OS, fa
     assert.equal(calls[0].opts.windowsHide, true);
     assert.equal(calls[0].opts.shell, false);
     assert.ok(backend.recordings.has(4242));
-    // A size scales; a given path is used as it is, and nothing is created for it.
+    // A size scales; a given path is used as it is, and its directory is created.
     backend.recordings.clear(); // the fake children share a pid
     const given = 'D:\\work\\demo\\take.mp4';
     const r2 = await backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', takeId: TAKE, path: given, fps: 24, size: { width: 1280, height: 720 } });
     assert.equal(r2.path, given);
-    assert.equal(backend.mkdirs.length, 1);
+    assert.deepEqual(backend.mkdirs[1], ['D:\\work\\demo', { recursive: true }]);
     assert.deepEqual(calls[1].args.slice(0, 9), ['-y', '-f', 'gdigrab', '-framerate', '24', '-i', 'desktop', '-vf', 'scale=1280:720']);
     assert.equal(calls[1].args.at(-1), given);
   });
@@ -502,6 +502,17 @@ describe('Windows backend: launch_browser, record_start, record_stop (any OS, fa
     const dead = await backend.recordStop({ pid: second.pid });
     assert.deepEqual(dead, { path: 'C:\\r\\b.mp4', durationS: 3, bytes: 0, truncated: true, exited: true, code: 1 });
     assert.deepEqual(children[1].written, [], 'no q to a dead ffmpeg');
+  });
+
+  it('record_start answers recorder_failed, by its code alone, when the directory cannot be made', async () => {
+    const t = fakeTime();
+    const { calls, spawnImpl } = spawnRecorder();
+    const backend = make({ spawnImpl, clock: t.clock, timers: t.timers, mkdir: async () => { throw Object.assign(new Error('EACCES: D:\\work\\demo'), { code: 'EACCES' }); } });
+    for (const extra of [{ path: 'D:\\work\\demo\\take.mp4' }, {}]) {
+      await assert.rejects(backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', takeId: TAKE, ...extra }),
+        (e) => e.code === 'recorder_failed' && e.message === 'recorder_failed');
+    }
+    assert.equal(calls.length, 0, 'ffmpeg never started');
   });
 
   // Review M-3: a pid Windows hands out again finalises the old entry.

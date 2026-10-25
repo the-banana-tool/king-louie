@@ -133,7 +133,9 @@ every user-side path itself. The service sends names; the helper places them.
   `^take-[0-9a-f]{12}$`. Without `path` the helper writes
   `%LOCALAPPDATA%\KingLouie\recordings\<take_id>\take.mp4` (creating the
   directory); a given `path` must be absolute and is used as it is (the
-  service has checked it against the session's working directory). Without
+  service has checked it against the session's working directory), and the
+  helper creates its directory, since the service cannot create the user's
+  directories. A directory that cannot be made is `recorder_failed`. Without
   `ffmpeg` the helper uses its `recorder.ffmpeg`; with neither the answer is
   `recorder_missing`. It runs ffmpeg (an `.exe`) as the user: `-y -f
   gdigrab -framerate <fps, 30> -i desktop`, then `-vf scale=<w>:<h>` when

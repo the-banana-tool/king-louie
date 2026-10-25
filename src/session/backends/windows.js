@@ -167,12 +167,11 @@ function createWindowsBackend({
       if (size !== null && !(size && evenSide(size.width) && evenSide(size.height))) throw new GuiError('invalid_params');
       if (!ffmpeg) throw new GuiError('recorder_missing');
       if (!/\.exe$/i.test(String(ffmpeg))) throw new GuiError('app_type_not_supported');
-      let out = given;
-      if (out === null) {
-        const dir = path.win32.join(kingLouieDir(env), 'recordings', takeId);
-        try { await mkdir(dir, { recursive: true }); } catch { throw new GuiError('recorder_failed'); }
-        out = path.win32.join(dir, 'take.mp4');
-      }
+      // The directory is made here, as the user, for a given path too: the
+      // service cannot create the user's directories.
+      const dir = given === null ? path.win32.join(kingLouieDir(env), 'recordings', takeId) : path.win32.dirname(given);
+      try { await mkdir(dir, { recursive: true }); } catch { throw new GuiError('recorder_failed'); }
+      const out = given === null ? path.win32.join(dir, 'take.mp4') : given;
       const args = ['-y', '-f', 'gdigrab', '-framerate', String(fps), '-i', 'desktop',
         ...(size ? ['-vf', `scale=${size.width}:${size.height}`] : []),
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out];
