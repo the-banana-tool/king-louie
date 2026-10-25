@@ -70,10 +70,22 @@ elevated prompt (Administrator).
 
 1. Install the service as an agent node:
    `king-louie-service install --profile agent` (it runs as `LOCAL SERVICE`),
-   and start it once. Pair the node with your relay and enrol your phone
-   (`king-louie-service enroll-device`; the install guide's section 10 has the
-   steps). Then record the node's identity:
-   `king-louie-service identity record`.
+   and start it once. Then, as the administrator, pair the node with your
+   relay and enrol your phone:
+   1. Get a code for the node from the relay host (`relay code <node-name>`
+      there), then run `king-louie-service pair wss://<relay-host>:<port>` and
+      type the code at its prompt.
+   2. In `node.yaml`, set the relay the phone approvals go through:
+
+      ```yaml
+      approvers:
+        relay: wss://relay.example.com:8443
+      ```
+
+   3. Start the service, then run `king-louie-service enroll-device` and
+      answer `y` at its `[y/N]` prompt to enrol the phone.
+
+   Then record the node's identity: `king-louie-service identity record`.
 2. Edit `node.yaml` in the admin config dir. Turn the GUI on, list Chrome and
    every app you will demo under `gui.apps`, and set how many delegate
    sessions may be open at once:
