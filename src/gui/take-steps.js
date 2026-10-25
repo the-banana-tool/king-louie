@@ -158,7 +158,8 @@ function guardMs(s, call) {
 
 // Moves a screenshot the browser tool saved into the take's directory.
 function place(savedTo, target) {
-  fs.mkdirSync(path.dirname(target), { recursive: true });
+  // Made on first use, private like the take store it sits in.
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   try {
     fs.renameSync(savedTo, target);
   } catch {

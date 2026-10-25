@@ -121,9 +121,9 @@ async function runTakeSteps(takes, record, params, options, browserActions) {
   const from = params.from ?? 0;
   const valid = validateSteps(params.steps, { from });
   if (!valid.ok) throw new GuiError('invalid_params', valid.error.message);
-  // Stills go beside the recording; a take with none keeps them in its own folder.
-  const recordingPath = record.recording && typeof record.recording.path === 'string' ? record.recording.path : null;
-  const takeDir = recordingPath ? path.dirname(recordingPath) : path.join(takes.store.dir, takeId);
+  // Stills and failure captures go in the take's own folder under the store, never the
+  // recording's: the service runs as LOCAL SERVICE and cannot write the user's paths.
+  const takeDir = path.join(takes.store.dir, takeId);
   const out = await runSteps({ steps: valid.steps, from, continueOnError: params.continue_on_error === true }, {
     actions: browserActions(),
     // The Take call's own context: its holder's browserKey resolves the take's browser.
@@ -139,7 +139,7 @@ async function runTakeSteps(takes, record, params, options, browserActions) {
   // A resumed run replaces what it ran again; the steps before `from` keep their outcome.
   const earlier = (Array.isArray(record.steps) ? record.steps : []).filter((s) => s && s.index < from);
   takes.recordSteps(takeId, [...earlier, ...out.results]);
-  const result = { ok: true, untrusted_output: true, results: out.results, stopped_at: out.stopped_at };
+  const result = { ok: true, untrusted_output: true, results: out.results, stopped_at: out.stopped_at, take_dir: takeDir };
   const last = out.results.at(-1);
   if (live.stopWhenDone && last && last.index === valid.steps.length - 1 && out.results.every((r) => r.ok) && takes.context(takeId)) {
     result.stopped = await takes.stop(takeId, {});

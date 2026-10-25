@@ -378,7 +378,7 @@ describe('Take.run_steps', () => {
     { step: 'click', selector: '#go' }
   ];
 
-  it('runs on the take\'s browser and policy, keeps the results on the record and puts stills beside the recording', async () => {
+  it('runs on the take\'s browser and policy, keeps the results on the record and puts captures under the store, not beside the recording', async () => {
     const recDir = tempDir();
     const takes = fakeTakes({ recording: { path: path.join(recDir, 'take-1.mp4') } });
     const { Take, actions } = build(takes, { click: true });
@@ -387,7 +387,11 @@ describe('Take.run_steps', () => {
     assert.equal(out.ok, true);
     assert.equal(out.untrusted_output, true);
     assert.equal(out.stopped_at, 2);
-    assert.equal(out.results[2].screenshot, path.join(recDir, 'step-2-failed.png'));
+    const takeDir = path.join(takes.store.dir, 'take-1');
+    assert.equal(out.take_dir, takeDir);
+    assert.equal(out.results[2].screenshot, path.join(takeDir, 'step-2-failed.png'));
+    assert.ok(fs.existsSync(out.results[2].screenshot));
+    assert.deepEqual(fs.readdirSync(recDir), [], 'nothing is written beside the recording');
     assert.ok(actions.calls.every((c) => c.ctx === options));
     assert.deepEqual(takes.policy.calls.map((c) => c.params.action), ['navigate', 'click', 'screenshot']);
     assert.deepEqual(takes.notes, ['Open the app']);
@@ -405,6 +409,8 @@ describe('Take.run_steps', () => {
     const { Take } = build(takes);
     const out = await Take.execute({ action: 'run_steps', steps: [{ step: 'screenshot', name: 'hero' }] }, {});
     assert.equal(out.results[0].screenshot, path.join(takes.store.dir, 'take-1', 'hero.png'));
+    assert.equal(out.take_dir, path.join(takes.store.dir, 'take-1'));
+    assert.ok(fs.statSync(out.take_dir).isDirectory(), 'made on first use');
   });
 
   it('stop_when_done stops the take when the last step passes, and not after a failure', async () => {
