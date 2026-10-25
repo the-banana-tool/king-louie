@@ -11,13 +11,31 @@ const { assertPathsUnchanged } = require('../gui/apps');
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-function createOpHandler(backend, { platform = process.platform } = {}) {
+// Ops whose failure is answered and logged by its code alone: an input's
+// error can quote the key (R-F5-16); the take ops' can quote the argv, a
+// path or ffmpeg's stderr (demo takes, Task 9).
+const QUIET_OPS = new Set(['input', 'launch_browser', 'record_start', 'record_stop', 'keep_awake']);
+
+// After the service connection has been gone this long, the helper stops
+// its recordings (demo takes spec §9). A reconnect before then keeps them.
+const RECORDING_GRACE_MS = 30000;
+
+function createOpHandler(backend, { platform = process.platform, realpath } = {}) {
+  const pathOptions = { platform, ...(realpath ? { realpath } : {}) };
   const ops = {
     launch: (p) => {
       // Re-resolved here, as the user, just before spawning (§3.4).
-      assertPathsUnchanged({ exe: p.exe, files: p.files || [] }, { platform });
+      assertPathsUnchanged({ exe: p.exe, files: p.files || [] }, pathOptions);
       return backend.launch({ exe: p.exe, argv: p.argv || [], files: p.files || [] });
     },
+    launch_browser: (p) => {
+      // The browser is an allowlisted app: re-resolved as launch's exe is.
+      assertPathsUnchanged({ exe: p.exe, files: [] }, pathOptions);
+      return backend.launchBrowser({ exe: p.exe, profileDir: p.profile_dir, args: p.args || [] });
+    },
+    record_start: (p) => backend.recordStart({ ffmpeg: p.ffmpeg, path: p.path, fps: p.fps, size: p.size === undefined ? null : p.size }),
+    record_stop: (p) => backend.recordStop({ pid: p.pid }),
+    keep_awake: (p) => backend.keepAwake({ on: p.on === true }),
     processes: (p) => backend.processes({ match: p.match || [] }),
     windows: (p) => backend.windows({ pids: p.pids || [] }),
     foreground: () => backend.foreground(),
@@ -32,6 +50,37 @@ function createOpHandler(backend, { platform = process.platform } = {}) {
     if (!Object.hasOwn(ops, op)) throw new GuiError('unknown_op', String(op).slice(0, 32));
     if (!backend) throw new GuiError('capability_unavailable', 'gui');
     return ops[op](isPlainObject(params) ? params : {});
+  };
+}
+
+// The 30 s rule (demo takes spec §9): `disconnected()` when the service
+// connection closes arms one timer; `connected()` clears it; when it fires,
+// every live recording is stopped. `stop()` (the helper ending) stops them
+// at once. The timer is ref'd: the helper is running its reconnect loop.
+function createRecordingGuard({ backend, timers = { setTimeout, clearTimeout }, graceMs = RECORDING_GRACE_MS, log = createLogger('session-helper/recordings') } = {}) {
+  let timer = null;
+  const stopAll = async () => {
+    if (!backend || typeof backend.stopRecordings !== 'function') return;
+    try {
+      await backend.stopRecordings();
+    } catch (err) {
+      log.warn(`stopping recordings failed (${(err && err.code) || 'error'})`);
+    }
+  };
+  const clear = () => {
+    if (timer !== null) timers.clearTimeout(timer);
+    timer = null;
+  };
+  return {
+    connected: clear,
+    disconnected() {
+      if (timer !== null) return;
+      timer = timers.setTimeout(() => { timer = null; stopAll(); }, graceMs);
+    },
+    async stop() {
+      clear();
+      await stopAll();
+    }
   };
 }
 
@@ -69,7 +118,7 @@ class HelperSession extends EventEmitter {
         // An input's failure is logged and answered by its code alone
         // (R-F5-16): a backend's own error can quote the command it ran, and
         // for a key press that command names the key.
-        const quiet = msg.op === 'input';
+        const quiet = QUIET_OPS.has(msg.op);
         if (!isGuiError(err)) this.log.warn(quiet ? `${msg.op} failed (${err.code || err.name || 'error'})` : `${msg.op} failed: ${err.message}`);
         this._send({ t: 'res', id: msg.id, ok: false, error: { code, message: quiet ? code : String(err.message || code).slice(0, 300), detail: isGuiError(err) ? err.info || {} : {} } });
       });
@@ -136,4 +185,4 @@ function connectToService({ endpoint, secret, nodeId, user, platform = process.p
   });
 }
 
-module.exports = { connectToService, createOpHandler, HelperSession };
+module.exports = { connectToService, createOpHandler, createRecordingGuard, HelperSession, QUIET_OPS, RECORDING_GRACE_MS };

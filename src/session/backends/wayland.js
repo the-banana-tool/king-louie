@@ -4,7 +4,7 @@
 // interactive captures, so only gui.launch is offered.
 const fs = require('fs');
 const { GuiError } = require('../../gui/errors');
-const { listProcesses, launchDetached } = require('./linux-common');
+const { listProcesses, launchDetached, windowsOnlyTakeOps } = require('./linux-common');
 
 function createWaylandBackend({ spawnImpl, readdir = fs.readdirSync, readlink = fs.readlinkSync } = {}) {
   const none = async () => { throw new GuiError('capability_unavailable', 'gui.input'); };
@@ -32,6 +32,7 @@ function createWaylandBackend({ spawnImpl, readdir = fs.readdirSync, readlink = 
     releaseAll: async () => null,
     locked: async () => null,
     hitTest: async () => null,
+    ...windowsOnlyTakeOps(),
     stop: async () => {}
   };
 }

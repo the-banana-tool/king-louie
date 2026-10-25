@@ -10,7 +10,7 @@ const { promisify } = require('util');
 const { createLogger } = require('../../logging');
 const { GuiError } = require('../../gui/errors');
 const { imageMatches } = require('../../gui/apps');
-const { listProcesses, launchDetached, jpegSize, keysym, modifierKeys } = require('./linux-common');
+const { listProcesses, launchDetached, jpegSize, keysym, modifierKeys, windowsOnlyTakeOps } = require('./linux-common');
 
 const execFileP = promisify(execFile);
 const XDOTOOL = '/usr/bin/xdotool';
@@ -252,6 +252,7 @@ function createX11Backend({ env = process.env, log = createLogger('session-helpe
     },
     locked: lockedHint,
     hitTest,
+    ...windowsOnlyTakeOps(),
     stop: async () => {}
   };
 }

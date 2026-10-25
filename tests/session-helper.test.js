@@ -56,6 +56,7 @@ function fakeBackend(reports) {
     probe: async () => { const r = reports[Math.min(i, reports.length - 1)]; i += 1; return r; },
     foreground: async () => { calls.push('foreground'); return { handle: '1', pid: 2, image: '/usr/bin/gedit' }; },
     locked: async () => locked,
+    stopRecordings: async () => { calls.push('stopRecordings'); return []; },
     stop: async () => { calls.push('stop'); }
   };
 }
@@ -140,6 +141,8 @@ describe('runSessionHelper', () => {
     ac.abort();
     assert.equal(await done, 0);
     assert.ok(backend.calls.includes('stop'));
+    // A helper that stops stops its recordings first (demo takes, Task 9).
+    assert.ok(backend.calls.indexOf('stopRecordings') >= 0 && backend.calls.indexOf('stopRecordings') < backend.calls.indexOf('stop'));
   });
 
   it('reconnects after a drop, re-reading its file (a rotated secret)', async () => {
@@ -194,6 +197,98 @@ describe('runSessionHelper', () => {
     assert.deepEqual(info.capabilities, []);
     assert.equal(info.probes[0].ok, false);
     assert.match(info.probes[0].hint, /no desktop session/i);
+  });
+});
+
+// Demo takes (Task 9): the four take ops and the 30 s recording rule.
+describe('take ops', () => {
+  const { createOpHandler, createRecordingGuard } = require('../src/session/connection');
+
+  it('createOpHandler dispatches the four ops to the backend, snake_case in, and an unknown op is still unknown_op', async () => {
+    const calls = [];
+    const backend = {
+      launchBrowser: async (a) => { calls.push(['launchBrowser', a]); return { pid: 1, cdp: { port: 9222, path: '/devtools/browser/x' } }; },
+      recordStart: async (a) => { calls.push(['recordStart', a]); return { pid: 2, startedAt: 5 }; },
+      recordStop: async (a) => { calls.push(['recordStop', a]); return { path: 'C:\\r\\a.mp4', durationS: 1, bytes: 3, truncated: false }; },
+      keepAwake: async (a) => { calls.push(['keepAwake', a]); return { on: a.on }; }
+    };
+    const realpath = (p) => p;
+    const handle = createOpHandler(backend, { platform: 'win32', realpath });
+    const exe = 'C:\\x\\chrome.exe';
+    assert.deepEqual(await handle('launch_browser', { exe, profile_dir: 'C:\\p\\demo', args: ['--a'] }), { pid: 1, cdp: { port: 9222, path: '/devtools/browser/x' } });
+    assert.deepEqual(await handle('launch_browser', { exe, profile_dir: 'C:\\p\\demo' }), { pid: 1, cdp: { port: 9222, path: '/devtools/browser/x' } });
+    assert.deepEqual(await handle('record_start', { ffmpeg: 'C:\\ff\\ffmpeg.exe', path: 'C:\\r\\a.mp4', fps: 24, size: { width: 1280, height: 720 } }), { pid: 2, startedAt: 5 });
+    assert.deepEqual(await handle('record_stop', { pid: 2 }), { path: 'C:\\r\\a.mp4', durationS: 1, bytes: 3, truncated: false });
+    assert.deepEqual(await handle('keep_awake', { on: true }), { on: true });
+    assert.deepEqual(await handle('keep_awake', { on: 'yes' }), { on: false }, 'only true is on');
+    assert.deepEqual(calls, [
+      ['launchBrowser', { exe, profileDir: 'C:\\p\\demo', args: ['--a'] }],
+      ['launchBrowser', { exe, profileDir: 'C:\\p\\demo', args: [] }],
+      ['recordStart', { ffmpeg: 'C:\\ff\\ffmpeg.exe', path: 'C:\\r\\a.mp4', fps: 24, size: { width: 1280, height: 720 } }],
+      ['recordStop', { pid: 2 }],
+      ['keepAwake', { on: true }],
+      ['keepAwake', { on: false }]
+    ]);
+    await assert.rejects(handle('record_everything', {}), (e) => e.code === 'unknown_op');
+  });
+
+  it('launch_browser re-resolves the browser exe as launch does', async () => {
+    const backend = { launchBrowser: async () => { throw new Error('not reached'); } };
+    const handle = createOpHandler(backend, { platform: 'win32', realpath: () => 'C:\\elsewhere\\chrome.exe' });
+    await assert.rejects(handle('launch_browser', { exe: 'C:\\x\\chrome.exe', profile_dir: 'C:\\p\\demo' }), (e) => e.code === 'path_changed');
+  });
+
+  function manualTimers() {
+    const t = { now: 0, list: [] };
+    t.setTimeout = (fn, ms) => { const h = { at: t.now + ms, fn, done: false }; t.list.push(h); return h; };
+    t.clearTimeout = (h) => { if (h) h.done = true; };
+    t.advance = async (ms) => {
+      t.now += ms;
+      for (const h of t.list) if (!h.done && h.at <= t.now) { h.done = true; h.fn(); }
+      await new Promise((r) => setImmediate(r));
+    };
+    return t;
+  }
+
+  it('after the connection closes, stopRecordings runs once 30 s pass, and not when it reconnects at 29 s', async () => {
+    const t = manualTimers();
+    let stops = 0;
+    const guard = createRecordingGuard({ backend: { stopRecordings: async () => { stops += 1; return []; } }, timers: t });
+    guard.disconnected();
+    await t.advance(29_000);
+    guard.connected();
+    await t.advance(10_000);
+    assert.equal(stops, 0, 'a reconnect at 29 s keeps the recording');
+    guard.disconnected();
+    await t.advance(29_999);
+    assert.equal(stops, 0);
+    await t.advance(1);
+    assert.equal(stops, 1);
+    await t.advance(60_000);
+    assert.equal(stops, 1, 'once');
+    // A second close while the timer runs does not start another.
+    guard.disconnected();
+    guard.disconnected();
+    await t.advance(30_000);
+    assert.equal(stops, 2);
+    // Stopping the helper stops them at once and leaves no timer.
+    guard.disconnected();
+    await guard.stop();
+    assert.equal(stops, 3);
+    await t.advance(30_000);
+    assert.equal(stops, 3);
+  });
+
+  it('a backend without stopRecordings, or one that fails, changes nothing', async () => {
+    const t = manualTimers();
+    const guard = createRecordingGuard({ backend: null, timers: t });
+    guard.disconnected();
+    await t.advance(30_000);
+    await guard.stop();
+    const failing = createRecordingGuard({ backend: { stopRecordings: async () => { throw new Error('C:\\r\\a.mp4 busy'); } }, timers: t, log: { warn: () => {} } });
+    failing.disconnected();
+    await t.advance(30_000);
+    await failing.stop();
   });
 });
 

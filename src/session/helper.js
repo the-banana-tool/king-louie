@@ -10,7 +10,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { createLogger } = require('../logging');
 const { readUserCopy, userCopyPath, checkUserCopyTrust } = require('../gui/session-secret');
-const { connectToService, createOpHandler } = require('./connection');
+const { connectToService, createOpHandler, createRecordingGuard } = require('./connection');
 const { selectBackend: defaultSelect, loadBackend, NO_BACKEND_REPORT } = require('./backends');
 const { adminConfigDir, defaultServiceDataDir } = require('../platform/paths');
 const { windowsPowerShellExe } = require('../platform/windows-paths');
@@ -98,6 +98,7 @@ async function runSessionHelper({ env = process.env, platform = process.platform
   }
   let report = backend ? await safeProbe(backend, log) : NO_BACKEND_REPORT('no desktop session was found for this helper (no display, or Wayland without portals)');
   const handleOp = createOpHandler(backend, { platform });
+  const recordingGuard = createRecordingGuard({ backend, log, ...(deps.timers ? { timers: deps.timers } : {}) });
   let attempt = 0;
   let exitCode = 0;
 
@@ -118,6 +119,7 @@ async function runSessionHelper({ env = process.env, platform = process.platform
         pid: process.pid, helperVersion: HELPER_VERSION, probeReport: report, handleOp, log
       });
       attempt = 0;
+      recordingGuard.connected();
       log.info('connected to the King Louie service');
       let lastLocked = report.locked;
       const reprobe = setInterval(async () => {
@@ -142,6 +144,8 @@ async function runSessionHelper({ env = process.env, platform = process.platform
       });
       clearInterval(reprobe);
       clearInterval(lockPoll);
+      // A recording outlives a short drop; 30 s without the service ends it.
+      recordingGuard.disconnected();
       if (!(signal && signal.aborted)) log.warn('the service connection closed; reconnecting');
     } catch (err) {
       log.warn(`not connected: ${err.message}`);
@@ -150,6 +154,7 @@ async function runSessionHelper({ env = process.env, platform = process.platform
     await sleep(delays[Math.min(attempt, delays.length - 1)], signal);
     attempt += 1;
   }
+  await recordingGuard.stop();
   if (backend && typeof backend.stop === 'function') await backend.stop().catch(() => {});
   if (logFile) logFile.close();
   return exitCode;

@@ -68,6 +68,7 @@ namespace KingLouie {
     [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder name, ref int size);
     [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);
   }
 
   public static class Worker {
@@ -108,8 +109,19 @@ namespace KingLouie {
         case "release_all": ReleaseAll(); return null;
         case "locked": return Locked();
         case "hit_test": return HitTest(new POINT(Int(p, "x", 0), Int(p, "y", 0)));
+        case "keep_awake": return KeepAwake(Bool(p, "on"));
         default: throw new OpError("unknown_op", op);
       }
+    }
+
+    // A take keeps the display and the system awake (demo takes, spec section 9).
+    // The state belongs to this thread, the one that reads every op, and ends
+    // with the worker. ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+    // when on; ES_CONTINUOUS alone clears it.
+    static object KeepAwake(bool on) {
+      uint prev = Native.SetThreadExecutionState(on ? 0x80000003u : 0x80000000u);
+      if (prev == 0) throw new OpError("backend_failed", "SetThreadExecutionState failed");
+      return new Dictionary<string, object> { { "on", on } };
     }
 
     // -- JSON helpers --------------------------------------------------------

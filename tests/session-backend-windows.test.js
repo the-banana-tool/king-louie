@@ -263,6 +263,292 @@ describe('finding 8, by reading the worker sources: the window under the point i
   });
 });
 
+// Demo takes (Task 9): the browser, recording and keep-awake ops of the
+// Windows backend, with a fake spawn, file reads and clock. Nothing real runs.
+describe('Windows backend: launch_browser, record_start, record_stop (any OS, faked)', () => {
+  const { createWindowsBackend } = require('../src/session/backends/windows');
+  const LOCALAPPDATA = 'C:\\Users\\alice\\AppData\\Local';
+  const ROOT = path.win32.join(LOCALAPPDATA, 'KingLouie', 'browser-profiles');
+
+  // A clock that moves when a timer fires, by that timer's delay.
+  function fakeTime() {
+    const t = { now: 1_000_000 };
+    t.clock = () => t.now;
+    t.timers = {
+      setTimeout: (fn, ms) => {
+        const h = { cancelled: false };
+        setImmediate(() => { if (h.cancelled) return; t.now += ms; fn(); });
+        return h;
+      },
+      clearTimeout: (h) => { if (h) h.cancelled = true; }
+    };
+    return t;
+  }
+
+  function fakeChild({ onQ = 'exit' } = {}) {
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.killed = 0;
+    child.kill = () => { child.killed += 1; setImmediate(() => child.emit('exit', null, 'SIGTERM')); return true; };
+    child.unref = () => {};
+    child.written = [];
+    child.stdin = { write: (s) => { child.written.push(s); if (s === 'q\n' && onQ === 'exit') child.emit('exit', 0, null); return true; }, end: () => {}, on: () => {} };
+    child.stderr = new PassThrough();
+    return child;
+  }
+
+  function spawnRecorder(childOpts) {
+    const calls = [];
+    const spawnImpl = (file, args, opts) => {
+      const child = fakeChild(childOpts);
+      calls.push({ file, args, opts, child });
+      setImmediate(() => child.emit('spawn'));
+      return child;
+    };
+    return { calls, spawnImpl };
+  }
+
+  const enoent = () => Object.assign(new Error('nope'), { code: 'ENOENT' });
+
+  it('launch_browser spawns chrome with a zero debugging port and reads DevToolsActivePort', async () => {
+    const t = fakeTime();
+    const { calls, spawnImpl } = spawnRecorder();
+    let reads = 0;
+    const readFile = async (p) => {
+      assert.equal(p, path.win32.join(ROOT, 'demo', 'DevToolsActivePort'));
+      reads += 1;
+      if (reads <= 2) throw enoent();
+      return '9222\n/devtools/browser/abc\n';
+    };
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl, readFile, unlink: async () => {}, clock: t.clock, timers: t.timers });
+    const profileDir = path.win32.join(ROOT, 'demo');
+    const r = await backend.launchBrowser({ exe: 'C:\\x\\chrome.exe', profileDir, args: ['--window-size=1280,800'] });
+    assert.deepEqual(r, { pid: 4242, cdp: { port: 9222, path: '/devtools/browser/abc' } });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].file, 'C:\\x\\chrome.exe');
+    assert.deepEqual(calls[0].args, [`--user-data-dir=${profileDir}`, '--remote-debugging-port=0', '--no-first-run', '--no-default-browser-check', '--window-size=1280,800']);
+    assert.equal(calls[0].opts.detached, true);
+    assert.equal(calls[0].opts.shell, false);
+    assert.equal(reads, 3);
+  });
+
+  it('launch_browser removes a stale DevToolsActivePort before it spawns', async () => {
+    const t = fakeTime();
+    const order = [];
+    const { spawnImpl } = spawnRecorder();
+    const backend = createWindowsBackend({
+      env: { LOCALAPPDATA }, clock: t.clock, timers: t.timers,
+      spawnImpl: (...a) => { order.push('spawn'); return spawnImpl(...a); },
+      unlink: async (p) => { order.push(`unlink ${path.win32.basename(p)}`); throw enoent(); },
+      readFile: async () => '9222\n/devtools/browser/abc'
+    });
+    await backend.launchBrowser({ exe: 'C:\\x\\chrome.exe', profileDir: path.win32.join(ROOT, 'demo') });
+    assert.deepEqual(order, ['unlink DevToolsActivePort', 'spawn']);
+  });
+
+  it('launch_browser refuses a profile dir outside the root', async () => {
+    const t = fakeTime();
+    const { calls, spawnImpl } = spawnRecorder();
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl, readFile: async () => '1\n/devtools/browser/x', unlink: async () => {}, clock: t.clock, timers: t.timers });
+    for (const profileDir of [
+      ROOT, // the root itself
+      path.win32.join(LOCALAPPDATA, 'KingLouie', 'other'),
+      `${ROOT}\\..\\escape`,
+      `${ROOT}\\demo\\..\\..\\escape`,
+      `${ROOT}\\demo\\..\\demo2`, // no '..' at all, even one that stays inside
+      `${ROOT}-evil\\demo`,
+      'browser-profiles\\demo', // relative
+      'D:\\elsewhere\\demo',
+      '',
+      null
+    ]) {
+      await assert.rejects(backend.launchBrowser({ exe: 'C:\\x\\chrome.exe', profileDir }), (e) => e.code === 'profile_outside_root' && e.message === 'profile_outside_root', String(profileDir));
+    }
+    const noEnv = createWindowsBackend({ env: {}, spawnImpl, clock: t.clock, timers: t.timers });
+    await assert.rejects(noEnv.launchBrowser({ exe: 'C:\\x\\chrome.exe', profileDir: path.win32.join(ROOT, 'demo') }), (e) => e.code === 'profile_outside_root');
+    assert.equal(calls.length, 0, 'spawn never called');
+    // Case does not matter on Windows.
+    const ok = await backend.launchBrowser({ exe: 'C:\\x\\chrome.exe', profileDir: path.win32.join(ROOT.toLowerCase(), 'Demo') });
+    assert.equal(ok.cdp.port, 1);
+  });
+
+  it('launch_browser refuses anything but an .exe', async () => {
+    const t = fakeTime();
+    const { calls, spawnImpl } = spawnRecorder();
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl, clock: t.clock, timers: t.timers });
+    await assert.rejects(backend.launchBrowser({ exe: 'C:\\x\\chrome.bat', profileDir: path.win32.join(ROOT, 'demo') }), (e) => e.code === 'app_type_not_supported');
+    assert.equal(calls.length, 0);
+  });
+
+  it('launch_browser kills and fails when the port file never appears', async () => {
+    const t = fakeTime();
+    const { calls, spawnImpl } = spawnRecorder();
+    let reads = 0;
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl, unlink: async () => {}, readFile: async () => { reads += 1; if (reads === 5) return '9222\n'; throw enoent(); }, clock: t.clock, timers: t.timers });
+    const start = t.now;
+    await assert.rejects(backend.launchBrowser({ exe: 'C:\\x\\chrome.exe', profileDir: path.win32.join(ROOT, 'demo') }),
+      (e) => e.code === 'browser_launch_failed' && e.message === 'browser_launch_failed');
+    assert.equal(calls[0].child.killed, 1, 'kill called');
+    assert.ok(t.now - start >= 10000, 'waited the whole 10 s');
+    assert.ok(t.now - start < 10400);
+    assert.ok(reads >= 49 && reads <= 52, `polled every 200 ms (${reads} reads)`);
+  });
+
+  it('launch_browser fails with its code alone when the exe cannot start', async () => {
+    const t = fakeTime();
+    const spawnImpl = () => {
+      const child = fakeChild();
+      setImmediate(() => child.emit('error', new Error('spawn C:\\x\\chrome.exe ENOENT')));
+      return child;
+    };
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl, unlink: async () => {}, clock: t.clock, timers: t.timers });
+    await assert.rejects(backend.launchBrowser({ exe: 'C:\\x\\chrome.exe', profileDir: path.win32.join(ROOT, 'demo') }),
+      (e) => e.code === 'browser_launch_failed' && !e.message.includes('chrome'));
+  });
+
+  it('record_start builds the ffmpeg argv', async () => {
+    const t = fakeTime();
+    const { calls, spawnImpl } = spawnRecorder();
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl, clock: t.clock, timers: t.timers });
+    const out = 'C:\\Users\\alice\\Videos\\recordings\\t1\\take.mp4';
+    const r = await backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', path: out });
+    assert.deepEqual(r, { pid: 4242, startedAt: t.now });
+    assert.equal(calls[0].file, 'C:\\ff\\ffmpeg.exe');
+    assert.deepEqual(calls[0].args, ['-y', '-f', 'gdigrab', '-framerate', '30', '-i', 'desktop', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out]);
+    assert.deepEqual(calls[0].opts.stdio, ['pipe', 'ignore', 'pipe']);
+    assert.equal(calls[0].opts.windowsHide, true);
+    assert.equal(calls[0].opts.shell, false);
+    assert.ok(backend.recordings.has(4242));
+    // A size scales.
+    backend.recordings.clear(); // the fake children share a pid
+    await backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', path: out, fps: 24, size: { width: 1280, height: 720 } });
+    assert.deepEqual(calls[1].args.slice(0, 9), ['-y', '-f', 'gdigrab', '-framerate', '24', '-i', 'desktop', '-vf', 'scale=1280:720']);
+  });
+
+  it('record_start refuses bad parameters before spawning', async () => {
+    const t = fakeTime();
+    const { calls, spawnImpl } = spawnRecorder();
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl, clock: t.clock, timers: t.timers });
+    const ok = { ffmpeg: 'C:\\ff\\ffmpeg.exe', path: 'C:\\r\\take.mp4' };
+    for (const bad of [
+      { ...ok, ffmpeg: 'C:\\ff\\ffmpeg.cmd' },
+      { ...ok, path: 'take.mp4' },
+      { ...ok, path: 'C:\\r\\take.avi' },
+      { ...ok, fps: 0 }, { ...ok, fps: 121 }, { ...ok, fps: 2.5 },
+      { ...ok, size: { width: 0, height: 720 } }, { ...ok, size: { width: 'x', height: 720 } }
+    ]) {
+      await assert.rejects(backend.recordStart(bad), (e) => e.code === 'invalid_params' || e.code === 'app_type_not_supported', JSON.stringify(bad));
+    }
+    assert.equal(calls.length, 0);
+  });
+
+  it('record_stop sends q and reports bytes; a dead ffmpeg reports exited', async () => {
+    const t = fakeTime();
+    let next = 500;
+    const children = [];
+    const spawnImpl = () => { const c = fakeChild(); c.pid = next++; children.push(c); setImmediate(() => c.emit('spawn')); return c; };
+    const sizes = { 'C:\\r\\a.mp4': 1234 };
+    const statSync = (p) => { if (!(p in sizes)) throw enoent(); return { size: sizes[p] }; };
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl, statSync, clock: t.clock, timers: t.timers });
+    const { pid } = await backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', path: 'C:\\r\\a.mp4' });
+    t.now += 12_500;
+    const r = await backend.recordStop({ pid });
+    assert.deepEqual(children[0].written, ['q\n']);
+    assert.deepEqual(r, { path: 'C:\\r\\a.mp4', durationS: 12.5, bytes: 1234, truncated: false });
+    assert.equal(children[0].killed, 0);
+    assert.equal(backend.recordings.has(pid), false, 'forgotten once stopped');
+    await assert.rejects(backend.recordStop({ pid }), (e) => e.code === 'unknown_recording');
+
+    // An ffmpeg that died on its own: remembered, reported, not asked again.
+    const second = await backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', path: 'C:\\r\\b.mp4' });
+    t.now += 3000;
+    children[1].emit('exit', 1, null);
+    assert.deepEqual(backend.recordings.get(second.pid).exited, true);
+    t.now += 7000;
+    const dead = await backend.recordStop({ pid: second.pid });
+    assert.deepEqual(dead, { path: 'C:\\r\\b.mp4', durationS: 3, bytes: 0, truncated: true, exited: true, code: 1 });
+    assert.deepEqual(children[1].written, [], 'no q to a dead ffmpeg');
+  });
+
+  it('record_stop kills an ffmpeg that ignores q after 15 s and reports truncated', async () => {
+    const t = fakeTime();
+    const { calls, spawnImpl } = spawnRecorder({ onQ: 'ignore' });
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl, statSync: () => ({ size: 99 }), clock: t.clock, timers: t.timers });
+    const { pid } = await backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', path: 'C:\\r\\a.mp4' });
+    const before = t.now;
+    const r = await backend.recordStop({ pid });
+    assert.equal(calls[0].child.killed, 1);
+    assert.ok(t.now - before >= 15000);
+    assert.equal(r.truncated, true);
+    assert.equal(r.bytes, 99);
+  });
+
+  it('stopRecordings stops every live recording', async () => {
+    const t = fakeTime();
+    let next = 100;
+    const children = [];
+    const spawnImpl = () => { const c = fakeChild(); c.pid = next++; children.push(c); setImmediate(() => c.emit('spawn')); return c; };
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl, statSync: () => ({ size: 1 }), clock: t.clock, timers: t.timers });
+    await backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', path: 'C:\\r\\a.mp4' });
+    await backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', path: 'C:\\r\\b.mp4' });
+    const results = await backend.stopRecordings();
+    assert.equal(results.length, 2);
+    assert.ok(children.every((c) => c.written.includes('q\n')));
+    assert.equal(backend.recordings.size, 0);
+    assert.deepEqual(await backend.stopRecordings(), []);
+  });
+
+  it('the worker has keep_awake over SetThreadExecutionState', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'session', 'backends', 'windows-worker.ps1'), 'utf8');
+    assert.match(src, /\[DllImport\("kernel32\.dll"\)\] public static extern uint SetThreadExecutionState\(uint esFlags\);/);
+    assert.match(src, /case "keep_awake"/);
+    assert.match(src, /0x80000003/);
+    assert.match(src, /0x80000000/);
+  });
+
+  it('keep_awake goes to the worker', async () => {
+    const sent = [];
+    const spawnImpl = () => {
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = () => {};
+      child.stdin.on('data', (chunk) => {
+        for (const line of chunk.toString().split('\n').filter(Boolean)) {
+          const req = JSON.parse(line);
+          sent.push(req);
+          child.stdout.write(`${JSON.stringify({ id: req.id, ok: true, result: { on: req.params.on } })}\n`);
+        }
+      });
+      return child;
+    };
+    const backend = createWindowsBackend({ env: { LOCALAPPDATA }, spawnImpl });
+    assert.deepEqual(await backend.keepAwake({ on: true }), { on: true });
+    assert.deepEqual(await backend.keepAwake({ on: false }), { on: false });
+    assert.deepEqual(sent.map((r) => [r.op, r.params]), [['keep_awake', { on: true }], ['keep_awake', { on: false }]]);
+    await backend.stop();
+  });
+});
+
+describe('the other backends refuse the take ops', () => {
+  const { GuiError } = require('../src/gui/errors');
+  const backends = {
+    macos: () => require('../src/session/backends/macos').createMacosBackend({ worker: { call: async () => null, stop: async () => {} } }),
+    x11: () => require('../src/session/backends/x11').createX11Backend({ env: {} }),
+    wayland: () => require('../src/session/backends/wayland').createWaylandBackend({})
+  };
+  for (const [name, make] of Object.entries(backends)) {
+    it(`${name}: capability_unavailable for all four`, async () => {
+      const b = make();
+      for (const m of ['launchBrowser', 'recordStart', 'recordStop', 'keepAwake']) {
+        await assert.rejects(b[m]({}), (e) => e instanceof GuiError && e.code === 'capability_unavailable' && /recording and browser launch are Windows only in D1/.test(e.message), `${name}.${m}`);
+      }
+      assert.deepEqual(await b.stopRecordings(), []);
+    });
+  }
+});
+
 describe('Windows worker', { skip: !WIN }, () => {
   const { createWindowsBackend } = require('../src/session/backends/windows');
   const backend = WIN ? createWindowsBackend({}) : null;

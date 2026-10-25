@@ -69,8 +69,10 @@ The helper's first sealed frame is its `probe_report`. Then:
   every 10 s and closes after 30 s without a frame.
 
 Ops: `launch`, `processes`, `windows`, `foreground`, `focus`, `close`,
-`screenshot`, `input`, `release_all`, `probe` (spec §3.3). Timeouts: 10 s,
-`screenshot` 20 s, `launch` 30 s. There is no clipboard op.
+`screenshot`, `input`, `release_all`, `probe` (spec §3.3), and
+`launch_browser`, `record_start`, `record_stop`, `keep_awake` (revised
+2026-10-24, below). Timeouts: 10 s, `screenshot` 20 s, `launch` 30 s,
+`launch_browser` 15 s, `record_stop` 20 s. There is no clipboard op.
 
 Revised 2026-10-13 (second security review; no frame, proof or sealing
 changed, and the vectors are the same):
@@ -88,6 +90,49 @@ changed, and the vectors are the same):
   model which window to look at next, never to let a click through.
 - The helper answers a failed `input` with its code alone (`message` is the
   code): a backend's own error can quote the command it ran.
+
+Revised 2026-10-24 (agent-driven demo takes, spec
+`docs/superpowers/specs/2026-10-24-agent-driven-demo-takes-design.md` §8,
+§9; no frame, proof or sealing changed, and the vectors are the same). Four
+ops, on the Windows backend only; every other backend answers
+`capability_unavailable` ("recording and browser launch are Windows only in
+D1"):
+
+- `launch_browser` `{ exe, profile_dir, args? }` → `{ pid, cdp: { port, path } }`.
+  `exe` is an `.exe`, re-resolved as `launch`'s is (`path_changed`).
+  `profile_dir` must be strictly below
+  `%LOCALAPPDATA%\KingLouie\browser-profiles\` of the helper's user: a drive
+  path, no `.` or `..` segment, compared without case; anything else is
+  `profile_outside_root` and nothing is started. The helper removes a stale
+  `DevToolsActivePort` from the profile, starts `exe` detached with
+  `--user-data-dir=<profile_dir> --remote-debugging-port=0 --no-first-run
+  --no-default-browser-check` and then `args`, and reads
+  `<profile_dir>\DevToolsActivePort` every 200 ms for up to 10 s for an
+  integer port and a `/devtools/browser/<id>` path. When none comes it kills
+  the browser and answers `browser_launch_failed`. The service attaches over
+  CDP at `http://127.0.0.1:<port>`; `close` with the pid ends it.
+- `record_start` `{ ffmpeg, path, fps?, size? }` → `{ pid, startedAt }`
+  (`startedAt` in ms on the helper's clock). Runs `ffmpeg` (an `.exe`) as
+  the user: `-y -f gdigrab -framerate <fps, 30> -i desktop`, then
+  `-vf scale=<w>:<h>` when `size` (even integers) is given, `-c:v libx264
+  -preset veryfast -crf 23 -pix_fmt yuv420p -an -movflags +faststart
+  <path>` (an absolute `.mp4`). A failure to start is `recorder_failed`.
+- `record_stop` `{ pid }` → `{ path, durationS, bytes, truncated }`. The
+  helper writes `q` to ffmpeg's stdin and waits up to 15 s for it to exit,
+  else kills it and says `truncated: true`. `bytes` is the file's size (0
+  when there is none). An ffmpeg that had already exited answers
+  `exited: true` and its `code` too (`truncated` unless the code was 0). An
+  unknown pid is `unknown_recording`.
+- `keep_awake` `{ on }` → `{ on }`: `SetThreadExecutionState` in the worker
+  (`ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED` on,
+  `ES_CONTINUOUS` off). It lasts while the worker runs.
+- 30 s after the service connection closes, the helper stops every live
+  recording as `record_stop` would; a reconnect within 30 s keeps them. A
+  helper that stops (logout, exit) stops them first. Nothing deletes a
+  recording's file.
+- These four, like `input`, are answered and logged by their code alone:
+  their errors could quote the argv, a path or ffmpeg's output. ffmpeg's
+  stderr is drained and never read or logged.
 
 ## 6. Vectors
 

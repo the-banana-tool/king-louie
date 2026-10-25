@@ -14,6 +14,10 @@ const { LineWorker } = require('./line-worker');
 const execFileP = promisify(execFile);
 const LAUNCH_PID_MS = 10000;
 
+// Demo takes (D1): the browser, recording and keep-awake ops are Windows
+// only (spec 2026-10-24 §9; avfoundation is the obvious next line).
+const refuseTakeOp = async () => { throw new GuiError('capability_unavailable', 'recording and browser launch are Windows only in D1'); };
+
 function createMacosBackend({ env = process.env, log = createLogger('session-helper/macos'), spawnImpl = spawn, execFileImpl = (f, a) => execFileP(f, a, { env }),
   workerFile = path.join(__dirname, 'macos-worker.js'), tmpDir = null, nodeBinary = process.execPath, worker = null } = {}) {
   const w = worker || new LineWorker({ file: '/usr/bin/osascript', args: ['-l', 'JavaScript', workerFile], spawnImpl, env, log, name: 'macos-worker' });
@@ -69,6 +73,11 @@ function createMacosBackend({ env = process.env, log = createLogger('session-hel
     releaseAll: () => w.call('release_all'),
     locked: () => w.call('locked'),
     hitTest: ({ x, y }) => w.call('hit_test', { x, y }),
+    launchBrowser: refuseTakeOp,
+    recordStart: refuseTakeOp,
+    recordStop: refuseTakeOp,
+    keepAwake: refuseTakeOp,
+    stopRecordings: async () => [],
     stop: () => w.stop()
   };
 }
