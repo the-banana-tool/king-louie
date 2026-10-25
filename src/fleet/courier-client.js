@@ -2,7 +2,7 @@
 // tool call goes to the service's FleetToolHandler through the file courier,
 // so one JobManager, one set of limits and one rate limiter serve the node.
 const { ToolError, MCP_TOOLS } = require('./fleet-tools');
-const { WAIT_MS_MAX } = require('./tool-definitions');
+const { WAIT_MS_MAX, WAIT_TOOL_NAMES } = require('./tool-definitions');
 // Pure definitions (no requires): the courier branch never loads src/mcp/.
 const { CASE_MCP_TOOLS } = require('../cases/mcp-tool-definitions');
 const { createLogger } = require('../logging');
@@ -52,7 +52,7 @@ const sameNames = (a, b) => a.length === b.length && a.every((n, i) => n === b[i
 // plain call then one short get_job per poll, so no courier request is held
 // open for the whole wait. JobManager's terminal statuses (src/runbooks/ is
 // not loaded on this branch).
-const WAIT_TOOLS = new Set(['send_to_job', 'get_job']);
+const WAIT_TOOLS = new Set(WAIT_TOOL_NAMES);
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'denied', 'expired']);
 const POLL_MS = 1000;
 // Done waiting: the job is terminal, or it is a delegate session whose turn
@@ -78,6 +78,8 @@ class CourierFleetClient {
     this.timeoutMs = timeoutMs;
     this.pollMs = pollMs;
     this.clock = clock;
+    // The stdio server advertises wait_ms only for a handler that waits.
+    this.waitsOnJobs = true;
     this.jobManager = null;
     this.jobRuns = new Map();
     this.runbookEngine = null;

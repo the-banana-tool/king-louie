@@ -6,6 +6,7 @@
 const readline = require('readline');
 const { createLogger } = require('../logging');
 const { FleetToolHandler, MCP_TOOLS, ToolError, untrustedOutput, STDIO_ORIGIN } = require('../fleet/fleet-tools');
+const { withWaitMs } = require('../fleet/tool-definitions');
 const { version: SERVER_VERSION } = require('../../package.json');
 
 const log = createLogger('stdio-mcp-server');
@@ -103,6 +104,9 @@ class StdioMcpServer {
           log.warn(`Listing tools failed: ${err.message}`);
         }
       }
+      // wait_ms (spec §11, C-9) only where the handler does the waiting: the
+      // courier client of `king-louie-service mcp`, never a direct handler.
+      if (this.handler.waitsOnJobs === true) tools = withWaitMs(tools);
       return this.send({ jsonrpc: '2.0', id, result: { tools } });
     }
 

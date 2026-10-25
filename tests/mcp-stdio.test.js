@@ -116,13 +116,37 @@ describe('Local Stdio MCP Server: protocol', () => {
     const logs = tools.find((t) => t.name === 'get_job_logs');
     assert.equal(logs.inputSchema.properties.since.type, 'integer');
     assert.match(logs.inputSchema.properties.since.description, /offset/);
+    // A handler called directly does not wait, so its list offers no wait_ms.
+    for (const t of tools) assert.ok(!('wait_ms' in (t.inputSchema.properties || {})), t.name);
+    c.close();
+  });
+
+  it('wait_ms is listed on send_to_job and get_job only for the courier client of king-louie-service mcp (spec §11, C-9)', async () => {
+    const { CourierFleetClient } = require('../src/fleet/courier-client');
+    const courier = { callService: async () => { const e = new Error('gone'); e.code = 'unavailable'; throw e; } };
+    const c = connect({ handler: new CourierFleetClient({ courier, nodeConfig: NODE }) });
+    const { tools } = (await c.request(1, 'tools/list')).result;
     for (const name of ['send_to_job', 'get_job']) {
       const { wait_ms: waitMs } = tools.find((t) => t.name === name).inputSchema.properties;
       assert.equal(waitMs.type, 'integer', name);
       assert.equal(waitMs.minimum, 0, name);
       assert.equal(waitMs.maximum, 25000, name);
     }
+    for (const t of tools.filter((x) => x.name !== 'send_to_job' && x.name !== 'get_job')) {
+      assert.ok(!('wait_ms' in (t.inputSchema.properties || {})), t.name);
+    }
     c.close();
+  });
+
+  it('the front door and the service-chat fleet tools offer no wait_ms', () => {
+    const { MCP_TOOLS } = require('../src/fleet/tool-definitions');
+    const { FleetRouter } = require('../src/frontdoor/router/router');
+    const { FLEET_CHAT_TOOLS } = require('../src/tools/builtin/fleet-chat-tools');
+    const frontDoor = FleetRouter.prototype.toolDefinitions.call({ extraTools: new Map() });
+    for (const defs of [MCP_TOOLS, frontDoor]) {
+      for (const t of defs) assert.ok(!('wait_ms' in (t.inputSchema.properties || {})), t.name);
+    }
+    for (const t of FLEET_CHAT_TOOLS) assert.ok(!('wait_ms' in (t.parameters.properties || {})), t.name);
   });
 
   it('answers ping with an empty result', async () => {
