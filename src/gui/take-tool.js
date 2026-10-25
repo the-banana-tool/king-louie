@@ -1,11 +1,13 @@
 'use strict';
 
 // The Take tool (spec docs/superpowers/specs/2026-10-24-agent-driven-demo-takes-design.md §5.2):
-// start, status, note and stop one screen-recorded browser demo. requiresApproval is false: the
-// take grant on the phone is the approval. Built with the GUI tools' own wrapper (src/gui/tools.js
+// start, run_steps, status, note and stop one screen-recorded browser demo. requiresApproval is
+// false: the take grant on the phone is the approval. Built with the GUI tools' own wrapper (src/gui/tools.js
 // passes it in), so a run that refuses unsafe calls is refused before anything here is read.
 
+const path = require('path');
 const { GuiError, isGuiError, toToolResult, TAKE_TOOL_NAME } = require('./errors');
+const { validateSteps, runSteps, STEP_KINDS, MAX_STEPS } = require('./take-steps');
 const { TAKE_MAX_MINUTES } = require('./lease-protocol');
 
 const ACTIONS = Object.freeze(['start', 'run_steps', 'status', 'note', 'stop']);
@@ -38,10 +40,17 @@ const PARAMETERS = {
       description: 'start: record the screen (default true); { dir } is a folder under the session\'s working folder'
     },
     stop_when_done: { type: 'boolean', description: 'start: stop the take when the last step passes' },
-    // run_steps (wired in the next change)
-    steps: { type: 'array', maxItems: 200, items: { type: 'object', properties: { action: { type: 'string', minLength: 1, maxLength: 32 } }, required: ['action'], additionalProperties: true } },
-    from: { type: 'integer', minimum: 0, maximum: 199 },
-    continue_on_error: { type: 'boolean' },
+    // run_steps: each step is checked whole by src/gui/take-steps.js (spec §10's table).
+    steps: {
+      type: 'array', minItems: 1, maxItems: MAX_STEPS,
+      items: { type: 'object', properties: { step: { type: 'string', enum: [...STEP_KINDS] } }, required: ['step'], additionalProperties: true },
+      description: 'run_steps: the script, in order; each { step, ...its fields }: navigate {url}; click, dblclick, hover, focus, check, '
+        + 'uncheck, clear {selector}; fill, type {selector, text}; press {key, selector?}; select_option {selector, value}; '
+        + 'scroll {selector?, dx, dy}; wait_for {selector, state?, timeout_ms?}; wait_for_url {url, timeout_ms?}; '
+        + 'wait_for_text {selector, text, timeout_ms?}; pause {ms} (pacing only, 10 s each, 60 s a run); screenshot {name?}; note {text}'
+    },
+    from: { type: 'integer', minimum: 0, maximum: MAX_STEPS - 1, description: 'run_steps: the index to start at (resume after a failure)' },
+    continue_on_error: { type: 'boolean', description: 'run_steps: run the rest after a step fails' },
     // note
     text: { type: 'string', minLength: 1, maxLength: 500, description: 'note: one line for the take\'s log (what you changed)' },
     // stop (and start's request reason)
@@ -56,13 +65,18 @@ const START_KEYS = ['name', 'sites', 'browser', 'apps', 'credentials', 'minutes'
 
 const refusal = (err) => ({ ...toToolResult(err), ...(isGuiError(err) ? { code: err.code } : {}) });
 
-function buildTakeTool({ takes, tool, jobIdOf }) {
+// The browser tool's actions, required on first use: nothing that loads src/gui/ for its config
+// or errors should load Playwright.
+const defaultBrowserActions = () => require('../tools/builtin/browser-tool').actions;
+
+function buildTakeTool({ takes, tool, jobIdOf, browserActions = defaultBrowserActions }) {
   return tool({
     name: TAKE_TOOL_NAME,
     description: 'Run one screen-recorded browser demo (a take). start asks the owner\'s phone once for the whole take '
       + '(sites, browser, apps, minutes); then drive its browser with the browser tools (the take\'s checks answer every '
       + 'approval), status shows where it is, note logs what you changed, stop ends it and returns the recording. '
-      + 'To wait, use wait_for or wait_for_url; never a shell.',
+      + 'run_steps runs a script of browser steps with no model between them and returns every step\'s outcome; '
+      + 'to wait, use wait_for, wait_for_url or wait_for_text; never a shell.',
     parameters: PARAMETERS
   }, async (params, options) => {
     try {
@@ -81,9 +95,9 @@ function buildTakeTool({ takes, tool, jobIdOf }) {
         });
         return { ok: true, ...out };
       }
-      if (action === 'run_steps') throw new GuiError('invalid_params', 'run_steps arrives in the next change');
       const record = takes.forJob(jobId);
       if (!record) throw new GuiError('invalid_params', 'this session has no take; start one first');
+      if (action === 'run_steps') return await runTakeSteps(takes, record, params, options, browserActions);
       if (action === 'status') return { ok: true, untrusted_output: true, ...(await takes.status(record.take_id)) };
       if (action === 'note') {
         if (params.text === undefined) throw new GuiError('invalid_params', '"text" is required');
@@ -96,6 +110,41 @@ function buildTakeTool({ takes, tool, jobIdOf }) {
       return refusal(err);
     }
   });
+}
+
+// Take.run_steps (spec §10): validates, runs the steps on the take's browser under the take's
+// policy, keeps the results on the record, and stops the take when it asked to stop when done.
+async function runTakeSteps(takes, record, params, options, browserActions) {
+  const takeId = record.take_id;
+  const live = takes.context(takeId);
+  if (!live) throw new GuiError('invalid_params', 'the take has ended');
+  const from = params.from ?? 0;
+  const valid = validateSteps(params.steps, { from });
+  if (!valid.ok) throw new GuiError('invalid_params', valid.error.message);
+  // Stills go beside the recording; a take with none keeps them in its own folder.
+  const recordingPath = record.recording && typeof record.recording.path === 'string' ? record.recording.path : null;
+  const takeDir = recordingPath ? path.dirname(recordingPath) : path.join(takes.store.dir, takeId);
+  const out = await runSteps({ steps: valid.steps, from, continueOnError: params.continue_on_error === true }, {
+    actions: browserActions(),
+    // The Take call's own context: its holder's browserKey resolves the take's browser.
+    context: options,
+    policy: live.policy,
+    takeDir,
+    clock: takes.clock,
+    timers: takes.timers,
+    onNote: (text) => takes.note(takeId, text),
+    isLive: () => takes.context(takeId) !== null,
+    signal: options.signal || null
+  });
+  // A resumed run replaces what it ran again; the steps before `from` keep their outcome.
+  const earlier = (Array.isArray(record.steps) ? record.steps : []).filter((s) => s && s.index < from);
+  takes.recordSteps(takeId, [...earlier, ...out.results]);
+  const result = { ok: true, untrusted_output: true, results: out.results, stopped_at: out.stopped_at };
+  const last = out.results.at(-1);
+  if (live.stopWhenDone && last && last.index === valid.steps.length - 1 && out.results.every((r) => r.ok) && takes.context(takeId)) {
+    result.stopped = await takes.stop(takeId, {});
+  }
+  return result;
 }
 
 module.exports = { buildTakeTool, TAKE_ACTIONS: ACTIONS };

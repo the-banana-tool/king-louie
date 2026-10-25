@@ -448,7 +448,7 @@ describe('the Take tool', () => {
     assert.equal(relay.all('kl.lease.request').length, 0);
   });
 
-  it('start, status, note, stop through the tool; run_steps is not here yet; a case turn is refused', async () => {
+  it('start, status, note, stop through the tool; run_steps checks its steps; a case turn is refused', async () => {
     const { Take } = toolsWith();
     const p = Take.execute({ action: 'start', ...PARAMS }, opts());
     await tick();
@@ -462,7 +462,7 @@ describe('the Take tool', () => {
     assert.equal(status.state, 'live');
     assert.equal((await Take.execute({ action: 'note', text: 'Fixed it' }, opts())).ok, true);
     const steps = await Take.execute({ action: 'run_steps' }, opts());
-    assert.deepEqual(steps, { ok: false, error: 'invalid_params: run_steps arrives in the next change', code: 'invalid_params' });
+    assert.deepEqual(steps, { ok: false, error: 'invalid_params: "steps" must be a list of 1–200 steps', code: 'invalid_params' });
     const busy = await Take.execute({ action: 'start', ...PARAMS }, opts({ origin: { ...ORIGIN, job_id: 'job-2' } }));
     assert.equal(busy.code, 'take_busy');
     const stopped = await Take.execute({ action: 'stop' }, opts());
