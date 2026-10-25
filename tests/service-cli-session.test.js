@@ -726,16 +726,56 @@ describe('the session user may post to the courier (Windows)', () => {
     assert.equal(d.executed.length, 0);
   });
 
-  it('when the take-back fails too, the message names what is left granted; a runner that throws is acl_failed', { skip: POSIX }, async () => {
+  it('when the take-back fails too, the message names what is left granted', { skip: POSIX }, async () => {
     const s = setup();
     const r = recorder(s, (req) => (req.mode === 'grant' ? ['ok', 'reparse_point'] : ['acl_failed']));
     const out = io();
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: out.io, deps: deps(s, r.deps) }), 1);
     assert.ok(out.err.join('').includes(`the grant on ${courierDirs(s)[0]} could not be taken back`), out.err.join(''));
-    const s2 = setup();
-    const out2 = io();
-    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s2.dataDir, io: out2.io, deps: deps(s2, { runCourierAcl: () => { throw new Error('powershell is gone'); } }) }), 1);
-    assert.ok(out2.err.join('').includes(`${courierDirs(s2)[0]} (acl_failed), ${courierDirs(s2)[1]} (acl_failed)`), out2.err.join(''));
+  });
+
+  // Review N-6: a runner that dies after one answer leaves the other
+  // directory unknown; both are revoked, so a half-granted install leaves
+  // nothing behind.
+  it('a runner that answers one ok and then dies: the other directory is acl_unknown, both are revoked, exit 1, no login start', { skip: POSIX }, async () => {
+    const [outbox, inbox] = [0, 1];
+    const cases = [
+      ['answers short', () => ['ok']],
+      ['throws after one ok', () => { throw Object.assign(new Error('the child died'), { codes: ['ok'] }); }],
+      ['throws with nothing', () => { throw new Error('powershell is gone'); }]
+    ];
+    for (const [label, grant] of cases) {
+      const s = setup();
+      const dirs = courierDirs(s);
+      const r = recorder(s, (req) => (req.mode === 'grant' ? grant() : req.names.map(() => 'ok')));
+      const out = io();
+      const d = deps(s, r.deps);
+      assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: out.io, deps: d }), 1, label);
+      const err = out.err.join('');
+      assert.ok(err.includes(`${dirs[inbox]} (acl_unknown: the runner said nothing of it)`), `${label}: ${err}`);
+      if (label === 'throws with nothing') assert.ok(err.includes(`${dirs[outbox]} (acl_unknown`), `${label}: ${err}`);
+      assert.ok(!err.includes('could not be taken back'), `${label}: ${err}`);
+      assert.deepEqual(r.courier(), [courierRequest('grant', SID, dirs), courierRequest('revoke', SID, dirs)], label);
+      assert.equal(d.executed.length, 0, label);
+    }
+  });
+
+  // Review N-5: the data dir's final path is read before the question, so a
+  // change while the owner reads is the runner's path_moved.
+  it('the data dir\'s realpath is read before the question, on install and uninstall, and is what the runner is handed', { skip: POSIX }, async () => {
+    const s = setup();
+    const order = [];
+    const r = recorder(s);
+    const d = deps(s, { ...r.deps, realpath: (p) => { order.push('realpath'); return fs.realpathSync.native(p); } });
+    d.confirm = async () => { order.push('confirm'); return true; };
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    assert.deepEqual(order, ['realpath', 'confirm']);
+    assert.equal(r.courier()[0].expected, S.windowsFinalPath(s.dataDir));
+    order.length = 0;
+    r.log.length = 0;
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    assert.deepEqual(order, ['realpath', 'confirm']);
+    assert.equal(r.courier()[0].expected, S.windowsFinalPath(s.dataDir));
   });
 
   it('install --dry-run lists both grants and creates or grants nothing', { skip: POSIX }, async () => {

@@ -476,27 +476,44 @@ function windowsFinalPath(p) {
 }
 
 // { mode: 'grant' | 'revoke', sid, dataDir, expected, names } → one code per
-// name, in order. `expected` is the data dir's final path as Node last saw
-// it: a hint the handle must match, nothing more. Elevated (the admin CLI),
-// synchronous.
+// name, in order. `expected` is the data dir's final path as Node read it
+// before the question: the handle must match it. Elevated (the admin CLI),
+// synchronous. A child that dies, times out or answers short (review N-6)
+// leaves every name without a known code `acl_unknown`: it may or may not
+// have been changed, so the caller undoes what it can and says so.
 function runCourierAcl({ mode, sid, dataDir, expected, names }, { execFile = execFileSync, env = process.env } = {}) {
   if (mode !== 'grant' && mode !== 'revoke') throw new GuiError('invalid_params', 'mode is grant or revoke');
   if (!SID_RE.test(String(sid))) throw new GuiError('invalid_params', 'a Windows session user is named by its SID');
   if (typeof dataDir !== 'string' || typeof expected !== 'string' || /[\r\n]/.test(`${dataDir}${expected}`)) throw new GuiError('invalid_params', 'the data dir');
   if (!Array.isArray(names) || !names.length || names.some((n) => !COURIER_NAMES.includes(n))) throw new GuiError('invalid_params', 'courier directories');
   const encoded = Buffer.from(WINDOWS_COURIER_ACL_SCRIPT, 'utf16le').toString('base64');
-  const out = String(execFile(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
-    encoding: 'utf8', windowsHide: true, timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'],
-    env: {
-      ...env,
-      KL_COURIER_MODE: mode, KL_COURIER_SID: sid, KL_COURIER_MASK: String(COURIER_MODIFY_MASK),
-      KL_COURIER_DATA_DIR: dataDir, KL_COURIER_EXPECTED: expected, KL_COURIER_NAMES: names.join('\n')
-    }
-  }));
-  const codes = out.trim().split(/\r?\n/).filter((l) => l.trim()).map((l) => {
-    try { return JSON.parse(l).code; } catch { return null; }
-  });
-  if (codes.length !== names.length || codes.some((c) => !COURIER_ACL_CODES.has(c))) throw new Error('unexpected output from the courier ACL script');
+  let out;
+  try {
+    out = String(execFile(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+      encoding: 'utf8', windowsHide: true, timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'],
+      env: {
+        ...env,
+        KL_COURIER_MODE: mode, KL_COURIER_SID: sid, KL_COURIER_MASK: String(COURIER_MODIFY_MASK),
+        KL_COURIER_DATA_DIR: dataDir, KL_COURIER_EXPECTED: expected, KL_COURIER_NAMES: names.join('\n')
+      }
+    }));
+  } catch (err) {
+    // What it printed before it died still counts.
+    out = err && err.stdout != null ? String(err.stdout) : '';
+  }
+  return courierCodes(out, names.length);
+}
+
+// The script's lines as codes, one per name: a line that is not one of the
+// codes, and every name past the last line, is acl_unknown.
+function courierCodes(out, count) {
+  const lines = String(out).trim().split(/\r?\n/).filter((l) => l.trim());
+  const codes = [];
+  for (let i = 0; i < count; i += 1) {
+    let code = null;
+    try { code = i < lines.length ? JSON.parse(lines[i]).code : null; } catch { code = null; }
+    codes.push(COURIER_ACL_CODES.has(code) ? code : 'acl_unknown');
+  }
   return codes;
 }
 

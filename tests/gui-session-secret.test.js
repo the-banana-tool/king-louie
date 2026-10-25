@@ -218,9 +218,13 @@ describe('per-user copies', () => {
     bad({ expected: undefined });
     bad({ names: ['..\\config'] });
     bad({ names: [] });
-    // Output it does not know is no answer.
-    assert.throws(() => S.runCourierAcl(req, { execFile: () => '{"code":"ok"}\n', env }), /unexpected output/);
-    assert.throws(() => S.runCourierAcl(req, { execFile: () => '{"code":"ok"}\n{"code":"maybe"}\n', env }), /unexpected output/);
+    // Review N-6: a name the child said nothing of, or nothing it knows, is
+    // acl_unknown (it may have been changed); what it printed before it died counts.
+    assert.deepEqual(S.runCourierAcl(req, { execFile: () => '{"code":"ok"}\n', env }), ['ok', 'acl_unknown']);
+    assert.deepEqual(S.runCourierAcl(req, { execFile: () => '{"code":"ok"}\n{"code":"maybe"}\n', env }), ['ok', 'acl_unknown']);
+    const died = () => { throw Object.assign(new Error('timed out'), { stdout: '{"code":"ok"}\r\n' }); };
+    assert.deepEqual(S.runCourierAcl(req, { execFile: died, env }), ['ok', 'acl_unknown']);
+    assert.deepEqual(S.runCourierAcl(req, { execFile: () => { throw new Error('spawn failed'); }, env }), ['acl_unknown', 'acl_unknown']);
     assert.equal(S.windowsFinalPath('C:\\data'), '\\\\?\\C:\\data');
     assert.equal(S.windowsFinalPath('\\\\server\\share\\data'), '\\\\?\\UNC\\server\\share\\data');
   });

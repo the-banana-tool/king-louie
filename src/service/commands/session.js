@@ -267,19 +267,33 @@ function existingCourierDirs(dataDir) {
 // relative to the one above without following a reparse point (task 16
 // re-review N-1): the service account owns the data dir and can make any of
 // them a junction at any moment, the data dir itself while install waits at
-// its question. Nothing here creates or opens them by name. The data dir's
-// native realpath, taken here, is only the final path the child's handle must
-// have. `dirs` are paths under the data dir's approvals; one code each; a
-// runner that fails says acl_failed for each.
-function courierAcl({ mode, sid, dirs, dataDir, deps }) {
+// its question. Nothing here creates or opens them by name. `expected` is the
+// data dir's final path, read before the question (courierExpected; review
+// N-5), so an ancestor redirected while the owner reads is path_moved.
+// `dirs` are paths under the data dir's approvals; one code each. A runner
+// that throws or answers short leaves each directory it said nothing of
+// acl_unknown (review N-6): it may have been changed.
+function courierAcl({ mode, sid, dirs, dataDir, expected, deps }) {
   const run = deps.runCourierAcl || ((req) => require('../../gui/session-secret').runCourierAcl(req));
-  const finalPath = require('../../gui/session-secret').windowsFinalPath;
+  let codes = [];
+  if (expected) {
+    try {
+      codes = run({ mode, sid, dataDir, expected, names: dirs.map((dir) => path.basename(dir)) });
+    } catch (err) {
+      codes = err && Array.isArray(err.codes) ? err.codes : [];
+    }
+  }
+  return dirs.map((_, i) => (Array.isArray(codes) && typeof codes[i] === 'string' ? codes[i] : (expected ? 'acl_unknown' : 'acl_failed')));
+}
+
+// The data dir's final path, read once before the question; null when it
+// cannot be read (the grant is then refused acl_failed, nothing asked).
+function courierExpected(dataDir, deps) {
   try {
-    const expected = finalPath((deps.realpath || fs.realpathSync.native)(dataDir));
-    const codes = run({ mode, sid, dataDir, expected, names: dirs.map((dir) => path.basename(dir)) });
-    if (Array.isArray(codes) && codes.length === dirs.length) return codes;
-  } catch { /* below */ }
-  return dirs.map(() => 'acl_failed');
+    return require('../../gui/session-secret').windowsFinalPath((deps.realpath || fs.realpathSync.native)(dataDir));
+  } catch {
+    return null;
+  }
 }
 
 // R-F5-9: off a terminal nobody can be asked, so only --yes goes on. Checked
@@ -315,6 +329,9 @@ async function install({ flags, dataDir, io, deps }) {
   // key file there counts only when the data dir's owner owns it, and the
   // identity is verified against that key before its id is sealed.
   const { nodeId, publicKey, cipher } = resolveNodeIdentity({ dataDir, platform: c.platform, deps });
+  // Beside that lstat, before the question (review N-5): the data dir's final
+  // path, which the courier runner's handle must have after it.
+  const courierRoot = c.platform === 'win32' ? courierExpected(dataDir, deps) : null;
   // R-F5-17: and it must be the identity an administrator recorded
   // ("king-louie-service identity record"). The identity above only proves
   // that whoever holds this data dir's master key stored it, which the
@@ -418,14 +435,19 @@ async function install({ flags, dataDir, io, deps }) {
     const halfDone = `the helper files are written but the login start is not: run "session install --user ${sessionUser}" again`;
     // The runner creates them (relative to its pinned handles) when missing.
     const dirs = courierDirs(dataDir);
-    const codes = courierAcl({ mode: 'grant', sid: account.sid, dirs, dataDir, deps });
+    const codes = courierAcl({ mode: 'grant', sid: account.sid, dirs, dataDir, expected: courierRoot, deps });
     const failed = dirs.filter((_, i) => codes[i] !== 'ok');
     if (failed.length) {
-      // None of the grant stays when part of it failed.
-      const granted = dirs.filter((_, i) => codes[i] === 'ok');
-      const undone = granted.length ? courierAcl({ mode: 'revoke', sid: account.sid, dirs: granted, dataDir, deps }) : [];
+      // None of the grant stays when part of it failed: what was granted, and
+      // what the runner said nothing of (acl_unknown: it may have been), is
+      // revoked again (review N-6).
+      const granted = dirs.filter((_, i) => codes[i] === 'ok' || codes[i] === 'acl_unknown');
+      const undone = granted.length ? courierAcl({ mode: 'revoke', sid: account.sid, dirs: granted, dataDir, expected: courierRoot, deps }) : [];
       const left = granted.filter((_, i) => undone[i] !== 'ok');
-      const why = failed.map((dir) => `${dir} (${codes[dirs.indexOf(dir)]})`).join(', ');
+      const why = failed.map((dir) => {
+        const code = codes[dirs.indexOf(dir)];
+        return `${dir} (${code}${code === 'acl_unknown' ? ': the runner said nothing of it' : ''})`;
+      }).join(', ');
       throw new Error(`${account.sid} could not be given modify on ${why}${left.length ? `; the grant on ${left.join(', ')} could not be taken back` : ''}; ${halfDone}`);
     }
   }
@@ -531,6 +553,9 @@ async function uninstall({ flags, dataDir, io, deps }) {
     io.stderr.write(`${err.message}\nNothing was removed.\n`);
     return 1;
   }
+  // Before the question (review N-5): the final path the courier runner's
+  // handle must have.
+  const courierRoot = c.platform === 'win32' ? courierExpected(dataDir, deps) : null;
 
   if (flags.dryRun) {
     // Everything the real run removes, and what it leaves.
@@ -596,7 +621,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
     if (c.platform !== 'win32') continue;
     const dirs = existingCourierDirs(dataDir);
     if (!dirs.length) continue;
-    const codes = courierAcl({ mode: 'revoke', sid: who.sid, dirs, dataDir, deps });
+    const codes = courierAcl({ mode: 'revoke', sid: who.sid, dirs, dataDir, expected: courierRoot, deps });
     dirs.forEach((dir, i) => {
       if (codes[i] !== 'ok') aclLeft.push(`the entry for ${who.sid} could not be taken off ${dir} (${codes[i]}); run "session uninstall --user ${sessionUser}" again (it removes the entry through a checked handle; do not use icacls by name on the service's directories)`);
     });
