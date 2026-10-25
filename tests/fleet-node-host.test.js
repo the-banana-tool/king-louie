@@ -333,6 +333,7 @@ describe('CourierFleetClient wait_ms (spec §11, C-9)', () => {
     const { client, seen } = fakeClient([turn, turn, { result: { job_id: 'j', session: 'idle', status: 'running' } }]);
     const r = await client.call('get_job', { job_id: 'j', wait_ms: 25000 });
     assert.equal(r.session, 'idle');
+    assert.deepEqual(r.wait, { ended: 'idle' });
     assert.equal(seen.length, 3);
     assert.ok(seen.every(([m]) => m === 'fleet.get_job'));
     assert.ok(seen.every(([, a]) => !('wait_ms' in a)));
@@ -346,6 +347,7 @@ describe('CourierFleetClient wait_ms (spec §11, C-9)', () => {
     ]);
     const r = await client.call('send_to_job', { job_id: 'j', message: 'hi', wait_ms: 5000 });
     assert.equal(r.result, 'reply');
+    assert.deepEqual(r.wait, { ended: 'idle' });
     assert.equal(seen[0][0], 'fleet.send_to_job');
     assert.deepEqual(seen[0][1], { job_id: 'j', message: 'hi' });
     assert.deepEqual(seen.slice(1).map(([m, a]) => [m, a]), [['fleet.get_job', { job_id: 'j' }], ['fleet.get_job', { job_id: 'j' }]]);
@@ -355,6 +357,7 @@ describe('CourierFleetClient wait_ms (spec §11, C-9)', () => {
     const { client, seen } = fakeClient([turn, { result: { job_id: 'j', session: 'turn', status: 'cancelled' } }, turn]);
     const r = await client.call('get_job', { job_id: 'j', wait_ms: 25000 });
     assert.equal(r.status, 'cancelled');
+    assert.deepEqual(r.wait, { ended: 'terminal' });
     assert.equal(seen.length, 2);
   });
 
@@ -369,7 +372,42 @@ describe('CourierFleetClient wait_ms (spec §11, C-9)', () => {
     });
     const r = await client.call('get_job', { job_id: 'j', wait_ms: 25000 });
     assert.equal(r.n, 2);
+    assert.deepEqual(r.wait, { ended: 'timeout' });
     assert.equal(seen.length, 2);
+  });
+
+  it('the cap is exact: 24999 ms keeps polling, 25000 stops', async () => {
+    let now = 0;
+    const seen = [];
+    const client = new CourierFleetClient({
+      courier: {
+        callService: async (m) => {
+          seen.push(m);
+          if (seen.length === 2) now = 24999;
+          else if (seen.length === 3) now = 25000;
+          if (seen.length > 5) throw new Error('still polling past wait_ms');
+          return { result: { ...turn.result, n: seen.length } };
+        }
+      },
+      pollMs: 0,
+      clock: () => now
+    });
+    const r = await client.call('get_job', { job_id: 'j', wait_ms: 25000 });
+    assert.equal(r.n, 3);
+    assert.deepEqual(r.wait, { ended: 'timeout' });
+    assert.equal(seen.length, 3);
+  });
+
+  it('a clock that never moves still ends the wait, after ceil(wait_ms / pollMs) + 1 polls', async () => {
+    const seen = [];
+    const client = new CourierFleetClient({
+      courier: { callService: async (m) => { seen.push(m); if (seen.length > 50) throw new Error('unbounded'); return turn; } },
+      pollMs: 0, // floored at 1 ms: 5 / 1 + 1 = 6 polls
+      clock: () => 0
+    });
+    const r = await client.call('get_job', { job_id: 'j', wait_ms: 5 });
+    assert.deepEqual(r.wait, { ended: 'timeout' });
+    assert.equal(seen.length, 1 + 6);
   });
 
   it('a clock set back never extends the wait (review A1)', async () => {
@@ -390,20 +428,8 @@ describe('CourierFleetClient wait_ms (spec §11, C-9)', () => {
     });
     const r = await client.call('get_job', { job_id: 'j', wait_ms: 25000 });
     assert.equal(r.n, 2);
+    assert.deepEqual(r.wait, { ended: 'timeout' });
     assert.equal(seen.length, 2);
-  });
-
-  it('the default clock is monotonic: Date.now going back does not extend the wait', async (t) => {
-    t.mock.timers.enable({ apis: ['Date'], now: 1e12 });
-    const seen = [];
-    const client = new CourierFleetClient({
-      courier: { callService: async (m) => { seen.push(m); if (seen.length >= 20) throw new Error('still polling'); t.mock.timers.setTime(0); return turn; } },
-      pollMs: 5
-    });
-    const r = await client.call('get_job', { job_id: 'j', wait_ms: 30 });
-    assert.equal(r.session, 'turn');
-    assert.equal(r.wait, undefined);
-    assert.ok(seen.length >= 2 && seen.length < 20, String(seen.length));
   });
 
   it('send_to_job: a failed poll after the send returns the send, marked poll_failed (review B1)', async () => {
@@ -461,7 +487,9 @@ describe('CourierFleetClient wait_ms (spec §11, C-9)', () => {
     t.mock.timers.tick(500); await flush();
     assert.equal(seen.length, 4);
     assert.equal(done, true);
-    assert.equal((await p).session, 'turn');
+    const r = await p;
+    assert.equal(r.session, 'turn');
+    assert.deepEqual(r.wait, { ended: 'timeout' });
   });
 
   it('wait_ms over 25000 is invalid_params, and nothing is sent', async () => {

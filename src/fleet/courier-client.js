@@ -55,15 +55,17 @@ const sameNames = (a, b) => a.length === b.length && a.every((n, i) => n === b[i
 const WAIT_TOOLS = new Set(WAIT_TOOL_NAMES);
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'denied', 'expired']);
 const POLL_MS = 1000;
-// Done waiting: the job is terminal, or it is a delegate session whose turn
-// has ended. A job with no session (a runbook job) waits for its end.
-function waitSettled(job) {
-  // No job to look at (a null result): nothing to wait for, so the reply is
-  // returned as it came.
-  if (!job || typeof job !== 'object') return true;
-  if (TERMINAL_STATUSES.has(job.status)) return true;
-  return typeof job.session === 'string' && job.session !== 'turn';
+// How a wait ended, or null while it should go on: the job is terminal, or
+// it is a delegate session whose turn has ended. A job with no session (a
+// runbook job) waits for its end. No job to look at (a null result) ends the
+// wait too, and that reply is returned as it came.
+function waitEnding(job) {
+  if (!job || typeof job !== 'object') return 'none';
+  if (TERMINAL_STATUSES.has(job.status)) return 'terminal';
+  return typeof job.session === 'string' && job.session !== 'turn' ? 'idle' : null;
 }
+// The reply with how the wait ended beside it, so a driver reads one field.
+const withWait = (job, wait) => (job && typeof job === 'object' ? { ...job, wait } : { wait });
 function readWaitMs(v) {
   if (v === undefined || v === null) return 0;
   if (!Number.isInteger(v) || v < 0) throw new ToolError('invalid_params', 'invalid_params: wait_ms must be a non-negative integer');
@@ -119,27 +121,36 @@ class CourierFleetClient {
   }
 
   // The plain call, then get_job every pollMs until the turn ends, the job
-  // is terminal or waitMs has passed (on a monotonic clock); the reply is the
-  // last get_job's. Once the plain call has gone through, a failed poll ends
-  // the wait with the last good reply marked `wait: { ended: 'poll_failed',
-  // code }`, never as an error: a send_to_job that throws after its message
-  // went out would invite the driver to send it again.
+  // is terminal or waitMs has passed (on a monotonic clock), and at most
+  // ceil(waitMs / pollMs) + 1 polls, so a clock that stalls cannot keep it
+  // going; the reply is the last get_job's with `wait: { ended }` beside it
+  // ('idle', 'terminal', 'timeout', or 'poll_failed' with `code`). Once the
+  // plain call has gone through, a failed poll ends the wait with the last
+  // good reply, never as an error: a send_to_job that throws after its
+  // message went out would invite the driver to send it again.
   async callAndWait(name, args, waitMs) {
     const elapsed = stopwatch(this.clock);
+    const pollMs = Math.max(1, Number.isFinite(this.pollMs) ? this.pollMs : POLL_MS);
+    const maxPolls = Math.ceil(waitMs / pollMs) + 1;
     let job = await this.call(name, args);
     // send_to_job answers with an acknowledgement, not the job: always look.
     let looked = name === 'get_job';
+    let polls = 0;
     const jobId = args.job_id;
     for (;;) {
-      if (looked && waitSettled(job)) return job;
+      if (looked) {
+        const ended = waitEnding(job);
+        if (ended === 'none') return job;
+        if (ended) return withWait(job, { ended });
+      }
       const left = waitMs - elapsed();
-      if (left <= 0 && looked) return job;
-      if (left > 0) await sleep(Math.min(this.pollMs, left));
+      if (looked && (left <= 0 || polls >= maxPolls)) return withWait(job, { ended: 'timeout' });
+      if (left > 0) await sleep(Math.min(pollMs, left));
+      polls += 1;
       try {
         job = await this.call('get_job', { job_id: jobId });
       } catch (err) {
-        const wait = { ended: 'poll_failed', code: err instanceof ToolError ? err.code : 'internal' };
-        return job && typeof job === 'object' ? { ...job, wait } : { wait };
+        return withWait(job, { ended: 'poll_failed', code: err instanceof ToolError ? err.code : 'internal' });
       }
       looked = true;
     }
