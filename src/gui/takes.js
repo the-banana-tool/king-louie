@@ -9,6 +9,7 @@
 // recording (the file is kept), closes the browser, clears the policy, releases the lease and
 // writes the record's `ended`.
 
+const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
 const { GuiError, isGuiError } = require('./errors');
@@ -31,6 +32,16 @@ const RECORDER_MISSING = 'Install ffmpeg (winget install Gyan.FFmpeg) or set gui
 const FIRST_COLUMN = Object.freeze([...BROWSER_ACTIONS.page, ...BROWSER_ACTIONS.session, ...BROWSER_ACTIONS.extract]);
 
 const iso = (ms) => new Date(ms).toISOString();
+// The real path of p (links and 8.3 names expanded) through its deepest existing ancestor,
+// case-folded on Windows.
+function realOf(p) {
+  const rest = [];
+  let cur = p;
+  while (!fs.existsSync(cur) && path.dirname(cur) !== cur) { rest.unshift(path.basename(cur)); cur = path.dirname(cur); }
+  const real = path.join(fs.realpathSync.native(cur), ...rest);
+  return process.platform === 'win32' ? real.toLowerCase() : real;
+}
+const isUnder = (child, parent) => child === parent || child.startsWith(parent.endsWith(path.sep) ? parent : parent + path.sep);
 const invalid = (detail) => new GuiError('invalid_params', detail);
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const plainLine = (v, max) => typeof v === 'string' && v.length > 0 && Array.from(v).length <= max && plainLineProblem(v) === null;
@@ -53,7 +64,8 @@ async function attachPlaywright(cdpUrl) {
 // Closes the take's Chrome itself: disconnecting Playwright from a CDP attach leaves it running.
 async function closeOverCdp(browser) {
   const cdp = browser && browser.browser;
-  if (!cdp || typeof cdp.newBrowserCDPSession !== 'function') return;
+  // Not closable this way: the caller ends the process by its pid instead.
+  if (!cdp || typeof cdp.newBrowserCDPSession !== 'function') throw new Error('no CDP connection to close');
   const session = await cdp.newBrowserCDPSession();
   await session.send('Browser.close');
 }
@@ -156,9 +168,13 @@ class TakeManager {
         if (typeof workingDirectory !== 'string' || !workingDirectory) throw invalid('"record.dir" needs a session with a working folder');
         const cwd = path.resolve(workingDirectory);
         const resolved = path.resolve(cwd, r.dir);
-        if (!(resolved === cwd || resolved.startsWith(cwd.endsWith(path.sep) ? cwd : cwd + path.sep))) {
-          throw invalid('"record.dir" must be under the session\'s working folder');
+        let inside = isUnder(resolved, cwd);
+        try {
+          inside = inside && isUnder(realOf(resolved), realOf(cwd));
+        } catch {
+          inside = false;
         }
+        if (!inside) throw invalid('"record.dir" must be under the session\'s working folder');
         dir = resolved;
       }
       record = { fps, size, dir };
@@ -191,44 +207,76 @@ class TakeManager {
 
     const record = this.store.create({ name: p.name, job_id: jobId, origin, state: 'requested' });
     const takeId = record.take_id;
+    let settle;
     const t = {
-      takeId, jobId, name: p.name, holder, lease: null, browser: null, browserKey: `take:${takeId}`, policy: null,
-      recording: null, awake: false, silentTimer: null, listener: null, ended: false, ending: null, stopWhenDone: p.stopWhenDone
+      takeId, jobId, name: p.name, holder, lease: null, leaseId: null, leaseEndReason: null, browser: null, browserPid: null,
+      browserKey: `take:${takeId}`, policy: null, recording: null, awake: false, silentTimer: null, listener: null,
+      ended: false, ending: null, lateRelease: null, stopWhenDone: p.stopWhenDone, startSettled: new Promise((r) => { settle = r; })
     };
     this.takes.set(takeId, t);
     this.byJob.set(jobId, takeId);
     this.active = t;
+    try {
+      return await this._start(t, p, { origin, nodeLocalOrigin, signal, ffmpeg });
+    } finally {
+      settle();
+    }
+  }
+
+  async _start(t, p, { origin, nodeLocalOrigin, signal, ffmpeg }) {
+    const cfg = this.guiConfig;
+    const { takeId, jobId, holder } = t;
     const ctx = { jobId };
-    // The lease ended while start was still going: what start made since is let go of.
+    // The take ended while start was still going: what start made since is let go of.
     const checkEnded = async () => {
       if (!t.ended) return;
-      await this._release(t);
-      if (t.recordingDone) this._safeUpdate(takeId, { recording: t.recordingDone });
-      throw new GuiError('lease_required', `the take ended (${t.endReason})`);
+      t.lateRelease = this._release(t).then(() => {
+        if (t.recordingDone) this._safeUpdate(takeId, { recording: t.recordingDone });
+      });
+      await t.lateRelease;
+      throw new GuiError('lease_required', `the take ended (${t.endReason || t.leaseEndReason || 'ended'})`);
     };
 
-    // 1. The lease: one tap on the phone approves the whole take.
+    // 1. The lease: one tap on the phone approves the whole take. The lease this request makes
+    // is found by its first 'state' event, emitted inside the request call (state pending);
+    // only that lease is ever ended by this take, and only its end reason is recorded.
+    let capturing = true;
+    t.listener = (l) => {
+      if (!t.leaseId) {
+        if (!capturing || l.jobId !== jobId || l.kind !== 'take' || l.state !== 'pending') return;
+        t.leaseId = l.leaseId;
+      }
+      if (l.leaseId !== t.leaseId) return;
+      if (l.state === 'ended') {
+        t.leaseEndReason = l.endReason || 'lease_ended';
+        if (!t.ended) this.end(takeId, t.leaseEndReason).catch(() => {});
+      } else if (l.locked && !t.ended) {
+        this.onLocked();
+      }
+    };
+    this.leases.on('state', t.listener);
     let lease;
     try {
-      lease = await this.leases.request({
-        jobId, origin, appIds: [cfg.browser, ...p.apps], minutes: p.minutes, reason: p.reason, signal, kind: 'take',
-        take: { name: p.name, sites: p.sites, browser: p.browser, credentials: p.credentials, unattended: true }, nodeLocalOrigin
-      });
+      let requested;
+      try {
+        requested = this.leases.request({
+          jobId, origin, appIds: [cfg.browser, ...p.apps], minutes: p.minutes, reason: p.reason, signal, kind: 'take',
+          take: { name: p.name, sites: p.sites, browser: p.browser, credentials: p.credentials, unattended: true }, nodeLocalOrigin
+        });
+      } finally {
+        capturing = false;
+      }
+      lease = await requested;
     } catch (err) {
-      await this.end(takeId, this._leaseEndReason(jobId, err));
+      await this.end(takeId, t.leaseEndReason || (isGuiError(err) ? err.code : 'lease_failed'));
       throw err;
     }
     t.lease = lease;
+    t.leaseId = lease.leaseId;
     const expiresAt = iso(lease.expiresAt);
     const grantedMinutes = Math.round((lease.expiresAt - this.clock()) / 60000);
     const grant = { sites: p.sites, browser: p.browser, apps: [...lease.apps], credentials: p.credentials, minutes: grantedMinutes, expires_at: expiresAt };
     this._safeUpdate(takeId, { lease_id: lease.leaseId, grant });
-    t.listener = (l) => {
-      if (l !== lease || t.ended) return;
-      if (l.state === 'ended') this.end(takeId, l.endReason || 'lease_ended').catch(() => {});
-      else if (l.locked) this.onLocked();
-    };
-    this.leases.on('state', t.listener);
     if (lease.state === 'ended') await this.end(takeId, lease.endReason || 'lease_ended');
     await checkEnded();
 
@@ -237,22 +285,27 @@ class TakeManager {
       if (!lease.apps.includes(cfg.browser)) {
         throw Object.assign(new GuiError('take_app_not_allowed', 'the phone did not approve the browser'), { endReason: 'browser_not_granted' });
       }
-      // 2. The browser, launched by the helper on the owner's screen.
+      // 2. The browser, launched by the helper on the owner's screen. Its pid is kept: every
+      // ending closes it through the broker unless the attached browser was closed over CDP.
       let launched;
       try {
         launched = await this.broker.launchBrowser({ exe: cfg.apps[cfg.browser].path, profile: p.profile, args: [] }, ctx);
       } catch (err) {
         throw new GuiError('browser_launch_failed', isGuiError(err) && err.code !== 'browser_launch_failed' ? err.code : null);
       }
+      if (launched && Number.isInteger(launched.pid)) t.browserPid = launched.pid;
       await checkEnded();
       const port = launched && launched.cdp && launched.cdp.port;
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new GuiError('browser_launch_failed', 'the helper gave no debugging port');
+      let browser;
       try {
-        t.browser = await this.attachBrowser(`http://127.0.0.1:${port}`);
+        browser = await this.attachBrowser(`http://127.0.0.1:${port}`);
       } catch {
         throw new GuiError('browser_launch_failed', 'could not attach to the browser');
       }
-      this.registry.setBrowser(t.browserKey, t.browser);
+      t.browser = browser;
+      // Registered before the policy is set, so no call approved by the take finds no browser.
+      this.registry.setBrowser(t.browserKey, browser);
       t.registered = true;
       await checkEnded();
 
@@ -307,6 +360,9 @@ class TakeManager {
       browserKey: t.browserKey,
       takeId: t.takeId,
       async decide(toolName, params) {
+        // From the instant the take ends, nothing is approved by it (a call that still holds
+        // this policy is refused, whatever the teardown is waiting on).
+        if (t.ended) return { allow: false, code: 'take_ended', error: 'the take has ended' };
         // A browser call naming a profile would open another browser and another vault's logins.
         if (BROWSER_TOOLS.includes(toolName) && params && params.profile !== undefined && params.profile !== null) {
           return { allow: false, code: 'take_browser_managed', error: 'the take owns its browser; use Take.start and Take.stop' };
@@ -314,14 +370,6 @@ class TakeManager {
         return inner.decide(toolName, params);
       }
     };
-  }
-
-  // Why a lease request that failed ended: the lease's own reason when it got that far.
-  _leaseEndReason(jobId, err) {
-    const mine = (this.leases.leases || []).filter((l) => l.jobId === jobId && l.kind === 'take');
-    const last = mine.at(-1);
-    if (last && last.state === 'ended' && last.endReason) return last.endReason;
-    return isGuiError(err) ? err.code : 'lease_failed';
   }
 
   _safeUpdate(takeId, patch) {
@@ -340,10 +388,13 @@ class TakeManager {
     const step = async (what, fn) => {
       try {
         await fn();
+        return true;
       } catch (err) {
         this.log.warn(`take teardown: ${what} failed (${isGuiError(err) ? err.code : err && err.message})`, { takeId: t.takeId });
+        return false;
       }
     };
+    if (t.policy && t.holder.current === t.policy) t.holder.clear();
     if (t.recording) {
       const rec = t.recording;
       t.recording = null;
@@ -368,17 +419,23 @@ class TakeManager {
       t.awake = false;
       await step('keep_awake off', () => this.broker.keepAwake(false, ctx));
     }
+    let closedOverCdp = false;
     if (t.browser) {
       const browser = t.browser;
       t.browser = null;
-      if (!keepBrowser) await step('closing the browser', () => this.closeBrowser(browser));
+      if (!keepBrowser) closedOverCdp = await step('closing the browser', () => this.closeBrowser(browser));
       if (t.registered) {
         t.registered = false;
         await step('the browser registry', () => this.registry.removeBrowser(t.browserKey));
       }
       await step('disconnecting the browser', () => browser.stop());
     }
-    if (t.policy && t.holder.current === t.policy) t.holder.clear();
+    // The Chrome the helper launched, when it was never attached or would not close over CDP.
+    if (t.browserPid !== null) {
+      const pid = t.browserPid;
+      t.browserPid = null;
+      if (!keepBrowser && !closedOverCdp) await step('ending the browser process', () => this.broker.closeLaunched(pid, ctx));
+    }
   }
 
   end(takeId, reason, opts = {}) {
@@ -389,20 +446,22 @@ class TakeManager {
   }
 
   async _end(t, reason, opts) {
+    // First and at once: the take approves nothing more, and its policy leaves the session.
     t.ended = true;
+    if (t.policy && t.holder.current === t.policy) t.holder.clear();
     if (t.silentTimer) this.timers.clearTimeout(t.silentTimer);
     t.silentTimer = null;
-    if (t.listener) this.leases.off('state', t.listener);
     await this._release(t, opts);
     // The model said done, but ffmpeg had already gone: the video is not what was asked for.
     if (t.recorderExited && reason === 'take_done') reason = 'recorder_failed';
     t.endReason = reason;
+    // Only the lease this take's own request made.
     try {
-      const lease = t.lease;
-      if (!lease || lease.state !== 'ended') this.leases.endForJob(t.jobId, reason);
+      if (t.leaseId) this.leases.endLease(t.leaseId, reason);
     } catch (err) {
       this.log.warn(`take teardown: releasing the lease failed (${err.message})`, { takeId: t.takeId });
     }
+    if (t.listener) this.leases.off('state', t.listener);
     const at = iso(this.clock());
     const current = this.store.get(t.takeId);
     const log = current && Array.isArray(current.log) ? current.log : [];
@@ -516,8 +575,11 @@ class TakeManager {
     return t ? this.end(t.takeId, reason) : Promise.resolve(null);
   }
 
+  // Ends every take, and waits for any start still going to let go of what it made.
   async stopAll(reason = 'service_stopped') {
-    await Promise.all([...this.takes.values()].filter((t) => !t.ended).map((t) => this.end(t.takeId, reason)));
+    const all = [...this.takes.values()];
+    await Promise.all(all.filter((t) => !t.ended).map((t) => this.end(t.takeId, reason)));
+    await Promise.all(all.map((t) => t.startSettled));
   }
 }
 

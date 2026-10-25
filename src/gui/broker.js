@@ -279,6 +279,19 @@ class GuiBroker extends EventEmitter {
     return { closed };
   }
 
+  // Ends one process this job launched (a take's Chrome), by its pid: asked
+  // to close first, then forced. A pid the job did not launch is refused.
+  async closeLaunched(pid, ctx = {}) {
+    const byApp = ctx.jobId ? this.launched.get(ctx.jobId) : null;
+    if (!Number.isInteger(pid) || !byApp || ![...byApp.values()].some((pids) => pids.has(pid))) {
+      throw new GuiError('invalid_params', 'not a process this job launched');
+    }
+    let closed = (await this.channel.request('close', { pids: [pid], force: false }, { jobId: ctx.jobId })).closed || [];
+    if (!closed.includes(pid)) closed = (await this.channel.request('close', { pids: [pid], force: true }, { jobId: ctx.jobId })).closed || [];
+    this._audit('gui.close', { job_id: ctx.jobId, pids: closed });
+    return { closed };
+  }
+
   // The id a job names one window by. A handle keeps its id for the job.
   _windowId(jobId, handle) {
     if (!jobId) return null;

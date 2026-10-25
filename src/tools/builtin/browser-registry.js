@@ -5,6 +5,7 @@
 // every run without a take share it, as they shared the old singleton.
 
 const PlaywrightBrowser = require('../../browser/playwright-browser');
+const { GuiError } = require('../../gui/errors');
 
 const DEFAULT_KEY = 'default';
 
@@ -18,15 +19,22 @@ function browserKeyOf(context) {
   return key || DEFAULT_KEY;
 }
 
+const TAKE_PREFIX = 'take:';
+
 // The key whose browser a run drives: its own key when a browser is
-// registered under it, else the default.
+// registered under it, else the default. A take's key never falls back: a
+// call approved for a take must not reach the owner's default browser.
 function resolvedKeyOf(context) {
   const key = browserKeyOf(context);
+  if (key.startsWith(TAKE_PREFIX)) return key;
   return key !== DEFAULT_KEY && registry.byKey.has(key) ? key : DEFAULT_KEY;
 }
 
 function getBrowser(context) {
   const key = resolvedKeyOf(context);
+  if (key.startsWith(TAKE_PREFIX) && !registry.byKey.has(key)) {
+    throw new GuiError('take_browser_unavailable', 'the browser of this take is gone (the take has ended)');
+  }
   if (key !== DEFAULT_KEY) return registry.byKey.get(key);
   if (!registry.default) registry.default = new PlaywrightBrowser();
   return registry.default;

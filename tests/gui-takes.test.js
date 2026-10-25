@@ -1,7 +1,7 @@
 // tests/gui-takes.test.js
 // TakeManager and the Take tool (spec docs/superpowers/specs/2026-10-24-agent-driven-demo-takes-design.md
 // §5, §6, §9): a real LeaseManager with a fake relay and phone, a fake broker, a temp TakeStore.
-const { describe, it, after, beforeEach } = require('node:test');
+const { describe, it, after, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -70,6 +70,10 @@ function fakeBroker() {
     ffmpeg: FFMPEG,
     launchFails: null,
     stopResult: null,
+    // A pending promise here holds that op until it settles (a lease ending mid-start).
+    gate: {},
+    launchResult: null,
+    closed: [],
     recorder: () => b.ffmpeg,
     releaseAll: async () => {},
     capability: () => ({ limits: [] }),
@@ -77,23 +81,33 @@ function fakeBroker() {
     focusApp: async () => {},
     async launchBrowser(req, ctx) {
       b.calls.push(['launchBrowser', req, ctx]);
+      if (b.gate.launch) await b.gate.launch;
       if (b.launchFails) throw b.launchFails;
-      return { pid: 7, cdp: { port: 9222, path: '/x' } };
+      return b.launchResult || { pid: 7, cdp: { port: 9222, path: '/x' } };
     },
     async recordStart(req, ctx) {
       b.calls.push(['recordStart', req, ctx]);
+      if (b.gate.record) await b.gate.record;
+      if (b.recordFails) throw b.recordFails;
       return { pid: 8, startedAt: 1000, path: req.path || 'C:\\rec\\take.mp4' };
     },
     async recordStop(req, ctx) {
       b.calls.push(['recordStop', req, ctx]);
+      if (b.gate.stop) await b.gate.stop;
       return b.stopResult || { path: 'C:\\rec\\take.mp4', durationS: 12, bytes: 1000, truncated: false };
     },
-    async keepAwake(on, ctx) { b.calls.push(['keepAwake', on, ctx]); return { on }; }
+    async keepAwake(on, ctx) { b.calls.push(['keepAwake', on, ctx]); return { on }; },
+    async closeLaunched(pid, ctx) { b.closed.push([pid, ctx]); return { closed: [pid] }; }
   };
   return b;
 }
 
 const names = (calls) => calls.map((c) => c[0]);
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+}
 const tick = () => new Promise((r) => setImmediate(r));
 
 let phone;
@@ -111,6 +125,10 @@ let holder;
 let registry;
 let attached;
 let cwd;
+let order;
+let hooks;
+let closes;
+let approverOn;
 
 beforeEach(async () => {
   phone = createFakePhone({ name: 'Owner phone' });
@@ -122,10 +140,14 @@ beforeEach(async () => {
   cleanups.push(() => approvers.cleanup());
   relay = new FakeRelay();
   broker = fakeBroker();
+  order = [];
+  hooks = {};
+  closes = [];
+  approverOn = true;
   audits = [];
   const audit = { append: async (e) => { audits.push(e); } };
   leases = new LeaseManager({
-    approvals: { identity, approverStore: approvers, relayClient: relay, phoneApprover: { isAvailable: () => true } },
+    approvals: { identity, approverStore: approvers, relayClient: relay, phoneApprover: { isAvailable: () => approverOn } },
     guiConfig, broker, audit, nodeName: 'gpu-box', clock: () => clock.now(), timers, jobOpen: () => true
   });
   leases.start();
@@ -135,16 +157,23 @@ beforeEach(async () => {
   cwd = path.join(dir, 'work');
   fs.mkdirSync(cwd);
   store = new TakeStore({ dir: path.join(dir, 'takes'), clock: () => clock.now() });
-  registry = { set: new Map(), removed: [], setBrowser(k, b) { this.set.set(k, b); }, removeBrowser(k) { this.removed.push(k); this.set.delete(k); } };
+  registry = { set: new Map(), removed: [], setBrowser(k, b) { order.push('setBrowser'); this.set.set(k, b); }, removeBrowser(k) { this.removed.push(k); this.set.delete(k); } };
   attached = [];
   const attachBrowser = async (cdpUrl) => {
+    if (hooks.attach) await hooks.attach;
+    if (hooks.attachFails) throw new Error('no CDP');
     const browser = { cdpUrl, stopped: false, page: { url: () => 'https://a.example.com' }, stop: async () => { browser.stopped = true; } };
     attached.push(browser);
     return browser;
   };
-  takes = new TakeManager({ leases, broker, store, guiConfig, registry, audit, clock: () => clock.now(), timers, attachBrowser, closeBrowser: async () => {} });
+  takes = new TakeManager({ leases, broker, store, guiConfig, registry, audit, clock: () => clock.now(), timers, attachBrowser,
+    closeBrowser: async (b) => { closes.push(b); if (hooks.closeFails) throw new Error('CDP close failed'); } });
   holder = createTakeHolder();
+  const set = holder.set;
+  holder.set = (policy) => { order.push('holder.set'); set(policy); };
 });
+
+afterEach(async () => { await takes.stopAll(); });
 
 const PARAMS = { name: 'BSEOA demo', sites: ['*.example.com'], minutes: 30, profile: 'demo' };
 
@@ -173,6 +202,7 @@ describe('TakeManager.start', () => {
     assert.equal(attached[0].cdpUrl, 'http://127.0.0.1:9222');
     assert.equal(registry.set.get(`take:${out.take_id}`), attached[0]);
     assert.ok(holder.current, 'the take policy is set');
+    assert.deepEqual(order, ['setBrowser', 'holder.set'], 'the browser is registered before any call can be approved for it');
     assert.equal(holder.current.browserKey, `take:${out.take_id}`);
     const lease = leases.current();
     assert.equal(lease.kind, 'take');
@@ -425,6 +455,146 @@ describe('ending a take', () => {
     assert.equal(s.state, 'live');
     assert.equal(s.lease.left_s, 29 * 60);
     assert.equal(s.recording.path, 'C:\\rec\\take.mp4');
+  });
+});
+
+describe('a take ends cleanly, whatever it holds', () => {
+  const leaseNow = () => leases.current();
+  const revoke = () => leases.onRevoke(other.leaseRevoke(identity.nodeId, leaseNow().leaseId));
+  async function granting(params = {}) {
+    const p = begin(params);
+    await tick();
+    leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 30 }));
+    return p;
+  }
+
+  it('from the instant it ends the policy approves nothing, even while the recorder is stopping', async () => {
+    const out = await started();
+    const policy = holder.current;
+    assert.equal((await policy.decide('BrowserPage', { action: 'screenshot' })).allow, true);
+    const gate = deferred();
+    broker.gate.stop = gate.promise;
+    const stopping = takes.stop(out.take_id);
+    assert.equal(holder.current, null, 'the holder is cleared before anything is awaited');
+    assert.deepEqual(await policy.decide('BrowserPage', { action: 'screenshot' }), { allow: false, code: 'take_ended', error: 'the take has ended' });
+    assert.equal(registry.set.has(`take:${out.take_id}`), true, 'still registered while recordStop waits');
+    gate.resolve();
+    await stopping;
+    assert.equal(registry.set.has(`take:${out.take_id}`), false);
+  });
+
+  it('a job holding a computer_use lease gets lease_busy, and that lease survives', async () => {
+    const cu = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes: 10, reason: 'other work' });
+    leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 10 }));
+    const held = await cu;
+    await assert.rejects(begin(), (e) => e.code === 'lease_busy');
+    assert.equal(held.state, 'active');
+    assert.equal(leases.current(), held);
+    assert.equal(store.list()[0].ended.reason, 'lease_busy');
+  });
+
+  it('a second take ending approval_unavailable records that reason, not the first take\'s', async () => {
+    const first = await started();
+    await takes.stop(first.take_id);
+    approverOn = false;
+    await assert.rejects(begin({ name: 'Second' }), (e) => e.code === 'approval_unavailable');
+    const second = store.list().find((r) => r.name === 'Second');
+    assert.equal(second.ended.reason, 'approval_unavailable');
+    assert.equal(store.get(first.take_id).ended.reason, 'take_done');
+  });
+
+  it('attach fails: the launched Chrome is closed by its pid', async () => {
+    hooks.attachFails = true;
+    await assert.rejects(granting(), (e) => e.code === 'browser_launch_failed');
+    assert.deepEqual(broker.closed, [[7, { jobId: 'job-1' }]]);
+    assert.equal(leases.current(), null);
+    assert.equal(store.list()[0].ended.reason, 'browser_launch_failed');
+  });
+
+  it('no debugging port: the launched Chrome is closed by its pid', async () => {
+    broker.launchResult = { pid: 7, cdp: {} };
+    await assert.rejects(granting(), (e) => e.code === 'browser_launch_failed');
+    assert.deepEqual(broker.closed.map((c) => c[0]), [7]);
+    assert.equal(attached.length, 0);
+  });
+
+  it('the lease ends while Chrome is launching: Chrome is closed by its pid, nothing else starts', async () => {
+    const gate = deferred();
+    broker.gate.launch = gate.promise;
+    const p = granting();
+    await tick();
+    await tick();
+    revoke();
+    gate.resolve();
+    await assert.rejects(p, (e) => e.code === 'lease_required');
+    assert.deepEqual(broker.closed.map((c) => c[0]), [7]);
+    assert.equal(attached.length, 0);
+    assert.ok(!names(broker.calls).includes('recordStart'));
+    assert.equal(store.list()[0].ended.reason, 'revoked');
+    assert.equal(holder.current, null);
+  });
+
+  it('the lease ends while attaching: the browser is closed and unregistered, no recorder', async () => {
+    const gate = deferred();
+    hooks.attach = gate.promise;
+    const p = granting();
+    await tick();
+    await tick();
+    revoke();
+    gate.resolve();
+    await assert.rejects(p, (e) => e.code === 'lease_required');
+    assert.equal(closes.length, 1, 'the late attach is closed over CDP too');
+    assert.equal(attached[0].stopped, true);
+    assert.equal(registry.set.size, 0);
+    assert.deepEqual(broker.closed.map((c) => c[0]), [7], 'the ending found Chrome not attached yet and closed it by pid');
+    assert.ok(!names(broker.calls).includes('recordStart'));
+    assert.equal(holder.current, null);
+  });
+
+  it('the lease ends while the recorder starts: the recording is stopped and kept, the browser closed', async () => {
+    const gate = deferred();
+    broker.gate.record = gate.promise;
+    const p = granting();
+    for (let i = 0; i < 4; i += 1) await tick();
+    assert.ok(names(broker.calls).includes('recordStart'));
+    revoke();
+    gate.resolve();
+    await assert.rejects(p, (e) => e.code === 'lease_required');
+    await takes.stopAll();
+    assert.ok(names(broker.calls).includes('recordStop'));
+    assert.equal(attached[0].stopped, true);
+    assert.equal(registry.set.size, 0);
+    const [record] = store.list();
+    assert.equal(record.ended.reason, 'revoked');
+    assert.equal(record.recording.path, 'C:\\rec\\take.mp4');
+    assert.equal(holder.current, null);
+  });
+
+  it('the recorder fails after attach: browser closed, key removed, holder unset, lease released, recorder_failed', async () => {
+    const { GuiError } = require('../src/gui/errors');
+    broker.recordFails = new GuiError('recorder_failed');
+    await assert.rejects(granting(), (e) => e.code === 'recorder_failed');
+    assert.equal(closes.length, 1);
+    assert.equal(attached[0].stopped, true);
+    assert.equal(registry.set.size, 0);
+    assert.equal(holder.current, null);
+    assert.equal(leases.current(), null);
+    assert.equal(store.list()[0].ended.reason, 'recorder_failed');
+  });
+
+  it('the CDP close fails on a stop: Chrome is closed by its pid; keep_browser leaves it running', async () => {
+    let out = await started();
+    hooks.closeFails = true;
+    await takes.stop(out.take_id);
+    assert.deepEqual(broker.closed.map((c) => c[0]), [7]);
+    hooks.closeFails = false;
+    broker.closed.length = 0;
+    closes.length = 0;
+    out = await started();
+    await takes.stop(out.take_id, { keepBrowser: true });
+    assert.deepEqual(closes, []);
+    assert.deepEqual(broker.closed, []);
+    assert.equal(attached.at(-1).stopped, true, 'only disconnected');
   });
 });
 

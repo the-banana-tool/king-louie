@@ -17,7 +17,7 @@ const GUI_ERROR_CODES = Object.freeze([
   'profile_outside_root', 'browser_launch_failed', 'unknown_recording', 'recorder_failed',
   // A take's refusals (src/gui/take-policy.js TAKE_CODES, written out: this file loads nothing).
   'take_tool_not_allowed', 'take_app_not_allowed', 'take_action_not_allowed', 'take_browser_managed', 'take_site_not_allowed',
-  'take_no_mid_take_approval', 'take_requires_local_origin', 'take_busy', 'recorder_missing'
+  'take_no_mid_take_approval', 'take_requires_local_origin', 'take_busy', 'recorder_missing', 'take_ended', 'take_browser_unavailable'
 ]);
 
 // The ten GUI tools and Take (a screen-recorded demo, spec 2026-10-24 §5.2).

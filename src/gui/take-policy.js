@@ -86,6 +86,8 @@ const TAKE_CODES = Object.freeze([
   'recorder_missing',
   'recorder_failed',
   'browser_launch_failed',
+  'take_ended',
+  'take_browser_unavailable',
 ]);
 
 const FIRST_COLUMN = Object.freeze([

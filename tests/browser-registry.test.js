@@ -24,17 +24,22 @@ describe('browser registry', () => {
     assert.notEqual(a, takeBrowser);
     assert.equal(getBrowser({ takePolicy: { current: { browserKey: 'take:1' } } }), takeBrowser);
     assert.equal(getBrowser({}), a);
-    assert.equal(getBrowser({ takePolicy: { current: { browserKey: 'take:9' } } }), a,
-      'a take key with no browser registered resolves to the default');
+    assert.throws(() => getBrowser({ takePolicy: { current: { browserKey: 'take:9' } } }),
+      (e) => e.code === 'take_browser_unavailable', 'a take key with no browser registered never falls back to the default');
+    assert.equal(getBrowser({ takePolicy: { current: { browserKey: 'other:9' } } }), a, 'any other key still does');
   });
 
-  it('removeBrowser drops a key\'s browser back to the default', () => {
+  it('removeBrowser leaves a take key refused and any other key on the default', () => {
     const ctx = { takePolicy: { current: { browserKey: 'take:2' } } };
     const mine = new PlaywrightBrowser();
     setBrowser('take:2', mine);
     assert.equal(getBrowser(ctx), mine);
     removeBrowser('take:2');
-    assert.equal(getBrowser(ctx), getBrowser({}));
+    assert.throws(() => getBrowser(ctx), (e) => e.code === 'take_browser_unavailable');
+    const other = { takePolicy: { current: { browserKey: 'chat:2' } } };
+    setBrowser('chat:2', new PlaywrightBrowser());
+    removeBrowser('chat:2');
+    assert.equal(getBrowser(other), getBrowser({}));
   });
 
   it('the active profile is per key', () => {

@@ -795,6 +795,12 @@ class LeaseManager extends EventEmitter {
     if (lease && lease.state === 'suspended' && lease.suspendReason !== CONTACT_REASON && ![...this.pending.values()].some((p) => p.ref === lease)) this._sendRequest(lease, { resume: true });
   }
 
+  // Ends one lease by id (a take ends only the lease its own request made).
+  endLease(leaseId, reason) {
+    const lease = this.find(leaseId);
+    if (lease && lease.state !== 'ended') this._end(lease, reason);
+  }
+
   endForJob(jobId, reason = 'job_closed') {
     for (const lease of this.leases) if (lease.jobId === jobId && lease.state !== 'ended') this._end(lease, reason);
   }
