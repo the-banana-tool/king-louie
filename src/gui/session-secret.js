@@ -262,6 +262,22 @@ function windowsUsersDirRevokeArgs(dir, sid, env = process.env) {
   return [windowsIcaclsExe(env), dir, '/remove:g', `*${sid}`];
 }
 
+// The session user runs `king-louie-service mcp`, which posts to the service
+// through the file courier under the data dir (approvals\outbox and
+// approvals\inbox), where only the service account could write. Modify, and
+// (OI)(CI) so the requests and the per-client inbox directories put there
+// inherit it. /grant:r replaces an older entry for the same SID.
+function windowsCourierAclArgs(dir, sid, env = process.env) {
+  if (!SID_RE.test(String(sid))) throw new GuiError('invalid_params', 'a Windows session user is named by its SID');
+  return [windowsIcaclsExe(env), dir, '/grant:r', `*${sid}:(OI)(CI)(M)`];
+}
+
+// Uninstall takes it off again, by SID.
+function windowsCourierRevokeArgs(dir, sid, env = process.env) {
+  if (!SID_RE.test(String(sid))) throw new GuiError('invalid_params', 'a Windows session user is named by its SID');
+  return [windowsIcaclsExe(env), dir, '/remove:g', `*${sid}`];
+}
+
 function defaultRunIcacls(argv) {
   execFileSync(argv[0], argv.slice(1), { stdio: 'ignore', windowsHide: true });
 }
@@ -644,7 +660,7 @@ function resolveSessionUser(name, { platform = process.platform, execFile = (f, 
 module.exports = {
   mintSessionSecret, canonicalPath, writeCanonical, readCanonical, canonicalMtime, inspectCanonical, sameSessionIdentity,
   userCopyPath, writeUserCopy, readUserCopy, removeUserCopy, checkUserCopyTrust, windowsUserOwnerArgs,
-  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs, removalKind, removeEntry, sessionIdentityExists, sessionIdentityState, isLocalMachineSid,
+  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs, windowsCourierAclArgs, windowsCourierRevokeArgs, defaultRunIcacls, removalKind, removeEntry, sessionIdentityExists, sessionIdentityState, isLocalMachineSid,
   endpointPath, sessionIpcDir, assertSafeComponents, windowsUserAclArgs, resolveSessionUser,
   classifyWindowsSid, assertSingleUserAccount
 };

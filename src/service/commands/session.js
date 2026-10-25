@@ -241,6 +241,41 @@ function loginStartText({ platform, account, sessionUser }) {
   return `${platform === 'darwin' ? 'the LaunchAgent' : 'the autostart entry'} ${A.autostartPath({ platform, home: account.home })}`;
 }
 
+// Windows: the session user runs `king-louie-service mcp`, which posts to the
+// service through the file courier under the data dir; install gives that
+// user modify on these two directories and uninstall takes it off again.
+const COURIER_TEXT = 'the service\'s courier (approvals\\outbox, approvals\\inbox)';
+const courierDirs = (dataDir) => [path.join(dataDir, 'approvals', 'outbox'), path.join(dataDir, 'approvals', 'inbox')];
+
+// After consent: the courier directories, created (0700, the service makes
+// them so too) when missing. A link or anything but a directory at one is
+// refused, so the grant never lands on what a link points to.
+function ensureCourierDirs(dataDir) {
+  for (const dir of [path.join(dataDir, 'approvals'), ...courierDirs(dataDir)]) {
+    try {
+      fs.mkdirSync(dir, { mode: 0o700 });
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+    const st = fs.lstatSync(dir);
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new GuiError('unsafe_path', `${dir} is not a directory (links are refused)`);
+  }
+  return courierDirs(dataDir);
+}
+
+// The courier directories uninstall asks icacls about: only real ones (a
+// missing one holds no entry, and a link is never followed).
+function existingCourierDirs(dataDir) {
+  return courierDirs(dataDir).filter((dir) => {
+    try {
+      const st = fs.lstatSync(dir);
+      return st.isDirectory() && !st.isSymbolicLink();
+    } catch {
+      return false;
+    }
+  });
+}
+
 // R-F5-9: off a terminal nobody can be asked, so only --yes goes on. Checked
 // before anything is resolved or read (as "desktop pair" does).
 function refusedUnasked({ flags, io, c, verb }) {
@@ -307,6 +342,9 @@ async function install({ flags, dataDir, io, deps }) {
     io.stdout.write(`[dry-run] write ${S.canonicalPath(c.configDir)} (node ${nodeId}, user ${sessionUser})\n`);
     io.stdout.write(`[dry-run] write ${sessionFile}\n`);
     if (c.platform === 'win32') io.stdout.write(`[dry-run] give ${account.sid} read-control, read-attributes and synchronize on ${path.dirname(sessionFile)} (that directory only)\n`);
+    if (c.platform === 'win32') {
+      for (const dir of courierDirs(dataDir)) io.stdout.write(`[dry-run] give ${account.sid} modify on ${dir} (created if missing)\n`);
+    }
     if (c.platform !== 'win32') io.stdout.write(`[dry-run] create ${ipcDir} (0711, owned by the service account)\n`);
     await c.execute(steps, { dryRun: true, io, entryPath: c.entryPath, nodePath: c.nodePath });
     return 0;
@@ -323,6 +361,7 @@ async function install({ flags, dataDir, io, deps }) {
   // checks who owns its file and the directory it is in before it trusts
   // either, and the directory's ACL would not let it look.
   if (c.platform === 'win32') io.stdout.write(`  lets ${sessionUser} read who owns ${path.dirname(sessionFile)} (its owner and attributes; nothing in it, and no other directory)\n`);
+  if (c.platform === 'win32') io.stdout.write(`  lets ${sessionUser} post requests to ${COURIER_TEXT}\n`);
   if (rotates) io.stdout.write(`  replaces the secret installed for ${shown(installed.user)}; the endpoint stays, so a running service and helper pick the new secret up without a restart\n`);
   if (!(await consented({ flags, c, question: `Install the session helper for ${sessionUser}? [y/N] ` }))) {
     io.stderr.write('Not installing without confirmation. Nothing was written.\n');
@@ -369,6 +408,16 @@ async function install({ flags, dataDir, io, deps }) {
     content: { v: 1, node_id: nodeId, endpoint, secret: secret.toString('hex'), rotated_at: new Date().toISOString() },
     ...(deps.runIcacls ? { runIcacls: deps.runIcacls } : {})
   });
+  if (c.platform === 'win32') {
+    const runIcacls = deps.runIcacls || S.defaultRunIcacls;
+    for (const dir of ensureCourierDirs(dataDir)) {
+      try {
+        runIcacls(S.windowsCourierAclArgs(dir, account.sid));
+      } catch (err) {
+        throw new Error(`${account.sid} could not be given modify on ${dir} (${err.message}); the helper files are written but the login start is not: run "session install --user ${sessionUser}" again`);
+      }
+    }
+  }
   await c.execute(steps, { dryRun: false, io, entryPath: c.entryPath, nodePath: c.nodePath });
   io.stdout.write(`Session helper installed for ${sessionUser} (node ${nodeId}).\n`);
   io.stdout.write(`  service secret: ${S.canonicalPath(c.configDir)}\n  user copy:      ${sessionFile}\n  endpoint:       ${endpoint}\n`);
@@ -476,7 +525,10 @@ async function uninstall({ flags, dataDir, io, deps }) {
     // Everything the real run removes, and what it leaves.
     for (const { who, file } of copies) {
       io.stdout.write(`[dry-run] remove ${file}\n`);
-      if (c.platform === 'win32') io.stdout.write(`[dry-run] remove the entry for ${who.sid} from the ACL of ${path.dirname(file)}\n`);
+      if (c.platform === 'win32') {
+        io.stdout.write(`[dry-run] remove the entry for ${who.sid} from the ACL of ${path.dirname(file)}\n`);
+        for (const dir of existingCourierDirs(dataDir)) io.stdout.write(`[dry-run] remove the entry for ${who.sid} from the ACL of ${dir}\n`);
+      }
     }
     if (mine) io.stdout.write(`[dry-run] remove ${installed.file} (the service's secret)\n`);
     else if (stale) io.stdout.write(`[dry-run] remove ${installed.file} (the service's secret, recorded for ${shown(installed.user)} under ${identityText(installed, c.platform)}, an identity that no longer exists here)\n`);
@@ -498,6 +550,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
     io.stdout.write(`  ${sessionUser}'s copy of the secret: ${file}\n`);
     if (c.platform === 'win32') io.stdout.write(`  ${sessionUser}'s right to read who owns ${path.dirname(file)}\n`);
   }
+  if (c.platform === 'win32') io.stdout.write(`  ${sessionUser}'s right to post requests to ${COURIER_TEXT}\n`);
   if (stale) io.stdout.write(`  the helper file records ${sessionUser} under another identity (${identityText(stale, c.platform)}) that no longer exists on this machine: the account was deleted and made again. What was installed for it is removed with this.\n`);
   if (mine || stale) io.stdout.write(`  the service's secret: ${installed.file} (desktop apps stay off on this node until "session install" runs again)\n`);
   if (damaged) io.stdout.write(`  the service's helper file: ${installed.file} ${installed.reason}, so this cannot tell who it was installed for; it is removed too. If it was installed for another user, run "session uninstall" for that user as well.\n`);
@@ -518,7 +571,8 @@ async function uninstall({ flags, dataDir, io, deps }) {
   }
   if (steps.length) await c.execute(steps, { dryRun: false, io, entryPath: c.entryPath, nodePath: c.nodePath });
   // Windows: each copy, then the entry install gave its SID on the users
-  // directory. If only such an entry stays behind, the rest is still
+  // directory, then its entries on the courier directories (which stay: they
+  // are the service's). If only such entries stay behind, the rest is still
   // removed and the command says what is left and how to remove it.
   const aclLeft = [];
   for (const { who } of copies) {
@@ -528,12 +582,21 @@ async function uninstall({ flags, dataDir, io, deps }) {
       if (!err || err.aclNotRemoved !== true) throw err;
       aclLeft.push(err.message);
     }
+    if (c.platform !== 'win32') continue;
+    const runIcacls = deps.runIcacls || S.defaultRunIcacls;
+    for (const dir of existingCourierDirs(dataDir)) {
+      try {
+        runIcacls(S.windowsCourierRevokeArgs(dir, who.sid));
+      } catch {
+        aclLeft.push(`the entry for ${who.sid} could not be taken off ${dir}; as an administrator run: icacls "${dir}" /remove:g *${who.sid}`);
+      }
+    }
   }
   // Never follows a link: a link is removed itself, a directory (a damaged
   // helper "file" can be one) with what is in it.
   if (removesCanonical) S.removeEntry(installed.file, { root: c.configDir, recursive: damaged });
   if (aclLeft.length) {
-    io.stderr.write(`Session helper removed for ${sessionUser}, except one directory permission: ${aclLeft.join('; ')}\n`);
+    io.stderr.write(`Session helper removed for ${sessionUser}, except ${aclLeft.length === 1 ? 'one directory permission' : `${aclLeft.length} directory permissions`}: ${aclLeft.join('; ')}\n`);
     return 1;
   }
   io.stdout.write(`Session helper removed for ${sessionUser}.\n`);

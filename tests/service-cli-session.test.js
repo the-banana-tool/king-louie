@@ -114,6 +114,12 @@ function tree(dir) {
   return out;
 }
 
+// The courier directories under the data dir, outbox first, and what install
+// and uninstall ask icacls for each (Windows).
+const courierDirs = (s) => [path.join(s.dataDir, 'approvals', 'outbox'), path.join(s.dataDir, 'approvals', 'inbox')];
+const courierGrants = (s, sid) => courierDirs(s).map((dir) => S.windowsCourierAclArgs(dir, sid));
+const courierRevokes = (s, sid) => courierDirs(s).map((dir) => S.windowsCourierRevokeArgs(dir, sid));
+
 describe('session install', () => {
   it('needs an administrator', async () => {
     const s = setup();
@@ -599,7 +605,7 @@ describe('second review finding 1: the session user can read who owns the users 
     assert.match(dry.out.join(''), /\[dry-run\] remove the entry for S-1-5-21-1-2-3-1001 from the ACL of .*session.users/);
     const t = io();
     assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
-    assert.deepEqual(calls, [S.windowsUsersDirRevokeArgs(dir, SID)]);
+    assert.deepEqual(calls, [S.windowsUsersDirRevokeArgs(dir, SID), ...courierRevokes(s, SID)]);
     assert.match(t.out.join(''), /alice's right to read who owns .*session.users/);
   });
 
@@ -609,13 +615,121 @@ describe('second review finding 1: the session user can read who owns the users 
     await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
     const t = io();
     assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: { ...d, runIcacls: () => { throw new Error('icacls failed'); } } }), 1);
-    assert.match(t.err.join(''), /except one directory permission/);
+    // The users directory's entry and the two courier entries.
+    assert.match(t.err.join(''), /except 3 directory permissions/);
     assert.match(t.err.join(''), /icacls .* \/remove:g \*S-1-5-21-1-2-3-1001/);
+    assert.match(t.err.join(''), /icacls "[^"]*approvals.outbox" \/remove:g \*S-1-5-21-1-2-3-1001/);
+    assert.match(t.err.join(''), /icacls "[^"]*approvals.inbox" \/remove:g \*S-1-5-21-1-2-3-1001/);
     assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), false);
     assert.equal(fs.existsSync(S.userCopyPath({ platform: 'win32', configDir: s.configDir, sid: SID })), false);
     // The next run finishes it.
     const again = io();
     assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: again.io, deps: d }), 0);
+  });
+});
+
+// The session user runs `king-louie-service mcp`, which posts to the service
+// through the courier (approvals\outbox, approvals\inbox under the data dir).
+describe('the session user may post to the courier (Windows)', () => {
+  const SID = 'S-1-5-21-1-2-3-1001';
+
+  it('install grants the user modify on both courier directories after the copy is written, creating them; the consent text names them', { skip: POSIX }, async () => {
+    const s = setup();
+    const calls = [];
+    const t = io();
+    const d = deps(s, { runIcacls: (argv) => calls.push({ argv, dirsThere: courierDirs(s).map((dir) => fs.existsSync(dir)) }) });
+    let shownBefore = null;
+    let dirsBefore = null;
+    d.confirm = async () => { shownBefore = t.out.join(''); dirsBefore = courierDirs(s).map((dir) => fs.existsSync(dir)); return true; };
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
+    assert.ok(shownBefore.includes('lets alice post requests to the service\'s courier (approvals\\outbox, approvals\\inbox)'), shownBefore);
+    assert.deepEqual(dirsBefore, [false, false], 'nothing is created before the answer');
+    // The users directory and the copy first (four calls), then the two grants.
+    assert.equal(calls.length, 6);
+    assert.deepEqual(calls.slice(4).map((c) => c.argv), courierGrants(s, SID));
+    assert.deepEqual(calls[4].dirsThere, [true, true], 'the directories exist before icacls is asked');
+    assert.ok(fs.existsSync(S.userCopyPath({ platform: 'win32', configDir: s.configDir, sid: SID })));
+    for (const dir of courierDirs(s)) assert.ok(fs.lstatSync(dir).isDirectory());
+  });
+
+  it('install keeps directories that are already there', { skip: POSIX }, async () => {
+    const s = setup();
+    for (const dir of courierDirs(s)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(courierDirs(s)[0], 'req.json'), '{}');
+    const calls = [];
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s, { runIcacls: (argv) => calls.push(argv) }) }), 0);
+    assert.deepEqual(calls.slice(4), courierGrants(s, SID));
+    assert.equal(fs.readFileSync(path.join(courierDirs(s)[0], 'req.json'), 'utf8'), '{}');
+  });
+
+  it('a link where a courier directory should be is refused; nothing is granted on it', { skip: POSIX }, async (t) => {
+    const s = setup();
+    const elsewhere = path.join(s.base, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    fs.mkdirSync(path.join(s.dataDir, 'approvals'));
+    try {
+      fs.symlinkSync(elsewhere, courierDirs(s)[0], 'junction');
+    } catch {
+      t.skip('cannot create a junction here');
+      return;
+    }
+    const calls = [];
+    const r = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: r.io, deps: deps(s, { runIcacls: (argv) => calls.push(argv) }) }), 1);
+    assert.match(r.err.join(''), /^unsafe_path/);
+    assert.ok(!calls.some((argv) => argv[1] === courierDirs(s)[0] || argv[1] === elsewhere));
+  });
+
+  it('install --dry-run lists both grants and creates or grants nothing', { skip: POSIX }, async () => {
+    const s = setup();
+    const calls = [];
+    const t = io();
+    const before = tree(s.base);
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: t.io, deps: deps(s, { runIcacls: (argv) => calls.push(argv), confirm: async () => { throw new Error('a dry run asks nothing'); } }) }), 0);
+    const out = t.out.join('');
+    for (const dir of courierDirs(s)) assert.ok(out.includes(`[dry-run] give ${SID} modify on ${dir} (created if missing)`), out);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(tree(s.base), before);
+  });
+
+  it('uninstall removes both grants after the users directory\'s entry, lists them first, and a dry run lists them without running anything', { skip: POSIX }, async () => {
+    const s = setup();
+    const calls = [];
+    const d = deps(s, { runIcacls: (argv) => calls.push(argv) });
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    calls.length = 0;
+    const dry = io();
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice', dryRun: true }, dataDir: s.dataDir, io: dry.io, deps: d }), 0);
+    assert.deepEqual(calls, []);
+    for (const dir of courierDirs(s)) assert.ok(dry.out.join('').includes(`[dry-run] remove the entry for ${SID} from the ACL of ${dir}`), dry.out.join(''));
+    const t = io();
+    let shownBefore = null;
+    d.confirm = async () => { shownBefore = t.out.join(''); return true; };
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
+    assert.ok(shownBefore.includes('alice\'s right to post requests to the service\'s courier (approvals\\outbox, approvals\\inbox)'), shownBefore);
+    assert.deepEqual(calls, [S.windowsUsersDirRevokeArgs(path.join(s.configDir, 'session', 'users'), SID), ...courierRevokes(s, SID)]);
+    // The directories stay: they are the service's.
+    for (const dir of courierDirs(s)) assert.ok(fs.existsSync(dir));
+  });
+
+  it('uninstall asks nothing of a courier directory that is not there', { skip: POSIX }, async () => {
+    const s = setup();
+    const calls = [];
+    const d = deps(s, { runIcacls: (argv) => calls.push(argv) });
+    await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d });
+    fs.rmSync(courierDirs(s)[1], { recursive: true });
+    calls.length = 0;
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: d }), 0);
+    assert.deepEqual(calls, [S.windowsUsersDirRevokeArgs(path.join(s.configDir, 'session', 'users'), SID), courierRevokes(s, SID)[0]]);
+  });
+
+  it('off Windows nothing is granted on the courier', { skip: !POSIX }, async () => {
+    const s = setup();
+    const calls = [];
+    const t = io();
+    assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: deps(s, { runIcacls: (argv) => calls.push(argv) }) }), 0);
+    assert.deepEqual(calls, []);
+    assert.ok(!t.out.join('').includes('courier'));
   });
 });
 
@@ -764,7 +878,10 @@ describe('second review finding 11: session uninstall', () => {
     if (!POSIX) {
       // Both SIDs' entries are taken off the users directory.
       const dir = path.join(s.configDir, 'session', 'users');
-      assert.deepEqual(asked.slice(1), [S.windowsUsersDirRevokeArgs(dir, again.sid), S.windowsUsersDirRevokeArgs(dir, old.sid)]);
+      assert.deepEqual(asked.slice(1), [
+        S.windowsUsersDirRevokeArgs(dir, again.sid), ...courierRevokes(s, again.sid),
+        S.windowsUsersDirRevokeArgs(dir, old.sid), ...courierRevokes(s, old.sid)
+      ]);
     }
     // The way out: the new account can be installed.
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: io().io, deps: deps(s, { resolveSessionUser: (n) => otherAccountForInstall(n) }) }), 0);
@@ -841,7 +958,7 @@ describe('second review finding 11: session uninstall', () => {
     assert.match(shownBefore, new RegExp(`Removing the session helper of alice \\(SID ${old.sid}\\)`));
     assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), false);
     assert.equal(fs.existsSync(copyOf(s, old)), false);
-    assert.deepEqual(revoked, [S.windowsUsersDirRevokeArgs(path.join(s.configDir, 'session', 'users'), old.sid)]);
+    assert.deepEqual(revoked, [S.windowsUsersDirRevokeArgs(path.join(s.configDir, 'session', 'users'), old.sid), ...courierRevokes(s, old.sid)]);
     assert.equal(d.executed.length, 1, 'the logon task named for alice is removed');
   });
 

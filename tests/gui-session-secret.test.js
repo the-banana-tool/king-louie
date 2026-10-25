@@ -184,6 +184,20 @@ describe('per-user copies', () => {
     assert.throws(() => S.windowsUsersDirRevokeArgs('C:\\cfg\\session\\users', '*S-1-1-0', env), (e) => e.code === 'invalid_params');
   });
 
+  // The session user runs `king-louie-service mcp`, which posts through the
+  // courier under the data dir: modify on the two directories, inherited by
+  // what is put in them, and removed again by SID.
+  it('Windows: the courier directories give the session user modify, inherited, and the revoke takes it off by SID', () => {
+    const env = { SystemRoot: 'C:\\Windows' };
+    const sid = 'S-1-5-21-1-2-3-1001';
+    assert.deepEqual(S.windowsCourierAclArgs('C:\\data\\approvals\\outbox', sid, env),
+      ['C:\\Windows\\System32\\icacls.exe', 'C:\\data\\approvals\\outbox', '/grant:r', `*${sid}:(OI)(CI)(M)`]);
+    assert.deepEqual(S.windowsCourierRevokeArgs('C:\\data\\approvals\\inbox', sid, env),
+      ['C:\\Windows\\System32\\icacls.exe', 'C:\\data\\approvals\\inbox', '/remove:g', `*${sid}`]);
+    assert.throws(() => S.windowsCourierAclArgs('C:\\data\\approvals\\outbox', 'Everyone', env), (e) => e.code === 'invalid_params');
+    assert.throws(() => S.windowsCourierRevokeArgs('C:\\data\\approvals\\inbox', '*S-1-1-0', env), (e) => e.code === 'invalid_params');
+  });
+
   it('Windows: removing the copy takes the user\'s entry off the users directory; a missing directory asks for nothing', { skip: POSIX }, () => {
     const { config } = tempConfig();
     const sid = 'S-1-5-21-1-2-3-1001';
