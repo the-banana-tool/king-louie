@@ -8,11 +8,13 @@ const path = require('path');
 const APP_ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const LOOKALIKE = /[\u0000\u2215\u2216\uFF0F\uFF3C]/;
 const GUI_KEYS = Object.freeze({
-  top: Object.freeze(['enabled', 'apps', 'screenshot', 'live_view', 'lease']),
+  top: Object.freeze(['enabled', 'apps', 'screenshot', 'live_view', 'lease', 'take', 'browser', 'recorder']),
   app: Object.freeze(['name', 'path', 'processes', 'args']),
   screenshot: Object.freeze(['max_width', 'quality']),
   live_view: Object.freeze(['interval_s', 'max_width', 'quality', 'max_frame_bytes']),
-  lease: Object.freeze(['default_minutes', 'max_minutes', 'yield_ms', 'max_inputs_per_minute', 'contact_s'])
+  lease: Object.freeze(['default_minutes', 'max_minutes', 'yield_ms', 'max_inputs_per_minute', 'contact_s']),
+  take: Object.freeze(['enabled', 'max_minutes']),
+  recorder: Object.freeze(['ffmpeg'])
 });
 // [min, max, default, camelCase name] per key.
 const RANGES = Object.freeze({
@@ -27,9 +29,11 @@ const RANGES = Object.freeze({
     // R-F5-15: how long input goes on without a signed message from the
     // granting phone. Two minutes; never more than five.
     contact_s: [30, 300, 120, 'contactS']
-  }
+  },
+  // A take (a screen-recorded demo): off unless gui.take.enabled is true.
+  take: { max_minutes: [1, 240, 240, 'maxMinutes'] }
 });
-const SECTION_NAMES = { screenshot: 'screenshot', live_view: 'liveView', lease: 'lease' };
+const SECTION_NAMES = { screenshot: 'screenshot', live_view: 'liveView', lease: 'lease', take: 'take' };
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
@@ -42,7 +46,8 @@ function defaultsFor(section) {
 const GUI_DEFAULTS = Object.freeze({
   screenshot: Object.freeze(defaultsFor('screenshot')),
   liveView: Object.freeze(defaultsFor('live_view')),
-  lease: Object.freeze(defaultsFor('lease'))
+  lease: Object.freeze(defaultsFor('lease')),
+  take: Object.freeze({ enabled: false, ...defaultsFor('take') })
 });
 
 function disabled() {
@@ -52,6 +57,9 @@ function disabled() {
     screenshot: { ...GUI_DEFAULTS.screenshot },
     liveView: { ...GUI_DEFAULTS.liveView },
     lease: { ...GUI_DEFAULTS.lease },
+    take: { ...GUI_DEFAULTS.take },
+    browser: null,
+    recorder: { ffmpeg: null },
     warnings: []
   };
 }
@@ -79,7 +87,7 @@ function parseGuiConfig(raw, { profile = 'agent', platform = process.platform, f
     out.enabled = raw.enabled === true;
   }
 
-  for (const section of ['screenshot', 'live_view', 'lease']) {
+  for (const section of ['screenshot', 'live_view', 'lease', 'take']) {
     const value = raw[section];
     if (value === undefined) continue;
     if (!isPlainObject(value)) throw invalid(`gui.${section} must be a mapping`);
@@ -93,6 +101,10 @@ function parseGuiConfig(raw, { profile = 'agent', platform = process.platform, f
       target[name] = value[key];
     }
   }
+  if (raw.take !== undefined && raw.take.enabled !== undefined) {
+    if (typeof raw.take.enabled !== 'boolean') throw invalid('gui.take.enabled must be true or false');
+    out.take.enabled = raw.take.enabled;
+  }
   if (out.lease.defaultMinutes > out.lease.maxMinutes) {
     throw invalid('gui.lease.default_minutes must not exceed gui.lease.max_minutes');
   }
@@ -102,6 +114,20 @@ function parseGuiConfig(raw, { profile = 'agent', platform = process.platform, f
     for (const [id, value] of Object.entries(raw.apps)) {
       if (!APP_ID_RE.test(id)) throw invalid(`gui.apps.${id}: an app id must match ${APP_ID_RE}`);
       out.apps[id] = parseApp(id, value, { platform, invalid, checkKeys, warnings: out.warnings });
+    }
+  }
+
+  if (raw.browser !== undefined) {
+    if (typeof raw.browser !== 'string' || !APP_ID_RE.test(raw.browser)) throw invalid(`gui.browser must be an app id matching ${APP_ID_RE}`);
+    if (!Object.prototype.hasOwnProperty.call(out.apps, raw.browser)) throw invalid(`gui.browser: "${raw.browser}" is not in gui.apps`);
+    out.browser = raw.browser;
+  }
+
+  if (raw.recorder !== undefined) {
+    if (!isPlainObject(raw.recorder)) throw invalid('gui.recorder must be a mapping');
+    checkKeys(raw.recorder, GUI_KEYS.recorder, 'gui.recorder.');
+    if (raw.recorder.ffmpeg !== undefined) {
+      out.recorder.ffmpeg = checkPath(raw.recorder.ffmpeg, 'gui.recorder.ffmpeg', platform, invalid, { exeOnly: true });
     }
   }
   return out;
@@ -149,5 +175,7 @@ function parseApp(id, value, { platform, invalid, checkKeys, warnings }) {
 
 // What an administrator adds to node.yaml to turn desktop apps on.
 const GUI_ENABLE_LINES = 'gui:\n  enabled: true';
+// What an administrator adds to node.yaml to turn takes on.
+const TAKE_ENABLE_LINES = 'gui:\n  take:\n    enabled: true';
 
-module.exports = { parseGuiConfig, GUI_KEYS, GUI_DEFAULTS, APP_ID_RE, GUI_ENABLE_LINES };
+module.exports = { parseGuiConfig, GUI_KEYS, GUI_DEFAULTS, APP_ID_RE, GUI_ENABLE_LINES, TAKE_ENABLE_LINES };

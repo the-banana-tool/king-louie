@@ -128,7 +128,28 @@ describe('parseGuiConfig', () => {
   });
 
   it('exposes its key lists', () => {
-    assert.deepEqual(GUI_KEYS.top, ['enabled', 'apps', 'screenshot', 'live_view', 'lease']);
+    assert.deepEqual(GUI_KEYS.top, ['enabled', 'apps', 'screenshot', 'live_view', 'lease', 'take', 'browser', 'recorder']);
+  });
+
+  it('take is off by default with a 240 minute cap', () => {
+    const g = parseGuiConfig({ enabled: true, apps: { chrome: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' } }, { platform: 'win32' });
+    assert.deepEqual(g.take, { enabled: false, maxMinutes: 240 });
+    assert.equal(g.browser, null);
+    assert.deepEqual(g.recorder, { ffmpeg: null });
+  });
+  it('take.max_minutes is 1 to 240', () => {
+    assert.throws(() => parseGuiConfig({ enabled: true, take: { enabled: true, max_minutes: 241 } }), /gui\.take\.max_minutes/);
+    assert.equal(parseGuiConfig({ enabled: true, take: { enabled: true, max_minutes: 90 } }).take.maxMinutes, 90);
+  });
+  it('browser must name an app', () => {
+    assert.throws(() => parseGuiConfig({ enabled: true, apps: {}, browser: 'chrome' }), /gui\.browser.*not in gui\.apps/);
+    assert.equal(parseGuiConfig({ enabled: true, apps: { chrome: 'C:\\x\\chrome.exe' }, browser: 'chrome' }, { platform: 'win32' }).browser, 'chrome');
+  });
+  it('recorder.ffmpeg must be an absolute path', () => {
+    assert.throws(() => parseGuiConfig({ enabled: true, recorder: { ffmpeg: 'ffmpeg' } }), /gui\.recorder\.ffmpeg/);
+  });
+  it('unknown take key is refused', () => {
+    assert.throws(() => parseGuiConfig({ enabled: true, take: { enabled: true, contact_s: 5 } }), /unknown key "gui\.take\.contact_s"/);
   });
 });
 
