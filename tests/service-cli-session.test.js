@@ -67,6 +67,11 @@ const who = (a) => (POSIX ? `uid ${a.uid}` : `SID ${a.sid}`);
 // process's own uid, the only one a test can write a file for.
 const otherAccountForInstall = (name) => (POSIX ? account(name) : otherAccount(name));
 
+function fakeCourierAcl(req) {
+  if (req.mode === 'grant') for (const name of req.names) fs.mkdirSync(path.join(req.dataDir, 'approvals', name), { recursive: true });
+  return req.names.map(() => 'ok');
+}
+
 function deps(s, extra = {}) {
   const executed = [];
   return {
@@ -83,8 +88,9 @@ function deps(s, extra = {}) {
     configDir: s.configDir,
     ipcDir: s.ipcDir,
     runIcacls: () => {},
-    // The courier grant and revoke (Windows): every directory "ok".
-    runCourierAcl: (req) => req.dirs.map(() => 'ok'),
+    // The courier grant and revoke (Windows): every directory "ok", and a
+    // grant makes the directories, as the real runner does.
+    runCourierAcl: fakeCourierAcl,
     // "Does the identity the helper file records still exist?" The real
     // check asks the OS (read-only); here every recorded identity exists
     // unless a test says otherwise.
@@ -120,7 +126,7 @@ function tree(dir) {
 // install and uninstall hand the handle-based runner (Windows). The temp data
 // dir is already its own native realpath.
 const courierDirs = (s) => [path.join(s.dataDir, 'approvals', 'outbox'), path.join(s.dataDir, 'approvals', 'inbox')];
-const courierRequest = (mode, sid, dirs) => ({ mode, sid, dirs: dirs.map((dir) => ({ path: dir, expected: S.windowsFinalPath(dir) })) });
+const courierRequest = (mode, sid, dirs) => ({ mode, sid, dataDir: path.dirname(path.dirname(dirs[0])), expected: S.windowsFinalPath(path.dirname(path.dirname(dirs[0]))), names: dirs.map((dir) => path.basename(dir)) });
 
 describe('session install', () => {
   it('needs an administrator', async () => {
@@ -629,13 +635,14 @@ describe('second review finding 1: the session user can read who owns the users 
 
 // The session user runs `king-louie-service mcp`, which posts to the service
 // through the courier (approvals\outbox, approvals\inbox under the data dir).
-// The grant and the revoke go through the handle-based runner (task 16
-// review, I-1), never icacls by name; these tests script that runner.
+// The grant, the revoke and the creation of the directories go through the
+// handle-based runner (task 16 review I-1, re-review N-1), never icacls or
+// mkdir by name; these tests script that runner, so nothing creates them.
 describe('the session user may post to the courier (Windows)', () => {
   const SID = 'S-1-5-21-1-2-3-1001';
   const usersDir = (s) => path.join(s.configDir, 'session', 'users');
   // One log of both runners, in order; `answer` scripts the courier codes.
-  function recorder(s, answer = (req) => req.dirs.map(() => 'ok')) {
+  function recorder(s, answer = fakeCourierAcl) {
     const log = [];
     return {
       log,
@@ -644,14 +651,14 @@ describe('the session user may post to the courier (Windows)', () => {
       deps: {
         runIcacls: (argv) => log.push({ kind: 'icacls', argv }),
         runCourierAcl: (req) => {
-          log.push({ kind: 'courier', req, dirsThere: courierDirs(s).map((dir) => fs.existsSync(dir)) });
+          log.push({ kind: 'courier', req, approvalsThere: fs.existsSync(path.join(s.dataDir, 'approvals')) });
           return answer(req);
         }
       }
     };
   }
 
-  it('install grants the user modify on both courier directories through the runner, after the copy is written, creating them; the consent text names them', { skip: POSIX }, async () => {
+  it('install hands the grant of both courier directories to the runner, after the copy is written; Node creates nothing; the consent text names them', { skip: POSIX }, async () => {
     const s = setup();
     const r = recorder(s);
     const t = io();
@@ -665,8 +672,8 @@ describe('the session user may post to the courier (Windows)', () => {
     // The users directory and the copy first (four icacls calls), then one grant of both directories.
     assert.deepEqual(r.log.map((e) => e.kind), ['icacls', 'icacls', 'icacls', 'icacls', 'courier']);
     assert.deepEqual(r.courier(), [courierRequest('grant', SID, courierDirs(s))]);
-    assert.deepEqual(r.log[4].dirsThere, [true, true], 'the directories exist before the runner is asked');
-    assert.ok(r.courier()[0].dirs[0].expected.startsWith('\\\\?\\'), 'the expected final path is the handle form');
+    assert.equal(r.log[4].approvalsThere, false, 'Node creates no courier directory: the runner does, through its handles');
+    assert.equal(r.courier()[0].expected, S.windowsFinalPath(s.dataDir), 'the data dir\'s final path is what the runner\'s handle must have');
     assert.ok(!r.icacls().some((argv) => courierDirs(s).includes(argv[1])), 'no icacls by name on a courier directory');
     assert.equal(d.executed.length, 1, 'the login start ran');
   });
@@ -681,29 +688,32 @@ describe('the session user may post to the courier (Windows)', () => {
     assert.equal(fs.readFileSync(path.join(courierDirs(s)[0], 'req.json'), 'utf8'), '{}');
   });
 
-  it('a link where a courier directory should be is refused before the runner; the message says the install is half done', { skip: POSIX }, async (t) => {
+  it('a junction at approvals: Node creates nothing through it, the runner\'s refusal is reported, nothing is granted, the install is half done', { skip: POSIX }, async (t) => {
     const s = setup();
     const elsewhere = path.join(s.base, 'elsewhere');
     fs.mkdirSync(elsewhere);
-    fs.mkdirSync(path.join(s.dataDir, 'approvals'));
     try {
-      fs.symlinkSync(elsewhere, courierDirs(s)[0], 'junction');
+      fs.symlinkSync(elsewhere, path.join(s.dataDir, 'approvals'), 'junction');
     } catch {
       t.skip('cannot create a junction here');
       return;
     }
-    const r = recorder(s);
+    const r = recorder(s, (req) => req.names.map(() => 'reparse_point'));
     const out = io();
     const d = deps(s, r.deps);
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: out.io, deps: d }), 1);
-    assert.match(out.err.join(''), /^unsafe_path.*the helper files are written but the login start is not: run "session install --user alice" again/);
-    assert.deepEqual(r.courier(), []);
+    const err = out.err.join('');
+    assert.ok(err.includes(`${courierDirs(s)[0]} (reparse_point), ${courierDirs(s)[1]} (reparse_point)`), err);
+    assert.match(err, /the helper files are written but the login start is not: run "session install --user alice" again/);
+    // One grant asked, nothing to take back, nothing made behind the junction.
+    assert.deepEqual(r.courier(), [courierRequest('grant', SID, courierDirs(s))]);
+    assert.deepEqual(fs.readdirSync(elsewhere), []);
     assert.equal(d.executed.length, 0);
   });
 
   it('a grant the runner refuses on inbox: the outbox grant is taken back, the message names both, exit 1, no login start', { skip: POSIX }, async () => {
     const s = setup();
-    const r = recorder(s, (req) => (req.mode === 'grant' ? ['ok', 'path_moved'] : req.dirs.map(() => 'ok')));
+    const r = recorder(s, (req) => (req.mode === 'grant' ? ['ok', 'path_moved'] : req.names.map(() => 'ok')));
     const out = io();
     const d = deps(s, r.deps);
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: out.io, deps: d }), 1);
@@ -792,7 +802,9 @@ describe('the session user may post to the courier (Windows)', () => {
     assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: { ...d, runCourierAcl: () => ['ok', 'reparse_point'] } }), 1);
     const err = t.err.join('');
     assert.match(err, /except one directory permission/);
-    assert.ok(err.includes(`the entry for ${SID} could not be taken off ${courierDirs(s)[1]} (reparse_point)`), err);
+    assert.ok(err.includes(`the entry for ${SID} could not be taken off ${courierDirs(s)[1]} (reparse_point); run "session uninstall --user alice" again`), err);
+    // Review N-4: never "run icacls by name" on the service's directory.
+    assert.ok(!new RegExp(`icacls "[^"]*approvals`).test(err), err);
     assert.equal(fs.existsSync(S.canonicalPath(s.configDir)), false);
   });
 
@@ -943,7 +955,7 @@ describe('second review finding 11: session uninstall', () => {
     const d2 = reborn({
       identityExists: (identity) => { asked.push(identity); return false; },
       runIcacls: (argv) => asked.push(argv),
-      runCourierAcl: (req) => { courierAsked.push(req); return req.dirs.map(() => 'ok'); }
+      runCourierAcl: (req) => { courierAsked.push(req); return req.names.map(() => 'ok'); }
     });
     let shownBefore = null;
     d2.confirm = async () => { shownBefore = t.out.join(''); return true; };

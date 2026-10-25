@@ -247,24 +247,9 @@ function loginStartText({ platform, account, sessionUser }) {
 const COURIER_TEXT = 'the service\'s courier (approvals\\outbox, approvals\\inbox)';
 const courierDirs = (dataDir) => [path.join(dataDir, 'approvals', 'outbox'), path.join(dataDir, 'approvals', 'inbox')];
 
-// After consent: the courier directories, created (0700, the service makes
-// them so too) when missing. A link or anything but a directory at one is
-// refused, so the grant never lands on what a link points to.
-function ensureCourierDirs(dataDir) {
-  for (const dir of [path.join(dataDir, 'approvals'), ...courierDirs(dataDir)]) {
-    try {
-      fs.mkdirSync(dir, { mode: 0o700 });
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-    }
-    const st = fs.lstatSync(dir);
-    if (st.isSymbolicLink() || !st.isDirectory()) throw new GuiError('unsafe_path', `${dir} is not a directory (links are refused)`);
-  }
-  return courierDirs(dataDir);
-}
-
-// The courier directories uninstall acts on: only real ones (a missing one
-// holds no entry, and a link is never followed).
+// The courier directories uninstall acts on and lists: only real ones (a
+// missing one holds no entry). This only reads, to choose what to ask and
+// what to say; the runner decides again through its handles.
 function existingCourierDirs(dataDir) {
   return courierDirs(dataDir).filter((dir) => {
     try {
@@ -276,18 +261,22 @@ function existingCourierDirs(dataDir) {
   });
 }
 
-// The grant and the revoke go through a handle opened on each directory
-// (runCourierAcl in gui/session-secret.js), which checks that the handle's
-// final path is this one: the data dir's native realpath, taken here, and
-// the fixed names below it. A junction anywhere on the way after that shows
-// as path_moved (or reparse_point at the directory itself). One code per
-// directory; a runner that fails says acl_failed for each.
+// The grant and the revoke, and the creation of the directories, happen only
+// in the elevated child (runCourierAcl in gui/session-secret.js), which pins
+// the data dir, then `approvals`, then each directory by handle, opening each
+// relative to the one above without following a reparse point (task 16
+// re-review N-1): the service account owns the data dir and can make any of
+// them a junction at any moment, the data dir itself while install waits at
+// its question. Nothing here creates or opens them by name. The data dir's
+// native realpath, taken here, is only the final path the child's handle must
+// have. `dirs` are paths under the data dir's approvals; one code each; a
+// runner that fails says acl_failed for each.
 function courierAcl({ mode, sid, dirs, dataDir, deps }) {
   const run = deps.runCourierAcl || ((req) => require('../../gui/session-secret').runCourierAcl(req));
   const finalPath = require('../../gui/session-secret').windowsFinalPath;
   try {
-    const root = (deps.realpath || fs.realpathSync.native)(dataDir);
-    const codes = run({ mode, sid, dirs: dirs.map((dir) => ({ path: dir, expected: finalPath(path.join(root, path.relative(dataDir, dir))) })) });
+    const expected = finalPath((deps.realpath || fs.realpathSync.native)(dataDir));
+    const codes = run({ mode, sid, dataDir, expected, names: dirs.map((dir) => path.basename(dir)) });
     if (Array.isArray(codes) && codes.length === dirs.length) return codes;
   } catch { /* below */ }
   return dirs.map(() => 'acl_failed');
@@ -427,14 +416,8 @@ async function install({ flags, dataDir, io, deps }) {
   });
   if (c.platform === 'win32') {
     const halfDone = `the helper files are written but the login start is not: run "session install --user ${sessionUser}" again`;
-    let dirs;
-    try {
-      dirs = ensureCourierDirs(dataDir);
-    } catch (err) {
-      // The same error (an unsafe_path keeps its code), saying what is done.
-      err.message = `${String(err.message).replace(/[\s.]+$/, '')}; ${halfDone}`;
-      throw err;
-    }
+    // The runner creates them (relative to its pinned handles) when missing.
+    const dirs = courierDirs(dataDir);
     const codes = courierAcl({ mode: 'grant', sid: account.sid, dirs, dataDir, deps });
     const failed = dirs.filter((_, i) => codes[i] !== 'ok');
     if (failed.length) {
@@ -615,7 +598,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
     if (!dirs.length) continue;
     const codes = courierAcl({ mode: 'revoke', sid: who.sid, dirs, dataDir, deps });
     dirs.forEach((dir, i) => {
-      if (codes[i] !== 'ok') aclLeft.push(`the entry for ${who.sid} could not be taken off ${dir} (${codes[i]}); once it is a real directory again, as an administrator run: icacls "${dir}" /remove:g *${who.sid}`);
+      if (codes[i] !== 'ok') aclLeft.push(`the entry for ${who.sid} could not be taken off ${dir} (${codes[i]}); run "session uninstall --user ${sessionUser}" again (it removes the entry through a checked handle; do not use icacls by name on the service's directories)`);
     });
   }
   // Never follows a link: a link is removed itself, a directory (a damaged

@@ -265,23 +265,36 @@ function windowsUsersDirRevokeArgs(dir, sid, env = process.env) {
 // The session user runs `king-louie-service mcp`, which posts to the service
 // through the file courier under the data dir (approvals\outbox and
 // approvals\inbox), where only the service account could write. The grant is
-// Modify, (OI)(CI), so what is put in them inherits it; the revoke takes every
-// explicit allow entry of that SID off again.
+// Modify, (OI)(CI), so what is put in them inherits it; grant and revoke both
+// drop every explicit allow entry of that SID first (icacls's /grant:r and
+// /remove:g; review N-2, accepted).
 //
-// Not icacls by name (task 16 review, I-1): the data dir is the service
-// account's, so it can put a junction where `approvals`, `outbox` or `inbox`
-// was between any check and an elevated grant by name, and the inheritable
-// grant would land on whatever the junction points to. Here each directory
-// is opened once, no reparse point followed (FILE_FLAG_OPEN_REPARSE_POINT),
-// with READ_CONTROL | WRITE_DAC; the handle must be a directory, not a
-// reparse point, and its final path must be the expected one (which catches
-// a junction above it); the DACL is read, changed and written back through
-// that same handle, which pins the object. SetKernelObjectSecurity sets the
-// directory's own DACL and walks no children, so nothing under a directory
-// the service controls is followed either: what is created there afterwards
-// inherits the entry as it is created. One JSON line per directory, a code,
-// never a path: ok, not_a_directory, reparse_point, path_moved, acl_failed.
+// Nothing by name through a directory the service controls (task 16 review
+// I-1, re-review N-1). The service account owns the data dir and everything
+// in it, so it can turn any of them into a junction at any moment, the data
+// dir itself included (in place, while install waits at its question). So
+// the whole chain is pinned by handles in one elevated child:
+//   1. The data dir is opened by path with FILE_FLAG_OPEN_REPARSE_POINT (a
+//      reparse point is opened as itself, never followed) and shared for
+//      read and write only (no FILE_SHARE_DELETE: it cannot be renamed or
+//      removed while the handle is open). A reparse point, a non-directory,
+//      or a final path (GetFinalPathNameByHandle) other than the expected one
+//      Node passes is refused.
+//   2. `approvals` is created if missing and opened RELATIVE to that handle
+//      (NtCreateFile with RootDirectory: no path is walked again), not
+//      following a reparse point, shared the same way, checked the same way
+//      (its final path is the data dir's plus \approvals).
+//   3. `outbox` and `inbox` the same, relative to the `approvals` handle; then
+//      the DACL is read, changed and written back through each one's handle
+//      (SetKernelObjectSecurity: the directory's own DACL, no walk of its
+//      children; what is made there later inherits the entry as it is made).
+//   4. Every handle is closed, in reverse.
+// A revoke creates nothing: a directory that is not there holds no entry
+// ("ok"). One JSON line per name, a code, never a path: ok, not_a_directory,
+// reparse_point, path_moved, acl_failed. A refusal at the data dir or at
+// `approvals` is that code for every name.
 const COURIER_ACL_CODES = new Set(['ok', 'not_a_directory', 'reparse_point', 'path_moved', 'acl_failed']);
+const COURIER_NAMES = Object.freeze(['outbox', 'inbox']);
 // FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE: icacls's (M).
 const COURIER_MODIFY_MASK = 0x1301bf;
 const WINDOWS_COURIER_ACL_CSHARP = [
@@ -299,8 +312,16 @@ const WINDOWS_COURIER_ACL_CSHARP = [
   '    public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;',
   '    public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;',
   '  }',
+  '  [StructLayout(LayoutKind.Sequential)]',
+  '  struct UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }',
+  '  [StructLayout(LayoutKind.Sequential)]',
+  '  struct OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public uint Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }',
+  '  [StructLayout(LayoutKind.Sequential)]',
+  '  struct IO_STATUS_BLOCK { public IntPtr Status; public IntPtr Information; }',
   '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
   '  static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);',
+  '  [DllImport("ntdll.dll")]',
+  '  static extern int NtCreateFile(out IntPtr handle, uint access, ref OBJECT_ATTRIBUTES oa, out IO_STATUS_BLOCK io, IntPtr allocationSize, uint attributes, uint share, uint disposition, uint options, IntPtr ea, uint eaLength);',
   '  [DllImport("kernel32.dll", SetLastError = true)]',
   '  static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION info);',
   '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
@@ -310,61 +331,134 @@ const WINDOWS_COURIER_ACL_CSHARP = [
   '  [DllImport("advapi32.dll", SetLastError = true)]',
   '  static extern bool SetKernelObjectSecurity(SafeFileHandle h, uint info, byte[] sd);',
   '  const uint DACL_SECURITY_INFORMATION = 4;',
-  '  public static string Apply(string path, string expected, string sid, bool grant, int mask) {',
-  '    // READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES; share read/write/delete; OPEN_EXISTING;',
-  '    // FILE_FLAG_BACKUP_SEMANTICS (a directory) | FILE_FLAG_OPEN_REPARSE_POINT (never followed).',
-  '    SafeFileHandle h = CreateFileW(path, 0x00060080, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);',
-  '    if (h.IsInvalid) return "acl_failed";',
-  '    using (h) {',
-  '      BY_HANDLE_FILE_INFORMATION info;',
-  '      if (!GetFileInformationByHandle(h, out info)) return "acl_failed";',
-  '      if ((info.FileAttributes & 0x400) != 0) return "reparse_point";',
-  '      if ((info.FileAttributes & 0x10) == 0) return "not_a_directory";',
-  '      StringBuilder buf = new StringBuilder(32768);',
-  '      uint n = GetFinalPathNameByHandleW(h, buf, (uint)buf.Capacity, 0);',
-  '      if (n == 0 || n >= (uint)buf.Capacity) return "acl_failed";',
-  '      if (!String.Equals(buf.ToString(), expected, StringComparison.OrdinalIgnoreCase)) return "path_moved";',
-  '      try {',
-  '        uint needed;',
-  '        GetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION, null, 0, out needed);',
-  '        if (needed == 0) return "acl_failed";',
-  '        byte[] bytes = new byte[needed];',
-  '        if (!GetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION, bytes, needed, out needed)) return "acl_failed";',
-  '        CommonSecurityDescriptor sd = new CommonSecurityDescriptor(true, false, new RawSecurityDescriptor(bytes, 0));',
-  '        DiscretionaryAcl dacl = sd.DiscretionaryAcl;',
-  '        if (dacl == null || !dacl.IsCanonical) return "acl_failed";',
-  '        SecurityIdentifier who = new SecurityIdentifier(sid);',
-  '        List<CommonAce> mine = new List<CommonAce>();',
-  '        for (int i = 0; i < dacl.Count; i++) {',
-  '          CommonAce ace = dacl[i] as CommonAce;',
-  '          if (ace != null && !ace.IsInherited && ace.AceQualifier == AceQualifier.AccessAllowed && ace.SecurityIdentifier == who) mine.Add(ace);',
+  '  // FILE_SHARE_READ | FILE_SHARE_WRITE: never FILE_SHARE_DELETE.',
+  '  const uint SHARE = 3;',
+  '  // FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | FILE_TRAVERSE: a parent the next open is relative to.',
+  '  const uint PARENT_ACCESS = 0x000000a1;',
+  '  // READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES: a directory whose DACL is set.',
+  '  const uint LEAF_ACCESS = 0x00060080;',
+  '  // null when the handle is a real directory at `expected`; else the code.',
+  '  static string Check(SafeFileHandle h, string expected, out string final) {',
+  '    final = null;',
+  '    BY_HANDLE_FILE_INFORMATION info;',
+  '    if (!GetFileInformationByHandle(h, out info)) return "acl_failed";',
+  '    if ((info.FileAttributes & 0x400) != 0) return "reparse_point";',
+  '    if ((info.FileAttributes & 0x10) == 0) return "not_a_directory";',
+  '    StringBuilder buf = new StringBuilder(32768);',
+  '    uint n = GetFinalPathNameByHandleW(h, buf, (uint)buf.Capacity, 0);',
+  '    if (n == 0 || n >= (uint)buf.Capacity) return "acl_failed";',
+  '    final = buf.ToString();',
+  '    if (!String.Equals(final, expected, StringComparison.OrdinalIgnoreCase)) return "path_moved";',
+  '    return null;',
+  '  }',
+  '  // `name` under the pinned `parent`, opened relative to its handle: created',
+  '  // when `create` and missing; a reparse point is opened as itself.',
+  '  // missing: nothing there and nothing created.',
+  '  static SafeFileHandle OpenChild(SafeFileHandle parent, string name, uint access, bool create, out string code) {',
+  '    code = null;',
+  '    UNICODE_STRING us = new UNICODE_STRING();',
+  '    us.Length = (ushort)(name.Length * 2);',
+  '    us.MaximumLength = (ushort)(name.Length * 2 + 2);',
+  '    us.Buffer = Marshal.StringToHGlobalUni(name);',
+  '    IntPtr pName = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING)));',
+  '    bool added = false;',
+  '    try {',
+  '      parent.DangerousAddRef(ref added);',
+  '      Marshal.StructureToPtr(us, pName, false);',
+  '      OBJECT_ATTRIBUTES oa = new OBJECT_ATTRIBUTES();',
+  '      oa.Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES));',
+  '      oa.RootDirectory = parent.DangerousGetHandle();',
+  '      oa.ObjectName = pName;',
+  '      oa.Attributes = 0x40; // OBJ_CASE_INSENSITIVE',
+  '      IntPtr h;',
+  '      IO_STATUS_BLOCK io;',
+  '      // SYNCHRONIZE; FILE_OPEN_IF (3) or FILE_OPEN (1); FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT',
+  '      // | FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT.',
+  '      int status = NtCreateFile(out h, access | 0x00100000, ref oa, out io, IntPtr.Zero, 0, SHARE, create ? 3u : 1u, 0x00204021u, IntPtr.Zero, 0);',
+  '      if (status >= 0) return new SafeFileHandle(h, true);',
+  '      uint s = unchecked((uint)status);',
+  '      if (s == 0xC0000034 || s == 0xC000003A) code = "missing";',
+  '      else if (s == 0xC0000103) code = "not_a_directory";',
+  '      else code = "acl_failed";',
+  '      return null;',
+  '    } finally {',
+  '      if (added) parent.DangerousRelease();',
+  '      Marshal.FreeHGlobal(us.Buffer);',
+  '      Marshal.FreeHGlobal(pName);',
+  '    }',
+  '  }',
+  '  static string SetDacl(SafeFileHandle h, string sid, bool grant, int mask) {',
+  '    try {',
+  '      uint needed;',
+  '      GetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION, null, 0, out needed);',
+  '      if (needed == 0) return "acl_failed";',
+  '      byte[] bytes = new byte[needed];',
+  '      if (!GetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION, bytes, needed, out needed)) return "acl_failed";',
+  '      CommonSecurityDescriptor sd = new CommonSecurityDescriptor(true, false, new RawSecurityDescriptor(bytes, 0));',
+  '      DiscretionaryAcl dacl = sd.DiscretionaryAcl;',
+  '      if (dacl == null || !dacl.IsCanonical) return "acl_failed";',
+  '      SecurityIdentifier who = new SecurityIdentifier(sid);',
+  '      List<CommonAce> mine = new List<CommonAce>();',
+  '      for (int i = 0; i < dacl.Count; i++) {',
+  '        CommonAce ace = dacl[i] as CommonAce;',
+  '        if (ace != null && !ace.IsInherited && ace.AceQualifier == AceQualifier.AccessAllowed && ace.SecurityIdentifier == who) mine.Add(ace);',
+  '      }',
+  '      foreach (CommonAce ace in mine) dacl.RemoveAccessSpecific(AccessControlType.Allow, who, ace.AccessMask, ace.InheritanceFlags, ace.PropagationFlags);',
+  '      if (grant) dacl.AddAccess(AccessControlType.Allow, who, mask, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None);',
+  '      byte[] result = new byte[sd.BinaryLength];',
+  '      sd.GetBinaryForm(result, 0);',
+  '      if (!SetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION, result)) return "acl_failed";',
+  '      return "ok";',
+  '    } catch (Exception) {',
+  '      return "acl_failed";',
+  '    }',
+  '  }',
+  '  static string[] All(int count, string code) {',
+  '    string[] codes = new string[count];',
+  '    for (int i = 0; i < count; i++) codes[i] = code;',
+  '    return codes;',
+  '  }',
+  '  public static string[] Run(string dataDir, string expected, string[] names, string sid, bool grant, int mask) {',
+  '    // OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.',
+  '    SafeFileHandle root = CreateFileW(dataDir, PARENT_ACCESS, SHARE, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);',
+  '    if (root.IsInvalid) return All(names.Length, "acl_failed");',
+  '    using (root) {',
+  '      string rootFinal;',
+  '      string code = Check(root, expected, out rootFinal);',
+  '      if (code != null) return All(names.Length, code);',
+  '      SafeFileHandle approvals = OpenChild(root, "approvals", PARENT_ACCESS, grant, out code);',
+  '      if (approvals == null) return All(names.Length, code == "missing" ? (grant ? "acl_failed" : "ok") : code);',
+  '      using (approvals) {',
+  '        string approvalsFinal;',
+  '        code = Check(approvals, rootFinal + "\\\\approvals", out approvalsFinal);',
+  '        if (code != null) return All(names.Length, code);',
+  '        string[] codes = new string[names.Length];',
+  '        for (int i = 0; i < names.Length; i++) {',
+  '          SafeFileHandle leaf = OpenChild(approvals, names[i], LEAF_ACCESS, grant, out code);',
+  '          if (leaf == null) { codes[i] = code == "missing" ? (grant ? "acl_failed" : "ok") : code; continue; }',
+  '          using (leaf) {',
+  '            string leafFinal;',
+  '            code = Check(leaf, approvalsFinal + "\\\\" + names[i], out leafFinal);',
+  '            codes[i] = code != null ? code : SetDacl(leaf, sid, grant, mask);',
+  '          }',
   '        }',
-  '        foreach (CommonAce ace in mine) dacl.RemoveAccessSpecific(AccessControlType.Allow, who, ace.AccessMask, ace.InheritanceFlags, ace.PropagationFlags);',
-  '        if (grant) dacl.AddAccess(AccessControlType.Allow, who, mask, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None);',
-  '        byte[] result = new byte[sd.BinaryLength];',
-  '        sd.GetBinaryForm(result, 0);',
-  '        if (!SetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION, result)) return "acl_failed";',
-  '        return "ok";',
-  '      } catch (Exception) {',
-  '        return "acl_failed";',
+  '        return codes;',
   '      }',
   '    }',
   '  }',
   '}'
 ].join('\n');
-// Paths, expected final paths, the SID and the mode travel in the
-// environment, never in the script text.
+// The data dir, its expected final path, the names, the SID and the mode
+// travel in the environment, never in the script text.
 const WINDOWS_COURIER_ACL_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
   'try {',
   "  Add-Type -TypeDefinition @'",
   WINDOWS_COURIER_ACL_CSHARP,
   "'@",
-  '  $paths = $env:KL_COURIER_PATHS.Split([char]10)',
-  '  $expected = $env:KL_COURIER_EXPECTED.Split([char]10)',
   "  $grant = $env:KL_COURIER_MODE -eq 'grant'",
-  '  for ($i = 0; $i -lt $paths.Length; $i++) {',
-  '    $code = [KlCourierAcl]::Apply($paths[$i], $expected[$i], $env:KL_COURIER_SID, $grant, [int]$env:KL_COURIER_MASK)',
+  '  $codes = [KlCourierAcl]::Run($env:KL_COURIER_DATA_DIR, $env:KL_COURIER_EXPECTED, $env:KL_COURIER_NAMES.Split([char]10), $env:KL_COURIER_SID, $grant, [int]$env:KL_COURIER_MASK)',
+  '  foreach ($code in $codes) {',
   `    [Console]::Out.WriteLine('{"code":"' + $code + '"}')`,
   '  }',
   '  exit 0',
@@ -381,25 +475,28 @@ function windowsFinalPath(p) {
   return s.startsWith('\\\\') ? `\\\\?\\UNC\\${s.slice(2)}` : `\\\\?\\${s}`;
 }
 
-// { mode: 'grant' | 'revoke', sid, dirs: [{ path, expected }] } → one code
-// per directory, in order. Elevated (the admin CLI), synchronous.
-function runCourierAcl({ mode, sid, dirs }, { execFile = execFileSync, env = process.env } = {}) {
+// { mode: 'grant' | 'revoke', sid, dataDir, expected, names } → one code per
+// name, in order. `expected` is the data dir's final path as Node last saw
+// it: a hint the handle must match, nothing more. Elevated (the admin CLI),
+// synchronous.
+function runCourierAcl({ mode, sid, dataDir, expected, names }, { execFile = execFileSync, env = process.env } = {}) {
   if (mode !== 'grant' && mode !== 'revoke') throw new GuiError('invalid_params', 'mode is grant or revoke');
   if (!SID_RE.test(String(sid))) throw new GuiError('invalid_params', 'a Windows session user is named by its SID');
-  if (!Array.isArray(dirs) || !dirs.length || dirs.some((d) => !d || /[\r\n]/.test(`${d.path}${d.expected}`))) throw new GuiError('invalid_params', 'courier directories');
+  if (typeof dataDir !== 'string' || typeof expected !== 'string' || /[\r\n]/.test(`${dataDir}${expected}`)) throw new GuiError('invalid_params', 'the data dir');
+  if (!Array.isArray(names) || !names.length || names.some((n) => !COURIER_NAMES.includes(n))) throw new GuiError('invalid_params', 'courier directories');
   const encoded = Buffer.from(WINDOWS_COURIER_ACL_SCRIPT, 'utf16le').toString('base64');
   const out = String(execFile(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
     encoding: 'utf8', windowsHide: true, timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'],
     env: {
       ...env,
       KL_COURIER_MODE: mode, KL_COURIER_SID: sid, KL_COURIER_MASK: String(COURIER_MODIFY_MASK),
-      KL_COURIER_PATHS: dirs.map((d) => d.path).join('\n'), KL_COURIER_EXPECTED: dirs.map((d) => d.expected).join('\n')
+      KL_COURIER_DATA_DIR: dataDir, KL_COURIER_EXPECTED: expected, KL_COURIER_NAMES: names.join('\n')
     }
   }));
   const codes = out.trim().split(/\r?\n/).filter((l) => l.trim()).map((l) => {
     try { return JSON.parse(l).code; } catch { return null; }
   });
-  if (codes.length !== dirs.length || codes.some((c) => !COURIER_ACL_CODES.has(c))) throw new Error('unexpected output from the courier ACL script');
+  if (codes.length !== names.length || codes.some((c) => !COURIER_ACL_CODES.has(c))) throw new Error('unexpected output from the courier ACL script');
   return codes;
 }
 
@@ -785,7 +882,7 @@ function resolveSessionUser(name, { platform = process.platform, execFile = (f, 
 module.exports = {
   mintSessionSecret, canonicalPath, writeCanonical, readCanonical, canonicalMtime, inspectCanonical, sameSessionIdentity,
   userCopyPath, writeUserCopy, readUserCopy, removeUserCopy, checkUserCopyTrust, windowsUserOwnerArgs,
-  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs, runCourierAcl, windowsFinalPath, COURIER_MODIFY_MASK, removalKind, removeEntry, sessionIdentityExists, sessionIdentityState, isLocalMachineSid,
+  windowsUsersDirAclArgs, windowsUsersDirRevokeArgs, runCourierAcl, windowsFinalPath, COURIER_MODIFY_MASK, COURIER_NAMES, removalKind, removeEntry, sessionIdentityExists, sessionIdentityState, isLocalMachineSid,
   endpointPath, sessionIpcDir, assertSafeComponents, windowsUserAclArgs, resolveSessionUser,
   classifyWindowsSid, assertSingleUserAccount
 };

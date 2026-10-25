@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const S = require('../src/gui/session-secret');
 const { createAesGcmCipher } = require('../src/platform/cipher');
-const { windowsIcaclsExe } = require('../src/platform/windows-paths');
+const { windowsIcaclsExe, windowsPowerShellExe } = require('../src/platform/windows-paths');
 
 const POSIX = process.platform !== 'win32';
 const UID = POSIX ? process.getuid() : 0;
@@ -187,73 +187,128 @@ describe('per-user copies', () => {
   // The session user runs `king-louie-service mcp`, which posts through the
   // courier under the data dir. The grant goes through one handle per
   // directory (task 16 review, I-1): paths in the environment, one code each.
-  it('runCourierAcl: paths, final paths, SID and mode in the environment, never the script; one code per directory', () => {
+  it('runCourierAcl: the data dir, its final path, the names, SID and mode in the environment, never the script; one code per name', () => {
     const env = { SystemRoot: 'C:\\Windows' };
     const sid = 'S-1-5-21-1-2-3-1001';
-    const dirs = [{ path: 'C:\\data\\approvals\\outbox', expected: '\\\\?\\C:\\data\\approvals\\outbox' }, { path: 'C:\\data\\approvals\\inbox', expected: '\\\\?\\C:\\data\\approvals\\inbox' }];
+    const req = { mode: 'grant', sid, dataDir: 'C:\\data', expected: '\\\\?\\C:\\data', names: ['outbox', 'inbox'] };
     let seen = null;
     const execFile = (file, argv, options) => {
       seen = { file, argv, options };
       return '{"code":"ok"}\r\n{"code":"path_moved"}\r\n';
     };
-    assert.deepEqual(S.runCourierAcl({ mode: 'grant', sid, dirs }, { execFile, env }), ['ok', 'path_moved']);
+    assert.deepEqual(S.runCourierAcl(req, { execFile, env }), ['ok', 'path_moved']);
     assert.equal(seen.argv[seen.argv.length - 2], '-EncodedCommand');
     const script = Buffer.from(seen.argv[seen.argv.length - 1], 'base64').toString('utf16le');
-    assert.ok(!script.includes('approvals') && !script.includes(sid), 'nothing of the request is in the script');
+    assert.ok(!script.includes('C:\\data') && !script.includes(sid), 'nothing of the request is in the script');
     assert.ok(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(script), 'the script is ASCII');
     assert.ok(!/Get-Acl|Set-Acl/.test(script));
-    assert.equal(seen.options.env.KL_COURIER_PATHS, `${dirs[0].path}\n${dirs[1].path}`);
-    assert.equal(seen.options.env.KL_COURIER_EXPECTED, `${dirs[0].expected}\n${dirs[1].expected}`);
+    // No delete sharing on any handle, and every child opened relative to its parent's.
+    assert.ok(/const uint SHARE = 3;/.test(script) && /RootDirectory = parent\.DangerousGetHandle\(\)/.test(script));
+    assert.ok(!/CreateDirectory/.test(script), 'nothing is created by name');
+    assert.equal(seen.options.env.KL_COURIER_DATA_DIR, 'C:\\data');
+    assert.equal(seen.options.env.KL_COURIER_EXPECTED, '\\\\?\\C:\\data');
+    assert.equal(seen.options.env.KL_COURIER_NAMES, 'outbox\ninbox');
     assert.equal(seen.options.env.KL_COURIER_SID, sid);
     assert.equal(seen.options.env.KL_COURIER_MODE, 'grant');
     assert.equal(seen.options.env.KL_COURIER_MASK, String(0x1301bf));
-    assert.throws(() => S.runCourierAcl({ mode: 'grant', sid: 'Everyone', dirs }, { execFile, env }), (e) => e.code === 'invalid_params');
-    assert.throws(() => S.runCourierAcl({ mode: 'chmod', sid, dirs }, { execFile, env }), (e) => e.code === 'invalid_params');
-    assert.throws(() => S.runCourierAcl({ mode: 'grant', sid, dirs: [{ path: 'C:\\a\nC:\\b', expected: 'x' }] }, { execFile, env }), (e) => e.code === 'invalid_params');
+    const bad = (patch) => assert.throws(() => S.runCourierAcl({ ...req, ...patch }, { execFile, env }), (e) => e.code === 'invalid_params');
+    bad({ sid: 'Everyone' });
+    bad({ mode: 'chmod' });
+    bad({ dataDir: 'C:\\a\nC:\\b' });
+    bad({ expected: undefined });
+    bad({ names: ['..\\config'] });
+    bad({ names: [] });
     // Output it does not know is no answer.
-    assert.throws(() => S.runCourierAcl({ mode: 'grant', sid, dirs }, { execFile: () => '{"code":"ok"}\n', env }), /unexpected output/);
-    assert.throws(() => S.runCourierAcl({ mode: 'grant', sid, dirs }, { execFile: () => '{"code":"ok"}\n{"code":"maybe"}\n', env }), /unexpected output/);
+    assert.throws(() => S.runCourierAcl(req, { execFile: () => '{"code":"ok"}\n', env }), /unexpected output/);
+    assert.throws(() => S.runCourierAcl(req, { execFile: () => '{"code":"ok"}\n{"code":"maybe"}\n', env }), /unexpected output/);
     assert.equal(S.windowsFinalPath('C:\\data'), '\\\\?\\C:\\data');
     assert.equal(S.windowsFinalPath('\\\\server\\share\\data'), '\\\\?\\UNC\\server\\share\\data');
   });
 
-  // The real script, against a temp dir this test owns (its owner holds
+  // The real script, against temp dirs this test owns (an owner holds
   // WRITE_DAC). Read back with the identity record's handle-based ACL reader.
-  it('Windows, the real runner: grant then revoke on a directory, a child inherits; a junction, a junction above and a file are refused with nothing granted', { skip: POSIX }, () => {
+  it('Windows, the real runner: creates and grants through pinned handles, a child inherits, revoke takes it off; the rest of the DACL and its protection survive; a junction at the data dir, at approvals or at outbox, a moved data dir and a file are refused with nothing made or granted', { skip: POSIX }, () => {
+    const { execFileSync } = require('child_process');
     const { inspectWindowsAcl } = require('../src/service/identity-record');
     const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-courier-acl-')));
     try {
       const sid = 'S-1-5-21-1-2-3-1001';
-      const entries = (p) => inspectWindowsAcl([p])[0].aces.filter((a) => a.sid === sid);
-      const at = (p) => ({ path: p, expected: S.windowsFinalPath(p) });
-      const outbox = path.join(base, 'approvals', 'outbox');
-      fs.mkdirSync(outbox, { recursive: true });
-      assert.deepEqual(S.runCourierAcl({ mode: 'grant', sid, dirs: [at(outbox)] }), ['ok']);
-      // Allow, Modify, OI|CI, explicit.
-      assert.deepEqual(entries(outbox), [{ type: 0, sid, mask: 0x1301bf, flags: 3 }]);
+      // An unrelated entry icacls can resolve: BUILTIN\Users.
+      const other = 'S-1-5-32-545';
+      const me = /"(S-1-[0-9-]+)"/.exec(execFileSync('whoami', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' }))[1];
+      const aces = (p) => inspectWindowsAcl([p])[0].aces;
+      const entries = (p) => aces(p).filter((a) => a.sid === sid);
+      const run = (mode, dataDir, expected = S.windowsFinalPath(dataDir), names = ['outbox', 'inbox']) => S.runCourierAcl({ mode, sid, dataDir, expected, names });
+      const isProtected = (p) => execFileSync(windowsPowerShellExe(), ['-NoProfile', '-NonInteractive', '-Command', '[Console]::Out.Write([System.IO.Directory]::GetAccessControl($env:KL_P).AreAccessRulesProtected)'], { env: { ...process.env, KL_P: p }, encoding: 'utf8' }).trim();
+
+      // A data dir with nothing in it: the runner makes approvals, outbox and inbox and grants both.
+      const data = path.join(base, 'data');
+      fs.mkdirSync(data);
+      assert.deepEqual(run('grant', data), ['ok', 'ok']);
+      const outbox = path.join(data, 'approvals', 'outbox');
+      assert.deepEqual(fs.readdirSync(path.join(data, 'approvals')).sort(), ['inbox', 'outbox']);
+      assert.deepEqual(entries(outbox), [{ type: 0, sid, mask: 0x1301bf, flags: 3 }], 'allow, modify, OI|CI, explicit');
+      assert.deepEqual(entries(path.join(data, 'approvals')), [], 'approvals itself gets nothing');
       fs.mkdirSync(path.join(outbox, 'child'));
       assert.deepEqual(entries(path.join(outbox, 'child')).map((a) => [a.mask, a.flags & 0x10]), [[0x1301bf, 0x10]], 'inherited by what is made in it');
-      // Granted again: still one entry.
-      assert.deepEqual(S.runCourierAcl({ mode: 'grant', sid, dirs: [at(outbox)] }), ['ok']);
+      assert.deepEqual(run('grant', data), ['ok', 'ok'], 'granted again');
+      assert.equal(entries(outbox).length, 1, 'still one entry');
+      assert.deepEqual(run('revoke', data), ['ok', 'ok']);
+      assert.deepEqual(entries(outbox), []);
+
+      // Review N-3: a protected DACL with an unrelated entry keeps both through a grant and a revoke.
+      execFileSync(windowsIcaclsExe(), [outbox, '/inheritance:r', '/grant:r', `*${me}:(OI)(CI)(F)`, `*${other}:(RX)`], { stdio: 'ignore' });
+      const before = aces(outbox).filter((a) => a.sid !== sid).map((a) => JSON.stringify(a)).sort();
+      assert.equal(isProtected(outbox), 'True');
+      assert.ok(before.some((a) => a.includes(other)));
+      assert.deepEqual(run('grant', data, undefined, ['outbox']), ['ok']);
       assert.equal(entries(outbox).length, 1);
-      assert.deepEqual(S.runCourierAcl({ mode: 'revoke', sid, dirs: [at(outbox)] }), ['ok']);
+      assert.deepEqual(aces(outbox).filter((a) => a.sid !== sid).map((a) => JSON.stringify(a)).sort(), before, 'every other entry as it was');
+      assert.equal(isProtected(outbox), 'True', 'still protected after the grant');
+      assert.deepEqual(run('revoke', data, undefined, ['outbox']), ['ok']);
+      assert.deepEqual(aces(outbox).filter((a) => a.sid !== sid).map((a) => JSON.stringify(a)).sort(), before);
+      assert.equal(isProtected(outbox), 'True', 'and after the revoke');
+
+      // A revoke creates nothing: a data dir with no approvals is "ok", and stays empty.
+      const empty = path.join(base, 'empty');
+      fs.mkdirSync(empty);
+      assert.deepEqual(run('revoke', empty), ['ok', 'ok']);
+      assert.deepEqual(fs.readdirSync(empty), []);
+
+      // A junction at approvals: refused, nothing made or granted behind it.
+      const d2 = path.join(base, 'd2');
+      const t2 = path.join(base, 't2');
+      fs.mkdirSync(d2);
+      fs.mkdirSync(t2);
+      fs.symlinkSync(t2, path.join(d2, 'approvals'), 'junction');
+      assert.deepEqual(run('grant', d2), ['reparse_point', 'reparse_point']);
+      assert.deepEqual(fs.readdirSync(t2), []);
+      assert.deepEqual(entries(t2), []);
+
+      // A junction at outbox: refused; inbox beside it is still granted.
+      const d3 = path.join(base, 'd3');
+      const t3 = path.join(base, 't3');
+      fs.mkdirSync(path.join(d3, 'approvals'), { recursive: true });
+      fs.mkdirSync(t3);
+      fs.symlinkSync(t3, path.join(d3, 'approvals', 'outbox'), 'junction');
+      assert.deepEqual(run('grant', d3), ['reparse_point', 'ok']);
+      assert.deepEqual(entries(t3), []);
+
+      // The data dir itself a junction (made one during the question), or not where Node last saw it.
+      const jd = path.join(base, 'jd');
+      fs.symlinkSync(data, jd, 'junction');
+      assert.deepEqual(run('grant', jd, S.windowsFinalPath(data)), ['reparse_point', 'reparse_point']);
       assert.deepEqual(entries(outbox), []);
-      // A junction where inbox should be: refused, the target untouched.
-      const target = path.join(base, 'target');
-      fs.mkdirSync(target);
-      const inbox = path.join(base, 'approvals', 'inbox');
-      fs.symlinkSync(target, inbox, 'junction');
-      assert.deepEqual(S.runCourierAcl({ mode: 'grant', sid, dirs: [at(inbox)] }), ['reparse_point']);
-      assert.deepEqual(entries(target), []);
-      // A junction above the directory (approvals swapped): the final path differs.
-      const alt = path.join(base, 'alt');
-      fs.symlinkSync(path.join(base, 'approvals'), alt, 'junction');
-      assert.deepEqual(S.runCourierAcl({ mode: 'grant', sid, dirs: [at(path.join(alt, 'outbox'))] }), ['path_moved']);
+      assert.deepEqual(run('grant', data, S.windowsFinalPath(path.join(base, 'elsewhere'))), ['path_moved', 'path_moved']);
       assert.deepEqual(entries(outbox), []);
-      const file = path.join(base, 'file');
-      fs.writeFileSync(file, '');
-      assert.deepEqual(S.runCourierAcl({ mode: 'grant', sid, dirs: [at(file)] }), ['not_a_directory']);
-      assert.deepEqual(S.runCourierAcl({ mode: 'grant', sid, dirs: [at(path.join(base, 'missing'))] }), ['acl_failed']);
+
+      // A file where outbox should be.
+      const d4 = path.join(base, 'd4');
+      fs.mkdirSync(path.join(d4, 'approvals'), { recursive: true });
+      fs.writeFileSync(path.join(d4, 'approvals', 'outbox'), '');
+      assert.deepEqual(run('grant', d4), ['not_a_directory', 'ok']);
+      assert.deepEqual(run('grant', path.join(base, 'missing')), ['acl_failed', 'acl_failed']);
+      assert.equal(fs.existsSync(path.join(base, 'missing')), false);
     } finally {
       fs.rmSync(base, { recursive: true, force: true });
     }
