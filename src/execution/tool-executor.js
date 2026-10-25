@@ -44,6 +44,8 @@ function extractErrorCode(error) {
   return 'TOOL_ERROR';
 }
 
+const TAKE_NO_MID_TAKE_APPROVAL = 'take_no_mid_take_approval';
+
 const DEFAULT_UNAVAILABLE_REFUSAL = 'Phone approval unavailable: no enrolled device or no relay link on this node. Nothing ran.';
 
 // The one place a requester's answer becomes "run" or a refusal. Requesters
@@ -225,10 +227,25 @@ class ToolExecutor extends EventEmitter {
     const refused = {
       success: false,
       error: `this take did not ask for ${toolName}; nothing was sent to the phone`,
-      code: 'take_no_mid_take_approval'
+      code: TAKE_NO_MID_TAKE_APPROVAL
     };
+    this.emit('approvalDenied', { toolName, parameters, deniedBy: 'take', code: TAKE_NO_MID_TAKE_APPROVAL });
     this.emit('postExecute', { toolName, parameters, result: refused });
     return refused;
+  }
+
+  // The same refusal for a tool that asks through the requester it was handed:
+  // `false`, with the take's code where the tool can read it.
+  _midTakeRequesterRefusal(toolName, parameters, metadata) {
+    if (metadata && typeof metadata === 'object') {
+      metadata.refusal = {
+        error: `this take did not ask for ${toolName}; nothing was sent to the phone`,
+        code: TAKE_NO_MID_TAKE_APPROVAL,
+        deniedBy: 'take'
+      };
+    }
+    this.emit('approvalDenied', { toolName, parameters, deniedBy: 'take', code: TAKE_NO_MID_TAKE_APPROVAL });
+    return false;
   }
 
   get permissionRules() {
@@ -836,9 +853,15 @@ class ToolExecutor extends EventEmitter {
   // asks. For a local-desktop run it is marked local (program §4.21).
   _rethreadedRequester() {
     // A refuseUnsafe run never asks anyone, and neither do its children.
+    // Inside a live take nobody is asked either (demo takes spec §7.2, R-D1-5):
+    // a tool that asks itself (an unsafe LaunchApp) gets `false` at once, and
+    // the take's code in metadata.refusal, never a phone prompt.
     const requester = this.refuseUnsafe
       ? async () => false
-      : (toolName, parameters, metadata) => this.requestApproval(toolName, parameters, metadata);
+      : async (toolName, parameters, metadata) => {
+        if (this._liveTake()) return this._midTakeRequesterRefusal(toolName, parameters, metadata);
+        return this.requestApproval(toolName, parameters, metadata);
+      };
     // Carried as a plain property (not a WeakMap mark) so create-core's
     // agentExecutorAdapter.execute can read it straight off
     // options.approvalRequester and forward it to the child's origin, the

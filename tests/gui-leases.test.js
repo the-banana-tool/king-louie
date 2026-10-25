@@ -123,6 +123,11 @@ describe('request and grant', () => {
     assert.throws(() => leases.assertUsable('job-2'), (e) => e.code === 'lease_required');
     assert.equal(lease.expiresAt, clock.now() + 10 * 60000);
     assert.ok(kinds().includes('lease.requested') && kinds().includes('lease.granted'));
+    // Every lease entry names its kind; only a take's carries the take's fields (spec 2026-10-24 §7.2).
+    for (const a of audits.filter((x) => x.kind.startsWith('lease.'))) {
+      assert.equal(a.data.kind, 'computer_use', a.kind);
+      for (const key of ['name', 'sites', 'credentials']) assert.ok(!(key in a.data), `${a.kind} has no ${key}`);
+    }
     assert.equal(relay.last('kl.lease.status').message.state, 'active');
   });
 

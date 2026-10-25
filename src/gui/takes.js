@@ -81,6 +81,8 @@ class TakeManager {
     // job id → its newest take id.
     this.byJob = new Map();
     this.active = null;
+    // §6.3: a helper gone 30 s took the recorder with it, so the live take ends helper_lost.
+    if (broker && typeof broker.on === 'function') broker.on('helper_lost', () => { this.onHelperLost().catch(() => {}); });
     // §5.3: a take found unfinished at start was cut off by a restart.
     try {
       store.markLiveEnded('service_restarted');
@@ -299,6 +301,10 @@ class TakeManager {
       t.browser = browser;
       // Registered before the policy is set, so no call approved by the take finds no browser.
       this.registry.setBrowser(t.browserKey, browser);
+      // The vault's browser_cred:<profile>:<host> entries are found by the key's profile
+      // (spec §8); a call inside a take may not name one itself (take_browser_managed).
+      // removeBrowser clears it.
+      this.registry.setActiveProfile(t.browserKey, p.profile);
       t.registered = true;
       await checkEnded();
 
@@ -311,6 +317,14 @@ class TakeManager {
             ffmpeg, takeId, path: p.record.dir ? path.join(p.record.dir, `${takeId}.mp4`) : undefined, fps: p.record.fps, size: p.record.size
           }, ctx);
         } catch (err) {
+          // The helper may have started ffmpeg and only the answer was lost (a timeout): it is
+          // stopped by the take id, best effort, so it does not record the desktop until the
+          // helper exits.
+          try {
+            await this.broker.recordStop({ takeId }, ctx);
+          } catch (stopErr) {
+            this.log.info(`no recording to stop for the take (${isGuiError(stopErr) ? stopErr.code : 'error'})`, { takeId });
+          }
           throw new GuiError('recorder_failed', isGuiError(err) && err.code !== 'recorder_failed' ? err.code : null);
         }
         recording = { pid: res.pid, path: res.path, started_at: iso(Number.isFinite(res.startedAt) ? res.startedAt : this.clock()) };
@@ -392,7 +406,9 @@ class TakeManager {
       const rec = t.recording;
       t.recording = null;
       const done = { path: rec.path, started_at: rec.started_at, stopped_at: null, duration_s: null, bytes: null };
-      await step('record_stop', async () => {
+      // A stop that fails found no recording to finish (the helper dropped it, or cannot be
+      // reached): the video is not what was asked for.
+      const stopped = await step('record_stop', async () => {
         const res = await this.broker.recordStop({ pid: rec.pid }, ctx);
         Object.assign(done, {
           path: res && typeof res.path === 'string' ? res.path : rec.path,
@@ -405,6 +421,7 @@ class TakeManager {
           t.recorderExited = true;
         }
       });
+      if (!stopped) t.recordStopFailed = true;
       done.stopped_at = iso(this.clock());
       t.recordingDone = done;
     }
@@ -445,8 +462,9 @@ class TakeManager {
     if (t.silentTimer) this.timers.clearTimeout(t.silentTimer);
     t.silentTimer = null;
     await this._release(t, opts);
-    // The model said done, but ffmpeg had already gone: the video is not what was asked for.
-    if (t.recorderExited && reason === 'take_done') reason = 'recorder_failed';
+    // The model said done, but ffmpeg had already gone, or the stop found no recording: the
+    // video is not what was asked for, and the take never says take_done (final review I-3).
+    if ((t.recorderExited || t.recordStopFailed) && reason === 'take_done') reason = 'recorder_failed';
     t.endReason = reason;
     // Only the lease this take's own request made.
     try {
@@ -477,7 +495,8 @@ class TakeManager {
     const record = await this.end(takeId, 'take_done', { keepBrowser });
     const rec = record && record.recording;
     return {
-      recording: rec ? { path: rec.path ?? null, duration_s: rec.duration_s ?? null, bytes: rec.bytes ?? null } : null,
+      // `truncated` only when the helper said so (ffmpeg killed, or gone early).
+      recording: rec ? { path: rec.path ?? null, duration_s: rec.duration_s ?? null, bytes: rec.bytes ?? null, ...(rec.truncated === true ? { truncated: true } : {}) } : null,
       steps: record ? this.store.summary(record).steps : { done: 0, failed: 0, total: 0 },
       ended: record && record.ended ? record.ended.reason : 'take_done'
     };
@@ -554,6 +573,13 @@ class TakeManager {
     if (!t || t.ended || !t.recording || t.recording.pid !== pid) return Promise.resolve(null);
     t.recorderExited = true;
     return this.end(t.takeId, 'recorder_failed');
+  }
+
+  // The broker's helper_lost: the helper has been gone 30 s and has stopped its recordings.
+  onHelperLost() {
+    const t = this.active;
+    if (!t || t.ended) return Promise.resolve(null);
+    return this.end(t.takeId, 'helper_lost');
   }
 
   // C-12: a lock that still happens ends the take; the recording is kept.

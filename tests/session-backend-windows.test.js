@@ -507,6 +507,44 @@ describe('Windows backend: launch_browser, record_start, record_stop (any OS, fa
     assert.deepEqual(children[1].written, [], 'no q to a dead ffmpeg');
   });
 
+  // Final review, minor 6: a record_start whose answer the service never got is stopped by take id.
+  it('record_stop { take_id } stops that take\'s recording; one still starting is stopped once it has; anything else is unknown_recording', async () => {
+    const t = fakeTime();
+    let next = 600;
+    const children = [];
+    let holdSpawn = null;
+    const spawnImpl = () => {
+      const c = fakeChild();
+      c.pid = next++;
+      children.push(c);
+      if (holdSpawn) holdSpawn.then(() => c.emit('spawn'));
+      else setImmediate(() => c.emit('spawn'));
+      return c;
+    };
+    const backend = make({ spawnImpl, statSync: () => ({ size: 5 }), clock: t.clock, timers: t.timers });
+    await backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', takeId: TAKE, path: 'C:\\r\\a.mp4' });
+    const r = await backend.recordStop({ takeId: TAKE });
+    assert.equal(r.path, 'C:\\r\\a.mp4');
+    assert.deepEqual(children[0].written, ['q\n']);
+    assert.equal(backend.recordings.size, 0);
+    for (const bad of [{ takeId: TAKE }, { takeId: 'take-ffffffffffff' }, { takeId: 7 }, {}]) {
+      await assert.rejects(backend.recordStop(bad), (e) => e.code === 'unknown_recording', JSON.stringify(bad));
+    }
+    // The stop arrives while ffmpeg is still starting: it waits for the start, then stops it.
+    let release;
+    holdSpawn = new Promise((resolve) => { release = resolve; });
+    const OTHER = 'take-abcdefabcdef';
+    const starting = backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', takeId: OTHER, path: 'C:\\r\\b.mp4' });
+    const stopping = backend.recordStop({ takeId: OTHER });
+    await new Promise((r2) => setImmediate(r2));
+    release();
+    await starting;
+    const r2 = await stopping;
+    assert.equal(r2.path, 'C:\\r\\b.mp4');
+    assert.deepEqual(children[1].written, ['q\n']);
+    assert.equal(backend.recordings.size, 0);
+  });
+
   it('record_start answers recorder_failed, by its code alone, when the directory cannot be made', async () => {
     const t = fakeTime();
     const { calls, spawnImpl } = spawnRecorder();

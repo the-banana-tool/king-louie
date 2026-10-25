@@ -137,12 +137,20 @@ class TakeStore {
     return out;
   }
 
+  // The ending goes in the log in the same write as the state (§5.3: the log holds every
+  // ending). A record that cannot be written is warned about by its id and the rest still run.
   markLiveEnded(reason) {
     const at = new Date(this.clock()).toISOString();
     const ids = [];
     for (const record of this.list()) {
       if (!UNFINISHED_STATES.includes(record.state)) continue;
-      this.update(record.take_id, { state: 'ended', ended: { at, reason } });
+      const log = Array.isArray(record.log) ? record.log : [];
+      try {
+        this.update(record.take_id, { state: 'ended', ended: { at, reason }, log: [...log, { at, ended: reason }] });
+      } catch (err) {
+        this.log.warn('a take left live was not marked ended', { takeId: record.take_id, code: (err && err.code) || 'error' });
+        continue;
+      }
       ids.push(record.take_id);
     }
     return ids;

@@ -221,6 +221,8 @@ describe('take ops', () => {
     assert.deepEqual(await handle('record_start', { ffmpeg: 'C:\\ff\\ffmpeg.exe', take_id: take, path: 'C:\\r\\a.mp4', fps: 24, size: { width: 1280, height: 720 } }), { pid: 2, startedAt: 5 });
     await handle('record_start', { take_id: take });
     assert.deepEqual(await handle('record_stop', { pid: 2 }), { path: 'C:\\r\\a.mp4', durationS: 1, bytes: 3, truncated: false });
+    // Minor 6: by take id, for a record_start whose answer the service never got.
+    await handle('record_stop', { take_id: take });
     assert.deepEqual(await handle('keep_awake', { on: true }), { on: true });
     assert.deepEqual(await handle('keep_awake', { on: 'yes' }), { on: false }, 'only true is on');
     assert.deepEqual(calls, [
@@ -230,6 +232,7 @@ describe('take ops', () => {
       // No ffmpeg named: the one the helper found; no path: the helper's default.
       ['recordStart', { ffmpeg: 'C:\\Users\\alice\\bin\\ffmpeg.exe', takeId: take, path: null, fps: undefined, size: null }],
       ['recordStop', { pid: 2 }],
+      ['recordStop', { takeId: take }],
       ['keepAwake', { on: true }],
       ['keepAwake', { on: false }]
     ]);

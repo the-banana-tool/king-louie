@@ -85,14 +85,33 @@ function createWindowsBackend({
     child.once('error', () => reject(new GuiError(code)));
   });
 
-  // pid -> { pid, child, path, startedAt, exited, code, endedAt, done }
+  // pid -> { pid, takeId, child, path, startedAt, exited, code, endedAt, done }
   const recordings = new Map();
   // Stops under way, so stopRecordings (the helper ending) waits for them too.
   const stopping = new Set();
+  // take id -> the record_start still going for it, so a stop by take id that
+  // arrives first waits for it.
+  const starting = new Map();
 
-  function recordStop({ pid } = {}) {
+  const byTakeId = (takeId) => [...recordings.values()].find((r) => r.takeId === takeId) || null;
+
+  // `{ pid }`, or `{ takeId }` for a recording whose record_start answer the
+  // service never got (it timed out): that take's recording, once it has
+  // started if it is still starting.
+  async function recordStop({ pid, takeId } = {}) {
+    if (pid === undefined && typeof takeId === 'string' && TAKE_ID.test(takeId)) {
+      if (!byTakeId(takeId) && starting.has(takeId)) await starting.get(takeId).catch(() => {});
+      const rec = byTakeId(takeId);
+      if (!rec) throw new GuiError('unknown_recording');
+      return stopEntry(rec);
+    }
     const rec = recordings.get(pid);
-    if (!rec) return Promise.reject(new GuiError('unknown_recording'));
+    if (!rec) throw new GuiError('unknown_recording');
+    return stopEntry(rec);
+  }
+
+  function stopEntry(rec) {
+    const pid = rec.pid;
     recordings.delete(pid);
     const p = finish(rec);
     stopping.add(p);
@@ -118,6 +137,49 @@ function createWindowsBackend({
       await settlesWithin(rec.done, KILL_WAIT_MS);
     }
     return { path: rec.path, durationS: duration(), bytes: bytes(), truncated };
+  }
+
+  async function startRecording({ ffmpeg = null, takeId, path: given = null, fps = 30, size = null } = {}) {
+    if (typeof takeId !== 'string' || !TAKE_ID.test(takeId)) throw new GuiError('invalid_params');
+    // Given, the path is the service's, already checked against the
+    // session's working directory: used as it is, if absolute.
+    if (given !== null && (typeof given !== 'string' || !DRIVE_PATH.test(given))) throw new GuiError('invalid_params');
+    if (!Number.isInteger(fps) || fps < 1 || fps > 120) throw new GuiError('invalid_params');
+    // libx264 with yuv420p needs even sides.
+    if (size !== null && !(size && evenSide(size.width) && evenSide(size.height))) throw new GuiError('invalid_params');
+    if (!ffmpeg) throw new GuiError('recorder_missing');
+    if (!/\.exe$/i.test(String(ffmpeg))) throw new GuiError('app_type_not_supported');
+    // The directory is made here, as the user, for a given path too: the
+    // service cannot create the user's directories.
+    const dir = given === null ? path.win32.join(kingLouieDir(env), 'recordings', takeId) : path.win32.dirname(given);
+    try { await mkdir(dir, { recursive: true }); } catch { throw new GuiError('recorder_failed'); }
+    const out = given === null ? path.win32.join(dir, 'take.mp4') : given;
+    const args = ['-y', '-f', 'gdigrab', '-framerate', String(fps), '-i', 'desktop',
+      ...(size ? ['-vf', `scale=${size.width}:${size.height}`] : []),
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out];
+    const child = spawnImpl(ffmpeg, args, { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true, shell: false });
+    const rec = { pid: null, takeId, child, path: out, startedAt: null, exited: false, code: null, endedAt: null, done: null };
+    rec.done = new Promise((resolve) => {
+      child.once('exit', (code) => {
+        rec.exited = true;
+        rec.code = code;
+        rec.endedAt = clock();
+        resolve();
+      });
+    });
+    await started(child, 'recorder_failed');
+    child.on('error', () => {});
+    // ffmpeg writes its progress to stderr all along: drained, never read.
+    if (child.stderr && typeof child.stderr.resume === 'function') child.stderr.resume();
+    if (child.stdin && typeof child.stdin.on === 'function') child.stdin.on('error', () => {});
+    rec.pid = child.pid;
+    rec.startedAt = clock();
+    // A pid Windows gave again: the old entry is finalised first (an
+    // exited one at once; a live one, which cannot be, stopped and
+    // tracked), never overwritten unseen.
+    if (recordings.has(rec.pid)) recordStop({ pid: rec.pid }).catch(() => {});
+    recordings.set(rec.pid, rec);
+    return { pid: rec.pid, startedAt: rec.startedAt, path: out };
   }
 
   return {
@@ -163,47 +225,15 @@ function createWindowsBackend({
         await sleep(PORT_POLL_MS);
       }
     },
-    async recordStart({ ffmpeg = null, takeId, path: given = null, fps = 30, size = null } = {}) {
-      if (typeof takeId !== 'string' || !TAKE_ID.test(takeId)) throw new GuiError('invalid_params');
-      // Given, the path is the service's, already checked against the
-      // session's working directory: used as it is, if absolute.
-      if (given !== null && (typeof given !== 'string' || !DRIVE_PATH.test(given))) throw new GuiError('invalid_params');
-      if (!Number.isInteger(fps) || fps < 1 || fps > 120) throw new GuiError('invalid_params');
-      // libx264 with yuv420p needs even sides.
-      if (size !== null && !(size && evenSide(size.width) && evenSide(size.height))) throw new GuiError('invalid_params');
-      if (!ffmpeg) throw new GuiError('recorder_missing');
-      if (!/\.exe$/i.test(String(ffmpeg))) throw new GuiError('app_type_not_supported');
-      // The directory is made here, as the user, for a given path too: the
-      // service cannot create the user's directories.
-      const dir = given === null ? path.win32.join(kingLouieDir(env), 'recordings', takeId) : path.win32.dirname(given);
-      try { await mkdir(dir, { recursive: true }); } catch { throw new GuiError('recorder_failed'); }
-      const out = given === null ? path.win32.join(dir, 'take.mp4') : given;
-      const args = ['-y', '-f', 'gdigrab', '-framerate', String(fps), '-i', 'desktop',
-        ...(size ? ['-vf', `scale=${size.width}:${size.height}`] : []),
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out];
-      const child = spawnImpl(ffmpeg, args, { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true, shell: false });
-      const rec = { pid: null, child, path: out, startedAt: null, exited: false, code: null, endedAt: null, done: null };
-      rec.done = new Promise((resolve) => {
-        child.once('exit', (code) => {
-          rec.exited = true;
-          rec.code = code;
-          rec.endedAt = clock();
-          resolve();
-        });
-      });
-      await started(child, 'recorder_failed');
-      child.on('error', () => {});
-      // ffmpeg writes its progress to stderr all along: drained, never read.
-      if (child.stderr && typeof child.stderr.resume === 'function') child.stderr.resume();
-      if (child.stdin && typeof child.stdin.on === 'function') child.stdin.on('error', () => {});
-      rec.pid = child.pid;
-      rec.startedAt = clock();
-      // A pid Windows gave again: the old entry is finalised first (an
-      // exited one at once; a live one, which cannot be, stopped and
-      // tracked), never overwritten unseen.
-      if (recordings.has(rec.pid)) recordStop({ pid: rec.pid }).catch(() => {});
-      recordings.set(rec.pid, rec);
-      return { pid: rec.pid, startedAt: rec.startedAt, path: out };
+    recordStart(opts = {}) {
+      const p = startRecording(opts);
+      const takeId = opts && opts.takeId;
+      if (typeof takeId === 'string' && TAKE_ID.test(takeId)) {
+        starting.set(takeId, p);
+        const forget = () => { if (starting.get(takeId) === p) starting.delete(takeId); };
+        p.then(forget, forget);
+      }
+      return p;
     },
     recordStop,
     // Every live recording, at once (the service gone 30 s, the helper

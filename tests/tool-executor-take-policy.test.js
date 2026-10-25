@@ -222,6 +222,38 @@ describe('ToolExecutor with a take policy', () => {
   });
 });
 
+// Spec §7.2: the audit ledger records every take refusal as take.refused, with
+// the code and the tool's name only (never the parameters or a URL).
+describe('the approval seam writes take.refused', () => {
+  it('a refused browser call and a refused shell call each write one entry with the tool, code and origin only', async () => {
+    const { phoneExecutorOptions } = require('../src/approvals/executor-options');
+    const entries = [];
+    const ledger = { append: async (e) => { entries.push(e); return e; } };
+    const origin = { client: 'stdio-mcp', session: null, job_id: 'job-1' };
+    const phoneCalls = [];
+    const seam = phoneExecutorOptions({ phoneApprover: { ttlMs: 60000, requestApproval: async (...a) => { phoneCalls.push(a); return true; } }, auditLedger: ledger, origin, local: false });
+    const holder = createTakeHolder();
+    const ex = new ToolExecutor({ requireApproval: true, ...seam.options, takePolicy: holder });
+    seam.attach(ex);
+    holder.set(policy());
+    await ex.execute('BrowserPage', { action: 'navigate', url: 'https://off-list.example.org/private?q=secret' });
+    await ex.execute('Bash', { command: 'echo secret' });
+    await ex.execute(GATED, { note: 'secret' });
+    // An allowed call writes none.
+    await ex.execute('BrowserPage', { action: 'click', selector: '#go' });
+    await new Promise((r) => setImmediate(r));
+    const refused = entries.filter((e) => e.kind === 'take.refused');
+    assert.deepEqual(refused.map((e) => e.data), [
+      { tool: 'BrowserPage', code: 'take_site_not_allowed', origin },
+      { tool: 'Bash', code: 'take_tool_not_allowed', origin },
+      { tool: GATED, code: 'take_no_mid_take_approval', origin }
+    ]);
+    const all = JSON.stringify(refused);
+    for (const leaked of ['off-list', 'secret', 'private']) assert.ok(!all.includes(leaked), leaked);
+    assert.equal(phoneCalls.length, 0);
+  });
+});
+
 // Take.run_steps' steps are held to the node's deny rules and tier through the
 // checkDenied the executor hands every tool (spec §7.2).
 describe('checkDenied: a step a tool runs itself is held to the node\'s rules', () => {

@@ -274,7 +274,12 @@ function buildGuiTools(gui) {
         // A paired desktop's turn is answered on its own screen; every other
         // run on the phone (Deviation 40).
         const atDesktop = isLocalRequester(requester);
-        const answer = await requester('LaunchApp', { app: resolution.exe, args: resolution.argv, files: resolution.files }, { tier: 'unsafe', reason: resolution.reason, signal: options.signal || null });
+        const meta = { tier: 'unsafe', reason: resolution.reason, signal: options.signal || null };
+        const answer = await requester('LaunchApp', { app: resolution.exe, args: resolution.argv, files: resolution.files }, meta);
+        // Inside a take the executor's requester refuses at once (demo takes spec §7.2).
+        if (answer !== true && meta.refusal && meta.refusal.code === 'take_no_mid_take_approval') {
+          return { ok: false, code: meta.refusal.code, error: `${meta.refusal.code}: ${meta.refusal.error} (a take launches its apps only with the arguments and files their allowlist entry permits)` };
+        }
         if (answer === 'unavailable') return { ok: false, error: 'signed approval unavailable' };
         if (answer === 'timeout') return { ok: false, error: atDesktop ? 'denied: approval timed out at the desktop' : 'denied: phone approval timed out' };
         if (answer !== true) return { ok: false, error: atDesktop ? 'denied: approval denied at the desktop' : 'denied: phone approval denied' };

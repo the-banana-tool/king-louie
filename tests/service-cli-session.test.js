@@ -667,7 +667,13 @@ describe('the session user may post to the courier (Windows)', () => {
     let dirsBefore = null;
     d.confirm = async () => { shownBefore = t.out.join(''); dirsBefore = courierDirs(s).map((dir) => fs.existsSync(dir)); return true; };
     assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice' }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
-    assert.ok(shownBefore.includes('lets alice post requests to the service\'s courier (approvals\\outbox, approvals\\inbox)'), shownBefore);
+    // Final review I-5: the line says what the grant gives, not that signatures protect it.
+    assert.ok(shownBefore.includes('lets alice post requests to the service\'s courier (approvals\\outbox, approvals\\inbox): '
+      + 'alice, and anything running as alice, can then drive this service as a local mcp client '
+      + '(open delegate sessions, run safe runbooks, answer spoken case questions as mcp-stdio, ask for a take); '
+      + 'unsafe calls and takes still go to the owner\'s phone. With modify on inbox it can also read and plant '
+      + 'the inbox files of other mcp clients (one an administrator runs, say).\n'), shownBefore);
+    assert.ok(!/signature/i.test(shownBefore), 'no claim that signatures protect the courier');
     assert.deepEqual(dirsBefore, [false, false], 'nothing is created before the answer');
     // The users directory and the copy first (four icacls calls), then one grant of both directories.
     assert.deepEqual(r.log.map((e) => e.kind), ['icacls', 'icacls', 'icacls', 'icacls', 'courier']);

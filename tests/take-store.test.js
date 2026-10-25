@@ -100,6 +100,36 @@ describe('TakeStore', () => {
     assert.deepEqual(store.markLiveEnded('service_restarted'), []);
   });
 
+  it('markLiveEnded appends the ending to each record\'s log, after what was there', () => {
+    const noted = store.create({ name: 'a', state: 'live', log: [{ at: '2026-10-24T11:59:00.000Z', text: 'closed a popup' }] });
+    const bare = store.create({ name: 'b', state: 'waiting' });
+    now += 5000;
+    store.markLiveEnded('service_restarted');
+    assert.deepEqual(store.get(noted.take_id).log, [
+      { at: '2026-10-24T11:59:00.000Z', text: 'closed a popup' },
+      { at: '2026-10-24T12:00:05.000Z', ended: 'service_restarted' }
+    ]);
+    assert.deepEqual(store.get(bare.take_id).log, [{ at: '2026-10-24T12:00:05.000Z', ended: 'service_restarted' }]);
+  });
+
+  it('one record that cannot be updated is warned about by its id, and the later ones are still ended', () => {
+    const first = store.create({ name: 'a', state: 'live' });
+    const second = store.create({ name: 'b', state: 'live' });
+    const [bad, good] = [first, second].sort((x, y) => x.take_id.localeCompare(y.take_id));
+    const update = store.update.bind(store);
+    store.update = (takeId, patch) => {
+      if (takeId === bad.take_id) throw new Error('disk full');
+      return update(takeId, patch);
+    };
+    let ids;
+    assert.doesNotThrow(() => { ids = store.markLiveEnded('service_restarted'); });
+    assert.deepEqual(ids, [good.take_id]);
+    assert.equal(store.get(good.take_id).state, 'ended');
+    assert.equal(store.get(bad.take_id).state, 'live');
+    assert.equal(log.warnings.length, 1);
+    assert.equal(log.warnings[0].meta.takeId, bad.take_id);
+  });
+
   it('summary gives the driver-side take object of spec 11', () => {
     const rec = store.create({
       name: 'Signup demo',

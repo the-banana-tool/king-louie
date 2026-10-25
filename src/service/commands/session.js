@@ -245,6 +245,10 @@ function loginStartText({ platform, account, sessionUser }) {
 // service through the file courier under the data dir; install gives that
 // user modify on these two directories and uninstall takes it off again.
 const COURIER_TEXT = 'the service\'s courier (approvals\\outbox, approvals\\inbox)';
+const courierGrantText = (user) => `${user}, and anything running as ${user}, can then drive this service as a local mcp client `
+  + '(open delegate sessions, run safe runbooks, answer spoken case questions as mcp-stdio, ask for a take); '
+  + 'unsafe calls and takes still go to the owner\'s phone. With modify on inbox it can also read and plant '
+  + 'the inbox files of other mcp clients (one an administrator runs, say).';
 const courierDirs = (dataDir) => [path.join(dataDir, 'approvals', 'outbox'), path.join(dataDir, 'approvals', 'inbox')];
 
 // The courier directories uninstall acts on and lists: only real ones (a
@@ -384,7 +388,11 @@ async function install({ flags, dataDir, io, deps }) {
   // checks who owns its file and the directory it is in before it trusts
   // either, and the directory's ACL would not let it look.
   if (c.platform === 'win32') io.stdout.write(`  lets ${sessionUser} read who owns ${path.dirname(sessionFile)} (its owner and attributes; nothing in it, and no other directory)\n`);
-  if (c.platform === 'win32') io.stdout.write(`  lets ${sessionUser} post requests to ${COURIER_TEXT}\n`);
+  // Final review I-5: what the grant really gives. The fleet requests mcp
+  // sends are not signed, so the courier trusts whoever can write it.
+  if (c.platform === 'win32') {
+    io.stdout.write(`  lets ${sessionUser} post requests to ${COURIER_TEXT}: ${courierGrantText(sessionUser)}\n`);
+  }
   if (rotates) io.stdout.write(`  replaces the secret installed for ${shown(installed.user)}; the endpoint stays, so a running service and helper pick the new secret up without a restart\n`);
   if (!(await consented({ flags, c, question: `Install the session helper for ${sessionUser}? [y/N] ` }))) {
     io.stderr.write('Not installing without confirmation. Nothing was written.\n');

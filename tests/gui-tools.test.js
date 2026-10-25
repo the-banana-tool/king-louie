@@ -207,6 +207,38 @@ describe('LaunchApp', () => {
     }
   });
 
+  // Demo takes spec §7.2 (final review I-1): inside a take an unsafe launch is refused, never
+  // sent to the phone, through the requester the executor hands the tool.
+  it('inside a take, an unsafe launch of a take app is refused at once and the approver is never asked', async () => {
+    const ToolExecutor = require('../src/execution/tool-executor');
+    const { toolRegistry } = require('../src/tools');
+    const { createTakeHolder } = require('../src/gui/take-holder');
+    const { createTakePolicy } = require('../src/gui/take-policy');
+    toolRegistry.register(tools.LaunchApp);
+    try {
+      const holder = createTakeHolder();
+      const denied = [];
+      const executor = new ToolExecutor({ requireApproval: true, approvalRequester: requester(true), takePolicy: holder, extraToolOptions: { origin: opts().origin } });
+      executor.on('approvalDenied', (e) => denied.push(e));
+      holder.set(createTakePolicy({ sites: ['a.example.com'], browser: true, apps: ['calculator'] }, { currentUrl: async () => null }));
+      const out = await executor.execute('LaunchApp', { app: 'calculator', args: ['--x'] });
+      assert.equal(out.ok, false);
+      assert.equal(out.code, 'take_no_mid_take_approval');
+      assert.match(out.error, /^take_no_mid_take_approval/);
+      assert.equal(requesterCalls.length, 0, 'the fake approver was never called');
+      assert.ok(!channel.requests.some((r) => r.op === 'launch'));
+      assert.deepEqual(denied.map((e) => [e.toolName, e.deniedBy, e.code]), [['LaunchApp', 'take', 'take_no_mid_take_approval']]);
+      // The take's own app with nothing outside its globs still launches without asking.
+      assert.equal((await executor.execute('LaunchApp', { app: 'calculator' })).ok, true);
+      // With no take the same unsafe launch asks as before.
+      holder.clear();
+      assert.equal((await executor.execute('LaunchApp', { app: 'calculator', args: ['--x'] })).ok, true);
+      assert.equal(requesterCalls.length, 1);
+    } finally {
+      toolRegistry.unregister('LaunchApp');
+    }
+  });
+
   it('no requester at all is denied', async () => {
     assert.deepEqual(await tools.LaunchApp.execute({ app: 'calculator', args: ['--x'] }, opts()), { ok: false, error: 'denied: phone approval required (no approval channel)' });
   });

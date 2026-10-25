@@ -58,6 +58,9 @@ function typeChunks(text) {
 // closeLaunched: how long a process asked to close may take before it is forced.
 const CLOSE_WAIT_MS = 5000;
 const CLOSE_POLL_MS = 500;
+// How long the helper may be gone before the live take ends helper_lost: the
+// helper's own grace before it stops its recordings (connection.js).
+const HELPER_LOST_MS = 30000;
 
 class GuiBroker extends EventEmitter {
   constructor({ channel, guiConfig, getPolicy = () => ({}), audit = null, dataDir = null, platform = process.platform, clock = Date.now,
@@ -78,6 +81,7 @@ class GuiBroker extends EventEmitter {
     this.lockedFlag = false;
     this.listeners = [];
     this.off = null;
+    this.lostTimer = null;
   }
 
   // The host could not start the GUI (index.js): from here on the capability
@@ -94,8 +98,8 @@ class GuiBroker extends EventEmitter {
 
   start() {
     const on = (event, fn) => { this.channel.on(event, fn); this.listeners.push([event, fn]); };
-    on('ready', (info) => { this.lockedFlag = Boolean(info && info.locked); this._changed(); });
-    on('closed', () => { this.lockedFlag = false; if (this.leases) this.leases.onHelperDisconnected(); this._changed(); });
+    on('ready', (info) => { this._clearHelperLost(); this.lockedFlag = Boolean(info && info.locked); this._changed(); });
+    on('closed', () => { this.lockedFlag = false; if (this.leases) this.leases.onHelperDisconnected(); this._armHelperLost(); this._changed(); });
     on('event', (kind) => {
       if (kind === 'locked' || kind === 'unlocked') {
         this.lockedFlag = kind === 'locked';
@@ -109,7 +113,26 @@ class GuiBroker extends EventEmitter {
     this._writeStatus();
   }
 
+  // Demo takes spec §6.3, §9: a helper gone HELPER_LOST_MS has stopped its
+  // recordings (its own 30 s rule), so the live take ends `helper_lost`
+  // (TakeManager listens). A reconnect sooner changes nothing. Ref'd: the
+  // service is running its helper endpoint meanwhile; stop() clears it.
+  _armHelperLost() {
+    if (this.lostTimer) return;
+    this.lostTimer = this.timers.setTimeout(() => {
+      this.lostTimer = null;
+      this.log.warn(`the session helper has been gone ${Math.round(HELPER_LOST_MS / 1000)} s`);
+      this.emit('helper_lost');
+    }, HELPER_LOST_MS);
+  }
+
+  _clearHelperLost() {
+    if (this.lostTimer) this.timers.clearTimeout(this.lostTimer);
+    this.lostTimer = null;
+  }
+
   stop() {
+    this._clearHelperLost();
     for (const [event, fn] of this.listeners) this.channel.off(event, fn);
     this.listeners = [];
     clearInterval(this.heartbeat);
@@ -260,9 +283,15 @@ class GuiBroker extends EventEmitter {
     return result;
   }
 
-  async recordStop({ pid }, ctx = {}) {
-    const result = await this.channel.request('record_stop', { pid }, { jobId: ctx.jobId, timeoutMs: 20000 });
-    this._audit('gui.record.stop', { job_id: ctx.jobId, pid, duration_s: result.durationS, bytes: result.bytes, truncated: result.truncated });
+  // By the recording's pid, or by its take id when record_start's answer never
+  // came (a timeout after ffmpeg may have started: final review, minor 6).
+  async recordStop({ pid, takeId } = {}, ctx = {}) {
+    let params;
+    if (Number.isInteger(pid)) params = { pid };
+    else if (typeof takeId === 'string' && takeId) params = { take_id: takeId };
+    else throw new GuiError('invalid_params', 'record_stop needs a pid or a take id');
+    const result = await this.channel.request('record_stop', params, { jobId: ctx.jobId, timeoutMs: 20000 });
+    this._audit('gui.record.stop', { job_id: ctx.jobId, ...params, duration_s: result.durationS, bytes: result.bytes, truncated: result.truncated });
     return result;
   }
 
@@ -567,4 +596,4 @@ class GuiBroker extends EventEmitter {
   }
 }
 
-module.exports = { GuiBroker, SUSPENDING_CODES, suspendsLease, SCREENSHOTS_PER_JOB, SCREENSHOT_TTL_MS, inputTimeoutMs, TYPE_CHUNK, typeChunks };
+module.exports = { GuiBroker, SUSPENDING_CODES, suspendsLease, SCREENSHOTS_PER_JOB, SCREENSHOT_TTL_MS, inputTimeoutMs, TYPE_CHUNK, typeChunks, HELPER_LOST_MS };

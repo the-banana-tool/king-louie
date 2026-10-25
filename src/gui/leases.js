@@ -362,7 +362,16 @@ class LeaseManager extends EventEmitter {
   // the calls; only its settling is left to a promise.
   _audit(kind, lease, extra = {}) {
     if (!this.audit) return;
-    const data = { job_id: lease ? lease.jobId : null, lease_id: lease ? lease.leaseId : null, ...extra };
+    // Every entry names the lease's kind; a take's request and grant also say what the
+    // phone was asked to approve (spec 2026-10-24 §7.2), its name but never its reason text.
+    const data = { job_id: lease ? lease.jobId : null, lease_id: lease ? lease.leaseId : null, kind: lease ? lease.kind : null, ...extra };
+    if (lease && lease.kind === 'take' && lease.take && (kind === 'lease.requested' || kind === 'lease.granted')) {
+      Object.assign(data, {
+        name: lease.take.name,
+        sites: Array.isArray(lease.take.sites) ? [...lease.take.sites] : [],
+        credentials: lease.take.credentials === true
+      });
+    }
     const failed = (err) => this.log.warn(`audit ${kind} failed: ${err.message}`);
     try {
       Promise.resolve(this.audit.append({ kind, data })).catch(failed);

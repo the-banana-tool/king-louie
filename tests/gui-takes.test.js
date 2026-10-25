@@ -65,7 +65,8 @@ class FakeRelay extends EventEmitter {
 }
 
 function fakeBroker() {
-  const b = {
+  // An emitter, as the real broker is: TakeManager listens for helper_lost.
+  const b = Object.assign(new EventEmitter(), {
     calls: [],
     ffmpeg: FFMPEG,
     launchFails: null,
@@ -98,7 +99,7 @@ function fakeBroker() {
     },
     async keepAwake(on, ctx) { b.calls.push(['keepAwake', on, ctx]); return { on }; },
     async closeLaunched(pid, ctx) { b.closed.push([pid, ctx]); return { closed: [pid] }; }
-  };
+  });
   return b;
 }
 
@@ -157,7 +158,12 @@ beforeEach(async () => {
   cwd = path.join(dir, 'work');
   fs.mkdirSync(cwd);
   store = new TakeStore({ dir: path.join(dir, 'takes'), clock: () => clock.now() });
-  registry = { set: new Map(), removed: [], setBrowser(k, b) { order.push('setBrowser'); this.set.set(k, b); }, removeBrowser(k) { this.removed.push(k); this.set.delete(k); } };
+  registry = {
+    set: new Map(), removed: [], profiles: new Map(),
+    setBrowser(k, b) { order.push('setBrowser'); this.set.set(k, b); },
+    setActiveProfile(k, name) { this.profiles.set(k, name); },
+    removeBrowser(k) { this.removed.push(k); this.set.delete(k); this.profiles.delete(k); }
+  };
   attached = [];
   const attachBrowser = async (cdpUrl) => {
     if (hooks.attach) await hooks.attach;
@@ -329,6 +335,111 @@ describe('TakeManager.start', () => {
     assert.deepEqual(broker.calls, []);
     assert.equal(leases.current(), null);
     assert.equal(store.list()[0].ended.reason, 'browser_not_granted');
+  });
+});
+
+// The final review's fixes (I-2, I-3, I-4, minor 6).
+describe('final review fixes', () => {
+  it('I-2: the take\'s browser has the take\'s profile, so fill_credentials looks up browser_cred:<profile>:<host>; params.profile stays refused', async () => {
+    const real = require('../src/tools/builtin/browser-registry');
+    const { actions } = require('../src/tools/builtin/browser-tool');
+    const mgr = new TakeManager({
+      leases, broker, store, guiConfig, registry: real, audit: { append: async (e) => { audits.push(e); } }, clock: () => clock.now(), timers,
+      attachBrowser: async () => ({ isRunning: true, page: { url: () => 'https://a.example.com/login' }, stop: async () => {} }), closeBrowser: async () => {}
+    });
+    try {
+      const p = mgr.start({ jobId: 'job-1', origin: ORIGIN, nodeLocalOrigin: true, holder, params: { ...PARAMS, credentials: true }, workingDirectory: cwd });
+      await tick();
+      leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 30 }));
+      const out = await p;
+      const key = `take:${out.take_id}`;
+      assert.equal(real.activeProfileOf(key), 'demo');
+      const asked = [];
+      const res = await actions.fill_credentials({}, { browserKey: key, vault: { get: (k) => { asked.push(k); return null; } } });
+      assert.equal(res.ok, false);
+      assert.deepEqual(asked, ['browser_cred:demo:a.example.com']);
+      const d = await holder.current.decide('BrowserSession', { action: 'fill_credentials', profile: 'other' });
+      assert.equal(d.code, 'take_browser_managed');
+      assert.equal((await holder.current.decide('BrowserSession', { action: 'fill_credentials' })).allow, true);
+      await mgr.stop(out.take_id);
+      assert.equal(real.activeProfileOf(key), null, 'the profile goes with the browser');
+    } finally {
+      await mgr.stopAll();
+    }
+  });
+
+  it('I-2: the fake registry sees the profile set after the browser and before the policy', async () => {
+    const out = await started();
+    assert.equal(registry.profiles.get(`take:${out.take_id}`), 'demo');
+  });
+
+  it('I-3(a): a stop whose record_stop fails (the helper lost the recording) ends recorder_failed, never take_done', async () => {
+    const { GuiError } = require('../src/gui/errors');
+    const out = await started();
+    broker.recordStop = async () => { throw new GuiError('unknown_recording'); };
+    const stopped = await takes.stop(out.take_id);
+    assert.equal(stopped.ended, 'recorder_failed');
+    assert.equal(stopped.recording.duration_s, null);
+    assert.equal(store.get(out.take_id).ended.reason, 'recorder_failed');
+    assert.equal(leases.find(out.lease_id).endReason, 'recorder_failed');
+    assert.equal(store.get(out.take_id).recording.path, 'C:\\rec\\take.mp4', 'the file is kept where it was');
+    // A take with no recording asked for still ends take_done.
+    const bare = await started({ record: false });
+    assert.equal((await takes.stop(bare.take_id)).ended, 'take_done');
+  });
+
+  it('I-3(a): a stop whose recording had exited says so in the result (truncated, the duration known)', async () => {
+    const out = await started();
+    broker.stopResult = { path: 'C:\\rec\\take.mp4', durationS: 3, bytes: 10, truncated: true, exited: true };
+    const stopped = await takes.stop(out.take_id);
+    assert.deepEqual(stopped.recording, { path: 'C:\\rec\\take.mp4', duration_s: 3, bytes: 10, truncated: true });
+    assert.equal(stopped.ended, 'recorder_failed');
+  });
+
+  it('I-3(b): helper_lost from the broker ends the live take helper_lost: holder cleared, lease ended by id, record ended, audited', async () => {
+    const out = await started();
+    const leaseId = leases.current().leaseId;
+    broker.emit('helper_lost');
+    await tick();
+    await tick();
+    const record = store.get(out.take_id);
+    assert.equal(record.state, 'ended');
+    assert.equal(record.ended.reason, 'helper_lost');
+    assert.equal(record.log.at(-1).ended, 'helper_lost');
+    assert.equal(holder.current, null);
+    assert.equal(leases.find(leaseId).state, 'ended');
+    assert.equal(leases.find(leaseId).endReason, 'helper_lost');
+    assert.ok(audits.some((a) => a.kind === 'take.ended' && a.data.reason === 'helper_lost'));
+    // With no live take it does nothing.
+    broker.emit('helper_lost');
+    await tick();
+    assert.equal(store.get(out.take_id).ended.reason, 'helper_lost');
+  });
+
+  it('I-4: a take\'s lease.requested and lease.granted carry kind, name, sites, credentials and minutes, and no reason text', async () => {
+    await started({ credentials: true, reason: 'Record the demo for the launch' });
+    await tick();
+    const requested = audits.find((a) => a.kind === 'lease.requested').data;
+    const granted = audits.find((a) => a.kind === 'lease.granted').data;
+    for (const data of [requested, granted]) {
+      assert.equal(data.kind, 'take');
+      assert.equal(data.name, 'BSEOA demo');
+      assert.deepEqual(data.sites, ['*.example.com']);
+      assert.equal(data.credentials, true);
+      assert.equal(data.minutes, 30);
+      assert.ok(!JSON.stringify(data).includes('Record the demo'), 'the reason is not in the ledger');
+    }
+    assert.ok(audits.filter((a) => a.kind.startsWith('lease.')).every((a) => a.data.kind === 'take'), 'every lease entry names its kind');
+  });
+
+  it('minor 6: a record_start that fails after the take id was sent is stopped by that take id before recorder_failed', async () => {
+    const { GuiError } = require('../src/gui/errors');
+    broker.recordFails = new GuiError('op_timeout', 'record_start took over 10000 ms');
+    await assert.rejects(started(), (e) => e.code === 'recorder_failed');
+    const [record] = store.list();
+    const stops = broker.calls.filter((c) => c[0] === 'recordStop');
+    assert.deepEqual(stops.map((c) => c[1]), [{ takeId: record.take_id }]);
+    assert.equal(record.ended.reason, 'recorder_failed');
   });
 });
 

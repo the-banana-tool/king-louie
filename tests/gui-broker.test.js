@@ -71,7 +71,8 @@ function broker(opts = {}) {
   let t = Date.parse('2026-09-23T18:00:00.000Z');
   const b = new GuiBroker({
     channel, guiConfig: opts.guiConfig || guiConfig, getPolicy: () => ({ allowed_roots: [] }), audit: { append: async (e) => { audits.push(e); } },
-    dataDir: opts.dataDir || null, platform: 'win32', clock: () => t, heartbeatMs: 60000, realpath: (p) => p
+    dataDir: opts.dataDir || null, platform: 'win32', clock: () => t, heartbeatMs: 60000, realpath: (p) => p,
+    ...(opts.timers ? { timers: opts.timers } : {})
   });
   // The broker sends no input without a lease manager (finding 4); these
   // tests are about the broker, so theirs always holds lease l1 for the job.
@@ -209,6 +210,48 @@ describe('capability lifecycle', () => {
     assert.throws(() => b.require('gui.launch'), (e) => e.detail === 'gui.launch');
     channel.drop();
     assert.equal(b.capability().available, false);
+  });
+
+  // Demo takes spec §6.3 (final review I-3): a helper gone 30 s is lost; one back sooner is not.
+  function fakeTimers() {
+    let now = 0;
+    let list = [];
+    return {
+      setTimeout(fn, ms) { const h = { fn, at: now + ms }; list.push(h); return h; },
+      clearTimeout(h) { list = list.filter((x) => x !== h); },
+      advance(ms) {
+        now += ms;
+        for (const due of list.filter((x) => x.at <= now)) { list = list.filter((x) => x !== due); due.fn(); }
+      },
+      pending: () => list.length
+    };
+  }
+
+  it('helper_lost: closed 29 s then ready is nothing; closed 30 s is one helper_lost', () => {
+    const timers = fakeTimers();
+    const { b, channel } = broker({ timers });
+    const lost = [];
+    b.on('helper_lost', () => lost.push(true));
+    channel.connect();
+    channel.drop();
+    timers.advance(29000);
+    channel.connect();
+    timers.advance(60000);
+    assert.equal(lost.length, 0, 'a reconnect within 30 s changes nothing');
+    assert.equal(timers.pending(), 0);
+    channel.drop();
+    channel.drop();
+    timers.advance(29999);
+    assert.equal(lost.length, 0);
+    timers.advance(1);
+    assert.equal(lost.length, 1, 'one helper_lost, however many closes');
+    assert.equal(timers.pending(), 0);
+    // stop() clears an armed timer.
+    channel.connect();
+    channel.drop();
+    assert.equal(timers.pending(), 1);
+    b.stop();
+    assert.equal(timers.pending(), 0);
   });
 
   it('a disabled gui is never available', () => {
@@ -614,6 +657,17 @@ describe('the take ops: launch_browser, record_start, record_stop, keep_awake', 
     assert.equal(sent.opts.timeoutMs, 20000);
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(audits.filter((a) => a.kind === 'gui.record.stop'), [{ kind: 'gui.record.stop', data: { job_id: 'job-1', pid: 777, duration_s: 12.5, bytes: 123456, truncated: false } }]);
+  });
+
+  // Minor 6: a recording whose record_start the service gave up on is stopped by its take id.
+  it('recordStop by take id sends { take_id } alone, and audits it', async () => {
+    const { b, channel, audits } = broker({ guiConfig: takeConfig, handlers: takeHandlers });
+    channel.connect();
+    await b.recordStop({ takeId: 'take-0123456789ab' }, ctx);
+    assert.deepEqual(channel.requests.find((r) => r.op === 'record_stop').params, { take_id: 'take-0123456789ab' });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(audits.find((a) => a.kind === 'gui.record.stop').data.take_id, 'take-0123456789ab');
+    await assert.rejects(b.recordStop({}, ctx), (e) => e.code === 'invalid_params');
   });
 
   it('keepAwake sends keep_awake and audits nothing', async () => {

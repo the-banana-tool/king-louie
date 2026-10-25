@@ -42,7 +42,8 @@ function createOpHandler(backend, { platform = process.platform, realpath, recor
       fps: p.fps,
       size: p.size === undefined ? null : p.size
     }),
-    record_stop: (p) => backend.recordStop({ pid: p.pid }),
+    // By pid, or by take id (a record_start whose answer the service never got).
+    record_stop: (p) => backend.recordStop(p.pid !== undefined ? { pid: p.pid } : { takeId: p.take_id }),
     keep_awake: (p) => backend.keepAwake({ on: p.on === true }),
     processes: (p) => backend.processes({ match: p.match || [] }),
     windows: (p) => backend.windows({ pids: p.pids || [] }),

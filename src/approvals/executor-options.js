@@ -118,6 +118,12 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
     executor.on('executeStart', ({ toolName }) => {
       append('exec.start', { kind: 'tool', name: toolName, request_id: null, job_id: origin.job_id || null, origin });
     });
+    // Demo takes spec §7.2: every take refusal, by the tool's name and the
+    // code only; never the parameters (a URL, typed text).
+    executor.on('approvalDenied', ({ toolName, deniedBy, code }) => {
+      if (deniedBy !== 'take') return;
+      append('take.refused', { tool: toolName, code: typeof code === 'string' ? code : null, origin });
+    });
     executor.on('postExecute', ({ toolName, result }) => {
       const ok = Boolean(result) && result.success !== false && result.ok !== false;
       append('exec.result', {
