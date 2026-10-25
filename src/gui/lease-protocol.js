@@ -397,7 +397,7 @@ function effectiveExpiry({ verifiedAt, minutes, resumeOf = null }) {
 
 module.exports = {
   LEASE_LIMITS, STATES, REQUEST_TTL_MS, VIEW_MAX_BYTES, CHECK_OF, CONTACT_TOKEN_RE, LISTING_MAX, LIST_NONCE_RE: NONCE_RE, newContactToken,
-  MAX_MINUTES, TAKE_MAX_MINUTES, LEASE_KINDS, VALIDATORS, checkLease,
+  MAX_MINUTES, TAKE_MAX_MINUTES, LEASE_KINDS, SITE_RE, VALIDATORS, checkLease,
   leaseHash, buildLeaseRequest, buildLeaseStatus, buildLeaseView, buildLeaseListing, isEnrolledDevice, offLeaseListing,
   verifyLeaseGrant, verifyLeaseRevoke, verifyLeaseWatch, verifyLeaseView, verifyLeaseListing, effectiveExpiry
 };

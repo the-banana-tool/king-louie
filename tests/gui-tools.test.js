@@ -104,7 +104,7 @@ async function withLease(appIds = ['calculator']) {
 }
 
 describe('schemas', () => {
-  it('ten tools, typed schemas with additionalProperties: false, the right flags', () => {
+  it('ten tools and Take, typed schemas with additionalProperties: false, the right flags', () => {
     assert.deepEqual(Object.keys(tools).sort(), [...GUI_TOOL_NAMES].sort());
     for (const t of Object.values(tools)) {
       assert.equal(t.parameters.type, 'object');
@@ -118,7 +118,7 @@ describe('schemas', () => {
     assert.throws(() => tools.Click.validateParameters({ screenshot_id: 'ss-1', x: 1.5, y: 2 }));
     const registry = new ToolRegistry();
     registerGuiTools(registry, { broker, leases, guiConfig, getPolicy: () => ({}), platform: plat });
-    assert.equal(registry.list().length, 10);
+    assert.equal(registry.list().length, 11);
   });
 
   it('Screenshot and ListApps classify read; the others routine, with no outer gate', () => {
@@ -254,7 +254,8 @@ describe('R-F5-3: a front-door client needs fleet:unsafe', () => {
       ListApps: {}, Screenshot: { app: 'calculator' }, LaunchApp: { app: 'calculator' }, CloseApp: { app: 'calculator' },
       RequestLease: { apps: ['calculator'], minutes: 5, reason: 'x' },
       Click: { screenshot_id: shot.screenshot_id, x: 5, y: 5 }, Type: { text: 'a' }, Key: { keys: 'a' },
-      Scroll: { screenshot_id: shot.screenshot_id, x: 5, y: 5, dy: 1 }, Drag: { screenshot_id: shot.screenshot_id, from: { x: 1, y: 1 }, to: { x: 2, y: 2 } }
+      Scroll: { screenshot_id: shot.screenshot_id, x: 5, y: 5, dy: 1 }, Drag: { screenshot_id: shot.screenshot_id, from: { x: 1, y: 1 }, to: { x: 2, y: 2 } },
+      Take: { action: 'start', name: 'Demo', sites: ['example.com'], minutes: 5 }
     };
     assert.deepEqual(Object.keys(calls).sort(), [...GUI_TOOL_NAMES].sort());
     for (const [name, params] of Object.entries(calls)) {
@@ -271,7 +272,7 @@ describe('R-F5-3: a front-door client needs fleet:unsafe', () => {
     assert.equal(requesterCalls.length, 0, 'and nobody was asked');
     await new Promise((r) => setImmediate(r));
     const refused = audits.slice(audited).filter((a) => a.kind === 'gui.refused');
-    assert.equal(refused.length, 12, 'each refusal is audited');
+    assert.equal(refused.length, 13, 'each refusal is audited');
     assert.ok(refused.every((a) => a.data.reason === 'scope' && a.data.job_id === 'job-1' && GUI_TOOL_NAMES.includes(a.data.tool)));
   });
 
@@ -359,12 +360,13 @@ describe('R-F5-4: which turns get GUI tools', () => {
   it('R-F5-4: a case turn keeps ListApps and Screenshot; a wake-up turn gets no GUI tool; a delegate turn gets all ten', () => {
     registerShared();
     assert.deepEqual([...GUI_READ_TOOL_NAMES], ['ListApps', 'Screenshot']);
-    assert.deepEqual([...GUI_READ_TOOL_NAMES, ...GUI_ACTING_TOOL_NAMES].sort(), [...GUI_TOOL_NAMES].sort());
+    // Take is neither: it refuses a case turn itself (tests/gui-takes.test.js).
+    assert.deepEqual([...GUI_READ_TOOL_NAMES, ...GUI_ACTING_TOOL_NAMES, 'Take'].sort(), [...GUI_TOOL_NAMES].sort());
     // The list in src/cases/ is written out (cases code does not load src/gui/); it must be these eight.
     assert.deepEqual(CASE_BLOCKED_TOOL_NAMES.slice(-GUI_ACTING_TOOL_NAMES.length), [...GUI_ACTING_TOOL_NAMES]);
     for (const name of GUI_READ_TOOL_NAMES) assert.ok(!CASE_BLOCKED_TOOL_NAMES.includes(name), `kept: ${name}`);
     const defs = GUI_TOOL_NAMES.map((n) => shared.get(n).toFunctionDefinition());
-    const inCase = shapeToolDefinitions(defs, true, shared).map((d) => d.name).filter((n) => GUI_TOOL_NAMES.includes(n));
+    const inCase = shapeToolDefinitions(defs, true, shared).map((d) => d.name).filter((n) => GUI_TOOL_NAMES.includes(n) && n !== 'Take');
     assert.deepEqual(inCase.sort(), ['ListApps', 'Screenshot']);
     assert.deepEqual(shapeToolDefinitions(defs, false, shared).map((d) => d.name), [...GUI_TOOL_NAMES]);
     // Wake-up turns (Deviation 36): none, not even the two read tools.

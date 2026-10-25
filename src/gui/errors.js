@@ -12,12 +12,20 @@ const GUI_ERROR_CODES = Object.freeze([
   'lease_pending', 'lease_denied', 'lease_request_expired', 'job_required', 'job_closed', 'approval_unavailable', 'helper_disconnected',
   'helper_already_connected', 'frame_rejected', 'auth_failed', 'op_timeout', 'unknown_op', 'backend_failed',
   'session_not_installed', 'session_file_insecure', 'session_file_invalid', 'session_user_mismatch', 'unsafe_path', 'user_not_found',
-  'home_missing', 'cancelled'
+  'home_missing', 'cancelled',
+  // The helper's take ops (session-v1, revised 2026-10-24).
+  'profile_outside_root', 'browser_launch_failed', 'unknown_recording', 'recorder_failed',
+  // A take's refusals (src/gui/take-policy.js TAKE_CODES, written out: this file loads nothing).
+  'take_tool_not_allowed', 'take_app_not_allowed', 'take_action_not_allowed', 'take_browser_managed', 'take_site_not_allowed',
+  'take_no_mid_take_approval', 'take_requires_local_origin', 'take_busy', 'recorder_missing'
 ]);
 
-// The ten GUI tools. Here (dependency-free) so code that shapes a run's tool
-// list can name them without loading the tools themselves.
-const GUI_TOOL_NAMES = Object.freeze(['ListApps', 'LaunchApp', 'CloseApp', 'Screenshot', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag']);
+// The ten GUI tools and Take (a screen-recorded demo, spec 2026-10-24 §5.2).
+// Here (dependency-free) so code that shapes a run's tool list can name them
+// without loading the tools themselves: a delegate turn that refuses unsafe
+// calls is offered none of them.
+const TAKE_TOOL_NAME = 'Take';
+const GUI_TOOL_NAMES = Object.freeze(['ListApps', 'LaunchApp', 'CloseApp', 'Screenshot', 'RequestLease', 'Click', 'Type', 'Key', 'Scroll', 'Drag', TAKE_TOOL_NAME]);
 
 class GuiError extends Error {
   constructor(code, detail = null, extra = {}) {
@@ -52,4 +60,4 @@ function fromWire(error) {
   return new GuiError(code, null, { info: isPlainObject(error) && isPlainObject(error.detail) ? error.detail : {} });
 }
 
-module.exports = { GuiError, GUI_ERROR_CODES, GUI_TOOL_NAMES, isGuiError, toToolResult, fromWire };
+module.exports = { GuiError, GUI_ERROR_CODES, GUI_TOOL_NAMES, TAKE_TOOL_NAME, isGuiError, toToolResult, fromWire };

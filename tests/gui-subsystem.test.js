@@ -228,7 +228,7 @@ describe('createGuiSubsystem', () => {
 
       const registry = new ToolRegistry();
       gui.registerTools(registry);
-      assert.equal(registry.list().length, 10);
+      assert.equal(registry.list().length, 11, 'the ten GUI tools and Take');
       for (const tool of registry.list()) {
         const out = await registry.get(tool.name).execute({}, { origin: { client: 'x', session: 'c1', job_id: null } });
         assert.equal(out.ok, false, tool.name);
@@ -355,7 +355,7 @@ describe('createGuiSubsystem', () => {
     assert.deepEqual(await a.relayClient.methods.get('lease.list')(), { statuses: [] });
     const registry = new ToolRegistry();
     gui.registerTools(registry);
-    assert.equal(registry.list().length, 10);
+    assert.equal(registry.list().length, 11, 'the ten GUI tools and Take');
 
     await gui.start();
     cleanups.push(() => gui.stop());

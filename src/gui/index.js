@@ -10,6 +10,9 @@ const { GuiBroker } = require('./broker');
 const { LeaseManager } = require('./leases');
 const { LiveView } = require('./live-view');
 const { registerGuiTools } = require('./tools');
+const { TakeStore } = require('./take-store');
+const { TakeManager } = require('./takes');
+const path = require('path');
 const { readCanonical, canonicalMtime, endpointPath, canonicalPath, inspectCanonical } = require('./session-secret');
 const { writeGuiStatus, SESSION_FILE_REMEDY, remedyFor } = require('./status');
 
@@ -50,7 +53,7 @@ function unavailableSubsystem({ reason, detail, guiConfig, dataDir, platform, lo
   let heartbeat = null;
   return {
     unavailable: { reason, detail },
-    broker: null, leases: null, liveView: null, channel: null,
+    broker: null, leases: null, liveView: null, channel: null, takes: null,
     capability,
     registerTools(toolRegistry) {
       registerGuiTools(toolRegistry, { unavailable: { reason, message }, guiConfig, platform });
@@ -169,6 +172,12 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
   broker.setLeases(leases);
   const relay = approvals.relayClient || null;
   const liveView = new LiveView({ leases, broker, identity: approvals.identity, relayClient: relay, guiConfig: gui });
+  // Demo takes (spec 2026-10-24): records under <dataDir>/takes. A screen lock reaches the
+  // manager through the lease (setLocked, from the helper's event), which ends the take.
+  const takes = dataDir ? new TakeManager({
+    leases, broker, audit, guiConfig: gui,
+    store: new TakeStore({ dir: path.join(dataDir, 'takes') })
+  }) : null;
   if (relay) {
     relay.registerMethod('lease.grant', async ({ envelope } = {}) => leases.onGrant(envelope));
     relay.registerMethod('lease.revoke', async ({ envelope } = {}) => leases.onRevoke(envelope));
@@ -186,12 +195,12 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
   let brokerStarted = false;
   const quietly = async (fn) => { try { await fn(); } catch (err) { log.debug(`gui teardown: ${err.message}`); } };
   const subsystem = {
-    broker, leases, liveView, channel,
+    broker, leases, liveView, channel, takes,
     // Set when start() failed: { reason, detail }.
     unavailable: null,
     capability: () => broker.capability(),
     registerTools(toolRegistry) {
-      registerGuiTools(toolRegistry, { broker, leases, liveView, guiConfig: gui, getPolicy, audit, platform });
+      registerGuiTools(toolRegistry, { broker, leases, liveView, guiConfig: gui, getPolicy, audit, platform, takes });
     },
     // Never throws (security review finding 2). A start that fails (the
     // pipe or socket name is taken by another local process, say) closes
@@ -219,6 +228,8 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
       }
     },
     async stop() {
+      // A take stops its recording and lets go of its browser while the helper is still there.
+      if (takes) await quietly(() => takes.stopAll('service_stopped'));
       liveView.stop();
       leases.stop();
       if (brokerStarted) broker.stop();

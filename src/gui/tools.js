@@ -6,15 +6,17 @@
 const { Tool } = require('../tools/tool-schema');
 const { REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
 const { isLocalRequester } = require('../core/origin');
-const { GuiError, isGuiError, toToolResult, GUI_TOOL_NAMES } = require('./errors');
+const { GuiError, isGuiError, toToolResult, GUI_TOOL_NAMES, TAKE_TOOL_NAME } = require('./errors');
+const { buildTakeTool } = require('./take-tool');
 const { resolveLaunch } = require('./apps');
 const { parseKeys, printableChar, isEnter, checkButton, checkClickModifiers, MODIFIERS } = require('./keys');
 const { checkTypeText, applyKey } = require('./text-guard');
 const { plainLineProblem } = require('../cases/hidden-chars');
 
 // R-F5-4: what a case turn keeps, and what src/cases/chat-integration.js blocks.
+// Take is neither: it refuses a case turn itself (src/gui/take-tool.js).
 const GUI_READ_TOOL_NAMES = Object.freeze(['ListApps', 'Screenshot']);
-const GUI_ACTING_TOOL_NAMES = Object.freeze(GUI_TOOL_NAMES.filter((name) => !GUI_READ_TOOL_NAMES.includes(name)));
+const GUI_ACTING_TOOL_NAMES = Object.freeze(GUI_TOOL_NAMES.filter((name) => !GUI_READ_TOOL_NAMES.includes(name) && name !== TAKE_TOOL_NAME));
 const APP_ID = { type: 'string', minLength: 1, maxLength: 32, pattern: '^[a-z][a-z0-9-]{0,31}$' };
 const SCREENSHOT_ID = { type: 'string', minLength: 4, maxLength: 16, pattern: '^ss-[0-9]+$' };
 // One of an app's other windows, as an earlier Screenshot named it.
@@ -50,6 +52,18 @@ const MAY_HAVE_SENT = Object.freeze(['op_timeout', 'backend_failed', 'helper_dis
 // Strict JSON-schema subset: what these schemas use, nothing more.
 function checkValue(schema, value, where) {
   const bad = (what) => { throw new GuiError('invalid_params', `${where} ${what}`); };
+  // One of several shapes (Take's `browser` and `record`): the first that holds.
+  if (Array.isArray(schema.anyOf)) {
+    for (const option of schema.anyOf) {
+      try {
+        checkValue(option, value, where);
+        return;
+      } catch (err) {
+        if (!isGuiError(err)) throw err;
+      }
+    }
+    bad('is not one of the allowed shapes');
+  }
   switch (schema.type) {
     case 'string': {
       if (typeof value !== 'string') bad('must be a string');
@@ -85,8 +99,11 @@ function checkValue(schema, value, where) {
 function checkParams(schema, params, prefix = '') {
   if (params === null || typeof params !== 'object' || Array.isArray(params)) throw new GuiError('invalid_params', `${prefix || 'parameters'} must be an object`);
   const props = schema.properties || {};
-  for (const key of Object.keys(params)) {
-    if (!Object.hasOwn(props, key)) throw new GuiError('invalid_params', `unknown parameter "${prefix}${key}"`);
+  // additionalProperties: true (a Take step, checked whole by its runner): only the named keys here.
+  if (schema.additionalProperties !== true) {
+    for (const key of Object.keys(params)) {
+      if (!Object.hasOwn(props, key)) throw new GuiError('invalid_params', `unknown parameter "${prefix}${key}"`);
+    }
   }
   for (const key of schema.required || []) {
     if (params[key] === undefined) throw new GuiError('invalid_params', `"${prefix}${key}" is required`);
@@ -141,7 +158,7 @@ function vaultValues(options) {
 }
 
 function buildGuiTools(gui) {
-  const { broker, leases, liveView = null, guiConfig, getPolicy = () => ({}), audit = null, platform = process.platform, unavailable = null } = gui;
+  const { broker, leases, liveView = null, guiConfig, getPolicy = () => ({}), audit = null, platform = process.platform, unavailable = null, takes = null } = gui;
   const policy = () => getPolicy() || {};
   const auditAppend = (kind, data) => {
     if (!audit) return;
@@ -435,7 +452,10 @@ function buildGuiTools(gui) {
         // then replaces it).
         return { action: { kind: 'drag', handle: a.handle, from: a.rel, to: b.rel, button }, typed: (buffer) => buffer.select() };
       });
-    })
+    }),
+
+    // A screen-recorded demo (spec 2026-10-24 §5.2). No takes on this node: it says so.
+    buildTakeTool({ takes, tool, jobIdOf })
   ];
 }
 
