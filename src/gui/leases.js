@@ -428,6 +428,7 @@ class LeaseManager extends EventEmitter {
     if (cur && cur.jobId !== jobId) throw new GuiError('lease_busy', 'another job holds this node\'s lease');
     // A lease of another kind is never handed back for this one.
     if (cur && cur.kind !== kind) throw new GuiError('lease_busy', `this job already holds a ${cur.kind} lease`);
+    // An active lease of this job and kind is handed back as it is: a given leaseId is then not used.
     if (cur && cur.state === 'active') return cur;
     if (cur && (cur.state === 'pending' || [...this.pending.values()].some((p) => p.ref === cur))) throw new GuiError('lease_pending', 'waiting for the phone');
     let lease = cur;

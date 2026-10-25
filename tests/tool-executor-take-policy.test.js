@@ -201,6 +201,25 @@ describe('ToolExecutor with a take policy', () => {
     await ex.execute('Read', {}, { browserKey: 'take:other' });
     assert.equal(seenContext.browserKey, null);
   });
+
+  it('a call decided with no take stays on the default browser when a take starts before it runs', async () => {
+    const { browserKeyOf, getBrowser, setBrowser, removeBrowser, registry } = require('../src/tools/builtin/browser-registry');
+    const takeBrowser = { mine: true };
+    setBrowser('take:late', takeBrowser);
+    try {
+      const { ex, holder } = executor({ requireApproval: false });
+      // No take when the call is decided; one goes live before the tool reads its browser.
+      const result = await ex.execute('Read', {});
+      assert.equal(result.success, true);
+      holder.set({ browserKey: 'take:late', decide: async () => ({ allow: true }) });
+      assert.equal(seenContext.browserKey, null);
+      assert.equal(browserKeyOf(seenContext), 'default');
+      assert.notEqual(getBrowser(seenContext), takeBrowser);
+      assert.equal(getBrowser(seenContext), registry.default);
+    } finally {
+      removeBrowser('take:late');
+    }
+  });
 });
 
 // Take.run_steps' steps are held to the node's deny rules and tier through the

@@ -61,9 +61,10 @@ const CLOSE_POLL_MS = 500;
 
 class GuiBroker extends EventEmitter {
   constructor({ channel, guiConfig, getPolicy = () => ({}), audit = null, dataDir = null, platform = process.platform, clock = Date.now,
-    log = createLogger('gui/broker'), heartbeatMs = 10000, realpath = realResolve, timers = { setTimeout, clearTimeout } } = {}) {
+    log = createLogger('gui/broker'), heartbeatMs = 10000, realpath = realResolve, timers = { setTimeout, clearTimeout },
+    monotonic = () => performance.now() } = {}) {
     super();
-    Object.assign(this, { channel, guiConfig, getPolicy, audit, dataDir, platform, clock, log, heartbeatMs, realpath, timers });
+    Object.assign(this, { channel, guiConfig, getPolicy, audit, dataDir, platform, clock, log, heartbeatMs, realpath, timers, monotonic });
     this.leases = null;
     // Both maps are per job and only for runs that have one (R-F5-7): a run
     // with no job id gets no entry, so such runs never share a bucket.
@@ -286,30 +287,53 @@ class GuiBroker extends EventEmitter {
   // Ends one process this job launched (a take's Chrome), by its pid: asked
   // to close, watched through the helper's process listing for up to
   // CLOSE_WAIT_MS (a close that was sent is not a process that exited: a
-  // "Leave site?" dialog or a hung browser keeps it up), then forced. A pid
+  // "Leave site?" dialog or a hung browser keeps it up), then forced. The
+  // bound is on the monotonic clock and covers the polls themselves; a close
+  // or a poll that fails or runs past it is doubt, and doubt forces. A pid
   // the job did not launch is refused.
   async closeLaunched(pid, ctx = {}) {
     const byApp = ctx.jobId ? this.launched.get(ctx.jobId) : null;
     const appId = byApp && Number.isInteger(pid) ? [...byApp.entries()].find(([, pids]) => pids.has(pid))?.[0] : undefined;
     if (appId === undefined) throw new GuiError('invalid_params', 'not a process this job launched');
     const req = { jobId: ctx.jobId };
-    await this.channel.request('close', { pids: [pid], force: false }, req);
-    const alive = async () => (await this._pids([appId], ctx)).some((p) => p.pid === pid);
+    const codeOf = (err) => (isGuiError(err) ? err.code : 'error');
+    const startedAt = this.monotonic();
+    const left = () => CLOSE_WAIT_MS - (this.monotonic() - startedAt);
     // Ref'd timers: the wait itself keeps the process up until it is over.
-    const sleep = (ms) => new Promise((resolve) => { this.timers.setTimeout(resolve, ms); });
-    let forced = false;
-    let running = await alive();
-    for (let waited = 0; running && waited < CLOSE_WAIT_MS; waited += CLOSE_POLL_MS) {
-      await sleep(CLOSE_POLL_MS);
-      running = await alive();
+    const TIMED_OUT = Symbol('timed out');
+    const within = (promise, ms) => {
+      let handle;
+      promise.catch(() => {});
+      const timer = new Promise((resolve) => { handle = this.timers.setTimeout(() => resolve(TIMED_OUT), Math.max(0, ms)); });
+      return Promise.race([promise, timer]).finally(() => this.timers.clearTimeout(handle));
+    };
+    let gone = false;
+    try {
+      await within(this.channel.request('close', { pids: [pid], force: false }, req), left());
+      while (left() > 0) {
+        const listed = await within(this._pids([appId], ctx).then((procs) => procs.some((p) => p.pid === pid)), left());
+        if (listed === false) { gone = true; break; }
+        if (listed === TIMED_OUT || left() <= 0) break;
+        await within(new Promise(() => {}), Math.min(CLOSE_POLL_MS, left()));
+      }
+    } catch (err) {
+      this.log.warn(`closing a launched process: the close or a poll failed (${codeOf(err)}); forcing it`);
     }
-    if (running) {
-      await this.channel.request('close', { pids: [pid], force: true }, req);
+    let forced = false;
+    let closed = gone ? [pid] : [];
+    if (!gone) {
       forced = true;
+      try {
+        const reply = await this.channel.request('close', { pids: [pid], force: true }, req);
+        if (reply && Array.isArray(reply.closed) && reply.closed.includes(pid)) closed = [pid];
+        else this.log.warn('closing a launched process: the forced close was not confirmed');
+      } catch (err) {
+        this.log.warn(`closing a launched process: the forced close failed (${codeOf(err)})`);
+      }
     }
     for (const pids of byApp.values()) pids.delete(pid);
-    this._audit('gui.close', { job_id: ctx.jobId, app_id: appId, pids: [pid], forced });
-    return { closed: [pid], forced };
+    this._audit('gui.close', { job_id: ctx.jobId, app_id: appId, pids: closed, forced });
+    return { closed, forced };
   }
 
   // The id a job names one window by. A handle keeps its id for the job.

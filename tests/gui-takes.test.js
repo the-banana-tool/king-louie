@@ -629,19 +629,23 @@ describe('a take ends cleanly, whatever it holds', () => {
 
 describe('GuiBroker#closeLaunched', () => {
   const { GuiBroker } = require('../src/gui/broker');
-  function brokerWith(exitAfterPolls) {
+  function brokerWith(exitAfterPolls, { poll = null } = {}) {
     const requests = [];
     let polls = 0;
     const channel = {
       on() {}, off() {},
       async request(op, params) {
         requests.push([op, params]);
-        if (op === 'processes') { polls += 1; return polls > exitAfterPolls ? [] : [{ pid: 7 }]; }
+        if (op === 'processes') {
+          polls += 1;
+          if (poll) return poll(polls);
+          return polls > exitAfterPolls ? [] : [{ pid: 7 }];
+        }
         if (op === 'close') return { closed: params.pids };
         return null;
       }
     };
-    const b = new GuiBroker({ channel, guiConfig, platform: 'win32', timers });
+    const b = new GuiBroker({ channel, guiConfig, platform: 'win32', timers, monotonic: () => clock.now() });
     b._recordLaunched('job-1', 'chrome', 7);
     return { b, requests };
   }
@@ -667,6 +671,24 @@ describe('GuiBroker#closeLaunched', () => {
     assert.deepEqual(closes(requests), [{ pids: [7], force: false }, { pids: [7], force: true }]);
     assert.equal(out.forced, true);
     assert.ok(clock.now() - start >= 5000);
+  });
+
+  it('a slow poll counts against the 5 s: a listing that takes 6 s is not waited for', async () => {
+    const { b, requests } = brokerWith(0, { poll: () => new Promise((resolve) => { timers.setTimeout(() => resolve([]), 6000); }) });
+    const start = clock.now();
+    const out = await drive(b.closeLaunched(7, { jobId: 'job-1' }));
+    assert.equal(out.forced, true);
+    assert.deepEqual(closes(requests).at(-1), { pids: [7], force: true });
+    assert.ok(clock.now() - start <= 5500, `forced within the bound (${clock.now() - start} ms)`);
+  });
+
+  it('a poll that fails is doubt, and doubt forces', async () => {
+    const { GuiError } = require('../src/gui/errors');
+    const { b, requests } = brokerWith(0, { poll: () => { throw new GuiError('op_timeout'); } });
+    const out = await drive(b.closeLaunched(7, { jobId: 'job-1' }));
+    assert.equal(out.forced, true);
+    assert.deepEqual(closes(requests), [{ pids: [7], force: false }, { pids: [7], force: true }]);
+    assert.deepEqual(out.closed, [7]);
   });
 
   it('a pid the job did not launch is refused, and nothing is sent', async () => {

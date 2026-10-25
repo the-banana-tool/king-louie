@@ -19,7 +19,9 @@ describe('browser registry', () => {
   it('the key a call was decided under comes first, then the live take\'s, then default', () => {
     assert.equal(browserKeyOf({ browserKey: 'take:1', takePolicy: { current: { browserKey: 'take:2' } } }), 'take:1');
     assert.equal(browserKeyOf({ browserKey: 'take:1', takePolicy: { current: null } }), 'take:1');
-    assert.equal(browserKeyOf({ browserKey: null, takePolicy: { current: { browserKey: 'take:2' } } }), 'take:2');
+    assert.equal(browserKeyOf({ browserKey: null, takePolicy: { current: { browserKey: 'take:2' } } }), 'default',
+      'decided outside any take: the default browser, even with a take live now');
+    assert.equal(browserKeyOf({ takePolicy: { current: { browserKey: 'take:2' } } }), 'take:2', 'no binding at all: the live take');
     assert.equal(browserKeyOf({ browserKey: null, takePolicy: { current: null } }), 'default');
   });
 
