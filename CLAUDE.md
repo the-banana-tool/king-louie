@@ -2365,14 +2365,20 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   device being revoked (`device_revoked`), the job closing (`job_closed`:
   `cancel_job`, the idle close, a failed turn), 30 minutes of driver
   silence after a turn ends (`driver_silent`, C-6; a turn start clears the
-  timer), a stop that finds the recorder already exited
-  (`recorder_failed`), the screen locking
+  timer), a stop that finds the recorder already exited or finds no
+  recording to stop (`recorder_failed`; a `Take.stop` never says
+  `take_done` then), the session helper gone 30 s (`helper_lost`: the
+  broker's `helper_lost` event, a ref'd timer armed on the helper channel's
+  `closed` and cleared on `ready`; the helper has stopped its recordings by
+  then), the screen locking
   (`screen_locked`, through the lease's `locked`, C-12), `Take.stop`
   (`take_done`), service shutdown (`service_stopped`). Every ending stops
   the recording and keeps the file, closes the take's Chrome by CDP or by
   pid (unless `Take.stop` passed `keep_browser`), clears the policy at once (from that instant every call it would
   have allowed is `take_ended`), and ends only the lease whose id the take
-  minted. Nothing deletes a recording.
+  minted. Nothing deletes a recording. A `record_start` that fails or times
+  out is followed by `record_stop { take_id }` (best effort), so an ffmpeg
+  whose answer was lost does not record on until the helper exits.
 - **What a take may do (§7, C-7, C-8).** `createTakePolicy`
   (`src/gui/take-policy.js`) is consulted in `ToolExecutor` where it would
   ask, after the deny patterns, the `denied` tier and the roots check, so
@@ -2384,12 +2390,27 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   (`take_action_not_allowed`; the take's own browser and profiles are
   `take_browser_managed`). `LaunchApp` only the take's `apps`. `Bash` and
   `PowerShell` are `take_tool_not_allowed`. A call that would go to the
-  phone is `take_no_mid_take_approval`. Every refusal is a tool error with a
-  `code`, never a prompt. A browser call is bound to the browser of the
+  phone is `take_no_mid_take_approval`, and so is a tool that asks through
+  the requester the executor hands it (an unsafe `LaunchApp`: arguments or
+  files outside its globs): `_rethreadedRequester` answers `false` with the
+  code in `metadata.refusal` while a take is live, and nobody is asked. A
+  take's allow lifts an `always_confirm` match (the policy answers before the
+  phone, spec §7.2) but never a `denied` tier or a path outside the allowed
+  roots. Every refusal is a tool error with a `code`, never a prompt. A browser call is bound to the browser of the
   take it was decided under (the per-run registry,
   `src/tools/builtin/browser-registry.js`); after the take ends it is
   `take_browser_unavailable`. `TAKE_CODES` lists every code;
-  `GUI_ERROR_CODES` writes them out again.
+  `GUI_ERROR_CODES` writes them out again. The take's browser key has the
+  take's `profile` as its active profile (`setActiveProfile`), so the vault
+  actions find `browser_cred:<profile>:<host>` when the take allows logins;
+  a call naming a profile itself is `take_browser_managed`.
+- **The audit ledger (§7.2).** Every `lease.*` entry carries the lease's
+  `kind`; a take's `lease.requested` and `lease.granted` add `name`, `sites`,
+  `credentials` and `minutes` (never the reason text). Every take refusal the
+  executor makes (`approvalDenied` with `deniedBy: 'take'`) is a
+  `take.refused { tool, code, origin }` entry from the approval seam, with no
+  parameters and no URL; a step that `run_steps` refuses is not one (it is in
+  the step's result). `take.ended` records every ending.
 - **Steps (§10).** `Take.run_steps` runs `{ step, ...fields }` objects
   (`validateSteps` in `src/gui/take-steps.js`: exactly each kind's fields,
   200 steps, 64 KiB, `pause` 10 s each and 60 s a run, waits 30 s by default
@@ -2422,8 +2443,9 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   (`findFfmpeg`, `src/session/recorder.js`; reported on the probe as
   `recorder.ffmpeg`, so `winget install Gyan.FFmpeg` as the user works after
   the helper restarts); with neither, `start` with `record: true` refuses
-  `recorder_missing` before any phone request. `record_stop` sends `q` and
-  waits 15 s. `keep_awake` sets `SetThreadExecutionState`. The helper stops
+  `recorder_missing` before any phone request. `record_stop { pid }` (or
+  `{ take_id }`, which first waits for a `record_start` of that take still
+  under way) sends `q` and waits 15 s. `keep_awake` sets `SetThreadExecutionState`. The helper stops
   its recordings 30 s after the service connection goes. These ops answer
   and log by their code alone.
 - **The driver's side (§11, C-9).** `wait_ms` (0 to 25000) exists only on
@@ -2444,16 +2466,21 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   `king-louie-service mcp` run as that user can post to the service. An
   elevated script sets it through directory handles pinned from the data
   dir down, so a junction planted anywhere under the data dir is refused;
-  a half-granted install is revoked. `session uninstall` revokes it. This
-  widens who can post a request, not who can forge one (the courier's
-  signatures are its protection).
+  a half-granted install is revoked. `session uninstall` revokes it. The
+  fleet requests `mcp` sends are not signed (only the relay methods are), so
+  the grant lets the session user, and anything running as that user, drive
+  the service as a local `mcp` client: open delegate sessions, run safe
+  runbooks, answer spoken case questions as `mcp-stdio`, ask for a take.
+  Unsafe calls and takes still go to the phone. With Modify on `inbox` the
+  user can also read and plant other producers' inbox files (an `mcp` an
+  administrator runs). The consent line `session install` prints says so.
+  Narrowing the grant to `outbox` only, with a per-user inbox, is a
+  follow-up the owner may ask for; it is not done.
 - Residuals: `PreToolUse` hooks do not run for steps in D1. Keep-awake
   holds only while the helper's PowerShell worker lives: a worker restarted
-  after an op timeout drops it until the next `keep_awake`. The take ends
-  `recorder_failed` only when its stop finds ffmpeg already gone
-  (`onRecorderExit` has no helper event calling it), and a helper gone 30 s
-  stops the recording without ending the take, whose stop then finds no
-  recording. A hand-made `--data-dir` whose ancestor the service account can
+  after an op timeout drops it until the next `keep_awake`. ffmpeg exiting
+  on its own mid-take is found only at the stop (`onRecorderExit` has no
+  helper event calling it), which then ends `recorder_failed`. A hand-made `--data-dir` whose ancestor the service account can
   write is outside the courier grant's pinning. Chrome's debugging port is
   open to the user's own processes while a take runs. The recording is the
   whole Windows desktop, every display, King Louie's own window included

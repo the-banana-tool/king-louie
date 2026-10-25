@@ -132,7 +132,15 @@ elevated prompt (Administrator).
    own files it gives that account Modify on the courier's
    `approvals\outbox` and `approvals\inbox` under the data dir, so
    `king-louie-service mcp`, run as you, can post to the service
-   (`session uninstall` takes it away again). Sign in to Windows once as that
+   (`session uninstall` takes it away again). Know what that grants: the
+   fleet requests `mcp` sends are not signed, so your account, and anything
+   running as your account, can drive the service as a local `mcp` client:
+   open delegate sessions, run safe runbooks, answer spoken case questions
+   (as `mcp-stdio`) and ask for a take. Unsafe calls and takes still go to
+   your phone. With Modify on `inbox` it can also read and plant the inbox
+   files of other `mcp` processes (one an administrator runs, say). Narrowing
+   the grant to `outbox` only, with an inbox of its own per user, is a
+   follow-up you may ask for; it is not done. Sign in to Windows once as that
    user so the helper starts, then check that
    `king-louie-service session status` says the GUI is enabled. A take needs
    the helper even when the demo is all in the browser: the service runs as
@@ -321,7 +329,9 @@ prompt nobody is watching.
 - A shell is never inside a take. A call the node would send to your phone is
   refused instead.
 - The node's own deny rules and `denied` tier still win over the take, for
-  the agent's calls and for every step.
+  the agent's calls and for every step. A call the take allows also skips an
+  `always_confirm` match (the take's policy answers before the phone would
+  be asked), but never a `denied` tier or a path outside the allowed roots.
 
 An unattended take never pauses. The wrong window in front, an app gone, the
 helper reconnecting or the relay link down refuse the one input that met it,
@@ -331,8 +341,16 @@ are the bound. A take ends when its time runs out, when any of your phones
 stops it, when the phone that approved it is revoked, when the session
 closes (`cancel_job`, the idle close, a failed turn), when the screen locks,
 when the service stops, or after **30 minutes** with no word from you once a
-turn has ended. Every ending stops the recording and keeps the file; nothing
-deletes a recording.
+turn has ended. Two endings mean the video is not all there:
+
+- `helper_lost`: the session helper has been gone 30 s (you signed out, it
+  crashed); it stops its recording then, so the take ends with it.
+- `recorder_failed`: ffmpeg would not start, had already exited when the
+  take stopped, or the stop found no recording; a `Take.stop` then answers
+  `ended: recorder_failed`, never `take_done`.
+
+Every ending stops the recording and keeps the file; nothing deletes a
+recording.
 
 ### The recording
 
@@ -362,6 +380,9 @@ profile is yours too, under `%LOCALAPPDATA%\KingLouie\browser-profiles\<name>`.
   delegate.
 - `timeout`: the service did not answer the courier within 30 s. Check that
   it is running, then call again.
+- `service_unavailable`: the courier found no service running on the data
+  dir (or could not hand it the request). Start the service, then call
+  again.
 - A call your phone did not answer in time fails with "Approval timed out
   after <N>s — no user response. Try again when someone is watching, or ask
   the user to pre-approve this tool." In service mode N is the phone request's
@@ -382,7 +403,8 @@ and a `code`, never a prompt and never a wait. The take's codes:
   gui.recorder.ffmpeg in node.yaml". Nothing was asked of the phone.
 - `recorder_failed`: ffmpeg would not start, or the recording's folder could
   not be made; as an ending, ffmpeg had already exited when the take
-  stopped, so the video is not all there.
+  stopped, or the stop found no recording to finish, so the video is not all
+  there.
 - `browser_launch_failed`: Chrome did not start, did not open its debugging
   port within 10 s, or could not be attached to. The take ends.
 - `take_app_not_allowed`: `LaunchApp` of an app that is not one of the take's
@@ -397,8 +419,9 @@ and a `code`, never a prompt and never a wait. The take's codes:
   the take's sites. `navigate` back to one.
 - `take_tool_not_allowed`: a shell in a take (use a wait step instead), or a
   take from a case.
-- `take_no_mid_take_approval`: the call would have needed your phone. Nothing
-  was sent; ask for it in the next take's `start`.
+- `take_no_mid_take_approval`: the call would have needed your phone (a
+  `LaunchApp` with arguments or files outside the app's allowlist entry
+  included). Nothing was sent; ask for it in the next take's `start`.
 - `take_ended`: the take has ended; a call it would have allowed is refused,
   and a step list already running stops (a new `run_steps`, `note` or `stop`
   after the end is `invalid_params`).

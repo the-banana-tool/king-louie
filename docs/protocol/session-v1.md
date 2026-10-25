@@ -148,7 +148,12 @@ every user-side path itself. The service sends names; the helper places them.
   else kills it and says `truncated: true`. `bytes` is the file's size (0
   when there is none). An ffmpeg that had already exited answers
   `exited: true` and its `code` too (`truncated` unless the code was 0). An
-  unknown pid is `unknown_recording`.
+  unknown pid is `unknown_recording`. `record_stop` `{ take_id }` (instead
+  of `pid`) stops that take's recording, waiting first for a `record_start`
+  of that take still under way: the service sends it when its
+  `record_start` failed or timed out, so an ffmpeg whose answer was lost
+  does not record the desktop until the helper exits. No recording of that
+  take is `unknown_recording`.
 - `keep_awake` `{ on }` → `{ on }`: `SetThreadExecutionState` in the worker
   (`ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED` on,
   `ES_CONTINUOUS` off). It lasts while the worker runs.
