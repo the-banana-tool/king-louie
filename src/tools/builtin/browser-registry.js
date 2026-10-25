@@ -1,7 +1,8 @@
 // The browsers the browser tools drive, one per run. A run's key is its take
 // policy's `browserKey` (`take:<take_id>`, set when a take runs), else
-// `default`: the owner's chat and every run without a take share the default
-// browser, as they shared the old singleton.
+// `default`. Only setBrowser gives a key a browser of its own; a key with
+// none registered resolves to the default browser, so the owner's chat and
+// every run without a take share it, as they shared the old singleton.
 
 const PlaywrightBrowser = require('../../browser/playwright-browser');
 
@@ -17,21 +18,18 @@ function browserKeyOf(context) {
   return key || DEFAULT_KEY;
 }
 
-function browserFor(key) {
-  if (key === DEFAULT_KEY) {
-    if (!registry.default) registry.default = new PlaywrightBrowser();
-    return registry.default;
-  }
-  let b = registry.byKey.get(key);
-  if (!b) {
-    b = new PlaywrightBrowser();
-    registry.byKey.set(key, b);
-  }
-  return b;
+// The key whose browser a run drives: its own key when a browser is
+// registered under it, else the default.
+function resolvedKeyOf(context) {
+  const key = browserKeyOf(context);
+  return key !== DEFAULT_KEY && registry.byKey.has(key) ? key : DEFAULT_KEY;
 }
 
 function getBrowser(context) {
-  return browserFor(browserKeyOf(context));
+  const key = resolvedKeyOf(context);
+  if (key !== DEFAULT_KEY) return registry.byKey.get(key);
+  if (!registry.default) registry.default = new PlaywrightBrowser();
+  return registry.default;
 }
 
 function setBrowser(key, browser) {
@@ -73,6 +71,7 @@ module.exports = {
   DEFAULT_KEY,
   registry,
   browserKeyOf,
+  resolvedKeyOf,
   getBrowser,
   setBrowser,
   removeBrowser,

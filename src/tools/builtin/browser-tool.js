@@ -15,10 +15,11 @@ function clampTimeout(requested, fallback) {
   return Math.min(t, MAX_ACTION_TIMEOUT);
 }
 
-// One browser per run (browser-registry.js): a take's run drives its own,
-// every other run shares the default one.
+// One browser per run (browser-registry.js): a take whose browser is
+// registered drives its own, every other run shares the default one. The
+// active profile is kept under the key whose browser the run drives.
 const {
-  browserKeyOf, getBrowser, activeProfileOf, setActiveProfile, allBrowsers,
+  resolvedKeyOf, getBrowser, activeProfileOf, setActiveProfile, allBrowsers,
 } = require('./browser-registry');
 
 const VAULT_CRED_PREFIX = 'browser_cred:';
@@ -148,7 +149,7 @@ const actions = {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async start(params, ctx) {
-    const key = browserKeyOf(ctx);
+    const key = resolvedKeyOf(ctx);
     const b = getBrowser(ctx);
     if (b.isRunning) {
       return { ok: true, message: 'Browser already running', profile: activeProfileOf(key) };
@@ -178,7 +179,7 @@ const actions = {
   async stop(_params, ctx) {
     const b = getBrowser(ctx);
     await b.stop();
-    setActiveProfile(browserKeyOf(ctx), null);
+    setActiveProfile(resolvedKeyOf(ctx), null);
     return { ok: true, message: 'Browser stopped' };
   },
 
@@ -190,7 +191,7 @@ const actions = {
     const names = fs.readdirSync(root, { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name);
-    return { ok: true, profiles: names, active: activeProfileOf(browserKeyOf(ctx)) };
+    return { ok: true, profiles: names, active: activeProfileOf(resolvedKeyOf(ctx)) };
   },
 
   async profile_create(params, ctx) {
@@ -205,7 +206,7 @@ const actions = {
 
   async profile_delete(params, ctx) {
     if (!params.profile) return { ok: false, error: '"profile" parameter is required.' };
-    if (activeProfileOf(browserKeyOf(ctx)) === params.profile && getBrowser(ctx).isRunning) {
+    if (activeProfileOf(resolvedKeyOf(ctx)) === params.profile && getBrowser(ctx).isRunning) {
       return { ok: false, error: `Profile "${params.profile}" is in use. Call stop first.` };
     }
     const dir = resolveProfileDir(ctx, params.profile);
@@ -217,13 +218,13 @@ const actions = {
   },
 
   async profile_current(_params, ctx) {
-    return { ok: true, active: activeProfileOf(browserKeyOf(ctx)), running: getBrowser(ctx).isRunning };
+    return { ok: true, active: activeProfileOf(resolvedKeyOf(ctx)), running: getBrowser(ctx).isRunning };
   },
 
   // ── Vault-backed credentials ───────────────────────────────────────────────
 
   async save_credentials(params, ctx) {
-    const profile = params.profile || activeProfileOf(browserKeyOf(ctx));
+    const profile = params.profile || activeProfileOf(resolvedKeyOf(ctx));
     if (!profile) return { ok: false, error: 'No active profile. Pass "profile" or start the browser with one.' };
     const page = getBrowser(ctx).page;
     const host = params.host || (page && hostFromUrl(page.url()));
@@ -244,7 +245,7 @@ const actions = {
     // If username/password aren't passed directly, pull from the vault using the
     // profile+host convention save_credentials uses.
     if (!username || !password) {
-      const profile = params.profile || activeProfileOf(browserKeyOf(ctx));
+      const profile = params.profile || activeProfileOf(resolvedKeyOf(ctx));
       const host = params.host;
       if (!profile || !host) {
         return { ok: false, error: 'Provide either (username+password) or (profile+host) to look up vault creds.' };
@@ -267,7 +268,7 @@ const actions = {
 
   async fill_credentials(params, ctx) {
     const b = requireRunning(ctx);
-    const profile = params.profile || activeProfileOf(browserKeyOf(ctx));
+    const profile = params.profile || activeProfileOf(resolvedKeyOf(ctx));
     if (!profile) return { ok: false, error: 'No active profile. Start the browser with a profile first.' };
     const host = params.host || hostFromUrl(b.page.url());
     if (!host) return { ok: false, error: 'Cannot determine host from current URL.' };
