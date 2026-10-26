@@ -112,7 +112,7 @@ non-goal lifts).
 |---|---|---|
 | `identity record` must exist and match; the service must not be able to write it (`checkNodeIdentityRecord`, `serviceProbe`) | the service account could swap the identity in the data dir | not required. `checkRecordedIdentity` returns state `personal`; the GUI, `doctor` and `session status` accept that state as "on". `identity record` under a personal `node.yaml` says so and writes nothing. |
 | approvers dir: the service must not be able to create a file in it; owner Administrators, SYSTEM or the config dir's owner, never LOCAL SERVICE | a service-owned set could enrol its own phone; approver files are checked for form only (`device_id` derives from `public_key`), so whoever can write the directory can add a phone | the write probe goes; the owner read stays. Today `serviceProbe: false` turns both off (`approver-store.js:66`, `:327`), so the store gets a separate `hosting: 'personal'` option that keeps `_checkOwners` and skips the probe. The owner rule is "Administrators, SYSTEM or the process's own account". The set is still re-read on change. What then keeps the model from writing an approver file is the tool policy row below, not the OS. |
-| the OS keeps the model's tools out of the owner's files: LOCAL SERVICE cannot write `approvers\`, `node.yaml`, the desktop app's profile or the user's browser cookies | the model runs tools; a routine `Bash` call in a delegate turn (not during a take, where shells are refused) is held in only by `always_confirm`, whose default names ssh, scp, `git push`, Vault and `*deploy*` | the process is the owner, so the OS holds nothing back. A personal node's default policy therefore makes `Bash` and `PowerShell` `tool_requires_approval` (the phone, like an unsafe `LaunchApp`), and the file tools' deny list gains the config dir, `node.yaml`, `approvers\` and the desktop app's profile directory (as `SECRET_FILE_PREFIXES` already hides the data dir's own stores). The owner may lift the shell rule in `node.yaml` `policy`; the file deny he cannot. Known and said in the consent text: a shell that is approved once can do anything the owner can, and a deny list on file tools does not fence a shell. (C-8; the owner's question in §12.) |
+| the OS keeps the model's tools out of the owner's files: LOCAL SERVICE cannot write `approvers\`, `node.yaml`, the desktop app's profile or the user's browser cookies | the model runs tools as the service account | the process is the owner, so the OS holds nothing back. What already holds (checked 2026-10-25): `Bash` is the only shell tool and carries `requiresApproval: true`, so `classifyToolCall` makes every shell call `unsafe` (`tool_requires_approval`) and it goes to the phone on any node with phone approvals; a file tool call outside `allowed_roots` is `unsafe` too. What is new: a **denied directory** list for the file tools (`Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`), refused outright for reads and writes alike, that a personal node fills with its config dir (so `node.yaml` and `approvers\`) and the desktop app's profile directory (`%APPDATA%\king-louie`: its vault, chats and browser cookies). The data dir's own stores are already hidden by `SECRET_FILE_PREFIXES`. Nothing in `node.yaml` lifts the deny. Known and said in the consent text: a shell the phone approves can do anything the owner can, and a deny list on file tools does not fence a shell. (C-8; R-PN-1.) |
 | `session/helper-secret.json`, the per-user copy, the pipe, the hello/challenge handshake, `sameUser` | the helper is another account | none of it. The GUI subsystem is built with an in-process channel (§7). No helper file means "on" here, where in the fleet layout it means "off". |
 | the courier ACL grant | only the service account could write `approvals\outbox` | none. The owner's `mcp` process owns the directories already. `FileCourier` and `CourierPump` are unchanged. |
 | `WINDOWS_CONFIG_DIRS_SCRIPT`, `WINDOWS_DATA_DIR_SCRIPT` (Administrators owner, LOCAL SERVICE read-only) | keep the service out of its own config | not run. The data and config dirs are ordinary user-owned directories under the user's profile. |
@@ -206,9 +206,8 @@ the start). It:
    `profile: agent`, `gui.enabled: true`, `gui.take.enabled: true`,
    `gui.browser` naming a `gui.apps` entry for Chrome (the path from
    `--browser`, else the registered `chrome.exe` App Path, else a refusal
-   naming the flag), the §6 policy rows (`Bash`, `PowerShell` as
-   `tool_requires_approval`), and `delegate.provider` / `delegate.model`
-   from `--provider` / `--model` when given. An existing `node.yaml` is
+   naming the flag), and `delegate.provider` / `delegate.model` from
+   `--provider` / `--model` when given. An existing `node.yaml` is
    kept, with the lines it lacks printed, not rewritten;
 3. checks `ffmpeg` on `PATH` and prints the `winget` line when absent
    (a warning, not a refusal: the take start refuses `recorder_missing`
@@ -353,13 +352,12 @@ login step.
 - C-7: the approver set is still re-read and still owner-checked (owner
   Administrators, SYSTEM or the process's account); only the write probe
   goes, since the account that could write it is the owner.
-- C-8: on a personal node `Bash` and `PowerShell` go to the phone by
-  default and the file tools cannot touch the config dir, `node.yaml`,
-  `approvers\` or the desktop app's profile (§6). This is the one place the
-  design adds a rule rather than removing one, because the OS boundary it
-  replaces is the only thing that kept the model's shell out of the
-  owner's files. The owner may prefer to accept the risk and keep shells
-  routine; that is his call (§12).
+- C-8: on a personal node the file tools cannot touch the config dir,
+  `node.yaml`, `approvers\` or the desktop app's profile (§6); shell calls
+  already go to the phone through `Bash`'s `requiresApproval`. This is the
+  one place the design adds a rule rather than removing one, because the OS
+  boundary it replaces is the only thing that kept the model's tools out of
+  the owner's files.
 - C-9: `pair` writes `approvers.relay` into `node.yaml` and starts the node
   under `hosting: personal`; `install --personal` does not start a node
   that has no relay yet.
@@ -371,9 +369,10 @@ login step.
 
 ## 12. Owner rulings (2026-10-25)
 
-- **R-PN-1.** On a personal node `Bash` and `PowerShell` go to the phone by
-  default, and the file tools cannot touch the config dir, `node.yaml`,
-  `approvers\` or the desktop app's profile (C-8 stands).
+- **R-PN-1.** On a personal node shell calls go to the phone (already the
+  case: `Bash` carries `requiresApproval`), and the file tools cannot touch
+  the config dir, `node.yaml`, `approvers\` or the desktop app's profile
+  (C-8 stands).
 - **R-PN-2.** The relay runs on sethserver (`king-louie-service relay run`
   under the `relay` block of its `service.json`, with a certificate). It is
   deployed outside this design, before the first take; this design assumes a
