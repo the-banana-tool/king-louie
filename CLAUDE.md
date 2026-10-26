@@ -2555,7 +2555,9 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   (`node.yaml`, `approvers\`) and `desktopProfileDirs()` (`%APPDATA%\king-louie`
   and `%APPDATA%\King Louie`, the dev and packaged names of the desktop app's
   profile: its vault, chats and cookies). `isDeniedPath` refuses every
-  path-gated tool, reads and writes alike, through links and a missing path's
+  path-gated tool, reads and writes alike (the Browser tool's
+  `save_storage_state`/`load_storage_state` `path` and `set_input_files`
+  `files` too, unconditionally), through links and a missing path's
   deepest existing ancestor; nothing in `node.yaml` lifts it. Shells already
   go to the phone (`Bash` is `requiresApproval`, so `unsafe`).
 - **The CLI forms.** `install --personal [--data-dir DIR] [--browser PATH]

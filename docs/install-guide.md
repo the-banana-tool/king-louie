@@ -1069,7 +1069,8 @@ What a personal node does **not** have, on purpose:
 What the model's tools cannot touch: because the service runs as you, the
 operating system no longer keeps its tools out of your files, so a personal
 node denies the file tools (`Read`, `Write`, `Edit`, `MultiEdit`, `Glob`,
-`Grep`) two directories outright, for reads and writes alike: the config dir
+`Grep`, and the browser's storage-state files and uploads) two directories
+outright, for reads and writes alike: the config dir
 (`node.yaml`, `approvers\`) and the desktop app's profile
 (`%APPDATA%\king-louie`, and `%APPDATA%\King Louie` as a packaged build may
 name it: its vault, chats and browser cookies). Nothing in

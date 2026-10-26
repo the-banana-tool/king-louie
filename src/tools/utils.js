@@ -426,6 +426,7 @@ module.exports = {
   registerDeniedDir,
   clearDeniedDirs,
   isDeniedPath,
+  deniedPathMessage,
   SECRET_FILE_PREFIXES,
   SECRET_PATH_DENIAL_MESSAGE,
   decryptSettingKey,

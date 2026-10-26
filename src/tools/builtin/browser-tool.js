@@ -24,6 +24,20 @@ const {
 
 const VAULT_CRED_PREFIX = 'browser_cred:';
 
+// The raw file paths some actions read or write (storage state, uploads)
+// are held to the node's denied dirs (src/tools/utils.js) like the file
+// tools' paths, with the same wording. A no-op while none is registered,
+// so no hosting flag reaches this tool. → the denial text, or null.
+function deniedFilePath(paths) {
+  const { isDeniedPath, deniedPathMessage } = require('../utils');
+  for (const p of [].concat(paths)) {
+    if (typeof p !== 'string' || !p) continue;
+    const abs = path.resolve(p);
+    if (isDeniedPath(abs)) return deniedPathMessage(p);
+  }
+  return null;
+}
+
 function profilesRoot(context) {
   if (!context || !context.userDataPath) {
     throw new Error('Profile actions require userDataPath in tool context (are you running inside Electron?).');
@@ -459,6 +473,8 @@ const actions = {
   async set_input_files(params, ctx) {
     const b = requireRunning(ctx);
     if (!params.files) return { ok: false, error: 'files parameter is required (path string or array of paths)' };
+    const denied = deniedFilePath(params.files);
+    if (denied) return { ok: false, error: denied };
     const loc = resolveLocator(b.page, params.selector);
     await loc.setInputFiles(params.files, { timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Set files on ${params.selector}` };
@@ -1020,6 +1036,8 @@ const actions = {
   async save_storage_state(params, ctx) {
     const b = requireRunning(ctx);
     if (!params.path) return { ok: false, error: 'path parameter is required (file path to save state to)' };
+    const denied = deniedFilePath(params.path);
+    if (denied) return { ok: false, error: denied };
     await b.context.storageState({ path: params.path });
     return { ok: true, message: `Storage state saved to ${params.path}` };
   },
@@ -1027,6 +1045,8 @@ const actions = {
   async load_storage_state(params, ctx) {
     const b = requireRunning(ctx);
     if (!params.path) return { ok: false, error: 'path parameter is required (file path to load state from)' };
+    const denied = deniedFilePath(params.path);
+    if (denied) return { ok: false, error: denied };
     // Loading storage state requires creating a new context
     const fs = require('fs');
     if (!fs.existsSync(params.path)) return { ok: false, error: `File not found: ${params.path}` };

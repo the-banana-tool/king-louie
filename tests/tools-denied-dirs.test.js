@@ -224,6 +224,59 @@ describe('denied directories', () => {
   });
 });
 
+// Review fix (final wave, item 4): the Browser tool's raw file paths.
+describe('the Browser tool\'s file paths', () => {
+  const { actions } = require('../src/tools/builtin/browser-tool');
+  const { setBrowser, removeBrowser } = require('../src/tools/builtin/browser-registry');
+  const KEY = 'take:denied-dirs-test';
+
+  function fakeBrowser(calls) {
+    return {
+      isRunning: true,
+      page: { locator: () => ({ setInputFiles: async (files) => { calls.push(['setInputFiles', files]); } }) },
+      context: {
+        storageState: async (opts) => { calls.push(['storageState', opts]); fs.writeFileSync(opts.path, '{"cookies":[]}'); },
+        addCookies: async (c) => { calls.push(['addCookies', c]); }
+      }
+    };
+  }
+
+  it('save_storage_state, load_storage_state and set_input_files refuse a path in a denied dir and touch nothing', async () => {
+    registerDeniedDir(cfg);
+    const calls = [];
+    setBrowser(KEY, fakeBrowser(calls));
+    const ctx = { takePolicy: { current: { browserKey: KEY } } };
+    try {
+      const saveTo = path.join(cfg, 'state.json');
+      const save = await actions.save_storage_state({ path: saveTo }, ctx);
+      assert.strictEqual(save.ok, false);
+      assert.match(save.error, DENIAL);
+      assert.strictEqual(fs.existsSync(saveTo), false, 'not created');
+
+      const load = await actions.load_storage_state({ path: path.join(cfg, 'node.yaml') }, ctx);
+      assert.strictEqual(load.ok, false);
+      assert.match(load.error, DENIAL);
+
+      const upload = await actions.set_input_files({ selector: '#f', files: [path.join(root, 'config2', 'f.txt'), path.join(cfg, 'approvers', 'a.json')] }, ctx);
+      assert.strictEqual(upload.ok, false);
+      assert.match(upload.error, DENIAL);
+      const single = await actions.set_input_files({ selector: '#f', files: path.join(cfg, 'node.yaml') }, ctx);
+      assert.strictEqual(single.ok, false);
+      assert.match(single.error, DENIAL);
+
+      assert.deepStrictEqual(calls, [], 'the browser was never asked to read or write');
+
+      // Outside the denied dir the actions go on as before.
+      const okPath = path.join(root, 'config2', 'state.json');
+      assert.strictEqual((await actions.save_storage_state({ path: okPath }, ctx)).ok, true);
+      assert.strictEqual((await actions.load_storage_state({ path: okPath }, ctx)).ok, true);
+      assert.strictEqual((await actions.set_input_files({ selector: '#f', files: path.join(root, 'config2', 'f.txt') }, ctx)).ok, true);
+    } finally {
+      removeBrowser(KEY);
+    }
+  });
+});
+
 function makeMemoryStore() {
   const data = {};
   return {
