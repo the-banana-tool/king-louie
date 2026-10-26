@@ -45,6 +45,12 @@ dir under %LOCALAPPDATA%\KingLouie\node (Windows only). Run it from a
 normal, unelevated prompt. "uninstall --personal" removes the task and
 leaves the data dir.
 
+"import --case" copies one case (by directory name or case id) and its chats
+from the desktop profile, with the node stopped. On a personal node
+(hosting: personal) it runs as the owner; on a fleet node it needs an
+administrator, and on POSIX it cannot run as root against a data dir another
+account owns (run it as that account).
+
 "history import" adds one conversation file (a Claude Code session, a Markdown
 transcript or a King Louie chat export) to the data dir's chat history as a new
 chat. Run it with the service stopped, as the account that owns the data dir,

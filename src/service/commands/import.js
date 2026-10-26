@@ -88,12 +88,44 @@ function defaultConfirm(io, question) {
 }
 
 const firstLine = (text) => String(text || '').split(/\r?\n/)[0];
+const ZERO_SHA = /^0+$/;
+
+// The paths of the desktop's case that differ from its HEAD (tracked
+// changes, staged or not, and untracked files git does not ignore), found
+// with plumbing that never writes the desktop's .git/index: `git status`
+// refreshes and rewrites the index, and runGitSync cannot pass
+// --no-optional-locks or GIT_OPTIONAL_LOCKS. diff-index does not refresh,
+// so a file whose stat changed but whose content did not is reported with
+// an all-zero worktree id; those are hashed (hash-object without -w writes
+// nothing) and kept only when the content really differs.
+function sourceChanges(git, dir) {
+  const changed = [];
+  const statOnly = [];
+  const fields = git(dir, ['diff-index', '-z', 'HEAD', '--']).split('\0');
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const meta = fields[i].replace(/^:/, '').split(' ');
+    const rel = fields[i + 1];
+    if (!rel) break;
+    const [, , headSha, workSha, status] = meta;
+    if (status === 'M' && ZERO_SHA.test(workSha || '') && meta[0] === meta[1]) statOnly.push({ rel, headSha });
+    else changed.push(rel);
+  }
+  if (statOnly.length) {
+    const hashes = git(dir, ['hash-object', '--', ...statOnly.map((s) => s.rel)]).trim().split(/\r?\n/);
+    statOnly.forEach((s, n) => { if (hashes[n] !== s.headSha) changed.push(s.rel); });
+  }
+  for (const rel of git(dir, ['ls-files', '-z', '--others', '--exclude-standard']).split('\0')) {
+    if (rel) changed.push(rel);
+  }
+  return changed;
+}
 
 // The case the owner named, from the source alone (personal node spec §9):
 // which directory and chats move, what the repository's head is, and the
-// two refusals that must come before anything is written: the node already
-// has that directory (CASE_EXISTS), or the desktop's copy is not a git
-// repository (CASE_NOT_A_REPO). Returns { refusal } or { selection }.
+// refusals that must come before anything is written: the node already has
+// that directory (CASE_EXISTS), the desktop's copy is not a git repository
+// (CASE_NOT_A_REPO) or one git refuses (GIT_UNSAFE_CONFIG), or it has
+// uncommitted changes (CASE_DIRTY). Returns { refusal } or { selection }.
 function selectCase({ source, from, target, caseRef, reader, git }) {
   let filtered;
   try {
@@ -116,7 +148,22 @@ function selectCase({ source, from, target, caseRef, reader, git }) {
   try {
     head = git(sourceDir, ['rev-parse', 'HEAD']).trim();
   } catch (err) {
+    if (err && err.code === 'GIT_UNSAFE_CONFIG') return { refusal: `GIT_UNSAFE_CONFIG: ${firstLine(err.message)}; nothing was written.` };
     return { refusal: `CASE_NOT_A_REPO: git cannot read the head of ${sourceDir} (${firstLine(err.message)}); nothing was written.` };
+  }
+  // A case with uncommitted changes would land on the node just as dirty and
+  // fail the verify after the copy, so it is refused here, before anything
+  // is written.
+  let dirty;
+  try {
+    dirty = sourceChanges(git, sourceDir);
+  } catch (err) {
+    if (err && err.code === 'GIT_UNSAFE_CONFIG') return { refusal: `GIT_UNSAFE_CONFIG: ${firstLine(err.message)}; nothing was written.` };
+    return { refusal: `CASE_NOT_A_REPO: git cannot read the state of ${sourceDir} (${firstLine(err.message)}); nothing was written.` };
+  }
+  if (dirty.length) {
+    const shown = dirty.slice(0, 5).join(', ') + (dirty.length > 5 ? ', ...' : '');
+    return { refusal: `CASE_DIRTY: the case at ${sourceDir} has ${dirty.length} uncommitted change(s) (${shown}). Quit the desktop app, or let its turn finish, so the case commits, then run this again; nothing was written.` };
   }
   const messages = chatIds.reduce((n, id) => {
     const chat = source.getValue('chat', id);
@@ -369,7 +416,7 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
         || (item.category === 'chat' && selection.chatIds.has(item.key)));
       const caseItem = items.find((item) => item.category === 'case');
       if (!caseItem || caseItem.action !== 'new') {
-        io.stderr.write(printable(`CASE_EXISTS: the node already has a case at ${selection.caseDir}${caseItem && caseItem.note ? ` (${caseItem.note})` : ''}; nothing was written.`) + '\n');
+        io.stderr.write(printable(`CASE_EXISTS: the node already has a case at ${selection.caseDir}${caseItem && caseItem.note ? ` (${caseItem.note})` : ''}; no case file or chat was written.`) + '\n');
         return 2;
       }
       io.stdout.write(printable(`Will copy case ${selection.title} (${selection.caseId}, ${selection.status}): ${selection.chats} chats, ${selection.messages} messages, head ${selection.head}`) + '\n');
@@ -417,7 +464,9 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
     io.stdout.write(printable(`desktop: head ${selection.head}, ${selection.chats} chats / ${selection.messages} messages`) + '\n');
     io.stdout.write(printable(`node: head ${result.head || 'unreadable'}, ${result.clean ? 'clean' : 'not clean'}, ${result.chats} chats / ${result.messages} messages`) + '\n');
     if (result.problems.length) {
-      io.stderr.write(printable(`VERIFY_MISMATCH: ${result.problems.join('; ')}. The copy on the node is kept; the desktop's case is unchanged.`) + '\n');
+      io.stderr.write(printable(`VERIFY_MISMATCH: ${result.problems.join('; ')}. The copy on the node is kept; the desktop's case is unchanged. `
+        + `To try again, with the node stopped, remove the node's case directory ${caseDirOnNode} and the node's ${result.chats} chat(s) with caseId ${selection.caseId}, then run this command again `
+        + '(a chat left on the node is imported again under a new id, and the counts can then never match).') + '\n');
       return 1;
     }
     if (failed) return 1;

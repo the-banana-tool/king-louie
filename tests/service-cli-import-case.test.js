@@ -263,6 +263,7 @@ describe('import --from --case', () => {
       assert.strictEqual(code, 1);
       assert.match(o.out.stderr, /VERIFY_MISMATCH/);
       assert.match(o.out.stderr, /not clean/);
+      assert.ok(o.out.stderr.includes(`remove the node's case directory ${path.join(dataDir, 'cases', 'lakeside-lot')} and the node's 2 chat(s) with caseId ${CASE_ID}`), o.out.stderr);
       assert.ok(!o.out.stdout.includes('Moved elsewhere'));
       assert.ok(fs.existsSync(path.join(dataDir, 'cases', 'lakeside-lot', 'case.yaml')), 'the copy stays');
     });
@@ -280,6 +281,56 @@ describe('import --from --case', () => {
       assert.match(o.out.stdout, /Dry run: nothing was written\./);
       assert.deepStrictEqual(snapshot(dataDir), before);
     });
+  });
+
+  it('CASE_DIRTY when the desktop case has uncommitted changes; no writer opened, nothing written', async () => {
+    const caseDirOf = (root) => path.join(root, 'cases', 'lakeside-lot');
+    for (const [label, dirty] of [
+      ['an untracked file', (dir) => fs.writeFileSync(path.join(dir, 'journal', 'b.md'), '# B\n')],
+      ['a changed tracked file', (dir) => fs.writeFileSync(path.join(dir, 'brief.md'), '# Brief, edited\n')],
+      ['a staged change', (dir) => { fs.writeFileSync(path.join(dir, 'brief.md'), '# Staged\n'); gitIn(dir, ['add', 'brief.md']); }]
+    ]) {
+      const { root } = userData();
+      dirty(caseDirOf(root));
+      const dataDir = keyedDataDir();
+      const before = snapshot(dataDir);
+      let opened = 0;
+      const o = io();
+      const code = await runImportCommand({ flags: { from: root, case: 'lakeside-lot', yes: true }, dataDir, io: o.io, deps: baseDeps({ openWriter: () => { opened += 1; throw new Error('no writer'); } }) });
+      assert.strictEqual(code, 2, label);
+      assert.match(o.out.stderr, /CASE_DIRTY/, label);
+      assert.match(o.out.stderr, /nothing was written/, label);
+      assert.strictEqual(opened, 0, `${label}: no writer opened`);
+      assert.deepStrictEqual(snapshot(dataDir), before, label);
+    }
+  });
+
+  it('a file touched but unchanged is not dirty, and the desktop index is not rewritten', async () => {
+    const { root, head } = userData();
+    const dir = path.join(root, 'cases', 'lakeside-lot');
+    const later = new Date(Date.now() + 60000);
+    fs.utimesSync(path.join(dir, 'brief.md'), later, later);
+    // diff-index (no refresh) reports the touched file, so the hash check is what clears it.
+    assert.match(gitIn(dir, ['diff-index', 'HEAD', '--']), /brief\.md/);
+    const indexBefore = fs.readFileSync(path.join(dir, '.git', 'index'));
+    const o = io();
+    const code = await runImportCommand({ flags: { from: root, case: 'lakeside-lot', dryRun: true }, dataDir: keyedDataDir(), io: o.io, deps: baseDeps() });
+    assert.strictEqual(code, 0, o.out.stderr);
+    assert.ok(o.out.stdout.includes(`head ${head}`));
+    assert.ok(fs.readFileSync(path.join(dir, '.git', 'index')).equals(indexBefore), "the desktop's .git/index is unchanged");
+  });
+
+  it('CASE_AMBIGUOUS when two directories share the id; CASE_UNREADABLE when the named directory has no case.yaml', async () => {
+    const { root } = userData();
+    fs.writeFileSync(path.join(root, 'cases', 'blue-folder', 'case.yaml'), `id: ${CASE_ID}\ntitle: Blue folder\n`);
+    const o = io();
+    assert.strictEqual(await runImportCommand({ flags: { from: root, case: CASE_ID, dryRun: true }, dataDir: keyedDataDir(), io: o.io, deps: baseDeps() }), 2);
+    assert.match(o.out.stderr, /CASE_AMBIGUOUS/);
+    fs.rmSync(path.join(root, 'cases', 'blue-folder', 'case.yaml'));
+    fs.writeFileSync(path.join(root, 'cases', 'blue-folder', 'notes.md'), 'x\n');
+    const o2 = io();
+    assert.strictEqual(await runImportCommand({ flags: { from: root, case: 'blue-folder', dryRun: true }, dataDir: keyedDataDir(), io: o2.io, deps: baseDeps() }), 2);
+    assert.match(o2.out.stderr, /CASE_UNREADABLE/);
   });
 
   it('refuses as root against a data dir another account owns, before anything is written', async () => {
