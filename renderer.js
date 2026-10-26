@@ -2684,8 +2684,10 @@ const CASE_STATUS_ACTIONS = [
   { status: 'paused', label: 'Pause', from: ['active'] },
   { status: 'active', label: 'Resume', from: ['paused'] },
   { status: 'done', label: 'Done', from: ['active', 'needs-direction', 'paused'], confirm: 'Mark this case done? It becomes read-only.' },
-  { status: 'abandoned', label: 'Abandon', from: ['draft', 'active', 'needs-direction', 'paused'], confirm: 'Abandon this case? It becomes read-only and its wake-ups stop.' }
+  { status: 'abandoned', label: 'Abandon', from: ['draft', 'active', 'needs-direction', 'paused'], confirm: 'Abandon this case? It becomes read-only and its wake-ups stop.' },
+  { status: 'abandoned', kind: 'moved', label: 'Moved elsewhere', from: ['draft', 'active', 'needs-direction', 'paused'], confirm: 'Mark this case as moved to another King Louie? It becomes read-only here and its wake-ups stop.' }
 ];
+const CASE_STATUS_REASON_LABELS = { moved: 'Moved to another King Louie' };
 const CASE_BUDGET_CATEGORIES = ['usd', 'deadline', 'turnsPerDay', 'contactsPerDay', 'questionsPerDay'];
 
 function caseButton(text, className = 'secondary-button') {
@@ -3036,19 +3038,19 @@ async function renderCaseUnattendedSection(chat, container, { pendingMessage = n
     const statusText = document.createElement('span');
     statusText.id = 'case-status-text';
     const reason = info.statusReason
-      ? ` (${info.statusReason.kind}${info.statusReason.note ? `: ${info.statusReason.note}` : ''})`
+      ? ` (${CASE_STATUS_REASON_LABELS[info.statusReason.kind] || info.statusReason.kind}${info.statusReason.note ? `: ${info.statusReason.note}` : ''})`
       : '';
     statusText.textContent = `Status: ${info.status}${reason}`;
     statusRow.appendChild(statusText);
     CASE_STATUS_ACTIONS.filter((a) => a.from.includes(info.status)).forEach((action) => {
       const b = caseButton(action.label);
-      b.id = `case-status-${action.status}`;
+      b.id = `case-status-${action.kind || action.status}`;
       b.addEventListener('click', async () => {
         // Cases stage 8: the Done confirm shows the summary and what is
         // still open first. It is never refused for an open item.
         const before = action.status === 'done' ? await caseProgressCloseLines(chat.caseId) : [];
         if (action.confirm && !(await showConfirmDialog(action.confirm, { before }))) return;
-        const r = await window.electron.cases.setStatus({ caseId: chat.caseId, status: action.status });
+        const r = await window.electron.cases.setStatus({ caseId: chat.caseId, status: action.status, ...(action.kind ? { kind: action.kind } : {}) });
         if (!r?.ok) { showError(r?.error || 'Could not change the status.'); return; }
         refresh();
       });

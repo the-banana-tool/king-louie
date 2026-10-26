@@ -84,12 +84,18 @@ function registerCaseUnattendedHandlers(ipcMain, context = {}) {
     question: await runtime().acknowledgeBriefing(required(caseId, 'caseId'), required(questionId, 'questionId'), { channel: 'in-app' })
   }));
 
-  handle(IPC.CASE_SET_STATUS, async ({ caseId, status, note }) => {
+  handle(IPC.CASE_SET_STATUS, async ({ caseId, status, kind, note }) => {
     if (!STATUSES.includes(status)) return { ok: false, error: `Unknown status "${status}". Statuses: ${STATUSES.join(', ')}.` };
     if (note !== undefined && typeof note !== 'string') return { ok: false, error: 'note must be text.' };
+    // Every reason kind is the host's to choose, but one: the owner may say
+    // a case was abandoned because it moved to another King Louie
+    // (personal node §9). Any other kind from the renderer is refused.
+    if (kind !== undefined && !(kind === 'moved' && status === 'abandoned')) {
+      return { ok: false, code: 'BAD_KIND', error: 'The only reason the app may give is "moved", and only with status abandoned.' };
+    }
     const rt = runtime();
     const id = required(caseId, 'caseId');
-    const meta = await rt.systemAction(id, `status ${status}`, () => rt.setStatus(id, status, { kind: 'owner', by: 'owner', note: note || '' }));
+    const meta = await rt.systemAction(id, `status ${status}`, () => rt.setStatus(id, status, { kind: kind === 'moved' ? 'moved' : 'owner', by: 'owner', note: note || '' }));
     // Cases stage 8: the progress as it now reads (after done, the record
     // the case was frozen with). The status is set either way: a progress
     // read that fails never fails the owner's press.

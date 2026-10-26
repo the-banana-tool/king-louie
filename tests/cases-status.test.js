@@ -2,7 +2,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const {
-  STATUSES, TRANSITIONS, ALLOWED, DENIED, READ_OPS, AUTONOMY_KEY, FAILURE_CLASSES,
+  STATUSES, REASON_KINDS, TRANSITIONS, ALLOWED, DENIED, READ_OPS, AUTONOMY_KEY, FAILURE_CLASSES,
   StatusError, canTransition, check
 } = require('../src/cases/status');
 
@@ -67,6 +67,21 @@ describe('status transitions', () => {
     for (const [from, to, by, kind] of refused) {
       assert.strictEqual(canTransition(from, to, by, kind), false, `${from} -> ${to} (${by}, ${kind})`);
     }
+  });
+
+  // Personal node §9: a case moved to another King Louie is closed here as
+  // abandoned, kind `moved`, by the owner; `moved` fits no other row.
+  it('accepts moved only for the owner transitions to abandoned', () => {
+    assert.ok(REASON_KINDS.includes('moved'));
+    for (const from of ['draft', 'active', 'needs-direction', 'paused']) {
+      assert.strictEqual(canTransition(from, 'abandoned', 'owner', 'moved'), true, from);
+      assert.strictEqual(canTransition(from, 'abandoned', 'runtime', 'moved'), false, from);
+    }
+    for (const [from, to] of [['active', 'paused'], ['paused', 'active'], ['active', 'done'], ['draft', 'active'], ['needs-direction', 'active'], ['done', 'abandoned']]) {
+      for (const by of ['owner', 'runtime']) assert.strictEqual(canTransition(from, to, by, 'moved'), false, `${from} -> ${to} (${by})`);
+    }
+    const movedRows = TRANSITIONS.filter((t) => t.kinds.includes('moved'));
+    assert.ok(movedRows.length > 0 && movedRows.every((t) => t.to === 'abandoned' && t.by.length === 1 && t.by[0] === 'owner'));
   });
 
   it('checks only from/to/by when no kind is given', () => {

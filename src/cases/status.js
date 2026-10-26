@@ -3,7 +3,9 @@
 // Pure: no I/O. CaseRuntime.setStatus and assertWritable apply it.
 
 const STATUSES = Object.freeze(['draft', 'active', 'needs-direction', 'paused', 'done', 'abandoned']);
-const REASON_KINDS = Object.freeze(['gating', 'failure', 'budget', 'budget-grant', 'commit', 'owner', 'direction']);
+// `moved` (personal node §9): the owner closed this copy of a case because
+// it went to another King Louie. It fits only the owner's rows to abandoned.
+const REASON_KINDS = Object.freeze(['gating', 'failure', 'budget', 'budget-grant', 'commit', 'owner', 'direction', 'moved']);
 
 const row = (from, to, by, kinds) => Object.freeze({
   from: Object.freeze(from), to, by: Object.freeze(by), kinds: Object.freeze(kinds)
@@ -11,7 +13,7 @@ const row = (from, to, by, kinds) => Object.freeze({
 
 const TRANSITIONS = Object.freeze([
   row(['draft'], 'active', ['runtime'], ['gating']),
-  row(['draft'], 'abandoned', ['owner'], ['owner']),
+  row(['draft'], 'abandoned', ['owner'], ['owner', 'moved']),
   row(['active'], 'needs-direction', ['runtime'], ['failure']),
   row(['active', 'needs-direction'], 'paused', ['runtime'], ['budget']),
   row(['active'], 'paused', ['runtime'], ['commit']),
@@ -21,7 +23,7 @@ const TRANSITIONS = Object.freeze([
   row(['paused'], 'needs-direction', ['runtime'], ['budget-grant']),
   row(['paused'], 'active', ['owner'], ['owner']),
   row(['active', 'needs-direction', 'paused'], 'done', ['owner'], ['owner']),
-  row(['active', 'needs-direction', 'paused'], 'abandoned', ['owner'], ['owner'])
+  row(['active', 'needs-direction', 'paused'], 'abandoned', ['owner'], ['owner', 'moved'])
 ]);
 
 // Cases stage 3: reading a plan or an executor's jobs is allowed wherever

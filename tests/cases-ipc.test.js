@@ -307,18 +307,56 @@ describe('case IPC, stage 2', () => {
     assert.match((await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'sleeping' })).error, /Unknown status/);
   });
 
-  it('ignores a renderer-supplied kind and always sets status as the owner', async () => {
+  it('sets status as the owner, and refuses any renderer-supplied kind but moved', async () => {
     const { runtime, call } = setup2();
     const c = await activeCase(runtime);
-    const seenKinds = [];
+    const seen = [];
     const original = runtime.setStatus.bind(runtime);
     runtime.setStatus = (id, status, opts) => {
-      seenKinds.push(opts && opts.kind);
+      seen.push(opts);
       return original(id, status, opts);
     };
-    const r = await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'paused', kind: 'budget-grant' });
+    for (const kind of ['budget-grant', 'owner', 'gating', 'direction', '', 7]) {
+      const r = await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'paused', kind });
+      assert.deepStrictEqual([r.ok, r.code], [false, 'BAD_KIND'], JSON.stringify(kind));
+    }
+    const owner = await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'abandoned', kind: 'owner' });
+    assert.deepStrictEqual([owner.ok, owner.code], [false, 'BAD_KIND']);
+    assert.strictEqual(runtime.getCase(c.id).status, 'active');
+    assert.deepStrictEqual(seen, []);
+    const r = await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'paused' });
     assert.strictEqual(r.ok, true);
-    assert.deepStrictEqual(seenKinds, ['owner']);
+    assert.deepStrictEqual(seen.map((o) => [o.kind, o.by]), [['owner', 'owner']]);
+  });
+
+  // Personal node §9: the desktop's copy of a case that went to another King
+  // Louie is closed as abandoned, kind moved; moved goes with abandoned only.
+  it('accepts kind moved only with status abandoned, and the case is read-only after', async () => {
+    const { runtime, call } = setup2();
+    const c = await activeCase(runtime);
+    for (const status of ['paused', 'done', 'active']) {
+      const r = await call(IPC.CASE_SET_STATUS, { caseId: c.id, status, kind: 'moved' });
+      assert.deepStrictEqual([r.ok, r.code], [false, 'BAD_KIND'], status);
+    }
+    assert.strictEqual(runtime.getCase(c.id).status, 'active');
+    const r = await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'abandoned', kind: 'moved', note: 'moved to laptop node' });
+    assert.strictEqual(r.ok, true);
+    const reason = runtime.getCase(c.id).statusReason;
+    assert.deepStrictEqual([r.case.status, reason.kind, reason.by, reason.note], ['abandoned', 'moved', 'owner', 'moved to laptop node']);
+    assert.deepStrictEqual(runtime.assertWritable(c.id, 'Ledger.assert'), { ok: false, error: 'Case is abandoned. It is read-only.' });
+    assert.strictEqual(runtime.assertWritable(c.id, 'Ledger.query'), null);
+  });
+
+  it('records a moved reason through the runtime, from a draft too', async () => {
+    const { runtime } = setup2();
+    const c = await activeCase(runtime);
+    runtime.setStatus(c.id, 'abandoned', { kind: 'moved', by: 'owner', note: 'moved to laptop node' });
+    assert.deepStrictEqual([runtime.getCase(c.id).status, runtime.getCase(c.id).statusReason.kind], ['abandoned', 'moved']);
+    assert.deepStrictEqual(runtime.assertWritable(c.id, 'Brief.update'), { ok: false, error: 'Case is abandoned. It is read-only.' });
+    const draft = await runtime.createCase({ title: 'Roof quotes', objective: 'Get three roof quotes', force: true });
+    assert.throws(() => runtime.setStatus(draft.id, 'abandoned', { kind: 'moved', by: 'runtime' }), { code: 'BAD_TRANSITION' });
+    runtime.setStatus(draft.id, 'abandoned', { kind: 'moved', by: 'owner' });
+    assert.strictEqual(runtime.getCase(draft.id).statusReason.kind, 'moved');
   });
 
   it('reports the budget and validates grants before writing an owner-action fact', async () => {
