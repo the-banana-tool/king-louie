@@ -176,6 +176,46 @@ function listSecretDataDirs() {
   return [...secretDataDirs.values()];
 }
 
+// ── Denied directories ──
+//
+// A personal node's service runs as the owner, so the operating system no
+// longer keeps the file tools out of the owner's admin files (the config dir,
+// the approvers). A denied directory is refused to every path-gated tool,
+// whatever the working directory and allowedDirectories say, and the
+// directory itself is denied too: listing it is a read of it. Held in the
+// comparison form (resolved, slash-normalised, lowercased), as the secret
+// dirs are, and both spellings are kept for a dir that does not exist yet.
+const deniedDirs = new Set();
+
+function registerDeniedDir(dir) {
+  if (!dir) return;
+  deniedDirs.add(normalizeForComparison(resolveRealPath(String(dir))));
+  deniedDirs.add(normalizeForComparison(String(dir)));
+}
+
+function clearDeniedDirs() {
+  deniedDirs.clear();
+}
+
+/**
+ * True when `targetPath`, resolved through any link, is a denied directory
+ * or is under one. A prefix counts only when it ends at a separator.
+ */
+function isDeniedPath(targetPath) {
+  if (!targetPath || deniedDirs.size === 0) return false;
+  const target = normalizeForComparison(resolveRealPath(String(targetPath)));
+  for (const dir of deniedDirs) {
+    if (target === dir || target.startsWith(dir.endsWith('/') ? dir : `${dir}/`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function deniedPathMessage(targetPath) {
+  return `${targetPath} is inside a directory King Louie's tools may not touch on this node`;
+}
+
 function isSecretFileName(name) {
   const lower = String(name || '').toLowerCase();
   return SECRET_FILE_PREFIXES.some((prefix) => lower.startsWith(prefix));
@@ -235,7 +275,11 @@ secretIdentities.snapshot = null;
  * allowedDirectories.
  */
 function isProtectedSecretPath(targetPath) {
-  if (!targetPath || secretDataDirs.size === 0) return false;
+  if (!targetPath) return false;
+  // Glob and Grep filter the files they walk through this check alone, so a
+  // denied directory reached from a root above it is skipped here.
+  if (isDeniedPath(targetPath)) return true;
+  if (secretDataDirs.size === 0) return false;
 
   // 1. Name + directory. Works for a file that does not exist yet, so a secret
   //    cannot be pre-planted or clobbered by Write/Edit either.
@@ -259,7 +303,7 @@ function isProtectedSecretPath(targetPath) {
  * files are never allowed.
  */
 function isPathAllowed(targetPath, workingDirectory, allowedDirectories = []) {
-  if (isProtectedSecretPath(targetPath)) {
+  if (isDeniedPath(targetPath) || isProtectedSecretPath(targetPath)) {
     return false;
   }
   if (workingDirectory && isPathWithin(workingDirectory, targetPath)) {
@@ -280,6 +324,9 @@ function isPathAllowed(targetPath, workingDirectory, allowedDirectories = []) {
  * and send it hunting for another way in.
  */
 function describePathDenial(targetPath, workingDirectory, allowedDirectories = []) {
+  if (isDeniedPath(targetPath)) {
+    return deniedPathMessage(targetPath);
+  }
   if (isProtectedSecretPath(targetPath)) {
     return SECRET_PATH_DENIAL_MESSAGE;
   }
@@ -363,6 +410,9 @@ module.exports = {
   registerSecretDataDir,
   clearSecretDataDirs,
   listSecretDataDirs,
+  registerDeniedDir,
+  clearDeniedDirs,
+  isDeniedPath,
   SECRET_FILE_PREFIXES,
   SECRET_PATH_DENIAL_MESSAGE,
   decryptSettingKey,

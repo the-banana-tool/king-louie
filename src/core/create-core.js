@@ -5,7 +5,7 @@ const ProviderFactory = require('../providers/provider-factory');
 const InferenceRouter = require('../providers/inference-router');
 const { initializeTools, toolRegistry } = require('../tools');
 const { registerFleetChatTools, unregisterFleetChatTools, FLEET_CHAT_TOOL_NAMES } = require('../tools/builtin/fleet-chat-tools');
-const { registerSecretDataDir } = require('../tools/utils');
+const { registerSecretDataDir, registerDeniedDir } = require('../tools/utils');
 const { tokenizeCommand } = require('./llm-command');
 const { createModelChoices } = require('./model-choices');
 const { DESKTOP_RULE_ORIGIN } = require('../tools/permission-rules');
@@ -159,6 +159,11 @@ function createCore(deps = {}) {
   // only thing between a remote origin and this directory's master key,
   // gateway token and encrypted stores is a deny-list. Tell it where they are.
   registerSecretDataDir(paths.dataDir);
+  // A personal node runs as the owner, so its admin dirs are kept from the
+  // file tools here rather than by the operating system (R-PN-1).
+  for (const dir of Array.isArray(deps.deniedDirs) ? deps.deniedDirs : []) {
+    if (dir) registerDeniedDir(dir);
+  }
   // The master key is not always inside the data dir: systemd hands it to the
   // service in $CREDENTIALS_DIRECTORY, and on macOS (and Linux without
   // systemd) it lives in the admin config dir. Unreachable while
