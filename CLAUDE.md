@@ -2552,8 +2552,9 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
 - **The denied dirs (R-PN-1, C-8).** The OS no longer keeps the model's
   tools out of the owner's files, so `run.js` passes `createCore` `deniedDirs`
   (registered with `registerDeniedDir`, `src/tools/utils.js`): the config dir
-  (`node.yaml`, `approvers\`) and `desktopProfileDir()` (`%APPDATA%\king-louie`,
-  the desktop app's vault, chats and cookies). `isDeniedPath` refuses every
+  (`node.yaml`, `approvers\`) and `desktopProfileDirs()` (`%APPDATA%\king-louie`
+  and `%APPDATA%\King Louie`, the dev and packaged names of the desktop app's
+  profile: its vault, chats and cookies). `isDeniedPath` refuses every
   path-gated tool, reads and writes alike, through links and a missing path's
   deepest existing ancestor; nothing in `node.yaml` lifts it. Shells already
   go to the phone (`Bash` is `requiresApproval`, so `unsafe`).

@@ -1058,7 +1058,8 @@ operating system no longer keeps its tools out of your files, so a personal
 node denies the file tools (`Read`, `Write`, `Edit`, `MultiEdit`, `Glob`,
 `Grep`) two directories outright, for reads and writes alike: the config dir
 (`node.yaml`, `approvers\`) and the desktop app's profile
-(`%APPDATA%\king-louie`: its vault, chats and browser cookies). Nothing in
+(`%APPDATA%\king-louie`, and `%APPDATA%\King Louie` as a packaged build may
+name it: its vault, chats and browser cookies). Nothing in
 `node.yaml` lifts that. Shell calls (`Bash`) go to your phone, as on any node
 with phone approvals. A shell the phone approves can do anything you can:
 the deny list fences the file tools, never a shell.
@@ -1067,7 +1068,8 @@ the deny list fences the file tools, never a shell.
 
 The desktop app keeps its cases; you can move one to the node. With the node
 stopped, as yourself (not elevated), and with the desktop app closed so
-nothing changes the case meanwhile:
+nothing changes the case meanwhile (`--from` is the desktop app's profile,
+`%APPDATA%\king-louie`, or `%APPDATA%\King Louie` for a packaged build):
 
 ```powershell
 king-louie-service import --from "$env:APPDATA\king-louie" --case <case dir or id> --dry-run
