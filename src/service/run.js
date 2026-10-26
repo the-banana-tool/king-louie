@@ -1,3 +1,4 @@
+const os = require('os');
 const path = require('path');
 const { createLogger } = require('../logging');
 const { acquireInstanceLock } = require('./pidfile');
@@ -57,12 +58,18 @@ function adminDirApprovalOptions({ adminUid, configDir }) {
 // data dir and held against the administrator's record of it in the config
 // dir. Throws when the record names another identity or cannot be trusted;
 // with no record it warns and goes on. → { identity, record }.
+// hosting 'personal' (spec 2026-10-25 §6): the process is the owner of the
+// data dir and the config dir (checked before this), so the record vouches
+// for nothing more and is not read; its state is 'personal'.
 // deps.identityRecord: tests only (how a temp dir's record is read).
-function checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, deps = {} }) {
+function checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, hosting = 'service', deps = {} }) {
   const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');
+  const identity = getOrGenerateNodeIdentity(servicePorts.store, servicePorts.cipher, nodeConfig.name);
+  if (hosting === 'personal') {
+    return { identity, record: { state: 'personal', file: null, problem: null, recorded: null } };
+  }
   const { assertRecordedIdentity } = require('./identity-record');
   const { adminConfigDir } = require('../platform/paths');
-  const identity = getOrGenerateNodeIdentity(servicePorts.store, servicePorts.cipher, nodeConfig.name);
   const record = assertRecordedIdentity({
     configDir: configDir || adminConfigDir({ dataDir }), dataDir, identity,
     ...(adminUid === undefined ? {} : { adminUid }), ...(deps.identityRecord || {})
@@ -97,7 +104,9 @@ function loadProfile(profile) {
   if (profile === 'agent') {
     return {
       // deps: tests only (deps.gui reaches createGuiSubsystem's deps, for a
-      // helper endpoint under a temp dir); runService passes none.
+      // helper endpoint under a temp dir or a personal node's channel;
+      // deps.personalOwner reaches assertPersonalOwner). runService passes
+      // its own deps through, which are none outside tests.
       async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, localInference = null, caseChecks = null, adminUid, configDir, executors, deps = {} }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
@@ -115,13 +124,24 @@ function loadProfile(profile) {
         const { createDesktopBridgeHost } = require('../desktop-bridge/service-wiring');
         const desktopBridge = createDesktopBridgeHost({ dataDir, features, ports, adminUid, configDir });
         const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir }));
+        const hosting = nodeConfig.hosting;
+        const { adminConfigDir, desktopProfileDir } = require('../platform/paths');
+        const cfgDir = configDir || adminConfigDir({ dataDir });
         // R-F5-17: the identity in the data dir must be the one an
         // administrator recorded, before anything is signed with it or any
         // link is opened. A mismatch, or a record that cannot be trusted,
         // stops the start; no record is a warning (and no computer use).
+        // Personal hosting (spec 2026-10-25 §6): instead, this process must
+        // own the data dir and the config dir, checked once, here, before
+        // approvals and the GUI; anything else refuses (PERSONAL_NOT_OWNER).
         let recordedIdentity;
         try {
-          recordedIdentity = checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, deps });
+          if (hosting === 'personal') {
+            const { assertPersonalOwner } = require('./personal-host');
+            assertPersonalOwner({ dataDir, configDir: cfgDir, ...(deps.personalOwner || {}) });
+            log.info(`hosting: personal (runs as ${os.userInfo().username}; the owner account is the trust boundary)`);
+          }
+          recordedIdentity = checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, hosting, deps });
         } catch (err) {
           await desktopBridge.stop().catch(() => {});
           throw err;
@@ -131,6 +151,9 @@ function loadProfile(profile) {
         // approval; with no enrolled phone or no relay it is refused.
         const approvals = await startApprovals({
           dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
+          // Personal hosting keeps the approver dir's owner read and drops
+          // its write probe (the owner can always write there).
+          approverStoreOptions: { ...adminDirApprovalOptions({ adminUid, configDir }).approverStoreOptions, hosting },
           nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }, identity: recordedIdentity.identity
         });
         let core;
@@ -143,9 +166,8 @@ function loadProfile(profile) {
         let gui = null;
         try {
           const { createGuiSubsystem, isJobOpen } = require('../gui');
-          const { adminConfigDir } = require('../platform/paths');
           gui = createGuiSubsystem({
-            nodeConfig, dataDir, configDir: configDir || adminConfigDir({ dataDir }), cipher: servicePorts.cipher, approvals,
+            nodeConfig, dataDir, configDir: cfgDir, cipher: servicePorts.cipher, approvals, hosting,
             // R-F5-7, late-bound: the core and the fleet node are built after
             // this. Until both exist, and for any job neither knows, no job
             // is open (fail closed).
@@ -196,6 +218,10 @@ function loadProfile(profile) {
             phoneApprover: approvals.phoneApprover,
             auditLedger: approvals.auditLedger,
             gui, // Fleet stage 5: the GUI subsystem, or null
+            // Personal hosting (R-PN-1): the OS no longer keeps the owner's
+            // config dir (node.yaml, approvers) and the desktop app's profile
+            // from the file tools, so they are denied outright.
+            deniedDirs: hosting === 'personal' ? [cfgDir, desktopProfileDir({ platform: process.platform, env: process.env })] : [],
             approvals, // Cases stage 4 (wave 3): the phone contact channel (relay link, admin approvers, node identity)
             nodePolicy: nodeConfig.policy,
             builtinSkillsDir: path.join(__dirname, '..', '..', 'skills'),
@@ -384,7 +410,8 @@ function ensureWorkspace(dataDir) {
 }
 
 // adminUid: tests only (who owns the admin config); never from argv or config.
-async function runService({ dataDir: requestedDataDir, profile: profileOverride, signal, stdout = process.stdout, adminUid }) {
+// deps: tests only, handed to the profile's start as they are.
+async function runService({ dataDir: requestedDataDir, profile: profileOverride, signal, stdout = process.stdout, adminUid, deps = {} }) {
   // Resolved once, here, because this is the only place that moves the
   // process: ensureWorkspace chdirs below, and a relative --data-dir would
   // then be re-resolved against the *new* cwd by everything built afterwards
@@ -418,7 +445,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, serviceConfig: config });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, serviceConfig: config, deps });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.
