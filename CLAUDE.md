@@ -2440,7 +2440,9 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   { ffmpeg?, take_id, path?, fps?, size?, max_s? }` (`max_s`, 1 to 86400,
   revised 2026-10-25: ffmpeg's `-t`, which `TakeManager` sets to the
   approved minutes times 60 plus 60) runs ffmpeg (`gdigrab -i desktop`:
-  the whole virtual desktop, every display; libx264, no audio) into
+  the whole virtual desktop, every display; libx264, no audio; a fragmented
+  MP4, `+frag_keyframe+empty_moov+default_base_moof`, so a file ended by `-t`
+  or a kill still plays) into
   `%LOCALAPPDATA%\KingLouie\recordings\<take_id>\take.mp4`, or
   `<record.dir>\<take_id>.mp4` when the take names a folder under the
   session's working directory. ffmpeg is `gui.recorder.ffmpeg`, else the

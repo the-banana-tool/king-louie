@@ -422,7 +422,11 @@ video, notifications and other windows included. It is 30 frames a second unless
 file is yours: by default
 `%LOCALAPPDATA%\KingLouie\recordings\<take_id>\take.mp4` under your own
 account, or `<dir>\<take_id>.mp4` when `record.dir` names a folder under the
-session's working folder (the `cwd` you passed to `delegate`). The browser
+session's working folder (the `cwd` you passed to `delegate`). It is a
+fragmented MP4, so a recording cut off (the take's time running out, or a
+recorder ended after a crash) still plays, and every common player opens
+it; for an editor that wants a plain mp4, remux it in a second with
+`ffmpeg -i take.mp4 -c copy -movflags +faststart take-plain.mp4`. The browser
 profile is yours too, under `%LOCALAPPDATA%\KingLouie\browser-profiles\<name>`.
 
 ## 5. What refuses, and why

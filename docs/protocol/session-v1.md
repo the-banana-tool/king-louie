@@ -175,6 +175,9 @@ the vectors are the same):
   given is `invalid_params`. Without it the argv is as above, so a service
   from before this revision is unaffected. The service sends the take's
   approved minutes times 60, plus 60.
+- The file is a fragmented MP4: `-movflags +frag_keyframe+empty_moov+default_base_moof`
+  in place of `-movflags +faststart` above, so a recording ended by `-t` or
+  by a kill (no index written at the end) still plays.
 - The reply's `pid` (already there) is what the service records with the
   take, so that a service started after a crash can end an ffmpeg the last
   run left recording: it kills that pid only while a process with it still

@@ -161,7 +161,9 @@ function createWindowsBackend({
     const out = given === null ? path.win32.join(dir, 'take.mp4') : given;
     const args = ['-y', '-f', 'gdigrab', '-framerate', String(fps), '-i', 'desktop',
       ...(size ? ['-vf', `scale=${size.width}:${size.height}`] : []),
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an',
+      // Fragmented MP4: a file ended by -t or a kill (no moov written at the end) still plays.
+      '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
       ...(maxS !== null ? ['-t', String(maxS)] : []), out];
     const child = spawnImpl(ffmpeg, args, { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true, shell: false });
     const rec = { pid: null, takeId, child, path: out, startedAt: null, exited: false, code: null, endedAt: null, done: null };

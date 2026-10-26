@@ -441,7 +441,8 @@ describe('Windows backend: launch_browser, record_start, record_stop (any OS, fa
     assert.deepEqual(r, { pid: 4242, startedAt: t.now, path: out });
     assert.deepEqual(backend.mkdirs, [[dir, { recursive: true }]]);
     assert.equal(calls[0].file, 'C:\\ff\\ffmpeg.exe');
-    assert.deepEqual(calls[0].args, ['-y', '-f', 'gdigrab', '-framerate', '30', '-i', 'desktop', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out]);
+    assert.deepEqual(calls[0].args, ['-y', '-f', 'gdigrab', '-framerate', '30', '-i', 'desktop', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', out]);
+    assert.ok(!calls[0].args.includes('+faststart'), 'faststart needs a moov at the end, which a killed ffmpeg never writes');
     assert.deepEqual(calls[0].opts.stdio, ['pipe', 'ignore', 'pipe']);
     assert.equal(calls[0].opts.windowsHide, true);
     assert.equal(calls[0].opts.shell, false);
