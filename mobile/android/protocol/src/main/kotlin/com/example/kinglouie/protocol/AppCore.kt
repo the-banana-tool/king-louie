@@ -29,11 +29,12 @@ class RelayClientFactory<C>(private val make: () -> C) {
 
 /** Three pretend nodes with in-app keys and a software phone key, shown under a "Demo" banner. Nothing here touches the network. */
 class DemoFleet(names: List<String> = listOf("gpu-box", "laptop", "web-01")) {
-    private class Node(val pin: NodePin, val keys: KeyPair)
+    // Software Ed25519 (Ed25519.kt): on Android 16 java.security has only the Keystore's.
+    private class Node(val pin: NodePin, val keys: Ed25519.KeyPair)
 
     private val nodes: List<Node> = names.map { name ->
-        val keys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
-        val spki = keys.public.encoded
+        val keys = Ed25519.generate()
+        val spki = keys.spki
         val raw = spki.copyOfRange(spki.size - 32, spki.size)
         Node(NodePin(Identifiers.nodeId(raw), name, Hex.encode(spki)), keys)
     }
@@ -79,7 +80,7 @@ class DemoFleet(names: List<String> = listOf("gpu-box", "laptop", "web-01")) {
             )
         )
         return Envelope.seal(message, node.pin.id, "Ed25519") { bytes ->
-            Signature.getInstance("Ed25519").run { initSign(node.keys.private); update(bytes); sign() }
+            node.keys.sign(bytes)
         }
     }
 
@@ -122,7 +123,7 @@ class DemoFleet(names: List<String> = listOf("gpu-box", "laptop", "web-01")) {
             )
         )
         return Envelope.seal(message, node.pin.id, "Ed25519") { bytes ->
-            Signature.getInstance("Ed25519").run { initSign(node.keys.private); update(bytes); sign() }
+            node.keys.sign(bytes)
         }
     }
 
@@ -160,7 +161,7 @@ class DemoFleet(names: List<String> = listOf("gpu-box", "laptop", "web-01")) {
             )
         )
         return Envelope.seal(message, node.pin.id, "Ed25519") { bytes ->
-            Signature.getInstance("Ed25519").run { initSign(node.keys.private); update(bytes); sign() }
+            node.keys.sign(bytes)
         }
     }
 

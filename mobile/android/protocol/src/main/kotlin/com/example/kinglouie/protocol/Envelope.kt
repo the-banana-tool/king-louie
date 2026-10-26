@@ -12,7 +12,6 @@ import java.security.spec.ECGenParameterSpec
 import java.security.spec.ECParameterSpec
 import java.security.spec.ECPoint
 import java.security.spec.ECPublicKeySpec
-import java.security.spec.X509EncodedKeySpec
 
 /**
  * A signed envelope: { alg, kid, payload, sig }. Signatures cover the payload
@@ -62,14 +61,9 @@ data class Envelope(val alg: String, val kid: String, val payload: String, val s
         } else {
             val signature = B64Url.decode(sig)
             val bytes = payloadBytes()
-            if (signature.size != 64) false else {
-                val key = KeyFactory.getInstance("Ed25519").generatePublic(X509EncodedKeySpec(spki))
-                Signature.getInstance("Ed25519").run {
-                    initVerify(key)
-                    update(bytes)
-                    verify(signature)
-                }
-            }
+            // In software (Ed25519.kt): on Android 16 java.security's only Ed25519 is the Keystore's,
+            // which refuses an outside public key, so a java.security check here failed every signature.
+            if (signature.size != 64) false else Ed25519.verify(spki.copyOfRange(12, 44), bytes, signature)
         }
     } catch (e: Exception) {
         false

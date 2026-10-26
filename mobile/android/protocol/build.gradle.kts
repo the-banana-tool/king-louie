@@ -11,6 +11,8 @@ kotlin {
 
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
+    // Ed25519 in software (Ed25519.kt): Android 16's java.security has only the Keystore's.
+    implementation("org.bouncycastle:bcprov-jdk18on:1.86")
     testImplementation("junit:junit:4.13.2")
 }
 
