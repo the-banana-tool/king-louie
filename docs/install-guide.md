@@ -1091,10 +1091,11 @@ king-louie-service import --from "$env:APPDATA\king-louie" --case <case dir or i
 
 It copies only that case's directory (its git repository, history and all)
 and the chats attached to it: no settings, no other chat or case, and no
-secret. It prints the plan and `Will copy case <title> (<id>, <status>): N
-chats, N messages, head <commit>`, then asks `Copy this case to the node?
-[y/N]` (`--yes` answers it; off a terminal `--yes` is needed). `--dry-run`
-stops after the plan. Before writing anything it refuses with
+secret. It prints `Will copy case <title> (<id>, <status>): N chats, N
+messages, head <commit>` and asks `Copy this case to the node? [y/N]` before
+it opens anything in the node's data dir, so a "no" changes nothing there
+(`--yes` answers it; off a terminal `--yes` is needed); then it prints the
+plan. `--dry-run` asks nothing and stops after the plan. Before writing anything it refuses with
 `CASE_NOT_FOUND`, `CASE_AMBIGUOUS` (two directories share the id: name the
 directory), `CASE_UNREADABLE`, `CASE_NOT_A_REPO`, `GIT_UNSAFE_CONFIG`, `CASE_DIRTY`
 (the desktop's copy has uncommitted changes: quit the desktop app, or let its

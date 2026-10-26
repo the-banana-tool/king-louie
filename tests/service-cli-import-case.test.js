@@ -237,10 +237,27 @@ describe('import --from --case', () => {
 
   it('a declined question writes nothing; off a TTY without --yes it refuses', async () => {
     await withCasesRoot(async () => {
-      const { root } = userData();
+      const { root, head } = userData();
       const dataDir = keyedDataDir();
+      const before = snapshot(dataDir);
       const o = io();
-      assert.strictEqual(await runImportCommand({ flags: { from: root, case: 'lakeside-lot' }, dataDir, io: o.io, deps: baseDeps({ isTTY: () => true, confirm: async () => false }) }), 1);
+      let opened = 0;
+      let historyOpened = 0;
+      let keyRead = 0;
+      const declined = baseDeps({
+        isTTY: () => true,
+        confirm: async () => false,
+        openWriter: () => { opened += 1; throw new Error('no writer'); },
+        openHistory: () => { historyOpened += 1; throw new Error('no store'); },
+        resolveMasterKey: () => { keyRead += 1; return { key: TEST_KEY, source: 'test' }; }
+      });
+      assert.strictEqual(await runImportCommand({ flags: { from: root, case: 'lakeside-lot' }, dataDir, io: o.io, deps: declined }), 1);
+      assert.strictEqual(opened, 0, 'the writer (and with it the node\'s stores) is never opened before the answer');
+      assert.strictEqual(historyOpened, 0, 'no history store opened');
+      assert.strictEqual(keyRead, 0, 'the master key is not even read');
+      assert.deepStrictEqual(snapshot(dataDir), before, 'no file under the node data dir changed');
+      assert.ok(o.out.stdout.includes(`Will copy case Lakeside lot (${CASE_ID}, open): 2 chats, 3 messages, head ${head}`), 'the owner saw what he was asked about');
+      assert.match(o.out.stdout, /Not copied: nothing was written\./);
       assert.strictEqual(fs.existsSync(path.join(dataDir, 'cases', 'lakeside-lot')), false);
       const o2 = io();
       assert.strictEqual(await runImportCommand({ flags: { from: root, case: 'lakeside-lot' }, dataDir, io: o2.io, deps: baseDeps() }), 2);

@@ -359,6 +359,21 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
     io.stderr.write(`import --case runs git in the copied case as this process; run it as the account that owns ${target}, not as root. Nothing was written.\n`);
     return 2;
   }
+  // The question comes before the writer opens the node's data dir (its
+  // stores, the master key), so a "no" leaves the data dir untouched. The
+  // selection already holds what the owner is asked about; the plan's own
+  // CASE_EXISTS check needs the open store and still runs after.
+  const summary = selection
+    ? printable(`Will copy case ${selection.title} (${selection.caseId}, ${selection.status}): ${selection.chats} chats, ${selection.messages} messages, head ${selection.head}`)
+    : null;
+  if (selection && !dryRun && !flags.yes) {
+    io.stdout.write(`${summary}\n`);
+    const ask = deps.confirm || ((question) => defaultConfirm(io, question));
+    if (!(await ask(CASE_QUESTION))) {
+      io.stdout.write('Not copied: nothing was written.\n');
+      return 1;
+    }
+  }
   // The writer never resolves the key itself (fix round 2, N1): as the
   // service account it can't read the root-only credential, and resolving
   // would mint and write a new key. This process resolves it read-only and
@@ -419,18 +434,12 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
         io.stderr.write(printable(`CASE_EXISTS: the node already has a case at ${selection.caseDir}${caseItem && caseItem.note ? ` (${caseItem.note})` : ''}; no case file or chat was written.`) + '\n');
         return 2;
       }
-      io.stdout.write(printable(`Will copy case ${selection.title} (${selection.caseId}, ${selection.status}): ${selection.chats} chats, ${selection.messages} messages, head ${selection.head}`) + '\n');
+      // Already printed above the question when one was asked.
+      if (dryRun || flags.yes) io.stdout.write(`${summary}\n`);
     }
     if (dryRun) {
       io.stdout.write('Dry run: nothing was written.\n');
       return 0;
-    }
-    if (selection && !flags.yes) {
-      const ask = deps.confirm || ((question) => defaultConfirm(io, question));
-      if (!(await ask(CASE_QUESTION))) {
-        io.stdout.write('Not copied: no case file or chat was written.\n');
-        return 1;
-      }
     }
     const skipped = [];
     for (const batch of planBatches(items, source, { skipped })) {

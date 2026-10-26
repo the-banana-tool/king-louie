@@ -2592,7 +2592,8 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   (`src/migration/case-filter.js`) narrows the desktop importer's inventory
   to one case's directory and the chats whose `caseId` is its id. The move
   runs with the node stopped, without elevation under personal (as root on
-  POSIX it refuses), prints the case, asks `[y/N]`, refuses `CASE_NOT_FOUND`,
+  POSIX it refuses), prints the case, asks `[y/N]` before the writer opens
+  the node's data dir (a "no" touches nothing there), refuses `CASE_NOT_FOUND`,
   `CASE_AMBIGUOUS`, `CASE_UNREADABLE`, `CASE_NOT_A_REPO`, `GIT_UNSAFE_CONFIG`,
   `CASE_DIRTY`, `CASE_EXISTS` before writing, rebuilds the landed repository's index from `HEAD`, checks
   head, a clean tree and the chat and message counts (`VERIFY_MISMATCH`), and
