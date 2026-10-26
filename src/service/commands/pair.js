@@ -2,9 +2,15 @@
 // node with its relay: the one-time code from `relay code <node-name>` is read
 // from stdin, and the relay's key is pinned in the node's store. `https://` is
 // the stage 4 front door's flow (./pair-front-door.js).
+const path = require('path');
+const { execFileSync } = require('child_process');
 const { buildServicePorts } = require('../ports');
-const { loadNodeConfig } = require('../node-config');
+const { loadNodeConfig, NODE_CONFIG_FILE } = require('../node-config');
 const { restoreDataDirOwnership } = require('../ownership');
+const { setNodeYamlRelay } = require('../node-yaml-edit');
+const { PERSONAL_TASK_NAME } = require('../personal-install');
+const { adminConfigDir } = require('../../platform/paths');
+const { windowsSchtasksExe } = require('../../platform/windows-paths');
 const { readLine, runningServicePid } = require('./io');
 
 const USAGE = 'Usage: king-louie-service pair <front-door-url> [--code CODE] [--ca-file PEM] [--yes-fingerprint "kl-…"] [--data-dir DIR]\n'
@@ -15,6 +21,21 @@ async function readAll(stdin) {
   const chunks = [];
   for await (const chunk of stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   return Buffer.concat(chunks).toString('utf8');
+}
+
+// Personal hosting (spec §8 step 5): run the logon task `install --personal`
+// registered, schtasks by absolute path. → true when it was run, false when
+// there is no such task.
+function defaultStartNode(env = process.env) {
+  const schtasks = windowsSchtasksExe(env);
+  const opts = { stdio: 'ignore', windowsHide: true, timeout: 30000 };
+  try {
+    execFileSync(schtasks, ['/Query', '/TN', PERSONAL_TASK_NAME], opts);
+  } catch {
+    return false;
+  }
+  execFileSync(schtasks, ['/Run', '/TN', PERSONAL_TASK_NAME], opts);
+  return true;
 }
 
 async function runPair({ url, dataDir, io, flags = {}, deps = {} }) {
@@ -142,6 +163,30 @@ async function runPair({ url, dataDir, io, flags = {}, deps = {} }) {
     io.stdout.write(`Paired ${nodeCfg.name} (${identity.nodeId}) with relay ${relayId}.\n`);
     io.stdout.write(`Relay fingerprint: ${fingerprintGroups(relayId)}\n`);
     io.stdout.write('Compare it with the fingerprint `king-louie-service relay run` logs on the relay host.\n');
+    if (nodeCfg.hosting === 'personal') {
+      // The owner's own node.yaml: written here, then the node started.
+      const file = path.join(adminConfigDir({ dataDir }), NODE_CONFIG_FILE);
+      let previous;
+      try {
+        ({ previous } = setNodeYamlRelay(file, url));
+      } catch (err) {
+        io.stderr.write(`Could not set approvers.relay in ${file}: ${err.message}\n`);
+        io.stderr.write(`Set "approvers: { relay: ${url} }" there by hand, then run: schtasks /Run /TN "${PERSONAL_TASK_NAME}"\n`);
+        return 1;
+      }
+      const was = previous && previous !== url ? ` (was ${previous})` : '';
+      io.stdout.write(`approvers.relay set to ${url} in ${file}${was}\n`);
+      const startNode = deps.startNode || (() => defaultStartNode(deps.env));
+      let started;
+      try {
+        started = startNode();
+      } catch (err) {
+        io.stderr.write(`Could not start ${PERSONAL_TASK_NAME}: ${err.message}\n`);
+        return 1;
+      }
+      io.stdout.write(started ? `Started ${PERSONAL_TASK_NAME}\n` : 'The logon task is not registered; run install --personal\n');
+      return 0;
+    }
     if (nodeCfg.approvers.relay !== url) {
       io.stdout.write(`Next: set "approvers: { relay: ${url} }" in the admin node.yaml, then start the service.\n`);
     }
