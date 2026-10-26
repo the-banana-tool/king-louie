@@ -75,10 +75,12 @@ function personalHostingRow({ dataDir, configDir, platform, deps }) {
   const { checkPersonalOwner } = require('./personal-host');
   const { adminConfigDir } = require('../platform/paths');
   const { PERSONAL_TASK_NAME } = require('./personal-install');
+  const { shown } = require('./commands/io');
   const owner = checkPersonalOwner({ dataDir, configDir: configDir || adminConfigDir({ dataDir }), platform, ...(deps.personalOwner || {}) });
-  if (!owner.ok) return { check: 'hosting', ok: false, detail: owner.problem };
+  // The owner names and the account name are system-supplied text: one plain line each.
+  if (!owner.ok) return { check: 'hosting', ok: false, detail: shown(owner.problem) };
   const task = deps.queryTask ? deps.queryTask() : (platform === 'win32' ? queryPersonalTask() : 'not registered');
-  const row = { check: 'hosting', ok: true, detail: `personal (runs as ${require('os').userInfo().username}; the owner account is the trust boundary); task ${PERSONAL_TASK_NAME}: ${task}` };
+  const row = { check: 'hosting', ok: true, detail: `personal (runs as ${shown(require('os').userInfo().username)}; the owner account is the trust boundary); task ${PERSONAL_TASK_NAME}: ${task}` };
   if (task === 'not registered') row.warn = true;
   return row;
 }
@@ -118,7 +120,7 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
   try {
     const { loadNodeConfig } = require('./node-config');
     const { RunbookEngine } = require('../runbooks/runbook-engine');
-    const nodeCfg = loadNodeConfig({ dataDir, adminUid });
+    const nodeCfg = loadNodeConfig({ dataDir, adminUid, ...(configDir ? { adminConfigDir: configDir } : {}) });
 
     results.push({ check: 'node configuration loaded', ok: true, detail: `name: ${nodeCfg.name}, profile: ${nodeCfg.profile}` });
     personal = nodeCfg.hosting === 'personal';
