@@ -18,7 +18,7 @@ const HELP = `Usage:
   king-louie-service desktop list [--data-dir DIR]
   king-louie-service models status|refresh [--data-dir DIR]
   king-louie-service profiles list|show <id-or-name>|set-default <id-or-name> [--data-dir DIR]
-  king-louie-service import --from <desktop user-data dir> [--data-dir DIR] [--dry-run]
+  king-louie-service import --from <desktop user-data dir> [--case <case dir or id> [--yes]] [--data-dir DIR] [--dry-run]
   king-louie-service history import <file> [--pattern ID] [--data-dir DIR]
   king-louie-service install [--profile P] [--user NAME] [--data-dir DIR] [--dry-run]
   king-louie-service uninstall [--dry-run]
@@ -336,6 +336,10 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
   }
   if (flags.sessionFile !== undefined && command !== 'session') {
     io.stderr.write('Flag "--session-file" is only valid for "session".\n');
+    return 2;
+  }
+  if (flags.case !== undefined && command !== 'import') {
+    io.stderr.write('Flag "--case" is only valid for "import".\n');
     return 2;
   }
 

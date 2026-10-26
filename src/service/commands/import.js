@@ -28,8 +28,11 @@ const { readHistoryChats } = require('../../migration/desktop-history');
 const { spawnWriter, printable } = require('./import-channel');
 const { isAdmin: defaultIsAdmin } = require('./admin-check');
 const { resolveMasterKeyReadOnly } = require('../../platform/master-key');
+const { filterInventoryToCase } = require('../../migration/case-filter');
 
-const IMPORT_USAGE = 'Usage: king-louie-service import --from <desktop user-data dir> [--data-dir DIR] [--dry-run]\n';
+const IMPORT_USAGE = 'Usage: king-louie-service import --from <desktop user-data dir> [--case <case dir or id>] [--yes] [--data-dir DIR] [--dry-run]\n';
+const DESKTOP_STEP = 'In the desktop app, open the case and choose "Moved elsewhere" so it is worked in one place.';
+const CASE_QUESTION = 'Copy this case to the node? [y/N] ';
 
 // The primary group of `uid`, from id(1) (fix round 2, N2). Absolute paths
 // only, the uid passed as one argument after `--`; /usr/bin/id first, then
@@ -65,6 +68,113 @@ function writerIdentity(dataDir, {
   const st = lstat(dataDir);
   if (st.uid === 0) return null;
   return { uid: st.uid, gid: primaryGid(st.uid) };
+}
+
+// EOF at the prompt counts as a decline; the answer is resolved before the
+// interface closes (the pattern of desktop pair's prompt).
+function defaultConfirm(io, question) {
+  return new Promise((resolve) => {
+    let answered = false;
+    const rl = require('readline').createInterface({ input: io.stdin, output: io.stdout });
+    rl.question(question, (answer) => {
+      answered = true;
+      resolve(/^y(es)?$/i.test(String(answer).trim()));
+      rl.close();
+    });
+    rl.on('close', () => {
+      if (!answered) resolve(false);
+    });
+  });
+}
+
+const firstLine = (text) => String(text || '').split(/\r?\n/)[0];
+
+// The case the owner named, from the source alone (personal node spec §9):
+// which directory and chats move, what the repository's head is, and the
+// two refusals that must come before anything is written: the node already
+// has that directory (CASE_EXISTS), or the desktop's copy is not a git
+// repository (CASE_NOT_A_REPO). Returns { refusal } or { selection }.
+function selectCase({ source, from, target, caseRef, reader, git }) {
+  let filtered;
+  try {
+    filtered = filterInventoryToCase({ inventory: source.inventory, getValue: source.getValue, caseFiles: source.caseFiles, caseRef });
+  } catch (err) {
+    if (!err.code) throw err;
+    return { refusal: `${err.code}: ${err.message}` };
+  }
+  const { caseDir, caseId, chatIds, meta } = filtered;
+  const nodeDir = path.join(target, 'cases', caseDir);
+  if (fs.existsSync(nodeDir)) {
+    return { refusal: `CASE_EXISTS: the node already has a case at ${nodeDir}; nothing was written.` };
+  }
+  const sourceDir = path.join(from, 'cases', caseDir);
+  const gitHead = reader.checkFile(path.join('cases', caseDir, '.git', 'HEAD'));
+  if (!gitHead.ok) {
+    return { refusal: `CASE_NOT_A_REPO: ${sourceDir} has no .git/HEAD${gitHead.reason ? ` (${gitHead.reason})` : ''}, so its history cannot move; nothing was written.` };
+  }
+  let head;
+  try {
+    head = git(sourceDir, ['rev-parse', 'HEAD']).trim();
+  } catch (err) {
+    return { refusal: `CASE_NOT_A_REPO: git cannot read the head of ${sourceDir} (${firstLine(err.message)}); nothing was written.` };
+  }
+  const messages = chatIds.reduce((n, id) => {
+    const chat = source.getValue('chat', id);
+    return n + (chat && Array.isArray(chat.messages) ? chat.messages.length : 0);
+  }, 0);
+  return {
+    selection: {
+      inventory: filtered.inventory,
+      caseDir,
+      caseId,
+      chatIds: new Set(chatIds),
+      title: String(meta.title || caseDir),
+      status: String(meta.status || 'unknown'),
+      chats: chatIds.length,
+      messages,
+      head
+    }
+  };
+}
+
+// After the copy: the node's repository has the source's head and a clean
+// tree, and the node holds as many chats and messages of the case as the
+// desktop did. The node's history store is opened read-only.
+function verifyCase({ selection, caseDirOnNode, historyFile, git, openHistory }) {
+  const problems = [];
+  let head = null;
+  let clean = false;
+  try {
+    head = git(caseDirOnNode, ['rev-parse', 'HEAD']).trim();
+    const status = git(caseDirOnNode, ['status', '--porcelain']).trim();
+    clean = status === '';
+    if (!clean) {
+      const lines = status.split(/\r?\n/);
+      problems.push(`the node's tree is not clean (${lines.length} changed path(s): ${lines.slice(0, 5).join(', ')}${lines.length > 5 ? ', ...' : ''})`);
+    }
+  } catch (err) {
+    problems.push(`git cannot read the node's copy (${firstLine(err.message)})`);
+  }
+  if (head !== null && head !== selection.head) problems.push(`the node's head is ${head}, the desktop's ${selection.head}`);
+  let chats = 0;
+  let messages = 0;
+  try {
+    const store = openHistory(historyFile);
+    try {
+      for (const c of store.listChats()) {
+        if (c.caseId !== selection.caseId) continue;
+        chats += 1;
+        messages += Number(c.messageCount) || 0;
+      }
+    } finally {
+      store.close();
+    }
+  } catch (err) {
+    problems.push(`the node's chats cannot be read (${firstLine(err.message)})`);
+  }
+  if (chats !== selection.chats) problems.push(`the node has ${chats} chat(s) of the case, the desktop ${selection.chats}`);
+  if (messages !== selection.messages) problems.push(`the node has ${messages} message(s) in them, the desktop ${selection.messages}`);
+  return { head, clean, chats, messages, problems };
 }
 
 function printPlan(io, plan, attention) {
@@ -105,11 +215,36 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
   // Read-only (fix round 2, N1): never creates a key, never writes a file.
   const resolveKey = deps.resolveMasterKey || ((dir, ownerUid) => resolveMasterKeyReadOnly({ platform, dataDir: dir, dataDirOwnerUid: ownerUid }));
   const openWriter = deps.openWriter || ((opts) => spawnWriter({ ...opts, spawn: deps.spawn || require('child_process').spawn }));
-  if (!flags.from) {
+  if (!flags.from || (flags.case !== undefined && (typeof flags.case !== 'string' || !flags.case.trim()))) {
     io.stderr.write(IMPORT_USAGE);
     return 2;
   }
-  if (!(await isAdmin())) {
+  const caseRef = flags.case === undefined ? null : flags.case.trim();
+  const dryRun = Boolean(flags.dryRun);
+  // --yes answers only the case move's question (personal node spec §9).
+  if (flags.yes && !caseRef) {
+    io.stderr.write('Flag "--yes" is only valid for "import" with "--case".\n');
+    return 2;
+  }
+  const isTTY = deps.isTTY ? deps.isTTY() : Boolean(io && io.stdin && io.stdin.isTTY);
+  if (caseRef && !dryRun && !flags.yes && !isTTY) {
+    io.stderr.write('Refusing to copy a case without confirmation on a non-interactive terminal; pass --yes.\n');
+    return 2;
+  }
+  // A case move under hosting: personal runs as the owner, with no
+  // elevation (spec §9); every other import, and a case move on a service
+  // node, still needs root/an administrator.
+  let personal = false;
+  if (caseRef) {
+    try {
+      const nodeCfg = (deps.loadNodeConfig || ((dir) => require('../node-config').loadNodeConfig({ dataDir: dir })))(dataDir);
+      personal = Boolean(nodeCfg) && nodeCfg.hosting === 'personal';
+    } catch (err) {
+      io.stderr.write(`Cannot read the node's configuration: ${printable(err.message)}\n`);
+      return 1;
+    }
+  }
+  if (!personal && !(await isAdmin())) {
     io.stderr.write(`import writes ${dataDir}; run it as root/an administrator.\n`);
     return 1;
   }
@@ -117,7 +252,6 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
     io.stderr.write(`Stop the service before importing into ${dataDir}.\n`);
     return 1;
   }
-  const dryRun = Boolean(flags.dryRun);
   const target = path.resolve(dataDir);
   // The data dir must already exist (I1): a dry run creates nothing, and a
   // real run needs its owner to know whom to write as.
@@ -136,14 +270,32 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
   }
   const from = path.resolve(flags.from);
   let source;
+  let reader;
   try {
-    const reader = createSafeReader({ root: from, platform });
+    reader = createSafeReader({ root: from, platform });
     const history = await readHistoryChats({ reader });
     source = readDesktopSource({ userDataDir: from, reader, decrypt: null, secrets: 'needs-desktop', history });
   } catch (err) {
     io.stderr.write(`Cannot read ${from}: ${err.message}\n`);
     return 1;
   }
+  const git = deps.runGitSync || ((cwd, args) => require('../../cases/git').runGitSync(cwd, args));
+  let selection = null;
+  if (caseRef) {
+    let picked;
+    try {
+      picked = selectCase({ source, from, target, caseRef, reader, git });
+    } catch (err) {
+      io.stderr.write(`Cannot read ${from}: ${printable(err.message)}\n`);
+      return 1;
+    }
+    if (picked.refusal) {
+      io.stderr.write(`${printable(picked.refusal)}\n`);
+      return 2;
+    }
+    selection = picked.selection;
+  }
+  const inventory = selection ? selection.inventory : source.inventory;
 
   let identity;
   try {
@@ -151,6 +303,14 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
   } catch (err) {
     io.stderr.write(`Cannot find the owner of ${target}: ${err.message}\n`);
     return 1;
+  }
+  // The case move rebuilds and reads the landed repository's index with git
+  // run by this process. As root on POSIX, against a data dir another
+  // account owns, that would leave a root-owned .git/index in a directory
+  // the service account controls, which the writer split exists to avoid.
+  if (selection && identity) {
+    io.stderr.write(`import --case runs git in the copied case as this process; run it as the account that owns ${target}, not as root. Nothing was written.\n`);
+    return 2;
   }
   // The writer never resolves the key itself (fix round 2, N1): as the
   // service account it can't read the root-only credential, and resolving
@@ -178,6 +338,12 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
     io.stderr.write(`Import failed: ${printable(err.message)}\n`);
     return 1;
   }
+  let writerClosed = false;
+  const closeWriter = async () => {
+    if (writerClosed) return;
+    writerClosed = true;
+    await writer.close();
+  };
   try {
     const info = (await writer.request('open', { dataDir: target, dryRun, guard: !identity, ...(masterKey ? { masterKey } : {}) })) || {};
     masterKey = null;
@@ -194,25 +360,75 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
           : 'the cases root is outside the data dir; files written there are not handed back to the service account, so check it can write them'
       });
     }
-    const plan = await writer.request('plan', { installId: source.installId, inventory: source.inventory });
+    const plan = await writer.request('plan', { installId: source.installId, inventory });
     printPlan(io, plan, attention);
+    let items = trustedItems(plan.items, inventory);
+    if (selection) {
+      // Only this case and its chats are driven, whatever the writer planned.
+      items = items.filter((item) => (item.category === 'case' && item.key === selection.caseDir)
+        || (item.category === 'chat' && selection.chatIds.has(item.key)));
+      const caseItem = items.find((item) => item.category === 'case');
+      if (!caseItem || caseItem.action !== 'new') {
+        io.stderr.write(printable(`CASE_EXISTS: the node already has a case at ${selection.caseDir}${caseItem && caseItem.note ? ` (${caseItem.note})` : ''}; nothing was written.`) + '\n');
+        return 2;
+      }
+      io.stdout.write(printable(`Will copy case ${selection.title} (${selection.caseId}, ${selection.status}): ${selection.chats} chats, ${selection.messages} messages, head ${selection.head}`) + '\n');
+    }
     if (dryRun) {
       io.stdout.write('Dry run: nothing was written.\n');
       return 0;
     }
+    if (selection && !flags.yes) {
+      const ask = deps.confirm || ((question) => defaultConfirm(io, question));
+      if (!(await ask(CASE_QUESTION))) {
+        io.stdout.write('Not copied: no case file or chat was written.\n');
+        return 1;
+      }
+    }
     const skipped = [];
-    for (const batch of planBatches(trustedItems(plan.items, source.inventory), source, { skipped })) {
+    for (const batch of planBatches(items, source, { skipped })) {
       await writer.request('apply', { planId: plan.planId, batch });
     }
     const report = await writer.request('finish', { planId: plan.planId });
     printReport(io, report || {}, skipped);
-    return (report && Array.isArray(report.failures) && report.failures.length) || skipped.length ? 1 : 0;
+    const failed = Boolean((report && Array.isArray(report.failures) && report.failures.length) || skipped.length);
+    if (!selection) return failed ? 1 : 0;
+    // The writer (and the core it holds) is closed before the node's store
+    // and repository are read.
+    await closeWriter();
+    const casesRoot = typeof info.casesRoot === 'string' ? info.casesRoot : path.join(target, 'cases');
+    const caseDirOnNode = path.join(casesRoot, selection.caseDir);
+    // The importer copies a case's .git objects, refs and HEAD but never its
+    // index (isAllowedUnderDotGit), so the landed repository has an empty
+    // index: every file reads as deleted and untracked, and the case's next
+    // commit would find nothing to commit. The index is rebuilt from HEAD
+    // (only .git/index is written; no working file is touched), so a copy
+    // whose files are HEAD's reads clean, as the desktop's did.
+    let indexProblem = null;
+    try {
+      git(caseDirOnNode, ['read-tree', 'HEAD']);
+    } catch (err) {
+      indexProblem = `the node's index could not be rebuilt from HEAD (${firstLine(err.message)})`;
+    }
+    if (deps.afterCopy) deps.afterCopy(caseDirOnNode);
+    const openHistory = deps.openHistory || ((file) => require('../../history').HistoryStore.open(file, { readonly: true }));
+    const result = verifyCase({ selection, caseDirOnNode, historyFile: path.join(target, 'history.sqlite'), git, openHistory });
+    if (indexProblem) result.problems.unshift(indexProblem);
+    io.stdout.write(printable(`desktop: head ${selection.head}, ${selection.chats} chats / ${selection.messages} messages`) + '\n');
+    io.stdout.write(printable(`node: head ${result.head || 'unreadable'}, ${result.clean ? 'clean' : 'not clean'}, ${result.chats} chats / ${result.messages} messages`) + '\n');
+    if (result.problems.length) {
+      io.stderr.write(printable(`VERIFY_MISMATCH: ${result.problems.join('; ')}. The copy on the node is kept; the desktop's case is unchanged.`) + '\n');
+      return 1;
+    }
+    if (failed) return 1;
+    io.stdout.write(`${DESKTOP_STEP}\n`);
+    return 0;
   } catch (err) {
     io.stderr.write(`Import failed: ${printable(err.message)}\n`);
     return 1;
   } finally {
-    await writer.close();
+    await closeWriter();
   }
 }
 
-module.exports = { runImportCommand, writerIdentity, primaryGroupOf, IMPORT_USAGE };
+module.exports = { runImportCommand, writerIdentity, primaryGroupOf, IMPORT_USAGE, DESKTOP_STEP };
