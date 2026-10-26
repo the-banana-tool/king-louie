@@ -14,14 +14,18 @@ function personalDataDir({ platform = process.platform, env = process.env } = {}
   return path.posix.join(home, '.local', 'share', 'king-louie', 'node', 'data');
 }
 
-// The desktop app's own profile (Electron's userData for "king-louie"): its
-// vault, chats and browser cookies. A personal node denies it to the file
-// tools. Null on Windows when APPDATA is unset.
-function desktopProfileDir({ platform = process.platform, env = process.env } = {}) {
-  if (platform === 'win32') return env.APPDATA ? path.win32.join(env.APPDATA, 'king-louie') : null;
+// The desktop app's own profile (Electron's userData): its vault, chats and
+// browser cookies. A personal node denies it to the file tools. Electron
+// names the folder after the app, which is `king-louie` in a dev run
+// (package.json name) and can be `King Louie` in a packaged build
+// (productName), so both are returned (fail closed). None on Windows when
+// APPDATA is unset.
+const DESKTOP_PROFILE_NAMES = Object.freeze(['king-louie', 'King Louie']);
+function desktopProfileDirs({ platform = process.platform, env = process.env } = {}) {
+  if (platform === 'win32') return env.APPDATA ? DESKTOP_PROFILE_NAMES.map((n) => path.win32.join(env.APPDATA, n)) : [];
   const home = env.HOME || os.homedir();
-  if (platform === 'darwin') return path.posix.join(home, 'Library', 'Application Support', 'king-louie');
-  return path.posix.join(home, '.config', 'king-louie');
+  const base = platform === 'darwin' ? path.posix.join(home, 'Library', 'Application Support') : path.posix.join(home, '.config');
+  return DESKTOP_PROFILE_NAMES.map((n) => path.posix.join(base, n));
 }
 
 // On Windows and macOS the data dir is a `data` subdir of the KingLouie dir,
@@ -266,7 +270,7 @@ module.exports = {
   defaultServiceDataDir,
   fleetDataDir,
   personalDataDir,
-  desktopProfileDir,
+  desktopProfileDirs,
   adminConfigDir,
   adminCredentialPath,
   ensureServicePaths,

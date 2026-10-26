@@ -9,7 +9,7 @@ const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { loadProfile } = require('../src/service/run');
-const { ensureServicePaths, ensurePrivateDir, desktopProfileDir } = require('../src/platform/paths');
+const { ensureServicePaths, ensurePrivateDir, desktopProfileDirs } = require('../src/platform/paths');
 const { readGuiStatusRecord } = require('../src/gui/status');
 const { isDeniedPath, clearDeniedDirs } = require('../src/tools/utils');
 const { IDENTITY_RECORD_TEST_OPTIONS } = require('./helpers/identity-record');
@@ -59,6 +59,14 @@ const GUI_YAML = `gui:\n  enabled: true\n  apps:\n    chrome:\n      name: Chrom
 const PERSONAL_YAML = `name: n\nprofile: agent\nhosting: personal\n${GUI_YAML}`;
 const SERVICE_YAML = `name: n\nprofile: agent\n${GUI_YAML}`;
 
+// The node identity the store holds (mesh.identity in chat-data.json), if any.
+function storedIdentity(dataDir) {
+  const file = path.join(dataDir, 'chat-data.json');
+  if (!fs.existsSync(file)) return undefined;
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  return data && data.mesh ? data.mesh.identity : undefined;
+}
+
 // A record nobody can use: `invalid`, which a fleet node refuses to start on.
 function writeBadRecord(configDir) {
   fs.mkdirSync(path.join(configDir, 'identity'), { recursive: true });
@@ -86,6 +94,8 @@ describe('loadProfile("agent") under hosting: personal', { timeout: 120000 }, ()
       const status = readGuiStatusRecord({ dataDir: l.dataDir });
       assert.equal(status.hosting, 'personal');
       assert.equal(status.available, true);
+      // What the refusal test's sentinels look for does exist after a start.
+      assert.ok(storedIdentity(l.dataDir), 'the node identity is in the store');
     } finally {
       await running.stop();
     }
@@ -114,19 +124,25 @@ describe('loadProfile("agent") under hosting: personal', { timeout: 120000 }, ()
       return true;
     });
     assert.deepEqual(asked, [[l.dataDir, l.configDir]]);
-    // Nothing of approvals ran: no staged dir, no node identity made.
-    assert.equal(fs.existsSync(path.join(l.dataDir, 'approvals')), false, 'startApprovals never ran');
+    // Refused before the node identity was made, which every start does
+    // before startApprovals (the first test shows it is stored after one).
+    assert.equal(storedIdentity(l.dataDir), undefined, 'no node identity was made, so approvals never started');
     assert.equal(deps.gui.channel.started, 0);
   });
 
-  it('personal registers the config dir and the desktop profile as denied dirs', async () => {
+  it('personal registers the config dir and both spellings of the desktop profile as denied dirs', async () => {
     const l = layout(PERSONAL_YAML);
-    const running = await start(l, personalDeps(l, { [l.dataDir]: ME, [l.configDir]: ME }));
+    // A fixed profile base under the temp dir, whatever the host's own.
+    const roaming = path.join(path.dirname(l.dataDir), 'roaming');
+    const env = { APPDATA: roaming, HOME: roaming };
+    const expected = [l.configDir, ...desktopProfileDirs({ platform: process.platform, env })];
+    assert.equal(expected.length, 3);
+    assert.ok(expected.slice(1).every((d) => d.startsWith(roaming)));
+    const running = await start(l, personalDeps(l, { [l.dataDir]: ME, [l.configDir]: ME }, { env }));
     try {
-      assert.equal(isDeniedPath(path.join(l.configDir, 'node.yaml')), true);
+      for (const dir of expected) assert.equal(isDeniedPath(path.join(dir, 'chat-data.json')), true, dir);
       assert.equal(isDeniedPath(path.join(l.configDir, 'approvers', 'phone.json')), true);
-      const profile = desktopProfileDir();
-      if (profile) assert.equal(isDeniedPath(path.join(profile, 'chat-data.json')), true);
+      assert.equal(isDeniedPath(path.join(roaming, 'some-other-app', 'x.json')), false, 'only the profile folders');
       assert.equal(isDeniedPath(path.join(l.workspace, 'notes.txt')), false, 'the workspace is not denied');
     } finally {
       await running.stop();

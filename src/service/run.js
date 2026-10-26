@@ -77,6 +77,16 @@ function checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, co
   return { identity, record };
 }
 
+// The account this process runs as, for the log only: os.userInfo() throws
+// for a uid with no passwd entry, which must not refuse a personal start.
+function accountName() {
+  try {
+    return os.userInfo().username;
+  } catch {
+    return process.env.USERNAME || process.env.USER || String(typeof process.getuid === 'function' ? process.getuid() : 'unknown');
+  }
+}
+
 // R-F5-20 (fourth security review, finding 2): a node on which computer use
 // is off still answers a phone's "what is running" with a listing it signs:
 // nothing. Registered only where no lease manager exists (`gui` null, or a
@@ -125,7 +135,7 @@ function loadProfile(profile) {
         const desktopBridge = createDesktopBridgeHost({ dataDir, features, ports, adminUid, configDir });
         const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir }));
         const hosting = nodeConfig.hosting;
-        const { adminConfigDir, desktopProfileDir } = require('../platform/paths');
+        const { adminConfigDir, desktopProfileDirs } = require('../platform/paths');
         const cfgDir = configDir || adminConfigDir({ dataDir });
         // R-F5-17: the identity in the data dir must be the one an
         // administrator recorded, before anything is signed with it or any
@@ -139,7 +149,7 @@ function loadProfile(profile) {
           if (hosting === 'personal') {
             const { assertPersonalOwner } = require('./personal-host');
             assertPersonalOwner({ dataDir, configDir: cfgDir, ...(deps.personalOwner || {}) });
-            log.info(`hosting: personal (runs as ${os.userInfo().username}; the owner account is the trust boundary)`);
+            log.info(`hosting: personal (runs as ${accountName()}; the owner account is the trust boundary)`);
           }
           recordedIdentity = checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, hosting, deps });
         } catch (err) {
@@ -149,11 +159,12 @@ function loadProfile(profile) {
         // Fleet stage 3: an unsafe tool from anything remote (chat channels,
         // gateway clients, cron, webhooks) runs only with a signed phone
         // approval; with no enrolled phone or no relay it is refused.
+        const approvalDirOptions = adminDirApprovalOptions({ adminUid, configDir });
         const approvals = await startApprovals({
-          dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
+          dataDir, ...approvalDirOptions,
           // Personal hosting keeps the approver dir's owner read and drops
           // its write probe (the owner can always write there).
-          approverStoreOptions: { ...adminDirApprovalOptions({ adminUid, configDir }).approverStoreOptions, hosting },
+          approverStoreOptions: { ...approvalDirOptions.approverStoreOptions, hosting },
           nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }, identity: recordedIdentity.identity
         });
         let core;
@@ -220,8 +231,9 @@ function loadProfile(profile) {
             gui, // Fleet stage 5: the GUI subsystem, or null
             // Personal hosting (R-PN-1): the OS no longer keeps the owner's
             // config dir (node.yaml, approvers) and the desktop app's profile
-            // from the file tools, so they are denied outright.
-            deniedDirs: hosting === 'personal' ? [cfgDir, desktopProfileDir({ platform: process.platform, env: process.env })] : [],
+            // from the file tools, so they are denied outright: both
+            // spellings of the profile's folder. deps.env: tests only.
+            deniedDirs: hosting === 'personal' ? [cfgDir, ...desktopProfileDirs({ platform: process.platform, env: deps.env || process.env })] : [],
             approvals, // Cases stage 4 (wave 3): the phone contact channel (relay link, admin approvers, node identity)
             nodePolicy: nodeConfig.policy,
             builtinSkillsDir: path.join(__dirname, '..', '..', 'skills'),
