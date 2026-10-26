@@ -67,16 +67,25 @@ function realpathOf(p) {
   }
 }
 
+// The real path of `filePath`. A path that does not exist yet is resolved
+// through its deepest existing ancestor and the missing segments appended
+// again: resolving only the parent let `<wd>/link/new/sub/x.json` keep its
+// link spelling, and Write's recursive mkdir then went through the link.
+// When not even the root resolves (a drive that is not there), no link can be
+// on the way, so the plain resolved spelling is the path.
 function resolveRealPath(filePath) {
-  try {
-    return realpathOf(filePath);
-  } catch {
-    // If the file doesn't exist yet, resolve the parent directory and append the basename
-    const dir = path.dirname(filePath);
+  const absolute = path.resolve(String(filePath));
+  const missing = [];
+  let current = absolute;
+  for (;;) {
     try {
-      return path.join(realpathOf(dir), path.basename(filePath));
+      const real = realpathOf(current);
+      return missing.length ? path.join(real, ...missing.reverse()) : real;
     } catch {
-      return path.resolve(filePath);
+      const parent = path.dirname(current);
+      if (parent === current) return absolute;
+      missing.push(path.basename(current));
+      current = parent;
     }
   }
 }
@@ -185,6 +194,9 @@ function listSecretDataDirs() {
 // directory itself is denied too: listing it is a read of it. Held in the
 // comparison form (resolved, slash-normalised, lowercased), as the secret
 // dirs are, and both spellings are kept for a dir that does not exist yet.
+// normalizeForComparison lowercases on every platform, not only win32: on a
+// case-sensitive filesystem that can deny a sibling spelled with other case,
+// which fails closed.
 const deniedDirs = new Set();
 
 function registerDeniedDir(dir) {
@@ -203,7 +215,7 @@ function clearDeniedDirs() {
  */
 function isDeniedPath(targetPath) {
   if (!targetPath || deniedDirs.size === 0) return false;
-  const target = normalizeForComparison(resolveRealPath(String(targetPath)));
+  const target = normalizeForComparison(resolveRealPath(targetPath));
   for (const dir of deniedDirs) {
     if (target === dir || target.startsWith(dir.endsWith('/') ? dir : `${dir}/`)) {
       return true;
@@ -271,8 +283,9 @@ secretIdentities.snapshot = null;
 
 /**
  * True when `targetPath` names one of the host's own secret files, by any
- * spelling. Checked before — and independently of — the working directory and
- * allowedDirectories.
+ * spelling, or is a denied directory or under one (isDeniedPath). Checked
+ * before — and independently of — the working directory and
+ * allowedDirectories. Glob and Grep filter the files they walk with this alone.
  */
 function isProtectedSecretPath(targetPath) {
   if (!targetPath) return false;

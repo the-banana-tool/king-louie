@@ -99,7 +99,9 @@ describe('denied directories', () => {
     assert.equal(globAbove.ok, true);
     const names = globAbove.files.map((f) => path.basename(f.path || f));
     assert.ok(!names.includes('node.yaml') && !names.includes('a.json'), names.join(','));
-    assert.ok(names.includes('f.txt'), names.join(','));
+    // The default listing is 'all': the denied dir and its subdir are not named either.
+    assert.ok(!names.includes('config') && !names.includes('approvers'), names.join(','));
+    assert.ok(names.includes('f.txt') && names.includes('config2'), names.join(','));
   });
 
   it('the denied dir itself is refused; a sibling with the same prefix is not', () => {
@@ -132,6 +134,46 @@ describe('denied directories', () => {
     assert.equal(isDeniedPath(link), true);
     assert.equal(isDeniedPath(path.join(link, 'node.yaml')), true);
     assert.equal(isPathAllowed(path.join(link, 'node.yaml'), root, []), false);
+  });
+
+  it('Write through a link into a denied dir is refused when several levels are missing', async (t) => {
+    registerDeniedDir(cfg);
+    const link = path.join(root, 'peek');
+    try {
+      fs.symlinkSync(cfg, link, isWindows ? 'junction' : 'dir');
+    } catch (err) {
+      t.skip(`cannot make a directory link here: ${err.code}`);
+      return;
+    }
+    const target = path.join(link, 'new', 'sub', 'x.json');
+    assert.equal(isDeniedPath(target), true);
+    assert.equal(isPathAllowed(target, root, []), false);
+    assert.match(describePathDenial(target, root, []), DENIAL);
+    await assert.rejects(
+      () => writeTool.execute({ file_path: target, content: '{}' }, { workingDirectory: root }),
+      DENIAL
+    );
+    assert.equal(fs.existsSync(path.join(cfg, 'new')), false);
+  });
+
+  it('a path whose missing segments sit under a link resolves through the link', (t) => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-denied-out-'));
+    const link = path.join(root, 'out-link');
+    try {
+      try {
+        fs.symlinkSync(outside, link, isWindows ? 'junction' : 'dir');
+      } catch (err) {
+        t.skip(`cannot make a directory link here: ${err.code}`);
+        return;
+      }
+      // isPathWithin sees the real place too: a working dir of `root` does not
+      // reach a file three levels under a link that leaves it.
+      assert.equal(isPathAllowed(path.join(link, 'a', 'b', 'c.txt'), root, []), false);
+      assert.equal(isPathAllowed(path.join(link, 'a', 'b', 'c.txt'), outside, []), true);
+    } finally {
+      try { fs.rmSync(link, { recursive: false, force: true }); } catch { /* best effort */ }
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('a denied dir registered through a link is denied by its real path', (t) => {
