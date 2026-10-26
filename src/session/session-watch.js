@@ -19,9 +19,12 @@ function startSessionWatch(backend, { report, emit, recorder, log, reprobeMs = 6
   const withRecorder = (r) => ({ ...r, recorder });
   let current = report;
   let lastLocked = report.locked;
+  // A callback already awaiting the backend when stop() runs says nothing.
+  let stopped = false;
   const reprobe = timers.setInterval(async () => {
     if (!backend) return;
     const next = withRecorder(await safeProbe(backend, log));
+    if (stopped) return;
     if (JSON.stringify(next.capabilities) !== JSON.stringify(current.capabilities) || JSON.stringify(next.limits) !== JSON.stringify(current.limits)) {
       current = next;
       emit('probe_changed', next);
@@ -31,12 +34,14 @@ function startSessionWatch(backend, { report, emit, recorder, log, reprobeMs = 6
     if (!backend || typeof backend.locked !== 'function') return;
     let now;
     try { now = await backend.locked(); } catch { return; }
+    if (stopped) return;
     if (now === null || now === lastLocked) return;
     lastLocked = now;
     emit(now ? 'locked' : 'unlocked', {});
   }, lockPollMs || 2000);
   return {
     stop() {
+      stopped = true;
       timers.clearInterval(reprobe);
       timers.clearInterval(lockPoll);
     },

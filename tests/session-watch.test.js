@@ -101,4 +101,23 @@ describe('startSessionWatch', () => {
     watch.stop();
     assert.equal(t.live.size, 0);
   });
+
+  it('a callback in flight when stop() is called emits nothing after it', async () => {
+    const t = fakeTimers();
+    let releaseProbe;
+    let releaseLock;
+    const backend = {
+      probe: () => new Promise((r) => { releaseProbe = r; }),
+      locked: () => new Promise((r) => { releaseLock = r; })
+    };
+    const calls = [];
+    const watch = startSessionWatch(backend, { report: baseReport(), recorder, log: quietLog, emit: (k, p) => calls.push([k, p]), timers: t.timers });
+    const fns = [...t.live.values()].map((x) => x.fn);
+    const running = fns.map((fn) => fn());
+    watch.stop();
+    releaseProbe({ capabilities: ['screenshot', 'input'], probes: [], displays: [], limits: [], locked: false });
+    releaseLock(true);
+    await Promise.all(running);
+    assert.deepEqual(calls, []);
+  });
 });
