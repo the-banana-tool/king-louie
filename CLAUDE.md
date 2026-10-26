@@ -2572,9 +2572,11 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
 - **The CLI forms.** `install --personal [--data-dir DIR] [--browser PATH]
   [--provider P] [--model M] [--dry-run] [--yes]`, unelevated (refused
   elevated, C-5), Windows only (C-6), refused while a fleet node is installed
-  (the `KingLouie` task, or a `node.yaml`, an identity record or a helper
-  file under `%ProgramData%\KingLouie\config`; C-12; a fleet data dir with
-  none of those is a one-line warning, not a refusal), and `--profile` or
+  (the `KingLouie` task, or a fleet layout marker, `fleetLayoutMarkers` in
+  `src/platform/paths.js`: a `node.yaml`, `service.json`, identity record or
+  helper file under `%ProgramData%\KingLouie\config`, named in the refusal,
+  which says to remove it by hand when there is no task; C-12; a fleet data
+  dir with none of those is a one-line warning, not a refusal), and `--profile` or
   `--user` with `--personal` is a usage error. It prints the account, dirs, task
   and what trusting the owner account means, asks `[y/N]` (`--yes` off a
   TTY), writes `node.yaml` (every string single-quoted; kept when there, with
@@ -2591,8 +2593,8 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   "KingLouie Node"`. `import --from <desktop>
   --case <case dir or id> [--yes]` moves one case (below). On Windows the
   default data dir is the fleet one only when the fleet config dir holds a
-  `node.yaml` (`fleetNodeYamlPath`; a fleet data dir without one is a
-  leftover and ignored), else `personalDataDir()`
+  marker (`fleetLayoutExists`, the same list as the guard; a fleet data dir
+  without one is a leftover and ignored), else `personalDataDir()`
   (`%LOCALAPPDATA%\KingLouie\node\data`) when that exists, else the fleet one
   (`defaultServiceDataDir`, C-11); the fleet `install` gets `--data-dir`
   unresolved from the CLI and plans into `fleetDataDir()` whatever exists.

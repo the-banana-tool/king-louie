@@ -99,13 +99,23 @@ function taskExists(env, name) {
   }
 }
 
-// A fleet node: the KingLouie boot task, or a node.yaml, an identity record
-// or a helper file in the fleet config dir (§8 step 0).
+// A fleet node: the KingLouie boot task, or one of the fleet layout's
+// marker files (§8 step 0), the same list the default data dir rule reads
+// (paths.js fleetLayoutMarkers). → { task, marker: <path> | null }.
 function defaultFleetInstalled(env) {
   const task = taskExists(env, FLEET_TASK_NAME);
-  const configDir = path.win32.join(env.ProgramData || 'C:\\ProgramData', 'KingLouie', 'config');
-  const held = [path.win32.join(configDir, NODE_YAML), path.win32.join(configDir, 'identity', 'node.json'), path.win32.join(configDir, 'session', 'helper-secret.json')].some((f) => fs.existsSync(f));
-  return { task, configDir: held ? configDir : null };
+  const marker = require('../platform/paths').fleetLayoutExists({ env });
+  return { task, marker };
+}
+
+// The refusal for a fleet node found: with the task, the fleet uninstall
+// removes it; a marker file alone is removed by nothing the CLI runs.
+function fleetRefusal({ task, marker }) {
+  if (task) {
+    const what = [`the ${FLEET_TASK_NAME} scheduled task`, marker && `${marker} exists`].filter(Boolean).join('; ');
+    return `a fleet node is installed on this machine (${what}); run uninstall / session uninstall first`;
+  }
+  return `a fleet node's file is on this machine (${marker}) with no ${FLEET_TASK_NAME} task: if no fleet node is meant to run here, remove that file by hand, then run this again`;
 }
 
 function readYaml(file) {
@@ -250,10 +260,7 @@ async function install({ flags, io, c }) {
   // start's owner check (§6) would then refuse them.
   if (c.isAdmin()) return refuse(io, 'install --personal runs as you, not elevated: open a normal prompt');
   const fleet = c.fleetInstalled() || {};
-  if (fleet.task || fleet.configDir) {
-    const what = [fleet.task && `the ${FLEET_TASK_NAME} scheduled task`, fleet.configDir && `${fleet.configDir} holds a node.yaml, an identity record or a helper file`].filter(Boolean).join('; ');
-    return refuse(io, `a fleet node is installed on this machine (${what}); run uninstall / session uninstall first`);
-  }
+  if (fleet.task || fleet.marker) return refuse(io, fleetRefusal(fleet));
   if (!flags.dataDir) return refuse(io, 'LOCALAPPDATA is not set, so there is no default data dir: pass --data-dir DIR');
 
   const dataDir = path.resolve(flags.dataDir);
@@ -311,7 +318,7 @@ async function install({ flags, io, c }) {
   // A warning, not a refusal: a take that records refuses recorder_missing
   // later with the same remedy.
   if (!c.findFfmpeg()) io.stdout.write(`${FFMPEG_LINE}\n`);
-  if (leftover) io.stdout.write(`${fleetData} exists but no fleet node.yaml is beside it: every command ignores it, and it may be removed.\n`);
+  if (leftover) io.stdout.write(`${fleetData} exists but no fleet config file is beside it: every command ignores it, and it may be removed.\n`);
 
   const xmlPath = path.join(c.tmpDir, `king-louie-node-${crypto.randomBytes(6).toString('hex')}.xml`);
   const schtasks = windowsSchtasksExe(c.env);

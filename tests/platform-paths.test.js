@@ -1,7 +1,7 @@
 // tests/platform-paths.test.js
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { defaultServiceDataDir, personalDataDir, fleetDataDir, desktopProfileDirs } = require('../src/platform/paths');
+const { defaultServiceDataDir, personalDataDir, fleetDataDir, desktopProfileDirs, fleetLayoutMarkers, fleetLayoutExists } = require('../src/platform/paths');
 
 const env = { ProgramData: 'C:\\ProgramData', LOCALAPPDATA: 'C:\\U\\a\\AppData\\Local', HOME: '/home/a' };
 
@@ -25,6 +25,20 @@ describe('defaultServiceDataDir falls back to the personal node', () => {
   it('win32: the fleet dir when its node.yaml and the personal dir both exist', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: () => true }), FLEET));
   it('win32: a leftover fleet data dir (no node.yaml) yields to the personal dir', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: (p) => p === FLEET || p === PERSONAL }), PERSONAL));
   it('win32: a leftover fleet data dir alone is still the default', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: (p) => p === FLEET }), FLEET));
+  // A fleet node may run with no node.yaml (it is optional), so any marker counts.
+  const CONFIG = 'C:\\ProgramData\\KingLouie\\config';
+  const MARKERS = ['node.yaml', 'service.json', 'identity\\node.json', 'session\\helper-secret.json'].map((f) => `${CONFIG}\\${f}`);
+  it('fleetLayoutMarkers lists node.yaml, service.json, the identity record and the helper file', () => assert.deepEqual(fleetLayoutMarkers({ env }), MARKERS));
+  for (const marker of MARKERS) {
+    it(`win32: ${marker.slice(CONFIG.length + 1)} alone makes the fleet dir win over the personal dir`, () => {
+      assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: (p) => p === marker || p === PERSONAL }), FLEET);
+      assert.equal(fleetLayoutExists({ env, exists: (p) => p === marker }), marker);
+    });
+  }
+  it('win32: no marker and a personal dir gives the personal dir', () => {
+    assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: (p) => !MARKERS.includes(p) }), PERSONAL);
+    assert.equal(fleetLayoutExists({ env, exists: () => false }), null);
+  });
   it('win32: the personal dir when only it exists', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env: { ProgramData: 'C:\\ProgramData', LOCALAPPDATA: 'C:\\U\\a\\AppData\\Local' }, exists: (p) => p.endsWith('node\\data') }), 'C:\\U\\a\\AppData\\Local\\KingLouie\\node\\data'));
   it('win32: the fleet dir when neither exists', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: () => false }), 'C:\\ProgramData\\KingLouie\\data'));
   it('win32: the fleet dir when LOCALAPPDATA is unset', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env: { ProgramData: 'C:\\ProgramData' }, exists: (p) => p !== 'C:\\ProgramData\\KingLouie\\data' }), 'C:\\ProgramData\\KingLouie\\data'));

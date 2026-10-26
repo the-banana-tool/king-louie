@@ -33,14 +33,14 @@ function desktopProfileDirs({ platform = process.platform, env = process.env } =
 // dir. Linux keeps that config under /etc/king-louie instead.
 //
 // On Windows the fleet layout keeps precedence when it is real, which is
-// when its config dir holds a node.yaml; else a personal node's dir when
+// when its config dir holds one of fleetLayoutMarkers(); else a personal node's dir when
 // that exists, else the fleet dir (personal node spec C-11). A fleet data
-// dir with no node.yaml beside it is a leftover and is ignored. Other
+// dir with none of them beside it is a leftover and is ignored. Other
 // platforms are unchanged (C-6).
 function defaultServiceDataDir({ platform = process.platform, env = process.env, exists = fs.existsSync } = {}) {
   const fleet = fleetDataDir({ platform, env });
   if (platform === 'win32') {
-    if (exists(fleetNodeYamlPath({ env }))) return fleet;
+    if (fleetLayoutExists({ env, exists })) return fleet;
     const personal = personalDataDir({ platform, env });
     if (personal && exists(personal)) return personal;
   }
@@ -56,12 +56,24 @@ function fleetDataDir({ platform = process.platform, env = process.env } = {}) {
   return '/var/lib/king-louie';
 }
 
-// Windows: the fleet layout's node.yaml, in the config dir beside the fleet
-// data dir (adminConfigDir's Windows rule). Its presence is what makes the
-// fleet layout real.
-function fleetNodeYamlPath({ env = process.env } = {}) {
-  const fleet = fleetDataDir({ platform: 'win32', env });
-  return path.win32.join(path.win32.dirname(fleet), 'config', 'node.yaml');
+// Windows: the files whose presence in the fleet config dir (beside the
+// fleet data dir, adminConfigDir's Windows rule) makes the fleet layout
+// real. node.yaml is optional for a fleet node, so any one counts: node.yaml,
+// service.json, the identity record or the session helper's file. One list,
+// read by the default data dir rule and by install --personal's fleet guard.
+function fleetLayoutMarkers({ env = process.env } = {}) {
+  const configDir = path.win32.join(path.win32.dirname(fleetDataDir({ platform: 'win32', env })), 'config');
+  return [
+    path.win32.join(configDir, 'node.yaml'),
+    path.win32.join(configDir, 'service.json'),
+    path.win32.join(configDir, 'identity', 'node.json'),
+    path.win32.join(configDir, 'session', 'helper-secret.json')
+  ];
+}
+
+// The first fleet layout marker that exists, or null.
+function fleetLayoutExists({ env = process.env, exists = fs.existsSync } = {}) {
+  return fleetLayoutMarkers({ env }).find((f) => exists(f)) || null;
 }
 
 // Every path component of `target`, from the filesystem root down to and
@@ -279,7 +291,8 @@ module.exports = {
   asarUnpackedPath,
   defaultServiceDataDir,
   fleetDataDir,
-  fleetNodeYamlPath,
+  fleetLayoutMarkers,
+  fleetLayoutExists,
   personalDataDir,
   desktopProfileDirs,
   adminConfigDir,

@@ -977,19 +977,22 @@ it. `--dry-run` prints the steps and changes nothing. On `y` it:
 
 It refuses: from an elevated prompt (the files would be Administrators-owned
 and the start's owner check would then refuse them); while a fleet node is
-installed (the `KingLouie` scheduled task exists, or
-`%ProgramData%\KingLouie\config` holds a `node.yaml`, an identity record or
-a helper file; run `uninstall` and `session uninstall` first; nothing is
-migrated, and the personal node is a new node with a new identity); and when
+installed (the `KingLouie` scheduled task exists: run `uninstall` and
+`session uninstall` first; nothing is migrated, and the personal node is a
+new node with a new identity); while `%ProgramData%\KingLouie\config` holds
+a `node.yaml`, a `service.json`, an identity record or a helper file with no
+such task (it names the file: remove it by hand if no fleet node is meant to
+be there); and when
 `LOCALAPPDATA` is not set and no `--data-dir` is given. `--profile` and
 `--user` are usage errors with `--personal`. A `%ProgramData%\KingLouie\data`
-with no fleet `node.yaml` beside it is a leftover: install names it in one
+with none of those files beside it is a leftover: install names it in one
 warning line (every command ignores it, and you may remove it) and goes on.
 Running it again is safe.
 
 Every other command finds the personal node's data dir by itself: on
 Windows the default data dir is `%ProgramData%\KingLouie\data` only when
-`%ProgramData%\KingLouie\config\node.yaml` exists (a real fleet node), else
+`%ProgramData%\KingLouie\config` holds one of those files (a real fleet
+node), else
 `%LOCALAPPDATA%\KingLouie\node\data` when that exists. So none of the
 commands below needs `--data-dir` unless you gave install one. The fleet
 `install` (no `--personal`) always plans into `%ProgramData%\KingLouie\data`.

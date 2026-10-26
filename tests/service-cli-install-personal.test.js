@@ -50,7 +50,7 @@ function deps(s, extra = {}) {
     whoAmI: () => ({ user: 'laptop\\owner', sid: SID }),
     findChrome: () => CHROME,
     findFfmpeg: () => 'C:\\ffmpeg\\bin\\ffmpeg.exe',
-    fleetInstalled: () => ({ task: false, configDir: null }),
+    fleetInstalled: () => ({ task: false, marker: null }),
     taskRegistered: () => true,
     // Only the temp tree exists, never the machine's real ProgramData.
     exists: (p) => p.startsWith(s.base) && fs.existsSync(p),
@@ -71,8 +71,10 @@ describe('install --personal: refusals', () => {
     const cases = [
       [{ isAdmin: () => true }, /install --personal runs as you, not elevated: open a normal prompt/],
       [{ platform: 'linux' }, /install --personal is Windows-only for now/],
-      [{ fleetInstalled: () => ({ task: true, configDir: null }) }, /a fleet node is installed on this machine \(.*KingLouie.*\); run uninstall \/ session uninstall first/],
-      [{ fleetInstalled: () => ({ task: false, configDir: 'C:\\ProgramData\\KingLouie\\config' }) }, /a fleet node is installed on this machine \(C:\\ProgramData\\KingLouie\\config.*\); run uninstall \/ session uninstall first/],
+      [{ fleetInstalled: () => ({ task: true, marker: null }) }, /a fleet node is installed on this machine \(the KingLouie scheduled task\); run uninstall \/ session uninstall first/],
+      [{ fleetInstalled: () => ({ task: true, marker: 'C:\\ProgramData\\KingLouie\\config\\node.yaml' }) }, /a fleet node is installed on this machine \(the KingLouie scheduled task; C:\\ProgramData\\KingLouie\\config\\node\.yaml exists\); run uninstall \/ session uninstall first/],
+      // A marker file alone: named, and removed by hand (the uninstalls would not remove it).
+      [{ fleetInstalled: () => ({ task: false, marker: 'C:\\ProgramData\\KingLouie\\config\\service.json' }) }, /^a fleet node's file is on this machine \(C:\\ProgramData\\KingLouie\\config\\service\.json\) with no KingLouie task: if no fleet node is meant to run here, remove that file by hand, then run this again$/m],
       [{ findChrome: () => null }, /no chrome\.exe found; pass --browser <path>/]
     ];
     for (const [extra, message] of cases) {
@@ -197,7 +199,7 @@ describe('install --personal', () => {
     const { code, t } = await run('install', s, d);
     assert.equal(code, 0, t.errors());
     const out = t.text();
-    assert.ok(out.includes(`${fleetData} exists but no fleet node.yaml is beside it: every command ignores it, and it may be removed.`), out);
+    assert.ok(out.includes(`${fleetData} exists but no fleet config file is beside it: every command ignores it, and it may be removed.`), out);
     assert.doesNotMatch(out, /--data-dir/);
   });
 
