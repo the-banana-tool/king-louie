@@ -1083,8 +1083,9 @@ chats, N messages, head <commit>`, then asks `Copy this case to the node?
 [y/N]` (`--yes` answers it; off a terminal `--yes` is needed). `--dry-run`
 stops after the plan. Before writing anything it refuses with
 `CASE_NOT_FOUND`, `CASE_AMBIGUOUS` (two directories share the id: name the
-directory), `CASE_UNREADABLE`, `CASE_NOT_A_REPO` or `CASE_EXISTS` (the node
-already has it). After the copy it checks that the node's copy has the
+directory), `CASE_UNREADABLE`, `CASE_NOT_A_REPO`, `GIT_UNSAFE_CONFIG`, `CASE_DIRTY`
+(the desktop's copy has uncommitted changes: quit the desktop app, or let its
+turn finish, and run it again) or `CASE_EXISTS` (the node already has it). After the copy it checks that the node's copy has the
 desktop's head, a clean tree and as many chats and messages, prints both
 sides (`desktop: ...`, `node: ...`), and on a difference says
 `VERIFY_MISMATCH` and keeps the copy.
