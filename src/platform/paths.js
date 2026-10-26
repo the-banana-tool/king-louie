@@ -1,11 +1,34 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+
+// A personal node's data dir: under the user's own profile rather than a
+// machine-wide one, with its config dir beside it (adminConfigDir). Null on
+// Windows when LOCALAPPDATA is unset, since no user path can be named then.
+function personalDataDir({ platform = process.platform, env = process.env } = {}) {
+  if (platform === 'win32') {
+    return env.LOCALAPPDATA ? path.win32.join(env.LOCALAPPDATA, 'KingLouie', 'node', 'data') : null;
+  }
+  const home = env.HOME || os.homedir();
+  if (platform === 'darwin') return path.posix.join(home, 'Library', 'Application Support', 'KingLouie', 'node', 'data');
+  return path.posix.join(home, '.local', 'share', 'king-louie', 'node', 'data');
+}
 
 // On Windows and macOS the data dir is a `data` subdir of the KingLouie dir,
 // leaving room beside it for stage 2's root/admin-owned, read-only config
 // dir. Linux keeps that config under /etc/king-louie instead.
-function defaultServiceDataDir({ platform = process.platform, env = process.env } = {}) {
-  if (platform === 'win32') return path.win32.join(env.ProgramData || 'C:\\ProgramData', 'KingLouie', 'data');
+//
+// On Windows the fleet layout keeps precedence: its dir when it exists, else
+// a personal node's when that exists, else the fleet dir (personal node spec
+// C-11). Other platforms are unchanged (C-6).
+function defaultServiceDataDir({ platform = process.platform, env = process.env, exists = fs.existsSync } = {}) {
+  if (platform === 'win32') {
+    const fleet = path.win32.join(env.ProgramData || 'C:\\ProgramData', 'KingLouie', 'data');
+    if (exists(fleet)) return fleet;
+    const personal = personalDataDir({ platform, env });
+    if (personal && exists(personal)) return personal;
+    return fleet;
+  }
   if (platform === 'darwin') return '/Library/Application Support/KingLouie/data';
   return '/var/lib/king-louie';
 }
@@ -224,6 +247,7 @@ function asarUnpackedPath(p) {
 module.exports = {
   asarUnpackedPath,
   defaultServiceDataDir,
+  personalDataDir,
   adminConfigDir,
   adminCredentialPath,
   ensureServicePaths,
