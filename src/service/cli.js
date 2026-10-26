@@ -1,5 +1,5 @@
 // CLI output goes to stdout/stderr on purpose; everything else logs via createLogger.
-const { defaultServiceDataDir } = require('../platform/paths');
+const { defaultServiceDataDir, personalDataDir } = require('../platform/paths');
 
 const HELP = `Usage:
   king-louie-service run [--data-dir DIR] [--profile agent|runbook|frontdoor]
@@ -22,6 +22,8 @@ const HELP = `Usage:
   king-louie-service history import <file> [--pattern ID] [--data-dir DIR]
   king-louie-service install [--profile P] [--user NAME] [--data-dir DIR] [--dry-run]
   king-louie-service uninstall [--dry-run]
+  king-louie-service install --personal [--data-dir DIR] [--browser PATH] [--provider P] [--model M] [--dry-run] [--yes]
+  king-louie-service uninstall --personal [--data-dir DIR] [--dry-run] [--yes]
   king-louie-service enroll-device [--data-dir DIR]              (admin: pair a phone approver)
   king-louie-service device list|revoke <device-id>|apply [--yes] [--data-dir DIR]
   king-louie-service relay run|code <node-name>|nodes|remove-node <node-name>|qr [--data-dir DIR]
@@ -36,6 +38,12 @@ const HELP = `Usage:
 A chat channel with an empty allowlist refuses every sender, and a channel
 approval is denied unless "channel approval" names an owner chat that is not
 the chat the request came from.
+
+"install --personal" sets up a personal node: the service runs in your own
+login session, as you, from a logon task ("KingLouie Node"), with its data
+dir under %LOCALAPPDATA%\KingLouie\node (Windows only). Run it from a
+normal, unelevated prompt. "uninstall --personal" removes the task and
+leaves the data dir.
 
 "history import" adds one conversation file (a Claude Code session, a Markdown
 transcript or a King Louie chat export) to the data dir's chat history as a new
@@ -54,14 +62,18 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
        king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
 `;
 
-const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern']);
+const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern', 'browser', 'provider', 'model', 'case']);
 // Flags that must never carry a value, whichever form produced it.
-const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'replace']);
+const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'replace', 'personal']);
 
 // The commands whose [y/N] question --yes answers (and that HELP documents
-// it for). The scoping is checked in main(), before any command runs.
-const YES_COMMANDS = [['desktop', 'pair'], ['device', 'apply'], ['identity', 'record'], ['session', 'install'], ['session', 'uninstall']];
-const YES_COMMANDS_TEXT = YES_COMMANDS.map(([c, s]) => `"${c} ${s}"`).join(', ').replace(/, ([^,]*)$/, ' and $1');
+// it for). The scoping is checked in main(), before any command runs. A
+// one-word entry is a command with no subcommand; install and uninstall take
+// it only with --personal (checked in main()).
+const YES_COMMANDS = [['desktop', 'pair'], ['device', 'apply'], ['identity', 'record'], ['session', 'install'], ['session', 'uninstall'], ['install'], ['uninstall'], ['import']];
+const YES_SHOWN = { install: 'install --personal', uninstall: 'uninstall --personal' };
+const listed = (names) => names.map((n) => `"${n}"`).join(', ').replace(/, ([^,]*)$/, ' and $1');
+const YES_COMMANDS_TEXT = `${listed(YES_COMMANDS.filter((e) => e.length === 2).map(([c, s]) => `${c} ${s}`))}, and for ${listed(YES_COMMANDS.filter((e) => e.length === 1).map(([c]) => YES_SHOWN[c] || c))}`;
 
 function parseArgs(argv) {
   const positional = [];
@@ -285,7 +297,8 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
   // --yes only means anything for the commands in YES_COMMANDS: every other
   // command either doesn't ask for confirmation or has its own gate, so
   // accepting the flag there would silently do nothing.
-  if (flags.yes && !YES_COMMANDS.some(([c, s]) => c === command && s === sub)) {
+  const installCommand = command === 'install' || command === 'uninstall';
+  if (flags.yes && (!YES_COMMANDS.some(([c, s]) => c === command && s === sub) || (installCommand && !flags.personal))) {
     io.stderr.write(`Flag "--yes" is only valid for ${YES_COMMANDS_TEXT}.\n`);
     return 2;
   }
@@ -310,6 +323,16 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
   if (flags.replace && !(command === 'identity' && sub === 'record')) {
     io.stderr.write('Flag "--replace" is only valid for "identity record".\n');
     return 2;
+  }
+  if (flags.personal && !installCommand) {
+    io.stderr.write('Flag "--personal" is only valid for "install" and "uninstall".\n');
+    return 2;
+  }
+  for (const name of ['browser', 'provider', 'model']) {
+    if (flags[name] !== undefined && !(command === 'install' && flags.personal)) {
+      io.stderr.write(`Flag "--${name}" is only valid for "install --personal".\n`);
+      return 2;
+    }
   }
   if (flags.sessionFile !== undefined && command !== 'session') {
     io.stderr.write('Flag "--session-file" is only valid for "session".\n');
@@ -449,6 +472,11 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
 
       case 'install':
       case 'uninstall': {
+        // --personal ignores the ProgramData default (personal node spec §8).
+        if (flags.personal) {
+          const { runPersonalInstall } = require('./personal-install');
+          return await runPersonalInstall({ command, flags: { ...flags, dataDir: flags.dataDir || personalDataDir() }, io });
+        }
         const { runInstallCommand } = require('./installers');
         return await runInstallCommand(command, { ...flags, dataDir }, io);
       }

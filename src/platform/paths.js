@@ -22,13 +22,20 @@ function personalDataDir({ platform = process.platform, env = process.env } = {}
 // a personal node's when that exists, else the fleet dir (personal node spec
 // C-11). Other platforms are unchanged (C-6).
 function defaultServiceDataDir({ platform = process.platform, env = process.env, exists = fs.existsSync } = {}) {
+  const fleet = fleetDataDir({ platform, env });
   if (platform === 'win32') {
-    const fleet = path.win32.join(env.ProgramData || 'C:\\ProgramData', 'KingLouie', 'data');
     if (exists(fleet)) return fleet;
     const personal = personalDataDir({ platform, env });
     if (personal && exists(personal)) return personal;
-    return fleet;
   }
+  return fleet;
+}
+
+// The fleet (service-account) layout's data dir, whatever exists on disk:
+// what the fleet `install` plans into, so a machine that holds a personal
+// node's data dir still gets its fleet install where the fleet layout puts it.
+function fleetDataDir({ platform = process.platform, env = process.env } = {}) {
+  if (platform === 'win32') return path.win32.join(env.ProgramData || 'C:\\ProgramData', 'KingLouie', 'data');
   if (platform === 'darwin') return '/Library/Application Support/KingLouie/data';
   return '/var/lib/king-louie';
 }
@@ -247,6 +254,7 @@ function asarUnpackedPath(p) {
 module.exports = {
   asarUnpackedPath,
   defaultServiceDataDir,
+  fleetDataDir,
   personalDataDir,
   adminConfigDir,
   adminCredentialPath,

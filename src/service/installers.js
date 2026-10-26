@@ -31,7 +31,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { defaultServiceDataDir, adminConfigDir, adminCredentialPath } = require('../platform/paths');
+const { fleetDataDir, adminConfigDir, adminCredentialPath } = require('../platform/paths');
 const { windowsPowerShellExe, windowsSchtasksExe } = require('../platform/windows-paths');
 const { PROFILES } = require('./config');
 
@@ -674,12 +674,13 @@ function renderWindowsTaskXml({ nodePath, entryPath, dataDir, profile = 'agent' 
 `;
 }
 
-function planInstall({ platform = process.platform, nodePath = process.execPath, entryPath, dataDir, user, profile = 'agent' }) {
+function planInstall({ platform = process.platform, env = process.env, nodePath = process.execPath, entryPath, dataDir, user, profile = 'agent' }) {
   assertValidProfile(profile);
   if (profile === 'frontdoor' && platform !== 'linux') {
     throw new Error('install --profile frontdoor is Linux only: the front door binds 443 through CAP_NET_BIND_SERVICE in its systemd unit');
   }
-  dataDir = dataDir || defaultServiceDataDir({ platform });
+  // The fleet layout's dir even where a personal node's exists (C-11).
+  dataDir = dataDir || fleetDataDir({ platform, env });
 
   let steps;
   if (platform === 'linux') {

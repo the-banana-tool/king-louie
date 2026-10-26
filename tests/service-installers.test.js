@@ -103,6 +103,15 @@ describe('install plans', () => {
     assert.strictEqual(steps[0].env.KL_DATA_DIR, 'C:\\ProgramData\\KingLouie');
     assert.ok(steps.some((s) => s.run?.[0] === SCHTASKS_EXE && s.run.includes('/Create')));
   });
+  it('windows: a machine with only a personal node\'s data dir still plans the fleet install into %ProgramData%', () => {
+    const root = tmp();
+    const localAppData = path.join(root, 'LocalAppData');
+    const programData = path.join(root, 'ProgramData');
+    fs.mkdirSync(path.join(localAppData, 'KingLouie', 'node', 'data'), { recursive: true });
+    const env = { ProgramData: programData, LOCALAPPDATA: localAppData };
+    const steps = planInstall({ platform: 'win32', nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', env });
+    assert.strictEqual(steps[0].env.KL_DATA_DIR, path.win32.resolve(programData, 'KingLouie', 'data'));
+  });
   it('darwin: requires --user', () => {
     assert.throws(() => planInstall({ platform: 'darwin', ...base, user: undefined }), /--user is required on macOS/);
   });

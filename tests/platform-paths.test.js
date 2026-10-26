@@ -1,7 +1,7 @@
 // tests/platform-paths.test.js
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { defaultServiceDataDir, personalDataDir } = require('../src/platform/paths');
+const { defaultServiceDataDir, personalDataDir, fleetDataDir } = require('../src/platform/paths');
 
 const env = { ProgramData: 'C:\\ProgramData', LOCALAPPDATA: 'C:\\U\\a\\AppData\\Local', HOME: '/home/a' };
 
@@ -26,4 +26,13 @@ describe('defaultServiceDataDir falls back to the personal node', () => {
   it('linux is unchanged', () => assert.equal(defaultServiceDataDir({ platform: 'linux', env, exists: () => true }), '/var/lib/king-louie'));
   it('darwin is unchanged', () => assert.equal(defaultServiceDataDir({ platform: 'darwin', env, exists: () => true }), '/Library/Application Support/KingLouie/data'));
   it('no arguments still returns a path', () => assert.equal(typeof defaultServiceDataDir(), 'string'));
+});
+
+describe('fleetDataDir', () => {
+  it('win32: under ProgramData, whatever exists', () => assert.equal(fleetDataDir({ platform: 'win32', env }), 'C:\\ProgramData\\KingLouie\\data'));
+  it('win32: C:\\ProgramData when the variable is unset', () => assert.equal(fleetDataDir({ platform: 'win32', env: {} }), 'C:\\ProgramData\\KingLouie\\data'));
+  it('linux and darwin: the service layout', () => {
+    assert.equal(fleetDataDir({ platform: 'linux', env }), '/var/lib/king-louie');
+    assert.equal(fleetDataDir({ platform: 'darwin', env }), '/Library/Application Support/KingLouie/data');
+  });
 });
