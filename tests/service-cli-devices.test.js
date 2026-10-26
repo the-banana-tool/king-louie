@@ -41,7 +41,7 @@ function streamIo() {
 
 // A node: data dir, admin config dir with node.yaml, approvers/ and (unless
 // told otherwise) a running service (this process's pid) linked to its relay.
-function node({ relay = true, running = true, linked = true } = {}) {
+function node({ relay = true, running = true, linked = true, hosting = null } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cli-devices-'));
   cleanups.push(() => fs.rmSync(base, { recursive: true, force: true }));
   const dataDir = path.join(base, 'data');
@@ -49,7 +49,7 @@ function node({ relay = true, running = true, linked = true } = {}) {
   fs.mkdirSync(path.join(configDir, 'approvers'), { recursive: true, mode: 0o755 });
   fs.mkdirSync(dataDir, { recursive: true });
   if (POSIX) for (const d of [base, configDir, path.join(configDir, 'approvers')]) fs.chmodSync(d, 0o755);
-  fs.writeFileSync(path.join(configDir, 'node.yaml'), `name: web-01\n${relay ? 'approvers:\n  relay: wss://10.0.0.5:18795\n' : ''}`, { mode: 0o644 });
+  fs.writeFileSync(path.join(configDir, 'node.yaml'), `name: web-01\n${hosting ? `profile: agent\nhosting: ${hosting}\n` : ''}${relay ? 'approvers:\n  relay: wss://10.0.0.5:18795\n' : ''}`, { mode: 0o644 });
   if (running) fs.writeFileSync(path.join(dataDir, 'service.pid'), String(process.pid));
   if (linked) {
     fs.mkdirSync(path.join(dataDir, 'approvals'), { recursive: true });
@@ -106,8 +106,8 @@ describe('enroll-device refusals', () => {
 });
 
 describe('enroll-device', () => {
-  async function enroll(answer) {
-    const n = node();
+  async function enroll(answer, nodeOptions = {}) {
+    const n = node(nodeOptions);
     const { pump, calls } = servicePump(n);
     const io = streamIo();
     const phone = createFakePhone({ name: 'Pixel 9' });
@@ -141,6 +141,18 @@ describe('enroll-device', () => {
     assert.equal(open(done.enroll).message.device.device_id, phone.deviceId);
     const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: null });
     assert.deepEqual(ledger.tail(1).map((e) => [e.kind, e.writer, e.data.device_id]), [['device.enrolled', 'cli', phone.deviceId]]);
+  });
+
+  // Personal hosting (spec 2026-10-25 §6, last row): the owner runs it
+  // unelevated. Nothing in enroll-device keys on elevation (the approvers
+  // dir is probed by writing a file, and isRoot() only picks the courier
+  // process), so a personal node whose service runs reaches the relay.
+  it('a personal node enrolls through the relay with no elevation refusal', async () => {
+    const { n, code, io, phone, done } = await enroll('y', { hosting: 'personal' });
+    assert.equal(code, 0);
+    assert.doesNotMatch(io.text.err, /root|Administrator|elevat/);
+    assert.ok(fs.existsSync(path.join(n.configDir, 'approvers', `${phone.deviceId}.json`)));
+    assert.equal(done.refused, false);
   });
 
   it('anything but y refuses and writes nothing', async () => {

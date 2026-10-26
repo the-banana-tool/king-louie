@@ -52,10 +52,43 @@ function identityMatchRow({ seen, platform, acl = null }) {
   return { check, ok: true, detail: `${base} (public keys compared; owners read). Not checked here: who can change the record (${why}; run doctor from an elevated prompt); ${privateHalf}; ${probe}` };
 }
 
+// The personal node's logon task, as `schtasks /Query` reports it (by
+// absolute path): its Status line when the query exits 0 and the task is
+// Ready or Running, else "not registered".
+function queryPersonalTask({ env = process.env, execFileSync = require('child_process').execFileSync } = {}) {
+  const { windowsSchtasksExe } = require('../platform/windows-paths');
+  const { PERSONAL_TASK_NAME } = require('./personal-install');
+  let out;
+  try {
+    out = String(execFileSync(windowsSchtasksExe(env), ['/Query', '/TN', PERSONAL_TASK_NAME, '/FO', 'LIST'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 30000 }));
+  } catch {
+    return 'not registered';
+  }
+  const m = /^Status:\s*(Ready|Running)\s*$/m.exec(out);
+  return m ? m[1] : 'not registered';
+}
+
+// doctor's "hosting" row on a personal node: the start log's words, with the
+// owner check (PASS only when this account owns the data and config dirs)
+// and the logon task's state (a warning when it is not registered).
+function personalHostingRow({ dataDir, configDir, platform, deps }) {
+  const { checkPersonalOwner } = require('./personal-host');
+  const { adminConfigDir } = require('../platform/paths');
+  const { PERSONAL_TASK_NAME } = require('./personal-install');
+  const owner = checkPersonalOwner({ dataDir, configDir: configDir || adminConfigDir({ dataDir }), platform, ...(deps.personalOwner || {}) });
+  if (!owner.ok) return { check: 'hosting', ok: false, detail: owner.problem };
+  const task = deps.queryTask ? deps.queryTask() : (platform === 'win32' ? queryPersonalTask() : 'not registered');
+  const row = { check: 'hosting', ok: true, detail: `personal (runs as ${require('os').userInfo().username}; the owner account is the trust boundary); task ${PERSONAL_TASK_NAME}: ${task}` };
+  if (task === 'not registered') row.warn = true;
+  return row;
+}
+
 // (default root). The CLI never passes it; tests pass their own euid so the
 // wiring runs unprivileged too.
 // Async: the approval checks wait for the approver store to load.
 // deps.identityRecord: tests only (how a temp dir's identity record is read).
+// deps.personalOwner: options for checkPersonalOwner (tests: the owner read);
+// deps.queryTask: () => 'Ready' | 'Running' | 'not registered' (tests: no schtasks).
 async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, configDir = null, deps = {} }) {
   const results = [];
   const major = Number(process.versions.node.split('.')[0]);
@@ -79,12 +112,17 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
   }
 
   // Check Node Config & Runbooks health
+  // Personal hosting (spec 2026-10-25 §6, §8): read from node.yaml here; a
+  // node.yaml doctor cannot load leaves the fleet layout's rows.
+  let personal = false;
   try {
     const { loadNodeConfig } = require('./node-config');
     const { RunbookEngine } = require('../runbooks/runbook-engine');
     const nodeCfg = loadNodeConfig({ dataDir, adminUid });
 
     results.push({ check: 'node configuration loaded', ok: true, detail: `name: ${nodeCfg.name}, profile: ${nodeCfg.profile}` });
+    personal = nodeCfg.hosting === 'personal';
+    results.push(personal ? personalHostingRow({ dataDir, configDir, platform, deps }) : { check: 'hosting', ok: true, detail: 'service' });
     // Fleet stage 5 §3.4: gui.apps entries that match by bare process name.
     for (const warning of (nodeCfg.gui && nodeCfg.gui.warnings) || []) {
       results.push({ check: 'gui app allowlist', ok: true, warn: true, detail: warning });
@@ -141,7 +179,17 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
   // the remedy. doctor has no master key, so it checks what it can (a regular
   // file, JSON, its shape, its owner); what the running service itself found
   // (a file that does not decrypt, say) is read from its status record.
-  {
+  // A personal node has no helper: its GUI runs in the service (spec §7),
+  // whose status record still says when desktop apps are off.
+  if (personal) {
+    results.push({ check: 'session helper', ok: true, detail: 'not used on a personal node (the GUI runs in-process)' });
+    const { readGuiStatusRecord, remedyFor } = require('../gui/status');
+    const { shown } = require('./commands/io');
+    const record = readGuiStatusRecord({ dataDir });
+    if (record && record.available !== true && typeof record.reason === 'string' && record.reason) {
+      results.push({ check: 'desktop apps (running service)', ok: false, detail: `off, ${shown(record.reason)}${record.detail ? `: ${shown(record.detail)}` : ''}. To fix it, ${remedyFor(record.reason)}` });
+    }
+  } else {
     const { adminConfigDir } = require('../platform/paths');
     const dir = configDir || adminConfigDir({ dataDir });
     const { inspectCanonical } = require('../gui/session-secret');
@@ -176,8 +224,11 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
   // public key the data dir holds. Doctor does not resolve the master key,
   // so this compares public keys only; the service and "session install"
   // also check that the private key is the public key's. Front doors and
-  // relay hosts are not held to a record.
-  {
+  // relay hosts are not held to a record, and neither is a personal node
+  // (spec §6: the owner account is the trust boundary).
+  if (personal) {
+    results.push({ check: 'recorded identity', ok: true, detail: 'not used on a personal node' });
+  } else {
     const { adminConfigDir } = require('../platform/paths');
     const dir = configDir || adminConfigDir({ dataDir });
     let profile = null;
@@ -300,4 +351,4 @@ async function approvalChecks({ dataDir, platform, adminUid = 0 }) {
   return out;
 }
 
-module.exports = { runDoctor, identityMatchRow };
+module.exports = { runDoctor, identityMatchRow, queryPersonalTask };

@@ -28,6 +28,14 @@ function common(dataDir, deps, io) {
     isAdmin: deps.isAdmin || (() => require('./admin-check').isAdmin({ platform })),
     // node.yaml is the admin's; a file that fails its owner check throws.
     nodeName: deps.nodeName || (() => require('../node-config').loadNodeConfig({ dataDir, adminConfigDir: configDir, ...adminOptions }).name),
+    // node.yaml says "hosting: personal"; one that cannot be read is the fleet layout.
+    personal: () => {
+      try {
+        return require('../node-config').loadNodeConfig({ dataDir, adminConfigDir: configDir, ...adminOptions }).hosting === 'personal';
+      } catch {
+        return false;
+      }
+    },
     // The admin's own reading of the record: no service-side write probe.
     recordOptions: { configDir, platform, serviceProbe: false, ...(deps.adminUid === undefined ? {} : { adminUid: deps.adminUid }), ...(deps.identityRecord || {}) }
   };
@@ -38,6 +46,12 @@ const idText = (nodeId) => `${nodeId} (fingerprint ${require('../../approvals/en
 async function record({ flags, dataDir, io, deps }) {
   const R = require('../identity-record');
   const c = common(dataDir, deps, io);
+  // Personal hosting (spec 2026-10-25 §6): nothing to vouch for; said
+  // before the elevation check, since the owner runs it unelevated.
+  if (c.personal()) {
+    io.stdout.write('a personal node records no identity; the owner account is the trust boundary\n');
+    return 0;
+  }
   if (!c.isAdmin()) { io.stderr.write('identity record needs root (or an elevated Administrator prompt on Windows).\n'); return 1; }
   // Off a terminal nobody can be asked, so only --yes goes on. Checked
   // before anything is resolved or read.

@@ -183,6 +183,19 @@ function common(dataDir, deps, io) {
         return null;
       }
     }),
+    // Personal hosting (spec 2026-10-25 §7): true when node.yaml says
+    // "hosting: personal"; a node.yaml that cannot be read is the fleet layout.
+    personal: () => {
+      try {
+        return require('../node-config').loadNodeConfig({
+          dataDir, adminConfigDir: configDir,
+          ...(deps.adminUid === undefined ? {} : { adminUid: deps.adminUid }),
+          ...(deps.geteuid ? { geteuid: deps.geteuid } : {})
+        }).hosting === 'personal';
+      } catch {
+        return false;
+      }
+    },
     isTTY: deps.isTTY || (() => Boolean(io && io.stdin && io.stdin.isTTY)),
     confirm: deps.confirm || ((question) => require('./desktop').defaultConfirm(io, question)),
     // node.yaml is the admin's; a file that fails its owner check throws.
@@ -200,6 +213,9 @@ function common(dataDir, deps, io) {
     resolveUser: deps.resolveSessionUser || ((name, options = {}) => require('../../gui/session-secret').resolveSessionUser(name, { platform, ...options }))
   };
 }
+
+// Personal hosting: the GUI runs in the service, over no helper (spec §7).
+const NO_HELPER = 'a personal node has no session helper; nothing to install';
 
 // R-F5-14: installing the helper enables nothing; node.yaml does.
 const NOT_ENABLED = (configDir) => `installed but not enabled in node.yaml: desktop apps stay off until ${path.join(configDir, 'node.yaml')} has\n  ${require('../../gui/config').GUI_ENABLE_LINES.replace(/\n/g, '\n  ')}\nand the service is restarted`;
@@ -318,6 +334,7 @@ async function install({ flags, dataDir, io, deps }) {
   const S = require('../../gui/session-secret');
   const A = require('../../session/autostart');
   const c = common(dataDir, deps, io);
+  if (c.personal()) { io.stderr.write(`${NO_HELPER}\n`); return 2; }
   if (!flags.user) { io.stderr.write(SESSION_USAGE); return 2; }
   if (!c.isAdmin()) { io.stderr.write('session install needs root (or an elevated Administrator prompt on Windows).\n'); return 1; }
   if (refusedUnasked({ flags, io, c, verb: 'install' })) return 2;
@@ -476,6 +493,7 @@ async function uninstall({ flags, dataDir, io, deps }) {
   const S = require('../../gui/session-secret');
   const A = require('../../session/autostart');
   const c = common(dataDir, deps, io);
+  if (c.personal()) { io.stdout.write(`${NO_HELPER}\n`); return 0; }
   if (!flags.user) { io.stderr.write(SESSION_USAGE); return 2; }
   if (!c.isAdmin()) { io.stderr.write('session uninstall needs root (or an elevated Administrator prompt on Windows).\n'); return 1; }
   if (refusedUnasked({ flags, io, c, verb: 'remove' })) return 2;
@@ -655,6 +673,28 @@ function printProbes(io, probes) {
 async function status({ dataDir, io, deps }) {
   const c = common(dataDir, deps, io);
   const record = (deps.readStatus || ((d) => require('../../gui/status').readGuiStatusRecord({ dataDir: d })))(dataDir);
+  // Personal hosting (spec 2026-10-25 §7): no helper; what the service's
+  // status.json says is printed as for a helper, under the hosting line.
+  if (c.personal()) {
+    io.stdout.write('hosting: personal\n');
+    io.stdout.write('helper: not used on a personal node; the GUI runs in the service\n');
+    if (!record) {
+      io.stdout.write('desktop apps: no running service reports them\n');
+      return 0;
+    }
+    if (!record.available) {
+      if (typeof record.reason === 'string' && record.reason) {
+        const { remedyFor } = require('../../gui/status');
+        io.stdout.write(`desktop apps: off (${shown(record.reason)})${record.detail ? `: ${shown(record.detail)}` : ''}\n`);
+        io.stdout.write(`  to fix it, ${remedyFor(record.reason)}\n`);
+      } else {
+        io.stdout.write('desktop apps: not available\n');
+      }
+      return 0;
+    }
+    printStatusRecord(io, record);
+    return 0;
+  }
   const installed = require('../../gui/session-secret').inspectCanonical({ configDir: c.configDir, platform: c.platform });
   if (installed.state === 'installed') {
     io.stdout.write(`installed for: ${shown(installed.user)} (${identityText(installed, c.platform)})\n`);
@@ -675,11 +715,17 @@ async function status({ dataDir, io, deps }) {
   }
   // From here on every value is the helper's word or the file's: shown, never printed raw.
   io.stdout.write(`helper: ${record.available ? `connected (${shown(record.user, 64)}, ${shown(record.platform, 64)})` : 'not connected'}\n`);
+  printStatusRecord(io, record);
+  return 0;
+}
+
+// The capabilities, limits, probes and lease lines of a status record.
+// Every value is the helper's word or the file's: shown, never printed raw.
+function printStatusRecord(io, record) {
   if (record.available) io.stdout.write(`capabilities: ${shownList(record.capabilities) || 'none'}\n`);
   if (Array.isArray(record.limits) && record.limits.length) io.stdout.write(`limits: ${shownList(record.limits)}\n`);
   printProbes(io, record.probes);
   if (record.lease) io.stdout.write(`lease: ${record.lease.active === true ? 'active' : 'not active'} (${shownList(record.lease.app_ids)})\n`);
-  return 0;
 }
 
 async function probe({ dataDir, io, deps }) {

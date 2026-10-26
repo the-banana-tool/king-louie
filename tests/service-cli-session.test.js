@@ -1513,3 +1513,75 @@ describe('R-F5-17: session install needs the administrator\'s record of the node
     assert.equal(canonical(s.configDir).node_id, identity.nodeId);
   });
 });
+
+// Personal hosting (spec 2026-10-25-personal-node-design.md §7, §8): no
+// session helper. install and uninstall say so and touch nothing; status
+// prints the hosting and then what the running service's status.json says.
+describe('session commands under personal hosting', () => {
+  function personal() {
+    const s = setup();
+    fs.writeFileSync(path.join(s.configDir, 'node.yaml'), 'name: laptop\nprofile: agent\nhosting: personal\n', { mode: 0o644 });
+    return s;
+  }
+  const NONE = 'a personal node has no session helper; nothing to install';
+
+  it('install refuses (exit 2) and writes nothing, elevated or not', async () => {
+    for (const isAdmin of [true, false]) {
+      const s = personal();
+      const before = fs.readdirSync(s.configDir).sort();
+      const t = io();
+      const d = deps(s, { isAdmin: () => isAdmin });
+      assert.equal(await runSessionCommand({ sub: 'install', flags: { user: 'alice', yes: true }, dataDir: s.dataDir, io: t.io, deps: d }), 2);
+      assert.equal(t.err.join(''), `${NONE}\n`);
+      assert.equal(t.out.join(''), '');
+      assert.deepEqual(d.executed, []);
+      assert.deepEqual(fs.readdirSync(s.configDir).sort(), before);
+    }
+  });
+
+  it('uninstall removes nothing and exits 0', async () => {
+    const s = personal();
+    const before = fs.readdirSync(s.configDir).sort();
+    const t = io();
+    const d = deps(s, { isAdmin: () => false });
+    assert.equal(await runSessionCommand({ sub: 'uninstall', flags: { user: 'alice', yes: true }, dataDir: s.dataDir, io: t.io, deps: d }), 0);
+    assert.equal(t.out.join(''), `${NONE}\n`);
+    assert.deepEqual(d.executed, []);
+    assert.deepEqual(fs.readdirSync(s.configDir).sort(), before);
+  });
+
+  it('status prints the hosting first, then the running service\'s capabilities, limits, probes and lease', async () => {
+    const s = personal();
+    fs.writeFileSync(path.join(s.dataDir, 'service.pid'), String(process.pid));
+    let t = io();
+    assert.equal(await runSessionCommand({ sub: 'status', flags: {}, dataDir: s.dataDir, io: t.io, deps: deps(s) }), 0);
+    assert.deepEqual(t.out.join('').trimEnd().split('\n'), ['hosting: personal', 'helper: not used on a personal node; the GUI runs in the service', 'desktop apps: no running service reports them']);
+
+    writeGuiStatus(s.dataDir, {
+      v: 1, pid: process.pid, hosting: 'personal', available: true, user: 'owner', platform: 'win32', capabilities: ['screenshot', 'input'],
+      probes: [{ check: 'send_input', ok: true }], limits: ['one display'], apps: [], since: 'x',
+      updated_at: new Date().toISOString(), lease: { active: true, app_ids: ['chrome'] }
+    });
+    t = io();
+    assert.equal(await runSessionCommand({ sub: 'status', flags: {}, dataDir: s.dataDir, io: t.io, deps: deps(s) }), 0);
+    assert.deepEqual(t.out.join('').trimEnd().split('\n'), [
+      'hosting: personal',
+      'helper: not used on a personal node; the GUI runs in the service',
+      'capabilities: screenshot, input',
+      'limits: one display',
+      '  send_input: ok',
+      'lease: active (chrome)'
+    ]);
+
+    writeGuiStatus(s.dataDir, {
+      v: 1, pid: process.pid, hosting: 'personal', available: false, reason: 'gui_start_failed', detail: 'no backend', user: null, platform: null,
+      capabilities: [], probes: [], limits: [], apps: [], since: 'x', updated_at: new Date().toISOString(), lease: null
+    });
+    t = io();
+    assert.equal(await runSessionCommand({ sub: 'status', flags: {}, dataDir: s.dataDir, io: t.io, deps: deps(s) }), 0);
+    const off = t.out.join('').trimEnd().split('\n');
+    assert.equal(off.length, 4);
+    assert.equal(off[2], 'desktop apps: off (gui_start_failed): no backend');
+    assert.match(off[3], /^ {2}to fix it, /);
+  });
+});

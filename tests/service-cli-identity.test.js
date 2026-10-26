@@ -589,3 +589,24 @@ describe('doctor: the node identity record', () => {
     });
   });
 });
+
+// Personal hosting (spec 2026-10-25-personal-node-design.md §6): the owner
+// account is the trust boundary, so no record is written; show is unchanged.
+describe('identity record under personal hosting', () => {
+  it('says so, exits 0 and writes nothing, elevated or not; show is unchanged', async () => {
+    for (const isAdmin of [true, false]) {
+      const s = setup();
+      fs.writeFileSync(path.join(s.configDir, 'node.yaml'), 'name: laptop\nprofile: agent\nhosting: personal\n', { mode: 0o644 });
+      const before = tree(s.configDir);
+      const t = io();
+      assert.equal(await run(s, t, { flags: { yes: true }, d: { isAdmin: () => isAdmin, isTTY: () => false } }), 0);
+      assert.equal(t.text(), 'a personal node records no identity; the owner account is the trust boundary\n');
+      assert.equal(t.errors(), '');
+      assert.deepEqual(tree(s.configDir), before);
+      assert.equal(seen(s).state, 'none');
+      const shown = io();
+      assert.equal(await run(s, shown, { sub: 'show' }), 1);
+      assert.match(shown.text(), /No administrator record of this node's identity/);
+    }
+  });
+});
