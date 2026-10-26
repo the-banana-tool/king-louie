@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="kl_window">#FF111418</color>
+    <style name="Theme.KingLouie" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/kl_window</item>
+        <item name="android:colorBackground">@color/kl_window</item>
+        <item name="android:windowSplashScreenBackground">@color/kl_window</item>
+    </style>
+</resources>

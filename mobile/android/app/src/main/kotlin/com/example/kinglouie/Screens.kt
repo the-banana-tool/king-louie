@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -23,6 +24,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -56,7 +58,8 @@ private fun relayText(value: JsonElement?): String = Display.escape(value.str() 
 
 @Composable
 fun Root(model: AppModel) {
-    MaterialTheme {
+    // KingLouieTheme (MainActivity) supplies the colours; the Surface paints the background under every screen.
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         model.banner?.let { text ->
             AlertDialog(onDismissRequest = { model.banner = null }, confirmButton = { TextButton({ model.banner = null }) { Text("OK") } }, text = { Text(text) })
         }
@@ -78,7 +81,7 @@ fun ScanOrPaste(model: AppModel, onDone: () -> Unit) {
 @Composable
 fun Welcome(model: AppModel) {
     var scanning by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("King Louie", style = MaterialTheme.typography.headlineLarge)
         Text("Approve what your machines want to do, with your fingerprint or face.")
         if (scanning) ScanOrPaste(model) { scanning = false } else {

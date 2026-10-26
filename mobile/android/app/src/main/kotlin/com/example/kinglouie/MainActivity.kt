@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.FragmentActivity
 import com.example.kinglouie.push.Push
@@ -18,7 +19,9 @@ class MainActivity : FragmentActivity() {
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
             .launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.POST_NOTIFICATIONS))
         if (Push.ENABLED) Push.register(this) { token -> model.registerPushToken(token) }
-        setContent { Root(model) }
+        // Drawn behind the status and navigation bars; every screen pads itself by their insets.
+        enableEdgeToEdge()
+        setContent { KingLouieTheme { Root(model) } }
         handle(intent)
     }
 
