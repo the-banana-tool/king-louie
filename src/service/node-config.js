@@ -23,10 +23,10 @@ const DEFAULT_MAX_CONCURRENT_JOBS = 2;
 // the node from loading. A misspelled `always_confirm` used to fall back
 // silently to the defaults, which can be looser than what the administrator
 // wrote. A later stage that parses a new top-level key appends it here in the
-// same change (fleet stage 3 `approvers`, stage 4 `frontdoor`, stage 5 `gui`)
-// and validates that key's own subtree itself.
+// same change (fleet stage 3 `approvers`, stage 4 `frontdoor`, stage 5 `gui`,
+// the personal node's `hosting`) and validates that key's own subtree itself.
 const NODE_YAML_KEYS = Object.freeze({
-  top: Object.freeze(['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir', 'approvers', 'frontdoor', 'delegate', 'gui']),
+  top: Object.freeze(['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir', 'approvers', 'frontdoor', 'delegate', 'gui', 'hosting']),
   policy: Object.freeze(['allowed_roots', 'remote_sessions', 'max_concurrent_jobs']),
   remote_sessions: Object.freeze(['always_confirm', 'deny']),
   approvers: Object.freeze(['relay', 'request_ttl_s']),
@@ -85,7 +85,8 @@ function defaultNodeConfig(adminDir) {
     approvers: { ...DEFAULT_APPROVERS },
     frontdoor: null,
     delegate: { ...DEFAULT_DELEGATE },
-    gui: parseGuiConfig(undefined, { profile: 'agent' })
+    gui: parseGuiConfig(undefined, { profile: 'agent' }),
+    hosting: 'service'
   };
 }
 
@@ -96,6 +97,14 @@ const DEFAULT_APPROVERS = { relay: null, requestTtlS: 300 };
 // Delegate sessions (fleet stage 4 §3.8, §6). provider/model null = the
 // node's settings default; cwd null = the first policy.allowed_roots entry.
 const DEFAULT_DELEGATE = Object.freeze({ provider: null, model: null, agent: 'main', idleCloseMs: 2 * 3600000, cwd: null, maxSessions: 4 });
+
+// How the service is hosted (personal node spec §6): `service`, the default,
+// or `personal`, which only an agent node may name (checked by the caller).
+function parseHosting(raw, invalid) {
+  if (raw === undefined) return 'service';
+  if (raw === 'service' || raw === 'personal') return raw;
+  throw invalid('hosting must be "service" or "personal"');
+}
 
 function parseDelegate(raw, invalid, file) {
   if (raw === undefined) return { ...DEFAULT_DELEGATE };
@@ -226,6 +235,8 @@ function loadNodeConfig({
   // Placement rules (§6): each block belongs to exactly one profile.
   if (parsed.frontdoor !== undefined && profile !== 'frontdoor') throw invalid('frontdoor: is only for profile: frontdoor');
   if (parsed.delegate !== undefined && profile !== 'agent') throw invalid('delegate needs profile: agent');
+  const hosting = parseHosting(parsed.hosting, invalid);
+  if (hosting === 'personal' && profile !== 'agent') throw invalid('hosting: personal needs profile: agent');
   const frontDoor = typeof parsed.front_door === 'string' ? parsed.front_door.trim() : null;
 
   let capabilities = [];
@@ -303,7 +314,8 @@ function loadNodeConfig({
     approvers: parseApprovers(parsed.approvers, invalid, configFile),
     frontdoor: profile === 'frontdoor' ? parseFrontDoorConfig(parsed.frontdoor, configFile) : null,
     delegate: parseDelegate(parsed.delegate, invalid, configFile),
-    gui: parseGuiConfig(parsed.gui, { profile, file: configFile })
+    gui: parseGuiConfig(parsed.gui, { profile, file: configFile }),
+    hosting
   };
 }
 

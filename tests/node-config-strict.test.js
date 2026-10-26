@@ -47,7 +47,7 @@ function expectUnknown(yaml, keyPath, known) {
 
 describe('NODE_YAML_KEYS', () => {
   it('lists every key node.yaml may carry, per level, frozen', () => {
-    assert.deepEqual([...NODE_YAML_KEYS.top], ['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir', 'approvers', 'frontdoor', 'delegate', 'gui']);
+    assert.deepEqual([...NODE_YAML_KEYS.top], ['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir', 'approvers', 'frontdoor', 'delegate', 'gui', 'hosting']);
     assert.deepEqual([...NODE_YAML_KEYS.policy], ['allowed_roots', 'remote_sessions', 'max_concurrent_jobs']);
     assert.deepEqual([...NODE_YAML_KEYS.remote_sessions], ['always_confirm', 'deny']);
     assert.deepEqual([...NODE_YAML_KEYS.approvers], ['relay', 'request_ttl_s']);
