@@ -237,7 +237,8 @@ describe('loadProfile("agent") with the desktop bridge', () => {
       try {
         assert.strictEqual(running.approvals.approverStore.dir, path.join(configDir, 'approvers'));
         // The approver store checks approvers/ against the same adminUid.
-        assert.deepStrictEqual(startApprovalsOpts[0].approverStoreOptions, { adminUid: selfUid });
+        // ... and with the node's hosting (a fleet node here).
+        assert.deepStrictEqual(startApprovalsOpts[0].approverStoreOptions, { adminUid: selfUid, hosting: 'service' });
         assert.strictEqual(running.approvals.approverStore.adminUid, selfUid);
         assert.strictEqual(bridgeStartApprovals, running.approvals);
         // approvalsStatus (F7 item 5) on F3's real objects: seq/at come from
