@@ -2582,14 +2582,15 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   TTY), writes `node.yaml` (every string single-quoted; kept when there, with
   the missing lines printed), warns when ffmpeg is not on `PATH`, registers
   the task and starts it only when the kept `node.yaml` loads
-  (`loadNodeConfig`) with `hosting: personal` and `approvers.relay` (else it
-  says what is missing), then prints what is left: `token
+  (`loadNodeConfig`) with `hosting: personal` and `approvers.relay` or a
+  `front-door.json` beside it (an `lstat`; else it says what is missing), then prints what is left: `token
   set`, `pair`, `enroll-device`, `vault set browser_cred:<profile>:<host>`
   (it asks for no secret, C-4) and `mcp`. `uninstall --personal [--data-dir
   DIR] [--dry-run] [--yes]` removes the task and keeps the data dir (no task
   registered: it says so and exits 0). `pair`
-  under personal writes `approvers.relay` into `node.yaml` and runs the task
-  (C-9); it still refuses while the node runs, naming `schtasks /End /TN
+  under personal writes the pin and runs the task (C-9): `pair wss://<relay>`
+  writes `approvers.relay` into `node.yaml`, `pair https://mcp.<domain>` (a
+  front door) writes `front-door.json` and leaves `approvers.relay` alone; it still refuses while the node runs, naming `schtasks /End /TN
   "KingLouie Node"`. `import --from <desktop>
   --case <case dir or id> [--yes]` moves one case (below). On Windows the
   default data dir is the fleet one only when the fleet config dir holds a

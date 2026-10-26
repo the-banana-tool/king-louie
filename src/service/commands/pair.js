@@ -38,6 +38,20 @@ function defaultStartNode(env = process.env) {
   return true;
 }
 
+// The tail of a personal node's pair, relay or front door alike. → exit code.
+function startPersonalNode(io, deps) {
+  const startNode = deps.startNode || (() => defaultStartNode(deps.env));
+  let started;
+  try {
+    started = startNode();
+  } catch (err) {
+    io.stderr.write(`Could not start ${PERSONAL_TASK_NAME}: ${err.message}\n`);
+    return 1;
+  }
+  io.stdout.write(started ? `Started ${PERSONAL_TASK_NAME}\n` : 'The logon task is not registered; run install --personal\n');
+  return 0;
+}
+
 async function runPair({ url, dataDir, io, flags = {}, deps = {} }) {
   if (!url) {
     io.stderr.write(USAGE);
@@ -83,9 +97,12 @@ async function runPair({ url, dataDir, io, flags = {}, deps = {} }) {
     const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeCfg.name);
 
     if (target.protocol === 'https:') {
-      const { pairWithFrontDoor } = require('./pair-front-door');
-      const { adminConfigDir } = require('../../platform/paths');
-      return await pairWithFrontDoor({ target, configDir: deps.configDir || adminConfigDir({ dataDir }), nodeCfg, identity, io, flags, deps });
+      const pairWithFrontDoor = deps.pairWithFrontDoor || require('./pair-front-door').pairWithFrontDoor;
+      const code = await pairWithFrontDoor({ target, configDir: deps.configDir || adminConfigDir({ dataDir }), nodeCfg, identity, io, flags, deps });
+      // front-door.json is the pin a personal node links to (service-wiring
+      // prefers it), so approvers.relay is left alone; only the start remains.
+      if (code !== 0 || nodeCfg.hosting !== 'personal') return code;
+      return startPersonalNode(io, deps);
     }
 
     const port = Number(target.port);
@@ -182,16 +199,7 @@ async function runPair({ url, dataDir, io, flags = {}, deps = {} }) {
       }
       const was = previous && previous !== url ? ` (was ${previous})` : '';
       io.stdout.write(`approvers.relay set to ${url} in ${file}${was}\n`);
-      const startNode = deps.startNode || (() => defaultStartNode(deps.env));
-      let started;
-      try {
-        started = startNode();
-      } catch (err) {
-        io.stderr.write(`Could not start ${PERSONAL_TASK_NAME}: ${err.message}\n`);
-        return 1;
-      }
-      io.stdout.write(started ? `Started ${PERSONAL_TASK_NAME}\n` : 'The logon task is not registered; run install --personal\n');
-      return 0;
+      return startPersonalNode(io, deps);
     }
     if (nodeCfg.approvers.relay !== url) {
       io.stdout.write(`Next: set "approvers: { relay: ${url} }" in the admin node.yaml, then start the service.\n`);

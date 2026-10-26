@@ -1011,7 +1011,9 @@ Install prints these five steps when it is done:
    `node.yaml` itself and then starts the logon task: you never edit the
    file or start the task by hand. `pair` refuses while the node runs, and
    says how to stop it (`schtasks /End /TN "KingLouie Node"`); to pair
-   again, stop it first (below).
+   again, stop it first (below). A front door instead of a relay works the
+   same way: `king-louie-service pair https://mcp.kl.example.com` writes the
+   pin to `front-door.json` beside `node.yaml` and starts the logon task.
 3. **Your phone**: `king-louie-service enroll-device`, with the node
    running, and answer `y` at its `[y/N]` prompt. None of these commands
    needs an elevated prompt on a personal node.

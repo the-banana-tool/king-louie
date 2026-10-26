@@ -215,7 +215,7 @@ describe('install --personal', () => {
   it('a kept node.yaml with a relay but not hosting: personal, or one that does not load, is registered and not started, with why', async () => {
     const cases = [
       ['name: laptop\nprofile: agent\napprovers:\n  relay: wss://relay.example.com:8443\n', /not started: node\.yaml lacks hosting: personal\./],
-      ['name: laptop\nprofile: agent\nhosting: personal\n', /not started: node\.yaml lacks approvers\.relay: wss:\/\/<relay>\./],
+      ['name: laptop\nprofile: agent\nhosting: personal\n', /not started: node\.yaml has no approvers\.relay and there is no front-door\.json yet: pair \(wss:\/\/<relay> or https:\/\/mcp\.<domain>\)/],
       ['name: laptop\nprofile: agent\nhosting: personal\nbogus_key: 1\napprovers:\n  relay: wss://relay.example.com:8443\n', /not started: node\.yaml does not load \(/]
     ];
     for (const [yaml, why] of cases) {
@@ -228,6 +228,36 @@ describe('install --personal', () => {
       assert.ok(!argvs(d).some((argv) => argv.includes('/Run')), yaml);
       assert.match(t.text(), why);
     }
+  });
+
+  it('a kept personal node.yaml with a front-door.json beside it (no approvers.relay) is started', async () => {
+    const s = setup();
+    fs.mkdirSync(s.configDir, { recursive: true });
+    fs.writeFileSync(s.yamlPath, 'name: laptop\nprofile: agent\nhosting: personal\n');
+    fs.writeFileSync(path.join(s.configDir, 'front-door.json'), '{}\n');
+    const d = deps(s);
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    assert.ok(argvs(d).some((argv) => argv.includes('/Run')), t.text());
+    assert.doesNotMatch(t.text(), /not started/);
+  });
+
+  it('a front-door.json that is not a regular file is not startable, with why', async () => {
+    const s = setup();
+    fs.mkdirSync(path.join(s.configDir, 'front-door.json'), { recursive: true });
+    fs.writeFileSync(s.yamlPath, 'name: laptop\nprofile: agent\nhosting: personal\n');
+    const d = deps(s);
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    assert.ok(!argvs(d).some((argv) => argv.includes('/Run')));
+    assert.match(t.text(), /not started: front-door\.json is not a regular file/);
+  });
+
+  it('the remaining steps name both pair forms', async () => {
+    const s = setup();
+    const { code, t } = await run('install', s, deps(s));
+    assert.equal(code, 0, t.errors());
+    assert.ok(t.text().includes('pair wss://<relay>   or   pair https://mcp.<domain>   (a relay or a front door: writes the pin and starts the node)'), t.text());
   });
 
   it('a numeric --model and a numeric hostname load back as strings', { skip: process.platform !== 'win32' && 'gui.apps paths are checked for the running platform' }, async () => {

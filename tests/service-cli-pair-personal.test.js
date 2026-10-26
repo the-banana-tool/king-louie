@@ -133,6 +133,59 @@ describe('pair under hosting: personal', () => {
   });
 });
 
+describe('pair https:// (a front door) under hosting: personal', () => {
+  const FRONT_DOOR = 'https://mcp.kl.example.com';
+  // pairWithFrontDoor is faked: its own suites cover the flow; this is the tail.
+  function fakeFrontDoor(exit, seen) {
+    return async (args) => { seen.push(args); return exit; };
+  }
+
+  it('personal: a front door pair starts the task and leaves approvers.relay alone', async () => {
+    const d = dirs();
+    fs.writeFileSync(d.yaml, PERSONAL_HEAD);
+    let starts = 0;
+    const seen = [];
+    const io = streamIo();
+    const exit = await runPair({ url: FRONT_DOOR, dataDir: d.dataDir, io, deps: { configDir: d.configDir, pairWithFrontDoor: fakeFrontDoor(0, seen), startNode: () => { starts += 1; return true; } } });
+    assert.equal(exit, 0, io.text.err);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].configDir, d.configDir);
+    assert.equal(starts, 1);
+    assert.match(io.text.out, /Started KingLouie Node\n/);
+    assert.equal(fs.readFileSync(d.yaml, 'utf8'), PERSONAL_HEAD);
+  });
+
+  it('personal: an unregistered task is said; a start that throws is exit 1; a failed pair starts nothing', async () => {
+    const d = dirs();
+    fs.writeFileSync(d.yaml, PERSONAL_HEAD);
+    let io = streamIo();
+    assert.equal(await runPair({ url: FRONT_DOOR, dataDir: d.dataDir, io, deps: { configDir: d.configDir, pairWithFrontDoor: fakeFrontDoor(0, []), startNode: () => false } }), 0);
+    assert.match(io.text.out, /The logon task is not registered; run install --personal\n/);
+
+    io = streamIo();
+    assert.equal(await runPair({ url: FRONT_DOOR, dataDir: d.dataDir, io, deps: { configDir: d.configDir, pairWithFrontDoor: fakeFrontDoor(0, []), startNode: () => { throw new Error('access denied'); } } }), 1);
+    assert.match(io.text.err, /Could not start KingLouie Node: access denied/);
+
+    let starts = 0;
+    io = streamIo();
+    assert.equal(await runPair({ url: FRONT_DOOR, dataDir: d.dataDir, io, deps: { configDir: d.configDir, pairWithFrontDoor: fakeFrontDoor(1, []), startNode: () => { starts += 1; return true; } } }), 1);
+    assert.equal(starts, 0);
+  });
+
+  it('service: a front door pair starts nothing (unchanged)', async () => {
+    const d = dirs();
+    const before = 'name: fleet-node\nprofile: agent\n';
+    fs.writeFileSync(d.yaml, before);
+    let starts = 0;
+    const io = streamIo();
+    const exit = await runPair({ url: FRONT_DOOR, dataDir: d.dataDir, io, deps: { configDir: d.configDir, pairWithFrontDoor: fakeFrontDoor(0, []), startNode: () => { starts += 1; return true; } } });
+    assert.equal(exit, 0, io.text.err);
+    assert.equal(starts, 0);
+    assert.doesNotMatch(io.text.out, /Started KingLouie Node/);
+    assert.equal(fs.readFileSync(d.yaml, 'utf8'), before);
+  });
+});
+
 describe('setNodeYamlRelay', () => {
   it('setNodeYamlRelay refuses a url with a newline', () => {
     const d = dirs();

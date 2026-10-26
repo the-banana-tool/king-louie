@@ -119,7 +119,9 @@ normal, unelevated prompt:
 2. `king-louie-service token set <provider>` (the delegate's key, on stdin).
 3. `king-louie-service pair wss://<relay-host>:<port>` with a code from the
    relay host (`relay code <node-name>` there). On a personal node it writes
-   `approvers.relay` into `node.yaml` and starts the node.
+   `approvers.relay` into `node.yaml` and starts the node. A front door works
+   the same way: `pair https://mcp.kl.example.com` writes its pin to
+   `front-door.json` in the config dir and starts the node.
 4. `king-louie-service enroll-device`, and answer `y` to enrol the phone.
 5. `king-louie-service vault set browser_cred:<profile>:<host>` for each
    login a take will use, with the node stopped

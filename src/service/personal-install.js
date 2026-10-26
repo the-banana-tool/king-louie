@@ -23,6 +23,9 @@ const PERSONAL_TASK_NAME = 'KingLouie Node';
 const FLEET_TASK_NAME = 'KingLouie';
 const SID_RE = /^S-1-\d+(-\d+){1,14}$/;
 const NODE_YAML = 'node.yaml';
+// src/fleet/front-door-pin.js's PIN_FILE (not required here: it loads the mesh).
+const FRONT_DOOR_PIN = 'front-door.json';
+const NOTHING_PAIRED = `${NODE_YAML} has no approvers.relay and there is no ${FRONT_DOOR_PIN} yet: pair (wss://<relay> or https://mcp.<domain>) writes one and starts the task`;
 
 const TRUST_LINE = 'the service will run as this account; the owner account is the trust boundary: anything running as you can drive it as a local mcp client and change its approver set, and a shell the phone approves can do anything you can';
 const REBOOT_LINE = 'a logon task: after a reboot the node is down until you log in (the phones show "Could not confirm" and a take cannot start)';
@@ -129,7 +132,9 @@ function readYaml(file) {
 
 // Whether the node.yaml in configDir is one the started task would run:
 // it loads through loadNodeConfig with hosting: personal and
-// approvers.relay set. → { ok: true } or { ok: false, why } (one line).
+// approvers.relay set or a front door pinned in <configDir>/front-door.json
+// (what the node links to: service-wiring.js prefers the pin).
+// → { ok: true } or { ok: false, why } (one line).
 function defaultStartable(configDir) {
   let config;
   try {
@@ -138,10 +143,19 @@ function defaultStartable(configDir) {
   } catch (err) {
     return { ok: false, why: `${NODE_YAML} does not load (${shown(err.message)})` };
   }
-  const missing = [];
-  if (config.hosting !== 'personal') missing.push('hosting: personal');
-  if (!(config.approvers && typeof config.approvers.relay === 'string' && config.approvers.relay.trim())) missing.push('approvers.relay: wss://<relay>');
-  return missing.length ? { ok: false, why: `${NODE_YAML} lacks ${missing.join(' and ')}` } : { ok: true };
+  if (config.hosting !== 'personal') return { ok: false, why: `${NODE_YAML} lacks hosting: personal` };
+  if (config.approvers && typeof config.approvers.relay === 'string' && config.approvers.relay.trim()) return { ok: true };
+  // lstat, as the pin reader does: a link is refused there, never followed.
+  let st;
+  try {
+    st = fs.lstatSync(path.join(configDir, FRONT_DOOR_PIN));
+  } catch (err) {
+    if (err.code === 'ENOENT') return { ok: false, why: NOTHING_PAIRED };
+    return { ok: false, why: `${FRONT_DOOR_PIN} cannot be read (${shown(err.message)})` };
+  }
+  if (st.isSymbolicLink()) return { ok: false, why: `${FRONT_DOOR_PIN} is a link, which the node refuses` };
+  if (!st.isFile()) return { ok: false, why: `${FRONT_DOOR_PIN} is not a regular file` };
+  return { ok: true };
 }
 
 function resolveDeps(deps, io) {
@@ -243,7 +257,7 @@ function leftLines({ provider, dataDir, defaultDir }) {
   return [
     'What is left, in order:',
     `  1. king-louie-service token set ${provider ? shown(provider) : '<provider>'}${dirFlag}   (the delegate's provider key, read from stdin, with the service stopped)`,
-    `  2. king-louie-service pair wss://<relay>${dirFlag}   (writes approvers.relay and starts the node)`,
+    `  2. king-louie-service pair wss://<relay>${dirFlag}   or   pair https://mcp.<domain>${dirFlag}   (a relay or a front door: writes the pin and starts the node)`,
     `  3. king-louie-service enroll-device${dirFlag}   (your phone; needs the node running)`,
     `  4. king-louie-service vault set browser_cred:<profile>:<host>${dirFlag}   (one for each login the takes will use, read from stdin)`,
     `  5. king-louie-service mcp${dirFlag}   (the command for the driver's MCP client config)`
@@ -285,7 +299,7 @@ async function install({ flags, io, c }) {
   const missing = existing ? missingLines(existing.text, wantedLeaves(wanted)) : null;
   // The task is started only when the node.yaml it will run is one that
   // starts: a fresh one has no relay yet, and pair starts it.
-  const start = existing ? c.startable(configDir) : { ok: false, why: `${NODE_YAML} has no approvers.relay yet: pair writes it and starts the task` };
+  const start = existing ? c.startable(configDir) : { ok: false, why: NOTHING_PAIRED };
   const relay = start.ok;
   // A fleet data dir with no node.yaml beside it is a leftover that the
   // default data dir rule ignores (paths.js defaultServiceDataDir).
