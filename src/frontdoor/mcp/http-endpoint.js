@@ -49,7 +49,7 @@ function requireFn(obj, fn, what) {
 }
 
 class McpHttpEndpoint {
-  constructor({ mcpHost, resourceUrl, tokens, grants, scopeRegistry, router, progressHoldS = 20, maxSessionsPerGrant = 20, now = Date.now, serverVersion = null } = {}) {
+  constructor({ mcpHost, origin = null, resourceUrl, tokens, grants, scopeRegistry, router, progressHoldS = 20, maxSessionsPerGrant = 20, now = Date.now, serverVersion = null } = {}) {
     // Fail closed: without any of these nothing could be authenticated,
     // scoped or answered.
     if (typeof mcpHost !== 'string' || !mcpHost) throw new TypeError('McpHttpEndpoint needs mcpHost');
@@ -65,9 +65,9 @@ class McpHttpEndpoint {
     }
     if (!Number.isInteger(maxSessionsPerGrant) || maxSessionsPerGrant < 1) throw new RangeError('maxSessionsPerGrant must be a positive integer');
     this.mcpHost = mcpHost.toLowerCase();
-    this.origin = `https://${this.mcpHost}`;
-    this.resourceUrl = resourceUrl;
-    this.metadataUrl = `${this.origin}/.well-known/oauth-protected-resource/mcp`;
+    // The public origin (https://mcp.<domain>[:port]): what a browser's Origin
+    // header must say, and the base of the metadata URL.
+    this.setOrigin(origin || `https://${this.mcpHost}`, resourceUrl);
     this.tokens = tokens;
     this.grants = grants;
     this.scopeRegistry = scopeRegistry;
@@ -79,6 +79,12 @@ class McpHttpEndpoint {
     // id → { id, grantId, version, createdAt, lastUsed, streams: Set<end()> }
     this.sessions = new Map();
     this.seq = 0; // creation order, for evicting the oldest session
+  }
+
+  setOrigin(origin, resourceUrl) {
+    this.origin = origin;
+    this.resourceUrl = resourceUrl;
+    this.metadataUrl = `${origin}/.well-known/oauth-protected-resource/mcp`;
   }
 
   sessionCount(grantId) {

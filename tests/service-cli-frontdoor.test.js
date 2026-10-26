@@ -95,6 +95,25 @@ async function confirmRun(t, name, courier, answer = 'y') {
   return { code: await running, io };
 }
 
+describe('frontdoor code prints the URL the front door is reached at', () => {
+  const printed = async (status) => {
+    const t = layout();
+    const io = streamIo();
+    const courier = service(null, { 'frontdoor.status': status });
+    assert.equal(await runFrontDoorCommand({ sub: 'code', arg: 'web-01', dataDir: t.dataDir, configDir: t.configDir, io, deps: { courier } }), 0, io.text.err);
+    return /^ {2}king-louie-service pair (\S+)$/m.exec(io.text.out)[1];
+  };
+
+  it('with its port when it is not 443, bare otherwise', async () => {
+    assert.equal(await printed({ frontdoor_id: FD.nodeId, domain: 'kl.example.com', public_url: 'https://mcp.kl.example.com:8443' }), 'https://mcp.kl.example.com:8443');
+    assert.equal(await printed({ frontdoor_id: FD.nodeId, domain: 'kl.example.com', public_url: 'https://mcp.kl.example.com' }), 'https://mcp.kl.example.com');
+    assert.equal(await printed({ frontdoor_id: FD.nodeId, domain: 'kl.example.com' }), 'https://mcp.kl.example.com', 'an older front door');
+    for (const odd of ['https://evil.example.com:8443', 'https://mcp.kl.example.com:8443/x', 'http://mcp.kl.example.com:8443', 42]) {
+      assert.equal(await printed({ frontdoor_id: FD.nodeId, domain: 'kl.example.com', public_url: odd }), 'https://mcp.kl.example.com', String(odd));
+    }
+  });
+});
+
 describe('frontdoor code --confirm', () => {
   it('writes the console record with the front door id reserved, and confirms', async () => {
     const t = layout();
@@ -305,7 +324,11 @@ describe('frontdoor admin commands: arguments and secrets', () => {
     const spki = `sha256/${'A'.repeat(43)}`;
     fs.writeFileSync(file, JSON.stringify({ connected: true, relay_public_url: 'https://mcp.kl.example.com', relay_spki: spki }));
     assert.deepEqual(readFrontDoorLink(t.dataDir), { relay: 'https://mcp.kl.example.com', spki });
+    // A front door on another port than 443 carries it in the URL.
+    fs.writeFileSync(file, JSON.stringify({ connected: true, relay_public_url: 'https://mcp.kl.example.com:8443', relay_spki: spki }));
+    assert.deepEqual(readFrontDoorLink(t.dataDir), { relay: 'https://mcp.kl.example.com:8443', spki });
     for (const bad of [
+      { relay_public_url: 'https://mcp.kl.example.com:443', relay_spki: spki },
       { relay_public_url: 'https://evil.example.com', relay_spki: spki },
       { relay_public_url: 'https://mcp.kl.example.com/x', relay_spki: spki },
       { relay_public_url: 'https://mcp.kl.example.com', relay_spki: null },

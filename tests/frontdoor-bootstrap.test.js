@@ -96,7 +96,7 @@ describe('bootstrapping a front door', () => {
     const enrolling = runFrontDoorCommand({ sub: 'enroll-device', dataDir: t.dataDir, configDir: t.configDir, io, deps: { renderQr: async () => '[QR]', storeOptions: STORE, allowTestKeys: true, pollMs: 25 } });
     const qrText = await until(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), () => `the QR (${io.text.err})`);
     const qr = decodeQr(qrText[1]);
-    assert.equal(qr.relay, 'https://mcp.kl.example.com');
+    assert.equal(qr.relay, t.url);
     assert.equal(qr.relay_spki, t.fd.relay.phoneSpki);
     assert.equal(qr.node.id, t.fd.identity.nodeId);
     const claim = await request(t.url, { method: 'POST', path: `/v1/enroll/${qr.code_id}`, json: phone.enroll({ codeId: qr.code_id, code: qr.code }), tls: t.tls });
@@ -178,6 +178,6 @@ describe('bootstrapping a front door', () => {
     const qrIo = streamIo();
     assert.equal(await runRelayCommand({ sub: 'qr', dataDir: t.dataDir, io: qrIo, deps: { loadConfig: () => ({ profile: 'frontdoor', relay: null }), renderQr: async () => '[QR]' } }), 0);
     const qr = decodeQr(/^(kl1:\S+)$/m.exec(qrIo.text.out)[1]);
-    assert.deepEqual(qr, { t: 'kl.relay', relay: 'https://mcp.kl.example.com', relay_spki: t.fd.relay.phoneSpki });
+    assert.deepEqual(qr, { t: 'kl.relay', relay: t.url, relay_spki: t.fd.relay.phoneSpki });
   });
 });

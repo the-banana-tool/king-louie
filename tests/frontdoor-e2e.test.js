@@ -290,7 +290,7 @@ describe('a running front door', () => {
   it('serves OAuth metadata on mcp. over the operator certificate', async () => {
     const res = await request(t.base, { path: '/.well-known/oauth-authorization-server', tls: t.tls });
     assert.equal(res.status, 200);
-    assert.equal(res.json.issuer, 'https://mcp.kl.example.com');
+    assert.equal(res.json.issuer, t.base);
   });
 
   it('pairs a node the phone approves; the node links with its pin; the mirror catches up; an MCP client runs a runbook', async () => {
@@ -528,7 +528,7 @@ describe('a running front door', () => {
 
   it('answers the admin CLI\'s courier RPCs', async () => {
     const status = await t.fd.adminRpc('frontdoor.status');
-    assert.deepEqual([status.frontdoor_id, status.domain, status.phones], [t.fd.identity.nodeId, 'kl.example.com', 1]);
+    assert.deepEqual([status.frontdoor_id, status.domain, status.public_url, status.phones], [t.fd.identity.nodeId, 'kl.example.com', t.base, 1]);
     assert.deepEqual((await t.fd.adminRpc('frontdoor.nodes')).map((n) => [n.node_name, n.online]), [['gpu-box', true]]);
     await assert.rejects(t.fd.adminRpc('frontdoor.bogus'), (err) => err.code === 'unknown_method');
   });
@@ -616,7 +616,7 @@ describe('a running front door', () => {
 
   it('writes link.json for the front door itself, so F3 enroll-device can run against it', () => {
     const link = JSON.parse(fs.readFileSync(path.join(t.dataDir, 'approvals', 'link.json'), 'utf8'));
-    assert.deepEqual([link.connected, link.relay_id, link.relay_public_url], [true, t.fd.identity.nodeId, 'https://mcp.kl.example.com']);
+    assert.deepEqual([link.connected, link.relay_id, link.relay_public_url], [true, t.fd.identity.nodeId, t.base]);
     assert.match(link.relay_spki, /^sha256\//);
   });
 

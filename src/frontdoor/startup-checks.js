@@ -54,7 +54,7 @@ function startupProblems({ serviceConfig, nodeConfig } = {}) {
       fourth.push('Invalid service.json: "relay" must be an object');
     } else {
       for (const key of Object.keys(relay)) if (!RELAY_KEYS.includes(key)) fourth.push(`Invalid service.json: unknown key "relay.${key}"`);
-      if (relay.public_url !== undefined) fourth.push(`relay.public_url is derived on the frontdoor profile (https://mcp.${fd.domain}); remove it`);
+      if (relay.public_url !== undefined) fourth.push(`relay.public_url is derived on the frontdoor profile (https://mcp.${fd.domain}[:port]); remove it`);
       for (const key of LISTENER_KEYS) if (relay[key] !== undefined) fourth.push(`the frontdoor profile uses one 443 listener; remove relay.${key}`);
       try {
         parsePushConfig(relay.push, 'service.json');

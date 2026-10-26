@@ -42,13 +42,14 @@ function shownClientError(message) {
 }
 
 class OAuthServer {
-  constructor({ domain, clients, pending, scopeRegistry, scopesEnabled, clientDefaults = [], now = Date.now,
+  constructor({ domain, origin = null, clients, pending, scopeRegistry, scopesEnabled, clientDefaults = [], now = Date.now,
     tokens = null, codes = null, grants = null, alerts = null, auditLedger = null, onGrantRevoked = () => {} } = {}) {
     // The name the SNI listener routes to this handler; a request whose Host
     // names anything else is misdirected (421), whatever its TLS name was.
     this.mcpHost = `mcp.${String(domain).toLowerCase()}`;
-    this.issuer = `https://${this.mcpHost}`;
-    this.resourceUrl = `${this.issuer}/mcp`;
+    // The public origin clients reach (https://mcp.<domain>[:port]); the
+    // issuer, the resource and every endpoint URL are built from it.
+    this.setOrigin(origin || `https://${this.mcpHost}`);
     this.clients = clients;
     this.pending = pending;
     this.scopeRegistry = scopeRegistry;
@@ -72,6 +73,11 @@ class OAuthServer {
       this.routes.set('POST /oauth/token', (req, res) => handlers.token(req, res));
       this.routes.set('POST /oauth/revoke', (req, res) => handlers.revoke(req, res));
     }
+  }
+
+  setOrigin(origin) {
+    this.issuer = origin;
+    this.resourceUrl = `${origin}/mcp`;
   }
 
   supportedScopes() {

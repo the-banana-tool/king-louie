@@ -173,6 +173,14 @@ async function startRelay({ dataDir, config, identity, listeners = 'own', regist
     get phoneSpki() {
       return relay.phoneSpki;
     },
+    // What relay.hello reports as public_url.
+    get publicUrl() {
+      return relay.publicUrl;
+    },
+    // The front door's URL once its listener is bound (port 0 in tests).
+    setPublicUrl(url) {
+      relay.publicUrl = url;
+    },
     // F4 (§3.3): after a certificate key change, relay.hello reports the new pin.
     setPhoneSpki(pin) {
       assertSpkiPin(pin);

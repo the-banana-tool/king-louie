@@ -50,7 +50,7 @@ describe('§3.1 startup checks', () => {
 
   it('4: no agent features, no relay listener keys, public_url derived, push parsed', () => {
     assert.deepEqual(first(opts({ service: { features: { ...OFF, gateway: true } } })), [4, 'the frontdoor profile runs no agent features: set features.gateway to false in service.json']);
-    assert.deepEqual(first(opts({ service: { relayRaw: { public_url: 'https://mcp.kl.example.com' } } })), [4, 'relay.public_url is derived on the frontdoor profile (https://mcp.kl.example.com); remove it']);
+    assert.deepEqual(first(opts({ service: { relayRaw: { public_url: 'https://mcp.kl.example.com' } } })), [4, 'relay.public_url is derived on the frontdoor profile (https://mcp.kl.example.com[:port]); remove it']);
     for (const key of ['tls', 'phone_listen', 'mesh_listen']) {
       assert.deepEqual(first(opts({ service: { relayRaw: { [key]: {} } } })), [4, `the frontdoor profile uses one 443 listener; remove relay.${key}`]);
     }

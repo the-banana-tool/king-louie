@@ -111,7 +111,7 @@ async function pairWithFrontDoor({ target, configDir, nodeCfg, identity, io, fla
   io.stdout.write(`Node fingerprint: ${nodeFingerprint(identity.nodeId)}\n`);
   const where = frontDoorTarget(target);
   if (!where) {
-    io.stderr.write(`A front door is reached at https://mcp.<domain>, not ${printable(target.origin)}. Nothing was sent.\n`);
+    io.stderr.write(`A front door is reached at https://mcp.<domain>[:port], not ${printable(target.origin)}. Nothing was sent.\n`);
     return 2;
   }
   const { host, domain } = where;

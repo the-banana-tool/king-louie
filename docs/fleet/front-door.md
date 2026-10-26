@@ -74,6 +74,13 @@ ACME directory's subscriber agreement; Let's Encrypt production is the default
 directory. With your own certificate instead, replace `acme` with
 `tls: { cert_file: /etc/king-louie/tls/mcp.pem, key_file: /etc/king-louie/tls/mcp.key }`.
 
+A `listen.port` other than 443 (another server already holds 443 on the host,
+say) is carried in every URL the front door hands out: the phone's QR, `pair`
+on the nodes and MCP clients all use `https://mcp.kl.example.com:<port>`, and
+nodes link to `wss://mesh.kl.example.com:<port>`. Built-in ACME answers
+TLS-ALPN-01, which the CA only tries on 443, so on another port use `tls:`
+files instead of `acme`.
+
 To let MCP clients read cases on agent machines, also list `cases:read` in
 `scopes_enabled`. It shows case lists, briefs, open questions and
 orientation, including private facts, through `list_cases`, `open_case` and

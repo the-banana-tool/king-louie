@@ -157,7 +157,7 @@ describe('service CLI: pair', () => {
     const nodeId = /^Node ID: (kl-[a-z2-7]{16})$/m.exec(io.text.out)?.[1];
     assert.ok(nodeId, io.text.out);
     assert.match(io.text.out, /^Node fingerprint: kl-[a-z2-7]{4} [a-z2-7]{4} [a-z2-7]{4} [a-z2-7]{4}$/m);
-    assert.match(io.text.err, /A front door is reached at https:\/\/mcp\.<domain>, not https:\/\/door\.example/);
+    assert.match(io.text.err, /A front door is reached at https:\/\/mcp\.<domain>\[:port\], not https:\/\/door\.example/);
 
     // The identity was saved, so a second run reports the same node.
     const again = streamIo();

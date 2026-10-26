@@ -135,12 +135,26 @@ async function withCourier(dataDir, io, deps, fn) {
   }
 }
 
-// frontdoor.status → { frontdoorId, domain }, checked.
+// frontdoor.status → { frontdoorId, domain, publicUrl }, checked. publicUrl
+// is https://mcp.<domain>[:port]; a front door from before it was reported
+// (or one that reports anything else) gives the bare https://mcp.<domain>.
 function frontDoorStatus(s) {
   if (!s || typeof s !== 'object' || typeof s.frontdoor_id !== 'string' || !NODE_ID_RE.test(s.frontdoor_id) || !isDnsName(s.domain)) {
     throw malformed('status');
   }
-  return { frontdoorId: s.frontdoor_id, domain: s.domain };
+  return { frontdoorId: s.frontdoor_id, domain: s.domain, publicUrl: mcpOrigin(s.public_url, s.domain) };
+}
+
+function mcpOrigin(value, domain) {
+  const bare = `https://mcp.${domain}`;
+  if (typeof value !== 'string') return bare;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return bare;
+  }
+  return url.protocol === 'https:' && url.origin === value && url.hostname === `mcp.${domain}` ? value : bare;
 }
 
 // frontdoor.pairing → the pending console pairing for `name`, checked: its
@@ -212,13 +226,13 @@ async function runCode({ name, confirm, dataDir, configDir, io, deps }) {
     return 1;
   }
   return withCourier(dataDir, io, deps, async (call) => {
-    const { frontdoorId, domain } = frontDoorStatus(await call('frontdoor.status'));
+    const { frontdoorId, publicUrl } = frontDoorStatus(await call('frontdoor.status'));
     const issued = await call('frontdoor.code', { node_name: name, confirm: Boolean(confirm) });
     if (!issued || typeof issued.code !== 'string' || !CODE_TEXT_RE.test(issued.code) || !isTimestamp(issued.expires_at)) throw malformed('pairing code');
     // The code is a secret: printed for the administrator only, never logged.
     io.stdout.write(`Pairing code for ${name}: ${issued.code}\n`);
     io.stdout.write(`It works once, until ${issued.expires_at}. On ${name}, as the administrator, run\n`);
-    io.stdout.write(`  king-louie-service pair https://mcp.${domain}\n`);
+    io.stdout.write(`  king-louie-service pair ${publicUrl}\n`);
     io.stdout.write('and type the code when it asks (typed, it stays out of your shell history).\n');
     io.stdout.write(`Front door fingerprint: ${nodeFingerprint(frontdoorId)}\n`);
     if (!confirm) {

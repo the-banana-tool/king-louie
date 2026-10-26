@@ -178,7 +178,15 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
   const fdConfig = nodeConfig.frontdoor;
   const domain = fdConfig.domain;
   const hosts = frontDoorHosts(domain);
-  const publicUrl = `https://${hosts.mcp}`;
+  const listen = deps.listen || fdConfig.listen;
+  // Every client-facing URL carries the port the front door is reached on
+  // when it is not 443 (another server may own 443 on the host): the relay
+  // URL in link.json and the enrollment QR, the re-pin, the OAuth issuer and
+  // resource, the MCP origin and the mesh URL. Port 0 (tests) is set again
+  // once the listener is bound.
+  const portSuffix = (port) => (port === 443 ? '' : `:${port}`);
+  const mcpOriginFor = (port) => `https://${hosts.mcp}${portSuffix(port)}`;
+  let publicUrl = mcpOriginFor(deps.publicPort || listen.port);
   const fdDir = path.join(dataDir, 'frontdoor');
   fs.mkdirSync(path.join(fdDir, 'oauth'), { recursive: true, mode: 0o700 });
 
@@ -323,7 +331,7 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
       if (mcp) mcp.endSessionsForGrant(grantId);
     };
     const oauth = new OAuthServer({
-      domain, clients, pending, scopeRegistry, scopesEnabled: fdConfig.oauth.scopesEnabled, clientDefaults: fdConfig.oauth.clientDefaults,
+      domain, origin: publicUrl, clients, pending, scopeRegistry, scopesEnabled: fdConfig.oauth.scopesEnabled, clientDefaults: fdConfig.oauth.clientDefaults,
       tokens, codes, grants, alerts, auditLedger: ownLedger, onGrantRevoked
     });
     registerGrantRoutes(relay.phoneApi, {
@@ -333,10 +341,9 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
       // on every use; revokeGrantEverywhere drops them here as well.
       scopeRules: () => scopeRegistry.rules(fdConfig.oauth.scopesEnabled), auditLedger: ownLedger, onGrantRevoked, tokens, nodes: registry
     });
-    mcp = new McpHttpEndpoint({ mcpHost: hosts.mcp, resourceUrl: oauth.resourceUrl, tokens, grants, scopeRegistry, router, progressHoldS: fdConfig.mcp.progressHoldS });
+    mcp = new McpHttpEndpoint({ mcpHost: hosts.mcp, origin: publicUrl, resourceUrl: oauth.resourceUrl, tokens, grants, scopeRegistry, router, progressHoldS: fdConfig.mcp.progressHoldS });
 
-    const listen = deps.listen || fdConfig.listen;
-    const meshUrlFor = (port) => `wss://${hosts.mesh}${port === 443 ? '' : `:${port}`}/mesh/v1`;
+    const meshUrlFor = (port) => `wss://${hosts.mesh}${portSuffix(port)}/mesh/v1`;
     // Set again once the listener is bound (port 0 in tests); nothing can
     // reach /pair/v1 before that.
     const pairing = new PairingService({
@@ -407,6 +414,16 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
     await listener.start(); // check 5
     const publicPort = deps.publicPort || listener.address().port;
     pairing.meshUrl = meshUrlFor(publicPort);
+    if (mcpOriginFor(publicPort) !== publicUrl) {
+      // Only when the configured port was 0: link.json is written again by
+      // spkiChanged() below.
+      publicUrl = mcpOriginFor(publicPort);
+      relay.setPublicUrl(publicUrl);
+      selfLink.publicUrl = publicUrl;
+      repin.publicUrl = publicUrl;
+      oauth.setOrigin(publicUrl);
+      mcp.setOrigin(publicUrl, oauth.resourceUrl);
+    }
 
     if (!fdConfig.tls) await tlsSource.start();
     spkiChanged();
@@ -424,7 +441,7 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
     adminRpc = async (method, params = {}) => {
       switch (method) {
         case 'frontdoor.status':
-          return { frontdoor_id: frontdoorId, fingerprint: nodeFingerprint(frontdoorId), domain, mesh_cert_fingerprint: identity.tlsFingerprint, tls: tlsSource.status(), phones: approverStore.activeCount() };
+          return { frontdoor_id: frontdoorId, fingerprint: nodeFingerprint(frontdoorId), domain, public_url: publicUrl, mesh_cert_fingerprint: identity.tlsFingerprint, tls: tlsSource.status(), phones: approverStore.activeCount() };
         case 'frontdoor.code':
           return pairing.issue(params.node_name, { by: 'console', confirm: params.confirm === true ? 'console' : 'phone' });
         case 'frontdoor.pairing': {
