@@ -10,6 +10,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { parseYaml } = require('../src/platform/yaml');
+const { parseGuiConfig } = require('../src/gui/config');
 const { loadNodeConfig, NODE_YAML_KEYS } = require('../src/service/node-config');
 const { loadServiceConfig, DEFAULT_FEATURES, DEFAULT_PORTS } = require('../src/service/config');
 const { RunbookEngine } = require('../src/runbooks/runbook-engine');
@@ -375,6 +376,38 @@ describe('example roles: load through the real loaders', () => {
     assert.deepEqual(Object.keys(rawService.features), Object.keys(DEFAULT_FEATURES));
     assert.deepEqual(Object.keys(rawService.ports), Object.keys(DEFAULT_PORTS));
     assert.ok(Object.values(rawService.features).every((v) => v === false), 'every listener feature off on the front door');
+  });
+
+  // Personal node (spec 2026-10-25 §8): the node.yaml install --personal
+  // writes, with the approvers block pair adds. Its paths are Windows paths
+  // (the install is Windows-only), so the GUI block is parsed as win32 on
+  // every platform and the whole file loads where those paths are absolute.
+  const PERSONAL = path.join(EXAMPLES, 'personal', 'node.yaml');
+
+  it('personal: node.yaml has only known keys and a take-ready gui block', () => {
+    const raw = parseYaml(fs.readFileSync(PERSONAL, 'utf8'));
+    for (const key of Object.keys(raw)) assert.ok(NODE_YAML_KEYS.top.includes(key), `node.yaml key ${key}`);
+    assert.deepEqual(Object.keys(raw), ['name', 'profile', 'hosting', 'approvers', 'gui', 'delegate']);
+    const gui = parseGuiConfig(raw.gui, { profile: 'agent', platform: 'win32' });
+    assert.equal(gui.enabled, true);
+    assert.equal(gui.take.enabled, true);
+    assert.equal(gui.take.maxMinutes, 240);
+    assert.equal(gui.browser, 'chrome');
+    assert.ok(gui.apps.chrome, 'the browser is one of gui.apps');
+  });
+
+  it('personal: loads through loadNodeConfig', { skip: POSIX ? 'its paths are Windows paths' : false }, () => {
+    const config = path.join(tmp(), 'config');
+    installInto(config, [PERSONAL]);
+    const node = loadNodeConfig({ adminConfigDir: config, ...adminOpts });
+    assert.equal(node.name, 'laptop');
+    assert.equal(node.profile, 'agent');
+    assert.equal(node.hosting, 'personal');
+    assert.equal(node.approvers.relay, 'wss://relay.example.com:8443');
+    assert.equal(node.gui.enabled, true);
+    assert.equal(node.gui.take.enabled, true);
+    assert.equal(node.gui.browser, 'chrome');
+    assert.equal(node.delegate.maxSessions, 2);
   });
 
   it('a Windows root with a space holds a file inside it', { skip: POSIX ? 'win32 path semantics' : false }, () => {
@@ -986,7 +1019,8 @@ describe('install guide', () => {
     '## 9. Troubleshooting',
     '## 10. Stage 3: Approving unsafe runbooks from your phone',
     '## 11. Stage 4: Reaching the fleet through the front door',
-    '## 12. Stage 5: Desktop apps on agent nodes'
+    '## 12. Stage 5: Desktop apps on agent nodes',
+    '## 13. Personal node (your own machine)'
   ];
   const lines = () => fs.readFileSync(GUIDE, 'utf8').split(/\r?\n/);
 

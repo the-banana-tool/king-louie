@@ -7,6 +7,9 @@ Replace them with your own as you go. Steps that differ by operating system
 are marked **Windows**, **macOS** or **Linux**. `<repository-url>`, `<runner>`
 and `<you>` are placeholders for your own values.
 
+On a Windows machine that is yours alone, where a driver on the same machine
+runs demo takes, see section 13 (a personal node) instead of sections 3 to 7.
+
 ## 1. What you are setting up
 
 | Role | Profile | OS | What it does | Runbooks |
@@ -879,3 +882,241 @@ Not available yet. This section is written when fleet stage 4 merges.
 ## 12. Stage 5: Desktop apps on agent nodes
 
 Not available yet. This section is written when fleet stage 5 merges.
+
+## 13. Personal node (your own machine)
+
+Everything above sets up a fleet node: the service runs as `LOCAL SERVICE`
+and an administrator owns its config, so every trust rule is "the service
+account cannot write what the administrator wrote". On a Windows machine
+where you are the only user and the administrator, and where you want a
+Claude Code session on the same machine to drive King Louie (demo takes,
+`docs/driving-king-louie.md`), that boundary only separates you from
+yourself. A **personal node** is the same service run another way: in your
+own login session, as you, started by a logon task, with one fact in place
+of the account checks: the process is the account that owns its data dir and
+its config dir. `examples/personal/node.yaml` is the file it ends up with.
+
+Choose it when the machine is yours alone and runs Windows. Keep the fleet
+layout (sections 3 to 7) for a machine someone else administers or other
+people sign in to. The two never share a machine: `install --personal`
+refuses while a fleet node is installed (below). macOS and Linux personal
+nodes are not done; the install refuses off Windows.
+
+What it needs, beyond the code (section 3) and Node.js: Chrome, `ffmpeg` on
+your `PATH` for takes that record, a relay you can reach
+(`king-louie-service relay run` on the relay host, under the `relay` block of
+its `service.json`), and the phone app.
+
+### Install
+
+From a **normal, unelevated** PowerShell, with the `node.exe` you want the
+service to run under (the logon task runs that same `node.exe` on the same
+`king-louie-service.js`):
+
+```powershell
+& 'C:\Program Files\nodejs\node.exe' <checkout>\bin\king-louie-service.js install --personal --dry-run
+& 'C:\Program Files\nodejs\node.exe' <checkout>\bin\king-louie-service.js install --personal
+```
+
+The full form is
+`king-louie-service install --personal [--data-dir DIR] [--browser PATH] [--provider P] [--model M] [--dry-run] [--yes]`.
+Before it asks anything it prints what it will do:
+
+- the account it runs as (name and SID), the data dir (default
+  `%LOCALAPPDATA%\KingLouie\node\data`), the config dir beside it
+  (`%LOCALAPPDATA%\KingLouie\node\config`) and the logon task's name,
+  `KingLouie Node`;
+- what that means: the service runs as this account and **the owner account
+  is the trust boundary**. Anything running as you can drive the node as a
+  local `mcp` client and can change its approver set, and a shell the phone
+  approves can do anything you can;
+- that it is a logon task: after a reboot the node is down until you log in
+  (the phones show "Could not confirm" for it and a take cannot start);
+- the files it will write, and the `node.yaml` itself.
+
+Then it asks `[y/N]`. Off a terminal it needs `--yes` and refuses without
+it. `--dry-run` prints the steps and changes nothing. On `y` it:
+
+1. creates the data dir and the config dir (owned by you, private to you);
+2. writes `node.yaml` in the config dir:
+
+   ```yaml
+   name: <this machine's name>
+   profile: agent
+   hosting: personal
+   gui:
+     enabled: true
+     apps:
+       chrome: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+     take:
+       enabled: true
+       max_minutes: 240
+     browser: chrome
+   ```
+
+   Chrome's path is `--browser PATH`, else Chrome's registered App Path;
+   with neither it refuses (`no chrome.exe found; pass --browser <path>`).
+   `--provider` and `--model` add `delegate.provider` and `delegate.model`.
+   A `node.yaml` that is already there is kept: install prints the lines it
+   lacks for you to add, and never rewrites it;
+3. checks for `ffmpeg` on your `PATH` and, when it is missing, says so with
+   the remedy, `winget install Gyan.FFmpeg` (a warning only: a take that
+   records is refused `recorder_missing` later). The node looks for ffmpeg
+   when it starts, so restart it after installing one;
+4. registers the logon task `KingLouie Node` for your SID (at logon, in your
+   interactive session, least privilege, restarted on failure, no battery
+   limits). On a first run it does **not** start it, because there is no
+   relay yet; `pair` starts it. A later run, once `approvers.relay` is set,
+   registers the task again and starts it.
+
+It refuses: from an elevated prompt (the files would be Administrators-owned
+and the start's owner check would then refuse them); while a fleet node is
+installed (the `KingLouie` scheduled task exists, or
+`%ProgramData%\KingLouie\config` holds an identity record or a helper file;
+run `uninstall` and `session uninstall` first; nothing is migrated, and the
+personal node is a new node with a new identity); and when `LOCALAPPDATA` is
+not set and no `--data-dir` is given. Running it again is safe.
+
+Every other command finds the personal node's data dir by itself: on
+Windows the default data dir is `%ProgramData%\KingLouie\data` when it
+exists, else `%LOCALAPPDATA%\KingLouie\node\data` when that exists. So none
+of the commands below needs `--data-dir` unless you gave install one.
+
+### What is left, in order
+
+Install prints these five steps when it is done:
+
+1. **The delegate's provider key**: `king-louie-service token set <provider>`,
+   the key on stdin. The node must be stopped (it is, after a first
+   install).
+2. **The relay**: get a code for the node on the relay host
+   (`king-louie-service relay code <node-name>` there), then
+   `king-louie-service pair wss://<relay-host>:<port>` and type the code at
+   its prompt. On a personal node `pair` writes `approvers.relay` into your
+   `node.yaml` itself and then starts the logon task: you never edit the
+   file or start the task by hand. `pair` refuses while the node runs; to
+   pair again, stop it first (below).
+3. **Your phone**: `king-louie-service enroll-device`, with the node
+   running, and answer `y` at its `[y/N]` prompt. None of these commands
+   needs an elevated prompt on a personal node.
+4. **The logins the takes will use**:
+   `king-louie-service vault set browser_cred:<profile>:<host>`, one for each
+   login, the value on stdin, with the node stopped (and `errands-token` when
+   a case sends errands). Install never asks for a secret itself.
+5. **The driver's MCP config**: `king-louie-service mcp`. For Claude Code,
+   the `mcpServers` block runs `node.exe` on
+   `<checkout>\bin\king-louie-service.js` with the one argument `mcp` (no
+   `--data-dir`: the default finds the node). The driver runs as you, so it
+   posts to the node with no grant.
+
+To stop and start the node (for `token set`, `vault set` or `pair`):
+
+```powershell
+schtasks /End /TN "KingLouie Node"
+schtasks /Run /TN "KingLouie Node"
+```
+
+### Check it
+
+On start the service checks, once, that this account owns the data dir and
+the config dir (neither may be a link). Anything else refuses the start with
+`PERSONAL_NOT_OWNER`, naming the owner it found and this account; the usual
+cause is a dir made from an elevated prompt. When it holds, the log has one
+line, `hosting: personal (runs as <user>; the owner account is the trust
+boundary)`. `hosting: personal` needs `profile: agent`: a `node.yaml` with
+any other profile does not load.
+
+`king-louie-service doctor` adds a `hosting` row after the node
+configuration: `personal (runs as <user>; the owner account is the trust
+boundary); task KingLouie Node: <state>`, a failure when the owner check does
+not hold and a warning when the task is not registered. Its identity-record
+row says `recorded identity: not used on a personal node`, and its session
+helper row `session helper: not used on a personal node (the GUI runs
+in-process)`. `king-louie-service session status` prints `hosting: personal`
+first and `helper: not used on a personal node; the GUI runs in the service`,
+then the capabilities, probes and leases as on a fleet node. The node must
+run in your interactive session (the logon task's) for screenshots and input;
+started from a remote or non-interactive shell its capabilities list neither.
+
+What a personal node does **not** have, on purpose:
+
+- **No identity record.** `identity record` says `a personal node records no
+  identity; the owner account is the trust boundary` and writes nothing.
+- **No session helper.** The service is already in your session, so the GUI
+  runs inside it. `session install` says `a personal node has no session
+  helper; nothing to install` and refuses; `session uninstall` removes
+  nothing.
+- **No courier grant.** Your `mcp` process already owns the courier
+  directories.
+- **No desktop pairing.** `desktop pair` and attaching the desktop app are
+  not supported on a personal node: the desktop's bridge-file trust rule
+  refuses a bridge file a user owns. Keep the desktop app standalone; it is
+  a second King Louie with its own data, and nothing is shared between them.
+
+What the model's tools cannot touch: because the service runs as you, the
+operating system no longer keeps its tools out of your files, so a personal
+node denies the file tools (`Read`, `Write`, `Edit`, `MultiEdit`, `Glob`,
+`Grep`) two directories outright, for reads and writes alike: the config dir
+(`node.yaml`, `approvers\`) and the desktop app's profile
+(`%APPDATA%\king-louie`: its vault, chats and browser cookies). Nothing in
+`node.yaml` lifts that. Shell calls (`Bash`) go to your phone, as on any node
+with phone approvals. A shell the phone approves can do anything you can:
+the deny list fences the file tools, never a shell.
+
+### Moving a case from the desktop app
+
+The desktop app keeps its cases; you can move one to the node. With the node
+stopped, as yourself (not elevated), and with the desktop app closed so
+nothing changes the case meanwhile:
+
+```powershell
+king-louie-service import --from "$env:APPDATA\king-louie" --case <case dir or id> --dry-run
+king-louie-service import --from "$env:APPDATA\king-louie" --case <case dir or id>
+```
+
+It copies only that case's directory (its git repository, history and all)
+and the chats attached to it: no settings, no other chat or case, and no
+secret. It prints the plan and `Will copy case <title> (<id>, <status>): N
+chats, N messages, head <commit>`, then asks `Copy this case to the node?
+[y/N]` (`--yes` answers it; off a terminal `--yes` is needed). `--dry-run`
+stops after the plan. Before writing anything it refuses with
+`CASE_NOT_FOUND`, `CASE_AMBIGUOUS` (two directories share the id: name the
+directory), `CASE_UNREADABLE`, `CASE_NOT_A_REPO` or `CASE_EXISTS` (the node
+already has it). After the copy it checks that the node's copy has the
+desktop's head, a clean tree and as many chats and messages, prints both
+sides (`desktop: ...`, `node: ...`), and on a difference says
+`VERIFY_MISMATCH` and keeps the copy.
+
+When all is well it prints the last step, in the desktop app: open the case
+and choose **Moved elsewhere** among its status actions. That closes the
+desktop's copy (status `abandoned`, reason "Moved to another King Louie"):
+read-only, no wake-ups, no contact ladder, so the case is worked in one place
+only. Nothing on the desktop is deleted.
+
+What does not move: the desktop's contact state (an open question of the
+case starts its ladder again on the node, so you may be asked twice until
+the desktop's copy is closed: close it first when that matters), the
+cross-case index (the node rebuilds it), and the browser profiles (the
+node's browser jobs start with fresh profiles; add the logins with
+`vault set` as above).
+
+### Uninstall
+
+`king-louie-service uninstall --personal [--data-dir DIR] [--dry-run] [--yes]`
+stops and deletes the logon task, after a `[y/N]` (`--yes` off a terminal).
+The data dir and the config dir stay, with the node's identity, chats and
+vault; delete them yourself to remove the node.
+
+### Known limits
+
+- After a reboot the node is down until you log in (a Windows Update restart
+  while you are away included): the phones show "Could not confirm" for it
+  and a take cannot start. Automatic logon is your own choice and not part
+  of this.
+- The owner account is the trust boundary: anything running as you can
+  drive the node through `mcp` and change its approver set, and a shell the
+  phone approves can do anything you can. The deny list covers the file
+  tools only.
+- The desktop app cannot attach to a personal node, and `desktop pair` is
+  not supported there.
+- Windows only.

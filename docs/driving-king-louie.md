@@ -80,9 +80,70 @@ Sessions live in the service's memory. A service restart forgets them.
 
 ## 2. Setting up the desktop
 
-Do this once, on the desktop the driver will run on. Every
-`king-louie-service` command below that changes the install runs from an
-elevated prompt (Administrator).
+Do this once, on the desktop the driver will run on. There are two ways to
+host the service there. On a Windows machine that is yours alone, use a
+**personal node**: one unelevated command, nothing to record or grant. Use
+the **fleet layout** (the service as `LOCAL SERVICE`, set up by an
+administrator) for a machine someone else administers.
+
+### A personal node (your own Windows machine)
+
+The service runs in your own login session, as you, from the logon task
+`KingLouie Node`; the owner account is the trust boundary. The install guide
+(`docs/install-guide.md`, section 13) has every step; in short, from a
+normal, unelevated prompt:
+
+1. `king-louie-service install --personal` (`--dry-run` first; `--browser
+   <chrome.exe>` when Chrome is not where Windows registers it). It prints
+   what it will do, asks `[y/N]`, creates the data dir
+   (`%LOCALAPPDATA%\KingLouie\node\data`) and the config dir beside it, and
+   writes a `node.yaml` with the GUI and takes on:
+
+   ```yaml
+   name: laptop
+   profile: agent
+   hosting: personal
+   gui:
+     enabled: true
+     apps:
+       chrome: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+     take:
+       enabled: true
+       max_minutes: 240
+     browser: chrome
+   ```
+
+   It registers the logon task and does not start it yet. Add more apps you
+   will demo under `gui.apps`, and `delegate: { max_sessions: 2 }` for more
+   than one open session at once, by editing that file yourself.
+2. `king-louie-service token set <provider>` (the delegate's key, on stdin).
+3. `king-louie-service pair wss://<relay-host>:<port>` with a code from the
+   relay host (`relay code <node-name>` there). On a personal node it writes
+   `approvers.relay` into `node.yaml` and starts the node.
+4. `king-louie-service enroll-device`, and answer `y` to enrol the phone.
+5. `king-louie-service vault set browser_cred:<profile>:<host>` for each
+   login a take will use, with the node stopped
+   (`schtasks /End /TN "KingLouie Node"`, then `/Run` to start it again).
+6. Install ffmpeg as yourself (`winget install Gyan.FFmpeg`) and restart the
+   node so it finds it.
+7. Point the driver at `king-louie-service mcp` (no `--data-dir`: the
+   default finds the personal node) and call `list_machines`.
+
+There is no identity record, no session helper and no courier grant on a
+personal node: the GUI runs inside the service, and your `mcp` process
+already owns the courier's directories. `king-louie-service doctor` and
+`king-louie-service session status` say `hosting: personal`. Two things are
+not supported there: `desktop pair` and attaching the desktop app (keep it
+standalone; to move one case over, see the install guide's "Moving a case
+from the desktop app"). After a reboot the node is down until you log in.
+The file tools cannot touch the config dir or the desktop app's profile, and
+every shell call goes to your phone; a shell the phone approves can do
+anything you can.
+
+### The fleet layout
+
+Every `king-louie-service` command below that changes the install runs from
+an elevated prompt (Administrator).
 
 1. Install the service as an agent node:
    `king-louie-service install --profile agent` (it runs as `LOCAL SERVICE`),

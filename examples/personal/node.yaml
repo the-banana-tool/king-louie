@@ -1,0 +1,27 @@
+# laptop: a personal node (Windows). The service runs in your own login
+# session, as you, from the logon task "KingLouie Node", not as LOCAL SERVICE.
+# `king-louie-service install --personal` writes this file to
+#   %LOCALAPPDATA%\KingLouie\node\config\node.yaml
+# (the data dir is %LOCALAPPDATA%\KingLouie\node\data), and
+# `king-louie-service pair wss://<relay-host>:<port>` adds the approvers block. Install guide,
+# "Personal node (your own machine)".
+# Only the keys below are allowed; anything else stops the node from loading.
+name: laptop
+profile: agent
+# personal needs profile: agent. The start then checks that this account owns
+# the data dir and the config dir, and refuses otherwise (PERSONAL_NOT_OWNER).
+hosting: personal
+approvers:
+  relay: wss://relay.example.com:8443
+gui:
+  enabled: true
+  apps:
+    chrome: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+  take:
+    enabled: true
+    max_minutes: 240
+  browser: chrome
+# install --personal writes delegate.provider and delegate.model only when
+# it is given --provider and --model.
+delegate:
+  max_sessions: 2

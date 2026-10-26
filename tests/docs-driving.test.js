@@ -16,6 +16,7 @@ const { STEP_KINDS } = require('../src/gui/take-steps');
 const { parseGuiConfig } = require('../src/gui/config');
 const { GUI_ERROR_CODES } = require('../src/gui/errors');
 const { parseYaml } = require('../src/platform/yaml');
+const { NODE_YAML_KEYS } = require('../src/service/node-config');
 const { WAIT_MS_MAX } = require('../src/fleet/tool-definitions');
 
 const DOC = path.join(__dirname, '..', 'docs', 'driving-king-louie.md');
@@ -106,6 +107,26 @@ describe('docs/driving-king-louie.md', () => {
     assert.equal(gui.take.maxMinutes, 240);
     assert.equal(gui.browser, 'chrome');
     assert.ok(gui.apps.chrome, 'the browser is one of gui.apps');
+  });
+
+  // Personal node (spec 2026-10-25 §8, §10): §2 gives the personal flow
+  // first, with the node.yaml install --personal writes, and the fleet flow
+  // after it.
+  it('gives the personal node first, with a node.yaml node.yaml accepts', async () => {
+    const setup = section('Setting up the desktop');
+    const blocks = [...setup.matchAll(/```yaml\n([\s\S]*?)```/g)].map((m) => parseYaml(dedent(m[1])));
+    const personal = blocks.find((y) => y && y.hosting !== undefined);
+    assert.ok(personal, 'section 2 has a node.yaml block with hosting');
+    assert.equal(blocks.find((y) => y && y.gui), personal, 'the first gui block is the personal one');
+    assert.equal(personal.hosting, 'personal');
+    assert.equal(personal.profile, 'agent');
+    for (const key of Object.keys(personal)) assert.ok(NODE_YAML_KEYS.top.includes(key), `node.yaml key ${key}`);
+    parseGuiConfig(personal.gui, { profile: 'agent', platform: 'win32' });
+    const usage = await help();
+    for (const form of ['install --personal', 'uninstall --personal']) assert.ok(usage.includes(`king-louie-service ${form}`), `help lists ${form}`);
+    const personalAt = setup.indexOf('king-louie-service install --personal');
+    const fleetAt = setup.indexOf('king-louie-service install --profile agent');
+    assert.ok(personalAt >= 0 && fleetAt > personalAt, 'the personal install comes before the fleet one');
   });
 
   it('describes the take as the Take tool has it', () => {

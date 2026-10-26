@@ -2502,3 +2502,115 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   seconds with the ffmpeg on `PATH` and checks the mp4 with `ffprobe`; no
   helper child, no input, no lease. Without the variable it is skipped, and
   with no ffmpeg it skips its one test.
+
+## Personal node
+
+Spec `docs/superpowers/specs/2026-10-25-personal-node-design.md` (owner
+rulings R-PN-1 to R-PN-4, the author's calls C-1 to C-12); plan
+`docs/superpowers/plans/2026-10-25-personal-node.md`. The owner's side is
+the install guide's section 13 and `docs/driving-king-louie.md` §2;
+`examples/personal/node.yaml` is the file it ends with.
+
+- **What it is.** The agent service on the owner's own Windows machine, in
+  his login session, as him, started by the logon task `KingLouie Node`
+  (`PERSONAL_TASK_NAME`, `src/service/personal-install.js`), not as LOCAL
+  SERVICE. The trust rules that compare accounts are replaced by one fact:
+  the process is the account that owns the data dir and the config dir.
+  Takes, leases, the take policy, the courier, the audit ledger and the
+  phones are unchanged.
+- **The key (C-1).** `node.yaml` `hosting: service | personal` (default
+  `service`; in `NODE_YAML_KEYS.top`). `personal` needs `profile: agent`
+  (`loadNodeConfig` refuses otherwise). Only the key switches the rules: a
+  fleet node started by hand as the owning user keeps the fleet behaviour.
+- **The owner check (C-2).** `assertPersonalOwner`
+  (`src/service/personal-host.js`), once, in the agent profile's start
+  (`run.js`), before the identity and approvals: on Windows both owners read
+  by the handle-based inspector and compared with the process's SID, on
+  POSIX with the euid; a link, an owner that cannot be read or another owner
+  refuses the start (`PERSONAL_NOT_OWNER`). Then one log line, `hosting:
+  personal (runs as <user>; the owner account is the trust boundary)`.
+- **What goes.** No identity record (`checkRecordedIdentity` returns state
+  `personal`, which the GUI takes as on; `identity record` writes nothing).
+  The approver store keeps its owner read (Administrators, SYSTEM or the
+  process's account) and its re-read on change, and drops the write probe
+  (`hosting: 'personal'` on the store, not `serviceProbe: false`). No
+  session helper, helper file, per-user copy or courier grant (`session
+  install` refuses). No `WINDOWS_CONFIG_DIRS_SCRIPT`/data-dir ACL scripts.
+  The master key stays under DPAPI `LocalMachine` (C-10).
+- **The in-process channel.** `InProcessChannel`
+  (`src/gui/in-process-channel.js`, `buildInProcessChannel`): the GUI
+  broker's `HelperChannel` surface over `selectBackend`/`loadBackend`,
+  `createOpHandler` and `startSessionWatch` (`src/session/session-watch.js`,
+  shared with the helper), the recorder from `findFfmpeg` at start. `request`
+  keeps the broker's timeouts (`op_timeout`); quiet ops answer by code
+  alone; it never emits `closed`, so `helper_lost` never happens.
+  `createGuiSubsystem` builds it when `hosting` is `personal` (a fake through
+  `deps.channel` in tests) and reads no helper file; required lazily, so the
+  runbook, relay and front-door graphs never load it. `status.json` carries
+  `hosting`. The process must be in the interactive session for screenshots
+  and input.
+- **The denied dirs (R-PN-1, C-8).** The OS no longer keeps the model's
+  tools out of the owner's files, so `run.js` passes `createCore` `deniedDirs`
+  (registered with `registerDeniedDir`, `src/tools/utils.js`): the config dir
+  (`node.yaml`, `approvers\`) and `desktopProfileDir()` (`%APPDATA%\king-louie`,
+  the desktop app's vault, chats and cookies). `isDeniedPath` refuses every
+  path-gated tool, reads and writes alike, through links and a missing path's
+  deepest existing ancestor; nothing in `node.yaml` lifts it. Shells already
+  go to the phone (`Bash` is `requiresApproval`, so `unsafe`).
+- **The CLI forms.** `install --personal [--data-dir DIR] [--browser PATH]
+  [--provider P] [--model M] [--dry-run] [--yes]`, unelevated (refused
+  elevated, C-5), Windows only (C-6), refused while a fleet node is installed
+  (the `KingLouie` task, or an identity record or helper file under
+  `%ProgramData%\KingLouie\config`; C-12). It prints the account, dirs, task
+  and what trusting the owner account means, asks `[y/N]` (`--yes` off a
+  TTY), writes `node.yaml` (kept when there, with the missing lines
+  printed), warns when ffmpeg is not on `PATH`, registers the task and starts
+  it only when `approvers.relay` is set, then prints what is left: `token
+  set`, `pair`, `enroll-device`, `vault set browser_cred:<profile>:<host>`
+  (it asks for no secret, C-4) and `mcp`. `uninstall --personal [--data-dir
+  DIR] [--dry-run] [--yes]` removes the task and keeps the data dir. `pair`
+  under personal writes `approvers.relay` into `node.yaml` and runs the task
+  (C-9); it still refuses while the node runs. `import --from <desktop>
+  --case <case dir or id> [--yes]` moves one case (below). On Windows the
+  default data dir is the fleet one when it exists, else
+  `personalDataDir()` (`%LOCALAPPDATA%\KingLouie\node\data`) when that
+  exists (`defaultServiceDataDir`, C-11); the fleet `install` plans into
+  `fleetDataDir()` whatever exists. `doctor` has a `hosting` row (and the
+  identity-record and helper rows say "not used on a personal node");
+  `session status` prints `hosting: personal` first.
+- **Moving a case (R-PN-3, C-3).** `filterInventoryToCase`
+  (`src/migration/case-filter.js`) narrows the desktop importer's inventory
+  to one case's directory and the chats whose `caseId` is its id. The move
+  runs with the node stopped, without elevation under personal (as root on
+  POSIX it refuses), prints the case, asks `[y/N]`, refuses `CASE_NOT_FOUND`,
+  `CASE_AMBIGUOUS`, `CASE_UNREADABLE`, `CASE_NOT_A_REPO`, `CASE_EXISTS`
+  before writing, rebuilds the landed repository's index from `HEAD`, checks
+  head, a clean tree and the chat and message counts (`VERIFY_MISMATCH`), and
+  then names the desktop step: the case's **Moved elsewhere** action, an owner
+  transition to `abandoned` with the `REASON_KINDS` entry `moved`
+  (`src/cases/status.js`; `case:setStatus` takes `kind: 'moved'` only with
+  `abandoned`). No secret moves; logins go in the node's vault by hand
+  (R-PN-4). Contact state, the cross-case index and browser profiles stay.
+- **Tests inject**: `deps.personalOwner` (`inspectOwners`, `geteuid`, the
+  stats) for the owner check; `deps.gui.channel` for a fake channel, and a
+  fake backend for `InProcessChannel`; `runPersonalInstall`'s `deps`
+  (`platform`, `env`, `isAdmin`, `isTTY`, `confirm`, `whoAmI`, `findChrome`,
+  `findFfmpeg`, `fleetInstalled`, `relaySet`, `hostname`, `tmpDir`,
+  `execute`), so no test registers a real task or writes the real
+  `%LOCALAPPDATA%`; `pair`'s `deps.startNode`; the case move's `isTTY`,
+  `confirm`, `loadNodeConfig`, `runGitSync`, `openHistory`; `clearDeniedDirs`
+  after a test that registers one. Files: `tests/service-personal-host.test.js`,
+  `service-run-personal`, `node-config-hosting`, `gui-in-process-channel`,
+  `session-watch`, `tools-denied-dirs`, `service-cli-install-personal`,
+  `service-cli-pair-personal`, `service-cli-import-case`,
+  `service-doctor-hosting`, `cases-status`.
+- Residuals: a logon-task node is down from a reboot until the owner logs
+  in (the phones show "Could not confirm"; said in the consent text); the
+  owner account is the boundary, so anything running as the owner can drive
+  the node over `mcp` and change the approver set, and a shell the phone
+  approves can do anything he can (the deny list fences the file tools, not
+  a shell); `desktop pair` and attaching the desktop app are unsupported
+  (the bridge-file trust rule refuses a user-owned file; the CLI's data-dir
+  fallback makes the helper and the attach find the personal dir and fail,
+  never trust it); macOS and Linux personal nodes are not done (the key is
+  platform-neutral; the install refuses off Windows).
