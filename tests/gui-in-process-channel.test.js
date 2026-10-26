@@ -6,6 +6,7 @@ const os = require('os');
 const { InProcessChannel, buildInProcessChannel } = require('../src/gui/in-process-channel');
 const { GuiBroker } = require('../src/gui/broker');
 const { parseGuiConfig } = require('../src/gui/config');
+const { GuiError } = require('../src/gui/errors');
 const { setLogLevel } = require('../src/logging');
 
 setLogLevel('fatal');
@@ -161,6 +162,57 @@ describe('InProcessChannel', () => {
     assert.deepEqual(events[2], ['unlocked', {}]);
     assert.equal(ch.info.locked, false);
     await ch.stop();
+  });
+
+  it('a quiet op\'s GuiError comes back as its code alone, with its info (R-F5-16)', async () => {
+    const backend = fakeBackend({ input: async () => { throw new GuiError('key_invalid', 'hunter2', { info: { at: 3 } }); } });
+    const { ch } = channel({ backend });
+    await ch.start();
+    const err = await ch.request('input', { action: { kind: 'key', key: 'hunter2' } }).then(() => null, (e) => e);
+    assert.equal(err.code, 'key_invalid');
+    assert.equal(err.message, 'key_invalid');
+    assert.deepEqual(err.info, { at: 3 });
+    backend.screenshot = async () => { throw new GuiError('window_minimized', 'Notepad'); };
+    const loud = await ch.request('screenshot', {}).then(() => null, (e) => e);
+    assert.equal(loud.message, 'window_minimized: Notepad', 'an op that is not quiet keeps its message');
+    await ch.stop();
+  });
+
+  it('request passes jobId and leaseId to the op handler, as the helper does', async () => {
+    const { ch } = channel();
+    await ch.start();
+    const seen = [];
+    ch.handleOp = async (op, params, ctx) => { seen.push([op, ctx]); return 1; };
+    await ch.request('foreground', {}, { jobId: 'j1', leaseId: 'l1' });
+    await ch.request('foreground', {});
+    assert.deepEqual(seen, [['foreground', { jobId: 'j1', leaseId: 'l1' }], ['foreground', { jobId: null, leaseId: null }]]);
+    await ch.stop();
+  });
+
+  it('stop() during start() leaves nothing running and emits no ready', async () => {
+    let releaseProbe;
+    const backend = fakeBackend({ probe: () => new Promise((r) => { releaseProbe = r; }) });
+    const { ch, t } = channel({ backend });
+    let ready = 0;
+    ch.on('ready', () => { ready += 1; });
+    const starting = ch.start();
+    await new Promise((r) => setImmediate(r));
+    await ch.stop();
+    releaseProbe({ capabilities: [...ALL_CAPS], probes: [], displays: [], limits: [], locked: false });
+    await starting;
+    assert.equal(ready, 0);
+    assert.equal(ch.connected, false);
+    assert.equal(ch.info, null);
+    assert.equal(t.live.size, 0, 'no watch was started');
+  });
+
+  it('a second start() does not leak the first watch', async () => {
+    const { ch, t } = channel();
+    await ch.start();
+    await ch.start();
+    assert.equal(t.live.size, 2, 'one watch: two intervals');
+    await ch.stop();
+    assert.equal(t.live.size, 0);
   });
 
   it('Review Focus 1: a backend whose probe has no gui.screenshot leaves capabilities without it; a GuiBroker over this channel reports capability() false', async () => {

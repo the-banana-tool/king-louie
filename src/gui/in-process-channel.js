@@ -28,14 +28,21 @@ class InProcessChannel extends EventEmitter {
     this.info = null;
     this.watch = null;
     this.pending = new Set();
+    this.gen = 0;
   }
 
+  // A stop() (or another start()) while this one awaits the backend moves
+  // the generation: this start then leaves nothing behind.
   async start() {
+    this._halt();
+    const gen = this.gen;
     // As the session helper does before its first probe (the macOS prompts).
     if (this.backend && typeof this.backend.requestPermissions === 'function') {
-      await Promise.resolve().then(() => this.backend.requestPermissions()).catch((err) => this.log.warn(`permission prompt failed: ${err.message}`));
+      await Promise.resolve().then(() => this.backend.requestPermissions()).catch((err) => this.log.warn(`permission prompt failed: ${err && err.message}`));
+      if (gen !== this.gen) return;
     }
     const report = this.backend ? await safeProbe(this.backend, this.log) : NO_BACKEND_REPORT(NO_BACKEND_REASON);
+    if (gen !== this.gen) return;
     const withRecorder = { ...report, recorder: this.recorder };
     this.info = {
       user: os.userInfo().username, platform: this.platform, pid: process.pid,
@@ -64,7 +71,7 @@ class InProcessChannel extends EventEmitter {
     this.emit('event', kind, payload || {});
   }
 
-  request(op, params = {}, { timeoutMs } = {}) {
+  request(op, params = {}, { jobId = null, leaseId = null, timeoutMs } = {}) {
     if (!this.connected) return Promise.reject(new GuiError('helper_disconnected'));
     const ms = timeoutMs ?? OP_TIMEOUTS[op] ?? DEFAULT_OP_TIMEOUT;
     return new Promise((resolve, reject) => {
@@ -80,29 +87,34 @@ class InProcessChannel extends EventEmitter {
       if (typeof entry.timer.unref === 'function') entry.timer.unref();
       this.pending.add(entry);
       Promise.resolve()
-        .then(() => this.handleOp(op, params))
+        .then(() => this.handleOp(op, params, { jobId: jobId || null, leaseId: leaseId || null }))
         .then((result) => settle(resolve, result === undefined ? null : result), (err) => entry.reject(this._asGuiError(op, err)));
     });
   }
 
-  // What the helper would have put on the wire: a GuiError keeps its code,
-  // anything else is backend_failed, and a quiet op's message is not kept
-  // (it can quote a key, an argv or a path).
+  // What the helper would have put on the wire: a GuiError keeps its code
+  // and info, anything else is backend_failed, and a quiet op's message is
+  // not kept, a GuiError's included (it can quote a key, an argv or a path).
   _asGuiError(op, err) {
-    if (isGuiError(err)) return err;
     const quiet = QUIET_OPS.has(op);
+    if (isGuiError(err)) return quiet ? new GuiError(err.code, null, { info: err.info || {} }) : err;
     if (!quiet) this.log.warn(`${op} failed: ${err && err.message}`);
     else this.log.warn(`${op} failed (${(err && (err.code || err.name)) || 'error'})`);
     return new GuiError('backend_failed', quiet ? null : String((err && err.message) || 'backend_failed').slice(0, 300));
   }
 
-  async stop() {
+  _halt() {
+    this.gen += 1;
     if (this.watch) this.watch.stop();
     this.watch = null;
+  }
+
+  async stop() {
+    this._halt();
     this.connected = false;
     for (const entry of [...this.pending]) entry.reject(new GuiError('helper_disconnected'));
     if (this.backend && typeof this.backend.stop === 'function') {
-      await Promise.resolve().then(() => this.backend.stop()).catch((err) => this.log.warn(`backend stop failed: ${err.message}`));
+      await Promise.resolve().then(() => this.backend.stop()).catch((err) => this.log.warn(`backend stop failed: ${err && err.message}`));
     }
   }
 }
