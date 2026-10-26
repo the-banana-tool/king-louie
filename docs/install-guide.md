@@ -911,7 +911,9 @@ its `service.json`), and the phone app.
 
 From a **normal, unelevated** PowerShell, with the `node.exe` you want the
 service to run under (the logon task runs that same `node.exe` on the same
-`king-louie-service.js`):
+`king-louie-service.js`). Run it from the checkout you keep: the task pins
+this checkout's path and `node.exe`, so a checkout or worktree removed later
+leaves a task that cannot start.
 
 ```powershell
 & 'C:\Program Files\nodejs\node.exe' <checkout>\bin\king-louie-service.js install --personal --dry-run
@@ -941,7 +943,7 @@ it. `--dry-run` prints the steps and changes nothing. On `y` it:
 2. writes `node.yaml` in the config dir:
 
    ```yaml
-   name: <this machine's name>
+   name: '<this machine name>'
    profile: agent
    hosting: personal
    gui:
@@ -957,6 +959,8 @@ it. `--dry-run` prints the steps and changes nothing. On `y` it:
    Chrome's path is `--browser PATH`, else Chrome's registered App Path;
    with neither it refuses (`no chrome.exe found; pass --browser <path>`).
    `--provider` and `--model` add `delegate.provider` and `delegate.model`.
+   Every string install writes is single-quoted, so a numeric machine name
+   or model id stays a string.
    A `node.yaml` that is already there is kept: install prints the lines it
    lacks for you to add, and never rewrites it;
 3. checks for `ffmpeg` on your `PATH` and, when it is missing, says so with
@@ -966,21 +970,29 @@ it. `--dry-run` prints the steps and changes nothing. On `y` it:
 4. registers the logon task `KingLouie Node` for your SID (at logon, in your
    interactive session, least privilege, restarted on failure, no battery
    limits). On a first run it does **not** start it, because there is no
-   relay yet; `pair` starts it. A later run, once `approvers.relay` is set,
-   registers the task again and starts it.
+   relay yet; `pair` starts it. A later run registers the task again and
+   starts it only when the kept `node.yaml` loads with `hosting: personal`
+   and `approvers.relay` set; otherwise it says which of those is missing
+   and leaves the task stopped.
 
 It refuses: from an elevated prompt (the files would be Administrators-owned
 and the start's owner check would then refuse them); while a fleet node is
 installed (the `KingLouie` scheduled task exists, or
-`%ProgramData%\KingLouie\config` holds an identity record or a helper file;
-run `uninstall` and `session uninstall` first; nothing is migrated, and the
-personal node is a new node with a new identity); and when `LOCALAPPDATA` is
-not set and no `--data-dir` is given. Running it again is safe.
+`%ProgramData%\KingLouie\config` holds a `node.yaml`, an identity record or
+a helper file; run `uninstall` and `session uninstall` first; nothing is
+migrated, and the personal node is a new node with a new identity); and when
+`LOCALAPPDATA` is not set and no `--data-dir` is given. `--profile` and
+`--user` are usage errors with `--personal`. A `%ProgramData%\KingLouie\data`
+with no fleet `node.yaml` beside it is a leftover: install names it in one
+warning line (every command ignores it, and you may remove it) and goes on.
+Running it again is safe.
 
 Every other command finds the personal node's data dir by itself: on
-Windows the default data dir is `%ProgramData%\KingLouie\data` when it
-exists, else `%LOCALAPPDATA%\KingLouie\node\data` when that exists. So none
-of the commands below needs `--data-dir` unless you gave install one.
+Windows the default data dir is `%ProgramData%\KingLouie\data` only when
+`%ProgramData%\KingLouie\config\node.yaml` exists (a real fleet node), else
+`%LOCALAPPDATA%\KingLouie\node\data` when that exists. So none of the
+commands below needs `--data-dir` unless you gave install one. The fleet
+`install` (no `--personal`) always plans into `%ProgramData%\KingLouie\data`.
 
 ### What is left, in order
 
@@ -994,8 +1006,9 @@ Install prints these five steps when it is done:
    `king-louie-service pair wss://<relay-host>:<port>` and type the code at
    its prompt. On a personal node `pair` writes `approvers.relay` into your
    `node.yaml` itself and then starts the logon task: you never edit the
-   file or start the task by hand. `pair` refuses while the node runs; to
-   pair again, stop it first (below).
+   file or start the task by hand. `pair` refuses while the node runs, and
+   says how to stop it (`schtasks /End /TN "KingLouie Node"`); to pair
+   again, stop it first (below).
 3. **Your phone**: `king-louie-service enroll-device`, with the node
    running, and answer `y` at its `[y/N]` prompt. None of these commands
    needs an elevated prompt on a personal node.
@@ -1108,7 +1121,8 @@ node's browser jobs start with fresh profiles; add the logins with
 `king-louie-service uninstall --personal [--data-dir DIR] [--dry-run] [--yes]`
 stops and deletes the logon task, after a `[y/N]` (`--yes` off a terminal).
 The data dir and the config dir stay, with the node's identity, chats and
-vault; delete them yourself to remove the node.
+vault; delete them yourself to remove the node. When the task is not
+registered it says so, removes nothing and exits 0.
 
 ### Known limits
 
@@ -1122,4 +1136,10 @@ vault; delete them yourself to remove the node.
   tools only.
 - The desktop app cannot attach to a personal node, and `desktop pair` is
   not supported there.
+- The logon task pins the checkout and `node.exe` install ran from: run
+  `install --personal` from the checkout you keep, since a removed checkout
+  or worktree leaves a task that cannot start.
+- The start's owner check reads owners only, not access lists: a data dir on
+  a drive whose ACL lets other accounts write passes it. Keep the default
+  `%LOCALAPPDATA%` location, or check the ACL yourself.
 - Windows only.

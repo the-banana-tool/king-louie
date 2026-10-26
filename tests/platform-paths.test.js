@@ -18,8 +18,13 @@ describe('personalDataDir', () => {
 });
 
 describe('defaultServiceDataDir falls back to the personal node', () => {
-  it('win32: the fleet dir when it exists', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: (p) => p === 'C:\\ProgramData\\KingLouie\\data' }), 'C:\\ProgramData\\KingLouie\\data'));
-  it('win32: the fleet dir when both exist', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: () => true }), 'C:\\ProgramData\\KingLouie\\data'));
+  const FLEET = 'C:\\ProgramData\\KingLouie\\data';
+  const FLEET_YAML = 'C:\\ProgramData\\KingLouie\\config\\node.yaml';
+  const PERSONAL = 'C:\\U\\a\\AppData\\Local\\KingLouie\\node\\data';
+  it('win32: the fleet dir when its node.yaml exists', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: (p) => p === FLEET_YAML || p === FLEET }), FLEET));
+  it('win32: the fleet dir when its node.yaml and the personal dir both exist', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: () => true }), FLEET));
+  it('win32: a leftover fleet data dir (no node.yaml) yields to the personal dir', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: (p) => p === FLEET || p === PERSONAL }), PERSONAL));
+  it('win32: a leftover fleet data dir alone is still the default', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: (p) => p === FLEET }), FLEET));
   it('win32: the personal dir when only it exists', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env: { ProgramData: 'C:\\ProgramData', LOCALAPPDATA: 'C:\\U\\a\\AppData\\Local' }, exists: (p) => p.endsWith('node\\data') }), 'C:\\U\\a\\AppData\\Local\\KingLouie\\node\\data'));
   it('win32: the fleet dir when neither exists', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env, exists: () => false }), 'C:\\ProgramData\\KingLouie\\data'));
   it('win32: the fleet dir when LOCALAPPDATA is unset', () => assert.equal(defaultServiceDataDir({ platform: 'win32', env: { ProgramData: 'C:\\ProgramData' }, exists: (p) => p !== 'C:\\ProgramData\\KingLouie\\data' }), 'C:\\ProgramData\\KingLouie\\data'));

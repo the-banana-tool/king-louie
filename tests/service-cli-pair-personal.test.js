@@ -102,6 +102,21 @@ describe('pair under hosting: personal', () => {
     assert.match(io.text.out, /The logon task is not registered; run install --personal\n/);
   });
 
+  it('personal: the "running, stop it first" refusal names the schtasks command; a fleet node does not', async () => {
+    for (const [yaml, named] of [[PERSONAL_HEAD, true], ['name: fleet-node\nprofile: agent\n', false]]) {
+      const d = dirs();
+      fs.writeFileSync(d.yaml, yaml);
+      // This test process is a live pid.
+      fs.writeFileSync(path.join(d.dataDir, 'service.pid'), String(process.pid));
+      const io = streamIo();
+      const exit = await runPair({ url: 'ws://127.0.0.1:1', dataDir: d.dataDir, io, deps: { useTls: false, code: 'x' } });
+      assert.equal(exit, 1);
+      assert.match(io.text.err, /The service is running/);
+      if (named) assert.ok(io.text.err.includes('schtasks /End /TN "KingLouie Node"'), io.text.err);
+      else assert.doesNotMatch(io.text.err, /schtasks/);
+    }
+  });
+
   it('service: prints the Next line and writes nothing (unchanged)', async () => {
     const d = dirs();
     const before = '# fleet node\nname: fleet-node\nprofile: agent\n';

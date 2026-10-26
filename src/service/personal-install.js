@@ -90,16 +90,21 @@ function defaultFindChrome(env) {
   return null;
 }
 
-// A fleet node: the KingLouie boot task, or an identity record or a helper
-// file in the fleet config dir (§8 step 0).
-function defaultFleetInstalled(env) {
-  let task = false;
+function taskExists(env, name) {
   try {
-    execFileSync(windowsSchtasksExe(env), ['/Query', '/TN', FLEET_TASK_NAME], { stdio: 'ignore', windowsHide: true, timeout: 30000 });
-    task = true;
-  } catch { /* no such task */ }
+    execFileSync(windowsSchtasksExe(env), ['/Query', '/TN', name], { stdio: 'ignore', windowsHide: true, timeout: 30000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// A fleet node: the KingLouie boot task, or a node.yaml, an identity record
+// or a helper file in the fleet config dir (§8 step 0).
+function defaultFleetInstalled(env) {
+  const task = taskExists(env, FLEET_TASK_NAME);
   const configDir = path.win32.join(env.ProgramData || 'C:\\ProgramData', 'KingLouie', 'config');
-  const held = [path.win32.join(configDir, 'identity', 'node.json'), path.win32.join(configDir, 'session', 'helper-secret.json')].some((f) => fs.existsSync(f));
+  const held = [path.win32.join(configDir, NODE_YAML), path.win32.join(configDir, 'identity', 'node.json'), path.win32.join(configDir, 'session', 'helper-secret.json')].some((f) => fs.existsSync(f));
   return { task, configDir: held ? configDir : null };
 }
 
@@ -112,15 +117,21 @@ function readYaml(file) {
   }
 }
 
-function defaultRelaySet(yamlPath) {
-  const existing = readYaml(yamlPath);
-  if (!existing || existing.error) return false;
+// Whether the node.yaml in configDir is one the started task would run:
+// it loads through loadNodeConfig with hosting: personal and
+// approvers.relay set. → { ok: true } or { ok: false, why } (one line).
+function defaultStartable(configDir) {
+  let config;
   try {
-    const parsed = parseYaml(existing.text);
-    return Boolean(parsed && parsed.approvers && typeof parsed.approvers.relay === 'string' && parsed.approvers.relay.trim());
-  } catch {
-    return false;
+    const uid = typeof process.geteuid === 'function' ? process.geteuid() : -1;
+    config = require('./node-config').loadNodeConfig({ adminConfigDir: configDir, adminUid: uid });
+  } catch (err) {
+    return { ok: false, why: `${NODE_YAML} does not load (${shown(err.message)})` };
   }
+  const missing = [];
+  if (config.hosting !== 'personal') missing.push('hosting: personal');
+  if (!(config.approvers && typeof config.approvers.relay === 'string' && config.approvers.relay.trim())) missing.push('approvers.relay: wss://<relay>');
+  return missing.length ? { ok: false, why: `${NODE_YAML} lacks ${missing.join(' and ')}` } : { ok: true };
 }
 
 function resolveDeps(deps, io) {
@@ -135,7 +146,9 @@ function resolveDeps(deps, io) {
     findChrome: deps.findChrome || (() => defaultFindChrome(env)),
     findFfmpeg: deps.findFfmpeg || (() => require('../session/recorder').findFfmpeg({ env })),
     fleetInstalled: deps.fleetInstalled || (() => defaultFleetInstalled(env)),
-    relaySet: deps.relaySet || defaultRelaySet,
+    startable: deps.startable || defaultStartable,
+    taskRegistered: deps.taskRegistered || (() => taskExists(env, PERSONAL_TASK_NAME)),
+    exists: deps.exists || fs.existsSync,
     hostname: deps.hostname || os.hostname,
     tmpDir: deps.tmpDir || os.tmpdir(),
     execute: deps.execute || ((steps) => executeSteps(steps, { io })),
@@ -146,8 +159,10 @@ function resolveDeps(deps, io) {
 
 // --- node.yaml ---
 
-// A YAML scalar: plain when it is a simple word, else single-quoted.
-const scalar = (v) => (/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(String(v)) ? String(v) : `'${String(v).replace(/'/g, "''")}'`);
+// A YAML string scalar, always single-quoted, so a value that reads as
+// another type plain (`true`, `null`, `123`, `1e3`, `on`, a numeric
+// hostname) stays a string.
+const scalar = (v) => `'${String(v).replace(/'/g, "''")}'`;
 
 // The values node.yaml gets, as dotted paths, in the order they are written.
 function wantedLeaves({ name, chrome, provider, model }) {
@@ -217,7 +232,7 @@ function leftLines({ provider, dataDir, defaultDir }) {
   const dirFlag = dataDir === defaultDir ? '' : ` --data-dir "${dataDir}"`;
   return [
     'What is left, in order:',
-    `  1. king-louie-service token set ${provider ? scalar(provider) : '<provider>'}${dirFlag}   (the delegate's provider key, read from stdin, with the service stopped)`,
+    `  1. king-louie-service token set ${provider ? shown(provider) : '<provider>'}${dirFlag}   (the delegate's provider key, read from stdin, with the service stopped)`,
     `  2. king-louie-service pair wss://<relay>${dirFlag}   (writes approvers.relay and starts the node)`,
     `  3. king-louie-service enroll-device${dirFlag}   (your phone; needs the node running)`,
     `  4. king-louie-service vault set browser_cred:<profile>:<host>${dirFlag}   (one for each login the takes will use, read from stdin)`,
@@ -236,7 +251,7 @@ async function install({ flags, io, c }) {
   if (c.isAdmin()) return refuse(io, 'install --personal runs as you, not elevated: open a normal prompt');
   const fleet = c.fleetInstalled() || {};
   if (fleet.task || fleet.configDir) {
-    const what = [fleet.task && `the ${FLEET_TASK_NAME} scheduled task`, fleet.configDir && `${fleet.configDir} holds an identity record or a helper file`].filter(Boolean).join('; ');
+    const what = [fleet.task && `the ${FLEET_TASK_NAME} scheduled task`, fleet.configDir && `${fleet.configDir} holds a node.yaml, an identity record or a helper file`].filter(Boolean).join('; ');
     return refuse(io, `a fleet node is installed on this machine (${what}); run uninstall / session uninstall first`);
   }
   if (!flags.dataDir) return refuse(io, 'LOCALAPPDATA is not set, so there is no default data dir: pass --data-dir DIR');
@@ -261,7 +276,14 @@ async function install({ flags, io, c }) {
   const existing = readYaml(yamlPath);
   if (existing && existing.error) return refuse(io, `Could not read ${yamlPath}: ${existing.error.message}`);
   const missing = existing ? missingLines(existing.text, wantedLeaves(wanted)) : null;
-  const relay = Boolean(existing) && c.relaySet(yamlPath);
+  // The task is started only when the node.yaml it will run is one that
+  // starts: a fresh one has no relay yet, and pair starts it.
+  const start = existing ? c.startable(configDir) : { ok: false, why: `${NODE_YAML} has no approvers.relay yet: pair writes it and starts the task` };
+  const relay = start.ok;
+  // A fleet data dir with no node.yaml beside it is a leftover that the
+  // default data dir rule ignores (paths.js defaultServiceDataDir).
+  const fleetData = require('../platform/paths').fleetDataDir({ platform: 'win32', env: c.env });
+  const leftover = path.resolve(fleetData) !== dataDir && c.exists(fleetData);
 
   io.stdout.write([
     'install --personal will set up a King Louie personal node:',
@@ -289,6 +311,7 @@ async function install({ flags, io, c }) {
   // A warning, not a refusal: a take that records refuses recorder_missing
   // later with the same remedy.
   if (!c.findFfmpeg()) io.stdout.write(`${FFMPEG_LINE}\n`);
+  if (leftover) io.stdout.write(`${fleetData} exists but no fleet node.yaml is beside it: every command ignores it, and it may be removed.\n`);
 
   const xmlPath = path.join(c.tmpDir, `king-louie-node-${crypto.randomBytes(6).toString('hex')}.xml`);
   const schtasks = windowsSchtasksExe(c.env);
@@ -317,14 +340,21 @@ async function install({ flags, io, c }) {
   await c.execute(steps);
   io.stdout.write(relay
     ? `The logon task "${PERSONAL_TASK_NAME}" is registered and started.\n`
-    : `The logon task "${PERSONAL_TASK_NAME}" is registered and not started: no relay is set yet, and pair starts it.\n`);
-  io.stdout.write(`${leftLines({ provider: flags.provider, dataDir, defaultDir: c.defaultDir }).join('\n')}\n`);
+    : `The logon task "${PERSONAL_TASK_NAME}" is registered and not started: ${start.why}.\n`);
+  // Whether --data-dir must be spelled out is what the CLI would pick now
+  // that the data dir exists.
+  const defaultDir = require('../platform/paths').defaultServiceDataDir({ platform: 'win32', env: c.env, exists: c.exists });
+  io.stdout.write(`${leftLines({ provider: flags.provider, dataDir, defaultDir }).join('\n')}\n`);
   return 0;
 }
 
 async function uninstall({ flags, io, c }) {
   if (!flags.dryRun && !flags.yes && !c.isTTY()) {
     return refuse(io, 'Refusing to remove the personal node\'s logon task without confirmation on a non-interactive terminal; pass --yes.');
+  }
+  if (!c.taskRegistered()) {
+    io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered: nothing to remove. The data dir stays as it is.\n`);
+    return 0;
   }
   const schtasks = windowsSchtasksExe(c.env);
   const steps = [
@@ -352,7 +382,6 @@ async function uninstall({ flags, io, c }) {
 async function runPersonalInstall({ command, flags = {}, io, deps = {} }) {
   const c = resolveDeps(deps, io);
   if (c.platform !== 'win32') return refuse(io, `${command} --personal is Windows-only for now`);
-  c.defaultDir = require('../platform/paths').personalDataDir({ platform: 'win32', env: c.env });
   if (command === 'install') return install({ flags, io, c });
   if (command === 'uninstall') return uninstall({ flags, io, c });
   return refuse(io, `Unknown command "${command}".`);

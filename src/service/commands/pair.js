@@ -64,7 +64,13 @@ async function runPair({ url, dataDir, io, flags = {}, deps = {} }) {
   // service would overwrite from its own in-memory copy.
   const pid = runningServicePid(dataDir);
   if (pid) {
-    io.stderr.write(`The service is running (pid ${pid}) on ${dataDir}. Stop it first, run this again, then start it.\n`);
+    // A personal node is stopped through its logon task, so say how.
+    let personal = false;
+    try {
+      personal = loadNodeConfig({ dataDir }).hosting === 'personal';
+    } catch { /* an unreadable node.yaml: the generic words */ }
+    const how = personal ? `Stop it first (schtasks /End /TN "${PERSONAL_TASK_NAME}")` : 'Stop it first';
+    io.stderr.write(`The service is running (pid ${pid}) on ${dataDir}. ${how}, run this again, then start it.\n`);
     return 1;
   }
 

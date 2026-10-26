@@ -32,13 +32,15 @@ function desktopProfileDirs({ platform = process.platform, env = process.env } =
 // leaving room beside it for stage 2's root/admin-owned, read-only config
 // dir. Linux keeps that config under /etc/king-louie instead.
 //
-// On Windows the fleet layout keeps precedence: its dir when it exists, else
-// a personal node's when that exists, else the fleet dir (personal node spec
-// C-11). Other platforms are unchanged (C-6).
+// On Windows the fleet layout keeps precedence when it is real, which is
+// when its config dir holds a node.yaml; else a personal node's dir when
+// that exists, else the fleet dir (personal node spec C-11). A fleet data
+// dir with no node.yaml beside it is a leftover and is ignored. Other
+// platforms are unchanged (C-6).
 function defaultServiceDataDir({ platform = process.platform, env = process.env, exists = fs.existsSync } = {}) {
   const fleet = fleetDataDir({ platform, env });
   if (platform === 'win32') {
-    if (exists(fleet)) return fleet;
+    if (exists(fleetNodeYamlPath({ env }))) return fleet;
     const personal = personalDataDir({ platform, env });
     if (personal && exists(personal)) return personal;
   }
@@ -52,6 +54,14 @@ function fleetDataDir({ platform = process.platform, env = process.env } = {}) {
   if (platform === 'win32') return path.win32.join(env.ProgramData || 'C:\\ProgramData', 'KingLouie', 'data');
   if (platform === 'darwin') return '/Library/Application Support/KingLouie/data';
   return '/var/lib/king-louie';
+}
+
+// Windows: the fleet layout's node.yaml, in the config dir beside the fleet
+// data dir (adminConfigDir's Windows rule). Its presence is what makes the
+// fleet layout real.
+function fleetNodeYamlPath({ env = process.env } = {}) {
+  const fleet = fleetDataDir({ platform: 'win32', env });
+  return path.win32.join(path.win32.dirname(fleet), 'config', 'node.yaml');
 }
 
 // Every path component of `target`, from the filesystem root down to and
@@ -269,6 +279,7 @@ module.exports = {
   asarUnpackedPath,
   defaultServiceDataDir,
   fleetDataDir,
+  fleetNodeYamlPath,
   personalDataDir,
   desktopProfileDirs,
   adminConfigDir,

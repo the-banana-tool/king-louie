@@ -334,6 +334,14 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
     io.stderr.write('Flag "--personal" is only valid for "install" and "uninstall".\n');
     return 2;
   }
+  // A personal node is always profile agent and always the account running
+  // the command, so either flag would silently mean nothing there.
+  for (const [flag, name] of [['profile', 'profile'], ['user', 'user']]) {
+    if (flags.personal && flags[flag] !== undefined) {
+      io.stderr.write(`Flag "--${name}" is not valid with "--personal": a personal node is profile agent and runs as you.\n`);
+      return 2;
+    }
+  }
   for (const name of ['browser', 'provider', 'model']) {
     if (flags[name] !== undefined && !(command === 'install' && flags.personal)) {
       io.stderr.write(`Flag "--${name}" is only valid for "install --personal".\n`);
@@ -487,8 +495,12 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
           const { runPersonalInstall } = require('./personal-install');
           return await runPersonalInstall({ command, flags: { ...flags, dataDir: flags.dataDir || personalDataDir() }, io });
         }
+        // The fleet install gets --data-dir as given, never the resolved
+        // default: planInstall's own fleetDataDir() default applies, so a
+        // machine that holds a personal node still installs the fleet node
+        // where the fleet layout puts it.
         const { runInstallCommand } = require('./installers');
-        return await runInstallCommand(command, { ...flags, dataDir }, io);
+        return await runInstallCommand(command, { ...flags, dataDir: flags.dataDir }, io);
       }
 
       case 'identity': {

@@ -51,6 +51,9 @@ function deps(s, extra = {}) {
     findChrome: () => CHROME,
     findFfmpeg: () => 'C:\\ffmpeg\\bin\\ffmpeg.exe',
     fleetInstalled: () => ({ task: false, configDir: null }),
+    taskRegistered: () => true,
+    // Only the temp tree exists, never the machine's real ProgramData.
+    exists: (p) => p.startsWith(s.base) && fs.existsSync(p),
     hostname: () => 'laptop',
     tmpDir: s.base,
     nodePath: 'C:\\Program Files\\nodejs\\node.exe',
@@ -156,7 +159,7 @@ describe('install --personal', () => {
     assert.ok(fs.statSync(s.dataDir).isDirectory());
     const yaml = fs.readFileSync(s.yamlPath, 'utf8');
     assert.equal(yaml, [
-      'name: laptop',
+      "name: 'laptop'",
       'profile: agent',
       'hosting: personal',
       'gui:',
@@ -183,6 +186,59 @@ describe('install --personal', () => {
       assert.ok(next > at, `"${piece}" in order in:\n${out}`);
       at = next;
     }
+    assert.doesNotMatch(out, /--data-dir/, 'the default data dir is what the CLI picks, so no flag');
+    assert.doesNotMatch(out, /may be removed/, 'no leftover fleet data dir here');
+  });
+
+  it('a leftover fleet data dir (no fleet node.yaml) is a warning, not a refusal, and the steps still need no --data-dir', async () => {
+    const s = setup();
+    const fleetData = 'C:\\ProgramData\\KingLouie\\data';
+    const d = deps(s, { exists: (p) => p === fleetData || (p.startsWith(s.base) && fs.existsSync(p)) });
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    const out = t.text();
+    assert.ok(out.includes(`${fleetData} exists but no fleet node.yaml is beside it: every command ignores it, and it may be removed.`), out);
+    assert.doesNotMatch(out, /--data-dir/);
+  });
+
+  it('a data dir other than the default is spelled out in the remaining steps', async () => {
+    const s = setup();
+    const d = deps(s);
+    const other = path.join(s.base, 'elsewhere', 'data');
+    const { code, t } = await run('install', s, d, { dataDir: other });
+    assert.equal(code, 0, t.errors());
+    assert.ok(t.text().includes(`pair wss://<relay> --data-dir "${other}"`), t.text());
+  });
+
+  it('a kept node.yaml with a relay but not hosting: personal, or one that does not load, is registered and not started, with why', async () => {
+    const cases = [
+      ['name: laptop\nprofile: agent\napprovers:\n  relay: wss://relay.example.com:8443\n', /not started: node\.yaml lacks hosting: personal\./],
+      ['name: laptop\nprofile: agent\nhosting: personal\n', /not started: node\.yaml lacks approvers\.relay: wss:\/\/<relay>\./],
+      ['name: laptop\nprofile: agent\nhosting: personal\nbogus_key: 1\napprovers:\n  relay: wss://relay.example.com:8443\n', /not started: node\.yaml does not load \(/]
+    ];
+    for (const [yaml, why] of cases) {
+      const s = setup();
+      fs.mkdirSync(s.configDir, { recursive: true });
+      fs.writeFileSync(s.yamlPath, yaml);
+      const d = deps(s);
+      const { code, t } = await run('install', s, d);
+      assert.equal(code, 0, t.errors());
+      assert.ok(!argvs(d).some((argv) => argv.includes('/Run')), yaml);
+      assert.match(t.text(), why);
+    }
+  });
+
+  it('a numeric --model and a numeric hostname load back as strings', { skip: process.platform !== 'win32' && 'gui.apps paths are checked for the running platform' }, async () => {
+    const s = setup();
+    const d = deps(s, { hostname: () => '12345' });
+    const { code, t } = await run('install', s, d, { provider: 'anthropic', model: '123' });
+    assert.equal(code, 0, t.errors());
+    const yaml = fs.readFileSync(s.yamlPath, 'utf8');
+    assert.match(yaml, /^name: '12345'$/m);
+    assert.match(yaml, /^ {2}model: '123'$/m);
+    const config = loadNodeConfig({ adminConfigDir: s.configDir, geteuid: () => UID, adminUid: UID });
+    assert.equal(config.name, '12345');
+    assert.equal(config.delegate.model, '123');
   });
 
   it('the node.yaml it writes loads through loadNodeConfig', { skip: process.platform !== 'win32' && 'gui.apps paths are checked for the running platform' }, async () => {
@@ -211,11 +267,11 @@ describe('install --personal', () => {
     assert.equal(fs.readFileSync(s.yamlPath, 'utf8'), mine, 'kept as it was');
     const out = t.text();
     assert.match(out, /keeps it/);
-    assert.match(out, /^ {2}hosting: personal$/m);
+    assert.match(out, /^ {2}hosting: 'personal'$/m);
     assert.match(out, /^ {2}gui\.take\.enabled: true$/m);
-    assert.match(out, /^ {2}gui\.browser: chrome$/m);
+    assert.match(out, /^ {2}gui\.browser: 'chrome'$/m);
     assert.doesNotMatch(out, /^ {2}gui\.enabled: true$/m, 'a line it has is not printed');
-    assert.doesNotMatch(out, /^ {2}profile: agent$/m);
+    assert.doesNotMatch(out, /^ {2}profile: 'agent'$/m);
     assert.ok(d.executed.flat().some((step) => step.run && step.run.includes('/Create') && step.run.includes('/F')));
   });
 
@@ -238,7 +294,7 @@ describe('install --personal', () => {
     const { code, t } = await run('install', s, d, { provider: 'anthropic', model: 'claude-opus-5-5' });
     assert.equal(code, 0, t.errors());
     const yaml = fs.readFileSync(s.yamlPath, 'utf8');
-    assert.match(yaml, /\ndelegate:\n {2}provider: anthropic\n {2}model: claude-opus-5-5\n$/);
+    assert.match(yaml, /\ndelegate:\n {2}provider: 'anthropic'\n {2}model: 'claude-opus-5-5'\n$/);
     assert.match(t.text(), /token set anthropic/);
   });
 
@@ -288,6 +344,15 @@ describe('uninstall --personal', () => {
     assert.ok(t.text().includes(s.dataDir));
   });
 
+  it('a task that is not registered: says so, removes nothing, exit 0', async () => {
+    const s = setup();
+    const d = deps(s, { taskRegistered: () => false });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 0, t.errors());
+    assert.equal(d.executed.length, 0);
+    assert.match(t.text(), /is not registered: nothing to remove/);
+  });
+
   it('off a TTY without --yes it refuses; --yes goes on', async () => {
     const s = setup();
     const d = deps(s, { isTTY: () => false });
@@ -319,6 +384,34 @@ describe('the CLI', () => {
       assert.equal(code, 2);
       assert.match(t.errors(), /"--yes" is only valid for/);
       assert.match(t.errors(), /"install --personal"/);
+    }
+  });
+
+  it('--profile and --user with --personal are usage errors naming the flag', async () => {
+    for (const [argv, flag] of [[['install', '--personal', '--profile', 'agent', '--dry-run'], '--profile'], [['uninstall', '--personal', '--user', 'owner', '--dry-run'], '--user']]) {
+      const { code, t } = await cli(argv);
+      assert.equal(code, 2, argv.join(' '));
+      assert.ok(t.errors().includes(`Flag "${flag}" is not valid with "--personal"`), t.errors());
+    }
+  });
+
+  it('the fleet install plans into the fleet data dir even where only a personal node exists', async () => {
+    const s = setup();
+    fs.mkdirSync(s.dataDir, { recursive: true });
+    const programData = path.join(s.base, 'ProgramData');
+    const saved = { LOCALAPPDATA: process.env.LOCALAPPDATA, ProgramData: process.env.ProgramData };
+    process.env.LOCALAPPDATA = s.localAppData;
+    process.env.ProgramData = programData;
+    try {
+      const { code, t } = await cli(['install', '--dry-run']);
+      assert.equal(code, 0, t.errors());
+      assert.ok(!t.text().includes(s.dataDir), t.text());
+      if (process.platform === 'win32') assert.ok(t.text().includes(path.win32.join(programData, 'KingLouie', 'data')), t.text());
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
     }
   });
 

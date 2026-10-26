@@ -2561,22 +2561,31 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
 - **The CLI forms.** `install --personal [--data-dir DIR] [--browser PATH]
   [--provider P] [--model M] [--dry-run] [--yes]`, unelevated (refused
   elevated, C-5), Windows only (C-6), refused while a fleet node is installed
-  (the `KingLouie` task, or an identity record or helper file under
-  `%ProgramData%\KingLouie\config`; C-12). It prints the account, dirs, task
+  (the `KingLouie` task, or a `node.yaml`, an identity record or a helper
+  file under `%ProgramData%\KingLouie\config`; C-12; a fleet data dir with
+  none of those is a one-line warning, not a refusal), and `--profile` or
+  `--user` with `--personal` is a usage error. It prints the account, dirs, task
   and what trusting the owner account means, asks `[y/N]` (`--yes` off a
-  TTY), writes `node.yaml` (kept when there, with the missing lines
-  printed), warns when ffmpeg is not on `PATH`, registers the task and starts
-  it only when `approvers.relay` is set, then prints what is left: `token
+  TTY), writes `node.yaml` (every string single-quoted; kept when there, with
+  the missing lines printed), warns when ffmpeg is not on `PATH`, registers
+  the task and starts it only when the kept `node.yaml` loads
+  (`loadNodeConfig`) with `hosting: personal` and `approvers.relay` (else it
+  says what is missing), then prints what is left: `token
   set`, `pair`, `enroll-device`, `vault set browser_cred:<profile>:<host>`
   (it asks for no secret, C-4) and `mcp`. `uninstall --personal [--data-dir
-  DIR] [--dry-run] [--yes]` removes the task and keeps the data dir. `pair`
+  DIR] [--dry-run] [--yes]` removes the task and keeps the data dir (no task
+  registered: it says so and exits 0). `pair`
   under personal writes `approvers.relay` into `node.yaml` and runs the task
-  (C-9); it still refuses while the node runs. `import --from <desktop>
+  (C-9); it still refuses while the node runs, naming `schtasks /End /TN
+  "KingLouie Node"`. `import --from <desktop>
   --case <case dir or id> [--yes]` moves one case (below). On Windows the
-  default data dir is the fleet one when it exists, else
-  `personalDataDir()` (`%LOCALAPPDATA%\KingLouie\node\data`) when that
-  exists (`defaultServiceDataDir`, C-11); the fleet `install` plans into
-  `fleetDataDir()` whatever exists. `doctor` has a `hosting` row (and the
+  default data dir is the fleet one only when the fleet config dir holds a
+  `node.yaml` (`fleetNodeYamlPath`; a fleet data dir without one is a
+  leftover and ignored), else `personalDataDir()`
+  (`%LOCALAPPDATA%\KingLouie\node\data`) when that exists, else the fleet one
+  (`defaultServiceDataDir`, C-11); the fleet `install` gets `--data-dir`
+  unresolved from the CLI and plans into `fleetDataDir()` whatever exists.
+  `doctor` has a `hosting` row (and the
   identity-record and helper rows say "not used on a personal node");
   `session status` prints `hosting: personal` first.
 - **Moving a case (R-PN-3, C-3).** `filterInventoryToCase`
@@ -2596,8 +2605,8 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   stats) for the owner check; `deps.gui.channel` for a fake channel, and a
   fake backend for `InProcessChannel`; `runPersonalInstall`'s `deps`
   (`platform`, `env`, `isAdmin`, `isTTY`, `confirm`, `whoAmI`, `findChrome`,
-  `findFfmpeg`, `fleetInstalled`, `relaySet`, `hostname`, `tmpDir`,
-  `execute`), so no test registers a real task or writes the real
+  `findFfmpeg`, `fleetInstalled`, `startable`, `taskRegistered`, `exists`,
+  `hostname`, `tmpDir`, `execute`), so no test registers a real task or writes the real
   `%LOCALAPPDATA%`; `pair`'s `deps.startNode`; the case move's `isTTY`,
   `confirm`, `loadNodeConfig`, `runGitSync`, `openHistory`; `clearDeniedDirs`
   after a test that registers one. Files: `tests/service-personal-host.test.js`,
@@ -2614,4 +2623,8 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   (the bridge-file trust rule refuses a user-owned file; the CLI's data-dir
   fallback makes the helper and the attach find the personal dir and fail,
   never trust it); macOS and Linux personal nodes are not done (the key is
-  platform-neutral; the install refuses off Windows).
+  platform-neutral; the install refuses off Windows). The logon task pins
+  the checkout and `node.exe` that ran `install --personal`, so a removed
+  checkout or worktree leaves a task that cannot start. The owner check
+  reads owners only, not access lists: a data dir on a drive whose ACL lets
+  other accounts write passes it (keep the default `%LOCALAPPDATA%`).
