@@ -230,6 +230,9 @@ class AppModel(context: Context) {
     val devices = mutableStateListOf<JsonElement>()
     val online = mutableStateMapOf<String, Boolean>()
     val nodes: List<NodePin> get() = storage.nodes
+
+    /** The demo fleet's nodes, shown on the Nodes screen in demo mode (nothing is pinned there). */
+    val demoNodes: List<NodePin> get() = demo?.pins.orEmpty()
     val relayUrl: String? get() = storage.relayUrl
     val relaySpki: String? get() = storage.relaySpki
     val deviceId: String? get() = if (mode == AppMode.DEMO) demo?.deviceId else key?.deviceId

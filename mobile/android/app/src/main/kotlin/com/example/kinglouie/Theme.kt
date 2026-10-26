@@ -39,7 +39,12 @@ private val LightColors = lightColorScheme(
     onSurface = Color(0xFF191C20),
     surfaceVariant = Color(0xFFDFE2EB),
     onSurfaceVariant = Color(0xFF43474E),
-    outline = Color(0xFF73777F)
+    outline = Color(0xFF73777F),
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFF2F3F9),
+    surfaceContainer = Color(0xFFECEEF4),
+    surfaceContainerHigh = Color(0xFFE6E8EE),
+    surfaceContainerHighest = Color(0xFFE1E2E8)
 )
 
 private val DarkColors = darkColorScheme(
@@ -61,7 +66,12 @@ private val DarkColors = darkColorScheme(
     onSurface = Color(0xFFE1E2E8),
     surfaceVariant = Color(0xFF43474E),
     onSurfaceVariant = Color(0xFFC3C6CF),
-    outline = Color(0xFF8D9199)
+    outline = Color(0xFF8D9199),
+    surfaceContainerLowest = Color(0xFF0B0E13),
+    surfaceContainerLow = Color(0xFF191C20),
+    surfaceContainer = Color(0xFF1D2024),
+    surfaceContainerHigh = Color(0xFF272A2F),
+    surfaceContainerHighest = Color(0xFF32353A)
 )
 
 /**
@@ -88,7 +98,7 @@ private val LightStatus = StatusColors(
     warning = Color(0xFF8A4F00),
     alertContainer = Color(0xFFFFDAD6),
     onAlertContainer = Color(0xFF410002),
-    online = Color(0xFF1E7B34),
+    online = Color(0xFF1A6B2D),
     offline = Color(0xFF73777F)
 )
 

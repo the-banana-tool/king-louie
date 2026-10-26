@@ -3,12 +3,15 @@ package com.example.kinglouie
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -50,13 +53,13 @@ private fun fdText(value: JsonElement?, max: Int = FrontDoor.SHOWN_TEXT_MAX): St
 @Composable
 fun FrontDoor(model: AppModel) {
     var screen by remember { mutableStateOf("menu") }
-    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (model.frontDoorId == null) {
-            Text("This phone is not paired with a front door.")
-            OutlinedButton({ model.refreshFrontDoor() }, enabled = model.mode == AppMode.LIVE) { Text("Check again") }
+            EmptyState("This phone is not paired with a front door.")
+            OutlinedButton({ model.refreshFrontDoor() }, Modifier.fillMaxWidth(), enabled = model.mode == AppMode.LIVE) { Text("Check again") }
             return@Column
         }
-        if (screen != "menu") TextButton({ screen = "menu"; model.cancelGrant() }) { Text("Back") }
+        if (screen != "menu") TextButton({ screen = "menu"; model.cancelGrant() }) { Text("‹ Front door menu") }
         when (screen) {
             "connect" -> ConnectClient(model)
             "clients" -> Clients(model)
@@ -64,11 +67,11 @@ fun FrontDoor(model: AppModel) {
             "nodes" -> FrontDoorNodes(model)
             "alerts" -> Alerts(model)
             else -> {
-                Button({ screen = "connect" }) { Text("Connect a client") }
-                OutlinedButton({ screen = "clients"; model.refreshClients() }) { Text("Connected clients") }
-                OutlinedButton({ screen = "pairings"; model.refreshPairings() }) { Text("Nodes waiting for you") }
-                OutlinedButton({ screen = "nodes"; model.refreshFrontDoorNodes() }) { Text("Nodes") }
-                OutlinedButton({ screen = "alerts"; model.refreshAlerts() }) { Text("Alerts") }
+                Button({ screen = "connect" }, Modifier.fillMaxWidth().height(DecisionHeight)) { Text("Connect a client") }
+                OutlinedButton({ screen = "pairings"; model.refreshPairings() }, Modifier.fillMaxWidth()) { Text("Nodes waiting for you") }
+                OutlinedButton({ screen = "clients"; model.refreshClients() }, Modifier.fillMaxWidth()) { Text("Connected clients") }
+                OutlinedButton({ screen = "nodes"; model.refreshFrontDoorNodes() }, Modifier.fillMaxWidth()) { Text("Nodes") }
+                OutlinedButton({ screen = "alerts"; model.refreshAlerts() }, Modifier.fillMaxWidth()) { Text("Alerts") }
             }
         }
     }
@@ -88,8 +91,8 @@ fun ConnectClient(model: AppModel) {
     }
     if (request == null) {
         Text("The code the client's browser shows", fontWeight = FontWeight.Bold)
-        OutlinedTextField(code, { code = it.take(16) }, label = { Text("XXX-XXX") }, singleLine = true)
-        Button({ model.findGrant(code) }, enabled = code.isNotBlank() && model.mode == AppMode.LIVE) { Text("Find the request") }
+        OutlinedTextField(code, { code = it.take(16) }, label = { Text("XXX-XXX") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Button({ model.findGrant(code) }, Modifier.fillMaxWidth(), enabled = code.isNotBlank() && model.mode == AppMode.LIVE) { Text("Find the request") }
         return
     }
     LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -110,19 +113,19 @@ fun ConnectClient(model: AppModel) {
                     Row(Modifier.padding(start = 24.dp), verticalAlignment = Alignment.CenterVertically) {
                         val chosen = limits[scope].orEmpty()
                         Checkbox(name in chosen, { on -> limits = limits + (scope to (if (on) chosen + name else chosen - name)) }, enabled = limitable)
-                        Text("Only ${FrontDoor.shownText(name)}", color = if (limitable) Color.Unspecified else Color.Gray)
+                        Text("Only ${FrontDoor.shownText(name)}", color = if (limitable) Color.Unspecified else MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
         }
         item {
             Text("With no machine chosen, the client may use every machine. Unsafe actions still need your phone each time.")
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
                 // Exactly the scopes switched on, in the order requested, each with its machine limit.
                 val scopes = request.requestedScopes.filter { it in enabled }
                     .map { s -> ScopeChoice(s, if (s == "fleet:unsafe") null else limits[s]?.takeIf { it.isNotEmpty() }?.toList()) }
-                Button({ model.decideGrant(request, scopes, true) }, enabled = enabled.isNotEmpty() && !model.frontDoorBusy) { Text("Approve") }
-                OutlinedButton({ model.decideGrant(request, emptyList(), false) }, enabled = !model.frontDoorBusy) { Text("Deny") }
+                ApproveButton("Approve", enabled.isNotEmpty() && !model.frontDoorBusy) { model.decideGrant(request, scopes, true) }
+                DenyButton("Deny", !model.frontDoorBusy) { model.decideGrant(request, emptyList(), false) }
             }
         }
     }
@@ -139,7 +142,7 @@ fun Clients(model: AppModel) {
                 Text("${FrontDoor.shownText(name)} (self-declared)", fontWeight = FontWeight.Bold)
                 Text(fdText(g["client_host"]))
                 Text(g["scopes"].arr().orEmpty().take(FrontDoor.SHOWN_TEXT_MAX).joinToString(", ") { fdText(it, 64) }, fontFamily = FontFamily.Monospace)
-                Text("Last used ${fdText(g["last_used_at"], 40).ifEmpty { "never" }}", color = Color.Gray)
+                Text("Last used ${fdText(g["last_used_at"], 40).ifEmpty { "never" }}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (grantId != null) TextButton({ model.revokeClient(grantId, name) }, enabled = !model.frontDoorBusy) { Text("Revoke") }
             }
             HorizontalDivider()
@@ -158,10 +161,10 @@ fun Pairings(model: AppModel) {
                 Text("${FrontDoor.shownText(p.nodeName)} (${p.profile})", fontWeight = FontWeight.Bold)
                 Text(p.fingerprint, fontFamily = FontFamily.Monospace)
                 Text("Check the node's console shows the same fingerprint.")
-                p.replaces?.let { Text("Replaces ${FrontDoor.nodeFingerprint(it)}", color = Color(0xFFE65100)) }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button({ model.decidePairing(p, true) }, enabled = !model.frontDoorBusy) { Text("Approve") }
-                    OutlinedButton({ model.decidePairing(p, false) }, enabled = !model.frontDoorBusy) { Text("Deny") }
+                p.replaces?.let { Text("Replaces ${FrontDoor.nodeFingerprint(it)}", color = statusColors.warning, fontWeight = FontWeight.Bold) }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    ApproveButton("Approve", !model.frontDoorBusy) { model.decidePairing(p, true) }
+                    DenyButton("Deny", !model.frontDoorBusy) { model.decidePairing(p, false) }
                 }
             }
             HorizontalDivider()
@@ -199,7 +202,7 @@ fun Alerts(model: AppModel) {
                 Text(fdText(a["kind"], 64), fontWeight = FontWeight.Bold)
                 Text(fdText(a["subject"]), fontFamily = FontFamily.Monospace)
                 Text(FrontDoor.shownText(a["detail"]?.let { Jcs.serialize(it) }, 400), fontFamily = FontFamily.Monospace)
-                Text(fdText(a["at"], 40), color = Color.Gray)
+                Text(fdText(a["at"], 40), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (a["acked"].bool() != true && id != null) TextButton({ model.ackAlert(id) }, enabled = !model.frontDoorBusy) { Text("Acknowledge") }
             }
             HorizontalDivider()
@@ -221,6 +224,6 @@ fun auditBreakWords(reason: String?): String = when (reason) {
 fun FrontDoorAudit(status: AuditStatus) {
     if (!status.broken && status.gapCount == 0) return
     Text("Reported by front door", fontWeight = FontWeight.Bold)
-    status.breaks.forEach { b -> Text("Break at #${b.seq ?: "?"}: ${auditBreakWords(b.reason)}", color = Color.Red) }
+    status.breaks.forEach { b -> Text("Break at #${b.seq ?: "?"}: ${auditBreakWords(b.reason)}", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold) }
     if (status.gapCount > 0) Text("${status.gapCount} gap(s) in the front door's copy of this history")
 }
