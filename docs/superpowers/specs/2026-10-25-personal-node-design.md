@@ -1,6 +1,7 @@
 # Personal node: King Louie's service on the owner's own machine
 
-Date: 2026-10-25. Status: draft for the owner's review.
+Date: 2026-10-25. Status: approved by the owner 2026-10-25 (rulings
+R-PN-1 to R-PN-4 in §12; the author's calls C-1 to C-12 in §11).
 
 Related: fleet stage 5 (`2026-09-23-fleet-stage5-session-helper.md`), demo
 takes D1 (`2026-10-24-agent-driven-demo-takes-design.md`), the install guide
@@ -221,9 +222,9 @@ the start). It:
 5. prints what is left, in order: `token set <provider>` (the delegate's
    provider key, read from stdin, service stopped, as today),
    `pair wss://<relay>` (writes `approvers.relay`, starts the node),
-   `enroll-device` (the phone; needs the node running), the command that
-   opens the take's Chrome profile for a one-time login (§9), and the `mcp`
-   command for the driver's MCP client config.
+   `enroll-device` (the phone; needs the node running), the `vault set`
+   lines for the logins the takes will use (§9), and the `mcp` command for
+   the driver's MCP client config.
 
 Every CLI command defaults its data dir to `%ProgramData%\KingLouie\data`
 today (`paths.js:8`). On Windows the default becomes: that path when it
@@ -252,27 +253,57 @@ The audit ledger gets no new entry kind: a personal node's `lease.*`,
 `node.yaml` is where the hosting is recorded, and it is owner-owned by
 design.
 
-## 9. The desktop app (an owner's question)
+## 9. Two King Louies, and moving a case between them (R-PN-3, R-PN-4)
 
 The owner's King Louie today is the standalone Electron app, with its vault,
-browser profiles and the live Lot 69 case in its own profile directory. A
-personal node has its own data dir, so there are two King Louies on the
-machine. Two ways to resolve that, for the owner to choose; this version
-builds neither and keeps the desktop standalone:
+browser profiles and the live Lot 69 case in its own profile directory. The
+owner ruled (R-PN-3) that the personal node is a second King Louie with its
+own data dir: the agents' King Louie, driven over `mcp`, beside the desktop,
+which stays standalone and is not attached. Nothing is shared between them.
 
-- **Attach later.** Import the desktop's data into the node once (the
-  desktop's own Import, which is how secrets move today), pair, attach. The
-  bridge-file trust rule would have to accept a file the owner's account
-  owns when the desktop finds `hosting: personal` beside it; that is a
-  rule change in the desktop app and a second design.
-- **Keep two.** The node is the agents' King Louie; the desktop is the
-  owner's. Nothing shared.
+**Moving one case.** The owner also ruled that the Lot 69 case moves to the
+node. The desktop-to-service importer exists (`src/migration/desktop-import.js`
+and `desktop-source.js`, behind `import --from <desktop userData>` on the
+CLI and the desktop's own Import over the bridge) and copies a whole
+profile: settings, chats and cases, as a plan of per-item actions. This
+design adds a filter, not a new path:
 
-Logins a demo needs: in the first version a take's Chrome profile persists
-under `%LOCALAPPDATA%\KingLouie\browser-profiles\<name>`, so the owner logs
-in once by hand in that profile (the install prints the command) and the
-take runs with `credentials: false`. The node's vault stays empty until the
-owner decides §9.
+- `king-louie-service import --from <desktop userData> --case <case id>`
+  plans only that case's directory (every file the walker already accepts,
+  `.git` included, so the repository's history moves whole) and the chats
+  whose `caseId` is that case; no settings, no other chat, no other case.
+  It runs with the node stopped, as the owner (under `hosting: personal`
+  the elevation requirement goes with the rest; the Windows write guard
+  stays), and like every import it writes no secret: the vault is R-PN-4's.
+- Before anything is written it prints what it will copy (the case's title,
+  its status, how many chats and messages, the repository's head) and asks
+  `[y/N]`; `--dry-run` prints and stops. A case already present on the node
+  under that id refuses (`CASE_EXISTS`); the importer's "copy" action for
+  a chat id already taken stays as it is.
+- After the copy it verifies: the node's case repository has the same head
+  and a clean tree, and the chat and message counts match; it prints both
+  sides. Only then does it print the desktop step.
+- The desktop's copy is then closed by the owner in the app, through the
+  existing owner transition to `abandoned`, with a new `REASON_KINDS`
+  entry `moved` whose reason text names the node. An abandoned case runs no
+  wake-up, goes up no ladder and is read-only, so one case is never worked
+  in two places. The move does not delete anything on the desktop.
+- What does not move, and what that means: the data-dir contact state
+  (`<dataDir>/contact/`: ladder progress, deliveries) is global and stays
+  on the desktop, so an open question of the case starts its ladder again
+  on the node (the owner may see one question twice, once from each side,
+  until the desktop copy is closed; close it first when that matters); the
+  cross-case index is rebuilt by the node; the `browser-profiles` the case
+  used (`kl-cases`) are not copied, so the node's browser jobs start with a
+  fresh profile and the logins R-PN-4 puts in the node's vault.
+
+**Logins (R-PN-4).** The owner adds the logins the demos and the moved case
+need to the node's vault himself, with `king-louie-service vault set <key>`
+(value on stdin, node stopped), under the keys the browser tools already use
+(`browser_cred:<profile>:<host>`) and `errands-token` for Ella. A take then
+runs with `credentials: true` where it needs them. The install prints the
+`vault set` line among what is left (§8 step 5), in place of the by-hand
+login step.
 
 ## 10. What is left to the builder
 
@@ -311,8 +342,12 @@ owner decides §9.
 - C-2: the owner check refuses the start rather than warn: a personal node
   whose data dir someone else owns is the fleet layout's problem, and the
   fleet layout's rules then apply.
-- C-3: the desktop stays standalone in this version (§9).
-- C-4: logins by hand in the take's profile, no vault seeding (§9).
+- C-3: the move of a case is a filter on the existing importer, not a new
+  export format, and it closes the desktop's copy through the existing
+  `abandoned` transition with a `moved` reason, rather than a new delete
+  (§9).
+- C-4: the install prints the `vault set` lines for logins; it never asks
+  for a secret itself (§9).
 - C-5: `install --personal` refuses to run elevated.
 - C-6: Windows only for the install command; the key is platform-neutral.
 - C-7: the approver set is still re-read and still owner-checked (owner
@@ -334,20 +369,20 @@ owner decides §9.
 - C-12: `install --personal` refuses while a fleet node is installed and
   migrates nothing.
 
-## 12. Questions for the owner
+## 12. Owner rulings (2026-10-25)
 
-1. **Shells on a personal node (C-8).** Go to the phone by default, or stay
-   routine as on a fleet node? The design says phone; it costs one tap per
-   shell call in a delegate turn outside a take (takes refuse shells
-   anyway).
-2. **The relay.** The phone's one tap needs a relay the phone can reach,
-   and none exists yet (the front door on sethserver is a later stage, and
-   the relay is part of it). The smallest step is `king-louie-service relay
-   run` on sethserver under the `relay` block of its `service.json`, with a
-   certificate, before the first take. Without it no take can start on
-   either layout. Is that the step to take now, before this design is built?
-3. **One King Louie or two (§9).** The desktop app stays standalone in this
-   version; the node is a second King Louie with its own data, vault and
-   cases. Attaching the desktop later is a second design.
-4. **Logins (C-4).** One-time login by hand in the take's Chrome profile,
-   no credentials in the node's vault for the first demos.
+- **R-PN-1.** On a personal node `Bash` and `PowerShell` go to the phone by
+  default, and the file tools cannot touch the config dir, `node.yaml`,
+  `approvers\` or the desktop app's profile (C-8 stands).
+- **R-PN-2.** The relay runs on sethserver (`king-louie-service relay run`
+  under the `relay` block of its `service.json`, with a certificate). It is
+  deployed outside this design, before the first take; this design assumes a
+  reachable relay and changes nothing in the relay.
+- **R-PN-3.** Two King Louies: the node is the agents', the desktop app stays
+  standalone and unattached. The Lot 69 case moves to the node (§9).
+- **R-PN-4.** The owner puts the logins into the node's vault himself (§9);
+  the install asks for no secret.
+
+What a later design may take up: attaching the desktop app to a personal
+node (the bridge-file trust rule), moving a case back, macOS and Linux
+personal nodes.
