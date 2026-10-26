@@ -1,7 +1,7 @@
 // tests/platform-paths.test.js
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { defaultServiceDataDir, personalDataDir, fleetDataDir } = require('../src/platform/paths');
+const { defaultServiceDataDir, personalDataDir, fleetDataDir, desktopProfileDir } = require('../src/platform/paths');
 
 const env = { ProgramData: 'C:\\ProgramData', LOCALAPPDATA: 'C:\\U\\a\\AppData\\Local', HOME: '/home/a' };
 
@@ -34,5 +34,14 @@ describe('fleetDataDir', () => {
   it('linux and darwin: the service layout', () => {
     assert.equal(fleetDataDir({ platform: 'linux', env }), '/var/lib/king-louie');
     assert.equal(fleetDataDir({ platform: 'darwin', env }), '/Library/Application Support/KingLouie/data');
+  });
+});
+
+describe('desktopProfileDir', () => {
+  it('the desktop app profile per platform; null on win32 without APPDATA', () => {
+    assert.equal(desktopProfileDir({ platform: 'win32', env: { APPDATA: 'C:\\U\\a\\AppData\\Roaming' } }), 'C:\\U\\a\\AppData\\Roaming\\king-louie');
+    assert.equal(desktopProfileDir({ platform: 'win32', env: {} }), null);
+    assert.equal(desktopProfileDir({ platform: 'darwin', env: { HOME: '/Users/a' } }), '/Users/a/Library/Application Support/king-louie');
+    assert.equal(desktopProfileDir({ platform: 'linux', env: { HOME: '/home/a' } }), '/home/a/.config/king-louie');
   });
 });

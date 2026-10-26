@@ -14,6 +14,16 @@ function personalDataDir({ platform = process.platform, env = process.env } = {}
   return path.posix.join(home, '.local', 'share', 'king-louie', 'node', 'data');
 }
 
+// The desktop app's own profile (Electron's userData for "king-louie"): its
+// vault, chats and browser cookies. A personal node denies it to the file
+// tools. Null on Windows when APPDATA is unset.
+function desktopProfileDir({ platform = process.platform, env = process.env } = {}) {
+  if (platform === 'win32') return env.APPDATA ? path.win32.join(env.APPDATA, 'king-louie') : null;
+  const home = env.HOME || os.homedir();
+  if (platform === 'darwin') return path.posix.join(home, 'Library', 'Application Support', 'king-louie');
+  return path.posix.join(home, '.config', 'king-louie');
+}
+
 // On Windows and macOS the data dir is a `data` subdir of the KingLouie dir,
 // leaving room beside it for stage 2's root/admin-owned, read-only config
 // dir. Linux keeps that config under /etc/king-louie instead.
@@ -256,6 +266,7 @@ module.exports = {
   defaultServiceDataDir,
   fleetDataDir,
   personalDataDir,
+  desktopProfileDir,
   adminConfigDir,
   adminCredentialPath,
   ensureServicePaths,
