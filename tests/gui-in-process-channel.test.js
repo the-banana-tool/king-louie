@@ -133,6 +133,14 @@ describe('InProcessChannel', () => {
     assert.equal(stopped, 1);
   });
 
+  it('stop() stops every live recording before the backend (ffmpeg is this process\'s child)', async () => {
+    const order = [];
+    const { ch } = channel({ backend: fakeBackend({ stopRecordings: async () => { order.push('recordings'); return []; }, stop: async () => { order.push('backend'); } }) });
+    await ch.start();
+    await ch.stop();
+    assert.deepEqual(order, ['recordings', 'backend']);
+  });
+
   it('a watch event arrives as "event" (kind, payload) and probe_changed updates info', async () => {
     let caps = [...ALL_CAPS];
     let lockedNow = false;

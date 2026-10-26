@@ -165,6 +165,21 @@ every user-side path itself. The service sends names; the helper places them.
   their errors could quote the argv, a path or ffmpeg's output. ffmpeg's
   stderr is drained and never read or logged.
 
+Revised 2026-10-25 (personal node; no frame, proof or sealing changed, and
+the vectors are the same):
+
+- `record_start` takes an optional `max_s`, an integer from 1 to 86400:
+  `{ ffmpeg?, take_id, path?, fps?, size?, max_s? }`. Given, ffmpeg gets
+  `-t <max_s>` just before `<path>`, so the file ends by itself even when no
+  `record_stop` ever comes (the service gone without a word). Anything else
+  given is `invalid_params`. Without it the argv is as above, so a service
+  from before this revision is unaffected. The service sends the take's
+  approved minutes times 60, plus 60.
+- The reply's `pid` (already there) is what the service records with the
+  take, so that a service started after a crash can end an ffmpeg the last
+  run left recording: it kills that pid only while a process with it still
+  runs under the image name `ffmpeg.exe` (pids are reused).
+
 ## 6. Vectors
 
 `tests/vectors/session-v1/`, rebuilt by `generate.js`: `handshake` (proofs and

@@ -2335,7 +2335,10 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   take only) and one per delegate session. The record is
   `<dataDir>/takes/<take_id>.json` (`TakeStore`, one writer; states
   `requested`, `live`, `waiting`, `ended`); a take found unfinished at start
-  is ended `service_restarted`.
+  is ended `service_restarted`, and the ffmpeg its `recorder: { pid,
+  started_at }` names is killed only while that pid is still an
+  `ffmpeg.exe` (`tasklist` by absolute path; tests inject `findProcess` and
+  `kill` into `TakeManager` or `markLiveEnded`).
 - **Off until enabled (C-1).** `node.yaml` `gui.take: { enabled: true,
   max_minutes: 240 }` (1 to 240; `gui.lease.max_minutes` does not bind a
   take), `gui.browser` (a `gui.apps` id), `gui.recorder.ffmpeg` (an absolute
@@ -2434,7 +2437,9 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   `PlaywrightBrowser#attach`. An argument that moves the profile or the
   debugging endpoint (`--user-data-dir`, `--profile-directory`,
   `--remote-debugging*`, in any switch form) is refused. `record_start
-  { ffmpeg?, take_id, path?, fps?, size? }` runs ffmpeg (`gdigrab -i desktop`:
+  { ffmpeg?, take_id, path?, fps?, size?, max_s? }` (`max_s`, 1 to 86400,
+  revised 2026-10-25: ffmpeg's `-t`, which `TakeManager` sets to the
+  approved minutes times 60 plus 60) runs ffmpeg (`gdigrab -i desktop`:
   the whole virtual desktop, every display; libx264, no audio) into
   `%LOCALAPPDATA%\KingLouie\recordings\<take_id>\take.mp4`, or
   `<record.dir>\<take_id>.mp4` when the take names a folder under the
@@ -2543,7 +2548,9 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   `createOpHandler` and `startSessionWatch` (`src/session/session-watch.js`,
   shared with the helper), the recorder from `findFfmpeg` at start. `request`
   keeps the broker's timeouts (`op_timeout`); quiet ops answer by code
-  alone; it never emits `closed`, so `helper_lost` never happens.
+  alone; it never emits `closed`, so `helper_lost` never happens; its
+  `stop()` stops every live recording (ffmpeg is the service's own child)
+  before the backend.
   `createGuiSubsystem` builds it when `hosting` is `personal` (a fake through
   `deps.channel` in tests) and reads no helper file; required lazily, so the
   runbook, relay and front-door graphs never load it. `status.json` carries

@@ -274,10 +274,11 @@ class GuiBroker extends EventEmitter {
 
   // `ffmpeg` and `path` are left out when not given: the helper then uses
   // the ffmpeg it found and a path of its own for the take.
-  async recordStart({ ffmpeg, takeId, path, fps, size }, ctx = {}) {
+  async recordStart({ ffmpeg, takeId, path, fps, size, maxS }, ctx = {}) {
     const params = { take_id: takeId, fps, size };
     if (ffmpeg !== undefined) params.ffmpeg = ffmpeg;
     if (path !== undefined) params.path = path;
+    if (maxS !== undefined) params.max_s = maxS;
     const result = await this.channel.request('record_start', params, { jobId: ctx.jobId });
     // A recording with no pid never started, or cannot be stopped: not one.
     if (!result || !Number.isInteger(result.pid)) throw new GuiError('recorder_failed', 'the recorder reported no process');

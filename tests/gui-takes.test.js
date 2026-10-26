@@ -204,6 +204,7 @@ describe('TakeManager.start', () => {
     assert.equal(broker.calls[1][1].ffmpeg, FFMPEG);
     assert.equal(broker.calls[1][1].takeId, out.take_id);
     assert.equal(broker.calls[1][1].path, undefined, 'the helper picks its own default');
+    assert.equal(broker.calls[1][1].maxS, 30 * 60 + 60, 'ffmpeg bounds the file at the approved minutes plus one');
     assert.equal(broker.calls[2][1], true);
     assert.equal(attached[0].cdpUrl, 'http://127.0.0.1:9222');
     assert.equal(registry.set.get(`take:${out.take_id}`), attached[0]);
@@ -226,8 +227,26 @@ describe('TakeManager.start', () => {
       browser: { profile: 'demo', cdp: true }, recording: { path: 'C:\\rec\\take.mp4', started_at: new Date(1000).toISOString() }
     });
     assert.equal(record.recording.path, 'C:\\rec\\take.mp4');
+    assert.deepEqual(record.recorder, { pid: 8, started_at: new Date(1000).toISOString() }, 'the record keeps the recorder pid');
     assert.equal(takes.live().take_id, out.take_id);
     assert.equal(takes.forJob('job-1').take_id, out.take_id);
+  });
+
+  it('a restart ends the last run\'s live take and kills its ffmpeg only while that pid is still ffmpeg', async () => {
+    const out = await started({ minutes: 45 });
+    assert.equal(broker.calls.find((c) => c[0] === 'recordStart')[1].maxS, 45 * 60 + 60);
+    // A second record left live, whose pid now belongs to something else.
+    const reused = store.create({ name: 'Other', job_id: 'job-9', state: 'live', recorder: { pid: 99, started_at: new Date(1000).toISOString() } });
+    const looked = [];
+    const killed = [];
+    const findProcess = (pid) => { looked.push(pid); return pid === 8 ? { image: 'ffmpeg.exe' } : { image: 'notepad.exe' }; };
+    // The service died: a new manager over the same store.
+    const restarted = new TakeManager({ leases, broker, store, guiConfig, registry, clock: () => clock.now(), timers, findProcess, kill: (pid) => killed.push(pid) });
+    assert.deepEqual(looked.sort(), [8, 99]);
+    assert.deepEqual(killed, [8], 'only the pid whose image is ffmpeg');
+    assert.equal(store.get(out.take_id).ended.reason, 'service_restarted');
+    assert.equal(store.get(reused.take_id).ended.reason, 'service_restarted');
+    await restarted.stopAll();
   });
 
   it('the phone denies: nothing launched, record ended with the reason', async () => {

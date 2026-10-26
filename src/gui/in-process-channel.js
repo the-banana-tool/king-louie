@@ -113,6 +113,12 @@ class InProcessChannel extends EventEmitter {
     this._halt();
     this.connected = false;
     for (const entry of [...this.pending]) entry.reject(new GuiError('helper_disconnected'));
+    // As the helper does when the service goes: ffmpeg is this process's
+    // child here, and a Windows child outlives its parent, so every live
+    // recording is stopped (its file kept) before the backend goes.
+    if (this.backend && typeof this.backend.stopRecordings === 'function') {
+      await Promise.resolve().then(() => this.backend.stopRecordings()).catch((err) => this.log.warn(`stopping recordings failed (${(err && (err.code || err.name)) || 'error'})`));
+    }
     if (this.backend && typeof this.backend.stop === 'function') {
       await Promise.resolve().then(() => this.backend.stop()).catch((err) => this.log.warn(`backend stop failed: ${err && err.message}`));
     }

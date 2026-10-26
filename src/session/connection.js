@@ -40,7 +40,9 @@ function createOpHandler(backend, { platform = process.platform, realpath, recor
       takeId: p.take_id,
       path: p.path === undefined ? null : p.path,
       fps: p.fps,
-      size: p.size === undefined ? null : p.size
+      size: p.size === undefined ? null : p.size,
+      // Optional, so a service from before it is unaffected.
+      maxS: p.max_s === undefined ? null : p.max_s
     }),
     // By pid, or by take id (a record_start whose answer the service never got).
     record_stop: (p) => backend.recordStop(p.pid !== undefined ? { pid: p.pid } : { takeId: p.take_id }),

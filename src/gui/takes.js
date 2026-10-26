@@ -33,6 +33,8 @@ const RECORDER_MISSING = 'Install ffmpeg (winget install Gyan.FFmpeg) or set gui
 const FIRST_COLUMN = Object.freeze([...BROWSER_ACTIONS.page, ...BROWSER_ACTIONS.session, ...BROWSER_ACTIONS.extract]);
 
 const iso = (ms) => new Date(ms).toISOString();
+// record_start's max_s for a take of `minutes`: the approved duration plus a minute of slack.
+const recordMaxS = (minutes) => minutes * 60 + 60;
 // The real path of p (links and 8.3 names expanded) through its deepest existing ancestor,
 // case-folded on Windows.
 function realOf(p) {
@@ -73,7 +75,8 @@ async function closeOverCdp(browser) {
 
 class TakeManager {
   constructor({ leases, broker, store, guiConfig, registry = null, audit = null, clock = Date.now, timers = { setTimeout, clearTimeout },
-    log = createLogger('gui/takes'), attachBrowser = attachPlaywright, closeBrowser = closeOverCdp } = {}) {
+    log = createLogger('gui/takes'), attachBrowser = attachPlaywright, closeBrowser = closeOverCdp,
+    findProcess = undefined, kill = undefined } = {}) {
     Object.assign(this, { leases, broker, store, guiConfig, audit, clock, timers, log, attachBrowser, closeBrowser });
     this.registry = registry || require('../tools/builtin/browser-registry');
     // take_id → the in-memory take (what the record cannot hold: the browser, the lease, the timer).
@@ -83,9 +86,10 @@ class TakeManager {
     this.active = null;
     // §6.3: a helper gone 30 s took the recorder with it, so the live take ends helper_lost.
     if (broker && typeof broker.on === 'function') broker.on('helper_lost', () => { this.onHelperLost().catch(() => {}); });
-    // §5.3: a take found unfinished at start was cut off by a restart.
+    // §5.3: a take found unfinished at start was cut off by a restart. Its ffmpeg, when one
+    // still runs under the pid it recorded, is ended (TakeStore#markLiveEnded).
     try {
-      store.markLiveEnded('service_restarted');
+      store.markLiveEnded('service_restarted', { ...(findProcess ? { findProcess } : {}), ...(kill ? { kill } : {}) });
     } catch (err) {
       log.warn(`takes left live at the last stop were not marked ended: ${err.message}`);
     }
@@ -313,8 +317,11 @@ class TakeManager {
       if (p.record) {
         let res;
         try {
+          // max_s bounds the file in ffmpeg itself (the approved minutes and one more), so a
+          // recording outlives a service that never sends record_stop by a minute at most.
           res = await this.broker.recordStart({
-            ffmpeg, takeId, path: p.record.dir ? path.join(p.record.dir, `${takeId}.mp4`) : undefined, fps: p.record.fps, size: p.record.size
+            ffmpeg, takeId, path: p.record.dir ? path.join(p.record.dir, `${takeId}.mp4`) : undefined, fps: p.record.fps, size: p.record.size,
+            maxS: recordMaxS(p.minutes)
           }, ctx);
         } catch (err) {
           // The helper may have started ffmpeg and only the answer was lost (a timeout): it is
@@ -329,7 +336,11 @@ class TakeManager {
         }
         recording = { pid: res.pid, path: res.path, started_at: iso(Number.isFinite(res.startedAt) ? res.startedAt : this.clock()) };
         t.recording = recording;
-        this._safeUpdate(takeId, { recording: { path: recording.path, started_at: recording.started_at } });
+        // The pid lets the next start end an ffmpeg this service left running (TakeStore).
+        this._safeUpdate(takeId, {
+          recording: { path: recording.path, started_at: recording.started_at },
+          recorder: { pid: recording.pid, started_at: recording.started_at }
+        });
         await checkEnded();
       }
 
@@ -602,4 +613,4 @@ class TakeManager {
   }
 }
 
-module.exports = { TakeManager, SILENT_MS, RECORDER_MISSING };
+module.exports = { TakeManager, SILENT_MS, RECORDER_MISSING, recordMaxS };

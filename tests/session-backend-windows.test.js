@@ -454,6 +454,24 @@ describe('Windows backend: launch_browser, record_start, record_stop (any OS, fa
     assert.deepEqual(backend.mkdirs[1], ['D:\\work\\demo', { recursive: true }]);
     assert.deepEqual(calls[1].args.slice(0, 9), ['-y', '-f', 'gdigrab', '-framerate', '24', '-i', 'desktop', '-vf', 'scale=1280:720']);
     assert.equal(calls[1].args.at(-1), given);
+    assert.ok(!calls[0].args.includes('-t') && !calls[1].args.includes('-t'), 'no max_s: no -t');
+  });
+
+  it('record_start with max_s bounds the file with -t just before the output', async () => {
+    const t = fakeTime();
+    const { calls, spawnImpl } = spawnRecorder();
+    const backend = make({ spawnImpl, clock: t.clock, timers: t.timers });
+    await backend.recordStart({ ffmpeg: 'C:\\ff\\ffmpeg.exe', takeId: TAKE, path: 'C:\\r\\a.mp4', maxS: 3660 });
+    assert.deepEqual(calls[0].args.slice(-3), ['-t', '3660', 'C:\\r\\a.mp4']);
+    // Through the op handler, as the service sends it.
+    backend.recordings.clear();
+    const { createOpHandler } = require('../src/session/connection');
+    const handle = createOpHandler(backend, { platform: 'win32' });
+    await handle('record_start', { ffmpeg: 'C:\\ff\\ffmpeg.exe', take_id: TAKE, path: 'C:\\r\\b.mp4', max_s: 61 });
+    assert.deepEqual(calls[1].args.slice(-3), ['-t', '61', 'C:\\r\\b.mp4']);
+    backend.recordings.clear();
+    await handle('record_start', { ffmpeg: 'C:\\ff\\ffmpeg.exe', take_id: TAKE, path: 'C:\\r\\c.mp4' });
+    assert.ok(!calls[2].args.includes('-t'), 'an older service sends no max_s');
   });
 
   it('record_start refuses bad parameters before spawning; no ffmpeg is recorder_missing', async () => {
@@ -466,7 +484,8 @@ describe('Windows backend: launch_browser, record_start, record_stop (any OS, fa
       { ...ok, takeId: undefined }, { ...ok, takeId: 'take-0123' }, { ...ok, takeId: 'take-0123456789AB' }, { ...ok, takeId: '..\\take-0123456789ab' },
       { ...ok, path: 'take.mp4' }, { ...ok, path: 7 },
       { ...ok, fps: 0 }, { ...ok, fps: 121 }, { ...ok, fps: 2.5 },
-      { ...ok, size: { width: 0, height: 720 } }, { ...ok, size: { width: 'x', height: 720 } }, { ...ok, size: { width: 1281, height: 720 } }
+      { ...ok, size: { width: 0, height: 720 } }, { ...ok, size: { width: 'x', height: 720 } }, { ...ok, size: { width: 1281, height: 720 } },
+      { ...ok, maxS: 0 }, { ...ok, maxS: 86401 }, { ...ok, maxS: 1.5 }, { ...ok, maxS: '60' }
     ]) {
       await assert.rejects(backend.recordStart(bad), (e) => (e.code === 'invalid_params' || e.code === 'app_type_not_supported') && e.message === e.code, JSON.stringify(bad));
     }

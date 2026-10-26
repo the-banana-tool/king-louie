@@ -38,7 +38,7 @@ describe('TakeStore', () => {
 
   it('has exactly the record keys and states of spec 5.3', () => {
     assert.deepEqual([...TAKE_KEYS], ['take_id', 'name', 'job_id', 'origin', 'lease_id', 'grant', 'state',
-      'steps', 'recording', 'log', 'ended', 'created_at']);
+      'steps', 'recording', 'recorder', 'log', 'ended', 'created_at']);
     assert.deepEqual([...TAKE_STATES], ['requested', 'live', 'waiting', 'ended']);
   });
 
@@ -128,6 +128,37 @@ describe('TakeStore', () => {
     assert.equal(store.get(bad.take_id).state, 'live');
     assert.equal(log.warnings.length, 1);
     assert.equal(log.warnings[0].meta.takeId, bad.take_id);
+  });
+
+  it('service_restarted kills a recorder pid only while it is still an ffmpeg; anything else is left alone', () => {
+    const rec = (pid) => ({ pid, started_at: '2026-10-24T11:00:00.000Z' });
+    const ff = store.create({ name: 'ffmpeg still there', state: 'live', recorder: rec(101) });
+    const reused = store.create({ name: 'pid reused', state: 'waiting', recorder: rec(102) });
+    const gone = store.create({ name: 'pid gone', state: 'live', recorder: rec(103) });
+    const lookupFails = store.create({ name: 'lookup fails', state: 'live', recorder: rec(104) });
+    const killFails = store.create({ name: 'kill fails', state: 'live', recorder: rec(105) });
+    store.create({ name: 'ended already', state: 'ended', recorder: rec(106), ended: { at: '2026-10-24T11:30:00.000Z', reason: 'take_done' } });
+    store.create({ name: 'no recorder', state: 'live' });
+    const images = { 101: 'ffmpeg.exe', 102: 'chrome.exe', 105: 'FFMPEG.EXE' };
+    const looked = [];
+    const killed = [];
+    const findProcess = (pid) => {
+      looked.push(pid);
+      if (pid === 104) throw Object.assign(new Error('tasklist C:\\secret path'), { code: 'ETIMEDOUT' });
+      return images[pid] ? { image: images[pid] } : null;
+    };
+    const kill = (pid) => {
+      if (pid === 105) throw Object.assign(new Error('denied'), { code: 'EPERM' });
+      killed.push(pid);
+    };
+    const ids = store.markLiveEnded('service_restarted', { findProcess, kill });
+    assert.deepEqual(looked.sort(), [101, 102, 103, 104, 105], 'ended records and records with no recorder are not looked up');
+    assert.deepEqual(killed, [101]);
+    for (const r of [ff, reused, gone, lookupFails, killFails]) assert.ok(ids.includes(r.take_id), r.name);
+    assert.equal(store.get(reused.take_id).ended.reason, 'service_restarted');
+    // Logged by code only, never the error's text.
+    assert.deepEqual(log.warnings.map((w) => w.meta.code).sort(), ['EPERM', 'ETIMEDOUT']);
+    assert.ok(log.warnings.every((w) => !JSON.stringify(w).includes('secret')));
   });
 
   it('summary gives the driver-side take object of spec 11', () => {

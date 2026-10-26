@@ -21,6 +21,8 @@ const PORT_POLL_MS = 200;
 const PORT_WAIT_MS = 10000;
 const STOP_WAIT_MS = 15000;
 const KILL_WAIT_MS = 2000;
+// record_start's max_s: at most a day.
+const MAX_RECORD_S = 86400;
 
 const DRIVE_PATH = /^[A-Za-z]:[\\/]/;
 
@@ -139,8 +141,11 @@ function createWindowsBackend({
     return { path: rec.path, durationS: duration(), bytes: bytes(), truncated };
   }
 
-  async function startRecording({ ffmpeg = null, takeId, path: given = null, fps = 30, size = null } = {}) {
+  async function startRecording({ ffmpeg = null, takeId, path: given = null, fps = 30, size = null, maxS = null } = {}) {
     if (typeof takeId !== 'string' || !TAKE_ID.test(takeId)) throw new GuiError('invalid_params');
+    // Optional (session-v1, revised 2026-10-25): ffmpeg's own bound on the
+    // file, so a recording nobody stops (the service gone) still ends.
+    if (maxS !== null && !(Number.isInteger(maxS) && maxS >= 1 && maxS <= MAX_RECORD_S)) throw new GuiError('invalid_params');
     // Given, the path is the service's, already checked against the
     // session's working directory: used as it is, if absolute.
     if (given !== null && (typeof given !== 'string' || !DRIVE_PATH.test(given))) throw new GuiError('invalid_params');
@@ -156,7 +161,8 @@ function createWindowsBackend({
     const out = given === null ? path.win32.join(dir, 'take.mp4') : given;
     const args = ['-y', '-f', 'gdigrab', '-framerate', String(fps), '-i', 'desktop',
       ...(size ? ['-vf', `scale=${size.width}:${size.height}`] : []),
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out];
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart',
+      ...(maxS !== null ? ['-t', String(maxS)] : []), out];
     const child = spawnImpl(ffmpeg, args, { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true, shell: false });
     const rec = { pid: null, takeId, child, path: out, startedAt: null, exited: false, code: null, endedAt: null, done: null };
     rec.done = new Promise((resolve) => {

@@ -11,8 +11,10 @@ const path = require('path');
 const { createLogger } = require('../logging');
 const { writeFileAtomic } = require('../approvals/approver-store');
 
+// `recorder` is `{ pid, started_at }` of the take's ffmpeg, written when it starts, so a
+// start after a crash can end an ffmpeg the last run left recording.
 const TAKE_KEYS = Object.freeze(['take_id', 'name', 'job_id', 'origin', 'lease_id', 'grant', 'state',
-  'steps', 'recording', 'log', 'ended', 'created_at']);
+  'steps', 'recording', 'recorder', 'log', 'ended', 'created_at']);
 const TAKE_STATES = Object.freeze(['requested', 'live', 'waiting', 'ended']);
 const UNFINISHED_STATES = Object.freeze(['requested', 'live', 'waiting']);
 const TAKE_ID_RE = /^take-[0-9a-f]{12}$/;
@@ -21,8 +23,31 @@ const HOST_KEYS = new Set(['take_id', 'created_at']);
 
 const DEFAULTS = Object.freeze({
   name: null, job_id: null, origin: null, lease_id: null, grant: null, state: 'requested',
-  steps: [], recording: null, log: [], ended: null,
+  steps: [], recording: null, recorder: null, log: [], ended: null,
 });
+
+// The image name of the process with this pid, or null when there is none (or it cannot be
+// told). Windows only: tasklist by absolute path, CSV, no header. Elsewhere null, so nothing
+// is ever killed there (takes record on Windows only).
+function defaultFindProcess(pid, { platform = process.platform, env = process.env } = {}) {
+  if (platform !== 'win32') return null;
+  const { execFileSync } = require('child_process');
+  const { windowsSystemRoot } = require('../platform/windows-paths');
+  const exe = path.win32.join(windowsSystemRoot(env), 'System32', 'tasklist.exe');
+  let out;
+  try {
+    out = String(execFileSync(exe, ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] }));
+  } catch {
+    return null;
+  }
+  for (const line of out.split(/\r?\n/)) {
+    const m = /^"([^"]*)","(\d+)"/.exec(line.trim());
+    if (m && Number(m[2]) === pid) return { image: m[1] };
+  }
+  return null;
+}
+
+const isFfmpegImage = (image) => typeof image === 'string' && /^ffmpeg(\.exe)?$/i.test(image.trim());
 
 function checkFields(fields, what) {
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
@@ -139,11 +164,16 @@ class TakeStore {
 
   // The ending goes in the log in the same write as the state (§5.3: the log holds every
   // ending). A record that cannot be written is warned about by its id and the rest still run.
-  markLiveEnded(reason) {
+  //
+  // A record with a `recorder` pid had an ffmpeg when the last run stopped. It is killed only
+  // when a process with that pid still runs and its image name is ffmpeg: pids are reused, so
+  // anything else under the pid is left alone. Logged by code only.
+  markLiveEnded(reason, { findProcess = defaultFindProcess, kill = (pid) => process.kill(pid) } = {}) {
     const at = new Date(this.clock()).toISOString();
     const ids = [];
     for (const record of this.list()) {
       if (!UNFINISHED_STATES.includes(record.state)) continue;
+      this._endStaleRecorder(record, { findProcess, kill });
       const log = Array.isArray(record.log) ? record.log : [];
       try {
         this.update(record.take_id, { state: 'ended', ended: { at, reason }, log: [...log, { at, ended: reason }] });
@@ -154,6 +184,27 @@ class TakeStore {
       ids.push(record.take_id);
     }
     return ids;
+  }
+
+  _endStaleRecorder(record, { findProcess, kill }) {
+    const pid = record.recorder && typeof record.recorder === 'object' ? record.recorder.pid : null;
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    let found;
+    try {
+      found = findProcess(pid);
+    } catch (err) {
+      this.log.warn('could not look up a take\'s recorder', { takeId: record.take_id, code: (err && err.code) || 'error' });
+      return false;
+    }
+    if (!found || !isFfmpegImage(found.image)) return false;
+    try {
+      kill(pid);
+    } catch (err) {
+      this.log.warn('could not end a take\'s recorder left running', { takeId: record.take_id, code: (err && err.code) || 'error' });
+      return false;
+    }
+    this.log.info('ended a take\'s recorder left running', { takeId: record.take_id });
+    return true;
   }
 
   summary(record) {
@@ -174,4 +225,4 @@ class TakeStore {
   }
 }
 
-module.exports = { TakeStore, TAKE_KEYS, TAKE_STATES, TAKE_ID_RE };
+module.exports = { TakeStore, TAKE_KEYS, TAKE_STATES, TAKE_ID_RE, defaultFindProcess };
