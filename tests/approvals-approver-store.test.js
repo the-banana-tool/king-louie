@@ -355,6 +355,90 @@ describe('ApproverStore: Windows owners', () => {
   });
 });
 
+// Personal node (spec 2026-10-25 §6, approvers row): the service runs as the
+// owner, so "can the service write approvers/?" is always yes and proves
+// nothing; the probe is skipped, while the Windows owner read stays.
+describe('ApproverStore: hosting personal', () => {
+  const USER = 'S-1-5-21-1-2-3-1001';
+  function recording() {
+    const opens = [];
+    const fsImpl = { ...fs, openSync: (p, f, ...rest) => { opens.push([p, f]); return fs.openSync(p, f, ...rest); } };
+    return { opens, fsImpl };
+  }
+  const probes = (opens) => opens.filter(([p, f]) => f === 'wx' && path.basename(p).startsWith('.probe-')).length;
+
+  it('personal: never opens a probe file, trusts a user-owned approvers dir under a user-owned config dir', async () => {
+    const l = layout();
+    const phone = createFakePhone();
+    write(l.dir, phone.approverRecord());
+    const { opens, fsImpl } = recording();
+    let reads = 0;
+    const s = store(l, { platform: 'win32', hosting: 'personal', fsImpl, readOwners: () => { reads += 1; return { approvers: USER, config: USER }; } });
+    assert.deepEqual(await s.ready(), { ok: true });
+    s.refresh();
+    assert.equal(s.isActive(phone.deviceId), true);
+    assert.equal(probes(opens), 0);
+    assert.equal(s.problem, null);
+    assert.equal(s.untrusted, false);
+    assert.equal(reads, 1, 'the owner read still runs');
+  });
+
+  it('personal: a config dir owned by LOCAL SERVICE is still refused', async () => {
+    const l = layout();
+    const phone = createFakePhone();
+    write(l.dir, phone.approverRecord());
+    const { opens, fsImpl } = recording();
+    const s = store(l, { platform: 'win32', hosting: 'personal', fsImpl, readOwners: () => ({ approvers: USER, config: 'S-1-5-19' }) });
+    const result = await s.ready();
+    assert.equal(result.ok, false);
+    assert.match(result.problem, /S-1-5-19/);
+    assert.equal(s.isActive(phone.deviceId), false);
+    assert.equal(probes(opens), 0);
+  });
+
+  it('personal: owners are read again on a scan once ChangeTime moves, still without a probe', async () => {
+    const l = layout();
+    const phone = createFakePhone();
+    write(l.dir, phone.approverRecord());
+    const { opens, fsImpl: rec } = recording();
+    let bump = 0n;
+    const fsImpl = { ...rec, lstatSync: (p, opts) => {
+      const st = fs.lstatSync(p, opts);
+      if (p === l.dir && opts && opts.bigint) st.ctimeNs += bump;
+      return st;
+    } };
+    let owners = { approvers: USER, config: USER };
+    const s = store(l, { platform: 'win32', hosting: 'personal', fsImpl, readOwners: () => owners });
+    assert.deepEqual(await s.ready(), { ok: true });
+    owners = { approvers: 'S-1-5-21-1-2-3-1002', config: USER };
+    bump = 1n;
+    s.refresh();
+    assert.equal(s.isActive(phone.deviceId), false);
+    assert.match(s.problem, /is owned by S-1-5-21-1-2-3-1002/);
+    assert.equal(probes(opens), 0);
+  });
+
+  it('service (default): the probe still runs', async () => {
+    const l = layout();
+    const { opens, fsImpl } = recording();
+    const s = store(l, { platform: 'win32', fsImpl });
+    await s.ready();
+    s.refresh();
+    assert.ok(probes(opens) >= 1);
+    // The real fs let this process write approvers/, so the default store refuses it.
+    assert.match(s.problem, /writable by the account running the service/);
+  });
+
+  it('an unknown hosting value is the service default', async () => {
+    const l = layout();
+    const { opens, fsImpl } = recording();
+    const s = store(l, { platform: 'win32', hosting: 'Personal', fsImpl });
+    assert.equal(s.hosting, 'service');
+    await s.ready();
+    assert.ok(probes(opens) >= 1);
+  });
+});
+
 describe('ApproverStore.stage', () => {
   async function fleet() {
     const l = layout();

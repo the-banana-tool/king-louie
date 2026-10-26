@@ -60,10 +60,15 @@ function checkApproverRecord(record, fileName = null) {
 // write" and mistake its own privilege for a broken ACL, treating every
 // approver as untrusted. POSIX is unaffected either way — assertAdminOwned
 // checks the actual owner/mode, not who is asking.
-function checkApproverDir({ dir, platform = process.platform, geteuid = defaultGeteuid, adminUid = 0, fsImpl = fs, serviceProbe = true }) {
+//
+// `hosting: 'personal'` (a personal node: the service runs as the owner)
+// skips the probe too, since the owner can always write their own dir and a
+// "yes" proves nothing; unlike `serviceProbe: false`, the store still runs
+// the Windows owner check (`_checkTrust`).
+function checkApproverDir({ dir, platform = process.platform, geteuid = defaultGeteuid, adminUid = 0, fsImpl = fs, serviceProbe = true, hosting = 'service' }) {
   if (!fsImpl.existsSync(dir)) return null;
   if (platform === 'win32') {
-    if (!serviceProbe) return null;
+    if (!serviceProbe || hosting === 'personal') return null;
     const probe = path.join(dir, `.probe-${crypto.randomBytes(6).toString('hex')}`);
     let fd = null;
     let openErr = null;
@@ -189,7 +194,7 @@ function writeFileAtomic(file, text, mode = 0o600) {
 
 class ApproverStore {
   constructor({ dir, stagedDir, geteuid = defaultGeteuid, adminUid = 0, platform = process.platform, now = Date.now,
-    allowTestKeys = false, fsImpl = fs, serviceProbe = true, readOwners = readWindowsOwners } = {}) {
+    allowTestKeys = false, fsImpl = fs, serviceProbe = true, readOwners = readWindowsOwners, hosting = 'service' } = {}) {
     if (!dir) throw new TypeError('ApproverStore needs a dir');
     this.dir = dir;
     this.stagedDir = stagedDir || null;
@@ -200,6 +205,7 @@ class ApproverStore {
     this.allowTestKeys = allowTestKeys === true;
     this.fs = fsImpl;
     this.serviceProbe = serviceProbe !== false;
+    this.hosting = hosting === 'personal' ? 'personal' : 'service';
     this.problem = null;
     // Untrusted until ready() runs the probe: a store nobody has checked yet
     // must fail closed, the same as one that failed the check.
@@ -272,6 +278,8 @@ class ApproverStore {
     // probe finds it locked, and a missing dir is simply no approvers.
     // Only once ready() has run: until then the store stays untrusted (and
     // its revoke overlay unbuilt), whatever a probe would say.
+    // Under personal hosting _checkTrust runs no probe, only the (cached)
+    // owner check, so a scan still sees an owner that changes.
     if (this.platform === 'win32' && this.serviceProbe && this._readied) this._reprobe();
     if (this.untrusted) {
       this._files.clear();
@@ -319,12 +327,15 @@ class ApproverStore {
   }
 
   // null when the dir may be trusted, else why not: the POSIX ownership
-  // check, or on Windows the write probe and then the owner check.
+  // check, or on Windows the write probe (not under personal hosting) and
+  // then the owner check.
   _checkTrust() {
     const problem = checkApproverDir({
-      dir: this.dir, platform: this.platform, geteuid: this.geteuid, adminUid: this.adminUid, fsImpl: this.fs, serviceProbe: this.serviceProbe
+      dir: this.dir, platform: this.platform, geteuid: this.geteuid, adminUid: this.adminUid, fsImpl: this.fs,
+      serviceProbe: this.serviceProbe, hosting: this.hosting
     });
-    if (problem || this.platform !== 'win32' || !this.serviceProbe) return problem;
+    if (problem || this.platform !== 'win32') return problem;
+    if (!this.serviceProbe && this.hosting !== 'personal') return problem;
     return this._checkOwners();
   }
 
