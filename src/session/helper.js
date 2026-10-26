@@ -12,6 +12,7 @@ const { createLogger } = require('../logging');
 const { readUserCopy, userCopyPath, checkUserCopyTrust } = require('../gui/session-secret');
 const { connectToService, createOpHandler, createRecordingGuard } = require('./connection');
 const { findFfmpeg } = require('./recorder');
+const { startSessionWatch, safeProbe } = require('./session-watch');
 const { selectBackend: defaultSelect, loadBackend, NO_BACKEND_REPORT } = require('./backends');
 const { adminConfigDir, defaultServiceDataDir } = require('../platform/paths');
 const { windowsPowerShellExe } = require('../platform/windows-paths');
@@ -52,16 +53,6 @@ function sleep(ms, signal) {
     const timer = setTimeout(resolve, ms);
     if (signal) signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
   });
-}
-
-async function safeProbe(backend, log) {
-  try {
-    const r = await backend.probe();
-    return { capabilities: r.capabilities || [], probes: r.probes || [], displays: r.displays || [], limits: r.limits || [], locked: r.locked === true };
-  } catch (err) {
-    log.warn(`probe failed: ${err.message}`);
-    return NO_BACKEND_REPORT(`the probe failed: ${err.message}`);
-  }
 }
 
 async function runSessionHelper({ env = process.env, platform = process.platform, signal = null, sessionFile = null, deps = {} } = {}) {
@@ -128,29 +119,15 @@ async function runSessionHelper({ env = process.env, platform = process.platform
       attempt = 0;
       recordingGuard.connected();
       log.info('connected to the King Louie service');
-      let lastLocked = report.locked;
-      const reprobe = setInterval(async () => {
-        if (!backend) return;
-        const next = withRecorder(await safeProbe(backend, log));
-        if (JSON.stringify(next.capabilities) !== JSON.stringify(report.capabilities) || JSON.stringify(next.limits) !== JSON.stringify(report.limits)) {
-          report = next;
-          session.sendEvent('probe_changed', next);
-        }
-      }, deps.reprobeMs || 60000);
-      const lockPoll = setInterval(async () => {
-        if (!backend || typeof backend.locked !== 'function') return;
-        let now;
-        try { now = await backend.locked(); } catch { return; }
-        if (now === null || now === lastLocked) return;
-        lastLocked = now;
-        session.sendEvent(now ? 'locked' : 'unlocked', {});
-      }, deps.lockPollMs || 2000);
+      const watch = startSessionWatch(backend, {
+        report, recorder, log, emit: (k, p) => session.sendEvent(k, p), reprobeMs: deps.reprobeMs, lockPollMs: deps.lockPollMs
+      });
       await new Promise((resolve) => {
         session.once('closed', resolve);
         if (signal) signal.addEventListener('abort', () => { session.close('logout'); resolve(); }, { once: true });
       });
-      clearInterval(reprobe);
-      clearInterval(lockPoll);
+      watch.stop();
+      report = watch.current();
       // A recording outlives a short drop; 30 s without the service ends it.
       recordingGuard.disconnected();
       if (!(signal && signal.aborted)) log.warn('the service connection closed; reconnecting');
