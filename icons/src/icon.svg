@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- King Louie app icon: a crowned banana on a midnight tile.
+       `scripts/build-icons.js` reads this file and derives every platform's
+       sizes and formats from it. The ids `tile`, `tile-glow` and `art` are what
+       the script looks for when it builds the variants (square, mac inset,
+       transparent foreground, tinted), so keep them. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34365c"/>
+      <stop offset="1" stop-color="#15162a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.15" r="0.9">
+      <stop offset="0" stop-color="#8a8dff" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#8a8dff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="peel" x1="0.1" y1="0.1" x2="0.9" y2="0.9">
+      <stop offset="0" stop-color="#ffe866"/>
+      <stop offset="0.5" stop-color="#ffcd2b"/>
+      <stop offset="1" stop-color="#eea312"/>
+    </linearGradient>
+    <linearGradient id="crown" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff0a0"/>
+      <stop offset="1" stop-color="#f2b11c"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="26" stdDeviation="20" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+    <clipPath id="body-clip">
+      <path d="M 318 236 C 372 214 412 246 414 296 C 446 528 606 662 836 660 C 882 660 896 736 846 760 C 542 846 262 700 196 416 C 180 346 230 266 318 236 Z"/>
+    </clipPath>
+  </defs>
+  <rect id="tile" width="1024" height="1024" rx="230" fill="url(#bg)"/>
+  <rect id="tile-glow" width="1024" height="1024" rx="230" fill="url(#glow)"/>
+  <g id="art">
+    <!-- stem: a stub behind the body, under the crown -->
+    <g transform="translate(356 128) rotate(-14)">
+      <rect x="-34" y="40" width="68" height="150" rx="24" fill="#5a3b1a"/>
+    </g>
+    <g filter="url(#shadow)">
+      <!-- banana body: stem upper-left, tip lower-right, belly toward bottom-left -->
+      <path d="M 318 236 C 372 214 412 246 414 296 C 446 528 606 662 836 660 C 882 660 896 736 846 760 C 542 846 262 700 196 416 C 180 346 230 266 318 236 Z"
+            fill="url(#peel)"/>
+      <!-- ridges -->
+      <path d="M 372 372 C 436 586 598 714 822 714" fill="none" stroke="#c7860c" stroke-opacity="0.5" stroke-width="20" stroke-linecap="round"/>
+      <path d="M 272 460 C 340 640 520 760 770 770" fill="none" stroke="#fff6b0" stroke-opacity="0.5" stroke-width="16" stroke-linecap="round"/>
+      <!-- tip, kept inside the silhouette -->
+      <g clip-path="url(#body-clip)">
+        <ellipse cx="872" cy="712" rx="46" ry="62" transform="rotate(20 872 712)" fill="#6a461c"/>
+      </g>
+    </g>
+    <!-- crown, seated on the stem -->
+    <g transform="translate(356 128) rotate(-14)" filter="url(#shadow)">
+      <path d="M -118 60 L -92 -56 L -36 12 L 0 -92 L 36 12 L 92 -56 L 118 60 Z" fill="url(#crown)"/>
+      <rect x="-124" y="52" width="248" height="46" rx="12" fill="#f2b11c"/>
+      <rect x="-124" y="52" width="248" height="14" rx="7" fill="#fff0a0"/>
+      <circle cx="-92" cy="-62" r="17" fill="#ff6b6b"/>
+      <circle cx="0" cy="-98" r="20" fill="#5ecbff"/>
+      <circle cx="92" cy="-62" r="17" fill="#ff6b6b"/>
+    </g>
+  </g>
+</svg>
