@@ -33,7 +33,7 @@ const failureDetail = (err) => String((err && err.message) || err || 'unknown er
 // the GUI tools are registered only to refuse with the reason; status.json carries it for "session
 // status" and doctor. The bad file is never read for anything else, and
 // nothing falls back to a weaker mode.
-function unavailableSubsystem({ reason, detail, guiConfig, dataDir, platform, log, clock = Date.now, heartbeatMs = 10000 }) {
+function unavailableSubsystem({ reason, detail, guiConfig, dataDir, platform, log, hosting = 'service', clock = Date.now, heartbeatMs = 10000 }) {
   const message = `${reason}: ${detail}; ${remedyFor(reason)}`;
   const apps = () => Object.values((guiConfig && guiConfig.apps) || {}).map((a) => ({ id: a.id, name: a.name }));
   const capability = () => ({
@@ -43,7 +43,7 @@ function unavailableSubsystem({ reason, detail, guiConfig, dataDir, platform, lo
     if (!dataDir) return;
     try {
       writeGuiStatus(dataDir, {
-        v: 1, pid: process.pid, available: false, reason, detail, user: null, platform: null, capabilities: [], probes: [], limits: [],
+        v: 1, pid: process.pid, hosting, available: false, reason, detail, user: null, platform: null, capabilities: [], probes: [], limits: [],
         apps: apps(), since: null, updated_at: new Date(clock()).toISOString(), lease: null
       });
     } catch (err) {
@@ -96,24 +96,120 @@ function createGuiSubsystem(options = {}) {
   try {
     return buildGuiSubsystem(options);
   } catch (err) {
-    const { nodeConfig = null, dataDir = null, platform = process.platform, log = createLogger('gui') } = options;
+    const { nodeConfig = null, dataDir = null, platform = process.platform, hosting = 'service', log = createLogger('gui') } = options;
     const detail = failureDetail(err);
     log.error(`desktop apps are off: the GUI could not be set up (${detail}). To fix it, ${remedyFor(GUI_START_FAILED)}.`, { reason: GUI_START_FAILED });
-    return unavailableSubsystem({ reason: GUI_START_FAILED, detail, guiConfig: nodeConfig && nodeConfig.gui, dataDir, platform, log });
+    return unavailableSubsystem({ reason: GUI_START_FAILED, detail, guiConfig: nodeConfig && nodeConfig.gui, dataDir, platform, log, hosting });
   }
 }
 
 // jobOpen fails closed: a host that passes none can hold no lease.
 // identityRecord: what the host's own check of the administrator's record
 // came to (assertRecordedIdentity, run.js); without one it is read here.
+// hosting 'personal' (spec 2026-10-25 §7): the service runs in the user's
+// own login session, so the broker drives the backend in-process
+// (deps.channel in tests). No helper file is read, no node id compared and
+// no identity record consulted, and the lease manager gets no write probe.
 function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => false, identityRecord = null,
-  adminUid = 0, geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1), log = createLogger('gui'), deps = {} } = {}) {
+  hosting = 'service', adminUid = 0, geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1), log = createLogger('gui'), deps = {} } = {}) {
   const gui = nodeConfig.gui;
   if (nodeConfig.profile !== 'agent' || !gui || !gui.enabled) {
     // R-F5-14: off until node.yaml enables it; an installed helper changes nothing.
     log.info('desktop apps are off on this node: node.yaml does not say "gui: enabled: true" (or the profile is not agent)');
     return null;
   }
+  const audit = approvals.auditLedger || null;
+  let channel;
+  let identityProbe;
+  if (hosting === 'personal') {
+    // Required here: a fleet node never loads the session backends.
+    channel = deps.channel || require('./in-process-channel').buildInProcessChannel({ platform, env: process.env, log });
+    identityProbe = null;
+  } else {
+    const helper = helperChannel({ gui, dataDir, configDir, cipher, approvals, platform, identityRecord, adminUid, geteuid, log, deps, audit });
+    // Null (no helper installed) or a subsystem that is off and says why.
+    if (!helper || helper.unavailable) return helper;
+    ({ channel, identityProbe } = helper);
+  }
+  const getPolicy = () => nodeConfig.policy;
+  const broker = new GuiBroker({ channel, guiConfig: gui, getPolicy, audit, dataDir, platform, hosting });
+  const leases = new LeaseManager({ approvals, guiConfig: gui, broker, audit, nodeName: nodeConfig.name, jobOpen, identityProbe });
+  broker.setLeases(leases);
+  const relay = approvals.relayClient || null;
+  const liveView = new LiveView({ leases, broker, identity: approvals.identity, relayClient: relay, guiConfig: gui });
+  // Demo takes (spec 2026-10-24): records under <dataDir>/takes. A screen lock reaches the
+  // manager through the lease (setLocked, from the helper's event), which ends the take.
+  const takes = dataDir ? new TakeManager({
+    leases, broker, audit, guiConfig: gui,
+    store: new TakeStore({ dir: path.join(dataDir, 'takes') })
+  }) : null;
+  if (relay) {
+    relay.registerMethod('lease.grant', async ({ envelope } = {}) => leases.onGrant(envelope));
+    relay.registerMethod('lease.revoke', async ({ envelope } = {}) => leases.onRevoke(envelope));
+    relay.registerMethod('lease.watch', async ({ envelope } = {}) => liveView.onWatch(envelope));
+    // R-F5-18: statuses signed now, for a phone that opens and asks what is
+    // running. R-F5-20: with the phone's nonce, a listing signed over it and
+    // over exactly those statuses, so the phone can tell the node's "nothing"
+    // from a relay that left something out.
+    relay.registerMethod('lease.list', async ({ device_id: deviceId, nonce } = {}) => {
+      const { statuses, listing } = leases.listingFor(deviceId, nonce);
+      return listing ? { statuses, listing } : { statuses };
+    });
+  }
+
+  let brokerStarted = false;
+  const quietly = async (fn) => { try { await fn(); } catch (err) { log.debug(`gui teardown: ${err.message}`); } };
+  const subsystem = {
+    broker, leases, liveView, channel, takes,
+    // Set when start() failed: { reason, detail }.
+    unavailable: null,
+    capability: () => broker.capability(),
+    registerTools(toolRegistry) {
+      registerGuiTools(toolRegistry, { broker, leases, liveView, guiConfig: gui, getPolicy, audit, platform, takes });
+    },
+    // Never throws (security review finding 2). A start that fails (the
+    // pipe or socket name is taken by another local process, say) closes
+    // what it opened, ends every lease and leaves the capability unavailable
+    // with a reason. The tools the core already registered refuse with it,
+    // status.json carries it, and the service goes on without desktop apps.
+    async start() {
+      try {
+        await channel.start();
+        broker.start();
+        brokerStarted = true;
+        leases.start();
+        if (relay) liveView.start();
+        if (hosting === 'personal') log.info('desktop apps run in this process (personal hosting)');
+        else log.info('waiting for the session helper', { endpoint: channel.endpoint });
+      } catch (err) {
+        const detail = failureDetail(err);
+        log.error(`desktop apps are off: the GUI could not start (${detail}). To fix it, ${remedyFor(GUI_START_FAILED)}.`, { reason: GUI_START_FAILED });
+        await quietly(() => liveView.stop());
+        await quietly(() => leases.stop());
+        await quietly(() => channel.stop());
+        subsystem.unavailable = { reason: GUI_START_FAILED, detail };
+        // The broker stays up only to say why and to keep status.json fresh.
+        if (!brokerStarted) await quietly(() => { broker.start(); brokerStarted = true; });
+        await quietly(() => broker.setUnavailable({ reason: GUI_START_FAILED, detail, message: `${GUI_START_FAILED}: ${detail}; ${remedyFor(GUI_START_FAILED)}` }));
+      }
+    },
+    async stop() {
+      // A take stops its recording and lets go of its browser while the helper is still there.
+      if (takes) await quietly(() => takes.stopAll('service_stopped'));
+      liveView.stop();
+      leases.stop();
+      if (brokerStarted) broker.stop();
+      brokerStarted = false;
+      await channel.stop();
+    }
+  };
+  return subsystem;
+}
+
+// A fleet node (hosting 'service'): the session helper's channel, once its
+// file and the administrator's record of the identity check out. Null when
+// no helper is installed; an unavailable subsystem when either cannot be used.
+function helperChannel({ gui, dataDir, configDir, cipher, approvals, platform, identityRecord, adminUid, geteuid, log, deps, audit }) {
   const read = () => readCanonical({ configDir, cipher, adminUid, geteuid });
   // R-F5-11: logged once, with the remedy and never the file's contents.
   const invalid = (detail) => {
@@ -161,83 +257,11 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
   const identityProbe = recordOptions.serviceProbe === false ? null
     : () => require('../service/identity-record').probeIdentityRecord({ configDir, platform, ...(recordOptions.fsImpl ? { fsImpl: recordOptions.fsImpl } : {}) });
 
-  const audit = approvals.auditLedger || null;
   const channel = new HelperChannel({
     endpoint: deps.endpoint || endpointPath({ platform, endpointId: canonical.endpointId }),
     platform, audit, readSecret: read, readMtime: () => canonicalMtime(configDir)
   });
-  const getPolicy = () => nodeConfig.policy;
-  const broker = new GuiBroker({ channel, guiConfig: gui, getPolicy, audit, dataDir, platform });
-  const leases = new LeaseManager({ approvals, guiConfig: gui, broker, audit, nodeName: nodeConfig.name, jobOpen, identityProbe });
-  broker.setLeases(leases);
-  const relay = approvals.relayClient || null;
-  const liveView = new LiveView({ leases, broker, identity: approvals.identity, relayClient: relay, guiConfig: gui });
-  // Demo takes (spec 2026-10-24): records under <dataDir>/takes. A screen lock reaches the
-  // manager through the lease (setLocked, from the helper's event), which ends the take.
-  const takes = dataDir ? new TakeManager({
-    leases, broker, audit, guiConfig: gui,
-    store: new TakeStore({ dir: path.join(dataDir, 'takes') })
-  }) : null;
-  if (relay) {
-    relay.registerMethod('lease.grant', async ({ envelope } = {}) => leases.onGrant(envelope));
-    relay.registerMethod('lease.revoke', async ({ envelope } = {}) => leases.onRevoke(envelope));
-    relay.registerMethod('lease.watch', async ({ envelope } = {}) => liveView.onWatch(envelope));
-    // R-F5-18: statuses signed now, for a phone that opens and asks what is
-    // running. R-F5-20: with the phone's nonce, a listing signed over it and
-    // over exactly those statuses, so the phone can tell the node's "nothing"
-    // from a relay that left something out.
-    relay.registerMethod('lease.list', async ({ device_id: deviceId, nonce } = {}) => {
-      const { statuses, listing } = leases.listingFor(deviceId, nonce);
-      return listing ? { statuses, listing } : { statuses };
-    });
-  }
-
-  let brokerStarted = false;
-  const quietly = async (fn) => { try { await fn(); } catch (err) { log.debug(`gui teardown: ${err.message}`); } };
-  const subsystem = {
-    broker, leases, liveView, channel, takes,
-    // Set when start() failed: { reason, detail }.
-    unavailable: null,
-    capability: () => broker.capability(),
-    registerTools(toolRegistry) {
-      registerGuiTools(toolRegistry, { broker, leases, liveView, guiConfig: gui, getPolicy, audit, platform, takes });
-    },
-    // Never throws (security review finding 2). A start that fails (the
-    // pipe or socket name is taken by another local process, say) closes
-    // what it opened, ends every lease and leaves the capability unavailable
-    // with a reason. The tools the core already registered refuse with it,
-    // status.json carries it, and the service goes on without desktop apps.
-    async start() {
-      try {
-        await channel.start();
-        broker.start();
-        brokerStarted = true;
-        leases.start();
-        if (relay) liveView.start();
-        log.info('waiting for the session helper', { endpoint: channel.endpoint });
-      } catch (err) {
-        const detail = failureDetail(err);
-        log.error(`desktop apps are off: the GUI could not start (${detail}). To fix it, ${remedyFor(GUI_START_FAILED)}.`, { reason: GUI_START_FAILED });
-        await quietly(() => liveView.stop());
-        await quietly(() => leases.stop());
-        await quietly(() => channel.stop());
-        subsystem.unavailable = { reason: GUI_START_FAILED, detail };
-        // The broker stays up only to say why and to keep status.json fresh.
-        if (!brokerStarted) await quietly(() => { broker.start(); brokerStarted = true; });
-        await quietly(() => broker.setUnavailable({ reason: GUI_START_FAILED, detail, message: `${GUI_START_FAILED}: ${detail}; ${remedyFor(GUI_START_FAILED)}` }));
-      }
-    },
-    async stop() {
-      // A take stops its recording and lets go of its browser while the helper is still there.
-      if (takes) await quietly(() => takes.stopAll('service_stopped'));
-      liveView.stop();
-      leases.stop();
-      if (brokerStarted) broker.stop();
-      brokerStarted = false;
-      await channel.stop();
-    }
-  };
-  return subsystem;
+  return { channel, identityProbe };
 }
 
 module.exports = { createGuiSubsystem, isJobOpen };

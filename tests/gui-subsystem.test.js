@@ -545,6 +545,104 @@ describe('createGuiSubsystem', () => {
   });
 });
 
+// Personal hosting (spec 2026-10-25 §7): the service runs in the user's own
+// login session and the broker talks to the backend in-process. No helper
+// file, no node-id comparison, no identity record.
+describe('hosting personal', () => {
+  const INFO = { user: 'alice', platform: process.platform, pid: process.pid, capabilities: ['gui.launch'], probes: [], displays: [], limits: [], locked: false, since: '2026-10-25T10:00:00.000Z' };
+  class FakeChannel extends EventEmitter {
+    constructor() { super(); this.connected = false; this.info = null; this.started = 0; this.stopped = 0; }
+    connect(info = INFO) { this.connected = true; this.info = { ...info }; this.emit('ready', this.info); }
+    async start() { this.started += 1; }
+    async stop() { this.stopped += 1; }
+    async request(op) { throw Object.assign(new Error(op), { code: 'unknown_op' }); }
+  }
+  const personal = (overrides = {}) => {
+    const { configDir, dataDir } = dirs();
+    const fake = new FakeChannel();
+    const a = approvals();
+    const log = spyLog();
+    const gui = createGui({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log, hosting: 'personal', deps: { channel: fake }, ...overrides });
+    return { gui, fake, a, log, configDir, dataDir };
+  };
+
+  it('builds with no helper file and no identity record, over deps.channel', () => {
+    const { gui, fake, a, log, configDir } = personal();
+    assert.ok(gui);
+    assert.equal(gui.unavailable, null);
+    assert.equal(gui.channel, fake);
+    assert.ok(gui.broker && gui.leases && gui.liveView && gui.takes);
+    assert.equal(fs.existsSync(S.canonicalPath(configDir)), false, 'no helper file was there to read');
+    assert.deepEqual([...a.relayClient.methods.keys()], ['lease.grant', 'lease.revoke', 'lease.watch', 'lease.list']);
+    const registry = new ToolRegistry();
+    gui.registerTools(registry);
+    assert.equal(registry.list().length, 11, 'the ten GUI tools and Take');
+    assert.deepEqual(log.errors, []);
+  });
+
+  it('a helper file written for another node is not read and does not turn the GUI off', () => {
+    const { configDir, dataDir } = dirs();
+    install(configDir, { nodeId: 'n-someone-else', record: false });
+    const fake = new FakeChannel();
+    const gui = createGui({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, log: spyLog(), hosting: 'personal', deps: { channel: fake } });
+    assert.equal(gui.unavailable, null);
+    assert.equal(gui.channel, fake);
+  });
+
+  it('writes hosting: personal into status.json', async () => {
+    const { gui, fake, dataDir } = personal();
+    await gui.start();
+    cleanups.push(() => gui.stop());
+    assert.equal(fake.started, 1);
+    fake.connect();
+    const raw = readGuiStatusRecord({ dataDir });
+    assert.equal(raw.hosting, 'personal');
+    assert.equal(raw.available, true);
+    assert.equal(gui.capability().available, true);
+    await gui.stop();
+    assert.equal(fake.stopped, 1);
+  });
+
+  it('passes no identityProbe to the lease manager', () => {
+    const probed = { ...IDENTITY_RECORD_TEST_OPTIONS, serviceProbe: true };
+    const { gui } = personal({ platform: 'win32', deps: { channel: new FakeChannel(), identityRecord: probed } });
+    assert.equal(gui.leases.identityProbe, null);
+  });
+
+  it('gui disabled under personal is still null', () => {
+    const { gui, log } = personal({ nodeConfig: nodeConfig({ enabled: false }) });
+    assert.equal(gui, null);
+    assert.deepEqual(log.errors, []);
+  });
+
+  it('a build that throws under personal writes hosting: personal into the off record', async () => {
+    const { configDir, dataDir } = dirs();
+    const a = approvals();
+    a.relayClient.registerMethod = () => { throw new Error('the relay client is not what it should be'); };
+    const gui = createGui({ nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: a, adminUid: UID, geteuid: () => UID, log: spyLog(), hosting: 'personal', deps: { channel: new FakeChannel() } });
+    assert.equal(gui.unavailable.reason, 'gui_start_failed');
+    await gui.start();
+    const raw = readGuiStatusRecord({ dataDir });
+    assert.equal(raw.hosting, 'personal');
+    assert.equal(raw.available, false);
+    await gui.stop();
+  });
+
+  it('fleet (no hosting) still needs the helper file: null without it, and writes hosting: service', async () => {
+    const { base, configDir, dataDir } = dirs();
+    const common = { nodeConfig: nodeConfig(), dataDir, configDir, cipher, approvals: approvals(), adminUid: UID, geteuid: () => UID, log: spyLog() };
+    assert.equal(createGui({ ...common, deps: { channel: new FakeChannel() } }), null, 'deps.channel does not stand in for the helper file');
+    assert.equal(createGui({ ...common, hosting: 'service' }), null);
+    install(configDir);
+    const gui = createGui({ ...common, deps: { endpoint: endpoint(base) } });
+    assert.ok(gui && gui.channel);
+    assert.ok(!(gui.channel instanceof FakeChannel));
+    await gui.start();
+    cleanups.push(() => gui.stop());
+    assert.equal(readGuiStatusRecord({ dataDir }).hosting, 'service');
+  });
+});
+
 describe('host wiring', () => {
   it('FleetToolHandler lists gui as a capability only while it is available', async () => {
     const handler = new FleetToolHandler({

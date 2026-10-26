@@ -63,11 +63,13 @@ const CLOSE_POLL_MS = 500;
 const HELPER_LOST_MS = 30000;
 
 class GuiBroker extends EventEmitter {
-  constructor({ channel, guiConfig, getPolicy = () => ({}), audit = null, dataDir = null, platform = process.platform, clock = Date.now,
+  // hosting: 'service' (a fleet node, over the session helper) or 'personal'
+  // (spec 2026-10-25 §7, in-process); written into status.json.
+  constructor({ channel, guiConfig, getPolicy = () => ({}), audit = null, dataDir = null, platform = process.platform, hosting = 'service', clock = Date.now,
     log = createLogger('gui/broker'), heartbeatMs = 10000, realpath = realResolve, timers = { setTimeout, clearTimeout },
     monotonic = () => performance.now() } = {}) {
     super();
-    Object.assign(this, { channel, guiConfig, getPolicy, audit, dataDir, platform, clock, log, heartbeatMs, realpath, timers, monotonic });
+    Object.assign(this, { channel, guiConfig, getPolicy, audit, dataDir, platform, hosting, clock, log, heartbeatMs, realpath, timers, monotonic });
     this.leases = null;
     // Both maps are per job and only for runs that have one (R-F5-7): a run
     // with no job id gets no entry, so such runs never share a bucket.
@@ -187,7 +189,7 @@ class GuiBroker extends EventEmitter {
     const info = !this.off && this.channel.connected ? this.channel.info : null;
     try {
       writeGuiStatus(this.dataDir, {
-        v: 1, pid: process.pid, available: stopping ? false : cap.available,
+        v: 1, pid: process.pid, hosting: this.hosting, available: stopping ? false : cap.available,
         ...(this.off ? { reason: this.off.reason, detail: this.off.detail } : {}), user: cap.user, platform: cap.platform,
         capabilities: cap.capabilities, probes: info ? info.probes : [], limits: cap.limits, apps: cap.apps, since: cap.since,
         updated_at: new Date(this.clock()).toISOString(),

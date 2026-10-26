@@ -272,6 +272,7 @@ describe('status.json', () => {
     const raw = JSON.parse(fs.readFileSync(statusPath(dataDir), 'utf8'));
     assert.equal(raw.available, true);
     assert.equal(raw.pid, process.pid);
+    assert.equal(raw.hosting, 'service', 'a broker built with no hosting is a fleet one');
     const at = Date.parse(raw.updated_at);
     assert.deepEqual(readGuiStatus({ dataDir, now: at + 1000 }), {
       available: true, capabilities: INFO.capabilities, apps: [{ id: 'calculator', name: 'Calculator' }, { id: 'notepad', name: 'Notepad' }], limits: [], lease: null
