@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Alternate: the dark banana on a sunrise tile. Copy over icons/src/icon.svg
+       and run `npm run icons:build` to use it. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe15a"/>
+      <stop offset="1" stop-color="#ff9a1f"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0.1" y1="0.1" x2="0.9" y2="0.9">
+      <stop offset="0" stop-color="#3a3c66"/>
+      <stop offset="1" stop-color="#1b1c33"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="24" stdDeviation="20" flood-color="#7a3d00" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect id="tile" width="1024" height="1024" rx="230" fill="url(#bg)"/>
+  <circle id="tile-glow" cx="300" cy="260" r="420" fill="#fff4b0" fill-opacity="0.35"/>
+  <g id="art"><g filter="url(#shadow)">
+    <path d="M 318 236
+             C 372 214 412 246 414 296
+             C 446 528 606 662 836 660
+             C 882 660 896 736 846 760
+             C 542 846 262 700 196 416
+             C 180 346 230 266 318 236 Z"
+          fill="url(#body)"/>
+    <path d="M 372 372 C 436 586 598 714 822 714" fill="none" stroke="#ffffff" stroke-opacity="0.2" stroke-width="20" stroke-linecap="round"/>
+    <path d="M 300 228 C 330 196 390 198 416 224 L 414 296 C 390 268 350 266 318 290 Z" fill="#ffffff" fill-opacity="0.92"/>
+  </g>
+  <g transform="translate(352 150) rotate(-14)" filter="url(#shadow)">
+    <path d="M -118 60 L -92 -56 L -36 12 L 0 -92 L 36 12 L 92 -56 L 118 60 Z" fill="#ffffff"/>
+    <rect x="-124" y="52" width="248" height="46" rx="12" fill="#ffffff"/>
+    <circle cx="-92" cy="-62" r="17" fill="#1b1c33"/>
+    <circle cx="0" cy="-98" r="20" fill="#1b1c33"/>
+    <circle cx="92" cy="-62" r="17" fill="#1b1c33"/>
+  </g>
+</g></svg>

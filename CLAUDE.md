@@ -2643,3 +2643,14 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   checkout or worktree leaves a task that cannot start. The owner check
   reads owners only, not access lists: a data dir on a drive whose ACL lets
   other accounts write passes it (keep the default `%LOCALAPPDATA%`).
+
+## Icons
+
+The app icon is `icons/src/icon.svg` (a crowned banana on a midnight tile;
+alternates in `icons/src/alternates/`). `npm run icons:build`
+(`scripts/build-icons.js`, Chromium through Playwright) regenerates every
+shipped format from it: `icons/` (Linux PNGs, `icon.ico`, `icon.icns` with
+Apple's inset), `favicon.*`, the Android adaptive layers under
+`mobile/android/app/src/main/res/` (the monochrome vector is hand-written)
+and the iOS `AppIcon.appiconset`. Never edit the bitmaps by hand;
+`tests/icons.test.js` checks their sizes and formats.

@@ -10,6 +10,8 @@
     <application
         android:name=".KingLouieApplication"
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="King Louie"
         android:supportsRtl="true"
         android:theme="@style/Theme.KingLouie">

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon layer (Android 13+): the banana and crown of icons/src/icon.svg
+     as one flat shape, in the 1024 space of that file, scaled into the 108dp
+     adaptive canvas so it sits inside the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <group
+        android:scaleX="0.7"
+        android:scaleY="0.7"
+        android:pivotX="545"
+        android:pivotY="431"
+        android:translateX="-33"
+        android:translateY="81">
+        <!-- banana body -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M318,236 C372,214 412,246 414,296 C446,528 606,662 836,660 C882,660 896,736 846,760 C542,846 262,700 196,416 C180,346 230,266 318,236 Z" />
+        <!-- stem and crown, in the crown's frame: translate(356,128) rotate(-14) -->
+        <group
+            android:translateX="356"
+            android:translateY="128"
+            android:rotation="-14">
+            <path
+                android:fillColor="#FFFFFFFF"
+                android:pathData="M-10,40 L10,40 L10,190 L-10,190 Z" />
+            <path
+                android:fillColor="#FFFFFFFF"
+                android:pathData="M-118,60 L-92,-56 L-36,12 L0,-92 L36,12 L92,-56 L118,60 Z" />
+            <path
+                android:fillColor="#FFFFFFFF"
+                android:pathData="M-124,64 L124,64 L124,98 L-124,98 Z" />
+        </group>
+    </group>
+</vector>
