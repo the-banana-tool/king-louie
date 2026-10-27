@@ -355,6 +355,7 @@ fun Nodes(model: AppModel) {
     var name by remember { mutableStateOf("") }
     var code by remember { mutableStateOf<String?>(null) }
     var showHistory by remember { mutableStateOf(false) }
+    var scanning by remember { mutableStateOf(false) }
     if (showHistory) {
         BackHandler { showHistory = false }
         Column(Modifier.fillMaxSize()) {
@@ -368,6 +369,12 @@ fun Nodes(model: AppModel) {
     val nodes = if (demo) model.demoNodes else model.nodes
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ScreenTitle("Nodes")
+        // The same scanner as Welcome and Settings: AppModel.scanned decides what the code is
+        // (kl.pair from a node's enroll-device, kl.invite, kl.relay) and applies its own checks.
+        if (scanning) ScanOrPaste(model) { scanning = false } else {
+            Button({ scanning = true }, Modifier.fillMaxWidth().height(DecisionHeight)) { Text("Scan a node's code") }
+            Secondary("From enroll-device on a computer: lets this phone approve it.")
+        }
         // Each relay request is a biometric prompt on this phone, so it is asked for, never automatic.
         if (model.mode == AppMode.LIVE) OutlinedButton({ model.refreshNodes() }, Modifier.fillMaxWidth()) { Text("Refresh online state") }
         if (nodes.isEmpty()) EmptyState("No node is paired yet. Get a pairing code below and give it to the node.")
@@ -463,7 +470,7 @@ fun Settings(model: AppModel) {
         SectionTitle("Relay")
         Text(model.relayUrl?.let { Display.escape(it) } ?: "not paired")
         model.relaySpki?.let { CodeBlock(it) }
-        if (scanning) ScanOrPaste(model) { scanning = false } else OutlinedButton({ scanning = true }, Modifier.fillMaxWidth()) { Text("Re-pin the relay (scan a relay code)") }
+        if (scanning) ScanOrPaste(model) { scanning = false } else OutlinedButton({ scanning = true }, Modifier.fillMaxWidth()) { Text("Scan a code (a node, an invite or a relay re-pin)") }
         SectionTitle("Front door")
         model.frontDoorId?.let { Text("Front door ${FrontDoor.nodeFingerprint(it)}", style = MonoStyle) }
         OutlinedButton({ frontDoor = true }, Modifier.fillMaxWidth()) { Text("Front door: clients, nodes, alerts") }
