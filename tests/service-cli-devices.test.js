@@ -477,6 +477,50 @@ describe('doctor', () => {
     assert.equal(await count(), '1');
   });
 
+  // The row reads front-door.json first (it supersedes approvers.relay in
+  // the service), with the service's own reader. adminUid: this test's
+  // files are owned by the account running it.
+  it('a node paired with a front door: "front door <domain> (<fingerprint>), linked/not linked", not "no relay configured"', async () => {
+    const { NodeIdentity } = require('../src/mesh/node-identity');
+    const { writePin } = require('../src/fleet/front-door-pin');
+    const { rawEd25519, nodeFingerprint } = require('../src/frontdoor/protocol/messages');
+    const fdId = new NodeIdentity({ nodeName: 'frontdoor' });
+    const row = async (n) => (await runDoctor({ dataDir: n.dataDir, configDir: n.configDir, platform: 'win32', adminUid: UID })).find((r) => r.check === 'relay paired and linked');
+    const pin = () => ({
+      v: 1, frontdoor_id: fdId.nodeId, frontdoor_public_key: rawEd25519(fdId.publicKey), domain: 'kl.example.com',
+      mesh_url: 'wss://mesh.kl.example.com/mesh/v1', mesh_cert_fingerprint: fdId.tlsFingerprint, paired_at: '2026-09-23T18:00:00.000Z'
+    });
+    const link = (n, value) => fs.writeFileSync(path.join(n.dataDir, 'approvals', 'link.json'), JSON.stringify(value));
+    const n = node({ relay: false });
+    writePin(n.configDir, pin());
+    const fp = nodeFingerprint(fdId.nodeId);
+    link(n, { connected: true, since: null, relay_id: fdId.nodeId });
+    let r = await row(n);
+    assert.equal(r.ok, true, r.detail);
+    assert.equal(r.detail, `front door kl.example.com (${fp}), linked`);
+    link(n, { connected: false, since: null, relay_id: fdId.nodeId });
+    r = await row(n);
+    assert.equal(r.ok, false);
+    assert.equal(r.detail, `front door kl.example.com (${fp}), not linked`);
+    // A link.json left from an old relay is not the front door's link.
+    link(n, { connected: true, since: null, relay_id: 'kl-nt4ritcfj5kepq3y' });
+    assert.equal((await row(n)).detail, `front door kl.example.com (${fp}), not linked`);
+    fs.rmSync(path.join(n.dataDir, 'approvals', 'link.json'));
+    assert.equal((await row(n)).detail, `front door kl.example.com (${fp}), not linked`);
+    // A pin that does not validate is a failure that says so.
+    fs.writeFileSync(path.join(n.configDir, 'front-door.json'), '{"v":1}');
+    r = await row(n);
+    assert.equal(r.ok, false);
+    assert.match(r.detail, /^front-door\.json cannot be used \(/);
+  });
+
+  it('the relay case is unchanged: no relay, a linked relay, an unpaired one', async () => {
+    const row = async (n) => (await runDoctor({ dataDir: n.dataDir, configDir: n.configDir, platform: 'win32', adminUid: UID })).find((r) => r.check === 'relay paired and linked');
+    assert.deepEqual(await row(node({ relay: false, linked: false })), { check: 'relay paired and linked', ok: true, detail: 'no relay configured (phone approvals off)' });
+    assert.deepEqual(await row(node()), { check: 'relay paired and linked', ok: true, detail: 'kl-nt4ritcfj5kepq3y connected' });
+    assert.deepEqual(await row(node({ linked: false })), { check: 'relay paired and linked', ok: false, detail: 'not paired with wss://10.0.0.5:18795 (run pair)' });
+  });
+
   it('reports the approver dir, the relay link and the audit chain', async () => {
     const n = node();
     const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: 'kl-aaaaaaaaaaaaaaaa' });

@@ -291,13 +291,13 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
     }
   }
 
-  results.push(...(await approvalChecks({ dataDir, platform, adminUid })));
+  results.push(...(await approvalChecks({ dataDir, platform, adminUid, configDir })));
   return results;
 }
 
 // Fleet stage 3: the approver set must be admin-only, the relay linked when
 // one is configured, and the audit chain intact.
-async function approvalChecks({ dataDir, platform, adminUid = 0 }) {
+async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = null }) {
   const out = [];
   const attempt = async (check, fn) => {
     try {
@@ -334,14 +334,29 @@ async function approvalChecks({ dataDir, platform, adminUid = 0 }) {
   });
   await attempt('relay paired and linked', () => {
     const { loadNodeConfig } = require('./node-config');
-    const nodeCfg = loadNodeConfig({ dataDir, adminUid });
-    if (!nodeCfg.approvers.relay) return { ok: true, detail: 'no relay configured (phone approvals off)' };
+    const pinDir = configDir || adminConfigDir({ dataDir });
     let link = null;
     try {
       link = JSON.parse(fs.readFileSync(path.join(dataDir, 'approvals', 'link.json'), 'utf8'));
     } catch {
       link = null;
     }
+    // front-door.json supersedes approvers.relay (service-wiring.js), so it
+    // is read first, with the service's own reader.
+    const { readPin } = require('../fleet/front-door-pin');
+    let pin = null;
+    try {
+      pin = readPin(pinDir, { adminUid });
+    } catch (err) {
+      return { ok: false, detail: `front-door.json cannot be used (${err.message})` };
+    }
+    if (pin) {
+      const { nodeFingerprint } = require('../frontdoor/protocol/messages');
+      const linked = Boolean(link && link.connected === true && link.relay_id === pin.frontdoor_id);
+      return { ok: linked, detail: `front door ${pin.domain} (${nodeFingerprint(pin.frontdoor_id)}), ${linked ? 'linked' : 'not linked'}` };
+    }
+    const nodeCfg = loadNodeConfig({ dataDir, adminConfigDir: pinDir, adminUid });
+    if (!nodeCfg.approvers.relay) return { ok: true, detail: 'no relay configured (phone approvals off)' };
     if (!link) return { ok: false, detail: `not paired with ${nodeCfg.approvers.relay} (run pair)` };
     return { ok: link.connected === true, detail: `${link.relay_id} ${link.connected ? 'connected' : 'disconnected'}` };
   });
