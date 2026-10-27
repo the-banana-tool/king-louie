@@ -254,7 +254,7 @@ describe('king-louie-service import --from', () => {
     assert.match(o.out.stderr, /run it as root\/an administrator/);
     o = io();
     assert.strictEqual(await runImportCommand({ flags: { from: userData() }, dataDir, io: o.io, deps: { isAdmin: () => true, runningServicePid: () => 4242 } }), 1);
-    assert.strictEqual(o.out.stderr, `Stop the service before importing into ${dataDir}.\n`);
+    assert.strictEqual(o.out.stderr, `Stop the service before importing into ${dataDir} (king-louie-service stop --data-dir ${dataDir}).\n`);
   });
 
   it('dry run prints the plan and writes nothing', async () => {

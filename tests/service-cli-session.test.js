@@ -1256,10 +1256,13 @@ describe('the CLI', () => {
     assert.equal(await main(['status', '--session-file', '/x.json'], t2.io), 2);
     assert.match(t2.err.join(''), /only valid for "session"/);
     // R-F5-9: --yes belongs to install and uninstall. (Without --user both
-    // stop at their usage text, so this never reaches a real install.)
+    // stop at their usage text, so this never reaches a real install.) The
+    // data dir is named, and does not exist: without it the CLI's default
+    // could find this machine's real personal node and answer for it.
+    const noNode = path.join(os.tmpdir(), `kl-no-node-${process.pid}-${Date.now()}`);
     for (const sub of ['install', 'uninstall']) {
       const t3 = io();
-      assert.equal(await main(['session', sub, '--yes'], t3.io), 2);
+      assert.equal(await main(['session', sub, '--yes', '--data-dir', noNode], t3.io), 2);
       assert.doesNotMatch(t3.err.join(''), /"--yes" is only valid/);
       assert.match(t3.err.join(''), new RegExp(`session ${sub} --user NAME \\[--data-dir DIR\\] \\[--dry-run\\] \\[--yes\\]`));
     }
