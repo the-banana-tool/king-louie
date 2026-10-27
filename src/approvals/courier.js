@@ -227,7 +227,11 @@ class FileCourier extends EventEmitter {
         this.waiting.delete(key);
         reject(new CourierError('timeout', `${method} got no reply from the service within ${timeoutMs} ms`));
       }, timeoutMs);
-      if (typeof timer.unref === 'function') timer.unref();
+      // Ref'd on purpose: a request waiting for its reply is the work that
+      // keeps a CLI alive. The poll interval is unref'd, so with this timer
+      // unref'd too a command run in-process (not as root: enroll-device on
+      // a personal node) left Node nothing to wait on, and it exited at the
+      // await with no output and status 0. Settling the request clears it.
       this.waiting.set(key, { resolve, reject, timer });
       try {
         this._post(method, params, { inbox: this.inboxName, key });

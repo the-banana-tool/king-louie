@@ -126,13 +126,17 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
   const finish = (claim, refused) => courier.call('enroll.done', { envelope: buildEnrollDone({ identity, codeId, enroll: refused ? null : claim, refused }) })
     .then(() => true, (err) => { io.stderr.write(`Could not tell the relay: ${err.message}\n`); return false; });
   const helperDead = () => (useChild && courier.dead ? courier.dead : null);
+  // Ref'd: waiting for the phone's scan is the work that keeps this command
+  // alive. In-process (not root) the courier's own timers are unref'd, so an
+  // unref'd wait here let Node exit before the QR code was printed. Cleared
+  // in the finally on every path.
+  let claimTimer = null;
   try {
     const claimed = new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), Math.min(deps.timeoutMs || deadlineMs, deadlineMs));
-      if (typeof timer.unref === 'function') timer.unref();
+      claimTimer = setTimeout(() => resolve(null), Math.min(deps.timeoutMs || deadlineMs, deadlineMs));
       courier.onMessage(async (method, params) => {
         if (method === 'enroll.claim' && params.code_id === codeId) {
-          clearTimeout(timer);
+          clearTimeout(claimTimer);
           resolve(params.envelope);
         }
       });
@@ -245,6 +249,7 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
     return 0;
   } finally {
     clearTimeout(expiry);
+    clearTimeout(claimTimer);
     courier.stop();
     restoreDataDirOwnership(dataDir, written, io.ownership);
   }
