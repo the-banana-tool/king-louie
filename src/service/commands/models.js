@@ -12,7 +12,7 @@ const PROFILES_USAGE = 'Usage: king-louie-service profiles list|show <id-or-name
 function refuseWhileRunning(dataDir, io, runningServicePid) {
   const pid = runningServicePid(dataDir);
   if (!pid) return false;
-  io.stderr.write(`The service is running (pid ${pid}) on ${dataDir}. Stop it first, run this again, then start it.\n`);
+  io.stderr.write(`${require('./stop').stopFirstText(pid, dataDir)}\n`);
   return true;
 }
 

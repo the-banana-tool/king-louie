@@ -2,6 +2,7 @@ const os = require('os');
 const path = require('path');
 const { createLogger } = require('../logging');
 const { acquireInstanceLock } = require('./pidfile');
+const { clearStaleStopRequest, watchStopRequest, removeStopRequest } = require('./stop-request');
 const { loadServiceConfig } = require('./config');
 const { ensureServicePaths, ensurePrivateDir, asarUnpackedPath } = require('../platform/paths');
 const { attachServiceLogFile } = require('./log-file');
@@ -422,7 +423,9 @@ function ensureWorkspace(dataDir) {
 }
 
 // adminUid: tests only (who owns the admin config); never from argv or config.
-// deps: tests only, handed to the profile's start as they are.
+// deps: tests only, handed to the profile's start as they are; also
+// deps.startProfile (in place of loadProfile(profile).start) and
+// deps.stopRequest (watchStopRequest's options: the interval).
 async function runService({ dataDir: requestedDataDir, profile: profileOverride, signal, stdout = process.stdout, adminUid, deps = {} }) {
   // Resolved once, here, because this is the only place that moves the
   // process: ensureWorkspace chdirs below, and a relative --data-dir would
@@ -449,6 +452,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
     logFile.close();
     throw err;
   }
+  clearStaleStopRequest(dataDir);
   const workspace = ensureWorkspace(dataDir);
   try {
     let running;
@@ -457,7 +461,8 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, serviceConfig: config, deps });
+      const startProfile = deps.startProfile || ((opts) => loadProfile(profile).start(opts));
+      running = await startProfile({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, serviceConfig: config, deps });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.
@@ -470,18 +475,26 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       running.startBackgroundChecks().catch((err) => log.warn(`Model background checks failed: ${err.message}`));
     }
 
+    let stopWatch = null;
     await new Promise((resolve) => {
       const onShutdown = () => resolve();
+      // `king-louie-service stop` (stop-request.js): the only way to stop a
+      // hidden personal node on Windows, and the same path as SIGINT.
+      stopWatch = watchStopRequest(dataDir, onShutdown, deps.stopRequest || {});
       process.once('SIGTERM', onShutdown);
       process.once('SIGINT', onShutdown);
       process.on('message', (m) => { if (m && m.type === 'shutdown') onShutdown(); });
       if (signal) signal.addEventListener('abort', onShutdown, { once: true });
     });
 
+    if (stopWatch) stopWatch.close();
     log.info('shutting down');
     await running.stop();
     log.info('stopped');
   } finally {
+    // A request that arrived during shutdown is spent: the next start must
+    // not find it.
+    removeStopRequest(dataDir);
     lock.release();
     logFile.close();
   }

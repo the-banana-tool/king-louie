@@ -2569,6 +2569,23 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   `files` too, unconditionally), through links and a missing path's
   deepest existing ancestor; nothing in `node.yaml` lifts it. Shells already
   go to the phone (`Bash` is `requiresApproval`, so `unsafe`).
+- **Stopping it.** `king-louie-service stop [--data-dir DIR] [--timeout S]
+  [--force]` (`src/service/commands/stop.js`; any profile, any OS). Never
+  `schtasks /End` alone: it kills the task's PowerShell wrapper and leaves
+  node.exe running, and a hidden node cannot be sent Ctrl-C. `stop` writes
+  `<dataDir>/service.stop` (`src/service/stop-request.js`) naming the pid
+  the pidfile names, only when that pid is live and its command line is
+  `king-louie-service … run` (`isServiceCommandLine`; `relay run` is not
+  one), and waits up to `--timeout` (30 s) for the pid to go before it says
+  "stopped"; past it, it says so, and `--force` kills the pid after checking
+  both again. `runService` checks for the file once a second (unref'd
+  interval, `watchStopRequest`), obeys only one naming its own pid, through
+  the same path as SIGINT, and removes it; a file naming another pid at
+  start is removed, never obeyed (`clearStaleStopRequest`). Under personal
+  hosting `stop` then ends the logon task, so it reads Ready. Every "stop it
+  first" refusal names the command (`stopFirstText`). Tests inject
+  `runStopCommand`'s process checks, kill, clock and sleep, and runService's
+  `deps.startProfile`/`deps.stopRequest` (`tests/service-stop.test.js`).
 - **The CLI forms.** `install --personal [--data-dir DIR] [--browser PATH]
   [--provider P] [--model M] [--dry-run] [--yes]`, unelevated (refused
   elevated, C-5), Windows only (C-6), refused while a fleet node is installed
@@ -2586,12 +2603,13 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   `front-door.json` beside it (an `lstat`; else it says what is missing), then prints what is left: `token
   set`, `pair`, `enroll-device`, `vault set browser_cred:<profile>:<host>`
   (it asks for no secret, C-4) and `mcp`. `uninstall --personal [--data-dir
-  DIR] [--dry-run] [--yes]` removes the task and keeps the data dir (no task
-  registered: it says so and exits 0). `pair`
+  DIR] [--dry-run] [--yes]` stops a running node (as `stop` does; one that
+  does not stop leaves the task registered), then ends and deletes the task
+  and keeps the data dir (no task registered: it says so and exits 0). `pair`
   under personal writes the pin and runs the task (C-9): `pair wss://<relay>`
   writes `approvers.relay` into `node.yaml`, `pair https://mcp.<domain>` (a
-  front door) writes `front-door.json` and leaves `approvers.relay` alone; it still refuses while the node runs, naming `schtasks /End /TN
-  "KingLouie Node"`. `import --from <desktop>
+  front door) writes `front-door.json` and leaves `approvers.relay` alone; it still refuses while the node runs, naming `king-louie-service stop`.
+  `import --from <desktop>
   --case <case dir or id> [--yes]` moves one case (below). On Windows the
   default data dir is the fleet one only when the fleet config dir holds a
   marker (`fleetLayoutExists`, the same list as the guard; a fleet data dir

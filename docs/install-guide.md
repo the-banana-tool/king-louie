@@ -1010,8 +1010,8 @@ Install prints these five steps when it is done:
    its prompt. On a personal node `pair` writes `approvers.relay` into your
    `node.yaml` itself and then starts the logon task: you never edit the
    file or start the task by hand. `pair` refuses while the node runs, and
-   says how to stop it (`schtasks /End /TN "KingLouie Node"`); to pair
-   again, stop it first (below). A front door instead of a relay works the
+   says how to stop it (`king-louie-service stop`); to pair again, stop it
+   first (below). A front door instead of a relay works the
    same way: `king-louie-service pair https://mcp.kl.example.com` writes the
    pin to `front-door.json` beside `node.yaml` and starts the logon task.
 3. **Your phone**: `king-louie-service enroll-device`, with the node
@@ -1030,9 +1030,16 @@ Install prints these five steps when it is done:
 To stop and start the node (for `token set`, `vault set` or `pair`):
 
 ```powershell
-schtasks /End /TN "KingLouie Node"
+king-louie-service stop
 schtasks /Run /TN "KingLouie Node"
 ```
+
+`stop` asks the node to shut down, waits up to 30 seconds (`--timeout S`)
+for it to exit, says "stopped" only once it has, and then ends the logon
+task so it reads Ready. If the node is still there after the timeout it
+says so; `king-louie-service stop --force` then kills it. Do not use
+`schtasks /End` on its own: it ends only the task's hidden PowerShell
+window and leaves the node running.
 
 ### Check it
 
@@ -1126,7 +1133,10 @@ node's browser jobs start with fresh profiles; add the logins with
 ### Uninstall
 
 `king-louie-service uninstall --personal [--data-dir DIR] [--dry-run] [--yes]`
-stops and deletes the logon task, after a `[y/N]` (`--yes` off a terminal).
+stops the node the way `king-louie-service stop` does, then ends and
+deletes the logon task, after a `[y/N]` (`--yes` off a terminal). A node
+that does not stop in time leaves the task registered; stop it with
+`stop --force` and run uninstall again.
 The data dir and the config dir stay, with the node's identity, chats and
 vault; delete them yourself to remove the node. When the task is not
 registered it says so, removes nothing and exits 0.

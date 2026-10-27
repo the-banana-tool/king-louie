@@ -59,6 +59,8 @@ function deps(s, extra = {}) {
     nodePath: 'C:\\Program Files\\nodejs\\node.exe',
     entryPath: 'C:\\kl\\bin\\king-louie-service.js',
     execute: async (steps) => { executed.push(steps); },
+    runningServicePid: () => null,
+    stopNode: async () => { throw new Error('stopNode called with no node running'); },
     ...extra
   };
 }
@@ -374,6 +376,39 @@ describe('uninstall --personal', () => {
     assert.ok(all.every((argv) => argv[0] === 'C:\\Windows\\System32\\schtasks.exe'));
     assert.match(t.text(), /stays/);
     assert.ok(t.text().includes(s.dataDir));
+  });
+
+  it('stops a running node (king-louie-service stop) before it ends and deletes the task', async () => {
+    const s = setup();
+    const order = [];
+    const d = deps(s, {
+      runningServicePid: (dir) => { assert.equal(dir, path.resolve(s.dataDir)); return 4321; },
+      stopNode: async (dir) => { order.push(`stop ${dir}`); return 0; }
+    });
+    d.execute = async (steps) => { order.push('execute'); d.executed.push(steps); };
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 0, t.errors());
+    assert.deepEqual(order, [`stop ${path.resolve(s.dataDir)}`, 'execute']);
+  });
+
+  it('a node that does not stop: the task is left registered, and the refusal names stop --force', async () => {
+    const s = setup();
+    const d = deps(s, { runningServicePid: () => 4321, stopNode: async () => 1 });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 1);
+    assert.equal(d.executed.length, 0);
+    assert.match(t.errors(), /did not stop, so the logon task was not removed/);
+    assert.match(t.errors(), /king-louie-service stop --data-dir .* --force/);
+  });
+
+  it('--dry-run says it would stop the node first, and stops nothing', async () => {
+    const s = setup();
+    const d = deps(s, { runningServicePid: () => 4321 });
+    const { code, t } = await run('uninstall', s, d, { dryRun: true });
+    assert.equal(code, 0, t.errors());
+    const out = t.text();
+    assert.ok(out.indexOf('stop the node running on') !== -1 && out.indexOf('stop the node running on') < out.indexOf('/End'), out);
+    assert.equal(d.executed.length, 0);
   });
 
   it('a task that is not registered: says so, removes nothing, exit 0', async () => {

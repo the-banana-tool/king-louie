@@ -296,7 +296,7 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
     return 1;
   }
   if (deps.runningServicePid(dataDir)) {
-    io.stderr.write(`Stop the service before importing into ${dataDir}.\n`);
+    io.stderr.write(`Stop the service before importing into ${dataDir} (${require('./stop').stopCommandText(dataDir)}).\n`);
     return 1;
   }
   const target = path.resolve(dataDir);

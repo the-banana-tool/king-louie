@@ -13,6 +13,7 @@ const { assertAdminOwned } = require('../src/service/config');
 const { PassThrough, Readable } = require('stream');
 const { runDesktopCommand, grantDirectoryReadControl, applyWindowsAcls, defaultConfirm, PAIR_WARNING } = require('../src/service/commands/desktop');
 const { main, parseArgs } = require('../src/service/cli');
+const { stopCommandText } = require('../src/service/commands/stop');
 const { windowsPowerShellEnv } = require('./helpers/windows-powershell-env');
 
 const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
@@ -120,7 +121,7 @@ describe('desktop pair', () => {
     const l = layout({ identity: null });
     let c = capture();
     assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io, deps: deps(l, { runningServicePid: () => 4242 }) }), 1);
-    assert.strictEqual(c.out.stderr, 'No node identity yet. Stop the service once and rerun this command.\n');
+    assert.strictEqual(c.out.stderr, `No node identity yet. Stop the service once (${stopCommandText(l.dataDir)}) and rerun this command.\n`);
     const created = new NodeIdentity({ nodeName: 'gpu-box' });
     let calls = 0;
     c = capture();

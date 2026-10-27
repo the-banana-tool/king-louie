@@ -108,7 +108,7 @@ describe('service CLI — history import: who may run it', () => {
   it('R-H4-4: refused while the service runs', async () => {
     const r = await run({ deps: { runningServicePid: () => 4417 } });
     assert.strictEqual(r.code, 1);
-    assert.strictEqual(r.err, `The service is running (pid 4417) on ${r.dataDir}. Stop it first, run this again, then start it.\n`);
+    assert.strictEqual(r.err, `The service is running (pid 4417) on ${r.dataDir}. Stop it first (king-louie-service stop --data-dir ${/\s/.test(r.dataDir) ? `"${r.dataDir}"` : r.dataDir}), run this again, then start it.\n`);
     assert.deepStrictEqual(fs.readdirSync(r.dataDir), []);
     // Through the real CLI and the real pidfile.
     const dir = tmp();

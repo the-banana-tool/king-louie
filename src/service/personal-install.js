@@ -176,6 +176,8 @@ function resolveDeps(deps, io) {
     hostname: deps.hostname || os.hostname,
     tmpDir: deps.tmpDir || os.tmpdir(),
     execute: deps.execute || ((steps) => executeSteps(steps, { io })),
+    runningServicePid: deps.runningServicePid || ((dir) => require('./commands/io').runningServicePid(dir)),
+    stopNode: deps.stopNode || ((dir) => require('./commands/stop').runStopCommand({ dataDir: dir, io })),
     nodePath: deps.nodePath || process.execPath,
     entryPath: deps.entryPath || path.resolve(__dirname, '..', '..', 'bin', 'king-louie-service.js')
   };
@@ -380,13 +382,17 @@ async function uninstall({ flags, io, c }) {
   const schtasks = windowsSchtasksExe(c.env);
   const steps = [
     // Already stopped (or never started) is not a reason to stop here.
-    { description: `stop the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/End', '/TN', PERSONAL_TASK_NAME], ignoreFailure: true },
+    { description: `end the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/End', '/TN', PERSONAL_TASK_NAME], ignoreFailure: true },
     { description: `delete the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Delete', '/TN', PERSONAL_TASK_NAME, '/F'] }
   ];
   const stays = flags.dataDir
     ? `The data dir ${path.resolve(flags.dataDir)} stays, and so does the config dir beside it: the node's identity, chats and vault are in them. Delete them yourself to remove the node.`
     : 'The data dir stays: the node\'s identity, chats and vault are in it.';
+  // `schtasks /End` kills only the PowerShell wrapper and leaves node.exe
+  // running, so the node is stopped first, the way `stop` stops it.
+  const dataDir = path.resolve(flags.dataDir);
   if (flags.dryRun) {
+    io.stdout.write(`  stop the node running on ${dataDir}, if any (${require('./commands/stop').stopCommandText(dataDir)})\n`);
     await executeSteps(steps, { dryRun: true, io });
     io.stdout.write(`${stays}\n`);
     return 0;
@@ -394,6 +400,12 @@ async function uninstall({ flags, io, c }) {
   if (!flags.yes && (await c.confirm(`Remove the logon task "${PERSONAL_TASK_NAME}"? [y/N] `)) !== true) {
     io.stderr.write('Not removing without confirmation. Nothing was removed.\n');
     return 1;
+  }
+  if (c.runningServicePid(dataDir)) {
+    if ((await c.stopNode(dataDir)) !== 0) {
+      io.stderr.write(`The node on ${dataDir} did not stop, so the logon task was not removed. Stop it (${require('./commands/stop').stopCommandText(dataDir)} --force), then run this again.\n`);
+      return 1;
+    }
   }
   await c.execute(steps);
   io.stdout.write(`${stays}\n`);

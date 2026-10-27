@@ -10,6 +10,7 @@ const path = require('path');
 const { PassThrough } = require('stream');
 const { runRelayCommand } = require('../src/service/commands/relay');
 const { runPair } = require('../src/service/commands/pair');
+const { stopCommandText } = require('../src/service/commands/stop');
 const { setNodeYamlRelay } = require('../src/service/node-yaml-edit');
 const { startRelay } = require('../src/frontdoor/relay');
 const { NodeIdentity } = require('../src/mesh/node-identity');
@@ -102,8 +103,8 @@ describe('pair under hosting: personal', () => {
     assert.match(io.text.out, /The logon task is not registered; run install --personal\n/);
   });
 
-  it('personal: the "running, stop it first" refusal names the schtasks command; a fleet node does not', async () => {
-    for (const [yaml, named] of [[PERSONAL_HEAD, true], ['name: fleet-node\nprofile: agent\n', false]]) {
+  it('the "running, stop it first" refusal names king-louie-service stop, never schtasks /End (it leaves node.exe running)', async () => {
+    for (const [yaml, personal] of [[PERSONAL_HEAD, true], ['name: fleet-node\nprofile: agent\n', false]]) {
       const d = dirs();
       fs.writeFileSync(d.yaml, yaml);
       // This test process is a live pid.
@@ -111,9 +112,14 @@ describe('pair under hosting: personal', () => {
       const io = streamIo();
       const exit = await runPair({ url: 'ws://127.0.0.1:1', dataDir: d.dataDir, io, deps: { useTls: false, code: 'x' } });
       assert.equal(exit, 1);
-      assert.match(io.text.err, /The service is running/);
-      if (named) assert.ok(io.text.err.includes('schtasks /End /TN "KingLouie Node"'), io.text.err);
-      else assert.doesNotMatch(io.text.err, /schtasks/);
+      assert.ok(io.text.err.includes(`Stop it first (${stopCommandText(d.dataDir)})`), io.text.err);
+      assert.doesNotMatch(io.text.err, /schtasks/);
+      if (personal) {
+        assert.match(io.text.err, /^The node is running \(pid \d+\)/);
+        assert.match(io.text.err, /then run this again: it starts the node when it is done\.\n$/);
+      } else {
+        assert.match(io.text.err, /^The service is running \(pid \d+\).*run this again, then start it\.\n$/);
+      }
     }
   });
 

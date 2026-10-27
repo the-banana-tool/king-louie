@@ -128,7 +128,7 @@ async function runHistoryCommand({ sub, arg, extra, flags = {}, dataDir, io, dep
   // 3. A running service holds the store.
   const pid = deps.runningServicePid(dataDir);
   if (pid) {
-    io.stderr.write(`The service is running (pid ${pid}) on ${dataDir}. Stop it first, run this again, then start it.\n`);
+    io.stderr.write(`${require('./stop').stopFirstText(pid, dataDir)}\n`);
     return 1;
   }
 

@@ -1,9 +1,11 @@
 // CLI output goes to stdout/stderr on purpose; everything else logs via createLogger.
 const { defaultServiceDataDir, personalDataDir } = require('../platform/paths');
+const { stopFirstText } = require('./commands/stop');
 
 const HELP = `Usage:
   king-louie-service run [--data-dir DIR] [--profile agent|runbook|frontdoor]
   king-louie-service status [--data-dir DIR]
+  king-louie-service stop [--data-dir DIR] [--timeout S] [--force]
   king-louie-service doctor [--data-dir DIR]
   king-louie-service mcp [--data-dir DIR]
   king-louie-service pair <front-door-url> [--code CODE] [--ca-file PEM] [--yes-fingerprint "kl-…"] [--data-dir DIR]
@@ -34,6 +36,10 @@ const HELP = `Usage:
   king-louie-service session install --user NAME [--data-dir DIR] [--dry-run] [--yes]
   king-louie-service session uninstall --user NAME [--data-dir DIR] [--dry-run] [--yes]
   king-louie-service session status|probe [--data-dir DIR]
+
+"stop" asks the service running on the data dir to shut down and waits up to
+--timeout seconds (default 30) for it to exit; with --force it then kills
+it. On a personal node it also ends the logon task.
 
 A chat channel with an empty allowlist refuses every sender, and a channel
 approval is denied unless "channel approval" names an owner chat that is not
@@ -68,9 +74,9 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
        king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
 `;
 
-const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern', 'browser', 'provider', 'model', 'case']);
+const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern', 'browser', 'provider', 'model', 'case', 'timeout']);
 // Flags that must never carry a value, whichever form produced it.
-const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'replace', 'personal']);
+const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'replace', 'personal', 'force']);
 
 // The commands whose [y/N] question --yes answers (and that HELP documents
 // it for). The scoping is checked in main(), before any command runs. A
@@ -241,7 +247,7 @@ async function runChannelCommand({ sub, channelArg, idArg, flags, dataDir, io })
   if (sub !== 'list') {
     const pid = runningServicePid(dataDir);
     if (pid) {
-      io.stderr.write(`The service is running (pid ${pid}) on ${dataDir}. Stop it first, run this again, then start it.\n`);
+      io.stderr.write(`${stopFirstText(pid, dataDir)}\n`);
       return 1;
     }
   }
@@ -352,6 +358,12 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
     io.stderr.write('Flag "--session-file" is only valid for "session".\n');
     return 2;
   }
+  for (const [flag, name] of [['timeout', 'timeout'], ['force', 'force']]) {
+    if (flags[flag] !== undefined && command !== 'stop') {
+      io.stderr.write(`Flag "--${name}" is only valid for "stop".\n`);
+      return 2;
+    }
+  }
   if (flags.case !== undefined && command !== 'import') {
     io.stderr.write('Flag "--case" is only valid for "import".\n');
     return 2;
@@ -379,6 +391,11 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
         }
         io.stdout.write(`not running — data dir ${dataDir}\n`);
         return 3;
+      }
+
+      case 'stop': {
+        const { runStopCommand } = require('./commands/stop');
+        return await runStopCommand({ dataDir, flags, io });
       }
 
       case 'doctor': {
@@ -441,7 +458,7 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
         // would overwrite this change on its next write.
         const pid = runningServicePid(dataDir);
         if (pid) {
-          io.stderr.write(`The service is running (pid ${pid}) on ${dataDir}. Stop it first, run this again, then start it.\n`);
+          io.stderr.write(`${stopFirstText(pid, dataDir)}\n`);
           return 1;
         }
         const { PROVIDER_LABELS } = require('../core');

@@ -125,7 +125,8 @@ normal, unelevated prompt:
 4. `king-louie-service enroll-device`, and answer `y` to enrol the phone.
 5. `king-louie-service vault set browser_cred:<profile>:<host>` for each
    login a take will use, with the node stopped
-   (`schtasks /End /TN "KingLouie Node"`, then `/Run` to start it again).
+   (`king-louie-service stop`, then `schtasks /Run /TN "KingLouie Node"` to
+   start it again; `schtasks /End` alone leaves the node running).
 6. Install ffmpeg as yourself (`winget install Gyan.FFmpeg`) and restart the
    node so it finds it.
 7. Point the driver at `king-louie-service mcp` (no `--data-dir`: the

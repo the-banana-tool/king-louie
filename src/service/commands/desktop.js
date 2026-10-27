@@ -122,7 +122,7 @@ function readExistingNodePublicKey(dataDir) {
 // owner has confirmed pairing (fix round 2, I1b): a running service would
 // overwrite the store, so this refuses rather than racing it.
 async function createNodeIdentity({ dataDir, io, deps }) {
-  if (deps.runningServicePid(dataDir)) return { ok: false, error: 'No node identity yet. Stop the service once and rerun this command.' };
+  if (deps.runningServicePid(dataDir)) return { ok: false, error: `No node identity yet. Stop the service once (${require('./stop').stopCommandText(dataDir)}) and rerun this command.` };
   const nodeName = deps.nodeName ? deps.nodeName() : defaultNodeName(dataDir);
   const create = deps.createIdentity ? (() => deps.createIdentity()) : null;
   const identity = await deps.withServiceCore(dataDir, io, (core, ports) => (create ? create() : defaultCreateIdentity(core, ports, nodeName)));

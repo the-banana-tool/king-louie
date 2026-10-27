@@ -12,6 +12,7 @@ const { PERSONAL_TASK_NAME } = require('../personal-install');
 const { adminConfigDir } = require('../../platform/paths');
 const { windowsSchtasksExe } = require('../../platform/windows-paths');
 const { readLine, runningServicePid } = require('./io');
+const { stopFirstText, stopCommandText } = require('./stop');
 
 const USAGE = 'Usage: king-louie-service pair <front-door-url> [--code CODE] [--ca-file PEM] [--yes-fingerprint "kl-…"] [--data-dir DIR]\n'
   + '       pair https://mcp.<domain> pairs with a front door; the code comes from the phone app or `frontdoor code` (typed at the prompt, it stays out of shell history)\n'
@@ -78,13 +79,15 @@ async function runPair({ url, dataDir, io, flags = {}, deps = {} }) {
   // service would overwrite from its own in-memory copy.
   const pid = runningServicePid(dataDir);
   if (pid) {
-    // A personal node is stopped through its logon task, so say how.
+    // A personal node's pair starts the node itself when it is done, so the
+    // owner has nothing to start afterwards.
     let personal = false;
     try {
       personal = loadNodeConfig({ dataDir }).hosting === 'personal';
     } catch { /* an unreadable node.yaml: the generic words */ }
-    const how = personal ? `Stop it first (schtasks /End /TN "${PERSONAL_TASK_NAME}")` : 'Stop it first';
-    io.stderr.write(`The service is running (pid ${pid}) on ${dataDir}. ${how}, run this again, then start it.\n`);
+    io.stderr.write(personal
+      ? `The node is running (pid ${pid}) on ${dataDir}. Stop it first (${stopCommandText(dataDir)}), then run this again: it starts the node when it is done.\n`
+      : `${stopFirstText(pid, dataDir)}\n`);
     return 1;
   }
 
