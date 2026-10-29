@@ -7,8 +7,8 @@
 // decision), takes either key (`read`); one that changes something with no
 // such envelope takes the device key (`device`). Two exceptions change
 // something with no envelope and still take either key, as §8.4 lists them:
-// POST /v1/presence (the phone's foreground state) and PUT /v1/push-token
-// (where its notifications go).
+// POST /v1/presence (the phone's foreground state), and PUT and DELETE
+// /v1/push-token (where its notifications go; push spec §7.3, C-9).
 const { open, verifyEs256, deviceIdFromJwk, isDeviceJwk, samePoint } = require('../approvals/envelope');
 const { validateMessage } = require('../approvals/messages');
 const { FUTURE_SKEW_MS } = require('../approvals/approver-store');
@@ -371,8 +371,30 @@ function registerPhoneRoutes(relay) {
       if (!['apns', 'fcm'].includes(platform) || typeof token !== 'string' || !token || token.length > 4096) {
         throw new ApiError(400, 'bad_push_token', 'body is { platform: apns|fcm, token }');
       }
+      // Written only when the platform or the token changed (the phone
+      // re-sends it at every cold start).
       devices.setPush(ctx.deviceId, { platform, token });
       return { status: 204 };
+    }
+  });
+
+  phoneApi.registerRoute('DELETE', '/v1/push-token', {
+    auth: 'read',
+    handler: async (req, ctx) => {
+      devices.setPush(ctx.deviceId, null);
+      return { status: 204 };
+    }
+  });
+
+  // Whether the relay holds a token for this device and has a sender for
+  // that token's platform. The token itself is never echoed.
+  phoneApi.registerRoute('GET', '/v1/push-token', {
+    auth: 'read',
+    handler: async (req, ctx) => {
+      const record = devices.get(ctx.deviceId);
+      const push = record && record.push;
+      const platforms = (relay.pusher && relay.pusher.platforms) || [];
+      return { body: { registered: Boolean(push), sender: Boolean(push) && platforms.includes(push.platform) } };
     }
   });
 }

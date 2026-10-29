@@ -30,6 +30,8 @@ function defaultSenders(config = {}, { readFile = (f) => fs.readFileSync(f, 'utf
 function createPusher(config = {}, { senders = defaultSenders(config), onDropToken = null } = {}) {
   return {
     senders: [...senders.map((s) => s.id), noneSender.id],
+    // The token platforms some sender can reach (GET /v1/push-token's `sender`).
+    platforms: [...new Set(senders.flatMap((s) => s.platforms))],
     async notify(device, { kind = 'approval', id, node_name: nodeName = null, expires_at: expiresAt = null, count = null } = {}) {
       const payload = { kind: KINDS.includes(kind) ? kind : 'approval', id, node_name: nodeName, expires_at: expiresAt };
       const platform = device && device.push && device.push.platform;
