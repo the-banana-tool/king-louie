@@ -158,8 +158,9 @@ Point the MCP client at `https://mcp.kl.example.com/mcp`. It registers, opens a
 consent page with a six-character code, and waits (the wait page sets a
 per-grant cookie, so opening the link for two different clients in the same
 browser does not overwrite one flow with the other). Type that code in the app
-(on Android, "Or type a code" on the Scanner's Scan a code tab; on iPhone,
-Connect a client), choose the scopes and machines, and approve with your
+(on Android, "Or type a code" on the Scanner's Scan a code tab, which adds
+the request to the Approvals list, where tapping it opens the scopes; on
+iPhone, Connect a client), choose the scopes and machines, and approve with your
 biometric. The app lists connected clients and revokes them (on Android,
 under Settings).
 
