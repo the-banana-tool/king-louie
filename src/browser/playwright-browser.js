@@ -33,6 +33,99 @@ function disableChromiumPasswordManager(userDataPath) {
   }
 }
 
+
+// ─── Snapshot refs (spec 2026-10-28 browser runner, §7) ─────────────────────
+// Refs are Playwright's own (`page._snapshotForAI()`, the `aria-ref=` engine;
+// C-5). A ref is a counter per document, so King Louie keeps a record per
+// page only to say when one is stale: written by every snapshot, made stale
+// by a main-frame navigation (same-document ones included).
+
+const REF_ID = /^(?:f\d+)?e\d+$/;
+
+/** A ref refusal: `code` is ref_stale, ref_not_found, ref_changed or invalid_params. */
+class BrowserRefError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'BrowserRefError';
+    this.code = code;
+  }
+}
+
+// Reads one quoted JSON-style string starting at s[i] === '"'.
+// → { value, end } (end is the index after the closing quote), or null.
+function readQuoted(s, i) {
+  let j = i + 1;
+  while (j < s.length) {
+    if (s[j] === '\\') { j += 2; continue; }
+    if (s[j] === '"') {
+      try { return { value: JSON.parse(s.slice(i, j + 1)), end: j + 1 }; } catch { return null; }
+    }
+    j += 1;
+  }
+  return null;
+}
+
+/**
+ * Parse one line of an AI snapshot: `- role "name" [attr] [ref=eN]…`, the
+ * key YAML single-quoted when it holds a special character. → `{ ref, role,
+ * name, label }` (`label` is `role "name"`, or the role alone when the node
+ * has no name), or null for a line it does not understand (no label; a ref
+ * on such a line resolves to ref_not_found). The ref is read only after the
+ * name, so a name that spells "[ref=e1]" is not taken for one.
+ */
+function parseSnapshotLine(line) {
+  if (typeof line !== 'string') return null;
+  const m = line.match(/^\s*- (.*)$/);
+  if (!m) return null;
+  let rest = m[1];
+  if (rest.startsWith("'")) {
+    // A YAML single-quoted scalar: '' is a quote; the key ends at a lone '.
+    let out = '';
+    let i = 1;
+    for (;;) {
+      if (i >= rest.length) return null;
+      if (rest[i] === "'") {
+        if (rest[i + 1] === "'") { out += "'"; i += 2; continue; }
+        break;
+      }
+      out += rest[i]; i += 1;
+    }
+    rest = out;
+  }
+  const roleMatch = rest.match(/^([a-z][a-zA-Z]*)/);
+  if (!roleMatch) return null;
+  const role = roleMatch[1];
+  let i = role.length;
+  let name = '';
+  if (rest.startsWith(' "', i)) {
+    const q = readQuoted(rest, i + 1);
+    if (!q) return null;
+    name = q.value;
+    i = q.end;
+  }
+  // After the name: attributes in brackets, then an optional ":" and value.
+  let ref = null;
+  while (rest.startsWith(' [', i)) {
+    const close = rest.indexOf(']', i + 2);
+    if (close < 0) return null;
+    const attr = rest.slice(i + 2, close);
+    const r = attr.match(/^ref=(.+)$/);
+    if (r && REF_ID.test(r[1])) ref = r[1];
+    i = close + 1;
+  }
+  if (i < rest.length && rest[i] !== ':') return null;
+  if (!ref) return null;
+  return { ref, role, name, label: name ? `${role} "${name}"` : role };
+}
+
+// page → { seq, labels: Map(ref → 'role "name"'), stale }
+const refRecords = new WeakMap();
+const watchedPages = new WeakSet();
+// page → the PlaywrightBrowser driving it, so a selector resolved against a
+// page can ask its browser about refs (set for every page it drives).
+const pageOwners = new WeakMap();
+let snapshotSeq = 0;
+
 let installPromise = null;
 
 function installChromium(onProgress) {
@@ -193,6 +286,7 @@ class PlaywrightBrowser {
   }
 
   _attachPageListeners(page) {
+    pageOwners.set(page, this);
     page.on('console', (msg) => {
       this.consoleMessages.push({
         type: msg.type(),
@@ -277,6 +371,82 @@ class PlaywrightBrowser {
     }
   }
 
+  // ── Snapshot refs ──────────────────────────────────────────────────────────
+
+  /**
+   * Take the current page's AI snapshot and record its refs (replacing the
+   * page's record). → the full snapshot text.
+   */
+  async snapshot() {
+    const page = this.page;
+    const { full } = await page._snapshotForAI();
+    const text = typeof full === 'string' ? full : '';
+    const labels = new Map();
+    for (const line of text.split('\n')) {
+      const p = parseSnapshotLine(line);
+      if (p) labels.set(p.ref, p.label);
+    }
+    snapshotSeq += 1;
+    refRecords.set(page, { seq: snapshotSeq, labels, stale: false });
+    if (!watchedPages.has(page)) {
+      watchedPages.add(page);
+      page.on('framenavigated', (frame) => {
+        if (frame !== page.mainFrame()) return;
+        const rec = refRecords.get(page);
+        if (rec) rec.stale = true;
+      });
+    }
+    return text;
+  }
+
+  /** The record of `page` (default: the current page), or null. */
+  refRecord(page = this.page) {
+    return (page && refRecords.get(page)) || null;
+  }
+
+  /** The label ('role "name"') the current page's live record holds for `ref`, or null. */
+  refLabel(ref, page = this.page) {
+    const rec = this.refRecord(page);
+    if (!rec || rec.stale) return null;
+    return rec.labels.get(ref) || null;
+  }
+
+  /**
+   * The locator for `ref` on the current page, after the record's checks
+   * (synchronous; throws BrowserRefError ref_stale / ref_not_found).
+   */
+  refLocator(ref) {
+    if (!REF_ID.test(String(ref))) {
+      throw new BrowserRefError('ref_not_found', `"${ref}" is not a ref. Refs look like e5 or f1e3 and come from a snapshot.`);
+    }
+    const page = this.page;
+    const rec = page ? refRecords.get(page) : null;
+    if (rec && rec.labels.has(ref)) {
+      if (rec.stale) {
+        throw new BrowserRefError('ref_stale', `ref=${ref} is stale: the page navigated since the snapshot. Take a new snapshot.`);
+      }
+      return page.locator(`aria-ref=${ref}`);
+    }
+    const pages = this.context ? this.context.pages() : [];
+    if (pages.some((p) => p !== page && (refRecords.get(p)?.labels.has(ref)))) {
+      throw new BrowserRefError('ref_stale', `ref=${ref} is from a snapshot of another tab. Switch back to that tab or take a new snapshot here.`);
+    }
+    throw new BrowserRefError('ref_not_found', `ref=${ref} is not in this page's last snapshot. Take a new snapshot.`);
+  }
+
+  /**
+   * Like refLocator, and also refuses ref_not_found when the element is no
+   * longer in the page (the aria-ref engine finds nothing for it), so a
+   * call does not wait out its timeout on an element that is gone.
+   */
+  async assertRefUsable(ref) {
+    const loc = this.refLocator(ref);
+    if (await loc.count() === 0) {
+      throw new BrowserRefError('ref_not_found', `The element at ref=${ref} is gone from the page. Take a new snapshot.`);
+    }
+    return loc;
+  }
+
   /**
    * Drain and return captured console messages.
    */
@@ -288,3 +458,7 @@ class PlaywrightBrowser {
 }
 
 module.exports = PlaywrightBrowser;
+module.exports.ownerOfPage = (page) => (page && pageOwners.get(page)) || null;
+module.exports.BrowserRefError = BrowserRefError;
+module.exports.parseSnapshotLine = parseSnapshotLine;
+module.exports.REF_ID = REF_ID;

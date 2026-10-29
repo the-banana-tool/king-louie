@@ -11,7 +11,7 @@ const browserTool = require('./browser-tool');
  */
 
 const EXTRACT_ACTIONS = [
-  'content', 'title',
+  'content', 'title', 'snapshot',
   'get_text', 'get_attribute', 'get_value', 'is_visible', 'count', 'bounding_box',
   'console', 'frames',
   'fill_in_frame', 'click_in_frame', 'type_in_frame', 'evaluate_in_frame',
@@ -22,8 +22,8 @@ const browserExtractTool = new Tool({
   name: 'BrowserExtract',
   description: `Extract data from the active page, drive iframes, and intercept network requests.
 
-Read actions: content (full HTML), title, get_text, get_attribute, get_value, is_visible, count, bounding_box.
-Frame actions: list with "frames" then use *_in_frame variants targeting frame_name / frame_url / frame_index.
+Read actions: snapshot (the page as text, a [ref=eN] on each element you can act on; interactive, ref, max_chars), content (full HTML), title, get_text, get_attribute, get_value, is_visible, count, bounding_box.
+Frame actions: list with "frames" then use *_in_frame variants targeting frame_name / frame_url / frame_index. They take no ref: a snapshot's frame refs (f1e3) work with click and fill directly.
 Network: route_block (drop matching requests), route_fulfill (mock responses), unroute.
 
 Console: returns recent browser console output.`,
@@ -34,7 +34,12 @@ Console: returns recent browser console output.`,
       ownerQuote: OWNER_QUOTE_PARAM,
 
       // Element selectors
-      selector: { type: 'string', description: 'Element selector for get_text/get_attribute/get_value/is_visible/count/bounding_box.' },
+      selector: { type: 'string', description: 'Element selector for get_text/get_attribute/get_value/is_visible/count/bounding_box (CSS, text=, role=, ..., or ref=eN from a snapshot).' },
+
+      // Snapshot
+      interactive: { type: 'boolean', description: 'snapshot: keep only the lines with a ref.' },
+      ref: { type: 'string', description: 'snapshot: return only this node (e.g. "e9") and its subtree.' },
+      max_chars: { type: 'number', description: 'snapshot: cut the text at a line end past this many characters (default 20000, at most 60000).' },
       attribute: { type: 'string', description: 'Attribute name for get_attribute.' },
 
       // Frame interaction
