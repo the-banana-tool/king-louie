@@ -193,9 +193,29 @@ describe('desktop:* handlers', () => {
     assert.strictEqual(IPC.DESKTOP_IMPORT_PROGRESS, 'desktop:importProgress');
     assert.deepStrictEqual(Object.keys(DESKTOP_METHODS).sort(), [
       'desktop:attach', 'desktop:detach', 'desktop:dismissServiceCommand', 'desktop:importApply', 'desktop:importPlan',
-      'desktop:pairCancel', 'desktop:pairConfirm', 'desktop:pairStart', 'desktop:retry', 'desktop:standaloneOnce',
-      'desktop:status', 'desktop:unpair'
+      'desktop:nodeInstall', 'desktop:nodeInstallPreview', 'desktop:nodeStart',
+      'desktop:pairCancel', 'desktop:pairConfirm', 'desktop:pairRestartConfirm', 'desktop:pairStart', 'desktop:retry',
+      'desktop:standaloneOnce', 'desktop:status', 'desktop:unpair'
     ]);
+  });
+
+  it('personal-node channels (spec §11): constants, methods, local and never served', () => {
+    const expected = {
+      DESKTOP_NODE_START: ['desktop:nodeStart', 'nodeStart'],
+      DESKTOP_NODE_INSTALL_PREVIEW: ['desktop:nodeInstallPreview', 'nodeInstallPreview'],
+      DESKTOP_NODE_INSTALL: ['desktop:nodeInstall', 'nodeInstall'],
+      DESKTOP_PAIR_RESTART_CONFIRM: ['desktop:pairRestartConfirm', 'pairRestartConfirm']
+    };
+    const inv = listIpcChannels();
+    const served = servedChannels(inv).handle;
+    for (const [key, [channel, method]] of Object.entries(expected)) {
+      assert.strictEqual(IPC[key], channel, key);
+      assert.strictEqual(DESKTOP_METHODS[channel], method, channel);
+      assert.strictEqual(classifyChannel(channel), 'local', channel);
+      assert.ok(inv.handle.includes(channel), `${channel} is registered`);
+      assert.ok(!served.includes(channel), `${channel} is not served over the bridge`);
+    }
+    assert.ok(!PROXIED_DOMAINS.includes('desktop'), 'desktop is not a proxied domain');
   });
 
   it('answers ATTACHED_UNAVAILABLE without a desktop controller', async () => {
