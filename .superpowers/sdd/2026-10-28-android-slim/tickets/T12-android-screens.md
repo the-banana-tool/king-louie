@@ -1,7 +1,7 @@
 ---
 id: T12
 title: The four screens
-status: in-progress
+status: done (merge 45b82029)
 blocked_by: [T09, T11]
 ---
 ## Goal

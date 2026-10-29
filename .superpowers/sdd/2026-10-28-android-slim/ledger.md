@@ -103,6 +103,15 @@ Start frontier: T01, T08, T09.
   "Check for requests" (spec words), so T12's string check must allow it.
   `alertContainer`/`onAlertContainer` remain for T12 to remove.
 
+- T12: a detail whose item leaves its store closes itself (so a confirmed
+  decision returns to the list); detail buttons do not close the detail on tap;
+  a lease request row's approve button reads "Allow"; an approved tool approval's
+  decided row has the `successBg` tint. The slim test reads `ROUTE_AUTH` as text
+  (requiring the routes test file would rerun it) and lists
+  `POST /v1/devices/read-key` as `read` (the relay accepts either key; comment
+  says the first send is device-signed). T10's relay-keys test kept. CLAUDE.md and
+  front-door.md wording adjusted to the built screens.
+
 ## Landed
 - T01 merge 932753aa (impl d2d4cc64): `isDevice` export, `kl.device.read_key`
   validator, `phoneAuthString(..., { key })`, `PHONE_AUTH_PREFIXES`,
@@ -126,5 +135,7 @@ Start frontier: T01, T08, T09.
 
 - T11 merge e8aae588 (impl 255b2f4a).
 
+- T12 merge 45b82029 (impl 6b195580).
+
 ## Left
-T12 (in progress); then the review and npm test.
+The code review and its fixes; `npm test`; the gradle runs once more.
