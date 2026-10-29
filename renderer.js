@@ -14372,6 +14372,37 @@ function renderImportPlan(result) {
   box.appendChild(apply);
 }
 
+// §8: the install's dry run (or its result) in the import box: the lines in
+// a <pre> by textContent, then the model's buttons.
+function renderInstallBox(model) {
+  const box = document.getElementById('service-pane-import');
+  if (!box || !model) return;
+  box.hidden = false;
+  serviceLinesInto(box, model.error ? [model.error] : []);
+  if (model.pre) {
+    const pre = document.createElement('pre');
+    pre.className = 'service-pane-install';
+    pre.textContent = model.pre;
+    box.appendChild(pre);
+  }
+  for (const action of model.actions) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = `service-action-${action.id}`;
+    btn.className = action.id === 'nodeInstall' ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm';
+    btn.textContent = action.label;
+    btn.addEventListener('click', () => { runServiceAction(action.id).catch((err) => serviceLog.warn('service action failed', { action: action.id, error: err && err.message })); });
+    box.appendChild(btn);
+  }
+}
+
+function hideServiceBox() {
+  const box = document.getElementById('service-pane-import');
+  if (!box) return;
+  box.innerHTML = '';
+  box.hidden = true;
+}
+
 function renderImportReport(report) {
   const box = document.getElementById('service-pane-import');
   if (!box) return;
@@ -14430,7 +14461,16 @@ async function runServiceAction(id) {
     else if (id === 'detach') result = await desktop.detach({ confirmed: true });
     else if (id === 'unpair') result = await desktop.unpair();
     else if (id === 'dismissServiceCommand') result = await desktop.dismissServiceCommand();
-    else if (id === 'import') {
+    else if (id === 'pairRestartConfirm') result = await desktop.pairRestartConfirm({ confirmed: true });
+    else if (id === 'nodeStart') result = await desktop.nodeStart({ restart: false });
+    else if (id === 'nodeRestart') result = await desktop.nodeStart({ restart: true });
+    else if (id === 'nodeInstallCancel') hideServiceBox();
+    else if (id === 'nodeInstallPreview') {
+      // The preview's refusal is drawn in the box itself, not as the pane error.
+      renderInstallBox(desktop.describeInstallPreview(await desktop.nodeInstallPreview()));
+    } else if (id === 'nodeInstall') {
+      renderInstallBox(desktop.describeInstallResult(await desktop.nodeInstall({ confirmed: true })));
+    } else if (id === 'import') {
       result = await desktop.importPlan();
       if (result && result.ok) renderImportPlan(result);
     } else if (id === 'importApply') {
@@ -14478,10 +14518,25 @@ function markUnavailableTabs(tabs = []) {
   });
 }
 
+// The banner's line and buttons come from describeAttachedBanner
+// (pane-model.js); this only draws them, every string with textContent.
+function attachedBannerAction(id) {
+  const desktop = window.electron.desktop;
+  if (id === 'retry') return desktop.retry();
+  if (id === 'standaloneOnce') return desktop.standaloneOnce();
+  if (id === 'nodeStart') return desktop.nodeStart({ restart: false });
+  if (id === 'nodeRestart') return desktop.nodeStart({ restart: true });
+  if (id === 'openServiceSettings') {
+    document.getElementById('open-settings-btn')?.click();
+    switchSettingsTab('service');
+  }
+  return null;
+}
+
 function renderAttachedBanner(status) {
   let banner = document.getElementById('attached-service-banner');
-  const show = status && status.view === 'attached-disconnected';
-  if (!show) {
+  const model = window.electron.desktop.describeBanner(status);
+  if (!model) {
     if (banner) banner.remove();
     return;
   }
@@ -14494,19 +14549,14 @@ function renderAttachedBanner(status) {
   }
   banner.innerHTML = '';
   const text = document.createElement('span');
-  text.textContent = (status.connection && status.connection.error) || 'The local King Louie service is not reachable.';
+  text.textContent = model.line;
   banner.appendChild(text);
-  const buttons = [
-    ['Retry now', () => window.electron.desktop.retry()],
-    ['Use standalone this time', () => window.electron.desktop.standaloneOnce()],
-    ['Local service settings', () => { document.getElementById('open-settings-btn')?.click(); switchSettingsTab('service'); }]
-  ];
-  for (const [label, fn] of buttons) {
+  for (const action of model.actions) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'btn btn-secondary btn-sm';
-    btn.textContent = label;
-    btn.addEventListener('click', () => { Promise.resolve(fn()).catch((err) => serviceLog.warn('attached banner action failed', { label, error: err && err.message })); });
+    btn.textContent = action.label;
+    btn.addEventListener('click', () => { Promise.resolve(attachedBannerAction(action.id)).catch((err) => serviceLog.warn('attached banner action failed', { action: action.id, error: err && err.message })); });
     banner.appendChild(btn);
   }
 }
