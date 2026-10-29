@@ -278,18 +278,23 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
     io.stderr.write('Refusing to copy a case without confirmation on a non-interactive terminal; pass --yes.\n');
     return 2;
   }
-  // A case move under hosting: personal runs as the owner, with no
-  // elevation (spec §9); every other import, and a case move on a service
-  // node, still needs root/an administrator.
+  // node.yaml is read for every import (desktop-attach spec §9.1, C-14).
+  // Under hosting: personal the import runs as the owner: no administrator,
+  // and an elevated run is refused with or without --case (C-2), since an
+  // elevated writer would leave Administrators-owned files in the data dir
+  // that the node's owner check (which reads the dirs' owners only) never
+  // sees. Every other import still needs root/an administrator.
   let personal = false;
-  if (caseRef) {
-    try {
-      const nodeCfg = (deps.loadNodeConfig || ((dir) => require('../node-config').loadNodeConfig({ dataDir: dir })))(dataDir);
-      personal = Boolean(nodeCfg) && nodeCfg.hosting === 'personal';
-    } catch (err) {
-      io.stderr.write(`Cannot read the node's configuration: ${printable(err.message)}\n`);
-      return 1;
-    }
+  try {
+    const nodeCfg = (deps.loadNodeConfig || ((dir) => require('../node-config').loadNodeConfig({ dataDir: dir })))(dataDir);
+    personal = Boolean(nodeCfg) && nodeCfg.hosting === 'personal';
+  } catch (err) {
+    io.stderr.write(`Cannot read the node's configuration: ${printable(err.message)}\n`);
+    return 1;
+  }
+  if (personal && (await isAdmin())) {
+    io.stderr.write('import on a personal node runs as you, not elevated: open a normal prompt.\n');
+    return 1;
   }
   if (!personal && !(await isAdmin())) {
     io.stderr.write(`import writes ${dataDir}; run it as root/an administrator.\n`);
