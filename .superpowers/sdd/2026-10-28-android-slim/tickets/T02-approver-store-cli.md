@@ -1,7 +1,7 @@
 ---
 id: T02
 title: Approver records keep a read key; kl.device.read_key staged and applied; node method device.read_key
-status: in-progress
+status: done (merge 8814398e)
 blocked_by: [T01]
 ---
 ## Goal

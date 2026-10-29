@@ -1,7 +1,7 @@
 ---
 id: T04
 title: Every relay route's auth per the table; POST /v1/devices/read-key; read_jwk from enrollments
-status: open
+status: in-progress
 blocked_by: [T02, T03]
 ---
 ## Goal

@@ -38,6 +38,17 @@ Start frontier: T01, T08, T09.
   with dark bars; on target SDK 37 the screens must paint `bgSidebarHdr` behind
   the bars (T12). No `todo` left in the drift test.
 
+- T02: approver records gain `read_key_at` (not in the spec) so `stale` has a
+  date to compare; a record with `read_key` and no `read_key_at` dates from
+  `enrolled_at`. Node method `device.read_key` answers `{ state:
+  'read-key-pending-apply' | 'duplicate' | 'rejected', reason }`; audit
+  `device.read_key_set` on apply. Front door's own `node-methods.js`/`routes.js`
+  know only enroll/revoke states: T04 handles `read-key-pending-apply`.
+- T03: an unknown `X-KL-Key` value is `401 bad_key` (code not in the spec).
+  Registry: `read_jwk`, `read_key_created_at`, `setReadKey(id, jwk, createdAt)`
+  -> `{ record, updated }`. fake-phone: `phone.readJwk`, `readSigner`,
+  `signApi(..., { key, signWith, header })`, `signReadApi`.
+
 ## Landed
 - T01 merge 932753aa (impl d2d4cc64): `isDevice` export, `kl.device.read_key`
   validator, `phoneAuthString(..., { key })`, `PHONE_AUTH_PREFIXES`,
@@ -46,5 +57,8 @@ Start frontier: T01, T08, T09.
 - T08 merge 2f4eabab (impl 99480a93): `ApprovalList.build(Input): Result`.
 - T09 merge f69f686f (impl ce77ea4d): `KlTokens`, dark theme, Ui, drift test.
 
+- T02 merge 8814398e (impl 8e6ff78b).
+- T03 merge 572bc8b0 (impl e56dc31e).
+
 ## Left
-T02, T03 (in progress), T04, T05, T06, T07, T10, T11, T12, T13.
+T04, T05 (in progress), T06, T07, T10, T11, T12, T13.
