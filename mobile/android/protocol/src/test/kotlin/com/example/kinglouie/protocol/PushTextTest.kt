@@ -77,6 +77,29 @@ class PushTextTest {
     }
 
     @Test
+    fun aCoalescedPushOfAnyKindJoinsTheRunningCount() {
+        // A session kind may be the newest of a window that also held Approvals (§6.4).
+        assertTrue(PushText.joinsApprovals("session_ended", 2))
+        assertTrue(PushText.joinsApprovals("session_paused", 9))
+        assertTrue(PushText.joinsApprovals("test", 3))
+        assertTrue(PushText.joinsApprovals("approval", 1))
+        assertFalse(PushText.joinsApprovals("session_ended", 1))
+        assertFalse(PushText.joinsApprovals("session_paused", 1))
+        assertFalse(PushText.joinsApprovals("test", 1))
+        assertFalse(PushText.joinsApprovals("grant", 5))
+        assertEquals("approvals", PushText.tag("session_ended", "l-1", 3))
+        assertEquals("approvals", PushText.tag("session_paused", "l-1", 2))
+        assertEquals("approvals", PushText.tag("test", "t-1", 2))
+        assertEquals("ended:l-1", PushText.tag("session_ended", "l-1", 1))
+        assertNull(PushText.tag("grant", "r1", 4))
+        assertEquals(PushText.APPROVALS_CHANNEL, PushText.channel("session_ended", 3))
+        assertEquals(PushText.APPROVALS_CHANNEL, PushText.channel("session_paused", 2))
+        assertEquals(PushText.SESSIONS_CHANNEL, PushText.channel("session_paused", 1))
+        assertEquals("4 waiting", PushText.approvalText("session_ended", "gpu-box", 4))
+        assertTrue(PushText.opensList("session_ended", 4))
+    }
+
+    @Test
     fun aTapOpensTheListForACountOrATest() {
         assertTrue(PushText.opensList("approval", 2))
         assertTrue(PushText.opensList("test", 1))

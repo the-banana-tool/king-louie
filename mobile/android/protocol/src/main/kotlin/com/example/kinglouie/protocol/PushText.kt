@@ -49,17 +49,28 @@ object PushText {
         else -> if (node.isEmpty()) "Test notification" else "Test notification from $node"
     }
 
+    /**
+     * Whether a push of [kind] standing for [items] (from [itemsIn]) shows as
+     * the one Approvals notification with its running count. A coalesced push
+     * (items above 1) of any kind does: the relay's window may hold Approvals
+     * and a session kind, and `k` is only the newest's (push spec §6.4, §7.2,
+     * read on the phone side). With c absent or 1, the session kinds and
+     * `test` keep their own notifications.
+     */
+    fun joinsApprovals(kind: String, items: Int): Boolean =
+        kind in KINDS && (kind in APPROVAL_KINDS || items > 1)
+
     /** The notification's tag, or null for a kind this app does not show. */
-    fun tag(kind: String, rid: String): String? = when (kind) {
-        in APPROVAL_KINDS -> APPROVALS_TAG
-        "session_ended" -> "ended:$rid"
-        "session_paused" -> "paused:$rid"
-        "test" -> "test:$rid"
-        else -> null
+    fun tag(kind: String, rid: String, items: Int = 1): String? = when {
+        kind !in KINDS -> null
+        joinsApprovals(kind, items) -> APPROVALS_TAG
+        kind == "session_ended" -> "ended:$rid"
+        kind == "session_paused" -> "paused:$rid"
+        else -> "test:$rid"
     }
 
-    fun channel(kind: String): String =
-        if (kind == "session_ended" || kind == "session_paused") SESSIONS_CHANNEL else APPROVALS_CHANNEL
+    fun channel(kind: String, items: Int = 1): String =
+        if (!joinsApprovals(kind, items) && (kind == "session_ended" || kind == "session_paused")) SESSIONS_CHANNEL else APPROVALS_CHANNEL
 
     /** A tap with a count above 1, a test, or a kind with no detail opens the Approvals list. */
     fun opensList(kind: String, count: Int): Boolean =

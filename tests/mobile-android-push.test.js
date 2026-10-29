@@ -66,10 +66,16 @@ describe('Android push (spec 3 §7.2)', () => {
     assert.ok(fs.existsSync(path.join(APP, 'main', 'res', 'drawable', 'ic_launcher_monochrome.xml')));
     // One notification per tag, with one id: a new Approvals push replaces the last.
     assert.match(body, /manager\.notify\(tag, Push\.NOTIFICATION_ID, notification\)/);
-    assert.match(body, /PushText\.tag\(kind, rid\)/);
+    // A coalesced push (c above 1) of any kind joins the Approvals
+    // notification and its running count, so tag, channel and count take the
+    // items; c absent or 1 leaves the session kinds their own notifications.
+    assert.match(body, /val items = PushText\.itemsIn\(message\.data\["c"\]\)/);
+    assert.match(body, /PushText\.tag\(kind, rid, items\)/);
+    assert.match(body, /val approvals = PushText\.joinsApprovals\(kind, items\)/);
+    assert.match(body, /Push\.addToCount\(this, items\)/);
+    assert.match(body, /Notification\.Builder\(this, PushText\.channel\(kind, items\)\)/);
     assert.match(body, /PushText\.nodeName\(message\.data\["n"\]\)/);
     // The running count: c added when present, kept across process death, shown above 1.
-    assert.match(body, /PushText\.itemsIn\(message\.data\["c"\]\)/);
     assert.match(body, /PushText\.approvalText\(kind, node, count\)/);
     assert.match(body, /PushText\.otherText\(kind, node\)/);
   });
