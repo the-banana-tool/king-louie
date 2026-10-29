@@ -176,7 +176,8 @@ describe('describeServicePane: personal node', () => {
     assert.deepStrictEqual(lineFor({ code: 'NODE_TASK_MISSING' }), ['King Louie Node has no logon task on this computer, so this app cannot start it.']);
     assert.deepStrictEqual(lineFor({ code: 'NODE_TASK_DISABLED' }), ['The logon task "KingLouie Node" is disabled in Task Scheduler. Enable it there to let this app start the node.']);
     assert.deepStrictEqual(lineFor({ code: 'NODE_TASK_OTHER_ACCOUNT' }), ['The logon task "KingLouie Node" belongs to another account; this app does not run it.']);
-    assert.deepStrictEqual(lineFor({ code: 'NODE_START_TIMEOUT' }), ['King Louie Node did not answer within 60 seconds.']);
+    // The controller words the timeout from its own wait; the pane holds no copy of the number.
+    assert.deepStrictEqual(lineFor({ code: 'NODE_START_TIMEOUT', message: 'King Louie Node did not answer within 90 seconds.' }), ['King Louie Node did not answer within 90 seconds.']);
     assert.deepStrictEqual(lineFor({ code: 'NODE_START_FAILED', message: 'service failed to start: port in use' }), ['King Louie Node stopped while starting: service failed to start: port in use']);
     assert.deepStrictEqual(lineFor({ code: 'SECURE_STORAGE_UNAVAILABLE', message: 'Secure storage is not available.' }), ['Secure storage is not available.']);
     assert.deepStrictEqual(lineFor({ code: 'PAIR_COMMAND_FAILED', message: 'bad\u001b[2Jline' }), ['Pairing did not finish: bad[2Jline [hidden or control characters removed]']);
@@ -219,7 +220,7 @@ describe('describeServicePane: personal node', () => {
     const failed = at({ startError: { code: 'NODE_START_FAILED', message: 'service failed to start: the instance lock is held' } });
     assert.strictEqual(failed.lines[0], 'King Louie Node stopped while starting: service failed to start: the instance lock is held');
     assert.deepStrictEqual(failed.actions.slice(3), [{ id: 'nodeStart', label: 'Start King Louie Node' }]);
-    const timeout = at({ startError: { code: 'NODE_START_TIMEOUT', message: 'x' } });
+    const timeout = at({ startError: { code: 'NODE_START_TIMEOUT', message: 'King Louie Node did not answer within 60 seconds.' } });
     assert.strictEqual(timeout.lines[0], 'King Louie Node did not answer within 60 seconds.');
     assert.deepStrictEqual(ids(timeout), STANDARD_DISCONNECTED);
     const missing = at({ task: 'missing' });
@@ -285,8 +286,10 @@ describe('describeAttachedBanner', () => {
     assert.deepStrictEqual(b({ task: 'missing' }).actions[3], { id: 'openServiceSettings', label: 'Install…' });
     assert.deepStrictEqual(b({ task: 'disabled' }).actions.map((a) => a.id), FLEET_IDS);
     assert.deepStrictEqual(b({ task: 'other-account' }).actions.map((a) => a.id), FLEET_IDS);
-    const timeout = b({ startError: { code: 'NODE_START_TIMEOUT' } });
-    assert.strictEqual(timeout.line, 'King Louie Node did not answer within 60 seconds.');
+    const timeout = b({ startError: { code: 'NODE_START_TIMEOUT', message: 'King Louie Node did not answer within 45 seconds.' } });
+    assert.strictEqual(timeout.line, 'King Louie Node did not answer within 45 seconds.');
+    // A node known to run whose pid is not known yet names no pid.
+    assert.strictEqual(b({ running: true, pid: null }).line, 'King Louie Node is running but its desktop bridge is not open.');
     assert.deepStrictEqual(timeout.actions.map((a) => a.id), FLEET_IDS);
     assert.strictEqual(b({ startError: { code: 'NODE_START_FAILED', message: 'service failed to start: x' } }).line, 'King Louie Node stopped while starting: service failed to start: x');
   });

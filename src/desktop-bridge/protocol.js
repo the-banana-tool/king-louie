@@ -4,6 +4,10 @@ const crypto = require('crypto');
 const PROTOCOL = 1;
 // 18796, not 18795: F3's relay mesh listener defaults to 18795.
 const DEFAULT_DESKTOP_BRIDGE_PORT = 18796;
+// The personal node's logon task (src/service/personal-install.js registers
+// it; a test holds the two equal). Here so the pane, which the preload loads,
+// and the desktop's runner name it from one place.
+const PERSONAL_TASK_NAME = 'KingLouie Node';
 const MIB = 1024 * 1024;
 
 const LIMITS = Object.freeze({
@@ -150,6 +154,7 @@ const MESSAGES = Object.freeze({
 module.exports = {
   PROTOCOL,
   DEFAULT_DESKTOP_BRIDGE_PORT,
+  PERSONAL_TASK_NAME,
   LIMITS,
   CLOSE,
   NODE_ID_RE,
