@@ -1,5 +1,7 @@
 package com.example.kinglouie
 
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -25,6 +27,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.kinglouie.protocol.AppMode
@@ -44,6 +47,16 @@ import kotlinx.serialization.json.JsonElement
 /** Text the relay (not a pinned node) supplied, escaped like any display text. */
 private fun relayText(value: JsonElement?): String = Display.escape(value.str() ?: "")
 
+/** The gear's Notifications row (push spec §7.3). */
+private fun notificationsText(row: AppModel.NotificationsRow): String = when (row) {
+    AppModel.NotificationsRow.ON -> "Notifications: on"
+    AppModel.NotificationsRow.OFF_IN_ANDROID -> "Notifications: off in Android settings"
+    AppModel.NotificationsRow.NO_PUSH_BUILD -> "Notifications: this build has no push"
+    AppModel.NotificationsRow.NO_RELAY_CREDENTIAL -> "Notifications: the relay has no push credential"
+    AppModel.NotificationsRow.NOT_REGISTERED -> "Notifications: not registered yet"
+    AppModel.NotificationsRow.NOT_ASKED -> "Notifications: the relay could not be asked"
+}
+
 /** Front-door text, capped and escaped by the core. */
 private fun fdText(value: JsonElement?, max: Int = FrontDoor.SHOWN_TEXT_MAX): String = FrontDoor.shownText(value.str(), max)
 
@@ -54,6 +67,7 @@ fun SettingsScreen(model: AppModel, back: () -> Unit, openScanner: () -> Unit) {
     var forget by remember { mutableStateOf<AppModel.SettingsNode?>(null) }
     var resetAsked by remember { mutableStateOf(false) }
     val live = model.mode == AppMode.LIVE
+    val context = LocalContext.current
 
     // Remove (C-15): forgets the pin on this phone and sends nothing.
     forget?.let { n ->
@@ -200,6 +214,14 @@ fun SettingsScreen(model: AppModel, back: () -> Unit, openScanner: () -> Unit) {
             // ---- This phone ----
             item {
                 SectionTitle("This phone")
+                model.notifications?.let { row ->
+                    Text(notificationsText(row), Modifier.padding(bottom = 4.dp))
+                    if (row == AppModel.NotificationsRow.OFF_IN_ANDROID) {
+                        OutlinedButton({
+                            context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
+                        }, Modifier.fillMaxWidth().padding(bottom = 8.dp), shape = RoundedCornerShape(KlTokens.radiusMd)) { Text("Open notification settings") }
+                    }
+                }
                 OutlinedButton({ resetAsked = true }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(KlTokens.radiusMd), colors = denyColors(), border = denyBorder(true)) {
                     Text("Reset this phone")
                 }

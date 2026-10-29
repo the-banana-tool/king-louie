@@ -1,5 +1,6 @@
 package com.example.kinglouie
 
+import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
@@ -61,6 +62,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -364,6 +367,8 @@ class AppModel(context: Context) {
         Push.appInFront(appContext)
         startLoop()
         startLiveLoop()
+        // Back from Android's notification settings (the gear's button): its row is asked again.
+        if (notifications != null) scope.launch { refreshNotifications(client) }
     }
 
     /** ON_STOP: the loop stops, with one best-effort "not in front" (C-8), and so do the live view's watches. */
@@ -446,6 +451,9 @@ class AppModel(context: Context) {
                         // 2. The other kinds, at most once every 5 s.
                         fetchRest(api)
                         pollProblem = null
+                        // A poll that got through: the phone is enrolled (an invite another phone
+                        // approved included), so a token not yet sent in this process goes now.
+                        sendPushToken()
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -1611,6 +1619,7 @@ class AppModel(context: Context) {
      * fingerprint) and puts it in the list as a client connection (C-13).
      */
     fun scanned(text: String) = scope.launch {
+        resetJob?.join()
         try {
             val trimmed = text.trim()
             if (!trimmed.startsWith("kl1:")) {
@@ -1716,7 +1725,7 @@ class AppModel(context: Context) {
                     // The enrollment carried the read key (§8.2): this node holds it.
                     if (readKey != null) readKeyNodes.set(pin.id, ReadKeyNodes.IN_USE)
                     banner = "Enrolled. This phone now approves for ${Display.escape(pin.name)}."
-                    sendPushToken()
+                    sendPushToken(again = true)
                     refreshFrontDoorNow()
                 }
                 "refused" -> {
@@ -1963,11 +1972,16 @@ class AppModel(context: Context) {
      * a front door its connected clients and what it says it is.
      */
     fun refreshSettings() {
-        if (settingsLoading || !readyToRead()) return
+        if (settingsLoading) return
+        if (!readyToRead()) {
+            scope.launch { refreshNotifications(null) }
+            return
+        }
         val api = client ?: return
         settingsLoading = true
         scope.launch {
             try {
+                refreshNotifications(api)
                 each {
                     val list = api.nodes()
                     for (n in list) n["node_id"].str()?.let { online[it] = n["online"].bool() == true }
@@ -2544,34 +2558,102 @@ class AppModel(context: Context) {
 
     /**
      * Keeps the token, and sends it at once when the read key can carry it
-     * (spec 3 R5: re-sent when FCM rotates it, with no prompt); otherwise the
-     * loop sends it when it starts.
+     * (spec 3 R5, push spec §7.3: from onNewToken in the background when
+     * enrolled, with no prompt); not enrolled, it is only stored, and the
+     * loop sends it once a poll gets through.
      */
     fun registerPushToken(token: String) {
         storage.pushToken = token
         if (readyToRead()) scope.launch { sendPushToken() }
     }
 
-    /** Registers the push token once per token, on the read key (§8.4). */
-    private suspend fun sendPushToken() {
-        val token = storage.pushToken ?: return
-        if (mode != AppMode.LIVE || token == storage.pushTokenSent || !readKeyKnown) return
+    /** The token the relay accepted in this process: null at every cold start, so the token goes again (C-10). */
+    private var pushTokenSentHere: String? = null
+
+    /** A Reset this phone under way: a new pairing waits for it (its key deletion must not take the new key). */
+    private var resetJob: Job? = null
+
+    /**
+     * Registers the push token on the read key (§8.4, push spec §7.3): once
+     * per process, so at every cold start whether it changed or not (the
+     * relay may have dropped it), and again when [again] (an enrollment just
+     * finished). With no token stored (Reset deleted it), FCM is asked.
+     */
+    private suspend fun sendPushToken(again: Boolean = false) {
+        if (mode != AppMode.LIVE || !readKeyKnown) return
+        val token = storage.pushToken ?: run {
+            if (Push.ENABLED) Push.token { registerPushToken(it) }
+            return
+        }
+        if (!again && token == pushTokenSentHere) return
         val api = client ?: return
         try {
             api.pushToken(token)
+            pushTokenSentHere = token
             storage.pushTokenSent = token
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // Tried again when the loop next starts.
+            // Tried again after the loop's next poll that gets through.
         }
     }
 
-    /** Reset this phone (after its confirm dialog): deletes both keys and every pin. */
+    /** The gear's Notifications row (push spec §7.3), in the order the owner can act on. */
+    enum class NotificationsRow { ON, OFF_IN_ANDROID, NO_PUSH_BUILD, NO_RELAY_CREDENTIAL, NOT_REGISTERED, NOT_ASKED }
+
+    /** Null until the gear first opens. */
+    var notifications by mutableStateOf<NotificationsRow?>(null)
+        private set
+
+    /** The phone's own state first; then GET /v1/push-token on the read key, when it can be asked. */
+    private suspend fun refreshNotifications(api: RelayApi?) {
+        notifications = when {
+            !Push.ENABLED || !Push.available(appContext) -> NotificationsRow.NO_PUSH_BUILD
+            appContext.getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() == false -> NotificationsRow.OFF_IN_ANDROID
+            api == null || !readyToRead() -> NotificationsRow.NOT_ASKED
+            else -> try {
+                val state = api.pushTokenState()
+                when {
+                    !state.registered -> NotificationsRow.NOT_REGISTERED
+                    !state.sender -> NotificationsRow.NO_RELAY_CREDENTIAL
+                    else -> NotificationsRow.ON
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                NotificationsRow.NOT_ASKED
+            }
+        }
+    }
+
+    /**
+     * Reset this phone (after its confirm dialog): tells the relay to forget
+     * the push token (best effort, push spec §7.3), then deletes both keys,
+     * every pin and the stored token. The DELETE is signed by the read key,
+     * so it goes before the keys do.
+     */
     fun reset() {
+        val api = client
+        // No loop starts again meanwhile: both need a client.
+        client = null
         stopLoop(sayAway = false)
         stopLiveLoop()
         cancelInvite()
+        resetJob = scope.launch { finishReset(api) }
+    }
+
+    private suspend fun finishReset(api: RelayApi?) {
+        if (api != null && Push.ENABLED && storage.pushTokenSent != null) {
+            try {
+                withTimeout(RESET_DELETE_MS) { api.deletePushToken() }
+            } catch (e: TimeoutCancellationException) {
+                // Best effort: the relay drops the token at its first push that FCM refuses.
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Best effort, as above.
+            }
+        }
         runCatching { DeviceKey.delete() }
         key = null
         readKey = null
@@ -2611,12 +2693,18 @@ class AppModel(context: Context) {
         pollProblem = null
         readKeyNodes.clearInMemory()
         lastRestAtMs = 0L
+        pushTokenSentHere = null
+        notifications = null
+        // Holds the push token too: it is deleted with the rest.
         storage.clear()
         changeMode(AppMode.WELCOME)
     }
 
     companion object {
         const val MAX_EXPIRES_IN_MS = 300_000
+
+        /** Reset waits this long for the relay to forget the push token, then goes on (push spec §7.3). */
+        const val RESET_DELETE_MS = 5_000L
 
         /** A decided row stays this long past its item's expiry (§7.2). */
         const val DECIDED_KEEP_MS = 60_000L

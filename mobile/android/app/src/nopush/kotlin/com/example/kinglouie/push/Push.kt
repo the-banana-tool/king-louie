@@ -14,6 +14,13 @@ object Push {
     fun register(activity: Activity, onToken: (String) -> Unit) = Unit
 
     @Suppress("UNUSED_PARAMETER")
+    fun token(onToken: (String) -> Unit) = Unit
+
+    /** This build has no push (push spec §7.3, the gear's row). */
+    @Suppress("UNUSED_PARAMETER")
+    fun available(context: Context): Boolean = false
+
+    @Suppress("UNUSED_PARAMETER")
     fun appInFront(context: Context) = Unit
 
     @Suppress("UNUSED_PARAMETER")
