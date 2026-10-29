@@ -15,7 +15,7 @@ const HELP = `Usage:
   king-louie-service channel allow <channel> <id> [--group] [--data-dir DIR]
   king-louie-service channel remove <channel> <id> [--group] [--data-dir DIR]
   king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
-  king-louie-service desktop pair <request> [--data-dir DIR] [--yes]
+  king-louie-service desktop pair <request> [--data-dir DIR] [--yes] [--json]
   king-louie-service desktop unpair <device-id> [--data-dir DIR]
   king-louie-service desktop list [--data-dir DIR]
   king-louie-service models status|refresh [--data-dir DIR]
@@ -76,7 +76,7 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
 
 const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern', 'browser', 'provider', 'model', 'case', 'timeout']);
 // Flags that must never carry a value, whichever form produced it.
-const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'replace', 'personal', 'force']);
+const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'replace', 'personal', 'force', 'json']);
 
 // The commands whose [y/N] question --yes answers (and that HELP documents
 // it for). The scoping is checked in main(), before any command runs. A
@@ -322,6 +322,12 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       return 2;
     }
   }
+  // --json ends desktop pair with one result line the desktop app reads
+  // (spec 2026-10-28 §6.1); no other command prints one.
+  if (flags.json && !(command === 'desktop' && sub === 'pair')) {
+    io.stderr.write('Flag "--json" is only valid for "desktop pair"\n');
+    return 2;
+  }
   if (flags.confirm && !(command === 'frontdoor' && sub === 'code')) {
     io.stderr.write('Flag "--confirm" is only valid for "frontdoor code".\n');
     return 2;
@@ -492,7 +498,7 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
 
       case 'desktop': {
         const { runDesktopCommand } = require('./commands/desktop');
-        return await runDesktopCommand({ sub, arg, dataDir, io, yes: Boolean(flags.yes), deps: { runningServicePid, withServiceCore } });
+        return await runDesktopCommand({ sub, arg, dataDir, io, yes: Boolean(flags.yes), json: Boolean(flags.json), deps: { runningServicePid, withServiceCore } });
       }
 
       case 'import': {
