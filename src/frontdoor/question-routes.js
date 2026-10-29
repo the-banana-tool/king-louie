@@ -5,6 +5,8 @@
 // filter only: the node verifies the device signature, nonce, binding,
 // device and time on every answer, so the relay forwards the signed body
 // untouched and adds no field the node trusts. Loads no agent code.
+// All three routes take either key of the device (android-slim §8.4): an
+// answer is a device-key envelope the node verifies.
 const { open } = require('../approvals/envelope');
 
 const WEEK_MS = 7 * 24 * 3600 * 1000;
@@ -25,13 +27,13 @@ function registerQuestionRoutes({ phoneApi, nodeHub, mailbox, devices, log }) {
   const activeNodes = (deviceId) => devices.nodesForDevice(deviceId).filter((n) => n.state === 'active').map((n) => n.node_id);
 
   phoneApi.registerRoute('GET', '/v1/questions', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => ({ body: mailbox.list({ nodeIds: activeNodes(ctx.deviceId), typePrefix: ASK_TYPE, toDevice: ctx.deviceId }) })
   });
 
   // The body is the device-signed kl.question.answer envelope, forwarded unchanged.
   phoneApi.registerRoute('POST', '/v1/questions/{token}/answer', {
-    auth: 'device',
+    auth: 'read',
     rate: { perMin: 30 },
     handler: async (req, ctx) => {
       if (!TOKEN.test(String(ctx.params.token))) throw httpError(400, 'bad_token', 'not a question token');
@@ -62,7 +64,7 @@ function registerQuestionRoutes({ phoneApi, nodeHub, mailbox, devices, log }) {
   // only from its relay link and for a paired device, and they only reorder
   // the reach ladder. deviceId comes from the device auth, never the body.
   phoneApi.registerRoute('POST', '/v1/presence', {
-    auth: 'device',
+    auth: 'read',
     rate: { perMin: 6 },
     handler: async (req, ctx) => {
       const body = ctx.body;

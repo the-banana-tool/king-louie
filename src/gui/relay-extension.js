@@ -3,6 +3,9 @@
 // through src/frontdoor/extensions.js. The relay stores and forwards; the
 // node verifies every phone envelope (lease-protocol.js checks 1–12). The
 // checks here only keep obvious junk off the link. Loads no agent code.
+// Every route takes either key of the device (android-slim §8.4): a grant or
+// a revoke is a device-key envelope the node verifies; a watch may be signed
+// by the read key (lease-protocol.js decides).
 const { open } = require('../approvals/envelope');
 
 const LEASE_TTL_MS = 5 * 60 * 1000;
@@ -93,7 +96,7 @@ function registerLeaseRoutes({ phoneApi, nodeHub, mailbox, devices, log }) {
   }
 
   phoneApi.registerRoute('GET', '/v1/leases', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       const given = ctx.query ? ctx.query.nonce : undefined;
       if (given !== undefined && (typeof given !== 'string' || !LIST_NONCE_RE.test(given))) throw httpError(400, 'bad_nonce', 'nonce must be 32 bytes of base64url');
@@ -109,7 +112,7 @@ function registerLeaseRoutes({ phoneApi, nodeHub, mailbox, devices, log }) {
 
   for (const [action, type] of Object.entries(ACTIONS)) {
     phoneApi.registerRoute('POST', `/v1/leases/{lease_id}/${action}`, {
-      auth: 'device',
+      auth: 'read',
       rate: action === 'watch' ? { perMin: 12 } : { perMin: 30 },
       handler: async (req, ctx) => {
         const leaseId = String(ctx.params.lease_id);
@@ -151,7 +154,7 @@ function registerLeaseRoutes({ phoneApi, nodeHub, mailbox, devices, log }) {
   }
 
   phoneApi.registerRoute('GET', '/v1/leases/{lease_id}/views', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       const leaseId = String(ctx.params.lease_id);
       if (!UUID_V4_RE.test(leaseId)) throw httpError(400, 'bad_lease', 'not a lease id');
