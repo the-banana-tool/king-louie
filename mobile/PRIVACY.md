@@ -20,7 +20,9 @@ relay you pair it with.
   below. A phone paired before the read key existed also keeps, for up to
   seven days, the statement its device key signed to introduce the read key
   to your nodes, so it can send it again to a node that was offline.
-- The push token, when push is configured.
+- The push token, when push is configured. The Android app sends it to the
+  relay again at every start. Reset this phone asks the relay to forget it
+  and deletes it.
 - On iPhone, history you opened, as the node-signed slices the node sent —
   held in memory for as long as you're looking at it, not written to disk.
   The Android app has no history view.
@@ -122,6 +124,8 @@ can see:
 - your devices' names, platforms and public keys (for an Android phone, the
   public half of its read key too), which nodes they approve for, and their
   push tokens;
+- which of your phones stopped a computer-use session, so that phone is not
+  notified of its own Stop;
 - the network addresses your phone and nodes connect from.
 
 The relay cannot approve anything: nodes check the phone's signature over the
@@ -129,18 +133,38 @@ exact action, and phones show only what a pinned node signed.
 
 ## Push
 
-Push is optional. When configured, a push carries only a kind and a request id
-(and the node's name in the alert text, such as "Approval needed on web-01" or
-"Session request on web-01" for a computer-use request); the app fetches the
-request from the relay and verifies it before showing it. On Android,
-tapping a notification opens that item (fetched with the read key, so it asks
-for no fingerprint); a notification has no buttons of its own.
+Push is optional. When configured, a push carries only a kind, an id (of the
+request, or of the computer-use session it is about), the node's name and,
+when several things arrive within ten seconds, how many (the node's name
+shows in the alert text, such as "Approval needed on web-01" or "Session
+request on web-01" for a computer-use request); the app fetches the request
+from the relay and verifies it before showing it. On Android a push also
+says, in words the app builds on the phone:
+
+- a computer-use session or take ended, unless you stopped it from this
+  phone;
+- a computer-use session paused because no phone was watching (only to the
+  phone that allowed it).
+
+On Android, a tap fetches with the phone's read key, without a fingerprint,
+and shows only what the node signed; a notification has no buttons of its
+own.
 
 - Apple (APNs) sees the request kind and node name in the alert it delivers.
 - Google (FCM) sees only the data fields, and the app builds the visible text
-  on the phone.
+  on the phone: the kind, the id, the node's name and a count; from them,
+  when your nodes ask for something and when a session ended or paused. It
+  also sees the phone's push token, your Firebase project and the time. To
+  keep machine names from Google, give your nodes neutral names (the name is
+  the one a node was paired under).
 - Neither sees the command, arguments or approval content, nor anything about
-  a computer-use request beyond its kind, its id and the node's name.
+  a computer-use request beyond its kind, its id and the node's name: no app,
+  site, take name or reason.
+
+Whoever holds your relay's push credential (a key of your Firebase project)
+can send these content-free notifications to the phones whose tokens it
+knows. A forged one opens the app on a list or a detail that is fetched and
+verified, so it can lead you to open the app, never to approve anything.
 
 Without push, the app checks the relay only while it is open.
 

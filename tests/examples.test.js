@@ -1029,6 +1029,9 @@ describe('install guide', () => {
     assert.deepEqual(found, HEADINGS);
   });
 
+  // Section 10 keeps its marker as its first line and, below it, the push
+  // spec's "Push to your phone" part (push spec §10, §14); 11 and 12 hold the
+  // marker alone.
   it('reserves sections 10 to 12 for wave 4 with one marker line each', () => {
     const all = lines();
     for (const [heading, stage] of [[HEADINGS[10], 3], [HEADINGS[11], 4], [HEADINGS[12], 5]]) {
@@ -1037,8 +1040,32 @@ describe('install guide', () => {
       for (let j = i + 1; j < all.length && !/^#{1,2} /.test(all[j]); j += 1) {
         if (all[j].trim()) body.push(all[j]);
       }
-      assert.deepEqual(body, [`Not available yet. This section is written when fleet stage ${stage} merges.`], heading);
+      const marker = `Not available yet. This section is written when fleet stage ${stage} merges.`;
+      if (stage === 3) {
+        assert.equal(body[0], marker, heading);
+        assert.equal(body[1], '### Push to your phone', heading);
+      } else {
+        assert.deepEqual(body, [marker], heading);
+      }
     }
+  });
+
+  it('section 10 holds the push runbook, and section 13 points at it', () => {
+    const text = lines().join('\n');
+    const push = text.slice(text.indexOf('### Push to your phone'), text.indexOf(HEADINGS[11]));
+    for (const needle of [
+      'kl.applicationId',
+      'Firebase Cloud\n   Messaging API Admin',
+      'install -o root -g king-louie -m 0640 kl-push.json /etc/king-louie/push/fcm-service-account.json',
+      '"service_account_file": "/etc/king-louie/push/fcm-service-account.json"',
+      './gradlew :app:installFcmRelease',
+      'king-louie-service relay push-test',
+      'SENDER_ID_MISMATCH'
+    ]) {
+      assert.ok(push.includes(needle), `the push part does not mention ${needle}`);
+    }
+    const personal = text.slice(text.indexOf(HEADINGS[13]));
+    assert.ok(personal.includes('section 10, "Push to your phone"'));
   });
 
   it('gives the commands the examples depend on', () => {

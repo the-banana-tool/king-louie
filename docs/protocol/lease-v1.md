@@ -98,6 +98,14 @@ device's next watch that is contact resumes it (status `active`) and never
 moves `expires_at`; expiry and revoke end it as always. `no_contact` is a
 value of the status's free `reason`.
 
+Push (revised 2026-10-28, push spec
+`docs/superpowers/specs/2026-10-28-push-notifications-design.md`; `fcm`
+phones only): a contact pause is pushed (`session_paused`) to the granting
+device alone, and the ending of a lease that was granted, for any reason, is
+pushed (`session_ended`) to every device active on the node except the one
+whose own verified revoke, or deny of a resume, ended it. A lease that never
+ran pushes nothing on ending. Through `push.notify` (§4); no message changed.
+
 A lease does not outlive the enrollment of the device that granted it
 (2026-10-13, third security review). When that device is revoked (a
 `kl.device.revoke` staged from another phone, or an administrator's
@@ -304,6 +312,7 @@ re-sends the status.
 | `GET /v1/leases?wait=0..25&nonce=b64url(32)` | `[{ node_id, envelope, status }]`: pending requests for the device's nodes with the latest status of each lease; then (R-F5-18) one `{ node_id, envelope: null, status }` for each lease that is running on those nodes or ended lately, where `status` is a `kl.lease.status` the node signed for this very listing (the relay asks each node, `lease.list`). This is the one device-signed request a phone makes when it opens; there is no unsigned listing, and a phone shows a lease from it only when the pinned node's signature on `status` verifies. A node that is offline, slow or older lists nothing. With `nonce` (R-F5-20; `400 bad_nonce` when it is not 32 bytes of base64url) each node that answers also gets one `{ node_id, envelope: null, status: null, listing }` before its statuses: the `kl.lease.listing` it signed over that nonce. Without `nonce` the reply is as before and no listing is passed on. The relay checks only that a listing opens, is of that type and names that node |
 | `POST /v1/leases/{lease_id}/grant` · `/revoke` · `/watch` | body = the phone envelope → `202 { state, reason?, status? }`, `503 node_offline`. `status` is the `kl.lease.status` envelope the node signed for this answer (absent when it refused the message): a phone verifies and applies it like any other status, and takes its `contact_token` from it; `state` and `reason` beside it are in clear and are never shown as the lease's state. The `202` for `/watch` also carries `after_seq`: the mailbox position read before the node heard the watch, so a phone that fetches on tap can ask for views from there with `wait` and get the frame this watch causes |
 | `GET /v1/leases/{lease_id}/views?after_seq&wait` | `[{ seq, envelope }]` of views to the caller and statuses, oldest first |
+| node → relay `push.notify` | `{ kind: 'session_ended'\|'session_paused', id: lease_id (uuid v4), to_device: device id\|null, except_device: device id\|null, expires_at: RFC 3339\|null }` → `{ ok: true }`; not both device fields; anything else `bad_push`. Unsigned, authenticated by the node's pinned link like `message.submit`'s `push`. The relay pushes to the node's active `fcm` devices, narrowed to `to_device` or without `except_device`, stores nothing and keeps no lease state. The node queues these in memory (at most 32, each at most an hour old) and sends them while the link is up, else at its next `connected`; a relay without the method answers `unknown_method` and the queue waits for the next `connected`. A take a restart ended (`service_restarted`) queues one `session_ended` when its record holds a granted lease |
 | node methods | `lease.grant`, `lease.revoke`, `lease.watch`: `{ envelope }` → `{ state, reason?, status? }`. `lease.list`: `{ device_id, nonce? }` (the device the relay authenticated; the nonce of its request) → `{ statuses: [envelope], listing? }`; `listing` (R-F5-20) only with a well-formed nonce and an enrolled device, signed over exactly those statuses: the status of the live lease, if any (signed now, or its newest when that is under five seconds old), and of at most the four that ended last; nothing for a device that is not enrolled on the node or is revoked. A node with computer use off registers `lease.list` too and answers `{ statuses: [], listing }` (fourth security review). The node takes the relay's word for who asks only to decide whether to answer: the statuses hold nothing this node's phones are not sent anyway, and whatever a phone then does (watch, stop) it signs itself |
 
 ## 5. Vectors

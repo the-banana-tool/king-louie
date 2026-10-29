@@ -138,6 +138,12 @@ pictures, presence) and keep a computer-use lease in contact; it asks for
 nothing but signs only while the phone is unlocked. Android only.
 _Avoid_: session key, API key, view key
 
+**Push**:
+A content-free hint from the relay to a paired phone that something waits or
+changed; never an Approval itself and never its content.
+_Avoid_: notification (for the message on the wire), alert (a front-door
+Approval kind)
+
 **Management surface**:
 Any place the owner sees and answers questions or acts on the fleet: the
 chat, a paired phone, an MCP client, a contact channel.

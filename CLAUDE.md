@@ -1039,6 +1039,18 @@ the e2e test), the owner check cannot tell them apart.
   `applied` (its record holds the key), `duplicate` (staged), `rejected`, or `offline`), and `device apply` writes it (`read key set`, audited
   `device.read_key_set`; `stale` for an older one). `A_read`/`B_read` in `TEST_DEVICE_KEYS` are
   refused as test keys. iOS has no read key and is unchanged.
+- Push (spec `docs/superpowers/specs/2026-10-28-push-notifications-design.md`, R-PU-1 to R-PU-5;
+  approval-v1 §8, lease-v1 §4): the relay's admin `relay.push` block (`fcm.service_account_file`, an
+  absolute path read once at start, shape-checked by `readServiceAccountFile`). Content-free payload
+  `{ k, rid, n, c? }`. The node's `PushQueue` (`src/gui/push-queue.js`) sends `push.notify`
+  (`node-methods.js`) for `session_ended` (a granted lease's end, except to the device whose own
+  signed Stop or resume deny ended it) and `session_paused` (a `no_contact` pause, granting device
+  only). The new kinds, `test`, `c`, dedupe, coalescing and the hourly cap (`push/gate.js`) are `fcm`
+  only; `apns` is byte for byte as before. `relay push-test` (admin; exit 0 only when every push
+  went out) and doctor's `push` row (`pushRow`, `<dataDir>/relay/push-status.json`). Tests use a
+  local fake FCM server on 127.0.0.1 (`tests/frontdoor-push.test.js`), never Google;
+  `tests/tracked-secrets.test.js` fails when the Firebase app config, a `local.properties` or a
+  service-account JSON is tracked. The owner's runbook is the install guide's "Push to your phone".
 - `mcp` asks through the running service (file courier); with the service stopped every unsafe runbook
   is denied at once.
 - Audit: `<dataDir>/audit/ledger-YYYY-MM.jsonl`, hash-chained; `doctor` verifies the chain.
