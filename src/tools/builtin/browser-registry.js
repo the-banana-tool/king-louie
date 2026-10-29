@@ -11,7 +11,7 @@ const DEFAULT_KEY = 'default';
 
 const registry = { default: null, byKey: new Map() };
 // Name of the profile backing each key's running browser, if any.
-const activeProfiles = new Map();
+const profileByKey = new Map();
 
 // The key a call was decided under (ToolExecutor binds it on every call: the
 // take's key, or null for a call decided outside any take, which stays on the
@@ -55,16 +55,22 @@ function setBrowser(key, browser) {
 function removeBrowser(key) {
   if (key === DEFAULT_KEY) registry.default = null;
   else registry.byKey.delete(key);
-  activeProfiles.delete(key);
+  profileByKey.delete(key);
 }
 
 function activeProfileOf(key) {
-  return activeProfiles.has(key) ? activeProfiles.get(key) : null;
+  return profileByKey.has(key) ? profileByKey.get(key) : null;
 }
 
 function setActiveProfile(key, name) {
-  if (name == null) activeProfiles.delete(key);
-  else activeProfiles.set(key, name);
+  if (name == null) profileByKey.delete(key);
+  else profileByKey.set(key, name);
+}
+
+// Every key's open profile, as [{ key, profile }]: a personal take refuses a profile open under
+// another key, since Chrome locks a user-data dir to one process.
+function activeProfiles() {
+  return [...profileByKey.entries()].map(([key, profile]) => ({ key, profile }));
 }
 
 // Every browser in the registry (the default first), for cleanup.
@@ -79,7 +85,7 @@ function allBrowsers() {
 function reset() {
   registry.default = null;
   registry.byKey.clear();
-  activeProfiles.clear();
+  profileByKey.clear();
 }
 
 module.exports = {
@@ -92,6 +98,7 @@ module.exports = {
   removeBrowser,
   activeProfileOf,
   setActiveProfile,
+  activeProfiles,
   allBrowsers,
   reset,
 };
