@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../../logging');
-const { loadServiceConfig } = require('../config');
+const { loadServiceConfig, hostPushConfig } = require('../config');
 const { restoreDataDirOwnership } = require('../ownership');
 const { runningServicePid, renderQr } = require('./io');
 
@@ -147,17 +147,6 @@ function defaultRelayNodeName(dataDir) {
   return loadNodeConfig({ dataDir, adminConfigDir: dir });
 }
 
-// The parsed relay.push block, from wherever this host keeps it: a front
-// door's service.json holds it raw (relay may hold only push there), a
-// `relay run` host's relay block has it parsed.
-function relayPushConfig(cfg) {
-  if (cfg && cfg.profile === 'frontdoor') {
-    const { parsePushConfig } = require('../config');
-    return parsePushConfig(cfg.relayRaw ? cfg.relayRaw.push : undefined, 'service.json');
-  }
-  return cfg && cfg.relay ? cfg.relay.push || {} : null;
-}
-
 // Device records as the relay stored them, read without the registry (whose
 // constructor reads the enrollment log too): this command writes nothing.
 function readDeviceRecords(dataDir) {
@@ -191,7 +180,7 @@ async function runPushTest({ dataDir, io, flags = {}, deps = {} }) {
   let nodeName;
   let serviceAccount;
   try {
-    push = relayPushConfig((deps.loadConfig || ((d) => loadServiceConfig(d)))(dataDir));
+    push = hostPushConfig((deps.loadConfig || ((d) => loadServiceConfig(d)))(dataDir));
     if (push === null) {
       io.stderr.write('There is no "relay" block in the admin service.json. See the relay section of the install guide.\n');
       return 1;

@@ -7,7 +7,7 @@ const path = require('path');
 const { parseDuration } = require('../src/platform/duration');
 const { parseFrontDoorConfig, FRONTDOOR_KEYS, frontDoorHosts, LETS_ENCRYPT_PRODUCTION } = require('../src/frontdoor/config');
 const { loadNodeConfig, NODE_YAML_KEYS } = require('../src/service/node-config');
-const { loadServiceConfig, parsePushConfig } = require('../src/service/config');
+const { loadServiceConfig, parsePushConfig, hostPushConfig } = require('../src/service/config');
 const { readServiceAccountFile } = require('../src/frontdoor/push/service-account');
 const { defaultSenders } = require('../src/frontdoor/push');
 
@@ -130,6 +130,16 @@ describe('loadServiceConfig: the frontdoor profile', () => {
     assert.deepEqual(parsePushConfig(undefined, 'service.json'), {});
     assert.deepEqual(parsePushConfig({ fcm: { service_account_file: '/etc/king-louie/fcm.json' } }, 'service.json'), { fcm: { serviceAccountFile: '/etc/king-louie/fcm.json' } });
     assert.throws(() => parsePushConfig({ gcm: {} }, 'service.json'), /unknown key "relay\.push\.gcm"/);
+  });
+
+  it("hostPushConfig reads a front door's raw relay.push and a relay host's parsed one", () => {
+    const fcm = { fcm: { serviceAccountFile: '/etc/king-louie/fcm.json' } };
+    assert.deepEqual(hostPushConfig({ profile: 'frontdoor', relayRaw: { push: { fcm: { service_account_file: '/etc/king-louie/fcm.json' } } } }), fcm);
+    assert.deepEqual(hostPushConfig({ relayRaw: null }, { frontdoor: true }), {});
+    assert.throws(() => hostPushConfig({ profile: 'frontdoor', relayRaw: { push: { gcm: {} } } }), /relay\.push\.gcm/);
+    assert.deepEqual(hostPushConfig({ profile: 'agent', relay: { push: fcm } }), fcm);
+    assert.deepEqual(hostPushConfig({ profile: 'agent', relay: {} }), {});
+    assert.equal(hostPushConfig({ profile: 'agent', relay: null }), null);
   });
 
   it('parsePushConfig refuses a relative service_account_file, naming the key', () => {

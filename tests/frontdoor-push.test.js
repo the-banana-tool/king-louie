@@ -318,7 +318,7 @@ describe('push text', () => {
 });
 
 describe('push kinds and the FCM payload (push spec §6.5, §7.1)', () => {
-  it('carries the new kinds, and c only for a count from 2 to 999', async () => {
+  it('carries the new kinds, and c for a count of 2 or more, capped at 999', async () => {
     const fcm = await fcmServer();
     const sender = createFcmSender(fcm.options);
     await sender.notify(device('fcm', 'a'), { kind: 'session_ended', id: 'lease-1', node_name: 'gpu-box' });
@@ -335,7 +335,9 @@ describe('push kinds and the FCM payload (push spec §6.5, §7.1)', () => {
     assert.deepEqual(data[1], { rid: 'lease-2', n: 'gpu-box', k: 'session_paused' });
     assert.deepEqual(data[2], { rid: 't-1', n: 'relay-1', k: 'test' });
     assert.deepEqual(data[3], { rid: 'r-1', n: 'gpu-box', k: 'approval', c: '10' });
-    for (const d of data.slice(4, 8)) assert.equal(d.c, undefined);
+    assert.equal(data[4].c, undefined, 'a count of 1 is not sent');
+    assert.equal(data[5].c, '999', 'a count above 999 is sent as 999');
+    for (const d of data.slice(6, 8)) assert.equal(d.c, undefined);
     assert.equal(data[8].c, '999');
     for (const d of data) for (const v of Object.values(d)) assert.equal(typeof v, 'string');
   });
@@ -606,6 +608,51 @@ describe('the pusher: at most 60 pushes per fcm device per hour (push spec §6.4
       unsubscribe();
     }
     for (const r of lines) assert.doesNotMatch(r.line, /devtok/);
+  });
+
+  it('remembers no (node, kind, id) the cap dropped, alone or coalesced, so it goes once the cap lifts', async () => {
+    const clock = fakeClock();
+    const { pusher, seen } = recordingPusher(clock);
+    const phone = device('fcm');
+    for (let i = 0; i < 60; i += 1) {
+      await pusher.notify(phone, { node_id: 'n-1', kind: 'approval', id: `r-${i}` });
+      await clock.advance(11 * SEC);
+    }
+    assert.equal(seen.length, 60);
+    // Late in the hour, so a key wrongly remembered would still be live when the cap lifts.
+    await clock.advance(2840 * SEC);
+    // Dropped alone.
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'session_ended', id: 'l-1' });
+    await clock.advance(11 * SEC);
+    // Dropped coalesced: the first opens a window (dropped), the next two are held and dropped together.
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-0' });
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-1' });
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-2' });
+    await clock.advance(11 * SEC);
+    assert.equal(seen.length, 60, 'all dropped by the cap');
+
+    await clock.advance(3 * MIN);
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'session_ended', id: 'l-1' });
+    await clock.advance(11 * SEC);
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-1' });
+    await clock.advance(11 * SEC);
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-2' });
+    await clock.advance(11 * SEC);
+    assert.deepEqual(seen.slice(60).map((p) => p.id), ['l-1', 'q-1', 'q-2']);
+
+    // What went out, alone or carried by a coalesced push, is remembered.
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-3' });
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-4' });
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-5' });
+    await clock.advance(11 * SEC);
+    assert.deepEqual(seen.slice(63).map((p) => p.id), ['q-3', 'q-5']);
+    await clock.advance(11 * SEC);
+    for (const id of ['l-1', 'q-3', 'q-4', 'q-5']) {
+      await pusher.notify(phone, { node_id: 'n-1', kind: id === 'l-1' ? 'session_ended' : 'question', id });
+      await clock.advance(11 * SEC);
+    }
+    assert.equal(seen.length, 65, 'nothing that went out is pushed again inside its window');
+    pusher.stop();
   });
 });
 

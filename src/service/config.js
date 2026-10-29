@@ -64,6 +64,16 @@ function requiredString(value, where, file) {
 }
 
 // relay.push, shared by the relay host and the front door (§3.1: "used as is").
+// This host's parsed relay.push block, from wherever the host keeps it: a
+// front door's service.json holds it raw (relay may hold only push there;
+// a block that does not parse throws), a `relay run` host's relay block has
+// it parsed. Null when the host has no relay block. `frontdoor` defaults to
+// the service config's own profile.
+function hostPushConfig(serviceConfig, { frontdoor = Boolean(serviceConfig && serviceConfig.profile === 'frontdoor') } = {}) {
+  if (frontdoor) return parsePushConfig(serviceConfig && serviceConfig.relayRaw ? serviceConfig.relayRaw.push : undefined, 'service.json');
+  return serviceConfig && serviceConfig.relay ? serviceConfig.relay.push || {} : null;
+}
+
 function parsePushConfig(raw, file) {
   const push = {};
   if (raw === undefined) return push;
@@ -518,4 +528,4 @@ function loadServiceConfig(dataDir, overrides = {}, {
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, parseLocalInferenceConfig, parseCaseChecksConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };
+module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, hostPushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, parseLocalInferenceConfig, parseCaseChecksConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

@@ -88,13 +88,15 @@ class KlMessagingService : FirebaseMessagingService() {
         val kind = message.data["k"] ?: "approval"
         // A newer relay's kind is ignored, never shown as something else.
         if (kind !in PushText.KINDS) return
-        val tag = PushText.tag(kind, rid) ?: return
+        // A coalesced push (c above 1) of any kind is the Approvals notification with its running count.
+        val items = PushText.itemsIn(message.data["c"])
+        val tag = PushText.tag(kind, rid, items) ?: return
         val node = PushText.nodeName(message.data["n"])
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(PushText.APPROVALS_CHANNEL, "Approvals", NotificationManager.IMPORTANCE_HIGH))
         manager.createNotificationChannel(NotificationChannel(PushText.SESSIONS_CHANNEL, "Sessions", NotificationManager.IMPORTANCE_DEFAULT))
-        val approvals = kind in PushText.APPROVAL_KINDS
-        val count = if (approvals) Push.addToCount(this, PushText.itemsIn(message.data["c"])) else 1
+        val approvals = PushText.joinsApprovals(kind, items)
+        val count = if (approvals) Push.addToCount(this, items) else 1
         val text = if (approvals) PushText.approvalText(kind, node, count) else PushText.otherText(kind, node)
         val open = PendingIntent.getActivity(
             this, tag.hashCode(),
@@ -105,7 +107,7 @@ class KlMessagingService : FirebaseMessagingService() {
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val notification = Notification.Builder(this, PushText.channel(kind))
+        val notification = Notification.Builder(this, PushText.channel(kind, items))
             .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentTitle("King Louie")
             .setContentText(text)

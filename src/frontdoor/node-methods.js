@@ -5,15 +5,15 @@ const { open, verifyEd25519, verifyEs256 } = require('../approvals/envelope');
 const { validateMessage, isTimestamp, DEVICE_ID_RE } = require('../approvals/messages');
 const { LinkRpcError } = require('../approvals/link-rpc');
 const { TTL_MS: CODE_TTL_MS } = require('./invites');
+const { KINDS, FCM_ONLY_KINDS, SESSION_KINDS } = require('./push/text');
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const MAX_PUSH_ID = 128;
-// The kinds message.submit may push: its own list, not push/text.js's
-// KINDS, which also holds the kinds only push.notify sends (push spec §7.1).
-const PUSH_KINDS = ['approval', 'grant', 'pairing', 'alert', 'question', 'lease'];
+// The kinds message.submit may push: push/text.js's KINDS less the ones only
+// push.notify (and the relay's own push-test) sends (push spec §7.1).
+const PUSH_KINDS = KINDS.filter((k) => !FCM_ONLY_KINDS.includes(k));
 // The kinds push.notify may push (push spec §6.2): a lease's ending or
-// contact pause, keyed by its lease id.
-const SESSION_KINDS = ['session_ended', 'session_paused'];
+// contact pause, keyed by its lease id (SESSION_KINDS, from push/text.js).
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const optionalDevice = (v) => v === null || v === undefined || (typeof v === 'string' && DEVICE_ID_RE.test(v));
 

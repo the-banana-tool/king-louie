@@ -437,9 +437,9 @@ office NAT) are not locked out by a neighbour's failures.
 | `POST /v1/devices/enroll` | device | enroll envelope → `{ nodes: [{ node_id, state }] }` |
 | `POST /v1/devices/revoke` | device | revoke envelope → `{ nodes: [{ node_id, state }] }` |
 | `GET /v1/devices` | device | → `[{ device_id, name, platform, nodes: [{ node_id, state }] }]` |
-| `PUT /v1/push-token` | device | `{ platform: 'apns'\|'fcm', token }` → `204`; written only when the platform or token changed |
-| `DELETE /v1/push-token` | device | → `204`; the relay forgets this device's token |
-| `GET /v1/push-token` | device | → `{ registered, sender }`: whether the relay holds a token for this device, and has a sender for its platform; the token is never echoed |
+| `PUT /v1/push-token` | device, either key (read: see "Read-key requests") | `{ platform: 'apns'\|'fcm', token }` → `204`; written only when the platform or token changed |
+| `DELETE /v1/push-token` | device, either key (read: see "Read-key requests") | → `204`; the relay forgets this device's token |
+| `GET /v1/push-token` | device, either key (read: see "Read-key requests") | → `{ registered, sender }`: whether the relay holds a token for this device, and has a sender for its platform; the token is never echoed |
 
 An invite claim's `mac` is `b64url(HMAC-SHA256(key = the 32 raw bytes of secret, JCS(device)))`;
 the inviting phone, not the relay, checks it.

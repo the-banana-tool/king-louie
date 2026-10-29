@@ -14,11 +14,14 @@
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../../logging');
+const { defaultTimers } = require('./gate');
 
 const log = createLogger('frontdoor/push');
 
 const WRITE_EVERY_MS = 60 * 1000;
 
+// Not src/cases/jsonfile.js's writeAtomic: this one makes the file 0600 and
+// its folder 0700, and removes the temporary file when the write fails.
 function writeAtomic(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
@@ -31,7 +34,7 @@ function writeAtomic(file, text) {
   }
 }
 
-function createPushStatus({ file, now = Date.now, timers }) {
+function createPushStatus({ file, now = Date.now, timers = defaultTimers }) {
   const state = { v: 1, last_send: null, last_failure: null };
   let dirty = false;
   let lastWrite = null;

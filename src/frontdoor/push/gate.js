@@ -28,6 +28,7 @@ const MAX_KEYS = 2048;
 const COALESCE_MS = 10 * SEC;
 const HOURLY_CAP = 60;
 
+// The real timers; the gate, the pusher and the status file default to these.
 const defaultTimers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h) };
 
 // send(device, payload) → Promise; payload carries `count` when it stands
@@ -45,17 +46,32 @@ function createPushGate({ send, now = Date.now, timers = defaultTimers }) {
     return handle;
   };
 
-  // True when this (node, kind, id) was pushed to this device inside its window.
-  function duplicate(deviceId, payload, nodeId) {
-    if (NOT_DEDUPED.has(payload.kind)) return false;
-    const key = `${deviceId}\0${nodeId || ''}\0${payload.kind}\0${payload.id}`;
-    const t = now();
+  // The dedupe key of a push, or null for a kind that is never deduped.
+  function keyOf(deviceId, payload, nodeId) {
+    if (NOT_DEDUPED.has(payload.kind)) return null;
+    return `${deviceId}\0${nodeId || ''}\0${payload.kind}\0${payload.id}`;
+  }
+
+  // True when this key went out to its device inside its window.
+  function duplicate(key) {
+    if (key === null) return false;
     const until = seen.get(key);
-    if (until !== undefined && until > t) return true;
+    if (until === undefined) return false;
+    if (until > now()) return true;
     seen.delete(key);
-    seen.set(key, t + (DEDUPE_MS[payload.kind] || DEFAULT_DEDUPE_MS));
-    while (seen.size > MAX_KEYS) seen.delete(seen.keys().next().value);
     return false;
+  }
+
+  // Records the keys of what actually went out (alone, or carried by a
+  // coalesced push): a push the cap drops is not remembered.
+  function remember(keys) {
+    const t = now();
+    for (const { key, kind } of keys) {
+      if (key === null) continue;
+      seen.delete(key);
+      seen.set(key, t + (DEDUPE_MS[kind] || DEFAULT_DEDUPE_MS));
+    }
+    while (seen.size > MAX_KEYS) seen.delete(seen.keys().next().value);
   }
 
   // The hourly cap, checked when a push actually leaves.
@@ -76,8 +92,9 @@ function createPushGate({ send, now = Date.now, timers = defaultTimers }) {
     return true;
   }
 
-  function release(device, payload) {
+  function release(device, payload, keys) {
     if (!underCap(device.device_id)) return Promise.resolve();
+    remember(keys);
     return send(device, payload);
   }
 
@@ -96,7 +113,7 @@ function createPushGate({ send, now = Date.now, timers = defaultTimers }) {
     delete payload.count;
     if (w.held.length > 1) payload.count = w.held.length;
     openWindow(deviceId);
-    release(newest.device, payload).catch((err) => log.warn(`coalesced push to ${deviceId} failed: ${err && err.message}`));
+    release(newest.device, payload, w.held.map((h) => h.key)).catch((err) => log.warn(`coalesced push to ${deviceId} failed: ${err && err.message}`));
   }
 
   return {
@@ -104,14 +121,17 @@ function createPushGate({ send, now = Date.now, timers = defaultTimers }) {
     notify(device, payload, nodeId = null) {
       if (stopped) return Promise.resolve();
       const deviceId = device.device_id;
-      if (duplicate(deviceId, payload, nodeId)) return Promise.resolve();
+      const key = { key: keyOf(deviceId, payload, nodeId), kind: payload.kind };
+      if (duplicate(key.key)) return Promise.resolve();
       const w = windows.get(deviceId);
       if (w) {
-        w.held.push({ device, payload });
+        // Held, not yet sent: a second copy in the same window is dropped.
+        if (key.key !== null && w.held.some((h) => h.key.key === key.key)) return Promise.resolve();
+        w.held.push({ device, payload, key });
         return Promise.resolve();
       }
       openWindow(deviceId);
-      return release(device, payload);
+      return release(device, payload, [key]);
     },
     // Drops what the windows hold and clears their timers.
     stop() {
@@ -122,4 +142,4 @@ function createPushGate({ send, now = Date.now, timers = defaultTimers }) {
   };
 }
 
-module.exports = { createPushGate, DEDUPE_MS, DEFAULT_DEDUPE_MS, MAX_KEYS, COALESCE_MS, HOURLY_CAP };
+module.exports = { createPushGate, defaultTimers, DEDUPE_MS, DEFAULT_DEDUPE_MS, MAX_KEYS, COALESCE_MS, HOURLY_CAP };

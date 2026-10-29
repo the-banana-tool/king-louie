@@ -12,7 +12,8 @@ const SESSION_ENDED_TTL_S = 3600;
 const MIN_COUNT = 2;
 const MAX_COUNT = 999;
 
-const countOf = (count) => (Number.isInteger(count) && count >= MIN_COUNT && count <= MAX_COUNT ? count : null);
+// Below 2 there is nothing to count; above 999 the phone is told 999.
+const countOf = (count) => (Number.isInteger(count) && count >= MIN_COUNT ? Math.min(count, MAX_COUNT) : null);
 
 // A token FCM says is gone (404 UNREGISTERED) or belongs to another Firebase
 // project (403 SENDER_ID_MISMATCH: the app was rebuilt against a new one) is
