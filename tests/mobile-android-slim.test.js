@@ -247,7 +247,7 @@ describe('Android: the read key and the routes (android-slim §8.4, §12.1)', ()
 // The code review's spec findings (P1, P2, P3, P6): what each fix wrote into the app.
 describe('Android: review fixes (android-slim §4, §6.4, §7.2, §9)', () => {
   // Every model file of the app (AppModel.kt and the files split out of it).
-  const modelText = () => ['AppModel.kt', 'Storage.kt', 'ReadKeyNodes.kt', 'InviteFlow.kt', 'OwnerText.kt']
+  const modelText = () => ['AppModel.kt', 'Storage.kt', 'ReadKeyNodes.kt', 'InviteFlow.kt', 'OwnerText.kt', 'ScannerCodes.kt']
     .filter((f) => fs.existsSync(path.join(KT_DIR, f))).map((f) => kt(f)).join('\n');
 
   it('a decided row of every yes/no kind stays at the bottom until a minute past its expiry (§7.2, P1)', () => {

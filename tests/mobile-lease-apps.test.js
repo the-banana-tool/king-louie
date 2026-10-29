@@ -803,7 +803,7 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     assert.equal(count(model, 'onBackground('), 1);
     assert.match(loop, /private fun startLoop\(\) \{\n\s+if \(!foreground \|\| pairing \|\| mode != AppMode\.LIVE \|\| loop != null \|\| !readKeyKnown\) return/);
     assert.match(loop, /fun onBackground\(\) \{\n\s+foreground = false\n\s+stopLoop\(sayAway = true\)\n\s+stopLiveLoop\(\)/);
-    assert.match(model, /private val readKeyKnown: Boolean get\(\) = readKey != null && !readKeyUnknown/);
+    assert.match(model, /private val readKeyKnown: Boolean get\(\) = readKey != null && !readKeyNodes\.unknown/);
     assert.equal(count(model, 'private inner class ForegroundLoop'), 1);
     // The live view's loop: started by the view's one DisposableEffect and the foreground, stopped by either.
     assert.match(liveLoop, /private fun startLiveLoop\(\) \{\n\s+if \(!liveViewVisible \|\| !foreground \|\| liveLoopJob\?\.isActive == true \|\| !readKeyKnown\) return/);
@@ -815,17 +815,23 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     // Neither loop names the device key or a decision.
     none(loop, DECIDES, 'ForegroundLoop');
     none(liveLoop, DECIDES, 'the live view\'s loop');
-    // Each `while` in the model, with its reason. A new one fails here until it is named.
-    const whiles = [...model.matchAll(/while \((.*)\) \{$/gm)].map((m) => m[1]);
-    assert.deepEqual(whiles, [
+    // Each `while` in the model, with its reason: AppModel.kt and the files split out of it (review S8).
+    // A new one fails here until it is named.
+    const whilesOf = (text) => [...text.matchAll(/while \((.*)\) \{$/gm)].map((m) => m[1]);
+    assert.deepEqual(whilesOf(model), [
       'isActive', // ForegroundLoop: presence every 60 s (C-8)
       'isActive', // ForegroundLoop: the approvals long poll (§9)
       'true', // the live view's loop (§7.6)
       'SystemClock.elapsedRealtime() < deadline', // a console pairing waits for its node (unchanged)
       'true', // a signed tool-approval response, re-sent while the node is offline and the request has time (unchanged)
-      'openInvite === invite', // Add another phone: the claim, every 3 s with the read key (C-14)
       'reply.retryable && attempts < 3' // a pairing decision the front door could not save (unchanged)
     ]);
+    const invite = read(...dir, 'InviteFlow.kt');
+    assert.deepEqual(whilesOf(invite), [
+      'open === invite' // Add another phone: the claim, every 3 s with the read key (C-14)
+    ]);
+    none(invite, DECIDES, 'InviteFlow.kt');
+    for (const f of ['Storage.kt', 'ReadKeyNodes.kt', 'OwnerText.kt', 'ScannerCodes.kt']) assert.deepEqual(whilesOf(read(...dir, f)), [], f);
     assert.equal(count(loop, 'while ('), 2);
     assert.equal(count(liveLoop, 'while ('), 1);
     assert.equal(count(live.replace(liveLoop, ''), 'while ('), 0, 'no other loop in the leases section');
@@ -837,7 +843,7 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     assert.match(loop, /if \(lastRestAtMs != 0L && now - lastRestAtMs < REST_EVERY_MS\) return@withLock/);
     assert.match(loop, /each \{ fetchQuestions\(api\) \}\n\s+each \{ refreshLeases\(api\) \}\n\s+if \(frontDoorId != null\) \{\n\s+each \{ fetchPairings\(api\) \}\n\s+each \{ fetchAlerts\(api\) \}/);
     // Its errors, as §9 says: retry_after, 401 or rate_limited 15 s, pin_mismatch one re-pin, unknown_read_key the set-up row, else 5 s.
-    assert.match(loop, /if \(e\.code == "unknown_read_key"\) \{\n\s+\/\/ [^\n]+\n\s+markReadKeyUnknown\(true\)/);
+    assert.match(loop, /if \(e\.code == "unknown_read_key"\) \{\n\s+\/\/ [^\n]+\n\s+readKeyNodes\.markUnknown\(true\)/);
     assert.match(loop, /if \(!repinTried\) \{\n\s+repinTried = true\n\s+if \(tryRepin\(\)\) return false\n\s+\}/);
     assert.match(loop, /val seconds = e\.retryAfter\?\.coerceAtLeast\(1\)\n\s+\?: if \(e\.status == 401 \|\| e\.code == "rate_limited"\) BUSY_WAIT_S else ERROR_WAIT_S/);
     assert.match(loop, /"Can't reach the relay\. Trying again in \$seconds s\."/);
@@ -1013,7 +1019,12 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     assert.match(model, /const val READ_KEY_SETUP_TITLE = "Check for requests without your fingerprint\. Set up once: two fingerprints\."/);
     // Re-posted at each loop start, with the read key, only while a node answered offline and the statement has not expired.
     const repost = section(model, 'private suspend fun repostReadKeyStatement', '\n    }\n');
-    assert.match(repost, /if \(readKeyNodes\.values\.none \{ it == RK_OFFLINE \}\) return\n\s+val envelope = keptStatement\(api\) \?: return\n\s+noteReadKeyReply\(api\.readKey\(envelope, PhoneKey\.READ\), firstPost = false\)/);
+    assert.match(repost, /if \(!readKeyNodes\.anyOffline\) return\n\s+val envelope = readKeyNodes\.kept\(api\.now\(\)\.toEpochMilli\(\)\) \?: return\n\s+readKeyNodes\.noteReply\(api\.readKey\(envelope, PhoneKey\.READ\), firstPost = false\)/);
+    // The statement and each node's answer are kept in ReadKeyNodes.kt (split out of AppModel.kt): an expired one is forgotten.
+    const nodes = read(...dir, 'ReadKeyNodes.kt');
+    assert.match(nodes, /val anyOffline: Boolean get\(\) = nodes\.values\.any \{ it == OFFLINE \}/);
+    assert.match(nodes, /if \(envelope == null \|\| expires == null \|\| expires <= relayNowMs\) \{\n\s+storage\.readKeyStatement = null/);
+    none(nodes, ['ReadKey.', 'DeviceKey', 'sign('], 'ReadKeyNodes.kt (it holds no key)');
     assert.match(loop, /repostReadKeyStatement\(api\)/);
     // No fallback to the device key for reading (C-19): RelayApi gets the read signer, and the loop needs a read key the relay knows.
     assert.equal(count(model, 'PhoneKey.DEVICE'), 1, 'only the first post of the statement');

@@ -20,10 +20,8 @@ import com.example.kinglouie.protocol.Envelope
 import com.example.kinglouie.protocol.FrontDoor
 import com.example.kinglouie.protocol.FrontDoorReply
 import com.example.kinglouie.protocol.GrantRequest
-import com.example.kinglouie.protocol.Hex
 import com.example.kinglouie.protocol.Identifiers
 import com.example.kinglouie.protocol.Jcs
-import com.example.kinglouie.protocol.JsonText
 import com.example.kinglouie.protocol.LeaseAction
 import com.example.kinglouie.protocol.LeaseRequest
 import com.example.kinglouie.protocol.LeaseStatus
@@ -46,7 +44,6 @@ import com.example.kinglouie.protocol.arr
 import com.example.kinglouie.protocol.bool
 import com.example.kinglouie.protocol.get
 import com.example.kinglouie.protocol.int
-import com.example.kinglouie.protocol.jsonString
 import com.example.kinglouie.protocol.obj
 import com.example.kinglouie.protocol.str
 import com.example.kinglouie.push.Push
@@ -63,122 +60,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import java.net.URI
 import java.text.DateFormat
 import java.time.Instant
 import java.util.Date
-
-/** A message meant for the owner as it stands (already worded and escaped). */
-class OwnerMessage(message: String) : Exception(message)
-
-/**
- * What the app keeps (mobile/PRIVACY.md): relay pin, node pins, mode, push
- * token, and the read key's set-up (android-slim §8.7). The keys live in the
- * Keystore.
- */
-class Storage(context: Context) {
-    private val prefs = context.getSharedPreferences("kl.state", Context.MODE_PRIVATE)
-
-    /** A phone left in the old demo mode reads as WELCOME: the demo is gone (android-slim §6.5). */
-    var mode: AppMode
-        get() = runCatching { AppMode.valueOf(prefs.getString("mode", null) ?: AppMode.WELCOME.name) }.getOrDefault(AppMode.WELCOME)
-        set(v) = prefs.edit().putString("mode", v.name).apply()
-    var relayUrl: String?
-        get() = prefs.getString("relayUrl", null)
-        set(v) = prefs.edit().putString("relayUrl", v).apply()
-    var relaySpki: String?
-        get() = prefs.getString("relaySpki", null)
-        set(v) = prefs.edit().putString("relaySpki", v).apply()
-    var pushToken: String?
-        get() = prefs.getString("pushToken", null)
-        set(v) = prefs.edit().putString("pushToken", v).apply()
-
-    /** The push token the relay last accepted from this phone. */
-    var pushTokenSent: String?
-        get() = prefs.getString("pushTokenSent", null)
-        set(v) = prefs.edit().putString("pushTokenSent", v).apply()
-
-    /**
-     * The front door this phone's relay is (fleet stage 4): set only when GET
-     * /v1/frontdoor names a node pinned from a code, with that key
-     * (FrontDoor.identify).
-     */
-    var frontDoorId: String?
-        get() = prefs.getString("frontDoorId", null)
-        set(v) = prefs.edit().putString("frontDoorId", v).apply()
-    var nodes: List<NodePin>
-        get() = prefs.getString("nodes", null)?.let { text ->
-            runCatching {
-                JsonText.parse(text).arr()!!.map { NodePin(it["id"].str()!!, it["name"].str()!!, it["key"].str()!!) }
-            }.getOrNull()
-        } ?: emptyList()
-        set(v) = prefs.edit().putString("nodes", Jcs.serialize(JsonArray(v.map {
-            JsonObject(mapOf("id" to jsonString(it.id), "name" to jsonString(it.name), "key" to jsonString(it.key)))
-        }))).apply()
-
-    /** The signed `kl.device.read_key` statement (an envelope, JSON), kept until it expires to re-post it (§8.7). */
-    var readKeyStatement: String?
-        get() = prefs.getString("readKeyStatement", null)
-        set(v) = prefs.edit().putString("readKeyStatement", v).apply()
-
-    /** What each node answered to that statement, by node id, in this app's words (AppModel.RK_*). */
-    var readKeyNodes: Map<String, String>
-        get() = prefs.getString("readKeyNodes", null)?.let { text ->
-            runCatching { JsonText.parse(text).obj()!!.mapValues { it.value.str()!! } }.getOrNull()
-        } ?: emptyMap()
-        set(v) = prefs.edit().putString("readKeyNodes", Jcs.serialize(JsonObject(v.mapValues { jsonString(it.value) }))).apply()
-
-    /** The relay answered `unknown_read_key`: the read key must be set up (again) before the loop runs. */
-    var readKeyUnknown: Boolean
-        get() = prefs.getBoolean("readKeyUnknown", false)
-        set(v) = prefs.edit().putBoolean("readKeyUnknown", v).apply()
-
-    /** The pairing state, to put back when a pairing does not finish. */
-    data class Snapshot(val mode: AppMode, val relayUrl: String?, val relaySpki: String?, val nodes: List<NodePin>, val frontDoorId: String?)
-
-    fun snapshot() = Snapshot(mode, relayUrl, relaySpki, nodes, frontDoorId)
-
-    fun restore(s: Snapshot) {
-        mode = s.mode
-        relayUrl = s.relayUrl
-        relaySpki = s.relaySpki
-        nodes = s.nodes
-        frontDoorId = s.frontDoorId
-    }
-
-    fun clear() = prefs.edit().clear().apply()
-}
-
-class PendingItem(
-    val id: String,
-    val message: JsonElement,
-    val display: JsonElement,
-    val fullText: Map<String, String>,
-    val receivedAtMs: Long,
-    val expiresInMs: Long,
-    initialStatus: String?
-) {
-    var status by mutableStateOf(initialStatus)
-
-    /** When `status` was last set (elapsedRealtime ms): a decided row's place in the list. */
-    var statusAtMs by mutableStateOf(if (initialStatus != null) SystemClock.elapsedRealtime() else 0L)
-
-    /** An approve or deny for this item is being signed or sent. */
-    var deciding by mutableStateOf(false)
-
-    /** From receipt, on the monotonic clock. */
-    val timeLeftMs: Long get() = (expiresInMs - (SystemClock.elapsedRealtime() - receivedAtMs)).coerceAtLeast(0)
-}
-
-/** A node pairing waiting on the front door, with when this phone first saw it (its time left counts from there). */
-data class PairingItem(val request: PairingRequest, val receivedAtMs: Long) {
-    val timeLeftMs: Long get() = (request.expiresInMs - (SystemClock.elapsedRealtime() - receivedAtMs)).coerceAtLeast(0)
-}
 
 class AppModel(context: Context) {
     private val storage = Storage(context)
@@ -207,10 +95,10 @@ class AppModel(context: Context) {
     var frontDoorId by mutableStateOf(storage.frontDoorId)
         private set
 
-    /** Add another phone (§6.4): the invite's QR while it is open, then the claimed device to compare. */
-    var inviteQr by mutableStateOf<String?>(null)
-        private set
-    var inviteClaim by mutableStateOf<JsonElement?>(null)
+    /** Add another phone (§6.4, InviteFlow.kt): the invite's QR while it is open, then the claimed device to compare. */
+    private val invite = InviteFlow(scope) { banner = it }
+    val inviteQr: String? get() = invite.qr
+    val inviteClaim: JsonElement? get() = invite.claim
 
     /** A client connection this phone claimed by its code (C-13), with the code the grant message needs. */
     var grantRequest by mutableStateOf<GrantRequest?>(null)
@@ -348,11 +236,12 @@ class AppModel(context: Context) {
     /** The set-up row (§8.7): signing or sending the statement. */
     var readKeySetupBusy by mutableStateOf(false)
         private set
-    private var readKeyUnknown by mutableStateOf(storage.readKeyUnknown)
-    private val readKeyNodes = mutableStateMapOf<String, String>().apply { putAll(storage.readKeyNodes) }
+
+    /** Each node's answer to the statement, the statement kept to re-post it, and whether the relay knows the read key (ReadKeyNodes.kt). */
+    private val readKeyNodes = ReadKeyNodes(storage)
 
     /** A read key the relay knows: the loop may run (§9). */
-    private val readKeyKnown: Boolean get() = readKey != null && !readKeyUnknown
+    private val readKeyKnown: Boolean get() = readKey != null && !readKeyNodes.unknown
 
     /** Whether the Approvals list shows the set-up row (`READ_KEY_SETUP_TITLE`) until it is done. */
     val readKeySetupNeeded: Boolean get() = mode == AppMode.LIVE && key != null && !readKeyKnown
@@ -361,10 +250,10 @@ class AppModel(context: Context) {
     fun readKeyState(nodeId: String): ReadKeyNodeState = when {
         !readKeyKnown -> ReadKeyNodeState.NOT_SENT
         // No statement was ever needed: the phone enrolled with its read key, so every node holds it.
-        readKeyNodes.isEmpty() -> ReadKeyNodeState.IN_USE
+        readKeyNodes.noneSent -> ReadKeyNodeState.IN_USE
         else -> when (readKeyNodes[nodeId]) {
-            RK_IN_USE -> ReadKeyNodeState.IN_USE
-            RK_WAITING -> ReadKeyNodeState.WAITING_FOR_APPLY
+            ReadKeyNodes.IN_USE -> ReadKeyNodeState.IN_USE
+            ReadKeyNodes.WAITING -> ReadKeyNodeState.WAITING_FOR_APPLY
             else -> ReadKeyNodeState.NOT_SENT
         }
     }
@@ -387,10 +276,9 @@ class AppModel(context: Context) {
                 val envelope = signReadKeyStatement(k, rk, api)
                 val reply = postReadKey(api, envelope, PhoneKey.DEVICE)
                 readKey = rk
-                keepStatement(envelope)
-                readKeyNodes.clear()
-                noteReadKeyReply(reply, firstPost = true)
-                markReadKeyUnknown(false)
+                readKeyNodes.keep(envelope)
+                readKeyNodes.noteReply(reply, firstPost = true)
+                readKeyNodes.markUnknown(false)
                 // RelayApi now carries the read key's signer, and the loop starts on it.
                 connect()
             } catch (e: Exception) {
@@ -417,9 +305,8 @@ class AppModel(context: Context) {
             try {
                 val envelope = signReadKeyStatement(k, rk, api)
                 val reply = postReadKey(api, envelope, PhoneKey.READ)
-                keepStatement(envelope)
-                readKeyNodes.clear()
-                noteReadKeyReply(reply, firstPost = true)
+                readKeyNodes.keep(envelope)
+                readKeyNodes.noteReply(reply, firstPost = true)
             } catch (e: Exception) {
                 fail(e)
             } finally {
@@ -441,71 +328,11 @@ class AppModel(context: Context) {
         throw e
     }
 
-    private fun keepStatement(envelope: Envelope) {
-        storage.readKeyStatement = Jcs.serialize(envelope.json)
-    }
-
-    /** The statement kept for re-posting, while it has not expired on the relay's clock; an expired one is forgotten. */
-    private fun keptStatement(api: RelayApi): Envelope? {
-        val text = storage.readKeyStatement ?: return null
-        val envelope = runCatching { Envelope.fromJson(JsonText.parse(text)) }.getOrNull()
-        val expires = envelope?.let { runCatching { it.message() }.getOrNull() }?.get("expires_at").str()?.let { Timestamps.epochMillis(it) }
-        if (envelope == null || expires == null || expires <= api.now().toEpochMilli()) {
-            storage.readKeyStatement = null
-            return null
-        }
-        return envelope
-    }
-
-    /**
-     * Each node's answer to a statement. A re-post goes to every node again
-     * (the relay forwards it to all), so only the nodes that were offline
-     * take the new answer. `applied`: the node's record holds this read key,
-     * so it is in use there. `duplicate` is a node that has the statement
-     * staged, waiting for `device apply`; on a first post it can only come
-     * from a node from before `applied`, whose record already held the key.
-     */
-    private fun noteReadKeyReply(reply: JsonElement?, firstPost: Boolean) {
-        for (n in reply["nodes"].arr().orEmpty()) {
-            val id = n["node_id"].str() ?: continue
-            val before = readKeyNodes[id]
-            if (!firstPost && before != null && before != RK_OFFLINE) continue
-            readKeyNodes[id] = when (n["state"].str()) {
-                "read-key-pending-apply" -> RK_WAITING
-                "applied" -> RK_IN_USE
-                "duplicate" -> if (firstPost) RK_IN_USE else RK_WAITING
-                "rejected" -> RK_REJECTED
-                else -> RK_OFFLINE
-            }
-        }
-        storage.readKeyNodes = readKeyNodes.toMap()
-    }
-
-    /** What a node's answer to a watch showed of its read key (only once a statement was needed). */
-    private fun setReadKeyNode(nodeId: String, state: String) {
-        if (readKeyNodes.isEmpty() || readKeyNodes[nodeId] == state) return
-        readKeyNodes[nodeId] = state
-        storage.readKeyNodes = readKeyNodes.toMap()
-    }
-
     /** At each loop start: the kept statement again, with the read key, when a node was offline (§8.7). No prompt. */
     private suspend fun repostReadKeyStatement(api: RelayApi) {
-        if (readKeyNodes.values.none { it == RK_OFFLINE }) return
-        val envelope = keptStatement(api) ?: return
-        noteReadKeyReply(api.readKey(envelope, PhoneKey.READ), firstPost = false)
-    }
-
-    private fun markReadKeyUnknown(unknown: Boolean) {
-        readKeyUnknown = unknown
-        storage.readKeyUnknown = unknown
-    }
-
-    /** A new device key enrolls with its own read key: no set-up is pending. */
-    private fun forgetReadKeySetup() {
-        markReadKeyUnknown(false)
-        readKeyNodes.clear()
-        storage.readKeyNodes = emptyMap()
-        storage.readKeyStatement = null
+        if (!readKeyNodes.anyOffline) return
+        val envelope = readKeyNodes.kept(api.now().toEpochMilli()) ?: return
+        readKeyNodes.noteReply(api.readKey(envelope, PhoneKey.READ), firstPost = false)
     }
 
     // ---- ForegroundLoop (android-slim §9) ----
@@ -648,7 +475,7 @@ class AppModel(context: Context) {
                 is RelayException -> {
                     if (e.code == "unknown_read_key") {
                         // The relay does not know this read key: the set-up row of §8.7.
-                        markReadKeyUnknown(true)
+                        readKeyNodes.markUnknown(true)
                         pollProblem = null
                         return false
                     }
@@ -1041,13 +868,6 @@ class AppModel(context: Context) {
                 answering.remove(item.token)
             }
         }
-    }
-
-    /** At most `max` code points, then escaped (never cut through an escape). */
-    private fun promptText(text: String, max: Int): String {
-        val cps = text.codePoints().toArray()
-        val cut = if (cps.size <= max) text else String(cps, 0, max - 1) + "…"
-        return Display.escape(cut)
     }
 
     // ---- Leases (fleet stage 5) ----
@@ -1498,13 +1318,13 @@ class AppModel(context: Context) {
                                 // The reply is the relay's word: only its node-signed status is applied.
                                 cursor = Leases.cursorAfterWatch(current.lastSeq, sent.json)
                                 updateLive(leaseId) { applyReplyStatus(sent.json, pin, it, deviceId) }
-                                setReadKeyNode(pin.id, RK_IN_USE)
+                                readKeyNodes.set(pin.id, ReadKeyNodes.IN_USE)
                             }
                             is SendOutcome.Rejected -> if (outcome.reason == "bad_signature") {
                                 // §8.7: this node does not know the read key yet. The view offers the
                                 // fingerprint watch; no more read-key watches go to it from this view.
                                 updateLive(leaseId) { it.copy(readKeyRefused = true) }
-                                if (readKeyNodes[pin.id] == RK_IN_USE) setReadKeyNode(pin.id, RK_WAITING)
+                                if (readKeyNodes[pin.id] == ReadKeyNodes.IN_USE) readKeyNodes.set(pin.id, ReadKeyNodes.WAITING)
                             }
                             is SendOutcome.Unconfirmed -> Unit
                         }
@@ -1530,7 +1350,7 @@ class AppModel(context: Context) {
                     throw e
                 } catch (e: RelayException) {
                     if (e.code == "unknown_read_key") {
-                        markReadKeyUnknown(true)
+                        readKeyNodes.markUnknown(true)
                         break
                     }
                     delay((e.retryAfter ?: if (e.status == 401 || e.code == "rate_limited") BUSY_WAIT_S else ERROR_WAIT_S).coerceAtLeast(1) * 1000L)
@@ -1678,13 +1498,6 @@ class AppModel(context: Context) {
 
     // Errors
 
-    private fun friendlyReason(reason: String?): String = when (reason) {
-        null, "" -> "no reason given"
-        "action_changed" -> "the action changed before it ran"
-        "expired" -> "too late — request expired"
-        else -> Display.escape(reason)
-    }
-
     /** The words the owner sees. Never a key, signature or code; relay text is escaped like any display text. */
     private fun describe(e: Throwable): String = when (e) {
         is KeyInvalidatedException -> DeviceKey.INVALIDATED_MESSAGE
@@ -1762,13 +1575,13 @@ class AppModel(context: Context) {
                 key = null
                 readKey = null
                 client = null
-                return DeviceKey.create().also { key = it; readKey = runCatching { ReadKey.load() }.getOrNull(); forgetReadKeySetup() }
+                return DeviceKey.create().also { key = it; readKey = runCatching { ReadKey.load() }.getOrNull(); readKeyNodes.forget() }
             }
         }
         // load() gives null on a transient Keystore2 error too; create() runs
         // only once the Keystore confirms there is no key at all.
         DeviceKey.requireAbsent()
-        return DeviceKey.create().also { key = it; readKey = runCatching { ReadKey.load() }.getOrNull(); forgetReadKeySetup() }
+        return DeviceKey.create().also { key = it; readKey = runCatching { ReadKey.load() }.getOrNull(); readKeyNodes.forget() }
     }
 
 
@@ -1808,34 +1621,6 @@ class AppModel(context: Context) {
         } catch (e: Exception) {
             fail(e)
         }
-    }
-
-    private fun isToken(text: String?, bytes: Int): Boolean =
-        text != null && runCatching { B64Url.decode(text).size == bytes }.getOrDefault(false)
-
-    /** `relay` must be an https origin and `relay_spki` a `sha256/` pin of 32 bytes. */
-    private fun relayPin(payload: JsonElement): Pair<String, String> {
-        val text = payload["relay"].str()
-        val spki = payload["relay_spki"].str()
-        val uri = text?.let { runCatching { URI(it) }.getOrNull() }
-        val ok = uri != null && uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrEmpty() &&
-            (uri.rawPath.isNullOrEmpty() || uri.rawPath == "/") && uri.rawQuery == null && uri.rawUserInfo == null && uri.rawFragment == null &&
-            spki != null && spki.startsWith("sha256/") && isToken(spki.removePrefix("sha256/"), 32)
-        if (!ok) throw OwnerMessage("This code does not name a relay this app can pin.")
-        return text!! to spki!!
-    }
-
-    /** A node pin from a pairing or invite code (never from the relay's node list). Its id must be the one its Ed25519 key derives. */
-    private fun nodePin(node: JsonElement?): NodePin {
-        val id = node["id"].str()
-        val name = node["name"].str()
-        val keyHex = node["key"].str()
-        val spki = keyHex?.let { runCatching { Hex.decode(it) }.getOrNull() }
-        val ok = id != null && name != null && spki != null && spki.size == 44 &&
-            Hex.encode(spki.copyOfRange(0, 12)) == Identifiers.ED25519_SPKI_PREFIX &&
-            Identifiers.nodeId(spki.copyOfRange(12, 44)) == id
-        if (!ok) throw OwnerMessage("This code carries a node key that does not match its id.")
-        return NodePin(id!!, name!!, keyHex!!)
     }
 
     private fun pinNode(pin: NodePin) {
@@ -1915,7 +1700,7 @@ class AppModel(context: Context) {
             when (result) {
                 "done" -> {
                     // The enrollment carried the read key (§8.2): this node holds it.
-                    if (readKey != null) setReadKeyNode(pin.id, RK_IN_USE)
+                    if (readKey != null) readKeyNodes.set(pin.id, ReadKeyNodes.IN_USE)
                     banner = "Enrolled. This phone now approves for ${Display.escape(pin.name)}."
                     sendPushToken()
                     refreshFrontDoorNow()
@@ -2211,61 +1996,34 @@ class AppModel(context: Context) {
         leaseRequests.removeAll { it.request.nodeId == nodeId }
         questions.removeAll { it.nodeId == nodeId }
         online.remove(nodeId)
-        if (readKeyNodes.remove(nodeId) != null) storage.readKeyNodes = readKeyNodes.toMap()
+        readKeyNodes.remove(nodeId)
         if (frontDoorId == nodeId) setFrontDoor(null)
     }
 
-    /** A pairing code on the Scanner's Get a code tab, and when it expires on this phone's clock (epoch ms; null when the relay did not say). */
-    data class PairingCodeShown(val code: String, val nodeName: String, val expiresAtMs: Long?)
+    /** Get a code (§6.1, ScannerCodes.kt): the code on screen and whether one is being asked for. */
+    private val pairingCodes = PairingCodeFlow()
+    val pairingCode: PairingCodeShown? get() = pairingCodes.shown
+    val pairingCodeBusy: Boolean get() = pairingCodes.busy
 
-    var pairingCode by mutableStateOf<PairingCodeShown?>(null)
-        private set
-    var pairingCodeBusy by mutableStateOf(false)
-        private set
-
-    /**
-     * Get code (§6.1): `POST /v1/pairing-codes`, one fingerprint (device-key
-     * transport, §8.4). The code is shown with its expiry; the relay URL the
-     * node pairs with is the pinned one (`relayUrl`).
-     */
+    /** Get code: one fingerprint (device-key transport, §8.4). */
     fun getPairingCode(nodeName: String) {
-        if (pairingCodeBusy) return
         val api = client ?: return
-        pairingCodeBusy = true
-        pairingCode = null
         scope.launch {
             try {
-                val reply = api.pairingCode(nodeName)
-                val code = reply["code"].str() ?: throw OwnerMessage("The relay did not return a pairing code.")
-                val offset = api.now().toEpochMilli() - System.currentTimeMillis()
-                val expires = reply["expires_at"].str()?.let { Timestamps.epochMillis(it) }?.let { it - offset }
-                    ?: reply["expires_in_ms"].int()?.let { System.currentTimeMillis() + it }
-                pairingCode = PairingCodeShown(Display.escape(code), Display.escape(nodeName), expires)
+                pairingCodes.get(api, nodeName)
             } catch (e: Exception) {
                 fail(e)
-            } finally {
-                pairingCodeBusy = false
             }
         }
     }
 
-    fun clearPairingCode() {
-        pairingCode = null
-    }
-
-    /** Phone A's open invite: its id, the secret in its QR code, and when it lapses (elapsedRealtime ms). */
-    private data class OpenInvite(val id: String, val secret: String, val untilMs: Long)
-
-    private var openInvite: OpenInvite? = null
-
-    /** Polls the open invite's claim (C-14). */
-    private var invitePoll: Job? = null
+    fun clearPairingCode() = pairingCodes.clear()
 
     /**
-     * Phone A, Add another phone: an invite with the relay and node pins (one
-     * fingerprint, device-key transport), then its claim is polled every
-     * INVITE_POLL_MS with the read key while the invite is open and until it
-     * expires (C-14). The owner still compares the two screens and confirms.
+     * Phone A, Add another phone (InviteFlow.kt): an invite with the relay
+     * and node pins (one fingerprint, device-key transport), then its claim is
+     * polled with the read key while the invite is open and until it expires
+     * (C-14). The owner still compares the two screens and confirms.
      */
     fun startInvite() = scope.launch {
         val api = client ?: return@launch
@@ -2273,102 +2031,19 @@ class AppModel(context: Context) {
             banner = "Set up checking without your fingerprint first (the first row of the list)."
             return@launch
         }
-        cancelInvite()
         try {
-            val inviteId = api.createInvite()["invite_id"].str()?.takeIf { isToken(it, 16) }
-                ?: throw OwnerMessage("The relay did not return an invite.")
-            val secret = Messages.randomNonce()
-            inviteClaim = null
-            inviteQr = Messages.encodeQr(JsonObject(mapOf(
-                "t" to jsonString("kl.invite"),
-                "relay" to jsonString(storage.relayUrl ?: ""),
-                "relay_spki" to jsonString(storage.relaySpki ?: ""),
-                "invite_id" to jsonString(inviteId),
-                "secret" to jsonString(secret),
-                "nodes" to JsonArray(storage.nodes.map { JsonObject(mapOf("id" to jsonString(it.id), "name" to jsonString(it.name), "key" to jsonString(it.key))) })
-            )))
-            // The invite lives 10 minutes on the relay.
-            val invite = OpenInvite(inviteId, secret, SystemClock.elapsedRealtime() + 10 * 60 * 1000L)
-            openInvite = invite
-            invitePoll = scope.launch { pollInvite(api, invite) }
+            invite.start(api, storage.relayUrl ?: "", storage.relaySpki ?: "", storage.nodes, key?.deviceId)
         } catch (e: Exception) {
-            inviteQr = null
             fail(e)
         }
     }
 
     /** Leaves Add another phone: the poll stops and the invite is forgotten here (it lapses on the relay). */
-    fun cancelInvite() {
-        invitePoll?.cancel()
-        invitePoll = null
-        openInvite = null
-        inviteQr = null
-        inviteClaim = null
-    }
-
-    /** The claim, every INVITE_POLL_MS with the read key, until it comes, the invite lapses or the flow is left. */
-    private suspend fun pollInvite(api: RelayApi, invite: OpenInvite) {
-        while (openInvite === invite) {
-            delay(INVITE_POLL_MS)
-            if (openInvite !== invite) return
-            if (SystemClock.elapsedRealtime() > invite.untilMs) {
-                openInvite = null
-                inviteQr = null
-                banner = "Nobody used the invite within 10 minutes. Start a new one."
-                return
-            }
-            val claim = try {
-                api.inviteClaim(invite.id)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: RelayException) {
-                if (e.code == "rate_limited" || e.status == 401) delay((e.retryAfter ?: BUSY_WAIT_S).coerceAtLeast(1) * 1000L)
-                continue
-            } catch (e: Exception) {
-                continue
-            }
-            if (claim == null || claim is JsonNull) continue
-            openInvite = null
-            inviteQr = null
-            val device = verifiedClaim(claim, invite.secret)
-            if (device == null) {
-                banner = "The invite was claimed by something that did not scan it. Nothing was enrolled."
-                return
-            }
-            inviteClaim = device
-            return
-        }
-    }
-
-    /**
-     * The claimed device, exactly as a valid enrollment would carry it
-     * (Messages.device rebuilds and checks it), with a mac only the scanner of
-     * this invite could make.
-     */
-    private fun verifiedClaim(claim: JsonElement, secret: String): JsonObject? {
-        val device = claim["device"] ?: return null
-        val id = device["device_id"].str() ?: return null
-        val name = device["name"].str() ?: return null
-        val platform = device["platform"].str()?.takeIf { it == "ios" || it == "android" } ?: return null
-        val x = device["public_key"]["x"].str() ?: return null
-        val y = device["public_key"]["y"].str() ?: return null
-        // A phone from this change claims with its read key too (§8.2); it is bound by the same mac.
-        val readJwk = device["read_key"]?.takeIf { it !is JsonNull }?.let { rk ->
-            Messages.jwk(rk["x"].str() ?: return null, rk["y"].str() ?: return null)
-        }
-        val rebuilt = try {
-            Messages.device(id, name, platform, x, y, readJwk)
-        } catch (e: ProtocolException) {
-            return null
-        }
-        if (rebuilt != device || id == key?.deviceId) return null
-        return if (claim["mac"].str() == Messages.inviteMac(secret, rebuilt)) rebuilt else null
-    }
+    fun cancelInvite() = invite.cancel()
 
     /** Phone A, after both screens show the same id: sign B's enrollment. */
     fun confirmInvited() = scope.launch {
-        val device = inviteClaim ?: return@launch
-        inviteClaim = null
+        val device = invite.take() ?: return@launch
         val k = key ?: return@launch
         val api = client ?: return@launch
         try {
@@ -2511,31 +2186,6 @@ class AppModel(context: Context) {
         return RepinTarget(url, spki, fd)
     }
 
-    /**
-     * A front-door answer that did not confirm what was asked, in the owner's
-     * words. Known codes are worded; any other code, and a 2xx without the
-     * expected state, is shown as neutral data, never as success.
-     */
-    private fun unconfirmed(reply: FrontDoorReply): String = when (reply) {
-        is FrontDoorReply.Done -> "The front door answered but did not confirm it (state: ${reply.state ?: "none"}). Check again before relying on it."
-        is FrontDoorReply.Refused -> when (reply.code) {
-            "expired", "unknown_request" -> "This request expired or was already decided. Start again in the client."
-            "not_claimant" -> "Another phone claimed this request."
-            "forbidden" -> "This phone is not an approver on this front door."
-            "revoked_device" -> "This phone was revoked on this front door."
-            "unknown_machine" -> "The front door has no machine by one of the names chosen. Choose again."
-            "already_decided" -> "This was already decided."
-            "unknown_pairing" -> "This pairing expired or was withdrawn."
-            "replaces_changed" -> "The node this one replaces changed. Check the pairing again."
-            "key_enrolled_as_other_name" -> "This node's key is already enrolled under another name."
-            "console_record" -> "This node was confirmed at the console. Remove it there with frontdoor remove-node."
-            "save_failed" -> "The front door could not save this. Try again" + (reply.retryAfterSeconds?.let { " in $it s." } ?: ".")
-            "not_found" -> "The front door no longer has it."
-            null -> "The front door did not confirm this (HTTP ${reply.status})."
-            else -> "The front door did not confirm this (${reply.code}, HTTP ${reply.status})."
-        }
-    }
-
     /** The typed code, as the grant carries it; the request is claimed for this phone. */
     fun findGrant(code: String) = scope.launch {
         cancelGrant()
@@ -2625,7 +2275,7 @@ class AppModel(context: Context) {
                 return
             }
             if (reply is FrontDoorReply.Refused && (reply.status == 410 || reply.status == 404)) cancelGrant()
-            banner = unconfirmed(reply)
+            banner = frontDoorUnconfirmed(reply)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -2662,7 +2312,7 @@ class AppModel(context: Context) {
             if (reply.succeeded) {
                 clients.removeAll { it["grant_id"].str() == grantId }
             } else {
-                banner = unconfirmed(reply)
+                banner = frontDoorUnconfirmed(reply)
             }
         } catch (e: Exception) {
             fail(e)
@@ -2742,7 +2392,7 @@ class AppModel(context: Context) {
                 banner = if (approve) "$name is enrolled. It links when its pair command finishes." else "Refused. $name was not added."
                 return
             }
-            banner = unconfirmed(reply)
+            banner = frontDoorUnconfirmed(reply)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -2765,7 +2415,7 @@ class AppModel(context: Context) {
                 // In effect but not saved: removing again (a new challenge) saves it.
                 banner = "The node is removed but the front door could not save that. Tap Remove again."
             } else {
-                banner = unconfirmed(reply)
+                banner = frontDoorUnconfirmed(reply)
             }
         } catch (e: Exception) {
             fail(e)
@@ -2938,12 +2588,11 @@ class AppModel(context: Context) {
         overflowing.clear()
         selected = null
         listNotice = null
-        pairingCode = null
+        pairingCodes.clear()
         frontDoorId = null
         fingerprintToCompare = null
         pollProblem = null
-        readKeyNodes.clear()
-        readKeyUnknown = false
+        readKeyNodes.clearInMemory()
         lastRestAtMs = 0L
         storage.clear()
         changeMode(AppMode.WELCOME)
@@ -2972,17 +2621,8 @@ class AppModel(context: Context) {
         const val WATCH_EVERY_MS = 20_000L
         const val LIVE_IDLE_MS = 1_000L
 
-        /** Add another phone: the claim is polled this often with the read key (C-14). */
-        const val INVITE_POLL_MS = 3_000L
-
         /** A `kl.device.read_key` lives at most seven days (approval-v1, READ_KEY_MAX_MS). */
         const val READ_KEY_STATEMENT_MS = 7L * 24 * 60 * 60 * 1000
-
-        // A node's answer to the read-key statement, as kept (Storage.readKeyNodes).
-        const val RK_IN_USE = "in_use"
-        const val RK_WAITING = "waiting"
-        const val RK_OFFLINE = "offline"
-        const val RK_REJECTED = "rejected"
 
         /** The set-up row (§8.7). */
         const val READ_KEY_SETUP_TITLE = "Check for requests without your fingerprint. Set up once: two fingerprints."
