@@ -211,8 +211,10 @@ async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false
 }
 
 async function runDesktop({ sub, arg, dataDir, io, deps, yes, result }) {
-  const refuse = (exitCode, code, message) => {
-    io.stderr.write(`${message}\n`);
+  // `label`, when given, leads the stderr line only (the JSON message is
+  // the message alone).
+  const refuse = (exitCode, code, message, label = '') => {
+    io.stderr.write(`${label}${message}\n`);
     result.value = { ok: false, code, message: shown(message, 1000) };
     return exitCode;
   };
@@ -235,11 +237,7 @@ async function runDesktop({ sub, arg, dataDir, io, deps, yes, result }) {
     if (elevated) return refuse(1, 'PAIR_ELEVATED', `desktop ${sub} on a personal node runs as you, not elevated: open a normal prompt`);
     const { checkPersonalOwner } = require('../personal-host');
     const owner = checkPersonalOwner({ dataDir, configDir, platform, ...(deps.personalOwner || {}) });
-    if (!owner.ok) {
-      io.stderr.write(`PERSONAL_NOT_OWNER: ${owner.problem}\n`);
-      result.value = { ok: false, code: 'PERSONAL_NOT_OWNER', message: shown(owner.problem, 1000) };
-      return 1;
-    }
+    if (!owner.ok) return refuse(1, 'PERSONAL_NOT_OWNER', owner.problem, 'PERSONAL_NOT_OWNER: ');
   } else if (!elevated) {
     return refuse(1, 'PAIR_NOT_ADMIN', `desktop ${sub} ${sub === 'list' ? 'reads' : 'writes'} ${configDir}; run it as root/an administrator.`);
   } else if (nodeConfigError) {
