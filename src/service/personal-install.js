@@ -29,16 +29,22 @@ const NOTHING_PAIRED = `${NODE_YAML} has no approvers.relay and there is no ${FR
 
 const TRUST_LINE = 'the service will run as this account; the owner account is the trust boundary: anything running as you can drive it as a local mcp client and change its approver set, and a shell the phone approves can do anything you can';
 const REBOOT_LINE = 'a logon task: after a reboot the node is down until you log in (the phones show "Could not confirm" and a take cannot start)';
+const BINARY_LINE = (bin) => `binary:     ${bin}, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed`;
+const ALREADY_RUNNING = (pid) => `King Louie Node is already running (pid ${pid}); the task starts it at your next logon.`;
 const FFMPEG_LINE = 'ffmpeg is not on PATH: a take that records needs it. Install it as yourself: winget install Gyan.FFmpeg';
 
 const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
-function renderPersonalTaskXml({ sid, nodePath, entryPath, dataDir, env = process.env }) {
+// runAsNode: nodePath is the desktop app's own binary (Electron), which runs
+// the entry as plain Node only with ELECTRON_RUN_AS_NODE set (desktop attach
+// spec §8, C-9); the task's PowerShell sets it before the call.
+function renderPersonalTaskXml({ sid, nodePath, entryPath, dataDir, runAsNode = false, env = process.env }) {
   if (!SID_RE.test(String(sid))) throw new Error('the task needs the account\'s SID');
   const node = sanitizeWindowsPath('nodePath', nodePath);
   const entry = sanitizeWindowsPath('entryPath', entryPath);
   const dir = sanitizeWindowsPath('dataDir', dataDir);
-  const args = `-WindowStyle Hidden -NoProfile -NonInteractive -Command & ${psQuote(node)} ${psQuote(entry)} run --data-dir ${psQuote(dir)}`;
+  const prefix = runAsNode ? "$env:ELECTRON_RUN_AS_NODE='1'; " : '';
+  const args = `-WindowStyle Hidden -NoProfile -NonInteractive -Command ${prefix}& ${psQuote(node)} ${psQuote(entry)} run --data-dir ${psQuote(dir)}`;
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>King Louie personal node</Description></RegistrationInfo>
@@ -179,6 +185,8 @@ function resolveDeps(deps, io) {
     runningServicePid: deps.runningServicePid || ((dir) => require('./commands/io').runningServicePid(dir)),
     stopNode: deps.stopNode || ((dir) => require('./commands/stop').runStopCommand({ dataDir: dir, io })),
     nodePath: deps.nodePath || process.execPath,
+    // Under Electron as Node (the desktop's Install…), the task runs the app's binary.
+    runAsNode: deps.runAsNode !== undefined ? Boolean(deps.runAsNode) : Boolean(process.versions.electron),
     entryPath: deps.entryPath || path.resolve(__dirname, '..', '..', 'bin', 'king-louie-service.js')
   };
 }
@@ -303,6 +311,9 @@ async function install({ flags, io, c }) {
   // starts: a fresh one has no relay yet, and pair starts it.
   const start = existing ? c.startable(configDir) : { ok: false, why: NOTHING_PAIRED };
   const relay = start.ok;
+  // A node already running on this data dir (one started by hand included)
+  // is not started a second time (C-11).
+  const runningPid = relay ? c.runningServicePid(dataDir) : null;
   // A fleet data dir with no node.yaml beside it is a leftover that the
   // default data dir rule ignores (paths.js defaultServiceDataDir).
   const fleetData = require('../platform/paths').fleetDataDir({ platform: 'win32', env: c.env });
@@ -314,6 +325,7 @@ async function install({ flags, io, c }) {
     `  data dir:   ${dataDir}`,
     `  config dir: ${configDir}`,
     `  logon task: ${PERSONAL_TASK_NAME}`,
+    ...(c.runAsNode ? [`  ${BINARY_LINE(c.nodePath)}`] : []),
     `  ${TRUST_LINE}`,
     `  ${REBOOT_LINE}`,
     'It will write:',
@@ -334,16 +346,17 @@ async function install({ flags, io, c }) {
   // A warning, not a refusal: a take that records refuses recorder_missing
   // later with the same remedy.
   if (!c.findFfmpeg()) io.stdout.write(`${FFMPEG_LINE}\n`);
+  if (runningPid) io.stdout.write(`${ALREADY_RUNNING(runningPid)}\n`);
   if (leftover) io.stdout.write(`${fleetData} exists but no fleet config file is beside it: every command ignores it, and it may be removed.\n`);
 
   const xmlPath = path.join(c.tmpDir, `king-louie-node-${crypto.randomBytes(6).toString('hex')}.xml`);
   const schtasks = windowsSchtasksExe(c.env);
   const steps = [
-    { description: 'write the logon task definition', writeFile: { path: xmlPath, content: `\ufeff${renderPersonalTaskXml({ sid: account.sid, nodePath: c.nodePath, entryPath: c.entryPath, dataDir, env: c.env })}`, mode: 0o600, encoding: 'utf16le' } },
+    { description: 'write the logon task definition', writeFile: { path: xmlPath, content: `\ufeff${renderPersonalTaskXml({ sid: account.sid, nodePath: c.nodePath, entryPath: c.entryPath, dataDir, runAsNode: c.runAsNode, env: c.env })}`, mode: 0o600, encoding: 'utf16le' } },
     { description: `register the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Create', '/TN', PERSONAL_TASK_NAME, '/XML', xmlPath, '/F'] },
     { description: 'delete the temporary task definition', unlink: xmlPath, always: true, ignoreFailure: true }
   ];
-  if (relay) steps.push({ description: `start the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Run', '/TN', PERSONAL_TASK_NAME] });
+  if (relay && !runningPid) steps.push({ description: `start the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Run', '/TN', PERSONAL_TASK_NAME] });
 
   if (flags.dryRun) {
     await executeSteps(steps, { dryRun: true, io });
@@ -361,7 +374,9 @@ async function install({ flags, io, c }) {
     io.stdout.write(`wrote ${yamlPath}\n`);
   }
   await c.execute(steps);
-  io.stdout.write(relay
+  io.stdout.write(runningPid
+    ? `The logon task "${PERSONAL_TASK_NAME}" is registered; it was not started again.\n`
+    : relay
     ? `The logon task "${PERSONAL_TASK_NAME}" is registered and started.\n`
     : `The logon task "${PERSONAL_TASK_NAME}" is registered and not started: ${start.why}.\n`);
   // Whether --data-dir must be spelled out is what the CLI would pick now
