@@ -1,7 +1,8 @@
 ---
 id: T08
 title: Node - lease endings and contact pauses queue push.notify
-status: open
+status: done
+merged: 3f35f05e
 blocked_by: []
 ---
 ## Goal
