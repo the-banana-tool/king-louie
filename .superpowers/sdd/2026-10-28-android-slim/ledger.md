@@ -112,6 +112,23 @@ Start frontier: T01, T08, T09.
   says the first send is device-signed). T10's relay-keys test kept. CLAUDE.md and
   front-door.md wording adjusted to the built screens.
 
+- Review (mattpocock-skills:code-review, two axes) found no anti-goal breach;
+  fixed in one FIX branch: S1 routes.js comment names the presence/push-token
+  exceptions; S2 glossary words; S3 one `samePoint` (envelope.js); S4 one
+  `hasTestKey` (test-keys.js), front door `checks.js` now refuses a test read key;
+  S5 `judgeReadKey` shared by stage and apply; S6/S9 devices.js tidy; S7 unused
+  exports dropped (`READ_KEY_MAX_MS` kept: generate.js uses it); S8 AppModel.kt
+  split partly (2,945 -> 2,646 lines: Storage.kt, ReadKeyNodes.kt, InviteFlow.kt,
+  ScannerCodes.kt, OwnerText.kt; loops, leases section and list stay where tests
+  pin them). P1 decided rows for lease requests, clients, pairings
+  (`DECIDED_KEEP_MS`); P2 `Row.notConfirmed` for unanswered Allow/Deny/Stop; P3
+  Settings without a read key shows a set-up line, no fingerprint fallback; P4
+  `RouteKey { READ, ENVELOPE, DEVICE }`: a read request with no read key fails
+  `read_key_not_set_up`, only envelope bodies may go device-signed; P5 the node
+  answers `applied` when the record already holds the key (protocol addition,
+  documented in approval-v1.md), the app maps it to in use; P6 fcm
+  `onMessageReceived` calls `onNotificationArrived()` (step 2 in the foreground).
+
 ## Landed
 - T01 merge 932753aa (impl d2d4cc64): `isDevice` export, `kl.device.read_key`
   validator, `phoneAuthString(..., { key })`, `PHONE_AUTH_PREFIXES`,
@@ -137,5 +154,16 @@ Start frontier: T01, T08, T09.
 
 - T12 merge 45b82029 (impl 6b195580).
 
+- FIX merge 2ecbd326 (impl 8eeb00f9, 92383651, ebff1450).
+
 ## Left
-The code review and its fixes; `npm test`; the gradle runs once more.
+Final `npm test` on 2ecbd326: tests 10503, pass 10407, fail 2, skipped 93; the
+same two tests as before, which use no file this branch changes
+(src/cases, src/channels, src/core) and pass alone on this branch (39/39,
+29/29) and on main: they fail only under full-suite load. (First run, at ee2ba45c before the fixes: 10495
+tests, 2 fail, both outside this work: `R-LI-8: a wake-up of a private case runs
+orient on its local model` and contact-send-counting `a released send never
+gives back a contact an open job relies on`; checked against main).
+By hand (spec §16): pairing and the set-up row on a real phone, the list filling
+without taps, one fingerprint per decision, a lease kept going by an open detail,
+presence seen by a case question's ladder, a tapped fcm notification.
