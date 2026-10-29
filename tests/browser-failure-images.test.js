@@ -142,6 +142,24 @@ describe('images after a failed browser action (headless Chromium)', () => {
     assert.deepEqual(takeImages(full), []);
   });
 
+  it('an interactive snapshot of an ordinary page spends nothing', async () => {
+    const ex = executor();
+    await getBrowser().page.setContent(`Plain text ${'words '.repeat(50)}<button>Go</button>`);
+    const r = await ex.execute('BrowserPage', { action: 'snapshot', interactive: true });
+    assert.equal(r.ok, true);
+    assert.ok(r.snapshot.length < 200, 'short once filtered');
+    assert.equal(r.image, undefined);
+    assert.deepEqual(takeImages(r), []);
+  });
+
+  it('a short page that has a ref is not an unknown state', async () => {
+    await getBrowser().page.setContent('<button>Go</button>');
+    const r = await executor().execute('BrowserPage', { action: 'snapshot' });
+    assert.equal(r.ok, true);
+    assert.ok(r.snapshot.length < 200);
+    assert.equal(r.image, undefined);
+  });
+
   it('a snapshot of one ref never gets an image', async () => {
     const ex = executor();
     const all = await ex.execute('BrowserPage', { action: 'snapshot', interactive: true });

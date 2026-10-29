@@ -60,9 +60,7 @@ All element actions auto-wait for the element to be actionable. Avoid wait_for_l
       target_ref_label: browserTool.TARGET_REF_LABEL_PARAM,
 
       // Snapshot
-      interactive: { type: 'boolean', description: 'snapshot: keep only the lines with a ref.' },
-      ref: { type: 'string', description: 'snapshot: return only this node (e.g. "e9") and its subtree.' },
-      max_chars: { type: 'number', description: 'snapshot: cut the text at a line end past this many characters (default 20000, at most 60000).' },
+      ...browserTool.SNAPSHOT_PARAMS,
 
       // Text input
       text: { type: 'string', description: 'Text for fill, type, keyboard_type.' },
@@ -94,7 +92,7 @@ All element actions auto-wait for the element to be actionable. Avoid wait_for_l
 
       // Screenshot / PDF
       full_page: { type: 'boolean', description: 'Capture full scrollable page for screenshot (default false).' },
-      to_file: { type: 'boolean', description: 'screenshot: save a PNG file (savedTo) instead of returning the image. Without it the viewport comes back as an image; multiply image coordinates by scale for mouse_click.' },
+      to_file: browserTool.TO_FILE_PARAM,
       format: { type: 'string', description: 'PDF paper format ("A4", "Letter", ...).' }
     },
     required: ['action']

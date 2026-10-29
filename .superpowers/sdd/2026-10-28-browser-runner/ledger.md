@@ -91,3 +91,35 @@ Integration branch `feat/browser-runner` at `C:\Users\sblac\Programming\king-lou
 Code review (and its fix agent), then `npm test` once.
 Review-fix inputs found so far: the unknown-page-state snapshot trigger checks only the snapshot's length,
 not "no ref and under 200 characters of text" (spec §8.2); the kept-window item above.
+
+## Review fixes (T12, branch feat/browser-runner-T12)
+1. Unknown page state: the snapshot handler judges the whole page (no ref line and under 200 characters)
+   before `interactive`/`ref`/`max_chars`, and marks the result in a WeakSet that `execute` reads; an
+   interactive snapshot of an ordinary page, or a short page with a ref, spends nothing.
+2. `snapshotLineRef` (playwright-browser.js): the parser's ref where it parses, else the last `[ref=…]`;
+   `interactive`, the failure snapshot and `refs` use it. The `ref` subtree lookup stays on the parser
+   (the node must be one the page's record knows).
+3. `otherSelectorRefRefusal` (browser-ref-label.js): a `ref=` or raw `aria-ref=` in any `*Selector` field
+   other than `selector`/`target_selector` is `invalid_params`, in `prepareParams` (before anyone is asked)
+   and in `execute` (direct calls). Done as one check over the params rather than in `resolveLocator`,
+   because the signup/payment/login helpers also pass those fields to `page.locator` directly, where a raw
+   `aria-ref=` would have resolved.
+4. `TakeManager#_keep` drops a kept browser on its context's `close`; `_assertProfileFree` also drops a
+   kept browser that no longer `isRunning`. Tested with headless Chromium.
+5. `checkRefLabels` refuses `ref_not_found` (BrowserRefError) when no browser is running.
+6. The executor's `prepareParams` refusal is `{ success: false, ok: false, error, code }`.
+7. The exact-label store is keyed by `[ref, shown label]` (a bounded Map of Sets, 512 keys), not by the
+   params object, so a copy still compares exactly; tested with a spread copy.
+8. tool-executor.js comments put back above `_liveTake`, `_prepareContext` has its own.
+9. `SNAPSHOT_PARAMS` and `TO_FILE_PARAM` exported from browser-tool.js and used by BrowserPage and
+   BrowserExtract; `snapshot` validates `ref` with `REF_ID`.
+10. `parseRefSelector`, `isFrameAction` and `RAW_ARIA_REF` in playwright-browser.js, used by browser-tool.js and
+    browser-ref-label.js; renderer.js keeps its copy with a comment naming the source (no require in the
+    renderer). take-steps.js keeps its `/^\s*ref=/` refusal (broader: it also refuses a leading space).
+11. `src/browser/profile-dirs.js` (`profilesRoot`, `resolveProfileDir`, `validProfileName`) used by
+    browser-tool.js and takes.js.
+12. `waitForErrorPage` and `attachFailureView` log a debug line (`createLogger('browser-tool')`) for each
+    dropped wait or capture.
+13. The take launcher gets a per-hosting argument: personal `{ exe, profile, userDataPath }`, fleet
+    `{ exe, profile, ctx, setPid, checkEnded }`.
+CLAUDE.md (Browser actions, Browser, Personal node) and docs/driving-king-louie.md (kept window) updated.

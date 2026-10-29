@@ -22,8 +22,13 @@ const {
   resolvedKeyOf, getBrowser, activeProfileOf, setActiveProfile, allBrowsers,
 } = require('./browser-registry');
 
-const { BrowserRefError, ownerOfPage, parseSnapshotLine } = require('../../browser/playwright-browser');
-const { prepareRefLabels, checkRefLabels } = require('./browser-ref-label');
+const {
+  BrowserRefError, ownerOfPage, parseSnapshotLine, snapshotLineRef, parseRefSelector, isFrameAction, REF_ID, RAW_ARIA_REF,
+} = require('../../browser/playwright-browser');
+const { prepareRefLabels, checkRefLabels, otherSelectorRefRefusal } = require('./browser-ref-label');
+
+const { createLogger } = require('../../logging');
+const log = createLogger('browser-tool');
 
 const VAULT_CRED_PREFIX = 'browser_cred:';
 
@@ -44,23 +49,7 @@ function deniedFilePath(paths) {
   return null;
 }
 
-function profilesRoot(context) {
-  if (!context || !context.userDataPath) {
-    throw new Error('Profile actions require userDataPath in tool context (are you running inside Electron?).');
-  }
-  return path.join(context.userDataPath, 'browser-profiles');
-}
-
-function validProfileName(name) {
-  return typeof name === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(name);
-}
-
-function resolveProfileDir(context, name) {
-  if (!validProfileName(name)) {
-    throw new Error(`Invalid profile name "${name}". Use 1–64 chars of [A-Za-z0-9_-].`);
-  }
-  return path.join(profilesRoot(context), name);
-}
+const { profilesRoot, resolveProfileDir } = require('../../browser/profile-dirs');
 
 function vaultKeyFor(profile, host) {
   return `${VAULT_CRED_PREFIX}${profile}:${host}`;
@@ -78,13 +67,11 @@ function requireRunning(ctx) {
   return b;
 }
 
-// "aria-ref" anywhere in a selector, chained ("form >> aria-ref=e5") or not.
-const RAW_ARIA_REF = /aria-ref\s*=/i;
 
 // The *_in_frame actions take no ref: a frame's refs (f1e3) already resolve
 // from the page. → the refusal, or null.
 function frameSelectorRefusal(selector) {
-  if (typeof selector === 'string' && (selector.startsWith('ref=') || RAW_ARIA_REF.test(selector))) {
+  if (parseRefSelector(selector) !== null || (typeof selector === 'string' && RAW_ARIA_REF.test(selector))) {
     return { ok: false, error: 'A ref is not accepted in the *_in_frame actions: use the ref with click or fill directly (a frame ref like f1e3 resolves from the page).', code: 'invalid_params' };
   }
   return null;
@@ -123,10 +110,11 @@ function resolveLocator(page, selector) {
   }
 
   // ref=e5 / ref=f1e3: Playwright's aria-ref engine, behind the page's record.
-  if (selector.startsWith('ref=')) {
+  const ref = parseRefSelector(selector);
+  if (ref !== null) {
     const owner = ownerOfPage(page);
     if (!owner) throw new BrowserRefError('ref_not_found', `${selector} is not in this page's last snapshot. Take a new snapshot.`);
-    return owner.refLocator(selector.slice(4));
+    return owner.refLocator(ref);
   }
 
   // role=button[name="Submit"]
@@ -275,6 +263,9 @@ function viewportImageResult(shot) {
 
 const FAILURE_SNAPSHOT_CHARS = 4000;
 const THIN_SNAPSHOT_CHARS = 200;
+// Snapshot results whose whole page had no ref and under THIN_SNAPSHOT_CHARS
+// characters of text (§8.2): marked by the handler, read by execute.
+const thinSnapshots = new WeakSet();
 const CAPTURE_TIMEOUT_MS = 10000;
 const PLAYWRIGHT_CALL = /^(?:locator|page|frame|frameLocator|elementHandle|mouse|keyboard|browserContext)\.\w+: /;
 const SELECTOR_SYNTAX = /Unexpected token|is not a valid selector|Unknown engine|Malformed selector/i;
@@ -311,7 +302,9 @@ async function waitForErrorPage(err, ctx) {
   if (!b || !/net::ERR_/.test(String(err && err.message))) return;
   try {
     await b.page.waitForURL((u) => String(u.href || u).startsWith('chrome-error://'), { timeout: ERROR_PAGE_WAIT_MS, waitUntil: 'commit' });
-  } catch { /* not an error page */ }
+  } catch (err2) {
+    log.debug('no error page after a failed navigation', { error: err2 && err2.message });
+  }
 }
 
 function onErrorPage(ctx) {
@@ -336,7 +329,9 @@ async function attachFailureView(result, ctx, { withSnapshot = true } = {}) {
         result.snapshot = snap.snapshot;
         result.untrusted_output = true;
       }
-    } catch { /* dropped */ }
+    } catch (err) {
+      log.debug('failure snapshot dropped', { error: err && err.message });
+    }
   }
   if (!budget.take()) {
     result.image_omitted = 'budget';
@@ -347,7 +342,9 @@ async function attachFailureView(result, ctx, { withSnapshot = true } = {}) {
     Object.assign(result, viewportImageResult(shot));
     result.untrusted_output = true;
     result.note = IMAGE_NOTE;
-  } catch { /* dropped */ }
+  } catch (err) {
+    log.debug('failure image dropped', { error: err && err.message });
+  }
   return result;
 }
 
@@ -748,12 +745,16 @@ const actions = {
       }
       maxChars = params.max_chars;
     }
-    if (params.ref !== undefined && (typeof params.ref !== 'string' || !/^(?:f\d+)?e\d+$/.test(params.ref))) {
+    if (params.ref !== undefined && (typeof params.ref !== 'string' || !REF_ID.test(params.ref))) {
       return { ok: false, error: 'ref must look like e5 or f1e3 (from a snapshot).', code: 'invalid_params' };
     }
     // Every form takes the whole snapshot, so the page's record is its current set.
-    let lines = (await b.snapshot()).split('\n');
+    const whole = await b.snapshot();
+    let lines = whole.split('\n');
+    // §8.2's unknown page state is judged on the whole page, whatever is returned.
+    const thin = whole.length < THIN_SNAPSHOT_CHARS && !lines.some((l) => snapshotLineRef(l) !== null);
     if (params.ref) {
+      // The parser's ref only: the node must be one the page's record knows.
       const start = lines.findIndex((l) => parseSnapshotLine(l)?.ref === params.ref);
       if (start < 0) {
         throw new BrowserRefError('ref_not_found', `ref=${params.ref} is not in this page's snapshot. Take a new snapshot.`);
@@ -763,7 +764,8 @@ const actions = {
       while (end < lines.length && lines[end].match(/^\s*/)[0].length > indent) end += 1;
       lines = lines.slice(start, end).map((l) => l.slice(indent));
     }
-    if (params.interactive === true) lines = lines.filter((l) => parseSnapshotLine(l) !== null);
+    // Every line that carries a ref, also one the parser cannot read (it has no label).
+    if (params.interactive === true) lines = lines.filter((l) => snapshotLineRef(l) !== null);
     // Cut at a line end.
     let text = '';
     let truncated = false;
@@ -773,15 +775,17 @@ const actions = {
       text = next;
     }
     if (truncated && !text) text = lines[0].slice(0, maxChars);
-    return {
+    const result = {
       ok: true,
       untrusted_output: true,
       url: b.page.url(),
       title: await b.page.title().catch(() => ''),
       snapshot: text,
-      refs: text.split('\n').filter((l) => parseSnapshotLine(l) !== null).length,
+      refs: text.split('\n').filter((l) => snapshotLineRef(l) !== null).length,
       truncated,
     };
+    if (thin) thinSnapshots.add(result);
+    return result;
   },
 
   async pdf(params, ctx) {
@@ -1488,17 +1492,25 @@ async function autoDetectApplyCoupon(page) {
 // stale, unknown, or an element that is gone (which Playwright would
 // otherwise wait out to the timeout) fail at once, typed.
 async function checkRefSelectors(params, ctx) {
-  if (/_in_frame$/.test(String(params.action))) return;
+  if (isFrameAction(params.action)) return;
   for (const sel of [params.selector, params.target_selector]) {
-    if (typeof sel !== 'string' || !sel.startsWith('ref=')) continue;
+    const ref = parseRefSelector(sel);
+    if (ref === null) continue;
     const b = getBrowser(ctx);
     if (!b || !b.isRunning || !b.page || typeof b.assertRefUsable !== 'function') return;
-    await b.assertRefUsable(sel.slice(4));
+    await b.assertRefUsable(ref);
   }
 }
 
 // C-8: set by the host from the page's snapshot; a model's own is dropped.
 const REF_LABEL_PARAM = { type: 'string', description: 'Set by the host, never by you: what a ref= selector names (role and name from the snapshot), shown on the approval. Anything you pass is replaced.' };
+// The snapshot's parameters and screenshot's to_file, shared with the split tools.
+const SNAPSHOT_PARAMS = Object.freeze({
+  interactive: { type: 'boolean', description: 'snapshot: keep only the lines with a ref.' },
+  ref: { type: 'string', description: 'snapshot: return only this node (e.g. "e9") and its subtree.' },
+  max_chars: { type: 'number', description: 'snapshot: cut the text at a line end past this many characters (default 20000, at most 60000).' },
+});
+const TO_FILE_PARAM = { type: 'boolean', description: 'screenshot: save a PNG file (savedTo) instead of returning the image. Without it the viewport comes back as an image; multiply image coordinates by scale for mouse_click.' };
 const TARGET_REF_LABEL_PARAM = { type: 'string', description: 'Set by the host, never by you: what a ref= target_selector names, shown on the approval. Anything you pass is replaced.' };
 
 // ─── Build the action enum from the handlers ─────────────────────────────────
@@ -1562,9 +1574,7 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
       target_ref_label: TARGET_REF_LABEL_PARAM,
 
       // Snapshot
-      interactive: { type: 'boolean', description: 'snapshot: keep only the lines with a ref.' },
-      ref: { type: 'string', description: 'snapshot: return only this node (e.g. "e9") and its subtree.' },
-      max_chars: { type: 'number', description: 'snapshot: cut the text at a line end past this many characters (default 20000, at most 60000).' },
+      ...SNAPSHOT_PARAMS,
 
       // Text input
       text: { type: 'string', description: 'Text for fill, type, keyboard_type actions' },
@@ -1601,7 +1611,7 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
 
       // Screenshot/PDF
       full_page: { type: 'boolean', description: 'Capture full scrollable page for screenshot (default false)' },
-      to_file: { type: 'boolean', description: 'screenshot: save a PNG file (savedTo) instead of returning the image. Without it the viewport comes back as an image; multiply image coordinates by scale for mouse_click.' },
+      to_file: TO_FILE_PARAM,
       format: { type: 'string', description: 'PDF paper format: "A4", "Letter", etc.' },
 
       // Tabs
@@ -1680,6 +1690,9 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
     if (!handler) {
       return { ok: false, error: `Unknown action: ${params.action}. Valid actions: ${actionNames.join(', ')}` };
     }
+    // C-7: only selector and target_selector take a ref (also checked in prepareParams).
+    const refused = otherSelectorRefRefusal(params);
+    if (refused) return { ok: false, ...refused };
     let result;
     try {
       await checkRefSelectors(params, context);
@@ -1699,8 +1712,7 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
     // and a whole-page snapshot with almost no text (a canvas, a blank page).
     if (params.action === 'navigate' && result && result.ok && onErrorPage(context)) {
       await attachFailureView(result, context);
-    } else if (params.action === 'snapshot' && params.ref === undefined && result && result.ok
-      && typeof result.snapshot === 'string' && result.snapshot.length < THIN_SNAPSHOT_CHARS) {
+    } else if (params.action === 'snapshot' && params.ref === undefined && result && thinSnapshots.has(result)) {
       await attachFailureView(result, context, { withSnapshot: false });
     }
     return result;
@@ -1725,3 +1737,5 @@ module.exports.jpegSize = jpegSize;
 module.exports.IMAGE_NOTE = IMAGE_NOTE;
 module.exports.REF_LABEL_PARAM = REF_LABEL_PARAM;
 module.exports.TARGET_REF_LABEL_PARAM = TARGET_REF_LABEL_PARAM;
+module.exports.SNAPSHOT_PARAMS = SNAPSHOT_PARAMS;
+module.exports.TO_FILE_PARAM = TO_FILE_PARAM;

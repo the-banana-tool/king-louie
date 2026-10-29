@@ -408,8 +408,8 @@ shell.
    `get_job_logs` are the evidence. Answer with `send_to_job`, and the agent
    carries on (for a script, from the failed index).
 4. **`stop`.** `Take.stop` stops the recording, closes the take's browser
-   (unless `keep_browser`; on a personal node a kept window stays until the
-   service stops), releases the lease, and answers with the
+   (unless `keep_browser`; on a personal node a kept window stays until you
+   close it or the service stops), releases the lease, and answers with the
    recording's `path`, `duration_s` and `bytes` and the step counts. `status`
    and `note` are there in between: where the take is, and a line in its log
    for what the agent changed.

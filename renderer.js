@@ -1486,7 +1486,9 @@ function suggestAllowPattern(toolName, parameters = {}) {
 // What a browser call's refs name, for the approval dialog (spec 2026-10-28
 // browser runner, C-8): 'click ref=e15 (button "Contact seller")'. The
 // labels are the host's (ToolExecutor adds them from the page's snapshot,
-// one plain line); set with textContent. → the line, or null.
+// one plain line); set with textContent. → the line, or null. The renderer
+// cannot require src/: `sel.startsWith('ref=')` is a copy of parseRefSelector
+// in src/browser/playwright-browser.js, the source of truth.
 function browserRefSummary(toolName, parameters = {}) {
   if (!/^Browser(Page|Extract|Session)?$/.test(toolName) || !parameters) return null;
   const part = (sel, label) => (typeof sel === 'string' && sel.startsWith('ref=') && typeof label === 'string')

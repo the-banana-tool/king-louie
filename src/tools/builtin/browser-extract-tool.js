@@ -38,9 +38,7 @@ Console: returns recent browser console output.`,
       ref_label: browserTool.REF_LABEL_PARAM,
 
       // Snapshot
-      interactive: { type: 'boolean', description: 'snapshot: keep only the lines with a ref.' },
-      ref: { type: 'string', description: 'snapshot: return only this node (e.g. "e9") and its subtree.' },
-      max_chars: { type: 'number', description: 'snapshot: cut the text at a line end past this many characters (default 20000, at most 60000).' },
+      ...browserTool.SNAPSHOT_PARAMS,
       attribute: { type: 'string', description: 'Attribute name for get_attribute.' },
 
       // Frame interaction
