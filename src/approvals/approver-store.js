@@ -11,9 +11,9 @@ const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
 const { assertAdminOwned } = require('../service/config');
-const { open, verifyEs256, isDeviceJwk, deviceIdFromJwk } = require('./envelope');
+const { open, verifyEs256, isDeviceJwk, samePoint, deviceIdFromJwk } = require('./envelope');
 const { validateMessage, NONCE_RE, DEVICE_ID_RE, TIMESTAMP_RE, PLATFORMS } = require('./messages');
-const { isTestDeviceKey } = require('./test-keys');
+const { hasTestKey } = require('./test-keys');
 
 const log = createLogger('approvals/approver-store');
 
@@ -63,22 +63,26 @@ function checkApproverRecord(record, fileName = null) {
   return null;
 }
 
-// Two JWKs for one point (x and y are canonical base64url once isDeviceJwk holds).
-function samePoint(a, b) {
-  return a.x === b.x && a.y === b.y;
-}
-
-// A record or device whose device key or read key is a published test key.
-function hasTestKey(holder) {
-  return isTestDeviceKey(holder.public_key) || (Object.hasOwn(holder, 'read_key') && isTestDeviceKey(holder.read_key));
-}
-
 // When the record's current read key was set: its read_key_at, else (a
 // record written before that field, or by hand) enrolled_at. -Infinity when
 // the record holds no read key.
 function readKeySetAt(record) {
   if (!record || !Object.hasOwn(record, 'read_key')) return -Infinity;
   return Date.parse(record.read_key_at || record.enrolled_at);
+}
+
+// Judges a well-formed kl.device.read_key statement against the record it
+// names, once its signer has been checked (android-slim §8.7). One rule
+// order for staging (ApproverStore#stage) and for `device apply`
+// (ApproverAdmin): null when the key may be set, else 'same_point' (it is
+// the device key), 'test_key' (a published key, unless allowed), 'applied'
+// (the record already holds it) or 'stale' (not newer than the record's).
+function judgeReadKey(record, message, { allowTestKeys = false } = {}) {
+  if (samePoint(message.read_key, record.public_key)) return 'same_point';
+  if (!allowTestKeys && hasTestKey({ public_key: null, read_key: message.read_key })) return 'test_key';
+  if (Object.hasOwn(record, 'read_key') && samePoint(message.read_key, record.read_key)) return 'applied';
+  if (Date.parse(message.created_at) <= readKeySetAt(record)) return 'stale';
+  return null;
 }
 
 // null when the approver dir may be trusted, else the problem. A missing dir
@@ -527,7 +531,12 @@ class ApproverStore {
     if (!STAGED_TYPES.includes(type)) return rejected('malformed');
     // Validated before it is used as a file name.
     if (typeof message.nonce !== 'string' || !NONCE_RE.test(message.nonce)) return rejected('malformed');
-    if (this._isKnownNonce(message.nonce)) return { state: 'duplicate' };
+    if (this._isKnownNonce(message.nonce)) {
+      // A re-post of a read-key statement `device apply` has already written
+      // answers `applied`, so the phone can tell it from one still staged.
+      if (type === 'kl.device.read_key' && this._readKeyApplied(envelope, message)) return { state: 'applied' };
+      return { state: 'duplicate' };
+    }
     const shape = validateMessage(type, message);
     if (shape) return rejected(shape);
     // Checked before `expired`: a message dated far in the future would
@@ -583,12 +592,21 @@ class ApproverStore {
     if (!this.isActive(message.device_id)) return rejected('signer_not_active');
     const record = this.get(message.device_id);
     if (!verifyEs256(envelope, record.public_key)) return rejected('bad_signature');
-    if (samePoint(message.read_key, record.public_key)) return rejected('malformed');
-    if (!this.allowTestKeys && isTestDeviceKey(message.read_key)) return rejected('test_key');
-    if (Object.hasOwn(record, 'read_key') && samePoint(message.read_key, record.read_key)) return { state: 'duplicate' };
-    if (Date.parse(message.created_at) <= readKeySetAt(record)) return rejected('stale');
+    const judged = judgeReadKey(record, message, { allowTestKeys: this.allowTestKeys });
+    if (judged === 'applied') return { state: 'applied' };
+    if (judged === 'same_point') return rejected('malformed');
+    if (judged) return rejected(judged);
     if (!this._writeStagedSafe(message.nonce, envelope)) return rejected('staging_write_failed');
     return { state: 'read-key-pending-apply' };
+  }
+
+  // True when a well-formed statement, signed by its device's key, names the
+  // read key that device's record already holds.
+  _readKeyApplied(envelope, message) {
+    if (validateMessage('kl.device.read_key', message)) return false;
+    if (envelope.alg !== 'ES256' || envelope.kid !== message.device_id || !this.isActive(message.device_id)) return false;
+    const record = this.get(message.device_id);
+    return verifyEs256(envelope, record.public_key) && judgeReadKey(record, message, { allowTestKeys: this.allowTestKeys }) === 'applied';
   }
 
   _writeStaged(nonce, envelope) {
@@ -611,5 +629,5 @@ class ApproverStore {
 }
 
 module.exports = {
-  ApproverStore, checkApproverRecord, hasTestKey, readKeySetAt, samePoint, STAGED_TYPES, checkApproverDir, checkWindowsOwners, readWindowsOwners, writeFileAtomic, APPROVER_CONTROLS, FUTURE_SKEW_MS
+  ApproverStore, checkApproverRecord, judgeReadKey, checkApproverDir, checkWindowsOwners, readWindowsOwners, writeFileAtomic, APPROVER_CONTROLS, FUTURE_SKEW_MS
 };

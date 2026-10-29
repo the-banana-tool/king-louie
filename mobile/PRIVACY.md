@@ -9,7 +9,7 @@ relay you pair it with.
 - The relay's address and the pin of its TLS key.
 - For each paired node: its id, name and public key (the pins that decide
   which requests are shown).
-- A reference to this phone's approval key (the device key). The key itself
+- A reference to this phone's device key, the key that signs every decision. It
   is created in the Secure Enclave (iOS) or the Android Keystore (StrongBox
   where available) and never leaves it; it signs only after a biometric check
   and stops working if the enrolled fingerprints or faces change.

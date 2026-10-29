@@ -114,6 +114,12 @@ function isDeviceJwk(jwk) {
   }
 }
 
+// Two JWKs for one point. Once isDeviceJwk holds for both, x and y are
+// canonical base64url, so comparing the strings compares the coordinates.
+function samePoint(a, b) {
+  return a.x === b.x && a.y === b.y;
+}
+
 function verifyEs256(envelope, jwk) {
   try {
     if (!envelope || envelope.alg !== 'ES256' || !isDeviceJwk(jwk)) return false;
@@ -183,6 +189,7 @@ module.exports = {
   ed25519RawToSpki,
   fingerprintGroups,
   isDeviceJwk,
+  samePoint,
   toB64url,
   fromB64url
 };
