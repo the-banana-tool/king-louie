@@ -59,7 +59,39 @@ T01 -> T02, T03, T07; T02 -> T06; T05 -> T06, T07; T08 -> T09; T10 -> T11;
 T12 (docs) last, after all. Start frontier: T01, T04, T05, T08, T10.
 
 ## Decisions and deviations
+- T01: `FCM_ONLY_KINDS` (text.js; `session_ended`, `session_paused`, `test`),
+  `PUSH_KINDS` local to node-methods.js (today's six, for `message.submit`),
+  `rejectsToken(status, text)` in fcm.js (404 UNREGISTERED, 403
+  SENDER_ID_MISMATCH), `DEFAULT_TTL_S` 300, `SESSION_ENDED_TTL_S` 3600. The
+  pusher's `notify` takes `count` (passed only to fcm); an FCM-only kind for a
+  non-fcm device returns quietly. An out-of-range count is dropped, push still goes.
+- T05: `readServiceAccountFile(file, { readFile })` + `REQUIRED_FIELDS` in
+  `src/frontdoor/push/service-account.js`; codes `PUSH_CREDENTIAL_UNREADABLE`,
+  `PUSH_CREDENTIAL_INVALID` (`err.field`); JSON parser messages never passed on.
+  Only the FCM path must be absolute (APNs `key_file` unchanged).
+- T04: `setPush` returns a boolean (wrote or not). New `pusher.platforms` (token
+  platforms the senders reach) answers GET's `sender` (sender ids need not equal
+  platforms). DELETE/GET need only an authenticated device, like PUT.
+- T08: `LeaseManager#pushQueue` (`src/gui/push-queue.js`: `enqueue`, `drain({
+  timeoutMs })`, `start`, `stop`, `size`; `PUSH_QUEUE_MAX` 32, `PUSH_MAX_AGE_MS`
+  1 h); `_end(lease, reason, { endedBy })`; `RelayClient#pushNotify`,
+  `push.notify` in `F3_METHODS`. A contact lapse that finds the lease's time up
+  ends it `expired` and pushes only `session_ended`. A send failing because the
+  link went down is re-queued; other errors dropped (debug, code only);
+  `unknown_method` turns the queue off until next `connected`. The queue sends
+  only through a link with `pushNotify` (the courier link has none; the service
+  holds the real relay client).
+- T10: `PushText` in the Android protocol module (words, tags, channels, count
+  parsing, name cleaning, opens-the-list rule) with JUnit `PushTextTest`;
+  `Push.NOTIFICATION_ID = 1` (tags tell notifications apart), count kept in
+  SharedPreferences `kl.push`, `Push.EXTRA_COUNT` `"kl.c"`, `openPushed(kind, id,
+  count)`, `AppModel.statusApplied`. Without a node name the words drop "on <n>".
+  Coming to the front zeroes the count but leaves the shown notification.
+  `test` uses tag `test:<rid>`.
 
 ## Landed
+- T01 merge 96ea2586; T05 merge 168106f3; T04 merge 0d31340e; T08 merge
+  3f35f05e; T10 merge 1203ea60 (tip bbf21a23). Both Android flavors build;
+  protocol `gradlew test` 107 pass.
 
 ## Left
