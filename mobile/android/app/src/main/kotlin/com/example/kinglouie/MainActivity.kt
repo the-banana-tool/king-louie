@@ -39,7 +39,12 @@ class MainActivity : FragmentActivity() {
         super.onDestroy()
     }
 
-    /** A tapped notification carries only a kind and an id; the app fetches and verifies. */
+    /**
+     * A tapped notification carries only a kind and an id (android-slim §13):
+     * AppModel.openPushed fetches with the read key, verifies, and selects
+     * that item's detail, or opens the list with "That request is no longer
+     * waiting." when it is gone.
+     */
     private fun handle(intent: Intent?) {
         val id = intent?.getStringExtra(Push.EXTRA_REQUEST_ID) ?: return
         model.openPushed(intent.getStringExtra(Push.EXTRA_KIND) ?: "approval", id)

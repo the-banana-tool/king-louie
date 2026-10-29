@@ -105,7 +105,6 @@ fun Welcome(model: AppModel) {
         Text("Approve what your machines want to do, with your fingerprint or face.", style = MaterialTheme.typography.titleMedium)
         if (scanning) ScanOrPaste(model) { scanning = false } else {
             Button({ scanning = true }, Modifier.fillMaxWidth().height(DecisionHeight)) { Text("Scan pairing code") }
-            OutlinedButton({ model.startDemo() }, Modifier.fillMaxWidth().height(DecisionHeight)) { Text("Try demo") }
         }
     }
 }
@@ -125,14 +124,6 @@ fun Main(model: AppModel) {
     // Fleet stage 5: the lease request being reviewed, and whether the live lease is on screen.
     var leaseItem by remember { mutableStateOf<AppModel.LeaseRequestItem?>(null) }
     var showLive by remember { mutableStateOf(false) }
-    // A lease push: show where the request will be listed. The model fetched nothing.
-    LaunchedEffect(model.leasePushes) {
-        if (model.leasePushes > 0) {
-            tab = 0
-            leaseItem = null
-            showLive = false
-        }
-    }
     // Back leaves a lease screen, then goes to Approvals; the sub-screens below handle their own Back first.
     BackHandler(enabled = leaseItem != null || showLive || tab != 0) {
         if (leaseItem != null || showLive) {
@@ -165,14 +156,6 @@ fun Main(model: AppModel) {
         }
     }) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            if (model.mode == AppMode.DEMO) {
-                val status = statusColors
-                Text(
-                    "Demo — nothing here reaches a real machine",
-                    Modifier.fillMaxWidth().background(status.demoContainer).padding(horizontal = 16.dp, vertical = 8.dp),
-                    color = status.onDemoContainer, fontWeight = FontWeight.Bold
-                )
-            }
             LeaseBanner(model) { leaseItem = null; showLive = true }
             model.fingerprintToCompare?.let {
                 Text("This phone: $it — check the other screen shows the same.", Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MonoStyle)
@@ -223,10 +206,11 @@ fun Pending(model: AppModel, openLease: (AppModel.LeaseRequestItem) -> Unit = {}
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { ScreenTitle("Approvals") }
-        if (model.mode == AppMode.LIVE) {
+        // The read key's set-up (android-slim §8.7); T12 draws it as the list's first row.
+        if (model.readKeySetupNeeded) {
             item {
-                Button({ model.checkNow() }, Modifier.fillMaxWidth().height(DecisionHeight), enabled = !model.isPolling) {
-                    Text(if (model.isPolling) "Checking…" else "Check for requests")
+                Button({ model.setUpReadKey() }, Modifier.fillMaxWidth().height(DecisionHeight), enabled = !model.readKeySetupBusy) {
+                    Text(AppModel.READ_KEY_SETUP_TITLE)
                 }
             }
         }
@@ -309,8 +293,6 @@ fun Detail(model: AppModel, item: PendingItem, onBack: () -> Unit) {
             item {
                 val status = item.status
                 if (status != null) Text("Status: $status", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.titleMedium)
-                // The node-signed status on demand: one tap, one signed fetch.
-                if (model.mode == AppMode.LIVE) OutlinedButton({ model.openPushed(item.id) }, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Refresh status") }
             }
         }
         // The decision, where a thumb reaches it: full width at the bottom, after every parameter above.
@@ -325,48 +307,10 @@ fun Detail(model: AppModel, item: PendingItem, onBack: () -> Unit) {
 }
 
 @Composable
-fun History(model: AppModel) {
-    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (model.mode == AppMode.DEMO) EmptyState("The demo has no history. On a paired phone, tap a node here to load what it did.")
-        else if (model.nodes.isEmpty()) EmptyState("History comes from your paired nodes. None is paired on this phone.")
-        model.nodes.forEach { n -> OutlinedButton({ model.loadHistory(n.id) }, Modifier.fillMaxWidth()) { Text(Display.escape(n.name)) } }
-        model.history?.let { (asOf, entries) ->
-            model.historyStatus?.let { FrontDoorAudit(it) }
-            model.historyStatusNote?.let { Secondary("Reported by front door: $it") }
-            Text("As of ${Display.escape(asOf)}", fontWeight = FontWeight.Bold)
-            LazyColumn {
-                items(entries) { e ->
-                    // Lease and GUI entries (fleet stage 5) are labelled; the kind itself is still shown.
-                    val kind = e["kind"].str() ?: ""
-                    val label = if (kind.startsWith("lease.") || kind.startsWith("gui.")) "Computer use · " else ""
-                    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                        Text("#${e["seq"].int()} $label${relayText(e["kind"])}", fontWeight = FontWeight.SemiBold)
-                        Secondary("${relayText(e["at"])} · ${relayText(e["writer"])}")
-                    }
-                    HorizontalDivider()
-                }
-            }
-        }
-    }
-}
-
-@Composable
 fun Nodes(model: AppModel) {
     var name by remember { mutableStateOf("") }
-    var code by remember { mutableStateOf<String?>(null) }
-    var showHistory by remember { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
-    if (showHistory) {
-        BackHandler { showHistory = false }
-        Column(Modifier.fillMaxSize()) {
-            BackBar("History") { showHistory = false }
-            History(model)
-        }
-        return
-    }
-    // Demo nodes are the demo fleet's; nothing is pinned in demo mode.
-    val demo = model.mode == AppMode.DEMO
-    val nodes = if (demo) model.demoNodes else model.nodes
+    val nodes = model.nodes
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ScreenTitle("Nodes")
         // The same scanner as Welcome and Settings: AppModel.scanned decides what the code is
@@ -375,23 +319,20 @@ fun Nodes(model: AppModel) {
             Button({ scanning = true }, Modifier.fillMaxWidth().height(DecisionHeight)) { Text("Scan a node's code") }
             Secondary("From enroll-device on a computer: lets this phone approve it.")
         }
-        // Each relay request is a biometric prompt on this phone, so it is asked for, never automatic.
-        if (model.mode == AppMode.LIVE) OutlinedButton({ model.refreshNodes() }, Modifier.fillMaxWidth()) { Text("Refresh online state") }
         if (nodes.isEmpty()) EmptyState("No node is paired yet. Get a pairing code below and give it to the node.")
         nodes.forEach { n ->
             ItemCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(Display.escape(n.name), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    if (demo) Secondary("demo") else OnlineDot(model.online[n.id])
+                    OnlineDot(model.online[n.id])
                 }
                 Text(FrontDoor.nodeFingerprint(n.id), style = MonoStyle)
             }
         }
-        OutlinedButton({ showHistory = true }, Modifier.fillMaxWidth()) { Text("History") }
         SectionTitle("Pairing code for a new node")
         OutlinedTextField(name, { name = it }, label = { Text("Node name, e.g. gpu-box") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-        Button({ model.pairingCode(name) { code = it } }, Modifier.fillMaxWidth(), enabled = name.isNotBlank() && model.mode == AppMode.LIVE) { Text("Get code") }
-        code?.let { SelectionContainer { CodeBlock(it) } }
+        Button({ model.getPairingCode(name) }, Modifier.fillMaxWidth(), enabled = name.isNotBlank() && model.mode == AppMode.LIVE && !model.pairingCodeBusy) { Text("Get code") }
+        model.pairingCode?.let { SelectionContainer { CodeBlock(it.code) } }
     }
 }
 
@@ -408,6 +349,7 @@ fun QrImage(text: String) {
 
 @Composable
 fun Devices(model: AppModel) {
+    LaunchedEffect(Unit) { model.refreshSettings() }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             ScreenTitle("Devices")
@@ -418,10 +360,8 @@ fun Devices(model: AppModel) {
                 }
             }
         }
-        // Each relay request is a biometric prompt on this phone, so it is asked for, never automatic.
-        if (model.mode == AppMode.LIVE) item { OutlinedButton({ model.refreshDevices() }, Modifier.fillMaxWidth()) { Text("Show devices") } }
         if (model.devices.isEmpty()) {
-            item { EmptyState(if (model.mode == AppMode.LIVE) "Tap Show devices to list the other phones that approve for your nodes." else "The demo has no other phones.") }
+            item { EmptyState("No other phone approves for your nodes.") }
         }
         items(model.devices) { d ->
             val id = d["device_id"].str() ?: ""
@@ -440,8 +380,8 @@ fun Devices(model: AppModel) {
                 Button({ model.startInvite() }, Modifier.fillMaxWidth().height(DecisionHeight), enabled = model.mode == AppMode.LIVE) { Text("Add a device") }
                 model.inviteQr?.let {
                     QrImage(it)
-                    Text("Scan this with the new phone, then tap below.")
-                    OutlinedButton({ model.checkInvite() }, Modifier.fillMaxWidth()) { Text("The new phone has scanned it") }
+                    Text("Scan this with the new phone. This screen notices when it has.")
+                    TextButton({ model.cancelInvite() }) { Text("Cancel") }
                 }
                 model.inviteClaim?.let { device ->
                     Text("New phone ${relayText(device["name"])}: d-${Identifiers.fingerprintGroups(device["device_id"].str() ?: "")}", style = MonoStyle)
@@ -475,7 +415,6 @@ fun Settings(model: AppModel) {
         model.frontDoorId?.let { Text("Front door ${FrontDoor.nodeFingerprint(it)}", style = MonoStyle) }
         OutlinedButton({ frontDoor = true }, Modifier.fillMaxWidth()) { Text("Front door: clients, nodes, alerts") }
         SectionTitle("This phone")
-        if (model.mode == AppMode.DEMO) Button({ model.leaveDemo() }, Modifier.fillMaxWidth()) { Text("Leave demo") }
         OutlinedButton({ model.reset() }, Modifier.fillMaxWidth(), colors = denyColors(), border = denyBorder(true)) { Text("Reset this phone") }
         Secondary("No analytics. The relay sees every action you are asked to approve; see PRIVACY.md.", Modifier.padding(top = 8.dp))
     }

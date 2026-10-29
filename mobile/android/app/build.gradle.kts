@@ -50,6 +50,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.fragment:fragment-ktx:1.9.1")
+    // ProcessLifecycleOwner: the foreground loop starts and stops with the app (android-slim §9).
+    implementation("androidx.lifecycle:lifecycle-process:2.10.0")
     implementation("androidx.biometric:biometric:1.1.0")
     // 1.4.2 and later ship 16 KB-aligned native libraries (1.3.4 did not).
     implementation("androidx.camera:camera-camera2:1.6.2")

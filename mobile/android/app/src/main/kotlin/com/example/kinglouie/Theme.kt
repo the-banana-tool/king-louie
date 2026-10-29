@@ -66,11 +66,8 @@ data class StatusColors(
     val online: Color,
     /** The offline dot only; never text a person must read. */
     val offline: Color,
-    // The four below are used only by today's demo banner (Screens.kt) and
-    // lease banner (LeaseScreens.kt). They go when those screens are
-    // rewritten (T11, T12); do not use them in new code.
-    val demoContainer: Color,
-    val onDemoContainer: Color,
+    // The two below are used only by today's lease banner (LeaseScreens.kt).
+    // They go when that screen is rewritten (T12); do not use them in new code.
     val alertContainer: Color,
     val onAlertContainer: Color
 )
@@ -80,8 +77,6 @@ private val KlStatus = StatusColors(
     warningBg = KlTokens.warningBg,
     online = KlTokens.success,
     offline = KlTokens.textMuted,
-    demoContainer = KlTokens.warningBg,
-    onDemoContainer = KlTokens.warning,
     alertContainer = KlTokens.errorBg,
     onAlertContainer = KlTokens.textPrimary
 )

@@ -20,7 +20,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.example.kinglouie.protocol.AppMode
 import com.example.kinglouie.protocol.Display
 
 /**
@@ -33,17 +32,8 @@ fun Questions(model: AppModel) {
     val drafts = remember { mutableStateMapOf<String, String>() }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { ScreenTitle("Questions") }
-        if (model.mode == AppMode.LIVE) {
-            item {
-                Button({ model.refreshQuestions() }, Modifier.fillMaxWidth().height(DecisionHeight), enabled = !model.isLoadingQuestions) {
-                    Text(if (model.isLoadingQuestions) "Checking…" else "Check for questions")
-                }
-            }
-        }
         if (model.questions.isEmpty()) {
-            item {
-                EmptyState(if (model.mode == AppMode.LIVE) "No open questions. Tap Check for questions to look again." else "No open questions in the demo.")
-            }
+            item { EmptyState("No open questions.") }
         }
         items(model.questions, key = { it.token }) { item ->
             val busy = item.token in model.answering
