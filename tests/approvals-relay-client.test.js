@@ -7,7 +7,7 @@ const path = require('path');
 const { MeshTransport } = require('../src/mesh/mesh-transport');
 const { NodeIdentity } = require('../src/mesh/node-identity');
 const { createLinkRpc } = require('../src/approvals/link-rpc');
-const { RelayClient, isReservedMethod } = require('../src/approvals/relay-client');
+const { RelayClient, isReservedMethod, NODE_INBOUND } = require('../src/approvals/relay-client');
 const { addSink } = require('../src/logging');
 
 let relayIdentity;
@@ -85,6 +85,11 @@ describe('RelayClient', () => {
     assert.deepEqual(await c.send({ a: 1 }, { push: { kind: 'lease', id: 'l-1' } }), { ok: true, seq: 1 });
     assert.deepEqual(relay.seen.slice(1).map((s) => s[0]), ['approval.submit', 'message.submit']);
     assert.deepEqual(relay.seen[2][1], { envelope: { a: 1 }, push: { kind: 'lease', id: 'l-1' }, to_device: null });
+    // push.notify (push spec §6.2) is F3's own method, called by the node.
+    assert.ok(isReservedMethod('push.notify'));
+    const hint = { kind: 'session_ended', id: '00000000-0000-4000-8000-000000000001', to_device: null, except_device: null, expires_at: null };
+    assert.deepEqual(await c.pushNotify(hint), { ok: true });
+    assert.deepEqual(relay.seen.pop(), ['push.notify', hint]);
 
     c.onMessage(async (method, params) => ({ delivered: true, method, params }));
     assert.deepEqual(await relay.rpc.call(nodeIdentity.peerId, 'approval.response', { envelope: 'x' }), { delivered: true, method: 'approval.response', params: { envelope: 'x' } });
@@ -100,7 +105,7 @@ describe('RelayClient', () => {
 
   it('registerMethod refuses F3 names and mesh.task.* / mesh.channel.*, but not a mesh.taskx-style name', () => {
     const c = new RelayClient({ identity: nodeIdentity, relayPin: null });
-    for (const name of ['approval.response', 'relay.hello', 'mesh.task.run', 'mesh.channel.open']) {
+    for (const name of ['approval.response', 'relay.hello', 'device.read_key', 'mesh.task.run', 'mesh.channel.open']) {
       assert.throws(() => c.registerMethod(name, () => {}), (err) => err.code === 'method_reserved', name);
       assert.equal(isReservedMethod(name), true);
     }
@@ -108,6 +113,8 @@ describe('RelayClient', () => {
     // merely starts with the reserved word, but isn't actually inside that
     // namespace, is untouched.
     assert.equal(isReservedMethod('mesh.taskx'), false);
+    // android-slim §8.7: the relay forwards a read-key statement beside device.enroll.
+    assert.ok(NODE_INBOUND.includes('device.read_key'));
     assert.doesNotThrow(() => c.registerMethod('mesh.taskx', () => {}));
     assert.doesNotThrow(() => c.registerMethod('lease.grant', () => {}));
   });

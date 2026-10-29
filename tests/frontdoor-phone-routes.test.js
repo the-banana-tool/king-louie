@@ -5,6 +5,9 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { createPhoneApi } = require('../src/frontdoor/phone-api');
+const { registerPhoneRoutes } = require('../src/frontdoor/routes');
+const { registerGrantRoutes } = require('../src/frontdoor/oauth/grant-routes');
+const extensions = require('../src/frontdoor/extensions');
 const { DeviceRegistry } = require('../src/frontdoor/device-registry');
 const { registerFrontDoorRoutes } = require('../src/frontdoor/phone-routes');
 const { createApproverNotifier } = require('../src/frontdoor/notify');
@@ -502,3 +505,92 @@ describe('createApproverNotifier', () => {
     assert.throws(() => createApproverNotifier({ devices: t.devices, pusher: { notify: () => {} } }), TypeError);
   });
 });
+
+// android-slim §8.4: which key every phone route takes. `read` takes either
+// key (the read key or the device key), `device` the device key only, and
+// `none`/`code`/`invite` no device signature. POST /v1/devices/read-key is
+// `read`: the app's first send uses the device key (the relay holds no read
+// key yet) and its re-sends the read key. T12 mirrors this table in
+// tests/mobile-android-slim.test.js; change both together.
+const ROUTE_AUTH = Object.freeze([
+  ['GET', '/v1/approvals', 'read'],
+  ['GET', '/v1/approvals/{request_id}', 'read'],
+  ['GET', '/v1/questions', 'read'],
+  ['GET', '/v1/leases', 'read'],
+  ['GET', '/v1/leases/{lease_id}/views', 'read'],
+  ['POST', '/v1/leases/{lease_id}/watch', 'read'],
+  ['POST', '/v1/presence', 'read'],
+  ['GET', '/v1/nodes', 'read'],
+  ['GET', '/v1/devices', 'read'],
+  ['GET', '/v1/devices/invites/{id}', 'read'],
+  ['GET', '/v1/pairings/pending', 'read'],
+  ['GET', '/v1/alerts', 'read'],
+  ['GET', '/v1/clients', 'read'],
+  ['GET', '/v1/frontdoor', 'read'],
+  ['GET', '/v1/nodes/{node_id}/audit-status', 'read'],
+  ['GET', '/v1/nodes/{node_id}/history', 'read'],
+  ['PUT', '/v1/push-token', 'read'],
+  ['DELETE', '/v1/push-token', 'read'],
+  ['GET', '/v1/push-token', 'read'],
+  ['POST', '/v1/challenges', 'read'],
+  ['POST', '/v1/approvals/{request_id}/response', 'read'],
+  ['POST', '/v1/leases/{lease_id}/grant', 'read'],
+  ['POST', '/v1/leases/{lease_id}/revoke', 'read'],
+  ['POST', '/v1/questions/{token}/answer', 'read'],
+  ['POST', '/v1/grants/{id}/decision', 'read'],
+  ['POST', '/v1/clients/{grant_id}/revoke', 'read'],
+  ['POST', '/v1/pairings/{id}/decision', 'read'],
+  ['POST', '/v1/nodes/{node_id}/remove', 'read'],
+  ['POST', '/v1/devices/enroll', 'read'],
+  ['POST', '/v1/devices/revoke', 'read'],
+  ['POST', '/v1/devices/read-key', 'read'],
+  ['GET', '/v1/grants/pending', 'device'],
+  ['POST', '/v1/alerts/{id}/ack', 'device'],
+  ['POST', '/v1/pairing-codes', 'device'],
+  ['POST', '/v1/devices/invites', 'device'],
+  ['GET', '/v1/time', 'none'],
+  ['POST', '/v1/enroll/{code_id}', 'code'],
+  ['GET', '/v1/enroll/{code_id}', 'code'],
+  ['POST', '/v1/devices/invites/{id}/claim', 'invite'],
+  ['GET', '/v1/repin', 'none']
+]);
+
+// Every route a front door serves, registered as profile.js does: F3's
+// routes and its extensions (startRelay), then the grant routes, then the
+// front door's own (which replace F3's of the same method and path).
+function frontDoorPhoneApi({ relayOnly = false } = {}) {
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'kl-route-table-'));
+  cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const devices = new DeviceRegistry({ file: path.join(dir, 'devices.json') });
+  const phoneApi = createPhoneApi({ devices });
+  const nodeHub = { rpc: async () => null, nodes: () => [], nodeById: () => null };
+  const mailbox = { registerType: () => {} };
+  registerPhoneRoutes({ phoneApi, nodeHub, approvals: {}, devices, invites: {} });
+  for (const extension of extensions) extension({ phoneApi, nodeHub, mailbox, pusher: {}, devices, approvals: {}, log: { debug() {}, warn() {} } });
+  if (relayOnly) return phoneApi;
+  registerGrantRoutes(phoneApi, { approverStore: { isActive: () => false } });
+  registerFrontDoorRoutes(phoneApi, {
+    approverStore: { isActive: () => false, get: () => null }, devices, nodeHub,
+    registry: { removeSigned: () => null, byId: () => null }, pairing: { issue: () => null, decide: () => null },
+    mirror: { history: () => null }, alerts: { list: () => [] }, challenges: { take: () => null }, identity: FD, domain: 'kl.example.com'
+  });
+  return phoneApi;
+}
+
+describe('android-slim §8.4: the key each phone route takes', () => {
+  it('every route a front door serves declares exactly the table', () => {
+    const actual = frontDoorPhoneApi().routes().map((r) => [r.method, r.pattern, r.auth]);
+    const key = ([m, p]) => `${m} ${p}`;
+    const sort = (rows) => [...rows].sort((x, y) => key(x).localeCompare(key(y)));
+    assert.deepEqual(sort(actual), sort(ROUTE_AUTH));
+  });
+
+  it("a relay with no front door (F3's routes and its extensions) declares the same key for every route it serves", () => {
+    const table = new Map(ROUTE_AUTH.map(([m, p, auth]) => [`${m} ${p}`, auth]));
+    const routes = frontDoorPhoneApi({ relayOnly: true }).routes();
+    assert.ok(routes.length > 20);
+    for (const r of routes) assert.equal(r.auth, table.get(`${r.method} ${r.pattern}`), `${r.method} ${r.pattern}`);
+  });
+});
+
+module.exports = { ROUTE_AUTH };

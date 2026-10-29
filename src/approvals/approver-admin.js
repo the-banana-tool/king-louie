@@ -4,10 +4,10 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { ApproverStore, checkApproverRecord, writeFileAtomic, FUTURE_SKEW_MS } = require('./approver-store');
+const { ApproverStore, checkApproverRecord, writeFileAtomic, FUTURE_SKEW_MS, judgeReadKey } = require('./approver-store');
 const { open, verifyEs256 } = require('./envelope');
 const { validateMessage, iso, DEVICE_ID_RE, NONCE_RE } = require('./messages');
-const { isTestDeviceKey } = require('./test-keys');
+const { hasTestKey } = require('./test-keys');
 
 const MAX_STAGED_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 // Not every platform defines O_NOFOLLOW (Windows does not); fall back to 0
@@ -47,6 +47,18 @@ function readRegularFile(file) {
   } finally {
     fs.closeSync(fd);
   }
+}
+
+// Whom a staged message is about and who signed it: a revoke names both; an
+// enrollment, the device it enrolls and its enroller; a read-key statement
+// is the device's own (android-slim spec §8.7).
+// device apply's words for judgeReadKey's refusals.
+const READ_KEY_RESULTS = { same_point: 'malformed', test_key: 'test key', applied: 'already set', stale: 'stale' };
+
+function stagedParties(message) {
+  if (message.type === 'kl.device.revoke') return { deviceId: message.device_id, signer: message.revoked_by };
+  if (message.type === 'kl.device.read_key') return { deviceId: message.device_id, signer: message.device_id };
+  return { deviceId: message.device && message.device.device_id, signer: message.enrolled_by };
 }
 
 class ApproverAdmin {
@@ -164,12 +176,12 @@ class ApproverAdmin {
           items.push(unsafe(file, 'misnamed'));
           continue;
         }
-        const revoke = message.type === 'kl.device.revoke';
+        const { deviceId, signer } = stagedParties(message);
         items.push({
           file,
           type: message.type,
-          deviceId: revoke ? message.device_id : message.device && message.device.device_id,
-          signer: revoke ? message.revoked_by : message.enrolled_by,
+          deviceId,
+          signer,
           receivedAt, // display only — never read for a policy decision (I1)
           envelope,
           message
@@ -229,7 +241,11 @@ class ApproverAdmin {
     const results = [];
 
     const revokes = items.filter((i) => i.type === 'kl.device.revoke');
-    const rest = items.filter((i) => i.type !== 'kl.device.revoke' && i.type !== 'unsafe');
+    // Read-key statements go last, newest first, so that of two for one
+    // device the newer is written and the older is then stale.
+    const readKeys = items.filter((i) => i.type === 'kl.device.read_key')
+      .sort((x, y) => Date.parse(y.message.created_at) - Date.parse(x.message.created_at));
+    const rest = items.filter((i) => i.type !== 'kl.device.revoke' && i.type !== 'kl.device.read_key' && i.type !== 'unsafe');
     const unsafe = items.filter((i) => i.type === 'unsafe');
 
     // Pass 1: judge every revoke against the pre-batch snapshot only, and
@@ -295,7 +311,7 @@ class ApproverAdmin {
           const { device } = item.message;
           if (!this.allowTestKeys && device.platform === 'demo') {
             result = 'rejected: demo device';
-          } else if (!this.allowTestKeys && isTestDeviceKey(device.public_key)) {
+          } else if (!this.allowTestKeys && hasTestKey(device)) {
             result = 'rejected: test key';
           } else {
             const existing = this.read(item.deviceId);
@@ -308,6 +324,7 @@ class ApproverAdmin {
                 name: device.name,
                 platform: device.platform,
                 public_key: device.public_key,
+                ...(device.read_key ? { read_key: device.read_key, read_key_at: item.message.created_at } : {}),
                 enrolled_at: iso(now),
                 enrolled_by: item.signer,
                 revoked_at: null,
@@ -323,11 +340,35 @@ class ApproverAdmin {
       results.push({ file: item.file, type: item.type, deviceId: item.deviceId, signer: item.signer, result });
     }
 
+    for (const item of readKeys) {
+      this._done(item.file);
+      results.push({ file: item.file, type: item.type, deviceId: item.deviceId, signer: item.signer, result: this._applyReadKey(item, { now, applied, revokedTargets }) });
+    }
+
     for (const item of unsafe) {
       results.push({ file: item.file, type: item.type, deviceId: item.deviceId, signer: item.signer, result: `rejected: ${item.reason}` });
     }
 
     return results;
+  }
+
+  // One staged kl.device.read_key, judged against the admin set as it stood
+  // before the batch and the record as it is now (an earlier statement in
+  // this batch may have set a newer key). Returns the result line.
+  _applyReadKey(item, { now, applied, revokedTargets }) {
+    const { message, envelope } = item;
+    if (this._fromFuture(message, now)) return 'rejected: created in the future';
+    if (this._tooOld(message, now)) return 'rejected: older than 7 days';
+    if (validateMessage('kl.device.read_key', message)) return 'rejected: malformed';
+    if (revokedTargets.has(item.deviceId)) return 'rejected: device was revoked';
+    const signer = applied.get(item.deviceId);
+    if (!signer || envelope.kid !== item.deviceId || !verifyEs256(envelope, signer.public_key)) return 'rejected: signer is not an active approver';
+    const record = this.read(item.deviceId);
+    if (!record || record.revoked_at !== null) return 'rejected: device was revoked';
+    const judged = judgeReadKey(record, message, { allowTestKeys: this.allowTestKeys });
+    if (judged) return `rejected: ${READ_KEY_RESULTS[judged]}`;
+    this.writeApprover({ ...record, read_key: message.read_key, read_key_at: message.created_at });
+    return 'read key set';
   }
 }
 

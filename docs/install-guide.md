@@ -877,6 +877,102 @@ The examples follow rules that keep a runbook safe to hand to a model:
 
 Not available yet. This section is written when fleet stage 3 merges.
 
+### Push to your phone
+
+Optional, Android only (iPhone push is unchanged and needs nothing here).
+Without it the app checks the relay only while it is open. With it the phone
+gets a notification when a node asks for something, and when a computer-use
+session or take ends (unless this phone stopped it) or pauses because no
+phone was watching; a tap opens that item with no fingerprint prompt. A push
+carries a kind, an id, the node's name and at most a count, never what is
+asked (see `mobile/PRIVACY.md`).
+
+The values below are invented; put your own in their place. Your Firebase
+config file, your `local.properties` and the service-account key never go
+into git (`tests/tracked-secrets.test.js` fails if one does).
+
+**A. Firebase (once, in a browser, signed in to the Google account that will
+own the project).**
+
+1. In the Firebase console, add a project, for example `kl-example-push`.
+   Google Analytics is not needed; leave it off.
+2. In that project, add an Android app. Its package name must be exactly the
+   `kl.applicationId` in `mobile/android/local.properties` (the example's
+   `com.example.kinglouie`; yours is your own). Nickname and SHA-1 are
+   optional. Download `google-services.json`.
+3. In Project settings > Cloud Messaging, check that "Firebase Cloud
+   Messaging API (V1)" is enabled (it is on a new project).
+4. In the Google Cloud console for the same project, IAM & Admin > Service
+   accounts, create one named `kl-push` with the role "Firebase Cloud
+   Messaging API Admin" and nothing else (never the project's default
+   `firebase-adminsdk` account, which can do far more). Under its Keys, add a
+   JSON key and download it. A Google Workspace organisation may forbid key
+   creation with the policy `iam.disableServiceAccountKeyCreation`; a
+   personal Google account has no such policy.
+
+**B. The relay host (the front door, as root).** On a `relay run` host, use
+its admin config dir in place of `/etc/king-louie` and the group its service
+runs under in place of `king-louie`.
+
+5. Copy the key file to the host directly (`scp`), never through a chat or
+   a shared folder, then put it in place and remove the copy:
+
+   ```sh
+   install -d -o root -g king-louie -m 0750 /etc/king-louie/push
+   install -o root -g king-louie -m 0640 kl-push.json /etc/king-louie/push/fcm-service-account.json
+   rm kl-push.json
+   ```
+
+6. Add the push block to `/etc/king-louie/service.json` (on the front door
+   the `relay` block holds only `push`; on a `relay run` host, add `push` to
+   the `relay` block that is there). The path must be absolute:
+
+   ```json
+   "relay": { "push": { "fcm": { "service_account_file": "/etc/king-louie/push/fcm-service-account.json" } } }
+   ```
+
+7. `systemctl restart king-louie.service` (on a `relay run` host, restart
+   `relay run`), then `king-louie-service doctor`: the `push` row names the
+   sender `fcm`, the file, its `project_id` (`kl-example-push`), its owner
+   and mode. The service refuses to start when the file is missing, is not
+   a service-account key or lacks a field, and says which, never what the
+   file holds.
+
+**C. The app (on the machine that builds it).**
+
+8. Put `google-services.json` at `mobile/android/app/src/fcm/`. It is
+   ignored by git; `git status` must not list it.
+9. From `mobile/android`, build and install the `fcm` flavor:
+   `./gradlew :app:installFcmRelease` (or pick the `fcmDebug` variant in
+   Android Studio). The `nopush` flavor, or `fcm` without the file, has no
+   push.
+10. Open the app and allow notifications when Android asks. If you said no,
+    the gear screen's Notifications row opens the setting.
+11. Enroll the phone (enrollment sends its push token), or, for a phone
+    already enrolled, just open the app (it sends the token at every start).
+    The gear screen's row says "Notifications: on". Its other answers: "off
+    in Android settings", "this build has no push", "the relay has no push
+    credential" (go back to B), "not registered yet" (open the app again
+    once the relay is reachable) and "the relay could not be asked".
+
+**D. Check.**
+
+12. On the relay host, as root: `king-louie-service relay push-test` (or
+    `--device <device-id>` for one phone). It prints each phone's id and
+    name with `sent` or the HTTP status, never a token, and exits 0 only when
+    every push went out. The phone shows "Test notification from frontdoor"
+    (the relay's node name).
+13. Optional, end to end: have the node ask for an approval (an unsafe
+    runbook over `mcp`), with the phone locked; "Approval needed on
+    <node>" appears, and a tap opens its detail with no fingerprint prompt.
+
+Rotating the key: add a new key to `kl-push` (step 4), replace the file
+(step 5), restart, check with `relay push-test`, then delete the old key in
+the Cloud console. A new Firebase project means a new `google-services.json`,
+a rebuild and new tokens; the relay drops each old token at its first
+`SENDER_ID_MISMATCH`. `Reset this phone` in the app asks the relay to forget
+the phone's token.
+
 ## 11. Stage 4: Reaching the fleet through the front door
 
 Not available yet. This section is written when fleet stage 4 merges.
@@ -1018,7 +1114,16 @@ Install prints these five steps when it is done:
    pin to `front-door.json` beside `node.yaml` and starts the logon task.
 3. **Your phone**: `king-louie-service enroll-device`, with the node
    running, and answer `y` at its `[y/N]` prompt. None of these commands
-   needs an elevated prompt on a personal node.
+   needs an elevated prompt on a personal node. An Android phone brings a
+   second key, its read key, which lets the app read without asking for your
+   fingerprint and can never approve anything; `enroll-device` prints its
+   fingerprint (`with a read key r-…`) beside the phone's. A phone paired
+   before its app had a read key sends it later, from its Approvals list:
+   the node stages it, and `king-louie-service device apply` writes it
+   after its `[y/N]` prompt. Upgrade the relay or front door and the
+   node before the Android app; an older relay refuses the app's reads.
+   Notifications on the phone need a push credential on the relay and the
+   app's `fcm` build: section 10, "Push to your phone".
 4. **The logins the takes will use**:
    `king-louie-service vault set browser_cred:<profile>:<host>`, one for each
    login, the value on stdin, with the node stopped (and `errands-token` when

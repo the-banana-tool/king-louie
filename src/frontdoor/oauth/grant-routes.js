@@ -1,6 +1,8 @@
 // The phone's side of connecting a client (fleet stage 4 §3.4, §4.9), under
 // F3's /v1 and its X-KL-* device auth. Only an active approver of this front
 // door (its admin-owned approvers/, R25) may use these routes (Deviation 13).
+// `auth` per android-slim §8.4: the claim by user code carries no envelope
+// and takes the device key; the others take either key.
 const { ApiError } = require('../phone-api');
 const { printable } = require('../http-util');
 const { normalizeUserCode } = require('../protocol/messages');
@@ -68,7 +70,7 @@ function registerGrantRoutes(phoneApi, { pending, grants, codes, clients, challe
   });
 
   phoneApi.registerRoute('POST', '/v1/grants/{id}/decision', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       const p = pending.get(ctx.params.id);
@@ -102,7 +104,7 @@ function registerGrantRoutes(phoneApi, { pending, grants, codes, clients, challe
   });
 
   phoneApi.registerRoute('GET', '/v1/clients', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       return {
@@ -116,7 +118,7 @@ function registerGrantRoutes(phoneApi, { pending, grants, codes, clients, challe
   // Ruling T2-purpose: a challenge is issued for one purpose and spent only
   // by that kind of message.
   phoneApi.registerRoute('POST', '/v1/challenges', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       const purpose = ctx.body && typeof ctx.body === 'object' ? ctx.body.purpose : undefined;
@@ -130,7 +132,7 @@ function registerGrantRoutes(phoneApi, { pending, grants, codes, clients, challe
   });
 
   phoneApi.registerRoute('POST', '/v1/clients/{grant_id}/revoke', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       const grantId = ctx.params.grant_id;

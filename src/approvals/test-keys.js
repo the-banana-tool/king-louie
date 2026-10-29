@@ -6,7 +6,12 @@
 const TEST_DEVICE_KEYS = Object.freeze([
   Object.freeze({ name: 'A', device_id: 'd-3vmwrihhdbnit4oi', x: 'krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74', y: '9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI' }),
   Object.freeze({ name: 'B', device_id: 'd-6xdlbxglhnvfa3lw', x: 'GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc', y: 'LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k' }),
-  Object.freeze({ name: 'C', device_id: 'd-futyo75nn4w4reil', x: 'RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w', y: 'gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78' })
+  Object.freeze({ name: 'C', device_id: 'd-futyo75nn4w4reil', x: 'RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w', y: 'gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78' }),
+  // Read keys (android-slim §8.1, §8.8). A read key has no device id of its
+  // own: `device_id` names the device it belongs to. Refused as a record's or
+  // an enrollment's read_key like the device keys above.
+  Object.freeze({ name: 'A_read', device_id: 'd-3vmwrihhdbnit4oi', read_key: true, x: 'bR4eNDGzasGOPyj1pvmA9ycRieOYKE2JVxoVpjhftII', y: 'epMctH6Kqp-VPnmnb3z8zs8RckTzC2yjbsuor2WWniY' }),
+  Object.freeze({ name: 'B_read', device_id: 'd-6xdlbxglhnvfa3lw', read_key: true, x: 'cVt3bucyCwSWInd6zTjQgp27Jl5Bsy_wLUnYZMzSBQY', y: 'jt2NwAHES1iQ9RYN8GvJNzrNVL4W2FwJQ5oH5CssLiU' })
 ]);
 
 const TEST_NODE_KEYS = Object.freeze([
@@ -22,8 +27,17 @@ function isTestDeviceKey(jwk) {
   return Boolean(jwk) && TEST_DEVICE_KEYS.some((k) => k.x === jwk.x && k.y === jwk.y);
 }
 
+// A record, or an enrollment's device, whose device key or read key
+// (android-slim §8.8) is a published test key. A holder without a read key is
+// judged on its device key alone.
+function hasTestKey(holder) {
+  if (!holder) return false;
+  const readKey = holder.read_key === undefined || holder.read_key === null ? null : holder.read_key;
+  return isTestDeviceKey(holder.public_key) || isTestDeviceKey(readKey);
+}
+
 function isTestNodeKey(spkiHex) {
   return TEST_NODE_KEYS.includes(String(spkiHex).toLowerCase());
 }
 
-module.exports = { TEST_DEVICE_KEYS, TEST_NODE_KEYS, isTestDeviceKey, isTestNodeKey };
+module.exports = { TEST_DEVICE_KEYS, TEST_NODE_KEYS, isTestDeviceKey, isTestNodeKey, hasTestKey };

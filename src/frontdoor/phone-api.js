@@ -2,6 +2,12 @@
 // signatures, code/invite path credentials, rate limits and a body cap. F3's
 // own routes register through it (routes.js), as do F4, F5 and C4; a later
 // registration of the same method and path replaces the earlier one (E8).
+//
+// A signed request names its key in `X-KL-Key` (android-slim §8.3): `device`
+// (or no header) is today's KL-PHONE-V1 against the device key; `read` is
+// KL-PHONE-READ-V1 against the device's `read_jwk`. A route's `auth: 'read'`
+// takes either key, `auth: 'device'` the device key only. Both keys share one
+// replay cache and one per-device rate bucket; handlers get `ctx.key`.
 const crypto = require('crypto');
 const { createLogger } = require('../logging');
 const { verifyEs256 } = require('../approvals/envelope');
@@ -13,7 +19,8 @@ const BODY_LIMIT = 262144;
 const SKEW_MS = 120000;
 const REPLAY_MS = 5 * 60 * 1000;
 const MAX_BUCKETS = 5000;
-const AUTH_KINDS = ['device', 'none', 'code', 'invite'];
+const AUTH_KINDS = ['device', 'read', 'none', 'code', 'invite'];
+const SIGNED_KINDS = ['device', 'read'];
 
 class ApiError extends Error {
   constructor(status, code, message, extra = {}) {
@@ -134,12 +141,23 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
     return route.rate ? `|${route.pattern}` : '';
   }
 
+  // Which key a signed request claims: X-KL-Key `read` or `device`, absent
+  // being `device`. A read claim on a device route is refused before the
+  // signature is checked: no read signature is ever accepted there.
+  function requestKey(req, route) {
+    const header = req.headers['x-kl-key'];
+    if (header === undefined) return 'device';
+    if (!SIGNED_KINDS.includes(header)) throw new ApiError(401, 'bad_key', 'X-KL-Key must be read or device');
+    if (header === 'read' && route.auth !== 'read') throw new ApiError(403, 'read_key_not_allowed', 'this route needs the device key');
+    return header;
+  }
+
   // Verifies the device signature and returns { device, replayKey } without
   // marking the replay entry used. The caller applies the per-device rate
   // limit before committing the replay entry, so a 429 never burns the
   // one-time signed string — the same request can still succeed once the
   // device's window clears.
-  function verifyDeviceSignature(req, pathWithQuery, body) {
+  function verifyDeviceSignature(req, pathWithQuery, body, key) {
     const deviceId = req.headers['x-kl-device'];
     const timestamp = req.headers['x-kl-timestamp'];
     const signature = req.headers['x-kl-signature'];
@@ -152,10 +170,13 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
     }
     const device = devices.get(deviceId);
     if (!device) throw new ApiError(401, 'unknown_device', 'this device is not registered with the relay');
-    const s = phoneAuthString(req.method, pathWithQuery, timestamp, body);
+    const jwk = key === 'read' ? device.read_jwk : device.jwk;
+    if (!jwk) throw new ApiError(401, 'unknown_read_key', 'the relay holds no read key for this device');
+    const s = phoneAuthString(req.method, pathWithQuery, timestamp, body, { key });
     const envelope = { alg: 'ES256', kid: deviceId, payload: Buffer.from(s, 'utf8').toString('base64url'), sig: String(signature) };
-    if (!verifyEs256(envelope, device.jwk)) throw new ApiError(401, 'bad_signature', 'the request signature does not verify');
-    // Keyed on the signed string, not the (malleable) signature value.
+    if (!verifyEs256(envelope, jwk)) throw new ApiError(401, 'bad_signature', 'the request signature does not verify');
+    // Keyed on the signed string, not the (malleable) signature value. The
+    // prefix makes the two keys' strings differ, so one cache serves both.
     const replayKey = `${crypto.createHash('sha256').update(s).digest('base64url')}|${deviceId}`;
     const t = now();
     for (const [k, until] of replay) if (until <= t) replay.delete(k);
@@ -238,8 +259,9 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
 
       let body;
       let device = null;
+      let key = null;
 
-      if (route.auth === 'device') {
+      if (SIGNED_KINDS.includes(route.auth)) {
         // No per-IP refusal ahead of the body and the signature: a request
         // that verifies always gets through, even from an IP whose bucket
         // other callers have filled (a shared CGNAT or office address), and
@@ -259,11 +281,13 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
             throw new ApiError(413, 'body_too_large', `bodies are limited to ${bodyLimit} bytes`);
           }
           body = await readBody(req);
-          const result = verifyDeviceSignature(req, pathWithQuery, body);
+          const claimed = requestKey(req, route);
+          const result = verifyDeviceSignature(req, pathWithQuery, body, claimed);
           verified = true;
           rateLimit(`device:${result.device.device_id}${suffix}`, (route.rate && route.rate.perMin) || limits.devicePerMin);
           replay.set(result.replayKey, now() + REPLAY_MS);
           device = result.device;
+          key = claimed;
         } catch (err) {
           // A verified signature that then hits its own device-rate limit
           // does not charge the IP bucket; anything short of a verified
@@ -298,7 +322,7 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
           throw new ApiError(400, 'bad_json', 'the body is not JSON');
         }
       }
-      const ctx = { deviceId: device ? device.device_id : null, device, params, query: Object.fromEntries(url.searchParams), body: parsed, relay };
+      const ctx = { deviceId: device ? device.device_id : null, device, key, params, query: Object.fromEntries(url.searchParams), body: parsed, relay };
       const result = (await route.handler(req, ctx)) || {};
       send(res, result.status || 200, result.body, result.headers);
     } catch (err) {

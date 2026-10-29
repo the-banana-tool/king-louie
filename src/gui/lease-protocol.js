@@ -305,17 +305,20 @@ function verifyLeaseGrant(envelope, { approverStore, nodeId, nonces, pending, gu
   return { accepted: true, check: null, reason: null, message: m, bytes: device.bytes, deviceId: device.deviceId, request };
 }
 
-function verifyLeaseControl(type) {
+// `allowReadKey`: whether the device's read key may sign it (android-slim
+// spec §8.5). Only a watch: it asks for frames and makes contact, and says
+// yes to nothing. `key` says which key verified ('device' | 'read').
+function verifyLeaseControl(type, { allowReadKey = false } = {}) {
   return (envelope, { approverStore, nodeId, nonces, knownLease }) => {
-    const device = verifyDeviceEnvelope(envelope, { approverStore, type, nodeId, nonces });
+    const device = verifyDeviceEnvelope(envelope, { approverStore, type, nodeId, nonces, allowReadKey });
     if (!device.ok) return reject(device.reason);
     if (!knownLease(device.message.lease_id)) return reject('unknown_lease');
-    return { accepted: true, check: null, reason: null, message: device.message, bytes: device.bytes, deviceId: device.deviceId };
+    return { accepted: true, check: null, reason: null, message: device.message, bytes: device.bytes, deviceId: device.deviceId, key: device.key };
   };
 }
 
 const verifyLeaseRevoke = verifyLeaseControl('kl.lease.revoke');
-const verifyLeaseWatch = verifyLeaseControl('kl.lease.watch');
+const verifyLeaseWatch = verifyLeaseControl('kl.lease.watch', { allowReadKey: true });
 
 // What a phone checks on a view (spec §3.10, §4.1): the node's signature
 // over the received bytes, the shape, the size, and that the frame is the

@@ -2,7 +2,7 @@
 // Everything signed goes through here, so the shapes live in one place.
 const crypto = require('crypto');
 const { canonicalize, sha256b64url } = require('../platform/jcs');
-const { seal, open, nodeSigner, deviceIdFromJwk, isDeviceJwk, fromB64url, toB64url, EnvelopeError } = require('./envelope');
+const { seal, open, nodeSigner, deriveDeviceId, deviceIdFromJwk, fingerprintGroups, isDeviceJwk, samePoint, fromB64url, toB64url, EnvelopeError } = require('./envelope');
 
 class MessageError extends Error {
   constructor(reason, detail = '') {
@@ -33,6 +33,7 @@ const TTL_MIN_MS = 30000;
 const TTL_MAX_MS = 300000;
 const ENROLL_MAX_MS = 10 * 60 * 1000;
 const REVOKE_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+const READ_KEY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const PLATFORMS = ['ios', 'android', 'demo'];
 const STATUS_STATES = ['approved', 'denied', 'expired', 'withdrawn', 'refused'];
 
@@ -218,12 +219,29 @@ function inviteMac(secret, device) {
   return hmacB64url(secret, device);
 }
 
+// The first line of the string a phone signs, by the key that signs it: the
+// device key (today's, biometric) or the read key (android-slim spec §8.3).
+// The prefixes differ so a read signature is never a device signature over
+// the same request.
+const PHONE_AUTH_PREFIXES = Object.freeze({ device: 'KL-PHONE-V1', read: 'KL-PHONE-READ-V1' });
+
 // The string a phone signs for device-authenticated phone API calls (§4.5).
-// The relay keys replay protection on SHA-256 of this string.
-function phoneAuthString(method, pathWithQuery, timestamp, body) {
+// The relay keys replay protection on SHA-256 of this string. `key` is
+// 'device' (the default) or 'read'; anything else is refused.
+function phoneAuthString(method, pathWithQuery, timestamp, body, { key = 'device' } = {}) {
+  if (!Object.hasOwn(PHONE_AUTH_PREFIXES, key)) throw new MessageError('malformed', 'unknown key kind');
   const bytes = Buffer.isBuffer(body) ? body : Buffer.from(body === undefined || body === null ? '' : String(body), 'utf8');
   const bodyHash = crypto.createHash('sha256').update(bytes).digest('base64url');
-  return ['KL-PHONE-V1', String(method).toUpperCase(), pathWithQuery, timestamp, bodyHash].join('\n');
+  return [PHONE_AUTH_PREFIXES[key], String(method).toUpperCase(), pathWithQuery, timestamp, bodyHash].join('\n');
+}
+
+// What people compare for a read key (spec §8.1): `r-` and the device id's
+// rule (the first 16 base32 characters of SHA-256 over 0x04||x||y), in groups
+// of four: 'r-abcd efgh ijkl mnop'. A read key has no id of its own.
+function readKeyFingerprint(jwk) {
+  if (!isDeviceJwk(jwk)) throw new MessageError('malformed', 'not a P-256 JWK');
+  const id = deriveDeviceId(Buffer.concat([Buffer.from([0x04]), fromB64url(jwk.x), fromB64url(jwk.y)]), 'r-');
+  return `r-${fingerprintGroups(id)}`;
 }
 
 function encodeQr(object) {
@@ -265,10 +283,18 @@ function checkOrigin(origin) {
   return hasExactKeys(origin, keys) && Object.values(origin).every((v) => v === null || withinLength(v, ORIGIN_STRING_MAX));
 }
 
+const DEVICE_KEYS = ['device_id', 'name', 'platform', 'public_key'];
+
+// The four keys of today, or exactly those and `read_key` (android-slim spec
+// §8.2): a P-256 JWK on the curve whose point is not `public_key`'s. The
+// device id still derives from `public_key` alone.
 function isDevice(device) {
-  if (!isPlainObject(device) || !hasExactKeys(device, ['device_id', 'name', 'platform', 'public_key'])) return false;
+  if (!isPlainObject(device)) return false;
+  const withReadKey = Object.hasOwn(device, 'read_key');
+  if (!hasExactKeys(device, withReadKey ? [...DEVICE_KEYS, 'read_key'] : DEVICE_KEYS)) return false;
   if (!isString(device.name) || device.name.length < 1 || device.name.length > 64) return false;
   if (!PLATFORMS.includes(device.platform) || !isDeviceJwk(device.public_key)) return false;
+  if (withReadKey && (!isDeviceJwk(device.read_key) || samePoint(device.read_key, device.public_key))) return false;
   return DEVICE_ID_RE.test(device.device_id) && deviceIdFromJwk(device.public_key) === device.device_id;
 }
 
@@ -298,6 +324,16 @@ const VALIDATORS = {
     if (!isTimestamp(m.created_at) || !isTimestamp(m.expires_at) || !NONCE_RE.test(m.nonce)) return false;
     const span = Date.parse(m.expires_at) - Date.parse(m.created_at);
     return span > 0 && span <= REVOKE_MAX_MS;
+  },
+  // The device key's statement of its read key, for phones enrolled before
+  // the read key (android-slim spec §8.7). Who signed it is the verifier's
+  // check; here, the shape and a window of at most 7 days.
+  'kl.device.read_key': (m) => {
+    if (!hasExactKeys(m, ['v', 'type', 'device_id', 'read_key', 'created_at', 'expires_at', 'nonce'])) return false;
+    if (!DEVICE_ID_RE.test(m.device_id) || !isDeviceJwk(m.read_key)) return false;
+    if (!isTimestamp(m.created_at) || !isTimestamp(m.expires_at) || !NONCE_RE.test(m.nonce)) return false;
+    const span = Date.parse(m.expires_at) - Date.parse(m.created_at);
+    return span > 0 && span <= READ_KEY_MAX_MS;
   },
   'kl.enroll.open': (m) => hasExactKeys(m, ['v', 'type', 'node_id', 'code_id', 'expires_at', 'nonce'])
     && NODE_ID_RE.test(m.node_id) && CODE_ID_RE.test(m.code_id) && isTimestamp(m.expires_at) && NONCE_RE.test(m.nonce),
@@ -387,7 +423,10 @@ module.exports = {
   buildEnrollDone,
   enrollMac,
   inviteMac,
+  READ_KEY_MAX_MS,
   phoneAuthString,
+  readKeyFingerprint,
+  isDevice,
   encodeQr,
   decodeQr,
   validateMessage,

@@ -1,5 +1,6 @@
 package com.example.kinglouie
 
+import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
@@ -11,21 +12,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.fragment.app.FragmentActivity
 import com.example.kinglouie.protocol.AppMode
+import com.example.kinglouie.protocol.ApprovalList
 import com.example.kinglouie.protocol.ApprovalStatus
-import com.example.kinglouie.protocol.AuditSlice
-import com.example.kinglouie.protocol.AuditStatus
 import com.example.kinglouie.protocol.B64Url
-import com.example.kinglouie.protocol.DemoFleet
 import com.example.kinglouie.protocol.Digest
 import com.example.kinglouie.protocol.Display
 import com.example.kinglouie.protocol.Envelope
 import com.example.kinglouie.protocol.FrontDoor
 import com.example.kinglouie.protocol.FrontDoorReply
 import com.example.kinglouie.protocol.GrantRequest
-import com.example.kinglouie.protocol.Hex
 import com.example.kinglouie.protocol.Identifiers
 import com.example.kinglouie.protocol.Jcs
-import com.example.kinglouie.protocol.JsonText
 import com.example.kinglouie.protocol.LeaseAction
 import com.example.kinglouie.protocol.LeaseRequest
 import com.example.kinglouie.protocol.LeaseStatus
@@ -34,6 +31,8 @@ import com.example.kinglouie.protocol.ListingCheck
 import com.example.kinglouie.protocol.Messages
 import com.example.kinglouie.protocol.NodePin
 import com.example.kinglouie.protocol.PairingRequest
+import com.example.kinglouie.protocol.PhoneKey
+import com.example.kinglouie.protocol.PushText
 import com.example.kinglouie.protocol.ProtocolException
 import com.example.kinglouie.protocol.QuestionItem
 import com.example.kinglouie.protocol.Questions
@@ -47,119 +46,44 @@ import com.example.kinglouie.protocol.arr
 import com.example.kinglouie.protocol.bool
 import com.example.kinglouie.protocol.get
 import com.example.kinglouie.protocol.int
-import com.example.kinglouie.protocol.jsonNumber
-import com.example.kinglouie.protocol.jsonString
 import com.example.kinglouie.protocol.obj
 import com.example.kinglouie.protocol.str
+import com.example.kinglouie.push.Push
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.serialization.json.JsonArray
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
-import java.net.URI
-import java.security.GeneralSecurityException
-import java.security.ProviderException
-
-/** A message meant for the owner as it stands (already worded and escaped). */
-class OwnerMessage(message: String) : Exception(message)
-
-/** What the app keeps (mobile/PRIVACY.md): relay pin, node pins, mode, push token. The key lives in the Keystore. */
-class Storage(context: Context) {
-    private val prefs = context.getSharedPreferences("kl.state", Context.MODE_PRIVATE)
-
-    var mode: AppMode
-        get() = runCatching { AppMode.valueOf(prefs.getString("mode", null) ?: AppMode.WELCOME.name) }.getOrDefault(AppMode.WELCOME)
-        set(v) = prefs.edit().putString("mode", v.name).apply()
-    var relayUrl: String?
-        get() = prefs.getString("relayUrl", null)
-        set(v) = prefs.edit().putString("relayUrl", v).apply()
-    var relaySpki: String?
-        get() = prefs.getString("relaySpki", null)
-        set(v) = prefs.edit().putString("relaySpki", v).apply()
-    var pushToken: String?
-        get() = prefs.getString("pushToken", null)
-        set(v) = prefs.edit().putString("pushToken", v).apply()
-
-    /** The push token the relay last accepted from this phone. */
-    var pushTokenSent: String?
-        get() = prefs.getString("pushTokenSent", null)
-        set(v) = prefs.edit().putString("pushTokenSent", v).apply()
-
-    /**
-     * The front door this phone's relay is (fleet stage 4): set only when GET
-     * /v1/frontdoor names a node pinned from a code, with that key
-     * (FrontDoor.identify).
-     */
-    var frontDoorId: String?
-        get() = prefs.getString("frontDoorId", null)
-        set(v) = prefs.edit().putString("frontDoorId", v).apply()
-    var nodes: List<NodePin>
-        get() = prefs.getString("nodes", null)?.let { text ->
-            runCatching {
-                JsonText.parse(text).arr()!!.map { NodePin(it["id"].str()!!, it["name"].str()!!, it["key"].str()!!) }
-            }.getOrNull()
-        } ?: emptyList()
-        set(v) = prefs.edit().putString("nodes", Jcs.serialize(JsonArray(v.map {
-            JsonObject(mapOf("id" to jsonString(it.id), "name" to jsonString(it.name), "key" to jsonString(it.key)))
-        }))).apply()
-
-    /** The pairing state, to put back when a pairing does not finish. */
-    data class Snapshot(val mode: AppMode, val relayUrl: String?, val relaySpki: String?, val nodes: List<NodePin>, val frontDoorId: String?)
-
-    fun snapshot() = Snapshot(mode, relayUrl, relaySpki, nodes, frontDoorId)
-
-    fun restore(s: Snapshot) {
-        mode = s.mode
-        relayUrl = s.relayUrl
-        relaySpki = s.relaySpki
-        nodes = s.nodes
-        frontDoorId = s.frontDoorId
-    }
-
-    fun clear() = prefs.edit().clear().apply()
-}
-
-class PendingItem(
-    val id: String,
-    val message: JsonElement,
-    val display: JsonElement,
-    val fullText: Map<String, String>,
-    val receivedAtMs: Long,
-    val expiresInMs: Long,
-    initialStatus: String?
-) {
-    var status by mutableStateOf(initialStatus)
-
-    /** An approve or deny for this item is being signed or sent. */
-    var deciding by mutableStateOf(false)
-
-    /** From receipt, on the monotonic clock. */
-    val timeLeftMs: Long get() = (expiresInMs - (SystemClock.elapsedRealtime() - receivedAtMs)).coerceAtLeast(0)
-}
+import kotlinx.serialization.json.JsonPrimitive
+import java.text.DateFormat
+import java.time.Instant
+import java.util.Date
 
 class AppModel(context: Context) {
+    private val appContext: Context = context.applicationContext
     private val storage = Storage(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var key: DeviceKey? = runCatching { DeviceKey.load() }.getOrNull()
-    private var demo: DemoFleet? = null
+
+    /** The read key (android-slim §8.1), or null for a phone enrolled before it. Made and deleted with `key`. */
+    private var readKey by mutableStateOf(runCatching { ReadKey.load() }.getOrNull())
     private var client: RelayApi? = null
-    private var pollJob: Job? = null
 
-    /** A pairing is under way; no check starts under it. */
+    /** A pairing is under way; the loop does not run under it. */
     private var pairing = false
-
-    /** No check before this (elapsedRealtime ms): the relay asked this phone to wait. */
-    private var notBeforeMs = 0L
 
     /** Requests already reported as refused (bounded), so each is reported once. */
     private val warnedPayloads = HashSet<String>()
@@ -169,23 +93,19 @@ class AppModel(context: Context) {
         private set
     var banner by mutableStateOf<String?>(null)
 
-    /** Why "Check for requests" did not get through; shown quietly on the Pending screen. */
+    /** Why the loop is not getting through, at most one line above the list (§6.2). */
     var pollProblem by mutableStateOf<String?>(null)
         private set
-    var isPolling by mutableStateOf(false)
-        private set
     var fingerprintToCompare by mutableStateOf<String?>(null)
-    var inviteQr by mutableStateOf<String?>(null)
-    var inviteClaim by mutableStateOf<JsonElement?>(null)
-    var history by mutableStateOf<Pair<String, List<JsonElement>>?>(null)
-
-    /** The front door's own gap and break records for the page in `history` ("reported by front door"). */
-    var historyStatus by mutableStateOf<AuditStatus?>(null)
-
-    /** Why those records could not be shown, when they could not. */
-    var historyStatusNote by mutableStateOf<String?>(null)
     var frontDoorId by mutableStateOf(storage.frontDoorId)
         private set
+
+    /** Add another phone (§6.4, InviteFlow.kt): the invite's QR while it is open, then the claimed device to compare. */
+    private val invite = InviteFlow(scope) { banner = it }
+    val inviteQr: String? get() = invite.qr
+    val inviteClaim: JsonElement? get() = invite.claim
+
+    /** A client connection this phone claimed by its code (C-13), with the code the grant message needs. */
     var grantRequest by mutableStateOf<GrantRequest?>(null)
         private set
     private var grantCode: String? = null
@@ -193,69 +113,88 @@ class AppModel(context: Context) {
     /** When `grantRequest` arrived (elapsedRealtime ms); its expiry counts from here. */
     private var grantReceivedAtMs = 0L
 
-    /** An approve or deny for `grantRequest`, or a pairing decision, is being signed or sent. */
+    /** A front-door decision or action (client, pairing, revoke, remove, acknowledge) is being signed or sent. */
     var frontDoorBusy by mutableStateOf(false)
         private set
-    val clients = mutableStateListOf<JsonElement>()
-    val pairings = mutableStateListOf<PairingRequest>()
-    val frontDoorNodes = mutableStateListOf<JsonElement>()
-    val alerts = mutableStateListOf<JsonElement>()
+
+    // ---- The stores (android-slim §10): one per kind, each replaced whole by its fetch ----
+    // Declared here, above `init`, so everything `init` reaches exists.
+
+    /** Tool approvals (`GET /v1/approvals`), verified by `receive`. */
     val pending = mutableStateListOf<PendingItem>()
 
-    /**
-     * Computer-use requests (fleet stage 5; the rest is in the Leases section
-     * below). Declared here, above `init`: `init` runs startDemo, which fills
-     * this list, and a property declared after `init` is not there yet.
-     */
+    /** Questions (`GET /v1/questions`), verified by `verifiedQuestion`. */
+    val questions = mutableStateListOf<QuestionItem>()
+
+    /** Lease requests (`GET /v1/leases`), verified by `verifiedLeaseRequest`. */
     val leaseRequests = mutableStateListOf<LeaseRequestItem>()
 
     /**
-     * Leases a pinned node listed as running that are not the one on the live
-     * screen (owner ruling R-F5-18). Up here with `leaseRequests`, for the
-     * same reason.
+     * Leases a pinned node listed as running (or pending, by the rules of
+     * notePendingListed) that are not the one on the live screen (owner
+     * ruling R-F5-18).
      */
     val runningLeases = mutableStateListOf<RunningLease>()
 
     /**
      * What this phone knows about computer use on each pinned node, by node
-     * id (owner ruling R-F5-20; fourth security review, finding 2). Three
-     * things can be true, and each is shown as what it is: nothing asked yet
-     * (no entry); a listing the node signed for this phone's own request,
-     * accepted at a time by this phone's clock, with what it listed; or a
-     * request that brought no listing this phone could accept. Written only
-     * by refreshLeases, on the owner's tap. Up here for the same reason.
+     * id (owner ruling R-F5-20; fourth security review, finding 2): nothing
+     * asked yet (no entry); a listing the node signed for this phone's own
+     * request, accepted at a time by this phone's clock; or a request that
+     * brought no listing this phone could accept. Written only by
+     * refreshLeases, which the loop calls.
      */
     val leaseChecks = mutableStateMapOf<String, LeaseNodeCheck>()
 
+    /** Node pairings waiting on the front door (`GET /v1/pairings/pending`), checked by the core. */
+    val pairings = mutableStateListOf<PairingItem>()
+
+    /** Front-door alerts (`GET /v1/alerts?since=0`). */
+    val alerts = mutableStateListOf<JsonElement>()
+
+    // Settings (§6.4), read with the read key when the screen opens.
+    val clients = mutableStateListOf<JsonElement>()
+    val frontDoorNodes = mutableStateListOf<JsonElement>()
     val devices = mutableStateListOf<JsonElement>()
     val online = mutableStateMapOf<String, Boolean>()
-    val nodes: List<NodePin> get() = storage.nodes
 
-    /** The demo fleet's nodes, shown on the Nodes screen in demo mode (nothing is pinned there). */
-    val demoNodes: List<NodePin> get() = demo?.pins.orEmpty()
+    val nodes: List<NodePin> get() = storage.nodes
     val relayUrl: String? get() = storage.relayUrl
     val relaySpki: String? get() = storage.relaySpki
-    val deviceId: String? get() = if (mode == AppMode.DEMO) demo?.deviceId else key?.deviceId
+    val deviceId: String? get() = key?.deviceId
+
+    /** This phone's device key, as people compare it: `d-abcd efgh …`. */
+    val deviceFingerprint: String? get() = key?.deviceId?.let { "d-" + Identifiers.fingerprintGroups(it) }
+
+    /** Its read key's: `r-abcd efgh ijkl mnop` (§8.1); null without one. */
+    val readKeyFingerprint: String? get() = readKey?.fingerprint
 
     init {
-        if (mode == AppMode.DEMO) startDemo()
         if (mode == AppMode.LIVE) connect()
     }
 
     /**
      * The only place a network client is made. RelayClientFactory hands one
-     * out in live mode only, so demo (and welcome) never has one; without a
-     * key there is nothing to sign requests with, so no client either.
+     * out in live mode only; without a key there is nothing to sign requests
+     * with, so no client either. A new client restarts the loop on it.
      */
     private fun connect() {
+        stopLoop(sayAway = false)
         client = null
         val k = key ?: return
         val url = storage.relayUrl ?: return
         val pin = storage.relaySpki ?: return
         val factory = RelayClientFactory {
-            RelayApi(url, pin, k.deviceId) { data -> sign(k, data, "Check your relay", "Signs this phone's request to the relay") }
+            RelayApi(url, pin, k.deviceId, { data -> sign(k, data, "Check your relay", "Signs this phone's request to the relay") }, readSigner())
         }
         client = factory.client(mode)
+        startLoop()
+    }
+
+    /** The read key's signer for RelayApi's read routes: no prompt, off the main thread. Null without a read key. */
+    private fun readSigner(): (suspend (ByteArray) -> ByteArray)? {
+        val rk = readKey ?: return null
+        return { data -> withContext(Dispatchers.IO) { rk.sign(data) } }
     }
 
     private fun changeMode(m: AppMode) {
@@ -280,45 +219,605 @@ class AppModel(context: Context) {
         return Envelope("ES256", k.deviceId, B64Url.encode(bytes), B64Url.encode(sign(k, bytes, title, description)))
     }
 
-    // ---- Questions (cases stage 4) ----
-    // No presence pings from this phone (ruling T19-presence): every
-    // device-signed relay request is a biometric prompt here, so the node sees
-    // it as not in the foreground and the reach ladder moves on. Questions
-    // load only when the owner taps Refresh, like "Check for requests".
+    /**
+     * The read key signs a `kl.lease.watch` and nothing else (android-slim
+     * §8.5): no prompt. The envelope names the device, as the device key's
+     * would (`kid` is the device id, `alg` ES256).
+     */
+    private suspend fun signRead(message: JsonObject): Envelope {
+        if (message["type"].str() != "kl.lease.watch") throw OwnerMessage("Only a watch is signed without your fingerprint.")
+        val rk = readKey ?: throw ReadKeyMissingException()
+        val id = key?.deviceId ?: throw ReadKeyMissingException()
+        val bytes = Jcs.bytes(message)
+        val signature = withContext(Dispatchers.IO) { rk.sign(bytes) }
+        return Envelope("ES256", id, B64Url.encode(bytes), B64Url.encode(signature))
+    }
 
-    val questions = mutableStateListOf<QuestionItem>()
+    // ---- The read key: set-up for a phone enrolled before it (android-slim §8.7) ----
 
-    /** Tokens whose answer is being signed or sent. */
-    val answering = mutableStateListOf<String>()
-    var isLoadingQuestions by mutableStateOf(false)
+    /** What a node knows of this phone's read key, for Settings (§6.4). */
+    enum class ReadKeyNodeState { IN_USE, WAITING_FOR_APPLY, NOT_SENT }
+
+    /** The set-up row (§8.7): signing or sending the statement. */
+    var readKeySetupBusy by mutableStateOf(false)
         private set
-    private val answeredTokens = HashSet<String>()
+
+    /** Each node's answer to the statement, the statement kept to re-post it, and whether the relay knows the read key (ReadKeyNodes.kt). */
+    private val readKeyNodes = ReadKeyNodes(storage)
+
+    /** A read key the relay knows: the loop may run (§9). */
+    private val readKeyKnown: Boolean get() = readKey != null && !readKeyNodes.unknown
+
+    /** Whether the Approvals list shows the set-up row (`READ_KEY_SETUP_TITLE`) until it is done. */
+    val readKeySetupNeeded: Boolean get() = mode == AppMode.LIVE && key != null && !readKeyKnown
+
+    /** Settings' line for one pinned node (§6.4). */
+    fun readKeyState(nodeId: String): ReadKeyNodeState = when {
+        !readKeyKnown -> ReadKeyNodeState.NOT_SENT
+        // No statement was ever needed: the phone enrolled with its read key, so every node holds it.
+        readKeyNodes.noneSent -> ReadKeyNodeState.IN_USE
+        else -> when (readKeyNodes[nodeId]) {
+            ReadKeyNodes.IN_USE -> ReadKeyNodeState.IN_USE
+            ReadKeyNodes.WAITING -> ReadKeyNodeState.WAITING_FOR_APPLY
+            else -> ReadKeyNodeState.NOT_SENT
+        }
+    }
 
     /**
-     * One look at the relay's questions. Only a node-signed `kl.question.ask`
-     * from a pinned node (kid, node_id and signature all that node's) is shown.
+     * The set-up row's tap: make the read key (or keep the one the relay does
+     * not know yet), sign a `kl.device.read_key` with the device key (one
+     * fingerprint) and post it with device-key transport (the second). A relay
+     * from before the read key answers 404: the app says to upgrade it and
+     * does not fall back to checking with fingerprints (C-19).
      */
-    fun refreshQuestions() {
-        if (pairing || mode != AppMode.LIVE || isLoadingQuestions) return
-        val api = client ?: run {
-            banner = "This phone is not paired with a relay."
-            return
-        }
-        isLoadingQuestions = true
+    fun setUpReadKey() {
+        if (readKeySetupBusy || mode != AppMode.LIVE || pairing) return
+        val k = key ?: return
+        val api = client ?: return
+        readKeySetupBusy = true
         scope.launch {
             try {
-                val pins = storage.nodes
-                val items = api.questions().mapNotNull { entry -> verifiedQuestion(entry, pins) }
-                    .distinctBy { it.token }
-                    .filter { it.token !in answeredTokens }
-                questions.clear()
-                questions.addAll(items)
+                val rk = readKey ?: withContext(Dispatchers.IO) { ReadKey.create() }
+                val envelope = signReadKeyStatement(k, rk, api)
+                val reply = postReadKey(api, envelope, PhoneKey.DEVICE)
+                readKey = rk
+                readKeyNodes.keep(envelope)
+                readKeyNodes.noteReply(reply, firstPost = true)
+                readKeyNodes.markUnknown(false)
+                // RelayApi now carries the read key's signer, and the loop starts on it.
+                connect()
             } catch (e: Exception) {
                 fail(e)
             } finally {
-                isLoadingQuestions = false
+                readKeySetupBusy = false
             }
         }
+    }
+
+    /**
+     * Settings' Send again, past the statement's seven days or after a node
+     * refused it: a new statement (one fingerprint), posted with the read key,
+     * which the relay already knows.
+     */
+    fun sendReadKeyAgain() {
+        if (!readKeyKnown) return setUpReadKey()
+        if (readKeySetupBusy) return
+        val k = key ?: return
+        val rk = readKey ?: return
+        val api = client ?: return
+        readKeySetupBusy = true
+        scope.launch {
+            try {
+                val envelope = signReadKeyStatement(k, rk, api)
+                val reply = postReadKey(api, envelope, PhoneKey.READ)
+                readKeyNodes.keep(envelope)
+                readKeyNodes.noteReply(reply, firstPost = true)
+            } catch (e: Exception) {
+                fail(e)
+            } finally {
+                readKeySetupBusy = false
+            }
+        }
+    }
+
+    private suspend fun signReadKeyStatement(k: DeviceKey, rk: ReadKey, api: RelayApi): Envelope {
+        val now = api.now()
+        val message = Messages.readKeyStatement(k.deviceId, rk.jwk, Timestamps.string(now), Timestamps.string(now.plusMillis(READ_KEY_STATEMENT_MS)), Messages.randomNonce())
+        return signEnvelope(k, message, "Check without your fingerprint", "Adds this phone's read key ${rk.fingerprint}")
+    }
+
+    private suspend fun postReadKey(api: RelayApi, envelope: Envelope, transport: PhoneKey): JsonElement? = try {
+        api.readKey(envelope, transport)
+    } catch (e: RelayException) {
+        if (e.status == 404) throw OwnerMessage(OLDER_RELAY)
+        throw e
+    }
+
+    /** At each loop start: the kept statement again, with the read key, when a node was offline (§8.7). No prompt. */
+    private suspend fun repostReadKeyStatement(api: RelayApi) {
+        if (!readKeyNodes.anyOffline) return
+        val envelope = readKeyNodes.kept(api.now().toEpochMilli()) ?: return
+        readKeyNodes.noteReply(api.readKey(envelope, PhoneKey.READ), firstPost = false)
+    }
+
+    // ---- ForegroundLoop (android-slim §9) ----
+    // One loop, started on ProcessLifecycleOwner's ON_START (onForeground,
+    // KingLouieApplication) and cancelled on ON_STOP (onBackground), only in
+    // live mode, with a read key the relay knows, and no pairing under way.
+    // It reads with the read key alone: nothing in it signs with the device
+    // key or makes a decision (owner ruling R-AN-6; R-F5-5 stands for every
+    // decision). Every wait is a delay in its own coroutine.
+    // tests/mobile-lease-apps.test.js reads this section up to its end marker.
+
+    /** The app is in the foreground (ProcessLifecycleOwner between ON_START and ON_STOP). */
+    private var foreground = false
+    private var loop: ForegroundLoop? = null
+
+    /** When the other kinds were last fetched (elapsedRealtime ms): at most once every REST_EVERY_MS. */
+    private var lastRestAtMs = 0L
+    private val restLock = Mutex()
+
+    /** Pull to refresh is fetching. */
+    var isRefreshing by mutableStateOf(false)
+        private set
+
+    /** ON_START. The Approvals notification's running count starts again (push spec §7.2). */
+    fun onForeground() {
+        foreground = true
+        Push.appInFront(appContext)
+        startLoop()
+        startLiveLoop()
+        // Back from Android's notification settings (the gear's button): its row is asked again.
+        if (notifications != null) scope.launch { refreshNotifications(client) }
+    }
+
+    /** ON_STOP: the loop stops, with one best-effort "not in front" (C-8), and so do the live view's watches. */
+    fun onBackground() {
+        foreground = false
+        stopLoop(sayAway = true)
+        stopLiveLoop()
+    }
+
+    private fun startLoop() {
+        if (!foreground || pairing || mode != AppMode.LIVE || loop != null || !readKeyKnown) return
+        val api = client ?: return
+        loop = ForegroundLoop(api).also { it.start() }
+    }
+
+    private fun stopLoop(sayAway: Boolean) {
+        loop?.stop(sayAway)
+        loop = null
+    }
+
+    /** Reading with the read key is possible now (the loop's conditions, less the foreground). */
+    private fun readyToRead(): Boolean = mode == AppMode.LIVE && !pairing && readKeyKnown && client != null
+
+    private inner class ForegroundLoop(private val api: RelayApi) {
+        private var job: Job? = null
+        private var repinTried = false
+
+        fun start() {
+            job = scope.launch {
+                try {
+                    run()
+                } finally {
+                    if (loop === this@ForegroundLoop) loop = null
+                }
+            }
+        }
+
+        fun stop(sayAway: Boolean) {
+            job?.cancel()
+            // Best effort, once: nothing waits for it and nothing sends it again.
+            if (sayAway) scope.launch {
+                try {
+                    api.presence(false)
+                } catch (e: Exception) {
+                    // The node lets presence lapse after 120 s anyway.
+                }
+            }
+        }
+
+        private suspend fun run() = coroutineScope {
+            // Presence (C-8): at the start and every 60 s while the loop runs.
+            val presence = launch {
+                while (isActive) {
+                    try {
+                        api.presence(true)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // A missed ping only lets presence lapse; the next one comes in 60 s.
+                    }
+                    delay(PRESENCE_EVERY_MS)
+                }
+            }
+            try {
+                try {
+                    // §8.7: a statement a node did not get (it was offline) goes again, with no prompt.
+                    repostReadKeyStatement(api)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Tried again at the next loop start; Settings shows each node's state.
+                }
+                sendPushToken()
+                while (isActive) {
+                    try {
+                        // 1. The approvals long poll: the wake signal.
+                        val items = api.approvals(LONG_POLL_S)
+                        fingerprintToCompare = null
+                        takeApprovals(items)
+                        // 2. The other kinds, at most once every 5 s.
+                        fetchRest(api)
+                        pollProblem = null
+                        // A poll that got through: the phone is enrolled (an invite another phone
+                        // approved included), so a token not yet sent in this process goes now.
+                        sendPushToken()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        pruneExpired()
+                        if (!waitAfter(e)) break
+                    }
+                }
+            } finally {
+                presence.cancel()
+            }
+        }
+
+        /** After an error: wait as §9 says and go on (true), or stop with the problem shown (false). */
+        private suspend fun waitAfter(e: Exception): Boolean {
+            when (e) {
+                is ReadKeyMissingException -> {
+                    // The Keystore no longer has it: the set-up row makes a new one.
+                    readKey = null
+                    return false
+                }
+                is ReadKeyUnavailableException -> {
+                    pollProblem = e.message
+                    delay(ERROR_WAIT_MS)
+                    return true
+                }
+                is KeyInvalidatedException -> {
+                    dropInvalidKey()
+                    return false
+                }
+                is RelayException -> {
+                    if (e.code == "unknown_read_key") {
+                        // The relay does not know this read key: the set-up row of §8.7.
+                        readKeyNodes.markUnknown(true)
+                        pollProblem = null
+                        return false
+                    }
+                    if (e.code == "pin_mismatch") {
+                        // Only a front door's signed re-pin, checked against the key pinned from a
+                        // code, moves the pin (once); connect() then runs a new loop on it.
+                        if (!repinTried) {
+                            repinTried = true
+                            if (tryRepin()) return false
+                        }
+                        banner = describe(e)
+                        pollProblem = describe(e)
+                        return false
+                    }
+                    val seconds = e.retryAfter?.coerceAtLeast(1)
+                        ?: if (e.status == 401 || e.code == "rate_limited") BUSY_WAIT_S else ERROR_WAIT_S
+                    pollProblem = if (e.code == "network") "Can't reach the relay. Trying again in $seconds s."
+                    else "${describe(e).trimEnd('.')}. Trying again in $seconds s."
+                    delay(seconds * 1000L)
+                    return true
+                }
+                else -> {
+                    pollProblem = "${describe(e).trimEnd('.')}. Trying again in ${ERROR_WAIT_S} s."
+                    delay(ERROR_WAIT_MS)
+                    return true
+                }
+            }
+        }
+    }
+
+    /**
+     * The approvals store, replaced by what the relay lists: each item through
+     * `receive` (the node's signature, approval-v1 §5); an undecided item the
+     * relay no longer lists was decided elsewhere or ran out, and leaves. A
+     * decided one stays until a minute past its expiry (pruneExpired).
+     */
+    private fun takeApprovals(items: List<JsonElement>) {
+        val pins = storage.nodes
+        val listed = items.mapNotNull { receive(it, pins) }.toSet()
+        pending.removeAll { it.status == null && !it.deciding && it.id !in listed }
+        pruneExpired()
+    }
+
+    /**
+     * Step 2 of §9: questions, leases (with a fresh nonce) and, on a front
+     * door, pairings and alerts; at most once every 5 s, whoever asks. One
+     * kind failing leaves that kind as it was; a failure about this phone or
+     * the relay as a whole goes to the caller.
+     */
+    private suspend fun fetchRest(api: RelayApi) = restLock.withLock {
+        val now = SystemClock.elapsedRealtime()
+        if (lastRestAtMs != 0L && now - lastRestAtMs < REST_EVERY_MS) return@withLock
+        lastRestAtMs = now
+        each { fetchQuestions(api) }
+        each { refreshLeases(api) }
+        if (frontDoorId != null) {
+            each { fetchPairings(api) }
+            each { fetchAlerts(api) }
+        }
+    }
+
+    private suspend fun each(fetch: suspend () -> Unit) {
+        try {
+            fetch()
+        } catch (e: RelayException) {
+            if (e.status == 401 || e.code in setOf("rate_limited", "pin_mismatch", "network")) throw e
+        } catch (e: ProtocolException) {
+            // A reply this app refuses as malformed: that kind stays as it was.
+        }
+    }
+
+    /**
+     * A notification arrived (the push service's thread): while the app is in
+     * front, step 2 at once, as for a tapped one (§9; the 5 s rule applies).
+     * In the background nothing runs: the notification is what the owner sees.
+     */
+    fun onNotificationArrived() {
+        scope.launch { if (foreground) refresh() }
+    }
+
+    /** Pull to refresh, a notification while in front, and the return from a decision: step 2 at once (the 5 s rule still applies). */
+    fun refresh() {
+        if (isRefreshing || !readyToRead()) return
+        val api = client ?: return
+        isRefreshing = true
+        scope.launch {
+            try {
+                fetchRest(api)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                pollProblem = describe(e)
+            } finally {
+                isRefreshing = false
+            }
+        }
+    }
+
+    // ---- ForegroundLoop: end ----
+
+    // ---- The Approvals list (android-slim §7, §10, §13) ----
+
+    /** The detail on screen over the list: one kind and its id. */
+    sealed class Selection {
+        data class Tool(val requestId: String) : Selection()
+        data class Question(val token: String) : Selection()
+        data class LeaseRequest(val requestId: String) : Selection()
+        data class RunningLease(val leaseId: String) : Selection()
+        data class Client(val grantId: String) : Selection()
+        data class Pairing(val pairingId: String) : Selection()
+        data class Alert(val id: String) : Selection()
+    }
+
+    /** The detail on screen, or null for the list. */
+    var selected by mutableStateOf<Selection?>(null)
+        private set
+
+    /** One line above the list after a notification whose item is gone (§13), or a session its node no longer has (C-18). */
+    var listNotice by mutableStateOf<String?>(null)
+        private set
+
+    /** Row ids whose summary did not fit when drawn (Compose's hasVisualOverflow): Review in place of Approve (C-12). */
+    private val overflowing = mutableStateMapOf<String, Boolean>()
+
+    /** Questions answered on this phone, and alerts it acknowledged: decided rows until their store no longer lists them. */
+    private val questionDecided = mutableStateMapOf<String, ApprovalList.Decided>()
+    private val alertDecided = mutableStateMapOf<String, ApprovalList.Decided>()
+
+    /**
+     * Lease requests, a client connection and node pairings this phone
+     * decided and the node or front door confirmed (§7.2): each a decided row
+     * at the bottom until a minute past its expiry (DECIDED_KEEP_MS), as a
+     * decided tool approval is. Kept apart from their stores, so a detail
+     * whose item was decided closes itself.
+     */
+    private val leaseDecided = mutableStateMapOf<String, Pair<LeaseRequestItem, ApprovalList.Decided>>()
+
+    private data class DecidedClient(val request: GrantRequest, val code: String, val receivedAtMs: Long, val decided: ApprovalList.Decided)
+
+    private var clientDecided by mutableStateOf<DecidedClient?>(null)
+    private val pairingDecided = mutableStateMapOf<String, Pair<PairingItem, ApprovalList.Decided>>()
+
+    private fun leaseRequestKept(item: LeaseRequestItem, relayNowMs: Long): Boolean =
+        relayNowMs <= (Timestamps.epochMillis(item.request.expiresAt) ?: 0L) + DECIDED_KEEP_MS
+
+    private fun clientKept(c: DecidedClient, elapsedMs: Long): Boolean = elapsedMs - c.receivedAtMs <= c.request.expiresInMs + DECIDED_KEEP_MS
+
+    private fun pairingKept(p: PairingItem, elapsedMs: Long): Boolean = elapsedMs - p.receivedAtMs <= p.request.expiresInMs + DECIDED_KEEP_MS
+
+    fun reportOverflow(rowId: String, overflow: Boolean) {
+        if (overflowing[rowId] != overflow) overflowing[rowId] = overflow
+    }
+
+    fun dismissListNotice() {
+        listNotice = null
+    }
+
+    /**
+     * The one list (§7): every store, as it stands, through ApprovalList.build
+     * (the order, the host-built strings and the buttons are its).
+     */
+    fun approvalList(): ApprovalList.Result {
+        val relayNow = client?.now()?.toEpochMilli() ?: System.currentTimeMillis()
+        val elapsed = SystemClock.elapsedRealtime()
+        fun decidedTool(p: PendingItem): ApprovalList.Decided? =
+            p.status?.takeIf { it != RETRY_OFFLINE && it != RETRY_BUSY }?.let { ApprovalList.Decided(it, p.statusAtMs) }
+        val grant = grantRequest
+        val input = ApprovalList.Input(
+            toolApprovals = pending.map { p ->
+                ApprovalList.ToolApproval(p.id, p.display, p.timeLeftMs, sending = p.deciding || p.status == RETRY_OFFLINE || p.status == RETRY_BUSY, decided = decidedTool(p))
+            },
+            questions = questions.map { ApprovalList.Question(it, sending = it.token in answering, decided = questionDecided[it.token]) },
+            leaseRequests = leaseRequests.map { item ->
+                val left = (Timestamps.epochMillis(item.request.expiresAt) ?: 0L) - relayNow
+                ApprovalList.LeaseRequestItem(item.request, item.nodeName, left, sending = item.request.requestId in decidingLease, unconfirmed = item.unconfirmed)
+            } + leaseDecided.values.filter { (item, _) -> leaseRequestKept(item, relayNow) }.map { (item, d) ->
+                ApprovalList.LeaseRequestItem(item.request, item.nodeName, (Timestamps.epochMillis(item.request.expiresAt) ?: 0L) - relayNow, decided = d)
+            },
+            clientConnections = (if (grant != null && grantCode != null) {
+                listOf(ApprovalList.ClientConnection(grant, grantCode!!, (grant.expiresInMs - (elapsed - grantReceivedAtMs)).coerceAtLeast(0), sending = frontDoorBusy))
+            } else emptyList()) + listOfNotNull(clientDecided?.takeIf { clientKept(it, elapsed) }?.let { c ->
+                ApprovalList.ClientConnection(c.request, c.code, (c.request.expiresInMs - (elapsed - c.receivedAtMs)).coerceAtLeast(0), decided = c.decided)
+            }),
+            nodePairings = pairings.filter { it.request.pairingId !in pairingDecided }.map { ApprovalList.NodePairing(it.request, it.timeLeftMs, sending = frontDoorBusy) } +
+                pairingDecided.values.filter { (item, _) -> pairingKept(item, elapsed) }.map { (item, d) -> ApprovalList.NodePairing(item.request, item.timeLeftMs, decided = d) },
+            alerts = alerts.map { a -> ApprovalList.Alert(a, sending = frontDoorBusy, decided = a["id"].str()?.let { alertDecided[it] }) },
+            runningLeases = runningLeaseRows(),
+            nodes = storage.nodes,
+            nodeChecks = leaseChecks.mapValues { (_, c) ->
+                when (c) {
+                    is LeaseNodeCheck.Confirmed -> ApprovalList.NodeCheck.Confirmed(c.atMs, c.running, c.waiting)
+                    is LeaseNodeCheck.Unconfirmed -> ApprovalList.NodeCheck.Unconfirmed
+                }
+            },
+            thisDevice = deviceId,
+            relayNowMs = relayNow,
+            frontDoorName = frontDoorId?.let { id -> storage.nodes.firstOrNull { it.id == id }?.name } ?: "front door",
+            overflowing = overflowing.filterValues { it }.keys,
+            pushOn = Push.ENABLED && storage.pushTokenSent != null,
+            formatTime = { DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(it)) },
+            formatDateTime = { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it)) }
+        )
+        return ApprovalList.build(input)
+    }
+
+    /**
+     * The running and pending leases, each from the status its node signed
+     * (verified again against the pin), with what this phone has seen since
+     * from signed views (the state, the time left). The lease on the live
+     * screen first; an ended one has no row (C-18; ApprovalList drops it).
+     */
+    private fun runningLeaseRows(): List<ApprovalList.RunningLease> {
+        val rows = ArrayList<ApprovalList.RunningLease>()
+        val live = liveLease
+        if (live != null) {
+            val signed = live.lastStatus?.let { signedStatus(live.nodeId, it) }
+            val status = (signed ?: LeaseStatus(live.leaseId, live.nodeId, live.appliedSeq, live.state, live.locked, live.reason, null)).copy(
+                state = live.state, locked = live.locked, reason = live.reason,
+                expiresAt = live.expiresAtMs?.let { Timestamps.string(Instant.ofEpochMilli(it)) } ?: signed?.expiresAt,
+                grantedByDevice = live.grantedByDevice, grantedByName = live.grantedByName
+            )
+            rows.add(ApprovalList.RunningLease(status, live.nodeName, signedGrant = live.leaseId in signedLeaseGrants, sending = live.busy, unconfirmed = live.unconfirmed))
+        }
+        for (lease in runningLeases) {
+            if (lease.leaseId == live?.leaseId) continue
+            val status = lease.status?.let { signedStatus(lease.nodeId, it) } ?: continue
+            rows.add(ApprovalList.RunningLease(status.copy(state = lease.state, reason = lease.reason), lease.nodeName, signedGrant = lease.leaseId in signedLeaseGrants))
+        }
+        return rows
+    }
+
+    private fun signedStatus(nodeId: String, envelope: Envelope): LeaseStatus? {
+        val pin = storage.nodes.firstOrNull { it.id == nodeId } ?: return null
+        return Leases.verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it) }
+    }
+
+    /** A row tapped anywhere but its buttons, or its Review or Open: its detail. */
+    fun open(row: ApprovalList.Row) {
+        listNotice = null
+        selected = when (row.kind) {
+            ApprovalList.Kind.TOOL_APPROVAL -> Selection.Tool(row.ref)
+            ApprovalList.Kind.QUESTION -> Selection.Question(row.ref)
+            ApprovalList.Kind.LEASE_REQUEST -> Selection.LeaseRequest(row.ref)
+            ApprovalList.Kind.CLIENT_CONNECTION -> Selection.Client(row.ref)
+            ApprovalList.Kind.NODE_PAIRING -> Selection.Pairing(row.ref)
+            ApprovalList.Kind.ALERT -> Selection.Alert(row.ref)
+            ApprovalList.Kind.RUNNING_LEASE -> {
+                if (liveLease?.leaseId != row.ref) runningLeases.firstOrNull { it.leaseId == row.ref }?.let { openRunningLease(it) }
+                followLiveView()
+                if (liveLease?.leaseId == row.ref) Selection.RunningLease(row.ref) else null
+            }
+            ApprovalList.Kind.NODE_CHECK -> null
+        }
+    }
+
+    /**
+     * Back to the list. A lease that is over is forgotten with its detail; a
+     * running one keeps its row. The other kinds are fetched at once (the 5 s
+     * rule applies), so a decision just made shows.
+     */
+    fun closeDetail() {
+        if (selected is Selection.RunningLease && liveLease?.state == "ended") closeLiveLease()
+        selected = null
+        refresh()
+    }
+
+    /**
+     * A row's own button (§7.2): the same decision the detail sends, with the
+     * row's defaults (every requested app and `max_minutes` for a lease; the
+     * front door's preselected scopes and no machine limits for a client).
+     */
+    fun press(row: ApprovalList.Row, button: ApprovalList.Button) {
+        if (button == ApprovalList.Button.OPEN || button == ApprovalList.Button.REVIEW) return open(row)
+        val yes = button == ApprovalList.Button.APPROVE
+        when (row.kind) {
+            ApprovalList.Kind.TOOL_APPROVAL -> if (yes || button == ApprovalList.Button.DENY) pending.firstOrNull { it.id == row.ref }?.let { decide(it, yes) }
+            ApprovalList.Kind.LEASE_REQUEST -> leaseRequests.firstOrNull { it.request.requestId == row.ref }?.let { item ->
+                if (yes) decideLease(item, item.request.apps.map { it.id }.toSet(), item.request.maxMinutes, grant = true)
+                else if (button == ApprovalList.Button.DENY) decideLease(item, emptySet(), 1, grant = false)
+            }
+            ApprovalList.Kind.CLIENT_CONNECTION -> grantRequest?.takeIf { it.grantId == row.ref }?.let { request ->
+                if (yes) decideGrant(request, request.preselected.map { ScopeChoice(it, null) }, true)
+                else if (button == ApprovalList.Button.DENY) decideGrant(request, emptyList(), false)
+            }
+            ApprovalList.Kind.NODE_PAIRING -> pairings.firstOrNull { it.request.pairingId == row.ref }?.let {
+                if (yes || button == ApprovalList.Button.DENY) decidePairing(it.request, yes)
+            }
+            ApprovalList.Kind.QUESTION -> if (button == ApprovalList.Button.GOT_IT) {
+                questions.firstOrNull { it.token == row.ref && it.kind == "briefing" }?.let { answer(it, null, "ok") }
+            }
+            ApprovalList.Kind.ALERT -> if (button == ApprovalList.Button.ACKNOWLEDGE) ackAlert(row.ref)
+            ApprovalList.Kind.RUNNING_LEASE -> if (button == ApprovalList.Button.STOP) {
+                if (liveLease?.leaseId == row.ref) killSwitch() else runningLeases.firstOrNull { it.leaseId == row.ref }?.let { stopRunningLease(it) }
+            }
+            ApprovalList.Kind.NODE_CHECK -> Unit
+        }
+    }
+
+    // What each detail shows, from its store (null once it left the store).
+    val selectedPending: PendingItem? get() = (selected as? Selection.Tool)?.let { s -> pending.firstOrNull { it.id == s.requestId } }
+    val selectedQuestion: QuestionItem? get() = (selected as? Selection.Question)?.let { s -> questions.firstOrNull { it.token == s.token } }
+    val selectedLeaseRequest: LeaseRequestItem? get() = (selected as? Selection.LeaseRequest)?.let { s -> leaseRequests.firstOrNull { it.request.requestId == s.requestId } }
+    val selectedClient: GrantRequest? get() = (selected as? Selection.Client)?.let { s -> grantRequest?.takeIf { it.grantId == s.grantId } }
+    val selectedPairing: PairingItem? get() = (selected as? Selection.Pairing)?.let { s -> pairings.firstOrNull { it.request.pairingId == s.pairingId } }
+    val selectedAlert: JsonElement? get() = (selected as? Selection.Alert)?.let { s -> alerts.firstOrNull { it["id"].str() == s.id } }
+
+    /** The running lease's detail is the live view (§7.6): `liveLease`, while it is the one selected. */
+    val selectedLiveLease: LiveLease? get() = (selected as? Selection.RunningLease)?.let { s -> liveLease?.takeIf { it.leaseId == s.leaseId } }
+
+    // ---- Questions (cases stage 4) ----
+    // Presence now comes from the foreground loop (C-8; ruling T19-presence no
+    // longer holds for Android), and the list is fetched by the loop with the
+    // read key.
+
+    /** Tokens whose answer is being signed or sent. */
+    val answering = mutableStateListOf<String>()
+    private val answeredTokens = HashSet<String>()
+
+    /**
+     * The questions store, replaced whole. Only a node-signed
+     * `kl.question.ask` from a pinned node (kid, node_id and signature all
+     * that node's) is shown; one answered here is not shown again.
+     */
+    private suspend fun fetchQuestions(api: RelayApi) {
+        val pins = storage.nodes
+        val items = api.questions().mapNotNull { entry -> verifiedQuestion(entry, pins) }
+            .distinctBy { it.token }
+            .filter { it.token !in answeredTokens }
+        questions.clear()
+        questions.addAll(items)
+        questionDecided.keys.retainAll(items.map { it.token }.toSet())
     }
 
     private fun verifiedQuestion(entry: JsonElement, pins: List<NodePin>): QuestionItem? {
@@ -345,7 +844,8 @@ class AppModel(context: Context) {
      * A fresh biometric signature over this one answer; the node verifies it
      * (R44). `signed_at` comes from the relay-corrected clock (the node allows
      * ±300 s), and the prompt shows the question escaped (node text is
-     * untrusted in a prompt).
+     * untrusted in a prompt). The request that carries it goes with the read
+     * key: the answer itself is the device key's (§8.4).
      */
     fun answer(item: QuestionItem, optionId: String?, text: String?) {
         if (mode != AppMode.LIVE || item.token in answering) return
@@ -367,8 +867,9 @@ class AppModel(context: Context) {
                 val ack = result["ack"].str()?.let { Display.escape(it) }
                 if (result["ok"].bool() == true) {
                     answeredTokens.add(item.token)
-                    questions.removeAll { it.token == item.token }
-                    banner = ack ?: "Answer recorded."
+                    // A decided row until the next fetch, which no longer lists it.
+                    questionDecided[item.token] = ApprovalList.Decided(ack ?: "Answer recorded.", SystemClock.elapsedRealtime())
+                    if ((selected as? Selection.Question)?.token == item.token) selected = null
                 } else {
                     banner = ack ?: "Not recorded: ${friendlyReason(result["error"].str() ?: result["outcome"].str())}"
                 }
@@ -380,21 +881,15 @@ class AppModel(context: Context) {
         }
     }
 
-    /** At most `max` code points, then escaped (never cut through an escape). */
-    private fun promptText(text: String, max: Int): String {
-        val cps = text.codePoints().toArray()
-        val cut = if (cps.size <= max) text else String(cps, 0, max - 1) + "…"
-        return Display.escape(cut)
-    }
-
     // ---- Leases (fleet stage 5) ----
-    // Owner rulings R-F5-1, R-F5-5, R-F5-6 (2026-10-12). Every signature on
-    // this phone is a biometric prompt, relay requests included. So each
-    // function below runs on the owner's tap, signs and sends one time, and
-    // shows a send that got no answer as not confirmed. Nothing here polls
-    // and nothing is sent again by itself. tests/mobile-lease-apps.test.js
-    // reads this section up to the demo marker, so keep both markers.
-    // (`leaseRequests` itself is declared above `init`, which fills it in demo.)
+    // Owner ruling R-F5-5 (2026-10-12) stands: each decision below (Allow,
+    // Deny, Stop) is signed once with the device key, sent once, and shown as
+    // not confirmed when no answer came. What changed (android-slim, R-AN-6,
+    // R-AN-9; R-F5-1 and R-F5-6 no longer hold for Android): the list is
+    // fetched by the foreground loop (refreshLeases), and the running lease's
+    // detail updates by itself through the live view loop below, whose watch
+    // is signed with the read key. tests/mobile-lease-apps.test.js reads this
+    // section up to its end marker, so keep both markers.
 
     data class LeaseRequestItem(val request: LeaseRequest, val nodeName: String, val status: LeaseStatus?, val unconfirmed: String? = null)
 
@@ -413,12 +908,12 @@ class AppModel(context: Context) {
         val grantedByName: String? = null,
         /** The newest status applied, as the node signed it. */
         val lastStatus: Envelope? = null,
-        /** A Stop or a Refresh is being signed or sent. */
+        /** A Stop, or the fingerprint watch, is being signed or sent. */
         val busy: Boolean = false,
-        /** The last Stop or Refresh got no answer; shown until the next tap. */
+        /** The last Stop, or fingerprint watch, got no answer; shown until the next tap. */
         val unconfirmed: String? = null,
-        /** The last Refresh was answered but brought no frame within the wait. */
-        val noFrame: Boolean = false
+        /** The node refused this phone's read-key watch (it does not know the read key yet, §8.7): the view offers the fingerprint watch. */
+        val readKeyRefused: Boolean = false
     )
 
     /**
@@ -446,16 +941,6 @@ class AppModel(context: Context) {
 
     var liveLease by mutableStateOf<LiveLease?>(null)
         private set
-    var isLoadingLeases by mutableStateOf(false)
-        private set
-
-    /** A `lease` push arrived and the list has not been fetched since. */
-    var leaseNotice by mutableStateOf(false)
-        private set
-
-    /** Counts lease pushes, so the screen can show the Pending tab once for each. */
-    var leasePushes by mutableStateOf(0)
-        private set
 
     /** Request ids whose decision is being signed or sent. */
     val decidingLease = mutableStateListOf<String>()
@@ -472,63 +957,51 @@ class AppModel(context: Context) {
      * notePendingListed).
      */
     private val signedLeaseGrants = HashMap<String, Long>()
-    private var demoLeaseJob: Job? = null
 
-    /** A `lease` push (R-F5-6): say where to look. Nothing is fetched until the owner taps. */
-    private fun noteLeasePush() {
-        leaseNotice = true
-        leasePushes += 1
-    }
+    /** The entries of the last list request, for a notification that names a lease (§13). */
+    private var lastLeaseEntries: List<JsonElement> = emptyList()
 
     /**
-     * "Check for computer-use requests": one list request, one prompt. The
-     * same answer lists what is running (R-F5-18): for each lease a status
-     * its node signed for this listing, with no request beside it.
+     * One list request, with the read key, called by the foreground loop
+     * (§10; it was the "Check" button's). The same answer lists what is
+     * running (R-F5-18): for each lease a status its node signed for this
+     * listing, with no request beside it. A request that fails leaves every
+     * node "could not confirm" and goes to the caller.
      */
-    fun refreshLeases() {
-        if (pairing || mode != AppMode.LIVE || isLoadingLeases) return
-        val api = client ?: run {
-            banner = "This phone is not paired with a relay."
-            return
-        }
-        isLoadingLeases = true
-        scope.launch {
-            try {
-                val pins = storage.nodes
-                // R-F5-20: a nonce chosen for this one request. Each node signs its listing
-                // over it, so an answer to an earlier request cannot be played again and no
-                // entry can be left out unseen. Still one request and one prompt.
-                val nonce = Messages.randomNonce()
-                val listed = api.leases(nonce)
-                val items = listed.mapNotNull { entry -> verifiedLeaseRequest(entry, pins, api) }.distinctBy { it.request.requestId }
-                leaseRequests.clear()
-                leaseRequests.addAll(items)
-                for (entry in listed) noteListedLease(entry, pins)
-                // R-F5-20: per pinned node, a listing it signed for this request and this
-                // phone, complete, or no answer. This phone cannot tell a node that is off,
-                // slow or older from a relay that kept its answer back: all "could not confirm".
-                // An accepted listing is "confirmed", with the time this phone accepted it and
-                // what the node listed; nothing else is.
-                val checkedAt = System.currentTimeMillis()
-                for (pin in pins) {
-                    val check = Leases.checkListing(listed, pin, nonce, deviceId ?: "")
-                    leaseChecks[pin.id] = if (check.accepted) {
-                        val named = Leases.listedStatuses(check, pin)
-                        dropMayStartRows(pin, named.map { it.leaseId }.toSet(), api)
-                        notePendingListed(check, pin, items.map { it.request.leaseId }.toSet())
-                        LeaseNodeCheck.Confirmed(checkedAt, named.count { Leases.isLive(it.state) }, named.count { it.state == "pending" })
-                    } else {
-                        LeaseNodeCheck.Unconfirmed
-                    }
+    private suspend fun refreshLeases(api: RelayApi) {
+        try {
+            val pins = storage.nodes
+            // R-F5-20: a nonce chosen for this one request. Each node signs its listing
+            // over it, so an answer to an earlier request cannot be played again and no
+            // entry can be left out unseen. Still one request, now with the read key.
+            val nonce = Messages.randomNonce()
+            val listed = api.leases(nonce)
+            lastLeaseEntries = listed
+            val items = listed.mapNotNull { entry -> verifiedLeaseRequest(entry, pins, api) }.distinctBy { it.request.requestId }
+            leaseRequests.clear()
+            leaseRequests.addAll(items)
+            for (entry in listed) noteListedLease(entry, pins)
+            // R-F5-20: per pinned node, a listing it signed for this request and this
+            // phone, complete, or no answer. This phone cannot tell a node that is off,
+            // slow or older from a relay that kept its answer back: all "could not confirm".
+            // An accepted listing is "confirmed", with the time this phone accepted it and
+            // what the node listed; nothing else is.
+            val checkedAt = System.currentTimeMillis()
+            for (pin in pins) {
+                val check = Leases.checkListing(listed, pin, nonce, deviceId ?: "")
+                leaseChecks[pin.id] = if (check.accepted) {
+                    val named = Leases.listedStatuses(check, pin)
+                    dropMayStartRows(pin, named.map { it.leaseId }.toSet(), api)
+                    notePendingListed(check, pin, items.map { it.request.leaseId }.toSet())
+                    LeaseNodeCheck.Confirmed(checkedAt, named.count { Leases.isLive(it.state) }, named.count { it.state == "pending" })
+                } else {
+                    LeaseNodeCheck.Unconfirmed
                 }
-                leaseNotice = false
-            } catch (e: Exception) {
-                // No reply at all: nothing was confirmed with any node.
-                for (pin in storage.nodes) leaseChecks[pin.id] = LeaseNodeCheck.Unconfirmed
-                fail(e)
-            } finally {
-                isLoadingLeases = false
             }
+        } catch (e: Exception) {
+            // No reply at all: nothing was confirmed with any node.
+            for (pin in storage.nodes) leaseChecks[pin.id] = LeaseNodeCheck.Unconfirmed
+            throw e
         }
     }
 
@@ -578,6 +1051,7 @@ class AppModel(context: Context) {
         }
         val known = runningLeases.indexOfFirst { it.leaseId == status.leaseId }
         if (!Leases.acceptsStatus(status, if (known >= 0) runningLeases[known].appliedSeq else 0)) return
+        statusApplied(status)
         // A row that is there stays while its node still signs "pending", whoever signed a
         // grant (fifth security review, finding 1): a newer status without a listing must
         // not take it down.
@@ -605,7 +1079,7 @@ class AppModel(context: Context) {
      * is on screen with its Allow and Deny, unanswered by this phone, is
      * that request and gets no second row. Only statuses of a listing that
      * passed are read, each verified again. Nothing is signed or sent here
-     * (R-F5-5), and it runs only inside the owner's "Check" tap (R-F5-1).
+     * (R-F5-5); it runs inside refreshLeases.
      */
     private fun notePendingListed(check: ListingCheck, pin: NodePin, shownAsRequest: Set<String>) {
         if (!check.accepted) return
@@ -689,14 +1163,9 @@ class AppModel(context: Context) {
         if (i >= 0) leaseRequests[i] = leaseRequests[i].copy(unconfirmed = text)
     }
 
-    /** Allow or Deny: one signature over the decision, one request that carries it (two prompts). */
+    /** Allow or Deny: one signature over the decision, carried by a read-key request (one prompt, §8.4). */
     fun decideLease(item: LeaseRequestItem, apps: Set<String>, minutes: Int, grant: Boolean) {
         val id = item.request.requestId
-        if (mode == AppMode.DEMO) {
-            leaseRequests.removeAll { it.request.requestId == id }
-            if (grant) openLiveLease(item.request.nodeId, item.request.leaseId, "active")
-            return
-        }
         val k = key ?: return
         val api = client ?: return
         if (id in decidingLease) return
@@ -717,15 +1186,17 @@ class AppModel(context: Context) {
                 val sent = sendLease(api, "grant", item.request.leaseId, envelope)
                 when (val outcome = sent.outcome) {
                     is SendOutcome.Unconfirmed ->
-                        markLeaseUnconfirmed(id, "Not confirmed: ${sent.problem}. Tap again, or check for requests to see what the node did.")
+                        markLeaseUnconfirmed(id, "Not confirmed: ${sent.problem}. Tap again, or wait for the list to show what the node did.")
                     is SendOutcome.Rejected -> banner = "Node rejected: ${friendlyReason(outcome.reason)}"
                     is SendOutcome.Confirmed -> {
                         decidedLeaseRequests.add(id)
+                        // A decided row until a minute past the request's expiry (§7.2).
+                        leaseDecided[id] = item.copy(unconfirmed = null) to ApprovalList.Decided(if (grant) "Allowed" else "Denied", SystemClock.elapsedRealtime())
                         leaseRequests.removeAll { it.request.requestId == id }
                         if (grant && outcome.state == "active") {
                             openLiveLease(item.request.nodeId, item.request.leaseId, outcome.state)
                             // The node's answer carries the status it signed for it, and with that the
-                            // first contact token: the first Refresh can echo it (R-F5-15).
+                            // first contact token: the live view's first watch can echo it (R-F5-15).
                             val opened = liveLease
                             val pin = storage.nodes.firstOrNull { it.id == item.request.nodeId }
                             if (opened != null && pin != null && opened.leaseId == item.request.leaseId) liveLease = applyReplyStatus(sent.json, pin, opened, k.deviceId)
@@ -756,20 +1227,19 @@ class AppModel(context: Context) {
             runningLeases.add(RunningLease(old.nodeId, old.nodeName, old.leaseId, old.state, old.reason, old.appliedSeq, old.grantedByDevice, old.grantedByName, old.lastStatus))
         }
         runningLeases.removeAll { it.leaseId == lease.leaseId }
-        demoLeaseJob?.cancel()
         val opened = LiveLease(lease.nodeId, pin.name, lease.leaseId)
         liveLease = if (lease.status != null) applyLease(lease.status, pin, opened, deviceId ?: "") else opened
     }
 
-    /** The live screen of a lease, from its banner row. It fetches nothing (R-F5-1): Refresh does. */
+    /** The live screen of a lease, from its row. It fetches nothing itself: the live view's loop does, while it is on screen. */
     fun openRunningLease(lease: RunningLease) {
         followRunningLease(lease)
     }
 
     /**
-     * Stop, from a banner row, for a lease this phone is not following
+     * Stop, from a row, for a lease this phone is not following
      * (R-F5-18): it becomes the one on the live screen, and then "Stop now"
-     * as always: one signed revoke, sent one time, two prompts. Any enrolled
+     * as always: one signed revoke, sent one time, one prompt. Any enrolled
      * phone may stop a lease.
      */
     fun stopRunningLease(lease: RunningLease) {
@@ -777,102 +1247,180 @@ class AppModel(context: Context) {
         if (liveLease?.leaseId == lease.leaseId) killSwitch()
     }
 
-    /** Opens the live screen with what is already known. It fetches nothing (R-F5-1): Refresh does. */
+    /** Opens the live screen with what is already known. It fetches nothing itself: the live view's loop does, while it is on screen. */
     fun openLiveLease(nodeId: String, leaseId: String, state: String = "pending") {
-        val pin = storage.nodes.firstOrNull { it.id == nodeId } ?: demo?.pins?.firstOrNull { it.id == nodeId } ?: return
-        demoLeaseJob?.cancel()
+        val pin = storage.nodes.firstOrNull { it.id == nodeId } ?: return
         liveLease = LiveLease(nodeId, pin.name, leaseId, state = state)
-        if (mode == AppMode.DEMO) startDemoFrames(pin)
     }
 
-    /**
-     * Refresh (R-F5-1, R-F5-6): one watch, then one fetch of what is new,
-     * held open up to Leases.REFRESH_WAIT_S for the frame that watch causes.
-     * Three prompts on this phone (the watch, its request, the fetch), all
-     * from this one tap.
-     */
-    fun refreshLiveLease() {
-        val live = liveLease ?: return
-        if (live.busy || mode != AppMode.LIVE) return
-        val k = key ?: return
+    // ---- Live view loop (android-slim §7.6) ----
+    // The running lease's detail updates by itself while it is on screen and
+    // the app is in the foreground: it long-polls the lease's views and sends
+    // a kl.lease.watch every WATCH_EVERY_MS, signed with the read key (signRead),
+    // echoing the newest contact token it applied, plus one early watch when a
+    // fresher token arrives within the 20 s (iOS's rule). Leaving the view or
+    // the app going to the background stops both. Every status and view goes
+    // through applyLease. Nothing here signs with the device key or decides:
+    // the fingerprint watch is watchWithFingerprint, called only from its button.
+
+    /** The live view is composed (LeaseScreens.kt's one DisposableEffect says so). */
+    private var liveViewVisible = false
+    private var liveLoopJob: Job? = null
+
+    /** The live view came on screen. */
+    fun liveViewShown() {
+        liveViewVisible = true
+        startLiveLoop()
+    }
+
+    /** The live view left the screen: its watches and polls stop. */
+    fun liveViewHidden() {
+        liveViewVisible = false
+        stopLiveLoop()
+    }
+
+    private fun stopLiveLoop() {
+        liveLoopJob?.cancel()
+        liveLoopJob = null
+    }
+
+    /** Another lease came onto the live view (from a row or a notification): the loop follows it. */
+    private fun followLiveView() {
+        if (!liveViewVisible) return
+        stopLiveLoop()
+        startLiveLoop()
+    }
+
+    private fun startLiveLoop() {
+        if (!liveViewVisible || !foreground || liveLoopJob?.isActive == true || !readKeyKnown) return
         val api = client ?: return
-        val pin = storage.nodes.firstOrNull { it.id == live.nodeId } ?: return
-        liveLease = live.copy(busy = true, unconfirmed = null, noFrame = false)
-        scope.launch {
-            var next = live.copy(unconfirmed = null, noFrame = false)
-            try {
-                var cursor = next.lastSeq
-                // What the screen knows from signed messages; a watch's reply may only lengthen the wait below.
-                var waitForFrame = next.state == "active"
-                // R-F5-15: a watch is contact only when it echoes a token the node issued a short
-                // while ago. If the one held is over a minute old (or there is none), the node is
-                // asked for a status signed now first: one more request, one more prompt, sent once.
-                if (next.state != "ended" && Leases.tokenIsStale(next.contactTokenAtMs, SystemClock.elapsedRealtime())) {
-                    val fresh = try {
-                        api.leases()
-                    } catch (e: RelayException) {
-                        next = next.copy(unconfirmed = "Refresh not confirmed: ${describe(e).trimEnd('.')}. Tap Refresh again.")
-                        return@launch
-                    }
-                    for (entry in fresh) {
-                        if (!isStatusOnly(entry) || entry["node_id"].str() != pin.id) continue
-                        val signed = entry["status"]?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() } ?: continue
-                        next = applyLease(signed, pin, next, k.deviceId)
-                    }
-                }
-                if (next.state != "ended") {
-                    val watch = Leases.watch(next.nodeId, next.leaseId, k.deviceId, next.contactToken, Messages.randomNonce(), Timestamps.string(api.now()))
-                    val sent = sendLease(api, "watch", next.leaseId, signEnvelope(k, watch, "Watch computer use", promptText(next.nodeName, 30)))
-                    when (val outcome = sent.outcome) {
-                        is SendOutcome.Unconfirmed -> {
-                            // No watch reached the node, so no frame is coming: the fetch (one more prompt) is not made.
-                            next = next.copy(unconfirmed = "Refresh not confirmed: ${sent.problem}. Tap Refresh again.")
-                            return@launch
+        val leaseId = liveLease?.leaseId ?: return
+        val deviceId = key?.deviceId ?: return
+        liveLoopJob = scope.launch {
+            var lastWatchAtMs = 0L
+            var lastWatchToken: String? = null
+            var earlyUsed = false
+            while (true) {
+                val live = liveLease?.takeIf { it.leaseId == leaseId } ?: break
+                if (live.state == "ended") break
+                val pin = storage.nodes.firstOrNull { it.id == live.nodeId } ?: break
+                try {
+                    var cursor = live.lastSeq
+                    val since = SystemClock.elapsedRealtime() - lastWatchAtMs
+                    val early = Leases.isPausedForContact(live.state, live.reason) && !earlyUsed &&
+                        live.contactToken != null && live.contactToken != lastWatchToken
+                    if (!live.readKeyRefused && (lastWatchAtMs == 0L || since >= WATCH_EVERY_MS || early)) {
+                        earlyUsed = lastWatchAtMs != 0L && since < WATCH_EVERY_MS
+                        // R-F5-15: a watch is contact only when it echoes a token the node issued a short
+                        // while ago; with an old one (or none) the node is asked for a status signed now first.
+                        if (Leases.tokenIsStale(live.contactTokenAtMs, SystemClock.elapsedRealtime())) {
+                            for (entry in api.leases()) {
+                                if (!isStatusOnly(entry) || entry["node_id"].str() != pin.id) continue
+                                val signed = entry["status"]?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() } ?: continue
+                                updateLive(leaseId) { applyLease(signed, pin, it, deviceId) }
+                            }
                         }
-                        is SendOutcome.Rejected -> {
-                            next = next.copy(unconfirmed = "The node refused the watch: ${friendlyReason(outcome.reason)}.")
-                            return@launch
-                        }
-                        is SendOutcome.Confirmed -> {
-                            // The reply is the relay's word, not signed by the node: it is never the
-                            // lease's state on this screen. It only decides whether to wait for the
-                            // signed view, which applyLease reads.
-                            waitForFrame = outcome.state == "active"
-                            // Views from where the relay's mailbox stood before the node heard this watch.
-                            cursor = Leases.cursorAfterWatch(next.lastSeq, sent.json)
-                            // The status the node signed for this watch (R-F5-15): the token the next Refresh echoes.
-                            next = applyReplyStatus(sent.json, pin, next, k.deviceId)
+                        val current = liveLease?.takeIf { it.leaseId == leaseId } ?: break
+                        val watch = Leases.watch(current.nodeId, current.leaseId, deviceId, current.contactToken, Messages.randomNonce(), Timestamps.string(api.now()))
+                        val sent = sendLease(api, "watch", leaseId, signRead(watch))
+                        lastWatchAtMs = SystemClock.elapsedRealtime()
+                        lastWatchToken = current.contactToken
+                        when (val outcome = sent.outcome) {
+                            is SendOutcome.Confirmed -> {
+                                // The reply is the relay's word: only its node-signed status is applied.
+                                cursor = Leases.cursorAfterWatch(current.lastSeq, sent.json)
+                                updateLive(leaseId) { applyReplyStatus(sent.json, pin, it, deviceId) }
+                                readKeyNodes.set(pin.id, ReadKeyNodes.IN_USE)
+                            }
+                            is SendOutcome.Rejected -> if (outcome.reason == "bad_signature") {
+                                // §8.7: this node does not know the read key yet. The view offers the
+                                // fingerprint watch; no more read-key watches go to it from this view.
+                                updateLive(leaseId) { it.copy(readKeyRefused = true) }
+                                if (readKeyNodes[pin.id] == ReadKeyNodes.IN_USE) readKeyNodes.set(pin.id, ReadKeyNodes.WAITING)
+                            }
+                            is SendOutcome.Unconfirmed -> Unit
                         }
                     }
-                }
-                val frameBefore = next.frameAtMs
-                val entries = try {
-                    api.leaseViews(next.leaseId, cursor, if (waitForFrame) Leases.REFRESH_WAIT_S else 0)
+                    val waitS = if (liveLease?.readKeyRefused == true) LONG_POLL_S
+                    else ((WATCH_EVERY_MS - (SystemClock.elapsedRealtime() - lastWatchAtMs)) / 1000).toInt().coerceIn(1, LONG_POLL_S)
+                    val entries = api.leaseViews(leaseId, cursor, waitS)
+                    var seq = cursor
+                    for (entry in entries) {
+                        seq = maxOf(seq, entry["seq"].int() ?: seq)
+                        val raw = entry["envelope"] ?: continue
+                        val envelope = try {
+                            Envelope.fromJson(raw)
+                        } catch (e: ProtocolException) {
+                            continue
+                        }
+                        updateLive(leaseId) { applyLease(envelope, pin, it, deviceId) }
+                    }
+                    updateLive(leaseId) { it.copy(lastSeq = maxOf(it.lastSeq, seq)) }
+                    // Nothing new and no wait left: a breath before the next poll.
+                    if (entries.isEmpty()) delay(LIVE_IDLE_MS)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: RelayException) {
-                    next = next.copy(unconfirmed = "Refresh not confirmed: ${describe(e).trimEnd('.')}. Tap Refresh again.")
-                    return@launch
-                }
-                next = next.copy(lastSeq = maxOf(next.lastSeq, cursor))
-                for (entry in entries) {
-                    next = next.copy(lastSeq = maxOf(next.lastSeq, entry["seq"].int() ?: next.lastSeq))
-                    val raw = entry["envelope"] ?: continue
-                    val envelope = try {
-                        Envelope.fromJson(raw)
-                    } catch (e: ProtocolException) {
-                        continue
+                    if (e.code == "unknown_read_key") {
+                        readKeyNodes.markUnknown(true)
+                        break
                     }
-                    next = applyLease(envelope, pin, next, k.deviceId)
+                    delay((e.retryAfter ?: if (e.status == 401 || e.code == "rate_limited") BUSY_WAIT_S else ERROR_WAIT_S).coerceAtLeast(1) * 1000L)
+                } catch (e: ReadKeyMissingException) {
+                    readKey = null
+                    break
+                } catch (e: Exception) {
+                    // A locked phone (the read key refuses then) or a reply this app refuses: wait, then go on.
+                    delay(ERROR_WAIT_MS)
                 }
-                next = next.copy(noFrame = next.state == "active" && !next.locked && next.frameAtMs == frameBefore)
-            } catch (e: Exception) {
-                // A prompt was cancelled or the key failed.
-                fail(e)
-            } finally {
-                // Still the same lease on screen: show what this tap learned.
-                if (liveLease?.leaseId == next.leaseId) liveLease = next.copy(busy = false)
             }
         }
     }
+
+    // ---- Live view loop: end ----
+
+    /** A change to the lease on the live screen, only while it is still [leaseId]. */
+    private inline fun updateLive(leaseId: String, change: (LiveLease) -> LiveLease) {
+        val live = liveLease
+        if (live != null && live.leaseId == leaseId) liveLease = change(live)
+    }
+
+    /**
+     * "Keep it going with your fingerprint" (§7.6): when a node refused the
+     * read-key watch because it does not know the read key yet, one watch
+     * signed with the device key, sent once (one prompt; the request that
+     * carries it goes with the read key). Called only from its button;
+     * nothing repeats it by itself.
+     */
+    fun watchWithFingerprint() {
+        val live = liveLease ?: return
+        if (live.busy || live.state == "ended") return
+        val k = key ?: return
+        val api = client ?: return
+        val pin = storage.nodes.firstOrNull { it.id == live.nodeId } ?: return
+        liveLease = live.copy(busy = true, unconfirmed = null)
+        scope.launch {
+            var unconfirmed: String? = null
+            try {
+                val watch = Leases.watch(live.nodeId, live.leaseId, k.deviceId, live.contactToken, Messages.randomNonce(), Timestamps.string(api.now()))
+                val sent = sendLease(api, "watch", live.leaseId, signEnvelope(k, watch, "Keep computer use going", promptText(live.nodeName, 30)))
+                when (val outcome = sent.outcome) {
+                    is SendOutcome.Unconfirmed -> unconfirmed = "Not confirmed: ${sent.problem}. Tap again."
+                    is SendOutcome.Rejected -> unconfirmed = "The node refused the watch: ${friendlyReason(outcome.reason)}."
+                    is SendOutcome.Confirmed -> updateLive(live.leaseId) { applyReplyStatus(sent.json, pin, it, k.deviceId) }
+                }
+            } catch (e: Exception) {
+                // A prompt was cancelled or the key failed: the watch was not sent.
+                fail(e)
+            } finally {
+                updateLive(live.leaseId) { it.copy(busy = false, unconfirmed = unconfirmed) }
+            }
+        }
+    }
+
+    /** What the live view says when a node refused the read-key watch (§7.6, §8.7). */
+    fun readKeyRefusedText(live: LiveLease): String =
+        "${Display.escape(live.nodeName)} does not know this phone's read key yet: run `king-louie-service device apply` there."
 
     /**
      * One received envelope onto the live lease. Only a status or a view the
@@ -884,6 +1432,7 @@ class AppModel(context: Context) {
         val status = Leases.verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it) }
         if (status != null) {
             if (status.leaseId != live.leaseId || !Leases.acceptsStatus(status, live.appliedSeq)) return live
+            statusApplied(status)
             return live.copy(
                 appliedSeq = status.seq, state = status.state, locked = status.locked, reason = status.reason,
                 expiresAtMs = status.expiresAt?.let { Timestamps.epochMillis(it) }, contactToken = status.contactToken ?: live.contactToken,
@@ -905,6 +1454,15 @@ class AppModel(context: Context) {
     }
 
     /**
+     * A signed status of a lease was applied (applyLease, noteListedLease):
+     * unless it says `suspended`, that lease's "Session paused" notification
+     * has said its piece and goes (push spec §7.2).
+     */
+    private fun statusApplied(status: LeaseStatus) {
+        if (status.state != "suspended") Push.leaseNotSuspended(appContext, status.leaseId)
+    }
+
+    /**
      * The status a node's answer may carry: the node signed it for that very
      * answer (R-F5-15). It goes through applyLease like any other, so it
      * counts only when the pinned node signed it, about this lease, with a
@@ -917,29 +1475,23 @@ class AppModel(context: Context) {
 
     /** Forgets the lease on this screen (the node's lease is not touched). */
     fun closeLiveLease() {
-        demoLeaseJob?.cancel()
         liveLease = null
     }
 
     /**
-     * "Stop now" (R-F5-5): one signed revoke, sent one time. Two prompts on
-     * this phone: the revoke, then the request that carries it. Whatever
+     * "Stop now" (R-F5-5): one signed revoke, sent one time. One prompt on
+     * this phone: the revoke (its request goes with the read key). Whatever
      * comes back is the relay's word, which the node did not sign: it never
      * ends the lease on this screen. The screen says the stop was sent and
      * is not yet confirmed by the computer (or that no answer came), Stop
      * stays enabled, and only a status or view the pinned node signed, read
-     * by applyLease on the next Refresh, shows the lease as ended. Nothing
+     * by applyLease from the live view's loop, shows the lease as ended. Nothing
      * is sent again by itself; a second revoke for a lease that already
      * ended is acknowledged by the node.
      */
     fun killSwitch() {
         val live = liveLease ?: return
         if (live.busy || live.state == "ended") return
-        if (mode == AppMode.DEMO) {
-            demoLeaseJob?.cancel()
-            liveLease = live.copy(state = "ended", reason = "revoked")
-            return
-        }
         val k = key ?: return
         val api = client ?: return
         liveLease = live.copy(busy = true, unconfirmed = null)
@@ -964,51 +1516,16 @@ class AppModel(context: Context) {
         }
     }
 
-    // ---- Leases: demo ----
-    // Canned frames for store review; no network, no key. This part may loop.
-
-    private fun startDemoFrames(pin: NodePin) {
-        val fleet = demo ?: return
-        demoLeaseJob?.cancel()
-        demoLeaseJob = scope.launch {
-            var seq = 1
-            while (true) {
-                val live = liveLease ?: break
-                if (live.state == "ended") break
-                val index = fleet.pins.indexOfFirst { it.id == pin.id }.takeIf { it >= 0 } ?: break
-                val action = LeaseAction(
-                    seq, Timestamps.string(java.time.Instant.now()), if (seq % 2 == 0) "Type" else "Click",
-                    if (seq % 2 == 0) "Typed 6 characters" else "Click left at (120, 88) on ss-$seq", "ok"
-                )
-                val envelope = fleet.leaseView(index, live.leaseId, seq, fleet.deviceId, demoFrame(seq), maxOf(0, 900 - seq * 3), listOf(action))
-                liveLease = applyLease(envelope, pin, live, fleet.deviceId)
-                seq += 1
-                delay(3000)
-            }
-        }
-    }
-
-    private fun demoFrame(seq: Int): ByteArray {
-        val bitmap = android.graphics.Bitmap.createBitmap(480, 320, android.graphics.Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(bitmap)
-        canvas.drawColor(android.graphics.Color.LTGRAY)
-        canvas.drawText("Demo frame $seq", 24f, 160f, android.graphics.Paint().apply { textSize = 32f })
-        return java.io.ByteArrayOutputStream().also { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 60, it) }.toByteArray()
-    }
+    // ---- Leases: end ----
 
     // Errors
-
-    private fun friendlyReason(reason: String?): String = when (reason) {
-        null, "" -> "no reason given"
-        "action_changed" -> "the action changed before it ran"
-        "expired" -> "too late — request expired"
-        else -> Display.escape(reason)
-    }
 
     /** The words the owner sees. Never a key, signature or code; relay text is escaped like any display text. */
     private fun describe(e: Throwable): String = when (e) {
         is KeyInvalidatedException -> DeviceKey.INVALIDATED_MESSAGE
         is KeyUnavailableException -> e.message ?: ""
+        is ReadKeyUnavailableException -> e.message ?: ""
+        is ReadKeyMissingException -> "This phone has no read key yet. Set it up from the list."
         is OwnerMessage -> e.message ?: ""
         is ProtocolException -> "Refused as malformed: ${Display.escape(e.message ?: "")}."
         is BiometricException -> when (e.code) {
@@ -1027,6 +1544,8 @@ class AppModel(context: Context) {
             "node_offline" -> "The node is offline."
             "gone" -> "Too late — this request has expired."
             "unknown_device" -> "The relay does not know this phone yet."
+            "unknown_read_key" -> "The relay does not know this phone's read key. Set it up again from the list."
+            RelayApi.READ_KEY_NOT_SET_UP -> e.message ?: e.code
             "pin_mismatch", "malformed", "network", "redirect", "poll_busy" -> e.message ?: e.code
             else -> if (e.message.isNullOrEmpty() || e.message == e.code) "The relay refused the request (${Display.escape(e.code)})." else Display.escape(e.message!!)
         }
@@ -1048,9 +1567,11 @@ class AppModel(context: Context) {
      * next pairing or invite makes a new one. Nothing else deletes a key.
      */
     private fun dropInvalidKey() {
-        pollJob?.cancel()
+        stopLoop(sayAway = false)
+        stopLiveLoop()
         runCatching { DeviceKey.delete() }
         key = null
+        readKey = null
         client = null
         banner = DeviceKey.INVALIDATED_MESSAGE
         pollProblem = DeviceKey.INVALIDATED_MESSAGE
@@ -1074,70 +1595,42 @@ class AppModel(context: Context) {
                 // Confirmed invalidated: the one case where the alias is replaced.
                 runCatching { DeviceKey.delete() }
                 key = null
+                readKey = null
                 client = null
-                return DeviceKey.create().also { key = it }
+                return DeviceKey.create().also { key = it; readKey = runCatching { ReadKey.load() }.getOrNull(); readKeyNodes.forget() }
             }
         }
         // load() gives null on a transient Keystore2 error too; create() runs
         // only once the Keystore confirms there is no key at all.
         DeviceKey.requireAbsent()
-        return DeviceKey.create().also { key = it }
+        return DeviceKey.create().also { key = it; readKey = runCatching { ReadKey.load() }.getOrNull(); readKeyNodes.forget() }
     }
 
-    // Demo
-
-    /**
-     * Also runs from Application.onCreate when the app was left in demo. The
-     * demo fleet needs Ed25519 in java.security; without it the app goes back
-     * to Welcome (saved, so a restart does not try again) instead of crashing.
-     */
-    fun startDemo() {
-        client = null
-        pending.clear()
-        // Only the list declared above `init`: this also runs from `init`, before the Leases section's own properties exist.
-        leaseRequests.clear()
-        try {
-            val fleet = DemoFleet()
-            val requests = listOf("nvidia-smi --gpu-reset", "rm -rf ~/Downloads/old", "systemctl restart site").mapIndexed { i, command -> fleet.request(i, command) }
-            demo = fleet
-            changeMode(AppMode.DEMO)
-            requests.forEach { receive(JsonObject(mapOf("envelope" to it.json, "expires_in_ms" to jsonNumber("300000"), "status" to JsonNull)), fleet.pins) }
-            // A demo lease request, node-signed and verified like a real one.
-            runCatching { fleet.leaseRequest(0, listOf("calculator", "notepad"), 15) }.getOrNull()?.let { env ->
-                Leases.verifiedMessage(env, fleet.pins[0])?.let { LeaseRequest.from(it) }?.let { leaseRequests.add(LeaseRequestItem(it, fleet.pins[0].name, null)) }
-            }
-        } catch (e: Exception) {
-            if (e !is GeneralSecurityException && e !is ProviderException && e !is ProtocolException) throw e
-            demo = null
-            pending.clear()
-            changeMode(AppMode.WELCOME)
-            banner = "The demo needs Ed25519 signatures, which this phone does not provide."
-        }
-    }
-
-    /** Leaving demo drops the fleet and its software key; the Keystore key is made at the first real pairing. */
-    fun leaveDemo() {
-        demo = null
-        pending.clear()
-        closeLiveLease()
-        runningLeases.clear()
-        leaseChecks.clear()
-        signedLeaseGrants.clear()
-        leaseRequests.clear()
-        decidedLeaseRequests.clear()
-        decidingLease.clear()
-        leaseNotice = false
-        val token = storage.pushToken
-        storage.clear()
-        storage.pushToken = token
-        changeMode(AppMode.WELCOME)
-    }
 
     // Scanning and pins
 
+    /** Whether the Scanner's field takes a client's six-character code (§6.1): only with a front door. */
+    val acceptsClientCode: Boolean get() = frontDoorId != null
+
+    /**
+     * The Scanner's camera and its one text field (§6.1): a `kl1:` code
+     * (`kl.pair`, `kl.invite`, `kl.relay`), or, on a front door, the code a
+     * client's browser shows, which claims that request for this phone (one
+     * fingerprint) and puts it in the list as a client connection (C-13).
+     */
     fun scanned(text: String) = scope.launch {
+        resetJob?.join()
         try {
-            val payload = Messages.decodeQr(text.trim())
+            val trimmed = text.trim()
+            if (!trimmed.startsWith("kl1:")) {
+                when {
+                    FrontDoor.normalizeUserCode(trimmed) == null -> banner = SCAN_FIELD_ACCEPTS
+                    frontDoorId == null -> banner = "A client's code needs a front door, and this phone is not paired with one."
+                    else -> findGrant(trimmed)
+                }
+                return@launch
+            }
+            val payload = Messages.decodeQr(trimmed)
             if (pairing) {
                 banner = "A pairing is already under way. Wait for it to finish."
                 return@launch
@@ -1153,34 +1646,6 @@ class AppModel(context: Context) {
         }
     }
 
-    private fun isToken(text: String?, bytes: Int): Boolean =
-        text != null && runCatching { B64Url.decode(text).size == bytes }.getOrDefault(false)
-
-    /** `relay` must be an https origin and `relay_spki` a `sha256/` pin of 32 bytes. */
-    private fun relayPin(payload: JsonElement): Pair<String, String> {
-        val text = payload["relay"].str()
-        val spki = payload["relay_spki"].str()
-        val uri = text?.let { runCatching { URI(it) }.getOrNull() }
-        val ok = uri != null && uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrEmpty() &&
-            (uri.rawPath.isNullOrEmpty() || uri.rawPath == "/") && uri.rawQuery == null && uri.rawUserInfo == null && uri.rawFragment == null &&
-            spki != null && spki.startsWith("sha256/") && isToken(spki.removePrefix("sha256/"), 32)
-        if (!ok) throw OwnerMessage("This code does not name a relay this app can pin.")
-        return text!! to spki!!
-    }
-
-    /** A node pin from a pairing or invite code (never from the relay's node list). Its id must be the one its Ed25519 key derives. */
-    private fun nodePin(node: JsonElement?): NodePin {
-        val id = node["id"].str()
-        val name = node["name"].str()
-        val keyHex = node["key"].str()
-        val spki = keyHex?.let { runCatching { Hex.decode(it) }.getOrNull() }
-        val ok = id != null && name != null && spki != null && spki.size == 44 &&
-            Hex.encode(spki.copyOfRange(0, 12)) == Identifiers.ED25519_SPKI_PREFIX &&
-            Identifiers.nodeId(spki.copyOfRange(12, 44)) == id
-        if (!ok) throw OwnerMessage("This code carries a node key that does not match its id.")
-        return NodePin(id!!, name!!, keyHex!!)
-    }
-
     private fun pinNode(pin: NodePin) {
         storage.nodes = storage.nodes.filter { it.id != pin.id } + pin
     }
@@ -1188,17 +1653,16 @@ class AppModel(context: Context) {
     private fun deviceJson(k: DeviceKey): JsonObject {
         val name = Build.MODEL.orEmpty().trim().take(64).ifEmpty { "Android phone" }
         return try {
-            Messages.device(k.deviceId, name, "android", k.x, k.y)
+            Messages.device(k.deviceId, name, "android", k.x, k.y, readKey?.jwk)
         } catch (e: ProtocolException) {
-            Messages.device(k.deviceId, "Android phone", "android", k.x, k.y)
+            Messages.device(k.deviceId, "Android phone", "android", k.x, k.y, readKey?.jwk)
         }
     }
 
-    /** Switches to the pins of a pairing or invite code, remembering what was there (demo included) for `restore`. */
+    /** Switches to the pins of a pairing or invite code, remembering what was there for `restore`. */
     private fun beginPairing(relay: Pair<String, String>, pins: List<NodePin>): Storage.Snapshot {
         val before = storage.snapshot()
-        if (mode == AppMode.DEMO) leaveDemo()
-        pollJob?.cancel()
+        stopLoop(sayAway = false)
         // A different relay is learned again (refreshFrontDoorNow) once the pairing finishes.
         if (storage.relayUrl != relay.first) setFrontDoor(null)
         storage.relayUrl = relay.first
@@ -1214,10 +1678,6 @@ class AppModel(context: Context) {
         fingerprintToCompare = null
         storage.restore(before)
         frontDoorId = before.frontDoorId
-        if (before.mode == AppMode.DEMO) {
-            startDemo()
-            return
-        }
         mode = before.mode
         connect()
     }
@@ -1262,8 +1722,10 @@ class AppModel(context: Context) {
             fingerprintToCompare = null
             when (result) {
                 "done" -> {
+                    // The enrollment carried the read key (§8.2): this node holds it.
+                    if (readKey != null) readKeyNodes.set(pin.id, ReadKeyNodes.IN_USE)
                     banner = "Enrolled. This phone now approves for ${Display.escape(pin.name)}."
-                    sendPushToken()
+                    sendPushToken(again = true)
                     refreshFrontDoorNow()
                 }
                 "refused" -> {
@@ -1277,6 +1739,7 @@ class AppModel(context: Context) {
             }
         } finally {
             pairing = false
+            startLoop()
         }
     }
 
@@ -1310,7 +1773,6 @@ class AppModel(context: Context) {
             return
         }
         val relay = relayPin(payload)
-        pollJob?.cancel()
         storage.relayUrl = relay.first
         storage.relaySpki = relay.second
         connect()
@@ -1339,8 +1801,8 @@ class AppModel(context: Context) {
      * Shows a request only when the core says so (shape, pin, node
      * signature); everything displayed comes from its display model.
      */
-    private fun receive(item: JsonElement, pins: List<NodePin>) {
-        val envJson = item["envelope"] ?: return
+    private fun receive(item: JsonElement, pins: List<NodePin>): String? {
+        val envJson = item["envelope"] ?: return null
         val view = Display.view(envJson, pins)
         val display = view.display
         if (!view.shown || display == null) {
@@ -1348,97 +1810,43 @@ class AppModel(context: Context) {
                 "bad_node_signature" -> warnOnce(envJson["payload"].str(), "Node key changed — pair again.", asBanner = true)
                 "malformed" -> warnOnce(envJson["payload"].str(), "A request was refused as malformed and is not shown.", asBanner = false)
             }
-            return
+            return null
         }
         val envelope = try {
             Envelope.fromJson(envJson)
         } catch (e: ProtocolException) {
-            return
+            return null
         }
         val message = try {
             envelope.message()
         } catch (e: ProtocolException) {
-            return
+            return null
         }
-        val id = message["request_id"].str() ?: return
-        val pin = pins.firstOrNull { it.id == envelope.kid } ?: return
+        val id = message["request_id"].str() ?: return null
+        val pin = pins.firstOrNull { it.id == envelope.kid } ?: return null
         val status = verifiedStatus(item["status"], id, pin)
         val existing = pending.indexOfFirst { it.id == id }
         if (existing >= 0) {
-            if (status != null) pending[existing].status = status
-            return
+            if (status != null && pending[existing].status != status) setStatus(id, status)
+            return id
         }
         // A request lives at most 300 s (approval-v1 §3.1); a relay cannot stretch it.
         val expiresInMs = (item["expires_in_ms"].int() ?: 0).coerceAtMost(MAX_EXPIRES_IN_MS).toLong()
         // Already over when it arrived: nothing to decide.
-        if (expiresInMs <= 0) return
+        if (expiresInMs <= 0) return null
         val full = Display.build(message, collapse = false)["items"].arr().orEmpty().associate { (it["path"].str() ?: "") to (it["text"].str() ?: "") }
         pending.add(PendingItem(id, message, display, full, SystemClock.elapsedRealtime(), expiresInMs, status))
+        return id
     }
 
-    /** Drops what is over: undecided requests at zero, and decided ones a minute after they ran out. */
+    /** Drops what is over: undecided requests at zero, and decided rows of every kind a minute after they ran out. */
     private fun pruneExpired() {
         val now = SystemClock.elapsedRealtime()
-        pending.removeAll { it.timeLeftMs == 0L && (it.status == null || now - it.receivedAtMs > it.expiresInMs + 60_000) }
-    }
-
-    /**
-     * "Check for requests": one long poll (up to 25 s). The approval key needs
-     * a biometric prompt for every signature, API requests included (spec
-     * §3.14 key parameters), so the app checks when the owner asks rather
-     * than continuously. One check at a time; a 429 is waited out, not retried.
-     */
-    fun checkNow() {
-        if (pairing || mode != AppMode.LIVE) return
-        val api = client ?: run {
-            pollProblem = if (key == null) "This phone has no approval key. Scan a pairing code from a node console." else "This phone is not paired with a relay."
-            return
-        }
-        if (pollJob?.isActive == true) return
-        val waitMs = notBeforeMs - SystemClock.elapsedRealtime()
-        if (waitMs > 0) {
-            pollProblem = "The relay is busy. Try again in ${(waitMs + 999) / 1000} s."
-            return
-        }
-        pollProblem = null
-        // Set inside the job, so a job cancelled before it starts never leaves "Checking…" behind.
-        pollJob = scope.launch {
-            isPolling = true
-            try {
-                val items = api.approvals(25)
-                fingerprintToCompare = null
-                items.forEach { receive(it, storage.nodes) }
-                pruneExpired()
-                sendPushToken()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: KeyInvalidatedException) {
-                dropInvalidKey()
-            } catch (e: KeyUnavailableException) {
-                banner = describe(e)
-                pollProblem = describe(e)
-            } catch (e: RelayException) {
-                pruneExpired()
-                // A request that fails device auth counts against the relay's
-                // per-IP budget, so an unknown device backs off too.
-                if (e.code == "rate_limited" || e.status == 401) notBeforeMs = SystemClock.elapsedRealtime() + (e.retryAfter ?: 15).coerceAtLeast(1) * 1000L
-                if (e.code == "pin_mismatch") {
-                    // Only a front door's signed re-pin, checked against the key
-                    // pinned from a code, moves the pin; anything else stops here
-                    // until the owner scans a relay code.
-                    if (tryRepin()) {
-                        pollProblem = "Re-pinned the front door. Tap \u201cCheck for requests\u201d again."
-                        return@launch
-                    }
-                    banner = describe(e)
-                }
-                pollProblem = describe(e)
-            } catch (e: Exception) {
-                pollProblem = describe(e)
-            } finally {
-                isPolling = false
-            }
-        }
+        pending.removeAll { it.timeLeftMs == 0L && (it.status == null || now - it.receivedAtMs > it.expiresInMs + DECIDED_KEEP_MS) }
+        val relayNow = client?.now()?.toEpochMilli() ?: System.currentTimeMillis()
+        leaseDecided.keys.removeAll { id -> leaseDecided[id]?.let { !leaseRequestKept(it.first, relayNow) } ?: true }
+        if (clientDecided?.let { clientKept(it, now) } == false) clientDecided = null
+        pairingDecided.keys.removeAll { id -> pairingDecided[id]?.let { !pairingKept(it.first, now) } ?: true }
     }
 
     /** Approve or deny: a fresh biometric signature over the response, and only for an action whose hash the node signed. */
@@ -1466,13 +1874,6 @@ class AppModel(context: Context) {
             return
         }
         try {
-            val fleet = demo
-            if (mode == AppMode.DEMO && fleet != null) {
-                val response = Messages.response(item.message, if (approve) "approve" else "deny", fleet.deviceId, Timestamps.string(java.time.Instant.now()))
-                Envelope.seal(response, fleet.deviceId) { fleet.sign(it) }
-                setStatus(item.id, if (approve) "approved (demo)" else "denied (demo)")
-                return
-            }
             val k = key
             val api = client
             if (k == null || api == null) {
@@ -1530,7 +1931,10 @@ class AppModel(context: Context) {
 
     private fun setStatus(id: String, status: String) {
         val i = pending.indexOfFirst { it.id == id }
-        if (i >= 0) pending[i].status = status
+        if (i >= 0) {
+            pending[i].status = status
+            pending[i].statusAtMs = SystemClock.elapsedRealtime()
+        }
     }
 
     /** After an error that ends the retries, the request is undecided again. */
@@ -1539,153 +1943,135 @@ class AppModel(context: Context) {
         if (i >= 0 && pending[i].status in setOf(RETRY_OFFLINE, RETRY_BUSY)) pending[i].status = null
     }
 
-    // History, nodes, devices
+    // ---- Settings (android-slim §6.4) and the Scanner's Get a code (§6.1) ----
 
-    fun loadHistory(nodeId: String) = scope.launch {
-        val pin = storage.nodes.firstOrNull { it.id == nodeId } ?: return@launch
-        try {
-            val envelope = client?.history(nodeId, 50, null) ?: return@launch
-            val result = AuditSlice.verify(envelope, pin.key)
-            if (!result.ok) {
-                banner = "History from ${Display.escape(pin.name)} did not verify (${Display.escape(result.reason ?: "unknown")})."
-                return@launch
-            }
-            // Signed by the pinned key, and about the node that was asked for.
-            val slice = Envelope.fromJson(envelope).message()
-            if (slice["node_id"].str() != pin.id) {
-                banner = "History from ${Display.escape(pin.name)} is about a different node."
-                return@launch
-            }
-            history = (slice["created_at"].str() ?: "") to result.entries.reversed()
-            historyStatus = null
-            historyStatusNote = null
-            if (frontDoorId != null) {
-                try {
-                    historyStatus = client?.auditStatus(nodeId)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    historyStatusNote = "The front door's gap and break records could not be read: ${describe(e)}"
-                }
-            }
-        } catch (e: Exception) {
-            fail(e)
-        }
-    }
+    /** One pinned node as Settings shows it. */
+    data class SettingsNode(
+        val pin: NodePin,
+        /** `kl-…` in groups, for people to compare. */
+        val fingerprint: String,
+        /** From `GET /v1/nodes`; null until Settings read it. */
+        val online: Boolean?,
+        val readKey: ReadKeyNodeState,
+        /** A node the phone added to the front door (`source: phone`): it also has Remove from front door. */
+        val removableFromFrontDoor: Boolean
+    )
 
-    fun refreshNodes() = scope.launch {
-        try {
-            client?.nodes()?.forEach { n -> n["node_id"].str()?.let { online[it] = n["online"].bool() == true } }
-        } catch (e: Exception) {
-            fail(e)
-        }
-    }
+    /** Settings is reading its lists. */
+    var settingsLoading by mutableStateOf(false)
+        private set
 
-    fun pairingCode(name: String, onCode: (String) -> Unit) = scope.launch {
-        try {
-            client?.pairingCode(name)?.get("code").str()?.let { onCode(Display.escape(it)) }
-        } catch (e: Exception) {
-            fail(e)
-        }
-    }
-
-    fun refreshDevices() = scope.launch {
-        try {
-            val list = client?.devices() ?: return@launch
-            devices.clear()
-            devices.addAll(list)
-        } catch (e: Exception) {
-            fail(e)
-        }
-    }
-
-    /** Phone A's open invite: its id, the secret in its QR code, and when it lapses (elapsedRealtime ms). */
-    private data class OpenInvite(val id: String, val secret: String, val untilMs: Long)
-
-    private var openInvite: OpenInvite? = null
-
-    /** Phone A: show an invite with the relay and node pins. */
-    fun startInvite() = scope.launch {
-        val api = client ?: return@launch
-        try {
-            val inviteId = api.createInvite()["invite_id"].str()?.takeIf { isToken(it, 16) }
-                ?: throw OwnerMessage("The relay did not return an invite.")
-            val secret = Messages.randomNonce()
-            inviteClaim = null
-            inviteQr = Messages.encodeQr(JsonObject(mapOf(
-                "t" to jsonString("kl.invite"),
-                "relay" to jsonString(storage.relayUrl ?: ""),
-                "relay_spki" to jsonString(storage.relaySpki ?: ""),
-                "invite_id" to jsonString(inviteId),
-                "secret" to jsonString(secret),
-                "nodes" to JsonArray(storage.nodes.map { JsonObject(mapOf("id" to jsonString(it.id), "name" to jsonString(it.name), "key" to jsonString(it.key))) })
-            )))
-            // The invite lives 10 minutes on the relay.
-            openInvite = OpenInvite(inviteId, secret, SystemClock.elapsedRealtime() + 10 * 60 * 1000L)
-        } catch (e: Exception) {
-            inviteQr = null
-            fail(e)
-        }
+    fun settingsNodes(): List<SettingsNode> = storage.nodes.map { pin ->
+        val onFrontDoor = frontDoorId != null && frontDoorNodes.any { it["node_id"].str() == pin.id && it["source"].str() == "phone" }
+        SettingsNode(pin, FrontDoor.nodeFingerprint(pin.id), online[pin.id], readKeyState(pin.id), onFrontDoor && pin.id != frontDoorId)
     }
 
     /**
-     * Phone A, when the owner taps after the new phone scanned the invite:
-     * one look at the claim. Each look is a device-signed request, which on
-     * this phone is a biometric prompt, so it is never polled on a timer.
+     * Settings opens: its lists, read with the read key (no prompt; no "Show
+     * devices" tap, R-AN-6): the nodes' online state, the other phones, and on
+     * a front door its connected clients and what it says it is.
      */
-    fun checkInvite() = scope.launch {
-        val invite = openInvite ?: return@launch
+    fun refreshSettings() {
+        if (settingsLoading) return
+        if (!readyToRead()) {
+            scope.launch { refreshNotifications(null) }
+            return
+        }
+        val api = client ?: return
+        settingsLoading = true
+        scope.launch {
+            try {
+                refreshNotifications(api)
+                each {
+                    val list = api.nodes()
+                    for (n in list) n["node_id"].str()?.let { online[it] = n["online"].bool() == true }
+                    frontDoorNodes.clear()
+                    frontDoorNodes.addAll(list)
+                }
+                each { fetchDevices(api) }
+                each { refreshFrontDoorNow() }
+                if (frontDoorId != null) each {
+                    val list = api.clients()
+                    clients.clear()
+                    clients.addAll(list)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                fail(e)
+            } finally {
+                settingsLoading = false
+            }
+        }
+    }
+
+    private suspend fun fetchDevices(api: RelayApi) {
+        val list = api.devices()
+        devices.clear()
+        devices.addAll(list)
+    }
+
+    /**
+     * Remove (C-15): forgets the node's pin on this phone after the owner
+     * confirmed it. Nothing is sent: the node still counts this phone as an
+     * approver until its administrator revokes it.
+     */
+    fun forgetNode(nodeId: String) {
+        storage.nodes = storage.nodes.filter { it.id != nodeId }
+        leaseChecks.remove(nodeId)
+        runningLeases.removeAll { it.nodeId == nodeId }
+        if (liveLease?.nodeId == nodeId) closeLiveLease()
+        leaseRequests.removeAll { it.request.nodeId == nodeId }
+        questions.removeAll { it.nodeId == nodeId }
+        online.remove(nodeId)
+        readKeyNodes.remove(nodeId)
+        if (frontDoorId == nodeId) setFrontDoor(null)
+    }
+
+    /** Get a code (§6.1, ScannerCodes.kt): the code on screen and whether one is being asked for. */
+    private val pairingCodes = PairingCodeFlow()
+    val pairingCode: PairingCodeShown? get() = pairingCodes.shown
+    val pairingCodeBusy: Boolean get() = pairingCodes.busy
+
+    /** Get code: one fingerprint (device-key transport, §8.4). */
+    fun getPairingCode(nodeName: String) {
+        val api = client ?: return
+        scope.launch {
+            try {
+                pairingCodes.get(api, nodeName)
+            } catch (e: Exception) {
+                fail(e)
+            }
+        }
+    }
+
+    fun clearPairingCode() = pairingCodes.clear()
+
+    /**
+     * Phone A, Add another phone (InviteFlow.kt): an invite with the relay
+     * and node pins (one fingerprint, device-key transport), then its claim is
+     * polled with the read key while the invite is open and until it expires
+     * (C-14). The owner still compares the two screens and confirms.
+     */
+    fun startInvite() = scope.launch {
         val api = client ?: return@launch
-        if (SystemClock.elapsedRealtime() > invite.untilMs) {
-            openInvite = null
-            inviteQr = null
-            banner = "Nobody used the invite within 10 minutes. Start a new one."
+        if (!readKeyKnown) {
+            banner = "Set up checking without your fingerprint first (the first row of the list)."
             return@launch
         }
         try {
-            val claim = api.inviteClaim(invite.id)
-            if (claim == null || claim is JsonNull) {
-                banner = "The new phone has not scanned the invite yet."
-                return@launch
-            }
-            openInvite = null
-            inviteQr = null
-            val device = verifiedClaim(claim, invite.secret)
-            if (device == null) {
-                banner = "The invite was claimed by something that did not scan it. Nothing was enrolled."
-                return@launch
-            }
-            inviteClaim = device
+            invite.start(api, storage.relayUrl ?: "", storage.relaySpki ?: "", storage.nodes, key?.deviceId)
         } catch (e: Exception) {
             fail(e)
         }
     }
 
-    /**
-     * The claimed device, exactly as a valid enrollment would carry it
-     * (Messages.device rebuilds and checks it), with a mac only the scanner of
-     * this invite could make.
-     */
-    private fun verifiedClaim(claim: JsonElement, secret: String): JsonObject? {
-        val device = claim["device"] ?: return null
-        val id = device["device_id"].str() ?: return null
-        val name = device["name"].str() ?: return null
-        val platform = device["platform"].str()?.takeIf { it == "ios" || it == "android" } ?: return null
-        val x = device["public_key"]["x"].str() ?: return null
-        val y = device["public_key"]["y"].str() ?: return null
-        val rebuilt = try {
-            Messages.device(id, name, platform, x, y)
-        } catch (e: ProtocolException) {
-            return null
-        }
-        if (rebuilt != device || id == key?.deviceId) return null
-        return if (claim["mac"].str() == Messages.inviteMac(secret, rebuilt)) rebuilt else null
-    }
+    /** Leaves Add another phone: the poll stops and the invite is forgotten here (it lapses on the relay). */
+    fun cancelInvite() = invite.cancel()
 
     /** Phone A, after both screens show the same id: sign B's enrollment. */
     fun confirmInvited() = scope.launch {
-        val device = inviteClaim ?: return@launch
-        inviteClaim = null
+        val device = invite.take() ?: return@launch
         val k = key ?: return@launch
         val api = client ?: return@launch
         try {
@@ -1706,8 +2092,8 @@ class AppModel(context: Context) {
     }
 
     /**
-     * Phone B: claim phone A's invite. It does not check for requests until
-     * the owner taps: the relay knows this phone only once phone A added it.
+     * Phone B: claim phone A's invite. The relay knows this phone only once
+     * phone A added it; until then the loop waits out each refusal.
      */
     private suspend fun claimInvite(payload: JsonElement) {
         val inviteId = payload["invite_id"].str()?.takeIf { isToken(it, 16) } ?: throw OwnerMessage("This invite is incomplete.")
@@ -1736,10 +2122,11 @@ class AppModel(context: Context) {
                 throw e
             }
             fingerprintToCompare = "d-" + Identifiers.fingerprintGroups(k.deviceId)
-            pollProblem = "When the other phone has added this one, tap “Check for requests”."
+            pollProblem = "When the other phone has added this one, requests appear here."
             banner = "Check that the other phone shows the same id, then confirm there."
         } finally {
             pairing = false
+            startLoop()
         }
     }
 
@@ -1751,15 +2138,15 @@ class AppModel(context: Context) {
             val message = Messages.revoke(target, k.deviceId, "revoked from a phone", Timestamps.string(now), Timestamps.string(now.plusSeconds(3600)), Messages.randomNonce())
             val label = name.ifEmpty { "d-" + Identifiers.fingerprintGroups(target) }
             api.revokeDevice(signEnvelope(k, message, "Revoke a device", "Revoke ${Display.escape(label)} on every node"))
-            refreshDevices()
+            fetchDevices(api)
         } catch (e: Exception) {
             fail(e)
         }
     }
 
-    // Front door (fleet stage 4). On this phone every device-signed request is
-    // a biometric prompt (F3's key parameters), so each list is fetched when
-    // the owner taps, never on a timer (Deviation 30).
+    // Front door (fleet stage 4). Its lists are read with the read key: pairings
+    // and alerts by the foreground loop, clients and nodes when Settings opens.
+    // Each decision is still one device-key signature (§8.4).
 
     private fun setFrontDoor(id: String?) {
         frontDoorId = id
@@ -1773,6 +2160,8 @@ class AppModel(context: Context) {
      */
     private suspend fun refreshFrontDoorNow() {
         val api = client ?: return
+        // A read; without a read key the relay is asked again once it is set up (Settings reads it).
+        if (readKey == null) return
         try {
             setFrontDoor(FrontDoor.identify(api.frontDoorInfo(), storage.nodes))
         } catch (e: RelayException) {
@@ -1783,8 +2172,6 @@ class AppModel(context: Context) {
             fail(e)
         }
     }
-
-    fun refreshFrontDoor() = scope.launch { refreshFrontDoorNow() }
 
     /**
      * Stage 4 §3.3.1: after a pin failure on a front door, exactly one
@@ -1825,31 +2212,6 @@ class AppModel(context: Context) {
         val spki = storage.relaySpki ?: return null
         val fd = frontDoorId ?: return null
         return RepinTarget(url, spki, fd)
-    }
-
-    /**
-     * A front-door answer that did not confirm what was asked, in the owner's
-     * words. Known codes are worded; any other code, and a 2xx without the
-     * expected state, is shown as neutral data, never as success.
-     */
-    private fun unconfirmed(reply: FrontDoorReply): String = when (reply) {
-        is FrontDoorReply.Done -> "The front door answered but did not confirm it (state: ${reply.state ?: "none"}). Check again before relying on it."
-        is FrontDoorReply.Refused -> when (reply.code) {
-            "expired", "unknown_request" -> "This request expired or was already decided. Start again in the client."
-            "not_claimant" -> "Another phone claimed this request."
-            "forbidden" -> "This phone is not an approver on this front door."
-            "revoked_device" -> "This phone was revoked on this front door."
-            "unknown_machine" -> "The front door has no machine by one of the names chosen. Choose again."
-            "already_decided" -> "This was already decided."
-            "unknown_pairing" -> "This pairing expired or was withdrawn."
-            "replaces_changed" -> "The node this one replaces changed. Check the pairing again."
-            "key_enrolled_as_other_name" -> "This node's key is already enrolled under another name."
-            "console_record" -> "This node was confirmed at the console. Remove it there with frontdoor remove-node."
-            "save_failed" -> "The front door could not save this. Try again" + (reply.retryAfterSeconds?.let { " in $it s." } ?: ".")
-            "not_found" -> "The front door no longer has it."
-            null -> "The front door did not confirm this (HTTP ${reply.status})."
-            else -> "The front door did not confirm this (${reply.code}, HTTP ${reply.status})."
-        }
     }
 
     /** The typed code, as the grant carries it; the request is claimed for this phone. */
@@ -1933,26 +2295,17 @@ class AppModel(context: Context) {
         try {
             val reply = api.grantDecision(request.grantId, envelope)
             if (reply.confirms(if (approve) "approved" else "denied")) {
+                // A decided row until a minute past the request's expiry (§7.2).
+                clientDecided = DecidedClient(request, code, grantReceivedAtMs, ApprovalList.Decided(if (approve) "Connected" else "Refused", SystemClock.elapsedRealtime()))
                 cancelGrant()
+                if (selected is Selection.Client) selected = null
                 banner = if (approve) "$name is connected. Go back to its window." else "Refused. $name was not connected."
                 return
             }
             if (reply is FrontDoorReply.Refused && (reply.status == 410 || reply.status == 404)) cancelGrant()
-            banner = unconfirmed(reply)
+            banner = frontDoorUnconfirmed(reply)
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            fail(e)
-        }
-    }
-
-    fun refreshClients() = scope.launch {
-        val api = client ?: return@launch
-        if (frontDoorId == null) return@launch
-        try {
-            val list = api.clients()
-            clients.clear()
-            clients.addAll(list)
         } catch (e: Exception) {
             fail(e)
         }
@@ -1987,24 +2340,32 @@ class AppModel(context: Context) {
             if (reply.succeeded) {
                 clients.removeAll { it["grant_id"].str() == grantId }
             } else {
-                banner = unconfirmed(reply)
+                banner = frontDoorUnconfirmed(reply)
             }
         } catch (e: Exception) {
             fail(e)
         }
     }
 
-    /** Nodes waiting for this phone; an entry the core cannot verify (its id does not derive from its key, say) is dropped. */
-    fun refreshPairings() = scope.launch {
-        val api = client ?: return@launch
-        if (frontDoorId == null) return@launch
-        try {
-            val list = api.pendingPairings().mapNotNull { runCatching { PairingRequest(it) }.getOrNull() }
-            pairings.clear()
-            pairings.addAll(list)
-        } catch (e: Exception) {
-            fail(e)
-        }
+    /**
+     * The pairings store, replaced whole: nodes waiting for this phone; an
+     * entry the core cannot verify (its id does not derive from its key, say)
+     * is dropped. A pairing keeps the time this phone first saw it.
+     */
+    private suspend fun fetchPairings(api: RelayApi) {
+        val list = api.pendingPairings().mapNotNull { runCatching { PairingRequest(it) }.getOrNull() }
+        val now = SystemClock.elapsedRealtime()
+        val next = list.map { p -> pairings.firstOrNull { it.request.pairingId == p.pairingId }?.copy(request = p) ?: PairingItem(p, now) }
+        pairings.clear()
+        pairings.addAll(next)
+    }
+
+    /** The alerts store, replaced whole; one this phone acknowledged keeps its decided row until it leaves. */
+    private suspend fun fetchAlerts(api: RelayApi) {
+        val list = api.alerts("0")
+        alerts.clear()
+        alerts.addAll(list)
+        alertDecided.keys.retainAll(list.mapNotNull { it["id"].str() }.toSet())
     }
 
     /**
@@ -2051,25 +2412,17 @@ class AppModel(context: Context) {
                 attempts++
             }
             if (reply.confirms(if (approve) "enrolled" else "denied")) {
-                pairings.removeAll { it.pairingId == pairing.pairingId }
+                // A decided row until a minute past the pairing's expiry (§7.2).
+                pairingDecided[pairing.pairingId] = (pairings.firstOrNull { it.request.pairingId == pairing.pairingId } ?: PairingItem(pairing, SystemClock.elapsedRealtime())) to
+                    ApprovalList.Decided(if (approve) "Enrolled" else "Refused", SystemClock.elapsedRealtime())
+                pairings.removeAll { it.request.pairingId == pairing.pairingId }
+                if ((selected as? Selection.Pairing)?.pairingId == pairing.pairingId) selected = null
                 banner = if (approve) "$name is enrolled. It links when its pair command finishes." else "Refused. $name was not added."
                 return
             }
-            banner = unconfirmed(reply)
+            banner = frontDoorUnconfirmed(reply)
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            fail(e)
-        }
-    }
-
-    fun refreshFrontDoorNodes() = scope.launch {
-        val api = client ?: return@launch
-        if (frontDoorId == null) return@launch
-        try {
-            val list = api.nodes()
-            frontDoorNodes.clear()
-            frontDoorNodes.addAll(list)
         } catch (e: Exception) {
             fail(e)
         }
@@ -2090,20 +2443,8 @@ class AppModel(context: Context) {
                 // In effect but not saved: removing again (a new challenge) saves it.
                 banner = "The node is removed but the front door could not save that. Tap Remove again."
             } else {
-                banner = unconfirmed(reply)
+                banner = frontDoorUnconfirmed(reply)
             }
-        } catch (e: Exception) {
-            fail(e)
-        }
-    }
-
-    fun refreshAlerts() = scope.launch {
-        val api = client ?: return@launch
-        if (frontDoorId == null) return@launch
-        try {
-            val list = api.alerts("0")
-            alerts.clear()
-            alerts.addAll(list)
         } catch (e: Exception) {
             fail(e)
         }
@@ -2115,24 +2456,98 @@ class AppModel(context: Context) {
         try {
             api.ackAlert(id)
             val i = alerts.indexOfFirst { it["id"].str() == id }
-            // The front door answered 204: show it acknowledged without another (prompted) fetch.
-            if (i >= 0) alerts[i] = JsonObject(alerts[i].obj().orEmpty() + ("acked" to kotlinx.serialization.json.JsonPrimitive(true)))
+            // The front door answered 204: a decided row until the next fetch, and acknowledged in the store.
+            alertDecided[id] = ApprovalList.Decided("Acknowledged", SystemClock.elapsedRealtime())
+            if (i >= 0) alerts[i] = JsonObject(alerts[i].obj().orEmpty() + ("acked" to JsonPrimitive(true)))
+            if ((selected as? Selection.Alert)?.id == id) selected = null
         } catch (e: Exception) {
             fail(e)
         }
     }
 
-    /** A tapped notification carries only { kind, id }: the app fetches and verifies. */
-    fun openPushed(kind: String, id: String) {
-        when (kind) {
-            "pairing" -> refreshPairings()
-            "alert" -> refreshAlerts()
-            // Cases stage 4 sends kind "question"; the app fetches and verifies the list itself.
-            "question" -> refreshQuestions()
-            // Fleet stage 5 sends kind "lease". It fetches nothing: a fetch is a prompt the owner did not ask for (R-F5-6).
-            "lease" -> noteLeasePush()
-            "approval" -> openPushed(id)
+    /**
+     * A tapped notification (§13, R-AN-9): it carries a kind and an id and
+     * nothing else. The app fetches with the read key (no fingerprint) and
+     * opens that item's detail; when the item is gone it opens the list with
+     * NO_LONGER_WAITING. A count above 1, a test or an unknown kind opens
+     * the list (push spec §7.2). Without a read key the relay knows, nothing
+     * is fetched: the list (and its set-up row) opens.
+     */
+    fun openPushed(kind: String, id: String, count: Int = 1) {
+        listNotice = null
+        selected = null
+        if (PushText.opensList(kind, count)) return
+        if (!readyToRead()) return
+        val api = client ?: return
+        scope.launch {
+            try {
+                val found: Selection? = when (kind) {
+                    "approval" -> {
+                        // A request id is a lowercase UUID; anything else is not ours to fetch.
+                        if (id.length != 36 || !id.all { it in "0123456789abcdef-" }) null
+                        else api.approval(id)?.let { receive(it, storage.nodes) }
+                            ?.takeIf { rid -> pending.any { it.id == rid && it.status == null } }?.let { Selection.Tool(it) }
+                    }
+                    "question" -> {
+                        fetchQuestions(api)
+                        questions.firstOrNull { it.token == id }?.let { Selection.Question(it.token) }
+                    }
+                    "lease", "session_paused", "session_ended" -> pushedLease(api, kind, id)
+                    "pairing" -> {
+                        fetchPairings(api)
+                        pairings.firstOrNull { it.request.pairingId == id }?.let { Selection.Pairing(id) }
+                    }
+                    "alert" -> {
+                        fetchAlerts(api)
+                        alerts.firstOrNull { it["id"].str() == id && it["acked"].bool() != true }?.let { Selection.Alert(id) }
+                    }
+                    // The list: opensList took these above; named so every kind has its line.
+                    "test" -> return@launch
+                    else -> return@launch
+                }
+                if (found is Selection.RunningLease) followLiveView()
+                if (found != null) selected = found else if (listNotice == null) listNotice = NO_LONGER_WAITING
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: RelayException) {
+                if (e.status == 404) listNotice = NO_LONGER_WAITING else pollProblem = describe(e)
+            } catch (e: Exception) {
+                pollProblem = describe(e)
+            }
         }
+    }
+
+    /**
+     * `lease`: the request whose request_id is the id, else the running lease
+     * whose lease_id is. `session_paused` and `session_ended` (spec 3's kinds;
+     * the id is the lease_id): that lease's live view; ended, its signed ended
+     * status and reason; gone from a listing that passed, "<node> no longer
+     * has this session; it is not running" (C-18).
+     */
+    private suspend fun pushedLease(api: RelayApi, kind: String, id: String): Selection? {
+        val knownNode = liveLease?.takeIf { it.leaseId == id }?.let { it.nodeId to it.nodeName }
+            ?: runningLeases.firstOrNull { it.leaseId == id }?.let { it.nodeId to it.nodeName }
+        refreshLeases(api)
+        if (kind == "lease") leaseRequests.firstOrNull { it.request.requestId == id }?.let { return Selection.LeaseRequest(id) }
+        if (liveLease?.leaseId == id) return Selection.RunningLease(id)
+        runningLeases.firstOrNull { it.leaseId == id }?.let { lease ->
+            openRunningLease(lease)
+            return if (liveLease?.leaseId == id) Selection.RunningLease(id) else null
+        }
+        // An ended lease has no row, but its detail opens from the notification with the status its node signed.
+        for (entry in lastLeaseEntries) {
+            if (!isStatusOnly(entry)) continue
+            val pin = storage.nodes.firstOrNull { it.id == entry["node_id"].str() } ?: continue
+            val signed = entry["status"]?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() } ?: continue
+            val status = Leases.verifiedMessage(signed, pin)?.let { LeaseStatus.from(it) } ?: continue
+            if (status.leaseId != id) continue
+            liveLease = applyLease(signed, pin, LiveLease(pin.id, pin.name, id), deviceId ?: "")
+            return Selection.RunningLease(id)
+        }
+        if (kind != "lease" && knownNode != null && leaseChecks[knownNode.first] is LeaseNodeCheck.Confirmed) {
+            listNotice = "${Display.escape(knownNode.second)} no longer has this session; it is not running."
+        }
+        return null
     }
 
     /** Nodes the phone pinned, and whether a grant can limit to each (Deviation 18). */
@@ -2142,65 +2557,124 @@ class AppModel(context: Context) {
     // Push
 
     /**
-     * Keeps the token only. It is sent after a check that got through or a
-     * pairing that finished (sendPushToken), never at startup: each send is a
-     * signed request, a fingerprint prompt on this phone.
+     * Keeps the token, and sends it at once when the read key can carry it
+     * (spec 3 R5, push spec §7.3: from onNewToken in the background when
+     * enrolled, with no prompt); not enrolled, it is only stored, and the
+     * loop sends it once a poll gets through.
      */
     fun registerPushToken(token: String) {
         storage.pushToken = token
+        if (readyToRead()) scope.launch { sendPushToken() }
     }
 
+    /** The token the relay accepted in this process: null at every cold start, so the token goes again (C-10). */
+    private var pushTokenSentHere: String? = null
+
+    /** A Reset this phone under way: a new pairing waits for it (its key deletion must not take the new key). */
+    private var resetJob: Job? = null
+
     /**
-     * Registers the push token once per token, after the relay knows this
-     * phone (a pairing that finished, or a check that got through). Each
-     * registration is a signed request, so it is not repeated.
+     * Registers the push token on the read key (§8.4, push spec §7.3): once
+     * per process, so at every cold start whether it changed or not (the
+     * relay may have dropped it), and again when [again] (an enrollment just
+     * finished). With no token stored (Reset deleted it), FCM is asked.
      */
-    private suspend fun sendPushToken() {
-        val token = storage.pushToken ?: return
-        if (mode != AppMode.LIVE || token == storage.pushTokenSent) return
+    private suspend fun sendPushToken(again: Boolean = false) {
+        if (mode != AppMode.LIVE || !readKeyKnown) return
+        val token = storage.pushToken ?: run {
+            if (Push.ENABLED) Push.token { registerPushToken(it) }
+            return
+        }
+        if (!again && token == pushTokenSentHere) return
         val api = client ?: return
         try {
             api.pushToken(token)
+            pushTokenSentHere = token
             storage.pushTokenSent = token
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            fail(e)
+            // Tried again after the loop's next poll that gets through.
         }
     }
 
-    /** A push carries only { kind, id }: fetch the envelope and verify it. */
-    fun openPushed(requestId: String) = scope.launch {
-        // A request id is a lowercase UUID; anything else is not ours to fetch.
-        if (requestId.length != 36 || !requestId.all { it in "0123456789abcdef-" }) return@launch
-        try {
-            client?.approval(requestId)?.let { receive(it, storage.nodes) }
-        } catch (e: Exception) {
-            fail(e)
+    /** The gear's Notifications row (push spec §7.3), in the order the owner can act on. */
+    enum class NotificationsRow { ON, OFF_IN_ANDROID, NO_PUSH_BUILD, NO_RELAY_CREDENTIAL, NOT_REGISTERED, NOT_ASKED }
+
+    /** Null until the gear first opens. */
+    var notifications by mutableStateOf<NotificationsRow?>(null)
+        private set
+
+    /** The phone's own state first; then GET /v1/push-token on the read key, when it can be asked. */
+    private suspend fun refreshNotifications(api: RelayApi?) {
+        notifications = when {
+            !Push.ENABLED || !Push.available(appContext) -> NotificationsRow.NO_PUSH_BUILD
+            appContext.getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() == false -> NotificationsRow.OFF_IN_ANDROID
+            api == null || !readyToRead() -> NotificationsRow.NOT_ASKED
+            else -> try {
+                val state = api.pushTokenState()
+                when {
+                    !state.registered -> NotificationsRow.NOT_REGISTERED
+                    !state.sender -> NotificationsRow.NO_RELAY_CREDENTIAL
+                    else -> NotificationsRow.ON
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                NotificationsRow.NOT_ASKED
+            }
         }
     }
 
+    /**
+     * Reset this phone (after its confirm dialog): tells the relay to forget
+     * the push token (best effort, push spec §7.3), then deletes both keys,
+     * every pin and the stored token. The DELETE is signed by the read key,
+     * so it goes before the keys do.
+     */
     fun reset() {
-        pollJob?.cancel()
+        val api = client
+        // No loop starts again meanwhile: both need a client.
+        client = null
+        stopLoop(sayAway = false)
+        stopLiveLoop()
+        cancelInvite()
+        resetJob = scope.launch { finishReset(api) }
+    }
+
+    private suspend fun finishReset(api: RelayApi?) {
+        if (api != null && Push.ENABLED && storage.pushTokenSent != null) {
+            try {
+                withTimeout(RESET_DELETE_MS) { api.deletePushToken() }
+            } catch (e: TimeoutCancellationException) {
+                // Best effort: the relay drops the token at its first push that FCM refuses.
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Best effort, as above.
+            }
+        }
         runCatching { DeviceKey.delete() }
         key = null
+        readKey = null
         client = null
-        demo = null
         pending.clear()
         devices.clear()
         online.clear()
         questions.clear()
+        questionDecided.clear()
         answeredTokens.clear()
         closeLiveLease()
         runningLeases.clear()
         leaseChecks.clear()
         signedLeaseGrants.clear()
+        lastLeaseEntries = emptyList()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
+        leaseDecided.clear()
         decidingLease.clear()
-        leaseNotice = false
-        history = null
-        inviteQr = null
-        inviteClaim = null
-        openInvite = null
+        clientDecided = null
+        pairingDecided.clear()
         grantRequest = null
         grantCode = null
         grantReceivedAtMs = 0L
@@ -2209,11 +2683,19 @@ class AppModel(context: Context) {
         pairings.clear()
         frontDoorNodes.clear()
         alerts.clear()
-        historyStatus = null
-        historyStatusNote = null
+        alertDecided.clear()
+        overflowing.clear()
+        selected = null
+        listNotice = null
+        pairingCodes.clear()
         frontDoorId = null
         fingerprintToCompare = null
         pollProblem = null
+        readKeyNodes.clearInMemory()
+        lastRestAtMs = 0L
+        pushTokenSentHere = null
+        notifications = null
+        // Holds the push token too: it is deleted with the rest.
         storage.clear()
         changeMode(AppMode.WELCOME)
     }
@@ -2221,9 +2703,49 @@ class AppModel(context: Context) {
     companion object {
         const val MAX_EXPIRES_IN_MS = 300_000
 
+        /** Reset waits this long for the relay to forget the push token, then goes on (push spec §7.3). */
+        const val RESET_DELETE_MS = 5_000L
+
+        /** A decided row stays this long past its item's expiry (§7.2). */
+        const val DECIDED_KEEP_MS = 60_000L
+
         /** The node refuses a longer free-text answer (UTF-16 units, as JS and Kotlin count). */
         const val MAX_ANSWER_CHARS = 2000
         const val RETRY_OFFLINE = "node offline — retrying"
         const val RETRY_BUSY = "relay busy — retrying"
+
+        // The foreground loop (§9).
+        const val LONG_POLL_S = 25
+        const val REST_EVERY_MS = 5_000L
+        const val PRESENCE_EVERY_MS = 60_000L
+        const val ERROR_WAIT_S = 5
+        const val ERROR_WAIT_MS = ERROR_WAIT_S * 1000L
+        const val BUSY_WAIT_S = 15
+
+        // The live view (§7.6): a watch every 20 s; a poll that brought nothing waits a second before the next.
+        const val WATCH_EVERY_MS = 20_000L
+        const val LIVE_IDLE_MS = 1_000L
+
+        /** A `kl.device.read_key` lives at most seven days (approval-v1, READ_KEY_MAX_MS). */
+        const val READ_KEY_STATEMENT_MS = 7L * 24 * 60 * 60 * 1000
+
+        /** The set-up row (§8.7). */
+        const val READ_KEY_SETUP_TITLE = "Check for requests without your fingerprint. Set up once: two fingerprints."
+
+        /** Settings (§6.4) before the read key is set up: its lists are read with the read key. */
+        const val SETTINGS_READ_KEY_LINE = "Set up the read key to see nodes and phones."
+
+        /** C-19: no fingerprint fallback for a relay from before the read key. */
+        const val OLDER_RELAY = "This relay is older than this app. Upgrade it, then try again."
+
+        /** §13: a tapped notification whose item is gone. */
+        const val NO_LONGER_WAITING = "That request is no longer waiting."
+
+        /** §6.1: what the Scanner's text field takes. */
+        const val SCAN_FIELD_ACCEPTS = "Type a code that starts with kl1: (from a node, another phone or a relay), or a client's six-character code like Q7K-M2X."
+
+        /** §7.6: the live view's line for a lease this phone granted, and the fallback button. */
+        const val KEEP_OPEN_LINE = "Keep this open to keep it going. Closing it pauses clicks and typing after about two minutes."
+        const val FINGERPRINT_WATCH_BUTTON = "Keep it going with your fingerprint"
     }
 }

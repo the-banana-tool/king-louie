@@ -199,22 +199,31 @@ characters.
 
 ## 7. Phone API additions (under `/v1`, approval-v1 §7 auth)
 
-| Method, path | Body → reply |
-|---|---|
-| `POST /v1/pairing-codes` | `{ node_name }` → `{ code, expires_at }` |
-| `GET /v1/pairings/pending` | → `[{ pairing_id, node_name, node_id, profile, public_key, tls_fingerprint, replaces, expires_in_ms }]` (`public_key` and `tls_fingerprint` are signed in `kl.node.enroll`, so the phone needs them) |
-| `POST /v1/pairings/{id}/decision` | `kl.node.enroll` → `{ state }` |
-| `GET /v1/grants/pending?user_code=` | → `{ grant_id, client_id, client_name, client_host, redirect_uri, resource, code_challenge, requested_scopes, preselected, expires_in_ms }` / `404 no_such_request` (claims the request for this phone) |
-| `POST /v1/grants/{id}/decision` | `kl.client.grant` → `{ state }` |
-| `GET /v1/clients` | → `[{ grant_id, client_name, client_host, scopes, accepted_at, last_used_at }]` |
-| `POST /v1/clients/{grant_id}/revoke` | `kl.client.revoke` → `204` |
-| `POST /v1/challenges` | `{ purpose: 'revoke' \| 'remove' }` → `{ challenge, expires_in_ms: 120000 }` (§4.6) |
-| `POST /v1/nodes/{node_id}/remove` | `kl.node.remove` → `204` |
-| `GET /v1/nodes` | approval-v1 fields + `profile`, `capabilities`, `source`, `audit`, `last_seen` |
-| `GET /v1/nodes/{node_id}/audit-status` | → `{ head_seq, anchor, gaps, breaks }` |
-| `GET /v1/alerts?since=`, `POST /v1/alerts/{id}/ack` | → `[{ id, kind, subject, detail, at, acked }]` / `204` |
-| `GET /v1/frontdoor` | → `{ frontdoor_id, public_key, domain, cert_not_after }` |
-| `GET /v1/repin` (no auth) | → `kl.relay.repin` / `404` |
+Key (revised 2026-10-28; approval-v1, "Revised 2026-10-28: the read key"):
+`read` takes a request signed by either the device key or the read key,
+`device` the device key only. A route whose body is a device-key envelope
+(`kl.client.grant`, `kl.client.revoke`, `kl.node.enroll`, `kl.node.remove`)
+or that only reads takes either; a claim by user code, an alert
+acknowledgement and a pairing code carry no envelope and take the device
+key. The front door's `verifyPhoneEnvelope` still verifies every envelope
+against the device key alone, so a read key never decides here.
+
+| Method, path | Key | Body → reply |
+|---|---|---|
+| `POST /v1/pairing-codes` | device | `{ node_name }` → `{ code, expires_at }` |
+| `GET /v1/pairings/pending` | read | → `[{ pairing_id, node_name, node_id, profile, public_key, tls_fingerprint, replaces, expires_in_ms }]` (`public_key` and `tls_fingerprint` are signed in `kl.node.enroll`, so the phone needs them) |
+| `POST /v1/pairings/{id}/decision` | read | `kl.node.enroll` → `{ state }` |
+| `GET /v1/grants/pending?user_code=` | device | → `{ grant_id, client_id, client_name, client_host, redirect_uri, resource, code_challenge, requested_scopes, preselected, expires_in_ms }` / `404 no_such_request` (claims the request for this phone) |
+| `POST /v1/grants/{id}/decision` | read | `kl.client.grant` → `{ state }` |
+| `GET /v1/clients` | read | → `[{ grant_id, client_name, client_host, scopes, accepted_at, last_used_at }]` |
+| `POST /v1/clients/{grant_id}/revoke` | read | `kl.client.revoke` → `204` |
+| `POST /v1/challenges` | read | `{ purpose: 'revoke' \| 'remove' }` → `{ challenge, expires_in_ms: 120000 }` (§4.6) |
+| `POST /v1/nodes/{node_id}/remove` | read | `kl.node.remove` → `204` |
+| `GET /v1/nodes` | read | approval-v1 fields + `profile`, `capabilities`, `source`, `audit`, `last_seen` |
+| `GET /v1/nodes/{node_id}/audit-status` | read | → `{ head_seq, anchor, gaps, breaks }` |
+| `GET /v1/alerts?since=`, `POST /v1/alerts/{id}/ack` | read, device | → `[{ id, kind, subject, detail, at, acked }]` / `204` |
+| `GET /v1/frontdoor` | read | → `{ frontdoor_id, public_key, domain, cert_not_after }` |
+| `GET /v1/repin` (no auth) | none | → `kl.relay.repin` / `404` |
 
 ## 8. Push
 

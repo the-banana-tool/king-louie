@@ -113,10 +113,31 @@ class TakeManager {
     if (broker && typeof broker.on === 'function') broker.on('helper_lost', () => { this.onHelperLost().catch(() => {}); });
     // §5.3: a take found unfinished at start was cut off by a restart. Its ffmpeg, when one
     // still runs under the pid it recorded, is ended (TakeStore#markLiveEnded).
+    let ended = [];
     try {
-      store.markLiveEnded('service_restarted', { ...(findProcess ? { findProcess } : {}), ...(kill ? { kill } : {}) });
+      ended = store.markLiveEnded('service_restarted', { ...(findProcess ? { findProcess } : {}), ...(kill ? { kill } : {}) }) || [];
     } catch (err) {
       log.warn(`takes left live at the last stop were not marked ended: ${err.message}`);
+    }
+    this._pushRestartEndings(ended);
+  }
+
+  // Push spec §6.2: the lease of a take cut off by a restart is gone from memory, so no ended
+  // status is signed for it. Each one that ran (its record has a lease_id and a grant) gets one
+  // session_ended for every phone, through the lease manager's queue, which holds it until the
+  // relay link is up.
+  _pushRestartEndings(takeIds) {
+    const queue = this.leases && this.leases.pushQueue;
+    if (!queue || typeof queue.enqueue !== 'function') return;
+    for (const takeId of takeIds) {
+      let record = null;
+      try { record = this.store.get(takeId); } catch { record = null; }
+      if (!record || typeof record.lease_id !== 'string' || !record.lease_id || !record.grant) continue;
+      try {
+        queue.enqueue({ kind: 'session_ended', id: record.lease_id });
+      } catch (err) {
+        this.log.debug('a restart ending was not queued for push', { takeId, code: (err && err.code) || 'error' });
+      }
     }
   }
 

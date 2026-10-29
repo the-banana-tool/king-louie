@@ -45,7 +45,7 @@ function envelopeSha(envelope) {
   }
 }
 
-// device.rejected fires on every malformed or forged device.enroll/revoke the
+// device.rejected fires on every malformed or forged device.enroll/revoke/read_key the
 // relay forwards, so a peer hammering the link with garbage envelopes must
 // not be able to grow the audit ledger without bound. At most REJECT_CAP are
 // audited individually per rolling REJECT_WINDOW_MS; once a window's cap is
@@ -89,8 +89,7 @@ function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, cour
       const result = await phoneApprover.handleResponse(params.envelope);
       return { delivered: true, ...result };
     }
-    if (method === 'device.enroll' || method === 'device.revoke') {
-      const result = approverStore.stage(params.envelope);
+    if (method === 'device.enroll' || method === 'device.revoke' || method === 'device.read_key') {
       // The audited type/device_id come from what the envelope actually
       // says (open()'s message.type, null when the envelope is malformed),
       // never from the rpc method the relay happened to call it through.
@@ -104,7 +103,13 @@ function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, cour
         type = null;
         deviceId = null;
       }
-      if (result.state !== 'duplicate') {
+      // A read-key statement (android-slim spec §8.7) comes only as
+      // device.read_key, and device.read_key carries nothing else. (Enroll and
+      // revoke may still cross each other's method, as before.)
+      const readKeyMismatch = (method === 'device.read_key') !== (type === 'kl.device.read_key');
+      const result = readKeyMismatch ? { state: 'rejected', reason: 'malformed' } : approverStore.stage(params.envelope);
+      // Nothing new happened for a duplicate or an `applied` read key: no audit entry.
+      if (result.state !== 'duplicate' && result.state !== 'applied') {
         const kind = result.state === 'rejected' ? 'device.rejected' : 'device.staged';
         if (kind !== 'device.rejected' || admitRejectedAudit()) {
           auditLedger.append({ kind, data: { type, device_id: deviceId, reason: result.reason || null, envelope_sha256: envelopeSha(params.envelope) } })

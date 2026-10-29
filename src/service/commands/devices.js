@@ -180,7 +180,7 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
     const { device } = check.message;
     // The name and platform come from the phone: printed without control or
     // bidi characters so they cannot rewrite what the administrator reads.
-    io.stdout.write(`Device "${printable(device.name)}" (${printable(device.platform)}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)} — does the phone show the same? [y/N] `);
+    io.stdout.write(`Device "${printable(device.name)}" (${printable(device.platform)}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)}${withReadKey(device)} — does the phone show the same? [y/N] `);
     const answer = await readLine(io.stdin, { signal: expired.signal });
     if (answer === null) {
       await finish(null, true);
@@ -208,6 +208,7 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
         name: device.name,
         platform: device.platform,
         public_key: device.public_key,
+        ...(device.read_key ? { read_key: device.read_key, read_key_at: check.message.created_at } : {}),
         enrolled_at: new Date(now()).toISOString(),
         enrolled_by: 'console',
         revoked_at: null,
@@ -277,6 +278,13 @@ function restorePriorFile(file, prior) {
   else fs.rmSync(file, { force: true });
 }
 
+// " with a read key r-abcd efgh ijkl mnop" for a device or record that holds
+// one (android-slim spec §8.2), else "".
+function withReadKey(holder) {
+  if (!holder || !holder.read_key) return '';
+  return ` with a read key ${readKeyText(holder.read_key)}`;
+}
+
 function describeState(store, record) {
   if (record.revoked_at) return `revoked ${record.revoked_at} by ${record.revoked_by}`;
   if (record.platform === 'demo') return 'demo (never accepted)';
@@ -289,15 +297,37 @@ function describeState(store, record) {
 // 7's listStaged() reports these instead of reading them) or 'unreadable'
 // (a name-shaped, readable file whose contents did not parse); both carry no
 // deviceId/signer/message, so they are shown by file path instead.
-function describeStagedItem(item, now) {
+// A staged read key's fingerprint; a staged file is service-written, so a
+// key that is not a P-256 JWK is named as such instead of thrown on.
+function readKeyText(jwk) {
+  const { readKeyFingerprint } = require('../../approvals/messages');
+  try {
+    return readKeyFingerprint(jwk);
+  } catch {
+    return '(malformed read key)';
+  }
+}
+
+// `recordsById` maps a device id to its approver record, for read-key statements.
+function describeStagedItem(item, now, recordsById = null) {
   if (item.type === 'unsafe' || item.type === 'unreadable') {
     return `${item.type}  ${item.file}  (${item.reason || item.error || 'unknown problem'})`;
   }
-  const label = item.type === 'kl.device.revoke' ? 'revoke' : 'enroll';
   // Age is judged on the message's own signed created_at (never ageMs, and
   // never the data dir's received_at, which the service itself writes and so
   // does not get to use to set policy or displayed trust).
-  return `${label}  ${item.deviceId}  signed by ${item.signer}  (${describeAge(item.message && item.message.created_at, now)})`;
+  const age = describeAge(item.message && item.message.created_at, now);
+  if (item.type === 'kl.device.read_key') {
+    // The device's own statement of its read key (android-slim spec §8.7):
+    // the device as this node knows it, and the new key's fingerprint.
+    const record = recordsById && recordsById.get(item.deviceId);
+    const name = record ? `"${printable(record.name)}"` : '(not an approver here)';
+    return `read key  ${item.deviceId}  ${name}  ${readKeyText(item.message.read_key)}  signed by the device itself  (${age})`;
+  }
+  if (item.type === 'kl.device.revoke') return `revoke  ${item.deviceId}  signed by ${item.signer}  (${age})`;
+  const device = item.message && item.message.device;
+  const readKey = device && device.read_key ? `  with a read key ${readKeyText(device.read_key)}` : '';
+  return `enroll  ${item.deviceId}${readKey}  signed by ${item.signer}  (${age})`;
 }
 
 // "N min ago" from a signed timestamp; a phone clock ahead of this one reads
@@ -325,7 +355,7 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
     const records = store.list();
     if (records.length === 0) io.stdout.write('No approver devices on this node.\n');
     for (const r of records) {
-      io.stdout.write(`${fingerprintGroups(r.device_id)}  ${r.device_id}  ${printable(r.name)} (${printable(r.platform)})  ${describeState(store, r)}  enrolled by ${r.enrolled_by}\n`);
+      io.stdout.write(`${fingerprintGroups(r.device_id)}  ${r.device_id}  ${printable(r.name)} (${printable(r.platform)})${r.read_key ? `  read key ${readKeyText(r.read_key)}` : ''}  ${describeState(store, r)}  enrolled by ${r.enrolled_by}\n`);
     }
     try {
       const staged = admin.listStaged();
@@ -376,7 +406,13 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
       results = await admin.applyStaged({
         confirm: async (items) => {
           const nowMs = (deps.now || Date.now)();
-          for (const i of items) io.stdout.write(`${describeStagedItem(i, nowMs)}\n`);
+          const recordsById = new Map();
+          for (const i of items) {
+            if (i.type !== 'kl.device.read_key') continue;
+            const record = admin.read(i.deviceId);
+            if (record) recordsById.set(i.deviceId, record);
+          }
+          for (const i of items) io.stdout.write(`${describeStagedItem(i, nowMs, recordsById)}\n`);
           if (flags.yes) return true;
           io.stdout.write('Apply these? [y/N] ');
           return /^y(es)?$/i.test((await readLine(io.stdin)).trim());
@@ -401,6 +437,7 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
       io.stdout.write(`${r.deviceId || r.file}: ${r.result}\n`);
       if (r.result === 'enrolled') await ledger.append({ kind: 'device.enrolled', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'revoked') await ledger.append({ kind: 'device.revoked', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
+      if (r.result === 'read key set') await ledger.append({ kind: 'device.read_key_set', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
     }
     return 0;
   } finally {

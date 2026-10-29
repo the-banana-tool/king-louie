@@ -24,8 +24,14 @@ const EXPECTED = [
   // Fourth security review: another pinned node's listing, an extra status beside one, and the shape (each lease once, at most eight, exact keys, a real time).
   'listing-other-node', 'listing-wrong-node', 'listing-extra-status', 'listing-duplicate-lease', 'listing-too-many', 'listing-extra-key', 'listing-bad-at',
   // Revised 2026-10-24: the take lease (demo takes spec §6).
-  'take-grant', 'take-grant-minutes-over-cap', 'take-request-missing-name', 'computer-use-with-unattended', 'status-take'
+  'take-grant', 'take-grant-minutes-over-cap', 'take-request-missing-name', 'computer-use-with-unattended', 'status-take',
+  // Revised 2026-10-28: the read key (android-slim spec §8.8). A watch may be
+  // signed by either key of its device; a grant or a revoke only by the device key.
+  'watch-read-key', 'watch-read-key-not-applied', 'grant-read-key', 'revoke-read-key'
 ];
+// What the phones consume (android-slim spec §5): iOS consumes PHONE, Android
+// PHONE and the read-key vectors a phone signs (iOS has no read key).
+const ANDROID_READ_KEY = ['watch-read-key'];
 const PHONE = ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'watch-no-token',
   'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame',
   'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature',
@@ -126,11 +132,11 @@ describe('lease-v1 vectors', () => {
   });
 
   it('has exactly the expected set, and phones consume exactly theirs', () => {
-    assert.equal(EXPECTED.length, 51);
+    assert.equal(EXPECTED.length, 55);
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
-    for (const phone of ['ios', 'android']) {
-      assert.deepEqual(vectors.filter((v) => v.consumers.includes(phone)).map((v) => v.name).sort(), [...PHONE].sort());
-    }
+    const consumedBy = (phone) => vectors.filter((v) => v.consumers.includes(phone)).map((v) => v.name).sort();
+    assert.deepEqual(consumedBy('ios'), [...PHONE].sort());
+    assert.deepEqual(consumedBy('android'), [...PHONE, ...ANDROID_READ_KEY].sort());
     assert.ok(vectors.every((v) => v.consumers.includes('node')));
   });
 
@@ -153,11 +159,32 @@ describe('lease-v1 vectors', () => {
       // The fields a phone reads from a status or a view, the contact token among them.
       if (v.expect.status) for (const [key, value] of Object.entries(v.expect.status)) assert.deepEqual(r.message[key], value, `${name}: ${key}`);
       if (v.expect.contact_token) assert.equal(r.message.contact_token, v.expect.contact_token);
+      // Which of the device's keys verified a watch (android-slim §8.6).
+      if (v.expect.key) assert.equal(r.key, v.expect.key);
       // What a phone knows of a node after a listing it accepted: every lease the node listed, in its order.
       if (v.expect.leases) assert.deepEqual(r.statuses.map((s) => ({ lease_id: s.lease_id, seq: s.seq, state: s.state })), v.expect.leases);
       if (name.startsWith('listing-') && !v.expect.accepted) assert.equal(r.statuses, undefined, 'a refused listing gives nothing to show');
     });
   }
+
+  it('the read-key vectors: signed by the read key of A, which every record but the not-applied one holds, and only a watch may use', () => {
+    const { verifyEs256 } = require('../src/approvals/envelope');
+    const KEYS = require('./vectors/approval-v1/keys.json');
+    const recordA = (v) => v.given.approvers.find((r) => r.device_id === KEYS.devices.A.id);
+    for (const name of ['watch-read-key', 'watch-read-key-not-applied', 'grant-read-key', 'revoke-read-key']) {
+      const v = byName.get(name);
+      assert.equal(v.input.kid, KEYS.devices.A.id, name);
+      assert.equal(verifyEs256(v.input, KEYS.devices.A_read.jwk), true, name);
+      assert.equal(verifyEs256(v.input, KEYS.devices.A.jwk), false, name);
+      if (name === 'watch-read-key-not-applied') assert.equal(Object.hasOwn(recordA(v), 'read_key'), false, name);
+      else assert.deepEqual(recordA(v).read_key, KEYS.devices.A_read.jwk, name);
+    }
+    // The phone builds the same message as for watch-valid; only the key differs.
+    const valid = byName.get('watch-valid').expect.message;
+    const read = byName.get('watch-read-key').expect.message;
+    assert.deepEqual(Object.keys(read).sort(), Object.keys(valid).sort());
+    assert.equal(read.device_id, valid.device_id);
+  });
 
   it('resume-capped: a resume never extends past the original expiry', () => {
     const v = byName.get('resume-capped');
@@ -166,7 +193,7 @@ describe('lease-v1 vectors', () => {
   });
 
   it('the phone-built messages are exactly the signed payloads', () => {
-    for (const name of ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'take-grant', 'revoke-valid', 'watch-valid', 'watch-no-token']) {
+    for (const name of ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'take-grant', 'revoke-valid', 'watch-valid', 'watch-no-token', 'watch-read-key']) {
       const v = byName.get(name);
       const payload = JSON.parse(Buffer.from(v.input.payload, 'base64url').toString('utf8'));
       assert.deepEqual(payload, v.expect.message, name);

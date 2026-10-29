@@ -3,9 +3,9 @@
 // each relay.hello). Nodes never trust any of it; they verify signatures.
 const fs = require('fs');
 const path = require('path');
-const { deviceIdFromJwk, open } = require('../approvals/envelope');
+const { deviceIdFromJwk, isDeviceJwk, samePoint, open } = require('../approvals/envelope');
 const { writeFileAtomic } = require('../approvals/approver-store');
-const { DEVICE_ID_RE, NODE_ID_RE } = require('../approvals/messages');
+const { DEVICE_ID_RE, NODE_ID_RE, isTimestamp } = require('../approvals/messages');
 const { err } = require('./errors');
 const { createLogger } = require('../logging');
 
@@ -31,6 +31,13 @@ function logKey(envelope) {
   return { kind: 'other', key: null };
 }
 
+// A stored read key that is not a P-256 JWK (a hand-edited or corrupted
+// file) is dropped on load, so the phone API never verifies against it.
+function withReadKeyChecked(record) {
+  if (record.read_jwk && isDeviceJwk(record.read_jwk) && isTimestamp(record.read_key_created_at)) return record;
+  return { ...record, read_jwk: null, read_key_created_at: null };
+}
+
 class DeviceRegistry {
   constructor({ file, now = Date.now } = {}) {
     if (!file) throw new TypeError('DeviceRegistry needs a file');
@@ -51,7 +58,7 @@ class DeviceRegistry {
       // A record whose device_id does not fit the regex (a hand-edited or
       // corrupted file) is dropped on load rather than becoming a map key.
       for (const record of Object.values(parsed.devices || {})) {
-        if (record && DEVICE_ID_RE.test(record.device_id)) this.devices.set(record.device_id, record);
+        if (record && DEVICE_ID_RE.test(record.device_id)) this.devices.set(record.device_id, withReadKeyChecked(record));
       }
     } catch {
       // No registry yet.
@@ -91,19 +98,51 @@ class DeviceRegistry {
       platform,
       push: existing ? existing.push : null,
       nodes: existing ? existing.nodes : {},
-      registered_at: existing ? existing.registered_at : new Date(this.now()).toISOString()
+      registered_at: existing ? existing.registered_at : new Date(this.now()).toISOString(),
+      // The read key (android-slim §8.2) is the device's own and survives a
+      // re-registration; only setReadKey changes it.
+      read_jwk: existing ? existing.read_jwk || null : null,
+      read_key_created_at: existing ? existing.read_key_created_at || null : null
     };
     this.devices.set(deviceId, record);
     this._save();
     return record;
   }
 
-  setPush(deviceId, push) {
+  // Stores the device's read key (android-slim §8.2, §8.7). `createdAt` is
+  // the statement's (or the enrollment's) created_at: only a strictly newer
+  // one replaces the stored key, an older or equal one is ignored. Answers
+  // null for an unknown device, else { record, updated }. Throws
+  // `bad_read_key` for a key that is not a P-256 JWK, one whose point is the
+  // device key's, or a created_at that is not RFC 3339 UTC.
+  setReadKey(deviceId, jwk, createdAt) {
     const record = DEVICE_ID_RE.test(deviceId) ? this.devices.get(deviceId) : null;
     if (!record) return null;
-    record.push = push ? { platform: push.platform, token: push.token } : null;
+    if (!isDeviceJwk(jwk)) throw err('bad_read_key', 'the read key is not a P-256 JWK');
+    if (samePoint(jwk, record.jwk)) throw err('bad_read_key', 'the read key is the device key');
+    if (!isTimestamp(createdAt)) throw err('bad_read_key', 'created_at must be RFC 3339 UTC');
+    if (record.read_jwk && record.read_key_created_at && Date.parse(createdAt) <= Date.parse(record.read_key_created_at)) {
+      return { record, updated: false };
+    }
+    record.read_jwk = { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y };
+    record.read_key_created_at = createdAt;
     this._save();
-    return record;
+    return { record, updated: true };
+  }
+
+  // Sets (or with null, clears) where the device's notifications go.
+  // Returns a boolean, "wrote": true when it saved a change, false when it
+  // wrote nothing (an unknown device, or the platform and token already held:
+  // push spec §7.3, the phone re-sends its token at every cold start).
+  setPush(deviceId, push) {
+    const record = DEVICE_ID_RE.test(deviceId) ? this.devices.get(deviceId) : null;
+    if (!record) return false;
+    const next = push ? { platform: push.platform, token: push.token } : null;
+    const held = record.push || null;
+    if (next === null ? held === null : held !== null && held.platform === next.platform && held.token === next.token) return false;
+    record.push = next;
+    this._save();
+    return true;
   }
 
   // nodeId becomes a key of record.nodes, so it is checked against its own

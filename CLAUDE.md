@@ -1152,13 +1152,42 @@ the e2e test), the owner check cannot tell them apart.
   Enrollments and revocations relayed from phones are staged per node: apply them with
   `king-louie-service device apply` (`--yes` skips the `[y/N]` prompt, never the signature checks);
   `device list`, `device revoke <device-id>`.
+- The read key (Android app spec `docs/superpowers/specs/2026-10-28-android-app-slim-design.md` §8,
+  R-AN-5; approval-v1 and lease-v1 "Revised 2026-10-28"): an Android phone's second P-256 key, no
+  biometric, Keystore-locked while the phone is. Enrollment may carry `device.read_key`; approver
+  records keep `read_key` and `read_key_at` (the signed `created_at` that set it; absent means
+  `enrolled_at`), relay device records `read_jwk` and `read_key_created_at` (`setReadKey`, only a
+  newer one replaces). A request signed with it sends `X-KL-Key: read` and signs `KL-PHONE-READ-V1`
+  (`phoneAuthString(..., { key: 'read' })`); each route is `auth: 'read'` (either key: reads, and
+  bodies that are device-key envelopes) or `'device'` (`GET /v1/grants/pending`, alert ack,
+  pairing codes, invites); refusals `401 bad_key`, `403 read_key_not_allowed`, `401 unknown_read_key`,
+  `401 bad_signature`; the table is `ROUTE_AUTH` in `tests/frontdoor-phone-routes.test.js`. On the
+  node only `verifyLeaseWatch` passes `verifyDeviceEnvelope({ allowReadKey: true })`; every decision
+  refuses a read-key signature `bad_signature` (a sweep test signs each with one). A phone enrolled
+  before it posts a device-signed `kl.device.read_key` to `POST /v1/devices/read-key`; the relay
+  stores it and forwards the node method `device.read_key` (each node `read-key-pending-apply`,
+  `applied` (its record holds the key), `duplicate` (staged), `rejected`, or `offline`), and `device apply` writes it (`read key set`, audited
+  `device.read_key_set`; `stale` for an older one). `A_read`/`B_read` in `TEST_DEVICE_KEYS` are
+  refused as test keys. iOS has no read key and is unchanged.
+- Push (spec `docs/superpowers/specs/2026-10-28-push-notifications-design.md`, R-PU-1 to R-PU-5;
+  approval-v1 §8, lease-v1 §4): the relay's admin `relay.push` block (`fcm.service_account_file`, an
+  absolute path read once at start, shape-checked by `readServiceAccountFile`). Content-free payload
+  `{ k, rid, n, c? }`. The node's `PushQueue` (`src/gui/push-queue.js`) sends `push.notify`
+  (`node-methods.js`) for `session_ended` (a granted lease's end, except to the device whose own
+  signed Stop or resume deny ended it) and `session_paused` (a `no_contact` pause, granting device
+  only). The new kinds, `test`, `c`, dedupe, coalescing and the hourly cap (`push/gate.js`) are `fcm`
+  only; `apns` is byte for byte as before. `relay push-test` (admin; exit 0 only when every push
+  went out) and doctor's `push` row (`pushRow`, `<dataDir>/relay/push-status.json`). Tests use a
+  local fake FCM server on 127.0.0.1 (`tests/frontdoor-push.test.js`), never Google;
+  `tests/tracked-secrets.test.js` fails when the Firebase app config, a `local.properties` or a
+  service-account JSON is tracked. The owner's runbook is the install guide's "Push to your phone".
 - `mcp` asks through the running service (file courier); with the service stopped every unsafe runbook
   is denied at once.
 - Audit: `<dataDir>/audit/ledger-YYYY-MM.jsonl`, hash-chained; `doctor` verifies the chain.
 - Tests: `tests/approvals-*.test.js`, `tests/frontdoor-*.test.js`, `tests/audit-ledger.test.js`,
   `tests/service-cli-devices.test.js`, `tests/service-cli-relay.test.js`. Vectors live in
   `tests/vectors/approval-v1/`; after changing a message, run `node tests/vectors/approval-v1/generate.js`
-  and commit the files (`--check` must say `41 vectors match`). `tests/approvals-e2e.test.js` spawns real
+  and commit the files (`--check` must say `49 vectors match`). `tests/approvals-e2e.test.js` spawns real
   processes and runs on Windows or as root; on Windows it denies itself write access to a temp
   `approvers/` dir with `icacls` (as an installer's ACL would) and lifts the deny before cleanup.
 - Mobile apps (`mobile/`, built from `docs/protocol/approval-v1.md`): protocol-core tests are
@@ -1507,15 +1536,15 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   `kl.question.ask` envelopes; an answer counts only as a device-signed
   `kl.question.answer` verified on the node (nonce, `signed_at` ± 300 s, live
   token), and it resolves only its own question. The relay routes are
-  `src/frontdoor/question-routes.js`. The apps' Questions screen shows only
-  questions signed by a pinned node and signs `signed_at` on the
+  `src/frontdoor/question-routes.js`. The apps (iOS's Questions screen,
+  Android's Approvals list) show only questions signed by a pinned node and signs `signed_at` on the
   relay-corrected clock. Foreground presence is unsigned
   (`{ foreground, at }`), but the relay request carrying it is still
-  device-authenticated, and on these phones the key needs biometrics: iOS
-  pings every 60 s only while its API session is already unlocked (never a
-  Face ID prompt of its own); Android sends no presence and loads questions
-  only when the owner taps. Follow-up: a relay presence auth that needs no
-  biometric prompt (an F3 pairing change) would let Android report presence.
+  device-authenticated: iOS pings every 60 s only while its API session is
+  already unlocked (never a Face ID prompt of its own); Android pings every
+  60 s while the app is in the foreground, signed with its read key (no
+  prompt; see Approvals and relay), with a best-effort `foreground: false`
+  on leaving, and loads questions in its foreground loop.
 
 ## Front door
 
@@ -2262,7 +2291,8 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
     <time>: no computer-use session", or the counts; only from a listing
     `checkListing` accepted, with the phone's own time), unconfirmed. A
     locked iOS session asks nothing and keeps the earlier answer with its
-    time; Android writes the state only in `refreshLeases`, on the tap.
+    time; Android writes the state only in `refreshLeases`, which its
+    foreground loop calls.
   - Every agent or runbook node with an identity and the relay link
     answers `lease.list`. Where no lease manager exists (gui not enabled,
     no helper, no record of the identity, a GUI that could not be built, a
@@ -2295,7 +2325,7 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
     without a remembered grant goes with the first accepted listing that
     no longer names the lease; a row that is there stays while its node
     still signs `pending`, listing or not (`noteListedLease`). Android
-    does this only inside the "Check" tap and sends nothing for it.
+    does this inside `refreshLeases` and sends nothing for it.
   - `Leases.isListing` in both cores is the node's
     `VALIDATORS['kl.lease.listing']` (exact keys, a real `at`, at most
     eight leases, each once), checked after the signature.
@@ -2412,7 +2442,7 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
   (`tests/session-backend-windows.test.js`), which shows the rule is
   written, not that it works. Swift and Kotlin are not compiled by
   `npm test`.
-- Vectors: `node tests/vectors/lease-v1/generate.js --check` (51) and
+- Vectors: `node tests/vectors/lease-v1/generate.js --check` (55) and
   `node tests/vectors/session-v1/generate.js --check` (6).
 - The phones: iOS signs only `kl.lease.watch` with its API session (owner
   ruling R-F5-8) and sends it only while the live lease view is on screen
@@ -2423,23 +2453,36 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
   applied in each watch and show a banner row with a working Stop for every
   lease a pinned node reports as running, saying who granted one this phone
   did not (R-F5-18); iOS asks when it becomes active with its session
-  unlocked, Android only when the owner taps "Check for computer-use
-  requests". Android fetches on tap, sends each
-  Stop, Allow and Refresh once and shows an unanswered send as not confirmed
-  (R-F5-1, R-F5-5), and a lease push there fetches nothing (R-F5-6); its
-  Refresh asks for a fresh status first when its token is over a minute old
-  (four prompts then, three otherwise). On
-  Android a relay's reply never changes the lease state on screen: only a
-  status or view the pinned node signed does (`applyLease`), so after Stop
-  it says "Stop sent, not yet confirmed by the computer" and Stop stays
-  enabled. Its live screen says "Paused: tap Refresh to let it continue"
-  for `no_contact` (R-F5-15), still with no timer. The app
-  modules have no test target, so `tests/mobile-lease-apps.test.js` pins
-  these rules by reading the Swift and Kotlin sources (it shows the rules are
-  written into the code, not that the apps build). On Android a property that
-  `AppModel`'s `init` reaches (through `startDemo`) is declared above `init`:
-  `leaseRequests` is, for that reason. `mobile/PRIVACY.md` says what a relay
-  operator sees of a lease.
+  unlocked. Android (Android app spec
+  `docs/superpowers/specs/2026-10-28-android-app-slim-design.md`, R-AN-5,
+  R-AN-6, R-AN-9, which replace R-F5-1, R-F5-6 and ruling T19-presence for
+  Android) reads with its read key, so no read asks for a fingerprint: while
+  the app is in the foreground one loop long-polls approvals and, when that
+  returns (at most every 5 s), fetches questions, leases (with a fresh
+  listing nonce), and on a front door pairings and alerts, and reports
+  presence every 60 s; running leases and takes are rows of its one
+  Approvals list with Stop. While a running lease's detail (the live lease
+  view) is on screen with the app in front, a second loop long-polls that
+  lease's views and sends a read-key `kl.lease.watch` every 20 s (and early
+  when a fresher token arrives), which is contact for the granting phone;
+  leaving the view or the app stops both, and the row says "Paused: open to
+  let it continue" for `no_contact`. Neither loop signs with the device key
+  or decides anything. A node that does not know the phone's read key yet
+  (`device apply` not run there) refuses the read-signed watch, and the view
+  offers one device-key watch on a button. A tapped notification opens its
+  item's detail. Each Stop, Allow and Deny is still signed once and sent once,
+  an unanswered send shown as not confirmed (R-F5-5), and a relay's reply
+  never changes the lease state on screen: only a status or view the pinned
+  node signed does (`applyLease`), so after Stop it says "Stop sent, not yet
+  confirmed by the computer" and Stop stays enabled. The Android app has no
+  demo, and four screens only: the Scanner, the Approvals list (its root,
+  with the Scanner and the gear in its top bar), an Approval's detail (a
+  running lease's is the live lease view) and Settings. The app modules
+  have no test target, so `tests/mobile-lease-apps.test.js` pins these
+  rules, and `tests/mobile-android-slim.test.js` the Android screens, by
+  reading the Swift and Kotlin sources (they show the rules are written into
+  the code, not that the apps build). `mobile/PRIVACY.md` says what a relay operator sees of a
+  lease.
 
 ## Browser
 

@@ -2,13 +2,20 @@
 // against that node's key before the relay stores or forwards it; the relay
 // never alters a signed message.
 const { open, verifyEd25519, verifyEs256 } = require('../approvals/envelope');
-const { validateMessage, isTimestamp } = require('../approvals/messages');
+const { validateMessage, isTimestamp, DEVICE_ID_RE } = require('../approvals/messages');
 const { LinkRpcError } = require('../approvals/link-rpc');
 const { TTL_MS: CODE_TTL_MS } = require('./invites');
-const { KINDS: PUSH_KINDS } = require('./push/text');
+const { KINDS, FCM_ONLY_KINDS, SESSION_KINDS } = require('./push/text');
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const MAX_PUSH_ID = 128;
+// The kinds message.submit may push: push/text.js's KINDS less the ones only
+// push.notify (and the relay's own push-test) sends (push spec §7.1).
+const PUSH_KINDS = KINDS.filter((k) => !FCM_ONLY_KINDS.includes(k));
+// The kinds push.notify may push (push spec §6.2): a lease's ending or
+// contact pause, keyed by its lease id (SESSION_KINDS, from push/text.js).
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const optionalDevice = (v) => v === null || v === undefined || (typeof v === 'string' && DEVICE_ID_RE.test(v));
 
 // Node answers to device.enroll / device.revoke that the relay records. A
 // node reply can never mark a device `active` through these paths: only
@@ -60,9 +67,12 @@ function registerNodeMethods(relay) {
 
   // Push carries only { kind, id } plus the node name (the pusher sanitises
   // it and builds generic alert text); never anything from the action.
-  const pushTo = (targets, payload) => {
+  // nodeId is the link's node: the pusher's dedupe key is (node, kind, id)
+  // per device (push spec §6.3), and it is never sent to a phone.
+  const pushTo = (nodeId, targets, payload) => {
+    if (typeof nodeId !== 'string' || !nodeId) throw new TypeError('pushTo needs the node id');
     for (const device of targets) {
-      pusher.notify(device, payload).catch((err) => log.warn(`push failed: ${err.message}`));
+      pusher.notify(device, { ...payload, node_id: nodeId }).catch((err) => log.warn(`push failed: ${err.message}`));
     }
   };
 
@@ -115,7 +125,7 @@ function registerNodeMethods(relay) {
     } catch (err) {
       throw new LinkRpcError(err.code || 'malformed', err.message);
     }
-    pushTo(devices.devicesForNode(nodeId), { kind: 'approval', id: message.request_id, node_name: node.node_name, expires_at: message.expires_at });
+    pushTo(nodeId, devices.devicesForNode(nodeId), { kind: 'approval', id: message.request_id, node_name: node.node_name, expires_at: message.expires_at });
     return { ok: true };
   });
 
@@ -142,9 +152,29 @@ function registerNodeMethods(relay) {
     if (push) {
       // Pushed only to phones that approve on this node.
       const targets = devices.devicesForNode(nodeId).filter((d) => toDevice === null || d.device_id === toDevice);
-      pushTo(targets, { kind: push.kind, id: push.id, node_name: node.node_name, expires_at: typeof push.expires_at === 'string' ? push.expires_at : null });
+      pushTo(nodeId, targets, { kind: push.kind, id: push.id, node_name: node.node_name, expires_at: typeof push.expires_at === 'string' ? push.expires_at : null });
     }
     return { ok: true, seq: result.seq };
+  });
+
+  // A lease ended or paused on the node (push spec §6.2). Authenticated by
+  // the pinned link alone, like message.submit's push hint; nothing goes in
+  // the mailbox and the relay keeps no lease state. Only fcm devices get the
+  // session kinds (C-2), so the targets are narrowed to them here.
+  nodeHub.onNodeMessage('push.notify', async (params, { nodeId }) => {
+    const p = isPlainObject(params) ? params : null;
+    const toDevice = p && p.to_device !== undefined ? p.to_device : null;
+    const exceptDevice = p && p.except_device !== undefined ? p.except_device : null;
+    const expiresAt = p && p.expires_at !== undefined ? p.expires_at : null;
+    const ok = p && SESSION_KINDS.includes(p.kind) && typeof p.id === 'string' && UUID_V4_RE.test(p.id)
+      && optionalDevice(toDevice) && optionalDevice(exceptDevice) && !(toDevice !== null && exceptDevice !== null)
+      && (expiresAt === null || isTimestamp(expiresAt));
+    if (!ok) throw new LinkRpcError('bad_push', `push.notify must be { kind: ${SESSION_KINDS.join('|')}, id: uuid v4, to_device?, except_device? (not both), expires_at? }`);
+    const node = nodeHub.nodeById(nodeId);
+    const targets = devices.devicesForNode(nodeId).filter((d) => d.push && d.push.platform === 'fcm'
+      && (toDevice === null || d.device_id === toDevice) && (exceptDevice === null || d.device_id !== exceptDevice));
+    pushTo(nodeId, targets, { kind: p.kind, id: p.id, node_name: node ? node.node_name : null, expires_at: expiresAt });
+    return { ok: true };
   });
 
   // A node opens a console enrollment code. A code id already known to the
@@ -183,6 +213,9 @@ function registerNodeMethods(relay) {
     const d = enroll.device;
     try {
       devices.register({ device_id: d.device_id, jwk: d.public_key, name: d.name, platform: d.platform });
+      // The read key (android-slim §8.2) is bound by the same self-signature
+      // and code_mac the node just checked.
+      if (d.read_key) devices.setReadKey(d.device_id, d.read_key, enroll.created_at);
     } catch (err) {
       throw new LinkRpcError(err.code || 'bad_device', err.message);
     }

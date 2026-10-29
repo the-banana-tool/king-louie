@@ -44,10 +44,14 @@ class LeaseVectorTest {
                 "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "view-node-sig-valid", "view-tampered-frame",
                 // Revised 2026-10-24: the take lease.
                 "take-grant", "take-grant-minutes-over-cap", "take-request-missing-name", "computer-use-with-unattended", "status-take"
-            ) + listingVectors,
+            ) + listingVectors + readKeyVectors,
             names
         )
     }
+
+    // Revised 2026-10-28: the read key (android-slim spec §8.8), run by
+    // watchSignedWithTheReadKey below.
+    private val readKeyVectors = setOf("watch-read-key")
 
     private val listingVectors = setOf(
         "listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
@@ -235,6 +239,21 @@ class LeaseVectorTest {
         }
         assertNotNull(vector("watch-valid")["expect"]["message"]["contact_token"].str())
         assertEquals(JsonNull, vector("watch-no-token")["expect"]["message"]["contact_token"])
+    }
+
+    /** android-slim §8.5: the read key signs a watch the phone builds as today; it verifies against the read key only. */
+    @Test
+    fun watchSignedWithTheReadKey() {
+        assertBuilds("watch-read-key") { _, e -> Leases.watch(s(e, "node_id"), s(e, "lease_id"), s(e, "device_id"), e["contact_token"].str(), s(e, "nonce"), s(e, "signed_at")) }
+        val v = vector("watch-read-key")
+        assertEquals("read", v["expect"]["key"].str())
+        val envelope = Envelope.fromJson(v["input"]!!)
+        val signer = v["given"]["approvers"].arr()!!.single { it["device_id"].str() == envelope.kid }
+        assertEquals(v["expect"]["message"]["device_id"].str(), envelope.kid)
+        assertTrue(envelope.verifyEs256(s(signer["read_key"], "x"), s(signer["read_key"], "y")))
+        assertFalse(envelope.verifyEs256(s(signer["public_key"], "x"), s(signer["public_key"], "y")))
+        // The same message as watch-valid's, key for key.
+        assertEquals(vector("watch-valid")["expect"]["message"].obj()!!.keys, v["expect"]["message"].obj()!!.keys)
     }
 
     /** R-F5-15: a status the pinned node signed gives the token the next watch echoes. */

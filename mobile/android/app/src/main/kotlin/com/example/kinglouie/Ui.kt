@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -41,49 +42,52 @@ val DecisionHeight = 56.dp
 /** A screen's heading. */
 @Composable
 fun ScreenTitle(text: String, modifier: Modifier = Modifier) {
-    Text(text, modifier.padding(top = 8.dp, bottom = 4.dp), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+    Text(text, modifier.padding(top = 8.dp, bottom = 4.dp), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, color = KlTokens.textPrimary)
 }
 
 /** A heading inside a screen. */
 @Composable
 fun SectionTitle(text: String, modifier: Modifier = Modifier) {
-    Text(text, modifier.padding(top = 12.dp, bottom = 2.dp), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+    Text(text, modifier.padding(top = 12.dp, bottom = 2.dp), style = MaterialTheme.typography.titleMedium, color = KlTokens.accent)
 }
 
-/** Secondary text that must still be read: onSurfaceVariant, never a grey on grey. */
+/** Secondary text that must still be read: textSecondary, never textMuted. */
 @Composable
 fun Secondary(text: String, modifier: Modifier = Modifier) {
-    Text(text, modifier, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Text(text, modifier, style = MaterialTheme.typography.bodyMedium, color = KlTokens.textSecondary)
 }
 
-/** What an empty list means and what to do about it. */
+/** What an empty list means and what to do about it: the info tint, the large radius. */
 @Composable
 fun EmptyState(text: String, modifier: Modifier = Modifier) {
-    Surface(modifier.fillMaxWidth().padding(vertical = 8.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-        Text(text, Modifier.padding(16.dp), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
+    Surface(
+        modifier.fillMaxWidth().padding(vertical = 8.dp), shape = RoundedCornerShape(KlTokens.radiusLg),
+        color = KlTokens.infoBg, border = BorderStroke(1.dp, KlTokens.borderSubtle)
+    ) {
+        Text(text, Modifier.padding(16.dp), style = MaterialTheme.typography.bodyLarge, color = KlTokens.textPrimary)
     }
 }
 
-/** A sub-screen's top row: back, and what this screen is. */
+/** A sub-screen's top bar on bgSidebar: back, and what this screen is. */
 @Composable
 fun BackBar(title: String, onBack: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-        Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 1)
+    Row(Modifier.fillMaxWidth().background(KlTokens.bgSidebar).padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = KlTokens.textPrimary) }
+        Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 1, color = KlTokens.textPrimary)
     }
 }
 
-/** A list card. */
+/** A list row: bgSurface (or a tint over it), the large radius, a subtle border. */
 @Composable
-fun ItemCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, content: @Composable () -> Unit) {
-    val shape = RoundedCornerShape(16.dp)
-    val color = MaterialTheme.colorScheme.surfaceContainer
+fun ItemCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, color: Color = KlTokens.bgSurface, content: @Composable () -> Unit) {
+    val shape = RoundedCornerShape(KlTokens.radiusLg)
+    val border = BorderStroke(1.dp, KlTokens.borderSubtle)
     if (onClick != null) {
-        Surface(onClick = onClick, modifier = modifier.fillMaxWidth(), shape = shape, color = color, tonalElevation = 1.dp) {
+        Surface(onClick = onClick, modifier = modifier.fillMaxWidth(), shape = shape, color = color, contentColor = KlTokens.textPrimary, border = border) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) { content() }
         }
     } else {
-        Surface(modifier = modifier.fillMaxWidth(), shape = shape, color = color, tonalElevation = 1.dp) {
+        Surface(modifier = modifier.fillMaxWidth(), shape = shape, color = color, contentColor = KlTokens.textPrimary, border = border) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) { content() }
         }
     }
@@ -92,8 +96,8 @@ fun ItemCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, conte
 /** Time left, or a request's status, as a pill; red in the last minute. */
 @Composable
 fun TimePill(text: String, urgent: Boolean) {
-    val bg = if (urgent) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer
-    val fg = if (urgent) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer
+    val bg = if (urgent) KlTokens.errorBg else KlTokens.bgOverlay
+    val fg = if (urgent) KlTokens.error else KlTokens.textSecondary
     Surface(shape = RoundedCornerShape(50), color = bg) {
         Text(text, Modifier.padding(horizontal = 12.dp, vertical = 4.dp), color = fg, style = MaterialTheme.typography.labelLarge)
     }
@@ -108,48 +112,70 @@ fun OnlineDot(online: Boolean?) {
         Text(
             when (online) { true -> "online"; false -> "offline"; null -> "not checked" },
             style = MaterialTheme.typography.bodyMedium,
-            color = if (online == true) status.online else MaterialTheme.colorScheme.onSurfaceVariant
+            color = if (online == true) status.online else KlTokens.textSecondary
         )
     }
 }
 
-/** Approve: filled, in the primary colour. */
+/** Approve: filled in the accent, bgBase text, the medium radius. */
 @Composable
 fun RowScope.ApproveButton(label: String, enabled: Boolean, onClick: () -> Unit) {
-    Button(onClick, Modifier.weight(1f).height(DecisionHeight), enabled = enabled) { Text(label, style = MaterialTheme.typography.labelLarge) }
+    Button(
+        onClick, Modifier.weight(1f).height(DecisionHeight), enabled = enabled,
+        shape = RoundedCornerShape(KlTokens.radiusMd), colors = approveColors()
+    ) { Text(label, style = MaterialTheme.typography.labelLarge) }
 }
+
+@Composable
+fun approveColors() = ButtonDefaults.buttonColors(
+    containerColor = KlTokens.accent,
+    contentColor = KlTokens.bgBase,
+    disabledContainerColor = KlTokens.accentDim,
+    disabledContentColor = KlTokens.textMuted // disabled
+)
 
 /** Deny: outlined in the error colour, so it never looks like Approve. */
 @Composable
 fun RowScope.DenyButton(label: String, enabled: Boolean, onClick: () -> Unit) {
     OutlinedButton(
         onClick, Modifier.weight(1f).height(DecisionHeight), enabled = enabled,
-        colors = denyColors(), border = denyBorder(enabled)
+        shape = RoundedCornerShape(KlTokens.radiusMd), colors = denyColors(), border = denyBorder(enabled)
     ) { Text(label, style = MaterialTheme.typography.labelLarge) }
 }
 
 @Composable
-fun denyColors() = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+fun denyColors() = ButtonDefaults.outlinedButtonColors(
+    contentColor = KlTokens.error,
+    disabledContentColor = KlTokens.textMuted // disabled
+)
 
 @Composable
-fun denyBorder(enabled: Boolean) = BorderStroke(2.dp, if (enabled) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
+fun denyBorder(enabled: Boolean) = BorderStroke(2.dp, if (enabled) KlTokens.error else KlTokens.textFaint)
 
-/** A filled red button (Stop, Revoke): red container, its own on-colour. */
+/** A filled red button (Stop, Revoke): the error fill, bgBase text. */
 @Composable
-fun stopColors() = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError)
+fun stopColors() = ButtonDefaults.buttonColors(
+    containerColor = KlTokens.error,
+    contentColor = KlTokens.bgBase,
+    disabledContainerColor = KlTokens.accentDim,
+    disabledContentColor = KlTokens.textMuted // disabled
+)
 
-/** The decision buttons at the bottom of a detail screen, full width, above the navigation bar. */
+/** The decision buttons at the bottom of a detail screen, full width, above the navigation bar, on bgElevated. */
 @Composable
 fun DecisionBar(content: @Composable RowScope.() -> Unit) {
-    Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = 3.dp) {
-        Row(Modifier.fillMaxWidth().padding(PaddingValues(horizontal = 16.dp, vertical = 12.dp)), horizontalArrangement = Arrangement.spacedBy(12.dp), content = content)
+    Surface(Modifier.fillMaxWidth(), color = KlTokens.bgElevated, contentColor = KlTokens.textPrimary) {
+        Column {
+            HorizontalDivider(color = KlTokens.borderSubtle)
+            Row(Modifier.fillMaxWidth().padding(PaddingValues(horizontal = 16.dp, vertical = 12.dp)), horizontalArrangement = Arrangement.spacedBy(12.dp), content = content)
+        }
     }
 }
 
-/** Monospace text on a tinted block: ids, commands, parameters. */
+/** Monospace text on bgOverlay with the small radius: ids, commands, parameters. */
 @Composable
-fun CodeBlock(text: String, modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.onSurface) {
-    Surface(modifier.fillMaxWidth().heightIn(min = 0.dp), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+fun CodeBlock(text: String, modifier: Modifier = Modifier, color: Color = KlTokens.textPrimary) {
+    Surface(modifier.fillMaxWidth().heightIn(min = 0.dp), shape = RoundedCornerShape(KlTokens.radiusSm), color = KlTokens.bgOverlay) {
         Text(text, Modifier.padding(horizontal = 10.dp, vertical = 8.dp), style = MonoStyle, color = color)
     }
 }

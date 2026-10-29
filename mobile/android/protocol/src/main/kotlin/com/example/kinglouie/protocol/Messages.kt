@@ -16,18 +16,66 @@ object Messages {
 
     fun randomNonce(): String = ByteArray(32).also { random.nextBytes(it) }.let { B64Url.encode(it) }
 
-    /** The `device` object of an enrollment. `name` is 1–64 UTF-16 units. */
-    fun device(deviceId: String, name: String, platform: String, x: String, y: String): JsonObject {
-        val device = JsonObject(
+    /** A P-256 public key as a JWK: `{ kty, crv, x, y }`, the coordinates base64url. Not checked here; its users check it. */
+    fun jwk(x: String, y: String): JsonObject =
+        JsonObject(mapOf("kty" to jsonString("EC"), "crv" to jsonString("P-256"), "x" to jsonString(x), "y" to jsonString(y)))
+
+    /**
+     * The `device` object of an enrollment. `name` is 1–64 UTF-16 units. With
+     * `readKey` (android-slim §8.2) it has a fifth member, `read_key`: a P-256
+     * JWK on the curve whose point is not the device key's. The device id
+     * still derives from the device key (`x`, `y`) alone.
+     */
+    fun device(deviceId: String, name: String, platform: String, x: String, y: String, readKey: JsonObject? = null): JsonObject {
+        val fields = linkedMapOf<String, JsonElement>(
+            "device_id" to jsonString(deviceId),
+            "name" to jsonString(name),
+            "platform" to jsonString(platform),
+            "public_key" to jwk(x, y)
+        )
+        if (readKey != null) fields["read_key"] = readKey
+        val device = JsonObject(fields)
+        if (!Rules.isDevice(device)) throw ProtocolException("not a valid device (name is 1–64 UTF-16 units; a read key is a P-256 key other than the device key)")
+        return device
+    }
+
+    /**
+     * kl.device.read_key (android-slim §8.7): the device key's statement of
+     * its read key, for a phone enrolled before the read key. Sealed with the
+     * device key (`kid` = `deviceId`, ES256). `expiresAt` is after
+     * `createdAt` by at most 7 days.
+     */
+    fun readKeyStatement(deviceId: String, readKey: JsonObject, createdAt: String, expiresAt: String, nonce: String): JsonObject = checked(
+        "kl.device.read_key",
+        JsonObject(
             mapOf(
+                "v" to jsonNumber("1"),
+                "type" to jsonString("kl.device.read_key"),
                 "device_id" to jsonString(deviceId),
-                "name" to jsonString(name),
-                "platform" to jsonString(platform),
-                "public_key" to JsonObject(mapOf("kty" to jsonString("EC"), "crv" to jsonString("P-256"), "x" to jsonString(x), "y" to jsonString(y)))
+                "read_key" to readKey,
+                "created_at" to jsonString(createdAt),
+                "expires_at" to jsonString(expiresAt),
+                "nonce" to jsonString(nonce)
             )
         )
-        if (!Rules.isDevice(device)) throw ProtocolException("not a valid device (name is 1–64 UTF-16 units)")
-        return device
+    )
+
+    /**
+     * What people compare for a read key (android-slim §8.1): `r-` and the
+     * device id's rule (the first 16 base32 characters of SHA-256 over
+     * 0x04 || x || y) in groups of four, 'r-abcd efgh ijkl mnop'. Throws for
+     * anything that is not a point on P-256. `readKeyFingerprint` in
+     * src/approvals/messages.js.
+     */
+    fun readKeyFingerprint(x: String, y: String): String {
+        Identifiers.deviceId(x, y) // checks the coordinates and the curve
+        val id = Identifiers.deviceId(byteArrayOf(0x04) + B64Url.decode(x) + B64Url.decode(y), "r-")
+        return "r-" + Identifiers.fingerprintGroups(id)
+    }
+
+    fun readKeyFingerprint(jwk: JsonElement): String {
+        if (!Rules.isDeviceJwk(jwk)) throw ProtocolException("not a P-256 JWK")
+        return readKeyFingerprint(jwk["x"].str()!!, jwk["y"].str()!!)
     }
 
     /** kl.approval.response for a node-signed request message. */
@@ -106,9 +154,17 @@ object Messages {
 
     fun inviteMac(secret: String, device: JsonElement): String = Digest.hmacB64url(secret, Jcs.bytes(device))
 
-    /** S for X-KL-Signature: "KL-PHONE-V1\n" + METHOD + "\n" + pathWithQuery + "\n" + timestamp + "\n" + b64url(SHA-256(body)). */
-    fun phoneAuthString(method: String, pathWithQuery: String, timestamp: String, body: ByteArray): String =
-        listOf("KL-PHONE-V1", method.uppercase(), pathWithQuery, timestamp, Digest.sha256B64url(body)).joinToString("\n")
+    /**
+     * S for X-KL-Signature: prefix + "\n" + METHOD + "\n" + pathWithQuery + "\n" + timestamp + "\n" + b64url(SHA-256(body)),
+     * the prefix "KL-PHONE-V1" for the device key and "KL-PHONE-READ-V1" for the read key (android-slim §8.3;
+     * a read-signed request also sends `X-KL-Key: read`, [PhoneKey.header]).
+     */
+    fun phoneAuthString(method: String, pathWithQuery: String, timestamp: String, body: ByteArray, key: PhoneKey = PhoneKey.DEVICE): String =
+        listOf(key.prefix, method.uppercase(), pathWithQuery, timestamp, Digest.sha256B64url(body)).joinToString("\n")
+
+    /** The string the read key signs: [phoneAuthString] with [PhoneKey.READ]. */
+    fun phoneReadAuthString(method: String, pathWithQuery: String, timestamp: String, body: ByteArray): String =
+        phoneAuthString(method, pathWithQuery, timestamp, body, PhoneKey.READ)
 
     fun encodeQr(obj: JsonElement): String = "kl1:" + B64Url.encode(Jcs.bytes(obj))
 
@@ -143,6 +199,18 @@ object Messages {
         if (reason != null) throw ProtocolException("not a valid $type: $reason")
         return message
     }
+}
+
+/**
+ * Which of the phone's two keys signs a phone API request (android-slim §8.3):
+ * the device key (biometric, the one that decides) or the read key (no prompt,
+ * signs only while the phone is unlocked). `header` is the `X-KL-Key` value;
+ * `prefix` the first line of the signed string. `PHONE_AUTH_PREFIXES` in
+ * src/approvals/messages.js.
+ */
+enum class PhoneKey(val header: String, val prefix: String) {
+    DEVICE("device", "KL-PHONE-V1"),
+    READ("read", "KL-PHONE-READ-V1")
 }
 
 /**
@@ -196,6 +264,7 @@ internal object Rules {
         "kl.approval.status" to ::status,
         "kl.device.enroll" to ::enroll,
         "kl.device.revoke" to ::revoke,
+        "kl.device.read_key" to ::readKey,
         "kl.audit.slice" to ::auditSlice
     )
 
@@ -209,6 +278,7 @@ internal object Rules {
     val STATUS_STATES = listOf("approved", "denied", "expired", "withdrawn", "refused")
     const val ENROLL_MAX_MS = 10L * 60 * 1000
     const val REVOKE_MAX_MS = 7L * 24 * 60 * 60 * 1000
+    const val READ_KEY_MAX_MS = 7L * 24 * 60 * 60 * 1000
     val PLATFORMS = listOf("ios", "android", "demo")
 
     // shapes
@@ -286,14 +356,22 @@ internal object Rules {
         }
     }
 
+    private val DEVICE_KEYS = listOf("device_id", "name", "platform", "public_key")
+
+    /** The four keys of today, or exactly those and `read_key`: a P-256 JWK whose point is not `public_key`'s (android-slim §8.2). */
     fun isDevice(v: JsonElement?): Boolean {
         val d = v.obj() ?: return false
-        if (!hasExactKeys(d, listOf("device_id", "name", "platform", "public_key"))) return false
+        val withReadKey = d.containsKey("read_key")
+        if (!hasExactKeys(d, if (withReadKey) DEVICE_KEYS + "read_key" else DEVICE_KEYS)) return false
         val name = d["name"].str() ?: return false
         if (name.length !in 1..64) return false
         if (!isOneOf(d["platform"], PLATFORMS) || !isDeviceJwk(d["public_key"]) || !isDeviceId(d["device_id"])) return false
+        if (withReadKey && (!isDeviceJwk(d["read_key"]) || samePoint(d["read_key"], d["public_key"]))) return false
         return Identifiers.deviceId(d["public_key"]["x"].str()!!, d["public_key"]["y"].str()!!) == d["device_id"].str()
     }
+
+    /** Two JWKs for one point; the node compares the coordinate strings (`samePoint`). */
+    private fun samePoint(a: JsonElement?, b: JsonElement?): Boolean = a["x"].str() == b["x"].str() && a["y"].str() == b["y"].str()
 
     /** expires_at − created_at in (0, max] milliseconds. */
     private fun spanWithin(m: JsonObject, max: Long): Boolean {
@@ -361,6 +439,14 @@ internal object Rules {
         if (!isDeviceId(m["device_id"]) || !isDeviceId(m["revoked_by"]) || !withinLength(m["reason"], REVOKE_REASON_MAX)) return false
         if (!isTimestamp(m["created_at"]) || !isTimestamp(m["expires_at"]) || !isNonce(m["nonce"])) return false
         return spanWithin(m, REVOKE_MAX_MS)
+    }
+
+    /** kl.device.read_key: who signed it is the verifier's check; here, the shape and a window of at most 7 days. */
+    private fun readKey(m: JsonObject): Boolean {
+        if (!hasExactKeys(m, listOf("v", "type", "device_id", "read_key", "created_at", "expires_at", "nonce"))) return false
+        if (!isDeviceId(m["device_id"]) || !isDeviceJwk(m["read_key"])) return false
+        if (!isTimestamp(m["created_at"]) || !isTimestamp(m["expires_at"]) || !isNonce(m["nonce"])) return false
+        return spanWithin(m, READ_KEY_MAX_MS)
     }
 
     private fun auditSlice(m: JsonObject): Boolean {

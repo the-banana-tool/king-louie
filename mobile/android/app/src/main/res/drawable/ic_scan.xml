@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Scanner's icon in the Approvals top bar (android-slim §6): four
+     viewfinder corners around a QR code's three finder squares. Hand-written,
+     since material-icons-core has no QR icon. Tinted by the IconButton. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Viewfinder corners -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M3,3h6v2H5v4H3V3zM15,3h6v6h-2V5h-4V3zM3,15h2v4h4v2H3v-6zM19,15h2v6h-6v-2h4v-4z" />
+    <!-- Finder squares and a few modules -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7,7h4v4H7V7zM8,8v2h2V8H8zM13,7h4v4h-4V7zM14,8v2h2V8h-2zM7,13h4v4H7v-4zM8,14v2h2v-2H8zM13,13h2v2h-2v-2zM15,15h2v2h-2v-2z" />
+</vector>

@@ -31,6 +31,13 @@ describe('service CLI', () => {
     assert.strictEqual(await main(['frobnicate'], t), 2);
     assert.match(t.err.join(''), /Unknown command/);
   });
+  it('refuses --device for any command but "relay push-test"', async () => {
+    for (const argv of [['relay', 'nodes'], ['device', 'list'], ['token', 'set', 'openai'], ['doctor']]) {
+      const t = io();
+      assert.strictEqual(await main([...argv, '--device', 'd-aaaaaaaaaaaaaaaa', '--data-dir', tmp()], t), 2, argv.join(' '));
+      assert.match(t.err.join(''), /Flag "--device" is only valid for "relay push-test"\./);
+    }
+  });
   it('stores a provider token from stdin, encrypted', async () => {
     const dir = tmp();
     const t = io('sk-from-stdin\n');

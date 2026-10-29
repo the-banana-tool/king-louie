@@ -14,10 +14,10 @@ const os = require('os');
 const path = require('path');
 const { canonicalize } = require('../../../src/platform/jcs');
 const { seal, fromB64url, verifyEs256, nodeSigner, deviceIdFromJwk } = require('../../../src/approvals/envelope');
-const { enrollMac, phoneAuthString } = require('../../../src/approvals/messages');
+const { enrollMac, phoneAuthString, READ_KEY_MAX_MS } = require('../../../src/approvals/messages');
 const { deriveNodeId, base32Encode } = require('../../../src/mesh/node-identity');
 const { AuditLedger, entryHash } = require('../../../src/audit/audit-ledger');
-const { phoneView } = require('./phone-reference');
+const { phoneView, phoneReadAuthString } = require('./phone-reference');
 
 const DIR = __dirname;
 const KEYS = require('./keys.json');
@@ -43,39 +43,46 @@ function nodeIdentity(name) {
   return { nodeId: deriveNodeId(spki), nodeName: name, publicKey: spki, key: spki.toString('hex'), sign: (b) => crypto.sign(null, b, key) };
 }
 
-// kid + payload → sig for every ES256 envelope in the committed files, plus
-// 'api:' + signing string → signature for the phone API vector. Only a
+// key x + payload → sig for every ES256 envelope in the committed files, plus
+// 'api:' + key x + signing string → signature for the phone API vectors. The
+// key, not the kid, names an entry: a read key signs under its device's id
+// (android-slim §8.1), so one kid can stand for two keys. Only a
 // signature that actually verifies is cached: a hand-edited or corrupted
 // committed file must never poison the cache with a broken signature that
 // then gets silently reused (and re-verified as broken) on every future run
 // — it must instead be signed fresh.
+// The device id a keys.json entry signs under: its own, or for a read key
+// (`read_key_of`) the id of the device it belongs to.
+const kidOf = (entry) => (entry.read_key_of ? deviceIdFromJwk(KEYS.devices[entry.read_key_of].jwk) : deviceIdFromJwk(entry.jwk));
+
 function loadSigCache() {
   const cache = new Map();
-  const idToJwk = new Map(Object.values(KEYS.devices).map((d) => [deviceIdFromJwk(d.jwk), d.jwk]));
-  const walk = (v, apiDeviceJwk) => {
+  const keys = Object.values(KEYS.devices).map((d) => ({ kid: kidOf(d), jwk: d.jwk }));
+  const walk = (v, apiJwks) => {
     if (!v || typeof v !== 'object') return;
     if (v.alg === 'ES256' && typeof v.kid === 'string' && typeof v.payload === 'string' && typeof v.sig === 'string') {
-      const jwk = idToJwk.get(v.kid);
-      if (jwk && verifyEs256(v, jwk)) cache.set(`${v.kid}:${v.payload}`, v.sig);
+      for (const k of keys.filter((x) => x.kid === v.kid)) if (verifyEs256(v, k.jwk)) cache.set(`${k.jwk.x}:${v.payload}`, v.sig);
     }
-    if (apiDeviceJwk && typeof v.signing_string === 'string' && typeof v.signature === 'string') {
+    if (typeof v.signing_string === 'string' && typeof v.signature === 'string') {
       const probe = { alg: 'ES256', kid: '_', payload: Buffer.from(v.signing_string).toString('base64url'), sig: v.signature };
-      if (verifyEs256(probe, apiDeviceJwk)) cache.set(`api:${v.signing_string}`, v.signature);
+      for (const jwk of apiJwks) if (verifyEs256(probe, jwk)) cache.set(`api:${jwk.x}:${v.signing_string}`, v.signature);
     }
-    for (const child of Object.values(v)) walk(child, apiDeviceJwk);
+    for (const child of Object.values(v)) walk(child, apiJwks);
   };
   for (const f of fs.readdirSync(DIR).filter((n) => n.endsWith('.json') && n !== 'keys.json')) {
     const doc = JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8'));
-    const apiJwk = doc && doc.given && doc.given.device && doc.given.device.jwk ? doc.given.device.jwk : null;
-    walk(doc, apiJwk);
+    const device = doc && doc.given && doc.given.device ? doc.given.device : {};
+    walk(doc, [device.jwk, device.read_jwk].filter(Boolean));
   }
   return cache;
 }
 
+// name: a keys.json device ('A'), or a read key ('A_read'), which signs under
+// its device's id.
 function deviceSigner(name, cache) {
   const d = KEYS.devices[name];
   const key = crypto.createPrivateKey({ key: { ...d.jwk, d: d.d }, format: 'jwk' });
-  const id = deviceIdFromJwk(d.jwk);
+  const id = kidOf(d);
   const signBytes = (bytes) => crypto.sign('sha256', bytes, { key, dsaEncoding: 'ieee-p1363' });
   return {
     id,
@@ -84,18 +91,18 @@ function deviceSigner(name, cache) {
     kid: id,
     sign(bytes) {
       const payload = Buffer.from(bytes).toString('base64url');
-      const cached = cache.get(`${id}:${payload}`);
+      const cached = cache.get(`${d.jwk.x}:${payload}`);
       if (cached && verifyEs256({ alg: 'ES256', kid: id, payload, sig: cached }, d.jwk)) return fromB64url(cached);
       const sig = signBytes(bytes);
-      cache.set(`${id}:${payload}`, sig.toString('base64url'));
+      cache.set(`${d.jwk.x}:${payload}`, sig.toString('base64url'));
       return sig;
     },
     signText(text) {
-      const cached = cache.get(`api:${text}`);
+      const cached = cache.get(`api:${d.jwk.x}:${text}`);
       const env = { alg: 'ES256', kid: id, payload: Buffer.from(text).toString('base64url'), sig: cached || '' };
       if (cached && verifyEs256(env, d.jwk)) return cached;
       const sig = signBytes(Buffer.from(text)).toString('base64url');
-      cache.set(`api:${text}`, sig);
+      cache.set(`api:${d.jwk.x}:${text}`, sig);
       return sig;
     }
   };
@@ -114,6 +121,8 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   const A = deviceSigner('A', sigCache);
   const B = deviceSigner('B', sigCache);
   const C = deviceSigner('C', sigCache);
+  const AR = deviceSigner('A_read', sigCache);
+  const BR = deviceSigner('B_read', sigCache);
   const nodeRef = { id: web.nodeId, name: web.nodeName, key: web.key };
   const vectors = [];
   const add = (v) => vectors.push(v);
@@ -285,28 +294,72 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   nodeVector('response-reject-expired', 11, good, { accepted: false, reason: 'expired' }, { now: iso(NOW_MS + 301000) });
   nodeVector('response-reject-changed-parameter', 12, good, { accepted: false, reason: 'action_changed' }, { current_action: { ...toolActionLit, params: { command: 'git push --force origin main' }, summary: 'Bash(git push --force origin main)' } });
   nodeVector('response-accept-phone-clock-ahead', null, respond(A, { signed_at: iso(NOW_MS + 10 * 60 * 1000) }), { accepted: true, reason: null });
+  // Signed with A's read key, which A's record holds: a read key never
+  // decides (android-slim §8.5, §8.6).
+  nodeVector('response-reject-read-key', 6, respond(AR), { accepted: false, reason: 'bad_signature' }, { approvers: [approver(A, { read_key: AR.jwk }), approver(B)] });
 
   // ── Enrollment and revocation ─────────────────────────────────────────────
   const code = sha('console code').toString('base64url');
   const codeId = codeIdOf('console');
-  const deviceOf = (dev, platform = 'android') => ({ device_id: dev.id, name: `Phone ${dev.id.slice(2, 6)}`, platform, public_key: dev.jwk });
-  const consoleEnroll = (dev, macCode) => {
-    const base = { v: 1, type: 'kl.device.enroll', device: deviceOf(dev), enrolled_by: null, created_at: NOW, expires_at: iso(NOW_MS + 600000), nonce: nonceOf(`enroll ${dev.id}`), code_id: codeId };
+  // readKey: the read key's public half, sent beside the device key (android-slim §8.2).
+  const deviceOf = (dev, platform = 'android', readKey = null) => ({
+    device_id: dev.id, name: `Phone ${dev.id.slice(2, 6)}`, platform, public_key: dev.jwk, ...(readKey ? { read_key: readKey } : {})
+  });
+  const consoleEnroll = (dev, macCode, { readKey = null, label = `enroll ${dev.id}` } = {}) => {
+    const base = { v: 1, type: 'kl.device.enroll', device: deviceOf(dev, 'android', readKey), enrolled_by: null, created_at: NOW, expires_at: iso(NOW_MS + 600000), nonce: nonceOf(label), code_id: codeId };
     return seal({ ...base, code_mac: enrollMac(macCode, base) }, dev);
   };
   const consoleGiven = { now: iso(NOW_MS + 60000), code_id: codeId, code, allow_test_keys: true };
   add({ name: 'enroll-console', consumers: ['node', 'ios', 'android'], given: consoleGiven, input: consoleEnroll(C, code), expect: { accepted: true, reason: null, device_id: C.id } });
   add({ name: 'enroll-console-bad-mac', consumers: ['node'], given: consoleGiven, input: consoleEnroll(C, sha('wrong code').toString('base64url')), expect: { accepted: false, reason: 'bad_mac', device_id: null } });
 
-  const signedEnroll = (by, dev) => seal({ v: 1, type: 'kl.device.enroll', device: deviceOf(dev, 'ios'), enrolled_by: by.id, created_at: NOW, expires_at: iso(NOW_MS + 600000), nonce: nonceOf(`signed ${by.id} ${dev.id}`) }, by);
+  const signedEnroll = (by, dev, { platform = 'ios', readKey = null } = {}) => seal({
+    v: 1, type: 'kl.device.enroll', device: deviceOf(dev, platform, readKey), enrolled_by: by.id, created_at: NOW, expires_at: iso(NOW_MS + 600000),
+    nonce: nonceOf(readKey ? `signed ${by.id} ${dev.id} read key` : `signed ${by.id} ${dev.id}`)
+  }, by);
   const revoke = (by, target) => seal({ v: 1, type: 'kl.device.revoke', device_id: target.id, revoked_by: by.id, reason: 'lost phone', created_at: NOW, expires_at: iso(NOW_MS + 3600000), nonce: nonceOf(`revoke ${by.id} ${target.id}`) }, by);
   const stageGiven = { now: iso(NOW_MS + 60000), approvers: [approver(A), approver(B)], overlay: [], allow_test_keys: true };
-  const stageVector = (name, inputs, results, active, given = {}) => add({ name, consumers: ['node'], given: { ...stageGiven, ...given }, input: inputs, expect: { results, active } });
+  // extra: more of `expect` (staged_read_keys) and the consumers, when not the node alone.
+  const stageVector = (name, inputs, results, active, given = {}, { consumers = ['node'], expect = {} } = {}) => add({
+    name, consumers, given: { ...stageGiven, ...given }, input: inputs, expect: { results, active, ...expect }
+  });
   stageVector('enroll-signed', [signedEnroll(A, C)], [{ state: 'staged' }], [A.id, B.id]);
   stageVector('enroll-signed-by-overlay-revoked', [signedEnroll(A, C)], [{ state: 'rejected', reason: 'signer_not_active' }], [B.id], { overlay: [A.id] });
   stageVector('revoke-valid', [revoke(A, B)], [{ state: 'revoked-pending-apply' }], [A.id]);
   stageVector('revoke-self-rejected', [revoke(A, A)], [{ state: 'rejected', reason: 'self_revoke' }], [A.id, B.id]);
   stageVector('revoke-mutual', [revoke(B, A), revoke(A, B)], [{ state: 'revoked-pending-apply' }, { state: 'revoked-pending-apply' }], []);
+
+  // ── The read key (android-slim spec §8.2, §8.6, §8.7, §8.8) ────────────────
+  // A console enrollment whose device carries its read key: accepted, and the
+  // record `enroll-device` writes holds it. Android builds the payload.
+  add({
+    name: 'enroll-console-read-key', consumers: ['node', 'android'], given: consoleGiven,
+    input: consoleEnroll(A, code, { readKey: AR.jwk, label: `enroll ${A.id} read key` }),
+    expect: { accepted: true, reason: null, device_id: A.id, read_key: AR.jwk }
+  });
+  // A read key that is the device key: the shape is wrong (§8.2).
+  add({
+    name: 'enroll-console-read-key-equal', consumers: ['node'], given: consoleGiven,
+    input: consoleEnroll(A, code, { readKey: A.jwk, label: `enroll ${A.id} read key equal` }),
+    expect: { accepted: false, reason: 'malformed', device_id: null, read_key: null }
+  });
+  // A signed enrollment of an Android phone with its read key: staged with it.
+  stageVector('enroll-signed-read-key', [signedEnroll(A, B, { platform: 'android', readKey: BR.jwk })], [{ state: 'staged' }], [A.id],
+    { approvers: [approver(A)] }, { expect: { staged_read_keys: [BR.jwk] } });
+  // A phone enrolled before the read key states it, signed with its device
+  // key (§8.7). Android builds the message.
+  const readKeyStatement = (dev, readKey, { created = NOW_MS, label = `read key ${dev.id}` } = {}) => ({
+    v: 1, type: 'kl.device.read_key', device_id: dev.id, read_key: readKey,
+    created_at: iso(created), expires_at: iso(created + READ_KEY_MAX_MS), nonce: nonceOf(label)
+  });
+  const statement = readKeyStatement(A, AR.jwk);
+  stageVector('read-key-valid', [seal(statement, A)], [{ state: 'read-key-pending-apply' }], [A.id, B.id], {},
+    { consumers: ['node', 'android'], expect: { staged_read_keys: [AR.jwk] } });
+  // The same statement signed by the read key it names: only the device key may.
+  stageVector('read-key-wrong-signer', [seal(statement, AR)], [{ state: 'rejected', reason: 'bad_signature' }], [A.id, B.id]);
+  // Dated more than five minutes past the node's clock.
+  stageVector('read-key-from-the-future', [seal(readKeyStatement(A, AR.jwk, { created: NOW_MS + 10 * 60000, label: `read key ${A.id} future` }), A)],
+    [{ state: 'rejected', reason: 'from_the_future' }], [A.id, B.id]);
 
   // ── History slice ─────────────────────────────────────────────────────────
   const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-vector-audit-'));
@@ -343,6 +396,18 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     given: { device: { device_id: A.id, jwk: A.jwk }, method: 'POST', path: apiPath, timestamp, body },
     input: { signing_string: signing, signature: A.signText(signing) },
     expect: { signing_string: signing, body_sha256: crypto.createHash('sha256').update(body).digest('base64url'), accepted: true }
+  });
+  // The same request signed by A's read key (android-slim §8.3): another
+  // first line, so the read signature verifies against the read JWK and
+  // never against the device JWK. The route takes either key (§8.4).
+  const readSigning = phoneReadAuthString('POST', apiPath, timestamp, body);
+  if (readSigning !== phoneAuthString('POST', apiPath, timestamp, body, { key: 'read' })) throw new Error('phone-reference.js and messages.js disagree on the read string');
+  add({
+    name: 'phone-api-auth-read',
+    consumers: ['node', 'android'],
+    given: { device: { device_id: A.id, jwk: A.jwk, read_jwk: AR.jwk }, key: 'read', method: 'POST', path: apiPath, timestamp, body },
+    input: { signing_string: readSigning, signature: AR.signText(readSigning) },
+    expect: { signing_string: readSigning, body_sha256: crypto.createHash('sha256').update(body).digest('base64url'), accepted: true, accepted_by_device_key: false }
   });
 
   return vectors;

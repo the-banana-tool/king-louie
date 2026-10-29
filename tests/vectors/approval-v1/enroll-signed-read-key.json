@@ -1,0 +1,56 @@
+{
+  "name": "enroll-signed-read-key",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:05:11.201Z",
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "overlay": [],
+    "allow_test_keys": true
+  },
+  "input": [
+    {
+      "alg": "ES256",
+      "kid": "d-3vmwrihhdbnit4oi",
+      "payload": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZGV2aWNlIjp7ImRldmljZV9pZCI6ImQtNnhkbGJ4Z2xobnZmYTNsdyIsIm5hbWUiOiJQaG9uZSA2eGRsIiwicGxhdGZvcm0iOiJhbmRyb2lkIiwicHVibGljX2tleSI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6IkduREhHZnhNVmt2NWlSeVN0UUlzSmJxV0tVdFB5NmlqdUExVWlXS2xZRGMiLCJ5IjoiTExoSXZRX3kwRG1JWElfcXhvaldSSUNLZmpQRV9vcmpaQlR3UmhqZTkxayJ9LCJyZWFkX2tleSI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6ImNWdDNidWN5Q3dTV0luZDZ6VGpRZ3AyN0psNUJzeV93TFVuWVpNelNCUVkiLCJ5IjoianQyTndBSEVTMWlROVJZTjhHdkpOenJOVkw0VzJGd0pRNW9INUNzc0xpVSJ9fSwiZW5yb2xsZWRfYnkiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODoxNDoxMS4yMDFaIiwibm9uY2UiOiJ4b2tqcjNzMWdJUE5POHJELWpEZ3lQenFjVUJhNTIwOHJJSEFjV1dnTVpnIiwidHlwZSI6ImtsLmRldmljZS5lbnJvbGwiLCJ2IjoxfQ",
+      "sig": "iDGlI-Ep50rdqkx06xzssL14N03uEJLRfOfi-lx6v2EKNWqqiE3YADznuetdAt5GFHzkxq_bScJB8IwhxJP3oQ"
+    }
+  ],
+  "expect": {
+    "results": [
+      {
+        "state": "staged"
+      }
+    ],
+    "active": [
+      "d-3vmwrihhdbnit4oi"
+    ],
+    "staged_read_keys": [
+      {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "cVt3bucyCwSWInd6zTjQgp27Jl5Bsy_wLUnYZMzSBQY",
+        "y": "jt2NwAHES1iQ9RYN8GvJNzrNVL4W2FwJQ5oH5CssLiU"
+      }
+    ]
+  }
+}

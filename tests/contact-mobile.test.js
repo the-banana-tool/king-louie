@@ -458,10 +458,10 @@ describe('question routes (relay side)', () => {
     return question;
   }
 
-  it('registers the three device-authenticated routes with their rate limits and the kl.question. mailbox prefix', () => {
+  it('registers the three signed routes (either key, android-slim §8.4) with their rate limits and the kl.question. mailbox prefix', () => {
     const r = relay();
     assert.deepStrictEqual([...r.routes.keys()], ['GET /v1/questions', 'POST /v1/questions/{token}/answer', 'POST /v1/presence']);
-    for (const spec of r.routes.values()) assert.strictEqual(spec.auth, 'device');
+    for (const spec of r.routes.values()) assert.strictEqual(spec.auth, 'read');
     assert.deepStrictEqual(r.routes.get('POST /v1/questions/{token}/answer').rate, { perMin: 30 });
     assert.deepStrictEqual(r.routes.get('POST /v1/presence').rate, { perMin: 6 });
     assert.strictEqual(WEEK_MS, 7 * 24 * 3600 * 1000);

@@ -514,8 +514,29 @@ describe('relay trust rules', () => {
     const ping = () => seal({ v: 1, type: 'kl.test.ping', node_id: a.identity.nodeId, nonce: crypto.randomBytes(32).toString('base64url') }, signer);
     await assert.rejects(a.call('message.submit', { envelope: ping(), push: { kind: 'bogus', id: 'x' } }), (e) => e.code === 'bad_push');
     await assert.rejects(a.call('message.submit', { envelope: ping(), push: { kind: 'lease', id: 'x', expires_at: 'tomorrow' } }), (e) => e.code === 'bad_push');
+    // The push spec's new kinds reach the relay only through push.notify,
+    // never through message.submit (push spec §7.1).
+    for (const kind of ['session_ended', 'session_paused', 'test']) {
+      await assert.rejects(a.call('message.submit', { envelope: ping(), push: { kind, id: 'x' } }), (e) => e.code === 'bad_push');
+    }
     assert.equal(r.mailbox.list({ nodeIds: [a.identity.nodeId] }).length, before_);
     assert.equal((await a.call('message.submit', { envelope: ping(), push: { kind: 'lease', id: 'x', expires_at: new Date(Date.now() + 60000).toISOString() } })).ok, true);
+  });
+
+  it('hands the pusher the link node id with each push, for its (node, kind, id) dedupe key', async () => {
+    const signer = nodeSigner(a.identity);
+    const ping = () => seal({ v: 1, type: 'kl.test.ping', node_id: a.identity.nodeId, nonce: crypto.randomBytes(32).toString('base64url') }, signer);
+    const seen = [];
+    const realNotify = r.pusher.notify;
+    r.pusher.notify = async (device, payload) => { seen.push({ device: device.device_id, ...payload }); };
+    try {
+      await a.call('message.submit', { envelope: ping(), push: { kind: 'question', id: 'q-node-id' } });
+      await until(() => seen.length > 0, 'the push');
+    } finally {
+      r.pusher.notify = realNotify;
+    }
+    assert.ok(seen.every((p) => p.node_id === a.identity.nodeId && p.id === 'q-node-id'));
+    assert.ok(seen.some((p) => p.device === phone.deviceId));
   });
 
   it('device.state touches only the calling node\'s column, and only known devices', async () => {
@@ -692,5 +713,271 @@ describe('relay trust rules', () => {
     secrets.add('tok-owner');
     const leaks = logLines.filter((line) => [...secrets].some((s) => s && line.includes(s)));
     assert.deepEqual(leaks, []);
+  });
+});
+
+// ── The read key (android-slim §8.2, §8.7) ───────────────────────────────────
+// A relay of its own and hand-driven nodes, as in the trust rules above.
+describe('relay: the read key', () => {
+  let r;
+  const rBase = () => `http://127.0.0.1:${r.address().phone.port}`;
+  async function call(phone, method, p, body, sign = {}) {
+    const text = body === undefined ? '' : JSON.stringify(body);
+    const headers = phone ? { ...phone.signApi(method, p, text, sign), 'content-type': 'application/json' } : { 'content-type': 'application/json' };
+    const res = await fetch(rBase() + p, { method, headers, body: method === 'GET' ? undefined : text });
+    const raw = await res.text();
+    return { status: res.status, body: raw ? JSON.parse(raw) : null };
+  }
+  async function linkNode(name, handlers = {}) {
+    const identity = new NodeIdentity({ nodeName: name });
+    const { code } = r.nodeHub.addCode(name);
+    const meshPort = r.address().mesh.port;
+    const transport = new MeshTransport({ identity, listen: false, useTls: false });
+    const pairing = new MeshPairing(identity, transport, { timeoutMs: 5000 });
+    const info = await pairing.acceptCode(code, '127.0.0.1', meshPort);
+    const rpc = createLinkRpc(transport);
+    for (const [method, fn] of Object.entries(handlers)) rpc.handle(method, fn);
+    await transport.start();
+    await transport.connectToPeer('127.0.0.1', meshPort);
+    cleanups.push(async () => { rpc.close(); pairing.cleanup(); await transport.stop(); });
+    await until(() => r.nodeHub.nodes().some((n) => n.node_name === name && n.online), `${name} online`);
+    return { identity, call: (method, params) => rpc.call(info.peerId, method, params, { timeoutMs: 3000 }) };
+  }
+  const otherJwk = () => {
+    const { x, y } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).publicKey.export({ format: 'jwk' });
+    return { kty: 'EC', crv: 'P-256', x, y };
+  };
+  const active = (phone, ...nodes) => {
+    r.devices.register({ device_id: phone.deviceId, jwk: phone.jwk, name: phone.name, platform: 'android' });
+    for (const n of nodes) r.devices.setNodeState(phone.deviceId, n.identity.nodeId, 'active');
+  };
+
+  const received = [];
+  let quiet; // no device.read_key handler: a node from before the read key
+  let modern; // stages it
+  const DAY_MS = 24 * 3600 * 1000;
+
+  before(async () => {
+    r = await startRelay({
+      dataDir: tempDir('kl-relay-readkey-'),
+      identity: new NodeIdentity({ nodeName: 'relay' }),
+      useTls: false,
+      config: { phoneListen: { host: '127.0.0.1', port: 0 }, meshListen: { host: '127.0.0.1', port: 0 }, publicUrl: 'https://kl.example.com', tls: {}, push: {} }
+    });
+    cleanups.push(() => r.stop());
+    quiet = await linkNode('rk-old', { 'enroll.claim': () => ({ delivered: true }) });
+    modern = await linkNode('rk-new', {
+      'device.read_key': (params) => { received.push(params.envelope); return { state: 'read-key-pending-apply' }; },
+      'device.enroll': () => ({ state: 'staged' })
+    });
+  });
+
+  it('a console enrollment that carries a read key gives the device read_jwk; one without gives none', async () => {
+    for (const withKey of [true, false]) {
+      const phone = createFakePhone({ name: withKey ? 'Pixel' : 'Old phone' });
+      const codeId = crypto.randomBytes(16).toString('base64url');
+      const code = crypto.randomBytes(32).toString('base64url');
+      await quiet.call('enroll.open', { envelope: buildEnrollOpen({ identity: quiet.identity, codeId, expiresAt: Date.now() + 600000 }) });
+      const claim = phone.enroll({ codeId, code, device: phone.device({ readKey: withKey }) });
+      assert.equal((await call(null, 'POST', `/v1/enroll/${codeId}`, claim)).status, 202);
+      assert.equal(r.devices.get(phone.deviceId), null, 'nothing is kept before the node reports the enrollment done');
+      assert.deepEqual(await quiet.call('enroll.done', { envelope: buildEnrollDone({ identity: quiet.identity, codeId, enroll: claim }) }), { ok: true });
+      const record = r.devices.get(phone.deviceId);
+      assert.deepEqual(record.read_jwk, withKey ? phone.readJwk : null);
+      assert.equal(record.read_key_created_at, withKey ? open(claim).message.created_at : null);
+      const read = await call(phone, 'GET', '/v1/nodes', undefined, { key: 'read' });
+      if (withKey) assert.equal(read.status, 200);
+      else assert.equal(read.body.error, 'unknown_read_key');
+    }
+  });
+
+  it("a signed enrollment and an invite claim carry the new phone's read key", async () => {
+    const inviter = createFakePhone({ name: 'Inviter' });
+    active(inviter, modern);
+    r.devices.setReadKey(inviter.deviceId, inviter.readJwk, new Date().toISOString());
+    const invite = await call(inviter, 'POST', '/v1/devices/invites', {});
+    assert.equal(invite.status, 200);
+    const newcomer = createFakePhone({ name: 'Newcomer' });
+    const equal = { ...newcomer.device(), read_key: newcomer.jwk };
+    const claimPath = `/v1/devices/invites/${invite.body.invite_id}/claim`;
+    assert.equal((await call(null, 'POST', claimPath, { device: equal, mac: 'm'.repeat(43) })).body.error, 'bad_device');
+    assert.equal((await call(null, 'POST', claimPath, { device: newcomer.device({ readKey: true }), mac: 'm'.repeat(43) })).status, 202);
+    const { claim } = (await call(inviter, 'GET', `/v1/devices/invites/${invite.body.invite_id}`, undefined, { key: 'read' })).body;
+    assert.deepEqual(claim.device.read_key, newcomer.readJwk);
+    assert.equal(r.devices.get(newcomer.deviceId), null, 'a claim registers nothing');
+    // The enrollment the inviter signs, sent with read-key transport.
+    const enrolled = await call(inviter, 'POST', '/v1/devices/enroll', inviter.enroll({ device: claim.device }), { key: 'read' });
+    assert.deepEqual(enrolled.body, { nodes: [{ node_id: modern.identity.nodeId, state: 'staged' }] });
+    assert.deepEqual(r.devices.get(newcomer.deviceId).read_jwk, newcomer.readJwk);
+  });
+
+  it('POST /v1/devices/read-key: device key first, stored, forwarded to every node where the device is active', async () => {
+    const phone = createFakePhone({ name: 'Upgraded phone' });
+    active(phone, quiet, modern);
+    const t0 = Date.now();
+    const statement = phone.readKeyStatement({ now: t0 });
+    // Before the relay knows the read key, a read-signed send cannot verify.
+    assert.equal((await call(phone, 'POST', '/v1/devices/read-key', statement, { key: 'read' })).body.error, 'unknown_read_key');
+    const first = await call(phone, 'POST', '/v1/devices/read-key', statement);
+    assert.equal(first.status, 200);
+    const byNode = (body) => Object.fromEntries(body.nodes.map((n) => [n.node_id, n.state]));
+    assert.deepEqual(byNode(first.body), { [quiet.identity.nodeId]: 'offline', [modern.identity.nodeId]: 'read-key-pending-apply' });
+    assert.deepEqual(received.at(-1), statement, 'the node gets the signed statement unchanged');
+    assert.deepEqual(r.devices.get(phone.deviceId).read_jwk, phone.readJwk);
+    assert.deepEqual(r.devices.nodesForDevice(phone.deviceId).map((n) => n.state), ['active', 'active'], 'no node state changes');
+
+    // The re-send with the read key (no prompt on the phone) is accepted and forwarded again.
+    const sent = received.length;
+    const again = await call(phone, 'POST', '/v1/devices/read-key', statement, { key: 'read' });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.nodes.length, 2);
+    assert.equal(received.length, sent + 1);
+
+    // A newer statement replaces the key; an older one does not (and is still forwarded).
+    const newer = otherJwk();
+    assert.equal((await call(phone, 'POST', '/v1/devices/read-key', phone.readKeyStatement({ now: t0 + 1000, readKey: newer }))).status, 200);
+    assert.deepEqual(r.devices.get(phone.deviceId).read_jwk, newer);
+    const older = phone.readKeyStatement({ now: t0 - 1000, readKey: otherJwk() });
+    assert.equal((await call(phone, 'POST', '/v1/devices/read-key', older)).status, 200);
+    assert.deepEqual(r.devices.get(phone.deviceId).read_jwk, newer);
+    assert.deepEqual(received.at(-1), older);
+  });
+
+  it("refuses a statement signed by the read key, another device's, from an inactive device, expired, from the future, or naming the device key", async () => {
+    const phone = createFakePhone({ name: 'Checked phone' });
+    const stranger = createFakePhone({ name: 'Stranger' });
+    active(phone, modern);
+    active(stranger, modern);
+    const sent = received.length;
+    const wrongSigner = await call(phone, 'POST', '/v1/devices/read-key', phone.readKeyStatement({ signWith: 'read' }));
+    assert.deepEqual([wrongSigner.status, wrongSigner.body.error], [400, 'bad_read_key']);
+    const notCaller = await call(stranger, 'POST', '/v1/devices/read-key', phone.readKeyStatement());
+    assert.deepEqual([notCaller.status, notCaller.body.error], [400, 'bad_read_key']);
+    const t = Date.now();
+    assert.equal((await call(phone, 'POST', '/v1/devices/read-key', phone.readKeyStatement({ now: t - 8 * DAY_MS, ttlMs: DAY_MS }))).body.error, 'expired');
+    assert.equal((await call(phone, 'POST', '/v1/devices/read-key', phone.readKeyStatement({ now: t + 10 * 60000 }))).body.error, 'from_the_future');
+    assert.equal((await call(phone, 'POST', '/v1/devices/read-key', phone.readKeyStatement({ readKey: phone.jwk }))).body.error, 'bad_read_key');
+    assert.equal((await call(phone, 'POST', '/v1/devices/read-key', phone.revoke(stranger.deviceId))).body.error, 'malformed');
+
+    const idle = createFakePhone({ name: 'Approves nowhere' });
+    active(idle, modern);
+    r.devices.setNodeState(idle.deviceId, modern.identity.nodeId, 'revoked');
+    const inactive = await call(idle, 'POST', '/v1/devices/read-key', idle.readKeyStatement());
+    assert.deepEqual([inactive.status, inactive.body.error], [403, 'forbidden']);
+
+    assert.equal(received.length, sent, 'nothing refused reached a node');
+    assert.equal(r.devices.get(phone.deviceId).read_jwk, null);
+    assert.equal(r.devices.get(idle.deviceId).read_jwk, null);
+  });
+
+  it("passes a node's `applied` through (the record already holds this key) and reports any other answer as offline", async () => {
+    const applied = await linkNode('rk-applied', { 'device.read_key': () => ({ state: 'applied' }) });
+    const odd = await linkNode('rk-odd', { 'device.read_key': () => ({ state: 'set-somehow' }) });
+    const phone = createFakePhone({ name: 'Already applied' });
+    active(phone, applied, odd);
+    const res = await call(phone, 'POST', '/v1/devices/read-key', phone.readKeyStatement());
+    assert.equal(res.status, 200);
+    const byNode = Object.fromEntries(res.body.nodes.map((n) => [n.node_id, n.state]));
+    assert.deepEqual(byNode, { [applied.identity.nodeId]: 'applied', [odd.identity.nodeId]: 'offline' });
+  });
+
+  it('a read-signed request reaches a read route and is refused on a device route', async () => {
+    const phone = createFakePhone({ name: 'Reader' });
+    active(phone, modern);
+    r.devices.setReadKey(phone.deviceId, phone.readJwk, new Date().toISOString());
+    assert.equal((await call(phone, 'GET', '/v1/approvals?wait=0', undefined, { key: 'read' })).status, 200);
+    assert.equal((await call(phone, 'PUT', '/v1/push-token', { platform: 'fcm', token: 't' }, { key: 'read' })).status, 204);
+    const refused = await call(phone, 'POST', '/v1/devices/invites', {}, { key: 'read' });
+    assert.deepEqual([refused.status, refused.body.error], [403, 'read_key_not_allowed']);
+  });
+});
+
+// Push spec §7.3 (C-9): the push-token routes take either key; PUT writes only
+// on a change, DELETE drops the token, GET says what the relay holds and never
+// echoes the token.
+describe('relay: the push-token routes', () => {
+  let r;
+  let dataDir;
+  const rBase = () => `http://127.0.0.1:${r.address().phone.port}`;
+  async function call(phone, method, p, body, sign = {}) {
+    const text = body === undefined ? '' : JSON.stringify(body);
+    const headers = { ...phone.signApi(method, p, text, sign), 'content-type': 'application/json' };
+    const res = await fetch(rBase() + p, { method, headers, body: method === 'GET' ? undefined : text });
+    const raw = await res.text();
+    return { status: res.status, body: raw ? JSON.parse(raw) : null, raw };
+  }
+  const phoneWithReadKey = (name) => {
+    const phone = createFakePhone({ name });
+    r.devices.register({ device_id: phone.deviceId, jwk: phone.jwk, name: phone.name, platform: 'android' });
+    r.devices.setReadKey(phone.deviceId, phone.readJwk, new Date().toISOString());
+    return phone;
+  };
+  const devicesFile = () => path.join(dataDir, 'relay', 'devices.json');
+
+  before(async () => {
+    dataDir = tempDir('kl-relay-pushtoken-');
+    r = await startRelay({
+      dataDir,
+      identity: new NodeIdentity({ nodeName: 'relay' }),
+      useTls: false,
+      senders: [{ id: 'recording', platforms: ['fcm'], notify: async () => ({ ok: true }) }],
+      config: { phoneListen: { host: '127.0.0.1', port: 0 }, meshListen: { host: '127.0.0.1', port: 0 }, publicUrl: 'https://kl.example.com', tls: {}, push: {} }
+    });
+    cleanups.push(() => r.stop());
+  });
+
+  it('PUT takes either key and leaves devices.json alone when nothing changed', async () => {
+    const phone = phoneWithReadKey('Token keeper');
+    assert.equal((await call(phone, 'PUT', '/v1/push-token', { platform: 'fcm', token: 'tok-1' }, { key: 'read' })).status, 204);
+    assert.deepEqual(r.devices.get(phone.deviceId).push, { platform: 'fcm', token: 'tok-1' });
+    // A trailing marker survives only if the file is not written again.
+    fs.appendFileSync(devicesFile(), '\n\n');
+    const marked = fs.readFileSync(devicesFile(), 'utf8');
+    assert.equal((await call(phone, 'PUT', '/v1/push-token', { platform: 'fcm', token: 'tok-1' })).status, 204);
+    assert.equal((await call(phone, 'PUT', '/v1/push-token', { platform: 'fcm', token: 'tok-1' }, { key: 'read' })).status, 204);
+    assert.equal(fs.readFileSync(devicesFile(), 'utf8'), marked, 'an unchanged token is not written');
+    assert.equal((await call(phone, 'PUT', '/v1/push-token', { platform: 'fcm', token: 'tok-2' }, { key: 'read' })).status, 204);
+    assert.notEqual(fs.readFileSync(devicesFile(), 'utf8'), marked, 'a new token is written');
+    assert.deepEqual(r.devices.get(phone.deviceId).push, { platform: 'fcm', token: 'tok-2' });
+  });
+
+  it('records the last push result in <dataDir>/relay/push-status.json, without the token or device id', async () => {
+    const phone = phoneWithReadKey('Status keeper');
+    r.devices.setPush(phone.deviceId, { platform: 'fcm', token: 'tok-status-hidden' });
+    await r.pusher.notify(r.devices.get(phone.deviceId), { node_id: 'n-status', kind: 'approval', id: 'r-status' });
+    const text = fs.readFileSync(path.join(dataDir, 'relay', 'push-status.json'), 'utf8');
+    const status = JSON.parse(text);
+    assert.equal(status.v, 1);
+    assert.equal(status.last_send.sender, 'recording');
+    assert.equal(status.last_failure, null);
+    assert.doesNotMatch(text, new RegExp(`tok-status-hidden|${phone.deviceId}`));
+  });
+
+  it('DELETE takes either key, answers 204 and drops the token', async () => {
+    for (const key of ['read', 'device']) {
+      const phone = phoneWithReadKey(`Dropper ${key}`);
+      r.devices.setPush(phone.deviceId, { platform: 'fcm', token: `tok-${key}` });
+      const res = await call(phone, 'DELETE', '/v1/push-token', undefined, { key });
+      assert.equal(res.status, 204, key);
+      assert.equal(r.devices.get(phone.deviceId).push, null, key);
+      assert.ok(!fs.readFileSync(devicesFile(), 'utf8').includes(`tok-${key}`), key);
+      assert.equal((await call(phone, 'DELETE', '/v1/push-token', undefined, { key })).status, 204, `${key}: again, nothing held`);
+    }
+  });
+
+  it('GET says whether a token is held and whether a sender exists for its platform, never the token', async () => {
+    for (const key of ['read', 'device']) {
+      const phone = phoneWithReadKey(`Asker ${key}`);
+      const none = await call(phone, 'GET', '/v1/push-token', undefined, { key });
+      assert.deepEqual([none.status, none.body], [200, { registered: false, sender: false }], key);
+      r.devices.setPush(phone.deviceId, { platform: 'fcm', token: 'hidden-fcm-value' });
+      const fcm = await call(phone, 'GET', '/v1/push-token', undefined, { key });
+      assert.deepEqual([fcm.status, fcm.body], [200, { registered: true, sender: true }], key);
+      assert.ok(!fcm.raw.includes('hidden-fcm-value'));
+      r.devices.setPush(phone.deviceId, { platform: 'apns', token: 'hidden-apns-value' });
+      const apns = await call(phone, 'GET', '/v1/push-token', undefined, { key });
+      assert.deepEqual([apns.status, apns.body], [200, { registered: true, sender: false }], `${key}: no apns sender here`);
+      assert.ok(!apns.raw.includes('hidden-apns-value'));
+    }
   });
 });

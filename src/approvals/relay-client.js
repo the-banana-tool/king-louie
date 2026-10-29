@@ -26,13 +26,15 @@ function sleepSync(ms) {
 
 // F3's own link methods (§4.6); nobody else may register these names.
 const F3_METHODS = new Set([
-  'relay.hello', 'approval.submit', 'approval.status', 'approval.response', 'message.submit',
-  'enroll.open', 'enroll.done', 'enroll.claim', 'device.enroll', 'device.revoke', 'device.state',
+  'relay.hello', 'approval.submit', 'approval.status', 'approval.response', 'message.submit', 'push.notify',
+  'enroll.open', 'enroll.done', 'enroll.claim', 'device.enroll', 'device.revoke', 'device.read_key', 'device.state',
   'audit.slice', 'audit.head'
 ]);
 const RESERVED_PREFIXES = ['mesh.task.', 'mesh.channel.'];
 // relay → node methods answered by the onMessage handler (service-wiring).
-const NODE_INBOUND = ['approval.response', 'enroll.claim', 'device.enroll', 'device.revoke', 'audit.slice', 'audit.head'];
+// device.read_key (android-slim spec §8.7): a device key's statement of its
+// read key, staged beside device.enroll; answers { state[, reason] }.
+const NODE_INBOUND = ['approval.response', 'enroll.claim', 'device.enroll', 'device.revoke', 'device.read_key', 'audit.slice', 'audit.head'];
 
 function isReservedMethod(name) {
   return F3_METHODS.has(name) || RESERVED_PREFIXES.some((p) => String(name).startsWith(p));
@@ -375,6 +377,13 @@ class RelayClient extends EventEmitter {
 
   send(envelope, { push = null, to_device = null } = {}) {
     return this.call('message.submit', { envelope, push, to_device });
+  }
+
+  // push spec §6.2 (C-1): a content-free hint that a granted lease ended or
+  // paused, for the relay to push to the phones (src/gui/push-queue.js).
+  // params: { kind, id, to_device, except_device, expires_at } → { ok: true }.
+  pushNotify(params) {
+    return this.call('push.notify', params);
   }
 
   // F3's relay → node methods: handler(method, params) → result.

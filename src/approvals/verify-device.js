@@ -5,7 +5,7 @@
 const crypto = require('crypto');
 const { open, verifyEs256, EnvelopeError } = require('./envelope');
 const { validateMessage, enrollMac } = require('./messages');
-const { isTestDeviceKey } = require('./test-keys');
+const { hasTestKey } = require('./test-keys');
 
 // Nonces of decided messages, in memory. `get` → { sha256 } | null.
 class NonceCache {
@@ -41,7 +41,17 @@ function bytesSha256(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('base64url');
 }
 
-function verifyDeviceEnvelope(envelope, { approverStore, type, nodeId, nonces = null, overlay = true } = {}) {
+// A record's read key, when it holds one (android-slim spec §8.2). Records
+// without one (iOS, or a phone enrolled before the read key) behave as before.
+function recordReadKey(record) {
+  return record.read_key === undefined || record.read_key === null ? null : record.read_key;
+}
+
+// `allowReadKey` (default false; android-slim spec §8.6): step 6 also accepts
+// a signature by the record's `read_key`. Only the lease watch passes it; every
+// decision keeps the default and refuses a read-key signature as
+// bad_signature. The result's `key` says which key verified.
+function verifyDeviceEnvelope(envelope, { approverStore, type, nodeId, nonces = null, overlay = true, allowReadKey = false } = {}) {
   const fail = (reason) => ({ ok: false, reason });
 
   // 1. Opens, canonical bytes, v === 1, the expected type, well-formed fields.
@@ -63,11 +73,16 @@ function verifyDeviceEnvelope(envelope, { approverStore, type, nodeId, nonces = 
   const record = approverStore.get(envelope.kid);
   if (!record) return fail('unknown_device');
   if (record.platform === 'demo') return fail('demo_device');
-  if (!approverStore.allowTestKeys && isTestDeviceKey(record.public_key)) return fail('test_key');
+  const readKey = recordReadKey(record);
+  if (!approverStore.allowTestKeys && hasTestKey(record)) return fail('test_key');
   if (!approverStore.isActive(envelope.kid, { overlay })) return fail('revoked_device');
 
-  // 6. Signature over the bytes received.
-  if (!verifyEs256(envelope, record.public_key)) return fail('bad_signature');
+  // 6. Signature over the bytes received: the device key, or, only when the
+  // caller allows it and the record has one, the read key.
+  let key;
+  if (verifyEs256(envelope, record.public_key)) key = 'device';
+  else if (allowReadKey === true && readKey && verifyEs256(envelope, readKey)) key = 'read';
+  else return fail('bad_signature');
 
   // 7. Meant for this node.
   if (message.node_id !== nodeId) return fail('wrong_node');
@@ -78,7 +93,7 @@ function verifyDeviceEnvelope(envelope, { approverStore, type, nodeId, nonces = 
     const seen = nonces.get(message.nonce);
     if (seen) return fail(seen.sha256 === bytesSha256(bytes) ? 'replay' : 'already_decided');
   }
-  return { ok: true, message, bytes, deviceId: envelope.kid };
+  return { ok: true, message, bytes, deviceId: envelope.kid, key };
 }
 
 // The console side of `enroll-device` (§3.10 step 4): the phone signed its own
@@ -101,7 +116,7 @@ function verifyConsoleEnrollment(envelope, { codeId, code, now = Date.now(), all
   if (envelope.alg !== 'ES256' || envelope.kid !== message.device.device_id) return fail('malformed');
   if (message.code_id !== codeId) return fail('wrong_code');
   if (message.device.platform === 'demo') return fail('demo_device');
-  if (!allowTestKeys && isTestDeviceKey(message.device.public_key)) return fail('test_key');
+  if (!allowTestKeys && hasTestKey(message.device)) return fail('test_key');
   if (!verifyEs256(envelope, message.device.public_key)) return fail('bad_signature');
   const { code_mac: mac, ...withoutMac } = message;
   const expected = Buffer.from(enrollMac(code, withoutMac));

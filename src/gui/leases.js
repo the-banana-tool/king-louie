@@ -17,6 +17,7 @@ const { TypedBuffer } = require('./text-guard');
 const { suspendsLease } = require('./broker');
 const { plainLineProblem } = require('../cases/hidden-chars');
 const L = require('./lease-protocol');
+const { PushQueue } = require('./push-queue');
 
 const NONCE_TTL_MS = 10 * 60 * 1000;
 const HISTORY_MAX = 32;
@@ -104,9 +105,14 @@ class LeaseManager extends EventEmitter {
   // clock then shows the time that passed.) A caller that injects only
   // `clock` (tests) gets that one clock for both.
   constructor({ approvals, guiConfig, broker = null, audit = null, nodeName = null, clock = Date.now, monotonic = null,
-    timers = { setTimeout, clearTimeout }, jobOpen = () => false, identityProbe = null, log = createLogger('gui/leases') } = {}) {
+    timers = { setTimeout, clearTimeout }, jobOpen = () => false, identityProbe = null, log = createLogger('gui/leases'),
+    pushQueue = null } = {}) {
     super();
     Object.assign(this, { approvals, guiConfig, broker, audit, clock, timers, jobOpen, identityProbe, log });
+    // push.notify hints (push spec §6.2): a granted lease ending, a contact
+    // pause. The GUI's other parts reach it here (a TakeManager queues its
+    // restart endings with enqueue; the GUI's stop awaits drain).
+    this.pushQueue = pushQueue || new PushQueue({ relayClient: approvals.relayClient, clock });
     this.monotonic = typeof monotonic === 'function' ? monotonic : (clock === Date.now ? () => performance.now() : clock);
     this.nodeName = nodeName || (approvals.identity && approvals.identity.nodeName) || 'unnamed-node';
     this.leases = [];
@@ -277,6 +283,7 @@ class LeaseManager extends EventEmitter {
       relay.on('disconnected', this._onDown);
       relay.on('connected', this._onUp);
     }
+    this.pushQueue.start();
     // A revoke a phone sent through the relay takes effect as it is staged.
     const store = this.approvals.approverStore;
     if (store && typeof store.onDeviceRevoked === 'function') this._offRevoked = store.onDeviceRevoked(() => this.checkGrantingDevices());
@@ -329,6 +336,9 @@ class LeaseManager extends EventEmitter {
     }
     if (this._offRevoked) { this._offRevoked(); this._offRevoked = null; }
     this.stopAll('service_stopped');
+    // The service_stopped pushes are sent now while the link is up; nothing
+    // waits for a later connected (the host awaits pushQueue.drain).
+    this.pushQueue.stop();
   }
 
   available() {
@@ -450,7 +460,7 @@ class LeaseManager extends EventEmitter {
         // grantedBy: the device whose grant made this lease (R-F5-15, R-F5-18): the only one that
         // resumes it or keeps it in contact. Any enrolled phone may stop it or watch it.
         apps: [], state: 'pending', locked: false, endReason: null, suspendReason: null, expiresAt: null, expiresMono: null,
-        grantedBy: null, grantedByName: null,
+        grantedBy: null, grantedByName: null, endedBy: null,
         seq: 0, typed: new TypedBuffer(), inputTimes: [], waiters: [], expiryTimer: null, controlNonces: new LeaseNonces(),
         lastContact: null, contactTimer: null, grantorTimer: null,
         // Contact tokens: token → { n, at }; how many were issued; and the
@@ -579,7 +589,8 @@ class LeaseManager extends EventEmitter {
     this.timers.clearTimeout(entry.timer);
     if (m.decision === 'deny') {
       this._audit('lease.denied', lease, { request_id: m.request_id, device_id: r.deviceId });
-      this._end(lease, 'denied');
+      // A deny of a resume ended a lease that ran: that phone needs no push of it.
+      this._end(lease, 'denied', { endedBy: entry.resume ? r.deviceId : null });
       return this._reply(lease, { state: 'ended' });
     }
     if (entry.resume && this._expired(lease)) {
@@ -659,7 +670,7 @@ class LeaseManager extends EventEmitter {
       return this._reply(lease, { state: 'ended' });
     }
     this._audit('lease.revoked', lease, { device_id: r.deviceId, reason: r.message.reason });
-    this._end(lease, 'revoked');
+    this._end(lease, 'revoked', { endedBy: r.deviceId });
     return this._reply(lease, { state: 'ended' });
   }
 
@@ -674,6 +685,7 @@ class LeaseManager extends EventEmitter {
     if (lease.controlNonces.full) return { accepted: false, reason: 'too_many_watches' };
     lease.controlNonces.add(r.message.nonce, bytesSha256(r.bytes));
     // R-F5-15: a watch from the device that granted this lease is contact
+    // (signed by either of its keys: android-slim spec §8.6)
     // when it echoes a contact token issued inside the window that has not
     // made contact before. Any other watch (another enrolled device's, one
     // with no token, an old one a relay kept back) still asks for frames,
@@ -687,7 +699,7 @@ class LeaseManager extends EventEmitter {
     }
     const contact = lease.grantedBy !== null && r.deviceId === lease.grantedBy && lease.state !== 'ended'
       && this._tokenMakesContact(lease, r.message.contact_token);
-    this._audit('lease.watch', lease, { device_id: r.deviceId, contact });
+    this._audit('lease.watch', lease, { device_id: r.deviceId, contact, key: r.key });
     const before = lease.lastStatus;
     if (contact) this._onContact(lease, r.deviceId);
     // Every accepted watch is answered with a status signed now, so the
@@ -780,6 +792,12 @@ class LeaseManager extends EventEmitter {
     this._audit('lease.suspended', lease, takesOver ? { reason, was: CONTACT_REASON } : { reason });
     this._status(lease);
     if (this.remainingMs(lease) <= 0) { this._end(lease, 'expired'); return; }
+    // Push spec §6.1 (C-4): active → suspended for want of contact, and only
+    // that transition, is pushed to the granting device: only its watch
+    // resumes the lease. A takeover by another reason pushes nothing.
+    if (reason === CONTACT_REASON && !takesOver && lease.grantedBy) {
+      this.pushQueue.enqueue({ kind: 'session_paused', id: lease.leaseId, to_device: lease.grantedBy, expires_at: new Date(lease.expiresAt).toISOString() });
+    }
     const relay = this.approvals.relayClient;
     // No resume request for want of contact: nothing needs approving again,
     // a watch from the granting phone resumes it (R-F5-15).
@@ -827,10 +845,13 @@ class LeaseManager extends EventEmitter {
     for (const lease of this.leases) if (lease.state !== 'ended') this._end(lease, reason);
   }
 
-  _end(lease, reason) {
+  // endedBy: the device whose own signed message ended the lease (a verified
+  // revoke, a verified deny of a resume), else null (push spec §6.1).
+  _end(lease, reason, { endedBy = null } = {}) {
     if (lease.state === 'ended') return;
     lease.state = 'ended';
     lease.endReason = reason;
+    lease.endedBy = endedBy;
     if (lease.expiryTimer) this.timers.clearTimeout(lease.expiryTimer);
     if (lease.contactTimer) this.timers.clearTimeout(lease.contactTimer);
     if (lease.grantorTimer) this.timers.clearTimeout(lease.grantorTimer);
@@ -845,6 +866,9 @@ class LeaseManager extends EventEmitter {
     if (!['revoked', 'expired', 'denied'].includes(reason)) this._audit('lease.ended', lease, { reason });
     this._settle(lease, new GuiError(END_ERROR[reason] || 'lease_required', END_ERROR[reason] ? (reason === IDENTITY_REASON ? IDENTITY_MESSAGE : null) : reason));
     this._status(lease);
+    // Push spec §6.1 (C-3): a lease that ran pushes its ending once, to every
+    // phone but the one that ended it; one that never ran pushes nothing.
+    if (lease.grantedBy) this.pushQueue.enqueue({ kind: 'session_ended', id: lease.leaseId, except_device: endedBy });
     const ended = this.leases.filter((l) => l.state === 'ended');
     if (ended.length > HISTORY_MAX) this.leases = this.leases.filter((l) => l !== ended[0]);
   }

@@ -28,6 +28,59 @@ function registryFile() {
 }
 
 describe('DeviceRegistry', () => {
+  it('setReadKey stores read_jwk, persists it, and only a newer created_at replaces it', () => {
+    const file = registryFile();
+    const phone = createFakePhone();
+    const reg = new DeviceRegistry({ file });
+    reg.register({ device_id: phone.deviceId, jwk: phone.jwk, name: 'Pixel 9', platform: 'android' });
+    assert.equal(reg.get(phone.deviceId).read_jwk, null, 'a new record has no read key');
+    const first = reg.setReadKey(phone.deviceId, phone.readJwk, '2026-10-28T10:00:00.000Z');
+    assert.equal(first.updated, true);
+    assert.deepEqual(first.record.read_jwk, phone.readJwk);
+    assert.equal(first.record.read_key_created_at, '2026-10-28T10:00:00.000Z');
+
+    const newer = createFakePhone().readJwk;
+    const older = createFakePhone().readJwk;
+    assert.equal(reg.setReadKey(phone.deviceId, older, '2026-10-28T09:00:00.000Z').updated, false);
+    assert.deepEqual(reg.get(phone.deviceId).read_jwk, phone.readJwk, 'an older statement is ignored');
+    assert.equal(reg.setReadKey(phone.deviceId, older, '2026-10-28T10:00:00.000Z').updated, false, 'an equal created_at is not newer');
+    assert.equal(reg.setReadKey(phone.deviceId, newer, '2026-10-28T11:00:00.000Z').updated, true);
+
+    const reloaded = new DeviceRegistry({ file });
+    assert.deepEqual(reloaded.get(phone.deviceId).read_jwk, newer);
+    assert.equal(reloaded.get(phone.deviceId).read_key_created_at, '2026-10-28T11:00:00.000Z');
+
+    // Registering the device again (a re-enrollment) keeps the read key.
+    reloaded.register({ device_id: phone.deviceId, jwk: phone.jwk, name: 'Pixel 9', platform: 'android' });
+    assert.deepEqual(reloaded.get(phone.deviceId).read_jwk, newer);
+  });
+
+  it('setReadKey refuses a bad key or timestamp and answers null for an unknown device', () => {
+    const reg = new DeviceRegistry({ file: registryFile() });
+    const phone = createFakePhone();
+    reg.register({ device_id: phone.deviceId, jwk: phone.jwk, name: 'Pixel 9', platform: 'android' });
+    assert.equal(reg.setReadKey(createFakePhone().deviceId, phone.readJwk, '2026-10-28T10:00:00.000Z'), null);
+    assert.equal(reg.setReadKey('not-an-id', phone.readJwk, '2026-10-28T10:00:00.000Z'), null);
+    assert.throws(() => reg.setReadKey(phone.deviceId, { kty: 'EC', crv: 'P-256', x: 'AA', y: 'AA' }, '2026-10-28T10:00:00.000Z'), (e) => e.code === 'bad_read_key');
+    assert.throws(() => reg.setReadKey(phone.deviceId, { ...phone.jwk }, '2026-10-28T10:00:00.000Z'), (e) => e.code === 'bad_read_key', 'equal to the device key');
+    assert.throws(() => reg.setReadKey(phone.deviceId, phone.readJwk, 'yesterday'), (e) => e.code === 'bad_read_key');
+    assert.equal(reg.get(phone.deviceId).read_jwk, null);
+  });
+
+  it('a malformed read_jwk in the file is dropped on load', () => {
+    const file = registryFile();
+    const phone = createFakePhone();
+    const reg = new DeviceRegistry({ file });
+    reg.register({ device_id: phone.deviceId, jwk: phone.jwk, name: 'Pixel 9', platform: 'android' });
+    reg.setReadKey(phone.deviceId, phone.readJwk, '2026-10-28T10:00:00.000Z');
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    raw.devices[phone.deviceId].read_jwk = { kty: 'EC', crv: 'P-256', x: 'nope', y: 'nope' };
+    fs.writeFileSync(file, JSON.stringify(raw));
+    const reloaded = new DeviceRegistry({ file });
+    assert.equal(reloaded.get(phone.deviceId).read_jwk, null);
+    assert.equal(reloaded.get(phone.deviceId).read_key_created_at, null);
+  });
+
   it('registers, persists, addresses push and tracks per-node state', () => {
     const file = registryFile();
     const phone = createFakePhone({ name: 'Pixel 9' });
@@ -121,7 +174,7 @@ describe('DeviceRegistry', () => {
     reg.register({ device_id: phone.deviceId, jwk: phone.jwk, name: 'x', platform: 'android' });
     assert.throws(() => reg.setNodeState(phone.deviceId, 'not-a-node-id', 'active'), (e) => e.code === 'bad_node');
     assert.equal(reg.get('not-a-device-id'), null);
-    assert.equal(reg.setPush('not-a-device-id', { platform: 'fcm', token: 't' }), null);
+    assert.equal(reg.setPush('not-a-device-id', { platform: 'fcm', token: 't' }), false);
     assert.deepEqual(reg.devicesForNode('not-a-node-id'), []);
     assert.deepEqual(reg.nodesForDevice('not-a-device-id'), []);
     assert.equal(reg.remove('not-a-device-id'), false);

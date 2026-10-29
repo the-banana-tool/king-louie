@@ -1,8 +1,17 @@
 // F3's phone API routes (spec §4.5), registered through the route registry
 // like any extension's. The relay authenticates callers and forwards; nodes
 // verify every signature again.
-const { open, verifyEs256, deviceIdFromJwk } = require('../approvals/envelope');
+//
+// Each route's `auth` follows android-slim §8.4: a route that only reads, or
+// whose body is an envelope the device key signed (the envelope is the
+// decision), takes either key (`read`); one that changes something with no
+// such envelope takes the device key (`device`). Two exceptions change
+// something with no envelope and still take either key, as §8.4 lists them:
+// POST /v1/presence (the phone's foreground state), and PUT and DELETE
+// /v1/push-token (where its notifications go; push spec §7.3, C-9).
+const { open, verifyEs256, deviceIdFromJwk, isDeviceJwk, samePoint } = require('../approvals/envelope');
 const { validateMessage } = require('../approvals/messages');
+const { FUTURE_SKEW_MS } = require('../approvals/approver-store');
 const { ApiError } = require('./phone-api');
 const { isConsoleEnrollment, sameEnvelope } = require('./node-methods');
 
@@ -13,6 +22,11 @@ const MAX_POLLS_PER_DEVICE = 2;
 // Node answers the relay records for a relayed enrollment or revocation (a
 // node reply never makes a device `active` here).
 const ENROLL_STATES = ['staged', 'rejected'];
+// Node answers to device.read_key (android-slim §8.7) passed back to the
+// phone (`applied`: the node's record already holds this read key;
+// `duplicate`: it is staged, waiting for `device apply`); anything else (an older node with no such method, no answer) is
+// `offline`, which the app re-sends to. None changes the device's state here.
+const READ_KEY_STATES = ['read-key-pending-apply', 'applied', 'duplicate', 'rejected'];
 
 function parseEnvelope(body, type) {
   let message;
@@ -106,7 +120,7 @@ function registerPhoneRoutes(relay) {
   // Long poll: returns at once when something is new since this device's
   // last call, else waits up to `wait` seconds for a change.
   phoneApi.registerRoute('GET', '/v1/approvals', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       const wait = Math.min(MAX_WAIT_S, Math.max(0, Number.parseInt(ctx.query.wait || '0', 10) || 0));
       const cursor = lastSeen.get(ctx.deviceId) || 0;
@@ -128,7 +142,7 @@ function registerPhoneRoutes(relay) {
   });
 
   phoneApi.registerRoute('GET', '/v1/approvals/{request_id}', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       const entry = approvals.get(ctx.params.request_id);
       if (!entry || !activeNodes(ctx.deviceId).includes(entry.node_id)) throw new ApiError(404, 'not_found', 'no such request');
@@ -139,7 +153,7 @@ function registerPhoneRoutes(relay) {
   // Forwards the calling device's own signed response for this request.
   // `accepted` is true only when the node answered exactly `true`.
   phoneApi.registerRoute('POST', '/v1/approvals/{request_id}/response', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       const entry = approvals.get(ctx.params.request_id);
       if (!entry || now() > entry.expires_at) throw new ApiError(410, 'gone', 'the request expired or is unknown');
@@ -158,7 +172,7 @@ function registerPhoneRoutes(relay) {
   // The node list is a relay-wide view too: a device that approves nowhere
   // (revoked everywhere) no longer learns every node id and name.
   phoneApi.registerRoute('GET', '/v1/nodes', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireActive(ctx);
       return { body: nodeHub.nodes().map(({ node_id, node_name, online }) => ({ node_id, node_name, online })) };
@@ -166,7 +180,7 @@ function registerPhoneRoutes(relay) {
   });
 
   phoneApi.registerRoute('GET', '/v1/nodes/{node_id}/history', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       if (!activeNodes(ctx.deviceId).includes(ctx.params.node_id)) throw new ApiError(404, 'not_found', 'no such node for this device');
       const params = { limit: Math.min(200, Math.max(1, Number.parseInt(ctx.query.limit || '50', 10) || 50)) };
@@ -206,8 +220,13 @@ function registerPhoneRoutes(relay) {
       const { device, mac } = ctx.body || {};
       const valid = device && typeof device === 'object' && typeof mac === 'string'
         && ['ios', 'android'].includes(device.platform) && typeof device.name === 'string' && device.name.length <= 64
-        && (() => { try { return deviceIdFromJwk(device.public_key) === device.device_id; } catch { return false; } })();
-      if (!valid) throw new ApiError(400, 'bad_device', 'claim needs { device: { device_id, name, platform, public_key }, mac }');
+        && (() => { try { return deviceIdFromJwk(device.public_key) === device.device_id; } catch { return false; } })()
+        // An Android phone's claim also carries its read key (§8.2): a P-256
+        // JWK that is not the device key. The inviter signs it into the
+        // enrollment, which is where the relay learns it.
+        && (!Object.hasOwn(device, 'read_key') || (isDeviceJwk(device.read_key)
+          && !samePoint(device.read_key, device.public_key)));
+      if (!valid) throw new ApiError(400, 'bad_device', 'claim needs { device: { device_id, name, platform, public_key, read_key? }, mac }');
       try {
         invites.claim(ctx.params.id, { device, mac });
       } catch (err) {
@@ -218,7 +237,7 @@ function registerPhoneRoutes(relay) {
   });
 
   phoneApi.registerRoute('GET', '/v1/devices/invites/{id}', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireActive(ctx);
       try {
@@ -235,7 +254,7 @@ function registerPhoneRoutes(relay) {
   // The signed-device path: one of the two ways a device is registered, and
   // only by a device that is active on at least one node.
   phoneApi.registerRoute('POST', '/v1/devices/enroll', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       const message = parseEnvelope(ctx.body, 'kl.device.enroll');
       if (message.enrolled_by !== ctx.deviceId || ctx.body.kid !== ctx.deviceId || !verifyEs256(ctx.body, ctx.device.jwk)) {
@@ -248,6 +267,7 @@ function registerPhoneRoutes(relay) {
       if (devices.logDecision(ctx.body) === 'full') throw new ApiError(503, 'log_full', 'the device log is full');
       try {
         devices.register({ device_id: d.device_id, jwk: d.public_key, name: d.name, platform: d.platform });
+        if (d.read_key) devices.setReadKey(d.device_id, d.read_key, message.created_at);
       } catch (err) {
         throw new ApiError(400, 'bad_device', err.message);
       }
@@ -269,7 +289,7 @@ function registerPhoneRoutes(relay) {
   });
 
   phoneApi.registerRoute('POST', '/v1/devices/revoke', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       const message = parseEnvelope(ctx.body, 'kl.device.revoke');
       if (message.revoked_by !== ctx.deviceId || ctx.body.kid !== ctx.deviceId || !verifyEs256(ctx.body, ctx.device.jwk)) {
@@ -298,8 +318,46 @@ function registerPhoneRoutes(relay) {
     }
   });
 
+  // A phone enrolled before the read key states it, signed with its device
+  // key (android-slim §8.7). The first send comes with device-key transport,
+  // since the relay holds no read key yet; a re-send to nodes that were
+  // offline comes with the read key. The relay keeps the key (a newer
+  // created_at replaces an older one) and forwards the statement to every
+  // node where the device is active; each node stages it for `device apply`.
+  phoneApi.registerRoute('POST', '/v1/devices/read-key', {
+    auth: 'read',
+    handler: async (req, ctx) => {
+      const message = parseEnvelope(ctx.body, 'kl.device.read_key');
+      if (message.device_id !== ctx.deviceId || ctx.body.kid !== ctx.deviceId || !verifyEs256(ctx.body, ctx.device.jwk)) {
+        throw new ApiError(400, 'bad_read_key', "the statement must be the calling device's, signed with its device key");
+      }
+      const t = now();
+      if (Date.parse(message.created_at) - t > FUTURE_SKEW_MS) throw new ApiError(400, 'from_the_future', 'created_at is in the future');
+      if (Date.parse(message.expires_at) <= t) throw new ApiError(400, 'expired', 'the statement has expired');
+      const nodeIds = requireActive(ctx);
+      try {
+        devices.setReadKey(ctx.deviceId, message.read_key, message.created_at);
+      } catch (err) {
+        if (err.code === 'bad_read_key') throw new ApiError(400, 'bad_read_key', err.message);
+        throw err;
+      }
+      const nodes = [];
+      for (const nodeId of nodeIds) {
+        let state = 'offline';
+        try {
+          const result = await nodeHub.rpc(nodeId, 'device.read_key', { envelope: ctx.body });
+          if (result && READ_KEY_STATES.includes(result.state)) state = result.state;
+        } catch {
+          state = 'offline';
+        }
+        nodes.push({ node_id: nodeId, state });
+      }
+      return { body: { nodes } };
+    }
+  });
+
   phoneApi.registerRoute('GET', '/v1/devices', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireActive(ctx);
       return { body: devices.list().map((d) => ({ device_id: d.device_id, name: d.name, platform: d.platform, nodes: devices.nodesForDevice(d.device_id) })) };
@@ -307,14 +365,36 @@ function registerPhoneRoutes(relay) {
   });
 
   phoneApi.registerRoute('PUT', '/v1/push-token', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       const { platform, token } = ctx.body || {};
       if (!['apns', 'fcm'].includes(platform) || typeof token !== 'string' || !token || token.length > 4096) {
         throw new ApiError(400, 'bad_push_token', 'body is { platform: apns|fcm, token }');
       }
+      // Written only when the platform or the token changed (the phone
+      // re-sends it at every cold start).
       devices.setPush(ctx.deviceId, { platform, token });
       return { status: 204 };
+    }
+  });
+
+  phoneApi.registerRoute('DELETE', '/v1/push-token', {
+    auth: 'read',
+    handler: async (req, ctx) => {
+      devices.setPush(ctx.deviceId, null);
+      return { status: 204 };
+    }
+  });
+
+  // Whether the relay holds a token for this device and has a sender for
+  // that token's platform. The token itself is never echoed.
+  phoneApi.registerRoute('GET', '/v1/push-token', {
+    auth: 'read',
+    handler: async (req, ctx) => {
+      const record = devices.get(ctx.deviceId);
+      const push = record && record.push;
+      const platforms = (relay.pusher && relay.pusher.platforms) || [];
+      return { body: { registered: Boolean(push), sender: Boolean(push) && platforms.includes(push.platform) } };
     }
   });
 }
