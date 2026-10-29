@@ -126,7 +126,10 @@ async function startRelay({ dataDir, config, identity, listeners = 'own', regist
   const mailbox = new Mailbox({ now });
   const pusher = createPusher(config.push || {}, {
     ...(senders ? { senders } : {}),
-    onDropToken: (device) => devices.setPush(device.device_id, null)
+    onDropToken: (device) => devices.setPush(device.device_id, null),
+    now,
+    // The last push result for `doctor` (push spec §8): no token, no device id.
+    statusFile: path.join(relayDir, 'push-status.json')
   });
   const meshTransport = external ? transport : new MeshTransport({ identity, host: config.meshListen.host, port: config.meshListen.port, useTls });
   const pairing = new MeshPairing(identity, meshTransport);
@@ -194,6 +197,8 @@ async function startRelay({ dataDir, config, identity, listeners = 'own', regist
     },
     async stop() {
       clearInterval(sweeper);
+      // Drops what a coalescing window holds and writes push-status.json.
+      pusher.stop();
       // Parked long polls answer now instead of holding their sockets.
       approvals.releaseWaiters();
       if (server) {

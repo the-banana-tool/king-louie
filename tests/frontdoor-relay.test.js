@@ -523,6 +523,22 @@ describe('relay trust rules', () => {
     assert.equal((await a.call('message.submit', { envelope: ping(), push: { kind: 'lease', id: 'x', expires_at: new Date(Date.now() + 60000).toISOString() } })).ok, true);
   });
 
+  it('hands the pusher the link node id with each push, for its (node, kind, id) dedupe key', async () => {
+    const signer = nodeSigner(a.identity);
+    const ping = () => seal({ v: 1, type: 'kl.test.ping', node_id: a.identity.nodeId, nonce: crypto.randomBytes(32).toString('base64url') }, signer);
+    const seen = [];
+    const realNotify = r.pusher.notify;
+    r.pusher.notify = async (device, payload) => { seen.push({ device: device.device_id, ...payload }); };
+    try {
+      await a.call('message.submit', { envelope: ping(), push: { kind: 'question', id: 'q-node-id' } });
+      await until(() => seen.length > 0, 'the push');
+    } finally {
+      r.pusher.notify = realNotify;
+    }
+    assert.ok(seen.every((p) => p.node_id === a.identity.nodeId && p.id === 'q-node-id'));
+    assert.ok(seen.some((p) => p.device === phone.deviceId));
+  });
+
   it('device.state touches only the calling node\'s column, and only known devices', async () => {
     await b.call('device.state', { device_id: phone.deviceId, state: 'revoked', node_id: a.identity.nodeId });
     const states = Object.fromEntries(r.devices.nodesForDevice(phone.deviceId).map((n) => [n.node_id, n.state]));
@@ -923,6 +939,18 @@ describe('relay: the push-token routes', () => {
     assert.equal((await call(phone, 'PUT', '/v1/push-token', { platform: 'fcm', token: 'tok-2' }, { key: 'read' })).status, 204);
     assert.notEqual(fs.readFileSync(devicesFile(), 'utf8'), marked, 'a new token is written');
     assert.deepEqual(r.devices.get(phone.deviceId).push, { platform: 'fcm', token: 'tok-2' });
+  });
+
+  it('records the last push result in <dataDir>/relay/push-status.json, without the token or device id', async () => {
+    const phone = phoneWithReadKey('Status keeper');
+    r.devices.setPush(phone.deviceId, { platform: 'fcm', token: 'tok-status-hidden' });
+    await r.pusher.notify(r.devices.get(phone.deviceId), { node_id: 'n-status', kind: 'approval', id: 'r-status' });
+    const text = fs.readFileSync(path.join(dataDir, 'relay', 'push-status.json'), 'utf8');
+    const status = JSON.parse(text);
+    assert.equal(status.v, 1);
+    assert.equal(status.last_send.sender, 'recording');
+    assert.equal(status.last_failure, null);
+    assert.doesNotMatch(text, new RegExp(`tok-status-hidden|${phone.deviceId}`));
   });
 
   it('DELETE takes either key, answers 204 and drops the token', async () => {
