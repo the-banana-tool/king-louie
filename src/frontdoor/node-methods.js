@@ -2,7 +2,7 @@
 // against that node's key before the relay stores or forwards it; the relay
 // never alters a signed message.
 const { open, verifyEd25519, verifyEs256 } = require('../approvals/envelope');
-const { validateMessage, isTimestamp } = require('../approvals/messages');
+const { validateMessage, isTimestamp, DEVICE_ID_RE } = require('../approvals/messages');
 const { LinkRpcError } = require('../approvals/link-rpc');
 const { TTL_MS: CODE_TTL_MS } = require('./invites');
 
@@ -11,6 +11,11 @@ const MAX_PUSH_ID = 128;
 // The kinds message.submit may push: its own list, not push/text.js's
 // KINDS, which also holds the kinds only push.notify sends (push spec §7.1).
 const PUSH_KINDS = ['approval', 'grant', 'pairing', 'alert', 'question', 'lease'];
+// The kinds push.notify may push (push spec §6.2): a lease's ending or
+// contact pause, keyed by its lease id.
+const SESSION_KINDS = ['session_ended', 'session_paused'];
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const optionalDevice = (v) => v === null || v === undefined || (typeof v === 'string' && DEVICE_ID_RE.test(v));
 
 // Node answers to device.enroll / device.revoke that the relay records. A
 // node reply can never mark a device `active` through these paths: only
@@ -147,6 +152,26 @@ function registerNodeMethods(relay) {
       pushTo(targets, { kind: push.kind, id: push.id, node_name: node.node_name, expires_at: typeof push.expires_at === 'string' ? push.expires_at : null });
     }
     return { ok: true, seq: result.seq };
+  });
+
+  // A lease ended or paused on the node (push spec §6.2). Authenticated by
+  // the pinned link alone, like message.submit's push hint; nothing goes in
+  // the mailbox and the relay keeps no lease state. Only fcm devices get the
+  // session kinds (C-2), so the targets are narrowed to them here.
+  nodeHub.onNodeMessage('push.notify', async (params, { nodeId }) => {
+    const p = isPlainObject(params) ? params : null;
+    const toDevice = p && p.to_device !== undefined ? p.to_device : null;
+    const exceptDevice = p && p.except_device !== undefined ? p.except_device : null;
+    const expiresAt = p && p.expires_at !== undefined ? p.expires_at : null;
+    const ok = p && SESSION_KINDS.includes(p.kind) && typeof p.id === 'string' && UUID_V4_RE.test(p.id)
+      && optionalDevice(toDevice) && optionalDevice(exceptDevice) && !(toDevice !== null && exceptDevice !== null)
+      && (expiresAt === null || isTimestamp(expiresAt));
+    if (!ok) throw new LinkRpcError('bad_push', `push.notify must be { kind: ${SESSION_KINDS.join('|')}, id: uuid v4, to_device?, except_device? (not both), expires_at? }`);
+    const node = nodeHub.nodeById(nodeId);
+    const targets = devices.devicesForNode(nodeId).filter((d) => d.push && d.push.platform === 'fcm'
+      && (toDevice === null || d.device_id === toDevice) && (exceptDevice === null || d.device_id !== exceptDevice));
+    pushTo(targets, { kind: p.kind, id: p.id, node_name: node ? node.node_name : null, expires_at: expiresAt });
+    return { ok: true };
   });
 
   // A node opens a console enrollment code. A code id already known to the
