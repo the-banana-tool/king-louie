@@ -84,5 +84,10 @@ Integration branch `feat/browser-runner` at `C:\Users\sblac\Programming\king-lou
 - A ref in the login/signup/payment selector fields gets no label and no run-time check.
 - Each approved ref action costs one extra snapshot.
 
+- T11 (merge 948819bf): CLAUDE.md "Browser" section and the §14 amendments. Deviation: also amended the
+  Demo takes endings bullet (personal close is `PlaywrightBrowser#stop`).
+
 ## Left
-T11, review, npm test.
+Code review (and its fix agent), then `npm test` once.
+Review-fix inputs found so far: the unknown-page-state snapshot trigger checks only the snapshot's length,
+not "no ref and under 200 characters of text" (spec §8.2); the kept-window item above.
