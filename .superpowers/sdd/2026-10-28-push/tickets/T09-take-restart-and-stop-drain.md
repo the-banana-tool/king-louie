@@ -1,7 +1,8 @@
 ---
 id: T09
 title: Takes - restart endings push; gui.stop waits for the queue
-status: open
+status: done
+merged: 91208ecf
 blocked_by: [T08]
 ---
 ## Goal
