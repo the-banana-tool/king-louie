@@ -17,7 +17,7 @@ after(async () => { for (const c of cleanups.reverse()) await c(); });
 
 const P256_ORDER = BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551');
 
-async function start({ rateLimits, clockOffsetMs = 0 } = {}) {
+async function start({ rateLimits, clockOffsetMs = 0, readKey = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-phone-api-'));
   cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
   const devices = new DeviceRegistry({ file: path.join(dir, 'devices.json') });
@@ -25,6 +25,7 @@ async function start({ rateLimits, clockOffsetMs = 0 } = {}) {
   const api = createPhoneApi({ devices, rateLimits, relay, now: () => Date.now() + clockOffsetMs });
   api.registerRoute('GET', '/v1/time', { auth: 'none', handler: async () => ({ body: { server_time: new Date().toISOString() } }) });
   api.registerRoute('POST', '/v1/echo/{thing}', { auth: 'device', handler: async (req, ctx) => ({ status: 202, body: { device: ctx.deviceId, thing: ctx.params.thing, query: ctx.query, body: ctx.body } }) });
+  api.registerRoute('POST', '/v1/look/{thing}', { auth: 'read', handler: async (req, ctx) => ({ status: 202, body: { device: ctx.deviceId, key: ctx.key, thing: ctx.params.thing, body: ctx.body } }) });
   api.registerRoute('GET', '/v1/enroll/{code_id}', { auth: 'code', handler: async (req, ctx) => ({ body: { code: ctx.params.code_id } }) });
   api.registerRoute('POST', '/v1/devices/invites/{id}/claim', { auth: 'invite', handler: async () => ({ status: 202, body: {} }) });
   const server = http.createServer(api.handler);
@@ -33,6 +34,7 @@ async function start({ rateLimits, clockOffsetMs = 0 } = {}) {
   const base = `http://127.0.0.1:${server.address().port}`;
   const phone = createFakePhone();
   devices.register({ device_id: phone.deviceId, jwk: phone.jwk, name: 'Pixel 9', platform: 'android' });
+  if (readKey) devices.setReadKey(phone.deviceId, phone.readJwk, new Date().toISOString());
   const call = async (method, p, { body = '', headers = {} } = {}) => {
     const res = await fetch(base + p, { method, headers, body: method === 'GET' ? undefined : body });
     const text = await res.text();
@@ -81,6 +83,108 @@ describe('phone API device auth', () => {
     const malleated = Buffer.concat([sig.subarray(0, 32), Buffer.from((P256_ORDER - s).toString(16).padStart(64, '0'), 'hex')]);
     const res = await call('POST', '/v1/echo/a', { body: '{}', headers: { ...headers, 'X-KL-Signature': malleated.toString('base64url') } });
     assert.equal(res.body.error, 'replay');
+  });
+});
+
+describe('phone API read key (android-slim §8.3)', () => {
+  it('the read string starts KL-PHONE-READ-V1 and the header says read', () => {
+    const { phoneAuthString } = require('../src/approvals/messages');
+    const phone = createFakePhone();
+    const timestamp = '2026-10-28T14:05:09.120Z';
+    const s = phoneAuthString('POST', '/v1/look/a?x=1', timestamp, '{}', { key: 'read' });
+    assert.equal(s.split('\n')[0], 'KL-PHONE-READ-V1');
+    const headers = phone.signReadApi('POST', '/v1/look/a?x=1', '{}', { timestamp });
+    assert.equal(headers['X-KL-Key'], 'read');
+    assert.equal(headers['X-KL-Device'], phone.deviceId);
+  });
+
+  it('a read-signed request is accepted on a read route, with ctx.key read and the device id', async () => {
+    const { call, phone } = await start();
+    const res = await call('POST', '/v1/look/abc', { body: '{"a":1}', headers: phone.signReadApi('POST', '/v1/look/abc', '{"a":1}') });
+    assert.equal(res.status, 202);
+    assert.deepEqual(res.body, { device: phone.deviceId, key: 'read', thing: 'abc', body: { a: 1 } });
+  });
+
+  it('a device-key request is accepted on a read route with ctx.key device, with or without X-KL-Key: device', async () => {
+    const { call, phone, signed } = await start();
+    assert.equal((await signed('POST', '/v1/look/a', '{}')).body.key, 'device');
+    const res = await call('POST', '/v1/look/b', { body: '{}', headers: phone.signApi('POST', '/v1/look/b', '{}', { key: 'device' }) });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.key, 'device');
+  });
+
+  it('a device route keeps accepting a device-key request, X-KL-Key: device included, and hands ctx.key device', async () => {
+    const { call, phone, api } = await start();
+    api.registerRoute('POST', '/v1/key', { auth: 'device', handler: async (req, ctx) => ({ body: { key: ctx.key } }) });
+    const res = await call('POST', '/v1/key', { body: '{}', headers: phone.signApi('POST', '/v1/key', '{}', { key: 'device' }) });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.key, 'device');
+  });
+
+  it('403 read_key_not_allowed for a read-signed request on a device route', async () => {
+    const { call, phone } = await start();
+    const res = await call('POST', '/v1/echo/a', { body: '{}', headers: phone.signReadApi('POST', '/v1/echo/a', '{}') });
+    assert.equal(res.status, 403);
+    assert.equal(res.body.error, 'read_key_not_allowed');
+  });
+
+  it('401 unknown_read_key for a device with no read_jwk', async () => {
+    const { call, phone } = await start({ readKey: false });
+    const res = await call('POST', '/v1/look/a', { body: '{}', headers: phone.signReadApi('POST', '/v1/look/a', '{}') });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.error, 'unknown_read_key');
+  });
+
+  it('401 bad_signature: a read signature checked against the device key, and the reverse', async () => {
+    const { call, phone } = await start();
+    // The read key over the device string, with no X-KL-Key: checked against the device key.
+    let res = await call('POST', '/v1/look/a', { body: '{}', headers: phone.signApi('POST', '/v1/look/a', '{}', { key: 'device', signWith: 'read', header: false }) });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.error, 'bad_signature');
+    // The same with X-KL-Key: device.
+    res = await call('POST', '/v1/look/b', { body: '{}', headers: phone.signApi('POST', '/v1/look/b', '{}', { key: 'device', signWith: 'read' }) });
+    assert.equal(res.body.error, 'bad_signature');
+    // The device key over the read string, claimed read: checked against the read key.
+    res = await call('POST', '/v1/look/c', { body: '{}', headers: phone.signApi('POST', '/v1/look/c', '{}', { key: 'read', signWith: 'device' }) });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.error, 'bad_signature');
+    // A read-key signature over the read string sent without X-KL-Key is a device request that does not verify.
+    res = await call('POST', '/v1/look/d', { body: '{}', headers: phone.signApi('POST', '/v1/look/d', '{}', { key: 'read', header: false }) });
+    assert.equal(res.body.error, 'bad_signature');
+  });
+
+  it('refuses an X-KL-Key that is neither read nor device', async () => {
+    const { call, phone } = await start();
+    const headers = { ...phone.signApi('POST', '/v1/look/a', '{}'), 'X-KL-Key': 'other' };
+    const res = await call('POST', '/v1/look/a', { body: '{}', headers });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.error, 'bad_key');
+  });
+
+  it('one replay cache across both keys', async () => {
+    const { call, phone } = await start();
+    const timestamp = new Date().toISOString();
+    const read = phone.signReadApi('POST', '/v1/look/a', '{}', { timestamp });
+    assert.equal((await call('POST', '/v1/look/a', { body: '{}', headers: read })).status, 202);
+    assert.equal((await call('POST', '/v1/look/a', { body: '{}', headers: read })).body.error, 'replay');
+    // The same request signed by the device key is another signed string, kept in the same cache.
+    const device = phone.signApi('POST', '/v1/look/a', '{}', { timestamp });
+    assert.equal((await call('POST', '/v1/look/a', { body: '{}', headers: device })).status, 202);
+    assert.equal((await call('POST', '/v1/look/a', { body: '{}', headers: device })).body.error, 'replay');
+  });
+
+  it('one rate bucket across both keys', async () => {
+    const { call, phone, signed } = await start({ rateLimits: { devicePerMin: 2 } });
+    assert.equal((await signed('POST', '/v1/look/1', '{}')).status, 202);
+    assert.equal((await call('POST', '/v1/look/2', { body: '{}', headers: phone.signReadApi('POST', '/v1/look/2', '{}') })).status, 202);
+    const limitedRead = await call('POST', '/v1/look/3', { body: '{}', headers: phone.signReadApi('POST', '/v1/look/3', '{}') });
+    assert.equal(limitedRead.status, 429);
+    assert.equal((await signed('POST', '/v1/echo/4', '{}')).status, 429);
+  });
+
+  it('registerRoute takes the read auth kind and routes() lists it', async () => {
+    const { api } = await start();
+    assert.deepEqual(api.routes().find((r) => r.pattern === '/v1/look/{thing}'), { method: 'POST', pattern: '/v1/look/{thing}', auth: 'read' });
   });
 });
 

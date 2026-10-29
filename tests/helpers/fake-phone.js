@@ -5,7 +5,10 @@
 // identity for tests that must not spawn openssl to make a TLS certificate.
 // Keys come from tests/vectors/approval-v1/keys.json when `seed` is 'A', 'B'
 // or 'C' (these are test keys nodes refuse without allowTestKeys), else they
-// are random.
+// are random. Every phone also has a read key (spec 2026-10-28 §8.1):
+// `readJwk`/`readSigner`, and `signApi(..., { key: 'read' })` for a
+// read-signed phone API call. It is keys.json's `<seed>_read` when the file
+// has one, else random.
 const crypto = require('crypto');
 const path = require('path');
 const { seal, open, deviceIdFromJwk, nodeSigner } = require('../../src/approvals/envelope');
@@ -38,6 +41,19 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
   }
   const deviceId = deviceIdFromJwk(jwk);
   const signer = { alg: 'ES256', kid: deviceId, sign: (bytes) => crypto.sign('sha256', bytes, { key: privateKey, dsaEncoding: 'ieee-p1363' }) };
+  const fixedRead = seed ? KEYS.devices[`${seed}_read`] : null;
+  let readJwk;
+  let readPrivateKey;
+  if (fixedRead) {
+    ({ jwk: readJwk, privateKey: readPrivateKey } = p256FromD(fixedRead.d));
+  } else {
+    const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const { kty, crv, x, y } = pair.publicKey.export({ format: 'jwk' });
+    readJwk = { kty, crv, x, y };
+    readPrivateKey = pair.privateKey;
+  }
+  // The read key has no id of its own: what it signs names the device.
+  const readSigner = { alg: 'ES256', kid: deviceId, sign: (bytes) => crypto.sign('sha256', bytes, { key: readPrivateKey, dsaEncoding: 'ieee-p1363' }) };
 
   const phone = {
     deviceId,
@@ -45,6 +61,8 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
     name,
     platform,
     signer,
+    readJwk,
+    readSigner,
     sign: (message) => seal(message, signer),
 
     device() {
@@ -129,14 +147,27 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
       return seal({ v: 1, type: 'kl.lease.watch', node_id: nodeId, lease_id: leaseId, device_id: deviceId, contact_token: contactToken, nonce: nonce || randomNonce(), signed_at: signedAt }, signer);
     },
 
-    // Headers for a device-authenticated phone API call.
-    signApi(method, pathWithQuery, body = '', { timestamp = new Date().toISOString() } = {}) {
-      const s = phoneAuthString(method, pathWithQuery, timestamp, body);
-      return {
+    // Headers for a device-authenticated phone API call. `key: 'read'` signs
+    // KL-PHONE-READ-V1 with the read key and adds `X-KL-Key: read`; `key:
+    // 'device'` adds `X-KL-Key: device` (absent is the same). `signWith`
+    // ('device' | 'read') signs with the other key than the one claimed, and
+    // `header: false` leaves X-KL-Key out, for refusal tests.
+    signApi(method, pathWithQuery, body = '', { timestamp = new Date().toISOString(), key = null, signWith = null, header = true } = {}) {
+      const kind = key || 'device';
+      const s = phoneAuthString(method, pathWithQuery, timestamp, body, { key: kind });
+      const by = (signWith || kind) === 'read' ? readSigner : signer;
+      const headers = {
         'X-KL-Device': deviceId,
         'X-KL-Timestamp': timestamp,
-        'X-KL-Signature': signer.sign(Buffer.from(s, 'utf8')).toString('base64url')
+        'X-KL-Signature': by.sign(Buffer.from(s, 'utf8')).toString('base64url')
       };
+      if (key && header) headers['X-KL-Key'] = key;
+      return headers;
+    },
+
+    // Shorthand: headers for a read-signed phone API call.
+    signReadApi(method, pathWithQuery, body = '', options = {}) {
+      return phone.signApi(method, pathWithQuery, body, { ...options, key: 'read' });
     },
 
     // client-grant-v1 (fleet stage 4 §4.2–4.3). `pending` is the view the
