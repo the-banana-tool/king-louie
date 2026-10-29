@@ -9,9 +9,10 @@ import com.example.kinglouie.protocol.FrontDoorReply
 import com.example.kinglouie.protocol.Jcs
 import com.example.kinglouie.protocol.JsonText
 import com.example.kinglouie.protocol.Messages
+import com.example.kinglouie.RouteKey.DEVICE
+import com.example.kinglouie.RouteKey.ENVELOPE
+import com.example.kinglouie.RouteKey.READ
 import com.example.kinglouie.protocol.PhoneKey
-import com.example.kinglouie.protocol.PhoneKey.DEVICE
-import com.example.kinglouie.protocol.PhoneKey.READ
 import com.example.kinglouie.protocol.ProtocolException
 import com.example.kinglouie.protocol.Timestamps
 import com.example.kinglouie.protocol.arr
@@ -73,17 +74,32 @@ class PinningTrustManager(private val pin: String) : X509TrustManager {
 }
 
 /**
+ * How a request is signed (android-slim §8.4, `ROUTE_AUTH` in
+ * tests/frontdoor-phone-routes.test.js).
+ *
+ * - READ: a request that only reads, or carries no decision (the lists,
+ *   presence, the push token, the views, a watch's transport). The read key
+ *   signs it; a phone without one gets `read_key_not_set_up` at once, never a
+ *   fingerprint prompt.
+ * - ENVELOPE: a request whose body is an envelope the device key signed (the
+ *   envelope is the decision: a response, an answer, a lease grant, deny or
+ *   revoke, an enrollment, a revocation, a front-door decision, a read-key
+ *   statement sent again). The read key signs the request; a phone enrolled
+ *   before the read key, until its §8.7 set-up, signs it with the device key,
+ *   which the relay accepts on these routes too.
+ * - DEVICE: a request that changes something with no envelope, and the first
+ *   read-key statement (the relay knows no read key until it has it). The read
+ *   key never signs one.
+ */
+enum class RouteKey { READ, ENVELOPE, DEVICE }
+
+/**
  * The relay's phone API (approval-v1 §7), with the two keys of android-slim
  * §8: `deviceSigner` signs with the device key (a biometric prompt for each
  * signature), `readSigner` with the read key (no prompt; refused while the
- * phone is locked). Each function names the key its route takes (§8.4,
- * `ROUTE_AUTH` in tests/frontdoor-phone-routes.test.js): READ for every route
- * that only reads or whose body is an envelope the device key signed, DEVICE
- * for the few that change something with no envelope, NONE for the time,
- * code, invite and re-pin routes. Without a `readSigner` (a phone enrolled
- * before the read key, until its §8.7 set-up) a READ route is signed with the
- * device key, which the relay accepts there too; the read key itself is never
- * used for a DEVICE route. Nothing here logs a key, signature or code.
+ * phone is locked). Each function names its route's [RouteKey]; NONE for the
+ * time, code, invite and re-pin routes. Nothing here logs a key, signature or
+ * code.
  */
 class RelayApi(
     private val base: String,
@@ -92,9 +108,6 @@ class RelayApi(
     private val deviceSigner: (suspend (ByteArray) -> ByteArray)?,
     private val readSigner: (suspend (ByteArray) -> ByteArray)? = null
 ) {
-    /** Whether READ routes go out with the read key (else with the device key). */
-    val signsWithReadKey: Boolean get() = readSigner != null
-
     private val trust = PinningTrustManager(pin)
     private val ssl = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }
 
@@ -115,13 +128,14 @@ class RelayApi(
     }
 
     /**
-     * Signed with `key` (READ, DEVICE, or NONE for the code, invite, time and
-     * re-pin routes). A 401 clock_skew is answered exactly once: the offset
+     * Signed as `key` says (RouteKey; NONE for the code, invite, time and
+     * re-pin routes). A READ request with no read key throws
+     * `read_key_not_set_up` before anything is signed or sent. A 401 clock_skew is answered exactly once: the offset
      * from its `server_time` is kept for this and every later request, and the
      * request is signed again. A second clock_skew is an error. Anything
      * outside 2xx throws RelayException.
      */
-    suspend fun request(method: String, pathWithQuery: String, key: PhoneKey?, body: JsonElement? = null): Pair<Int, JsonElement?> {
+    suspend fun request(method: String, pathWithQuery: String, key: RouteKey?, body: JsonElement? = null): Pair<Int, JsonElement?> {
         val (status, json) = exchange(method, pathWithQuery, key, body)
         if (status in 200..299) return status to json
         throw RelayException(status, json["error"].str() ?: "http_$status", json["message"].str() ?: "", json["retry_after"].int())
@@ -133,22 +147,23 @@ class RelayApi(
      * replies read with FrontDoorReply. A transport failure, a refused pin, a
      * redirect or an unreadable 2xx throws.
      */
-    suspend fun exchange(method: String, pathWithQuery: String, key: PhoneKey?, body: JsonElement? = null, retried: Boolean = false): Pair<Int, JsonElement?> {
+    suspend fun exchange(method: String, pathWithQuery: String, key: RouteKey?, body: JsonElement? = null, retried: Boolean = false): Pair<Int, JsonElement?> {
         val bytes = body?.let { Jcs.bytes(it) } ?: ByteArray(0)
         val headers = mutableMapOf<String, String>()
-        // READ falls back to the device key only when this phone has no read key; DEVICE never uses the read key.
-        val used = if (key == READ && readSigner == null) DEVICE else key
-        val signer = when (used) {
-            READ -> readSigner
-            DEVICE -> deviceSigner
-            null -> null
+        // Only an envelope's request falls back to the device key, on a phone with no read key;
+        // a READ request then fails without a prompt, and DEVICE never uses the read key.
+        val (signer, used) = when (key) {
+            READ -> (readSigner ?: throw RelayException(0, READ_KEY_NOT_SET_UP, READ_KEY_NOT_SET_UP_TEXT)) to PhoneKey.READ
+            ENVELOPE -> if (readSigner != null) readSigner to PhoneKey.READ else deviceSigner to PhoneKey.DEVICE
+            DEVICE -> deviceSigner to PhoneKey.DEVICE
+            null -> null to null
         }
         if (used != null && deviceId != null && signer != null) {
             val timestamp = Timestamps.string(now())
             val s = Messages.phoneAuthString(method, pathWithQuery, timestamp, bytes, used)
             headers["X-KL-Device"] = deviceId
             // A device-key request sends no X-KL-Key, as before the read key, so an older relay reads it as today.
-            if (used == READ) headers["X-KL-Key"] = PhoneKey.READ.header
+            if (used == PhoneKey.READ) headers["X-KL-Key"] = PhoneKey.READ.header
             headers["X-KL-Timestamp"] = timestamp
             headers["X-KL-Signature"] = B64Url.encode(signer.invoke(s.toByteArray(Charsets.UTF_8)))
         }
@@ -229,14 +244,14 @@ class RelayApi(
     suspend fun approval(id: String): JsonElement? = request("GET", "/v1/approvals/${segment(id)}", READ).second
 
     /** `202 { delivered, accepted, reason }`; read it with ResponseOutcome. */
-    suspend fun respond(id: String, envelope: Envelope): JsonElement? = request("POST", "/v1/approvals/${segment(id)}/response", READ, envelope.json).second
+    suspend fun respond(id: String, envelope: Envelope): JsonElement? = request("POST", "/v1/approvals/${segment(id)}/response", ENVELOPE, envelope.json).second
 
     // Cases stage 4: node-signed kl.question.ask envelopes, and device-signed answers back.
     suspend fun questions(): List<JsonElement> = request("GET", "/v1/questions", READ).second.arr() ?: emptyList()
 
     /** The node's `{ ok, outcome, ack }` or `{ ok: false, error }`, passed through by the relay. */
     suspend fun answerQuestion(token: String, envelope: Envelope): JsonElement? =
-        request("POST", "/v1/questions/${segment(token)}/answer", READ, envelope.json).second
+        request("POST", "/v1/questions/${segment(token)}/answer", ENVELOPE, envelope.json).second
 
     // Fleet stage 5 (§4.7): lease requests, decisions and views. No call here
     // repeats itself; each decision is sent once (R-F5-5).
@@ -251,11 +266,14 @@ class RelayApi(
 
     /**
      * `202 { state, reason? }` from the node, passed through by the relay; a
-     * watch reply also has `after_seq`. Read-key transport for grant, revoke
-     * and watch alike: the envelope is what decides (§8.4).
+     * watch reply also has `after_seq`. A grant, deny or revoke is an
+     * envelope the device key signed (ENVELOPE); a watch is read-only
+     * transport (READ), whichever key signed the watch itself.
      */
-    suspend fun leaseDecision(action: String, leaseId: String, envelope: Envelope): JsonElement? =
-        request("POST", "/v1/leases/${segment(leaseId)}/$action", READ, envelope.json).second
+    suspend fun leaseDecision(action: String, leaseId: String, envelope: Envelope): JsonElement? {
+        val route = if (action == "watch") READ else ENVELOPE
+        return request("POST", "/v1/leases/${segment(leaseId)}/$action", route, envelope.json).second
+    }
 
     /** Views and statuses after `afterSeq`; `waitS` > 0 holds the request open until something arrives (the relay caps it at 25). */
     suspend fun leaseViews(leaseId: String, afterSeq: Int, waitS: Int): List<JsonElement> =
@@ -279,17 +297,20 @@ class RelayApi(
     suspend fun claimInvite(id: String, device: JsonElement, mac: String) {
         request("POST", "/v1/devices/invites/${segment(id)}/claim", NONE, JsonObject(mapOf("device" to device, "mac" to jsonString(mac))))
     }
-    suspend fun enrollDevice(envelope: Envelope): JsonElement? = request("POST", "/v1/devices/enroll", READ, envelope.json).second
-    suspend fun revokeDevice(envelope: Envelope): JsonElement? = request("POST", "/v1/devices/revoke", READ, envelope.json).second
+    suspend fun enrollDevice(envelope: Envelope): JsonElement? = request("POST", "/v1/devices/enroll", ENVELOPE, envelope.json).second
+    suspend fun revokeDevice(envelope: Envelope): JsonElement? = request("POST", "/v1/devices/revoke", ENVELOPE, envelope.json).second
 
     /**
      * A device-key-signed `kl.device.read_key` statement (android-slim §8.7):
      * `key` DEVICE for the first send (the relay knows no read key until it
-     * has this), READ for a re-send to nodes that answered `offline`.
-     * `{ nodes: [{ node_id, state }] }`; a relay from before the read key
-     * answers 404.
+     * has this), READ for a re-send to nodes that answered `offline` (an
+     * envelope's request, so ENVELOPE). `{ nodes: [{ node_id, state }] }`; a
+     * relay from before the read key answers 404.
      */
-    suspend fun readKey(statement: Envelope, key: PhoneKey): JsonElement? = request("POST", "/v1/devices/read-key", key, statement.json).second
+    suspend fun readKey(statement: Envelope, key: PhoneKey): JsonElement? {
+        val route = if (key == PhoneKey.DEVICE) DEVICE else ENVELOPE
+        return request("POST", "/v1/devices/read-key", route, statement.json).second
+    }
     suspend fun devices(): List<JsonElement> = request("GET", "/v1/devices", READ).second.arr() ?: emptyList()
 
     /** On the read key: re-sent with no prompt when the token rotates (spec 3 R5). */
@@ -314,7 +335,7 @@ class RelayApi(
 
     /** Decisions, revocations and removals: only FrontDoorReply's exact-state check confirms one, and a refusal's code is data. */
     private suspend fun reply(path: String, envelope: Envelope): FrontDoorReply {
-        val (status, body) = exchange("POST", path, READ, envelope.json)
+        val (status, body) = exchange("POST", path, ENVELOPE, envelope.json)
         return FrontDoorReply.from(status, body)
     }
 
@@ -343,7 +364,11 @@ class RelayApi(
         private val longPolls = Semaphore(2)
 
         /** No device signature: the time, code, invite and re-pin routes. */
-        val NONE: PhoneKey? = null
+        val NONE: RouteKey? = null
+
+        /** A READ request on a phone without a read key (P4 of the review): it is set up from the list. */
+        const val READ_KEY_NOT_SET_UP = "read_key_not_set_up"
+        const val READ_KEY_NOT_SET_UP_TEXT = "This phone's read key is not set up yet. Set it up from the list (two fingerprints, once)."
 
         /** One path segment, percent-encoded so an id can never add a segment or a query. */
         fun segment(value: String): String = buildString {

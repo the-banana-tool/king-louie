@@ -202,7 +202,7 @@ describe('Android: the Scanner and Settings (android-slim §6.1, §6.4)', () => 
 
   it('Settings reads its lists when it opens, removes a pin only after a confirm, and keeps reset behind one', () => {
     const s = kt('SettingsScreen.kt');
-    assert.match(s, /LaunchedEffect\(Unit\) \{ model\.refreshSettings\(\) \}/);
+    assert.match(s, /LaunchedEffect\(model\.readKeySetupNeeded\) \{ model\.refreshSettings\(\) \}/);
     assert.match(s, /model\.settingsNodes\(\)/);
     for (const call of ['model.forgetNode(', 'model.removeNode(', 'model.revokeClient(', 'model.revoke(', 'model.startInvite()', 'model.confirmInvited()', 'model.sendReadKeyAgain()', 'model.reset()']) {
       assert.ok(s.includes(call), call);
@@ -228,10 +228,12 @@ describe('Android: the read key and the routes (android-slim §8.4, §12.1)', ()
     assert.match(model, /private fun readSigner\(\): \(suspend \(ByteArray\) -> ByteArray\)\? \{\n\s+val rk = readKey \?: return null\n\s+return \{ data -> withContext\(Dispatchers\.IO\) \{ rk\.sign\(data\) \} \}/);
     assert.equal(count(model, 'readSigner()'), 2, 'declared, and handed to RelayApi once');
     assert.match(model, /if \(message\["type"\]\.str\(\) != "kl\.lease\.watch"\) throw /);
-    // RelayApi: its read signer signs a READ request and nothing else (presence, the lists, the watch's transport).
+    // RelayApi: its read signer signs a READ request (presence, the lists, the watch's transport) and an
+    // ENVELOPE one (the request carrying a device-key envelope), never a DEVICE one.
     const api = code(kt('RelayApi.kt'));
-    assert.match(api, /READ -> readSigner\n/);
-    assert.equal(count(api, 'readSigner'), 4, 'declared, signsWithReadKey, the fallback check and READ -> readSigner');
+    assert.match(api, /READ -> \(readSigner \?: throw /);
+    assert.match(api, /ENVELOPE -> if \(readSigner != null\) readSigner to PhoneKey\.READ else deviceSigner to PhoneKey\.DEVICE\n/);
+    assert.equal(count(api, 'readSigner'), 4, 'declared, READ, and ENVELOPE\'s check and use');
     // No screen touches either key.
     for (const file of appFiles()) {
       const base = path.basename(file);
@@ -241,3 +243,65 @@ describe('Android: the read key and the routes (android-slim §8.4, §12.1)', ()
     }
   });
 });
+
+// The code review's spec findings (P1, P2, P3, P6): what each fix wrote into the app.
+describe('Android: review fixes (android-slim §4, §6.4, §7.2, §9)', () => {
+  // Every model file of the app (AppModel.kt and the files split out of it).
+  const modelText = () => ['AppModel.kt', 'Storage.kt', 'ReadKeyNodes.kt', 'InviteFlow.kt', 'OwnerText.kt', 'ScannerCodes.kt']
+    .filter((f) => fs.existsSync(path.join(KT_DIR, f))).map((f) => kt(f)).join('\n');
+
+  it('a decided row of every yes/no kind stays at the bottom until a minute past its expiry (§7.2, P1)', () => {
+    const list = section(kt('AppModel.kt'), 'fun approvalList(): ApprovalList.Result {', '\n    }\n');
+    assert.match(list, /ApprovalList\.LeaseRequestItem\([^\n]*decided = /);
+    assert.match(list, /ApprovalList\.ClientConnection\([^\n]*decided = /);
+    assert.match(list, /ApprovalList\.NodePairing\([^\n]*decided = /);
+    const model = kt('AppModel.kt');
+    // A confirmed lease decision keeps its row, decided, instead of dropping it at once.
+    assert.match(model, /leaseDecided\[id\] = /);
+    assert.match(model, /clientDecided = /);
+    assert.match(model, /pairingDecided\[pairing\.pairingId\] = /);
+    // Each leaves a minute past its expiry.
+    assert.match(model, /DECIDED_KEEP_MS = 60_000L/);
+  });
+
+  it('an unanswered Allow, Deny or Stop says so on its row, and Stop stays enabled (R-F5-5, P2)', () => {
+    const list = section(kt('AppModel.kt'), 'fun approvalList(): ApprovalList.Result {', '\n    }\n');
+    assert.match(list, /unconfirmed = item\.unconfirmed/);
+    const rows = section(kt('AppModel.kt'), 'private fun runningLeaseRows', '\n    }\n');
+    assert.match(rows, /unconfirmed = live\.unconfirmed/);
+    const s = kt('Screens.kt');
+    assert.match(s, /row\.notConfirmed\?\.let \{ Text\(it, [^\n]*statusColors\.warning/);
+  });
+
+  it('Settings without a read key shows the set-up line and what the phone knows (§6.4, P3)', () => {
+    const s = kt('SettingsScreen.kt');
+    assert.match(s, /if \(model\.readKeySetupNeeded\) \{/);
+    assert.match(s, /Text\(AppModel\.SETTINGS_READ_KEY_LINE/);
+    assert.match(s, /model\.setUpReadKey\(\)/);
+    // Read again once the read key is set up.
+    assert.match(s, /LaunchedEffect\(model\.readKeySetupNeeded\) \{ model\.refreshSettings\(\) \}/);
+    assert.match(modelText(), /const val SETTINGS_READ_KEY_LINE = "Set up the read key to see nodes and phones\."/);
+    // The pins, the fingerprints and Reset do not wait for the read key.
+    assert.match(s, /val nodes = model\.settingsNodes\(\)/);
+    assert.match(s, /model\.deviceFingerprint/);
+    assert.match(s, /resetAsked = true/);
+  });
+
+  it('a notification arriving while the app is in front runs step 2 at once (§9, P6)', () => {
+    const fcm = read(path.join(ROOT, 'mobile', 'android', 'app', 'src', 'fcm', 'kotlin', 'com', 'example', 'kinglouie', 'push', 'Push.kt'));
+    const received = section(fcm, 'override fun onMessageReceived(message: RemoteMessage) {', '\n    }\n');
+    assert.match(received, /\(application as KingLouieApplication\)\.model\.onNotificationArrived\(\)/);
+    // The notification kinds are spec 3's, unchanged.
+    assert.match(received, /setOf\("approval", "pairing", "alert", "question", "lease"\)/);
+    const arrived = section(kt('AppModel.kt'), 'fun onNotificationArrived() {', '\n    }\n');
+    assert.match(arrived, /scope\.launch \{ if \(foreground\) refresh\(\) \}/);
+  });
+});
+
+function section(text, start, end) {
+  const a = text.indexOf(start);
+  assert.ok(a >= 0, `"${start}" is there`);
+  const b = text.indexOf(end, a + start.length);
+  assert.ok(b > a, `"${end}" follows "${start}"`);
+  return text.slice(a, b + end.length);
+}

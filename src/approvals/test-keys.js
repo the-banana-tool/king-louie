@@ -27,8 +27,17 @@ function isTestDeviceKey(jwk) {
   return Boolean(jwk) && TEST_DEVICE_KEYS.some((k) => k.x === jwk.x && k.y === jwk.y);
 }
 
+// A record, or an enrollment's device, whose device key or read key
+// (android-slim §8.8) is a published test key. A holder without a read key is
+// judged on its device key alone.
+function hasTestKey(holder) {
+  if (!holder) return false;
+  const readKey = holder.read_key === undefined || holder.read_key === null ? null : holder.read_key;
+  return isTestDeviceKey(holder.public_key) || isTestDeviceKey(readKey);
+}
+
 function isTestNodeKey(spkiHex) {
   return TEST_NODE_KEYS.includes(String(spkiHex).toLowerCase());
 }
 
-module.exports = { TEST_DEVICE_KEYS, TEST_NODE_KEYS, isTestDeviceKey, isTestNodeKey };
+module.exports = { TEST_DEVICE_KEYS, TEST_NODE_KEYS, isTestDeviceKey, isTestNodeKey, hasTestKey };

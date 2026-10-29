@@ -5,8 +5,11 @@
 // Each route's `auth` follows android-slim §8.4: a route that only reads, or
 // whose body is an envelope the device key signed (the envelope is the
 // decision), takes either key (`read`); one that changes something with no
-// such envelope takes the device key (`device`).
-const { open, verifyEs256, deviceIdFromJwk, isDeviceJwk } = require('../approvals/envelope');
+// such envelope takes the device key (`device`). Two exceptions change
+// something with no envelope and still take either key, as §8.4 lists them:
+// POST /v1/presence (the phone's foreground state) and PUT /v1/push-token
+// (where its notifications go).
+const { open, verifyEs256, deviceIdFromJwk, isDeviceJwk, samePoint } = require('../approvals/envelope');
 const { validateMessage } = require('../approvals/messages');
 const { FUTURE_SKEW_MS } = require('../approvals/approver-store');
 const { ApiError } = require('./phone-api');
@@ -20,9 +23,10 @@ const MAX_POLLS_PER_DEVICE = 2;
 // node reply never makes a device `active` here).
 const ENROLL_STATES = ['staged', 'rejected'];
 // Node answers to device.read_key (android-slim §8.7) passed back to the
-// phone; anything else (an older node with no such method, no answer) is
+// phone (`applied`: the node's record already holds this read key;
+// `duplicate`: it is staged, waiting for `device apply`); anything else (an older node with no such method, no answer) is
 // `offline`, which the app re-sends to. None changes the device's state here.
-const READ_KEY_STATES = ['read-key-pending-apply', 'duplicate', 'rejected'];
+const READ_KEY_STATES = ['read-key-pending-apply', 'applied', 'duplicate', 'rejected'];
 
 function parseEnvelope(body, type) {
   let message;
@@ -221,7 +225,7 @@ function registerPhoneRoutes(relay) {
         // JWK that is not the device key. The inviter signs it into the
         // enrollment, which is where the relay learns it.
         && (!Object.hasOwn(device, 'read_key') || (isDeviceJwk(device.read_key)
-          && !(device.read_key.x === device.public_key.x && device.read_key.y === device.public_key.y)));
+          && !samePoint(device.read_key, device.public_key)));
       if (!valid) throw new ApiError(400, 'bad_device', 'claim needs { device: { device_id, name, platform, public_key, read_key? }, mac }');
       try {
         invites.claim(ctx.params.id, { device, mac });

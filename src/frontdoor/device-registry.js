@@ -3,7 +3,7 @@
 // each relay.hello). Nodes never trust any of it; they verify signatures.
 const fs = require('fs');
 const path = require('path');
-const { deviceIdFromJwk, isDeviceJwk, open } = require('../approvals/envelope');
+const { deviceIdFromJwk, isDeviceJwk, samePoint, open } = require('../approvals/envelope');
 const { writeFileAtomic } = require('../approvals/approver-store');
 const { DEVICE_ID_RE, NODE_ID_RE, isTimestamp } = require('../approvals/messages');
 const { err } = require('./errors');
@@ -119,7 +119,7 @@ class DeviceRegistry {
     const record = DEVICE_ID_RE.test(deviceId) ? this.devices.get(deviceId) : null;
     if (!record) return null;
     if (!isDeviceJwk(jwk)) throw err('bad_read_key', 'the read key is not a P-256 JWK');
-    if (jwk.x === record.jwk.x && jwk.y === record.jwk.y) throw err('bad_read_key', 'the read key is the device key');
+    if (samePoint(jwk, record.jwk)) throw err('bad_read_key', 'the read key is the device key');
     if (!isTimestamp(createdAt)) throw err('bad_read_key', 'created_at must be RFC 3339 UTC');
     if (record.read_jwk && record.read_key_created_at && Date.parse(createdAt) <= Date.parse(record.read_key_created_at)) {
       return { record, updated: false };

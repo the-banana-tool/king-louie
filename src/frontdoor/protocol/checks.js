@@ -7,7 +7,7 @@
 const crypto = require('crypto');
 const { open, verifyEs256, verifyEd25519, EnvelopeError } = require('../../approvals/envelope');
 const { validateMessage } = require('../../approvals/messages');
-const { isTestDeviceKey, isTestNodeKey } = require('../../approvals/test-keys');
+const { hasTestKey, isTestNodeKey } = require('../../approvals/test-keys');
 const { deriveNodeId } = require('../../mesh/node-identity');
 const { spkiHexFromRaw } = require('./messages');
 
@@ -54,7 +54,7 @@ function verifyPhoneEnvelope(envelope, { approverStore, type, frontdoorId, accep
   const record = approverStore.get(envelope.kid);
   if (!record) return fail('unknown_device');
   if (record.platform === 'demo') return fail('demo_device');
-  if (approverStore.allowTestKeys !== true && isTestDeviceKey(record.public_key)) return fail('test_key');
+  if (approverStore.allowTestKeys !== true && hasTestKey(record)) return fail('test_key');
   if (acceptedAt === null) {
     if (!approverStore.isActive(envelope.kid)) return fail('revoked_device');
   } else if (record.revoked_at !== null && !(Date.parse(acceptedAt) < Date.parse(record.revoked_at))) {

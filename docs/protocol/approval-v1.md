@@ -642,7 +642,7 @@ it has not expired (`400 expired`); the caller is active on at least one node
 then stores the key (a newer `created_at` replaces an older one) and forwards
 the envelope as the node method `device.read_key` (`{ envelope }`) to every
 node where the device is active. Each node's `state` is what it answered,
-`read-key-pending-apply`, `duplicate` or `rejected`, or `offline` for anything
+`read-key-pending-apply`, `applied`, `duplicate` or `rejected`, or `offline` for anything
 else (no answer, or a node from before this change). The relay writes no
 device-log entry for a statement; the phone re-sends it, with the read key, to
 the nodes that answered `offline`, until it expires.
@@ -654,11 +654,15 @@ that method (`malformed` otherwise). Then: shape (`malformed`),
 (`malformed`); the device an active approver (`signer_not_active`) whose
 **device key** verifies it (`bad_signature`: a statement signed by the read
 key itself is refused); `read_key` not the device key (`malformed`) and not a
-test key (`test_key`); the record's read key already (`{ state: 'duplicate' }`);
+test key (`test_key`); the record's read key already (`{ state: 'applied' }`:
+`device apply` has written it, so the phone can stop waiting; this also
+answers a re-sent statement whose nonce the node has seen);
 `created_at` after the record's current read key was set (`read_key_at`, else
 `enrolled_at`; `stale` otherwise). A staged statement answers
 `{ state: 'read-key-pending-apply' }` and is audited `device.staged` (a
-refusal `device.rejected`, as for enroll and revoke).
+refusal `device.rejected`, as for enroll and revoke). The same statement sent
+again while it is still staged answers `{ state: 'duplicate' }`. Neither
+`applied` nor `duplicate` is audited.
 
 `king-louie-service device apply` lists a staged statement as
 `read key  <device-id>  "<name>"  r-…  signed by the device itself  (<age>)`,

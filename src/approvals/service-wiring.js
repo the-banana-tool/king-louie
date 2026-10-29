@@ -108,7 +108,8 @@ function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, cour
       // revoke may still cross each other's method, as before.)
       const readKeyMismatch = (method === 'device.read_key') !== (type === 'kl.device.read_key');
       const result = readKeyMismatch ? { state: 'rejected', reason: 'malformed' } : approverStore.stage(params.envelope);
-      if (result.state !== 'duplicate') {
+      // Nothing new happened for a duplicate or an `applied` read key: no audit entry.
+      if (result.state !== 'duplicate' && result.state !== 'applied') {
         const kind = result.state === 'rejected' ? 'device.rejected' : 'device.staged';
         if (kind !== 'device.rejected' || admitRejectedAudit()) {
           auditLedger.append({ kind, data: { type, device_id: deviceId, reason: result.reason || null, envelope_sha256: envelopeSha(params.envelope) } })

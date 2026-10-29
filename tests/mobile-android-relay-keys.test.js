@@ -89,9 +89,9 @@ describe('Android: two keys, and the key each relay route is signed with (androi
     const api = read(...KT, 'RelayApi.kt');
     const found = calls(api);
     assert.ok(found.length >= 30, `found ${found.length} calls`);
-    // reply() is the front door's decision helper; it signs with the read key.
-    assert.match(api, /private suspend fun reply\(path: String, envelope: Envelope\): FrontDoorReply \{\n\s+val \(status, body\) = exchange\("POST", path, READ, envelope\.json\)/);
-    const allowed = { READ: ['read'], DEVICE: ['device'], NONE: ['none', 'code', 'invite'], reply: ['read'], key: ['read'] };
+    // reply() is the front door's decision helper; its body is a device-key envelope.
+    assert.match(api, /private suspend fun reply\(path: String, envelope: Envelope\): FrontDoorReply \{\n\s+val \(status, body\) = exchange\("POST", path, ENVELOPE, envelope\.json\)/);
+    const allowed = { READ: ['read'], ENVELOPE: ['read'], DEVICE: ['device'], NONE: ['none', 'code', 'invite'], reply: ['read'], route: ['read'] };
     for (const c of found) {
       const hits = routeFor(table, c.method, c.path);
       assert.equal(hits.length >= 1, true, `${c.method} ${c.path} is in ROUTE_AUTH`);
@@ -99,14 +99,41 @@ describe('Android: two keys, and the key each relay route is signed with (androi
       assert.ok(kinds, `${c.method} ${c.path}: a key RelayApi names (${c.key})`);
       for (const h of hits) assert.ok(kinds.includes(h.auth), `${c.method} ${c.path} signed ${c.key}, table says ${h.auth}`);
     }
-    // The one route whose key is the caller's: kl.device.read_key, device key first, read key after (§8.7).
-    const keyed = found.filter((c) => c.key === 'key');
-    assert.deepEqual(keyed.map((c) => `${c.method} ${c.path}`), ['POST /v1/devices/read-key']);
+    // The routes whose key is chosen in the function: kl.device.read_key (device key first, then the
+    // envelope rule, §8.7) and a lease envelope (a watch is read-only transport; grant, deny and
+    // revoke are decisions).
+    const keyed = found.filter((c) => c.key === 'route');
+    assert.deepEqual(keyed.map((c) => `${c.method} ${c.path}`).sort(), ['POST /v1/devices/read-key', 'POST /v1/leases/${segment(leaseId)}/$action']);
+    assert.match(api, /val route = if \(key == PhoneKey\.DEVICE\) DEVICE else ENVELOPE\n\s+return request\("POST", "\/v1\/devices\/read-key", route, statement\.json\)/);
+    assert.match(api, /val route = if \(action == "watch"\) READ else ENVELOPE\n\s+return request\("POST", "\/v1\/leases\/\$\{segment\(leaseId\)\}\/\$action", route, envelope\.json\)/);
+    // ENVELOPE carries an envelope the device key signed, and only that: every such call's body is one.
+    for (const m of api.matchAll(/\b(?:request|exchange)\("(?:POST|PUT)", [^\n]*?, ENVELOPE, ([a-z]+)\.json\)/g)) {
+      assert.ok(['envelope', 'statement'].includes(m[1]), `an ENVELOPE request sends an envelope (${m[0]})`);
+    }
     // Presence (§9): read key, { foreground, at }.
     assert.match(api, /suspend fun presence\(foreground: Boolean\)/);
     assert.ok(found.some((c) => c.method === 'POST' && c.path === '/v1/presence' && c.key === 'READ'));
     // The push token rides the read key (spec 3 R5).
     assert.ok(found.some((c) => c.method === 'PUT' && c.path === '/v1/push-token' && c.key === 'READ'));
+  });
+
+  it('a read-only request with no read key fails at once and never prompts; only an envelope may travel device-signed (P4)', () => {
+    const api = read(...KT, 'RelayApi.kt');
+    assert.match(api, /enum class RouteKey \{ READ, ENVELOPE, DEVICE \}/);
+    const exchange = api.slice(api.indexOf('suspend fun exchange('), api.indexOf('private fun send('));
+    // READ: the read key or a clear error, never the device key.
+    assert.match(exchange, /READ -> \(readSigner \?: throw RelayException\(0, READ_KEY_NOT_SET_UP, READ_KEY_NOT_SET_UP_TEXT\)\) to PhoneKey\.READ/);
+    // ENVELOPE: the read key, else (a phone enrolled before it, until its set-up) the device key.
+    assert.match(exchange, /ENVELOPE -> if \(readSigner != null\) readSigner to PhoneKey\.READ else deviceSigner to PhoneKey\.DEVICE/);
+    assert.match(exchange, /DEVICE -> deviceSigner to PhoneKey\.DEVICE/);
+    assert.match(api, /const val READ_KEY_NOT_SET_UP = "read_key_not_set_up"/);
+    // Every GET is READ or unsigned, but the one that claims a client by its code (DEVICE).
+    for (const c of calls(api).filter((x) => x.method === 'GET')) {
+      if (c.path.startsWith('/v1/grants/pending')) assert.equal(c.key, 'DEVICE', c.path);
+      else assert.ok(['READ', 'NONE'].includes(c.key), `GET ${c.path} is ${c.key}`);
+    }
+    // Presence and the push token are READ.
+    for (const p of ['/v1/presence', '/v1/push-token']) assert.ok(calls(api).some((c) => c.path === p && c.key === 'READ'), p);
   });
 
   it('AppModel gives RelayApi the read key\'s signer, and the read key never prompts', () => {

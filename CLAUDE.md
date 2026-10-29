@@ -1036,7 +1036,7 @@ the e2e test), the owner check cannot tell them apart.
   refuses a read-key signature `bad_signature` (a sweep test signs each with one). A phone enrolled
   before it posts a device-signed `kl.device.read_key` to `POST /v1/devices/read-key`; the relay
   stores it and forwards the node method `device.read_key` (each node `read-key-pending-apply`,
-  `duplicate`, `rejected`, or `offline`), and `device apply` writes it (`read key set`, audited
+  `applied` (its record holds the key), `duplicate` (staged), `rejected`, or `offline`), and `device apply` writes it (`read key set`, audited
   `device.read_key_set`; `stale` for an older one). `A_read`/`B_read` in `TEST_DEVICE_KEYS` are
   refused as test keys. iOS has no read key and is unchanged.
 - `mcp` asks through the running service (file courier); with the service stopped every unsafe runbook

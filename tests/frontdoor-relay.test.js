@@ -849,6 +849,17 @@ describe('relay: the read key', () => {
     assert.equal(r.devices.get(idle.deviceId).read_jwk, null);
   });
 
+  it("passes a node's `applied` through (the record already holds this key) and reports any other answer as offline", async () => {
+    const applied = await linkNode('rk-applied', { 'device.read_key': () => ({ state: 'applied' }) });
+    const odd = await linkNode('rk-odd', { 'device.read_key': () => ({ state: 'set-somehow' }) });
+    const phone = createFakePhone({ name: 'Already applied' });
+    active(phone, applied, odd);
+    const res = await call(phone, 'POST', '/v1/devices/read-key', phone.readKeyStatement());
+    assert.equal(res.status, 200);
+    const byNode = Object.fromEntries(res.body.nodes.map((n) => [n.node_id, n.state]));
+    assert.deepEqual(byNode, { [applied.identity.nodeId]: 'applied', [odd.identity.nodeId]: 'offline' });
+  });
+
   it('a read-signed request reaches a read route and is refused on a device route', async () => {
     const phone = createFakePhone({ name: 'Reader' });
     active(phone, modern);

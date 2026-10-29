@@ -282,8 +282,7 @@ function restorePriorFile(file, prior) {
 // one (android-slim spec §8.2), else "".
 function withReadKey(holder) {
   if (!holder || !holder.read_key) return '';
-  const { readKeyFingerprint } = require('../../approvals/messages');
-  return ` with a read key ${readKeyFingerprint(holder.read_key)}`;
+  return ` with a read key ${readKeyText(holder.read_key)}`;
 }
 
 function describeState(store, record) {
@@ -309,8 +308,8 @@ function readKeyText(jwk) {
   }
 }
 
-// `names` maps a device id to its approver record, for read-key statements.
-function describeStagedItem(item, now, names = null) {
+// `recordsById` maps a device id to its approver record, for read-key statements.
+function describeStagedItem(item, now, recordsById = null) {
   if (item.type === 'unsafe' || item.type === 'unreadable') {
     return `${item.type}  ${item.file}  (${item.reason || item.error || 'unknown problem'})`;
   }
@@ -321,7 +320,7 @@ function describeStagedItem(item, now, names = null) {
   if (item.type === 'kl.device.read_key') {
     // The device's own statement of its read key (android-slim spec §8.7):
     // the device as this node knows it, and the new key's fingerprint.
-    const record = names && names.get(item.deviceId);
+    const record = recordsById && recordsById.get(item.deviceId);
     const name = record ? `"${printable(record.name)}"` : '(not an approver here)';
     return `read key  ${item.deviceId}  ${name}  ${readKeyText(item.message.read_key)}  signed by the device itself  (${age})`;
   }
@@ -407,13 +406,13 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
       results = await admin.applyStaged({
         confirm: async (items) => {
           const nowMs = (deps.now || Date.now)();
-          const names = new Map();
+          const recordsById = new Map();
           for (const i of items) {
             if (i.type !== 'kl.device.read_key') continue;
             const record = admin.read(i.deviceId);
-            if (record) names.set(i.deviceId, record);
+            if (record) recordsById.set(i.deviceId, record);
           }
-          for (const i of items) io.stdout.write(`${describeStagedItem(i, nowMs, names)}\n`);
+          for (const i of items) io.stdout.write(`${describeStagedItem(i, nowMs, recordsById)}\n`);
           if (flags.yes) return true;
           io.stdout.write('Apply these? [y/N] ');
           return /^y(es)?$/i.test((await readLine(io.stdin)).trim());

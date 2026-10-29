@@ -221,6 +221,18 @@ describe('security properties', () => {
     assert.equal(new ApproverStore({ dir: s.baseDir, allowTestKeys: 'true' }).allowTestKeys, false);
   });
 
+  it('refuses a record whose read key is a published test key, as the node does', async () => {
+    const { TEST_DEVICE_KEYS } = require('../src/approvals/test-keys');
+    const k = TEST_DEVICE_KEYS.find((t) => t.read_key);
+    const phone = createFakePhone();
+    const record = { ...phone.approverRecord(), read_key: { kty: 'EC', crv: 'P-256', x: k.x, y: k.y } };
+    const s = await approverStoreWith([record], { allowTestKeys: false, now: () => NOW });
+    stores.push(s);
+    const p = pending({ claimed_by: phone.deviceId });
+    const r = C.checkGrantDecision(phone.grant({ frontdoorId: FD.nodeId, pending: p }), { approverStore: s, frontdoorId: FD.nodeId, pending: p, now: NOW });
+    assert.equal(r.reason, 'test_key');
+  });
+
   it('refuses a demo device and a device staged for removal (overlay)', async () => {
     const demo = createFakePhone({ platform: 'demo' });
     const s = await approverStoreWith([A.approverRecord(), demo.approverRecord()], { overlay: [A.deviceId], allowTestKeys: true, now: () => NOW });

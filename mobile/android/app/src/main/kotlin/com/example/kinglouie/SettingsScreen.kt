@@ -49,7 +49,8 @@ private fun fdText(value: JsonElement?, max: Int = FrontDoor.SHOWN_TEXT_MAX): St
 
 @Composable
 fun SettingsScreen(model: AppModel, back: () -> Unit, openScanner: () -> Unit) {
-    LaunchedEffect(Unit) { model.refreshSettings() }
+    // Read when it opens, and again once the read key is set up.
+    LaunchedEffect(model.readKeySetupNeeded) { model.refreshSettings() }
     var forget by remember { mutableStateOf<AppModel.SettingsNode?>(null) }
     var resetAsked by remember { mutableStateOf(false) }
     val live = model.mode == AppMode.LIVE
@@ -78,6 +79,19 @@ fun SettingsScreen(model: AppModel, back: () -> Unit, openScanner: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         BackBar("Settings", back)
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // Without the read key the lists are not read (no fingerprint fallback, C-19): the set-up
+            // line, and below it what this phone knows itself (pins, fingerprints, Reset).
+            if (model.readKeySetupNeeded) {
+                item {
+                    ItemCard {
+                        Text(AppModel.SETTINGS_READ_KEY_LINE, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Button({ model.setUpReadKey() }, Modifier.fillMaxWidth().height(DecisionHeight).padding(top = 4.dp), enabled = !model.readKeySetupBusy,
+                            shape = RoundedCornerShape(KlTokens.radiusMd), colors = approveColors()) {
+                            Text(AppModel.READ_KEY_SETUP_TITLE, style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+                }
+            }
             // ---- Nodes ----
             item { SectionTitle("Nodes") }
             val nodes = model.settingsNodes()

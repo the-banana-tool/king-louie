@@ -206,6 +206,8 @@ private fun RowBody(model: AppModel, row: ApprovalList.Row, textColor: Color) {
     row.secondLine?.let { Text(it, style = if (row.secondLineMonospace) MonoStyle else MaterialTheme.typography.bodyMedium) }
     row.detail?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = if (row.warning) statusColors.warning else KlTokens.textSecondary) }
     row.status?.let { Text(it, style = MaterialTheme.typography.titleSmall, color = KlTokens.textSecondary) }
+    // R-F5-5: an unanswered send says so; the buttons stay enabled.
+    row.notConfirmed?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = statusColors.warning) }
     if (row.buttons.isNotEmpty()) {
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             for (button in row.buttons) RowButton(row, button) { model.press(row, button) }

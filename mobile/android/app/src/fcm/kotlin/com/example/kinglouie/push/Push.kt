@@ -64,5 +64,7 @@ class KlMessagingService : FirebaseMessagingService() {
             .setAutoCancel(true)
             .build()
         manager.notify("$kind:$rid".hashCode(), notification)
+        // In front, the list is fetched at once (android-slim §9); in the background this does nothing.
+        (application as KingLouieApplication).model.onNotificationArrived()
     }
 }

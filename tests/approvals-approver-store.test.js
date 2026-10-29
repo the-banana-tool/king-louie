@@ -1113,12 +1113,28 @@ describe('read key: kl.device.read_key staged and applied', () => {
     assert.deepEqual(s.stage(statement(a, { kty: 'EC', crv: 'P-256', x: k.x, y: k.y })), { state: 'rejected', reason: 'test_key' });
   });
 
-  it('refuses a statement older than the record\'s current read key (stale); the same key again is a duplicate', async () => {
+  it('refuses a statement older than the record\'s current read key (stale); the key the record already holds is applied', async () => {
     const current = readPhone().jwk;
     const { s, a } = await fleet((x, y) => [{ ...x.approverRecord(), read_key: current, read_key_at: iso(NOW - 60 * 1000) }, y.approverRecord()]);
     assert.deepEqual(s.stage(statement(a, readPhone().jwk, { now: NOW - 2 * 60 * 1000 })), { state: 'rejected', reason: 'stale' });
-    assert.deepEqual(s.stage(statement(a, current)), { state: 'duplicate' });
+    assert.deepEqual(s.stage(statement(a, current)), { state: 'applied' });
     assert.equal(s.stage(statement(a, readPhone().jwk)).state, 'read-key-pending-apply');
+  });
+
+  it('a re-post of a statement device apply has written answers applied; one still staged stays duplicate', async () => {
+    const { s, a, l } = await fleet();
+    const read = readPhone();
+    const env = statement(a, read.jwk);
+    assert.deepEqual(s.stage(env), { state: 'read-key-pending-apply' });
+    assert.deepEqual(s.stage(env), { state: 'duplicate' }, 'staged, not yet applied');
+    await admin(l).applyStaged({ confirm: async () => true });
+    const fresh = store(l);
+    await fresh.ready();
+    assert.deepEqual(fresh.stage(env), { state: 'applied' }, 'the same envelope after apply');
+    assert.deepEqual(fresh.stage(statement(a, read.jwk)), { state: 'applied' }, 'a new statement of the same key');
+    // The same key stated under another device's signature is still refused.
+    const b = createFakePhone();
+    assert.equal(fresh.stage(statement(a, read.jwk, { signer: { alg: 'ES256', kid: a.deviceId, sign: b.signer.sign } })).state, 'rejected');
   });
 
   it('a record\'s read key with no read_key_at dates from enrolled_at', async () => {

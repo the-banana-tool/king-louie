@@ -5,7 +5,7 @@
 const crypto = require('crypto');
 const { open, verifyEs256, EnvelopeError } = require('./envelope');
 const { validateMessage, enrollMac } = require('./messages');
-const { isTestDeviceKey } = require('./test-keys');
+const { hasTestKey } = require('./test-keys');
 
 // Nonces of decided messages, in memory. `get` → { sha256 } | null.
 class NonceCache {
@@ -74,7 +74,7 @@ function verifyDeviceEnvelope(envelope, { approverStore, type, nodeId, nonces = 
   if (!record) return fail('unknown_device');
   if (record.platform === 'demo') return fail('demo_device');
   const readKey = recordReadKey(record);
-  if (!approverStore.allowTestKeys && (isTestDeviceKey(record.public_key) || isTestDeviceKey(readKey))) return fail('test_key');
+  if (!approverStore.allowTestKeys && hasTestKey(record)) return fail('test_key');
   if (!approverStore.isActive(envelope.kid, { overlay })) return fail('revoked_device');
 
   // 6. Signature over the bytes received: the device key, or, only when the
@@ -116,7 +116,7 @@ function verifyConsoleEnrollment(envelope, { codeId, code, now = Date.now(), all
   if (envelope.alg !== 'ES256' || envelope.kid !== message.device.device_id) return fail('malformed');
   if (message.code_id !== codeId) return fail('wrong_code');
   if (message.device.platform === 'demo') return fail('demo_device');
-  if (!allowTestKeys && (isTestDeviceKey(message.device.public_key) || isTestDeviceKey(message.device.read_key))) return fail('test_key');
+  if (!allowTestKeys && hasTestKey(message.device)) return fail('test_key');
   if (!verifyEs256(envelope, message.device.public_key)) return fail('bad_signature');
   const { code_mac: mac, ...withoutMac } = message;
   const expected = Buffer.from(enrollMac(code, withoutMac));

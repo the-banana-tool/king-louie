@@ -4,10 +4,10 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { ApproverStore, checkApproverRecord, writeFileAtomic, FUTURE_SKEW_MS, hasTestKey, readKeySetAt, samePoint } = require('./approver-store');
+const { ApproverStore, checkApproverRecord, writeFileAtomic, FUTURE_SKEW_MS, judgeReadKey } = require('./approver-store');
 const { open, verifyEs256 } = require('./envelope');
 const { validateMessage, iso, DEVICE_ID_RE, NONCE_RE } = require('./messages');
-const { isTestDeviceKey } = require('./test-keys');
+const { hasTestKey } = require('./test-keys');
 
 const MAX_STAGED_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 // Not every platform defines O_NOFOLLOW (Windows does not); fall back to 0
@@ -52,6 +52,9 @@ function readRegularFile(file) {
 // Whom a staged message is about and who signed it: a revoke names both; an
 // enrollment, the device it enrolls and its enroller; a read-key statement
 // is the device's own (android-slim spec §8.7).
+// device apply's words for judgeReadKey's refusals.
+const READ_KEY_RESULTS = { same_point: 'malformed', test_key: 'test key', applied: 'already set', stale: 'stale' };
+
 function stagedParties(message) {
   if (message.type === 'kl.device.revoke') return { deviceId: message.device_id, signer: message.revoked_by };
   if (message.type === 'kl.device.read_key') return { deviceId: message.device_id, signer: message.device_id };
@@ -362,13 +365,11 @@ class ApproverAdmin {
     if (!signer || envelope.kid !== item.deviceId || !verifyEs256(envelope, signer.public_key)) return 'rejected: signer is not an active approver';
     const record = this.read(item.deviceId);
     if (!record || record.revoked_at !== null) return 'rejected: device was revoked';
-    if (samePoint(message.read_key, record.public_key)) return 'rejected: malformed';
-    if (!this.allowTestKeys && isTestDeviceKey(message.read_key)) return 'rejected: test key';
-    if (Object.hasOwn(record, 'read_key') && samePoint(message.read_key, record.read_key)) return 'rejected: already set';
-    if (Date.parse(message.created_at) <= readKeySetAt(record)) return 'rejected: stale';
+    const judged = judgeReadKey(record, message, { allowTestKeys: this.allowTestKeys });
+    if (judged) return `rejected: ${READ_KEY_RESULTS[judged]}`;
     this.writeApprover({ ...record, read_key: message.read_key, read_key_at: message.created_at });
     return 'read key set';
   }
 }
 
-module.exports = { stagedParties, ApproverAdmin, ApproverAdminError, MAX_STAGED_AGE_MS };
+module.exports = { ApproverAdmin, ApproverAdminError, MAX_STAGED_AGE_MS };

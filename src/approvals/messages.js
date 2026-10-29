@@ -2,7 +2,7 @@
 // Everything signed goes through here, so the shapes live in one place.
 const crypto = require('crypto');
 const { canonicalize, sha256b64url } = require('../platform/jcs');
-const { seal, open, nodeSigner, deriveDeviceId, deviceIdFromJwk, fingerprintGroups, isDeviceJwk, fromB64url, toB64url, EnvelopeError } = require('./envelope');
+const { seal, open, nodeSigner, deriveDeviceId, deviceIdFromJwk, fingerprintGroups, isDeviceJwk, samePoint, fromB64url, toB64url, EnvelopeError } = require('./envelope');
 
 class MessageError extends Error {
   constructor(reason, detail = '') {
@@ -229,7 +229,7 @@ const PHONE_AUTH_PREFIXES = Object.freeze({ device: 'KL-PHONE-V1', read: 'KL-PHO
 // The relay keys replay protection on SHA-256 of this string. `key` is
 // 'device' (the default) or 'read'; anything else is refused.
 function phoneAuthString(method, pathWithQuery, timestamp, body, { key = 'device' } = {}) {
-  if (!Object.hasOwn(PHONE_AUTH_PREFIXES, key)) throw new MessageError('malformed', 'unknown phone key kind');
+  if (!Object.hasOwn(PHONE_AUTH_PREFIXES, key)) throw new MessageError('malformed', 'unknown key kind');
   const bytes = Buffer.isBuffer(body) ? body : Buffer.from(body === undefined || body === null ? '' : String(body), 'utf8');
   const bodyHash = crypto.createHash('sha256').update(bytes).digest('base64url');
   return [PHONE_AUTH_PREFIXES[key], String(method).toUpperCase(), pathWithQuery, timestamp, bodyHash].join('\n');
@@ -284,12 +284,6 @@ function checkOrigin(origin) {
 }
 
 const DEVICE_KEYS = ['device_id', 'name', 'platform', 'public_key'];
-
-// Two JWKs for one point. x and y are canonical base64url (isDeviceJwk), so
-// comparing the strings compares the coordinates.
-function samePoint(a, b) {
-  return a.x === b.x && a.y === b.y;
-}
 
 // The four keys of today, or exactly those and `read_key` (android-slim spec
 // §8.2): a P-256 JWK on the curve whose point is not `public_key`'s. The
@@ -429,7 +423,6 @@ module.exports = {
   buildEnrollDone,
   enrollMac,
   inviteMac,
-  PHONE_AUTH_PREFIXES,
   READ_KEY_MAX_MS,
   phoneAuthString,
   readKeyFingerprint,
