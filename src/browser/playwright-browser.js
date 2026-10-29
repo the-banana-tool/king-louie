@@ -1,9 +1,9 @@
-const { chromium } = require('playwright');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const { createLogger } = require('../logging');
+const { CHROME_FLAGS, IGNORED_DEFAULT_ARGS } = require('./chrome-flags');
 const log = createLogger('playwright-browser');
 
 /**
@@ -66,7 +66,12 @@ function isMissingBrowserError(err) {
  * Manages a single browser instance with context and page lifecycle.
  */
 class PlaywrightBrowser {
-  constructor() {
+  /**
+   * @param {object} [opts]
+   * @param {object} [opts.chromium] Playwright's chromium (injectable for tests)
+   */
+  constructor({ chromium } = {}) {
+    this._chromium = chromium || require('playwright').chromium;
     this.browser = null;
     this.context = null;
     this.page = null;
@@ -86,32 +91,31 @@ class PlaywrightBrowser {
     if (this.isRunning) return;
 
     const headless = options.headless !== false;
-    const viewport = { width: 1280, height: 720 };
-    const launchArgs = [
-      '--disable-session-crashed-bubble',
-      '--disable-infobars',
-      '--hide-crash-restore-bubble',
-      '--no-first-run',
-      '--no-default-browser-check',
-      // Suppress Chromium's built-in password manager / autofill prompts —
-      // king-louie's vault is the source of truth.
-      '--disable-features=PasswordManagerOnboarding,AutofillServerCommunication,PasswordManager',
-      // Without this, every page sees navigator.webdriver === true and the
-      // bot walls on sites like Zillow (PerimeterX "Press & Hold") refuse even
-      // the owner pressing the button by hand in the headed window.
-      '--disable-blink-features=AutomationControlled',
-    ];
+    // `viewport: null` lets the page take the window's own size.
+    const viewport = options.viewport === undefined ? { width: 1280, height: 720 } : options.viewport;
+    const extraArgs = Array.isArray(options.extraArgs) ? options.extraArgs : [];
+    const chromium = this._chromium;
 
-    const launch = async (channel) => {
-      const base = { headless, args: launchArgs };
-      if (channel) base.channel = channel;
+    const launch = async ({ channel, executablePath } = {}) => {
+      const base = {
+        headless,
+        args: [...CHROME_FLAGS, ...extraArgs],
+        ignoreDefaultArgs: [...IGNORED_DEFAULT_ARGS],
+      };
+      if (executablePath) base.executablePath = executablePath;
+      else if (channel) base.channel = channel;
       if (options.userDataPath) {
         disableChromiumPasswordManager(options.userDataPath);
         this._persistent = true;
-        this.context = await chromium.launchPersistentContext(options.userDataPath, {
-          ...base,
-          viewport,
-        });
+        try {
+          this.context = await chromium.launchPersistentContext(options.userDataPath, {
+            ...base,
+            viewport,
+          });
+        } catch (err) {
+          this._persistent = false;
+          throw err;
+        }
         this.browser = null;
         this.page = this.context.pages()[0] || await this.context.newPage();
       } else {
@@ -122,17 +126,23 @@ class PlaywrightBrowser {
       }
     };
 
-    try {
-      // Prefer the user's installed Chrome — avoids the ~280MB playwright download.
-      await launch('chrome');
-    } catch (chromeErr) {
+    if (options.executablePath) {
+      // The caller named the binary: use it or fail. No bundled fallback and
+      // no download.
+      await launch({ executablePath: options.executablePath });
+    } else {
       try {
-        await launch(null);
-      } catch (bundledErr) {
-        if (!isMissingBrowserError(bundledErr)) throw bundledErr;
-        if (options.onInstallProgress) options.onInstallProgress('Downloading Chromium for browser automation…');
-        await installChromium(options.onInstallProgress);
-        await launch(null);
+        // Prefer the user's installed Chrome — avoids the ~280MB playwright download.
+        await launch({ channel: 'chrome' });
+      } catch (chromeErr) {
+        try {
+          await launch();
+        } catch (bundledErr) {
+          if (!isMissingBrowserError(bundledErr)) throw bundledErr;
+          if (options.onInstallProgress) options.onInstallProgress('Downloading Chromium for browser automation…');
+          await installChromium(options.onInstallProgress);
+          await launch();
+        }
       }
     }
 
@@ -147,7 +157,7 @@ class PlaywrightBrowser {
   async attach({ cdpUrl } = {}) {
     if (this.isRunning) return;
     if (!cdpUrl) throw new Error('attach requires cdpUrl');
-    this.browser = await chromium.connectOverCDP(cdpUrl);
+    this.browser = await this._chromium.connectOverCDP(cdpUrl);
     this._persistent = false;
     this._attached = true;
     this.context = this.browser.contexts()[0];
