@@ -427,4 +427,4 @@ class SelfProbe {
   }
 }
 
-module.exports = { SelfProbe, createProbeHandler, createProbeCertificate, guardLookup, readStatusJson, MAX_PENDING_NONCES };
+module.exports = { SelfProbe, createProbeHandler, createProbeCertificate, guardLookup, readStatusJson, isIsoInstant, MAX_PENDING_NONCES };

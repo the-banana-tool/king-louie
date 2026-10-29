@@ -288,6 +288,17 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
         results.push({ check: 'service.json', ok: false, detail: err.message });
       }
       if (serviceConfig) results.push(...(await require('../frontdoor/doctor-checks').checks({ dataDir, configDir: dir, adminUid, nodeConfig, serviceConfig, platform })));
+    } else {
+      // A `relay run` host (push spec §8): its admin service.json has a relay
+      // block, parsed with relay.push. A service.json that does not load is
+      // not this row's to report (the service refuses to start with it).
+      let relay = null;
+      try {
+        relay = require('./config').loadServiceConfig(dataDir, {}, { adminConfigDir: dir, adminUid }).relay;
+      } catch {
+        relay = null;
+      }
+      if (relay) results.push(require('../frontdoor/doctor-checks').pushRow({ dataDir, push: relay.push, platform, adminUid }));
     }
   }
 
