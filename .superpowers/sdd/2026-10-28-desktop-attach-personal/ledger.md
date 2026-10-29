@@ -21,6 +21,7 @@ C:\Users\sblac\Programming\king-louie-wt\desktop-attach-personal), base main 6af
 - T05 install --personal electron: merge 105d0f99
 - T08 IPC channels/preload: merge 2c0c2474
 - T09 pane model, renderer banner: merge 2fc8e743
+- T02 personal-node runner: merge 22010fa5
 
 ## Deviations
 - All tickets: branches are `feat/desktop-attach-personal-TNN` (git cannot nest `feat/desktop-attach-personal/TNN` under an existing branch of that name).
@@ -30,6 +31,7 @@ C:\Users\sblac\Programming\king-louie-wt\desktop-attach-personal), base main 6af
 - T05: closing line when the node is already running: `...is registered; it was not started again.` (wording not in the spec).
 - T08: preload sends `{ confirmed: false }` when the caller did not pass true (as `detach` does).
 - T09: the unpaired personal view's second line uses the spec's quoted words, not the CLI's `PAIR_WARNING` constant (which says "this service"); wording chosen for stage `command` (`Pairing with King Louie Node "<name>"…`) and `confirming` (`Checking the node's desktop bridge…`); personal views show `Version X.`; T09 also edited preload.js to expose describeBanner/describeInstallPreview/describeInstallResult.
+- T02: PERSONAL_TASK_NAME is copied in personal-node.js (not required from personal-install.js, so the installer is not loaded into the desktop), a test holds them equal; new codes NODE_TASK_RUN_FAILED, NODE_STOP_FAILED and nodeRunning's other: true (a live pid that is not a King Louie node); detect carries me; off Windows and under the KL_TEST_MODE+KL_DESKTOP_BRIDGE_FILE override detect says not personal with no inspector call; the async command-line lookup is a copy of stop.js's PowerShell one (stop.js's blocks).
 
 ## Unconfirmed on a real machine (spec §15)
 - /Run → handshake time with an owner-sized history store (60 s kept, unmeasured).
@@ -37,3 +39,4 @@ C:\Users\sblac\Programming\king-louie-wt\desktop-attach-personal), base main 6af
 - `schtasks /Query /XML ONE` on Windows 11 Home.
 - Where startAttached hands over to the client's reconnect loop; whether getPort's
   trust read should skip the four-path read during a start wait.
+- Whether the task XML's <Principal><UserId> is exported as a SID (install --personal registers it with the SID) or as an account name; a name would read as other-account and the desktop would never run the owner's task.

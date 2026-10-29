@@ -1,7 +1,8 @@
 ---
 id: T02
 title: src/desktop-bridge/personal-node.js (detect, task, pidfile, CLI, log)
-status: open
+status: done
+merged: 22010fa5
 blocked_by: [T01]
 ---
 ## Goal
