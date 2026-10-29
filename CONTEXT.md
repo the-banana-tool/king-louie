@@ -71,6 +71,17 @@ The text a harness put in place of the history it condensed; kept verbatim
 when a session is imported. Recall never writes one.
 _Avoid_: summary (alone), compacted history
 
+### Local models
+
+**Local model**:
+A model that runs on hardware the owner controls, with no request leaving it.
+_Avoid_: SLM, small model (size is not the point), offline model
+
+**Adapter**:
+Weights trained from one owner's history that change how a local model does
+one job.
+_Avoid_: fine-tune (as a noun), custom model, LoRA (that is one way to make one)
+
 ### Fleet and cases
 
 **Fleet**:
@@ -100,9 +111,20 @@ _Avoid_: prose answer, free-text answer (that is one shape of it)
 
 **Pressed answer**:
 An answer no model relays: a button the owner presses in the app, or a
-signature from the paired phone. Approvals, budget grants, direction, a
+signature from the paired phone. Tool approvals, budget grants, direction, a
 case's status and a commit failure take only this kind.
 _Avoid_: button answer, manual answer
+
+**Approval**:
+Anything a node sends the paired phone that waits for the owner's press,
+whatever it asks: a tool approval, a question, a lease or take request, a
+client connection, a device enrollment, an alert to acknowledge.
+_Avoid_: request, pending item, inbox item
+
+**Tool approval**:
+An approval over one unsafe tool call or runbook, signed over the exact
+action.
+_Avoid_: approval (alone, for this kind), F3 approval
 
 **Management surface**:
 Any place the owner sees and answers questions or acts on the fleet: the
