@@ -1,7 +1,8 @@
 ---
 id: T01
 title: Push payload, kinds and the FCM sender
-status: open
+status: done
+merged: 96ea2586
 blocked_by: []
 ---
 ## Goal
