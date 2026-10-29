@@ -16,7 +16,7 @@ const { startupRows } = require('./startup-checks');
 const { SelfProbe, readStatusJson, isIsoInstant } = require('./probe');
 const { LETS_ENCRYPT_PRODUCTION } = require('./config');
 const { readServiceAccountFile } = require('./push/service-account');
-const { parsePushConfig } = require('../service/config');
+const { hostPushConfig } = require('../service/config');
 
 const DAY_MS = 86400000;
 // The unit installers.js writes (UNIT_PATH there).
@@ -315,7 +315,7 @@ async function checks({ dataDir, configDir, adminUid = 0, nodeConfig, serviceCon
   // parse is also the startup row above, and says no more than its key.
   let pushConfig = null;
   try {
-    pushConfig = parsePushConfig(serviceConfig && serviceConfig.relayRaw ? serviceConfig.relayRaw.push : undefined, 'service.json');
+    pushConfig = hostPushConfig(serviceConfig, { frontdoor: true });
   } catch (err) {
     push('push', false, shown(err.message));
   }
