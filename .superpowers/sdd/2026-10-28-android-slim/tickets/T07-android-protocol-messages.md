@@ -1,7 +1,7 @@
 ---
 id: T07
 title: Android protocol module speaks the read key and consumes the new vectors
-status: open
+status: in-progress
 blocked_by: [T06]
 ---
 ## Goal

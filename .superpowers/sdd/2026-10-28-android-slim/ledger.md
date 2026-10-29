@@ -59,6 +59,14 @@ Start frontier: T01, T08, T09.
 - T05: only `verifyLeaseWatch` has `allowReadKey: true` (sweep has a static
   check); audit `lease.watch` carries `key`.
 
+- T06: `A_read`/`B_read` in `TEST_DEVICE_KEYS` (`read_key: true`), keys.json
+  entries `{ d, jwk, read_key_of, fingerprint }`; added expectation fields
+  (`read_key`, `staged_read_keys`, `accepted_by_device_key: false`, `key: 'read'`);
+  `watch-read-key` proves acceptance, not contact (contact needs the manager's
+  tokens; gui-leases covers it). Kotlin `readKeyVectors` sets list the four
+  Android vectors, run by T07: `phone-api-auth-read`, `enroll-console-read-key`,
+  `read-key-valid`, `watch-read-key`.
+
 ## Landed
 - T01 merge 932753aa (impl d2d4cc64): `isDevice` export, `kl.device.read_key`
   validator, `phoneAuthString(..., { key })`, `PHONE_AUTH_PREFIXES`,
@@ -73,5 +81,7 @@ Start frontier: T01, T08, T09.
 - T04 merge 8a439abf (impl fe5168d0).
 - T05 merge 68bb365f (impl 9ac40699).
 
+- T06 merge 8356ae42 (impl 1952223a): approval-v1 49, lease-v1 55.
+
 ## Left
-T06 (in progress), T07, T10, T11, T12, T13.
+T07 (in progress), T10, T11, T12, T13.
