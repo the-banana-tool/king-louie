@@ -67,7 +67,10 @@ const name = (v) => {
   return RESERVED_NAME_RE.test(v) ? 'must not be a name the runner gives its own stills (step-N, step-N-failed)' : null;
 };
 
-const SELECTOR = str(1, SELECTOR_MAX);
+// A snapshot ref (`ref=e12`, spec 2026-10-28-browser-runner C-7) names an element of the last
+// snapshot, and a script is written before any snapshot exists: refused in every step.
+const SELECTOR = (v) => str(1, SELECTOR_MAX)(v)
+  || (/^\s*ref=/.test(v) ? 'cannot be a ref= selector: a script is written before any snapshot exists; use a CSS, role= or text= selector' : null);
 const TIMEOUT = int(1, WAIT_MAX_MS);
 const DELTA = int(-SCROLL_MAX, SCROLL_MAX);
 const req = (check) => ({ check, required: true });

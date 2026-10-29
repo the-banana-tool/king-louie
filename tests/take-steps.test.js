@@ -562,6 +562,27 @@ describe('runSteps: the node\'s rules, the take and the turn', () => {
     assert.ok(!browserCalls(s.actions).includes('click'));
   });
 
+  it('a ref= selector is refused in every step that takes one, naming the index and the field', () => {
+    // Spec 2026-10-28-browser-runner C-7: a script is written before any snapshot exists.
+    const cases = [
+      { step: 'click', selector: 'ref=e12' },
+      { step: 'fill', selector: 'ref=f1e3', text: 'x' },
+      { step: 'press', key: 'Enter', selector: 'ref=e4' },
+      { step: 'scroll', selector: 'ref=e9' },
+      { step: 'wait_for', selector: 'ref=e2' },
+      { step: 'wait_for_text', selector: 'ref=e2', text: 'Done' },
+    ];
+    for (const bad of cases) {
+      const r = validateSteps([{ step: 'navigate', url: 'https://example.com/' }, bad]);
+      assert.equal(r.ok, false, bad.step);
+      assert.equal(r.error.code, 'invalid_params');
+      assert.ok(r.error.message.startsWith(`step 1 (${bad.step}): "selector" cannot be a ref= selector`), r.error.message);
+    }
+    // Only the ref= form: a CSS selector that merely mentions it is unchanged.
+    assert.equal(validateSteps([{ step: 'click', selector: '[data-ref="e12"]' }]).ok, true);
+    assert.equal(validateSteps([{ step: 'click', selector: 'text=ref=e12' }]).ok, true);
+  });
+
   it('wait_for_text refuses the keyword selectors the browser tool resolves whole', () => {
     const { KEYWORD_SELECTOR_PREFIXES } = require('../src/gui/take-steps');
     assert.deepEqual([...KEYWORD_SELECTOR_PREFIXES], ['label=', 'placeholder=', 'testid=', 'alt=', 'title=']);

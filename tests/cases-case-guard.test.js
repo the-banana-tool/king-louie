@@ -185,3 +185,73 @@ describe('browser start in a case', () => {
     }
   });
 });
+
+// Spec 2026-10-28-browser-runner §7.5 and C-12: snapshot is look-only and joins the
+// allowed lists; a ref selector follows its action's rule.
+describe('snapshot and refs in a case', () => {
+  it('allows snapshot on every tool that offers it, refuses fill on a ref, allows click on a ref', async () => {
+    const { ctx } = await setup();
+    for (const tool of ['BrowserPage', 'BrowserExtract', 'Browser']) {
+      assert.strictEqual(caseToolGuard(tool, { action: 'snapshot' }, ctx), null, tool);
+      assert.strictEqual(caseToolGuard(tool, { action: 'snapshot', interactive: true, ref: 'e3' }, ctx), null, tool);
+    }
+    assert.ok(BROWSER_ALLOWED.BrowserExtract.includes('snapshot'));
+    assert.strictEqual(new Set(BROWSER_ALLOWED.Browser).size, BROWSER_ALLOWED.Browser.length, 'Browser lists each action once');
+    for (const tool of ['BrowserPage', 'Browser']) {
+      assert.deepStrictEqual(caseToolGuard(tool, { action: 'fill', selector: 'ref=e14', text: 'x' }, ctx), { success: false, error: BROWSER_REFUSAL }, tool);
+      assert.strictEqual(caseToolGuard(tool, { action: 'click', selector: 'ref=e15' }, ctx), null, tool);
+    }
+  });
+
+  describe('in a wake-up, through ToolExecutor', () => {
+    const { toolRegistry } = require('../src/tools');
+    const { Tool } = require('../src/tools/tool-schema');
+    const ToolExecutor = require('../src/execution/tool-executor');
+    const { WAKEUP_BROWSER_ACTING_REFUSAL } = require('../src/cases/executors/case-guard');
+    const ran = [];
+    const previous = toolRegistry.get('BrowserPage');
+    after(() => {
+      if (previous) toolRegistry.register(previous);
+      else toolRegistry.unregister('BrowserPage');
+    });
+    toolRegistry.register(new Tool({
+      name: 'BrowserPage',
+      description: 'a fake browser page tool',
+      requiresApproval: true,
+      parameters: { type: 'object', properties: { action: { type: 'string' }, selector: { type: 'string' } }, required: ['action'] },
+      execute: async (params) => { ran.push(params.action); return { ok: true, action: params.action }; }
+    }));
+
+    const run = async (params) => {
+      const asked = [];
+      ran.length = 0;
+      configureCaseGuard({ browserProfile: async () => ({ ok: true, running: true, active: 'kl-cases' }) });
+      try {
+        const executor = new ToolExecutor({
+          requireApproval: true,
+          denyAutoApproval: true,
+          useSandbox: false,
+          approvalRequester: async (name, p) => { asked.push([name, p.action]); return true; },
+          extraToolOptions: { caseContext: { caseId: 'case-1', source: 'wakeup' } }
+        });
+        return { result: await executor.execute('BrowserPage', params), asked };
+      } finally {
+        configureCaseGuard({});
+      }
+    };
+
+    it('runs snapshot without asking anyone', async () => {
+      const { result, asked } = await run({ action: 'snapshot' });
+      assert.strictEqual(result.ok, true);
+      assert.deepStrictEqual(asked, []);
+      assert.deepStrictEqual(ran, ['snapshot']);
+    });
+
+    it('refuses a click on a ref by policy (wakeup_browser_acting) and asks nobody', async () => {
+      const { result, asked } = await run({ action: 'click', selector: 'ref=e15' });
+      assert.deepStrictEqual(result, { success: false, error: WAKEUP_BROWSER_ACTING_REFUSAL, deniedBy: 'policy', code: 'wakeup_browser_acting' });
+      assert.deepStrictEqual(asked, []);
+      assert.deepStrictEqual(ran, []);
+    });
+  });
+});

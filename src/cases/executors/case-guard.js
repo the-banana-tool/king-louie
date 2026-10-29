@@ -12,14 +12,17 @@ const { CASES_BROWSER_PROFILE } = require('./util');
 const SESSION = ['start', 'stop', 'status', 'profile_list', 'profile_current', 'tabs', 'close_tab', 'switch_tab', 'open_tab'];
 const PAGE = [
   'navigate', 'go_back', 'go_forward', 'reload', 'click', 'dblclick', 'check', 'uncheck', 'hover', 'focus', 'scroll', 'screenshot',
-  'mouse_move', 'mouse_wheel', 'mouse_click', 'wait_for', 'wait_for_url', 'wait_for_load_state', 'wait_for_response'
+  'mouse_move', 'mouse_wheel', 'mouse_click', 'wait_for', 'wait_for_url', 'wait_for_load_state', 'wait_for_response',
+  // The page's accessibility snapshot (spec 2026-10-28-browser-runner §7.5, C-12): look-only,
+  // offered on BrowserPage, BrowserExtract and Browser. A `ref=` selector follows its action.
+  'snapshot'
 ];
-const EXTRACT = ['content', 'title', 'get_text', 'get_attribute', 'get_value', 'is_visible', 'count', 'bounding_box', 'console', 'frames', 'click_in_frame', 'route_block', 'unroute'];
+const EXTRACT = ['content', 'title', 'get_text', 'get_attribute', 'get_value', 'is_visible', 'count', 'bounding_box', 'console', 'frames', 'click_in_frame', 'route_block', 'unroute', 'snapshot'];
 const BROWSER_ALLOWED = Object.freeze({
   BrowserSession: Object.freeze(SESSION),
   BrowserPage: Object.freeze(PAGE),
   BrowserExtract: Object.freeze(EXTRACT),
-  Browser: Object.freeze([...SESSION, ...PAGE, ...EXTRACT])
+  Browser: Object.freeze([...new Set([...SESSION, ...PAGE, ...EXTRACT])])
 });
 const URL_GATED = Object.freeze({
   BrowserSession: { open_tab: 'url' },
