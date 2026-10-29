@@ -75,9 +75,8 @@ class ProtocolVectorTest {
         )
     }
 
-    // Revised 2026-10-28: the read key (android-slim spec §8.8). Named here so
-    // the set stays exact; the tests that run them come with the read key's
-    // Android side (android-slim T07).
+    // Revised 2026-10-28: the read key (android-slim spec §8.8), run by
+    // readKeyAuth, consoleEnrollWithReadKey and readKeyStatement below.
     private val readKeyVectors = setOf("phone-api-auth-read", "enroll-console-read-key", "read-key-valid")
 
     @Test
@@ -301,6 +300,115 @@ class ProtocolVectorTest {
         val rebuilt = Messages.consoleEnroll(sent["device"]!!, v["given"]["code_id"].str()!!, v["given"]["code"].str()!!,
             sent["created_at"].str()!!, sent["expires_at"].str()!!, sent["nonce"].str()!!)
         assertEquals(v["input"]["payload"].str(), B64Url.encode(Jcs.bytes(rebuilt)))
+    }
+
+    /** android-slim §8.3: the read string, and a read signature that verifies against the read key only. */
+    @Test
+    fun readKeyAuth() {
+        val v = vector("phone-api-auth-read")
+        val g = v["given"]!!
+        assertEquals("read", g["key"].str())
+        val body = g["body"].str()!!.toByteArray()
+        val s = Messages.phoneAuthString(g["method"].str()!!, g["path"].str()!!, g["timestamp"].str()!!, body, PhoneKey.READ)
+        assertEquals(v["expect"]["signing_string"].str(), s)
+        assertEquals(s, Messages.phoneReadAuthString(g["method"].str()!!, g["path"].str()!!, g["timestamp"].str()!!, body))
+        assertEquals(v["expect"]["body_sha256"].str(), Digest.sha256B64url(body))
+        // The prefix keeps a read signature from ever being a device one over the same request.
+        val deviceString = Messages.phoneAuthString(g["method"].str()!!, g["path"].str()!!, g["timestamp"].str()!!, body)
+        assertTrue(deviceString.startsWith("KL-PHONE-V1\n"))
+        assertEquals(deviceString.substringAfter('\n'), s.substringAfter('\n'))
+        assertEquals("device", PhoneKey.DEVICE.header)
+        assertEquals("read", PhoneKey.READ.header)
+        val env = Envelope("ES256", g["device"]["device_id"].str()!!, B64Url.encode(s.toByteArray()), v["input"]["signature"].str()!!)
+        assertTrue(env.verifyEs256(g["device"]["read_jwk"]["x"].str()!!, g["device"]["read_jwk"]["y"].str()!!))
+        assertFalse(env.verifyEs256(g["device"]["jwk"]["x"].str()!!, g["device"]["jwk"]["y"].str()!!))
+        assertEquals(false, v["expect"]["accepted_by_device_key"].bool())
+
+        // Sign → verify with the published A_read key.
+        val aRead = keys()["devices"]["A_read"]!!
+        val sig = Signature.getInstance("SHA256withECDSA").run { initSign(deviceKey("A_read")); update(s.toByteArray()); P1363.fromDer(sign()) }
+        val mine = Envelope("ES256", g["device"]["device_id"].str()!!, B64Url.encode(s.toByteArray()), B64Url.encode(sig))
+        assertTrue(mine.verifyEs256(aRead["jwk"]["x"].str()!!, aRead["jwk"]["y"].str()!!))
+    }
+
+    /** android-slim §8.1: `r-` and the device id's rule, in groups of four. */
+    @Test
+    fun readKeyFingerprint() {
+        for (name in listOf("A_read", "B_read")) {
+            val k = keys()["devices"][name]!!
+            assertEquals(name, k["fingerprint"].str(), Messages.readKeyFingerprint(k["jwk"]["x"].str()!!, k["jwk"]["y"].str()!!))
+            assertEquals(name, k["fingerprint"].str(), Messages.readKeyFingerprint(k["jwk"]!!))
+        }
+        val a = keys()["devices"]["A"]!!
+        // The same rule as the device id, another prefix.
+        assertEquals("r-" + Identifiers.fingerprintGroups(a["id"].str()!!),
+            Messages.readKeyFingerprint(a["jwk"]["x"].str()!!, a["jwk"]["y"].str()!!))
+        val y = a["jwk"]["y"].str()!!
+        val offCurve = B64Url.encode(P256.coordinate(BigInteger(1, B64Url.decode(y)).add(BigInteger.ONE)))
+        throwsProtocol { Messages.readKeyFingerprint(a["jwk"]["x"].str()!!, offCurve) }
+        throwsProtocol { Messages.readKeyFingerprint(obj("kty" to jsonString("EC"))) }
+    }
+
+    /** android-slim §8.2: the phone builds the console enrollment whose `device` carries `read_key`, byte for byte. */
+    @Test
+    fun consoleEnrollWithReadKey() {
+        val v = vector("enroll-console-read-key")
+        val sent = Envelope.fromJson(v["input"]!!).message()
+        val d = sent["device"]!!
+        val readKey = v["expect"]["read_key"]!!
+        val device = Messages.device(d["device_id"].str()!!, d["name"].str()!!, d["platform"].str()!!,
+            d["public_key"]["x"].str()!!, d["public_key"]["y"].str()!!, Messages.jwk(readKey["x"].str()!!, readKey["y"].str()!!))
+        assertEquals(d, device)
+        val rebuilt = Messages.consoleEnroll(device, v["given"]["code_id"].str()!!, v["given"]["code"].str()!!,
+            sent["created_at"].str()!!, sent["expires_at"].str()!!, sent["nonce"].str()!!)
+        assertEquals(v["input"]["payload"].str(), B64Url.encode(Jcs.bytes(rebuilt)))
+        val a = keys()["devices"]["A"]!!
+        assertEquals(v["expect"]["device_id"].str(), a["id"].str())
+        assertTrue(Envelope.fromJson(v["input"]!!).verifyEs256(a["jwk"]["x"].str()!!, a["jwk"]["y"].str()!!))
+
+        // Four keys or exactly five; a read key on the curve whose point is not the device key's.
+        val id = a["id"].str()!!
+        val x = a["jwk"]["x"].str()!!
+        val y = a["jwk"]["y"].str()!!
+        throwsProtocol { Messages.device(id, "Phone", "android", x, y, Messages.jwk(x, y)) }
+        val offCurve = B64Url.encode(P256.coordinate(BigInteger(1, B64Url.decode(readKey["y"].str()!!)).add(BigInteger.ONE)))
+        throwsProtocol { Messages.device(id, "Phone", "android", x, y, Messages.jwk(readKey["x"].str()!!, offCurve)) }
+        assertEquals("malformed", Messages.validate("kl.device.enroll", JsonObject(rebuilt + ("device" to JsonObject(device + ("extra" to JsonNull))))))
+        val halfJwk = obj("kty" to jsonString("EC"), "crv" to jsonString("P-256"), "x" to jsonString(x))
+        assertEquals("malformed", Messages.validate("kl.device.enroll", JsonObject(rebuilt + ("device" to JsonObject(device + ("read_key" to halfJwk))))))
+        // Without a read key the device is today's four keys.
+        assertEquals(setOf("device_id", "name", "platform", "public_key"), Messages.device(id, "Phone", "android", x, y).keys)
+    }
+
+    /** android-slim §8.7: the device key's statement of its read key, byte for byte, signed by the device key. */
+    @Test
+    fun readKeyStatement() {
+        val v = vector("read-key-valid")
+        val envelope = Envelope.fromJson(v["input"].arr()!![0])
+        val sent = envelope.message()
+        val readKey = v["expect"]["staged_read_keys"].arr()!![0]
+        val rk = Messages.jwk(readKey["x"].str()!!, readKey["y"].str()!!)
+        val id = sent["device_id"].str()!!
+        val nonce = sent["nonce"].str()!!
+        val built = Messages.readKeyStatement(id, rk, sent["created_at"].str()!!, sent["expires_at"].str()!!, nonce)
+        assertEquals(sent, built)
+        assertArrayEquals(envelope.payloadBytes(), Jcs.bytes(built))
+        assertNull(Messages.validate("kl.device.read_key", built))
+        val a = keys()["devices"]["A"]!!
+        assertEquals(a["id"].str(), envelope.kid)
+        assertTrue(envelope.verifyEs256(a["jwk"]["x"].str()!!, a["jwk"]["y"].str()!!))
+        val aRead = keys()["devices"]["A_read"]!!
+        assertFalse(envelope.verifyEs256(aRead["jwk"]["x"].str()!!, aRead["jwk"]["y"].str()!!))
+
+        // At most 7 days between created_at and expires_at, and after it.
+        Messages.readKeyStatement(id, rk, "2026-09-23T18:04:11.201Z", "2026-09-30T18:04:11.201Z", nonce)
+        throwsProtocol { Messages.readKeyStatement(id, rk, "2026-09-23T18:04:11.201Z", "2026-09-30T18:04:11.202Z", nonce) }
+        throwsProtocol { Messages.readKeyStatement(id, rk, "2026-09-23T18:04:11.201Z", "2026-09-23T18:04:11.201Z", nonce) }
+        throwsProtocol { Messages.readKeyStatement("d-not-a-device", rk, "2026-09-23T18:04:11.201Z", "2026-09-24T18:04:11.201Z", nonce) }
+        throwsProtocol { Messages.readKeyStatement(id, rk, "2026-09-23T18:04:11.201Z", "2026-09-24T18:04:11.201Z", "short") }
+        throwsProtocol { Messages.readKeyStatement(id, obj("kty" to jsonString("EC")), "2026-09-23T18:04:11.201Z", "2026-09-24T18:04:11.201Z", nonce) }
+        assertEquals("malformed", Messages.validate("kl.device.read_key", JsonObject(built + ("extra" to JsonNull))))
+        assertEquals("unsupported_version", Messages.validate("kl.device.read_key", JsonObject(built + ("v" to jsonNumber("2")))))
     }
 
     /** Sign → verify with the fixed device A key; the response the phone builds is the committed bytes. */
