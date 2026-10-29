@@ -130,6 +130,12 @@ T12 (docs) last, after all. Start frontier: T01, T04, T05, T08, T10.
   file owner `adminUid`, 0640, dir 0750. APNs only listed, its key not checked.
   A non-2xx last send is a `warn`, a malformed status file a failure.
   Windows: "owner and mode not checked (POSIX only)".
+- T12: deviation in `tests/examples.test.js`: it required install-guide
+  sections 10 to 12 to hold only "Not available yet"; section 10 now keeps that
+  line first with `### Push to your phone` below (a new test checks it and
+  section 13's pointer). Docs leave out a service-account email (the denylist
+  and the front-door doc test refuse such values). The C-15 test is
+  `tests/tracked-secrets.test.js` (skips without git).
 
 ## Landed
 - T01 merge 96ea2586; T05 merge 168106f3; T04 merge 0d31340e; T08 merge
@@ -138,5 +144,6 @@ T12 (docs) last, after all. Start frontier: T01, T04, T05, T08, T10.
 - T02 merge 47828984; T03 merge 4e439582 (+ fix ed55392c); T07 merge d49c94d3;
   T09 merge 91208ecf; T11 merge bf41dbb7 (tip a36f2701). Both flavors build.
 - T06 merge 26da41ae.
+- T12 merge c050b5a0.
 
 ## Left
