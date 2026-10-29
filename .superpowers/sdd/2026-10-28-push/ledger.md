@@ -167,3 +167,14 @@ T12 (docs) last, after all. Start frontier: T01, T04, T05, T08, T10.
 - FIX merge b688ec51 (impl 828d925c). Both flavors build; protocol tests pass.
 
 ## Left
+Final `npm test` on b50fce58: tests 10597, pass 10502, fail 1, skipped 93. The
+one failure was `tests/frontdoor-stores.test.js` "never lets an outside id
+become a key", which pinned `setPush`'s old `null` for an unknown id (T04 made
+it a boolean); fixed in 8b1523da (that file 27/27). The two known-flaky files
+(cases-private-models, contact-send-counting) passed in the full run.
+By hand on a real phone and relay (spec §16): real FCM delivery locked and in
+Doze; the notification permission prompt and the gear row when refused; a tap
+on each kind; a token rotation reaching the relay without opening the app;
+`SENDER_ID_MISMATCH` after switching Firebase projects; the google-services
+plugin build with a real config file; POSIX owner/mode checks of the doctor row
+on a real Linux front door. Swift untouched.
