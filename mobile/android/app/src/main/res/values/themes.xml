@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- The window behind Compose and the launch splash: the same colours as
-         the Compose theme's background (Theme.kt), so nothing flashes black.
-         The framework Material theme keeps the app free of AppCompat; Compose
-         draws everything else. values-night/ holds the dark variant. -->
-    <color name="kl_window">#FFF8F9FF</color>
-    <style name="Theme.KingLouie" parent="android:Theme.Material.Light.NoActionBar">
+    <!-- The window behind Compose and the launch splash: bgBase (Tokens.kt, the
+         bg-base token of styles.css), whatever the system's light/dark setting,
+         so nothing flashes. The app is dark only (spec §11.2); there is no
+         values-night/. The framework Material theme keeps the app free of
+         AppCompat; Compose draws everything else. -->
+    <color name="kl_window">#FF1E1E2E</color>
+    <style name="Theme.KingLouie" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/kl_window</item>
         <item name="android:colorBackground">@color/kl_window</item>
         <item name="android:windowSplashScreenBackground">@color/kl_window</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>
