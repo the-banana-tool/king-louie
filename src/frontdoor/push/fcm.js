@@ -1,10 +1,27 @@
 // FCM HTTP v1 with a service account: a data-only, high-priority message
-// carrying { rid, n, k }. The OAuth token is cached until a minute before it
-// expires.
+// carrying { rid, n, k } and, on a coalesced push, `c` (push spec §7.1). The
+// OAuth token is cached until a minute before it expires.
 const { signJwt, requestText } = require('./jwt');
 const { sanitizeNodeName } = require('./text');
 
 const SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
+
+// android.ttl when the payload has no expires_at (push spec §6.5, C-7).
+const DEFAULT_TTL_S = 300;
+const SESSION_ENDED_TTL_S = 3600;
+const MIN_COUNT = 2;
+const MAX_COUNT = 999;
+
+const countOf = (count) => (Number.isInteger(count) && count >= MIN_COUNT && count <= MAX_COUNT ? count : null);
+
+// A token FCM says is gone (404 UNREGISTERED) or belongs to another Firebase
+// project (403 SENDER_ID_MISMATCH: the app was rebuilt against a new one) is
+// dropped (C-11). A 400 never is: it is as likely the relay's own message.
+function rejectsToken(status, text) {
+  if (status === 404) return /UNREGISTERED/.test(text);
+  if (status === 403) return /SENDER_ID_MISMATCH/.test(text);
+  return false;
+}
 
 function createFcmSender({ serviceAccount, tokenUrl = 'https://oauth2.googleapis.com/token', fcmOrigin = 'https://fcm.googleapis.com', now = Date.now }) {
   let access = null;
@@ -31,11 +48,15 @@ function createFcmSender({ serviceAccount, tokenUrl = 'https://oauth2.googleapis
     platforms: ['fcm'],
     async notify(device, payload) {
       const token = await accessToken();
-      const secondsLeft = payload.expires_at ? Math.max(0, Math.ceil((Date.parse(payload.expires_at) - now()) / 1000)) : 300;
+      const fallbackTtl = payload.kind === 'session_ended' ? SESSION_ENDED_TTL_S : DEFAULT_TTL_S;
+      const secondsLeft = payload.expires_at ? Math.max(0, Math.ceil((Date.parse(payload.expires_at) - now()) / 1000)) : fallbackTtl;
+      const data = { rid: String(payload.id), n: sanitizeNodeName(payload.node_name) || '', k: payload.kind };
+      const count = countOf(payload.count);
+      if (count !== null) data.c = String(count);
       const body = JSON.stringify({
         message: {
           token: device.push.token,
-          data: { rid: String(payload.id), n: sanitizeNodeName(payload.node_name) || '', k: payload.kind },
+          data,
           android: { priority: 'HIGH', ttl: `${secondsLeft}s` }
         }
       });
@@ -44,8 +65,7 @@ function createFcmSender({ serviceAccount, tokenUrl = 'https://oauth2.googleapis
         body
       });
       if (res.status === 401 || res.status === 403) clearAccess();
-      const unregistered = res.status === 404 && /UNREGISTERED/.test(res.text);
-      return { ok: res.status === 200, dropToken: unregistered, status: res.status };
+      return { ok: res.status === 200, dropToken: rejectsToken(res.status, res.text), status: res.status };
     }
   };
 }

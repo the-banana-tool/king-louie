@@ -9,7 +9,7 @@ const { createLogger } = require('../../logging');
 const { noneSender } = require('./none');
 const { createApnsSender } = require('./apns');
 const { createFcmSender } = require('./fcm');
-const { KINDS, alertText } = require('./text');
+const { KINDS, FCM_ONLY_KINDS, alertText } = require('./text');
 
 const log = createLogger('frontdoor/push');
 
@@ -29,9 +29,13 @@ function defaultSenders(config = {}, { readFile = (f) => fs.readFileSync(f, 'utf
 function createPusher(config = {}, { senders = defaultSenders(config), onDropToken = null } = {}) {
   return {
     senders: [...senders.map((s) => s.id), noneSender.id],
-    async notify(device, { kind = 'approval', id, node_name: nodeName = null, expires_at: expiresAt = null } = {}) {
+    async notify(device, { kind = 'approval', id, node_name: nodeName = null, expires_at: expiresAt = null, count = null } = {}) {
       const payload = { kind: KINDS.includes(kind) ? kind : 'approval', id, node_name: nodeName, expires_at: expiresAt };
       const platform = device && device.push && device.push.platform;
+      // The new kinds and the count reach fcm devices only (push spec C-2):
+      // anything else gets exactly what it got before.
+      if (platform !== 'fcm' && FCM_ONLY_KINDS.includes(payload.kind)) return;
+      if (platform === 'fcm' && count !== null && count !== undefined) payload.count = count;
       const sender = (platform && senders.find((s) => s.platforms.includes(platform))) || noneSender;
       try {
         const result = await sender.notify(device, payload);
