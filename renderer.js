@@ -1034,6 +1034,8 @@ function getToolResultSummary(toolName, result) {
     const errMsg = result.error || result.message || 'failed';
     return typeof errMsg === 'string' ? errMsg.slice(0, 60) : 'failed';
   }
+  // A browser screenshot's image went to the model only; the row keeps its size.
+  if (result.image && result.image.shown_to_model === true) return 'screenshot (image shown to the model)';
   if (toolName === 'Bash') {
     const exit = result.exitCode !== undefined ? result.exitCode : (result.code !== undefined ? result.code : null);
     if (exit !== null) return `exit ${exit}`;
@@ -1231,8 +1233,20 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
     payloadDiv.className = 'tool-event-payload';
     payloadDiv.hidden = true;
 
-    // Check for Browser screenshot with savedTo path — show inline image
-    if (isResult && toolName === 'Browser' && payload && payload.savedTo) {
+    // A screenshot whose image went to the model only: no pixels are stored, so say so.
+    if (isResult && payload && payload.image && payload.image.shown_to_model === true) {
+      const note = document.createElement('div');
+      note.style.cssText = 'margin: 8px 0; font-size: 0.9em; color: var(--text-secondary);';
+      note.textContent = 'screenshot (image shown to the model)';
+      payloadDiv.appendChild(note);
+      if (payload.page) {
+        const infoDiv = document.createElement('div');
+        infoDiv.style.cssText = 'font-size: 0.9em; color: var(--text-secondary);';
+        infoDiv.textContent = `${payload.page.title || ''} — ${payload.page.url || ''}`;
+        payloadDiv.appendChild(infoDiv);
+      }
+    } else if (isResult && toolName === 'Browser' && payload && payload.savedTo) {
+      // Browser screenshot with savedTo path — show inline image
       const imgContainer = document.createElement('div');
       imgContainer.style.cssText = 'margin: 8px 0; max-width: 100%; overflow: hidden;';
       const img = document.createElement('img');

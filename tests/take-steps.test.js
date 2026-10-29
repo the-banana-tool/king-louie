@@ -317,7 +317,7 @@ describe('runSteps', () => {
     assert.equal(out.results[0].screenshot, path.join(s.takeDir, 'hero.png'));
     assert.equal(out.results[1].screenshot, path.join(s.takeDir, 'step-1.png'));
     assert.ok(fs.existsSync(out.results[0].screenshot));
-    assert.deepEqual(s.actions.calls[0].params, {});
+    assert.deepEqual(s.actions.calls[0].params, { to_file: true }, 'a still is the file form, never the model image');
   });
 
   it('pause waits on a ref\'d timer, and ms comes from the clock', async () => {

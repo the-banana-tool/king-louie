@@ -97,6 +97,7 @@ PREFER HIGH-LEVEL: login / signup / fill_payment auto-detect fields across sites
     required: ['action']
   },
   requiresApproval: true,
+  emitsImages: true,
   execute: async (params, context) => {
     if (!SESSION_ACTIONS.includes(params.action)) {
       return { ok: false, error: `BrowserSession does not support action "${params.action}". Use BrowserPage or BrowserExtract.` };

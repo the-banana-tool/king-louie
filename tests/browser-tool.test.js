@@ -662,9 +662,9 @@ describe('Browser Tool - integration', () => {
 
   // ── Screenshot ─────────────────────────────────────────────────────────────
 
-  it('screenshot saves a PNG file and returns page info', async () => {
+  it('screenshot with to_file saves a PNG file and returns page info', async () => {
     await setPageContent(TEST_PAGE_HTML);
-    const result = await browserTool.execute({ action: 'screenshot' });
+    const result = await browserTool.execute({ action: 'screenshot', to_file: true });
     assert.strictEqual(result.ok, true);
     assert.ok(result.savedTo.endsWith('.png'));
     assert.ok(fs.existsSync(result.savedTo));

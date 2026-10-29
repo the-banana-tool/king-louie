@@ -55,6 +55,7 @@ Console: returns recent browser console output.`,
     required: ['action']
   },
   requiresApproval: true,
+  emitsImages: true,
   execute: async (params, context) => {
     if (!EXTRACT_ACTIONS.includes(params.action)) {
       return { ok: false, error: `BrowserExtract does not support action "${params.action}". Use BrowserSession or BrowserPage.` };
