@@ -429,3 +429,29 @@ describe('pane wiring', () => {
     assert.strictEqual((renderer.match(/desktop\.onStatusChanged\(/g) || []).length, 1);
   });
 });
+
+// T02's runner codes (spec 2026-10-28 §7.1): a /Run or a stop that failed.
+describe('a /Run or a stop that failed', () => {
+  const personal = { deviceId: 'kld-abcdefghijklmnop', fingerprint: 'f', label: 'desk', service: { nodeId: 'kl-x', port: 18796, hosting: 'personal', dataDir: 'C:\\x\\data', fingerprint: 'g' } };
+  const nodeWith = (startError, extra = {}) => ({ hosting: 'personal', name: 'laptop-01', dataDir: 'C:\\x\\data', task: 'registered', running: false, pid: null, starting: false, startError, ...extra });
+  const pane = (n) => describeServicePane({ view: 'attached-disconnected', pairing: personal, connection: { status: 'disconnected' }, node: n });
+  const banner = (n) => describeAttachedBanner({ view: 'attached-disconnected', pairing: personal, connection: { status: 'disconnected' }, node: n });
+
+  it('NODE_TASK_RUN_FAILED: could not be started, with Start', () => {
+    const n = nodeWith({ code: 'NODE_TASK_RUN_FAILED', message: 'ERROR: Access is denied.' });
+    const m = pane(n);
+    assert.strictEqual(m.lines[0], 'King Louie Node could not be started: ERROR: Access is denied.');
+    assert.deepStrictEqual(m.actions.slice(3), [{ id: 'nodeStart', label: 'Start King Louie Node' }]);
+    const b = banner(n);
+    assert.strictEqual(b.line, 'King Louie Node could not be started: ERROR: Access is denied.');
+    assert.deepStrictEqual(b.actions[3], { id: 'nodeStart', label: 'Start King Louie Node' });
+  });
+
+  it('NODE_STOP_FAILED: could not be stopped, with Restart', () => {
+    const n = nodeWith({ code: 'NODE_STOP_FAILED', message: 'stop did not\u0007 finish' }, { running: true, pid: 4242 });
+    const m = pane(n);
+    assert.strictEqual(m.lines[0], 'King Louie Node could not be stopped: stop did not finish [hidden or control characters removed]');
+    assert.deepStrictEqual(m.actions.slice(3), [{ id: 'nodeRestart', label: 'Restart King Louie Node' }]);
+    assert.deepStrictEqual(banner(n).actions[3], { id: 'nodeRestart', label: 'Restart King Louie Node' });
+  });
+});

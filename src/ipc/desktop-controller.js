@@ -37,6 +37,26 @@ const PAIR_FATAL = new Set([
   'DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'ANOTHER_DEVICE', 'SERVICE_KEY_CHANGED',
   'PAIR_SERVICE_CHANGED', 'PAIR_NOT_FOUND', 'PAIR_CONFIRM_STALE', 'NOT_PAIRING'
 ]);
+// §7.3: the bridge codes that end an attached start's wait (the client's FATAL).
+const BRIDGE_FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'ANOTHER_DEVICE', 'SERVICE_KEY_CHANGED']);
+const INSTALL_CLI_TIMEOUT_MS = 120000;
+const NOT_PERSONAL_TEXT = 'No King Louie Node on this computer is paired with this desktop.';
+
+// A data dir as the disk names it and as the pairing recorded it: Windows
+// paths compare without case and without a trailing separator.
+function samePath(a, b) {
+  const norm = (p) => String(p).replace(/[\\/]+$/, '').toLowerCase();
+  return typeof a === 'string' && typeof b === 'string' && norm(a) === norm(b);
+}
+
+// §8: the CLI's output as lines for a <pre>, each through `shown`; blank
+// lines inside are kept, those at either end dropped.
+function outputLines(...texts) {
+  const lines = texts.filter(Boolean).join('\n').split(/\r?\n/).map((l) => shown(l.replace(/\s+$/, ''), 400));
+  while (lines.length && !lines[0]) lines.shift();
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
+  return lines;
+}
 
 function firstLine(text) {
   const line = String(text || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean);
@@ -104,6 +124,12 @@ function createDesktopController({
   // The §7.3 wait's sleep, so dispose() can end it.
   let waitTimer = null;
   let waitWake = null;
+  // The attached start (§7.2, §7.3): run by itself once per launch (C-13);
+  // a press starts a new generation, which ends the wait before it.
+  let launchStarted = false;
+  let startGeneration = 0;
+  let startRun = null;
+  let attachWaiting = false;
 
   const send = (channel, payload) => {
     const win = getWindow();
@@ -246,7 +272,10 @@ function createDesktopController({
     const pairing = state.pairing;
     if (state.pendingPair) return 'pairing';
     if (!pairing || !pairing.service) return 'unpaired';
-    if (mode === 'attached') return connection.status === 'connected' ? 'attached-connected' : 'attached-disconnected';
+    if (mode === 'attached') {
+      if (connection.status === 'connected') return 'attached-connected';
+      return nodeState.starting && nodeStatus() ? 'attached-starting' : 'attached-disconnected';
+    }
     return 'paired';
   }
 
@@ -311,7 +340,7 @@ function createDesktopController({
       }) : null,
       node,
       service: liveService || (pairing && pairing.service && pairing.service.info) || null,
-      connection: { ...connection },
+      connection: current === 'attached-starting' ? { ...connection, status: 'starting' } : { ...connection },
       approvals,
       lastImport: state.lastImport,
       unavailableTabs: mode === 'attached' ? [...ATTACHED_UNAVAILABLE_TABS] : [],
@@ -341,6 +370,11 @@ function createDesktopController({
   // answers `{ done: true, result }`, the node's log says it failed to start
   // after `since`, or nodeStartWaitMs pass. `isCurrent()` false or dispose()
   // ends it as CANCELLED. Each sleep is a ref'd timer, cleared by dispose().
+  function wakeWait() {
+    if (waitTimer) clearTimer(waitTimer);
+    waitTimer = null;
+    if (waitWake) { const wake = waitWake; waitWake = null; wake(); }
+  }
   function sleep(ms) {
     return new Promise((resolve) => {
       waitWake = resolve;
@@ -745,6 +779,9 @@ function createDesktopController({
     if (!client) return;
     clientStateHandler = (s) => {
       connection = { status: s.status, code: s.code, error: s.error, nextRetryAt: s.nextRetryAt };
+      // §7.3: a connect, or a code waiting will not change, ends the
+      // attached start's sleep at once (its timer cleared).
+      if (attachWaiting && (s.status === 'connected' || BRIDGE_FATAL.has(s.code))) wakeWait();
       notify();
     };
     client.on('state', clientStateHandler);
@@ -753,12 +790,216 @@ function createDesktopController({
   function dispose() {
     disposed = true;
     stopPolling();
-    if (waitTimer) clearTimer(waitTimer);
-    waitTimer = null;
-    if (waitWake) { const wake = waitWake; waitWake = null; wake(); }
+    wakeWait();
     closeImportSession();
     if (client && clientStateHandler) client.off('state', clientStateHandler);
     clientStateHandler = null;
+  }
+
+  // --- §7.2-§7.4, §8: the personal node an attached desktop starts. ---
+
+  const personalPairingDir = () => {
+    const svc = state.pairing && state.pairing.service;
+    return svc && svc.hosting === 'personal' && svc.dataDir ? svc.dataDir : null;
+  };
+
+  // Today's connect: the client's own loop and backoff, nothing else.
+  function connectNow() {
+    if (client) client.connect().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
+  }
+
+  function endStart(startError) {
+    nodeState = { ...nodeState, starting: false, startError: startError || null };
+    notify();
+  }
+
+  // Whether the client's own loop has settled the wait: connected, or a
+  // code that waiting will not change (shown as now).
+  function clientSettled() {
+    if (client && client.connected) return { done: true, result: { connected: true } };
+    if (connection.status === 'failed' && BRIDGE_FATAL.has(connection.code)) return { done: true, result: { connected: false } };
+    return null;
+  }
+
+  // One start: check the disk (C-7), run or restart the node when that is
+  // what is asked and allowed (C-11), then the §7.3 wait over the client's
+  // own loop: retryNow() every nodeRetryMs, no second connection loop.
+  async function attachedStart({ dataDir, restart = false, gen }) {
+    const current = () => !disposed && gen === startGeneration;
+    let local = null;
+    try {
+      local = await nodeRunner.detectPersonalNode({ dataDir });
+    } catch (err) {
+      log.warn(`personal node read failed: ${err.message}`);
+    }
+    if (!current()) return;
+    if (!local || !local.personal || !samePath(local.dataDir, dataDir)) {
+      // The record only says whether to try; the disk says no.
+      endStart(null);
+      connectNow();
+      return;
+    }
+    let since = null;
+    if (restart) {
+      const restarted = await nodeRunner.restartNode({ dataDir });
+      if (!current()) return;
+      if (!restarted.ok) {
+        endStart({ code: restarted.code || 'NODE_STOP_FAILED', message: shown(restarted.message || '', 400) });
+        connectNow();
+        return;
+      }
+      since = restarted.ranAt;
+    } else {
+      const running = await nodeRunner.nodeRunning({ dataDir });
+      if (!current()) return;
+      nodeState = { ...nodeState, running: Boolean(running.running), pid: running.running ? running.pid : null };
+      if (!running.running) {
+        const task = await nodeRunner.queryTask({ me: local.me });
+        if (!current()) return;
+        nodeState = { ...nodeState, task: task.state };
+        if (task.state !== 'registered') {
+          const refusal = TASK_REFUSALS[task.state] || TASK_REFUSALS.unknown;
+          endStart({ code: refusal.code, message: refusal.message });
+          connectNow();
+          return;
+        }
+        nodeState = { ...nodeState, starting: true, startError: null };
+        notify();
+        const ran = await nodeRunner.runTask();
+        if (!current()) return;
+        if (!ran.ok) {
+          endStart({ code: ran.code || 'NODE_TASK_RUN_FAILED', message: shown(ran.message || '', 400) });
+          connectNow();
+          return;
+        }
+        since = ran.ranAt;
+      }
+    }
+    nodeState = { ...nodeState, starting: true, startError: null };
+    notify();
+    attachWaiting = true;
+    let waited;
+    try {
+      waited = await waitForNode({
+        dataDir,
+        since,
+        isCurrent: current,
+        attempt: async () => {
+          const before = clientSettled();
+          if (before) return before;
+          if (client) client.retryNow().catch(() => {});
+          return clientSettled() || { done: false };
+        }
+      });
+    } finally {
+      if (gen === startGeneration) attachWaiting = false;
+    }
+    if (waited.code === 'CANCELLED') return;
+    if (waited.ok) {
+      if (waited.result.connected) nodeState = { ...nodeState, running: true };
+      endStart(null);
+    } else if (waited.code === 'NODE_START_TIMEOUT' && since === null) {
+      // Nothing was run: the node was up already and its bridge never
+      // answered, which the "running (pid N)" row and its Restart say.
+      endStart(null);
+    } else {
+      endStart({ code: waited.code, message: waited.message });
+    }
+  }
+
+  function launchStart(dataDir, restart) {
+    const gen = ++startGeneration;
+    wakeWait();
+    const run = attachedStart({ dataDir, restart, gen }).catch((err) => {
+      log.warn(`starting King Louie Node failed: ${err.message}`);
+      if (gen === startGeneration) endStart({ code: 'NODE_START_FAILED', message: shown(err.message, 400) });
+    });
+    startRun = run;
+    run.then(() => { if (startRun === run) startRun = null; });
+    return run;
+  }
+
+  // §7.2: called by the attached host in place of client.connect(). A
+  // personal pairing runs the node at most once per launch (C-13); a fleet
+  // pairing connects at once, as before.
+  async function startAttached() {
+    if (mode !== 'attached' || !client) return;
+    const first = !launchStarted;
+    launchStarted = true;
+    const dataDir = personalPairingDir();
+    if (!first || !dataDir || !nodeRunner) {
+      connectNow();
+      return;
+    }
+    await launchStart(dataDir, false);
+  }
+
+  // §7.4's Start/Restart buttons: only on a press. Answers once the start
+  // is under way; the wait goes on in the background (statusChanged on
+  // each step), so the pane is not held for up to 60 s.
+  async function nodeStart({ restart = false } = {}) {
+    const dataDir = personalPairingDir();
+    if (!dataDir || !nodeRunner) return { ok: false, code: 'NOT_PERSONAL', error: NOT_PERSONAL_TEXT };
+    if (mode !== 'attached' || !client) return { ok: false, code: 'NOT_ATTACHED', error: 'Attach to King Louie Node first.' };
+    launchStarted = true;
+    nodeState = { ...nodeState, starting: true, startError: null };
+    notify();
+    launchStart(dataDir, restart === true);
+    return status();
+  }
+
+  // Resolves once no start is in flight.
+  async function startIdle() {
+    while (startRun) await startRun;
+  }
+
+  // §8: which data dir Install is for, and whose task it reads after.
+  async function installTarget() {
+    const recorded = personalDataDir();
+    if (recorded) return { dataDir: recorded, me: undefined };
+    if (!nodeRunner) return null;
+    try {
+      const local = await nodeRunner.detectPersonalNode({});
+      return local && local.personal && local.dataDir ? { dataDir: local.dataDir, me: local.me } : null;
+    } catch (err) {
+      log.warn(`personal node read failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  function installResult(cli) {
+    const lines = outputLines(cli && cli.stdout, cli && cli.stderr);
+    if (cli && cli.code === 0) return { ok: true, lines };
+    const message = firstLine(cli && cli.stderr) || firstLine(cli && cli.stdout)
+      || (cli && cli.timedOut ? 'the command did not finish in time' : shown((cli && cli.error) || 'the command failed', 400));
+    return { ok: false, code: 'NODE_INSTALL_FAILED', message, lines };
+  }
+
+  const notPersonalInstall = () => ({ ok: false, code: 'NOT_PERSONAL', message: NOT_PERSONAL_TEXT, error: NOT_PERSONAL_TEXT, lines: [] });
+
+  async function nodeInstallPreview() {
+    const target = await installTarget();
+    if (!target) return notPersonalInstall();
+    const cli = await nodeRunner.runCli(['install', '--personal', '--dry-run', '--data-dir', target.dataDir], { timeoutMs: INSTALL_CLI_TIMEOUT_MS });
+    return installResult(cli);
+  }
+
+  async function nodeInstall({ confirmed = false } = {}) {
+    if (confirmed !== true) {
+      const text = 'Installing King Louie Node needs the Install press.';
+      return { ok: false, code: 'CONFIRM_REQUIRED', message: text, error: text, lines: [] };
+    }
+    const target = await installTarget();
+    if (!target) return notPersonalInstall();
+    const cli = await nodeRunner.runCli(['install', '--personal', '--yes', '--data-dir', target.dataDir], { timeoutMs: INSTALL_CLI_TIMEOUT_MS });
+    // Whatever the install did, the task and the node are read again.
+    const [task, running] = await Promise.all([
+      nodeRunner.queryTask({ me: target.me }).catch(() => ({ state: 'unknown' })),
+      nodeRunner.nodeRunning({ dataDir: target.dataDir }).catch(() => ({ running: false, pid: null }))
+    ]);
+    nodeState = { ...nodeState, task: task.state, running: Boolean(running.running), pid: running.running ? running.pid : null };
+    notify();
+    return installResult(cli);
   }
 
   resumePendingPair();
@@ -766,6 +1007,7 @@ function createDesktopController({
   return {
     status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
     importPlan, importApply, dismissServiceCommand, createClient, setClient, dispose,
+    startAttached, startIdle, nodeStart, nodeInstallPreview, nodeInstall,
     on: (event, fn) => emitter.on(event, fn)
   };
 }
