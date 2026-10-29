@@ -11,7 +11,7 @@ const { createApnsSender } = require('./apns');
 const { createFcmSender } = require('./fcm');
 const { readServiceAccountFile } = require('./service-account');
 const { KINDS, FCM_ONLY_KINDS, alertText } = require('./text');
-const { createPushGate } = require('./gate');
+const { createPushGate, defaultTimers } = require('./gate');
 const { createPushStatus } = require('./status');
 
 const log = createLogger('frontdoor/push');
@@ -28,8 +28,6 @@ function defaultSenders(config = {}, { readFile = (f) => fs.readFileSync(f, 'utf
   }
   return senders;
 }
-
-const defaultTimers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h) };
 
 // options.now / options.timers: injected clock and timers (tests);
 // options.statusFile: where push-status.json goes (the relay passes

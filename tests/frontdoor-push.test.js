@@ -607,6 +607,51 @@ describe('the pusher: at most 60 pushes per fcm device per hour (push spec §6.4
     }
     for (const r of lines) assert.doesNotMatch(r.line, /devtok/);
   });
+
+  it('remembers no (node, kind, id) the cap dropped, alone or coalesced, so it goes once the cap lifts', async () => {
+    const clock = fakeClock();
+    const { pusher, seen } = recordingPusher(clock);
+    const phone = device('fcm');
+    for (let i = 0; i < 60; i += 1) {
+      await pusher.notify(phone, { node_id: 'n-1', kind: 'approval', id: `r-${i}` });
+      await clock.advance(11 * SEC);
+    }
+    assert.equal(seen.length, 60);
+    // Late in the hour, so a key wrongly remembered would still be live when the cap lifts.
+    await clock.advance(2840 * SEC);
+    // Dropped alone.
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'session_ended', id: 'l-1' });
+    await clock.advance(11 * SEC);
+    // Dropped coalesced: the first opens a window (dropped), the next two are held and dropped together.
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-0' });
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-1' });
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-2' });
+    await clock.advance(11 * SEC);
+    assert.equal(seen.length, 60, 'all dropped by the cap');
+
+    await clock.advance(3 * MIN);
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'session_ended', id: 'l-1' });
+    await clock.advance(11 * SEC);
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-1' });
+    await clock.advance(11 * SEC);
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-2' });
+    await clock.advance(11 * SEC);
+    assert.deepEqual(seen.slice(60).map((p) => p.id), ['l-1', 'q-1', 'q-2']);
+
+    // What went out, alone or carried by a coalesced push, is remembered.
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-3' });
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-4' });
+    await pusher.notify(phone, { node_id: 'n-1', kind: 'question', id: 'q-5' });
+    await clock.advance(11 * SEC);
+    assert.deepEqual(seen.slice(63).map((p) => p.id), ['q-3', 'q-5']);
+    await clock.advance(11 * SEC);
+    for (const id of ['l-1', 'q-3', 'q-4', 'q-5']) {
+      await pusher.notify(phone, { node_id: 'n-1', kind: id === 'l-1' ? 'session_ended' : 'question', id });
+      await clock.advance(11 * SEC);
+    }
+    assert.equal(seen.length, 65, 'nothing that went out is pushed again inside its window');
+    pusher.stop();
+  });
 });
 
 describe('the pusher: apns devices as today (push spec C-2)', () => {
