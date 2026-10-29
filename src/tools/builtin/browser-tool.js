@@ -24,6 +24,9 @@ const {
 
 const VAULT_CRED_PREFIX = 'browser_cred:';
 
+// The profile a start with no "profile" opens (C-2); "ephemeral: true" opens none.
+const DEFAULT_PROFILE = 'king-louie';
+
 // The raw file paths some actions read or write (storage state, uploads)
 // are held to the node's denied dirs (src/tools/utils.js) like the file
 // tools' paths, with the same wording. A no-op while none is registered,
@@ -169,7 +172,12 @@ const actions = {
       return { ok: true, message: 'Browser already running', profile: activeProfileOf(key) };
     }
     const opts = {};
-    if (params.profile) {
+    if (params.ephemeral === true && (params.profile || params.userDataPath)) {
+      return { ok: false, error: '"ephemeral: true" opens an empty context with no profile; do not pass "profile" or "userDataPath" with it.' };
+    }
+    if (params.ephemeral === true) {
+      setActiveProfile(key, null);
+    } else if (params.profile) {
       const dir = resolveProfileDir(ctx, params.profile);
       fs.mkdirSync(dir, { recursive: true });
       opts.userDataPath = dir;
@@ -178,7 +186,15 @@ const actions = {
       opts.userDataPath = params.userDataPath;
       setActiveProfile(key, null);
     } else {
-      setActiveProfile(key, null);
+      // No profile named: the King Louie profile, persistent, so a login made
+      // once serves later chats (spec 2026-10-28 browser runner, C-2).
+      if (!ctx || !ctx.userDataPath) {
+        return { ok: false, error: `A start without "profile" opens the "${DEFAULT_PROFILE}" profile, which needs userDataPath in the tool context. Pass "ephemeral: true" for an empty context with no profile.` };
+      }
+      const dir = resolveProfileDir(ctx, DEFAULT_PROFILE);
+      fs.mkdirSync(dir, { recursive: true });
+      opts.userDataPath = dir;
+      setActiveProfile(key, DEFAULT_PROFILE);
     }
     // v1 default: headed, so the user can watch the automation.
     opts.headless = params.headless === true;
@@ -1227,6 +1243,7 @@ PROFILES — persistent logins and cookies across runs:
   - "profile_list" — list saved profiles.
   - "profile_create" / "profile_delete" — manage named profiles (params.profile). Stored under the app's userData dir.
   - "start" with params.profile="<name>" — launches Chromium with that profile attached. Cookies, localStorage, and service workers persist between sessions.
+  - "start" without params.profile — opens the persistent "king-louie" profile, where the owner's logins for ordinary chats live. Pass params.ephemeral=true instead for an empty context that keeps nothing and sees no login.
   - "profile_current" — report the active profile.
 
 VAULT CREDENTIALS — King-Louie's vault is the source of truth for web logins. Chromium's own password manager is disabled.
@@ -1363,6 +1380,7 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
       // Start options
       userDataPath: { type: 'string', description: 'Raw Chrome user data directory (start action, advanced). Prefer "profile" — it resolves to a managed directory under the app\'s userData.' },
       profile: { type: 'string', description: 'Named persistent profile (used by start, profile_create, profile_delete, save_credentials, fill_credentials). Cookies/localStorage persist between runs. Allowed chars: [A-Za-z0-9_-], max 64.' },
+      ephemeral: { type: 'boolean', description: 'start only: open an empty context that keeps nothing and sees no saved login, instead of the persistent "king-louie" profile a start without "profile" opens. Not with "profile" or "userDataPath".' },
       headless: { type: 'boolean', description: 'Run headless (default false — v1 defaults to visible so you can watch). Set true to hide the window.' },
 
       // Vault-backed credentials

@@ -107,6 +107,89 @@ describe('Browser Tool - unit', () => {
   });
 });
 
+// ─── Default profile (spec 2026-10-28 browser runner, C-2) ───────────────────
+
+describe('Browser Tool - default profile', () => {
+  const os = require('os');
+  const { caseToolGuard } = require('../src/cases/executors/case-guard');
+  let dataDir;
+
+  before(async () => {
+    await browserTool._cleanup();
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-browser-default-'));
+  });
+
+  after(async () => {
+    await browserTool._cleanup();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('start without a profile opens the persistent king-louie profile under the data dir', async () => {
+    const ctx = { userDataPath: dataDir };
+    const result = await browserTool.execute({ action: 'start', headless: true }, ctx);
+    try {
+      assert.strictEqual(result.ok, true, result.error);
+      assert.strictEqual(result.profile, 'king-louie');
+      const current = await browserTool.execute({ action: 'profile_current' }, ctx);
+      assert.strictEqual(current.active, 'king-louie');
+      const dir = path.join(dataDir, 'browser-profiles', 'king-louie');
+      assert.ok(fs.existsSync(dir), 'profile dir created');
+      // Chromium writes its user data into the profile dir: the context is persistent.
+      assert.ok(fs.readdirSync(dir).length > 0, 'Chromium wrote into the profile dir');
+    } finally {
+      await browserTool.execute({ action: 'stop' }, ctx);
+    }
+  });
+
+  it('ephemeral: true keeps the empty, non-persistent context', async () => {
+    const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-browser-ephemeral-'));
+    const ctx = { userDataPath: otherDir };
+    try {
+      const result = await browserTool.execute({ action: 'start', headless: true, ephemeral: true }, ctx);
+      assert.strictEqual(result.ok, true, result.error);
+      assert.strictEqual(result.profile, null);
+      assert.strictEqual(fs.existsSync(path.join(otherDir, 'browser-profiles')), false);
+    } finally {
+      await browserTool.execute({ action: 'stop' }, ctx);
+      fs.rmSync(otherDir, { recursive: true, force: true });
+    }
+  });
+
+  it('ephemeral: true with a profile or a user data path is refused', async () => {
+    const ctx = { userDataPath: dataDir };
+    for (const p of [{ profile: 'king-louie' }, { userDataPath: path.join(dataDir, 'raw') }]) {
+      const result = await browserTool.execute({ action: 'start', headless: true, ephemeral: true, ...p }, ctx);
+      assert.strictEqual(result.ok, false, JSON.stringify(p));
+      assert.match(result.error, /ephemeral/);
+    }
+  });
+
+  it('start without a profile and no data dir says to pass ephemeral', async () => {
+    const result = await browserTool.execute({ action: 'start', headless: true }, {});
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error, /ephemeral: true/);
+  });
+
+  it('a case turn still needs kl-cases: no profile and ephemeral are refused', () => {
+    const ctx = { caseContext: { caseId: 'c-1' } };
+    for (const tool of ['Browser', 'BrowserSession']) {
+      for (const p of [{}, { ephemeral: true }, { profile: 'king-louie' }]) {
+        const refused = caseToolGuard(tool, { action: 'start', ...p }, ctx);
+        assert.ok(refused && refused.success === false, `${tool} ${JSON.stringify(p)}`);
+      }
+    }
+  });
+
+  it('Browser and BrowserSession describe ephemeral', () => {
+    const sessionTool = require('../src/tools/builtin/browser-session-tool');
+    for (const tool of [browserTool, sessionTool]) {
+      const schema = tool.parameters;
+      assert.strictEqual(schema.properties.ephemeral.type, 'boolean', tool.name);
+      assert.match(schema.properties.ephemeral.description, /king-louie/);
+    }
+  });
+});
+
 // ─── Integration tests (launches a real browser) ─────────────────────────────
 
 // Helper: set page HTML via evaluate, then return the current page URL
@@ -177,7 +260,7 @@ const TEST_PAGE_HTML = `<!DOCTYPE html>
 describe('Browser Tool - integration', () => {
   before(async () => {
     await browserTool._cleanup();
-    const result = await browserTool.execute({ action: 'start', headless: true });
+    const result = await browserTool.execute({ action: 'start', headless: true, ephemeral: true });
     assert.strictEqual(result.ok, true, `Browser failed to start: ${result.error || ''}`);
   });
 
