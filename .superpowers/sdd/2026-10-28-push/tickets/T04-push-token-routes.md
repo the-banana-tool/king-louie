@@ -1,7 +1,8 @@
 ---
 id: T04
 title: Push-token routes - DELETE, GET, no-op PUT
-status: open
+status: done
+merged: 0d31340e
 blocked_by: []
 ---
 ## Goal
