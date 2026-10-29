@@ -68,20 +68,19 @@ fun EmptyState(text: String, modifier: Modifier = Modifier) {
     }
 }
 
-/** A sub-screen's top row: back, and what this screen is. */
+/** A sub-screen's top bar on bgSidebar: back, and what this screen is. */
 @Composable
 fun BackBar(title: String, onBack: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().background(KlTokens.bgSidebar).padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = KlTokens.textPrimary) }
         Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 1, color = KlTokens.textPrimary)
     }
 }
 
-/** A list row: bgSurface, the large radius, a subtle border. */
+/** A list row: bgSurface (or a tint over it), the large radius, a subtle border. */
 @Composable
-fun ItemCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, content: @Composable () -> Unit) {
+fun ItemCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, color: Color = KlTokens.bgSurface, content: @Composable () -> Unit) {
     val shape = RoundedCornerShape(KlTokens.radiusLg)
-    val color = KlTokens.bgSurface
     val border = BorderStroke(1.dp, KlTokens.borderSubtle)
     if (onClick != null) {
         Surface(onClick = onClick, modifier = modifier.fillMaxWidth(), shape = shape, color = color, contentColor = KlTokens.textPrimary, border = border) {

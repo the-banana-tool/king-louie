@@ -65,20 +65,14 @@ data class StatusColors(
     val warningBg: Color,
     val online: Color,
     /** The offline dot only; never text a person must read. */
-    val offline: Color,
-    // The two below are used only by today's lease banner (LeaseScreens.kt).
-    // They go when that screen is rewritten (T12); do not use them in new code.
-    val alertContainer: Color,
-    val onAlertContainer: Color
+    val offline: Color
 )
 
 private val KlStatus = StatusColors(
     warning = KlTokens.warning,
     warningBg = KlTokens.warningBg,
     online = KlTokens.success,
-    offline = KlTokens.textMuted,
-    alertContainer = KlTokens.errorBg,
-    onAlertContainer = KlTokens.textPrimary
+    offline = KlTokens.textMuted
 )
 
 val LocalStatusColors = staticCompositionLocalOf { KlStatus }

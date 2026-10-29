@@ -1391,8 +1391,8 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   `kl.question.ask` envelopes; an answer counts only as a device-signed
   `kl.question.answer` verified on the node (nonce, `signed_at` ± 300 s, live
   token), and it resolves only its own question. The relay routes are
-  `src/frontdoor/question-routes.js`. The apps' Questions screen shows only
-  questions signed by a pinned node and signs `signed_at` on the
+  `src/frontdoor/question-routes.js`. The apps (iOS's Questions screen,
+  Android's Approvals list) show only questions signed by a pinned node and signs `signed_at` on the
   relay-corrected clock. Foreground presence is unsigned
   (`{ foreground, at }`), but the relay request carrying it is still
   device-authenticated: iOS pings every 60 s only while its API session is
@@ -2330,10 +2330,13 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
   never changes the lease state on screen: only a status or view the pinned
   node signed does (`applyLease`), so after Stop it says "Stop sent, not yet
   confirmed by the computer" and Stop stays enabled. The Android app has no
-  demo. The app modules have no test target, so
-  `tests/mobile-lease-apps.test.js` pins these rules by reading the Swift
-  and Kotlin sources (it shows the rules are written into the code, not that
-  the apps build). `mobile/PRIVACY.md` says what a relay operator sees of a
+  demo, and four screens only: the Scanner, the Approvals list (its root,
+  with the Scanner and the gear in its top bar), an Approval's detail (a
+  running lease's is the live lease view) and Settings. The app modules
+  have no test target, so `tests/mobile-lease-apps.test.js` pins these
+  rules, and `tests/mobile-android-slim.test.js` the Android screens, by
+  reading the Swift and Kotlin sources (they show the rules are written into
+  the code, not that the apps build). `mobile/PRIVACY.md` says what a relay operator sees of a
   lease.
 
 ## Demo takes (D1)
