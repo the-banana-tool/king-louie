@@ -1,7 +1,8 @@
 ---
 id: T03
 title: Relay link method push.notify
-status: open
+status: done
+merged: 4e439582
 blocked_by: [T01]
 ---
 ## Goal
