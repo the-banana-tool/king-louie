@@ -9,20 +9,45 @@
 // hidden, at most 80 characters). A model's own labels are always dropped
 // first. At run time the handler compares the element's role and name now
 // with what was approved, and refuses `ref_changed` on a difference.
+//
+// Only `selector` and `target_selector` take a ref (C-7). A ref, or a raw
+// aria-ref=, in any other selector field (login's usernameSelector, a payment
+// helper's cardNumberSelector, ...) is refused invalid_params: it would act on
+// an element with no label shown and no run-time check.
 
 const { ACTING_ACTIONS } = require('../browser-acting');
 const { plainLineProblem } = require('../../cases/hidden-chars');
 const { getBrowser } = require('./browser-registry');
-const { BrowserRefError } = require('../../browser/playwright-browser');
+const {
+  BrowserRefError, parseRefSelector, isFrameAction, RAW_ARIA_REF,
+} = require('../../browser/playwright-browser');
 
 const LABEL_MAX = 80;
 const LABEL_FIELDS = [['selector', 'ref_label'], ['target_selector', 'target_ref_label']];
+const REF_FIELDS = new Set(LABEL_FIELDS.map(([sel]) => sel));
 
-// params object → { ref_label: raw, target_ref_label: raw }: the labels as the
-// snapshot gave them, before hiding or cutting, so the run-time comparison is
-// exact (two names hidden alike, or alike in their first 80 characters, are
-// still told apart). Keyed by the very object the executor runs.
-const approvedRaw = new WeakMap();
+// The labels as the snapshot gave them, before hiding or cutting, so the
+// run-time comparison is exact (two names hidden alike, or alike in their
+// first 80 characters, are still told apart). Keyed by what survives any copy
+// of the params, the ref and the label shown, not by the params object: a
+// caller that spreads or clones the params between the approval and the run
+// still compares exactly. Every raw label seen behind one shown label is kept
+// (the owner could not tell them apart). Bounded; the oldest goes first.
+const RAW_MAX = 512;
+const approvedRaw = new Map();
+
+function rememberRaw(ref, shown, raw) {
+  const key = JSON.stringify([ref, shown]);
+  const set = approvedRaw.get(key) || new Set();
+  set.add(raw);
+  approvedRaw.delete(key);
+  approvedRaw.set(key, set);
+  while (approvedRaw.size > RAW_MAX) approvedRaw.delete(approvedRaw.keys().next().value);
+}
+
+function rawFor(ref, shown) {
+  return approvedRaw.get(JSON.stringify([ref, shown])) || null;
+}
 
 /** A snapshot label ('role "name"') as the approval shows it. */
 function shownRefLabel(raw) {
@@ -36,25 +61,43 @@ function shownRefLabel(raw) {
   return chars.length > LABEL_MAX ? `${chars.slice(0, LABEL_MAX - 1).join('')}…` : label;
 }
 
-const isRef = (sel) => typeof sel === 'string' && sel.startsWith('ref=');
+/**
+ * A ref (or a raw aria-ref=) in a selector field other than `selector` and
+ * `target_selector`. → `{ error, code: 'invalid_params' }`, or null.
+ */
+function otherSelectorRefRefusal(params) {
+  if (!params || typeof params !== 'object') return null;
+  for (const [key, value] of Object.entries(params)) {
+    if (REF_FIELDS.has(key) || !/selector$/i.test(key) || typeof value !== 'string') continue;
+    if (parseRefSelector(value) !== null || RAW_ARIA_REF.test(value)) {
+      return {
+        error: `${key} does not take a ref: only selector and target_selector do. Use a CSS, role= or label= selector here, or act on the ref with click or fill.`,
+        code: 'invalid_params',
+      };
+    }
+  }
+  return null;
+}
 
 /**
  * The browser tools' `prepareParams`: → `{ params }` (a new object, the
  * model's own labels removed and the host's added) or `{ error, code }` for a
- * ref that has no label (stale, unknown, no snapshot).
+ * ref that has no label (stale, unknown, no snapshot) or a ref in a field
+ * that takes none.
  */
 function prepareRefLabels(params, context) {
   if (!params || typeof params !== 'object') return { params };
+  const refused = otherSelectorRefRefusal(params);
+  if (refused) return refused;
   const next = { ...params };
   delete next.ref_label;
   delete next.target_ref_label;
   const action = String(next.action || '');
-  if (!ACTING_ACTIONS.has(action) || /_in_frame$/.test(action)) return { params: next };
-  const raw = {};
+  if (!ACTING_ACTIONS.has(action) || isFrameAction(action)) return { params: next };
   for (const [selKey, labelKey] of LABEL_FIELDS) {
     const sel = next[selKey];
-    if (!isRef(sel)) continue;
-    const ref = sel.slice(4);
+    const ref = parseRefSelector(sel);
+    if (ref === null) continue;
     let label = null;
     try {
       const b = getBrowser(context);
@@ -68,10 +111,9 @@ function prepareRefLabels(params, context) {
     if (!label) {
       return { error: `${sel} is not in this page's last snapshot. Take a new snapshot.`, code: 'ref_not_found' };
     }
-    raw[labelKey] = label;
     next[labelKey] = shownRefLabel(label);
+    rememberRaw(ref, next[labelKey], label);
   }
-  if (Object.keys(raw).length) approvedRaw.set(next, raw);
   return { params: next };
 }
 
@@ -79,19 +121,22 @@ function prepareRefLabels(params, context) {
  * Before the handler acts: every ref the call carries a host label for must
  * still name an element with that role and name (read from a fresh snapshot
  * of the page, the same computation the label came from). Throws
- * BrowserRefError ref_changed.
+ * BrowserRefError ref_changed, or ref_not_found when no browser is running.
  */
 async function checkRefLabels(params, context) {
-  if (!params || /_in_frame$/.test(String(params.action))) return;
-  const raw = approvedRaw.get(params) || {};
+  if (!params || isFrameAction(params.action)) return;
   for (const [selKey, labelKey] of LABEL_FIELDS) {
     const sel = params[selKey];
     const shown = params[labelKey];
-    if (!isRef(sel) || typeof shown !== 'string') continue;
-    const ref = sel.slice(4);
+    const ref = parseRefSelector(sel);
+    if (ref === null || typeof shown !== 'string') continue;
     const b = getBrowser(context);
+    if (!b || !b.isRunning || !b.page || typeof b.currentRefLabel !== 'function') {
+      throw new BrowserRefError('ref_not_found', `${sel} names nothing: the browser is not running. Start it and take a new snapshot.`);
+    }
     const now = await b.currentRefLabel(ref);
-    const same = now !== null && (raw[labelKey] !== undefined ? now === raw[labelKey] : shownRefLabel(now) === shown);
+    const raws = rawFor(ref, shown);
+    const same = now !== null && (raws ? raws.has(now) : shownRefLabel(now) === shown);
     if (!same) {
       const what = now === null ? 'it is no longer in the page\'s snapshot' : `it is now ${shownRefLabel(now)}`;
       throw new BrowserRefError('ref_changed', `The element at ${sel} no longer has the role and name the approval showed (${shown}): ${what}. Nothing was done; take a new snapshot.`);
@@ -99,4 +144,4 @@ async function checkRefLabels(params, context) {
   }
 }
 
-module.exports = { prepareRefLabels, checkRefLabels, shownRefLabel, LABEL_MAX };
+module.exports = { prepareRefLabels, checkRefLabels, shownRefLabel, otherSelectorRefRefusal, LABEL_MAX };

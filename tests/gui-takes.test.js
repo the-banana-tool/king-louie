@@ -982,6 +982,29 @@ describe('personal takes', () => {
     assert.equal(browsers[0].isRunning, false, 'stopAll closes the kept browser');
   });
 
+  it('a kept window the owner closes by hand frees its profile for the next take', async () => {
+    const out = await started();
+    await takes.stop(out.take_id, { keepBrowser: true });
+    assert.equal(takes.kept.size, 1);
+    await browsers[0].context.close(); // the owner closes the window
+    assert.equal(takes.kept.size, 0, 'the closed browser leaves the kept set');
+    const again = await started();
+    assert.ok(again.take_id, 'a later take on the same profile is not refused');
+    assert.equal(launches.length, 2);
+  });
+
+  it('a kept browser that is no longer running does not hold its profile', async () => {
+    const out = await started();
+    await takes.stop(out.take_id, { keepBrowser: true });
+    // A kept entry whose close event was never seen (a browser with no context events).
+    const [entry] = [...takes.kept];
+    takes.kept.clear();
+    takes.kept.add({ browser: { isRunning: false, stop: async () => {} }, profile: entry.profile });
+    await browsers[0].stop();
+    const again = await started();
+    assert.ok(again.take_id);
+  });
+
   it('a profile open under the default key is browser_launch_failed before any request or launch', async () => {
     realRegistry.setActiveProfile(realRegistry.DEFAULT_KEY, 'demo');
     await assert.rejects(begin(), (err) => err.code === 'browser_launch_failed' && /profile demo is open in another browser/.test(err.message));

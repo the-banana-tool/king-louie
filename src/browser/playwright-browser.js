@@ -41,6 +41,8 @@ function disableChromiumPasswordManager(userDataPath) {
 // by a main-frame navigation (same-document ones included).
 
 const REF_ID = /^(?:f\d+)?e\d+$/;
+// "aria-ref" anywhere in a selector, chained ("form >> aria-ref=e5") or not.
+const RAW_ARIA_REF = /aria-ref\s*=/i;
 
 /** A ref refusal: `code` is ref_stale, ref_not_found, ref_changed or invalid_params. */
 class BrowserRefError extends Error {
@@ -116,6 +118,31 @@ function parseSnapshotLine(line) {
   if (i < rest.length && rest[i] !== ':') return null;
   if (!ref) return null;
   return { ref, role, name, label: name ? `${role} "${name}"` : role };
+}
+
+const LINE_REF = /\[ref=((?:f\d+)?e\d+)\]/g;
+
+/**
+ * The ref a snapshot line carries: the parser's where it parses the line, else
+ * the last `[ref=…]` on it (such a ref has no label, so it is listed and
+ * counted but cannot be approved: ref_not_found). → the ref, or null.
+ */
+function snapshotLineRef(line) {
+  const p = parseSnapshotLine(line);
+  if (p) return p.ref;
+  if (typeof line !== 'string') return null;
+  const all = [...line.matchAll(LINE_REF)];
+  return all.length ? all[all.length - 1][1] : null;
+}
+
+/** `ref=e5` → `e5`; anything else (a CSS selector, a raw aria-ref=) → null. */
+function parseRefSelector(sel) {
+  return typeof sel === 'string' && sel.startsWith('ref=') ? sel.slice(4) : null;
+}
+
+/** The *_in_frame actions, which take no ref. */
+function isFrameAction(action) {
+  return /_in_frame$/.test(String(action));
 }
 
 // page → { seq, labels: Map(ref → 'role "name"'), stale }
@@ -479,3 +506,7 @@ module.exports.ownerOfPage = (page) => (page && pageOwners.get(page)) || null;
 module.exports.BrowserRefError = BrowserRefError;
 module.exports.parseSnapshotLine = parseSnapshotLine;
 module.exports.REF_ID = REF_ID;
+module.exports.RAW_ARIA_REF = RAW_ARIA_REF;
+module.exports.snapshotLineRef = snapshotLineRef;
+module.exports.parseRefSelector = parseRefSelector;
+module.exports.isFrameAction = isFrameAction;

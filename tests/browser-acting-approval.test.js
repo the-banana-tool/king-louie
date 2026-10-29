@@ -188,7 +188,32 @@ describe('the approval label of a ref (headless Chromium)', () => {
     const result = await ex.execute('BrowserPage', { action: 'click', selector: 'ref=e999' });
     assert.strictEqual(prompts.length, 0);
     assert.strictEqual(result.success, false);
+    assert.strictEqual(result.ok, false, 'shaped like the browser tools\' own refusals');
     assert.strictEqual(result.code, 'ref_not_found');
+    assert.strictEqual(typeof result.error, 'string');
+  });
+
+  it('a ref in a login field is refused invalid_params before anything is filled or asked', async () => {
+    await getBrowser().page.setContent('<input id="u"><input id="p" type="password"><p id="out">idle</p>');
+    snap = (await browserTool.execute({ action: 'snapshot' })).snapshot;
+    const ref = refOf(snap, /textbox/);
+    const { ex, prompts } = executor();
+    const viaExecutor = await ex.execute('BrowserSession', { action: 'login', passwordSelector: `ref=${ref}`, username: 'a', password: 'b' });
+    assert.strictEqual(prompts.length, 0);
+    assert.strictEqual(viaExecutor.ok, false);
+    assert.strictEqual(viaExecutor.code, 'invalid_params');
+    for (const params of [
+      { action: 'login', usernameSelector: '#u', passwordSelector: `ref=${ref}`, username: 'a', password: 'b' },
+      { action: 'login', usernameSelector: 'aria-ref=e1', passwordSelector: '#p', username: 'a', password: 'b' },
+      { action: 'fill_payment', cardNumberSelector: `ref=${ref}`, cardNumber: '4242424242424242' },
+      { action: 'signup', emailSelector: `ref=${ref}`, email: 'a@example.com', password: 'x' }
+    ]) {
+      const direct = await browserTool.execute(params);
+      assert.strictEqual(direct.ok, false, JSON.stringify(params));
+      assert.strictEqual(direct.code, 'invalid_params', JSON.stringify(params));
+    }
+    assert.strictEqual(await getBrowser().page.inputValue('#u'), '');
+    assert.strictEqual(await getBrowser().page.inputValue('#p'), '');
   });
 
   it('a ref from before a navigation is refused ref_stale before anyone is asked', async () => {
@@ -290,5 +315,44 @@ describe('the desktop approval dialog says what a ref names', () => {
     const dialog = src.slice(src.indexOf('function showToolApprovalDialog('), src.indexOf('\nfunction ', src.indexOf('function showToolApprovalDialog(') + 1));
     assert.match(dialog, /refLine\.textContent = refSummary/);
     assert.doesNotMatch(dialog, /refLine\.innerHTML/);
+  });
+});
+
+describe('the ref label check, without a page', () => {
+  const { prepareRefLabels, checkRefLabels } = require('../src/tools/builtin/browser-ref-label');
+  const registry = require('../src/tools/builtin/browser-registry');
+  const KEY = 'test-ref-label';
+  const ctx = { browserKey: KEY };
+  // A browser whose snapshot named e5 with one long name and whose page now names e5 with
+  // another: both are cut to the same 80 characters on the approval.
+  const longA = `button "${'Same start '.repeat(10)}A"`;
+  const longB = `button "${'Same start '.repeat(10)}B"`;
+  const fake = (now) => ({
+    isRunning: true, page: {},
+    refLocator() {}, refLabel: () => longA, currentRefLabel: async () => now
+  });
+
+  it('compares the exact label even when the params were copied after preparing', async () => {
+    registry.setBrowser(KEY, fake(longB));
+    try {
+      const prepared = prepareRefLabels({ action: 'click', selector: 'ref=e5' }, ctx);
+      assert.ok(prepared.params.ref_label.endsWith('…'));
+      const copy = { ...prepared.params };
+      await assert.rejects(checkRefLabels(copy, ctx), (err) => err.code === 'ref_changed');
+      registry.setBrowser(KEY, fake(longA));
+      await checkRefLabels({ ...prepared.params }, ctx);
+    } finally {
+      registry.removeBrowser(KEY);
+    }
+  });
+
+  it('a browser that is not running is a coded refusal, not a TypeError', async () => {
+    registry.setBrowser(KEY, { isRunning: false, page: null });
+    try {
+      await assert.rejects(checkRefLabels({ action: 'click', selector: 'ref=e5', ref_label: 'button "Go"' }, ctx),
+        (err) => err.name === 'BrowserRefError' && err.code === 'ref_not_found');
+    } finally {
+      registry.removeBrowser(KEY);
+    }
   });
 });

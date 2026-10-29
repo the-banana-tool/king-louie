@@ -220,7 +220,6 @@ class ToolExecutor extends EventEmitter {
     this.nodeLocalOrigin = options.nodeLocalOrigin !== false;
   }
 
-  // The live take policy, or null.
   // What a tool's prepareParams is given: the call's options and this run's
   // take, so a browser tool reads the browser the call will be decided on.
   _prepareContext(options = {}) {
@@ -233,6 +232,7 @@ class ToolExecutor extends EventEmitter {
     };
   }
 
+  // The live take policy, or null.
   _liveTake() {
     return this.takePolicy && this.takePolicy.current ? this.takePolicy.current : null;
   }
@@ -371,7 +371,9 @@ class ToolExecutor extends EventEmitter {
         effectiveParameters = out.params;
         return null;
       }
-      const refused = { success: false, error: out?.error || `${toolName} refused its parameters`, ...(out?.code ? { code: out.code } : {}) };
+      // Shaped like the browser tools' own refusals ({ ok: false, error, code }), with the
+      // executor's success: false.
+      const refused = { success: false, ok: false, error: out?.error || `${toolName} refused its parameters`, ...(out?.code ? { code: out.code } : {}) };
       this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
       return refused;
     };

@@ -69,6 +69,15 @@ describe('snapshot line parser', () => {
     assert.strictEqual(p.ref, 'e9');
   });
 
+  it('snapshotLineRef: the parser\'s ref where it parses, else the last [ref=…] on the line', () => {
+    const { snapshotLineRef } = PlaywrightBrowser;
+    assert.strictEqual(snapshotLineRef('- link "go [ref=e1]" [ref=e9]'), 'e9');
+    assert.strictEqual(snapshotLineRef('- "unterminated [ref=e4]'), 'e4');
+    assert.strictEqual(snapshotLineRef('garbage [ref=f2e3]'), 'f2e3');
+    assert.strictEqual(snapshotLineRef('- text: Email'), null);
+    assert.strictEqual(snapshotLineRef('- link "x" [ref=nope]'), null);
+  });
+
   it('tolerates lines it does not understand and gives them no label', () => {
     for (const l of ['- text: Email', '    - /url: /x', '', 'garbage [ref=e3]', '- "unterminated [ref=e4]']) {
       const p = parseSnapshotLine(l);
@@ -133,6 +142,20 @@ describe('snapshot and refs (headless Chromium)', () => {
     const r = await run({ action: 'snapshot', ref: 'e999' });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.code, 'ref_not_found');
+  });
+
+  it('interactive and refs keep a line with a ref the parser cannot read', async () => {
+    const b = getBrowser();
+    const own = Object.getOwnPropertyDescriptor(b, 'snapshot');
+    b.snapshot = async () => ['- generic [ref=e1]:', '  - text: plain', '  - "odd [ref=e7]', '  - button "Go" [ref=e8]'].join('\n');
+    try {
+      const r = await run({ action: 'snapshot', interactive: true });
+      assert.strictEqual(r.ok, true, r.error);
+      assert.deepStrictEqual(r.snapshot.split('\n'), ['- generic [ref=e1]:', '  - "odd [ref=e7]', '  - button "Go" [ref=e8]']);
+      assert.strictEqual(r.refs, 3);
+    } finally {
+      if (own) Object.defineProperty(b, 'snapshot', own); else delete b.snapshot;
+    }
   });
 
   it('max_chars cuts at a line end and says truncated; it is bounded', async () => {

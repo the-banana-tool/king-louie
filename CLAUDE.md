@@ -125,8 +125,15 @@ characters). The desktop dialog shows it (`browserRefSummary` in
 the handler reads a fresh snapshot (`PlaywrightBrowser#currentRefLabel`) and
 refuses `ref_changed` when the element no longer has that role and name. The
 label is the page's own name: it proves which element ran, not what it does.
-Not covered: a ref in the `login`/signup/payment selector fields gets no label
-and no run-time check, and each approved ref action costs one extra snapshot.
+The executor's refusal is `{ success: false, ok: false, error, code }`. Only
+`selector` and `target_selector` take a ref: a `ref=` or raw `aria-ref=` in any
+other selector field (`login`'s `usernameSelector`, `passwordSelector`,
+`submitSelector`, the signup and payment fields) is refused `invalid_params`
+before anyone is asked and before anything is filled
+(`otherSelectorRefRefusal`). The exact label behind a hidden or cut one is
+kept by ref and shown label, not by the params object, so a copy of the
+params still compares exactly. Each approved ref action costs one extra
+snapshot.
 
 ## Service mode
 
@@ -2361,7 +2368,10 @@ rulings R-BR-*, the author's calls C-1 to C-14); tickets and ledger in
   `BrowserExtract`, `Browser`; look-only, not in `ACTING_ACTIONS`) returns
   Playwright's AI snapshot (`page._snapshotForAI().full`) as
   `untrusted_output`, with `url`, `title`, `refs` (the ref lines in the
-  text) and `truncated`. `interactive: true` keeps only ref lines; `ref`
+  text) and `truncated`. A line's ref is the parser's (`parseSnapshotLine`)
+  where it parses the line, else the last `[ref=…]` on it
+  (`snapshotLineRef`): such a line is kept and counted but has no label, so
+  acting on it is `ref_not_found`. `interactive: true` keeps only ref lines; `ref`
   returns that node's subtree; `max_chars` (default 20000, 1 to 60000, else
   `invalid_params`) cuts at a line end. A selector `ref=eN` / `ref=f1e3`
   resolves through Playwright's `aria-ref=` engine, in every action that
@@ -2395,7 +2405,9 @@ rulings R-BR-*, the author's calls C-1 to C-14); tickets and ledger in
   acting action whose handler threw a page error (`isPageError`: a
   `TimeoutError` or a Playwright call-prefixed message, not a selector
   syntax error), a `navigate` that lands on `chrome-error://` (waiting up to
-  1 s for the commit), and a whole-page `snapshot` under 200 characters get
+  1 s for the commit), and a `snapshot` (no `ref`) of a page whose whole
+  snapshot has no ref and is under 200 characters (judged on the whole page
+  whatever `interactive` or `max_chars` return) get
   the interactive snapshot (4000 characters) and a viewport image. At most
   `AUTO_IMAGES_PER_RUN` (3) per run (`src/tools/browser-auto-images.js`;
   `ToolExecutor` builds one budget and hands it as
@@ -2711,11 +2723,13 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   refused `browser_launch_failed` ("profile <name> is open in another
   browser"), before the phone is asked and again before the launch. Every
   ending calls `PlaywrightBrowser#stop`; `keep_browser` takes the key out of
-  the registry and holds the window in `TakeManager#kept` until `stopAll`.
+  the registry and holds the window in `TakeManager#kept` until `stopAll`,
+  or until the owner closes it (the context's `close`; a kept browser no
+  longer running is dropped at the next check), which frees its profile.
+  The profile directory comes from `resolveProfileDir`
+  (`src/browser/profile-dirs.js`), as the browser tools' does.
   Profiles the helper made under `%LOCALAPPDATA%\KingLouie\browser-profiles\`
-  are not moved. Open: a kept window the owner closes by hand stays in
-  `kept` until the service stops, so a later take on that profile is refused
-  until then.
+  are not moved.
 - **The denied dirs (R-PN-1, C-8).** The OS no longer keeps the model's
   tools out of the owner's files, so `run.js` passes `createCore` `deniedDirs`
   (registered with `registerDeniedDir`, `src/tools/utils.js`): the config dir

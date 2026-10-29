@@ -18,6 +18,7 @@ const { newLeaseId } = require('./leases');
 const { createTakePolicy, BROWSER_ACTIONS, BROWSER_TOOLS } = require('./take-policy');
 const { plainLineProblem } = require('../cases/hidden-chars');
 const { CHROME_FLAGS } = require('../browser/chrome-flags');
+const { resolveProfileDir } = require('../browser/profile-dirs');
 
 // C-6: a take with no word from the driver for 30 minutes after a report ends.
 const SILENT_MS = 30 * 60000;
@@ -94,7 +95,9 @@ class TakeManager {
     findProcess = undefined, kill = undefined, hosting = 'service', dataDir = null, launchTakeBrowser = null, createBrowser = null } = {}) {
     Object.assign(this, { leases, broker, store, guiConfig, audit, clock, timers, log, attachBrowser, closeBrowser, hosting, dataDir });
     this.personal = hosting === 'personal';
-    // Step 2 of a start: { exe, profile, userDataPath, ctx, setPid, checkEnded } → the browser.
+    // Step 2 of a start → the browser. Personal: { exe, profile, userDataPath }. Fleet:
+    // { exe, profile, ctx, setPid, checkEnded } (the helper's call, the pid it reports, and the
+    // check that the take did not end while the helper launched).
     this.launchTakeBrowser = launchTakeBrowser
       || (this.personal ? (req) => launchPersonalBrowser(req, { createBrowser }) : (req) => this._launchFleetBrowser(req));
     // Personal: { browser, profile } a take kept open with keep_browser, outside the registry;
@@ -310,19 +313,20 @@ class TakeManager {
       }
       // 2. The browser: the helper's Chrome attached over CDP (fleet), or one Playwright launches
       // itself (personal).
-      let userDataPath = null;
+      const exe = cfg.apps[cfg.browser].path;
+      let launchReq;
       if (this.personal) {
         if (!this.dataDir) throw new GuiError('browser_launch_failed', 'no data dir for the take\'s browser profile');
         // Chrome locks a user-data dir to one process (C-3): checked again, the phone took time.
         this._assertProfileFree(p.profile, t.browserKey);
-        userDataPath = path.join(this.dataDir, 'browser-profiles', p.profile);
+        // The same directory the browser tools open for this profile name.
+        launchReq = { exe, profile: p.profile, userDataPath: resolveProfileDir({ userDataPath: this.dataDir }, p.profile) };
+      } else {
+        launchReq = { exe, profile: p.profile, ctx, setPid: (pid) => { if (Number.isInteger(pid)) t.browserPid = pid; }, checkEnded };
       }
       let browser;
       try {
-        browser = await this.launchTakeBrowser({
-          exe: cfg.apps[cfg.browser].path, profile: p.profile, userDataPath, ctx,
-          setPid: (pid) => { if (Number.isInteger(pid)) t.browserPid = pid; }, checkEnded
-        });
+        browser = await this.launchTakeBrowser(launchReq);
       } catch (err) {
         // The launcher's own refusal, or checkEnded's (the take ended while launching).
         if (isGuiError(err) && (err.code === 'browser_launch_failed' || t.ended)) throw err;
@@ -415,9 +419,19 @@ class TakeManager {
     }
   }
 
-  // Personal (C-3): a profile open under another registry key, or in a browser a take kept, is
-  // refused before Chrome starts.
+  // Personal (C-4): a kept browser stays in `kept` until stopAll, or until its context closes
+  // (the owner closed the window), which frees its profile for the next take.
+  _keep(browser, profile) {
+    const entry = { browser, profile };
+    this.kept.add(entry);
+    const context = browser && browser.context;
+    if (context && typeof context.on === 'function') context.on('close', () => this.kept.delete(entry));
+  }
+
+  // Personal (C-3): a profile open under another registry key, or in a browser a take kept and
+  // that still runs, is refused before Chrome starts.
   _assertProfileFree(profile, ownKey) {
+    for (const k of [...this.kept]) if (k.browser && k.browser.isRunning === false) this.kept.delete(k);
     const open = this.registry.activeProfiles().some((e) => e.key !== ownKey && e.profile === profile)
       || [...this.kept].some((k) => k.profile === profile);
     if (open) throw new GuiError('browser_launch_failed', `profile ${profile} is open in another browser`);
@@ -505,7 +519,7 @@ class TakeManager {
         t.registered = false;
         await step('the browser registry', () => this.registry.removeBrowser(t.browserKey));
       }
-      if (keepBrowser) this.kept.add({ browser, profile: t.profile });
+      if (keepBrowser) this._keep(browser, t.profile);
       else await step('closing the browser', () => browser.stop());
     }
     if (t.browser) {
