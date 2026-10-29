@@ -11,6 +11,7 @@ import com.example.kinglouie.KingLouieApplication
 import com.example.kinglouie.MainActivity
 import com.example.kinglouie.R
 import com.example.kinglouie.protocol.PushText
+import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
@@ -33,9 +34,15 @@ object Push {
     private const val PREFS = "kl.push"
     private const val COUNT_KEY = "approvals_count"
 
-    fun register(activity: Activity, onToken: (String) -> Unit) {
-        // Without the owner's own google-services.json there is no Firebase
-        // app to ask; the app then works as the nopush flavor does.
+    fun register(activity: Activity, onToken: (String) -> Unit) = token(onToken)
+
+    /**
+     * Asks FCM for this app's token (no Activity needed: after Reset this
+     * phone deleted the stored one, the next enrollment asks again).
+     * Without the owner's own google-services.json there is no Firebase app
+     * to ask; the app then works as the nopush flavor does.
+     */
+    fun token(onToken: (String) -> Unit) {
         val messaging = try {
             FirebaseMessaging.getInstance()
         } catch (e: IllegalStateException) {
@@ -43,6 +50,9 @@ object Push {
         }
         messaging.token.addOnSuccessListener { onToken(it) }
     }
+
+    /** Whether this build can receive a push at all: a Firebase app exists (push spec §7.3, the gear's row). */
+    fun available(context: Context): Boolean = FirebaseApp.getApps(context).isNotEmpty()
 
     /**
      * The running count of Approval pushes since the app was last in front

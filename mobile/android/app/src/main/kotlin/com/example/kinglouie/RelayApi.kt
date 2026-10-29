@@ -16,6 +16,7 @@ import com.example.kinglouie.protocol.PhoneKey
 import com.example.kinglouie.protocol.ProtocolException
 import com.example.kinglouie.protocol.Timestamps
 import com.example.kinglouie.protocol.arr
+import com.example.kinglouie.protocol.bool
 import com.example.kinglouie.protocol.get
 import com.example.kinglouie.protocol.int
 import com.example.kinglouie.protocol.jsonNumber
@@ -45,6 +46,9 @@ import javax.net.ssl.X509TrustManager
  * refuses), `network`, `redirect`, `poll_busy`.
  */
 class RelayException(val status: Int, val code: String, message: String, val retryAfter: Int? = null) : Exception(message.ifEmpty { code })
+
+/** GET /v1/push-token (push spec §7.3): whether the relay holds a token for this phone, and a sender for its platform. */
+data class PushTokenState(val registered: Boolean, val sender: Boolean)
 
 /** The relay's leaf certificate does not match the pinned SPKI hash. */
 class PinMismatchException : CertificateException("Relay certificate changed — scan a new relay code.")
@@ -316,6 +320,17 @@ class RelayApi(
     /** On the read key: re-sent with no prompt when the token rotates (spec 3 R5). */
     suspend fun pushToken(token: String) {
         request("PUT", "/v1/push-token", READ, JsonObject(mapOf("platform" to jsonString("fcm"), "token" to jsonString(token))))
+    }
+
+    /** Reset this phone (push spec §7.3): the relay forgets where this phone's notifications go. 204. */
+    suspend fun deletePushToken() {
+        request("DELETE", "/v1/push-token", READ)
+    }
+
+    /** The gear's Notifications row (push spec §7.3): the relay never echoes the token. */
+    suspend fun pushTokenState(): PushTokenState {
+        val body = request("GET", "/v1/push-token", READ).second
+        return PushTokenState(registered = body["registered"].bool() == true, sender = body["sender"].bool() == true)
     }
 
     /** `202 { state: 'waiting' }`, or 410 code_closed once the code was used or closed. */

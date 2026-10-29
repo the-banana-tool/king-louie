@@ -42,7 +42,7 @@ function routeFor(table, method, kotlinPath) {
 // Every call RelayApi makes: request(...) and exchange(...) with a literal method and path, and reply(path, …).
 function calls(api) {
   const out = [];
-  for (const m of api.matchAll(/\b(request|exchange)\("(GET|POST|PUT)", (?:if \([^)]*\) )?"([^"]+)"(?: else "[^"]+")?, ([A-Za-z_.]+)/g)) {
+  for (const m of api.matchAll(/\b(request|exchange)\("(GET|POST|PUT|DELETE)", (?:if \([^)]*\) )?"([^"]+)"(?: else "[^"]+")?, ([A-Za-z_.]+)/g)) {
     out.push({ via: m[1], method: m[2], path: m[3], key: m[4] });
   }
   for (const m of api.matchAll(/\breply\("([^"]+)", /g)) out.push({ via: 'reply', method: 'POST', path: m[1], key: 'reply' });
@@ -113,8 +113,10 @@ describe('Android: two keys, and the key each relay route is signed with (androi
     // Presence (§9): read key, { foreground, at }.
     assert.match(api, /suspend fun presence\(foreground: Boolean\)/);
     assert.ok(found.some((c) => c.method === 'POST' && c.path === '/v1/presence' && c.key === 'READ'));
-    // The push token rides the read key (spec 3 R5).
-    assert.ok(found.some((c) => c.method === 'PUT' && c.path === '/v1/push-token' && c.key === 'READ'));
+    // The push token rides the read key (spec 3 R5), and so do its DELETE and GET (push spec §7.3).
+    for (const method of ['PUT', 'DELETE', 'GET']) {
+      assert.ok(found.some((c) => c.method === method && c.path === '/v1/push-token' && c.key === 'READ'), `${method} /v1/push-token on READ`);
+    }
   });
 
   it('a read-only request with no read key fails at once and never prompts; only an envelope may travel device-signed (P4)', () => {

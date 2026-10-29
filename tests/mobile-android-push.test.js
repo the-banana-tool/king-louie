@@ -105,3 +105,67 @@ describe('Android push (spec 3 §7.2)', () => {
     for (const k of EIGHT) assert.ok(pushed.includes(`"${k}"`), `openPushed names ${k}`);
   });
 });
+
+describe('Android push token (spec 3 §7.3, C-10, R-PU-5)', () => {
+  const api = () => main('RelayApi.kt');
+  const model = () => main('AppModel.kt');
+
+  it('RelayApi deletes and reads the token on the read key', () => {
+    assert.match(api(), /suspend fun deletePushToken\(\) \{\n\s+request\("DELETE", "\/v1\/push-token", READ\)/);
+    const state = section(api(), 'suspend fun pushTokenState(): PushTokenState {', '\n    }\n');
+    assert.match(state, /request\("GET", "\/v1\/push-token", READ\)/);
+    assert.match(state, /\["registered"\]\.bool\(\) == true/);
+    assert.match(state, /\["sender"\]\.bool\(\) == true/);
+  });
+
+  it('the token goes again at every cold start, changed or not, and right after an enrollment', () => {
+    const m = model();
+    // Once per process (in memory), never "once per token value" from storage.
+    assert.match(m, /private var pushTokenSentHere: String\? = null/);
+    const send = section(m, 'private suspend fun sendPushToken(again: Boolean = false) {', '\n    }\n');
+    assert.ok(!send.includes('storage.pushTokenSent ||') && !/token == storage\.pushTokenSent/.test(send), 'storage does not decide');
+    assert.match(send, /if \(!again && token == pushTokenSentHere\) return/);
+    assert.match(send, /pushTokenSentHere = token/);
+    // The loop sends at its start and after each poll that got through (a no-op once sent in this process).
+    const loop = section(m, 'private suspend fun run() = coroutineScope {', '\n        }\n    }\n');
+    assert.ok((loop.match(/sendPushToken\(\)/g) || []).length >= 2, 'the loop sends at its start and after a poll that got through');
+    // A finished console enrollment sends at once.
+    const done = section(m, '"done" -> {', '\n                }\n');
+    assert.match(done, /sendPushToken\(again = true\)/);
+  });
+
+  it('onNewToken sends at once when enrolled; not enrolled, it only stores', () => {
+    assert.match(code(fcm()), /override fun onNewToken\(token: String\) \{\n\s+\(application as KingLouieApplication\)\.model\.registerPushToken\(token\)/);
+    const reg = section(model(), 'fun registerPushToken(token: String) {', '\n    }\n');
+    assert.match(reg, /storage\.pushToken = token/);
+    assert.match(reg, /if \(readyToRead\(\)\) scope\.launch \{ sendPushToken\(\) \}/);
+  });
+
+  it('Reset this phone: DELETE first (best effort), then the keys, then the stored token', () => {
+    const m = model();
+    const reset = section(m, 'fun reset() {', '\n    }\n');
+    assert.match(reset, /resetJob = scope\.launch/);
+    const finish = section(m, 'private suspend fun finishReset(api: RelayApi?) {', '\n    }\n');
+    const del = finish.indexOf('api.deletePushToken()');
+    const keys = finish.indexOf('DeviceKey.delete()');
+    const cleared = finish.indexOf('storage.clear()');
+    assert.ok(del >= 0 && keys > del && cleared > keys, 'DELETE, then the keys, then storage (which holds the token)');
+    assert.match(finish, /withTimeout\(RESET_DELETE_MS\)/);
+    // A new pairing waits for the reset, so the old key's deletion cannot take the new key.
+    assert.match(section(m, 'fun scanned(text: String) = scope.launch {', '\n    }\n'), /resetJob\?\.join\(\)/);
+  });
+
+  it('the gear shows one Notifications row from GET /v1/push-token and the phone\'s state', () => {
+    const settings = main('SettingsScreen.kt');
+    for (const words of ['Notifications: on', 'Notifications: off in Android settings', 'Notifications: this build has no push',
+      'Notifications: the relay has no push credential', 'Notifications: not registered yet']) {
+      assert.ok(settings.includes(words) || model().includes(words), words);
+    }
+    assert.match(settings, /Settings\.ACTION_APP_NOTIFICATION_SETTINGS/);
+    assert.match(settings, /Settings\.EXTRA_APP_PACKAGE/);
+    assert.match(section(model(), 'fun refreshSettings() {', '\n    }\n'), /refreshNotifications\(api\)/);
+    // Whether a Firebase app exists: fcm without a config reports no push; nopush never has one.
+    assert.match(nopush(), /fun available\(context: Context\): Boolean = false/);
+    assert.match(code(fcm()), /fun available\(context: Context\): Boolean = FirebaseApp\.getApps\(context\)\.isNotEmpty\(\)/);
+  });
+});
