@@ -46,8 +46,14 @@ function fakeTimers(clock) {
 }
 
 class FakeRelay extends EventEmitter {
-  constructor() { super(); this.connected = true; this.sent = []; this.methods = new Map(); }
+  constructor() { super(); this.connected = true; this.sent = []; this.methods = new Map(); this.pushes = []; }
   isConnected() { return this.connected; }
+  // push.notify (push spec §6.2): recorded as the relay link would carry it.
+  async pushNotify(params) {
+    if (!this.connected) throw Object.assign(new Error('relay_offline'), { code: 'relay_offline' });
+    this.pushes.push(params);
+    return { ok: true };
+  }
   async send(envelope, opts = {}) {
     if (!this.connected) throw Object.assign(new Error('relay_offline'), { code: 'relay_offline' });
     this.sent.push({ envelope, opts, message: open(envelope).message });
@@ -1572,6 +1578,129 @@ describe('lock, expiry and revoke', () => {
 
 // Agent-driven demo takes (spec 2026-10-24 §6.3, R-D1-7): a take is a lease
 // of its own kind; an unattended one has no contact window and never pauses.
+describe('push.notify: a granted lease ending or pausing for want of contact (push spec §6)', () => {
+  const WINDOW = 120000;
+  const ended = (lease) => relay.pushes.filter((p) => p.kind === 'session_ended' && p.id === lease.leaseId);
+  const pausedPushes = (lease) => relay.pushes.filter((p) => p.kind === 'session_paused' && p.id === lease.leaseId);
+
+  it('an expiry pushes session_ended once, to every phone (no except_device), after the ended status', async () => {
+    const lease = await granted({ minutes: 1 });
+    timers.advance(60000 + 1);
+    assert.equal(lease.endReason, 'expired');
+    assert.deepEqual(ended(lease), [{ kind: 'session_ended', id: lease.leaseId, to_device: null, except_device: null, expires_at: null }]);
+    assert.equal(lease.endedBy, null);
+    assert.equal(relay.last('kl.lease.status').message.state, 'ended', 'the ended status went out');
+    leases.stopAll();
+    assert.equal(ended(lease).length, 1);
+  });
+
+  it('a revoke from device B: except_device is B; a replayed revoke and a listing push nothing more', async () => {
+    const lease = await granted();
+    const revoke = other.leaseRevoke(identity.nodeId, lease.leaseId);
+    leases.onRevoke(revoke);
+    assert.equal(lease.endedBy, other.deviceId);
+    assert.deepEqual(ended(lease).map((p) => [p.except_device, p.to_device]), [[other.deviceId, null]]);
+    leases.onRevoke(revoke);
+    leases.listFor(phone.deviceId);
+    leases.listingFor(phone.deviceId, Buffer.alloc(32, 7).toString('base64url'));
+    assert.equal(relay.pushes.length, 1);
+  });
+
+  it('the granting phone stops its own lease: except_device is that phone', async () => {
+    const lease = await granted();
+    leases.onRevoke(phone.leaseRevoke(identity.nodeId, lease.leaseId));
+    assert.deepEqual(ended(lease).map((p) => p.except_device), [phone.deviceId]);
+  });
+
+  it('a deny of a resume names the device that denied it', async () => {
+    const lease = await granted();
+    leases.suspend(lease.leaseId, 'foreground_changed');
+    leases.onGrant(other.leaseGrant(relay.last('kl.lease.request').envelope, { decision: 'deny' }));
+    assert.equal(lease.endReason, 'denied');
+    assert.deepEqual(ended(lease).map((p) => p.except_device), [other.deviceId]);
+  });
+
+  it('a lease that never ran pushes nothing: a request that expired, a first request denied', async () => {
+    const denied = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+    leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { decision: 'deny' }));
+    await assert.rejects(denied, (e) => e.code === 'lease_denied');
+    const waiting = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+    timers.advance(5 * 60000 + 1);
+    await assert.rejects(waiting, (e) => e.code === 'lease_request_expired');
+    leases.stopAll();
+    assert.deepEqual(relay.pushes, []);
+  });
+
+  it('every other ending of a lease that ran pushes once with no except_device: service_stopped, job_closed, a take reason', async () => {
+    const a = await granted();
+    leases.stopAll('service_stopped');
+    const b = await granted({ jobId: 'job-2' });
+    leases.endForJob('job-2');
+    const c = await granted({ jobId: 'job-3' });
+    leases.endLease(c.leaseId, 'driver_silent');
+    for (const l of [a, b, c]) assert.deepEqual(ended(l).map((p) => p.except_device), [null], l.endReason);
+  });
+
+  it('a contact lapse pushes session_paused to the granting device only, with the lease expiry, once per transition', async () => {
+    const lease = await granted();
+    timers.advance(WINDOW + 1);
+    assert.equal(lease.suspendReason, 'no_contact');
+    assert.deepEqual(pausedPushes(lease), [{
+      kind: 'session_paused', id: lease.leaseId, to_device: phone.deviceId, except_device: null, expires_at: new Date(lease.expiresAt).toISOString()
+    }]);
+    // Asked again while already paused: no second push.
+    leases.suspend(lease.leaseId, 'no_contact');
+    assert.equal(pausedPushes(lease).length, 1);
+    // A watch resumes it; the next lapse is a new transition and pushes again.
+    assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, true);
+    assert.equal(lease.state, 'active');
+    timers.advance(WINDOW + 1);
+    assert.equal(pausedPushes(lease).length, 2);
+  });
+
+  it('another reason taking over a contact pause does not push; nor does any other suspension', async () => {
+    const lease = await granted();
+    timers.advance(WINDOW + 1);
+    const n = relay.pushes.length;
+    leases.onHelperDisconnected();
+    assert.equal(lease.suspendReason, 'helper_disconnected');
+    assert.equal(relay.pushes.length, n);
+    leases.stopAll();
+    const second = await granted({ jobId: 'job-2' });
+    const before = relay.pushes.length;
+    leases.suspend(second.leaseId, 'foreground_changed');
+    assert.equal(relay.pushes.length, before);
+  });
+
+  it('an unattended take never pauses, so never pushes session_paused; its ending pushes', async () => {
+    const take = { name: 'Demo', sites: ['*.example.com'], browser: true, credentials: false, unattended: true };
+    const p = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes: 180, reason: 'demo', kind: 'take', take });
+    leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 180 }));
+    const lease = await p;
+    timers.advance(2 * 3600000);
+    leases.suspend(lease.leaseId, 'no_contact');
+    assert.deepEqual(pausedPushes(lease), []);
+    leases.endLease(lease.leaseId, 'take_done');
+    assert.deepEqual(ended(lease).map((x) => x.except_device), [null]);
+  });
+
+  it('an ending while the relay link is down is sent when it returns', async () => {
+    const lease = await granted();
+    relay.down();
+    leases.endLease(lease.leaseId, 'service_stopped');
+    assert.deepEqual(relay.pushes, []);
+    relay.up();
+    assert.equal(ended(lease).length, 1);
+  });
+
+  it('the queue is reached as leases.pushQueue, and drains', async () => {
+    const lease = await granted();
+    leases.pushQueue.enqueue({ kind: 'session_ended', id: lease.leaseId });
+    await leases.pushQueue.drain({ timeoutMs: 100 });
+    assert.equal(relay.pushes.at(-1).id, lease.leaseId);
+  });
+});
+
 describe('take leases', () => {
   const TAKE = { name: 'BSEOA demo', sites: ['*.example.com'], browser: true, credentials: false, unattended: true };
   const takeRequest = (extra = {}) => leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes: 180, reason: 'demo', kind: 'take', take: TAKE, ...extra });

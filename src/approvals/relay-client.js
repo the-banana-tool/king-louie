@@ -26,7 +26,7 @@ function sleepSync(ms) {
 
 // F3's own link methods (§4.6); nobody else may register these names.
 const F3_METHODS = new Set([
-  'relay.hello', 'approval.submit', 'approval.status', 'approval.response', 'message.submit',
+  'relay.hello', 'approval.submit', 'approval.status', 'approval.response', 'message.submit', 'push.notify',
   'enroll.open', 'enroll.done', 'enroll.claim', 'device.enroll', 'device.revoke', 'device.read_key', 'device.state',
   'audit.slice', 'audit.head'
 ]);
@@ -377,6 +377,13 @@ class RelayClient extends EventEmitter {
 
   send(envelope, { push = null, to_device = null } = {}) {
     return this.call('message.submit', { envelope, push, to_device });
+  }
+
+  // push spec §6.2 (C-1): a content-free hint that a granted lease ended or
+  // paused, for the relay to push to the phones (src/gui/push-queue.js).
+  // params: { kind, id, to_device, except_device, expires_at } → { ok: true }.
+  pushNotify(params) {
+    return this.call('push.notify', params);
   }
 
   // F3's relay → node methods: handler(method, params) → result.
