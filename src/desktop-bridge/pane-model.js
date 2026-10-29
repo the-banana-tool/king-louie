@@ -31,6 +31,8 @@ const NODE_LINES = {
 };
 const TASK_CODES = { missing: 'NODE_TASK_MISSING', disabled: 'NODE_TASK_DISABLED', 'other-account': 'NODE_TASK_OTHER_ACCOUNT' };
 const START_FAILED = (line) => `King Louie Node stopped while starting: ${plain(line)}`;
+const RUN_FAILED = (message) => `King Louie Node could not be started: ${plain(message)}`;
+const STOP_FAILED = (message) => `King Louie Node could not be stopped: ${plain(message)}`;
 const RUNNING_NO_BRIDGE = (pid) => `King Louie Node is running (pid ${plain(pid)}) but its desktop bridge is not open.`;
 const PAIR_ELEVATED_LINE = 'This app is running as administrator. Close it and open it normally to pair.';
 const PERSONAL_PAIR_WARNING = 'Every paired desktop sees every chat, setting and secret name in the node.';
@@ -60,6 +62,8 @@ function refusalLine(error) {
   if (code === 'PAIR_ELEVATED') return PAIR_ELEVATED_LINE;
   if (code === 'PAIR_COMMAND_FAILED') return /^Pairing did not finish/.test(text) ? plain(text) : `Pairing did not finish: ${plain(text)}`;
   if (code === 'NODE_START_FAILED') return START_FAILED(text);
+  if (code === 'NODE_TASK_RUN_FAILED') return RUN_FAILED(text);
+  if (code === 'NODE_STOP_FAILED') return STOP_FAILED(text);
   if (NODE_LINES[code]) return NODE_LINES[code];
   return plain(text);
 }
@@ -72,6 +76,8 @@ function disconnectedRow(n, { install }) {
   const err = n.startError;
   if (err && err.code === 'NODE_START_FAILED') return { line: START_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
   if (err && err.code === 'NODE_START_TIMEOUT') return { line: NODE_LINES.NODE_START_TIMEOUT, action: null };
+  if (err && err.code === 'NODE_TASK_RUN_FAILED') return { line: RUN_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
+  if (err && err.code === 'NODE_STOP_FAILED') return { line: STOP_FAILED(errorText(err)), action: { id: 'nodeRestart', label: 'Restart King Louie Node' } };
   const taskCode = TASK_CODES[n.task] || (err && Object.values(TASK_CODES).includes(err.code) ? err.code : null);
   if (taskCode === 'NODE_TASK_MISSING') return { line: NODE_LINES.NODE_TASK_MISSING, action: install };
   if (taskCode) return { line: NODE_LINES[taskCode], action: null };

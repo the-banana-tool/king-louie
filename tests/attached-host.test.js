@@ -178,3 +178,57 @@ describe('attached host', () => {
     assert.ok(status.unavailableTabs.includes('mcp'));
   });
 });
+
+// Spec 2026-10-28 §7.2: start() hands the launch to the controller, which
+// runs a personal node once and otherwise connects as before.
+describe('attached host: the start', () => {
+  it('start() calls controller.startAttached() and not client.connect()', async () => {
+    const calls = [];
+    let made = null;
+    const { host, client } = (() => {
+      const handlers = new Map();
+      const ipcMain = { handle: (ch, fn) => handlers.set(ch, fn), on() {} };
+      const userDataDir = tmp();
+      const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
+      const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
+      state.setMode('attached');
+      const fake = new FakeClient();
+      fake.connect = async () => { calls.push('connect'); return null; };
+      const controllerFactory = (opts) => {
+        made = require('../src/ipc/desktop-controller').createDesktopController(opts);
+        const real = made.startAttached;
+        made.startAttached = async () => { calls.push('startAttached'); return real(); };
+        return made;
+      };
+      state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, pairedAt: '2026-09-23T14:02:11Z' } });
+      const app = { getPath: () => userDataDir, relaunch() {}, exit() {}, quit() {} };
+      const h = startAttachedHost({ app, ipcMain, safeStorage, dialog: {}, getWindow: () => null, state, env: {}, platform: 'linux', clientFactory: () => fake, controllerFactory });
+      return { host: h, client: fake };
+    })();
+    host.start();
+    await new Promise((r) => setImmediate(r));
+    assert.deepStrictEqual(calls, ['startAttached', 'connect'], 'a fleet pairing still connects at once, through the controller');
+    assert.strictEqual(host.client, client);
+    await host.shutdown();
+  });
+
+  it('a controller whose start fails is logged, not thrown', async () => {
+    const { host } = (() => {
+      const ipcMain = { handle() {}, on() {} };
+      const userDataDir = tmp();
+      const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
+      const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
+      state.setMode('attached');
+      const controllerFactory = (opts) => {
+        const c = require('../src/ipc/desktop-controller').createDesktopController(opts);
+        c.startAttached = async () => { throw new Error('boom'); };
+        return c;
+      };
+      const app = { getPath: () => userDataDir, relaunch() {}, exit() {}, quit() {} };
+      return { host: startAttachedHost({ app, ipcMain, safeStorage, dialog: {}, getWindow: () => null, state, env: {}, platform: 'linux', clientFactory: () => new FakeClient(), controllerFactory }) };
+    })();
+    assert.doesNotThrow(() => host.start());
+    await new Promise((r) => setImmediate(r));
+    await host.shutdown();
+  });
+});
