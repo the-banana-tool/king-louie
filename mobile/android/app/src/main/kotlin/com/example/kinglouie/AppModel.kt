@@ -62,6 +62,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -151,6 +152,9 @@ class AppModel(context: Context) {
     private val storage = Storage(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var key: DeviceKey? = runCatching { DeviceKey.load() }.getOrNull()
+
+    /** The read key (android-slim §8.1), or null for a phone enrolled before it. Made and deleted with `key`. */
+    private var readKey: ReadKey? = runCatching { ReadKey.load() }.getOrNull()
     private var demo: DemoFleet? = null
     private var client: RelayApi? = null
     private var pollJob: Job? = null
@@ -253,9 +257,15 @@ class AppModel(context: Context) {
         val url = storage.relayUrl ?: return
         val pin = storage.relaySpki ?: return
         val factory = RelayClientFactory {
-            RelayApi(url, pin, k.deviceId) { data -> sign(k, data, "Check your relay", "Signs this phone's request to the relay") }
+            RelayApi(url, pin, k.deviceId, { data -> sign(k, data, "Check your relay", "Signs this phone's request to the relay") }, readSigner())
         }
         client = factory.client(mode)
+    }
+
+    /** The read key's signer for RelayApi's read routes: no prompt, off the main thread. Null without a read key. */
+    private fun readSigner(): (suspend (ByteArray) -> ByteArray)? {
+        val rk = readKey ?: return null
+        return { data -> withContext(Dispatchers.IO) { rk.sign(data) } }
     }
 
     private fun changeMode(m: AppMode) {
@@ -1051,6 +1061,7 @@ class AppModel(context: Context) {
         pollJob?.cancel()
         runCatching { DeviceKey.delete() }
         key = null
+        readKey = null
         client = null
         banner = DeviceKey.INVALIDATED_MESSAGE
         pollProblem = DeviceKey.INVALIDATED_MESSAGE
@@ -1074,14 +1085,15 @@ class AppModel(context: Context) {
                 // Confirmed invalidated: the one case where the alias is replaced.
                 runCatching { DeviceKey.delete() }
                 key = null
+                readKey = null
                 client = null
-                return DeviceKey.create().also { key = it }
+                return DeviceKey.create().also { key = it; readKey = runCatching { ReadKey.load() }.getOrNull() }
             }
         }
         // load() gives null on a transient Keystore2 error too; create() runs
         // only once the Keystore confirms there is no key at all.
         DeviceKey.requireAbsent()
-        return DeviceKey.create().also { key = it }
+        return DeviceKey.create().also { key = it; readKey = runCatching { ReadKey.load() }.getOrNull() }
     }
 
     // Demo
@@ -1188,9 +1200,9 @@ class AppModel(context: Context) {
     private fun deviceJson(k: DeviceKey): JsonObject {
         val name = Build.MODEL.orEmpty().trim().take(64).ifEmpty { "Android phone" }
         return try {
-            Messages.device(k.deviceId, name, "android", k.x, k.y)
+            Messages.device(k.deviceId, name, "android", k.x, k.y, readKey?.jwk)
         } catch (e: ProtocolException) {
-            Messages.device(k.deviceId, "Android phone", "android", k.x, k.y)
+            Messages.device(k.deviceId, "Android phone", "android", k.x, k.y, readKey?.jwk)
         }
     }
 
@@ -1541,36 +1553,10 @@ class AppModel(context: Context) {
 
     // History, nodes, devices
 
-    fun loadHistory(nodeId: String) = scope.launch {
-        val pin = storage.nodes.firstOrNull { it.id == nodeId } ?: return@launch
-        try {
-            val envelope = client?.history(nodeId, 50, null) ?: return@launch
-            val result = AuditSlice.verify(envelope, pin.key)
-            if (!result.ok) {
-                banner = "History from ${Display.escape(pin.name)} did not verify (${Display.escape(result.reason ?: "unknown")})."
-                return@launch
-            }
-            // Signed by the pinned key, and about the node that was asked for.
-            val slice = Envelope.fromJson(envelope).message()
-            if (slice["node_id"].str() != pin.id) {
-                banner = "History from ${Display.escape(pin.name)} is about a different node."
-                return@launch
-            }
-            history = (slice["created_at"].str() ?: "") to result.entries.reversed()
-            historyStatus = null
-            historyStatusNote = null
-            if (frontDoorId != null) {
-                try {
-                    historyStatus = client?.auditStatus(nodeId)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    historyStatusNote = "The front door's gap and break records could not be read: ${describe(e)}"
-                }
-            }
-        } catch (e: Exception) {
-            fail(e)
-        }
+    /** History is no longer fetched (android-slim §6.5: RelayApi has no `history`); T11 and T12 remove this and its screen. */
+    @Suppress("UNUSED_PARAMETER")
+    fun loadHistory(nodeId: String) {
+        banner = "History is no longer shown in this app."
     }
 
     fun refreshNodes() = scope.launch {
@@ -2182,6 +2168,7 @@ class AppModel(context: Context) {
         pollJob?.cancel()
         runCatching { DeviceKey.delete() }
         key = null
+        readKey = null
         client = null
         demo = null
         pending.clear()

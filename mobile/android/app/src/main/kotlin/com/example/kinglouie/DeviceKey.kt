@@ -45,7 +45,7 @@ class KeyUnavailableException : Exception("This phone's key store did not answer
 class BiometricException(val code: Int, message: String) : Exception(message)
 
 /**
- * This phone's approval key: Android Keystore P-256, StrongBox when the phone
+ * This phone's approval key (the "device key"; the read key is ReadKey): Android Keystore P-256, StrongBox when the phone
  * has it (TEE otherwise), usable only through a strong-biometric prompt for
  * each signature, and invalidated when the enrolled biometrics change.
  */
@@ -174,7 +174,12 @@ class DeviceKey private constructor(private val publicKey: ECPublicKey) {
             if (found != null) throw KeyUnavailableException()
         }
 
-        /** Made at the first real pairing (never in demo mode). */
+        /**
+         * Made at the first real pairing (never in demo mode), with a new
+         * read key beside it (android-slim §8.1): an enrollment carries both.
+         * A read key that cannot be made leaves the phone as one enrolled
+         * before the read key; the §8.7 set-up makes it later.
+         */
         fun create(): DeviceKey {
             fun spec(strongBox: Boolean) = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
                 .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
@@ -192,11 +197,17 @@ class DeviceKey private constructor(private val publicKey: ECPublicKey) {
                 generator.initialize(spec(false))
                 generator.generateKeyPair()
             }
+            runCatching { ReadKey.create() }.onFailure { runCatching { ReadKey.delete() } }
             return DeviceKey(pair.public as ECPublicKey)
         }
 
+        /** Removes the device key and the read key with it (Reset, or a device key Android invalidated). */
         fun delete() {
-            keyStore().deleteEntry(ALIAS)
+            try {
+                keyStore().deleteEntry(ALIAS)
+            } finally {
+                ReadKey.delete()
+            }
         }
     }
 }

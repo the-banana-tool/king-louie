@@ -408,7 +408,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.equal(count(live, 'leaseChecks[pin.id] = '), 2, 'from the check, and from a request that failed; nowhere else');
     assert.ok(android.indexOf('val leaseChecks = mutableStateMapOf<String, LeaseNodeCheck>()') < android.indexOf('\n    init {'));
     const api = read(...kt, 'RelayApi.kt');
-    assert.match(api, /suspend fun leases\(nonce: String\? = null\): List<JsonElement> =\n\s+request\("GET", if \(nonce == null\) "\/v1\/leases\?wait=0" else "\/v1\/leases\?wait=0&nonce=\$nonce"\)/);
+    assert.match(api, /suspend fun leases\(nonce: String\? = null\): List<JsonElement> =\n\s+request\("GET", if \(nonce == null\) "\/v1\/leases\?wait=0" else "\/v1\/leases\?wait=0&nonce=\$nonce", READ\)/);
     const screens = read(...kt, 'LeaseScreens.kt');
     const pending = section(screens, 'fun LeaseRequests(', '\n}\n');
     assert.match(pending, /is AppModel\.LeaseNodeCheck\.Unconfirmed -> Text\(Leases\.couldNotConfirm\(pin\.name\), /);
