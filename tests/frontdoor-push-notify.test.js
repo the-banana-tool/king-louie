@@ -60,7 +60,7 @@ describe('push.notify (relay side)', () => {
     const h = harness();
     assert.deepEqual(await h.call(notify()), { ok: true });
     assert.deepEqual(h.pushes.map((p) => p.device).sort(), [devA, devB]);
-    assert.deepEqual(h.pushes[0], { device: h.pushes[0].device, kind: 'session_ended', id: LEASE, node_name: 'gpu-box', expires_at: null });
+    assert.deepEqual(h.pushes[0], { device: h.pushes[0].device, kind: 'session_ended', id: LEASE, node_name: 'gpu-box', expires_at: null, node_id: NODE });
     assert.equal(h.puts.length, 0);
   });
 
@@ -74,7 +74,7 @@ describe('push.notify (relay side)', () => {
     const h = harness();
     const expires = new Date(Date.now() + 600000).toISOString();
     await h.call(notify({ kind: 'session_paused', to_device: devB, expires_at: expires }));
-    assert.deepEqual(h.pushes, [{ device: devB, kind: 'session_paused', id: LEASE, node_name: 'gpu-box', expires_at: expires }]);
+    assert.deepEqual(h.pushes, [{ device: devB, kind: 'session_paused', id: LEASE, node_name: 'gpu-box', expires_at: expires, node_id: NODE }]);
   });
 
   it('a device of another node, or a non-fcm device, is never a target', async () => {

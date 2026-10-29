@@ -173,7 +173,7 @@ function registerNodeMethods(relay) {
     const node = nodeHub.nodeById(nodeId);
     const targets = devices.devicesForNode(nodeId).filter((d) => d.push && d.push.platform === 'fcm'
       && (toDevice === null || d.device_id === toDevice) && (exceptDevice === null || d.device_id !== exceptDevice));
-    pushTo(targets, { kind: p.kind, id: p.id, node_name: node ? node.node_name : null, expires_at: expiresAt });
+    pushTo(nodeId, targets, { kind: p.kind, id: p.id, node_name: node ? node.node_name : null, expires_at: expiresAt });
     return { ok: true };
   });
 
