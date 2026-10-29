@@ -22,6 +22,7 @@ C:\Users\sblac\Programming\king-louie-wt\desktop-attach-personal), base main 6af
 - T08 IPC channels/preload: merge 2c0c2474
 - T09 pane model, renderer banner: merge 2fc8e743
 - T02 personal-node runner: merge 22010fa5
+- T06 controller one-click pairing: merge 192fe4cb16b424e4f5e885d56de4c913ea3b3344
 
 ## Deviations
 - All tickets: branches are `feat/desktop-attach-personal-TNN` (git cannot nest `feat/desktop-attach-personal/TNN` under an existing branch of that name).
@@ -32,6 +33,7 @@ C:\Users\sblac\Programming\king-louie-wt\desktop-attach-personal), base main 6af
 - T08: preload sends `{ confirmed: false }` when the caller did not pass true (as `detach` does).
 - T09: the unpaired personal view's second line uses the spec's quoted words, not the CLI's `PAIR_WARNING` constant (which says "this service"); wording chosen for stage `command` (`Pairing with King Louie Node "<name>"…`) and `confirming` (`Checking the node's desktop bridge…`); personal views show `Version X.`; T09 also edited preload.js to expose describeBanner/describeInstallPreview/describeInstallResult.
 - T02: PERSONAL_TASK_NAME is copied in personal-node.js (not required from personal-install.js, so the installer is not loaded into the desktop), a test holds them equal; new codes NODE_TASK_RUN_FAILED, NODE_STOP_FAILED and nodeRunning's other: true (a live pid that is not a King Louie node); detect carries me; off Windows and under the KL_TEST_MODE+KL_DESKTOP_BRIDGE_FILE override detect says not personal with no inspector call; the async command-line lookup is a copy of stop.js's PowerShell one (stop.js's blocks).
+- T06: the §6.2 step 5 wait calls the existing pairConfirm every 3 s (its handshake is the only proof the bridge is up); its fatal refusals end the wait. The task is queried before /Run (NODE_TASK_MISSING/DISABLED/OTHER_ACCOUNT; an unreadable task reports NODE_TASK_MISSING with its own message). A personal pending pair surviving an app restart comes back as PAIR_COMMAND_FAILED ("the app closed while pairing") with Try again/Cancel and is not polled. The pairing record also stores service.name; the unpaired status calls queryTask and nodeRunning (two more PowerShell/schtasks calls per status read on Windows); pairStart calls detectPersonalNode first, so a fleet machine gets one inspector call too.
 
 ## Unconfirmed on a real machine (spec §15)
 - /Run → handshake time with an owner-sized history store (60 s kept, unmeasured).

@@ -1,7 +1,8 @@
 ---
 id: T06
 title: Controller one-click pairing, personal unpair, node status
-status: open
+status: done
+merged: 192fe4cb16b424e4f5e885d56de4c913ea3b3344
 blocked_by: [T01, T02]
 ---
 ## Goal
