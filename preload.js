@@ -1398,7 +1398,10 @@ contextBridge.exposeInMainWorld(
       describe: (status) => (paneModel ? paneModel.describeServicePane(status) : null),
       describeImport: (report) => (paneModel ? paneModel.describeImportReport(report) : []),
       decideDetachClick: (args) => (paneModel ? paneModel.decideDetachClick(args) : { confirm: false, arm: true }),
-      paneShapeChanged: (prevModel, nextModel) => (paneModel ? paneModel.paneShapeChanged(prevModel, nextModel) : true)
+      paneShapeChanged: (prevModel, nextModel) => (paneModel ? paneModel.paneShapeChanged(prevModel, nextModel) : true),
+      describeBanner: (status) => (paneModel ? paneModel.describeAttachedBanner(status) : null),
+      describeInstallPreview: (result) => (paneModel ? paneModel.describeInstallPreview(result) : null),
+      describeInstallResult: (result) => (paneModel ? paneModel.describeInstallResult(result) : null)
     },
     markdown: {
       parse: (text) => safeMarkdownParse(text),
