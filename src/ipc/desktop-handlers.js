@@ -15,7 +15,12 @@ const DESKTOP_METHODS = Object.freeze({
   [IPC.DESKTOP_IMPORT_PLAN]: 'importPlan',
   [IPC.DESKTOP_IMPORT_APPLY]: 'importApply',
   [IPC.DESKTOP_RETRY]: 'retry',
-  [IPC.DESKTOP_DISMISS_SERVICE_COMMAND]: 'dismissServiceCommand'
+  [IPC.DESKTOP_DISMISS_SERVICE_COMMAND]: 'dismissServiceCommand',
+  // The personal node (spec 2026-10-28 §11): local by LOCAL_PREFIXES.
+  [IPC.DESKTOP_NODE_START]: 'nodeStart',
+  [IPC.DESKTOP_NODE_INSTALL_PREVIEW]: 'nodeInstallPreview',
+  [IPC.DESKTOP_NODE_INSTALL]: 'nodeInstall',
+  [IPC.DESKTOP_PAIR_RESTART_CONFIRM]: 'pairRestartConfirm'
 });
 
 const unavailable = () => ({ ok: false, code: 'ATTACHED_UNAVAILABLE', error: 'Not available here.' });

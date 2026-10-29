@@ -67,8 +67,9 @@ describe('preload → window.electron bridge resilience', () => {
 function runPreloadWithFakeIpc() {
   let exposedApi = null;
   const listenersByChannel = new Map();
+  const invoked = [];
   const ipcRenderer = {
-    invoke: async () => ({ ok: true }),
+    invoke: async (channel, ...args) => { invoked.push([channel, ...args]); return { ok: true }; },
     send: () => {},
     on: (channel, fn) => {
       const set = listenersByChannel.get(channel) || new Set();
@@ -97,7 +98,7 @@ function runPreloadWithFakeIpc() {
   const emit = (channel, data) => {
     for (const fn of listenersByChannel.get(channel) || []) fn({}, data);
   };
-  return { exposedApi, emit, listenerCount: (channel) => (listenersByChannel.get(channel)?.size || 0) };
+  return { exposedApi, emit, invoked, listenerCount: (channel) => (listenersByChannel.get(channel)?.size || 0) };
 }
 
 describe('cases.onChanged (additive listeners)', () => {
@@ -131,6 +132,40 @@ describe('cases.onChanged (additive listeners)', () => {
     exposedApi.cases.onChanged(() => {});
     assert.strictEqual(listenerCount('case:changed'), 1);
   });
+});
+
+describe('desktop: personal-node methods (spec §11)', () => {
+  it('nodeStart sends restart as a boolean, true only for restart === true', async () => {
+    const { exposedApi, invoked } = runPreloadWithFakeIpc();
+    await exposedApi.desktop.nodeStart();
+    await exposedApi.desktop.nodeStart({ restart: true });
+    await exposedApi.desktop.nodeStart({ restart: 'yes', extra: 1 });
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(invoked)), [
+      ['desktop:nodeStart', { restart: false }],
+      ['desktop:nodeStart', { restart: true }],
+      ['desktop:nodeStart', { restart: false }]
+    ]);
+  });
+
+  it('nodeInstallPreview sends nothing but the channel', async () => {
+    const { exposedApi, invoked } = runPreloadWithFakeIpc();
+    await exposedApi.desktop.nodeInstallPreview({ confirmed: true });
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(invoked)), [['desktop:nodeInstallPreview']]);
+  });
+
+  for (const [method, channel] of [['nodeInstall', 'desktop:nodeInstall'], ['pairRestartConfirm', 'desktop:pairRestartConfirm']]) {
+    it(`${method} sends confirmed: true only when the caller passed confirmed === true`, async () => {
+      const { exposedApi, invoked } = runPreloadWithFakeIpc();
+      await exposedApi.desktop[method]({ confirmed: true, dataDir: 'C:\elsewhere' });
+      await exposedApi.desktop[method]({ confirmed: 'true' });
+      await exposedApi.desktop[method]();
+      assert.deepStrictEqual(JSON.parse(JSON.stringify(invoked)), [
+        [channel, { confirmed: true }],
+        [channel, { confirmed: false }],
+        [channel, { confirmed: false }]
+      ]);
+    });
+  }
 });
 
 describe('BrowserWindow webPreferences (preload contract)', () => {
