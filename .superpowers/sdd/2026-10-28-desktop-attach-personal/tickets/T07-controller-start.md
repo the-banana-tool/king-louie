@@ -1,7 +1,8 @@
 ---
 id: T07
 title: Start the node at attached launch, Start/Restart, Install from the pane
-status: open
+status: done
+merged: e8ff16f2
 blocked_by: [T06]
 ---
 ## Goal

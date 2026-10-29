@@ -1,7 +1,8 @@
 ---
 id: T10
 title: CLAUDE.md and install guide
-status: open
+status: done
+merged: 6381000f
 blocked_by: [T01, T02, T03, T04, T05, T06, T07, T08, T09]
 ---
 ## Goal
