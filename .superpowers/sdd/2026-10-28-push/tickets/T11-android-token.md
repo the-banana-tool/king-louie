@@ -1,7 +1,8 @@
 ---
 id: T11
 title: Android - token every cold start, DELETE on reset, gear Notifications row
-status: open
+status: done
+merged: bf41dbb7
 blocked_by: [T10]
 ---
 ## Goal
