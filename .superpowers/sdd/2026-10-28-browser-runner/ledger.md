@@ -88,9 +88,9 @@ Integration branch `feat/browser-runner` at `C:\Users\sblac\Programming\king-lou
   Demo takes endings bullet (personal close is `PlaywrightBrowser#stop`).
 
 ## Left
-Code review (and its fix agent), then `npm test` once.
-Review-fix inputs found so far: the unknown-page-state snapshot trigger checks only the snapshot's length,
-not "no ref and under 200 characters of text" (spec §8.2); the kept-window item above.
+Nothing in code. `npm test` on e746ea74: tests 10471, pass 10377, fail 0, skipped 93, todo 1.
+Owner-only checks: the §13 items above (headed Chrome on the owner's machine) and the opt-in
+`KL_E2E_TAKE=1 node --test tests/e2e/demo-take.test.js` personal case, never run here.
 
 ## Review fixes (T12, branch feat/browser-runner-T12)
 1. Unknown page state: the snapshot handler judges the whole page (no ref line and under 200 characters)
@@ -123,3 +123,5 @@ not "no ref and under 200 characters of text" (spec §8.2); the kept-window item
 13. The take launcher gets a per-hosting argument: personal `{ exe, profile, userDataPath }`, fleet
     `{ exe, profile, ctx, setPid, checkEnded }`.
 CLAUDE.md (Browser actions, Browser, Personal node) and docs/driving-king-louie.md (kept window) updated.
+
+T12 merged as e746ea74.
