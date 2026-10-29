@@ -86,7 +86,9 @@ function parsePushConfig(raw, file) {
   if (raw.fcm !== undefined) {
     if (!isPlainObject(raw.fcm)) throw new Error(`Invalid ${file}: relay.push.fcm must be an object`);
     rejectUnknownKeys(raw.fcm, ['service_account_file'], 'relay.push.fcm', file);
-    push.fcm = { serviceAccountFile: requiredString(raw.fcm.service_account_file, 'relay.push.fcm.service_account_file', file) };
+    const serviceAccountFile = requiredString(raw.fcm.service_account_file, 'relay.push.fcm.service_account_file', file);
+    if (!path.isAbsolute(serviceAccountFile)) throw new Error(`Invalid ${file}: relay.push.fcm.service_account_file must be an absolute path`);
+    push.fcm = { serviceAccountFile };
   }
   return push;
 }

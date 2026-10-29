@@ -9,6 +9,7 @@ const { createLogger } = require('../../logging');
 const { noneSender } = require('./none');
 const { createApnsSender } = require('./apns');
 const { createFcmSender } = require('./fcm');
+const { readServiceAccountFile } = require('./service-account');
 const { KINDS, alertText } = require('./text');
 
 const log = createLogger('frontdoor/push');
@@ -21,7 +22,7 @@ function defaultSenders(config = {}, { readFile = (f) => fs.readFileSync(f, 'utf
     senders.push(createApnsSender({ teamId: a.teamId, keyId: a.keyId, keyPem: readFile(a.keyFile), topic: a.topic, environment: a.environment }));
   }
   if (config && config.fcm) {
-    senders.push(createFcmSender({ serviceAccount: JSON.parse(readFile(config.fcm.serviceAccountFile)) }));
+    senders.push(createFcmSender({ serviceAccount: readServiceAccountFile(config.fcm.serviceAccountFile, { readFile }) }));
   }
   return senders;
 }
