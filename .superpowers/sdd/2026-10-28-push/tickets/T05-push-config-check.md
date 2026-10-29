@@ -1,7 +1,8 @@
 ---
 id: T05
 title: relay.push config - absolute path, credential file shape check at start
-status: open
+status: done
+merged: 168106f3
 blocked_by: []
 ---
 ## Goal
