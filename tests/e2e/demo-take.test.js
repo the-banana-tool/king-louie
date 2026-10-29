@@ -87,3 +87,70 @@ describe('demo take: browser and recorder end to end', { skip: !RUN && 'set KL_E
     assert.ok(duration >= 3, `ffprobe reports ${duration} s`);
   });
 });
+
+// Browser-runner spec 2026-10-28 §5, §11: on a personal node the service runs
+// as the owner in the owner's session, so a take's browser is Playwright's
+// own headed launch (TakeManager's launchPersonalBrowser, with CHROME_FLAGS)
+// on a profile under the data dir, and the recorder is the backend driven
+// through the in-process channel, not a session helper. Same gate as above;
+// it opens a maximised Chromium window and records the screen five seconds.
+describe('demo take: personal hosting, browser launched by PlaywrightBrowser', { skip: !RUN && 'set KL_E2E_TAKE=1 on Windows, in an interactive session' }, () => {
+  const { launchPersonalBrowser } = require('../../src/gui/takes');
+  const { InProcessChannel } = require('../../src/gui/in-process-channel');
+  let base;
+  let channel = null;
+  let ffmpeg;
+  let browser = null;
+
+  before(() => {
+    base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-e2e-take-personal-')));
+    const env = { ...process.env, LOCALAPPDATA: base };
+    ffmpeg = findFfmpeg({ env });
+    channel = new InProcessChannel({ backend: createWindowsBackend({ env }), env, recorder: { ffmpeg } });
+  });
+
+  after(async () => {
+    if (browser) await browser.stop().catch(() => {});
+    // Stops any recording still running, then the backend.
+    if (channel) await channel.stop().catch(() => {});
+    try { fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); } catch { /* best effort */ }
+  });
+
+  it('launches a headed browser through PlaywrightBrowser, records five seconds and gets a playable mp4', async (t) => {
+    if (!ffmpeg) {
+      t.skip('no ffmpeg.exe on PATH (winget install Gyan.FFmpeg)');
+      return;
+    }
+    const ffprobe = path.join(path.dirname(ffmpeg), 'ffprobe.exe');
+
+    // Where TakeManager puts a personal take's profile: <dataDir>/browser-profiles/<profile>.
+    const userDataPath = path.join(base, 'data', 'browser-profiles', 'take');
+    browser = await launchPersonalBrowser({ exe: chromium.executablePath(), userDataPath });
+    assert.ok(browser.isRunning, 'the browser is running');
+    assert.ok(fs.existsSync(userDataPath), 'the profile is under the data dir');
+    await browser.page.goto('about:blank');
+    const seen = await browser.page.evaluate(() => ({ webdriver: navigator.webdriver, ua: navigator.userAgent }));
+    assert.equal(seen.webdriver, false, 'navigator.webdriver is false');
+    assert.ok(!/HeadlessChrome/.test(seen.ua), 'the browser is headed');
+
+    await channel.start();
+    assert.equal(channel.connected, true);
+    const takeId = `take-${crypto.randomBytes(6).toString('hex')}`;
+    // record_start names no ffmpeg: the channel's recorder (found on PATH) is used.
+    const started = await channel.request('record_start', { take_id: takeId, fps: 30, max_s: 120 });
+    assert.equal(fs.realpathSync.native(path.dirname(started.path)), fs.realpathSync.native(path.join(base, 'KingLouie', 'recordings', takeId)));
+
+    // A ref'd timer holds the loop open across the recording.
+    await new Promise((resolve) => setTimeout(resolve, RECORD_MS));
+    const stopped = await channel.request('record_stop', { pid: started.pid });
+    assert.equal(stopped.path, started.path);
+    assert.equal(stopped.truncated, false);
+    assert.ok(fs.existsSync(stopped.path), 'the mp4 exists');
+    assert.ok(stopped.bytes > 0, 'the mp4 is not empty');
+
+    assert.ok(fs.existsSync(ffprobe), 'ffprobe.exe is beside ffmpeg.exe');
+    const out = execFileSync(ffprobe, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', stopped.path], { encoding: 'utf8' });
+    const duration = Number(out.trim());
+    assert.ok(duration >= 3, `ffprobe reports ${duration} s`);
+  });
+});
