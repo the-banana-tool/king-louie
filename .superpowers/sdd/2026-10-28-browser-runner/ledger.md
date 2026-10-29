@@ -43,6 +43,16 @@ Integration branch `feat/browser-runner` at `C:\Users\sblac\Programming\king-lou
   personal.
 - T09 (merge 7325e19c): the take leads with the goal; `docs/driving-king-louie.md` and the takes spec
   amendment.
+- T06 (merge 8f384d55): `src/tools/browser-auto-images.js` (`AUTO_IMAGES_PER_RUN` 3); `ToolExecutor` hands
+  `executeContext.browserAutoImages`; a failed acting action gets an image and an interactive snapshot when
+  `isPageError` (a TimeoutError or a Playwright call-prefixed message); navigate waits up to 1 s for
+  chrome-error://.
+- T07 (merge 29f734ef): `Tool#prepareParams`; `src/tools/builtin/browser-ref-label.js` sets `ref_label` and
+  `target_ref_label` before anyone is asked; the run-time check reads a fresh `_snapshotForAI`
+  (`PlaywrightBrowser#currentRefLabel`) and refuses `ref_changed`; the renderer's approval dialog shows a
+  `browserRefSummary` line.
+- T10 (merge cf062f70): opt-in personal-hosting case in `tests/e2e/demo-take.test.js` (`KL_E2E_TAKE=1`);
+  NOT run here.
 
 ## Deviations
 - Implementer branches are named `feat/browser-runner-T<NN>`: git refuses `feat/browser-runner/T<NN>` beside
@@ -58,10 +68,21 @@ Integration branch `feat/browser-runner` at `C:\Users\sblac\Programming\king-lou
 - T03: `refs` counts the ref lines in the returned text.
 - T08: the profile-in-use rule is also checked before the phone is asked; kept windows are covered.
 - T09: the model-driven STUCK wording is `STUCK: what I see, what I tried, what I need`.
+- T06: a direct `execute` without `browserAutoImages` attaches nothing; a failed capture still spends the
+  budget.
+- T07: a drag target gets its own `target_ref_label`; a hidden name shows as
+  `<role> (name hidden: not one plain line)`; `prepareParams` runs before a hook's confirm prompt too; the
+  run-time check's fresh snapshot replaces Playwright's ref map, so a ref to an element renamed since is
+  `ref_not_found` on next use.
+- Merge T07: conflict in `browserTool.execute` resolved as `checkRefSelectors`, `checkRefLabels`, then
+  `result = await handler(...)`; a `BrowserRefError` (`ref_changed` included) returns early with no image;
+  the `ref_changed` test asserts no image.
 
 ## Open items (for the review fix)
 - A kept personal window the owner closes by hand stays in `TakeManager#kept` until `stopAll`, so a later
   take on that profile is refused until the service restarts; drop the entry on the context's `close` event.
+- A ref in the login/signup/payment selector fields gets no label and no run-time check.
+- Each approved ref action costs one extra snapshot.
 
 ## Left
-T06, T07, T10, T11, review, npm test.
+T11, review, npm test.

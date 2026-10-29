@@ -1,7 +1,8 @@
 ---
 id: T10
 title: Opt-in e2e, a personal-hosting take launched through PlaywrightBrowser
-status: open
+status: done
+merged: cf062f70
 blocked_by: [T08]
 ---
 ## Goal

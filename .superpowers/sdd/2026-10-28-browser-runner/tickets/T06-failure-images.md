@@ -1,7 +1,8 @@
 ---
 id: T06
 title: An image and a snapshot after a failed acting action, three per run
-status: open
+status: done
+merged: 8f384d55
 blocked_by: [T03, T05]
 ---
 ## Goal

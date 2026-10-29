@@ -1,7 +1,8 @@
 ---
 id: T07
 title: The owner approves what a ref names (ref_label, ref_changed)
-status: open
+status: done
+merged: 29f734ef
 blocked_by: [T03]
 ---
 ## Goal
