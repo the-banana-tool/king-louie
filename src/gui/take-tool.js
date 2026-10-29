@@ -78,10 +78,11 @@ function buildTakeTool({ takes, tool, jobIdOf, browserActions = defaultBrowserAc
   return tool({
     name: TAKE_TOOL_NAME,
     description: 'Run one screen-recorded browser demo (a take). start asks the owner\'s phone once for the whole take '
-      + '(sites, browser, apps, minutes); then drive its browser with the browser tools (the take\'s checks answer every '
-      + 'approval), status shows where it is, note logs what you changed, stop ends it and returns the recording. '
-      + 'run_steps runs a script of browser steps with no model between them and returns every step\'s outcome; '
-      + 'to wait, use wait_for, wait_for_url or wait_for_text; never a shell.',
+      + '(sites, browser, apps, minutes); then do the task with the browser tools (the take\'s checks answer every '
+      + 'approval): read the page with snapshot and act on its refs (selector "ref=e12"), take a screenshot when the '
+      + 'page is not what the snapshot says, and to wait use wait_for, wait_for_url or wait_for_text, never a shell. '
+      + 'status shows where the take is, note logs what you changed, stop ends it and returns the recording. '
+      + 'run_steps runs a script the driver gave you, with no model between the steps, and returns every step\'s outcome.',
     parameters: PARAMETERS
   }, async (params, options) => {
     try {
