@@ -7,6 +7,7 @@ const path = require('path');
 const { execFileSync, execFile: execFileCallback } = require('child_process');
 const { deriveNodeId } = require('../mesh/node-identity');
 const { adminConfigDir, defaultServiceDataDir } = require('../platform/paths');
+const { loadNodeConfig: loadNodeConfigDefault, NODE_CONFIG_FILE } = require('../service/node-config');
 const { windowsPowerShellExe } = require('../platform/windows-paths');
 const { deriveDeviceId, fromB64url, toB64url } = require('./keys');
 const { PROTOCOL, DEVICE_ID_RE } = require('./protocol');
@@ -307,29 +308,99 @@ function parseInspectOutput(out) {
   return { me, entries };
 }
 
+// The four paths one inspector call reads (spec 2026-10-28 §5.1, C-1): the
+// config dir D, the bridge file F, D\node.yaml Y and the data dir beside D, A
+// (adminConfigDir's Windows rule puts the config dir beside the data dir).
+// detectPersonalNode asks about the same four, with F perhaps absent.
+function bridgeTrustPaths(file) {
+  const configDir = path.dirname(file);
+  return [configDir, file, path.join(configDir, NODE_CONFIG_FILE), path.join(configDir, '..', 'data')];
+}
+
+// node.yaml through the strict loader the node itself uses (every key
+// checked). Its own owner check is POSIX-only and the owners here were read
+// by the inspector already, so the account it compares against is this one.
+function loadPersonalNodeConfig({ adminConfigDir: dir }) {
+  return loadNodeConfigDefault({
+    adminConfigDir: dir,
+    adminUid: typeof process.getuid === 'function' ? process.getuid() : 0
+  });
+}
+
+// The personal rule, pure over an inspector report: every path in `checks`
+// ({ path, entry } with the inspector's entry, or null when missing) is
+// present, no link, owned by `me` (a non-empty SID), and configDir's
+// node.yaml loads and says hosting: personal. This is assertPersonalOwner's
+// rule (src/service/personal-host.js) applied from the desktop. The bridge
+// trust check passes D, F, Y, A; detectPersonalNode passes D, Y, A.
+// Returns { ok: true, name } or { ok: false, reason, path?, problem }, with
+// reason one of 'unreadable', 'link', 'missing', 'other-owner',
+// 'not-personal'; `problem` is a sentence fragment naming the path.
+function judgePersonalPaths({ me, checks, configDir, loadNodeConfig = loadPersonalNodeConfig }) {
+  const nodeYaml = path.join(configDir, NODE_CONFIG_FILE);
+  const unreadable = { ok: false, reason: 'unreadable', problem: 'the owners could not be read' };
+  if (typeof me !== 'string' || !me.trim() || !Array.isArray(checks)) return unreadable;
+  for (const { path: target, entry } of checks) {
+    if (entry && entry.link) return { ok: false, reason: 'link', path: target, problem: `${target} is a junction or link` };
+  }
+  for (const { path: target, entry } of checks) {
+    if (!entry) {
+      if (target === nodeYaml) return notPersonal(nodeYaml);
+      return { ok: false, reason: 'missing', path: target, problem: `${target} does not exist` };
+    }
+    if (typeof entry.owner !== 'string' || !entry.owner || entry.owner === '(none)') return unreadable;
+    if (entry.owner !== me) {
+      return { ok: false, reason: 'other-owner', path: target, problem: `${target} is owned by ${entry.owner}, not by you` };
+    }
+  }
+  let config;
+  try {
+    config = loadNodeConfig({ adminConfigDir: configDir });
+  } catch {
+    return notPersonal(nodeYaml);
+  }
+  if (!config || config.hosting !== 'personal') return notPersonal(nodeYaml);
+  return { ok: true, name: config.name };
+}
+
+function notPersonal(nodeYaml) {
+  return { ok: false, reason: 'not-personal', path: nodeYaml, problem: `${nodeYaml} does not say hosting: personal` };
+}
+
 function untrusted(file) {
   return { ok: false, code: 'BRIDGE_FILE_UNTRUSTED', error: `${file} is not owned by an administrator; refusing to trust it.` };
+}
+
+function untrustedBecause(file, problem) {
+  return { ok: false, code: 'BRIDGE_FILE_UNTRUSTED', error: `Refusing to trust ${file}: ${problem}.` };
 }
 
 function missing(file) {
   return { ok: false, code: 'BRIDGE_FILE_MISSING', error: `No local service found at ${path.dirname(file)}.` };
 }
 
-// The file and its directory must be administrator-owned and not writable by
-// anyone else. With KL_TEST_MODE=1 and KL_DESKTOP_BRIDGE_FILE set, the current
-// user is accepted too (e2e only). Async (final review I2): on Windows the
-// owner read is a PowerShell child process the caller awaits, never blocks on.
+// Windows (spec 2026-10-28 §5.1): one inspector call over bridgeTrustPaths.
+// The fleet rule, unchanged: the file and its directory owned by SYSTEM or
+// Administrators, neither a link (node.yaml and the data dir not consulted).
+// Otherwise the personal rule (judgePersonalPaths over all four). With
+// KL_TEST_MODE=1 and KL_DESKTOP_BRIDGE_FILE set, the current user is accepted
+// in the fleet rule too (e2e only), and the personal rule is never entered.
+// POSIX keeps the fleet rule only: owned by root and not writable by anyone
+// else. Async (final review I2): on Windows the owner read is a PowerShell
+// child process the caller awaits, never blocks on.
+// Resolves { ok: true, hosting: 'service' | 'personal' } or { ok: false, code, error }.
 async function checkBridgeFileTrust(file, {
   env = process.env,
   platform = process.platform,
   getuid = () => (typeof process.getuid === 'function' ? process.getuid() : -1),
   lstat = fs.lstatSync,
-  inspectOwners = inspectWindowsOwnersAsync
+  inspectOwners = inspectWindowsOwnersAsync,
+  loadNodeConfig = loadPersonalNodeConfig
 } = {}) {
   const dir = path.dirname(file);
   const testMode = env.KL_TEST_MODE === '1' && Boolean(env.KL_DESKTOP_BRIDGE_FILE);
   if (platform === 'win32') {
-    const paths = [dir, file];
+    const paths = bridgeTrustPaths(file);
     let report;
     try {
       report = await inspectOwners(paths, { env });
@@ -343,13 +414,32 @@ async function checkBridgeFileTrust(file, {
     if (!report || !Array.isArray(report.entries) || report.entries.length !== paths.length) {
       return untrusted(file);
     }
-    for (const entry of report.entries) {
-      if (!entry) return missing(file);
-      if (entry.link) return untrusted(file);
-      const ok = ADMIN_OWNER_SIDS.includes(entry.owner) || (testMode && entry.owner === report.me);
-      if (!ok) return untrusted(file);
+    const [dirEntry, fileEntry] = report.entries;
+    if (!dirEntry || !fileEntry) return missing(file);
+    const fleetOwner = (entry) => !entry.link
+      && (ADMIN_OWNER_SIDS.includes(entry.owner) || (testMode && Boolean(report.me) && entry.owner === report.me));
+    if (fleetOwner(dirEntry) && fleetOwner(fileEntry)) return { ok: true, hosting: 'service' };
+    // A bridge file the owner's account did not write is the fleet rule's to
+    // refuse; only one this account owns is judged as a personal node's.
+    if (testMode) return untrusted(file);
+    if (fileEntry.link) return untrustedBecause(file, `${file} is a junction or link`);
+    if (typeof report.me !== 'string' || !report.me.trim()) return untrustedBecause(file, 'the owners could not be read');
+    if (fileEntry.owner !== report.me) return untrusted(file);
+    const verdict = judgePersonalPaths({
+      me: report.me,
+      checks: paths.map((target, i) => ({ path: target, entry: report.entries[i] })),
+      configDir: dir,
+      loadNodeConfig
+    });
+    if (verdict.ok) return { ok: true, hosting: 'personal' };
+    if (verdict.reason === 'not-personal') {
+      return {
+        ok: false,
+        code: 'BRIDGE_FILE_UNTRUSTED',
+        error: `${file} is owned by you, but ${verdict.path} does not say hosting: personal; a bridge file you own is trusted only for a personal node.`
+      };
     }
-    return { ok: true };
+    return untrustedBecause(file, verdict.problem);
   }
   const me = getuid();
   for (const target of [dir, file]) {
@@ -363,14 +453,14 @@ async function checkBridgeFileTrust(file, {
     const ownerOk = st.uid === 0 || (testMode && st.uid === me);
     if (!ownerOk || (st.mode & 0o022)) return untrusted(file);
   }
-  return { ok: true };
+  return { ok: true, hosting: 'service' };
 }
 
 async function readTrustedBridgeFile(file, options = {}) {
   const trust = await checkBridgeFileTrust(file, options);
   if (!trust.ok) return trust;
   try {
-    return { ok: true, record: parseBridgeFile(await fs.promises.readFile(file, 'utf8'), file) };
+    return { ok: true, record: parseBridgeFile(await fs.promises.readFile(file, 'utf8'), file), hosting: trust.hosting };
   } catch (err) {
     if (err.code === 'ENOENT') return missing(file);
     return { ok: false, code: err.code === 'BRIDGE_FILE_INVALID' ? err.code : 'BRIDGE_FILE_INVALID', error: err.message };
@@ -399,6 +489,8 @@ module.exports = {
   bridgeFilePath,
   inspectWindowsOwners,
   inspectWindowsOwnersAsync,
+  bridgeTrustPaths,
+  judgePersonalPaths,
   checkBridgeFileTrust,
   readTrustedBridgeFile
 };
