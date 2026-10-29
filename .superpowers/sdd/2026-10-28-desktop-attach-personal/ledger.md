@@ -64,3 +64,6 @@ All fixed.
 - Where startAttached hands over to the client's reconnect loop; whether getPort's
   trust read should skip the four-path read during a start wait.
 - Whether the task XML's <Principal><UserId> is exported as a SID (install --personal registers it with the SID) or as an account name; a name would read as other-account and the desktop would never run the owner's task.
+
+## Full suite
+- npm test at 787d67c4: tests 10529, pass 10435, fail 0, cancelled 0, skipped 93, todo 1 (Windows, Node from the checkout). Kotlin/Swift not touched by this spec, not run.
