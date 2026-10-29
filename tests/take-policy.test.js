@@ -10,6 +10,7 @@ const {
   CREDENTIAL_ACTIONS,
   NEVER_ACTIONS,
   TAKE_CODES,
+  LOOK_ONLY_ACTIONS,
 } = require('../src/gui/take-policy');
 
 describe('hostAllowed', () => {
@@ -170,6 +171,41 @@ describe('decide', () => {
       allowed: ['navigate', 'click'],
     });
     assert.deepEqual(await p.decide('BrowserPage', { action: 'click', selector: 'a' }), { allow: true });
+  });
+
+  it('snapshot is look-only: it runs on any host, under every split tool and Browser', async () => {
+    // Spec 2026-10-28-browser-runner §7.5, C-12.
+    assert.ok(BROWSER_ACTIONS.extract.includes('snapshot'));
+    assert.ok(LOOK_ONLY_ACTIONS.includes('snapshot'));
+    const off = policy({}, 'https://accounts.example.net/login');
+    for (const tool of ['BrowserPage', 'BrowserExtract', 'Browser']) {
+      assert.deepEqual(await off.decide(tool, { action: 'snapshot' }), { allow: true }, tool);
+      assert.deepEqual(await off.decide(tool, { action: 'snapshot', interactive: true, ref: 'e3' }), { allow: true }, tool);
+    }
+    assert.deepEqual(await policy({}, null).decide('BrowserPage', { action: 'snapshot' }), { allow: true });
+  });
+
+  it('a click on a ref checks the current page like any click', async () => {
+    const off = await policy({}, 'https://accounts.example.net/login').decide('BrowserPage', { action: 'click', selector: 'ref=e15' });
+    assert.equal(off.code, 'take_site_not_allowed');
+    assert.deepEqual(
+      await policy({}, 'https://app.example.com/').decide('BrowserPage', { action: 'click', selector: 'ref=e15' }),
+      { allow: true },
+    );
+  });
+
+  it('a narrowed list without snapshot refuses it; one with it allows it', async () => {
+    const without = await policy({ browser: ['navigate', 'click'] }, 'https://app.example.com/').decide('BrowserPage', { action: 'snapshot' });
+    assert.deepEqual(without, {
+      allow: false,
+      code: 'take_action_not_allowed',
+      error: 'snapshot is outside what this take approved',
+      allowed: ['navigate', 'click'],
+    });
+    assert.deepEqual(
+      await policy({ browser: ['navigate', 'snapshot'] }, 'https://accounts.example.net/').decide('BrowserExtract', { action: 'snapshot' }),
+      { allow: true },
+    );
   });
 
   it('a narrowed list cannot widen the first column', async () => {

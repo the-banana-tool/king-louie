@@ -24,6 +24,8 @@ const BROWSER_ACTIONS = Object.freeze({
   extract: Object.freeze([
     'content', 'title', 'get_text', 'get_attribute', 'get_value', 'is_visible', 'count',
     'bounding_box', 'console', 'frames', 'fill_in_frame', 'click_in_frame', 'type_in_frame',
+    // The page's accessibility snapshot (spec 2026-10-28-browser-runner §7.5): look-only.
+    'snapshot',
   ]),
 });
 
@@ -53,7 +55,7 @@ const LOOK_ONLY_ACTIONS = Object.freeze([
   'status', 'tabs', 'close_tab', 'switch_tab', 'screenshot', 'content', 'title', 'get_text',
   'get_attribute', 'get_value', 'is_visible', 'count', 'bounding_box', 'console', 'frames',
   'wait_for', 'wait_for_url', 'wait_for_load_state', 'wait_for_response',
-  'go_back', 'go_forward', 'reload',
+  'go_back', 'go_forward', 'reload', 'snapshot',
 ]);
 
 // Act on where they go, not on the current page: only the target (params.url) is checked.
