@@ -88,10 +88,47 @@ T12 (docs) last, after all. Start frontier: T01, T04, T05, T08, T10.
   count)`, `AppModel.statusApplied`. Without a node name the words drop "on <n>".
   Coming to the front zeroes the count but leaves the shown notification.
   `test` uses tag `test:<rid>`.
+- T02: `src/frontdoor/push/gate.js` (`DEDUPE_MS`, `DEFAULT_DEDUPE_MS` 10 min,
+  `MAX_KEYS` 2048 relay-wide (key = device, node, kind, id), `COALESCE_MS` 10 s,
+  `HOURLY_CAP` 60, sliding hour counted when a push leaves) and
+  `src/frontdoor/push/status.js`. `pushTo(nodeId, targets, payload)`;
+  `node_id` is a dedupe key only, never sent. `test` never deduped; the
+  front door's own pairing/alert pushes have an empty node in the key. A
+  coalesced push is the newest held payload whole (incl. `expires_at`), `c` only
+  when 2+ held. `stop()` DROPS what a window holds (§17 allows it); nothing sent
+  after stop. The gate applies only to fcm devices with an fcm sender.
+  `push-status.json` = `{ v: 1, last_send: { at, sender, status } | null,
+  last_failure: {...} | null }`, 0600, temp+rename, first result at once then at
+  most once a minute (unref'd) and a final write on stop.
+- T03: `push.notify` in `node-methods.js` (the profile-graph test allows it
+  there; §17 item 1 settled); `SESSION_KINDS`, local `UUID_V4_RE`; missing
+  optional fields read as null. Merger fix ed55392c: passes the node id to
+  `pushTo`.
+- T07: `relay push-test` admin-only via `admin-check.js` `isAdmin` (no other
+  relay subcommand checked admin; copied from `desktop.js`); exit 0 only when
+  every push went out, else 1; `--device` is now a global value flag. `n` is
+  `node.yaml`'s name, or `relay` on a relay-run host with no node.yaml (the
+  spec does not say; author's call). It writes nothing, so a token FCM rejects
+  is dropped only by the running relay at its next push.
+- T09: `PushQueue.start()` also flushes what waits (the relay link starts
+  before the GUI in run.js, so a restart ending queued at construction would
+  otherwise wait forever). `gui.stop()`: leases end `service_stopped`, then
+  `pushQueue.drain({ timeoutMs: PUSH_DRAIN_MS = 2000 })` alongside broker and
+  channel shutdown. run.js already stops the GUI before `approvals.stop()`. The
+  stop-drain test is in `tests/gui-subsystem.test.js`.
+- T11: a sixth gear-row state, "Notifications: the relay could not be asked"
+  (`NOT_ASKED`: no read key yet, or the GET failed) — not in the spec's five.
+  "Already sent" is in memory only (`pushTokenSentHere`), so every cold start
+  re-sends. Reset is asynchronous (`finishReset`, DELETE bounded by
+  `RESET_DELETE_MS` 5 s, sent only if a token was ever accepted), new pairings
+  wait for it. `Push.token(onToken)`, `Push.available(context)` (both flavors).
+  The row re-checks on return to the foreground once the gear was opened.
 
 ## Landed
 - T01 merge 96ea2586; T05 merge 168106f3; T04 merge 0d31340e; T08 merge
   3f35f05e; T10 merge 1203ea60 (tip bbf21a23). Both Android flavors build;
   protocol `gradlew test` 107 pass.
+- T02 merge 47828984; T03 merge 4e439582 (+ fix ed55392c); T07 merge d49c94d3;
+  T09 merge 91208ecf; T11 merge bf41dbb7 (tip a36f2701). Both flavors build.
 
 ## Left
