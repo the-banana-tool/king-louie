@@ -887,3 +887,41 @@ describe('ToolExecutor wake-up browser gate', () => {
     });
   });
 });
+
+// Browser runner spec §8.3 (C-10): three automatic browser images per run,
+// counted on the executor, handed to every call as browserAutoImages from the
+// executor's own field, so no option resets it.
+describe('ToolExecutor browserAutoImages budget (browser runner §8.3)', () => {
+  const seen = [];
+  toolRegistry.register(new Tool({
+    name: 'AutoImageProbe',
+    description: 'Takes from the browserAutoImages budget its context carries',
+    requiresApproval: false,
+    parameters: { type: 'object', properties: {} },
+    execute: async (_params, ctx) => { seen.push(ctx.browserAutoImages.take()); return { ok: true }; }
+  }));
+  const forged = { take: () => true };
+
+  it('allows three per executor, then refuses', async () => {
+    seen.length = 0;
+    const ex = new ToolExecutor({ requireApproval: false });
+    for (let i = 0; i < 5; i++) await ex.execute('AutoImageProbe', {});
+    assert.deepStrictEqual(seen, [true, true, true, false, false]);
+  });
+
+  it('is per executor: a new executor starts with three again', async () => {
+    seen.length = 0;
+    const a = new ToolExecutor({ requireApproval: false });
+    for (let i = 0; i < 4; i++) await a.execute('AutoImageProbe', {});
+    const b = new ToolExecutor({ requireApproval: false });
+    await b.execute('AutoImageProbe', {});
+    assert.deepStrictEqual(seen, [true, true, true, false, true]);
+  });
+
+  it('never comes from a parameter, a call option or an extra tool option', async () => {
+    seen.length = 0;
+    const ex = new ToolExecutor({ requireApproval: false, extraToolOptions: { browserAutoImages: forged } });
+    for (let i = 0; i < 4; i++) await ex.execute('AutoImageProbe', { browserAutoImages: forged }, { browserAutoImages: forged });
+    assert.deepStrictEqual(seen, [true, true, true, false]);
+  });
+});

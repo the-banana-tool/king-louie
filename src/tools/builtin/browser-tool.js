@@ -1,5 +1,5 @@
 const { Tool } = require('../tool-schema');
-const { OWNER_QUOTE_PARAM } = require('../browser-acting');
+const { OWNER_QUOTE_PARAM, ACTING_ACTIONS } = require('../browser-acting');
 const { validateUrl } = require('./web-fetch-utils');
 const fs = require('fs');
 const path = require('path');
@@ -268,6 +268,86 @@ function viewportImageResult(shot) {
     image: { width: shot.width, height: shot.height, scale: shot.scale, shown_to_model: true },
     _images: [{ base64: shot.base64, mimeType: shot.mimeType, id: `browser-${imageSeq}` }],
   };
+}
+
+// ─── The view after a failure (browser runner spec §8.2, §8.3, C-10) ────────
+
+const FAILURE_SNAPSHOT_CHARS = 4000;
+const THIN_SNAPSHOT_CHARS = 200;
+const CAPTURE_TIMEOUT_MS = 10000;
+const PLAYWRIGHT_CALL = /^(?:locator|page|frame|frameLocator|elementHandle|mouse|keyboard|browserContext)\.\w+: /;
+const SELECTOR_SYNTAX = /Unexpected token|is not a valid selector|Unknown engine|Malformed selector/i;
+
+// A Playwright error from touching the page: a timeout, strict mode, no
+// element, detached, not visible, covered. Not a selector Playwright could not
+// parse, nor our own refusals (no browser, a blocked URL, a missing
+// parameter): the page was never touched, so they get no image.
+function isPageError(err) {
+  if (!err || typeof err.message !== 'string' || SELECTOR_SYNTAX.test(err.message)) return false;
+  return err.name === 'TimeoutError' || PLAYWRIGHT_CALL.test(err.message);
+}
+
+function withCaptureTimeout(promise) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('capture timed out')), CAPTURE_TIMEOUT_MS);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function runningBrowser(ctx) {
+  try {
+    const b = getBrowser(ctx);
+    return b && b.isRunning && b.page ? b : null;
+  } catch { return null; }
+}
+
+// A navigation that fails with a net:: error rejects before Chromium commits
+// its error page; wait up to ERROR_PAGE_WAIT_MS for the commit.
+const ERROR_PAGE_WAIT_MS = 1000;
+async function waitForErrorPage(err, ctx) {
+  const b = runningBrowser(ctx);
+  if (!b || !/net::ERR_/.test(String(err && err.message))) return;
+  try {
+    await b.page.waitForURL((u) => String(u.href || u).startsWith('chrome-error://'), { timeout: ERROR_PAGE_WAIT_MS, waitUntil: 'commit' });
+  } catch { /* not an error page */ }
+}
+
+function onErrorPage(ctx) {
+  const b = runningBrowser(ctx);
+  try { return !!b && String(b.page.url()).startsWith('chrome-error://'); } catch { return false; }
+}
+
+// Adds the interactive snapshot (unless the result has its own) and, while the
+// run's budget (ctx.browserAutoImages, from ToolExecutor) allows, a viewport
+// image; past it, image_omitted: 'budget'. With no budget in the context
+// nothing is added. A capture that fails is dropped: the result keeps its own
+// error whatever happens here.
+async function attachFailureView(result, ctx, { withSnapshot = true } = {}) {
+  const budget = ctx && ctx.browserAutoImages;
+  if (!budget || typeof budget.take !== 'function') return result;
+  const b = runningBrowser(ctx);
+  if (!b) return result;
+  if (withSnapshot) {
+    try {
+      const snap = await withCaptureTimeout(actions.snapshot({ interactive: true, max_chars: FAILURE_SNAPSHOT_CHARS }, ctx));
+      if (snap && snap.ok && typeof snap.snapshot === 'string') {
+        result.snapshot = snap.snapshot;
+        result.untrusted_output = true;
+      }
+    } catch { /* dropped */ }
+  }
+  if (!budget.take()) {
+    result.image_omitted = 'budget';
+    return result;
+  }
+  try {
+    const shot = await withCaptureTimeout(captureViewportImage(b.page));
+    Object.assign(result, viewportImageResult(shot));
+    result.untrusted_output = true;
+    result.note = IMAGE_NOTE;
+  } catch { /* dropped */ }
+  return result;
 }
 
 // ─── Action handlers ─────────────────────────────────────────────────────────
@@ -1591,13 +1671,29 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
     if (!handler) {
       return { ok: false, error: `Unknown action: ${params.action}. Valid actions: ${actionNames.join(', ')}` };
     }
+    let result;
     try {
       await checkRefSelectors(params, context);
-      return await handler(params, context);
+      result = await handler(params, context);
     } catch (err) {
       if (err instanceof BrowserRefError) return { ok: false, error: err.message, code: err.code };
-      return { ok: false, error: err.message || String(err) };
+      result = { ok: false, error: err.message || String(err) };
+      // §8.2: a failed acting action, or a navigation that left an error page.
+      if (isPageError(err) && params.action === 'navigate') await waitForErrorPage(err, context);
+      if (isPageError(err) && (ACTING_ACTIONS.has(params.action) || (params.action === 'navigate' && onErrorPage(context)))) {
+        await attachFailureView(result, context);
+      }
+      return result;
     }
+    // §8.2's unknown page states: a navigation that landed on an error page,
+    // and a whole-page snapshot with almost no text (a canvas, a blank page).
+    if (params.action === 'navigate' && result && result.ok && onErrorPage(context)) {
+      await attachFailureView(result, context);
+    } else if (params.action === 'snapshot' && params.ref === undefined && result && result.ok
+      && typeof result.snapshot === 'string' && result.snapshot.length < THIN_SNAPSHOT_CHARS) {
+      await attachFailureView(result, context, { withSnapshot: false });
+    }
+    return result;
   },
 });
 

@@ -3,6 +3,7 @@ const { toolRegistry } = require('../tools');
 const { getRuntimeEnvironment } = require('./runtime-environment');
 const { evaluateRules, describeRule } = require('../tools/permission-rules');
 const { BROWSER_TOOLS, isActingBrowserCall, ownerQuoteInTurn } = require('../tools/browser-acting');
+const { createAutoImageBudget } = require('../tools/browser-auto-images');
 const path = require('path');
 const { caseWriteRefusal, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
 const { UNVERIFIABLE_PATH_ERROR } = require('../cases/safe-path');
@@ -107,6 +108,8 @@ class ToolExecutor extends EventEmitter {
     // `allow` permission rule — which is downgraded to `ask`. `deny` rules
     // are untouched, and tools that don't require approval still run.
     this.denyAutoApproval = options.denyAutoApproval === true;
+    // Three automatic browser images per run (browser runner spec §8.3).
+    this._browserAutoImages = createAutoImageBudget();
     // The owner's own message that started this turn (the local chat send
     // path only). A browser action that changes something runs unasked when
     // the model's ownerQuote is found in it (src/tools/browser-acting.js).
@@ -693,7 +696,10 @@ class ToolExecutor extends EventEmitter {
         nodeLocalOrigin: this.nodeLocalOrigin,
         // The deny rules and the node tier for a call a tool makes itself
         // (Take.run_steps' steps); from this executor, never from options.
-        checkDenied: (name, params) => this._checkDenied(name, params, options)
+        checkDenied: (name, params) => this._checkDenied(name, params, options),
+        // The run's budget of automatic browser images (browser runner §8.3);
+        // from this executor's own field, never from options.
+        browserAutoImages: this._browserAutoImages
       };
       // Set here only, and not writable: no option or tool changes which
       // browser this call was approved for (src/tools/builtin/browser-registry.js).
