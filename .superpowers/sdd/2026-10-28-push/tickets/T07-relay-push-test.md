@@ -1,7 +1,8 @@
 ---
 id: T07
 title: king-louie-service relay push-test
-status: open
+status: done
+merged: d49c94d3
 blocked_by: [T01, T05]
 ---
 ## Goal
