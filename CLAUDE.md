@@ -1009,14 +1009,18 @@ work while attached appends it to `PROXIED_DOMAINS`).
     (the same rule without the bridge file), `queryTask` (`schtasks /Query /XML
     ONE`: the principal's SID and `Enabled`, never the localised text),
     `nodeRunning` (the pidfile and `isServiceCommandLine`), `runTask`
-    (`schtasks /Run`), `restartNode` (`king-louie-service stop`, then `/Run`;
-    never `/End` alone, `/Change` or `/Create`), `startFailureSince` (the
+    (`schtasks /Run`), `stopNode` (`king-louie-service stop`; never `/End`
+    alone, `/Change` or `/Create`), `startFailureSince` (the
     newest `service failed to start` line in `<A>\logs\service.log` after
     the run), `runCli` (the app's own binary with `ELECTRON_RUN_AS_NODE=1`
     and its own `bin/king-louie-service.js`). `schtasks` and the CLI go by
     absolute path, arguments as an array, never a path read from the task,
     the bridge file or `node.yaml`. The unpaired status reads the task and
-    the pidfile on each read.
+    the pidfile on each read. The controller runs the task in one place
+    (`runNodeTask`, for pairing, the attached start, Start and Restart):
+    `queryTask` first, refused per `TASK_REFUSALS` unless registered,
+    enabled and this account's; a restart then stops only a node that runs
+    (with none it is a start); then `/Run`, refused on failure.
   - Pairing (`pairStart` under personal): the CLI (120 s), the bridge file
     read through the trust rule (`hosting: personal` and the CLI's
     `nodeId`, else `PAIR_SERVICE_CHANGED`), then the node: none running, run
@@ -1042,9 +1046,14 @@ work while attached appends it to `PROXIED_DOMAINS`).
     (`DEVICE_UNPAIRED`, `PROTOCOL_MISMATCH`, `ANOTHER_DEVICE`,
     `SERVICE_KEY_CHANGED`), ends the wait at once. When the desktop ran
     nothing (the node was already up and its bridge never answered), the
-    60 s end with no `startError`, and the pane's "running (pid N)" row
-    offers **Restart King Louie Node**. A drop after connecting never runs
-    the task; `attached-disconnected` adds one button from what was found
+    60 s end with no `startError` only when a fresh read still finds it
+    running (the pane's "running (pid N)" row offers **Restart King Louie
+    Node**); gone by then, `NODE_START_TIMEOUT`, whose text the controller
+    words from `nodeStartWaitMs`. A drop after connecting never runs the
+    task: it reads the task and the pidfile again (and an
+    `attached-disconnected` status does, at most every `nodeRefreshMs`,
+    5 s; `refreshIdle()` for tests), so the row is chosen from what is
+    found now; `attached-disconnected` adds one button from what was found
     (`nodeStart({ restart })`: **Start** or **Restart King Louie Node**; or
     **Install…**). `nodeStart` acts only on a press, answers its status
     once the start is under way and waits in the background (each step
@@ -1052,9 +1061,13 @@ work while attached appends it to `PROXIED_DOMAINS`).
     `startIdle()` resolves when no start is in flight (tests await it).
     Install from the pane (task missing): `nodeInstallPreview()` shows
     `install --personal --dry-run`'s lines, `nodeInstall({ confirmed: true
-    })` runs it with `--yes` (120 s each, for the recorded data dir, else
-    the one `detectPersonalNode` finds) and reads the task and the pidfile
-    again whatever it did.
+    })` runs it with `--yes` (120 s each). Both read the disk first
+    (`detectPersonalNode`, for the recorded data dir when there is one,
+    which must still be a personal node's: C-7), and `nodeInstall` refuses
+    unless the task is missing (`NODE_TASK_REGISTERED`,
+    `NODE_TASK_DISABLED`, `NODE_TASK_OTHER_ACCOUNT`, `NODE_TASK_UNREADABLE`);
+    after the CLI it reads the task and the pidfile again whatever it did.
+    Each wait has its own sleep timer; `dispose()` clears them all.
   - Codes: `NODE_TASK_MISSING`, `NODE_TASK_DISABLED`,
     `NODE_TASK_OTHER_ACCOUNT` (never run another account's task),
     `NODE_START_TIMEOUT`, `NODE_START_FAILED`, `NODE_TASK_RUN_FAILED` (the

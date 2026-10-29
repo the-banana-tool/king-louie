@@ -12,7 +12,7 @@ const { rawFromPublicKeyObject, fingerprintGroups } = require('../desktop-bridge
 const { MESSAGES } = require('../desktop-bridge/protocol');
 const { ATTACHED_UNAVAILABLE_TABS } = require('../desktop-bridge/allowlist');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
-const { createPersonalNodeRunner } = require('../desktop-bridge/personal-node');
+const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
 const { shown } = require('../service/commands/io');
 
 const log = createLogger('desktop-controller');
@@ -23,22 +23,29 @@ const STANDALONE_ONCE = '--kl-standalone-once';
 const PAIR_CLI_TIMEOUT_MS = 120000;
 const NODE_START_WAIT_MS = 60000;
 const NODE_RETRY_MS = 3000;
-const NODE_START_TIMEOUT_TEXT = 'King Louie Node did not answer within 60 seconds.';
+// §7.4: an attached-disconnected status reads the node again at most this often.
+const NODE_REFRESH_MS = 5000;
+const startTimeoutText = (ms) => `King Louie Node did not answer within ${Math.round(ms / 1000)} seconds.`;
 const TASK_REFUSALS = {
   missing: { code: 'NODE_TASK_MISSING', message: 'King Louie Node has no logon task on this computer, so this app cannot start it.' },
-  disabled: { code: 'NODE_TASK_DISABLED', message: 'The logon task "KingLouie Node" is disabled in Task Scheduler. Enable it there to let this app start the node.' },
-  'other-account': { code: 'NODE_TASK_OTHER_ACCOUNT', message: 'The logon task "KingLouie Node" belongs to another account; this app does not run it.' },
-  unknown: { code: 'NODE_TASK_MISSING', message: 'The logon task "KingLouie Node" could not be read, so this app cannot start it.' }
+  disabled: { code: 'NODE_TASK_DISABLED', message: `The logon task "${PERSONAL_TASK_NAME}" is disabled in Task Scheduler. Enable it there to let this app start the node.` },
+  'other-account': { code: 'NODE_TASK_OTHER_ACCOUNT', message: `The logon task "${PERSONAL_TASK_NAME}" belongs to another account; this app does not run it.` },
+  unknown: { code: 'NODE_TASK_MISSING', message: `The logon task "${PERSONAL_TASK_NAME}" could not be read, so this app cannot start it.` }
 };
+// §8: Install runs only while no task is registered.
+const INSTALL_REFUSALS = {
+  registered: { code: 'NODE_TASK_REGISTERED', message: `The logon task "${PERSONAL_TASK_NAME}" is already registered; there is nothing to install.` },
+  disabled: TASK_REFUSALS.disabled,
+  'other-account': TASK_REFUSALS['other-account'],
+  unknown: { code: 'NODE_TASK_UNREADABLE', message: TASK_REFUSALS.unknown.message }
+};
+// §7.3: the bridge codes that end an attached start's wait (the client's FATAL).
+const BRIDGE_FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'ANOTHER_DEVICE', 'SERVICE_KEY_CHANGED']);
 // pairConfirm answers that waiting will not change (the bridge client's
 // FATAL set, and the pairing's own refusals); anything else is a bridge
 // that is not up yet.
-const PAIR_FATAL = new Set([
-  'DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'ANOTHER_DEVICE', 'SERVICE_KEY_CHANGED',
-  'PAIR_SERVICE_CHANGED', 'PAIR_NOT_FOUND', 'PAIR_CONFIRM_STALE', 'NOT_PAIRING'
-]);
-// §7.3: the bridge codes that end an attached start's wait (the client's FATAL).
-const BRIDGE_FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'ANOTHER_DEVICE', 'SERVICE_KEY_CHANGED']);
+const PAIR_FATAL = new Set([...BRIDGE_FATAL, 'PAIR_SERVICE_CHANGED', 'PAIR_NOT_FOUND', 'PAIR_CONFIRM_STALE', 'NOT_PAIRING']);
+const INITIAL_NODE_STATE = Object.freeze({ task: 'unknown', running: false, pid: null, starting: false, startError: null });
 const INSTALL_CLI_TIMEOUT_MS = 120000;
 const NOT_PERSONAL_TEXT = 'No King Louie Node on this computer is paired with this desktop.';
 
@@ -58,9 +65,19 @@ function outputLines(...texts) {
   return lines;
 }
 
-function firstLine(text) {
-  const line = String(text || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean);
-  return line ? shown(line, 400) : '';
+// nodeRunning's answer as the status's two fields.
+function runningFields(r) {
+  const running = Boolean(r && r.running);
+  return { running, pid: running && Number.isInteger(r.pid) ? r.pid : null };
+}
+
+// A refusal or error from the node, the CLI or the trust read, as the
+// status carries it: every string through `shown`.
+function shownError(error) {
+  return {
+    code: shown((error && error.code) || 'NODE_START_FAILED', 80),
+    message: shown((error && (error.message || error.error)) || '', 400)
+  };
 }
 
 function quoteArg(value) {
@@ -84,7 +101,7 @@ function createDesktopController({
   // and the clock and timers of the §7.3 wait (tests inject a fake clock).
   nodeRunner = platform === 'win32' ? createPersonalNodeRunner({ env, platform }) : null,
   clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
-  nodeStartWaitMs = NODE_START_WAIT_MS, nodeRetryMs = NODE_RETRY_MS
+  nodeStartWaitMs = NODE_START_WAIT_MS, nodeRetryMs = NODE_RETRY_MS, nodeRefreshMs = NODE_REFRESH_MS
 }) {
   const emitter = new EventEmitter();
   const bridgeFile = () => bridgeFilePath({ env, platform });
@@ -120,10 +137,17 @@ function createDesktopController({
   // and its refusal. In memory: a pending pair from before a restart has none.
   let personalFlow = null;
   // What the desktop last learnt of the personal node (§7.1, §11).
-  let nodeState = { task: 'unknown', running: false, pid: null, starting: false, startError: null };
-  // The §7.3 wait's sleep, so dispose() can end it.
-  let waitTimer = null;
-  let waitWake = null;
+  let nodeState = { ...INITIAL_NODE_STATE };
+  // Every §7.3 wait's sleep, each with its own timer (the pairing flow's and
+  // the attached start's can run at once); dispose() ends them all.
+  const sleeps = new Set();
+  // The attached start's and the pairing flow's current sleeps, so a
+  // connect, a fatal code or a cancel ends that wait alone.
+  let attachSlot = null;
+  let pairSlot = null;
+  // §7.4: the node read again after a drop and in a disconnected status.
+  let lastNodeReadAt = -Infinity;
+  let refreshRun = null;
   // The attached start (§7.2, §7.3): run by itself once per launch (C-13);
   // a press starts a new generation, which ends the wait before it.
   let launchStarted = false;
@@ -256,13 +280,19 @@ function createDesktopController({
     let base = null;
     if (pending && pending.personal) base = pending.personal;
     else if (!pending && svc && svc.hosting === 'personal') base = { name: svc.name || null, dataDir: svc.dataDir };
-    if (!base) return null;
+    return base ? nodeView(base) : null;
+  }
+
+  // §11's `node`, from what the desktop last learnt of it.
+  function nodeView(base) {
     return {
       hosting: 'personal', name: base.name || null, dataDir: base.dataDir || null,
       task: nodeState.task, running: nodeState.running, pid: nodeState.pid,
       starting: nodeState.starting, startError: nodeState.startError
     };
   }
+
+  const setRunning = (r) => { nodeState = { ...nodeState, ...runningFields(r) }; };
 
   const pairCommand = (request) => (platform === 'win32'
     ? `king-louie-service desktop pair ${request}`
@@ -292,6 +322,9 @@ function createDesktopController({
       }
     }
     let bridge = null;
+    // §7.4: a disconnected personal pairing shows what §7.1 finds now
+    // (rate-limited: not a PowerShell call per repaint).
+    if (current === 'attached-disconnected') await refreshNode().catch(() => {});
     let node = nodeStatus();
     if (current === 'unpaired') {
       let r;
@@ -357,31 +390,33 @@ function createDesktopController({
       nodeRunner.queryTask({ me: local.me }).catch(() => ({ state: 'unknown' })),
       nodeRunner.nodeRunning({ dataDir: local.dataDir }).catch(() => ({ running: false, pid: null }))
     ]);
-    nodeState = { ...nodeState, task: task.state, running: Boolean(running.running), pid: running.running ? running.pid : null };
-    return {
-      hosting: 'personal', name: local.name || null, dataDir: local.dataDir,
-      task: nodeState.task, running: nodeState.running, pid: nodeState.pid,
-      starting: nodeState.starting, startError: nodeState.startError
-    };
+    nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+    return nodeView(local);
   }
 
   // §7.3, shared with the attached start (T07): from the /Run (`since`, or
   // null when nothing was run) call `attempt()` every nodeRetryMs until it
   // answers `{ done: true, result }`, the node's log says it failed to start
   // after `since`, or nodeStartWaitMs pass. `isCurrent()` false or dispose()
-  // ends it as CANCELLED. Each sleep is a ref'd timer, cleared by dispose().
-  function wakeWait() {
-    if (waitTimer) clearTimer(waitTimer);
-    waitTimer = null;
-    if (waitWake) { const wake = waitWake; waitWake = null; wake(); }
-  }
-  function sleep(ms) {
+  // ends it as CANCELLED. Each sleep is a ref'd timer of its own, held in
+  // `slot` (when given) while it runs; waking it clears that timer.
+  function sleep(ms, slot) {
     return new Promise((resolve) => {
-      waitWake = resolve;
-      waitTimer = setTimer(() => { waitTimer = null; waitWake = null; resolve(); }, ms);
+      const h = { timer: null };
+      const end = (clear) => {
+        if (!sleeps.delete(h)) return;
+        if (clear) clearTimer(h.timer);
+        if (slot && slot.current === h) slot.current = null;
+        resolve();
+      };
+      h.wake = () => end(true);
+      sleeps.add(h);
+      if (slot) slot.current = h;
+      h.timer = setTimer(() => end(false), ms);
     });
   }
-  async function waitForNode({ dataDir, since = null, attempt, isCurrent = () => true }) {
+  const wakeSlot = (slot) => { if (slot && slot.current) slot.current.wake(); };
+  async function waitForNode({ dataDir, since = null, attempt, isCurrent = () => true, slot = null }) {
     const cancelled = { ok: false, code: 'CANCELLED' };
     const started = clock();
     for (;;) {
@@ -395,8 +430,8 @@ function createDesktopController({
         if (failed) return { ok: false, code: 'NODE_START_FAILED', message: shown(failed.line, 400) };
       }
       const left = started + nodeStartWaitMs - clock();
-      if (left <= 0) return { ok: false, code: 'NODE_START_TIMEOUT', message: NODE_START_TIMEOUT_TEXT };
-      await sleep(Math.min(nodeRetryMs, left));
+      if (left <= 0) return { ok: false, code: 'NODE_START_TIMEOUT', message: startTimeoutText(nodeStartWaitMs) };
+      await sleep(Math.min(nodeRetryMs, left), slot);
     }
   }
 
@@ -413,11 +448,40 @@ function createDesktopController({
 
   async function failFlow(request, error) {
     if (personalFlow && personalFlow.request === request) {
-      personalFlow.error = { code: error.code, message: error.message };
+      personalFlow.error = shownError(error);
       nodeState = { ...nodeState, starting: false };
       notify();
     }
     return status();
+  }
+
+  // §7.1, §12: the one way the desktop runs the task, for the pairing flow,
+  // the attached start, Start and Restart. The task is read first and must
+  // be registered, enabled and this account's (never another account's
+  // task: TASK_REFUSALS); a restart then stops a node that runs (and only
+  // one that runs); then /Run. Resolves { ok: true, ranAt }, a refusal
+  // { ok: false, code, message } (shown), or { cancelled: true }.
+  async function runNodeTask({ dataDir, me, restart = false, isCurrent, onStarting = null }) {
+    const task = await nodeRunner.queryTask({ me }).catch(() => ({ state: 'unknown' }));
+    if (!isCurrent()) return { cancelled: true };
+    nodeState = { ...nodeState, task: task.state };
+    if (task.state !== 'registered') return { ok: false, ...(TASK_REFUSALS[task.state] || TASK_REFUSALS.unknown) };
+    if (onStarting) onStarting();
+    if (restart) {
+      const running = await nodeRunner.nodeRunning({ dataDir });
+      if (!isCurrent()) return { cancelled: true };
+      setRunning(running);
+      if (running.running) {
+        const stopped = await nodeRunner.stopNode({ dataDir });
+        if (!isCurrent()) return { cancelled: true };
+        if (!stopped.ok) return { ok: false, ...shownError({ code: stopped.code || 'NODE_STOP_FAILED', message: stopped.message }) };
+        setRunning(null);
+      }
+    }
+    const ran = await nodeRunner.runTask();
+    if (!isCurrent()) return { cancelled: true };
+    if (!ran.ok) return { ok: false, ...shownError({ code: ran.code || 'NODE_TASK_RUN_FAILED', message: ran.message }) };
+    return { ok: true, ranAt: ran.ranAt };
   }
 
   // §6.2 steps 2-4 for a pending personal pair; step 5 is finishPersonalPair.
@@ -429,10 +493,10 @@ function createDesktopController({
     if (!current()) return status();
     const json = cli && cli.json && typeof cli.json === 'object' ? cli.json : null;
     if (json && json.ok === false) {
-      return failFlow(request, { code: shown(json.code || 'PAIR_COMMAND_FAILED', 80), message: shown(json.message || '', 400) });
+      return failFlow(request, { code: json.code || 'PAIR_COMMAND_FAILED', message: json.message || '' });
     }
     if (!json || json.ok !== true || cli.code !== 0 || typeof json.nodeId !== 'string') {
-      const why = firstLine(cli && cli.stderr) || (cli && cli.timedOut ? 'the command did not finish in time' : shown((cli && cli.error) || 'the command failed', 400));
+      const why = firstLine(cli && cli.stderr) || (cli && cli.timedOut ? 'the command did not finish in time' : ((cli && cli.error) || 'the command failed'));
       return failFlow(request, { code: 'PAIR_COMMAND_FAILED', message: `Pairing did not finish: ${why}` });
     }
     // 3. The trusted read: the personal rule, the CLI's own node.
@@ -455,7 +519,7 @@ function createDesktopController({
     // 4. Bring the bridge up.
     const running = await nodeRunner.nodeRunning({ dataDir });
     if (!current()) return status();
-    nodeState = { ...nodeState, running: Boolean(running.running), pid: running.running ? running.pid : null };
+    setRunning(running);
     if (running.running && json.bridgeTurnedOn === true) {
       // C-6: never restart a running node without asking.
       setStage(request, 'restart-needed');
@@ -465,15 +529,16 @@ function createDesktopController({
       setStage(request, 'confirming');
       return finishPersonalPair(request, null);
     }
-    const task = await nodeRunner.queryTask({});
-    if (!current()) return status();
-    nodeState = { ...nodeState, task: task.state };
-    if (task.state !== 'registered') return failFlow(request, TASK_REFUSALS[task.state] || TASK_REFUSALS.unknown);
-    nodeState = { ...nodeState, starting: true, startError: null };
-    setStage(request, 'starting');
-    const ran = await nodeRunner.runTask();
-    if (!current()) return status();
-    if (!ran.ok) return failFlow(request, { code: ran.code || 'NODE_TASK_RUN_FAILED', message: shown(ran.message || '', 400) });
+    const ran = await runNodeTask({
+      dataDir,
+      isCurrent: current,
+      onStarting: () => {
+        nodeState = { ...nodeState, starting: true, startError: null };
+        setStage(request, 'starting');
+      }
+    });
+    if (ran.cancelled) return status();
+    if (!ran.ok) return failFlow(request, ran);
     return finishPersonalPair(request, ran.ranAt);
   }
 
@@ -483,9 +548,12 @@ function createDesktopController({
     const current = flowCurrent(request);
     const record = personalFlow.record;
     const dataDir = state.pendingPair.personal.dataDir;
+    const slot = { current: null };
+    pairSlot = slot;
     const waited = await waitForNode({
       dataDir,
       since,
+      slot,
       isCurrent: current,
       attempt: async () => {
         found = record;
@@ -495,14 +563,15 @@ function createDesktopController({
         return { done: false };
       }
     });
+    if (pairSlot === slot) pairSlot = null;
     nodeState = { ...nodeState, starting: false };
     if (waited.code === 'CANCELLED') return status();
     if (!waited.ok) {
-      nodeState = { ...nodeState, startError: { code: waited.code, message: waited.message } };
+      nodeState = { ...nodeState, startError: shownError(waited) };
       return failFlow(request, waited);
     }
     const r = waited.result;
-    if (!r.ok) return failFlow(request, { code: r.code, message: shown(r.error || '', 400) });
+    if (!r.ok) return failFlow(request, { code: r.code, message: r.error || '' });
     personalFlow = null;
     nodeState = { ...nodeState, running: true, startError: null };
     return status();
@@ -516,11 +585,17 @@ function createDesktopController({
     }
     if (confirmed !== true) return { ok: false, code: 'CONFIRM_REQUIRED', error: 'Pairing restarts King Louie Node: a turn or a take in progress stops.' };
     const request = pending.request;
-    nodeState = { ...nodeState, starting: true, startError: null };
-    setStage(request, 'starting');
-    const restarted = await nodeRunner.restartNode({ dataDir: pending.personal.dataDir });
-    if (!flowCurrent(request)()) return status();
-    if (!restarted.ok) return failFlow(request, { code: restarted.code || 'NODE_STOP_FAILED', message: shown(restarted.message || '', 400) });
+    const restarted = await runNodeTask({
+      dataDir: pending.personal.dataDir,
+      restart: true,
+      isCurrent: flowCurrent(request),
+      onStarting: () => {
+        nodeState = { ...nodeState, starting: true, startError: null };
+        setStage(request, 'starting');
+      }
+    });
+    if (restarted.cancelled) return status();
+    if (!restarted.ok) return failFlow(request, restarted);
     return finishPersonalPair(request, restarted.ranAt);
   }
 
@@ -558,7 +633,7 @@ function createDesktopController({
     if (personal) {
       stopPolling();
       personalFlow = { request, stage: 'command', error: null, record: null };
-      nodeState = { task: 'unknown', running: false, pid: null, starting: false, startError: null };
+      nodeState = { ...INITIAL_NODE_STATE };
       notify();
       return runPersonalPair(request);
     }
@@ -643,6 +718,7 @@ function createDesktopController({
   async function pairCancel() {
     state.setPendingPair(null);
     personalFlow = null;
+    wakeSlot(pairSlot);
     nodeState = { ...nodeState, starting: false };
     stopPolling();
     notify();
@@ -778,11 +854,19 @@ function createDesktopController({
     clientStateHandler = null;
     if (!client) return;
     clientStateHandler = (s) => {
+      const was = connection.status;
       connection = { status: s.status, code: s.code, error: s.error, nextRetryAt: s.nextRetryAt };
       // §7.3: a connect, or a code waiting will not change, ends the
       // attached start's sleep at once (its timer cleared).
-      if (attachWaiting && (s.status === 'connected' || BRIDGE_FATAL.has(s.code))) wakeWait();
+      if (attachWaiting && (s.status === 'connected' || BRIDGE_FATAL.has(s.code))) wakeSlot(attachSlot);
       notify();
+      // §7.4, C-13: after a drop the row is chosen from what §7.1 finds
+      // now. Read only: a drop never runs the task.
+      if (was === 'connected' && s.status !== 'connected') {
+        refreshNode({ force: true })
+          .then((changed) => { if (changed) notify(); })
+          .catch((err) => log.warn(`reading King Louie Node after a drop failed: ${err.message}`));
+      }
     };
     client.on('state', clientStateHandler);
   }
@@ -790,7 +874,7 @@ function createDesktopController({
   function dispose() {
     disposed = true;
     stopPolling();
-    wakeWait();
+    for (const h of [...sleeps]) h.wake();
     closeImportSession();
     if (client && clientStateHandler) client.off('state', clientStateHandler);
     clientStateHandler = null;
@@ -809,8 +893,38 @@ function createDesktopController({
   }
 
   function endStart(startError) {
-    nodeState = { ...nodeState, starting: false, startError: startError || null };
+    nodeState = { ...nodeState, starting: false, startError: startError ? shownError(startError) : null };
     notify();
+  }
+
+  // §7.4: read the task and the pidfile again for an attached personal
+  // pairing that is not starting. At most once per nodeRefreshMs unless
+  // forced (a drop); resolves true when it read something.
+  function refreshNode({ force = false } = {}) {
+    const dataDir = personalPairingDir();
+    if (mode !== 'attached' || !dataDir || !nodeRunner || disposed) return Promise.resolve(false);
+    if (startRun || nodeState.starting) return Promise.resolve(false);
+    if (refreshRun) return refreshRun;
+    if (!force && clock() - lastNodeReadAt < nodeRefreshMs) return Promise.resolve(false);
+    lastNodeReadAt = clock();
+    const run = (async () => {
+      const [task, running] = await Promise.all([
+        nodeRunner.queryTask({}).catch(() => ({ state: 'unknown' })),
+        nodeRunner.nodeRunning({ dataDir }).catch(() => ({ running: false, pid: null }))
+      ]);
+      // A start begun meanwhile owns the state.
+      if (disposed || startRun || nodeState.starting) return false;
+      nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+      return true;
+    })();
+    refreshRun = run;
+    run.then(() => { if (refreshRun === run) refreshRun = null; }, () => { if (refreshRun === run) refreshRun = null; });
+    return run;
+  }
+
+  // Resolves once no read of the node is in flight.
+  async function refreshIdle() {
+    while (refreshRun) await refreshRun.catch(() => {});
   }
 
   // Whether the client's own loop has settled the wait: connected, or a
@@ -840,49 +954,44 @@ function createDesktopController({
       return;
     }
     let since = null;
-    if (restart) {
-      const restarted = await nodeRunner.restartNode({ dataDir });
+    let run = restart;
+    if (!restart) {
+      const running = await nodeRunner.nodeRunning({ dataDir });
       if (!current()) return;
-      if (!restarted.ok) {
-        endStart({ code: restarted.code || 'NODE_STOP_FAILED', message: shown(restarted.message || '', 400) });
+      setRunning(running);
+      run = !running.running;
+    }
+    if (run) {
+      // A restart stops only a node that runs: with none, it is a start.
+      const ran = await runNodeTask({
+        dataDir,
+        me: local.me,
+        restart,
+        isCurrent: current,
+        onStarting: () => {
+          nodeState = { ...nodeState, starting: true, startError: null };
+          notify();
+        }
+      });
+      if (ran.cancelled) return;
+      if (!ran.ok) {
+        endStart(ran);
         connectNow();
         return;
       }
-      since = restarted.ranAt;
-    } else {
-      const running = await nodeRunner.nodeRunning({ dataDir });
-      if (!current()) return;
-      nodeState = { ...nodeState, running: Boolean(running.running), pid: running.running ? running.pid : null };
-      if (!running.running) {
-        const task = await nodeRunner.queryTask({ me: local.me });
-        if (!current()) return;
-        nodeState = { ...nodeState, task: task.state };
-        if (task.state !== 'registered') {
-          const refusal = TASK_REFUSALS[task.state] || TASK_REFUSALS.unknown;
-          endStart({ code: refusal.code, message: refusal.message });
-          connectNow();
-          return;
-        }
-        nodeState = { ...nodeState, starting: true, startError: null };
-        notify();
-        const ran = await nodeRunner.runTask();
-        if (!current()) return;
-        if (!ran.ok) {
-          endStart({ code: ran.code || 'NODE_TASK_RUN_FAILED', message: shown(ran.message || '', 400) });
-          connectNow();
-          return;
-        }
-        since = ran.ranAt;
-      }
+      since = ran.ranAt;
     }
     nodeState = { ...nodeState, starting: true, startError: null };
     notify();
     attachWaiting = true;
+    const slot = { current: null };
+    attachSlot = slot;
     let waited;
     try {
       waited = await waitForNode({
         dataDir,
         since,
+        slot,
         isCurrent: current,
         attempt: async () => {
           const before = clientSettled();
@@ -893,15 +1002,21 @@ function createDesktopController({
       });
     } finally {
       if (gen === startGeneration) attachWaiting = false;
+      if (attachSlot === slot) attachSlot = null;
     }
     if (waited.code === 'CANCELLED') return;
     if (waited.ok) {
       if (waited.result.connected) nodeState = { ...nodeState, running: true };
       endStart(null);
     } else if (waited.code === 'NODE_START_TIMEOUT' && since === null) {
-      // Nothing was run: the node was up already and its bridge never
-      // answered, which the "running (pid N)" row and its Restart say.
-      endStart(null);
+      // Nothing was run: the node was up at the start. Read it again: still
+      // up, its bridge never answered (the "running (pid N)" row and its
+      // Restart say so); gone, the timeout stands (§7.3).
+      const now = await nodeRunner.nodeRunning({ dataDir }).catch(() => ({ running: false, pid: null }));
+      if (!current()) return;
+      setRunning(now);
+      lastNodeReadAt = clock();
+      endStart(now.running ? null : waited);
     } else {
       endStart({ code: waited.code, message: waited.message });
     }
@@ -909,7 +1024,7 @@ function createDesktopController({
 
   function launchStart(dataDir, restart) {
     const gen = ++startGeneration;
-    wakeWait();
+    wakeSlot(attachSlot);
     const run = attachedStart({ dataDir, restart, gen }).catch((err) => {
       log.warn(`starting King Louie Node failed: ${err.message}`);
       if (gen === startGeneration) endStart({ code: 'NODE_START_FAILED', message: shown(err.message, 400) });
@@ -954,17 +1069,21 @@ function createDesktopController({
   }
 
   // §8: which data dir Install is for, and whose task it reads after.
+  // The disk is read every time (C-7): a recorded data dir only says where
+  // to look, and must still be a personal node's.
   async function installTarget() {
-    const recorded = personalDataDir();
-    if (recorded) return { dataDir: recorded, me: undefined };
     if (!nodeRunner) return null;
+    const recorded = personalDataDir();
+    let local;
     try {
-      const local = await nodeRunner.detectPersonalNode({});
-      return local && local.personal && local.dataDir ? { dataDir: local.dataDir, me: local.me } : null;
+      local = await nodeRunner.detectPersonalNode(recorded ? { dataDir: recorded } : {});
     } catch (err) {
       log.warn(`personal node read failed: ${err.message}`);
       return null;
     }
+    if (!local || !local.personal || !local.dataDir) return null;
+    if (recorded && !samePath(local.dataDir, recorded)) return null;
+    return { dataDir: local.dataDir, me: local.me };
   }
 
   function installResult(cli) {
@@ -991,13 +1110,21 @@ function createDesktopController({
     }
     const target = await installTarget();
     if (!target) return notPersonalInstall();
+    // §8: only while no task is registered.
+    const before = await nodeRunner.queryTask({ me: target.me }).catch(() => ({ state: 'unknown' }));
+    if (before.state !== 'missing') {
+      nodeState = { ...nodeState, task: before.state };
+      notify();
+      const refusal = INSTALL_REFUSALS[before.state] || INSTALL_REFUSALS.unknown;
+      return { ok: false, code: refusal.code, message: refusal.message, error: refusal.message, lines: [] };
+    }
     const cli = await nodeRunner.runCli(['install', '--personal', '--yes', '--data-dir', target.dataDir], { timeoutMs: INSTALL_CLI_TIMEOUT_MS });
     // Whatever the install did, the task and the node are read again.
     const [task, running] = await Promise.all([
       nodeRunner.queryTask({ me: target.me }).catch(() => ({ state: 'unknown' })),
       nodeRunner.nodeRunning({ dataDir: target.dataDir }).catch(() => ({ running: false, pid: null }))
     ]);
-    nodeState = { ...nodeState, task: task.state, running: Boolean(running.running), pid: running.running ? running.pid : null };
+    nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
     notify();
     return installResult(cli);
   }
@@ -1007,7 +1134,7 @@ function createDesktopController({
   return {
     status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
     importPlan, importApply, dismissServiceCommand, createClient, setClient, dispose,
-    startAttached, startIdle, nodeStart, nodeInstallPreview, nodeInstall,
+    startAttached, startIdle, refreshIdle, nodeStart, nodeInstallPreview, nodeInstall,
     on: (event, fn) => emitter.on(event, fn)
   };
 }
