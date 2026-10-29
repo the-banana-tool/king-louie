@@ -318,7 +318,7 @@ describe('push text', () => {
 });
 
 describe('push kinds and the FCM payload (push spec §6.5, §7.1)', () => {
-  it('carries the new kinds, and c only for a count from 2 to 999', async () => {
+  it('carries the new kinds, and c for a count of 2 or more, capped at 999', async () => {
     const fcm = await fcmServer();
     const sender = createFcmSender(fcm.options);
     await sender.notify(device('fcm', 'a'), { kind: 'session_ended', id: 'lease-1', node_name: 'gpu-box' });
@@ -335,7 +335,9 @@ describe('push kinds and the FCM payload (push spec §6.5, §7.1)', () => {
     assert.deepEqual(data[1], { rid: 'lease-2', n: 'gpu-box', k: 'session_paused' });
     assert.deepEqual(data[2], { rid: 't-1', n: 'relay-1', k: 'test' });
     assert.deepEqual(data[3], { rid: 'r-1', n: 'gpu-box', k: 'approval', c: '10' });
-    for (const d of data.slice(4, 8)) assert.equal(d.c, undefined);
+    assert.equal(data[4].c, undefined, 'a count of 1 is not sent');
+    assert.equal(data[5].c, '999', 'a count above 999 is sent as 999');
+    for (const d of data.slice(6, 8)) assert.equal(d.c, undefined);
     assert.equal(data[8].c, '999');
     for (const d of data) for (const v of Object.values(d)) assert.equal(typeof v, 'string');
   });

@@ -130,10 +130,10 @@ class DeviceRegistry {
     return { record, updated: true };
   }
 
-  // Sets (or with null, clears) where the device's notifications go. Answers
-  // whether it wrote: an unknown device, or the platform and token already
-  // held (push spec §7.3: the phone re-sends its token at every cold start),
-  // write nothing.
+  // Sets (or with null, clears) where the device's notifications go.
+  // Returns a boolean, "wrote": true when it saved a change, false when it
+  // wrote nothing (an unknown device, or the platform and token already held:
+  // push spec §7.3, the phone re-sends its token at every cold start).
   setPush(deviceId, push) {
     const record = DEVICE_ID_RE.test(deviceId) ? this.devices.get(deviceId) : null;
     if (!record) return false;
