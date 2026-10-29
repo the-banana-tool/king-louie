@@ -1,7 +1,7 @@
 ---
 id: T12
 title: The four screens
-status: open
+status: in-progress
 blocked_by: [T09, T11]
 ---
 ## Goal

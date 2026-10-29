@@ -90,6 +90,19 @@ Start frontier: T01, T08, T09.
   instead of the brief's Fable 5.1 (the implementer followed the system
   attribution reminder).
 
+- T11: `lifecycle-process:2.10.0` added; `AppMode { WELCOME, LIVE }`;
+  `DemoFleet` in protocol test sources. `verifiedClaim` now accepts a joining
+  phone's `read_key`. `refreshLeases` is private, called by the loop and by
+  notifications; a failure marks every node "could not confirm". A node's
+  read-key state is partly inferred (`duplicate` on first post = in use; an
+  accepted read-key watch = in use; `bad_signature` = waiting for apply). A
+  pre-read-key relay answers the loop's read requests 401 and the loop waits 15
+  s; only the set-up route's 404 shows the "older relay" message. A notification
+  arriving (not tapped) does not trigger a fetch: `Push.kt` is spec 3's. Invite
+  polling needs the read key set up first. `READ_KEY_SETUP_TITLE` contains
+  "Check for requests" (spec words), so T12's string check must allow it.
+  `alertContainer`/`onAlertContainer` remain for T12 to remove.
+
 ## Landed
 - T01 merge 932753aa (impl d2d4cc64): `isDevice` export, `kl.device.read_key`
   validator, `phoneAuthString(..., { key })`, `PHONE_AUTH_PREFIXES`,
@@ -111,5 +124,7 @@ Start frontier: T01, T08, T09.
 - T10 merge 980e08ca (impl 729926e8).
 - T13 merge 487109b7 (impl d6f790a1).
 
+- T11 merge e8aae588 (impl 255b2f4a).
+
 ## Left
-T11 (in progress), T12; then the review and npm test.
+T12 (in progress); then the review and npm test.
