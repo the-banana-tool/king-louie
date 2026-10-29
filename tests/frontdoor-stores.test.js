@@ -174,7 +174,7 @@ describe('DeviceRegistry', () => {
     reg.register({ device_id: phone.deviceId, jwk: phone.jwk, name: 'x', platform: 'android' });
     assert.throws(() => reg.setNodeState(phone.deviceId, 'not-a-node-id', 'active'), (e) => e.code === 'bad_node');
     assert.equal(reg.get('not-a-device-id'), null);
-    assert.equal(reg.setPush('not-a-device-id', { platform: 'fcm', token: 't' }), null);
+    assert.equal(reg.setPush('not-a-device-id', { platform: 'fcm', token: 't' }), false);
     assert.deepEqual(reg.devicesForNode('not-a-node-id'), []);
     assert.deepEqual(reg.nodesForDevice('not-a-device-id'), []);
     assert.equal(reg.remove('not-a-device-id'), false);
