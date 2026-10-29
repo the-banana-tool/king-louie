@@ -974,3 +974,208 @@ describe('M3 round 2: a failed staging write is a result, not a throw', () => {
     assert.equal(s.isActive(b.deviceId), false);
   });
 });
+
+// The read key (android-slim spec §8.2, §8.7): approver records may hold a
+// `read_key`; a device-key-signed kl.device.read_key is staged and applied.
+describe('read key: approver records', () => {
+  const { checkApproverRecord } = require('../src/approvals/approver-store');
+  const { TEST_DEVICE_KEYS } = require('../src/approvals/test-keys');
+  const testJwk = (k) => ({ kty: 'EC', crv: 'P-256', x: k.x, y: k.y });
+
+  it('accepts a record with or without read_key, and refuses a malformed one or one equal to public_key', () => {
+    const phone = createFakePhone();
+    const read = createFakePhone().jwk;
+    assert.equal(checkApproverRecord(phone.approverRecord()), null);
+    assert.equal(checkApproverRecord({ ...phone.approverRecord(), read_key: read }), null);
+    assert.equal(checkApproverRecord({ ...phone.approverRecord(), read_key: read, read_key_at: '2026-09-23T18:00:00.000Z' }), null);
+    assert.match(checkApproverRecord({ ...phone.approverRecord(), read_key: { ...phone.jwk } }), /read_key/);
+    assert.match(checkApproverRecord({ ...phone.approverRecord(), read_key: { ...read, d: 'x' } }), /read_key/);
+    assert.match(checkApproverRecord({ ...phone.approverRecord(), read_key: null }), /read_key/);
+    assert.match(checkApproverRecord({ ...phone.approverRecord(), read_key_at: '2026-09-23T18:00:00.000Z' }), /read_key_at/);
+    assert.match(checkApproverRecord({ ...phone.approverRecord(), read_key: read, read_key_at: 'yesterday' }), /read_key_at/);
+  });
+
+  it('a published test key as a read key is refused unless the store allows test keys', async () => {
+    const l = layout();
+    const phone = createFakePhone();
+    write(l.dir, { ...phone.approverRecord(), read_key: testJwk(TEST_DEVICE_KEYS[2]) });
+    const s = store(l);
+    await s.ready();
+    assert.deepEqual(s.list(), []);
+    assert.equal(s.isActive(phone.deviceId), false);
+    assert.equal(s.isTestKey(phone.deviceId), true);
+    const allowed = store(l, { allowTestKeys: true });
+    await allowed.ready();
+    assert.equal(allowed.isActive(phone.deviceId), true);
+  });
+
+  it('a signed enrollment carrying read_key is staged, and applied with it', async () => {
+    const l = layout();
+    const a = createFakePhone();
+    write(l.dir, a.approverRecord());
+    const s = store(l);
+    await s.ready();
+    const c = createFakePhone({ name: 'New phone' });
+    const read = createFakePhone().jwk;
+    assert.deepEqual(s.stage(a.enroll({ device: { ...c.device(), read_key: read }, now: NOW })), { state: 'staged' });
+    const ad = admin(l);
+    let shown;
+    const results = await ad.applyStaged({ confirm: async (items) => { shown = items; return true; } });
+    assert.deepEqual(shown[0].message.device.read_key, read);
+    assert.deepEqual(results.map((r) => r.result), ['enrolled']);
+    assert.deepEqual(ad.read(c.deviceId).read_key, read);
+    assert.equal(ad.read(c.deviceId).read_key_at, iso(NOW));
+  });
+
+  it('refuses to stage or apply an enrollment whose read_key is a published test key', async () => {
+    const l = layout();
+    const a = createFakePhone();
+    write(l.dir, a.approverRecord());
+    const s = store(l);
+    await s.ready();
+    const c = createFakePhone();
+    const env = a.enroll({ device: { ...c.device(), read_key: testJwk(TEST_DEVICE_KEYS[0]) }, now: NOW });
+    assert.deepEqual(s.stage(env), { state: 'rejected', reason: 'test_key' });
+    // Planted straight into staged/ (the service account could): apply refuses it too.
+    const permissive = store(l, { allowTestKeys: true });
+    await permissive.ready();
+    assert.deepEqual(permissive.stage(env), { state: 'staged' });
+    assert.deepEqual((await admin(l).applyStaged({ confirm: async () => true })).map((r) => r.result), ['rejected: test key']);
+  });
+});
+
+describe('read key: kl.device.read_key staged and applied', () => {
+  function statement(phone, readJwk, { now = NOW, ttlMs = 7 * 24 * 60 * 60 * 1000, deviceId = phone.deviceId, signer = phone.signer, nonce = null } = {}) {
+    return seal({
+      v: 1, type: 'kl.device.read_key', device_id: deviceId, read_key: readJwk,
+      created_at: iso(now), expires_at: iso(now + ttlMs), nonce: nonce || randomNonce()
+    }, signer);
+  }
+  function readPhone() {
+    const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const { kty, crv, x, y } = pair.publicKey.export({ format: 'jwk' });
+    return { jwk: { kty, crv, x, y }, sign: (bytes) => crypto.sign('sha256', bytes, { key: pair.privateKey, dsaEncoding: 'ieee-p1363' }) };
+  }
+  async function fleet(records = null) {
+    const l = layout();
+    const a = createFakePhone({ name: 'Owner phone' });
+    const b = createFakePhone({ name: 'Second phone' });
+    for (const r of records ? records(a, b) : [a.approverRecord(), b.approverRecord()]) write(l.dir, r);
+    const s = store(l);
+    await s.ready();
+    return { l, a, b, s };
+  }
+
+  it('stages a statement signed by the device key of an active approver, once', async () => {
+    const { s, a, l } = await fleet();
+    const read = readPhone();
+    const env = statement(a, read.jwk);
+    assert.deepEqual(s.stage(env), { state: 'read-key-pending-apply' });
+    assert.deepEqual(s.stage(env), { state: 'duplicate' });
+    assert.equal(fs.readdirSync(l.stagedDir).length, 1);
+    assert.equal(s.get(a.deviceId).read_key, undefined, 'staged is not applied');
+  });
+
+  it('refuses a statement signed by the read key itself, by another device, or for another device', async () => {
+    const { s, a, b } = await fleet();
+    const read = readPhone();
+    assert.deepEqual(s.stage(statement(a, read.jwk, { signer: { alg: 'ES256', kid: a.deviceId, sign: read.sign } })), { state: 'rejected', reason: 'bad_signature' });
+    assert.deepEqual(s.stage(statement(a, read.jwk, { signer: b.signer })), { state: 'rejected', reason: 'malformed' });
+    const forged = { ...statement(a, read.jwk), sig: statement(b, read.jwk, { signer: b.signer }).sig };
+    assert.deepEqual(s.stage(forged), { state: 'rejected', reason: 'bad_signature' });
+  });
+
+  it('refuses a statement from a device that is not an active approver', async () => {
+    const { s, b } = await fleet((x, y) => [x.approverRecord(), y.approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' })]);
+    assert.deepEqual(s.stage(statement(b, readPhone().jwk)), { state: 'rejected', reason: 'signer_not_active' });
+    assert.deepEqual(s.stage(statement(createFakePhone(), readPhone().jwk)), { state: 'rejected', reason: 'signer_not_active' });
+  });
+
+  it('refuses a statement from a device revoked through the overlay', async () => {
+    const { s, a, b } = await fleet();
+    s.stage(a.revoke(b.deviceId, { now: NOW }));
+    assert.deepEqual(s.stage(statement(b, readPhone().jwk)), { state: 'rejected', reason: 'signer_not_active' });
+  });
+
+  it('refuses from_the_future beyond 5 minutes, expired, and a window over 7 days', async () => {
+    const { s, a } = await fleet();
+    assert.deepEqual(s.stage(statement(a, readPhone().jwk, { now: NOW + 6 * 60 * 1000 })), { state: 'rejected', reason: 'from_the_future' });
+    assert.equal(s.stage(statement(a, readPhone().jwk, { now: NOW + 4 * 60 * 1000 })).state, 'read-key-pending-apply');
+    assert.deepEqual(s.stage(statement(a, readPhone().jwk, { now: NOW - 2 * 60 * 60 * 1000, ttlMs: 60 * 60 * 1000 })), { state: 'rejected', reason: 'expired' });
+    assert.deepEqual(s.stage(statement(a, readPhone().jwk, { ttlMs: 8 * 24 * 60 * 60 * 1000 })), { state: 'rejected', reason: 'malformed' });
+  });
+
+  it('refuses a read key equal to the device key, or a published test key', async () => {
+    const { s, a } = await fleet();
+    const { TEST_DEVICE_KEYS } = require('../src/approvals/test-keys');
+    assert.deepEqual(s.stage(statement(a, { ...a.jwk })), { state: 'rejected', reason: 'malformed' });
+    const k = TEST_DEVICE_KEYS[1];
+    assert.deepEqual(s.stage(statement(a, { kty: 'EC', crv: 'P-256', x: k.x, y: k.y })), { state: 'rejected', reason: 'test_key' });
+  });
+
+  it('refuses a statement older than the record\'s current read key (stale); the same key again is a duplicate', async () => {
+    const current = readPhone().jwk;
+    const { s, a } = await fleet((x, y) => [{ ...x.approverRecord(), read_key: current, read_key_at: iso(NOW - 60 * 1000) }, y.approverRecord()]);
+    assert.deepEqual(s.stage(statement(a, readPhone().jwk, { now: NOW - 2 * 60 * 1000 })), { state: 'rejected', reason: 'stale' });
+    assert.deepEqual(s.stage(statement(a, current)), { state: 'duplicate' });
+    assert.equal(s.stage(statement(a, readPhone().jwk)).state, 'read-key-pending-apply');
+  });
+
+  it('a record\'s read key with no read_key_at dates from enrolled_at', async () => {
+    const { s, a } = await fleet((x, y) => [{ ...x.approverRecord(), read_key: readPhone().jwk }, y.approverRecord()]);
+    // enrolled_at is 2026-09-23T18:00:00.000Z, which is NOW.
+    assert.deepEqual(s.stage(statement(a, readPhone().jwk, { now: NOW - 1000 })), { state: 'rejected', reason: 'stale' });
+  });
+
+  it('device apply writes read_key after yes, nothing after no', async () => {
+    const { s, a, l } = await fleet();
+    const read = readPhone();
+    s.stage(statement(a, read.jwk));
+    const ad = admin(l);
+    let shown;
+    assert.deepEqual(await ad.applyStaged({ confirm: async (items) => { shown = items; return false; } }), []);
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0].type, 'kl.device.read_key');
+    assert.equal(shown[0].deviceId, a.deviceId);
+    assert.equal(shown[0].signer, a.deviceId);
+    assert.equal(ad.read(a.deviceId).read_key, undefined);
+
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => [r.type, r.deviceId, r.result]), [['kl.device.read_key', a.deviceId, 'read key set']]);
+    const record = ad.read(a.deviceId);
+    assert.deepEqual(record.read_key, read.jwk);
+    assert.equal(record.read_key_at, iso(NOW));
+    assert.equal(record.enrolled_by, 'console', 'the rest of the record is kept');
+    assert.equal(fs.readdirSync(path.join(l.stagedDir, 'done')).length, 1);
+    const fresh = store(l);
+    await fresh.ready();
+    assert.equal(fresh.isActive(a.deviceId), true);
+  });
+
+  it('apply: the newest of two statements wins, the older is stale, and a revoked device gets none', async () => {
+    const { s, a, b, l } = await fleet();
+    const older = readPhone().jwk;
+    const newer = readPhone().jwk;
+    s.stage(statement(a, newer, { now: NOW }));
+    s.stage(statement(a, older, { now: NOW - 60 * 1000 }));
+    s.stage(statement(b, readPhone().jwk));
+    s.stage(a.revoke(b.deviceId, { now: NOW }));
+    const results = await admin(l).applyStaged({ confirm: async () => true });
+    const byDevice = results.filter((r) => r.type === 'kl.device.read_key').map((r) => [r.deviceId, r.result]);
+    assert.deepEqual(byDevice.sort(), [
+      [a.deviceId, 'read key set'],
+      [a.deviceId, 'rejected: stale'],
+      [b.deviceId, 'rejected: device was revoked']
+    ].sort());
+    assert.deepEqual(admin(l).read(a.deviceId).read_key, newer);
+    assert.equal(admin(l).read(b.deviceId).read_key, undefined);
+  });
+
+  it('apply re-checks the signer against the admin set', async () => {
+    const { s, a, l } = await fleet();
+    s.stage(statement(a, readPhone().jwk));
+    // The administrator revoked the device between staging and apply.
+    admin(l).markRevoked(a.deviceId, 'console');
+    assert.deepEqual((await admin(l).applyStaged({ confirm: async () => true })).map((r) => r.result), ['rejected: signer is not an active approver']);
+  });
+});
