@@ -183,6 +183,9 @@ function registerNodeMethods(relay) {
     const d = enroll.device;
     try {
       devices.register({ device_id: d.device_id, jwk: d.public_key, name: d.name, platform: d.platform });
+      // The read key (android-slim §8.2) is bound by the same self-signature
+      // and code_mac the node just checked.
+      if (d.read_key) devices.setReadKey(d.device_id, d.read_key, enroll.created_at);
     } catch (err) {
       throw new LinkRpcError(err.code || 'bad_device', err.message);
     }

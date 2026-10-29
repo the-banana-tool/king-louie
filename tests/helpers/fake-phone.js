@@ -65,8 +65,28 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
     readSigner,
     sign: (message) => seal(message, signer),
 
-    device() {
-      return { device_id: deviceId, name, platform, public_key: jwk };
+    // `readKey: true` adds the read key's public half (android-slim §8.2),
+    // as an Android phone built from that change enrolls.
+    device({ readKey = false } = {}) {
+      const d = { device_id: deviceId, name, platform, public_key: jwk };
+      if (readKey) d.read_key = readJwk;
+      return d;
+    },
+
+    // kl.device.read_key (android-slim §8.7): this phone's statement of its
+    // read key, signed with the device key (`signWith: 'read'` signs it with
+    // the read key, for refusal tests).
+    readKeyStatement({ now = Date.now(), ttlMs = 7 * 24 * 60 * 60 * 1000, nonce = null, readKey = null, signWith = 'device', overrides = {} } = {}) {
+      return seal({
+        v: 1,
+        type: 'kl.device.read_key',
+        device_id: deviceId,
+        read_key: readKey || readJwk,
+        created_at: iso(now),
+        expires_at: iso(now + ttlMs),
+        nonce: nonce || randomNonce(),
+        ...overrides
+      }, signWith === 'read' ? readSigner : signer);
     },
 
     approverRecord({ enrolledBy = 'console', enrolledAt = '2026-09-23T18:00:00.000Z', revokedAt = null, revokedBy = null, enrollment = null } = {}) {

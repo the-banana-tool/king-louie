@@ -49,7 +49,9 @@ describe('lease routes', () => {
     assert.deepEqual([...r.routes.keys()], [
       'GET /v1/leases', 'POST /v1/leases/{lease_id}/grant', 'POST /v1/leases/{lease_id}/revoke', 'POST /v1/leases/{lease_id}/watch', 'GET /v1/leases/{lease_id}/views'
     ]);
-    for (const spec of r.routes.values()) assert.equal(spec.auth, 'device');
+    // android-slim §8.4: signed with either key of the device (a grant or a
+    // revoke still carries its device-key envelope, which the node checks).
+    for (const spec of r.routes.values()) assert.equal(spec.auth, 'read');
     assert.deepEqual(r.mailbox.types.get('kl.lease.'), { ttlMs: LEASE_TTL_MS, maxBytes: 262144 });
   });
 
@@ -103,7 +105,7 @@ describe('lease routes', () => {
         { node_id: NODE, envelope: null, status: ended }
       ]);
       assert.deepEqual(r.rpcs, [{ nodeId: NODE, method: 'lease.list', params: { device_id: phone.deviceId }, opts: { timeoutMs: 5000 } }]);
-      assert.equal(r.routes.get('GET /v1/leases').auth, 'device', 'one device-signed request; there is no unsigned listing');
+      assert.equal(r.routes.get('GET /v1/leases').auth, 'read', 'one signed request (either key of the device); there is no unsigned listing');
       assert.ok(![...r.routes.keys()].some((k) => /live|running/.test(k)), 'no route of its own');
     });
 

@@ -8,6 +8,10 @@
 //
 // Ids in the path are checked against their own patterns before anything is
 // looked up with them. Reason codes are returned as codes; the phone words them.
+//
+// `auth` per android-slim §8.4: reads and routes whose body is a device-key
+// envelope take either key (`read`); a pairing code and an alert
+// acknowledgement, which carry no envelope, take the device key.
 const { createLogger } = require('../logging');
 const { ApiError } = require('./phone-api');
 const { NODE_ID_RE } = require('../approvals/messages');
@@ -87,7 +91,7 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
   });
 
   phoneApi.registerRoute('GET', '/v1/pairings/pending', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       return { body: pairing.pending() };
@@ -95,7 +99,7 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
   });
 
   phoneApi.registerRoute('POST', '/v1/pairings/{id}/decision', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       const pairingId = validId(ctx.params.id, PAIRING_ID_RE);
@@ -110,7 +114,7 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
   });
 
   phoneApi.registerRoute('POST', '/v1/nodes/{node_id}/remove', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       const nodeId = validId(ctx.params.node_id, NODE_ID_RE);
@@ -157,7 +161,7 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
   });
 
   phoneApi.registerRoute('GET', '/v1/nodes', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       return {
@@ -191,7 +195,7 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
   });
 
   phoneApi.registerRoute('GET', '/v1/nodes/{node_id}/history', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       const nodeId = validId(ctx.params.node_id, NODE_ID_RE);
@@ -217,7 +221,7 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
   });
 
   phoneApi.registerRoute('GET', '/v1/nodes/{node_id}/audit-status', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       const nodeId = validId(ctx.params.node_id, NODE_ID_RE);
@@ -234,7 +238,7 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
   });
 
   phoneApi.registerRoute('GET', '/v1/alerts', {
-    auth: 'device',
+    auth: 'read',
     handler: async (req, ctx) => {
       requireApprover(ctx);
       const since = queryValue(req, 'since', SEQ_RE);
@@ -255,7 +259,7 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
 
   // Public facts about this front door, for any phone the relay knows.
   phoneApi.registerRoute('GET', '/v1/frontdoor', {
-    auth: 'device',
+    auth: 'read',
     handler: async () => {
       let cert = null;
       try {
