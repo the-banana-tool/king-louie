@@ -603,6 +603,29 @@ describe('hosting personal', () => {
     assert.equal(fake.stopped, 1);
   });
 
+  it('stop ends the leases service_stopped, then waits for the push queue, at most 2 s, before it returns (push spec §6.2)', async () => {
+    const { gui } = personal();
+    await gui.start();
+    const queue = gui.leases.pushQueue;
+    const ended = [];
+    const realStopAll = gui.leases.stopAll.bind(gui.leases);
+    gui.leases.stopAll = (reason) => { ended.push(reason); return realStopAll(reason); };
+    const drains = [];
+    let release;
+    queue.drain = (opts) => {
+      drains.push({ opts, leasesEnded: [...ended], listening: queue.listening });
+      return new Promise((resolve) => { release = resolve; });
+    };
+    let done = false;
+    const stopping = gui.stop().then(() => { done = true; });
+    for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
+    assert.deepEqual(drains, [{ opts: { timeoutMs: 2000 }, leasesEnded: ['service_stopped'], listening: false }]);
+    assert.equal(done, false, 'stop waits for the queue');
+    release();
+    await stopping;
+    assert.equal(done, true);
+  });
+
   it('passes no identityProbe to the lease manager', () => {
     const probed = { ...IDENTITY_RECORD_TEST_OPTIONS, serviceProbe: true };
     const { gui } = personal({ platform: 'win32', deps: { channel: new FakeChannel(), identityRecord: probed } });

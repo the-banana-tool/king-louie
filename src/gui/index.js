@@ -92,6 +92,9 @@ function isJobOpen({ jobManager = null, chatExists = null } = {}, jobId) {
 // Never throws (security review finding 2): whatever goes wrong while the GUI
 // is built, the service that hosts it still starts. The result is then a
 // subsystem that is off, with the reason gui_start_failed.
+// How long gui.stop() waits for the service_stopped pushes (push spec §6.2).
+const PUSH_DRAIN_MS = 2000;
+
 function createGuiSubsystem(options = {}) {
   try {
     return buildGuiSubsystem(options);
@@ -197,10 +200,18 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
       // A take stops its recording and lets go of its browser while the helper is still there.
       if (takes) await quietly(() => takes.stopAll('service_stopped'));
       liveView.stop();
+      // Every lease ends service_stopped here, queueing its session_ended push (push spec
+      // §6.2). The host closes the relay link after this returns (run.js stops the GUI before
+      // approvals), so the sends are waited for, at most PUSH_DRAIN_MS, beside the teardown.
       leases.stop();
+      const drained = quietly(() => leases.pushQueue.drain({ timeoutMs: PUSH_DRAIN_MS }));
       if (brokerStarted) broker.stop();
       brokerStarted = false;
-      await channel.stop();
+      try {
+        await channel.stop();
+      } finally {
+        await drained;
+      }
     }
   };
   return subsystem;

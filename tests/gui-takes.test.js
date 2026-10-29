@@ -56,8 +56,10 @@ function fakeTimers(clock) {
 }
 
 class FakeRelay extends EventEmitter {
-  constructor() { super(); this.sent = []; }
-  isConnected() { return true; }
+  constructor() { super(); this.sent = []; this.pushes = []; this.connected = true; }
+  isConnected() { return this.connected; }
+  // push.notify (push spec §6.2): what the node's queue sent.
+  async pushNotify(params) { this.pushes.push(params); return { ok: true }; }
   async send(envelope, opts = {}) { this.sent.push({ envelope, opts, message: open(envelope).message }); return { ok: true }; }
   registerMethod() {}
   last(type) { return [...this.sent].reverse().find((s) => s.message.type === type); }
@@ -246,6 +248,23 @@ describe('TakeManager.start', () => {
     assert.deepEqual(killed, [8], 'only the pid whose image is ffmpeg');
     assert.equal(store.get(out.take_id).ended.reason, 'service_restarted');
     assert.equal(store.get(reused.take_id).ended.reason, 'service_restarted');
+    await restarted.stopAll();
+  });
+
+  it('a restart pushes session_ended once per granted take it ended, none for an ungranted one (push spec §6.2)', async () => {
+    const granted = await started();
+    // A record cut off before its grant: no lease_id, no grant.
+    const ungranted = store.create({ name: 'Never granted', job_id: 'job-8', state: 'requested' });
+    relay.pushes.length = 0;
+    // The link is not up yet at a restart: the queue keeps the entries for the next connected.
+    relay.connected = false;
+    const restarted = new TakeManager({ leases, broker, store, guiConfig, registry, clock: () => clock.now(), timers, findProcess: () => null, kill: () => {} });
+    assert.equal(store.get(ungranted.take_id).ended.reason, 'service_restarted');
+    assert.deepEqual(relay.pushes, [], 'nothing sent while the link is down');
+    relay.connected = true;
+    relay.emit('connected');
+    await tick();
+    assert.deepEqual(relay.pushes, [{ kind: 'session_ended', id: store.get(granted.take_id).lease_id, to_device: null, except_device: null, expires_at: null }]);
     await restarted.stopAll();
   });
 
@@ -534,6 +553,19 @@ describe('ending a take', () => {
     assert.equal(record.ended.reason, 'driver_silent');
     assert.equal(record.recording.path, 'C:\\rec\\take.mp4');
     assert.equal(SILENT_MS, 30 * 60000);
+  });
+
+  it('a take ending driver_silent gives one session_ended push to every phone (push spec §6.1)', async () => {
+    const out = await started({ minutes: 120 });
+    relay.pushes.length = 0;
+    takes.onTurnEnd('job-1');
+    timers.advance(SILENT_MS);
+    await tick();
+    await tick();
+    assert.equal(store.get(out.take_id).ended.reason, 'driver_silent');
+    assert.deepEqual(relay.pushes, [{ kind: 'session_ended', id: store.get(out.take_id).lease_id, to_device: null, except_device: null, expires_at: null }]);
+    await takes.stopAll();
+    assert.equal(relay.pushes.length, 1, 'an ended take is never pushed again');
   });
 
   it('the recorder exiting early ends the take recorder_failed and keeps the path', async () => {

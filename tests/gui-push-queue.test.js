@@ -46,6 +46,20 @@ describe('PushQueue', () => {
     assert.deepEqual(link.calls, [{ kind: 'session_ended', id: LEASE(1), to_device: null, except_device: 'dev-b', expires_at: null }]);
   });
 
+  it('entries queued before start, whose link came up before start, are sent by start (a take ended at a restart)', async () => {
+    const link = new FakeLink({ connected: false });
+    const queue = new PushQueue({ relayClient: link, clock: () => Date.parse('2026-10-29T12:00:00.000Z'), log: capture().log });
+    queue.enqueue({ kind: 'session_ended', id: LEASE(1) });
+    // The link connects while nothing listens yet (the GUI is built before it starts).
+    link.up();
+    await settle();
+    assert.equal(link.calls.length, 0);
+    queue.start();
+    await settle();
+    assert.deepEqual(link.calls.map((c) => c.id), [LEASE(1)]);
+    queue.stop();
+  });
+
   it('holds entries while the link is down and sends them on the next connected', async () => {
     const { link, queue } = build({ connected: false });
     queue.enqueue({ kind: 'session_ended', id: LEASE(1) });
