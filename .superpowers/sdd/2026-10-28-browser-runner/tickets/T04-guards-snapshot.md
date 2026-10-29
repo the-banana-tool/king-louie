@@ -1,7 +1,8 @@
 ---
 id: T04
 title: snapshot in the case guard and the take policy; run_steps refuses ref=
-status: open
+status: done
+merged: f622a652
 blocked_by: []
 ---
 ## Goal

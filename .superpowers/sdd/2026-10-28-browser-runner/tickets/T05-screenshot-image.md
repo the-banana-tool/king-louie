@@ -1,7 +1,8 @@
 ---
 id: T05
 title: screenshot returns an image; the four browser tools emit images
-status: open
+status: done
+merged: 32f2a56a
 blocked_by: []
 ---
 ## Goal

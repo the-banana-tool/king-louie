@@ -25,7 +25,26 @@ Integration branch `feat/browser-runner` at `C:\Users\sblac\Programming\king-lou
 - The token figures of §8.5.
 
 ## Landed
-(none yet)
+- T01 (merge 3e392f7b): `src/browser/chrome-flags.js` holds the one Chrome flag set; `PlaywrightBrowser` drops
+  `--enable-automation` and takes `executablePath`, `viewport` and `extraArgs`.
+- T02 (merge 636c2eb2): `start` with no profile opens the persistent `king-louie` profile; `ephemeral: true`
+  asks for a throwaway context.
+- T04 (merge f622a652): `snapshot` joins the case guard's and the take policy's lists; `run_steps` refuses a
+  `ref=` selector.
+- T05 (merge 32f2a56a): `screenshot` returns the viewport image to the model (`to_file` keeps the file form);
+  the four browser tools are `emitsImages`; take steps ask for `to_file`.
+- T09 (merge 7325e19c): the take leads with the goal; `docs/driving-king-louie.md` and the takes spec
+  amendment.
+
+## Deviations
+- Implementer branches are named `feat/browser-runner-T<NN>`: git refuses `feat/browser-runner/T<NN>` beside
+  an existing `feat/browser-runner`.
+- T02: `start` with no profile and no `userDataPath` in the tool context returns ok:false telling to pass
+  `ephemeral: true`; `ephemeral` with `profile`/`userDataPath` is refused.
+- T04: `snapshot` also joins the case guard's `PAGE` list (C-6 offers it on BrowserPage).
+- T05: renderer.js labels image results "screenshot (image shown to the model)"; the DPI path divides by
+  devicePixelRatio (unconfirmed above 100 %).
+- T09: the model-driven STUCK wording is `STUCK: what I see, what I tried, what I need`.
 
 ## Left
-All tickets.
+T03, T06, T07, T08, T10, T11, then code review and `npm test` once.

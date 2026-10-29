@@ -1,7 +1,8 @@
 ---
 id: T02
 title: A start without a profile opens the King Louie profile
-status: open
+status: done
+merged: 636c2eb2
 blocked_by: []
 ---
 ## Goal

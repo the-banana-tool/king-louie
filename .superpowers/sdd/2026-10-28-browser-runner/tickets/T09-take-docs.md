@@ -1,7 +1,8 @@
 ---
 id: T09
 title: Take leads with the goal; the driver's guide and the takes spec amendment
-status: open
+status: done
+merged: 7325e19c
 blocked_by: []
 ---
 ## Goal

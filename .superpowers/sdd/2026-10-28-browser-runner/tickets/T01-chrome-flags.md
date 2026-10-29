@@ -1,7 +1,8 @@
 ---
 id: T01
 title: One Chrome flag set and PlaywrightBrowser launch options
-status: open
+status: done
+merged: 3e392f7b
 blocked_by: []
 ---
 ## Goal
