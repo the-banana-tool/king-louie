@@ -870,3 +870,81 @@ describe('relay: the read key', () => {
     assert.deepEqual([refused.status, refused.body.error], [403, 'read_key_not_allowed']);
   });
 });
+
+// Push spec §7.3 (C-9): the push-token routes take either key; PUT writes only
+// on a change, DELETE drops the token, GET says what the relay holds and never
+// echoes the token.
+describe('relay: the push-token routes', () => {
+  let r;
+  let dataDir;
+  const rBase = () => `http://127.0.0.1:${r.address().phone.port}`;
+  async function call(phone, method, p, body, sign = {}) {
+    const text = body === undefined ? '' : JSON.stringify(body);
+    const headers = { ...phone.signApi(method, p, text, sign), 'content-type': 'application/json' };
+    const res = await fetch(rBase() + p, { method, headers, body: method === 'GET' ? undefined : text });
+    const raw = await res.text();
+    return { status: res.status, body: raw ? JSON.parse(raw) : null, raw };
+  }
+  const phoneWithReadKey = (name) => {
+    const phone = createFakePhone({ name });
+    r.devices.register({ device_id: phone.deviceId, jwk: phone.jwk, name: phone.name, platform: 'android' });
+    r.devices.setReadKey(phone.deviceId, phone.readJwk, new Date().toISOString());
+    return phone;
+  };
+  const devicesFile = () => path.join(dataDir, 'relay', 'devices.json');
+
+  before(async () => {
+    dataDir = tempDir('kl-relay-pushtoken-');
+    r = await startRelay({
+      dataDir,
+      identity: new NodeIdentity({ nodeName: 'relay' }),
+      useTls: false,
+      senders: [{ id: 'recording', platforms: ['fcm'], notify: async () => ({ ok: true }) }],
+      config: { phoneListen: { host: '127.0.0.1', port: 0 }, meshListen: { host: '127.0.0.1', port: 0 }, publicUrl: 'https://kl.example.com', tls: {}, push: {} }
+    });
+    cleanups.push(() => r.stop());
+  });
+
+  it('PUT takes either key and leaves devices.json alone when nothing changed', async () => {
+    const phone = phoneWithReadKey('Token keeper');
+    assert.equal((await call(phone, 'PUT', '/v1/push-token', { platform: 'fcm', token: 'tok-1' }, { key: 'read' })).status, 204);
+    assert.deepEqual(r.devices.get(phone.deviceId).push, { platform: 'fcm', token: 'tok-1' });
+    // A trailing marker survives only if the file is not written again.
+    fs.appendFileSync(devicesFile(), '\n\n');
+    const marked = fs.readFileSync(devicesFile(), 'utf8');
+    assert.equal((await call(phone, 'PUT', '/v1/push-token', { platform: 'fcm', token: 'tok-1' })).status, 204);
+    assert.equal((await call(phone, 'PUT', '/v1/push-token', { platform: 'fcm', token: 'tok-1' }, { key: 'read' })).status, 204);
+    assert.equal(fs.readFileSync(devicesFile(), 'utf8'), marked, 'an unchanged token is not written');
+    assert.equal((await call(phone, 'PUT', '/v1/push-token', { platform: 'fcm', token: 'tok-2' }, { key: 'read' })).status, 204);
+    assert.notEqual(fs.readFileSync(devicesFile(), 'utf8'), marked, 'a new token is written');
+    assert.deepEqual(r.devices.get(phone.deviceId).push, { platform: 'fcm', token: 'tok-2' });
+  });
+
+  it('DELETE takes either key, answers 204 and drops the token', async () => {
+    for (const key of ['read', 'device']) {
+      const phone = phoneWithReadKey(`Dropper ${key}`);
+      r.devices.setPush(phone.deviceId, { platform: 'fcm', token: `tok-${key}` });
+      const res = await call(phone, 'DELETE', '/v1/push-token', undefined, { key });
+      assert.equal(res.status, 204, key);
+      assert.equal(r.devices.get(phone.deviceId).push, null, key);
+      assert.ok(!fs.readFileSync(devicesFile(), 'utf8').includes(`tok-${key}`), key);
+      assert.equal((await call(phone, 'DELETE', '/v1/push-token', undefined, { key })).status, 204, `${key}: again, nothing held`);
+    }
+  });
+
+  it('GET says whether a token is held and whether a sender exists for its platform, never the token', async () => {
+    for (const key of ['read', 'device']) {
+      const phone = phoneWithReadKey(`Asker ${key}`);
+      const none = await call(phone, 'GET', '/v1/push-token', undefined, { key });
+      assert.deepEqual([none.status, none.body], [200, { registered: false, sender: false }], key);
+      r.devices.setPush(phone.deviceId, { platform: 'fcm', token: 'hidden-fcm-value' });
+      const fcm = await call(phone, 'GET', '/v1/push-token', undefined, { key });
+      assert.deepEqual([fcm.status, fcm.body], [200, { registered: true, sender: true }], key);
+      assert.ok(!fcm.raw.includes('hidden-fcm-value'));
+      r.devices.setPush(phone.deviceId, { platform: 'apns', token: 'hidden-apns-value' });
+      const apns = await call(phone, 'GET', '/v1/push-token', undefined, { key });
+      assert.deepEqual([apns.status, apns.body], [200, { registered: true, sender: false }], `${key}: no apns sender here`);
+      assert.ok(!apns.raw.includes('hidden-apns-value'));
+    }
+  });
+});

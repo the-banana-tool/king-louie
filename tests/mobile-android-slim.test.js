@@ -55,6 +55,8 @@ const SPEC_ROUTE_AUTH = [
   ['GET', '/v1/nodes/{node_id}/audit-status', 'read'],
   ['GET', '/v1/nodes/{node_id}/history', 'read'],
   ['PUT', '/v1/push-token', 'read'],
+  ['DELETE', '/v1/push-token', 'read'],
+  ['GET', '/v1/push-token', 'read'],
   ['POST', '/v1/challenges', 'read'],
   ['POST', '/v1/approvals/{request_id}/response', 'read'],
   ['POST', '/v1/leases/{lease_id}/grant', 'read'],
