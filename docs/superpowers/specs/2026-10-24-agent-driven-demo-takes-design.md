@@ -473,6 +473,22 @@ driven by the service over CDP.
   process of the owner's account could attach while a take runs. The same account already
   owns the screen the take is on; §13 lists it.
 
+**Revised 2026-10-28** (spec `2026-10-28-browser-runner-design.md` §9, owner rulings of
+2026-10-28; this note amends §8, §10 and §13 and replaces nothing else above):
+
+- On a personal node the take's browser is launched by the service through
+  `PlaywrightBrowser` (R-BR-3; that spec's §5): no `launch_browser`, no `DevToolsActivePort`,
+  no `connectOverCDP`, no debugging port; the profile is under the node's data dir
+  (`<dataDir>/browser-profiles/<profile>`). The rest of §8 is the fleet's.
+- The fixed flag set (`CHROME_FLAGS`, `src/browser/chrome-flags.js`) reaches the helper's
+  Chrome as `launch_browser`'s `args` (R-BR-2), as §8 always said it would.
+- §10's steps refuse a `ref=` selector (that spec's C-7: a script is written before any
+  snapshot exists, `invalid_params`), and its `screenshot` step is the file form (C-9:
+  `to_file: true`).
+- §13's residual "Chrome's debugging port is open to the owner's own processes" applies to
+  fleet nodes only.
+- `Take.start`'s `browser.cdp` is `false` on a personal node (C-4).
+
 ## 9. Recording
 
 - **A new helper op, `record_start`**: `{ path, fps, size? }` → `{ pid, started_at }`, and

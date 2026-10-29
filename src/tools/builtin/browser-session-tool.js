@@ -32,7 +32,7 @@ Typical sequence: profile_list → start (with profile) → fill_credentials or 
 
 PROFILES persist cookies/localStorage between runs:
   - profile_list / profile_create / profile_delete / profile_current
-  - start with params.profile="<name>" attaches that profile.
+  - start with params.profile="<name>" attaches that profile; without one it opens the persistent "king-louie" profile (the owner's logins for chats). params.ephemeral=true opens an empty context instead.
 
 VAULT CREDENTIALS (King-Louie's encrypted vault, not Chromium's):
   - save_credentials (profile?, host?, username, password) — stores creds.
@@ -45,10 +45,12 @@ PREFER HIGH-LEVEL: login / signup / fill_payment auto-detect fields across sites
     properties: {
       action: { type: 'string', enum: SESSION_ACTIONS, description: 'Session action.' },
       ownerQuote: OWNER_QUOTE_PARAM,
+      ref_label: browserTool.REF_LABEL_PARAM,
 
       // Lifecycle / profile
       profile: { type: 'string', description: 'Named persistent profile [A-Za-z0-9_-], max 64. Cookies/localStorage persist between runs.' },
       userDataPath: { type: 'string', description: 'Raw Chrome user data directory (advanced; prefer "profile").' },
+      ephemeral: { type: 'boolean', description: 'start only: an empty context that keeps nothing and sees no saved login, instead of the persistent "king-louie" profile a start without "profile" opens. Not with "profile" or "userDataPath".' },
       headless: { type: 'boolean', description: 'Run headless (default false — visible).' },
 
       // Credentials / auth
@@ -96,6 +98,8 @@ PREFER HIGH-LEVEL: login / signup / fill_payment auto-detect fields across sites
     required: ['action']
   },
   requiresApproval: true,
+  prepareParams: browserTool.prepareParams,
+  emitsImages: true,
   execute: async (params, context) => {
     if (!SESSION_ACTIONS.includes(params.action)) {
       return { ok: false, error: `BrowserSession does not support action "${params.action}". Use BrowserPage or BrowserExtract.` };

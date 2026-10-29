@@ -140,7 +140,7 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
   // Demo takes (spec 2026-10-24): records under <dataDir>/takes. A screen lock reaches the
   // manager through the lease (setLocked, from the helper's event), which ends the take.
   const takes = dataDir ? new TakeManager({
-    leases, broker, audit, guiConfig: gui,
+    leases, broker, audit, guiConfig: gui, hosting, dataDir,
     store: new TakeStore({ dir: path.join(dataDir, 'takes') })
   }) : null;
   if (relay) {

@@ -1034,6 +1034,8 @@ function getToolResultSummary(toolName, result) {
     const errMsg = result.error || result.message || 'failed';
     return typeof errMsg === 'string' ? errMsg.slice(0, 60) : 'failed';
   }
+  // A browser screenshot's image went to the model only; the row keeps its size.
+  if (result.image && result.image.shown_to_model === true) return 'screenshot (image shown to the model)';
   if (toolName === 'Bash') {
     const exit = result.exitCode !== undefined ? result.exitCode : (result.code !== undefined ? result.code : null);
     if (exit !== null) return `exit ${exit}`;
@@ -1231,8 +1233,20 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
     payloadDiv.className = 'tool-event-payload';
     payloadDiv.hidden = true;
 
-    // Check for Browser screenshot with savedTo path — show inline image
-    if (isResult && toolName === 'Browser' && payload && payload.savedTo) {
+    // A screenshot whose image went to the model only: no pixels are stored, so say so.
+    if (isResult && payload && payload.image && payload.image.shown_to_model === true) {
+      const note = document.createElement('div');
+      note.style.cssText = 'margin: 8px 0; font-size: 0.9em; color: var(--text-secondary);';
+      note.textContent = 'screenshot (image shown to the model)';
+      payloadDiv.appendChild(note);
+      if (payload.page) {
+        const infoDiv = document.createElement('div');
+        infoDiv.style.cssText = 'font-size: 0.9em; color: var(--text-secondary);';
+        infoDiv.textContent = `${payload.page.title || ''} — ${payload.page.url || ''}`;
+        payloadDiv.appendChild(infoDiv);
+      }
+    } else if (isResult && toolName === 'Browser' && payload && payload.savedTo) {
+      // Browser screenshot with savedTo path — show inline image
       const imgContainer = document.createElement('div');
       imgContainer.style.cssText = 'margin: 8px 0; max-width: 100%; overflow: hidden;';
       const img = document.createElement('img');
@@ -1469,6 +1483,22 @@ function suggestAllowPattern(toolName, parameters = {}) {
   return null;
 }
 
+// What a browser call's refs name, for the approval dialog (spec 2026-10-28
+// browser runner, C-8): 'click ref=e15 (button "Contact seller")'. The
+// labels are the host's (ToolExecutor adds them from the page's snapshot,
+// one plain line); set with textContent. → the line, or null. The renderer
+// cannot require src/: `sel.startsWith('ref=')` is a copy of parseRefSelector
+// in src/browser/playwright-browser.js, the source of truth.
+function browserRefSummary(toolName, parameters = {}) {
+  if (!/^Browser(Page|Extract|Session)?$/.test(toolName) || !parameters) return null;
+  const part = (sel, label) => (typeof sel === 'string' && sel.startsWith('ref=') && typeof label === 'string')
+    ? `${sel} (${label})` : null;
+  const from = part(parameters.selector, parameters.ref_label);
+  const to = part(parameters.target_selector, parameters.target_ref_label);
+  if (!from && !to) return null;
+  return [String(parameters.action || ''), from, to ? `to ${to}` : null].filter(Boolean).join(' ');
+}
+
 function showToolApprovalDialog(approvalId, toolName, parameters) {
   const messageDiv = document.createElement('div');
   messageDiv.className = 'message assistant prompt-message';
@@ -1481,6 +1511,8 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
 
   const pre = document.createElement('pre');
   pre.textContent = JSON.stringify(parameters || {}, null, 2);
+  // A ref names an element only through its label: say it in words above the parameters.
+  const refSummary = browserRefSummary(toolName, parameters);
 
   const actions = document.createElement('div');
   actions.className = 'prompt-actions';
@@ -1579,6 +1611,12 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   actions.appendChild(approveBtn);
 
   messageContent.appendChild(title);
+  if (refSummary) {
+    const refLine = document.createElement('p');
+    refLine.className = 'prompt-ref-summary';
+    refLine.textContent = refSummary;
+    messageContent.appendChild(refLine);
+  }
   messageContent.appendChild(pre);
   messageContent.appendChild(actions);
   messageDiv.appendChild(messageContent);

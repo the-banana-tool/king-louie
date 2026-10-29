@@ -67,7 +67,10 @@ const name = (v) => {
   return RESERVED_NAME_RE.test(v) ? 'must not be a name the runner gives its own stills (step-N, step-N-failed)' : null;
 };
 
-const SELECTOR = str(1, SELECTOR_MAX);
+// A snapshot ref (`ref=e12`, spec 2026-10-28-browser-runner C-7) names an element of the last
+// snapshot, and a script is written before any snapshot exists: refused in every step.
+const SELECTOR = (v) => str(1, SELECTOR_MAX)(v)
+  || (/^\s*ref=/.test(v) ? 'cannot be a ref= selector: a script is written before any snapshot exists; use a CSS, role= or text= selector' : null);
 const TIMEOUT = int(1, WAIT_MAX_MS);
 const DELTA = int(-SCROLL_MAX, SCROLL_MAX);
 const req = (check) => ({ check, required: true });
@@ -183,7 +186,7 @@ function browserCall(s) {
       action: 'wait_for',
       params: { selector: `${s.selector} >> internal:text=${JSON.stringify(s.text)}i`, state: 'visible', timeout: s.timeout_ms ?? WAIT_DEFAULT_MS }
     };
-    case 'screenshot': return { action: 'screenshot', params: {} };
+    case 'screenshot': return { action: 'screenshot', params: { to_file: true } };
     default: return { action: s.step, params: { selector: s.selector } };
   }
 }
@@ -271,7 +274,8 @@ async function runSteps({ steps, from = 0, continueOnError = false } = {}, {
 
   async function screenshotTo(fileName) {
     if (!takeDir) throw new StepError('invalid_params', 'the take has no directory for a screenshot');
-    const out = await browse({ action: 'screenshot', params: {} }, ACT_GUARD_MS);
+    // The file form (R-BR-7): without to_file the browser returns an image and saves nothing.
+    const out = await browse({ action: 'screenshot', params: { to_file: true } }, ACT_GUARD_MS);
     if (!out || typeof out.savedTo !== 'string') throw new StepError('step_failed', 'the browser saved no screenshot');
     return place(out.savedTo, path.join(takeDir, fileName));
   }

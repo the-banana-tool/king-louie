@@ -3,6 +3,7 @@ const { toolRegistry } = require('../tools');
 const { getRuntimeEnvironment } = require('./runtime-environment');
 const { evaluateRules, describeRule } = require('../tools/permission-rules');
 const { BROWSER_TOOLS, isActingBrowserCall, ownerQuoteInTurn } = require('../tools/browser-acting');
+const { createAutoImageBudget } = require('../tools/browser-auto-images');
 const path = require('path');
 const { caseWriteRefusal, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
 const { UNVERIFIABLE_PATH_ERROR } = require('../cases/safe-path');
@@ -107,6 +108,8 @@ class ToolExecutor extends EventEmitter {
     // `allow` permission rule — which is downgraded to `ask`. `deny` rules
     // are untouched, and tools that don't require approval still run.
     this.denyAutoApproval = options.denyAutoApproval === true;
+    // Three automatic browser images per run (browser runner spec §8.3).
+    this._browserAutoImages = createAutoImageBudget();
     // The owner's own message that started this turn (the local chat send
     // path only). A browser action that changes something runs unasked when
     // the model's ownerQuote is found in it (src/tools/browser-acting.js).
@@ -215,6 +218,18 @@ class ToolExecutor extends EventEmitter {
     // Whether the run's origin is one this node started itself (the desktop,
     // the service's own chat, a stdio session); a take needs one.
     this.nodeLocalOrigin = options.nodeLocalOrigin !== false;
+  }
+
+  // What a tool's prepareParams is given: the call's options and this run's
+  // take, so a browser tool reads the browser the call will be decided on.
+  _prepareContext(options = {}) {
+    const take = this._liveTake();
+    return {
+      ...this.extraToolOptions,
+      ...options,
+      takePolicy: this.takePolicy,
+      browserKey: take && typeof take.browserKey === 'string' && take.browserKey ? take.browserKey : null
+    };
   }
 
   // The live take policy, or null.
@@ -338,6 +353,30 @@ class ToolExecutor extends EventEmitter {
     // decorating the context.
     let effectiveParameters = parameters;
     let preHookResult = null;
+    // The tool's own preparation (prepareParams), once, after the hooks have
+    // had their say and before anyone is asked: a hook's confirm prompt, the
+    // rules, the tier and the approval gate all see what it returns. → null
+    // or the refusal to return.
+    let prepared = false;
+    const prepare = () => {
+      prepared = true;
+      if (!tool.prepareParams) return null;
+      let out;
+      try {
+        out = tool.prepareParams(effectiveParameters, this._prepareContext(options));
+      } catch (err) {
+        out = { error: err.message || String(err), code: err.code };
+      }
+      if (out && out.params && typeof out.params === 'object') {
+        effectiveParameters = out.params;
+        return null;
+      }
+      // Shaped like the browser tools' own refusals ({ ok: false, error, code }), with the
+      // executor's success: false.
+      const refused = { success: false, ok: false, error: out?.error || `${toolName} refused its parameters`, ...(out?.code ? { code: out.code } : {}) };
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
+      return refused;
+    };
 
     if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
       preHookResult = await this.hookExecutor.run('PreToolUse', {
@@ -373,6 +412,9 @@ class ToolExecutor extends EventEmitter {
         return denied;
       }
 
+      const refusedByTool = prepare();
+      if (refusedByTool) return refusedByTool;
+
       if (action === 'confirm') {
         if (this.refuseUnsafe) return this._refuseUnsafeResult(toolName, effectiveParameters);
         if (this._liveTake()) return this._noMidTakeApprovalResult(toolName, effectiveParameters);
@@ -396,6 +438,11 @@ class ToolExecutor extends EventEmitter {
           return denied;
         }
       }
+    }
+
+    if (!prepared) {
+      const refusedByTool = prepare();
+      if (refusedByTool) return refusedByTool;
     }
 
     this.emit('preExecute', { toolName, parameters: effectiveParameters });
@@ -693,7 +740,10 @@ class ToolExecutor extends EventEmitter {
         nodeLocalOrigin: this.nodeLocalOrigin,
         // The deny rules and the node tier for a call a tool makes itself
         // (Take.run_steps' steps); from this executor, never from options.
-        checkDenied: (name, params) => this._checkDenied(name, params, options)
+        checkDenied: (name, params) => this._checkDenied(name, params, options),
+        // The run's budget of automatic browser images (browser runner §8.3);
+        // from this executor's own field, never from options.
+        browserAutoImages: this._browserAutoImages
       };
       // Set here only, and not writable: no option or tool changes which
       // browser this call was approved for (src/tools/builtin/browser-registry.js).

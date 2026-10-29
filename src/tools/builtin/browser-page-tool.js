@@ -17,7 +17,7 @@ const PAGE_ACTIONS = [
   'click', 'dblclick', 'fill', 'type', 'press', 'clear',
   'select_option', 'check', 'uncheck', 'hover', 'focus',
   'drag_and_drop', 'set_input_files',
-  'scroll', 'screenshot', 'pdf', 'evaluate',
+  'scroll', 'screenshot', 'snapshot', 'pdf', 'evaluate',
   'keyboard_type', 'keyboard_down', 'keyboard_up',
   'mouse_click', 'mouse_move', 'mouse_wheel',
   'wait_for', 'wait_for_url', 'wait_for_load_state', 'wait_for_response'
@@ -37,8 +37,13 @@ Selector strategies (pass as "selector"):
   - XPath:       "xpath=//div[@id='app']"
   - Alt:         "alt=Company logo"
   - Title:       "title=Close dialog"
+  - Ref:         "ref=e15" (from the last "snapshot" of the current page)
 
-All element actions auto-wait for the element to be actionable. Avoid wait_for_load_state state="networkidle" on chatty sites (LinkedIn, modern dashboards) — they stream telemetry forever and you'll burn the timeout. Prefer wait_for on a specific element or wait_for_url.`,
+"snapshot" lists the page as text, one node a line with its role, name and a [ref=eN] on each element you can act on; pass "ref=eN" as the selector to click or fill exactly that element. interactive=true keeps only the lines with a ref; ref="eN" returns that node's subtree; max_chars (default 20000, at most 60000) cuts at a line end. A ref lasts until the page navigates: then take a new snapshot (ref_stale).
+
+All element actions auto-wait for the element to be actionable. Avoid wait_for_load_state state="networkidle" on chatty sites (LinkedIn, modern dashboards) — they stream telemetry forever and you'll burn the timeout. Prefer wait_for on a specific element or wait_for_url.
+
+"screenshot" returns the viewport as an image you see (JPEG, at most 1280 px wide) and writes no file; the result's image.scale is viewport pixels per image pixel, so multiply image coordinates by scale for mouse_click. to_file, full_page or selector save a PNG file instead (savedTo) and return no image.`,
   parameters: {
     type: 'object',
     properties: {
@@ -49,8 +54,13 @@ All element actions auto-wait for the element to be actionable. Avoid wait_for_l
       url: { type: 'string', description: 'URL for navigate, wait_for_url.' },
 
       // Element selectors
-      selector: { type: 'string', description: 'Element selector (CSS, text=, role=, label=, placeholder=, testid=, xpath=, alt=, title=).' },
-      target_selector: { type: 'string', description: 'Target element selector for drag_and_drop.' },
+      selector: { type: 'string', description: 'Element selector (CSS, text=, role=, label=, placeholder=, testid=, xpath=, alt=, title=, or ref=eN from a snapshot).' },
+      target_selector: { type: 'string', description: 'Target element selector for drag_and_drop (ref=eN accepted).' },
+      ref_label: browserTool.REF_LABEL_PARAM,
+      target_ref_label: browserTool.TARGET_REF_LABEL_PARAM,
+
+      // Snapshot
+      ...browserTool.SNAPSHOT_PARAMS,
 
       // Text input
       text: { type: 'string', description: 'Text for fill, type, keyboard_type.' },
@@ -82,11 +92,14 @@ All element actions auto-wait for the element to be actionable. Avoid wait_for_l
 
       // Screenshot / PDF
       full_page: { type: 'boolean', description: 'Capture full scrollable page for screenshot (default false).' },
+      to_file: browserTool.TO_FILE_PARAM,
       format: { type: 'string', description: 'PDF paper format ("A4", "Letter", ...).' }
     },
     required: ['action']
   },
   requiresApproval: true,
+  prepareParams: browserTool.prepareParams,
+  emitsImages: true,
   execute: async (params, context) => {
     if (!PAGE_ACTIONS.includes(params.action)) {
       return { ok: false, error: `BrowserPage does not support action "${params.action}". Use BrowserSession or BrowserExtract.` };

@@ -317,7 +317,7 @@ describe('runSteps', () => {
     assert.equal(out.results[0].screenshot, path.join(s.takeDir, 'hero.png'));
     assert.equal(out.results[1].screenshot, path.join(s.takeDir, 'step-1.png'));
     assert.ok(fs.existsSync(out.results[0].screenshot));
-    assert.deepEqual(s.actions.calls[0].params, {});
+    assert.deepEqual(s.actions.calls[0].params, { to_file: true }, 'a still is the file form, never the model image');
   });
 
   it('pause waits on a ref\'d timer, and ms comes from the clock', async () => {
@@ -560,6 +560,27 @@ describe('runSteps: the node\'s rules, the take and the turn', () => {
     assert.equal(out.results[0].error.code, 'op_timeout');
     assert.equal(out.stopped_at, 0);
     assert.ok(!browserCalls(s.actions).includes('click'));
+  });
+
+  it('a ref= selector is refused in every step that takes one, naming the index and the field', () => {
+    // Spec 2026-10-28-browser-runner C-7: a script is written before any snapshot exists.
+    const cases = [
+      { step: 'click', selector: 'ref=e12' },
+      { step: 'fill', selector: 'ref=f1e3', text: 'x' },
+      { step: 'press', key: 'Enter', selector: 'ref=e4' },
+      { step: 'scroll', selector: 'ref=e9' },
+      { step: 'wait_for', selector: 'ref=e2' },
+      { step: 'wait_for_text', selector: 'ref=e2', text: 'Done' },
+    ];
+    for (const bad of cases) {
+      const r = validateSteps([{ step: 'navigate', url: 'https://example.com/' }, bad]);
+      assert.equal(r.ok, false, bad.step);
+      assert.equal(r.error.code, 'invalid_params');
+      assert.ok(r.error.message.startsWith(`step 1 (${bad.step}): "selector" cannot be a ref= selector`), r.error.message);
+    }
+    // Only the ref= form: a CSS selector that merely mentions it is unchanged.
+    assert.equal(validateSteps([{ step: 'click', selector: '[data-ref="e12"]' }]).ok, true);
+    assert.equal(validateSteps([{ step: 'click', selector: 'text=ref=e12' }]).ok, true);
   });
 
   it('wait_for_text refuses the keyword selectors the browser tool resolves whole', () => {
