@@ -17,6 +17,7 @@ const { SITE_RE, TAKE_MAX_MINUTES } = require('./lease-protocol');
 const { newLeaseId } = require('./leases');
 const { createTakePolicy, BROWSER_ACTIONS, BROWSER_TOOLS } = require('./take-policy');
 const { plainLineProblem } = require('../cases/hidden-chars');
+const { CHROME_FLAGS } = require('../browser/chrome-flags');
 
 // C-6: a take with no word from the driver for 30 minutes after a report ends.
 const SILENT_MS = 30 * 60000;
@@ -64,6 +65,20 @@ async function attachPlaywright(cdpUrl) {
   return browser;
 }
 
+// A personal node's take (browser-runner spec §5, C-3): the service runs in the owner's session,
+// so Playwright launches the gui.apps Chrome itself, headed and maximized with no emulated
+// viewport, on the profile under the node's data dir. No helper, no debugging port, no pid.
+async function launchPersonalBrowser({ exe, userDataPath }, { createBrowser } = {}) {
+  const browser = createBrowser ? createBrowser() : new (require('../browser/playwright-browser'))();
+  try {
+    await browser.start({ userDataPath, executablePath: exe, headless: false, viewport: null, extraArgs: ['--start-maximized'] });
+  } catch (err) {
+    await browser.stop().catch(() => {});
+    throw err;
+  }
+  return browser;
+}
+
 // Closes the take's Chrome itself: disconnecting Playwright from a CDP attach leaves it running.
 async function closeOverCdp(browser) {
   const cdp = browser && browser.browser;
@@ -76,8 +91,15 @@ async function closeOverCdp(browser) {
 class TakeManager {
   constructor({ leases, broker, store, guiConfig, registry = null, audit = null, clock = Date.now, timers = { setTimeout, clearTimeout },
     log = createLogger('gui/takes'), attachBrowser = attachPlaywright, closeBrowser = closeOverCdp,
-    findProcess = undefined, kill = undefined } = {}) {
-    Object.assign(this, { leases, broker, store, guiConfig, audit, clock, timers, log, attachBrowser, closeBrowser });
+    findProcess = undefined, kill = undefined, hosting = 'service', dataDir = null, launchTakeBrowser = null, createBrowser = null } = {}) {
+    Object.assign(this, { leases, broker, store, guiConfig, audit, clock, timers, log, attachBrowser, closeBrowser, hosting, dataDir });
+    this.personal = hosting === 'personal';
+    // Step 2 of a start: { exe, profile, userDataPath, ctx, setPid, checkEnded } → the browser.
+    this.launchTakeBrowser = launchTakeBrowser
+      || (this.personal ? (req) => launchPersonalBrowser(req, { createBrowser }) : (req) => this._launchFleetBrowser(req));
+    // Personal: { browser, profile } a take kept open with keep_browser, outside the registry;
+    // stopAll closes them (C-4).
+    this.kept = new Set();
     this.registry = registry || require('../tools/builtin/browser-registry');
     // take_id → the in-memory take (what the record cannot hold: the browser, the lease, the timer).
     this.takes = new Map();
@@ -214,11 +236,13 @@ class TakeManager {
       if (!ffmpeg) throw new GuiError('recorder_missing', RECORDER_MISSING);
     }
 
+    if (this.personal) this._assertProfileFree(p.profile, null);
+
     const record = this.store.create({ name: p.name, job_id: jobId, origin, state: 'requested' });
     const takeId = record.take_id;
     let settle;
     const t = {
-      takeId, jobId, name: p.name, holder, lease: null, leaseId: null, leaseEndReason: null, browser: null, browserPid: null,
+      takeId, jobId, name: p.name, profile: p.profile, holder, lease: null, leaseId: null, leaseEndReason: null, browser: null, browserPid: null,
       browserKey: `take:${takeId}`, policy: null, recording: null, awake: false, silentTimer: null, listener: null,
       ended: false, ending: null, lateRelease: null, stopWhenDone: p.stopWhenDone, startSettled: new Promise((r) => { settle = r; })
     };
@@ -284,23 +308,25 @@ class TakeManager {
       if (!lease.apps.includes(cfg.browser)) {
         throw Object.assign(new GuiError('take_app_not_allowed', 'the phone did not approve the browser'), { endReason: 'browser_not_granted' });
       }
-      // 2. The browser, launched by the helper on the owner's screen. Its pid is kept: every
-      // ending closes it through the broker unless the attached browser was closed over CDP.
-      let launched;
-      try {
-        launched = await this.broker.launchBrowser({ exe: cfg.apps[cfg.browser].path, profile: p.profile, args: [] }, ctx);
-      } catch (err) {
-        throw new GuiError('browser_launch_failed', isGuiError(err) && err.code !== 'browser_launch_failed' ? err.code : null);
+      // 2. The browser: the helper's Chrome attached over CDP (fleet), or one Playwright launches
+      // itself (personal).
+      let userDataPath = null;
+      if (this.personal) {
+        if (!this.dataDir) throw new GuiError('browser_launch_failed', 'no data dir for the take\'s browser profile');
+        // Chrome locks a user-data dir to one process (C-3): checked again, the phone took time.
+        this._assertProfileFree(p.profile, t.browserKey);
+        userDataPath = path.join(this.dataDir, 'browser-profiles', p.profile);
       }
-      if (launched && Number.isInteger(launched.pid)) t.browserPid = launched.pid;
-      await checkEnded();
-      const port = launched && launched.cdp && launched.cdp.port;
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new GuiError('browser_launch_failed', 'the helper gave no debugging port');
       let browser;
       try {
-        browser = await this.attachBrowser(`http://127.0.0.1:${port}`);
-      } catch {
-        throw new GuiError('browser_launch_failed', 'could not attach to the browser');
+        browser = await this.launchTakeBrowser({
+          exe: cfg.apps[cfg.browser].path, profile: p.profile, userDataPath, ctx,
+          setPid: (pid) => { if (Number.isInteger(pid)) t.browserPid = pid; }, checkEnded
+        });
+      } catch (err) {
+        // The launcher's own refusal, or checkEnded's (the take ended while launching).
+        if (isGuiError(err) && (err.code === 'browser_launch_failed' || t.ended)) throw err;
+        throw new GuiError('browser_launch_failed', isGuiError(err) ? err.code : null);
       }
       t.browser = browser;
       // Registered before the policy is set, so no call approved by the take finds no browser.
@@ -359,13 +385,42 @@ class TakeManager {
       this._safeUpdate(takeId, { state: 'live' });
       return {
         take_id: takeId, lease_id: lease.leaseId, granted_minutes: grantedMinutes, expires_at: expiresAt,
-        browser: { profile: p.profile, cdp: true },
+        browser: { profile: p.profile, cdp: !this.personal },
         recording: recording ? { path: recording.path, started_at: recording.started_at } : null
       };
     } catch (err) {
       if (!t.ended) await this.end(takeId, err.endReason || (isGuiError(err) ? err.code : 'take_start_failed'));
       throw err;
     }
+  }
+
+  // The fleet's step 2: the helper launches Chrome on the owner's screen with CHROME_FLAGS and
+  // the service attaches over CDP. Its pid is kept: every ending closes it through the broker
+  // unless the attached browser was closed over CDP.
+  async _launchFleetBrowser({ exe, profile, ctx, setPid, checkEnded }) {
+    let launched;
+    try {
+      launched = await this.broker.launchBrowser({ exe, profile, args: [...CHROME_FLAGS] }, ctx);
+    } catch (err) {
+      throw new GuiError('browser_launch_failed', isGuiError(err) && err.code !== 'browser_launch_failed' ? err.code : null);
+    }
+    if (launched) setPid(launched.pid);
+    await checkEnded();
+    const port = launched && launched.cdp && launched.cdp.port;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new GuiError('browser_launch_failed', 'the helper gave no debugging port');
+    try {
+      return await this.attachBrowser(`http://127.0.0.1:${port}`);
+    } catch {
+      throw new GuiError('browser_launch_failed', 'could not attach to the browser');
+    }
+  }
+
+  // Personal (C-3): a profile open under another registry key, or in a browser a take kept, is
+  // refused before Chrome starts.
+  _assertProfileFree(profile, ownKey) {
+    const open = this.registry.activeProfiles().some((e) => e.key !== ownKey && e.profile === profile)
+      || [...this.kept].some((k) => k.profile === profile);
+    if (open) throw new GuiError('browser_launch_failed', `profile ${profile} is open in another browser`);
   }
 
   _policy(grant, t) {
@@ -441,6 +496,18 @@ class TakeManager {
       await step('keep_awake off', () => this.broker.keepAwake(false, ctx));
     }
     let closedOverCdp = false;
+    if (t.browser && this.personal) {
+      // C-4: Playwright launched it, so stop() ends Chrome. A kept one leaves the registry (no
+      // tool reaches it) and is closed by stopAll.
+      const browser = t.browser;
+      t.browser = null;
+      if (t.registered) {
+        t.registered = false;
+        await step('the browser registry', () => this.registry.removeBrowser(t.browserKey));
+      }
+      if (keepBrowser) this.kept.add({ browser, profile: t.profile });
+      else await step('closing the browser', () => browser.stop());
+    }
     if (t.browser) {
       const browser = t.browser;
       t.browser = null;
@@ -610,7 +677,12 @@ class TakeManager {
     const all = [...this.takes.values()];
     await Promise.all(all.filter((t) => !t.ended).map((t) => this.end(t.takeId, reason)));
     await Promise.all(all.map((t) => t.startSettled));
+    const kept = [...this.kept];
+    this.kept.clear();
+    await Promise.all(kept.map(({ browser }) => browser.stop().catch((err) => {
+      this.log.warn(`a kept take browser did not close: ${err && err.message}`);
+    })));
   }
 }
 
-module.exports = { TakeManager, SILENT_MS, RECORDER_MISSING, recordMaxS };
+module.exports = { TakeManager, SILENT_MS, RECORDER_MISSING, recordMaxS, launchPersonalBrowser };

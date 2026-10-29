@@ -18,6 +18,7 @@ const { GUI_TOOL_NAMES, GUI_ERROR_CODES, TAKE_TOOL_NAME } = require('../src/gui/
 const { TAKE_CODES } = require('../src/gui/take-policy');
 const { REFUSE_UNSAFE_MESSAGE } = require('../src/approvals/executor-options');
 const { setLogLevel } = require('../src/logging');
+const { CHROME_FLAGS } = require('../src/browser/chrome-flags');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
 
@@ -199,7 +200,7 @@ describe('TakeManager.start', () => {
   it('start: request → grant → browser → recorder → keep awake → live', async () => {
     const out = await started();
     assert.deepEqual(names(broker.calls), ['launchBrowser', 'recordStart', 'keepAwake']);
-    assert.deepEqual(broker.calls[0][1], { exe: guiConfig.apps.chrome.path, profile: 'demo', args: [] });
+    assert.deepEqual(broker.calls[0][1], { exe: guiConfig.apps.chrome.path, profile: 'demo', args: [...CHROME_FLAGS] }, 'the fleet passes CHROME_FLAGS to the helper');
     assert.deepEqual(broker.calls[0][2], { jobId: 'job-1' });
     assert.equal(broker.calls[1][1].ffmpeg, FFMPEG);
     assert.equal(broker.calls[1][1].takeId, out.take_id);
@@ -880,5 +881,155 @@ describe('the Take tool', () => {
     const out = await Take.execute({ action: 'status' }, opts());
     assert.equal(out.ok, false);
     assert.match(out.error, /^capability_unavailable/);
+  });
+});
+
+// Browser-runner spec §5, C-3, C-4: on a personal node the take launches Chrome itself through
+// PlaywrightBrowser (no helper, no debugging port). Bundled Chromium, headless only.
+describe('personal takes', () => {
+  const PlaywrightBrowser = require('../src/browser/playwright-browser');
+  const realRegistry = require('../src/tools/builtin/browser-registry');
+  const { chromium } = require('playwright');
+  let dataDir;
+  let launches;
+  let seen;
+  let browsers;
+
+  // Playwright's chromium, recording every launch's options.
+  const recordingChromium = () => ({
+    launchPersistentContext: (dir, opts) => { seen.push({ dir, opts }); return chromium.launchPersistentContext(dir, opts); },
+    launch: (opts) => { seen.push({ opts }); return chromium.launch(opts); }
+  });
+
+  function personalManager(extra = {}) {
+    return new TakeManager({
+      leases, broker, store, guiConfig, registry: realRegistry, clock: () => clock.now(), timers, hosting: 'personal', dataDir,
+      launchTakeBrowser: async (req) => {
+        launches.push(req);
+        const b = new PlaywrightBrowser({ chromium: recordingChromium() });
+        browsers.push(b);
+        await b.start({ userDataPath: req.userDataPath, executablePath: chromium.executablePath(), headless: true, viewport: null });
+        return b;
+      },
+      ...extra
+    });
+  }
+
+  beforeEach(() => {
+    realRegistry.reset();
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-ptakes-'));
+    launches = [];
+    seen = [];
+    browsers = [];
+    takes = personalManager();
+  });
+
+  afterEach(async () => {
+    await takes.stopAll();
+    for (const b of browsers) await b.stop();
+    realRegistry.reset();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('start launches through PlaywrightBrowser: no helper launch, no debugging port, registered with the profile, cdp: false', async () => {
+    const out = await started();
+    assert.ok(!names(broker.calls).includes('launchBrowser'), 'the helper launches nothing');
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0].userDataPath, path.join(dataDir, 'browser-profiles', 'demo'));
+    assert.equal(launches[0].exe, guiConfig.apps.chrome.path);
+    assert.equal(launches[0].profile, 'demo');
+    assert.equal(seen.length, 1);
+    assert.ok(!seen[0].opts.args.some((a) => a.startsWith('--remote-debugging')), 'no debugging port');
+    const key = `take:${out.take_id}`;
+    assert.equal(realRegistry.registry.byKey.get(key), browsers[0]);
+    assert.equal(realRegistry.activeProfileOf(key), 'demo');
+    assert.equal(holder.current.browserKey, key);
+    assert.deepEqual(out.browser, { profile: 'demo', cdp: false });
+    assert.deepEqual(broker.closed, [], 'no pid to close');
+
+    const res = await takes.stop(out.take_id);
+    assert.equal(res.ended, 'take_done');
+    assert.equal(browsers[0].isRunning, false, 'the stop closes the browser');
+    assert.equal(realRegistry.registry.byKey.has(key), false);
+    assert.equal(realRegistry.activeProfileOf(key), null);
+  });
+
+  it('every ending closes it: a revoke, the job closing, the helper lost', async () => {
+    const endings = [
+      () => leases.onRevoke(phone.leaseRevoke(identity.nodeId, leases.current().leaseId)),
+      () => takes.endForJob('job-1', 'job_closed'),
+      () => takes.onHelperLost()
+    ];
+    for (const end of endings) {
+      const out = await started();
+      const b = browsers.at(-1);
+      assert.equal(b.isRunning, true);
+      await end();
+      await takes.end(out.take_id, 'ended');
+      assert.notEqual(store.get(out.take_id).ended.reason, 'ended', 'the ending itself closed it');
+      assert.equal(b.isRunning, false);
+      assert.equal(realRegistry.registry.byKey.has(`take:${out.take_id}`), false);
+    }
+  });
+
+  it('keep_browser: the key leaves the registry at once, the window stays; stopAll closes it', async () => {
+    const out = await started();
+    const key = `take:${out.take_id}`;
+    await takes.stop(out.take_id, { keepBrowser: true });
+    assert.equal(realRegistry.registry.byKey.has(key), false, 'out of every tool\'s reach');
+    assert.equal(browsers[0].isRunning, true, 'the window stays');
+    await takes.stopAll();
+    assert.equal(browsers[0].isRunning, false, 'stopAll closes the kept browser');
+  });
+
+  it('a profile open under the default key is browser_launch_failed before any request or launch', async () => {
+    realRegistry.setActiveProfile(realRegistry.DEFAULT_KEY, 'demo');
+    await assert.rejects(begin(), (err) => err.code === 'browser_launch_failed' && /profile demo is open in another browser/.test(err.message));
+    assert.equal(relay.last('kl.lease.request'), undefined, 'the phone is not asked');
+    assert.equal(launches.length, 0);
+    assert.equal(takes.live(), null);
+  });
+
+  it('a profile opened while the phone was asked is refused before the launch, and the lease released', async () => {
+    const p = begin();
+    await tick();
+    realRegistry.setActiveProfile(realRegistry.DEFAULT_KEY, 'demo');
+    leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 30 }));
+    await assert.rejects(p, (err) => err.code === 'browser_launch_failed');
+    assert.equal(launches.length, 0);
+    assert.equal(leases.current(), null);
+    assert.equal(takes.live(), null);
+  });
+
+  it('a Playwright launch that throws is browser_launch_failed; nothing registered, no recorder', async () => {
+    takes = personalManager({ launchTakeBrowser: async () => { throw new Error('Executable does not exist'); } });
+    await assert.rejects(started(), (err) => err.code === 'browser_launch_failed');
+    assert.equal(realRegistry.registry.byKey.size, 0);
+    assert.ok(!names(broker.calls).includes('recordStart'));
+    assert.equal(leases.current(), null);
+  });
+
+  it('the default launcher starts gui.apps[gui.browser] headed, maximized, no viewport, on <dataDir>/browser-profiles/<profile>', async () => {
+    const calls = [];
+    const page = { on() {}, url: () => 'about:blank' };
+    const stub = {
+      async launchPersistentContext(dir, opts) { calls.push({ dir, opts }); return { pages: () => [page], newPage: async () => page, close: async () => {} }; },
+      async launch() { throw new Error('not a persistent launch'); }
+    };
+    takes = new TakeManager({
+      leases, broker, store, guiConfig, registry: realRegistry, clock: () => clock.now(), timers, hosting: 'personal', dataDir,
+      createBrowser: () => new PlaywrightBrowser({ chromium: stub })
+    });
+    const out = await started();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].dir, path.join(dataDir, 'browser-profiles', 'demo'));
+    const o = calls[0].opts;
+    assert.equal(o.headless, false);
+    assert.equal(o.viewport, null);
+    assert.equal(o.executablePath, guiConfig.apps.chrome.path);
+    assert.equal(o.channel, undefined);
+    assert.deepEqual(o.args, [...CHROME_FLAGS, '--start-maximized']);
+    assert.deepEqual(out.browser, { profile: 'demo', cdp: false });
+    assert.ok(!names(broker.calls).includes('launchBrowser'));
   });
 });
