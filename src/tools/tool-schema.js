@@ -44,6 +44,13 @@ class Tool {
     // hash in that entry is taken over it. Every other tool has none, and
     // its parameters are hashed as called.
     this.auditParameters = typeof config.auditParameters === 'function' ? config.auditParameters : null;
+    // Called by ToolExecutor after the PreToolUse hooks and before
+    // validateParameters and every approval, as prepareParams(params, context)
+    // → { params } (the parameters judged, shown and run from then on) or
+    // { error, code } (the call is refused, nobody asked). Only the browser
+    // tools define it: they put what a ref names on the call (C-8, spec
+    // 2026-10-28 browser runner).
+    this.prepareParams = typeof config.prepareParams === 'function' ? config.prepareParams : null;
   }
 
   toFunctionDefinition() {

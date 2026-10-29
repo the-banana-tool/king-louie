@@ -435,6 +435,23 @@ class PlaywrightBrowser {
   }
 
   /**
+   * The label ('role "name"') `ref` has on the current page now, from a fresh
+   * AI snapshot (the same computation the record's labels came from), or null
+   * when the fresh snapshot has no such ref. Playwright keeps an element's
+   * ref while its role and name stay the same and gives it a new one when
+   * either changes, so a renamed element reads null or another label. The
+   * record is left as it is: only the snapshot action writes it.
+   */
+  async currentRefLabel(ref) {
+    const { full } = await this.page._snapshotForAI();
+    for (const line of (typeof full === 'string' ? full : '').split('\n')) {
+      const p = parseSnapshotLine(line);
+      if (p && p.ref === ref) return p.label;
+    }
+    return null;
+  }
+
+  /**
    * Like refLocator, and also refuses ref_not_found when the element is no
    * longer in the page (the aria-ref engine finds nothing for it), so a
    * call does not wait out its timeout on an element that is gone.

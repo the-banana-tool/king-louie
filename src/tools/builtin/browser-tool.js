@@ -23,6 +23,7 @@ const {
 } = require('./browser-registry');
 
 const { BrowserRefError, ownerOfPage, parseSnapshotLine } = require('../../browser/playwright-browser');
+const { prepareRefLabels, checkRefLabels } = require('./browser-ref-label');
 
 const VAULT_CRED_PREFIX = 'browser_cred:';
 
@@ -1416,6 +1417,10 @@ async function checkRefSelectors(params, ctx) {
   }
 }
 
+// C-8: set by the host from the page's snapshot; a model's own is dropped.
+const REF_LABEL_PARAM = { type: 'string', description: 'Set by the host, never by you: what a ref= selector names (role and name from the snapshot), shown on the approval. Anything you pass is replaced.' };
+const TARGET_REF_LABEL_PARAM = { type: 'string', description: 'Set by the host, never by you: what a ref= target_selector names, shown on the approval. Anything you pass is replaced.' };
+
 // ─── Build the action enum from the handlers ─────────────────────────────────
 const actionNames = Object.keys(actions);
 
@@ -1473,6 +1478,8 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
       // Element selectors
       selector: { type: 'string', description: 'Element selector (CSS, text=, role=, label=, placeholder=, testid=, xpath=, alt=, title=, or ref=eN from a snapshot)' },
       target_selector: { type: 'string', description: 'Target element selector for drag_and_drop (ref=eN accepted)' },
+      ref_label: REF_LABEL_PARAM,
+      target_ref_label: TARGET_REF_LABEL_PARAM,
 
       // Snapshot
       interactive: { type: 'boolean', description: 'snapshot: keep only the lines with a ref.' },
@@ -1584,6 +1591,8 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
     required: ['action'],
   },
   requiresApproval: true,
+  // C-8: the host labels an acting call's refs before anyone is asked.
+  prepareParams: prepareRefLabels,
   // C-11: a screenshot, and later a failed acting action, returns `_images`.
   emitsImages: true,
   execute: async (params, context) => {
@@ -1593,6 +1602,7 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
     }
     try {
       await checkRefSelectors(params, context);
+      await checkRefLabels(params, context);
       return await handler(params, context);
     } catch (err) {
       if (err instanceof BrowserRefError) return { ok: false, error: err.message, code: err.code };
@@ -1617,3 +1627,5 @@ module.exports.captureViewportImage = captureViewportImage;
 module.exports.viewportImageResult = viewportImageResult;
 module.exports.jpegSize = jpegSize;
 module.exports.IMAGE_NOTE = IMAGE_NOTE;
+module.exports.REF_LABEL_PARAM = REF_LABEL_PARAM;
+module.exports.TARGET_REF_LABEL_PARAM = TARGET_REF_LABEL_PARAM;

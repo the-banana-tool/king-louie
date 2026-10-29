@@ -1483,6 +1483,20 @@ function suggestAllowPattern(toolName, parameters = {}) {
   return null;
 }
 
+// What a browser call's refs name, for the approval dialog (spec 2026-10-28
+// browser runner, C-8): 'click ref=e15 (button "Contact seller")'. The
+// labels are the host's (ToolExecutor adds them from the page's snapshot,
+// one plain line); set with textContent. → the line, or null.
+function browserRefSummary(toolName, parameters = {}) {
+  if (!/^Browser(Page|Extract|Session)?$/.test(toolName) || !parameters) return null;
+  const part = (sel, label) => (typeof sel === 'string' && sel.startsWith('ref=') && typeof label === 'string')
+    ? `${sel} (${label})` : null;
+  const from = part(parameters.selector, parameters.ref_label);
+  const to = part(parameters.target_selector, parameters.target_ref_label);
+  if (!from && !to) return null;
+  return [String(parameters.action || ''), from, to ? `to ${to}` : null].filter(Boolean).join(' ');
+}
+
 function showToolApprovalDialog(approvalId, toolName, parameters) {
   const messageDiv = document.createElement('div');
   messageDiv.className = 'message assistant prompt-message';
@@ -1495,6 +1509,8 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
 
   const pre = document.createElement('pre');
   pre.textContent = JSON.stringify(parameters || {}, null, 2);
+  // A ref names an element only through its label: say it in words above the parameters.
+  const refSummary = browserRefSummary(toolName, parameters);
 
   const actions = document.createElement('div');
   actions.className = 'prompt-actions';
@@ -1593,6 +1609,12 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   actions.appendChild(approveBtn);
 
   messageContent.appendChild(title);
+  if (refSummary) {
+    const refLine = document.createElement('p');
+    refLine.className = 'prompt-ref-summary';
+    refLine.textContent = refSummary;
+    messageContent.appendChild(refLine);
+  }
   messageContent.appendChild(pre);
   messageContent.appendChild(actions);
   messageDiv.appendChild(messageContent);
