@@ -1,0 +1,30 @@
+{
+  "name": "enroll-console-read-key",
+  "consumers": [
+    "node",
+    "android"
+  ],
+  "given": {
+    "now": "2026-09-23T18:05:11.201Z",
+    "code_id": "dAEMnC18UoZQV-skmzsqzg",
+    "code": "uMl9rw5jwz4VTBOaDPaMMVummWUHRA0cO_MrmT078as",
+    "allow_test_keys": true
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJjb2RlX2lkIjoiZEFFTW5DMThVb1pRVi1za216c3F6ZyIsImNvZGVfbWFjIjoiYVBQZld4SnQtZURQcGFuU0p0RkZwOGVLZ0wtSkZ0MFpvT2QzVURZRnN1OCIsImNyZWF0ZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjExLjIwMVoiLCJkZXZpY2UiOnsiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwibmFtZSI6IlBob25lIDN2bXciLCJwbGF0Zm9ybSI6ImFuZHJvaWQiLCJwdWJsaWNfa2V5Ijp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4Ijoia3JjeUc1RDZIUHg5UDNHaTVvYVI2T3lVOUQxZ0lyYzNVRDZwSVJjRHE3NCIsInkiOiI5WHFnUFhzTUFZcGxYNUlaVm4tOUZSUDJzTjRvSEZSUGpuWnlmRy1HcGFJIn0sInJlYWRfa2V5Ijp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiYlI0ZU5ER3phc0dPUHlqMXB2bUE5eWNSaWVPWUtFMkpWeG9WcGpoZnRJSSIsInkiOiJlcE1jdEg2S3FwLVZQbm1uYjN6OHpzOFJja1R6QzJ5amJzdW9yMldXbmlZIn19LCJlbnJvbGxlZF9ieSI6bnVsbCwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MTQ6MTEuMjAxWiIsIm5vbmNlIjoiZkxOZ2ptWlJpSkQ5LV9QaktIZF9FM2RIT293clZZZXJZZ1RpRmRFWnM3byIsInR5cGUiOiJrbC5kZXZpY2UuZW5yb2xsIiwidiI6MX0",
+    "sig": "B6BnuCmyAR0VaQrfgq8bP5ikqbIitLwuQF96QdiEiQXJdPbEhG_ALr1H_vb3jnjn5LhgWlECLnFqWgvz2PU4sw"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "device_id": "d-3vmwrihhdbnit4oi",
+    "read_key": {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "bR4eNDGzasGOPyj1pvmA9ycRieOYKE2JVxoVpjhftII",
+      "y": "epMctH6Kqp-VPnmnb3z8zs8RckTzC2yjbsuor2WWniY"
+    }
+  }
+}

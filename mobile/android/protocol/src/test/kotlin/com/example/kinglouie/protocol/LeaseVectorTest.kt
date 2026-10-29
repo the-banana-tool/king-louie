@@ -44,10 +44,15 @@ class LeaseVectorTest {
                 "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "view-node-sig-valid", "view-tampered-frame",
                 // Revised 2026-10-24: the take lease.
                 "take-grant", "take-grant-minutes-over-cap", "take-request-missing-name", "computer-use-with-unattended", "status-take"
-            ) + listingVectors,
+            ) + listingVectors + readKeyVectors,
             names
         )
     }
+
+    // Revised 2026-10-28: the read key (android-slim spec §8.8). Named here so
+    // the set stays exact; the test that runs it comes with the read key's
+    // Android side (android-slim T07).
+    private val readKeyVectors = setOf("watch-read-key")
 
     private val listingVectors = setOf(
         "listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",

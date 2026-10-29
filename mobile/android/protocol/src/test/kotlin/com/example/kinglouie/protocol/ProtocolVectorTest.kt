@@ -70,10 +70,15 @@ class ProtocolVectorTest {
         assertEquals(
             setOf("jcs", "device-id-p256", "device-id-ed25519", "request-valid", "request-bad-node-signature",
                 "request-unpinned-node", "request-malformed", "request-display", "request-display-edge",
-                "request-malformed-equivalent-keys", "enroll-console", "audit-slice", "phone-api-auth"),
+                "request-malformed-equivalent-keys", "enroll-console", "audit-slice", "phone-api-auth") + readKeyVectors,
             names
         )
     }
+
+    // Revised 2026-10-28: the read key (android-slim spec §8.8). Named here so
+    // the set stays exact; the tests that run them come with the read key's
+    // Android side (android-slim T07).
+    private val readKeyVectors = setOf("phone-api-auth-read", "enroll-console-read-key", "read-key-valid")
 
     @Test
     fun jcs() {

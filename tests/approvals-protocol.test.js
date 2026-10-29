@@ -18,7 +18,7 @@ const { setLogLevel } = require('../src/logging');
 const { testNodeIdentity, createFakePhone, KEYS } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
 const { buildVectors, serialize } = require('./vectors/approval-v1/generate');
-const { phoneView } = require('./vectors/approval-v1/phone-reference');
+const { phoneView, phoneReadAuthString } = require('./vectors/approval-v1/phone-reference');
 
 // These vectors deliberately construct known-bad approver files (test-key,
 // demo-device) and a store that refuses to trust its own directory; the
@@ -27,6 +27,13 @@ const { phoneView } = require('./vectors/approval-v1/phone-reference');
 setLogLevel('fatal');
 
 const DIR = path.join(__dirname, 'vectors', 'approval-v1');
+// The read-key vectors (android-slim spec §8.8): `node`, and `android` where
+// the phone builds or signs something; never `ios`.
+const READ_KEY = [
+  'phone-api-auth-read', 'enroll-console-read-key', 'enroll-console-read-key-equal', 'enroll-signed-read-key',
+  'read-key-valid', 'read-key-wrong-signer', 'read-key-from-the-future', 'response-reject-read-key'
+];
+const READ_KEY_ANDROID = ['phone-api-auth-read', 'enroll-console-read-key', 'read-key-valid'];
 const EXPECTED = [
   'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
   'request-malformed', 'request-display-edge', 'request-malformed-equivalent-keys',
@@ -35,7 +42,9 @@ const EXPECTED = [
     'revoked-via-overlay', 'bad-signature', 'wrong-node', 'replay', 'already-decided', 'unknown-request', 'nonce-mismatch', 'action-hash-mismatch',
     'expires-mismatch', 'expired', 'changed-parameter'].map((n) => `response-reject-${n}`),
   'response-accept-phone-clock-ahead', 'enroll-console', 'enroll-console-bad-mac', 'enroll-signed', 'enroll-signed-by-overlay-revoked',
-  'revoke-valid', 'revoke-self-rejected', 'revoke-mutual', 'audit-slice', 'phone-api-auth'
+  'revoke-valid', 'revoke-self-rejected', 'revoke-mutual', 'audit-slice', 'phone-api-auth',
+  // Revised 2026-10-28: the read key (android-slim spec §8.8).
+  ...READ_KEY
 ];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json') && f !== 'keys.json')
@@ -83,6 +92,16 @@ describe('approval-v1 vectors', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
   });
 
+  it('49 vectors; the read-key ones name node and android only, android where the phone builds or signs', () => {
+    assert.equal(EXPECTED.length, 49);
+    for (const name of READ_KEY) {
+      const want = READ_KEY_ANDROID.includes(name) ? ['node', 'android'] : ['node'];
+      assert.deepEqual(byName.get(name).consumers, want, name);
+    }
+    // iOS consumes exactly what it did before the read key.
+    assert.deepEqual(vectors.filter((v) => v.consumers.includes('ios')).map((v) => v.name).filter((n) => READ_KEY.includes(n)), []);
+  });
+
   it('the committed files are exactly what generate.js produces', () => {
     for (const v of buildVectors()) {
       assert.equal(fs.readFileSync(path.join(DIR, `${v.name}.json`), 'utf8'), serialize(v), v.name);
@@ -95,7 +114,7 @@ describe('approval-v1 vectors', () => {
     });
   }
 
-  for (const v of vectors.filter((x) => /^(enroll-signed|revoke-)/.test(x.name))) {
+  for (const v of vectors.filter((x) => /^(enroll-signed|revoke-|read-key-)/.test(x.name))) {
     it(v.name, async () => {
       const store = await approverStoreWith(v.given.approvers, { overlay: v.given.overlay, allowTestKeys: v.given.allow_test_keys, now: () => Date.parse(v.given.now) });
       stores.push(store);
@@ -103,15 +122,41 @@ describe('approval-v1 vectors', () => {
       assert.deepEqual(results, v.expect.results);
       const active = v.given.approvers.map((r) => r.device_id).filter((id) => store.isActive(id));
       assert.deepEqual(active.sort(), [...v.expect.active].sort());
+      // What was staged carries the read key it was signed with (`device apply` writes it).
+      if (v.expect.staged_read_keys) {
+        const staged = v.input.filter((_, i) => results[i].state !== 'rejected').map((env) => {
+          const { message } = open(JSON.parse(fs.readFileSync(path.join(store.stagedDir, `${open(env).message.nonce}.json`), 'utf8')).envelope);
+          return message.type === 'kl.device.enroll' ? message.device.read_key : message.read_key;
+        });
+        assert.deepEqual(staged, v.expect.staged_read_keys);
+      }
     });
   }
 
   for (const v of vectors.filter((x) => x.name.startsWith('enroll-console'))) {
     it(v.name, () => {
       const r = verifyConsoleEnrollment(v.input, { codeId: v.given.code_id, code: v.given.code, now: Date.parse(v.given.now), allowTestKeys: v.given.allow_test_keys });
-      assert.deepEqual({ accepted: r.ok, reason: r.ok ? null : r.reason, device_id: r.ok ? r.deviceId : null }, v.expect);
+      const got = { accepted: r.ok, reason: r.ok ? null : r.reason, device_id: r.ok ? r.deviceId : null };
+      // A console enrollment that carries a read key: the record `enroll-device` writes holds it.
+      if (Object.hasOwn(v.expect, 'read_key')) got.read_key = r.ok ? r.message.device.read_key : null;
+      assert.deepEqual(got, v.expect);
     });
   }
+
+  it('phone-api-auth-read: the KL-PHONE-READ-V1 string, signed by the read key and not by the device key', () => {
+    const v = byName.get('phone-api-auth-read');
+    const g = v.given;
+    assert.equal(g.key, 'read');
+    const s = phoneAuthString(g.method, g.path, g.timestamp, g.body, { key: 'read' });
+    assert.equal(s, v.expect.signing_string);
+    assert.equal(phoneReadAuthString(g.method, g.path, g.timestamp, g.body), s, 'the phone reference builds the same string');
+    assert.ok(s.startsWith('KL-PHONE-READ-V1\n'));
+    assert.equal(s.split('\n')[4], v.expect.body_sha256);
+    assert.notEqual(s, phoneAuthString(g.method, g.path, g.timestamp, g.body), 'never the device string over the same request');
+    const env = { alg: 'ES256', kid: g.device.device_id, payload: Buffer.from(s).toString('base64url'), sig: v.input.signature };
+    assert.equal(verifyEs256(env, g.device.read_jwk), v.expect.accepted);
+    assert.equal(verifyEs256(env, g.device.jwk), v.expect.accepted_by_device_key);
+  });
 
   it('jcs', () => {
     const v = byName.get('jcs');

@@ -5,6 +5,7 @@
 // approval screen displays. generate.js uses it to write the expectations of
 // the phone vectors; the iOS and Android apps implement the same rules and
 // must produce the same `display`.
+const crypto = require('crypto');
 const { open, verifyEd25519, EnvelopeError } = require('../../../src/approvals/envelope');
 const { validateMessage } = require('../../../src/approvals/messages');
 const { canonicalize } = require('../../../src/platform/jcs');
@@ -200,4 +201,13 @@ function phoneView(envelope, pinned) {
   return { shown: true, reason: null, display: buildDisplay(message) };
 }
 
-module.exports = { phoneView, buildDisplay, escapeText, isHidden, joinArgv, pathSegment, hasEquivalentKeys, COLLAPSE_OVER, HEAD, TAIL };
+// The string a phone signs with its read key (android-slim spec §8.3), for a
+// request sent with `X-KL-Key: read`. Written here apart from messages.js so
+// generate.js checks one against the other. `body` is the exact text sent
+// ('' for none).
+function phoneReadAuthString(method, pathWithQuery, timestamp, body) {
+  const bodyHash = crypto.createHash('sha256').update(Buffer.from(body === undefined || body === null ? '' : String(body), 'utf8')).digest('base64url');
+  return ['KL-PHONE-READ-V1', String(method).toUpperCase(), pathWithQuery, timestamp, bodyHash].join('\n');
+}
+
+module.exports = { phoneView, phoneReadAuthString, buildDisplay, escapeText, isHidden, joinArgv, pathSegment, hasEquivalentKeys, COLLAPSE_OVER, HEAD, TAIL };

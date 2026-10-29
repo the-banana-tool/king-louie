@@ -1,5 +1,5 @@
 {
-  "note": "Fixed test keys for the approval-v1 vectors. Never use them for anything real: nodes refuse these device keys unless built with allowTestKeys (src/approvals/test-keys.js).",
+  "note": "Fixed test keys for the approval-v1 vectors. Never use them for anything real: nodes refuse these device keys (and the read keys A_read and B_read, which have no device id of their own: read_key_of names the device they belong to) unless built with allowTestKeys (src/approvals/test-keys.js).",
   "nodes": {
     "web-01": {
       "seed": "00f47b1c993fe0506bf6e606dca8c01afaaafc14cf44ee38c70bf6fb2b166727",
@@ -32,6 +32,18 @@
       "d": "qOUXdbyjhl0jf43zlVAs6BXELTf23qVZsCf4uHUxoIk",
       "jwk": { "kty": "EC", "crv": "P-256", "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w", "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78" },
       "id": "d-futyo75nn4w4reil"
+    },
+    "A_read": {
+      "d": "0NQQ98vgNy-HUBPB6b28-0FkGuRDXcL03y7Pv51pz1k",
+      "jwk": { "kty": "EC", "crv": "P-256", "x": "bR4eNDGzasGOPyj1pvmA9ycRieOYKE2JVxoVpjhftII", "y": "epMctH6Kqp-VPnmnb3z8zs8RckTzC2yjbsuor2WWniY" },
+      "read_key_of": "A",
+      "fingerprint": "r-nzy7 gfgc 4j6g oetu"
+    },
+    "B_read": {
+      "d": "JUikljfXyQbLjhRW4iQoWvfV0F_itqwBDSuMOtFz8Uc",
+      "jwk": { "kty": "EC", "crv": "P-256", "x": "cVt3bucyCwSWInd6zTjQgp27Jl5Bsy_wLUnYZMzSBQY", "y": "jt2NwAHES1iQ9RYN8GvJNzrNVL4W2FwJQ5oH5CssLiU" },
+      "read_key_of": "B",
+      "fingerprint": "r-245m efke vdmy 5lkl"
     }
   }
 }
