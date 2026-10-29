@@ -67,6 +67,13 @@ Start frontier: T01, T08, T09.
   Android vectors, run by T07: `phone-api-auth-read`, `enroll-console-read-key`,
   `read-key-valid`, `watch-read-key`.
 
+- T07: Kotlin API `PhoneKey { DEVICE, READ }` (`header`, `prefix`),
+  `Messages.phoneAuthString(..., key)`, `phoneReadAuthString`, `jwk(x, y)`,
+  `device(..., readKey)`, `readKeyStatement(...)`, `readKeyFingerprint(...)`,
+  `validate("kl.device.read_key")`. Deviation: `readKeyFingerprint` is in
+  `Messages`, not beside the device id in `Encoding.kt` (which §12 keeps
+  unchanged). A read-key watch is today's `Leases.watch(...)` signed by the read key.
+
 ## Landed
 - T01 merge 932753aa (impl d2d4cc64): `isDevice` export, `kl.device.read_key`
   validator, `phoneAuthString(..., { key })`, `PHONE_AUTH_PREFIXES`,
@@ -83,5 +90,7 @@ Start frontier: T01, T08, T09.
 
 - T06 merge 8356ae42 (impl 1952223a): approval-v1 49, lease-v1 55.
 
+- T07 merge aede376d (impl 85d2ad79).
+
 ## Left
-T07 (in progress), T10, T11, T12, T13.
+T10 (in progress), T11, T12, T13.
