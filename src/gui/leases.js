@@ -674,6 +674,7 @@ class LeaseManager extends EventEmitter {
     if (lease.controlNonces.full) return { accepted: false, reason: 'too_many_watches' };
     lease.controlNonces.add(r.message.nonce, bytesSha256(r.bytes));
     // R-F5-15: a watch from the device that granted this lease is contact
+    // (signed by either of its keys: android-slim spec §8.6)
     // when it echoes a contact token issued inside the window that has not
     // made contact before. Any other watch (another enrolled device's, one
     // with no token, an old one a relay kept back) still asks for frames,
@@ -687,7 +688,7 @@ class LeaseManager extends EventEmitter {
     }
     const contact = lease.grantedBy !== null && r.deviceId === lease.grantedBy && lease.state !== 'ended'
       && this._tokenMakesContact(lease, r.message.contact_token);
-    this._audit('lease.watch', lease, { device_id: r.deviceId, contact });
+    this._audit('lease.watch', lease, { device_id: r.deviceId, contact, key: r.key });
     const before = lease.lastStatus;
     if (contact) this._onContact(lease, r.deviceId);
     // Every accepted watch is answered with a status signed now, so the
