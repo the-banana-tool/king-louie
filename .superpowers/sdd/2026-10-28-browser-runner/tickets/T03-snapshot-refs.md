@@ -1,7 +1,8 @@
 ---
 id: T03
 title: The snapshot action, ref= selectors, the per-page record, the Playwright pin
-status: open
+status: done
+merged: 1b0bfe24
 blocked_by: [T01]
 ---
 ## Goal

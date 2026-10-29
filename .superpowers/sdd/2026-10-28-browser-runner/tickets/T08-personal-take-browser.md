@@ -1,7 +1,8 @@
 ---
 id: T08
 title: A personal node's take launches Chrome through PlaywrightBrowser; the fleet passes CHROME_FLAGS
-status: open
+status: done
+merged: dc2bf0b4
 blocked_by: [T01]
 ---
 ## Goal

@@ -29,10 +29,18 @@ Integration branch `feat/browser-runner` at `C:\Users\sblac\Programming\king-lou
   `--enable-automation` and takes `executablePath`, `viewport` and `extraArgs`.
 - T02 (merge 636c2eb2): `start` with no profile opens the persistent `king-louie` profile; `ephemeral: true`
   asks for a throwaway context.
+- T03 (merge 1b0bfe24): the `snapshot` action reads `page._snapshotForAI().full`; `ref=` resolves through
+  `aria-ref=` with a per-page ref record in `PlaywrightBrowser`; `BrowserRefError` codes `ref_stale`,
+  `ref_not_found`, `invalid_params`; a raw `aria-ref=` selector is refused; the `*_in_frame` actions refuse
+  refs; `playwright` pinned to 1.58.2.
 - T04 (merge f622a652): `snapshot` joins the case guard's and the take policy's lists; `run_steps` refuses a
   `ref=` selector.
 - T05 (merge 32f2a56a): `screenshot` returns the viewport image to the model (`to_file` keeps the file form);
   the four browser tools are `emitsImages`; take steps ask for `to_file`.
+- T08 (merge dc2bf0b4): a personal node's take launches Chrome through `launchPersonalBrowser` /
+  `PlaywrightBrowser`; the fleet passes `CHROME_FLAGS` to the helper launch; `activeProfiles()` in the
+  browser registry; kept windows are held in `TakeManager#kept` and closed by `stopAll`; `cdp: false` on
+  personal.
 - T09 (merge 7325e19c): the take leads with the goal; `docs/driving-king-louie.md` and the takes spec
   amendment.
 
@@ -44,7 +52,16 @@ Integration branch `feat/browser-runner` at `C:\Users\sblac\Programming\king-lou
 - T04: `snapshot` also joins the case guard's `PAGE` list (C-6 offers it on BrowserPage).
 - T05: renderer.js labels image results "screenshot (image shown to the model)"; the DPI path divides by
   devicePixelRatio (unconfirmed above 100 %).
+- T03: a raw `aria-ref=` selector is refused (added from T04's review, not in the spec: it would bypass the
+  ref record and the C-8 label).
+- T03: `max_chars` outside 1..60000 is refused rather than clamped.
+- T03: `refs` counts the ref lines in the returned text.
+- T08: the profile-in-use rule is also checked before the phone is asked; kept windows are covered.
 - T09: the model-driven STUCK wording is `STUCK: what I see, what I tried, what I need`.
 
+## Open items (for the review fix)
+- A kept personal window the owner closes by hand stays in `TakeManager#kept` until `stopAll`, so a later
+  take on that profile is refused until the service restarts; drop the entry on the context's `close` event.
+
 ## Left
-T03, T06, T07, T08, T10, T11, then code review and `npm test` once.
+T06, T07, T10, T11, review, npm test.
