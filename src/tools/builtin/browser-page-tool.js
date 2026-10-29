@@ -38,7 +38,9 @@ Selector strategies (pass as "selector"):
   - Alt:         "alt=Company logo"
   - Title:       "title=Close dialog"
 
-All element actions auto-wait for the element to be actionable. Avoid wait_for_load_state state="networkidle" on chatty sites (LinkedIn, modern dashboards) — they stream telemetry forever and you'll burn the timeout. Prefer wait_for on a specific element or wait_for_url.`,
+All element actions auto-wait for the element to be actionable. Avoid wait_for_load_state state="networkidle" on chatty sites (LinkedIn, modern dashboards) — they stream telemetry forever and you'll burn the timeout. Prefer wait_for on a specific element or wait_for_url.
+
+"screenshot" returns the viewport as an image you see (JPEG, at most 1280 px wide) and writes no file; the result's image.scale is viewport pixels per image pixel, so multiply image coordinates by scale for mouse_click. to_file, full_page or selector save a PNG file instead (savedTo) and return no image.`,
   parameters: {
     type: 'object',
     properties: {
@@ -82,11 +84,13 @@ All element actions auto-wait for the element to be actionable. Avoid wait_for_l
 
       // Screenshot / PDF
       full_page: { type: 'boolean', description: 'Capture full scrollable page for screenshot (default false).' },
+      to_file: { type: 'boolean', description: 'screenshot: save a PNG file (savedTo) instead of returning the image. Without it the viewport comes back as an image; multiply image coordinates by scale for mouse_click.' },
       format: { type: 'string', description: 'PDF paper format ("A4", "Letter", ...).' }
     },
     required: ['action']
   },
   requiresApproval: true,
+  emitsImages: true,
   execute: async (params, context) => {
     if (!PAGE_ACTIONS.includes(params.action)) {
       return { ok: false, error: `BrowserPage does not support action "${params.action}". Use BrowserSession or BrowserExtract.` };
