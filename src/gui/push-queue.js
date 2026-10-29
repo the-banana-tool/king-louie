@@ -14,7 +14,8 @@ const { createLogger } = require('../logging');
 
 const PUSH_QUEUE_MAX = 32;
 const PUSH_MAX_AGE_MS = 60 * 60 * 1000;
-const PUSH_KINDS = new Set(['session_ended', 'session_paused']);
+const { SESSION_KINDS } = require('../frontdoor/push/text');
+const PUSH_KINDS = new Set(SESSION_KINDS);
 // A send that failed because the link went: kept for the next `connected`.
 const LINK_DOWN_CODES = new Set(['relay_offline', 'not_linked', 'peer_disconnected', 'closed']);
 

@@ -4,7 +4,10 @@
 // (control characters stripped) and capped before it is ever used.
 // The last three (push spec §7.1) reach `fcm` devices only (C-2): an apns
 // device is never sent one, so its pushes stay byte for byte as before.
-const FCM_ONLY_KINDS = ['session_ended', 'session_paused', 'test'];
+// The kinds a node sends with push.notify (push spec §6.2): a lease's
+// ending or contact pause.
+const SESSION_KINDS = ['session_ended', 'session_paused'];
+const FCM_ONLY_KINDS = [...SESSION_KINDS, 'test'];
 const KINDS = ['approval', 'grant', 'pairing', 'alert', 'question', 'lease', ...FCM_ONLY_KINDS];
 const TITLES = {
   approval: 'Approval needed',
@@ -35,4 +38,4 @@ function alertText({ kind = 'approval', node_name: nodeName = null } = {}) {
   return name ? `${title} on ${name}` : title;
 }
 
-module.exports = { KINDS, FCM_ONLY_KINDS, TITLES, alertText, sanitizeNodeName };
+module.exports = { KINDS, FCM_ONLY_KINDS, SESSION_KINDS, TITLES, alertText, sanitizeNodeName };
