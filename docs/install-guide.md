@@ -289,7 +289,9 @@ elevated prompt and otherwise relies on Windows: an account that cannot write
 the data dir fails to open the history, with that error. A service installed
 under `LOCAL SERVICE` therefore has no command-line import. Import from the
 desktop app attached to that service instead (the app reads the file on the
-desktop and sends the conversation to the service).
+desktop and sends the conversation to the service). A personal node (section
+13) runs as you, so there the command works from a normal prompt, and the
+desktop app can attach to it as well ("Attaching the desktop app").
 
 ## 5. Write the config directories
 
@@ -1073,10 +1075,6 @@ What a personal node does **not** have, on purpose:
   nothing.
 - **No courier grant.** Your `mcp` process already owns the courier
   directories.
-- **No desktop pairing.** `desktop pair` and attaching the desktop app are
-  not supported on a personal node: the desktop's bridge-file trust rule
-  refuses a bridge file a user owns. Keep the desktop app standalone; it is
-  a second King Louie with its own data, and nothing is shared between them.
 
 What the model's tools cannot touch: because the service runs as you, the
 operating system no longer keeps its tools out of your files, so a personal
@@ -1089,6 +1087,117 @@ name it: its vault, chats and browser cookies). Nothing in
 `node.yaml` lifts that. Shell calls (`Bash`) go to your phone, as on any node
 with phone approvals. A shell the phone approves can do anything you can:
 the deny list fences the file tools, never a shell.
+
+### Attaching the desktop app
+
+The desktop app can be the node's window, as it can for a fleet service
+(attached mode): the node holds the chats, settings and cases and does the
+work, and the app shows them. Everything here runs as you; no step needs an
+elevated prompt, and the app refuses to pair while it runs as administrator
+(`This app is running as administrator. Close it and open it normally to
+pair.`).
+
+1. In the desktop app, open **Settings > Local service**. On this machine it
+   says `King Louie Node "laptop-01" runs on this computer as you.` and
+   `Every paired desktop sees every chat, setting and secret name in the
+   node.` Press **Pair**. The app runs `king-louie-service desktop pair
+   <request> --yes --json` itself, with its own binary: the command checks
+   that you own the data dir and the config dir (`PERSONAL_NOT_OWNER`
+   otherwise), adds the app to the node's paired devices, writes the bridge
+   file and turns the desktop bridge on in the config dir's `service.json`.
+   It sets no access list; the files keep your profile's.
+2. The app then brings the bridge up. With no node running it starts the
+   logon task. With the node running and the bridge just turned on, the node
+   must restart to open it, and the pane asks once: `King Louie Node is
+   running (pid N). Pairing restarts it: a turn or a take in progress
+   stops.` **Restart and pair** runs `king-louie-service stop` and starts
+   the task again; **Cancel** leaves the node alone. The app waits up to 60
+   seconds for the bridge and confirms the pairing by itself. A failure
+   shows its reason, with **Try again** and **Cancel**.
+3. The paired view says `Running as you (<account>), in your session.` and
+   offers **Import…**, **Attach** and **Unpair**. **Attach** relaunches the
+   app attached.
+
+The app trusts the node's bridge file only when the config dir, the bridge
+file, `node.yaml` and the data dir are all owned by you, none is a link, and
+`node.yaml` says `hosting: personal`; anything else is refused with the rule
+that failed. A bridge file left from an elevated `desktop pair` (owned by
+Administrators) passes neither rule: press **Pair** again. **Unpair** removes
+the app from the node's devices itself (`desktop unpair`); only when that
+fails does the pane show the command to run.
+
+At each launch, attached, when the node is down the app starts the logon
+task once and shows `Starting King Louie Node…` while it waits (up to 60
+seconds). It never runs another account's task, never enables, creates or
+deletes one, and never starts the task by itself after it has connected
+once: if you stop the node, the app waits for you. When it is not
+connected the banner keeps **Retry now**, **Use standalone this time** and
+**Local service settings**, and adds one button from what it found:
+
+- `King Louie Node is not running.`, or `King Louie Node stopped while
+  starting: <the log line>`: **Start King Louie Node**;
+- `King Louie Node is running (pid N) but its desktop bridge is not open.`:
+  **Restart King Louie Node**;
+- `King Louie Node did not answer within 60 seconds.`: **Retry now** (a node
+  that comes up later still connects; the log is
+  `%LOCALAPPDATA%\KingLouie\node\data\logs\service.log`);
+- `King Louie Node has no logon task on this computer, so this app cannot
+  start it.`: **Install…**;
+- the task disabled in Task Scheduler, or belonging to another account: a
+  line saying so, and no button (enable it there, or install as yourself).
+
+**Install…** (Settings > Local service, when there is no logon task) shows
+the output of `install --personal --dry-run`; **Install** is your yes to it
+and runs the install. A task installed this way runs the desktop app's own
+binary, so the node runs the app's version (an update to the app updates the
+node at its next start), and removing or moving the app leaves a task that
+cannot start; the dry run names the binary. When a node you started by hand
+is already running, the install registers the task and does not start a
+second one.
+
+Closing the app never stops the node, and neither does **Detach**. **Use
+standalone this time** opens the app's own data once, with channels,
+gateway and cron off, beside the running node.
+
+### Moving everything from the desktop app
+
+To make the node your one King Louie, move the desktop app's data into it
+once, then attach. Update both to the same version first.
+
+1. Quit the desktop app (it would go on writing chats and cases while they
+   are read) and stop the node: `king-louie-service stop`.
+2. From a normal prompt, read the plan, then copy:
+
+   ```powershell
+   king-louie-service import --from "$env:APPDATA\king-louie" --dry-run
+   king-louie-service import --from "$env:APPDATA\king-louie"
+   ```
+
+   (`%APPDATA%\King Louie` for a packaged build.) It copies settings, the
+   user profile, the permission rules and always-approve entries, the allowed
+   directories, chats, memory, cron jobs (imported disabled) and cases. On a
+   personal node it runs as you and refuses an elevated prompt. Secrets are
+   listed `needs-desktop`: the command line never reads them, because only
+   the desktop app can unseal them.
+3. `king-louie-service install --personal`, or the app's **Install…** in the
+   next step: it registers the logon task and, with the relay or front door
+   already paired, starts it.
+4. Open the desktop app (still standalone), **Settings > Local service**,
+   **Pair**. The node runs with the bridge off, so the pane asks **Restart
+   and pair** once.
+5. **Import…** in the paired view. The app reads its own secrets and sends
+   them to the node: provider keys, search and image keys, the vault and the
+   Anthropic sign-in. What step 2 copied plans as already present, and a chat
+   you changed in the app since then as an update.
+6. **Attach**. The app relaunches attached and, from then on, starts the
+   node at launch when it is down.
+
+A case you already moved with `import --case` (below) is never overwritten:
+it plans as already present, or as needing attention. A chat changed both in
+the app and on the node after step 2 comes over as a copy; the dry run shows
+which. The app's own copy stays on disk, read by nothing while attached, and
+used again only by **Use standalone this time** or **Detach**; nothing
+deletes it.
 
 ### Moving a case from the desktop app
 
@@ -1151,8 +1260,13 @@ registered it says so, removes nothing and exits 0.
   drive the node through `mcp` and change its approver set, and a shell the
   phone approves can do anything you can. The deny list covers the file
   tools only.
-- The desktop app cannot attach to a personal node, and `desktop pair` is
-  not supported there.
+- Attached, the node is still down from a reboot until you log in; the
+  desktop app then starts it at launch.
+- A node you started by hand in a terminal stops when that terminal closes;
+  the app then offers **Start King Louie Node**, which starts the logon
+  task, not the terminal.
+- A node installed from the desktop app runs the app's binary and version:
+  uninstalling or moving the app leaves a task that cannot start.
 - The logon task pins the checkout and `node.exe` install ran from: run
   `install --personal` from the checkout you keep, since a removed checkout
   or worktree leaves a task that cannot start.

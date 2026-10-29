@@ -363,18 +363,23 @@ describe('bridge-file trust (Windows rules, injected inspector)', () => {
   const file = 'C:\\ProgramData\\KingLouie\\config\\desktop-bridge.json';
   const inspector = (entries, me = 'S-1-5-21-1-2-3-1001') => () => ({ me, entries });
 
-  it('accepts SYSTEM or Administrators as owner of the file and its directory', async () => {
-    const out = await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-32-544', link: false }, { owner: 'S-1-5-18', link: false }]) });
-    assert.deepStrictEqual(out, { ok: true });
+  // The fleet rule reads the directory and the file; node.yaml and the data
+  // dir (the last two of the four paths) are not consulted, so a fleet node
+  // with neither still passes.
+  const fleet = (d, f) => [d, f, null, null];
+
+  it('accepts SYSTEM or Administrators as owner of the file and its directory, with no node.yaml', async () => {
+    const out = await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector(fleet({ owner: 'S-1-5-32-544', link: false }, { owner: 'S-1-5-18', link: false })) });
+    assert.deepStrictEqual(out, { ok: true, hosting: 'service' });
   });
 
   it('refuses a user-owned directory, a reparse point and (outside test mode) the current user', async () => {
     const user = 'S-1-5-21-1-2-3-1001';
-    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: user, link: false }, { owner: 'S-1-5-18', link: false }]) })).code, 'BRIDGE_FILE_UNTRUSTED');
-    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: true }, { owner: 'S-1-5-18', link: false }]) })).code, 'BRIDGE_FILE_UNTRUSTED');
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector(fleet({ owner: user, link: false }, { owner: 'S-1-5-18', link: false })) })).code, 'BRIDGE_FILE_UNTRUSTED');
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector(fleet({ owner: 'S-1-5-18', link: true }, { owner: 'S-1-5-18', link: false })) })).code, 'BRIDGE_FILE_UNTRUSTED');
     const testEnv = { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: file };
-    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: testEnv, platform: 'win32', inspectOwners: inspector([{ owner: user, link: false }, { owner: user, link: false }]) })).ok, true);
-    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: false }, null]) })).code, 'BRIDGE_FILE_MISSING');
+    assert.deepStrictEqual(await pairing.checkBridgeFileTrust(file, { env: testEnv, platform: 'win32', inspectOwners: inspector(fleet({ owner: user, link: false }, { owner: user, link: false })) }), { ok: true, hosting: 'service' });
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector(fleet({ owner: 'S-1-5-18', link: false }, null)) })).code, 'BRIDGE_FILE_MISSING');
   });
 
   it('exports the installers handle-based inspector', () => {
@@ -404,6 +409,9 @@ describe('bridge-file trust (Windows rules, injected inspector)', () => {
     const short = await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: false }]) });
     assert.strictEqual(short.ok, false);
     assert.strictEqual(short.code, 'BRIDGE_FILE_UNTRUSTED');
+    // The old two-path reply is short now that four paths are asked about.
+    const two = await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: false }, { owner: 'S-1-5-18', link: false }]) });
+    assert.strictEqual(two.code, 'BRIDGE_FILE_UNTRUSTED');
   });
 
   it('refuses (never throws) when the inspector returns a non-array entries', async () => {
@@ -485,7 +493,7 @@ describe('bridge-file trust (Windows rules, injected inspector)', () => {
   });
 
   it('checkBridgeFileTrust and readTrustedBridgeFile return promises', () => {
-    const inspectOwners = () => ({ me: 'x', entries: [{ owner: 'S-1-5-18', link: false }, null] });
+    const inspectOwners = () => ({ me: 'x', entries: [{ owner: 'S-1-5-18', link: false }, null, null, null] });
     const a = pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners });
     const b = pairing.readTrustedBridgeFile(file, { env: {}, platform: 'win32', inspectOwners });
     assert.ok(a instanceof Promise);
@@ -500,5 +508,189 @@ describe('bridge-file trust (Windows rules, injected inspector)', () => {
     assert.match(out.me, /^S-1-5-/);
     assert.strictEqual(out.entries.length, 2);
     assert.strictEqual(out.entries[1].link, false);
+  });
+});
+
+// Spec 2026-10-28 §5.1 (R-DA-1, C-1): a personal node's bridge file, owned by
+// the account the desktop runs as, beside a node.yaml that says
+// hosting: personal, in a config dir and a data dir that account owns.
+describe('bridge-file trust: the personal rule (Windows, injected inspector)', () => {
+  const ME = 'S-1-5-21-1000-2000-3000-1001';
+  const OTHER = 'S-1-5-21-1000-2000-3000-1002';
+  const PERSONAL_YAML = 'name: laptop-01\nprofile: agent\nhosting: personal\n';
+  // A real node.yaml in a temp config dir, with the data dir beside it, so
+  // the strict loader runs for real; owners come from the injected inspector.
+  const layout = (yaml = PERSONAL_YAML) => {
+    const root = tmp();
+    const configDir = path.join(root, 'config');
+    const dataDir = path.join(root, 'data');
+    fs.mkdirSync(configDir, { mode: 0o755 });
+    fs.mkdirSync(dataDir, { mode: 0o755 });
+    fs.chmodSync(configDir, 0o755);
+    const nodeYaml = path.join(configDir, 'node.yaml');
+    if (yaml !== null) {
+      fs.writeFileSync(nodeYaml, yaml, { mode: 0o644 });
+      fs.chmodSync(nodeYaml, 0o644);
+    }
+    return { configDir, dataDir, nodeYaml, file: path.join(configDir, 'desktop-bridge.json') };
+  };
+  const mine = { owner: ME, link: false };
+  const recording = (entries, ...rest) => {
+    const me = rest.length ? rest[0] : ME;
+    const calls = [];
+    const fn = async (paths) => { calls.push(paths); return { me, entries }; };
+    fn.calls = calls;
+    return fn;
+  };
+  const check = (file, inspectOwners, env = {}) => pairing.checkBridgeFileTrust(file, { env, platform: 'win32', inspectOwners });
+  const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  it('lists the four paths: config dir, bridge file, node.yaml, the data dir beside it', () => {
+    const { configDir, dataDir, file, nodeYaml } = layout();
+    assert.deepStrictEqual(pairing.bridgeTrustPaths(file), [configDir, file, nodeYaml, dataDir]);
+  });
+
+  it('trusts a personal node, with one inspector call over the four paths', async () => {
+    const { configDir, dataDir, file, nodeYaml } = layout();
+    const inspectOwners = recording([mine, mine, mine, mine]);
+    assert.deepStrictEqual(await check(file, inspectOwners), { ok: true, hosting: 'personal' });
+    assert.deepStrictEqual(inspectOwners.calls, [[configDir, file, nodeYaml, dataDir]]);
+  });
+
+  it('refuses when node.yaml is missing, says hosting: service, leaves hosting out, or has an unknown key', async () => {
+    const yamls = [null, 'name: laptop-01\nprofile: agent\nhosting: service\n', 'name: laptop-01\nprofile: agent\n', `${PERSONAL_YAML}colour: blue\n`];
+    for (const yaml of yamls) {
+      const { file, nodeYaml } = layout(yaml);
+      const out = await check(file, recording([mine, mine, yaml === null ? null : mine, mine]));
+      assert.strictEqual(out.ok, false, String(yaml));
+      assert.strictEqual(out.code, 'BRIDGE_FILE_UNTRUSTED');
+      assert.strictEqual(out.error, `${file} is owned by you, but ${nodeYaml} does not say hosting: personal; a bridge file you own is trusted only for a personal node.`);
+    }
+  });
+
+  it('refuses a data dir (or config dir, or node.yaml) owned by another SID, naming it', async () => {
+    const { configDir, dataDir, file, nodeYaml } = layout();
+    const other = { owner: OTHER, link: false };
+    const a = await check(file, recording([mine, mine, mine, other]));
+    assert.strictEqual(a.code, 'BRIDGE_FILE_UNTRUSTED');
+    assert.match(a.error, new RegExp(`${escapeRe(dataDir)} is owned by ${OTHER}, not by you`));
+    assert.match((await check(file, recording([mine, mine, other, mine]))).error, new RegExp(`${escapeRe(nodeYaml)} is owned by ${OTHER}, not by you`));
+    assert.match((await check(file, recording([other, mine, mine, mine]))).error, new RegExp(`${escapeRe(configDir)} is owned by ${OTHER}, not by you`));
+  });
+
+  it('refuses a link at any of the four paths', async () => {
+    const { file } = layout();
+    const paths = pairing.bridgeTrustPaths(file);
+    for (let i = 0; i < 4; i++) {
+      const entries = [mine, mine, mine, mine];
+      entries[i] = { owner: ME, link: true };
+      const out = await check(file, recording(entries));
+      assert.strictEqual(out.code, 'BRIDGE_FILE_UNTRUSTED', `link at ${i}`);
+      assert.match(out.error, new RegExp(`${escapeRe(paths[i])} is a junction or link`));
+    }
+  });
+
+  it('refuses when the inspector could not say who this process is', async () => {
+    const { file } = layout();
+    for (const me of ['', undefined, null]) {
+      const out = await check(file, recording([mine, mine, mine, mine], me));
+      assert.strictEqual(out.ok, false);
+      assert.strictEqual(out.code, 'BRIDGE_FILE_UNTRUSTED');
+      assert.match(out.error, /the owners could not be read/);
+    }
+  });
+
+  it('refuses a missing data dir, and reports a missing config dir or bridge file as missing', async () => {
+    const { file } = layout();
+    assert.strictEqual((await check(file, recording([mine, mine, mine, null]))).code, 'BRIDGE_FILE_UNTRUSTED');
+    assert.strictEqual((await check(file, recording([mine, null, mine, mine]))).code, 'BRIDGE_FILE_MISSING');
+    assert.strictEqual((await check(file, recording([null, null, null, null]))).code, 'BRIDGE_FILE_MISSING');
+  });
+
+  it('refuses an Administrators-owned bridge file in a personal config dir (it fails both rules)', async () => {
+    const { file } = layout();
+    assert.strictEqual((await check(file, recording([mine, { owner: 'S-1-5-32-544', link: false }, mine, mine]))).code, 'BRIDGE_FILE_UNTRUSTED');
+  });
+
+  it('a short inspector reply is refused even for a personal layout', async () => {
+    const { file } = layout();
+    assert.strictEqual((await check(file, recording([mine, mine, mine]))).code, 'BRIDGE_FILE_UNTRUSTED');
+  });
+
+  it('the KL_TEST_MODE override is unchanged and never enters the personal rule', async () => {
+    const { file } = layout();
+    const env = { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: file };
+    assert.deepStrictEqual(await check(file, recording([mine, mine, mine, mine]), env), { ok: true, hosting: 'service' });
+    let loaded = false;
+    const out = await pairing.checkBridgeFileTrust(file, {
+      env,
+      platform: 'win32',
+      inspectOwners: recording([{ owner: OTHER, link: false }, mine, mine, mine]),
+      loadNodeConfig: () => { loaded = true; return { hosting: 'personal' }; }
+    });
+    assert.strictEqual(out.code, 'BRIDGE_FILE_UNTRUSTED');
+    assert.strictEqual(loaded, false);
+  });
+
+  it('a fleet node is never read through the personal rule', async () => {
+    const { file } = layout();
+    const admin = { owner: 'S-1-5-32-544', link: false };
+    let loaded = false;
+    const out = await pairing.checkBridgeFileTrust(file, {
+      env: {},
+      platform: 'win32',
+      inspectOwners: recording([admin, admin, mine, mine]),
+      loadNodeConfig: () => { loaded = true; return { hosting: 'personal' }; }
+    });
+    assert.deepStrictEqual(out, { ok: true, hosting: 'service' });
+    assert.strictEqual(loaded, false);
+  });
+
+  it('readTrustedBridgeFile returns hosting beside the record', async () => {
+    const { file } = layout();
+    const identity = new NodeIdentity({ nodeName: 'laptop-01' });
+    fs.writeFileSync(file, JSON.stringify(pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18796 })));
+    const out = await pairing.readTrustedBridgeFile(file, { env: {}, platform: 'win32', inspectOwners: recording([mine, mine, mine, mine]) });
+    assert.strictEqual(out.ok, true);
+    assert.strictEqual(out.hosting, 'personal');
+    assert.strictEqual(out.record.nodeId, identity.nodeId);
+  });
+
+  describe('judgePersonalPaths (the rule detectPersonalNode reuses, without the bridge file)', () => {
+    const checksFor = ({ configDir, nodeYaml, dataDir }, entries = [mine, mine, mine]) => [
+      { path: configDir, entry: entries[0] }, { path: nodeYaml, entry: entries[1] }, { path: dataDir, entry: entries[2] }
+    ];
+
+    it('judges D, Y and A and returns the node name', () => {
+      const l = layout();
+      assert.deepStrictEqual(pairing.judgePersonalPaths({ me: ME, checks: checksFor(l), configDir: l.configDir }), { ok: true, name: 'laptop-01' });
+    });
+
+    it('says why it failed, without naming a bridge file', () => {
+      const l = layout('name: laptop-01\nprofile: agent\n');
+      const out = pairing.judgePersonalPaths({ me: ME, checks: checksFor(l), configDir: l.configDir });
+      assert.deepStrictEqual(out, { ok: false, reason: 'not-personal', path: l.nodeYaml, problem: `${l.nodeYaml} does not say hosting: personal` });
+      const other = pairing.judgePersonalPaths({ me: ME, checks: checksFor(l, [mine, mine, { owner: OTHER, link: false }]), configDir: l.configDir });
+      assert.deepStrictEqual(other, { ok: false, reason: 'other-owner', path: l.dataDir, problem: `${l.dataDir} is owned by ${OTHER}, not by you` });
+      const link = pairing.judgePersonalPaths({ me: ME, checks: checksFor(l, [{ owner: ME, link: true }, mine, mine]), configDir: l.configDir });
+      assert.deepStrictEqual(link, { ok: false, reason: 'link', path: l.configDir, problem: `${l.configDir} is a junction or link` });
+      const gone = pairing.judgePersonalPaths({ me: ME, checks: checksFor(l, [mine, mine, null]), configDir: l.configDir });
+      assert.strictEqual(gone.reason, 'missing');
+    });
+
+    it('takes an injected loader with adminConfigDir, and refuses when it throws', () => {
+      const l = layout();
+      const seen = [];
+      const ok = pairing.judgePersonalPaths({
+        me: ME,
+        checks: checksFor(l),
+        configDir: l.configDir,
+        loadNodeConfig: (opts) => { seen.push(opts.adminConfigDir); return { hosting: 'personal', name: 'x' }; }
+      });
+      assert.deepStrictEqual(ok, { ok: true, name: 'x' });
+      assert.deepStrictEqual(seen, [l.configDir]);
+      const bad = pairing.judgePersonalPaths({ me: ME, checks: checksFor(l), configDir: l.configDir, loadNodeConfig: () => { throw new Error('boom'); } });
+      assert.strictEqual(bad.reason, 'not-personal');
+    });
   });
 });

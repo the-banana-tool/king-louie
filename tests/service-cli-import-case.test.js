@@ -96,7 +96,9 @@ function recordingWriter() {
 const personal = { loadNodeConfig: () => ({ hosting: 'personal' }) };
 const baseDeps = (extra = {}) => ({
   runningServicePid: () => null,
-  isAdmin: () => { throw new Error('the elevation check must not run under hosting: personal'); },
+  // Under hosting: personal the elevation check runs only to refuse an
+  // elevated prompt (desktop-attach spec §9.1, C-2).
+  isAdmin: () => false,
   resolveMasterKey: () => ({ key: TEST_KEY, source: 'test' }),
   isTTY: () => false,
   ...personal,

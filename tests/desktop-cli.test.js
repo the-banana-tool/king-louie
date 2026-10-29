@@ -456,6 +456,170 @@ describe('CLI dispatch', () => {
   });
 });
 
+// Spec 2026-10-28 desktop attached to the personal node §6.1: under a
+// node.yaml with hosting: personal, desktop pair|unpair|list run as the
+// owner, unelevated, and never touch the ACLs.
+describe('desktop pair|unpair|list under hosting: personal (§6.1)', () => {
+  const { loadNodeConfig } = require('../src/service/node-config');
+  const ME = 'S-1-5-21-1000-2000-3000-1001';
+  const OTHER = 'S-1-5-21-1000-2000-3000-1002';
+
+  function personalLayout(opts = {}) {
+    const l = layout(opts);
+    fs.writeFileSync(path.join(l.configDir, 'node.yaml'), 'name: laptop-01\nprofile: agent\nhosting: personal\n', { mode: 0o644 });
+    return l;
+  }
+  const realLoad = (dataDir, configDir) => loadNodeConfig({ dataDir, adminConfigDir: configDir, geteuid: () => selfUid, adminUid: selfUid });
+  const owners = (dataOwner = ME, configOwner = ME) => ({
+    platform: 'win32',
+    inspectOwners: (paths) => ({ me: ME, entries: paths.map((_, i) => ({ owner: i === 0 ? dataOwner : configOwner, link: false })) })
+  });
+  const pdeps = (l, extra = {}) => {
+    const calls = { acls: 0 };
+    return {
+      calls,
+      deps: deps(l, {
+        platform: 'win32',
+        isAdmin: () => false,
+        loadNodeConfig: realLoad,
+        personalOwner: owners(),
+        applyWindowsAcls: () => { calls.acls += 1; },
+        ...extra
+      })
+    };
+  };
+  const lastJson = (stdout) => JSON.parse(stdout.trimEnd().split('\n').pop());
+  const ELEVATED = 'desktop pair on a personal node runs as you, not elevated: open a normal prompt';
+
+  it('refuses an elevated run, writing nothing, with PAIR_ELEVATED on --json', async () => {
+    const l = personalLayout();
+    const before = [snapshotDir(l.dataDir), snapshotDir(l.configDir)];
+    const c = capture();
+    const { deps: d, calls } = pdeps(l, { isAdmin: () => true });
+    assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io, deps: d, yes: true, json: true }), 1);
+    assert.strictEqual(c.out.stderr, `${ELEVATED}\n`);
+    assert.deepStrictEqual(lastJson(c.out.stdout), { ok: false, code: 'PAIR_ELEVATED', message: ELEVATED });
+    assert.deepStrictEqual([snapshotDir(l.dataDir), snapshotDir(l.configDir)], before);
+    assert.strictEqual(calls.acls, 0);
+  });
+
+  it('refuses PERSONAL_NOT_OWNER with the check\'s problem line when another account owns the data dir', async () => {
+    const l = personalLayout();
+    const before = [snapshotDir(l.dataDir), snapshotDir(l.configDir)];
+    const c = capture();
+    const { deps: d } = pdeps(l, { personalOwner: owners(OTHER, ME) });
+    assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io, deps: d, yes: true, json: true }), 1);
+    const problem = `${l.dataDir} is owned by ${OTHER}, not this account (${ME})`;
+    assert.strictEqual(c.out.stderr, `PERSONAL_NOT_OWNER: ${problem}\n`);
+    assert.deepStrictEqual(lastJson(c.out.stdout), { ok: false, code: 'PERSONAL_NOT_OWNER', message: problem });
+    assert.deepStrictEqual([snapshotDir(l.dataDir), snapshotDir(l.configDir)], before);
+  });
+
+  it('pairs unelevated: the three files, no ACLs, and a JSON line last (bridgeTurnedOn true, then false)', async () => {
+    const l = personalLayout();
+    const req = request('laptop-01 desk');
+    const decoded = pairing.decodePairRequest(req);
+    const c = capture();
+    const { deps: d, calls } = pdeps(l);
+    assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: req, dataDir: l.dataDir, io: c.io, deps: d, yes: true, json: true }), 0);
+    assert.deepStrictEqual(pairing.parseDevices(fs.readFileSync(path.join(l.configDir, 'desktop-devices.json'), 'utf8')).devices.map((x) => x.deviceId), [decoded.deviceId]);
+    const bridge = JSON.parse(fs.readFileSync(path.join(l.configDir, 'desktop-bridge.json'), 'utf8'));
+    assert.strictEqual(bridge.nodeId, l.identity.nodeId);
+    const svc = JSON.parse(fs.readFileSync(path.join(l.configDir, 'service.json'), 'utf8'));
+    assert.deepStrictEqual(svc, { features: { desktopBridge: true }, ports: { desktopBridge: 18796 } });
+    assert.strictEqual(calls.acls, 0, 'applyWindowsAcls is never called under personal hosting');
+    assert.ok(c.out.stdout.includes(PAIR_WARNING), 'the human lines still come first');
+    assert.ok(c.out.stdout.includes('Restart the service to open the desktop bridge.'));
+    assert.deepStrictEqual(lastJson(c.out.stdout), { ok: true, nodeId: l.identity.nodeId, port: 18796, bridgeTurnedOn: true, hosting: 'personal' });
+    const again = capture();
+    assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: request('second desk'), dataDir: l.dataDir, io: again.io, deps: d, yes: true, json: true }), 0);
+    assert.deepStrictEqual(lastJson(again.out.stdout), { ok: true, nodeId: l.identity.nodeId, port: 18796, bridgeTurnedOn: false, hosting: 'personal' });
+    assert.strictEqual(calls.acls, 0);
+  });
+
+  it('ends a refused pairing request with a JSON line too', async () => {
+    const l = personalLayout();
+    const c = capture();
+    const { deps: d } = pdeps(l);
+    assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: 'klpair1.nope', dataDir: l.dataDir, io: c.io, deps: d, yes: true, json: true }), 2);
+    const result = lastJson(c.out.stdout);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.code, 'PAIR_REQUEST_INVALID');
+  });
+
+  it('prints no JSON line without --json', async () => {
+    const l = personalLayout();
+    const c = capture();
+    const { deps: d } = pdeps(l);
+    assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io, deps: d, yes: true }), 0);
+    assert.ok(!c.out.stdout.includes('{"ok"'));
+  });
+
+  it('a fleet pair with --json reports hosting service, and its administrator refusal', async () => {
+    const l = layout();
+    const c = capture();
+    assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io, deps: deps(l), yes: true, json: true }), 0);
+    assert.deepStrictEqual(lastJson(c.out.stdout), { ok: true, nodeId: l.identity.nodeId, port: 18796, bridgeTurnedOn: true, hosting: 'service' });
+    const c2 = capture();
+    assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: request(), dataDir: l.dataDir, io: c2.io, deps: deps(l, { isAdmin: () => false }), yes: true, json: true }), 1);
+    assert.strictEqual(lastJson(c2.out.stdout).code, 'PAIR_NOT_ADMIN');
+  });
+
+  it('unpair and list run unelevated, refuse elevated and refuse another owner', async () => {
+    const l = personalLayout();
+    const req = request('laptop-01 desk');
+    const { deviceId } = pairing.decodePairRequest(req);
+    const { deps: d } = pdeps(l);
+    assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: req, dataDir: l.dataDir, io: capture().io, deps: d, yes: true }), 0);
+    let c = capture();
+    assert.strictEqual(await runDesktopCommand({ sub: 'list', dataDir: l.dataDir, io: c.io, deps: d }), 0);
+    assert.match(c.out.stdout, new RegExp(`${deviceId}\\s+laptop-01 desk`));
+    for (const sub of ['list', 'unpair']) {
+      c = capture();
+      assert.strictEqual(await runDesktopCommand({ sub, arg: deviceId, dataDir: l.dataDir, io: c.io, deps: pdeps(l, { isAdmin: () => true }).deps }), 1);
+      assert.strictEqual(c.out.stderr, `desktop ${sub} on a personal node runs as you, not elevated: open a normal prompt\n`);
+      c = capture();
+      assert.strictEqual(await runDesktopCommand({ sub, arg: deviceId, dataDir: l.dataDir, io: c.io, deps: pdeps(l, { personalOwner: owners(ME, OTHER) }).deps }), 1);
+      assert.match(c.out.stderr, /^PERSONAL_NOT_OWNER: .* is owned by S-1-5-21-1000-2000-3000-1002, not this account/);
+    }
+    c = capture();
+    assert.strictEqual(await runDesktopCommand({ sub: 'unpair', arg: deviceId, dataDir: l.dataDir, io: c.io, deps: d }), 0);
+    assert.deepStrictEqual(pairing.parseDevices(fs.readFileSync(path.join(l.configDir, 'desktop-devices.json'), 'utf8')).devices, []);
+  });
+
+  it('a node.yaml that does not load keeps the administrator refusal unelevated, and is refused elevated', async () => {
+    const l = layout();
+    fs.writeFileSync(path.join(l.configDir, 'node.yaml'), 'name: laptop-01\nbogus: 1\n', { mode: 0o644 });
+    const c = capture();
+    assert.strictEqual(await runDesktopCommand({ sub: 'list', dataDir: l.dataDir, io: c.io, deps: deps(l, { isAdmin: () => false, loadNodeConfig: realLoad }) }), 1);
+    assert.strictEqual(c.out.stderr, `desktop list reads ${l.configDir}; run it as root/an administrator.\n`);
+    const c2 = capture();
+    assert.strictEqual(await runDesktopCommand({ sub: 'list', dataDir: l.dataDir, io: c2.io, deps: deps(l, { loadNodeConfig: realLoad }) }), 1);
+    assert.match(c2.out.stderr, /^Cannot read the node's configuration: /);
+  });
+
+  it('the CLI refuses --json for any command but desktop pair, and passes it through for desktop pair', async () => {
+    for (const argv of [['desktop', 'list', '--json'], ['status', '--json'], ['desktop', 'unpair', 'kld-aaaaaaaaaaaaaaaa', '--json']]) {
+      const c = capture();
+      assert.strictEqual(await main(argv, { stdin: process.stdin, ...c.io }), 2);
+      assert.strictEqual(c.out.stderr, 'Flag "--json" is only valid for "desktop pair"\n');
+    }
+    const desktop = require('../src/service/commands/desktop');
+    const original = desktop.runDesktopCommand;
+    let received = null;
+    desktop.runDesktopCommand = async (args) => { received = args; return 0; };
+    try {
+      const c = capture();
+      assert.strictEqual(await main(['desktop', 'pair', 'klpair1.x', '--yes', '--json'], { stdin: process.stdin, ...c.io }), 0);
+      assert.strictEqual(received.json, true);
+      assert.strictEqual(received.yes, true);
+    } finally {
+      desktop.runDesktopCommand = original;
+    }
+    assert.match(desktop.DESKTOP_HELP, /desktop pair <request> \[--data-dir DIR\] \[--yes\] \[--json\]/);
+  });
+});
+
 describe('Windows ACE for the bridge-file directory (R56)', { skip: process.platform !== 'win32' ? 'Windows only' : false }, () => {
   it('grants Authenticated Users READ_CONTROL|FILE_READ_ATTRIBUTES, not inherited', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-ace-'));

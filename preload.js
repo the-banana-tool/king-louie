@@ -1391,6 +1391,10 @@ contextBridge.exposeInMainWorld(
       unpair: () => ipcRenderer.invoke('desktop:unpair'),
       retry: () => ipcRenderer.invoke('desktop:retry'),
       dismissServiceCommand: () => ipcRenderer.invoke('desktop:dismissServiceCommand'),
+      nodeStart: (payload = {}) => ipcRenderer.invoke('desktop:nodeStart', { restart: Boolean(payload && payload.restart === true) }),
+      nodeInstallPreview: () => ipcRenderer.invoke('desktop:nodeInstallPreview'),
+      nodeInstall: (payload = {}) => ipcRenderer.invoke('desktop:nodeInstall', { confirmed: Boolean(payload && payload.confirmed === true) }),
+      pairRestartConfirm: (payload = {}) => ipcRenderer.invoke('desktop:pairRestartConfirm', { confirmed: Boolean(payload && payload.confirmed === true) }),
       importPlan: () => ipcRenderer.invoke('desktop:importPlan'),
       importApply: () => ipcRenderer.invoke('desktop:importApply'),
       onStatusChanged: (callback) => registerOnce('desktop:statusChanged', callback),
@@ -1398,7 +1402,10 @@ contextBridge.exposeInMainWorld(
       describe: (status) => (paneModel ? paneModel.describeServicePane(status) : null),
       describeImport: (report) => (paneModel ? paneModel.describeImportReport(report) : []),
       decideDetachClick: (args) => (paneModel ? paneModel.decideDetachClick(args) : { confirm: false, arm: true }),
-      paneShapeChanged: (prevModel, nextModel) => (paneModel ? paneModel.paneShapeChanged(prevModel, nextModel) : true)
+      paneShapeChanged: (prevModel, nextModel) => (paneModel ? paneModel.paneShapeChanged(prevModel, nextModel) : true),
+      describeBanner: (status) => (paneModel ? paneModel.describeAttachedBanner(status) : null),
+      describeInstallPreview: (result) => (paneModel ? paneModel.describeInstallPreview(result) : null),
+      describeInstallResult: (result) => (paneModel ? paneModel.describeInstallResult(result) : null)
     },
     markdown: {
       parse: (text) => safeMarkdownParse(text),

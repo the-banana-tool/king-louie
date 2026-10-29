@@ -150,8 +150,11 @@ function startAttachedHost(deps) {
   return {
     controller,
     client,
+    // Spec 2026-10-28 §7.2: the controller connects. A personal pairing may
+    // run the node first (once per launch) and then waits on this client's
+    // own loop; a fleet pairing connects at once, as before.
     start() {
-      if (client) client.connect().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
+      if (client) controller.startAttached().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
     },
     async shutdown() {
       controller.dispose();

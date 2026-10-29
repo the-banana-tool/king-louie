@@ -284,6 +284,10 @@ module.exports = {
   DESKTOP_IMPORT_APPLY: 'desktop:importApply',
   DESKTOP_RETRY: 'desktop:retry',
   DESKTOP_DISMISS_SERVICE_COMMAND: 'desktop:dismissServiceCommand',
+  DESKTOP_NODE_START: 'desktop:nodeStart',
+  DESKTOP_NODE_INSTALL_PREVIEW: 'desktop:nodeInstallPreview',
+  DESKTOP_NODE_INSTALL: 'desktop:nodeInstall',
+  DESKTOP_PAIR_RESTART_CONFIRM: 'desktop:pairRestartConfirm',
   DESKTOP_STATUS_CHANGED: 'desktop:statusChanged',
   DESKTOP_IMPORT_PROGRESS: 'desktop:importProgress'
 };

@@ -15,10 +15,11 @@ const {
 const { fingerprintGroups } = require('../../desktop-bridge/keys');
 const { DEFAULT_DESKTOP_BRIDGE_PORT, DEVICE_ID_RE } = require('../../desktop-bridge/protocol');
 const { isAdmin: defaultIsAdmin } = require('./admin-check');
+const { shown } = require('./io');
 
 const log = createLogger('service-desktop-cli');
 
-const DESKTOP_HELP = `Usage: king-louie-service desktop pair <request> [--data-dir DIR] [--yes]
+const DESKTOP_HELP = `Usage: king-louie-service desktop pair <request> [--data-dir DIR] [--yes] [--json]
        king-louie-service desktop unpair <device-id> [--data-dir DIR]
        king-louie-service desktop list [--data-dir DIR]
 `;
@@ -174,7 +175,49 @@ async function confirmPairing({ io, deps, yes }) {
   return confirmed ? { ok: true } : { ok: false, code: 1, message: 'Not pairing without confirmation.\n' };
 }
 
-async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false }) {
+// Under a node.yaml that says hosting: personal (spec 2026-10-28 §6.1) the
+// node runs as its owner: these commands run as that account too, never
+// elevated (an elevated run would leave Administrators-owned files the
+// desktop's personal trust rule refuses), only when the process owns the
+// data dir and the config dir, and set no ACL (the files inherit the
+// owner's profile ACL). Anything else keeps the fleet's rules.
+function readHosting({ dataDir, configDir, deps }) {
+  const load = deps.loadNodeConfig || ((dir, cfgDir) => require('../node-config').loadNodeConfig({ dataDir: dir, adminConfigDir: cfgDir }));
+  try {
+    const cfg = load(dataDir, configDir);
+    return { hosting: cfg && cfg.hosting === 'personal' ? 'personal' : 'service' };
+  } catch (err) {
+    return { hosting: 'service', error: err };
+  }
+}
+
+// `--json` (desktop pair only): the human lines first, then one JSON line on
+// stdout for the desktop to act on: { ok: true, nodeId, port,
+// bridgeTurnedOn, hosting } or { ok: false, code, message } (spec C-4).
+async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false, json = false }) {
+  const result = { value: null };
+  let code;
+  try {
+    code = await runDesktop({ sub, arg, dataDir, io, deps, yes, result });
+  } catch (err) {
+    if (json && sub === 'pair') io.stdout.write(`${JSON.stringify({ ok: false, code: 'PAIR_COMMAND_FAILED', message: shown(err && err.message, 1000) })}\n`);
+    throw err;
+  }
+  if (json && sub === 'pair') {
+    const line = result.value || { ok: false, code: 'PAIR_COMMAND_FAILED', message: `desktop pair exited ${code}` };
+    io.stdout.write(`${JSON.stringify(line)}\n`);
+  }
+  return code;
+}
+
+async function runDesktop({ sub, arg, dataDir, io, deps, yes, result }) {
+  // `label`, when given, leads the stderr line only (the JSON message is
+  // the message alone).
+  const refuse = (exitCode, code, message, label = '') => {
+    io.stderr.write(`${label}${message}\n`);
+    result.value = { ok: false, code, message: shown(message, 1000) };
+    return exitCode;
+  };
   // No fail-open default (like import.js's I7): a caller that forgets this
   // could re-check a service that is in fact running and overwrite its
   // devices file underneath it.
@@ -187,9 +230,20 @@ async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false
     io.stderr.write(DESKTOP_HELP);
     return 2;
   }
-  if (!(await isAdmin())) {
-    io.stderr.write(`desktop ${sub} ${sub === 'list' ? 'reads' : 'writes'} ${configDir}; run it as root/an administrator.\n`);
-    return 1;
+  const { hosting, error: nodeConfigError } = readHosting({ dataDir, configDir, deps });
+  const personal = hosting === 'personal';
+  const elevated = await isAdmin();
+  if (personal) {
+    if (elevated) return refuse(1, 'PAIR_ELEVATED', `desktop ${sub} on a personal node runs as you, not elevated: open a normal prompt`);
+    const { checkPersonalOwner } = require('../personal-host');
+    const owner = checkPersonalOwner({ dataDir, configDir, platform, ...(deps.personalOwner || {}) });
+    if (!owner.ok) return refuse(1, 'PERSONAL_NOT_OWNER', owner.problem, 'PERSONAL_NOT_OWNER: ');
+  } else if (!elevated) {
+    return refuse(1, 'PAIR_NOT_ADMIN', `desktop ${sub} ${sub === 'list' ? 'reads' : 'writes'} ${configDir}; run it as root/an administrator.`);
+  } else if (nodeConfigError) {
+    // Only an administrator gets here: an unelevated fleet run keeps the
+    // administrator refusal above whatever node.yaml holds.
+    return refuse(1, 'NODE_CONFIG_INVALID', `Cannot read the node's configuration: ${shown(nodeConfigError.message, 500)}`);
   }
   const devicesFile = path.join(configDir, DEVICES_FILE);
   const readDevices = () => (fs.existsSync(devicesFile) ? parseDevices(fs.readFileSync(devicesFile, 'utf8')) : emptyDevices());
@@ -210,6 +264,7 @@ async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false
 
   if (!arg) {
     io.stderr.write(DESKTOP_HELP);
+    result.value = { ok: false, code: 'PAIR_USAGE', message: `desktop ${sub} needs an argument` };
     return 2;
   }
 
@@ -236,24 +291,17 @@ async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false
   // freshly generated node identity via withServiceCore) before the refusal.
   if (!yes) {
     const isTTY = deps.isTTY ? deps.isTTY() : defaultIsTTY(io);
-    if (!isTTY) {
-      io.stderr.write('Refusing to pair without confirmation on a non-interactive terminal; pass --yes.\n');
-      return 2;
-    }
+    if (!isTTY) return refuse(2, 'PAIR_CONFIRM_REQUIRED', 'Refusing to pair without confirmation on a non-interactive terminal; pass --yes.');
   }
 
   const serviceFile = path.join(configDir, 'service.json');
   const serviceCfg = readJsonIfExists(serviceFile);
-  if (serviceCfg.profile === 'runbook') {
-    io.stderr.write('desktopBridge needs profile: agent\n');
-    return 1;
-  }
+  if (serviceCfg.profile === 'runbook') return refuse(1, 'PAIR_NEEDS_AGENT', 'desktopBridge needs profile: agent');
   let request;
   try {
     request = decodePairRequest(arg);
   } catch (err) {
-    io.stderr.write(`Not a pairing request: ${err.message}\n`);
-    return 2;
+    return refuse(2, 'PAIR_REQUEST_INVALID', `Not a pairing request: ${err.message}`);
   }
 
   const configured = serviceCfg.ports && Number.isInteger(serviceCfg.ports.desktopBridge) ? serviceCfg.ports.desktopBridge : undefined;
@@ -270,27 +318,18 @@ async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false
   // when an identity already exists, so a first pair never persists
   // anything before the owner has agreed to it.
   const existing = readExistingNodePublicKey(dataDir);
-  if (existing.error) {
-    io.stderr.write(`${existing.error}\n`);
-    return 1;
-  }
+  if (existing.error) return refuse(1, 'NODE_IDENTITY_UNREADABLE', existing.error);
   let record = existing.ok ? bridgeFileRecord({ publicKey: existing.publicKey, port }) : null;
   if (record) io.stdout.write(`Service: ${record.nodeId} (${fingerprintGroups(record.nodeId)})\n`);
 
   const trust = await confirmPairing({ io, deps, yes });
-  if (!trust.ok) {
-    io.stderr.write(trust.message);
-    return trust.code;
-  }
+  if (!trust.ok) return refuse(trust.code, trust.code === 2 ? 'PAIR_CONFIRM_REQUIRED' : 'PAIR_DECLINED', trust.message.trimEnd());
 
   // I1b: only after confirmation does a missing identity get created —
   // this is the one place this command can write to <dataDir>/chat-data.json.
   if (!record) {
     const created = await createNodeIdentity({ dataDir, io, deps });
-    if (!created.ok) {
-      io.stderr.write(`${created.error}\n`);
-      return 1;
-    }
+    if (!created.ok) return refuse(1, 'NODE_IDENTITY_MISSING', created.error);
     record = bridgeFileRecord({ publicKey: created.publicKey, port });
     io.stdout.write(`Service: ${record.nodeId} (${fingerprintGroups(record.nodeId)}) — compare this on your desktop.\n`);
   }
@@ -315,11 +354,14 @@ async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false
   };
   writeKeepingOwnership(serviceFile, `${JSON.stringify(merged, null, 2)}\n`);
 
-  if (platform === 'win32') (deps.applyWindowsAcls || applyWindowsAcls)({ bridgeFile, configDir, io });
-  else fs.chmodSync(bridgeFile, 0o644);
+  // Personal hosting sets no ACL and no owner (spec C-3): the files keep the
+  // owner's inherited profile ACL, which the desktop's personal rule expects.
+  if (platform === 'win32' && !personal) (deps.applyWindowsAcls || applyWindowsAcls)({ bridgeFile, configDir, io });
+  else if (platform !== 'win32') fs.chmodSync(bridgeFile, 0o644);
 
   io.stdout.write(`If this fingerprint differs from the one on your desktop, run \`desktop unpair ${request.deviceId}\` now.\n`);
   if (turnedOn) io.stdout.write('Restart the service to open the desktop bridge.\n');
+  result.value = { ok: true, nodeId: record.nodeId, port, bridgeTurnedOn: turnedOn, hosting };
   return 0;
 }
 

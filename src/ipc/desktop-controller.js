@@ -12,11 +12,77 @@ const { rawFromPublicKeyObject, fingerprintGroups } = require('../desktop-bridge
 const { MESSAGES } = require('../desktop-bridge/protocol');
 const { ATTACHED_UNAVAILABLE_TABS } = require('../desktop-bridge/allowlist');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
+const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
+const { shown } = require('../service/commands/io');
 
 const log = createLogger('desktop-controller');
 
 const DETACH_WARNING = 'After detaching, this app runs its own King Louie again next to the service; its cron jobs and channels may act twice. Stop the service if you no longer want it.';
 const STANDALONE_ONCE = '--kl-standalone-once';
+// Spec 2026-10-28 §6.2, §7.3 (C-12).
+const PAIR_CLI_TIMEOUT_MS = 120000;
+const NODE_START_WAIT_MS = 60000;
+const NODE_RETRY_MS = 3000;
+// §7.4: an attached-disconnected status reads the node again at most this often.
+const NODE_REFRESH_MS = 5000;
+const startTimeoutText = (ms) => `King Louie Node did not answer within ${Math.round(ms / 1000)} seconds.`;
+const TASK_REFUSALS = {
+  missing: { code: 'NODE_TASK_MISSING', message: 'King Louie Node has no logon task on this computer, so this app cannot start it.' },
+  disabled: { code: 'NODE_TASK_DISABLED', message: `The logon task "${PERSONAL_TASK_NAME}" is disabled in Task Scheduler. Enable it there to let this app start the node.` },
+  'other-account': { code: 'NODE_TASK_OTHER_ACCOUNT', message: `The logon task "${PERSONAL_TASK_NAME}" belongs to another account; this app does not run it.` },
+  unknown: { code: 'NODE_TASK_MISSING', message: `The logon task "${PERSONAL_TASK_NAME}" could not be read, so this app cannot start it.` }
+};
+// §8: Install runs only while no task is registered.
+const INSTALL_REFUSALS = {
+  registered: { code: 'NODE_TASK_REGISTERED', message: `The logon task "${PERSONAL_TASK_NAME}" is already registered; there is nothing to install.` },
+  disabled: TASK_REFUSALS.disabled,
+  'other-account': TASK_REFUSALS['other-account'],
+  unknown: { code: 'NODE_TASK_UNREADABLE', message: TASK_REFUSALS.unknown.message }
+};
+// §7.3: the bridge codes that end an attached start's wait (the client's FATAL).
+const BRIDGE_FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'ANOTHER_DEVICE', 'SERVICE_KEY_CHANGED']);
+// pairConfirm answers that waiting will not change (the bridge client's
+// FATAL set, and the pairing's own refusals); anything else is a bridge
+// that is not up yet.
+const PAIR_FATAL = new Set([...BRIDGE_FATAL, 'PAIR_SERVICE_CHANGED', 'PAIR_NOT_FOUND', 'PAIR_CONFIRM_STALE', 'NOT_PAIRING']);
+const INITIAL_NODE_STATE = Object.freeze({ task: 'unknown', running: false, pid: null, starting: false, startError: null });
+const INSTALL_CLI_TIMEOUT_MS = 120000;
+const NOT_PERSONAL_TEXT = 'No King Louie Node on this computer is paired with this desktop.';
+
+// A data dir as the disk names it and as the pairing recorded it: Windows
+// paths compare without case and without a trailing separator.
+function samePath(a, b) {
+  const norm = (p) => String(p).replace(/[\\/]+$/, '').toLowerCase();
+  return typeof a === 'string' && typeof b === 'string' && norm(a) === norm(b);
+}
+
+// §8: the CLI's output as lines for a <pre>, each through `shown`; blank
+// lines inside are kept, those at either end dropped.
+function outputLines(...texts) {
+  const lines = texts.filter(Boolean).join('\n').split(/\r?\n/).map((l) => shown(l.replace(/\s+$/, ''), 400));
+  while (lines.length && !lines[0]) lines.shift();
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
+  return lines;
+}
+
+// nodeRunning's answer as the status's two fields.
+function runningFields(r) {
+  const running = Boolean(r && r.running);
+  return { running, pid: running && Number.isInteger(r.pid) ? r.pid : null };
+}
+
+// A refusal or error from the node, the CLI or the trust read, as the
+// status carries it: every string through `shown`.
+function shownError(error) {
+  return {
+    code: shown((error && error.code) || 'NODE_START_FAILED', 80),
+    message: shown((error && (error.message || error.error)) || '', 400)
+  };
+}
+
+function quoteArg(value) {
+  return `"${String(value).replace(/"/g, '\\"')}"`;
+}
 
 function currentUsername() {
   try {
@@ -30,13 +96,31 @@ function createDesktopController({
   state, mode, app, getWindow = () => null, env = process.env, platform = process.platform,
   userDataDir, safeStorage, stdout = process.stdout, argv = process.argv,
   readBridgeFile = null, clientFactory = null, pollMs = 3000, pollWindowMs = 10 * 60 * 1000,
-  now = () => new Date(), username = null
+  now = () => new Date(), username = null,
+  // The personal node (spec 2026-10-28): the runner that reads and starts it,
+  // and the clock and timers of the §7.3 wait (tests inject a fake clock).
+  nodeRunner = platform === 'win32' ? createPersonalNodeRunner({ env, platform }) : null,
+  clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
+  nodeStartWaitMs = NODE_START_WAIT_MS, nodeRetryMs = NODE_RETRY_MS, nodeRefreshMs = NODE_REFRESH_MS
 }) {
   const emitter = new EventEmitter();
   const bridgeFile = () => bridgeFilePath({ env, platform });
   // Async (final review I2): on Windows the trust read is a ~1.5 s
   // PowerShell child process; an injected reader may still be synchronous.
-  const readFile = async () => (readBridgeFile ? readBridgeFile() : readTrustedBridgeFile(bridgeFile(), { env, platform }));
+  // A personal pairing (pending or made) reads its own data dir's bridge
+  // file through the runner: one inspector call, the same trust rule.
+  const personalDataDir = () => {
+    const pending = state.pendingPair;
+    if (pending && pending.personal && pending.personal.dataDir) return pending.personal.dataDir;
+    const svc = state.pairing && state.pairing.service;
+    return svc && svc.hosting === 'personal' && svc.dataDir ? svc.dataDir : null;
+  };
+  const readFile = async () => {
+    if (readBridgeFile) return readBridgeFile();
+    const dataDir = personalDataDir();
+    if (dataDir && nodeRunner) return (await nodeRunner.inspectLocal({ dataDir })).trust;
+    return readTrustedBridgeFile(bridgeFile(), { env, platform });
+  };
   const makeClient = clientFactory || ((options) => new DesktopBridgeClient(options));
   let client = null;
   let clientStateHandler = null;
@@ -49,6 +133,27 @@ function createDesktopController({
   let foundError = null;
   let importSession = null;
   let disposed = false;
+  // The one-click pairing in flight (§6.2): which pending pair, its stage
+  // and its refusal. In memory: a pending pair from before a restart has none.
+  let personalFlow = null;
+  // What the desktop last learnt of the personal node (§7.1, §11).
+  let nodeState = { ...INITIAL_NODE_STATE };
+  // Every §7.3 wait's sleep, each with its own timer (the pairing flow's and
+  // the attached start's can run at once); dispose() ends them all.
+  const sleeps = new Set();
+  // The attached start's and the pairing flow's current sleeps, so a
+  // connect, a fatal code or a cancel ends that wait alone.
+  let attachSlot = null;
+  let pairSlot = null;
+  // §7.4: the node read again after a drop and in a disconnected status.
+  let lastNodeReadAt = -Infinity;
+  let refreshRun = null;
+  // The attached start (§7.2, §7.3): run by itself once per launch (C-13);
+  // a press starts a new generation, which ends the wait before it.
+  let launchStarted = false;
+  let startGeneration = 0;
+  let startRun = null;
+  let attachWaiting = false;
 
   const send = (channel, payload) => {
     const win = getWindow();
@@ -146,7 +251,16 @@ function createDesktopController({
     if (!pending) return;
     const created = Date.parse(pending.createdAt);
     const until = Number.isFinite(created) ? created + pollWindowMs : Date.now() - 1;
-    if (until > Date.now()) {
+    if (until > Date.now() && pending.personal) {
+      // The one-click flow died with the app that ran it: say so, and let
+      // the owner try again or cancel. Nothing is run by itself.
+      personalFlow = {
+        request: pending.request,
+        stage: 'command',
+        error: { code: 'PAIR_COMMAND_FAILED', message: 'Pairing did not finish: the app closed while pairing.' },
+        record: null
+      };
+    } else if (until > Date.now()) {
       setImmediate(() => {
         if (!disposed && state.pendingPair && state.pendingPair.request === pending.request) {
           startPolling(until).catch((err) => log.warn(`pairing poll failed: ${err.message}`));
@@ -159,6 +273,27 @@ function createDesktopController({
     }
   }
 
+  // §11's `node`: null unless the node in question is a personal one.
+  function nodeStatus() {
+    const pending = state.pendingPair;
+    const svc = state.pairing && state.pairing.service;
+    let base = null;
+    if (pending && pending.personal) base = pending.personal;
+    else if (!pending && svc && svc.hosting === 'personal') base = { name: svc.name || null, dataDir: svc.dataDir };
+    return base ? nodeView(base) : null;
+  }
+
+  // §11's `node`, from what the desktop last learnt of it.
+  function nodeView(base) {
+    return {
+      hosting: 'personal', name: base.name || null, dataDir: base.dataDir || null,
+      task: nodeState.task, running: nodeState.running, pid: nodeState.pid,
+      starting: nodeState.starting, startError: nodeState.startError
+    };
+  }
+
+  const setRunning = (r) => { nodeState = { ...nodeState, ...runningFields(r) }; };
+
   const pairCommand = (request) => (platform === 'win32'
     ? `king-louie-service desktop pair ${request}`
     : `sudo king-louie-service desktop pair ${request}`);
@@ -167,7 +302,10 @@ function createDesktopController({
     const pairing = state.pairing;
     if (state.pendingPair) return 'pairing';
     if (!pairing || !pairing.service) return 'unpaired';
-    if (mode === 'attached') return connection.status === 'connected' ? 'attached-connected' : 'attached-disconnected';
+    if (mode === 'attached') {
+      if (connection.status === 'connected') return 'attached-connected';
+      return nodeState.starting && nodeStatus() ? 'attached-starting' : 'attached-disconnected';
+    }
     return 'paired';
   }
 
@@ -184,10 +322,22 @@ function createDesktopController({
       }
     }
     let bridge = null;
+    // §7.4: a disconnected personal pairing shows what §7.1 finds now
+    // (rate-limited: not a PowerShell call per repaint).
+    if (current === 'attached-disconnected') await refreshNode().catch(() => {});
+    let node = nodeStatus();
     if (current === 'unpaired') {
       let r;
       try {
-        r = (await readFile()) || {};
+        if (nodeRunner) {
+          // C-1: one inspector call answers the bridge read and whether a
+          // personal node lives here.
+          const local = await nodeRunner.inspectLocal({ bridgeFile: bridgeFile() });
+          r = (readBridgeFile ? await readBridgeFile() : local.trust) || {};
+          node = await unpairedNode(local.node);
+        } else {
+          r = (await readFile()) || {};
+        }
       } catch (err) {
         r = { ok: false, code: err.code || null, error: err.message };
       }
@@ -207,15 +357,23 @@ function createDesktopController({
         label: pairing.label,
         service: pairing.service ? { ...pairing.service, fingerprint: fingerprintGroups(pairing.service.nodeId) } : null
       } : null,
-      pendingPair: pending ? {
+      pendingPair: pending ? (pending.personal ? {
+        request: pending.request,
+        personal: true,
+        stage: personalFlow && personalFlow.request === pending.request ? personalFlow.stage : 'command',
+        deviceFingerprint: fingerprintGroups(pending.deviceId),
+        service: found ? { nodeId: found.nodeId, fingerprint: fingerprintGroups(found.nodeId), port: found.port } : null,
+        error: personalFlow && personalFlow.request === pending.request ? personalFlow.error : null
+      } : {
         request: pending.request,
         command: pairCommand(pending.request),
         deviceFingerprint: fingerprintGroups(pending.deviceId),
         service: found ? { nodeId: found.nodeId, fingerprint: fingerprintGroups(found.nodeId), port: found.port } : null,
         error: foundError
-      } : null,
+      }) : null,
+      node,
       service: liveService || (pairing && pairing.service && pairing.service.info) || null,
-      connection: { ...connection },
+      connection: current === 'attached-starting' ? { ...connection, status: 'starting' } : { ...connection },
       approvals,
       lastImport: state.lastImport,
       unavailableTabs: mode === 'attached' ? [...ATTACHED_UNAVAILABLE_TABS] : [],
@@ -224,8 +382,235 @@ function createDesktopController({
     };
   }
 
+  // The unpaired view's node: what the inspector said, plus the task and
+  // whether a node runs (§7.1), so the pane can offer Install.
+  async function unpairedNode(local) {
+    if (!local || !local.personal) return null;
+    const [task, running] = await Promise.all([
+      nodeRunner.queryTask({ me: local.me }).catch(() => ({ state: 'unknown' })),
+      nodeRunner.nodeRunning({ dataDir: local.dataDir }).catch(() => ({ running: false, pid: null }))
+    ]);
+    nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+    return nodeView(local);
+  }
+
+  // §7.3, shared with the attached start (T07): from the /Run (`since`, or
+  // null when nothing was run) call `attempt()` every nodeRetryMs until it
+  // answers `{ done: true, result }`, the node's log says it failed to start
+  // after `since`, or nodeStartWaitMs pass. `isCurrent()` false or dispose()
+  // ends it as CANCELLED. Each sleep is a ref'd timer of its own, held in
+  // `slot` (when given) while it runs; waking it clears that timer.
+  function sleep(ms, slot) {
+    return new Promise((resolve) => {
+      const h = { timer: null };
+      const end = (clear) => {
+        if (!sleeps.delete(h)) return;
+        if (clear) clearTimer(h.timer);
+        if (slot && slot.current === h) slot.current = null;
+        resolve();
+      };
+      h.wake = () => end(true);
+      sleeps.add(h);
+      if (slot) slot.current = h;
+      h.timer = setTimer(() => end(false), ms);
+    });
+  }
+  const wakeSlot = (slot) => { if (slot && slot.current) slot.current.wake(); };
+  async function waitForNode({ dataDir, since = null, attempt, isCurrent = () => true, slot = null }) {
+    const cancelled = { ok: false, code: 'CANCELLED' };
+    const started = clock();
+    for (;;) {
+      if (disposed || !isCurrent()) return cancelled;
+      const r = await attempt();
+      if (disposed || !isCurrent()) return cancelled;
+      if (r && r.done) return { ok: true, result: r.result };
+      if (since !== null && nodeRunner) {
+        const failed = await nodeRunner.startFailureSince(since, { dataDir });
+        if (disposed || !isCurrent()) return cancelled;
+        if (failed) return { ok: false, code: 'NODE_START_FAILED', message: shown(failed.line, 400) };
+      }
+      const left = started + nodeStartWaitMs - clock();
+      if (left <= 0) return { ok: false, code: 'NODE_START_TIMEOUT', message: startTimeoutText(nodeStartWaitMs) };
+      await sleep(Math.min(nodeRetryMs, left), slot);
+    }
+  }
+
+  // §6.2: is this pending pair still the one the flow was started for?
+  const flowCurrent = (request) => () => !disposed && Boolean(state.pendingPair) && state.pendingPair.request === request
+    && Boolean(personalFlow) && personalFlow.request === request;
+
+  function setStage(request, stage) {
+    if (!personalFlow || personalFlow.request !== request) return;
+    personalFlow.stage = stage;
+    personalFlow.error = null;
+    notify();
+  }
+
+  async function failFlow(request, error) {
+    if (personalFlow && personalFlow.request === request) {
+      personalFlow.error = shownError(error);
+      nodeState = { ...nodeState, starting: false };
+      notify();
+    }
+    return status();
+  }
+
+  // §7.1, §12: the one way the desktop runs the task, for the pairing flow,
+  // the attached start, Start and Restart. The task is read first and must
+  // be registered, enabled and this account's (never another account's
+  // task: TASK_REFUSALS); a restart then stops a node that runs (and only
+  // one that runs); then /Run. Resolves { ok: true, ranAt }, a refusal
+  // { ok: false, code, message } (shown), or { cancelled: true }.
+  async function runNodeTask({ dataDir, me, restart = false, isCurrent, onStarting = null }) {
+    const task = await nodeRunner.queryTask({ me }).catch(() => ({ state: 'unknown' }));
+    if (!isCurrent()) return { cancelled: true };
+    nodeState = { ...nodeState, task: task.state };
+    if (task.state !== 'registered') return { ok: false, ...(TASK_REFUSALS[task.state] || TASK_REFUSALS.unknown) };
+    if (onStarting) onStarting();
+    if (restart) {
+      const running = await nodeRunner.nodeRunning({ dataDir });
+      if (!isCurrent()) return { cancelled: true };
+      setRunning(running);
+      if (running.running) {
+        const stopped = await nodeRunner.stopNode({ dataDir });
+        if (!isCurrent()) return { cancelled: true };
+        if (!stopped.ok) return { ok: false, ...shownError({ code: stopped.code || 'NODE_STOP_FAILED', message: stopped.message }) };
+        setRunning(null);
+      }
+    }
+    const ran = await nodeRunner.runTask();
+    if (!isCurrent()) return { cancelled: true };
+    if (!ran.ok) return { ok: false, ...shownError({ code: ran.code || 'NODE_TASK_RUN_FAILED', message: ran.message }) };
+    return { ok: true, ranAt: ran.ranAt };
+  }
+
+  // §6.2 steps 2-4 for a pending personal pair; step 5 is finishPersonalPair.
+  async function runPersonalPair(request) {
+    const current = flowCurrent(request);
+    const dataDir = state.pendingPair.personal.dataDir;
+    // 2. The CLI, as this account, unelevated.
+    const cli = await nodeRunner.runCli(['desktop', 'pair', request, '--yes', '--json', '--data-dir', dataDir], { timeoutMs: PAIR_CLI_TIMEOUT_MS });
+    if (!current()) return status();
+    const json = cli && cli.json && typeof cli.json === 'object' ? cli.json : null;
+    if (json && json.ok === false) {
+      return failFlow(request, { code: json.code || 'PAIR_COMMAND_FAILED', message: json.message || '' });
+    }
+    if (!json || json.ok !== true || cli.code !== 0 || typeof json.nodeId !== 'string') {
+      const why = firstLine(cli && cli.stderr) || (cli && cli.timedOut ? 'the command did not finish in time' : ((cli && cli.error) || 'the command failed'));
+      return failFlow(request, { code: 'PAIR_COMMAND_FAILED', message: `Pairing did not finish: ${why}` });
+    }
+    // 3. The trusted read: the personal rule, the CLI's own node.
+    let trust;
+    try {
+      trust = (await nodeRunner.inspectLocal({ dataDir })).trust || {};
+    } catch (err) {
+      trust = { ok: false, code: 'BRIDGE_FILE_UNTRUSTED', error: err.message };
+    }
+    if (!current()) return status();
+    if (!trust.ok) {
+      return failFlow(request, { code: trust.code || 'BRIDGE_FILE_UNTRUSTED', message: trust.error || MESSAGES.PAIR_SERVICE_CHANGED });
+    }
+    if (trust.hosting !== 'personal' || !trust.record || trust.record.nodeId !== json.nodeId) {
+      return failFlow(request, { code: 'PAIR_SERVICE_CHANGED', message: MESSAGES.PAIR_SERVICE_CHANGED });
+    }
+    personalFlow.record = trust.record;
+    found = trust.record;
+    foundError = null;
+    // 4. Bring the bridge up.
+    const running = await nodeRunner.nodeRunning({ dataDir });
+    if (!current()) return status();
+    setRunning(running);
+    if (running.running && json.bridgeTurnedOn === true) {
+      // C-6: never restart a running node without asking.
+      setStage(request, 'restart-needed');
+      return status();
+    }
+    if (running.running) {
+      setStage(request, 'confirming');
+      return finishPersonalPair(request, null);
+    }
+    const ran = await runNodeTask({
+      dataDir,
+      isCurrent: current,
+      onStarting: () => {
+        nodeState = { ...nodeState, starting: true, startError: null };
+        setStage(request, 'starting');
+      }
+    });
+    if (ran.cancelled) return status();
+    if (!ran.ok) return failFlow(request, ran);
+    return finishPersonalPair(request, ran.ranAt);
+  }
+
+  // §6.2 step 5: wait for the bridge (§7.3), each try the existing
+  // pairConfirm with the record of step 3.
+  async function finishPersonalPair(request, since) {
+    const current = flowCurrent(request);
+    const record = personalFlow.record;
+    const dataDir = state.pendingPair.personal.dataDir;
+    const slot = { current: null };
+    pairSlot = slot;
+    const waited = await waitForNode({
+      dataDir,
+      since,
+      slot,
+      isCurrent: current,
+      attempt: async () => {
+        found = record;
+        const r = await pairConfirm({ nodeId: record.nodeId });
+        if (r && r.ok && r.view && r.view !== 'pairing') return { done: true, result: r };
+        if (r && !r.ok && PAIR_FATAL.has(r.code)) return { done: true, result: r };
+        return { done: false };
+      }
+    });
+    if (pairSlot === slot) pairSlot = null;
+    nodeState = { ...nodeState, starting: false };
+    if (waited.code === 'CANCELLED') return status();
+    if (!waited.ok) {
+      nodeState = { ...nodeState, startError: shownError(waited) };
+      return failFlow(request, waited);
+    }
+    const r = waited.result;
+    if (!r.ok) return failFlow(request, { code: r.code, message: r.error || '' });
+    personalFlow = null;
+    nodeState = { ...nodeState, running: true, startError: null };
+    return status();
+  }
+
+  // §6.2 step 4's "Restart and pair".
+  async function pairRestartConfirm({ confirmed = false } = {}) {
+    const pending = state.pendingPair;
+    if (!pending || !pending.personal || !personalFlow || personalFlow.request !== pending.request || personalFlow.stage !== 'restart-needed') {
+      return { ok: false, code: 'NOT_PAIRING', error: 'No pairing is waiting for a restart.' };
+    }
+    if (confirmed !== true) return { ok: false, code: 'CONFIRM_REQUIRED', error: 'Pairing restarts King Louie Node: a turn or a take in progress stops.' };
+    const request = pending.request;
+    const restarted = await runNodeTask({
+      dataDir: pending.personal.dataDir,
+      restart: true,
+      isCurrent: flowCurrent(request),
+      onStarting: () => {
+        nodeState = { ...nodeState, starting: true, startError: null };
+        setStage(request, 'starting');
+      }
+    });
+    if (restarted.cancelled) return status();
+    if (!restarted.ok) return failFlow(request, restarted);
+    return finishPersonalPair(request, restarted.ranAt);
+  }
+
   async function pairStart() {
     if (!state.secureStorageUsable()) return { ok: false, code: 'SECURE_STORAGE_UNAVAILABLE', error: MESSAGES.SECURE_STORAGE_UNAVAILABLE };
+    // §6.2: the local read decides which flow runs.
+    let local = null;
+    if (nodeRunner) {
+      try {
+        local = (await nodeRunner.detectPersonalNode({})) || null;
+      } catch (err) {
+        log.warn(`personal node read failed: ${err.message}`);
+      }
+    }
+    const personal = Boolean(local && local.personal && local.dataDir);
     // A follow-up command from a previous unpair is moot once a new pairing
     // starts; the owner dismisses it or it's superseded, never both shown.
     state.setPendingServiceCommand(null);
@@ -240,10 +625,19 @@ function createDesktopController({
       privateKeySealed: state.seal(privateKey.export({ type: 'pkcs8', format: 'pem' })),
       label,
       request,
-      createdAt: createdAt.toISOString()
+      createdAt: createdAt.toISOString(),
+      ...(personal ? { personal: { dataDir: local.dataDir, name: local.name || null } } : {})
     });
     found = null;
     foundError = null;
+    if (personal) {
+      stopPolling();
+      personalFlow = { request, stage: 'command', error: null, record: null };
+      nodeState = { ...INITIAL_NODE_STATE };
+      notify();
+      return runPersonalPair(request);
+    }
+    personalFlow = null;
     await startPolling(createdAt.getTime() + pollWindowMs);
     return status();
   }
@@ -306,7 +700,13 @@ function createDesktopController({
       publicKey: pending.publicKey,
       privateKeySealed: pending.privateKeySealed,
       label: pending.label,
-      service: { ...service, pairedAt: now().toISOString(), info: { version: info.version, account: info.account, profile: info.profile, providersConfigured: info.providersConfigured } }
+      service: {
+        ...service,
+        // C-7: what the pairing was made with; each launch reads the disk again.
+        ...(pending.personal ? { hosting: 'personal', dataDir: pending.personal.dataDir, name: pending.personal.name || null } : {}),
+        pairedAt: now().toISOString(),
+        info: { version: info.version, account: info.account, profile: info.profile, providersConfigured: info.providersConfigured }
+      }
     });
     state.setPendingPair(null);
     stopPolling();
@@ -317,6 +717,9 @@ function createDesktopController({
 
   async function pairCancel() {
     state.setPendingPair(null);
+    personalFlow = null;
+    wakeSlot(pairSlot);
+    nodeState = { ...nodeState, starting: false };
     stopPolling();
     notify();
     return status();
@@ -347,7 +750,21 @@ function createDesktopController({
     state.setPendingPair(null);
     state.setMode('standalone');
     stopPolling();
-    const command = pairing ? `${platform === 'win32' ? '' : 'sudo '}king-louie-service desktop unpair ${pairing.deviceId}` : null;
+    personalFlow = null;
+    const svc = pairing && pairing.service;
+    const personalDir = svc && svc.hosting === 'personal' && svc.dataDir && nodeRunner ? svc.dataDir : null;
+    let command = pairing ? `${platform === 'win32' ? '' : 'sudo '}king-louie-service desktop unpair ${pairing.deviceId}` : null;
+    if (personalDir) {
+      // C-8: under personal hosting the desktop removes itself from the node;
+      // the follow-up command shows only when that fails.
+      const r = await nodeRunner.runCli(['desktop', 'unpair', pairing.deviceId, '--data-dir', personalDir], { timeoutMs: PAIR_CLI_TIMEOUT_MS });
+      if (r && r.code === 0) {
+        command = null;
+      } else {
+        command = `king-louie-service desktop unpair ${pairing.deviceId} --data-dir ${quoteArg(personalDir)}`;
+        log.warn(`desktop unpair did not finish: ${firstLine(r && r.stderr) || 'no output'}`);
+      }
+    }
     // Persisted, not just returned: notify() below (or, in attached mode,
     // the relaunch) can reach the pane before this reply ever does, and the
     // pane needs to keep showing this on every repaint — including one
@@ -437,8 +854,19 @@ function createDesktopController({
     clientStateHandler = null;
     if (!client) return;
     clientStateHandler = (s) => {
+      const was = connection.status;
       connection = { status: s.status, code: s.code, error: s.error, nextRetryAt: s.nextRetryAt };
+      // §7.3: a connect, or a code waiting will not change, ends the
+      // attached start's sleep at once (its timer cleared).
+      if (attachWaiting && (s.status === 'connected' || BRIDGE_FATAL.has(s.code))) wakeSlot(attachSlot);
       notify();
+      // §7.4, C-13: after a drop the row is chosen from what §7.1 finds
+      // now. Read only: a drop never runs the task.
+      if (was === 'connected' && s.status !== 'connected') {
+        refreshNode({ force: true })
+          .then((changed) => { if (changed) notify(); })
+          .catch((err) => log.warn(`reading King Louie Node after a drop failed: ${err.message}`));
+      }
     };
     client.on('state', clientStateHandler);
   }
@@ -446,16 +874,267 @@ function createDesktopController({
   function dispose() {
     disposed = true;
     stopPolling();
+    for (const h of [...sleeps]) h.wake();
     closeImportSession();
     if (client && clientStateHandler) client.off('state', clientStateHandler);
     clientStateHandler = null;
   }
 
+  // --- §7.2-§7.4, §8: the personal node an attached desktop starts. ---
+
+  const personalPairingDir = () => {
+    const svc = state.pairing && state.pairing.service;
+    return svc && svc.hosting === 'personal' && svc.dataDir ? svc.dataDir : null;
+  };
+
+  // Today's connect: the client's own loop and backoff, nothing else.
+  function connectNow() {
+    if (client) client.connect().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
+  }
+
+  function endStart(startError) {
+    nodeState = { ...nodeState, starting: false, startError: startError ? shownError(startError) : null };
+    notify();
+  }
+
+  // §7.4: read the task and the pidfile again for an attached personal
+  // pairing that is not starting. At most once per nodeRefreshMs unless
+  // forced (a drop); resolves true when it read something.
+  function refreshNode({ force = false } = {}) {
+    const dataDir = personalPairingDir();
+    if (mode !== 'attached' || !dataDir || !nodeRunner || disposed) return Promise.resolve(false);
+    if (startRun || nodeState.starting) return Promise.resolve(false);
+    if (refreshRun) return refreshRun;
+    if (!force && clock() - lastNodeReadAt < nodeRefreshMs) return Promise.resolve(false);
+    lastNodeReadAt = clock();
+    const run = (async () => {
+      const [task, running] = await Promise.all([
+        nodeRunner.queryTask({}).catch(() => ({ state: 'unknown' })),
+        nodeRunner.nodeRunning({ dataDir }).catch(() => ({ running: false, pid: null }))
+      ]);
+      // A start begun meanwhile owns the state.
+      if (disposed || startRun || nodeState.starting) return false;
+      nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+      return true;
+    })();
+    refreshRun = run;
+    run.then(() => { if (refreshRun === run) refreshRun = null; }, () => { if (refreshRun === run) refreshRun = null; });
+    return run;
+  }
+
+  // Resolves once no read of the node is in flight.
+  async function refreshIdle() {
+    while (refreshRun) await refreshRun.catch(() => {});
+  }
+
+  // Whether the client's own loop has settled the wait: connected, or a
+  // code that waiting will not change (shown as now).
+  function clientSettled() {
+    if (client && client.connected) return { done: true, result: { connected: true } };
+    if (connection.status === 'failed' && BRIDGE_FATAL.has(connection.code)) return { done: true, result: { connected: false } };
+    return null;
+  }
+
+  // One start: check the disk (C-7), run or restart the node when that is
+  // what is asked and allowed (C-11), then the §7.3 wait over the client's
+  // own loop: retryNow() every nodeRetryMs, no second connection loop.
+  async function attachedStart({ dataDir, restart = false, gen }) {
+    const current = () => !disposed && gen === startGeneration;
+    let local = null;
+    try {
+      local = await nodeRunner.detectPersonalNode({ dataDir });
+    } catch (err) {
+      log.warn(`personal node read failed: ${err.message}`);
+    }
+    if (!current()) return;
+    if (!local || !local.personal || !samePath(local.dataDir, dataDir)) {
+      // The record only says whether to try; the disk says no.
+      endStart(null);
+      connectNow();
+      return;
+    }
+    let since = null;
+    let run = restart;
+    if (!restart) {
+      const running = await nodeRunner.nodeRunning({ dataDir });
+      if (!current()) return;
+      setRunning(running);
+      run = !running.running;
+    }
+    if (run) {
+      // A restart stops only a node that runs: with none, it is a start.
+      const ran = await runNodeTask({
+        dataDir,
+        me: local.me,
+        restart,
+        isCurrent: current,
+        onStarting: () => {
+          nodeState = { ...nodeState, starting: true, startError: null };
+          notify();
+        }
+      });
+      if (ran.cancelled) return;
+      if (!ran.ok) {
+        endStart(ran);
+        connectNow();
+        return;
+      }
+      since = ran.ranAt;
+    }
+    nodeState = { ...nodeState, starting: true, startError: null };
+    notify();
+    attachWaiting = true;
+    const slot = { current: null };
+    attachSlot = slot;
+    let waited;
+    try {
+      waited = await waitForNode({
+        dataDir,
+        since,
+        slot,
+        isCurrent: current,
+        attempt: async () => {
+          const before = clientSettled();
+          if (before) return before;
+          if (client) client.retryNow().catch(() => {});
+          return clientSettled() || { done: false };
+        }
+      });
+    } finally {
+      if (gen === startGeneration) attachWaiting = false;
+      if (attachSlot === slot) attachSlot = null;
+    }
+    if (waited.code === 'CANCELLED') return;
+    if (waited.ok) {
+      if (waited.result.connected) nodeState = { ...nodeState, running: true };
+      endStart(null);
+    } else if (waited.code === 'NODE_START_TIMEOUT' && since === null) {
+      // Nothing was run: the node was up at the start. Read it again: still
+      // up, its bridge never answered (the "running (pid N)" row and its
+      // Restart say so); gone, the timeout stands (§7.3).
+      const now = await nodeRunner.nodeRunning({ dataDir }).catch(() => ({ running: false, pid: null }));
+      if (!current()) return;
+      setRunning(now);
+      lastNodeReadAt = clock();
+      endStart(now.running ? null : waited);
+    } else {
+      endStart({ code: waited.code, message: waited.message });
+    }
+  }
+
+  function launchStart(dataDir, restart) {
+    const gen = ++startGeneration;
+    wakeSlot(attachSlot);
+    const run = attachedStart({ dataDir, restart, gen }).catch((err) => {
+      log.warn(`starting King Louie Node failed: ${err.message}`);
+      if (gen === startGeneration) endStart({ code: 'NODE_START_FAILED', message: shown(err.message, 400) });
+    });
+    startRun = run;
+    run.then(() => { if (startRun === run) startRun = null; });
+    return run;
+  }
+
+  // §7.2: called by the attached host in place of client.connect(). A
+  // personal pairing runs the node at most once per launch (C-13); a fleet
+  // pairing connects at once, as before.
+  async function startAttached() {
+    if (mode !== 'attached' || !client) return;
+    const first = !launchStarted;
+    launchStarted = true;
+    const dataDir = personalPairingDir();
+    if (!first || !dataDir || !nodeRunner) {
+      connectNow();
+      return;
+    }
+    await launchStart(dataDir, false);
+  }
+
+  // §7.4's Start/Restart buttons: only on a press. Answers once the start
+  // is under way; the wait goes on in the background (statusChanged on
+  // each step), so the pane is not held for up to 60 s.
+  async function nodeStart({ restart = false } = {}) {
+    const dataDir = personalPairingDir();
+    if (!dataDir || !nodeRunner) return { ok: false, code: 'NOT_PERSONAL', error: NOT_PERSONAL_TEXT };
+    if (mode !== 'attached' || !client) return { ok: false, code: 'NOT_ATTACHED', error: 'Attach to King Louie Node first.' };
+    launchStarted = true;
+    nodeState = { ...nodeState, starting: true, startError: null };
+    notify();
+    launchStart(dataDir, restart === true);
+    return status();
+  }
+
+  // Resolves once no start is in flight.
+  async function startIdle() {
+    while (startRun) await startRun;
+  }
+
+  // §8: which data dir Install is for, and whose task it reads after.
+  // The disk is read every time (C-7): a recorded data dir only says where
+  // to look, and must still be a personal node's.
+  async function installTarget() {
+    if (!nodeRunner) return null;
+    const recorded = personalDataDir();
+    let local;
+    try {
+      local = await nodeRunner.detectPersonalNode(recorded ? { dataDir: recorded } : {});
+    } catch (err) {
+      log.warn(`personal node read failed: ${err.message}`);
+      return null;
+    }
+    if (!local || !local.personal || !local.dataDir) return null;
+    if (recorded && !samePath(local.dataDir, recorded)) return null;
+    return { dataDir: local.dataDir, me: local.me };
+  }
+
+  function installResult(cli) {
+    const lines = outputLines(cli && cli.stdout, cli && cli.stderr);
+    if (cli && cli.code === 0) return { ok: true, lines };
+    const message = firstLine(cli && cli.stderr) || firstLine(cli && cli.stdout)
+      || (cli && cli.timedOut ? 'the command did not finish in time' : shown((cli && cli.error) || 'the command failed', 400));
+    return { ok: false, code: 'NODE_INSTALL_FAILED', message, lines };
+  }
+
+  const notPersonalInstall = () => ({ ok: false, code: 'NOT_PERSONAL', message: NOT_PERSONAL_TEXT, error: NOT_PERSONAL_TEXT, lines: [] });
+
+  async function nodeInstallPreview() {
+    const target = await installTarget();
+    if (!target) return notPersonalInstall();
+    const cli = await nodeRunner.runCli(['install', '--personal', '--dry-run', '--data-dir', target.dataDir], { timeoutMs: INSTALL_CLI_TIMEOUT_MS });
+    return installResult(cli);
+  }
+
+  async function nodeInstall({ confirmed = false } = {}) {
+    if (confirmed !== true) {
+      const text = 'Installing King Louie Node needs the Install press.';
+      return { ok: false, code: 'CONFIRM_REQUIRED', message: text, error: text, lines: [] };
+    }
+    const target = await installTarget();
+    if (!target) return notPersonalInstall();
+    // §8: only while no task is registered.
+    const before = await nodeRunner.queryTask({ me: target.me }).catch(() => ({ state: 'unknown' }));
+    if (before.state !== 'missing') {
+      nodeState = { ...nodeState, task: before.state };
+      notify();
+      const refusal = INSTALL_REFUSALS[before.state] || INSTALL_REFUSALS.unknown;
+      return { ok: false, code: refusal.code, message: refusal.message, error: refusal.message, lines: [] };
+    }
+    const cli = await nodeRunner.runCli(['install', '--personal', '--yes', '--data-dir', target.dataDir], { timeoutMs: INSTALL_CLI_TIMEOUT_MS });
+    // Whatever the install did, the task and the node are read again.
+    const [task, running] = await Promise.all([
+      nodeRunner.queryTask({ me: target.me }).catch(() => ({ state: 'unknown' })),
+      nodeRunner.nodeRunning({ dataDir: target.dataDir }).catch(() => ({ running: false, pid: null }))
+    ]);
+    nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+    notify();
+    return installResult(cli);
+  }
+
   resumePendingPair();
 
   return {
-    status, pairStart, pairConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
+    status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
     importPlan, importApply, dismissServiceCommand, createClient, setClient, dispose,
+    startAttached, startIdle, refreshIdle, nodeStart, nodeInstallPreview, nodeInstall,
     on: (event, fn) => emitter.on(event, fn)
   };
 }
