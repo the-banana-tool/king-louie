@@ -47,6 +47,9 @@ A signed message travels as an envelope:
   Ed25519 key with prefix `kld-` (vector `device-id-ed25519`).
 - Fingerprints are shown to people in groups of four: `d-abcdefghijklmnop` →
   `abcd efgh ijkl mnop`.
+- An Android phone may also hold a second P-256 key, its **read key**, beside
+  the device key that decides ("Revised 2026-10-28: the read key", at the end
+  of this document).
 
 ## 3. Messages
 
@@ -122,6 +125,7 @@ of `approved`, `denied`, `expired`, `withdrawn`, `refused`.
 ### 3.4 Enrollment and revocation (phone-signed)
 
 `kl.device.enroll`: `{ v, type, device: { device_id, name, platform, public_key }, enrolled_by, created_at, expires_at, nonce }`.
+`device` may also carry `read_key` ("Revised 2026-10-28", at the end).
 
 - Console enrollment: `enrolled_by: null`, signed by the new device itself
   (`kid = device.device_id`), plus `code_id` and
@@ -438,6 +442,12 @@ office NAT) are not locked out by a neighbour's failures.
 An invite claim's `mac` is `b64url(HMAC-SHA256(key = the 32 raw bytes of secret, JCS(device)))`;
 the inviting phone, not the relay, checks it.
 
+`device` in the Auth column above is a device-key signature. Since
+2026-10-28 a request may instead be signed with the device's read key; each
+route takes either key or the device key only, and the table in "Revised
+2026-10-28: the read key" (at the end) gives each route's key, including
+the routes added since.
+
 ## 8. Push
 
 Push carries only `{ kind, id }` (and the node name in the alert text): APNs
@@ -481,3 +491,234 @@ with `allowTestKeys: true` — production code never sets that flag. An app or
 node build that pins one of these keys, or ships `keys.json` itself outside
 `tests/`, has zero security from that key: anyone can produce a valid
 signature for it, today or after this document changes.
+
+## Revised 2026-10-28: the read key
+
+Android app spec `docs/superpowers/specs/2026-10-28-android-app-slim-design.md`
+§8 (owner ruling R-AN-5). Every change is additive: a phone with no read key
+(every iOS phone, and an Android phone enrolled before this) works exactly as
+before against an upgraded relay and node.
+
+### Two keys
+
+- The **device key** is the phone's key of §2: it decides. On Android each
+  signature asks for a strong biometric.
+- The **read key** is a second P-256 key in the Android Keystore that asks
+  for nothing (no user authentication) but signs only while the phone is
+  unlocked. It may sign two things: a read-key request to the relay (below)
+  and `kl.lease.watch` (lease-v1, "Revised 2026-10-28"). Nothing it signs
+  can approve, grant, answer, stop, enroll, revoke, connect, disconnect, pair,
+  acknowledge or remove anything, on the node, the front door or the relay.
+- A read key has no device id of its own: everything it signs names the
+  device it belongs to. Its fingerprint for people is `r-` and the first 16
+  base32 characters of SHA-256 over `0x04 || x || y` (the device id's rule,
+  another prefix), in groups of four: `r-nzy7 gfgc 4j6g oetu`
+  (`readKeyFingerprint` in `src/approvals/messages.js`).
+
+### Enrollment carries the read key
+
+`kl.device.enroll`'s `device` has exactly the four keys of §3.4, or exactly
+those and `read_key`:
+
+```jsonc
+"device": { "device_id": "d-…", "name": "Pixel", "platform": "android",
+            "public_key": { "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+            "read_key":   { "kty": "EC", "crv": "P-256", "x": "…", "y": "…" } }
+```
+
+- `read_key` is a P-256 JWK on the curve (§2) whose point is not
+  `public_key`'s (`malformed` otherwise). `device_id` still derives from
+  `public_key` alone.
+- It is bound by whatever binds the device key: in a console enrollment the
+  device's own signature and `code_mac`; in a signed enrollment the enrolling
+  phone's signature; in an invite the claim's `mac` over `device` (the claim
+  route accepts `read_key` and refuses one equal to `public_key`,
+  `400 bad_device`), which the inviting phone checks before it signs.
+- A published test key (`keys.json`, `A_read` and `B_read` included) as a
+  read key is refused like one as a device key (`test_key`) unless the node
+  allows test keys.
+
+The node keeps it in the approver record (`<configDir>/approvers/<id>.json`):
+two optional keys, `read_key` (the JWK) and `read_key_at` (the signed
+`created_at` of the enrollment or statement that set it). A record may have
+`read_key` without `read_key_at` (it then dates from `enrolled_at`), never
+`read_key_at` without `read_key`; a `read_key` that is malformed or equals
+`public_key` makes the record invalid. `enroll-device` (console) and
+`device apply` (staged) write them and print "with a read key r-…" beside the
+device's fingerprint before they ask; `device list` shows each record's read
+key.
+
+The relay keeps it in its device record as `read_jwk` and
+`read_key_created_at`, set by every path that registers a device from an
+enrollment (`enroll.done` once the node reports a console enrollment done,
+and `POST /v1/devices/enroll`, which is where an invited phone's key arrives)
+and by `POST /v1/devices/read-key`. Only a strictly newer `created_at`
+replaces a stored read key; a re-registration keeps it.
+
+### Read-key requests
+
+A request signed with the read key carries one more header, and its signed
+string has another first line:
+
+```
+X-KL-Device:    d-…            (the device, as for a device-key request)
+X-KL-Key:       read
+X-KL-Timestamp: 2026-10-28T14:05:09.120Z
+X-KL-Signature: b64url(ES256-P1363 by the read key over UTF-8 of S)
+
+S = "KL-PHONE-READ-V1\n" + METHOD + "\n" + pathWithQuery + "\n" + timestamp + "\n" + b64url(SHA-256(body))
+```
+
+Without `X-KL-Key`, or with `X-KL-Key: device`, a request is §7's
+`KL-PHONE-V1` against the device key. The clock window, the replay cache and
+the per-device rate limit of §7 are shared by both keys; the prefix keeps a
+read signature from ever being a device signature over the same request.
+
+Each route declares `read` (either key) or `device` (the device key only).
+The relay's refusals:
+
+| Case | Reply |
+|---|---|
+| `X-KL-Key` is neither `read` nor `device` | `401 bad_key` |
+| `X-KL-Key: read` on a `device` route (refused before the signature is checked) | `403 read_key_not_allowed` |
+| `X-KL-Key: read` from a device the relay holds no read key for | `401 unknown_read_key` |
+| a signature that does not verify against the key the header names | `401 bad_signature` |
+
+The rule for a route's key: a request that only reads, and a request whose
+body is an envelope the device key signed (the envelope is the decision; the
+relay or node checks its signature), take either key. A request that changes
+something and carries no device-key envelope takes the device key. So a
+decision costs one biometric signature, over the decision itself, whatever
+key carries the request.
+
+| Method, path | Key |
+|---|---|
+| `GET /v1/approvals`, `GET /v1/approvals/{request_id}` | read |
+| `GET /v1/questions` | read |
+| `GET /v1/leases`, `GET /v1/leases/{lease_id}/views` | read |
+| `POST /v1/leases/{lease_id}/watch` | read (the body is a watch, which either key may sign) |
+| `POST /v1/presence` | read |
+| `GET /v1/nodes`, `GET /v1/devices`, `GET /v1/devices/invites/{id}` | read |
+| `GET /v1/pairings/pending`, `GET /v1/alerts`, `GET /v1/clients`, `GET /v1/frontdoor`, `GET /v1/nodes/{node_id}/audit-status`, `GET /v1/nodes/{node_id}/history` | read |
+| `PUT /v1/push-token` | read |
+| `POST /v1/challenges` | read (a challenge is spent only by a device-key envelope) |
+| `POST /v1/approvals/{request_id}/response` | read (body: a device-key `kl.approval.response`) |
+| `POST /v1/leases/{lease_id}/grant`, `/revoke` | read (body: a device-key `kl.lease.grant` / `kl.lease.revoke`) |
+| `POST /v1/questions/{token}/answer` | read (body: a device-key `kl.question.answer`) |
+| `POST /v1/grants/{id}/decision`, `POST /v1/clients/{grant_id}/revoke`, `POST /v1/pairings/{id}/decision`, `POST /v1/nodes/{node_id}/remove` | read (body: a device-key client-grant-v1 envelope) |
+| `POST /v1/devices/enroll`, `POST /v1/devices/revoke` | read (body: a device-key enroll or revoke, verified against the caller's device key) |
+| `POST /v1/devices/read-key` | read (the first send is device-key, since the relay holds no read key yet; a re-send may be read-key) |
+| `GET /v1/grants/pending?user_code=` | device (claims a client's request, no envelope) |
+| `POST /v1/alerts/{id}/ack` | device (no envelope) |
+| `POST /v1/pairing-codes`, `POST /v1/devices/invites` | device (opens a way in for a node or a phone, no envelope) |
+| `GET /v1/time`, `GET /v1/repin` | none |
+| `POST /v1/enroll/{code_id}`, `GET /v1/enroll/{code_id}` | code |
+| `POST /v1/devices/invites/{id}/claim` | invite |
+
+The same table is `ROUTE_AUTH` in `tests/frontdoor-phone-routes.test.js`,
+which checks it against every route a relay and a front door register.
+
+### `kl.device.read_key`: a phone enrolled before the read key
+
+An Android phone enrolled with no read key makes one and states it, signed
+with its device key (`kid` = `device_id`, `ES256`):
+
+```jsonc
+{ "v": 1, "type": "kl.device.read_key", "device_id": "d-…",
+  "read_key": { "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+  "created_at": "…", "expires_at": "≤ created_at + 7 days", "nonce": "b64url(32)" }
+```
+
+Exactly those keys; `read_key` a P-256 JWK; `expires_at − created_at` more
+than 0 and at most 7 days (`READ_KEY_MAX_MS`).
+
+`POST /v1/devices/read-key`, body the envelope → `{ nodes: [{ node_id, state }] }`.
+The relay checks, in order: the envelope opens and is a valid
+`kl.device.read_key` (`400 malformed`); `device_id` and `kid` are the caller
+and the caller's device key verifies it (`400 bad_read_key`); `created_at` is
+not more than 5 minutes ahead of the relay's clock (`400 from_the_future`);
+it has not expired (`400 expired`); the caller is active on at least one node
+(`403 forbidden`); the key is not the device key (`400 bad_read_key`). It
+then stores the key (a newer `created_at` replaces an older one) and forwards
+the envelope as the node method `device.read_key` (`{ envelope }`) to every
+node where the device is active. Each node's `state` is what it answered,
+`read-key-pending-apply`, `duplicate` or `rejected`, or `offline` for anything
+else (no answer, or a node from before this change). The relay writes no
+device-log entry for a statement; the phone re-sends it, with the read key, to
+the nodes that answered `offline`, until it expires.
+
+A node checks it like a relayed revoke (§3.4) and only stages it. The
+`device.read_key` method carries only this type, and this type comes only by
+that method (`malformed` otherwise). Then: shape (`malformed`),
+`from_the_future`, `expired`; `alg` `ES256` and `kid` equal to `device_id`
+(`malformed`); the device an active approver (`signer_not_active`) whose
+**device key** verifies it (`bad_signature`: a statement signed by the read
+key itself is refused); `read_key` not the device key (`malformed`) and not a
+test key (`test_key`); the record's read key already (`{ state: 'duplicate' }`);
+`created_at` after the record's current read key was set (`read_key_at`, else
+`enrolled_at`; `stale` otherwise). A staged statement answers
+`{ state: 'read-key-pending-apply' }` and is audited `device.staged` (a
+refusal `device.rejected`, as for enroll and revoke).
+
+`king-louie-service device apply` lists a staged statement as
+`read key  <device-id>  "<name>"  r-…  signed by the device itself  (<age>)`,
+asks `[y/N]` as for an enrollment, and judges it against the admin-applied set
+as it stood before the batch: the result is `read key set` (written as
+`read_key` and `read_key_at`, audited `device.read_key_set`) or `rejected:`
+with `created in the future`, `older than 7 days`, `malformed`, `device was
+revoked`, `signer is not an active approver`, `test key`, `already set` or
+`stale`. Statements are applied after the batch's enrollments and revokes,
+newest first, so of two for one device the newer is written and the older is
+then stale. The approver set is still written only by the administrator's
+command.
+
+Until a node has applied a phone's read key it refuses that phone's
+read-signed watches (`bad_signature`); everything the relay serves works at
+once, since the relay knows the key from the first post. A relay from before
+this change answers `404` to `POST /v1/devices/read-key`.
+
+### What the node checks
+
+`verifyDeviceEnvelope` (`src/approvals/verify-device.js`) takes
+`allowReadKey` (default false). Step 6 of §4 becomes: the signature verifies
+against the record's `public_key`; or, only when `allowReadKey` is true and
+the record has a `read_key`, against `read_key`; else `bad_signature`. The
+result's `key` says which verified (`'device'` or `'read'`). Steps 1 to 5 and
+7 to 8 are unchanged, so a revoked device's read key is refused with the
+device (`revoked_device`), and a record whose read key is a published test
+key is refused `test_key`. Only `verifyLeaseWatch` passes
+`allowReadKey: true`; approval responses, lease grants and revokes, question
+answers, signed executor approvals, enroll and revoke staging and the front
+door's phone envelopes keep the default and refuse a read-key signature as
+`bad_signature`.
+
+### What it proves
+
+A read signature proves that the app ran on an unlocked phone that holds the
+key, not that the owner just authenticated. Someone holding the owner's
+unlocked phone with the app open can read what the phone lists (every
+Approval with every parameter, questions, a leased app's frames), keep a
+computer-use lease that phone granted in contact until its approved expiry,
+and report the phone in front; they cannot decide anything. The relay
+operator gains nothing: it cannot sign with either key.
+
+### Vectors
+
+Eight more, 49 in all (`generate.js --check` says `49 vectors match`).
+`keys.json` adds the read keys `A_read` and `B_read` (`{ d, jwk, read_key_of,
+fingerprint }`, `read_key_of` naming the device they belong to), refused by
+nodes as test keys like the others. `phone-reference.js` adds
+`phoneReadAuthString`.
+
+| Vector | Consumers | What |
+|---|---|---|
+| `phone-api-auth-read` | node, android | the `KL-PHONE-READ-V1` string and body hash; the read-key signature verifies against the read JWK and not the device JWK (`accepted_by_device_key: false`) |
+| `enroll-console-read-key` | node, android (the phone builds the payload) | a console enrollment whose `device` carries `read_key`: accepted, and the record holds it |
+| `enroll-console-read-key-equal` | node | `read_key` equal to `public_key`: `malformed` |
+| `enroll-signed-read-key` | node | a signed enrollment carrying `read_key`: staged with it (`expect.staged_read_keys`) |
+| `read-key-valid` | node, android (the phone builds the message) | a `kl.device.read_key`: `read-key-pending-apply` |
+| `read-key-wrong-signer` | node | the statement signed by the read key itself: `bad_signature` |
+| `read-key-from-the-future` | node | `from_the_future` |
+| `response-reject-read-key` | node | an approval response signed by A's read key, A's record holding it: `bad_signature` |
+
+iOS reads none of them; its vector tests filter on `ios`.

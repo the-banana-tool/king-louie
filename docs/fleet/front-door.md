@@ -44,6 +44,19 @@ Use the account URL your ACME directory assigned to the front door's account.
   Ubuntu).
 - Run `chrony` (or another NTP client). Grants, pairings and challenges
   expire on the front door's clock, and certificates are only as good as it.
+- Upgrade the front door and every node before the Android app. The app
+  reads with its read key (`docs/protocol/approval-v1.md`, "Revised
+  2026-10-28: the read key"), and a front door from before that answers
+  `404` to it: the app then asks you to upgrade the relay and does not fall
+  back to asking for a fingerprint on every read.
+- A phone paired before the read key existed sends it once, after the
+  upgrade (one row in its Approvals list, two fingerprints). The front door
+  uses it at once; each node stages it, and the node's administrator applies
+  it with `king-louie-service device apply`, which prints the device and the
+  read key's fingerprint (`r-…`) and asks `[y/N]`. Until a node has applied
+  it, keeping a computer-use lease on that node going needs a fingerprint
+  (the app offers it), since the node does not accept the phone's read-key
+  watches yet.
 
 ## Install
 
@@ -129,9 +142,10 @@ A fresh front door trusts no phone and no node. The order is:
    node's service; it links to `mesh.kl.example.com` with the pin it wrote to
    its `front-door.json`.
 
-3. **Later nodes, from the phone.** In the app (Nodes), ask for a code for
-   `web-01`, run `king-louie-service pair https://mcp.kl.example.com` on
-   `web-01`, and approve it in the app.
+3. **Later nodes, from the phone.** In the app, ask for a code for
+   `web-01` (on Android, the Scanner's Get a code tab; on iPhone, Nodes),
+   run `king-louie-service pair https://mcp.kl.example.com` on `web-01`, and
+   approve the node pairing in the app.
 
 `king-louie-service frontdoor nodes` lists the nodes, where each came from
 (`console` or `phone`), whether it is online, and its fingerprint.
@@ -144,8 +158,10 @@ Point the MCP client at `https://mcp.kl.example.com/mcp`. It registers, opens a
 consent page with a six-character code, and waits (the wait page sets a
 per-grant cookie, so opening the link for two different clients in the same
 browser does not overwrite one flow with the other). Type that code in the app
-(Connect a client), choose the scopes and machines, and approve with your
-biometric. The app lists connected clients and revokes them.
+(on Android, "Or type a code" on the Scanner's Scan a code tab; on iPhone,
+Connect a client), choose the scopes and machines, and approve with your
+biometric. The app lists connected clients and revokes them (on Android,
+under Settings).
 
 ## Re-pinning
 

@@ -126,6 +126,18 @@ An approval over one unsafe tool call or runbook, signed over the exact
 action.
 _Avoid_: approval (alone, for this kind), F3 approval
 
+**Device key**:
+The paired phone's key that decides: every approval, grant, answer, stop,
+enrollment and revocation is signed with it. On Android each signature asks
+for a fingerprint.
+_Avoid_: approval key, phone key (when the read key is meant too), session key
+
+**Read key**:
+The paired phone's second key, which may only read (lists, statuses,
+pictures, presence) and keep a computer-use lease in contact; it asks for
+nothing but signs only while the phone is unlocked. Android only.
+_Avoid_: session key, API key, view key
+
 **Management surface**:
 Any place the owner sees and answers questions or acts on the fleet: the
 chat, a paired phone, an MCP client, a contact channel.

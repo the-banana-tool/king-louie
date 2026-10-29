@@ -397,3 +397,52 @@ keys for its kind; `VALIDATORS['kl.lease.request']` refuses it,
 `malformed`), and `status-take` (`expect.status` holds `kind`, `unattended`
 and `name` too). The four `status-*` vectors before it, and the listing
 vectors that carry statuses, now carry the three keys. Fifty-one vectors in all.
+
+## Revised 2026-10-28: the read key
+
+Android app spec `docs/superpowers/specs/2026-10-28-android-app-slim-design.md`
+§8 (owner ruling R-AN-5). An Android phone may hold a **read key** beside its
+device key (approval-v1, "Revised 2026-10-28: the read key"): a P-256 key that
+asks for no biometric and signs only while the phone is unlocked. No message
+changes shape.
+
+- **A watch may be signed by either key of its device.** `kl.lease.watch`
+  keeps its shape: `kid` and `device_id` are the device's id, `alg` is
+  `ES256`. `verifyLeaseWatch` passes `allowReadKey: true` to
+  `verifyDeviceEnvelope`, so check 6 accepts the record's `read_key` as well
+  as its `public_key`, and the result says which (`key: 'device' | 'read'`).
+  A record with no `read_key` (iOS, or an Android phone whose read key this
+  node has not applied with `device apply` yet) refuses a read-signed watch
+  as `bad_signature`.
+- **Contact is unchanged** ("Contact" in §2): a watch from the granting
+  device whose `contact_token` is fresh and unused, from either of its keys.
+  On Android that now means "the phone that granted this lease is unlocked
+  with the lease's view open", which is iOS's meaning already (its watches
+  are signed with a session unlocked once), where before it meant "the owner
+  touched the fingerprint sensor within two minutes". An unattended take has
+  no contact window; a watch brings it frames and a fresh status only.
+- **Only a watch.** `kl.lease.grant` (a resume grant too) and
+  `kl.lease.revoke` verify against the device key alone: a read-key signature
+  is `bad_signature`. Stop is still one biometric signature.
+- **Transport.** `POST /v1/leases/{lease_id}/watch`, `/grant` and `/revoke`,
+  `GET /v1/leases` and `GET /v1/leases/{lease_id}/views` take either key's
+  request signature (approval-v1's route table); the node, not the relay,
+  decides what the envelope in the body may be signed with.
+- **Audit.** The `lease.watch` entry adds `key` (`device` or `read`) beside
+  `device_id` and `contact`.
+
+Vectors: four more, 55 in all (`node tests/vectors/lease-v1/generate.js
+--check` says `55 vectors match`). An approver in `given.approvers[]` may
+carry `read_key`, and a read-key vector's `expect` adds `key: 'read'` where
+it is accepted.
+
+| Vector | Consumers | What |
+|---|---|---|
+| `watch-read-key` | node, android | a watch from the granting device signed with its read key: accepted, `key: 'read'`. The phone builds the same `expect.message` as for `watch-valid` and signs it with the read key. (Whether it is contact depends on the manager's tokens, which the vector does not hold; `tests/gui-leases.test.js` covers that.) |
+| `watch-read-key-not-applied` | node | the same watch, the record without a `read_key`: `bad_signature` |
+| `grant-read-key` | node | a grant signed by the read key: `bad_signature` |
+| `revoke-read-key` | node | a revoke signed by the read key: `bad_signature` |
+
+The phone sets now differ: iOS consumes the phone vectors of §5 and the take
+section; Android consumes those and `watch-read-key`
+(`tests/lease-vectors.test.js`).

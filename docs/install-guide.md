@@ -1016,7 +1016,14 @@ Install prints these five steps when it is done:
    pin to `front-door.json` beside `node.yaml` and starts the logon task.
 3. **Your phone**: `king-louie-service enroll-device`, with the node
    running, and answer `y` at its `[y/N]` prompt. None of these commands
-   needs an elevated prompt on a personal node.
+   needs an elevated prompt on a personal node. An Android phone brings a
+   second key, its read key, which lets the app read without asking for your
+   fingerprint and can never approve anything; `enroll-device` prints its
+   fingerprint (`with a read key r-…`) beside the phone's. A phone paired
+   before its app had a read key sends it later, from its Approvals list:
+   the node stages it, and `king-louie-service device apply` writes it
+   after its `[y/N]` prompt. Upgrade the relay or front door and the
+   node before the Android app; an older relay refuses the app's reads.
 4. **The logins the takes will use**:
    `king-louie-service vault set browser_cred:<profile>:<host>`, one for each
    login, the value on stdin, with the node stopped (and `errands-token` when
