@@ -1,7 +1,8 @@
 ---
 id: T10
 title: Android - Push.kt kinds, channels, running count, icon, taps
-status: open
+status: done
+merged: 1203ea60
 blocked_by: []
 ---
 ## Goal
