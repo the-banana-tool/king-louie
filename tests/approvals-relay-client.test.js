@@ -7,7 +7,7 @@ const path = require('path');
 const { MeshTransport } = require('../src/mesh/mesh-transport');
 const { NodeIdentity } = require('../src/mesh/node-identity');
 const { createLinkRpc } = require('../src/approvals/link-rpc');
-const { RelayClient, isReservedMethod } = require('../src/approvals/relay-client');
+const { RelayClient, isReservedMethod, NODE_INBOUND } = require('../src/approvals/relay-client');
 const { addSink } = require('../src/logging');
 
 let relayIdentity;
@@ -100,7 +100,7 @@ describe('RelayClient', () => {
 
   it('registerMethod refuses F3 names and mesh.task.* / mesh.channel.*, but not a mesh.taskx-style name', () => {
     const c = new RelayClient({ identity: nodeIdentity, relayPin: null });
-    for (const name of ['approval.response', 'relay.hello', 'mesh.task.run', 'mesh.channel.open']) {
+    for (const name of ['approval.response', 'relay.hello', 'device.read_key', 'mesh.task.run', 'mesh.channel.open']) {
       assert.throws(() => c.registerMethod(name, () => {}), (err) => err.code === 'method_reserved', name);
       assert.equal(isReservedMethod(name), true);
     }
@@ -108,6 +108,8 @@ describe('RelayClient', () => {
     // merely starts with the reserved word, but isn't actually inside that
     // namespace, is untouched.
     assert.equal(isReservedMethod('mesh.taskx'), false);
+    // android-slim §8.7: the relay forwards a read-key statement beside device.enroll.
+    assert.ok(NODE_INBOUND.includes('device.read_key'));
     assert.doesNotThrow(() => c.registerMethod('mesh.taskx', () => {}));
     assert.doesNotThrow(() => c.registerMethod('lease.grant', () => {}));
   });

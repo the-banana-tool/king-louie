@@ -27,12 +27,14 @@ function sleepSync(ms) {
 // F3's own link methods (§4.6); nobody else may register these names.
 const F3_METHODS = new Set([
   'relay.hello', 'approval.submit', 'approval.status', 'approval.response', 'message.submit',
-  'enroll.open', 'enroll.done', 'enroll.claim', 'device.enroll', 'device.revoke', 'device.state',
+  'enroll.open', 'enroll.done', 'enroll.claim', 'device.enroll', 'device.revoke', 'device.read_key', 'device.state',
   'audit.slice', 'audit.head'
 ]);
 const RESERVED_PREFIXES = ['mesh.task.', 'mesh.channel.'];
 // relay → node methods answered by the onMessage handler (service-wiring).
-const NODE_INBOUND = ['approval.response', 'enroll.claim', 'device.enroll', 'device.revoke', 'audit.slice', 'audit.head'];
+// device.read_key (android-slim spec §8.7): a device key's statement of its
+// read key, staged beside device.enroll; answers { state[, reason] }.
+const NODE_INBOUND = ['approval.response', 'enroll.claim', 'device.enroll', 'device.revoke', 'device.read_key', 'audit.slice', 'audit.head'];
 
 function isReservedMethod(name) {
   return F3_METHODS.has(name) || RESERVED_PREFIXES.some((p) => String(name).startsWith(p));

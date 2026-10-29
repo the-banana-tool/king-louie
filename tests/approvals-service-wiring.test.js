@@ -47,6 +47,16 @@ function layout(records = []) {
   return { base, dataDir, configDir, ports: { store, cipher: createAesGcmCipher(crypto.randomBytes(32)) } };
 }
 
+// A device key's kl.device.read_key statement for a fresh read key (android-slim §8.7).
+function readKeyStatement(phone, { now = Date.now() } = {}) {
+  const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const { kty, crv, x, y } = publicKey.export({ format: 'jwk' });
+  return phone.sign({
+    v: 1, type: 'kl.device.read_key', device_id: phone.deviceId, read_key: { kty, crv, x, y },
+    created_at: new Date(now).toISOString(), expires_at: new Date(now + 24 * 60 * 60 * 1000).toISOString(), nonce: crypto.randomBytes(32).toString('base64url')
+  });
+}
+
 const storeOptions = { geteuid: () => UID, adminUid: UID, platform: 'linux' };
 const nodeConfig = (approvers = { relay: null, requestTtlS: 300 }) => ({ name: 'web-01', approvers, policy: {} });
 
@@ -119,6 +129,13 @@ describe('startApprovals', () => {
     assert.deepEqual(staged, { state: 'staged' });
     await new Promise((r) => setImmediate(r));
     assert.ok(a.auditLedger.tail(5).some((e) => e.kind === 'device.staged' && e.data.device_id === newcomer.deviceId));
+
+    // android-slim §8.7: the relay forwards a device key's read-key statement as device.read_key.
+    const readKey = readKeyStatement(phone);
+    assert.deepEqual(await relay.rpc.call(nodeIdentity.peerId, 'device.read_key', { envelope: readKey }), { state: 'read-key-pending-apply' });
+    assert.deepEqual(await relay.rpc.call(nodeIdentity.peerId, 'device.read_key', { envelope: readKey }), { state: 'duplicate' });
+    await new Promise((r) => setImmediate(r));
+    assert.ok(a.auditLedger.tail(5).some((e) => e.kind === 'device.staged' && e.data.type === 'kl.device.read_key' && e.data.device_id === phone.deviceId));
 
     const submitted = [];
     relay.rpc.handle('approval.submit', (params) => { submitted.push(params.envelope); return { ok: true }; });
@@ -306,6 +323,40 @@ describe('createRelayDispatcher: device.enroll and device.revoke auditing', () =
     }
     assert.equal(auditLedger.entries.length, 20);
     assert.equal(warnings.filter((w) => /device\.rejected audit entries are being rate-limited/.test(w)).length, 1);
+  });
+});
+
+describe('createRelayDispatcher: device.read_key', () => {
+  function fakeAuditLedger() {
+    const entries = [];
+    return { entries, append: async (entry) => { entries.push(entry); return { ...entry, seq: entries.length }; } };
+  }
+
+  it('stages a read-key statement and audits it as device.staged, typed from the envelope', async () => {
+    const phone = createFakePhone();
+    const auditLedger = fakeAuditLedger();
+    const seen = [];
+    const approverStore = { stage: (envelope) => { seen.push(envelope); return { state: 'read-key-pending-apply' }; } };
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore, auditLedger, courierPump: null });
+    const envelope = readKeyStatement(phone);
+    assert.deepEqual(await dispatch('device.read_key', { envelope }), { state: 'read-key-pending-apply' });
+    assert.equal(seen.length, 1);
+    assert.equal(auditLedger.entries[0].kind, 'device.staged');
+    assert.equal(auditLedger.entries[0].data.type, 'kl.device.read_key');
+    assert.equal(auditLedger.entries[0].data.device_id, phone.deviceId);
+  });
+
+  it('refuses another message type sent as device.read_key, and a read-key statement sent as device.enroll or device.revoke', async () => {
+    const phone = createFakePhone();
+    const auditLedger = fakeAuditLedger();
+    const approverStore = { stage: () => { throw new Error('must not stage'); } };
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore, auditLedger, courierPump: null });
+    assert.deepEqual(await dispatch('device.read_key', { envelope: phone.revoke(createFakePhone().deviceId) }), { state: 'rejected', reason: 'malformed' });
+    assert.deepEqual(await dispatch('device.read_key', { envelope: { not: 'an envelope' } }), { state: 'rejected', reason: 'malformed' });
+    assert.deepEqual(await dispatch('device.enroll', { envelope: readKeyStatement(phone) }), { state: 'rejected', reason: 'malformed' });
+    assert.deepEqual(await dispatch('device.revoke', { envelope: readKeyStatement(phone) }), { state: 'rejected', reason: 'malformed' });
+    assert.equal(auditLedger.entries.length, 4);
+    assert.ok(auditLedger.entries.every((e) => e.kind === 'device.rejected'));
   });
 });
 

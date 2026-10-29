@@ -284,6 +284,106 @@ describe('enroll-device ends without enrolling', () => {
   });
 });
 
+// android-slim spec §8.2, §8.7: the read key's fingerprint is shown beside
+// the device's before every question, and kept in the record.
+describe('the read key in the device commands', () => {
+  const crypto = require('crypto');
+  const { readKeyFingerprint, iso, randomNonce } = require('../src/approvals/messages');
+  function readJwk() {
+    const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const { kty, crv, x, y } = publicKey.export({ format: 'jwk' });
+    return { kty, crv, x, y };
+  }
+  function statement(phone, jwk, now = Date.now()) {
+    return phone.sign({ v: 1, type: 'kl.device.read_key', device_id: phone.deviceId, read_key: jwk, created_at: iso(now), expires_at: iso(now + 24 * 60 * 60 * 1000), nonce: randomNonce() });
+  }
+  function stagedNode(records) {
+    const n = node();
+    for (const r of records) fs.writeFileSync(path.join(n.configDir, 'approvers', `${r.device_id}.json`), JSON.stringify(r), { mode: 0o644 });
+    const store = new ApproverStore({ dir: path.join(n.configDir, 'approvers'), stagedDir: path.join(n.dataDir, 'approvals', 'staged'), ...storeOptions });
+    return { n, store };
+  }
+
+  it('enroll-device names the read key before asking, and the record keeps it', async () => {
+    const n = node();
+    const { pump, calls } = servicePump(n);
+    const io = streamIo();
+    const phone = createFakePhone({ name: 'Pixel 9' });
+    const read = readJwk();
+    const running = runEnrollDevice({ ...n, io, deps });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    const envelope = phone.enroll({ device: { ...phone.device(), read_key: read }, codeId: qr.code_id, code: qr.code });
+    pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope });
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    assert.ok(io.text.out.includes(` with a read key ${readKeyFingerprint(read)} — does the phone show the same? [y/N]`), io.text.out);
+    io.stdin.write('y\n');
+    assert.equal(await running, 0);
+    await waitFor(() => calls.some(([m]) => m === 'enroll.done'), 'enroll.done');
+    const record = JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${phone.deviceId}.json`), 'utf8'));
+    assert.deepEqual(record.read_key, read);
+    assert.equal(record.read_key_at, open(envelope).message.created_at);
+  });
+
+  it('enroll-device without a read key asks as before', async () => {
+    const n = node();
+    const { pump } = servicePump(n);
+    const io = streamIo();
+    const phone = createFakePhone();
+    const running = runEnrollDevice({ ...n, io, deps });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope: phone.enroll({ codeId: qr.code_id, code: qr.code }) });
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    assert.doesNotMatch(io.text.out, /read key/);
+    io.stdin.write('n\n');
+    assert.equal(await running, 1);
+  });
+
+  it('device apply shows a staged read-key statement with its fingerprint, asks, and writes it after y', async () => {
+    const a = createFakePhone({ name: 'Owner phone' });
+    const { n, store } = stagedNode([a.approverRecord()]);
+    await store.ready();
+    const read = readJwk();
+    assert.equal(store.stage(statement(a, read)).state, 'read-key-pending-apply');
+
+    let io = streamIo();
+    let running = runDevice({ sub: 'apply', flags: {}, ...n, io, deps });
+    await waitFor(() => /Apply these\? \[y\/N\]/.test(io.text.out), 'the question');
+    assert.ok(io.text.out.includes(`read key  ${a.deviceId}  "Owner phone"  ${readKeyFingerprint(read)}  signed by the device itself`), io.text.out);
+    io.stdin.write('n\n');
+    assert.equal(await running, 0);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${a.deviceId}.json`), 'utf8')).read_key, undefined);
+
+    io = streamIo();
+    running = runDevice({ sub: 'apply', flags: {}, ...n, io, deps });
+    await waitFor(() => /Apply these\? \[y\/N\]/.test(io.text.out), 'the question');
+    io.stdin.write('y\n');
+    assert.equal(await running, 0);
+    assert.ok(io.text.out.includes(`${a.deviceId}: read key set`), io.text.out);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${a.deviceId}.json`), 'utf8')).read_key, read);
+    const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: null });
+    assert.deepEqual(ledger.tail(1).map((e) => [e.kind, e.data.device_id]), [['device.read_key_set', a.deviceId]]);
+
+    io = streamIo();
+    assert.equal(await runDevice({ sub: 'list', ...n, io, deps }), 0);
+    assert.ok(io.text.out.includes(`${a.deviceId}  Owner phone (android)  read key ${readKeyFingerprint(read)}  active`), io.text.out);
+  });
+
+  it('device apply names the read key a staged enrollment carries', async () => {
+    const a = createFakePhone();
+    const { n, store } = stagedNode([a.approverRecord()]);
+    await store.ready();
+    const b = createFakePhone();
+    const read = readJwk();
+    store.stage(a.enroll({ device: { ...b.device(), read_key: read } }));
+    const io = streamIo();
+    assert.equal(await runDevice({ sub: 'apply', flags: { yes: true }, ...n, io, deps }), 0);
+    assert.ok(io.text.out.includes(`enroll  ${b.deviceId}  with a read key ${readKeyFingerprint(read)}  signed by ${a.deviceId}`), io.text.out);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${b.deviceId}.json`), 'utf8')).read_key, read);
+  });
+});
+
 describe('device list | revoke | apply', () => {
   it('the real CLI entry accepts --yes for "device apply" and refuses it for every other device command', async () => {
     const n = node();
