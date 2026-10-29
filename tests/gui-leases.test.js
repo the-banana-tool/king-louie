@@ -2,7 +2,7 @@
 const { describe, it, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
-const { open } = require('../src/approvals/envelope');
+const { open, seal } = require('../src/approvals/envelope');
 const { LeaseManager } = require('../src/gui/leases');
 const { parseGuiConfig } = require('../src/gui/config');
 const { setLogLevel } = require('../src/logging');
@@ -78,7 +78,12 @@ beforeEach(async () => {
   identity = testNodeIdentity({ key: 'gpu-box' });
   clock = { t: Date.parse('2026-09-23T18:00:00.000Z'), now() { return this.t; } };
   timers = fakeTimers(clock);
-  const store = await approverStoreWith([phone.approverRecord(), other.approverRecord()], { now: () => clock.now() });
+  await buildLeases([phone.approverRecord(), other.approverRecord()]);
+});
+
+// A fresh relay, broker, audit list and LeaseManager over a store holding `records`.
+async function buildLeases(records) {
+  const store = await approverStoreWith(records, { now: () => clock.now() });
   stores.push(store);
   relay = new FakeRelay();
   broker = { calls: [], releaseAll: async () => { broker.calls.push('releaseAll'); }, focusApp: async (ids) => { broker.calls.push(['focus', ids]); }, capability: () => ({ limits: ['no_human_yield'] }), leaseChanged: () => {} };
@@ -89,7 +94,7 @@ beforeEach(async () => {
     jobOpen: (jobId) => openJobs.has(jobId)
   });
   leases.start();
-});
+}
 
 async function granted({ appIds = ['calculator'], minutes = 10, jobId = 'job-1' } = {}) {
   const p = leases.request({ jobId, origin: { ...ORIGIN, job_id: jobId }, appIds, minutes: 15, reason: 'Enter the totals' });
@@ -1729,5 +1734,86 @@ describe('take leases', () => {
     relay.down();
     assert.equal(lease.suspendReason, 'relay_unreachable');
     assert.ok(!kinds().includes('lease.event'));
+  });
+});
+
+// android-slim spec §8.5, §8.6: a watch may be signed by either key of its
+// device; every other lease message only by the device key.
+describe('the read key signs watches and nothing else', () => {
+  // The same message, signed by the device's read key instead.
+  const asRead = (device, envelope) => seal(open(envelope).message, device.readSigner);
+  const watchAudits = () => audits.filter((a) => a.kind === 'lease.watch').map((a) => a.data);
+
+  describe('with read keys in the records', () => {
+    beforeEach(async () => {
+      leases.stop();
+      await buildLeases([phone.approverRecord({ readKey: true }), other.approverRecord({ readKey: true })]);
+    });
+
+    it('a read-signed watch from the granting device is contact; the audit entry names the read key', async () => {
+      const lease = await granted();
+      const seen = leases.verifyWatch(asRead(phone, watchFrom(phone, lease)));
+      assert.equal(seen.accepted, true);
+      assert.equal(seen.contact, true);
+      assert.deepEqual(watchAudits().at(-1), { job_id: 'job-1', lease_id: lease.leaseId, kind: 'computer_use', device_id: phone.deviceId, contact: true, key: 'read' });
+    });
+
+    it('a device-signed watch still is contact, audited with key device', async () => {
+      const lease = await granted();
+      assert.equal(leases.verifyWatch(watchFrom(phone, lease)).contact, true);
+      assert.equal(watchAudits().at(-1).key, 'device');
+    });
+
+    it('a read-signed watch from another device asks for frames only', async () => {
+      const lease = await granted();
+      const seen = leases.verifyWatch(asRead(other, watchFrom(other, lease)));
+      assert.equal(seen.accepted, true);
+      assert.equal(seen.contact, false);
+      assert.deepEqual([watchAudits().at(-1).device_id, watchAudits().at(-1).key], [other.deviceId, 'read']);
+    });
+
+    it('a read-signed grant is refused bad_signature and leases nothing', async () => {
+      const p = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      const req = relay.last('kl.lease.request');
+      assert.deepEqual(leases.onGrant(asRead(phone, phone.leaseGrant(req.envelope))), { state: 'rejected', reason: 'bad_signature' });
+      assert.equal(leases.current().state, 'pending');
+      // The device-signed grant of the same request still goes through.
+      assert.equal(leases.onGrant(phone.leaseGrant(req.envelope)).state, 'active');
+      await p;
+    });
+
+    it('a read-signed deny is refused too', async () => {
+      const p = leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['calculator'], minutes: 15, reason: 'x' });
+      const req = relay.last('kl.lease.request');
+      assert.deepEqual(leases.onGrant(asRead(phone, phone.leaseGrant(req.envelope, { decision: 'deny' }))), { state: 'rejected', reason: 'bad_signature' });
+      leases.onGrant(phone.leaseGrant(req.envelope));
+      await p;
+    });
+
+    it('a read-signed revoke is refused bad_signature; the lease runs on', async () => {
+      const lease = await granted();
+      const revoke = asRead(phone, phone.leaseRevoke(identity.nodeId, lease.leaseId, { signedAt: new Date(clock.now()).toISOString() }));
+      assert.deepEqual(leases.onRevoke(revoke), { state: 'rejected', reason: 'bad_signature' });
+      assert.equal(lease.state, 'active');
+      assert.ok(audits.some((a) => a.kind === 'lease.rejected' && a.data.reason === 'bad_signature'));
+    });
+
+    it('a read-signed resume grant is refused bad_signature; the lease stays suspended', async () => {
+      const lease = await granted();
+      leases.noteInputOutcome(lease, { code: 'app_not_running' });
+      assert.equal(lease.state, 'suspended');
+      const resume = relay.last('kl.lease.request');
+      assert.equal(resume.message.lease.resumes, lease.leaseId);
+      assert.deepEqual(leases.onGrant(asRead(phone, phone.leaseGrant(resume.envelope, { minutes: 1 }))), { state: 'rejected', reason: 'bad_signature' });
+      assert.equal(lease.state, 'suspended');
+      leases.onGrant(phone.leaseGrant(resume.envelope, { minutes: 1 }));
+      assert.equal(lease.state, 'active');
+    });
+  });
+
+  it('a read-signed watch is bad_signature while the record holds no read key', async () => {
+    const lease = await granted();
+    assert.deepEqual(leases.verifyWatch(asRead(phone, watchFrom(phone, lease))), { accepted: false, reason: 'bad_signature' });
+    assert.equal(watchAudits().length, 0);
   });
 });

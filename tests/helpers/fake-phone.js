@@ -69,11 +69,15 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
       return { device_id: deviceId, name, platform, public_key: jwk };
     },
 
-    approverRecord({ enrolledBy = 'console', enrolledAt = '2026-09-23T18:00:00.000Z', revokedAt = null, revokedBy = null, enrollment = null } = {}) {
-      return {
+    // `readKey: true` adds this phone's read key to the record (android-slim
+    // spec §8.2); without it the record is as before the read key.
+    approverRecord({ enrolledBy = 'console', enrolledAt = '2026-09-23T18:00:00.000Z', revokedAt = null, revokedBy = null, enrollment = null, readKey = false } = {}) {
+      const record = {
         v: 1, device_id: deviceId, name, platform, public_key: jwk,
         enrolled_at: enrolledAt, enrolled_by: enrolledBy, revoked_at: revokedAt, revoked_by: revokedBy, enrollment
       };
+      if (readKey) record.read_key = readJwk;
+      return record;
     },
 
     // Answers a node-signed kl.approval.request exactly as the app does.
