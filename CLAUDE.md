@@ -925,7 +925,17 @@ allowlisted channels (`src/desktop-bridge/allowlist.js`; a stage whose domain mu
 work while attached appends it to `PROXIED_DOMAINS`).
 
 - **Pairing:** start from Settings > Local service, then run the command it shows
-  as root/Administrator: `king-louie-service desktop pair <request>`. The CLI
+  as root/Administrator: `king-louie-service desktop pair <request>`. On a
+  personal node (`hosting: personal`) the pane's **Pair** runs `desktop pair
+  <request> --yes --json --data-dir <A>` itself, as the owner, unelevated; the
+  CLI refuses elevation there (`PAIR_ELEVATED`) and checks the owner of the
+  data and config dirs (`checkPersonalOwner`), writes no ACL, and the desktop
+  then starts or restarts the node and confirms itself (spec
+  `2026-10-28-desktop-attached-to-personal-node-design.md`; see Personal node
+  below). `--json` is valid for `desktop pair` only: the human lines, then one
+  JSON line, `{ ok: true, nodeId, port, bridgeTurnedOn, hosting }` or `{ ok:
+  false, code, message }` (`PAIR_COMMAND_FAILED` when nothing more exact
+  applies). The CLI
   prints the device's label and fingerprint first and asks "Trust this device?
   [y/N]" on a TTY (default no); off a TTY it needs `--yes` or refuses (exit 2).
   Nothing is written, not even a new node identity, before that consent. `--yes`
@@ -977,6 +987,74 @@ work while attached appends it to `PROXIED_DOMAINS`).
   (`src/platform/write-guard.js`) that refuses a path routed through a symlink
   or junction; the guard narrows the window but can't close it against a
   service-account swap mid-write — documented as a residual, not a promise.
+  Under `hosting: personal` it runs as the owner, unelevated, for the whole
+  profile as for `--case`, and refuses an elevated prompt.
+- **Personal node** (spec `2026-10-28-desktop-attached-to-personal-node-design.md`,
+  owner rulings R-DA-1 to R-DA-5). Windows only; the fleet rule, wording and
+  flow (the copied elevated command, the 3 s poll, **Confirm**) are unchanged.
+  - Trust (`checkBridgeFileTrust`/`readTrustedBridgeFile` in
+    `src/desktop-bridge/pairing.js`, which now also return `hosting`): one
+    inspector call over the config dir, the bridge file, `node.yaml` and the
+    data dir beside it (`bridgeTrustPaths`). The fleet rule (dir and file
+    owned by SYSTEM or Administrators) comes first; else all four must be
+    owned by the desktop's account, none a link, and `node.yaml` must load
+    with the strict `loadNodeConfig` and say `hosting: personal`
+    (`judgePersonalPaths`), else `BRIDGE_FILE_UNTRUSTED` naming the rule that
+    failed. A personal config dir holding an Administrators-owned bridge file
+    (an elevated `desktop pair` from before) fails both: Pair again. POSIX
+    keeps the fleet rule only.
+  - `createPersonalNodeRunner` (`src/desktop-bridge/personal-node.js`) is the
+    one place that inspects, queries and runs: `inspectLocal` (one inspector
+    call answering both the trust and the detection), `detectPersonalNode`
+    (the same rule without the bridge file), `queryTask` (`schtasks /Query /XML
+    ONE`: the principal's SID and `Enabled`, never the localised text),
+    `nodeRunning` (the pidfile and `isServiceCommandLine`), `runTask`
+    (`schtasks /Run`), `restartNode` (`king-louie-service stop`, then `/Run`;
+    never `/End` alone, `/Change` or `/Create`), `startFailureSince` (the
+    newest `service failed to start` line in `<A>\logs\service.log` after
+    the run), `runCli` (the app's own binary with `ELECTRON_RUN_AS_NODE=1`
+    and its own `bin/king-louie-service.js`). `schtasks` and the CLI go by
+    absolute path, arguments as an array, never a path read from the task,
+    the bridge file or `node.yaml`. The unpaired status reads the task and
+    the pidfile on each read.
+  - Pairing (`pairStart` under personal): the CLI (120 s), the bridge file
+    read through the trust rule (`hosting: personal` and the CLI's
+    `nodeId`, else `PAIR_SERVICE_CHANGED`), then the node: none running, run
+    the task; running and `bridgeTurnedOn`, `pendingPair.stage`
+    `restart-needed` and one **Restart and pair** (`pairRestartConfirm({
+    confirmed: true })`); then `pairConfirm` every 3 s until its handshake
+    holds or 60 s pass. The record gains `service.hosting` and
+    `service.dataDir`; the paired view says `Running as you (<account>), in
+    your session.` **Unpair** runs `desktop unpair <device-id>` itself and
+    keeps the follow-up command only when that fails. A personal pending
+    pair that outlives an app restart comes back as `PAIR_COMMAND_FAILED`
+    with **Try again** and **Cancel**, unpolled.
+  - Starting (R-DA-3): `startAttachedHost`'s `start()` calls
+    `controller.startAttached()`, which once per launch, when the record
+    says personal, `detectPersonalNode` agrees for the recorded data dir and
+    no node runs, runs `KingLouie Node` if it is registered, enabled and the
+    owner's; then it waits up to 60 s (a ref'd timer, cleared on connect and
+    `shutdown()`), calling the client's `retryNow()` every 3 s, in the view
+    `attached-starting` (banner `Starting King Louie Node…`, no buttons). A
+    new `service failed to start` line ends the wait `NODE_START_FAILED`;
+    60 s ends it `NODE_START_TIMEOUT`, and the client's own backoff carries
+    on. A drop after connecting never runs the task; `attached-disconnected`
+    adds one button from what was found (`nodeStart({ restart })`: **Start**
+    or **Restart King Louie Node**; or **Install…**). Install from the pane
+    (task missing): `nodeInstallPreview()` shows `install --personal
+    --dry-run`'s lines, `nodeInstall({ confirmed: true })` runs it with
+    `--yes`.
+  - Codes: `NODE_TASK_MISSING`, `NODE_TASK_DISABLED`,
+    `NODE_TASK_OTHER_ACCOUNT` (never run another account's task),
+    `NODE_START_TIMEOUT`, `NODE_START_FAILED`, `NODE_TASK_RUN_FAILED` (the
+    `/Run` failed), `NODE_STOP_FAILED` (a restart's `stop` failed),
+    `PAIR_ELEVATED`, `PAIR_COMMAND_FAILED`. Every string from the node or the
+    CLI reaches the pane through `shown` (`describeServicePane`,
+    `describeAttachedBanner` in `src/desktop-bridge/pane-model.js`).
+  - Closing the desktop never stops the node; Detach leaves it running.
+    Tests inject the runner (`deps.nodeRunner`), and the runner's
+    `inspectOwners`, `execFile`, `spawn`, `readPidfile`, `commandLineOf` and
+    `whoAmI`; no test runs a real `schtasks` or CLI.
 - **Lockout:** a handshake with a valid device signature is never refused by
   lockout; only further *failing* attempts for an already-locked-out device id
   are refused, closed `4429` at once (no delay is added).
@@ -2610,7 +2688,17 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   writes `approvers.relay` into `node.yaml`, `pair https://mcp.<domain>` (a
   front door) writes `front-door.json` and leaves `approvers.relay` alone; it still refuses while the node runs, naming `king-louie-service stop`.
   `import --from <desktop>
-  --case <case dir or id> [--yes]` moves one case (below). On Windows the
+  --case <case dir or id> [--yes]` moves one case (below); `import --from
+  <desktop>` (the whole profile) also runs unelevated under personal and
+  refuses an elevated prompt. `desktop pair|unpair|list` run unelevated under
+  personal (refused elevated, `PAIR_ELEVATED`; owner check
+  `checkPersonalOwner`; no `icacls`), and `desktop pair --json` ends with one
+  JSON line (Attached mode). Run under Electron as Node (the desktop's
+  Install…), `install --personal` writes a task whose action sets
+  `ELECTRON_RUN_AS_NODE=1` before the app's binary (`renderPersonalTaskXml`'s
+  `runAsNode`) and its consent names the binary; with a live node on the
+  pidfile it skips the `/Run` and says the task starts it at the next
+  logon. On Windows the
   default data dir is the fleet one only when the fleet config dir holds a
   marker (`fleetLayoutExists`, the same list as the guard; a fleet data dir
   without one is a leftover and ignored), else `personalDataDir()`
@@ -2623,8 +2711,7 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
 - **Moving a case (R-PN-3, C-3).** `filterInventoryToCase`
   (`src/migration/case-filter.js`) narrows the desktop importer's inventory
   to one case's directory and the chats whose `caseId` is its id. The move
-  runs with the node stopped, without elevation under personal (as root on
-  POSIX it refuses), prints the case, asks `[y/N]` before the writer opens
+  runs with the node stopped, unelevated, and refused elevated, prints the case, asks `[y/N]` before the writer opens
   the node's data dir (a "no" touches nothing there), refuses `CASE_NOT_FOUND`,
   `CASE_AMBIGUOUS`, `CASE_UNREADABLE`, `CASE_NOT_A_REPO`, `GIT_UNSAFE_CONFIG`,
   `CASE_DIRTY`, `CASE_EXISTS` before writing, rebuilds the landed repository's index from `HEAD`, checks
@@ -2652,10 +2739,10 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   owner account is the boundary, so anything running as the owner can drive
   the node over `mcp` and change the approver set, and a shell the phone
   approves can do anything he can (the deny list fences the file tools, not
-  a shell); `desktop pair` and attaching the desktop app are unsupported
-  (the bridge-file trust rule refuses a user-owned file; the CLI's data-dir
-  fallback makes the helper and the attach find the personal dir and fail,
-  never trust it); macOS and Linux personal nodes are not done (the key is
+  a shell); attached, the desktop app runs the node's task, never the node
+  itself; a node installed from the desktop runs the app's binary and
+  version (removing or moving the app leaves a task that cannot start);
+  macOS and Linux personal nodes are not done (the key is
   platform-neutral; the install refuses off Windows). The logon task pins
   the checkout and `node.exe` that ran `install --personal`, so a removed
   checkout or worktree leaves a task that cannot start. The owner check
