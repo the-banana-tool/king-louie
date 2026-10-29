@@ -25,6 +25,25 @@ C:\Users\sblac\Programming\king-louie-wt\desktop-attach-personal), base main 6af
 - T06 controller one-click pairing: merge 192fe4cb16b424e4f5e885d56de4c913ea3b3344
 - T07 controller start at attached launch, Start/Restart, Install: merge e8ff16f2
 - T10 CLAUDE.md and install guide: merge 6381000f (doc fix b48729c5)
+- T11 code-review fixes: merge 0e99502c
+
+## Code review (mattpocock-skills:code-review, 2026-10-28)
+Spec:
+- S1 restart ran /Run without the task check (fixed: one runNodeTask helper; runner restartNode replaced by stopNode).
+- S2 stale node state after a drop (fixed: re-read on leaving connected and rate-limited in attached-disconnected status, nodeRefreshMs 5 s; restart with nothing running just starts; NODE_START_TIMEOUT unless a fresh read finds the node running).
+- S3 install re-reads the disk and needs the task missing (fixed: new codes NODE_TASK_REGISTERED, NODE_TASK_UNREADABLE).
+Standards:
+- T1 a sleep handle per wait.
+- T2 an unreadable node.yaml is not personal in import (admin refusal when unelevated).
+- T3 refusals through shown.
+- T4 timeout text from nodeStartWaitMs.
+- T5 PERSONAL_TASK_NAME in protocol.js.
+- T6 PAIR_FATAL from BRIDGE_FATAL.
+- T7 refuse() for PERSONAL_NOT_OWNER.
+- T8 one firstLine, one node-status builder.
+- T9 /bin/ps and the pidfile.js reader.
+- T10 test string.
+All fixed.
 
 ## Deviations
 - All tickets: branches are `feat/desktop-attach-personal-TNN` (git cannot nest `feat/desktop-attach-personal/TNN` under an existing branch of that name).
