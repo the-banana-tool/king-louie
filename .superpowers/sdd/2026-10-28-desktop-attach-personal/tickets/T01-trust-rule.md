@@ -1,7 +1,8 @@
 ---
 id: T01
 title: Bridge-file trust rule for a personal node
-status: open
+status: done
+merged: f5d66043
 blocked_by: []
 ---
 ## Goal

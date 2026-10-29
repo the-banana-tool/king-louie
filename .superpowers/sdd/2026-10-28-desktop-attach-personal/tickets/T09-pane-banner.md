@@ -1,7 +1,8 @@
 ---
 id: T09
 title: Pane model and attached banner for the personal views
-status: open
+status: done
+merged: 2fc8e743
 blocked_by: []
 ---
 ## Goal

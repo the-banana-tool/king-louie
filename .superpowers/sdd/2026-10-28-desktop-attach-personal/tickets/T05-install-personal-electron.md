@@ -1,7 +1,8 @@
 ---
 id: T05
 title: install --personal under Electron as Node, and no second start
-status: open
+status: done
+merged: 105d0f99
 blocked_by: []
 ---
 ## Goal

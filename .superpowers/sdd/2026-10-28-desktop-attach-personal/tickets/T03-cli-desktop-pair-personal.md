@@ -1,7 +1,8 @@
 ---
 id: T03
 title: desktop pair|unpair|list under hosting personal, and --json
-status: open
+status: done
+merged: 5b6c1ee9
 blocked_by: []
 ---
 ## Goal

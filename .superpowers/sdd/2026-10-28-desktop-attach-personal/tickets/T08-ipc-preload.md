@@ -1,7 +1,8 @@
 ---
 id: T08
 title: IPC channels and preload for the four new desktop methods
-status: open
+status: done
+merged: 2c0c2474
 blocked_by: []
 ---
 ## Goal

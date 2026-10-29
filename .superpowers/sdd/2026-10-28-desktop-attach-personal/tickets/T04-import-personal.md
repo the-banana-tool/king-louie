@@ -1,7 +1,8 @@
 ---
 id: T04
 title: import --from (whole profile) unelevated under hosting personal
-status: open
+status: done
+merged: 645d80fa
 blocked_by: []
 ---
 ## Goal
