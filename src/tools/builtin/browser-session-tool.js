@@ -45,6 +45,7 @@ PREFER HIGH-LEVEL: login / signup / fill_payment auto-detect fields across sites
     properties: {
       action: { type: 'string', enum: SESSION_ACTIONS, description: 'Session action.' },
       ownerQuote: OWNER_QUOTE_PARAM,
+      ref_label: browserTool.REF_LABEL_PARAM,
 
       // Lifecycle / profile
       profile: { type: 'string', description: 'Named persistent profile [A-Za-z0-9_-], max 64. Cookies/localStorage persist between runs.' },
@@ -97,6 +98,7 @@ PREFER HIGH-LEVEL: login / signup / fill_payment auto-detect fields across sites
     required: ['action']
   },
   requiresApproval: true,
+  prepareParams: browserTool.prepareParams,
   emitsImages: true,
   execute: async (params, context) => {
     if (!SESSION_ACTIONS.includes(params.action)) {

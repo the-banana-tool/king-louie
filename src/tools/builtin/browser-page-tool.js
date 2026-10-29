@@ -56,6 +56,8 @@ All element actions auto-wait for the element to be actionable. Avoid wait_for_l
       // Element selectors
       selector: { type: 'string', description: 'Element selector (CSS, text=, role=, label=, placeholder=, testid=, xpath=, alt=, title=, or ref=eN from a snapshot).' },
       target_selector: { type: 'string', description: 'Target element selector for drag_and_drop (ref=eN accepted).' },
+      ref_label: browserTool.REF_LABEL_PARAM,
+      target_ref_label: browserTool.TARGET_REF_LABEL_PARAM,
 
       // Snapshot
       interactive: { type: 'boolean', description: 'snapshot: keep only the lines with a ref.' },
@@ -98,6 +100,7 @@ All element actions auto-wait for the element to be actionable. Avoid wait_for_l
     required: ['action']
   },
   requiresApproval: true,
+  prepareParams: browserTool.prepareParams,
   emitsImages: true,
   execute: async (params, context) => {
     if (!PAGE_ACTIONS.includes(params.action)) {

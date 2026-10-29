@@ -35,6 +35,7 @@ Console: returns recent browser console output.`,
 
       // Element selectors
       selector: { type: 'string', description: 'Element selector for get_text/get_attribute/get_value/is_visible/count/bounding_box (CSS, text=, role=, ..., or ref=eN from a snapshot).' },
+      ref_label: browserTool.REF_LABEL_PARAM,
 
       // Snapshot
       interactive: { type: 'boolean', description: 'snapshot: keep only the lines with a ref.' },
@@ -60,6 +61,7 @@ Console: returns recent browser console output.`,
     required: ['action']
   },
   requiresApproval: true,
+  prepareParams: browserTool.prepareParams,
   emitsImages: true,
   execute: async (params, context) => {
     if (!EXTRACT_ACTIONS.includes(params.action)) {

@@ -221,6 +221,18 @@ class ToolExecutor extends EventEmitter {
   }
 
   // The live take policy, or null.
+  // What a tool's prepareParams is given: the call's options and this run's
+  // take, so a browser tool reads the browser the call will be decided on.
+  _prepareContext(options = {}) {
+    const take = this._liveTake();
+    return {
+      ...this.extraToolOptions,
+      ...options,
+      takePolicy: this.takePolicy,
+      browserKey: take && typeof take.browserKey === 'string' && take.browserKey ? take.browserKey : null
+    };
+  }
+
   _liveTake() {
     return this.takePolicy && this.takePolicy.current ? this.takePolicy.current : null;
   }
@@ -341,6 +353,28 @@ class ToolExecutor extends EventEmitter {
     // decorating the context.
     let effectiveParameters = parameters;
     let preHookResult = null;
+    // The tool's own preparation (prepareParams), once, after the hooks have
+    // had their say and before anyone is asked: a hook's confirm prompt, the
+    // rules, the tier and the approval gate all see what it returns. → null
+    // or the refusal to return.
+    let prepared = false;
+    const prepare = () => {
+      prepared = true;
+      if (!tool.prepareParams) return null;
+      let out;
+      try {
+        out = tool.prepareParams(effectiveParameters, this._prepareContext(options));
+      } catch (err) {
+        out = { error: err.message || String(err), code: err.code };
+      }
+      if (out && out.params && typeof out.params === 'object') {
+        effectiveParameters = out.params;
+        return null;
+      }
+      const refused = { success: false, error: out?.error || `${toolName} refused its parameters`, ...(out?.code ? { code: out.code } : {}) };
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
+      return refused;
+    };
 
     if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
       preHookResult = await this.hookExecutor.run('PreToolUse', {
@@ -376,6 +410,9 @@ class ToolExecutor extends EventEmitter {
         return denied;
       }
 
+      const refusedByTool = prepare();
+      if (refusedByTool) return refusedByTool;
+
       if (action === 'confirm') {
         if (this.refuseUnsafe) return this._refuseUnsafeResult(toolName, effectiveParameters);
         if (this._liveTake()) return this._noMidTakeApprovalResult(toolName, effectiveParameters);
@@ -399,6 +436,11 @@ class ToolExecutor extends EventEmitter {
           return denied;
         }
       }
+    }
+
+    if (!prepared) {
+      const refusedByTool = prepare();
+      if (refusedByTool) return refusedByTool;
     }
 
     this.emit('preExecute', { toolName, parameters: effectiveParameters });
