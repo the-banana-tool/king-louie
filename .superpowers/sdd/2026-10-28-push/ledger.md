@@ -137,6 +137,25 @@ T12 (docs) last, after all. Start frontier: T01, T04, T05, T08, T10.
   and the front-door doc test refuse such values). The C-15 test is
   `tests/tracked-secrets.test.js` (skips without git).
 
+- Review (mattpocock-skills:code-review, two axes, since 863a61ad: the base;
+  android-slim was reviewed on its own branch). Fixed in one FIX branch:
+  S1 gate.js remembered a (node, kind, id) before the hourly cap, so a
+  cap-dropped push was deduped (a `session_ended` blocked 24 h): now
+  remembered only when it goes out (alone or carried by a coalesced push); a
+  second copy inside an open window is dropped. S2/S4 one `defaultTimers`
+  (gate.js). S3 `SESSION_KINDS` exported from text.js; message.submit's list is
+  `KINDS` minus `FCM_ONLY_KINDS`. S5 status.js keeps its own atomic write
+  (cases' `writeAtomic` sets no mode, leaves temp on failure; commented). S6
+  `hostPushConfig(serviceConfig, { frontdoor })` in src/service/config.js.
+  S9 `setPush` comment. P1 phone: `c` > 1 on ANY kind shows the running-count
+  Approvals notification and opens the list (a session kind can be the newest
+  in a window that held Approvals; phone-side reading of §6.4/§7.2,
+  `PushText.joinsApprovals`). P2 `c` capped at 999, not dropped. P3 `--device`
+  outside `relay push-test` is a usage error (exit 2). approval-v1 §7 table:
+  push-token rows say either key. Not fixed (judgement calls): S7 (one
+  validator for the push-hint shape), S8 (`leases.pushQueue` reached through
+  LeaseManager).
+
 ## Landed
 - T01 merge 96ea2586; T05 merge 168106f3; T04 merge 0d31340e; T08 merge
   3f35f05e; T10 merge 1203ea60 (tip bbf21a23). Both Android flavors build;
@@ -145,5 +164,6 @@ T12 (docs) last, after all. Start frontier: T01, T04, T05, T08, T10.
   T09 merge 91208ecf; T11 merge bf41dbb7 (tip a36f2701). Both flavors build.
 - T06 merge 26da41ae.
 - T12 merge c050b5a0.
+- FIX merge b688ec51 (impl 828d925c). Both flavors build; protocol tests pass.
 
 ## Left
