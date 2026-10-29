@@ -22,6 +22,8 @@ const {
   resolvedKeyOf, getBrowser, activeProfileOf, setActiveProfile, allBrowsers,
 } = require('./browser-registry');
 
+const { BrowserRefError, ownerOfPage, parseSnapshotLine } = require('../../browser/playwright-browser');
+
 const VAULT_CRED_PREFIX = 'browser_cred:';
 
 // The profile a start with no "profile" opens (C-2); "ephemeral: true" opens none.
@@ -75,6 +77,22 @@ function requireRunning(ctx) {
   return b;
 }
 
+// "aria-ref" anywhere in a selector, chained ("form >> aria-ref=e5") or not.
+const RAW_ARIA_REF = /aria-ref\s*=/i;
+
+// The *_in_frame actions take no ref: a frame's refs (f1e3) already resolve
+// from the page. → the refusal, or null.
+function frameSelectorRefusal(selector) {
+  if (typeof selector === 'string' && (selector.startsWith('ref=') || RAW_ARIA_REF.test(selector))) {
+    return { ok: false, error: 'A ref is not accepted in the *_in_frame actions: use the ref with click or fill directly (a frame ref like f1e3 resolves from the page).', code: 'invalid_params' };
+  }
+  return null;
+}
+
+// A snapshot's size (C-6).
+const SNAPSHOT_DEFAULT_CHARS = 20000;
+const SNAPSHOT_MAX_CHARS = 60000;
+
 /**
  * Resolve a Playwright locator from a selector string.
  *
@@ -88,12 +106,27 @@ function requireRunning(ctx) {
  *   - XPath:        "xpath=//div[@id='app']"
  *   - Alt text:     "alt=Company logo"
  *   - Title:        "title=Close dialog"
+ *   - Ref:          "ref=e5" (from the last snapshot of the current page)
+ *
+ * A raw "aria-ref=" selector is refused: it would reach an element without
+ * the ref record's checks (and later without the approval's label).
  *
  * Playwright's built-in selector engines (text=, xpath=) are passed through.
  * The custom prefixes (role=, label=, etc.) map to Playwright's getBy* methods.
  */
 function resolveLocator(page, selector) {
   if (!selector) throw new Error('selector parameter is required');
+
+  if (RAW_ARIA_REF.test(selector)) {
+    throw new BrowserRefError('invalid_params', 'A raw "aria-ref=" selector is not accepted. Use ref=eN with a ref from a snapshot.');
+  }
+
+  // ref=e5 / ref=f1e3: Playwright's aria-ref engine, behind the page's record.
+  if (selector.startsWith('ref=')) {
+    const owner = ownerOfPage(page);
+    if (!owner) throw new BrowserRefError('ref_not_found', `${selector} is not in this page's last snapshot. Take a new snapshot.`);
+    return owner.refLocator(selector.slice(4));
+  }
 
   // role=button[name="Submit"]
   const roleMatch = selector.match(/^role=(\w+)(?:\[name=["'](.+?)["']\])?$/);
@@ -625,6 +658,51 @@ const actions = {
     };
   },
 
+  async snapshot(params, ctx) {
+    const b = requireRunning(ctx);
+    let maxChars = SNAPSHOT_DEFAULT_CHARS;
+    if (params.max_chars !== undefined) {
+      if (!Number.isInteger(params.max_chars) || params.max_chars < 1 || params.max_chars > SNAPSHOT_MAX_CHARS) {
+        return { ok: false, error: `max_chars must be a whole number from 1 to ${SNAPSHOT_MAX_CHARS}.`, code: 'invalid_params' };
+      }
+      maxChars = params.max_chars;
+    }
+    if (params.ref !== undefined && (typeof params.ref !== 'string' || !/^(?:f\d+)?e\d+$/.test(params.ref))) {
+      return { ok: false, error: 'ref must look like e5 or f1e3 (from a snapshot).', code: 'invalid_params' };
+    }
+    // Every form takes the whole snapshot, so the page's record is its current set.
+    let lines = (await b.snapshot()).split('\n');
+    if (params.ref) {
+      const start = lines.findIndex((l) => parseSnapshotLine(l)?.ref === params.ref);
+      if (start < 0) {
+        throw new BrowserRefError('ref_not_found', `ref=${params.ref} is not in this page's snapshot. Take a new snapshot.`);
+      }
+      const indent = lines[start].match(/^\s*/)[0].length;
+      let end = start + 1;
+      while (end < lines.length && lines[end].match(/^\s*/)[0].length > indent) end += 1;
+      lines = lines.slice(start, end).map((l) => l.slice(indent));
+    }
+    if (params.interactive === true) lines = lines.filter((l) => parseSnapshotLine(l) !== null);
+    // Cut at a line end.
+    let text = '';
+    let truncated = false;
+    for (const line of lines) {
+      const next = text ? `${text}\n${line}` : line;
+      if (next.length > maxChars) { truncated = true; break; }
+      text = next;
+    }
+    if (truncated && !text) text = lines[0].slice(0, maxChars);
+    return {
+      ok: true,
+      untrusted_output: true,
+      url: b.page.url(),
+      title: await b.page.title().catch(() => ''),
+      snapshot: text,
+      refs: text.split('\n').filter((l) => parseSnapshotLine(l) !== null).length,
+      truncated,
+    };
+  },
+
   async pdf(params, ctx) {
     const b = requireRunning(ctx);
     const fs = require('fs');
@@ -829,6 +907,8 @@ const actions = {
   },
 
   async fill_in_frame(params, ctx) {
+    const refused = frameSelectorRefusal(params.selector);
+    if (refused) return refused;
     const f = resolveFrame(requireRunning(ctx).page, params);
     if (!params.selector) return { ok: false, error: 'selector parameter is required' };
     if (params.text === undefined) return { ok: false, error: 'text parameter is required' };
@@ -837,6 +917,8 @@ const actions = {
   },
 
   async click_in_frame(params, ctx) {
+    const refused = frameSelectorRefusal(params.selector);
+    if (refused) return refused;
     const f = resolveFrame(requireRunning(ctx).page, params);
     if (!params.selector) return { ok: false, error: 'selector parameter is required' };
     await f.locator(params.selector).click({ timeout: clampTimeout(params.timeout, 10000) });
@@ -844,6 +926,8 @@ const actions = {
   },
 
   async type_in_frame(params, ctx) {
+    const refused = frameSelectorRefusal(params.selector);
+    if (refused) return refused;
     const f = resolveFrame(requireRunning(ctx).page, params);
     if (!params.selector) return { ok: false, error: 'selector parameter is required' };
     if (params.text === undefined) return { ok: false, error: 'text parameter is required' };
@@ -855,6 +939,8 @@ const actions = {
   },
 
   async evaluate_in_frame(params, ctx) {
+    const refused = frameSelectorRefusal(params.selector);
+    if (refused) return refused;
     const f = resolveFrame(requireRunning(ctx).page, params);
     if (!params.expression) return { ok: false, error: 'expression parameter is required' };
     const result = await f.evaluate(params.expression);
@@ -1317,6 +1403,19 @@ async function autoDetectApplyCoupon(page) {
   return null;
 }
 
+// A ref= in selector or target_selector is checked before the handler runs:
+// stale, unknown, or an element that is gone (which Playwright would
+// otherwise wait out to the timeout) fail at once, typed.
+async function checkRefSelectors(params, ctx) {
+  if (/_in_frame$/.test(String(params.action))) return;
+  for (const sel of [params.selector, params.target_selector]) {
+    if (typeof sel !== 'string' || !sel.startsWith('ref=')) continue;
+    const b = getBrowser(ctx);
+    if (!b || !b.isRunning || !b.page || typeof b.assertRefUsable !== 'function') return;
+    await b.assertRefUsable(sel.slice(4));
+  }
+}
+
 // ─── Build the action enum from the handlers ─────────────────────────────────
 const actionNames = Object.keys(actions);
 
@@ -1352,6 +1451,9 @@ Selector strategies (pass as the "selector" parameter):
   - XPath:        "xpath=//div[@id='app']"
   - Alt text:     "alt=Company logo"
   - Title:        "title=Close dialog"
+  - Ref:          "ref=e15" (from the last "snapshot" of the current page)
+
+SNAPSHOT: "snapshot" lists the page as text, one node a line with its role, name and a [ref=eN] on each element you can act on; pass "ref=eN" as a selector to click or fill exactly that element. interactive=true keeps only the lines with a ref; ref="eN" returns that node's subtree; max_chars (default 20000, at most 60000) cuts at a line end. A ref lasts until the page navigates: then take a new snapshot (ref_stale). Do not use refs in the *_in_frame actions; a frame's refs (f1e3) work with click and fill directly.
 
 All element actions auto-wait for the element to be actionable.
 SCREENSHOT: "screenshot" returns the viewport as an image you see (JPEG, at most 1280 px wide) and writes no file; the result's image.scale is viewport pixels per image pixel, so multiply image coordinates by scale for mouse_click. to_file, full_page or selector save a PNG file instead (savedTo) and return no image.
@@ -1369,8 +1471,13 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
       url: { type: 'string', description: 'URL for navigate, login, open_tab, wait_for_url, get_cookies' },
 
       // Element selectors
-      selector: { type: 'string', description: 'Element selector (CSS, text=, role=, label=, placeholder=, testid=, xpath=, alt=, title=)' },
-      target_selector: { type: 'string', description: 'Target element selector for drag_and_drop' },
+      selector: { type: 'string', description: 'Element selector (CSS, text=, role=, label=, placeholder=, testid=, xpath=, alt=, title=, or ref=eN from a snapshot)' },
+      target_selector: { type: 'string', description: 'Target element selector for drag_and_drop (ref=eN accepted)' },
+
+      // Snapshot
+      interactive: { type: 'boolean', description: 'snapshot: keep only the lines with a ref.' },
+      ref: { type: 'string', description: 'snapshot: return only this node (e.g. "e9") and its subtree.' },
+      max_chars: { type: 'number', description: 'snapshot: cut the text at a line end past this many characters (default 20000, at most 60000).' },
 
       // Text input
       text: { type: 'string', description: 'Text for fill, type, keyboard_type actions' },
@@ -1485,8 +1592,10 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
       return { ok: false, error: `Unknown action: ${params.action}. Valid actions: ${actionNames.join(', ')}` };
     }
     try {
+      await checkRefSelectors(params, context);
       return await handler(params, context);
     } catch (err) {
+      if (err instanceof BrowserRefError) return { ok: false, error: err.message, code: err.code };
       return { ok: false, error: err.message || String(err) };
     }
   },

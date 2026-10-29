@@ -17,7 +17,7 @@ const PAGE_ACTIONS = [
   'click', 'dblclick', 'fill', 'type', 'press', 'clear',
   'select_option', 'check', 'uncheck', 'hover', 'focus',
   'drag_and_drop', 'set_input_files',
-  'scroll', 'screenshot', 'pdf', 'evaluate',
+  'scroll', 'screenshot', 'snapshot', 'pdf', 'evaluate',
   'keyboard_type', 'keyboard_down', 'keyboard_up',
   'mouse_click', 'mouse_move', 'mouse_wheel',
   'wait_for', 'wait_for_url', 'wait_for_load_state', 'wait_for_response'
@@ -37,6 +37,9 @@ Selector strategies (pass as "selector"):
   - XPath:       "xpath=//div[@id='app']"
   - Alt:         "alt=Company logo"
   - Title:       "title=Close dialog"
+  - Ref:         "ref=e15" (from the last "snapshot" of the current page)
+
+"snapshot" lists the page as text, one node a line with its role, name and a [ref=eN] on each element you can act on; pass "ref=eN" as the selector to click or fill exactly that element. interactive=true keeps only the lines with a ref; ref="eN" returns that node's subtree; max_chars (default 20000, at most 60000) cuts at a line end. A ref lasts until the page navigates: then take a new snapshot (ref_stale).
 
 All element actions auto-wait for the element to be actionable. Avoid wait_for_load_state state="networkidle" on chatty sites (LinkedIn, modern dashboards) — they stream telemetry forever and you'll burn the timeout. Prefer wait_for on a specific element or wait_for_url.
 
@@ -51,8 +54,13 @@ All element actions auto-wait for the element to be actionable. Avoid wait_for_l
       url: { type: 'string', description: 'URL for navigate, wait_for_url.' },
 
       // Element selectors
-      selector: { type: 'string', description: 'Element selector (CSS, text=, role=, label=, placeholder=, testid=, xpath=, alt=, title=).' },
-      target_selector: { type: 'string', description: 'Target element selector for drag_and_drop.' },
+      selector: { type: 'string', description: 'Element selector (CSS, text=, role=, label=, placeholder=, testid=, xpath=, alt=, title=, or ref=eN from a snapshot).' },
+      target_selector: { type: 'string', description: 'Target element selector for drag_and_drop (ref=eN accepted).' },
+
+      // Snapshot
+      interactive: { type: 'boolean', description: 'snapshot: keep only the lines with a ref.' },
+      ref: { type: 'string', description: 'snapshot: return only this node (e.g. "e9") and its subtree.' },
+      max_chars: { type: 'number', description: 'snapshot: cut the text at a line end past this many characters (default 20000, at most 60000).' },
 
       // Text input
       text: { type: 'string', description: 'Text for fill, type, keyboard_type.' },
