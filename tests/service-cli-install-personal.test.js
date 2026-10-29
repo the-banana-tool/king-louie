@@ -343,6 +343,59 @@ describe('install --personal', () => {
   });
 });
 
+describe('install --personal: under the desktop app\'s binary, and with a node running', () => {
+  const APP = 'C:\\Program Files\\King Louie\\King Louie.exe';
+  const RELAY_YAML = 'name: laptop\nprofile: agent\nhosting: personal\napprovers:\n  relay: wss://relay.example.com:8443\n';
+  const argsOf = (xml) => /<Arguments>(.*)<\/Arguments>/.exec(xml)[1].replace(/&amp;/g, '&');
+
+  it('runAsNode: the task sets ELECTRON_RUN_AS_NODE, and the consent names the binary and what it means', async () => {
+    const s = setup();
+    const d = deps(s, { runAsNode: true, nodePath: APP });
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    assert.match(t.text(), /^ {2}binary: {5}C:\\Program Files\\King Louie\\King Louie\.exe, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed$/m);
+    const write = d.executed.flat().find((step) => step.writeFile);
+    assert.match(argsOf(write.writeFile.content), /-Command \$env:ELECTRON_RUN_AS_NODE='1'; & 'C:\\Program Files\\King Louie\\King Louie\.exe' 'C:\\kl\\bin\\king-louie-service\.js' run --data-dir /);
+  });
+
+  it('run from node.exe: no variable in the task and no binary line in the consent', async () => {
+    const s = setup();
+    const d = deps(s, { runAsNode: false });
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    assert.doesNotMatch(t.text(), /binary:/);
+    const write = d.executed.flat().find((step) => step.writeFile);
+    assert.doesNotMatch(write.writeFile.content, /ELECTRON_RUN_AS_NODE/);
+  });
+
+  it('a node already running on the data dir: no /Run step, and it says the task starts it at the next logon', async () => {
+    const s = setup();
+    fs.mkdirSync(s.configDir, { recursive: true });
+    fs.writeFileSync(s.yamlPath, RELAY_YAML);
+    const asked = [];
+    const d = deps(s, { runningServicePid: (dir) => { asked.push(dir); return 4242; } });
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    assert.ok(asked.length > 0 && asked.every((dir) => dir === s.dataDir), JSON.stringify(asked));
+    const all = argvs(d);
+    assert.ok(all.some((argv) => argv.includes('/Create')), JSON.stringify(all));
+    assert.ok(!all.some((argv) => argv.includes('/Run')), JSON.stringify(all));
+    assert.match(t.text(), /^King Louie Node is already running \(pid 4242\); the task starts it at your next logon\.$/m);
+    assert.doesNotMatch(t.text(), /registered and started/);
+  });
+
+  it('a node running: the dry run shows no /Run step either', async () => {
+    const s = setup();
+    fs.mkdirSync(s.configDir, { recursive: true });
+    fs.writeFileSync(s.yamlPath, RELAY_YAML);
+    const d = deps(s, { runningServicePid: () => 4242 });
+    const { code, t } = await run('install', s, d, { dryRun: true });
+    assert.equal(code, 0, t.errors());
+    assert.doesNotMatch(t.text(), /\/Run/);
+    assert.match(t.text(), /^King Louie Node is already running \(pid 4242\); the task starts it at your next logon\.$/m);
+  });
+});
+
 describe('renderPersonalTaskXml', () => {
   it('renderPersonalTaskXml: LogonTrigger for the SID, InteractiveToken, LeastPrivilege, run --data-dir', () => {
     const xml = renderPersonalTaskXml({ sid: SID, nodePath: 'C:\\Program Files\\nodejs\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\Users\\owner\\AppData\\Local\\KingLouie\\node\\data', env: { SystemRoot: 'C:\\Windows' } });
@@ -355,6 +408,14 @@ describe('renderPersonalTaskXml', () => {
     assert.match(xml, /<StopIfGoingOnBatteries>false<\/StopIfGoingOnBatteries>/);
     assert.match(xml, /<Command>C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe<\/Command>/);
     assert.match(xml, /run --data-dir 'C:\\Users\\owner\\AppData\\Local\\KingLouie\\node\\data'/);
+  });
+
+  it('runAsNode: true sets ELECTRON_RUN_AS_NODE before the call to the binary; without it, no variable is set', () => {
+    const base = { sid: SID, nodePath: 'C:\\Program Files\\King Louie\\King Louie.exe', entryPath: 'C:\\Program Files\\King Louie\\resources\\app.asar\\bin\\king-louie-service.js', dataDir: 'C:\\d\\data', env: { SystemRoot: 'C:\\Windows' } };
+    const argsOf = (xml) => /<Arguments>(.*)<\/Arguments>/.exec(xml)[1].replace(/&amp;/g, '&');
+    const call = "& 'C:\\Program Files\\King Louie\\King Louie.exe' 'C:\\Program Files\\King Louie\\resources\\app.asar\\bin\\king-louie-service.js' run --data-dir 'C:\\d\\data'";
+    assert.equal(argsOf(renderPersonalTaskXml({ ...base, runAsNode: true })), `-WindowStyle Hidden -NoProfile -NonInteractive -Command $env:ELECTRON_RUN_AS_NODE='1'; ${call}`);
+    assert.equal(argsOf(renderPersonalTaskXml(base)), `-WindowStyle Hidden -NoProfile -NonInteractive -Command ${call}`);
   });
 
   it('refuses a malformed SID and a path with a double quote', () => {
