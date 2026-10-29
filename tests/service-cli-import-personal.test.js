@@ -166,9 +166,17 @@ describe('import --from under hosting: personal', () => {
     assert.strictEqual(code, 0, o.out.stderr);
   });
 
-  it('a node.yaml that cannot be read stops the import', async () => {
+  it('a node.yaml that cannot be read is not personal: unelevated it is the administrator refusal', async () => {
     const o = io();
     const code = await runImportCommand({ flags: { from: userData() }, dataDir: keyedDataDir(), io: o.io, deps: deps({ loadNodeConfig: () => { throw new Error('Invalid node.yaml: bad key'); } }) });
+    assert.strictEqual(code, 1);
+    assert.match(o.out.stderr, /run it as root\/an administrator/);
+    assert.doesNotMatch(o.out.stderr, /Cannot read the node's configuration/);
+  });
+
+  it('a node.yaml that cannot be read stops an elevated import', async () => {
+    const o = io();
+    const code = await runImportCommand({ flags: { from: userData() }, dataDir: keyedDataDir(), io: o.io, deps: deps({ isAdmin: () => true, loadNodeConfig: () => { throw new Error('Invalid node.yaml: bad key'); } }) });
     assert.strictEqual(code, 1);
     assert.match(o.out.stderr, /Cannot read the node's configuration: Invalid node.yaml: bad key/);
   });

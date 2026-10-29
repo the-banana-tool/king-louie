@@ -1,6 +1,6 @@
 // What Settings > Local service shows for each state (fleet stage 7 §3.9).
 // Pure, so the wording is tested in node; the preload exposes it to the renderer.
-const { MESSAGES, DEFAULT_DESKTOP_BRIDGE_PORT } = require('./protocol');
+const { MESSAGES, DEFAULT_DESKTOP_BRIDGE_PORT, PERSONAL_TASK_NAME } = require('./protocol');
 
 const UNAVAILABLE_TAB_NOTICE = 'Managed by the local service; not available while attached.';
 const INSTALL_HINT = 'Install king-louie-service on this computer and run it with the agent profile to use this app as its window.';
@@ -21,11 +21,12 @@ function plain(value) {
   return shown(value);
 }
 
+// NODE_START_TIMEOUT has no line here: the controller words it from its own
+// wait (the seconds), and the pane shows that message.
 const NODE_LINES = {
   NODE_TASK_MISSING: 'King Louie Node has no logon task on this computer, so this app cannot start it.',
-  NODE_TASK_DISABLED: 'The logon task "KingLouie Node" is disabled in Task Scheduler. Enable it there to let this app start the node.',
-  NODE_TASK_OTHER_ACCOUNT: 'The logon task "KingLouie Node" belongs to another account; this app does not run it.',
-  NODE_START_TIMEOUT: 'King Louie Node did not answer within 60 seconds.',
+  NODE_TASK_DISABLED: `The logon task "${PERSONAL_TASK_NAME}" is disabled in Task Scheduler. Enable it there to let this app start the node.`,
+  NODE_TASK_OTHER_ACCOUNT: `The logon task "${PERSONAL_TASK_NAME}" belongs to another account; this app does not run it.`,
   NOT_RUNNING: 'King Louie Node is not running.',
   STARTING: 'Starting King Louie Node…'
 };
@@ -33,7 +34,9 @@ const TASK_CODES = { missing: 'NODE_TASK_MISSING', disabled: 'NODE_TASK_DISABLED
 const START_FAILED = (line) => `King Louie Node stopped while starting: ${plain(line)}`;
 const RUN_FAILED = (message) => `King Louie Node could not be started: ${plain(message)}`;
 const STOP_FAILED = (message) => `King Louie Node could not be stopped: ${plain(message)}`;
-const RUNNING_NO_BRIDGE = (pid) => `King Louie Node is running (pid ${plain(pid)}) but its desktop bridge is not open.`;
+const RUNNING_NO_BRIDGE = (pid) => (Number.isInteger(pid)
+  ? `King Louie Node is running (pid ${pid}) but its desktop bridge is not open.`
+  : 'King Louie Node is running but its desktop bridge is not open.');
 const PAIR_ELEVATED_LINE = 'This app is running as administrator. Close it and open it normally to pair.';
 const PERSONAL_PAIR_WARNING = 'Every paired desktop sees every chat, setting and secret name in the node.';
 const INSTALL_ACTION = { id: 'nodeInstallPreview', label: 'Install…' };
@@ -75,7 +78,7 @@ function refusalLine(error) {
 function disconnectedRow(n, { install }) {
   const err = n.startError;
   if (err && err.code === 'NODE_START_FAILED') return { line: START_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
-  if (err && err.code === 'NODE_START_TIMEOUT') return { line: NODE_LINES.NODE_START_TIMEOUT, action: null };
+  if (err && err.code === 'NODE_START_TIMEOUT') return { line: plain(errorText(err)), action: null };
   if (err && err.code === 'NODE_TASK_RUN_FAILED') return { line: RUN_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
   if (err && err.code === 'NODE_STOP_FAILED') return { line: STOP_FAILED(errorText(err)), action: { id: 'nodeRestart', label: 'Restart King Louie Node' } };
   const taskCode = TASK_CODES[n.task] || (err && Object.values(TASK_CODES).includes(err.code) ? err.code : null);

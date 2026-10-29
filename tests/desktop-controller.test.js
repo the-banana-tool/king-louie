@@ -623,7 +623,7 @@ function fakeRunner({
   personal = true, running = false, task = 'registered', failure = null,
   cli = () => ({ code: 0, stdout: '', stderr: '', json: { ok: true } }),
   trust = () => ({ ok: false, code: 'BRIDGE_FILE_MISSING', error: 'No local service found.' }),
-  restart = () => ({ ok: true, ranAt: 2000 }), unpairCode = 0
+  stop = () => ({ ok: true }), unpairCode = 0
 } = {}) {
   const calls = [];
   const node = personal
@@ -634,10 +634,16 @@ function fakeRunner({
     running,
     async inspectLocal(a = {}) { calls.push(['inspectLocal', a]); return { trust: trust(), node }; },
     async detectPersonalNode(a = {}) { calls.push(['detectPersonalNode', a]); return node; },
-    async queryTask(a) { calls.push(['queryTask', a]); return { state: task }; },
+    task,
+    async queryTask(a) { calls.push(['queryTask', a]); return { state: runner.task }; },
     async nodeRunning(a) { calls.push(['nodeRunning', a]); return runner.running ? { running: true, pid: 4242 } : { running: false, pid: null }; },
     async runTask() { calls.push(['runTask']); return { ok: true, ranAt: 1000 }; },
-    async restartNode(a) { calls.push(['restartNode', a]); return restart(); },
+    async stopNode(a) {
+      calls.push(['stopNode', a]);
+      const r = stop();
+      if (r.ok) runner.running = false;
+      return r;
+    },
     async runCli(args, opts) {
       calls.push(['runCli', args, opts]);
       if (args[0] === 'desktop' && args[1] === 'unpair') return { code: unpairCode, stdout: '', stderr: unpairCode ? 'could not remove the device\n' : '', json: null };
@@ -803,14 +809,41 @@ describe('desktop controller: a personal node', () => {
     assert.strictEqual(out.pendingPair.error, null);
     assert.strictEqual(out.node.running, true);
     assert.strictEqual(out.node.pid, 4242);
-    assert.ok(!runner.calls.some(([c]) => c === 'restartNode' || c === 'runTask'), 'nothing restarted yet');
+    assert.ok(!runner.calls.some(([c]) => c === 'stopNode' || c === 'runTask'), 'nothing restarted yet');
     assert.strictEqual((await controller.pairRestartConfirm({ confirmed: 'yes' })).code, 'CONFIRM_REQUIRED');
-    assert.ok(!runner.calls.some(([c]) => c === 'restartNode'));
+    assert.ok(!runner.calls.some(([c]) => c === 'stopNode'));
+    const before = runner.calls.length;
     const done = await controller.pairRestartConfirm({ confirmed: true });
     assert.strictEqual(done.view, 'paired', JSON.stringify(done));
-    assert.deepStrictEqual(runner.calls.filter(([c]) => c === 'restartNode').map(([, a]) => a), [{ dataDir: PERSONAL_DATA_DIR }]);
-    assert.ok(!runner.calls.some(([c]) => c === 'runTask'), 'the restart runs the task itself');
+    // §7.1, §12: the task is checked before anything is stopped, then stop, then /Run.
+    const steps = runner.calls.slice(before).map(([c]) => c).filter((c) => ['queryTask', 'stopNode', 'runTask'].includes(c));
+    assert.deepStrictEqual(steps, ['queryTask', 'stopNode', 'runTask']);
+    assert.deepStrictEqual(runner.calls.filter(([c]) => c === 'stopNode').map(([, a]) => a), [{ dataDir: PERSONAL_DATA_DIR }]);
     assert.strictEqual(state.pairing.service.hosting, 'personal');
+    controller.dispose();
+  });
+
+  for (const [task, code] of [['other-account', 'NODE_TASK_OTHER_ACCOUNT'], ['disabled', 'NODE_TASK_DISABLED'], ['missing', 'NODE_TASK_MISSING']]) {
+    it(`"Restart and pair" with a task that is ${task} stops nothing and runs nothing (${code})`, async () => {
+      const svc = await startService();
+      const runner = fakeRunner({ running: true, task, cli: pairingCli(svc, { bridgeTurnedOn: true }), trust: trustedRecord(svc.port) });
+      const { controller } = controllerFor({ extra: { nodeRunner: runner, ...fakeTimers().extra } });
+      await controller.pairStart();
+      const out = await controller.pairRestartConfirm({ confirmed: true });
+      assert.strictEqual(out.pendingPair.error.code, code);
+      assert.ok(!runner.calls.some(([c]) => c === 'stopNode' || c === 'runTask'));
+      assert.strictEqual(out.node.starting, false);
+      controller.dispose();
+    });
+  }
+
+  it("a refusal's text from the trust read reaches the status through shown", async () => {
+    const svc = await startService();
+    const runner = fakeRunner({ cli: pairingCli(svc), trust: () => ({ ok: false, code: 'BRIDGE_FILE_UNTRUSTED', error: 'Refusing to trust C:\\x\\desktop-bridge.json: a link.\u202e\nsecond line' }) });
+    const { controller } = controllerFor({ extra: { nodeRunner: runner } });
+    const out = await controller.pairStart();
+    assert.strictEqual(out.pendingPair.error.code, 'BRIDGE_FILE_UNTRUSTED');
+    assert.strictEqual(out.pendingPair.error.message, 'Refusing to trust C:\\x\\desktop-bridge.json: a link. second line [hidden or control characters removed]');
     controller.dispose();
   });
 
@@ -827,7 +860,7 @@ describe('desktop controller: a personal node', () => {
     const { controller } = controllerFor({ extra: { nodeRunner: runner, ...timers.extra } });
     const out = await controller.pairStart();
     assert.strictEqual(out.view, 'paired', JSON.stringify(out));
-    assert.ok(!runner.calls.some(([c]) => c === 'restartNode' || c === 'runTask'));
+    assert.ok(!runner.calls.some(([c]) => c === 'stopNode' || c === 'runTask'));
     controller.dispose();
   });
 
@@ -1217,7 +1250,7 @@ describe('desktop controller: the attached start of a personal node', () => {
     assert.strictEqual(out.ok, true);
     await controller.startIdle();
     assert.strictEqual(runner.calls.filter(([c]) => c === 'runTask').length, 1);
-    assert.ok(!runner.calls.some(([c]) => c === 'restartNode'));
+    assert.ok(!runner.calls.some(([c]) => c === 'stopNode'));
     assert.strictEqual((await controller.status()).view, 'attached-connected');
     controller.dispose();
   });
@@ -1227,23 +1260,144 @@ describe('desktop controller: the attached start of a personal node', () => {
     const { controller } = attachedController({ runner, client: new FakeAttachedClient({ liveOnRetry: 1 }) });
     await controller.nodeStart({ restart: false });
     await controller.startIdle();
-    assert.ok(!runner.calls.some(([c]) => c === 'runTask' || c === 'restartNode'));
+    assert.ok(!runner.calls.some(([c]) => c === 'runTask' || c === 'stopNode'));
     controller.dispose();
   });
 
-  it('nodeStart({ restart: true }) stops and runs through restartNode, never runTask', async () => {
+  it('nodeStart({ restart: true }) checks the task, stops, then runs it', async () => {
     const runner = fakeRunner({ running: true });
+    const client = new FakeAttachedClient({ liveOnRetry: 2 });
+    const { controller } = attachedController({ runner, client });
+    await controller.nodeStart({ restart: true });
+    await controller.startIdle();
+    const steps = runner.calls.map(([c]) => c).filter((c) => ['queryTask', 'stopNode', 'runTask'].includes(c));
+    assert.deepStrictEqual(steps, ['queryTask', 'stopNode', 'runTask']);
+    assert.deepStrictEqual(runner.calls.filter(([c]) => c === 'stopNode').map(([, a]) => a), [{ dataDir: PERSONAL_DATA_DIR }]);
+    assert.strictEqual(runner.calls.find(([c]) => c === 'queryTask')[1].me, OWNER_SID);
+    assert.strictEqual(runner.calls.find(([c]) => c === 'startFailureSince')[1], 1000, 'the wait reads the log from the /Run');
+    controller.dispose();
+  });
+
+  for (const [task, code] of [['other-account', 'NODE_TASK_OTHER_ACCOUNT'], ['disabled', 'NODE_TASK_DISABLED']]) {
+    it(`a restart with a task that is ${task} stops nothing and runs nothing (${code})`, async () => {
+      const runner = fakeRunner({ running: true, task });
+      const { controller } = attachedController({ runner });
+      await controller.nodeStart({ restart: true });
+      await controller.startIdle();
+      assert.ok(!runner.calls.some(([c]) => c === 'stopNode' || c === 'runTask'));
+      const status = await controller.status();
+      assert.strictEqual(status.node.startError.code, code);
+      assert.strictEqual(status.node.running, true, 'the node was left running');
+      controller.dispose();
+    });
+  }
+
+  it('a restart with no node running just starts it: no stop', async () => {
+    const runner = fakeRunner({ running: false });
     const client = new FakeAttachedClient({ liveOnRetry: 1 });
     const { controller } = attachedController({ runner, client });
     await controller.nodeStart({ restart: true });
     await controller.startIdle();
-    assert.deepStrictEqual(runner.calls.filter(([c]) => c === 'restartNode').map(([, a]) => a), [{ dataDir: PERSONAL_DATA_DIR }]);
+    assert.ok(!runner.calls.some(([c]) => c === 'stopNode'));
+    assert.strictEqual(runner.calls.filter(([c]) => c === 'runTask').length, 1);
+    assert.strictEqual((await controller.status()).view, 'attached-connected');
+    controller.dispose();
+  });
+
+  it('after a drop the status reads the node again: no stale running row, nothing is run (C-13)', async () => {
+    const runner = fakeRunner({ running: true });
+    const client = new FakeAttachedClient({ liveOnRetry: 1 });
+    const { controller } = attachedController({ runner, client });
+    await controller.startAttached();
+    assert.strictEqual((await controller.status()).view, 'attached-connected');
+    runner.running = false; // the owner stopped the node
+    client.drop();
+    await controller.refreshIdle();
+    const status = await controller.status();
+    assert.strictEqual(status.view, 'attached-disconnected');
+    assert.strictEqual(status.node.running, false);
+    assert.strictEqual(status.node.pid, null);
+    assert.strictEqual(status.node.task, 'registered', 'the Start row, chosen from what is found now');
     assert.ok(!runner.calls.some(([c]) => c === 'runTask'));
     controller.dispose();
   });
 
+  it('the disconnected status reads the node again, at most once a while', async () => {
+    const runner = fakeRunner({ running: false, task: 'missing' });
+    const timers = fakeTimers();
+    const { controller } = attachedController({ runner, timers });
+    // Not started: the view is attached-disconnected from the start.
+    const first = await controller.status();
+    assert.strictEqual(first.view, 'attached-disconnected');
+    assert.strictEqual(first.node.task, 'missing');
+    await controller.status();
+    await controller.status();
+    assert.strictEqual(runner.calls.filter(([c]) => c === 'nodeRunning').length, 1, 'rate-limited');
+    timers.now += 60000;
+    runner.task = 'registered';
+    assert.strictEqual((await controller.status()).node.task, 'registered');
+    assert.strictEqual(runner.calls.filter(([c]) => c === 'nodeRunning').length, 2);
+    assert.ok(!runner.calls.some(([c]) => c === 'runTask'));
+    controller.dispose();
+  });
+
+  it('a wait where nothing was run times out when the node is gone by then', async () => {
+    const runner = fakeRunner({ running: true });
+    const { controller } = attachedController({ runner });
+    const keepAlive = setTimeout(() => {}, 60000);
+    try {
+      const realNodeRunning = runner.nodeRunning;
+      let reads = 0;
+      runner.nodeRunning = async (a) => { reads += 1; if (reads > 1) runner.running = false; return realNodeRunning(a); };
+      await controller.startAttached();
+      const status = await controller.status();
+      assert.strictEqual(status.node.startError.code, 'NODE_START_TIMEOUT');
+      assert.strictEqual(status.node.running, false);
+      assert.ok(!runner.calls.some(([c]) => c === 'runTask'));
+    } finally {
+      clearTimeout(keepAlive);
+      controller.dispose();
+    }
+  });
+
+  it('the timeout says the wait it was given', async () => {
+    const runner = fakeRunner();
+    const timers = fakeTimers();
+    const made = controllerFor({ mode: 'attached', extra: { nodeRunner: runner, ...timers.extra, nodeStartWaitMs: 30000 } });
+    made.state.setPairing(personalPairing());
+    made.controller.setClient(new FakeAttachedClient());
+    const keepAlive = setTimeout(() => {}, 60000);
+    try {
+      await made.controller.startAttached();
+      assert.deepStrictEqual((await made.controller.status()).node.startError, { code: 'NODE_START_TIMEOUT', message: 'King Louie Node did not answer within 30 seconds.' });
+    } finally {
+      clearTimeout(keepAlive);
+      made.controller.dispose();
+    }
+  });
+
+  it('two waits at once each keep their own timer, and dispose clears both', async () => {
+    const svc = await startService();
+    const port = await deadPort();
+    const runner = fakeRunner({ cli: pairingCli(svc), trust: trustedRecord(port) });
+    const timers = heldTimers();
+    const { controller } = attachedController({ runner, timers });
+    const keepAlive = setTimeout(() => {}, 60000);
+    try {
+      const attached = controller.startAttached();
+      while (timers.pending.size === 0) await new Promise((r) => setImmediate(r));
+      const paired = controller.pairStart();
+      while (timers.pending.size < 2) await new Promise((r) => setTimeout(r, 5));
+      controller.dispose();
+      await Promise.all([attached, paired]);
+      assert.strictEqual(timers.pending.size, 0, 'no timer left behind');
+    } finally {
+      clearTimeout(keepAlive);
+    }
+  });
+
   it('a restart whose stop fails is NODE_STOP_FAILED in the status', async () => {
-    const runner = fakeRunner({ running: true, restart: () => ({ ok: false, code: 'NODE_STOP_FAILED', message: 'stop did not finish' }) });
+    const runner = fakeRunner({ running: true, stop: () => ({ ok: false, code: 'NODE_STOP_FAILED', message: 'stop did not finish' }) });
     const { controller } = attachedController({ runner });
     await controller.nodeStart({ restart: true });
     await controller.startIdle();
@@ -1306,15 +1460,45 @@ describe('desktop controller: Install from the pane (§8)', () => {
     const runner = cliRunner(() => ({ code: 0, stdout: 'Registered KingLouie Node.\n', stderr: '', json: null }));
     const { controller, state } = controllerFor({ extra: { nodeRunner: runner } });
     state.setPairing(personalPairing());
-    const realQuery = runner.queryTask;
-    runner.queryTask = async (a) => { await realQuery(a); return { state: 'registered' }; };
+    const realCli = runner.runCli;
+    runner.runCli = async (args, opts) => { const r = await realCli(args, opts); runner.task = 'registered'; return r; };
     const out = await controller.nodeInstall({ confirmed: true });
     assert.deepStrictEqual(runner.calls.find(([c]) => c === 'runCli')[1], ['install', '--personal', '--yes', '--data-dir', PERSONAL_DATA_DIR]);
     assert.deepStrictEqual(out, { ok: true, lines: ['Registered KingLouie Node.'] });
     const ran = runner.calls.map(([c]) => c);
+    assert.ok(ran.indexOf('detectPersonalNode') < ran.indexOf('runCli'), 'the disk is read before the install (C-7)');
+    assert.deepStrictEqual(runner.calls.find(([c]) => c === 'detectPersonalNode')[1], { dataDir: PERSONAL_DATA_DIR });
+    assert.ok(ran.indexOf('queryTask') < ran.indexOf('runCli'), 'the task is checked before the install');
     assert.ok(ran.lastIndexOf('queryTask') > ran.indexOf('runCli'), 'the task is read after the install');
     assert.strictEqual((await controller.status()).node.task, 'registered');
     assert.ok(!ran.includes('runTask'), 'the desktop runs nothing itself after an install');
+    controller.dispose();
+  });
+
+  for (const task of ['registered', 'disabled', 'other-account', 'unknown']) {
+    it(`nodeInstall refuses a task that is ${task} and runs nothing (§8: only with no task)`, async () => {
+      const runner = fakeRunner({ task, cli: () => ({ code: 0, stdout: 'Registered.\n', stderr: '', json: null }) });
+      const { controller } = controllerFor({ extra: { nodeRunner: runner } });
+      const out = await controller.nodeInstall({ confirmed: true });
+      assert.strictEqual(out.ok, false);
+      assert.ok(out.code && out.code !== 'NODE_TASK_MISSING', out.code);
+      assert.ok(out.message);
+      assert.deepStrictEqual(out.lines, []);
+      assert.ok(!runner.calls.some(([c]) => c === 'runCli'));
+      controller.dispose();
+    });
+  }
+
+  it('a recorded personal pairing the disk no longer agrees with: Install refuses (C-7)', async () => {
+    const runner = fakeRunner({ personal: false, task: 'missing' });
+    const { controller, state } = controllerFor({ extra: { nodeRunner: runner } });
+    state.setPairing(personalPairing());
+    for (const out of [await controller.nodeInstallPreview(), await controller.nodeInstall({ confirmed: true })]) {
+      assert.strictEqual(out.ok, false);
+      assert.strictEqual(out.code, 'NOT_PERSONAL');
+    }
+    assert.deepStrictEqual(runner.calls.filter(([c]) => c === 'detectPersonalNode').map(([, a]) => a), [{ dataDir: PERSONAL_DATA_DIR }, { dataDir: PERSONAL_DATA_DIR }]);
+    assert.ok(!runner.calls.some(([c]) => c === 'runCli'));
     controller.dispose();
   });
 

@@ -268,6 +268,8 @@ describe('queryTask (C-10: the task XML, never the localised text)', () => {
 
   it('names the task the installer registers', () => {
     assert.strictEqual(require('../src/desktop-bridge/personal-node').PERSONAL_TASK_NAME, require('../src/service/personal-install').PERSONAL_TASK_NAME);
+    // The pane (loaded by the preload) reads it from protocol.js.
+    assert.strictEqual(require('../src/desktop-bridge/protocol').PERSONAL_TASK_NAME, require('../src/service/personal-install').PERSONAL_TASK_NAME);
   });
 });
 
@@ -284,6 +286,29 @@ describe('nodeRunning (the pidfile and the command line, as stop tests them)', (
     });
     return { r, seen };
   };
+
+  it('reads the pidfile with the service\'s own reader by default', async () => {
+    const { dataDir } = layout();
+    fs.writeFileSync(path.join(dataDir, 'service.pid'), `${process.pid}\n`);
+    const r = createPersonalNodeRunner({ platform: 'win32', env: ENV, commandLineOf: async () => 'node bin/king-louie-service.js run --data-dir x' });
+    assert.deepStrictEqual(await r.nodeRunning({ dataDir }), { running: true, pid: process.pid });
+    fs.writeFileSync(path.join(dataDir, 'service.pid'), 'not a pid');
+    assert.deepStrictEqual(await r.nodeRunning({ dataDir }), { running: false, pid: null });
+  });
+
+  it('asks /bin/ps by absolute path for the command line off Windows and Linux', async () => {
+    const execFile = fakeExecFile(() => ({ stdout: 'node king-louie-service.js run\n' }));
+    const r = createPersonalNodeRunner({ platform: 'darwin', env: ENV, execFile, readPidfile: async () => 4242, isRunning: () => true });
+    assert.deepStrictEqual(await r.nodeRunning({ dataDir: '/data' }), { running: true, pid: 4242 });
+    assert.strictEqual(execFile.calls[0].file, '/bin/ps');
+    assert.deepStrictEqual(execFile.calls[0].args, ['-o', 'args=', '-p', '4242']);
+  });
+
+  it('exports the one firstLine: the first non-empty line, through shown', () => {
+    const { firstLine } = require('../src/desktop-bridge/personal-node');
+    assert.strictEqual(firstLine('\n  boom‮ \nmore'), 'boom [hidden or control characters removed]');
+    assert.strictEqual(firstLine(''), '');
+  });
 
   it('is running when the pidfile names a live king-louie-service run', async () => {
     const { r, seen } = make();
@@ -366,20 +391,20 @@ describe('runTask and restartNode (§7.1: /Run; restart is stop then /Run, never
     assert.strictEqual(out.message, 'ERROR: The system cannot find the file specified. [hidden or control characters removed]');
   });
 
-  it('restarts with the CLI\'s stop on the data dir, then /Run', async () => {
+  it('stops with the CLI\'s stop on the data dir and runs nothing else (the controller checks the task and runs it)', async () => {
     const order = [];
     const spawn = fakeSpawn((child, args) => { order.push(['cli', ...args.slice(1)]); exits(0, 'stopped\n')(child); });
     const execFile = fakeExecFile((file, args) => { order.push(['schtasks', ...args]); return { stdout: 'SUCCESS' }; });
     const r = createPersonalNodeRunner({ platform: 'win32', env: ENV, spawn, execFile, now: () => 5 });
-    assert.deepStrictEqual(await r.restartNode({ dataDir: 'C:\\data' }), { ok: true, ranAt: 5 });
-    assert.deepStrictEqual(order, [['cli', 'stop', '--data-dir', 'C:\\data'], ['schtasks', '/Run', '/TN', 'KingLouie Node']]);
-    assert.ok(!order.some((step) => step.includes('/End')));
+    assert.strictEqual(r.restartNode, undefined, 'no restart that runs the task without the task check');
+    assert.deepStrictEqual(await r.stopNode({ dataDir: 'C:\\data' }), { ok: true });
+    assert.deepStrictEqual(order, [['cli', 'stop', '--data-dir', 'C:\\data']]);
   });
 
-  it('does not /Run when stop failed', async () => {
+  it('a stop that failed is NODE_STOP_FAILED with its first line', async () => {
     const spawn = fakeSpawn(exits(1, '', 'The node did not stop within 30 s.\n'));
     const execFile = fakeExecFile(() => ({ stdout: 'SUCCESS' }));
-    const out = await createPersonalNodeRunner({ platform: 'win32', env: ENV, spawn, execFile }).restartNode({ dataDir: 'C:\\data' });
+    const out = await createPersonalNodeRunner({ platform: 'win32', env: ENV, spawn, execFile }).stopNode({ dataDir: 'C:\\data' });
     assert.deepStrictEqual(out, { ok: false, code: 'NODE_STOP_FAILED', message: 'The node did not stop within 30 s.' });
     assert.strictEqual(execFile.calls.length, 0);
   });

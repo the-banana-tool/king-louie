@@ -17,8 +17,9 @@
 //   pid whose command line is `king-louie-service … run`);
 // - did it fail to start (startFailureSince: the node's own log).
 // What it runs: `schtasks /Run` (runTask), the CLI with the app's own binary
-// as Node (runCli, C-9), and a restart as the CLI's `stop` then `/Run`
-// (restartNode). Never `/End`, `/Change` or `/Create`.
+// as Node (runCli, C-9), and the CLI's `stop` (stopNode). A restart is the
+// controller's: the task checked, then stop, then `/Run`. Never `/End`,
+// `/Change` or `/Create`.
 
 const fs = require('fs');
 const path = require('path');
@@ -29,12 +30,11 @@ const { windowsSchtasksExe, windowsPowerShellExe, windowsSystemRoot } = require(
 const { shown } = require('../service/commands/io');
 const { isServiceCommandLine } = require('../service/commands/stop');
 const pairing = require('./pairing');
+const { PERSONAL_TASK_NAME } = require('./protocol');
+const pidfile = require('../service/pidfile');
 
 const log = createLogger('desktop-bridge/personal-node');
 
-// Kept equal to src/service/personal-install.js's PERSONAL_TASK_NAME (a test
-// holds the two equal); not required from there, which loads the installer.
-const PERSONAL_TASK_NAME = 'KingLouie Node';
 const ENTRY_PATH = path.resolve(__dirname, '..', '..', 'bin', 'king-louie-service.js');
 const DEFAULT_CLI_TIMEOUT_MS = 120000;
 const SCHTASKS_TIMEOUT_MS = 30000;
@@ -56,8 +56,8 @@ function createPersonalNodeRunner(deps = {}) {
   const now = deps.now || Date.now;
   const execPath = deps.execPath || process.execPath;
   const entryPath = deps.entryPath || ENTRY_PATH;
-  const readPidfile = deps.readPidfile || defaultReadPidfile;
-  const isRunning = deps.isRunning || ((pid) => require('../service/pidfile').isRunning(pid));
+  const readPidfile = deps.readPidfile || (async (dataDir) => pidfile.readPidfile(dataDir));
+  const isRunning = deps.isRunning || ((pid) => pidfile.isRunning(pid));
   const commandLineOf = deps.commandLineOf || ((pid) => defaultCommandLineOf(pid, { platform, env, execFile }));
   const whoAmI = deps.whoAmI || (() => defaultWhoAmI({ env, execFile }));
   const testOverride = env.KL_TEST_MODE === '1' && Boolean(env.KL_DESKTOP_BRIDGE_FILE);
@@ -238,9 +238,10 @@ function createPersonalNodeRunner(deps = {}) {
     });
   }
 
-  // §7.1: a restart, only on a press: the CLI's `stop` (which under personal
-  // hosting also ends the task), then /Run. Never `/End`.
-  async function restartNode({ dataDir }) {
+  // §7.1: the stop half of a restart (only on a press): the CLI's `stop`,
+  // which under personal hosting also ends the task. Never `/End`. The
+  // controller checks the task before it and runs /Run after it.
+  async function stopNode({ dataDir }) {
     const stopped = await runCli(['stop', '--data-dir', dataDir], { timeoutMs: STOP_TIMEOUT_MS });
     if (stopped.code !== 0) {
       return {
@@ -250,7 +251,7 @@ function createPersonalNodeRunner(deps = {}) {
           || (stopped.timedOut ? 'stop did not finish' : shown(stopped.error || 'stop failed'))
       };
     }
-    return runTask();
+    return { ok: true };
   }
 
   // §7.1: the newest `service failed to start` line of <A>\logs\service.log
@@ -283,7 +284,7 @@ function createPersonalNodeRunner(deps = {}) {
     queryTask,
     nodeRunning,
     runTask,
-    restartNode,
+    stopNode,
     runCli,
     startFailureSince
   };
@@ -331,15 +332,6 @@ function lastJsonLine(stdout) {
   }
 }
 
-async function defaultReadPidfile(dataDir) {
-  try {
-    const pid = Number((await fs.promises.readFile(path.join(dataDir, 'service.pid'), 'utf8')).trim());
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
 function execText(execFile, file, args) {
   return new Promise((resolve) => {
     try {
@@ -369,7 +361,7 @@ async function defaultCommandLineOf(pid, { platform, env, execFile }) {
       return null;
     }
   }
-  const out = await execText(execFile, 'ps', ['-o', 'args=', '-p', String(n)]);
+  const out = await execText(execFile, '/bin/ps', ['-o', 'args=', '-p', String(n)]);
   return out && out.trim() ? out.trim() : null;
 }
 
@@ -400,5 +392,6 @@ module.exports = {
   ENTRY_PATH,
   DEFAULT_CLI_TIMEOUT_MS,
   FAILED_TO_START,
+  firstLine,
   parseTaskXml
 };

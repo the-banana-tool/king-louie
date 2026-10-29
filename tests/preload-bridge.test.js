@@ -156,7 +156,7 @@ describe('desktop: personal-node methods (spec §11)', () => {
   for (const [method, channel] of [['nodeInstall', 'desktop:nodeInstall'], ['pairRestartConfirm', 'desktop:pairRestartConfirm']]) {
     it(`${method} sends confirmed: true only when the caller passed confirmed === true`, async () => {
       const { exposedApi, invoked } = runPreloadWithFakeIpc();
-      await exposedApi.desktop[method]({ confirmed: true, dataDir: 'C:\elsewhere' });
+      await exposedApi.desktop[method]({ confirmed: true, dataDir: 'C:\\elsewhere' });
       await exposedApi.desktop[method]({ confirmed: 'true' });
       await exposedApi.desktop[method]();
       assert.deepStrictEqual(JSON.parse(JSON.stringify(invoked)), [

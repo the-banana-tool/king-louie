@@ -283,21 +283,28 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
   // and an elevated run is refused with or without --case (C-2), since an
   // elevated writer would leave Administrators-owned files in the data dir
   // that the node's owner check (which reads the dirs' owners only) never
-  // sees. Every other import still needs root/an administrator.
+  // sees. Every other import still needs root/an administrator. A node.yaml
+  // that cannot be read is not personal (as desktop.js reads it):
+  // unelevated, the administrator refusal; elevated, the error.
   let personal = false;
+  let nodeConfigError = null;
   try {
     const nodeCfg = (deps.loadNodeConfig || ((dir) => require('../node-config').loadNodeConfig({ dataDir: dir })))(dataDir);
     personal = Boolean(nodeCfg) && nodeCfg.hosting === 'personal';
   } catch (err) {
-    io.stderr.write(`Cannot read the node's configuration: ${printable(err.message)}\n`);
-    return 1;
+    nodeConfigError = err;
   }
-  if (personal && (await isAdmin())) {
+  const elevated = await isAdmin();
+  if (personal && elevated) {
     io.stderr.write('import on a personal node runs as you, not elevated: open a normal prompt.\n');
     return 1;
   }
-  if (!personal && !(await isAdmin())) {
+  if (!personal && !elevated) {
     io.stderr.write(`import writes ${dataDir}; run it as root/an administrator.\n`);
+    return 1;
+  }
+  if (nodeConfigError) {
+    io.stderr.write(`Cannot read the node's configuration: ${printable(nodeConfigError.message)}\n`);
     return 1;
   }
   if (deps.runningServicePid(dataDir)) {
