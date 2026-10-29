@@ -29,6 +29,7 @@ const HELP = `Usage:
   king-louie-service enroll-device [--data-dir DIR]              (admin: pair a phone approver)
   king-louie-service device list|revoke <device-id>|apply [--yes] [--data-dir DIR]
   king-louie-service relay run|code <node-name>|nodes|remove-node <node-name>|qr [--data-dir DIR]
+  king-louie-service relay push-test [--device <device-id>] [--data-dir DIR]   (admin: send a test push)
   king-louie-service frontdoor enroll-device|code <node-name> [--confirm]|nodes|remove-node <node-name>|rotate-tls-key [--data-dir DIR]
   king-louie-service identity record [--replace] [--data-dir DIR] [--dry-run] [--yes]   (admin: record this node's identity)
   king-louie-service identity show [--data-dir DIR]
@@ -74,7 +75,7 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
        king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
 `;
 
-const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern', 'browser', 'provider', 'model', 'case', 'timeout']);
+const VALUE_FLAGS = new Set(['data-dir', 'device', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern', 'browser', 'provider', 'model', 'case', 'timeout']);
 // Flags that must never carry a value, whichever form produced it.
 const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'replace', 'personal', 'force']);
 
@@ -437,7 +438,7 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
 
       case 'relay': {
         const { runRelayCommand } = require('./commands/relay');
-        return await runRelayCommand({ sub, arg, dataDir, io });
+        return await runRelayCommand({ sub, arg, flags, dataDir, io });
       }
 
       case 'frontdoor': {

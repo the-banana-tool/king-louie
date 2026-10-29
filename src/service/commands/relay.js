@@ -1,4 +1,5 @@
-// `king-louie-service relay run|code|nodes|remove-node|qr` (spec §3.12).
+// `king-louie-service relay run|code|nodes|remove-node|qr` (spec §3.12) and
+// `relay push-test` (push spec §9).
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -15,6 +16,7 @@ const RELAY_HELP = `Usage: king-louie-service relay run [--data-dir DIR]
        king-louie-service relay nodes [--data-dir DIR]
        king-louie-service relay remove-node <node-name> [--data-dir DIR]
        king-louie-service relay qr [--data-dir DIR]
+       king-louie-service relay push-test [--device <device-id>] [--data-dir DIR]
 `;
 
 function registryFile(dataDir) {
@@ -134,7 +136,118 @@ function onFrontDoor(dataDir, deps) {
   }
 }
 
-async function runRelayCommand({ sub, arg, dataDir, io, deps = {} }) {
+// The relay's own node name, the `n` of a test push: node.yaml's name (a front
+// door always has one); a `relay run` host without a node.yaml is "relay",
+// the name its identity is made under.
+function defaultRelayNodeName(dataDir) {
+  const { adminConfigDir } = require('../../platform/paths');
+  const { loadNodeConfig, NODE_CONFIG_FILE } = require('../node-config');
+  const dir = adminConfigDir({ dataDir });
+  if (!fs.existsSync(path.join(dir, NODE_CONFIG_FILE))) return { name: 'relay' };
+  return loadNodeConfig({ dataDir, adminConfigDir: dir });
+}
+
+// The parsed relay.push block, from wherever this host keeps it: a front
+// door's service.json holds it raw (relay may hold only push there), a
+// `relay run` host's relay block has it parsed.
+function relayPushConfig(cfg) {
+  if (cfg && cfg.profile === 'frontdoor') {
+    const { parsePushConfig } = require('../config');
+    return parsePushConfig(cfg.relayRaw ? cfg.relayRaw.push : undefined, 'service.json');
+  }
+  return cfg && cfg.relay ? cfg.relay.push || {} : null;
+}
+
+// Device records as the relay stored them, read without the registry (whose
+// constructor reads the enrollment log too): this command writes nothing.
+function readDeviceRecords(dataDir) {
+  const { DEVICE_ID_RE } = require('../../approvals/messages');
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(path.join(dataDir, 'relay', 'devices.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+  return Object.values((parsed && parsed.devices) || {}).filter((r) => r && typeof r.device_id === 'string' && DEVICE_ID_RE.test(r.device_id));
+}
+
+const hasFcmToken = (record) => Boolean(record.push && record.push.platform === 'fcm' && typeof record.push.token === 'string' && record.push.token);
+
+// `relay push-test [--device <device-id>]` (push spec §9, C-14): one `test`
+// push to each device with an fcm token, or to the named one, straight
+// through the FCM sender (no dedupe, no coalescing). Prints each device's id,
+// name and `sent` or the HTTP status; never a token. Runs with the relay
+// running or not, and changes nothing: a token FCM rejects stays on file
+// (the running relay drops it at its next push).
+async function runPushTest({ dataDir, io, flags = {}, deps = {} }) {
+  const { isAdmin: defaultIsAdmin } = require('./admin-check');
+  const { shown } = require('./io');
+  const isAdmin = deps.isAdmin || (() => defaultIsAdmin());
+  if (!(await isAdmin())) {
+    io.stderr.write('relay push-test reads the push credential; run it as root/an administrator.\n');
+    return 1;
+  }
+  let push;
+  let nodeName;
+  let serviceAccount;
+  try {
+    push = relayPushConfig((deps.loadConfig || ((d) => loadServiceConfig(d)))(dataDir));
+    if (push === null) {
+      io.stderr.write('There is no "relay" block in the admin service.json. See the relay section of the install guide.\n');
+      return 1;
+    }
+    if (!push.fcm) {
+      io.stderr.write('No FCM push is configured: the admin service.json has no relay.push.fcm block, so phones get no push (the app checks only while open). See the install guide\'s push part.\n');
+      return 1;
+    }
+    const { readServiceAccountFile } = require('../../frontdoor/push/service-account');
+    serviceAccount = readServiceAccountFile(push.fcm.serviceAccountFile);
+    nodeName = ((deps.loadNodeConfig || defaultRelayNodeName)(dataDir) || {}).name || '';
+  } catch (err) {
+    io.stderr.write(`${err.message}\n`);
+    return 1;
+  }
+
+  const records = readDeviceRecords(dataDir);
+  let targets;
+  if (flags.device !== undefined) {
+    const record = records.find((r) => r.device_id === flags.device);
+    if (!record) {
+      io.stderr.write(`No device ${shown(flags.device, 64)} is enrolled with this relay. \`king-louie-service relay push-test\` with no --device tries every phone with a push token.\n`);
+      return 1;
+    }
+    if (!hasFcmToken(record)) {
+      io.stderr.write(`${record.device_id}  ${shown(record.name, 64)}  has no fcm push token: open the app on that phone (it sends its token at start), then try again.\n`);
+      return 1;
+    }
+    targets = [record];
+  } else {
+    targets = records.filter(hasFcmToken);
+    if (targets.length === 0) {
+      io.stderr.write('There is no device with an fcm push token on this relay: enroll the phone, or open the app on it (it sends its token at start), then try again.\n');
+      return 1;
+    }
+  }
+
+  const { createFcmSender } = require('../../frontdoor/push/fcm');
+  const sender = createFcmSender({ serviceAccount, ...(deps.fcm || {}) });
+  let failed = 0;
+  for (const record of targets) {
+    let outcome;
+    try {
+      const result = await sender.notify(record, { kind: 'test', id: crypto.randomBytes(8).toString('hex'), node_name: nodeName });
+      outcome = result.ok ? 'sent' : `HTTP ${result.status}${result.dropToken ? ' (FCM no longer knows this token; the relay drops it at its next push)' : ''}`;
+    } catch (err) {
+      // The sender's own messages name a status, never a token.
+      outcome = `failed: ${shown(err.message, 200)}`;
+    }
+    if (outcome !== 'sent') failed += 1;
+    io.stdout.write(`${record.device_id}  ${shown(record.name, 64)}  ${outcome}\n`);
+  }
+  return failed === 0 ? 0 : 1;
+}
+
+async function runRelayCommand({ sub, arg, dataDir, io, flags = {}, deps = {} }) {
   if (Object.hasOwn(FRONT_DOOR_COUNTERPARTS, sub) && onFrontDoor(dataDir, deps)) {
     io.stderr.write(`relay ${sub} is not used on a front door; use "king-louie-service ${FRONT_DOOR_COUNTERPARTS[sub]}".\n`);
     return 2;
@@ -179,6 +292,7 @@ async function runRelayCommand({ sub, arg, dataDir, io, deps = {} }) {
     io.stdout.write(`Removed ${arg}.\n`);
     return 0;
   }
+  if (sub === 'push-test') return runPushTest({ dataDir, io, flags, deps });
   if (sub === 'qr') {
     const { relaySpkiPin } = require('../../frontdoor/tls');
     const { encodeQr } = require('../../approvals/messages');

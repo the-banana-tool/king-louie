@@ -309,3 +309,152 @@ describe('relay commands on a front door (fleet stage 4 §3.1)', () => {
     }
   });
 });
+
+// `relay push-test` (push spec §9, C-14) against a local FCM server on
+// 127.0.0.1: token exchange and send, never Google.
+describe('relay push-test', () => {
+  const http = require('http');
+  const crypto = require('crypto');
+
+  async function fcmServer(respond = () => [200, '{}']) {
+    const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const sends = [];
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        if (req.url === '/token') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ access_token: 'ya29.oauth-access', expires_in: 3600 }));
+          return;
+        }
+        const parsed = JSON.parse(body);
+        sends.push(parsed.message);
+        const [status, text] = respond(parsed.message);
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(text);
+      });
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    cleanups.push(() => new Promise((r) => server.close(r)));
+    const { port } = server.address();
+    return {
+      sends,
+      privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }),
+      fcm: { tokenUrl: `http://127.0.0.1:${port}/token`, fcmOrigin: `http://127.0.0.1:${port}` }
+    };
+  }
+
+  const ids = { a: 'd-aaaaaaaaaaaaaaaa', b: 'd-bbbbbbbbbbbbbbbb', c: 'd-cccccccccccccccc', d: 'd-dddddddddddddddd' };
+
+  // A data dir holding devices.json, and the push credential file beside it.
+  function setup(server) {
+    const { base, dataDir } = dirs();
+    const keyFile = path.join(base, 'push-cred.json');
+    fs.writeFileSync(keyFile, JSON.stringify({ type: 'service_account', project_id: 'kl-example', client_email: 'push@kl-example.example.com', private_key: server.privateKeyPem }));
+    const devices = {
+      [ids.a]: { device_id: ids.a, name: 'Pixel A', platform: 'android', push: { platform: 'fcm', token: 'fcm-token-alpha-1234567890' }, nodes: {} },
+      [ids.b]: { device_id: ids.b, name: 'Pixel B', platform: 'android', push: { platform: 'fcm', token: 'fcm-token-bravo-1234567890' }, nodes: {} },
+      [ids.c]: { device_id: ids.c, name: 'iPhone C', platform: 'ios', push: { platform: 'apns', token: 'apns-token-charlie-123456' }, nodes: {} },
+      [ids.d]: { device_id: ids.d, name: 'Pixel D', platform: 'android', push: null, nodes: {} }
+    };
+    fs.mkdirSync(path.join(dataDir, 'relay'), { recursive: true });
+    const devicesFile = path.join(dataDir, 'relay', 'devices.json');
+    fs.writeFileSync(devicesFile, `${JSON.stringify({ devices }, null, 2)}\n`);
+    return { dataDir, keyFile, devicesFile };
+  }
+
+  const relayHost = (keyFile) => () => ({ relay: relayConfig('127.0.0.1', { push: keyFile ? { fcm: { serviceAccountFile: keyFile } } : {} }) });
+  const deps = (server, loadConfig, extra = {}) => ({ isAdmin: () => true, loadConfig, loadNodeConfig: () => ({ name: 'relay-1' }), fcm: server.fcm, ...extra });
+  const tokens = ['fcm-token-alpha', 'fcm-token-bravo', 'apns-token-charlie', 'ya29'];
+  const noToken = (io) => { for (const t of tokens) assert.equal(`${io.text.out}${io.text.err}`.includes(t), false, t); };
+
+  it('sends one test push to every device with an fcm token and prints sent or the status', async () => {
+    const server = await fcmServer((m) => (m.token.startsWith('fcm-token-bravo') ? [404, '{"error":{"status":"NOT_FOUND","details":[{"errorCode":"UNREGISTERED"}]}}'] : [200, '{}']));
+    const { dataDir, keyFile, devicesFile } = setup(server);
+    const before = fs.readFileSync(devicesFile, 'utf8');
+    const io = streamIo();
+    const code = await runRelayCommand({ sub: 'push-test', dataDir, io, flags: {}, deps: deps(server, relayHost(keyFile)) });
+    assert.equal(code, 1, 'one device failed');
+    assert.equal(server.sends.length, 2);
+    for (const m of server.sends) {
+      assert.equal(m.data.k, 'test');
+      assert.equal(m.data.n, 'relay-1');
+      assert.match(m.data.rid, /^[0-9a-f]{16,}$/);
+      assert.equal(m.android.priority, 'HIGH');
+    }
+    assert.notEqual(server.sends[0].data.rid, server.sends[1].data.rid);
+    assert.match(io.text.out, new RegExp(`${ids.a}\\s+Pixel A\\s+sent`));
+    assert.match(io.text.out, new RegExp(`${ids.b}\\s+Pixel B\\s+HTTP 404`));
+    assert.doesNotMatch(io.text.out, /iPhone C|Pixel D/);
+    noToken(io);
+    // Read-only: a rejected token is not dropped from the file here.
+    assert.equal(fs.readFileSync(devicesFile, 'utf8'), before);
+  });
+
+  it('sends to the named device only, and refuses an unknown or tokenless one', async () => {
+    const server = await fcmServer();
+    const { dataDir, keyFile } = setup(server);
+    let io = streamIo();
+    assert.equal(await runRelayCommand({ sub: 'push-test', dataDir, io, flags: { device: ids.a }, deps: deps(server, relayHost(keyFile)) }), 0);
+    assert.equal(server.sends.length, 1);
+    assert.equal(server.sends[0].token, 'fcm-token-alpha-1234567890');
+    assert.match(io.text.out, new RegExp(`${ids.a}\\s+Pixel A\\s+sent`));
+    noToken(io);
+
+    for (const device of ['d-zzzzzzzzzzzzzzzz', 'not-a-device', ids.c, ids.d]) {
+      io = streamIo();
+      assert.equal(await runRelayCommand({ sub: 'push-test', dataDir, io, flags: { device }, deps: deps(server, relayHost(keyFile)) }), 1, device);
+      assert.ok(io.text.err.length > 0, device);
+      noToken(io);
+    }
+    assert.equal(server.sends.length, 1);
+  });
+
+  it('says so when no fcm push is configured, and when no device has an fcm token', async () => {
+    const server = await fcmServer();
+    const { dataDir, keyFile, devicesFile } = setup(server);
+    let io = streamIo();
+    assert.equal(await runRelayCommand({ sub: 'push-test', dataDir, io, flags: {}, deps: deps(server, relayHost(null)) }), 1);
+    assert.match(io.text.err, /relay\.push\.fcm/);
+    assert.match(io.text.err, /no FCM push is configured/i);
+
+    fs.writeFileSync(devicesFile, JSON.stringify({ devices: {} }));
+    io = streamIo();
+    assert.equal(await runRelayCommand({ sub: 'push-test', dataDir, io, flags: {}, deps: deps(server, relayHost(keyFile)) }), 1);
+    assert.match(io.text.err, /no device .*fcm/i);
+    assert.equal(server.sends.length, 0);
+  });
+
+  it('names the path and not the contents of a credential file that does not parse', async () => {
+    const server = await fcmServer();
+    const { dataDir, keyFile } = setup(server);
+    fs.writeFileSync(keyFile, '{"type":"service_account","private_key":"-----BEGIN secret');
+    const io = streamIo();
+    assert.equal(await runRelayCommand({ sub: 'push-test', dataDir, io, flags: {}, deps: deps(server, relayHost(keyFile)) }), 1);
+    assert.ok(io.text.err.includes(keyFile), io.text.err);
+    assert.equal(io.text.err.includes('BEGIN secret'), false);
+    assert.equal(server.sends.length, 0);
+  });
+
+  it('runs as root or an administrator only', async () => {
+    const server = await fcmServer();
+    const { dataDir, keyFile } = setup(server);
+    const io = streamIo();
+    assert.equal(await runRelayCommand({ sub: 'push-test', dataDir, io, flags: {}, deps: deps(server, relayHost(keyFile), { isAdmin: () => false }) }), 1);
+    assert.match(io.text.err, /root|administrator/i);
+    assert.equal(server.sends.length, 0);
+  });
+
+  it('reads relay.push from a front door service.json, with the front door\'s node name', async () => {
+    const server = await fcmServer();
+    const { dataDir, keyFile } = setup(server);
+    const io = streamIo();
+    const loadConfig = () => ({ profile: 'frontdoor', relay: null, relayRaw: { push: { fcm: { service_account_file: keyFile } } } });
+    const code = await runRelayCommand({ sub: 'push-test', dataDir, io, flags: {}, deps: deps(server, loadConfig, { loadNodeConfig: () => ({ name: 'frontdoor' }) }) });
+    assert.equal(code, 0, io.text.err);
+    assert.equal(server.sends.length, 2);
+    assert.ok(server.sends.every((m) => m.data.n === 'frontdoor' && m.data.k === 'test'));
+    noToken(io);
+  });
+});
