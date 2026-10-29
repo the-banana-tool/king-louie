@@ -3,10 +3,13 @@
 # Where the Android SDK is installed on this machine.
 sdk.dir=/path/to/Android/sdk
 
-# Your application id (the package users install).
+# Your application id (the package users install). It is also the package
+# name your Firebase project's Android app must be given, for push.
 kl.applicationId=com.example.kinglouie
 
-# Push (optional, program Q-A). The `nopush` flavor needs nothing. For the
-# `fcm` flavor, download google-services.json from your own Firebase project
-# and put it at app/src/fcm/google-services.json; the build applies the
-# google-services plugin only when that file exists.
+# Push (optional). The `nopush` flavor needs nothing. For the `fcm` flavor,
+# download google-services.json from your own Firebase project and put it at
+# app/src/fcm/google-services.json; the build applies the google-services
+# plugin only when that file exists, and git ignores it. The whole setup
+# (Firebase, the relay's credential, the build, the check) is the install
+# guide's "Push to your phone" part, section 10 of docs/install-guide.md.

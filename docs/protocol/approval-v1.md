@@ -437,7 +437,9 @@ office NAT) are not locked out by a neighbour's failures.
 | `POST /v1/devices/enroll` | device | enroll envelope → `{ nodes: [{ node_id, state }] }` |
 | `POST /v1/devices/revoke` | device | revoke envelope → `{ nodes: [{ node_id, state }] }` |
 | `GET /v1/devices` | device | → `[{ device_id, name, platform, nodes: [{ node_id, state }] }]` |
-| `PUT /v1/push-token` | device | `{ platform: 'apns'\|'fcm', token }` → `204` |
+| `PUT /v1/push-token` | device | `{ platform: 'apns'\|'fcm', token }` → `204`; written only when the platform or token changed |
+| `DELETE /v1/push-token` | device | → `204`; the relay forgets this device's token |
+| `GET /v1/push-token` | device | → `{ registered, sender }`: whether the relay holds a token for this device, and has a sender for its platform; the token is never echoed |
 
 An invite claim's `mac` is `b64url(HMAC-SHA256(key = the 32 raw bytes of secret, JCS(device)))`;
 the inviting phone, not the relay, checks it.
@@ -455,6 +457,45 @@ Push carries only `{ kind, id }` (and the node name in the alert text): APNs
 `approval`, `grant`, `pairing`, `alert`, `question`, `lease`; a missing `k` means
 `approval`. On a tap the app fetches the envelope and verifies it. Without push
 the app long-polls `GET /v1/approvals?wait=25` while in the foreground.
+
+Revised 2026-10-28 (push spec
+`docs/superpowers/specs/2026-10-28-push-notifications-design.md`). Everything
+below applies to devices whose push platform is `fcm` only; an `apns` device
+gets exactly the pushes above, byte for byte. No signed message changed.
+
+FCM data, every value a string:
+
+| Field | Value |
+|---|---|
+| `k` | `approval`, `question`, `lease`, `pairing`, `alert`; `session_ended`, `session_paused` (lease-v1 §4, `push.notify`); `test` (`king-louie-service relay push-test`) |
+| `rid` | the item's id: `request_id` (approval, lease), the question's token, the pairing or alert id, the `lease_id` (session kinds), a random id (test) |
+| `n` | the node's name, control and format characters stripped, capped at 40; empty when unknown |
+| `c` | only on a coalesced push: how many items it stands for, `2` to `999` |
+
+Nothing else: no text of the action, no case, app, site or take name, no
+reason code, no time left. `message.submit`'s `push` parameter still takes
+only the six kinds above; the session kinds come only from `push.notify`, and
+`test` only from the command.
+
+- **Dedupe**, per device, by (node, kind, id): `session_ended` 24 hours,
+  `session_paused` 2 minutes, every other kind 10 minutes; `test` never. At
+  most 2,048 keys per relay, oldest out, in memory (a restart can repeat one
+  push).
+- **Coalescing**, per device, after dedupe: the first push goes at once and
+  opens a 10-second window; what arrives in it is held, and when it closes
+  one push goes, the newest held item whole, with `c` when two or more were
+  held. A relay that stops drops what a window holds.
+- **Cap**: at most 60 pushes per device per hour, counted when a push
+  leaves; past that a push is dropped with one `warn` per device per hour.
+- **`android.ttl`**: the seconds to `expires_at` when the push has one (an
+  approval, a paused lease's own expiry), else 3,600 s for `session_ended`
+  and 300 s for the rest. Priority `HIGH`.
+- **Dropped tokens**: FCM `404 UNREGISTERED` and `403 SENDER_ID_MISMATCH` (a
+  token of another Firebase project) drop the device's token; a `400` never
+  does. The app registers again at its next cold start or token rotation.
+
+The phone builds the visible text itself; a tap fetches with the read key
+and shows only what a pinned node signed.
 
 ## 9. Vectors
 
@@ -600,7 +641,7 @@ key carries the request.
 | `POST /v1/presence` | read |
 | `GET /v1/nodes`, `GET /v1/devices`, `GET /v1/devices/invites/{id}` | read |
 | `GET /v1/pairings/pending`, `GET /v1/alerts`, `GET /v1/clients`, `GET /v1/frontdoor`, `GET /v1/nodes/{node_id}/audit-status`, `GET /v1/nodes/{node_id}/history` | read |
-| `PUT /v1/push-token` | read |
+| `PUT /v1/push-token`, `DELETE /v1/push-token`, `GET /v1/push-token` | read |
 | `POST /v1/challenges` | read (a challenge is spent only by a device-key envelope) |
 | `POST /v1/approvals/{request_id}/response` | read (body: a device-key `kl.approval.response`) |
 | `POST /v1/leases/{lease_id}/grant`, `/revoke` | read (body: a device-key `kl.lease.grant` / `kl.lease.revoke`) |

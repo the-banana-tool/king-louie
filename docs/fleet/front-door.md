@@ -185,14 +185,83 @@ records before the certificate, so an approver revoked, or a node record
 removed by hand, while the service was stopped takes effect (and is audited)
 without a full restart.
 
+## Push notifications
+
+Optional. Without push the app checks the front door only while it is open.
+With it, an Android phone (the `fcm` build) gets a notification when a node
+asks for something, and when a computer-use session or take ends (unless
+that phone stopped it) or pauses because no phone was watching. A push
+carries a kind, an id, the node's name and at most a count; the phone
+fetches the rest with its read key and shows only what a node signed. iPhone
+push (APNs) is unchanged. The Firebase steps and the app build are in the
+install guide's "Push to your phone" part (section 10); this is the front
+door's half.
+
+The credential is a Google service-account JSON key of your own Firebase
+project, for a dedicated account with the single role "Firebase Cloud
+Messaging API Admin" (never the project's default Admin SDK account). It
+lives outside the data dir, so no import, backup or `doctor` output carries
+it. Copy it to the host directly (`scp`), then, as root:
+
+```sh
+install -d -o root -g king-louie -m 0750 /etc/king-louie/push
+install -o root -g king-louie -m 0640 kl-push.json /etc/king-louie/push/fcm-service-account.json
+rm kl-push.json
+```
+
+On the front door the `relay` block of `/etc/king-louie/service.json` holds
+only `push`:
+
+```json
+"relay": { "push": { "fcm": { "service_account_file": "/etc/king-louie/push/fcm-service-account.json" } } }
+```
+
+The path must be absolute. The file is read once, at start: the service
+refuses to start when it is missing or unreadable, is not JSON, or lacks
+`type: service_account` or a string `project_id`, `client_email` or
+`private_key` (the refusal names the path and the field, never a value from
+the file). `SIGHUP` does not re-read it; restart after changing it.
+
+```sh
+systemctl restart king-louie.service
+king-louie-service doctor
+king-louie-service relay push-test
+```
+
+`doctor`'s `push` row names the senders and, for FCM, the file, its
+`project_id`, that it is owned `root` with the service's group (the data
+dir's), mode `0640`, in a `0750` directory, and the last send and last
+failure the running service recorded in `<dataDir>/relay/push-status.json`
+(time, sender, HTTP status; never a token or a device id). A wrong owner or
+mode, a file that does not parse or an unreadable status file fails the row;
+a last send that was not a 2xx is a warning. With no push configured the row
+says `none (the app checks only while open)`, which is not a failure.
+
+`relay push-test [--device <device-id>]` runs as root, with the service
+running or not. It reads the credential and the device list (changing
+neither) and sends one test push to each phone with an `fcm` token, or to the
+named one, printing each device's id and name with `sent` or the HTTP status
+(never a token). It exits 0 only when every push went out, else 1. The phone
+shows "Test notification from frontdoor" (the `name` in `node.yaml`). That
+tells "no credential" (the command says so), "no token" (open the app on the
+phone: it sends its token at every start) and "Android blocks
+notifications" (the phone's gear screen says so) apart. A token FCM no
+longer knows is dropped by the running service at its next push.
+
+Rotating the key: add a new JSON key to the same service account, replace
+the file as above, restart, check with `relay push-test`, then delete the old
+key in the Cloud console. A new Firebase project means a new app build and
+new tokens; the front door drops each old token at its first
+`SENDER_ID_MISMATCH`.
+
 ## doctor
 
 On the front door, `doctor` checks the startup rules, that a phone is
 enrolled, the last self-probe (DNS for both names, `mcp.` and `mesh.` both
 reaching this machine), the certificate's days left (FAIL below 21), the unit's
 `CAP_NET_BIND_SERVICE`, that no node or grant record failed verification,
-that no audit break is unacknowledged, and the clock against the ACME
-directory (FAIL above 30 s).
+that no audit break is unacknowledged, push (see Push notifications), and
+the clock against the ACME directory (FAIL above 30 s).
 
 A node or grant record that fails verification, or a break in the audit
 mirror (a fork, a truncation, a replayed page, and so on), stays flagged until
