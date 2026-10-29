@@ -62,9 +62,12 @@ function registerNodeMethods(relay) {
 
   // Push carries only { kind, id } plus the node name (the pusher sanitises
   // it and builds generic alert text); never anything from the action.
-  const pushTo = (targets, payload) => {
+  // nodeId is the link's node: the pusher's dedupe key is (node, kind, id)
+  // per device (push spec §6.3), and it is never sent to a phone.
+  const pushTo = (nodeId, targets, payload) => {
+    if (typeof nodeId !== 'string' || !nodeId) throw new TypeError('pushTo needs the node id');
     for (const device of targets) {
-      pusher.notify(device, payload).catch((err) => log.warn(`push failed: ${err.message}`));
+      pusher.notify(device, { ...payload, node_id: nodeId }).catch((err) => log.warn(`push failed: ${err.message}`));
     }
   };
 
@@ -117,7 +120,7 @@ function registerNodeMethods(relay) {
     } catch (err) {
       throw new LinkRpcError(err.code || 'malformed', err.message);
     }
-    pushTo(devices.devicesForNode(nodeId), { kind: 'approval', id: message.request_id, node_name: node.node_name, expires_at: message.expires_at });
+    pushTo(nodeId, devices.devicesForNode(nodeId), { kind: 'approval', id: message.request_id, node_name: node.node_name, expires_at: message.expires_at });
     return { ok: true };
   });
 
@@ -144,7 +147,7 @@ function registerNodeMethods(relay) {
     if (push) {
       // Pushed only to phones that approve on this node.
       const targets = devices.devicesForNode(nodeId).filter((d) => toDevice === null || d.device_id === toDevice);
-      pushTo(targets, { kind: push.kind, id: push.id, node_name: node.node_name, expires_at: typeof push.expires_at === 'string' ? push.expires_at : null });
+      pushTo(nodeId, targets, { kind: push.kind, id: push.id, node_name: node.node_name, expires_at: typeof push.expires_at === 'string' ? push.expires_at : null });
     }
     return { ok: true, seq: result.seq };
   });
