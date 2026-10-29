@@ -1,7 +1,7 @@
 ---
 id: T05
 title: Lease watches verify against either key; audit key; the refusal sweep
-status: in-progress
+status: done (merge 68bb365f)
 blocked_by: [T01, T02]
 ---
 ## Goal

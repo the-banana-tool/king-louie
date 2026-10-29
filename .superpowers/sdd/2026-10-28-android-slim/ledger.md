@@ -49,6 +49,16 @@ Start frontier: T01, T08, T09.
   -> `{ record, updated }`. fake-phone: `phone.readJwk`, `readSigner`,
   `signApi(..., { key, signWith, header })`, `signReadApi`.
 
+- T04: read-key route refusal codes are the implementer's (`bad_read_key`,
+  `expired`, `from_the_future`, `forbidden`, `malformed`); a node answer other
+  than the three states (incl. an older node) is reported `offline`; statements
+  are not written to the relay device log (the phone's re-send covers offline
+  nodes). The invite claim accepts an optional `read_key`. §8.4 table is
+  `ROUTE_AUTH` exported from `tests/frontdoor-phone-routes.test.js`.
+  fake-phone: `device({ readKey })`, `readKeyStatement(...)`, `approverRecord({ readKey })`.
+- T05: only `verifyLeaseWatch` has `allowReadKey: true` (sweep has a static
+  check); audit `lease.watch` carries `key`.
+
 ## Landed
 - T01 merge 932753aa (impl d2d4cc64): `isDevice` export, `kl.device.read_key`
   validator, `phoneAuthString(..., { key })`, `PHONE_AUTH_PREFIXES`,
@@ -60,5 +70,8 @@ Start frontier: T01, T08, T09.
 - T02 merge 8814398e (impl 8e6ff78b).
 - T03 merge 572bc8b0 (impl e56dc31e).
 
+- T04 merge 8a439abf (impl fe5168d0).
+- T05 merge 68bb365f (impl 9ac40699).
+
 ## Left
-T04, T05 (in progress), T06, T07, T10, T11, T12, T13.
+T06 (in progress), T07, T10, T11, T12, T13.

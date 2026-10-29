@@ -1,7 +1,7 @@
 ---
 id: T06
 title: approval-v1 (49) and lease-v1 (55) vectors; split phone sets
-status: open
+status: in-progress
 blocked_by: [T02, T05]
 ---
 ## Goal
