@@ -9,13 +9,24 @@ const { TEST_DEVICE_KEYS, TEST_NODE_KEYS, isTestDeviceKey, isTestNodeKey } = req
 
 describe('test keys', () => {
   it('test-keys.js lists exactly the public halves of keys.json', () => {
+    assert.deepEqual(TEST_DEVICE_KEYS.map((k) => k.name), Object.keys(KEYS.devices));
     for (const k of TEST_DEVICE_KEYS) {
       const fixed = KEYS.devices[k.name];
       assert.equal(fixed.jwk.x, k.x);
       assert.equal(fixed.jwk.y, k.y);
-      assert.equal(deviceIdFromJwk(fixed.jwk), k.device_id);
-      assert.equal(fixed.id, k.device_id);
+      if (k.read_key) {
+        // A read key (android-slim §8.1, §8.8) has no device id of its own:
+        // device_id names the device it belongs to.
+        assert.equal(k.name, `${fixed.read_key_of}_read`);
+        assert.equal(KEYS.devices[fixed.read_key_of].id, k.device_id);
+        assert.equal(m.readKeyFingerprint(fixed.jwk), fixed.fingerprint);
+      } else {
+        assert.equal(deviceIdFromJwk(fixed.jwk), k.device_id);
+        assert.equal(fixed.id, k.device_id);
+      }
     }
+    assert.equal(isTestDeviceKey(KEYS.devices.A_read.jwk), true);
+    assert.equal(isTestDeviceKey(KEYS.devices.B_read.jwk), true);
     assert.deepEqual(Object.values(KEYS.nodes).map((n) => n.spki), [...TEST_NODE_KEYS]);
     assert.equal(isTestDeviceKey(KEYS.devices.B.jwk), true);
     assert.equal(isTestDeviceKey(createFakePhone().jwk), false);
@@ -24,6 +35,10 @@ describe('test keys', () => {
 
   it('fixed seeds give the keys and ids in keys.json', () => {
     assert.equal(createFakePhone({ seed: 'A' }).deviceId, KEYS.devices.A.id);
+    // A seeded phone's read key is keys.json's `<seed>_read`; C has none, so its read key is random.
+    assert.deepEqual(createFakePhone({ seed: 'A' }).readJwk, KEYS.devices.A_read.jwk);
+    assert.deepEqual(createFakePhone({ seed: 'B' }).readJwk, KEYS.devices.B_read.jwk);
+    assert.equal(isTestDeviceKey(createFakePhone({ seed: 'C' }).readJwk), false);
     const node = testNodeIdentity({ key: 'web-01' });
     assert.equal(node.nodeId, KEYS.nodes['web-01'].id);
     assert.equal(node.publicKey.toString('hex'), KEYS.nodes['web-01'].spki);

@@ -58,15 +58,22 @@ const DEVICES = Object.fromEntries(Object.entries(DEVICE_D).map(([k, d]) => {
   const { jwk, key } = p256(d);
   return [k, { id: deviceIdFromJwk(jwk), jwk, key }];
 }));
+// A's read key (android-slim spec §8.1): it signs under A's device id.
+const A_READ = { id: DEVICES.A.id, ...p256(KEYS.devices.A_read.d) };
 
-function record(label, { platform = 'android', revokedAt = null } = {}) {
+// readKey: the record holds the device's read key (android-slim §8.2), as
+// `device apply` writes it.
+function record(label, { platform = 'android', revokedAt = null, readKey = null } = {}) {
   const d = DEVICES[label];
   return {
     v: 1, device_id: d.id, name: `Test phone ${d.id.slice(2, 6)}`, platform, public_key: d.jwk,
-    enrolled_at: '2026-09-01T00:00:00.000Z', enrolled_by: 'console', revoked_at: revokedAt, revoked_by: revokedAt ? 'console' : null, enrollment: null
+    enrolled_at: '2026-09-01T00:00:00.000Z', enrolled_by: 'console', revoked_at: revokedAt, revoked_by: revokedAt ? 'console' : null, enrollment: null,
+    ...(readKey ? { read_key: readKey } : {})
   };
 }
 const APPROVERS = [record('A'), record('B'), record('C', { revokedAt: '2026-09-20T00:00:00.000Z' }), record('D', { platform: 'demo' })];
+// The same set, A's record holding its read key.
+const APPROVERS_READ_KEY = [record('A', { readKey: A_READ.jwk }), ...APPROVERS.slice(1)];
 
 // Committed phone signatures, reused while they still verify.
 function sigCache() {
@@ -80,8 +87,9 @@ function sigCache() {
 }
 const CACHE = sigCache();
 
+// label: a device of DEVICES, or 'A_read' for A's read key.
 function phoneSeal(label, message) {
-  const d = DEVICES[label];
+  const d = label === 'A_read' ? A_READ : DEVICES[label];
   const signer = { alg: 'ES256', kid: d.id, sign: (bytes) => crypto.sign('sha256', bytes, { key: d.key, dsaEncoding: 'ieee-p1363' }) };
   const fresh = seal(message, signer);
   const cached = CACHE.get(`${fresh.kid}|${fresh.payload}`);
@@ -129,10 +137,11 @@ function base(now = iso(NOW_MS + 6000)) {
 
 const PHONES = ['node', 'ios', 'android'];
 
-function grantVector(name, { requestOptions = {}, grantOptions = {}, given = {}, pendingOverride = null, device = 'A', expect, check = null, consumers = ['node'], tamper = null, withRequest = false }) {
+// signWith: the key that signs, when not the device's own ('A_read').
+function grantVector(name, { requestOptions = {}, grantOptions = {}, given = {}, pendingOverride = null, device = 'A', signWith = device, expect, check = null, consumers = ['node'], tamper = null, withRequest = false }) {
   const req = requestFor(name, requestOptions);
   const message = grantMessage(req.message, { device, ...grantOptions });
-  let input = phoneSeal(device, message);
+  let input = phoneSeal(signWith, message);
   if (tamper) input = tamper(input);
   const v = {
     name, consumers, check,
@@ -371,6 +380,26 @@ function buildVectors() {
   };
   out.push(requestVector('take-request-missing-name', { requestOptions: takeRequest, change: (l) => { delete l.name; return l; } }));
   out.push(requestVector('computer-use-with-unattended', { requestOptions: {}, change: (l) => ({ ...l, unattended: true }) }));
+  // Revised 2026-10-28 (android-slim spec §8.6, §8.8): a watch may be signed
+  // by either key of its device; a grant or a revoke only by the device key.
+  // Android signs watch-read-key's message, the same as watch-valid's, with
+  // its read key.
+  const readKeyGiven = (known) => ({ ...leaseGiven(known), approvers: APPROVERS_READ_KEY });
+  out.push({
+    name: 'watch-read-key', consumers: ['node', 'android'], check: null, given: readKeyGiven([uuidOf('lease watch-read-key')]),
+    input: phoneSeal('A_read', watchMessage('watch-read-key')), expect: { ...accepted, message: watchMessage('watch-read-key'), key: 'read' }
+  });
+  // The same watch before `device apply` wrote the read key into A's record.
+  out.push({
+    name: 'watch-read-key-not-applied', consumers: ['node'], check: 6, given: leaseGiven([uuidOf('lease watch-read-key-not-applied')]),
+    input: phoneSeal('A_read', watchMessage('watch-read-key-not-applied')), expect: reject('bad_signature')
+  });
+  out.push(grantVector('grant-read-key', { signWith: 'A_read', given: { approvers: APPROVERS_READ_KEY }, expect: reject('bad_signature'), check: 6 }));
+  out.push({
+    name: 'revoke-read-key', consumers: ['node'], check: 6, given: readKeyGiven([uuidOf('lease revoke-read-key')]),
+    input: phoneSeal('A_read', revokeMessage('revoke-read-key')), expect: reject('bad_signature')
+  });
+
   out.push({
     name: 'status-take', consumers: PHONES, check: null, given: viewGiven,
     input: statusEnvelope('status-take', { seq: 5, kind: 'take', unattended: true, name: TAKE.name, expiresAt: NOW_MS + 180 * 60000 }),
