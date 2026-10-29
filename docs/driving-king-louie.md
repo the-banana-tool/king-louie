@@ -50,9 +50,14 @@ themselves. That includes:
 
 - **The browser tools.** `BrowserSession`, `BrowserPage` and `BrowserExtract`.
   The browser is headed by default, so it opens on the desktop where you can
-  watch it. `BrowserPage` can wait for what a step needs instead of sleeping:
-  `wait_for` an element (visible, hidden, attached or detached) and
-  `wait_for_url` for a navigation.
+  watch it. The agent reads a page with `snapshot`: the page's accessibility
+  tree as text, each element it can act on marked with a ref (`[ref=e12]`),
+  which it then passes as the selector (`ref=e12`). A `screenshot` comes back
+  to the agent as an image of the page (a file only when it asks for one),
+  and an action that fails brings an image and a short snapshot with its
+  error, so the agent sees what was in the way. `BrowserPage` can wait for
+  what a step needs instead of sleeping: `wait_for` an element (visible,
+  hidden, attached or detached) and `wait_for_url` for a navigation.
 - **The GUI tools**, when the node's GUI is on (section 2): `ListApps`,
   `LaunchApp`, `CloseApp`, `Screenshot`, `RequestLease`, `Click`, `Type`,
   `Key`, `Scroll` and `Drag`. Looking needs nothing more; input needs a lease
@@ -123,18 +128,31 @@ normal, unelevated prompt:
    the same way: `pair https://mcp.kl.example.com` writes its pin to
    `front-door.json` in the config dir and starts the node.
 4. `king-louie-service enroll-device`, and answer `y` to enrol the phone.
-5. `king-louie-service vault set browser_cred:<profile>:<host>` for each
-   login a take will use, with the node stopped
-   (`king-louie-service stop`, then `schtasks /Run /TN "KingLouie Node"` to
-   start it again; `schtasks /End` alone leaves the node running).
+5. Log in once to each site a take will use, in the profile the take will
+   name. The node launches the take's Chrome itself (the `gui.browser`
+   entry, never a bundled Chromium) on
+   `<dataDir>\browser-profiles\<profile>`, the same folder its own chats use,
+   so a login made from a chat serves every later take: start a session
+   (`delegate`), ask it to "start the browser with profile take and open
+   https://app.example.com/", and log in by hand in the window that opens;
+   then have it stop the browser (a take is refused a profile a chat still
+   has open). Once per profile. For a take that fills the login itself
+   (`credentials`), store it instead with
+   `king-louie-service vault set browser_cred:<profile>:<host>`, with the
+   node stopped (`king-louie-service stop`, then
+   `schtasks /Run /TN "KingLouie Node"` to start it again; `schtasks /End`
+   alone leaves the node running).
 6. Install ffmpeg as yourself (`winget install Gyan.FFmpeg`) and restart the
    node so it finds it.
 7. Point the driver at `king-louie-service mcp` (no `--data-dir`: the
    default finds the personal node) and call `list_machines`.
 
 There is no identity record, no session helper and no courier grant on a
-personal node: the GUI runs inside the service, and your `mcp` process
-already owns the courier's directories. `king-louie-service doctor` and
+personal node: the GUI runs inside the service, the service starts the
+take's Chrome itself (no debugging port), and your `mcp` process already
+owns the courier's directories. Profiles a fleet layout's helper made under
+`%LOCALAPPDATA%\KingLouie\browser-profiles\` are not moved: log in once
+more. `king-louie-service doctor` and
 `king-louie-service session status` say `hosting: personal`. Two things are
 not supported there: `desktop pair` and attaching the desktop app (keep it
 standalone; to move one case over, see the install guide's "Moving a case
@@ -271,48 +289,71 @@ What a good task looks like:
 
 ## 4. Recording a take
 
-A take is a screen-recorded run of a scripted demo: you ask King Louie to run
-a script of browser steps on the desktop under one approval from your phone,
-and you get back the recording and how each step went. It is an ordinary
-delegate session (section 3) whose agent uses the `Take` tool. A take needs
-section 2 done in full: takes on in `node.yaml`, the session helper running
-as you (even for a demo that is all in the browser), and ffmpeg unless the
-take does not record. It is started only from a session the node started
-itself, which a `delegate` through `king-louie-service mcp` on the machine is.
+A take is a screen-recorded demo run by an agent: you tell King Louie what
+the viewer should see happen, your phone approves the whole take with one
+tap, and the agent does it in a browser on the desktop while the screen is
+recorded, then gives you the recording. It is an ordinary delegate session
+(section 3) whose agent uses the `Take` tool and the browser tools. The agent
+reads each page and acts on what it finds, so a cookie banner, a stray tab or
+a slow page is handled, not a failure. A take needs section 2 done in full:
+takes on in `node.yaml`, ffmpeg unless the take does not record, and on a
+fleet node the session helper running as you (even for a demo that is all in
+the browser). It is started only from a session the node started itself,
+which a `delegate` through `king-louie-service mcp` on the machine is.
 
 ### The task you send
 
-Send one `delegate` whose task holds:
+Send one `delegate` whose task holds, in this order:
 
-- The take's name (one plain line, 60 characters at most: the phone shows
-  it), the sites it acts on (hosts in lower case, `app.example.com`, or
-  `*.example.com` for the domain and every subdomain; no paths), how many minutes it may run, and
-  the browser profile to use (a name such as `demo`; a login made in it is
-  kept for the next take).
-- The script, as a JSON list the agent passes to `Take.run_steps` unchanged:
+1. **The goal**, in a few sentences: what the viewer should see happen, and
+   what done looks like ("the audit's results page is on screen with the
+   score visible").
+2. The take's name (one plain line, 60 characters at most: the phone shows
+   it), the sites it acts on (hosts in lower case, `app.example.com`, or
+   `*.example.com` for the domain and every subdomain; no paths), how many
+   minutes it may run, and the browser profile to use (a name such as
+   `demo`; a login made in it is kept for the next take).
+3. **Beats**, when the order matters, in prose: "first show the empty
+   dashboard, then start an audit on www.example.com, then open the
+   results". Not steps: the agent finds the way on the page.
+4. What to do when stuck: try another way with the browser and GUI tools;
+   failing that, stop, not improvise, and end the turn with
+   `STUCK: what I see, what I tried, what I need`.
+5. To call `Take.stop` when the goal is on screen, and to reply with the
+   recording's path.
+6. To minimise King Louie's own window first if it is open: the recording is
+   the whole screen.
 
-  ```json
-  [
-    { "step": "navigate", "url": "https://app.example.com/" },
-    { "step": "click", "selector": "role=button[name=\"New audit\"]" },
-    { "step": "fill", "selector": "#site", "text": "https://www.example.com" },
-    { "step": "press", "key": "Enter" },
-    { "step": "wait_for_text", "selector": "#results", "text": "Audit complete", "timeout_ms": 90000 },
-    { "step": "pause", "ms": 3000 },
-    { "step": "screenshot", "name": "results" }
-  ]
-  ```
+The agent's pace is its own, a call every few seconds, which reads as a
+person working. A demo that must be crisp, or timed to a narration, is a
+scripted take.
 
-- The intent of each step in one sentence, by its index ("Step 4: wait for
-  the audit, so the viewer sees it finish"). A step holds only its own
-  fields, so the intent goes in the task text, or in a `note` step.
-- What to do when stuck: fix it with the browser and GUI tools and run the
-  rest with `from` set to the failed index; failing that, stop and end the
-  turn with `STUCK at step N: what I see, what I tried, what I need`.
-- To call `Take.stop` when the last step passes (or to pass
-  `stop_when_done: true` to `start`), and to reply with the recording's path.
-- To minimise King Louie's own window first if it is open: the recording is
-  the whole screen.
+### A scripted take
+
+When a demo has been recorded once and must be repeated exactly (timed to a
+narration, say), give the agent the script as a JSON list it passes to
+`Take.run_steps` unchanged:
+
+```json
+[
+  { "step": "navigate", "url": "https://app.example.com/" },
+  { "step": "click", "selector": "role=button[name=\"New audit\"]" },
+  { "step": "fill", "selector": "#site", "text": "https://www.example.com" },
+  { "step": "press", "key": "Enter" },
+  { "step": "wait_for_text", "selector": "#results", "text": "Audit complete", "timeout_ms": 90000 },
+  { "step": "pause", "ms": 3000 },
+  { "step": "screenshot", "name": "results" }
+]
+```
+
+Add the intent of each step in one sentence, by its index ("Step 4: wait for
+the audit, so the viewer sees it finish"); a step holds only its own fields,
+so the intent goes in the task text, or in a `note` step. When a step fails
+the agent fixes it with the browser and GUI tools and runs the rest with
+`from` set to the failed index; failing that, it ends the turn with
+`STUCK at step N: what I see, what I tried, what I need`. Ask it to call
+`Take.stop` when the last step passes (or to pass `stop_when_done: true` to
+`start`).
 
 The steps, each `{ "step": <kind>, ...its fields }` and nothing else:
 
@@ -328,11 +369,13 @@ The steps, each `{ "step": <kind>, ...its fields }` and nothing else:
 | `wait_for_url` | `url`, `timeout_ms` |
 | `wait_for_text` | `selector` (CSS or `role=`, never `label=`, `placeholder=`, `testid=`, `alt=` or `title=`), `text`, `timeout_ms` |
 | `pause` | `ms` (10 s at most, 60 s a run: for pacing the video, never for waiting on a page) |
-| `screenshot` | `name` (optional) |
+| `screenshot` | `name` (optional; saved as a file in the take's folder) |
 | `note` | `text` (one line for the take's log) |
 
-A wait's `timeout_ms` is 30 s unless given and 120 s at most. A list holds 200
-steps and 64 KiB at most. To wait, use a wait step, never a pause and never a
+A step's selector is never a `ref=`: a script is written before any snapshot
+exists, so a step list that names one is `invalid_params`. A wait's
+`timeout_ms` is 30 s unless given and 120 s at most. A list holds 200 steps
+and 64 KiB at most. To wait, use a wait step, never a pause and never a
 shell.
 
 ### What happens
@@ -343,23 +386,30 @@ shell.
    actions narrows it), `apps` (`gui.apps` ids it may also launch), `credentials`
    (logins from the vault on the sites), `record` (`true` by default; `false`,
    or `{ dir, fps, size }`), `reason` and `stop_when_done`. Your phone gets
-   one request; the call waits for your tap. Once you allow it, the helper
-   starts Chrome on your screen with the profile, the service attaches to it,
-   the recording starts and the screen is kept awake. The answer carries
-   `take_id`, `expires_at` and the recording's `path`.
-2. **`run_steps`.** The steps run in order with no model between them. The
-   answer lists each step as `{ index, step, action, ok, ms, url, error?,
-   screenshot? }`, says `stopped_at`, and gives `take_dir`, the folder of the
-   step stills and the failure captures (`<dataDir>/takes/<take_id>/`, the
-   service's). The run stops at the first failure unless
-   `continue_on_error`.
-3. **Stuck.** When the agent cannot fix a step it ends its turn with the
-   report. The session is `idle`, the take is `waiting`, and the recording
-   and the lease go on. Read the report in `result`; the `tool Take …` lines
-   in `get_job_logs` are the evidence. Answer with `send_to_job`, and the
-   agent runs the rest of the list from the failed index.
+   one request; the call waits for your tap. Once you allow it, Chrome opens
+   on your screen with the profile (a personal node starts it itself; a
+   fleet node's helper starts it and the service attaches to it), the
+   recording starts and the screen is kept awake. The answer carries
+   `take_id`, `expires_at`, the recording's `path`, and `browser` (its
+   `profile`, and `cdp`, which is `false` on a personal node).
+2. **The agent works.** It makes its browser calls under the take's checks:
+   `snapshot` to read the page, an action on a ref, a `screenshot` when the
+   page is not what the snapshot says, a `note` for what it changed. It calls
+   `run_steps` only when your task gave a script: then the steps run in order
+   with no model between them, and the answer lists each step as `{ index,
+   step, action, ok, ms, url, error?, screenshot? }`, says `stopped_at`, and
+   gives `take_dir`, the folder of the step stills and the failure captures
+   (`<dataDir>/takes/<take_id>/`, the service's). The run stops at the first
+   failure unless `continue_on_error`.
+3. **Stuck.** When the agent cannot get on it ends its turn with the
+   report; a turn that runs out of iterations ends the same way. The session
+   is `idle`, the take is `waiting`, and the recording and the lease go on.
+   Read the report in `result`; the `tool Take …` and browser lines in
+   `get_job_logs` are the evidence. Answer with `send_to_job`, and the agent
+   carries on (for a script, from the failed index).
 4. **`stop`.** `Take.stop` stops the recording, closes the take's browser
-   (unless `keep_browser`), releases the lease, and answers with the
+   (unless `keep_browser`; on a personal node a kept window stays until the
+   service stops), releases the lease, and answers with the
    recording's `path`, `duration_s` and `bytes` and the step counts. `status`
    and `note` are there in between: where the take is, and a line in its log
    for what the agent changed.
@@ -385,7 +435,8 @@ prompt nobody is watching.
 - The browser tools act only on the sites. `navigate` and `open_tab` check
   where they go; every other action that acts checks the page it is on, so a
   page that wandered off the sites refuses until a `navigate` back. Looking
-  (screenshots, content, tabs, the waits, closing a tab) works anywhere.
+  (`snapshot`, screenshots, content, tabs, the waits, closing a tab) works
+  anywhere.
   Scripts (`evaluate`), network rewriting, cookies, storage and file uploads
   are never inside a take; logins only with `credentials`.
 - The GUI tools work under the take's lease; `LaunchApp` starts only the
@@ -430,7 +481,10 @@ fragmented MP4, so a recording cut off (the take's time running out, or a
 recorder ended after a crash) still plays, and every common player opens
 it; for an editor that wants a plain mp4, remux it in a second with
 `ffmpeg -i take.mp4 -c copy -movflags +faststart take-plain.mp4`. The browser
-profile is yours too, under `%LOCALAPPDATA%\KingLouie\browser-profiles\<name>`.
+profile is yours too: on a personal node under the node's data dir,
+`<dataDir>\browser-profiles\<name>` (the folder its chats use, so a login
+made from a chat is there for the take); on a fleet node under
+`%LOCALAPPDATA%\KingLouie\browser-profiles\<name>`, the helper's.
 
 ## 5. What refuses, and why
 
@@ -473,8 +527,12 @@ and a `code`, never a prompt and never a wait. The take's codes:
   not be made; as an ending, ffmpeg had already exited when the take
   stopped, or the stop found no recording to finish, so the video is not all
   there.
-- `browser_launch_failed`: Chrome did not start, did not open its debugging
-  port within 10 s, or could not be attached to. The take ends.
+- `browser_launch_failed`: Chrome did not start. On a personal node: no
+  Chrome at the `gui.browser` path, the profile locked by another Chrome, or
+  "profile <name> is open in another browser" (a chat of the node has that
+  profile open; stop that browser first). On a fleet node: Chrome did not
+  open its debugging port within 10 s, or could not be attached to. The take
+  ends.
 - `take_app_not_allowed`: `LaunchApp` of an app that is not one of the take's
   `apps`, or the phone did not allow the browser.
 - `take_action_not_allowed`: a browser action outside what the take was
@@ -495,8 +553,16 @@ and a `code`, never a prompt and never a wait. The take's codes:
   after the end is `invalid_params`).
 - `take_browser_unavailable`: a browser call allowed while the take was live
   arrived after its browser was gone.
+- `ref_stale`, `ref_not_found` and `ref_changed` are browser errors, not take
+  codes, and you may see them quoted in a STUCK report. A ref (`ref=e12`)
+  names an element from the agent's last `snapshot` of that page:
+  `ref_stale` when the page navigated since or another tab is current,
+  `ref_not_found` when no snapshot of the page has that ref or the element
+  is gone, `ref_changed` when it
+  no longer has the role and name the approval showed. The agent takes a new
+  `snapshot` and acts on its refs.
 - A step list that does not check is `invalid_params`, naming the index and
-  the field; so is a `start` while takes are off in `node.yaml` or
+  the field (a `ref=` selector in a step included); so is a `start` while takes are off in `node.yaml` or
   `gui.browser` is not set. A run with no job to bind a take to is
   `job_required`.
 - In `run_steps` results, a failed step's `error.code` is one of the codes
