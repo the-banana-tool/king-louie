@@ -37,6 +37,9 @@ class PushQueue {
     if (this.listening || !relay || typeof relay.on !== 'function') return;
     relay.on('connected', this._onUp);
     this.listening = true;
+    // What was queued before start (a take ended at a restart) goes now if the link came up
+    // meanwhile: that connected was heard by nobody.
+    this._flush();
   }
 
   // Stops waiting for the next `connected`; sends in flight still settle.
