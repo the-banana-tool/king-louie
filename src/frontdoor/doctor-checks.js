@@ -13,8 +13,10 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 const { startupRows } = require('./startup-checks');
-const { SelfProbe, readStatusJson } = require('./probe');
+const { SelfProbe, readStatusJson, isIsoInstant } = require('./probe');
 const { LETS_ENCRYPT_PRODUCTION } = require('./config');
+const { readServiceAccountFile } = require('./push/service-account');
+const { parsePushConfig } = require('../service/config');
 
 const DAY_MS = 86400000;
 // The unit installers.js writes (UNIT_PATH there).
@@ -94,6 +96,117 @@ function fetchDate(url, { timeoutMs = 5000 } = {}) {
     req.on('error', () => done(null));
     req.end();
   });
+}
+
+// The push row (push spec §8, C-12, C-14), on a front door and on a `relay
+// run` host. `push` is the parsed relay.push block ({ fcm?, apns? }; empty or
+// null when none). What it says: the senders configured; for FCM, that the
+// credential file is there, owned root:<the data dir's group> 0640 in a 0750
+// directory (POSIX only; the group is the one the service runs under, which
+// owns the data dir), parses, and its project_id; and the last result the
+// running relay recorded in <dataDir>/relay/push-status.json. Nothing else of
+// the file or of the status is shown: never a key, a token or a device id.
+const PUSH_NONE = 'none (the app checks only while open)';
+const MAX_PUSH_STATUS_BYTES = 4096;
+const PUSH_SENDERS = ['fcm', 'apns'];
+
+const octal = (mode) => (mode & 0o777).toString(8).padStart(4, '0');
+
+function credentialProblems({ file, platform, adminUid, dataDir, lstat }) {
+  const problems = [];
+  let st;
+  try {
+    st = lstat(file);
+  } catch (err) {
+    return { problems: [err && err.code === 'ENOENT' ? `${file} is missing` : `${file} cannot be checked (${err && err.code ? err.code : 'error'})`], readable: false };
+  }
+  if (st.isSymbolicLink() || !st.isFile()) return { problems: [`${file} is a link or not a regular file`], readable: false };
+  if (platform === 'win32') return { problems, readable: true, posix: null };
+  const dir = path.dirname(file);
+  let group = null;
+  try {
+    group = lstat(dataDir).gid;
+  } catch {
+    group = null;
+  }
+  const owner = adminUid === 0 ? 'root' : `uid ${adminUid}`;
+  if (st.uid !== adminUid) problems.push(`${file} is owned by uid ${st.uid} (want ${owner})`);
+  if (group !== null && st.gid !== group) problems.push(`${file} has group ${st.gid} (want ${group}, the data dir's group)`);
+  if ((st.mode & 0o777) !== 0o640) problems.push(`${file} has mode ${octal(st.mode)} (want 0640)`);
+  let ds = null;
+  try {
+    ds = lstat(dir);
+  } catch (err) {
+    problems.push(`directory ${dir} cannot be checked (${err && err.code ? err.code : 'error'})`);
+  }
+  if (ds) {
+    if (ds.isSymbolicLink() || !ds.isDirectory()) problems.push(`directory ${dir} is a link or not a directory`);
+    else {
+      if (ds.uid !== adminUid) problems.push(`directory ${dir} is owned by uid ${ds.uid} (want ${owner})`);
+      if (group !== null && ds.gid !== group) problems.push(`directory ${dir} has group ${ds.gid} (want ${group})`);
+      if ((ds.mode & 0o777) !== 0o750) problems.push(`directory ${dir} has mode ${octal(ds.mode)} (want 0750)`);
+    }
+  }
+  return { problems, readable: true, posix: `owned ${owner}:${group === null ? st.gid : group}, mode 0640, in a 0750 directory` };
+}
+
+function statusEntry(e) {
+  if (e === null) return true;
+  if (e === undefined || typeof e !== 'object' || Array.isArray(e)) return false;
+  const keys = Object.keys(e).sort();
+  if (keys.join(',') !== 'at,sender,status') return false;
+  return isIsoInstant(e.at) && PUSH_SENDERS.includes(e.sender) && (e.status === null || (Number.isInteger(e.status) && e.status >= 100 && e.status <= 599));
+}
+
+const describeResult = (e) => `${e.at} ${e.sender} ${e.status === null ? 'no HTTP answer' : `HTTP ${e.status}`}`;
+
+// { ok, warn?, text }
+function lastPushResult(dataDir) {
+  const file = path.join(dataDir, 'relay', 'push-status.json');
+  if (!present(file)) return { ok: true, text: 'no push sent yet' };
+  const s = readStatusJson(file, MAX_PUSH_STATUS_BYTES);
+  const shaped = s !== null && typeof s === 'object' && !Array.isArray(s)
+    && Object.keys(s).sort().join(',') === 'last_failure,last_send,v'
+    && s.v === 1 && statusEntry(s.last_send) && statusEntry(s.last_failure);
+  if (!shaped) return { ok: false, text: `cannot read ${file}; the relay rewrites it after its next push` };
+  if (s.last_send === null) return { ok: true, text: 'no push sent yet' };
+  const failed = s.last_send.status === null || s.last_send.status < 200 || s.last_send.status > 299;
+  const parts = [`last send ${describeResult(s.last_send)}`];
+  if (s.last_failure) parts.push(`last failure ${describeResult(s.last_failure)}`);
+  return { ok: true, warn: failed, text: parts.join('; ') };
+}
+
+function pushRow({ dataDir, push, platform = process.platform, adminUid = 0, deps = {} } = {}) {
+  const lstat = deps.lstat || fs.lstatSync;
+  const senders = PUSH_SENDERS.filter((s) => push && push[s]);
+  if (senders.length === 0) return { check: 'push', ok: true, detail: PUSH_NONE };
+  let ok = true;
+  const parts = [`senders: ${senders.join(', ')}`];
+  if (push.fcm) {
+    const file = push.fcm.serviceAccountFile;
+    const seen = credentialProblems({ file, platform, adminUid, dataDir, lstat });
+    let projectId = null;
+    if (seen.readable) {
+      try {
+        projectId = readServiceAccountFile(file, deps.readFile ? { readFile: deps.readFile } : {}).project_id;
+      } catch (err) {
+        // Its messages name the path and a field, never a value from the file.
+        seen.problems.push(shown(err.message));
+      }
+    }
+    if (seen.problems.length) {
+      ok = false;
+      parts.push(...seen.problems);
+    } else {
+      parts.push(`fcm credential ${file}, project_id ${shown(projectId)}, ${seen.posix || 'owner and mode not checked (POSIX only)'}`);
+    }
+  }
+  const last = lastPushResult(dataDir);
+  if (!last.ok) ok = false;
+  parts.push(last.text);
+  const out = { check: 'push', ok, detail: parts.join('; ') };
+  if (ok && last.warn) out.warn = true;
+  return out;
 }
 
 function readUnit() {
@@ -198,6 +311,16 @@ async function checks({ dataDir, configDir, adminUid = 0, nodeConfig, serviceCon
     }
   }
 
+  // A front door keeps relay.push raw in service.json; a block that does not
+  // parse is also the startup row above, and says no more than its key.
+  let pushConfig = null;
+  try {
+    pushConfig = parsePushConfig(serviceConfig && serviceConfig.relayRaw ? serviceConfig.relayRaw.push : undefined, 'service.json');
+  } catch (err) {
+    push('push', false, shown(err.message));
+  }
+  if (pushConfig) rows.push(pushRow({ dataDir, push: pushConfig, platform, adminUid, deps: deps.push || {} }));
+
   const directory = fd.acme ? fd.acme.directory : LETS_ENCRYPT_PRODUCTION;
   let date = null;
   try {
@@ -215,4 +338,4 @@ async function checks({ dataDir, configDir, adminUid = 0, nodeConfig, serviceCon
   return rows;
 }
 
-module.exports = { checks, NO_PHONE, BREAK_REASONS };
+module.exports = { checks, pushRow, NO_PHONE, BREAK_REASONS, PUSH_NONE };

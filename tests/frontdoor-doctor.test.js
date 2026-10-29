@@ -236,3 +236,160 @@ describe('runDoctor on a front door', () => {
     assert.equal(rows.some((r) => r.check === 'frontdoor profile'), false);
   });
 });
+
+// Push spec §8 (C-12, C-14): the push row, on a front door and a relay run host.
+describe('doctor: the push row', () => {
+  const { pushRow } = require('../src/frontdoor/doctor-checks');
+  const KEY_FILE = '/etc/king-louie/push/fcm-key.json';
+  const KEY_DIR = '/etc/king-louie/push';
+  const SECRET = '-----BEGIN PRIVATE KEY-----\nAAAAsecretsecret\n-----END PRIVATE KEY-----\n';
+  const key = (over = {}) => JSON.stringify({ type: 'service_account', project_id: 'kl-push-example', client_email: 'fcm@kl-push-example.iam.gserviceaccount.example.com', private_key: SECRET, private_key_id: 'abc123secretid', ...over });
+  const fileStat = (over = {}) => ({ uid: 0, gid: 990, mode: 0o100640, isSymbolicLink: () => false, isFile: () => true, isDirectory: () => false, ...over });
+  const dirStat = (over = {}) => ({ uid: 0, gid: 990, mode: 0o40750, isSymbolicLink: () => false, isFile: () => false, isDirectory: () => true, ...over });
+  function harness({ text = key(), file = fileStat(), dir = dirStat(), missing = false, status } = {}) {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-push-doctor-'));
+    cleanups.push(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+    if (status !== undefined) {
+      fs.mkdirSync(path.join(dataDir, 'relay'), { recursive: true });
+      fs.writeFileSync(path.join(dataDir, 'relay', 'push-status.json'), typeof status === 'string' ? status : JSON.stringify(status));
+    }
+    const lstat = (p) => {
+      if (p === KEY_FILE) {
+        if (missing) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        return file;
+      }
+      if (p === KEY_DIR) return dir;
+      if (p === dataDir) return dirStat({ uid: 990, gid: 990, mode: 0o40700 });
+      throw new Error(`unexpected lstat ${p}`);
+    };
+    const readFile = (p) => {
+      assert.equal(p, KEY_FILE);
+      if (missing) throw Object.assign(new Error('x'), { code: 'ENOENT' });
+      return text;
+    };
+    const run = (push = { fcm: { serviceAccountFile: KEY_FILE } }, platform = 'linux') => pushRow({ dataDir, push, platform, adminUid: 0, deps: { lstat, readFile } });
+    return { dataDir, run };
+  }
+  const noSecrets = (r) => {
+    for (const s of ['AAAAsecretsecret', 'abc123secretid', 'gserviceaccount', 'BEGIN PRIVATE']) assert.ok(!r.detail.includes(s), `${s} in ${r.detail}`);
+  };
+
+  it('no push configured is "none", not a failure', () => {
+    const t = harness();
+    assert.deepEqual(t.run({}), { check: 'push', ok: true, detail: 'none (the app checks only while open)' });
+    assert.deepEqual(t.run(null), { check: 'push', ok: true, detail: 'none (the app checks only while open)' });
+  });
+
+  it('a configured fcm sender: owner, mode and project id; no status yet', () => {
+    const r = harness().run();
+    assert.equal(r.ok, true, r.detail);
+    assert.equal(r.check, 'push');
+    assert.match(r.detail, /^senders: fcm; /);
+    assert.match(r.detail, /project_id kl-push-example/);
+    assert.match(r.detail, /owned root:990, mode 0640, in a 0750 directory/);
+    assert.match(r.detail, /no push sent yet/);
+    noSecrets(r);
+  });
+
+  it('a wrong owner, group or mode fails on POSIX', () => {
+    for (const [opts, want] of [
+      [{ file: fileStat({ mode: 0o100644 }) }, /mode 0644/],
+      [{ file: fileStat({ uid: 990 }) }, /owned by uid 990/],
+      [{ file: fileStat({ gid: 0 }) }, /group 0/],
+      [{ dir: dirStat({ mode: 0o40755 }) }, /directory .* mode 0755/],
+      [{ dir: dirStat({ uid: 990 }) }, /directory .* owned by uid 990/],
+      [{ file: fileStat({ isSymbolicLink: () => true, isFile: () => false }) }, /link/]
+    ]) {
+      const r = harness(opts).run();
+      assert.equal(r.ok, false, JSON.stringify(opts));
+      assert.match(r.detail, want);
+      noSecrets(r);
+    }
+  });
+
+  it('on Windows owner and mode are not checked', () => {
+    const r = harness({ file: fileStat({ mode: 0o100666, uid: 5 }) }).run(undefined, 'win32');
+    assert.equal(r.ok, true, r.detail);
+    assert.match(r.detail, /owner and mode not checked \(POSIX only\)/);
+    assert.match(r.detail, /project_id kl-push-example/);
+  });
+
+  it('a missing or unparsable file fails, naming the path and never the contents', () => {
+    let r = harness({ missing: true }).run();
+    assert.equal(r.ok, false);
+    assert.match(r.detail, /fcm-key\.json/);
+    assert.match(r.detail, /missing/);
+    r = harness({ text: '{ "private_key": "AAAAsecretsecret" ' }).run();
+    assert.equal(r.ok, false);
+    assert.match(r.detail, /does not parse/);
+    noSecrets(r);
+    r = harness({ text: key({ project_id: undefined }) }).run();
+    assert.equal(r.ok, false);
+    assert.match(r.detail, /"project_id"/);
+    noSecrets(r);
+  });
+
+  it('the last result from push-status.json: times and HTTP status only', () => {
+    const status = { v: 1, last_send: { at: '2026-10-29T10:00:00.000Z', sender: 'fcm', status: 200 }, last_failure: { at: '2026-10-28T09:00:00.000Z', sender: 'fcm', status: 404 } };
+    let r = harness({ status }).run();
+    assert.equal(r.ok, true, r.detail);
+    assert.match(r.detail, /last send 2026-10-29T10:00:00\.000Z fcm HTTP 200; last failure 2026-10-28T09:00:00\.000Z fcm HTTP 404/);
+    assert.equal(r.warn, undefined);
+    // The last send failed: a warning, not a failure.
+    r = harness({ status: { v: 1, last_send: { at: '2026-10-29T10:00:00.000Z', sender: 'fcm', status: null }, last_failure: { at: '2026-10-29T10:00:00.000Z', sender: 'fcm', status: null } } }).run();
+    assert.equal(r.ok, true);
+    assert.equal(r.warn, true);
+    assert.match(r.detail, /last send 2026-10-29T10:00:00\.000Z fcm no HTTP answer/);
+  });
+
+  it('a push-status.json that is there but unreadable or misshapen fails, and shows nothing of it', () => {
+    for (const status of [
+      '{nope',
+      { v: 1, last_send: { at: 'yesterday\u001b[2J', sender: 'fcm', status: 200 }, last_failure: null },
+      { v: 2 },
+      { v: 1, last_send: { at: '2026-10-29T10:00:00.000Z', sender: 'fcm', status: 200, token: 'tok-secret' }, last_failure: null }
+    ]) {
+      const r = harness({ status }).run();
+      assert.equal(r.ok, false, JSON.stringify(status));
+      assert.match(r.detail, /cannot read .*push-status\.json/);
+      assert.doesNotMatch(r.detail, /yesterday|tok-secret/);
+    }
+  });
+
+  it('the front door checks() includes it, from service.json relay.push', async () => {
+    const t = await setup();
+    let rows = await t.run();
+    assert.deepEqual(row(rows, 'push'), { check: 'push', ok: true, detail: 'none (the app checks only while open)' });
+    t.serviceConfig.relayRaw = { push: { fcm: { service_account_file: path.join(t.dataDir, 'nope', 'key.json') } } };
+    rows = await t.run();
+    assert.equal(row(rows, 'push').ok, false);
+    assert.match(row(rows, 'push').detail, /missing/);
+  });
+});
+
+describe('runDoctor on a relay run host', () => {
+  function layout(tt, { serviceJson, nodeYaml } = {}) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-relay-doctor-'));
+    tt.after(() => fs.rmSync(base, { recursive: true, force: true }));
+    const dataDir = path.join(base, 'data');
+    const configDir = path.join(base, 'config');
+    fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o755 });
+    if (process.platform !== 'win32') { fs.chmodSync(base, 0o755); fs.chmodSync(dataDir, 0o700); }
+    if (serviceJson) fs.writeFileSync(path.join(configDir, 'service.json'), JSON.stringify(serviceJson), { mode: 0o644 });
+    if (nodeYaml) fs.writeFileSync(path.join(configDir, 'node.yaml'), nodeYaml, { mode: 0o644 });
+    return { dataDir, configDir, adminUid: process.platform !== 'win32' ? process.getuid() : 0 };
+  }
+
+  it('adds the push row when the admin service.json has a relay block', async (tt) => {
+    const t = layout(tt, { serviceJson: { relay: { public_url: 'https://relay.example.com', tls: { cert_file: '/etc/kl/c.pem', key_file: '/etc/kl/k.pem' }, mesh_listen: { host: '10.0.0.5' } } } });
+    const rows = await runDoctor({ dataDir: t.dataDir, configDir: t.configDir, adminUid: t.adminUid, platform: 'linux' });
+    assert.deepEqual(rows.filter((r) => r.check === 'push'), [{ check: 'push', ok: true, detail: 'none (the app checks only while open)' }]);
+  });
+
+  it('adds no push row without a relay block', async (tt) => {
+    const t = layout(tt, { nodeYaml: 'name: web-01\nprofile: runbook\n' });
+    const rows = await runDoctor({ dataDir: t.dataDir, configDir: t.configDir, adminUid: t.adminUid, platform: 'linux' });
+    assert.equal(rows.some((r) => r.check === 'push'), false);
+  });
+});
