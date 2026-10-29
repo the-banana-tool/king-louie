@@ -123,6 +123,13 @@ T12 (docs) last, after all. Start frontier: T01, T04, T05, T08, T10.
   `RESET_DELETE_MS` 5 s, sent only if a token was ever accepted), new pairings
   wait for it. `Push.token(onToken)`, `Push.available(context)` (both flavors).
   The row re-checks on return to the foreground once the gear was opened.
+- T06: one `push` row (`pushRow`, `PUSH_NONE` in `src/frontdoor/doctor-checks.js`;
+  `src/service/doctor.js` adds it on a relay-run host with a `relay` block).
+  The spec's `root:<group>` group is taken as the data dir's gid (the group
+  the service runs under; not compared if the data dir cannot be stat'd);
+  file owner `adminUid`, 0640, dir 0750. APNs only listed, its key not checked.
+  A non-2xx last send is a `warn`, a malformed status file a failure.
+  Windows: "owner and mode not checked (POSIX only)".
 
 ## Landed
 - T01 merge 96ea2586; T05 merge 168106f3; T04 merge 0d31340e; T08 merge
@@ -130,5 +137,6 @@ T12 (docs) last, after all. Start frontier: T01, T04, T05, T08, T10.
   protocol `gradlew test` 107 pass.
 - T02 merge 47828984; T03 merge 4e439582 (+ fix ed55392c); T07 merge d49c94d3;
   T09 merge 91208ecf; T11 merge bf41dbb7 (tip a36f2701). Both flavors build.
+- T06 merge 26da41ae.
 
 ## Left

@@ -1,7 +1,8 @@
 ---
 id: T06
 title: doctor push row (front door and relay run host)
-status: open
+status: done
+merged: 26da41ae
 blocked_by: [T02, T05]
 ---
 ## Goal
