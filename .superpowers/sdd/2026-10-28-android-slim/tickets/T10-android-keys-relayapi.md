@@ -1,7 +1,7 @@
 ---
 id: T10
 title: ReadKey.kt, DeviceKey.create makes both keys, RelayApi with two signers
-status: in-progress
+status: done (merge 980e08ca)
 blocked_by: [T07]
 ---
 ## Goal

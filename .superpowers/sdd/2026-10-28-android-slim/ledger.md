@@ -74,6 +74,22 @@ Start frontier: T01, T08, T09.
   `Messages`, not beside the device id in `Encoding.kt` (which §12 keeps
   unchanged). A read-key watch is today's `Leases.watch(...)` signed by the read key.
 
+- T10: RelayApi read routes fall back to the device key when the phone has no
+  read key (pre-change phones until §8.7 set-up); device routes never use the
+  read key; a device-signed request sends no `X-KL-Key`. `ReadKey.create()`
+  failing inside `DeviceKey.create()` keeps the device key (the phone then gets
+  the §8.7 set-up row). `auditStatus` removed with `history`. `deviceJson` now
+  carries `read_key` (enrollments, §8.2). The watch envelope is still signed by
+  the device key (T11 switches it to the read key). New test
+  `tests/mobile-android-relay-keys.test.js` checks every RelayApi call against
+  `ROUTE_AUTH`.
+- T13 was started and merged before its blocker T12 (orchestrator's call: its
+  files are disjoint; the Android wording follows the spec). If T11/T12 deviate
+  in words, CLAUDE.md's phones bullet, PRIVACY.md and front-door.md need a
+  follow-up. T13's commit carries a `Co-Authored-By: Claude Opus 5.5` line
+  instead of the brief's Fable 5.1 (the implementer followed the system
+  attribution reminder).
+
 ## Landed
 - T01 merge 932753aa (impl d2d4cc64): `isDevice` export, `kl.device.read_key`
   validator, `phoneAuthString(..., { key })`, `PHONE_AUTH_PREFIXES`,
@@ -92,5 +108,8 @@ Start frontier: T01, T08, T09.
 
 - T07 merge aede376d (impl 85d2ad79).
 
+- T10 merge 980e08ca (impl 729926e8).
+- T13 merge 487109b7 (impl d6f790a1).
+
 ## Left
-T10 (in progress), T11, T12, T13.
+T11 (in progress), T12; then the review and npm test.

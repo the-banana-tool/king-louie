@@ -1,7 +1,7 @@
 ---
 id: T11
 title: AppModel - foreground loop, per-kind stores, read-key set-up, notification routing; demo and history go
-status: open
+status: in-progress
 blocked_by: [T08, T10]
 ---
 ## Goal

@@ -1,7 +1,7 @@
 ---
 id: T13
 title: Protocol docs, glossary, privacy, CLAUDE.md, guides
-status: open
+status: done (merge 487109b7)
 blocked_by: [T04, T06, T12]
 ---
 ## Goal
