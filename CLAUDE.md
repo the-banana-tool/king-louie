@@ -1038,17 +1038,32 @@ work while attached appends it to `PROXIED_DOMAINS`).
     `attached-starting` (banner `Starting King Louie Node…`, no buttons). A
     new `service failed to start` line ends the wait `NODE_START_FAILED`;
     60 s ends it `NODE_START_TIMEOUT`, and the client's own backoff carries
-    on. A drop after connecting never runs the task; `attached-disconnected`
-    adds one button from what was found (`nodeStart({ restart })`: **Start**
-    or **Restart King Louie Node**; or **Install…**). Install from the pane
-    (task missing): `nodeInstallPreview()` shows `install --personal
-    --dry-run`'s lines, `nodeInstall({ confirmed: true })` runs it with
-    `--yes`.
+    on. A connect, or a bridge code waiting will not change
+    (`DEVICE_UNPAIRED`, `PROTOCOL_MISMATCH`, `ANOTHER_DEVICE`,
+    `SERVICE_KEY_CHANGED`), ends the wait at once. When the desktop ran
+    nothing (the node was already up and its bridge never answered), the
+    60 s end with no `startError`, and the pane's "running (pid N)" row
+    offers **Restart King Louie Node**. A drop after connecting never runs
+    the task; `attached-disconnected` adds one button from what was found
+    (`nodeStart({ restart })`: **Start** or **Restart King Louie Node**; or
+    **Install…**). `nodeStart` acts only on a press, answers its status
+    once the start is under way and waits in the background (each step
+    sends `statusChanged`); a new press ends the wait before it, and
+    `startIdle()` resolves when no start is in flight (tests await it).
+    Install from the pane (task missing): `nodeInstallPreview()` shows
+    `install --personal --dry-run`'s lines, `nodeInstall({ confirmed: true
+    })` runs it with `--yes` (120 s each, for the recorded data dir, else
+    the one `detectPersonalNode` finds) and reads the task and the pidfile
+    again whatever it did.
   - Codes: `NODE_TASK_MISSING`, `NODE_TASK_DISABLED`,
     `NODE_TASK_OTHER_ACCOUNT` (never run another account's task),
     `NODE_START_TIMEOUT`, `NODE_START_FAILED`, `NODE_TASK_RUN_FAILED` (the
     `/Run` failed), `NODE_STOP_FAILED` (a restart's `stop` failed),
-    `PAIR_ELEVATED`, `PAIR_COMMAND_FAILED`. Every string from the node or the
+    `PAIR_ELEVATED`, `PAIR_COMMAND_FAILED`, `NODE_INSTALL_FAILED` (the
+    install CLI failed or timed out), `CONFIRM_REQUIRED` (`nodeInstall`
+    without `confirmed: true`), `NOT_PERSONAL` (no personal pairing, or no
+    personal node to install for), `NOT_ATTACHED` (`nodeStart` while not
+    attached). Every string from the node or the
     CLI reaches the pane through `shown` (`describeServicePane`,
     `describeAttachedBanner` in `src/desktop-bridge/pane-model.js`).
   - Closing the desktop never stops the node; Detach leaves it running.
