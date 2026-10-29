@@ -1,7 +1,7 @@
 ---
 id: T03
 title: Relay authenticates read-signed requests
-status: open
+status: in-progress
 blocked_by: [T01]
 ---
 ## Goal

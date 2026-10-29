@@ -1,7 +1,7 @@
 ---
 id: T01
 title: Node messages and the shared device check accept a read key
-status: open
+status: done (merge 932753aa)
 blocked_by: []
 ---
 ## Goal

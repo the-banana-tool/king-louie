@@ -1,7 +1,7 @@
 ---
 id: T09
 title: Desktop tokens, dark-only theme, Ui wearing the tokens; drift test
-status: open
+status: done (merge f69f686f)
 blocked_by: []
 ---
 ## Goal

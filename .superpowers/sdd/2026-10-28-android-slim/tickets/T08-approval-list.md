@@ -1,7 +1,7 @@
 ---
 id: T08
 title: ApprovalList.build, the pure merge and order
-status: open
+status: done (merge 2f4eabab)
 blocked_by: []
 ---
 ## Goal
