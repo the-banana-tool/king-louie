@@ -8,6 +8,8 @@ const { parseDuration } = require('../src/platform/duration');
 const { parseFrontDoorConfig, FRONTDOOR_KEYS, frontDoorHosts, LETS_ENCRYPT_PRODUCTION } = require('../src/frontdoor/config');
 const { loadNodeConfig, NODE_YAML_KEYS } = require('../src/service/node-config');
 const { loadServiceConfig, parsePushConfig } = require('../src/service/config');
+const { readServiceAccountFile } = require('../src/frontdoor/push/service-account');
+const { defaultSenders } = require('../src/frontdoor/push');
 
 const EUID = typeof process.geteuid === 'function' ? process.geteuid() : 0;
 const temps = [];
@@ -128,5 +130,69 @@ describe('loadServiceConfig: the frontdoor profile', () => {
     assert.deepEqual(parsePushConfig(undefined, 'service.json'), {});
     assert.deepEqual(parsePushConfig({ fcm: { service_account_file: '/etc/king-louie/fcm.json' } }, 'service.json'), { fcm: { serviceAccountFile: '/etc/king-louie/fcm.json' } });
     assert.throws(() => parsePushConfig({ gcm: {} }, 'service.json'), /unknown key "relay\.push\.gcm"/);
+  });
+
+  it('parsePushConfig refuses a relative service_account_file, naming the key', () => {
+    assert.throws(() => parsePushConfig({ fcm: { service_account_file: 'push/fcm.json' } }, 'service.json'),
+      /relay\.push\.fcm\.service_account_file must be an absolute path/);
+    assert.throws(() => parsePushConfig({ fcm: { service_account_file: './fcm.json' } }, 'service.json'),
+      /relay\.push\.fcm\.service_account_file must be an absolute path/);
+  });
+});
+
+describe('readServiceAccountFile: the FCM credential checked at relay start', () => {
+  const FILE = '/etc/king-louie/push/fcm.json';
+  const KEY = { type: 'service_account', project_id: 'kl-example-push', client_email: 'push@kl-example-push.iam.example.com', private_key: 'PRIVATE-KEY-SENTINEL' };
+  const reading = (text) => ({ readFile: (f) => { assert.equal(f, FILE); return text; } });
+  const refusal = (fn) => { try { fn(); } catch (err) { return err; } assert.fail('expected a refusal'); };
+
+  it('returns the parsed key when every field is there', () => {
+    assert.deepEqual(readServiceAccountFile(FILE, reading(JSON.stringify(KEY))), KEY);
+  });
+
+  for (const field of ['type', 'project_id', 'client_email', 'private_key']) {
+    it(`names a missing ${field} and the path, never a value from the file`, () => {
+      const partial = { ...KEY };
+      delete partial[field];
+      const err = refusal(() => readServiceAccountFile(FILE, reading(JSON.stringify(partial))));
+      assert.equal(err.code, 'PUSH_CREDENTIAL_INVALID');
+      assert.equal(err.field, field);
+      assert.match(err.message, new RegExp(`"${field}"`));
+      assert.ok(err.message.includes(FILE));
+      for (const v of Object.values(KEY)) if (v !== 'service_account') assert.ok(!err.message.includes(v), `leaked ${v}`);
+    });
+  }
+
+  it('refuses a type that is not service_account, and a field that is not a string', () => {
+    const wrongType = refusal(() => readServiceAccountFile(FILE, reading(JSON.stringify({ ...KEY, type: 'authorized_user' }))));
+    assert.equal(wrongType.field, 'type');
+    assert.ok(!wrongType.message.includes('authorized_user'));
+    const notString = refusal(() => readServiceAccountFile(FILE, reading(JSON.stringify({ ...KEY, private_key: 42 }))));
+    assert.equal(notString.field, 'private_key');
+  });
+
+  it('refuses a file that does not parse without echoing it', () => {
+    const err = refusal(() => readServiceAccountFile(FILE, reading('{"private_key": "PRIVATE-KEY-SENTINEL", broken')));
+    assert.equal(err.code, 'PUSH_CREDENTIAL_INVALID');
+    assert.ok(err.message.includes(FILE));
+    assert.ok(!err.message.includes('SENTINEL'));
+    const notObject = refusal(() => readServiceAccountFile(FILE, reading('["PRIVATE-KEY-SENTINEL"]')));
+    assert.equal(notObject.code, 'PUSH_CREDENTIAL_INVALID');
+    assert.ok(!notObject.message.includes('SENTINEL'));
+  });
+
+  it('refuses a file that cannot be read, naming the path', () => {
+    const err = refusal(() => readServiceAccountFile(FILE, { readFile: () => { throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }); } }));
+    assert.equal(err.code, 'PUSH_CREDENTIAL_UNREADABLE');
+    assert.ok(err.message.includes(FILE));
+    assert.match(err.message, /ENOENT/);
+  });
+
+  it('defaultSenders checks the file before building the FCM sender', () => {
+    const partial = { ...KEY };
+    delete partial.client_email;
+    assert.throws(() => defaultSenders({ fcm: { serviceAccountFile: FILE } }, reading(JSON.stringify(partial))), /"client_email"/);
+    const senders = defaultSenders({ fcm: { serviceAccountFile: FILE } }, reading(JSON.stringify(KEY)));
+    assert.deepEqual(senders.map((s) => s.id), ['fcm']);
   });
 });
