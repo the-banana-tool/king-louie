@@ -3,9 +3,11 @@ package com.example.kinglouie
 import android.Manifest
 import android.content.Intent
 import android.os.Bundle
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.graphics.toArgb
 import androidx.fragment.app.FragmentActivity
 import com.example.kinglouie.push.Push
 
@@ -20,7 +22,9 @@ class MainActivity : FragmentActivity() {
             .launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.POST_NOTIFICATIONS))
         if (Push.ENABLED) Push.register(this) { token -> model.registerPushToken(token) }
         // Drawn behind the status and navigation bars; every screen pads itself by their insets.
-        enableEdgeToEdge()
+        // The app is dark only: light bar icons over bgSidebarHdr whatever the system setting.
+        val bars = SystemBarStyle.dark(KlTokens.bgSidebarHdr.toArgb())
+        enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
         setContent { KingLouieTheme { Root(model) } }
         handle(intent)
     }
