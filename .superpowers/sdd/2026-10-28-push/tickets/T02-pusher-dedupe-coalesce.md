@@ -1,7 +1,8 @@
 ---
 id: T02
 title: Relay pusher - dedupe, 10 s coalescing, hourly cap, push-status.json
-status: open
+status: done
+merged: 47828984
 blocked_by: [T01]
 ---
 ## Goal
