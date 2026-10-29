@@ -2,14 +2,20 @@
 // action itself (spec §6.5 leak rule). node_name is operator-set text that
 // ends up in a push notification shown by the OS, so it is sanitised
 // (control characters stripped) and capped before it is ever used.
-const KINDS = ['approval', 'grant', 'pairing', 'alert', 'question', 'lease'];
+// The last three (push spec §7.1) reach `fcm` devices only (C-2): an apns
+// device is never sent one, so its pushes stay byte for byte as before.
+const FCM_ONLY_KINDS = ['session_ended', 'session_paused', 'test'];
+const KINDS = ['approval', 'grant', 'pairing', 'alert', 'question', 'lease', ...FCM_ONLY_KINDS];
 const TITLES = {
   approval: 'Approval needed',
   grant: 'Access request',
   pairing: 'Pairing request',
   alert: 'Alert',
   question: 'Question waiting',
-  lease: 'Session request'
+  lease: 'Session request',
+  session_ended: 'Session ended',
+  session_paused: 'Session paused',
+  test: 'Test'
 };
 
 const MAX_NODE_NAME_LEN = 40;
@@ -29,4 +35,4 @@ function alertText({ kind = 'approval', node_name: nodeName = null } = {}) {
   return name ? `${title} on ${name}` : title;
 }
 
-module.exports = { KINDS, TITLES, alertText, sanitizeNodeName };
+module.exports = { KINDS, FCM_ONLY_KINDS, TITLES, alertText, sanitizeNodeName };

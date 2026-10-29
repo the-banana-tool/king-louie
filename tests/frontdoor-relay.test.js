@@ -514,6 +514,11 @@ describe('relay trust rules', () => {
     const ping = () => seal({ v: 1, type: 'kl.test.ping', node_id: a.identity.nodeId, nonce: crypto.randomBytes(32).toString('base64url') }, signer);
     await assert.rejects(a.call('message.submit', { envelope: ping(), push: { kind: 'bogus', id: 'x' } }), (e) => e.code === 'bad_push');
     await assert.rejects(a.call('message.submit', { envelope: ping(), push: { kind: 'lease', id: 'x', expires_at: 'tomorrow' } }), (e) => e.code === 'bad_push');
+    // The push spec's new kinds reach the relay only through push.notify,
+    // never through message.submit (push spec §7.1).
+    for (const kind of ['session_ended', 'session_paused', 'test']) {
+      await assert.rejects(a.call('message.submit', { envelope: ping(), push: { kind, id: 'x' } }), (e) => e.code === 'bad_push');
+    }
     assert.equal(r.mailbox.list({ nodeIds: [a.identity.nodeId] }).length, before_);
     assert.equal((await a.call('message.submit', { envelope: ping(), push: { kind: 'lease', id: 'x', expires_at: new Date(Date.now() + 60000).toISOString() } })).ok, true);
   });

@@ -7,7 +7,8 @@ const http2 = require('http2');
 const { createPusher } = require('../src/frontdoor/push');
 const { createApnsSender } = require('../src/frontdoor/push/apns');
 const { createFcmSender } = require('../src/frontdoor/push/fcm');
-const { alertText } = require('../src/frontdoor/push/text');
+const { alertText, KINDS, FCM_ONLY_KINDS } = require('../src/frontdoor/push/text');
+const { addSink } = require('../src/logging');
 
 const servers = [];
 after(async () => { for (const s of servers) await new Promise((r) => s.close(r)); });
@@ -271,5 +272,171 @@ describe('FCM sender', () => {
     assert.equal(sends[0].message.data.n, 'web-01rm -rf /');
     assert.ok(sends[1].message.data.n.length <= 40 && sends[1].message.data.n.endsWith('…'));
     assert.equal(sends[2].message.data.n, '');
+  });
+});
+
+// A local FCM server (token exchange and send) on 127.0.0.1: `respond`
+// decides each send's status and body from the parsed message.
+async function fcmServer(respond = () => [200, '{}']) {
+  const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const sends = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      if (req.url === '/token') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ access_token: 'ya29.oauth-access', expires_in: 3600 }));
+        return;
+      }
+      const parsed = JSON.parse(body);
+      sends.push(parsed);
+      const [status, text] = respond(parsed.message);
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(text);
+    });
+  });
+  const port = await listen(server);
+  return {
+    sends,
+    options: {
+      serviceAccount: { client_email: 'relay@example.com', private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }), project_id: 'kl-example' },
+      tokenUrl: `http://127.0.0.1:${port}/token`,
+      fcmOrigin: `http://127.0.0.1:${port}`
+    }
+  };
+}
+
+describe('push text', () => {
+  it('KINDS holds the three fcm-only kinds with their titles', () => {
+    assert.deepEqual(FCM_ONLY_KINDS, ['session_ended', 'session_paused', 'test']);
+    for (const k of FCM_ONLY_KINDS) assert.ok(KINDS.includes(k));
+    assert.equal(alertText({ kind: 'session_ended', node_name: 'gpu-box' }), 'Session ended on gpu-box');
+    assert.equal(alertText({ kind: 'session_paused' }), 'Session paused');
+    assert.equal(alertText({ kind: 'test' }), 'Test');
+  });
+});
+
+describe('push kinds and the FCM payload (push spec §6.5, §7.1)', () => {
+  it('carries the new kinds, and c only for a count from 2 to 999', async () => {
+    const fcm = await fcmServer();
+    const sender = createFcmSender(fcm.options);
+    await sender.notify(device('fcm', 'a'), { kind: 'session_ended', id: 'lease-1', node_name: 'gpu-box' });
+    await sender.notify(device('fcm', 'a'), { kind: 'session_paused', id: 'lease-2', node_name: 'gpu-box' });
+    await sender.notify(device('fcm', 'a'), { kind: 'test', id: 't-1', node_name: 'relay-1' });
+    await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-1', node_name: 'gpu-box', count: 10 });
+    await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-2', count: 1 });
+    await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-3', count: 1000 });
+    await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-4', count: 2.5 });
+    await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-5', count: '7' });
+    await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-6', count: 999 });
+    const data = fcm.sends.map((s) => s.message.data);
+    assert.deepEqual(data[0], { rid: 'lease-1', n: 'gpu-box', k: 'session_ended' });
+    assert.deepEqual(data[1], { rid: 'lease-2', n: 'gpu-box', k: 'session_paused' });
+    assert.deepEqual(data[2], { rid: 't-1', n: 'relay-1', k: 'test' });
+    assert.deepEqual(data[3], { rid: 'r-1', n: 'gpu-box', k: 'approval', c: '10' });
+    for (const d of data.slice(4, 8)) assert.equal(d.c, undefined);
+    assert.equal(data[8].c, '999');
+    for (const d of data) for (const v of Object.values(d)) assert.equal(typeof v, 'string');
+  });
+
+  it('sets ttl: seconds to expires_at, else 3600 for session_ended, else 300', async () => {
+    const fcm = await fcmServer();
+    const now = Date.parse('2026-10-29T12:00:00.000Z');
+    const sender = createFcmSender({ ...fcm.options, now: () => now });
+    const in90 = new Date(now + 90000).toISOString();
+    await sender.notify(device('fcm', 'a'), { kind: 'session_paused', id: 'l-1', expires_at: in90 });
+    await sender.notify(device('fcm', 'a'), { kind: 'session_ended', id: 'l-2' });
+    await sender.notify(device('fcm', 'a'), { kind: 'session_paused', id: 'l-3' });
+    await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-1' });
+    await sender.notify(device('fcm', 'a'), { kind: 'test', id: 't-1' });
+    assert.deepEqual(fcm.sends.map((s) => s.message.android.ttl), ['90s', '3600s', '300s', '300s', '300s']);
+  });
+
+  it('drops a token on 403 SENDER_ID_MISMATCH, never on a 400', async () => {
+    const fcm = await fcmServer((m) => {
+      if (m.token === 'other-project') return [403, JSON.stringify({ error: { code: 403, status: 'PERMISSION_DENIED', details: [{ '@type': 'type.googleapis.com/google.firebase.fcm.v1.FcmError', errorCode: 'SENDER_ID_MISMATCH' }] } })];
+      if (m.token === 'bad-request') return [400, JSON.stringify({ error: { code: 400, status: 'INVALID_ARGUMENT', details: [{ errorCode: 'INVALID_ARGUMENT' }] } })];
+      if (m.token === 'denied') return [403, JSON.stringify({ error: { code: 403, status: 'PERMISSION_DENIED' } })];
+      return [200, '{}'];
+    });
+    const sender = createFcmSender(fcm.options);
+    assert.deepEqual(await sender.notify(device('fcm', 'other-project'), { kind: 'approval', id: 'r-1' }), { ok: false, dropToken: true, status: 403 });
+    assert.deepEqual(await sender.notify(device('fcm', 'bad-request'), { kind: 'approval', id: 'r-2' }), { ok: false, dropToken: false, status: 400 });
+    assert.deepEqual(await sender.notify(device('fcm', 'denied'), { kind: 'approval', id: 'r-3' }), { ok: false, dropToken: false, status: 403 });
+  });
+});
+
+describe('the pusher and the fcm-only kinds (push spec C-2)', () => {
+  it('passes a count to an fcm sender, sends the new kinds to fcm only, and keeps an apns payload as today', async () => {
+    const seen = [];
+    const fcm = { id: 'fcm', platforms: ['fcm'], notify: async (d, p) => { seen.push(['fcm', p]); return { ok: true }; } };
+    const apns = { id: 'apns', platforms: ['apns'], notify: async (d, p) => { seen.push(['apns', p]); return { ok: true }; } };
+    const pusher = createPusher({}, { senders: [fcm, apns] });
+    await pusher.notify(device('fcm'), { kind: 'approval', id: 'r-1', node_name: 'gpu-box', count: 3 });
+    await pusher.notify(device('fcm'), { kind: 'session_ended', id: 'l-1', node_name: 'gpu-box' });
+    await pusher.notify(device('apns'), { kind: 'session_ended', id: 'l-1', node_name: 'gpu-box' });
+    await pusher.notify(device('apns'), { kind: 'session_paused', id: 'l-2' });
+    await pusher.notify(device('apns'), { kind: 'test', id: 't-1' });
+    await pusher.notify(device('apns'), { kind: 'approval', id: 'r-2', node_name: 'gpu-box', count: 3 });
+    assert.deepEqual(seen, [
+      ['fcm', { kind: 'approval', id: 'r-1', node_name: 'gpu-box', expires_at: null, count: 3 }],
+      ['fcm', { kind: 'session_ended', id: 'l-1', node_name: 'gpu-box', expires_at: null }],
+      ['apns', { kind: 'approval', id: 'r-2', node_name: 'gpu-box', expires_at: null }]
+    ]);
+  });
+
+  it("an apns device's push for today's kinds is byte for byte today's", async () => {
+    const { privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const requests = [];
+    const server = http2.createServer();
+    server.on('stream', (stream, headers) => {
+      let body = '';
+      stream.on('data', (c) => { body += c; });
+      stream.on('end', () => { requests.push({ headers, body }); stream.respond({ ':status': 200 }); stream.end(); });
+    });
+    const port = await listen(server);
+    const apns = createApnsSender({
+      teamId: 'TEAM123456', keyId: 'KEY1234567', keyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }),
+      topic: 'com.example.kinglouie', origin: `http://127.0.0.1:${port}`
+    });
+    const pusher = createPusher({}, { senders: [apns] });
+    const expires = '2030-01-01T00:00:00.000Z';
+    for (const kind of ['approval', 'grant', 'pairing', 'alert', 'question', 'lease']) {
+      await pusher.notify(device('apns', 'abc'), { kind, id: `id-${kind}`, node_name: 'web-01', expires_at: expires, count: 5 });
+    }
+    await pusher.notify(device('apns', 'abc'), { kind: 'session_ended', id: 'l-1', node_name: 'web-01' });
+    assert.equal(requests.length, 6);
+    const titles = { approval: 'Approval needed', grant: 'Access request', pairing: 'Pairing request', alert: 'Alert', question: 'Question waiting', lease: 'Session request' };
+    for (const r of requests) {
+      const kind = JSON.parse(r.body).kl.k;
+      assert.equal(r.body, `{"aps":{"alert":{"title":"King Louie","body":"${titles[kind]} on web-01"},"sound":"default"},"kl":{"rid":"id-${kind}","k":"${kind}"}}`);
+      assert.equal(r.headers['apns-expiration'], String(Date.parse(expires) / 1000));
+      assert.equal(r.headers['apns-collapse-id'], `id-${kind}`);
+      assert.equal(r.headers[':path'], '/3/device/abc');
+    }
+  });
+
+  it('never logs a device token or an access token', async () => {
+    const lines = [];
+    const unsubscribe = addSink((record) => { lines.push(record.line); });
+    try {
+      const fcm = await fcmServer((m) => {
+        if (m.token === 'devtok-unregistered') return [404, JSON.stringify({ error: { details: [{ errorCode: 'UNREGISTERED' }] } })];
+        if (m.token === 'devtok-mismatch') return [403, JSON.stringify({ error: { details: [{ errorCode: 'SENDER_ID_MISMATCH' }] } })];
+        return [500, '{"error":"devtok-500"}'];
+      });
+      const dropped = [];
+      const pusher = createPusher({}, { senders: [createFcmSender(fcm.options)], onDropToken: (d) => dropped.push(d.device_id) });
+      await pusher.notify(device('fcm', 'devtok-unregistered'), { kind: 'session_ended', id: 'l-1' });
+      await pusher.notify(device('fcm', 'devtok-mismatch'), { kind: 'approval', id: 'r-1' });
+      await pusher.notify(device('fcm', 'devtok-500'), { kind: 'approval', id: 'r-2' });
+      await pusher.notify(device('apns', 'devtok-apns'), { kind: 'test', id: 't-1' });
+      assert.equal(dropped.length, 2);
+    } finally {
+      unsubscribe();
+    }
+    assert.ok(lines.length >= 3, 'the drops and the failure were logged');
+    for (const line of lines) assert.doesNotMatch(line, /devtok|ya29|oauth-access/);
   });
 });

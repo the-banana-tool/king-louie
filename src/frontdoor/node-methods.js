@@ -5,10 +5,12 @@ const { open, verifyEd25519, verifyEs256 } = require('../approvals/envelope');
 const { validateMessage, isTimestamp } = require('../approvals/messages');
 const { LinkRpcError } = require('../approvals/link-rpc');
 const { TTL_MS: CODE_TTL_MS } = require('./invites');
-const { KINDS: PUSH_KINDS } = require('./push/text');
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const MAX_PUSH_ID = 128;
+// The kinds message.submit may push: its own list, not push/text.js's
+// KINDS, which also holds the kinds only push.notify sends (push spec §7.1).
+const PUSH_KINDS = ['approval', 'grant', 'pairing', 'alert', 'question', 'lease'];
 
 // Node answers to device.enroll / device.revoke that the relay records. A
 // node reply can never mark a device `active` through these paths: only
