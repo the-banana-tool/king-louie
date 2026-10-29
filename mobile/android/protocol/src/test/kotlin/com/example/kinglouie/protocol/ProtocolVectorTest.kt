@@ -599,10 +599,9 @@ class ProtocolVectorTest {
     }
 
     @Test
-    fun demoModeNeverBuildsTheNetworkClient() {
+    fun onlyLiveModeBuildsTheNetworkClient() {
         var constructed = 0
         val factory = RelayClientFactory { constructed += 1; "client" }
-        assertNull(factory.client(AppMode.DEMO))
         assertNull(factory.client(AppMode.WELCOME))
         assertEquals(0, factory.built)
         assertEquals(0, constructed)

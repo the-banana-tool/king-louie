@@ -19,6 +19,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,10 +35,12 @@ import com.example.kinglouie.protocol.Leases
 import java.text.DateFormat
 import java.util.Date
 
-// Fleet stage 5 §3.10 on this phone (owner rulings R-F5-1, R-F5-5, R-F5-6):
-// nothing on these screens runs by itself. The model is called only from a
-// button the owner taps, and every text shown comes from a message a pinned
-// node signed, escaped. tests/mobile-lease-apps.test.js reads this file.
+// Fleet stage 5 §3.10 on this phone. The list is fetched by the model's
+// foreground loop, and the live view updates by itself while it is on screen
+// (android-slim §7.6: its one DisposableEffect starts and stops it). Every
+// decision is still the owner's tap (R-F5-5), and every text shown comes from
+// a message a pinned node signed, escaped. tests/mobile-lease-apps.test.js
+// reads this file.
 
 private val LIMIT_TEXT = mapOf(
     "no_lock_detect" to "This computer cannot detect a locked screen.",
@@ -64,10 +67,6 @@ fun LeaseRequests(model: AppModel, open: (AppModel.LeaseRequestItem) -> Unit) {
     val warning = statusColors.warning
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         SectionTitle("Computer use")
-        if (model.leaseNotice) Text("A computer-use request arrived. Tap the button below to load it.", color = warning, fontWeight = FontWeight.Bold)
-        if (model.mode == AppMode.LIVE) {
-            OutlinedButton({ model.refreshLeases() }, Modifier.fillMaxWidth(), enabled = !model.isLoadingLeases) { Text(if (model.isLoadingLeases) "Checking…" else "Check for computer-use requests") }
-        }
         // R-F5-20, and the fourth security review's finding 2: what this phone knows of each
         // paired computer, said as what it is. Not asked yet (nothing has been checked, which
         // is not "nothing is running"); checked, with the time and what the computer listed;
@@ -82,8 +81,8 @@ fun LeaseRequests(model: AppModel, open: (AppModel.LeaseRequestItem) -> Unit) {
                     is AppModel.LeaseNodeCheck.Unconfirmed -> Text(Leases.couldNotConfirm(pin.name), color = warning, fontWeight = FontWeight.Bold)
                 }
             }
-            if (model.nodes.any { model.leaseChecks[it.id] == null }) Text(Leases.NOT_CHECKED_YET_DETAIL + " Tap the button above to ask.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (model.nodes.any { model.leaseChecks[it.id] is AppModel.LeaseNodeCheck.Unconfirmed }) Text(Leases.COULD_NOT_CONFIRM_DETAIL + " Tap the button above to ask again.", color = warning)
+            if (model.nodes.any { model.leaseChecks[it.id] == null }) Text(Leases.NOT_CHECKED_YET_DETAIL, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (model.nodes.any { model.leaseChecks[it.id] is AppModel.LeaseNodeCheck.Unconfirmed }) Text(Leases.COULD_NOT_CONFIRM_DETAIL, color = warning)
         }
         for (item in model.leaseRequests) {
             ItemCard(onClick = { open(item) }) {
@@ -151,7 +150,7 @@ fun LeaseRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, back: (
                 }
                 for (limit in item.request.limits) Text(LIMIT_TEXT[limit] ?: Display.escape(limit), color = warning)
                 item.unconfirmed?.let { Text(it, color = warning, fontWeight = FontWeight.Bold) }
-                Secondary("Allow and Deny each ask for your fingerprint twice: once for the decision, once to send it.", Modifier.padding(top = 8.dp))
+                Secondary("Allow and Deny each ask for your fingerprint once.", Modifier.padding(top = 8.dp))
             }
         }
         // The decision, where a thumb reaches it: full width at the bottom, after everything the node signed above.
@@ -177,9 +176,14 @@ private fun LeaseMinutes(item: AppModel.LeaseRequestItem, minutes: Int, set: (In
     }
 }
 
-/** The lease as the last Refresh left it. It does not update by itself (R-F5-1). */
+/** The running lease's detail: it updates by itself while it is on screen (android-slim §7.6). */
 @Composable
 fun LiveLeaseScreen(model: AppModel, close: () -> Unit) {
+    // The live view's loop: started when this is composed, stopped when it leaves (and with the app's lifecycle, in the model).
+    DisposableEffect(Unit) {
+        model.liveViewShown()
+        onDispose { model.liveViewHidden() }
+    }
     val live = model.liveLease ?: return
     val warning = statusColors.warning
     val alarm = MaterialTheme.colorScheme.error
@@ -193,27 +197,27 @@ fun LiveLeaseScreen(model: AppModel, close: () -> Unit) {
                 colors = stopColors()) { Text(if (live.busy) "Working…" else "Stop now", Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.titleMedium) }
             val bitmap = live.frame?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
             if (bitmap != null) Image(bitmap.asImageBitmap(), contentDescription = "The leased app's window", modifier = Modifier.fillMaxWidth())
-            else Text("No frame loaded. Tap Refresh.")
-            live.frameAtMs?.let { Secondary("Frame from ${formatLeft(maxOf(0L, System.currentTimeMillis() - it))} ago. This screen does not update by itself.") }
+            else Text("No frame yet.")
+            live.frameAtMs?.let { Secondary("Frame from ${formatLeft(maxOf(0L, System.currentTimeMillis() - it))} ago.") }
             if (live.frameDropped) Text("Frame dropped (too large)", color = warning)
-            if (live.noFrame) Text("No frame arrived in ${Leases.REFRESH_WAIT_S} s. The leased app may not be in front. Tap Refresh to try again.", color = warning)
+            if (live.readKeyRefused) {
+                Text(model.readKeyRefusedText(live), color = warning)
+                OutlinedButton({ model.watchWithFingerprint() }, Modifier.fillMaxWidth(), enabled = !live.busy) { Text(AppModel.FINGERPRINT_WATCH_BUTTON) }
+            }
             live.unconfirmed?.let { Text(it, color = alarm, fontWeight = FontWeight.Bold) }
             // R-F5-18: a lease this phone did not grant says who did. Only that phone keeps it going.
             val grantedByOther = Leases.grantedByOther(live.grantedByDevice, live.grantedByName, model.deviceId)
             grantedByOther?.let { Text(it) }
             // R-F5-15: the node pauses input when the phone that granted the lease has not been in
-            // touch. This screen sends nothing by itself (R-F5-1), so it says what the owner has to do.
+            // touch. While this view is open its watches are that touch (§7.6).
             if (Leases.isPausedForContact(live.state, live.reason)) {
-                if (grantedByOther == null) Text("Paused: tap Refresh to let it continue.", color = alarm, fontWeight = FontWeight.Bold)
+                if (grantedByOther == null) Text("Paused: open to let it continue", color = alarm, fontWeight = FontWeight.Bold)
                 else Text("Paused: the phone that granted it has not been in touch. You can still stop it here.", color = alarm, fontWeight = FontWeight.Bold)
             } else if (live.state == "active" && grantedByOther == null) {
-                Text("The computer pauses clicks and typing when this phone has not refreshed for about two minutes. Tap Refresh to keep it going.", color = warning)
+                Text(AppModel.KEEP_OPEN_LINE, color = warning)
             }
             live.reason?.takeIf { live.state != "active" }?.let { Text("Reason: ${Display.escape(it)}") }
-            if (model.mode == AppMode.LIVE) {
-                OutlinedButton({ model.refreshLiveLease() }, enabled = !live.busy) { Text("Refresh") }
-                Secondary("Stop asks for your fingerprint twice, Refresh three times (four when the last was over a minute ago). Nothing is sent until you tap.")
-            }
+            Secondary("Stop asks for your fingerprint once.")
             // Leaving the screen forgets only a lease that is over. One that is
             // still running keeps its banner, and so its Stop button, on every tab.
             if (live.state == "ended") OutlinedButton({ model.closeLiveLease(); close() }, Modifier.fillMaxWidth()) { Text("Close") }

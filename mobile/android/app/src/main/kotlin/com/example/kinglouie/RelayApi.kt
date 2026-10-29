@@ -239,7 +239,7 @@ class RelayApi(
         request("POST", "/v1/questions/${segment(token)}/answer", READ, envelope.json).second
 
     // Fleet stage 5 (§4.7): lease requests, decisions and views. No call here
-    // repeats itself; the model calls each once per tap (R-F5-1, R-F5-5).
+    // repeats itself; each decision is sent once (R-F5-5).
     /**
      * [nonce] (R-F5-20): 32 random bytes this phone chose for this one
      * request. It is in the query, so under the request signature; each node

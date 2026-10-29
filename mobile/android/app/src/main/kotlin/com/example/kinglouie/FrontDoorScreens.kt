@@ -29,7 +29,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.kinglouie.protocol.AppMode
-import com.example.kinglouie.protocol.AuditStatus
 import com.example.kinglouie.protocol.FrontDoor
 import com.example.kinglouie.protocol.Jcs
 import com.example.kinglouie.protocol.ScopeChoice
@@ -56,7 +55,6 @@ fun FrontDoor(model: AppModel) {
     Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (model.frontDoorId == null) {
             EmptyState("This phone is not paired with a front door.")
-            OutlinedButton({ model.refreshFrontDoor() }, Modifier.fillMaxWidth(), enabled = model.mode == AppMode.LIVE) { Text("Check again") }
             return@Column
         }
         if (screen != "menu") TextButton({ screen = "menu"; model.cancelGrant() }) { Text("‹ Front door menu") }
@@ -68,10 +66,10 @@ fun FrontDoor(model: AppModel) {
             "alerts" -> Alerts(model)
             else -> {
                 Button({ screen = "connect" }, Modifier.fillMaxWidth().height(DecisionHeight)) { Text("Connect a client") }
-                OutlinedButton({ screen = "pairings"; model.refreshPairings() }, Modifier.fillMaxWidth()) { Text("Nodes waiting for you") }
-                OutlinedButton({ screen = "clients"; model.refreshClients() }, Modifier.fillMaxWidth()) { Text("Connected clients") }
-                OutlinedButton({ screen = "nodes"; model.refreshFrontDoorNodes() }, Modifier.fillMaxWidth()) { Text("Nodes") }
-                OutlinedButton({ screen = "alerts"; model.refreshAlerts() }, Modifier.fillMaxWidth()) { Text("Alerts") }
+                OutlinedButton({ screen = "pairings" }, Modifier.fillMaxWidth()) { Text("Nodes waiting for you") }
+                OutlinedButton({ screen = "clients"; model.refreshSettings() }, Modifier.fillMaxWidth()) { Text("Connected clients") }
+                OutlinedButton({ screen = "nodes"; model.refreshSettings() }, Modifier.fillMaxWidth()) { Text("Nodes") }
+                OutlinedButton({ screen = "alerts" }, Modifier.fillMaxWidth()) { Text("Alerts") }
             }
         }
     }
@@ -152,10 +150,9 @@ fun Clients(model: AppModel) {
 
 @Composable
 fun Pairings(model: AppModel) {
-    OutlinedButton({ model.refreshPairings() }) { Text("Check for nodes") }
     if (model.pairings.isEmpty()) Text("No node is waiting. Give the node its code, then run pair on it.")
     LazyColumn {
-        items(model.pairings, key = { it.pairingId }) { p ->
+        items(model.pairings.map { it.request }, key = { it.pairingId }) { p ->
             Column(Modifier.padding(vertical = 6.dp)) {
                 // The core checked the name's alphabet and that the id derives from the key.
                 Text("${FrontDoor.shownText(p.nodeName)} (${p.profile})", fontWeight = FontWeight.Bold)
@@ -174,7 +171,6 @@ fun Pairings(model: AppModel) {
 
 @Composable
 fun FrontDoorNodes(model: AppModel) {
-    OutlinedButton({ model.refreshFrontDoorNodes() }) { Text("Refresh") }
     if (model.frontDoorNodes.isEmpty()) Text("No node is enrolled with this front door.")
     LazyColumn {
         items(model.frontDoorNodes) { n ->
@@ -193,7 +189,6 @@ fun FrontDoorNodes(model: AppModel) {
 
 @Composable
 fun Alerts(model: AppModel) {
-    OutlinedButton({ model.refreshAlerts() }) { Text("Refresh") }
     if (model.alerts.isEmpty()) Text("No alerts.")
     LazyColumn {
         items(model.alerts.reversed()) { a ->
@@ -219,11 +214,3 @@ fun auditBreakWords(reason: String?): String = when (reason) {
     else -> "reason $reason"
 }
 
-/** The front door's gap and break records for one node's history ("reported by front door"). */
-@Composable
-fun FrontDoorAudit(status: AuditStatus) {
-    if (!status.broken && status.gapCount == 0) return
-    Text("Reported by front door", fontWeight = FontWeight.Bold)
-    status.breaks.forEach { b -> Text("Break at #${b.seq ?: "?"}: ${auditBreakWords(b.reason)}", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold) }
-    if (status.gapCount > 0) Text("${status.gapCount} gap(s) in the front door's copy of this history")
-}
