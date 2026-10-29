@@ -460,8 +460,10 @@ class AppModel(context: Context) {
     /**
      * Each node's answer to a statement. A re-post goes to every node again
      * (the relay forwards it to all), so only the nodes that were offline
-     * take the new answer; a `duplicate` then means only that the node has it
-     * (staged or applied), never that it is in use.
+     * take the new answer. `applied`: the node's record holds this read key,
+     * so it is in use there. `duplicate` is a node that has the statement
+     * staged, waiting for `device apply`; on a first post it can only come
+     * from a node from before `applied`, whose record already held the key.
      */
     private fun noteReadKeyReply(reply: JsonElement?, firstPost: Boolean) {
         for (n in reply["nodes"].arr().orEmpty()) {
@@ -470,6 +472,7 @@ class AppModel(context: Context) {
             if (!firstPost && before != null && before != RK_OFFLINE) continue
             readKeyNodes[id] = when (n["state"].str()) {
                 "read-key-pending-apply" -> RK_WAITING
+                "applied" -> RK_IN_USE
                 "duplicate" -> if (firstPost) RK_IN_USE else RK_WAITING
                 "rejected" -> RK_REJECTED
                 else -> RK_OFFLINE
@@ -717,6 +720,15 @@ class AppModel(context: Context) {
         }
     }
 
+    /**
+     * A notification arrived (the push service's thread): while the app is in
+     * front, step 2 at once, as for a tapped one (§9; the 5 s rule applies).
+     * In the background nothing runs: the notification is what the owner sees.
+     */
+    fun onNotificationArrived() {
+        scope.launch { if (foreground) refresh() }
+    }
+
     /** Pull to refresh, a notification while in front, and the return from a decision: step 2 at once (the 5 s rule still applies). */
     fun refresh() {
         if (isRefreshing || !readyToRead()) return
@@ -765,6 +777,27 @@ class AppModel(context: Context) {
     private val questionDecided = mutableStateMapOf<String, ApprovalList.Decided>()
     private val alertDecided = mutableStateMapOf<String, ApprovalList.Decided>()
 
+    /**
+     * Lease requests, a client connection and node pairings this phone
+     * decided and the node or front door confirmed (§7.2): each a decided row
+     * at the bottom until a minute past its expiry (DECIDED_KEEP_MS), as a
+     * decided tool approval is. Kept apart from their stores, so a detail
+     * whose item was decided closes itself.
+     */
+    private val leaseDecided = mutableStateMapOf<String, Pair<LeaseRequestItem, ApprovalList.Decided>>()
+
+    private data class DecidedClient(val request: GrantRequest, val code: String, val receivedAtMs: Long, val decided: ApprovalList.Decided)
+
+    private var clientDecided by mutableStateOf<DecidedClient?>(null)
+    private val pairingDecided = mutableStateMapOf<String, Pair<PairingItem, ApprovalList.Decided>>()
+
+    private fun leaseRequestKept(item: LeaseRequestItem, relayNowMs: Long): Boolean =
+        relayNowMs <= (Timestamps.epochMillis(item.request.expiresAt) ?: 0L) + DECIDED_KEEP_MS
+
+    private fun clientKept(c: DecidedClient, elapsedMs: Long): Boolean = elapsedMs - c.receivedAtMs <= c.request.expiresInMs + DECIDED_KEEP_MS
+
+    private fun pairingKept(p: PairingItem, elapsedMs: Long): Boolean = elapsedMs - p.receivedAtMs <= p.request.expiresInMs + DECIDED_KEEP_MS
+
     fun reportOverflow(rowId: String, overflow: Boolean) {
         if (overflowing[rowId] != overflow) overflowing[rowId] = overflow
     }
@@ -790,12 +823,17 @@ class AppModel(context: Context) {
             questions = questions.map { ApprovalList.Question(it, sending = it.token in answering, decided = questionDecided[it.token]) },
             leaseRequests = leaseRequests.map { item ->
                 val left = (Timestamps.epochMillis(item.request.expiresAt) ?: 0L) - relayNow
-                ApprovalList.LeaseRequestItem(item.request, item.nodeName, left, sending = item.request.requestId in decidingLease)
+                ApprovalList.LeaseRequestItem(item.request, item.nodeName, left, sending = item.request.requestId in decidingLease, unconfirmed = item.unconfirmed)
+            } + leaseDecided.values.filter { (item, _) -> leaseRequestKept(item, relayNow) }.map { (item, d) ->
+                ApprovalList.LeaseRequestItem(item.request, item.nodeName, (Timestamps.epochMillis(item.request.expiresAt) ?: 0L) - relayNow, decided = d)
             },
-            clientConnections = if (grant != null && grantCode != null) {
+            clientConnections = (if (grant != null && grantCode != null) {
                 listOf(ApprovalList.ClientConnection(grant, grantCode!!, (grant.expiresInMs - (elapsed - grantReceivedAtMs)).coerceAtLeast(0), sending = frontDoorBusy))
-            } else emptyList(),
-            nodePairings = pairings.map { ApprovalList.NodePairing(it.request, it.timeLeftMs, sending = frontDoorBusy) },
+            } else emptyList()) + listOfNotNull(clientDecided?.takeIf { clientKept(it, elapsed) }?.let { c ->
+                ApprovalList.ClientConnection(c.request, c.code, (c.request.expiresInMs - (elapsed - c.receivedAtMs)).coerceAtLeast(0), decided = c.decided)
+            }),
+            nodePairings = pairings.filter { it.request.pairingId !in pairingDecided }.map { ApprovalList.NodePairing(it.request, it.timeLeftMs, sending = frontDoorBusy) } +
+                pairingDecided.values.filter { (item, _) -> pairingKept(item, elapsed) }.map { (item, d) -> ApprovalList.NodePairing(item.request, item.timeLeftMs, decided = d) },
             alerts = alerts.map { a -> ApprovalList.Alert(a, sending = frontDoorBusy, decided = a["id"].str()?.let { alertDecided[it] }) },
             runningLeases = runningLeaseRows(),
             nodes = storage.nodes,
@@ -832,7 +870,7 @@ class AppModel(context: Context) {
                 expiresAt = live.expiresAtMs?.let { Timestamps.string(Instant.ofEpochMilli(it)) } ?: signed?.expiresAt,
                 grantedByDevice = live.grantedByDevice, grantedByName = live.grantedByName
             )
-            rows.add(ApprovalList.RunningLease(status, live.nodeName, signedGrant = live.leaseId in signedLeaseGrants, sending = live.busy))
+            rows.add(ApprovalList.RunningLease(status, live.nodeName, signedGrant = live.leaseId in signedLeaseGrants, sending = live.busy, unconfirmed = live.unconfirmed))
         }
         for (lease in runningLeases) {
             if (lease.leaseId == live?.leaseId) continue
@@ -1320,6 +1358,8 @@ class AppModel(context: Context) {
                     is SendOutcome.Rejected -> banner = "Node rejected: ${friendlyReason(outcome.reason)}"
                     is SendOutcome.Confirmed -> {
                         decidedLeaseRequests.add(id)
+                        // A decided row until a minute past the request's expiry (§7.2).
+                        leaseDecided[id] = item.copy(unconfirmed = null) to ApprovalList.Decided(if (grant) "Allowed" else "Denied", SystemClock.elapsedRealtime())
                         leaseRequests.removeAll { it.request.requestId == id }
                         if (grant && outcome.state == "active") {
                             openLiveLease(item.request.nodeId, item.request.leaseId, outcome.state)
@@ -1670,6 +1710,7 @@ class AppModel(context: Context) {
             "gone" -> "Too late — this request has expired."
             "unknown_device" -> "The relay does not know this phone yet."
             "unknown_read_key" -> "The relay does not know this phone's read key. Set it up again from the list."
+            RelayApi.READ_KEY_NOT_SET_UP -> e.message ?: e.code
             "pin_mismatch", "malformed", "network", "redirect", "poll_busy" -> e.message ?: e.code
             else -> if (e.message.isNullOrEmpty() || e.message == e.code) "The relay refused the request (${Display.escape(e.code)})." else Display.escape(e.message!!)
         }
@@ -1990,10 +2031,14 @@ class AppModel(context: Context) {
         return id
     }
 
-    /** Drops what is over: undecided requests at zero, and decided ones a minute after they ran out. */
+    /** Drops what is over: undecided requests at zero, and decided rows of every kind a minute after they ran out. */
     private fun pruneExpired() {
         val now = SystemClock.elapsedRealtime()
-        pending.removeAll { it.timeLeftMs == 0L && (it.status == null || now - it.receivedAtMs > it.expiresInMs + 60_000) }
+        pending.removeAll { it.timeLeftMs == 0L && (it.status == null || now - it.receivedAtMs > it.expiresInMs + DECIDED_KEEP_MS) }
+        val relayNow = client?.now()?.toEpochMilli() ?: System.currentTimeMillis()
+        leaseDecided.keys.removeAll { id -> leaseDecided[id]?.let { !leaseRequestKept(it.first, relayNow) } ?: true }
+        if (clientDecided?.let { clientKept(it, now) } == false) clientDecided = null
+        pairingDecided.keys.removeAll { id -> pairingDecided[id]?.let { !pairingKept(it.first, now) } ?: true }
     }
 
     /** Approve or deny: a fresh biometric signature over the response, and only for an action whose hash the node signed. */
@@ -2412,6 +2457,8 @@ class AppModel(context: Context) {
      */
     private suspend fun refreshFrontDoorNow() {
         val api = client ?: return
+        // A read; without a read key the relay is asked again once it is set up (Settings reads it).
+        if (readKey == null) return
         try {
             setFrontDoor(FrontDoor.identify(api.frontDoorInfo(), storage.nodes))
         } catch (e: RelayException) {
@@ -2570,6 +2617,8 @@ class AppModel(context: Context) {
         try {
             val reply = api.grantDecision(request.grantId, envelope)
             if (reply.confirms(if (approve) "approved" else "denied")) {
+                // A decided row until a minute past the request's expiry (§7.2).
+                clientDecided = DecidedClient(request, code, grantReceivedAtMs, ApprovalList.Decided(if (approve) "Connected" else "Refused", SystemClock.elapsedRealtime()))
                 cancelGrant()
                 if (selected is Selection.Client) selected = null
                 banner = if (approve) "$name is connected. Go back to its window." else "Refused. $name was not connected."
@@ -2685,6 +2734,9 @@ class AppModel(context: Context) {
                 attempts++
             }
             if (reply.confirms(if (approve) "enrolled" else "denied")) {
+                // A decided row until a minute past the pairing's expiry (§7.2).
+                pairingDecided[pairing.pairingId] = (pairings.firstOrNull { it.request.pairingId == pairing.pairingId } ?: PairingItem(pairing, SystemClock.elapsedRealtime())) to
+                    ApprovalList.Decided(if (approve) "Enrolled" else "Refused", SystemClock.elapsedRealtime())
                 pairings.removeAll { it.request.pairingId == pairing.pairingId }
                 if ((selected as? Selection.Pairing)?.pairingId == pairing.pairingId) selected = null
                 banner = if (approve) "$name is enrolled. It links when its pair command finishes." else "Refused. $name was not added."
@@ -2870,7 +2922,10 @@ class AppModel(context: Context) {
         lastLeaseEntries = emptyList()
         leaseRequests.clear()
         decidedLeaseRequests.clear()
+        leaseDecided.clear()
         decidingLease.clear()
+        clientDecided = null
+        pairingDecided.clear()
         grantRequest = null
         grantCode = null
         grantReceivedAtMs = 0L
@@ -2896,6 +2951,9 @@ class AppModel(context: Context) {
 
     companion object {
         const val MAX_EXPIRES_IN_MS = 300_000
+
+        /** A decided row stays this long past its item's expiry (§7.2). */
+        const val DECIDED_KEEP_MS = 60_000L
 
         /** The node refuses a longer free-text answer (UTF-16 units, as JS and Kotlin count). */
         const val MAX_ANSWER_CHARS = 2000
@@ -2928,6 +2986,9 @@ class AppModel(context: Context) {
 
         /** The set-up row (§8.7). */
         const val READ_KEY_SETUP_TITLE = "Check for requests without your fingerprint. Set up once: two fingerprints."
+
+        /** Settings (§6.4) before the read key is set up: its lists are read with the read key. */
+        const val SETTINGS_READ_KEY_LINE = "Set up the read key to see nodes and phones."
 
         /** C-19: no fingerprint fallback for a relay from before the read key. */
         const val OLDER_RELAY = "This relay is older than this app. Upgrade it, then try again."

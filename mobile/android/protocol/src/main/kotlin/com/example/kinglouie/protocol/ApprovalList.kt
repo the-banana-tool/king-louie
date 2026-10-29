@@ -40,8 +40,15 @@ object ApprovalList {
 
     data class Question(val item: QuestionItem, val sending: Boolean = false, val decided: Decided? = null)
 
-    /** A verified lease request; [nodeName] is the pinned node's name. */
-    data class LeaseRequestItem(val request: LeaseRequest, val nodeName: String, val timeLeftMs: Long, val sending: Boolean = false, val decided: Decided? = null)
+    /**
+     * A verified lease request; [nodeName] is the pinned node's name.
+     * [unconfirmed]: the last Allow or Deny got no answer (R-F5-5), in the
+     * app's words; the row says so and keeps its buttons.
+     */
+    data class LeaseRequestItem(
+        val request: LeaseRequest, val nodeName: String, val timeLeftMs: Long, val sending: Boolean = false, val decided: Decided? = null,
+        val unconfirmed: String? = null
+    )
 
     /** A claimed client connection, with the code it was claimed by (the grant message needs it). */
     data class ClientConnection(val request: GrantRequest, val userCode: String, val timeLeftMs: Long, val sending: Boolean = false, val decided: Decided? = null)
@@ -58,8 +65,13 @@ object ApprovalList {
      * pending leases get here is the app's rule (`noteListedLease`,
      * `notePendingListed`, `dropMayStartRows`); [signedGrant] is whether this
      * phone remembers signing a grant for it, which chooses only the words.
+     * [unconfirmed]: the last Stop got no answer the node signed (R-F5-5);
+     * the row says so and Stop stays enabled.
      */
-    data class RunningLease(val status: LeaseStatus, val nodeName: String, val signedGrant: Boolean = false, val sending: Boolean = false)
+    data class RunningLease(
+        val status: LeaseStatus, val nodeName: String, val signedGrant: Boolean = false, val sending: Boolean = false,
+        val unconfirmed: String? = null
+    )
 
     /** One pinned node's listing check; a node with none in [Input.nodeChecks] has not been asked yet. */
     sealed class NodeCheck {
@@ -121,6 +133,12 @@ object ApprovalList {
         val enabled: Boolean = true,
         /** "Sending…", or a decided row's status, shown in place of the buttons' effect. */
         val status: String? = null,
+        /**
+         * An unanswered send (R-F5-5), shown in the warning colour under the
+         * row while nothing is being sent; the buttons stay enabled, so the
+         * owner can tap again.
+         */
+        val notConfirmed: String? = null,
         /** Shown in the warning colour ("Could not confirm"). */
         val warning: Boolean = false,
         /** A question of `high` urgency. */
@@ -203,7 +221,8 @@ object ApprovalList {
             id = "lease:${s.leaseId}", kind = Kind.RUNNING_LEASE, ref = s.leaseId, nodeId = s.nodeId, nodeName = node,
             label = if (s.kind == "take") "Take" else "Computer use", summary = summary, detail = detail,
             timeLeftMs = expiresMs?.let { (it - input.relayNowMs).coerceAtLeast(0) },
-            buttons = listOf(Button.STOP), enabled = !lease.sending, status = if (lease.sending) SENDING else null
+            buttons = listOf(Button.STOP), enabled = !lease.sending, status = if (lease.sending) SENDING else null,
+            notConfirmed = if (lease.sending) null else lease.unconfirmed
         )
     }
 
@@ -222,12 +241,13 @@ object ApprovalList {
     // ---- waiting Approvals (§7.2) ----
 
     /** Approve and Deny, Review in place of Approve when the row cannot show the yes; disabled while sending or past the deadline; none once decided. */
-    private fun decisionRow(row: Row, review: Boolean, input: Input, sending: Boolean, decided: Decided?): Row = when {
+    private fun decisionRow(row: Row, review: Boolean, input: Input, sending: Boolean, decided: Decided?, unconfirmed: String? = null): Row = when {
         decided != null -> row.copy(buttons = emptyList(), enabled = false, status = decided.status)
         else -> row.copy(
             buttons = listOf(if (review || row.id in input.overflowing) Button.REVIEW else Button.APPROVE, Button.DENY),
             enabled = !sending && (row.timeLeftMs ?: 1) > 0,
-            status = if (sending) SENDING else null
+            status = if (sending) SENDING else null,
+            notConfirmed = if (sending) null else unconfirmed
         )
     }
 
@@ -258,7 +278,7 @@ object ApprovalList {
             nodeName = Display.escape(item.nodeName), label = label, summary = summary, timeLeftMs = item.timeLeftMs.coerceAtLeast(0)
         )
         // C-12: limits carry warnings that must be read; a take with credentials may use logins from the vault.
-        return decisionRow(row, r.limits.isNotEmpty() || (r.isTake && r.credentials), input, item.sending, item.decided)
+        return decisionRow(row, r.limits.isNotEmpty() || (r.isTake && r.credentials), input, item.sending, item.decided, item.unconfirmed)
     }
 
     private fun clientRow(c: ClientConnection, input: Input): Row {

@@ -245,6 +245,50 @@ class ApprovalListTest {
         assertEquals(emptyList<ApprovalList.Button>(), decided.buttons)
     }
 
+    @Test
+    fun decidedRowsOfEveryYesNoKindShowTheirStatusAndGoLast() {
+        val lr = leaseRequest("lr", 30_000).copy(decided = ApprovalList.Decided("Allowed", 300))
+        val client = grant(10_000).copy(decided = ApprovalList.Decided("Connected", 200))
+        val pair = pairing(40_000).copy(decided = ApprovalList.Decided("Refused", 100))
+        val rows = ApprovalList.build(input(leaseRequests = listOf(lr), clientConnections = listOf(client), nodePairings = listOf(pair), toolApprovals = listOf(tool("open", "gpu-box", 5000)))).rows
+        assertEquals(listOf("tool:open", "lease-request:lr", "client:${client.request.grantId}", "pairing:${pair.request.pairingId}"), rows.map { it.id })
+        for ((row, status) in rows.drop(1).zip(listOf("Allowed", "Connected", "Refused"))) {
+            assertEquals(status, row.status)
+            assertEquals(emptyList<ApprovalList.Button>(), row.buttons)
+            assertFalse(row.enabled)
+        }
+    }
+
+    // ---- R-F5-5: an unanswered send is shown as not confirmed ----
+
+    @Test
+    fun anUnansweredLeaseDecisionSaysNotConfirmedAndKeepsItsButtons() {
+        val text = "Not confirmed: no answer. Tap again, or wait for the list to show what the node did."
+        val row = ApprovalList.build(input(leaseRequests = listOf(leaseRequest("a", 1000).copy(unconfirmed = text)))).rows.single()
+        assertEquals(text, row.notConfirmed)
+        assertEquals(listOf(ApprovalList.Button.APPROVE, ApprovalList.Button.DENY), row.buttons)
+        assertTrue(row.enabled)
+        assertNull(row.status)
+        // While it is sent again, Sending… stands in its place.
+        val again = ApprovalList.build(input(leaseRequests = listOf(leaseRequest("b", 1000).copy(unconfirmed = text, sending = true)))).rows.single()
+        assertNull(again.notConfirmed)
+        assertEquals(ApprovalList.SENDING, again.status)
+        assertNull(ApprovalList.build(input(leaseRequests = listOf(leaseRequest("c", 1000)))).rows.single().notConfirmed)
+    }
+
+    @Test
+    fun anUnconfirmedStopKeepsStopEnabled() {
+        val text = Leases.stopNotice(SendOutcome.Unconfirmed, "no answer")
+        val row = ApprovalList.build(input(runningLeases = listOf(lease("l1", "active").copy(unconfirmed = text)))).rows.single()
+        assertEquals(text, row.notConfirmed)
+        assertEquals(listOf(ApprovalList.Button.STOP), row.buttons)
+        assertTrue(row.enabled)
+        val sending = ApprovalList.build(input(runningLeases = listOf(lease("l2", "active").copy(unconfirmed = text, sending = true)))).rows.single()
+        assertNull(sending.notConfirmed)
+        assertFalse(sending.enabled)
+        assertNull(ApprovalList.build(input(runningLeases = listOf(lease("l3", "active")))).rows.single().notConfirmed)
+    }
+
     // ---- §7.3 running leases ----
 
     @Test
