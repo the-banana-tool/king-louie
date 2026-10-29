@@ -293,8 +293,8 @@ describe('Android: review fixes (android-slim §4, §6.4, §7.2, §9)', () => {
     const fcm = read(path.join(ROOT, 'mobile', 'android', 'app', 'src', 'fcm', 'kotlin', 'com', 'example', 'kinglouie', 'push', 'Push.kt'));
     const received = section(fcm, 'override fun onMessageReceived(message: RemoteMessage) {', '\n    }\n');
     assert.match(received, /\(application as KingLouieApplication\)\.model\.onNotificationArrived\(\)/);
-    // The notification kinds are spec 3's, unchanged.
-    assert.match(received, /setOf\("approval", "pairing", "alert", "question", "lease"\)/);
+    // The notification kinds are spec 3's (tests/mobile-android-push.test.js checks the list).
+    assert.match(received, /if \(kind !in PushText\.KINDS\) return/);
     const arrived = section(kt('AppModel.kt'), 'fun onNotificationArrived() {', '\n    }\n');
     assert.match(arrived, /scope\.launch \{ if \(foreground\) refresh\(\) \}/);
   });

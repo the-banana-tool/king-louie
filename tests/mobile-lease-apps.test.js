@@ -956,7 +956,7 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
 
   it('Android: a lease push opens the lease\'s detail (§13), fetched with the read key', () => {
     const { model } = android();
-    const pushed = section(model, 'fun openPushed(kind: String, id: String)', '\n    }\n');
+    const pushed = section(model, 'fun openPushed(kind: String, id: String, count: Int = 1)','\n    }\n');
     assert.match(pushed, /if \(!readyToRead\(\)\) return/);
     assert.match(pushed, /"lease", "session_paused", "session_ended" -> pushedLease\(api, kind, id\)/);
     assert.match(pushed, /if \(found != null\) selected = found else if \(listNotice == null\) listNotice = NO_LONGER_WAITING/);
@@ -968,7 +968,7 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     assert.match(model, /const val NO_LONGER_WAITING = "That request is no longer waiting\."/);
     none(model, ['noteLeasePush', 'leasePushes', 'leaseNotice', 'fun refreshLeases()', 'fun refreshLiveLease(', 'fun checkNow('], 'AppModel.kt');
     // MainActivity routes a tapped notification there.
-    assert.match(read(...dir, 'MainActivity.kt'), /model\.openPushed\(intent\.getStringExtra\(Push\.EXTRA_KIND\) \?: "approval", id\)/);
+    assert.match(read(...dir, 'MainActivity.kt'), /model\.openPushed\(intent\.getStringExtra\(Push\.EXTRA_KIND\) \?: "approval", id, intent\.getIntExtra\(Push\.EXTRA_COUNT, 1\)\)/);
   });
 
   it('Android: a lease is shown only when a pinned node signed it', () => {

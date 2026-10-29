@@ -31,6 +31,7 @@ import com.example.kinglouie.protocol.Messages
 import com.example.kinglouie.protocol.NodePin
 import com.example.kinglouie.protocol.PairingRequest
 import com.example.kinglouie.protocol.PhoneKey
+import com.example.kinglouie.protocol.PushText
 import com.example.kinglouie.protocol.ProtocolException
 import com.example.kinglouie.protocol.QuestionItem
 import com.example.kinglouie.protocol.Questions
@@ -69,6 +70,7 @@ import java.time.Instant
 import java.util.Date
 
 class AppModel(context: Context) {
+    private val appContext: Context = context.applicationContext
     private val storage = Storage(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var key: DeviceKey? = runCatching { DeviceKey.load() }.getOrNull()
@@ -356,9 +358,10 @@ class AppModel(context: Context) {
     var isRefreshing by mutableStateOf(false)
         private set
 
-    /** ON_START. */
+    /** ON_START. The Approvals notification's running count starts again (push spec §7.2). */
     fun onForeground() {
         foreground = true
+        Push.appInFront(appContext)
         startLoop()
         startLiveLoop()
     }
@@ -1040,6 +1043,7 @@ class AppModel(context: Context) {
         }
         val known = runningLeases.indexOfFirst { it.leaseId == status.leaseId }
         if (!Leases.acceptsStatus(status, if (known >= 0) runningLeases[known].appliedSeq else 0)) return
+        statusApplied(status)
         // A row that is there stays while its node still signs "pending", whoever signed a
         // grant (fifth security review, finding 1): a newer status without a listing must
         // not take it down.
@@ -1420,6 +1424,7 @@ class AppModel(context: Context) {
         val status = Leases.verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it) }
         if (status != null) {
             if (status.leaseId != live.leaseId || !Leases.acceptsStatus(status, live.appliedSeq)) return live
+            statusApplied(status)
             return live.copy(
                 appliedSeq = status.seq, state = status.state, locked = status.locked, reason = status.reason,
                 expiresAtMs = status.expiresAt?.let { Timestamps.epochMillis(it) }, contactToken = status.contactToken ?: live.contactToken,
@@ -1438,6 +1443,15 @@ class AppModel(context: Context) {
             actions = Leases.mergedActions(live.actions, view.actions), contactToken = view.contactToken ?: live.contactToken,
             contactTokenAtMs = if (view.contactToken != null) SystemClock.elapsedRealtime() else live.contactTokenAtMs
         )
+    }
+
+    /**
+     * A signed status of a lease was applied (applyLease, noteListedLease):
+     * unless it says `suspended`, that lease's "Session paused" notification
+     * has said its piece and goes (push spec §7.2).
+     */
+    private fun statusApplied(status: LeaseStatus) {
+        if (status.state != "suspended") Push.leaseNotSuspended(appContext, status.leaseId)
     }
 
     /**
@@ -2441,13 +2455,14 @@ class AppModel(context: Context) {
      * A tapped notification (§13, R-AN-9): it carries a kind and an id and
      * nothing else. The app fetches with the read key (no fingerprint) and
      * opens that item's detail; when the item is gone it opens the list with
-     * NO_LONGER_WAITING. A count, a test or an unknown kind opens the list.
-     * Without a read key the relay knows, nothing is fetched: the list (and
-     * its set-up row) opens.
+     * NO_LONGER_WAITING. A count above 1, a test or an unknown kind opens
+     * the list (push spec §7.2). Without a read key the relay knows, nothing
+     * is fetched: the list (and its set-up row) opens.
      */
-    fun openPushed(kind: String, id: String) {
+    fun openPushed(kind: String, id: String, count: Int = 1) {
         listNotice = null
         selected = null
+        if (PushText.opensList(kind, count)) return
         if (!readyToRead()) return
         val api = client ?: return
         scope.launch {
@@ -2472,6 +2487,8 @@ class AppModel(context: Context) {
                         fetchAlerts(api)
                         alerts.firstOrNull { it["id"].str() == id && it["acked"].bool() != true }?.let { Selection.Alert(id) }
                     }
+                    // The list: opensList took these above; named so every kind has its line.
+                    "test" -> return@launch
                     else -> return@launch
                 }
                 if (found is Selection.RunningLease) followLiveView()

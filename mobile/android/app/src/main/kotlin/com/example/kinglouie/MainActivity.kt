@@ -40,13 +40,14 @@ class MainActivity : FragmentActivity() {
     }
 
     /**
-     * A tapped notification carries only a kind and an id (android-slim §13):
-     * AppModel.openPushed fetches with the read key, verifies, and selects
-     * that item's detail, or opens the list with "That request is no longer
-     * waiting." when it is gone.
+     * A tapped notification carries only a kind, an id and the running count
+     * (android-slim §13, push spec §7.2): AppModel.openPushed opens the list
+     * for a count above 1 or a test; otherwise it fetches with the read key,
+     * verifies, and selects that item's detail, or opens the list with "That
+     * request is no longer waiting." when it is gone.
      */
     private fun handle(intent: Intent?) {
         val id = intent?.getStringExtra(Push.EXTRA_REQUEST_ID) ?: return
-        model.openPushed(intent.getStringExtra(Push.EXTRA_KIND) ?: "approval", id)
+        model.openPushed(intent.getStringExtra(Push.EXTRA_KIND) ?: "approval", id, intent.getIntExtra(Push.EXTRA_COUNT, 1))
     }
 }
