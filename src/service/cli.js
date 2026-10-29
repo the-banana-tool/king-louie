@@ -323,6 +323,10 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       return 2;
     }
   }
+  if (flags.device !== undefined && !(command === 'relay' && sub === 'push-test')) {
+    io.stderr.write('Flag "--device" is only valid for "relay push-test".\n');
+    return 2;
+  }
   if (flags.confirm && !(command === 'frontdoor' && sub === 'code')) {
     io.stderr.write('Flag "--confirm" is only valid for "frontdoor code".\n');
     return 2;
