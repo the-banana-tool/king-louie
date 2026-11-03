@@ -7,6 +7,11 @@ ObjC.import('Foundation');
 ObjC.import('AppKit');
 ObjC.import('CoreGraphics');
 ObjC.import('ApplicationServices');
+// The bridge's metadata for CoreGraphics does not list these two on current
+// macOS, so $.CGPreflightScreenCaptureAccess is undefined until it is bound.
+['CGPreflightScreenCaptureAccess', 'CGRequestScreenCaptureAccess'].forEach(function (name) {
+  if (typeof $[name] !== 'function') ObjC.bindFunction(name, ['bool', []]);
+});
 
 var lastInjection = 0;
 var automationOk = null;
