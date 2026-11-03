@@ -40,8 +40,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 2
         run: |
-          node -e "const c=require('child_process').spawn('/usr/bin/osascript',['-l','JavaScript','src/session/backends/macos-worker.js'],{stdio:['pipe','inherit','inherit']});c.stdin.write(JSON.stringify({id:1,op:'probe',params:{}})+'
-');setTimeout(()=>{c.kill();process.exit(0)},20000)"
+          node -e "const c=require('child_process').spawn('/usr/bin/osascript',['-l','JavaScript','src/session/backends/macos-worker.js'],{stdio:['pipe','inherit','inherit']});c.stdin.write(JSON.stringify({id:1,op:'probe',params:{}})+String.fromCharCode(10));setTimeout(()=>{c.kill();process.exit(0)},20000)"
       # Diagnostic only (never fails the job): tests/mesh-hardening.test.js
       # dies with SIGABRT on macOS, deterministically, inside 'an attacker
       # holding 8 sockets on the same address cannot keep a valid peer out',
