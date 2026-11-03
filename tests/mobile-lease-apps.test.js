@@ -839,7 +839,8 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     none(live, ['postDelayed', 'Timer(', 'withTimeout', 'generateSequence', 'tailrec', 'ticker', 'Handler(', 'schedule', 'LaunchedEffect', '.collect', 'flow {'], 'the leases section');
     assert.equal(count(live.replace(liveLoop, ''), 'delay('), 0, 'only the live view\'s loop waits');
     // The loop's read-only steps (§9): the long poll, then the other kinds at most every 5 s.
-    assert.match(loop, /val items = api\.approvals\(LONG_POLL_S\)/);
+    // After a failed try, one quick check first, so "Unlock this phone" clears at once.
+    assert.match(loop, /val items = api\.approvals\(if \(pollProblem == null\) LONG_POLL_S else 0\)/);
     assert.match(loop, /if \(lastRestAtMs != 0L && now - lastRestAtMs < REST_EVERY_MS\) return@withLock/);
     assert.match(loop, /each \{ fetchQuestions\(api\) \}\n\s+each \{ refreshLeases\(api\) \}\n\s+if \(frontDoorId != null\) \{\n\s+each \{ fetchPairings\(api\) \}\n\s+each \{ fetchAlerts\(api\) \}/);
     // Its errors, as §9 says: retry_after, 401 or rate_limited 15 s, pin_mismatch one re-pin, unknown_read_key the set-up row, else 5 s.

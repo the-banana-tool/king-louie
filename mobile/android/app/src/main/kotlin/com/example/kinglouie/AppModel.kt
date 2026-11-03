@@ -444,8 +444,10 @@ class AppModel(context: Context) {
                 sendPushToken()
                 while (isActive) {
                     try {
-                        // 1. The approvals long poll: the wake signal.
-                        val items = api.approvals(LONG_POLL_S)
+                        // 1. The approvals long poll: the wake signal. After a failed try (a
+                        // locked phone, the relay out of reach) one quick check first, so the
+                        // problem line clears as soon as a request gets through, not 25 s later.
+                        val items = api.approvals(if (pollProblem == null) LONG_POLL_S else 0)
                         fingerprintToCompare = null
                         takeApprovals(items)
                         // 2. The other kinds, at most once every 5 s.
