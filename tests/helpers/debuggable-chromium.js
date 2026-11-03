@@ -30,7 +30,10 @@ function hasPage(port) {
 // Chromium lists its first tab (to test that attach() waits for it).
 async function launchDebuggableChromium({ timeoutMs = 20000, waitForPage = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cdp-'));
+  // Spawned directly, so without the --no-sandbox Playwright's own launch
+  // passes: a Linux CI runner or a container has no usable sandbox.
   const child = spawn(chromium.executablePath(), [
+    ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
     '--headless=new', '--remote-debugging-port=0', '--no-first-run', `--user-data-dir=${dir}`, 'about:blank',
   ], { stdio: 'ignore' });
 

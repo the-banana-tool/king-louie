@@ -52,7 +52,7 @@ describe('detectPersonalNode', () => {
     assert.deepStrictEqual(inspectOwners.calls, [[configDir, file, nodeYaml, dataDir]]);
   });
 
-  it('answers for a recorded data dir (the config dir beside it)', async () => {
+  it('answers for a recorded data dir (the config dir beside it)', { skip: process.platform !== 'win32' && 'a win32 path join over a real temp dir: a personal node is Windows only' }, async () => {
     const { configDir, dataDir, file } = layout();
     const inspectOwners = recording([mine, mine, mine, mine]);
     const runner = createPersonalNodeRunner({ platform: 'win32', env: {}, inspectOwners });

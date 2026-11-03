@@ -557,8 +557,11 @@ async function uninstall({ flags, dataDir, io, deps }) {
   // Every copy this removes: this account's, and the one of the identity
   // the helper file records under the same name (the same file off Windows,
   // where a copy is named by the user; another on Windows, named by SID).
+  // Off Windows, while the helper file keeps another identity under this
+  // name, that one file is the kept identity's copy, so it stays too.
+  const keepsOthersCopy = c.platform !== 'win32' && recordedForName && !removesCanonical;
   const copies = [];
-  for (const who of [account, ...(stale ? [stale] : [])]) {
+  for (const who of keepsOthersCopy ? [] : [account, ...(stale ? [stale] : [])]) {
     const file = S.userCopyPath({ platform: c.platform, configDir: c.configDir, user: sessionUser, sid: who.sid });
     if (!copies.some((x) => x.file === file)) copies.push({ who, file });
   }

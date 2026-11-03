@@ -425,6 +425,11 @@ describe('per-user copies', () => {
     const { windowsPowerShellExe } = require('../src/platform/windows-paths');
     const { windowsPowerShellEnv } = require('./helpers/windows-powershell-env');
     const icacls = (argv) => execFileSync(argv[0], argv.slice(1), { stdio: 'ignore', windowsHide: true });
+    // An elevated process (a Windows CI runner is one) holds the Administrators
+    // entry the lock leaves, and its files are Administrators' own, so these
+    // two can only show their refusals to the session user they stand for.
+    const whoami = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'whoami.exe');
+    const elevated = () => /S-1-16-(12288|16384)/.test(execFileSync(whoami, ['/groups', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true }));
     const LIFT = [
       "$ErrorActionPreference = 'Stop'",
       "Add-Type -TypeDefinition @'",
@@ -470,7 +475,8 @@ describe('per-user copies', () => {
       return { dir, file, me };
     }
 
-    it('proves the finding: without the entry the session user cannot read who owns the directory, and the helper would exit', async () => {
+    it('proves the finding: without the entry the session user cannot read who owns the directory, and the helper would exit', async (t) => {
+      if (elevated()) { t.skip('this process is elevated: the lock does not keep it out'); return; }
       const { dir, file } = build();
       lock(dir);
       try {
@@ -480,7 +486,8 @@ describe('per-user copies', () => {
       }
     });
 
-    it('with the entry install adds, the same check passes, and the user can still neither list nor write the directory', async () => {
+    it('with the entry install adds, the same check passes, and the user can still neither list nor write the directory', async (t) => {
+      if (elevated()) { t.skip('this process is elevated: the lock does not keep it out'); return; }
       const { dir, file, me } = build();
       icacls(S.windowsUsersDirAclArgs(dir, me));
       lock(dir);

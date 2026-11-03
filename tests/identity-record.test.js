@@ -551,7 +551,8 @@ describe('the administrator\'s record of the node identity (R-F5-17)', () => {
       // The owner keeps the right to rewrite an ACL whatever it says.
       const unlock = (...targets) => { for (const t of targets) { try { icacls(t, '/reset'); } catch { /* cleanup reports what is left */ } } };
 
-      it('the reviewer\'s case: no new file can be made in identity\\, the record inherits a write entry, and the probe refuses it', () => {
+      it('the reviewer\'s case: no new file can be made in identity\\, the record inherits a write entry, and the probe refuses it', (t) => {
+        if (elevated()) { t.skip('this process is elevated (a Windows CI runner is): the ACL does not keep it from creating a file'); return; }
         const s = recorded();
         const dir = path.join(s.configDir, 'identity');
         const file = R.recordPath(s.configDir);

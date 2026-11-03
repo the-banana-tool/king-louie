@@ -26,7 +26,17 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      # The browser tests drive Playwright's own Chromium (never the runner's
+      # Chrome), and npm ci does not download it. On Linux --with-deps also
+      # installs the system libraries it loads.
+      - run: npx playwright install --with-deps chromium
       - run: npm test
+      # Temporary: the macOS worker's probe fails on the runner, and fromWire
+      # drops the worker's message.
+      - name: Diagnose the macOS worker probe
+        if: always() && runner.os == 'macOS'
+        continue-on-error: true
+        run: echo '{"id":1,"op":"probe","params":{}}' | /usr/bin/osascript -l JavaScript src/session/backends/macos-worker.js 2>&1 | head -5
       # Diagnostic only (never fails the job): tests/mesh-hardening.test.js
       # dies with SIGABRT on macOS, deterministically, inside 'an attacker
       # holding 8 sockets on the same address cannot keep a valid peer out',
