@@ -25,6 +25,7 @@ const { ApproverStore } = require('../approvals/approver-store');
 const { CourierPump } = require('../approvals/courier');
 const { createRelayDispatcher, trackDeviceStates } = require('../approvals/service-wiring');
 const { startRelay } = require('./relay');
+const { offLeaseListing } = require('../gui/lease-protocol');
 const { FrontDoorSelfLink } = require('./self-link');
 const { frontDoorHosts } = require('./config');
 const { runStartupChecks } = require('./startup-checks');
@@ -293,7 +294,12 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
     const courierPump = new CourierPump({ dataDir, relayClient: selfLink, identity, rpcHandler: (method, params) => adminRpc(method, params) });
     relay.nodeHub.attachLocalNode({
       nodeId: frontdoorId, nodeName: nodeConfig.name, publicKeyHex: identity.publicKey.toString('hex'),
-      dispatch: createRelayDispatcher({ phoneApprover: NO_APPROVALS, approverStore, auditLedger: ownLedger, courierPump })
+      // The front door runs no computer use, so it signs "nothing running"
+      // for its phones, which pin it as a node and ask it like any other.
+      dispatch: createRelayDispatcher({
+        phoneApprover: NO_APPROVALS, approverStore, auditLedger: ownLedger, courierPump,
+        leaseList: offLeaseListing({ identity, approverStore })
+      })
     });
     selfLink.writeLink();
     courierPump.start();

@@ -79,9 +79,13 @@ function rejectedAuditLimiter() {
 
 // relay → node methods (spec §4.6). A response or claim for a request an
 // out-of-process producer (mcp, the admin CLI) made goes to its courier inbox.
-function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, courierPump = null }) {
+// leaseList answers lease.list for a node whose dispatcher is the only way in:
+// the front door as its own node, which runs no computer use and so passes
+// offLeaseListing (a signed "nothing"). Without one, lease.list is unknown.
+function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, courierPump = null, leaseList = null }) {
   const admitRejectedAudit = rejectedAuditLimiter();
   return async (method, params = {}) => {
+    if (method === 'lease.list' && typeof leaseList === 'function') return leaseList(params);
     if (method === 'approval.response' || method === 'enroll.claim') {
       const inbox = courierPump ? courierPump.routeFor(method, params) : null;
       if (inbox) return { delivered: courierPump.deliver(inbox, method, params), accepted: null, reason: null };

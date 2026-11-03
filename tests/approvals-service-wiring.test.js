@@ -500,3 +500,31 @@ describe('relay and audit configuration', () => {
     assert.throws(load, /unknown key "approvers\.phone" \(known: relay, request_ttl_s\)/);
   });
 });
+
+// QoL testing 2026-11-02: a phone enrolled on a front door pins the front
+// door as a node, and the relay asks every node of the phone, the front door
+// included, what is running. The front door's own dispatcher had no
+// lease.list, so its phones said "Could not confirm with frontdoor" for
+// ever. A front door runs no computer use, so it signs "nothing" like any
+// node without a lease manager; a dispatcher given no leaseList is unchanged.
+describe('createRelayDispatcher: lease.list', () => {
+  it('answers lease.list from the leaseList it is given, and refuses it as before without one', async () => {
+    const { offLeaseListing } = require('../src/gui/lease-protocol');
+    const identity = new NodeIdentity({ nodeName: 'frontdoor' });
+    const phone = createFakePhone();
+    const store = await approverStoreWith([phone.approverRecord()]);
+    cleanups.push(() => store.cleanup());
+    const nonce = crypto.randomBytes(32).toString('base64url');
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore: store, auditLedger: null, leaseList: offLeaseListing({ identity, approverStore: store }) });
+    const answer = await dispatch('lease.list', { device_id: phone.deviceId, nonce });
+    assert.deepEqual(answer.statuses, []);
+    const listing = open(answer.listing).message;
+    assert.equal(listing.type, 'kl.lease.listing');
+    assert.equal(listing.node_id, identity.nodeId);
+    assert.equal(listing.to_device, phone.deviceId);
+    assert.equal(listing.nonce, nonce);
+    assert.deepEqual(listing.leases, []);
+    const plain = createRelayDispatcher({ phoneApprover: null, approverStore: store, auditLedger: null });
+    await assert.rejects(plain('lease.list', { device_id: phone.deviceId, nonce }), { code: 'unknown_method' });
+  });
+});
