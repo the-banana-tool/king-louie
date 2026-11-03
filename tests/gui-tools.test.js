@@ -599,7 +599,14 @@ describe('input tools', () => {
       await liveView.tick();
       for (let i = 0; i < 20; i += 1) await new Promise((r) => setImmediate(r));
 
-      const entries = open(ledger.slice()).message.entries;
+      // A refusal's entry is appended a tick after the call, behind the ledger's
+      // lock file, which a busy machine waits for on a timer.
+      let entries = [];
+      for (let i = 0; i < 200; i += 1) {
+        entries = open(ledger.slice()).message.entries;
+        if (entries.filter((e) => e.kind === 'gui.input').length >= 12) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
       const inputs = entries.filter((e) => e.kind === 'gui.input');
       assert.equal(inputs.length, 12, 'every input that reached the tool, refused ones too (two were refused by the schema first)');
       // A Type entry says how much, nothing else; a Key entry names only keys that are not text.

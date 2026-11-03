@@ -190,7 +190,7 @@ describe('install --personal', () => {
       assert.ok(next > at, `"${piece}" in order in:\n${out}`);
       at = next;
     }
-    assert.doesNotMatch(out, /--data-dir/, 'the default data dir is what the CLI picks, so no flag');
+    if (process.platform === 'win32') assert.doesNotMatch(out, /--data-dir/, 'the default data dir is what the CLI picks, so no flag');
     assert.doesNotMatch(out, /may be removed/, 'no leftover fleet data dir here');
   });
 
@@ -202,7 +202,7 @@ describe('install --personal', () => {
     assert.equal(code, 0, t.errors());
     const out = t.text();
     assert.ok(out.includes(`${fleetData} exists but no fleet config file is beside it: every command ignores it, and it may be removed.`), out);
-    assert.doesNotMatch(out, /--data-dir/);
+    if (process.platform === 'win32') assert.doesNotMatch(out, /--data-dir/);
   });
 
   it('a data dir other than the default is spelled out in the remaining steps', async () => {
@@ -255,7 +255,8 @@ describe('install --personal', () => {
     assert.match(t.text(), /not started: front-door\.json is not a regular file/);
   });
 
-  it('the remaining steps name both pair forms', async () => {
+  // (Off Windows the win32 default data dir never equals a temp POSIX path, so the steps carry --data-dir.)
+  it('the remaining steps name both pair forms', { skip: process.platform !== 'win32' && 'the default data dir is a win32 path' }, async () => {
     const s = setup();
     const { code, t } = await run('install', s, deps(s));
     assert.equal(code, 0, t.errors());
@@ -523,7 +524,7 @@ describe('the CLI', () => {
     }
   });
 
-  it('the fleet install plans into the fleet data dir even where only a personal node exists', async () => {
+  it('the fleet install plans into the fleet data dir even where only a personal node exists', { skip: process.platform !== 'win32' && 'a personal node and its default data dir are Windows only' }, async () => {
     const s = setup();
     fs.mkdirSync(s.dataDir, { recursive: true });
     const programData = path.join(s.base, 'ProgramData');
@@ -534,7 +535,7 @@ describe('the CLI', () => {
       const { code, t } = await cli(['install', '--dry-run']);
       assert.equal(code, 0, t.errors());
       assert.ok(!t.text().includes(s.dataDir), t.text());
-      if (process.platform === 'win32') assert.ok(t.text().includes(path.win32.join(programData, 'KingLouie', 'data')), t.text());
+      assert.ok(t.text().includes(path.win32.join(programData, 'KingLouie', 'data')), t.text());
     } finally {
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];

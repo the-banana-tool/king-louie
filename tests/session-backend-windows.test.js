@@ -14,6 +14,18 @@ const { setLogLevel } = require('../src/logging');
 setLogLevel('fatal');
 const WIN = process.platform === 'win32';
 
+// LineWorker's op timer is unref'd, so on Node 22 an await that only it will
+// end has nothing holding the loop open: node exits the file mid-await and
+// cancels every test after it. A ref'd timer stays alive across the await.
+async function holdingLoop(work) {
+  const keep = setTimeout(() => {}, 30000);
+  try {
+    return await work;
+  } finally {
+    clearTimeout(keep);
+  }
+}
+
 describe('LineWorker (any OS, with a fake child)', () => {
   function fakeSpawn(reply) {
     const calls = [];
@@ -106,7 +118,7 @@ describe('LineWorker (any OS, with a fake child)', () => {
     child.emit('exit', 1);
     await assert.rejects(pending, (e) => e.code === 'backend_failed');
     const again = w.call('foreground', {}, { timeoutMs: 50 });
-    await assert.rejects(again, (e) => e.code === 'op_timeout');
+    await holdingLoop(assert.rejects(again, (e) => e.code === 'op_timeout'));
   });
 
   // A child that can be told to reply, exit or fail by hand.
@@ -164,7 +176,7 @@ describe('LineWorker (any OS, with a fake child)', () => {
     const hung = w.call('screenshot', {}, { timeoutMs: 30 });
     const queued = w.call('foreground', {}, { timeoutMs: 5000 });
     queued.catch(() => {});
-    await assert.rejects(hung, (e) => e.code === 'op_timeout');
+    await holdingLoop(assert.rejects(hung, (e) => e.code === 'op_timeout'));
     assert.equal(children[0].killed, 1, 'the worker that did not answer is killed');
     // What waited behind the hung op on the same worker fails now, not at its own timeout.
     await assert.rejects(queued, (e) => e.code === 'backend_failed');

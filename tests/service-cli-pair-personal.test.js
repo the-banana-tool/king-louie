@@ -68,7 +68,11 @@ const GUI_TAIL = [
   ''
 ].join('\n');
 
-describe('pair under hosting: personal', () => {
+// runPair reads node.yaml with loadNodeConfig, which off Windows refuses a
+// config dir not owned by root; a test process cannot give it one.
+const NEEDS_WINDOWS = process.platform !== 'win32' && 'off Windows node.yaml must be root-owned, and a personal node is Windows only';
+
+describe('pair under hosting: personal', { skip: NEEDS_WINDOWS }, () => {
   it('personal: writes approvers.relay, keeps the rest of node.yaml byte for byte, starts the task once', async () => {
     const d = dirs();
     const before = `${PERSONAL_HEAD}${GUI_TAIL}`;
@@ -139,7 +143,7 @@ describe('pair under hosting: personal', () => {
   });
 });
 
-describe('pair https:// (a front door) under hosting: personal', () => {
+describe('pair https:// (a front door) under hosting: personal', { skip: NEEDS_WINDOWS }, () => {
   const FRONT_DOOR = 'https://mcp.kl.example.com';
   // pairWithFrontDoor is faked: its own suites cover the flow; this is the tail.
   function fakeFrontDoor(exit, seen) {

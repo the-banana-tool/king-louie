@@ -10,7 +10,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Not ubuntu-latest: package.json pins playwright exactly (its private
+        # snapshot API), and that version refuses to install on Ubuntu 26.04.
+        os: [ubuntu-24.04, windows-latest, macos-latest]
         # 22 is the floor package.json engines promises (king-louie-service
         # runs on the system Node); 24 is what Electron 41 bundles, so it is
         # the runtime the desktop app actually ships on.
@@ -26,6 +28,10 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      # The browser tests drive Playwright's own Chromium (never the runner's
+      # Chrome), and npm ci does not download it. On Linux --with-deps also
+      # installs the system libraries it loads.
+      - run: npx playwright install --with-deps chromium
       - run: npm test
       # Diagnostic only (never fails the job): tests/mesh-hardening.test.js
       # dies with SIGABRT on macOS, deterministically, inside 'an attacker

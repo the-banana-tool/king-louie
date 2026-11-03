@@ -38,7 +38,7 @@ settles has nothing holding the loop open, so node exits the file mid-await
 resolved") and cancels every test after it. Keep a ref'd `setTimeout` alive
 across that await.
 
-A Windows CI runner differs from a dev box in two ways tests must survive:
+A Windows CI runner differs from a dev box in three ways tests must survive:
 - Steps run under pwsh 7, whose `PSModulePath` reaches any node-spawned
   `powershell.exe` (5.1) and breaks its `Microsoft.PowerShell.Security`
   cmdlets (`Get-Acl` "could not be loaded", exit code still 0). `src/`
@@ -48,7 +48,15 @@ A Windows CI runner differs from a dev box in two ways tests must survive:
   through `fs.realpathSync.native`, which expands it; the JS `realpathSync`
   resolves links but keeps the short name.
 
-To reproduce both, run the suite from pwsh with `TEMP`/`TMP` pointed at the
+- It is elevated. An ACL that keeps an ordinary account out does not keep it
+  out, so a real `icacls` test of a refusal skips itself when elevated.
+
+The Linux legs run on `ubuntu-24.04`, not `ubuntu-latest`: the exact
+`playwright` pin refuses to install on 26.04. The personal node is Windows
+only, so a test that injects `platform: 'win32'` over a real temp dir, or
+loads a `node.yaml` the test process owns, skips itself off Windows.
+
+To reproduce the first two, run the suite from pwsh with `TEMP`/`TMP` pointed at the
 short name of a long-named folder (`cmd /c for %I in ("<dir>") do @echo %~sI`).
 
 `npm run test:e2e` launches the real Electron binary through Playwright's

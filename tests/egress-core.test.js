@@ -112,6 +112,9 @@ describe('the egress policy in the core', () => {
     core.saveProviderToken('openai', 'sk-test-openai-123456');
     await core.start();
     ctx = core.context;
+    // The assembler's first index embeds the tool descriptions (no chat text)
+    // in the background; let it finish before any test watches the requests.
+    await ctx.getContextAssembler().assemble('', {});
     const chat = (id, extra = {}) => ctx.createChat({ id, title: id, createdAt: AT, updatedAt: AT, messages: [], ...extra });
     chat('chat-open');
     chat('chat-private');
