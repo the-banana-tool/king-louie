@@ -33,6 +33,11 @@ jobs:
       # installs the system libraries it loads.
       - run: npx playwright install --with-deps chromium
       - run: npm test
+        if: runner.os != 'Windows'
+      # npm test's command with fewer files at once. At the default concurrency
+      # a different timing-sensitive test failed on most Windows runs.
+      - run: node --test --test-concurrency=2 --test-timeout=600000 tests/*.test.js
+        if: runner.os == 'Windows'
       # Diagnostic only (never fails the job): tests/mesh-hardening.test.js
       # dies with SIGABRT on macOS, deterministically, inside 'an attacker
       # holding 8 sockets on the same address cannot keep a valid peer out',

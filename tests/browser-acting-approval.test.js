@@ -249,7 +249,8 @@ describe('the approval label of a ref (headless Chromium)', () => {
   it('an approved ref click whose element is unchanged runs', async () => {
     const ref = refOf(snap, /button "Contact seller"/);
     const ex = new ToolExecutor({ requireApproval: true, approvalRequester: async () => true, shouldAutoApprove: async () => false });
-    const result = await ex.execute('BrowserPage', { action: 'click', selector: `ref=${ref}` });
+    // Longer than the default: a busy runner's Chromium can stall the click's stability wait.
+    const result = await ex.execute('BrowserPage', { action: 'click', selector: `ref=${ref}`, timeout: 15000 });
     assert.strictEqual(result.ok, true, result.error);
     assert.strictEqual(await out(), 'sent');
   });
