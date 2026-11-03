@@ -10,7 +10,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Not ubuntu-latest: package.json pins playwright exactly (its private
+        # snapshot API), and that version refuses to install on Ubuntu 26.04.
+        os: [ubuntu-24.04, windows-latest, macos-latest]
         # 22 is the floor package.json engines promises (king-louie-service
         # runs on the system Node); 24 is what Electron 41 bundles, so it is
         # the runtime the desktop app actually ships on.
@@ -36,7 +38,10 @@ jobs:
       - name: Diagnose the macOS worker probe
         if: always() && runner.os == 'macOS'
         continue-on-error: true
-        run: echo '{"id":1,"op":"probe","params":{}}' | /usr/bin/osascript -l JavaScript src/session/backends/macos-worker.js 2>&1 | head -5
+        timeout-minutes: 2
+        run: |
+          node -e "const c=require('child_process').spawn('/usr/bin/osascript',['-l','JavaScript','src/session/backends/macos-worker.js'],{stdio:['pipe','inherit','inherit']});c.stdin.write(JSON.stringify({id:1,op:'probe',params:{}})+'
+');setTimeout(()=>{c.kill();process.exit(0)},20000)"
       # Diagnostic only (never fails the job): tests/mesh-hardening.test.js
       # dies with SIGABRT on macOS, deterministically, inside 'an attacker
       # holding 8 sockets on the same address cannot keep a valid peer out',
