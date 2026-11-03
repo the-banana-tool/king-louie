@@ -85,11 +85,7 @@ jobs:
             dist/*.deb
 
   build-mac:
-    # Not macos-latest: electron-builder 26.8.1 passes the certificate's password
-    # to set-key-partition-list -k, which expects the temporary keychain's, and
-    # the macOS 26 image refuses that (SecKeychainUnlock). Lift the pin once an
-    # electron-builder release has the fix.
-    runs-on: macos-15
+    runs-on: macos-latest
     environment: release
     steps:
       - uses: actions/checkout@v6

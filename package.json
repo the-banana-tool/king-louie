@@ -40,6 +40,7 @@
     "icon": "icons/icon",
     "files": [
       "**/*",
+      "!.claude/**",
       "!tests/**",
       "!product-management/**",
       "!.github/**",
@@ -80,7 +81,7 @@
   },
   "devDependencies": {
     "electron": "^41.0.4",
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.18.0"
   },
   "dependencies": {
     "@fortawesome/fontawesome-free": "^7.2.0",
