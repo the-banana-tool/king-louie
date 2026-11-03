@@ -59,6 +59,9 @@ describe('images after a failed browser action (headless Chromium)', () => {
   beforeEach(async () => {
     const b = getBrowser();
     await b.context.unrouteAll({ behavior: 'ignoreErrors' });
+    // Off a chrome-error:// page the last test may have left: a setContent on
+    // one can have its context destroyed by a navigation still to come.
+    await b.page.goto('about:blank');
     await b.page.setContent(FORM_PAGE);
   });
 

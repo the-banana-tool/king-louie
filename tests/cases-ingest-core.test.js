@@ -182,10 +182,12 @@ describe('createCore ingest wiring', () => {
     };
     const childProcess = require('node:child_process');
     const realSpawn = childProcess.spawn;
-    const pids = [];
+    // PDF workers only: git runs here too, and Windows soon gives a used pid
+    // to another process, so whether each ended is read from its own handle.
+    const workers = [];
     childProcess.spawn = (...args) => {
       const child = realSpawn(...args);
-      pids.push(child.pid);
+      if (Array.isArray(args[1]) && args[1].some((arg) => /pdf-worker/.test(String(arg)))) workers.push(child);
       return child;
     };
     try {
@@ -194,13 +196,13 @@ describe('createCore ingest wiring', () => {
     } finally {
       childProcess.spawn = realSpawn;
     }
-    const reader = pids.at(-1);
+    const reader = workers.at(-1).pid;
     assert.ok(alive(reader), 'the reader of the scan runs while OCR waits');
     // The OCR reply comes back while shutdown waits for it.
     setTimeout(release, 100);
     await c.shutdown();
     assert.deepStrictEqual(calls, ['ocr']);
     assert.strictEqual(alive(reader), false, 'the worker is gone once shutdown resolves');
-    assert.ok(pids.every((pid) => !alive(pid)));
+    assert.ok(workers.every((w) => w.exitCode !== null || w.signalCode !== null), 'every worker has exited');
   });
 });
