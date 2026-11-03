@@ -181,12 +181,14 @@ describe('CaseRuntime', () => {
   });
 
   it('refreshes a held lock so a long turn does not go stale', async () => {
-    const rt = new CaseRuntime({ root: tmp(), staleLockMs: 300 });
+    // Refreshed every second, and held past the 3 s limit: a busy CI runner can
+    // stall this process for over a second, which a shorter limit cannot absorb.
+    const rt = new CaseRuntime({ root: tmp(), staleLockMs: 3000 });
     const info = await rt.createCase({ title: 'Lakeside lot' });
     const t1 = await rt.beginTurn(info.id, { turnId: 'long' });
-    await sleep(700);
+    await sleep(3500);
     const age = Date.now() - fs.statSync(path.join(info.dir, '.kl', 'lock')).mtimeMs;
-    assert.ok(age < 300, `lock is ${age}ms old`);
+    assert.ok(age < 3000, `lock is ${age}ms old`);
     await assert.rejects(rt.beginTurn(info.id, { turnId: 'second' }), CaseBusyError);
     await rt.endTurn(t1, {});
   });

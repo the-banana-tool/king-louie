@@ -56,6 +56,10 @@ The Linux legs run on `ubuntu-24.04`, not `ubuntu-latest`: the exact
 only, so a test that injects `platform: 'win32'` over a real temp dir, or
 loads a `node.yaml` the test process owns, skips itself off Windows.
 
+The Windows legs run `--test-concurrency=2`, since the runner is slow enough
+under load to stall a process for a second or more: give a test that measures
+real time a margin of seconds.
+
 To reproduce the first two, run the suite from pwsh with `TEMP`/`TMP` pointed at the
 short name of a long-named folder (`cmd /c for %I in ("<dir>") do @echo %~sI`).
 
