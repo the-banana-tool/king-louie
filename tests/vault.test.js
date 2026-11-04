@@ -176,3 +176,86 @@ describe('the vault pane and tool cannot destroy a dotted entry', () => {
     assert.strictEqual(vault.delete('flat.name'), false);
   });
 });
+
+describe('a branch with no secret in it is nothing', () => {
+  const { JsonFileStore } = require('../src/platform/json-file-store');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const cipher = { encryptString: (s) => `E:${s}`, decryptString: (s) => s.slice(2) };
+  const tmpDir = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-vault-'));
+    after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    return dir;
+  };
+  function setup() {
+    const dir = tmpDir();
+    const store = new JsonFileStore({ dir, name: 'config' });
+    const vault = createVault({ store, cipher });
+    const handlers = new Map();
+    require('../src/ipc/settings-handlers').registerSettingsHandlers({ handle: (c, fn) => handlers.set(c, fn) }, { vaultStore: store, encryptToken: cipher.encryptString, decryptToken: cipher.decryptString });
+    const call = async (channel, arg) => { const a = await handlers.get(channel)({}, arg); return a.data && a.ok !== false ? { ok: a.ok, ...a.data } : a; };
+    return { dir, store, vault, call };
+  }
+
+  const AU = 'browser_cred:p:example.com.au';
+  const COM = 'browser_cred:p:example.com';
+
+  it('save, delete, save the shorter name: nothing is in the way, and no parent is left', () => {
+    const { vault, store } = setup();
+    vault.set(AU, 'one');
+    assert.strictEqual(vault.delete(AU), true);
+    assert.deepStrictEqual(Object.keys(store.store).filter((k) => k.startsWith('__vault_')), [], 'the empty parents go');
+    assert.strictEqual(vault.blockedBy(COM), null);
+    vault.set(COM, 'two');
+    assert.strictEqual(vault.get(COM), 'two');
+  });
+
+  it('delete keeps the parents another secret still needs', () => {
+    const { vault } = setup();
+    vault.set(AU, 'one');
+    vault.set('browser_cred:p:example.org', 'two');
+    vault.delete(AU);
+    assert.strictEqual(vault.get('browser_cred:p:example.org'), 'two');
+    assert.deepStrictEqual(vault.list(), ['browser_cred:p:example.org']);
+  });
+
+  it('the same order on the store the desktop uses, whose delete does not prune', async () => {
+    const { default: Conf } = await import('conf');
+    const conf = new Conf({ cwd: tmpDir(), configName: 'config', projectName: 'kl-test' });
+    const vault = createVault({ store: conf, cipher });
+    vault.set(AU, 'one');
+    vault.delete(AU);
+    assert.strictEqual(vault.blockedBy(COM), null);
+    vault.set(COM, 'two');
+    assert.strictEqual(vault.get(COM), 'two');
+    assert.deepStrictEqual(vault.list(), [COM]);
+  });
+
+  it('empty parents already on disk block nothing, and writing over them works', () => {
+    const { vault, store } = setup();
+    store.set(`__vault_${COM}`, { au: {} });
+    assert.strictEqual(vault.holds(COM), false);
+    assert.strictEqual(vault.blockedBy(COM), null);
+    vault.set(COM, 'two');
+    assert.strictEqual(vault.get(COM), 'two');
+  });
+
+  it('a branch with a secret, or with something that is no branch, still blocks', () => {
+    const { vault, store } = setup();
+    vault.set(AU, 'one');
+    assert.strictEqual(vault.blockedBy(COM), COM);
+    store.set('__vault_odd', { count: 3 });
+    assert.strictEqual(vault.blockedBy('odd'), 'odd');
+  });
+
+  it('a rename off a dotted name leaves no empty parent in the way', async () => {
+    const { vault, call } = setup();
+    vault.set(AU, 'one');
+    assert.strictEqual((await call('settings:vaultUpdate', { oldKey: AU, newKey: 'plain' })).ok, true);
+    assert.strictEqual(vault.blockedBy(COM), null);
+    vault.set(COM, 'two');
+    assert.strictEqual(vault.get('plain'), 'one');
+    assert.strictEqual(vault.get(COM), 'two');
+  });
+});

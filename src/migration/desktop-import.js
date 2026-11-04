@@ -1135,7 +1135,7 @@ class DesktopImporter {
         this.requireCipher();
         this.requireSecretString(value);
         // Written only if still absent (fix round 1, I4).
-        if (ctx.vault.has(item.key) || ctx.vault.blockedBy(item.key)) {
+        if (ctx.vault.holds(item.key) || ctx.vault.blockedBy(item.key)) {
           return { note: `a secret with this name was added to the ${this.where} after the plan was made; not overwritten` };
         }
         ctx.vault.set(item.key, value);

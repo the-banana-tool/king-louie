@@ -42,6 +42,10 @@ function readVaultEntries(data) {
   return { entries, unread };
 }
 
+// A branch with nothing in it, as a delete on a store that does not prune leaves.
+const isEmptyBranch = (node) => Boolean(node) && typeof node === 'object' && !Array.isArray(node)
+  && Object.values(node).every(isEmptyBranch);
+
 const vaultBlockedText = (key, blocker) => (blocker === String(key)
   ? `"${key}" has other secrets stored under it, so it cannot be written.`
   : `"${key}" cannot be written: the secret "${blocker}" is in its way.`);
@@ -59,7 +63,8 @@ function createVault({ store, cipher }) {
       const name = parts.slice(0, i).join('.');
       if (holds(name)) return name;
     }
-    return read(key) !== undefined && !holds(key) ? String(key) : null;
+    const here = read(key);
+    return here !== undefined && !holds(key) && !isEmptyBranch(here) ? String(key) : null;
   };
   return {
     set(key, value) {
@@ -78,12 +83,20 @@ function createVault({ store, cipher }) {
     // has entries under it. holds() is true of a stored secret alone.
     holds,
     blockedBy,
-    // One secret, never a branch. False when it is still there afterwards (a name
+    // One secret, never a branch, and the parents it leaves empty go with it: no
+    // store's delete prunes them. False when it is still there afterwards (a name
     // stored flat, which a store's own delete cannot reach).
     delete(key) {
       if (!holds(key)) return false;
       store.delete(storeKey(key));
-      return !holds(key);
+      if (holds(key)) return false;
+      const parts = String(key).split('.');
+      for (let i = parts.length - 1; i >= 1; i -= 1) {
+        const parent = parts.slice(0, i).join('.');
+        if (!isEmptyBranch(read(parent))) break;
+        store.delete(storeKey(parent));
+      }
+      return true;
     },
     list() {
       return [...readVaultEntries(store.store).entries.keys()];

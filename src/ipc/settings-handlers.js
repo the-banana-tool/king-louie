@@ -533,12 +533,12 @@ function registerSettingsHandlers(ipcMain, context = {}) {
       // Update both key name and value
       if (!encryptToken) return { ok: false, error: 'Encryption unavailable.' };
       getVaultStore().set(newStoreKey, encryptToken(value));
-      if (oldStoreKey !== newStoreKey) getVaultStore().delete(oldStoreKey);
+      if (oldStoreKey !== newStoreKey) vault.delete(oldKey);
     } else if (oldStoreKey !== newStoreKey) {
       // Rename key only — move the encrypted blob
       const existing = vaultNodeAt(getVaultStore().store, oldKey);
       getVaultStore().set(newStoreKey, existing);
-      getVaultStore().delete(oldStoreKey);
+      vault.delete(oldKey);
     }
 
     return { ok: true, message: `Secret updated.` };

@@ -202,6 +202,30 @@ describe('a dotted key landing on a node', () => {
   });
 });
 
+describe('empty parents on a node', () => {
+  const COM = 'browser_cred:king-louie:shop.example.com';
+
+  it('a key deleted on the node leaves nothing the plan calls in the way', async () => {
+    const { core, importer } = await nodeService();
+    core.context.vault.set(`${COM}.au`, 'gone');
+    core.context.vault.delete(`${COM}.au`);
+    const source = readSource(await desktopConfig({ [COM]: 'from-desktop' }));
+    const { plan, report } = await moveAll(importer, source);
+    assert.strictEqual(itemOf(plan, COM).action, 'new');
+    assert.deepStrictEqual(report.failures, []);
+    assert.strictEqual(core.context.vault.get(COM), 'from-desktop');
+  });
+
+  it('an empty branch already on disk plans new, and the entry lands over it', async () => {
+    const { core, importer } = await nodeService();
+    core.context.vaultStore.set(`__vault_${COM}`, { au: {} });
+    const source = readSource(await desktopConfig({ [COM]: 'from-desktop' }));
+    const { plan } = await moveAll(importer, source);
+    assert.strictEqual(itemOf(plan, COM).action, 'new');
+    assert.strictEqual(core.context.vault.get(COM), 'from-desktop');
+  });
+});
+
 describe('what reading whole must not widen', () => {
   const RESERVED = ['contact.relay', 'contact.email.password', 'local.workstation', 'Contact.Relay', ' local .x'];
 
