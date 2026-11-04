@@ -3,19 +3,33 @@
 // Electron vaults keep working.
 const VAULT_PREFIX = '__vault_';
 
+// What a store's data holds under a name, by own properties only, so x.toString over
+// a branch is nothing. A store nests a name at each dot; one stored flat reads too.
+function vaultNodeAt(data, key) {
+  const name = `${VAULT_PREFIX}${key}`;
+  if (data && typeof data === 'object' && Object.hasOwn(data, name)) return data[name];
+  let node = data;
+  for (const part of name.split('.')) {
+    if (!node || typeof node !== 'object' || !Object.hasOwn(node, part)) return undefined;
+    node = node[part];
+  }
+  return node;
+}
+
 function createVault({ store, cipher }) {
   const storeKey = (key) => `${VAULT_PREFIX}${key}`;
-  const holds = (key) => typeof store.get(storeKey(key)) === 'string';
+  const read = (key) => vaultNodeAt(store.store, key);
+  const holds = (key) => typeof read(key) === 'string';
   return {
     set(key, value) {
       store.set(storeKey(key), cipher.encryptString(value));
     },
     get(key) {
-      const encrypted = store.get(storeKey(key));
-      return encrypted ? cipher.decryptString(encrypted) : null;
+      const encrypted = read(key);
+      return typeof encrypted === 'string' && encrypted ? cipher.decryptString(encrypted) : null;
     },
     has(key) {
-      return store.has(storeKey(key));
+      return read(key) !== undefined;
     },
     // A store nests a key at each dot, so has() is also true of a name that only
     // has entries under it. holds() is true of a stored secret alone.
@@ -29,7 +43,7 @@ function createVault({ store, cipher }) {
         const name = parts.slice(0, i).join('.');
         if (holds(name)) return name;
       }
-      return store.has(storeKey(key)) && !holds(key) ? String(key) : null;
+      return read(key) !== undefined && !holds(key) ? String(key) : null;
     },
     delete(key) {
       if (!store.has(storeKey(key))) return false;
@@ -44,4 +58,4 @@ function createVault({ store, cipher }) {
   };
 }
 
-module.exports = { createVault, VAULT_PREFIX };
+module.exports = { createVault, vaultNodeAt, VAULT_PREFIX };

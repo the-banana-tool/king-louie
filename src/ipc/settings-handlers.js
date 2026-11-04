@@ -5,6 +5,7 @@ const log = createLogger('settings');
 
 const { isContactVaultKey } = require('../cases/contact-settings');
 const { isLocalServerVaultKey } = require('../models/local-vault-keys');
+const { createVault, vaultNodeAt } = require('../platform/vault');
 
 function registerSettingsHandlers(ipcMain, context = {}) {
   const {
@@ -484,7 +485,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     const store = getVaultStore();
     const held = (Array.isArray(keys) ? keys : []).filter((key) => {
       if (typeof key !== 'string' || isContactVaultKey(key) || isLocalServerVaultKey(key)) return false;
-      const encrypted = store.get(`${VAULT_PREFIX}${key}`);
+      const encrypted = vaultNodeAt(store.store, key);
       if (typeof encrypted !== 'string' || !encrypted) return false;
       try {
         return Boolean(decryptToken(encrypted));
