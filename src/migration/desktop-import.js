@@ -376,6 +376,15 @@ async function recordedLandingHolds(dir, entry, source) {
   }
 }
 
+function nodeCasePrivate(dir) {
+  try {
+    const meta = parseCaseYaml(fs.readFileSync(path.join(dir, 'case.yaml'), 'utf8'));
+    return Boolean(meta) && meta.private === true;
+  } catch {
+    return false;
+  }
+}
+
 function nodeCaseId(dir) {
   try {
     const meta = parseCaseYaml(fs.readFileSync(path.join(dir, 'case.yaml'), 'utf8'));
@@ -428,7 +437,7 @@ async function caseMatchesSource(dir, source) {
     if (nodeHead === head) return (await sameTree()) && (clean !== true || cleanHere());
     if (clean !== true) return false;
     await git(dir, ['merge-base', '--is-ancestor', head, nodeHead]);
-    if ((await git(dir, ['diff', '--diff-filter=D', '--name-only', head, 'HEAD'])).trim() !== '') return false;
+    if ((await git(dir, ['diff', '--no-renames', '--diff-filter=D', '--name-only', head, 'HEAD'])).trim() !== '') return false;
     return cleanHere();
   } catch {
     return false;
@@ -1348,11 +1357,19 @@ class DesktopImporter {
         // On record at once: a cut-off from here on must not leave a landed case
         // with nothing to say what landed, or how whole it was.
         const landedFrom = expected && expected.landedFrom ? expected.landedFrom : null;
+        // A private case not marked yet is incomplete until the mark holds: the
+        // mark runs git, and this entry must already be there if it never returns.
+        const awaitingMark = Boolean(expected && expected.private) && nodeCasePrivate(dest) !== true;
+        const wholeBesidesMark = !short && !headProblem;
         if (this.personal) {
-          manifest.items[k] = { at, result: 'ok', targetKey: dir, landedFrom, ...(short || headProblem ? { incomplete: true } : {}) };
+          manifest.items[k] = { at, result: 'ok', targetKey: dir, landedFrom, ...(!wholeBesidesMark || awaitingMark ? { incomplete: true } : {}) };
           this.writeManifest(manifest);
         }
         const markProblem = expected && expected.private ? await this.ensureCasePrivate(dest) : null;
+        if (this.personal && awaitingMark && !markProblem && wholeBesidesMark) {
+          manifest.items[k] = { at, result: 'ok', targetKey: dir, landedFrom };
+          this.writeManifest(manifest);
+        }
         if (markProblem) notes.push(`it is private on the desktop and could not be marked private here (${markProblem})`);
         // Fix round 4, ruling (c): names Windows can't store were skipped;
         // the rest of the case landed, and the owner is told which.

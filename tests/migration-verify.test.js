@@ -1518,6 +1518,73 @@ describe('fix round 2: a landing on record, and the node\'s sweep', () => {
     });
   });
 
+  it('fix round 3: a file lost on the node and replaced by a similar one is not read as a rename', async () => {
+    const n = await node();
+    const s = await profile();
+    const text = Array.from({ length: 40 }, (_, i) => `line ${i} of the notes on the lot`).join('\n');
+    fs.writeFileSync(path.join(s.dir, 'notes.md'), `${text}\n`);
+    await git.commitAll(s.dir, 'long notes');
+    await move(n, s);
+    forget(n);
+    const landed = path.join(n.root, s.name);
+    fs.rmSync(path.join(landed, 'notes.md'));
+    fs.writeFileSync(path.join(landed, 'other.md'), `${text}\none more line\n`);
+    await git.commitAll(landed, 'renamed with an edit');
+    const retry = await move(n, s);
+    assert.strictEqual(retry.item.action, 'needs-attention');
+    assert.strictEqual(retry.item.incomplete, true);
+    assert.strictEqual(retry.verified.ok, false);
+  });
+
+  for (const [what, chop, early] of [['lost its key', true, true], ['says so', false, undefined]]) {
+    it(`fix round 3: the early record of a private case whose case.yaml ${what}`, async () => {
+      const n = await node();
+      const s = await profile();
+      const yamlFile = path.join(s.dir, 'case.yaml');
+      const text = fs.readFileSync(yamlFile, 'utf8');
+      fs.writeFileSync(yamlFile, chop ? text : `${text}private: true\n`);
+      await git.commitAll(s.dir, 'private or not');
+      const source = await loadDesktopSource({ userDataDir: s.p, safeStorage, platform: 'win32' });
+      source.inventory.cases[0].private = true;
+      const imp = await n.importer();
+      const seen = [];
+      const realWrite = imp.writeManifest.bind(imp);
+      imp.writeManifest = (manifest) => {
+        seen.push(JSON.parse(JSON.stringify(manifest.items[`case:${s.name}`] || null)));
+        return realWrite(manifest);
+      };
+      const raw = await imp.plan({ installId: source.installId, inventory: source.inventory });
+      for (const batch of planBatches(raw.items, source, {})) await imp.apply({ planId: raw.planId, batch });
+      await imp.finish({ planId: raw.planId });
+      assert.strictEqual(seen[0].incomplete, early, 'not yet marked: a cut-off here must not read as whole');
+      assert.strictEqual(seen[seen.length - 1].incomplete, undefined, 'marked: the record clears');
+      assert.strictEqual(new CaseStore({ root: n.root }).list()[0].private, true);
+    });
+  }
+
+  it('fix round 3: a private case that cannot be marked stays incomplete on record, and a retry says so', async () => {
+    const n = await node();
+    const s = await profile();
+    const source = await loadDesktopSource({ userDataDir: s.p, safeStorage, platform: 'win32' });
+    source.inventory.cases[0].private = true;
+    const rt = n.core.context.getCaseRuntime();
+    const real = rt.markPrivate;
+    rt.markPrivate = async () => { throw new Error('the mark could not be written'); };
+    try {
+      const imp = await n.importer();
+      const raw = await imp.plan({ installId: source.installId, inventory: source.inventory });
+      for (const batch of planBatches(raw.items, source, {})) await imp.apply({ planId: raw.planId, batch });
+      const report = await imp.finish({ planId: raw.planId });
+      assert.deepStrictEqual(report.incomplete.map((i) => i.key), [s.name]);
+    } finally {
+      rt.markPrivate = real;
+    }
+    const again = await (await n.importer()).plan({ installId: source.installId, inventory: source.inventory });
+    const item = again.items.find((i) => i.category === 'case');
+    assert.strictEqual(item.action, 'needs-attention');
+    assert.strictEqual(item.incomplete, true);
+  });
+
   it('what a refusal says: not that trying again helps; last resort after comparing, naming what the node added', async () => {
     const n = await node();
     const s = await profile();
