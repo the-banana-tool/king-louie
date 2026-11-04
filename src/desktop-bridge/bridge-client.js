@@ -12,10 +12,10 @@ const { channelTimeoutMs } = require('./allowlist');
 
 const log = createLogger('desktop-bridge-client');
 const DEFAULT_BACKOFF_MS = Object.freeze([1000, 2000, 4000, 8000, 16000, 30000]);
-// No retry until retryNow(): the credentials or the pin are wrong, or another
-// device holds the connection, and hammering the service will not change
+// No retry until retryNow(): the credentials or the pin are wrong, or the node
+// has no room for another window, and hammering the service will not change
 // that. LOCKED_OUT (4429) is deliberately NOT here — see errorForClose.
-const FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'ANOTHER_DEVICE', 'SERVICE_KEY_CHANGED']);
+const FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'TOO_MANY_WINDOWS', 'SERVICE_KEY_CHANGED']);
 
 function safeNodeId(publicKeyHex) {
   try {
@@ -29,9 +29,9 @@ function safeNodeId(publicKeyHex) {
 // own status/error vocabulary:
 //  - 4401 BAD_SIGNATURE only reaches a client that signed wrong (a bug, not
 //    a credential problem) — not fatal, so a fixed build recovers on its own.
-//  - 4403 DEVICE_UNPAIRED and 4409 ANOTHER_DEVICE and 4426 PROTOCOL_MISMATCH
-//    are fatal (see FATAL): nothing changes by itself, so retryNow() (the
-//    owner re-pairing, detaching the other device, or upgrading) is required.
+//  - 4403 DEVICE_UNPAIRED and 4409 TOO_MANY_WINDOWS and 4426 PROTOCOL_MISMATCH
+//    are fatal (see FATAL): retryNow() (the owner re-pairing, closing another
+//    window, or upgrading) is required.
 //  - 4429 LOCKED_OUT is deliberately NOT fatal. The server only reaches this
 //    branch for a signature that failed to verify (task 4's hardening never
 //    checks lockout for a *valid* signature), so this client — which always
@@ -47,7 +47,7 @@ function errorForClose(code, reason, port) {
   switch (code) {
     case 4401: return new BridgeError('BAD_SIGNATURE', MESSAGES.BAD_SIGNATURE);
     case 4403: return new BridgeError('DEVICE_UNPAIRED', MESSAGES.DEVICE_UNPAIRED);
-    case 4409: return new BridgeError('ANOTHER_DEVICE', MESSAGES.ANOTHER_DEVICE(reason || 'unknown'));
+    case 4409: return new BridgeError('TOO_MANY_WINDOWS', MESSAGES.TOO_MANY_WINDOWS);
     case 4426: return new BridgeError('PROTOCOL_MISMATCH', MESSAGES.PROTOCOL_MISMATCH(reason || 'another version'));
     case 4429: return new BridgeError('LOCKED_OUT', MESSAGES.LOCKED_OUT);
     case 4400: return new BridgeError('MALFORMED', MESSAGES.MALFORMED);

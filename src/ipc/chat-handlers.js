@@ -21,6 +21,7 @@ const { bridgeOriginFor } = require('../history/bridge-origin');
 const { offerCaseNudge } = require('../cases/case-nudge');
 const { egressPolicy } = require('../models/egress');
 const { createPrivateMark } = require('./private-mark');
+const { localDesktopDeviceId, isRemoteWindowEvent } = require('../core/origin');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -82,6 +83,11 @@ async function refreshProvider(availability, provider) {
 }
 
 const TASK_RUNNING_MESSAGE = 'A task is still running in this chat. Send your message when it has finished.';
+const REPLY_RUNNING_MESSAGE = 'A reply is still running in this chat.';
+
+// A window on a node's bridge. Another window cannot see this one's turn, so its
+// Send box is no guard; the Electron host's own window keeps its overlapping sends.
+const fromBridgeWindow = (event) => localDesktopDeviceId(event) !== null || isRemoteWindowEvent(event);
 
 function registerChatHandlers(ipcMain, context = {}) {
   const {
@@ -126,11 +132,13 @@ function registerChatHandlers(ipcMain, context = {}) {
   // (targeted fix, after final review I2's fix wave). Stop aborts every
   // controller in the set and clears the whole entry.
   const activeRuns = new Map();
+  // chatId -> sends waiting on a case's beginTurn, the one await before activeRuns.
+  const beginningSends = new Map();
   // Owner decision Q29: case:attach refuses a chat while a turn runs in it
   // (src/ipc/case-handlers.js reads this from the context the two share). A
   // task's turn counts (tasks spec 2026-11-03 §4.3): src/fleet/start.js sets
   // isTaskChatRunning while the node runs, so it is read on every call.
-  context.isChatRunning = (chatId) => activeRuns.has(chatId) || context.isTaskChatRunning?.(chatId) === true;
+  context.isChatRunning = (chatId) => activeRuns.has(chatId) || beginningSends.has(chatId) || context.isTaskChatRunning?.(chatId) === true;
 
   const assertNoTaskRunning = (chatId) => {
     if (context.isTaskChatRunning?.(chatId) === true) throw Object.assign(new Error(TASK_RUNNING_MESSAGE), { code: 'CHAT_BUSY' });
@@ -430,6 +438,8 @@ function registerChatHandlers(ipcMain, context = {}) {
     // words landing in a client's run would be read by that run as the client's. Before anything
     // is begun or stored.
     assertNoTaskRunning(chatId);
+    // Two windows on one node: the second never starts a second run in the chat.
+    if (fromBridgeWindow(event) && context.isChatRunning(chatId)) return { ok: false, code: 'CHAT_BUSY', error: REPLY_RUNNING_MESSAGE };
 
     // Resolve working directory: per-chat > process.cwd()
     const chatForDir = findChat(chatId, { messages: true });
@@ -449,9 +459,17 @@ function registerChatHandlers(ipcMain, context = {}) {
     // { ok: false, error }.
     const caseId = chatForDir?.caseId || null;
     const caseRuntime = caseId && typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
-    let caseTurn = caseRuntime
-      ? await caseRuntime.beginTurn(caseId, { turnId: `turn-${runId}`, source: 'owner', ownerMessage: safeMessage, chatId })
-      : null;
+    let caseTurn = null;
+    if (caseRuntime) {
+      beginningSends.set(chatId, (beginningSends.get(chatId) || 0) + 1);
+      try {
+        caseTurn = await caseRuntime.beginTurn(caseId, { turnId: `turn-${runId}`, source: 'owner', ownerMessage: safeMessage, chatId });
+      } finally {
+        const left = beginningSends.get(chatId) - 1;
+        if (left > 0) beginningSends.set(chatId, left);
+        else beginningSends.delete(chatId);
+      }
+    }
     const endCaseTurn = async (fields) => {
       if (!caseTurn) return;
       const turn = caseTurn;

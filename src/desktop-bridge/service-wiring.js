@@ -18,14 +18,14 @@ function createDesktopBridgeHost({
   }
   const host = {
     server: null,
-    // ui: the core's ambient events go to the connected desktop (never
+    // ui: the core's ambient events go to every connected window (never
     // prompts; the dispatcher filters). host.interactive: C2's R50 port.
     coreDeps: {
       ui: {
         send: (channel, payload) => { if (host.server) host.server.forwardAmbient(channel, payload); },
         reportError: (message) => log.warn(`core reported: ${message}`)
       },
-      host: { interactive: () => Boolean(host.server && host.server.connected != null) }
+      host: { interactive: () => Boolean(host.server && host.server.connected.length > 0) }
     },
     async start({ core, ports: servicePorts, approvals = null }) {
       const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');

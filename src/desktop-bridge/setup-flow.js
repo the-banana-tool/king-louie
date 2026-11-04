@@ -59,7 +59,7 @@ const BRIDGE_HELP = {
   DEVICE_UNPAIRED: { help: 'King Louie Node no longer knows this app. In Local service settings press Unpair, then Pair.' },
   SERVICE_KEY_CHANGED: { help: 'King Louie Node\'s identity changed after this app paired with it. If you reinstalled it, press Unpair in Local service settings, then Pair. If you did not, do not pair again until you know why.' },
   PROTOCOL_MISMATCH: { help: 'This app and King Louie Node are too far apart in version. Restart the node. If that does not help, install the same version of both.', action: { id: 'nodeRestart', label: 'Restart King Louie Node' } },
-  ANOTHER_DEVICE: { help: 'Another desktop is attached to King Louie Node. Close it, then press Check again.' }
+  TOO_MANY_WINDOWS: { help: 'Too many windows are attached to King Louie Node. Close one, then press Check again.' }
 };
 
 // The press after a refused move, by what can actually help. MIGRATION_BUSY and

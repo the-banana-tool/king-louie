@@ -15,6 +15,7 @@ const {
 const { DEVICES_FILE, DEVICES_CONTROLS, parseDevices, findDevice } = require('./pairing');
 const { fromB64url, verifyWithRawKey } = require('./keys');
 const { createConnection } = require('./connection');
+const { currentConnection } = require('./run-context');
 
 const log = createLogger('desktop-bridge');
 const defaultGeteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1);
@@ -56,7 +57,8 @@ class DesktopBridgeServer extends EventEmitter {
     this.now = now;
     this.limits = { ...LIMITS, ...limits };
     this.wss = null;
-    this.live = null;
+    // deviceId -> its one connection, oldest first (a device attaching again goes last).
+    this.connections = new Map();
     this.preAuth = [];
     this.sockets = new Set();
     this.failures = new Map();
@@ -81,12 +83,23 @@ class DesktopBridgeServer extends EventEmitter {
     this.dispatcher = factory({
       core, cipher, dataDir, approvals, account, hosting,
       getServiceInfo: () => this.serviceInfo(),
-      getConnection: () => this.live
+      getConnections: () => [...this.connections.values()],
+      // A run's own window, gone or not: a gone one is asked nothing, and its
+      // run never borrows another device's. Only a prompt with no run behind
+      // it goes to the oldest local window.
+      getConnection: () => currentConnection() || this._oldestLocal()
     });
   }
 
   get connected() {
-    return this.live ? { deviceId: this.live.deviceId, label: this.live.label } : null;
+    return [...this.connections.values()].filter((c) => c.live).map((c) => ({ deviceId: c.deviceId, label: c.label, remote: c.remote }));
+  }
+
+  _oldestLocal() {
+    for (const conn of this.connections.values()) {
+      if (conn.live && !conn.remote) return conn;
+    }
+    return null;
   }
 
   serviceInfo() {
@@ -145,12 +158,12 @@ class DesktopBridgeServer extends EventEmitter {
     if (!this.wss) return;
     clearInterval(this.recheckTimer);
     this.recheckTimer = null;
-    const conn = this.live;
-    // Kick off (or pick up) the live connection's disconnect cleanup right
-    // away, concurrently with tearing down its socket below, rather than
-    // waiting for the 'close' event to get around to it.
-    const disconnectDone = conn ? this._disconnectOnce(conn) : Promise.resolve();
-    if (conn) {
+    const conns = [...this.connections.values()];
+    // Kick off (or pick up) each connection's disconnect cleanup right away,
+    // concurrently with tearing down its socket below, rather than waiting
+    // for the 'close' event to get around to it.
+    const disconnectDone = Promise.all(conns.map((conn) => this._disconnectOnce(conn)));
+    for (const conn of conns) {
       conn.send({ t: 'bye', code: 'SERVICE_STOPPING' });
       conn.close(CLOSE.GOING_AWAY, 'service stopping');
     }
@@ -165,7 +178,7 @@ class DesktopBridgeServer extends EventEmitter {
     for (const ws of this.sockets) {
       try { ws.terminate(); } catch { /* gone */ }
     }
-    // Every run the desktop started, and every prompt it was shown, must be
+    // Every run a window started, and every prompt it was shown, must be
     // aborted/denied before stop() resolves — otherwise a caller that exits
     // right after stop() (or reuses the port) can race that cleanup. Bounded
     // so a wedged handler (e.g. a stuck chat:stopResponse) cannot hang
@@ -174,7 +187,7 @@ class DesktopBridgeServer extends EventEmitter {
     const wss = this.wss;
     this.wss = null;
     await new Promise((resolve) => wss.close(() => resolve()));
-    this.live = null;
+    this.connections.clear();
   }
 
   _onConnection(ws) {
@@ -290,15 +303,16 @@ class DesktopBridgeServer extends EventEmitter {
     // Re-read: an unpair between clientHello and auth wins.
     const device = this._lookupDevice(state.deviceId);
     if (!device) return this._close(state, CLOSE.UNKNOWN_DEVICE, 'unknown device');
-    if (this.live && this.live.deviceId !== state.deviceId) return this._close(state, CLOSE.OTHER_DEVICE, this.live.label);
+    // One connection per device: attaching again takes its own place.
+    const old = this.connections.get(state.deviceId);
+    if (!old && this.connections.size >= this.limits.maxDevices) return this._close(state, CLOSE.TOO_MANY_WINDOWS, 'too many windows');
     this._removePreAuth(state);
     state.timers.forEach(clearTimeout);
     state.timers = [];
     this.failures.delete(state.deviceId);
     this.lockouts.delete(state.deviceId);
-    if (this.live) {
-      const old = this.live;
-      this.live = null;
+    if (old) {
+      this.connections.delete(state.deviceId);
       old.markGone();
       old.close(CLOSE.NORMAL, 'replaced by a new connection');
     }
@@ -310,7 +324,7 @@ class DesktopBridgeServer extends EventEmitter {
       close: (code, reason) => { try { state.ws.close(code, truncateUtf8(reason, 123)); } catch { /* gone */ } }
     });
     state.conn = conn;
-    this.live = conn;
+    this.connections.set(conn.deviceId, conn);
     this._sendRaw(state.ws, { t: 'ready', service: this.serviceInfo() });
     log.info(`desktop "${device.label}" (${device.deviceId}) attached`);
     this.emit('connected', { deviceId: conn.deviceId, label: conn.label });
@@ -348,14 +362,14 @@ class DesktopBridgeServer extends EventEmitter {
     const conn = state.conn;
     if (!conn) return;
     state.conn = null;
-    if (this.live === conn) this.live = null;
+    if (this.connections.get(conn.deviceId) === conn) this.connections.delete(conn.deviceId);
     conn.markGone();
     this._disconnectOnce(conn);
     log.info(`desktop "${conn.label}" disconnected`);
     this.emit('disconnected', { deviceId: conn.deviceId, label: conn.label });
   }
 
-  // stop() and _onClose both lead here for the live connection (stop()
+  // stop() and _onClose both lead here for a live connection (stop()
   // closes its socket, which then emits 'close' too); disconnectPromises
   // dedupes by the conn object so dispatcher.onDisconnect still runs exactly
   // once, and both callers can await the same settled-when-cleanup-is-done
@@ -441,10 +455,11 @@ class DesktopBridgeServer extends EventEmitter {
   }
 
   _recheckLive() {
-    const conn = this.live;
-    if (conn && !this._lookupDevice(conn.deviceId)) {
-      log.info(`desktop ${conn.deviceId} is no longer paired; closing it`);
-      conn.close(CLOSE.UNKNOWN_DEVICE, 'unpaired');
+    for (const conn of this.connections.values()) {
+      if (!this._lookupDevice(conn.deviceId)) {
+        log.info(`desktop ${conn.deviceId} is no longer paired; closing it`);
+        conn.close(CLOSE.UNKNOWN_DEVICE, 'unpaired');
+      }
     }
   }
 

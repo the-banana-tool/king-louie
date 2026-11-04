@@ -89,6 +89,7 @@ function connection(label = 'desk a') {
 
 function makeDispatcher({ overrides = {}, coreOverride = null, approvals = null, createImporter = null, hosting = undefined } = {}) {
   let current = null;
+  const attached = new Set();
   const dispatcher = createBridgeDispatcher({
     core: coreOverride || core,
     cipher,
@@ -98,13 +99,14 @@ function makeDispatcher({ overrides = {}, coreOverride = null, approvals = null,
     ...(hosting ? { hosting } : {}),
     getServiceInfo: () => ({ version: '26.9.0' }),
     getConnection: () => current,
+    getConnections: () => [...attached],
     registerHandlers: (ipc, ctx) => {
       registerHandlers(ipc, ctx);
       for (const [channel, fn] of Object.entries(overrides)) ipc.handle(channel, fn);
     },
     createImporter
   });
-  return { dispatcher, use: (conn) => { current = conn; } };
+  return { dispatcher, use: (conn) => { current = conn; attached.add(conn); } };
 }
 
 const waitFor = async (fn, ms = 5000) => {

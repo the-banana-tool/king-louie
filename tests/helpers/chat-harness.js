@@ -91,7 +91,7 @@ function chatHarness({ provider, providerType = 'openai', model = 'test-model', 
   };
   const send = (payload = {}) => handlers.get(IPC.CHAT_SEND_MESSAGE)(event, { chatId: theChat.id, message: 'Hello', ...payload });
   const stop = () => handlers.get(IPC.CHAT_STOP_RESPONSE)(event, { chatId: theChat.id });
-  return { chat: theChat, sent, usage, send, stop, context };
+  return { chat: theChat, sent, usage, send, stop, context, event };
 }
 
 module.exports = { chatHarness };

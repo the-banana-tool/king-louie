@@ -53,7 +53,7 @@ const INSTALL_REFUSALS = {
   unknown: { code: 'NODE_TASK_UNREADABLE', message: TASK_REFUSALS.unknown.message }
 };
 // §7.3: the bridge codes that end an attached start's wait (the client's FATAL).
-const BRIDGE_FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'ANOTHER_DEVICE', 'SERVICE_KEY_CHANGED']);
+const BRIDGE_FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'TOO_MANY_WINDOWS', 'SERVICE_KEY_CHANGED']);
 // pairConfirm answers that waiting will not change (the bridge client's
 // FATAL set, and the pairing's own refusals); anything else is a bridge
 // that is not up yet.

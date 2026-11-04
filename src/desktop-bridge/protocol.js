@@ -28,7 +28,9 @@ const LIMITS = Object.freeze({
   lockoutMs: 60000,
   deviceRecheckMs: 5000,
   headersTimeoutMs: 10000,
-  maxTrackedFailures: 1024
+  maxTrackedFailures: 1024,
+  // Windows attached at once, local and remote together (spec 2026-11-04 §9).
+  maxDevices: 8
 });
 
 const CLOSE = Object.freeze({
@@ -38,7 +40,7 @@ const CLOSE = Object.freeze({
   MALFORMED: 4400,
   BAD_SIGNATURE: 4401,
   UNKNOWN_DEVICE: 4403,
-  OTHER_DEVICE: 4409,
+  TOO_MANY_WINDOWS: 4409,
   PROTOCOL_MISMATCH: 4426,
   LOCKED_OUT: 4429
 });
@@ -136,7 +138,7 @@ const MESSAGES = Object.freeze({
   PAIR_NOT_FOUND: 'No local service was found yet. Wait for its fingerprint to appear, then confirm.',
   PAIR_SERVICE_CHANGED: 'The local service changed since its fingerprint was shown. Cancel and start pairing again.',
   PAIR_CONFIRM_STALE: 'This confirm did not say which service it was for. Reopen Settings > Local service and try again.',
-  ANOTHER_DEVICE: (label) => `Another desktop (${label}) is attached to this service.`,
+  TOO_MANY_WINDOWS: 'Too many windows are attached to this node. Close one, then try again.',
   PROTOCOL_MISMATCH: (theirs) => `This app speaks desktop-bridge protocol ${PROTOCOL}; the service speaks ${theirs}. Upgrade the older one.`,
   SERVICE_TOO_OLD: (version, channel) => `The local service (version ${version}) does not support ${channel}. Upgrade the service.`,
   SERVICE_RESTARTED: 'The local service restarted; the reply was lost.',

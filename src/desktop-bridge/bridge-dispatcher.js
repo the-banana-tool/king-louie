@@ -1,7 +1,8 @@
 // The service side of attached mode (fleet stage 7 §3.4). It registers the
 // very handler modules the desktop runs against a virtual ipcMain, serves the
 // allowlisted subset, builds a fresh marked event per call, and binds every
-// prompt it forwards to the connection that saw it.
+// prompt it forwards to the connection that saw it. Every other renderer event
+// goes to every window (remote window plan R-RW-7).
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
@@ -14,8 +15,12 @@ const { servedChannels, isRendererEvent, PROMPT_EVENTS } = require('./allowlist'
 const { createDesktopScope } = require('./desktop-scope');
 const { checkPath: defaultCheckPath } = require('./check-path');
 const { MESSAGES } = require('./protocol');
+const { runFor } = require('./run-context');
 
 const log = createLogger('desktop-bridge');
+
+// What goes to one window, the run's, and never to the others.
+const ONE_WINDOW_EVENTS = new Set([...PROMPT_EVENTS, 'canvas:executeJs']);
 
 // Which inbound send answers which forwarded prompt, and where its id lives.
 const PROMPT_RESPONSES = Object.freeze({
@@ -62,7 +67,7 @@ function approvalsStatus({ approvals, dataDir }) {
 
 function createBridgeDispatcher({
   core, cipher = null, dataDir, approvals = null, account = null, hosting = 'service',
-  getServiceInfo = () => ({}), getConnection = () => null,
+  getServiceInfo = () => ({}), getConnection = () => null, getConnections = () => [],
   registerHandlers = defaultRegisterHandlers, listChannels = listIpcChannels,
   checkPath = defaultCheckPath, createImporter = null
 }) {
@@ -78,8 +83,44 @@ function createBridgeDispatcher({
   const pendingDirectoryAccessResolvers = new Map();
   const scope = createDesktopScope({ dataDir, context });
 
+  const anyWindowLive = () => getConnections().some((c) => c.live);
+
+  // One window's failure to take a frame is not the run's, nor the next window's.
+  const broadcast = (channel, payload) => {
+    for (const conn of getConnections()) {
+      if (!conn.live) continue;
+      try {
+        conn.send({ t: 'event', channel, payload });
+      } catch (err) {
+        log.warn(`sending ${channel} to a window failed: ${err.message}`);
+      }
+    }
+  };
+
+  // A pending canvas:executeJs is bound to one connection and nothing else will
+  // ever answer it.
+  const failCanvas = (requestId) => {
+    const pending = core.pendingCanvasJsResolvers && core.pendingCanvasJsResolvers.get(requestId);
+    if (!pending) return;
+    core.pendingCanvasJsResolvers.delete(requestId);
+    clearTimeout(pending.timeout);
+    try { pending.reject(new Error('The desktop disconnected.')); } catch (err) { log.warn(`rejecting a canvas request failed: ${err.message}`); }
+  };
+
   const pushEvent = (conn, channel, payload) => {
-    if (!conn || !conn.live || !isRendererEvent(channel, { hosting })) return;
+    if (!isRendererEvent(channel, { hosting })) return;
+    if (!ONE_WINDOW_EVENTS.has(channel)) {
+      broadcast(channel, payload);
+      return;
+    }
+    if (!conn || !conn.live) {
+      // sender.isDestroyed() stays false while another window is live, so
+      // create-core's own check no longer catches a gone window's code.
+      if (payload && channel === 'canvas:executeJs') failCanvas(payload.requestId);
+      return;
+    }
+    // A dialog is only ever a local window's (spec §9).
+    if (channel === 'tool:approvalRequired' && conn.remote) return;
     if (payload && channel === 'tool:approvalRequired') conn.prompts.approvals.add(payload.approvalId);
     if (payload && channel === 'agent:askUser') conn.prompts.askUser.add(payload.requestId);
     if (payload && channel === 'tool:directoryAccessRequired') conn.prompts.directory.add(payload.requestId);
@@ -87,7 +128,7 @@ function createBridgeDispatcher({
     conn.send({ t: 'event', channel, payload });
   };
 
-  // What createElectronPrompter treats as the window: the live connection.
+  // What createElectronPrompter treats as the window: the run's connection.
   const connectionAsWindow = () => {
     const conn = getConnection();
     if (!conn || !conn.live) return null;
@@ -172,8 +213,11 @@ function createBridgeDispatcher({
     }
   };
 
+  // A run outlives its window's connection for a while, and the others are still
+  // watching its chat: the sender is gone only when no window is left. A prompt
+  // for a gone connection still goes nowhere (pushEvent).
   const makeEvent = (conn) => markLocalDesktopEvent(
-    { sender: { send: (channel, payload) => pushEvent(conn, channel, payload), isDestroyed: () => !conn.live } },
+    { sender: { send: (channel, payload) => pushEvent(conn, channel, payload), isDestroyed: () => !conn.live && !anyWindowLive() } },
     { deviceId: conn.deviceId }
   );
 
@@ -189,8 +233,11 @@ function createBridgeDispatcher({
     // channel does: a case turn runs inside chat:sendMessage, and
     // case:answerQuestion only schedules an unattended wake-up, which must
     // outlive the desktop.
-    const chatId = channel === 'chat:sendMessage' && args[0] && typeof args[0].chatId === 'string' ? args[0].chatId : null;
-    if (chatId) conn.runs.add(chatId);
+    // A send into a running chat is refused CHAT_BUSY and starts nothing, so it
+    // never makes this connection's drop stop a run it did not start.
+    const sentTo = channel === 'chat:sendMessage' && args[0] && typeof args[0].chatId === 'string' ? args[0].chatId : null;
+    const chatId = sentTo && bridgeContext.isChatRunning?.(sentTo) !== true ? sentTo : null;
+    if (chatId) conn.runs.set(chatId, (conn.runs.get(chatId) || 0) + 1);
     try {
       const value = await handlers.get(channel)(makeEvent(conn), ...args);
       noteImport(conn, channel, value);
@@ -200,7 +247,11 @@ function createBridgeDispatcher({
     } catch (err) {
       conn.send({ t: 'result', id, error: (err && err.message) || String(err), code: (err && err.code) || 'HANDLER_ERROR' });
     } finally {
-      if (chatId) conn.runs.delete(chatId);
+      if (chatId) {
+        const left = conn.runs.get(chatId) - 1;
+        if (left > 0) conn.runs.set(chatId, left);
+        else conn.runs.delete(chatId);
+      }
     }
   }
 
@@ -305,11 +356,13 @@ function createBridgeDispatcher({
   }
 
   async function handleFrame(conn, frame) {
-    if (frame.t === 'invoke') return onInvoke(conn, frame);
-    if (frame.t === 'send') return onSend(conn, frame);
-    if (frame.t === 'call') return onCall(conn, frame);
-    log.warn(`dropped an unknown frame type ${frame.t}`);
-    return undefined;
+    return runFor(conn, () => {
+      if (frame.t === 'invoke') return onInvoke(conn, frame);
+      if (frame.t === 'send') return onSend(conn, frame);
+      if (frame.t === 'call') return onCall(conn, frame);
+      log.warn(`dropped an unknown frame type ${frame.t}`);
+      return undefined;
+    });
   }
 
   // Nothing started from a desktop keeps running unattended (spec §3.3).
@@ -333,19 +386,13 @@ function createBridgeDispatcher({
     // 10 s execution timeout (create-core.js), which would otherwise be the
     // only thing standing between it and a permanently pending promise if
     // that timeout is ever removed or lengthened.
-    for (const requestId of [...conn.prompts.canvas]) {
-      const pending = core.pendingCanvasJsResolvers && core.pendingCanvasJsResolvers.get(requestId);
-      if (!pending) continue;
-      core.pendingCanvasJsResolvers.delete(requestId);
-      clearTimeout(pending.timeout);
-      try { pending.reject(new Error('The desktop disconnected.')); } catch (err) { log.warn(`rejecting a canvas request failed: ${err.message}`); }
-    }
+    for (const requestId of [...conn.prompts.canvas]) failCanvas(requestId);
     conn.prompts.approvals.clear();
     conn.prompts.directory.clear();
     conn.prompts.askUser.clear();
     conn.prompts.canvas.clear();
     const stop = handlers.get('chat:stopResponse');
-    for (const chatId of [...conn.runs]) {
+    for (const chatId of [...conn.runs.keys()]) {
       try {
         if (stop) await stop(event, { chatId });
         context.appendMessageToChat(chatId, 'assistant', MESSAGES.DESKTOP_DISCONNECTED_RUN, {}, { returnChat: false });
@@ -360,9 +407,8 @@ function createBridgeDispatcher({
   // The core's own ui.send (chat:updated, backgroundTask:completed, case:changed):
   // never a prompt, so a remote-origin run cannot borrow the dialog.
   function forwardAmbient(channel, payload) {
-    const conn = getConnection();
-    if (!conn || !conn.live || !isRendererEvent(channel, { hosting }) || PROMPT_EVENTS.has(channel)) return;
-    conn.send({ t: 'event', channel, payload });
+    if (!isRendererEvent(channel, { hosting }) || ONE_WINDOW_EVENTS.has(channel)) return;
+    broadcast(channel, payload);
   }
 
   function providersConfigured() {
