@@ -94,9 +94,12 @@ administrator) for a machine someone else administers.
 ### A personal node (your own Windows machine)
 
 The service runs in your own login session, as you, from the logon task
-`KingLouie Node`; the owner account is the trust boundary. The install guide
-(`docs/install-guide.md`, section 13) has every step; in short, from a
-normal, unelevated prompt:
+`KingLouie Node`; the owner account is the trust boundary. On first run the
+desktop window installs the node, pairs with it, starts it and moves the old
+profile into it, each on one press (install guide, "Attaching the desktop
+app"). The terminal install below stays, and is the one a machine with no
+window uses. The install guide (`docs/install-guide.md`, section 13) has every
+step; in short, from a normal, unelevated prompt:
 
 1. `king-louie-service install --personal` (`--dry-run` first; `--browser
    <chrome.exe>` when Chrome is not where Windows registers it). It prints
@@ -153,10 +156,8 @@ take's Chrome itself (no debugging port), and your `mcp` process already
 owns the courier's directories. Profiles a fleet layout's helper made under
 `%LOCALAPPDATA%\KingLouie\browser-profiles\` are not moved: log in once
 more. `king-louie-service doctor` and
-`king-louie-service session status` say `hosting: personal`. Two things are
-not supported there: `desktop pair` and attaching the desktop app (keep it
-standalone; to move one case over, see the install guide's "Moving a case
-from the desktop app"). After a reboot the node is down until you log in.
+`king-louie-service session status` say `hosting: personal`. After a reboot
+the node is down until you log in.
 The file tools cannot touch the config dir or the desktop app's profile, and
 every shell call goes to your phone; a shell the phone approves can do
 anything you can.

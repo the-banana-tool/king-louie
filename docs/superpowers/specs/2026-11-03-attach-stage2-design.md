@@ -285,11 +285,13 @@ terminal; the install guide keeps its sequence.
 userDataDir, dest })` copies the profile into a sibling directory the
 desktop makes: `<parent of userData>\king-louie.backup-<ISO timestamp with
 colons removed>` (C-8). It refuses to begin when `dest` exists. It copies
-every regular file under the profile except Electron's caches (`Cache`,
-`Code Cache`, `GPUCache`, `DawnCache`, `blob_storage`, `Session Storage`,
-`Local Storage`, `Service Worker`, `logs`) and `history.sqlite`,
-`history.sqlite-wal`, `history.sqlite-shm`, which it snapshots instead with
-the same `sqlite.backup` the reader uses, into `<dest>\history.sqlite`.
+every regular file under the profile except twelve Electron directories at
+the top level (`EXCLUDED_DIRS`: `Cache`, `Code Cache`, `GPUCache`,
+`DawnCache`, `DawnGraphiteCache`, `DawnWebGPUCache`, `blob_storage`, `Session
+Storage`, `Local Storage`, `Service Worker`, `Network`, `logs`; a running
+desktop holds `Network/Cookies` locked) and `history.sqlite` with its `-wal`,
+`-shm` and `-journal`, which it snapshots instead with the same
+`sqlite.backup` the reader uses, into `<dest>\history.sqlite`.
 Links are copied as what they point to, never followed outside the
 profile (`fs.cp` with `dereference: false`, a link refused). Then it
 verifies: every copied file's size and SHA-256 equal the source's read
@@ -300,6 +302,21 @@ messages }`, `appVersion`) and answers `{ dest, bytes, files, history }`.
 Any failure removes nothing of the source and leaves the half-made `dest`
 in place, named in the refusal (`BACKUP_FAILED`), so the owner can look
 at it; the move does not begin.
+
+**One desktop per profile.** `main.js` takes a single-instance lock per
+`userData` (`src/ipc/single-instance.js`), after `--user-data-dir` is applied:
+a second desktop writing the profile is what the backup's check cannot catch
+from inside. A second launch focuses the first window and exits 0, and its
+argv is never read.
+
+**What cannot move.** The plan and the apply refuse `MIGRATION_SOURCE`, with
+nothing moved, for: `schemaProblem`; a source that reads fewer chats or
+messages than its backup; a custom `cases.root` that is absent or holds cases
+(they are outside the profile and would not move; checked at the plan, before
+the apply and again before the mark); and a case the reader holds back whole
+(a nested repository, a refused directory: otherwise a whole case is marked
+moved with a line on screen). A dirty case lands as it stands, with a note in
+the plan: a case mid-turn at a crash must not block the move.
 
 **What is shown.** The plan, grouped as `printPlan` prints it: counts per
 category and action (`new`, `update`, `copy`, `skip-present`,
@@ -347,7 +364,12 @@ with pairing as its first step and no move.
 
 **A move that fails halfway.** Each item is written and recorded in the
 node's manifest as it lands; the desktop shows the report with the failed
-count; nothing is marked; **Try again** plans again. The backup is not
+count; nothing is marked; **Try again** plans again. A landed case's manifest
+entry records `landedFrom` (the source's head, file count and bytes), so a
+retry takes it as present while its source still equals what landed and the
+node's repository passes `git fsck`, whatever the node has done since; else it
+is `needs-attention`. That trusts the node's working tree: a file removed there
+reads as the node's own work, and a same-size edit is not caught. The backup is not
 made again if `<dest>\backup.json` from this launch verifies (the setup
 keeps its path in memory); a new launch makes a new backup directory. Two
 backups cost disk and nothing else.
@@ -454,8 +476,13 @@ What is admitted:
   run as the owner on the node; the fleet keeps them out.
 - G-1 proxies the skills, webhooks, workflows and hooks panes to a
   personal node; each is a process the node may spawn, as the desktop did.
-  The window is marked as the local desktop's event, so every approval
-  those paths ask for is on-screen.
+  The window is marked as the local desktop's event, so an approval a pane's
+  own call asks for is on-screen. A workflow is not: its tool calls go to the
+  phone or are refused, never on-screen, and a workflow outlives the window.
+- The personal proxied list is for the same-account loopback bridge only. A
+  paired device can run code as the owner through `skill:install`,
+  `settings:mcpSave` and hooks. Stage 3's remote attach must use its own list:
+  this one, over a remote link, is remote code execution by a remote window.
 - A node running the app's binary dies with the installer (§6.8); a turn
   in progress is lost. The owner is told to quit the app before updating,
   and nothing more is promised.
@@ -496,7 +523,8 @@ it.
   `startable` with the bridge on. A new bullet **Setup and the move**: the
   steps, the backup directory and `backup.json`, `verifyMigration`, the
   marker, the personal carry set, G-1 and G-2. **Testing**: `launchApp`
-  appends `--kl-standalone`; `launchApp({ attached: true })` does not.
+  appends `--kl-standalone`; `launchApp({ attached: true })` does not. **Running
+  the app**: `npm start`, `start:standalone` and the one-desktop-per-profile lock.
 - `docs/install-guide.md` §13: "Attaching the desktop app" becomes the
   product's first run (the window installs, pairs, starts); "Moving
   everything from the desktop app" leads with the window's flow and keeps

@@ -178,7 +178,7 @@ Expected: PASS.
 - Test: `tests/profile-backup.test.js` (new)
 
 **Interfaces:**
-- Produces: `detectOldProfile(userDataDir, { readHistory = readHistoryChats, reader }) → { found, chats, messages, cases, bytes, schemaProblem: string | null }`; `backupProfile({ userDataDir, dest, now, backup = sqlite.backup, appVersion }) → { dest, bytes, files, history: { chats, messages } }` or throws `BACKUP_FAILED` (`err.code`, `err.dest`); `backupDirFor(userDataDir, now) → string` (spec §6.5's name); `EXCLUDED_DIRS` (the nine cache names); `readBackupManifest(dest)`.
+- Produces: `detectOldProfile(userDataDir, { readHistory = readHistoryChats, reader, env }) → { found, chats, messages, cases, bytes, schemaProblem: string | null, customCasesRoot, customCases, customCasesMissing }`; `backupProfile({ userDataDir, dest, now, backup = sqlite.backup, appVersion, env, onProgress }) → { dest, bytes, files, history: { chats, messages } }` or throws `BACKUP_FAILED` (`err.code`, `err.dest`); `backupDirFor(userDataDir, now) → string` (spec §6.5's name); `EXCLUDED_DIRS` (the twelve directory names); `readBackupManifest(dest, { onProgress })`; `readCaseRoot(root)`. Beyond the plan: `claimSingleInstance({ app, getWindow })` in `src/ipc/single-instance.js`, one desktop per `userData`.
 
 - [ ] **Step 1: Write the failing tests** (temp dirs; a real store through `tests/helpers/history-fixture.js`; `closeOpenHistoryStores()` before removal)
 
