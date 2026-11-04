@@ -11,6 +11,7 @@ const { encodePairRequest, defaultDeviceLabel, bridgeFilePath, readTrustedBridge
 const { rawFromPublicKeyObject, fingerprintGroups } = require('../desktop-bridge/keys');
 const { MESSAGES } = require('../desktop-bridge/protocol');
 const { unavailableTabsFor } = require('../desktop-bridge/allowlist');
+const { nodeHosting, nodeVersion } = require('../desktop-bridge/pane-model');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
 const { detectOldProfile, backupProfile, backupDirFor, readBackupManifest } = require('../migration/profile-backup');
 const { verifyMigration, withSourceFacts } = require('../migration/migration-verify');
@@ -22,6 +23,9 @@ const { STANDALONE_FLAG, STANDALONE_ONCE_FLAG: STANDALONE_ONCE } = require('../d
 const log = createLogger('desktop-controller');
 
 const DETACH_WARNING = 'After detaching, this app runs its own King Louie again next to the service; its cron jobs and channels may act twice. Stop the service if you no longer want it.';
+// §6.1: on Windows a detached app has no core of its own; the launch rule brings
+// it back to the setup screen. Once the profile is moved, Detach is refused.
+const DETACH_WARNING_WINDOWS = 'After detaching, this app has no King Louie to show: it opens on the setup screen until you attach it again. The service keeps running, with its cron jobs and channels, and nothing is deleted. Stop the service if you no longer want it.';
 // Spec 2026-10-28 §6.2, §7.3 (C-12).
 const PAIR_CLI_TIMEOUT_MS = 120000;
 const NODE_START_WAIT_MS = 60000;
@@ -320,6 +324,8 @@ function createDesktopController({
 
   const setRunning = (r) => { nodeState = { ...nodeState, ...runningFields(r) }; };
 
+  const detachWarning = () => (platform === 'win32' ? DETACH_WARNING_WINDOWS : DETACH_WARNING);
+
   const pairCommand = (request) => (platform === 'win32'
     ? `king-louie-service desktop pair ${request}`
     : `sudo king-louie-service desktop pair ${request}`);
@@ -374,7 +380,11 @@ function createDesktopController({
     const summary = liveService || (record && record.info) || null;
     // A node from before `hosting` says nothing: a personal pairing's record
     // always does, so no word anywhere is a fleet service.
-    const service = summary ? { ...summary, hosting: summary.hosting || (record && record.hosting) || 'service' } : null;
+    const service = summary ? {
+      ...summary,
+      hosting: nodeHosting(summary.hosting) || nodeHosting(record && record.hosting) || 'service',
+      version: nodeVersion(summary.version)
+    } : null;
     return {
       ok: true,
       mode,
@@ -413,7 +423,7 @@ function createDesktopController({
       // The pairing record, as the attached host's routes go by it: the tabs
       // and the channels behind them cannot disagree.
       unavailableTabs: mode === 'attached' ? [...unavailableTabsFor(record && record.hosting)] : [],
-      detachWarning: DETACH_WARNING,
+      detachWarning: detachWarning(),
       pendingServiceCommand: state.pendingServiceCommand
     };
   }
@@ -423,7 +433,7 @@ function createDesktopController({
   // been updated since. The fleet updates its own service: no gap to show.
   function versionGap(service, liveService) {
     if (!liveService || service.hosting !== 'personal') return null;
-    const node = liveService.version;
+    const node = service.version;
     if (!node || !appVersion || node === appVersion) return null;
     return { node, app: appVersion };
   }
@@ -792,7 +802,7 @@ function createDesktopController({
   async function detach({ confirmed = false } = {}) {
     const migrated = migratedRefusal();
     if (migrated) return migrated;
-    if (confirmed !== true) return { ok: false, code: 'CONFIRM_REQUIRED', error: DETACH_WARNING };
+    if (confirmed !== true) return { ok: false, code: 'CONFIRM_REQUIRED', error: detachWarning() };
     state.setMode('standalone');
     return relaunch();
   }
@@ -1132,7 +1142,10 @@ function createDesktopController({
             nodeDataDir: service.dataDir || null,
             nodeId: service.nodeId,
             counts: { ...verified.checked, attention: Array.isArray(report.attention) ? report.attention.length : 0 },
-            leftBehind
+            leftBehind,
+            // Both outlast the plan: the setup keeps them on screen up to Done.
+            private: session.plan.private || null,
+            staysBehind: staysBehindLines(session.plan)
           });
         } catch (err) {
           log.warn(`the migration marker was not written: ${err.message}`);
@@ -1450,4 +1463,4 @@ function createDesktopController({
   };
 }
 
-module.exports = { createDesktopController, DETACH_WARNING, STANDALONE_ONCE };
+module.exports = { createDesktopController, DETACH_WARNING, DETACH_WARNING_WINDOWS, STANDALONE_ONCE };

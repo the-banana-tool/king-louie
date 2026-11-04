@@ -294,6 +294,9 @@ describe('the move over a real bridge', () => {
 
       assert.strictEqual(state.migration.nodeId, server.identity.nodeId);
       assert.strictEqual(state.migration.nodeDataDir, dataDir);
+      assert.strictEqual(state.migration.private.chats, 1, 'the private note outlasts the plan');
+      assert.deepStrictEqual(state.migration.staysBehind, planned.staysBehind);
+      assert.match((await controller.status()).migration.private.note, /1 private chat/);
       assert.ok(fs.existsSync(path.join(state.migration.backupDir, 'backup.json')));
       assert.strictEqual(profileHash(), hashBefore, 'the old profile\'s store is untouched');
       assert.ok(fs.existsSync(caseDir), 'and its cases are still there');

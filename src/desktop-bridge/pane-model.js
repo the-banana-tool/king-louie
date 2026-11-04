@@ -21,6 +21,17 @@ function plain(value) {
   return shown(value);
 }
 
+// What a node says of itself is data (attach stage 2 §6.8): a hosting is one of
+// two words, a version a short plain string, and anything else is no word at all.
+function nodeHosting(value) {
+  return value === 'personal' || value === 'service' ? value : null;
+}
+function nodeVersion(value) {
+  if (typeof value !== 'string' || !value) return null;
+  const { shown } = require('../service/commands/io');
+  return shown(value, 64);
+}
+
 // NODE_START_TIMEOUT has no line here: the controller words it from its own
 // wait (the seconds), and the pane shows that message.
 const NODE_LINES = {
@@ -40,6 +51,19 @@ const RUNNING_NO_BRIDGE = (pid) => (Number.isInteger(pid)
 const PAIR_ELEVATED_LINE = 'This app is running as administrator. Close it and open it normally to pair.';
 const PERSONAL_PAIR_WARNING = 'Every paired desktop sees every chat, setting and secret name in the node.';
 const INSTALL_ACTION = { id: 'nodeInstallPreview', label: 'Install…' };
+const VERSION_ACTION = { id: 'nodeRestart', label: 'Restart King Louie Node to update it' };
+
+// §6.8, C-12: the row for a node on another version. The node runs the app's own
+// binary, so a restart is the update, and it stays a press: a restart ends a turn
+// or a take. A node that is down is updated by the Start already on offer.
+function versionLine(s) {
+  const v = s.versionMismatch;
+  return v ? `King Louie Node runs ${plain(v.node)}; this app is ${plain(v.app)}.` : null;
+}
+function withVersionPress(actions) {
+  if (actions.some((a) => a.id === 'nodeStart')) return actions;
+  return [...actions.filter((a) => a.id !== 'nodeRestart'), VERSION_ACTION];
+}
 
 // A personal node is what the status says now (`node`, read from the disk
 // each time) or what the pairing recorded; a fleet status has neither.
@@ -120,7 +144,7 @@ function serviceLines(status) {
   if (fp) lines.push(`Service: ${fp}`);
   const svc = status.service;
   if (isPersonal(status)) {
-    if (svc && svc.version) lines.push(`Version ${svc.version}.`);
+    if (svc && svc.version) lines.push(`Version ${plain(svc.version)}.`);
     lines.push(svc && svc.account ? `Running as you (${plain(svc.account)}), in your session.` : 'Running as you, in your session.');
   } else if (svc && svc.account) {
     lines.push(`Version ${svc.version}, running as ${svc.account}.`);
@@ -182,6 +206,10 @@ function describeServicePane(status = {}) {
       lines.push('Chats made while attached live in the service.');
       actions.push({ id: 'import', label: 'Import…' }, { id: 'detach', label: 'Detach' }, { id: 'unpair', label: 'Unpair' });
       if (installOffered(s)) actions.push(INSTALL_ACTION);
+      if (versionLine(s)) {
+        lines.push(versionLine(s));
+        actions.push(VERSION_ACTION);
+      }
       break;
     case 'attached-starting':
       lines.push(NODE_LINES.STARTING);
@@ -193,8 +221,17 @@ function describeServicePane(status = {}) {
       const row = n ? disconnectedRow(n, { install: INSTALL_ACTION }) : null;
       lines.push(row ? row.line : (c.error || MESSAGES.SERVICE_UNREACHABLE(knownPort || DEFAULT_DESKTOP_BRIDGE_PORT)));
       if (c.nextRetryAt) lines.push(`Next retry at ${new Date(c.nextRetryAt).toLocaleTimeString()}.`);
-      actions.push({ id: 'retry', label: 'Retry now' }, { id: 'standaloneOnce', label: 'Use standalone this time' }, { id: 'detach', label: 'Detach' });
+      actions.push({ id: 'retry', label: 'Retry now' });
+      // C-1, C-3: on Windows a down node is started, not replaced.
+      if (s.platform !== 'win32') actions.push({ id: 'standaloneOnce', label: 'Use standalone this time' });
+      actions.push({ id: 'detach', label: 'Detach' });
       if (row && row.action) actions.push(row.action);
+      if (versionLine(s)) {
+        lines.push(versionLine(s));
+        const pressed = withVersionPress(actions);
+        actions.length = 0;
+        actions.push(...pressed);
+      }
       break;
     }
     default: {
@@ -228,17 +265,21 @@ function describeServicePane(status = {}) {
 function describeAttachedBanner(status) {
   const s = status || {};
   if (s.view === 'attached-starting') return { line: NODE_LINES.STARTING, actions: [] };
+  const version = versionLine(s);
+  if (s.view === 'attached-connected') return version ? { line: version, actions: [VERSION_ACTION] } : null;
   if (s.view !== 'attached-disconnected') return null;
   const n = personalNode(s);
   const row = n ? disconnectedRow(n, { install: { id: 'openServiceSettings', label: 'Install…' } }) : null;
   const actions = [
     { id: 'retry', label: 'Retry now' },
-    { id: 'standaloneOnce', label: 'Use standalone this time' },
+    // C-1, C-3: on Windows a down node is started, not replaced.
+    ...(s.platform === 'win32' ? [] : [{ id: 'standaloneOnce', label: 'Use standalone this time' }]),
     { id: 'openServiceSettings', label: 'Local service settings' }
   ];
   if (row && row.action) actions.push(row.action);
   const c = s.connection || {};
-  return { line: row ? row.line : (c.error || 'The local King Louie service is not reachable.'), actions };
+  const line = row ? row.line : (c.error || 'The local King Louie service is not reachable.');
+  return version ? { line: `${line} ${version}`, actions: withVersionPress(actions) } : { line, actions };
 }
 
 // §8: `install --personal --dry-run`'s output (lines for a <pre>), then the
@@ -317,5 +358,6 @@ function paneShapeChanged(prevModel, nextModel) {
 module.exports = {
   describeServicePane, describeApprovals, describeImportReport, describeServiceCommand,
   describeAttachedBanner, describeInstallPreview, describeInstallResult,
-  decideDetachClick, paneShapeChanged, DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE
+  decideDetachClick, paneShapeChanged, DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE,
+  plain, nodeHosting, nodeVersion, disconnectedRow, refusalLine, NODE_LINES, PERSONAL_PAIR_WARNING
 };

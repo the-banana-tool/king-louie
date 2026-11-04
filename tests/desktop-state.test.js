@@ -227,6 +227,14 @@ describe('desktop state: the migration marker and the setup (attach stage 2 §6.
     assert.deepStrictEqual(state.migration.leftBehind, leftBehind);
   });
 
+  it('the marker keeps the private note and the stays-behind list, when told, so they outlast the plan', () => {
+    const state = openState();
+    const privateNote = { chats: 1, cases: 0, note: '1 private chat stays private.' };
+    state.setMigration({ ...marker(), private: privateNote, staysBehind: ['Browser profiles stay.'] });
+    assert.deepStrictEqual(state.migration.private, privateNote);
+    assert.deepStrictEqual(state.migration.staysBehind, ['Browser profiles stay.']);
+  });
+
   it('setSetup round-trips and needs completedAt', () => {
     const state = openState();
     state.setSetup({ completedAt: '2026-11-04T10:05:00.000Z' });

@@ -10,7 +10,7 @@ const { DesktopBridgeServer } = require('../src/desktop-bridge/bridge-server');
 const pairing = require('../src/desktop-bridge/pairing');
 const keys = require('../src/desktop-bridge/keys');
 const { openDesktopState } = require('../src/ipc/desktop-state');
-const { createDesktopController, DETACH_WARNING } = require('../src/ipc/desktop-controller');
+const { createDesktopController, DETACH_WARNING, DETACH_WARNING_WINDOWS } = require('../src/ipc/desktop-controller');
 const { registerDesktopHandlers } = require('../src/ipc/desktop-handlers');
 const { MESSAGES } = require('../src/desktop-bridge/protocol');
 const { EventEmitter } = require('events');
@@ -1611,6 +1611,27 @@ describe('desktop controller: hosting and the version gap', () => {
     controller.dispose();
   });
 
+  it('what the node says of itself is coerced: hosting only personal or service, version a bounded plain string', async () => {
+    const odd = connectedTo({ version: '1.0\u0007', hosting: { evil: true } });
+    const status = await odd.controller.status();
+    assert.strictEqual(status.service.hosting, 'personal', 'not a word from the node: the pairing record says');
+    assert.ok(status.service.version.includes('[hidden or control characters removed]'));
+    assert.doesNotMatch(status.service.version, /\u0007/);
+    assert.ok(status.versionMismatch.node.includes('[hidden or control characters removed]'));
+    odd.controller.dispose();
+    const number = connectedTo({ version: 7, hosting: 'personal' });
+    const numbered = await number.controller.status();
+    assert.strictEqual(numbered.service.version, null);
+    assert.strictEqual(numbered.versionMismatch, null, 'nothing a person could read: no row');
+    number.controller.dispose();
+    const long = connectedTo({ version: '9'.repeat(500), hosting: 'personal' });
+    assert.strictEqual((await long.controller.status()).service.version.length, 64);
+    long.controller.dispose();
+    const fleet = connectedTo({ version: '1.0.0', hosting: 'root' }, { pairingRecord: fleetPairing() });
+    assert.strictEqual((await fleet.controller.status()).service.hosting, 'service');
+    fleet.controller.dispose();
+  });
+
   it('a personal node on another version: versionMismatch names both', async () => {
     const { controller } = connectedTo({ version: '1.0.0', hosting: 'personal' });
     const status = await controller.status();
@@ -2188,6 +2209,18 @@ describe('desktop controller: the one-time move', () => {
     assert.strictEqual((await controller.migrationApply({ confirmed: true })).ok, true);
     assert.strictEqual(state.migration.backupDir.endsWith(path.basename(second.backup.dest)), true);
     controller.dispose();
+  });
+
+  it('the Detach warning on Windows says what Detach does there; off Windows it keeps its words', async () => {
+    assert.strictEqual(DETACH_WARNING_WINDOWS, 'After detaching, this app has no King Louie to show: it opens on the setup screen until you attach it again. The service keeps running, with its cron jobs and channels, and nothing is deleted. Stop the service if you no longer want it.');
+    assert.strictEqual(DETACH_WARNING, 'After detaching, this app runs its own King Louie again next to the service; its cron jobs and channels may act twice. Stop the service if you no longer want it.');
+    const { controller } = moveController();
+    assert.strictEqual((await controller.status()).detachWarning, DETACH_WARNING_WINDOWS);
+    assert.deepStrictEqual(await controller.detach({}), { ok: false, code: 'CONFIRM_REQUIRED', error: DETACH_WARNING_WINDOWS });
+    controller.dispose();
+    const linux = controllerFor({ readBridgeFile: () => ({ ok: false }) });
+    assert.strictEqual((await linux.controller.status()).detachWarning, DETACH_WARNING);
+    linux.controller.dispose();
   });
 
   it('PROFILE_MIGRATED unless dev: standaloneOnce and detach', async () => {
