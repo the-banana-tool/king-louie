@@ -636,7 +636,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     }
     const away = isObj(r.away) ? { mode: r.away.mode, until: r.away.until } : null;
     log.info(`${channel} set away ${away ? `${away.mode} until ${away.until}` : 'off'}`);
-    auditEntry('cases.set_away', { mode: args.mode, until: away ? away.until : null }, 'set_away');
+    auditEntry('cases.set_away', { mode: args.mode }, 'set_away');
     return { away };
   }
 
@@ -705,7 +705,8 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
     }
     const factId = res?.fact?.id ?? res?.question?.answer?.factId ?? null;
     log.info(`${channel} ${briefing ? 'acknowledged' : 'answered'} ${q.id} in case ${meta.slug}`);
-    auditEntry('cases.answer_question', { caseId: meta.id, questionId: q.id, optionId: hasOption ? args.option_id : null, factId }, q.id);
+    // Mirrored to the relay, so ids only: the option an owner chose is what the seal keeps from it.
+    auditEntry('cases.answer_question', { caseId: meta.id, questionId: q.id, factId }, q.id);
     return {
       question_id: q.id,
       answered_at: res?.question?.answer?.at ?? null,
