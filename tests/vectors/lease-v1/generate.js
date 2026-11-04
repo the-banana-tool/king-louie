@@ -475,8 +475,8 @@ function buildVectors() {
   });
 
   // Revised 2026-11-04: sealed (sealed phones, R-SP-2, R-SP-4, R-SP-9). The node is
-  // web-01, whose box key is in keys.json. consumers stays ['node'] until the phone
-  // cores read them (Tasks 8 and 9). given.box is what the reader opens with.
+  // web-01, whose box key is in keys.json. Android reads all but the changed lease,
+  // which only a node can refuse. given.box is what the reader opens with.
   const webBox = KEYS.nodes['web-01'].box.jwk;
   const sealedTo = { [DEVICES.A.id]: KEYS.devices.A_box.jwk, [DEVICES.B.id]: KEYS.devices.B_box.jwk, [WEB.nodeId]: webBox };
   const webGiven = { node: { id: WEB.nodeId, name: 'web-01', key: WEB.spkiHex }, box: { device_id: DEVICES.A.id, d: KEYS.devices.A_box.d } };
@@ -505,13 +505,13 @@ function buildVectors() {
   {
     const { full, envelope } = sealedRequest('sealed');
     out.push({
-      name: 'request-sealed', consumers: ['node'], check: 'request', given: { ...webGiven }, input: envelope,
+      name: 'request-sealed', consumers: ['node', 'android'], check: 'request', given: { ...webGiven }, input: envelope,
       expect: { ...accepted, status: { lease: full.lease, origin: full.origin, salt: full.salt, lease_hash: full.lease_hash } }
     });
     // The phone signs the salted hash it recomputed; the node re-checks with the salt it kept.
     const message = grantMessage(full, { minutes: 10 });
     out.push({
-      name: 'grant-to-sealed', consumers: ['node'], check: null,
+      name: 'grant-to-sealed', consumers: ['node', 'android'], check: null,
       given: { ...base(), ...webGiven, pending: [{ ...pendingOf(full), salt: full.salt }], request: envelope },
       input: phoneSeal('A', message), expect: { ...accepted, message }
     });
@@ -534,7 +534,7 @@ function buildVectors() {
   {
     const { message, envelope } = sealedStatus('status-sealed', 5);
     out.push({
-      name: 'status-sealed', consumers: ['node'], check: null, given: { ...webGiven }, input: envelope,
+      name: 'status-sealed', consumers: ['node', 'android'], check: null, given: { ...webGiven }, input: envelope,
       expect: { ...accepted, status: { lease_id: message.lease_id, seq: 5, state: 'active', contact_token: message.contact_token, granted_by: message.granted_by, kind: 'task', unattended: true, name: TASK_LEASE.name } }
     });
   }
@@ -547,7 +547,7 @@ function buildVectors() {
       actions: [{ seq: 41, at: iso(NOW_MS), tool: 'Type', summary: 'Typed 6 characters', result: 'ok' }], contactToken: tokenOf('view sealed'), now: NOW_MS
     }));
     out.push({
-      name: 'view-sealed', consumers: ['node'], check: null, given: { ...webGiven }, input: sealedForm('view-sealed', 'kl.lease.view', message),
+      name: 'view-sealed', consumers: ['node', 'android'], check: null, given: { ...webGiven }, input: sealedForm('view-sealed', 'kl.lease.view', message),
       expect: { ...accepted, status: { lease_id: message.lease_id, to_device: DEVICES.A.id, foreground: message.foreground, frame, frame_dropped: false, actions: message.actions } }
     });
   }
@@ -556,7 +556,7 @@ function buildVectors() {
     const { message, envelope } = sealedStatus('listing sealed', 6);
     const nonce = nonceOf('listing-with-sealed-status');
     out.push({
-      name: 'listing-with-sealed-status', consumers: ['node'], check: null,
+      name: 'listing-with-sealed-status', consumers: ['node', 'android'], check: null,
       given: { node: webGiven.node, nonce, device_id: DEVICES.A.id, statuses: [envelope] },
       input: L.buildLeaseListing({ identity: WEB, toDevice: DEVICES.A.id, nonce, statuses: [envelope], now: NOW_MS }),
       expect: { ...accepted, leases: [{ lease_id: message.lease_id, seq: 6, state: 'active' }] }

@@ -1,7 +1,8 @@
 {
   "name": "seal-content-clear-key",
   "consumers": [
-    "node"
+    "node",
+    "android"
   ],
   "given": {
     "box": {

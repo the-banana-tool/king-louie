@@ -1,7 +1,8 @@
 {
   "name": "enroll-console-box-key",
   "consumers": [
-    "node"
+    "node",
+    "android"
   ],
   "given": {
     "now": "2026-09-23T18:05:11.201Z",

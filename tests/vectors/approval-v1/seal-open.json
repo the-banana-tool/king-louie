@@ -1,7 +1,8 @@
 {
   "name": "seal-open",
   "consumers": [
-    "node"
+    "node",
+    "android"
   ],
   "given": {
     "box": {

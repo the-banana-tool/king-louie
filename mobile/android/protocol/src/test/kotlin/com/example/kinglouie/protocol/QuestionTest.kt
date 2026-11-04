@@ -1,10 +1,17 @@
 package com.example.kinglouie.protocol
 
+import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
+import java.security.KeyPairGenerator
+import java.security.interfaces.ECPrivateKey
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECGenParameterSpec
 
 /**
  * Cases stage 4 §3.9. The expected bytes are the same string the node test
@@ -44,5 +51,53 @@ class QuestionTest {
         )
         val text = Questions.answer(item, null, "Only after the survey", "d-bbbbbbbbbbbbbbbb", "n".repeat(43), "2026-09-25T14:00:00Z")
         assertTrue(Jcs.serialize(text).startsWith("""{"answer":{"text":"Only after the survey"},"""))
+    }
+
+    /** A P-256 key for the node's box, made here: the answer opens with it and nothing else. */
+    private fun nodeBox(): Pair<JsonObject, (String, String) -> ByteArray> {
+        val pair = KeyPairGenerator.getInstance("EC").run { initialize(ECGenParameterSpec("secp256r1")); generateKeyPair() }
+        val w = (pair.public as ECPublicKey).w
+        val jwk = Messages.jwk(B64Url.encode(P256.coordinate(w.affineX)), B64Url.encode(P256.coordinate(w.affineY)))
+        return jwk to softwareAgree(P256.coordinate((pair.private as ECPrivateKey).s))
+    }
+
+    @Test
+    fun sealsTheAnswerToWhatItIsTold() {
+        val (box, agree) = nodeBox()
+        val item = QuestionItem.from(question, "web-01")!!
+        val message = Questions.answer(item, null, "Only after the survey", "d-bbbbbbbbbbbbbbbb", "n".repeat(43), "2026-09-25T14:00:00Z", sealTo = box)
+        for (key in listOf("case_id", "question_id", "answer")) assertFalse(key, message.containsKey(key))
+        assertEquals("kl-aaaaaaaaaaaaaaaa", message["node_id"].str())
+        assertEquals(setOf("kl-aaaaaaaaaaaaaaaa"), message["sealed"]["keys"].obj()!!.keys)
+        val clearAnswer = Questions.answer(item, null, "Only after the survey", "d-bbbbbbbbbbbbbbbb", "n".repeat(43), "2026-09-25T14:00:00Z")
+        assertEquals(clearAnswer, Seal.open("kl.question.answer", message, "kl-aaaaaaaaaaaaaaaa", agree))
+    }
+
+    /** A clear ask takes no node_box from its text: only an opened one has it. */
+    @Test
+    fun aClearAskHasNothingToSealTo() {
+        val item = QuestionItem.from(question, "web-01")!!
+        assertNull(item.nodeBox)
+        assertNull(item.unreadable)
+        assertEquals(SealState.CLEAR, item.seal)
+    }
+
+    /** R-SP-15: a clear ask from a node seen sealing shows no question and takes no answer. */
+    @Test
+    fun aClearAskAfterSealed() {
+        val item = QuestionItem.from(question, "web-01", sealedSeen = true)!!
+        assertEquals("clear_after_sealed", item.unreadable)
+        assertEquals("", item.text)
+        assertEquals("", item.caseId)
+        assertTrue(item.options.isEmpty())
+        assertEquals("web-01", item.nodeName)
+        assertEquals("7QD4KM", item.token)
+        try {
+            Questions.answer(item, "a", null, "d-bbbbbbbbbbbbbbbb", "n".repeat(43), "2026-09-25T14:00:00Z")
+            fail("expected a ProtocolException")
+        } catch (e: ProtocolException) {
+            // no answer offered
+        }
+        assertNull(QuestionItem.from(question, "web-01", sealedSeen = false)!!.unreadable)
     }
 }

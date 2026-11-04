@@ -1,7 +1,8 @@
 {
   "name": "seal-content-not-jcs",
   "consumers": [
-    "node"
+    "node",
+    "android"
   ],
   "given": {
     "box": {

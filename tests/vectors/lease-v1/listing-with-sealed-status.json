@@ -1,7 +1,8 @@
 {
   "name": "listing-with-sealed-status",
   "consumers": [
-    "node"
+    "node",
+    "android"
   ],
   "check": null,
   "given": {

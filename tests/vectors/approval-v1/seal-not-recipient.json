@@ -1,7 +1,8 @@
 {
   "name": "seal-not-recipient",
   "consumers": [
-    "node"
+    "node",
+    "android"
   ],
   "given": {
     "box": {

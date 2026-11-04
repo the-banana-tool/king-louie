@@ -1,7 +1,8 @@
 {
   "name": "seal-tampered-clear",
   "consumers": [
-    "node"
+    "node",
+    "android"
   ],
   "given": {
     "box": {

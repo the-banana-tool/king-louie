@@ -37,14 +37,15 @@ const READ_KEY = [
   'read-key-valid', 'read-key-wrong-signer', 'read-key-from-the-future', 'response-reject-read-key'
 ];
 const READ_KEY_ANDROID = ['phone-api-auth-read', 'enroll-console-read-key', 'read-key-valid'];
-// The seal (sealed phones, R-SP-1, R-SP-2): the node's for now.
+// The seal (sealed phones, R-SP-1, R-SP-2): the node's and Android's.
 const SEAL = ['seal-open', 'seal-not-recipient', 'seal-tampered-ct', 'seal-tampered-clear', 'seal-hash-mismatch', 'seal-content-not-jcs', 'seal-content-clear-key'];
-// The box key (sealed phones, R-SP-10): the node's.
+// The box key (sealed phones, R-SP-10): the node's, and Android's where the phone builds it.
 const BOX_KEY = ['enroll-console-box-key', 'enroll-console-box-key-equal', 'enroll-signed-box-key', 'box-key-valid', 'box-key-wrong-signer', 'box-key-stale'];
-// Sealed tool approvals (R-SP-2, R-SP-5): the node's for now.
+// Sealed tool approvals (R-SP-2, R-SP-5): the node's, and Android's where the phone reads the request.
 const SEALED_APPROVAL = ['request-sealed-display', 'response-approve-sealed', 'response-reject-sealed-changed-parameter', 'response-reject-sealed-hash-unsalted'];
-// Sealed questions (R-SP-4): the node's for now.
+// Sealed questions (R-SP-4): the node's and Android's.
 const SEALED_QUESTION = ['question-ask-sealed', 'question-answer-sealed'];
+const SEALED_ANDROID = [...SEAL, ...SEALED_QUESTION, 'request-sealed-display', 'enroll-console-box-key', 'box-key-valid'];
 const EXPECTED = [
   'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
   'request-malformed', 'request-display-edge', 'request-malformed-equivalent-keys',
@@ -127,9 +128,11 @@ describe('approval-v1 vectors', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
   });
 
-  it('68 vectors; the read-key ones name node and android only, android where the phone builds or signs; the box-key, sealed approval and sealed question ones the node alone', () => {
+  it('68 vectors; the read-key and sealed ones name node and android only, android where the phone builds, signs or opens', () => {
     assert.equal(EXPECTED.length, 68);
-    for (const name of [...BOX_KEY, ...SEALED_APPROVAL, ...SEALED_QUESTION]) assert.deepEqual(byName.get(name).consumers, ['node'], name);
+    for (const name of [...SEAL, ...BOX_KEY, ...SEALED_APPROVAL, ...SEALED_QUESTION]) {
+      assert.deepEqual(byName.get(name).consumers, SEALED_ANDROID.includes(name) ? ['node', 'android'] : ['node'], name);
+    }
     for (const name of READ_KEY) {
       const want = READ_KEY_ANDROID.includes(name) ? ['node', 'android'] : ['node'];
       assert.deepEqual(byName.get(name).consumers, want, name);
@@ -191,7 +194,6 @@ describe('approval-v1 vectors', () => {
   for (const name of SEAL) {
     it(`${name} (openSealed with the vector's d)`, () => {
       const v = byName.get(name);
-      assert.deepEqual(v.consumers, ['node']);
       assert.deepEqual(runSealVector(v), v.expect);
     });
   }

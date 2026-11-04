@@ -1,7 +1,8 @@
 {
   "name": "seal-hash-mismatch",
   "consumers": [
-    "node"
+    "node",
+    "android"
   ],
   "given": {
     "box": {

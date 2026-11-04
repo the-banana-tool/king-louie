@@ -70,7 +70,7 @@ class ProtocolVectorTest {
         assertEquals(
             setOf("jcs", "device-id-p256", "device-id-ed25519", "request-valid", "request-bad-node-signature",
                 "request-unpinned-node", "request-malformed", "request-display", "request-display-edge",
-                "request-malformed-equivalent-keys", "enroll-console", "audit-slice", "phone-api-auth") + readKeyVectors,
+                "request-malformed-equivalent-keys", "enroll-console", "audit-slice", "phone-api-auth") + readKeyVectors + sealedVectors,
             names
         )
     }
@@ -78,6 +78,12 @@ class ProtocolVectorTest {
     // Revised 2026-10-28: the read key (android-slim spec §8.8), run by
     // readKeyAuth, consoleEnrollWithReadKey and readKeyStatement below.
     private val readKeyVectors = setOf("phone-api-auth-read", "enroll-console-read-key", "read-key-valid")
+
+    // Revised 2026-11-04: sealed phones (R-SP-1, R-SP-2, R-SP-4, R-SP-10), run by SealVectorTest.
+    private val sealedVectors = setOf(
+        "seal-open", "seal-not-recipient", "seal-tampered-ct", "seal-tampered-clear", "seal-hash-mismatch", "seal-content-not-jcs", "seal-content-clear-key",
+        "request-sealed-display", "enroll-console-box-key", "box-key-valid", "question-ask-sealed", "question-answer-sealed"
+    )
 
     @Test
     fun jcs() {

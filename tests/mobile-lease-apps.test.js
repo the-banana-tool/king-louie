@@ -451,7 +451,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     // Both cores' vector tests name every listing vector the generator marks for phones, and no other.
     const dir = path.join(ROOT, 'tests', 'vectors', 'lease-v1');
     const listing = fs.readdirSync(dir).filter((f) => f.startsWith('listing-')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')))
-      // listing-with-sealed-status is the node's until the phone cores read it (sealed phones, Tasks 8 and 9).
+      // listing-with-sealed-status is the node's and Android's until iOS reads it (sealed phones, Task 9).
       .filter((v) => v.consumers.includes('ios'));
     assert.equal(listing.length, 14);
     for (const v of listing) assert.deepEqual(v.consumers.slice().sort(), ['android', 'ios', 'node'], v.name);
@@ -487,7 +487,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     for (const core of [swift, kotlin]) assert.equal(count(core, 'no computer-use session'), 1, 'only in the sentence that says when it was checked');
     // What a listing listed is read only from one that was accepted.
     assert.match(swift, /public static func listedStatuses\(_ check: ListingCheck, pin: NodePin\) -> \[LeaseStatus\] \{\n\s+guard check\.accepted else \{ return \[\] \}/);
-    assert.match(kotlin, /fun listedStatuses\(check: ListingCheck, pin: NodePin\): List<LeaseStatus> =\n\s+if \(!check\.accepted\) emptyList\(\) else /);
+    assert.match(kotlin, /fun listedStatuses\(check: ListingCheck, pin: NodePin, open: Opener\? = null\): List<LeaseStatus> =\n\s+if \(!check\.accepted\) emptyList\(\) else /);
 
     // iOS: the state per node; absent means not asked.
     const ios = read('mobile', 'ios', 'App', 'AppModel.swift');

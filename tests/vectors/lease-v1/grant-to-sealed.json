@@ -1,7 +1,8 @@
 {
   "name": "grant-to-sealed",
   "consumers": [
-    "node"
+    "node",
+    "android"
   ],
   "check": null,
   "given": {
