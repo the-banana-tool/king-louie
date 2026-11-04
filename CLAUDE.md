@@ -63,6 +63,24 @@ real time a margin of seconds.
 To reproduce the first two, run the suite from pwsh with `TEMP`/`TMP` pointed at the
 short name of a long-named folder (`cmd /c for %I in ("<dir>") do @echo %~sI`).
 
+`npm test` compiles no phone code. CI's `phone-cores-android` and
+`phone-cores-ios` jobs run both protocol cores against the vectors on every pull
+request and push to `main`. Locally, the Kotlin core is `../gradlew test` in
+`mobile/android/protocol` (JDK 17, no Android SDK), and the Android app compiles
+here with `ANDROID_HOME` set: `./gradlew :app:compileNopushDebugKotlin
+:app:compileFcmDebugKotlin` in `mobile/android` (it has flavors, so there is no
+`:app:compileDebugKotlin`). The Swift core needs no Mac: `git archive <sha>
+mobile/ios/KLProtocol tests/vectors` into a temp dir, change that copy's
+`Package.swift` to depend on `https://github.com/apple/swift-crypto.git` `from:
+"3.0.0"` (its `Crypto` product, for the target and the test target; the sources
+`#if canImport` it), then:
+
+```bash
+docker run --rm -v "<copy>:/work" -w /work/mobile/ios/KLProtocol swift:6.1 bash -c 'swift build --build-tests --scratch-path /tmp/b; swift test --skip-build --scratch-path /tmp/b'
+```
+
+`mobile/ios/App` needs SwiftUI and compiles on no machine but a Mac.
+
 `npm run test:e2e` launches the real Electron binary through Playwright's
 `_electron` (`tests/e2e/helpers.js`). Every launch gets its own temporary
 `--user-data-dir` (the helper throws `userData isolation failed` otherwise), so
@@ -1193,19 +1211,65 @@ the e2e test), the owner check cannot tell them apart.
   local fake FCM server on 127.0.0.1 (`tests/frontdoor-push.test.js`), never Google;
   `tests/tracked-secrets.test.js` fails when the Firebase app config, a `local.properties` or a
   service-account JSON is tracked. The owner's runbook is the install guide's "Push to your phone".
+- Sealed phones (plan `docs/superpowers/plans/2026-11-04-sealed-phones.md`, rulings R-SP-1 to R-SP-15;
+  approval-v1 and lease-v1 "Revised 2026-11-04"). A node seals what it sends to phones, so a relay
+  carries it and cannot read it; `mobile/PRIVACY.md` says what it still sees.
+  - The box key: a phone's third P-256 key (iOS's second), key agreement only, no prompt, unlocked only;
+    never signs. `device.box_key` in an enrollment, or a device-signed `kl.device.box_key`
+    (`POST /v1/devices/box-key`, auth `read`; the relay stores nothing and forwards the node method
+    `device.box_key`, each node `box-key-pending-apply`, `applied`, `duplicate`, `rejected` or `offline`).
+    `device apply` writes `box_key` and `box_key_at` (`box key set`, audited `device.box_key_set`).
+    Fingerprint `b-…`. `enroll-device` refuses a claim with no box key for a record that holds one. The
+    node's own box key (`createBox`, `src/approvals/node-box-key.js`) sits encrypted in the identity
+    record and goes out as `node_box`; only a service start fills a record that has none
+    (`getOrGenerateNodeIdentity(..., { fillBox: true })`, a test walks the callers), so a CLI or a
+    standalone `mcp` has `box: null`.
+  - The seal: `src/approvals/seal.js` (`sealContent`, `openSealed`; `SEAL_SPLIT` is the one table of what
+    is content). One content key wrapped per recipient; AAD is the clear part. A sealed request's hash is
+    salted (`saltedHash`), and the pending entry keeps the salt, so a clear request pending when sealing
+    turns on keeps its unsalted rule. Never pass `ephemeral` or `random` outside vectors
+    (`tests/sealed-types.test.js`, which also fails for a content type with no entry). A new node→phone
+    content type gets a row. A sealed request's signed payload is at most `SEALED_PAYLOAD_MAX`, about 130
+    KB of parameters (`action_too_large`), because the audit mirror's page is 256 KiB; an entry over it
+    breaks that node's mirror for good.
+  - The switch: `createSealPolicy` (`src/approvals/seal-policy.js`), read at every build. `sealing()` is
+    true while an active record holds a box key or the latch is set; `canSeal()` needs a device, the latch
+    known to be on disk and a node box. The latch is `<dataDir>/approvals/sealing.json`, written once
+    before anything is sealed, and only ENOENT under a real directory is unlatched. `sealing()` true with
+    `canSeal()` false refuses `no_sealed_recipient`: a tool approval is denied, a question is held on the
+    ladder (`skipped` / `sealing`, re-sent by `LadderEngine#_reseal` when a key arrives, one warning per
+    episode), a lease is refused or ends. It never sends clear. The way back is `king-louie-service device
+    unseal` at the console (`--yes` off a terminal; audited `device.unsealed`; refused while a record not
+    revoked by an administrator holds a box key, and elevated or by a non-owner on a personal node). A
+    relayed message never clears it. Residual: anything running as the service account can delete the file,
+    and with no device holding a box key the node then sends in clear.
+  - The phones (`Seal.kt`, `Seal.swift`): shape, pin, signature, and only then the open. `sealedSeen`, per
+    node, persisted, cleared by Reset: once a node's sealed message has opened, its clear request or ask has
+    no decision (`clear_after_sealed`), since a relay can replay an old one. A message that cannot be read
+    is a row from its verified clear part with no decision (`not_recipient`, `open_failed`, `key_locked`,
+    the apps' `box_key_broken`). An app from before this shows nothing, so phones upgrade first. A clear
+    answer with no clear ask of its token is refused `sealed_required` on the node.
+  - Doctor: `sealing to phones` and `phones without a box key`. Upgrade order (the install guide's "Sealing
+    to your phone"): phones, relay or front door, each node, `device apply` per node.
+  - The audit ledger is served to the relay's mirror, so it holds the tool's name, the tier and ids, never
+    a parameter, an error's words or a client's name (`src/approvals/audit-fields.js`,
+    `tests/approvals-audit-fields.test.js`). `approval.request` holds the sealed envelope, with `job_id`
+    null. `params_hmac` (`tier.decision`, `request.inbound`) is keyed from the node's box key, null with no
+    box, never a plain hash. An origin is `{ kind }`, plus `grant_id` and `client_id` for a front-door one
+    (`auditOriginOf`). An error is a code or `{ error_chars }`. `gui.launch` holds the app id and pid.
 - `mcp` asks through the running service (file courier); with the service stopped every unsafe runbook
   is denied at once.
 - Audit: `<dataDir>/audit/ledger-YYYY-MM.jsonl`, hash-chained; `doctor` verifies the chain.
 - Tests: `tests/approvals-*.test.js`, `tests/frontdoor-*.test.js`, `tests/audit-ledger.test.js`,
   `tests/service-cli-devices.test.js`, `tests/service-cli-relay.test.js`. Vectors live in
   `tests/vectors/approval-v1/`; after changing a message, run `node tests/vectors/approval-v1/generate.js`
-  and commit the files (`--check` must say `49 vectors match`). `tests/approvals-e2e.test.js` spawns real
+  and commit the files (`--check` must say `68 vectors match`). `tests/approvals-e2e.test.js` spawns real
   processes and runs on Windows or as root; on Windows it denies itself write access to a temp
   `approvers/` dir with `icacls` (as an installer's ACL would) and lifts the deny before cleanup.
 - Mobile apps (`mobile/`, built from `docs/protocol/approval-v1.md`): protocol-core tests are
   `swift test` in `mobile/ios/KLProtocol` (macOS) and `../gradlew test` in `mobile/android/protocol`
-  (JDK 17, no Android SDK); both read `tests/vectors/approval-v1`. `mobile/PRIVACY.md` says what the
-  relay operator can see.
+  (JDK 17, no Android SDK); both read `tests/vectors/approval-v1`, and CI's `phone-cores-android` and
+  `phone-cores-ios` run them (see Testing). `mobile/PRIVACY.md` says what the relay operator can see.
 
 ## Cases: executors (stage 3)
 
@@ -1990,8 +2054,8 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
   (default no). Off a TTY they need `--yes` or refuse (exit 2) before
   anything is resolved or read. Nothing is minted, created or written before
   the answer. `--dry-run` asks nothing. `--yes` is valid for `desktop pair`,
-  `device apply`, `identity record`, `session install` and `session
-  uninstall` only (`YES_COMMANDS` in `src/service/cli.js`).
+  `device apply`, `device unseal`, `identity record`, `session install` and
+  `session uninstall` only (`YES_COMMANDS` in `src/service/cli.js`).
 - **Who is installed (R-F5-2, R-F5-10).** One session user per node, decided
   by the SID the canonical file records (the uid off Windows:
   `session_sid`, `session_uid`), never the bare name. Another identity is
@@ -2410,7 +2474,7 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
   are not text keep their names. Pictures still show the window. The audit
   ledger is served to the relay's mirror and holds the same and no more: a
   `Type` entry is `{ length }` (no hash of the text), a `Key` entry names
-  the key only when it is not text, and the `params_sha256` of a
+  the key only when it is not text, and the `params_hmac` of a
   `tier.decision` is taken over that form (`Tool#auditParameters`; every
   other tool is hashed as called). A refused key is not repeated in its
   refusal, and the helper logs a failed input by its code alone. A
@@ -2422,6 +2486,21 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
   view only when its node `seq` is newer than the last applied for that
   lease, and a view only when `to_device` is this device
   (`Leases.acceptsStatus` / `acceptsView` in both cores).
+- **Sealed leases (sealed phones, R-SP-4, R-SP-8, R-SP-9).** Under sealing a
+  request's `lease`, `origin` and `salt`, a status's `name` and a view's
+  `foreground`, `frame`, `frame_dropped` and `actions` are sealed, and
+  `lease_hash` is salted. A status's other fields stay clear, and a listing is
+  fully clear: `verifyLeaseListing` opens nothing, so a relay can neither hide a
+  lease nor read a name. The raw frame is capped at `SEALED_FRAME_MAX_BYTES`
+  (138240), under `max_frame_bytes`, so a view stays within 256 KiB; still over,
+  it goes `frame: null, frame_dropped: true`. With no phone to read it
+  (`sealProblem`): a request is refused `capability_unavailable` naming
+  `no_sealed_recipient`, no view goes, and a running or pending lease ends
+  `no_sealed_recipient` (`checkGrantingDevices`, every 5 s and before input). Its
+  statuses still go, sealed to the node alone (`statusTargets`), so the state, a
+  listing and Stop keep working. A clear request held for the link is never sent
+  once the node seals (`_rebuild`). A phone keeps a lease's last name in memory,
+  and shows `(sealed)` for one never read.
 - Case turns keep `ListApps` and `Screenshot` only: the eight acting GUI
   tools are in `CASE_BLOCKED_TOOL_NAMES`. Wake-up turns get no GUI tool;
   delegate turns get all ten unless they refuse unsafe calls (owner rulings
@@ -2454,7 +2533,7 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
   (`tests/session-backend-windows.test.js`), which shows the rule is
   written, not that it works. Swift and Kotlin are not compiled by
   `npm test`.
-- Vectors: `node tests/vectors/lease-v1/generate.js --check` (80) and
+- Vectors: `node tests/vectors/lease-v1/generate.js --check` (86) and
   `node tests/vectors/session-v1/generate.js --check` (6).
 - The phones: iOS signs only `kl.lease.watch` with its API session (owner
   ruling R-F5-8) and sends it only while the live lease view is on screen
@@ -2674,7 +2753,8 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   broker's `helper_lost` event, a ref'd timer armed on the helper channel's
   `closed` and cleared on `ready`; the helper has stopped its recordings by
   then), the screen locking
-  (`screen_locked`, through the lease's `locked`, C-12), `Take.stop`
+  (`screen_locked`, through the lease's `locked`, C-12), a node that seals with
+  no phone left to read it (`no_sealed_recipient`), `Take.stop`
   (`take_done`), service shutdown (`service_stopped`). Every ending stops
   the recording and keeps the file, closes the take's Chrome by CDP or by
   pid (`PlaywrightBrowser#stop` on a personal node) (unless `Take.stop` passed `keep_browser`), clears the policy at once (from that instant every call it would
@@ -2710,11 +2790,12 @@ code (every `TAKE_CODES` entry in its §5, its `node.yaml` block through
   actions find `browser_cred:<profile>:<host>` when the take allows logins;
   a call naming a profile itself is `take_browser_managed`.
 - **The audit ledger (§7.2).** Every `lease.*` entry carries the lease's
-  `kind`; a take's `lease.requested` and `lease.granted` add `name`, `sites`,
-  `credentials` and `minutes` (never the reason text). Every take refusal the
+  `kind`; a take's `lease.requested` and `lease.granted` add `credentials` and
+  `minutes`. `name`, `sites` and the reason text left the ledger with sealed
+  phones (R-SP-7): it is served to the relay's mirror. Every take refusal the
   executor makes (`approvalDenied` with `deniedBy: 'take'`) is a
-  `take.refused { tool, code, origin }` entry from the approval seam, with no
-  parameters and no URL; a step that `run_steps` refuses is not one (it is in
+  `take.refused { tool, code, origin }` entry from the approval seam, with the
+  origin as `auditOriginOf` gives it, no parameters and no URL; a step that `run_steps` refuses is not one (it is in
   the step's result). `take.ended` records every ending.
 - **Steps (§10).** `Take.run_steps` runs `{ step, ...fields }` objects
   (`validateSteps` in `src/gui/take-steps.js`: exactly each kind's fields,
@@ -3061,7 +3142,7 @@ install guide's "Your first task".
   routing. Malformed twice, or no model: the task runs with no proposal. Empty `allows`
   is look-only: no card.
 - **The grant** (`src/tasks/grants.js`, `src/tasks/cards.js`): a lease of kind `task`
-  (lease-v1 "Revised 2026-11-03"), one card per task, sent every 5 minutes, 12 cards in
+  (lease-v1 "Revised 2026-11-03", sealed under "Revised 2026-11-04"), one card per task, sent every 5 minutes, 12 cards in
   all, then `waiting`, reason `grant_pending`. Turns do not wait for the press; an
   acting call the card would cover does. With no press nothing a model proposed binds:
   a $2 cap and at most 30 minutes. Only a press moves a cap or a deadline: to the card's
@@ -3075,7 +3156,9 @@ install guide's "Your first task".
   manager (`gui` off) there are no cards: each acting call asks for itself, and the
   cap or deadline ends the task `failed`. A denied card ends it `cancelled`, reason
   `grant_denied`; Stop or a revoked device, reason `stopped`. A task `interrupted`
-  by a restart re-proposes and cards again on its next send.
+  by a restart re-proposes and cards again on its next send. With sealing on and no phone
+  to read it, a running task ends `failed`, reason `no_sealed_recipient`, and its turn is cut; a
+  first card refused so has each act ask for itself, and each is denied.
 - **The policy** (`createTaskPolicy`, `src/tasks/policy.js`), consulted in `ToolExecutor`
   where it would ask, after hooks, deny rules, the `denied` tier, denied dirs and the
   roots check. No never list: the phone is the gate, so a call outside the grant takes
@@ -3100,18 +3183,20 @@ install guide's "Your first task".
   (`core.context.isTaskChatRunning`).
 - **Telling.** `task_ended` (`SESSION_KINDS`, `PushQueue`, content-free, fcm only) to
   every device, on `done`, `failed`, `cancelled` and `interrupted`. Audit:
-  `task.requested { task_id, client, node }`, `task.ended { task_id, reason, usd }`,
+  `task.requested { task_id, origin, node }` (`auditOriginOf`; the task's record keeps the
+  client), `task.ended { task_id, reason, usd }`,
   `task.refused { tool, code, origin }` (`task_ended`, or `phone_denied` for the owner's no to a
   call outside the grant; the seam's `approvalDenied` listener). No text and no URL in
-  those. `lease.requested` and `lease.granted` carry `name`, and the ledger is mirrored to
-  the relay, so the first 60 code points of each task's text sit in the relay's mirror.
+  those. `lease.requested` and `lease.granted` carry `allows` and `usd` and no `name` or `sites`
+  (R-SP-7), so with sealing on the relay's mirror holds none of a task's text. On a node not
+  yet sealing the card goes in clear.
 - **Codes.** To a client: `task_busy` (`retry_after`), `task_not_found`, `task_ended`,
   `task_unconfirmed` (no answer after sending: it may have started, so look, never
   resend), `unknown_machine`, `machine_offline`, `capability_unavailable`,
   `insufficient_scope`, `invalid_params`, `bad_node_answer`, `frontdoor_busy`,
   `node_timeout`. `ended.reason` and `reason`: `done`, `cancelled`, `grant_denied`,
   `stopped`, `spend_cap`, `duration`, `grant_pending`, `stuck`, `abandoned`, `became_case`, `private`,
-  `chat_deleted`, `turn_failed`, `max_iterations`, `guardrail_halt`, or a failure's own
+  `chat_deleted`, `turn_failed`, `max_iterations`, `guardrail_halt`, `no_sealed_recipient`, or a failure's own
   code (`failureCode`, never its message).
 - **Tests.** `tests/helpers/tasks-harness.js`: a `TaskManager` over a real in-memory store
   and a temp `TaskStore`, a scripted adapter, a fake clock (`time.advance`), recording push
