@@ -622,7 +622,8 @@ class FleetToolHandler {
     let mismatch = typeof outcome.action_hash !== 'string';
     if (!mismatch) {
       try {
-        liveHash = actionHash(currentAction());
+        // A sealed request's hash is salted (R-SP-2); the outcome carries the salt.
+        liveHash = actionHash(currentAction(), { salt: outcome.salt || null });
       } catch {
         mismatch = true;
       }

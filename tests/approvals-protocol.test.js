@@ -40,6 +40,8 @@ const READ_KEY_ANDROID = ['phone-api-auth-read', 'enroll-console-read-key', 'rea
 const SEAL = ['seal-open', 'seal-not-recipient', 'seal-tampered-ct', 'seal-tampered-clear', 'seal-hash-mismatch', 'seal-content-not-jcs', 'seal-content-clear-key'];
 // The box key (sealed phones, R-SP-10): the node's.
 const BOX_KEY = ['enroll-console-box-key', 'enroll-console-box-key-equal', 'enroll-signed-box-key', 'box-key-valid', 'box-key-wrong-signer', 'box-key-stale'];
+// Sealed tool approvals (R-SP-2, R-SP-5): the node's for now.
+const SEALED_APPROVAL = ['request-sealed-display', 'response-approve-sealed', 'response-reject-sealed-changed-parameter', 'response-reject-sealed-hash-unsalted'];
 const EXPECTED = [
   'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
   'request-malformed', 'request-display-edge', 'request-malformed-equivalent-keys',
@@ -52,7 +54,8 @@ const EXPECTED = [
   // Revised 2026-10-28: the read key (android-slim spec §8.8).
   ...READ_KEY,
   ...SEAL,
-  ...BOX_KEY
+  ...BOX_KEY,
+  ...SEALED_APPROVAL
 ];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json') && f !== 'keys.json')
@@ -69,7 +72,10 @@ async function runResponseVector(v) {
   const now = () => Date.parse(v.given.now);
   const store = await approverStoreWith(v.given.approvers, { overlay: v.given.overlay, allowTestKeys: v.given.allow_test_keys, now });
   stores.push(store);
-  const queue = [...v.given.pending];
+  // An entry is an envelope, or for a sealed request { envelope, salt }: what the
+  // node kept, since its salt is nowhere in clear.
+  const pendingOf = (entry) => (entry.envelope ? entry : { envelope: entry, salt: null });
+  const queue = v.given.pending.map(pendingOf);
   const approver = new PhoneApprover({
     identity: testNodeIdentity({ key: nodeKeyName(v.given.node.id) }),
     approverStore: store,
@@ -79,13 +85,13 @@ async function runResponseVector(v) {
     setTimer: () => null,
     clearTimer: () => {},
     buildRequest: () => {
-      const envelope = queue.shift();
+      const { envelope, salt } = queue.shift();
       const { message, bytes } = open(envelope);
-      return { message, envelope, bytes };
+      return { message, envelope, bytes, salt };
     }
   });
-  for (const env of v.given.pending) {
-    const { message } = open(env);
+  for (const entry of v.given.pending) {
+    const { message } = open(pendingOf(entry).envelope);
     approver.requestAction(message.action, { origin: message.origin, currentAction: () => v.given.current_action });
   }
   for (let i = 0; i < 50 && approver.pending().length < v.given.pending.length; i += 1) await new Promise((r) => setImmediate(r));
@@ -117,9 +123,9 @@ describe('approval-v1 vectors', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
   });
 
-  it('62 vectors; the read-key ones name node and android only, android where the phone builds or signs; the box-key ones the node alone', () => {
-    assert.equal(EXPECTED.length, 62);
-    for (const name of BOX_KEY) assert.deepEqual(byName.get(name).consumers, ['node'], name);
+  it('66 vectors; the read-key ones name node and android only, android where the phone builds or signs; the box-key and sealed approval ones the node alone', () => {
+    assert.equal(EXPECTED.length, 66);
+    for (const name of [...BOX_KEY, ...SEALED_APPROVAL]) assert.deepEqual(byName.get(name).consumers, ['node'], name);
     for (const name of READ_KEY) {
       const want = READ_KEY_ANDROID.includes(name) ? ['node', 'android'] : ['node'];
       assert.deepEqual(byName.get(name).consumers, want, name);
@@ -239,12 +245,29 @@ describe('approval-v1 vectors', () => {
     const decomposed = `e${String.fromCodePoint(0x301)}`;
     assert.ok(keys.includes(composed) && keys.includes(decomposed), 'the params carry both forms of the key');
     assert.equal(validateMessage('kl.approval.request', message), null, 'the node keeps both keys and accepts the shape');
-    assert.deepEqual(phoneView(v.input, v.given.pinned_nodes), { shown: false, reason: 'malformed', display: null });
+    assert.deepEqual(phoneView(v.input, { pinned: v.given.pinned_nodes }), { shown: false, reason: 'malformed', display: null });
+  });
+
+  it('request-sealed-display: a sealed request shows what the clear one shows, and only to a box that opens it', () => {
+    const v = byName.get('request-sealed-display');
+    const view = phoneView(v.input, { pinned: v.given.pinned_nodes, box: v.given.box });
+    assert.deepEqual(view, v.expect);
+    assert.equal(view.shown, true);
+    assert.deepEqual(view.display, byName.get('request-display').expect.display);
+    const { message } = open(v.input);
+    assert.equal(validateMessage('kl.approval.request', message), null);
+    assert.equal(Object.hasOwn(message, 'action'), false);
+    assert.deepEqual(phoneView(v.input, { pinned: v.given.pinned_nodes }), { shown: false, reason: 'not_recipient', display: null });
+    assert.deepEqual(phoneView(v.input, { pinned: [], box: v.given.box }), { shown: false, reason: 'unpinned_node', display: null });
+    // Not a recipient at all: the box key of a device with no wrap here.
+    assert.deepEqual(phoneView(v.input, { pinned: v.given.pinned_nodes, box: { device_id: 'd-aaaaaaaaaaaaaaaa', d: v.given.box.d } }), { shown: false, reason: 'not_recipient', display: null });
+    // A wrap that does not open: another phone's box under this one's id.
+    assert.deepEqual(phoneView(v.input, { pinned: v.given.pinned_nodes, box: { device_id: v.given.box.device_id, d: KEYS.devices.B_box.d } }), { shown: false, reason: 'open_failed', display: null });
   });
 
   for (const v of vectors.filter((x) => x.consumers.includes('ios') && x.name.startsWith('request-'))) {
     it(`${v.name} (phone reference)`, () => {
-      assert.deepEqual(phoneView(v.input, v.given.pinned_nodes), v.expect);
+      assert.deepEqual(phoneView(v.input, { pinned: v.given.pinned_nodes }), v.expect);
     });
   }
 

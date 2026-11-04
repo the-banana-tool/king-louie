@@ -244,6 +244,23 @@ describe('signed envelopes', () => {
     }
   });
 
+  it('activates from the Outcome of a sealed request, whose hash is salted (R-SP-2)', async () => {
+    const salt = Buffer.alloc(32, 9).toString('base64url');
+    const approver = {
+      async requestAction(action) {
+        return { decision: 'approve', request_id: 'r-sealed', device_id: 'd-1', action_hash: helpers.actionHash(action, { salt }), salt, reason: null };
+      }
+    };
+    const s = await setup({ authority: 'signed', approver });
+    await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    await s.reg.lastSignedRequest;
+    const e = envelopeOf(s);
+    assert.strictEqual(e.status, 'active');
+    assert.strictEqual(e.grantedBy.evidence.request_id, 'r-sealed');
+    assert.strictEqual(ops.verifyEnvelopeGrant(s.reg, s.meta.id, e).ok, true);
+    assert.strictEqual(JSON.stringify(e).includes(salt), false, 'the salt is not written to the case');
+  });
+
   it('refuses when no phone approver is enrolled, writing nothing', async () => {
     const s = await setup({ authority: 'signed' });
     assert.deepStrictEqual(await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId)), { ok: false, error: 'signed approval unavailable' });

@@ -171,7 +171,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     }, nodeSigner(identity));
   };
   const pinnedWeb = [{ id: web.nodeId, key: web.key }];
-  const phoneVector = (name, env, pinned) => add({ name, consumers: ['ios', 'android'], given: { now: NOW, pinned_nodes: pinned }, input: env, expect: phoneView(env, pinned) });
+  const phoneVector = (name, env, pinned) => add({ name, consumers: ['ios', 'android'], given: { now: NOW, pinned_nodes: pinned }, input: env, expect: phoneView(env, { pinned }) });
 
   const req = request(web, 'main', toolActionLit);
   phoneVector('request-valid', req, pinnedWeb);
@@ -518,6 +518,41 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   // JCS bytes, but the content overrules a key the AAD covers.
   const clearKey = sealParts('content clear key');
   sealVector('seal-content-clear-key', handSealed('content clear key', clearKey.clear, Buffer.from(canonicalize({ ...clearKey.content, node_name: 'other-node' }), 'utf8')), 'content_malformed');
+
+  // ── Sealed tool approvals (R-SP-2, R-SP-5): a node-signed sealed request ────
+  // To both phones and the node itself, as a node sends one. The node's for now;
+  // the phones take these up with their cores.
+  const webBox = KEYS.nodes['web-01'].box.jwk;
+  const signedSealedRequest = (label, action, origin) => {
+    const salt = sha(`sealed request salt ${label}`).toString('base64url');
+    const clear = {
+      v: 1, type: sealType, request_id: uuidOf(`sealed request ${label}`), node_id: web.nodeId, node_name: web.nodeName,
+      action_hash: saltedHash(salt, action), created_at: NOW, expires_at: iso(NOW_MS + 300000), nonce: nonceOf(`sealed request ${label}`), node_box: webBox
+    };
+    const random = (n) => (n === 32 ? sha(`sealed request cek ${label}`) : sha(`sealed request iv ${label}`).subarray(0, n));
+    const message = sealContent({
+      type: sealType, senderId: web.nodeId, clear, content: { action, origin, salt }, recipients: { ...boxA, ...boxB, [web.nodeId]: webBox },
+      ephemeral: fixedBox(sha(`sealed request epk ${label}`)), random
+    });
+    return { envelope: seal(message, nodeSigner(web)), salt, message };
+  };
+  // The action and origin of request-display, so the two displays are one.
+  const sealedDisplay = signedSealedRequest('display', runbookAction, { client: 'stdio-mcp', session: null, job_id: 'job-1' });
+  const boxOfA = { device_id: A.id, d: KEYS.devices.A_box.d };
+  add({
+    name: 'request-sealed-display', consumers: ['node'], given: { now: NOW, pinned_nodes: pinnedWeb, box: boxOfA },
+    input: sealedDisplay.envelope, expect: phoneView(sealedDisplay.envelope, { pinned: pinnedWeb, box: boxOfA })
+  });
+  const sealedPending = signedSealedRequest('response', toolActionLit, { client: 'gateway', session: 'chat-1', job_id: null });
+  const respondSealed = (overrides = {}) => respond(A, {
+    request_id: sealedPending.message.request_id, action_hash: sealedPending.message.action_hash, nonce: sealedPending.message.nonce, expires_at: sealedPending.message.expires_at, ...overrides
+  });
+  const sealedGiven = { pending: [{ envelope: sealedPending.envelope, salt: sealedPending.salt }] };
+  nodeVector('response-approve-sealed', null, respondSealed(), { accepted: true, reason: null }, sealedGiven);
+  nodeVector('response-reject-sealed-changed-parameter', 12, respondSealed(), { accepted: false, reason: 'action_changed' }, {
+    ...sealedGiven, current_action: { ...toolActionLit, params: { command: 'git push --force origin main' }, summary: 'Bash(git push --force origin main)' }
+  });
+  nodeVector('response-reject-sealed-hash-unsalted', 10, respondSealed({ action_hash: unsalted }), { accepted: false, reason: 'action_hash_mismatch' }, sealedGiven);
 
   return vectors;
 }

@@ -27,6 +27,7 @@ const https = require('https');
 const net = require('net');
 const { createLinkRpc } = require('../src/approvals/link-rpc');
 const { buildRequest, toolAction } = require('../src/approvals/messages');
+const { generateBoxKey } = require('../src/approvals/node-box-key');
 const { relaySpkiPin } = require('../src/frontdoor/tls');
 const { createPhoneServer, PHONE_LISTENER } = require('../src/frontdoor/relay');
 const { addSink } = require('../src/logging');
@@ -356,6 +357,30 @@ describe('relay trust rules', () => {
     const { envelope: second } = buildRequest({ identity: a.identity, action: toolAction('Bash', { command: 'id' }, '/srv'), origin: { client: 'agent' }, ttlMs: 60000 });
     await a.call('approval.submit', { envelope: second });
     assert.equal((await call(phone, 'POST', `/v1/approvals/${open(second).message.request_id}/response`, phone.respond(envelope, 'approve'))).status, 400);
+  });
+
+  it('approval.submit takes a sealed request: the phone gets the envelope as signed, and nothing in clear holds the action', async () => {
+    const nodeBox = generateBoxKey().jwk;
+    const sealPolicy = {
+      sealing: () => true,
+      canSeal: () => true,
+      recipients: () => ({ [phone.deviceId]: generateBoxKey().jwk, [a.identity.nodeId]: nodeBox }),
+      senderId: a.identity.nodeId,
+      nodeBox
+    };
+    const { envelope, message } = buildRequest({ identity: a.identity, action: toolAction('Bash', { command: 'hidden-parameter' }, '/srv/hidden-cwd'), origin: { client: 'agent', session: 'hidden-session' }, ttlMs: 60000, sealPolicy });
+    assert.deepEqual(await a.call('approval.submit', { envelope }), { ok: true });
+    const got = await call(phone, 'GET', `/v1/approvals/${message.request_id}`);
+    assert.equal(got.status, 200);
+    assert.deepEqual(got.body.envelope, envelope);
+    const list = await call(phone, 'GET', '/v1/approvals?wait=0');
+    assert.ok(list.body.some((e) => e.envelope.payload === envelope.payload));
+    const seen = open(got.body.envelope).message;
+    for (const key of ['action', 'origin', 'salt']) assert.equal(Object.hasOwn(seen, key), false, key);
+    const clearText = JSON.stringify({ seen: { ...seen, sealed: null }, view: { ...got.body, envelope: null } });
+    for (const hidden of ['hidden-parameter', 'hidden-cwd', 'hidden-session', 'Bash']) assert.equal(clearText.includes(hidden), false, hidden);
+    const res = await call(phone, 'POST', `/v1/approvals/${message.request_id}/response`, phone.respond(envelope, 'approve'));
+    assert.equal(res.status, 202);
   });
 
   it('refuses node envelopes not signed by the node on the link, or naming another node', async () => {

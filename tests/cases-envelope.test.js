@@ -335,6 +335,51 @@ describe('signed grants', () => {
     assert.match(action.summary, /^env-01 · phone-agent: /);
   });
 
+  describe('a sealed request (R-SP-2): its hash is salted', () => {
+    const boxNode = testNodeIdentity({ box: true });
+    const boxPhone = createFakePhone({ name: 'Box phone', boxKey: true });
+    let boxStore;
+    before(async () => { boxStore = await approverStoreWith([boxPhone.approverRecord({ boxKey: true })]); });
+    after(() => { if (boxStore) boxStore.cleanup(); });
+    const sealPolicy = {
+      sealing: () => true,
+      canSeal: () => true,
+      recipients: () => ({ [boxPhone.deviceId]: boxPhone.boxJwk, [boxNode.nodeId]: boxNode.box.jwk }),
+      senderId: boxNode.nodeId,
+      nodeBox: boxNode.box.jwk
+    };
+    const sealedReq = (action = signedAction(env, 'case-1', helpers)) => buildRequest({ identity: boxNode, action, origin, requestId: REQ, sealPolicy });
+    const entriesFor = (req) => [
+      { kind: 'approval.request', data: { job_id: null, envelope: req.envelope } },
+      { kind: 'approval.response', data: { request_id: REQ, device_id: boxPhone.deviceId, decision: 'approve', envelope: boxPhone.respond(req.envelope, 'approve'), job_id: null } },
+      { kind: 'approval.outcome', data: approved() }
+    ];
+    const verify = (entries, over = {}) => verifySignedGrant(env, {
+      caseId: 'case-1', auditLedger: ledger(entries), approverStore: boxStore, nodeId: boxNode.nodeId, nodePublicKey: boxNode.publicKey, nodeBox: boxNode.box, ...over
+    });
+
+    it('the memory path takes the outcome\'s salt', () => {
+      const req = sealedReq();
+      const outcome = { decision: 'approve', action_hash: req.message.action_hash, salt: req.salt };
+      assert.strictEqual(verifySignedGrant(env, { caseId: 'case-1', outcomes: [outcome] }).via, 'memory');
+      assert.strictEqual(verifySignedGrant(env, { caseId: 'case-1', outcomes: [{ decision: 'approve', action_hash: req.message.action_hash }] }).ok, false, 'no salt, no match');
+      assert.strictEqual(verifySignedGrant(env, { caseId: 'case-1', outcomes: [{ ...outcome, salt: 'short' }] }).ok, false, 'a bad salt proves nothing');
+    });
+
+    it('the audit path opens the node\'s own request with its box', () => {
+      assert.deepStrictEqual(verify(entriesFor(sealedReq())), { ok: true, via: 'audit' });
+    });
+
+    it('with no box the audit path proves nothing', () => {
+      assert.deepStrictEqual(verify(entriesFor(sealedReq()), { nodeBox: null }), NOT_FOUND);
+    });
+
+    it('a sealed request for another action proves nothing', () => {
+      const other = sealedReq({ ...signedAction(env, 'case-1', helpers), summary: 'something else' });
+      assert.deepStrictEqual(verify(entriesFor(other)), NOT_FOUND);
+    });
+  });
+
   it('two envelopes with the same core are different signed actions', () => {
     const other = { ...env, id: 'env-02' };
     assert.strictEqual(other.hash, env.hash);

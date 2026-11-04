@@ -254,7 +254,8 @@ function loadProfile(profile) {
             approvalTrust: {
               approverStore: approvals.approverStore,
               nodeId: approvals.identity.nodeId,
-              nodePublicKey: approvals.identity.publicKey
+              nodePublicKey: approvals.identity.publicKey,
+              box: approvals.identity.box || null
             }
           });
           await core.start();

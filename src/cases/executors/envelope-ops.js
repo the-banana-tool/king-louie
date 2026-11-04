@@ -90,7 +90,8 @@ function grantCheckOptions(reg, caseId, envelopeId) {
     auditScanEntries: reg.settings().auditScanEntries,
     approverStore: trust.approverStore,
     nodeId: trust.nodeId,
-    nodePublicKey: trust.nodePublicKey
+    nodePublicKey: trust.nodePublicKey,
+    nodeBox: trust.box
   };
 }
 
@@ -227,11 +228,12 @@ function requestIdHolder(reg, caseId, envelopeId, requestId) {
 }
 
 // The action hash the phone must have signed for this envelope as it is now,
-// or null when the envelope is missing or malformed.
-function liveActionHash(reg, caseId, env) {
+// or null when the envelope is missing or malformed. `salt` is the outcome's,
+// when its request was sealed (R-SP-2).
+function liveActionHash(reg, caseId, env, salt = null) {
   try {
     const helpers = approvalHelpers();
-    return env ? helpers.actionHash(signedAction(env, caseId, helpers)) : null;
+    return env ? helpers.actionHash(signedAction(env, caseId, helpers), { salt }) : null;
   } catch {
     return null;
   }
@@ -248,7 +250,7 @@ async function activateSigned(reg, caseId, envelopeId, outcome) {
     return false;
   }
   // Ruling T10-hash: an envelope reads active only when its grant would verify.
-  if (outcome.action_hash !== liveActionHash(reg, caseId, env)) {
+  if (outcome.action_hash !== liveActionHash(reg, caseId, env, outcome.salt || null)) {
     journal(reg, caseId, `Envelope ${envelopeId} not activated: phone request ${outcome.request_id} approved a different action.`);
     return false;
   }
@@ -297,7 +299,7 @@ async function applySignedOutcome(reg, caseId, envelopeId, outcome) {
     log.warn(`Signed approval for ${envelopeId} reuses request ${outcome.request_id} (already granted ${holder}); ignored.`);
     return { applied: false, error: `request ${outcome.request_id} already granted ${holder}` };
   }
-  const live = liveActionHash(reg, caseId, new EnvelopeStore(reg.caseDir(caseId)).get(envelopeId));
+  const live = liveActionHash(reg, caseId, new EnvelopeStore(reg.caseDir(caseId)).get(envelopeId), outcome.salt || null);
   if (!live || outcome.action_hash !== live) {
     log.warn(`Signed approval for ${envelopeId} (request ${outcome.request_id}) is for a different action; ignored.`);
     return { applied: false, error: 'the phone approved a different action; request it again' };

@@ -1,0 +1,84 @@
+{
+  "name": "response-reject-sealed-hash-unsalted",
+  "consumers": [
+    "node"
+  ],
+  "check": 10,
+  "given": {
+    "now": "2026-09-23T18:04:41.201Z",
+    "node": {
+      "id": "kl-c2ubd6jjqumalzt5",
+      "name": "web-01",
+      "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "overlay": [],
+    "allow_test_keys": true,
+    "pending": [
+      {
+        "envelope": {
+          "alg": "Ed25519",
+          "kid": "kl-c2ubd6jjqumalzt5",
+          "payload": "eyJhY3Rpb25faGFzaCI6InNNRldNX0NheGlyWDFrT3Vhc1JxZmMtUzRkd0ROOEdva2JnaUU0WUE0SXMiLCJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsIm5vZGVfYm94Ijp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoidHNZRzZmZlVwYmpzOTBSendGUXlFRnFLX3hremJPMlhmQVUteTczTUpNdyIsInkiOiJxU2x3ZjhrbFJHUFVTcFNBd29HV3Z4RmhlT0dOS1ZrbTRheE9yWmVVSllRIn0sIm5vZGVfaWQiOiJrbC1jMnViZDZqanF1bWFsenQ1Iiwibm9kZV9uYW1lIjoid2ViLTAxIiwibm9uY2UiOiJ6U3NuU2RFdWNxV0lhRU9BWURQVWdjQ2tyMzJuWXZIWXluSVdXb1JEUnhJIiwicmVxdWVzdF9pZCI6IjdhM2Y4NzliLTA4NWItNGNkOC05OWJlLWRlNzMxMTM0YTc4ZiIsInNlYWxlZCI6eyJjdCI6ImEwMkR3U1k5a25JbVVIRHpfT2QwUEo2SW5hVWNTaDFHbjJTNmlGcUh3cWs3OWVGeWVYY1o0R29ET0dCaDd0ckZQV1BWUEhfbHpXbGN1OUtHQkdIRUZLNlZLQXhBQW80MllXeUNhMVJRNkRQTlVNX2NnYUM2RXBQdXNUcW9BX3lGU0xWTEdHY2l0Wkx0WFh1US1wRGxDQmFYQzJZbnFtRk1HSUUzTXBpUzVRenpjM3ZWd1dieXRlV3M5S0l4SFo4cTBNMzlERkhwdWlTdkdtNzZiSjRXZVotcUFFRi1nXzREWUF1bmN4SGw3eS1RVTNNRFh0MWVLV24xU2FnYi1kbXRpWEMyOGdHaFZYN3RhSEsySmRoVFdCUk1hc2RfNkxnWDJzZFZQVDBQSUxLYWFxMy1kVVdMREpCRDVEQ3M0dXJLYXlmRTE4NHdlZXFLMU90VE1oTmZsRFAtdzBrTVJTb3gyYXVIemdqS2Rld0UiLCJlcGsiOnsiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJZRFFYTE8wMWhvMmEyZlFhcEx4a3hseVhpOHpRcjh1R0Iwcm1ZU2V4OUVZIiwieSI6ImZnb3JIY2U0ZmhPUUJ5RnByd2piYmk3UlpZWm1hdmh4R3JzeTBHbXRTWmMifSwiaXYiOiIxVWR4bG0yN2ZZV3FtZG83Iiwia2V5cyI6eyJkLTN2bXdyaWhoZGJuaXQ0b2kiOiJtZmFmUFdld2RaVnNjb0tIQzV0ZEVWMmFNOGNGbFR3SDc0Q1o3OUZLX2JkVkNSbDVBazF0SWJTTG10Sy1JQXZqIiwiZC02eGRsYnhnbGhudmZhM2x3IjoiNzlzbEUwRkJRWENNa05DaldENXZuWFpJMlRpcHE5elBORlZmQUdUNVFSY2p1SkEyOXo5bVlIMFlad3hJWEs3ZiIsImtsLWMydWJkNmpqcXVtYWx6dDUiOiJDOU51dVpzWG11cG13ZkpiWThSUW9mUUUtNXZSbmdOTjF1blI5cXZHWXpzdFhVa0FSZmZXcW5zWW02dDBLS2NxIn0sInYiOjF9LCJ0eXBlIjoia2wuYXBwcm92YWwucmVxdWVzdCIsInYiOjF9",
+          "sig": "08gA0rU3ZV7nnfZFvdBwX1zGRaHWjVtsEg8j-wTkkyYBLCJaUEdtoqfQ_O0BiBUatEIpViccGYutgUKJhtZPBA"
+        },
+        "salt": "B1ZB7Y63mBW7zmDek0bkvAlWAWQV7j3wxYOqDiND9zE"
+      }
+    ],
+    "used": [],
+    "current_action": {
+      "kind": "tool",
+      "name": "Bash",
+      "params": {
+        "command": "git push origin main"
+      },
+      "cwd": "/srv/site",
+      "summary": "Bash(git push origin main)"
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJhY3Rpb25faGFzaCI6IjNDV25zMUdkZjBCN2NQRmdDenZoMlF2ZkZlUnNUdmpTZ0RXMkF2cmdjakEiLCJkZWNpc2lvbiI6ImFwcHJvdmUiLCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODowOToxMS4yMDFaIiwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub25jZSI6InpTc25TZEV1Y3FXSWFFT0FZRFBVZ2NDa3IzMm5ZdkhZeW5JV1dvUkRSeEkiLCJyZXF1ZXN0X2lkIjoiN2EzZjg3OWItMDg1Yi00Y2Q4LTk5YmUtZGU3MzExMzRhNzhmIiwic2lnbmVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDozMS4yMDFaIiwidHlwZSI6ImtsLmFwcHJvdmFsLnJlc3BvbnNlIiwidiI6MX0",
+    "sig": "EE3h0HcLdjtn3D66Di5dRgQWMhBpL9myheYhxKIxw8zFO1TKgwKNVFEqqOKo1v9JZPmKMtdfG0RYkuyNyWSQ3A"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "action_hash_mismatch"
+  }
+}

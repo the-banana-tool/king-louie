@@ -143,6 +143,27 @@ describe('FleetToolHandler origins through the unsafe path', () => {
         return { decision: 'approve', action_hash: actionHash(currentAction()), request_id: 'req-1' };
       }
     };
+    // A sealed request's outcome (R-SP-2): its hash is salted, and the pre-run
+    // re-check takes the outcome's salt or it could never pass.
+    const SALT = Buffer.alloc(32, 7).toString('base64url');
+    const sealedRun = async (hashOf) => {
+      const sealed = new FleetToolHandler({
+        nodeConfig: NODE,
+        runbookEngine: engine,
+        auditLedger: fakeLedger(),
+        approver: { unavailableReason: () => null, requestAction: async (_, { currentAction }) => ({ decision: 'approve', action_hash: hashOf(currentAction()), salt: SALT, request_id: 'req-2' }) }
+      });
+      const started = sealed.runRunbook({ machine: 'web-01', runbook: 'site.restart' }, FD_ORIGIN);
+      await sealed.jobRuns.get(started.job_id);
+      await settle();
+      return sealed.jobManager.getJob(started.job_id);
+    };
+    assert.equal((await sealedRun((a) => actionHash(a, { salt: SALT }))).status, 'succeeded');
+    const changed = await sealedRun((a) => actionHash({ ...a, summary: 'something else' }, { salt: SALT }));
+    assert.equal(changed.status, 'failed');
+    assert.match(changed.result, /^action_changed/);
+    // The unsalted hash under a salt is not the approved one either.
+    assert.match((await sealedRun((a) => actionHash(a))).result, /^action_changed/);
     const ledger = fakeLedger();
     const h = new FleetToolHandler({ nodeConfig: NODE, runbookEngine: engine, approver, auditLedger: ledger });
     const { job_id: jobId, status } = h.runRunbook({ machine: 'web-01', runbook: 'site.restart' }, FD_ORIGIN);

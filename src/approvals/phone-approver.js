@@ -5,7 +5,7 @@
 const { createLogger } = require('../logging');
 const { canonicalize, sha256b64url } = require('../platform/jcs');
 const {
-  buildRequest, buildStatus, toolAction, actionHash, MessageError, TTL_MAX_MS, clampTtl
+  buildRequest, buildStatus, toolAction, actionHash, normalizeOrigin, MessageError, TTL_MAX_MS, clampTtl
 } = require('./messages');
 const { verifyDeviceEnvelope, bytesSha256 } = require('./verify-device');
 const { PendingRequests } = require('./pending-store');
@@ -16,7 +16,7 @@ const DEFAULT_UNAVAILABLE = 'Phone approval unavailable: no enrolled device or n
 
 class PhoneApprover {
   constructor({ identity, nodeName = null, approverStore, link, auditLedger, ttlMs = TTL_MAX_MS, now = Date.now,
-    setTimer = setTimeout, clearTimer = clearTimeout, buildRequest: build = buildRequest } = {}) {
+    setTimer = setTimeout, clearTimer = clearTimeout, buildRequest: build = buildRequest, sealPolicy = null } = {}) {
     if (!identity || !approverStore || !auditLedger) throw new TypeError('PhoneApprover needs identity, approverStore and auditLedger');
     this.identity = identity;
     this.nodeName = nodeName || identity.nodeName;
@@ -28,6 +28,7 @@ class PhoneApprover {
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.build = build;
+    this.sealPolicy = sealPolicy;
     this.pendingRequests = new PendingRequests({ now });
     this.stopped = false;
     this._onConnected = () => this._resubmitAll();
@@ -91,20 +92,28 @@ class PhoneApprover {
 
   async requestAction(action, { origin = null, signal = null, currentAction } = {}) {
     if (typeof currentAction !== 'function') throw new TypeError('currentAction required');
+    // Ahead of the availability checks: an untrusted store or a revoke that
+    // left nobody is also "nobody to seal to", and it is denied as that.
+    if (!this.stopped && this._cannotSeal()) return this._denyUnsealable();
     const unavailable = this.unavailableReason();
     if (unavailable) return this._outcome('unavailable', { reason: unavailable });
 
     let built;
     try {
-      built = this.build({ identity: this.identity, action, origin, ttlMs: this.ttlMs, now: this.now() });
+      built = this.build({ identity: this.identity, action, origin, ttlMs: this.ttlMs, now: this.now(), sealPolicy: this.sealPolicy });
     } catch (err) {
+      if (err instanceof MessageError && err.reason === 'no_sealed_recipient') return this._denyUnsealable();
       if (err instanceof MessageError) return this._outcome('error', { reason: err.reason });
       throw err;
     }
     const { message, envelope, bytes } = built;
+    const salt = built.salt || null;
+    // An origin is sealed with the action (R-SP-4), so a sealed request's job id
+    // stays out of the mirrored ledger too.
+    const jobId = salt ? null : normalizeOrigin(origin).job_id;
     const ids = { request_id: message.request_id, action_hash: message.action_hash };
     try {
-      await this._audit('approval.request', { job_id: message.origin.job_id, envelope });
+      await this._audit('approval.request', { job_id: jobId, envelope });
     } catch (err) {
       log.error(`approval.request not audited, so not sent: ${err.message}`);
       return this._outcome('error', { ...ids, reason: 'audit_unavailable' });
@@ -115,16 +124,18 @@ class PhoneApprover {
     // to the link, or a request built just before shutdown could still be
     // submitted, answered and approved after stop().
     if (this.stopped) {
-      this._auditBestEffort('approval.outcome', { request_id: message.request_id, state: 'withdrawn', reason: 'the service is stopping', job_id: message.origin.job_id });
+      this._auditBestEffort('approval.outcome', { request_id: message.request_id, state: 'withdrawn', reason: 'the service is stopping', job_id: jobId });
       return this._outcome('unavailable', { ...ids, reason: 'the service is stopping' });
     }
     if (signal && signal.aborted) {
-      this._auditBestEffort('approval.outcome', { request_id: message.request_id, state: 'withdrawn', reason: null, job_id: message.origin.job_id });
+      this._auditBestEffort('approval.outcome', { request_id: message.request_id, state: 'withdrawn', reason: null, job_id: jobId });
       return this._outcome('withdrawn', ids);
     }
 
     return new Promise((resolve) => {
-      const entry = { request: message, envelope, bytes, currentAction, resolve, signal, timer: null, onAbort: null, deciding: false };
+      // `salt` is this request's hash rule, kept for its whole life: a box key
+      // applied while it is pending changes the next request, not this one.
+      const entry = { request: message, envelope, bytes, salt, jobId, currentAction, resolve, signal, timer: null, onAbort: null, deciding: false };
       this.pendingRequests.add(entry);
       const delay = Math.max(0, Date.parse(message.expires_at) - this.now());
       entry.timer = this.setTimer(() => this._finish(message.request_id, 'expired', { statusState: 'expired' }), delay);
@@ -135,6 +146,21 @@ class PhoneApprover {
       }
       this._submit(entry);
     });
+  }
+
+  // R-SP-5: sealing and nobody to seal to. A policy that cannot answer counts.
+  _cannotSeal() {
+    if (!this.sealPolicy) return false;
+    try {
+      return this.sealPolicy.sealing() && !this.sealPolicy.canSeal();
+    } catch {
+      return true;
+    }
+  }
+
+  _denyUnsealable() {
+    this._auditBestEffort('approval.outcome', { request_id: null, state: 'refused', reason: 'no_sealed_recipient', job_id: null });
+    return this._outcome('deny', { reason: 'no_sealed_recipient' });
   }
 
   // While the link is down the request stays pending; `connected` resubmits
@@ -177,9 +203,11 @@ class PhoneApprover {
     entry.finishedCause = cause || decision;
     this.clearTimer(entry.timer);
     if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
-    this._auditBestEffort('approval.outcome', { request_id: requestId, state: statusState || decision, reason, job_id: entry.request.origin.job_id });
+    this._auditBestEffort('approval.outcome', { request_id: requestId, state: statusState || decision, reason, job_id: entry.jobId });
     if (statusState) this._sendStatus(requestId, statusState, deviceId, reason);
-    entry.resolve(this._outcome(decision, { request_id: requestId, device_id: deviceId, action_hash: entry.request.action_hash, reason }));
+    const outcome = this._outcome(decision, { request_id: requestId, device_id: deviceId, action_hash: entry.request.action_hash, reason });
+    // A caller that re-checks the action against outcome.action_hash needs it.
+    entry.resolve(entry.salt ? { ...outcome, salt: entry.salt } : outcome);
   }
 
   _reject(envelope, requestId, deviceId, reason) {
@@ -227,7 +255,7 @@ class PhoneApprover {
     // 12. The action, rebuilt from live state, is still the one approved.
     let live = null;
     try {
-      live = actionHash(entry.currentAction());
+      live = actionHash(entry.currentAction(), { salt: entry.salt });
     } catch {
       live = null;
     }
@@ -241,7 +269,7 @@ class PhoneApprover {
     // 13. Audited before it counts; on failure nothing is consumed and the phone may retry.
     entry.deciding = true;
     try {
-      await this._audit('approval.response', { request_id: requestId, device_id: deviceId, decision: message.decision, envelope, job_id: req.origin.job_id });
+      await this._audit('approval.response', { request_id: requestId, device_id: deviceId, decision: message.decision, envelope, job_id: entry.jobId });
     } catch (err) {
       entry.deciding = false;
       log.error(`approval.response not audited, so not accepted: ${err.message}`);
@@ -260,7 +288,7 @@ class PhoneApprover {
     // guarantee the approval covers what will actually run.
     let liveAfterAudit = null;
     try {
-      liveAfterAudit = actionHash(entry.currentAction());
+      liveAfterAudit = actionHash(entry.currentAction(), { salt: entry.salt });
     } catch {
       liveAfterAudit = null;
     }
@@ -312,6 +340,9 @@ class PhoneApprover {
       case 'approve':
         return true;
       case 'deny':
+        // Not the owner's no, so not counted as one by the denial tracker.
+        if (outcome.reason === 'no_sealed_recipient') return refuse('unavailable', 'Denied (no_sealed_recipient): this node seals its approvals and no phone can read them. Enroll a phone or apply its box key. Nothing ran.');
+        return false;
       case 'withdrawn':
         return false;
       case 'expired':
@@ -325,7 +356,7 @@ class PhoneApprover {
   }
 
   pending() {
-    return this.pendingRequests.list().map((e) => ({ request_id: e.request.request_id, expires_at: e.request.expires_at, summary: e.request.action.summary }));
+    return this.pendingRequests.list().map((e) => ({ request_id: e.request.request_id, expires_at: e.request.expires_at, summary: e.request.action ? e.request.action.summary : '(sealed)' }));
   }
 
   stop() {
