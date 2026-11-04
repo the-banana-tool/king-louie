@@ -174,6 +174,19 @@ describe('DelegateSessions', () => {
     assert.equal(t.jobs.activeJobCount(), 0, 'an idle session holds no slot');
   });
 
+  it('a delegate\'s tool entries say which grant and client the front door issued, and no name or session', async () => {
+    const t = await setup();
+    script = [use(GATED)];
+    const { job_id: jobId } = await t.sessions.start({ task: 'push', origin: origin(['fleet:delegate', 'fleet:unsafe']) });
+    await t.sessions.turns.get(jobId);
+    await new Promise((resolve) => { setImmediate(resolve); });
+    const tier = t.audit.find((e) => e.kind === 'tier.decision').data;
+    assert.deepEqual(tier.origin, { kind: 'frontdoor', grant_id: 'gr_y', client_id: 'dcr_x' });
+    assert.equal(tier.job_id, jobId);
+    const text = JSON.stringify(t.audit);
+    assert.ok(!text.includes('Example Client') && !text.includes('mcp-1'), text);
+  });
+
   it('an always_confirm call reaches the phone with the front door\'s origin when fleet:unsafe is granted', async () => {
     const t = await setup();
     script = [use(GATED)];

@@ -239,7 +239,7 @@ class GuiBroker extends EventEmitter {
     const result = await this.channel.request('launch', { exe: resolution.exe, argv: resolution.argv, files: resolution.files }, { jobId: ctx.jobId, timeoutMs: 30000 });
     const pid = result && Number.isInteger(result.pid) ? result.pid : null;
     this._recordLaunched(ctx.jobId, resolution.appId, pid);
-    this._audit('gui.launch', { job_id: ctx.jobId, app_id: resolution.appId, exe: resolution.exe, argv: [...resolution.argv, ...resolution.files], tier: resolution.tier, approved_by: approvedBy, pid });
+    this._audit('gui.launch', { job_id: ctx.jobId, app_id: resolution.appId, tier: resolution.tier, approved_by: approvedBy, pid });
     return { app_id: resolution.appId, pid, tier: resolution.tier, launched_at: new Date(this.clock()).toISOString() };
   }
 
@@ -261,7 +261,7 @@ class GuiBroker extends EventEmitter {
     const result = await this.channel.request('launch_browser', { exe, profile, args }, { jobId: ctx.jobId, timeoutMs: 15000 });
     const pid = result && Number.isInteger(result.pid) ? result.pid : null;
     this._recordLaunched(ctx.jobId, this.guiConfig.browser, pid);
-    this._audit('gui.browser.launch', { job_id: ctx.jobId, exe, pid });
+    this._audit('gui.browser.launch', { job_id: ctx.jobId, app_id: this.guiConfig.browser, pid });
     return result;
   }
 

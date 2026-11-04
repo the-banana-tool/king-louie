@@ -7,11 +7,25 @@
 // keep the on-screen dialog and never reach the phone; remote runs in phone
 // mode only ever get the phone.
 const { createLogger } = require('../logging');
-const { paramsHmac, auditOriginOf, auditError } = require('./audit-fields');
+const { paramsHmac, auditOriginOf, auditError, errorByCode } = require('./audit-fields');
 const originHelpers = require('../core/origin');
 
 const log = createLogger('approvals/executor-options');
 const PHONE_GRACE_MS = 15000;
+const LOGGED_ERROR_MAX = 2000;
+
+// The ledger holds a failure's code alone, so its words are logged here. A tool
+// with an audit form of its parameters (Type, Key) may quote typed text, so it is
+// logged by code too; so is one the registry does not know.
+function logToolFailure(toolName, jobId, result) {
+  // Required here, as in phoneExecutorOptions: only the agent profile loads the tool registry.
+  const { toolRegistry } = require('../tools');
+  const tool = toolRegistry.get(toolName);
+  const words = !tool || typeof tool.auditParameters === 'function'
+    ? errorByCode(result)
+    : String((result && result.error) || 'failed').slice(0, LOGGED_ERROR_MAX);
+  log.warn(`${toolName} failed (job ${jobId || 'none'}): ${words}`);
+}
 
 // Fleet stage 4 §3.8: a delegate session whose client was not granted
 // fleet:unsafe refuses unsafe calls itself; the phone is never asked.
@@ -82,7 +96,9 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
     // The same metadata object goes on to the phone approver, so the refusal
     // it writes there reaches ToolExecutor's mapApprovalResult.
     options.approvalRequester = (toolName, parameters, metadata = {}) => {
-      metadata.origin = origin;
+      // What the phone is shown; the kind and the ids are the ledger's.
+      const { kind, grant_id: grantId, client_id: clientId, ...phoneOrigin } = origin;
+      metadata.origin = phoneOrigin;
       return phoneApprover.requestApproval(toolName, parameters, metadata);
     };
     // The phone's own expiry answers first ('timeout' from the approver).
@@ -132,6 +148,7 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
     });
     executor.on('postExecute', ({ toolName, result }) => {
       const ok = Boolean(result) && result.success !== false && result.ok !== false;
+      if (!ok) logToolFailure(toolName, origin.job_id, result);
       append('exec.result', {
         kind: 'tool', name: toolName, request_id: null, job_id: origin.job_id || null, origin: auditOrigin,
         ok, exit_status: null, error: ok ? null : auditError(result)

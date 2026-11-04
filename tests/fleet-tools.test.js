@@ -26,7 +26,7 @@ describe('origins', () => {
     assert.equal(Array.from(approvalOrigin(fd, 'job-1').client).length, 200);
     assert.equal(approvalOrigin(fd, 'job-1').session, 's-1');
     assert.deepEqual(approvalOrigin(STDIO_ORIGIN, null), { client: 'stdio-mcp', session: null, job_id: null });
-    assert.deepEqual(auditOrigin(fd), { kind: 'frontdoor' });
+    assert.deepEqual(auditOrigin(fd), { kind: 'frontdoor', grant_id: 'gr_y', client_id: 'dcr_x' });
     assert.deepEqual(auditOrigin(null), { kind: 'stdio' });
   });
 });
@@ -191,10 +191,10 @@ describe('FleetToolHandler origins through the unsafe path', () => {
     const byKind = Object.fromEntries(ledger.entries.map((e) => [e.kind, e.data]));
     assert.deepEqual(Object.keys(byKind).sort(), ['exec.result', 'exec.start', 'request.inbound']);
     // Mirrored entries hold no free text: the origin is its kind, and no client is named.
-    for (const kind of ['request.inbound', 'exec.start', 'exec.result']) assert.deepEqual(byKind[kind].origin, { kind: 'frontdoor' }, kind);
+    for (const kind of ['request.inbound', 'exec.start', 'exec.result']) assert.deepEqual(byKind[kind].origin, { kind: 'frontdoor', grant_id: 'gr_y', client_id: 'dcr_x' }, kind);
     assert.ok(!('client' in byKind['request.inbound']));
     assert.ok(!('params_sha256' in byKind['request.inbound']));
-    assert.ok(!/Example Client|dcr_x|gr_y|s-1/.test(JSON.stringify(ledger.entries)));
+    assert.ok(!/Example Client|s-1/.test(JSON.stringify(ledger.entries)));
     assert.equal(byKind['exec.start'].job_id, jobId);
     assert.equal(byKind['exec.start'].request_id, 'req-1');
   });
@@ -228,9 +228,8 @@ describe('FleetToolHandler delegate jobs (fix round 1)', () => {
     await settle();
     const inbound = ledger.entries.filter((e) => e.kind === 'request.inbound').map((e) => e.data);
     assert.deepEqual(inbound.map((e) => e.name), ['delegate', 'send_to_job']);
-    assert.deepEqual(inbound[0].origin, { kind: 'frontdoor' });
-    assert.equal(inbound[1].job_id, d.job_id);
-    assert.deepEqual(inbound[1].origin, { kind: 'frontdoor' });
+    assert.deepEqual(inbound[0].origin, { kind: 'frontdoor', grant_id: 'gr_y', client_id: 'dcr_x' });
+    assert.deepEqual(inbound[1].origin, { kind: 'frontdoor', grant_id: 'gr_y', client_id: 'dcr_x' });
     assert.equal(inbound[1].job_id, d.job_id);
     // A ledger whose identity has no box key writes no mark at all, never a plain hash.
     for (const e of inbound) assert.deepEqual([e.params_hmac, 'params_sha256' in e], [null, false]);
@@ -238,7 +237,7 @@ describe('FleetToolHandler delegate jobs (fix round 1)', () => {
 
   // Final review carry T9: stdio can name any string as job_id; the audit
   // entry keeps at most 200 code points of it, like every origin string.
-  it('send_to_job cuts a raw job_id to 200 code points in request.inbound', async () => {
+  it('send_to_job writes no job_id this node does not know in request.inbound', async () => {
     const ledger = fakeLedger();
     const delegateSessions = { start: async () => ({}), send: async () => ({}), cancel: () => ({}), ownsJob: () => true };
     const h = new FleetToolHandler({ nodeConfig: { ...NODE, profile: 'agent' }, delegateSessions, auditLedger: ledger });
@@ -246,7 +245,6 @@ describe('FleetToolHandler delegate jobs (fix round 1)', () => {
     await assert.rejects(h.call('send_to_job', { job_id: long, message: 'go on' }, { origin: FD_ORIGIN }));
     await settle();
     const [inbound] = ledger.entries.filter((e) => e.kind === 'request.inbound').map((e) => e.data);
-    assert.equal(Array.from(inbound.job_id).length, 200);
-    assert.ok(long.startsWith(inbound.job_id));
+    assert.equal(inbound.job_id, null);
   });
 });

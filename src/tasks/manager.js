@@ -18,7 +18,7 @@ const { createLogger } = require('../logging');
 const { realResolve } = require('../platform/path-roots');
 const { TASK_GUIDANCE, parseStuck } = require('../context/system-sections');
 const { summarizeTurnLlm } = require('../tracking/llm-totals');
-const { ToolError, approvalOrigin } = require('../fleet/fleet-tools');
+const { ToolError, executorOrigin } = require('../fleet/fleet-tools');
 const { shouldRefuseUnsafe } = require('../fleet/delegate-sessions');
 const { TaskCards } = require('./cards');
 const { createTaskPolicy } = require('./policy');
@@ -532,7 +532,7 @@ class TaskManager {
       allowedToolNames: taskToolNames(this.toolRegistry),
       onUsageRecorded: (event) => this._charge(turn, [event]),
       executorOptions: {
-        origin: approvalOrigin(origin, `chat:${chatId}`),
+        origin: executorOrigin(origin, `chat:${chatId}`),
         chatId,
         refuseUnsafe: shouldRefuseUnsafe(origin, this.nodeConfig),
         allowedRoots: [workDir],

@@ -263,7 +263,7 @@ class HelperChannel extends EventEmitter {
         if (first) {
           conn.since = new Date(this.clock()).toISOString();
           const info = this.info;
-          this._audit('gui.helper.connected', { user: info.user, platform: info.platform, pid: info.pid, capabilities: info.capabilities });
+          this._audit('gui.helper.connected', { platform: info.platform, pid: info.pid, capabilities: info.capabilities });
           this.emit('ready', info);
         } else {
           this.emit('event', 'probe_changed', this.info);

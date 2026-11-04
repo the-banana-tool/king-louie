@@ -30,9 +30,16 @@ function paramsHmac(params, identity) {
   }
 }
 
-// { kind }, from a fixed list: a kind or client nobody knows is 'remote', never repeated.
+// { kind }, from a fixed list: a kind or client nobody knows is 'remote', never
+// repeated. A front-door origin adds the ids the front door issued (controller's
+// ruling), so a call can be tied to its grant; never the name a client gave itself,
+// or its session.
 function auditOriginOf(origin) {
   const o = origin || {};
+  if (o.kind === 'frontdoor') {
+    const id = (v) => (typeof v === 'string' && v ? v : null);
+    return { kind: 'frontdoor', grant_id: id(o.grant_id), client_id: id(o.client_id) };
+  }
   if (ORIGIN_KINDS.includes(o.kind)) return { kind: o.kind };
   if (typeof o.client === 'string' && Object.hasOwn(LOCAL_CLIENTS, o.client)) return { kind: LOCAL_CLIENTS[o.client] };
   return { kind: 'remote' };
@@ -45,4 +52,11 @@ function auditError(result) {
   return { error_chars: typeof r.error === 'string' ? r.error.length : 0 };
 }
 
-module.exports = { paramsHmac, auditOriginOf, auditError, PARAMS_INFO };
+// A failure as the node's own log may say it when its tool's text must stay out
+// of logs too (Type, Key): the code, or how long it was.
+function errorByCode(result) {
+  const shown = auditError(result);
+  return typeof shown === 'string' ? shown : `${shown.error_chars} characters`;
+}
+
+module.exports = { paramsHmac, auditOriginOf, auditError, errorByCode, PARAMS_INFO };

@@ -518,7 +518,9 @@ describe('launch, close and list', () => {
     channel.connect();
     const launched = await b.launch({ tier: 'routine', reason: 'allowlisted', appId: 'calculator', exe: 'C:\\Windows\\System32\\calc.exe', argv: [], files: [], match: [] }, ctx, { approvedBy: 'allowlist' });
     assert.equal(launched.pid, 555);
-    assert.ok(audits.some((a) => a.kind === 'gui.launch' && a.data.approved_by === 'allowlist' && a.data.app_id === 'calculator'));
+    await new Promise((r) => setImmediate(r));
+    // Mirrored, so no path or argument: what ran is the allowlist's id.
+    assert.deepEqual(audits.find((a) => a.kind === 'gui.launch').data, { job_id: 'job-1', app_id: 'calculator', tier: 'routine', pid: 555, approved_by: 'allowlist' });
     const closed = await b.close('calculator', true, ctx);
     const closes = channel.requests.filter((r) => r.op === 'close').map((r) => r.params);
     assert.deepEqual(closes, [{ pids: [555], force: true }, { pids: [100], force: false }]);
@@ -574,7 +576,7 @@ describe('the take ops: launch_browser, record_start, record_stop, keep_awake', 
     assert.deepEqual(sent.opts, { jobId: 'job-1', timeoutMs: 15000 });
     assert.deepEqual([...b.launched.get('job-1').get('chrome')], [4242]);
     await new Promise((r) => setImmediate(r));
-    assert.deepEqual(audits.filter((a) => a.kind === 'gui.browser.launch'), [{ kind: 'gui.browser.launch', data: { job_id: 'job-1', exe: CHROME, pid: 4242 } }]);
+    assert.deepEqual(audits.filter((a) => a.kind === 'gui.browser.launch'), [{ kind: 'gui.browser.launch', data: { job_id: 'job-1', app_id: 'chrome', pid: 4242 } }]);
   });
 
   it('launchBrowser with no job id keeps no pid', async () => {

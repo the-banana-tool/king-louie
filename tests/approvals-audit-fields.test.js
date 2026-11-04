@@ -16,7 +16,7 @@ const { FleetToolHandler } = require('../src/fleet/fleet-tools');
 const { toolRegistry } = require('../src/tools');
 const { Tool } = require('../src/tools/tool-schema');
 const { canonicalize } = require('../src/platform/jcs');
-const { setLogLevel } = require('../src/logging');
+const { setLogLevel, addSink } = require('../src/logging');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
 
@@ -182,9 +182,96 @@ describe('params_hmac (R-SP-7)', () => {
   });
 });
 
+describe('request.inbound names and ids (fleet-tools)', () => {
+  const FD = { kind: 'frontdoor', client_id: 'dcr_x', client_name: CLIENT, grant_id: 'gr_y', mcp_session: SESSION };
+  const NODE = { name: 'web-01', profile: 'agent', capabilities: [], policy: {} };
+  const inboundOf = (ledger) => ledger.entries.filter((e) => e.kind === 'request.inbound').map((e) => e.data);
+
+  it('a known tool or runbook is named; any other string is (other)', async () => {
+    const ledger = ledgerFor(testNodeIdentity({ box: true }));
+    const engine = { getRunbook: (n) => (n === 'site.status' ? { name: n } : null) };
+    const h = new FleetToolHandler({ nodeConfig: NODE, runbookEngine: engine, auditLedger: ledger });
+    h.auditInbound('site.status', {}, FD, null);
+    h.auditInbound('delegate', {}, FD, null);
+    h.auditInbound(`${PARAM} a client wrote this`, {}, FD, null);
+    h.auditInbound(7, {}, FD, null);
+    await settle();
+    assert.deepEqual(inboundOf(ledger).map((d) => d.name), ['site.status', 'delegate', '(other)', '(other)']);
+    assert.ok(!allText(ledger.entries).includes(PARAM));
+  });
+
+  it('send_to_job and send_to_task write an id only when this node knows it', async () => {
+    const ledger = ledgerFor(testNodeIdentity({ box: true }));
+    const tasks = { store: { get: (id) => (id === 'task-known' ? { task_id: id } : null) }, send: async () => ({ task_id: 'task-known', seq: 1 }), get: async () => ({ task_id: 'task-known', seq: 1, text: null, answer: null }) };
+    const delegateSessions = { start: async () => ({}), send: async () => ({ job_id: 'x' }), cancel: () => ({}), ownsJob: () => false };
+    const h = new FleetToolHandler({ nodeConfig: NODE, delegateSessions, tasks, auditLedger: ledger });
+    await assert.rejects(h.call('send_to_job', { job_id: `${PARAM} free`, message: 'hi' }, { origin: FD }));
+    await h.callTask('send_to_task', { task_id: `${PARAM} free`, message: 'hi' }, FD).catch(() => {});
+    await h.callTask('send_to_task', { task_id: 'task-known', message: 'hi' }, FD).catch(() => {});
+    await settle();
+    assert.deepEqual(inboundOf(ledger).map((d) => [d.name, d.job_id]), [['send_to_job', null], ['send_to_task', null], ['send_to_task', 'task-known']]);
+    assert.ok(!allText(ledger.entries).includes(PARAM));
+  });
+});
+
+describe('the detail stays in the node\'s own log', () => {
+  const quietExecutor = (ledger, auditParameters) => {
+    toolRegistry.register(new Tool({
+      name: TOOL, description: 'test', requiresApproval: false, parameters: { type: 'object', properties: {} },
+      ...(auditParameters ? { auditParameters } : {}),
+      execute: async () => ({ success: false, error: `it said: ${FAILURE} ${PARAM}` })
+    }));
+    const seam = approvalSeam({ remoteApprovals: 'phone', executorOptions: { origin: { client: CLIENT, session: null, job_id: 'job-9' } }, phoneApprover: { ttlMs: 1000, requestApproval: async () => true, isAvailable: () => true }, auditLedger: ledger, nodePolicy: { allowed_roots: [], remote_sessions: { always_confirm: [], deny: [] } } });
+    const executor = new ToolExecutor(seam.toolExecutorOptions);
+    seam.attach(executor);
+    return executor;
+  };
+
+  async function logged(run) {
+    const records = [];
+    const remove = addSink((r) => records.push(r));
+    setLogLevel('info');
+    try {
+      await run();
+      await settle();
+    } finally {
+      remove();
+      setLogLevel('fatal');
+    }
+    return JSON.stringify(records);
+  }
+
+  it('a tool\'s failure: its name, its job and its error text, in the log and not the ledger', async () => {
+    const ledger = ledgerFor(testNodeIdentity({ box: true }));
+    const executor = quietExecutor(ledger, null);
+    const text = await logged(() => executor.execute(TOOL, { command: 'x' }));
+    for (const want of [TOOL, 'job-9', FAILURE]) assert.ok(text.includes(want), want);
+    assert.ok(!allText(ledger.entries).includes(FAILURE));
+  });
+
+  it('a tool with an audit form (Type, Key) is logged by code alone: no typed text', async () => {
+    const ledger = ledgerFor(testNodeIdentity({ box: true }));
+    const executor = quietExecutor(ledger, () => ({ length: 5 }));
+    const text = await logged(() => executor.execute(TOOL, { text: PARAM }));
+    assert.ok(text.includes(TOOL) && text.includes('job-9'));
+    assert.ok(!text.includes(PARAM) && !text.includes(FAILURE), text);
+  });
+
+  it('a runbook\'s failure: its error is in the log', async () => {
+    const ledger = ledgerFor(testNodeIdentity({ box: true }));
+    const jobs = { getSignal: () => null, isTerminal: () => false, updateJob: () => {}, markExecuting: () => {}, markSettled: () => {} };
+    const h = new FleetToolHandler({ nodeConfig: { name: 'web-01', profile: 'runbook', capabilities: [], policy: {} }, auditLedger: ledger, jobManager: jobs });
+    h.runbookEngine = { releaseExecution: () => {}, executeRunbook: async () => ({ success: false, error: FAILURE }) };
+    const text = await logged(() => h.executeJob('job-1', 'site.restart', {}, {}, {}));
+    for (const want of ['site.restart', 'job-1', FAILURE]) assert.ok(text.includes(want), want);
+  });
+});
+
 describe('auditOriginOf and auditError', () => {
   it('an origin is its kind and nothing a client named', () => {
-    assert.deepEqual(auditOriginOf({ kind: 'frontdoor', client_name: CLIENT, client_id: 'dcr_x', grant_id: 'gr_y' }), { kind: 'frontdoor' });
+    // What the front door issued, never what a client calls itself.
+    assert.deepEqual(auditOriginOf({ kind: 'frontdoor', client_name: CLIENT, client: CLIENT, session: SESSION, mcp_session: SESSION, client_id: 'dcr_x', grant_id: 'gr_y' }), { kind: 'frontdoor', grant_id: 'gr_y', client_id: 'dcr_x' });
+    assert.deepEqual(auditOriginOf({ kind: 'frontdoor', client_name: CLIENT }), { kind: 'frontdoor', grant_id: null, client_id: null });
     assert.deepEqual(auditOriginOf({ kind: 'stdio', client: 'stdio-mcp' }), { kind: 'stdio' });
     assert.deepEqual(auditOriginOf({ kind: 'service-chat', client: 'x' }), { kind: 'service-chat' });
     assert.deepEqual(auditOriginOf({ client: 'desktop', deviceId: 'kld-1', session: 'chat-1' }), { kind: 'desktop' });
@@ -216,10 +303,10 @@ describe('the runbook path (fleet-tools)', () => {
     await settle();
     const inbound = ledger.entries.find((e) => e.kind === 'request.inbound').data;
     assert.deepEqual(Object.keys(inbound).sort(), ['job_id', 'method', 'name', 'origin', 'params_hmac']);
-    assert.deepEqual(inbound.origin, { kind: 'frontdoor' });
+    assert.deepEqual(inbound.origin, { kind: 'frontdoor', grant_id: 'gr_y', client_id: 'dcr_x' });
     assert.equal(inbound.params_hmac, paramsHmac({ value: PARAM }, identity));
     const text = allText(ledger.entries);
-    for (const planted of [PARAM, CLIENT, SESSION, 'dcr_x', 'gr_y']) assert.ok(!text.includes(planted), planted);
+    for (const planted of [PARAM, CLIENT, SESSION]) assert.ok(!text.includes(planted), planted);
   });
 
   it('a runbook that fails records how long its error was, and one that throws a code records the code', async () => {
@@ -235,7 +322,7 @@ describe('the runbook path (fleet-tools)', () => {
     await settle();
     const results = ledger.entries.filter((e) => e.kind === 'exec.result').map((e) => e.data);
     assert.deepEqual(results.map((d) => d.error), [{ error_chars: FAILURE.length }, 'rate_limited']);
-    assert.deepEqual(ledger.entries.find((e) => e.kind === 'exec.start').data.origin, { kind: 'frontdoor' });
+    assert.deepEqual(ledger.entries.find((e) => e.kind === 'exec.start').data.origin, { kind: 'frontdoor', grant_id: 'gr_y', client_id: 'dcr_x' });
     const text = allText(ledger.entries);
     for (const planted of [FAILURE, CLIENT, SESSION]) assert.ok(!text.includes(planted), planted);
   });
