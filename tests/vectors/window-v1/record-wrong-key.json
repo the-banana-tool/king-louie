@@ -1,0 +1,46 @@
+{
+  "name": "record-wrong-key",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "session_id": "w2jUc285Clxi20TXukyRC_tWJUeOTbssqYfXSZxvX9M",
+    "window": {
+      "key": "A",
+      "device_id": "kld-kxxgvjxu2fdtvh5s",
+      "public_key": "UwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec",
+      "ephemeral": "f2-7975Bgm-8Bew6I2PgsN4JDeDThtcnT72gk4o3VTI"
+    },
+    "node": {
+      "key": "web-01",
+      "node_id": "kl-t7zd5qd7crh3ttn3",
+      "public_key": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec",
+      "ephemeral": "0QTTdv0344J8tvO-9depSIHKRzeYYWiXYeYTeW9wiVo"
+    },
+    "pin": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec"
+  },
+  "input": {
+    "cases": [
+      {
+        "name": "the other direction's key",
+        "bytes": "EAAAAAAAAAAA8zml-MC9j5gtjAixCb2PteTmcBAvdtAX9I9D1H3FJh87MR6OUBXlVkboAphq5yb9XnxOqOclyc2N3To0wzEly3rgO-2_EUuT5gUJIZ07ET7AzaeHyAe2aCtcflFMYhwoapWitU19IuweHQmzteY3F-KiqdvLc6silZttK3cteTsOZ-2YWV3cz-ryLa7H1E_uisqPo4pupXAfoXOwEkMvxwQNkneh7oPiVlwblplq8F7chSx2SUaTn9Cgk55vtMR9FfyyoQLdhbEgW5HKfsRwoMMIs9kFTBXVMEdXdh2i5pRYoFsjDXOBZJKYEcmdYkoSf8mCTFN78v_kLrm2HZ2IpZQCuHkeBEnfZHAjLy5PRtk"
+      },
+      {
+        "name": "the other direction's aad",
+        "bytes": "EAAAAAAAAAAAkPsomY4PbpPCCExLqUKgMKUf94lmL3axhoKJ3x6Ga9gFWsaxLwg-vhdAOmxwHYhKrZD079BubtK7S3wt-MW-7OJbjyOo19ulombsYfNEZmW3hgVjjJOjREf8GtJQvrQqKyJxt-VNoU046VWNHqxyJDa2uM05rHnaz9UjOOOhv5ZKBZ3es6S9sWnr_pXX94ZA6GxzXl_u1NfESpm4yNktxBvUoOCjyldk7l-OG80StfFpJ9-pgQt4KzjqPhGePakt2-erZ7DBVgzF5r1u0F0Z049ESP0UBs5PxaRmkNpZu8d-NXxF208Hi2mqWuzI2Yh_DrOZEQ2j6a5A-uQM3gKwUashPT3qD_d2hGUQmzkmDIs"
+      },
+      {
+        "name": "another session's key",
+        "bytes": "EAAAAAAAAAAApYvY2lz8b7_doicCXDSwP05bDxkhbugtKW6w2RKyVjFKFAqcNl85_-OX4caWf-UbxCrg5T30-m73cGiDsFNWYpgLZAVReflsn1FsIg9RpqWeAm125WgEd5NP7ctcfORBj9gH6Uswq-ccXRZqeNptJa0F4OQse6zDqO9ZaUixjHJojgltgGE1cBWF3r4-flmArqWYtkkT9FPKtuZSQjjtNLxJVkabkxdZaZKZdoLgiPBsRBAx__00oraIai6tOxw5MagfnICqz1ZGr56tVy_CxwD0fb8EvW6PRQiM6vb5vRIMbRcdjBx0IIHF5LqMisyALRgjosev1eUhaMloJuZwO-q45iOjAyjfp3QSM8FsC4A"
+      }
+    ],
+    "control": "EAAAAAAAAAAAkPsomY4PbpPCCExLqUKgMKUf94lmL3axhoKJ3x6Ga9gFWsaxLwg-vhdAOmxwHYhKrZD079BubtK7S3wt-MW-7OJbjyOo19ulombsYfNEZmW3hgVjjJOjREf8GtJQvrQqKyJxt-VNoU046VWNHqxyJDa2uM05rHnaz9UjOOOhv5ZKBZ3es6S9sWnr_pXX94ZA6GxzXl_u1NfESpm4yNktxBvUoOCjyldk7l-OG80StfFpJ9-pgQt4KzjqPhGePakt2-erZ7DBVgzF5r1u0F0Z049ESP0UBs5PxaRmkNpZu8d-NXxF208Hi2mqWuzI2Yh_DrOZEQ2j6a5A-uQM3gKwUX1z4FuMc4b_BT43tj5VPLM"
+  },
+  "expect": {
+    "close": {
+      "code": 4400,
+      "reason": "record"
+    },
+    "control_frame": "ZnJhbWU"
+  }
+}

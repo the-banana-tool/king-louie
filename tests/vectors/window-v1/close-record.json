@@ -1,0 +1,34 @@
+{
+  "name": "close-record",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "session_id": "w2jUc285Clxi20TXukyRC_tWJUeOTbssqYfXSZxvX9M",
+    "window": {
+      "key": "A",
+      "device_id": "kld-kxxgvjxu2fdtvh5s",
+      "public_key": "UwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec",
+      "ephemeral": "f2-7975Bgm-8Bew6I2PgsN4JDeDThtcnT72gk4o3VTI"
+    },
+    "node": {
+      "key": "web-01",
+      "node_id": "kl-t7zd5qd7crh3ttn3",
+      "public_key": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec",
+      "ephemeral": "0QTTdv0344J8tvO-9depSIHKRzeYYWiXYeYTeW9wiVo"
+    },
+    "pin": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec"
+  },
+  "input": {
+    "record": "EAAAAAAAAAAAoPsomY9pHPFHbUxLqUKgMKUf94lmL3axhoKJ3x6Ga9gFWsaxLwg-vhdAOmxwHYhKrZD079BubtK7S3wt-MW-7OJbjyOo19ulombsYfNEZmW3hgVjjJOjREf8GtJQvrQqKyJxt-VNoU046VWNHqxyJDa2uM05rHnaz9UjOOOhv5ZKBZ3es6S9sWnr_pXX94ZA6GxzXl_u1NfESpm4yNktxBvUoOCjyldk7l-OG80StfFpJ9-pgQt4KzjqPhGePakt2-erZ7DBVgzF5r1u0F0Z049ESP0UBs5PxaRmkNpZu8d-NXxF208Hi2mqWuzI2Yh_DrOZEQ2j6a5A-uQM3gKwUbjtSr_hXPAjD1PnkwZLt-Q",
+    "later": "EAAAAAAAAAABx2ULROe282Q3mx1xSlFl6c-sKtgyf-awTVq1TXv2SAA8B4Xo62Gju1trMcpiyNUQ7RaSxqdN5NaE5yLBFyzQerHbvXltBAirg4kAzrd-r62vzYW_coh2cl55tHWLUNdhHZwMf4fLDachsGZuR3wc1nsQMusFJf9z59cjZDyfzt3a3-RWbkO0f6Q6QBp_3eAbH-e8apDqcWpJ3EcokExGuK1EQvWwBnAr_NGml5zCscxvIhODjqUaEerU9O9RYFCef8XXT9jwDdUhzJJZMEUo7ONz-wgy0OVaFQ4A47zd4eEYGUXdyw5cCc1_bOIgbv1rjpKIkH4-Jqk3I0xrnaIJvLEL6sv-z8dNYj_c07KYYYY"
+  },
+  "expect": {
+    "plaintext": "MAAAAAQAAAPoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "close": {
+      "code": 1000,
+      "reason": "peer"
+    },
+    "frames": []
+  }
+}

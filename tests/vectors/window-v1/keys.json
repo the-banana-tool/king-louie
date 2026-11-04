@@ -1,0 +1,27 @@
+{
+  "note": "Fixed test keys for the window-v1 vectors (Ed25519 seeds). Never use them for anything real.",
+  "nodes": {
+    "web-01": {
+      "seed": "f8b6fb12b3f0dfa81f3bbc8dfcfca663748e95c119e80c6b1eaae6649227b531",
+      "public_key": "0143e4bbd5f309bad630dd7f5c12fb94e342d3cc7e607659be3afe5025bc49e7",
+      "id": "kl-t7zd5qd7crh3ttn3"
+    },
+    "gpu-box": {
+      "seed": "6620909c904d154d3ee8427ca2ee2a09be81e6d3c44e4dd255b1f3bf3ab41973",
+      "public_key": "edca9c0b4e6bad45904292f95fc4cef35ec31e747556bd09fb29e4d3dfebf542",
+      "id": "kl-rln2mmbkgcqnmaho"
+    }
+  },
+  "windows": {
+    "A": {
+      "seed": "c94c19e082b3043c7fe4e5fa4e6780daceb29f15917fc625c09f88e131efbdc7",
+      "public_key": "5302f42ee870a81441294bb56c6942200398b2b3f78236778aabb2c04f47ade7",
+      "id": "kld-kxxgvjxu2fdtvh5s"
+    },
+    "B": {
+      "seed": "ca1af1cb30becd451d90feeb8b1e66060db23988127c49ac55bbd85a3d9f511f",
+      "public_key": "8d2672764884fd008e65ff07dde4993f90fe38e002c401c22ea4347862f1b3ae",
+      "id": "kld-nqlzel5qml4uurig"
+    }
+  }
+}

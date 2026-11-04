@@ -1,0 +1,31 @@
+{
+  "name": "record-unknown-kind",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "session_id": "w2jUc285Clxi20TXukyRC_tWJUeOTbssqYfXSZxvX9M",
+    "window": {
+      "key": "A",
+      "device_id": "kld-kxxgvjxu2fdtvh5s",
+      "public_key": "UwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec",
+      "ephemeral": "f2-7975Bgm-8Bew6I2PgsN4JDeDThtcnT72gk4o3VTI"
+    },
+    "node": {
+      "key": "web-01",
+      "node_id": "kl-t7zd5qd7crh3ttn3",
+      "public_key": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec",
+      "ephemeral": "0QTTdv0344J8tvO-9depSIHKRzeYYWiXYeYTeW9wiVo"
+    },
+    "pin": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec"
+  },
+  "input": {
+    "record": "EAAAAAAAAAAA7_somYtpHPKvbUxLqUKgMKUf94lmL3axhoKJ3x6Ga9gFWsaxLwg-vhdAOmxwHYhKrZD079BubtK7S3wt-MW-7OJbjyOo19ulombsYfNEZmW3hgVjjJOjREf8GtJQvrQqKyJxt-VNoU046VWNHqxyJDa2uM05rHnaz9UjOOOhv5ZKBZ3es6S9sWnr_pXX94ZA6GxzXl_u1NfESpm4yNktxBvUoOCjyldk7l-OG80StfFpJ9-pgQt4KzjqPhGePakt2-erZ7DBVgzF5r1u0F0Z049ESP0UBs5PxaRmkNpZu8d-NXxF208Hi2mqWuzI2Yh_DrOZEQ2j6a5A-uQM3gKwUaRttkRltFrKN8o-0yUR0eI"
+  },
+  "expect": {
+    "close": {
+      "code": 4400,
+      "reason": "record"
+    }
+  }
+}
