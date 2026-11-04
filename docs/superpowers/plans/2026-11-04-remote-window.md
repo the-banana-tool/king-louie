@@ -76,6 +76,10 @@ Each is the author's call; the owner may overrule. The plan builds on them as wr
 
 ---
 
+- **R-RW-22 (controller, after Task 3).** A remote window needs a node that can seal: `window.open` (Task 6) and enrollment (Task 9) refuse unless `sealPolicy.canSeal()`, with `node_not_sealing` and a plain line saying to apply a phone's box key. Otherwise phone-class arguments would cross the relay in clear. Secret-bearing channels (`settings:vaultStore`, `settings:vaultUpdate`, the provider and key channels, `settings:mcpSave`) always use the hash form with the key name shown and never the value, sealed or not.
+
+- **R-RW-23 (controller, after Task 3).** A revoked device's pending approval is withdrawn and its approved call does not run; a mere drop still runs what was approved. Task 5 gives the dispatcher the difference.
+
 ## File map
 
 Create:
