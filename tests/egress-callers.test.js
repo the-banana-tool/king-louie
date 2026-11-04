@@ -234,10 +234,10 @@ describe('the callers that bypass the router, in a core', () => {
     core.saveProviderToken('openai', 'sk-test-openai-123456');
     await core.start();
     ctx = core.context;
-    // The assembler's first index embeds the tool descriptions (no chat
-    // text) in the background; let it finish before any turn is watched.
-    await ctx.getContextAssembler().assemble('', {});
-    assert.ok(embedded.length > 0 && embedded.every((text) => /^(tool|system section): /.test(text)), 'only tool and section descriptions were embedded at start');
+    // The assembler's first index reads the host in the background; let it
+    // finish before any turn is watched. In the default mode it embeds nothing.
+    await ctx.getContextAssembler().firstIndexSettled();
+    assert.deepStrictEqual(embedded, [], 'nothing was embedded at start');
   });
   after(async () => {
     globalThis.fetch = originalFetch;
@@ -331,10 +331,16 @@ describe('the callers that bypass the router, in a core', () => {
       assert.deepStrictEqual(embedded, []);
       assert.deepStrictEqual(fetched, []);
       // The same turn in a chat that is not private does embed the message:
-      // the path this test watches is live.
+      // the path this test watches is live. The switch into semantic mode
+      // sends the descriptions first, on this turn and not on the private one.
       const open = newChat({ title: 'Fence' });
       await send(open, 'The side gate code is 4417.');
-      assert.deepStrictEqual(embedded, ['The side gate code is 4417.']);
+      assert.strictEqual(embedded.at(-1), 'The side gate code is 4417.');
+      const rest = embedded.slice(0, -1);
+      assert.ok(rest.length > 0 && rest.every((text) => /^(tool|system section): /.test(text)), 'only tool and section descriptions came before it');
+      embedded.length = 0;
+      await send(open, 'The north gate code is 2280.');
+      assert.deepStrictEqual(embedded, ['The north gate code is 2280.']);
     } finally {
       assembler.mode = mode;
     }

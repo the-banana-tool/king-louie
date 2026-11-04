@@ -47,8 +47,17 @@ class FakeProvider {
 let core;
 let dataDir;
 const cipher = createAesGcmCipher(crypto.randomBytes(32));
+// The core holds an OpenAI token, so a request off this machine would carry it.
+const originalFetch = globalThis.fetch;
+const refusedRequests = [];
 
 before(async () => {
+  globalThis.fetch = async (url, init) => {
+    const { hostname } = new URL(String(url?.url || url));
+    if (['127.0.0.1', 'localhost', '[::1]'].includes(hostname)) return originalFetch(url, init);
+    refusedRequests.push(String(url?.url || url));
+    throw new Error(`no network in unit tests (${url})`);
+  };
   ProviderFactory.registerProvider('openai', FakeProvider);
   toolRegistry.register(new Tool({
     name: PROBE,
@@ -75,9 +84,12 @@ before(async () => {
 
 after(async () => {
   await core.shutdown().catch(() => {});
+  globalThis.fetch = originalFetch;
   if (realOpenAI) ProviderFactory.registerProvider('openai', realOpenAI);
   closeOpenHistoryStores();
   fs.rmSync(dataDir, { recursive: true, force: true });
+  // A background caller swallows the refusal, so the list is what fails the file.
+  assert.deepStrictEqual(refusedRequests, [], 'a request left the machine');
 });
 
 function connection(label = 'desk a') {

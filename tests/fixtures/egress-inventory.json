@@ -77,7 +77,7 @@
     "label": "behind-gate",
     "gate": "src/ipc/chat-handlers.js",
     "check": "...(turnEgress ? { embed: false } : {})",
-    "why": "semantic tool selection embeds the owner's message through a direct OpenAI client; the chat send path passes assemble({ embed: false }) under a policy. index() embeds tool descriptions only"
+    "why": "semantic tool selection embeds the owner's message through a direct OpenAI client; the chat send path passes assemble({ embed: false }) under a policy. Only in semantic mode, which nothing in production turns on, it also embeds the tool descriptions and system sections (working directory, git user, branch, file names, commit subjects, CLI list, local apps): in index(), and on the first turn after a switch into it, never under embed: false. The default mode sends nothing"
   },
   "src/core/create-core.js": {
     "sites": {

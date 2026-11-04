@@ -137,10 +137,16 @@ describe('a private case: the mark, and every case model call behind it', { skip
     await core.start();
     ctx = core.context;
     rt = ctx.getCaseRuntime();
+    // Anything the first index sends lands here, not in the window of whichever
+    // test runs first after beforeEach clears the list.
+    await ctx.getContextAssembler().firstIndexSettled();
   });
   after(async () => {
-    globalThis.fetch = originalFetch;
-    if (core) await core.shutdown();
+    try {
+      if (core) await core.shutdown();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
     await shutdownPdfSandbox();
     setActiveCatalog(null);
     closeOpenHistoryStores();
