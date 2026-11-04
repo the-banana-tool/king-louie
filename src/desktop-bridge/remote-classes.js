@@ -24,45 +24,38 @@ const PRESS_CHANNELS_REMOTE = Object.freeze([
 const READ = [
   'apps:list', 'canvas:getState', 'case:budget', 'case:detours', 'case:envelopes',
   'case:ingestRecord', 'case:list', 'case:listExamplePlaybooks', 'case:orientation',
-  'case:playbookProposals', 'case:playbooks', 'case:progress', 'case:questions',
-  'case:runningTurn', 'case:sources', 'case:checkPlaybookUpdates', 'chat:get', 'chat:load',
-  'chat:running', 'chat:readScreenshot', 'checkpoint:changes', 'checkpoint:getStatus',
-  'checkpoint:list', 'contact:ladderState', 'contactPolicy:get', 'cron:list', 'cron:status',
-  'executors:list', 'history:embedder.status', 'history:excerpts', 'history:links.get',
-  'history:search', 'hooks:list', 'memory:list', 'memory:recall', 'models:chatView',
-  'models:explain', 'models:kingLouie', 'models:local.list', 'models:picker', 'models:profiles',
-  'models:status', 'models:usable', 'presence:status', 'settings:load', 'settings:mcpList',
-  'settings:vaultHeld', 'settings:vaultList', 'skill:checkDeps', 'skill:getPinned',
-  'skill:getSettings', 'skill:list', 'skill:listPinnable', 'skill:listWithSettings', 'tool:list',
-  'tool:listPermissionRules', 'usage:getDaily', 'usage:getSession', 'workflow:get',
-  'workflow:list', 'workflow:progress', 'bridge.status', 'bridge.checkPath',
-  'bridge.approvalsStatus'
+  'case:playbookProposals', 'case:playbooks', 'case:progress', 'case:questions', 'case:runningTurn',
+  'case:sources', 'chat:get', 'chat:load', 'chat:running', 'chat:readScreenshot',
+  'checkpoint:changes', 'checkpoint:getStatus', 'checkpoint:list', 'contact:ladderState',
+  'contactPolicy:get', 'cron:list', 'cron:status', 'executors:list', 'history:embedder.status',
+  'history:excerpts', 'history:links.get', 'history:search', 'hooks:list', 'memory:list',
+  'memory:recall', 'models:chatView', 'models:explain', 'models:kingLouie', 'models:local.list',
+  'models:picker', 'models:profiles', 'models:status', 'models:usable', 'presence:status',
+  'settings:load', 'settings:mcpList', 'settings:vaultHeld', 'settings:vaultList',
+  'skill:checkDeps', 'skill:getPinned', 'skill:list', 'skill:listPinnable', 'tool:list',
+  'tool:listPermissionRules', 'usage:getDaily', 'usage:getSession', 'workflow:get', 'workflow:list',
+  'workflow:progress', 'bridge.status', 'bridge.checkPath', 'bridge.approvalsStatus'
 ];
 
 const ORDINARY = [
-  'agent:userResponse', 'canvas:close', 'canvas:setState', 'case:attach', 'case:create',
-  'case:ingestExtract', 'case:reindex', 'case:rejectPlaybookProposal', 'case:reviewProposal',
-  'chat:addMessage', 'chat:create', 'chat:delete', 'chat:rename', 'chat:sendMessage',
-  'chat:setActive', 'chat:setAgentMode', 'chat:setDisabledMcpServers', 'chat:setSandboxMode',
-  'chat:stopResponse', 'chat:truncateFrom', 'checkpoint:setEnabled', 'cron:remove',
-  'history:embedder.rebuild', 'history:embedder.retry', 'history:import.append',
-  'history:import.begin', 'history:import.finish', 'history:import.lookup', 'history:links.set',
-  'history:scope.set', 'memory:capture', 'memory:clear', 'memory:delete', 'models:acceptProposal',
+  'agent:userResponse', 'canvas:close', 'canvas:setState', 'case:create', 'case:ingestExtract',
+  'case:reindex', 'case:rejectPlaybookProposal', 'chat:addMessage', 'chat:create', 'chat:rename',
+  'chat:sendMessage', 'chat:setActive', 'chat:setAgentMode', 'chat:setDisabledMcpServers',
+  'chat:stopResponse', 'cron:remove', 'history:embedder.rebuild', 'history:embedder.retry',
+  'history:import.append', 'history:import.begin', 'history:import.finish', 'history:import.lookup',
+  'history:links.set', 'history:scope.set', 'memory:delete', 'models:acceptProposal',
   'models:dismissProposal', 'models:duplicateKingLouie', 'models:duplicateProfile',
   'models:refreshCatalog', 'models:removeCustomRole', 'models:removeProfile',
-  'models:saveCatalogSettings', 'models:saveCustomRole', 'models:saveKingLouieSettings',
-  'models:saveProfile', 'models:setChatProfile', 'models:setDefaultProfile',
-  'models:setMainOverride', 'models:testAll', 'presence:heartbeat',
-  'settings:removeAllowedDirectory', 'settings:saveDefaults', 'settings:saveNotifications',
-  'settings:saveTemplateVariables', 'settings:saveUserProfile', 'settings:saveVoice',
+  'models:saveCustomRole', 'models:saveKingLouieSettings', 'models:saveProfile',
+  'models:setChatProfile', 'models:setDefaultProfile', 'models:setMainOverride', 'models:testAll',
+  'presence:heartbeat', 'settings:removeAllowedDirectory', 'settings:saveVoice',
   'settings:setImageGenDefault', 'settings:testImageGenKey', 'settings:testProvider',
-  'settings:testWebSearchKey', 'skill:checkUpdates', 'skill:pin', 'skill:unpin',
-  'tool:removePermissionRule', 'workflow:cancel', 'workflow:delete', 'workflow:pause',
-  'bridge.canvasJsResult'
+  'settings:testWebSearchKey', 'skill:pin', 'skill:unpin', 'workflow:cancel', 'workflow:delete',
+  'workflow:pause', 'bridge.canvasJsResult'
 ];
 
-// tool:execute needs no gate of its own in the dispatcher: its tool approval
-// goes to the phone through approvalSeam. It is listed so the sweep asserts it.
+// tool:execute is gated by the dispatcher like the rest of this list; the tool
+// it runs then asks the phone too, through approvalSeam, as any remote call does.
 const PHONE = [
   'apps:add', 'apps:remove', 'apps:rescan', 'case:acceptPlaybookBudget', 'case:acceptVerified',
   'case:addPlaybook', 'case:applyPlaybookProposal', 'case:cancelJob', 'case:ingestFiles',
@@ -80,7 +73,12 @@ const PHONE = [
   'skill:setEnabled', 'skill:update', 'tool:execute', 'webhook:create', 'webhook:delete',
   'webhook:get', 'webhook:list', 'webhook:regenerateSecret', 'webhook:update', 'workflow:create',
   'workflow:plan', 'workflow:planAndExecute', 'workflow:recoverPlan', 'workflow:run',
-  'bridge.setWorkingDirectory', 'bridge.addAllowedDirectory'
+  'bridge.setWorkingDirectory', 'bridge.addAllowedDirectory', 'tool:removePermissionRule',
+  'chat:setSandboxMode', 'settings:saveDefaults', 'case:checkPlaybookUpdates', 'case:attach',
+  'case:reviewProposal', 'settings:saveNotifications', 'settings:saveUserProfile',
+  'settings:saveTemplateVariables', 'memory:capture', 'models:saveCatalogSettings',
+  'checkpoint:setEnabled', 'skill:checkUpdates', 'chat:delete', 'chat:truncateFrom', 'memory:clear',
+  'skill:getSettings', 'skill:listWithSettings'
 ];
 
 const LOCAL = [
@@ -115,9 +113,52 @@ function remoteClassOf(name) {
   return WINDOW_PREFIXES.some((prefix) => name.startsWith(prefix)) ? 'local' : null;
 }
 
+// A channel whose class depends on what it is asked to do. It only ever raises
+// the table's class, and what it cannot read is phone. `args` is the frame's
+// argument list; `context` is the core's, for `getSettings` and `getChat`.
+const RAISED_BY_FIELD = Object.freeze({ 'case:create': Object.freeze(['playbooks', 'acceptBudgetRaises']) });
+const LEAVES_PROFILE = new Set(['models:removeProfile', 'models:setDefaultProfile', 'models:setChatProfile']);
+
+function payloadOf(args) {
+  const first = Array.isArray(args) ? args[0] : args;
+  return first && typeof first === 'object' && !Array.isArray(first) ? first : {};
+}
+
+function leavesLocalOnlyProfile(channel, payload, context) {
+  const models = context.getSettings().models || {};
+  const profiles = Array.isArray(models.profiles) ? models.profiles : [];
+  const isLocalOnly = (id) => {
+    const profile = profiles.find((p) => p && p.id === id);
+    return Boolean(profile && Array.isArray(profile.localOnly) && profile.localOnly.length > 0);
+  };
+  const stored = models.defaultProfileId;
+  const defaultId = profiles.some((p) => p && p.id === stored) ? stored : (profiles[0] && profiles[0].id) || null;
+  if (channel === 'models:removeProfile') return isLocalOnly(payload.id);
+  if (channel === 'models:setDefaultProfile') return payload.id !== defaultId && isLocalOnly(defaultId);
+  const chat = context.getChat(payload.chatId);
+  // A case keeps its choice in case.yaml, which is not read here.
+  if (!chat || chat.caseId) return true;
+  const current = chat.profileId || defaultId;
+  return (payload.profileId || defaultId) !== current && isLocalOnly(current);
+}
+
+function remotePayloadClass(channel, args, context = null) {
+  const base = remoteClassOf(channel);
+  if (base === null || base === 'phone' || base === 'local') return base;
+  const payload = payloadOf(args);
+  const fields = Object.hasOwn(RAISED_BY_FIELD, channel) ? RAISED_BY_FIELD[channel] : null;
+  if (fields) return fields.some((field) => Object.hasOwn(payload, field)) ? 'phone' : base;
+  if (!LEAVES_PROFILE.has(channel)) return base;
+  try {
+    return leavesLocalOnlyProfile(channel, payload, context) ? 'phone' : base;
+  } catch {
+    return 'phone';
+  }
+}
+
 function assertComplete(names) {
   const missing = [...names].filter((name) => remoteClassOf(name) === null);
   if (missing.length > 0) throw new Error(`No remote class for: ${missing.join(', ')}`);
 }
 
-module.exports = { CLASSES, REMOTE_CLASSES, CALL_METHODS, PRESS_CHANNELS_REMOTE, remoteClassOf, assertComplete };
+module.exports = { CLASSES, REMOTE_CLASSES, CALL_METHODS, PRESS_CHANNELS_REMOTE, remoteClassOf, remotePayloadClass, assertComplete };

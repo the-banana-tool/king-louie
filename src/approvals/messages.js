@@ -99,7 +99,8 @@ function cloneJson(value) {
   }
 }
 
-function toolAction(toolName, params, cwd) {
+// `note` is host-written and comes first, so a cut never takes it.
+function toolAction(toolName, params, cwd, note = null) {
   // Required here, like runbook-engine in runbookAction, so a module that
   // only verifies envelopes (the front door) never loads src/execution/.
   const { formatToolPattern } = require('../execution/tool-patterns');
@@ -109,7 +110,7 @@ function toolAction(toolName, params, cwd) {
     name: String(toolName),
     params: cloned,
     cwd: cwd === undefined || cwd === null ? null : String(cwd),
-    summary: cutSummary(formatToolPattern(toolName, cloned))
+    summary: cutSummary(note ? `${note}: ${formatToolPattern(toolName, cloned)}` : formatToolPattern(toolName, cloned))
   };
 }
 

@@ -9,7 +9,7 @@ const path = require('path');
 const { listIpcChannels } = require('../src/ipc/channel-inventory');
 const { servedChannels, classifyChannel } = require('../src/desktop-bridge/allowlist');
 const {
-  CLASSES, REMOTE_CLASSES, CALL_METHODS, PRESS_CHANNELS_REMOTE, remoteClassOf, assertComplete
+  CLASSES, REMOTE_CLASSES, CALL_METHODS, PRESS_CHANNELS_REMOTE, remoteClassOf, remotePayloadClass, assertComplete
 } = require('../src/desktop-bridge/remote-classes');
 
 const ROOT = path.join(__dirname, '..');
@@ -163,6 +163,98 @@ describe('the classes that gate something', () => {
       'case:setCheck', 'case:verifyNow', 'tool:approvalResponse', 'tool:directoryAccessResponse'
     ]);
     for (const name of PRESS_CHANNELS_REMOTE) assert.strictEqual(remoteClassOf(name), 'local', name);
+  });
+});
+
+describe('the audit round: what the first table had too low', () => {
+  const PHONE_NOW = [
+    'tool:removePermissionRule', 'chat:setSandboxMode', 'settings:saveDefaults', 'case:checkPlaybookUpdates', 'case:attach',
+    'case:reviewProposal', 'settings:saveNotifications', 'settings:saveUserProfile', 'settings:saveTemplateVariables',
+    'memory:capture', 'models:saveCatalogSettings', 'checkpoint:setEnabled', 'skill:checkUpdates', 'chat:delete',
+    'chat:truncateFrom', 'memory:clear', 'skill:getSettings', 'skill:listWithSettings'
+  ];
+  for (const name of PHONE_NOW) {
+    it(`${name} is phone`, () => assert.strictEqual(remoteClassOf(name), 'phone'));
+  }
+
+  it('settings:mcpList and settings:load stay read, the handlers redact them', () => {
+    assert.strictEqual(remoteClassOf('settings:mcpList'), 'read');
+    assert.strictEqual(remoteClassOf('settings:load'), 'read');
+  });
+
+  it('chat:addMessage stays ordinary, its handler holds the sender and the metadata', () => {
+    assert.strictEqual(remoteClassOf('chat:addMessage'), 'ordinary');
+  });
+
+  it('tool:execute is phone, with a dispatcher gate of its own', () => {
+    assert.strictEqual(remoteClassOf('tool:execute'), 'phone');
+    assert.doesNotMatch(source('src/desktop-bridge/remote-classes.js'), /needs no gate/);
+  });
+});
+
+describe('remotePayloadClass', () => {
+  const LOCAL_ONLY = { id: 'p-local', localOnly: ['main'], roles: {} };
+  const HOSTED = { id: 'p-hosted', roles: {} };
+  const chats = { 'chat-local': { id: 'chat-local', profileId: 'p-local' }, 'chat-hosted': { id: 'chat-hosted', profileId: 'p-hosted' }, 'chat-default': { id: 'chat-default' }, 'chat-case': { id: 'chat-case', caseId: 'case-1' } };
+  const context = (defaultProfileId = 'p-hosted') => ({
+    getSettings: () => ({ models: { profiles: [HOSTED, LOCAL_ONLY], defaultProfileId } }),
+    getChat: (id) => chats[id] || null
+  });
+
+  it('answers the table for every channel with no payload rule', () => {
+    for (const name of ['chat:load', 'chat:sendMessage', 'skill:install', 'app:quitWindow']) assert.strictEqual(remotePayloadClass(name, [{}], context()), remoteClassOf(name), name);
+    assert.strictEqual(remotePayloadClass('chat:someNewChannel', [{}], context()), null);
+    assert.strictEqual(remotePayloadClass('__proto__', [{}], context()), null);
+  });
+
+  it('case:create is phone with playbooks or acceptBudgetRaises present, even empty or false', () => {
+    assert.strictEqual(remotePayloadClass('case:create', [{ title: 'Lakeside lot' }], context()), 'ordinary');
+    for (const payload of [{ playbooks: ['example:one'] }, { playbooks: [] }, { acceptBudgetRaises: true }, { acceptBudgetRaises: false }]) {
+      assert.strictEqual(remotePayloadClass('case:create', [{ title: 'Lakeside lot', ...payload }], context()), 'phone', JSON.stringify(payload));
+    }
+  });
+
+  it('a payload that is not an object raises nothing and breaks nothing', () => {
+    for (const args of [undefined, null, [], [null], ['text'], 'text']) assert.strictEqual(remotePayloadClass('case:create', args, context()), 'ordinary');
+  });
+
+  it('models:removeProfile is phone for a profile with localOnly', () => {
+    assert.strictEqual(remotePayloadClass('models:removeProfile', [{ id: 'p-local' }], context()), 'phone');
+    assert.strictEqual(remotePayloadClass('models:removeProfile', [{ id: 'p-hosted' }], context()), 'ordinary');
+    assert.strictEqual(remotePayloadClass('models:removeProfile', [{ id: 'p-unknown' }], context()), 'ordinary');
+  });
+
+  it('models:setDefaultProfile is phone when the default it leaves has localOnly', () => {
+    assert.strictEqual(remotePayloadClass('models:setDefaultProfile', [{ id: 'p-hosted' }], context('p-local')), 'phone');
+    assert.strictEqual(remotePayloadClass('models:setDefaultProfile', [{ id: 'p-local' }], context('p-local')), 'ordinary', 'it leaves nothing');
+    assert.strictEqual(remotePayloadClass('models:setDefaultProfile', [{ id: 'p-local' }], context('p-hosted')), 'ordinary');
+  });
+
+  it('models:setChatProfile is phone when the chat leaves a profile with localOnly, its own or the default', () => {
+    assert.strictEqual(remotePayloadClass('models:setChatProfile', [{ chatId: 'chat-local', profileId: 'p-hosted' }], context()), 'phone');
+    assert.strictEqual(remotePayloadClass('models:setChatProfile', [{ chatId: 'chat-local', profileId: null }], context()), 'phone');
+    assert.strictEqual(remotePayloadClass('models:setChatProfile', [{ chatId: 'chat-default', profileId: 'p-hosted' }], context('p-local')), 'phone');
+    assert.strictEqual(remotePayloadClass('models:setChatProfile', [{ chatId: 'chat-hosted', profileId: 'p-local' }], context()), 'ordinary');
+    assert.strictEqual(remotePayloadClass('models:setChatProfile', [{ chatId: 'chat-local', profileId: 'p-local' }], context()), 'ordinary', 'it leaves nothing');
+  });
+
+  it('what cannot be read is phone: no context, a reader that throws, an unknown chat, a case chat', () => {
+    const cases = [
+      ['models:removeProfile', { id: 'p-hosted' }], ['models:setDefaultProfile', { id: 'p-hosted' }],
+      ['models:setChatProfile', { chatId: 'chat-hosted', profileId: 'p-local' }]
+    ];
+    const throwing = { getSettings: () => { throw new Error('closed'); }, getChat: () => { throw new Error('closed'); } };
+    for (const [channel, payload] of cases) {
+      assert.strictEqual(remotePayloadClass(channel, [payload]), 'phone', `${channel}, no context`);
+      assert.strictEqual(remotePayloadClass(channel, [payload], throwing), 'phone', `${channel}, throws`);
+    }
+    assert.strictEqual(remotePayloadClass('models:setChatProfile', [{ chatId: 'chat-none', profileId: 'p-local' }], context()), 'phone');
+    assert.strictEqual(remotePayloadClass('models:setChatProfile', [{ chatId: 'chat-case', profileId: 'p-local' }], context()), 'phone', 'a case keeps its choice in case.yaml');
+  });
+
+  it('never lowers a class', () => {
+    assert.strictEqual(remotePayloadClass('case:setStatus', [{}], context()), 'phone');
+    assert.strictEqual(remotePayloadClass('case:verifyNow', [{ playbooks: [] }], context()), 'local');
   });
 });
 

@@ -107,7 +107,7 @@ const { initializeMesh } = require('../mesh');
 const { WorkflowEngine } = require('../workflows/workflow-engine');
 const PlannerExecutor = require('../workflows/planner-executor');
 const { MCPManager, createVaultEnvResolver } = require('../mcp');
-const { createCaseToolHandler, CHAT_CHANNEL } = require('../mcp/case-tools');
+const { createCaseToolHandler, CHAT_CHANNEL, REMOTE_WINDOW_CHANNEL } = require('../mcp/case-tools');
 const { BackgroundTaskManager } = require('../tasks/background-task-manager');
 const { createLogger } = require('../logging');
 const { DEFAULT_SETTINGS, mergeSettings } = require('./settings');
@@ -2403,7 +2403,7 @@ function createCore(deps = {}) {
         get guardContext() { return executorOptions.guardContext || null; },
         // Management surfaces: the in-app case tool handler the chat's
         // list_questions, get_presence and the other case tools call.
-        get caseManagement() { return inAppCaseToolHandler(); },
+        get caseManagement() { return seam.remote ? remoteWindowCaseToolHandler() : inAppCaseToolHandler(); },
         // Management surfaces §3.6: the service's own FleetToolHandler and
         // this run's chat, for the fleet tools (fleet-chat-tools.js builds
         // the origin from these, never from a tool's parameters); null
@@ -3451,6 +3451,21 @@ function createCore(deps = {}) {
       });
     }
     return inAppCaseTools;
+  }
+
+  // The same tools on a remote window's turn: its words are checked as the
+  // chat's are, and its answers are recorded as what they are.
+  let remoteWindowCaseTools = null;
+  function remoteWindowCaseToolHandler() {
+    if (!remoteWindowCaseTools) {
+      remoteWindowCaseTools = createCaseToolHandler({
+        getRuntime: () => caseRuntime,
+        getContact: () => (contactHost ? contactHost.context() : null),
+        getExecutorRegistry: () => executorRegistry,
+        channel: REMOTE_WINDOW_CHANNEL
+      });
+    }
+    return remoteWindowCaseTools;
   }
 
   // Management surfaces §3.6: the fleet tools in a service-run chat. Only

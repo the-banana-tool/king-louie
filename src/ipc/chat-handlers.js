@@ -83,6 +83,7 @@ async function refreshProvider(availability, provider) {
 }
 
 const TASK_RUNNING_MESSAGE = 'A task is still running in this chat. Send your message when it has finished.';
+const REMOTE_ADDABLE_SENDERS = Object.freeze(['user', 'assistant']);
 const REPLY_RUNNING_MESSAGE = 'A reply is still running in this chat.';
 
 // A window on a node's bridge. Another window cannot see this one's turn, so its
@@ -378,8 +379,13 @@ function registerChatHandlers(ipcMain, context = {}) {
     return { canceled: false, chat: patchChat(chatId, { workingDirectory: dir, updatedAt: new Date().toISOString() }) };
   }));
 
-  ipcMain.handle(IPC.CHAT_ADD_MESSAGE, wrapHandler(IPC.CHAT_ADD_MESSAGE, async (_event, payload = {}) => {
+  ipcMain.handle(IPC.CHAT_ADD_MESSAGE, wrapHandler(IPC.CHAT_ADD_MESSAGE, async (event, payload = {}) => {
     const { chatId, sender, text, ...metadata } = payload;
+    // A remote window adds the owner's words or a plain reply; a status row, a
+    // tool row or a card, and every field that makes one, are the node's own.
+    if (isRemoteWindowEvent(event) && (!REMOTE_ADDABLE_SENDERS.includes(sender) || Object.keys(metadata).length > 0)) {
+      return { ok: false, code: 'REMOTE_MESSAGE_REFUSED', error: 'A remote window may add only a plain user or assistant message.' };
+    }
     return appendMessageToChat(chatId, sender, text, metadata);
   }));
 
@@ -808,7 +814,9 @@ function registerChatHandlers(ipcMain, context = {}) {
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment, null, {
         workingDirectory: chatWorkingDirectory,
         allowedDirectories,
-        useSandbox: sandboxMode,
+        // A remote window's payload does not choose: the chat's stored value does,
+        // and only a phone approval changes that (chat:setSandboxMode).
+        useSandbox: isRemoteWindowEvent(event) ? chatForDir?.sandboxMode !== false : sandboxMode,
         chatId,
         // This is the chat's own turn: SearchHistory and ReadHistory read the
         // chat's history scope (stage H4). Its children are not given this.
@@ -819,7 +827,9 @@ function registerChatHandlers(ipcMain, context = {}) {
         // SpawnAgent children report their calls here (spec §10).
         onSubagentLlm: (run) => { subagentRuns.push(run); },
         ownerTurnText,
-        caseContext: caseTurn ? caseRuntime.caseContext(caseTurn, { ownerMessages, ownerMessageTimes }) : null
+        caseContext: caseTurn
+          ? { ...caseRuntime.caseContext(caseTurn, { ownerMessages, ownerMessageTimes }), ...(isRemoteWindowEvent(event) ? { ownerChannel: 'remote-window' } : {}) }
+          : null
       });
 
       executor.on('preExecute', ({ toolName, parameters }) => {

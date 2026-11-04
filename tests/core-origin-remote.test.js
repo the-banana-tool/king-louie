@@ -9,6 +9,14 @@ const {
   markRemoteWindowEvent, isRemoteWindowEvent, remoteWindowDeviceId, remoteWindowApproved
 } = require('../src/core/origin');
 const { approvalSeam } = require('../src/approvals/executor-options');
+const { toolAction } = require('../src/approvals/messages');
+const ToolExecutor = require('../src/execution/tool-executor');
+const { initializeTools } = require('../src/tools');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+initializeTools();
 
 const DEVICE = 'kld-abcdefghijklmnop';
 const REQUEST = 'req-0001';
@@ -97,7 +105,116 @@ describe('the approval seam for a remote event', () => {
       const seam = seamFor({ approvalRequester: handed });
       assert.notStrictEqual(seam.toolExecutorOptions.approvalRequester, handed);
     });
+
+    it(`'${remoteApprovals}': the tools that outlive a turn come back unsafe, each named`, () => {
+      const { classifyCall } = seamFor().toolExecutorOptions;
+      for (const name of ['BackgroundTask', 'TaskStatus', 'message', 'SpawnAgent', 'sessions_spawn', 'sessions_list', 'Cron', 'RemoteDispatch']) {
+        const decision = classifyCall(name, {}, {});
+        assert.strictEqual(decision && decision.tier, 'unsafe', name);
+      }
+    });
+
+    it(`'${remoteApprovals}': the same for a child, which carries the remote origin and no event`, () => {
+      const seam = approvalSeam({
+        remoteApprovals, event: null, approvalRequester: async () => true,
+        executorOptions: { origin: { client: 'remote-window', deviceId: DEVICE, session: 'chat-1', job_id: null } },
+        phoneApprover: fakePhone()
+      });
+      assert.strictEqual(seam.local, false);
+      assert.strictEqual(seam.toolExecutorOptions.denyAutoApproval, true);
+      assert.strictEqual(seam.toolExecutorOptions.classifyCall('SpawnAgent', {}, {}).tier, 'unsafe');
+      assert.strictEqual(seam.toolExecutorOptions.remoteWindowTurn, undefined, 'a child has no typed words');
+    });
+
+    it(`'${remoteApprovals}': the turn's typed words are open, a closed run's are not`, () => {
+      assert.strictEqual(seamFor().toolExecutorOptions.remoteWindowTurn, true);
+      const closed = seamFor({ executorOptions: { chatId: 'chat-1', denyAutoApproval: true } });
+      assert.strictEqual(closed.toolExecutorOptions.remoteWindowTurn, undefined);
+    });
   }
+
+  it('every tool a task turn removes for outliving it counts for a remote turn too, from one list', () => {
+    const { taskToolNames } = require('../src/tasks/values');
+    const { outlivesRemoteTurn, TASK_REMOVED_TOOLS } = require('../src/approvals/outliving-tools');
+    const names = ['Read', 'SpawnAgent', ...TASK_REMOVED_TOOLS, 'sessions_list', 'sessions_history', 'sessions_spawn'];
+    const kept = taskToolNames({ list: () => names.map((name) => ({ name })) });
+    assert.deepStrictEqual([...kept].sort(), ['Read', 'SpawnAgent'], 'the task list is read from the shared one');
+    for (const name of names.filter((n) => !kept.has(n))) assert.strictEqual(outlivesRemoteTurn(name), true, name);
+    assert.strictEqual(outlivesRemoteTurn('SpawnAgent'), true);
+    for (const name of ['Read', 'Bash', '', null, 'constructor']) assert.strictEqual(outlivesRemoteTurn(name), false, String(name));
+    assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '../src/tasks/values.js'), 'utf8'), /'BackgroundTask'/, 'not copied');
+  });
+
+  it('a tool that does not outlive the turn keeps the classifier it had, and a denial stays a denial', () => {
+    const inner = (name) => (name === 'Refused' || name === 'Cron' ? { tier: 'denied', reason: 'node' } : { tier: 'routine', reason: 'inner' });
+    const seam = approvalSeam({
+      remoteApprovals: 'deny', event: markRemoteWindowEvent({}, { deviceId: DEVICE }), executorOptions: { chatId: 'chat-1' }
+    });
+    assert.strictEqual(seam.toolExecutorOptions.classifyCall('Read', {}, {}), null);
+    const { remoteClassifier } = require('../src/approvals/executor-options');
+    const wrapped = remoteClassifier(inner);
+    assert.deepStrictEqual(wrapped('Read', {}, {}), { tier: 'routine', reason: 'inner' });
+    assert.strictEqual(wrapped('Refused', {}, {}).tier, 'denied');
+    assert.strictEqual(wrapped('Cron', {}, {}).tier, 'denied');
+    assert.strictEqual(wrapped('BackgroundTask', {}, {}).tier, 'unsafe');
+  });
+
+  it('a phone-mode node policy still classifies a remote run, under the wrap', () => {
+    const seam = approvalSeam({
+      remoteApprovals: 'phone', event: markRemoteWindowEvent({}, { deviceId: DEVICE }), executorOptions: { chatId: 'chat-1' }, phoneApprover: fakePhone(),
+      nodePolicy: { allowed_roots: [], remote_sessions: { always_confirm: [], deny: ['Blocked*'] } }
+    });
+    assert.strictEqual(seam.toolExecutorOptions.classifyCall('SpawnAgent', {}, {}).tier, 'unsafe');
+  });
+
+  for (const remoteApprovals of ['allow', 'deny']) {
+    it(`'${remoteApprovals}': the requester answers false at once, so nothing hangs and nothing runs`, async () => {
+      const seam = approvalSeam({ remoteApprovals, event: markRemoteWindowEvent({ sender: {} }, { deviceId: DEVICE }), approvalRequester: async () => true, executorOptions: { chatId: 'chat-1' } });
+      assert.strictEqual(await seam.toolExecutorOptions.approvalRequester('Bash', {}, {}), false);
+      const executor = new ToolExecutor({ workingDirectory: os.tmpdir(), requireApproval: true, useSandbox: false, ...seam.toolExecutorOptions });
+      const out = await executor.execute('Bash', { command: 'echo never' });
+      assert.strictEqual(out.success, false);
+      assert.strictEqual(out.deniedBy, 'user');
+    });
+  }
+
+  describe('a Bash card with the sandbox off', () => {
+    const summaryOf = async (executorOptions, toolName = 'Bash', params = { command: 'npm test' }) => {
+      const seen = {};
+      const phoneApprover = { ...fakePhone(), requestApproval: async (_tool, _params, metadata) => { Object.assign(seen, metadata); return false; } };
+      const seam = approvalSeam({ remoteApprovals: 'phone', event: markRemoteWindowEvent({}, { deviceId: DEVICE }), executorOptions: { chatId: 'chat-1', ...executorOptions }, phoneApprover });
+      await seam.toolExecutorOptions.approvalRequester(toolName, params, {});
+      return toolAction(toolName, params, null, seen.cardNote).summary;
+    };
+
+    it('says so first, where a cut cannot reach it', async () => {
+      assert.match(await summaryOf({ useSandbox: false }), /^Sandbox off: Bash/);
+      assert.match(await summaryOf({ useSandbox: false }, 'Bash', { command: `npm ${'x'.repeat(400)}` }), /^Sandbox off: Bash/);
+    });
+
+    it('says nothing with the sandbox on, or for another tool', async () => {
+      assert.doesNotMatch(await summaryOf({ useSandbox: true }), /Sandbox/);
+      assert.doesNotMatch(await summaryOf({}), /Sandbox/);
+      assert.doesNotMatch(await summaryOf({ useSandbox: false }, 'Write', { file_path: 'a.txt' }), /Sandbox/);
+    });
+
+    it('a local run with the sandbox off keeps its card as it was', () => {
+      const seam = approvalSeam({ remoteApprovals: 'phone', event: { sender: {} }, executorOptions: { chatId: 'chat-1', useSandbox: false }, phoneApprover: fakePhone() });
+      const metadata = {};
+      seam.toolExecutorOptions.approvalRequester('Bash', { command: 'npm test' }, metadata);
+      assert.strictEqual(metadata.cardNote, undefined);
+    });
+
+    it('with no note the summary is what it always was', () => {
+      assert.strictEqual(toolAction('Bash', { command: 'npm test' }, null).summary, toolAction('Bash', { command: 'npm test' }, null, null).summary);
+      assert.doesNotMatch(toolAction('Bash', { command: 'npm test' }, null).summary, /Sandbox/);
+    });
+
+    it('the approver signs the note and compares it live', () => {
+      const text = fs.readFileSync(path.join(__dirname, '../src/approvals/phone-approver.js'), 'utf8');
+      assert.strictEqual((text.match(/toolAction\(toolName, parameters, meta\.workingDirectory \|\| null, meta\.cardNote\)/g) || []).length, 2);
+    });
+  });
 
   it('in phone mode the question goes to the phone, with the origin it shows', async () => {
     const asked = [];

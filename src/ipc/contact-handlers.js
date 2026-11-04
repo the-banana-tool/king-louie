@@ -3,7 +3,7 @@
 // presence. Everything goes through core.context.getContact().
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
-const { isLocalDesktopEvent } = require('../core/origin');
+const { isLocalDesktopEvent, isRemoteWindowEvent } = require('../core/origin');
 
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 
@@ -29,6 +29,9 @@ function registerContactHandlers(ipcMain, context = {}) {
   handle(IPC.CONTACT_POLICY_SET, async (_event, policy) => contact().setPolicy(policy));
 
   handle(IPC.PRESENCE_HEARTBEAT, async (event, payload) => {
+    // A remote tab in focus does not put the owner at a window: the questions
+    // keep going to the phone (remote window plan R-RW-13).
+    if (isRemoteWindowEvent(event)) return { ok: true, counted: false };
     if (!fromMainWindow(event) && !fromAttachedDesktop(event)) {
       return { ok: false, error: 'presence:heartbeat is accepted only from the main window or an attached desktop.' };
     }

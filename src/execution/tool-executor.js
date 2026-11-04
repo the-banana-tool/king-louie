@@ -114,6 +114,10 @@ class ToolExecutor extends EventEmitter {
     // path only). A browser action that changes something runs unasked when
     // the model's ownerQuote is found in it (src/tools/browser-acting.js).
     this.ownerTurnText = typeof options.ownerTurnText === 'string' ? options.ownerTurnText : null;
+    // A remote window's own turn (approvalSeam, nothing else): denyAutoApproval
+    // holds, so its words lift no gate, but they are the owner's, so a spoken
+    // tool may check its quote against them (remote window plan R-RW-9).
+    this.remoteWindowTurn = options.remoteWindowTurn === true;
     // Cases stage 2: a wake-up turn may run only these tools, whatever the
     // model names. null means no restriction (every other caller).
     if (options.allowedToolNames instanceof Set) {
@@ -332,7 +336,7 @@ class ToolExecutor extends EventEmitter {
     // condition under which tool.execute gets ownerTurnText: null), so a
     // gateway, cron or remote run never asks anyone (a phone on a service
     // node) to approve a call that would then fail not_owner.
-    if (tool.requiresOwnerTurn && (this.denyAutoApproval || typeof this.ownerTurnText !== 'string' || !this.ownerTurnText.trim())) {
+    if (tool.requiresOwnerTurn && ((this.denyAutoApproval && !this.remoteWindowTurn) || typeof this.ownerTurnText !== 'string' || !this.ownerTurnText.trim())) {
       const refused = { success: false, error: OWNER_TURN_REQUIRED_MESSAGE, code: 'not_owner', deniedBy: 'policy' };
       this.emit('postExecute', { toolName, parameters, result: refused });
       return refused;
@@ -787,8 +791,9 @@ class ToolExecutor extends EventEmitter {
         // The owner's own message for this turn, from this executor's own
         // field only (the local chat send path sets it): last, so no call
         // option or extra tool option can supply it, and never under
-        // denyAutoApproval. answer_question checks its quote against it.
-        ownerTurnText: this.denyAutoApproval ? null : this.ownerTurnText,
+        // denyAutoApproval but on a remote window's own turn. answer_question
+        // checks its quote against it.
+        ownerTurnText: this.denyAutoApproval && !this.remoteWindowTurn ? null : this.ownerTurnText,
         // This run's take holder and origin locality, from this executor's
         // own fields (the Take tool reads them).
         takePolicy: this.takePolicy,

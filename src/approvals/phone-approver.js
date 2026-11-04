@@ -388,7 +388,7 @@ class PhoneApprover {
     };
     let action;
     try {
-      action = toolAction(toolName, parameters, meta.workingDirectory || null);
+      action = toolAction(toolName, parameters, meta.workingDirectory || null, meta.cardNote);
     } catch (err) {
       if (err instanceof MessageError) return refuse('unavailable', `Action cannot be shown on the phone (${err.reason}); nothing ran.`);
       throw err;
@@ -399,7 +399,7 @@ class PhoneApprover {
       // Read live: metadata.workingDirectory at the moment a phone response
       // is being checked against reality, not the value captured when the
       // request was first signed.
-      currentAction: () => toolAction(toolName, parameters, meta.workingDirectory || null)
+      currentAction: () => toolAction(toolName, parameters, meta.workingDirectory || null, meta.cardNote)
     });
     switch (outcome.decision) {
       case 'approve':
