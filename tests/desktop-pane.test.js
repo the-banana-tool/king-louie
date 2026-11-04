@@ -382,6 +382,28 @@ describe('nodeHosting / nodeVersion: what a node says of itself', () => {
   });
 });
 
+describe('describeLocalInferenceBlock: the Models pane on a personal node (G-5)', () => {
+  const { describeLocalInferenceBlock } = require('../src/desktop-bridge/pane-model');
+
+  it('names the service.json beside the data dir, with a block the service would load', () => {
+    const m = describeLocalInferenceBlock({ node: { hosting: 'personal', dataDir: path.win32.join('C:\\', 'Users', 'owner', 'AppData', 'Local', 'KingLouie', 'node', 'data') } });
+    assert.strictEqual(m.file, path.win32.join('C:\\', 'Users', 'owner', 'AppData', 'Local', 'KingLouie', 'node', 'config', 'service.json'));
+    assert.match(m.intro, /restart King Louie Node/);
+    const { parseLocalInferenceConfig } = require('../src/service/config');
+    const block = JSON.parse(`{${m.example}}`).localInference;
+    assert.strictEqual(block.servers[0].id, 'workstation');
+    assert.ok(parseLocalInferenceConfig(block));
+  });
+
+  it('the path goes through shown; a fleet node, or a node with no data dir, gets nothing', () => {
+    const odd = describeLocalInferenceBlock({ node: { hosting: 'personal', dataDir: path.win32.join('C:\\', 'x\u202e', 'data') } });
+    assert.match(odd.file, /hidden or control characters removed/);
+    assert.strictEqual(describeLocalInferenceBlock({ node: null }), null);
+    assert.strictEqual(describeLocalInferenceBlock({ node: { hosting: 'personal' } }), null);
+    assert.strictEqual(describeLocalInferenceBlock({}), null);
+  });
+});
+
 describe('describeInstallPreview / describeInstallResult', () => {
   it('the dry run\'s lines go in a <pre> text, each through shown, with Install and Cancel', () => {
     const m = describeInstallPreview({ ok: true, lines: ['Account: LAPTOP-01\\owner', 'Task: KingLouie Node', 'odd\u0007line'] });

@@ -99,6 +99,7 @@ const dom = {
   modelsLocalAddBtn: document.getElementById('models-local-add-btn'),
   modelsLocalOllamaBtn: document.getElementById('models-local-ollama-btn'),
   modelsLocalUsage: document.getElementById('models-local-usage'),
+  modelsLocalAdminBlock: document.getElementById('models-local-admin-block'),
   importChatPrivate: document.getElementById('import-chat-private'),
   inputContainer: document.getElementById('input-container'),
   inputResizeHandle: document.getElementById('input-resize-handle'),
@@ -8205,6 +8206,27 @@ function localServerCard(server, { readOnly }) {
   return card;
 }
 
+// A personal node's owner is its administrator: where the block goes, and one to
+// paste (attach stage 2 §6.6, G-5). Words from describeLocalInferenceBlock.
+async function paintLocalInferenceBlock(readOnly) {
+  const box = dom.modelsLocalAdminBlock;
+  if (!box) return;
+  box.textContent = '';
+  box.hidden = true;
+  if (!readOnly || !window.electron?.desktop?.status) return;
+  const model = window.electron.desktop.describeLocalInference(await window.electron.desktop.status());
+  if (!model) return;
+  const intro = document.createElement('p');
+  intro.textContent = model.intro;
+  const file = document.createElement('code');
+  file.textContent = model.file;
+  const example = document.createElement('pre');
+  example.textContent = model.example;
+  box.textContent = '';
+  box.append(intro, file, example);
+  box.hidden = false;
+}
+
 function renderLocalServers(view) {
   const list = dom.modelsLocalList;
   if (!list) return;
@@ -8213,6 +8235,7 @@ function renderLocalServers(view) {
   if (dom.modelsLocalActions) dom.modelsLocalActions.hidden = readOnly;
   const servers = Array.isArray(view?.servers) ? view.servers : [];
   if (readOnly) setLocalStatus(LOCAL_ADMIN_SENTENCE);
+  paintLocalInferenceBlock(readOnly).catch((err) => localUiLog.warn(`reading the node's status failed: ${err.message}`));
   if (!servers.length) {
     const empty = document.createElement('div');
     empty.className = 'provider-message';

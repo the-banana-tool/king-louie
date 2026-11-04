@@ -1412,7 +1412,8 @@ contextBridge.exposeInMainWorld(
       paneShapeChanged: (prevModel, nextModel) => (paneModel ? paneModel.paneShapeChanged(prevModel, nextModel) : true),
       describeBanner: (status) => (paneModel ? paneModel.describeAttachedBanner(status) : null),
       describeInstallPreview: (result) => (paneModel ? paneModel.describeInstallPreview(result) : null),
-      describeInstallResult: (result) => (paneModel ? paneModel.describeInstallResult(result) : null)
+      describeInstallResult: (result) => (paneModel ? paneModel.describeInstallResult(result) : null),
+      describeLocalInference: (status) => (paneModel ? paneModel.describeLocalInferenceBlock(status) : null)
     },
     markdown: {
       parse: (text) => safeMarkdownParse(text),

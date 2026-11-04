@@ -97,6 +97,15 @@ describe('renderer: local servers in the Models tab', () => {
     assert.match(recheck, /confirm: true, expected: first\.resolved\.addresses/);
   });
 
+  it('G-5: read-only on a personal node, the pane paints the config path and block with textContent only', () => {
+    const paint = block('async function paintLocalInferenceBlock(', '\nfunction renderLocalServers(');
+    assert.doesNotMatch(paint, NO_HTML);
+    assert.ok(paint.includes('describeLocalInference(await window.electron.desktop.status())'));
+    assert.ok(block('function renderLocalServers(', '\nasync function renderLocalUsage(').includes('paintLocalInferenceBlock(readOnly)'));
+    assert.ok(html.includes('id="models-local-admin-block"'));
+    assert.ok(preload.includes('describeLocalInference: (status)'));
+  });
+
   it('R-LI-31: "Use this Ollama as a local server" adds it, then lists the profile targets before moving them', () => {
     const flow = block('async function useOllamaAsLocal(', '\n// A profile card');
     assert.match(flow, /fromOllama\(\{\}\)/);

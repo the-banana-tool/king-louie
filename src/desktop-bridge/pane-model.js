@@ -264,6 +264,28 @@ function describeServicePane(status = {}) {
 // `retry`, `standaloneOnce`, `openServiceSettings` (also the Install… row:
 // it opens Settings > Local service, where the preview runs), `nodeStart`,
 // `nodeRestart`.
+// The Models pane on a personal node (attach stage 2 §6.6, G-5). Local servers
+// come only from the admin block there, and on a personal node the owner is the
+// administrator, so the pane says which file and shows a block to paste. Read
+// only: nothing here writes the file. Null for a fleet node, whose file is its
+// administrator's.
+const LOCAL_INFERENCE_EXAMPLE = `"localInference": {
+  "servers": [
+    { "id": "workstation", "name": "Workstation", "kind": "ollama", "baseUrl": "http://127.0.0.1:11434", "maxConcurrent": 2 }
+  ]
+}`;
+function describeLocalInferenceBlock(status = {}) {
+  const node = personalNode(status);
+  if (!node || !node.dataDir) return null;
+  const sep = String(node.dataDir).includes('\\') ? '\\' : '/';
+  const file = [dirOf(node.dataDir), 'config', 'service.json'].join(sep);
+  return {
+    intro: 'To add a local server, add a block like this one to the file below, then restart King Louie Node.',
+    file: plain(file),
+    example: LOCAL_INFERENCE_EXAMPLE
+  };
+}
+
 function describeAttachedBanner(status) {
   const s = status || {};
   if (s.view === 'attached-starting') return { line: NODE_LINES.STARTING, actions: [] };
@@ -359,7 +381,7 @@ function paneShapeChanged(prevModel, nextModel) {
 
 module.exports = {
   describeServicePane, describeApprovals, describeImportReport, describeServiceCommand,
-  describeAttachedBanner, describeInstallPreview, describeInstallResult,
+  describeAttachedBanner, describeInstallPreview, describeInstallResult, describeLocalInferenceBlock,
   decideDetachClick, paneShapeChanged, DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE,
   plain, nodeHosting, nodeVersion, disconnectedRow, refusalLine, NODE_LINES, PERSONAL_PAIR_WARNING
 };
