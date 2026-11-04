@@ -17,7 +17,7 @@ const { MESSAGES, LIMITS } = require('../desktop-bridge/protocol');
 const { normalizeDirectory } = require('../desktop-bridge/desktop-scope');
 const { guardCheck } = require('../platform/write-guard');
 const { hasPrototypePart } = require('../platform/vault');
-const { CHATS_OUT_OF_ORDER } = require('./migration-verify');
+const { chatsOutOfOrder } = require('./migration-verify');
 const { isContactVaultKey } = require('../cases/contact-settings');
 const { isLocalServerVaultKey } = require('../models/local-vault-keys');
 
@@ -1647,7 +1647,7 @@ class DesktopImporter {
       notes: [
         ...(cronDisabled ? [`${cronDisabled} cron job(s) were imported disabled; enable them in Settings > Scheduler.`] : []),
         ...(needsRestart ? [RESTART_NOTE] : []),
-        ...(placed ? [] : [CHATS_OUT_OF_ORDER])
+        ...(placed ? [] : [chatsOutOfOrder(this.where)])
       ]
     };
   }

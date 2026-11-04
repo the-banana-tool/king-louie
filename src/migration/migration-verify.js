@@ -18,7 +18,8 @@
 // The moved chats' order is compared too, and only ever said: it refuses nothing.
 const { shown } = require('../service/commands/io');
 
-const CHATS_OUT_OF_ORDER = 'Your chats are all on the node, but its list does not show them in the order they had here. Only the order differs: nothing is missing.';
+// Claims the order and no more: a chat that did not land is said apart, and may be here too.
+const chatsOutOfOrder = (where) => `The chat list on the ${where} does not show the moved chats in the order they had here.`;
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 const CHECKED_ACTIONS = new Set([...WRITE_ACTIONS, 'skip-present']);
 
@@ -116,7 +117,7 @@ async function checkChats(items, invoke, note, notes) {
     return;
   }
   const listed = load.chats.filter(Boolean);
-  if (outOfOrder(items, listed)) notes.push(CHATS_OUT_OF_ORDER);
+  if (outOfOrder(items, listed)) notes.push(chatsOutOfOrder('node'));
   const byId = new Map(listed.map((c) => [c.id, c]));
   for (const item of items) {
     const onNode = byId.get(item.targetKey || item.key);
@@ -201,4 +202,4 @@ async function verifyMigration({ plan, report, invoke }) {
   return { ok: true, checked: { chats: chats.length, cases: cases.length, ...(vault.length ? { vault: vault.length } : {}) }, ...said };
 }
 
-module.exports = { verifyMigration, withSourceFacts, CHATS_OUT_OF_ORDER };
+module.exports = { verifyMigration, withSourceFacts, chatsOutOfOrder };

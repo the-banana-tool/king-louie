@@ -474,8 +474,19 @@ describe('verifyMigration against a real importer', () => {
     });
     const { plan, report } = await move(importer, { chats: ordered('c1', 'c2') });
     assert.deepStrictEqual(report.failures, []);
-    assert.ok(report.notes.some((n) => /order/.test(n)), JSON.stringify(report.notes));
+    assert.ok(report.notes.some((n) => /order/.test(n) && /\bnode\b/.test(n)), JSON.stringify(report.notes));
     assert.strictEqual((await verifyMigration({ plan, report, invoke })).ok, true);
+    const fleet = new DesktopImporter({
+      context,
+      targets: await buildImportTargets({ context: core.context, dataDir }),
+      dataDir,
+      checkPath,
+      scope: createDesktopScope({ dataDir, context: core.context })
+    });
+    const said = (await move(fleet, { chats: ordered('c3', 'c4') })).report.notes.join(' ');
+    assert.match(said, /order/);
+    assert.match(said, /\bservice\b/);
+    assert.doesNotMatch(said, /\bnode\b/);
   });
 
   it('chats out of order are a line, never a refusal, and only the moved chats count', async () => {
@@ -488,7 +499,9 @@ describe('verifyMigration against a real importer', () => {
     assert.deepStrictEqual(reversed.checked, { chats: 2, cases: 0 });
     assert.strictEqual(reversed.notes.length, 1);
     assert.match(reversed.notes[0], /order/);
-    assert.match(reversed.notes[0], /nothing is missing/i);
+    assert.doesNotMatch(reversed.notes[0], /nothing is missing|all on the node/i, 'it claims the order and no more');
+    const short = await verifyMigration({ plan, report: cleanReport(), invoke: nodeAnswers({ chats: [onNode('c2')] }).invoke });
+    assert.strictEqual(short.ok, false);
   });
 
   it('a real chat and a real case: verified, and the case reads as it did on the desktop (HEAD, clean tree)', async () => {
