@@ -13,11 +13,11 @@ const { encodePairRequest, defaultDeviceLabel, bridgeFilePath, readTrustedBridge
 const { rawFromPublicKeyObject, fingerprintGroups } = require('../desktop-bridge/keys');
 const { MESSAGES } = require('../desktop-bridge/protocol');
 const { unavailableTabsFor } = require('../desktop-bridge/allowlist');
-const { PERSONAL_CLI_FILE, defaultServiceDataDir } = require('../platform/paths');
+const { PERSONAL_CLI_FILE, defaultServiceDataDir, isPersonalCli } = require('../platform/paths');
 const { nodeHosting, nodeVersion } = require('../desktop-bridge/pane-model');
 const { describeSetup, nextSetupStep, setupFacts } = require('../desktop-bridge/setup-flow');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
-const { backupProfile, backupDirFor, readBackupManifest } = require('../migration/profile-backup');
+const { backupProfile, backupDirFor, readBackupManifest, readCaseRoot } = require('../migration/profile-backup');
 const { detectOldProfileApart } = require('../migration/old-profile-read');
 const { verifyMigration, withSourceFacts } = require('../migration/migration-verify');
 const { SECRET_CATEGORIES } = require('../migration/desktop-import');
@@ -141,7 +141,7 @@ function createDesktopController({
   now = () => new Date(), username = null,
   // resolveLaunchMode's answer (spec 2026-11-03 §6.1), for desktop:status.
   launch = { host: mode, why: mode === 'attached' ? 'attached' : 'dev', degraded: false },
-  cliExists = (file) => fs.existsSync(file),
+  cliExists = isPersonalCli,
   // What a personal node's version is compared with (spec 2026-11-03 §6.8).
   appVersion = app && typeof app.getVersion === 'function' ? app.getVersion() : null,
   // The personal node (spec 2026-10-28): the runner that reads and starts it,
@@ -216,6 +216,7 @@ function createDesktopController({
   let restartedAfterMove = false;
   let elevated = false;
   let migrateSkipped = false;
+  let finishedForNow = false;
   let profileDefault = false;
   // The old profile, read once per launch and again when asked (§6.5). The read
   // takes a while on a big profile, so it has one run, and a run overtaken by a
@@ -497,7 +498,8 @@ function createDesktopController({
       completedAt: stored.completedAt || null,
       phoneOffered: stored.phoneOffered === true,
       phoneSeen: stored.phoneSeen === true,
-      migrateSkipped
+      migrateSkipped,
+      finishedForNow
     };
   }
 
@@ -620,7 +622,11 @@ function createDesktopController({
   // know whether there is one: a line and no press until the read answers.
   async function setupStep() {
     const { status: s, reading } = await setupStatus(oldProfileWaitMs);
-    if (reading) return describeNow({ ...s, oldProfile: OLD_PROFILE_UNKNOWN }, { setupProgress: setupProgress || READING_OLD_PROFILE });
+    if (reading) {
+      const answer = describeNow({ ...s, oldProfile: OLD_PROFILE_UNKNOWN }, { setupProgress: setupProgress || READING_OLD_PROFILE });
+      // A read can hang for as long as its time limit: Check again starts a new one.
+      return setupProgress ? answer : { ...answer, actions: [...answer.actions, { id: 'retry', label: 'Check again' }] };
+    }
     // The phone step's first instruction stops the node: once offered it stays.
     if (s.setup.step === 'phone' && !s.setup.phoneOffered) {
       state.noteSetup({ phoneOffered: true });
@@ -640,7 +646,10 @@ function createDesktopController({
       const old = await readOldProfile();
       if (state.migration) return refused(profileMigrated());
       if (moveRun) return { ...MOVE_RUNNING };
-      if (!old || !old.found || old.schemaProblem) {
+      if (old && old.found && old.schemaProblem) {
+        return refused({ ok: false, code: 'NOT_POSTPONABLE', error: 'Your earlier King Louie could not be read, so the old standalone mode cannot be relied on to open it. Press Retry, or Skip for now.' });
+      }
+      if (!old || !old.found) {
         return refused({ ok: false, code: 'NOT_POSTPONABLE', error: 'There is nothing on this computer to keep using, so there is no standalone mode to go back to.' });
       }
       return relaunch([STANDALONE_ONCE]);
@@ -680,6 +689,13 @@ function createDesktopController({
       return answers.setupError;
     }
     if (step === 'phone') state.noteSetup({ phoneSeen: true });
+    // A move skipped and not made is not a setup finished: the window goes on for
+    // this launch, and the move is offered at the next. A read that failed for a
+    // passing reason offers that Skip, so it must not close the move for good.
+    if (migrateSkipped && !state.migration) {
+      finishedForNow = true;
+      return answer();
+    }
     state.setSetup({ completedAt: now().toISOString() });
     return answer();
   }
@@ -1370,6 +1386,7 @@ function createDesktopController({
   // on its row; the move is done either way.
   function restartAfterMove() {
     restartedAfterMove = true;
+    state.clearRestartDue();
     nodeStartNow({ restart: true }).catch((err) => log.warn(`restarting King Louie Node after the move failed: ${err.message}`));
   }
 
@@ -1415,7 +1432,8 @@ function createDesktopController({
             files: backup.files,
             history: backup.history,
             customCasesRoot: old.customCasesRoot ? shown(old.customCasesRoot, 400) : null,
-            customCases: old.customCases
+            customCases: old.customCases,
+            customCasesMissing: old.customCasesMissing === true
           },
           plan: {
             ...plan,
@@ -1445,10 +1463,22 @@ function createDesktopController({
       if (!session) return { ok: false, code: 'PLAN_EXPIRED', error: 'The plan for this move expired; plan it again.' };
       const { backup, service, customCasesRoot, customCases, heldCases, refusedFiles } = session.move;
       // The move carries only the profile's own cases folder, so marking it
-      // would leave these behind with no way back to them from this profile.
-      if (customCasesRoot && customCases !== 0) {
-        return moveSourceRefusal(`Cases under ${customCasesRoot} are outside this profile and would not move. Move them into the profile's cases folder, or out of use, and plan again.`);
+      // would leave these behind with no way back to them from this profile. The
+      // plan's count is only what it was: a drive can go, or a case arrive, since.
+      const caseRootRefusal = async () => {
+        if (!customCasesRoot) return null;
+        const now = await readCaseRoot(customCasesRoot);
+        if (now.customCases === 0) return null;
+        return moveSourceRefusal(now.customCasesMissing
+          ? `The cases folder ${customCasesRoot} is not there, so its cases would not move. Plug its drive in, or if that folder is no longer used make an empty folder at that path, and plan again.`
+          : `Cases under ${customCasesRoot} are outside this profile and would not move. Move them into the profile's cases folder, or out of use, and plan again.`);
+      };
+      if (customCases !== 0 && customCasesRoot) {
+        const refused = await caseRootRefusal();
+        return refused || moveSourceRefusal(`The cases folder ${customCasesRoot} has changed since the plan, so plan again.`);
       }
+      const rootChanged = await caseRootRefusal();
+      if (rootChanged) return rootChanged;
       if (heldCases.length) {
         const names = heldCases.map((h) => h.key).join(', ');
         return moveSourceRefusal(`${heldCases.length === 1 ? 'A case cannot' : 'Cases cannot'} be moved as ${heldCases.length === 1 ? 'it stands' : 'they stand'}: ${names}. Nothing was moved. Sort ${heldCases.length === 1 ? 'it' : 'them'} out on the desktop and plan again.`);
@@ -1497,9 +1527,13 @@ function createDesktopController({
             verified
           };
         }
+        const rootGone = await caseRootRefusal();
+        if (rootGone) return { ...rootGone, report: shownOut, leftBehind, refusedFiles, verified };
         try {
           state.setMigration({
             at: now().toISOString(),
+            // Cleared as the restart goes; an app death before that leaves it for the next launch.
+            restartDue: true,
             backupDir: backup.dest,
             nodeDataDir: service.dataDir || null,
             nodeId: service.nodeId,
@@ -1739,7 +1773,13 @@ function createDesktopController({
       connectNow();
       return;
     }
-    await launchStart(dataDir, false);
+    // A move marked by a launch that died before its restart: owed once.
+    const owed = Boolean(state.migration && state.migration.restartDue);
+    if (owed) {
+      state.clearRestartDue();
+      restartedAfterMove = true;
+    }
+    await launchStart(dataDir, owed);
   }
 
   // §7.4's Start/Restart buttons: only on a press. Answers once the start
@@ -1869,7 +1909,7 @@ function createDesktopController({
     status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
     importPlan, importApply, migrationPlan, migrationApply, dismissServiceCommand, createClient, setClient, dispose,
     startAttached, startIdle, refreshIdle, nodeStart, nodeRestart, nodeInstallPreview, nodeInstall,
-    setupStep, setupLater, setupFinish,
+    setupStep, setupLater, setupFinish, finishedForNow: () => finishedForNow,
     on: (event, fn) => emitter.on(event, fn)
   };
 }

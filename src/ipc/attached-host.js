@@ -82,7 +82,7 @@ function startAttachedHost(deps) {
     // §6.3: the wizard is the setup's provider, profile and phone steps. A fleet
     // pairing has no setup, so it has no first run.
     'wizard:getStatus': async () => {
-      const setupDone = Boolean(state.setup && state.setup.completedAt);
+      const setupDone = Boolean(state.setup && state.setup.completedAt) || controller.finishedForNow();
       const fleet = Boolean(state.pairing && state.pairing.service) && hosting() !== 'personal';
       return { ok: true, isFirstRun: !setupDone && !fleet && !(launch && launch.why === 'dev') };
     },

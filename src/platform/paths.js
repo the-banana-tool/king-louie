@@ -8,6 +8,22 @@ const path = require('path');
 // The command-line launcher `install --personal` writes beside a window-installed
 // node's config dir, so its owner has a king-louie-service to run.
 const PERSONAL_CLI_FILE = 'king-louie-service.cmd';
+// Its first line. A file of that name without it may be the owner's own script.
+const PERSONAL_CLI_MARKER = '@rem King Louie Node launcher, written by install --personal.';
+
+function isPersonalCli(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const head = Buffer.alloc(PERSONAL_CLI_MARKER.length);
+    const read = fs.readSync(fd, head, 0, head.length, 0);
+    return head.toString('utf8', 0, read) === PERSONAL_CLI_MARKER;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
 
 function personalDataDir({ platform = process.platform, env = process.env } = {}) {
   if (platform === 'win32') {
@@ -311,6 +327,8 @@ module.exports = {
   pathPresent,
   personalDataDir,
   PERSONAL_CLI_FILE,
+  PERSONAL_CLI_MARKER,
+  isPersonalCli,
   desktopProfileDirs,
   adminConfigDir,
   adminCredentialPath,

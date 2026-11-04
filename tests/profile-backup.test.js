@@ -171,6 +171,14 @@ describe('detectOldProfile, out of the main process', () => {
   });
 });
 
+describe('a cases root named only by the environment and not there', () => {
+  it('says nothing is here for an empty profile, since nothing in it names that folder', async () => {
+    const root = emptyProfile();
+    const res = await detectOldProfile(root, { env: { KL_CASES_ROOT: path.join(path.dirname(root), 'not-there') } });
+    assert.strictEqual(res.found, false);
+  });
+});
+
 describe('a custom cases root the owner emptied', () => {
   const { readDesktopSource } = require('../src/migration/desktop-source');
   const { loadDesktopSource } = require('../src/ipc/desktop-export');
@@ -223,7 +231,7 @@ describe('a custom cases root the owner emptied', () => {
 describe('detectOldProfile', () => {
   it('empty dir is not found', async () => {
     const res = await detectOldProfile(emptyProfile());
-    assert.deepStrictEqual(res, { found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 });
+    assert.deepStrictEqual(res, { found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0, customCasesMissing: false });
   });
 
   it('a directory that is not there is not found', async () => {
@@ -840,11 +848,18 @@ describe('a custom cases root', () => {
     assert.strictEqual(res.customCases, 0);
   });
 
-  it('a root that is not there counts 0; one that cannot be read counts null', async () => {
+  it('a root that is not there is not empty: it counts null and says so; one that cannot be read counts null', async () => {
     const root = emptyProfile();
     const missing = path.join(path.dirname(root), 'not-there');
     put(root, 'chat-data.json', JSON.stringify({ settings: { cases: { root: missing } } }));
-    assert.strictEqual((await detectOldProfile(root, { env: {} })).customCases, 0);
+    const absent = await detectOldProfile(root, { env: {} });
+    assert.strictEqual(absent.customCases, null);
+    assert.strictEqual(absent.customCasesMissing, true);
+    assert.strictEqual(absent.found, true);
+    fs.mkdirSync(missing);
+    const present = await detectOldProfile(root, { env: {} });
+    assert.strictEqual(present.customCases, 0, 'only a folder that exists and holds none is empty');
+    assert.strictEqual(present.customCasesMissing, false);
     const file = put(path.dirname(root), 'a-file', 'x');
     put(root, 'chat-data.json', JSON.stringify({ settings: { cases: { root: file } } }));
     assert.strictEqual((await detectOldProfile(root, { env: {} })).customCases, null);

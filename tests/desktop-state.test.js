@@ -243,6 +243,19 @@ describe('desktop state: the migration marker and the setup (attach stage 2 §6.
     assert.throws(() => openState().setSetup({}), /completedAt/);
   });
 
+  it('restartDue goes on the marker and comes off alone', () => {
+    const state = openState();
+    state.setMigration({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\b', nodeId: 'kl-abc', restartDue: true });
+    assert.strictEqual(state.migration.restartDue, true);
+    state.clearRestartDue();
+    assert.strictEqual(state.migration.restartDue, undefined);
+    assert.strictEqual(state.migration.backupDir, 'C:\\b');
+    state.clearRestartDue();
+    const none = openState();
+    none.clearRestartDue();
+    assert.strictEqual(none.migration, null);
+  });
+
   it('noteSetup keeps what the walk has shown, and setSetup keeps it', () => {
     const state = openState();
     assert.strictEqual(state.setup, null);

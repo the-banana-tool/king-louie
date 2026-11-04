@@ -566,7 +566,41 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
       assert.ok(!none.executed.flat().some((step) => step.unlink));
     });
 
-    it('uninstall removes what install would write here, marker or not, and leaves anyone else\'s, saying so', async () => {
+    it('install does not write over a file of that name it did not write, and says so; its own it replaces', async () => {
+      const s = setup();
+      const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
+      fs.mkdirSync(path.dirname(cli), { recursive: true });
+      fs.writeFileSync(cli, '@echo off\r\necho my own script\r\n');
+      const d = deps(s, { runAsNode: true, nodePath: APP });
+      const { code, t } = await run('install', s, d, { yes: true });
+      assert.equal(code, 0, t.errors());
+      assert.equal(launcherStep(d), undefined);
+      assert.match(t.text(), /king-louie-service\.cmd[^\n]* left /);
+
+      fs.writeFileSync(cli, renderServiceCli({ nodePath: 'C:\\old\\k.exe', entryPath: 'C:\\old\\k.js' }));
+      const again = deps(s, { runAsNode: true, nodePath: APP, taskRegistered: () => false });
+      await run('install', s, again, { yes: true });
+      assert.ok(launcherStep(again), 'an older launcher of ours is replaced');
+    });
+
+    it('uninstall with no --data-dir looks at the default place, and with no default says what to pass', async () => {
+      const s = setup();
+      const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
+      fs.mkdirSync(path.dirname(cli), { recursive: true });
+      fs.writeFileSync(cli, renderServiceCli({ nodePath: APP, entryPath: 'C:\\k.js' }));
+      for (const taskRegistered of [() => true, () => false]) {
+        const d = deps(s, { taskRegistered });
+        const { code, t } = await run('uninstall', s, d, { yes: true, dataDir: undefined });
+        assert.equal(code, 0, t.errors());
+        assert.ok(d.executed.flat().some((step) => step.unlink === cli), 'the launcher goes');
+      }
+      const none = deps(s, { env: { SystemRoot: 'C:\\Windows', PATH: '' } });
+      const { code, t } = await run('uninstall', s, none, { yes: true, dataDir: undefined });
+      assert.notEqual(code, 0);
+      assert.match(t.errors(), /--data-dir/);
+    });
+
+    it('uninstall removes what carries the marker, and leaves anyone else\'s, saying so', async () => {
       const s = setup();
       const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
       fs.mkdirSync(path.dirname(cli), { recursive: true });

@@ -186,6 +186,20 @@ describe('attached host', () => {
     await fleet.host.shutdown();
   });
 
+  it('a setup finished for this launch does not open the wizard again', async () => {
+    const made = setup({ pairingService: { hosting: 'personal', dataDir: 'C:\\x\\data' }, launch: { host: 'attached', why: 'attached', degraded: false }, nodeRunner: null, controllerFactory: (deps) => {
+      const { createDesktopController } = require('../src/ipc/desktop-controller');
+      return createDesktopController({ ...deps, nodeRunner: null, migrationDeps: { detectOldProfile: async () => ({ found: true, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: 'bad', customCasesRoot: null, customCases: 0 }) } });
+    } });
+    made.client.goLive(SERVICE([]));
+    await made.host.controller.setupFinish({ skip: 'migrate' });
+    await made.host.controller.setupFinish({ skip: 'phone' });
+    await made.handlers.get('wizard:complete')({});
+    assert.ok(!made.state.setup.completedAt);
+    assert.deepStrictEqual(await made.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
+    await made.host.shutdown();
+  });
+
   it('wizard:complete finishes the setup, and is refused before the move', async () => {
     const finished = [];
     const controllerFactory = (deps) => {

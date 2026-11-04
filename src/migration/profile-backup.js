@@ -167,16 +167,20 @@ function customRootOf(root, settingRoot, env) {
   return path.relative(path.join(root, WATCHED_DIR), resolved) === '' ? null : resolved;
 }
 
-// How many case directories a custom root holds: 0 when it is not there, null
-// when it cannot be read. A link may be a case, so it counts.
-async function countCaseDirs(dir) {
+// How many case directories a custom root holds, and whether it is there at all.
+// Only a folder that exists and reads with none is 0: a root that is gone may be a
+// drive not plugged in, with every case on it, so it is null like one that cannot
+// be read, and customCasesMissing says which. A link may be a case, so it counts.
+async function readCaseRoot(dir) {
   try {
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-    return entries.filter((e) => !e.name.startsWith('.') && (e.isDirectory() || e.isSymbolicLink())).length;
+    return { customCases: entries.filter((e) => !e.name.startsWith('.') && (e.isDirectory() || e.isSymbolicLink())).length, customCasesMissing: false };
   } catch (err) {
-    return err.code === 'ENOENT' ? 0 : null;
+    return { customCases: null, customCasesMissing: err.code === 'ENOENT' };
   }
 }
+
+const NO_CASE_ROOT = Object.freeze({ customCases: 0, customCasesMissing: false });
 
 function settingRootFrom(root, reader = createSafeReader({ root })) {
   const read = reader.readFile('chat-data.json');
@@ -344,7 +348,7 @@ async function backupProfile({
     if (moved) throw new Refusal(`${shown(moved)} changed while the backup ran; close any other King Louie and try again`);
 
     const customCasesRoot = customRootOf(root, settingRootFrom(root), env);
-    const customCases = customCasesRoot ? await countCaseDirs(customCasesRoot) : 0;
+    const { customCases, customCasesMissing } = customCasesRoot ? await readCaseRoot(customCasesRoot) : NO_CASE_ROOT;
     const manifest = {
       v: 1,
       from: root,
@@ -360,7 +364,7 @@ async function backupProfile({
     await io.rm(path.join(dest, UNFINISHED));
     say({ phase: 'done', files: listed.length, totalFiles: listed.length, bytes, totalBytes: bytes, path: '' });
     log.info('profile backed up', { files: listed.length, bytes, chats: history.chats, messages: history.messages });
-    return { dest, bytes, files: listed.length, history, customCasesRoot, customCases };
+    return { dest, bytes, files: listed.length, history, customCasesRoot, customCases, customCasesMissing };
   } catch (err) {
     const where = made
       ? `The unfinished copy is at ${shown(dest)}, marked by its ${UNFINISHED} file; it is no good as a backup and can be deleted once you have looked at it.`
@@ -433,14 +437,14 @@ async function readBackupManifest(dest, { onProgress = null } = {}) {
 const STORE_PROBLEM_KEYS = new Set([STORE_FILE, 'chat-data.json']);
 
 // { found, chats, messages, cases, bytes, schemaProblem, customCasesRoot,
-// customCases }. Never throws, and never answers "nothing here" for a profile
+// customCases, customCasesMissing }. Never throws, and never answers "nothing here" for a profile
 // it could not read: a store or a chat-data.json the reader refuses is found,
 // with schemaProblem saying why. customCasesRoot (through shown) is a cases
 // root outside the profile's own folder, which neither the backup nor the move
-// carries; customCases is how many directories it holds, 0 when it is not
-// there, null when it cannot be read.
+// carries; customCases is how many directories it holds, null when it is not
+// there (customCasesMissing) or cannot be read.
 async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, reader = null, env = process.env } = {}) {
-  const nothing = { found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 };
+  const nothing = { found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0, customCasesMissing: false };
   const problemOnly = (text) => ({ ...nothing, found: true, schemaProblem: shown(text, 400) });
   const root = path.resolve(userDataDir);
   let safe = reader;
@@ -457,10 +461,11 @@ async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, r
   let settingRoot;
   let customCasesRoot;
   let customCases;
+  let customCasesMissing;
   try {
     settingRoot = settingRootFrom(root, safe);
     customCasesRoot = customRootOf(root, settingRoot, env);
-    customCases = customCasesRoot ? await countCaseDirs(customCasesRoot) : 0;
+    ({ customCases, customCasesMissing } = customCasesRoot ? await readCaseRoot(customCasesRoot) : NO_CASE_ROOT);
     history = await readHistory({ reader: safe });
     // With the root empty the cases are the ones in the profile's own folder,
     // where the setup's screen tells the owner to put them.
@@ -477,7 +482,7 @@ async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, r
   }, 0);
   const found = Boolean(
     history.found || schemaProblem || inventory.chats.length || inventory.cases.length
-    || settingRoot || customCases !== 0 || attention.some((a) => a.category === 'case')
+    || settingRoot || (customCases !== 0 && !customCasesMissing) || attention.some((a) => a.category === 'case')
   );
   if (!found) return nothing;
   let bytes = 0;
@@ -495,8 +500,9 @@ async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, r
     bytes,
     schemaProblem,
     customCasesRoot: customCasesRoot ? shown(customCasesRoot, 400) : null,
-    customCases
+    customCases,
+    customCasesMissing
   };
 }
 
-module.exports = { detectOldProfile, backupProfile, backupDirFor, readBackupManifest, EXCLUDED_DIRS };
+module.exports = { detectOldProfile, backupProfile, backupDirFor, readBackupManifest, readCaseRoot, EXCLUDED_DIRS };

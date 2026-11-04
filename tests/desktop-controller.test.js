@@ -2328,6 +2328,7 @@ describe('desktop controller: the one-time move', () => {
 // --- Attach stage 2 §6.3: the controller walks the setup. ---
 
 describe('desktop controller: the setup walk', () => {
+  const renderServiceCliForTest = () => require('../src/service/personal-install').renderServiceCli({ nodePath: 'C:\\k.exe', entryPath: 'C:\\k.js' });
   const { openTempStore, seedChat } = require('./helpers/history-fixture');
   const NEEDS_NODE = { host: 'attached', why: 'needs-node', degraded: false };
   const ATTACHED = { host: 'attached', why: 'attached', degraded: false };
@@ -2634,7 +2635,7 @@ describe('desktop controller: the setup walk', () => {
     made.controller.on('changed', () => changed.push(1));
     const answer = await made.controller.setupStep();
     assert.strictEqual(answer.step, 'migrate');
-    assert.deepStrictEqual(answer.actions, []);
+    assert.deepStrictEqual(ids(answer), ['retry']);
     assert.match(answer.lines[0], /earlier/);
     assert.strictEqual((await made.controller.status()).oldProfile, null);
     release({ found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 });
@@ -2939,6 +2940,191 @@ describe('desktop controller: the setup walk', () => {
     controller.dispose();
   });
 
+  // The review's walk: a root holding a case, the drive pulled.
+  function unpluggedWalk() {
+    const outside = path.join(tmp(), 'cases-on-a-drive');
+    fs.mkdirSync(path.join(outside, 'lakeside-lot'), { recursive: true });
+    fs.writeFileSync(path.join(outside, 'lakeside-lot', 'case.yaml'), 'id: case-lot\nslug: lakeside-lot\ntitle: Lakeside lot\n');
+    const pulled = `${outside}-pulled`;
+    fs.renameSync(outside, pulled);
+    const client = nodeClient();
+    const call = client.call.bind(client);
+    client.call = async (method, params) => {
+      if (method === 'import.plan') client.plannedRoot = params.inventory.customCasesRoot;
+      return call(method, params);
+    };
+    const made = attachedWalk({ client, seed: { settings: { cases: { root: outside } } }, counted: false });
+    return { ...made, client, outside, pulled };
+  }
+
+  it('a custom root on a drive not plugged in: the screen says so, nothing is marked, and the case moves refused until it is back', async () => {
+    const { controller, state, client, outside, pulled } = unpluggedWalk();
+    const first = await controller.setupStep();
+    assert.strictEqual(first.step, 'migrate');
+    assert.match(first.error.message, /is not there/);
+    const planned = await controller.migrationPlan();
+    assert.strictEqual(planned.ok, true);
+    assert.strictEqual(client.plannedRoot, outside, 'the node is told, so its plan keeps its needs-attention line');
+    const screen = await controller.setupStep();
+    assert.ok(!ids(screen).includes('migrationApply'));
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).code, 'MIGRATION_SOURCE');
+    assert.strictEqual(state.migration, null);
+
+    // Plugged back in: it holds a case, so the old refusal stands.
+    fs.renameSync(pulled, outside);
+    await controller.retry();
+    const back = await controller.setupStep();
+    assert.match(back.error.message, /1 case is kept in/);
+    assert.strictEqual(state.migration, null);
+    controller.dispose();
+  });
+
+  it('a custom root no longer used: an empty folder at that path lets the move go on', async () => {
+    const { controller, state, outside } = unpluggedWalk();
+    await controller.setupStep();
+    fs.mkdirSync(outside);
+    await controller.retry();
+    const after = await controller.setupStep();
+    assert.strictEqual(after.error, null, JSON.stringify(after.error));
+    assert.strictEqual((await controller.migrationPlan()).ok, true);
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).ok, true);
+    assert.ok(state.migration);
+    await controller.startIdle();
+    controller.dispose();
+  });
+
+  it('the count is taken again before the mark: a root that went away or filled up after the plan marks nothing', async () => {
+    for (const change of [(root) => fs.rmSync(root, { recursive: true }), (root) => fs.mkdirSync(path.join(root, 'late-case'))]) {
+      const outside = tmp();
+      const client = nodeClient();
+      const made = attachedWalk({ client, seed: { settings: { cases: { root: outside } } }, counted: false });
+      assert.strictEqual((await made.controller.migrationPlan()).ok, true);
+      change(outside);
+      const out = await made.controller.migrationApply({ confirmed: true });
+      assert.strictEqual(out.code, 'MIGRATION_SOURCE', JSON.stringify(out));
+      assert.strictEqual(made.state.migration, null);
+      assert.ok(!made.runner.calls.some(([c]) => c === 'stopNode'));
+      fs.mkdirSync(outside, { recursive: true });
+      made.controller.dispose();
+    }
+
+    // Between the landing and the mark.
+    const outside = tmp();
+    const client = nodeClient();
+    const made = attachedWalk({ client, seed: { settings: { cases: { root: outside } } }, counted: false });
+    await made.controller.migrationPlan();
+    const realInvoke = client.invoke.bind(client);
+    client.invoke = async (channel, args) => {
+      if (fs.existsSync(outside)) fs.rmSync(outside, { recursive: true });
+      return realInvoke(channel, args);
+    };
+    const out = await made.controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.code, 'MIGRATION_SOURCE', JSON.stringify(out));
+    assert.strictEqual(made.state.migration, null);
+    fs.mkdirSync(outside, { recursive: true });
+    made.controller.dispose();
+  });
+
+  it('Skip for now finishes this launch only: nothing is written, and the move is offered at the next', async () => {
+    const failing = { detectOldProfile: async () => ({ found: true, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: 'the reader ended with code 1', customCasesRoot: null, customCases: 0 }) };
+    const made = attachedWalk({ counted: false, extra: { migrationDeps: failing } });
+    const { controller, state } = made;
+    assert.strictEqual((await controller.setupStep()).step, 'migrate');
+    await controller.setupFinish({ skip: 'migrate' });
+    await controller.setupFinish({ skip: 'phone' });
+    assert.strictEqual((await controller.setupStep()).step, 'done');
+    const finished = await controller.setupFinish();
+    assert.strictEqual(finished.ok, true);
+    assert.strictEqual(finished.step, 'done');
+    assert.deepStrictEqual(finished.actions, [], 'nothing left to draw this launch');
+    assert.strictEqual(state.setup.completedAt, undefined);
+    assert.strictEqual((await controller.status()).setup.finishedForNow, true);
+    controller.dispose();
+
+    const next = made.build();
+    assert.strictEqual((await next.setupStep()).step, 'migrate');
+    assert.strictEqual((await next.status()).setup.finishedForNow, false);
+    next.dispose();
+  });
+
+  it('NOT_POSTPONABLE on a profile that failed to read says that, and not that nothing is here', async () => {
+    const made = attachedWalk({ counted: false, extra: { migrationDeps: { detectOldProfile: async () => ({ found: true, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: 'bad', customCasesRoot: null, customCases: 0 }) } } });
+    const out = await made.controller.setupLater();
+    assert.strictEqual(out.code, 'NOT_POSTPONABLE');
+    assert.match(out.error, /could not be read/);
+    assert.doesNotMatch(out.error, /nothing on this computer/);
+    made.controller.dispose();
+  });
+
+  it('a read that hangs can be pressed again: the line has a Check again, which starts a new read', async () => {
+    let count = 0;
+    const answers = [];
+    const detect = () => { count += 1; return new Promise((r) => answers.push(r)); };
+    const made = attachedWalk({ counted: false, extra: { setTimer: setTimeout, clearTimer: clearTimeout, clock: Date.now, oldProfileWaitMs: 5, migrationDeps: { detectOldProfile: detect } } });
+    const hung = await made.controller.setupStep();
+    assert.deepStrictEqual(ids(hung), ['retry']);
+    await made.controller.retry();
+    await made.controller.setupStep();
+    assert.strictEqual(count, 2);
+    answers[1]({ found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 });
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual((await made.controller.setupStep()).step, 'phone');
+    // The first read's late answer is nobody's.
+    answers[0]({ found: true, chats: 9, messages: 9, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 });
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual((await made.controller.status()).oldProfile.found, false);
+    made.controller.dispose();
+  });
+
+  it('a move whose restart was lost to an app death restarts once at the next launch', async () => {
+    const client = nodeClient();
+    const made = attachedWalk({ client });
+    made.state.setMigration({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\b', nodeId: 'kl-abc', restartDue: true });
+    const launch1 = made.build();
+    await launch1.startAttached();
+    await launch1.startIdle();
+    assert.strictEqual(made.runner.calls.filter(([c]) => c === 'stopNode').length, 1);
+    assert.strictEqual(made.runner.calls.filter(([c]) => c === 'runTask').length, 1);
+    assert.strictEqual(made.state.migration.restartDue, undefined);
+    assert.ok(made.state.migration.backupDir);
+    launch1.dispose();
+    const launch2 = made.build();
+    await launch2.startAttached();
+    await launch2.startIdle();
+    assert.strictEqual(made.runner.calls.filter(([c]) => c === 'stopNode').length, 1, 'once');
+    launch2.dispose();
+    made.controller.dispose();
+  });
+
+  it('a verified apply writes restartDue with the mark and clears it as the restart goes', async () => {
+    const seen = [];
+    const made = attachedWalk();
+    const stopNode = made.runner.stopNode.bind(made.runner);
+    made.runner.stopNode = async (a) => { seen.push(made.state.migration.restartDue); return stopNode(a); };
+    const setMigration = made.state.setMigration;
+    made.state.setMigration = (entry) => { seen.push(entry.restartDue); return setMigration(entry); };
+    await made.controller.migrationPlan();
+    await made.controller.migrationApply({ confirmed: true });
+    await made.controller.startIdle();
+    assert.deepStrictEqual(seen, [true, undefined]);
+    made.controller.dispose();
+  });
+
+  it('a file of the launcher\'s name that is not ours is not offered as the launcher', async () => {
+    const made = walk({ profile: false, launch: ATTACHED, mode: 'attached', runner: fakeRunner({ running: true }), client: nodeClient() });
+    const dataDir = path.join(made.parent, 'node', 'data');
+    fs.mkdirSync(dataDir, { recursive: true });
+    const record = personalPairing();
+    record.service.dataDir = dataDir;
+    made.state.setPairing(record);
+    const cli = path.join(path.dirname(dataDir), 'king-louie-service.cmd');
+    fs.writeFileSync(cli, '@echo off\r\necho mine\r\n');
+    assert.ok(!('serviceCli' in (await made.controller.status()).node));
+    fs.writeFileSync(cli, renderServiceCliForTest());
+    assert.strictEqual((await made.controller.status()).node.serviceCli, cli);
+    made.controller.dispose();
+  });
+
   it('status carries the launcher, the default data dir, the profile dir and the setup facts through shown', async () => {
     const made = attachedWalk({ extra: { cliExists: () => true }, profile: false });
     await made.controller.setupStep();
@@ -2947,7 +3133,7 @@ describe('desktop controller: the setup walk', () => {
     assert.strictEqual(typeof status.node.defaultDataDir, 'string');
     assert.strictEqual(status.profileDir, made.userDataDir);
     assert.strictEqual(status.userProfileDefault, false);
-    assert.deepStrictEqual(Object.keys(status.setup).sort(), ['completedAt', 'migrateSkipped', 'phoneOffered', 'phoneSeen', 'step']);
+    assert.deepStrictEqual(Object.keys(status.setup).sort(), ['completedAt', 'finishedForNow', 'migrateSkipped', 'phoneOffered', 'phoneSeen', 'step']);
     made.controller.dispose();
   });
 

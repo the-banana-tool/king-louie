@@ -14,7 +14,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { sanitizeWindowsPath, xmlEscape, executeSteps } = require('./installers');
 const { windowsSystemRoot, windowsSchtasksExe, windowsPowerShellExe } = require('../platform/windows-paths');
-const { ensurePrivateDir, PERSONAL_CLI_FILE } = require('../platform/paths');
+const { ensurePrivateDir, personalDataDir, PERSONAL_CLI_FILE, PERSONAL_CLI_MARKER, isPersonalCli } = require('../platform/paths');
 const { parseYaml } = require('../platform/yaml');
 const { parseGuiConfig } = require('../gui/config');
 const { shown } = require('./commands/io');
@@ -93,7 +93,7 @@ function renderServiceCli({ nodePath, entryPath }) {
   // cmd reads a non-ASCII path in the console's page, and the page outlives the
   // script: it is saved, set for the one line, and put back with the exit code kept.
   return [
-    SERVICE_CLI_MARKER,
+    PERSONAL_CLI_MARKER,
     '@echo off',
     'setlocal',
     ...(ascii ? [] : ['for /f "tokens=2 delims=:." %%a in (\'chcp\') do set "KLCP=%%a"', 'chcp 65001 >nul']),
@@ -104,27 +104,7 @@ function renderServiceCli({ nodePath, entryPath }) {
   ].join('\r\n');
 }
 
-// Ours only if it says so or is what this install would write: a file of that
-// name beside the config dir may be the owner's own script.
-function isOurServiceCli(text, c) {
-  if (typeof text !== 'string') return false;
-  if (text.startsWith(SERVICE_CLI_MARKER)) return true;
-  try {
-    return text === renderServiceCli({ nodePath: c.nodePath, entryPath: c.entryPath });
-  } catch {
-    return false;
-  }
-}
-
-function readServiceCli(file) {
-  try {
-    return fs.readFileSync(file, 'utf8');
-  } catch {
-    return null;
-  }
-}
-
-const SERVICE_CLI_MARKER = '@rem King Louie Node launcher, written by install --personal.';
+const cliLeftLine = (file) => `${shown(file, 400)} is left where it is: King Louie did not write it.`;
 
 function defaultWhoAmI(env) {
   const out = String(execFileSync(system32(env, 'whoami.exe'), ['/user', '/fo', 'csv'], { encoding: 'utf8', windowsHide: true, timeout: 30000 }));
@@ -449,7 +429,10 @@ async function install({ flags, io, c }) {
     { description: 'delete the temporary task definition', unlink: xmlPath, always: true, ignoreFailure: true }
   ];
   // With none, the owner has only a harder command to type; no reason to stop.
-  if (c.runAsNode) steps.push({ description: 'write the king-louie-service command', writeFile: { path: cliPath, content: renderServiceCli({ nodePath: c.nodePath, entryPath: c.entryPath }) }, ignoreFailure: true });
+  // A file of that name it did not write stays; its own older one is replaced.
+  const cliForeign = c.runAsNode && c.exists(cliPath) && !isPersonalCli(cliPath);
+  if (cliForeign) io.stdout.write(`${cliLeftLine(cliPath)}\n`);
+  if (c.runAsNode && !cliForeign) steps.push({ description: 'write the king-louie-service command', writeFile: { path: cliPath, content: renderServiceCli({ nodePath: c.nodePath, entryPath: c.entryPath }) }, ignoreFailure: true });
   if (relay && !runningPid) steps.push({ description: `start the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Run', '/TN', PERSONAL_TASK_NAME] });
 
   if (flags.dryRun) {
@@ -484,13 +467,16 @@ async function uninstall({ flags, io, c }) {
   if (!flags.dryRun && !flags.yes && !c.isTTY()) {
     return refuse(io, 'Refusing to remove the personal node\'s logon task without confirmation on a non-interactive terminal; pass --yes.');
   }
-  const cliPath = flags.dataDir ? path.join(path.dirname(path.resolve(flags.dataDir)), PERSONAL_CLI_FILE) : null;
-  const cliThere = Boolean(cliPath && c.exists(cliPath));
-  const cliOurs = cliThere && isOurServiceCli(readServiceCli(cliPath), c);
+  const named = flags.dataDir || personalDataDir({ platform: 'win32', env: c.env });
+  if (!named) return refuse(io, 'LOCALAPPDATA is not set, so there is no default data dir: pass --data-dir DIR');
+  const dataDir = path.resolve(named);
+  const cliPath = path.join(path.dirname(dataDir), PERSONAL_CLI_FILE);
+  const cliThere = c.exists(cliPath);
+  const cliOurs = cliThere && isPersonalCli(cliPath);
   const cliSteps = cliOurs
     ? [{ description: 'delete the king-louie-service command', unlink: cliPath, ignoreFailure: true }]
     : [];
-  if (cliThere && !cliOurs) io.stdout.write(`${shown(cliPath, 400)} is left where it is: King Louie did not write it.\n`);
+  if (cliThere && !cliOurs) io.stdout.write(`${cliLeftLine(cliPath)}\n`);
   if (!c.taskRegistered()) {
     if (!cliSteps.length) {
       io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered: nothing to remove. The data dir stays as it is.\n`);
@@ -515,12 +501,9 @@ async function uninstall({ flags, io, c }) {
     { description: `delete the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Delete', '/TN', PERSONAL_TASK_NAME, '/F'] },
     ...cliSteps
   ];
-  const stays = flags.dataDir
-    ? `The data dir ${path.resolve(flags.dataDir)} stays, and so does the config dir beside it: the node's identity, chats and vault are in them. Delete them yourself to remove the node.`
-    : 'The data dir stays: the node\'s identity, chats and vault are in it.';
+  const stays = `The data dir ${dataDir} stays, and so does the config dir beside it: the node's identity, chats and vault are in them. Delete them yourself to remove the node.`;
   // `schtasks /End` kills only the PowerShell wrapper and leaves node.exe
   // running, so the node is stopped first, the way `stop` stops it.
-  const dataDir = path.resolve(flags.dataDir);
   if (flags.dryRun) {
     io.stdout.write(`  stop the node running on ${dataDir}, if any (${require('./commands/stop').stopCommandText(dataDir)})\n`);
     await executeSteps(steps, { dryRun: true, io });

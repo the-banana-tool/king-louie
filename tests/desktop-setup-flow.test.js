@@ -119,6 +119,42 @@ const LAUNCH_ATTACHED = { host: 'attached', why: 'attached', degraded: false };
 const attachedUp = (extra = {}) => base({ launch: LAUNCH_ATTACHED, mode: 'attached', view: 'attached-connected', pairing: PAIRING, service: { hosting: 'personal', providersConfigured: true, version: '1.0.0' }, connection: { status: 'connected' }, node: NODE, ...extra });
 const OLD = { found: true, chats: 3, messages: 120, cases: 2, bytes: 5 * 1024 * 1024, schemaProblem: null, customCasesRoot: null, customCases: 0 };
 
+describe('a custom root that is not there', () => {
+  const at = (where) => ({
+    platform: 'win32', launch: { host: 'attached', why: 'attached' }, mode: 'attached',
+    pairing: { service: { hosting: 'personal', dataDir: 'C:\\d' } }, connection: { status: 'connected' }, service: { providersConfigured: true, hosting: 'personal' },
+    node: { hosting: 'personal', task: 'registered', running: true }, setup: {}, profileDir: 'C:\\p',
+    oldProfile: { found: true, chats: 1, messages: 1, cases: 0, bytes: 1, customCasesRoot: 'E:\\cases', customCases: null, customCasesMissing: true },
+    ...where
+  });
+
+  it('says the folder is not there, and both ways on, with no move to press', () => {
+    const found = describeSetup(at({}));
+    assert.strictEqual(found.error.code, 'MIGRATION_SOURCE');
+    assert.match(found.error.message, /E:\\cases is not there/);
+    assert.match(found.error.message, /plug it in and press Check again/);
+    assert.match(found.error.message, /make an empty folder at that path and press Check again/);
+    assert.ok(found.actions.some((a) => a.id === 'retry'));
+
+    const plan = describeSetup(at({ migrationPlan: { ok: true, backup: { dest: 'C:\\b', bytes: 1, files: 1, history: { chats: 1, messages: 1 }, customCasesRoot: 'E:\\cases', customCases: null, customCasesMissing: true }, plan: { items: [], counts: {} }, staysBehind: [] } }));
+    assert.match(plan.error.message, /is not there/);
+    assert.ok(!plan.actions.some((a) => a.id === 'migrationApply'));
+  });
+});
+
+describe('finished for now', () => {
+  const base = { launch: { host: 'attached', why: 'attached' }, attached: true, paired: true, connected: true, service: { hosting: 'personal', providersConfigured: true }, oldProfile: { found: true }, migration: null };
+  it('is done while it lasts, with nothing to draw; without it the move comes back', () => {
+    assert.strictEqual(nextSetupStep({ ...base, setup: { finishedForNow: true } }), 'done');
+    assert.strictEqual(nextSetupStep({ ...base, setup: { phoneSeen: true } }), 'migrate');
+    const answer = describeSetup({
+      platform: 'win32', launch: base.launch, mode: 'attached', pairing: { service: { hosting: 'personal', dataDir: 'C:\\d' } }, connection: { status: 'connected' },
+      service: base.service, oldProfile: base.oldProfile, node: { hosting: 'personal' }, setup: { finishedForNow: true }
+    });
+    assert.deepStrictEqual([answer.step, answer.lines, answer.actions], ['done', [], []]);
+  });
+});
+
 describe('the custom-root instruction says what follows from it', () => {
   it('names the standalone mode, which still looks in the old folder', () => {
     const { error } = describeSetup({

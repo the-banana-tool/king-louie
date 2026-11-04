@@ -156,7 +156,7 @@ const isAttached = (facts) => Boolean(facts.paired) && facts.attached !== false;
 function nextSetupStep(facts) {
   const f = facts || {};
   if (standaloneLaunch(f)) return 'done';
-  if (isAttached(f) && (hostingOf(f) !== 'personal' || setupOf(f).completedAt)) return 'done';
+  if (isAttached(f) && (hostingOf(f) !== 'personal' || setupOf(f).completedAt || setupOf(f).finishedForNow)) return 'done';
   if (f.elevated) return 'install';
   if (f.pendingPair) return 'pair';
   if (!f.paired) {
@@ -341,6 +341,12 @@ function itemNoteLines(items) {
 function customRootRefusal(source, pressWord, profileDir) {
   if (!source || !source.customCasesRoot || source.customCases === 0) return null;
   const root = long(source.customCasesRoot);
+  if (source.customCasesMissing) {
+    return {
+      code: 'MIGRATION_SOURCE',
+      message: `Your cases are kept in ${root}, and ${root} is not there, so the move cannot carry them. If it is on a drive that is not plugged in, plug it in and press ${pressWord}. If that folder is no longer used, make an empty folder at that path and press ${pressWord}.`
+    };
+  }
   const count = source.customCases;
   const said = isCount(count)
     ? `${counted(count, 'case')} ${count === 1 ? 'is' : 'are'} kept in ${root}, outside this app's own folder, and the move does not carry ${count === 1 ? 'it' : 'them'}.`
@@ -500,7 +506,7 @@ function bodyFor(step, s, f) {
 // `done` with no setup behind it: a standalone launch, a fleet pairing, a setup
 // already finished. The chat is on screen; there is nothing to draw or press.
 function nothingToDraw(step, f) {
-  return step === 'done' && (standaloneLaunch(f) || hostingOf(f) !== 'personal' || Boolean(setupOf(f).completedAt));
+  return step === 'done' && (standaloneLaunch(f) || hostingOf(f) !== 'personal' || Boolean(setupOf(f).completedAt) || Boolean(setupOf(f).finishedForNow));
 }
 
 function describeSetup(status) {
