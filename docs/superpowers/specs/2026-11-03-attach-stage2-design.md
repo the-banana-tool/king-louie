@@ -344,7 +344,9 @@ and are listed.
 (`src/migration/migration-verify.js`) asks the node over the proxied
 channels: every chat planned `new`, `update` or `copy` is in `chat:load`
 by its target id with the planned message count; every case planned `new`
-is in `case:list`; the report has no failed item. A difference is
+is in `case:list`; every vault entry planned to be there answers by its whole
+key in `settings:vaultHeld`; the report has no failed item. A moved chat out of
+the desktop's order is a line in the report, never a refusal. Any other difference is
 `MIGRATION_UNVERIFIED` with the list of what is missing; nothing is
 marked; **Try again** plans again (what landed is `skip-present`). The
 report's counts and the verification are shown.
