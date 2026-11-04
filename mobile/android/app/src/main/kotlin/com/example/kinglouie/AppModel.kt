@@ -836,7 +836,7 @@ class AppModel(context: Context) {
         } catch (e: ProtocolException) {
             return null
         }
-        val item = QuestionItem.from(message, pin.name) ?: return null
+        val item = QuestionItem.from(message, pin.name, sealedSeen = emptySet()) ?: return null
         // Signed by the node it names, and listed under that node.
         if (item.nodeId != pin.id) return null
         entry["node_id"].str()?.let { if (it != pin.id) return null }
@@ -1021,7 +1021,7 @@ class AppModel(context: Context) {
             return null
         }
         val pin = pins.firstOrNull { it.id == envelope.kid } ?: return null
-        val request = Leases.verifiedMessage(envelope, pin)?.let { LeaseRequest.from(it) } ?: return null
+        val request = Leases.verifiedMessage(envelope, pin)?.let { LeaseRequest.from(it, sealedSeen = emptySet()) } ?: return null
         if (request.requestId in decidedLeaseRequests) return null
         if ((Timestamps.epochMillis(request.expiresAt) ?: 0L) <= api.now().toEpochMilli()) return null
         // Listed under the node that signed it.
@@ -1814,7 +1814,7 @@ class AppModel(context: Context) {
      */
     private fun receive(item: JsonElement, pins: List<NodePin>): String? {
         val envJson = item["envelope"] ?: return null
-        val view = Display.view(envJson, pins)
+        val view = Display.view(envJson, pins, sealedSeen = emptySet())
         val display = view.display
         if (!view.shown || display == null) {
             when (view.reason) {

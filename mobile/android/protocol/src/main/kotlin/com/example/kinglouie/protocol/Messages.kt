@@ -113,8 +113,23 @@ object Messages {
         return boxKeyFingerprint(jwk["x"].str()!!, jwk["y"].str()!!)
     }
 
-    /** kl.approval.response for a node-signed request message. */
+    /**
+     * kl.approval.response for a node-signed clear request message. A sealed one
+     * is refused: nothing is decided over what was not opened and held to its
+     * hash ([responseToOpened]).
+     */
     fun response(request: JsonElement, decision: String, deviceId: String, signedAt: String): JsonObject {
+        if (request.obj()?.containsKey("sealed") == true) throw ProtocolException("a sealed request is answered from what it opened to")
+        return buildResponse(request, decision, deviceId, signedAt)
+    }
+
+    /** kl.approval.response for a sealed request, from what it opened to ([PhoneView.opened]), which must pass [validateOpenedRequest]. */
+    fun responseToOpened(opened: JsonObject, decision: String, deviceId: String, signedAt: String): JsonObject {
+        validateOpenedRequest(opened)?.let { throw ProtocolException("not an opened request: $it") }
+        return buildResponse(opened, decision, deviceId, signedAt)
+    }
+
+    private fun buildResponse(request: JsonElement, decision: String, deviceId: String, signedAt: String): JsonObject {
         fun field(k: String) = request[k].str() ?: throw ProtocolException("not a request: $k")
         return checked(
             "kl.approval.response",

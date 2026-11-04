@@ -25,7 +25,7 @@ class QuestionTest {
 
     @Test
     fun parsesAQuestion() {
-        val item = QuestionItem.from(question, "web-01")
+        val item = QuestionItem.from(question, "web-01", sealedSeen = emptySet())
         assertNotNull(item)
         assertEquals("7QD4KM", item!!.token)
         assertEquals("Lakeside lot", item.caseTitle)
@@ -35,15 +35,15 @@ class QuestionTest {
 
     @Test
     fun refusesAnythingElse() {
-        assertNull(QuestionItem.from(JsonText.parse("""{"type":"kl.approval.request"}"""), "web-01"))
-        assertNull(QuestionItem.from(JsonText.parse("""{"type":"kl.question.ask","token":"7QD4KM"}"""), "web-01"))
+        assertNull(QuestionItem.from(JsonText.parse("""{"type":"kl.approval.request"}"""), "web-01", sealedSeen = emptySet()))
+        assertNull(QuestionItem.from(JsonText.parse("""{"type":"kl.question.ask","token":"7QD4KM"}"""), "web-01", sealedSeen = emptySet()))
         // The pre-M6 type name is not a question either.
-        assertNull(QuestionItem.from(JsonText.parse(Jcs.serialize(question).replace("kl.question.ask", "kl.question")), "web-01"))
+        assertNull(QuestionItem.from(JsonText.parse(Jcs.serialize(question).replace("kl.question.ask", "kl.question")), "web-01", sealedSeen = emptySet()))
     }
 
     @Test
     fun buildsTheAnswerTheNodeVerifies() {
-        val item = QuestionItem.from(question, "web-01")!!
+        val item = QuestionItem.from(question, "web-01", sealedSeen = emptySet())!!
         val message = Questions.answer(item, "a", null, "d-bbbbbbbbbbbbbbbb", "n".repeat(43), "2026-09-25T14:00:00Z")
         assertEquals(
             """{"answer":{"option_id":"a"},"case_id":"mfz1k2-0a1b2c3d","device_id":"d-bbbbbbbbbbbbbbbb","node_id":"kl-aaaaaaaaaaaaaaaa","nonce":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn","question_id":"q-0012","signed_at":"2026-09-25T14:00:00Z","token":"7QD4KM","type":"kl.question.answer","v":1}""",
@@ -64,7 +64,7 @@ class QuestionTest {
     @Test
     fun sealsTheAnswerToWhatItIsTold() {
         val (box, agree) = nodeBox()
-        val item = QuestionItem.from(question, "web-01")!!
+        val item = QuestionItem.from(question, "web-01", sealedSeen = emptySet())!!
         val message = Questions.answer(item, null, "Only after the survey", "d-bbbbbbbbbbbbbbbb", "n".repeat(43), "2026-09-25T14:00:00Z", sealTo = box)
         for (key in listOf("case_id", "question_id", "answer")) assertFalse(key, message.containsKey(key))
         assertEquals("kl-aaaaaaaaaaaaaaaa", message["node_id"].str())
@@ -76,7 +76,7 @@ class QuestionTest {
     /** A clear ask takes no node_box from its text: only an opened one has it. */
     @Test
     fun aClearAskHasNothingToSealTo() {
-        val item = QuestionItem.from(question, "web-01")!!
+        val item = QuestionItem.from(question, "web-01", sealedSeen = emptySet())!!
         assertNull(item.nodeBox)
         assertNull(item.unreadable)
         assertEquals(SealState.CLEAR, item.seal)
@@ -85,7 +85,8 @@ class QuestionTest {
     /** R-SP-15: a clear ask from a node seen sealing shows no question and takes no answer. */
     @Test
     fun aClearAskAfterSealed() {
-        val item = QuestionItem.from(question, "web-01", sealedSeen = true)!!
+        val seen = setOf("kl-aaaaaaaaaaaaaaaa")
+        val item = QuestionItem.from(question, "web-01", sealedSeen = seen)!!
         assertEquals("clear_after_sealed", item.unreadable)
         assertEquals("", item.text)
         assertEquals("", item.caseId)
@@ -98,6 +99,8 @@ class QuestionTest {
         } catch (e: ProtocolException) {
             // no answer offered
         }
-        assertNull(QuestionItem.from(question, "web-01", sealedSeen = false)!!.unreadable)
+        assertNull(QuestionItem.from(question, "web-01", sealedSeen = emptySet())!!.unreadable)
+        // Another node seen sealing says nothing of this one.
+        assertNull(QuestionItem.from(question, "web-01", sealedSeen = setOf("kl-bbbbbbbbbbbbbbbb"))!!.unreadable)
     }
 }

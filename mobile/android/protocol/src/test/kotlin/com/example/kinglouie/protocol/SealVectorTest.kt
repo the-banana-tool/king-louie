@@ -229,7 +229,7 @@ class SealVectorTest {
         val given = v["given"]
         val pins = given["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }
         val input = v["input"]!!
-        val shown = Display.view(input, pins, openerOf(given["box"]))
+        val shown = Display.view(input, pins, openerOf(given["box"]), sealedSeen = emptySet())
         assertEquals(v["expect"], shown.json)
         assertEquals(SealState.OPENED, shown.seal)
         assertEquals(vector("request-display")["expect"]["display"], shown.display)
@@ -238,20 +238,208 @@ class SealVectorTest {
         assertFalse(Envelope.fromJson(input).message().containsKey("action"))
 
         val hidden = JsonObject(mapOf("shown" to kotlinx.serialization.json.JsonPrimitive(false), "reason" to jsonString("not_recipient"), "display" to JsonNull))
-        val noBox = Display.view(input, pins)
+        val noBox = Display.view(input, pins, sealedSeen = emptySet())
         assertEquals(hidden, noBox.json)
         assertEquals(SealState.UNREAD, noBox.seal)
-        assertEquals("unpinned_node", Display.view(input, emptyList(), openerOf(given["box"])).reason)
+        assertEquals("unpinned_node", Display.view(input, emptyList(), openerOf(given["box"]), sealedSeen = emptySet()).reason)
         // Not a recipient at all: the box key of a device with no wrap here.
-        assertEquals("not_recipient", Display.view(input, pins, Seal.opener("d-aaaaaaaaaaaaaaaa", softwareAgree(given["box"]["d"].str()!!))).reason)
+        assertEquals("not_recipient", Display.view(input, pins, Seal.opener("d-aaaaaaaaaaaaaaaa", softwareAgree(given["box"]["d"].str()!!)), sealedSeen = emptySet()).reason)
         // A wrap that does not open: another phone's box under this one's id.
-        val wrong = Display.view(input, pins, Seal.opener(given["box"]["device_id"].str()!!, softwareAgree(keys()["devices"]["B_box"]["d"].str()!!)))
+        val wrong = Display.view(input, pins, Seal.opener(given["box"]["device_id"].str()!!, softwareAgree(keys()["devices"]["B_box"]["d"].str()!!)), sealedSeen = emptySet())
         assertEquals("open_failed", wrong.reason)
         assertEquals(SealState.UNREAD, wrong.seal)
         assertNull(wrong.display)
         // A response to it is over the hash as received, salted: a phone signs what it signs today.
-        val response = Messages.response(Envelope.fromJson(input).message(), "approve", given["box"]["device_id"].str()!!, "2026-09-23T18:04:31.201Z")
+        val device = given["box"]["device_id"].str()!!
+        val response = Messages.responseToOpened(shown.opened!!, "approve", device, "2026-09-23T18:04:31.201Z")
         assertEquals(Envelope.fromJson(input).message()["action_hash"], response["action_hash"])
+    }
+
+    /** No decision is signed over what was not opened, or over what opened and did not hold. */
+    @Test
+    fun aResponseNeedsAnOpenedRequest() {
+        val v = vector("request-sealed-display")
+        val device = v["given"]["box"]["device_id"].str()!!
+        val at = "2026-09-23T18:04:31.201Z"
+        val unopened = Envelope.fromJson(v["input"]!!).message()
+        fun refuses(block: () -> Unit) = try {
+            block()
+            fail("expected a ProtocolException")
+        } catch (e: ProtocolException) {
+            // refused before anything is signed
+        }
+        refuses { Messages.response(unopened, "approve", device, at) }
+        refuses { Messages.response(unopened, "deny", device, at) }
+        refuses { Messages.responseToOpened(unopened, "approve", device, at) }
+        val opened = Seal.open(requestType, unopened, device, softwareAgree(v["given"]["box"]["d"].str()!!))
+        assertNotNull(Messages.responseToOpened(opened, "deny", device, at))
+        val action = opened["action"].obj()!!
+        refuses { Messages.responseToOpened(JsonObject(opened + ("action" to JsonObject(action + ("summary" to jsonString("other"))))), "approve", device, at) }
+        // A clear request has no opened form, and its own answer is as it was.
+        val clear = Envelope.fromJson(vector("request-valid")["input"]!!).message()
+        refuses { Messages.responseToOpened(clear, "approve", device, at) }
+        assertNotNull(Messages.response(clear, "approve", device, at))
+        // Only what was opened is handed to the screen.
+        val pins = v["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }
+        assertNull(Display.view(v["input"]!!, pins, sealedSeen = emptySet()).opened)
+        val clearPins = vector("request-valid")["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }
+        assertNull(Display.view(vector("request-valid")["input"]!!, clearPins, sealedSeen = emptySet()).opened)
+    }
+
+    /** The phone's box key will not act: no decision, for a reason that passes, and nothing marks the node. */
+    @Test
+    fun aLockedPhoneAndARequest() {
+        val v = vector("request-sealed-display")
+        val pins = v["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }
+        val locked = Seal.opener(v["given"]["box"]["device_id"].str()!!) { _, _ -> throw SealKeyUnavailableException("locked") }
+        val view = Display.view(v["input"]!!, pins, locked, sealedSeen = emptySet())
+        assertFalse(view.shown)
+        assertEquals("key_locked", view.reason)
+        assertEquals(SealState.UNREAD, view.seal)
+        assertNull(view.display)
+        assertEquals(emptySet<String>(), Seal.noteSealedSeen(emptySet(), pins[0].id, view.seal))
+    }
+
+    @Test
+    fun aLockedPhoneAndAQuestion() {
+        val v = vector("question-ask-sealed")
+        val locked = Seal.opener(v["given"]["box"]["device_id"].str()!!) { _, _ -> throw SealKeyUnavailableException("locked") }
+        val item = QuestionItem.from(Envelope.fromJson(v["input"]!!).message(), "web-01", locked, sealedSeen = emptySet())!!
+        assertEquals("key_locked", item.unreadable)
+        assertEquals(SealState.UNREAD, item.seal)
+        assertEquals("", item.text)
+        try {
+            Questions.answer(item, "a", null, v["given"]["box"]["device_id"].str()!!, "n".repeat(43), "2026-09-23T18:04:11.201Z")
+            fail("expected a ProtocolException")
+        } catch (e: ProtocolException) {
+            // no answer offered
+        }
+    }
+
+    /** Sealed by hand, as a sender that does not follow the format: the plaintext is whatever it is given. */
+    private fun handSealed(type: String, clear: JsonObject, senderId: String, plaintext: ByteArray): JsonObject {
+        val recipient = keys()["devices"]["A"]["id"].str()!!
+        val box = keys()["devices"]["A_box"]["jwk"]!!
+        val pair = java.security.KeyPairGenerator.getInstance("EC").run { initialize(java.security.spec.ECGenParameterSpec("secp256r1")); generateKeyPair() }
+        val w = (pair.public as java.security.interfaces.ECPublicKey).w
+        val secret = KeyAgreement.getInstance("ECDH").run {
+            init(pair.private)
+            doPhase(P256.publicKey(box["x"].str()!!, box["y"].str()!!), true)
+            generateSecret()
+        }
+        fun hmac(key: ByteArray, data: ByteArray) = javax.crypto.Mac.getInstance("HmacSHA256").run { init(javax.crypto.spec.SecretKeySpec(key, "HmacSHA256")); doFinal(data) }
+        val kek = hmac(hmac(ByteArray(32), secret), "kl-seal-v1\n$type\n$senderId\n$recipient".toByteArray() + byteArrayOf(1))
+        fun gcm(key: ByteArray, iv: ByteArray, input: ByteArray, aad: ByteArray?) = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding").run {
+            init(javax.crypto.Cipher.ENCRYPT_MODE, javax.crypto.spec.SecretKeySpec(key, "AES"), javax.crypto.spec.GCMParameterSpec(128, iv))
+            if (aad != null) updateAAD(aad)
+            doFinal(input)
+        }
+        val cek = ByteArray(32) { 7 }
+        val iv = ByteArray(12) { 9 }
+        val sealed = JsonObject(
+            mapOf(
+                "v" to jsonNumber("1"), "epk" to Messages.jwk(B64Url.encode(P256.coordinate(w.affineX)), B64Url.encode(P256.coordinate(w.affineY))),
+                "iv" to jsonString(B64Url.encode(iv)), "ct" to jsonString(B64Url.encode(gcm(cek, iv, plaintext, Jcs.bytes(clear)))),
+                "keys" to JsonObject(mapOf(recipient to jsonString(B64Url.encode(gcm(kek, ByteArray(12), cek, null)))))
+            )
+        )
+        return JsonObject(clear + ("sealed" to sealed))
+    }
+
+    private fun signedByWeb(message: JsonObject): Envelope {
+        val key = KeyFactory.getInstance("Ed25519").generatePrivate(
+            java.security.spec.EdECPrivateKeySpec(java.security.spec.NamedParameterSpec.ED25519, Hex.decode(keys()["nodes"]["web-01"]["seed"].str()!!))
+        )
+        return Envelope.seal(message, message["node_id"].str()!!, "Ed25519") { bytes -> java.security.Signature.getInstance("Ed25519").run { initSign(key); update(bytes); sign() } }
+    }
+
+    /** content_malformed, signed by the pinned node, through every reader: a decision is refused; a status keeps its clear part. */
+    @Test
+    fun contentMalformedThroughEveryReader() {
+        val leaseDir = File(System.getProperty("kl.leaseVectors") ?: error("kl.leaseVectors is not set"))
+        fun leaseVector(name: String) = JsonText.parse(File(leaseDir, "$name.json").readBytes())
+        val web = keys()["nodes"]["web-01"]
+        val pin = NodePin(web["id"].str()!!, "web-01", web["spki"].str()!!)
+        val a = keys()["devices"]["A"]["id"].str()!!
+        val d = keys()["devices"]["A_box"]["d"].str()!!
+        val open = Seal.opener(a, softwareAgree(d))
+        // JSON with the right kind of key, but not the JCS bytes.
+        val notJcs = "{ \"name\": null }".toByteArray()
+        fun malformed(type: String, input: JsonElement): JsonObject {
+            val clear = JsonObject(Envelope.fromJson(input).message() - "sealed")
+            val message = handSealed(type, clear, web["id"].str()!!, notJcs)
+            assertEquals(type, "content_malformed", reasonOf { Seal.open(type, message, a, softwareAgree(d)) })
+            return message
+        }
+
+        val request = malformed(requestType, vector("request-sealed-display")["input"]!!)
+        val shown = Display.view(signedByWeb(request).json, listOf(pin), open, sealedSeen = emptySet())
+        assertEquals("malformed", shown.reason)
+        assertFalse(shown.shown)
+        assertNull(shown.display)
+        assertEquals(SealState.UNREAD, shown.seal)
+
+        val lease = LeaseRequest.check(malformed("kl.lease.request", leaseVector("request-sealed")["input"]!!), open, sealedSeen = emptySet())
+        assertEquals("malformed", lease.reason)
+        assertNull(lease.request)
+        assertEquals(SealState.UNREAD, lease.seal)
+
+        val status = LeaseStatus.from(malformed("kl.lease.status", leaseVector("status-sealed")["input"]!!), open)!!
+        assertEquals(SealState.UNREAD, status.seal)
+        assertNull(status.name)
+        assertEquals("active", status.state)
+
+        val view = Leases.verifyView(signedByWeb(malformed("kl.lease.view", leaseVector("view-sealed")["input"]!!)), pin, open)
+        assertFalse(view.accepted)
+        assertEquals("malformed", view.reason)
+        assertNull(view.view)
+
+        assertNull(QuestionItem.from(malformed("kl.question.ask", vector("question-ask-sealed")["input"]!!), "web-01", open, sealedSeen = emptySet()))
+    }
+
+    /** What the node holds an ask to, sealed: in clear before anything opens, and inside after. */
+    @Test
+    fun aSealedAskIsHeldToTheNodesRules() {
+        val v = vector("question-ask-sealed")
+        val box = v["given"]["box"]
+        val message = Envelope.fromJson(v["input"]!!).message()
+        val open = openerOf(box)
+        fun read(m: JsonObject) = QuestionItem.from(m, "web-01", open, sealedSeen = emptySet())
+        assertNotNull(read(message))
+        assertNull("v 2", read(JsonObject(message + ("v" to jsonNumber("2")))))
+        assertNull("a token outside the alphabet", read(JsonObject(message + ("token" to jsonString("7qd4km")))))
+        assertNull("a token of five", read(JsonObject(message + ("token" to jsonString("7QD4K")))))
+        assertNull("the letter I is not in tokens", read(JsonObject(message + ("token" to jsonString("7QD4KI")))))
+        val full = v["expect"]["message"].obj()!!
+        val a = keys()["devices"]["A"]
+        fun opened(change: JsonObject): QuestionItem? {
+            val (clear, content) = Seal.split("kl.question.ask", change)
+            return read(Seal.seal("kl.question.ask", full["node_id"].str()!!, clear, content, a["id"].str()!! to keys()["devices"]["A_box"]["jwk"].obj()!!))
+        }
+        assertNotNull(opened(full))
+        assertNull("a case id with a space", opened(JsonObject(full + ("case_id" to jsonString("a b")))))
+        assertNull("a case id of 81", opened(JsonObject(full + ("case_id" to jsonString("a".repeat(81))))))
+        assertNull("no case id", opened(JsonObject(full - "case_id")))
+        assertNull("a question id without q-", opened(JsonObject(full + ("question_id" to jsonString("0012")))))
+        assertNull("a question id of three digits", opened(JsonObject(full + ("question_id" to jsonString("q-012")))))
+        assertNull("options that are no list", opened(JsonObject(full + ("options" to jsonString("a")))))
+        assertNull("no case title", opened(JsonObject(full - "case_title")))
+    }
+
+    /** An answer goes to the ask's own box and no other. */
+    @Test
+    fun anAnswerGoesToTheAsksOwnBox() {
+        val v = vector("question-ask-sealed")
+        val item = QuestionItem.from(Envelope.fromJson(v["input"]!!).message(), "web-01", openerOf(v["given"]["box"]), sealedSeen = emptySet())!!
+        val device = v["given"]["box"]["device_id"].str()!!
+        val otherBox = keys()["devices"]["B_box"]["jwk"].obj()!!
+        try {
+            Questions.answer(item, "a", null, device, "n".repeat(43), "2026-09-23T18:04:11.201Z", sealTo = otherBox)
+            fail("expected a ProtocolException")
+        } catch (e: ProtocolException) {
+            // refused before anything is signed
+        }
+        assertNotNull(Questions.answer(item, "a", null, device, "n".repeat(43), "2026-09-23T18:04:11.201Z", sealTo = item.nodeBox))
     }
 
     /** A failed signature, an unpinned node, a misshapen message: nothing is opened. */
@@ -263,12 +451,12 @@ class SealVectorTest {
         val opener: Opener = { t, m -> calls += 1; openerOf(v["given"]["box"])(t, m) }
         val input = v["input"]!!
         val otherKey = keys()["nodes"]["gpu-box"]["spki"].str()!!
-        assertEquals("bad_node_signature", Display.view(input, listOf(NodePin(pin["id"].str()!!, "", otherKey)), opener).reason)
-        assertEquals("unpinned_node", Display.view(input, emptyList(), opener).reason)
+        assertEquals("bad_node_signature", Display.view(input, listOf(NodePin(pin["id"].str()!!, "", otherKey)), opener, sealedSeen = emptySet()).reason)
+        assertEquals("unpinned_node", Display.view(input, emptyList(), opener, sealedSeen = emptySet()).reason)
         val garbled = Envelope.fromJson(input).run { copy(payload = B64Url.encode("{\"sealed\":{}}".toByteArray())) }
-        assertEquals("malformed", Display.view(garbled.json, listOf(NodePin(pin["id"].str()!!, "", pin["key"].str()!!)), opener).reason)
+        assertEquals("malformed", Display.view(garbled.json, listOf(NodePin(pin["id"].str()!!, "", pin["key"].str()!!)), opener, sealedSeen = emptySet()).reason)
         assertEquals(0, calls)
-        assertTrue(Display.view(input, listOf(NodePin(pin["id"].str()!!, "", pin["key"].str()!!)), opener).shown)
+        assertTrue(Display.view(input, listOf(NodePin(pin["id"].str()!!, "", pin["key"].str()!!)), opener, sealedSeen = emptySet()).shown)
         assertEquals(1, calls)
     }
 
@@ -296,22 +484,25 @@ class SealVectorTest {
         val clear = vector("request-valid")
         val pins = clear["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }
         assertEquals("clear_after_sealed", Seal.CLEAR_AFTER_SEALED)
-        val refused = Display.view(clear["input"]!!, pins, sealedSeen = true)
+        val seen = setOf(keys()["nodes"]["web-01"]["id"].str()!!)
+        val refused = Display.view(clear["input"]!!, pins, sealedSeen = seen)
         assertFalse(refused.shown)
         assertEquals("clear_after_sealed", refused.reason)
         assertNull(refused.display)
         // Not seen sealing: byte for byte what it was.
-        assertEquals(clear["expect"], Display.view(clear["input"]!!, pins, sealedSeen = false).json)
-        assertEquals(clear["expect"], Display.view(clear["input"]!!, pins).json)
-        assertEquals(SealState.CLEAR, Display.view(clear["input"]!!, pins).seal)
+        assertEquals(clear["expect"], Display.view(clear["input"]!!, pins, sealedSeen = emptySet()).json)
+        // Another node seen sealing says nothing of this one.
+        assertEquals(clear["expect"], Display.view(clear["input"]!!, pins, sealedSeen = setOf("kl-aaaaaaaaaaaaaaaa")).json)
+        assertEquals(clear["expect"], Display.view(clear["input"]!!, pins, sealedSeen = emptySet()).json)
+        assertEquals(SealState.CLEAR, Display.view(clear["input"]!!, pins, sealedSeen = emptySet()).seal)
         // The signature and the pin still come first: nothing unverified earns the words.
-        assertEquals("unpinned_node", Display.view(clear["input"]!!, emptyList(), sealedSeen = true).reason)
+        assertEquals("unpinned_node", Display.view(clear["input"]!!, emptyList(), sealedSeen = seen).reason)
         val bad = vector("request-bad-node-signature")
-        assertEquals("bad_node_signature", Display.view(bad["input"]!!, bad["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }, sealedSeen = true).reason)
+        assertEquals("bad_node_signature", Display.view(bad["input"]!!, bad["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }, sealedSeen = seen).reason)
         // A sealed one goes on being shown.
         val sealed = vector("request-sealed-display")
         val sealedPins = sealed["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }
-        assertTrue(Display.view(sealed["input"]!!, sealedPins, openerOf(sealed["given"]["box"]), sealedSeen = true).shown)
+        assertTrue(Display.view(sealed["input"]!!, sealedPins, openerOf(sealed["given"]["box"]), sealedSeen = seen).shown)
     }
 
     /** The rule for one node: what opened sealed marks it, for good; nothing else does; types not listed are not held to it. */
@@ -330,13 +521,15 @@ class SealVectorTest {
         assertEquals(setOf(node), seen)
         assertFalse(other in seen)
 
-        val clearAsk = JsonObject(mapOf("type" to jsonString("kl.question.ask")))
+        val clearAsk = JsonObject(mapOf("type" to jsonString("kl.question.ask"), "node_id" to jsonString(node)))
         for (type in listOf("kl.question.ask", "kl.approval.request", "kl.lease.request")) {
-            assertTrue(type, Seal.clearRefused(type, clearAsk, true))
-            assertFalse(type, Seal.clearRefused(type, clearAsk, false))
-            assertFalse(type, Seal.clearRefused(type, JsonObject(clearAsk + ("sealed" to JsonNull)), true))
+            assertTrue(type, Seal.clearRefused(type, clearAsk, seen))
+            assertFalse(type, Seal.clearRefused(type, clearAsk, emptySet()))
+            assertFalse(type, Seal.clearRefused(type, clearAsk, setOf(other)))
+            assertFalse(type, Seal.clearRefused(type, JsonObject(clearAsk + ("sealed" to JsonNull)), seen))
+            assertFalse(type, Seal.clearRefused(type, JsonObject(clearAsk - "node_id"), seen))
         }
-        for (type in listOf("kl.lease.status", "kl.lease.view", "kl.approval.status", "kl.lease.listing")) assertFalse(type, Seal.clearRefused(type, clearAsk, true))
+        for (type in listOf("kl.lease.status", "kl.lease.view", "kl.approval.status", "kl.lease.listing")) assertFalse(type, Seal.clearRefused(type, clearAsk, seen))
     }
 
     // ---- the box key (R-SP-10) ----
@@ -436,7 +629,7 @@ class SealVectorTest {
         val expect = v["expect"]["message"]!!
         assertEquals(expect, Seal.open("kl.question.ask", message, box["device_id"].str()!!, softwareAgree(box["d"].str()!!)))
 
-        val item = QuestionItem.from(message, "web-01", openerOf(box))!!
+        val item = QuestionItem.from(message, "web-01", openerOf(box), sealedSeen = emptySet())!!
         assertEquals(expect["text"].str(), item.text)
         assertEquals(expect["case_id"].str(), item.caseId)
         assertEquals(expect["question_id"].str(), item.questionId)
@@ -447,7 +640,7 @@ class SealVectorTest {
         assertNull(item.unreadable)
 
         // Not this phone's to open: the clear facts and no question.
-        val unread = QuestionItem.from(message, "web-01")!!
+        val unread = QuestionItem.from(message, "web-01", sealedSeen = emptySet())!!
         assertEquals("not_recipient", unread.unreadable)
         assertEquals(SealState.UNREAD, unread.seal)
         assertEquals("web-01", unread.nodeName)
@@ -455,7 +648,7 @@ class SealVectorTest {
         assertEquals("high", unread.urgency)
         assertEquals("", unread.text)
         assertEquals(emptyList<QuestionOption>(), unread.options)
-        assertEquals("open_failed", QuestionItem.from(message, "web-01", Seal.opener(box["device_id"].str()!!, softwareAgree(keys()["devices"]["B_box"]["d"].str()!!)))!!.unreadable)
+        assertEquals("open_failed", QuestionItem.from(message, "web-01", Seal.opener(box["device_id"].str()!!, softwareAgree(keys()["devices"]["B_box"]["d"].str()!!)), sealedSeen = emptySet())!!.unreadable)
         // Nothing can be answered from it.
         try {
             Questions.answer(unread, "a", null, box["device_id"].str()!!, "n".repeat(43), "2026-09-23T18:04:11.201Z")
@@ -464,14 +657,14 @@ class SealVectorTest {
             // no answer offered
         }
         // A message claiming to be sealed in another shape is not read at all.
-        assertNull(QuestionItem.from(JsonObject(message - "node_box"), "web-01", openerOf(box)))
+        assertNull(QuestionItem.from(JsonObject(message - "node_box"), "web-01", openerOf(box), sealedSeen = emptySet()))
     }
 
     /** The whole answer of given.ask and given.answer, sealed to the ask's node_box without the caller asking for it. */
     @Test
     fun aSealedAnswer() {
         val ask = vector("question-ask-sealed")
-        val item = QuestionItem.from(Envelope.fromJson(ask["input"]!!).message(), "web-01", openerOf(ask["given"]["box"]))!!
+        val item = QuestionItem.from(Envelope.fromJson(ask["input"]!!).message(), "web-01", openerOf(ask["given"]["box"]), sealedSeen = emptySet())!!
         val v = vector("question-answer-sealed")
         val g = v["given"]
         val device = g["device"]["device_id"].str()!!

@@ -985,7 +985,7 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     // The app: requests come through the pin and the core, and nothing else opens an envelope.
     const verified = section(live, 'private fun verifiedLeaseRequest', '\n    }\n');
     assert.match(verified, /val pin = pins\.firstOrNull \{ it\.id == envelope\.kid \} \?: return null/);
-    assert.match(verified, /val request = Leases\.verifiedMessage\(envelope, pin\)\?\.let \{ LeaseRequest\.from\(it\) \} \?: return null/);
+    assert.match(verified, /val request = Leases\.verifiedMessage\(envelope, pin\)\?\.let \{ LeaseRequest\.from\(it, sealedSeen = emptySet\(\)\) \} \?: return null/);
     assert.match(verified, /return LeaseRequestItem\(request, pin\.name, status\)/);
     const apply = section(live, 'private fun applyLease', '\n    }\n');
     assert.match(apply, /Leases\.verifiedMessage\(envelope, pin\)\?\.let \{ LeaseStatus\.from\(it\) \}/);

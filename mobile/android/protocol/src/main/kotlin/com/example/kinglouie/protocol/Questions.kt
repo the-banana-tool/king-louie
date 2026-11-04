@@ -43,7 +43,7 @@ data class QuestionItem(
          * [message] has passed the node's signature: only then may [open] read it.
          * What cannot be read has [unreadable] set.
          */
-        fun from(message: JsonElement, nodeName: String, open: Opener? = null, sealedSeen: Boolean = false): QuestionItem? {
+        fun from(message: JsonElement, nodeName: String, open: Opener? = null, sealedSeen: Set<String>): QuestionItem? {
             val received = message.obj() ?: return null
             if (received["type"].str() != TYPE) return null
             val token = received["token"].str() ?: return null
@@ -61,7 +61,7 @@ data class QuestionItem(
             val caseId = full["case_id"].str() ?: return null
             val questionId = full["question_id"].str() ?: return null
             val text = full["text"].str() ?: return null
-            if (sealed && (full["case_title"].str() == null || full["options"].arr() == null)) return null
+            if (sealed && !isOpenedAsk(full)) return null
             val options = (full["options"].arr() ?: emptyList()).mapNotNull { o ->
                 val id = o["id"].str() ?: return@mapNotNull null
                 val label = o["label"].str() ?: return@mapNotNull null
@@ -74,10 +74,21 @@ data class QuestionItem(
             )
         }
 
+        /** TOKEN_RE in src/cases/contact-format.js; CASE_ID and QUESTION_ID in src/channels/mobile-app-channel.js. */
+        private val TOKEN = Regex("[0-9A-HJKMNP-TV-Z]{6}")
+        private val CASE_ID = Regex("[A-Za-z0-9._-]{1,80}")
+        private val QUESTION_ID = Regex("q-[0-9]{4,}")
+
         /** What a sealed ask holds in clear (validateAskMessage in src/channels/mobile-app-channel.js). */
         private fun isSealedAsk(m: JsonObject): Boolean =
-            Seal.isSealedShape(TYPE, m) && Rules.isNodeId(m["node_id"]) && m["kind"].str() != null && m["urgency"].str() != null &&
+            m["v"]?.let { Rules.isOne(it) } == true && Seal.isSealedShape(TYPE, m) && Rules.isNodeId(m["node_id"]) &&
+                m["token"].str()?.let { TOKEN.matches(it) } == true && m["kind"].str() != null && m["urgency"].str() != null &&
                 (m["expires_at"] is JsonNull || Rules.isTimestamp(m["expires_at"])) && Rules.isDeviceJwk(m["node_box"])
+
+        /** And what its content holds once opened. */
+        private fun isOpenedAsk(m: JsonObject): Boolean =
+            m["case_id"].str()?.let { CASE_ID.matches(it) } == true && m["question_id"].str()?.let { QUESTION_ID.matches(it) } == true &&
+                m["case_title"].str() != null && m["text"].str() != null && m["options"].arr() != null
     }
 }
 
@@ -87,12 +98,12 @@ object Questions {
      * option pick carries only `option_id`, and the text is the answer body
      * only: a signed answer resolves its own question and nothing else.
      * [sealTo] is the node box it is sealed to (R-SP-3), the ask's own by default;
-     * a sealed ask is never answered in clear, and one that cannot be read is
-     * not answered at all. A sealed answer's content is exact JCS ([Seal]).
+     * a sealed ask is answered to its own box and no other, never in clear, and
+     * one that cannot be read is not answered at all. A sealed answer's content is exact JCS ([Seal]).
      */
     fun answer(item: QuestionItem, optionId: String?, text: String?, deviceId: String, nonce: String, signedAt: String, sealTo: JsonObject? = item.nodeBox): JsonObject {
         if (item.unreadable != null) throw ProtocolException("this question cannot be answered: ${item.unreadable}")
-        if (sealTo == null && item.nodeBox != null) throw ProtocolException("a sealed question is answered sealed")
+        if (item.nodeBox != null && sealTo != item.nodeBox) throw ProtocolException("a sealed question is answered sealed, to its own node box")
         val answer = if (optionId != null) JsonObject(mapOf("option_id" to jsonString(optionId)))
         else JsonObject(mapOf("text" to jsonString(text ?: "")))
         val full = JsonObject(

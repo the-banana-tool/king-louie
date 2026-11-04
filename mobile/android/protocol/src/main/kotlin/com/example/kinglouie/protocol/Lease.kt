@@ -43,23 +43,23 @@ data class LeaseRequest(
         const val TYPE = "kl.lease.request"
 
         /** [check]'s request: null unless it can be answered. */
-        fun from(message: JsonElement, open: Opener? = null, sealedSeen: Boolean = false): LeaseRequest? = check(message, open, sealedSeen).request
+        fun from(message: JsonElement, open: Opener? = null, sealedSeen: Set<String>): LeaseRequest? = check(message, open, sealedSeen).request
 
         /**
          * A complete kl.lease.request whose lease_hash is the hash of its lease
          * (the salted one when it came sealed, R-SP-2), and whose lease has
          * exactly the keys of its kind ([Leases.isLease]); else the reason:
          * `malformed`, `lease_hash_mismatch`, `not_recipient`, `open_failed`,
-         * `clear_after_sealed`. [message] has passed the node's signature: only
+         * `key_locked`, `clear_after_sealed`. [message] has passed the node's signature: only
          * then may [open] read it.
          */
-        fun check(message: JsonElement, open: Opener? = null, sealedSeen: Boolean = false): LeaseRequestCheck {
+        fun check(message: JsonElement, open: Opener? = null, sealedSeen: Set<String>): LeaseRequestCheck {
             fun refused(reason: String, seal: SealState = SealState.CLEAR) = LeaseRequestCheck(null, reason, seal)
             val received = message.obj() ?: return refused("malformed")
             if (received["type"].str() != TYPE || received["v"].int() != 1) return refused("malformed")
             if (Seal.clearRefused(TYPE, received, sealedSeen)) return refused(Seal.CLEAR_AFTER_SEALED)
             if (received.containsKey("sealed") && !Leases.isSealedRequest(received)) return refused("malformed")
-            val read = Seal.read(TYPE, received, open) ?: return refused("malformed")
+            val read = Seal.read(TYPE, received, open) ?: return refused("malformed", SealState.UNREAD)
             if (!read.opened) return refused(read.reason ?: "malformed", read.state)
             val opened = read.state == SealState.OPENED
             if (opened) Leases.openedRequestProblem(read.message)?.let { return refused(it, read.state) }
@@ -136,32 +136,43 @@ data class LeaseStatus(
     val kind: String = "computer_use",
     val unattended: Boolean = false,
     val name: String? = null,
-    /** UNREAD: sealed and not this phone's to open, so [name] is null whatever the kind; every other field is the clear part's (R-SP-9). */
+    /** UNREAD: sealed and not read, so [name] is null whatever the kind; every other field is the clear part's (R-SP-9). */
     val seal: SealState = SealState.CLEAR
 ) {
     companion object {
         const val TYPE = "kl.lease.status"
 
-        /** [received] has passed the node's signature: only then may [open] read it. */
+        /**
+         * [received] has passed the node's signature: only then may [open] read it.
+         * A status sealed in the right shape is never dropped for what is inside:
+         * content that opens to nothing good, a bad name, a locked phone or a wrap
+         * that does not open leave the clear part, so the phone can never say no
+         * session is running while one is.
+         */
         fun from(received: JsonElement, open: Opener? = null): LeaseStatus? {
             val message = received.obj() ?: return null
             if (message["type"].str() != TYPE) return null
-            val read = Seal.read(TYPE, message, open) ?: return null
-            val m = read.message
+            if (message.containsKey("sealed") && !Seal.isSealedShape(TYPE, message)) return null
+            val read = Seal.read(TYPE, message, open)
+            val m = read?.message ?: JsonObject(message - "sealed")
             val kind = m["kind"].str()?.takeIf { it in Leases.LEASE_KINDS } ?: return null
             val unattended = m["unattended"].bool() ?: return null
             if (kind == "computer_use" && unattended) return null
-            fun status(shownName: String?): LeaseStatus? = LeaseStatus(
+            fun status(shownName: String?, state: SealState): LeaseStatus? = LeaseStatus(
                 m["lease_id"].str() ?: return null, m["node_id"].str() ?: return null, m["seq"].int() ?: return null,
                 m["state"].str() ?: return null, m["locked"].bool() ?: return null, m["reason"].str(), m["expires_at"].str(),
                 m["contact_token"].str(), m["granted_by"]["device_id"].str(), m["granted_by"]["name"].str(),
-                kind, unattended, shownName, read.state
+                kind, unattended, shownName, state
             )
-            // Not this phone's to open: everything but the name (R-SP-9).
-            if (!read.opened) return status(null)
-            val name = m["name"] ?: return null
-            if (if (kind == "computer_use") name !is JsonNull else !Leases.isTakeName(name)) return null
-            return status(name.str())
+            // Everything but the name (R-SP-9).
+            if (read == null || !read.opened) return status(null, SealState.UNREAD)
+            fun checkedName(): JsonElement? {
+                val name = m["name"] ?: return null
+                if (if (kind == "computer_use") name !is JsonNull else !Leases.isTakeName(name)) return null
+                return name
+            }
+            val shown = checkedName() ?: return if (read.state == SealState.OPENED) status(null, SealState.UNREAD) else null
+            return status(shown.str(), read.state)
         }
     }
 }
@@ -777,7 +788,7 @@ object Leases {
 
     /**
      * The checks of `verifyLeaseView`: the size, the pinned node's signature, the
-     * node, and only then [open] on a sealed one. Not this phone's to open: accepted,
+     * node, and only then [open] on a sealed one. Not this phone's to open, or a locked phone: accepted,
      * the clear part alone (no frame, no actions), `seal` UNREAD.
      */
     fun verifyView(envelope: Envelope, pin: NodePin, open: Opener? = null): ViewCheck {

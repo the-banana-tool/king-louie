@@ -10,7 +10,14 @@ import kotlinx.serialization.json.JsonPrimitive
 data class NodePin(val id: String, val name: String, val key: String)
 
 /** Whether a request may be shown, and exactly what the approval screen displays (§5, vectors `request-*`). */
-data class PhoneView(val shown: Boolean, val reason: String?, val display: JsonElement?, val seal: SealState = SealState.CLEAR) {
+data class PhoneView(
+    val shown: Boolean,
+    val reason: String?,
+    val display: JsonElement?,
+    val seal: SealState = SealState.CLEAR,
+    /** A sealed request that was shown, opened: what [Messages.responseToOpened] answers. Null for anything else. */
+    val opened: JsonObject? = null
+) {
     val json: JsonObject
         get() = JsonObject(mapOf("shown" to JsonPrimitive(shown), "reason" to (reason?.let { jsonString(it) } ?: JsonNull), "display" to (display ?: JsonNull)))
 }
@@ -160,9 +167,10 @@ object Display {
      * sealed one opened with [open]: `not_recipient` (no opener, or no wrap for
      * this phone) and `open_failed` keep their own reason, `action_hash_mismatch`
      * is refused before anything is shown, and content that is no such content
-     * is `malformed`. A clear one from a node seen sealing is `clear_after_sealed`.
+     * is `malformed`. A locked phone is `key_locked`. A clear one from a node in
+     * [sealedSeen] is `clear_after_sealed`.
      */
-    fun view(envelopeJson: JsonElement, pinned: List<NodePin>, open: Opener? = null, sealedSeen: Boolean = false): PhoneView {
+    fun view(envelopeJson: JsonElement, pinned: List<NodePin>, open: Opener? = null, sealedSeen: Set<String>): PhoneView {
         fun hide(reason: String, seal: SealState = SealState.CLEAR) = PhoneView(false, reason, null, seal)
         val envelope: Envelope
         val message: JsonObject
@@ -178,10 +186,10 @@ object Display {
         if (pin == null || envelope.kid != nodeId) return hide("unpinned_node")
         if (!envelope.verifyEd25519(pin.key)) return hide("bad_node_signature")
         if (Seal.clearRefused("kl.approval.request", message, sealedSeen)) return hide(Seal.CLEAR_AFTER_SEALED)
-        val read = Seal.read("kl.approval.request", message, open) ?: return hide("malformed")
+        val read = Seal.read("kl.approval.request", message, open) ?: return hide("malformed", SealState.UNREAD)
         if (!read.opened) return hide(read.reason ?: "malformed", read.state)
         if (read.state == SealState.OPENED) Messages.validateOpenedRequest(read.message)?.let { return hide(it, read.state) }
-        return PhoneView(true, null, build(read.message), read.state)
+        return PhoneView(true, null, build(read.message), read.state, if (read.state == SealState.OPENED) read.message else null)
     }
 }
 

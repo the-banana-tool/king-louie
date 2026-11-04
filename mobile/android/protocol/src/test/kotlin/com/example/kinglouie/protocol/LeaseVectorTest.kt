@@ -25,7 +25,7 @@ class LeaseVectorTest {
     private fun pin(v: JsonElement): NodePin = v["given"]["node"].let { NodePin(s(it, "id"), s(it, "name"), s(it, "key")) }
     private fun request(v: JsonElement): LeaseRequest {
         val message = Leases.verifiedMessage(Envelope.fromJson(v["given"]["request"]!!), pin(v)) ?: error("the request verifies against the node pin")
-        return LeaseRequest.from(message) ?: error("the request parses")
+        return LeaseRequest.from(message, sealedSeen = emptySet()) ?: error("the request parses")
     }
 
     private fun assertBuilds(name: String, build: (JsonElement, JsonElement) -> JsonObject) {
@@ -214,7 +214,7 @@ class LeaseVectorTest {
         for (name in listOf("take-request-missing-name", "computer-use-with-unattended")) {
             val v = vector(name)
             val message = Leases.verifiedMessage(Envelope.fromJson(v["input"]!!), pin(v)) ?: error("$name verifies against the node pin")
-            assertNull(name, LeaseRequest.from(message))
+            assertNull(name, LeaseRequest.from(message, sealedSeen = emptySet()))
             assertFalse(name, Leases.isLease(message["lease"]))
             assertEquals(name, "malformed", v["expect"]["reason"].str())
         }
@@ -242,7 +242,7 @@ class LeaseVectorTest {
         assertTrue(Leases.isLease(leaseWith("max_minutes", JsonPrimitive(240))))
     }
 
-    private fun taskCard(name: String): LeaseRequest = vector(name).let { LeaseRequest.from(Leases.verifiedMessage(Envelope.fromJson(it["input"]!!), pin(it))!!)!! }
+    private fun taskCard(name: String): LeaseRequest = vector(name).let { LeaseRequest.from(Leases.verifiedMessage(Envelope.fromJson(it["input"]!!), pin(it))!!, sealedSeen = emptySet())!! }
 
     /** A task's request: no apps, its own sites, allows and usd; empty allows is the card that raises a look-only task's spend. */
     @Test
@@ -264,7 +264,7 @@ class LeaseVectorTest {
         for (name in taskRequestsRefused) {
             val v = vector(name)
             val message = Leases.verifiedMessage(Envelope.fromJson(v["input"]!!), pin(v)) ?: error("$name verifies against the node pin")
-            assertNull(name, LeaseRequest.from(message))
+            assertNull(name, LeaseRequest.from(message, sealedSeen = emptySet()))
             assertFalse(name, Leases.isLease(message["lease"]))
             assertEquals(name, "malformed", v["expect"]["reason"].str())
         }
@@ -490,7 +490,7 @@ class LeaseVectorTest {
         val message = Leases.verifiedMessage(Envelope.fromJson(vector("grant-valid")["given"]["request"]!!), pin(vector("grant-valid")))!!
         val lease = message["lease"].obj()!!
         val changed = JsonObject(message + ("lease" to JsonObject(lease + ("max_minutes" to JsonPrimitive(60)))))
-        assertNull(LeaseRequest.from(changed))
+        assertNull(LeaseRequest.from(changed, sealedSeen = emptySet()))
     }
 
     // ---- sealed (R-SP-2, R-SP-4, R-SP-9, R-SP-15) ----
@@ -513,11 +513,11 @@ class LeaseVectorTest {
         val box = v["given"]["box"]
         val message = signed(v)
         for (key in listOf("lease", "origin", "salt")) assertFalse(key, message.containsKey(key))
-        val check = LeaseRequest.check(message, openerOf(box))
+        val check = LeaseRequest.check(message, openerOf(box), sealedSeen = emptySet())
         assertNull(check.reason)
         assertEquals(SealState.OPENED, check.seal)
         val request = check.request!!
-        assertEquals(LeaseRequest.from(message, openerOf(box)), request)
+        assertEquals(LeaseRequest.from(message, openerOf(box), sealedSeen = emptySet()), request)
         val expect = v["expect"]["status"]
         assertEquals(s(expect, "lease_hash"), request.leaseHash)
         assertEquals(listOf("calculator", "notepad"), request.apps.map { it.id })
@@ -528,14 +528,14 @@ class LeaseVectorTest {
         assertEquals(s(expect, "lease_hash"), Seal.saltedHash(s(expect, "salt"), expect["lease"]!!))
 
         // Not this phone's to open: no request to answer, and the reason says why.
-        val noOpener = LeaseRequest.check(message)
+        val noOpener = LeaseRequest.check(message, sealedSeen = emptySet())
         assertEquals("not_recipient", noOpener.reason)
         assertEquals(SealState.UNREAD, noOpener.seal)
         assertNull(noOpener.request)
-        assertNull(LeaseRequest.from(message))
-        assertEquals("open_failed", LeaseRequest.check(message, wrongBox(v)).reason)
+        assertNull(LeaseRequest.from(message, sealedSeen = emptySet()))
+        assertEquals("open_failed", LeaseRequest.check(message, wrongBox(v), sealedSeen = emptySet()).reason)
         // A sealed request whose clear part is short is not one.
-        assertEquals("malformed", LeaseRequest.check(JsonObject(message - "node_box"), openerOf(box)).reason)
+        assertEquals("malformed", LeaseRequest.check(JsonObject(message - "node_box"), openerOf(box), sealedSeen = emptySet()).reason)
     }
 
     /** R-SP-2: what is opened is held to the signed hash before anything is shown. */
@@ -546,15 +546,15 @@ class LeaseVectorTest {
         val full = Seal.open(LeaseRequest.TYPE, signed(v), s(box, "device_id"), softwareAgree(s(box, "d")))
         val lease = full["lease"].obj()!!
         val changed = sealedToA(LeaseRequest.TYPE, JsonObject(full + ("lease" to JsonObject(lease + ("max_minutes" to JsonPrimitive(60))))))
-        val check = LeaseRequest.check(changed, openerOf(box))
+        val check = LeaseRequest.check(changed, openerOf(box), sealedSeen = emptySet())
         assertEquals("lease_hash_mismatch", check.reason)
         assertNull(check.request)
         assertEquals(SealState.OPENED, check.seal)
         // The unsalted hash of the same lease does not stand in for the salted one.
         val unsalted = sealedToA(LeaseRequest.TYPE, JsonObject(full + ("lease_hash" to jsonString(Digest.sha256B64url(Jcs.bytes(lease))))))
-        assertEquals("lease_hash_mismatch", LeaseRequest.check(unsalted, openerOf(box)).reason)
+        assertEquals("lease_hash_mismatch", LeaseRequest.check(unsalted, openerOf(box), sealedSeen = emptySet()).reason)
         // Opened and not what a request holds.
-        fun opened(edit: JsonObject): String? = LeaseRequest.check(sealedToA(LeaseRequest.TYPE, edit), openerOf(box)).reason
+        fun opened(edit: JsonObject): String? = LeaseRequest.check(sealedToA(LeaseRequest.TYPE, edit), openerOf(box), sealedSeen = emptySet()).reason
         assertEquals("malformed", opened(JsonObject(full + ("origin" to JsonPrimitive("x")))))
         assertEquals("malformed", opened(JsonObject(full - "salt")))
         assertEquals("malformed", opened(JsonObject(full + ("lease" to JsonObject(lease + ("kind" to JsonPrimitive("screen")))))))
@@ -567,7 +567,7 @@ class LeaseVectorTest {
         val v = vector("grant-to-sealed")
         val e = v["expect"]["message"]!!
         val message = Leases.verifiedMessage(Envelope.fromJson(v["given"]["request"]!!), pin(v))!!
-        val request = LeaseRequest.from(message, openerOf(v["given"]["box"]))!!
+        val request = LeaseRequest.from(message, openerOf(v["given"]["box"]), sealedSeen = emptySet())!!
         val built = Leases.grant(request, e["grant"]["apps"].arr()!!.map { it.str()!! }, e["grant"]["minutes"].int()!!, s(e, "device_id"), s(e, "signed_at"))
         assertEquals(e, built)
         assertArrayEquals(Envelope.fromJson(v["input"]!!).payloadBytes(), Jcs.bytes(built))
@@ -602,12 +602,17 @@ class LeaseVectorTest {
         }
         assertTrue(Leases.isTaskStatus(message))
         assertNull(Leases.taskStopName(message))
-        // Sealed in another shape, or opened to no name: not read.
+        // Sealed in another shape: not read.
         assertNull(LeaseStatus.from(JsonObject(message - "seq"), openerOf(v["given"]["box"])))
         assertNull(LeaseStatus.from(JsonObject(message + ("name" to JsonPrimitive("x"))), openerOf(v["given"]["box"])))
         val full = Seal.open(LeaseStatus.TYPE, message, s(v["given"]["box"], "device_id"), softwareAgree(s(v["given"]["box"], "d")))
-        assertNull(LeaseStatus.from(sealedToA(LeaseStatus.TYPE, JsonObject(full - "name")), openerOf(v["given"]["box"])))
-        assertNull(LeaseStatus.from(sealedToA(LeaseStatus.TYPE, JsonObject(full + ("name" to JsonPrimitive("a  b")))), openerOf(v["given"]["box"])))
+        // Opened to no name, or to a bad one: kept, unread. A phone never loses a lease to what is sealed in it.
+        for (bad in listOf(JsonObject(full - "name"), JsonObject(full + ("name" to JsonPrimitive("a  b"))))) {
+            val kept = LeaseStatus.from(sealedToA(LeaseStatus.TYPE, bad), openerOf(v["given"]["box"]))!!
+            assertEquals(SealState.UNREAD, kept.seal)
+            assertNull(kept.name)
+            assertEquals(s(expect, "state"), kept.state)
+        }
         // A clear status is as it was.
         assertEquals(SealState.CLEAR, LeaseStatus.from(signed(vector("status-valid")))!!.seal)
     }
@@ -696,18 +701,78 @@ class LeaseVectorTest {
     @Test
     fun aClearRequestAfterSealed() {
         val clear = Leases.verifiedMessage(Envelope.fromJson(vector("grant-valid")["given"]["request"]!!), pin(vector("grant-valid")))!!
-        val refused = LeaseRequest.check(clear, sealedSeen = true)
+        val seen = setOf(s(clear, "node_id"))
+        val refused = LeaseRequest.check(clear, sealedSeen = seen)
         assertEquals("clear_after_sealed", refused.reason)
         assertNull(refused.request)
-        assertNull(LeaseRequest.from(clear, sealedSeen = true))
-        assertEquals(SealState.CLEAR, LeaseRequest.check(clear).seal)
-        assertNotNull(LeaseRequest.from(clear))
+        assertNull(LeaseRequest.from(clear, sealedSeen = seen))
+        // Another node seen sealing says nothing of this one.
+        assertNotNull(LeaseRequest.from(clear, sealedSeen = setOf("kl-aaaaaaaaaaaaaaaa")))
+        assertEquals(SealState.CLEAR, LeaseRequest.check(clear, sealedSeen = emptySet()).seal)
+        assertNotNull(LeaseRequest.from(clear, sealedSeen = emptySet()))
         val sealed = vector("request-sealed")
-        assertNotNull(LeaseRequest.from(signed(sealed), openerOf(sealed["given"]["box"]), sealedSeen = true))
+        assertNotNull(LeaseRequest.from(signed(sealed), openerOf(sealed["given"]["box"]), sealedSeen = setOf(pin(sealed).id)))
         assertNotNull(LeaseStatus.from(signed(vector("status-valid"))))
         val view = vector("view-node-sig-valid")
         assertTrue(Leases.verifyView(Envelope.fromJson(view["input"]!!), pin(view)).accepted)
         assertEquals(SealState.CLEAR, Leases.verifyView(Envelope.fromJson(view["input"]!!), pin(view)).view!!.seal)
+    }
+
+    private fun lockedOpener(): Opener = Seal.opener(s(boxKeys()["devices"]["A"], "id")) { _, _ -> throw SealKeyUnavailableException("locked") }
+
+    private fun signedByWeb(message: JsonObject): Envelope {
+        val key = java.security.KeyFactory.getInstance("Ed25519").generatePrivate(
+            java.security.spec.EdECPrivateKeySpec(java.security.spec.NamedParameterSpec.ED25519, Hex.decode(boxKeys()["nodes"]["web-01"]["seed"].str()!!))
+        )
+        return Envelope.seal(message, message["node_id"].str()!!, "Ed25519") { bytes -> java.security.Signature.getInstance("Ed25519").run { initSign(key); update(bytes); sign() } }
+    }
+
+    /** A locked phone: no request to answer, for a reason that passes. */
+    @Test
+    fun aLockedPhoneAndARequest() {
+        val check = LeaseRequest.check(signed(vector("request-sealed")), lockedOpener(), sealedSeen = emptySet())
+        assertEquals("key_locked", check.reason)
+        assertEquals(Seal.KEY_LOCKED, check.reason)
+        assertNull(check.request)
+        assertEquals(SealState.UNREAD, check.seal)
+    }
+
+    /** A locked phone keeps every lease and its Stop: a status needs nothing opened. */
+    @Test
+    fun aLockedPhoneAndAStatus() {
+        val v = vector("status-sealed")
+        val status = LeaseStatus.from(signed(v), lockedOpener())!!
+        assertEquals(SealState.UNREAD, status.seal)
+        assertNull(status.name)
+        assertEquals(s(v["expect"]["status"], "state"), status.state)
+        assertEquals(s(v["expect"]["status"], "contact_token"), status.contactToken)
+        val listed = Leases.listedStatuses(ListingCheck(true, null, listOf(Envelope.fromJson(v["input"]!!))), pin(v), lockedOpener())
+        assertEquals(listOf(s(v["expect"]["status"], "lease_id")), listed.map { it.leaseId })
+    }
+
+    /** A locked phone and a view: accepted, the clear part alone, so a watch still has its token. */
+    @Test
+    fun aLockedPhoneAndAView() {
+        val v = vector("view-sealed")
+        val check = Leases.verifyView(Envelope.fromJson(v["input"]!!), pin(v), lockedOpener())
+        assertTrue(check.accepted)
+        val view = check.view!!
+        assertEquals(SealState.UNREAD, view.seal)
+        assertNull(view.frame)
+        assertNotNull(view.contactToken)
+    }
+
+    /** A listing a phone took stays whole when a status in it opens to something bad: no lease is lost to its name. */
+    @Test
+    fun aListedStatusThatOpensBadlyIsKept() {
+        val v = vector("status-sealed")
+        val box = v["given"]["box"]
+        val full = Seal.open(LeaseStatus.TYPE, signed(v), s(box, "device_id"), softwareAgree(s(box, "d")))
+        val envelope = signedByWeb(sealedToA(LeaseStatus.TYPE, JsonObject(full + ("name" to JsonPrimitive("a  b")))))
+        val listed = Leases.listedStatuses(ListingCheck(true, null, listOf(envelope)), pin(v), openerOf(box))
+        assertEquals(listOf(s(full, "lease_id")), listed.map { it.leaseId })
+        assertNull(listed[0].name)
+        assertEquals(SealState.UNREAD, listed[0].seal)
     }
 
     @Test
@@ -715,6 +780,6 @@ class LeaseVectorTest {
         val fleet = DemoFleet()
         val envelope = fleet.leaseRequest(0, listOf("calculator"), 15)
         val message = Leases.verifiedMessage(envelope, fleet.pins[0])!!
-        assertEquals("calculator", LeaseRequest.from(message)?.apps?.first()?.id)
+        assertEquals("calculator", LeaseRequest.from(message, sealedSeen = emptySet())?.apps?.first()?.id)
     }
 }

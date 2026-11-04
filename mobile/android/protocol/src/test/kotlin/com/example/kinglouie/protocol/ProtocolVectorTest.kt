@@ -130,7 +130,7 @@ class ProtocolVectorTest {
             "request-display", "request-display-edge", "request-malformed-equivalent-keys")) {
             val v = vector(name)
             val pins = v["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }
-            assertEquals(name, v["expect"], Display.view(v["input"]!!, pins).json)
+            assertEquals(name, v["expect"], Display.view(v["input"]!!, pins, sealedSeen = emptySet()).json)
         }
     }
 
@@ -182,7 +182,7 @@ class ProtocolVectorTest {
         for (variant in variants) {
             assertNotEquals(text, variant)
             val forged = envelope.copy(payload = B64Url.encode(variant.toByteArray()))
-            assertEquals(variant, "malformed", Display.view(forged.json, pins).reason)
+            assertEquals(variant, "malformed", Display.view(forged.json, pins, sealedSeen = emptySet()).reason)
             throwsProtocol { forged.message() }
         }
     }
@@ -206,7 +206,7 @@ class ProtocolVectorTest {
         val message = JsonObject(request + mapOf("action" to edited, "action_hash" to jsonString(Digest.sha256B64url(Jcs.bytes(edited)))))
         val envelope = sealEd25519(message, web01["id"].str()!!, nodeKey("web-01"))
         assertTrue(envelope.verifyEd25519(web01["spki"].str()!!))
-        val view = Display.view(envelope.json, listOf(NodePin(web01["id"].str()!!, "web-01", web01["spki"].str()!!)))
+        val view = Display.view(envelope.json, listOf(NodePin(web01["id"].str()!!, "web-01", web01["spki"].str()!!)), sealedSeen = emptySet())
         assertEquals("malformed", view.reason)
     }
 
@@ -616,11 +616,11 @@ class ProtocolVectorTest {
 
         val fleet = DemoFleet()
         assertEquals(listOf("gpu-box", "laptop", "web-01"), fleet.pins.map { it.name })
-        val view = Display.view(fleet.request(2, "systemctl restart site").json, fleet.pins)
+        val view = Display.view(fleet.request(2, "systemctl restart site").json, fleet.pins, sealedSeen = emptySet())
         assertTrue(view.reason, view.shown)
         assertEquals("web-01", view.display["node"]["name"].str())
         // A long command still makes a valid request: the summary is cut to 300 code points.
-        assertTrue(Display.view(fleet.request(0, "x".repeat(400)).json, fleet.pins).shown)
+        assertTrue(Display.view(fleet.request(0, "x".repeat(400)).json, fleet.pins, sealedSeen = emptySet()).shown)
         assertTrue(fleet.deviceId.startsWith("d-"))
     }
 

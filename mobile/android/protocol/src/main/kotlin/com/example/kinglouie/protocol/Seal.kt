@@ -17,8 +17,8 @@ class SealException(val reason: String, detail: String = "") : Exception(if (det
 
 /**
  * The phone's box key will not act now (a locked Keystore). It is not a wrap
- * that does not open, so an `agree` that throws this goes through [Seal.open]
- * and every reader, for the app's row to say so.
+ * that does not open: an `agree` that throws this goes through [Seal.open], and
+ * a reader takes it as [Seal.KEY_LOCKED].
  */
 open class SealKeyUnavailableException(message: String) : Exception(message)
 
@@ -81,14 +81,22 @@ object Seal {
      * R-SP-15: a relay can replay an old clear ask or request, signed by the
      * node, to draw a clear answer. Once this phone has opened a sealed message
      * from a node, such a message from that node is unreadable with this reason
-     * and offers no decision. Checked after the signature.
+     * and offers no decision. Checked after the signature, by the reader, so nobody
+     * parses an unverified payload to find its node.
      */
     const val CLEAR_AFTER_SEALED = "clear_after_sealed"
     private val HELD_TO_SEALING = setOf("kl.question.ask", "kl.approval.request", "kl.lease.request")
 
-    /** Whether R-SP-15 refuses this message. [sealedSeen]: this phone has opened a sealed message from its node. */
-    fun clearRefused(type: String, message: JsonObject, sealedSeen: Boolean): Boolean =
-        sealedSeen && type in HELD_TO_SEALING && !message.containsKey("sealed")
+    /** Whether R-SP-15 refuses this message. [sealedSeen]: the nodes this phone has opened a sealed message from. */
+    fun clearRefused(type: String, message: JsonObject, sealedSeen: Set<String>): Boolean =
+        type in HELD_TO_SEALING && !message.containsKey("sealed") && message["node_id"].str()?.let { it in sealedSeen } == true
+
+    /**
+     * Sealed and the phone's box key will not act now: it passes when the phone
+     * unlocks. No decision is offered, what needs nothing opened still reads, and
+     * no node is marked by it.
+     */
+    const val KEY_LOCKED = "key_locked"
 
     /** The nodes seen sealing, after a verified message from [nodeId] was read: only an open adds one, and nothing takes one away. */
     fun noteSealedSeen(seen: Set<String>, nodeId: String, state: SealState): Set<String> = if (state == SealState.OPENED) seen + nodeId else seen
@@ -276,7 +284,7 @@ object Seal {
 
     /**
      * How a verified message reads. [reason] when not opened: `not_recipient` (no
-     * opener, or no wrap for this phone) or `open_failed`. [message] is then the
+     * opener, or no wrap for this phone), `open_failed` or [KEY_LOCKED]. [message] is then the
      * clear part alone. Null: sealed in no shape of this type, or it opened to
      * something that is no such content; a screen says `malformed`.
      */
@@ -293,6 +301,8 @@ object Seal {
             Read(open(type, message), SealState.OPENED, null)
         } catch (e: SealException) {
             if (e.reason == "not_recipient" || e.reason == "open_failed") Read(clear, SealState.UNREAD, e.reason) else null
+        } catch (e: SealKeyUnavailableException) {
+            Read(clear, SealState.UNREAD, KEY_LOCKED)
         }
     }
 }
