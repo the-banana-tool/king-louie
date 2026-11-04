@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { runPersonalInstall, renderPersonalTaskXml, PERSONAL_TASK_NAME } = require('../src/service/personal-install');
+const { runPersonalInstall, renderPersonalTaskXml, PERSONAL_TASK_NAME, renderServiceCli } = require('../src/service/personal-install');
 const { loadNodeConfig } = require('../src/service/node-config');
 const { main } = require('../src/service/cli');
 
@@ -472,6 +472,83 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
     assert.match(t.text(), /^ {2}binary: {5}C:\\Program Files\\King Louie\\King Louie\.exe, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed$/m);
     const write = d.executed.flat().find((step) => step.writeFile);
     assert.match(argsOf(write.writeFile.content), /-Command \$env:ELECTRON_RUN_AS_NODE='1'; & 'C:\\Program Files\\King Louie\\King Louie\.exe' 'C:\\kl\\bin\\king-louie-service\.js' run --data-dir /);
+  });
+
+  describe('the launcher a window-installed owner runs', () => {
+    const launcherStep = (d) => d.executed.flat().find((step) => step.writeFile && step.writeFile.path.endsWith('king-louie-service.cmd'));
+
+    it('written beside the config dir with the pinned paths, by execute, in the consent and the dry run', async () => {
+      const s = setup();
+      const d = deps(s, { runAsNode: true, nodePath: APP });
+      const { code, t } = await run('install', s, d, { yes: true });
+      assert.equal(code, 0, t.errors());
+      const step = launcherStep(d);
+      assert.equal(step.writeFile.path, path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd'));
+      assert.equal(step.ignoreFailure, true);
+      assert.equal(step.writeFile.content, renderServiceCli({ nodePath: APP, entryPath: 'C:\\kl\\bin\\king-louie-service.js' }));
+      assert.ok(t.text().includes('king-louie-service.cmd'));
+
+      const dry = deps(s, { runAsNode: true, nodePath: APP });
+      const out = await run('install', s, dry, { dryRun: true });
+      assert.equal(out.code, 0, out.t.errors());
+      assert.match(out.t.text(), /\[dry-run\] [^\n]*king-louie-service\.cmd/);
+      assert.ok(!fs.existsSync(step.writeFile.path), 'written only by execute');
+    });
+
+    it('a checkout install (node.exe) writes none', async () => {
+      const s = setup();
+      const d = deps(s, { runAsNode: false });
+      const { code, t } = await run('install', s, d, { yes: true });
+      assert.equal(code, 0, t.errors());
+      assert.equal(launcherStep(d), undefined);
+      assert.ok(!t.text().includes('king-louie-service.cmd'));
+    });
+
+    it('renders quoted, CRLF, with the variable set, spaces and shell characters inert', () => {
+      const text = renderServiceCli({ nodePath: 'C:\\Program Files\\King & Louie\\King Louie.exe', entryPath: 'C:\\Program Files\\King & Louie\\resources\\app.asar\\bin\\king-louie-service.js' });
+      assert.deepEqual(text.split('\r\n'), [
+        '@echo off',
+        'setlocal',
+        'set "ELECTRON_RUN_AS_NODE=1"',
+        '"C:\\Program Files\\King & Louie\\King Louie.exe" "C:\\Program Files\\King & Louie\\resources\\app.asar\\bin\\king-louie-service.js" %*',
+        'exit /b %errorlevel%',
+        ''
+      ]);
+    });
+
+    it('a percent in a path is doubled; a non-ASCII path sets the code page; a quote is refused', () => {
+      assert.ok(renderServiceCli({ nodePath: 'C:\\a%b\\k.exe', entryPath: 'C:\\k.js' }).includes('"C:\\a%%b\\k.exe"'));
+      const accented = renderServiceCli({ nodePath: 'C:\\Users\\Jos\u00e9\\k.exe', entryPath: 'C:\\k.js' });
+      assert.ok(accented.split('\r\n').includes('chcp 65001 >nul'));
+      assert.ok(!renderServiceCli({ nodePath: 'C:\\k.exe', entryPath: 'C:\\k.js' }).includes('chcp'));
+      assert.throws(() => renderServiceCli({ nodePath: 'C:\\a"b\\k.exe', entryPath: 'C:\\k.js' }), /double quote/);
+    });
+
+    it('uninstall removes it, with the task and with no task; the dry run lists it; none there, no step', async () => {
+      const s = setup();
+      const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
+      fs.mkdirSync(path.dirname(cli), { recursive: true });
+      fs.writeFileSync(cli, 'x');
+      const d = deps(s);
+      const { code, t } = await run('uninstall', s, d, { yes: true });
+      assert.equal(code, 0, t.errors());
+      assert.ok(d.executed.flat().some((step) => step.unlink === cli));
+
+      const noTask = deps(s, { taskRegistered: () => false });
+      const second = await run('uninstall', s, noTask, { yes: true });
+      assert.equal(second.code, 0, second.t.errors());
+      assert.ok(noTask.executed.flat().some((step) => step.unlink === cli));
+
+      const dry = deps(s);
+      const out = await run('uninstall', s, dry, { dryRun: true });
+      assert.match(out.t.text(), /\[dry-run\] [^\n]*king-louie-service\.cmd/);
+      assert.ok(fs.existsSync(cli), 'a dry run removes nothing');
+
+      fs.unlinkSync(cli);
+      const none = deps(s);
+      await run('uninstall', s, none, { yes: true });
+      assert.ok(!none.executed.flat().some((step) => step.unlink));
+    });
   });
 
   it('run from node.exe: no variable in the task and no binary line in the consent', async () => {

@@ -22,15 +22,15 @@ function plain(value) {
 }
 
 // What a node says of itself is data (attach stage 2 §6.8): a hosting is one of
-// two words, a version a short plain string, and anything else is no word at all.
+// two words, a version looks like one, and anything else is no word at all.
+const VERSION_RE = /^[0-9A-Za-z.+-]{1,64}$/;
 function nodeHosting(value) {
   return value === 'personal' || value === 'service' ? value : null;
 }
 function nodeVersion(value) {
-  if (typeof value !== 'string' || !value) return null;
-  const { shown } = require('../service/commands/io');
-  return shown(value, 64);
+  return typeof value === 'string' && VERSION_RE.test(value) ? value : null;
 }
+const own = (table, key) => (typeof key === 'string' && Object.hasOwn(table, key) ? table[key] : undefined);
 
 // NODE_START_TIMEOUT has no line here: the controller words it from its own
 // wait (the seconds), and the pane shows that message.
@@ -91,7 +91,7 @@ function refusalLine(error) {
   if (code === 'NODE_START_FAILED') return START_FAILED(text);
   if (code === 'NODE_TASK_RUN_FAILED') return RUN_FAILED(text);
   if (code === 'NODE_STOP_FAILED') return STOP_FAILED(text);
-  if (NODE_LINES[code]) return NODE_LINES[code];
+  if (own(NODE_LINES, code)) return NODE_LINES[code];
   return plain(text);
 }
 
@@ -105,7 +105,7 @@ function disconnectedRow(n, { install }) {
   if (err && err.code === 'NODE_START_TIMEOUT') return { line: plain(errorText(err)), action: null };
   if (err && err.code === 'NODE_TASK_RUN_FAILED') return { line: RUN_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
   if (err && err.code === 'NODE_STOP_FAILED') return { line: STOP_FAILED(errorText(err)), action: { id: 'nodeRestart', label: 'Restart King Louie Node' } };
-  const taskCode = TASK_CODES[n.task] || (err && Object.values(TASK_CODES).includes(err.code) ? err.code : null);
+  const taskCode = own(TASK_CODES, n.task) || (err && Object.values(TASK_CODES).includes(err.code) ? err.code : null);
   if (taskCode === 'NODE_TASK_MISSING') return { line: NODE_LINES.NODE_TASK_MISSING, action: install };
   if (taskCode) return { line: NODE_LINES[taskCode], action: null };
   if (n.running) return { line: RUNNING_NO_BRIDGE(n.pid), action: { id: 'nodeRestart', label: 'Restart King Louie Node' } };

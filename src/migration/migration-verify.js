@@ -27,7 +27,7 @@ const counted = (n, word) => `${n} private ${word}${n === 1 ? '' : 's'}`;
 function privateNote(chats, cases) {
   if (!chats && !cases) return null;
   const what = [chats ? counted(chats, 'chat') : null, cases ? counted(cases, 'case') : null].filter(Boolean).join(' and ');
-  return `${what} move and stay private. They answer only on a local model: until this node has a local server, which goes in the localInference block of its admin service.json, they answer PRIVATE_NO_LOCAL_MODEL.`;
+  return `${what} move and stay private. They answer only on a model running on your own machines: until King Louie Node has one, they say "This needs a local model, and none in the profile can take it." Local servers are added in the localInference block of service.json, in the node's config folder.`;
 }
 
 // The time a chat list shows for a chat: its last user or assistant message, else
@@ -38,7 +38,7 @@ function lastMessageTime(messages) {
   return last && typeof last.timestamp === 'string' && last.timestamp ? last.timestamp : null;
 }
 
-const dirtyNote = (dir) => `${dir} has uncommitted changes on the desktop. They move as they stand, and the node commits them the next time it sweeps the case, within about a minute.`;
+const DIRTY_NOTE = 'it has changes not committed to its history. They move as they stand, and the node commits them the next time it sweeps the case, within about a minute.';
 
 // What only the desktop knows, on each item the verification compares with the
 // node: a chat's message count, last message time and private mark, a case's
@@ -66,7 +66,7 @@ function withSourceFacts(plan, source) {
   const cases = moving('case');
   const dirtyCases = items
     .filter((i) => i.category === 'case' && CHECKED_ACTIONS.has(i.action) && caseEntries.get(i.key)?.clean === false)
-    .map((i) => ({ key: i.key, note: dirtyNote(i.key) }));
+    .map((i) => ({ key: i.key, note: DIRTY_NOTE }));
   return { ...plan, items, private: { chats, cases, note: privateNote(chats, cases) }, dirtyCases };
 }
 

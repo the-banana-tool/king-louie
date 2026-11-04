@@ -1611,13 +1611,12 @@ describe('desktop controller: hosting and the version gap', () => {
     controller.dispose();
   });
 
-  it('what the node says of itself is coerced: hosting only personal or service, version a bounded plain string', async () => {
-    const odd = connectedTo({ version: '1.0\u0007', hosting: { evil: true } });
+  it('what the node says of itself is coerced: hosting only personal or service, version a version or nothing', async () => {
+    const odd = connectedTo({ version: 'Restart\u0007 now', hosting: { evil: true } });
     const status = await odd.controller.status();
     assert.strictEqual(status.service.hosting, 'personal', 'not a word from the node: the pairing record says');
-    assert.ok(status.service.version.includes('[hidden or control characters removed]'));
-    assert.doesNotMatch(status.service.version, /\u0007/);
-    assert.ok(status.versionMismatch.node.includes('[hidden or control characters removed]'));
+    assert.strictEqual(status.service.version, null);
+    assert.strictEqual(status.versionMismatch, null);
     odd.controller.dispose();
     const number = connectedTo({ version: 7, hosting: 'personal' });
     const numbered = await number.controller.status();
@@ -1625,7 +1624,7 @@ describe('desktop controller: hosting and the version gap', () => {
     assert.strictEqual(numbered.versionMismatch, null, 'nothing a person could read: no row');
     number.controller.dispose();
     const long = connectedTo({ version: '9'.repeat(500), hosting: 'personal' });
-    assert.strictEqual((await long.controller.status()).service.version.length, 64);
+    assert.strictEqual((await long.controller.status()).service.version, null);
     long.controller.dispose();
     const fleet = connectedTo({ version: '1.0.0', hosting: 'root' }, { pairingRecord: fleetPairing() });
     assert.strictEqual((await fleet.controller.status()).service.hosting, 'service');
@@ -2089,7 +2088,7 @@ describe('desktop controller: the one-time move', () => {
     const planned = await controller.migrationPlan();
     assert.strictEqual(planned.ok, true, JSON.stringify(planned));
     assert.strictEqual(planned.plan.private.chats, 1);
-    assert.match(planned.plan.private.note, /PRIVATE_NO_LOCAL_MODEL/);
+    assert.doesNotMatch(planned.plan.private.note, /PRIVATE_NO_LOCAL_MODEL/);
     assert.strictEqual(planned.plan.items.find((i) => i.key === 'c1').private, true);
     const out = await controller.migrationApply({ confirmed: true });
     assert.strictEqual(out.code, 'MIGRATION_UNVERIFIED');
@@ -2212,7 +2211,7 @@ describe('desktop controller: the one-time move', () => {
   });
 
   it('the Detach warning on Windows says what Detach does there; off Windows it keeps its words', async () => {
-    assert.strictEqual(DETACH_WARNING_WINDOWS, 'After detaching, this app has no King Louie to show: it opens on the setup screen until you attach it again. The service keeps running, with its cron jobs and channels, and nothing is deleted. Stop the service if you no longer want it.');
+    assert.strictEqual(DETACH_WARNING_WINDOWS, 'After detaching, this app has no King Louie to show: it opens on the setup screen until you attach it again. King Louie keeps running in the background, with its cron jobs and channels, and nothing is deleted.');
     assert.strictEqual(DETACH_WARNING, 'After detaching, this app runs its own King Louie again next to the service; its cron jobs and channels may act twice. Stop the service if you no longer want it.');
     const { controller } = moveController();
     assert.strictEqual((await controller.status()).detachWarning, DETACH_WARNING_WINDOWS);
@@ -2221,6 +2220,25 @@ describe('desktop controller: the one-time move', () => {
     const linux = controllerFor({ readBridgeFile: () => ({ ok: false }) });
     assert.strictEqual((await linux.controller.status()).detachWarning, DETACH_WARNING);
     linux.controller.dispose();
+  });
+
+  it('status names the profile folder, for the screens that send the owner to it', async () => {
+    const { controller, userDataDir } = moveController();
+    assert.strictEqual((await controller.status()).profileDir, userDataDir);
+    controller.dispose();
+  });
+
+  it('status.node names the launcher when the install wrote one, and only then', async () => {
+    const pairing = { deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abc', publicKey: 'aa', port: 18796, hosting: 'personal', dataDir: 'C:\\Users\\Al Smith\\node\\data', pairedAt: '2026-11-04T10:00:00Z' } };
+    const cli = 'C:\\Users\\Al Smith\\node\\king-louie-service.cmd';
+    const asked = [];
+    const there = moveController({ pairingRecord: pairing, extra: { cliExists: (p) => { asked.push(p); return true; } } });
+    assert.strictEqual((await there.controller.status()).node.serviceCli, cli);
+    assert.ok(asked.includes(cli));
+    there.controller.dispose();
+    const absent = moveController({ pairingRecord: pairing, extra: { cliExists: () => false } });
+    assert.ok(!('serviceCli' in (await absent.controller.status()).node));
+    absent.controller.dispose();
   });
 
   it('PROFILE_MIGRATED unless dev: standaloneOnce and detach', async () => {

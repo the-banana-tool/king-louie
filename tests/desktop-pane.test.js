@@ -366,11 +366,12 @@ describe('nodeHosting / nodeVersion: what a node says of itself', () => {
     for (const v of ['root', '', null, undefined, 1, {}, ['personal']]) assert.strictEqual(nodeHosting(v), null);
   });
 
-  it('version is a bounded plain string or nothing', () => {
+  it('version is a version-shaped string of at most 64 characters, or nothing', () => {
     assert.strictEqual(nodeVersion('1.0.0'), '1.0.0');
     for (const v of ['', null, undefined, 1, {}, ['1.0.0']]) assert.strictEqual(nodeVersion(v), null);
-    assert.strictEqual(nodeVersion('9'.repeat(500)).length, 64);
-    assert.ok(nodeVersion('1\u0007').includes('[hidden or control characters removed]'));
+    assert.strictEqual(nodeVersion('1.0.0-beta.1+build7'), '1.0.0-beta.1+build7');
+    assert.strictEqual(nodeVersion('9'.repeat(64)).length, 64);
+    for (const v of ['9'.repeat(65), '1\u0007', 'Restart now', 'see https://example.com', '1.0\n2']) assert.strictEqual(nodeVersion(v), null, v);
   });
 });
 

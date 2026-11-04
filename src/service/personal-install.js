@@ -14,7 +14,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { sanitizeWindowsPath, xmlEscape, executeSteps } = require('./installers');
 const { windowsSystemRoot, windowsSchtasksExe, windowsPowerShellExe } = require('../platform/windows-paths');
-const { ensurePrivateDir } = require('../platform/paths');
+const { ensurePrivateDir, PERSONAL_CLI_FILE } = require('../platform/paths');
 const { parseYaml } = require('../platform/yaml');
 const { parseGuiConfig } = require('../gui/config');
 const { shown } = require('./commands/io');
@@ -79,6 +79,27 @@ function renderPersonalTaskXml({ sid, nodePath, entryPath, dataDir, runAsNode = 
 const system32 = (env, exe) => path.win32.join(windowsSystemRoot(env), 'System32', exe);
 
 // `whoami /user /fo csv`: a header line, then "domain\user","S-1-…".
+// A window-installed node runs the app's own binary, which has no command on any
+// PATH (`king-louie-service` is only a package.json bin), so the owner gets this
+// file instead: the logon task's pinned paths and variable, as a .cmd. Run by a
+// person, from cmd.exe. Inside double quotes only `%` is still special; a quote
+// cannot be there (sanitizeWindowsPath). cmd reads a batch file in the console's
+// code page, so a path outside ASCII needs UTF-8 said first.
+function renderServiceCli({ nodePath, entryPath }) {
+  const node = sanitizeWindowsPath('nodePath', nodePath);
+  const entry = sanitizeWindowsPath('entryPath', entryPath);
+  const quoted = (p) => `"${p.replace(/%/g, '%%')}"`;
+  return [
+    '@echo off',
+    ...(/^[\x00-\x7f]*$/.test(node + entry) ? [] : ['chcp 65001 >nul']),
+    'setlocal',
+    'set "ELECTRON_RUN_AS_NODE=1"',
+    `${quoted(node)} ${quoted(entry)} %*`,
+    'exit /b %errorlevel%',
+    ''
+  ].join('\r\n');
+}
+
 function defaultWhoAmI(env) {
   const out = String(execFileSync(system32(env, 'whoami.exe'), ['/user', '/fo', 'csv'], { encoding: 'utf8', windowsHide: true, timeout: 30000 }));
   const line = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop() || '';
@@ -332,6 +353,7 @@ async function install({ flags, io, c }) {
   // running platform's path form so the files land where it says.
   const configDir = path.join(path.dirname(dataDir), 'config');
   const yamlPath = path.join(configDir, NODE_YAML);
+  const cliPath = path.join(path.dirname(dataDir), PERSONAL_CLI_FILE);
 
   // No Chrome is no reason to stop (C-6): the window needs no browser, and
   // gui stays off until node.yaml says otherwise.
@@ -374,6 +396,7 @@ async function install({ flags, io, c }) {
     existing ? `  ${yamlPath} (exists: install keeps it)` : `  ${yamlPath}`,
     `  ${dataDir} and ${configDir} (created when missing)`,
     `  the logon task "${PERSONAL_TASK_NAME}" (registered again when it exists)`,
+    ...(c.runAsNode ? [`  ${cliPath} (the king-louie-service command for this node)`] : []),
     ''
   ].join('\n'));
   if (!existing) {
@@ -399,6 +422,8 @@ async function install({ flags, io, c }) {
     { description: `register the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Create', '/TN', PERSONAL_TASK_NAME, '/XML', xmlPath, '/F'] },
     { description: 'delete the temporary task definition', unlink: xmlPath, always: true, ignoreFailure: true }
   ];
+  // With none, the owner has only a harder command to type; no reason to stop.
+  if (c.runAsNode) steps.push({ description: 'write the king-louie-service command', writeFile: { path: cliPath, content: renderServiceCli({ nodePath: c.nodePath, entryPath: c.entryPath }) }, ignoreFailure: true });
   if (relay && !runningPid) steps.push({ description: `start the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Run', '/TN', PERSONAL_TASK_NAME] });
 
   if (flags.dryRun) {
@@ -433,15 +458,33 @@ async function uninstall({ flags, io, c }) {
   if (!flags.dryRun && !flags.yes && !c.isTTY()) {
     return refuse(io, 'Refusing to remove the personal node\'s logon task without confirmation on a non-interactive terminal; pass --yes.');
   }
+  const cliPath = flags.dataDir ? path.join(path.dirname(path.resolve(flags.dataDir)), PERSONAL_CLI_FILE) : null;
+  const cliSteps = cliPath && c.exists(cliPath)
+    ? [{ description: 'delete the king-louie-service command', unlink: cliPath, ignoreFailure: true }]
+    : [];
   if (!c.taskRegistered()) {
-    io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered: nothing to remove. The data dir stays as it is.\n`);
+    if (!cliSteps.length) {
+      io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered: nothing to remove. The data dir stays as it is.\n`);
+      return 0;
+    }
+    io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered. The data dir stays as it is.\n`);
+    if (flags.dryRun) {
+      await executeSteps(cliSteps, { dryRun: true, io });
+      return 0;
+    }
+    if (!flags.yes && (await c.confirm(`Remove ${cliPath}? [y/N] `)) !== true) {
+      io.stderr.write('Not removing without confirmation. Nothing was removed.\n');
+      return 1;
+    }
+    await c.execute(cliSteps);
     return 0;
   }
   const schtasks = windowsSchtasksExe(c.env);
   const steps = [
     // Already stopped (or never started) is not a reason to stop here.
     { description: `end the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/End', '/TN', PERSONAL_TASK_NAME], ignoreFailure: true },
-    { description: `delete the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Delete', '/TN', PERSONAL_TASK_NAME, '/F'] }
+    { description: `delete the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Delete', '/TN', PERSONAL_TASK_NAME, '/F'] },
+    ...cliSteps
   ];
   const stays = flags.dataDir
     ? `The data dir ${path.resolve(flags.dataDir)} stays, and so does the config dir beside it: the node's identity, chats and vault are in them. Delete them yourself to remove the node.`
@@ -478,4 +521,4 @@ async function runPersonalInstall({ command, flags = {}, io, deps = {} }) {
   return refuse(io, `Unknown command "${command}".`);
 }
 
-module.exports = { runPersonalInstall, renderPersonalTaskXml, renderNodeYaml, PERSONAL_TASK_NAME };
+module.exports = { runPersonalInstall, renderPersonalTaskXml, renderServiceCli, renderNodeYaml, PERSONAL_TASK_NAME };

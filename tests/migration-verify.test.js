@@ -296,6 +296,7 @@ describe('the move over a real bridge', () => {
       assert.strictEqual(state.migration.nodeDataDir, dataDir);
       assert.strictEqual(state.migration.private.chats, 1, 'the private note outlasts the plan');
       assert.deepStrictEqual(state.migration.staysBehind, planned.staysBehind);
+      assert.deepStrictEqual(state.migration.notes, out.report.notes);
       assert.match((await controller.status()).migration.private.note, /1 private chat/);
       assert.ok(fs.existsSync(path.join(state.migration.backupDir, 'backup.json')));
       assert.strictEqual(profileHash(), hashBefore, 'the old profile\'s store is untouched');
@@ -502,8 +503,9 @@ describe('verifyMigration: the private mark', () => {
     assert.strictEqual(out.private.chats, 2);
     assert.strictEqual(out.private.cases, 1);
     assert.match(out.private.note, /2 private chats and 1 private case/);
-    assert.match(out.private.note, /PRIVATE_NO_LOCAL_MODEL/);
-    assert.match(out.private.note, /admin service\.json/);
+    assert.doesNotMatch(out.private.note, /PRIVATE_NO_LOCAL_MODEL|admin/);
+    assert.match(out.private.note, /needs a local model/);
+    assert.match(out.private.note, /service\.json/);
     assert.match(out.private.note, /localInference/);
   });
 
@@ -1051,7 +1053,7 @@ describe('fix round 1: a case on the node is compared with the source', () => {
     assert.strictEqual(fs.readFileSync(path.join(n.root, src.name, 'uncommitted.md'), 'utf8'), 'mid-turn\n');
     assert.strictEqual(fs.readFileSync(path.join(n.root, src.name, 'notes.md'), 'utf8'), '# Notes, edited\n');
     assert.deepStrictEqual(first.plan.dirtyCases.map((d) => d.key), [src.name]);
-    assert.match(first.plan.dirtyCases[0].note, /uncommitted/);
+    assert.match(first.plan.dirtyCases[0].note, /not committed/);
     assert.strictEqual((await verifyMigration({ ...first, invoke: n.invoke })).ok, true);
 
     const retry = await land(await n.importer(), await snap(src.dir, src.name));

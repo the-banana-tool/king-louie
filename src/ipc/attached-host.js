@@ -18,11 +18,15 @@ function startAttachedHost(deps) {
     env = process.env, platform = process.platform,
     listChannels = listIpcChannels, clientFactory = null, controllerFactory = createDesktopController, launch
   } = deps;
+  // Attach stage 2 §6.1: this host also carries a window with no attachment
+  // (`needs-node`): no node yet, or one detached on purpose, whose pairing is kept.
+  // Nothing connects until Attach says so, or the Detach warning would be false.
+  const mode = launch && launch.why === 'needs-node' ? state.mode : 'attached';
   const controller = controllerFactory({
-    state, mode: 'attached', app, getWindow, env, platform,
+    state, mode, app, getWindow, env, platform,
     userDataDir: app.getPath('userData'), safeStorage, clientFactory, launch
   });
-  const client = controller.createClient();
+  const client = mode === 'attached' ? controller.createClient() : null;
   controller.setClient(client);
   const openRuns = new Map(); // responseId -> chatId
 

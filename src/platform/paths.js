@@ -5,6 +5,10 @@ const path = require('path');
 // A personal node's data dir: under the user's own profile rather than a
 // machine-wide one, with its config dir beside it (adminConfigDir). Null on
 // Windows when LOCALAPPDATA is unset, since no user path can be named then.
+// The command-line launcher `install --personal` writes beside a window-installed
+// node's config dir, so its owner has a king-louie-service to run.
+const PERSONAL_CLI_FILE = 'king-louie-service.cmd';
+
 function personalDataDir({ platform = process.platform, env = process.env } = {}) {
   if (platform === 'win32') {
     return env.LOCALAPPDATA ? path.win32.join(env.LOCALAPPDATA, 'KingLouie', 'node', 'data') : null;
@@ -306,6 +310,7 @@ module.exports = {
   fleetLayoutExists,
   pathPresent,
   personalDataDir,
+  PERSONAL_CLI_FILE,
   desktopProfileDirs,
   adminConfigDir,
   adminCredentialPath,

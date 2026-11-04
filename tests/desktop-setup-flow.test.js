@@ -95,6 +95,11 @@ describe('setupFacts', () => {
     assert.strictEqual(setupFacts({ service: null, pairing: null }).service.hosting, null);
   });
 
+  it('the pairing record comes ahead of what the node says', () => {
+    assert.strictEqual(setupFacts({ service: { hosting: 'service' }, pairing: { service: { hosting: 'personal' } } }).service.hosting, 'personal');
+    assert.strictEqual(setupFacts({ service: { hosting: 'personal' }, pairing: { service: { hosting: 'service' } } }).service.hosting, 'service');
+  });
+
   it('the pane\'s node shape reads as personal; PAIR_ELEVATED anywhere is elevated', () => {
     assert.strictEqual(setupFacts({ node: { hosting: 'personal', task: 'registered' } }).node.personal, true);
     assert.strictEqual(setupFacts({ pendingPair: { personal: true, error: { code: 'PAIR_ELEVATED' } } }).elevated, true);
@@ -110,7 +115,8 @@ describe('setupFacts', () => {
 const base = (extra = {}) => ({ platform: 'win32', launch: { host: 'attached', why: 'needs-node' }, mode: 'standalone', pairing: null, service: null, connection: { status: 'disconnected' }, setup: { completedAt: null }, ...extra });
 const NODE = { hosting: 'personal', name: 'laptop-01', dataDir: 'C:\\Users\\owner\\AppData\\Local\\KingLouie\\node\\data', task: 'registered', running: false, pid: null, starting: false, startError: null };
 const PAIRING = { service: { hosting: 'personal', dataDir: NODE.dataDir, fingerprint: 'wxyz', port: 18796, name: 'laptop-01' } };
-const attachedUp = (extra = {}) => base({ mode: 'attached', view: 'attached-connected', pairing: PAIRING, service: { hosting: 'personal', providersConfigured: true, version: '1.0.0' }, connection: { status: 'connected' }, node: NODE, ...extra });
+const LAUNCH_ATTACHED = { host: 'attached', why: 'attached', degraded: false };
+const attachedUp = (extra = {}) => base({ launch: LAUNCH_ATTACHED, mode: 'attached', view: 'attached-connected', pairing: PAIRING, service: { hosting: 'personal', providersConfigured: true, version: '1.0.0' }, connection: { status: 'connected' }, node: NODE, ...extra });
 const OLD = { found: true, chats: 3, messages: 120, cases: 2, bytes: 5 * 1024 * 1024, schemaProblem: null, customCasesRoot: null, customCases: 0 };
 
 const planAnswer = (extra = {}) => ({
@@ -303,7 +309,7 @@ describe('describeSetup: pair', () => {
 });
 
 describe('describeSetup: start', () => {
-  const down = (node, extra = {}) => base({ mode: 'attached', view: 'attached-disconnected', pairing: PAIRING, node: { ...NODE, ...node }, ...extra });
+  const down = (node, extra = {}) => base({ launch: LAUNCH_ATTACHED, mode: 'attached', view: 'attached-disconnected', pairing: PAIRING, node: { ...NODE, ...node }, ...extra });
 
   it('not running: one press starts it', () => {
     const m = describeSetup(down({ running: false }));
@@ -335,11 +341,27 @@ describe('describeSetup: start', () => {
     assert.strictEqual(ids(failed)[0], 'nodeStart');
   });
 
-  it('a start refused for its task does not offer the Start it was refused', () => {
-    const m = describeSetup(down({ task: 'registered', startError: { code: 'NODE_TASK_DISABLED', message: 'disabled' } }));
+  it('a start refused for its task: the help while the task still says so, no Start it would refuse', () => {
+    const m = describeSetup(down({ task: 'disabled', startError: { code: 'NODE_TASK_DISABLED', message: 'disabled' } }));
     assert.strictEqual(m.error.code, 'NODE_TASK_DISABLED');
     assert.deepStrictEqual(ids(m), ['retry']);
     assert.match(text(m), /Enable/);
+  });
+
+  it('a task-coded startError the task as read now disagrees with is over: Start, as told', () => {
+    for (const code of ['NODE_TASK_DISABLED', 'NODE_TASK_OTHER_ACCOUNT', 'NODE_TASK_MISSING', 'NODE_TASK_UNREADABLE']) {
+      const m = describeSetup(down({ task: 'registered', startError: { code, message: 'old' } }));
+      assert.strictEqual(m.error, null, code);
+      assert.strictEqual(ids(m)[0], 'nodeStart', code);
+      assert.ok(!ids(m).includes('nodeInstallPreview'), code);
+      assert.ok(m.lines.includes('King Louie Node is not running.'), code);
+    }
+  });
+
+  it('the task as read now decides over a start failure that says otherwise', () => {
+    const m = describeSetup(down({ task: 'disabled', startError: { code: 'NODE_START_FAILED', message: 'bad' } }));
+    assert.strictEqual(m.error.code, 'NODE_TASK_DISABLED');
+    assert.ok(!ids(m).includes('nodeStart'));
   });
 
   it('a timeout is not a dead end: a press to try again and the way to the pane', () => {
@@ -407,7 +429,7 @@ describe('describeSetup: migrate', () => {
     const m = describeSetup(at({ migrationPlan: answer }));
     const all = m.lines.join('\n');
     assert.ok(all.includes('2 private chats and 1 private case stay private.'));
-    assert.match(all, /busy-lot.*not committed/);
+    assert.ok(all.includes('Case busy-lot: it has changes not committed'), all);
     assert.match(all, /2 files/);
     assert.ok(all.includes(MARK));
     assert.match(all, /vault site-login/);
@@ -431,6 +453,8 @@ describe('describeSetup: migrate', () => {
     assert.strictEqual(before.error.code, 'MIGRATION_SOURCE');
     assert.ok(before.error.message.includes(MARK));
     assert.match(before.error.message, /4 cases/);
+    const named = describeSetup(at({ oldProfile: custom, profileDir: 'C:\\Users\\owner\\AppData\\Roaming\\king-louie' }));
+    assert.ok(named.error.message.includes('C:\\Users\\owner\\AppData\\Roaming\\king-louie\\cases'), named.error.message);
     assert.match(text(before), /Check again/);
 
     const answer = planAnswer();
@@ -438,6 +462,11 @@ describe('describeSetup: migrate', () => {
     answer.backup.customCases = 4;
     const after = describeSetup(at({ migrationPlan: answer }));
     assert.ok(!ids(after).includes('migrationApply'));
+
+    // The profile read after the plan was made still holds the press back.
+    const later = describeSetup(at({ oldProfile: custom, migrationPlan: planAnswer() }));
+    assert.ok(!ids(later).includes('migrationApply'));
+    assert.strictEqual(later.error.code, 'MIGRATION_SOURCE');
 
     const unknown = describeSetup(at({ oldProfile: { ...OLD, customCasesRoot: 'D:\\kept', customCases: null } }));
     assert.ok(!ids(unknown).includes('migrationPlan'));
@@ -480,9 +509,9 @@ describe('describeSetup: migrate', () => {
     assert.ok(m.lines.some((l) => l.includes('C:\\b\\half')));
   });
 
-  it('MIGRATION_BUSY: wait, and no press at all', () => {
+  it('MIGRATION_BUSY: wait; the one press only looks again', () => {
     const m = describeSetup(at({ migrationResult: { ok: false, code: 'MIGRATION_BUSY', error: 'The move of this profile is running; wait for it to finish.' } }));
-    assert.deepStrictEqual(ids(m), []);
+    assert.deepStrictEqual(m.actions, [{ id: 'retry', label: 'Check again' }]);
     assert.strictEqual(m.canPostpone, false);
     assert.match(m.error.message, /wait/);
   });
@@ -533,7 +562,8 @@ describe('describeSetup: after the move, what stayed is on screen up to Done', (
     counts: { chats: 3, cases: 2, attention: 1 },
     leftBehind: { needsAttention: [{ category: 'case', key: 'other-lot', note: 'already on the node' }], secrets: [{ category: 'vault', key: 'site-login', note: null }] },
     private: { chats: 1, cases: 0, note: '1 private chat stays private.' },
-    staysBehind: ['Browser profiles: log in again in the node\'s browser.']
+    staysBehind: ['Browser profiles: log in again in the node\'s browser.'],
+    notes: ['Cron jobs were imported disabled.']
   };
   const service = (providersConfigured) => ({ hosting: 'personal', providersConfigured });
   const stages = [
@@ -553,6 +583,7 @@ describe('describeSetup: after the move, what stayed is on screen up to Done', (
       assert.match(all, /vault site-login/);
       assert.ok(all.includes('1 private chat stays private.'));
       assert.ok(all.includes('Browser profiles'));
+      assert.ok(all.includes('Cron jobs were imported disabled.'), 'the notes outlast a relaunch');
       assert.strictEqual(m.canPostpone, false);
     });
   }
@@ -581,6 +612,45 @@ describe('describeSetup: provider, profile, phone, done', () => {
     assert.match(m.pre, /king-louie-service pair wss:\/\/<relay>/);
     assert.match(m.pre, /king-louie-service pair https:\/\/mcp\.<domain>/);
     assert.match(m.pre, /king-louie-service enroll-device/);
+  });
+
+  it('phone: the launcher the install wrote, in full and quoted; with none, the plain name', () => {
+    const cli = 'C:\\Users\\Al Smith\\AppData\\Local\\KingLouie\\node\\king-louie-service.cmd';
+    const m = describeSetup(attachedUp({ userProfileDefault: false, node: { ...NODE, serviceCli: cli, defaultDataDir: NODE.dataDir } }));
+    assert.deepStrictEqual(m.pre.split('\n'), [
+      `"${cli}" stop`,
+      `"${cli}" pair wss://<relay>`,
+      `"${cli}" pair https://mcp.<domain>`,
+      `"${cli}" enroll-device`
+    ]);
+    assert.match(text(m), /Command Prompt/);
+    const flagged = describeSetup(attachedUp({ userProfileDefault: false, node: { ...NODE, serviceCli: cli } }));
+    assert.ok(flagged.pre.startsWith(`"${cli}" stop --data-dir "${NODE.dataDir}"`), flagged.pre);
+    const odd = describeSetup(attachedUp({ userProfileDefault: false, node: { ...NODE, serviceCli: 'C:\\od\u0007d.cmd' } }));
+    assert.doesNotMatch(odd.pre, /\u0007/);
+    assert.ok(odd.pre.includes(MARK));
+  });
+
+  it('phone stays on screen once offered: the stop it asks for does not take its commands away', () => {
+    const stopped = base({ launch: LAUNCH_ATTACHED, mode: 'attached', view: 'attached-disconnected', pairing: PAIRING, service: { hosting: 'personal', providersConfigured: true }, connection: { status: 'disconnected' }, node: NODE, setup: { completedAt: null, phoneOffered: true } });
+    const m = describeSetup(stopped);
+    assert.strictEqual(m.step, 'phone');
+    assert.match(m.pre, /pair wss/);
+    assert.match(m.pre, /enroll-device/);
+    assert.deepStrictEqual(ids(m), ['nodeStart', 'skip']);
+    assert.match(text(m), /pair starts it again/);
+    assert.strictEqual(nextSetupStep(setupFacts(stopped)), 'phone');
+    assert.strictEqual(nextSetupStep(setupFacts({ ...stopped, setup: { phoneOffered: true, phoneSeen: true } })), 'start', 'skipped, the node still has to come up');
+    assert.strictEqual(nextSetupStep(setupFacts({ ...stopped, setup: { phoneOffered: false } })), 'start', 'never offered: start as ever');
+    assert.deepStrictEqual(ids(describeSetup({ ...stopped, node: { ...NODE, starting: true } })), ['skip']);
+    assert.deepStrictEqual(ids(describeSetup({ ...stopped, node: { ...NODE, running: true, pid: 7 } })), ['skip']);
+  });
+
+  it('phone: Done once a phone is enrolled, Skip before', () => {
+    const m = describeSetup(attachedUp({ userProfileDefault: false, approvals: { available: true, devices: [{ device_id: 'd', active: true }] } }));
+    assert.deepStrictEqual(m.actions, [{ id: 'skip', label: 'Done' }]);
+    const inactive = describeSetup(attachedUp({ userProfileDefault: false, approvals: { available: true, devices: [{ device_id: 'd', active: false }] } }));
+    assert.deepStrictEqual(inactive.actions, [{ id: 'skip', label: 'Skip' }]);
   });
 
   it('phone: says what a Telegram or Discord bot does with no phone', () => {
@@ -616,7 +686,7 @@ describe('describeSetup: provider, profile, phone, done', () => {
   it('a standalone launch and a fleet pairing draw nothing', () => {
     for (const s of [
       { launch: { host: 'standalone', why: 'dev' }, node: { fresh: true }, oldProfile: OLD },
-      base({ mode: 'attached', view: 'attached-connected', pairing: { service: { fingerprint: 'x' } }, service: { hosting: 'service', providersConfigured: false }, connection: { status: 'connected' } })
+      base({ launch: LAUNCH_ATTACHED, mode: 'attached', view: 'attached-connected', pairing: { service: { fingerprint: 'x' } }, service: { hosting: 'service', providersConfigured: false }, connection: { status: 'connected' } })
     ]) {
       const m = describeSetup(s);
       assert.strictEqual(m.step, 'done');
@@ -635,13 +705,31 @@ describe('describeSetup: provider, profile, phone, done', () => {
   });
 });
 
+describe('codes and words that are data', () => {
+  it('a code or an action named after an Object.prototype key is only a word', () => {
+    const c = describeSetup(base({ launch: LAUNCH_ATTACHED, mode: 'attached', view: 'attached-disconnected', pairing: PAIRING, node: NODE, connection: { status: 'disconnected', code: 'constructor', error: 'e' } }));
+    assert.strictEqual(c.error, null);
+    assert.strictEqual(ids(c)[0], 'nodeStart');
+    const t = describeSetup(base({ node: { ...NODE, task: 'constructor' } }));
+    assert.doesNotMatch(text(t), /function|native code/);
+    const p = describeSetup(attachedUp({ oldProfile: OLD, migrationPlan: planAnswer({ plan: { counts: { constructor: 1, toString: 2 }, items: [{ category: 'constructor', action: 'hasOwnProperty' }, { category: 'chat', action: 'constructor' }] } }) }));
+    const all = p.lines.join('\n');
+    assert.doesNotMatch(all, /function|native code/);
+    assert.match(all, /1 constructor/);
+    assert.match(all, /constructor: 1 hasOwnProperty/);
+    assert.match(all, /Chats: 1 constructor/);
+    const r = describeSetup(attachedUp({ oldProfile: OLD, migrationResult: { ok: false, code: 'constructor', error: 'x' } }));
+    assert.strictEqual(r.actions[0].label, 'Try again');
+  });
+});
+
 describe('every state has a next action or says there is none', () => {
   it('no state with no press and no words', () => {
     const statuses = [
       base({ node: { fresh: true } }), base({ node: NODE }), base({ node: null }),
       ...['missing', 'disabled', 'other-account', 'unknown'].map((task) => base({ node: { ...NODE, task } })),
-      ...['missing', 'disabled', 'other-account', 'unknown', 'registered'].map((task) => base({ mode: 'attached', view: 'attached-disconnected', pairing: PAIRING, node: { ...NODE, task } })),
-      base({ mode: 'attached', view: 'attached-disconnected', pairing: PAIRING, node: null }),
+      ...['missing', 'disabled', 'other-account', 'unknown', 'registered'].map((task) => base({ launch: LAUNCH_ATTACHED, mode: 'attached', view: 'attached-disconnected', pairing: PAIRING, node: { ...NODE, task } })),
+      base({ launch: LAUNCH_ATTACHED, mode: 'attached', view: 'attached-disconnected', pairing: PAIRING, node: null }),
       attachedUp({ oldProfile: OLD }),
       attachedUp({ service: { hosting: 'personal', providersConfigured: false } }),
       attachedUp({ userProfileDefault: true }),

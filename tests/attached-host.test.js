@@ -8,6 +8,7 @@ const { EventEmitter } = require('events');
 const { JsonFileStore } = require('../src/platform/json-file-store');
 const { openDesktopState } = require('../src/ipc/desktop-state');
 const { startAttachedHost } = require('../src/ipc/attached-host');
+const { describeSetup } = require('../src/desktop-bridge/setup-flow');
 const { listIpcChannels } = require('../src/ipc/channel-inventory');
 const { BridgeError } = require('../src/desktop-bridge/protocol');
 
@@ -76,6 +77,60 @@ function setup({ pairingService = {}, ...hostDeps } = {}) {
   const host = startAttachedHost({ app, ipcMain, safeStorage, dialog, getWindow: () => window, state, env: {}, platform: 'linux', clientFactory: () => client, ...hostDeps });
   return { host, handlers, listeners, sent, client, dialogAnswers, state };
 }
+
+// Attach stage 2 §6.1: on Windows a detached window comes back under needs-node
+// with its pairing kept. Nothing connects behind the words of the warning.
+describe('attached host: a window the launch rule sent to the setup', () => {
+  function needsNode({ paired }) {
+    const userDataDir = tmp();
+    const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
+    const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
+    state.setMode('standalone');
+    if (paired) state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, hosting: 'personal', dataDir: 'C:\\x\\data', pairedAt: '2026-11-03T14:02:11Z' } });
+    const calls = [];
+    const app = { getPath: () => userDataDir, relaunch: (o) => calls.push(['relaunch', o]), exit: () => calls.push(['exit']), quit: () => calls.push(['quit']) };
+    let clients = 0;
+    const host = startAttachedHost({
+      app, ipcMain: { handle() {}, on() {} }, safeStorage, dialog: {}, getWindow: () => null, state, env: {}, platform: 'linux',
+      launch: { host: 'attached', why: 'needs-node', degraded: false },
+      clientFactory: () => { clients += 1; return new FakeClient(); }
+    });
+    return { host, state, calls, clientsMade: () => clients };
+  }
+
+  it('a kept pairing, detached: no client, nothing connects, and the one press is Attach', async () => {
+    const { host, state, calls, clientsMade } = needsNode({ paired: true });
+    assert.strictEqual(host.client, null);
+    assert.strictEqual(clientsMade(), 0);
+    host.start();
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(clientsMade(), 0);
+    const status = await host.controller.status();
+    assert.strictEqual(status.mode, 'standalone');
+    assert.strictEqual(status.view, 'paired');
+    const model = describeSetup(status);
+    assert.strictEqual(model.step, 'pair');
+    assert.deepStrictEqual(model.actions.map((a) => a.id), ['attach']);
+    assert.strictEqual((await host.controller.attach()).ok, true);
+    assert.strictEqual(state.mode, 'attached');
+    assert.ok(calls.length, 'and it relaunches');
+    await host.shutdown();
+  });
+
+  it('a launch that is attached still builds its client', async () => {
+    const userDataDir = tmp();
+    const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
+    const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
+    state.setMode('attached');
+    state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, pairedAt: '2026-11-03T14:02:11Z' } });
+    const fake = new FakeClient();
+    const app = { getPath: () => userDataDir, relaunch() {}, exit() {}, quit() {} };
+    const host = startAttachedHost({ app, ipcMain: { handle() {}, on() {} }, safeStorage, dialog: {}, getWindow: () => null, state, env: {}, platform: 'linux', launch: { host: 'attached', why: 'attached', degraded: false }, clientFactory: () => fake });
+    assert.strictEqual(host.client, fake);
+    assert.strictEqual((await host.controller.status()).mode, 'attached');
+    await host.shutdown();
+  });
+});
 
 describe('attached host', () => {
   it('registers every inventory channel exactly once, plus canvas:executeJsResult', () => {

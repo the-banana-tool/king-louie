@@ -97,12 +97,13 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
         if (typeof entry[key] !== 'string' || !entry[key]) throw new Error(`setMigration needs ${key}`);
       }
       if (store.get('migration')) throw new Error('this profile is already marked as migrated');
-      const { at, backupDir, nodeDataDir = null, nodeId, counts = {}, leftBehind, private: privateNote, staysBehind } = entry;
+      const { at, backupDir, nodeDataDir = null, nodeId, counts = {}, leftBehind, private: privateNote, staysBehind, notes } = entry;
       store.set('migration', {
         at, backupDir, nodeDataDir, nodeId, counts,
         ...(leftBehind ? { leftBehind } : {}),
         ...(privateNote ? { private: privateNote } : {}),
-        ...(staysBehind ? { staysBehind } : {})
+        ...(staysBehind ? { staysBehind } : {}),
+        ...(notes ? { notes } : {})
       });
     },
     get setup() { return store.get('setup') || null; },

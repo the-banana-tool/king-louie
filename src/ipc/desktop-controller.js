@@ -3,7 +3,9 @@
 // never swapped under a live core. The private key is sealed with safeStorage
 // and unsealed only for the moment of a signature.
 const crypto = require('crypto');
+const fs = require('fs');
 const os = require('os');
+const path = require('path');
 const { EventEmitter } = require('events');
 const { createLogger } = require('../logging');
 const { DesktopBridgeClient } = require('../desktop-bridge/bridge-client');
@@ -11,6 +13,7 @@ const { encodePairRequest, defaultDeviceLabel, bridgeFilePath, readTrustedBridge
 const { rawFromPublicKeyObject, fingerprintGroups } = require('../desktop-bridge/keys');
 const { MESSAGES } = require('../desktop-bridge/protocol');
 const { unavailableTabsFor } = require('../desktop-bridge/allowlist');
+const { PERSONAL_CLI_FILE } = require('../platform/paths');
 const { nodeHosting, nodeVersion } = require('../desktop-bridge/pane-model');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
 const { detectOldProfile, backupProfile, backupDirFor, readBackupManifest } = require('../migration/profile-backup');
@@ -25,7 +28,7 @@ const log = createLogger('desktop-controller');
 const DETACH_WARNING = 'After detaching, this app runs its own King Louie again next to the service; its cron jobs and channels may act twice. Stop the service if you no longer want it.';
 // §6.1: on Windows a detached app has no core of its own; the launch rule brings
 // it back to the setup screen. Once the profile is moved, Detach is refused.
-const DETACH_WARNING_WINDOWS = 'After detaching, this app has no King Louie to show: it opens on the setup screen until you attach it again. The service keeps running, with its cron jobs and channels, and nothing is deleted. Stop the service if you no longer want it.';
+const DETACH_WARNING_WINDOWS = 'After detaching, this app has no King Louie to show: it opens on the setup screen until you attach it again. King Louie keeps running in the background, with its cron jobs and channels, and nothing is deleted.';
 // Spec 2026-10-28 §6.2, §7.3 (C-12).
 const PAIR_CLI_TIMEOUT_MS = 120000;
 const NODE_START_WAIT_MS = 60000;
@@ -119,6 +122,7 @@ function createDesktopController({
   now = () => new Date(), username = null,
   // resolveLaunchMode's answer (spec 2026-11-03 §6.1), for desktop:status.
   launch = { host: mode, why: mode === 'attached' ? 'attached' : 'dev', degraded: false },
+  cliExists = (file) => fs.existsSync(file),
   // What a personal node's version is compared with (spec 2026-11-03 §6.8).
   appVersion = app && typeof app.getVersion === 'function' ? app.getVersion() : null,
   // The personal node (spec 2026-10-28): the runner that reads and starts it,
@@ -315,10 +319,14 @@ function createDesktopController({
 
   // §11's `node`, from what the desktop last learnt of it.
   function nodeView(base) {
+    // The launcher an install from this app wrote, beside the config dir. Only
+    // shown to the owner as words to type; a checkout install has none.
+    const cli = base.dataDir ? path.win32.join(path.win32.dirname(base.dataDir), PERSONAL_CLI_FILE) : null;
     return {
       hosting: 'personal', name: base.name || null, dataDir: base.dataDir || null,
       task: nodeState.task, running: nodeState.running, pid: nodeState.pid,
-      starting: nodeState.starting, startError: nodeState.startError
+      starting: nodeState.starting, startError: nodeState.startError,
+      ...(cli && cliExists(cli) ? { serviceCli: shown(cli, 400) } : {})
     };
   }
 
@@ -392,6 +400,7 @@ function createDesktopController({
       standaloneOnce: mode === 'standalone' && argv.includes(STANDALONE_ONCE),
       migration: state.migration ? { ...state.migration, backupDir: shown(state.migration.backupDir, 400) } : null,
       launch: { ...launch },
+      profileDir: userDataDir ? shown(userDataDir, 400) : null,
       bridgeFile: bridgeFile(),
       bridge,
       pairing: pairing ? {
@@ -1145,7 +1154,8 @@ function createDesktopController({
             leftBehind,
             // Both outlast the plan: the setup keeps them on screen up to Done.
             private: session.plan.private || null,
-            staysBehind: staysBehindLines(session.plan)
+            staysBehind: staysBehindLines(session.plan),
+            notes: shownOut.notes
           });
         } catch (err) {
           log.warn(`the migration marker was not written: ${err.message}`);

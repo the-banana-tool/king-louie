@@ -10,7 +10,9 @@
 //   setupError                     any other press's refusal ({ code, error })
 //   setupProgress                  the line of a step under way (no press meanwhile)
 //   elevated, userProfileDefault   facts; node.defaultDataDir: the CLI's default
-//   setup: { completedAt, phoneSeen, migrateSkipped }  migrateSkipped: this launch
+//   setup: { completedAt, phoneSeen, phoneOffered, migrateSkipped }
+//     phoneOffered: the phone step has been shown; migrateSkipped: this launch
+//   profileDir: the app's own folder; node.serviceCli: the launcher the install wrote
 //
 // Every string from the node, the CLI, a path or the old profile goes through
 // `shown`. A press that cannot help is not offered: a state with no way forward
@@ -47,6 +49,8 @@ const TASK_HELP = {
   }
 };
 
+const TASK_ERROR_CODES = new Set(['NODE_TASK_MISSING', 'NODE_TASK_DISABLED', 'NODE_TASK_OTHER_ACCOUNT', 'NODE_TASK_UNREADABLE']);
+
 // The bridge codes waiting will not change (the client's FATAL set).
 const BRIDGE_HELP = {
   DEVICE_UNPAIRED: { help: 'King Louie Node no longer knows this app. In Local service settings press Unpair, then Pair.' },
@@ -56,13 +60,13 @@ const BRIDGE_HELP = {
 };
 
 // The press after a refused move, by what can actually help. MIGRATION_BUSY and
-// PROFILE_MIGRATED have none: one waits, the other is already over.
+// PROFILE_MIGRATED can only be looked at again: one waits, the other is over.
 const MOVE_PRESS = {
   MIGRATION_SOURCE: 'Plan again',
   PLAN_EXPIRED: 'Plan again',
   MIGRATION_UNVERIFIED: 'Plan the move again'
 };
-const MOVE_NO_PRESS = new Set(['MIGRATION_BUSY', 'PROFILE_MIGRATED']);
+const MOVE_ONLY_LOOK = new Set(['MIGRATION_BUSY', 'PROFILE_MIGRATED']);
 
 const ACTION_WORDS = {
   new: 'new',
@@ -74,6 +78,10 @@ const ACTION_WORDS = {
   'needs-desktop': 'not readable here'
 };
 const CATEGORY_WORDS = { chat: 'Chats', case: 'Cases' };
+
+// A code, an action or a task read from a node or a store is data: only a table's
+// own key counts, so `constructor` is a word and not a function.
+const own = (table, key) => (typeof key === 'string' && Object.hasOwn(table, key) ? table[key] : undefined);
 
 // Required here, as in pane-model: the preload loads this module.
 function long(value) {
@@ -122,7 +130,8 @@ function setupFacts(status) {
     connected: Boolean(s.connection && s.connection.status === 'connected'),
     service: {
       providersConfigured: svc.providersConfigured,
-      hosting: nodeHosting(svc.hosting) || nodeHosting(record.hosting) || (paired ? 'service' : null)
+      // The record is what the pairing was made with; the node only speaks of itself.
+      hosting: nodeHosting(record.hosting) || nodeHosting(svc.hosting) || (paired ? 'service' : null)
     },
     oldProfile: s.oldProfile || null,
     migration: s.migration || null,
@@ -155,6 +164,9 @@ function nextSetupStep(facts) {
     return n && !n.fresh && n.personal && n.task === 'registered' ? 'pair' : 'install';
   }
   if (f.attached === false) return 'pair';
+  // The phone step's first instruction stops the node, and its other commands are
+  // still to run: once offered it stays until it is skipped or done.
+  if (setupOf(f).phoneOffered && !setupOf(f).phoneSeen) return 'phone';
   if (!f.connected) return 'start';
   const old = f.oldProfile;
   if (old && old.found && !f.migration && !setupOf(f).migrateSkipped) return 'migrate';
@@ -205,7 +217,7 @@ function installStep(s, f) {
       actions: [SERVICE_SETTINGS, CHECK_AGAIN]
     };
   }
-  const help = !n.fresh && TASK_HELP[n.task];
+  const help = !n.fresh && own(TASK_HELP, n.task);
   if (help) return { lines: [help.help], error: { code: help.code, message: help.message }, actions: [CHECK_AGAIN] };
   return installAnswer(s) || {
     lines: [
@@ -247,10 +259,13 @@ function pairStep(s, f) {
 // ── start ───────────────────────────────────────────────────────────────────
 
 function startStep(s) {
-  const n = s.node || null;
+  // A start refused for its task is about the task as it was. The owner may have
+  // fixed it since, as told, so the task as read now decides.
+  const read = s.node || null;
+  const n = read && read.startError && TASK_ERROR_CODES.has(read.startError.code) ? { ...read, startError: null } : read;
   const c = s.connection || {};
   if (s.view === 'attached-starting' || (n && n.starting)) return { lines: [NODE_LINES.STARTING], actions: [], noLater: true };
-  const bridge = BRIDGE_HELP[c.code];
+  const bridge = own(BRIDGE_HELP, c.code);
   if (bridge) {
     return {
       lines: [bridge.help],
@@ -262,10 +277,7 @@ function startStep(s) {
     const answer = installAnswer(s);
     if (answer) return answer;
   }
-  // A start refused for its task says the same as the task read now: pressing
-  // Start again would only be refused again.
-  const err = n && n.startError;
-  const help = n && (err ? Object.values(TASK_HELP).find((h) => h.code === err.code) : TASK_HELP[n.task]);
+  const help = n && own(TASK_HELP, n.task);
   if (help) return { lines: [help.help], error: { code: help.code, message: help.message }, actions: [CHECK_AGAIN] };
   const row = n ? disconnectedRow(n, { install: { id: 'nodeInstallPreview', label: 'Install…' } }) : null;
   if (!row) return { lines: [c.error ? long(c.error) : 'King Louie Node is not reachable.'], actions: [CHECK_AGAIN, SERVICE_SETTINGS] };
@@ -292,7 +304,7 @@ const refusedFilesLine = (n) => `${counted(n, 'file')} inside your cases could n
 function countWords(counts) {
   return Object.entries(counts || {})
     .filter(([, n]) => n)
-    .map(([action, n]) => `${isCount(n) ? n : 0} ${ACTION_WORDS[action] || plain(action)}`)
+    .map(([action, n]) => `${isCount(n) ? n : 0} ${own(ACTION_WORDS, action) || plain(action)}`)
     .join(', ');
 }
 
@@ -301,25 +313,26 @@ function categoryLines(items) {
   const byCategory = new Map();
   for (const item of list(items)) {
     if (!item || typeof item.category !== 'string') continue;
-    const row = byCategory.get(item.category) || {};
+    const row = byCategory.get(item.category) || Object.create(null);
     row[item.action] = (row[item.action] || 0) + 1;
     byCategory.set(item.category, row);
   }
-  return [...byCategory].map(([category, row]) => `${CATEGORY_WORDS[category] || plain(category)}: ${countWords(row)}`);
+  return [...byCategory].map(([category, row]) => `${own(CATEGORY_WORDS, category) || plain(category)}: ${countWords(row)}`);
 }
 
 // Cases kept outside the profile are never carried, so the move cannot be pressed
 // while the folder holds any, or while nobody can tell.
-function customRootRefusal(source, pressWord) {
+function customRootRefusal(source, pressWord, profileDir) {
   if (!source || !source.customCasesRoot || source.customCases === 0) return null;
   const root = long(source.customCasesRoot);
   const count = source.customCases;
   const said = isCount(count)
     ? `${counted(count, 'case')} ${count === 1 ? 'is' : 'are'} kept in ${root}, outside this app's own folder, and the move does not carry ${count === 1 ? 'it' : 'them'}.`
     : `Cases may be kept in ${root}, outside this app's own folder, but that folder could not be read, and the move does not carry them.`;
+  const into = profileDir ? `${long(profileDir)}\\cases` : 'the "cases" folder inside this app\'s own folder';
   return {
     code: 'MIGRATION_SOURCE',
-    message: `${said} Move those case folders into the "cases" folder inside this app's own folder, or somewhere else if you no longer need them here, then press ${pressWord}.`
+    message: `${said} Move those case folders into ${into}, or somewhere else if you no longer need them here, then press ${pressWord}.`
   };
 }
 
@@ -330,16 +343,16 @@ function moveFailure(answer) {
   if (answer.report) lines.push(...describeImportReport(answer.report).filter(Boolean).map(long));
   if (isCount(answer.refusedFiles) && answer.refusedFiles > 0) lines.push(refusedFilesLine(answer.refusedFiles));
   lines.push(...leftBehindLines(answer.leftBehind));
-  const noPress = MOVE_NO_PRESS.has(answer.code);
+  const onlyLook = MOVE_ONLY_LOOK.has(answer.code);
   return {
     lines,
     error: refusalOf({ code: 'IMPORT_FAILED', ...answer }),
-    actions: noPress ? [] : [{ id: 'migrationPlan', label: MOVE_PRESS[answer.code] || 'Try again' }],
-    noLater: noPress
+    actions: onlyLook ? [CHECK_AGAIN] : [{ id: 'migrationPlan', label: own(MOVE_PRESS, answer.code) || 'Try again' }],
+    noLater: onlyLook
   };
 }
 
-function planScreen(answer) {
+function planScreen(answer, profileDir, old) {
   const lines = [];
   const b = answer.backup || {};
   const h = b.history || {};
@@ -354,7 +367,7 @@ function planScreen(answer) {
   if (isCount(answer.refusedFiles) && answer.refusedFiles > 0) lines.push(refusedFilesLine(answer.refusedFiles));
   lines.push(...leftBehindLines(answer.leftBehind));
   lines.push('Stays on this computer:', ...list(answer.staysBehind).map(long));
-  const custom = customRootRefusal(b, 'Check again');
+  const custom = customRootRefusal(b, 'Check again', profileDir) || customRootRefusal(old, 'Check again', profileDir);
   const held = list(answer.heldCases);
   for (const h2 of held) lines.push(`Held back: ${plain(h2.category)} ${plain(h2.key)}${h2.note ? `: ${long(h2.note)}` : ''}`);
   if (custom) return { lines, error: custom, actions: [{ id: 'migrationPlan', label: 'Check again' }] };
@@ -385,8 +398,8 @@ function migrateStep(s, f) {
   if (result && !result.ok) return moveFailure(result);
   const plan = s.migrationPlan;
   if (plan && !plan.ok) return moveFailure(plan);
-  if (plan) return planScreen(plan);
-  const custom = customRootRefusal(old, 'Check again');
+  if (plan) return planScreen(plan, s.profileDir, old);
+  const custom = customRootRefusal(old, 'Check again', s.profileDir);
   const found = `Your earlier King Louie is on this computer: ${counted(old.chats, 'chat')}, ${counted(old.messages, 'message')}, ${counted(old.cases, 'case')}${sizeOf(old.bytes) ? ` (${sizeOf(old.bytes)})` : ''}.`;
   if (custom) return { lines: [found], error: custom, actions: [CHECK_AGAIN] };
   return {
@@ -406,8 +419,10 @@ function movedLines(s, f) {
   const lines = [`Your earlier King Louie moved into King Louie Node${date ? ` on ${date}` : ''}. Its copy stays on this computer, and the backup is at ${long(m.backupDir)}.`];
   if (m.private && m.private.note) lines.push(long(m.private.note));
   lines.push(...leftBehindLines(m.leftBehind));
-  const notes = list(s.migrationResult && s.migrationResult.report && s.migrationResult.report.notes);
-  lines.push(...notes.map(long));
+  // On the marker, so a relaunch before Done keeps them; the same note from this
+  // launch's report shows once.
+  const notes = [...list(m.notes), ...list(s.migrationResult && s.migrationResult.report && s.migrationResult.report.notes)];
+  lines.push(...[...new Set(notes.map(long))]);
   const stays = list(m.staysBehind);
   if (stays.length) lines.push('Stays on this computer:', ...stays.map(long));
   return lines;
@@ -416,27 +431,35 @@ function movedLines(s, f) {
 // ── phone ───────────────────────────────────────────────────────────────────
 
 function phoneCommands(s) {
+  // A window-installed node's launcher, whole and quoted; `pair` and the rest are
+  // not on any PATH for that owner. A checkout install has the package's own name.
+  const serviceCli = s.node && s.node.serviceCli;
+  const cli = serviceCli ? `"${long(serviceCli)}"` : 'king-louie-service';
   const dataDir = (s.pairing && s.pairing.service && s.pairing.service.dataDir) || (s.node && s.node.dataDir) || null;
   const atDefault = s.node && s.node.defaultDataDir && sameDir(dataDir, s.node.defaultDataDir);
   const flag = dataDir && !atDefault ? ` --data-dir "${long(dataDir)}"` : '';
   return [
-    `king-louie-service stop${flag}`,
-    `king-louie-service pair wss://<relay>${flag}`,
-    `king-louie-service pair https://mcp.<domain>${flag}`,
-    `king-louie-service enroll-device${flag}`
+    `${cli} stop${flag}`,
+    `${cli} pair wss://<relay>${flag}`,
+    `${cli} pair https://mcp.<domain>${flag}`,
+    `${cli} enroll-device${flag}`
   ].join('\n');
 }
 
-function phoneStep(s) {
-  return {
-    lines: [
-      'A phone lets you approve what King Louie does while you are away from this window. It is optional, and this app runs nothing for it.',
-      'To set one up, open a terminal and stop the node first, since pairing refuses while it runs. Then run one of the two pair commands (wss for a relay, https for a front door), then enroll-device.',
-      'If you use a Telegram or Discord bot with King Louie: with no phone enrolled it still answers, but anything needing a phone\'s approval is refused.'
-    ],
-    pre: phoneCommands(s),
-    actions: [{ id: 'skip', label: 'Skip' }]
-  };
+function phoneStep(s, f) {
+  const n = s.node || null;
+  const lines = [
+    'A phone lets you approve what King Louie does while you are away from this window. It is optional, and this app runs nothing for it.',
+    'To set one up, open Command Prompt and stop the node first, since pairing refuses while it runs. Then run one of the two pair commands (wss for a relay, https for a front door, with your own address in place of the part in angle brackets), then enroll-device.',
+    'If you use a Telegram or Discord bot with King Louie: with no phone enrolled it still answers, but anything needing a phone\'s approval is refused.'
+  ];
+  const enrolled = list(s.approvals && s.approvals.devices).some((d) => d && d.active);
+  const actions = [{ id: 'skip', label: enrolled ? 'Done' : 'Skip' }];
+  if (!f.connected) {
+    lines.push('King Louie Node is not connected to this app right now. pair starts it again when it finishes, and enroll-device needs it running.');
+    if (n && !n.running && !n.starting) actions.unshift({ id: 'nodeStart', label: 'Start King Louie Node' });
+  }
+  return { lines, pre: phoneCommands(s), actions };
 }
 
 // ── the answer ──────────────────────────────────────────────────────────────
@@ -451,7 +474,7 @@ function bodyFor(step, s, f) {
       return { lines: ['King Louie needs a key from an AI provider before it can answer. Choose a provider and enter your key; it is kept by King Louie Node on this computer.'], actions: [] };
     case 'profile':
       return { lines: ['Tell King Louie your name and what you do.'], actions: [] };
-    case 'phone': return phoneStep(s);
+    case 'phone': return phoneStep(s, f);
     default:
       return { lines: ['King Louie Node is ready.'], actions: [{ id: 'setupFinish', label: 'Open King Louie' }] };
   }

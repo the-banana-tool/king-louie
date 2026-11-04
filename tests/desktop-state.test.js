@@ -230,7 +230,8 @@ describe('desktop state: the migration marker and the setup (attach stage 2 §6.
   it('the marker keeps the private note and the stays-behind list, when told, so they outlast the plan', () => {
     const state = openState();
     const privateNote = { chats: 1, cases: 0, note: '1 private chat stays private.' };
-    state.setMigration({ ...marker(), private: privateNote, staysBehind: ['Browser profiles stay.'] });
+    state.setMigration({ ...marker(), private: privateNote, staysBehind: ['Browser profiles stay.'], notes: ['Cron jobs were imported disabled.'] });
+    assert.deepStrictEqual(state.migration.notes, ['Cron jobs were imported disabled.']);
     assert.deepStrictEqual(state.migration.private, privateNote);
     assert.deepStrictEqual(state.migration.staysBehind, ['Browser profiles stay.']);
   });
