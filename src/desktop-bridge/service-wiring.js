@@ -25,7 +25,8 @@ function createDesktopBridgeHost({
         send: (channel, payload) => { if (host.server) host.server.forwardAmbient(channel, payload); },
         reportError: (message) => log.warn(`core reported: ${message}`)
       },
-      host: { interactive: () => Boolean(host.server && host.server.connected.length > 0) }
+      // A remote window is not the owner at this machine.
+      host: { interactive: () => Boolean(host.server && host.server.connected.some((c) => !c.remote)) }
     },
     async start({ core, ports: servicePorts, approvals = null }) {
       const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');

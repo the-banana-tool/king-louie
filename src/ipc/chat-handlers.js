@@ -133,6 +133,8 @@ function registerChatHandlers(ipcMain, context = {}) {
   // (targeted fix, after final review I2's fix wave). Stop aborts every
   // controller in the set and clears the whole entry.
   const activeRuns = new Map();
+  // A send's event -> its controller, for stopping that run and no other.
+  const runByEvent = new WeakMap();
   // chatId -> sends waiting on a case's beginTurn, the one await before activeRuns.
   const beginningSends = new Map();
   // Owner decision Q29: case:attach refuses a chat while a turn runs in it
@@ -140,6 +142,18 @@ function registerChatHandlers(ipcMain, context = {}) {
   // task's turn counts (tasks spec 2026-11-03 §4.3): src/fleet/start.js sets
   // isTaskChatRunning while the node runs, so it is read on every call.
   context.isChatRunning = (chatId) => activeRuns.has(chatId) || beginningSends.has(chatId) || context.isTaskChatRunning?.(chatId) === true;
+
+  // Stops the run this event started, if it is still going. False for one already
+  // stopped or never begun (a refused send).
+  context.stopRunForEvent = (event) => {
+    const controller = runByEvent.get(event);
+    if (!controller || controller.signal.aborted) return false;
+    controller.abort();
+    for (const [chatId, set] of activeRuns) {
+      if (set.delete(controller) && set.size === 0) activeRuns.delete(chatId);
+    }
+    return true;
+  };
 
   const assertNoTaskRunning = (chatId) => {
     if (context.isTaskChatRunning?.(chatId) === true) throw Object.assign(new Error(TASK_RUNNING_MESSAGE), { code: 'CHAT_BUSY' });
@@ -261,6 +275,24 @@ function registerChatHandlers(ipcMain, context = {}) {
     }
   }
 
+  // What the window that acted has already drawn, for the other windows on the bridge
+  // (the dispatcher leaves that window out). The Electron host's own window is alone.
+  const notifyOtherWindows = (event, channel, payload) => {
+    if (fromBridgeWindow(event)) safeSend(event.sender, channel, payload);
+  };
+  // The row without its attachments' bytes: the store has them for the reload at the end.
+  const notifyRowAdded = (event, chatId, chat, run) => {
+    const messages = chat && Array.isArray(chat.messages) ? chat.messages : [];
+    const row = messages[messages.length - 1];
+    if (!row) return;
+    const attachments = (row.images?.length || 0) + (row.documents?.length || 0);
+    notifyOtherWindows(event, 'chat:rowAdded', {
+      chatId,
+      run,
+      message: { id: row.id, seq: row.seq, sender: row.sender, text: row.text, timestamp: row.timestamp, ...(attachments ? { attachments } : {}) }
+    });
+  };
+
   const getMainWindow = () => (
     typeof context.getMainWindow === 'function' ? context.getMainWindow() : context.mainWindow
   );
@@ -303,7 +335,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     return { ok: true, chat: withPrivateMark(chat) };
   }));
 
-  ipcMain.handle(IPC.CHAT_CREATE, wrapHandler(IPC.CHAT_CREATE, async (_event, title = 'New Chat') => {
+  ipcMain.handle(IPC.CHAT_CREATE, wrapHandler(IPC.CHAT_CREATE, async (event, title = 'New Chat') => {
     const now = new Date().toISOString();
     const settings = typeof context.getSettings === 'function' ? context.getSettings() : {};
     const defaults = settings.defaults || {};
@@ -325,6 +357,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     };
     createChat(newChat, { position: 'front' });
     setActiveChatId(newChat.id);
+    notifyOtherWindows(event, 'chat:listChanged', { chatId: newChat.id, what: 'created' });
     return newChat;
   }));
 
@@ -333,12 +366,15 @@ function registerChatHandlers(ipcMain, context = {}) {
     return { activeChatId: chatId };
   }));
 
-  ipcMain.handle(IPC.CHAT_RENAME, wrapHandler(IPC.CHAT_RENAME, async (_event, { chatId, name }) => {
-    return patchChat(chatId, { title: name, updatedAt: new Date().toISOString() });
+  ipcMain.handle(IPC.CHAT_RENAME, wrapHandler(IPC.CHAT_RENAME, async (event, { chatId, name }) => {
+    const renamed = patchChat(chatId, { title: name, updatedAt: new Date().toISOString() });
+    notifyOtherWindows(event, 'chat:listChanged', { chatId, what: 'renamed' });
+    return renamed;
   }));
 
-  ipcMain.handle(IPC.CHAT_DELETE, wrapHandler(IPC.CHAT_DELETE, async (_event, chatId) => {
+  ipcMain.handle(IPC.CHAT_DELETE, wrapHandler(IPC.CHAT_DELETE, async (event, chatId) => {
     deleteChat(chatId);
+    notifyOtherWindows(event, 'chat:listChanged', { chatId, what: 'deleted' });
     if (getActiveChatId() === chatId) {
       setActiveChatId(listChats({ messages: false })[0]?.id || null);
     }
@@ -386,7 +422,9 @@ function registerChatHandlers(ipcMain, context = {}) {
     if (isRemoteWindowEvent(event) && (!REMOTE_ADDABLE_SENDERS.includes(sender) || Object.keys(metadata).length > 0)) {
       return { ok: false, code: 'REMOTE_MESSAGE_REFUSED', error: 'A remote window may add only a plain user or assistant message.' };
     }
-    return appendMessageToChat(chatId, sender, text, metadata);
+    const updated = appendMessageToChat(chatId, sender, text, metadata);
+    if (REMOTE_ADDABLE_SENDERS.includes(sender)) notifyRowAdded(event, chatId, updated, false);
+    return updated;
   }));
 
   // The owner's private mark on a chat (local inference spec 2026-10-13
@@ -455,6 +493,8 @@ function registerChatHandlers(ipcMain, context = {}) {
 
     const responseId = createId();
     const runId = createId();
+    const abortController = new AbortController();
+    runByEvent.set(event, abortController);
 
     // Case mode (spec §5): begin before the prompt hook fires or the user
     // message is persisted. A busy or missing case must run nothing — no
@@ -505,7 +545,6 @@ function registerChatHandlers(ipcMain, context = {}) {
     const subagentRuns = [];
     const summarize = () => summarizeTurnLlm({ calls: ownCalls, subagents: subagentRuns });
     let llmSummary = summarize();
-    const abortController = new AbortController();
     // Registered right after beginTurn, before the prompt hook and the
     // usability gate: Stop was invisible to activeRuns for the whole gate
     // (a connection test can run 20s or more), so a Stop pressed there was
@@ -568,6 +607,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       if (!userMessage) {
         throw new Error('Chat not found');
       }
+      notifyRowAdded(event, chatId, userMessage, true);
       // The new message's seq, read in the same synchronous tick as the
       // append: the tail and recall consider only what came before it.
       const historyStore = typeof getHistoryStore === 'function' ? getHistoryStore() : null;
@@ -1122,9 +1162,10 @@ function registerChatHandlers(ipcMain, context = {}) {
     }
   }));
 
-  ipcMain.handle(IPC.CHAT_TRUNCATE_FROM, wrapHandler(IPC.CHAT_TRUNCATE_FROM, async (_event, { chatId, fromIndex }) => {
+  ipcMain.handle(IPC.CHAT_TRUNCATE_FROM, wrapHandler(IPC.CHAT_TRUNCATE_FROM, async (event, { chatId, fromIndex }) => {
     // A Resend truncates, then sends: refused here, it has removed nothing.
     assertNoTaskRunning(chatId);
+    if (fromBridgeWindow(event) && context.isChatRunning(chatId)) return { ok: false, code: 'CHAT_BUSY', error: REPLY_RUNNING_MESSAGE };
     const chat = findChat(chatId, { messages: true });
     if (!chat) throw new Error('Chat not found');
     if (!Number.isInteger(fromIndex) || fromIndex < 0 || fromIndex >= chat.messages.length) {

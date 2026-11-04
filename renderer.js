@@ -9358,6 +9358,25 @@ function showTextInputDialog({ heading: headingText, value = '', placeholder = '
   });
 }
 
+// The node refused: nothing was stored and any reply running here goes on, so its
+// streaming node and Stop stay. The words go back in the box.
+function showBusyRefusal(chatId, message, refusal, tempId = null) {
+  appState.chats = appState.chats.map((chat) => (
+    chat.id === chatId && tempId && Array.isArray(chat.messages)
+      ? { ...chat, messages: chat.messages.filter((m) => m.id !== tempId) }
+      : chat
+  ));
+  // Only with no stream to lose: a redraw empties the view.
+  if (!appState.activeResponses.has(chatId)) refreshUI();
+  dom.chatMessages.querySelector('.chat-busy-refusal')?.remove();
+  addMessage('assistant', refusal.error || 'Unable to send message.');
+  const added = dom.chatMessages.lastElementChild;
+  added?.classList.add('chat-busy-refusal');
+  const streaming = dom.chatMessages.querySelector('.message.streaming');
+  if (streaming && added && added !== streaming) dom.chatMessages.insertBefore(added, streaming);
+  if (!dom.userInput.value) dom.userInput.value = message;
+}
+
 async function sendMessage() {
   const message = dom.userInput.value.trim();
   const pendingImages = Array.isArray(appState.pendingImages) ? [...appState.pendingImages] : [];
@@ -9783,16 +9802,20 @@ async function sendMessage() {
     }
   }
 
+  // A reply is streaming in this chat: a redraw would drop its node, so the new row
+  // waits for the answer (on the bridge, most often a refusal).
+  const busyHere = appState.activeResponses.has(appState.activeChatId);
+  const tempId = busyHere ? null : `temp-${Date.now()}`;
   const now = new Date().toISOString();
   appState.chats = appState.chats.map((chat) => {
-    if (chat.id !== appState.activeChatId) return chat;
+    if (chat.id !== appState.activeChatId || busyHere) return chat;
     return {
       ...chat,
       updatedAt: now,
       messages: [
         ...chat.messages,
         {
-          id: `temp-${Date.now()}`,
+          id: tempId,
           sender: 'user',
           text: message,
           timestamp: now,
@@ -9806,12 +9829,20 @@ async function sendMessage() {
       ]
     };
   });
-  refreshUI();
+  if (!busyHere) refreshUI();
 
   dom.userInput.value = '';
   dom.userInput.style.height = 'auto';
-  clearPendingImages();
+  if (busyHere) {
+    // Kept unrevoked: a refusal hands them back.
+    appState.pendingImages = [];
+    appState.pendingDocuments = [];
+    renderPendingImages();
+  } else {
+    clearPendingImages();
+  }
 
+  let refused = false;
   try {
     const pinnedInfo = await window.electron.skill.getPinned({ chatId: appState.activeChatId });
     if (pinnedInfo?.pinned) {
@@ -9843,6 +9874,16 @@ async function sendMessage() {
       agentMode: appState.isAgentModeEnabled,
       sandboxMode: appState.isSandboxModeEnabled
     });
+    if (rawResult?.code === 'CHAT_BUSY') {
+      refused = true;
+      showBusyRefusal(appState.activeChatId, message, rawResult, tempId);
+      if (busyHere) {
+        appState.pendingImages = pendingImages;
+        appState.pendingDocuments = pendingDocuments;
+        renderPendingImages();
+      }
+      return;
+    }
     const updatedChat = unwrapIpcResult(rawResult, 'Unable to send message.');
 
     if (updatedChat) {
@@ -9875,8 +9916,10 @@ async function sendMessage() {
     const storedRow = lastUser && lastUser.text === message && !String(lastUser.id).startsWith('temp-');
     if (!storedRow && !dom.userInput.value) dom.userInput.value = message;
   } finally {
-    setResponseActive(false, appState.activeChatId);
-    flushToolGroup();
+    if (!refused) {
+      setResponseActive(false, appState.activeChatId);
+      flushToolGroup();
+    }
   }
 }
 
@@ -9935,13 +9978,19 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
 
   // Truncate from this message onward (removes the user message + its response)
   try {
-    const updatedChat = await window.electron.chat.truncateFrom({ chatId, fromIndex: msgIndex });
+    const rawTruncated = await window.electron.chat.truncateFrom({ chatId, fromIndex: msgIndex });
+    if (rawTruncated?.code === 'CHAT_BUSY') {
+      showBusyRefusal(chatId, message, rawTruncated);
+      return;
+    }
+    const updatedChat = unwrapIpcResult(rawTruncated, 'Unable to resend.');
     if (updatedChat) {
       appState.chats = appState.chats.map((c) => (c.id === updatedChat.id ? updatedChat : c));
       refreshUI();
     }
   } catch (err) {
     addMessage('assistant', `Error: ${err.message || 'Unable to resend.'}`);
+    if (!dom.userInput.value) dom.userInput.value = message;
     return;
   }
 
@@ -9957,6 +10006,7 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
 
   // Re-send the message through the normal flow
   // Add user message to local state optimistically
+  const tempId = `temp-${Date.now()}`;
   const now = new Date().toISOString();
   appState.chats = appState.chats.map((c) => {
     if (c.id !== chatId) return c;
@@ -9966,7 +10016,7 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
       messages: [
         ...(c.id === latest.id ? latest.messages : c.messages),
         {
-          id: `temp-${Date.now()}`,
+          id: tempId,
           sender: 'user',
           text: message,
           timestamp: now,
@@ -9978,6 +10028,7 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
   });
   refreshUI();
 
+  let refused = false;
   try {
     setResponseActive(true, chatId);
     const rawResult = await window.electron.chat.sendMessage({
@@ -9988,6 +10039,14 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
       agentMode: appState.isAgentModeEnabled,
       sandboxMode: appState.isSandboxModeEnabled
     });
+    if (rawResult?.code === 'CHAT_BUSY') {
+      refused = true;
+      // Another window's run took the chat after the truncate: its stream, if it has
+      // reached here, keeps the chat active; this send's own mark does not.
+      if (!dom.chatMessages.querySelector('.message.streaming')) setResponseActive(false, chatId);
+      showBusyRefusal(chatId, message, rawResult, tempId);
+      return;
+    }
     const updatedChat = unwrapIpcResult(rawResult, 'Unable to send message.');
     if (updatedChat) {
       appState.chats = appState.chats.map((c) => (c.id === updatedChat.id ? updatedChat : c));
@@ -10010,8 +10069,10 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
       addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
     }
   } finally {
-    setResponseActive(false, chatId);
-    flushToolGroup();
+    if (!refused) {
+      setResponseActive(false, chatId);
+      flushToolGroup();
+    }
   }
 }
 
@@ -12880,6 +12941,21 @@ window.addEventListener('blur', () => {
   }
 });
 
+// What another window's turn left this one behind on: its rows are in the store. Read
+// when no reply is active here, since a full load redraws the view (see refreshChatListOnly).
+const watchedRuns = new Set();
+let chatUpdatedDuringReply = false;
+function afterReplyEnded(chatId) {
+  const watched = watchedRuns.delete(chatId);
+  if (!watched && !chatUpdatedDuringReply) return;
+  if (appState.activeResponses.size > 0) {
+    chatUpdatedDuringReply = true;
+    return;
+  }
+  chatUpdatedDuringReply = false;
+  loadChats().catch((err) => chatLog.warn(`Chat reload failed: ${err.message}`));
+}
+
 unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, responseId }) => {
   setResponseActive(true, chatId);
   appState._streamStartTime = Date.now();
@@ -12972,6 +13048,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
   streamTextOffsets.delete(responseId);
   if (appState.streamRenderedTools) appState.streamRenderedTools.clear();
   setResponseActive(false, chatId);
+  afterReplyEnded(chatId);
   if (chatId !== appState.activeChatId) return;
   const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"]`);
   if (messageDiv) {
@@ -13030,6 +13107,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
   streamTextOffsets.delete(responseId);
   if (appState.streamRenderedTools) appState.streamRenderedTools.clear();
   setResponseActive(false, chatId);
+  afterReplyEnded(chatId);
   if (chatId !== appState.activeChatId) return;
 
   // Remove streaming class from the wrapper div
@@ -13234,7 +13312,43 @@ unsubscribeHandlers.push(window.electron.agent.onAskUser(({ requestId, question 
 
 // Listen for chat updates from Telegram bridge or other sources
 unsubscribeHandlers.push(window.electron.chat.onChatUpdated(async () => {
+  // A full load empties the view, and a reply streaming here with it: the list now,
+  // the rest when the reply ends (afterReplyEnded).
+  if (appState.activeResponses.size > 0) {
+    chatUpdatedDuringReply = true;
+    await refreshChatListOnly();
+    return;
+  }
   await loadChats();
+}));
+
+// Another window's row (remote window plan, task 2): drawn in place, above a reply
+// streaming here. Its attachments arrive with the reload when the run ends.
+unsubscribeHandlers.push(window.electron.chat.onRowAdded(({ chatId, run, message }) => {
+  if (!chatId || !message) return;
+  if (run) watchedRuns.add(chatId);
+  const chat = getActiveChat();
+  if (!chat || chat.id !== chatId || !Array.isArray(chat.messages) || chat.messages.some((m) => m.id === message.id)) return;
+  chat.messages.push(message);
+  addMessage(message.sender, message.text, { seq: message.seq, chatId, messageId: message.id });
+  const added = dom.chatMessages.lastElementChild;
+  const streaming = dom.chatMessages.querySelector('.message.streaming');
+  if (streaming && added && added !== streaming) dom.chatMessages.insertBefore(added, streaming);
+  updateEmptyState();
+}));
+
+// Another window made, renamed or deleted a chat. The open chat deleted there: this
+// window says so and opens the node's next one for it (chat:load's answer), or none.
+unsubscribeHandlers.push(window.electron.chat.onListChanged(async ({ chatId, what }) => {
+  if (what === 'deleted' && chatId === appState.activeChatId) {
+    setResponseActive(false, chatId);
+    await loadChats();
+    showNotice(`Another window deleted the chat you had open.${appState.activeChatId ? ' This is the next one.' : ''}`);
+    return;
+  }
+  await refreshChatListOnly();
+  const open = getActiveChat();
+  if (open && open.id === chatId && open.title) dom.chatHeaderTitle.textContent = open.title;
 }));
 
 window.addEventListener('beforeunload', () => {

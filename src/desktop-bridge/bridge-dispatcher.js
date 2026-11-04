@@ -15,12 +15,14 @@ const { servedChannels, isRendererEvent, PROMPT_EVENTS } = require('./allowlist'
 const { createDesktopScope } = require('./desktop-scope');
 const { checkPath: defaultCheckPath } = require('./check-path');
 const { MESSAGES } = require('./protocol');
-const { runFor } = require('./run-context');
+const { runFor, currentConnection } = require('./run-context');
 
 const log = createLogger('desktop-bridge');
 
 // What goes to one window, the run's, and never to the others.
 const ONE_WINDOW_EVENTS = new Set([...PROMPT_EVENTS, 'canvas:executeJs']);
+// What the window that acted has already drawn: for every window but that one.
+const OTHER_WINDOWS_EVENTS = new Set(['chat:rowAdded', 'chat:listChanged']);
 
 // Which inbound send answers which forwarded prompt, and where its id lives.
 const PROMPT_RESPONSES = Object.freeze({
@@ -86,9 +88,9 @@ function createBridgeDispatcher({
   const anyWindowLive = () => getConnections().some((c) => c.live);
 
   // One window's failure to take a frame is not the run's, nor the next window's.
-  const broadcast = (channel, payload) => {
+  const broadcast = (channel, payload, except = null) => {
     for (const conn of getConnections()) {
-      if (!conn.live) continue;
+      if (!conn.live || conn === except) continue;
       try {
         conn.send({ t: 'event', channel, payload });
       } catch (err) {
@@ -107,20 +109,41 @@ function createBridgeDispatcher({
     try { pending.reject(new Error('The desktop disconnected.')); } catch (err) { log.warn(`rejecting a canvas request failed: ${err.message}`); }
   };
 
+  // A prompt no window will see is refused now, or its caller waits out its timeout
+  // and its resolver stays behind. agent:askUser never gets here: the prompter checks
+  // the connection in the same tick it sends, and answers for itself.
+  const refusePrompt = (conn, channel, payload) => {
+    if (!payload) return;
+    if (channel === 'canvas:executeJs') {
+      // sender.isDestroyed() stays false while another window is live, so
+      // create-core's own check no longer catches a gone window's code.
+      failCanvas(payload.requestId);
+      return;
+    }
+    const answer = channel === 'tool:approvalRequired'
+      ? ['tool:approvalResponse', { approvalId: payload.approvalId, approved: false }]
+      : channel === 'tool:directoryAccessRequired'
+        ? ['tool:directoryAccessResponse', { requestId: payload.requestId, approved: false }]
+        : null;
+    if (!answer) return;
+    try {
+      listeners.get(answer[0])?.(conn ? makeEvent(conn) : {}, answer[1]);
+    } catch (err) {
+      log.warn(`refusing a prompt failed: ${err.message}`);
+    }
+  };
+
   const pushEvent = (conn, channel, payload) => {
     if (!isRendererEvent(channel, { hosting })) return;
     if (!ONE_WINDOW_EVENTS.has(channel)) {
-      broadcast(channel, payload);
-      return;
-    }
-    if (!conn || !conn.live) {
-      // sender.isDestroyed() stays false while another window is live, so
-      // create-core's own check no longer catches a gone window's code.
-      if (payload && channel === 'canvas:executeJs') failCanvas(payload.requestId);
+      broadcast(channel, payload, OTHER_WINDOWS_EVENTS.has(channel) ? conn : null);
       return;
     }
     // A dialog is only ever a local window's (spec §9).
-    if (channel === 'tool:approvalRequired' && conn.remote) return;
+    if (!conn || !conn.live || (channel === 'tool:approvalRequired' && conn.remote)) {
+      refusePrompt(conn, channel, payload);
+      return;
+    }
     if (payload && channel === 'tool:approvalRequired') conn.prompts.approvals.add(payload.approvalId);
     if (payload && channel === 'agent:askUser') conn.prompts.askUser.add(payload.requestId);
     if (payload && channel === 'tool:directoryAccessRequired') conn.prompts.directory.add(payload.requestId);
@@ -162,8 +185,27 @@ function createBridgeDispatcher({
     return context.runLlmCommand(command);
   };
 
+  // Each device has its own open chat, or one window's selection would move another's
+  // next send (a private or case chat included). The first read pins it from the stored
+  // selection, which only a local window writes: what a new device starts from and what
+  // a restart comes back to. Outside a frame there is no device, and the store answers.
+  const openChats = new Map(); // deviceId -> chatId
+  const getActiveChatId = () => {
+    const conn = currentConnection();
+    if (!conn) return context.getActiveChatId();
+    if (!openChats.has(conn.deviceId)) openChats.set(conn.deviceId, context.getActiveChatId());
+    return openChats.get(conn.deviceId);
+  };
+  const setActiveChatId = (chatId) => {
+    const conn = currentConnection();
+    if (conn) openChats.set(conn.deviceId, chatId);
+    if (!conn || !conn.remote) context.setActiveChatId(chatId);
+  };
+
   const bridgeContext = {
     ...context,
+    getActiveChatId,
+    setActiveChatId,
     // This copy is made when the bridge opens, before the fleet starts and sets this on
     // core.context, and it outlasts the fleet's stop: so it asks the core's on every call.
     isTaskChatRunning: (chatId) => context.isTaskChatRunning?.(chatId) === true,
@@ -233,13 +275,12 @@ function createBridgeDispatcher({
     // channel does: a case turn runs inside chat:sendMessage, and
     // case:answerQuestion only schedules an unattended wake-up, which must
     // outlive the desktop.
-    // A send into a running chat is refused CHAT_BUSY and starts nothing, so it
-    // never makes this connection's drop stop a run it did not start.
-    const sentTo = channel === 'chat:sendMessage' && args[0] && typeof args[0].chatId === 'string' ? args[0].chatId : null;
-    const chatId = sentTo && bridgeContext.isChatRunning?.(sentTo) !== true ? sentTo : null;
-    if (chatId) conn.runs.set(chatId, (conn.runs.get(chatId) || 0) + 1);
+    // A refused send registers no run, so a drop finds nothing to stop for it.
+    const chatId = channel === 'chat:sendMessage' && args[0] && typeof args[0].chatId === 'string' ? args[0].chatId : null;
+    const event = makeEvent(conn);
+    if (chatId) conn.runs.set(event, chatId);
     try {
-      const value = await handlers.get(channel)(makeEvent(conn), ...args);
+      const value = await handlers.get(channel)(event, ...args);
       noteImport(conn, channel, value);
       // Begun for a desktop that left while the handler ran.
       if (!conn.live) dropImport(conn);
@@ -247,11 +288,7 @@ function createBridgeDispatcher({
     } catch (err) {
       conn.send({ t: 'result', id, error: (err && err.message) || String(err), code: (err && err.code) || 'HANDLER_ERROR' });
     } finally {
-      if (chatId) {
-        const left = conn.runs.get(chatId) - 1;
-        if (left > 0) conn.runs.set(chatId, left);
-        else conn.runs.delete(chatId);
-      }
+      if (chatId) conn.runs.delete(event);
     }
   }
 
@@ -391,11 +428,13 @@ function createBridgeDispatcher({
     conn.prompts.directory.clear();
     conn.prompts.askUser.clear();
     conn.prompts.canvas.clear();
-    const stop = handlers.get('chat:stopResponse');
-    for (const chatId of [...conn.runs.keys()]) {
+    // By run, not by chat: a run someone already stopped may still be unwinding here
+    // while a newer run of the chat, another window's, goes on.
+    for (const [runEvent, chatId] of [...conn.runs]) {
       try {
-        if (stop) await stop(event, { chatId });
+        if (bridgeContext.stopRunForEvent?.(runEvent) !== true) continue;
         context.appendMessageToChat(chatId, 'assistant', MESSAGES.DESKTOP_DISCONNECTED_RUN, {}, { returnChat: false });
+        broadcast('chat:updated', { chatId });
         log.info(`stopped chat ${chatId}: its desktop disconnected`);
       } catch (err) {
         log.warn(`stopping chat ${chatId} failed: ${err.message}`);

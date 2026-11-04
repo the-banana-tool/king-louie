@@ -14,8 +14,8 @@ function createConnection({ deviceId, label, send, close = () => {}, remote = fa
     cleaned: false,
     send,
     close,
-    // chatId -> how many of its chat:sendMessage calls started on this connection
-    // and have not returned (a stopped turn can still be ending when the next begins)
+    // The event of each chat:sendMessage this connection made that has not returned,
+    // to its chatId. Keyed by run, since a chat can hold another window's newer run.
     runs: new Map(),
     // ids of prompts and canvas requests forwarded to this connection only
     prompts: { approvals: new Set(), askUser: new Set(), directory: new Set(), canvas: new Set() },

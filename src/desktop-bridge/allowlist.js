@@ -48,6 +48,8 @@ const PROMPT_EVENTS = new Set(['tool:approvalRequired', 'tool:directoryAccessReq
 const RENDERER_EVENTS = new Set([
   'chat:messageStart', 'chat:messageChunk', 'chat:messageComplete', 'chat:messageError',
   'chat:toolUse', 'chat:toolResult', 'chat:toolProgress', 'chat:updated',
+  // What the window that acted already drew, for the others (remote window plan, task 2).
+  'chat:rowAdded', 'chat:listChanged',
   'chat:advisorStarted', 'chat:advisorCompleted',
   'canvas:render', 'canvas:close', 'canvas:executeJs',
   ...PROMPT_EVENTS,

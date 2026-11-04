@@ -257,6 +257,8 @@ describe('the server takes several windows', () => {
     assert.strictEqual(interactive(), false, 'an empty list is nobody there');
     host.server = { connected: [{ deviceId: 'kld-aaaaaaaaaaaaaaaa', label: 'laptop', remote: false }] };
     assert.strictEqual(interactive(), true);
+    host.server = { connected: [{ deviceId: 'kld-aaaaaaaaaaaaaaaa', label: 'travel laptop', remote: true }] };
+    assert.strictEqual(interactive(), false, 'a remote window is not the owner at this machine');
   });
 });
 
@@ -610,10 +612,244 @@ describe('a real core behind several windows', () => {
     A.ws.close();
     B.ws.close();
   });
+
+  const invoke = async (w, id, channel, ...args) => {
+    w.send({ t: 'invoke', id, channel, args });
+    await waitFor(() => w.result(id), `the answer to ${channel}`);
+    return w.result(id).value;
+  };
+
+  it('a drop stops the run that window started, not a newer run of the chat', async () => {
+    const { server, A, B } = await twoWindows();
+    const chatId = newChat();
+    const oldRun = deferred();
+    const newRun = deferred();
+    script.push(async () => { await oldRun.promise; return text('old'); });
+    sendInto(A, 1, chatId, 'First');
+    await waitFor(() => B.events('chat:messageStart').length === 1, 'the first turn');
+    // B stops A's run and sends; A's run is still unwinding when A goes.
+    assert.deepStrictEqual(await invoke(B, 2, 'chat:stopResponse', { chatId }), { ok: true });
+    script.push(async () => { await newRun.promise; return text('From the laptop.'); });
+    sendInto(B, 3, chatId, 'Second');
+    await waitFor(() => B.events('chat:messageStart').length === 2, 'the second turn');
+    A.ws.terminate();
+    await waitFor(() => server.connected.length === 1, "A's connection to go");
+    await delay(30);
+    oldRun.resolve();
+    newRun.resolve();
+    await waitFor(() => B.result(3), "B's reply");
+    assert.strictEqual(B.result(3).value.ok, true);
+    const assistant = rows(chatId, 'assistant');
+    assert.ok(assistant.some((m) => m.text === 'From the laptop.' && !m.stopped), JSON.stringify(assistant.map((m) => m.text)));
+    assert.ok(!assistant.some((m) => m.text === STOPPED_ROW));
+    B.ws.close();
+  });
+
+  it('the disconnect row tells the windows still there', async () => {
+    const { A, B } = await twoWindows();
+    const chatId = newChat();
+    const hold = deferred();
+    script.push(async () => { await hold.promise; return text('too late'); });
+    sendInto(A, 1, chatId, 'First');
+    await waitFor(() => B.events('chat:messageStart').length === 1, 'the turn');
+    const before = B.events('chat:updated').length;
+    A.ws.terminate();
+    await waitFor(() => B.events('chat:updated').length > before, 'chat:updated on the window still there');
+    assert.ok(rows(chatId, 'assistant').some((m) => m.text === STOPPED_ROW));
+    assert.strictEqual(B.events('chat:updated').at(-1).payload.chatId, chatId);
+    hold.resolve();
+    B.ws.close();
+  });
+
+  it('chat:truncateFrom into a running chat is CHAT_BUSY and removes nothing', async () => {
+    const { A, B } = await twoWindows();
+    const chatId = newChat();
+    const hold = deferred();
+    script.push(async () => { await hold.promise; return text('Done.'); });
+    sendInto(A, 1, chatId, 'First');
+    await waitFor(() => A.events('chat:messageStart')[0], 'the turn');
+    for (const [w, id] of [[B, 2], [A, 3]]) {
+      assert.deepStrictEqual(await invoke(w, id, 'chat:truncateFrom', { chatId, fromIndex: 0 }), BUSY);
+    }
+    assert.deepStrictEqual(rows(chatId, 'user').map((m) => m.text), ['First']);
+    hold.resolve();
+    await waitFor(() => A.result(1), 'the turn to end');
+    const cut = await invoke(B, 4, 'chat:truncateFrom', { chatId, fromIndex: 0 });
+    assert.strictEqual(cut.ok, true, 'free again');
+    assert.deepStrictEqual(rows(chatId, 'user'), []);
+    A.ws.close();
+    B.ws.close();
+  });
+
+  it('each device has its own open chat; a new device starts from the last local selection', async () => {
+    const a = makeDevice('desk at home');
+    const b = makeDevice('laptop');
+    const c = makeDevice('kitchen');
+    const { port, server } = await bridge([a, b, c]);
+    const [one, two, three] = [newChat(), newChat(), newChat()];
+    core.context.setActiveChatId(one);
+    let A = await attach(port, a);
+    const B = await attach(port, b);
+    let id = 0;
+    const openIn = async (w) => (await invoke(w, id += 1, 'chat:load')).data.activeChatId;
+
+    assert.strictEqual(await openIn(B), one, 'a new device starts from the stored selection');
+    await invoke(A, id += 1, 'chat:setActive', two);
+    assert.strictEqual(await openIn(A), two);
+    assert.strictEqual(await openIn(B), one, "A's selection does not move B");
+    assert.strictEqual(core.context.getActiveChatId(), two, 'a local selection is what a restart comes back to, as before');
+
+    await invoke(B, id += 1, 'chat:setActive', three);
+    assert.strictEqual(await openIn(A), two);
+    assert.strictEqual(await openIn(B), three);
+
+    // It is the device's, not the socket's.
+    A.ws.close();
+    await A.closed;
+    A = await attach(port, a);
+    assert.strictEqual(await openIn(A), two, 'a window coming back finds its own chat');
+
+    const C = await attach(port, c);
+    assert.strictEqual(await openIn(C), three, 'the newest local selection');
+    await invoke(A, id += 1, 'chat:setActive', one);
+    assert.strictEqual(await openIn(C), three, 'pinned once read: a later selection elsewhere does not move it');
+
+    // A remote window's selection is its own and is not what a restart returns to.
+    const sent = [];
+    const remote = createConnection({ deviceId: 'kld-remoteremoterem', label: 'travel laptop', remote: true, send: (f) => sent.push(f) });
+    server.connections.set(remote.deviceId, remote);
+    await server.dispatcher.handleFrame(remote, { t: 'invoke', id: 900, channel: 'chat:setActive', args: [two] });
+    await server.dispatcher.handleFrame(remote, { t: 'invoke', id: 901, channel: 'chat:load', args: [] });
+    assert.strictEqual(sent.find((f) => f.id === 901).value.data.activeChatId, two);
+    assert.strictEqual(core.context.getActiveChatId(), one);
+    server.connections.delete(remote.deviceId);
+
+    // A new chat is its creator's alone. A deleted chat leaves another window on one that exists.
+    const created = await invoke(A, id += 1, 'chat:create', 'Fresh');
+    assert.strictEqual(await openIn(A), created.data.id);
+    assert.strictEqual(await openIn(B), three);
+    const after = await invoke(A, id += 1, 'chat:delete', three);
+    assert.notStrictEqual(after.data.activeChatId, three);
+    const left = await openIn(B);
+    assert.notStrictEqual(left, three);
+    assert.ok(core.context.getChat(left, { messages: false }), 'B falls back to a chat that exists');
+    for (const w of [A, B, C]) w.ws.close();
+  });
+
+  it('a lone window reads and writes the stored selection as it always did', async () => {
+    const a = makeDevice('desk at home');
+    const { port } = await bridge([a]);
+    const [one, two] = [newChat(), newChat()];
+    core.context.setActiveChatId(one);
+    const A = await attach(port, a);
+    assert.strictEqual((await invoke(A, 1, 'chat:load')).data.activeChatId, one);
+    await invoke(A, 2, 'chat:setActive', two);
+    assert.strictEqual(core.context.getActiveChatId(), two);
+    const created = await invoke(A, 3, 'chat:create', 'Fresh');
+    assert.strictEqual(core.context.getActiveChatId(), created.data.id);
+    assert.strictEqual((await invoke(A, 4, 'chat:delete', created.data.id)).data.activeChatId, core.context.getActiveChatId());
+    A.ws.close();
+  });
+
+  it('other windows get the owner\'s row and the list changes; the window that acted does not', async () => {
+    const { A, B } = await twoWindows();
+    const chatId = newChat();
+    script.push(text('Lot 12.'));
+    sendInto(A, 1, chatId, 'Which lot?');
+    await waitFor(() => A.result(1), 'the turn');
+    const added = B.events('chat:rowAdded');
+    assert.strictEqual(added.length, 1);
+    assert.strictEqual(added[0].payload.chatId, chatId);
+    assert.strictEqual(added[0].payload.run, true);
+    assert.strictEqual(added[0].payload.message.sender, 'user');
+    assert.strictEqual(added[0].payload.message.text, 'Which lot?');
+    assert.ok(added[0].payload.message.id);
+    const order = B.received.filter((f) => f.t === 'event').map((f) => f.channel);
+    assert.ok(order.indexOf('chat:rowAdded') < order.indexOf('chat:messageStart'), order.join());
+
+    const created = (await invoke(A, 2, 'chat:create', 'Fresh')).data;
+    await invoke(A, 3, 'chat:rename', { chatId: created.id, name: 'Renamed' });
+    await invoke(A, 4, 'chat:addMessage', { chatId: created.id, sender: 'user', text: '/help' });
+    await invoke(A, 5, 'chat:delete', created.id);
+    await waitFor(() => B.events('chat:listChanged').length === 3, 'the list changes');
+    assert.deepStrictEqual(B.events('chat:listChanged').map((f) => f.payload), [
+      { chatId: created.id, what: 'created' },
+      { chatId: created.id, what: 'renamed' },
+      { chatId: created.id, what: 'deleted' }
+    ]);
+    const local = B.events('chat:rowAdded').at(-1).payload;
+    assert.strictEqual(local.run, false);
+    assert.strictEqual(local.message.text, '/help');
+    assert.deepStrictEqual(A.events('chat:rowAdded'), []);
+    assert.deepStrictEqual(A.events('chat:listChanged'), []);
+    A.ws.close();
+    B.ws.close();
+  });
+
+  it('a row event carries no attachment bytes', async () => {
+    const { A, B } = await twoWindows();
+    const chatId = newChat();
+    script.push(text('Seen.'));
+    const base64 = Buffer.from('Lakeside lot notes').toString('base64');
+    A.send({ t: 'invoke', id: 1, channel: 'chat:sendMessage', args: [{ chatId, message: 'Look', agentMode: true, documents: [{ name: 'notes.pdf', mimeType: 'application/pdf', base64 }] }] });
+    await waitFor(() => A.result(1), 'the turn');
+    const { message } = B.events('chat:rowAdded')[0].payload;
+    assert.strictEqual(message.text, 'Look');
+    assert.ok(!JSON.stringify(message).includes(base64));
+    assert.strictEqual(message.attachments, 1);
+    assert.strictEqual(message.documents, undefined);
+    A.ws.close();
+    B.ws.close();
+  });
+
+  it('a prompt that can reach no window is refused at once and leaves nothing behind', async () => {
+    const a = makeDevice('desk at home');
+    const { port, server } = await bridge([a]);
+    const A = await attach(port, a);
+    const sent = [];
+    const remote = createConnection({ deviceId: 'kld-remoteremoterem', label: 'travel laptop', remote: true, send: (f) => sent.push(f) });
+    server.connections.set(remote.deviceId, remote);
+    const pending = core.context.pendingApprovalResolvers;
+    const execute = { t: 'invoke', id: 1, channel: 'tool:execute', args: [{ toolName: PROBE_TOOL, parameters: {} }] };
+
+    const started = Date.now();
+    await server.dispatcher.handleFrame(remote, execute);
+    assert.strictEqual(sent.find((f) => f.id === 1).value.data.deniedBy, 'user');
+    assert.ok(!sent.some((f) => f.channel === 'tool:approvalRequired'));
+    assert.deepStrictEqual(A.events('tool:approvalRequired'), []);
+    assert.strictEqual(pending.size, 0);
+
+    const goneSent = [];
+    const gone = createConnection({ deviceId: 'kld-gonegonegonegone', label: 'gone', send: (f) => goneSent.push(f) });
+    gone.markGone();
+    await server.dispatcher.handleFrame(gone, execute);
+    assert.strictEqual(goneSent.find((f) => f.id === 1).value.data.deniedBy, 'user');
+    assert.strictEqual(pending.size, 0);
+    assert.deepStrictEqual(A.events('tool:approvalRequired'), []);
+
+    // A directory prompt raised for a window gone between the check and the send.
+    let sender = null;
+    probe = async (event) => { sender = event.sender; return { ok: true }; };
+    await server.dispatcher.handleFrame(gone, { t: 'invoke', id: 2, channel: 'chat:get', args: [{}] });
+    let answered = null;
+    server.dispatcher.bridgeContext.pendingDirectoryAccessResolvers.set('dir-1', { directory: 'C:\\example', resolve: (v) => { answered = v; } });
+    sender.send('tool:directoryAccessRequired', { requestId: 'dir-1', directory: 'C:\\example', toolName: 'Read' });
+    assert.strictEqual(answered, false);
+    assert.strictEqual(server.dispatcher.bridgeContext.pendingDirectoryAccessResolvers.has('dir-1'), false);
+    assert.ok(Date.now() - started < 5000, 'at once, not after a timeout');
+    server.connections.delete(remote.deviceId);
+    A.ws.close();
+  });
 });
 
 describe('a bridge send into a running chat', () => {
   const bridgeEvent = (h) => markLocalDesktopEvent(h.event, { deviceId: 'kld-aaaaaaaaaaaaaaaa' });
+
+  it("the desktop's own window gets no row event", async () => {
+    const h = chatHarness({ provider: { async *streamMessage() { yield 'done'; }, async sendMessage() { return { content: 'done' }; } } });
+    await h.send();
+    assert.deepStrictEqual(h.sent.filter((s) => s.channel === 'chat:rowAdded'), []);
+  });
 
   it('a case chat is busy from before its turn begins', async () => {
     const release = deferred();
