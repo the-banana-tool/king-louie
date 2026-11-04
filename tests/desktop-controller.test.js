@@ -3056,24 +3056,50 @@ describe('desktop controller: the setup walk', () => {
     made.controller.dispose();
   });
 
-  it('a read that hangs can be pressed again: the line has a Check again, which starts a new read', async () => {
+  it('three presses on a read that hangs leave one child: Check again joins the read in flight', async () => {
     let count = 0;
     const answers = [];
     const detect = () => { count += 1; return new Promise((r) => answers.push(r)); };
     const made = attachedWalk({ counted: false, extra: { setTimer: setTimeout, clearTimer: clearTimeout, clock: Date.now, oldProfileWaitMs: 5, migrationDeps: { detectOldProfile: detect } } });
     const hung = await made.controller.setupStep();
     assert.deepStrictEqual(ids(hung), ['retry']);
+    for (let i = 0; i < 3; i += 1) {
+      await made.controller.retry();
+      await made.controller.setupStep();
+    }
+    assert.strictEqual(count, 1);
+    answers[0]({ found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 });
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual((await made.controller.setupStep()).step, 'phone');
+    // With the read landed, the next press reads again.
     await made.controller.retry();
     await made.controller.setupStep();
     assert.strictEqual(count, 2);
     answers[1]({ found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 });
     await new Promise((r) => setImmediate(r));
-    assert.strictEqual((await made.controller.setupStep()).step, 'phone');
-    // The first read's late answer is nobody's.
-    answers[0]({ found: true, chats: 9, messages: 9, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 });
-    await new Promise((r) => setImmediate(r));
-    assert.strictEqual((await made.controller.status()).oldProfile.found, false);
     made.controller.dispose();
+  });
+
+  it('a new plan takes back Skip for now: finished for this launch ends, and the move is the step again', async () => {
+    const made = attachedWalk();
+    const { controller } = made;
+    await controller.setupStep();
+    await controller.setupFinish({ skip: 'migrate' });
+    await controller.setupFinish();
+    assert.strictEqual((await controller.status()).setup.finishedForNow, true);
+    await controller.migrationPlan();
+    const after = await controller.status();
+    assert.strictEqual(after.setup.finishedForNow, false);
+    assert.strictEqual(after.setup.migrateSkipped, false);
+    assert.strictEqual((await controller.setupStep()).step, 'migrate');
+    controller.dispose();
+  });
+
+  it('a cases-folder refusal at the apply shows its path through shown', async () => {
+    // caseRootRefusal's three messages are the only ones built from the session's root.
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ipc', 'desktop-controller.js'), 'utf8');
+    assert.strictEqual((src.match(/\$\{customCasesRoot\}/g) || []).length, 0);
+    assert.strictEqual((src.match(/\$\{shown\(customCasesRoot, 400\)\}/g) || []).length, 3);
   });
 
   it('a move whose restart was lost to an app death restarts once at the next launch', async () => {

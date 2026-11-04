@@ -624,7 +624,7 @@ function createDesktopController({
     const { status: s, reading } = await setupStatus(oldProfileWaitMs);
     if (reading) {
       const answer = describeNow({ ...s, oldProfile: OLD_PROFILE_UNKNOWN }, { setupProgress: setupProgress || READING_OLD_PROFILE });
-      // A read can hang for as long as its time limit: Check again starts a new one.
+      // A read can hang for as long as its time limit: Check again joins it, and says what it found.
       return setupProgress ? answer : { ...answer, actions: [...answer.actions, { id: 'retry', label: 'Check again' }] };
     }
     // The phone step's first instruction stops the node: once offered it stays.
@@ -1169,7 +1169,9 @@ function createDesktopController({
     if (client) client.retryNow().catch(() => {});
     clearAnswers();
     elevated = false;
-    invalidateOldProfile();
+    // A read still under way joins: a new one would leave its child reading the
+    // whole store beside this one, one more for every press while a read hangs.
+    if (!oldRead.run) invalidateOldProfile();
     // A refusal for this app being elevated is about that launch's CLI run.
     const pending = state.pendingPair;
     if (pending && pending.personal && personalFlow && personalFlow.request === pending.request
@@ -1393,6 +1395,10 @@ function createDesktopController({
   function runMigrationPlan() {
     return runMove('plan', async () => {
       if (state.migration) return profileMigrated();
+      // Planning the move is the owner taking back a Skip for now: the walk goes on
+      // to the move and its Finish, rather than staying finished for this launch.
+      finishedForNow = false;
+      migrateSkipped = false;
       const target = moveTarget();
       if (target.refusal) return target.refusal;
       try {
@@ -1470,12 +1476,12 @@ function createDesktopController({
         const now = await readCaseRoot(customCasesRoot);
         if (now.customCases === 0) return null;
         return moveSourceRefusal(now.customCasesMissing
-          ? `The cases folder ${customCasesRoot} is not there, so its cases would not move. Plug its drive in, or if that folder is no longer used make an empty folder at that path, and plan again.`
-          : `Cases under ${customCasesRoot} are outside this profile and would not move. Move them into the profile's cases folder, or out of use, and plan again.`);
+          ? `The cases folder ${shown(customCasesRoot, 400)} is not there, so its cases would not move. Plug its drive in, or if that folder is no longer used make an empty folder at that path, and plan again.`
+          : `Cases under ${shown(customCasesRoot, 400)} are outside this profile and would not move. Move them into the profile's cases folder, or out of use, and plan again.`);
       };
       if (customCases !== 0 && customCasesRoot) {
         const refused = await caseRootRefusal();
-        return refused || moveSourceRefusal(`The cases folder ${customCasesRoot} has changed since the plan, so plan again.`);
+        return refused || moveSourceRefusal(`The cases folder ${shown(customCasesRoot, 400)} has changed since the plan, so plan again.`);
       }
       const rootChanged = await caseRootRefusal();
       if (rootChanged) return rootChanged;
