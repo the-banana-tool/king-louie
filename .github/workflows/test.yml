@@ -77,3 +77,22 @@ jobs:
       - run: node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models
         env:
           LONGHAUL_HOME: ${{ runner.temp }}/longhaul
+
+  # The only compile of the phone cores against the vectors: npm test reads
+  # their sources and compiles no Kotlin or Swift. The protocol core is its own
+  # Gradle build, so it needs no Android SDK.
+  phone-cores-android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - run: cd mobile/android/protocol && ../gradlew test --no-daemon
+
+  phone-cores-ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: cd mobile/ios/KLProtocol && swift test

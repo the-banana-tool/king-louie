@@ -973,6 +973,94 @@ a rebuild and new tokens; the relay drops each old token at its first
 `SENDER_ID_MISMATCH`. `Reset this phone` in the app asks the relay to forget
 the phone's token.
 
+### Sealing to your phone
+
+A node seals what it sends to phones once a phone's box key is on it: requests,
+questions, task cards and pictures. The relay carries them and cannot read them.
+`mobile/PRIVACY.md` lists what it still sees.
+
+**Upgrade in this order:**
+
+1. **The phone apps.** An app from before this change shows nothing for a node that
+   seals, and cannot say why. **If the app shows nothing for a node, update the app.**
+2. **The relay or front door.** It adds the route a phone sends its box key to. On an
+   older one the app says `This relay is older than this app. Upgrade it, then try
+   again.`
+3. **Each node.** Its service makes the node's own box key when it starts. It still
+   sends in clear.
+4. **On each phone**, in its list: `Read sealed messages on this phone. Set up once:
+   one fingerprint.` This states the box key to every node that phone approves for.
+5. **`king-louie-service device apply` on each node.** That is when that node starts
+   sealing. A node upgraded before this stays in clear.
+
+`device apply` now also lists each staged box key:
+`box key  <device-id>  "<name>"  b-…  signed by the device itself  (<age>)`. Compare
+the fingerprint with the one in the app's Settings, then answer `y`.
+No restart is needed. A phone may send it again from Settings with **Send again**. A
+statement lasts seven days.
+
+**A new phone** pairs with a node only after that relay and node are upgraded: its
+pairing carries the box key, and an older one refuses it. `enroll-device` prints
+`with a box key b-…`, and that phone needs no `device apply` there. If a phone with a
+box key enrolls again with none in its claim, `enroll-device` refuses it: run
+`device revoke <device-id>`, Reset the phone and enroll it again.
+
+A relay from before the read key, or a node from before takes and tasks, still goes
+ahead of the phones: a new phone cannot read its reads or statuses.
+
+**What a phone shows** in place of what it cannot read, with no Allow, Deny or answer:
+
+| Line | What to do |
+|---|---|
+| `Sealed for this node's other phones. Run device apply on <node> for this phone.` | Run it. If the phone has not stated its box key, set it up first. |
+| `Unlock to read` | Unlock the phone. |
+| `This node seals its messages. This one was not sealed, so it may be old.` | Do not trust it. If you expected it, have the node send it again. |
+| `This phone's box key stopped working. Make a new one in Settings.` | Do that, then `device apply` on each node. |
+| `This phone cannot hold a box key; sealed nodes will not show here.` | Settings has **Try again**. |
+
+**`king-louie-service doctor`** has two rows:
+
+| Row | Says | Means |
+|---|---|---|
+| `sealing to phones` | `off: no phone has a box key yet` | In clear. |
+| | `on (N phones)` | Sealed to those phones. |
+| | `on (N phones); the latch file is damaged, and the next message replaces it` | A warning. Nothing to do unless it comes back. |
+| | `on, but no phone can read it: enroll or apply a box key` | **Nothing goes to the phones.** See below. |
+| | `off: the set is not trusted`, `on, but no phone can read it: the set is not trusted` | The approver directory's row above says why. |
+| | `on, but this node has no box key: restart the service` | Restart it. |
+| | `on, but the latch cannot be written…` | Fix what it names. Nothing goes to the phones until then. |
+| `phones without a box key` | fingerprints, or `none` | These phones cannot read this node. |
+
+**A node that has sealed does not go back on its own.** It remembers in
+`approvals/sealing.json` in the data dir. If the last phone with a box key is revoked, or the approver set stops being
+trusted, the node sends no content and says `no_sealed_recipient`:
+
+- a tool approval is denied, and nothing runs;
+- a question stays on the other rungs of its ladder, and comes to the phone when a box
+  key arrives;
+- a new computer-use, take or task request is refused, a running lease ends, and a take
+  keeps its recording;
+- a running task ends `failed`; one with no card has each act denied.
+
+The fix is to enroll a phone, or apply a phone's box key. To go back to clear instead:
+
+```
+king-louie-service device unseal
+```
+
+It prints what it does and asks `[y/N]`; off a terminal it needs `--yes`. It is refused
+while any phone an administrator has not revoked holds a box key, so `device apply` a
+revoke sent from a phone first. It is recorded in the audit ledger. It takes effect at the
+next message. On a personal node run it as you, not elevated.
+
+One gap remains: anything running as the node's service account (on a personal node, as
+you) can delete `sealing.json`. While a phone holds a box key the node writes it again at
+once. With none, the node then sends in clear, and doctor says `off`.
+
+**Limits under sealing:** a sealed approval holds about 130 KB of parameters, and a bigger
+action is refused `action_too_large`, so split a big `Write`. A sealed live-view picture
+is at most 135 KB.
+
 ## 11. Stage 4: Reaching the fleet through the front door
 
 Not available yet. This section is written when fleet stage 4 merges.
@@ -1120,10 +1208,13 @@ Install prints these five steps when it is done:
    fingerprint (`with a read key r-…`) beside the phone's. A phone paired
    before its app had a read key sends it later, from its Approvals list:
    the node stages it, and `king-louie-service device apply` writes it
-   after its `[y/N]` prompt. Upgrade the relay or front door and the
-   node before the Android app; an older relay refuses the app's reads.
-   Notifications on the phone need a push credential on the relay and the
-   app's `fcm` build: section 10, "Push to your phone".
+   after its `[y/N]` prompt. A relay from before the read key refuses the
+   Android app's reads, so bring that one up to date first. Every phone also
+   brings a box key (`with a box key b-…`), and from then on this node seals
+   what it sends to phones: section 10, "Sealing to your phone". Pair a new
+   phone only once this relay and node are upgraded. Notifications on the
+   phone need a push credential on the relay and the app's `fcm` build:
+   section 10, "Push to your phone".
 4. **The logins the takes will use**:
    `king-louie-service vault set browser_cred:<profile>:<host>`, one for each
    login, the value on stdin, with the node stopped (and `errands-token` when

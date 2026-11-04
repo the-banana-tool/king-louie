@@ -213,7 +213,11 @@ describe('Android: the Scanner and Settings (android-slim §6.1, §6.4)', () => 
     assert.ok(count(s, 'AlertDialog(') >= 2, 'Remove and Reset each ask first');
     assert.ok(s.includes('It shows the same — add it'));
     for (const gone of ['The new phone has scanned it', 'notices when it has']) assert.ok(!s.includes(gone), gone);
-    assert.ok(s.includes('No analytics. The relay sees every action you are asked to approve, and when this app is open. See PRIVACY.md.'));
+    assert.ok(s.includes('No analytics. The relay cannot read what a sealed node sends. It still sees when this app is open, your yes or no, and everything from a node that does not seal yet. See PRIVACY.md.'));
+    assert.ok(!s.includes('The relay sees every action'), 'untrue of a sealing node');
+    const ios = fs.readFileSync(path.join(__dirname, '..', 'mobile', 'ios', 'App', 'Views.swift'), 'utf8');
+    assert.ok(ios.includes('No analytics. The relay cannot read what a sealed node sends. It still sees when this app is open, your yes or no, and everything from a node that does not seal yet. See PRIVACY.md.'), 'iOS says the same');
+    assert.ok(!ios.includes('The relay sees every action'), 'untrue of a sealing node');
     for (const w of ['read key in use', 'waiting for `device apply` on the node', 'not sent yet']) assert.ok(s.includes(w), w);
   });
 });

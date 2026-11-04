@@ -27,8 +27,8 @@ class OwnerMessage(message: String) : Exception(message)
 
 /**
  * What the app keeps (mobile/PRIVACY.md): relay pin, node pins, mode, push
- * token, and the read key's set-up (android-slim §8.7). The keys live in the
- * Keystore.
+ * token, the read key's set-up (android-slim §8.7), the box key's, and the nodes
+ * it has opened a sealed message from. The keys live in the Keystore.
  */
 class Storage(context: Context) {
     private val prefs = context.getSharedPreferences("kl.state", Context.MODE_PRIVATE)

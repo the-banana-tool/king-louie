@@ -171,6 +171,18 @@ pictures, presence) and keep a computer-use lease in contact; it asks for
 nothing but signs only while the phone is unlocked. Android only.
 _Avoid_: session key, API key, view key
 
+**Box key**:
+A P-256 key that opens what is sealed to its holder and signs nothing. A paired
+phone has one, which asks for nothing and works only while the phone is
+unlocked; a node has one, for what a phone seals back to it.
+_Avoid_: encryption key, session key, read key (for this key)
+
+**Sealed**:
+Of a message: its content opens only with a box key it was sealed to, so the
+relay carries it and reads only its clear part. A node seals from the first
+time an active phone's box key is on it, and does not go back on its own.
+_Avoid_: encrypted (alone), end-to-end, private (a chat's or case's mark)
+
 **Push**:
 A content-free hint from the relay to a paired phone that something waits or
 changed; never an Approval itself and never its content.

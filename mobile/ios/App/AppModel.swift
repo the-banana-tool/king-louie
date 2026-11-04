@@ -5,8 +5,10 @@ import SwiftUI
 import UIKit
 
 /// What the app keeps (mobile/PRIVACY.md): the relay pin, node pins, its key
-/// reference (in the Keychain) and the push token. Nothing else, and no
-/// analytics. History is held in memory only (see AppModel.history).
+/// references (in the Keychain) and the push token here; beside this, the nodes it
+/// has opened a sealed message from (SealedSeenStore, `kl.sealed-seen`) and what
+/// nodes were told of its box key (BoxKeyNodes, `kl.box-key.nodes`). Nothing else,
+/// and no analytics. History is held in memory only (see AppModel.history).
 struct StoredState: Codable {
     var mode: AppMode = .welcome
     var relayURL: String?

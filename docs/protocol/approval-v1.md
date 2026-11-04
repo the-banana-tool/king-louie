@@ -50,6 +50,9 @@ A signed message travels as an envelope:
 - An Android phone may also hold a second P-256 key, its **read key**, beside
   the device key that decides ("Revised 2026-10-28: the read key", at the end
   of this document).
+- A phone may also hold a P-256 **box key**, which opens what a node seals to
+  it and signs nothing, and a node holds one of its own ("Revised 2026-11-04:
+  sealed phones", at the end of this document).
 
 ## 3. Messages
 
@@ -80,6 +83,9 @@ itself before signing):
   characters); `code_id` is 16 random bytes the same way (22 characters).
 
 ### 3.1 `kl.approval.request` (node-signed)
+
+This is the clear shape. A sealing node sends the sealed shape instead
+("Revised 2026-11-04: sealed phones").
 
 ```json
 { "v": 1, "type": "kl.approval.request", "request_id": "<uuid v4>", "node_id": "kl-…", "node_name": "web-01",
@@ -125,7 +131,8 @@ of `approved`, `denied`, `expired`, `withdrawn`, `refused`.
 ### 3.4 Enrollment and revocation (phone-signed)
 
 `kl.device.enroll`: `{ v, type, device: { device_id, name, platform, public_key }, enrolled_by, created_at, expires_at, nonce }`.
-`device` may also carry `read_key` ("Revised 2026-10-28", at the end).
+`device` may also carry `read_key` ("Revised 2026-10-28", at the end) and
+`box_key` ("Revised 2026-11-04", at the end).
 
 - Console enrollment: `enrolled_by: null`, signed by the new device itself
   (`kid = device.device_id`), plus `code_id` and
@@ -649,6 +656,7 @@ key carries the request.
 | `POST /v1/grants/{id}/decision`, `POST /v1/clients/{grant_id}/revoke`, `POST /v1/pairings/{id}/decision`, `POST /v1/nodes/{node_id}/remove` | read (body: a device-key client-grant-v1 envelope) |
 | `POST /v1/devices/enroll`, `POST /v1/devices/revoke` | read (body: a device-key enroll or revoke, verified against the caller's device key) |
 | `POST /v1/devices/read-key` | read (the first send is device-key, since the relay holds no read key yet; a re-send may be read-key) |
+| `POST /v1/devices/box-key` | read (body: a device-key `kl.device.box_key`) |
 | `GET /v1/grants/pending?user_code=` | device (claims a client's request, no envelope) |
 | `POST /v1/alerts/{id}/ack` | device (no envelope) |
 | `POST /v1/pairing-codes`, `POST /v1/devices/invites` | device (opens a way in for a node or a phone, no envelope) |
@@ -749,7 +757,7 @@ operator gains nothing: it cannot sign with either key.
 
 ### Vectors
 
-Eight more, 49 in all (`generate.js --check` says `49 vectors match`).
+Eight more, 49 at this revision. The current count is in "Revised 2026-11-04".
 `keys.json` adds the read keys `A_read` and `B_read` (`{ d, jwk, read_key_of,
 fingerprint }`, `read_key_of` naming the device they belong to), refused by
 nodes as test keys like the others. `phone-reference.js` adds
@@ -767,3 +775,259 @@ nodes as test keys like the others. `phone-reference.js` adds
 | `response-reject-read-key` | node | an approval response signed by A's read key, A's record holding it: `bad_signature` |
 
 iOS reads none of them; its vector tests filter on `ios`.
+
+## Revised 2026-11-04: sealed phones
+
+Sealed phones plan `docs/superpowers/plans/2026-11-04-sealed-phones.md`,
+rulings R-SP-1 to R-SP-6, R-SP-10 and R-SP-15. A node seals what it sends to
+phones, so a relay passes it and cannot read it. `src/approvals/seal.js` is the
+reference, and `SEAL_SPLIT` there is the one table of what is content. A node
+with no phone holding a box key sends today's clear bytes. Leases have their
+own section in lease-v1, "Revised 2026-11-04".
+
+### The box key
+
+A phone's **box key** is a P-256 key used only for key agreement. It signs
+nothing. It asks for no user authentication and works only while the phone is
+unlocked: Android Keystore (StrongBox when the phone has it), iOS Secure
+Enclave. Its fingerprint for people is `b-` and the device id's rule over
+`0x04 || x || y`, in groups of four (`boxKeyFingerprint`).
+
+A **node's box key** is one P-256 key, stored encrypted in the identity record
+beside the Ed25519 private key (`boxKeyJwk`, `encryptedBoxKey`): Ed25519 cannot
+do key agreement. Only a service start makes one for a record that has none. A
+process with no box key has `box: null`. A node sends its JWK in the clear part
+of every sealed message that a phone may answer, as `node_box`. The node
+signature covers it, so a phone pins nothing new.
+
+`kl.device.enroll`'s `device` may carry `box_key`, a P-256 JWK on the curve,
+beside `read_key`. It must not be the point of `public_key` or `read_key`
+(`malformed`). It is bound as `read_key` is. A published test key as a box key
+(`A_box`, `B_box` in `keys.json`) is refused `test_key` unless the node allows
+test keys. The approver record keeps two optional keys, `box_key` and
+`box_key_at`: `box_key_at` never without `box_key`, and a `box_key` that is
+malformed or equals `public_key` or `read_key` makes the record invalid.
+
+A phone enrolled before the box key states it, signed with its device key
+(`kid` = `device_id`, `ES256`):
+
+```jsonc
+{ "v": 1, "type": "kl.device.box_key", "device_id": "d-…",
+  "box_key": { "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+  "created_at": "…", "expires_at": "≤ created_at + 7 days", "nonce": "b64url(32)" }
+```
+
+`POST /v1/devices/box-key`, body the envelope → `{ nodes: [{ node_id, state }] }`.
+The relay checks, in order: the envelope opens and is a valid
+`kl.device.box_key` (`400 malformed`); `device_id` and `kid` are the caller and
+the caller's device key verifies it (`400 bad_box_key`); `created_at` is not
+more than 5 minutes ahead (`400 from_the_future`); it has not expired (`400
+expired`); the caller is active on at least one node (`403 forbidden`). It
+**stores nothing**: it forwards the envelope as the node method `device.box_key`
+(`{ envelope }`) to every node where the device is active. Each node's `state`
+is what it answered, `box-key-pending-apply`, `applied`, `duplicate` or
+`rejected`, or `offline` for anything else. A relay from before this change
+answers `404`. The phone re-sends the statement to nodes that answered `offline`,
+until it expires.
+
+A node checks it like `kl.device.read_key` and only stages it, and the
+`device.box_key` method carries only this type. The judgment, in order
+(`judgeBoxKey`): the point of `public_key` or `read_key` (`malformed`), a test
+key (`test_key`), the record's box key already (`{ state: 'applied' }`),
+`created_at` not after the record's `box_key_at`, else `enrolled_at` (`stale`).
+
+`king-louie-service device apply` lists it as
+`box key  <device-id>  "<name>"  b-…  signed by the device itself  (<age>)`, asks
+`[y/N]`, and writes `box_key` and `box_key_at`: `box key set`, audited
+`device.box_key_set`, or `rejected:` with the same words as a read key. Key
+statements are applied after the batch's enrollments and revokes, read keys then
+box keys, each newest first. `enroll-device` and `device apply` print `with a box
+key b-…` beside the fingerprint, and `device list` shows it. `enroll-device`
+refuses a claim with no box key for a device whose record holds one: revoke it,
+Reset the phone and enroll again. A claim with another box key names both
+fingerprints in its question.
+
+### The format
+
+```jsonc
+"sealed": { "v": 1, "epk": { "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+            "iv": "b64url(12)", "ct": "b64url", "keys": { "<recipient id>": "b64url(48)" } }
+```
+
+- `epk` is a fresh P-256 key per message. `cek` is 32 random bytes. An injected
+  ephemeral key or random source is for vectors only: a reused `epk` repeats
+  keystream under the zero iv below.
+- `ct` = AES-256-GCM(`cek`, `iv`, JCS(**content**), AAD = JCS(**clear part**)),
+  the 16-byte tag appended. The clear part is the message without `sealed`.
+- `keys[r]` = AES-256-GCM(`kek_r`, 12 zero bytes, `cek`), the tag appended: 48
+  bytes. The zero iv is safe because `kek_r` is fresh per message and recipient.
+- `kek_r` = HKDF-SHA256(ikm = the 32-byte x-coordinate from ECDH(`epk`, box key of
+  r), salt = empty, info = UTF-8 of `"kl-seal-v1\n" + type + "\n" + sender id +
+  "\n" + recipient id`), 32 bytes. The sender id is `device_id` in a
+  `kl.question.answer` and `node_id` in every other type. A recipient id is a
+  device id or a node id.
+- A sealed message holds exactly its type's clear keys and `sealed`. The message
+  a validator checks is clear ∪ content. The content's bytes must be the JCS of an
+  object holding only its type's content keys, else `content_malformed`.
+
+A successful open is not authentication. A box key is public, so anyone can seal
+to it: the open proves only that this message was sealed to this recipient and
+has not changed. The signed envelope around it is what says who sent it.
+
+### What is sealed
+
+| Type | Content (inside `sealed`) | Clear (the relay may read; the AAD) |
+|---|---|---|
+| `kl.approval.request` | `action`, `origin`, `salt` | `v`, `type`, `request_id`, `node_id`, `node_name`, `action_hash`, `created_at`, `expires_at`, `nonce`, `node_box` |
+| `kl.lease.request` | `lease`, `origin`, `salt` | `v`, `type`, `request_id`, `lease_id`, `node_id`, `node_name`, `lease_hash`, `created_at`, `expires_at`, `nonce`, `node_box` |
+| `kl.lease.status` | `name` | `v`, `type`, `node_id`, `lease_id`, `seq`, `at`, `state`, `locked`, `reason`, `expires_at`, `contact_token`, `granted_by`, `kind`, `unattended` |
+| `kl.lease.view` | `foreground`, `frame`, `frame_dropped`, `actions` | `v`, `type`, `node_id`, `lease_id`, `seq`, `at`, `to_device`, `state`, `locked`, `remaining_s`, `contact_token` |
+| `kl.question.ask` | `case_id`, `question_id`, `case_title`, `text`, `options` | `v`, `type`, `node_id`, `token`, `kind`, `urgency`, `expires_at`, `node_box` |
+| `kl.question.answer` (phone → node) | `case_id`, `question_id`, `answer` | `v`, `type`, `node_id`, `token`, `device_id`, `nonce`, `signed_at` |
+
+Not sealed: `kl.approval.response`, `kl.approval.status`, `kl.lease.grant`,
+`kl.lease.revoke`, `kl.lease.watch`, `kl.lease.listing`, `kl.device.*`,
+`kl.enroll.*`, `kl.audit.*`, the front door's client-grant-v1 messages, push.
+
+**Salted hashes.** In a sealed request, `salt` is 32 random bytes in base64url,
+inside the content, and `action_hash` = b64url(SHA-256(raw(`salt`) ‖ JCS(`action`))).
+So a relay cannot test a guess at a short parameter against the hash. The clear
+shape keeps the unsalted rule. A response's shape does not change: the phone signs
+the salted hash as received. The node's step 12 recomputes with the salt it kept on
+the pending entry, so a clear request still pending when sealing turns on keeps its
+unsalted rule.
+
+### Who it is sealed to, and when
+
+`createSealPolicy` (`src/approvals/seal-policy.js`) answers at every build, with
+nothing cached but the store's own scan:
+
+- `recipients()`: every active approver record that holds `box_key` (the revoke
+  overlay counts), plus the node's own box key if it has one. An untrusted store,
+  or a latch not known to be on disk, gives none.
+- `sealing()`: true while that set holds a device, or **the latch** is set.
+- `canSeal()`: a device in the set, a latch known to be on disk, and a node box key.
+
+The latch is `<dataDir>/approvals/sealing.json`, `{ v: 1, latched_at }`, written
+atomically the first time the set holds a device, before anything is sealed. Only
+one state is not latched: the file is not there, under a real directory or no
+directory. Anything else that cannot be read as a latch counts as latched. A file
+that does not parse is replaced at the next build that has a device. Nothing a
+relay sends clears it.
+
+`sealing()` true and `canSeal()` false: the node sends no content, and a build
+refuses `no_sealed_recipient`. A tool approval is denied with that reason, a
+question stays on the other rungs of its ladder and goes out when a key arrives, a
+lease request is refused `capability_unavailable`, and a running lease ends
+(lease-v1). It never sends clear. The way back is at the console,
+`king-louie-service device unseal` (`--yes` off a terminal; prints what it does;
+audited `device.unsealed`), refused while any record not revoked by an
+administrator holds a box key. Residual: the file is the service account's, so
+anything running as that account can delete it, and with no device holding a box
+key the node then sends in clear.
+
+A device with no box key gets the same sealed message and cannot open it.
+
+### What the phone checks and shows
+
+In this order, and nothing is opened before the signature holds:
+
+1. The shape: the sealed shape or the clear one (§5), else `malformed`.
+2. The pin and the signature, as §5.
+3. Sealed: the open. Not in `keys` is `not_recipient`. Any failure of a key
+   agreement or a tag is `open_failed`. Content that is not what the table says is
+   `malformed` on the screen (`content_malformed` from `Seal.open`). A box key that
+   will not answer is `key_locked`.
+4. The opened message against the node's rules (`validateOpenedRequest`), and its
+   salted hash: `action_hash_mismatch` before anything is shown.
+5. Clear, from a node this phone has opened a sealed message from: `clear_after_sealed`.
+
+`sealedSeen` (R-SP-15) is kept per node id beside the pins. Reset clears it. A
+relay can replay an old clear message, signed by the node, to draw a clear answer,
+so once a phone has opened something sealed from a node, a clear
+`kl.approval.request`, `kl.lease.request` or `kl.question.ask` from it has no
+decision.
+
+A message that cannot be read shows a row from its verified clear part (node, kind,
+time left) with no Allow, Deny or answer, and one line:
+
+| Reason | Line |
+|---|---|
+| `not_recipient`, `open_failed` | `Sealed for this node's other phones. Run device apply on <node> for this phone.` |
+| `clear_after_sealed` | `This node seals its messages. This one was not sealed, so it may be old.` |
+| `key_locked` | `Unlock to read` |
+| `box_key_broken` (the app's: three failures on an unlocked phone over at least 30 s) | `This phone's box key stopped working. Make a new one in Settings.` |
+
+An app from before this change refuses a sealed message as `malformed` and shows
+nothing, so it cannot say why. The upgrade order puts phones first for that reason.
+
+A question's answer to a sealed ask is sealed to that ask's `node_box`, with the
+node's id as the one recipient.
+
+### What the node checks on an answer
+
+`handleAnswer`, in order: the signature, the signer is `device_id` and active, the
+node, the nonce, `signed_at`; then the open with the node's box key (`open_failed`:
+it does not open, the node is not a recipient, or the node has no box key); the
+whole message (`malformed`); the token against the opened `case_id` and
+`question_id` (`unknown_question`); then `sealed_required`: a clear answer counts
+only when a clear delivery of that token exists. A sealed answer to a clear ask is
+accepted.
+
+### Limits
+
+A sealed request's signed payload is at most 258048 characters
+(`SEALED_PAYLOAD_MAX`), since an audit entry over the mirror's 256 KiB page breaks
+that node's mirror for good (`oversize_entry`). That is about 130 KB of parameters;
+the whole action measures at most 143917 bytes with 8 phones. Over it the build
+refuses `action_too_large`, as the clear shape does past 256 KiB. One content key
+wrapped per recipient keeps an 8-phone message within this: 16 wraps are 768 bytes.
+
+### Codes
+
+| Code | Where | Means |
+|---|---|---|
+| `no_sealed_recipient` | node, building | sealing is on and no phone can read it; nothing was sent |
+| `action_too_large` | node, building | over `SEALED_PAYLOAD_MAX` when sealed |
+| `sealed_required` | node, on an answer | a clear answer with no clear ask of that token |
+| `not_recipient`, `open_failed` | phone, node | not sealed to this key, or it would not open |
+| `content_malformed` | `openSealed`, `Seal.open` | opened, and not the JCS of the type's content keys |
+| `action_hash_mismatch` | phone, node | the hash does not hold; on a phone, for the salted rule too |
+| `clear_after_sealed` | phone | a clear message from a node this phone has opened a sealed one from |
+| `key_locked` | phone | the box key would not answer, most often because the phone is locked |
+| `bad_box_key` | relay | the statement is not the calling device's, signed with its device key |
+
+### The audit ledger
+
+`approval.request` keeps `envelope`, now the sealed one, so the ledger and the
+mirror hold ciphertext where they held parameters; its `job_id` is null under
+sealing. Entries stay plain JSON hashed over JCS, so §3.6's chain check does not
+change. `tier.decision` and `request.inbound` hold `params_hmac`, not
+`params_sha256`: HMAC-SHA256 under a key from HKDF over the node's box key
+(`kl-audit-params-v1`), or null in a process with no box key. Old entries keep
+their field. See `src/approvals/audit-fields.js`.
+
+### Vectors
+
+Nineteen more, 68 in all (`generate.js --check` says `68 vectors match`).
+`keys.json` adds `A_box` and `B_box`. A vector's `given.box` is the recipient's id
+and key.
+
+| Vector | Consumers | What |
+|---|---|---|
+| `seal-open` | node, ios, android | opens to `expect.message` |
+| `seal-not-recipient`, `seal-tampered-ct`, `seal-tampered-clear` | node, ios, android | `not_recipient`, `open_failed` (the ciphertext; a clear part moved under another's seal) |
+| `seal-content-not-jcs`, `seal-content-clear-key` | node, ios, android | `content_malformed` |
+| `seal-hash-mismatch` | node, ios, android | `action_hash_mismatch` |
+| `request-sealed-display` | node, ios, android | the same display as a clear request |
+| `response-approve-sealed` | node | accepted over the salted hash |
+| `response-reject-sealed-hash-unsalted`, `response-reject-sealed-changed-parameter` | node | `action_hash_mismatch` (step 10), `action_changed` (step 12) |
+| `question-ask-sealed`, `question-answer-sealed` | node, ios, android | an ask opened; an answer built byte for byte |
+| `enroll-console-box-key` | node, ios, android | accepted, and the record holds it |
+| `enroll-console-box-key-equal` | node | `malformed` |
+| `enroll-signed-box-key` | node | staged with it |
+| `box-key-valid` | node, ios, android | `box-key-pending-apply` |
+| `box-key-wrong-signer`, `box-key-stale` | node | `bad_signature`, `stale` |
+
+`.github/workflows/test.yml`'s `phone-cores-android` and `phone-cores-ios` run both
+cores against them on every pull request and every push to `main`.

@@ -243,7 +243,7 @@ fun SettingsScreen(model: AppModel, back: () -> Unit, openScanner: () -> Unit) {
                 OutlinedButton({ resetAsked = true }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(KlTokens.radiusMd), colors = denyColors(), border = denyBorder(true)) {
                     Text("Reset this phone")
                 }
-                Secondary("No analytics. The relay sees every action you are asked to approve, and when this app is open. See PRIVACY.md.", Modifier.padding(top = 8.dp))
+                Secondary("No analytics. The relay cannot read what a sealed node sends. It still sees when this app is open, your yes or no, and everything from a node that does not seal yet. See PRIVACY.md.", Modifier.padding(top = 8.dp))
             }
         }
     }

@@ -463,7 +463,7 @@ struct SettingsView: View {
                     Button("Reset this phone", role: .destructive) { model.reset() }
                 }
                 Section("Privacy") {
-                    Text("No analytics. The relay sees every action you are asked to approve; see PRIVACY.md.").font(.caption)
+                    Text("No analytics. The relay cannot read what a sealed node sends. It still sees when this app is open, your yes or no, and everything from a node that does not seal yet. See PRIVACY.md.").font(.caption)
                 }
             }
             .navigationTitle("Settings")
