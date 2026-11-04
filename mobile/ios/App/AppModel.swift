@@ -1058,7 +1058,7 @@ final class AppModel: ObservableObject {
     /// A `kl.device.box_key` lives at most seven days (R-SP-10).
     static let boxKeyStatementSeconds: TimeInterval = 7 * 24 * 60 * 60
     /// The set-up row (R-SP-10).
-    static let boxKeySetupTitle = "Read sealed messages on this phone. Set up once: one fingerprint."
+    static let boxKeySetupTitle = "Read sealed messages on this phone. Set up once: one unlock."
     /// Settings, for a phone that refuses the key.
     static let boxKeyRefusedLine = "This phone cannot hold a box key; sealed nodes will not show here."
     /// C-19, as on Android: no fallback for a relay from before the box key.
@@ -1094,8 +1094,9 @@ final class AppModel: ObservableObject {
     var boxKeyRefused: Bool { boxKeyNodes.refused }
     /// Its box key's: `b-abcd efgh ijkl mnop` (R-SP-10); nil without one.
     var boxKeyFingerprint: String? { boxKey?.fingerprint }
-    /// Whether the Pending list shows the set-up row.
-    var boxKeySetupNeeded: Bool { mode == .live && key != nil && !boxKeyNodes.refused && (boxKey == nil || !boxKeyNodes.sent) }
+    /// Whether the Pending list shows the set-up row. Only with the session unlocked: its
+    /// post signs with the session, so the statement's prompt is then the one unlock.
+    var boxKeySetupNeeded: Bool { mode == .live && key?.isSessionUnlocked == true && !boxKeyNodes.refused && (boxKey == nil || !boxKeyNodes.sent) }
 
     private func deviceLocked() -> Bool { !UIApplication.shared.isProtectedDataAvailable }
 

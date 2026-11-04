@@ -549,7 +549,43 @@ describe('iOS: the box key statement (R-SP-10)', () => {
     assert.match(views, /await model\.sendBoxKeyAgain\(\)/);
     assert.match(views, /case \.waitingForApply:/);
     const android = read(...KT, 'AppModel.kt').match(/const val BOX_KEY_SETUP_TITLE = "([^"]+)"/)[1];
-    assert.equal(count(iosModel(), `static let boxKeySetupTitle = "${android}"`), 1);
+    // The one difference from Android: iOS's prompt unlocks, whichever biometry the phone has.
+    assert.ok(android.includes('one fingerprint'));
+    assert.equal(count(iosModel(), `static let boxKeySetupTitle = "${android.replace('one fingerprint', 'one unlock')}"`), 1);
+    // And the row shows only when the post needs no second prompt.
+    assert.match(section(iosModel(), 'var boxKeySetupNeeded: Bool', '\n'), /key\?\.isSessionUnlocked == true/);
+  });
+
+  it('the key a pairing made, or a locked launch could not read, reaches the model', () => {
+    const model = iosModel();
+    const ensure = section(model, 'private func ensureKey() throws -> DeviceKey', '\n    }\n');
+    assert.ok(ensure.indexOf('key = created') >= 0 && ensure.indexOf('key = created') < ensure.indexOf('boxKeyMade()'));
+    assert.match(section(model, 'private func boxKeyMade()', '\n    }\n'), /boxKey = BoxKey\.load\(\)/);
+    assert.match(section(model, '    init() {', '\n    }\n'), /boxKey = BoxKey\.load\(\)/);
+    assert.match(section(model, 'func resumePolling()', '\n    }\n'), /if boxKey == nil, mode == \.live \{ boxKey = BoxKey\.load\(\) \}/);
+  });
+
+  it('a key that cannot agree is never kept', () => {
+    const create = section(ios('BoxKey.swift'), 'static func create() throws -> BoxKey', '\n    }\n');
+    const first = create.indexOf('_ = try key.sharedSecretFromKeyAgreement(with: P256.KeyAgreement.PrivateKey().publicKey)');
+    assert.ok(first >= 0 && first < create.indexOf('delete()') && first < create.indexOf('SecItemAdd('));
+  });
+
+  it('what a fetch read reaches the stores a screen draws', () => {
+    const model = iosModel();
+    const questions = section(model, 'func refreshQuestions(', '\n    }\n');
+    assert.match(questions, /questions = read\.filter \{ \$0\.unreadable == nil && !heldToSealing\(\$0\.nodeId, \$0\.seal\) \}/);
+    const leases = section(model, 'func refreshLeases', 'func decideLease');
+    assert.match(leases, /let items = read\.filter \{ !heldToSealing\(\$0\.request\.nodeId, \$0\.seal\) \}\n/);
+    assert.match(leases, /leaseRequests = items\n/);
+  });
+
+  it('an open request screen loses Allow and Deny once the request cannot be decided', () => {
+    const views = ios('LeaseViews.swift');
+    const body = section(section(views, 'struct LeaseRequestView: View', '\n}\n'), 'var body: some View {', '\n    }\n');
+    assert.match(body, /if model\.leaseRequests\.contains\(where: \{ \$0\.id == item\.id \}\) \{\n\s+requestForm\n\s+\} else \{/);
+    assert.ok(!/Button|decideLease/.test(body));
+    assert.ok(section(views, 'private var requestForm: some View', '\n    }\n').includes('await model.decideLease(item,'));
   });
 });
 
