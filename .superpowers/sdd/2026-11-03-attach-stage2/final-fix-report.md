@@ -99,11 +99,17 @@ RED/GREEN: `a status that fails before any good read draws the failure screen…
 
 ## Concerns
 
-1. **The mark can still be blocked for good by a secret that will not decrypt.** `planBatches` catches the decrypt failure into `skipped`, `verifyMigration` notes every `skipped`, and the plan comes out the same each time. Same shape as finding 1, not in the rulings, so left and listed in the CLAUDE.md residuals. A profile whose DPAPI blob no longer opens (a reinstalled account, a copied profile) never reaches the mark. This needs a ruling before the real profile.
+1. **A key that will not decrypt: ruled and done, see "After the report".** One case the rule leaves: a profile with one stored key that is really bad is 1 of 1, more than half, so it refuses every time. That screen offers Plan again and Not now, and no Skip, so that owner never reaches the mark. Applied as ruled; a floor on the count would change it.
 2. `import --case` of a renamed folder whose id is on the node: the id is rewritten, so `verifyCase`, which counts chats by the old id, says `VERIFY_MISMATCH`. Nothing is lost and the message says what to do. Before this round it landed a duplicate id, which was worse.
 3. Sizing messages stringifies each in the main process at plan time, so a very large profile still stalls briefly there. Far less than the read that moved out.
 4. A second case's `case.yaml` differs from its HEAD until the sweep commits it.
 5. No real install, migration or packaged run has been done. `courier-proxy` under the real app binary, the `.cmd` launcher's phone route and `statfs` on the owner's disk are all covered only by injected tests.
+
+## After the report: coordinator's ruling
+
+- **Undecryptable key.** `setAsideUnreadableSecrets` at the plan: every stored key is tried; one that fails comes out of the inventory, so no plan holds it and verification cannot miss it. Its name only goes in **Stays on this computer** and `leftBehind`. Secure storage unavailable, or more than half failing, refuses `MIGRATION_SOURCE` with nothing moved. Tests in `tests/migration-oversize.test.js` on a real bridge: one of three, two of three, one of two (exactly half goes on), storage unavailable. RED first: 3 of the 4 failed (exactly half already passed).
+- **`skill:update`** uses `execFile` for `git pull` and npm. RED first: 6 failed in `skill:update`. GREEN: the named files plus the boundary test, 440 pass, 0 fail, 5 skipped.
+- Run after this: the importer, verify, controller and skill-handler test files, not the full suite, as ruled.
 
 ## Suites
 

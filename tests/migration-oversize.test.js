@@ -42,7 +42,7 @@ const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-oversize
 const MIB = 1024 * 1024;
 const attachment = (bytes, fill = 'a') => ({ name: 'screenshot.png', mimeType: 'image/png', base64: Buffer.alloc(bytes, fill).toString('base64') });
 
-async function realBridge({ seed, sourceOptions = {} }, run) {
+async function realBridge({ seed, sourceOptions = {}, chatData = { settings: {} }, unreadable = () => false }, run) {
   const root = tmp();
   const dataDir = path.join(root, 'node', 'data');
   const configDir = path.join(root, 'node', 'config');
@@ -64,8 +64,8 @@ async function realBridge({ seed, sourceOptions = {} }, run) {
   const seeded = HistoryStore.open(path.join(userDataDir, 'history.sqlite'));
   seed(seeded);
   seeded.close();
-  fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify({ settings: {} }));
-  const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
+  fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify(chatData));
+  const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => { const text = Buffer.from(b).toString(); if (unreadable(text)) throw new Error(`could not decrypt ${text}`); return text; } };
   const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
   let client = null;
   let controller = null;
@@ -151,6 +151,76 @@ describe('a big chat over a real bridge', () => {
       assert.ok(!chat.messages[1].attachments || chat.messages[1].attachments.length === 0);
       const manifest = JSON.parse(fs.readFileSync(path.join(dataDir, 'imports', fs.readdirSync(path.join(dataDir, 'imports'))[0]), 'utf8'));
       assert.strictEqual(manifest.items['chat:huge'].incomplete, true, 'it lands without being marked complete');
+    });
+  });
+});
+
+describe('a stored key that will not decrypt', () => {
+  const sealed = (text) => Buffer.from(text).toString('base64');
+  const tokens = (names) => Object.fromEntries(names.map((n) => [n, sealed(`value-${n}`)]));
+  const seed = (store) => seedChat(store, { id: 'c1', title: 'One', messages: [{ sender: 'user', text: 'hello' }] });
+
+  it('one bad key of three: named before the press, left behind, not missing, and the mark goes on', async () => {
+    await realBridge({
+      seed,
+      chatData: { settings: {}, apiTokens: tokens(['anthropic', 'openai', 'mistral']) },
+      unreadable: (text) => text === 'value-mistral'
+    }, async ({ controller, core, state }) => {
+      const planned = await controller.migrationPlan();
+      assert.strictEqual(planned.ok, true, JSON.stringify(planned));
+      const line = planned.staysBehind.find((l) => l.includes('mistral'));
+      assert.match(line, /enter it again on the node/i);
+      assert.doesNotMatch(JSON.stringify(planned), /value-mistral|could not decrypt/, 'the name only');
+      assert.ok(planned.leftBehind.secrets.some((s) => s.key === 'mistral'));
+      assert.ok(!planned.plan.items.some((i) => i.key === 'mistral'), 'nothing is planned for it');
+      const out = await controller.migrationApply({ confirmed: true });
+      assert.strictEqual(out.ok, true, JSON.stringify(out.verified || out));
+      assert.ok(state.migration, 'the mark is written');
+      assert.ok(state.migration.staysBehind.some((l) => l.includes('mistral')), 'and the line outlasts the plan');
+      assert.ok(state.migration.leftBehind.secrets.some((s) => s.key === 'mistral'));
+      const held = core.context.getApiTokens();
+      assert.ok(held.anthropic && held.openai, 'the others moved');
+      assert.ok(!held.mistral);
+    });
+  });
+
+  it('more than half failing is a wrong environment: refused, nothing planned, nothing marked', async () => {
+    await realBridge({
+      seed,
+      chatData: { settings: {}, apiTokens: tokens(['anthropic', 'openai', 'mistral']) },
+      unreadable: (text) => text !== 'value-anthropic'
+    }, async ({ controller, core, state }) => {
+      const out = await controller.migrationPlan();
+      assert.strictEqual(out.ok, false);
+      assert.strictEqual(out.code, 'MIGRATION_SOURCE');
+      assert.match(out.error, /2 of your 3 stored keys/);
+      assert.match(out.error, /nothing was moved/i);
+      assert.strictEqual((await controller.migrationApply({ confirmed: true })).code, 'PLAN_EXPIRED');
+      assert.strictEqual(state.migration, null);
+      assert.ok(!core.context.getChat('c1'));
+    });
+  });
+
+  it('exactly half is not more than half: the move goes on', async () => {
+    await realBridge({
+      seed,
+      chatData: { settings: {}, apiTokens: tokens(['anthropic', 'openai']) },
+      unreadable: (text) => text === 'value-openai'
+    }, async ({ controller }) => {
+      assert.strictEqual((await controller.migrationPlan()).ok, true);
+    });
+  });
+
+  it('secure storage unavailable altogether: refused, whatever the count', async () => {
+    await realBridge({
+      seed,
+      chatData: { settings: {}, apiTokens: tokens(['anthropic']) },
+      sourceOptions: { safeStorage: { isEncryptionAvailable: () => false } }
+    }, async ({ controller, state }) => {
+      const out = await controller.migrationPlan();
+      assert.strictEqual(out.code, 'MIGRATION_SOURCE');
+      assert.match(out.error, /secure storage/i);
+      assert.strictEqual(state.migration, null);
     });
   });
 });

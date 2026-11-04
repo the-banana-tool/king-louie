@@ -534,7 +534,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
     }
 
     try {
-      childProcess.execSync('git pull --ff-only', { cwd: skillPath, timeout: 60000, stdio: 'pipe' });
+      await git(skillPath, ['pull', '--ff-only'], 60000);
     } catch (err) {
       return { ok: false, error: `Git pull failed: ${err.stderr?.toString().trim() || err.message}` };
     }
@@ -545,7 +545,8 @@ function registerSkillHandlers(ipcMain, context = {}) {
       if (fs.existsSync(pkgPath)) {
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
         if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
-          childProcess.execSync('npm install --production', { cwd: skillPath, timeout: 120000, stdio: 'pipe' });
+          const npm = resolveProgram(['npm', 'install', '--production'], { cwd: skillPath });
+          await run(npm.file, npm.args, { cwd: skillPath, timeout: 120000 });
         }
       }
     } catch (err) {

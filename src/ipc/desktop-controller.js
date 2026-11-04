@@ -21,6 +21,7 @@ const { backupProfile, backupDirFor, readBackupManifest, readCaseRoot } = requir
 const { detectOldProfileApart } = require('../migration/old-profile-read');
 const { verifyMigration, withSourceFacts } = require('../migration/migration-verify');
 const { SECRET_CATEGORIES } = require('../migration/desktop-import');
+const { setAsideUnreadableSecrets } = require('../migration/desktop-source');
 const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
 const { shown } = require('../service/commands/io');
 const { STANDALONE_FLAG, STANDALONE_ONCE_FLAG: STANDALONE_ONCE } = require('../desktop-bridge/launch-mode');
@@ -70,6 +71,15 @@ const STAYS_BEHIND_FIXED = Object.freeze([
   'External agents (the executors folder): agent packages you installed and their daily contact counts. An agent a case uses needs setting up again on the node.'
 ]);
 const agentLine = ({ dir, agents }) => `Case ${dir}: its agent ${agents.join(', ')} is in the executors folder and does not move. Set it up on the node before this case sends anything.`;
+// A key that can never decrypt must not hold the mark back; a mass failure is the wrong
+// environment, and must not be marked as a move that lost them.
+const UNREADABLE_KEY_WORDS = Object.freeze({ providerToken: 'Provider key', searchKey: 'Search key', imageKey: 'Image key', vault: 'Vault entry', anthropicOAuth: 'The Anthropic sign-in', channelToken: 'Bot token' });
+const UNREADABLE_KEY_NOTE = 'it can no longer be read on this computer and stays sealed here and in the backup; enter it again on the node';
+const unreadableKeyLine = ({ category, key }) => (category === 'anthropicOAuth'
+  ? `${UNREADABLE_KEY_WORDS[category]}: ${UNREADABLE_KEY_NOTE}.`
+  : `${UNREADABLE_KEY_WORDS[category]} ${key}: ${UNREADABLE_KEY_NOTE}.`);
+const NO_SECURE_STORAGE = 'Secure storage is not available to this app right now, so it cannot read your stored keys, and nothing was moved. That is this session and not your keys: make sure you are signed in to your own Windows account, restart the computer if it goes on, and plan again.';
+const keysUnreadable = (failed, total) => `${failed} of your ${total} stored keys cannot be read right now, and nothing was moved. So many failing together points to this session rather than to the keys: make sure you are signed in to the Windows account that stored them, restart the computer if it goes on, and plan again.`;
 const capitalised = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 const MIGRATION_STORE_FILES = new Set(['history.sqlite', 'chat-data.json']);
 const MOVE_RUNNING = { ok: false, code: 'MIGRATION_BUSY', error: 'The move of this profile is running; wait for it to finish.' };
@@ -1327,7 +1337,8 @@ function createDesktopController({
     const named = items.filter((i) => i.action === 'skip-excluded' && i.note).map((i) => i.note);
     const tooLarge = items.filter((i) => i.category === 'chat' && i.action === 'needs-attention' && i.note).map((i) => capitalised(i.note));
     const agents = (source && Array.isArray(source.agentCases) ? source.agentCases : []).map(agentLine);
-    return [...new Set([...tooLarge, ...agents, ...named, ...STAYS_BEHIND_FIXED])].map((line) => shown(line, 600));
+    const keys = (source && Array.isArray(source.unreadableSecrets) ? source.unreadableSecrets : []).map(unreadableKeyLine);
+    return [...new Set([...keys, ...tooLarge, ...agents, ...named, ...STAYS_BEHIND_FIXED])].map((line) => shown(line, 600));
   }
 
   // What the owner reads of a plan or a report; the session keeps the real one.
@@ -1369,7 +1380,10 @@ function createDesktopController({
     const reported = (key) => (report && Array.isArray(report[key]) ? report[key].filter(Boolean) : []);
     return {
       needsAttention: once([...open.filter((i) => !isSecret(i)), ...reported('attention').filter((i) => !isSecret(i)), ...(source.attention || [])]),
-      secrets: once([...open.filter(isSecret), ...reported('secretsMissing'), ...reported('attention').filter(isSecret)])
+      secrets: once([
+        ...(Array.isArray(source.unreadableSecrets) ? source.unreadableSecrets : []).map((s) => ({ ...s, note: UNREADABLE_KEY_NOTE })),
+        ...open.filter(isSecret), ...reported('secretsMissing'), ...reported('attention').filter(isSecret)
+      ])
     };
   }
 
@@ -1442,6 +1456,9 @@ function createDesktopController({
         const source = await move.loadDesktopSource({ userDataDir, safeStorage, platform, customRootEmpty: old.customCases === 0 });
         const problem = sourceProblem(source, backup);
         if (problem) return moveSourceRefusal(`The old profile did not read whole, so nothing was moved: ${problem}`);
+        if (source.inventory.secrets === 'unavailable') return moveSourceRefusal(NO_SECURE_STORAGE);
+        const keys = setAsideUnreadableSecrets(source);
+        if (keys.unreadable.length * 2 > keys.total) return moveSourceRefusal(keysUnreadable(keys.unreadable.length, keys.total));
         closeImportSession();
         const plan = withSourceFacts(await planImport({ client: target.client, source }), source);
         // A case the reader holds back whole is in no plan, so nothing could ever

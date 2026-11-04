@@ -484,6 +484,32 @@ function readCaseHead(reader, dir) {
   return null;
 }
 
+// For the one-time move: tries every stored key, and takes the ones that will not
+// decrypt out of the inventory, so no plan holds them and nothing counts them as
+// missing. Only names are kept; a value that does decrypt is dropped at once. They stay
+// sealed in the profile and the backup. Whether so many failing is a wrong environment
+// is the caller's to say, from the counts.
+const SECRET_LISTS = Object.freeze({ providerToken: 'providerTokens', searchKey: 'searchKeys', imageKey: 'imageKeys', vault: 'vault', channelToken: 'channelTokens' });
+function setAsideUnreadableSecrets(source) {
+  const inventory = source.inventory;
+  const held = Object.entries(SECRET_LISTS).flatMap(([category, list]) => arr(inventory[list]).map((key) => ({ category, key })));
+  if (inventory.anthropicOAuth) held.push({ category: 'anthropicOAuth', key: 'anthropicOAuth' });
+  const unreadable = held.filter(({ category, key }) => {
+    try {
+      source.getValue(category, key);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  for (const { category, key } of unreadable) {
+    if (category === 'anthropicOAuth') inventory.anthropicOAuth = false;
+    else inventory[SECRET_LISTS[category]] = inventory[SECRET_LISTS[category]].filter((k) => k !== key);
+  }
+  source.unreadableSecrets = unreadable;
+  return { total: held.length, unreadable };
+}
+
 // A chat as entries: one when it fits a batch, as it always went; else one per run of
 // messages under maxBytes, in order, and a message bigger than that alone. Measured
 // message by message: a long chat with its attachments can be more than one string
@@ -571,4 +597,4 @@ function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024
   if (batch.length) yield batch;
 }
 
-module.exports = { createSafeReader, readDesktopSource, planBatches, MAX_FILE_BYTES };
+module.exports = { createSafeReader, readDesktopSource, planBatches, setAsideUnreadableSecrets, MAX_FILE_BYTES };

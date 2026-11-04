@@ -1052,6 +1052,12 @@ work while attached appends it to `PROXIED_DOMAINS`).
     `src/migration/old-profile-read.js`), one marked line per chat; a child that dies is
     an attention row the move refuses on, never fewer chats. Decrypting stays in the main
     process, and needs no chat.
+  - A stored key that will not decrypt (`setAsideUnreadableSecrets`, at the plan): it comes
+    out of the inventory, so no plan holds it and verify cannot miss it; its name goes in
+    **Stays on this computer** and `leftBehind`, it stays sealed in the profile and backup,
+    and the mark goes on. Secure storage unavailable, or more than half the keys failing,
+    is a wrong environment: `MIGRATION_SOURCE`, nothing moved (so one key alone, failing,
+    refuses too).
   - `detectOldProfile` is also `found` for `apiTokens`, the Anthropic sign-in, search and
     image keys, a vault key in `config.json`, or a carried setting that is not its default
     (`settingsWouldMove`; `keysOrSettings` on the answer).
@@ -1082,16 +1088,14 @@ work while attached appends it to `PROXIED_DOMAINS`).
   from the window wait for stage 3. A recorded landing trusts the node's working tree, so
   a file removed there reads as the node's own work. A same-size edit to a landed file
   isn't caught. `start:standalone` can poll the same bot as the node. `skill:install` and
-  `skill:checkUpdates` no longer block (`execFile`, `git fetch` only on the pane's press;
-  `skill:install` refuses a relative path over the bridge), but `skill:update` still runs
-  `execSync` on its press. What does not move: skills, workflows and webhooks (each said
+  `skill:checkUpdates` and `skill:update` no longer block (`execFile`, `git fetch` only on
+  the pane's press; `skill:install` refuses a relative path over the bridge). What does not move: skills, workflows and webhooks (each said
   on the plan, `PERSONAL_EXCLUDED`), `ops-memory.jsonl`, `contact/` and `executors/` (named
   in `STAYS_BEHIND_FIXED`; a case whose agent is in `executors/` gets its own line). They
   stay in the old profile and the backup. Skills and workflows do not go through the
   case-file path: a skill clone is a nested `.git` the importer refuses and whose
   `.git/config` it drops, a skill installed from a folder is a junction the reader
-  refuses, and both stores load only at the node's start. A secret that will not decrypt
-  is reported `skipped` and blocks the mark on every try. Sizing messages for the plan
+  refuses, and both stores load only at the node's start. Sizing messages for the plan
   stringifies each one in the main process. Private
   chats answer `PRIVATE_NO_LOCAL_MODEL` until a local server is in the admin block. No
   real install, migration or packaged run has been done.
