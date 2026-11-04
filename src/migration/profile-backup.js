@@ -13,11 +13,11 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const sqlite = require('node:sqlite');
-const { HistoryStore } = require('../history');
 const { createLogger } = require('../logging');
 const { shown } = require('../service/commands/io');
 const { writeFileAtomic } = require('../approvals/approver-store');
-const { readHistoryChats, snapshotHistoryFile, countChats } = require('./desktop-history');
+const { resolveCasesRoot } = require('../cases/case-runtime');
+const { readHistoryChats, snapshotHistoryFile, openSnapshot, countChats } = require('./desktop-history');
 const { createSafeReader, readDesktopSource } = require('./desktop-source');
 
 const log = createLogger('profile-backup');
@@ -33,8 +33,18 @@ const EXCLUDED_DIRS = Object.freeze([
 ]);
 const STORE_FILE = 'history.sqlite';
 // Top level only as well: a document under a case may have the name.
-const STORE_FILES = new Set([STORE_FILE, `${STORE_FILE}-wal`, `${STORE_FILE}-shm`]);
+const STORE_FILES = new Set([STORE_FILE, `${STORE_FILE}-wal`, `${STORE_FILE}-shm`, `${STORE_FILE}-journal`]);
 const MANIFEST = 'backup.json';
+// Written first and removed last, so a directory a refused or cut-off try left
+// behind cannot be taken for a good backup.
+const UNFINISHED = 'UNFINISHED';
+const UNFINISHED_TEXT = 'This King Louie backup did not finish and is not a good copy of the profile. It can be deleted.\n';
+// What a running King Louie writes, checked unchanged after the copy. Not
+// -shm, which any reader (this one included) may touch, and not Chromium's
+// files, which change whatever anyone does.
+const WATCHED_FILES = Object.freeze([STORE_FILE, `${STORE_FILE}-wal`, `${STORE_FILE}-journal`, 'chat-data.json', 'config.json']);
+const EMPTY_WHEN_IDLE = new Set([`${STORE_FILE}-wal`, `${STORE_FILE}-journal`]);
+const WATCHED_DIR = 'cases';
 // What another program holding a file looks like on Windows (antivirus for a
 // moment, Chrome for as long as it runs).
 const HELD_CODES = new Set(['EBUSY', 'EPERM', 'EACCES', 'EAGAIN', 'EMFILE', 'ENFILE']);
@@ -55,6 +65,7 @@ const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 function whyFailed(err) {
   if (err instanceof Refusal) return err.message;
   if (err.code === 'ENOSPC') return 'the disk is full';
+  if (err.code === 'ENOENT') return 'it is no longer there';
   if (HELD_CODES.has(err.code)) return `another program has it open (${err.code}); close Chrome or whatever else is using it and try again`;
   return shown(err.code || err.message);
 }
@@ -107,6 +118,75 @@ async function listProfile(root, io, { strict = true, withStore = false } = {}) 
   };
   await walk('');
   return { files, dirs };
+}
+
+// rel -> size and mtime of everything a running King Louie would write.
+async function watchedMarks(root, io) {
+  const marks = new Map();
+  const note = (rel, stat) => marks.set(rel, `${stat.size}:${stat.mtimeMs}`);
+  const lstatOrNull = (file) => io.lstat(file).catch((err) => {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  });
+  for (const rel of WATCHED_FILES) {
+    const stat = await lstatOrNull(path.join(root, rel));
+    // An empty -wal is the same as none: our own plain open can leave one.
+    if (stat && !(EMPTY_WHEN_IDLE.has(rel) && stat.size === 0)) note(rel, stat);
+  }
+  const walk = async (rel) => {
+    const entries = await io.readdir(path.join(root, ...rel.split('/')), { withFileTypes: true }).catch((err) => {
+      if (err.code === 'ENOENT') return [];
+      throw err;
+    });
+    for (const entry of entries) {
+      const childRel = `${rel}/${entry.name}`;
+      if (entry.isDirectory()) {
+        await walk(childRel);
+      } else {
+        const stat = await lstatOrNull(path.join(root, ...childRel.split('/')));
+        if (stat) note(childRel, stat);
+      }
+    }
+  };
+  await walk(WATCHED_DIR);
+  return marks;
+}
+
+function firstMoved(before, after) {
+  for (const [rel, mark] of before) if (after.get(rel) !== mark) return rel;
+  for (const rel of after.keys()) if (!before.has(rel)) return rel;
+  return null;
+}
+
+// The cases root the runtime would use, when it is not the profile's own
+// `cases` folder: the setting, else KL_CASES_ROOT (resolveCasesRoot). The move
+// carries only that folder, so anything elsewhere has to be dealt with first.
+function customRootOf(root, settingRoot, env) {
+  const settings = settingRoot ? { cases: { root: settingRoot } } : {};
+  const resolved = path.resolve(resolveCasesRoot({ settings, env, dataDir: root }));
+  return path.relative(path.join(root, WATCHED_DIR), resolved) === '' ? null : resolved;
+}
+
+// How many case directories a custom root holds: 0 when it is not there, null
+// when it cannot be read. A link may be a case, so it counts.
+async function countCaseDirs(dir) {
+  try {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    return entries.filter((e) => !e.name.startsWith('.') && (e.isDirectory() || e.isSymbolicLink())).length;
+  } catch (err) {
+    return err.code === 'ENOENT' ? 0 : null;
+  }
+}
+
+function settingRootFrom(root) {
+  const read = createSafeReader({ root }).readFile('chat-data.json');
+  if (!read.ok) return null;
+  try {
+    const value = JSON.parse(read.data.toString('utf8'))?.settings?.cases?.root;
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 function hashFile(file, io) {
@@ -172,8 +252,8 @@ async function snapshotStore({ userDataDir, dest, backup }) {
   }
   let history;
   try {
-    // Immutable: a read-only open would leave -wal and -shm in the backup.
-    const snapshot = HistoryStore.open(file, { readonly: true, allowOlderSchema: true, immutable: true });
+    // Not a plain read-only open, which would leave -wal and -shm in the backup.
+    const snapshot = openSnapshot(file);
     try {
       history = countChats(snapshot);
     } finally {
@@ -188,13 +268,16 @@ async function snapshotStore({ userDataDir, dest, backup }) {
   return { history, file };
 }
 
-// { dest, bytes, files (a count), history: { chats, messages } }, or throws
-// BACKUP_FAILED with err.dest. Writes only under `dest`. An onProgress listener
+// { dest, bytes, files (a count), history: { chats, messages }, customCasesRoot,
+// customCases }, or throws BACKUP_FAILED with err.dest. Writes only under
+// `dest`. A write to a King Louie store from the first listing to the end of
+// the copy refuses: the files would be from different moments. A custom cases
+// root is outside the profile, so it is recorded, not copied. An onProgress listener
 // gets { phase: 'snapshot' | 'copy' | 'done', files, totalFiles, bytes,
 // totalBytes, path } (path through shown), at most every 200 ms while copying.
 async function backupProfile({
   userDataDir, dest, now = Date.now, backup = sqlite.backup, appVersion = null,
-  fsImpl = {}, onProgress = null, retryDelaysMs = RETRY_DELAYS_MS
+  fsImpl = {}, onProgress = null, retryDelaysMs = RETRY_DELAYS_MS, env = process.env
 }) {
   const io = { ...fs.promises, createReadStream: fs.createReadStream, ...fsImpl };
   const root = path.resolve(userDataDir);
@@ -209,17 +292,25 @@ async function backupProfile({
   };
   try {
     const inside = path.relative(root, path.resolve(dest));
-    if (!inside || (!inside.startsWith('..') && !path.isAbsolute(inside))) throw new Refusal('the backup directory is inside the profile');
+    const outside = inside === '..' || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside);
+    if (!outside) throw new Refusal('the backup directory is inside the profile');
     const rootStat = await io.lstat(root);
     if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Refusal('the profile is not a directory (a link is refused)');
     if (await io.lstat(dest).then(() => true, () => false)) throw new Refusal(`${shown(dest)} already exists`);
 
+    const marks = await watchedMarks(root, io);
     const { files, dirs } = await listProfile(root, io);
     const totalFiles = files.length;
     const totalBytes = files.reduce((n, f) => n + f.size, 0);
 
-    await io.mkdir(dest); // not recursive: fails if it appeared since the check
+    try {
+      await io.mkdir(dest); // not recursive: fails if it appeared since the check
+    } catch (err) {
+      if (err.code === 'ENOENT') throw new Refusal(`the folder that would hold the backup, ${shown(path.dirname(dest))}, does not exist`);
+      throw err;
+    }
     made = true;
+    await io.writeFile(path.join(dest, UNFINISHED), UNFINISHED_TEXT);
 
     say({ phase: 'snapshot', files: 0, totalFiles, bytes: 0, totalBytes, path: STORE_FILE });
     const { history, file: snapshot } = await snapshotStore({ userDataDir: root, dest, backup });
@@ -249,6 +340,11 @@ async function backupProfile({
       bytes += size;
     }
 
+    const moved = firstMoved(marks, await watchedMarks(root, io));
+    if (moved) throw new Refusal(`${shown(moved)} changed while the backup ran; close any other King Louie and try again`);
+
+    const customCasesRoot = customRootOf(root, settingRootFrom(root), env);
+    const customCases = customCasesRoot ? await countCaseDirs(customCasesRoot) : 0;
     const manifest = {
       v: 1,
       from: root,
@@ -256,14 +352,19 @@ async function backupProfile({
       files: listed,
       history,
       appVersion,
+      customCasesRoot,
+      customCases,
       ...(vanished.length ? { vanished } : {})
     };
     writeFileAtomic(path.join(dest, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`);
+    await io.rm(path.join(dest, UNFINISHED));
     say({ phase: 'done', files: listed.length, totalFiles: listed.length, bytes, totalBytes: bytes, path: '' });
     log.info('profile backed up', { files: listed.length, bytes, chats: history.chats, messages: history.messages });
-    return { dest, bytes, files: listed.length, history };
+    return { dest, bytes, files: listed.length, history, customCasesRoot, customCases };
   } catch (err) {
-    const where = made ? `The unfinished copy is at ${shown(dest)}.` : 'Nothing was written.';
+    const where = made
+      ? `The unfinished copy is at ${shown(dest)}, marked by its ${UNFINISHED} file; it is no good as a backup and can be deleted once you have looked at it.`
+      : 'Nothing was written.';
     const out = new Error(`The profile could not be backed up: ${whyFailed(err)}. Nothing in the profile was changed. ${where}`);
     out.code = 'BACKUP_FAILED';
     out.dest = dest;
@@ -273,9 +374,10 @@ async function backupProfile({
 }
 
 // The manifest of a backup that is still whole by the sizes it recorded, or
-// null: no backup.json, one that is not a manifest, a listed file gone or a
-// different size, a listed path that leaves the backup.
+// null: an UNFINISHED marker, no backup.json, one that is not a manifest, a
+// listed file gone or a different size, a listed path that leaves the backup.
 async function readBackupManifest(dest) {
+  if (await fs.promises.lstat(path.join(dest, UNFINISHED)).then(() => true, () => false)) return null;
   let manifest;
   try {
     manifest = JSON.parse(await fs.promises.readFile(path.join(dest, MANIFEST), 'utf8'));
@@ -285,7 +387,7 @@ async function readBackupManifest(dest) {
   if (!manifest || manifest.v !== 1 || !Array.isArray(manifest.files) || !manifest.history) return null;
   for (const entry of manifest.files) {
     if (!entry || typeof entry.path !== 'string' || !Number.isInteger(entry.bytes) || typeof entry.sha256 !== 'string') return null;
-    if (entry.path.split('/').some((seg) => !seg || seg === '.' || seg === '..') || path.isAbsolute(entry.path)) return null;
+    if (entry.path.split(/[\\/]/).some((seg) => !seg || seg === '.' || seg === '..') || path.isAbsolute(entry.path)) return null;
     try {
       const stat = await fs.promises.lstat(path.join(dest, ...entry.path.split('/')));
       if (!stat.isFile() || stat.size !== entry.bytes) return null;
@@ -298,11 +400,15 @@ async function readBackupManifest(dest) {
 
 const STORE_PROBLEM_KEYS = new Set([STORE_FILE, 'chat-data.json']);
 
-// { found, chats, messages, cases, bytes, schemaProblem }. Never throws, and
-// never answers "nothing here" for a profile it could not read: a store or a
-// chat-data.json the reader refuses is found, with schemaProblem saying why.
-async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, reader = null } = {}) {
-  const nothing = { found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null };
+// { found, chats, messages, cases, bytes, schemaProblem, customCasesRoot,
+// customCases }. Never throws, and never answers "nothing here" for a profile
+// it could not read: a store or a chat-data.json the reader refuses is found,
+// with schemaProblem saying why. customCasesRoot (through shown) is a cases
+// root outside the profile's own folder, which neither the backup nor the move
+// carries; customCases is how many directories it holds, 0 when it is not
+// there, null when it cannot be read.
+async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, reader = null, env = process.env } = {}) {
+  const nothing = { found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 };
   const problemOnly = (text) => ({ ...nothing, found: true, schemaProblem: shown(text, 400) });
   const root = path.resolve(userDataDir);
   let safe = reader;
@@ -329,9 +435,11 @@ async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, r
     const chat = getValue('chat', c.id);
     return n + (chat && Array.isArray(chat.messages) ? chat.messages.length : 0);
   }, 0);
+  const customCasesRoot = customRootOf(root, inventory.customCasesRoot, env);
+  const customCases = customCasesRoot ? await countCaseDirs(customCasesRoot) : 0;
   const found = Boolean(
     history.found || schemaProblem || inventory.chats.length || inventory.cases.length
-    || inventory.customCasesRoot || attention.some((a) => a.category === 'case')
+    || inventory.customCasesRoot || customCases !== 0 || attention.some((a) => a.category === 'case')
   );
   if (!found) return nothing;
   let bytes = 0;
@@ -341,7 +449,16 @@ async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, r
   } catch (err) {
     log.debug('profile size not read', { code: err.code });
   }
-  return { found, chats: inventory.chats.length, messages, cases: inventory.cases.length, bytes, schemaProblem };
+  return {
+    found,
+    chats: inventory.chats.length,
+    messages,
+    cases: inventory.cases.length,
+    bytes,
+    schemaProblem,
+    customCasesRoot: customCasesRoot ? shown(customCasesRoot, 400) : null,
+    customCases
+  };
 }
 
 module.exports = { detectOldProfile, backupProfile, backupDirFor, readBackupManifest, EXCLUDED_DIRS };

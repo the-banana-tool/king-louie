@@ -17,6 +17,7 @@ const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 const {
   detectOldProfile, backupProfile, backupDirFor, readBackupManifest, EXCLUDED_DIRS
 } = require('../src/migration/profile-backup');
+const { snapshotHistoryFile } = require('../src/migration/desktop-history');
 
 const FIXED = Date.parse('2026-11-03T12:00:00.000Z');
 const NO_WAIT = [1, 1];
@@ -114,7 +115,7 @@ describe('EXCLUDED_DIRS', () => {
 describe('detectOldProfile', () => {
   it('empty dir is not found', async () => {
     const res = await detectOldProfile(emptyProfile());
-    assert.deepStrictEqual(res, { found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null });
+    assert.deepStrictEqual(res, { found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 });
   });
 
   it('a directory that is not there is not found', async () => {
@@ -318,23 +319,41 @@ describe('the source is never touched', () => {
     assert.strictEqual(sha(path.join(root, 'history.sqlite-wal')), walBefore);
   });
 
-  it('a store written during the snapshot is snapshotted again through SQLite', async () => {
-    const root = emptyProfile();
-    seedStore(root);
-    let calls = 0;
-    const backup = async (db, out) => {
-      calls += 1;
+  const writesOnFirstCall = (root) => {
+    const state = { calls: 0 };
+    state.backup = async (db, out) => {
+      state.calls += 1;
       await sqlite.backup(db, out);
-      if (calls === 1) {
+      if (state.calls === 1) {
         const writer = HistoryStore.open(path.join(root, 'history.sqlite'));
         appendTo(writer, 'chat-a', 'written-meanwhile');
         writer.close();
       }
     };
-    const res = await backupProfile({ userDataDir: root, dest: destFor(root), now: FIXED, backup });
-    assert.strictEqual(calls, 2);
-    assert.deepStrictEqual(res.history, { chats: 2, messages: 6 });
-    assert.deepStrictEqual(countsIn(path.join(destFor(root), 'history.sqlite')), { chats: 2, messages: 6 });
+    return state;
+  };
+
+  it('a store written during the snapshot is snapshotted again through SQLite', async () => {
+    const root = emptyProfile();
+    seedStore(root);
+    const out = path.join(path.dirname(root), 'snapshot.sqlite');
+    const state = writesOnFirstCall(root);
+    const counts = await snapshotHistoryFile(path.join(root, 'history.sqlite'), out, { backup: state.backup });
+    assert.strictEqual(state.calls, 2);
+    assert.deepStrictEqual(counts, { chats: 2, messages: 6 });
+    assert.deepStrictEqual(countsIn(out), { chats: 2, messages: 6 });
+  });
+
+  it('a backup whose store was written during the snapshot is refused', async () => {
+    const root = emptyProfile();
+    seedStore(root);
+    const dest = destFor(root);
+    await assert.rejects(backupProfile({ userDataDir: root, dest, now: FIXED, backup: writesOnFirstCall(root).backup }), (err) => {
+      isBackupFailed(dest)(err);
+      assert.ok(err.message.includes('history.sqlite'));
+      assert.match(err.message, /close any other King Louie/);
+      return true;
+    });
   });
 });
 
@@ -658,6 +677,256 @@ describe('backupProfile', () => {
   });
 });
 
+describe('a custom cases root', () => {
+  const outsideRoot = (root, names = []) => {
+    const outside = path.join(path.dirname(root), 'cases-elsewhere');
+    fs.mkdirSync(outside);
+    for (const name of names) fs.mkdirSync(path.join(outside, name));
+    return outside;
+  };
+
+  it('the setting is named, with the directories there', async () => {
+    const root = emptyProfile();
+    const outside = outsideRoot(root, ['mvcase-1', 'mvcase-2', '.index']);
+    put(root, 'chat-data.json', JSON.stringify({ settings: { cases: { root: outside } } }));
+    const res = await detectOldProfile(root, { env: {} });
+    assert.strictEqual(res.found, true);
+    assert.strictEqual(res.customCasesRoot, outside);
+    assert.strictEqual(res.customCases, 2);
+    assert.strictEqual(res.cases, 0);
+  });
+
+  it('a relative setting resolves under the profile, as the runtime does', async () => {
+    const root = emptyProfile();
+    put(root, 'chat-data.json', JSON.stringify({ settings: { cases: { root: 'mine' } } }));
+    put(root, 'mine/mvcase-1/brief.md', 'x');
+    const res = await detectOldProfile(root, { env: {} });
+    assert.strictEqual(res.customCasesRoot, path.join(root, 'mine'));
+    assert.strictEqual(res.customCases, 1);
+  });
+
+  it('KL_CASES_ROOT is honoured when no setting names a root', async () => {
+    const root = emptyProfile();
+    seedStore(root);
+    const outside = outsideRoot(root, ['mvcase-1']);
+    const res = await detectOldProfile(root, { env: { KL_CASES_ROOT: outside } });
+    assert.strictEqual(res.customCasesRoot, outside);
+    assert.strictEqual(res.customCases, 1);
+  });
+
+  it('KL_CASES_ROOT holding cases makes a profile found on its own; empty, it does not', async () => {
+    const root = emptyProfile();
+    const outside = outsideRoot(root);
+    assert.strictEqual((await detectOldProfile(root, { env: { KL_CASES_ROOT: outside } })).found, false);
+    fs.mkdirSync(path.join(outside, 'mvcase-1'));
+    const res = await detectOldProfile(root, { env: { KL_CASES_ROOT: outside } });
+    assert.strictEqual(res.found, true);
+    assert.strictEqual(res.customCases, 1);
+  });
+
+  it('the profile\'s own cases folder is no custom root', async () => {
+    const root = emptyProfile();
+    seedStore(root);
+    const res = await detectOldProfile(root, { env: { KL_CASES_ROOT: path.join(root, 'cases') } });
+    assert.strictEqual(res.customCasesRoot, null);
+    assert.strictEqual(res.customCases, 0);
+  });
+
+  it('a root that is not there counts 0; one that cannot be read counts null', async () => {
+    const root = emptyProfile();
+    const missing = path.join(path.dirname(root), 'not-there');
+    put(root, 'chat-data.json', JSON.stringify({ settings: { cases: { root: missing } } }));
+    assert.strictEqual((await detectOldProfile(root, { env: {} })).customCases, 0);
+    const file = put(path.dirname(root), 'a-file', 'x');
+    put(root, 'chat-data.json', JSON.stringify({ settings: { cases: { root: file } } }));
+    assert.strictEqual((await detectOldProfile(root, { env: {} })).customCases, null);
+  });
+
+  it('the backup records it in the manifest and its answer, and says nothing when there is none', async () => {
+    const root = emptyProfile();
+    const outside = outsideRoot(root, ['mvcase-1']);
+    put(root, 'chat-data.json', JSON.stringify({ settings: { cases: { root: outside } } }));
+    const res = await backupProfile({ userDataDir: root, dest: destFor(root), now: FIXED, env: {} });
+    assert.strictEqual(res.customCasesRoot, outside);
+    assert.strictEqual(res.customCases, 1);
+    const manifest = await readBackupManifest(destFor(root));
+    assert.strictEqual(manifest.customCasesRoot, outside);
+    assert.strictEqual(manifest.customCases, 1);
+
+    const plain = fullProfile();
+    await backupProfile({ userDataDir: plain, dest: destFor(plain), now: FIXED, env: {} });
+    const none = await readBackupManifest(destFor(plain));
+    assert.strictEqual(none.customCasesRoot, null);
+    assert.strictEqual(none.customCases, 0);
+  });
+});
+
+describe('writes during the copy', () => {
+  // Runs `act` once, right after the named file's copy.
+  const afterCopyOf = (name, act) => {
+    let done = false;
+    return {
+      copyFile: async (from, to, mode) => {
+        await fs.promises.copyFile(from, to, mode);
+        if (!done && path.basename(from) === name) {
+          done = true;
+          act();
+        }
+      }
+    };
+  };
+  const refusedFor = async (root, fsImpl, named) => {
+    const dest = destFor(root);
+    await assert.rejects(backupProfile({ userDataDir: root, dest, now: FIXED, fsImpl, retryDelaysMs: NO_WAIT }), (err) => {
+      isBackupFailed(dest)(err);
+      assert.ok(err.message.includes(named), err.message);
+      assert.match(err.message, /close any other King Louie/);
+      return true;
+    });
+    assert.strictEqual(await readBackupManifest(dest), null);
+    assert.ok(!fs.existsSync(path.join(dest, 'backup.json')));
+  };
+
+  it('a store message and a case line after the snapshot: refused', async () => {
+    const root = fullProfile();
+    const facts = put(root, 'cases/x/facts.jsonl', '{"id":"f-0001"}\n');
+    await refusedFor(root, afterCopyOf('facts.jsonl', () => {
+      const writer = HistoryStore.open(path.join(root, 'history.sqlite'));
+      appendTo(writer, 'chat-a', 'after-the-snapshot');
+      writer.close();
+      fs.appendFileSync(facts, '{"id":"f-0002"}\n');
+    }), 'history.sqlite');
+  });
+
+  it('a case file changed after its copy: refused', async () => {
+    const root = fullProfile();
+    const facts = put(root, 'cases/x/facts.jsonl', '{"id":"f-0001"}\n');
+    await refusedFor(root, afterCopyOf('facts.jsonl', () => fs.appendFileSync(facts, 'more\n')), 'cases/x/facts.jsonl');
+  });
+
+  it('chat-data.json changed after its copy: refused', async () => {
+    const root = fullProfile();
+    await refusedFor(root, afterCopyOf('chat-data.json', () => fs.appendFileSync(path.join(root, 'chat-data.json'), ' ')), 'chat-data.json');
+  });
+
+  it('config.json with the same size and a new mtime: refused', async () => {
+    const root = fullProfile();
+    const config = put(root, 'config.json', '{}');
+    const later = new Date(Date.now() + 60000);
+    await refusedFor(root, afterCopyOf('config.json', () => fs.utimesSync(config, later, later)), 'config.json');
+  });
+
+  it('a new file under cases/: refused', async () => {
+    const root = fullProfile();
+    await refusedFor(root, afterCopyOf('chat-data.json', () => put(root, 'cases/x/new.md', 'x')), 'cases/x/new.md');
+  });
+
+  it('a case file removed: refused', async () => {
+    const root = fullProfile();
+    const gone = put(root, 'cases/x/zz-last.md', 'x');
+    await refusedFor(root, afterCopyOf('zz-last.md', () => fs.rmSync(gone)), 'cases/x/zz-last.md');
+  });
+
+  it('Chromium churning its own files is no refusal', async () => {
+    const root = fullProfile();
+    const dips = put(root, 'DIPS', 'chromium');
+    const prefs = put(root, 'Preferences', '{}');
+    const res = await backupProfile({
+      userDataDir: root,
+      dest: destFor(root),
+      now: FIXED,
+      fsImpl: afterCopyOf('DIPS', () => { fs.appendFileSync(dips, 'more'); fs.appendFileSync(prefs, ' '); })
+    });
+    assert.ok(res.files > 0);
+    assert.ok(await readBackupManifest(destFor(root)));
+  });
+});
+
+describe('an unfinished backup', () => {
+  it('holds UNFINISHED from the start; a finished one does not', async () => {
+    const root = fullProfile();
+    const dest = destFor(root);
+    let seen = false;
+    const backup = async (db, out) => {
+      seen = fs.existsSync(path.join(dest, 'UNFINISHED'));
+      await sqlite.backup(db, out);
+    };
+    await backupProfile({ userDataDir: root, dest, now: FIXED, backup });
+    assert.strictEqual(seen, true);
+    assert.ok(!fs.existsSync(path.join(dest, 'UNFINISHED')));
+  });
+
+  it('a refusal leaves the marker, says the copy can be deleted, and deletes nothing', async () => {
+    const root = fullProfile();
+    const dest = destFor(root);
+    const fsImpl = { copyFile: async () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }); } };
+    await assert.rejects(backupProfile({ userDataDir: root, dest, now: FIXED, fsImpl, retryDelaysMs: NO_WAIT }), (err) => {
+      assert.match(err.message, /UNFINISHED/);
+      assert.match(err.message, /can be deleted/);
+      return true;
+    });
+    assert.ok(fs.existsSync(path.join(dest, 'UNFINISHED')));
+    assert.ok(fs.existsSync(path.join(dest, 'history.sqlite')), 'nothing is removed');
+  });
+
+  it('readBackupManifest takes a marked directory for no backup', async () => {
+    const root = fullProfile();
+    const dest = destFor(root);
+    await backupProfile({ userDataDir: root, dest, now: FIXED });
+    fs.writeFileSync(path.join(dest, 'UNFINISHED'), 'x');
+    assert.strictEqual(await readBackupManifest(dest), null);
+  });
+});
+
+describe('the smaller refusals', () => {
+  it('a hot journal beside the store is not copied', async () => {
+    const root = fullProfile();
+    put(root, 'history.sqlite-journal', '');
+    await backupProfile({ userDataDir: root, dest: destFor(root), now: FIXED });
+    assert.ok(!fs.existsSync(path.join(destFor(root), 'history.sqlite-journal')));
+  });
+
+  it('a dest named ..hidden inside the profile is refused', async () => {
+    const root = fullProfile();
+    const dest = path.join(root, '..hidden');
+    await assert.rejects(backupProfile({ userDataDir: root, dest, now: FIXED }), isBackupFailed(dest));
+    assert.ok(!fs.existsSync(dest));
+  });
+
+  it('a dest beside the profile whose name starts with two dots is not inside it', async () => {
+    const root = fullProfile();
+    const dest = path.join(path.dirname(root), '..king-louie-backup');
+    await backupProfile({ userDataDir: root, dest, now: FIXED });
+    assert.ok(fs.existsSync(path.join(dest, 'backup.json')));
+  });
+
+  it('a missing parent of dest is said in words', async () => {
+    const root = fullProfile();
+    const dest = path.join(path.dirname(root), 'no-such-folder', 'backup');
+    await assert.rejects(backupProfile({ userDataDir: root, dest, now: FIXED }), (err) => {
+      isBackupFailed(dest)(err);
+      assert.match(err.message, /does not exist/);
+      assert.ok(!err.message.includes('ENOENT'));
+      return true;
+    });
+  });
+
+  it('where SQLite refuses the immutable URI (a UNC path), the backup takes the plain open', async () => {
+    const root = fullProfile();
+    const real = HistoryStore.open;
+    HistoryStore.open = function open(file, options = {}) {
+      if (options.immutable) throw new Error('unable to open database file');
+      return real.call(this, file, options);
+    };
+    try {
+      const res = await backupProfile({ userDataDir: root, dest: destFor(root), now: FIXED });
+      assert.deepStrictEqual(res.history, { chats: 2, messages: 5 });
+    } finally {
+      HistoryStore.open = real;
+    }
+  });
+});
+
 describe('readBackupManifest', () => {
   async function made() {
     const root = fullProfile();
@@ -691,11 +960,14 @@ describe('readBackupManifest', () => {
     assert.strictEqual(await readBackupManifest(dest), null);
   });
 
-  it('refuses a listed path that leaves the backup', async () => {
-    const dest = await made();
-    const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'backup.json'), 'utf8'));
-    manifest.files.push({ path: '../outside.txt', bytes: 1, sha256: 'a'.repeat(64) });
-    fs.writeFileSync(path.join(dest, 'backup.json'), JSON.stringify(manifest));
-    assert.strictEqual(await readBackupManifest(dest), null);
-  });
+  for (const listed of ['../outside.txt', '..\\outside.txt', 'cases\\..\\..\\outside.txt']) {
+    it(`refuses a listed path that leaves the backup: ${listed}`, async () => {
+      const dest = await made();
+      put(path.dirname(dest), 'outside.txt', 'x');
+      const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'backup.json'), 'utf8'));
+      manifest.files.push({ path: listed, bytes: 1, sha256: 'a'.repeat(64) });
+      fs.writeFileSync(path.join(dest, 'backup.json'), JSON.stringify(manifest));
+      assert.strictEqual(await readBackupManifest(dest), null);
+    });
+  }
 });

@@ -36,13 +36,15 @@ const sizeOf = (file) => {
   }
 };
 
-// What says whether anything wrote to the store: the main file's size and
-// mtime and how much its WAL and rollback journal hold.
-function storeMark(file) {
+// One reading of the store: `mark` says whether anything wrote to it (the main
+// file's size and mtime and how much its WAL and rollback journal hold), and
+// `atRest` is that the WAL and the journal hold nothing.
+function readStoreState(file) {
   const main = fs.statSync(file);
-  return `${main.size}:${main.mtimeMs}:${sizeOf(`${file}-wal`)}:${sizeOf(`${file}-journal`)}`;
+  const wal = sizeOf(`${file}-wal`);
+  const journal = sizeOf(`${file}-journal`);
+  return { mark: `${main.size}:${main.mtimeMs}:${wal}:${journal}`, atRest: wal === 0 && journal === 0 };
 }
-const storeAtRest = (file) => sizeOf(`${file}-wal`) === 0 && sizeOf(`${file}-journal`) === 0;
 
 const OPEN_OPTIONS = { readonly: true, allowOlderSchema: true };
 
@@ -51,7 +53,7 @@ function countChats(store) {
   return { chats: chats.length, messages: chats.reduce((n, c) => n + c.messageCount, 0) };
 }
 
-// A path SQLite will not take as a URI (a UNC share): the plain open instead.
+// A path SQLite will not take as a URI (a UNC share): null, for the plain open.
 function openImmutable(file) {
   try {
     return HistoryStore.open(file, { ...OPEN_OPTIONS, immutable: true });
@@ -60,6 +62,9 @@ function openImmutable(file) {
     throw err;
   }
 }
+
+// A snapshot of ours, which nothing writes: leaves nothing beside it where it can.
+const openSnapshot = (file) => openImmutable(file) || HistoryStore.open(file, OPEN_OPTIONS);
 
 async function backUpFrom(store, out, backup) {
   try {
@@ -74,12 +79,12 @@ async function backUpFrom(store, out, backup) {
 // and message counts, read right after the backup. Throws what the open or the
 // backup threw: a schema the reader refuses, a locked or corrupt file.
 async function snapshotHistoryFile(file, out, { backup = sqlite.backup } = {}) {
-  if (storeAtRest(file)) {
-    const mark = storeMark(file);
+  const state = readStoreState(file);
+  if (state.atRest) {
     const store = openImmutable(file);
     if (store) {
       const counts = await backUpFrom(store, out, backup);
-      if (storeMark(file) === mark) return counts;
+      if (readStoreState(file).mark === state.mark) return counts;
       // Something wrote while an immutable connection was reading (immutable
       // takes no locks): that read proves nothing. SQLite's own locks now.
       fs.rmSync(out, { force: true });
@@ -112,7 +117,7 @@ async function readHistoryChats({ reader, tmpRoot = os.tmpdir(), backup = sqlite
     // An H1 desktop's file is schema 1: read as it is, never upgraded (only
     // chats and messages are read).
     await snapshotHistoryFile(checked.path, file, { backup });
-    snapshot = HistoryStore.open(file, { ...OPEN_OPTIONS, immutable: true });
+    snapshot = openSnapshot(file);
     return { found: true, chats: snapshot.listChats({ messages: true }).map(forImport), attention };
   } catch (err) {
     attention.push({
@@ -127,4 +132,4 @@ async function readHistoryChats({ reader, tmpRoot = os.tmpdir(), backup = sqlite
   }
 }
 
-module.exports = { readHistoryChats, snapshotHistoryFile, countChats };
+module.exports = { readHistoryChats, snapshotHistoryFile, openSnapshot, countChats };

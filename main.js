@@ -19,6 +19,16 @@ protocol.registerSchemesAsPrivileged([
 const userDataArg = process.argv.find((a) => a.startsWith('--user-data-dir='));
 if (userDataArg) app.setPath('userData', path.resolve(userDataArg.slice('--user-data-dir='.length)));
 
+// One desktop per profile: a second launch on this userData focuses the first
+// window and stops here, before it reads the profile or acts on its arguments.
+const { claimSingleInstance } = require('./src/ipc/single-instance');
+let mainWindow = null;
+const getWindow = () => mainWindow;
+if (!claimSingleInstance({ app, getWindow })) {
+  app.exit(0);
+  return;
+}
+
 const { createLogger } = require('./src/logging');
 const { openDesktopState } = require('./src/ipc/desktop-state');
 const { startStandaloneHost } = require('./src/ipc/standalone-host');
@@ -26,9 +36,6 @@ const { startAttachedHost } = require('./src/ipc/attached-host');
 const { resolveLaunchMode } = require('./src/desktop-bridge/launch-mode');
 
 const log = createLogger('main');
-
-let mainWindow = null;
-const getWindow = () => mainWindow;
 
 // Attached or standalone is decided here, before any core exists (spec
 // 2026-11-03-attach-stage2-design §6.1).
