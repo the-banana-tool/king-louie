@@ -11,12 +11,17 @@ class JsonFileStore {
   // written, so a root admin CLI knows which files it has to hand back to the
   // data dir's owner (src/service/ownership.js). Constructing a store writes
   // nothing, so a store that is only read is never reported.
-  constructor({ dir, name = 'config', defaults = {}, onWrite = null }) {
+  //
+  // `beforeSave(data, readStored)` runs before each write and may change what is
+  // written; `readStored()` parses the file as it is on disk now. A store with no
+  // `beforeSave` reads nothing here.
+  constructor({ dir, name = 'config', defaults = {}, onWrite = null, beforeSave = null }) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.path = path.join(dir, `${name}.json`);
     this._defaults = clone(defaults) || {};
     this._data = null;
     this._onWrite = typeof onWrite === 'function' ? onWrite : null;
+    this._beforeSave = typeof beforeSave === 'function' ? beforeSave : null;
   }
 
   _load() {
@@ -42,7 +47,7 @@ class JsonFileStore {
   //   - the mode is pinned with fchmod on that descriptor, never a path-based
   //     chmod that would re-resolve the name after the write.
   _save() {
-    this._keepStoredBoxKey();
+    if (this._beforeSave) this._beforeSave(this._data, () => JSON.parse(fs.readFileSync(this.path, 'utf8')));
     const body = JSON.stringify(this._data, null, 2);
     // One retry: 'wx' failing with EEXIST means something is squatting the
     // name we picked. Remove it and try a fresh name rather than writing
@@ -72,25 +77,6 @@ class JsonFileStore {
       break;
     }
     if (this._onWrite) this._onWrite(this.path);
-  }
-
-  // This file is read once and written whole, so an instance that read it before
-  // the service's start stored the node's box key would write the record back
-  // without it, and the next start would make another. Reads the disk only when
-  // this instance holds an identity with no box key.
-  _keepStoredBoxKey() {
-    const held = this._data.mesh && this._data.mesh.identity;
-    if (!held || typeof held !== 'object' || held.encryptedBoxKey) return;
-    let stored;
-    try {
-      stored = JSON.parse(fs.readFileSync(this.path, 'utf8')).mesh.identity;
-    } catch {
-      return;
-    }
-    if (stored && stored.publicKey === held.publicKey && stored.boxKeyJwk && stored.encryptedBoxKey) {
-      held.boxKeyJwk = stored.boxKeyJwk;
-      held.encryptedBoxKey = stored.encryptedBoxKey;
-    }
   }
 
   // Forget what was read: the next read comes from disk.

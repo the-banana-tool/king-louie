@@ -8,8 +8,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { JsonFileStore } = require('../src/platform/json-file-store');
+const { buildServicePorts } = require('../src/service/ports');
 const { createAesGcmCipher } = require('../src/platform/cipher');
-const { MeshIdentity, saveIdentity, loadIdentity, IDENTITY_STORE_KEY } = require('../src/mesh/mesh-identity');
+const { MeshIdentity, saveIdentity, loadIdentity, keepStoredBoxKey, IDENTITY_STORE_KEY } = require('../src/mesh/mesh-identity');
 const { NodeIdentity, getOrGenerateNodeIdentity } = require('../src/mesh/node-identity');
 const { generateBoxKey, createBox } = require('../src/approvals/node-box-key');
 const { readNodeIdentity } = require('../src/service/commands/session');
@@ -20,10 +21,13 @@ const { createFakePhone, testNodeIdentity, KEYS } = require('./helpers/fake-phon
 const cleanups = [];
 after(() => { for (const c of cleanups.reverse()) c(); });
 
+// The service's chat-data store, as src/service/ports.js builds it.
+const chatData = (dir) => new JsonFileStore({ dir, name: 'chat-data', beforeSave: keepStoredBoxKey });
+
 function fresh() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-box-key-'));
   cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const store = new JsonFileStore({ dir, name: 'chat-data' });
+  const store = chatData(dir);
   return { dir, store, cipher: createAesGcmCipher(crypto.randomBytes(32)) };
 }
 
@@ -202,7 +206,7 @@ describe('only the service start fills', () => {
   it('the fill re-reads the record and adopts a key already there, with no write', () => {
     const f = fresh();
     recordWithoutBox(f);
-    const stale = new JsonFileStore({ dir: f.dir, name: 'chat-data' });
+    const stale = chatData(f.dir);
     assert.equal(Object.hasOwn(stale.get(IDENTITY_STORE_KEY), 'boxKeyJwk'), false, 'this instance has read the record');
     const first = fill(f.store, f.cipher);
     const file = path.join(f.dir, 'chat-data.json');
@@ -215,7 +219,7 @@ describe('only the service start fills', () => {
   it('a stale instance\'s later ordinary set neither loses nor replaces the key', () => {
     const f = fresh();
     recordWithoutBox(f);
-    const stale = new JsonFileStore({ dir: f.dir, name: 'chat-data' });
+    const stale = chatData(f.dir);
     assert.equal(Object.hasOwn(stale.get(IDENTITY_STORE_KEY), 'boxKeyJwk'), false);
     const first = fill(f.store, f.cipher);
     const stored = f.store.get(IDENTITY_STORE_KEY);
@@ -223,13 +227,13 @@ describe('only the service start fills', () => {
     const onDisk = JSON.parse(fs.readFileSync(path.join(f.dir, 'chat-data.json'), 'utf8'));
     assert.equal(onDisk.settings.anything, 1);
     assert.deepEqual(onDisk.mesh.identity, stored);
-    assert.deepEqual(fill(new JsonFileStore({ dir: f.dir, name: 'chat-data' }), f.cipher).box.jwk, first.box.jwk);
+    assert.deepEqual(fill(chatData(f.dir), f.cipher).box.jwk, first.box.jwk);
   });
 
   it('a stale instance does not bring in the box key of another identity', () => {
     const f = fresh();
     recordWithoutBox(f);
-    const stale = new JsonFileStore({ dir: f.dir, name: 'chat-data' });
+    const stale = chatData(f.dir);
     const held = stale.get(IDENTITY_STORE_KEY);
     saveIdentity(f.store, new NodeIdentity({ nodeName: 'other' }), f.cipher);
     fill(f.store, f.cipher);
@@ -237,6 +241,39 @@ describe('only the service start fills', () => {
     const onDisk = JSON.parse(fs.readFileSync(path.join(f.dir, 'chat-data.json'), 'utf8'));
     assert.equal(onDisk.mesh.identity.publicKey, held.publicKey);
     assert.equal(Object.hasOwn(onDisk.mesh.identity, 'encryptedBoxKey'), false);
+  });
+
+  it('the service\'s chat-data store has the guard, and its other stores and a plain store read nothing to save', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-box-key-ports-'));
+    cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const ports = buildServicePorts({ dataDir: dir });
+    assert.equal(ports.store._beforeSave, keepStoredBoxKey);
+    assert.equal(ports.vaultStore._beforeSave, null);
+    assert.equal(fs.readFileSync(path.join(__dirname, '..', 'src', 'service', 'commands', 'import-writer.js'), 'utf8').includes('keepStoredBoxKey'), false);
+
+    const plain = new JsonFileStore({ dir, name: 'plain' });
+    plain.set('mesh', { identity: { publicKey: 'x' } });
+    const real = fs.readFileSync;
+    let reads = 0;
+    fs.readFileSync = (...args) => { reads += 1; return real(...args); };
+    try {
+      plain.set('other', 1);
+    } finally {
+      fs.readFileSync = real;
+    }
+    assert.equal(reads, 0, 'a store with no beforeSave reads nothing');
+    assert.equal(fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'json-file-store.js'), 'utf8').includes('mesh'), false, 'the store knows nothing of the mesh');
+  });
+
+  it('beforeSave is given the data and a read of the disk, and may change what is written', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-box-key-before-'));
+    cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const seen = [];
+    const store = new JsonFileStore({ dir, name: 'thing', beforeSave: (data, readStored) => { seen.push(data.a); if (data.a === 2) data.b = readStored().a; } });
+    store.set('a', 1);
+    store.set('a', 2);
+    assert.deepEqual(seen, [1, 2]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(store.path, 'utf8')), { a: 2, b: 1 });
   });
 
   it('only the service\'s start paths ask for a fill', () => {
@@ -251,7 +288,11 @@ describe('only the service start fills', () => {
     };
     walk(root);
     const asking = files.filter((f) => /fillBox: true/.test(fs.readFileSync(f, 'utf8'))).map((f) => path.relative(root, f).split(path.sep).join('/')).sort();
-    assert.deepEqual(asking, ['approvals/service-wiring.js', 'frontdoor/profile.js', 'service/run.js']);
+    assert.deepEqual(asking, ['approvals/service-wiring.js', 'service/run.js']);
+    // A front door seals nothing and opens nothing, so it never needs a box key.
+    for (const file of files.filter((f) => path.relative(root, f).split(path.sep)[0] === 'frontdoor')) {
+      assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /identity\.box\b|sealPolicy|createSealPolicy/, file);
+    }
     const wiring = fs.readFileSync(path.join(root, 'approvals', 'service-wiring.js'), 'utf8');
     assert.equal(wiring.match(/fillBox: true/g).length, 1);
     const mcp = wiring.slice(wiring.indexOf('async function startMcpApprovals'));

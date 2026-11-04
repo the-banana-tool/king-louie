@@ -416,6 +416,26 @@ function saveIdentity(store, identity, cipher) {
   return record;
 }
 
+// The service's chat-data store is read once and written whole, so an instance that
+// read it before the service's start stored the node's box key would write the
+// record back without it, and the next start would make another. A beforeSave for
+// that store (JsonFileStore): reads the disk only when this instance holds an
+// identity with no box key.
+function keepStoredBoxKey(data, readStored) {
+  const held = data.mesh && data.mesh.identity;
+  if (!held || typeof held !== 'object' || held.encryptedBoxKey) return;
+  let stored;
+  try {
+    stored = readStored().mesh.identity;
+  } catch {
+    return;
+  }
+  if (stored && stored.publicKey === held.publicKey && stored.boxKeyJwk && stored.encryptedBoxKey) {
+    held.boxKeyJwk = stored.boxKeyJwk;
+    held.encryptedBoxKey = stored.encryptedBoxKey;
+  }
+}
+
 // Adds a box key to the stored record and changes nothing else in it: the
 // Ed25519 and TLS ciphertexts stay as they were. Throws when it cannot, with the
 // record untouched: no cipher, or a record not yet under the cipher.
@@ -485,6 +505,7 @@ module.exports = {
   saveIdentity,
   loadIdentity,
   saveBoxKey,
+  keepStoredBoxKey,
   serializeIdentity,
   deserializeIdentity,
   IDENTITY_STORE_KEY,
