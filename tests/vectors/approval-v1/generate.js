@@ -15,6 +15,7 @@ const path = require('path');
 const { canonicalize } = require('../../../src/platform/jcs');
 const { seal, fromB64url, verifyEs256, nodeSigner, deviceIdFromJwk } = require('../../../src/approvals/envelope');
 const { enrollMac, phoneAuthString, READ_KEY_MAX_MS } = require('../../../src/approvals/messages');
+const { sealContent, saltedHash } = require('../../../src/approvals/seal');
 const { deriveNodeId, base32Encode } = require('../../../src/mesh/node-identity');
 const { AuditLedger, entryHash } = require('../../../src/audit/audit-ledger');
 const { phoneView, phoneReadAuthString } = require('./phone-reference');
@@ -57,7 +58,8 @@ const kidOf = (entry) => (entry.read_key_of ? deviceIdFromJwk(KEYS.devices[entry
 
 function loadSigCache() {
   const cache = new Map();
-  const keys = Object.values(KEYS.devices).map((d) => ({ kid: kidOf(d), jwk: d.jwk }));
+  // A box key only agrees keys: it signs nothing.
+  const keys = Object.values(KEYS.devices).filter((d) => !d.box_key_of).map((d) => ({ kid: kidOf(d), jwk: d.jwk }));
   const walk = (v, apiJwks) => {
     if (!v || typeof v !== 'object') return;
     if (v.alg === 'ES256' && typeof v.kid === 'string' && typeof v.payload === 'string' && typeof v.sig === 'string') {
@@ -105,6 +107,17 @@ function deviceSigner(name, cache) {
       cache.set(`api:${d.jwk.x}:${text}`, sig);
       return sig;
     }
+  };
+}
+
+// A key-agreement key from fixed bytes, for a vector's ephemeral key.
+function fixedBox(d) {
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.setPrivateKey(d);
+  const pub = ecdh.getPublicKey();
+  return {
+    jwk: { kty: 'EC', crv: 'P-256', x: pub.subarray(1, 33).toString('base64url'), y: pub.subarray(33, 65).toString('base64url') },
+    agree: (jwk) => ecdh.computeSecret(Buffer.concat([Buffer.from([0x04]), fromB64url(jwk.x), fromB64url(jwk.y)]))
   };
 }
 
@@ -409,6 +422,46 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     input: { signing_string: readSigning, signature: AR.signText(readSigning) },
     expect: { signing_string: readSigning, body_sha256: crypto.createHash('sha256').update(body).digest('base64url'), accepted: true, accepted_by_device_key: false }
   });
+
+  // ── The seal (sealed phones, R-SP-1, R-SP-2, R-SP-4) ───────────────────────
+  // Sealed by web-01. The input is the message the signed envelope would
+  // carry; the signature is another layer and is not what these test. A phone
+  // refuses action_hash_mismatch itself, after opening: openSealed does not
+  // read the action.
+  const sealType = 'kl.approval.request';
+  const boxA = { [A.id]: KEYS.devices.A_box.jwk };
+  const boxB = { [B.id]: KEYS.devices.B_box.jwk };
+  const sealedRequest = (label, { recipients = { ...boxA, ...boxB }, actionHash = null } = {}) => {
+    const salt = sha(`seal salt ${label}`).toString('base64url');
+    const content = { action: toolActionLit, origin: { client: 'gateway', session: 'chat-1', job_id: null }, salt };
+    const clear = {
+      v: 1, type: sealType, request_id: uuidOf(`seal ${label}`), node_id: web.nodeId, node_name: web.nodeName,
+      action_hash: actionHash || saltedHash(salt, toolActionLit), created_at: NOW, expires_at: iso(NOW_MS + 300000),
+      nonce: nonceOf(`seal ${label}`), node_box: KEYS.nodes['web-01'].box.jwk
+    };
+    const random = (n) => (n === 32 ? sha(`seal cek ${label}`) : sha(`seal iv ${label}`).subarray(0, n));
+    const message = sealContent({ type: sealType, senderId: web.nodeId, clear, content, recipients, ephemeral: fixedBox(sha(`seal epk ${label}`)), random });
+    return { message, full: { ...clear, ...content } };
+  };
+  const flipFirstByte = (b64) => {
+    const bytes = Buffer.from(fromB64url(b64));
+    bytes[0] ^= 0x01;
+    return bytes.toString('base64url');
+  };
+  const sealVector = (name, input, reason, message = null) => add({
+    name, consumers: ['node'], given: { box: { device_id: A.id, d: KEYS.devices.A_box.d }, type: sealType }, input, expect: { reason, message }
+  });
+
+  const sealedMain = sealedRequest('main');
+  sealVector('seal-open', sealedMain.message, null, sealedMain.full);
+  sealVector('seal-not-recipient', sealedRequest('not recipient', { recipients: boxB }).message, 'not_recipient');
+  const sealedForCt = sealedRequest('tampered ct').message;
+  sealVector('seal-tampered-ct', { ...sealedForCt, sealed: { ...sealedForCt.sealed, ct: flipFirstByte(sealedForCt.sealed.ct) } }, 'open_failed');
+  // A relay moves one request's sealed object onto another request's clear part.
+  sealVector('seal-tampered-clear', { ...sealedRequest('moved onto').message, sealed: sealedRequest('moved from').message.sealed }, 'open_failed');
+  // Opens, but the clear hash is today's unsalted one and not the content's.
+  const unsalted = crypto.createHash('sha256').update(canonicalize(toolActionLit)).digest('base64url');
+  sealVector('seal-hash-mismatch', sealedRequest('hash mismatch', { actionHash: unsalted }).message, 'action_hash_mismatch');
 
   return vectors;
 }

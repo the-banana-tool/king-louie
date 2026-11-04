@@ -5,6 +5,7 @@
 // checks the committed files are exactly what generate.js produces.
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
@@ -12,6 +13,7 @@ const { canonicalize } = require('../src/platform/jcs');
 const { open, deviceIdFromJwk, deriveDeviceId, fingerprintGroups, fromB64url, verifyEs256 } = require('../src/approvals/envelope');
 const { phoneAuthString, validateMessage } = require('../src/approvals/messages');
 const { verifyConsoleEnrollment } = require('../src/approvals/verify-device');
+const { openSealed, saltedHash, SealError } = require('../src/approvals/seal');
 const { PhoneApprover } = require('../src/approvals/phone-approver');
 const { verifyAuditSlice } = require('../src/audit/audit-ledger');
 const { setLogLevel } = require('../src/logging');
@@ -34,6 +36,8 @@ const READ_KEY = [
   'read-key-valid', 'read-key-wrong-signer', 'read-key-from-the-future', 'response-reject-read-key'
 ];
 const READ_KEY_ANDROID = ['phone-api-auth-read', 'enroll-console-read-key', 'read-key-valid'];
+// The seal (sealed phones, R-SP-1, R-SP-2): the node's for now.
+const SEAL = ['seal-open', 'seal-not-recipient', 'seal-tampered-ct', 'seal-tampered-clear', 'seal-hash-mismatch'];
 const EXPECTED = [
   'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
   'request-malformed', 'request-display-edge', 'request-malformed-equivalent-keys',
@@ -44,7 +48,8 @@ const EXPECTED = [
   'response-accept-phone-clock-ahead', 'enroll-console', 'enroll-console-bad-mac', 'enroll-signed', 'enroll-signed-by-overlay-revoked',
   'revoke-valid', 'revoke-self-rejected', 'revoke-mutual', 'audit-slice', 'phone-api-auth',
   // Revised 2026-10-28: the read key (android-slim spec §8.8).
-  ...READ_KEY
+  ...READ_KEY,
+  ...SEAL
 ];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json') && f !== 'keys.json')
@@ -87,13 +92,30 @@ async function runResponseVector(v) {
   return result;
 }
 
+// What a phone does with a sealed request: open it, then hold the clear hash to
+// the opened content before anything is shown.
+function runSealVector(v) {
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.setPrivateKey(fromB64url(v.given.box.d));
+  const agree = (jwk) => ecdh.computeSecret(Buffer.concat([Buffer.from([0x04]), fromB64url(jwk.x), fromB64url(jwk.y)]));
+  let opened;
+  try {
+    opened = openSealed({ type: v.given.type, message: v.input, recipientId: v.given.box.device_id, agree });
+  } catch (err) {
+    if (!(err instanceof SealError)) throw err;
+    return { reason: err.reason, message: null };
+  }
+  if (saltedHash(opened.content.salt, opened.content.action) !== opened.message.action_hash) return { reason: 'action_hash_mismatch', message: null };
+  return { reason: null, message: opened.message };
+}
+
 describe('approval-v1 vectors', () => {
   it('every vector the spec names is committed, and nothing else', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
   });
 
-  it('49 vectors; the read-key ones name node and android only, android where the phone builds or signs', () => {
-    assert.equal(EXPECTED.length, 49);
+  it('54 vectors; the read-key ones name node and android only, android where the phone builds or signs', () => {
+    assert.equal(EXPECTED.length, 54);
     for (const name of READ_KEY) {
       const want = READ_KEY_ANDROID.includes(name) ? ['node', 'android'] : ['node'];
       assert.deepEqual(byName.get(name).consumers, want, name);
@@ -140,6 +162,14 @@ describe('approval-v1 vectors', () => {
       // A console enrollment that carries a read key: the record `enroll-device` writes holds it.
       if (Object.hasOwn(v.expect, 'read_key')) got.read_key = r.ok ? r.message.device.read_key : null;
       assert.deepEqual(got, v.expect);
+    });
+  }
+
+  for (const name of SEAL) {
+    it(`${name} (openSealed with the vector's d)`, () => {
+      const v = byName.get(name);
+      assert.deepEqual(v.consumers, ['node']);
+      assert.deepEqual(runSealVector(v), v.expect);
     });
   }
 

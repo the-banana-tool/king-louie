@@ -11,13 +11,22 @@ const TEST_DEVICE_KEYS = Object.freeze([
   // own: `device_id` names the device it belongs to. Refused as a record's or
   // an enrollment's read_key like the device keys above.
   Object.freeze({ name: 'A_read', device_id: 'd-3vmwrihhdbnit4oi', read_key: true, x: 'bR4eNDGzasGOPyj1pvmA9ycRieOYKE2JVxoVpjhftII', y: 'epMctH6Kqp-VPnmnb3z8zs8RckTzC2yjbsuor2WWniY' }),
-  Object.freeze({ name: 'B_read', device_id: 'd-6xdlbxglhnvfa3lw', read_key: true, x: 'cVt3bucyCwSWInd6zTjQgp27Jl5Bsy_wLUnYZMzSBQY', y: 'jt2NwAHES1iQ9RYN8GvJNzrNVL4W2FwJQ5oH5CssLiU' })
+  Object.freeze({ name: 'B_read', device_id: 'd-6xdlbxglhnvfa3lw', read_key: true, x: 'cVt3bucyCwSWInd6zTjQgp27Jl5Bsy_wLUnYZMzSBQY', y: 'jt2NwAHES1iQ9RYN8GvJNzrNVL4W2FwJQ5oH5CssLiU' }),
+  // Box keys (sealed phones, R-SP-1): key agreement only, and no id of their
+  // own, so `device_id` names the device, as for a read key.
+  Object.freeze({ name: 'A_box', device_id: 'd-3vmwrihhdbnit4oi', box_key: true, x: 'AUcENPOiBeZMUCUoLPAf4iXiRVQGO2XcbpR_GbvA47Y', y: '3wSU8i6hc3-PXZztNVJm2LpENtj87rbex4qhJa3VQ-4' }),
+  Object.freeze({ name: 'B_box', device_id: 'd-6xdlbxglhnvfa3lw', box_key: true, x: 'h6PCItS4cVIGuDrKEcllyTPlzqJD3V4yStB8RYEEhlc', y: 'Mb8Qva8gF3CiDXhJpmWn5R0JV1QbHmocdj4DV-pbqKA' })
 ]);
 
 const TEST_NODE_KEYS = Object.freeze([
   Object.freeze('302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423'),
   Object.freeze('302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950'),
   Object.freeze('302a300506032b65700321007d85a245144905192e752ad2c1051643a6e966d934dcbc6baaaabffe1978a725')
+]);
+
+// The public half of web-01's box key (R-SP-3).
+const TEST_NODE_BOX_KEYS = Object.freeze([
+  Object.freeze({ kty: 'EC', crv: 'P-256', x: 'tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw', y: 'qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ' })
 ]);
 
 // Compares raw x/y strings, not curve points, so callers must validate the
@@ -27,17 +36,22 @@ function isTestDeviceKey(jwk) {
   return Boolean(jwk) && TEST_DEVICE_KEYS.some((k) => k.x === jwk.x && k.y === jwk.y);
 }
 
-// A record, or an enrollment's device, whose device key or read key
-// (android-slim §8.8) is a published test key. A holder without a read key is
-// judged on its device key alone.
+// A record, or an enrollment's device, whose device key, read key
+// (android-slim §8.8) or box key (R-SP-1) is a published test key. A holder
+// without one of the last two is judged on what it has.
 function hasTestKey(holder) {
   if (!holder) return false;
   const readKey = holder.read_key === undefined || holder.read_key === null ? null : holder.read_key;
-  return isTestDeviceKey(holder.public_key) || isTestDeviceKey(readKey);
+  return isTestDeviceKey(holder.public_key) || isTestDeviceKey(readKey) || isTestDeviceKey(holder.box_key);
 }
 
 function isTestNodeKey(spkiHex) {
   return TEST_NODE_KEYS.includes(String(spkiHex).toLowerCase());
 }
 
-module.exports = { TEST_DEVICE_KEYS, TEST_NODE_KEYS, isTestDeviceKey, isTestNodeKey, hasTestKey };
+// As isTestDeviceKey: raw x/y strings, so validate the JWK's shape first.
+function isTestNodeBoxKey(jwk) {
+  return Boolean(jwk) && TEST_NODE_BOX_KEYS.some((k) => k.x === jwk.x && k.y === jwk.y);
+}
+
+module.exports = { TEST_DEVICE_KEYS, TEST_NODE_KEYS, TEST_NODE_BOX_KEYS, isTestDeviceKey, isTestNodeKey, isTestNodeBoxKey, hasTestKey };

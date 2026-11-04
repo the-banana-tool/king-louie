@@ -1,0 +1,80 @@
+{
+  "name": "seal-open",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    },
+    "type": "kl.approval.request"
+  },
+  "input": {
+    "v": 1,
+    "type": "kl.approval.request",
+    "request_id": "4374cbf9-af5f-4b30-b7ab-4e167a887004",
+    "node_id": "kl-c2ubd6jjqumalzt5",
+    "node_name": "web-01",
+    "action_hash": "b34_McF73EgYqn9FzLy3Vlm7jnbuODc_WqHMum0WYhs",
+    "created_at": "2026-09-23T18:04:11.201Z",
+    "expires_at": "2026-09-23T18:09:11.201Z",
+    "nonce": "vJMJ5AjVs084DZH1Q1KxueDhx3wTS5eAfOegpnNNV98",
+    "node_box": {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw",
+      "y": "qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ"
+    },
+    "sealed": {
+      "v": 1,
+      "epk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "xC_sgxFHfzcmTXSavlJGIIvtGPqTMpNQJ40AMGWOd6o",
+        "y": "ZTOExs35ticycJrRT5MMU88TNz4mKL-U_Aid3Njawag"
+      },
+      "iv": "aUD9TxO4xgHtUntI",
+      "ct": "0P-Lo3oXwDBafU1OQruzesGYfKTWgQt-9r0qV3gGktswMshR3zRctCHykFJbSCtraslU04c1_Y2AAHf5F6rymZuypkuY_ayNkHP_e2kPU2MjtrqgqXrRyEh_sLEZ3GjP5lsS2RtmVIZfYWhRz__NDiAGxW2EgHqJI6KesHtziv_ucRnFGkfw9oQZiuxJARrNryUou5aLDaHRbFqYuioR4ORmZ0r4qGePtTilEbWOG7I9OnVFLGq8SLItx6oA4F17pTEGoxOrthFkOI5OMxavMpNAkDdFhRfGDvmdfhcv5Oxed8sfocCspXvHG4qFEk-SOXIFlw4i6mN3-g-q3NAFDvsehM6fbz-TVl8haLXr0-us",
+      "keys": {
+        "d-3vmwrihhdbnit4oi": "TCDPmqUOQOgK0HgbVFXup2ulvHY1w6-ouq31wDj84m16OFGR8vZsb3-we_XTFHvt",
+        "d-6xdlbxglhnvfa3lw": "-FoO-gywr4CPURdOPJmXctDOP40OorYSp_RdsT3JovwLJK5IdiZLhHj_xvaViCL8"
+      }
+    }
+  },
+  "expect": {
+    "reason": null,
+    "message": {
+      "v": 1,
+      "type": "kl.approval.request",
+      "request_id": "4374cbf9-af5f-4b30-b7ab-4e167a887004",
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "node_name": "web-01",
+      "action_hash": "b34_McF73EgYqn9FzLy3Vlm7jnbuODc_WqHMum0WYhs",
+      "created_at": "2026-09-23T18:04:11.201Z",
+      "expires_at": "2026-09-23T18:09:11.201Z",
+      "nonce": "vJMJ5AjVs084DZH1Q1KxueDhx3wTS5eAfOegpnNNV98",
+      "node_box": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw",
+        "y": "qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ"
+      },
+      "action": {
+        "kind": "tool",
+        "name": "Bash",
+        "params": {
+          "command": "git push origin main"
+        },
+        "cwd": "/srv/site",
+        "summary": "Bash(git push origin main)"
+      },
+      "origin": {
+        "client": "gateway",
+        "session": "chat-1",
+        "job_id": null
+      },
+      "salt": "UjdMV0IVyIJRw6_D97ilvZNjpWXPtq8SXp1Oy_1NXvY"
+    }
+  }
+}
