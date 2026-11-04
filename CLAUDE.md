@@ -1222,14 +1222,17 @@ the e2e test), the owner check cannot tell them apart.
     Fingerprint `b-…`. `enroll-device` refuses a claim with no box key for a record that holds one. The
     node's own box key (`createBox`, `src/approvals/node-box-key.js`) sits encrypted in the identity
     record and goes out as `node_box`; only a service start fills a record that has none
-    (`getOrGenerateNodeIdentity(..., { fillBox: true })`, a test walks the callers), so a CLI or a
-    standalone `mcp` has `box: null`.
+    (`getOrGenerateNodeIdentity(..., { fillBox: true })`, a test walks the callers), so a CLI, a
+    standalone `mcp` or a front door has `box: null`. On a latched node `enroll-device` says a phone with no
+    box key will see nothing.
   - The seal: `src/approvals/seal.js` (`sealContent`, `openSealed`; `SEAL_SPLIT` is the one table of what
     is content). One content key wrapped per recipient; AAD is the clear part. Every sender pads: `pad`,
     only spaces, makes the JCS bytes of the content a multiple of 256; an opener takes any number of
     spaces and strips it, and anything else there is `content_malformed`. It is in no table and no hash. A sealed request's hash is
     salted (`saltedHash`), and the pending entry keeps the salt, so a clear request pending when sealing
-    turns on keeps its unsalted rule. Never pass `ephemeral` or `random` outside vectors
+    turns on keeps its unsalted rule, and one held with the link down is rebuilt, never resent in clear. A
+    relay that answers a sealed request `malformed` or `bad_request` is older than the node: the request
+    ends at once, `relay_too_old`. Never pass `ephemeral` or `random` outside vectors
     (`tests/sealed-types.test.js`, which also fails for a content type with no entry). A new node→phone
     content type gets a row. A sealed request's signed payload is at most `SEALED_PAYLOAD_MAX`, about 130
     KB of parameters (`action_too_large`), because the audit mirror's page is 256 KiB; an entry over it
