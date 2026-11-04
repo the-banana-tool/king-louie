@@ -558,7 +558,7 @@ describe('iOS: sealedSeen (R-SP-15)', () => {
     const model = iosModel();
     const store = section(model, 'enum SealedSeenStore', '\n}\n');
     assert.match(store, /UserDefaults\.standard\.set\(nodes\.sorted\(\), forKey: key\)/);
-    assert.match(store, /synchronize\(\)/);
+    assert.match(section(store, 'static func save(', '\n    }\n'), /synchronize\(\)/);
     // In StoredState a new key would fail the old decode and lose the pins, and `restore` would put an old set back.
     assert.ok(!section(model, 'struct StoredState: Codable', '\n}\n').includes('sealedSeen'));
     assert.match(model, /private var sealedSeen: Set<String> = SealedSeenStore\.load\(\)/);
