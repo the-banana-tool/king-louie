@@ -165,6 +165,16 @@ function createSealPolicy({ approverStore, identity, dataDir, writeLatchFile = w
       const { devices, durable } = look();
       return Boolean(box) && durable && devices.length > 0;
     },
+    // Why canSeal() is false, as a clause an owner can act on. The causes differ:
+    // only the last is fixed by a phone.
+    whyNot() {
+      const { devices, durable } = look();
+      if (approverStore.untrusted) return `the approver set is not trusted: ${approverStore.problem || 'it has not been verified on this node'}`;
+      if (!box) return 'this node has no box key of its own: restart the service so it makes one';
+      if (devices.length === 0) return 'no active phone holds a box key. Enroll a phone or apply its box key';
+      if (!durable) return 'phones hold box keys, but approvals/sealing.json cannot be written in the data dir: check that directory';
+      return null;
+    },
     recipients() {
       const { devices, durable } = look();
       // No key leaves here before the latch is on disk.

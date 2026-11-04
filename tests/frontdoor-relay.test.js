@@ -15,7 +15,7 @@ const { MeshPairing } = require('../src/mesh/mesh-pairing');
 const { NodeIdentity, deriveNodeId } = require('../src/mesh/node-identity');
 const { startRelay } = require('../src/frontdoor/relay');
 const { assertPrivateMeshHost } = require('../src/frontdoor/net');
-const { startApprovals } = require('../src/approvals/service-wiring');
+const { startApprovals, startMcpApprovals } = require('../src/approvals/service-wiring');
 const { FileCourier } = require('../src/approvals/courier');
 const { ApproverAdmin } = require('../src/approvals/approver-admin');
 const { verifyConsoleEnrollment } = require('../src/approvals/verify-device');
@@ -27,7 +27,8 @@ const https = require('https');
 const net = require('net');
 const { createLinkRpc } = require('../src/approvals/link-rpc');
 const { buildRequest, toolAction } = require('../src/approvals/messages');
-const { generateBoxKey } = require('../src/approvals/node-box-key');
+const { generateBoxKey, createBox } = require('../src/approvals/node-box-key');
+const { isSealedShape } = require('../src/approvals/seal');
 const { relaySpkiPin } = require('../src/frontdoor/tls');
 const { createPhoneServer, PHONE_LISTENER } = require('../src/frontdoor/relay');
 const { addSink } = require('../src/logging');
@@ -72,7 +73,7 @@ async function phoneCall(phone, method, p, body) {
 
 // A node: its own data and admin config dirs, paired with the relay, running
 // startApprovals, with a service.pid naming this process so couriers work.
-async function startNode(name, approverRecords = []) {
+async function startNode(name, approverRecords = [], { box = false } = {}) {
   const baseDir = tempDir(`kl-relay-node-${name}-`);
   const dataDir = path.join(baseDir, 'data');
   const configDir = path.join(baseDir, 'config');
@@ -83,6 +84,10 @@ async function startNode(name, approverRecords = []) {
   fs.writeFileSync(path.join(dataDir, 'service.pid'), String(process.pid));
 
   const identity = new NodeIdentity({ nodeName: name });
+  if (box) {
+    const { jwk, d } = generateBoxKey();
+    identity.box = createBox(jwk, d);
+  }
   const { code } = relay.nodeHub.addCode(name);
   const meshPort = relay.address().mesh.port;
   const pairing = new MeshPairing(identity, new MeshTransport({ identity, listen: false, useTls: false }), { timeoutMs: 5000 });
@@ -96,7 +101,7 @@ async function startNode(name, approverRecords = []) {
   });
   cleanups.push(() => approvals.stop());
   await until(() => approvals.relayClient.isConnected(), `${name} to link`);
-  return { name, identity, dataDir, configDir, approvals };
+  return { name, identity, dataDir, configDir, approvals, store, ports: { store, cipher: createAesGcmCipher(crypto.randomBytes(32)) } };
 }
 
 before(async () => {
@@ -111,6 +116,45 @@ before(async () => {
     extensions: [(r) => r.mailbox.registerType('kl.test.', { ttlMs: 60000 })]
   });
   cleanups.push(() => relay.stop());
+});
+
+// The wiring itself: a real node with a box-key approver sends sealed, in the
+// service and in the `mcp` process alike.
+describe('startApprovals seals once an approver holds a box key', () => {
+  const owner = createFakePhone({ name: 'Box phone', boxKey: true });
+  const action = toolAction('Bash', { command: 'hidden-parameter' }, '/srv/site');
+  let node;
+  before(async () => { node = await startNode('sealing-01', [owner.approverRecord({ boxKey: true })], { box: true }); });
+
+  it('the service: what reaches the relay has the sealed shape and opens for the phone', async () => {
+    const ask = node.approvals.phoneApprover.requestAction(action, { origin: { client: 'agent' }, currentAction: () => action });
+    const held = await until(() => relay.approvals.list([node.identity.nodeId])[0], 'the request at the relay');
+    const { message } = open(held.envelope);
+    assert.equal(isSealedShape('kl.approval.request', message), true);
+    assert.equal(Object.hasOwn(message, 'action'), false);
+    assert.equal(Buffer.from(held.envelope.payload, 'base64url').toString().includes('hidden-parameter'), false);
+    assert.deepEqual(owner.open(held.envelope, 'kl.approval.request').content.action, action);
+    assert.ok(Object.hasOwn(message.sealed.keys, node.identity.nodeId));
+    node.approvals.phoneApprover.stop();
+    await ask;
+  });
+
+  it('the mcp process: its approver seals too', async () => {
+    const mcp = await startMcpApprovals({
+      dataDir: node.dataDir, configDir: node.configDir, nodeConfig: { name: node.name, approvers: { requestTtlS: 300 }, policy: {} },
+      ports: node.ports, identity: node.identity, approverStoreOptions: storeOptions
+    });
+    cleanups.push(() => mcp.stop());
+    const sent = [];
+    mcp.courier.submit = async (envelope) => { sent.push(envelope); };
+    mcp.courier.canDeliver = () => ({ ok: true });
+    mcp.courier.isConnected = () => true;
+    const ask = mcp.approver.requestAction(action, { origin: { client: 'stdio-mcp' }, currentAction: () => action });
+    await until(() => sent.length === 1, 'the request at the courier');
+    assert.equal(isSealedShape('kl.approval.request', open(sent[0]).message), true);
+    mcp.approver.stop();
+    await ask;
+  });
 });
 
 describe('relay end to end', () => {

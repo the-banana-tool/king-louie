@@ -205,7 +205,7 @@ function buildSealedRequest(full, action, targets, identity) {
   }
   const envelope = seal(message, nodeSigner(identity));
   if (envelope.payload.length > SEALED_PAYLOAD_MAX) {
-    throw new MessageError('action_too_large', 'the sealed request is over what an audit page can hold');
+    throw Object.assign(new MessageError('action_too_large', 'the sealed request is over what an audit page can hold'), { sealed: true });
   }
   return { message, envelope, bytes: fromB64url(envelope.payload), salt };
 }

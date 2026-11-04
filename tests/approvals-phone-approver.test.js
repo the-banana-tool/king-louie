@@ -716,7 +716,8 @@ describe('PhoneApprover with a seal policy', () => {
     const { approver, link, boxed, ledger } = await sealedSetup();
     const pending = ask(approver);
     const request = await waitForSubmit(link);
-    assert.deepEqual(approver.pending().map((p) => p.summary), ['(sealed)']);
+    // Read only by the loopback bridge to the node's own paired window.
+    assert.deepEqual(approver.pending().map((p) => p.summary), [liveAction().summary]);
     await approver.handleResponse(boxed[0].respond(request, 'approve'));
     await pending;
     await tick();
@@ -734,6 +735,69 @@ describe('PhoneApprover with a seal policy', () => {
     const seen = JSON.stringify(decode({ submitted: link.submitted, statuses: link.statuses, ledger: ledger.entries, lines }));
     for (const hidden of [PARAM, 'hidden-parameter', 's-hidden-session', 'job-hidden-id', 'Bash(']) assert.equal(seen.includes(hidden), false, hidden);
     approver.stop();
+  });
+
+  describe('a relay that refuses a sealed request', () => {
+    const refusingLink = (code) => {
+      const link = fakeLink();
+      link.submit = async (env) => { link.submitted.push(env); throw Object.assign(new Error('expected kl.approval.request'), { code }); };
+      return link;
+    };
+    const logged = async (run) => {
+      const lines = [];
+      const removeSink = addSink((record) => { lines.push(record.line); });
+      try {
+        await run();
+        await tick();
+        await tick();
+      } finally {
+        removeSink();
+      }
+      return lines;
+    };
+
+    for (const code of ['malformed', 'bad_request']) {
+      it(`${code} warns once, naming the relay's version and the upgrade order`, async () => {
+        const { approver, link } = await sealedSetup({ link: refusingLink(code) });
+        const asks = [];
+        const lines = await logged(async () => {
+          asks.push(ask(approver), ask(approver));
+          await waitForSubmit(link, 2);
+        });
+        const warned = lines.filter((l) => /relay before node/.test(l));
+        assert.equal(warned.length, 1, lines.join('\n'));
+        assert.match(warned[0], /older than this node/);
+        assert.equal(lines.some((l) => /will resubmit on reconnect/.test(l)), false);
+        approver.stop();
+        await Promise.all(asks);
+      });
+    }
+
+    it('another failure of a sealed request is the ordinary retry', async () => {
+      const { approver, link } = await sealedSetup({ link: refusingLink('link_down') });
+      let pending;
+      const lines = await logged(async () => {
+        pending = ask(approver);
+        await waitForSubmit(link);
+      });
+      assert.ok(lines.some((l) => /will resubmit on reconnect/.test(l)));
+      assert.equal(lines.some((l) => /relay before node/.test(l)), false);
+      approver.stop();
+      await pending;
+    });
+
+    it('a clear request refused malformed is the ordinary retry', async () => {
+      const { approver, link } = await sealedSetup({ holders: 0, plain: 1, link: refusingLink('malformed') });
+      let pending;
+      const lines = await logged(async () => {
+        pending = ask(approver);
+        await waitForSubmit(link);
+      });
+      assert.ok(lines.some((l) => /will resubmit on reconnect/.test(l)));
+      assert.equal(lines.some((l) => /relay before node/.test(l)), false);
+      approver.stop();
+      await pending;
+    });
   });
 
   it('a clear request still audits its job id', async () => {
@@ -788,6 +852,67 @@ describe('PhoneApprover with a seal policy', () => {
       approver.stop();
     });
 
+    it('with no phone holding a box key the denial says to enroll one', async () => {
+      const { approver, dataDir } = await sealedSetup({ holders: 0, plain: 1 });
+      writeLatch(dataDir);
+      const metadata = {};
+      await approver.requestApproval('Bash', { command: PARAM }, metadata);
+      assert.match(metadata.refusal.error, /Enroll a phone or apply its box key/);
+      assert.deepEqual(approver.sealRefusal().reason, 'no_sealed_recipient');
+      approver.stop();
+    });
+
+    // The real policy over a store that is not trusted, whatever its phones hold.
+    it('an untrusted approver set is named as the cause, not a missing phone', async () => {
+      const { identity, store, dataDir, link } = await sealedSetup();
+      writeLatch(dataDir);
+      const untrusted = { list: () => [], isActive: () => false, untrusted: true, problem: 'the approver dir is writable by the service' };
+      const sealPolicy = createSealPolicy({ approverStore: untrusted, identity, dataDir });
+      const approver = new PhoneApprover({ identity, approverStore: store, link, auditLedger: fakeLedger(), sealPolicy, setTimer: () => null, clearTimer: () => {} });
+      const metadata = {};
+      assert.equal(await approver.requestApproval('Bash', { command: PARAM }, metadata), 'unavailable');
+      assert.match(metadata.refusal.error, /no_sealed_recipient/);
+      assert.match(metadata.refusal.error, /the approver dir is writable by the service/);
+      assert.doesNotMatch(metadata.refusal.error, /Enroll/);
+      const outcome = await approver.requestAction(liveAction(), { currentAction: liveAction });
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'no_sealed_recipient']);
+      approver.stop();
+    });
+
+    it('a latch that cannot be written is named as the cause while phones hold box keys', async () => {
+      const { identity, store, dataDir, link } = await sealedSetup();
+      const sealPolicy = createSealPolicy({ approverStore: store, identity, dataDir, writeLatchFile: () => { throw Object.assign(new Error('read-only'), { code: 'EROFS' }); } });
+      const approver = new PhoneApprover({ identity, approverStore: store, link, auditLedger: fakeLedger(), sealPolicy, setTimer: () => null, clearTimer: () => {} });
+      const metadata = {};
+      assert.equal(await approver.requestApproval('Bash', { command: PARAM }, metadata), 'unavailable');
+      assert.match(metadata.refusal.error, /no_sealed_recipient/);
+      assert.match(metadata.refusal.error, /sealing\.json cannot be written/);
+      assert.doesNotMatch(metadata.refusal.error, /Enroll/);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('a node with no box key of its own is named as the cause', async () => {
+      const { approver } = await sealedSetup({ holders: 1, nodeBox: false });
+      const metadata = {};
+      await approver.requestApproval('Bash', { command: PARAM }, metadata);
+      assert.match(metadata.refusal.error, /no box key of its own/);
+      assert.doesNotMatch(metadata.refusal.error, /Enroll/);
+      approver.stop();
+    });
+
+    it('sealRefusal is null while it can seal, and on the clear path', async () => {
+      const sealing = await sealedSetup();
+      assert.equal(sealing.approver.sealRefusal(), null);
+      sealing.approver.stop();
+      const clear = await sealedSetup({ holders: 0, plain: 1 });
+      assert.equal(clear.approver.sealRefusal(), null);
+      clear.approver.stop();
+      const none = await sealedSetup({ withPolicy: false });
+      assert.equal(none.approver.sealRefusal(), null);
+      none.approver.stop();
+    });
+
     it('a policy that throws is refused, never clear', async () => {
       const { identity } = await sealedSetup({ holders: 0, plain: 1 });
       const boom = () => { throw new Error('store boom'); };
@@ -836,6 +961,21 @@ describe('PhoneApprover with a seal policy', () => {
       assert.deepEqual([outcome.decision, outcome.reason], ['error', 'action_too_large']);
       assert.deepEqual(link.submitted, []);
       approver.stop();
+    });
+
+    it('the model reads plain words for a sealed oversize call, and the old words stay for a clear one', async () => {
+      const big = { content: 'x'.repeat(MAX_ACTION_BYTES - 1024) };
+      const sealed = await sealedSetup();
+      const metadata = {};
+      assert.equal(await sealed.approver.requestApproval('Write', big, metadata), 'unavailable');
+      assert.equal(metadata.refusal.error, 'A sealed approval holds about 130 KB of parameters. Write it in smaller pieces. Nothing ran.');
+      sealed.approver.stop();
+      const huge = { content: 'x'.repeat(MAX_ACTION_BYTES) };
+      const clear = await sealedSetup({ holders: 0, plain: 1 });
+      const clearMeta = {};
+      assert.equal(await clear.approver.requestApproval('Write', huge, clearMeta), 'unavailable');
+      assert.match(clearMeta.refusal.error, /^Action cannot be shown on the phone \(action_too_large\)/);
+      clear.approver.stop();
     });
 
     it('the largest action that seals, to eight phones and with the longest origin, fits a mirror page and a link frame', async () => {

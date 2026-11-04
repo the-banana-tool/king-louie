@@ -261,6 +261,63 @@ describe('signed envelopes', () => {
     assert.strictEqual(JSON.stringify(e).includes(salt), false, 'the salt is not written to the case');
   });
 
+  it('on a node that cannot seal it refuses before the question, naming no_sealed_recipient', async () => {
+    const approver = {
+      calls: 0,
+      sealRefusal: () => ({ reason: 'no_sealed_recipient', detail: 'no active phone holds a box key' }),
+      async requestAction() { this.calls += 1; return { decision: 'deny', reason: 'no_sealed_recipient' }; }
+    };
+    const s = await setup({ authority: 'signed', approver });
+    const before = s.rt.questions(s.meta.id).list ? s.rt.questions(s.meta.id).list().length : null;
+    const r = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /no_sealed_recipient/);
+    assert.match(r.error, /no active phone holds a box key/);
+    assert.strictEqual(approver.calls, 0);
+    assert.deepStrictEqual(new EnvelopeStore(s.meta.dir).list(), []);
+    if (before !== null) assert.strictEqual(s.rt.questions(s.meta.id).list().length, before);
+  });
+
+  describe('a request denied no_sealed_recipient after the check (the delta path)', () => {
+    const denied = { decision: 'deny', request_id: null, device_id: null, action_hash: null, reason: 'no_sealed_recipient', detail: 'no active phone holds a box key' };
+    const quiet = { requestAction: () => new Promise(() => {}) };
+
+    it('is journaled with its reason, and grants nothing', async () => {
+      const s = await setup({ authority: 'signed', approver: quiet });
+      await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+      const r = await ops.applySignedOutcome(s.reg, s.meta.id, 'env-01', denied);
+      assert.strictEqual(r.applied, false);
+      assert.match(journalText(s), /Envelope env-01 did not go to the phone \(no_sealed_recipient\): no active phone holds a box key/);
+      assert.strictEqual(envelopeOf(s).status, 'requested');
+      assert.strictEqual(ops.signedOutcomesFor(s.reg, s.meta.id, 'env-01').length, 0);
+    });
+
+    it('waits for the case lock when the case is busy, and still grants nothing', async () => {
+      const s = await setup({ authority: 'signed', approver: quiet });
+      await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+      const real = s.rt.systemAction.bind(s.rt);
+      s.rt.systemAction = async () => {
+        const err = new Error('Case "Lakeside lot" is busy');
+        err.name = 'CaseBusyError';
+        throw err;
+      };
+      assert.strictEqual((await ops.applySignedOutcome(s.reg, s.meta.id, 'env-01', denied)).applied, false);
+      s.rt.systemAction = real;
+      assert.doesNotMatch(journalText(s), /no_sealed_recipient/);
+      await ops.applyPendingSignedGrants(s.reg, s.meta.id);
+      assert.match(journalText(s), /no_sealed_recipient/);
+      assert.strictEqual(envelopeOf(s).status, 'requested');
+      assert.strictEqual(s.reg.pendingSignedGrants.size, 0);
+    });
+
+    it('another denial is still only the phone saying no', async () => {
+      const s = await setup({ authority: 'signed', approver: quiet });
+      await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+      await ops.applySignedOutcome(s.reg, s.meta.id, 'env-01', { decision: 'deny', reason: null });
+      assert.doesNotMatch(journalText(s), /did not go to the phone/);
+    });
+  });
+
   it('refuses when no phone approver is enrolled, writing nothing', async () => {
     const s = await setup({ authority: 'signed' });
     assert.deepStrictEqual(await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId)), { ok: false, error: 'signed approval unavailable' });

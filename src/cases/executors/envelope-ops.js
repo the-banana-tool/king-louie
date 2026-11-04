@@ -126,6 +126,9 @@ async function requestEnvelopeUnsafe(reg, { caseId, turnId = null, signal = null
   if (entry.authority === 'signed') {
     approver = reg.getPhoneApprover();
     if (!approver) return { ok: false, error: 'signed approval unavailable' };
+    // Before the question: nothing is written, and nobody is told it went.
+    const refusal = typeof approver.sealRefusal === 'function' ? approver.sealRefusal() : null;
+    if (refusal) return { ok: false, error: `Envelope refused (${refusal.reason}): ${refusal.detail}.` };
   }
   const store = new EnvelopeStore(meta.dir);
   const env = {
@@ -285,7 +288,25 @@ async function activateSigned(reg, caseId, envelopeId, outcome) {
   return true;
 }
 
+// A request that never went to a phone (a delta's second request, on a node that
+// has stopped being able to seal). Its own map, never pendingSignedGrants: an
+// entry there is a grant.
+function journalUnsealable(reg, caseId, envelopeId, outcome) {
+  journal(reg, caseId, `Envelope ${envelopeId} did not go to the phone (${outcome.reason}): ${outcome.detail || 'no phone can read it'}.`);
+}
+
 async function applySignedOutcome(reg, caseId, envelopeId, outcome) {
+  if (outcome && outcome.decision === 'deny' && outcome.reason === 'no_sealed_recipient') {
+    log.warn(`Signed approval for ${envelopeId} did not go to the phone: ${outcome.reason}.`);
+    try {
+      await reg.caseRuntime.systemAction(caseId, `envelope unsealable ${envelopeId}`, () => journalUnsealable(reg, caseId, envelopeId, outcome));
+    } catch (err) {
+      if (!err || err.name !== 'CaseBusyError') throw err;
+      reg.pendingSignedRefusals = reg.pendingSignedRefusals || new Map();
+      reg.pendingSignedRefusals.set(grantKey(caseId, envelopeId), outcome);
+    }
+    return { applied: false, decision: 'deny', error: outcome.reason };
+  }
   if (!outcome || outcome.decision !== 'approve') {
     log.info(`Signed approval for ${envelopeId} ended ${outcome?.decision || 'without an outcome'}; it stays requested.`);
     return { applied: false, decision: outcome?.decision || null };
@@ -321,6 +342,11 @@ async function applySignedOutcome(reg, caseId, envelopeId, outcome) {
 
 // Turn-start hook: the lock is already held.
 async function applyPendingSignedGrants(reg, caseId) {
+  for (const [key, outcome] of [...(reg.pendingSignedRefusals || [])]) {
+    if (!key.startsWith(`${caseId}/`)) continue;
+    journalUnsealable(reg, caseId, key.slice(caseId.length + 1), outcome);
+    reg.pendingSignedRefusals.delete(key);
+  }
   for (const [key, outcome] of [...reg.pendingSignedGrants]) {
     if (!key.startsWith(`${caseId}/`)) continue;
     await activateSigned(reg, caseId, key.slice(caseId.length + 1), outcome);

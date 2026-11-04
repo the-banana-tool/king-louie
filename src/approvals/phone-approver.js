@@ -13,6 +13,9 @@ const { PendingRequests } = require('./pending-store');
 const log = createLogger('approvals/phone-approver');
 
 const DEFAULT_UNAVAILABLE = 'Phone approval unavailable: no enrolled device or no relay link on this node. Nothing ran.';
+const UNSEALABLE = 'no phone can read a sealed approval';
+const SEALED_TOO_LARGE = 'A sealed approval holds about 130 KB of parameters. Write it in smaller pieces. Nothing ran.';
+const SHAPE_REFUSALS = ['malformed', 'bad_request'];
 
 class PhoneApprover {
   constructor({ identity, nodeName = null, approverStore, link, auditLedger, ttlMs = TTL_MAX_MS, now = Date.now,
@@ -94,7 +97,7 @@ class PhoneApprover {
     if (typeof currentAction !== 'function') throw new TypeError('currentAction required');
     // Ahead of the availability checks: an untrusted store or a revoke that
     // left nobody is also "nobody to seal to", and it is denied as that.
-    if (!this.stopped && this._cannotSeal()) return this._denyUnsealable();
+    if (!this.stopped && this.sealRefusal()) return this._denyUnsealable();
     const unavailable = this.unavailableReason();
     if (unavailable) return this._outcome('unavailable', { reason: unavailable });
 
@@ -103,6 +106,7 @@ class PhoneApprover {
       built = this.build({ identity: this.identity, action, origin, ttlMs: this.ttlMs, now: this.now(), sealPolicy: this.sealPolicy });
     } catch (err) {
       if (err instanceof MessageError && err.reason === 'no_sealed_recipient') return this._denyUnsealable();
+      if (err instanceof MessageError && err.sealed) return { ...this._outcome('error', { reason: err.reason }), sealed: true };
       if (err instanceof MessageError) return this._outcome('error', { reason: err.reason });
       throw err;
     }
@@ -135,7 +139,8 @@ class PhoneApprover {
     return new Promise((resolve) => {
       // `salt` is this request's hash rule, kept for its whole life: a box key
       // applied while it is pending changes the next request, not this one.
-      const entry = { request: message, envelope, bytes, salt, jobId, currentAction, resolve, signal, timer: null, onAbort: null, deciding: false };
+      // `summary` is for pending(): a sealed message no longer holds it.
+      const entry = { request: message, envelope, bytes, salt, jobId, summary: action ? action.summary : null, currentAction, resolve, signal, timer: null, onAbort: null, deciding: false };
       this.pendingRequests.add(entry);
       const delay = Math.max(0, Date.parse(message.expires_at) - this.now());
       entry.timer = this.setTimer(() => this._finish(message.request_id, 'expired', { statusState: 'expired' }), delay);
@@ -148,19 +153,35 @@ class PhoneApprover {
     });
   }
 
-  // R-SP-5: sealing and nobody to seal to. A policy that cannot answer counts.
-  _cannotSeal() {
-    if (!this.sealPolicy) return false;
+  // R-SP-5: sealing and nobody to seal to, with why, else null. A policy that
+  // cannot answer counts. For a caller that must not say a request went.
+  sealRefusal() {
+    if (!this.sealPolicy) return null;
+    let detail = UNSEALABLE;
     try {
-      return this.sealPolicy.sealing() && !this.sealPolicy.canSeal();
+      if (!this.sealPolicy.sealing() || this.sealPolicy.canSeal()) return null;
+      if (typeof this.sealPolicy.whyNot === 'function') detail = this.sealPolicy.whyNot() || UNSEALABLE;
     } catch {
-      return true;
+      detail = UNSEALABLE;
     }
+    return { reason: 'no_sealed_recipient', detail };
   }
 
   _denyUnsealable() {
     this._auditBestEffort('approval.outcome', { request_id: null, state: 'refused', reason: 'no_sealed_recipient', job_id: null });
-    return this._outcome('deny', { reason: 'no_sealed_recipient' });
+    const refusal = this.sealRefusal();
+    return { ...this._outcome('deny', { reason: 'no_sealed_recipient' }), detail: refusal ? refusal.detail : UNSEALABLE };
+  }
+
+  // An older relay's validator knows only the clear shape, and answers a sealed
+  // request one of these every time, so a reconnect will not help.
+  _submitFailed(entry, err) {
+    if (entry.salt && SHAPE_REFUSALS.includes(err.code)) {
+      if (!this.warnedOldRelay) log.warn(`the relay refused a sealed request (${err.code}): it is probably older than this node. Upgrade order is relay before node.`);
+      this.warnedOldRelay = true;
+      return;
+    }
+    log.warn(`approval.submit failed; will resubmit on reconnect: ${err.message}`);
   }
 
   // While the link is down the request stays pending; `connected` resubmits
@@ -169,7 +190,7 @@ class PhoneApprover {
     if (!this.link || !this.link.isConnected()) return;
     Promise.resolve()
       .then(() => this.link.submit(entry.envelope))
-      .catch((err) => log.warn(`approval.submit failed; will resubmit on reconnect: ${err.message}`));
+      .catch((err) => this._submitFailed(entry, err));
   }
 
   _resubmitAll() {
@@ -341,7 +362,7 @@ class PhoneApprover {
         return true;
       case 'deny':
         // Not the owner's no, so not counted as one by the denial tracker.
-        if (outcome.reason === 'no_sealed_recipient') return refuse('unavailable', 'Denied (no_sealed_recipient): this node seals its approvals and no phone can read them. Enroll a phone or apply its box key. Nothing ran.');
+        if (outcome.reason === 'no_sealed_recipient') return refuse('unavailable', `Denied (no_sealed_recipient): this node seals its approvals and ${outcome.detail || UNSEALABLE}. Nothing ran.`);
         return false;
       case 'withdrawn':
         return false;
@@ -349,14 +370,18 @@ class PhoneApprover {
         return 'timeout';
       case 'error':
         if (outcome.reason === 'audit_unavailable') return refuse('audit', 'Audit ledger unavailable; nothing ran.');
+        if (outcome.sealed) return refuse('unavailable', SEALED_TOO_LARGE);
         return refuse('unavailable', `Action cannot be shown on the phone (${outcome.reason}); nothing ran.`);
       default:
         return refuse('unavailable', outcome.reason ? `Phone approval unavailable: ${outcome.reason}. Nothing ran.` : DEFAULT_UNAVAILABLE);
     }
   }
 
+  // Holds the summary of a sealed request too: its only caller is the loopback
+  // bridge to this node's own paired window (bridge.approvalsStatus). Nothing
+  // here goes on a relay path.
   pending() {
-    return this.pendingRequests.list().map((e) => ({ request_id: e.request.request_id, expires_at: e.request.expires_at, summary: e.request.action ? e.request.action.summary : '(sealed)' }));
+    return this.pendingRequests.list().map((e) => ({ request_id: e.request.request_id, expires_at: e.request.expires_at, summary: e.summary }));
   }
 
   stop() {

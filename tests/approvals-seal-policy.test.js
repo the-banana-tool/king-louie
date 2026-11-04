@@ -273,7 +273,7 @@ describe('sealing and the latch', () => {
 
   it('the policy has no way to clear the latch', async () => {
     const { policy } = await setup();
-    assert.deepEqual(Object.keys(policy).sort(), ['canSeal', 'nodeBox', 'recipients', 'sealing', 'senderId']);
+    assert.deepEqual(Object.keys(policy).sort(), ['canSeal', 'nodeBox', 'recipients', 'sealing', 'senderId', 'whyNot']);
   });
 });
 

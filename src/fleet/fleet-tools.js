@@ -581,7 +581,8 @@ class FleetToolHandler {
 
     if (jobs.isTerminal(jobId)) return; // cancel_job already decided it
     if (outcome.decision === 'deny') {
-      jobs.updateJob(jobId, { status: 'denied', reason: `denied: ${outcome.reason || 'the phone denied it'}` });
+      const why = outcome.detail ? `${outcome.reason}: ${outcome.detail}` : (outcome.reason || 'the phone denied it');
+      jobs.updateJob(jobId, { status: 'denied', reason: `denied: ${why}` });
       return;
     }
     if (outcome.decision === 'expired') {
@@ -593,7 +594,8 @@ class FleetToolHandler {
       return;
     }
     if (outcome.decision !== 'approve') {
-      jobs.updateJob(jobId, { status: 'denied', reason: `denied_by_policy: ${outcome.reason || outcome.decision}` });
+      const why = outcome.sealed ? 'A sealed approval holds about 130 KB of parameters. Shorten the runbook\'s parameters. Nothing ran.' : (outcome.reason || outcome.decision);
+      jobs.updateJob(jobId, { status: 'denied', reason: `denied_by_policy: ${why}` });
       return;
     }
 

@@ -164,6 +164,21 @@ describe('FleetToolHandler origins through the unsafe path', () => {
     assert.match(changed.result, /^action_changed/);
     // The unsalted hash under a salt is not the approved one either.
     assert.match((await sealedRun((a) => actionHash(a))).result, /^action_changed/);
+    // Too large to seal, and nobody to seal to: plain reasons on the job.
+    const refusedRun = async (outcome) => {
+      const refused = new FleetToolHandler({ nodeConfig: NODE, runbookEngine: engine, auditLedger: fakeLedger(), approver: { unavailableReason: () => null, requestAction: async () => outcome } });
+      const started = refused.runRunbook({ machine: 'web-01', runbook: 'site.restart' }, FD_ORIGIN);
+      await refused.jobRuns.get(started.job_id);
+      await settle();
+      return refused.jobManager.getJob(started.job_id);
+    };
+    const tooLarge = await refusedRun({ decision: 'error', reason: 'action_too_large', sealed: true });
+    assert.equal(tooLarge.status, 'denied');
+    assert.equal(tooLarge.reason, 'denied_by_policy: A sealed approval holds about 130 KB of parameters. Shorten the runbook\'s parameters. Nothing ran.');
+    const clearTooLarge = await refusedRun({ decision: 'error', reason: 'action_too_large' });
+    assert.equal(clearTooLarge.reason, 'denied_by_policy: action_too_large');
+    const nobody = await refusedRun({ decision: 'deny', reason: 'no_sealed_recipient', detail: 'no active phone holds a box key' });
+    assert.equal(nobody.reason, 'denied: no_sealed_recipient: no active phone holds a box key');
     const ledger = fakeLedger();
     const h = new FleetToolHandler({ nodeConfig: NODE, runbookEngine: engine, approver, auditLedger: ledger });
     const { job_id: jobId, status } = h.runRunbook({ machine: 'web-01', runbook: 'site.restart' }, FD_ORIGIN);
