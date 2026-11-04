@@ -470,6 +470,12 @@ async function runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, 
     io.stderr.write(`${why}Nothing changed.\n`);
     return 1;
   }
+  // The question can wait a while, and the service account can write this directory.
+  const problemNow = latchPathProblem(dataDir);
+  if (problemNow) {
+    io.stderr.write(`${problemNow} Nothing changed.\n`);
+    return 1;
+  }
   const written = [];
   try {
     const ports = buildServicePorts({ dataDir, onPathWritten: (p) => written.push(p) });

@@ -561,6 +561,13 @@ class LeaseVectorTest {
         assertEquals("malformed", opened(JsonObject(full - "salt")))
         assertEquals("malformed", opened(JsonObject(full + ("lease" to JsonObject(lease + ("kind" to JsonPrimitive("screen")))))))
         assertEquals("malformed", opened(JsonObject(full + ("salt" to jsonString("short")))))
+        // resumes names this request's own lease or nothing, whatever the hash says: each is hashed again here, so it holds.
+        fun resuming(leaseId: String): JsonObject {
+            val edited = JsonObject(lease + ("resumes" to jsonString(leaseId)))
+            return JsonObject(full + ("lease" to edited) + ("lease_hash" to jsonString(Seal.saltedHash(s(full, "salt"), edited))))
+        }
+        assertEquals("malformed", opened(resuming("0f8e7c2a-5b1d-4c3e-9a7f-2d6b8e1c4a90")))
+        assertNull(opened(resuming(s(full, "lease_id"))))
     }
 
     /** The grant is built over the salted hash as received, byte for byte, and its shape does not change. */

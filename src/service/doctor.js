@@ -365,7 +365,7 @@ async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = nul
   await attempt('sealing to phones', async () => {
     // A node that has sealed sends no content with no phone to seal to (the
     // latch, R-SP-5): that is a fault, and never the same row as "off".
-    const { readLatch, latchWriteProblem } = require('../approvals/seal-policy');
+    const { readLatch, latchPathProblem, latchWriteProblem } = require('../approvals/seal-policy');
     const latch = readLatch(dataDir);
     const { latched } = latch;
     if (problem) {
@@ -382,9 +382,15 @@ async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = nul
     // The two things canSeal() needs besides a phone. Each refuses every send, so
     // neither may read as "on".
     if (!identityHoldsBoxKey(dataDir)) return { ok: false, detail: 'on, but this node has no box key: restart the service' };
-    const unwritable = latch.state === 'bad' ? 'it is there and cannot be read' : (latch.state === 'none' ? latchWriteProblem(dataDir) : null);
+    const count = `${sealing} ${sealing === 1 ? 'phone' : 'phones'}`;
+    // A file that does not read as a latch is replaced at the next build; a link
+    // or a directory at its path, or an approvals path that is no directory, is not.
+    const inTheWay = latch.state === 'bad' ? latchPathProblem(dataDir) : null;
+    if (inTheWay) return { ok: false, detail: `on, but the latch cannot be written: ${inTheWay} Nothing goes to the phones until it can.` };
+    const unwritable = latch.state === 'good' ? null : latchWriteProblem(dataDir);
     if (unwritable) return { ok: false, detail: `on, but the latch cannot be written (${unwritable}): nothing goes to the phones until it can` };
-    return { ok: true, detail: `on (${sealing} ${sealing === 1 ? 'phone' : 'phones'})` };
+    if (latch.state === 'bad') return { ok: true, warn: true, detail: `on (${count}); the latch file is damaged, and the next message replaces it` };
+    return { ok: true, detail: `on (${count})` };
   });
   await attempt('phones without a box key', async () => {
     if (problem) return { ok: true, detail: 'none (the set is not trusted)' };

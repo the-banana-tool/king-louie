@@ -972,9 +972,11 @@ describe('relay: the read key', () => {
     assert.equal(received.length, sent + 1);
     assert.deepEqual(received.at(-1), statement, 'the node gets the signed statement unchanged');
     assert.equal(JSON.stringify(r.devices.get(phone.deviceId)), before, 'the relay stores nothing');
-    assert.equal(JSON.stringify(r.devices.get(phone.deviceId)).includes('box'), false);
+    const boxX = JSON.parse(Buffer.from(statement.payload, 'base64url').toString('utf8')).box_key.x;
+    assert.ok(boxX, 'the statement carries the key looked for below');
+    assert.equal(JSON.stringify(r.devices.get(phone.deviceId)).includes(boxX), false);
     const list = await call(phone, 'GET', '/v1/devices', undefined, { key: 'read' });
-    assert.equal(JSON.stringify(list.body).includes('box'), false, 'GET /v1/devices echoes no box key');
+    assert.equal(JSON.stringify(list.body).includes(boxX), false, 'GET /v1/devices echoes no box key');
   });
 
   it("box-key refuses a read-key-signed statement, another device's, an expired or future one, a wrong type, and an inactive device", async () => {
@@ -988,8 +990,10 @@ describe('relay: the read key', () => {
     const notCaller = await call(stranger, 'POST', '/v1/devices/box-key', phone.boxKeyStatement());
     assert.deepEqual([notCaller.status, notCaller.body.error], [400, 'bad_box_key']);
     const t = Date.now();
-    assert.equal((await call(phone, 'POST', '/v1/devices/box-key', phone.boxKeyStatement({ now: t - 8 * DAY_MS, ttlMs: DAY_MS }))).body.error, 'expired');
-    assert.equal((await call(phone, 'POST', '/v1/devices/box-key', phone.boxKeyStatement({ now: t + 10 * 60000 }))).body.error, 'from_the_future');
+    const expired = await call(phone, 'POST', '/v1/devices/box-key', phone.boxKeyStatement({ now: t - 8 * DAY_MS, ttlMs: DAY_MS }));
+    assert.deepEqual([expired.status, expired.body.error], [400, 'expired']);
+    const future = await call(phone, 'POST', '/v1/devices/box-key', phone.boxKeyStatement({ now: t + 10 * 60000 }));
+    assert.deepEqual([future.status, future.body.error], [400, 'from_the_future']);
     assert.equal((await call(phone, 'POST', '/v1/devices/box-key', phone.readKeyStatement())).body.error, 'malformed');
 
     const idle = createFakePhone({ name: 'Box nowhere' });

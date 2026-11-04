@@ -512,6 +512,21 @@ describe('device unseal', () => {
     assert.equal(readLatch(n.dataDir).state, 'good');
   });
 
+  it('a non-file put at the latch path while it asks stops it, with no audit entry', async () => {
+    const n = node();
+    n.latch();
+    const io = streamIo();
+    const running = unseal(n, io, { flags: {}, extra: { isTTY: () => true } });
+    await asked(io);
+    fs.rmSync(latchFile(n.dataDir));
+    fs.mkdirSync(latchFile(n.dataDir));
+    io.stdin.write('y\n');
+    assert.equal(await running, 1);
+    assert.match(io.text.err, /not a file/);
+    assert.equal(fs.statSync(latchFile(n.dataDir)).isDirectory(), true);
+    assert.deepEqual(entries(n), []);
+  });
+
   it('says when it takes effect, and that a running service with a holder latches again', async () => {
     const n = node();
     n.latch();

@@ -903,6 +903,26 @@ describe('doctor', () => {
       assert.match(sealing.detail, /^on, but the latch cannot be written/);
     });
 
+    it('a damaged latch file with a phone to seal to: on, and the next message replaces it', async () => {
+      const n = node();
+      fs.mkdirSync(path.join(n.dataDir, 'approvals'), { recursive: true });
+      fs.writeFileSync(path.join(n.dataDir, 'approvals', 'sealing.json'), 'garbage');
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      boxRecord(n);
+      const { sealing } = await rows(n);
+      assert.deepEqual([sealing.ok, sealing.warn, sealing.detail], [true, true, 'on (1 phone); the latch file is damaged, and the next message replaces it']);
+    });
+
+    it('a directory at the latch path with a phone to seal to fails the row, and says what is there', async () => {
+      const n = node();
+      fs.mkdirSync(path.join(n.dataDir, 'approvals', 'sealing.json'), { recursive: true });
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      boxRecord(n);
+      const { sealing } = await rows(n);
+      assert.equal(sealing.ok, false);
+      assert.match(sealing.detail, /^on, but the latch cannot be written: .*is not a file/);
+    });
+
     it('a latch this account cannot create fails the row', { skip: !POSIX || UID === 0 }, async () => {
       const n = node({ linked: false });
       fs.mkdirSync(path.join(n.dataDir, 'approvals'));
