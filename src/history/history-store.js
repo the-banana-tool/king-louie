@@ -297,6 +297,21 @@ class HistoryStore {
       : this.createChat({ ...chat, id }, options)));
   }
 
+  // Puts these chats at the head of the list, in this order; every other chat
+  // keeps its place. Only the position moves: no chat reads as changed.
+  placeFirst(ids) {
+    const keys = [...new Set(ids.map((id) => normalizeId(id)).filter(Boolean))];
+    if (!keys.length) return;
+    this.transaction(() => {
+      const { lo } = this._stmt('SELECT MIN(position) AS lo FROM chats').get();
+      let position = (lo === null ? 1 : Number(lo)) - keys.length;
+      for (const key of keys) {
+        this._stmt('UPDATE chats SET position = ? WHERE id = ?').run(position, key);
+        position += 1;
+      }
+    });
+  }
+
   updateChat(id, patch = {}, { messages = true } = {}) {
     const key = normalizeId(id);
     if (!key) return null;

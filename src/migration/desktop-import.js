@@ -16,6 +16,7 @@ const { writeFileAtomic } = require('../desktop-bridge/pairing');
 const { MESSAGES, LIMITS } = require('../desktop-bridge/protocol');
 const { normalizeDirectory } = require('../desktop-bridge/desktop-scope');
 const { guardCheck } = require('../platform/write-guard');
+const { CHATS_OUT_OF_ORDER } = require('./migration-verify');
 const { isContactVaultKey } = require('../cases/contact-settings');
 const { isLocalServerVaultKey } = require('../models/local-vault-keys');
 
@@ -1254,6 +1255,27 @@ class DesktopImporter {
     });
   }
 
+  // Each chat lands at the head of the list, so in plan order they come out reversed,
+  // and a retry lands around what an earlier try left. Set once, when all have landed:
+  // the plan's chats in the desktop's order, ahead of the rest. A personal node takes
+  // the ones already there too, since a retry plans those as skip-present; anywhere
+  // else a chat already landed stays where that host has it. False when it could not.
+  placeLandedChats(plan, items) {
+    const ids = items.filter((item) => item.category === 'chat').filter((item) => {
+      const landed = plan.results.get(itemKey('chat', item.key));
+      if (item.action === 'new' || item.action === 'copy' || item.partial === true) return Boolean(landed && landed.ok);
+      return this.personal && (item.action === 'update' || item.action === 'skip-present');
+    }).map((item) => plan.results.get(itemKey('chat', item.key))?.record?.targetKey || item.targetKey);
+    if (!ids.length) return true;
+    try {
+      this.context.getHistoryStore().placeFirst(ids);
+      return true;
+    } catch (err) {
+      log.warn(`could not put the moved chats in order: ${err.message}`);
+      return false;
+    }
+  }
+
   // A case the desktop holds as private: its case.yaml normally says so, as it
   // came with the repository. One that does not (the key was lost and its chats
   // were what made it private) is marked by the runtime. Null, or what failed.
@@ -1562,6 +1584,7 @@ class DesktopImporter {
       if (this.personal && (item.category === 'channelToken' || (item.category === 'settings' && ['channels', 'hooks', 'mcpServers'].includes(item.key)))) needsRestart = true;
       manifest.items[k] = { at, result: 'ok', ...(r.record || {}), ...(r.incomplete ? { incomplete: true } : {}) };
     }
+    const placed = this.placeLandedChats(plan, items);
     manifest.runs.push({ planId: plan.planId, at, source: plan.source });
     this.writeManifest(manifest);
     this.plans.delete(plan.planId);
@@ -1579,7 +1602,8 @@ class DesktopImporter {
       ...(needsRestart ? { needsRestart: true } : {}),
       notes: [
         ...(cronDisabled ? [`${cronDisabled} cron job(s) were imported disabled; enable them in Settings > Scheduler.`] : []),
-        ...(needsRestart ? [RESTART_NOTE] : [])
+        ...(needsRestart ? [RESTART_NOTE] : []),
+        ...(placed ? [] : [CHATS_OUT_OF_ORDER])
       ]
     };
   }

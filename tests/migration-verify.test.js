@@ -399,6 +399,98 @@ describe('verifyMigration against a real importer', () => {
     return { plan, report };
   }
 
+  // The chat list's order: the store's position, which is what the renderer draws.
+  const listed = (core) => core.context.listChats({ messages: false }).map((c) => c.id);
+  const ordered = (...ids) => ids.map((id) => chat(id));
+
+  it('moved chats keep the desktop\'s order, ahead of what the node already holds', async () => {
+    const { core, importer, invoke } = await service();
+    core.context.upsertChat(chat('own'), { position: 'front' });
+    const chats = ordered('c1', 'c2', 'c3', 'c4');
+    const { plan, report } = await move(importer, { chats });
+    assert.deepStrictEqual(report.failures, []);
+    assert.deepStrictEqual(listed(core), ['c1', 'c2', 'c3', 'c4', 'own']);
+    assert.deepStrictEqual(await verifyMigration({ plan, report, invoke }), { ok: true, checked: { chats: 4, cases: 0 } });
+  });
+
+  it('a private chat keeps its rank, and its mark', async () => {
+    const { core, importer } = await service();
+    const chats = [chat('c1'), { ...chat('hush'), private: true }, chat('c3')];
+    await move(importer, { chats });
+    assert.deepStrictEqual(listed(core), ['c1', 'hush', 'c3']);
+    assert.strictEqual(core.context.getHistoryStore().chatRef('hush').private, true);
+  });
+
+  it('a retry after a partial landing puts the whole list back in order', async () => {
+    const { core, importer, makeImporter, invoke } = await service();
+    const chats = ordered('c1', 'c2', 'c3', 'c4', 'c5');
+    const inventory = inventoryOf({ chats });
+    const first = await importer.plan({ installId, inventory });
+    await importer.apply({ planId: first.planId, batch: chats.filter((c) => ['c2', 'c4'].includes(c.id)).map((c) => ({ category: 'chat', key: c.id, value: c })) });
+    await importer.finish({ planId: first.planId });
+    core.context.upsertChat(chat('own'), { position: 'back' });
+
+    const { plan, report } = await move(await makeImporter(), { chats });
+    assert.deepStrictEqual(plan.items.filter((i) => i.action === 'skip-present').map((i) => i.key), ['c2', 'c4']);
+    assert.deepStrictEqual(listed(core), ['c1', 'c2', 'c3', 'c4', 'c5', 'own']);
+    assert.strictEqual((await verifyMigration({ plan, report, invoke })).ok, true);
+  });
+
+  it('a cut-off that never reached finish is put in order by the retry too', async () => {
+    const { core, importer, makeImporter } = await service();
+    const chats = ordered('c1', 'c2', 'c3');
+    const first = await importer.plan({ installId, inventory: inventoryOf({ chats }) });
+    await importer.apply({ planId: first.planId, batch: chats.slice(1).map((c) => ({ category: 'chat', key: c.id, value: c })) });
+    await move(await makeImporter(), { chats });
+    assert.deepStrictEqual(listed(core), ['c1', 'c2', 'c3']);
+  });
+
+  it('a fleet or one-case import lands its new chats in order and moves nothing else', async () => {
+    const { core, dataDir } = await service();
+    const fleet = new DesktopImporter({
+      context: core.context,
+      targets: await buildImportTargets({ context: core.context, dataDir }),
+      dataDir,
+      checkPath,
+      scope: createDesktopScope({ dataDir, context: core.context })
+    });
+    await move(fleet, { chats: ordered('c1', 'c2') });
+    core.context.upsertChat(chat('own'), { position: 'front' });
+    await move(fleet, { chats: ordered('c1', 'c2', 'c3', 'c4') });
+    assert.deepStrictEqual(listed(core), ['c3', 'c4', 'own', 'c1', 'c2'], 'a chat already landed stays where the service has it');
+  });
+
+  it('a store that cannot set the order fails nothing, and the report says so', async () => {
+    const { core, dataDir, invoke } = await service();
+    const context = Object.create(core.context);
+    context.getHistoryStore = () => { throw new Error('the store is busy'); };
+    const importer = new DesktopImporter({
+      context,
+      targets: await buildImportTargets({ context: core.context, dataDir }),
+      dataDir,
+      checkPath,
+      scope: createDesktopScope({ dataDir, context: core.context }),
+      hosting: 'personal'
+    });
+    const { plan, report } = await move(importer, { chats: ordered('c1', 'c2') });
+    assert.deepStrictEqual(report.failures, []);
+    assert.ok(report.notes.some((n) => /order/.test(n)), JSON.stringify(report.notes));
+    assert.strictEqual((await verifyMigration({ plan, report, invoke })).ok, true);
+  });
+
+  it('chats out of order are a line, never a refusal, and only the moved chats count', async () => {
+    const plan = { items: [chatItem('c1', 2), chatItem('c2', 2)] };
+    const onNode = (id) => ({ id, messageCount: 2 });
+    const inOrder = await verifyMigration({ plan, report: cleanReport(), invoke: nodeAnswers({ chats: [onNode('own'), onNode('c1'), onNode('mine'), onNode('c2')] }).invoke });
+    assert.deepStrictEqual(inOrder, { ok: true, checked: { chats: 2, cases: 0 } });
+    const reversed = await verifyMigration({ plan, report: cleanReport(), invoke: nodeAnswers({ chats: [onNode('c2'), onNode('c1')] }).invoke });
+    assert.strictEqual(reversed.ok, true);
+    assert.deepStrictEqual(reversed.checked, { chats: 2, cases: 0 });
+    assert.strictEqual(reversed.notes.length, 1);
+    assert.match(reversed.notes[0], /order/);
+    assert.match(reversed.notes[0], /nothing is missing/i);
+  });
+
   it('a real chat and a real case: verified, and the case reads as it did on the desktop (HEAD, clean tree)', async () => {
     const { importer, root, invoke } = await service();
     const src = await sourceCase();

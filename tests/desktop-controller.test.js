@@ -2000,6 +2000,25 @@ describe('desktop controller: the one-time move', () => {
     controller.dispose();
   });
 
+  it('chats out of order on the node still mark the move, and the line stays on screen', async () => {
+    const client = new FakeNodeClient();
+    const invoke = client.invoke.bind(client);
+    client.invoke = async (channel, args) => {
+      const answer = await invoke(channel, args);
+      if (channel === 'chat:load') answer.data.chats.reverse();
+      return answer;
+    };
+    const { controller, state } = moveController({ client });
+    await controller.migrationPlan();
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.ok, true, JSON.stringify(out));
+    assert.strictEqual(out.verified.ok, true);
+    assert.ok(state.migration, 'the mark does not wait on order');
+    assert.ok(out.report.notes.some((n) => /order/.test(n)), JSON.stringify(out.report.notes));
+    assert.deepStrictEqual(state.migration.notes, out.report.notes);
+    controller.dispose();
+  });
+
   it('one chat missing on the node: no marker, MIGRATION_UNVERIFIED naming it, and Try again lands it', async () => {
     const client = new FakeNodeClient({ dropChat: 'c2' });
     const { controller, state, parent } = moveController({ client });

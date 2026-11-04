@@ -1551,7 +1551,8 @@ function createDesktopController({
           report,
           invoke: (channel, args = []) => session.client.invoke(channel, args)
         });
-        const shownOut = shownReport(report);
+        // Said beside the rest, and never a refusal: the mark does not wait on order.
+        const shownOut = shownReport({ ...report, notes: [...new Set([...(report.notes || []), ...(verified.notes || [])])] });
         const leftBehind = leftBehindOf({ plan: session.plan, source: session.source, report });
         if (!verified.ok) {
           return {

@@ -15,8 +15,10 @@
 // that does not match the source. What is private on the desktop must be private
 // on the node, moved or already there: a mark lost would let a hosted model read it.
 // Every vault entry planned to be there is asked for by its whole key.
+// The moved chats' order is compared too, and only ever said: it refuses nothing.
 const { shown } = require('../service/commands/io');
 
+const CHATS_OUT_OF_ORDER = 'Your chats are all on the node, but its list does not show them in the order they had here. Only the order differs: nothing is missing.';
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 const CHECKED_ACTIONS = new Set([...WRITE_ACTIONS, 'skip-present']);
 
@@ -94,7 +96,14 @@ function unwrapped(answer) {
 
 const sameTime = (a, b) => a === b || (Boolean(a) && Boolean(b) && Date.parse(a) === Date.parse(b));
 
-async function checkChats(items, invoke, note) {
+// Over the moved chats only: the node's own may sit anywhere among them.
+function outOfOrder(items, listed) {
+  const rank = new Map(listed.map((c, i) => [c.id, i]));
+  const ranks = items.map((item) => rank.get(item.targetKey || item.key)).filter((n) => n !== undefined);
+  return ranks.some((n, i) => i > 0 && n < ranks[i - 1]);
+}
+
+async function checkChats(items, invoke, note, notes) {
   let load;
   try {
     load = unwrapped(await invoke('chat:load', []));
@@ -106,7 +115,9 @@ async function checkChats(items, invoke, note) {
     note('chat', 'chat:load', (load && load.history && load.history.error) || (load && load.error) || 'the node has no chat list to read');
     return;
   }
-  const byId = new Map(load.chats.filter(Boolean).map((c) => [c.id, c]));
+  const listed = load.chats.filter(Boolean);
+  if (outOfOrder(items, listed)) notes.push(CHATS_OUT_OF_ORDER);
+  const byId = new Map(listed.map((c) => [c.id, c]));
   for (const item of items) {
     const onNode = byId.get(item.targetKey || item.key);
     if (!onNode) {
@@ -170,6 +181,7 @@ async function checkVault(items, invoke, note) {
 // Never throws.
 async function verifyMigration({ plan, report, invoke }) {
   const missing = [];
+  const notes = [];
   const note = (category, key, why) => missing.push({ category: shown(category, 80), key: shown(key), why: shown(why, 1200) });
   reportProblems(report, note);
   if (!plan || !Array.isArray(plan.items)) note('import', 'plan', 'there is no plan to check against');
@@ -181,11 +193,12 @@ async function verifyMigration({ plan, report, invoke }) {
   for (const item of items) {
     if (item.incomplete === true) note(item.category, item.key, item.note || 'an earlier import landed it incomplete');
   }
-  if (chats.length) await checkChats(chats, invoke, note);
+  if (chats.length) await checkChats(chats, invoke, note, notes);
   if (cases.length) await checkCases(cases, invoke, note);
   if (vault.length) await checkVault(vault, invoke, note);
-  if (missing.length) return { ok: false, code: 'MIGRATION_UNVERIFIED', missing };
-  return { ok: true, checked: { chats: chats.length, cases: cases.length, ...(vault.length ? { vault: vault.length } : {}) } };
+  const said = notes.length ? { notes } : {};
+  if (missing.length) return { ok: false, code: 'MIGRATION_UNVERIFIED', missing, ...said };
+  return { ok: true, checked: { chats: chats.length, cases: cases.length, ...(vault.length ? { vault: vault.length } : {}) }, ...said };
 }
 
-module.exports = { verifyMigration, withSourceFacts };
+module.exports = { verifyMigration, withSourceFacts, CHATS_OUT_OF_ORDER };
