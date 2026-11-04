@@ -105,7 +105,9 @@ function disconnectedRow(n, { install }) {
   if (err && err.code === 'NODE_START_TIMEOUT') return { line: plain(errorText(err)), action: null };
   if (err && err.code === 'NODE_TASK_RUN_FAILED') return { line: RUN_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
   if (err && err.code === 'NODE_STOP_FAILED') return { line: STOP_FAILED(errorText(err)), action: { id: 'nodeRestart', label: 'Restart King Louie Node' } };
-  const taskCode = own(TASK_CODES, n.task) || (err && Object.values(TASK_CODES).includes(err.code) ? err.code : null);
+  // A task code from a refused start counts only while the task as read now
+  // does not say otherwise: registered means that refusal is over.
+  const taskCode = own(TASK_CODES, n.task) || (err && n.task !== 'registered' && Object.values(TASK_CODES).includes(err.code) ? err.code : null);
   if (taskCode === 'NODE_TASK_MISSING') return { line: NODE_LINES.NODE_TASK_MISSING, action: install };
   if (taskCode) return { line: NODE_LINES[taskCode], action: null };
   if (n.running) return { line: RUNNING_NO_BRIDGE(n.pid), action: { id: 'nodeRestart', label: 'Restart King Louie Node' } };

@@ -234,6 +234,13 @@ describe('describeServicePane: personal node', () => {
     assert.deepStrictEqual(ids(other), STANDARD_DISCONNECTED);
     const taskCode = at({ task: 'unknown', startError: { code: 'NODE_TASK_DISABLED' } });
     assert.strictEqual(taskCode.lines[0], disabled.lines[0]);
+    // A task code is about the task as it was: read as registered now, it is stale.
+    const stale = at({ task: 'registered', running: false, startError: { code: 'NODE_TASK_MISSING', message: 'no task' } });
+    assert.strictEqual(stale.lines[0], at({ task: 'registered', running: false }).lines[0]);
+    assert.ok(ids(stale).includes('nodeStart'), ids(stale).join());
+    assert.ok(!ids(stale).includes('nodeInstallPreview'), ids(stale).join());
+    const staleRunning = at({ task: 'registered', running: true, pid: 4242, startError: { code: 'NODE_TASK_DISABLED' } });
+    assert.ok(ids(staleRunning).includes('nodeRestart'), ids(staleRunning).join());
     const unknown = at({ task: 'unknown', running: false });
     assert.strictEqual(unknown.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18796).');
     assert.deepStrictEqual(ids(unknown), STANDARD_DISCONNECTED);

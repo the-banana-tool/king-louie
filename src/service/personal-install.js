@@ -89,16 +89,42 @@ function renderServiceCli({ nodePath, entryPath }) {
   const node = sanitizeWindowsPath('nodePath', nodePath);
   const entry = sanitizeWindowsPath('entryPath', entryPath);
   const quoted = (p) => `"${p.replace(/%/g, '%%')}"`;
+  const ascii = /^[\x00-\x7f]*$/.test(node + entry);
+  // cmd reads a non-ASCII path in the console's page, and the page outlives the
+  // script: it is saved, set for the one line, and put back with the exit code kept.
   return [
+    SERVICE_CLI_MARKER,
     '@echo off',
-    ...(/^[\x00-\x7f]*$/.test(node + entry) ? [] : ['chcp 65001 >nul']),
     'setlocal',
+    ...(ascii ? [] : ['for /f "tokens=2 delims=:." %%a in (\'chcp\') do set "KLCP=%%a"', 'chcp 65001 >nul']),
     'set "ELECTRON_RUN_AS_NODE=1"',
     `${quoted(node)} ${quoted(entry)} %*`,
-    'exit /b %errorlevel%',
+    ...(ascii ? ['exit /b %errorlevel%'] : ['set "KLEXIT=%errorlevel%"', 'if defined KLCP chcp %KLCP% >nul', 'exit /b %KLEXIT%']),
     ''
   ].join('\r\n');
 }
+
+// Ours only if it says so or is what this install would write: a file of that
+// name beside the config dir may be the owner's own script.
+function isOurServiceCli(text, c) {
+  if (typeof text !== 'string') return false;
+  if (text.startsWith(SERVICE_CLI_MARKER)) return true;
+  try {
+    return text === renderServiceCli({ nodePath: c.nodePath, entryPath: c.entryPath });
+  } catch {
+    return false;
+  }
+}
+
+function readServiceCli(file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+const SERVICE_CLI_MARKER = '@rem King Louie Node launcher, written by install --personal.';
 
 function defaultWhoAmI(env) {
   const out = String(execFileSync(system32(env, 'whoami.exe'), ['/user', '/fo', 'csv'], { encoding: 'utf8', windowsHide: true, timeout: 30000 }));
@@ -459,9 +485,12 @@ async function uninstall({ flags, io, c }) {
     return refuse(io, 'Refusing to remove the personal node\'s logon task without confirmation on a non-interactive terminal; pass --yes.');
   }
   const cliPath = flags.dataDir ? path.join(path.dirname(path.resolve(flags.dataDir)), PERSONAL_CLI_FILE) : null;
-  const cliSteps = cliPath && c.exists(cliPath)
+  const cliThere = Boolean(cliPath && c.exists(cliPath));
+  const cliOurs = cliThere && isOurServiceCli(readServiceCli(cliPath), c);
+  const cliSteps = cliOurs
     ? [{ description: 'delete the king-louie-service command', unlink: cliPath, ignoreFailure: true }]
     : [];
+  if (cliThere && !cliOurs) io.stdout.write(`${shown(cliPath, 400)} is left where it is: King Louie did not write it.\n`);
   if (!c.taskRegistered()) {
     if (!cliSteps.length) {
       io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered: nothing to remove. The data dir stays as it is.\n`);

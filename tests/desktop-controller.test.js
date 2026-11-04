@@ -1106,6 +1106,34 @@ describe('desktop controller: the attached start of a personal node', () => {
     controller.dispose();
   });
 
+  it('a read that finds the task registered clears a start refused for its task, and only that', async () => {
+    const runner = fakeRunner({ task: 'missing' });
+    const client = new FakeAttachedClient();
+    const { controller } = attachedController({ runner, client, extra: { nodeRefreshMs: 0 } });
+    await controller.startAttached();
+    assert.strictEqual((await controller.status()).node.startError.code, 'NODE_TASK_MISSING');
+    await controller.refreshIdle();
+    // Still missing: the refusal agrees.
+    assert.strictEqual((await controller.status()).node.startError.code, 'NODE_TASK_MISSING');
+    await controller.refreshIdle();
+    runner.task = 'registered';
+    runner.running = true;
+    await controller.status();
+    await controller.refreshIdle();
+    assert.strictEqual((await controller.status()).node.startError, null);
+    controller.dispose();
+  });
+
+  it('a read of the task leaves a start error that is not about the task', async () => {
+    const runner = fakeRunner({ failure: { line: 'service failed to start: the instance lock is held' } });
+    const { controller } = attachedController({ runner, extra: { nodeRefreshMs: 0 } });
+    await controller.startAttached();
+    await controller.status();
+    await controller.refreshIdle();
+    assert.strictEqual((await controller.status()).node.startError.code, 'NODE_START_FAILED');
+    controller.dispose();
+  });
+
   it('a node already running is never run again; the wait still connects', async () => {
     const runner = fakeRunner({ running: true });
     const client = new FakeAttachedClient({ liveOnRetry: 1 });

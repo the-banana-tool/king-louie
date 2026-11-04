@@ -88,6 +88,13 @@ function outputLines(...texts) {
 const LOG_LINE = /^\[[A-Za-z][\w./-]*\]\s/;
 const withoutLogLines = (text) => String(text || '').split(/\r?\n/).filter((l) => !LOG_LINE.test(l)).join('\n');
 
+// A start refused for its task is about the task as it was. Read as registered
+// now, that refusal is over, whatever else the error says stands.
+const TASK_ERROR_CODES = new Set(['NODE_TASK_MISSING', 'NODE_TASK_DISABLED', 'NODE_TASK_OTHER_ACCOUNT', 'NODE_TASK_UNREADABLE']);
+function withoutStaleTaskError(startError, taskState) {
+  return startError && taskState === 'registered' && TASK_ERROR_CODES.has(startError.code) ? null : startError;
+}
+
 // nodeRunning's answer as the status's two fields.
 function runningFields(r) {
   const running = Boolean(r && r.running);
@@ -1244,7 +1251,7 @@ function createDesktopController({
       ]);
       // A start begun meanwhile owns the state.
       if (disposed || startRun || nodeState.starting) return false;
-      nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+      nodeState = { ...nodeState, task: task.state, ...runningFields(running), startError: withoutStaleTaskError(nodeState.startError, task.state) };
       return true;
     })();
     refreshRun = run;

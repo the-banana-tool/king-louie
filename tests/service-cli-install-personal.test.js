@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const { runPersonalInstall, renderPersonalTaskXml, PERSONAL_TASK_NAME, renderServiceCli } = require('../src/service/personal-install');
 const { loadNodeConfig } = require('../src/service/node-config');
 const { main } = require('../src/service/cli');
@@ -507,6 +508,7 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
     it('renders quoted, CRLF, with the variable set, spaces and shell characters inert', () => {
       const text = renderServiceCli({ nodePath: 'C:\\Program Files\\King & Louie\\King Louie.exe', entryPath: 'C:\\Program Files\\King & Louie\\resources\\app.asar\\bin\\king-louie-service.js' });
       assert.deepEqual(text.split('\r\n'), [
+        '@rem King Louie Node launcher, written by install --personal.',
         '@echo off',
         'setlocal',
         'set "ELECTRON_RUN_AS_NODE=1"',
@@ -519,7 +521,21 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
     it('a percent in a path is doubled; a non-ASCII path sets the code page; a quote is refused', () => {
       assert.ok(renderServiceCli({ nodePath: 'C:\\a%b\\k.exe', entryPath: 'C:\\k.js' }).includes('"C:\\a%%b\\k.exe"'));
       const accented = renderServiceCli({ nodePath: 'C:\\Users\\Jos\u00e9\\k.exe', entryPath: 'C:\\k.js' });
-      assert.ok(accented.split('\r\n').includes('chcp 65001 >nul'));
+      // setlocal first, the page saved before it changes, and put back after the
+      // node exits with the node's exit code kept.
+      assert.deepEqual(accented.split('\r\n'), [
+        '@rem King Louie Node launcher, written by install --personal.',
+        '@echo off',
+        'setlocal',
+        'for /f "tokens=2 delims=:." %%a in (\'chcp\') do set "KLCP=%%a"',
+        'chcp 65001 >nul',
+        'set "ELECTRON_RUN_AS_NODE=1"',
+        '"C:\\Users\\Jos\u00e9\\k.exe" "C:\\k.js" %*',
+        'set "KLEXIT=%errorlevel%"',
+        'if defined KLCP chcp %KLCP% >nul',
+        'exit /b %KLEXIT%',
+        ''
+      ]);
       assert.ok(!renderServiceCli({ nodePath: 'C:\\k.exe', entryPath: 'C:\\k.js' }).includes('chcp'));
       assert.throws(() => renderServiceCli({ nodePath: 'C:\\a"b\\k.exe', entryPath: 'C:\\k.js' }), /double quote/);
     });
@@ -528,7 +544,7 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
       const s = setup();
       const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
       fs.mkdirSync(path.dirname(cli), { recursive: true });
-      fs.writeFileSync(cli, 'x');
+      fs.writeFileSync(cli, renderServiceCli({ nodePath: 'C:\\elsewhere\\k.exe', entryPath: 'C:\\elsewhere\\k.js' }));
       const d = deps(s);
       const { code, t } = await run('uninstall', s, d, { yes: true });
       assert.equal(code, 0, t.errors());
@@ -548,6 +564,45 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
       const none = deps(s);
       await run('uninstall', s, none, { yes: true });
       assert.ok(!none.executed.flat().some((step) => step.unlink));
+    });
+
+    it('uninstall removes what install would write here, marker or not, and leaves anyone else\'s, saying so', async () => {
+      const s = setup();
+      const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
+      fs.mkdirSync(path.dirname(cli), { recursive: true });
+      fs.writeFileSync(cli, renderServiceCli({ nodePath: APP, entryPath: 'C:\\kl\\bin\\king-louie-service.js' }));
+      const same = deps(s, { nodePath: APP });
+      await run('uninstall', s, same, { yes: true });
+      assert.ok(same.executed.flat().some((step) => step.unlink === cli));
+
+      for (const taskRegistered of [() => true, () => false]) {
+        fs.writeFileSync(cli, '@echo off\r\necho my own script\r\n');
+        const d = deps(s, { taskRegistered });
+        const { code, t } = await run('uninstall', s, d, { yes: true });
+        assert.equal(code, 0, t.errors());
+        assert.ok(!d.executed.flat().some((step) => step.unlink), 'not ours: not removed');
+        assert.match(t.text(), /king-louie-service\.cmd[^\n]* left /);
+      }
+      const dry = deps(s);
+      const out = await run('uninstall', s, dry, { dryRun: true });
+      assert.doesNotMatch(out.t.text(), /\[dry-run\] [^\n]*king-louie-service\.cmd/);
+      assert.match(out.t.text(), /king-louie-service\.cmd[^\n]* left /);
+      assert.ok(fs.existsSync(cli));
+    });
+
+    it('a launcher with a non-ASCII path keeps the node\'s exit code and puts the console\'s page back', { skip: process.platform !== 'win32' }, () => {
+      const s = setup();
+      const dir = path.join(s.base, 'Jos\u00e9');
+      fs.mkdirSync(dir);
+      const entry = path.join(dir, 'k.js');
+      fs.writeFileSync(entry, 'process.exit(7);\n');
+      const file = path.join(s.base, 'launcher.cmd');
+      fs.writeFileSync(file, renderServiceCli({ nodePath: process.execPath, entryPath: entry }));
+      const script = path.join(s.base, 'outer.cmd');
+      fs.writeFileSync(script, ['@echo off', 'chcp 437 >nul', 'call "%~1"', 'echo exit=%errorlevel%', 'chcp', ''].join('\r\n'));
+      const r = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', script, file], { encoding: 'utf8', windowsHide: true });
+      assert.match(r.stdout, /exit=7/, r.stdout + r.stderr);
+      assert.match(r.stdout, /: 437\b/, r.stdout);
     });
   });
 
