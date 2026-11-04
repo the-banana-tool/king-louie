@@ -2254,7 +2254,159 @@ describe('sealed leases (sealed phones, R-SP-2, R-SP-4, R-SP-5, R-SP-7)', () => 
     leases.stopAll();
   });
 
+  describe('a resume under sealing', () => {
+    async function suspendedForResume() {
+      const lease = await running();
+      leases.suspend(lease.leaseId, 'foreground_changed');
+      assert.equal(lease.state, 'suspended');
+      return lease;
+    }
+
+    it('goes sealed, is granted by the granting phone over its salted hash, and never outlives the lease', async () => {
+      const lease = await suspendedForResume();
+      const expiry = lease.expiresAt;
+      const req = relay.last('kl.lease.request');
+      assert.ok(req.message.sealed && !('lease' in req.message));
+      const full = opened(req);
+      assert.equal(full.lease.resumes, lease.leaseId);
+      assert.equal(L.validateOpenedLeaseRequest(full), null);
+      clock.t += 1000;
+      const reply = leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 10 }));
+      assert.equal(reply.state, 'active');
+      assert.equal(lease.state, 'active');
+      assert.ok(lease.expiresAt <= expiry, 'a resume does not extend the lease');
+      leases.stopAll();
+    });
+
+    it('the same grant again is a replay, and changes nothing', async () => {
+      const lease = await suspendedForResume();
+      const req = relay.last('kl.lease.request');
+      const grant = phone.leaseGrant(req.envelope, { minutes: 10 });
+      assert.equal(leases.onGrant(grant).state, 'active');
+      const expiry = lease.expiresAt;
+      assert.deepEqual([leases.onGrant(grant).state, leases.onGrant(grant).reason], ['rejected', 'replay']);
+      assert.deepEqual([lease.state, lease.expiresAt], ['active', expiry]);
+      leases.stopAll();
+    });
+
+    it('a grant over the unsalted hash is lease_hash_mismatch, and the request stays open', async () => {
+      const lease = await suspendedForResume();
+      const req = relay.last('kl.lease.request');
+      const unsalted = phone.leaseGrant(req.envelope, { minutes: 10, overrides: { lease_hash: L.leaseHash(opened(req).lease) } });
+      assert.equal(leases.onGrant(unsalted).reason, 'lease_hash_mismatch');
+      assert.equal(lease.state, 'suspended');
+      assert.equal(leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 10 })).state, 'active');
+      leases.stopAll();
+    });
+  });
+
+  describe('a clear request held with the link down, when sealing turns on', () => {
+    const payloadOf = (sent) => Buffer.from(sent.envelope.payload, 'base64url').toString('utf8');
+
+    it('never goes out: it is sealed again, and only the new one can be granted', async () => {
+      sealing = false;
+      relay.down();
+      const p = requestLease();
+      const [held] = [...leases.pending.values()];
+      assert.ok(open(held.envelope).message.lease, 'built in clear');
+      sealing = null;
+      relay.up();
+      const sent = relay.all('kl.lease.request');
+      assert.equal(sent.length, 1);
+      assert.ok(sent[0].message.sealed);
+      assert.doesNotMatch(payloadOf(sent[0]), /calc\.exe|Enter the totals/);
+      assert.equal(leases.pending.size, 1);
+      assert.equal(leases.onGrant(phone.leaseGrant(held.envelope, { minutes: 10 })).reason, 'unknown_request');
+      assert.equal(leases.onGrant(phone.leaseGrant(sent[0].envelope, { minutes: 10 })).state, 'active');
+      await p;
+      leases.stopAll();
+    });
+
+    it('with nobody to seal to, it ends the lease with the cause and goes nowhere', async () => {
+      sealing = false;
+      relay.down();
+      const p = requestLease();
+      sealing = null;
+      canSeal = false;
+      relay.up();
+      await assert.rejects(p, (e) => e.code === 'capability_unavailable' && /no_sealed_recipient/.test(e.message));
+      assert.equal(relay.all('kl.lease.request').length, 0);
+      assert.equal(leases.current(), null);
+    });
+
+    it('so does the node\'s own resume, held when its send failed', async () => {
+      sealing = false;
+      const lease = await running();
+      const realSend = relay.send;
+      relay.send = async () => { throw new Error('relay_offline'); };
+      leases.suspend(lease.leaseId, 'foreground_changed');
+      relay.send = realSend;
+      await new Promise((resolve) => { setImmediate(resolve); });
+      const before = relay.all('kl.lease.request').length;
+      assert.ok([...leases.pending.values()].every((e) => e.resume && e.delivered === false && e.salt === null));
+      sealing = null;
+      relay.down();
+      relay.up();
+      const after = relay.all('kl.lease.request').slice(before);
+      assert.equal(after.length, 1);
+      assert.ok(after[0].message.sealed);
+      assert.equal(opened(after[0]).lease.resumes, lease.leaseId);
+      assert.equal(leases.pending.size, 1);
+      leases.stopAll();
+    });
+
+    it('a clear request held while sealing stays off is delivered as it was', async () => {
+      sealing = false;
+      relay.down();
+      const p = requestLease();
+      relay.up();
+      const [sent] = relay.all('kl.lease.request');
+      assert.ok(sent.message.lease);
+      leases.onGrant(phone.leaseGrant(sent.envelope, { minutes: 10 }));
+      await p;
+      leases.stopAll();
+    });
+  });
+
   describe('latched, and nobody left to seal to', () => {
+    it('a pending lease does not wait out its request: the check from the request ends it with the cause', async () => {
+      const p = requestLease();
+      const lease = leases.current();
+      assert.equal(lease.state, 'pending');
+      canSeal = false;
+      timers.advance(5000);
+      await assert.rejects(p, (e) => e.code === 'capability_unavailable' && /no_sealed_recipient/.test(e.message));
+      assert.deepEqual([lease.state, lease.endReason], ['ended', 'no_sealed_recipient']);
+      assert.equal(leases.pending.size, 0);
+      const sent = relay.last('kl.lease.status');
+      assert.deepEqual([sent.message.state, sent.message.reason], ['ended', 'no_sealed_recipient']);
+    });
+
+    it('a grant on a clear pending request is refused before it activates', async () => {
+      sealing = false;
+      const p = requestLease();
+      const req = relay.last('kl.lease.request');
+      const lease = leases.current();
+      sealing = true;
+      canSeal = false;
+      const reply = leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 10 }));
+      assert.deepEqual([reply.state, reply.reason], ['ended', 'no_sealed_recipient']);
+      assert.deepEqual([lease.state, lease.endReason, lease.expiresAt], ['ended', 'no_sealed_recipient', null]);
+      assert.equal(lease.grantedBy, null);
+      assert.ok(!kinds().includes('lease.granted'));
+      await assert.rejects(p, (e) => e.code === 'capability_unavailable');
+    });
+
+    it('a deny still answers as a deny', async () => {
+      sealing = false;
+      const p = requestLease();
+      const req = relay.last('kl.lease.request');
+      sealing = true;
+      canSeal = false;
+      leases.onGrant(phone.leaseGrant(req.envelope, { decision: 'deny' }));
+      await assert.rejects(p, (e) => e.code === 'lease_denied');
+    });
+
     it('a new request is refused capability_unavailable with the cause, and nothing is sent', async () => {
       canSeal = false;
       await assert.rejects(requestLease(), (e) => e.code === 'capability_unavailable' && /no_sealed_recipient/.test(e.message) && /no active phone holds a box key/.test(e.message));

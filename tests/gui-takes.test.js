@@ -240,6 +240,21 @@ describe('a take on a node that seals', () => {
     assert.ok(names(broker.calls).includes('recordStop'));
   });
 
+  it('a press on a clear pending request while nobody can read it starts no browser and no recorder', async () => {
+    const realPolicy = leases.sealPolicy;
+    leases.sealPolicy = null;
+    const p = begin();
+    await tick();
+    const req = relay.last('kl.lease.request');
+    assert.ok(req.message.lease, 'asked in clear');
+    leases.sealPolicy = realPolicy;
+    canSeal = false;
+    const reply = leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 30 }));
+    assert.equal(reply.reason, 'no_sealed_recipient');
+    await assert.rejects(p, (e) => e.code === 'capability_unavailable');
+    assert.deepEqual(broker.calls, []);
+  });
+
   it('with nobody to seal to a new take is refused before anything starts', async () => {
     canSeal = false;
     await assert.rejects(begin(), (e) => e.code === 'capability_unavailable' && /no_sealed_recipient/.test(e.message));

@@ -321,8 +321,8 @@ class LeaseManager extends EventEmitter {
     const store = this.approvals.approverStore;
     if (refresh && store && typeof store.refresh === 'function') store.refresh();
     for (const lease of this.leases) {
-      if (lease.state === 'ended' || lease.grantedBy === null) continue;
-      if (!this._grantorActive(lease)) this._end(lease, GRANTOR_REVOKED_REASON);
+      if (lease.state === 'ended') continue;
+      if (lease.grantedBy !== null && !this._grantorActive(lease)) this._end(lease, GRANTOR_REVOKED_REASON);
       else {
         const why = this.sealProblem();
         if (why) this._endUnsealable(lease, why);
@@ -525,6 +525,8 @@ class LeaseManager extends EventEmitter {
         tokens: new Map(), tokenIssued: 0, tokenUsedUpTo: 0, lastStatus: null
       };
       this.leases.push(lease);
+      // A lease nobody has granted yet does not wait out its request once no phone can read it.
+      if (this.sealPolicy) this._armGrantorCheck(lease);
       this._sendRequest(lease, { resume: false, probed: true });
     } else {
       // A suspended lease whose resume request lapsed: ask again.
@@ -666,6 +668,13 @@ class LeaseManager extends EventEmitter {
     if (entry.resume && this._expired(lease)) {
       this._end(lease, 'expired');
       return this._reply(lease, { state: 'ended' });
+    }
+    // A grant on a request sent before nobody could read this node (a clear one,
+    // say) does not activate: a take would start its browser and recorder on it.
+    const unsealable = this.sealProblem();
+    if (unsealable) {
+      this._endUnsealable(lease, unsealable);
+      return this._reply(lease, { state: 'ended', reason: SEAL_REASON });
     }
     lease.apps = [...m.grant.apps];
     if (!entry.resume) {
@@ -895,11 +904,21 @@ class LeaseManager extends EventEmitter {
 
   _relayUp() {
     const now = this.clock();
-    for (const entry of this.pending.values()) {
-      if (!entry.delivered && now <= Date.parse(entry.expires_at)) this._deliver(entry);
+    for (const entry of [...this.pending.values()]) {
+      if (entry.delivered || now > Date.parse(entry.expires_at)) continue;
+      if (entry.salt === null && this.sealing()) this._rebuild(entry);
+      else this._deliver(entry);
     }
     const lease = this.current();
     if (lease && lease.state === 'suspended' && lease.suspendReason !== CONTACT_REASON && ![...this.pending.values()].some((p) => p.ref === lease)) this._sendRequest(lease, { resume: true });
+  }
+
+  // A clear request held with the link down, and this node seals now: it never
+  // goes out. A new one is built, which seals it, or ends the lease with the cause.
+  _rebuild(entry) {
+    this.timers.clearTimeout(entry.timer);
+    this.pending.delete(entry.request_id);
+    this._sendRequest(entry.ref, { resume: entry.resume });
   }
 
   // Ends one lease by id (a take ends only the lease its own request made).
