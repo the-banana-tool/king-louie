@@ -73,13 +73,16 @@ class Storage(context: Context) {
     /**
      * The nodes this phone has opened a sealed message from, by node id
      * (R-SP-15). Only a signature-verified open adds one (AppModel.noteSeal);
-     * Reset clears it with the rest, and nothing else takes one away.
+     * Reset clears it with the rest, and nothing else takes one away. A one-way
+     * mark, so it is on disk before anything goes on (commit, not apply).
      */
     var sealedSeen: Set<String>
         get() = prefs.getString("sealedSeen", null)?.let { text ->
             runCatching { JsonText.parse(text).arr()!!.map { it.str()!! }.toSet() }.getOrNull()
         } ?: emptySet()
-        set(v) = prefs.edit().putString("sealedSeen", Jcs.serialize(JsonArray(v.sorted().map { jsonString(it) }))).apply()
+        set(v) {
+            prefs.edit().putString("sealedSeen", Jcs.serialize(JsonArray(v.sorted().map { jsonString(it) }))).commit()
+        }
 
     /** The signed `kl.device.read_key` statement (an envelope, JSON), kept until it expires to re-post it (§8.7). */
     var readKeyStatement: String?
@@ -110,7 +113,7 @@ class Storage(context: Context) {
         } ?: emptyMap()
         set(v) = prefs.edit().putString("boxKeyNodes", Jcs.serialize(JsonObject(v.mapValues { jsonString(it.value) }))).apply()
 
-    /** An enrollment carried this box key, or a statement of it went out. */
+    /** A statement of this box key went to every node, or every pinned node enrolled with it (BoxKeyNodes.sent). */
     var boxKeySent: Boolean
         get() = prefs.getBoolean("boxKeySent", false)
         set(v) = prefs.edit().putBoolean("boxKeySent", v).apply()

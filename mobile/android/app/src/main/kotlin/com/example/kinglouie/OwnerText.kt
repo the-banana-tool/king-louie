@@ -30,7 +30,17 @@ private const val KEY_LOCKED_LINE = "Unlock to read"
 internal fun unreadableLine(reason: String, nodeName: String): String = when (reason) {
     Seal.CLEAR_AFTER_SEALED -> CLEAR_AFTER_SEALED_LINE
     Seal.KEY_LOCKED -> KEY_LOCKED_LINE
+    AppModel.BOX_KEY_BROKEN -> "This phone's box key stopped working. Make a new one in Settings."
+    AppModel.BOX_KEY_REFUSED -> AppModel.BOX_KEY_REFUSED_LINE
     else -> "Sealed for this node's other phones. Run device apply on ${Display.escape(nodeName)} for this phone."
+}
+
+/** A lease's kind in a row's label. The kind of a sealed request nobody read is not known, and is not guessed. */
+internal fun leaseLabel(kind: String?): String = when (kind) {
+    "computer_use" -> "Computer use"
+    "take" -> "Take"
+    "task" -> "Task"
+    else -> "Request"
 }
 
 /** At most `max` code points, then escaped (never cut through an escape). */

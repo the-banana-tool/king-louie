@@ -233,7 +233,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.equal(count(live, '["status"]'), 5, 'a listed request\'s status, a listed lease\'s (twice: the list, and the live view\'s fresh status), a reply\'s and a task\'s Allow (through noteListedLease): all through verifiedMessage or applyLease');
     // The live view asks for a fresh status before a watch only when the token it holds is over a minute old by the phone's running clock.
     const refresh = section(live, '// ---- Live view loop (android-slim §7.6) ----', '// ---- Live view loop: end ----');
-    assert.match(refresh, /if \(Leases\.tokenIsStale\(live\.contactTokenAtMs, SystemClock\.elapsedRealtime\(\)\)\) \{\n\s+for \(entry in api\.leases\(\)\) \{\n/);
+    assert.match(refresh, /if \(Leases\.tokenIsStale\(live\.contactTokenAtMs, SystemClock\.elapsedRealtime\(\)\)\) \{\n\s+val listed = api\.leases\(\)\n\s+warmSeals\(listed\)\n\s+for \(entry in listed\) \{\n/);
     assert.ok(refresh.indexOf('Leases.tokenIsStale(') < refresh.indexOf('Leases.watch('), 'before the watch is built');
     assert.match(refresh, /if \(!isStatusOnly\(entry\) \|\| entry\["node_id"\]\.str\(\) != pin\.id\) continue\n\s+val signed = .*\n\s+updateLive\(leaseId\) \{ applyLease\(signed, pin, it, deviceId\) \}/);
     assert.equal(count(apply, 'SystemClock.elapsedRealtime()'), 2, 'the token\'s age is taken when it is applied');

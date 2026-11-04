@@ -179,8 +179,16 @@ fun SettingsScreen(model: AppModel, back: () -> Unit, openScanner: () -> Unit) {
                     Text("This phone", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(model.deviceFingerprint ?: "No key yet", style = MonoStyle)
                     Text(model.readKeyFingerprint?.let { "Read key $it" } ?: "No read key yet", style = MonoStyle, color = KlTokens.textSecondary)
-                    if (model.boxKeyRefused) Text(AppModel.BOX_KEY_REFUSED_LINE, color = statusColors.warning)
-                    else Text(model.boxKeyFingerprint?.let { "Box key $it" } ?: "No box key yet", style = MonoStyle, color = KlTokens.textSecondary)
+                    if (model.boxKeyRefused) {
+                        Text(AppModel.BOX_KEY_REFUSED_LINE, color = statusColors.warning)
+                        if (live) TextButton({ model.retryBoxKey() }, enabled = !model.boxKeySetupBusy) { Text("Try again") }
+                    } else {
+                        Text(model.boxKeyFingerprint?.let { "Box key $it" } ?: "No box key yet", style = MonoStyle, color = KlTokens.textSecondary)
+                        if (model.boxKeyBroken) {
+                            Text(unreadableLine(AppModel.BOX_KEY_BROKEN, ""), color = statusColors.warning)
+                            if (live) TextButton({ model.remakeBoxKey() }, enabled = !model.boxKeySetupBusy) { Text("Make a new box key") }
+                        }
+                    }
                 }
             }
             val others = model.devices.filter { it["device_id"].str() != model.deviceId }

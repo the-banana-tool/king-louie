@@ -72,7 +72,7 @@ describe('Android: the box key (R-SP-10)', () => {
     const model = kt('AppModel.kt');
     const device = section(model, 'private fun deviceJson(k: DeviceKey)', '\n    }\n');
     assert.equal(count(device, 'readKey?.jwk, boxKey?.jwk)'), 2);
-    assert.match(kt('SettingsScreen.kt'), /if \(model\.boxKeyRefused\) Text\(AppModel\.BOX_KEY_REFUSED_LINE/);
+    assert.match(kt('SettingsScreen.kt'), /if \(model\.boxKeyRefused\) \{\n\s+Text\(AppModel\.BOX_KEY_REFUSED_LINE/);
     assert.equal(count(model, 'const val BOX_KEY_REFUSED_LINE = "This phone cannot hold a box key; sealed nodes will not show here."'), 1);
     assert.match(model, /boxKeyNodes\.markRefused\(true\)/);
   });
@@ -222,9 +222,153 @@ describe('Android: sealedSeen (R-SP-15)', () => {
     const demote = section(model, 'private fun demoteClear(', '\n    }\n');
     for (const store of ['pending', 'questions', 'leaseRequests']) assert.ok(demote.includes(store), store);
     // And the fetch that made the mark keeps the row, and looks again at what it read before the mark.
-    assert.match(section(model, 'private fun takeApprovals', '\n    }\n'), /it\.ref !in unread && it\.ref\.removePrefix\(TOOL_REF\) !in listed/);
+    assert.match(section(model, 'private fun takeApprovals', '\n    }\n'), /u\.ref !in unread && \(id !in listed \|\| pending\.any \{ it\.id == id \}\)/);
     assert.match(section(model, 'private suspend fun fetchQuestions', '\n    }\n'), /read\.partition \{ it\.unreadable != null \|\| heldToSealing\(it\.nodeId, it\.seal\) \}/);
     assert.match(section(model, 'private suspend fun refreshLeases', '\n    }\n'), /read\.partition \{ heldToSealing\(it\.request\.nodeId, it\.seal\) \}/);
+  });
+});
+
+describe('Android: a box key that stopped working, or was refused', () => {
+  it('a failure while unlocked that lasts gets its own reason, line and remedy', () => {
+    const model = kt('AppModel.kt');
+    assert.match(section(model, 'private fun deviceLocked()', '\n'), /KeyguardManager::class\.java\)\?\.isDeviceLocked == true/);
+    const warm = section(model, 'private suspend fun warmSeals', '\n    }\n');
+    assert.match(warm, /catch \(e: SealKeyUnavailableException\)/);
+    assert.match(warm, /if \(deviceLocked\(\)\) sawLocked = true else sawFailure = true/);
+    assert.match(warm, /boxKeyHealth\.failedUnlocked\(SystemClock\.elapsedRealtime\(\)\)/);
+    assert.match(warm, /boxKeyBroken = boxKeyHealth\.broken/);
+    const text = kt('OwnerText.kt');
+    assert.equal(count(text, "This phone's box key stopped working. Make a new one in Settings."), 1);
+    assert.match(section(text, 'internal fun unreadableLine', '\n}\n'), /AppModel\.BOX_KEY_BROKEN -> /);
+    assert.match(section(model, 'private fun rowReason(', '\n'), /private fun rowReason\(u: UnreadableItem\)/);
+    assert.match(section(model, 'private fun rowReason(', '\n    }\n'), /u\.reason == Seal\.KEY_LOCKED && boxKeyBroken -> BOX_KEY_BROKEN/);
+    assert.match(section(model, 'fun approvalList()', '\n    }\n'), /unreadableLine\(rowReason\(u\), u\.nodeName\)/);
+    assert.match(kt('SettingsScreen.kt'), /model\.boxKeyBroken/);
+    assert.match(kt('SettingsScreen.kt'), /model\.remakeBoxKey\(\)/);
+    const remake = section(model, 'fun remakeBoxKey()', '\n    }\n');
+    for (const step of ['BoxKey.delete()', 'clearOpened()', 'boxKeyNodes.forget()', 'setUpBoxKey()']) assert.ok(remake.includes(step), step);
+    assert.ok(remake.indexOf('BoxKey.delete()') < remake.indexOf('setUpBoxKey()'));
+  });
+
+  it('an entry that is gone is that failure too, not a wrap for someone else', () => {
+    assert.match(section(kt('BoxKey.kt'), 'fun agree(x: String, y: String)', '\n    }\n'), /stored as\? PrivateKey \?: throw BoxKeyUnavailableException\(\)/);
+  });
+
+  it('a refusal can be tried again, a locked phone is never marked, and rows say the refusal', () => {
+    const model = kt('AppModel.kt');
+    assert.equal(count(model, 'if (!deviceLocked()) boxKeyNodes.markRefused(true)'), 1);
+    assert.equal(count(model, 'if (boxKey == null && !deviceLocked()) boxKeyNodes.markRefused(true)'), 1);
+    assert.equal(count(model, 'boxKeyNodes.markRefused(true)'), 2);
+    const retry = section(model, 'fun retryBoxKey()', '\n    }\n');
+    assert.ok(retry.indexOf('boxKeyNodes.markRefused(false)') >= 0 && retry.indexOf('boxKeyNodes.markRefused(false)') < retry.indexOf('setUpBoxKey()'));
+    assert.match(kt('SettingsScreen.kt'), /model\.retryBoxKey\(\)[^\n]*\{ Text\("Try again"\) \}/);
+    assert.match(section(model, 'private fun rowReason(', '\n    }\n'), /boxKeyNodes\.refused && u\.reason in setOf\("not_recipient", "open_failed"\) -> BOX_KEY_REFUSED/);
+    assert.match(section(kt('OwnerText.kt'), 'internal fun unreadableLine', '\n}\n'), /AppModel\.BOX_KEY_REFUSED -> AppModel\.BOX_KEY_REFUSED_LINE/);
+  });
+
+  it('pairing a new node does not call old nodes told, when they never were', () => {
+    const model = kt('AppModel.kt');
+    const enrolled = section(model, 'private fun enrolledWithBoxKey(', '\n    }\n');
+    assert.match(enrolled, /if \(boxKeyNodes\.sent \|\| storage\.nodes\.all \{ it\.id in enrolled \}\) boxKeyNodes\.markSent\(\)/);
+    assert.equal(count(model, 'boxKeyNodes.markSent()'), 2, 'after a post, and here');
+    assert.match(section(model, 'private suspend fun pairAtConsole', '\n    }\n'), /enrolledWithBoxKey\(setOf\(pin\.id\)\)/);
+    assert.match(section(model, 'private suspend fun claimInvite', '\n    }\n'), /enrolledWithBoxKey\(pins\.map \{ it\.id \}\.toSet\(\)\)/);
+  });
+
+  it('the one-way mark is written at once, and again if the store lost it', () => {
+    assert.match(section(kt('Storage.kt'), 'var sealedSeen: Set<String>', '\n\n'), /\.commit\(\)/);
+    assert.match(section(kt('AppModel.kt'), 'private fun noteSeal(nodeId: String, state: SealState)', '\n    }\n'), /if \(storage\.sealedSeen != next\) storage\.sealedSeen = next/);
+  });
+
+  it('a retry looks again before each send, and the label is not a guess', () => {
+    const model = kt('AppModel.kt');
+    const loop = section(section(model, 'private suspend fun sendResponse', '\n    }\n'), 'while (true) {', 'api.respond(');
+    assert.match(loop, /if \(approvalHeld\(item\)\) \{\n\s+refuseHeldApproval\(item\)\n\s+return null/);
+    assert.match(section(model, 'private fun unreadableLease(', '\n    )\n'), /leaseLabel\(item\.request\.kind\)/);
+    assert.match(section(model, 'private fun verifiedLeaseRequest', '\n    }\n'), /leaseLabel\(status\?\.kind\)/);
+    const label = section(kt('OwnerText.kt'), 'internal fun leaseLabel', '\n}\n');
+    for (const [kind, word] of [['computer_use', 'Computer use'], ['take', 'Take'], ['task', 'Task']]) assert.ok(label.includes(`"${kind}" -> "${word}"`), kind);
+    assert.match(label, /else -> "Request"/);
+    assert.ok(!model.includes('"Computer use", '), 'no guess is left');
+    assert.ok(!/\(none, or the Keystore did not answer\)/.test(kt('BoxKey.kt')));
+  });
+});
+
+describe('Android: the Keystore, off the main thread, and plaintext kept briefly', () => {
+  it('warmSeals verifies first, opens off the main thread and marks nothing', () => {
+    const model = kt('AppModel.kt');
+    const warm = section(model, 'private suspend fun warmSeals', '\n    }\n');
+    assert.match(warm, /withContext\(Dispatchers\.IO\)/);
+    assert.ok(warm.indexOf('verifiedSealed(raw, pins)') >= 0 && warm.indexOf('verifiedSealed(raw, pins)') < warm.indexOf('open('));
+    assert.ok(!warm.includes('noteSeal('));
+    const verified = section(model, 'private fun verifiedSealed(', '\n    }\n');
+    assert.match(verified, /Leases\.verifiedMessage\(envelope, pin\)/);
+    assert.match(verified, /containsKey\("sealed"\)/);
+    // What already opened is not asked for again, and a fresh open is what proves the key.
+    assert.match(warm, /message in openedMemo/);
+    assert.match(warm, /sawOpen = true/);
+  });
+
+  it('a failure is remembered for one fetch and the memo keeps only successes', () => {
+    const model = kt('AppModel.kt');
+    const opener = section(model, 'private fun opener(): Opener?', '\n    }\n');
+    assert.match(opener, /val failed = synchronized\(openedMemo\) \{ failedOpens\[message\] \}\n\s+if \(failed != null\) throw failed/);
+    // The only write to the memo is after an open returned, and only for the generation that asked.
+    assert.equal(count(model, 'openedMemo[message] = '), 1);
+    assert.match(opener, /open\(type, message\)\.also \{ opened ->\n\s+synchronized\(openedMemo\) \{ if \(generation == openedGeneration\) openedMemo\[message\] = opened \}/);
+    const warm = section(model, 'private suspend fun warmSeals', '\n    }\n');
+    assert.match(warm, /failedOpens\.clear\(\)/);
+    assert.match(warm, /if \(generation == openedGeneration\) failedOpens\[message\] = e/);
+  });
+
+  it('every reader the network reaches off a fetch warms first', () => {
+    const model = kt('AppModel.kt');
+    assert.match(section(model, 'fun openPushed(', '\n    }\n'), /api\.approval\(id\)\?\.let \{ entry ->\n\s+warmSeals\(listOf\(entry\)\)\n\s+receive\(entry, storage\.nodes\)/);
+    const decide = section(model, 'fun decideLease(', '\n    }\n');
+    assert.ok(decide.indexOf('warmSeals(listOfNotNull(sent.json))') >= 0);
+    assert.ok(decide.indexOf('warmSeals(listOfNotNull(sent.json))') < decide.indexOf('noteListedLease('));
+    assert.match(section(model, 'fun watchWithFingerprint()', '\n    }\n'), /warmSeals\(listOfNotNull\(sent\.json\)\)/);
+    assert.match(section(model, 'fun killSwitch()', '\n    }\n'), /warmSeals\(listOfNotNull\(sent\.json\)\)/);
+    const liveLoop = section(model, '// ---- Live view loop (android-slim §7.6) ----', '// ---- Live view loop: end ----');
+    assert.equal(count(liveLoop, 'warmSeals('), 3, 'a listing, a watch reply and each view');
+    const fetches = [section(model, 'private fun takeApprovals', '\n    }\n'), section(model, 'private suspend fun fetchQuestions', '\n    }\n'), section(model, 'private suspend fun refreshLeases', '\n    }\n')];
+    assert.match(fetches[1], /warmSeals\(listed\)/);
+    assert.match(fetches[2], /warmSeals\(listed\)/);
+    assert.match(section(model, 'private inner class ForegroundLoop', 'private fun takeApprovals'), /warmSeals\(items\)\n\s+takeApprovals\(items\)/);
+  });
+
+  it('plaintext leaves with the screen, and nothing in flight brings it back', () => {
+    const model = kt('AppModel.kt');
+    const clear = section(model, 'private fun clearOpened()', '\n    }\n');
+    assert.match(clear, /openedGeneration\+\+/);
+    assert.match(clear, /openedMemo\.clear\(\)/);
+    assert.match(clear, /failedOpens\.clear\(\)/);
+    assert.match(section(model, 'fun onBackground()', '\n    }\n'), /clearOpened\(\)/);
+    assert.match(section(model, 'fun closeLiveLease()', '\n    }\n'), /clearOpened\(\)/);
+    assert.match(section(model, 'private suspend fun finishReset', 'companion object'), /clearOpened\(\)/);
+    // A view's entry goes once it was read, applied or not.
+    const apply = section(model, 'private fun applyLease', '\n    }\n');
+    assert.ok(apply.indexOf('dropOpenedViews()') > apply.indexOf('Leases.verifyView('));
+    assert.ok(apply.indexOf('dropOpenedViews()') < apply.indexOf('check.view?.takeIf'));
+    assert.match(section(model, 'private fun dropOpenedViews()', '\n    }\n'), /"kl\.lease\.view"/);
+  });
+});
+
+describe('Android: the shape of the gate', () => {
+  it('approvalHeld is exactly a clear item of a node seen sealing', () => {
+    assert.match(kt('AppModel.kt'), /private fun approvalHeld\(item: PendingItem\): Boolean = item\.opened == null && heldToSealing\(item\.display\["node"\]\["id"\]\.str\(\) \?: "", SealState\.CLEAR\)\n/);
+  });
+
+  it('demoteClear leaves what is decided or under way, and only that node', () => {
+    const demote = section(kt('AppModel.kt'), 'private fun demoteClear(', '\n    }\n');
+    assert.match(demote, /pending\.filter \{ approvalHeld\(it\) && it\.status == null && !it\.deciding && it\.display\["node"\]\["id"\]\.str\(\) == nodeId \}/);
+    assert.match(demote, /questions\.filter \{ it\.nodeId == nodeId && heldToSealing\(it\.nodeId, it\.seal\) && it\.token !in answering \}/);
+    assert.match(demote, /leaseRequests\.filter \{ it\.request\.nodeId == nodeId && heldToSealing\(it\.request\.nodeId, it\.seal\) && it\.request\.requestId !in decidingLease \}/);
+  });
+
+  it('a key counts as sent only after the post returned', () => {
+    const setUp = section(kt('AppModel.kt'), 'fun setUpBoxKey()', '\n    }\n');
+    assert.ok(setUp.indexOf('postBoxKey(api, envelope)') >= 0 && setUp.indexOf('postBoxKey(api, envelope)') < setUp.indexOf('boxKeyNodes.markSent()'));
   });
 });
 

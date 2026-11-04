@@ -1,5 +1,6 @@
 package com.example.kinglouie
 
+import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
@@ -15,6 +16,7 @@ import com.example.kinglouie.protocol.AppMode
 import com.example.kinglouie.protocol.ApprovalList
 import com.example.kinglouie.protocol.ApprovalStatus
 import com.example.kinglouie.protocol.B64Url
+import com.example.kinglouie.protocol.BoxKeyHealth
 import com.example.kinglouie.protocol.Digest
 import com.example.kinglouie.protocol.Display
 import com.example.kinglouie.protocol.Envelope
@@ -42,6 +44,7 @@ import com.example.kinglouie.protocol.RepinTarget
 import com.example.kinglouie.protocol.ResponseOutcome
 import com.example.kinglouie.protocol.ScopeChoice
 import com.example.kinglouie.protocol.Seal
+import com.example.kinglouie.protocol.SealKeyUnavailableException
 import com.example.kinglouie.protocol.SealState
 import com.example.kinglouie.protocol.SendOutcome
 import com.example.kinglouie.protocol.Timestamps
@@ -90,10 +93,22 @@ class AppModel(context: Context) {
     /** The nodes this phone has opened a sealed message from (R-SP-15), as Storage keeps them; noteSeal is the only writer. */
     private var sealedSeen: Set<String> = storage.sealedSeen
 
-    /** What verified sealed messages opened to, so a fetch every 5 s asks the Keystore once for each. Only ever this phone's own plaintext, already in the stores. */
+    /**
+     * What verified sealed messages opened to, so a fetch every 5 s asks the Keystore
+     * once for each. It holds plaintext, some of it no store keeps, so it lasts only
+     * while it is of use: cleared when the app leaves the foreground, when the live
+     * lease closes and at Reset, and a view's entry goes as soon as it is read.
+     * Successes only. Guards failedOpens and openedGeneration too.
+     */
     private val openedMemo = object : LinkedHashMap<JsonObject, JsonObject>() {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<JsonObject, JsonObject>?): Boolean = size > OPENED_MEMO_MAX
     }
+
+    /** What failed to open in this fetch, so its readers do not ask the Keystore on the main thread. The next fetch asks again. */
+    private val failedOpens = HashMap<JsonObject, Exception>()
+
+    /** Moves at every clear: an open that started before one stores nothing. */
+    private var openedGeneration = 0L
 
     /** The last name a sealed status of a take or task opened to, by lease id: what the rows show, since drawing never decrypts. */
     private val leaseNames = HashMap<String, String>()
@@ -378,6 +393,20 @@ class AppModel(context: Context) {
     /** This phone's Keystore would not make a box key; Settings says what that means. */
     val boxKeyRefused: Boolean get() = boxKeyNodes.refused
 
+    /** Telling a locked phone from a key that stopped working. In memory: a restart finds out again. */
+    private val boxKeyHealth = BoxKeyHealth()
+
+    /** The box key has failed on an unlocked phone for a while: rows say so, and Settings can make a new one. */
+    var boxKeyBroken by mutableStateOf(false)
+        private set
+
+    private fun deviceLocked(): Boolean = appContext.getSystemService(KeyguardManager::class.java)?.isDeviceLocked == true
+
+    private fun clearBoxKeyHealth() {
+        boxKeyHealth.reset()
+        boxKeyBroken = false
+    }
+
     /** Whether the Approvals list shows the set-up row. After the read key's, which carries the request with no second fingerprint. */
     val boxKeySetupNeeded: Boolean get() = mode == AppMode.LIVE && key != null && readKeyKnown && !boxKeyNodes.refused && (boxKey == null || !boxKeyNodes.sent)
 
@@ -397,8 +426,9 @@ class AppModel(context: Context) {
      * The set-up row's tap: make the box key (or keep one no node was told of),
      * sign a `kl.device.box_key` with the device key (one fingerprint) and post it
      * with the read key. A Keystore that will not make the key leaves the phone
-     * with none, and no more row. Nothing is sealed to the key until each node
-     * runs `device apply`, and a message's row says so.
+     * with none, and no more row until Settings' Try again; a locked phone says
+     * nothing of the Keystore, so it is not marked. Nothing is sealed to the key
+     * until each node runs `device apply`, and a message's row says so.
      */
     fun setUpBoxKey() {
         if (boxKeySetupBusy || mode != AppMode.LIVE || pairing) return
@@ -414,7 +444,7 @@ class AppModel(context: Context) {
                     throw e
                 } catch (e: Exception) {
                     runCatching { BoxKey.delete() }
-                    boxKeyNodes.markRefused(true)
+                    if (!deviceLocked()) boxKeyNodes.markRefused(true)
                     return@launch
                 }
                 val envelope = signBoxKeyStatement(k, bk, api)
@@ -430,6 +460,27 @@ class AppModel(context: Context) {
                 boxKeySetupBusy = false
             }
         }
+    }
+
+    /** Settings' Try again, on a phone marked refused. */
+    fun retryBoxKey() {
+        boxKeyNodes.markRefused(false)
+        setUpBoxKey()
+    }
+
+    /**
+     * Settings' Make a new box key, once the key stopped working: the old one goes,
+     * no node is counted as told, and setUpBoxKey makes a new one and sends its
+     * statement. Each node seals to it after its `device apply`.
+     */
+    fun remakeBoxKey() {
+        if (boxKeySetupBusy || mode != AppMode.LIVE || pairing || key == null || client == null) return
+        runCatching { BoxKey.delete() }
+        boxKey = null
+        clearOpened()
+        clearBoxKeyHealth()
+        boxKeyNodes.forget()
+        setUpBoxKey()
     }
 
     /** Settings' Send again, past the statement's seven days or after a node refused it: a new statement (one fingerprint). */
@@ -478,56 +529,109 @@ class AppModel(context: Context) {
     private fun boxKeyMade() {
         boxKey = runCatching { BoxKey.load() }.getOrNull()
         clearOpened()
+        clearBoxKeyHealth()
         boxKeyNodes.forget()
-        if (boxKey == null) boxKeyNodes.markRefused(true)
+        if (boxKey == null && !deviceLocked()) boxKeyNodes.markRefused(true)
+    }
+
+    /**
+     * An enrollment carrying this box key finished for [enrolled]. Other pinned nodes
+     * know of it only if they were told before: a key whose statement never went (a
+     * relay from before the box key answers 404) keeps its set-up row and statement.
+     */
+    private fun enrolledWithBoxKey(enrolled: Set<String>) {
+        if (boxKey == null) return
+        if (boxKeyNodes.sent || storage.nodes.all { it.id in enrolled }) boxKeyNodes.markSent()
     }
 
     // ---- Reading what is sealed (R-SP-6, R-SP-15) ----
 
     /**
      * What opens a sealed message for this phone, or null without a box key. A
-     * reader calls it only once the node's signature has held. A success is kept;
-     * a failure is not, so a locked phone reads it once it unlocks.
+     * reader calls it only once the node's signature has held. A success is kept
+     * while it is of use; a failure only until the next fetch, so a locked phone
+     * reads it once it unlocks.
      */
     private fun opener(): Opener? {
         val bk = boxKey ?: return null
         val id = key?.deviceId ?: return null
         val open = Seal.opener(id) { x, y -> bk.agree(x, y) }
+        val generation = synchronized(openedMemo) { openedGeneration }
         return { type, message ->
-            synchronized(openedMemo) { openedMemo[message] } ?: open(type, message).also { opened -> synchronized(openedMemo) { openedMemo[message] = opened } }
+            val failed = synchronized(openedMemo) { failedOpens[message] }
+            if (failed != null) throw failed
+            synchronized(openedMemo) { openedMemo[message] } ?: open(type, message).also { opened ->
+                synchronized(openedMemo) { if (generation == openedGeneration) openedMemo[message] = opened }
+            }
         }
     }
 
     private fun clearOpened() {
-        synchronized(openedMemo) { openedMemo.clear() }
+        synchronized(openedMemo) {
+            openedGeneration++
+            openedMemo.clear()
+            failedOpens.clear()
+        }
+    }
+
+    /** A view is read once and holds a frame: its entry does not wait to age out. */
+    private fun dropOpenedViews() {
+        synchronized(openedMemo) { openedMemo.keys.removeAll { it["type"].str() == "kl.lease.view" } }
+    }
+
+    /** A sealed message a pinned node signed, or null for anything else. */
+    private fun verifiedSealed(raw: JsonElement, pins: List<NodePin>): JsonObject? {
+        val envelope = try {
+            Envelope.fromJson(raw)
+        } catch (e: ProtocolException) {
+            return null
+        }
+        val pin = pins.firstOrNull { it.id == envelope.kid } ?: return null
+        return Leases.verifiedMessage(envelope, pin)?.takeIf { it.containsKey("sealed") && it["type"].str() != null }
     }
 
     /**
      * Opens what a fetch brought with the Keystore off the main thread, signature
-     * first, so the readers find it done. It marks and decides nothing: a failure
-     * here is the reader's to report.
+     * first, so the readers find it done, whichever way it went. It marks and decides
+     * nothing. What it saw of the box key goes to [boxKeyHealth]: only a fresh open
+     * says the key works, and a failure counts only on an unlocked phone.
      */
     private suspend fun warmSeals(entries: List<JsonElement>) {
         val open = opener() ?: return
         val pins = storage.nodes
+        val generation = synchronized(openedMemo) {
+            failedOpens.clear()
+            openedGeneration
+        }
+        var sawOpen = false
+        var sawLocked = false
+        var sawFailure = false
         withContext(Dispatchers.IO) {
             for (entry in entries) {
                 for (field in listOf("envelope", "status")) {
                     val raw = entry[field] ?: continue
+                    val message = verifiedSealed(raw, pins) ?: continue
+                    if (synchronized(openedMemo) { message in openedMemo }) continue
                     try {
-                        val envelope = Envelope.fromJson(raw)
-                        val pin = pins.firstOrNull { it.id == envelope.kid } ?: continue
-                        val message = Leases.verifiedMessage(envelope, pin) ?: continue
-                        val type = message["type"].str() ?: continue
-                        if (message.containsKey("sealed")) open(type, message)
-                    } catch (e: CancellationException) {
-                        throw e
+                        open(message["type"].str()!!, message)
+                        sawOpen = true
+                    } catch (e: SealKeyUnavailableException) {
+                        synchronized(openedMemo) { if (generation == openedGeneration) failedOpens[message] = e }
+                        if (deviceLocked()) sawLocked = true else sawFailure = true
                     } catch (e: Exception) {
-                        // The reader meets the same failure and says what it means.
+                        synchronized(openedMemo) { if (generation == openedGeneration) failedOpens[message] = e }
                     }
                 }
             }
         }
+        if (synchronized(openedMemo) { generation != openedGeneration }) return
+        when {
+            sawOpen -> boxKeyHealth.opened()
+            sawLocked -> boxKeyHealth.locked()
+            sawFailure -> boxKeyHealth.failedUnlocked(SystemClock.elapsedRealtime())
+            else -> return
+        }
+        boxKeyBroken = boxKeyHealth.broken
     }
 
     /**
@@ -537,10 +641,10 @@ class AppModel(context: Context) {
      */
     private fun noteSeal(nodeId: String, state: SealState) {
         val next = Seal.noteSealedSeen(sealedSeen, nodeId, state)
-        if (next == sealedSeen) return
+        val marked = next != sealedSeen
         sealedSeen = next
-        storage.sealedSeen = next
-        demoteClear(nodeId)
+        if (storage.sealedSeen != next) storage.sealedSeen = next
+        if (marked) demoteClear(nodeId)
     }
 
     /** R-SP-15: a clear message from a node this phone has seen seal offers no decision, however long it has been on screen. */
@@ -559,9 +663,16 @@ class AppModel(context: Context) {
     )
 
     private fun unreadableLease(item: LeaseRequestItem) = UnreadableItem(
-        LEASE_REF + item.request.requestId, item.request.nodeId, item.nodeName, "Computer use", Seal.CLEAR_AFTER_SEALED,
+        LEASE_REF + item.request.requestId, item.request.nodeId, item.nodeName, leaseLabel(item.request.kind), Seal.CLEAR_AFTER_SEALED,
         Timestamps.epochMillis(item.request.expiresAt)
     )
+
+    /** Why a row says what it says now: a reader's reason, or what is since known of this phone's own key. */
+    private fun rowReason(u: UnreadableItem): String = when {
+        u.reason == Seal.KEY_LOCKED && boxKeyBroken -> BOX_KEY_BROKEN
+        boxKeyNodes.refused && u.reason in setOf("not_recipient", "open_failed") -> BOX_KEY_REFUSED
+        else -> u.reason
+    }
 
     private fun putUnreadable(item: UnreadableItem) {
         val i = unreadable.indexOfFirst { it.ref == item.ref }
@@ -649,6 +760,7 @@ class AppModel(context: Context) {
         foreground = false
         stopLoop(sayAway = true)
         stopLiveLoop()
+        clearOpened()
     }
 
     private fun startLoop() {
@@ -813,7 +925,11 @@ class AppModel(context: Context) {
         val listed = items.mapNotNull { receive(it, pins, unread) }.toSet()
         pending.removeAll { it.status == null && !it.deciding && it.id !in listed }
         // One this batch's first sealed open took the buttons off is still listed, and keeps its row.
-        unreadable.removeAll { it.ref.startsWith(TOOL_REF) && it.ref !in unread && it.ref.removePrefix(TOOL_REF) !in listed }
+        // One that can be read now is in `pending`, and its old row goes.
+        unreadable.removeAll { u ->
+            val id = u.ref.removePrefix(TOOL_REF)
+            u.ref.startsWith(TOOL_REF) && u.ref !in unread && (id !in listed || pending.any { it.id == id })
+        }
         pruneExpired()
     }
 
@@ -963,7 +1079,7 @@ class AppModel(context: Context) {
             runningLeases = runningLeaseRows(),
             sealedUnreadable = unreadable.mapNotNull { u ->
                 val left = u.expiresAtMs?.let { it - relayNow }
-                if (left != null && left <= 0) null else ApprovalList.SealedUnreadable(u.ref, u.nodeId, u.nodeName, u.label, unreadableLine(u.reason, u.nodeName), left)
+                if (left != null && left <= 0) null else ApprovalList.SealedUnreadable(u.ref, u.nodeId, u.nodeName, u.label, unreadableLine(rowReason(u), u.nodeName), left)
             },
             nodes = storage.nodes,
             nodeChecks = leaseChecks.mapValues { (_, c) ->
@@ -1352,7 +1468,7 @@ class AppModel(context: Context) {
             ?.let { readStatus(it, pin) }?.takeIf { it.leaseId == leaseId }
         if (status?.state == "ended") return null
         if (request == null) {
-            if (check.reason in UNREADABLE_REASONS) unread.add(UnreadableItem(LEASE_REF + requestId, pin.id, pin.name, "Computer use", check.reason!!, expiresAtMs))
+            if (check.reason in UNREADABLE_REASONS) unread.add(UnreadableItem(LEASE_REF + requestId, pin.id, pin.name, leaseLabel(status?.kind), check.reason!!, expiresAtMs))
             return null
         }
         return LeaseRequestItem(request, pin.name, status, seal = check.seal)
@@ -1526,6 +1642,7 @@ class AppModel(context: Context) {
                         // A decided row until a minute past the request's expiry (§7.2).
                         leaseDecided[id] = item.copy(unconfirmed = null) to ApprovalList.Decided(if (grant) "Allowed" else "Denied", SystemClock.elapsedRealtime())
                         leaseRequests.removeAll { it.request.requestId == id }
+                        warmSeals(listOfNotNull(sent.json))
                         // A task has no live view: its row comes from the status its node signed for this answer.
                         if (grant && item.request.isTask) noteListedLease(JsonObject(mapOf("node_id" to JsonPrimitive(item.request.nodeId), "status" to (sent.json["status"] ?: JsonNull))), storage.nodes)
                         else if (grant && outcome.state == "active") {
@@ -1655,7 +1772,9 @@ class AppModel(context: Context) {
                         // R-F5-15: a watch is contact only when it echoes a token the node issued a short
                         // while ago; with an old one (or none) the node is asked for a status signed now first.
                         if (Leases.tokenIsStale(live.contactTokenAtMs, SystemClock.elapsedRealtime())) {
-                            for (entry in api.leases()) {
+                            val listed = api.leases()
+                            warmSeals(listed)
+                            for (entry in listed) {
                                 if (!isStatusOnly(entry) || entry["node_id"].str() != pin.id) continue
                                 val signed = entry["status"]?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() } ?: continue
                                 updateLive(leaseId) { applyLease(signed, pin, it, deviceId) }
@@ -1670,6 +1789,7 @@ class AppModel(context: Context) {
                             is SendOutcome.Confirmed -> {
                                 // The reply is the relay's word: only its node-signed status is applied.
                                 cursor = Leases.cursorAfterWatch(current.lastSeq, sent.json)
+                                warmSeals(listOfNotNull(sent.json))
                                 updateLive(leaseId) { applyReplyStatus(sent.json, pin, it, deviceId) }
                                 readKeyNodes.set(pin.id, ReadKeyNodes.IN_USE)
                             }
@@ -1749,7 +1869,10 @@ class AppModel(context: Context) {
                 when (val outcome = sent.outcome) {
                     is SendOutcome.Unconfirmed -> unconfirmed = "Not confirmed: ${sent.problem}. Tap again."
                     is SendOutcome.Rejected -> unconfirmed = "The node refused the watch: ${friendlyReason(outcome.reason)}."
-                    is SendOutcome.Confirmed -> updateLive(live.leaseId) { applyReplyStatus(sent.json, pin, it, k.deviceId) }
+                    is SendOutcome.Confirmed -> {
+                        warmSeals(listOfNotNull(sent.json))
+                        updateLive(live.leaseId) { applyReplyStatus(sent.json, pin, it, k.deviceId) }
+                    }
                 }
             } catch (e: Exception) {
                 // A prompt was cancelled or the key failed: the watch was not sent.
@@ -1784,6 +1907,7 @@ class AppModel(context: Context) {
             )
         }
         val check = Leases.verifyView(envelope, pin, opener())
+        dropOpenedViews()
         val view = check.view?.takeIf { check.accepted && it.leaseId == live.leaseId } ?: return live
         noteSeal(pin.id, view.seal)
         if (!Leases.acceptsView(view, live.appliedSeq, deviceId)) return live
@@ -1819,6 +1943,7 @@ class AppModel(context: Context) {
     /** Forgets the lease on this screen (the node's lease is not touched). */
     fun closeLiveLease() {
         liveLease = null
+        clearOpened()
     }
 
     /**
@@ -1853,7 +1978,10 @@ class AppModel(context: Context) {
                 // The answer may carry the status the node signed for it. Only that, verified by
                 // applyLease, can show the lease as ended here; then there is nothing left to confirm.
                 val pin = storage.nodes.firstOrNull { it.id == live.nodeId }
-                if (pin != null) next = applyReplyStatus(sent.json, pin, next, k.deviceId)
+                if (pin != null) {
+                    warmSeals(listOfNotNull(sent.json))
+                    next = applyReplyStatus(sent.json, pin, next, k.deviceId)
+                }
                 if (next.state == "ended") next = next.copy(unconfirmed = null)
             } catch (e: Exception) {
                 // A prompt was cancelled or the key failed: the stop was not sent.
@@ -1923,6 +2051,7 @@ class AppModel(context: Context) {
         readKey = null
         boxKey = null
         clearOpened()
+        clearBoxKeyHealth()
         client = null
         banner = DeviceKey.INVALIDATED_MESSAGE
         pollProblem = DeviceKey.INVALIDATED_MESSAGE
@@ -2077,10 +2206,8 @@ class AppModel(context: Context) {
                     // The enrollment carried the read key (§8.2): this node holds it.
                     if (readKey != null) readKeyNodes.set(pin.id, ReadKeyNodes.IN_USE)
                     // And the box key (R-SP-10).
-                    if (boxKey != null) {
-                        boxKeyNodes.markSent()
-                        boxKeyNodes.set(pin.id, BoxKeyNodes.IN_USE)
-                    }
+                    enrolledWithBoxKey(setOf(pin.id))
+                    if (boxKey != null) boxKeyNodes.set(pin.id, BoxKeyNodes.IN_USE)
                     banner = "Enrolled. This phone now approves for ${Display.escape(pin.name)}."
                     sendPushToken(again = true)
                     refreshFrontDoorNow()
@@ -2300,6 +2427,11 @@ class AppModel(context: Context) {
      */
     private suspend fun sendResponse(api: RelayApi, item: PendingItem, envelope: Envelope): JsonElement? {
         while (true) {
+            // R-SP-15: a retry can wait for as long as the request lives.
+            if (approvalHeld(item)) {
+                refuseHeldApproval(item)
+                return null
+            }
             try {
                 return api.respond(item.id, envelope) ?: JsonNull
             } catch (e: RelayException) {
@@ -2510,7 +2642,7 @@ class AppModel(context: Context) {
                 throw e
             }
             // The claim carried the box key, and the other phone's enrollment carries it on (R-SP-10).
-            if (boxKey != null) boxKeyNodes.markSent()
+            enrolledWithBoxKey(pins.map { it.id }.toSet())
             fingerprintToCompare = "d-" + Identifiers.fingerprintGroups(k.deviceId)
             pollProblem = "When the other phone has added this one, requests appear here."
             banner = "Check that the other phone shows the same id, then confirm there."
@@ -2875,7 +3007,10 @@ class AppModel(context: Context) {
                     "approval" -> {
                         // A request id is a lowercase UUID; anything else is not ours to fetch.
                         if (id.length != 36 || !id.all { it in "0123456789abcdef-" }) null
-                        else api.approval(id)?.let { receive(it, storage.nodes) }
+                        else api.approval(id)?.let { entry ->
+                            warmSeals(listOf(entry))
+                            receive(entry, storage.nodes)
+                        }
                             ?.takeIf { rid -> pending.any { it.id == rid && it.status == null } }?.let { Selection.Tool(it) }
                     }
                     "question" -> {
@@ -2909,7 +3044,7 @@ class AppModel(context: Context) {
     }
 
     private fun unreadableNotice(id: String): String? =
-        unreadable.firstOrNull { it.ref.substringAfter(':') == id }?.let { unreadableLine(it.reason, it.nodeName) }
+        unreadable.firstOrNull { it.ref.substringAfter(':') == id }?.let { unreadableLine(rowReason(it), it.nodeName) }
 
     /**
      * `lease`: the request whose request_id is the id, else the running lease
@@ -3074,6 +3209,7 @@ class AppModel(context: Context) {
         readKey = null
         boxKey = null
         clearOpened()
+        clearBoxKeyHealth()
         leaseNames.clear()
         unreadable.clear()
         client = null
@@ -3164,6 +3300,10 @@ class AppModel(context: Context) {
 
         /** Settings, for a phone whose Keystore refuses the key. */
         const val BOX_KEY_REFUSED_LINE = "This phone cannot hold a box key; sealed nodes will not show here."
+
+        // What a row says of this phone's own key, in place of a reader's reason.
+        const val BOX_KEY_BROKEN = "box_key_broken"
+        const val BOX_KEY_REFUSED = "box_key_refused"
 
         /** What a reader's reason makes a row with no decision (R-SP-6, R-SP-15); any other refusal shows nothing. */
         val UNREADABLE_REASONS = setOf("not_recipient", "open_failed", Seal.KEY_LOCKED, Seal.CLEAR_AFTER_SEALED)

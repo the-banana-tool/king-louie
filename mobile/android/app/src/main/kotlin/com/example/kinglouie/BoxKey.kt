@@ -20,10 +20,10 @@ import javax.crypto.KeyAgreement
 
 /**
  * The box key will not agree now: the phone is locked (the Keystore refuses it
- * then, by design) or the Keystore did not answer. Not proof the wrap is bad,
- * so a reader says to unlock, never to run `device apply`.
+ * then, by design), the Keystore did not answer, or the key is broken or gone.
+ * Not proof the wrap is bad, so a reader never says to run `device apply`.
  */
-class BoxKeyUnavailableException : SealKeyUnavailableException("The phone is locked.")
+class BoxKeyUnavailableException : SealKeyUnavailableException("The box key did not answer.")
 
 /**
  * The box key (sealed phones plan, R-SP-1, R-SP-10): a third Android Keystore
@@ -45,9 +45,9 @@ class BoxKey private constructor(private val publicKey: ECPublicKey) {
     /**
      * The raw x-coordinate of ECDH with the point (x, y), which the core has
      * checked is on the curve. A locked phone's error varies by Android version,
-     * so every Keystore failure here is BoxKeyUnavailableException; create() has
-     * already found a StrongBox that will not agree. An entry that is gone throws
-     * something else, which the core reads as `open_failed`.
+     * so every Keystore failure here is BoxKeyUnavailableException, an entry that
+     * is gone included; create() has already found a StrongBox that will not agree.
+     * AppModel tells a locked phone from a key that stopped working.
      */
     fun agree(x: String, y: String): ByteArray {
         val peer = P256.publicKey(x, y)
@@ -58,7 +58,7 @@ class BoxKey private constructor(private val publicKey: ECPublicKey) {
         } catch (e: IOException) {
             throw BoxKeyUnavailableException()
         }
-        val key = stored as? PrivateKey ?: throw IllegalStateException("no box key")
+        val key = stored as? PrivateKey ?: throw BoxKeyUnavailableException()
         return try {
             agreement(key, peer)
         } catch (e: GeneralSecurityException) {
@@ -80,7 +80,10 @@ class BoxKey private constructor(private val publicKey: ECPublicKey) {
                 generateSecret()
             }
 
-        /** The key, or null (none, or the Keystore did not answer). */
+        /**
+         * The key, or null. Not proof there is none: on Keystore2 a transient error in
+         * getCertificate also comes back as null. Throws when the Keystore will not open.
+         */
         fun load(): BoxKey? {
             val cert = keyStore().getCertificate(ALIAS) ?: return null
             return BoxKey(cert.publicKey as ECPublicKey)

@@ -24,7 +24,11 @@ import kotlinx.serialization.json.JsonElement
 class BoxKeyNodes(private val storage: Storage) {
     private val nodes = mutableStateMapOf<String, String>().apply { putAll(storage.boxKeyNodes) }
 
-    /** An enrollment carried this box key, or a statement of it went out. A key made and told to nobody still needs the set-up. */
+    /**
+     * A statement of this box key went to every node, or every pinned node enrolled
+     * with it. A key made and told to nobody, or to a new node only, still needs the
+     * set-up. So [noneSent] with this set means every node holds it.
+     */
     var sent by mutableStateOf(storage.boxKeySent)
         private set
 

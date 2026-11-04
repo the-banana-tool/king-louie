@@ -29,6 +29,35 @@ open class SealKeyUnavailableException(message: String) : Exception(message)
  */
 typealias Opener = (type: String, message: JsonObject) -> JsonObject
 
+/**
+ * Whether a box key that keeps refusing has stopped working. A Keystore refuses a
+ * locked phone by design, and for a moment after it unlocks, so only failures on
+ * an unlocked phone count, and only when there are several and they last. A fresh
+ * open, or a phone seen locked, starts the count again.
+ */
+class BoxKeyHealth(private val strikesToBreak: Int = 3, private val afterMs: Long = 30_000L) {
+    private var strikes = 0
+    private var failingSinceMs = 0L
+
+    var broken = false
+        private set
+
+    fun failedUnlocked(nowMs: Long) {
+        if (strikes == 0) failingSinceMs = nowMs
+        strikes++
+        if (strikes >= strikesToBreak && nowMs - failingSinceMs >= afterMs) broken = true
+    }
+
+    fun opened() = reset()
+
+    fun locked() = reset()
+
+    fun reset() {
+        strikes = 0
+        broken = false
+    }
+}
+
 /** How a message reached a reader: never sealed, sealed and opened, or sealed and not this phone's to open. */
 enum class SealState { CLEAR, OPENED, UNREAD }
 
