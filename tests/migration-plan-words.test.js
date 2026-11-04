@@ -265,3 +265,81 @@ describe('what a digest is sent for', () => {
     assert.ok(!('userProfileDigest' in out));
   });
 });
+
+describe('the restart offer on a retry', () => {
+  const MCP = { mcpServers: { files: { command: 'example-mcp' } } };
+  async function nodeWith(bootId) {
+    const made = await nodeService();
+    const fresh = (boot = bootId) => new DesktopImporter({
+      context: made.core.context,
+      targets: made.importer.targets,
+      dataDir: made.importer.dataDir,
+      checkPath,
+      cipher: made.importer.cipher,
+      scope: made.importer.scope,
+      hosting: 'personal',
+      ...(boot ? { bootId: boot } : {})
+    });
+    return { ...made, fresh };
+  }
+  const personalProfile = (chatData) => {
+    const userDataDir = tmp();
+    fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify(chatData));
+    return readDesktopSource({ userDataDir, reader: createSafeReader({ root: userDataDir }), decrypt: (s) => s, hosting: 'personal' });
+  };
+  async function tryMove(importer, source, { finish = true } = {}) {
+    const plan = await planOf(importer, source.inventory);
+    let wrote = 0;
+    for (const batch of planBatches(plan.items, source)) {
+      wrote += batch.length;
+      await importer.apply({ planId: plan.planId, batch });
+    }
+    return { plan, wrote, report: finish ? await importer.finish({ planId: plan.planId }) : null };
+  }
+
+  it('an MCP server landed on the first try is still offered when the retry writes nothing', async () => {
+    const { fresh } = await nodeWith();
+    const source = personalProfile({ settings: MCP });
+    const first = await tryMove(fresh(), source);
+    assert.strictEqual(first.report.needsRestart, true);
+    const retry = await tryMove(fresh(), source);
+    assert.strictEqual(itemOf(retry.plan, 'settings', 'mcpServers').action, 'skip-present');
+    assert.strictEqual(retry.wrote, 0);
+    assert.strictEqual(retry.report.needsRestart, true);
+    assert.ok(retry.report.notes.some((n) => /next starts/.test(n)), JSON.stringify(retry.report.notes));
+  });
+
+  it('a bot token landed before a cut-off that never reached finish is offered too', async () => {
+    const { fresh } = await nodeWith();
+    const source = personalProfile({ settings: {}, apiTokens: { __telegram_bot_token: 'bot-value' } });
+    await tryMove(fresh(), source, { finish: false });
+    const retry = await tryMove(fresh(), source);
+    assert.strictEqual(itemOf(retry.plan, 'channelToken', '__telegram_bot_token').action, 'skip-present');
+    assert.strictEqual(retry.report.needsRestart, true);
+  });
+
+  it('a retry where none of those moved offers nothing', async () => {
+    const { fresh } = await nodeWith();
+    const source = personalProfile({ settings: { templateVariables: { name: 'Example Owner' } } });
+    await tryMove(fresh(), source);
+    const retry = await tryMove(fresh(), source);
+    assert.strictEqual(retry.report.needsRestart, undefined);
+  });
+
+  it('what the node already had, this desktop not having moved it, offers nothing', async () => {
+    const { core, fresh } = await nodeWith();
+    core.context.setApiTokens({ ...core.context.getApiTokens(), __telegram_bot_token: core.context.encryptToken('the-node-own') });
+    const source = personalProfile({ settings: { mcpServers: {} }, apiTokens: { __telegram_bot_token: 'bot-value' } });
+    const { plan, report } = await tryMove(fresh(), source);
+    assert.strictEqual(itemOf(plan, 'channelToken', '__telegram_bot_token').action, 'skip-present');
+    assert.strictEqual(report.needsRestart, undefined);
+  });
+
+  it('a node that has started since the landing runs them already, so nothing is offered', async () => {
+    const { fresh } = await nodeWith('boot-1');
+    const source = personalProfile({ settings: MCP });
+    await tryMove(fresh(), source);
+    const retry = await tryMove(fresh('boot-2'), source);
+    assert.strictEqual(retry.report.needsRestart, undefined);
+  });
+});

@@ -161,6 +161,11 @@ const reservedVaultNote = (key, where) => (isContactVaultKey(key)
   : `Vault entry ${key} is a local server's key. It stays on this computer and in the backup: on the ${where}, a local server and its key come only from its service.json.`);
 const vaultBlockedNote = (key, blocker, where) => `Vault entry ${key} was not moved: the ${where} holds ${blocker === key ? 'other entries under that name' : blocker}, and a name cannot hold both. It stays on this computer and in the backup; enter it again under another name if you need it there.`;
 
+// This process, so a landing can tell whether the node has started since.
+const NODE_BOOT = crypto.randomUUID();
+// What takes effect only when a personal node next starts.
+const startsWithNode = (item) => item.category === 'channelToken' || (item.category === 'settings' && ['channels', 'hooks', 'mcpServers'].includes(item.key));
+
 class ImportError extends Error {
   constructor(code, message) {
     super(message);
@@ -593,11 +598,13 @@ class DesktopImporter {
     cleanupStaging = true,
     writeGuard = null,
     hosting = 'service',
+    bootId = NODE_BOOT,
     maxChatBytes = MAX_CHAT_BYTES
   }) {
     this.maxChatBytes = maxChatBytes;
     this.context = context;
     this.personal = hosting === 'personal';
+    this.bootId = bootId;
     this.where = this.personal ? 'node' : 'service';
     this.settingsKeys = importedSettingsKeys(hosting);
     this.targets = targets;
@@ -683,7 +690,7 @@ class DesktopImporter {
     try {
       const doc = JSON.parse(fs.readFileSync(this.manifestPath(installId), 'utf8'));
       if (doc && doc.v === 1 && doc.items && typeof doc.items === 'object') {
-        return { v: 1, installId, runs: arr(doc.runs), items: doc.items };
+        return { v: 1, installId, runs: arr(doc.runs), items: doc.items, ...(typeof doc.restartBoot === 'string' ? { restartBoot: doc.restartBoot } : {}) };
       }
     } catch { /* no manifest yet */ }
     return { v: 1, installId, runs: [], items: {} };
@@ -698,6 +705,23 @@ class DesktopImporter {
     guardCheck(this.writeGuard, file);
     writeFileAtomic(file, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
     this.onPathWritten(file);
+  }
+
+  // Something from this desktop landed that waits for the node's next start, on record
+  // at once and through any later try: a retry plans it as already there and writes
+  // nothing, and a cut-off may never reach finish. Under the node's own start, so a node
+  // that has started since runs it already.
+  noteStartsWithNode(plan, item, out, value) {
+    if (!this.personal || out.note || !startsWithNode(item)) return;
+    // An empty list, or the defaults, started nothing new.
+    if (item.category === 'settings') {
+      const landed = mergeSettings({ [item.key]: value })[item.key];
+      if (landed === undefined || landed === null || (isPlainObject(landed) && !Object.keys(landed).length)) return;
+      if (stable(landed) === stable(mergeSettings(DEFAULT_SETTINGS)[item.key])) return;
+    }
+    const manifest = this.readManifest(plan.installId);
+    if (manifest.restartBoot === this.bootId) return;
+    this.writeManifest({ ...manifest, restartBoot: this.bootId });
   }
 
   expire() {
@@ -997,6 +1021,7 @@ class DesktopImporter {
       }
       try {
         const out = (await this.write(plan, item, entry.value)) || {};
+        this.noteStartsWithNode(plan, item, out, entry.value);
         if (out.pending) {
           results.push({ category, key, ok: true });
           continue;
@@ -1458,6 +1483,7 @@ class DesktopImporter {
   async finish({ planId } = {}) {
     const plan = this.getPlan(planId);
     const manifest = this.readManifest(plan.installId);
+    const needsRestart = this.personal && manifest.restartBoot === this.bootId;
     const at = this.now().toISOString();
     const root = this.casesRoot();
     const staging = path.join(root, `.import-${plan.planId}`);
@@ -1594,7 +1620,6 @@ class DesktopImporter {
     const incomplete = [];
     const secretsMissing = [];
     let cronDisabled = 0;
-    let needsRestart = false;
     for (const item of items) {
       const k = itemKey(item.category, item.key);
       if (item.action === 'needs-attention') attention.push({ category: item.category, key: item.key, note: item.note });
@@ -1626,7 +1651,6 @@ class DesktopImporter {
       // Written, but not all of it: a retry must not read this as done.
       if (r.incomplete) incomplete.push({ category: item.category, key: item.key, note: r.note });
       if (item.category === 'cron') cronDisabled += 1;
-      if (this.personal && (item.category === 'channelToken' || (item.category === 'settings' && ['channels', 'hooks', 'mcpServers'].includes(item.key)))) needsRestart = true;
       manifest.items[k] = { at, result: 'ok', ...(r.record || {}), ...(r.incomplete ? { incomplete: true } : {}) };
     }
     const placed = this.placeLandedChats(plan, items);

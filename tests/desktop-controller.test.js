@@ -2029,6 +2029,19 @@ describe('desktop controller: the one-time move', () => {
     }
   });
 
+  it('a retry\'s mark offers the restart the node reports, after a verify that failed', async () => {
+    const client = new FakeNodeClient({ dropChat: 'c2', finish: { needsRestart: true } });
+    const { controller, state } = moveController({ client });
+    await controller.migrationPlan();
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).code, 'MIGRATION_UNVERIFIED');
+    assert.strictEqual(state.migration, null);
+    client.dropChat = null;
+    await controller.migrationPlan();
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).ok, true);
+    assert.strictEqual(state.migration.restartDue, true);
+    controller.dispose();
+  });
+
   it('chats out of order on the node still mark the move, and the line stays on screen', async () => {
     const client = new FakeNodeClient();
     const invoke = client.invoke.bind(client);
