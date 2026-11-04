@@ -16,6 +16,8 @@ const { writeFileAtomic } = require('../desktop-bridge/pairing');
 const { MESSAGES, LIMITS } = require('../desktop-bridge/protocol');
 const { normalizeDirectory } = require('../desktop-bridge/desktop-scope');
 const { guardCheck } = require('../platform/write-guard');
+const { isContactVaultKey } = require('../cases/contact-settings');
+const { isLocalServerVaultKey } = require('../models/local-vault-keys');
 
 const log = createLogger('desktop-import');
 
@@ -133,6 +135,18 @@ const PERSONAL_EXCLUDED = Object.freeze({
 });
 const overCapNote = (c) => `chat "${String(c.title || c.id).slice(0, 80)}" is ${(c.overCapBytes / (1024 * 1024)).toFixed(1)} MB, over the ${MAX_CHAT_BYTES / (1024 * 1024)} MB a chat can move in. It does not move: it stays in this computer's copy and in the backup.`;
 const tooLargeNote = (c, exists) => `chat "${String(c.title || c.id).slice(0, 80)}" has a message of ${(c.tooLargeBytes / (1024 * 1024)).toFixed(1)} MB, too large to send to the node. ${exists ? 'The node already holds this chat, and it is left as it is.' : 'The chat moves without what that message holds, with a line saying so in its place.'} The whole message stays in this computer's copy and in the backup.`;
+
+// What the Vault tool keeps to itself on a node, read as it reads a key. Such a key
+// never moves, on any host: a contact credential and a local server's key are the
+// administrator's there.
+const isReservedVaultKey = (key) => isContactVaultKey(key) || isLocalServerVaultKey(key);
+const PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+// A store walks a key's parts as object keys, so this is no name for a secret.
+const hasPrototypePart = (key) => String(key).split('.').some((part) => PROTOTYPE_KEYS.has(part));
+const reservedVaultNote = (key, where) => (isContactVaultKey(key)
+  ? `Vault entry ${key} is a contact channel's credential. It stays on this computer and in the backup: on the ${where}, contact credentials are set only by its administrator.`
+  : `Vault entry ${key} is a local server's key. It stays on this computer and in the backup: on the ${where}, a local server and its key come only from its service.json.`);
+const vaultBlockedNote = (key, blocker, where) => `Vault entry ${key} was not moved: the ${where} holds ${blocker === key ? 'other entries under that name' : blocker}, and a name cannot hold both. It stays on this computer and in the backup; enter it again under another name if you need it there.`;
 
 class ImportError extends Error {
   constructor(code, message) {
@@ -868,7 +882,15 @@ class DesktopImporter {
       if (!KNOWN_IMAGE_KEYS.has(p)) { add('imageKey', p, 'skip-excluded', 'not an image provider key this service uses'); continue; }
       secret('imageKey', p, Boolean(settings.imageGeneration && settings.imageGeneration[p] && settings.imageGeneration[p].apiKey));
     }
-    for (const k of arr(inventory.vault)) secret('vault', k, this.context.vault.has(k));
+    const where = this.personal ? 'node' : 'service';
+    for (const k of arr(inventory.vault)) {
+      if (isReservedVaultKey(k)) { add('vault', k, 'skip-excluded', reservedVaultNote(k, where)); continue; }
+      if (hasPrototypePart(k)) { add('vault', k, 'skip-excluded', `Vault entry ${k} stays on this computer: its name cannot be stored.`); continue; }
+      const held = this.context.vault.holds(k);
+      const blocker = held ? null : this.context.vault.blockedBy(k);
+      if (blocker) add('vault', k, 'needs-attention', vaultBlockedNote(k, blocker, where));
+      else secret('vault', k, held);
+    }
     if (inventory.anthropicOAuth) {
       const stored = this.context.getStore().get('anthropicOAuth');
       secret('anthropicOAuth', 'anthropicOAuth', Boolean(stored && stored.accessToken));
@@ -1067,7 +1089,7 @@ class DesktopImporter {
         this.requireCipher();
         this.requireSecretString(value);
         // Written only if still absent (fix round 1, I4).
-        if (ctx.vault.has(item.key)) {
+        if (ctx.vault.has(item.key) || ctx.vault.blockedBy(item.key)) {
           return { note: 'a secret with this name was added to the service after the plan was made; not overwritten' };
         }
         ctx.vault.set(item.key, value);
@@ -1608,6 +1630,8 @@ module.exports = {
   CHANNEL_ALLOWLISTS_KEY,
   ALLOWLIST_CHANNELS,
   SECRET_CATEGORIES,
+  isReservedVaultKey,
+  hasPrototypePart,
   CATEGORY_ORDER,
   EXCLUDED,
   PLAN_TTL_MS,

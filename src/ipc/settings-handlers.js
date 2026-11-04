@@ -3,6 +3,9 @@ const { createLogger } = require('../logging');
 
 const log = createLogger('settings');
 
+const { isContactVaultKey } = require('../cases/contact-settings');
+const { isLocalServerVaultKey } = require('../models/local-vault-keys');
+
 function registerSettingsHandlers(ipcMain, context = {}) {
   const {
     safeStorage,
@@ -472,6 +475,24 @@ function registerSettingsHandlers(ipcMain, context = {}) {
       .filter((k) => k.startsWith(VAULT_PREFIX))
       .map((k) => k.slice(VAULT_PREFIX.length));
     return { ok: true, keys: vaultKeys, count: vaultKeys.length };
+  }));
+
+  // Which of these names the store holds a secret under that decrypts: names only,
+  // for the move's verifier. A whole key, so a dotted one is asked as itself. Says
+  // nothing of what the Vault tool keeps to itself.
+  ipcMain.handle('settings:vaultHeld', wrapHandler('settings:vaultHeld', async (_event, { keys } = {}) => {
+    const store = getVaultStore();
+    const held = (Array.isArray(keys) ? keys : []).filter((key) => {
+      if (typeof key !== 'string' || isContactVaultKey(key) || isLocalServerVaultKey(key)) return false;
+      const encrypted = store.get(`${VAULT_PREFIX}${key}`);
+      if (typeof encrypted !== 'string' || !encrypted) return false;
+      try {
+        return Boolean(decryptToken(encrypted));
+      } catch {
+        return false;
+      }
+    });
+    return { ok: true, held };
   }));
 
   ipcMain.handle('settings:vaultStore', wrapHandler('settings:vaultStore', async (_event, { key, value } = {}) => {

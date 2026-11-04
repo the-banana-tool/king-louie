@@ -14,6 +14,7 @@
 // not missing, except a case an earlier run landed incomplete or one on the node
 // that does not match the source. What is private on the desktop must be private
 // on the node, moved or already there: a mark lost would let a hosted model read it.
+// Every vault entry planned to be there is asked for by its whole key.
 const { shown } = require('../service/commands/io');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
@@ -145,6 +146,24 @@ async function checkCases(items, invoke, note) {
   }
 }
 
+async function checkVault(items, invoke, note) {
+  let answer;
+  try {
+    answer = unwrapped(await invoke('settings:vaultHeld', [{ keys: items.map((i) => i.key) }]));
+  } catch (err) {
+    note('vault', 'settings:vaultHeld', `the node did not say which vault entries it holds: ${reasonOf(err)}`);
+    return;
+  }
+  if (!answer || !Array.isArray(answer.held)) {
+    note('vault', 'settings:vaultHeld', (answer && answer.error) || 'the node did not say which vault entries it holds');
+    return;
+  }
+  const held = new Set(answer.held);
+  for (const item of items) {
+    if (!held.has(item.key)) note('vault', item.key, 'it is not in the node\'s vault');
+  }
+}
+
 // { ok: true, checked: { chats, cases } } or { ok: false, code:
 // 'MIGRATION_UNVERIFIED', missing: [{ category, key, why }] }, every string
 // through shown. `plan`'s chat items carry messageCount (withSourceFacts).
@@ -158,13 +177,15 @@ async function verifyMigration({ plan, report, invoke }) {
   const checked = (category) => items.filter((i) => i.category === category && CHECKED_ACTIONS.has(i.action));
   const chats = checked('chat');
   const cases = checked('case');
+  const vault = checked('vault');
   for (const item of items) {
     if (item.incomplete === true) note(item.category, item.key, item.note || 'an earlier import landed it incomplete');
   }
   if (chats.length) await checkChats(chats, invoke, note);
   if (cases.length) await checkCases(cases, invoke, note);
+  if (vault.length) await checkVault(vault, invoke, note);
   if (missing.length) return { ok: false, code: 'MIGRATION_UNVERIFIED', missing };
-  return { ok: true, checked: { chats: chats.length, cases: cases.length } };
+  return { ok: true, checked: { chats: chats.length, cases: cases.length, ...(vault.length ? { vault: vault.length } : {}) } };
 }
 
 module.exports = { verifyMigration, withSourceFacts };

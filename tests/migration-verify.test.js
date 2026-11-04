@@ -238,6 +238,12 @@ describe('the move over a real bridge', () => {
     seeded.markPrivate('secret-1');
     seeded.close();
     fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify({ settings: {} }));
+    // As electron-store writes them: nested at each dot. A login, and a key that stays.
+    const sealed = (text) => Buffer.from(text).toString('base64');
+    fs.writeFileSync(path.join(userDataDir, 'config.json'), JSON.stringify({
+      '__vault_browser_cred:king-louie:login': { example: { com: sealed('{"username":"owner","password":"x"}') } },
+      __vault_contact: { relay: sealed('relay-token') }
+    }));
     const runtime = new CaseRuntime({ root: path.join(userDataDir, 'cases') });
     const made = await runtime.createCase({ title: 'North field', objective: 'Survey the field', force: true });
     const caseDir = runtime.getCase(made.id).dir;
@@ -283,7 +289,11 @@ describe('the move over a real bridge', () => {
 
       const out = await controller.migrationApply({ confirmed: true });
       assert.strictEqual(out.ok, true, JSON.stringify(out));
-      assert.deepStrictEqual(out.verified, { ok: true, checked: { chats: 2, cases: 1 } });
+      assert.deepStrictEqual(out.verified, { ok: true, checked: { chats: 2, cases: 1, vault: 1 } });
+      assert.strictEqual(core.context.vault.get('browser_cred:king-louie:login.example.com'), '{"username":"owner","password":"x"}');
+      assert.strictEqual(core.context.vault.has('contact.relay'), false);
+      assert.ok(planned.staysBehind.some((line) => line.includes('contact.relay')), planned.staysBehind.join('\n'));
+      assert.ok(!JSON.stringify(out).includes('relay-token'));
 
       assert.strictEqual(core.context.getChat('c1').messages.length, 3);
       assert.strictEqual(core.context.getHistoryStore().chatRef('secret-1').private, true);

@@ -15,7 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const { parseCaseYaml } = require('../cases/case-store');
 const { BUILTIN_IDS } = require('../cases/executors/builtins');
-const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS, MAX_CHAT_PART_BYTES, MAX_CHAT_BYTES } = require('./desktop-import');
+const { EXCLUDED, isReservedVaultKey, hasPrototypePart, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS, MAX_CHAT_PART_BYTES, MAX_CHAT_BYTES } = require('./desktop-import');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 // A desktop store file or a case file bigger than this is refused rather
@@ -39,6 +39,32 @@ function withoutTooLarge(chat, maxMessageBytes) {
     ...(m.id ? { id: m.id } : {}), sender: m.sender, ...(m.timestamp ? { timestamp: m.timestamp } : {}), text: TOO_LARGE_TEXT
   }));
   return { ...chat, messages };
+}
+
+// electron-store nests a key at each dot, so browser_cred:<profile>:<host.tld> is
+// an object under a truncated name. Each entry by its whole key, from the string
+// leaves; a key stored flat reads the same. No part of a key may be a prototype
+// key. What is there and cannot be read is said, never dropped unsaid.
+const VAULT_STORE_PREFIX = '__vault_';
+const VAULT_UNREAD_NOTE = 'this stored vault entry is not in a form the move can read; it stays on this computer and in the backup';
+const MAX_VAULT_DEPTH = 64;
+function readVaultEntries(config, attention) {
+  const entries = new Map();
+  const unread = (key) => attention.push({ category: 'vault', key, note: VAULT_UNREAD_NOTE });
+  const walk = (key, value, depth) => {
+    if (!value) return;
+    if (!key || hasPrototypePart(key)) unread(key);
+    else if (typeof value === 'string') {
+      if (entries.has(key)) unread(key);
+      else entries.set(key, value);
+    } else if (typeof value === 'object' && !Array.isArray(value) && depth < MAX_VAULT_DEPTH) {
+      for (const part of Object.keys(value)) walk(`${key}.${part}`, value[part], depth + 1);
+    } else unread(key);
+  };
+  for (const k of Object.keys(config)) {
+    if (k.startsWith(VAULT_STORE_PREFIX)) walk(k.slice(VAULT_STORE_PREFIX.length), config[k], 0);
+  }
+  return entries;
 }
 
 // Windows residual (fix round 1, I3): there is no owner check on win32. The
@@ -215,6 +241,7 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     : crypto.createHash('sha256').update(fs.realpathSync.native(userDataDir)).digest('hex').slice(0, 16);
 
   const settings = chatData.settings && typeof chatData.settings === 'object' ? chatData.settings : {};
+  const vaultEntries = readVaultEntries(config, attention);
   // Since history stage H1 a profile's chats live in history.sqlite; any
   // that could not be migrated are still in chat-data.json. The store wins
   // for an id both hold. `history` is readHistoryChats' result, read by the
@@ -361,7 +388,7 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     providerTokens: Object.keys(tokens).filter((k) => tokens[k] && (!k.startsWith('__') || k === '__elevenlabs_api_key')),
     searchKeys: Object.keys(settings.webSearch || {}).filter((p) => settings.webSearch[p] && settings.webSearch[p].apiKey),
     imageKeys: Object.keys(settings.imageGeneration || {}).filter((p) => settings.imageGeneration[p] && settings.imageGeneration[p].apiKey),
-    vault: Object.keys(config).filter((k) => k.startsWith('__vault_') && config[k]).map((k) => k.slice('__vault_'.length)),
+    vault: [...vaultEntries.keys()],
     anthropicOAuth: Boolean(oauth),
     channelTokens: CHANNEL_TOKEN_KEYS.filter((k) => tokens[k]),
     channelAllowlists: ALLOWLIST_CHANNELS.filter((c) => channelAllowlist(c)),
@@ -396,7 +423,7 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
       case 'providerToken': return secret(tokens[key]);
       case 'searchKey': return secret(settings.webSearch && settings.webSearch[key] && settings.webSearch[key].apiKey);
       case 'imageKey': return secret(settings.imageGeneration && settings.imageGeneration[key] && settings.imageGeneration[key].apiKey);
-      case 'vault': return secret(config[`__vault_${key}`]);
+      case 'vault': return secret(vaultEntries.get(key));
       // Only these names, whatever a plan asks for: the typesafe.ai key and a
       // local server's key sit in the same object and never move.
       case 'channelToken': return CHANNEL_TOKEN_KEYS.includes(key) ? secret(tokens[key]) : null;
@@ -504,7 +531,9 @@ function readCaseHead(reader, dir) {
 const SECRET_LISTS = Object.freeze({ providerToken: 'providerTokens', searchKey: 'searchKeys', imageKey: 'imageKeys', vault: 'vault', channelToken: 'channelTokens' });
 function setAsideUnreadableSecrets(source) {
   const inventory = source.inventory;
-  const held = Object.entries(SECRET_LISTS).flatMap(([category, list]) => arr(inventory[list]).map((key) => ({ category, key })));
+  // A key that never moves is never opened, and says nothing about the environment.
+  const held = Object.entries(SECRET_LISTS).flatMap(([category, list]) => arr(inventory[list]).map((key) => ({ category, key })))
+    .filter(({ category, key }) => category !== 'vault' || !isReservedVaultKey(key));
   if (inventory.anthropicOAuth) held.push({ category: 'anthropicOAuth', key: 'anthropicOAuth' });
   const unreadable = held.filter(({ category, key }) => {
     try {
