@@ -367,7 +367,8 @@ function customRootRefusal(source, pressWord, profileDir) {
   const said = isCount(count)
     ? `${counted(count, 'case')} ${count === 1 ? 'is' : 'are'} kept in ${root}, outside this app's own folder, and the move does not carry ${count === 1 ? 'it' : 'them'}.`
     : `Cases may be kept in ${root}, outside this app's own folder, but that folder could not be read, and the move does not carry them.`;
-  const into = profileDir ? `${long(profileDir)}\\cases` : 'the "cases" folder inside this app\'s own folder';
+  // The folder's own separator: the preload loads this module, so no `path` here.
+  const into = profileDir ? `${long(profileDir)}${String(profileDir).includes('\\') ? '\\' : '/'}cases` : 'the "cases" folder inside this app\'s own folder';
   return {
     code: 'MIGRATION_SOURCE',
     message: `${said} Move those case folders into ${into}, or somewhere else if you no longer need them here, then press ${pressWord}. The old standalone mode keeps looking in the first folder, so it will not show them after that.`

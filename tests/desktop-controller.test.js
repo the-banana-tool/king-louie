@@ -2265,6 +2265,10 @@ describe('desktop controller: the one-time move', () => {
     assert.strictEqual((await there.controller.status()).node.serviceCli, cli);
     assert.ok(asked.includes(cli));
     there.controller.dispose();
+    // A path in POSIX form stays one, whichever host reads it.
+    const posix = moveController({ pairingRecord: { ...pairing, service: { ...pairing.service, dataDir: '/srv/owner/node/data' } }, extra: { cliExists: () => true } });
+    assert.strictEqual((await posix.controller.status()).node.serviceCli, '/srv/owner/node/king-louie-service.cmd');
+    posix.controller.dispose();
     const absent = moveController({ pairingRecord: pairing, extra: { cliExists: () => false } });
     assert.ok(!('serviceCli' in (await absent.controller.status()).node));
     absent.controller.dispose();

@@ -530,6 +530,8 @@ describe('describeSetup: migrate', () => {
     assert.match(before.error.message, /4 cases/);
     const named = describeSetup(at({ oldProfile: custom, profileDir: 'C:\\Users\\owner\\AppData\\Roaming\\king-louie' }));
     assert.ok(named.error.message.includes('C:\\Users\\owner\\AppData\\Roaming\\king-louie\\cases'), named.error.message);
+    const posix = describeSetup(at({ oldProfile: custom, profileDir: '/home/owner/.config/king-louie' }));
+    assert.ok(posix.error.message.includes('/home/owner/.config/king-louie/cases'), posix.error.message);
     assert.match(text(before), /Check again/);
 
     const answer = planAnswer();

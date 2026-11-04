@@ -376,7 +376,8 @@ function createDesktopController({
   function nodeView(base) {
     // The launcher an install from this app wrote, beside the config dir. Only
     // shown to the owner as words to type; a checkout install has none.
-    const cli = base.dataDir ? path.win32.join(path.win32.dirname(base.dataDir), PERSONAL_CLI_FILE) : null;
+    const dirPath = base.dataDir && base.dataDir.includes('\\') ? path.win32 : path.posix;
+    const cli = base.dataDir ? dirPath.join(dirPath.dirname(base.dataDir), PERSONAL_CLI_FILE) : null;
     return {
       hosting: 'personal', name: base.name || null, dataDir: base.dataDir || null,
       task: nodeState.task, running: nodeState.running, pid: nodeState.pid,

@@ -594,7 +594,7 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
       assert.deepStrictEqual(stopped, [custom]);
     });
 
-    it('uninstall with no --data-dir looks at the default place, and with no default says what to pass', async () => {
+    it('uninstall with no --data-dir looks at the default place', { skip: process.platform !== 'win32' && 'the default data dir is a win32 path' }, async () => {
       const s = setup();
       const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
       fs.mkdirSync(path.dirname(cli), { recursive: true });
@@ -605,6 +605,10 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
         assert.equal(code, 0, t.errors());
         assert.ok(d.executed.flat().some((step) => step.unlink === cli), 'the launcher goes');
       }
+    });
+
+    it('uninstall with no --data-dir and no default place says what to pass', async () => {
+      const s = setup();
       const none = deps(s, { env: { SystemRoot: 'C:\\Windows', PATH: '' } });
       const { code, t } = await run('uninstall', s, none, { yes: true, dataDir: undefined });
       assert.notEqual(code, 0);
