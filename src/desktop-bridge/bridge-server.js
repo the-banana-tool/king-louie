@@ -79,7 +79,7 @@ class DesktopBridgeServer extends EventEmitter {
     this.disconnectCleanupMs = this.limits.disconnectCleanupMs ?? DEFAULT_DISCONNECT_CLEANUP_MS;
     const factory = createDispatcher || ((opts) => require('./bridge-dispatcher').createBridgeDispatcher(opts));
     this.dispatcher = factory({
-      core, cipher, dataDir, approvals, account,
+      core, cipher, dataDir, approvals, account, hosting,
       getServiceInfo: () => this.serviceInfo(),
       getConnection: () => this.live
     });

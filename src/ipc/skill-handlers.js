@@ -36,7 +36,17 @@ function registerSkillHandlers(ipcMain, context = {}) {
 
   ipcMain.handle(IPC.SKILL_CUSTOMIZE, wrapHandler(IPC.SKILL_CUSTOMIZE, async (_event, { skillId } = {}) => {
     const customization = ensureSkillCustomizationFile(skillId);
-    const openError = await getShell().openPath(customization.path);
+    // Over the bridge there is no shell: nothing opens on the node's side.
+    const shell = getShell();
+    if (!shell) {
+      return {
+        ok: false,
+        code: 'NO_SHELL_HERE',
+        error: `King Louie cannot open it from here. The file is at ${customization.path}`,
+        ...customization
+      };
+    }
+    const openError = await shell.openPath(customization.path);
     if (openError) {
       return {
         ok: false,

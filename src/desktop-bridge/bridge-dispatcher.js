@@ -61,7 +61,7 @@ function approvalsStatus({ approvals, dataDir }) {
 }
 
 function createBridgeDispatcher({
-  core, cipher = null, dataDir, approvals = null, account = null,
+  core, cipher = null, dataDir, approvals = null, account = null, hosting = 'service',
   getServiceInfo = () => ({}), getConnection = () => null,
   registerHandlers = defaultRegisterHandlers, listChannels = listIpcChannels,
   checkPath = defaultCheckPath, createImporter = null
@@ -79,7 +79,7 @@ function createBridgeDispatcher({
   const scope = createDesktopScope({ dataDir, context });
 
   const pushEvent = (conn, channel, payload) => {
-    if (!conn || !conn.live || !isRendererEvent(channel)) return;
+    if (!conn || !conn.live || !isRendererEvent(channel, { hosting })) return;
     if (payload && channel === 'tool:approvalRequired') conn.prompts.approvals.add(payload.approvalId);
     if (payload && channel === 'agent:askUser') conn.prompts.askUser.add(payload.requestId);
     if (payload && channel === 'tool:directoryAccessRequired') conn.prompts.directory.add(payload.requestId);
@@ -112,9 +112,10 @@ function createBridgeDispatcher({
   // settings:runLlmCommand is proxied, but its channel actions are not
   // (spec §8: channels are not proxied): refused here, before the core
   // sees them, so the desktop can neither start a channel in the service
-  // nor store a channel token there.
+  // nor store a channel token there. A personal node takes them (spec
+  // 2026-11-03 G-2): the desktop has no core, so no bot answers twice.
   const runLlmCommand = async (command) => {
-    if (LLM_CHANNEL_ACTIONS.includes(llmCommandAction(command))) {
+    if (hosting !== 'personal' && LLM_CHANNEL_ACTIONS.includes(llmCommandAction(command))) {
       return { ok: false, code: 'CHANNELS_NOT_PROXIED', error: MESSAGES.CHANNELS_NOT_PROXIED };
     }
     return context.runLlmCommand(command);
@@ -143,7 +144,7 @@ function createBridgeDispatcher({
   const served = servedChannels({
     handle: inventory.handle.filter((ch) => handlers.has(ch)),
     on: inventory.on.filter((ch) => listeners.has(ch))
-  });
+  }, { hosting });
   const servedHandle = new Set(served.handle);
   const servedOn = new Set(served.on);
 
@@ -360,7 +361,7 @@ function createBridgeDispatcher({
   // never a prompt, so a remote-origin run cannot borrow the dialog.
   function forwardAmbient(channel, payload) {
     const conn = getConnection();
-    if (!conn || !conn.live || !isRendererEvent(channel) || PROMPT_EVENTS.has(channel)) return;
+    if (!conn || !conn.live || !isRendererEvent(channel, { hosting }) || PROMPT_EVENTS.has(channel)) return;
     conn.send({ t: 'event', channel, payload });
   }
 

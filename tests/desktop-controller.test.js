@@ -1555,6 +1555,21 @@ describe('desktop controller: hosting and the version gap', () => {
     return made;
   }
 
+  it('unavailableTabs: the mesh alone on a personal pairing, connected or down', async () => {
+    const { controller } = connectedTo({ version: '1.0.1', hosting: 'personal' });
+    assert.deepStrictEqual((await controller.status()).unavailableTabs, ['mesh']);
+    controller.dispose();
+    const down = attachedController({ runner: fakeRunner({ running: false }) });
+    assert.deepStrictEqual((await down.controller.status()).unavailableTabs, ['mesh']);
+    down.controller.dispose();
+  });
+
+  it('unavailableTabs: the whole list on a fleet pairing', async () => {
+    const { controller } = connectedTo({ version: '1.0.0', hosting: 'service' }, { pairingRecord: fleetPairing() });
+    assert.deepStrictEqual((await controller.status()).unavailableTabs, ['mcp', 'channels', 'hooks', 'skills', 'webhooks', 'workflows', 'mesh', 'diagnostics', 'system-apps']);
+    controller.dispose();
+  });
+
   it('a personal node on another version: versionMismatch names both', async () => {
     const { controller } = connectedTo({ version: '1.0.0', hosting: 'personal' });
     const status = await controller.status();

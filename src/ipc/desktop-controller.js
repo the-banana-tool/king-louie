@@ -10,7 +10,7 @@ const { DesktopBridgeClient } = require('../desktop-bridge/bridge-client');
 const { encodePairRequest, defaultDeviceLabel, bridgeFilePath, readTrustedBridgeFile } = require('../desktop-bridge/pairing');
 const { rawFromPublicKeyObject, fingerprintGroups } = require('../desktop-bridge/keys');
 const { MESSAGES } = require('../desktop-bridge/protocol');
-const { ATTACHED_UNAVAILABLE_TABS } = require('../desktop-bridge/allowlist');
+const { unavailableTabsFor } = require('../desktop-bridge/allowlist');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
 const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
 const { shown } = require('../service/commands/io');
@@ -387,7 +387,9 @@ function createDesktopController({
       connection: current === 'attached-starting' ? { ...connection, status: 'starting' } : { ...connection },
       approvals,
       lastImport: state.lastImport,
-      unavailableTabs: mode === 'attached' ? [...ATTACHED_UNAVAILABLE_TABS] : [],
+      // The pairing record, as the attached host's routes go by it: the tabs
+      // and the channels behind them cannot disagree.
+      unavailableTabs: mode === 'attached' ? [...unavailableTabsFor(record && record.hosting)] : [],
       detachWarning: DETACH_WARNING,
       pendingServiceCommand: state.pendingServiceCommand
     };

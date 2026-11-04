@@ -40,6 +40,10 @@ function startAttachedHost(deps) {
   });
   const live = () => Boolean(client && client.connected);
   const served = (channel) => Boolean(client && client.service && Array.isArray(client.service.channels) && client.service.channels.includes(channel));
+  // The pairing record says what the node is (a record with no word is the
+  // fleet); served() still decides per channel from the handshake.
+  const hosting = () => (state.pairing && state.pairing.service && state.pairing.service.hosting === 'personal' ? 'personal' : 'service');
+  const routeOf = (channel) => classifyChannel(channel, { hosting: hosting() });
 
   async function providerReady() {
     if (!client.service || client.service.providersConfigured !== false) return true;
@@ -111,18 +115,16 @@ function startAttachedHost(deps) {
 
   const inventory = listChannels();
   for (const channel of inventory.handle) {
-    const route = classifyChannel(channel);
+    const route = routeOf(channel);
     let fn;
     if (route === 'local') fn = channel.startsWith('desktop:') ? createDesktopHandler(channel, () => controller) : (LOCAL[channel] || (async () => unavailable()));
     else if (route === 'prestep') fn = PRESTEP[channel];
-    else if (route === 'proxy') fn = (_event, ...args) => proxyInvoke(channel, args);
-    else fn = async () => unavailable();
+    else fn = async (_event, ...args) => (routeOf(channel) === 'proxy' ? proxyInvoke(channel, args) : unavailable());
     ipcMain.handle(channel, fn);
   }
   for (const channel of inventory.on) {
-    const route = classifyChannel(channel);
     ipcMain.on(channel, (_event, ...args) => {
-      if (route !== 'proxy' || !live() || !served(channel)) {
+      if (routeOf(channel) !== 'proxy' || !live() || !served(channel)) {
         log.debug(`dropped ${channel} while attached`);
         return;
       }
@@ -135,7 +137,7 @@ function startAttachedHost(deps) {
 
   if (client) {
     client.on('event', (channel, payload) => {
-      if (!isRendererEvent(channel)) return;
+      if (!isRendererEvent(channel, { hosting: hosting() })) return;
       if (channel === 'chat:messageStart' && payload) openRuns.set(payload.responseId, payload.chatId);
       if ((channel === 'chat:messageComplete' || channel === 'chat:messageError') && payload) openRuns.delete(payload.responseId);
       send(channel, payload);

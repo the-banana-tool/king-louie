@@ -55,7 +55,7 @@ class FakeClient extends EventEmitter {
 
 const SERVICE = (channels, extra = {}) => ({ version: '26.9.0', protocol: 1, nodeId: 'kl-abcdefghijklmnop', account: 'LOCAL SERVICE', profile: 'agent', providersConfigured: true, channels, ...extra });
 
-function setup(hostDeps = {}) {
+function setup({ pairingService = {}, ...hostDeps } = {}) {
   const handlers = new Map();
   const listeners = new Map();
   const ipcMain = {
@@ -70,11 +70,11 @@ function setup(hostDeps = {}) {
   const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
   const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
   state.setMode('attached');
-  state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, pairedAt: '2026-09-23T14:02:11Z' } });
+  state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, pairedAt: '2026-09-23T14:02:11Z', ...pairingService } });
   const client = new FakeClient();
   const app = { getPath: () => userDataDir, relaunch() {}, exit() {}, quit() {} };
   const host = startAttachedHost({ app, ipcMain, safeStorage, dialog, getWindow: () => window, state, env: {}, platform: 'linux', clientFactory: () => client, ...hostDeps });
-  return { host, handlers, listeners, sent, client, dialogAnswers };
+  return { host, handlers, listeners, sent, client, dialogAnswers, state };
 }
 
 describe('attached host', () => {
@@ -183,6 +183,82 @@ describe('attached host', () => {
     assert.strictEqual(status.ok, true);
     assert.strictEqual(status.view, 'attached-connected');
     assert.ok(status.unavailableTabs.includes('mcp'));
+  });
+});
+
+// Attach stage 2 (spec 2026-11-03 §6.6, G-1): the pairing record says what the
+// node is; what it serves the handshake still says, channel by channel.
+describe('attached host: a personal pairing', () => {
+  const PERSONAL = { pairingService: { hosting: 'personal', dataDir: 'C:\\example\\data' } };
+
+  it('proxies a personal domain the service lists', async () => {
+    const { host, handlers, client } = setup(PERSONAL);
+    client.goLive(SERVICE(['hooks:list', 'settings:mcpList'], { hosting: 'personal' }));
+    assert.deepStrictEqual(await handlers.get('hooks:list')({}), { ok: true, data: { channel: 'hooks:list' } });
+    assert.deepStrictEqual(await handlers.get('settings:mcpList')({}), { ok: true, data: { channel: 'settings:mcpList' } });
+    assert.deepStrictEqual(client.invoked.map(([ch]) => ch), ['hooks:list', 'settings:mcpList']);
+    await host.shutdown();
+  });
+
+  it('answers SERVICE_TOO_OLD when the service does not list it', async () => {
+    const { host, handlers, client } = setup(PERSONAL);
+    client.goLive(SERVICE(['chat:load'], { hosting: 'personal' }));
+    assert.strictEqual((await handlers.get('hooks:list')({})).code, 'SERVICE_TOO_OLD');
+    assert.deepStrictEqual(client.invoked, []);
+    await host.shutdown();
+  });
+
+  it('answers SERVICE_UNREACHABLE while the node is down', async () => {
+    const { host, handlers } = setup(PERSONAL);
+    assert.strictEqual((await handlers.get('hooks:list')({})).code, 'SERVICE_UNREACHABLE');
+    await host.shutdown();
+  });
+
+  it('keeps Anthropic OAuth and read-aloud unavailable', async () => {
+    const { host, handlers, client } = setup(PERSONAL);
+    client.goLive(SERVICE(['settings:anthropicOAuthStart', 'chat:speakLast'], { hosting: 'personal' }));
+    assert.strictEqual((await handlers.get('settings:anthropicOAuthStart')({})).code, 'ATTACHED_UNAVAILABLE');
+    assert.strictEqual((await handlers.get('chat:speakLast')({})).code, 'ATTACHED_UNAVAILABLE');
+    assert.deepStrictEqual(client.invoked, []);
+    await host.shutdown();
+  });
+
+  it('a record with no hosting is the fleet: unavailable, even if a service lists the channel', async () => {
+    const { host, handlers, client } = setup();
+    client.goLive(SERVICE(['hooks:list', 'settings:mcpList']));
+    assert.strictEqual((await handlers.get('hooks:list')({})).code, 'ATTACHED_UNAVAILABLE');
+    assert.strictEqual((await handlers.get('settings:mcpList')({})).code, 'ATTACHED_UNAVAILABLE');
+    assert.deepStrictEqual(client.invoked, []);
+    await host.shutdown();
+  });
+
+  it('goes by the record as it is now', async () => {
+    const { host, handlers, client, state } = setup(PERSONAL);
+    client.goLive(SERVICE(['hooks:list'], { hosting: 'personal' }));
+    assert.strictEqual((await handlers.get('hooks:list')({})).ok, true);
+    const { hosting, ...fleet } = state.pairing.service;
+    assert.strictEqual(hosting, 'personal');
+    state.setPairing({ ...state.pairing, service: fleet });
+    assert.strictEqual((await handlers.get('hooks:list')({})).code, 'ATTACHED_UNAVAILABLE');
+    await host.shutdown();
+  });
+
+  it('a workflow event reaches the window on a personal pairing and not on a fleet one', async () => {
+    const wide = setup(PERSONAL);
+    wide.client.emit('event', 'workflow:started', { workflowId: 'w-1' });
+    assert.deepStrictEqual(wide.sent, [['workflow:started', { workflowId: 'w-1' }]]);
+    await wide.host.shutdown();
+    const fleet = setup();
+    fleet.client.emit('event', 'workflow:started', { workflowId: 'w-1' });
+    assert.deepStrictEqual(fleet.sent, []);
+    await fleet.host.shutdown();
+  });
+
+  it('desktop:status marks only the mesh unavailable', async () => {
+    const { host, handlers, client } = setup(PERSONAL);
+    client.goLive(SERVICE(['chat:load'], { hosting: 'personal' }));
+    assert.deepStrictEqual((await handlers.get('desktop:status')({})).unavailableTabs, ['mesh']);
+    await host.shutdown();
   });
 });
 

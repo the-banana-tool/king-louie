@@ -145,6 +145,14 @@ describe('hosting in bridge.status', () => {
     assert.strictEqual(serverWith({ hosting: 'personal' }).serviceInfo().hosting, 'personal');
   });
 
+  it('hands its hosting to the dispatcher it builds', () => {
+    const seen = [];
+    const createDispatcher = (opts) => { seen.push(opts.hosting); return fakeDispatcher(); };
+    serverWith({ hosting: 'personal', createDispatcher });
+    serverWith({ createDispatcher });
+    assert.deepStrictEqual(seen, ['personal', 'service']);
+  });
+
   it('a server built without says service', () => {
     assert.strictEqual(serverWith({}).serviceInfo().hosting, 'service');
   });

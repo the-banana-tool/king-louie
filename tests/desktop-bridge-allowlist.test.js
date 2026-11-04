@@ -3,7 +3,8 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const IPC = require('../src/ipc/constants');
 const {
-  classifyChannel, servedChannels, isRendererEvent, isTimeoutExempt, channelTimeoutMs, LONG_CHANNEL_TIMEOUT_MS, PROMPT_EVENTS, RENDERER_EVENTS, PROXIED_DOMAINS
+  classifyChannel, servedChannels, isRendererEvent, isTimeoutExempt, channelTimeoutMs, LONG_CHANNEL_TIMEOUT_MS, PROMPT_EVENTS, RENDERER_EVENTS, PROXIED_DOMAINS,
+  PERSONAL_PROXIED_DOMAINS, ATTACHED_UNAVAILABLE_TABS, unavailableTabsFor
 } = require('../src/desktop-bridge/allowlist');
 const { listIpcChannels } = require('../src/ipc/channel-inventory');
 const { registerDesktopHandlers, DESKTOP_METHODS } = require('../src/ipc/desktop-handlers');
@@ -251,5 +252,103 @@ describe('desktop:* handlers', () => {
     });
     assert.deepStrictEqual(await handlers.get('desktop:status')({}), { ok: false, code: 'DESKTOP_ERROR', error: 'null' });
     assert.deepStrictEqual(await handlers.get('desktop:detach')({}), { ok: false, code: 'DESKTOP_ERROR', error: 'undefined' });
+  });
+});
+
+// Attach stage 2 (spec 2026-11-03 §6.6, G-1, G-2, C-15): a personal node's owner
+// is its administrator, so the window reaches the panes standalone had. The
+// fleet's allowlist stays exactly what it was.
+describe('allowlist under hosting', () => {
+  const personal = { hosting: 'personal' };
+  const service = { hosting: 'service' };
+  const domain = (ch) => ch.slice(0, ch.indexOf(':'));
+  const inv = listIpcChannels();
+  const everyChannel = [...inv.handle, ...inv.on];
+  const isPersonalOnly = (ch) => PERSONAL_PROXIED_DOMAINS.includes(domain(ch)) || ch.startsWith('settings:mcp');
+
+  it('names the personal domains', () => {
+    assert.deepStrictEqual([...PERSONAL_PROXIED_DOMAINS], ['hooks', 'skill', 'webhook', 'workflow', 'apps', 'diagnostics', 'channel']);
+  });
+
+  for (const name of ['hooks', 'skill', 'webhook', 'workflow', 'apps', 'diagnostics', 'channel']) {
+    it(`every ${name}: channel is proxy under personal and deny under the fleet`, () => {
+      const channels = everyChannel.filter((ch) => domain(ch) === name);
+      assert.ok(channels.length > 0, `${name} has channels`);
+      for (const ch of channels) {
+        assert.strictEqual(classifyChannel(ch, personal), 'proxy', ch);
+        assert.strictEqual(classifyChannel(ch, service), 'deny', ch);
+        assert.strictEqual(classifyChannel(ch), 'deny', ch);
+      }
+    });
+  }
+
+  it('settings:mcp* is proxy under personal and deny under the fleet', () => {
+    const channels = everyChannel.filter((ch) => ch.startsWith('settings:mcp'));
+    assert.deepStrictEqual([...channels].sort(), ['settings:mcpDelete', 'settings:mcpList', 'settings:mcpReload', 'settings:mcpSave']);
+    for (const ch of channels) {
+      assert.strictEqual(classifyChannel(ch, personal), 'proxy', ch);
+      assert.strictEqual(classifyChannel(ch, service), 'deny', ch);
+      assert.strictEqual(classifyChannel(ch), 'deny', ch);
+    }
+  });
+
+  it('stays denied under both: Anthropic OAuth, read-aloud, the mesh and the gateway', () => {
+    const denied = everyChannel.filter((ch) => ch.startsWith('settings:anthropicOAuth') || ['mesh', 'gateway'].includes(domain(ch)));
+    assert.ok(denied.includes('settings:anthropicOAuthStart'));
+    for (const ch of [...denied, 'chat:speakLast', 'settings:testVoice']) {
+      assert.strictEqual(classifyChannel(ch, personal), 'deny', ch);
+      assert.strictEqual(classifyChannel(ch, service), 'deny', ch);
+    }
+  });
+
+  it('only the exact word personal widens anything', () => {
+    for (const hosting of [undefined, null, '', 'Personal', 'fleet', 1, true]) {
+      assert.strictEqual(classifyChannel('hooks:list', { hosting }), 'deny', String(hosting));
+      assert.strictEqual(classifyChannel('settings:mcpList', { hosting }), 'deny', String(hosting));
+    }
+  });
+
+  it('local and prestep routes do not move under personal', () => {
+    for (const ch of ['desktop:status', 'wizard:getStatus', 'app:quitWindow', 'history:import.pick']) assert.strictEqual(classifyChannel(ch, personal), 'local', ch);
+    for (const ch of ['chat:pickWorkingDirectory', 'settings:addAllowedDirectory']) assert.strictEqual(classifyChannel(ch, personal), 'prestep', ch);
+  });
+
+  it('the fleet serves nothing new: every hosting but personal serves what no options serve', () => {
+    const fleet = servedChannels(inv);
+    assert.deepStrictEqual(servedChannels(inv, service), fleet);
+    assert.deepStrictEqual(servedChannels(inv, { hosting: 'anything' }), fleet);
+    assert.deepStrictEqual([...fleet.handle, ...fleet.on].filter(isPersonalOnly), []);
+  });
+
+  it('personal serves the fleet set plus exactly the personal domains and settings:mcp*', () => {
+    const fleet = servedChannels(inv);
+    const wide = servedChannels(inv, personal);
+    const added = wide.handle.filter((ch) => !fleet.handle.includes(ch));
+    assert.deepStrictEqual(added, inv.handle.filter(isPersonalOnly));
+    for (const ch of fleet.handle) assert.ok(wide.handle.includes(ch), ch);
+    assert.deepStrictEqual(wide.on.filter((ch) => !fleet.on.includes(ch)), inv.on.filter(isPersonalOnly));
+  });
+
+  it('unavailableTabsFor: the fleet\'s list, or the mesh alone under personal', () => {
+    assert.deepStrictEqual([...unavailableTabsFor('service')], [...ATTACHED_UNAVAILABLE_TABS]);
+    assert.deepStrictEqual([...unavailableTabsFor('personal')], ['mesh']);
+    for (const hosting of [undefined, null, 'other']) assert.deepStrictEqual([...unavailableTabsFor(hosting)], [...ATTACHED_UNAVAILABLE_TABS]);
+    assert.deepStrictEqual([...ATTACHED_UNAVAILABLE_TABS], ['mcp', 'channels', 'hooks', 'skills', 'webhooks', 'workflows', 'mesh', 'diagnostics', 'system-apps']);
+  });
+
+  it('a workflow\'s events reach the window under personal only', () => {
+    for (const ch of ['workflow:created', 'workflow:started', 'workflow:completed', 'workflow:failed', 'workflow:paused', 'workflow:cancelled', 'workflow:task:started', 'workflow:task:completed', 'workflow:task:failed']) {
+      assert.strictEqual(isRendererEvent(ch, personal), true, ch);
+      assert.strictEqual(isRendererEvent(ch, service), false, ch);
+      assert.strictEqual(isRendererEvent(ch), false, ch);
+    }
+    assert.strictEqual(isRendererEvent('mesh:peerConnected', personal), false);
+    assert.strictEqual(isRendererEvent('chat:updated', personal), true);
+  });
+
+  it('a pane\'s call that can outlast the default timeout gets the long bound', () => {
+    for (const ch of ['skill:install', 'skill:update', 'skill:checkUpdates', 'workflow:plan', 'workflow:planAndExecute', 'settings:mcpSave', 'settings:mcpReload']) {
+      assert.strictEqual(channelTimeoutMs(ch, 120000), LONG_CHANNEL_TIMEOUT_MS, ch);
+    }
   });
 });
