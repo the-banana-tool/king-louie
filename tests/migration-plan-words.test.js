@@ -59,7 +59,7 @@ async function nodeService({ hosting = 'personal' } = {}) {
 function profile(chatData) {
   const userDataDir = tmp();
   fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify(chatData));
-  return readDesktopSource({ userDataDir, reader: createSafeReader({ root: userDataDir }), decrypt: (s) => s });
+  return readDesktopSource({ userDataDir, reader: createSafeReader({ root: userDataDir }), decrypt: (s) => s, hosting: 'personal' });
 }
 const planOf = (importer, inventory) => importer.plan({ installId: 'install-0001', inventory: { installId: 'install-0001', secrets: 'included', ...inventory } });
 const itemOf = (plan, category, key) => plan.items.find((i) => i.category === category && i.key === key);
@@ -232,5 +232,36 @@ describe('a refusal on a personal node says the node', () => {
     importer.scope.addPermissionRule = () => false;
     const { results } = await importer.apply({ planId: plan.planId, batch: [{ category: 'permissionRule', key: 'Bash|git *|allow', value: rule }] });
     assert.match(results[0].note, /kept the service's rule/);
+  });
+});
+
+describe('what a digest is sent for', () => {
+  const profileFor = (chatData, hosting) => {
+    const userDataDir = tmp();
+    fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify(chatData));
+    return readDesktopSource({ userDataDir, reader: createSafeReader({ root: userDataDir }), decrypt: (s) => s, hosting });
+  };
+  const chatData = { settings: { voice: {}, models: {}, channels: {}, hooks: {}, mcpServers: {} }, userProfile: { name: 'Example Owner' } };
+
+  it('a service target gets digests of what it can take, and no more', () => {
+    assert.deepStrictEqual(Object.keys(profileFor(chatData).inventory.settingDigests), ['voice']);
+  });
+
+  it('a personal target gets the settings it also carries', () => {
+    assert.deepStrictEqual(Object.keys(profileFor(chatData, 'personal').inventory.settingDigests).sort(), ['channels', 'hooks', 'mcpServers', 'models', 'voice']);
+  });
+
+  it('a one-case inventory carries none', () => {
+    const { filterInventoryToCase } = require('../src/migration/case-filter');
+    const source = profileFor(chatData, 'personal');
+    source.inventory.cases = [{ dir: 'lakeside-lot' }];
+    const out = filterInventoryToCase({
+      inventory: source.inventory,
+      getValue: () => null,
+      caseFiles: () => [{ relPath: 'case.yaml', read: () => ({ ok: true, data: Buffer.from('id: case-lot\nslug: lakeside-lot\ntitle: Lakeside lot\n') }) }],
+      caseRef: 'lakeside-lot'
+    }).inventory;
+    assert.ok(!('settingDigests' in out));
+    assert.ok(!('userProfileDigest' in out));
   });
 });

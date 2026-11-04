@@ -56,12 +56,13 @@ async function addCaseCleanliness(source, userDataDir) {
   return source;
 }
 
-async function loadDesktopSource({ userDataDir, safeStorage, platform = process.platform, customRootEmpty = false, maxMessageBytes, maxChatBytes, readHistory = () => readHistoryApart({ userDataDir }) }) {
+async function loadDesktopSource({ hosting, userDataDir, safeStorage, platform = process.platform, customRootEmpty = false, maxMessageBytes, maxChatBytes, readHistory = () => readHistoryApart({ userDataDir }) }) {
   const usable = secureStorageUsable(safeStorage, platform);
   const cipher = usable ? createSafeStorageCipher(safeStorage) : null;
   const reader = createSafeReader({ root: userDataDir, platform });
   const history = await readHistory();
   return addCaseCleanliness(readDesktopSource({
+    hosting,
     userDataDir,
     reader,
     decrypt: cipher ? (encrypted) => cipher.decryptString(encrypted) : null,

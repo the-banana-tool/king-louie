@@ -47,7 +47,7 @@ function withoutTooLarge(chat, maxMessageBytes) {
 // an object under a truncated name (readVaultEntries reads each whole). What is there
 // and cannot be read is said, never dropped unsaid.
 // Each setting that could move, as the node would hold it. None when it will not merge.
-function settingDigests(settings) {
+function settingDigests(settings, hosting) {
   let merged;
   try {
     merged = mergeSettings(settings);
@@ -55,7 +55,7 @@ function settingDigests(settings) {
     return {};
   }
   const profiles = arr(settings.models && settings.models.profiles).length > 0;
-  return Object.fromEntries(importedSettingsKeys('personal').filter((key) => settings[key] !== undefined).map((key) => [key, settingDigest(key, merged[key], { profiles })]));
+  return Object.fromEntries(importedSettingsKeys(hosting).filter((key) => settings[key] !== undefined).map((key) => [key, settingDigest(key, merged[key], { profiles })]));
 }
 
 const VAULT_UNREAD_NOTE = 'this stored vault entry is not in a form the move can read; it stays on this computer and in the backup';
@@ -208,7 +208,8 @@ function createSafeReader({ root, platform = process.platform, fsImpl = fs, maxF
 // with a custom root gets them moved (attach stage 2 §6.5): the setting cannot be
 // changed from a window with no core, and the desktop never writes this profile's
 // stores. The CLI does not pass it.
-function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null, customRootEmpty = false, maxMessageBytes = MAX_CHAT_PART_BYTES, maxChatBytes = MAX_CHAT_BYTES }) {
+// hosting: what the target is, for what is worth comparing there.
+function readDesktopSource({ hosting = 'service', userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null, customRootEmpty = false, maxMessageBytes = MAX_CHAT_PART_BYTES, maxChatBytes = MAX_CHAT_BYTES }) {
   const attention = [];
   const readJson = (rel) => {
     const r = reader.readFile(rel);
@@ -376,7 +377,7 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
       return { id: c.id, updatedAt: c.updatedAt || null, title: String(c.title || ''), ...past };
     }),
     settingsKeys: Object.keys(settings).filter((k) => !['allowedDirectories', 'webSearch', 'imageGeneration'].includes(k)),
-    settingDigests: settingDigests(settings),
+    settingDigests: settingDigests(settings, hosting),
     userProfile: Boolean(chatData.userProfile),
     ...(chatData.userProfile ? { userProfileDigest: userProfileDigest(chatData.userProfile) } : {}),
     permissionRules: arr(toolApprovals.permissionRules).filter((r) => r && r.tool && r.action).map((r) => ({ tool: r.tool, pattern: r.pattern || '*', action: r.action })),

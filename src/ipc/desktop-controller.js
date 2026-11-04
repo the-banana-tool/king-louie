@@ -1456,7 +1456,7 @@ function createDesktopController({
           return { ok: false, code: err.code || 'BACKUP_FAILED', error: shown(err.message, 800), backupDir: err.dest ? shown(err.dest, 400) : null };
         }
         setProgress('Working out what will move…');
-        const source = await move.loadDesktopSource({ userDataDir, safeStorage, platform, customRootEmpty: old.customCases === 0 });
+        const source = await move.loadDesktopSource({ userDataDir, safeStorage, platform, customRootEmpty: old.customCases === 0, hosting: 'personal' });
         const problem = sourceProblem(source, backup);
         if (problem) return moveSourceRefusal(`The old profile did not read whole, so nothing was moved: ${problem}`);
         if (source.inventory.secrets === 'unavailable') return moveSourceRefusal(NO_SECURE_STORAGE);
